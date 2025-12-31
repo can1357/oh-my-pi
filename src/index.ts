@@ -31,7 +31,6 @@ export {
 	readPluginPackageJson,
 	savePluginsJson,
 } from "@omp/manifest";
-export { checkMigration, migrateToNpm } from "@omp/migrate";
 export {
 	npmInfo,
 	npmInstall,

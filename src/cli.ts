@@ -17,7 +17,6 @@ import { uninstallPlugin } from "@omp/commands/uninstall";
 import { updatePlugin } from "@omp/commands/update";
 import { whyFile } from "@omp/commands/why";
 import { withErrorHandling } from "@omp/errors";
-import { checkMigration, migrateToNpm } from "@omp/migrate";
 import { checkNpmAvailable } from "@omp/npm";
 import chalk from "chalk";
 import { program } from "commander";
@@ -30,14 +29,6 @@ if (!npmCheck.available) {
 }
 
 program.name("omp").description("Oh My Pi - Plugin manager for pi configuration").version("0.2.0");
-
-// Check for migration on startup (only for commands that need it)
-program.hook("preAction", async (thisCommand) => {
-	const migratingCommands = ["install", "uninstall", "update", "list", "link"];
-	if (migratingCommands.includes(thisCommand.name())) {
-		await checkMigration();
-	}
-});
 
 // ============================================================================
 // Core Commands
@@ -247,14 +238,5 @@ Examples:
 	.option("--fish", "Output fish shell syntax instead of POSIX")
 	.option("--json", "Output as JSON")
 	.action(withErrorHandling(envCommand));
-
-program
-	.command("migrate")
-	.description("Migrate from legacy manifest.json to npm-native format")
-	.action(
-		withErrorHandling(async () => {
-			await migrateToNpm();
-		}),
-	);
 
 program.parse();

@@ -111,7 +111,6 @@ Initialize a project-local config with `omp init`.
 | `omp features <name>` | | List or configure plugin features |
 | `omp config <name>` | | Get or set plugin configuration variables |
 | `omp env` | | Print environment variables for shell eval |
-| `omp migrate` | | Migrate from legacy manifest.json format |
 
 Most commands accept `-g`/`--global` or `-l`/`--local` flags to override scope auto-detection.
 

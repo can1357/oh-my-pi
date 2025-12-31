@@ -17,9 +17,6 @@ export const GLOBAL_PACKAGE_JSON = join(PLUGINS_DIR, "package.json");
 // Global package-lock.json
 export const GLOBAL_LOCK_FILE = join(PLUGINS_DIR, "package-lock.json");
 
-// Legacy manifest (for migration)
-export const LEGACY_MANIFEST_PATH = join(PLUGINS_DIR, "manifest.json");
-
 // Project-local config directory
 export const PROJECT_PI_DIR = ".pi";
 

@@ -3,7 +3,6 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
 	GLOBAL_PACKAGE_JSON,
-	LEGACY_MANIFEST_PATH,
 	NODE_MODULES_DIR,
 	PLUGINS_DIR,
 	PROJECT_PACKAGE_JSON,
@@ -113,25 +112,6 @@ export interface PluginsJson {
 	disabled?: string[]; // disabled plugin names
 	/** Per-plugin feature and variable config */
 	config?: Record<string, PluginConfig>;
-}
-
-/**
- * Legacy manifest structure (for migration)
- */
-export interface LegacyPluginInfo {
-	type: "github" | "local" | "npm";
-	repo?: string;
-	package?: string;
-	path?: string;
-	subdir?: string;
-	version?: string;
-	linked?: boolean;
-	installed: string[];
-	installedAt: string;
-}
-
-export interface LegacyManifest {
-	plugins: Record<string, LegacyPluginInfo>;
 }
 
 /**
@@ -360,25 +340,6 @@ export async function readPluginPackageJson(pluginName: string, global = true): 
 export function getPluginSourceDir(pluginName: string, global = true): string {
 	const nodeModules = global ? NODE_MODULES_DIR : ".pi/node_modules";
 	return join(nodeModules, pluginName);
-}
-
-/**
- * Check if legacy manifest.json exists
- */
-export function hasLegacyManifest(): boolean {
-	return existsSync(LEGACY_MANIFEST_PATH);
-}
-
-/**
- * Load legacy manifest.json
- */
-export async function loadLegacyManifest(): Promise<LegacyManifest> {
-	try {
-		const data = await readFile(LEGACY_MANIFEST_PATH, "utf-8");
-		return JSON.parse(data) as LegacyManifest;
-	} catch {
-		return { plugins: {} };
-	}
 }
 
 /**
