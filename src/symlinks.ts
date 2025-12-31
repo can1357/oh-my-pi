@@ -275,8 +275,11 @@ export async function writeRuntimeConfig(
 			console.log(chalk.dim(`  Updated: ${runtimePath}`));
 		}
 	} catch (err) {
-		if (verbose) {
-			console.log(chalk.yellow(`  ⚠ Failed to update runtime config: ${err}`));
+		const error = err as Error;
+		// Always warn about runtime config failures - they affect plugin behavior
+		console.warn(chalk.yellow(`⚠ Failed to update runtime config at ${runtimePath}: ${error.message}`));
+		if (process.env.DEBUG) {
+			console.warn(chalk.dim(error.stack));
 		}
 	}
 }

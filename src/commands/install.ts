@@ -15,7 +15,7 @@ import {
 	readPluginPackageJson,
 	savePluginsJson,
 } from "@omp/manifest";
-import { npmInfo, npmInstall } from "@omp/npm";
+import { npmInfo, npmInstall, requireNpm } from "@omp/npm";
 import { log, outputJson, setJsonMode } from "@omp/output";
 import {
 	getProjectPiDir,
@@ -183,9 +183,18 @@ export function resolveFeatures(
 /**
  * Process omp dependencies recursively with cycle detection.
  * Creates symlinks for dependencies that have omp.install entries.
+ * Recurses into all dependencies to find transitive omp.install entries,
+ * even if intermediate dependencies don't have omp.install themselves.
+ * Returns a map of auto-linked transitive deps (depName -> parentPluginName).
  */
-async function processOmpDependencies(pkgJson: PluginPackageJson, isGlobal: boolean, seen: Set<string>): Promise<void> {
-	if (!pkgJson.dependencies) return;
+async function processOmpDependencies(
+	pkgJson: PluginPackageJson,
+	isGlobal: boolean,
+	seen: Set<string>,
+	parentPluginName: string,
+	transitiveDeps: Map<string, string> = new Map(),
+): Promise<Map<string, string>> {
+	if (!pkgJson.dependencies) return transitiveDeps;
 
 	for (const depName of Object.keys(pkgJson.dependencies)) {
 		if (seen.has(depName)) {
@@ -195,13 +204,21 @@ async function processOmpDependencies(pkgJson: PluginPackageJson, isGlobal: bool
 		seen.add(depName);
 
 		const depPkgJson = await readPluginPackageJson(depName, isGlobal);
-		if (depPkgJson?.omp?.install) {
+		if (!depPkgJson) continue;
+
+		// Create symlinks if this dependency has omp.install entries
+		if (depPkgJson.omp?.install) {
 			log(chalk.dim(`  Processing dependency: ${depName}`));
 			await createPluginSymlinks(depName, depPkgJson, isGlobal);
-			// Recurse into this dependency's dependencies
-			await processOmpDependencies(depPkgJson, isGlobal, seen);
+			// Track this as a transitive dep (points to the top-level parent that pulled it in)
+			transitiveDeps.set(depName, parentPluginName);
 		}
+
+		// Always recurse into transitive dependencies to find nested omp.install entries
+		await processOmpDependencies(depPkgJson, isGlobal, seen, parentPluginName, transitiveDeps);
 	}
+
+	return transitiveDeps;
 }
 
 export interface InstallOptions {
@@ -253,6 +270,8 @@ function isLocalPath(spec: string): boolean {
  * omp install [pkg...]
  */
 export async function installPlugin(packages?: string[], options: InstallOptions = {}): Promise<void> {
+	requireNpm();
+
 	// Enable JSON mode early so all human output is suppressed
 	if (options.json) {
 		setJsonMode(true);
@@ -540,13 +559,15 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			createdSymlinks = symlinkResult.created;
 
 			// 7. Process dependencies with omp field (with cycle detection)
-			await processOmpDependencies(pkgJson, isGlobal, new Set([name]));
+			const autoLinkedTransitiveDeps = await processOmpDependencies(pkgJson, isGlobal, new Set([name]), name);
 
 			// 8. Stage manifest and config changes (written only after full success)
 			// For global mode, npm --save already updates package.json dependencies
 			// but we need to handle devDependencies and config manually
 			// For project-local mode, we must manually update plugins.json
-			if (options.save || options.saveDev || configToStore) {
+			// Also register any auto-linked transitive deps
+			const hasTransitiveDeps = autoLinkedTransitiveDeps.size > 0;
+			if (options.save || options.saveDev || configToStore || hasTransitiveDeps) {
 				if (options.saveDev) {
 					pendingPluginEntry = { name, version: info.version, isDev: true };
 				} else if (!isGlobal) {
@@ -566,7 +587,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 
 			// 9. Commit all manifest changes atomically after all operations succeeded
 			// This ensures plugins.json is only written if npm install + symlinks both succeeded
-			if (pendingPluginEntry || pendingConfig) {
+			if (pendingPluginEntry || pendingConfig || hasTransitiveDeps) {
 				// Reload to avoid stale data if multiple packages are being installed
 				pluginsJson = await loadPluginsJson(isGlobal);
 
@@ -590,6 +611,16 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 						...pluginsJson.config[name],
 						...pendingConfig,
 					};
+				}
+
+				// Register auto-linked transitive dependencies
+				if (hasTransitiveDeps) {
+					if (!pluginsJson.transitiveDeps) {
+						pluginsJson.transitiveDeps = {};
+					}
+					for (const [depName, parentName] of autoLinkedTransitiveDeps) {
+						pluginsJson.transitiveDeps[depName] = parentName;
+					}
 				}
 
 				await savePluginsJson(pluginsJson, isGlobal);

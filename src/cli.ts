@@ -17,16 +17,7 @@ import { uninstallPlugin } from "@omp/commands/uninstall";
 import { updatePlugin } from "@omp/commands/update";
 import { whyFile } from "@omp/commands/why";
 import { withErrorHandling } from "@omp/errors";
-import { checkNpmAvailable } from "@omp/npm";
-import chalk from "chalk";
 import { program } from "commander";
-
-// Check npm availability at startup
-const npmCheck = checkNpmAvailable();
-if (!npmCheck.available) {
-	console.log(chalk.red(npmCheck.error));
-	process.exit(1);
-}
 
 program.name("omp").description("Oh My Pi - Plugin manager for pi configuration").version("0.4.0");
 

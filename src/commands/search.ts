@@ -1,4 +1,4 @@
-import { npmSearch } from "@omp/npm";
+import { npmSearch, requireNpm } from "@omp/npm";
 import { log, outputJson, setJsonMode } from "@omp/output";
 import chalk from "chalk";
 
@@ -16,6 +16,8 @@ export interface SearchOptions {
  * Search npm for plugins with omp-plugin keyword
  */
 export async function searchPlugins(query: string, options: SearchOptions = {}): Promise<void> {
+	requireNpm();
+
 	if (options.json) {
 		setJsonMode(true);
 	}

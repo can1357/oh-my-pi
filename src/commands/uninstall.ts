@@ -3,7 +3,7 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { getInstalledPlugins, loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
-import { npmUninstall } from "@omp/npm";
+import { npmUninstall, requireNpm } from "@omp/npm";
 import { NODE_MODULES_DIR, PLUGINS_DIR, PROJECT_NODE_MODULES, resolveScope } from "@omp/paths";
 import { removePluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
@@ -20,6 +20,8 @@ export interface UninstallOptions {
  * Uninstall a plugin
  */
 export async function uninstallPlugin(name: string, options: UninstallOptions = {}): Promise<void> {
+	requireNpm();
+
 	const isGlobal = resolveScope(options);
 	const prefix = isGlobal ? PLUGINS_DIR : ".pi";
 	const nodeModules = isGlobal ? NODE_MODULES_DIR : PROJECT_NODE_MODULES;

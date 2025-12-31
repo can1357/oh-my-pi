@@ -1,4 +1,4 @@
-import { npmInfo } from "@omp/npm";
+import { npmInfo, requireNpm } from "@omp/npm";
 import chalk from "chalk";
 
 export interface InfoOptions {
@@ -11,6 +11,8 @@ export interface InfoOptions {
  * Show detailed info about a package before install
  */
 export async function showInfo(packageName: string, options: InfoOptions = {}): Promise<void> {
+	requireNpm();
+
 	console.log(chalk.blue(`Fetching info for ${packageName}...`));
 
 	try {

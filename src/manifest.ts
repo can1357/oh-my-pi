@@ -9,6 +9,7 @@ import {
 	PROJECT_PACKAGE_JSON,
 	PROJECT_PLUGINS_JSON,
 } from "@omp/paths";
+import chalk from "chalk";
 
 /**
  * Format permission-related errors with actionable guidance
@@ -113,6 +114,8 @@ export interface PluginsJson {
 	disabled?: string[]; // disabled plugin names
 	/** Per-plugin feature and variable config */
 	config?: Record<string, PluginConfig>;
+	/** Auto-linked transitive omp dependencies (name -> parent plugin that pulled it in) */
+	transitiveDeps?: Record<string, string>;
 }
 
 /**
@@ -196,6 +199,7 @@ export async function loadPluginsJson(global = true): Promise<PluginsJson> {
 				devDependencies: parsed.devDependencies || {},
 				disabled: parsed.omp?.disabled || [],
 				config: parsed.omp?.config || {},
+				transitiveDeps: parsed.omp?.transitiveDeps || {},
 			};
 		}
 
@@ -205,10 +209,11 @@ export async function loadPluginsJson(global = true): Promise<PluginsJson> {
 			devDependencies: parsed.devDependencies || {},
 			disabled: parsed.disabled || [],
 			config: parsed.config || {},
+			transitiveDeps: parsed.transitiveDeps || {},
 		};
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-			return { plugins: {}, devDependencies: {}, disabled: [], config: {} };
+			return { plugins: {}, devDependencies: {}, disabled: [], config: {}, transitiveDeps: {} };
 		}
 		throw err;
 	}
@@ -270,7 +275,7 @@ export async function savePluginsJson(data: PluginsJson, global = true): Promise
 				delete existing.devDependencies;
 			}
 
-			// Build omp field with disabled and config
+			// Build omp field with disabled, config, and transitiveDeps
 			const ompField: Record<string, unknown> = (existing.omp as Record<string, unknown>) || {};
 			if (data.disabled?.length) {
 				ompField.disabled = data.disabled;
@@ -281,6 +286,11 @@ export async function savePluginsJson(data: PluginsJson, global = true): Promise
 				ompField.config = data.config;
 			} else {
 				delete ompField.config;
+			}
+			if (data.transitiveDeps && Object.keys(data.transitiveDeps).length > 0) {
+				ompField.transitiveDeps = data.transitiveDeps;
+			} else {
+				delete ompField.transitiveDeps;
 			}
 			if (Object.keys(ompField).length > 0) {
 				existing.omp = ompField;
@@ -300,6 +310,9 @@ export async function savePluginsJson(data: PluginsJson, global = true): Promise
 			}
 			if (data.config && Object.keys(data.config).length > 0) {
 				output.config = data.config;
+			}
+			if (data.transitiveDeps && Object.keys(data.transitiveDeps).length > 0) {
+				output.transitiveDeps = data.transitiveDeps;
 			}
 			await writeFile(path, JSON.stringify(output, null, 2));
 
@@ -389,7 +402,18 @@ export async function readPluginPackageJson(pluginName: string, global = true): 
 	try {
 		const data = await readFile(pkgPath, "utf-8");
 		return JSON.parse(data) as PluginPackageJson;
-	} catch {
+	} catch (err) {
+		const error = err as NodeJS.ErrnoException;
+		// Only warn for non-ENOENT errors (corrupt JSON, permission issues, etc.)
+		// ENOENT is expected when checking if a plugin is installed
+		if (error.code !== "ENOENT") {
+			console.warn(
+				chalk.yellow(`⚠ Failed to read package.json for '${pluginName}': ${error.message}`),
+			);
+			if (process.env.DEBUG) {
+				console.warn(chalk.dim((error as Error).stack));
+			}
+		}
 		return null;
 	}
 }

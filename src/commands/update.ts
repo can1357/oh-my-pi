@@ -1,7 +1,7 @@
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { loadPluginsJson, type OmpInstallEntry, type PluginPackageJson, readPluginPackageJson } from "@omp/manifest";
-import { npmUpdate } from "@omp/npm";
+import { npmUpdate, requireNpm } from "@omp/npm";
 import { log, outputJson, setJsonMode } from "@omp/output";
 import {
 	getProjectPiDir,
@@ -24,6 +24,8 @@ export interface UpdateOptions {
  * Update plugin(s) to latest within semver range
  */
 export async function updatePlugin(name?: string, options: UpdateOptions = {}): Promise<void> {
+	requireNpm();
+
 	if (options.json) {
 		setJsonMode(true);
 	}

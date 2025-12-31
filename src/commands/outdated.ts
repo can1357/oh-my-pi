@@ -1,5 +1,5 @@
 import { loadPluginsJson } from "@omp/manifest";
-import { npmOutdated } from "@omp/npm";
+import { npmOutdated, requireNpm } from "@omp/npm";
 import { PLUGINS_DIR, resolveScope } from "@omp/paths";
 import chalk from "chalk";
 
@@ -13,6 +13,8 @@ export interface OutdatedOptions {
  * List plugins with newer versions available
  */
 export async function showOutdated(options: OutdatedOptions = {}): Promise<void> {
+	requireNpm();
+
 	const isGlobal = resolveScope(options);
 	const prefix = isGlobal ? PLUGINS_DIR : ".pi";
 

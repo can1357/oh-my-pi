@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import type { OmpField } from "@omp/manifest";
+import chalk from "chalk";
 
 export interface NpmAvailability {
 	available: boolean;
@@ -33,6 +34,17 @@ export function checkNpmAvailable(): NpmAvailability {
 			available: false,
 			error: "npm is not installed or not in PATH. Please install Node.js/npm.",
 		};
+	}
+}
+
+/**
+ * Require npm to be available; throws if not.
+ * Use this at the start of commands that need npm.
+ */
+export function requireNpm(): void {
+	const check = checkNpmAvailable();
+	if (!check.available) {
+		throw new Error(check.error);
 	}
 }
 
@@ -135,7 +147,12 @@ export async function npmInfo(packageName: string): Promise<NpmPackageInfo | nul
 	try {
 		const output = npmExec(["info", packageName, "--json"]);
 		return JSON.parse(output);
-	} catch {
+	} catch (err) {
+		const error = err as Error;
+		console.warn(chalk.yellow(`⚠ Failed to fetch npm info for '${packageName}': ${error.message}`));
+		if (process.env.DEBUG) {
+			console.warn(chalk.dim(error.stack));
+		}
 		return null;
 	}
 }
@@ -144,10 +161,19 @@ export async function npmInfo(packageName: string): Promise<NpmPackageInfo | nul
  * Search npm for packages with a keyword
  */
 export async function npmSearch(query: string, keyword = "omp-plugin"): Promise<NpmSearchResult[]> {
-	// Search for packages with the omp-plugin keyword
-	const searchTerm = keyword ? `keywords:${keyword} ${query}` : query;
-	const output = npmExec(["search", searchTerm, "--json"]);
-	return JSON.parse(output);
+	try {
+		// Search for packages with the omp-plugin keyword
+		const searchTerm = keyword ? `keywords:${keyword} ${query}` : query;
+		const output = npmExec(["search", searchTerm, "--json"]);
+		return JSON.parse(output);
+	} catch (err) {
+		const error = err as Error;
+		console.warn(chalk.yellow(`⚠ npm search failed for '${query}': ${error.message}`));
+		if (process.env.DEBUG) {
+			console.warn(chalk.dim(error.stack));
+		}
+		return [];
+	}
 }
 
 /**

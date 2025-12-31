@@ -165,6 +165,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 
 	// 7. Check for missing omp dependencies
 	const missingDeps: string[] = [];
+	const transitiveDeps = pluginsJson.transitiveDeps || {};
 	for (const [name, pkgJson] of installedPlugins) {
 		if (pkgJson.dependencies) {
 			for (const depName of Object.keys(pkgJson.dependencies)) {
@@ -177,8 +178,8 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 					}
 				} else if (depPkgJson.omp?.install && depPkgJson.omp.install.length > 0) {
 					// Dependency is an omp plugin (has install entries) and is present - that's fine
-					// But check if it's registered in the plugins manifest
-					if (!pluginsJson.plugins[depName]) {
+					// Check if it's registered in the plugins manifest or as a transitive dep
+					if (!pluginsJson.plugins[depName] && !transitiveDeps[depName]) {
 						missingDeps.push(`${name} requires omp plugin ${depName} (installed but not in manifest)`);
 					}
 				}
