@@ -9,6 +9,8 @@
         "chalk": "^5.3.0",
         "commander": "^12.0.0",
         "ora": "^9.0.0",
+        "string-width": "^8.1.0",
+        "strip-ansi": "^7.1.2",
       },
       "devDependencies": {
         "@biomejs/biome": "2.3.10",

@@ -1,0 +1,54 @@
+{
+  "name": "@oh-my-pi/anthropic-websearch",
+  "version": "0.1.0",
+  "description": "Anthropic Claude web search tool for pi",
+  "keywords": [
+    "omp-plugin",
+    "anthropic",
+    "claude",
+    "web-search"
+  ],
+  "author": "Can Bölük <me@can.ac>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/can1357/oh-my-pi.git",
+    "directory": "plugins/anthropic-websearch"
+  },
+  "omp": {
+    "install": [
+      {
+        "src": "tools/anthropic-websearch/runtime.json",
+        "dest": "agent/tools/anthropic-websearch/runtime.json",
+        "copy": true
+      },
+      {
+        "src": "tools/anthropic-websearch/index.ts",
+        "dest": "agent/tools/anthropic-websearch/index.ts"
+      }
+    ],
+    "variables": {
+      "apiKey": {
+        "type": "string",
+        "env": "ANTHROPIC_SEARCH_API_KEY",
+        "description": "Anthropic API key for web search (optional if using models.json provider or oauth)",
+        "required": false
+      },
+      "baseUrl": {
+        "type": "string",
+        "env": "ANTHROPIC_SEARCH_BASE_URL",
+        "description": "Anthropic API base URL for web search (optional)",
+        "required": false
+      },
+      "model": {
+        "type": "string",
+        "env": "ANTHROPIC_SEARCH_MODEL",
+        "description": "Model to use for web search",
+        "default": "claude-sonnet-4-5-20250514"
+      }
+    }
+  },
+  "files": [
+    "tools"
+  ]
+}
