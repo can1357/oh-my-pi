@@ -1,6 +1,6 @@
 import { existsSync, lstatSync } from "node:fs";
 import { readlink } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { getInstalledPlugins, getPluginSourceDir, readPluginPackageJson } from "@omp/manifest";
 import { PI_CONFIG_DIR, getProjectPiDir, resolveScope } from "@omp/paths";
 import { traceInstalledFile } from "@omp/symlinks";
@@ -10,6 +10,19 @@ export interface WhyOptions {
 	global?: boolean;
 	local?: boolean;
 	json?: boolean;
+}
+
+/**
+ * Validates that a resolved path stays within the base directory.
+ * Prevents path traversal attacks via malicious user input.
+ */
+function isPathWithinBase(basePath: string, targetPath: string): boolean {
+	const normalizedBase = resolve(basePath);
+	const resolvedTarget = resolve(basePath, targetPath);
+	const rel = relative(normalizedBase, resolvedTarget);
+	if (rel === "") return true;
+	if (rel.startsWith("..") || isAbsolute(rel)) return false;
+	return true;
 }
 
 /**
@@ -39,13 +52,23 @@ export async function whyFile(filePath: string, options: WhyOptions = {}): Promi
 		}
 	}
 
+	// Validate path doesn't escape base directory (prevents path traversal attacks)
+	if (!isPathWithinBase(baseDir, relativePath)) {
+		console.log(chalk.red(`Error: Path traversal blocked - path escapes base directory`));
+		process.exitCode = 1;
+		return;
+	}
+
 	// Check if it's a path in agent/ directory
 	if (!relativePath.startsWith("agent/")) {
 		// Try prepending agent/
 		const withAgent = `agent/${relativePath}`;
-		const fullWithAgent = join(baseDir, withAgent);
-		if (existsSync(fullWithAgent)) {
-			relativePath = withAgent;
+		// Re-validate with agent/ prefix
+		if (isPathWithinBase(baseDir, withAgent)) {
+			const fullWithAgent = join(baseDir, withAgent);
+			if (existsSync(fullWithAgent)) {
+				relativePath = withAgent;
+			}
 		}
 	}
 

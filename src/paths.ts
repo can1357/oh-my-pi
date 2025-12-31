@@ -101,7 +101,7 @@ export function getPackageJsonPath(global = true): string {
 	if (global) {
 		return GLOBAL_PACKAGE_JSON;
 	}
-	return join(getProjectPiDir(), "plugins.json");
+	return join(getProjectPiDir(), "package.json");
 }
 
 /**

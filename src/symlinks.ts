@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
-import { copyFile, mkdir, readlink, rm, symlink } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readlink, rm, symlink } from "node:fs/promises";
 import { platform } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { OmpFeature, OmpInstallEntry, PluginPackageJson, PluginRuntimeConfig } from "@omp/manifest";
 import { getPluginSourceDir } from "@omp/manifest";
 import { PI_CONFIG_DIR, getProjectPiDir } from "@omp/paths";
@@ -53,12 +53,19 @@ function formatPermissionError(err: NodeJS.ErrnoException, path: string): string
 /**
  * Validates that a target path stays within the base directory.
  * Prevents path traversal attacks via malicious dest entries like '../../../etc/passwd'.
+ * Uses path.relative() for cross-platform compatibility (handles both POSIX and Windows separators).
  */
 function isPathWithinBase(basePath: string, targetPath: string): boolean {
 	const normalizedBase = resolve(basePath);
 	const resolvedTarget = resolve(basePath, targetPath);
-	// Must start with base path followed by separator (or be exactly the base)
-	return resolvedTarget === normalizedBase || resolvedTarget.startsWith(`${normalizedBase}/`);
+	// Compute relative path from base to target
+	const rel = relative(normalizedBase, resolvedTarget);
+	// If relative path starts with '..' or is absolute, the target escapes the base
+	// Empty string means they're the same directory (allowed)
+	if (rel === "") return true;
+	// Check if path escapes (starts with .. or is absolute on Windows like C:\)
+	if (rel.startsWith("..") || isAbsolute(rel)) return false;
+	return true;
 }
 
 /**
@@ -156,10 +163,30 @@ export async function createPluginSymlinks(
 					}
 				}
 			} else {
-				// Remove existing symlink/file if it exists
+				// Check destination type before removal to avoid deleting real files/directories
 				try {
-					await rm(dest, { force: true, recursive: true });
-				} catch {}
+					const destStats = await lstat(dest);
+					if (destStats.isSymbolicLink()) {
+						// Safe to remove existing symlink
+						await rm(dest, { force: true });
+					} else {
+						// Destination is a real file or directory - refuse to delete
+						const destType = destStats.isDirectory() ? "directory" : "file";
+						const msg = `Cannot create symlink at '${entry.dest}': destination is a real ${destType}, not a symlink. ` +
+							`Remove it manually if you want to replace it with a symlink.`;
+						result.errors.push(msg);
+						if (verbose) {
+							console.log(chalk.red(`  ✗ ${msg}`));
+						}
+						continue;
+					}
+				} catch (statErr) {
+					// Destination doesn't exist - that's fine, no removal needed
+					const error = statErr as NodeJS.ErrnoException;
+					if (error.code !== "ENOENT") {
+						throw statErr;
+					}
+				}
 
 				// Create symlink (use junctions on Windows for directories to avoid admin requirement)
 				try {

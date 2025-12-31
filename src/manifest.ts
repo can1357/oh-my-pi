@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
 	GLOBAL_PACKAGE_JSON,
 	NODE_MODULES_DIR,
@@ -316,18 +316,75 @@ export async function savePluginsJson(data: PluginsJson, global = true): Promise
 }
 
 /**
+ * Validates a plugin name against npm naming rules and path traversal attacks.
+ * - Scoped packages: @scope/name (scope and name must be valid npm names)
+ * - Unscoped packages: name only (no / or \ allowed)
+ * - No path traversal sequences (../, ..\, etc.)
+ * Returns true if valid, false otherwise.
+ */
+export function isValidPluginName(pluginName: string): boolean {
+	// Check for path traversal attempts
+	if (pluginName.includes("..") || pluginName.includes("\\")) {
+		return false;
+	}
+
+	// npm package name rules (simplified):
+	// - Can't start with . or _
+	// - No uppercase letters
+	// - No special characters except - and .
+	// - Max 214 chars
+	const validNpmName = /^(?:@[a-z0-9][-a-z0-9._]*\/)?[a-z0-9][-a-z0-9._]*$/;
+
+	if (!validNpmName.test(pluginName)) {
+		return false;
+	}
+
+	// Additional validation: scoped packages should only have exactly one /
+	if (pluginName.startsWith("@")) {
+		const slashCount = (pluginName.match(/\//g) || []).length;
+		if (slashCount !== 1) {
+			return false;
+		}
+	} else {
+		// Unscoped packages should have no /
+		if (pluginName.includes("/")) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+/**
+ * Validates that a resolved path stays within the node_modules base directory.
+ * Uses path.relative() for cross-platform compatibility.
+ */
+function isPluginPathWithinNodeModules(nodeModules: string, pluginName: string): boolean {
+	const normalizedBase = resolve(nodeModules);
+	const resolvedTarget = resolve(nodeModules, pluginName);
+	const rel = relative(normalizedBase, resolvedTarget);
+	if (rel === "") return false; // Can't be node_modules itself
+	if (rel.startsWith("..") || isAbsolute(rel)) return false;
+	return true;
+}
+
+/**
  * Read a plugin's package.json from node_modules
  */
 export async function readPluginPackageJson(pluginName: string, global = true): Promise<PluginPackageJson | null> {
-	const nodeModules = global ? NODE_MODULES_DIR : join(getProjectPiDir(), "node_modules");
-	let pkgPath: string;
-
-	// Handle scoped packages
-	if (pluginName.startsWith("@")) {
-		pkgPath = join(nodeModules, pluginName, "package.json");
-	} else {
-		pkgPath = join(nodeModules, pluginName, "package.json");
+	// Validate plugin name to prevent path traversal attacks
+	if (!isValidPluginName(pluginName)) {
+		return null;
 	}
+
+	const nodeModules = global ? NODE_MODULES_DIR : join(getProjectPiDir(), "node_modules");
+
+	// Double-check the resolved path stays within node_modules
+	if (!isPluginPathWithinNodeModules(nodeModules, pluginName)) {
+		return null;
+	}
+
+	const pkgPath = join(nodeModules, pluginName, "package.json");
 
 	try {
 		const data = await readFile(pkgPath, "utf-8");
@@ -338,10 +395,22 @@ export async function readPluginPackageJson(pluginName: string, global = true): 
 }
 
 /**
- * Get the source directory for a plugin in node_modules
+ * Get the source directory for a plugin in node_modules.
+ * Throws on invalid plugin names to prevent path traversal attacks.
  */
 export function getPluginSourceDir(pluginName: string, global = true): string {
+	// Validate plugin name to prevent path traversal attacks
+	if (!isValidPluginName(pluginName)) {
+		throw new Error(`Invalid plugin name: ${pluginName}`);
+	}
+
 	const nodeModules = global ? NODE_MODULES_DIR : join(getProjectPiDir(), "node_modules");
+
+	// Double-check the resolved path stays within node_modules
+	if (!isPluginPathWithinNodeModules(nodeModules, pluginName)) {
+		throw new Error(`Plugin path escapes node_modules: ${pluginName}`);
+	}
+
 	return join(nodeModules, pluginName);
 }
 
