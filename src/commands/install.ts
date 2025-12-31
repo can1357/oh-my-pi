@@ -21,7 +21,7 @@ import {
 	PI_CONFIG_DIR,
 	PLUGINS_DIR,
 	PROJECT_NODE_MODULES,
-	PROJECT_PI_DIR,
+	getProjectPiDir,
 	resolveScope,
 } from "@omp/paths";
 import { createPluginSymlinks, getAllFeatureNames, getDefaultFeatures } from "@omp/symlinks";
@@ -253,7 +253,7 @@ function isLocalPath(spec: string): boolean {
  */
 export async function installPlugin(packages?: string[], options: InstallOptions = {}): Promise<void> {
 	const isGlobal = resolveScope(options);
-	const prefix = isGlobal ? PLUGINS_DIR : ".pi";
+	const prefix = isGlobal ? PLUGINS_DIR : getProjectPiDir();
 	const _nodeModules = isGlobal ? NODE_MODULES_DIR : PROJECT_NODE_MODULES;
 
 	// Initialize plugins directory if needed
@@ -584,7 +584,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			// Rollback: remove any symlinks that were created
 			if (createdSymlinks.length > 0) {
 				console.log(chalk.dim("  Rolling back symlinks..."));
-				const baseDir = isGlobal ? PI_CONFIG_DIR : PROJECT_PI_DIR;
+				const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
 				for (const dest of createdSymlinks) {
 					try {
 						await rm(join(baseDir, dest), { force: true, recursive: true });

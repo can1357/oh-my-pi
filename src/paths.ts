@@ -14,8 +14,8 @@ export const NODE_MODULES_DIR = join(PLUGINS_DIR, "node_modules");
 // Global package.json for plugin management
 export const GLOBAL_PACKAGE_JSON = join(PLUGINS_DIR, "package.json");
 
-// Global package-lock.json
-export const GLOBAL_LOCK_FILE = join(PLUGINS_DIR, "package-lock.json");
+// Global omp lock file (separate from npm's package-lock.json)
+export const GLOBAL_LOCK_FILE = join(PLUGINS_DIR, "omp-lock.json");
 
 // Project-local config directory
 export const PROJECT_PI_DIR = ".pi";

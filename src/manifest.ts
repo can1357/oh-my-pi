@@ -7,6 +7,7 @@ import {
 	PLUGINS_DIR,
 	PROJECT_PACKAGE_JSON,
 	PROJECT_PLUGINS_JSON,
+	getProjectPiDir,
 } from "@omp/paths";
 
 /**
@@ -144,20 +145,22 @@ export async function initGlobalPlugins(): Promise<void> {
  * Initialize the project-local .pi directory with plugins.json and package.json
  */
 export async function initProjectPlugins(): Promise<void> {
-	const PROJECT_PI_DIR = dirname(PROJECT_PLUGINS_JSON);
+	const projectPiDir = getProjectPiDir();
+	const pluginsJsonPath = join(projectPiDir, "plugins.json");
+	const packageJsonPath = join(projectPiDir, "package.json");
 	try {
-		await mkdir(PROJECT_PI_DIR, { recursive: true });
+		await mkdir(projectPiDir, { recursive: true });
 
 		// Create plugins.json if it doesn't exist
-		if (!existsSync(PROJECT_PLUGINS_JSON)) {
+		if (!existsSync(pluginsJsonPath)) {
 			const pluginsJson = {
 				plugins: {},
 			};
-			await writeFile(PROJECT_PLUGINS_JSON, JSON.stringify(pluginsJson, null, 2));
+			await writeFile(pluginsJsonPath, JSON.stringify(pluginsJson, null, 2));
 		}
 
 		// Create package.json if it doesn't exist (for npm operations)
-		if (!existsSync(PROJECT_PACKAGE_JSON)) {
+		if (!existsSync(packageJsonPath)) {
 			const packageJson = {
 				name: "pi-project-plugins",
 				version: "1.0.0",
@@ -165,12 +168,12 @@ export async function initProjectPlugins(): Promise<void> {
 				description: "Project-local pi plugins managed by omp",
 				dependencies: {},
 			};
-			await writeFile(PROJECT_PACKAGE_JSON, JSON.stringify(packageJson, null, 2));
+			await writeFile(packageJsonPath, JSON.stringify(packageJson, null, 2));
 		}
 	} catch (err) {
 		const error = err as NodeJS.ErrnoException;
 		if (error.code === "EACCES" || error.code === "EPERM") {
-			throw new Error(formatPermissionError(error, PROJECT_PI_DIR));
+			throw new Error(formatPermissionError(error, projectPiDir));
 		}
 		throw err;
 	}
@@ -316,7 +319,7 @@ export async function savePluginsJson(data: PluginsJson, global = true): Promise
  * Read a plugin's package.json from node_modules
  */
 export async function readPluginPackageJson(pluginName: string, global = true): Promise<PluginPackageJson | null> {
-	const nodeModules = global ? NODE_MODULES_DIR : ".pi/node_modules";
+	const nodeModules = global ? NODE_MODULES_DIR : join(getProjectPiDir(), "node_modules");
 	let pkgPath: string;
 
 	// Handle scoped packages
@@ -338,7 +341,7 @@ export async function readPluginPackageJson(pluginName: string, global = true): 
  * Get the source directory for a plugin in node_modules
  */
 export function getPluginSourceDir(pluginName: string, global = true): string {
-	const nodeModules = global ? NODE_MODULES_DIR : ".pi/node_modules";
+	const nodeModules = global ? NODE_MODULES_DIR : join(getProjectPiDir(), "node_modules");
 	return join(nodeModules, pluginName);
 }
 
