@@ -10,32 +10,34 @@
  *   2. .env in current directory
  *   3. ~/.env
  *
- * Tools exposed:
+ * Tools exposed (all prefixed with web_search_ to indicate web searching capability):
  *   Exa Search:
- *     - web_search_exa: Real-time web searches
- *     - get_code_context_exa: Code search for libraries, docs, examples
- *     - deep_search_exa: Natural language web search
- *     - crawling_exa: Extract content from specific URLs
- *     - company_research_exa: Research companies
- *     - linkedin_search_exa: Search LinkedIn profiles/companies
- *     - deep_researcher_start: Start comprehensive AI research
- *     - deep_researcher_check: Check research task status
+ *     - web_search_general: Real-time web searches
+ *     - web_search_code_context: Code search for libraries, docs, examples
+ *     - web_search_deep: Natural language web search
+ *     - web_search_crawl_url: Extract content from specific URLs
+ *     - web_search_company_research: Research companies
+ *     - web_search_linkedin: Search LinkedIn profiles/companies
+ *     - web_search_researcher_start: Start comprehensive AI research
+ *     - web_search_researcher_check: Check research task status
  *
- *   Websets:
- *     - create_webset: Create entity collections with search/enrichments
- *     - list_websets: List all websets
- *     - get_webset: Get webset details
- *     - update_webset: Update webset metadata
- *     - list_webset_items: List items in a webset
- *     - get_item: Get item details
- *     - create_search: Add search to webset
- *     - get_search: Check search status
- *     - cancel_search: Cancel running search
- *     - create_enrichment: Extract custom data from items
- *     - get_enrichment: Get enrichment details
- *     - delete_enrichment: Delete enrichment
- *     - cancel_enrichment: Cancel running enrichment
- *     - create_monitor: Auto-update webset on schedule
+ *   Websets (web-based entity collections):
+ *     - webset_create: Create entity collections with search/enrichments
+ *     - webset_list: List all websets
+ *     - webset_get: Get webset details
+ *     - webset_update: Update webset metadata
+ *     - webset_delete: Delete a webset
+ *     - webset_items_list: List items in a webset
+ *     - webset_item_get: Get item details
+ *     - webset_search_create: Add search to webset
+ *     - webset_search_get: Check search status
+ *     - webset_search_cancel: Cancel running search
+ *     - webset_enrichment_create: Extract custom data from items
+ *     - webset_enrichment_get: Get enrichment details
+ *     - webset_enrichment_update: Update enrichment metadata
+ *     - webset_enrichment_delete: Delete enrichment
+ *     - webset_enrichment_cancel: Cancel running enrichment
+ *     - webset_monitor_create: Auto-update webset on schedule
  */
 
 import * as fs from "node:fs";
@@ -59,6 +61,36 @@ const EXA_TOOLS = [
    "deep_researcher_start",
    "deep_researcher_check",
 ];
+
+// Tool name mapping: original MCP name -> new web_search prefixed name
+const TOOL_NAME_MAP: Record<string, string> = {
+   // Exa Search tools
+   "web_search_exa": "web_search_general",
+   "deep_search_exa": "web_search_deep",
+   "get_code_context_exa": "web_search_code_context",
+   "crawling_exa": "web_search_crawl_url",
+   "company_research_exa": "web_search_company_research",
+   "linkedin_search_exa": "web_search_linkedin",
+   "deep_researcher_start": "web_search_researcher_start",
+   "deep_researcher_check": "web_search_researcher_check",
+   // Websets tools
+   "create_webset": "webset_create",
+   "list_websets": "webset_list",
+   "get_webset": "webset_get",
+   "update_webset": "webset_update",
+   "delete_webset": "webset_delete",
+   "list_webset_items": "webset_items_list",
+   "get_item": "webset_item_get",
+   "create_search": "webset_search_create",
+   "get_search": "webset_search_get",
+   "cancel_search": "webset_search_cancel",
+   "create_enrichment": "webset_enrichment_create",
+   "get_enrichment": "webset_enrichment_get",
+   "update_enrichment": "webset_enrichment_update",
+   "delete_enrichment": "webset_enrichment_delete",
+   "cancel_enrichment": "webset_enrichment_cancel",
+   "create_monitor": "webset_monitor_create",
+};
 
 interface MCPTool {
    name: string;
@@ -239,18 +271,22 @@ async function callMCPTool(baseUrl: string, apiKey: string, toolName: string, ar
 }
 
 /**
- * Create a tool wrapper for an MCP tool
+ * Create a tool wrapper for an MCP tool with renamed tool name
  */
 function createToolWrapper(
    mcpTool: MCPTool,
    baseUrl: string,
    apiKey: string
 ): CustomAgentTool<TSchema, unknown> {
+   // Use the mapped name if available, otherwise keep original
+   const renamedName = TOOL_NAME_MAP[mcpTool.name] ?? mcpTool.name;
+   
    return {
-      name: mcpTool.name,
+      name: renamedName,
       description: mcpTool.description,
       parameters: mcpTool.inputSchema,
       async execute(args) {
+         // Call the MCP server with the ORIGINAL tool name
          return callMCPTool(baseUrl, apiKey, mcpTool.name, args as Record<string, unknown>);
       },
    };
