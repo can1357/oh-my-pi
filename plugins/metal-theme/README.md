@@ -5,7 +5,7 @@ A metal theme for pi.
 ## Installation
 
 ```bash
-omp install oh-my-pi/plugins/metal-theme
+omp install @oh-my-pi/metal-theme
 ```
 
 ## Contents

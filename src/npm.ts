@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import type { OmpField } from "@omp/manifest";
+import { createProgress } from "@omp/progress";
 import chalk from "chalk";
 
 export interface NpmAvailability {
@@ -130,7 +131,16 @@ export async function npmInstall(
 
 	args.push(...packages);
 
-	npmExecWithPrefix(args, prefix);
+	const pkgList = packages.length === 1 ? packages[0] : `${packages.length} packages`;
+	const progress = createProgress(`Installing ${pkgList}...`);
+
+	try {
+		npmExecWithPrefix(args, prefix);
+		progress.succeed(`Installed ${pkgList} (${progress.elapsed()}s)`);
+	} catch (err) {
+		progress.fail(`Failed to install ${pkgList}`);
+		throw err;
+	}
 }
 
 /**
@@ -207,7 +217,18 @@ export async function npmUpdate(packages: string[], prefix: string): Promise<voi
 	if (packages.length > 0) {
 		args.push(...packages);
 	}
-	npmExecWithPrefix(args, prefix);
+
+	const pkgList =
+		packages.length === 0 ? "all packages" : packages.length === 1 ? packages[0] : `${packages.length} packages`;
+	const progress = createProgress(`Updating ${pkgList}...`);
+
+	try {
+		npmExecWithPrefix(args, prefix);
+		progress.succeed(`Updated ${pkgList} (${progress.elapsed()}s)`);
+	} catch (err) {
+		progress.fail(`Failed to update ${pkgList}`);
+		throw err;
+	}
 }
 
 /**

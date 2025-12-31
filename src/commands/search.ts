@@ -1,5 +1,6 @@
 import { npmSearch, requireNpm } from "@omp/npm";
 import { log, outputJson, setJsonMode } from "@omp/output";
+import { createProgress } from "@omp/progress";
 import chalk from "chalk";
 
 function truncate(str: string, maxLen: number): string {
@@ -22,10 +23,11 @@ export async function searchPlugins(query: string, options: SearchOptions = {}):
 		setJsonMode(true);
 	}
 
-	log(chalk.blue(`Searching npm for "${query}" with omp-plugin keyword...`));
+	const progress = createProgress(`Searching npm for "${query}"...`);
 
 	try {
 		const results = await npmSearch(query, "omp-plugin");
+		progress.succeed(`Search complete`);
 
 		if (results.length === 0) {
 			log(chalk.yellow("\nNo plugins found."));

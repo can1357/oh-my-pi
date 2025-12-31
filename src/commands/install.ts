@@ -25,6 +25,7 @@ import {
 	PROJECT_NODE_MODULES,
 	resolveScope,
 } from "@omp/paths";
+import { createProgress } from "@omp/progress";
 import { createPluginSymlinks, getAllFeatureNames, getDefaultFeatures } from "@omp/symlinks";
 import chalk from "chalk";
 
@@ -400,9 +401,10 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 
 			// 1. Resolve version and fetch package metadata from npm registry
 			// npm info includes omp field if present in package.json
+			const fetchProgress = createProgress(`Fetching package info for ${name}...`);
 			const info = await npmInfo(pkgSpec);
 			if (!info) {
-				log(chalk.red(`  ✗ Package not found: ${name}`));
+				fetchProgress.fail(`Package not found: ${name}`);
 				process.exitCode = 1;
 				results.push({
 					name,
@@ -412,6 +414,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 				});
 				continue;
 			}
+			fetchProgress.succeed(`Found ${info.name}@${info.version}`);
 			resolvedVersion = info.version;
 
 			// 2. Check for conflicts BEFORE npm install using registry metadata

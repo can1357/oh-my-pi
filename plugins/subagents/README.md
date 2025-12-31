@@ -5,7 +5,7 @@ Task delegation system with specialized subagents for pi.
 ## Installation
 
 ```bash
-omp install oh-my-pi/plugins/subagents
+omp install @oh-my-pi/subagents
 ```
 
 ## Contents

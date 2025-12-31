@@ -5,7 +5,7 @@ Interactive user prompting tool for gathering user input during agent execution.
 ## Installation
 
 ```bash
-omp install oh-my-pi/plugins/user-prompt
+omp install @oh-my-pi/user-prompt
 ```
 
 ## Tool

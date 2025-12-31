@@ -4,6 +4,7 @@ import { platform } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { OmpFeature, OmpInstallEntry, PluginPackageJson, PluginRuntimeConfig } from "@omp/manifest";
 import { getPluginSourceDir } from "@omp/manifest";
+import { log } from "@omp/output";
 import { getProjectPiDir, PI_CONFIG_DIR } from "@omp/paths";
 import chalk from "chalk";
 
@@ -105,7 +106,7 @@ export async function createPluginSymlinks(
 	const installEntries = getInstallEntries(pkgJson);
 	if (installEntries.length === 0) {
 		if (verbose) {
-			console.log(chalk.dim("  No omp.install entries found"));
+			log(chalk.dim("  No omp.install entries found"));
 		}
 		return result;
 	}
@@ -116,7 +117,7 @@ export async function createPluginSymlinks(
 		// Skip destinations that the user chose to keep from existing plugins
 		if (skipDestinations?.has(entry.dest)) {
 			if (verbose) {
-				console.log(chalk.dim(`  Skipped: ${entry.dest} (conflict resolved to existing plugin)`));
+				log(chalk.dim(`  Skipped: ${entry.dest} (conflict resolved to existing plugin)`));
 			}
 			continue;
 		}
@@ -126,7 +127,7 @@ export async function createPluginSymlinks(
 			const msg = `Path traversal blocked: ${entry.dest} escapes base directory`;
 			result.errors.push(msg);
 			if (verbose) {
-				console.log(chalk.red(`  ✗ ${msg}`));
+				log(chalk.red(`  ✗ ${msg}`));
 			}
 			continue;
 		}
@@ -139,7 +140,7 @@ export async function createPluginSymlinks(
 			if (!existsSync(src)) {
 				result.errors.push(`Source not found: ${entry.src}`);
 				if (verbose) {
-					console.log(chalk.yellow(`  ⚠ Source not found: ${entry.src}`));
+					log(chalk.yellow(`  ⚠ Source not found: ${entry.src}`));
 				}
 				continue;
 			}
@@ -155,11 +156,11 @@ export async function createPluginSymlinks(
 					await copyFile(src, dest);
 					result.created.push(entry.dest);
 					if (verbose) {
-						console.log(chalk.dim(`  Copied: ${entry.dest} (from ${entry.src})`));
+						log(chalk.dim(`  Copied: ${entry.dest} (from ${entry.src})`));
 					}
 				} else {
 					if (verbose) {
-						console.log(chalk.dim(`  Exists: ${entry.dest} (preserved)`));
+						log(chalk.dim(`  Exists: ${entry.dest} (preserved)`));
 					}
 				}
 			} else {
@@ -177,7 +178,7 @@ export async function createPluginSymlinks(
 							`Remove it manually if you want to replace it with a symlink.`;
 						result.errors.push(msg);
 						if (verbose) {
-							console.log(chalk.red(`  ✗ ${msg}`));
+							log(chalk.red(`  ✗ ${msg}`));
 						}
 						continue;
 					}
@@ -204,16 +205,16 @@ export async function createPluginSymlinks(
 				} catch (symlinkErr) {
 					const error = symlinkErr as NodeJS.ErrnoException;
 					if (isWindows && error.code === "EPERM") {
-						console.log(chalk.red(`  Permission denied creating symlink.`));
-						console.log(chalk.dim("  On Windows, enable Developer Mode or run as Administrator."));
-						console.log(chalk.dim("  Settings > Update & Security > For developers > Developer Mode"));
+						log(chalk.red(`  Permission denied creating symlink.`));
+						log(chalk.dim("  On Windows, enable Developer Mode or run as Administrator."));
+						log(chalk.dim("  Settings > Update & Security > For developers > Developer Mode"));
 					}
 					throw symlinkErr;
 				}
 				result.created.push(entry.dest);
 
 				if (verbose) {
-					console.log(chalk.dim(`  Linked: ${entry.dest} → ${entry.src}`));
+					log(chalk.dim(`  Linked: ${entry.dest} → ${entry.src}`));
 				}
 			}
 		} catch (err) {
@@ -221,9 +222,9 @@ export async function createPluginSymlinks(
 			const msg = `Failed to install ${entry.dest}: ${formatPermissionError(error, join(baseDir, entry.dest))}`;
 			result.errors.push(msg);
 			if (verbose) {
-				console.log(chalk.red(`  ✗ ${msg}`));
+				log(chalk.red(`  ✗ ${msg}`));
 				if (error.code === "EACCES" || error.code === "EPERM") {
-					console.log(chalk.dim("  Check directory permissions or run with appropriate privileges."));
+					log(chalk.dim("  Check directory permissions or run with appropriate privileges."));
 				}
 			}
 		}
@@ -272,7 +273,7 @@ export async function writeRuntimeConfig(
 		};
 		writeFileSync(runtimePath, `${JSON.stringify(merged, null, 2)}\n`);
 		if (verbose) {
-			console.log(chalk.dim(`  Updated: ${runtimePath}`));
+			log(chalk.dim(`  Updated: ${runtimePath}`));
 		}
 	} catch (err) {
 		const error = err as Error;
@@ -322,7 +323,7 @@ export async function removePluginSymlinks(
 			const msg = `Path traversal blocked: ${entry.dest} escapes base directory`;
 			result.errors.push(msg);
 			if (verbose) {
-				console.log(chalk.red(`  ✗ ${msg}`));
+				log(chalk.red(`  ✗ ${msg}`));
 			}
 			continue;
 		}
@@ -338,7 +339,7 @@ export async function removePluginSymlinks(
 					await rm(dest, { force: true });
 					result.removed.push(entry.dest);
 					if (verbose) {
-						console.log(chalk.dim(`  Removed: ${entry.dest}`));
+						log(chalk.dim(`  Removed: ${entry.dest}`));
 					}
 					continue;
 				}
@@ -347,7 +348,7 @@ export async function removePluginSymlinks(
 				if (!stats.isSymbolicLink()) {
 					result.skippedNonSymlinks.push(dest);
 					if (verbose) {
-						console.log(chalk.yellow(`  ⚠ Skipping ${entry.dest}: not a symlink (may contain user data)`));
+						log(chalk.yellow(`  ⚠ Skipping ${entry.dest}: not a symlink (may contain user data)`));
 					}
 					continue;
 				}
@@ -355,7 +356,7 @@ export async function removePluginSymlinks(
 				await rm(dest, { force: true, recursive: true });
 				result.removed.push(entry.dest);
 				if (verbose) {
-					console.log(chalk.dim(`  Removed: ${entry.dest}`));
+					log(chalk.dim(`  Removed: ${entry.dest}`));
 				}
 			}
 		} catch (err) {
@@ -363,9 +364,9 @@ export async function removePluginSymlinks(
 			const msg = `Failed to remove ${entry.dest}: ${formatPermissionError(error, dest)}`;
 			result.errors.push(msg);
 			if (verbose) {
-				console.log(chalk.yellow(`  ⚠ ${msg}`));
+				log(chalk.yellow(`  ⚠ ${msg}`));
 				if (error.code === "EACCES" || error.code === "EPERM") {
-					console.log(chalk.dim("  Check directory permissions or run with appropriate privileges."));
+					log(chalk.dim("  Check directory permissions or run with appropriate privileges."));
 				}
 			}
 		}
