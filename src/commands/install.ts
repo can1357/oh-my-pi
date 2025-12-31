@@ -1101,7 +1101,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 async function installLocalPlugin(
 	localPath: string,
 	isGlobal: boolean,
-	_options: InstallOptions,
+	options: InstallOptions,
 ): Promise<{
 	name: string;
 	version: string;
@@ -1178,6 +1178,57 @@ async function installLocalPlugin(
 			};
 		}
 
+		// Dry-run mode: compute and display operations, skip execution
+		if (options.dryRun) {
+			const dryRunOps: DryRunOperation[] = [];
+			const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
+
+			// Copy operation
+			dryRunOps.push({
+				type: "copy",
+				description: `Copy plugin directory to ${pluginDir}`,
+				path: pluginDir,
+				target: localPath,
+			});
+
+			// Compute symlink/copy operations from package.json
+			if (pkgJson.omp?.install) {
+				for (const entry of pkgJson.omp.install) {
+					if (entry.copy) {
+						dryRunOps.push({
+							type: "copy",
+							description: `Copy ${entry.src} to ${entry.dest}`,
+							path: join(baseDir, entry.dest),
+							target: entry.src,
+						});
+					} else {
+						dryRunOps.push({
+							type: "symlink",
+							description: `Symlink ${entry.dest} → ${entry.src}`,
+							path: join(baseDir, entry.dest),
+							target: entry.src,
+						});
+					}
+				}
+			}
+
+			// Manifest update
+			const manifestFile = isGlobal ? "package.json" : "plugins.json";
+			dryRunOps.push({
+				type: "manifest-update",
+				description: `Add ${pluginName}@file:${localPath} to ${manifestFile}`,
+			});
+
+			// Lockfile update
+			dryRunOps.push({
+				type: "lockfile-update",
+				description: `Record ${pluginName}@${pkgJson.version} in omp-lock.json`,
+			});
+
+			displayDryRunOperations(pluginName, dryRunOps);
+			return { name: pluginName, version: pkgJson.version, success: true };
+		}
+
 		log(chalk.blue(`\nInstalling ${pluginName} from ${localPath}...`));
 
 		// Create node_modules directory
@@ -1194,7 +1245,7 @@ async function installLocalPlugin(
 
 		// Update plugins.json/package.json
 		const pluginsJson = await loadPluginsJson(isGlobal);
-		if (_options.saveDev) {
+		if (options.saveDev) {
 			if (!pluginsJson.devDependencies) {
 				pluginsJson.devDependencies = {};
 			}
