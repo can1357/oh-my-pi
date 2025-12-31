@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { detectAllConflicts, formatConflicts } from "@omp/conflicts";
-import { getInstalledPlugins, loadPluginsJson, readPluginPackageJson } from "@omp/manifest";
+import { getInstalledPlugins, loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
 import {
 	GLOBAL_PACKAGE_JSON,
 	NODE_MODULES_DIR,
@@ -9,7 +9,7 @@ import {
 	PROJECT_PLUGINS_JSON,
 	resolveScope,
 } from "@omp/paths";
-import { checkPluginSymlinks } from "@omp/symlinks";
+import { checkPluginSymlinks, createPluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 
 export interface DoctorOptions {
@@ -160,6 +160,38 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 		});
 	}
 
+	// 7. Check for missing omp dependencies
+	const missingDeps: string[] = [];
+	for (const [name, pkgJson] of installedPlugins) {
+		if (pkgJson.dependencies) {
+			for (const depName of Object.keys(pkgJson.dependencies)) {
+				const depPkgJson = await readPluginPackageJson(depName, isGlobal);
+				if (!depPkgJson) {
+					// Dependency not found in node_modules
+					// Check if it's supposed to be an omp plugin by looking in the plugins manifest
+					if (pluginsJson.plugins[depName]) {
+						missingDeps.push(`${name} requires ${depName} (not in node_modules)`);
+					}
+				} else if (depPkgJson.omp?.install && depPkgJson.omp.install.length > 0) {
+					// Dependency is an omp plugin (has install entries) and is present - that's fine
+					// But check if it's registered in the plugins manifest
+					if (!pluginsJson.plugins[depName]) {
+						missingDeps.push(`${name} requires omp plugin ${depName} (installed but not in manifest)`);
+					}
+				}
+			}
+		}
+	}
+
+	if (missingDeps.length > 0) {
+		results.push({
+			check: "Missing omp dependencies",
+			status: "warning",
+			message: missingDeps.join("; "),
+			fix: isGlobal ? "Run: npm install in ~/.pi/plugins" : "Run: npm install in .pi",
+		});
+	}
+
 	// Output results
 	if (options.json) {
 		console.log(JSON.stringify({ results }, null, 2));
@@ -221,6 +253,53 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 		console.log(chalk.yellow("\nMissing symlinks:"));
 		for (const s of missingSymlinks) {
 			console.log(chalk.dim(`  - ${s}`));
+		}
+	}
+
+	// Apply fixes if --fix flag was passed
+	if (options.fix) {
+		let fixedAnything = false;
+
+		// Fix broken/missing symlinks by re-creating them
+		if (brokenSymlinks.length > 0 || missingSymlinks.length > 0) {
+			console.log(chalk.blue("\nAttempting to fix broken/missing symlinks..."));
+			for (const [name, pkgJson] of installedPlugins) {
+				const symlinkResult = await createPluginSymlinks(name, pkgJson, isGlobal, false);
+				if (symlinkResult.created.length > 0) {
+					fixedAnything = true;
+					console.log(chalk.green(`  ✓ Re-created symlinks for ${name}`));
+				}
+				if (symlinkResult.errors.length > 0) {
+					for (const err of symlinkResult.errors) {
+						console.log(chalk.red(`  ✗ ${name}: ${err}`));
+					}
+				}
+			}
+		}
+
+		// Remove orphaned manifest entries
+		if (orphaned.length > 0) {
+			console.log(chalk.blue("\nRemoving orphaned entries from manifest..."));
+			for (const name of orphaned) {
+				delete pluginsJson.plugins[name];
+				console.log(chalk.green(`  ✓ Removed ${name}`));
+			}
+			await savePluginsJson(pluginsJson, isGlobal);
+			fixedAnything = true;
+		}
+
+		// Conflicts cannot be auto-fixed
+		if (conflicts.length > 0) {
+			console.log(chalk.yellow("\nConflicts cannot be auto-fixed. Please resolve manually:"));
+			for (const conflict of formatConflicts(conflicts)) {
+				console.log(chalk.dim(`  - ${conflict}`));
+			}
+		}
+
+		if (fixedAnything) {
+			console.log(chalk.green("\n✓ Fixes applied. Run 'omp doctor' again to verify."));
+		} else if (conflicts.length === 0) {
+			console.log(chalk.dim("\nNo fixable issues found."));
 		}
 	}
 }

@@ -56,7 +56,17 @@ export async function searchPlugins(query: string, options: SearchOptions = {}):
 
 		console.log(chalk.dim("Install with: omp install <package-name>"));
 	} catch (err) {
-		console.log(chalk.red(`Error searching: ${(err as Error).message}`));
+		const error = err as Error;
+		if (
+			error.message.includes("ENOTFOUND") ||
+			error.message.includes("ETIMEDOUT") ||
+			error.message.includes("EAI_AGAIN")
+		) {
+			console.log(chalk.red("\nNetwork error: Unable to reach npm registry."));
+			console.log(chalk.dim("  Check your internet connection and try again."));
+		} else {
+			console.log(chalk.red(`\nSearch failed: ${error.message}`));
+		}
 		process.exitCode = 1;
 	}
 }

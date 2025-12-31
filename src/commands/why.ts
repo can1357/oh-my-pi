@@ -1,7 +1,7 @@
 import { existsSync, lstatSync } from "node:fs";
 import { readlink } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
-import { getInstalledPlugins, readPluginPackageJson } from "@omp/manifest";
+import { getInstalledPlugins, getPluginSourceDir, readPluginPackageJson } from "@omp/manifest";
 import { PI_CONFIG_DIR, PROJECT_PI_DIR, resolveScope } from "@omp/paths";
 import { traceInstalledFile } from "@omp/symlinks";
 import chalk from "chalk";
@@ -100,9 +100,25 @@ export async function whyFile(filePath: string, options: WhyOptions = {}): Promi
 	}
 
 	if (result) {
-		console.log(chalk.green(`✓ Installed by: ${result.plugin}`));
-		console.log(chalk.dim(`  Source: ${result.entry.src}`));
-		console.log(chalk.dim(`  Dest: ${result.entry.dest}`));
+		// Verify it's actually a symlink pointing to the right place
+		if (!isSymlink) {
+			console.log(chalk.yellow("⚠ This file exists but is not a symlink"));
+			console.log(chalk.dim("  It may have been manually created or the symlink was replaced."));
+			console.log(chalk.dim(`  Expected to be installed by: ${result.plugin}`));
+		} else {
+			// Verify symlink points to correct source
+			const expectedSrc = join(getPluginSourceDir(result.plugin, isGlobal), result.entry.src);
+			if (target !== expectedSrc) {
+				console.log(chalk.yellow("⚠ Symlink target does not match expected source"));
+				console.log(chalk.dim(`  Expected: ${expectedSrc}`));
+				console.log(chalk.dim(`  Actual: ${target}`));
+				console.log(chalk.dim(`  Expected to be installed by: ${result.plugin}`));
+			} else {
+				console.log(chalk.green(`✓ Installed by: ${result.plugin}`));
+				console.log(chalk.dim(`  Source: ${result.entry.src}`));
+				console.log(chalk.dim(`  Dest: ${result.entry.dest}`));
+			}
+		}
 
 		// Get plugin info
 		const pkgJson = await readPluginPackageJson(result.plugin, isGlobal);

@@ -47,13 +47,15 @@ export async function listPlugins(options: ListOptions = {}): Promise<void> {
 		const specifier = pluginsJson.plugins[name];
 		const isLocal = specifier.startsWith("file:");
 		const disabled = pluginsJson.disabled?.includes(name);
+		const isMissing = !pkgJson;
 
-		const version = pkgJson?.version ? chalk.dim(` v${pkgJson.version}`) : "";
+		const version = pkgJson?.version ? chalk.dim(` v${pkgJson.version}`) : chalk.dim(` (${specifier})`);
 		const localBadge = isLocal ? chalk.cyan(" (local)") : "";
 		const disabledBadge = disabled ? chalk.yellow(" (disabled)") : "";
-		const icon = disabled ? chalk.gray("○") : chalk.green("◆");
+		const missingBadge = isMissing ? chalk.red(" (missing)") : "";
+		const icon = disabled ? chalk.gray("○") : isMissing ? chalk.red("✗") : chalk.green("◆");
 
-		console.log(`${icon} ${chalk.bold(name)}${version}${localBadge}${disabledBadge}`);
+		console.log(`${icon} ${chalk.bold(name)}${version}${localBadge}${disabledBadge}${missingBadge}`);
 
 		if (pkgJson?.description) {
 			console.log(chalk.dim(`    ${pkgJson.description}`));

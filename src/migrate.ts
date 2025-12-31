@@ -8,8 +8,10 @@ import {
 	loadLegacyManifest,
 	type PluginPackageJson,
 	type PluginsJson,
+	readPluginPackageJson,
 	savePluginsJson,
 } from "@omp/manifest";
+import { createPluginSymlinks } from "@omp/symlinks";
 import { LEGACY_MANIFEST_PATH, NODE_MODULES_DIR, PLUGINS_DIR } from "@omp/paths";
 import chalk from "chalk";
 
@@ -103,6 +105,15 @@ export async function migrateToNpm(): Promise<boolean> {
 
 		// Archive legacy manifest
 		await archiveLegacyManifest();
+
+		// Re-create symlinks for migrated plugins
+		console.log(chalk.dim("  Creating symlinks..."));
+		for (const [name] of Object.entries(newPluginsJson.plugins)) {
+			const pkgJson = await readPluginPackageJson(name, true); // global mode
+			if (pkgJson?.omp?.install?.length) {
+				await createPluginSymlinks(name, pkgJson, true);
+			}
+		}
 
 		console.log();
 		console.log(chalk.green(`✓ Migrated ${migrated.length} plugin(s)`));

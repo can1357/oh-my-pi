@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, symlink } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { loadPluginsJson, type PluginPackageJson, savePluginsJson } from "@omp/manifest";
 import { NODE_MODULES_DIR, PROJECT_NODE_MODULES, resolveScope } from "@omp/paths";
@@ -10,6 +10,7 @@ export interface LinkOptions {
 	name?: string;
 	global?: boolean;
 	local?: boolean;
+	force?: boolean;
 }
 
 /**
@@ -52,13 +53,22 @@ export async function linkPlugin(localPath: string, options: LinkOptions = {}): 
 				install: ompJson.install,
 			},
 		};
+
+		// Persist the conversion to package.json
+		console.log(chalk.dim("  Converting omp.json to package.json..."));
+		await writeFile(localPkgJsonPath, JSON.stringify(pkgJson, null, 2));
 	} else {
+		// Create minimal package.json so npm operations work correctly
 		pkgJson = {
 			name: options.name || basename(localPath),
 			version: "0.0.0-dev",
 			keywords: ["omp-plugin"],
+			omp: {
+				install: [],
+			},
 		};
-		console.log(chalk.yellow("  Warning: No package.json or omp.json found"));
+		console.log(chalk.yellow("  No package.json found, creating minimal one..."));
+		await writeFile(localPkgJsonPath, JSON.stringify(pkgJson, null, 2));
 	}
 
 	const pluginName = options.name || pkgJson.name;
@@ -67,10 +77,24 @@ export async function linkPlugin(localPath: string, options: LinkOptions = {}): 
 	// Check if already installed
 	const pluginsJson = await loadPluginsJson(isGlobal);
 	if (pluginsJson.plugins[pluginName]) {
-		console.log(chalk.yellow(`Plugin "${pluginName}" is already installed.`));
-		console.log(chalk.dim("Use omp uninstall first, or specify a different name with -n"));
-		process.exitCode = 1;
-		return;
+		const existingSpec = pluginsJson.plugins[pluginName];
+		const isLinked = existingSpec.startsWith("file:");
+
+		if (isLinked) {
+			console.log(chalk.yellow(`Plugin "${pluginName}" is already linked.`));
+			console.log(chalk.dim(`  Current link: ${existingSpec}`));
+			console.log(chalk.dim("  Re-linking..."));
+			// Continue with the linking process (will overwrite)
+		} else if (options.force) {
+			console.log(chalk.yellow(`Plugin "${pluginName}" is installed from npm. Overwriting with link...`));
+			// Continue with the linking process (will overwrite)
+		} else {
+			console.log(chalk.yellow(`Plugin "${pluginName}" is already installed from npm.`));
+			console.log(chalk.dim("Use omp uninstall first, or specify a different name with -n"));
+			console.log(chalk.dim("Or use --force to overwrite the npm installation"));
+			process.exitCode = 1;
+			return;
+		}
 	}
 
 	try {

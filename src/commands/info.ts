@@ -60,6 +60,14 @@ export async function showInfo(packageName: string, options: InfoOptions = {}): 
 			console.log(chalk.dim("keywords: ") + info.keywords.join(", "));
 		}
 
+		// Dependencies
+		if (info.dependencies && Object.keys(info.dependencies).length > 0) {
+			console.log(chalk.dim("\ndependencies:"));
+			for (const [depName, depVersion] of Object.entries(info.dependencies)) {
+				console.log(chalk.dim(`  ${depName}: ${depVersion}`));
+			}
+		}
+
 		// Is it an omp plugin?
 		const isOmpPlugin = info.keywords?.includes("omp-plugin");
 		if (isOmpPlugin) {
@@ -69,11 +77,31 @@ export async function showInfo(packageName: string, options: InfoOptions = {}): 
 			console.log(chalk.dim("  It may work, but might not have omp.install configuration"));
 		}
 
+		// Show what files will be installed
+		if (info.omp?.install?.length) {
+			console.log(chalk.dim("\nFiles to install:"));
+			for (const entry of info.omp.install) {
+				console.log(chalk.dim(`  ${entry.src} → ${entry.dest}`));
+			}
+		}
+
 		// Versions
-		if (options.versions && info["dist-tags"]) {
-			console.log(chalk.dim("\ndist-tags:"));
-			for (const [tag, version] of Object.entries(info["dist-tags"])) {
-				console.log(chalk.dim(`  ${tag}: `) + version);
+		if (options.versions) {
+			if (info["dist-tags"]) {
+				console.log(chalk.dim("\ndist-tags:"));
+				for (const [tag, version] of Object.entries(info["dist-tags"])) {
+					console.log(chalk.dim(`  ${tag}: `) + version);
+				}
+			}
+
+			if (info.versions?.length) {
+				console.log(chalk.dim("\nall versions:"));
+				// Show recent versions (last 10)
+				const versionsToShow = info.versions.slice(-10);
+				console.log(chalk.dim(`  ${versionsToShow.join(", ")}`));
+				if (info.versions.length > 10) {
+					console.log(chalk.dim(`  ... and ${info.versions.length - 10} more`));
+				}
 			}
 		}
 

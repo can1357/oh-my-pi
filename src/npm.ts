@@ -89,14 +89,10 @@ export async function npmInfo(packageName: string): Promise<NpmPackageInfo | nul
  * Search npm for packages with a keyword
  */
 export async function npmSearch(query: string, keyword = "omp-plugin"): Promise<NpmSearchResult[]> {
-	try {
-		// Search for packages with the omp-plugin keyword
-		const searchTerm = keyword ? `keywords:${keyword} ${query}` : query;
-		const output = npmExec(["search", searchTerm, "--json"]);
-		return JSON.parse(output);
-	} catch {
-		return [];
-	}
+	// Search for packages with the omp-plugin keyword
+	const searchTerm = keyword ? `keywords:${keyword} ${query}` : query;
+	const output = npmExec(["search", searchTerm, "--json"]);
+	return JSON.parse(output);
 }
 
 /**

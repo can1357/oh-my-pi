@@ -93,6 +93,7 @@ so changes are reflected immediately without reinstalling.
 	.option("-n, --name <name>", "Custom name for the plugin")
 	.option("-g, --global", "Link globally")
 	.option("-l, --local", "Link to project-local .pi/")
+	.option("--force", "Overwrite existing npm-installed plugin")
 	.action(linkPlugin);
 
 // ============================================================================
