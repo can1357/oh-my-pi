@@ -187,9 +187,7 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 				try {
 					await createPluginSymlinks(pluginName, pkgJson, isGlobal);
 				} catch (restoreErr) {
-					log(
-						chalk.red(`  Failed to restore symlinks for ${pluginName}: ${(restoreErr as Error).message}`),
-					);
+					log(chalk.red(`  Failed to restore symlinks for ${pluginName}: ${(restoreErr as Error).message}`));
 				}
 			}
 		}

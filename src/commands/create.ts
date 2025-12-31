@@ -11,22 +11,54 @@ export interface CreateOptions {
 const VALID_NPM_CHARS = new Set("abcdefghijklmnopqrstuvwxyz0123456789-_.");
 
 /**
- * Validate that a name conforms to npm naming rules
+ * Parse a scoped package name into its components.
+ * Returns { scope, name } where scope includes the @ prefix, or { scope: null, name } for unscoped.
+ */
+function parseScopedName(fullName: string): { scope: string | null; name: string } {
+	if (fullName.startsWith("@")) {
+		const slashIndex = fullName.indexOf("/");
+		if (slashIndex > 1) {
+			return {
+				scope: fullName.slice(0, slashIndex),
+				name: fullName.slice(slashIndex + 1),
+			};
+		}
+	}
+	return { scope: null, name: fullName };
+}
+
+/**
+ * Validate that a name conforms to npm naming rules.
+ * Supports both scoped (@scope/name) and unscoped names.
  */
 function isValidNpmName(name: string): boolean {
 	if (!name || name.length === 0) return false;
-	if (name.startsWith(".") || name.startsWith("_")) return false;
-	if (name.includes(" ")) return false;
-	for (const char of name) {
+
+	const { scope, name: packageName } = parseScopedName(name);
+
+	// Validate scope if present
+	if (scope !== null) {
+		const scopeName = scope.slice(1); // Remove @
+		if (!scopeName || scopeName.length === 0) return false;
+		for (const char of scopeName) {
+			if (!VALID_NPM_CHARS.has(char)) return false;
+		}
+	}
+
+	// Validate package name
+	if (!packageName || packageName.length === 0) return false;
+	if (packageName.startsWith(".") || packageName.startsWith("_")) return false;
+	if (packageName.includes(" ")) return false;
+	for (const char of packageName) {
 		if (!VALID_NPM_CHARS.has(char)) return false;
 	}
 	return true;
 }
 
 /**
- * Normalize a string to be a valid npm package name
+ * Normalize a string to be a valid npm package name component (not including scope).
  */
-function normalizePluginName(name: string): string {
+function normalizeNameComponent(name: string): string {
 	let normalized = name.toLowerCase().split(" ").join("-");
 
 	// Remove invalid characters (keep alphanumeric, -, _, .)
@@ -43,26 +75,74 @@ function normalizePluginName(name: string): string {
 }
 
 /**
+ * Normalize a plugin name, preserving scope for scoped packages.
+ * Returns the normalized name with omp- prefix applied to the package name portion.
+ */
+function normalizePluginName(name: string): string {
+	const { scope, name: packageName } = parseScopedName(name);
+	const normalizedName = normalizeNameComponent(packageName);
+
+	if (scope !== null) {
+		// For scoped packages, normalize the scope too
+		const normalizedScope = normalizeNameComponent(scope.slice(1));
+		if (!normalizedScope) return normalizedName;
+		return `@${normalizedScope}/${normalizedName}`;
+	}
+
+	return normalizedName;
+}
+
+/**
+ * Apply omp- prefix to a package name, handling scoped packages correctly.
+ * For unscoped: name -> omp-name
+ * For scoped: @scope/name -> @scope/omp-name
+ */
+function applyOmpPrefix(name: string): string {
+	const { scope, name: packageName } = parseScopedName(name);
+
+	// Check if package name already has omp- prefix
+	const prefixedName = packageName.startsWith("omp-") ? packageName : `omp-${packageName}`;
+
+	if (scope !== null) {
+		return `${scope}/${prefixedName}`;
+	}
+	return prefixedName;
+}
+
+/**
+ * Get the directory name for a plugin (strips scope for scoped packages).
+ */
+function getPluginDirectory(pluginName: string): string {
+	const { scope, name: packageName } = parseScopedName(pluginName);
+	if (scope !== null) {
+		// For scoped packages, use scope-name as directory (e.g., @foo/omp-bar -> foo-omp-bar)
+		return `${scope.slice(1)}-${packageName}`;
+	}
+	return packageName;
+}
+
+/**
  * Scaffold a new plugin from template
  */
 export async function createPlugin(name: string, options: CreateOptions = {}): Promise<void> {
-	// Ensure name follows conventions
-	let pluginName = name.startsWith("omp-") ? name : `omp-${name}`;
+	// Apply omp- prefix correctly (handles scoped names)
+	let pluginName = applyOmpPrefix(name);
 
 	// Validate and normalize the plugin name
 	if (!isValidNpmName(pluginName)) {
 		const normalized = normalizePluginName(pluginName);
-		if (!normalized || normalized === "omp-" || normalized === "omp") {
+		const { name: normalizedPackageName } = parseScopedName(normalized);
+		if (!normalizedPackageName || normalizedPackageName === "omp-" || normalizedPackageName === "omp") {
 			console.log(chalk.red(`Error: Invalid plugin name "${name}" cannot be normalized to a valid npm name`));
 			process.exitCode = 1;
 			return;
 		}
 		// Ensure omp- prefix after normalization
-		const finalName = normalized.startsWith("omp-") ? normalized : `omp-${normalized}`;
+		const finalName = applyOmpPrefix(normalized);
 		console.log(chalk.yellow(`Invalid plugin name. Normalized to: ${finalName}`));
 		pluginName = finalName;
 	}
-	const pluginDir = pluginName;
+	const pluginDir = getPluginDirectory(pluginName);
 
 	if (existsSync(pluginDir)) {
 		console.log(chalk.red(`Error: Directory ${pluginDir} already exists`));

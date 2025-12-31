@@ -221,6 +221,50 @@ async function processOmpDependencies(
 	return transitiveDeps;
 }
 
+/**
+ * Collect all transitive dependencies that have omp.install entries from registry metadata.
+ * Used for pre-install conflict detection before npm install runs.
+ * Returns a map of depName -> partial PluginPackageJson (with omp field).
+ */
+async function collectTransitiveOmpDeps(
+	info: {
+		name: string;
+		version: string;
+		dependencies?: Record<string, string>;
+		omp?: { install?: Array<{ src: string; dest: string }> };
+	},
+	seen: Set<string> = new Set(),
+): Promise<Map<string, PluginPackageJson>> {
+	const result = new Map<string, PluginPackageJson>();
+
+	if (!info.dependencies) return result;
+
+	for (const depName of Object.keys(info.dependencies)) {
+		if (seen.has(depName)) continue;
+		seen.add(depName);
+
+		const depInfo = await npmInfo(depName);
+		if (!depInfo) continue;
+
+		// If this dep has omp.install, add it to result
+		if (depInfo.omp?.install?.length) {
+			result.set(depName, {
+				name: depInfo.name,
+				version: depInfo.version,
+				omp: depInfo.omp,
+			} as PluginPackageJson);
+		}
+
+		// Recurse into this dep's dependencies
+		const nestedDeps = await collectTransitiveOmpDeps(depInfo, seen);
+		for (const [name, pkgJson] of nestedDeps) {
+			result.set(name, pkgJson);
+		}
+	}
+
+	return result;
+}
+
 export interface InstallOptions {
 	global?: boolean;
 	local?: boolean;
@@ -374,25 +418,62 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			const skipDestinations = new Set<string>();
 			const preInstallPkgJson = info.omp?.install ? { name: info.name, version: info.version, omp: info.omp } : null;
 
-			if (preInstallPkgJson) {
-				// Check for intra-plugin duplicates first
-				const intraDupes = detectIntraPluginDuplicates(preInstallPkgJson);
-				if (intraDupes.length > 0) {
-					log(chalk.red(`  ✗ Plugin has duplicate destinations:`));
-					for (const dupe of intraDupes) {
-						log(chalk.red(`    ${dupe.dest} ← ${dupe.sources.join(", ")}`));
+			// Collect transitive deps with omp.install for conflict detection
+			const transitiveDeps = await collectTransitiveOmpDeps(info);
+			const hasOmpContent = preInstallPkgJson || transitiveDeps.size > 0;
+
+			if (hasOmpContent) {
+				// Check for intra-plugin duplicates first (in main plugin)
+				if (preInstallPkgJson) {
+					const intraDupes = detectIntraPluginDuplicates(preInstallPkgJson);
+					if (intraDupes.length > 0) {
+						log(chalk.red(`  ✗ Plugin has duplicate destinations:`));
+						for (const dupe of intraDupes) {
+							log(chalk.red(`    ${dupe.dest} ← ${dupe.sources.join(", ")}`));
+						}
+						process.exitCode = 1;
+						results.push({
+							name,
+							version: info.version,
+							success: false,
+							error: "Duplicate destinations in plugin",
+						});
+						continue;
 					}
+				}
+
+				// Check intra-plugin duplicates in transitive deps too
+				let hasTransitiveDupes = false;
+				for (const [depName, depPkgJson] of transitiveDeps) {
+					const intraDupes = detectIntraPluginDuplicates(depPkgJson);
+					if (intraDupes.length > 0) {
+						log(chalk.red(`  ✗ Dependency ${depName} has duplicate destinations:`));
+						for (const dupe of intraDupes) {
+							log(chalk.red(`    ${dupe.dest} ← ${dupe.sources.join(", ")}`));
+						}
+						hasTransitiveDupes = true;
+					}
+				}
+				if (hasTransitiveDupes) {
 					process.exitCode = 1;
 					results.push({
 						name,
 						version: info.version,
 						success: false,
-						error: "Duplicate destinations in plugin",
+						error: "Duplicate destinations in transitive dependency",
 					});
 					continue;
 				}
 
-				const preInstallConflicts = detectConflicts(name, preInstallPkgJson, existingPlugins);
+				// Create a synthetic package.json for conflict checking if main plugin has no omp
+				const pkgJsonForConflicts =
+					preInstallPkgJson ||
+					({
+						name: info.name,
+						version: info.version,
+					} as PluginPackageJson);
+
+				const preInstallConflicts = detectConflicts(name, pkgJsonForConflicts, existingPlugins, transitiveDeps);
 
 				if (preInstallConflicts.length > 0 && !options.force) {
 					// Check for non-interactive terminal (CI environments)
@@ -456,7 +537,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 
 			// 5. Re-check conflicts with full package.json if we didn't check pre-install
 			// This handles edge cases where omp field wasn't in registry metadata
-			if (!preInstallPkgJson) {
+			if (!hasOmpContent) {
 				// Check for intra-plugin duplicates first
 				const intraDupes = detectIntraPluginDuplicates(pkgJson);
 				if (intraDupes.length > 0) {
@@ -478,7 +559,27 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 					continue;
 				}
 
-				const conflicts = detectConflicts(name, pkgJson, existingPlugins);
+				// Read transitive deps from installed packages (more accurate than registry)
+				const installedTransitiveDeps = new Map<string, PluginPackageJson>();
+				if (pkgJson.dependencies) {
+					const seen = new Set<string>([name]);
+					const collectInstalled = async (deps: Record<string, string>) => {
+						for (const depName of Object.keys(deps)) {
+							if (seen.has(depName)) continue;
+							seen.add(depName);
+							const depPkgJson = await readPluginPackageJson(depName, isGlobal);
+							if (depPkgJson?.omp?.install) {
+								installedTransitiveDeps.set(depName, depPkgJson);
+							}
+							if (depPkgJson?.dependencies) {
+								await collectInstalled(depPkgJson.dependencies);
+							}
+						}
+					};
+					await collectInstalled(pkgJson.dependencies);
+				}
+
+				const conflicts = detectConflicts(name, pkgJson, existingPlugins, installedTransitiveDeps);
 
 				if (conflicts.length > 0 && !options.force) {
 					// Check for non-interactive terminal (CI environments)

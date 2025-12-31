@@ -131,10 +131,12 @@ export async function whyFile(filePath: string, options: WhyOptions = {}): Promi
 		} else {
 			// Verify symlink points to correct source
 			const expectedSrc = join(getPluginSourceDir(result.plugin, isGlobal), result.entry.src);
-			if (target !== expectedSrc) {
+			// Resolve the symlink target to an absolute path (readlink returns raw value, often relative)
+			const resolvedTarget = resolve(fullPath, "..", target!);
+			if (resolvedTarget !== expectedSrc) {
 				console.log(chalk.yellow("⚠ Symlink target does not match expected source"));
 				console.log(chalk.dim(`  Expected: ${expectedSrc}`));
-				console.log(chalk.dim(`  Actual: ${target}`));
+				console.log(chalk.dim(`  Actual: ${resolvedTarget}`));
 				console.log(chalk.dim(`  Expected to be installed by: ${result.plugin}`));
 			} else {
 				console.log(chalk.green(`✓ Installed by: ${result.plugin}`));

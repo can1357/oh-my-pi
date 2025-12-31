@@ -407,9 +407,7 @@ export async function readPluginPackageJson(pluginName: string, global = true): 
 		// Only warn for non-ENOENT errors (corrupt JSON, permission issues, etc.)
 		// ENOENT is expected when checking if a plugin is installed
 		if (error.code !== "ENOENT") {
-			console.warn(
-				chalk.yellow(`⚠ Failed to read package.json for '${pluginName}': ${error.message}`),
-			);
+			console.warn(chalk.yellow(`⚠ Failed to read package.json for '${pluginName}': ${error.message}`));
 			if (process.env.DEBUG) {
 				console.warn(chalk.dim((error as Error).stack));
 			}
