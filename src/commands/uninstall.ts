@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { getInstalledPlugins, loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
 import { npmUninstall } from "@omp/npm";
 import { NODE_MODULES_DIR, PLUGINS_DIR, PROJECT_NODE_MODULES, resolveScope } from "@omp/paths";
@@ -60,7 +61,31 @@ export async function uninstallPlugin(name: string, options: UninstallOptions = 
 
 		// 2. Remove symlinks
 		if (pkgJson) {
-			await removePluginSymlinks(name, pkgJson, isGlobal);
+			const result = await removePluginSymlinks(name, pkgJson, isGlobal);
+
+			if (result.skippedNonSymlinks.length > 0) {
+				console.log(chalk.yellow("\nThe following files are not symlinks and were not removed:"));
+				for (const file of result.skippedNonSymlinks) {
+					console.log(chalk.dim(`  - ${file}`));
+				}
+
+				if (process.stdin.isTTY && process.stdout.isTTY) {
+					const rl = createInterface({ input: process.stdin, output: process.stdout });
+					const answer = await new Promise<string>((resolve) => {
+						rl.question(chalk.yellow("Delete these files anyway? [y/N] "), (ans) => {
+							rl.close();
+							resolve(ans);
+						});
+					});
+
+					if (answer.toLowerCase() === "y") {
+						for (const file of result.skippedNonSymlinks) {
+							await rm(file, { force: true, recursive: true });
+							console.log(chalk.dim(`  Deleted: ${file}`));
+						}
+					}
+				}
+			}
 		}
 
 		// 3. npm uninstall

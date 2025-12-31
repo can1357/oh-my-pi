@@ -1,7 +1,7 @@
 import { existsSync, lstatSync } from "node:fs";
 import { mkdir, readlink, rm, symlink } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
 import { platform } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import type { OmpInstallEntry, PluginPackageJson } from "@omp/manifest";
 import { getPluginSourceDir } from "@omp/manifest";
 import { PI_CONFIG_DIR, PROJECT_PI_DIR } from "@omp/paths";
@@ -27,7 +27,7 @@ function isPathWithinBase(basePath: string, targetPath: string): boolean {
 	const normalizedBase = resolve(basePath);
 	const resolvedTarget = resolve(basePath, targetPath);
 	// Must start with base path followed by separator (or be exactly the base)
-	return resolvedTarget === normalizedBase || resolvedTarget.startsWith(normalizedBase + "/");
+	return resolvedTarget === normalizedBase || resolvedTarget.startsWith(`${normalizedBase}/`);
 }
 
 /**
@@ -40,6 +40,12 @@ function getBaseDir(global: boolean): string {
 export interface SymlinkResult {
 	created: string[];
 	errors: string[];
+}
+
+export interface SymlinkRemovalResult {
+	removed: string[];
+	errors: string[];
+	skippedNonSymlinks: string[]; // Files that exist but aren't symlinks
 }
 
 /**
@@ -155,8 +161,8 @@ export async function removePluginSymlinks(
 	pkgJson: PluginPackageJson,
 	global = true,
 	verbose = true,
-): Promise<SymlinkResult> {
-	const result: SymlinkResult = { created: [], errors: [] };
+): Promise<SymlinkRemovalResult> {
+	const result: SymlinkRemovalResult = { removed: [], errors: [], skippedNonSymlinks: [] };
 
 	if (!pkgJson.omp?.install?.length) {
 		return result;
@@ -181,16 +187,15 @@ export async function removePluginSymlinks(
 			if (existsSync(dest)) {
 				const stats = lstatSync(dest);
 				if (!stats.isSymbolicLink()) {
-					const msg = `Skipping ${entry.dest}: not a symlink (may contain user data)`;
-					result.errors.push(msg);
+					result.skippedNonSymlinks.push(dest);
 					if (verbose) {
-						console.log(chalk.yellow(`  ⚠ ${msg}`));
+						console.log(chalk.yellow(`  ⚠ Skipping ${entry.dest}: not a symlink (may contain user data)`));
 					}
 					continue;
 				}
 
 				await rm(dest, { force: true, recursive: true });
-				result.created.push(entry.dest);
+				result.removed.push(entry.dest);
 				if (verbose) {
 					console.log(chalk.dim(`  Removed: ${entry.dest}`));
 				}

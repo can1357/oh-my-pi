@@ -11,8 +11,8 @@ import {
 	readPluginPackageJson,
 	savePluginsJson,
 } from "@omp/manifest";
-import { createPluginSymlinks } from "@omp/symlinks";
 import { LEGACY_MANIFEST_PATH, NODE_MODULES_DIR, PLUGINS_DIR } from "@omp/paths";
+import { createPluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 
 /**

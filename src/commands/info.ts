@@ -4,6 +4,7 @@ import chalk from "chalk";
 export interface InfoOptions {
 	json?: boolean;
 	versions?: boolean;
+	allVersions?: boolean;
 }
 
 /**
@@ -86,7 +87,7 @@ export async function showInfo(packageName: string, options: InfoOptions = {}): 
 		}
 
 		// Versions
-		if (options.versions) {
+		if (options.versions || options.allVersions) {
 			if (info["dist-tags"]) {
 				console.log(chalk.dim("\ndist-tags:"));
 				for (const [tag, version] of Object.entries(info["dist-tags"])) {
@@ -96,11 +97,16 @@ export async function showInfo(packageName: string, options: InfoOptions = {}): 
 
 			if (info.versions?.length) {
 				console.log(chalk.dim("\nall versions:"));
-				// Show recent versions (last 10)
-				const versionsToShow = info.versions.slice(-10);
-				console.log(chalk.dim(`  ${versionsToShow.join(", ")}`));
-				if (info.versions.length > 10) {
-					console.log(chalk.dim(`  ... and ${info.versions.length - 10} more`));
+				if (options.allVersions) {
+					// Show all versions
+					console.log(chalk.dim(`  ${info.versions.join(", ")}`));
+				} else {
+					// Show last 10
+					const versionsToShow = info.versions.slice(-10);
+					console.log(chalk.dim(`  ${versionsToShow.join(", ")}`));
+					if (info.versions.length > 10) {
+						console.log(chalk.dim(`  ... and ${info.versions.length - 10} more (use --all-versions to see all)`));
+					}
 				}
 			}
 		}

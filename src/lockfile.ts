@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import chalk from "chalk";
 import { GLOBAL_LOCK_FILE, PROJECT_PLUGINS_LOCK } from "@omp/paths";
+import chalk from "chalk";
 
 /**
  * Lock file schema version

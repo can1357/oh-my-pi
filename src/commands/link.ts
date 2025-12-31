@@ -1,10 +1,26 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { loadPluginsJson, type PluginPackageJson, savePluginsJson } from "@omp/manifest";
 import { NODE_MODULES_DIR, PROJECT_NODE_MODULES, resolveScope } from "@omp/paths";
 import { createPluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
+
+async function confirmCreate(path: string): Promise<boolean> {
+	if (!process.stdin.isTTY || !process.stdout.isTTY) {
+		console.log(chalk.dim("  Non-interactive mode: auto-creating package.json"));
+		return true;
+	}
+
+	const rl = createInterface({ input: process.stdin, output: process.stdout });
+	return new Promise((resolve) => {
+		rl.question(chalk.yellow(`  Create minimal package.json at ${path}? [Y/n] `), (answer) => {
+			rl.close();
+			resolve(answer.toLowerCase() !== "n");
+		});
+	});
+}
 
 export interface LinkOptions {
 	name?: string;
@@ -59,6 +75,13 @@ export async function linkPlugin(localPath: string, options: LinkOptions = {}): 
 		await writeFile(localPkgJsonPath, JSON.stringify(pkgJson, null, 2));
 	} else {
 		// Create minimal package.json so npm operations work correctly
+		console.log(chalk.yellow("  No package.json found in target directory."));
+		const shouldCreate = await confirmCreate(localPkgJsonPath);
+		if (!shouldCreate) {
+			console.log(chalk.yellow("  Aborted: package.json required for linking"));
+			process.exitCode = 1;
+			return;
+		}
 		pkgJson = {
 			name: options.name || basename(localPath),
 			version: "0.0.0-dev",
@@ -67,7 +90,7 @@ export async function linkPlugin(localPath: string, options: LinkOptions = {}): 
 				install: [],
 			},
 		};
-		console.log(chalk.yellow("  No package.json found, creating minimal one..."));
+		console.log(chalk.dim("  Creating minimal package.json..."));
 		await writeFile(localPkgJsonPath, JSON.stringify(pkgJson, null, 2));
 	}
 

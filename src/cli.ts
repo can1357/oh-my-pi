@@ -26,7 +26,7 @@ if (!npmCheck.available) {
 	process.exit(1);
 }
 
-program.name("omp").description("Oh My Pi - Plugin manager for pi configuration").version("0.1.0");
+program.name("omp").description("Oh My Pi - Plugin manager for pi configuration").version("0.2.0");
 
 // Check for migration on startup (only for commands that need it)
 program.hook("preAction", async (thisCommand) => {
@@ -121,13 +121,16 @@ program
 	.description("Search npm for omp-plugin keyword")
 	.option("--json", "Output as JSON")
 	.option("--limit <n>", "Maximum results to show", "20")
-	.action(withErrorHandling((query, options) => searchPlugins(query, { ...options, limit: parseInt(options.limit, 10) })));
+	.action(
+		withErrorHandling((query, options) => searchPlugins(query, { ...options, limit: parseInt(options.limit, 10) })),
+	);
 
 program
 	.command("info <package>")
 	.description("Show plugin details before install")
 	.option("--json", "Output as JSON")
 	.option("--versions", "Show available versions")
+	.option("--all-versions", "Show all published versions")
 	.action(withErrorHandling(showInfo));
 
 program

@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/cli",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Plugin manager for pi - install and manage pi config plugins from git repos",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -11,7 +11,8 @@
 	"scripts": {
 		"build": "bun build src/cli.ts --outdir dist --target bun && tsc --emitDeclarationOnly",
 		"dev": "bun --watch src/cli.ts",
-		"check": "biome check --write . && tsc --noEmit",
+		"lint": "biome check --write .",
+		"check": "bun run lint && tsc --noEmit",
 		"clean": "rm -rf dist",
 		"publish:all": "./scripts/publish.sh",
 		"publish:dry": "./scripts/publish.sh --dry-run",

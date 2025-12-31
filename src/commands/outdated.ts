@@ -22,9 +22,12 @@ export async function showOutdated(options: OutdatedOptions = {}): Promise<void>
 		const outdated = await npmOutdated(prefix);
 		const pluginsJson = await loadPluginsJson(isGlobal);
 
-		// Filter to only show plugins we manage
+		// Filter to only show plugins we manage AND are not local
 		const managedOutdated = Object.entries(outdated).filter(([name]) => {
-			return pluginsJson.plugins[name] !== undefined;
+			const specifier = pluginsJson.plugins[name];
+			if (!specifier) return false; // Not in our manifest
+			if (specifier.startsWith("file:")) return false; // Local plugin, skip
+			return true;
 		});
 
 		if (managedOutdated.length === 0) {
@@ -65,6 +68,12 @@ export async function showOutdated(options: OutdatedOptions = {}): Promise<void>
 					`${wantedColor(wanted.padEnd(15))}` +
 					`${latestColor(latest)}`,
 			);
+		}
+
+		// Note about local plugins excluded from check
+		const localPlugins = Object.entries(pluginsJson.plugins).filter(([_, spec]) => spec.startsWith("file:"));
+		if (localPlugins.length > 0) {
+			console.log(chalk.dim(`\nNote: ${localPlugins.length} local plugin(s) excluded from check`));
 		}
 
 		console.log();

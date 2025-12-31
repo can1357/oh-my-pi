@@ -6,6 +6,7 @@ import {
 	LEGACY_MANIFEST_PATH,
 	NODE_MODULES_DIR,
 	PLUGINS_DIR,
+	PROJECT_PACKAGE_JSON,
 	PROJECT_PLUGINS_JSON,
 } from "@omp/paths";
 
@@ -101,6 +102,42 @@ export async function initGlobalPlugins(): Promise<void> {
 }
 
 /**
+ * Initialize the project-local .pi directory with plugins.json and package.json
+ */
+export async function initProjectPlugins(): Promise<void> {
+	const PROJECT_PI_DIR = dirname(PROJECT_PLUGINS_JSON);
+	try {
+		await mkdir(PROJECT_PI_DIR, { recursive: true });
+
+		// Create plugins.json if it doesn't exist
+		if (!existsSync(PROJECT_PLUGINS_JSON)) {
+			const pluginsJson = {
+				plugins: {},
+			};
+			await writeFile(PROJECT_PLUGINS_JSON, JSON.stringify(pluginsJson, null, 2));
+		}
+
+		// Create package.json if it doesn't exist (for npm operations)
+		if (!existsSync(PROJECT_PACKAGE_JSON)) {
+			const packageJson = {
+				name: "pi-project-plugins",
+				version: "1.0.0",
+				private: true,
+				description: "Project-local pi plugins managed by omp",
+				dependencies: {},
+			};
+			await writeFile(PROJECT_PACKAGE_JSON, JSON.stringify(packageJson, null, 2));
+		}
+	} catch (err) {
+		const error = err as NodeJS.ErrnoException;
+		if (error.code === "EACCES" || error.code === "EPERM") {
+			throw new Error(formatPermissionError(error, PROJECT_PI_DIR));
+		}
+		throw err;
+	}
+}
+
+/**
  * Load plugins.json (global or project)
  */
 export async function loadPluginsJson(global = true): Promise<PluginsJson> {
@@ -131,6 +168,32 @@ export async function loadPluginsJson(global = true): Promise<PluginsJson> {
 		}
 		throw err;
 	}
+}
+
+/**
+ * Sync .pi/package.json with plugins.json for npm operations in project-local mode
+ */
+async function syncProjectPackageJson(data: PluginsJson): Promise<void> {
+	let existing: Record<string, unknown> = {};
+	try {
+		existing = JSON.parse(await readFile(PROJECT_PACKAGE_JSON, "utf-8"));
+	} catch {
+		existing = {
+			name: "pi-project-plugins",
+			version: "1.0.0",
+			private: true,
+			description: "Project-local pi plugins managed by omp",
+		};
+	}
+
+	existing.dependencies = data.plugins;
+	if (data.devDependencies && Object.keys(data.devDependencies).length > 0) {
+		existing.devDependencies = data.devDependencies;
+	} else {
+		delete existing.devDependencies;
+	}
+
+	await writeFile(PROJECT_PACKAGE_JSON, JSON.stringify(existing, null, 2));
 }
 
 /**
@@ -177,6 +240,9 @@ export async function savePluginsJson(data: PluginsJson, global = true): Promise
 				output.disabled = data.disabled;
 			}
 			await writeFile(path, JSON.stringify(output, null, 2));
+
+			// Sync .pi/package.json for npm operations
+			await syncProjectPackageJson(data);
 		}
 	} catch (err) {
 		const error = err as NodeJS.ErrnoException;

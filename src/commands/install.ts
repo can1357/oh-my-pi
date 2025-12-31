@@ -1,12 +1,14 @@
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { type Conflict, detectConflicts, detectIntraPluginDuplicates, formatConflicts } from "@omp/conflicts";
+import { updateLockFile } from "@omp/lockfile";
 import {
 	getInstalledPlugins,
 	initGlobalPlugins,
+	initProjectPlugins,
 	loadPluginsJson,
 	type PluginPackageJson,
 	readPluginPackageJson,
@@ -19,22 +21,16 @@ import {
 	PLUGINS_DIR,
 	PROJECT_NODE_MODULES,
 	PROJECT_PI_DIR,
-	PROJECT_PLUGINS_JSON,
 	resolveScope,
 } from "@omp/paths";
 import { createPluginSymlinks } from "@omp/symlinks";
-import { getLockedVersion, updateLockFile } from "@omp/lockfile";
 import chalk from "chalk";
 
 /**
  * Process omp dependencies recursively with cycle detection.
  * Creates symlinks for dependencies that have omp.install entries.
  */
-async function processOmpDependencies(
-	pkgJson: PluginPackageJson,
-	isGlobal: boolean,
-	seen: Set<string>,
-): Promise<void> {
+async function processOmpDependencies(pkgJson: PluginPackageJson, isGlobal: boolean, seen: Set<string>): Promise<void> {
 	if (!pkgJson.dependencies) return;
 
 	for (const depName of Object.keys(pkgJson.dependencies)) {
@@ -139,12 +135,8 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 	if (isGlobal) {
 		await initGlobalPlugins();
 	} else {
-		// Ensure project .pi directory exists
-		await mkdir(prefix, { recursive: true });
-		// Initialize plugins.json if it doesn't exist
-		if (!existsSync(PROJECT_PLUGINS_JSON)) {
-			await savePluginsJson({ plugins: {} }, false);
-		}
+		// Initialize project .pi directory with both plugins.json and package.json
+		await initProjectPlugins();
 	}
 
 	// If no packages specified, install from plugins.json
@@ -211,9 +203,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 
 			// 2. Check for conflicts BEFORE npm install using registry metadata
 			const skipDestinations = new Set<string>();
-			const preInstallPkgJson = info.omp?.install
-				? { name: info.name, version: info.version, omp: info.omp }
-				: null;
+			const preInstallPkgJson = info.omp?.install ? { name: info.name, version: info.version, omp: info.omp } : null;
 
 			if (preInstallPkgJson) {
 				// Check for intra-plugin duplicates first
@@ -238,7 +228,12 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 							console.log(chalk.yellow(`  ⚠ ${formatConflicts([conflict])[0]}`));
 						}
 						process.exitCode = 1;
-						results.push({ name, version: info.version, success: false, error: "Conflicts in non-interactive mode" });
+						results.push({
+							name,
+							version: info.version,
+							success: false,
+							error: "Conflicts in non-interactive mode",
+						});
 						continue;
 					}
 
@@ -309,7 +304,12 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 						// Rollback: uninstall the package
 						execFileSync("npm", ["uninstall", "--prefix", prefix, name], { stdio: "pipe" });
 						process.exitCode = 1;
-						results.push({ name, version: info.version, success: false, error: "Conflicts in non-interactive mode" });
+						results.push({
+							name,
+							version: info.version,
+							success: false,
+							error: "Conflicts in non-interactive mode",
+						});
 						continue;
 					}
 
@@ -488,7 +488,12 @@ async function installLocalPlugin(
 				console.log(chalk.red(`  ${dupe.dest} ← ${dupe.sources.join(", ")}`));
 			}
 			process.exitCode = 1;
-			return { name: pluginName, version: pkgJson.version, success: false, error: "Duplicate destinations in plugin" };
+			return {
+				name: pluginName,
+				version: pkgJson.version,
+				success: false,
+				error: "Duplicate destinations in plugin",
+			};
 		}
 
 		console.log(chalk.blue(`\nInstalling ${pluginName} from ${localPath}...`));

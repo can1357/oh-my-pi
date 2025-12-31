@@ -8,6 +8,8 @@ export interface CreateOptions {
 	author?: string;
 }
 
+const VALID_NPM_CHARS = new Set("abcdefghijklmnopqrstuvwxyz0123456789-_.");
+
 /**
  * Validate that a name conforms to npm naming rules
  */
@@ -15,7 +17,9 @@ function isValidNpmName(name: string): boolean {
 	if (!name || name.length === 0) return false;
 	if (name.startsWith(".") || name.startsWith("_")) return false;
 	if (name.includes(" ")) return false;
-	if (!/^[a-z0-9][a-z0-9\-_\.]*$/.test(name)) return false;
+	for (const char of name) {
+		if (!VALID_NPM_CHARS.has(char)) return false;
+	}
 	return true;
 }
 
@@ -23,12 +27,18 @@ function isValidNpmName(name: string): boolean {
  * Normalize a string to be a valid npm package name
  */
 function normalizePluginName(name: string): string {
-	// Convert to lowercase, replace spaces with hyphens
-	let normalized = name.toLowerCase().replace(/\s+/g, "-");
+	let normalized = name.toLowerCase().split(" ").join("-");
+
 	// Remove invalid characters (keep alphanumeric, -, _, .)
-	normalized = normalized.replace(/[^a-z0-9\-_\.]/g, "");
+	normalized = Array.from(normalized)
+		.filter((char) => VALID_NPM_CHARS.has(char))
+		.join("");
+
 	// Can't start with . or _ or -
-	normalized = normalized.replace(/^[\.\-_]+/, "");
+	while (normalized.startsWith(".") || normalized.startsWith("_") || normalized.startsWith("-")) {
+		normalized = normalized.slice(1);
+	}
+
 	return normalized;
 }
 

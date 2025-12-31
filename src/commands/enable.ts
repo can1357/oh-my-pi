@@ -1,6 +1,6 @@
 import { loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
 import { resolveScope } from "@omp/paths";
-import { createPluginSymlinks, removePluginSymlinks } from "@omp/symlinks";
+import { checkPluginSymlinks, createPluginSymlinks, removePluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 
 export interface EnableDisableOptions {
@@ -40,9 +40,16 @@ export async function enablePlugin(name: string, options: EnableDisableOptions =
 			return;
 		}
 
-		// Re-create symlinks
-		console.log(chalk.blue(`Enabling ${name}...`));
-		await createPluginSymlinks(name, pkgJson, isGlobal);
+		// Check if symlinks are already in place
+		const symlinkStatus = await checkPluginSymlinks(name, pkgJson, isGlobal);
+
+		if (symlinkStatus.valid.length > 0 && symlinkStatus.broken.length === 0 && symlinkStatus.missing.length === 0) {
+			console.log(chalk.yellow(`Plugin "${name}" symlinks are already in place.`));
+		} else {
+			// Re-create symlinks
+			console.log(chalk.blue(`Enabling ${name}...`));
+			await createPluginSymlinks(name, pkgJson, isGlobal);
+		}
 
 		// Remove from disabled list
 		pluginsJson.disabled = pluginsJson.disabled.filter((n) => n !== name);

@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 // Global pi configuration directory
 export const PI_CONFIG_DIR = join(homedir(), ".pi");
@@ -26,6 +26,9 @@ export const PROJECT_PI_DIR = ".pi";
 // Project-local plugins.json
 export const PROJECT_PLUGINS_JSON = join(PROJECT_PI_DIR, "plugins.json");
 
+// Project-local package.json (for npm operations)
+export const PROJECT_PACKAGE_JSON = join(PROJECT_PI_DIR, "package.json");
+
 // Project-local lock file
 export const PROJECT_PLUGINS_LOCK = join(PROJECT_PI_DIR, "plugins-lock.json");
 
@@ -33,13 +36,45 @@ export const PROJECT_PLUGINS_LOCK = join(PROJECT_PI_DIR, "plugins-lock.json");
 export const PROJECT_NODE_MODULES = join(PROJECT_PI_DIR, "node_modules");
 
 /**
- * Get the agent directory (where symlinks are installed)
+ * Find the project root by walking up parent directories looking for .pi/plugins.json.
+ * Similar to how git finds .git directories.
+ *
+ * @returns The absolute path to the project root, or null if not found
  */
-export function getAgentDir(global = true): string {
-	if (global) {
-		return join(PI_CONFIG_DIR, "agent");
+export function findProjectRoot(): string | null {
+	let dir = process.cwd();
+	const root = resolve("/");
+
+	while (dir !== root) {
+		if (existsSync(join(dir, ".pi", "plugins.json"))) {
+			return dir;
+		}
+		const parent = dirname(dir);
+		if (parent === dir) break; // Reached filesystem root
+		dir = parent;
 	}
-	return join(PROJECT_PI_DIR, "agent");
+
+	return null;
+}
+
+/**
+ * Check if a project-local .pi/plugins.json exists in the current directory or any parent
+ */
+export function hasProjectPlugins(): boolean {
+	return findProjectRoot() !== null;
+}
+
+/**
+ * Get the project .pi directory path.
+ * Uses findProjectRoot() to locate the project, or falls back to cwd.
+ */
+export function getProjectPiDir(): string {
+	const projectRoot = findProjectRoot();
+	if (projectRoot) {
+		return join(projectRoot, ".pi");
+	}
+	// Fallback to cwd (e.g., for init command)
+	return resolve(PROJECT_PI_DIR);
 }
 
 /**
@@ -49,7 +84,7 @@ export function getPluginsDir(global = true): string {
 	if (global) {
 		return PLUGINS_DIR;
 	}
-	return PROJECT_PI_DIR;
+	return getProjectPiDir();
 }
 
 /**
@@ -59,7 +94,7 @@ export function getNodeModulesDir(global = true): string {
 	if (global) {
 		return NODE_MODULES_DIR;
 	}
-	return PROJECT_NODE_MODULES;
+	return join(getProjectPiDir(), "node_modules");
 }
 
 /**
@@ -69,14 +104,17 @@ export function getPackageJsonPath(global = true): string {
 	if (global) {
 		return GLOBAL_PACKAGE_JSON;
 	}
-	return PROJECT_PLUGINS_JSON;
+	return join(getProjectPiDir(), "plugins.json");
 }
 
 /**
- * Check if a project-local .pi/plugins.json exists in the current working directory
+ * Get the agent directory (where symlinks are installed)
  */
-export function hasProjectPlugins(): boolean {
-	return existsSync(PROJECT_PLUGINS_JSON);
+export function getAgentDir(global = true): string {
+	if (global) {
+		return join(PI_CONFIG_DIR, "agent");
+	}
+	return join(getProjectPiDir(), "agent");
 }
 
 /**

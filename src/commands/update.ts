@@ -1,8 +1,15 @@
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { type OmpInstallEntry, type PluginPackageJson, loadPluginsJson, readPluginPackageJson } from "@omp/manifest";
+import { loadPluginsJson, type OmpInstallEntry, type PluginPackageJson, readPluginPackageJson } from "@omp/manifest";
 import { npmUpdate } from "@omp/npm";
-import { NODE_MODULES_DIR, PI_CONFIG_DIR, PLUGINS_DIR, PROJECT_NODE_MODULES, PROJECT_PI_DIR, resolveScope } from "@omp/paths";
+import {
+	NODE_MODULES_DIR,
+	PI_CONFIG_DIR,
+	PLUGINS_DIR,
+	PROJECT_NODE_MODULES,
+	PROJECT_PI_DIR,
+	resolveScope,
+} from "@omp/paths";
 import { createPluginSymlinks, removePluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 
@@ -151,7 +158,9 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 				try {
 					await createPluginSymlinks(pluginName, pkgJson, isGlobal);
 				} catch (restoreErr) {
-					console.log(chalk.red(`  Failed to restore symlinks for ${pluginName}: ${(restoreErr as Error).message}`));
+					console.log(
+						chalk.red(`  Failed to restore symlinks for ${pluginName}: ${(restoreErr as Error).message}`),
+					);
 				}
 			}
 		}
