@@ -20,6 +20,10 @@
 	"keywords": ["pi", "plugin", "manager", "cli"],
 	"author": "",
 	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/can1357/oh-my-pi.git"
+	},
 	"devDependencies": {
 		"@biomejs/biome": "2.3.5",
 		"@types/node": "^22.10.5",

@@ -1,13 +1,14 @@
 import { existsSync, lstatSync } from "node:fs";
 import { readlink } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { getInstalledPlugins, readPluginPackageJson } from "@omp/manifest";
-import { PI_CONFIG_DIR } from "@omp/paths";
+import { PI_CONFIG_DIR, PROJECT_PI_DIR, resolveScope } from "@omp/paths";
 import { traceInstalledFile } from "@omp/symlinks";
 import chalk from "chalk";
 
 export interface WhyOptions {
 	global?: boolean;
+	local?: boolean;
 	json?: boolean;
 }
 
@@ -15,31 +16,45 @@ export interface WhyOptions {
  * Show which plugin installed a file
  */
 export async function whyFile(filePath: string, options: WhyOptions = {}): Promise<void> {
-	const isGlobal = options.global !== false;
+	const isGlobal = resolveScope(options);
 
-	// Normalize path - make it relative to PI_CONFIG_DIR if it's absolute
+	// Determine the base directory based on scope
+	const baseDir = isGlobal ? PI_CONFIG_DIR : resolve(PROJECT_PI_DIR);
+
+	// Normalize path - make it relative to the appropriate base directory
 	let relativePath = filePath;
-	if (filePath.startsWith(PI_CONFIG_DIR)) {
-		relativePath = relative(PI_CONFIG_DIR, filePath);
-	} else if (filePath.startsWith("~/.pi/")) {
-		relativePath = filePath.slice(6); // Remove ~/.pi/
+	if (isGlobal) {
+		if (filePath.startsWith(PI_CONFIG_DIR)) {
+			relativePath = relative(PI_CONFIG_DIR, filePath);
+		} else if (filePath.startsWith("~/.pi/")) {
+			relativePath = filePath.slice(6); // Remove ~/.pi/
+		}
+	} else {
+		// Project-local mode
+		const resolvedProjectDir = resolve(PROJECT_PI_DIR);
+		if (filePath.startsWith(resolvedProjectDir)) {
+			relativePath = relative(resolvedProjectDir, filePath);
+		} else if (filePath.startsWith(".pi/")) {
+			relativePath = filePath.slice(4); // Remove .pi/
+		}
 	}
 
 	// Check if it's a path in agent/ directory
 	if (!relativePath.startsWith("agent/")) {
 		// Try prepending agent/
 		const withAgent = `agent/${relativePath}`;
-		const fullWithAgent = join(PI_CONFIG_DIR, withAgent);
+		const fullWithAgent = join(baseDir, withAgent);
 		if (existsSync(fullWithAgent)) {
 			relativePath = withAgent;
 		}
 	}
 
-	const fullPath = join(PI_CONFIG_DIR, relativePath);
+	const fullPath = join(baseDir, relativePath);
 
 	// Check if file exists
 	if (!existsSync(fullPath)) {
 		console.log(chalk.yellow(`File not found: ${fullPath}`));
+		process.exitCode = 1;
 		return;
 	}
 
@@ -54,7 +69,7 @@ export async function whyFile(filePath: string, options: WhyOptions = {}): Promi
 
 	// Search through installed plugins
 	const installedPlugins = await getInstalledPlugins(isGlobal);
-	const result = await traceInstalledFile(relativePath, installedPlugins);
+	const result = await traceInstalledFile(relativePath, installedPlugins, isGlobal);
 
 	if (options.json) {
 		console.log(

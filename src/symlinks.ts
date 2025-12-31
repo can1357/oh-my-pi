@@ -1,10 +1,28 @@
 import { existsSync, lstatSync } from "node:fs";
 import { mkdir, readlink, rm, symlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { OmpInstallEntry, PluginPackageJson } from "@omp/manifest";
 import { getPluginSourceDir } from "@omp/manifest";
-import { PI_CONFIG_DIR } from "@omp/paths";
+import { PI_CONFIG_DIR, PROJECT_PI_DIR } from "@omp/paths";
 import chalk from "chalk";
+
+/**
+ * Validates that a target path stays within the base directory.
+ * Prevents path traversal attacks via malicious dest entries like '../../../etc/passwd'.
+ */
+function isPathWithinBase(basePath: string, targetPath: string): boolean {
+	const normalizedBase = resolve(basePath);
+	const resolvedTarget = resolve(basePath, targetPath);
+	// Must start with base path followed by separator (or be exactly the base)
+	return resolvedTarget === normalizedBase || resolvedTarget.startsWith(normalizedBase + "/");
+}
+
+/**
+ * Get the base directory for symlink destinations based on scope
+ */
+function getBaseDir(global: boolean): string {
+	return global ? PI_CONFIG_DIR : PROJECT_PI_DIR;
+}
 
 export interface SymlinkResult {
 	created: string[];
@@ -13,12 +31,14 @@ export interface SymlinkResult {
 
 /**
  * Create symlinks for a plugin's omp.install entries
+ * @param skipDestinations - Set of destination paths to skip (e.g., due to conflict resolution)
  */
 export async function createPluginSymlinks(
 	pluginName: string,
 	pkgJson: PluginPackageJson,
 	global = true,
 	verbose = true,
+	skipDestinations?: Set<string>,
 ): Promise<SymlinkResult> {
 	const result: SymlinkResult = { created: [], errors: [] };
 	const sourceDir = getPluginSourceDir(pluginName, global);
@@ -30,10 +50,30 @@ export async function createPluginSymlinks(
 		return result;
 	}
 
+	const baseDir = getBaseDir(global);
+
 	for (const entry of pkgJson.omp.install) {
+		// Skip destinations that the user chose to keep from existing plugins
+		if (skipDestinations?.has(entry.dest)) {
+			if (verbose) {
+				console.log(chalk.dim(`  Skipped: ${entry.dest} (conflict resolved to existing plugin)`));
+			}
+			continue;
+		}
+
+		// Validate dest path stays within base directory (prevents path traversal attacks)
+		if (!isPathWithinBase(baseDir, entry.dest)) {
+			const msg = `Path traversal blocked: ${entry.dest} escapes base directory`;
+			result.errors.push(msg);
+			if (verbose) {
+				console.log(chalk.red(`  ✗ ${msg}`));
+			}
+			continue;
+		}
+
 		try {
 			const src = join(sourceDir, entry.src);
-			const dest = join(PI_CONFIG_DIR, entry.dest);
+			const dest = join(baseDir, entry.dest);
 
 			// Check if source exists
 			if (!existsSync(src)) {
@@ -77,6 +117,7 @@ export async function createPluginSymlinks(
 export async function removePluginSymlinks(
 	_pluginName: string,
 	pkgJson: PluginPackageJson,
+	global = true,
 	verbose = true,
 ): Promise<SymlinkResult> {
 	const result: SymlinkResult = { created: [], errors: [] };
@@ -85,8 +126,20 @@ export async function removePluginSymlinks(
 		return result;
 	}
 
+	const baseDir = getBaseDir(global);
+
 	for (const entry of pkgJson.omp.install) {
-		const dest = join(PI_CONFIG_DIR, entry.dest);
+		// Validate dest path stays within base directory (prevents path traversal attacks)
+		if (!isPathWithinBase(baseDir, entry.dest)) {
+			const msg = `Path traversal blocked: ${entry.dest} escapes base directory`;
+			result.errors.push(msg);
+			if (verbose) {
+				console.log(chalk.red(`  ✗ ${msg}`));
+			}
+			continue;
+		}
+
+		const dest = join(baseDir, entry.dest);
 
 		try {
 			if (existsSync(dest)) {
@@ -118,14 +171,21 @@ export async function checkPluginSymlinks(
 ): Promise<{ valid: string[]; broken: string[]; missing: string[] }> {
 	const result = { valid: [] as string[], broken: [] as string[], missing: [] as string[] };
 	const sourceDir = getPluginSourceDir(pluginName, global);
+	const baseDir = getBaseDir(global);
 
 	if (!pkgJson.omp?.install?.length) {
 		return result;
 	}
 
 	for (const entry of pkgJson.omp.install) {
+		// Skip entries with path traversal (treat as broken)
+		if (!isPathWithinBase(baseDir, entry.dest)) {
+			result.broken.push(entry.dest);
+			continue;
+		}
+
 		const src = join(sourceDir, entry.src);
-		const dest = join(PI_CONFIG_DIR, entry.dest);
+		const dest = join(baseDir, entry.dest);
 
 		if (!existsSync(dest)) {
 			result.missing.push(entry.dest);
@@ -178,11 +238,13 @@ export async function getPluginForSymlink(
 export async function traceInstalledFile(
 	filePath: string,
 	installedPlugins: Map<string, PluginPackageJson>,
+	global = true,
 ): Promise<{ plugin: string; entry: OmpInstallEntry } | null> {
-	// Normalize the path relative to PI_CONFIG_DIR
+	// Normalize the path relative to the base directory
+	const baseDir = getBaseDir(global);
 	let relativePath = filePath;
-	if (filePath.startsWith(PI_CONFIG_DIR)) {
-		relativePath = filePath.slice(PI_CONFIG_DIR.length + 1);
+	if (filePath.startsWith(baseDir)) {
+		relativePath = filePath.slice(baseDir.length + 1);
 	}
 
 	for (const [name, pkgJson] of installedPlugins) {

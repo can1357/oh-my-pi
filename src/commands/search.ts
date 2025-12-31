@@ -19,6 +19,7 @@ export async function searchPlugins(query: string, options: SearchOptions = {}):
 			console.log(chalk.yellow("\nNo plugins found."));
 			console.log(chalk.dim("Try a different search term, or search without keyword:"));
 			console.log(chalk.dim("  npm search omp-plugin"));
+			process.exitCode = 1;
 			return;
 		}
 
@@ -56,5 +57,6 @@ export async function searchPlugins(query: string, options: SearchOptions = {}):
 		console.log(chalk.dim("Install with: omp install <package-name>"));
 	} catch (err) {
 		console.log(chalk.red(`Error searching: ${(err as Error).message}`));
+		process.exitCode = 1;
 	}
 }

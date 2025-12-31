@@ -1,4 +1,5 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import type { OmpField } from "@omp/manifest";
 
 export interface NpmPackageInfo {
 	name: string;
@@ -10,6 +11,8 @@ export interface NpmPackageInfo {
 	repository?: { type: string; url: string } | string;
 	versions?: string[];
 	"dist-tags"?: Record<string, string>;
+	omp?: OmpField;
+	dependencies?: Record<string, string>;
 }
 
 export interface NpmSearchResult {
@@ -25,8 +28,7 @@ export interface NpmSearchResult {
  * Execute npm command and return output
  */
 export function npmExec(args: string[], cwd?: string): string {
-	const cmd = `npm ${args.join(" ")}`;
-	return execSync(cmd, {
+	return execFileSync("npm", args, {
 		cwd,
 		stdio: ["pipe", "pipe", "pipe"],
 		encoding: "utf-8",
@@ -37,7 +39,10 @@ export function npmExec(args: string[], cwd?: string): string {
  * Execute npm command with prefix (for installing to specific directory)
  */
 export function npmExecWithPrefix(args: string[], prefix: string): string {
-	return npmExec(["--prefix", prefix, ...args]);
+	return execFileSync("npm", ["--prefix", prefix, ...args], {
+		stdio: ["pipe", "pipe", "pipe"],
+		encoding: "utf-8",
+	});
 }
 
 /**

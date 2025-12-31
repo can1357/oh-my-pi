@@ -41,6 +41,7 @@ export interface PluginPackageJson {
  */
 export interface PluginsJson {
 	plugins: Record<string, string>; // name -> version specifier
+	devDependencies?: Record<string, string>; // dev dependencies
 	disabled?: string[]; // disabled plugin names
 }
 
@@ -95,6 +96,7 @@ export async function loadPluginsJson(global = true): Promise<PluginsJson> {
 			// Global uses standard package.json format
 			return {
 				plugins: parsed.dependencies || {},
+				devDependencies: parsed.devDependencies || {},
 				disabled: parsed.omp?.disabled || [],
 			};
 		}
@@ -102,11 +104,12 @@ export async function loadPluginsJson(global = true): Promise<PluginsJson> {
 		// Project uses plugins.json format
 		return {
 			plugins: parsed.plugins || {},
+			devDependencies: parsed.devDependencies || {},
 			disabled: parsed.disabled || [],
 		};
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-			return { plugins: {}, disabled: [] };
+			return { plugins: {}, devDependencies: {}, disabled: [] };
 		}
 		throw err;
 	}
@@ -134,6 +137,11 @@ export async function savePluginsJson(data: PluginsJson, global = true): Promise
 		}
 
 		existing.dependencies = data.plugins;
+		if (data.devDependencies && Object.keys(data.devDependencies).length > 0) {
+			existing.devDependencies = data.devDependencies;
+		} else {
+			delete existing.devDependencies;
+		}
 		if (data.disabled?.length) {
 			existing.omp = { ...((existing.omp as Record<string, unknown>) || {}), disabled: data.disabled };
 		}
@@ -141,7 +149,14 @@ export async function savePluginsJson(data: PluginsJson, global = true): Promise
 		await writeFile(path, JSON.stringify(existing, null, 2));
 	} else {
 		// Project uses simple plugins.json format
-		await writeFile(path, JSON.stringify(data, null, 2));
+		const output: Record<string, unknown> = { plugins: data.plugins };
+		if (data.devDependencies && Object.keys(data.devDependencies).length > 0) {
+			output.devDependencies = data.devDependencies;
+		}
+		if (data.disabled?.length) {
+			output.disabled = data.disabled;
+		}
+		await writeFile(path, JSON.stringify(output, null, 2));
 	}
 }
 

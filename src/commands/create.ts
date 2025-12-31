@@ -18,6 +18,7 @@ export async function createPlugin(name: string, options: CreateOptions = {}): P
 
 	if (existsSync(pluginDir)) {
 		console.log(chalk.red(`Error: Directory ${pluginDir} already exists`));
+		process.exitCode = 1;
 		return;
 	}
 
@@ -149,5 +150,6 @@ Provide instructions for the agent here.
 		console.log(chalk.dim("  5. Publish: npm publish"));
 	} catch (err) {
 		console.log(chalk.red(`Error creating plugin: ${(err as Error).message}`));
+		process.exitCode = 1;
 	}
 }

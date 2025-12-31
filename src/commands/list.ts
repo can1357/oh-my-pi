@@ -1,8 +1,10 @@
 import { loadPluginsJson, readPluginPackageJson } from "@omp/manifest";
+import { resolveScope } from "@omp/paths";
 import chalk from "chalk";
 
 export interface ListOptions {
 	global?: boolean;
+	local?: boolean;
 	json?: boolean;
 }
 
@@ -10,13 +12,14 @@ export interface ListOptions {
  * List all installed plugins
  */
 export async function listPlugins(options: ListOptions = {}): Promise<void> {
-	const isGlobal = options.global !== false;
+	const isGlobal = resolveScope(options);
 	const pluginsJson = await loadPluginsJson(isGlobal);
 	const pluginNames = Object.keys(pluginsJson.plugins);
 
 	if (pluginNames.length === 0) {
 		console.log(chalk.yellow("No plugins installed."));
 		console.log(chalk.dim("Install one with: omp install <package>"));
+		process.exitCode = 1;
 		return;
 	}
 

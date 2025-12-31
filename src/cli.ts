@@ -45,7 +45,8 @@ Examples:
   $ omp install                         # Install all from plugins.json
 `,
 	)
-	.option("-g, --global", "Install globally to ~/.pi (default)")
+	.option("-g, --global", "Install globally to ~/.pi")
+	.option("-l, --local", "Install to project-local .pi/")
 	.option("-S, --save", "Add to plugins.json")
 	.option("-D, --save-dev", "Add as dev dependency")
 	.option("--force", "Overwrite conflicts without prompting")
@@ -56,7 +57,8 @@ program
 	.command("uninstall <name>")
 	.alias("rm")
 	.description("Remove plugin and its symlinks")
-	.option("-g, --global", "Uninstall from ~/.pi (default)")
+	.option("-g, --global", "Uninstall from ~/.pi")
+	.option("-l, --local", "Uninstall from project-local .pi/")
 	.option("--json", "Output as JSON")
 	.action(uninstallPlugin);
 
@@ -64,7 +66,8 @@ program
 	.command("update [name]")
 	.alias("up")
 	.description("Update to latest within semver range")
-	.option("-g, --global", "Update global plugins (default)")
+	.option("-g, --global", "Update global plugins")
+	.option("-l, --local", "Update project-local plugins")
 	.option("--json", "Output as JSON")
 	.action(updatePlugin);
 
@@ -72,7 +75,8 @@ program
 	.command("list")
 	.alias("ls")
 	.description("Show installed plugins")
-	.option("-g, --global", "List global plugins (default)")
+	.option("-g, --global", "List global plugins")
+	.option("-l, --local", "List project-local plugins")
 	.option("--json", "Output as JSON")
 	.action(listPlugins);
 
@@ -87,7 +91,8 @@ so changes are reflected immediately without reinstalling.
 `,
 	)
 	.option("-n, --name <name>", "Custom name for the plugin")
-	.option("-g, --global", "Link globally (default)")
+	.option("-g, --global", "Link globally")
+	.option("-l, --local", "Link to project-local .pi/")
 	.action(linkPlugin);
 
 // ============================================================================
@@ -117,14 +122,16 @@ program
 program
 	.command("outdated")
 	.description("List plugins with newer versions")
-	.option("-g, --global", "Check global plugins (default)")
+	.option("-g, --global", "Check global plugins")
+	.option("-l, --local", "Check project-local plugins")
 	.option("--json", "Output as JSON")
 	.action(showOutdated);
 
 program
 	.command("doctor")
 	.description("Check for broken symlinks, conflicts")
-	.option("-g, --global", "Check global plugins (default)")
+	.option("-g, --global", "Check global plugins")
+	.option("-l, --local", "Check project-local plugins")
 	.option("--fix", "Attempt to fix issues")
 	.option("--json", "Output as JSON")
 	.action(runDoctor);
@@ -139,21 +146,24 @@ program
 program
 	.command("why <file>")
 	.description("Show which plugin installed a file")
-	.option("-g, --global", "Check global plugins (default)")
+	.option("-g, --global", "Check global plugins")
+	.option("-l, --local", "Check project-local plugins")
 	.option("--json", "Output as JSON")
 	.action(whyFile);
 
 program
 	.command("enable <name>")
 	.description("Enable a disabled plugin")
-	.option("-g, --global", "Target global plugins (default)")
+	.option("-g, --global", "Target global plugins")
+	.option("-l, --local", "Target project-local plugins")
 	.option("--json", "Output as JSON")
 	.action(enablePlugin);
 
 program
 	.command("disable <name>")
 	.description("Disable plugin without uninstalling")
-	.option("-g, --global", "Target global plugins (default)")
+	.option("-g, --global", "Target global plugins")
+	.option("-l, --local", "Target project-local plugins")
 	.option("--json", "Output as JSON")
 	.action(disablePlugin);
 

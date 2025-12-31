@@ -1,9 +1,11 @@
 import { loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
+import { resolveScope } from "@omp/paths";
 import { createPluginSymlinks, removePluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 
 export interface EnableDisableOptions {
 	global?: boolean;
+	local?: boolean;
 	json?: boolean;
 }
 
@@ -11,19 +13,21 @@ export interface EnableDisableOptions {
  * Enable a disabled plugin (re-create symlinks)
  */
 export async function enablePlugin(name: string, options: EnableDisableOptions = {}): Promise<void> {
-	const isGlobal = options.global !== false;
+	const isGlobal = resolveScope(options);
 
 	const pluginsJson = await loadPluginsJson(isGlobal);
 
 	// Check if plugin exists
 	if (!pluginsJson.plugins[name]) {
 		console.log(chalk.yellow(`Plugin "${name}" is not installed.`));
+		process.exitCode = 1;
 		return;
 	}
 
 	// Check if already enabled
 	if (!pluginsJson.disabled?.includes(name)) {
 		console.log(chalk.yellow(`Plugin "${name}" is already enabled.`));
+		process.exitCode = 1;
 		return;
 	}
 
@@ -32,6 +36,7 @@ export async function enablePlugin(name: string, options: EnableDisableOptions =
 		const pkgJson = await readPluginPackageJson(name, isGlobal);
 		if (!pkgJson) {
 			console.log(chalk.red(`Could not read package.json for ${name}`));
+			process.exitCode = 1;
 			return;
 		}
 
@@ -50,6 +55,7 @@ export async function enablePlugin(name: string, options: EnableDisableOptions =
 		}
 	} catch (err) {
 		console.log(chalk.red(`Error enabling plugin: ${(err as Error).message}`));
+		process.exitCode = 1;
 	}
 }
 
@@ -57,19 +63,21 @@ export async function enablePlugin(name: string, options: EnableDisableOptions =
  * Disable a plugin (remove symlinks but keep installed)
  */
 export async function disablePlugin(name: string, options: EnableDisableOptions = {}): Promise<void> {
-	const isGlobal = options.global !== false;
+	const isGlobal = resolveScope(options);
 
 	const pluginsJson = await loadPluginsJson(isGlobal);
 
 	// Check if plugin exists
 	if (!pluginsJson.plugins[name]) {
 		console.log(chalk.yellow(`Plugin "${name}" is not installed.`));
+		process.exitCode = 1;
 		return;
 	}
 
 	// Check if already disabled
 	if (pluginsJson.disabled?.includes(name)) {
 		console.log(chalk.yellow(`Plugin "${name}" is already disabled.`));
+		process.exitCode = 1;
 		return;
 	}
 
@@ -78,12 +86,13 @@ export async function disablePlugin(name: string, options: EnableDisableOptions 
 		const pkgJson = await readPluginPackageJson(name, isGlobal);
 		if (!pkgJson) {
 			console.log(chalk.red(`Could not read package.json for ${name}`));
+			process.exitCode = 1;
 			return;
 		}
 
 		// Remove symlinks
 		console.log(chalk.blue(`Disabling ${name}...`));
-		await removePluginSymlinks(name, pkgJson);
+		await removePluginSymlinks(name, pkgJson, isGlobal);
 
 		// Add to disabled list
 		if (!pluginsJson.disabled) {
@@ -101,5 +110,6 @@ export async function disablePlugin(name: string, options: EnableDisableOptions 
 		}
 	} catch (err) {
 		console.log(chalk.red(`Error disabling plugin: ${(err as Error).message}`));
+		process.exitCode = 1;
 	}
 }

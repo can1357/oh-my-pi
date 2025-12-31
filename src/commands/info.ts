@@ -17,6 +17,7 @@ export async function showInfo(packageName: string, options: InfoOptions = {}): 
 
 		if (!info) {
 			console.log(chalk.red(`Package not found: ${packageName}`));
+			process.exitCode = 1;
 			return;
 		}
 
@@ -80,5 +81,6 @@ export async function showInfo(packageName: string, options: InfoOptions = {}): 
 		console.log(chalk.dim(`Install with: omp install ${packageName}`));
 	} catch (err) {
 		console.log(chalk.red(`Error fetching info: ${(err as Error).message}`));
+		process.exitCode = 1;
 	}
 }

@@ -5,6 +5,11 @@
   "keywords": ["omp-plugin", "theme", "metal"],
   "author": "",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/can1357/oh-my-pi.git",
+    "directory": "plugins/metal-theme"
+  },
   "omp": {
     "install": [
       { "src": "themes/metal.json", "dest": "agent/themes/metal.json" }

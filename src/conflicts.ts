@@ -5,6 +5,38 @@ export interface Conflict {
 	plugins: Array<{ name: string; src: string }>;
 }
 
+export interface IntraPluginDuplicate {
+	dest: string;
+	sources: string[];
+}
+
+/**
+ * Detect duplicate destinations within a single plugin's omp.install array
+ */
+export function detectIntraPluginDuplicates(pkgJson: PluginPackageJson): IntraPluginDuplicate[] {
+	const duplicates: IntraPluginDuplicate[] = [];
+
+	if (!pkgJson.omp?.install?.length) {
+		return duplicates;
+	}
+
+	const destMap = new Map<string, string[]>();
+
+	for (const entry of pkgJson.omp.install) {
+		const sources = destMap.get(entry.dest) || [];
+		sources.push(entry.src);
+		destMap.set(entry.dest, sources);
+	}
+
+	for (const [dest, sources] of destMap) {
+		if (sources.length > 1) {
+			duplicates.push({ dest, sources });
+		}
+	}
+
+	return duplicates;
+}
+
 /**
  * Detect conflicts between a new plugin and existing plugins
  */

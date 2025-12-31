@@ -1,10 +1,28 @@
-# Oh My Pi (omp)
+<p align="center">
+  <img src=".github/logo.png?raw=true" alt="Oh My Pi" height="300">
+</p>
 
-Plugin manager for pi configuration. Like oh-my-zsh, but for pi.
+<p align="center">
+  <strong>Plugin manager for <a href="https://github.com/badlogic/pi-mono">pi</a>.</strong>
+</p>
 
-**v1.0 - npm-Native Architecture**
+<p align="center">
+  Like oh-my-zsh, but for your AI coding assistant.
+</p>
 
-Plugins are npm packages with an `omp` field in package.json. Discover plugins via npm, install with semver, and enjoy a familiar package management experience.
+<p align="center">
+  <a href="https://www.npmjs.com/package/@oh-my-pi/cli"><img src="https://img.shields.io/npm/v/@oh-my-pi/cli?style=flat&colorA=18181B&colorB=F0DB4F" alt="npm version"></a>
+  <a href="https://github.com/can1357/oh-my-pi/actions"><img src="https://img.shields.io/github/actions/workflow/status/can1357/oh-my-pi/ci.yml?style=flat&colorA=18181B" alt="CI"></a>
+  <a href="https://github.com/can1357/oh-my-pi/blob/main/LICENSE"><img src="https://img.shields.io/github/license/can1357/oh-my-pi?style=flat&colorA=18181B" alt="License"></a>
+</p>
+
+---
+
+**Oh My Pi won't make Claude write better code...** but it might make _you_ feel like it does.
+
+Install community plugins with a single command. Themes, custom agents, slash commands, tools — all managed through npm, all a `omp install` away.
+
+No more copy-pasting prompt files. No more manually symlinking configs. Just vibes.
 
 ## Installation
 
@@ -15,209 +33,177 @@ npm install -g @oh-my-pi/cli
 ## Quick Start
 
 ```bash
+# Initialize a project-local plugin config (optional)
+omp init
+
 # Search for plugins
 omp search agents
 
 # Install a plugin
 omp install @oh-my-pi/subagents
 
-# List installed plugins
+# See what you've got
 omp list
 
 # Check for updates
 omp outdated
 
-# Update all plugins
+# Update everything
 omp update
 ```
 
-## Commands
+## How It Works
 
-### Core Commands
-
-| Command              | Description                                            |
-|----------------------|--------------------------------------------------------|
-| `omp install [pkg...]` | Install plugin(s). No args = install from plugins.json |
-| `omp uninstall <pkg>`  | Remove plugin and its symlinks                         |
-| `omp update [pkg]`     | Update to latest within semver range                   |
-| `omp list`             | Show installed plugins                                 |
-| `omp link <path>`      | Symlink local plugin (dev mode)                        |
-
-### Discovery & Info
-
-| Command                | Description                                |
-|------------------------|--------------------------------------------|
-| `omp search <query>`   | Search npm for omp-plugin keyword          |
-| `omp info <pkg>`       | Show plugin details before install         |
-| `omp outdated`         | List plugins with newer versions           |
-
-### Maintenance
-
-| Command                  | Description                              |
-|--------------------------|------------------------------------------|
-| `omp init`               | Create .pi/plugins.json in current project |
-| `omp doctor`             | Check for broken symlinks, conflicts     |
-| `omp why <file>`         | Show which plugin installed a file       |
-| `omp enable/disable <pkg>` | Toggle plugin without uninstall        |
-
-### Plugin Development
-
-| Command            | Description                    |
-|--------------------|--------------------------------|
-| `omp create <name>`| Scaffold new plugin from template |
-| `omp link <path>`  | Symlink local plugin for dev   |
-
-### Flags
-
-- `--global / -g`: Install to ~/.pi (default)
-- `--save / -S`: Add to plugins.json
-- `--json`: Machine-readable output
-- `--force`: Overwrite conflicts
-
-## Plugin Format
-
-Plugins are npm packages with an `omp` field in package.json:
-
-```json
-{
-  "name": "@oh-my-pi/subagents",
-  "version": "1.0.0",
-  "description": "Task delegation agents for pi-agent",
-  "keywords": ["omp-plugin", "agents"],
-  "omp": {
-    "install": [
-      { "src": "agents/task.md", "dest": "agent/agents/task.md" },
-      { "src": "tools/task/", "dest": "agent/tools/task/" }
-    ]
-  },
-  "files": ["agents", "tools"]
-}
-```
-
-### Convention
-
-- Include `omp-plugin` keyword for discoverability
-- No namespace required (but `omp-` prefix is recommended)
-- Use semver for versioning
-
-## Directory Structure
-
-### Global (default)
+omp installs plugins via npm and symlinks their files into your pi configuration directory:
 
 ```
 ~/.pi/
-├── plugins/
-│   ├── node_modules/          # npm-managed
-│   │   ├── @oh-my-pi/subagents/
-│   │   └── @oh-my-pi/metal-theme/
-│   ├── package.json           # Global plugin manifest
-│   └── package-lock.json      # Lock file
-├── agent/                     # Symlink targets
-│   ├── agents/
-│   ├── tools/
-│   ├── themes/
-│   └── commands/
+├── agent/              # Where plugin files get symlinked
+│   ├── agents/         # Agent definitions (.md)
+│   ├── commands/       # Slash commands (.md)
+│   ├── tools/          # Custom tools (.ts)
+│   └── themes/         # Theme files (.json)
+└── plugins/            # Plugin storage
+    ├── package.json    # Installed plugins manifest
+    └── node_modules/   # Actual plugin packages
 ```
 
-### Project-Local
+Plugins declare which files to install via the `omp.install` field in their `package.json`. omp creates symlinks from the plugin's files into the appropriate `~/.pi/agent/` subdirectories.
 
-```
-.pi/
-├── plugins.json               # Project plugin config
-├── plugins-lock.json          # Lock file
-└── node_modules/              # Project-scoped installs
-    └── omp-my-plugin/
-```
+## Global vs Local Plugins
 
-Project plugins.json:
-```json
-{
-  "plugins": {
-    "@oh-my-pi/subagents": "^2.0.0",
-    "@oh-my-pi/metal-theme": "^1.0.0"
-  }
-}
-```
+omp supports both global and project-local plugin configurations:
 
-## Install Flow
+| Scope | Config Location | Agent Directory | Use Case |
+|-------|-----------------|-----------------|----------|
+| Global | `~/.pi/plugins/` | `~/.pi/agent/` | Personal defaults |
+| Local | `.pi/` | `.pi/agent/` | Project-specific plugins |
 
 ```bash
+# Explicit scope
+omp install -g @oh-my-pi/subagents   # Global
+omp install -l @oh-my-pi/subagents   # Local
+
+# Auto-detect: uses local if .pi/plugins.json exists, otherwise global
 omp install @oh-my-pi/subagents
 ```
 
-1. Resolve version from npm registry
-2. Check for conflicts (same dest from different plugins)
-3. `npm install --prefix ~/.pi/plugins omp-subagents`
-4. Read package.json → omp.install
-5. For each {src, dest}: symlink to ~/.pi/{dest}
-6. Recursively process dependencies with omp field
-7. Update package.json
+Initialize a project-local config with `omp init`.
 
-### Conflict Detection
+## Commands
 
-```
-⚠ Conflict: omp-dark-theme and omp-nord-theme both install agent/themes/dark.json
-  Choose: [1] dark-theme  [2] nord-theme  [3] abort
-```
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `omp install [pkg...]` | `i` | Install plugin(s). No args = install from plugins.json |
+| `omp uninstall <pkg>` | `rm` | Remove plugin and its symlinks |
+| `omp update [pkg]` | `up` | Update to latest within semver range |
+| `omp list` | `ls` | Show installed plugins |
+| `omp search <query>` | | Search npm for plugins |
+| `omp info <pkg>` | | Show plugin details before install |
+| `omp outdated` | | List plugins with newer versions |
+| `omp doctor` | | Check for broken symlinks, conflicts |
+| `omp link <path>` | | Symlink local plugin (dev mode) |
+| `omp create <name>` | | Scaffold new plugin from template |
+| `omp init` | | Create .pi/plugins.json in current project |
+| `omp why <file>` | | Show which plugin installed a file |
+| `omp enable <name>` | | Enable a disabled plugin |
+| `omp disable <name>` | | Disable plugin without uninstalling |
+| `omp migrate` | | Migrate from legacy manifest.json format |
+
+Most commands accept `-g`/`--global` or `-l`/`--local` flags to override scope auto-detection.
 
 ## Creating Plugins
 
-```bash
-omp create my-plugin
+Plugins are npm packages with an `omp` field in `package.json`:
+
+```json
+{
+  "name": "my-cool-plugin",
+  "version": "1.0.0",
+  "keywords": ["omp-plugin"],
+  "omp": {
+    "install": [
+      { "src": "agents/researcher.md", "dest": "agent/agents/researcher.md" },
+      { "src": "commands/research.md", "dest": "agent/commands/research.md" },
+      { "src": "tools/search/index.ts", "dest": "agent/tools/search/index.ts" },
+      { "src": "themes/dark.json", "dest": "agent/themes/dark.json" }
+    ]
+  },
+  "files": ["agents", "commands", "tools", "themes"]
+}
 ```
 
-Creates:
+### Plugin Structure
+
 ```
-omp-my-plugin/
+my-cool-plugin/
 ├── package.json
-├── README.md
-├── agents/
-│   └── example.md
-├── tools/
-├── themes/
-└── commands/
+├── agents/           # Agent definitions
+│   └── researcher.md
+├── commands/         # Slash commands
+│   └── research.md
+├── tools/            # Custom tools
+│   └── search/
+│       └── index.ts
+└── themes/           # Theme files
+    └── dark.json
 ```
+
+### Install Mappings
+
+The `omp.install` array maps source files to their destination in the agent directory:
+
+- `src`: Path relative to the plugin root
+- `dest`: Path relative to the pi config dir (usually starts with `agent/`)
 
 ### Publishing
 
-1. Create a package with an `omp` field in package.json
-2. Add `omp-plugin` to keywords
+1. Add `omp-plugin` to your `keywords` array (required for `omp search` discovery)
+2. Include source directories in the `files` array
 3. Publish to npm: `npm publish`
-4. Users install with: `omp install your-package-name`
 
-## Migration from v0.x
+Your plugin is now discoverable via `omp search`.
 
-If you have plugins installed with the old manifest.json format:
+### Development Workflow
 
 ```bash
-omp migrate
+# Scaffold a new plugin
+omp create my-plugin
+
+# Link for local development (changes reflect immediately)
+omp link ./my-plugin
+
+# Test your plugin
+omp list
+
+# When ready, publish
+cd my-plugin && npm publish
 ```
 
-This will:
-1. Convert manifest.json → package.json format
-2. Move plugins to node_modules structure
-3. Re-create symlinks
-4. Archive old manifest.json
+## Bundled Plugins
 
-## Bundled Example Plugins
+- **[@oh-my-pi/subagents](https://npmjs.com/package/@oh-my-pi/subagents)**: Task delegation with specialized sub-agents (task, planner, explore, reviewer)
+- **[@oh-my-pi/metal-theme](https://npmjs.com/package/@oh-my-pi/metal-theme)**: A metal theme
 
-This package includes example plugins in the `plugins/` directory:
+## Troubleshooting
 
-- **@oh-my-pi/subagents** - Task delegation system with specialized subagents
-- **@oh-my-pi/metal-theme** - Metal theme for pi
-
-Install bundled plugins:
 ```bash
-# After npm install -g @oh-my-pi/cli
-omp install $(npm root -g)/@oh-my-pi/cli/plugins/subagents
-omp install $(npm root -g)/@oh-my-pi/cli/plugins/metal-theme
+# Check for broken symlinks and conflicts
+omp doctor
+
+# See which plugin installed a specific file
+omp why ~/.pi/agent/agents/researcher.md
+
+# Temporarily disable a plugin
+omp disable @oh-my-pi/subagents
+
+# Re-enable it later
+omp enable @oh-my-pi/subagents
 ```
 
-Or link for development:
-```bash
-omp link ./plugins/subagents
-omp link ./plugins/metal-theme
-```
+## Credits
+
+Built for [pi](https://github.com/badlogic/pi-mono) by [@badlogic](https://github.com/badlogic).
 
 ## License
 

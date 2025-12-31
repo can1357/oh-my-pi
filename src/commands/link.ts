@@ -2,13 +2,14 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, symlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { loadPluginsJson, type PluginPackageJson, savePluginsJson } from "@omp/manifest";
-import { NODE_MODULES_DIR, PROJECT_NODE_MODULES } from "@omp/paths";
+import { NODE_MODULES_DIR, PROJECT_NODE_MODULES, resolveScope } from "@omp/paths";
 import { createPluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 
 export interface LinkOptions {
 	name?: string;
 	global?: boolean;
+	local?: boolean;
 }
 
 /**
@@ -16,7 +17,7 @@ export interface LinkOptions {
  * Creates a symlink in node_modules pointing to the local directory
  */
 export async function linkPlugin(localPath: string, options: LinkOptions = {}): Promise<void> {
-	const isGlobal = options.global !== false;
+	const isGlobal = resolveScope(options);
 	const nodeModules = isGlobal ? NODE_MODULES_DIR : PROJECT_NODE_MODULES;
 
 	// Expand ~ to home directory
@@ -28,6 +29,7 @@ export async function linkPlugin(localPath: string, options: LinkOptions = {}): 
 	// Verify the path exists
 	if (!existsSync(localPath)) {
 		console.log(chalk.red(`Error: Path does not exist: ${localPath}`));
+		process.exitCode = 1;
 		return;
 	}
 
@@ -67,6 +69,7 @@ export async function linkPlugin(localPath: string, options: LinkOptions = {}): 
 	if (pluginsJson.plugins[pluginName]) {
 		console.log(chalk.yellow(`Plugin "${pluginName}" is already installed.`));
 		console.log(chalk.dim("Use omp uninstall first, or specify a different name with -n"));
+		process.exitCode = 1;
 		return;
 	}
 
@@ -100,6 +103,7 @@ export async function linkPlugin(localPath: string, options: LinkOptions = {}): 
 		console.log(chalk.dim("  Changes to the source will be reflected immediately"));
 	} catch (err) {
 		console.log(chalk.red(`Error linking plugin: ${(err as Error).message}`));
+		process.exitCode = 1;
 		// Cleanup on failure
 		try {
 			await rm(pluginDir, { force: true });

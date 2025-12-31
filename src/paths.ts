@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -69,4 +70,33 @@ export function getPackageJsonPath(global = true): string {
 		return GLOBAL_PACKAGE_JSON;
 	}
 	return PROJECT_PLUGINS_JSON;
+}
+
+/**
+ * Check if a project-local .pi/plugins.json exists in the current working directory
+ */
+export function hasProjectPlugins(): boolean {
+	return existsSync(PROJECT_PLUGINS_JSON);
+}
+
+/**
+ * Resolve whether to use global or local scope based on CLI flags and auto-detection.
+ *
+ * Logic:
+ * - If --global is passed: use global mode
+ * - If --local is passed: use local mode
+ * - If neither: check if .pi/plugins.json exists in cwd, if so use local, otherwise use global
+ *
+ * @param options - CLI options containing global and local flags
+ * @returns true if global scope should be used, false for local
+ */
+export function resolveScope(options: { global?: boolean; local?: boolean }): boolean {
+	if (options.global) {
+		return true;
+	}
+	if (options.local) {
+		return false;
+	}
+	// Auto-detect: if project-local plugins.json exists, use local mode
+	return !hasProjectPlugins();
 }

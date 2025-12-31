@@ -5,6 +5,11 @@
   "keywords": ["omp-plugin", "agents", "task-delegation"],
   "author": "",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/can1357/oh-my-pi.git",
+    "directory": "plugins/subagents"
+  },
   "omp": {
     "install": [
       { "src": "tools/task/index.ts", "dest": "agent/tools/task/index.ts" },

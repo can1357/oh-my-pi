@@ -1,12 +1,20 @@
 import { existsSync } from "node:fs";
 import { detectAllConflicts, formatConflicts } from "@omp/conflicts";
 import { getInstalledPlugins, loadPluginsJson, readPluginPackageJson } from "@omp/manifest";
-import { GLOBAL_PACKAGE_JSON, NODE_MODULES_DIR, PLUGINS_DIR } from "@omp/paths";
+import {
+	GLOBAL_PACKAGE_JSON,
+	NODE_MODULES_DIR,
+	PLUGINS_DIR,
+	PROJECT_NODE_MODULES,
+	PROJECT_PLUGINS_JSON,
+	resolveScope,
+} from "@omp/paths";
 import { checkPluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 
 export interface DoctorOptions {
 	global?: boolean;
+	local?: boolean;
 	fix?: boolean;
 	json?: boolean;
 }
@@ -22,7 +30,7 @@ interface DiagnosticResult {
  * Run health checks on the plugin system
  */
 export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
-	const isGlobal = options.global !== false;
+	const isGlobal = resolveScope(options);
 	const results: DiagnosticResult[] = [];
 
 	console.log(chalk.blue("Running health checks...\n"));
@@ -45,7 +53,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 	}
 
 	// 2. Check package.json exists
-	const packageJsonPath = isGlobal ? GLOBAL_PACKAGE_JSON : ".pi/plugins.json";
+	const packageJsonPath = isGlobal ? GLOBAL_PACKAGE_JSON : PROJECT_PLUGINS_JSON;
 	if (!existsSync(packageJsonPath)) {
 		results.push({
 			check: "Package manifest",
@@ -62,7 +70,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 	}
 
 	// 3. Check node_modules exists
-	const nodeModules = isGlobal ? NODE_MODULES_DIR : ".pi/node_modules";
+	const nodeModules = isGlobal ? NODE_MODULES_DIR : PROJECT_NODE_MODULES;
 	if (!existsSync(nodeModules)) {
 		results.push({
 			check: "Node modules",
@@ -194,6 +202,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 	} else {
 		if (errors.length > 0) {
 			console.log(chalk.red(`${errors.length} error(s) found`));
+			process.exitCode = 1;
 		}
 		if (warnings.length > 0) {
 			console.log(chalk.yellow(`${warnings.length} warning(s) found`));

@@ -1,10 +1,11 @@
 import { loadPluginsJson } from "@omp/manifest";
 import { npmOutdated } from "@omp/npm";
-import { PLUGINS_DIR } from "@omp/paths";
+import { PLUGINS_DIR, resolveScope } from "@omp/paths";
 import chalk from "chalk";
 
 export interface OutdatedOptions {
 	global?: boolean;
+	local?: boolean;
 	json?: boolean;
 }
 
@@ -12,7 +13,7 @@ export interface OutdatedOptions {
  * List plugins with newer versions available
  */
 export async function showOutdated(options: OutdatedOptions = {}): Promise<void> {
-	const isGlobal = options.global !== false;
+	const isGlobal = resolveScope(options);
 	const prefix = isGlobal ? PLUGINS_DIR : ".pi";
 
 	console.log(chalk.blue("Checking for outdated plugins..."));
@@ -72,5 +73,6 @@ export async function showOutdated(options: OutdatedOptions = {}): Promise<void>
 		console.log(chalk.dim("  - 'latest' = latest available version"));
 	} catch (err) {
 		console.log(chalk.red(`Error checking outdated: ${(err as Error).message}`));
+		process.exitCode = 1;
 	}
 }

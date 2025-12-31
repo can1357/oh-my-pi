@@ -15,6 +15,7 @@ export async function initProject(options: InitOptions = {}): Promise<void> {
 	if (existsSync(PROJECT_PLUGINS_JSON) && !options.force) {
 		console.log(chalk.yellow(`${PROJECT_PLUGINS_JSON} already exists.`));
 		console.log(chalk.dim("Use --force to overwrite"));
+		process.exitCode = 1;
 		return;
 	}
 
@@ -38,5 +39,6 @@ export async function initProject(options: InitOptions = {}): Promise<void> {
 		console.log(chalk.dim("  3. Run: omp install (to install all)"));
 	} catch (err) {
 		console.log(chalk.red(`Error initializing project: ${(err as Error).message}`));
+		process.exitCode = 1;
 	}
 }

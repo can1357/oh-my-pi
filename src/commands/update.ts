@@ -1,11 +1,14 @@
-import { loadPluginsJson, readPluginPackageJson } from "@omp/manifest";
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
+import { type OmpInstallEntry, type PluginPackageJson, loadPluginsJson, readPluginPackageJson } from "@omp/manifest";
 import { npmUpdate } from "@omp/npm";
-import { NODE_MODULES_DIR, PLUGINS_DIR, PROJECT_NODE_MODULES } from "@omp/paths";
+import { NODE_MODULES_DIR, PI_CONFIG_DIR, PLUGINS_DIR, PROJECT_NODE_MODULES, PROJECT_PI_DIR, resolveScope } from "@omp/paths";
 import { createPluginSymlinks, removePluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 
 export interface UpdateOptions {
 	global?: boolean;
+	local?: boolean;
 	json?: boolean;
 }
 
@@ -13,7 +16,7 @@ export interface UpdateOptions {
  * Update plugin(s) to latest within semver range
  */
 export async function updatePlugin(name?: string, options: UpdateOptions = {}): Promise<void> {
-	const isGlobal = options.global !== false;
+	const isGlobal = resolveScope(options);
 	const prefix = isGlobal ? PLUGINS_DIR : ".pi";
 	const _nodeModules = isGlobal ? NODE_MODULES_DIR : PROJECT_NODE_MODULES;
 
@@ -22,12 +25,14 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 
 	if (pluginNames.length === 0) {
 		console.log(chalk.yellow("No plugins installed."));
+		process.exitCode = 1;
 		return;
 	}
 
 	// If specific plugin name provided, verify it's installed
 	if (name && !pluginsJson.plugins[name]) {
 		console.log(chalk.yellow(`Plugin "${name}" is not installed.`));
+		process.exitCode = 1;
 		return;
 	}
 
@@ -50,6 +55,7 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 
 	if (npmPlugins.length === 0) {
 		console.log(chalk.yellow("No npm plugins to update."));
+		process.exitCode = 1;
 		return;
 	}
 
@@ -57,21 +63,34 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 
 	const results: Array<{ name: string; from: string; to: string; success: boolean }> = [];
 
+	// Save old package info before removing symlinks (for recovery on failure)
+	const oldPkgJsons = new Map<string, PluginPackageJson>();
+	const beforeVersions: Record<string, string> = {};
+	const oldInstallEntries = new Map<string, OmpInstallEntry[]>();
+
 	try {
-		// Get current versions before update
-		const beforeVersions: Record<string, string> = {};
+		// Get current versions and install entries before update
 		for (const pluginName of npmPlugins) {
 			const pkgJson = await readPluginPackageJson(pluginName, isGlobal);
 			if (pkgJson) {
+				oldPkgJsons.set(pluginName, pkgJson);
 				beforeVersions[pluginName] = pkgJson.version;
 
+				// Save old install entries for later comparison
+				if (pkgJson.omp?.install) {
+					oldInstallEntries.set(pluginName, [...pkgJson.omp.install]);
+				}
+
 				// Remove old symlinks before update
-				await removePluginSymlinks(pluginName, pkgJson, false);
+				await removePluginSymlinks(pluginName, pkgJson, isGlobal);
 			}
 		}
 
 		// npm update
 		await npmUpdate(npmPlugins, prefix);
+
+		// Base directory for symlink destinations
+		const baseDir = isGlobal ? PI_CONFIG_DIR : PROJECT_PI_DIR;
 
 		// Re-process symlinks for each updated plugin
 		for (const pluginName of npmPlugins) {
@@ -80,7 +99,25 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 				const beforeVersion = beforeVersions[pluginName] || "unknown";
 				const afterVersion = pkgJson.version;
 
-				// Create new symlinks
+				// Handle changed omp.install entries: remove orphaned symlinks
+				const oldEntries = oldInstallEntries.get(pluginName) || [];
+				const newEntries = pkgJson.omp?.install || [];
+				const newDests = new Set(newEntries.map((e) => e.dest));
+
+				for (const oldEntry of oldEntries) {
+					if (!newDests.has(oldEntry.dest)) {
+						// This destination was in the old version but not in the new one
+						const dest = join(baseDir, oldEntry.dest);
+						try {
+							await rm(dest, { force: true });
+							console.log(chalk.dim(`  Removed orphaned: ${oldEntry.dest}`));
+						} catch {
+							// Ignore removal errors for orphaned symlinks
+						}
+					}
+				}
+
+				// Create new symlinks (handles overwrites for existing destinations)
 				await createPluginSymlinks(pluginName, pkgJson, isGlobal);
 
 				const changed = beforeVersion !== afterVersion;
@@ -107,6 +144,18 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 			console.log(JSON.stringify({ results }, null, 2));
 		}
 	} catch (err) {
+		// Restore old symlinks on failure
+		if (oldPkgJsons.size > 0) {
+			console.log(chalk.yellow("  Update failed, restoring symlinks..."));
+			for (const [pluginName, pkgJson] of oldPkgJsons) {
+				try {
+					await createPluginSymlinks(pluginName, pkgJson, isGlobal);
+				} catch (restoreErr) {
+					console.log(chalk.red(`  Failed to restore symlinks for ${pluginName}: ${(restoreErr as Error).message}`));
+				}
+			}
+		}
 		console.log(chalk.red(`Error updating plugins: ${(err as Error).message}`));
+		process.exitCode = 1;
 	}
 }
