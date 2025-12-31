@@ -1,4 +1,5 @@
 import { npmSearch } from "@omp/npm";
+import { log, outputJson, setJsonMode } from "@omp/output";
 import chalk from "chalk";
 
 function truncate(str: string, maxLen: number): string {
@@ -15,15 +16,19 @@ export interface SearchOptions {
  * Search npm for plugins with omp-plugin keyword
  */
 export async function searchPlugins(query: string, options: SearchOptions = {}): Promise<void> {
-	console.log(chalk.blue(`Searching npm for "${query}" with omp-plugin keyword...`));
+	if (options.json) {
+		setJsonMode(true);
+	}
+
+	log(chalk.blue(`Searching npm for "${query}" with omp-plugin keyword...`));
 
 	try {
 		const results = await npmSearch(query, "omp-plugin");
 
 		if (results.length === 0) {
-			console.log(chalk.yellow("\nNo plugins found."));
-			console.log(chalk.dim("Try a different search term, or search without keyword:"));
-			console.log(chalk.dim("  npm search omp-plugin"));
+			log(chalk.yellow("\nNo plugins found."));
+			log(chalk.dim("Try a different search term, or search without keyword:"));
+			log(chalk.dim("  npm search omp-plugin"));
 			process.exitCode = 1;
 			return;
 		}
@@ -32,34 +37,34 @@ export async function searchPlugins(query: string, options: SearchOptions = {}):
 		const displayResults = results.slice(0, limit);
 
 		if (options.json) {
-			console.log(JSON.stringify({ results: displayResults }, null, 2));
+			outputJson({ results: displayResults });
 			return;
 		}
 
-		console.log(chalk.bold(`\nFound ${results.length} plugin(s):\n`));
+		log(chalk.bold(`\nFound ${results.length} plugin(s):\n`));
 
 		for (const result of displayResults) {
-			console.log(chalk.green("◆ ") + chalk.bold(result.name) + chalk.dim(` v${result.version}`));
+			log(chalk.green("◆ ") + chalk.bold(result.name) + chalk.dim(` v${result.version}`));
 
 			if (result.description) {
-				console.log(chalk.dim(`    ${truncate(result.description, 100)}`));
+				log(chalk.dim(`    ${truncate(result.description, 100)}`));
 			}
 
 			if (result.keywords?.length) {
 				const otherKeywords = result.keywords.filter((k) => k !== "omp-plugin");
 				if (otherKeywords.length > 0) {
-					console.log(chalk.dim(`    tags: ${otherKeywords.join(", ")}`));
+					log(chalk.dim(`    tags: ${otherKeywords.join(", ")}`));
 				}
 			}
 
-			console.log();
+			log();
 		}
 
 		if (results.length > limit) {
-			console.log(chalk.dim(`... and ${results.length - limit} more. Use --limit to see more.`));
+			log(chalk.dim(`... and ${results.length - limit} more. Use --limit to see more.`));
 		}
 
-		console.log(chalk.dim("Install with: omp install <package-name>"));
+		log(chalk.dim("Install with: omp install <package-name>"));
 	} catch (err) {
 		const error = err as Error;
 		if (
@@ -67,10 +72,10 @@ export async function searchPlugins(query: string, options: SearchOptions = {}):
 			error.message.includes("ETIMEDOUT") ||
 			error.message.includes("EAI_AGAIN")
 		) {
-			console.log(chalk.red("\nNetwork error: Unable to reach npm registry."));
-			console.log(chalk.dim("  Check your internet connection and try again."));
+			log(chalk.red("\nNetwork error: Unable to reach npm registry."));
+			log(chalk.dim("  Check your internet connection and try again."));
 		} else {
-			console.log(chalk.red(`\nSearch failed: ${error.message}`));
+			log(chalk.red(`\nSearch failed: ${error.message}`));
 		}
 		process.exitCode = 1;
 	}

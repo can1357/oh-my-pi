@@ -1,5 +1,6 @@
 import type { OmpVariable } from "@omp/manifest";
 import { loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
+import { log, outputJson, setJsonMode } from "@omp/output";
 import { resolveScope } from "@omp/paths";
 import chalk from "chalk";
 
@@ -115,18 +116,22 @@ function resolveEnabledFeatures(
  * omp config @oh-my-pi/exa
  */
 export async function listConfig(name: string, options: ConfigOptions = {}): Promise<void> {
+	if (options.json) {
+		setJsonMode(true);
+	}
+
 	const isGlobal = resolveScope(options);
 	const pluginsJson = await loadPluginsJson(isGlobal);
 
 	if (!pluginsJson.plugins[name]) {
-		console.log(chalk.yellow(`Plugin "${name}" is not installed.`));
+		log(chalk.yellow(`Plugin "${name}" is not installed.`));
 		process.exitCode = 1;
 		return;
 	}
 
 	const pkgJson = await readPluginPackageJson(name, isGlobal);
 	if (!pkgJson) {
-		console.log(chalk.red(`Could not read package.json for ${name}`));
+		log(chalk.red(`Could not read package.json for ${name}`));
 		process.exitCode = 1;
 		return;
 	}
@@ -137,35 +142,29 @@ export async function listConfig(name: string, options: ConfigOptions = {}): Pro
 	const variables = collectVariables(pkgJson, enabledFeatures);
 
 	if (Object.keys(variables).length === 0) {
-		console.log(chalk.yellow(`Plugin "${name}" has no configurable variables.`));
+		log(chalk.yellow(`Plugin "${name}" has no configurable variables.`));
 		return;
 	}
 
 	const userVars = config?.variables || {};
 
 	if (options.json) {
-		console.log(
-			JSON.stringify(
-				{
-					plugin: name,
-					variables: Object.entries(variables).map(([vname, vdef]) => ({
-						name: vname,
-						type: vdef.type,
-						value: userVars[vname],
-						default: vdef.default,
-						required: vdef.required,
-						env: vdef.env,
-						description: vdef.description,
-					})),
-				},
-				null,
-				2,
-			),
-		);
+		outputJson({
+			plugin: name,
+			variables: Object.entries(variables).map(([vname, vdef]) => ({
+				name: vname,
+				type: vdef.type,
+				value: userVars[vname],
+				default: vdef.default,
+				required: vdef.required,
+				env: vdef.env,
+				description: vdef.description,
+			})),
+		});
 		return;
 	}
 
-	console.log(chalk.bold(`\nVariables for ${name}:\n`));
+	log(chalk.bold(`\nVariables for ${name}:\n`));
 
 	for (const [vname, vdef] of Object.entries(variables)) {
 		const currentValue = userVars[vname];
@@ -182,24 +181,24 @@ export async function listConfig(name: string, options: ConfigOptions = {}): Pro
 		const requiredStr = vdef.required && !hasValue ? chalk.red(" (required)") : "";
 		const envStr = vdef.env ? chalk.dim(` [${vdef.env}]`) : "";
 
-		console.log(`${icon} ${chalk.bold(vname)}${requiredStr}${envStr}`);
+		log(`${icon} ${chalk.bold(vname)}${requiredStr}${envStr}`);
 
 		if (vdef.description) {
-			console.log(chalk.dim(`    ${vdef.description}`));
+			log(chalk.dim(`    ${vdef.description}`));
 		}
 
-		console.log(chalk.dim(`    Type: ${vdef.type}`));
+		log(chalk.dim(`    Type: ${vdef.type}`));
 
 		if (hasValue) {
-			console.log(`    Value: ${formatValue(currentValue, vdef)}`);
+			log(`    Value: ${formatValue(currentValue, vdef)}`);
 		} else if (hasDefault) {
-			console.log(`    Default: ${formatValue(vdef.default, vdef)}`);
+			log(`    Default: ${formatValue(vdef.default, vdef)}`);
 		}
 	}
 
-	console.log();
-	console.log(chalk.dim(`Set a value: omp config ${name} <variable> <value>`));
-	console.log(chalk.dim(`Delete a value: omp config ${name} <variable> --delete`));
+	log();
+	log(chalk.dim(`Set a value: omp config ${name} <variable> <value>`));
+	log(chalk.dim(`Delete a value: omp config ${name} <variable> --delete`));
 }
 
 /**
@@ -207,18 +206,22 @@ export async function listConfig(name: string, options: ConfigOptions = {}): Pro
  * omp config @oh-my-pi/exa apiKey
  */
 export async function getConfig(name: string, key: string, options: ConfigOptions = {}): Promise<void> {
+	if (options.json) {
+		setJsonMode(true);
+	}
+
 	const isGlobal = resolveScope(options);
 	const pluginsJson = await loadPluginsJson(isGlobal);
 
 	if (!pluginsJson.plugins[name]) {
-		console.log(chalk.yellow(`Plugin "${name}" is not installed.`));
+		log(chalk.yellow(`Plugin "${name}" is not installed.`));
 		process.exitCode = 1;
 		return;
 	}
 
 	const pkgJson = await readPluginPackageJson(name, isGlobal);
 	if (!pkgJson) {
-		console.log(chalk.red(`Could not read package.json for ${name}`));
+		log(chalk.red(`Could not read package.json for ${name}`));
 		process.exitCode = 1;
 		return;
 	}
@@ -230,8 +233,8 @@ export async function getConfig(name: string, key: string, options: ConfigOption
 
 	const varDef = variables[key];
 	if (!varDef) {
-		console.log(chalk.red(`Unknown variable "${key}".`));
-		console.log(chalk.dim(`Available: ${Object.keys(variables).join(", ") || "(none)"}`));
+		log(chalk.red(`Unknown variable "${key}".`));
+		log(chalk.dim(`Available: ${Object.keys(variables).join(", ") || "(none)"}`));
 		process.exitCode = 1;
 		return;
 	}
@@ -240,14 +243,14 @@ export async function getConfig(name: string, key: string, options: ConfigOption
 	const value = userValue ?? varDef.default;
 
 	if (options.json) {
-		console.log(JSON.stringify({ plugin: name, variable: key, value, default: varDef.default }, null, 2));
+		outputJson({ plugin: name, variable: key, value, default: varDef.default });
 		return;
 	}
 
 	if (value !== undefined) {
-		console.log(formatValue(value, varDef));
+		log(formatValue(value, varDef));
 	} else {
-		console.log(chalk.dim("(not set)"));
+		log(chalk.dim("(not set)"));
 	}
 }
 
@@ -256,18 +259,22 @@ export async function getConfig(name: string, key: string, options: ConfigOption
  * omp config @oh-my-pi/exa apiKey sk-xxx
  */
 export async function setConfig(name: string, key: string, value: string, options: ConfigOptions = {}): Promise<void> {
+	if (options.json) {
+		setJsonMode(true);
+	}
+
 	const isGlobal = resolveScope(options);
 	const pluginsJson = await loadPluginsJson(isGlobal);
 
 	if (!pluginsJson.plugins[name]) {
-		console.log(chalk.yellow(`Plugin "${name}" is not installed.`));
+		log(chalk.yellow(`Plugin "${name}" is not installed.`));
 		process.exitCode = 1;
 		return;
 	}
 
 	const pkgJson = await readPluginPackageJson(name, isGlobal);
 	if (!pkgJson) {
-		console.log(chalk.red(`Could not read package.json for ${name}`));
+		log(chalk.red(`Could not read package.json for ${name}`));
 		process.exitCode = 1;
 		return;
 	}
@@ -279,8 +286,8 @@ export async function setConfig(name: string, key: string, value: string, option
 
 	const varDef = variables[key];
 	if (!varDef) {
-		console.log(chalk.red(`Unknown variable "${key}".`));
-		console.log(chalk.dim(`Available: ${Object.keys(variables).join(", ") || "(none)"}`));
+		log(chalk.red(`Unknown variable "${key}".`));
+		log(chalk.dim(`Available: ${Object.keys(variables).join(", ") || "(none)"}`));
 		process.exitCode = 1;
 		return;
 	}
@@ -290,7 +297,7 @@ export async function setConfig(name: string, key: string, value: string, option
 	try {
 		parsed = parseValue(value, varDef);
 	} catch (err) {
-		console.log(chalk.red((err as Error).message));
+		log(chalk.red((err as Error).message));
 		process.exitCode = 1;
 		return;
 	}
@@ -303,15 +310,15 @@ export async function setConfig(name: string, key: string, value: string, option
 	pluginsJson.config[name].variables[key] = parsed;
 	await savePluginsJson(pluginsJson, isGlobal);
 
-	console.log(chalk.green(`✓ Set ${name}.${key} = ${JSON.stringify(parsed)}`));
+	log(chalk.green(`✓ Set ${name}.${key} = ${JSON.stringify(parsed)}`));
 
 	if (varDef.env) {
-		console.log(chalk.dim(`  Environment variable: ${varDef.env}`));
-		console.log(chalk.dim(`  Export with: omp env`));
+		log(chalk.dim(`  Environment variable: ${varDef.env}`));
+		log(chalk.dim(`  Export with: omp env`));
 	}
 
 	if (options.json) {
-		console.log(JSON.stringify({ plugin: name, variable: key, value: parsed }, null, 2));
+		outputJson({ plugin: name, variable: key, value: parsed });
 	}
 }
 
@@ -320,11 +327,15 @@ export async function setConfig(name: string, key: string, value: string, option
  * omp config @oh-my-pi/exa apiKey --delete
  */
 export async function deleteConfig(name: string, key: string, options: ConfigOptions = {}): Promise<void> {
+	if (options.json) {
+		setJsonMode(true);
+	}
+
 	const isGlobal = resolveScope(options);
 	const pluginsJson = await loadPluginsJson(isGlobal);
 
 	if (!pluginsJson.plugins[name]) {
-		console.log(chalk.yellow(`Plugin "${name}" is not installed.`));
+		log(chalk.yellow(`Plugin "${name}" is not installed.`));
 		process.exitCode = 1;
 		return;
 	}
@@ -332,7 +343,7 @@ export async function deleteConfig(name: string, key: string, options: ConfigOpt
 	const config = pluginsJson.config?.[name];
 	// Check key presence with hasOwnProperty, not truthiness (allows deleting falsy values like false, 0, "", [])
 	if (!config?.variables || !Object.hasOwn(config.variables, key)) {
-		console.log(chalk.yellow(`Variable "${key}" is not set for ${name}.`));
+		log(chalk.yellow(`Variable "${key}" is not set for ${name}.`));
 		return;
 	}
 
@@ -351,10 +362,10 @@ export async function deleteConfig(name: string, key: string, options: ConfigOpt
 
 	await savePluginsJson(pluginsJson, isGlobal);
 
-	console.log(chalk.green(`✓ Deleted ${name}.${key} (reverted to default)`));
+	log(chalk.green(`✓ Deleted ${name}.${key} (reverted to default)`));
 
 	if (options.json) {
-		console.log(JSON.stringify({ plugin: name, variable: key, deleted: true }, null, 2));
+		outputJson({ plugin: name, variable: key, deleted: true });
 	}
 }
 

@@ -2,12 +2,13 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { loadPluginsJson, type OmpInstallEntry, type PluginPackageJson, readPluginPackageJson } from "@omp/manifest";
 import { npmUpdate } from "@omp/npm";
+import { log, outputJson, setJsonMode } from "@omp/output";
 import {
+	getProjectPiDir,
 	NODE_MODULES_DIR,
 	PI_CONFIG_DIR,
 	PLUGINS_DIR,
 	PROJECT_NODE_MODULES,
-	getProjectPiDir,
 	resolveScope,
 } from "@omp/paths";
 import { createPluginSymlinks, removePluginSymlinks } from "@omp/symlinks";
@@ -23,6 +24,10 @@ export interface UpdateOptions {
  * Update plugin(s) to latest within semver range
  */
 export async function updatePlugin(name?: string, options: UpdateOptions = {}): Promise<void> {
+	if (options.json) {
+		setJsonMode(true);
+	}
+
 	const isGlobal = resolveScope(options);
 	const prefix = isGlobal ? PLUGINS_DIR : ".pi";
 	const _nodeModules = isGlobal ? NODE_MODULES_DIR : PROJECT_NODE_MODULES;
@@ -31,14 +36,14 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 	const pluginNames = Object.keys(pluginsJson.plugins);
 
 	if (pluginNames.length === 0) {
-		console.log(chalk.yellow("No plugins installed."));
+		log(chalk.yellow("No plugins installed."));
 		process.exitCode = 1;
 		return;
 	}
 
 	// If specific plugin name provided, verify it's installed
 	if (name && !pluginsJson.plugins[name]) {
-		console.log(chalk.yellow(`Plugin "${name}" is not installed.`));
+		log(chalk.yellow(`Plugin "${name}" is not installed.`));
 		process.exitCode = 1;
 		return;
 	}
@@ -57,16 +62,16 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 	});
 
 	if (localPlugins.length > 0) {
-		console.log(chalk.dim(`Skipping ${localPlugins.length} local plugin(s): ${localPlugins.join(", ")}`));
+		log(chalk.dim(`Skipping ${localPlugins.length} local plugin(s): ${localPlugins.join(", ")}`));
 	}
 
 	if (npmPlugins.length === 0) {
-		console.log(chalk.yellow("No npm plugins to update."));
+		log(chalk.yellow("No npm plugins to update."));
 		process.exitCode = 1;
 		return;
 	}
 
-	console.log(chalk.blue(`Updating ${npmPlugins.length} plugin(s)...`));
+	log(chalk.blue(`Updating ${npmPlugins.length} plugin(s)...`));
 
 	const results: Array<{
 		name: string;
@@ -122,7 +127,7 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 						const dest = join(baseDir, oldEntry.dest);
 						try {
 							await rm(dest, { force: true });
-							console.log(chalk.dim(`  Removed orphaned: ${oldEntry.dest}`));
+							log(chalk.dim(`  Removed orphaned: ${oldEntry.dest}`));
 						} catch {
 							// Ignore removal errors for orphaned symlinks
 						}
@@ -134,9 +139,9 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 
 				const changed = beforeVersion !== afterVersion;
 				if (changed) {
-					console.log(chalk.green(`  ✓ ${pluginName}: ${beforeVersion} → ${afterVersion}`));
+					log(chalk.green(`  ✓ ${pluginName}: ${beforeVersion} → ${afterVersion}`));
 				} else {
-					console.log(chalk.dim(`  · ${pluginName}: ${afterVersion} (already latest)`));
+					log(chalk.dim(`  · ${pluginName}: ${afterVersion} (already latest)`));
 				}
 
 				results.push({
@@ -149,27 +154,44 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 		}
 
 		const updated = results.filter((r) => r.from !== r.to);
-		console.log();
-		console.log(chalk.dim(`Updated: ${updated.length}, Already latest: ${results.length - updated.length}`));
+		log();
+		log(chalk.dim(`Updated: ${updated.length}, Already latest: ${results.length - updated.length}`));
 
 		if (options.json) {
-			console.log(JSON.stringify({ results }, null, 2));
+			outputJson({ results });
 		}
 	} catch (err) {
-		// Restore old symlinks on failure
+		// Restore old symlinks AND node_modules on failure
 		if (oldPkgJsons.size > 0) {
-			console.log(chalk.yellow("  Update failed, restoring symlinks..."));
+			log(chalk.yellow("  Update failed, rolling back..."));
+
+			// Reinstall old versions to restore node_modules
+			const packagesToRestore = Array.from(oldPkgJsons.entries()).map(
+				([pluginName, pkgJson]) => `${pluginName}@${pkgJson.version}`,
+			);
+			if (packagesToRestore.length > 0) {
+				log(chalk.dim("  Restoring package versions..."));
+				try {
+					const { npmInstall } = await import("@omp/npm");
+					await npmInstall(packagesToRestore, prefix, { save: false });
+				} catch (restoreErr) {
+					log(chalk.red(`  Failed to restore package versions: ${(restoreErr as Error).message}`));
+				}
+			}
+
+			// Restore symlinks after node_modules are restored
+			log(chalk.dim("  Restoring symlinks..."));
 			for (const [pluginName, pkgJson] of oldPkgJsons) {
 				try {
 					await createPluginSymlinks(pluginName, pkgJson, isGlobal);
 				} catch (restoreErr) {
-					console.log(
+					log(
 						chalk.red(`  Failed to restore symlinks for ${pluginName}: ${(restoreErr as Error).message}`),
 					);
 				}
 			}
 		}
-		console.log(chalk.red(`Error updating plugins: ${(err as Error).message}`));
+		log(chalk.red(`Error updating plugins: ${(err as Error).message}`));
 		process.exitCode = 1;
 	}
 }

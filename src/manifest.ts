@@ -3,11 +3,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
 	GLOBAL_PACKAGE_JSON,
+	getProjectPiDir,
 	NODE_MODULES_DIR,
 	PLUGINS_DIR,
 	PROJECT_PACKAGE_JSON,
 	PROJECT_PLUGINS_JSON,
-	getProjectPiDir,
 } from "@omp/paths";
 
 /**

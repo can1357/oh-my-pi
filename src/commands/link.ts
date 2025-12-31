@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -27,6 +27,7 @@ export interface LinkOptions {
 	global?: boolean;
 	local?: boolean;
 	force?: boolean;
+	yes?: boolean;
 }
 
 /**
@@ -126,8 +127,46 @@ export async function linkPlugin(localPath: string, options: LinkOptions = {}): 
 		// Create parent directory (handles scoped packages like @org/name)
 		await mkdir(dirname(pluginDir), { recursive: true });
 
-		// Remove existing if present
+		// Remove existing if present - with confirmation for non-symlink directories
 		if (existsSync(pluginDir)) {
+			const stat = lstatSync(pluginDir);
+			const isSymlink = stat.isSymbolicLink();
+
+			if (!isSymlink) {
+				// Real directory or file - requires confirmation
+				console.log(chalk.yellow(`\nWarning: ${pluginDir} exists and is not a symlink.`));
+				console.log(chalk.dim("This directory/file will be deleted:"));
+				console.log(chalk.dim(`  - ${pluginDir}`));
+
+				const skipConfirmation = options.force || options.yes;
+				const isInteractive = process.stdin.isTTY && process.stdout.isTTY;
+
+				if (!skipConfirmation) {
+					if (!isInteractive) {
+						console.log(chalk.red("\nError: Destructive operation requires confirmation."));
+						console.log(chalk.dim("Use --force or --yes flag in non-interactive environments."));
+						process.exitCode = 1;
+						return;
+					}
+
+					const rl = createInterface({
+						input: process.stdin,
+						output: process.stdout,
+					});
+					const answer = await new Promise<string>((resolve) => {
+						rl.question(chalk.yellow("\nDelete this and proceed with linking? [y/N] "), (ans) => {
+							rl.close();
+							resolve(ans);
+						});
+					});
+
+					if (answer.toLowerCase() !== "y" && answer.toLowerCase() !== "yes") {
+						console.log(chalk.dim("Link aborted."));
+						return;
+					}
+				}
+			}
+
 			await rm(pluginDir, { force: true, recursive: true });
 		}
 

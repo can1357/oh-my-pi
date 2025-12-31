@@ -40,6 +40,13 @@ export {
 	npmUpdate,
 } from "@omp/npm";
 export {
+	isJsonMode,
+	log,
+	logError,
+	outputJson,
+	setJsonMode,
+} from "@omp/output";
+export {
 	checkPluginSymlinks,
 	createPluginSymlinks,
 	removePluginSymlinks,

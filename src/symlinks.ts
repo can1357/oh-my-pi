@@ -4,7 +4,7 @@ import { platform } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { OmpFeature, OmpInstallEntry, PluginPackageJson, PluginRuntimeConfig } from "@omp/manifest";
 import { getPluginSourceDir } from "@omp/manifest";
-import { PI_CONFIG_DIR, getProjectPiDir } from "@omp/paths";
+import { getProjectPiDir, PI_CONFIG_DIR } from "@omp/paths";
 import chalk from "chalk";
 
 /**
@@ -172,7 +172,8 @@ export async function createPluginSymlinks(
 					} else {
 						// Destination is a real file or directory - refuse to delete
 						const destType = destStats.isDirectory() ? "directory" : "file";
-						const msg = `Cannot create symlink at '${entry.dest}': destination is a real ${destType}, not a symlink. ` +
+						const msg =
+							`Cannot create symlink at '${entry.dest}': destination is a real ${destType}, not a symlink. ` +
 							`Remove it manually if you want to replace it with a symlink.`;
 						result.errors.push(msg);
 						if (verbose) {

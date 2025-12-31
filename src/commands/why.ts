@@ -2,7 +2,7 @@ import { existsSync, lstatSync } from "node:fs";
 import { readlink } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { getInstalledPlugins, getPluginSourceDir, readPluginPackageJson } from "@omp/manifest";
-import { PI_CONFIG_DIR, getProjectPiDir, resolveScope } from "@omp/paths";
+import { getProjectPiDir, PI_CONFIG_DIR, resolveScope } from "@omp/paths";
 import { traceInstalledFile } from "@omp/symlinks";
 import chalk from "chalk";
 

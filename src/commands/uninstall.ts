@@ -12,6 +12,8 @@ export interface UninstallOptions {
 	global?: boolean;
 	local?: boolean;
 	json?: boolean;
+	force?: boolean;
+	yes?: boolean;
 }
 
 /**
@@ -28,6 +30,70 @@ export async function uninstallPlugin(name: string, options: UninstallOptions = 
 		console.log(chalk.yellow(`Plugin "${name}" is not installed.`));
 		process.exitCode = 1;
 		return;
+	}
+
+	// Collect all items that will be deleted for confirmation
+	const pkgJsonPreview = await readPluginPackageJson(name, isGlobal);
+	const itemsToDelete: string[] = [];
+	const pluginDir = join(nodeModules, name);
+
+	if (existsSync(pluginDir)) {
+		itemsToDelete.push(pluginDir);
+	}
+
+	// Collect symlinks that would be removed
+	if (pkgJsonPreview?.omp?.install) {
+		const { removePluginSymlinks: previewSymlinks } = await import("@omp/symlinks");
+		// Get symlink paths without actually removing them
+		for (const entry of pkgJsonPreview.omp.install) {
+			const dest = typeof entry === "string" ? entry : entry.dest;
+			if (dest) {
+				const destPath = isGlobal
+					? join(process.env.HOME || "", dest.replace(/^~\//, ""))
+					: join(process.cwd(), dest);
+				if (existsSync(destPath)) {
+					itemsToDelete.push(destPath);
+				}
+			}
+		}
+	}
+
+	// Show what will be deleted and require confirmation
+	if (itemsToDelete.length > 0) {
+		console.log(chalk.yellow(`\nThe following ${itemsToDelete.length} item(s) will be deleted:`));
+		for (const item of itemsToDelete) {
+			console.log(chalk.dim(`  - ${item}`));
+		}
+		console.log();
+
+		// Check for interactive mode and --force/--yes flags
+		const isInteractive = process.stdin.isTTY && process.stdout.isTTY;
+		const skipConfirmation = options.force || options.yes;
+
+		if (!skipConfirmation) {
+			if (!isInteractive) {
+				console.log(chalk.red("Error: Destructive operation requires confirmation."));
+				console.log(chalk.dim("Use --force or --yes flag in non-interactive environments."));
+				process.exitCode = 1;
+				return;
+			}
+
+			const rl = createInterface({
+				input: process.stdin,
+				output: process.stdout,
+			});
+			const answer = await new Promise<string>((resolve) => {
+				rl.question(chalk.yellow(`Proceed with uninstalling "${name}"? [y/N] `), (ans) => {
+					rl.close();
+					resolve(ans);
+				});
+			});
+
+			if (answer.toLowerCase() !== "y" && answer.toLowerCase() !== "yes") {
+				console.log(chalk.dim("Uninstall aborted."));
+				return;
+			}
+		}
 	}
 
 	try {
@@ -69,7 +135,14 @@ export async function uninstallPlugin(name: string, options: UninstallOptions = 
 					console.log(chalk.dim(`  - ${file}`));
 				}
 
-				if (process.stdin.isTTY && process.stdout.isTTY) {
+				const skipConfirmation = options.force || options.yes;
+
+				if (skipConfirmation) {
+					for (const file of result.skippedNonSymlinks) {
+						await rm(file, { force: true, recursive: true });
+						console.log(chalk.dim(`  Deleted: ${file}`));
+					}
+				} else if (process.stdin.isTTY && process.stdout.isTTY) {
 					const rl = createInterface({
 						input: process.stdin,
 						output: process.stdout,
@@ -81,12 +154,15 @@ export async function uninstallPlugin(name: string, options: UninstallOptions = 
 						});
 					});
 
-					if (answer.toLowerCase() === "y") {
+					if (answer.toLowerCase() === "y" || answer.toLowerCase() === "yes") {
 						for (const file of result.skippedNonSymlinks) {
 							await rm(file, { force: true, recursive: true });
 							console.log(chalk.dim(`  Deleted: ${file}`));
 						}
 					}
+				} else {
+					console.log(chalk.yellow("Non-interactive mode: skipping deletion of non-symlink files."));
+					console.log(chalk.dim("Use --force or --yes flag to delete these files."));
 				}
 			}
 		}

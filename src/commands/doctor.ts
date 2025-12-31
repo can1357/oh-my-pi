@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { createInterface } from "node:readline";
 import { detectAllConflicts, formatConflicts } from "@omp/conflicts";
 import { getInstalledPlugins, loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
 import {
@@ -17,6 +18,8 @@ export interface DoctorOptions {
 	local?: boolean;
 	fix?: boolean;
 	json?: boolean;
+	force?: boolean;
+	yes?: boolean;
 }
 
 interface DiagnosticResult {
@@ -258,6 +261,54 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 
 	// Apply fixes if --fix flag was passed
 	if (options.fix) {
+		// Collect all destructive operations for confirmation
+		const destructiveOps: string[] = [];
+
+		if (orphaned.length > 0) {
+			for (const name of orphaned) {
+				destructiveOps.push(`Remove orphaned manifest entry: ${name}`);
+			}
+		}
+
+		// Show what will be done and require confirmation
+		if (destructiveOps.length > 0) {
+			console.log(
+				chalk.yellow(`\nThe following ${destructiveOps.length} destructive operation(s) will be performed:`),
+			);
+			for (const op of destructiveOps) {
+				console.log(chalk.dim(`  - ${op}`));
+			}
+			console.log();
+
+			const skipConfirmation = options.force || options.yes;
+			const isInteractive = process.stdin.isTTY && process.stdout.isTTY;
+
+			if (!skipConfirmation) {
+				if (!isInteractive) {
+					console.log(chalk.red("Error: Destructive operations require confirmation."));
+					console.log(chalk.dim("Use --force or --yes flag in non-interactive environments."));
+					process.exitCode = 1;
+					return;
+				}
+
+				const rl = createInterface({
+					input: process.stdin,
+					output: process.stdout,
+				});
+				const answer = await new Promise<string>((resolve) => {
+					rl.question(chalk.yellow("Proceed with fixes? [y/N] "), (ans) => {
+						rl.close();
+						resolve(ans);
+					});
+				});
+
+				if (answer.toLowerCase() !== "y" && answer.toLowerCase() !== "yes") {
+					console.log(chalk.dim("Fix aborted."));
+					return;
+				}
+			}
+		}
+
 		let fixedAnything = false;
 
 		// Fix broken/missing symlinks by re-creating them

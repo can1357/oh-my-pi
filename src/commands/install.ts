@@ -16,12 +16,13 @@ import {
 	savePluginsJson,
 } from "@omp/manifest";
 import { npmInfo, npmInstall } from "@omp/npm";
+import { log, outputJson, setJsonMode } from "@omp/output";
 import {
+	getProjectPiDir,
 	NODE_MODULES_DIR,
 	PI_CONFIG_DIR,
 	PLUGINS_DIR,
 	PROJECT_NODE_MODULES,
-	getProjectPiDir,
 	resolveScope,
 } from "@omp/paths";
 import { createPluginSymlinks, getAllFeatureNames, getDefaultFeatures } from "@omp/symlinks";
@@ -188,14 +189,14 @@ async function processOmpDependencies(pkgJson: PluginPackageJson, isGlobal: bool
 
 	for (const depName of Object.keys(pkgJson.dependencies)) {
 		if (seen.has(depName)) {
-			console.log(chalk.yellow(`  Skipping circular dependency: ${depName}`));
+			log(chalk.yellow(`  Skipping circular dependency: ${depName}`));
 			continue;
 		}
 		seen.add(depName);
 
 		const depPkgJson = await readPluginPackageJson(depName, isGlobal);
 		if (depPkgJson?.omp?.install) {
-			console.log(chalk.dim(`  Processing dependency: ${depName}`));
+			log(chalk.dim(`  Processing dependency: ${depName}`));
 			await createPluginSymlinks(depName, depPkgJson, isGlobal);
 			// Recurse into this dependency's dependencies
 			await processOmpDependencies(depPkgJson, isGlobal, seen);
@@ -222,11 +223,11 @@ async function promptConflictResolution(conflict: Conflict): Promise<number | nu
 	});
 
 	return new Promise((resolve) => {
-		console.log(chalk.yellow(`\n⚠ Conflict: ${formatConflicts([conflict])[0]}`));
+		log(chalk.yellow(`\n⚠ Conflict: ${formatConflicts([conflict])[0]}`));
 		conflict.plugins.forEach((p, i) => {
-			console.log(`  [${i + 1}] ${p.name}`);
+			log(`  [${i + 1}] ${p.name}`);
 		});
-		console.log(`  [${conflict.plugins.length + 1}] abort`);
+		log(`  [${conflict.plugins.length + 1}] abort`);
 
 		rl.question("  Choose: ", (answer) => {
 			rl.close();
@@ -252,6 +253,11 @@ function isLocalPath(spec: string): boolean {
  * omp install [pkg...]
  */
 export async function installPlugin(packages?: string[], options: InstallOptions = {}): Promise<void> {
+	// Enable JSON mode early so all human output is suppressed
+	if (options.json) {
+		setJsonMode(true);
+	}
+
 	const isGlobal = resolveScope(options);
 	const prefix = isGlobal ? PLUGINS_DIR : getProjectPiDir();
 	const _nodeModules = isGlobal ? NODE_MODULES_DIR : PROJECT_NODE_MODULES;
@@ -278,17 +284,13 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 		);
 
 		if (packages.length === 0) {
-			console.log(chalk.yellow("No plugins to install."));
-			console.log(
-				chalk.dim(isGlobal ? "Add plugins with: omp install <package>" : "Add plugins to .pi/plugins.json"),
-			);
+			log(chalk.yellow("No plugins to install."));
+			log(chalk.dim(isGlobal ? "Add plugins with: omp install <package>" : "Add plugins to .pi/plugins.json"));
 			process.exitCode = 1;
 			return;
 		}
 
-		console.log(
-			chalk.blue(`Installing ${packages.length} plugin(s) from ${isGlobal ? "package.json" : "plugins.json"}...`),
-		);
+		log(chalk.blue(`Installing ${packages.length} plugin(s) from ${isGlobal ? "package.json" : "plugins.json"}...`));
 	}
 
 	// Get existing plugins for conflict detection
@@ -325,14 +327,19 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 		const isReinstall = existingPlugins.has(name) || !!pluginsJson.plugins[name];
 		const existingConfig = pluginsJson.config?.[name];
 
+		// Pending manifest changes (committed only on full success)
+		let pendingPluginEntry: { name: string; version: string; isDev: boolean } | null = null;
+		let pendingConfig: PluginConfig | null = null;
+		let pendingLockUpdate: { name: string; version: string } | null = null;
+
 		try {
-			console.log(chalk.blue(`\nInstalling ${pkgSpec}...`));
+			log(chalk.blue(`\nInstalling ${pkgSpec}...`));
 
 			// 1. Resolve version and fetch package metadata from npm registry
 			// npm info includes omp field if present in package.json
 			const info = await npmInfo(pkgSpec);
 			if (!info) {
-				console.log(chalk.red(`  ✗ Package not found: ${name}`));
+				log(chalk.red(`  ✗ Package not found: ${name}`));
 				process.exitCode = 1;
 				results.push({
 					name,
@@ -352,9 +359,9 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 				// Check for intra-plugin duplicates first
 				const intraDupes = detectIntraPluginDuplicates(preInstallPkgJson);
 				if (intraDupes.length > 0) {
-					console.log(chalk.red(`  ✗ Plugin has duplicate destinations:`));
+					log(chalk.red(`  ✗ Plugin has duplicate destinations:`));
 					for (const dupe of intraDupes) {
-						console.log(chalk.red(`    ${dupe.dest} ← ${dupe.sources.join(", ")}`));
+						log(chalk.red(`    ${dupe.dest} ← ${dupe.sources.join(", ")}`));
 					}
 					process.exitCode = 1;
 					results.push({
@@ -371,9 +378,9 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 				if (preInstallConflicts.length > 0 && !options.force) {
 					// Check for non-interactive terminal (CI environments)
 					if (!process.stdout.isTTY || !process.stdin.isTTY) {
-						console.log(chalk.red("Conflicts detected in non-interactive mode. Use --force to override."));
+						log(chalk.red("Conflicts detected in non-interactive mode. Use --force to override."));
 						for (const conflict of preInstallConflicts) {
-							console.log(chalk.yellow(`  ⚠ ${formatConflicts([conflict])[0]}`));
+							log(chalk.yellow(`  ⚠ ${formatConflicts([conflict])[0]}`));
 						}
 						process.exitCode = 1;
 						results.push({
@@ -402,7 +409,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 					}
 
 					if (abort) {
-						console.log(chalk.yellow(`  Aborted due to conflicts (before download)`));
+						log(chalk.yellow(`  Aborted due to conflicts (before download)`));
 						process.exitCode = 1;
 						results.push({
 							name,
@@ -416,14 +423,14 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			}
 
 			// 3. npm install - only reached if no conflicts or user resolved them
-			console.log(chalk.dim(`  Fetching from npm...`));
+			log(chalk.dim(`  Fetching from npm...`));
 			await npmInstall([pkgSpec], prefix, { save: options.save || isGlobal });
 			npmInstallSucceeded = true;
 
 			// 4. Read package.json from installed package
 			const pkgJson = await readPluginPackageJson(name, isGlobal);
 			if (!pkgJson) {
-				console.log(chalk.yellow(`  ⚠ Installed but no package.json found`));
+				log(chalk.yellow(`  ⚠ Installed but no package.json found`));
 				results.push({ name, version: info.version, success: true });
 				continue;
 			}
@@ -434,9 +441,9 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 				// Check for intra-plugin duplicates first
 				const intraDupes = detectIntraPluginDuplicates(pkgJson);
 				if (intraDupes.length > 0) {
-					console.log(chalk.red(`  ✗ Plugin has duplicate destinations:`));
+					log(chalk.red(`  ✗ Plugin has duplicate destinations:`));
 					for (const dupe of intraDupes) {
-						console.log(chalk.red(`    ${dupe.dest} ← ${dupe.sources.join(", ")}`));
+						log(chalk.red(`    ${dupe.dest} ← ${dupe.sources.join(", ")}`));
 					}
 					// Rollback: uninstall the package
 					execFileSync("npm", ["uninstall", "--prefix", prefix, name], {
@@ -457,9 +464,9 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 				if (conflicts.length > 0 && !options.force) {
 					// Check for non-interactive terminal (CI environments)
 					if (!process.stdout.isTTY || !process.stdin.isTTY) {
-						console.log(chalk.red("Conflicts detected in non-interactive mode. Use --force to override."));
+						log(chalk.red("Conflicts detected in non-interactive mode. Use --force to override."));
 						for (const conflict of conflicts) {
-							console.log(chalk.yellow(`  ⚠ ${formatConflicts([conflict])[0]}`));
+							log(chalk.yellow(`  ⚠ ${formatConflicts([conflict])[0]}`));
 						}
 						// Rollback: uninstall the package
 						execFileSync("npm", ["uninstall", "--prefix", prefix, name], {
@@ -489,7 +496,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 					}
 
 					if (abort) {
-						console.log(chalk.yellow(`  Aborted due to conflicts`));
+						log(chalk.yellow(`  Aborted due to conflicts`));
 						// Rollback: uninstall the package
 						execFileSync("npm", ["uninstall", "--prefix", prefix, name], {
 							stdio: "pipe",
@@ -513,11 +520,11 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			const allFeatureNames = getAllFeatureNames(pkgJson);
 			if (allFeatureNames.length > 0) {
 				if (enabledFeatures.length === allFeatureNames.length) {
-					console.log(chalk.dim(`  Features: all (${enabledFeatures.join(", ")})`));
+					log(chalk.dim(`  Features: all (${enabledFeatures.join(", ")})`));
 				} else if (enabledFeatures.length === 0) {
-					console.log(chalk.dim(`  Features: none (core only)`));
+					log(chalk.dim(`  Features: none (core only)`));
 				} else {
-					console.log(chalk.dim(`  Features: ${enabledFeatures.join(", ")}`));
+					log(chalk.dim(`  Features: ${enabledFeatures.join(", ")}`));
 				}
 			}
 
@@ -535,55 +542,73 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			// 7. Process dependencies with omp field (with cycle detection)
 			await processOmpDependencies(pkgJson, isGlobal, new Set([name]));
 
-			// 8. Update manifest and config
+			// 8. Stage manifest and config changes (written only after full success)
 			// For global mode, npm --save already updates package.json dependencies
 			// but we need to handle devDependencies and config manually
 			// For project-local mode, we must manually update plugins.json
 			if (options.save || options.saveDev || configToStore) {
-				// Reload to avoid stale data if multiple packages are being installed
-				pluginsJson = await loadPluginsJson(isGlobal);
 				if (options.saveDev) {
-					// Save to devDependencies
-					if (!pluginsJson.devDependencies) {
-						pluginsJson.devDependencies = {};
-					}
-					pluginsJson.devDependencies[name] = info.version;
-					// Remove from plugins if it was there
-					delete pluginsJson.plugins[name];
+					pendingPluginEntry = { name, version: info.version, isDev: true };
 				} else if (!isGlobal) {
-					// Save to plugins (project-local mode only - npm handles global)
-					pluginsJson.plugins[name] = info.version;
+					pendingPluginEntry = { name, version: info.version, isDev: false };
 				}
 
-				// Store feature config if changed
 				if (configToStore) {
+					pendingConfig = configToStore;
+				}
+			}
+
+			// Stage lock file update
+			pendingLockUpdate = { name, version: info.version };
+
+			// Add to installed plugins map for subsequent conflict detection
+			existingPlugins.set(name, pkgJson);
+
+			// 9. Commit all manifest changes atomically after all operations succeeded
+			// This ensures plugins.json is only written if npm install + symlinks both succeeded
+			if (pendingPluginEntry || pendingConfig) {
+				// Reload to avoid stale data if multiple packages are being installed
+				pluginsJson = await loadPluginsJson(isGlobal);
+
+				if (pendingPluginEntry) {
+					if (pendingPluginEntry.isDev) {
+						if (!pluginsJson.devDependencies) {
+							pluginsJson.devDependencies = {};
+						}
+						pluginsJson.devDependencies[pendingPluginEntry.name] = pendingPluginEntry.version;
+						delete pluginsJson.plugins[pendingPluginEntry.name];
+					} else {
+						pluginsJson.plugins[pendingPluginEntry.name] = pendingPluginEntry.version;
+					}
+				}
+
+				if (pendingConfig) {
 					if (!pluginsJson.config) {
 						pluginsJson.config = {};
 					}
 					pluginsJson.config[name] = {
 						...pluginsJson.config[name],
-						...configToStore,
+						...pendingConfig,
 					};
 				}
 
 				await savePluginsJson(pluginsJson, isGlobal);
 			}
 
-			// Add to installed plugins map for subsequent conflict detection
-			existingPlugins.set(name, pkgJson);
+			// Update lock file with exact version (after manifest is committed)
+			if (pendingLockUpdate) {
+				await updateLockFile(pendingLockUpdate.name, pendingLockUpdate.version, isGlobal);
+			}
 
-			// Update lock file with exact version
-			await updateLockFile(name, info.version, isGlobal);
-
-			console.log(chalk.green(`✓ Installed ${name}@${info.version}`));
+			log(chalk.green(`✓ Installed ${name}@${info.version}`));
 			results.push({ name, version: info.version, success: true });
 		} catch (err) {
 			const errorMsg = (err as Error).message;
-			console.log(chalk.red(`  ✗ Failed to install ${name}: ${errorMsg}`));
+			log(chalk.red(`  ✗ Failed to install ${name}: ${errorMsg}`));
 
 			// Rollback: remove any symlinks that were created
 			if (createdSymlinks.length > 0) {
-				console.log(chalk.dim("  Rolling back symlinks..."));
+				log(chalk.dim("  Rolling back symlinks..."));
 				const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
 				for (const dest of createdSymlinks) {
 					try {
@@ -596,7 +621,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 
 			// Rollback: uninstall npm package if it was installed
 			if (npmInstallSucceeded) {
-				console.log(chalk.dim("  Rolling back npm install..."));
+				log(chalk.dim("  Rolling back npm install..."));
 				try {
 					execFileSync("npm", ["uninstall", "--prefix", prefix, name], {
 						stdio: "pipe",
@@ -620,17 +645,17 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 	const successful = results.filter((r) => r.success);
 	const failed = results.filter((r) => !r.success);
 
-	console.log();
+	log();
 	if (successful.length > 0) {
-		console.log(chalk.green(`✓ Installed ${successful.length} plugin(s)`));
+		log(chalk.green(`✓ Installed ${successful.length} plugin(s)`));
 	}
 	if (failed.length > 0) {
-		console.log(chalk.red(`✗ Failed to install ${failed.length} plugin(s)`));
+		log(chalk.red(`✗ Failed to install ${failed.length} plugin(s)`));
 		process.exitCode = 1;
 	}
 
 	if (options.json) {
-		console.log(JSON.stringify({ results }, null, 2));
+		outputJson({ results });
 	}
 }
 
@@ -654,7 +679,7 @@ async function installLocalPlugin(
 	localPath = resolve(localPath);
 
 	if (!existsSync(localPath)) {
-		console.log(chalk.red(`Error: Path does not exist: ${localPath}`));
+		log(chalk.red(`Error: Path does not exist: ${localPath}`));
 		process.exitCode = 1;
 		return {
 			name: basename(localPath),
@@ -704,9 +729,9 @@ async function installLocalPlugin(
 		// Check for intra-plugin duplicates
 		const intraDupes = detectIntraPluginDuplicates(pkgJson);
 		if (intraDupes.length > 0) {
-			console.log(chalk.red(`\nError: Plugin has duplicate destinations:`));
+			log(chalk.red(`\nError: Plugin has duplicate destinations:`));
 			for (const dupe of intraDupes) {
-				console.log(chalk.red(`  ${dupe.dest} ← ${dupe.sources.join(", ")}`));
+				log(chalk.red(`  ${dupe.dest} ← ${dupe.sources.join(", ")}`));
 			}
 			process.exitCode = 1;
 			return {
@@ -717,7 +742,7 @@ async function installLocalPlugin(
 			};
 		}
 
-		console.log(chalk.blue(`\nInstalling ${pluginName} from ${localPath}...`));
+		log(chalk.blue(`\nInstalling ${pluginName} from ${localPath}...`));
 
 		// Create node_modules directory
 		await mkdir(nodeModules, { recursive: true });
@@ -729,7 +754,7 @@ async function installLocalPlugin(
 
 		// Copy the plugin
 		await cp(localPath, pluginDir, { recursive: true });
-		console.log(chalk.dim(`  Copied to ${pluginDir}`));
+		log(chalk.dim(`  Copied to ${pluginDir}`));
 
 		// Update plugins.json/package.json
 		const pluginsJson = await loadPluginsJson(isGlobal);
@@ -751,11 +776,11 @@ async function installLocalPlugin(
 		// Update lock file for local plugin
 		await updateLockFile(pluginName, pkgJson.version, isGlobal);
 
-		console.log(chalk.green(`✓ Installed ${pluginName}@${pkgJson.version}`));
+		log(chalk.green(`✓ Installed ${pluginName}@${pkgJson.version}`));
 		return { name: pluginName, version: pkgJson.version, success: true };
 	} catch (err) {
 		const errorMsg = (err as Error).message;
-		console.log(chalk.red(`  ✗ Failed: ${errorMsg}`));
+		log(chalk.red(`  ✗ Failed: ${errorMsg}`));
 		process.exitCode = 1;
 		return {
 			name: basename(localPath),

@@ -3,11 +3,15 @@
 	"version": "0.4.0",
 	"description": "Plugin manager for pi - install and manage pi config plugins from git repos",
 	"type": "module",
-	"main": "./dist/index.js",
-	"types": "./dist/index.d.ts",
+	"main": "./dist/cli.js",
+	"types": "./dist/cli.d.ts",
 	"bin": {
 		"omp": "./dist/cli.js"
 	},
+	"files": [
+		"dist",
+		"README.md"
+	],
 	"scripts": {
 		"build": "bun build src/cli.ts --outdir dist --target bun && tsc --emitDeclarationOnly",
 		"dev": "bun --watch src/cli.ts",

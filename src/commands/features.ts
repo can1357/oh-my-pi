@@ -188,15 +188,19 @@ async function applyFeatureChanges(
 		console.log(chalk.dim(`  Enabling: ${toEnable.join(", ")}`));
 	}
 
+	// Write runtime.json FIRST (for runtime feature detection)
+	// This order ensures consistency: if runtime.json write succeeds but plugins.json fails,
+	// the runtime behavior matches reality. If runtime.json fails, we bail before touching
+	// plugins.json, avoiding state divergence.
+	await writeRuntimeConfig(runtimePath, { features: newEnabled });
+
 	// Update plugins.json (source of truth for config/env commands)
+	// Only written after runtime.json succeeds
 	const pluginsJson = await loadPluginsJson(isGlobal);
 	if (!pluginsJson.config) pluginsJson.config = {};
 	if (!pluginsJson.config[name]) pluginsJson.config[name] = {};
 	pluginsJson.config[name].features = newEnabled;
 	await savePluginsJson(pluginsJson, isGlobal);
-
-	// Also write to runtime.json (for runtime feature detection)
-	await writeRuntimeConfig(runtimePath, { features: newEnabled });
 
 	console.log(chalk.green(`\n✓ Features updated`));
 	if (newEnabled.length > 0) {

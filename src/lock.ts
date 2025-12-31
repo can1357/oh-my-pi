@@ -1,6 +1,6 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { PI_CONFIG_DIR, getProjectPiDir } from "@omp/paths";
+import { getProjectPiDir, PI_CONFIG_DIR } from "@omp/paths";
 
 const LOCK_TIMEOUT_MS = 60000; // 1 minute
 
