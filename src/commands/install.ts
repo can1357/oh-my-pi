@@ -133,10 +133,10 @@ export function resolveFeatures(
 	if (isReinstall && existingConfig?.features !== undefined) {
 		const storedFeatures = existingConfig.features;
 
-		// null means "first install, got all"
+		// null means "first install, used defaults" - recompute defaults in case plugin updated
 		if (storedFeatures === null) {
 			return {
-				enabledFeatures: allFeatureNames,
+				enabledFeatures: getDefaultFeatures(pluginFeatures),
 				configToStore: undefined, // Keep existing
 			};
 		}
@@ -156,11 +156,12 @@ export function resolveFeatures(
 		};
 	}
 
-	// Case 4: First install with no bracket -> ALL features
+	// Case 4: First install with no bracket -> use DEFAULT features
 	if (!isReinstall) {
+		const defaultFeatures = getDefaultFeatures(pluginFeatures);
 		return {
-			enabledFeatures: allFeatureNames,
-			configToStore: { features: null }, // null = "first install, got all"
+			enabledFeatures: defaultFeatures,
+			configToStore: { features: null }, // null = "first install, used defaults"
 		};
 	}
 

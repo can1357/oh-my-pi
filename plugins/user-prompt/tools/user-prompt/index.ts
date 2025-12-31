@@ -13,18 +13,17 @@
  *   - Use multiSelect: true to allow multiple answers to be selected for a question
  *   - If you recommend a specific option, make that the first option in the list
  *     and add "(Recommended)" at the end of the label
- *
- * Parameters:
- *   - question: The question to ask the user
- *   - options: Array of {label} options for the user to choose from
- *   - multiSelect: (optional) Allow multiple selections (default: false)
  */
 
 import { Type } from "@sinclair/typebox";
 import { Text } from "@mariozechner/pi-tui";
 import type { CustomAgentTool, CustomToolFactory, ToolAPI } from "@mariozechner/pi-coding-agent";
 
-const OTHER_OPTION = "Other (provide custom input)";
+// =============================================================================
+// Tool Definition
+// =============================================================================
+
+const OTHER_OPTION = "Other (type your own)";
 
 const OptionItem = Type.Object({
    label: Type.String({ description: "Display label for this option" }),
@@ -33,7 +32,7 @@ const OptionItem = Type.Object({
 const UserPromptParams = Type.Object({
    question: Type.String({ description: "The question to ask the user" }),
    options: Type.Array(OptionItem, {
-      description: "Available options for the user to choose from. Users can always select 'Other' to provide custom text input.",
+      description: "Available options for the user to choose from.",
       minItems: 1,
    }),
    multiSelect: Type.Optional(Type.Boolean({
@@ -102,21 +101,12 @@ const factory: CustomToolFactory = (pi: ToolAPI) => {
 
       async execute(_toolCallId, params, _signal, _onUpdate) {
          const { question, options, multiSelect = false } = params;
-
          const optionLabels = options.map((o) => o.label);
-         // Add "Other" option for custom input
-         const allOptions = [...optionLabels, OTHER_OPTION];
 
-         // Check if UI is available
          if (!pi.hasUI) {
             return {
-               content: [{ type: "text", text: "Error: User prompt requires interactive mode (no UI available)" }],
-               details: {
-                  question,
-                  options: optionLabels,
-                  multiSelect,
-                  selectedOptions: [],
-               },
+               content: [{ type: "text", text: "Error: User prompt requires interactive mode" }],
+               details: { question, options: optionLabels, multiSelect, selectedOptions: [] },
             };
          }
 
@@ -124,55 +114,58 @@ const factory: CustomToolFactory = (pi: ToolAPI) => {
          let customInput: string | undefined;
 
          if (multiSelect) {
-            // For multi-select, we need to loop until user is done
-            // Use a simple approach: show all options and let user select one at a time
-            // with a "Done selecting" option
-            const DONE_OPTION = "Done selecting";
+            // Multi-select: show checkboxes in the label to indicate selection state
+            const DONE = "✓ Done selecting";
             const selected = new Set<string>();
 
             while (true) {
-               const remaining = allOptions.filter((o) => !selected.has(o) && o !== OTHER_OPTION);
-               const currentOptions = [
-                  ...remaining,
-                  ...(selected.size > 0 ? [DONE_OPTION] : []),
-                  OTHER_OPTION,
-               ];
-
-               const selectedLabel = selected.size > 0
-                  ? `\n(Selected: ${Array.from(selected).join(", ")})`
-                  : "";
-
-               const choice = await pi.ui.select(
-                  `${question}${selectedLabel}`,
-                  currentOptions
-               );
-
-               if (choice === null || choice === DONE_OPTION) {
-                  break;
+               // Build options with checkbox indicators
+               const opts: string[] = [];
+               
+               // Add "Done" option if any selected
+               if (selected.size > 0) {
+                  opts.push(DONE);
                }
+               
+               // Add all options with [X] or [ ] prefix
+               for (const opt of optionLabels) {
+                  const checkbox = selected.has(opt) ? "[X]" : "[ ]";
+                  opts.push(`${checkbox} ${opt}`);
+               }
+               
+               // Add "Other" option
+               opts.push(OTHER_OPTION);
 
+               const prefix = selected.size > 0 ? `(${selected.size} selected) ` : "";
+               const choice = await pi.ui.select(`${prefix}${question}`, opts);
+
+               if (choice === null || choice === DONE) break;
+               
                if (choice === OTHER_OPTION) {
-                  const input = await pi.ui.input("Enter your custom response:", "Type here...");
-                  if (input) {
-                     customInput = input;
-                  }
+                  const input = await pi.ui.input("Enter your response:");
+                  if (input) customInput = input;
                   break;
                }
-
-               selected.add(choice);
+               
+               // Toggle selection - extract the actual option name
+               const optMatch = choice.match(/^\[.\] (.+)$/);
+               if (optMatch) {
+                  const opt = optMatch[1];
+                  if (selected.has(opt)) {
+                     selected.delete(opt);
+                  } else {
+                     selected.add(opt);
+                  }
+               }
             }
-
             selectedOptions = Array.from(selected);
          } else {
-            // Single select: use the select UI
-            const choice = await pi.ui.select(question, allOptions);
-
+            // Single select with "Other" option
+            const choice = await pi.ui.select(question, [...optionLabels, OTHER_OPTION]);
             if (choice === OTHER_OPTION) {
-               const input = await pi.ui.input("Enter your custom response:", "Type here...");
-               if (input) {
-                  customInput = input;
-               }
-            } else if (choice !== null) {
+               const input = await pi.ui.input("Enter your response:");
+               if (input) customInput = input;
+            } else if (choice) {
                selectedOptions = [choice];
             }
          }
@@ -185,73 +178,65 @@ const factory: CustomToolFactory = (pi: ToolAPI) => {
             customInput,
          };
 
-         // Format the response
          let responseText: string;
          if (customInput) {
             responseText = `User provided custom input: ${customInput}`;
          } else if (selectedOptions.length > 0) {
-            if (multiSelect) {
-               responseText = `User selected: ${selectedOptions.join(", ")}`;
-            } else {
-               responseText = `User selected: ${selectedOptions[0]}`;
-            }
+            responseText = multiSelect
+               ? `User selected: ${selectedOptions.join(", ")}`
+               : `User selected: ${selectedOptions[0]}`;
          } else {
             responseText = "User cancelled the selection";
          }
 
-         return {
-            content: [{ type: "text", text: responseText }],
-            details,
-         };
+         return { content: [{ type: "text", text: responseText }], details };
       },
 
-      renderCall(args, theme) {
+      renderCall(args, t) {
          if (!args.question) {
-            return new Text(theme.fg("error", "user_prompt: no question provided"), 0, 0);
+            return new Text(t.fg("error", "user_prompt: no question provided"), 0, 0);
          }
 
-         const multiTag = args.multiSelect ? theme.fg("muted", " [multi-select]") : "";
-         let text = theme.fg("toolTitle", "? ") + theme.fg("accent", args.question) + multiTag;
+         const multiTag = args.multiSelect ? t.fg("muted", " [multi-select]") : "";
+         let text = t.fg("toolTitle", "? ") + t.fg("accent", args.question) + multiTag;
 
-         if (args.options && args.options.length > 0) {
-            for (let i = 0; i < args.options.length; i++) {
-               const opt = args.options[i];
-               const bullet = theme.fg("dim", "  ○ ");
-               text += "\n" + bullet + theme.fg("muted", opt.label);
+         if (args.options?.length) {
+            for (const opt of args.options) {
+               text += "\n" + t.fg("dim", "  ○ ") + t.fg("muted", opt.label);
             }
-            text += "\n" + theme.fg("dim", "  ○ ") + theme.fg("muted", "Other (custom input)");
+            text += "\n" + t.fg("dim", "  ○ ") + t.fg("muted", "Other (custom input)");
          }
 
          return new Text(text, 0, 0);
       },
 
-      renderResult(result, { expanded }, theme) {
+      renderResult(result, { expanded }, t) {
          const { details } = result;
-
          if (!details) {
-            const text = result.content[0];
-            return new Text(text?.type === "text" ? text.text : "", 0, 0);
+            const txt = result.content[0];
+            return new Text(txt?.type === "text" ? txt.text : "", 0, 0);
          }
 
-         let text = theme.fg("toolTitle", "? ") + theme.fg("accent", details.question);
+         let text = t.fg("toolTitle", "? ") + t.fg("accent", details.question);
 
          if (details.customInput) {
-            text += "\n" + theme.fg("dim", "  └─ ") + theme.fg("success", "✓ ") + theme.fg("fg", details.customInput);
+            // Custom input provided
+            text += "\n" + t.fg("dim", "  ⎿ ") + t.fg("success", details.customInput);
          } else if (details.selectedOptions.length > 0) {
-            for (let i = 0; i < details.options.length; i++) {
-               const opt = details.options[i];
-               const isSelected = details.selectedOptions.includes(opt);
-               const isLast = i === details.options.length - 1 && !details.customInput;
-               const branch = isLast ? "└─" : "├─";
-
-               if (isSelected) {
-                  text += "\n" + theme.fg("dim", `  ${branch} `) + theme.fg("success", "✓ ") + theme.fg("fg", opt);
-               } else if (expanded) {
-                  text += "\n" + theme.fg("dim", `  ${branch} ○ `) + theme.fg("muted", opt);
+            // Show only selected options
+            const selected = details.selectedOptions;
+            if (selected.length === 1) {
+               text += "\n" + t.fg("dim", "  ⎿ ") + t.fg("success", selected[0]);
+            } else {
+               // Multiple selections
+               for (let i = 0; i < selected.length; i++) {
+                  const isLast = i === selected.length - 1;
+                  const branch = isLast ? "└─" : "├─";
+                  text += "\n" + t.fg("dim", `  ${branch} `) + t.fg("success", selected[i]);
                }
             }
          } else {
-            text += "\n" + theme.fg("dim", "  └─ ") + theme.fg("warning", "No response");
+            text += "\n" + t.fg("dim", "  ⎿ ") + t.fg("warning", "Cancelled");
          }
 
          return new Text(text, 0, 0);

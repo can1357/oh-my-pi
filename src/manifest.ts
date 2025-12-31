@@ -26,6 +26,17 @@ function formatPermissionError(err: NodeJS.ErrnoException, path: string): string
 export interface OmpInstallEntry {
 	src: string;
 	dest: string;
+	/** If true, this file is copied (not symlinked) and can be edited by omp */
+	copy?: boolean;
+}
+
+/**
+ * Runtime configuration stored in plugin's runtime.json
+ * This file is copied (not symlinked) and edited by omp features/config commands
+ */
+export interface PluginRuntimeConfig {
+	features?: string[];
+	options?: Record<string, unknown>;
 }
 
 /**
@@ -41,12 +52,11 @@ export interface OmpVariable {
 }
 
 /**
- * Feature definition - groups install entries and variables
+ * Feature definition - metadata only, no install entries
+ * All feature files are always installed; runtime.json controls which are active
  */
 export interface OmpFeature {
 	description?: string;
-	/** Install entries belonging to this feature */
-	install?: OmpInstallEntry[];
 	/** Runtime variables specific to this feature */
 	variables?: Record<string, OmpVariable>;
 	/** Default enabled state (default: true) */

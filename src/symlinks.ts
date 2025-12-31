@@ -1,40 +1,28 @@
-import { existsSync, lstatSync } from "node:fs";
-import { mkdir, readlink, rm, symlink } from "node:fs/promises";
+import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFile, mkdir, readlink, rm, symlink } from "node:fs/promises";
 import { platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import type { OmpFeature, OmpInstallEntry, PluginPackageJson } from "@omp/manifest";
+import type { OmpFeature, OmpInstallEntry, PluginPackageJson, PluginRuntimeConfig } from "@omp/manifest";
 import { getPluginSourceDir } from "@omp/manifest";
 import { PI_CONFIG_DIR, PROJECT_PI_DIR } from "@omp/paths";
 import chalk from "chalk";
 
 /**
- * Get all install entries for enabled features + top-level entries.
- * If enabledFeatures is undefined, returns only top-level entries (backward compatible).
- * If enabledFeatures is provided, includes top-level + entries from those features.
+ * Get all install entries from package.json.
+ * Features no longer have install entries - all files are always installed.
+ */
+export function getInstallEntries(pkgJson: PluginPackageJson): OmpInstallEntry[] {
+	return pkgJson.omp?.install ?? [];
+}
+
+/**
+ * @deprecated Use getInstallEntries instead. Features no longer have install arrays.
  */
 export function getEnabledInstallEntries(
 	pkgJson: PluginPackageJson,
-	enabledFeatures?: string[],
+	_enabledFeatures?: string[],
 ): OmpInstallEntry[] {
-	const entries: OmpInstallEntry[] = [];
-
-	// Always include top-level install entries
-	if (pkgJson.omp?.install) {
-		entries.push(...pkgJson.omp.install);
-	}
-
-	// If features specified, include install entries from enabled features
-	if (enabledFeatures && pkgJson.omp?.features) {
-		const features = pkgJson.omp.features;
-		for (const featureName of enabledFeatures) {
-			const feature = features[featureName];
-			if (feature?.install) {
-				entries.push(...feature.install);
-			}
-		}
-	}
-
-	return entries;
+	return getInstallEntries(pkgJson);
 }
 
 /**
@@ -95,9 +83,9 @@ export interface SymlinkRemovalResult {
 }
 
 /**
- * Create symlinks for a plugin's omp.install entries
+ * Create symlinks (or copy files with copy:true) for a plugin's omp.install entries
  * @param skipDestinations - Set of destination paths to skip (e.g., due to conflict resolution)
- * @param enabledFeatures - If provided, only install entries from these features (plus top-level)
+ * @param enabledFeatures - Features to write into runtime.json (if plugin has one)
  */
 export async function createPluginSymlinks(
 	pluginName: string,
@@ -110,7 +98,7 @@ export async function createPluginSymlinks(
 	const result: SymlinkResult = { created: [], errors: [] };
 	const sourceDir = getPluginSourceDir(pluginName, global);
 
-	const installEntries = getEnabledInstallEntries(pkgJson, enabledFeatures);
+	const installEntries = getInstallEntries(pkgJson);
 	if (installEntries.length === 0) {
 		if (verbose) {
 			console.log(chalk.dim("  No omp.install entries found"));
@@ -155,40 +143,57 @@ export async function createPluginSymlinks(
 			// Create parent directory
 			await mkdir(dirname(dest), { recursive: true });
 
-			// Remove existing symlink/file if it exists
-			try {
-				await rm(dest, { force: true, recursive: true });
-			} catch {}
-
-			// Create symlink (use junctions on Windows for directories to avoid admin requirement)
-			try {
-				if (isWindows) {
-					const stats = lstatSync(src);
-					if (stats.isDirectory()) {
-						await symlink(src, dest, "junction");
-					} else {
-						await symlink(src, dest, "file");
+			// Handle copy vs symlink
+			if (entry.copy) {
+				// For copy entries (like runtime.json), copy the file
+				// But DON'T overwrite if it already exists (preserves user edits)
+				if (!existsSync(dest)) {
+					await copyFile(src, dest);
+					result.created.push(entry.dest);
+					if (verbose) {
+						console.log(chalk.dim(`  Copied: ${entry.dest} (from ${entry.src})`));
 					}
 				} else {
-					await symlink(src, dest);
+					if (verbose) {
+						console.log(chalk.dim(`  Exists: ${entry.dest} (preserved)`));
+					}
 				}
-			} catch (symlinkErr) {
-				const error = symlinkErr as NodeJS.ErrnoException;
-				if (isWindows && error.code === "EPERM") {
-					console.log(chalk.red(`  Permission denied creating symlink.`));
-					console.log(chalk.dim("  On Windows, enable Developer Mode or run as Administrator."));
-					console.log(chalk.dim("  Settings > Update & Security > For developers > Developer Mode"));
-				}
-				throw symlinkErr;
-			}
-			result.created.push(entry.dest);
+			} else {
+				// Remove existing symlink/file if it exists
+				try {
+					await rm(dest, { force: true, recursive: true });
+				} catch {}
 
-			if (verbose) {
-				console.log(chalk.dim(`  Linked: ${entry.dest} → ${entry.src}`));
+				// Create symlink (use junctions on Windows for directories to avoid admin requirement)
+				try {
+					if (isWindows) {
+						const stats = lstatSync(src);
+						if (stats.isDirectory()) {
+							await symlink(src, dest, "junction");
+						} else {
+							await symlink(src, dest, "file");
+						}
+					} else {
+						await symlink(src, dest);
+					}
+				} catch (symlinkErr) {
+					const error = symlinkErr as NodeJS.ErrnoException;
+					if (isWindows && error.code === "EPERM") {
+						console.log(chalk.red(`  Permission denied creating symlink.`));
+						console.log(chalk.dim("  On Windows, enable Developer Mode or run as Administrator."));
+						console.log(chalk.dim("  Settings > Update & Security > For developers > Developer Mode"));
+					}
+					throw symlinkErr;
+				}
+				result.created.push(entry.dest);
+
+				if (verbose) {
+					console.log(chalk.dim(`  Linked: ${entry.dest} → ${entry.src}`));
+				}
 			}
 		} catch (err) {
 			const error = err as NodeJS.ErrnoException;
-			const msg = `Failed to link ${entry.dest}: ${formatPermissionError(error, join(baseDir, entry.dest))}`;
+			const msg = `Failed to install ${entry.dest}: ${formatPermissionError(error, join(baseDir, entry.dest))}`;
 			result.errors.push(msg);
 			if (verbose) {
 				console.log(chalk.red(`  ✗ ${msg}`));
@@ -199,23 +204,77 @@ export async function createPluginSymlinks(
 		}
 	}
 
+	// If enabledFeatures provided and plugin has a runtime.json entry, update it
+	if (enabledFeatures !== undefined) {
+		const runtimeEntry = installEntries.find((e) => e.copy && e.dest.endsWith("runtime.json"));
+		if (runtimeEntry) {
+			const runtimePath = join(baseDir, runtimeEntry.dest);
+			await writeRuntimeConfig(runtimePath, { features: enabledFeatures }, verbose);
+		}
+	}
+
 	return result;
 }
 
 /**
- * Remove symlinks for a plugin's omp.install entries
- * @param enabledFeatures - If provided, only remove entries from these features (plus top-level)
+ * Read runtime.json config from a plugin's installed location
+ */
+export function readRuntimeConfig(runtimePath: string): PluginRuntimeConfig {
+	try {
+		const content = readFileSync(runtimePath, "utf-8");
+		return JSON.parse(content) as PluginRuntimeConfig;
+	} catch {
+		return { features: [], options: {} };
+	}
+}
+
+/**
+ * Write runtime.json config to a plugin's installed location
+ */
+export async function writeRuntimeConfig(
+	runtimePath: string,
+	config: PluginRuntimeConfig,
+	verbose = false,
+): Promise<void> {
+	try {
+		const existing = readRuntimeConfig(runtimePath);
+		const merged: PluginRuntimeConfig = {
+			features: config.features ?? existing.features ?? [],
+			options: { ...existing.options, ...config.options },
+		};
+		writeFileSync(runtimePath, JSON.stringify(merged, null, 2) + "\n");
+		if (verbose) {
+			console.log(chalk.dim(`  Updated: ${runtimePath}`));
+		}
+	} catch (err) {
+		if (verbose) {
+			console.log(chalk.yellow(`  ⚠ Failed to update runtime config: ${err}`));
+		}
+	}
+}
+
+/**
+ * Get the path to a plugin's runtime.json in the installed location
+ */
+export function getRuntimeConfigPath(pkgJson: PluginPackageJson, global = true): string | null {
+	const entries = getInstallEntries(pkgJson);
+	const runtimeEntry = entries.find((e) => e.copy && e.dest.endsWith("runtime.json"));
+	if (!runtimeEntry) return null;
+	return join(getBaseDir(global), runtimeEntry.dest);
+}
+
+/**
+ * Remove symlinks and copied files for a plugin's omp.install entries
  */
 export async function removePluginSymlinks(
 	_pluginName: string,
 	pkgJson: PluginPackageJson,
 	global = true,
 	verbose = true,
-	enabledFeatures?: string[],
 ): Promise<SymlinkRemovalResult> {
 	const result: SymlinkRemovalResult = { removed: [], errors: [], skippedNonSymlinks: [] };
 
-	const installEntries = getEnabledInstallEntries(pkgJson, enabledFeatures);
+	const installEntries = getInstallEntries(pkgJson);
 	if (installEntries.length === 0) {
 		return result;
 	}
@@ -238,6 +297,18 @@ export async function removePluginSymlinks(
 		try {
 			if (existsSync(dest)) {
 				const stats = lstatSync(dest);
+
+				// For copy entries (like runtime.json), we can safely remove them
+				if (entry.copy) {
+					await rm(dest, { force: true });
+					result.removed.push(entry.dest);
+					if (verbose) {
+						console.log(chalk.dim(`  Removed: ${entry.dest}`));
+					}
+					continue;
+				}
+
+				// For symlinks, check they're actually symlinks
 				if (!stats.isSymbolicLink()) {
 					result.skippedNonSymlinks.push(dest);
 					if (verbose) {
@@ -269,20 +340,18 @@ export async function removePluginSymlinks(
 }
 
 /**
- * Check symlink health for a plugin
- * @param enabledFeatures - If provided, only check entries from these features (plus top-level)
+ * Check symlink/file health for a plugin
  */
 export async function checkPluginSymlinks(
 	pluginName: string,
 	pkgJson: PluginPackageJson,
 	global = true,
-	enabledFeatures?: string[],
 ): Promise<{ valid: string[]; broken: string[]; missing: string[] }> {
 	const result = { valid: [] as string[], broken: [] as string[], missing: [] as string[] };
 	const sourceDir = getPluginSourceDir(pluginName, global);
 	const baseDir = getBaseDir(global);
 
-	const installEntries = getEnabledInstallEntries(pkgJson, enabledFeatures);
+	const installEntries = getInstallEntries(pkgJson);
 	if (installEntries.length === 0) {
 		return result;
 	}
@@ -304,6 +373,18 @@ export async function checkPluginSymlinks(
 
 		try {
 			const stats = lstatSync(dest);
+
+			// For copy entries, just check the file exists
+			if (entry.copy) {
+				if (stats.isFile()) {
+					result.valid.push(entry.dest);
+				} else {
+					result.broken.push(entry.dest);
+				}
+				continue;
+			}
+
+			// For symlinks, verify they point to valid sources
 			if (stats.isSymbolicLink()) {
 				const _target = await readlink(dest);
 				if (existsSync(src)) {

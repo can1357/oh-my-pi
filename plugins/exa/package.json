@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/exa",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Exa AI web search and websets tools for pi",
   "keywords": ["omp-plugin", "exa", "web-search", "websets", "ai-search"],
   "author": "Can Bölük <me@can.ac>",
@@ -12,8 +12,45 @@
   },
   "omp": {
     "install": [
-      { "src": "tools/exa/index.ts", "dest": "agent/tools/exa/index.ts" }
-    ]
+      { "src": "tools/exa/runtime.json", "dest": "agent/tools/exa/runtime.json", "copy": true },
+      { "src": "tools/exa/index.ts", "dest": "agent/tools/exa/index.ts" },
+      { "src": "tools/exa/shared.ts", "dest": "agent/tools/exa/shared.ts" },
+      { "src": "tools/exa/search.ts", "dest": "agent/tools/exa/search.ts" },
+      { "src": "tools/exa/linkedin.ts", "dest": "agent/tools/exa/linkedin.ts" },
+      { "src": "tools/exa/company.ts", "dest": "agent/tools/exa/company.ts" },
+      { "src": "tools/exa/researcher.ts", "dest": "agent/tools/exa/researcher.ts" },
+      { "src": "tools/exa/websets.ts", "dest": "agent/tools/exa/websets.ts" }
+    ],
+    "variables": {
+      "apiKey": {
+        "type": "string",
+        "env": "EXA_API_KEY",
+        "description": "Exa API key for authentication",
+        "required": true
+      }
+    },
+    "features": {
+      "search": {
+        "description": "Core web search (general, deep, code context, URL crawling)",
+        "default": true
+      },
+      "linkedin": {
+        "description": "LinkedIn profile and company search",
+        "default": false
+      },
+      "company": {
+        "description": "Comprehensive company research",
+        "default": false
+      },
+      "researcher": {
+        "description": "Long-running AI research tasks",
+        "default": false
+      },
+      "websets": {
+        "description": "Entity collection management (14 tools)",
+        "default": false
+      }
+    }
   },
   "files": ["tools"]
 }

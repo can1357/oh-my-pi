@@ -120,7 +120,7 @@ Most commands accept `-g`/`--global` or `-l`/`--local` flags to override scope a
 Plugins can expose optional features that you can selectively enable. Use pip-style bracket syntax during install:
 
 ```bash
-# Install with all features (default for first install)
+# Install with default features (plugin decides which are on by default)
 omp install @oh-my-pi/exa
 
 # Install with specific features only
@@ -137,6 +137,8 @@ omp install @oh-my-pi/exa[]
 omp install @oh-my-pi/exa              # Keeps existing features
 omp install @oh-my-pi/exa[search]      # Reconfigures to search only
 ```
+
+Plugins define which features are enabled by default via `default: true` in their manifest. Features with `default: false` are opt-in.
 
 Manage features after install with `omp features`:
 

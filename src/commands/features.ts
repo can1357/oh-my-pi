@@ -1,12 +1,7 @@
-import { loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
+import { checkbox } from "@inquirer/prompts";
+import { loadPluginsJson, readPluginPackageJson } from "@omp/manifest";
 import { resolveScope } from "@omp/paths";
-import {
-	createPluginSymlinks,
-	getAllFeatureNames,
-	getDefaultFeatures,
-	getEnabledInstallEntries,
-	removePluginSymlinks,
-} from "@omp/symlinks";
+import { getAllFeatureNames, getDefaultFeatures, getRuntimeConfigPath, readRuntimeConfig, writeRuntimeConfig } from "@omp/symlinks";
 import chalk from "chalk";
 
 export interface FeaturesOptions {
@@ -19,37 +14,10 @@ export interface FeaturesOptions {
 }
 
 /**
- * Resolve which features are currently enabled based on stored config
- */
-function resolveCurrentFeatures(
-	allFeatureNames: string[],
-	storedFeatures: string[] | null | undefined,
-	pluginFeatures: Record<string, { default?: boolean }>,
-): string[] {
-	// null = first install, got all
-	if (storedFeatures === null) {
-		return allFeatureNames;
-	}
-
-	// ["*"] = explicitly all
-	if (Array.isArray(storedFeatures) && storedFeatures.includes("*")) {
-		return allFeatureNames;
-	}
-
-	// Specific list
-	if (Array.isArray(storedFeatures)) {
-		return storedFeatures;
-	}
-
-	// undefined = use defaults
-	return getDefaultFeatures(pluginFeatures);
-}
-
-/**
- * List available features for a plugin
+ * Interactive feature selection for a plugin
  * omp features @oh-my-pi/exa
  */
-export async function listFeatures(name: string, options: FeaturesOptions = {}): Promise<void> {
+export async function interactiveFeatures(name: string, options: FeaturesOptions = {}): Promise<void> {
 	const isGlobal = resolveScope(options);
 	const pluginsJson = await loadPluginsJson(isGlobal);
 
@@ -73,10 +41,17 @@ export async function listFeatures(name: string, options: FeaturesOptions = {}):
 		return;
 	}
 
-	const allFeatureNames = Object.keys(features);
-	const config = pluginsJson.config?.[name];
-	const enabledFeatures = resolveCurrentFeatures(allFeatureNames, config?.features, features);
+	// Get runtime config path and current enabled features
+	const runtimePath = getRuntimeConfigPath(pkgJson, isGlobal);
+	if (!runtimePath) {
+		console.log(chalk.yellow(`Plugin "${name}" does not have a runtime.json config file.`));
+		return;
+	}
 
+	const runtimeConfig = readRuntimeConfig(runtimePath);
+	const enabledFeatures = runtimeConfig.features ?? getDefaultFeatures(features);
+
+	// JSON output mode - just list
 	if (options.json) {
 		console.log(
 			JSON.stringify(
@@ -87,7 +62,6 @@ export async function listFeatures(name: string, options: FeaturesOptions = {}):
 						enabled: enabledFeatures.includes(fname),
 						default: fdef.default !== false,
 						description: fdef.description,
-						installCount: fdef.install?.length || 0,
 						variables: fdef.variables ? Object.keys(fdef.variables) : [],
 					})),
 				},
@@ -98,6 +72,48 @@ export async function listFeatures(name: string, options: FeaturesOptions = {}):
 		return;
 	}
 
+	// Non-interactive mode - just list
+	if (!process.stdout.isTTY || !process.stdin.isTTY) {
+		listFeaturesNonInteractive(name, features, enabledFeatures);
+		return;
+	}
+
+	// Interactive mode - checkbox prompt
+	console.log(chalk.bold(`\nConfigure features for ${name}:\n`));
+
+	const choices = Object.entries(features).map(([fname, fdef]) => {
+		const optIn = fdef.default === false ? chalk.dim(" (opt-in)") : "";
+		const desc = fdef.description ? chalk.dim(` - ${fdef.description}`) : "";
+		return {
+			name: `${fname}${optIn}${desc}`,
+			value: fname,
+			checked: enabledFeatures.includes(fname),
+		};
+	});
+
+	try {
+		const selected = await checkbox({
+			message: "Select features to enable:",
+			choices,
+			pageSize: 15,
+		});
+
+		// Apply changes
+		await applyFeatureChanges(name, runtimePath, features, enabledFeatures, selected);
+	} catch (err) {
+		// User cancelled (Ctrl+C)
+		console.log(chalk.dim("\nCancelled."));
+	}
+}
+
+/**
+ * Non-interactive feature listing
+ */
+function listFeaturesNonInteractive(
+	name: string,
+	features: Record<string, { description?: string; default?: boolean; variables?: Record<string, unknown> }>,
+	enabledFeatures: string[],
+): void {
 	console.log(chalk.bold(`\nFeatures for ${name}:\n`));
 
 	for (const [fname, fdef] of Object.entries(features)) {
@@ -108,9 +124,6 @@ export async function listFeatures(name: string, options: FeaturesOptions = {}):
 		console.log(`${icon} ${chalk.bold(fname)}${defaultStr}`);
 		if (fdef.description) {
 			console.log(chalk.dim(`    ${fdef.description}`));
-		}
-		if (fdef.install?.length) {
-			console.log(chalk.dim(`    Files: ${fdef.install.length}`));
 		}
 		if (fdef.variables && Object.keys(fdef.variables).length > 0) {
 			console.log(chalk.dim(`    Variables: ${Object.keys(fdef.variables).join(", ")}`));
@@ -123,7 +136,46 @@ export async function listFeatures(name: string, options: FeaturesOptions = {}):
 }
 
 /**
- * Configure features for an installed plugin
+ * Apply feature changes - simply update runtime.json
+ */
+async function applyFeatureChanges(
+	name: string,
+	runtimePath: string,
+	features: Record<string, { description?: string; default?: boolean; variables?: Record<string, unknown> }>,
+	currentlyEnabled: string[],
+	newEnabled: string[],
+): Promise<void> {
+	// Compute what changed
+	const toDisable = currentlyEnabled.filter((f) => !newEnabled.includes(f));
+	const toEnable = newEnabled.filter((f) => !currentlyEnabled.includes(f));
+
+	if (toDisable.length === 0 && toEnable.length === 0) {
+		console.log(chalk.yellow("\nNo changes to feature configuration."));
+		return;
+	}
+
+	console.log(chalk.blue(`\nApplying changes...`));
+
+	if (toDisable.length > 0) {
+		console.log(chalk.dim(`  Disabling: ${toDisable.join(", ")}`));
+	}
+	if (toEnable.length > 0) {
+		console.log(chalk.dim(`  Enabling: ${toEnable.join(", ")}`));
+	}
+
+	// Write the new features to runtime.json
+	await writeRuntimeConfig(runtimePath, { features: newEnabled });
+
+	console.log(chalk.green(`\n✓ Features updated`));
+	if (newEnabled.length > 0) {
+		console.log(chalk.dim(`  Enabled: ${newEnabled.join(", ")}`));
+	} else {
+		console.log(chalk.dim(`  Enabled: none`));
+	}
+}
+
+/**
+ * Configure features for an installed plugin via CLI flags
  * omp features @oh-my-pi/exa --enable websets --disable search
  * omp features @oh-my-pi/exa --set search,websets
  */
@@ -153,8 +205,17 @@ export async function configureFeatures(name: string, options: FeaturesOptions =
 	}
 
 	const allFeatureNames = Object.keys(features);
-	const config = pluginsJson.config?.[name];
-	const currentlyEnabled = resolveCurrentFeatures(allFeatureNames, config?.features, features);
+
+	// Get runtime config
+	const runtimePath = getRuntimeConfigPath(pkgJson, isGlobal);
+	if (!runtimePath) {
+		console.log(chalk.yellow(`Plugin "${name}" does not have a runtime.json config file.`));
+		process.exitCode = 1;
+		return;
+	}
+
+	const runtimeConfig = readRuntimeConfig(runtimePath);
+	const currentlyEnabled = runtimeConfig.features ?? getDefaultFeatures(features);
 
 	let newEnabled: string[];
 
@@ -204,83 +265,23 @@ export async function configureFeatures(name: string, options: FeaturesOptions =
 		}
 	}
 
-	// Compute what changed
-	const toDisable = currentlyEnabled.filter((f) => !newEnabled.includes(f));
-	const toEnable = newEnabled.filter((f) => !currentlyEnabled.includes(f));
-
-	if (toDisable.length === 0 && toEnable.length === 0) {
-		console.log(chalk.yellow("No changes to feature configuration."));
-		return;
-	}
-
-	console.log(chalk.blue(`\nReconfiguring features for ${name}...`));
-
-	// Remove symlinks for disabled features
-	if (toDisable.length > 0) {
-		console.log(chalk.dim(`  Disabling: ${toDisable.join(", ")}`));
-		// Create a fake pkgJson with only the features to disable
-		const disableEntries = toDisable.flatMap((f) => features[f].install || []);
-		if (disableEntries.length > 0) {
-			await removePluginSymlinks(name, { ...pkgJson, omp: { install: disableEntries } }, isGlobal, false);
-		}
-	}
-
-	// Create symlinks for newly enabled features
-	if (toEnable.length > 0) {
-		console.log(chalk.dim(`  Enabling: ${toEnable.join(", ")}`));
-		const enableEntries = toEnable.flatMap((f) => features[f].install || []);
-		if (enableEntries.length > 0) {
-			await createPluginSymlinks(
-				name,
-				{ ...pkgJson, omp: { install: enableEntries } },
-				isGlobal,
-				false,
-				undefined,
-				undefined,
-			);
-		}
-	}
-
-	// Update config in plugins.json
-	if (!pluginsJson.config) {
-		pluginsJson.config = {};
-	}
-	if (!pluginsJson.config[name]) {
-		pluginsJson.config[name] = {};
-	}
-
-	// Store the new feature list
-	if (newEnabled.length === allFeatureNames.length) {
-		// All enabled - store ["*"] for explicitness
-		pluginsJson.config[name].features = ["*"];
-	} else {
-		pluginsJson.config[name].features = newEnabled;
-	}
-
-	await savePluginsJson(pluginsJson, isGlobal);
-
-	console.log(chalk.green(`\n✓ Features updated`));
-	if (newEnabled.length > 0) {
-		console.log(chalk.dim(`  Enabled: ${newEnabled.join(", ")}`));
-	} else {
-		console.log(chalk.dim(`  Enabled: none (core only)`));
-	}
+	await applyFeatureChanges(name, runtimePath, features, currentlyEnabled, newEnabled);
 
 	if (options.json) {
-		console.log(JSON.stringify({ plugin: name, enabled: newEnabled, disabled: toDisable, added: toEnable }, null, 2));
+		console.log(JSON.stringify({ plugin: name, enabled: newEnabled }, null, 2));
 	}
 }
 
 /**
  * Main features command handler
- * Routes to list or configure based on options
+ * Routes to interactive or configure based on options
  */
 export async function featuresCommand(name: string, options: FeaturesOptions = {}): Promise<void> {
-	// If any modification options are passed, configure
+	// If any modification options are passed, configure via CLI
 	if (options.enable || options.disable || options.set !== undefined) {
 		await configureFeatures(name, options);
 	} else {
-		// Otherwise, just list
-		await listFeatures(name, options);
+		// Otherwise, show interactive UI (or list in non-TTY mode)
+		await interactiveFeatures(name, options);
 	}
 }
