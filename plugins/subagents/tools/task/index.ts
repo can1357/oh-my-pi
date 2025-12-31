@@ -29,7 +29,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import * as readline from "node:readline";
 import { Type } from "@sinclair/typebox";
 import { StringEnum, type AgentToolUpdateCallback } from "@mariozechner/pi-ai";
@@ -39,6 +39,76 @@ import type {
   CustomToolFactory,
   ToolAPI,
 } from "@mariozechner/pi-coding-agent";
+
+/** Cache for available models (refreshed once per tool factory instantiation) */
+let cachedModels: string[] | null = null;
+
+/**
+ * Get available models from `pi --list-models`.
+ * Caches the result for performance.
+ */
+function getAvailableModels(): string[] {
+  if (cachedModels !== null) return cachedModels;
+
+  try {
+    const result = spawnSync("pi", ["--list-models"], {
+      encoding: "utf-8",
+      timeout: 5000,
+    });
+
+    if (result.status !== 0 || !result.stdout) {
+      cachedModels = [];
+      return cachedModels;
+    }
+
+    // Parse output: skip header line, extract model column
+    const lines = result.stdout.trim().split("\n");
+    cachedModels = lines
+      .slice(1) // Skip header
+      .map((line) => {
+        const parts = line.trim().split(/\s+/);
+        return parts[1]; // Model name is second column
+      })
+      .filter(Boolean);
+
+    return cachedModels;
+  } catch {
+    cachedModels = [];
+    return cachedModels;
+  }
+}
+
+/**
+ * Resolve a fuzzy model pattern to an actual model name.
+ * Supports comma-separated patterns (e.g., "gpt, opus").
+ * Returns the first match found, or undefined if no match.
+ */
+function resolveModelPattern(
+  pattern: string,
+  availableModels?: string[],
+): string | undefined {
+  if (!pattern || pattern === "default") return undefined;
+
+  const models = availableModels ?? getAvailableModels();
+  if (models.length === 0) {
+    // Fallback: return pattern as-is if we can't get available models
+    return pattern;
+  }
+
+  // Split by comma, try each pattern in order
+  const patterns = pattern
+    .split(",")
+    .map((p) => p.trim().toLowerCase())
+    .filter(Boolean);
+
+  for (const p of patterns) {
+    const match = models.find((m) => m.toLowerCase().includes(p));
+    if (match) return match;
+  }
+
+  // No match found - return first pattern as-is (let pi handle the error)
+  return patterns[0];
+}
 
 const MAX_OUTPUT_LINES = 5000;
 const MAX_OUTPUT_BYTES = 500_000;
@@ -450,11 +520,11 @@ async function runSingleAgent(
 
   // "default" means no model override - use pi's configured default
   const modelOverride = options?.model;
-  const modelToUse =
+  const rawModel =
     modelOverride === "default" ? undefined : (modelOverride ?? agent.model);
+  const modelToUse = rawModel ? resolveModelPattern(rawModel) : undefined;
   if (modelToUse) {
-    // Use --models for pattern matching (takes first match from available models)
-    args.push("--models", modelToUse);
+    args.push("--model", modelToUse);
   }
 
   if (agent.tools && agent.tools.length > 0) {
@@ -806,7 +876,7 @@ function buildDescription(pi: ToolAPI): string {
       " concurrent)",
   );
   lines.push(
-    '  - model: (optional) Override the agent\'s default model using pattern matching (e.g., "sonnet", "haiku", "gpt-4o"), or "default" to use pi\'s default model',
+    '  - model: (optional) Override the agent\'s default model with fuzzy matching (e.g., "sonnet", "codex", "5.2"). Supports comma-separated fallbacks: "gpt, opus" tries gpt first, then opus. Use "default" for pi\'s default model',
   );
   lines.push(
     "- context: (optional) Shared context string prepended to all task prompts - use this to avoid repeating instructions",
