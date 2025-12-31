@@ -7,7 +7,7 @@ import {
 	PI_CONFIG_DIR,
 	PLUGINS_DIR,
 	PROJECT_NODE_MODULES,
-	PROJECT_PI_DIR,
+	getProjectPiDir,
 	resolveScope,
 } from "@omp/paths";
 import { createPluginSymlinks, removePluginSymlinks } from "@omp/symlinks";
@@ -102,7 +102,7 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 		await npmUpdate(npmPlugins, prefix);
 
 		// Base directory for symlink destinations
-		const baseDir = isGlobal ? PI_CONFIG_DIR : PROJECT_PI_DIR;
+		const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
 
 		// Re-process symlinks for each updated plugin
 		for (const pluginName of npmPlugins) {

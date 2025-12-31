@@ -2,7 +2,7 @@ import { existsSync, lstatSync } from "node:fs";
 import { readlink } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { getInstalledPlugins, getPluginSourceDir, readPluginPackageJson } from "@omp/manifest";
-import { PI_CONFIG_DIR, PROJECT_PI_DIR, resolveScope } from "@omp/paths";
+import { PI_CONFIG_DIR, getProjectPiDir, resolveScope } from "@omp/paths";
 import { traceInstalledFile } from "@omp/symlinks";
 import chalk from "chalk";
 
@@ -19,7 +19,7 @@ export async function whyFile(filePath: string, options: WhyOptions = {}): Promi
 	const isGlobal = resolveScope(options);
 
 	// Determine the base directory based on scope
-	const baseDir = isGlobal ? PI_CONFIG_DIR : resolve(PROJECT_PI_DIR);
+	const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
 
 	// Normalize path - make it relative to the appropriate base directory
 	let relativePath = filePath;
@@ -31,9 +31,9 @@ export async function whyFile(filePath: string, options: WhyOptions = {}): Promi
 		}
 	} else {
 		// Project-local mode
-		const resolvedProjectDir = resolve(PROJECT_PI_DIR);
-		if (filePath.startsWith(resolvedProjectDir)) {
-			relativePath = relative(resolvedProjectDir, filePath);
+		const projectPiDir = getProjectPiDir();
+		if (filePath.startsWith(projectPiDir)) {
+			relativePath = relative(projectPiDir, filePath);
 		} else if (filePath.startsWith(".pi/")) {
 			relativePath = filePath.slice(4); // Remove .pi/
 		}

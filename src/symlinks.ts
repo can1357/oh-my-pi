@@ -4,7 +4,7 @@ import { platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { OmpFeature, OmpInstallEntry, PluginPackageJson, PluginRuntimeConfig } from "@omp/manifest";
 import { getPluginSourceDir } from "@omp/manifest";
-import { PI_CONFIG_DIR, PROJECT_PI_DIR } from "@omp/paths";
+import { PI_CONFIG_DIR, getProjectPiDir } from "@omp/paths";
 import chalk from "chalk";
 
 /**
@@ -65,7 +65,7 @@ function isPathWithinBase(basePath: string, targetPath: string): boolean {
  * Get the base directory for symlink destinations based on scope
  */
 function getBaseDir(global: boolean): string {
-	return global ? PI_CONFIG_DIR : PROJECT_PI_DIR;
+	return global ? PI_CONFIG_DIR : getProjectPiDir();
 }
 
 export interface SymlinkResult {

@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { open, readFile, rename, unlink } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { GLOBAL_LOCK_FILE, PROJECT_PLUGINS_LOCK } from "@omp/paths";
 import chalk from "chalk";
 
@@ -67,11 +68,77 @@ export async function loadLockFile(global = true): Promise<LockFile | null> {
 }
 
 /**
- * Save lock file
+ * Acquire an advisory lock for lockfile operations.
+ * Uses exclusive file creation (wx flag) for atomicity.
+ */
+async function acquireLockfileLock(lockfilePath: string): Promise<void> {
+	const advisoryLockPath = `${lockfilePath}.lock`;
+	const maxAttempts = 50;
+	const retryDelayMs = 100;
+
+	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		try {
+			// Attempt exclusive creation - fails if file exists
+			const handle = await open(advisoryLockPath, "wx");
+			await handle.writeFile(JSON.stringify({ pid: process.pid, timestamp: Date.now() }));
+			await handle.close();
+			return;
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+				// Lock exists, check if stale (older than 30 seconds)
+				try {
+					const content = await readFile(advisoryLockPath, "utf-8");
+					const { timestamp } = JSON.parse(content);
+					if (Date.now() - timestamp > 30000) {
+						// Stale lock, remove and retry
+						await unlink(advisoryLockPath).catch(() => {});
+						continue;
+					}
+				} catch {
+					// Corrupted lock file, remove and retry
+					await unlink(advisoryLockPath).catch(() => {});
+					continue;
+				}
+				// Wait and retry
+				await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+				continue;
+			}
+			throw err;
+		}
+	}
+	throw new Error(`Failed to acquire lockfile lock after ${maxAttempts} attempts`);
+}
+
+/**
+ * Release the advisory lock for lockfile operations.
+ */
+async function releaseLockfileLock(lockfilePath: string): Promise<void> {
+	const advisoryLockPath = `${lockfilePath}.lock`;
+	await unlink(advisoryLockPath).catch(() => {});
+}
+
+/**
+ * Save lock file atomically using temp-file-plus-rename pattern.
+ * This ensures the lockfile is never left in a partially-written state.
  */
 export async function saveLockFile(lockFile: LockFile, global = true): Promise<void> {
 	const path = global ? GLOBAL_LOCK_FILE : PROJECT_PLUGINS_LOCK;
-	await writeFile(path, JSON.stringify(lockFile, null, 2));
+	const tempPath = join(dirname(path), `.omp-lockfile-${process.pid}-${Date.now()}.tmp`);
+
+	// Write to temp file first
+	const handle = await open(tempPath, "w");
+	try {
+		await handle.writeFile(JSON.stringify(lockFile, null, 2));
+		await handle.sync(); // Ensure data is flushed to disk
+		await handle.close();
+
+		// Atomic rename to replace original
+		await rename(tempPath, path);
+	} catch (err) {
+		await handle.close().catch(() => {});
+		await unlink(tempPath).catch(() => {});
+		throw err;
+	}
 }
 
 /**
@@ -117,16 +184,24 @@ export async function getLockedVersion(packageName: string, global = true): Prom
 
 /**
  * Update the lock file with a package's exact version.
+ * Uses advisory locking to prevent concurrent read-modify-write corruption.
  */
 export async function updateLockFile(packageName: string, version: string, global = true): Promise<void> {
-	let lockFile = await loadLockFile(global);
-	if (!lockFile) {
-		lockFile = createLockFile();
+	const lockfilePath = global ? GLOBAL_LOCK_FILE : PROJECT_PLUGINS_LOCK;
+
+	await acquireLockfileLock(lockfilePath);
+	try {
+		let lockFile = await loadLockFile(global);
+		if (!lockFile) {
+			lockFile = createLockFile();
+		}
+
+		lockFile.packages[packageName] = {
+			version,
+		};
+
+		await saveLockFile(lockFile, global);
+	} finally {
+		await releaseLockfileLock(lockfilePath);
 	}
-
-	lockFile.packages[packageName] = {
-		version,
-	};
-
-	await saveLockFile(lockFile, global);
 }
