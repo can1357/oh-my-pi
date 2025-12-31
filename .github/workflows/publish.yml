@@ -4,12 +4,60 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      skip_npm:
+        description: 'Skip npm publish (build binaries only)'
+        type: boolean
+        default: false
 
 jobs:
+  build-binaries:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: bun-linux-x64
+            artifact: omp-linux-x64
+          - os: ubuntu-latest
+            target: bun-linux-arm64
+            artifact: omp-linux-arm64
+          - os: macos-latest
+            target: bun-darwin-x64
+            artifact: omp-darwin-x64
+          - os: macos-latest
+            target: bun-darwin-arm64
+            artifact: omp-darwin-arm64
+          - os: ubuntu-latest
+            target: bun-windows-x64
+            artifact: omp-windows-x64.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build standalone binary
+        run: bun build src/cli.ts --compile --target ${{ matrix.target }} --outfile ${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
   publish:
     runs-on: ubuntu-latest
+    needs: build-binaries
     permissions:
-      contents: read
+      contents: write
       id-token: write
 
     steps:
@@ -30,10 +78,24 @@ jobs:
       - name: Build
         run: bun run build
 
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: binaries/*
+          generate_release_notes: true
+
       - name: Publish @oh-my-pi/cli
+        if: ${{ !inputs.skip_npm }}
         run: npm publish --access public --provenance
 
       - name: Publish plugins
+        if: ${{ !inputs.skip_npm }}
         run: |
           for dir in plugins/*/; do
             echo "Publishing $dir"
