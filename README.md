@@ -22,6 +22,7 @@
 | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | **[@oh-my-pi/subagents](https://npmjs.com/package/@oh-my-pi/subagents)**     | Task delegation with specialized sub-agents (task, planner, explore, reviewer) |
 | **[@oh-my-pi/exa](https://npmjs.com/package/@oh-my-pi/exa)**                 | Exa AI-powered web search, company/people lookup, and websets                  |
+| **[@oh-my-pi/perplexity](https://npmjs.com/package/@oh-my-pi/perplexity)**   | Perplexity AI search with Sonar models (fast and pro)                          |
 | **[@oh-my-pi/user-prompt](https://npmjs.com/package/@oh-my-pi/user-prompt)** | Interactive user prompting for gathering input during execution                |
 | **[@oh-my-pi/init](https://npmjs.com/package/@oh-my-pi/init)**               | `/init` command to generate AGENTS.md documentation for a codebase             |
 | **[@oh-my-pi/metal-theme](https://npmjs.com/package/@oh-my-pi/metal-theme)** | A metal theme 🤘                                                               |

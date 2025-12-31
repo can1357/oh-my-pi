@@ -22,26 +22,27 @@ Version/publish scripts: `bun scripts/bump-version.ts`, `bun scripts/publish.ts 
 
 ### Core Modules (src/)
 
-| File | Responsibility |
-|------|----------------|
-| `cli.ts` | Commander.js entry point; wires commands to handlers |
-| `manifest.ts` | Plugin manifest types (`omp` field in package.json), loading/saving `plugins.json`, reading plugin package.json from node_modules |
-| `symlinks.ts` | Create/remove/check symlinks for `omp.install` entries; handles `copy: true` for mutable files like `runtime.json`; path traversal protection |
-| `paths.ts` | All path constants and scope resolution (global `~/.pi/` vs project-local `.pi/`) |
-| `conflicts.ts` | Detect destination collisions between plugins before install |
-| `lockfile.ts` | `omp-lock.json` for integrity verification (tarball hashes) |
-| `npm.ts` | npm CLI wrapper (`npm install`, `npm view`, `npm search`) |
-| `lock.ts` | File-based mutex for concurrent CLI invocations |
-| `progress.ts` | Spinner/progress output utilities |
-| `output.ts` | Console output helpers, JSON mode support |
-| `errors.ts` | Error handling wrapper for commands |
-| `runtime.ts` | Runtime config resolution (env vars from plugin variables) |
+| File           | Responsibility                                                                                                                                |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cli.ts`       | Commander.js entry point; wires commands to handlers                                                                                          |
+| `manifest.ts`  | Plugin manifest types (`omp` field in package.json), loading/saving `plugins.json`, reading plugin package.json from node_modules             |
+| `symlinks.ts`  | Create/remove/check symlinks for `omp.install` entries; handles `copy: true` for mutable files like `runtime.json`; path traversal protection |
+| `paths.ts`     | All path constants and scope resolution (global `~/.pi/` vs project-local `.pi/`)                                                             |
+| `conflicts.ts` | Detect destination collisions between plugins before install                                                                                  |
+| `lockfile.ts`  | `omp-lock.json` for integrity verification (tarball hashes)                                                                                   |
+| `npm.ts`       | npm CLI wrapper (`npm install`, `npm view`, `npm search`)                                                                                     |
+| `lock.ts`      | File-based mutex for concurrent CLI invocations                                                                                               |
+| `progress.ts`  | Spinner/progress output utilities                                                                                                             |
+| `output.ts`    | Console output helpers, JSON mode support                                                                                                     |
+| `errors.ts`    | Error handling wrapper for commands                                                                                                           |
+| `runtime.ts`   | Runtime config resolution (env vars from plugin variables)                                                                                    |
 
 ### Commands (src/commands/)
 
 Each command is a separate file exporting an async handler. Pattern: receive CLI options, resolve scope, load manifests, perform operation, update state.
 
 Key commands:
+
 - `install.ts` — Most complex; handles npm install, transitive omp deps, conflict detection, feature resolution, symlink creation
 - `doctor.ts` — Health checks: broken symlinks, orphaned files, config validation
 - `features.ts` / `config.ts` — Runtime configuration of installed plugins
@@ -49,8 +50,9 @@ Key commands:
 ### Plugin Structure (plugins/)
 
 Built-in plugins ship in `plugins/` and are published separately. Each has:
+
 - `package.json` with `omp` field defining install mappings and features
-- Source files (agents/*.md, commands/*.md, tools/*.ts, themes/*.json)
+- Source files (agents/_.md, commands/_.md, tools/_.ts, themes/_.json)
 
 `omp.install` entries map `src` (relative to plugin) → `dest` (relative to agent dir).
 

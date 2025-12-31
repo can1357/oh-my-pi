@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { loadPluginsJson, type OmpInstallEntry, type PluginPackageJson, readPluginPackageJson } from "@omp/manifest";
 import { npmUpdate, requireNpm } from "@omp/npm";
 import { log, outputJson, setJsonMode } from "@omp/output";
-import { getNodeModulesDir, getProjectPiDir, PI_CONFIG_DIR, PLUGINS_DIR, resolveScope } from "@omp/paths";
+import { getProjectPiDir, PI_CONFIG_DIR, PLUGINS_DIR, resolveScope } from "@omp/paths";
 import { createPluginSymlinks, removePluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 

@@ -1253,7 +1253,7 @@ async function installLocalPlugin(
 		log(chalk.dim(`  Copied to ${pluginDir}`));
 
 		// Track state for rollback
-		let pluginCopied = true;
+		const pluginCopied = true;
 		let symlinksCreated = false;
 
 		try {

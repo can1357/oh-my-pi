@@ -1,0 +1,57 @@
+{
+  "name": "@oh-my-pi/perplexity",
+  "version": "0.1.0",
+  "description": "Perplexity AI search tools for pi",
+  "keywords": [
+    "omp-plugin",
+    "perplexity",
+    "web-search",
+    "ai-search",
+    "sonar"
+  ],
+  "author": "Can Bölük <me@can.ac>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/can1357/oh-my-pi.git",
+    "directory": "plugins/perplexity"
+  },
+  "omp": {
+    "install": [
+      {
+        "src": "tools/perplexity/runtime.json",
+        "dest": "agent/tools/perplexity/runtime.json",
+        "copy": true
+      },
+      {
+        "src": "tools/perplexity/index.ts",
+        "dest": "agent/tools/perplexity/index.ts"
+      },
+      {
+        "src": "tools/perplexity/shared.ts",
+        "dest": "agent/tools/perplexity/shared.ts"
+      },
+      {
+        "src": "tools/perplexity/search.ts",
+        "dest": "agent/tools/perplexity/search.ts"
+      }
+    ],
+    "variables": {
+      "apiKey": {
+        "type": "string",
+        "env": "PERPLEXITY_API_KEY",
+        "description": "Perplexity API key for authentication",
+        "required": true
+      }
+    },
+    "features": {
+      "search": {
+        "description": "Web search with Sonar models (fast and pro)",
+        "default": true
+      }
+    }
+  },
+  "files": [
+    "tools"
+  ]
+}
