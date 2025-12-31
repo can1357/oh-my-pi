@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { getInstalledPlugins, loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
 import { npmUninstall, requireNpm } from "@omp/npm";
-import { NODE_MODULES_DIR, PLUGINS_DIR, PROJECT_NODE_MODULES, resolveScope } from "@omp/paths";
+import { getNodeModulesDir, getPluginsDir, getProjectPiDir, PI_CONFIG_DIR, resolveScope } from "@omp/paths";
 import { removePluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 
@@ -24,8 +24,8 @@ export async function uninstallPlugin(name: string, options: UninstallOptions = 
 	requireNpm();
 
 	const isGlobal = resolveScope(options);
-	const prefix = isGlobal ? PLUGINS_DIR : ".pi";
-	const nodeModules = isGlobal ? NODE_MODULES_DIR : PROJECT_NODE_MODULES;
+	const prefix = getPluginsDir(isGlobal);
+	const nodeModules = getNodeModulesDir(isGlobal);
 
 	// Check if plugin is installed
 	const pluginsJson = await loadPluginsJson(isGlobal);
@@ -46,14 +46,13 @@ export async function uninstallPlugin(name: string, options: UninstallOptions = 
 
 	// Collect symlinks that would be removed
 	if (pkgJsonPreview?.omp?.install) {
-		const { removePluginSymlinks: previewSymlinks } = await import("@omp/symlinks");
+		// Compute base directory same as symlinks.ts uses
+		const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
 		// Get symlink paths without actually removing them
 		for (const entry of pkgJsonPreview.omp.install) {
 			const dest = typeof entry === "string" ? entry : entry.dest;
 			if (dest) {
-				const destPath = isGlobal
-					? join(process.env.HOME || "", dest.replace(/^~\//, ""))
-					: join(process.cwd(), dest);
+				const destPath = join(baseDir, dest);
 				if (existsSync(destPath)) {
 					itemsToDelete.push(destPath);
 				}

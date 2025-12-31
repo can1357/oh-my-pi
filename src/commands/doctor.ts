@@ -13,12 +13,11 @@ import {
 } from "@omp/manifest";
 import {
 	GLOBAL_PACKAGE_JSON,
+	getNodeModulesDir,
+	getPluginsJsonPath,
 	getProjectPiDir,
-	NODE_MODULES_DIR,
 	PI_CONFIG_DIR,
 	PLUGINS_DIR,
-	PROJECT_NODE_MODULES,
-	PROJECT_PLUGINS_JSON,
 	resolveScope,
 } from "@omp/paths";
 import { checkPluginSymlinks, createPluginSymlinks } from "@omp/symlinks";
@@ -156,7 +155,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 	}
 
 	// 2. Check package.json exists
-	const packageJsonPath = isGlobal ? GLOBAL_PACKAGE_JSON : PROJECT_PLUGINS_JSON;
+	const packageJsonPath = isGlobal ? GLOBAL_PACKAGE_JSON : getPluginsJsonPath();
 	if (!existsSync(packageJsonPath)) {
 		results.push({
 			check: "Package manifest",
@@ -173,7 +172,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 	}
 
 	// 3. Check node_modules exists
-	const nodeModules = isGlobal ? NODE_MODULES_DIR : PROJECT_NODE_MODULES;
+	const nodeModules = getNodeModulesDir(isGlobal);
 	if (!existsSync(nodeModules)) {
 		results.push({
 			check: "Node modules",

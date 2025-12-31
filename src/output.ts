@@ -77,7 +77,7 @@ export function truncate(str: string, maxLen: number): string {
 	const plain = stripAnsi(str);
 	if (plain.length <= maxLen) return str;
 	// Strip ANSI, truncate, add ellipsis (str might have ANSI so use plain)
-	return plain.slice(0, maxLen - 3) + "...";
+	return `${plain.slice(0, maxLen - 3)}...`;
 }
 
 /**

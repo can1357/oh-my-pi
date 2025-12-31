@@ -1,7 +1,11 @@
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { PROJECT_PI_DIR, PROJECT_PLUGINS_JSON } from "@omp/paths";
+import { resolve } from "node:path";
 import chalk from "chalk";
+
+// init always operates on CWD, using local paths intentionally
+const PROJECT_PI_DIR = resolve(".pi");
+const PROJECT_PLUGINS_JSON = resolve(".pi", "plugins.json");
 
 /**
  * Format permission-related errors with actionable guidance

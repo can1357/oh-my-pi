@@ -12,28 +12,52 @@ function isProcessAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0); // Signal 0 = check existence
 		return true;
-	} catch {
-		return false;
+	} catch (err: unknown) {
+		// ESRCH = no such process = definitely dead
+		// EPERM = no permission to signal = process exists but owned by another user
+		// Any other error = treat as alive (don't risk deleting active lock)
+		if (err instanceof Error && "code" in err && err.code === "ESRCH") {
+			return false;
+		}
+		return true;
 	}
 }
 
 async function tryCleanStaleLock(lockPath: string): Promise<boolean> {
+	let content: string;
 	try {
-		const content = await readFile(lockPath, "utf-8");
-		const { pid, timestamp } = JSON.parse(content);
-
-		const isStale = Date.now() - timestamp > LOCK_TIMEOUT_MS;
-		const isDeadProcess = !isProcessAlive(pid);
-
-		if (isStale || isDeadProcess) {
-			await rm(lockPath, { force: true });
+		content = await readFile(lockPath, "utf-8");
+	} catch (err: unknown) {
+		// ENOENT = file doesn't exist = already cleaned
+		if (err instanceof Error && "code" in err && err.code === "ENOENT") {
 			return true;
 		}
+		// Other read errors (permission, etc) = don't touch
 		return false;
-	} catch {
-		// File doesn't exist or is malformed - consider it cleaned
-		return true;
 	}
+
+	let pid: number;
+	let timestamp: number;
+	try {
+		({ pid, timestamp } = JSON.parse(content));
+	} catch {
+		// JSON parse error = lock file being written or corrupted - don't touch
+		return false;
+	}
+
+	const isStale = Date.now() - timestamp > LOCK_TIMEOUT_MS;
+	const isDeadProcess = !isProcessAlive(pid);
+
+	if (isStale || isDeadProcess) {
+		try {
+			await rm(lockPath, { force: true });
+			return true;
+		} catch {
+			// Failed to remove = don't claim we cleaned it
+			return false;
+		}
+	}
+	return false;
 }
 
 export async function acquireLock(global = true): Promise<boolean> {

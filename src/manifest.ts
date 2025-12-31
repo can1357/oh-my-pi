@@ -1,13 +1,14 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { logError } from "@omp/output";
 import {
 	GLOBAL_PACKAGE_JSON,
+	getPackageJsonPath,
+	getPluginsJsonPath,
 	getProjectPiDir,
 	NODE_MODULES_DIR,
 	PLUGINS_DIR,
-	PROJECT_PACKAGE_JSON,
-	PROJECT_PLUGINS_JSON,
 } from "@omp/paths";
 import chalk from "chalk";
 
@@ -186,7 +187,7 @@ export async function initProjectPlugins(): Promise<void> {
  * Load plugins.json (global or project)
  */
 export async function loadPluginsJson(global = true): Promise<PluginsJson> {
-	const path = global ? GLOBAL_PACKAGE_JSON : PROJECT_PLUGINS_JSON;
+	const path = global ? GLOBAL_PACKAGE_JSON : getPluginsJsonPath();
 
 	try {
 		const data = await readFile(path, "utf-8");
@@ -223,9 +224,10 @@ export async function loadPluginsJson(global = true): Promise<PluginsJson> {
  * Sync .pi/package.json with plugins.json for npm operations in project-local mode
  */
 async function syncProjectPackageJson(data: PluginsJson): Promise<void> {
+	const packageJsonPath = getPackageJsonPath(false);
 	let existing: Record<string, unknown> = {};
 	try {
-		existing = JSON.parse(await readFile(PROJECT_PACKAGE_JSON, "utf-8"));
+		existing = JSON.parse(await readFile(packageJsonPath, "utf-8"));
 	} catch {
 		existing = {
 			name: "pi-project-plugins",
@@ -242,14 +244,14 @@ async function syncProjectPackageJson(data: PluginsJson): Promise<void> {
 		delete existing.devDependencies;
 	}
 
-	await writeFile(PROJECT_PACKAGE_JSON, JSON.stringify(existing, null, 2));
+	await writeFile(packageJsonPath, JSON.stringify(existing, null, 2));
 }
 
 /**
  * Save plugins.json (global or project)
  */
 export async function savePluginsJson(data: PluginsJson, global = true): Promise<void> {
-	const path = global ? GLOBAL_PACKAGE_JSON : PROJECT_PLUGINS_JSON;
+	const path = global ? GLOBAL_PACKAGE_JSON : getPluginsJsonPath();
 
 	try {
 		await mkdir(dirname(path), { recursive: true });
@@ -407,9 +409,9 @@ export async function readPluginPackageJson(pluginName: string, global = true): 
 		// Only warn for non-ENOENT errors (corrupt JSON, permission issues, etc.)
 		// ENOENT is expected when checking if a plugin is installed
 		if (error.code !== "ENOENT") {
-			console.warn(chalk.yellow(`⚠ Failed to read package.json for '${pluginName}': ${error.message}`));
+			logError(chalk.yellow(`⚠ Failed to read package.json for '${pluginName}': ${error.message}`));
 			if (process.env.DEBUG) {
-				console.warn(chalk.dim((error as Error).stack));
+				logError(chalk.dim((error as Error).stack));
 			}
 		}
 		return null;

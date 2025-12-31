@@ -3,14 +3,7 @@ import { join } from "node:path";
 import { loadPluginsJson, type OmpInstallEntry, type PluginPackageJson, readPluginPackageJson } from "@omp/manifest";
 import { npmUpdate, requireNpm } from "@omp/npm";
 import { log, outputJson, setJsonMode } from "@omp/output";
-import {
-	getProjectPiDir,
-	NODE_MODULES_DIR,
-	PI_CONFIG_DIR,
-	PLUGINS_DIR,
-	PROJECT_NODE_MODULES,
-	resolveScope,
-} from "@omp/paths";
+import { getNodeModulesDir, getProjectPiDir, PI_CONFIG_DIR, PLUGINS_DIR, resolveScope } from "@omp/paths";
 import { createPluginSymlinks, removePluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 
@@ -45,8 +38,8 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 	}
 
 	const isGlobal = resolveScope(options);
-	const prefix = isGlobal ? PLUGINS_DIR : ".pi";
-	const _nodeModules = isGlobal ? NODE_MODULES_DIR : PROJECT_NODE_MODULES;
+	const prefix = isGlobal ? PLUGINS_DIR : getProjectPiDir();
+	const _nodeModules = getNodeModulesDir(isGlobal);
 
 	const pluginsJson = await loadPluginsJson(isGlobal);
 	const pluginNames = Object.keys(pluginsJson.plugins);

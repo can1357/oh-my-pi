@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import type { OmpField } from "@omp/manifest";
+import { logError } from "@omp/output";
 import { createProgress } from "@omp/progress";
 import chalk from "chalk";
 
@@ -166,9 +167,9 @@ export async function npmInfo(packageName: string): Promise<NpmPackageInfo | nul
 		return JSON.parse(output);
 	} catch (err) {
 		const error = err as Error;
-		console.warn(chalk.yellow(`⚠ Failed to fetch npm info for '${packageName}': ${error.message}`));
+		logError(chalk.yellow(`⚠ Failed to fetch npm info for '${packageName}': ${error.message}`));
 		if (process.env.DEBUG) {
-			console.warn(chalk.dim(error.stack));
+			logError(chalk.dim(error.stack));
 		}
 		return null;
 	}
@@ -185,9 +186,9 @@ export async function npmSearch(query: string, keyword = "omp-plugin"): Promise<
 		return JSON.parse(output);
 	} catch (err) {
 		const error = err as Error;
-		console.warn(chalk.yellow(`⚠ npm search failed for '${query}': ${error.message}`));
+		logError(chalk.yellow(`⚠ npm search failed for '${query}': ${error.message}`));
 		if (process.env.DEBUG) {
-			console.warn(chalk.dim(error.stack));
+			logError(chalk.dim(error.stack));
 		}
 		return [];
 	}

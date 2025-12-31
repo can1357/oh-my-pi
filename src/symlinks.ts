@@ -4,7 +4,7 @@ import { platform } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { OmpFeature, OmpInstallEntry, PluginPackageJson, PluginRuntimeConfig } from "@omp/manifest";
 import { getPluginSourceDir } from "@omp/manifest";
-import { log } from "@omp/output";
+import { log, logError } from "@omp/output";
 import { getProjectPiDir, PI_CONFIG_DIR } from "@omp/paths";
 import chalk from "chalk";
 
@@ -278,9 +278,9 @@ export async function writeRuntimeConfig(
 	} catch (err) {
 		const error = err as Error;
 		// Always warn about runtime config failures - they affect plugin behavior
-		console.warn(chalk.yellow(`⚠ Failed to update runtime config at ${runtimePath}: ${error.message}`));
+		logError(chalk.yellow(`⚠ Failed to update runtime config at ${runtimePath}: ${error.message}`));
 		if (process.env.DEBUG) {
-			console.warn(chalk.dim(error.stack));
+			logError(chalk.dim(error.stack));
 		}
 	}
 }

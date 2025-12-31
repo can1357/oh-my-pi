@@ -105,6 +105,14 @@ export function getPackageJsonPath(global = true): string {
 }
 
 /**
+ * Get the plugins.json path for project-local scope.
+ * For global scope, use GLOBAL_PACKAGE_JSON instead (dependencies are in package.json).
+ */
+export function getPluginsJsonPath(): string {
+	return join(getProjectPiDir(), "plugins.json");
+}
+
+/**
  * Get the agent directory (where symlinks are installed)
  */
 export function getAgentDir(global = true): string {

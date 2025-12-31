@@ -3,7 +3,7 @@ import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { loadPluginsJson, type PluginPackageJson, savePluginsJson } from "@omp/manifest";
-import { NODE_MODULES_DIR, PROJECT_NODE_MODULES, resolveScope } from "@omp/paths";
+import { getNodeModulesDir, resolveScope } from "@omp/paths";
 import { createPluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 
@@ -36,7 +36,7 @@ export interface LinkOptions {
  */
 export async function linkPlugin(localPath: string, options: LinkOptions = {}): Promise<void> {
 	const isGlobal = resolveScope(options);
-	const nodeModules = isGlobal ? NODE_MODULES_DIR : PROJECT_NODE_MODULES;
+	const nodeModules = getNodeModulesDir(isGlobal);
 
 	// Expand ~ to home directory
 	if (localPath.startsWith("~")) {

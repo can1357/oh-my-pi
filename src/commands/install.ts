@@ -17,14 +17,7 @@ import {
 } from "@omp/manifest";
 import { npmInfo, npmInstall, requireNpm } from "@omp/npm";
 import { log, outputJson, setJsonMode } from "@omp/output";
-import {
-	getProjectPiDir,
-	NODE_MODULES_DIR,
-	PI_CONFIG_DIR,
-	PLUGINS_DIR,
-	PROJECT_NODE_MODULES,
-	resolveScope,
-} from "@omp/paths";
+import { getNodeModulesDir, getProjectPiDir, PI_CONFIG_DIR, PLUGINS_DIR, resolveScope } from "@omp/paths";
 import { createProgress } from "@omp/progress";
 import { createPluginSymlinks, getAllFeatureNames, getDefaultFeatures } from "@omp/symlinks";
 import chalk from "chalk";
@@ -435,7 +428,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 
 	const isGlobal = resolveScope(options);
 	const prefix = isGlobal ? PLUGINS_DIR : getProjectPiDir();
-	const _nodeModules = isGlobal ? NODE_MODULES_DIR : PROJECT_NODE_MODULES;
+	const _nodeModules = getNodeModulesDir(isGlobal);
 
 	// Initialize plugins directory if needed
 	if (isGlobal) {
@@ -1132,8 +1125,8 @@ async function installLocalPlugin(
 		};
 	}
 
-	const _prefix = isGlobal ? PLUGINS_DIR : ".pi";
-	const nodeModules = isGlobal ? NODE_MODULES_DIR : PROJECT_NODE_MODULES;
+	const _prefix = isGlobal ? PLUGINS_DIR : getProjectPiDir();
+	const nodeModules = getNodeModulesDir(isGlobal);
 
 	try {
 		// Read package.json from local path
