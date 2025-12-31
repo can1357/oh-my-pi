@@ -10,7 +10,7 @@
  *
  * Usage notes:
  *   - Users will always be able to select "Other" to provide custom text input
- *   - Use multiSelect: true to allow multiple answers to be selected for a question
+ *   - Use multi: true to allow multiple answers to be selected for a question
  *   - If you recommend a specific option, make that the first option in the list
  *     and add "(Recommended)" at the end of the label
  */
@@ -35,7 +35,7 @@ const UserPromptParams = Type.Object({
       description: "Available options for the user to choose from.",
       minItems: 1,
    }),
-   multiSelect: Type.Optional(Type.Boolean({
+   multi: Type.Optional(Type.Boolean({
       description: "Allow multiple options to be selected (default: false)",
       default: false,
    })),
@@ -44,7 +44,7 @@ const UserPromptParams = Type.Object({
 interface UserPromptDetails {
    question: string;
    options: string[];
-   multiSelect: boolean;
+   multi: boolean;
    selectedOptions: string[];
    customInput?: string;
 }
@@ -57,24 +57,10 @@ const DESCRIPTION = `Use this tool when you need to ask the user questions durin
 
 Usage notes:
 - Users will always be able to select "Other" to provide custom text input
-- Use multiSelect: true to allow multiple answers to be selected for a question
+- Use multi: true to allow multiple answers to be selected for a question
 - If you recommend a specific option, make that the first option in the list and add "(Recommended)" at the end of the label
 
 Example usage:
-
-<example>
-assistant: I need to know which database you'd like to use for this project.
-assistant: Uses the user_prompt tool:
-{
-  "question": "Which database would you like to use?",
-  "options": [
-    {"label": "PostgreSQL (Recommended)"},
-    {"label": "MySQL"},
-    {"label": "SQLite"},
-    {"label": "MongoDB"}
-  ]
-}
-</example>
 
 <example>
 assistant: Let me ask which features you want to include.
@@ -88,7 +74,7 @@ assistant: Uses the user_prompt tool:
     {"label": "Unit tests"},
     {"label": "Documentation"}
   ],
-  "multiSelect": true
+  "multi": true
 }
 </example>`;
 
@@ -100,20 +86,20 @@ const factory: CustomToolFactory = (pi: ToolAPI) => {
       parameters: UserPromptParams,
 
       async execute(_toolCallId, params, _signal, _onUpdate) {
-         const { question, options, multiSelect = false } = params;
+         const { question, options, multi = false } = params;
          const optionLabels = options.map((o) => o.label);
 
          if (!pi.hasUI) {
             return {
                content: [{ type: "text", text: "Error: User prompt requires interactive mode" }],
-               details: { question, options: optionLabels, multiSelect, selectedOptions: [] },
+               details: { question, options: optionLabels, multi, selectedOptions: [] },
             };
          }
 
          let selectedOptions: string[] = [];
          let customInput: string | undefined;
 
-         if (multiSelect) {
+         if (multi) {
             // Multi-select: show checkboxes in the label to indicate selection state
             const DONE = "✓ Done selecting";
             const selected = new Set<string>();
@@ -173,7 +159,7 @@ const factory: CustomToolFactory = (pi: ToolAPI) => {
          const details: UserPromptDetails = {
             question,
             options: optionLabels,
-            multiSelect,
+            multi,
             selectedOptions,
             customInput,
          };
@@ -182,7 +168,7 @@ const factory: CustomToolFactory = (pi: ToolAPI) => {
          if (customInput) {
             responseText = `User provided custom input: ${customInput}`;
          } else if (selectedOptions.length > 0) {
-            responseText = multiSelect
+            responseText = multi
                ? `User selected: ${selectedOptions.join(", ")}`
                : `User selected: ${selectedOptions[0]}`;
          } else {
@@ -197,7 +183,7 @@ const factory: CustomToolFactory = (pi: ToolAPI) => {
             return new Text(t.fg("error", "user_prompt: no question provided"), 0, 0);
          }
 
-         const multiTag = args.multiSelect ? t.fg("muted", " [multi-select]") : "";
+         const multiTag = args.multi ? t.fg("muted", " [multi-select]") : "";
          let text = t.fg("toolTitle", "? ") + t.fg("accent", args.question) + multiTag;
 
          if (args.options?.length) {
