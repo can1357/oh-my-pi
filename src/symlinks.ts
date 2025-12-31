@@ -143,6 +143,16 @@ export async function removePluginSymlinks(
 
 		try {
 			if (existsSync(dest)) {
+				const stats = lstatSync(dest);
+				if (!stats.isSymbolicLink()) {
+					const msg = `Skipping ${entry.dest}: not a symlink (may contain user data)`;
+					result.errors.push(msg);
+					if (verbose) {
+						console.log(chalk.yellow(`  ⚠ ${msg}`));
+					}
+					continue;
+				}
+
 				await rm(dest, { force: true, recursive: true });
 				result.created.push(entry.dest);
 				if (verbose) {

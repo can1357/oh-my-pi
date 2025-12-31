@@ -23,6 +23,7 @@ import {
 	resolveScope,
 } from "@omp/paths";
 import { createPluginSymlinks } from "@omp/symlinks";
+import { getLockedVersion, updateLockFile } from "@omp/lockfile";
 import chalk from "chalk";
 
 /**
@@ -149,7 +150,15 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 	// If no packages specified, install from plugins.json
 	if (!packages || packages.length === 0) {
 		const pluginsJson = await loadPluginsJson(isGlobal);
-		packages = Object.entries(pluginsJson.plugins).map(([name, version]) => `${name}@${version}`);
+		// Prefer locked versions for reproducible installs
+		const lockFile = await import("@omp/lockfile").then((m) => m.loadLockFile(isGlobal));
+		packages = await Promise.all(
+			Object.entries(pluginsJson.plugins).map(async ([name, version]) => {
+				// Use locked version if available for reproducibility
+				const lockedVersion = lockFile?.packages[name]?.version;
+				return `${name}@${lockedVersion || version}`;
+			}),
+		);
 
 		if (packages.length === 0) {
 			console.log(chalk.yellow("No plugins to install."));
@@ -359,6 +368,9 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			// Add to installed plugins map for subsequent conflict detection
 			existingPlugins.set(name, pkgJson);
 
+			// Update lock file with exact version
+			await updateLockFile(name, info.version, isGlobal);
+
 			console.log(chalk.green(`✓ Installed ${name}@${info.version}`));
 			results.push({ name, version: info.version, success: true });
 		} catch (err) {
@@ -509,6 +521,9 @@ async function installLocalPlugin(
 
 		// Create symlinks
 		await createPluginSymlinks(pluginName, pkgJson, isGlobal);
+
+		// Update lock file for local plugin
+		await updateLockFile(pluginName, pkgJson.version, isGlobal);
 
 		console.log(chalk.green(`✓ Installed ${pluginName}@${pkgJson.version}`));
 		return { name: pluginName, version: pkgJson.version, success: true };

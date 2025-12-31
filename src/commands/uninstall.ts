@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
+import { getInstalledPlugins, loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
 import { npmUninstall } from "@omp/npm";
 import { NODE_MODULES_DIR, PLUGINS_DIR, PROJECT_NODE_MODULES, resolveScope } from "@omp/paths";
 import { removePluginSymlinks } from "@omp/symlinks";
@@ -34,6 +34,29 @@ export async function uninstallPlugin(name: string, options: UninstallOptions = 
 
 		// 1. Read package.json for omp.install entries before uninstalling
 		const pkgJson = await readPluginPackageJson(name, isGlobal);
+
+		// Check for shared dependencies
+		if (pkgJson?.dependencies) {
+			const allPlugins = await getInstalledPlugins(isGlobal);
+			const sharedDeps: string[] = [];
+
+			for (const depName of Object.keys(pkgJson.dependencies)) {
+				for (const [otherName, otherPkgJson] of allPlugins) {
+					if (otherName !== name && otherPkgJson.dependencies?.[depName]) {
+						sharedDeps.push(`${depName} (also used by ${otherName})`);
+						break;
+					}
+				}
+			}
+
+			if (sharedDeps.length > 0) {
+				console.log(chalk.yellow("\n⚠ Warning: This plugin shares dependencies with other plugins:"));
+				for (const dep of sharedDeps) {
+					console.log(chalk.dim(`  - ${dep}`));
+				}
+				console.log(chalk.dim("  These dependencies will remain installed."));
+			}
+		}
 
 		// 2. Remove symlinks
 		if (pkgJson) {

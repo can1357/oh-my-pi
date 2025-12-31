@@ -9,11 +9,49 @@ export interface CreateOptions {
 }
 
 /**
+ * Validate that a name conforms to npm naming rules
+ */
+function isValidNpmName(name: string): boolean {
+	if (!name || name.length === 0) return false;
+	if (name.startsWith(".") || name.startsWith("_")) return false;
+	if (name.includes(" ")) return false;
+	if (!/^[a-z0-9][a-z0-9\-_\.]*$/.test(name)) return false;
+	return true;
+}
+
+/**
+ * Normalize a string to be a valid npm package name
+ */
+function normalizePluginName(name: string): string {
+	// Convert to lowercase, replace spaces with hyphens
+	let normalized = name.toLowerCase().replace(/\s+/g, "-");
+	// Remove invalid characters (keep alphanumeric, -, _, .)
+	normalized = normalized.replace(/[^a-z0-9\-_\.]/g, "");
+	// Can't start with . or _ or -
+	normalized = normalized.replace(/^[\.\-_]+/, "");
+	return normalized;
+}
+
+/**
  * Scaffold a new plugin from template
  */
 export async function createPlugin(name: string, options: CreateOptions = {}): Promise<void> {
 	// Ensure name follows conventions
-	const pluginName = name.startsWith("omp-") ? name : `omp-${name}`;
+	let pluginName = name.startsWith("omp-") ? name : `omp-${name}`;
+
+	// Validate and normalize the plugin name
+	if (!isValidNpmName(pluginName)) {
+		const normalized = normalizePluginName(pluginName);
+		if (!normalized || normalized === "omp-" || normalized === "omp") {
+			console.log(chalk.red(`Error: Invalid plugin name "${name}" cannot be normalized to a valid npm name`));
+			process.exitCode = 1;
+			return;
+		}
+		// Ensure omp- prefix after normalization
+		const finalName = normalized.startsWith("omp-") ? normalized : `omp-${normalized}`;
+		console.log(chalk.yellow(`Invalid plugin name. Normalized to: ${finalName}`));
+		pluginName = finalName;
+	}
 	const pluginDir = pluginName;
 
 	if (existsSync(pluginDir)) {

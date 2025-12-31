@@ -1,6 +1,11 @@
 import { npmSearch } from "@omp/npm";
 import chalk from "chalk";
 
+function truncate(str: string, maxLen: number): string {
+	if (!str || str.length <= maxLen) return str;
+	return str.slice(0, maxLen - 3) + "...";
+}
+
 export interface SearchOptions {
 	json?: boolean;
 	limit?: number;
@@ -37,7 +42,7 @@ export async function searchPlugins(query: string, options: SearchOptions = {}):
 			console.log(chalk.green("◆ ") + chalk.bold(result.name) + chalk.dim(` v${result.version}`));
 
 			if (result.description) {
-				console.log(chalk.dim(`    ${result.description}`));
+				console.log(chalk.dim(`    ${truncate(result.description, 100)}`));
 			}
 
 			if (result.keywords?.length) {
