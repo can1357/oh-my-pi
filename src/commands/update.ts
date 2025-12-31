@@ -68,7 +68,12 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 
 	console.log(chalk.blue(`Updating ${npmPlugins.length} plugin(s)...`));
 
-	const results: Array<{ name: string; from: string; to: string; success: boolean }> = [];
+	const results: Array<{
+		name: string;
+		from: string;
+		to: string;
+		success: boolean;
+	}> = [];
 
 	// Save old package info before removing symlinks (for recovery on failure)
 	const oldPkgJsons = new Map<string, PluginPackageJson>();

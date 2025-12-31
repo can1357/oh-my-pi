@@ -70,7 +70,10 @@ export async function uninstallPlugin(name: string, options: UninstallOptions = 
 				}
 
 				if (process.stdin.isTTY && process.stdout.isTTY) {
-					const rl = createInterface({ input: process.stdin, output: process.stdout });
+					const rl = createInterface({
+						input: process.stdin,
+						output: process.stdout,
+					});
 					const answer = await new Promise<string>((resolve) => {
 						rl.question(chalk.yellow("Delete these files anyway? [y/N] "), (ans) => {
 							rl.close();

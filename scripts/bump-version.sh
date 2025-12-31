@@ -23,21 +23,18 @@ pkg.version = '$VERSION';
 require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, '\t') + '\n');
 "
 
-# Update plugins/subagents/package.json
-echo "  Updating plugins/subagents/package.json..."
-bun --eval "
-const pkg = require('./plugins/subagents/package.json');
+# Update all plugin package.json files
+for plugin_dir in plugins/*/; do
+  if [[ -f "${plugin_dir}package.json" ]]; then
+    plugin_name=$(basename "$plugin_dir")
+    echo "  Updating plugins/${plugin_name}/package.json..."
+    bun --eval "
+const pkg = require('./${plugin_dir}package.json');
 pkg.version = '$VERSION';
-require('fs').writeFileSync('plugins/subagents/package.json', JSON.stringify(pkg, null, 2) + '\n');
+require('fs').writeFileSync('${plugin_dir}package.json', JSON.stringify(pkg, null, 2) + '\n');
 "
-
-# Update plugins/metal-theme/package.json
-echo "  Updating plugins/metal-theme/package.json..."
-bun --eval "
-const pkg = require('./plugins/metal-theme/package.json');
-pkg.version = '$VERSION';
-require('fs').writeFileSync('plugins/metal-theme/package.json', JSON.stringify(pkg, null, 2) + '\n');
-"
+  fi
+done
 
 # Update version in CLI
 echo "  Updating src/cli.ts version..."

@@ -17,13 +17,13 @@ omp install @oh-my-pi/exa[search,linkedin,websets]
 
 ## Features
 
-| Feature | Default | Description | Tools |
-|---------|---------|-------------|-------|
-| `search` | ✓ | Core web search capabilities | 4 tools |
-| `linkedin` | | LinkedIn profile and company search | 1 tool |
-| `company` | | Comprehensive company research | 1 tool |
-| `researcher` | | Long-running AI research tasks | 2 tools |
-| `websets` | | Entity collection management | 14 tools |
+| Feature      | Default | Description                         | Tools    |
+| ------------ | ------- | ----------------------------------- | -------- |
+| `search`     | ✓       | Core web search capabilities        | 4 tools  |
+| `linkedin`   |         | LinkedIn profile and company search | 1 tool   |
+| `company`    |         | Comprehensive company research      | 1 tool   |
+| `researcher` |         | Long-running AI research tasks      | 2 tools  |
+| `websets`    |         | Entity collection management        | 14 tools |
 
 Manage features after install:
 
@@ -62,76 +62,81 @@ Get your API key from: https://dashboard.exa.ai/api-keys
 
 ### search (default)
 
-| Tool | Description |
-|------|-------------|
-| `web_search_general` | Real-time web searches with content extraction |
-| `web_search_deep` | Natural language web search with synthesized results |
-| `web_search_code_context` | Search code snippets, docs, and examples |
-| `web_search_crawl_url` | Extract content from specific URLs |
+| Tool                      | Description                                          |
+| ------------------------- | ---------------------------------------------------- |
+| `web_search_general`      | Real-time web searches with content extraction       |
+| `web_search_deep`         | Natural language web search with synthesized results |
+| `web_search_code_context` | Search code snippets, docs, and examples             |
+| `web_search_crawl_url`    | Extract content from specific URLs                   |
 
 ### linkedin
 
-| Tool | Description |
-|------|-------------|
+| Tool                  | Description                            |
+| --------------------- | -------------------------------------- |
 | `web_search_linkedin` | Search LinkedIn profiles and companies |
 
 ### company
 
-| Tool | Description |
-|------|-------------|
+| Tool                          | Description                    |
+| ----------------------------- | ------------------------------ |
 | `web_search_company_research` | Comprehensive company research |
 
 ### researcher
 
-| Tool | Description |
-|------|-------------|
+| Tool                          | Description                                  |
+| ----------------------------- | -------------------------------------------- |
 | `web_search_researcher_start` | Start comprehensive AI-powered research task |
-| `web_search_researcher_check` | Check research task status and get results |
+| `web_search_researcher_check` | Check research task status and get results   |
 
 ### websets
 
-| Tool | Description |
-|------|-------------|
-| `webset_create` | Create entity collections with search and enrichments |
-| `webset_list` | List all websets in your account |
-| `webset_get` | Get detailed webset information |
-| `webset_update` | Update webset metadata |
-| `webset_delete` | Delete a webset |
-| `webset_items_list` | List items in a webset |
-| `webset_item_get` | Get item details |
-| `webset_search_create` | Add search to find entities for a webset |
-| `webset_search_get` | Check search status |
-| `webset_search_cancel` | Cancel running search |
-| `webset_enrichment_create` | Extract custom data from webset items |
-| `webset_enrichment_get` | Get enrichment details |
-| `webset_enrichment_update` | Update enrichment metadata |
-| `webset_enrichment_delete` | Delete enrichment |
-| `webset_enrichment_cancel` | Cancel running enrichment |
-| `webset_monitor_create` | Auto-update webset on schedule |
+| Tool                       | Description                                           |
+| -------------------------- | ----------------------------------------------------- |
+| `webset_create`            | Create entity collections with search and enrichments |
+| `webset_list`              | List all websets in your account                      |
+| `webset_get`               | Get detailed webset information                       |
+| `webset_update`            | Update webset metadata                                |
+| `webset_delete`            | Delete a webset                                       |
+| `webset_items_list`        | List items in a webset                                |
+| `webset_item_get`          | Get item details                                      |
+| `webset_search_create`     | Add search to find entities for a webset              |
+| `webset_search_get`        | Check search status                                   |
+| `webset_search_cancel`     | Cancel running search                                 |
+| `webset_enrichment_create` | Extract custom data from webset items                 |
+| `webset_enrichment_get`    | Get enrichment details                                |
+| `webset_enrichment_update` | Update enrichment metadata                            |
+| `webset_enrichment_delete` | Delete enrichment                                     |
+| `webset_enrichment_cancel` | Cancel running enrichment                             |
+| `webset_monitor_create`    | Auto-update webset on schedule                        |
 
 ## Usage Examples
 
 ### Code Search
+
 ```
 Find examples of how to use React hooks with TypeScript
 ```
 
 ### Web Search
+
 ```
 Search for the latest news about AI regulation in the EU
 ```
 
 ### Company Research (requires company feature)
+
 ```
 Research the company OpenAI and find information about their products
 ```
 
 ### Deep Research (requires researcher feature)
+
 ```
 Start a deep research project on the impact of large language models on software development
 ```
 
 ### Websets (requires websets feature)
+
 ```
 Create a webset of AI startups in San Francisco founded after 2020,
 find 10 companies and enrich with CEO name and funding amount
@@ -140,6 +145,7 @@ find 10 companies and enrich with CEO name and funding amount
 ## How It Works
 
 The plugin connects to Exa's hosted MCP (Model Context Protocol) servers:
+
 - `https://mcp.exa.ai/mcp` - Search tools
 - `https://websetsmcp.exa.ai/mcp` - Websets tools
 

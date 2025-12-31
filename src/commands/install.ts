@@ -12,7 +12,6 @@ import {
 	loadPluginsJson,
 	type PluginConfig,
 	type PluginPackageJson,
-	type PluginsJson,
 	readPluginPackageJson,
 	savePluginsJson,
 } from "@omp/manifest";
@@ -59,7 +58,12 @@ export function parsePackageSpecWithFeatures(spec: string): ParsedPackageSpec {
 
 	if (!match) {
 		// Fallback: treat as plain name
-		return { name: spec, version: "latest", features: null, allFeatures: false };
+		return {
+			name: spec,
+			version: "latest",
+			features: null,
+			allFeatures: false,
+		};
 	}
 
 	const [, name, featuresStr, version = "latest"] = match;
@@ -80,7 +84,10 @@ export function parsePackageSpecWithFeatures(spec: string): ParsedPackageSpec {
 	}
 
 	// [f1,f2,...] = specific features
-	const features = featuresStr.split(",").map((f) => f.trim()).filter(Boolean);
+	const features = featuresStr
+		.split(",")
+		.map((f) => f.trim())
+		.filter(Boolean);
 	return { name, version, features, allFeatures: false };
 }
 
@@ -287,7 +294,12 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 	// Get existing plugins for conflict detection
 	const existingPlugins = await getInstalledPlugins(isGlobal);
 
-	const results: Array<{ name: string; version: string; success: boolean; error?: string }> = [];
+	const results: Array<{
+		name: string;
+		version: string;
+		success: boolean;
+		error?: string;
+	}> = [];
 
 	// Load plugins.json once for reinstall detection and config storage
 	let pluginsJson = await loadPluginsJson(isGlobal);
@@ -322,7 +334,12 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			if (!info) {
 				console.log(chalk.red(`  ✗ Package not found: ${name}`));
 				process.exitCode = 1;
-				results.push({ name, version, success: false, error: "Package not found" });
+				results.push({
+					name,
+					version,
+					success: false,
+					error: "Package not found",
+				});
 				continue;
 			}
 			resolvedVersion = info.version;
@@ -340,7 +357,12 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 						console.log(chalk.red(`    ${dupe.dest} ← ${dupe.sources.join(", ")}`));
 					}
 					process.exitCode = 1;
-					results.push({ name, version: info.version, success: false, error: "Duplicate destinations in plugin" });
+					results.push({
+						name,
+						version: info.version,
+						success: false,
+						error: "Duplicate destinations in plugin",
+					});
 					continue;
 				}
 
@@ -382,7 +404,12 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 					if (abort) {
 						console.log(chalk.yellow(`  Aborted due to conflicts (before download)`));
 						process.exitCode = 1;
-						results.push({ name, version: info.version, success: false, error: "Conflicts" });
+						results.push({
+							name,
+							version: info.version,
+							success: false,
+							error: "Conflicts",
+						});
 						continue;
 					}
 				}
@@ -412,9 +439,16 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 						console.log(chalk.red(`    ${dupe.dest} ← ${dupe.sources.join(", ")}`));
 					}
 					// Rollback: uninstall the package
-					execFileSync("npm", ["uninstall", "--prefix", prefix, name], { stdio: "pipe" });
+					execFileSync("npm", ["uninstall", "--prefix", prefix, name], {
+						stdio: "pipe",
+					});
 					process.exitCode = 1;
-					results.push({ name, version: info.version, success: false, error: "Duplicate destinations in plugin" });
+					results.push({
+						name,
+						version: info.version,
+						success: false,
+						error: "Duplicate destinations in plugin",
+					});
 					continue;
 				}
 
@@ -428,7 +462,9 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 							console.log(chalk.yellow(`  ⚠ ${formatConflicts([conflict])[0]}`));
 						}
 						// Rollback: uninstall the package
-						execFileSync("npm", ["uninstall", "--prefix", prefix, name], { stdio: "pipe" });
+						execFileSync("npm", ["uninstall", "--prefix", prefix, name], {
+							stdio: "pipe",
+						});
 						process.exitCode = 1;
 						results.push({
 							name,
@@ -455,21 +491,23 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 					if (abort) {
 						console.log(chalk.yellow(`  Aborted due to conflicts`));
 						// Rollback: uninstall the package
-						execFileSync("npm", ["uninstall", "--prefix", prefix, name], { stdio: "pipe" });
+						execFileSync("npm", ["uninstall", "--prefix", prefix, name], {
+							stdio: "pipe",
+						});
 						process.exitCode = 1;
-						results.push({ name, version: info.version, success: false, error: "Conflicts" });
+						results.push({
+							name,
+							version: info.version,
+							success: false,
+							error: "Conflicts",
+						});
 						continue;
 					}
 				}
 			}
 
 			// 6. Resolve features and create symlinks
-			const { enabledFeatures, configToStore } = resolveFeatures(
-				pkgJson,
-				parsed,
-				existingConfig,
-				isReinstall,
-			);
+			const { enabledFeatures, configToStore } = resolveFeatures(pkgJson, parsed, existingConfig, isReinstall);
 
 			// Log feature selection if plugin has features
 			const allFeatureNames = getAllFeatureNames(pkgJson);
@@ -484,7 +522,14 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			}
 
 			// Create symlinks for omp.install entries (skip destinations user assigned to existing plugins)
-			const symlinkResult = await createPluginSymlinks(name, pkgJson, isGlobal, true, skipDestinations, enabledFeatures);
+			const symlinkResult = await createPluginSymlinks(
+				name,
+				pkgJson,
+				isGlobal,
+				true,
+				skipDestinations,
+				enabledFeatures,
+			);
 			createdSymlinks = symlinkResult.created;
 
 			// 7. Process dependencies with omp field (with cycle detection)
@@ -553,14 +598,21 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			if (npmInstallSucceeded) {
 				console.log(chalk.dim("  Rolling back npm install..."));
 				try {
-					execFileSync("npm", ["uninstall", "--prefix", prefix, name], { stdio: "pipe" });
+					execFileSync("npm", ["uninstall", "--prefix", prefix, name], {
+						stdio: "pipe",
+					});
 				} catch {
 					// Ignore cleanup errors
 				}
 			}
 
 			process.exitCode = 1;
-			results.push({ name, version: resolvedVersion, success: false, error: errorMsg });
+			results.push({
+				name,
+				version: resolvedVersion,
+				success: false,
+				error: errorMsg,
+			});
 		}
 	}
 
@@ -589,7 +641,12 @@ async function installLocalPlugin(
 	localPath: string,
 	isGlobal: boolean,
 	_options: InstallOptions,
-): Promise<{ name: string; version: string; success: boolean; error?: string }> {
+): Promise<{
+	name: string;
+	version: string;
+	success: boolean;
+	error?: string;
+}> {
 	// Expand ~ to home directory
 	if (localPath.startsWith("~")) {
 		localPath = join(process.env.HOME || "", localPath.slice(1));
@@ -599,7 +656,12 @@ async function installLocalPlugin(
 	if (!existsSync(localPath)) {
 		console.log(chalk.red(`Error: Path does not exist: ${localPath}`));
 		process.exitCode = 1;
-		return { name: basename(localPath), version: "local", success: false, error: "Path not found" };
+		return {
+			name: basename(localPath),
+			version: "local",
+			success: false,
+			error: "Path not found",
+		};
 	}
 
 	const _prefix = isGlobal ? PLUGINS_DIR : ".pi";
@@ -695,6 +757,11 @@ async function installLocalPlugin(
 		const errorMsg = (err as Error).message;
 		console.log(chalk.red(`  ✗ Failed: ${errorMsg}`));
 		process.exitCode = 1;
-		return { name: basename(localPath), version: "local", success: false, error: errorMsg };
+		return {
+			name: basename(localPath),
+			version: "local",
+			success: false,
+			error: errorMsg,
+		};
 	}
 }

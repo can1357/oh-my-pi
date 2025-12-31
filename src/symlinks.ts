@@ -18,10 +18,7 @@ export function getInstallEntries(pkgJson: PluginPackageJson): OmpInstallEntry[]
 /**
  * @deprecated Use getInstallEntries instead. Features no longer have install arrays.
  */
-export function getEnabledInstallEntries(
-	pkgJson: PluginPackageJson,
-	_enabledFeatures?: string[],
-): OmpInstallEntry[] {
+export function getEnabledInstallEntries(pkgJson: PluginPackageJson, _enabledFeatures?: string[]): OmpInstallEntry[] {
 	return getInstallEntries(pkgJson);
 }
 
@@ -218,13 +215,16 @@ export async function createPluginSymlinks(
 
 /**
  * Read runtime.json config from a plugin's installed location
+ * Returns {} on failure so callers can detect missing/corrupt config and fall back to defaults
  */
 export function readRuntimeConfig(runtimePath: string): PluginRuntimeConfig {
 	try {
 		const content = readFileSync(runtimePath, "utf-8");
 		return JSON.parse(content) as PluginRuntimeConfig;
 	} catch {
-		return { features: [], options: {} };
+		// Return empty object (not {features: []}) so callers detect missing config
+		// and can fall back to plugin defaults instead of treating as "all disabled"
+		return {};
 	}
 }
 
@@ -242,7 +242,7 @@ export async function writeRuntimeConfig(
 			features: config.features ?? existing.features ?? [],
 			options: { ...existing.options, ...config.options },
 		};
-		writeFileSync(runtimePath, JSON.stringify(merged, null, 2) + "\n");
+		writeFileSync(runtimePath, `${JSON.stringify(merged, null, 2)}\n`);
 		if (verbose) {
 			console.log(chalk.dim(`  Updated: ${runtimePath}`));
 		}
@@ -272,7 +272,11 @@ export async function removePluginSymlinks(
 	global = true,
 	verbose = true,
 ): Promise<SymlinkRemovalResult> {
-	const result: SymlinkRemovalResult = { removed: [], errors: [], skippedNonSymlinks: [] };
+	const result: SymlinkRemovalResult = {
+		removed: [],
+		errors: [],
+		skippedNonSymlinks: [],
+	};
 
 	const installEntries = getInstallEntries(pkgJson);
 	if (installEntries.length === 0) {
@@ -347,7 +351,11 @@ export async function checkPluginSymlinks(
 	pkgJson: PluginPackageJson,
 	global = true,
 ): Promise<{ valid: string[]; broken: string[]; missing: string[] }> {
-	const result = { valid: [] as string[], broken: [] as string[], missing: [] as string[] };
+	const result = {
+		valid: [] as string[],
+		broken: [] as string[],
+		missing: [] as string[],
+	};
 	const sourceDir = getPluginSourceDir(pluginName, global);
 	const baseDir = getBaseDir(global);
 

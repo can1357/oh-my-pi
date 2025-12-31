@@ -14,7 +14,12 @@ export interface ConfigOptions {
  * Collect all variables from a plugin (top-level + enabled features)
  */
 function collectVariables(
-	pkgJson: { omp?: { variables?: Record<string, OmpVariable>; features?: Record<string, { variables?: Record<string, OmpVariable> }> } },
+	pkgJson: {
+		omp?: {
+			variables?: Record<string, OmpVariable>;
+			features?: Record<string, { variables?: Record<string, OmpVariable> }>;
+		};
+	},
 	enabledFeatures: string[],
 ): Record<string, OmpVariable> {
 	const vars: Record<string, OmpVariable> = {};
@@ -42,18 +47,22 @@ function collectVariables(
  */
 function parseValue(value: string, varDef: OmpVariable): string | number | boolean | string[] {
 	switch (varDef.type) {
-		case "number":
+		case "number": {
 			const num = Number(value);
-			if (isNaN(num)) {
+			if (Number.isNaN(num)) {
 				throw new Error(`Invalid number: ${value}`);
 			}
 			return num;
+		}
 		case "boolean":
 			if (value === "true" || value === "1" || value === "yes") return true;
 			if (value === "false" || value === "0" || value === "no") return false;
 			throw new Error(`Invalid boolean: ${value}. Use true/false, 1/0, or yes/no`);
 		case "string[]":
-			return value.split(",").map((s) => s.trim()).filter(Boolean);
+			return value
+				.split(",")
+				.map((s) => s.trim())
+				.filter(Boolean);
 		default:
 			return value;
 	}
@@ -80,15 +89,22 @@ function formatValue(value: unknown, varDef: OmpVariable): string {
 
 /**
  * Resolve which features are currently enabled
+ *
+ * - null/undefined: use plugin defaults (features with default !== false)
+ * - ["*"]: explicitly all features
+ * - []: no optional features
+ * - ["f1", "f2"]: specific features
  */
 function resolveEnabledFeatures(
 	allFeatureNames: string[],
 	storedFeatures: string[] | null | undefined,
 	pluginFeatures: Record<string, { default?: boolean }>,
 ): string[] {
-	if (storedFeatures === null) return allFeatureNames;
+	// Explicit "all features" request
 	if (Array.isArray(storedFeatures) && storedFeatures.includes("*")) return allFeatureNames;
+	// Explicit feature list (including empty array = no features)
 	if (Array.isArray(storedFeatures)) return storedFeatures;
+	// null/undefined = use defaults
 	return Object.entries(pluginFeatures)
 		.filter(([_, f]) => f.default !== false)
 		.map(([name]) => name);
@@ -156,7 +172,13 @@ export async function listConfig(name: string, options: ConfigOptions = {}): Pro
 		const hasValue = currentValue !== undefined;
 		const hasDefault = vdef.default !== undefined;
 
-		const icon = hasValue ? chalk.green("✓") : hasDefault ? chalk.blue("○") : vdef.required ? chalk.red("!") : chalk.gray("○");
+		const icon = hasValue
+			? chalk.green("✓")
+			: hasDefault
+				? chalk.blue("○")
+				: vdef.required
+					? chalk.red("!")
+					: chalk.gray("○");
 		const requiredStr = vdef.required && !hasValue ? chalk.red(" (required)") : "";
 		const envStr = vdef.env ? chalk.dim(` [${vdef.env}]`) : "";
 
@@ -308,7 +330,8 @@ export async function deleteConfig(name: string, key: string, options: ConfigOpt
 	}
 
 	const config = pluginsJson.config?.[name];
-	if (!config?.variables?.[key]) {
+	// Check key presence with hasOwnProperty, not truthiness (allows deleting falsy values like false, 0, "", [])
+	if (!config?.variables || !Object.hasOwn(config.variables, key)) {
 		console.log(chalk.yellow(`Variable "${key}" is not set for ${name}.`));
 		return;
 	}

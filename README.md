@@ -74,10 +74,10 @@ Plugins declare which files to install via the `omp.install` field in their `pac
 
 omp supports both global and project-local plugin configurations:
 
-| Scope | Config Location | Agent Directory | Use Case |
-|-------|-----------------|-----------------|----------|
-| Global | `~/.pi/plugins/` | `~/.pi/agent/` | Personal defaults |
-| Local | `.pi/` | `.pi/agent/` | Project-specific plugins |
+| Scope  | Config Location  | Agent Directory | Use Case                 |
+| ------ | ---------------- | --------------- | ------------------------ |
+| Global | `~/.pi/plugins/` | `~/.pi/agent/`  | Personal defaults        |
+| Local  | `.pi/`           | `.pi/agent/`    | Project-specific plugins |
 
 ```bash
 # Explicit scope
@@ -92,25 +92,25 @@ Initialize a project-local config with `omp init`.
 
 ## Commands
 
-| Command | Alias | Description |
-|---------|-------|-------------|
-| `omp install [pkg...]` | `i` | Install plugin(s). No args = install from plugins.json |
-| `omp uninstall <pkg>` | `rm` | Remove plugin and its symlinks |
-| `omp update [pkg]` | `up` | Update to latest within semver range |
-| `omp list` | `ls` | Show installed plugins |
-| `omp search <query>` | | Search npm for plugins |
-| `omp info <pkg>` | | Show plugin details before install |
-| `omp outdated` | | List plugins with newer versions |
-| `omp doctor` | | Check for broken symlinks, conflicts |
-| `omp link <path>` | | Symlink local plugin (dev mode) |
-| `omp create <name>` | | Scaffold new plugin from template |
-| `omp init` | | Create .pi/plugins.json in current project |
-| `omp why <file>` | | Show which plugin installed a file |
-| `omp enable <name>` | | Enable a disabled plugin |
-| `omp disable <name>` | | Disable plugin without uninstalling |
-| `omp features <name>` | | List or configure plugin features |
-| `omp config <name>` | | Get or set plugin configuration variables |
-| `omp env` | | Print environment variables for shell eval |
+| Command                | Alias | Description                                            |
+| ---------------------- | ----- | ------------------------------------------------------ |
+| `omp install [pkg...]` | `i`   | Install plugin(s). No args = install from plugins.json |
+| `omp uninstall <pkg>`  | `rm`  | Remove plugin and its symlinks                         |
+| `omp update [pkg]`     | `up`  | Update to latest within semver range                   |
+| `omp list`             | `ls`  | Show installed plugins                                 |
+| `omp search <query>`   |       | Search npm for plugins                                 |
+| `omp info <pkg>`       |       | Show plugin details before install                     |
+| `omp outdated`         |       | List plugins with newer versions                       |
+| `omp doctor`           |       | Check for broken symlinks, conflicts                   |
+| `omp link <path>`      |       | Symlink local plugin (dev mode)                        |
+| `omp create <name>`    |       | Scaffold new plugin from template                      |
+| `omp init`             |       | Create .pi/plugins.json in current project             |
+| `omp why <file>`       |       | Show which plugin installed a file                     |
+| `omp enable <name>`    |       | Enable a disabled plugin                               |
+| `omp disable <name>`   |       | Disable plugin without uninstalling                    |
+| `omp features <name>`  |       | List or configure plugin features                      |
+| `omp config <name>`    |       | Get or set plugin configuration variables              |
+| `omp env`              |       | Print environment variables for shell eval             |
 
 Most commands accept `-g`/`--global` or `-l`/`--local` flags to override scope auto-detection.
 
@@ -190,16 +190,16 @@ Plugins are npm packages with an `omp` field in `package.json`:
 
 ```json
 {
-  "name": "my-cool-plugin",
-  "version": "1.0.0",
-  "keywords": ["omp-plugin"],
-  "omp": {
-    "install": [
-      { "src": "agents/researcher.md", "dest": "agent/agents/researcher.md" },
-      { "src": "commands/research.md", "dest": "agent/commands/research.md" }
-    ]
-  },
-  "files": ["agents", "commands", "tools", "themes"]
+	"name": "my-cool-plugin",
+	"version": "1.0.0",
+	"keywords": ["omp-plugin"],
+	"omp": {
+		"install": [
+			{ "src": "agents/researcher.md", "dest": "agent/agents/researcher.md" },
+			{ "src": "commands/research.md", "dest": "agent/commands/research.md" }
+		]
+	},
+	"files": ["agents", "commands", "tools", "themes"]
 }
 ```
 
@@ -209,44 +209,38 @@ Plugins can define optional features and configurable variables:
 
 ```json
 {
-  "name": "@oh-my-pi/exa",
-  "version": "1.0.0",
-  "keywords": ["omp-plugin"],
-  "omp": {
-    "install": [
-      { "src": "tools/core.ts", "dest": "agent/tools/exa/core.ts" }
-    ],
-    "variables": {
-      "apiKey": {
-        "type": "string",
-        "env": "EXA_API_KEY",
-        "description": "Exa API key",
-        "required": true
-      }
-    },
-    "features": {
-      "search": {
-        "description": "Web search capabilities",
-        "default": true,
-        "install": [
-          { "src": "tools/search.ts", "dest": "agent/tools/exa/search.ts" }
-        ]
-      },
-      "websets": {
-        "description": "Curated content collections",
-        "default": false,
-        "install": [
-          { "src": "tools/websets.ts", "dest": "agent/tools/exa/websets.ts" }
-        ],
-        "variables": {
-          "defaultCollection": {
-            "type": "string",
-            "default": "general"
-          }
-        }
-      }
-    }
-  }
+	"name": "@oh-my-pi/exa",
+	"version": "1.0.0",
+	"keywords": ["omp-plugin"],
+	"omp": {
+		"install": [{ "src": "tools/core.ts", "dest": "agent/tools/exa/core.ts" }],
+		"variables": {
+			"apiKey": {
+				"type": "string",
+				"env": "EXA_API_KEY",
+				"description": "Exa API key",
+				"required": true
+			}
+		},
+		"features": {
+			"search": {
+				"description": "Web search capabilities",
+				"default": true,
+				"install": [{ "src": "tools/search.ts", "dest": "agent/tools/exa/search.ts" }]
+			},
+			"websets": {
+				"description": "Curated content collections",
+				"default": false,
+				"install": [{ "src": "tools/websets.ts", "dest": "agent/tools/exa/websets.ts" }],
+				"variables": {
+					"defaultCollection": {
+						"type": "string",
+						"default": "general"
+					}
+				}
+			}
+		}
+	}
 }
 ```
 

@@ -1,7 +1,7 @@
 import { checkbox } from "@inquirer/prompts";
-import { loadPluginsJson, readPluginPackageJson } from "@omp/manifest";
+import { loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
 import { resolveScope } from "@omp/paths";
-import { getAllFeatureNames, getDefaultFeatures, getRuntimeConfigPath, readRuntimeConfig, writeRuntimeConfig } from "@omp/symlinks";
+import { getDefaultFeatures, getRuntimeConfigPath, readRuntimeConfig, writeRuntimeConfig } from "@omp/symlinks";
 import chalk from "chalk";
 
 export interface FeaturesOptions {
@@ -41,15 +41,25 @@ export async function interactiveFeatures(name: string, options: FeaturesOptions
 		return;
 	}
 
-	// Get runtime config path and current enabled features
+	// Get runtime config path
 	const runtimePath = getRuntimeConfigPath(pkgJson, isGlobal);
 	if (!runtimePath) {
 		console.log(chalk.yellow(`Plugin "${name}" does not have a runtime.json config file.`));
 		return;
 	}
 
-	const runtimeConfig = readRuntimeConfig(runtimePath);
-	const enabledFeatures = runtimeConfig.features ?? getDefaultFeatures(features);
+	// Determine currently enabled features:
+	// 1. Check plugins.json config (source of truth after omp features changes)
+	// 2. Fall back to runtime.json
+	// 3. Fall back to plugin defaults
+	const pluginConfig = pluginsJson.config?.[name];
+	let enabledFeatures: string[];
+	if (Array.isArray(pluginConfig?.features)) {
+		enabledFeatures = pluginConfig.features;
+	} else {
+		const runtimeConfig = readRuntimeConfig(runtimePath);
+		enabledFeatures = runtimeConfig.features ?? getDefaultFeatures(features);
+	}
 
 	// JSON output mode - just list
 	if (options.json) {
@@ -99,8 +109,8 @@ export async function interactiveFeatures(name: string, options: FeaturesOptions
 		});
 
 		// Apply changes
-		await applyFeatureChanges(name, runtimePath, features, enabledFeatures, selected);
-	} catch (err) {
+		await applyFeatureChanges(name, runtimePath, features, enabledFeatures, selected, isGlobal);
+	} catch (_err) {
 		// User cancelled (Ctrl+C)
 		console.log(chalk.dim("\nCancelled."));
 	}
@@ -111,7 +121,14 @@ export async function interactiveFeatures(name: string, options: FeaturesOptions
  */
 function listFeaturesNonInteractive(
 	name: string,
-	features: Record<string, { description?: string; default?: boolean; variables?: Record<string, unknown> }>,
+	features: Record<
+		string,
+		{
+			description?: string;
+			default?: boolean;
+			variables?: Record<string, unknown>;
+		}
+	>,
 	enabledFeatures: string[],
 ): void {
 	console.log(chalk.bold(`\nFeatures for ${name}:\n`));
@@ -136,14 +153,22 @@ function listFeaturesNonInteractive(
 }
 
 /**
- * Apply feature changes - simply update runtime.json
+ * Apply feature changes - update both plugins.json (for config/env) and runtime.json (for runtime)
  */
 async function applyFeatureChanges(
 	name: string,
 	runtimePath: string,
-	features: Record<string, { description?: string; default?: boolean; variables?: Record<string, unknown> }>,
+	_features: Record<
+		string,
+		{
+			description?: string;
+			default?: boolean;
+			variables?: Record<string, unknown>;
+		}
+	>,
 	currentlyEnabled: string[],
 	newEnabled: string[],
+	isGlobal: boolean,
 ): Promise<void> {
 	// Compute what changed
 	const toDisable = currentlyEnabled.filter((f) => !newEnabled.includes(f));
@@ -163,7 +188,14 @@ async function applyFeatureChanges(
 		console.log(chalk.dim(`  Enabling: ${toEnable.join(", ")}`));
 	}
 
-	// Write the new features to runtime.json
+	// Update plugins.json (source of truth for config/env commands)
+	const pluginsJson = await loadPluginsJson(isGlobal);
+	if (!pluginsJson.config) pluginsJson.config = {};
+	if (!pluginsJson.config[name]) pluginsJson.config[name] = {};
+	pluginsJson.config[name].features = newEnabled;
+	await savePluginsJson(pluginsJson, isGlobal);
+
+	// Also write to runtime.json (for runtime feature detection)
 	await writeRuntimeConfig(runtimePath, { features: newEnabled });
 
 	console.log(chalk.green(`\n✓ Features updated`));
@@ -206,7 +238,7 @@ export async function configureFeatures(name: string, options: FeaturesOptions =
 
 	const allFeatureNames = Object.keys(features);
 
-	// Get runtime config
+	// Get runtime config path
 	const runtimePath = getRuntimeConfigPath(pkgJson, isGlobal);
 	if (!runtimePath) {
 		console.log(chalk.yellow(`Plugin "${name}" does not have a runtime.json config file.`));
@@ -214,8 +246,18 @@ export async function configureFeatures(name: string, options: FeaturesOptions =
 		return;
 	}
 
-	const runtimeConfig = readRuntimeConfig(runtimePath);
-	const currentlyEnabled = runtimeConfig.features ?? getDefaultFeatures(features);
+	// Determine currently enabled features:
+	// 1. Check plugins.json config (source of truth after omp features changes)
+	// 2. Fall back to runtime.json
+	// 3. Fall back to plugin defaults
+	const pluginConfig = pluginsJson.config?.[name];
+	let currentlyEnabled: string[];
+	if (Array.isArray(pluginConfig?.features)) {
+		currentlyEnabled = pluginConfig.features;
+	} else {
+		const runtimeConfig = readRuntimeConfig(runtimePath);
+		currentlyEnabled = runtimeConfig.features ?? getDefaultFeatures(features);
+	}
 
 	let newEnabled: string[];
 
@@ -226,7 +268,10 @@ export async function configureFeatures(name: string, options: FeaturesOptions =
 		} else if (options.set === "") {
 			newEnabled = [];
 		} else {
-			newEnabled = options.set.split(",").map((f) => f.trim()).filter(Boolean);
+			newEnabled = options.set
+				.split(",")
+				.map((f) => f.trim())
+				.filter(Boolean);
 			// Validate
 			for (const f of newEnabled) {
 				if (!features[f]) {
@@ -265,7 +310,7 @@ export async function configureFeatures(name: string, options: FeaturesOptions =
 		}
 	}
 
-	await applyFeatureChanges(name, runtimePath, features, currentlyEnabled, newEnabled);
+	await applyFeatureChanges(name, runtimePath, features, currentlyEnabled, newEnabled, isGlobal);
 
 	if (options.json) {
 		console.log(JSON.stringify({ plugin: name, enabled: newEnabled }, null, 2));

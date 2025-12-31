@@ -1,6 +1,7 @@
 ---
 description: Explore gathers context, planner creates implementation plan (no implementation)
 ---
+
 Use the subagent tool with the chain parameter to execute this workflow:
 
 1. First, use the "explore" agent to find all code relevant to: $@

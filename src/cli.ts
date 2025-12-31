@@ -28,7 +28,7 @@ if (!npmCheck.available) {
 	process.exit(1);
 }
 
-program.name("omp").description("Oh My Pi - Plugin manager for pi configuration").version("0.2.0");
+program.name("omp").description("Oh My Pi - Plugin manager for pi configuration").version("0.4.0");
 
 // ============================================================================
 // Core Commands

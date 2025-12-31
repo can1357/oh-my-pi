@@ -1,8 +1,14 @@
 {
   "name": "@oh-my-pi/user-prompt",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "Interactive user prompting tool for gathering user input during execution",
-  "keywords": ["omp-plugin", "user-prompt", "interactive", "questions", "input"],
+  "keywords": [
+    "omp-plugin",
+    "user-prompt",
+    "interactive",
+    "questions",
+    "input"
+  ],
   "author": "Can Bölük <me@can.ac>",
   "license": "MIT",
   "repository": {
@@ -12,8 +18,13 @@
   },
   "omp": {
     "install": [
-      { "src": "tools/user-prompt/index.ts", "dest": "agent/tools/user-prompt/index.ts" }
+      {
+        "src": "tools/user-prompt/index.ts",
+        "dest": "agent/tools/user-prompt/index.ts"
+      }
     ]
   },
-  "files": ["tools"]
+  "files": [
+    "tools"
+  ]
 }

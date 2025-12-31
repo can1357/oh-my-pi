@@ -1,8 +1,14 @@
 {
   "name": "@oh-my-pi/exa",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "Exa AI web search and websets tools for pi",
-  "keywords": ["omp-plugin", "exa", "web-search", "websets", "ai-search"],
+  "keywords": [
+    "omp-plugin",
+    "exa",
+    "web-search",
+    "websets",
+    "ai-search"
+  ],
   "author": "Can Bölük <me@can.ac>",
   "license": "MIT",
   "repository": {
@@ -12,14 +18,39 @@
   },
   "omp": {
     "install": [
-      { "src": "tools/exa/runtime.json", "dest": "agent/tools/exa/runtime.json", "copy": true },
-      { "src": "tools/exa/index.ts", "dest": "agent/tools/exa/index.ts" },
-      { "src": "tools/exa/shared.ts", "dest": "agent/tools/exa/shared.ts" },
-      { "src": "tools/exa/search.ts", "dest": "agent/tools/exa/search.ts" },
-      { "src": "tools/exa/linkedin.ts", "dest": "agent/tools/exa/linkedin.ts" },
-      { "src": "tools/exa/company.ts", "dest": "agent/tools/exa/company.ts" },
-      { "src": "tools/exa/researcher.ts", "dest": "agent/tools/exa/researcher.ts" },
-      { "src": "tools/exa/websets.ts", "dest": "agent/tools/exa/websets.ts" }
+      {
+        "src": "tools/exa/runtime.json",
+        "dest": "agent/tools/exa/runtime.json",
+        "copy": true
+      },
+      {
+        "src": "tools/exa/index.ts",
+        "dest": "agent/tools/exa/index.ts"
+      },
+      {
+        "src": "tools/exa/shared.ts",
+        "dest": "agent/tools/exa/shared.ts"
+      },
+      {
+        "src": "tools/exa/search.ts",
+        "dest": "agent/tools/exa/search.ts"
+      },
+      {
+        "src": "tools/exa/linkedin.ts",
+        "dest": "agent/tools/exa/linkedin.ts"
+      },
+      {
+        "src": "tools/exa/company.ts",
+        "dest": "agent/tools/exa/company.ts"
+      },
+      {
+        "src": "tools/exa/researcher.ts",
+        "dest": "agent/tools/exa/researcher.ts"
+      },
+      {
+        "src": "tools/exa/websets.ts",
+        "dest": "agent/tools/exa/websets.ts"
+      }
     ],
     "variables": {
       "apiKey": {
@@ -52,5 +83,7 @@
       }
     }
   },
-  "files": ["tools"]
+  "files": [
+    "tools"
+  ]
 }

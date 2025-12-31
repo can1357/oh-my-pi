@@ -1,13 +1,10 @@
-import type { OmpVariable, PluginPackageJson, PluginsJson } from "@omp/manifest";
+import type { OmpVariable, PluginPackageJson } from "@omp/manifest";
 import { loadPluginsJson, readPluginPackageJson } from "@omp/manifest";
 
 /**
  * Collect all variables from a plugin (top-level + enabled features)
  */
-function collectVariables(
-	pkgJson: PluginPackageJson,
-	enabledFeatures: string[],
-): Record<string, OmpVariable> {
+function collectVariables(pkgJson: PluginPackageJson, enabledFeatures: string[]): Record<string, OmpVariable> {
 	const vars: Record<string, OmpVariable> = {};
 
 	// Top-level variables
@@ -30,15 +27,22 @@ function collectVariables(
 
 /**
  * Resolve which features are currently enabled
+ *
+ * - null/undefined: use plugin defaults (features with default !== false)
+ * - ["*"]: explicitly all features
+ * - []: no optional features
+ * - ["f1", "f2"]: specific features
  */
 function resolveEnabledFeatures(
 	allFeatureNames: string[],
 	storedFeatures: string[] | null | undefined,
 	pluginFeatures: Record<string, { default?: boolean }>,
 ): string[] {
-	if (storedFeatures === null) return allFeatureNames;
+	// Explicit "all features" request
 	if (Array.isArray(storedFeatures) && storedFeatures.includes("*")) return allFeatureNames;
+	// Explicit feature list (including empty array = no features)
 	if (Array.isArray(storedFeatures)) return storedFeatures;
+	// null/undefined = use defaults
 	return Object.entries(pluginFeatures)
 		.filter(([_, f]) => f.default !== false)
 		.map(([name]) => name);
@@ -60,11 +64,7 @@ export async function getPluginEnvVars(global = true): Promise<Record<string, st
 
 		const config = pluginsJson.config?.[pluginName];
 		const allFeatureNames = Object.keys(pkgJson.omp.features || {});
-		const enabledFeatures = resolveEnabledFeatures(
-			allFeatureNames,
-			config?.features,
-			pkgJson.omp.features || {},
-		);
+		const enabledFeatures = resolveEnabledFeatures(allFeatureNames, config?.features, pkgJson.omp.features || {});
 
 		// Collect variables from top-level and enabled features
 		const variables = collectVariables(pkgJson, enabledFeatures);

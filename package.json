@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/cli",
-	"version": "0.2.0",
+	"version": "0.4.0",
 	"description": "Plugin manager for pi - install and manage pi config plugins from git repos",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -12,13 +12,19 @@
 		"build": "bun build src/cli.ts --outdir dist --target bun && tsc --emitDeclarationOnly",
 		"dev": "bun --watch src/cli.ts",
 		"lint": "biome check --write .",
-		"check": "bun run lint && tsc --noEmit",
+		"format": "prettier --write \"**/*.md\" && biome check --write .",
+		"check": "bun run format && tsc --noEmit",
 		"clean": "rm -rf dist",
 		"publish:all": "./scripts/publish.sh",
 		"publish:dry": "./scripts/publish.sh --dry-run",
 		"version:bump": "./scripts/bump-version.sh"
 	},
-	"keywords": ["pi", "plugin", "manager", "cli"],
+	"keywords": [
+		"pi",
+		"plugin",
+		"manager",
+		"cli"
+	],
 	"author": "Can Bölük <me@can.ac>",
 	"license": "MIT",
 	"repository": {
@@ -26,9 +32,10 @@
 		"url": "https://github.com/can1357/oh-my-pi.git"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.3.5",
+		"@biomejs/biome": "2.3.10",
 		"@types/node": "^22.10.5",
 		"bun-types": "^1.2.17",
+		"prettier": "^3.7.4",
 		"typescript": "^5.9.2"
 	},
 	"dependencies": {

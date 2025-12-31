@@ -47,20 +47,31 @@ const FILE_CATEGORIES: FileCategory[] = [
 		pattern: /^agent\/prompts?\//,
 		label: "Prompts",
 		color: chalk.blue,
-		extractName: (dest) => dest.split("/").pop()?.replace(/\.[^.]+$/, "") || dest,
+		extractName: (dest) =>
+			dest
+				.split("/")
+				.pop()
+				?.replace(/\.[^.]+$/, "") || dest,
 	},
 	{
 		pattern: /^agent\/hooks?\//,
 		label: "Hooks",
 		color: chalk.red,
-		extractName: (dest) => dest.split("/").pop()?.replace(/\.[^.]+$/, "") || dest,
+		extractName: (dest) =>
+			dest
+				.split("/")
+				.pop()
+				?.replace(/\.[^.]+$/, "") || dest,
 	},
 ];
 
 /**
  * Categorize installed files into known categories
  */
-function categorizeFiles(files: string[]): { categorized: Map<string, string[]>; uncategorized: string[] } {
+function categorizeFiles(files: string[]): {
+	categorized: Map<string, string[]>;
+	uncategorized: string[];
+} {
 	const categorized = new Map<string, string[]>();
 	const uncategorized: string[] = [];
 
