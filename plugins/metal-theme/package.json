@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "description": "Metal theme for pi",
   "keywords": ["omp-plugin", "theme", "metal"],
-  "author": "",
+  "author": "Can Bölük <me@can.ac>",
   "license": "MIT",
   "repository": {
     "type": "git",

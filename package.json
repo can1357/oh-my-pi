@@ -19,7 +19,7 @@
 		"version:bump": "./scripts/bump-version.sh"
 	},
 	"keywords": ["pi", "plugin", "manager", "cli"],
-	"author": "",
+	"author": "Can Bölük <me@can.ac>",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
