@@ -107,8 +107,8 @@ function resolveModelPattern(
     if (match) return match;
   }
 
-  // No match found - return first pattern as-is (let pi handle the error)
-  return patterns[0];
+  // No match found - use default model instead of erroring
+  return undefined;
 }
 
 const MAX_OUTPUT_LINES = 5000;
