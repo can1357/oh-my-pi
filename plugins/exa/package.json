@@ -1,0 +1,19 @@
+{
+  "name": "@oh-my-pi/exa",
+  "version": "0.1.0",
+  "description": "Exa AI web search and websets tools for pi",
+  "keywords": ["omp-plugin", "exa", "web-search", "websets", "ai-search"],
+  "author": "Can Bölük <me@can.ac>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/can1357/oh-my-pi.git",
+    "directory": "plugins/exa"
+  },
+  "omp": {
+    "install": [
+      { "src": "tools/exa/index.ts", "dest": "agent/tools/exa/index.ts" }
+    ]
+  },
+  "files": ["tools"]
+}
