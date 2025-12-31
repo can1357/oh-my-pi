@@ -135,6 +135,9 @@ dist
 !.yarn/sdks
 !.yarn/versions
 
+# npm (bun.lock is canonical)
+package-lock.json
+
 # Vite files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
