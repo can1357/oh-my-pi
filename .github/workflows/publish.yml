@@ -33,10 +33,9 @@ jobs:
       - name: Publish @oh-my-pi/cli
         run: npm publish --access public --provenance
 
-      - name: Publish @oh-my-pi/subagents
-        working-directory: plugins/subagents
-        run: npm publish --access public --provenance
-
-      - name: Publish @oh-my-pi/metal-theme
-        working-directory: plugins/metal-theme
-        run: npm publish --access public --provenance
+      - name: Publish plugins
+        run: |
+          for dir in plugins/*/; do
+            echo "Publishing $dir"
+            (cd "$dir" && npm publish --access public --provenance)
+          done
