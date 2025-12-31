@@ -18,6 +18,17 @@
 
 ---
 
+## Plugins
+
+| Plugin                                                                       | Description                                                                    |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| **[@oh-my-pi/subagents](https://npmjs.com/package/@oh-my-pi/subagents)**     | Task delegation with specialized sub-agents (task, planner, explore, reviewer) |
+| **[@oh-my-pi/exa](https://npmjs.com/package/@oh-my-pi/exa)**                 | Exa AI-powered web search, company/people lookup, and websets                  |
+| **[@oh-my-pi/user-prompt](https://npmjs.com/package/@oh-my-pi/user-prompt)** | Interactive user prompting for gathering input during execution                |
+| **[@oh-my-pi/metal-theme](https://npmjs.com/package/@oh-my-pi/metal-theme)** | A metal theme 🤘                                                               |
+
+---
+
 **Oh My Pi won't make Claude write better code...** but it might make _you_ feel like it does.
 
 Install community plugins with a single command. Themes, custom agents, slash commands, tools — all managed through npm, all a `omp install` away.
@@ -33,17 +44,14 @@ npm install -g @oh-my-pi/cli
 ## Quick Start
 
 ```bash
-# Initialize a project-local plugin config (optional)
-omp init
-
-# Search for plugins
-omp search agents
-
 # Install a plugin
 omp install @oh-my-pi/subagents
 
 # See what you've got
 omp list
+
+# Search for more
+omp search agents
 
 # Check for updates
 omp outdated
@@ -290,13 +298,6 @@ omp list
 # When ready, publish
 cd my-plugin && npm publish
 ```
-
-## Bundled Plugins
-
-- **[@oh-my-pi/subagents](https://npmjs.com/package/@oh-my-pi/subagents)**: Task delegation with specialized sub-agents (task, planner, explore, reviewer)
-- **[@oh-my-pi/metal-theme](https://npmjs.com/package/@oh-my-pi/metal-theme)**: A metal theme
-- **[@oh-my-pi/exa](https://npmjs.com/package/@oh-my-pi/exa)**: Exa AI-powered web search and websets tools
-- **[@oh-my-pi/user-prompt](https://npmjs.com/package/@oh-my-pi/user-prompt)**: Interactive user prompting for gathering input during agent execution
 
 ## Troubleshooting
 
