@@ -28,6 +28,29 @@ interface MCPToolsResponse {
   };
 }
 
+function normalizeInputSchema(schema: unknown): Record<string, unknown> {
+  if (!schema || typeof schema !== "object") {
+    return { type: "object", properties: {}, required: [] };
+  }
+
+  const normalized = { ...(schema as Record<string, unknown>) };
+
+  if (!("type" in normalized)) {
+    normalized.type = "object";
+  }
+
+  if (!("properties" in normalized)) {
+    normalized.properties = {};
+  }
+
+  const required = (normalized as { required?: unknown }).required;
+  if (!Array.isArray(required)) {
+    normalized.required = [];
+  }
+
+  return normalized;
+}
+
 /**
  * Parse a .env file and return key-value pairs
  */
@@ -249,15 +272,30 @@ export function createToolWrapper(
     name: renamedName,
     label: renamedName.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
     description: mcpTool.description,
-    parameters: mcpTool.inputSchema,
+    parameters: normalizeInputSchema(mcpTool.inputSchema) as TSchema,
     async execute(_toolCallId, params) {
-      const result = await callFn(mcpTool.name, (params ?? {}) as Record<string, unknown>);
-      // Return in AgentToolResult format: { content: [...], details: ... }
-      const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-      return {
-        content: [{ type: "text" as const, text }],
-        details: result,
-      };
+      try {
+        const result = await callFn(
+          mcpTool.name,
+          (params ?? {}) as Record<string, unknown>,
+        );
+        const text =
+          typeof result === "string"
+            ? result
+            : result == null
+              ? "null"
+              : JSON.stringify(result, null, 2) ?? String(result);
+        return {
+          content: [{ type: "text" as const, text }],
+          details: result,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text" as const, text: `Error: ${message}` }],
+          details: { error: message },
+        };
+      }
     },
   };
 }
