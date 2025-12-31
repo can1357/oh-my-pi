@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/logo.png?raw=true&q=2" alt="Oh My Pi" height="300">
+  <img src="assets/logo.png" alt="Oh My Pi" height="300">
 </p>
 
 <p align="center">
