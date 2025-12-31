@@ -4,7 +4,7 @@ import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { type Conflict, detectConflicts, detectIntraPluginDuplicates, formatConflicts } from "@omp/conflicts";
-import { updateLockFile } from "@omp/lockfile";
+import { getLockedPackage, updateLockFile, verifyIntegrity } from "@omp/lockfile";
 import {
 	getInstalledPlugins,
 	initGlobalPlugins,
@@ -505,7 +505,12 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 		// Pending manifest changes (committed only on full success)
 		let pendingPluginEntry: { name: string; version: string; isDev: boolean } | null = null;
 		let pendingConfig: PluginConfig | null = null;
-		let pendingLockUpdate: { name: string; version: string } | null = null;
+		let pendingLockUpdate: {
+			name: string;
+			version: string;
+			resolved?: string;
+			integrity?: string;
+		} | null = null;
 
 		try {
 			log(chalk.blue(`\nInstalling ${pkgSpec}...`));
@@ -527,6 +532,27 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			}
 			fetchProgress.succeed(`Found ${info.name}@${info.version}`);
 			resolvedVersion = info.version;
+
+			// Verify integrity if package was previously locked
+			const lockedEntry = await getLockedPackage(name, isGlobal);
+			if (lockedEntry?.integrity && info.dist?.integrity) {
+				if (!verifyIntegrity(lockedEntry.integrity, info.dist.integrity)) {
+					log(
+						chalk.red(`  ✗ Integrity mismatch for ${name}@${info.version}: registry hash differs from lockfile`),
+					);
+					log(chalk.dim(`    Expected: ${lockedEntry.integrity}`));
+					log(chalk.dim(`    Got: ${info.dist.integrity}`));
+					log(chalk.yellow(`    This could indicate registry compromise or republished package.`));
+					process.exitCode = 1;
+					results.push({
+						name,
+						version: info.version,
+						success: false,
+						error: "Integrity verification failed",
+					});
+					continue;
+				}
+			}
 
 			// 2. Check for conflicts BEFORE npm install using registry metadata
 			const skipDestinations = new Set<string>();
@@ -945,8 +971,13 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 				}
 			}
 
-			// Stage lock file update
-			pendingLockUpdate = { name, version: info.version };
+			// Stage lock file update with integrity data
+			pendingLockUpdate = {
+				name,
+				version: info.version,
+				resolved: info.dist?.tarball,
+				integrity: info.dist?.integrity,
+			};
 
 			// Add to installed plugins map for subsequent conflict detection
 			existingPlugins.set(name, pkgJson);
@@ -992,9 +1023,17 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 				await savePluginsJson(pluginsJson, isGlobal);
 			}
 
-			// Update lock file with exact version (after manifest is committed)
+			// Update lock file with exact version and integrity (after manifest is committed)
 			if (pendingLockUpdate) {
-				await updateLockFile(pendingLockUpdate.name, pendingLockUpdate.version, isGlobal);
+				await updateLockFile(
+					pendingLockUpdate.name,
+					{
+						version: pendingLockUpdate.version,
+						resolved: pendingLockUpdate.resolved,
+						integrity: pendingLockUpdate.integrity,
+					},
+					isGlobal,
+				);
 			}
 
 			log(chalk.green(`✓ Installed ${name}@${info.version}`));

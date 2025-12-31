@@ -183,11 +183,36 @@ export async function getLockedVersion(packageName: string, global = true): Prom
 }
 
 /**
- * Update the lock file with a package's exact version.
+ * Metadata for a locked package entry
+ */
+export interface LockFileUpdateData {
+	version: string;
+	resolved?: string;
+	integrity?: string;
+	dependencies?: Record<string, string>;
+}
+
+/**
+ * Update the lock file with a package's exact version and integrity data.
  * Uses advisory locking to prevent concurrent read-modify-write corruption.
  */
-export async function updateLockFile(packageName: string, version: string, global = true): Promise<void> {
+export async function updateLockFile(
+	packageName: string,
+	data: string | LockFileUpdateData,
+	global = true,
+): Promise<void> {
 	const lockfilePath = global ? GLOBAL_LOCK_FILE : PROJECT_PLUGINS_LOCK;
+
+	// Normalize string version to full data object
+	const entry: LockFilePackage =
+		typeof data === "string"
+			? { version: data }
+			: {
+					version: data.version,
+					...(data.resolved && { resolved: data.resolved }),
+					...(data.integrity && { integrity: data.integrity }),
+					...(data.dependencies && { dependencies: data.dependencies }),
+				};
 
 	await acquireLockfileLock(lockfilePath);
 	try {
@@ -196,12 +221,36 @@ export async function updateLockFile(packageName: string, version: string, globa
 			lockFile = createLockFile();
 		}
 
-		lockFile.packages[packageName] = {
-			version,
-		};
+		lockFile.packages[packageName] = entry;
 
 		await saveLockFile(lockFile, global);
 	} finally {
 		await releaseLockfileLock(lockfilePath);
 	}
+}
+
+/**
+ * Get a locked package entry, if it exists in the lock file.
+ */
+export async function getLockedPackage(packageName: string, global = true): Promise<LockFilePackage | null> {
+	const lockFile = await loadLockFile(global);
+	if (!lockFile) return null;
+	return lockFile.packages[packageName] ?? null;
+}
+
+/**
+ * Verify that a package's integrity matches the lockfile entry.
+ * Returns true if integrity matches or if no integrity is recorded.
+ * Returns false if integrity is recorded but doesn't match.
+ */
+export function verifyIntegrity(expected: string | undefined, actual: string | undefined): boolean {
+	if (!expected) {
+		// No integrity recorded in lockfile - can't verify but don't fail
+		return true;
+	}
+	if (!actual) {
+		// Integrity expected but not provided - verification failed
+		return false;
+	}
+	return expected === actual;
 }

@@ -1,7 +1,27 @@
-import { loadPluginsJson, readPluginPackageJson } from "@omp/manifest";
+import { loadPluginsJson, type PluginPackageJson, readPluginPackageJson } from "@omp/manifest";
 import { sanitize } from "@omp/output";
 import { resolveScope } from "@omp/paths";
 import chalk from "chalk";
+
+/**
+ * Simple concurrency limiter for parallel operations.
+ * Limits the number of concurrent promises to avoid overwhelming the filesystem.
+ */
+async function parallelLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+	const results: R[] = new Array(items.length);
+	let index = 0;
+
+	async function worker(): Promise<void> {
+		while (index < items.length) {
+			const currentIndex = index++;
+			results[currentIndex] = await fn(items[currentIndex]);
+		}
+	}
+
+	const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+	await Promise.all(workers);
+	return results;
+}
 
 export interface ListOptions {
 	global?: boolean;
@@ -142,10 +162,21 @@ export async function listPlugins(options: ListOptions = {}): Promise<void> {
 		return;
 	}
 
+	// Read all package.json files in parallel with concurrency limit
+	const CONCURRENCY_LIMIT = 16;
+	const pkgJsonMap = new Map<string, PluginPackageJson | null>();
+	const pkgJsonResults = await parallelLimit(pluginNames, CONCURRENCY_LIMIT, async (name) => ({
+		name,
+		pkgJson: await readPluginPackageJson(name, isGlobal),
+	}));
+	for (const { name, pkgJson } of pkgJsonResults) {
+		pkgJsonMap.set(name, pkgJson);
+	}
+
 	if (options.json) {
 		const plugins: Record<string, unknown> = {};
 		for (const name of pluginNames) {
-			const pkgJson = await readPluginPackageJson(name, isGlobal);
+			const pkgJson = pkgJsonMap.get(name);
 			const disabled = pluginsJson.disabled?.includes(name) || false;
 			plugins[name] = {
 				version: pkgJson?.version || pluginsJson.plugins[name],
@@ -162,7 +193,7 @@ export async function listPlugins(options: ListOptions = {}): Promise<void> {
 	console.log(chalk.bold(`Installed plugins (${pluginNames.length}) [${location}]:\n`));
 
 	for (const name of pluginNames.sort()) {
-		const pkgJson = await readPluginPackageJson(name, isGlobal);
+		const pkgJson = pkgJsonMap.get(name);
 		const specifier = pluginsJson.plugins[name];
 		const isLocal = specifier.startsWith("file:");
 		const disabled = pluginsJson.disabled?.includes(name);

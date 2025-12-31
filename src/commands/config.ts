@@ -1,4 +1,4 @@
-import type { OmpVariable } from "@omp/manifest";
+import type { OmpVariable, PluginsJson } from "@omp/manifest";
 import { loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
 import { log, outputJson, setJsonMode } from "@omp/output";
 import { resolveScope } from "@omp/paths";
@@ -386,6 +386,216 @@ export async function deleteConfig(name: string, key: string, options: ConfigOpt
 	if (options.json) {
 		outputJson({ plugin: name, variable: key, deleted: true });
 	}
+}
+
+/**
+ * Validation error for a single variable
+ */
+export interface ValidationError {
+	plugin: string;
+	variable: string;
+	error: "missing" | "type_mismatch";
+	message: string;
+	expected?: string;
+	actual?: string;
+}
+
+/**
+ * Validate value type matches variable definition
+ */
+function validateValueType(value: unknown, varDef: OmpVariable): { valid: boolean; expected: string; actual: string } {
+	const expected = varDef.type;
+	let actual: string;
+	let valid = false;
+
+	if (value === undefined || value === null) {
+		actual = "undefined";
+		valid = false;
+	} else if (varDef.type === "string") {
+		actual = typeof value;
+		valid = typeof value === "string";
+	} else if (varDef.type === "number") {
+		actual = typeof value;
+		valid = typeof value === "number" && !Number.isNaN(value);
+	} else if (varDef.type === "boolean") {
+		actual = typeof value;
+		valid = typeof value === "boolean";
+	} else if (varDef.type === "string[]") {
+		if (Array.isArray(value)) {
+			const allStrings = value.every((v) => typeof v === "string");
+			actual = allStrings ? "string[]" : "mixed[]";
+			valid = allStrings;
+		} else {
+			actual = typeof value;
+			valid = false;
+		}
+	} else {
+		actual = typeof value;
+		valid = true; // Unknown types pass
+	}
+
+	return { valid, expected, actual };
+}
+
+/**
+ * Validate configuration for a single plugin
+ * Returns list of validation errors
+ */
+async function validatePluginConfig(
+	name: string,
+	pluginsJson: PluginsJson,
+	isGlobal: boolean,
+): Promise<ValidationError[]> {
+	const errors: ValidationError[] = [];
+
+	const pkgJson = await readPluginPackageJson(name, isGlobal);
+	if (!pkgJson) {
+		errors.push({
+			plugin: name,
+			variable: "(package)",
+			error: "missing",
+			message: `Could not read package.json for ${name}`,
+		});
+		return errors;
+	}
+
+	const allFeatureNames = Object.keys(pkgJson.omp?.features || {});
+	const config = pluginsJson.config?.[name];
+	const enabledFeatures = resolveEnabledFeatures(allFeatureNames, config?.features, pkgJson.omp?.features || {});
+	const variables = collectVariables(pkgJson, enabledFeatures);
+
+	const userVars = config?.variables || {};
+
+	for (const [varName, varDef] of Object.entries(variables)) {
+		const userValue = userVars[varName];
+		const hasUserValue = userValue !== undefined;
+		const hasDefault = varDef.default !== undefined;
+		const effectiveValue = hasUserValue ? userValue : varDef.default;
+
+		// Check required variables are set
+		if (varDef.required && !hasUserValue && !hasDefault) {
+			errors.push({
+				plugin: name,
+				variable: varName,
+				error: "missing",
+				message: `Required variable "${varName}" is not set`,
+				expected: varDef.type,
+			});
+			continue;
+		}
+
+		// Check type matches if value exists
+		if (effectiveValue !== undefined) {
+			const typeCheck = validateValueType(effectiveValue, varDef);
+			if (!typeCheck.valid) {
+				errors.push({
+					plugin: name,
+					variable: varName,
+					error: "type_mismatch",
+					message: `Variable "${varName}" has wrong type`,
+					expected: typeCheck.expected,
+					actual: typeCheck.actual,
+				});
+			}
+		}
+	}
+
+	return errors;
+}
+
+export interface ValidateOptions {
+	global?: boolean;
+	local?: boolean;
+	json?: boolean;
+}
+
+/**
+ * Validate configuration for all installed plugins
+ * omp config validate
+ *
+ * Checks:
+ * - All required variables for enabled features are set
+ * - Variable types match expected types
+ *
+ * Returns non-zero exit code if validation fails
+ */
+export async function validateConfig(options: ValidateOptions = {}): Promise<void> {
+	if (options.json) {
+		setJsonMode(true);
+	}
+
+	const isGlobal = resolveScope(options);
+	const pluginsJson = await loadPluginsJson(isGlobal);
+
+	const pluginNames = Object.keys(pluginsJson.plugins);
+	const disabledPlugins = new Set(pluginsJson.disabled || []);
+
+	// Filter to only enabled plugins
+	const enabledPlugins = pluginNames.filter((name) => !disabledPlugins.has(name));
+
+	if (enabledPlugins.length === 0) {
+		if (options.json) {
+			outputJson({ valid: true, errors: [], plugins: 0 });
+		} else {
+			log(chalk.yellow("No enabled plugins to validate."));
+		}
+		return;
+	}
+
+	const allErrors: ValidationError[] = [];
+
+	for (const name of enabledPlugins) {
+		const errors = await validatePluginConfig(name, pluginsJson, isGlobal);
+		allErrors.push(...errors);
+	}
+
+	if (options.json) {
+		outputJson({
+			valid: allErrors.length === 0,
+			errors: allErrors,
+			plugins: enabledPlugins.length,
+		});
+		if (allErrors.length > 0) {
+			process.exitCode = 1;
+		}
+		return;
+	}
+
+	if (allErrors.length === 0) {
+		log(chalk.green(`✓ Configuration valid for ${enabledPlugins.length} plugin(s)`));
+		return;
+	}
+
+	// Group errors by plugin
+	const errorsByPlugin = new Map<string, ValidationError[]>();
+	for (const error of allErrors) {
+		const existing = errorsByPlugin.get(error.plugin) || [];
+		existing.push(error);
+		errorsByPlugin.set(error.plugin, existing);
+	}
+
+	log(chalk.red(`\n✗ Configuration validation failed\n`));
+
+	for (const [plugin, errors] of errorsByPlugin) {
+		log(chalk.bold(`  ${plugin}:`));
+		for (const error of errors) {
+			if (error.error === "missing") {
+				log(chalk.red(`    ✗ ${error.variable}: ${error.message}`));
+				if (error.expected) {
+					log(chalk.dim(`      Expected type: ${error.expected}`));
+					log(chalk.dim(`      Fix: omp config ${plugin} ${error.variable} <value>`));
+				}
+			} else if (error.error === "type_mismatch") {
+				log(chalk.red(`    ✗ ${error.variable}: ${error.message}`));
+				log(chalk.dim(`      Expected: ${error.expected}, got: ${error.actual}`));
+				log(chalk.dim(`      Fix: omp config ${plugin} ${error.variable} <correct-value>`));
+			}
+		}
+		log();
+	}
+
+	log(chalk.dim(`Total: ${allErrors.length} error(s) in ${errorsByPlugin.size} plugin(s)`));
+	process.exitCode = 1;
 }
 
 /**

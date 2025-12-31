@@ -49,6 +49,12 @@ export function requireNpm(): void {
 	}
 }
 
+export interface NpmPackageDist {
+	tarball: string;
+	integrity?: string;
+	shasum?: string;
+}
+
 export interface NpmPackageInfo {
 	name: string;
 	version: string;
@@ -61,6 +67,7 @@ export interface NpmPackageInfo {
 	"dist-tags"?: Record<string, string>;
 	omp?: OmpField;
 	dependencies?: Record<string, string>;
+	dist?: NpmPackageDist;
 }
 
 export interface NpmSearchResult {

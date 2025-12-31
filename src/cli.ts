@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { configCommand } from "@omp/commands/config";
+import { configCommand, validateConfig } from "@omp/commands/config";
 import { createPlugin } from "@omp/commands/create";
 import { runDoctor } from "@omp/commands/doctor";
 import { disablePlugin, enablePlugin } from "@omp/commands/enable";
@@ -210,6 +210,29 @@ Examples:
 	.action(withErrorHandling(featuresCommand));
 
 program
+	.command("config:validate")
+	.description("Validate all required config variables are set with correct types")
+	.addHelpText(
+		"after",
+		`
+Examples:
+  $ omp config:validate           # Validate all enabled plugins
+  $ omp config:validate --global  # Validate global plugins only
+  $ omp config:validate --json    # JSON output for CI
+
+Validates that:
+  - All required variables for enabled features are set
+  - Variable types match expected types (string, number, boolean, string[])
+
+Returns exit code 1 if validation fails.
+`,
+	)
+	.option("-g, --global", "Target global plugins")
+	.option("-l, --local", "Target project-local plugins")
+	.option("--json", "Output as JSON")
+	.action(withErrorHandling(validateConfig));
+
+program
 	.command("config <name> [key] [value]")
 	.description("Get or set plugin configuration variables")
 	.addHelpText(
@@ -220,6 +243,9 @@ Examples:
   $ omp config @oh-my-pi/exa apiKey          # Get value of apiKey
   $ omp config @oh-my-pi/exa apiKey sk-xxx   # Set apiKey to sk-xxx
   $ omp config @oh-my-pi/exa apiKey --delete # Reset apiKey to default
+
+See also:
+  $ omp config:validate                      # Validate all config
 `,
 	)
 	.option("-g, --global", "Target global plugins")
