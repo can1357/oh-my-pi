@@ -266,6 +266,11 @@ async function collectTransitiveOmpDeps(
 	return result;
 }
 
+/**
+ * Conflict resolution strategies for non-interactive environments
+ */
+export type ConflictResolution = "abort" | "overwrite" | "skip" | "prompt";
+
 export interface InstallOptions {
 	global?: boolean;
 	local?: boolean;
@@ -273,10 +278,14 @@ export interface InstallOptions {
 	saveDev?: boolean;
 	force?: boolean;
 	json?: boolean;
+	dryRun?: boolean;
+	conflictResolution?: ConflictResolution;
 }
 
 /**
- * Prompt user to choose when there's a conflict
+ * Prompt user to choose when there's a conflict.
+ * Re-prompts on invalid input with an error message.
+ * Returns null only if user explicitly chooses abort.
  */
 async function promptConflictResolution(conflict: Conflict): Promise<number | null> {
 	const rl = createInterface({
@@ -284,22 +293,48 @@ async function promptConflictResolution(conflict: Conflict): Promise<number | nu
 		output: process.stdout,
 	});
 
-	return new Promise((resolve) => {
-		log(chalk.yellow(`\n⚠ Conflict: ${formatConflicts([conflict])[0]}`));
-		conflict.plugins.forEach((p, i) => {
-			log(`  [${i + 1}] ${p.name}`);
-		});
-		log(`  [${conflict.plugins.length + 1}] abort`);
+	const maxChoice = conflict.plugins.length + 1;
+	const validChoices = Array.from({ length: maxChoice }, (_, i) => i + 1);
 
-		rl.question("  Choose: ", (answer) => {
-			rl.close();
-			const choice = parseInt(answer, 10);
-			if (choice > 0 && choice <= conflict.plugins.length) {
-				resolve(choice - 1);
-			} else {
-				resolve(null);
-			}
-		});
+	const displayPrompt = (showHeader: boolean) => {
+		if (showHeader) {
+			log(chalk.yellow(`\n⚠ Conflict: ${formatConflicts([conflict])[0]}`));
+			conflict.plugins.forEach((p, i) => {
+				log(`  [${i + 1}] ${p.name}`);
+			});
+			log(`  [${conflict.plugins.length + 1}] abort`);
+		}
+	};
+
+	return new Promise((resolve) => {
+		displayPrompt(true);
+
+		const askQuestion = () => {
+			rl.question("  Choose: ", (answer) => {
+				const trimmed = answer.trim();
+				const choice = parseInt(trimmed, 10);
+
+				// Check for explicit abort choice
+				if (choice === maxChoice) {
+					rl.close();
+					resolve(null);
+					return;
+				}
+
+				// Check for valid plugin choice
+				if (choice > 0 && choice <= conflict.plugins.length) {
+					rl.close();
+					resolve(choice - 1);
+					return;
+				}
+
+				// Invalid input - show error and reprompt
+				log(chalk.red(`  Invalid choice "${trimmed}". Valid options: ${validChoices.join(", ")}`));
+				askQuestion();
+			});
+		};
+
+		askQuestion();
 	});
 }
 
@@ -308,6 +343,77 @@ async function promptConflictResolution(conflict: Conflict): Promise<number | nu
  */
 function isLocalPath(spec: string): boolean {
 	return spec.startsWith("/") || spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("~");
+}
+
+/**
+ * Dry-run operation types for install
+ */
+interface DryRunOperation {
+	type: "npm-install" | "symlink" | "copy" | "config-update" | "manifest-update" | "lockfile-update";
+	description: string;
+	path?: string;
+	target?: string;
+}
+
+/**
+ * Display dry-run operations in a clear format
+ */
+function displayDryRunOperations(pluginName: string, operations: DryRunOperation[]): void {
+	log(chalk.blue(`\n📋 Dry-run: ${pluginName}`));
+	log(chalk.dim("  The following operations would be performed:\n"));
+
+	const grouped = {
+		npm: operations.filter((o) => o.type === "npm-install"),
+		symlinks: operations.filter((o) => o.type === "symlink"),
+		copies: operations.filter((o) => o.type === "copy"),
+		configs: operations.filter((o) => o.type === "config-update"),
+		manifests: operations.filter((o) => o.type === "manifest-update"),
+		lockfiles: operations.filter((o) => o.type === "lockfile-update"),
+	};
+
+	if (grouped.npm.length > 0) {
+		log(chalk.yellow("  📦 npm operations:"));
+		for (const op of grouped.npm) {
+			log(`     ${op.description}`);
+		}
+	}
+
+	if (grouped.symlinks.length > 0) {
+		log(chalk.yellow("  🔗 Symlinks to create:"));
+		for (const op of grouped.symlinks) {
+			log(`     ${op.path} → ${op.target}`);
+		}
+	}
+
+	if (grouped.copies.length > 0) {
+		log(chalk.yellow("  📄 Files to copy:"));
+		for (const op of grouped.copies) {
+			log(`     ${op.path} ← ${op.target}`);
+		}
+	}
+
+	if (grouped.configs.length > 0) {
+		log(chalk.yellow("  ⚙️  Config updates:"));
+		for (const op of grouped.configs) {
+			log(`     ${op.description}`);
+		}
+	}
+
+	if (grouped.manifests.length > 0) {
+		log(chalk.yellow("  📝 Manifest updates:"));
+		for (const op of grouped.manifests) {
+			log(`     ${op.description}`);
+		}
+	}
+
+	if (grouped.lockfiles.length > 0) {
+		log(chalk.yellow("  🔒 Lockfile updates:"));
+		for (const op of grouped.lockfiles) {
+			log(`     ${op.description}`);
+		}
+	}
+
+	log();
 }
 
 /**
@@ -320,6 +426,11 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 	// Enable JSON mode early so all human output is suppressed
 	if (options.json) {
 		setJsonMode(true);
+	}
+
+	// Dry-run mode announcement
+	if (options.dryRun) {
+		log(chalk.cyan("🔍 DRY-RUN MODE: No changes will be made\n"));
 	}
 
 	const isGlobal = resolveScope(options);
@@ -479,9 +590,19 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 				const preInstallConflicts = detectConflicts(name, pkgJsonForConflicts, existingPlugins, transitiveDeps);
 
 				if (preInstallConflicts.length > 0 && !options.force) {
-					// Check for non-interactive terminal (CI environments)
-					if (!process.stdout.isTTY || !process.stdin.isTTY) {
-						log(chalk.red("Conflicts detected in non-interactive mode. Use --force to override."));
+					// Determine conflict resolution strategy
+					const isNonInteractive = !process.stdout.isTTY || !process.stdin.isTTY;
+					const resolution = options.conflictResolution || (isNonInteractive ? undefined : "prompt");
+
+					// Non-interactive without explicit resolution strategy
+					if (isNonInteractive && !resolution) {
+						log(
+							chalk.red(
+								"Conflicts detected in non-interactive mode. Use --conflict-resolution or --force to proceed.",
+							),
+						);
+						log(chalk.dim("  Options: --conflict-resolution=abort|overwrite|skip"));
+						log(chalk.dim("           --force (alias for --conflict-resolution=overwrite)"));
 						for (const conflict of preInstallConflicts) {
 							log(chalk.yellow(`  ⚠ ${formatConflicts([conflict])[0]}`));
 						}
@@ -490,39 +611,136 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 							name,
 							version: info.version,
 							success: false,
-							error: "Conflicts in non-interactive mode",
+							error: "Conflicts in non-interactive mode without resolution strategy",
 						});
 						continue;
 					}
 
-					// Handle conflicts BEFORE downloading the package
-					let abort = false;
-					for (const conflict of preInstallConflicts) {
-						const choice = await promptConflictResolution(conflict);
-						if (choice === null) {
-							abort = true;
-							break;
+					// Handle based on resolution strategy
+					if (resolution === "abort") {
+						log(chalk.yellow(`  Aborted due to conflicts (--conflict-resolution=abort)`));
+						for (const conflict of preInstallConflicts) {
+							log(chalk.yellow(`  ⚠ ${formatConflicts([conflict])[0]}`));
 						}
-						// choice is 0-indexed: 0 = first plugin (existing), last index = new plugin
-						const newPluginIndex = conflict.plugins.length - 1;
-						if (choice !== newPluginIndex) {
-							// User chose an existing plugin, skip this destination
-							skipDestinations.add(conflict.dest);
-						}
-					}
-
-					if (abort) {
-						log(chalk.yellow(`  Aborted due to conflicts (before download)`));
 						process.exitCode = 1;
 						results.push({
 							name,
 							version: info.version,
 							success: false,
-							error: "Conflicts",
+							error: "Conflicts (abort strategy)",
 						});
 						continue;
 					}
+
+					if (resolution === "skip") {
+						// Skip all conflicting destinations, keeping existing plugins
+						for (const conflict of preInstallConflicts) {
+							skipDestinations.add(conflict.dest);
+							log(chalk.dim(`  Skipping ${conflict.dest} (keeping existing)`));
+						}
+					} else if (resolution === "overwrite") {
+						// Don't add to skipDestinations - will overwrite existing
+						for (const conflict of preInstallConflicts) {
+							log(chalk.dim(`  Overwriting ${conflict.dest}`));
+						}
+					} else {
+						// Interactive prompt mode
+						let abort = false;
+						for (const conflict of preInstallConflicts) {
+							const choice = await promptConflictResolution(conflict);
+							if (choice === null) {
+								abort = true;
+								break;
+							}
+							// choice is 0-indexed: 0 = first plugin (existing), last index = new plugin
+							const newPluginIndex = conflict.plugins.length - 1;
+							if (choice !== newPluginIndex) {
+								// User chose an existing plugin, skip this destination
+								skipDestinations.add(conflict.dest);
+							}
+						}
+
+						if (abort) {
+							log(chalk.yellow(`  Aborted due to conflicts (before download)`));
+							process.exitCode = 1;
+							results.push({
+								name,
+								version: info.version,
+								success: false,
+								error: "Conflicts",
+							});
+							continue;
+						}
+					}
 				}
+			}
+
+			// 3. Dry-run mode: compute and display operations, skip execution
+			if (options.dryRun) {
+				const dryRunOps: DryRunOperation[] = [];
+				const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
+
+				// npm install operation
+				dryRunOps.push({
+					type: "npm-install",
+					description: `npm install ${pkgSpec} --prefix ${prefix}`,
+				});
+
+				// Compute symlink/copy operations from registry metadata
+				if (info.omp?.install) {
+					for (const entry of info.omp.install) {
+						if (skipDestinations.has(entry.dest)) continue;
+
+						if (entry.copy) {
+							dryRunOps.push({
+								type: "copy",
+								description: `Copy ${entry.src} to ${entry.dest}`,
+								path: join(baseDir, entry.dest),
+								target: entry.src,
+							});
+						} else {
+							dryRunOps.push({
+								type: "symlink",
+								description: `Symlink ${entry.dest} → ${entry.src}`,
+								path: join(baseDir, entry.dest),
+								target: entry.src,
+							});
+						}
+					}
+				}
+
+				// Transitive deps with omp.install
+				for (const [depName, depPkgJson] of transitiveDeps) {
+					if (depPkgJson.omp?.install) {
+						for (const entry of depPkgJson.omp.install) {
+							dryRunOps.push({
+								type: "symlink",
+								description: `Symlink from ${depName}: ${entry.dest} → ${entry.src}`,
+								path: join(baseDir, entry.dest),
+								target: `${depName}/${entry.src}`,
+							});
+						}
+					}
+				}
+
+				// Manifest updates
+				if (options.save || options.saveDev || !isGlobal) {
+					const manifestFile = isGlobal ? "package.json" : "plugins.json";
+					dryRunOps.push({
+						type: "manifest-update",
+						description: `Add ${name}@${info.version} to ${manifestFile}`,
+					});
+				}
+
+				// Lockfile update
+				dryRunOps.push({
+					type: "lockfile-update",
+					description: `Record ${name}@${info.version} in omp-lock.json`,
+				});
+
+				displayDryRunOperations(name, dryRunOps);
+				results.push({ name, version: info.version, success: true });
+				continue;
 			}
 
 			// 3. npm install - only reached if no conflicts or user resolved them
@@ -585,9 +803,19 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 				const conflicts = detectConflicts(name, pkgJson, existingPlugins, installedTransitiveDeps);
 
 				if (conflicts.length > 0 && !options.force) {
-					// Check for non-interactive terminal (CI environments)
-					if (!process.stdout.isTTY || !process.stdin.isTTY) {
-						log(chalk.red("Conflicts detected in non-interactive mode. Use --force to override."));
+					// Determine conflict resolution strategy
+					const isNonInteractive = !process.stdout.isTTY || !process.stdin.isTTY;
+					const resolution = options.conflictResolution || (isNonInteractive ? undefined : "prompt");
+
+					// Non-interactive without explicit resolution strategy
+					if (isNonInteractive && !resolution) {
+						log(
+							chalk.red(
+								"Conflicts detected in non-interactive mode. Use --conflict-resolution or --force to proceed.",
+							),
+						);
+						log(chalk.dim("  Options: --conflict-resolution=abort|overwrite|skip"));
+						log(chalk.dim("           --force (alias for --conflict-resolution=overwrite)"));
 						for (const conflict of conflicts) {
 							log(chalk.yellow(`  ⚠ ${formatConflicts([conflict])[0]}`));
 						}
@@ -600,26 +828,17 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 							name,
 							version: info.version,
 							success: false,
-							error: "Conflicts in non-interactive mode",
+							error: "Conflicts in non-interactive mode without resolution strategy",
 						});
 						continue;
 					}
 
-					let abort = false;
-					for (const conflict of conflicts) {
-						const choice = await promptConflictResolution(conflict);
-						if (choice === null) {
-							abort = true;
-							break;
+					// Handle based on resolution strategy
+					if (resolution === "abort") {
+						log(chalk.yellow(`  Aborted due to conflicts (--conflict-resolution=abort)`));
+						for (const conflict of conflicts) {
+							log(chalk.yellow(`  ⚠ ${formatConflicts([conflict])[0]}`));
 						}
-						const newPluginIndex = conflict.plugins.length - 1;
-						if (choice !== newPluginIndex) {
-							skipDestinations.add(conflict.dest);
-						}
-					}
-
-					if (abort) {
-						log(chalk.yellow(`  Aborted due to conflicts`));
 						// Rollback: uninstall the package
 						execFileSync("npm", ["uninstall", "--prefix", prefix, name], {
 							stdio: "pipe",
@@ -629,9 +848,52 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 							name,
 							version: info.version,
 							success: false,
-							error: "Conflicts",
+							error: "Conflicts (abort strategy)",
 						});
 						continue;
+					}
+
+					if (resolution === "skip") {
+						// Skip all conflicting destinations, keeping existing plugins
+						for (const conflict of conflicts) {
+							skipDestinations.add(conflict.dest);
+							log(chalk.dim(`  Skipping ${conflict.dest} (keeping existing)`));
+						}
+					} else if (resolution === "overwrite") {
+						// Don't add to skipDestinations - will overwrite existing
+						for (const conflict of conflicts) {
+							log(chalk.dim(`  Overwriting ${conflict.dest}`));
+						}
+					} else {
+						// Interactive prompt mode
+						let abort = false;
+						for (const conflict of conflicts) {
+							const choice = await promptConflictResolution(conflict);
+							if (choice === null) {
+								abort = true;
+								break;
+							}
+							const newPluginIndex = conflict.plugins.length - 1;
+							if (choice !== newPluginIndex) {
+								skipDestinations.add(conflict.dest);
+							}
+						}
+
+						if (abort) {
+							log(chalk.yellow(`  Aborted due to conflicts`));
+							// Rollback: uninstall the package
+							execFileSync("npm", ["uninstall", "--prefix", prefix, name], {
+								stdio: "pipe",
+							});
+							process.exitCode = 1;
+							results.push({
+								name,
+								version: info.version,
+								success: false,
+								error: "Conflicts",
+							});
+							continue;
+						}
 					}
 				}
 			}
@@ -781,16 +1043,23 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 	const failed = results.filter((r) => !r.success);
 
 	log();
-	if (successful.length > 0) {
-		log(chalk.green(`✓ Installed ${successful.length} plugin(s)`));
-	}
-	if (failed.length > 0) {
-		log(chalk.red(`✗ Failed to install ${failed.length} plugin(s)`));
-		process.exitCode = 1;
+	if (options.dryRun) {
+		log(chalk.cyan(`✓ Dry-run complete: ${successful.length} plugin(s) would be installed`));
+		if (failed.length > 0) {
+			log(chalk.yellow(`  ${failed.length} plugin(s) would fail (conflicts, not found, etc.)`));
+		}
+	} else {
+		if (successful.length > 0) {
+			log(chalk.green(`✓ Installed ${successful.length} plugin(s)`));
+		}
+		if (failed.length > 0) {
+			log(chalk.red(`✗ Failed to install ${failed.length} plugin(s)`));
+			process.exitCode = 1;
+		}
 	}
 
 	if (options.json) {
-		outputJson({ results });
+		outputJson({ results, dryRun: options.dryRun });
 	}
 }
 

@@ -1,5 +1,6 @@
 import { loadPluginsJson } from "@omp/manifest";
 import { npmOutdated, requireNpm } from "@omp/npm";
+import { padEnd, sanitize, truncate } from "@omp/output";
 import { PLUGINS_DIR, resolveScope } from "@omp/paths";
 import chalk from "chalk";
 
@@ -45,18 +46,24 @@ export async function showOutdated(options: OutdatedOptions = {}): Promise<void>
 
 		console.log(chalk.bold(`\nOutdated plugins (${managedOutdated.length}):\n`));
 
+		// Column widths
+		const COL_NAME = 28;
+		const COL_VERSION = 15;
+
 		// Header
 		console.log(
-			chalk.dim("  Package".padEnd(30)) +
-				chalk.dim("Current".padEnd(15)) +
-				chalk.dim("Wanted".padEnd(15)) +
+			chalk.dim(padEnd("  Package", COL_NAME + 2)) +
+				chalk.dim(padEnd("Current", COL_VERSION)) +
+				chalk.dim(padEnd("Wanted", COL_VERSION)) +
 				chalk.dim("Latest"),
 		);
 
-		for (const [name, versions] of managedOutdated) {
-			const current = versions.current || "?";
-			const wanted = versions.wanted || "?";
-			const latest = versions.latest || "?";
+		for (const [rawName, versions] of managedOutdated) {
+			// Sanitize npm metadata, truncate long names
+			const name = truncate(sanitize(rawName), COL_NAME);
+			const current = sanitize(versions.current || "?");
+			const wanted = sanitize(versions.wanted || "?");
+			const latest = sanitize(versions.latest || "?");
 
 			const hasMinorUpdate = wanted !== current;
 			const hasMajorUpdate = latest !== wanted;
@@ -65,9 +72,9 @@ export async function showOutdated(options: OutdatedOptions = {}): Promise<void>
 			const latestColor = hasMajorUpdate ? chalk.red : wantedColor;
 
 			console.log(
-				`  ${chalk.white(name.padEnd(28))}` +
-					`${chalk.dim(current.padEnd(15))}` +
-					`${wantedColor(wanted.padEnd(15))}` +
+				`  ${padEnd(chalk.white(name), COL_NAME)}` +
+					`${padEnd(chalk.dim(current), COL_VERSION)}` +
+					`${padEnd(wantedColor(wanted), COL_VERSION)}` +
 					`${latestColor(latest)}`,
 			);
 		}

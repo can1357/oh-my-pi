@@ -44,6 +44,30 @@ function collectVariables(
 }
 
 /**
+ * Parse a boolean value (case-insensitive)
+ * Accepts: true/false, yes/no, on/off, 1/0
+ */
+function parseBoolean(value: string): boolean {
+	const lower = value.toLowerCase();
+	if (lower === "true" || lower === "1" || lower === "yes" || lower === "on") return true;
+	if (lower === "false" || lower === "0" || lower === "no" || lower === "off") return false;
+	throw new Error(`Invalid boolean: ${value}. Use true/false, yes/no, on/off, or 1/0`);
+}
+
+/**
+ * Parse a string array value
+ * Supports both comma-separated ("a,b,c") and space-separated ("a b c") values
+ */
+function parseStringArray(value: string): string[] {
+	// If contains commas, split by comma; otherwise split by whitespace
+	const separator = value.includes(",") ? "," : /\s+/;
+	return value
+		.split(separator)
+		.map((s) => s.trim())
+		.filter(Boolean);
+}
+
+/**
  * Parse a string value to the appropriate type based on variable definition
  */
 function parseValue(value: string, varDef: OmpVariable): string | number | boolean | string[] {
@@ -56,14 +80,9 @@ function parseValue(value: string, varDef: OmpVariable): string | number | boole
 			return num;
 		}
 		case "boolean":
-			if (value === "true" || value === "1" || value === "yes") return true;
-			if (value === "false" || value === "0" || value === "no") return false;
-			throw new Error(`Invalid boolean: ${value}. Use true/false, 1/0, or yes/no`);
+			return parseBoolean(value);
 		case "string[]":
-			return value
-				.split(",")
-				.map((s) => s.trim())
-				.filter(Boolean);
+			return parseStringArray(value);
 		default:
 			return value;
 	}

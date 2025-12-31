@@ -1,12 +1,7 @@
 import { npmSearch, requireNpm } from "@omp/npm";
-import { log, outputJson, setJsonMode } from "@omp/output";
+import { log, outputJson, sanitize, setJsonMode, truncate } from "@omp/output";
 import { createProgress } from "@omp/progress";
 import chalk from "chalk";
-
-function truncate(str: string, maxLen: number): string {
-	if (!str || str.length <= maxLen) return str;
-	return `${str.slice(0, maxLen - 3)}...`;
-}
 
 export interface SearchOptions {
 	json?: boolean;
@@ -48,14 +43,18 @@ export async function searchPlugins(query: string, options: SearchOptions = {}):
 		log(chalk.bold(`\nFound ${results.length} plugin(s):\n`));
 
 		for (const result of displayResults) {
-			log(chalk.green("◆ ") + chalk.bold(result.name) + chalk.dim(` v${result.version}`));
+			// Sanitize all npm metadata to prevent escape injection
+			const name = sanitize(result.name);
+			const version = sanitize(result.version);
+			log(chalk.green("◆ ") + chalk.bold(name) + chalk.dim(` v${version}`));
 
 			if (result.description) {
-				log(chalk.dim(`    ${truncate(result.description, 100)}`));
+				const desc = truncate(sanitize(result.description), 100);
+				log(chalk.dim(`    ${desc}`));
 			}
 
 			if (result.keywords?.length) {
-				const otherKeywords = result.keywords.filter((k) => k !== "omp-plugin");
+				const otherKeywords = result.keywords.filter((k) => k !== "omp-plugin").map(sanitize);
 				if (otherKeywords.length > 0) {
 					log(chalk.dim(`    tags: ${otherKeywords.join(", ")}`));
 				}

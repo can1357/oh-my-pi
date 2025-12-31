@@ -41,6 +41,9 @@ Examples:
   $ omp install @oh-my-pi/subagents@^2.0.0      # Specific version range
   $ omp install ./local/path                    # Local directory (copies)
   $ omp install                                 # Install all from plugins.json
+  $ omp install --conflict-resolution=skip      # CI: skip conflicting files
+  $ omp install --conflict-resolution=overwrite # CI: overwrite conflicts
+  $ omp install --dry-run                       # Preview changes without installing
 `,
 	)
 	.option("-g, --global", "Install globally to ~/.pi")
@@ -48,7 +51,19 @@ Examples:
 	.option("-S, --save", "Add to plugins.json")
 	.option("-D, --save-dev", "Add as dev dependency")
 	.option("--force", "Overwrite conflicts without prompting")
+	.option(
+		"--conflict-resolution <strategy>",
+		"Conflict resolution strategy for CI: abort, overwrite, skip, prompt",
+		(value: string) => {
+			const valid = ["abort", "overwrite", "skip", "prompt"];
+			if (!valid.includes(value)) {
+				throw new Error(`Invalid conflict resolution strategy: ${value}. Valid options: ${valid.join(", ")}`);
+			}
+			return value;
+		},
+	)
 	.option("--json", "Output as JSON")
+	.option("--dry-run", "Show what would be done without making changes")
 	.action(withErrorHandling(installPlugin));
 
 program
@@ -57,6 +72,7 @@ program
 	.description("Remove plugin and its symlinks")
 	.option("-g, --global", "Uninstall from ~/.pi")
 	.option("-l, --local", "Uninstall from project-local .pi/")
+	.option("--dry-run", "Show what would be deleted without making changes")
 	.option("--json", "Output as JSON")
 	.action(withErrorHandling(uninstallPlugin));
 
@@ -66,6 +82,7 @@ program
 	.description("Update to latest within semver range")
 	.option("-g, --global", "Update global plugins")
 	.option("-l, --local", "Update project-local plugins")
+	.option("--dry-run", "Show what would be updated without making changes")
 	.option("--json", "Output as JSON")
 	.action(withErrorHandling(updatePlugin));
 

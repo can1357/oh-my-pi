@@ -14,6 +14,7 @@ export interface UninstallOptions {
 	json?: boolean;
 	force?: boolean;
 	yes?: boolean;
+	dryRun?: boolean;
 }
 
 /**
@@ -58,6 +59,48 @@ export async function uninstallPlugin(name: string, options: UninstallOptions = 
 				}
 			}
 		}
+	}
+
+	// Dry-run mode: display what would be deleted and exit
+	if (options.dryRun) {
+		console.log(chalk.cyan("🔍 DRY-RUN MODE: No changes will be made\n"));
+		console.log(chalk.blue(`📋 Dry-run: uninstall ${name}`));
+		console.log(chalk.dim("  The following operations would be performed:\n"));
+
+		if (itemsToDelete.length > 0) {
+			console.log(chalk.yellow("  🗑️  Files/directories to delete:"));
+			for (const item of itemsToDelete) {
+				console.log(`     ${item}`);
+			}
+		}
+
+		console.log(chalk.yellow("  📦 npm operations:"));
+		console.log(`     npm uninstall ${name} --prefix ${prefix}`);
+
+		console.log(chalk.yellow("  📝 Manifest updates:"));
+		console.log(`     Remove ${name} from ${isGlobal ? "package.json" : "plugins.json"}`);
+
+		console.log();
+		console.log(chalk.cyan(`✓ Dry-run complete: "${name}" would be uninstalled`));
+
+		if (options.json) {
+			console.log(
+				JSON.stringify(
+					{
+						dryRun: true,
+						name,
+						itemsToDelete,
+						operations: [
+							{ type: "npm-uninstall", description: `npm uninstall ${name}` },
+							{ type: "manifest-update", description: `Remove ${name} from manifest` },
+						],
+					},
+					null,
+					2,
+				),
+			);
+		}
+		return;
 	}
 
 	// Show what will be deleted and require confirmation

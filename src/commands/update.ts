@@ -18,6 +18,16 @@ export interface UpdateOptions {
 	global?: boolean;
 	local?: boolean;
 	json?: boolean;
+	dryRun?: boolean;
+}
+
+/**
+ * Dry-run operation for update
+ */
+interface DryRunUpdateOp {
+	type: "npm-update" | "symlink-remove" | "symlink-create" | "orphan-remove";
+	description: string;
+	path?: string;
 }
 
 /**
@@ -28,6 +38,10 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 
 	if (options.json) {
 		setJsonMode(true);
+	}
+
+	if (options.dryRun) {
+		log(chalk.cyan("🔍 DRY-RUN MODE: No changes will be made\n"));
 	}
 
 	const isGlobal = resolveScope(options);
@@ -86,6 +100,95 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 	const oldPkgJsons = new Map<string, PluginPackageJson>();
 	const beforeVersions: Record<string, string> = {};
 	const oldInstallEntries = new Map<string, OmpInstallEntry[]>();
+
+	// Dry-run mode: compute and display what would happen
+	if (options.dryRun) {
+		const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
+		const dryRunOps: DryRunUpdateOp[] = [];
+
+		// Collect current state
+		for (const pluginName of npmPlugins) {
+			const pkgJson = await readPluginPackageJson(pluginName, isGlobal);
+			if (pkgJson) {
+				beforeVersions[pluginName] = pkgJson.version;
+
+				// Symlinks that would be removed
+				if (pkgJson.omp?.install) {
+					for (const entry of pkgJson.omp.install) {
+						dryRunOps.push({
+							type: "symlink-remove",
+							description: `Remove symlink: ${entry.dest}`,
+							path: join(baseDir, entry.dest),
+						});
+					}
+				}
+			}
+		}
+
+		// npm update operation
+		dryRunOps.push({
+			type: "npm-update",
+			description: `npm update ${npmPlugins.join(" ")} --prefix ${prefix}`,
+		});
+
+		// Symlinks that would be recreated (same as before unless plugin changes)
+		for (const pluginName of npmPlugins) {
+			const pkgJson = await readPluginPackageJson(pluginName, isGlobal);
+			if (pkgJson?.omp?.install) {
+				for (const entry of pkgJson.omp.install) {
+					dryRunOps.push({
+						type: "symlink-create",
+						description: `Create symlink: ${entry.dest} → ${entry.src}`,
+						path: join(baseDir, entry.dest),
+					});
+				}
+			}
+		}
+
+		// Display dry-run operations
+		log(chalk.blue(`\n📋 Dry-run: update ${npmPlugins.length} plugin(s)`));
+		log(chalk.dim("  The following operations would be performed:\n"));
+
+		const symlinkRemoves = dryRunOps.filter((o) => o.type === "symlink-remove");
+		const npmOps = dryRunOps.filter((o) => o.type === "npm-update");
+		const symlinkCreates = dryRunOps.filter((o) => o.type === "symlink-create");
+
+		if (symlinkRemoves.length > 0) {
+			log(chalk.yellow("  🗑️  Symlinks to remove (temporarily):"));
+			for (const op of symlinkRemoves) {
+				log(`     ${op.path}`);
+			}
+		}
+
+		if (npmOps.length > 0) {
+			log(chalk.yellow("  📦 npm operations:"));
+			for (const op of npmOps) {
+				log(`     ${op.description}`);
+			}
+		}
+
+		if (symlinkCreates.length > 0) {
+			log(chalk.yellow("  🔗 Symlinks to recreate:"));
+			for (const op of symlinkCreates) {
+				log(`     ${op.description}`);
+			}
+		}
+
+		log();
+		log(chalk.cyan(`✓ Dry-run complete: ${npmPlugins.length} plugin(s) would be updated`));
+
+		if (options.json) {
+			outputJson({
+				dryRun: true,
+				plugins: npmPlugins.map((n) => ({
+					name: n,
+					currentVersion: beforeVersions[n] || "unknown",
+				})),
+				operations: dryRunOps,
+			});
+		}
+		return;
+	}
 
 	try {
 		// Get current versions and install entries before update

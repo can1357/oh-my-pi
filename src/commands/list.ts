@@ -1,4 +1,5 @@
 import { loadPluginsJson, readPluginPackageJson } from "@omp/manifest";
+import { sanitize } from "@omp/output";
 import { resolveScope } from "@omp/paths";
 import chalk from "chalk";
 
@@ -167,16 +168,18 @@ export async function listPlugins(options: ListOptions = {}): Promise<void> {
 		const disabled = pluginsJson.disabled?.includes(name);
 		const isMissing = !pkgJson;
 
-		const version = pkgJson?.version ? chalk.dim(`v${pkgJson.version}`) : chalk.dim(`(${specifier})`);
 		const localBadge = isLocal ? chalk.cyan(" (local)") : "";
 		const disabledBadge = disabled ? chalk.yellow(" (disabled)") : "";
 		const missingBadge = isMissing ? chalk.red(" (missing)") : "";
 		const icon = disabled ? chalk.gray("○") : isMissing ? chalk.red("✗") : chalk.green("◆");
 
-		console.log(`${icon} ${chalk.bold(name)} ${version}${localBadge}${disabledBadge}${missingBadge}`);
+		// Sanitize npm metadata to prevent escape injection
+		const safeName = sanitize(name);
+		const safeVersion = pkgJson?.version ? chalk.dim(`v${sanitize(pkgJson.version)}`) : chalk.dim(`(${specifier})`);
+		console.log(`${icon} ${chalk.bold(safeName)} ${safeVersion}${localBadge}${disabledBadge}${missingBadge}`);
 
 		if (pkgJson?.description) {
-			console.log(chalk.dim(`    ${pkgJson.description}`));
+			console.log(chalk.dim(`    ${sanitize(pkgJson.description)}`));
 		}
 
 		if (isLocal) {

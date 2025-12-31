@@ -30,6 +30,7 @@ export async function envCommand(options: EnvOptions = {}): Promise<void> {
 	if (script.length === 0) {
 		console.error(chalk.yellow("No environment variables configured."));
 		console.error(chalk.dim("Set variables with: omp config <plugin> <variable> <value>"));
+		process.exitCode = 1;
 		return;
 	}
 
