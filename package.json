@@ -19,9 +19,9 @@
 		"format": "prettier --write \"**/*.md\" && biome check --write .",
 		"check": "bun run format && tsc --noEmit",
 		"clean": "rm -rf dist",
-		"publish:all": "./scripts/publish.sh",
-		"publish:dry": "./scripts/publish.sh --dry-run",
-		"version:bump": "./scripts/bump-version.sh"
+		"publish:all": "bun scripts/publish.ts",
+		"publish:dry": "bun scripts/publish.ts --dry-run",
+		"version:bump": "bun scripts/bump-version.ts"
 	},
 	"keywords": [
 		"pi",
