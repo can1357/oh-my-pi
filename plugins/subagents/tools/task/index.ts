@@ -448,7 +448,10 @@ async function runSingleAgent(
 
   const args: string[] = ["-p", "--no-session", "--mode", "json"];
 
-  const modelToUse = options?.model ?? agent.model;
+  // "default" means no model override - use pi's configured default
+  const modelOverride = options?.model;
+  const modelToUse =
+    modelOverride === "default" ? undefined : (modelOverride ?? agent.model);
   if (modelToUse) {
     // Use --models for pattern matching (takes first match from available models)
     args.push("--models", modelToUse);
@@ -679,7 +682,7 @@ const TaskItem = Type.Object({
   model: Type.Optional(
     Type.String({
       description:
-        "Override the model for this task (takes precedence over agent's default model)",
+        'Override the model for this task (takes precedence over agent\'s default model), or "default" to use pi\'s default',
     }),
   ),
 });
@@ -803,7 +806,7 @@ function buildDescription(pi: ToolAPI): string {
       " concurrent)",
   );
   lines.push(
-    '  - model: (optional) Override the agent\'s default model using pattern matching (e.g., "sonnet", "haiku", "gpt-4o")',
+    '  - model: (optional) Override the agent\'s default model using pattern matching (e.g., "sonnet", "haiku", "gpt-4o"), or "default" to use pi\'s default model',
   );
   lines.push(
     "- context: (optional) Shared context string prepended to all task prompts - use this to avoid repeating instructions",
