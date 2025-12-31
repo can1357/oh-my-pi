@@ -1,6 +1,41 @@
 import { execFileSync } from "node:child_process";
 import type { OmpField } from "@omp/manifest";
 
+export interface NpmAvailability {
+	available: boolean;
+	version?: string;
+	error?: string;
+}
+
+/**
+ * Check npm availability and version
+ */
+export function checkNpmAvailable(): NpmAvailability {
+	try {
+		const version = execFileSync("npm", ["--version"], {
+			encoding: "utf-8",
+			stdio: ["pipe", "pipe", "pipe"],
+		}).trim();
+
+		// Parse version and check minimum (npm 7+)
+		const major = parseInt(version.split(".")[0], 10);
+		if (major < 7) {
+			return {
+				available: false,
+				version,
+				error: `npm version ${version} is too old. Please upgrade to npm 7 or later.`,
+			};
+		}
+
+		return { available: true, version };
+	} catch {
+		return {
+			available: false,
+			error: "npm is not installed or not in PATH. Please install Node.js/npm.",
+		};
+	}
+}
+
 export interface NpmPackageInfo {
 	name: string;
 	version: string;
@@ -24,25 +59,45 @@ export interface NpmSearchResult {
 	author?: { name: string };
 }
 
+const DEFAULT_TIMEOUT_MS = 60000; // 60 seconds
+
 /**
  * Execute npm command and return output
  */
-export function npmExec(args: string[], cwd?: string): string {
-	return execFileSync("npm", args, {
-		cwd,
-		stdio: ["pipe", "pipe", "pipe"],
-		encoding: "utf-8",
-	});
+export function npmExec(args: string[], cwd?: string, timeout = DEFAULT_TIMEOUT_MS): string {
+	try {
+		return execFileSync("npm", args, {
+			cwd,
+			stdio: ["pipe", "pipe", "pipe"],
+			encoding: "utf-8",
+			timeout,
+		});
+	} catch (err) {
+		const error = err as { killed?: boolean; code?: string; message: string };
+		if (error.killed || error.code === "ETIMEDOUT") {
+			throw new Error(`npm operation timed out after ${timeout / 1000} seconds`);
+		}
+		throw err;
+	}
 }
 
 /**
  * Execute npm command with prefix (for installing to specific directory)
  */
-export function npmExecWithPrefix(args: string[], prefix: string): string {
-	return execFileSync("npm", ["--prefix", prefix, ...args], {
-		stdio: ["pipe", "pipe", "pipe"],
-		encoding: "utf-8",
-	});
+export function npmExecWithPrefix(args: string[], prefix: string, timeout = DEFAULT_TIMEOUT_MS): string {
+	try {
+		return execFileSync("npm", ["--prefix", prefix, ...args], {
+			stdio: ["pipe", "pipe", "pipe"],
+			encoding: "utf-8",
+			timeout,
+		});
+	} catch (err) {
+		const error = err as { killed?: boolean; code?: string; message: string };
+		if (error.killed || error.code === "ETIMEDOUT") {
+			throw new Error(`npm operation timed out after ${timeout / 1000} seconds`);
+		}
+		throw err;
+	}
 }
 
 /**

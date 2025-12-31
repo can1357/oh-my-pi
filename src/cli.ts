@@ -13,8 +13,18 @@ import { searchPlugins } from "@omp/commands/search";
 import { uninstallPlugin } from "@omp/commands/uninstall";
 import { updatePlugin } from "@omp/commands/update";
 import { whyFile } from "@omp/commands/why";
+import { withErrorHandling } from "@omp/errors";
 import { checkMigration, migrateToNpm } from "@omp/migrate";
+import { checkNpmAvailable } from "@omp/npm";
+import chalk from "chalk";
 import { program } from "commander";
+
+// Check npm availability at startup
+const npmCheck = checkNpmAvailable();
+if (!npmCheck.available) {
+	console.log(chalk.red(npmCheck.error));
+	process.exit(1);
+}
 
 program.name("omp").description("Oh My Pi - Plugin manager for pi configuration").version("0.1.0");
 
@@ -51,7 +61,7 @@ Examples:
 	.option("-D, --save-dev", "Add as dev dependency")
 	.option("--force", "Overwrite conflicts without prompting")
 	.option("--json", "Output as JSON")
-	.action(installPlugin);
+	.action(withErrorHandling(installPlugin));
 
 program
 	.command("uninstall <name>")
@@ -60,7 +70,7 @@ program
 	.option("-g, --global", "Uninstall from ~/.pi")
 	.option("-l, --local", "Uninstall from project-local .pi/")
 	.option("--json", "Output as JSON")
-	.action(uninstallPlugin);
+	.action(withErrorHandling(uninstallPlugin));
 
 program
 	.command("update [name]")
@@ -69,7 +79,7 @@ program
 	.option("-g, --global", "Update global plugins")
 	.option("-l, --local", "Update project-local plugins")
 	.option("--json", "Output as JSON")
-	.action(updatePlugin);
+	.action(withErrorHandling(updatePlugin));
 
 program
 	.command("list")
@@ -78,7 +88,7 @@ program
 	.option("-g, --global", "List global plugins")
 	.option("-l, --local", "List project-local plugins")
 	.option("--json", "Output as JSON")
-	.action(listPlugins);
+	.action(withErrorHandling(listPlugins));
 
 program
 	.command("link <path>")
@@ -94,7 +104,7 @@ so changes are reflected immediately without reinstalling.
 	.option("-g, --global", "Link globally")
 	.option("-l, --local", "Link to project-local .pi/")
 	.option("--force", "Overwrite existing npm-installed plugin")
-	.action(linkPlugin);
+	.action(withErrorHandling(linkPlugin));
 
 // ============================================================================
 // New Commands
@@ -104,21 +114,21 @@ program
 	.command("init")
 	.description("Create .pi/plugins.json in current project")
 	.option("--force", "Overwrite existing plugins.json")
-	.action(initProject);
+	.action(withErrorHandling(initProject));
 
 program
 	.command("search <query>")
 	.description("Search npm for omp-plugin keyword")
 	.option("--json", "Output as JSON")
 	.option("--limit <n>", "Maximum results to show", "20")
-	.action((query, options) => searchPlugins(query, { ...options, limit: parseInt(options.limit, 10) }));
+	.action(withErrorHandling((query, options) => searchPlugins(query, { ...options, limit: parseInt(options.limit, 10) })));
 
 program
 	.command("info <package>")
 	.description("Show plugin details before install")
 	.option("--json", "Output as JSON")
 	.option("--versions", "Show available versions")
-	.action(showInfo);
+	.action(withErrorHandling(showInfo));
 
 program
 	.command("outdated")
@@ -126,7 +136,7 @@ program
 	.option("-g, --global", "Check global plugins")
 	.option("-l, --local", "Check project-local plugins")
 	.option("--json", "Output as JSON")
-	.action(showOutdated);
+	.action(withErrorHandling(showOutdated));
 
 program
 	.command("doctor")
@@ -135,14 +145,14 @@ program
 	.option("-l, --local", "Check project-local plugins")
 	.option("--fix", "Attempt to fix issues")
 	.option("--json", "Output as JSON")
-	.action(runDoctor);
+	.action(withErrorHandling(runDoctor));
 
 program
 	.command("create <name>")
 	.description("Scaffold new plugin from template")
 	.option("-d, --description <desc>", "Plugin description")
 	.option("-a, --author <author>", "Plugin author")
-	.action(createPlugin);
+	.action(withErrorHandling(createPlugin));
 
 program
 	.command("why <file>")
@@ -150,7 +160,7 @@ program
 	.option("-g, --global", "Check global plugins")
 	.option("-l, --local", "Check project-local plugins")
 	.option("--json", "Output as JSON")
-	.action(whyFile);
+	.action(withErrorHandling(whyFile));
 
 program
 	.command("enable <name>")
@@ -158,7 +168,7 @@ program
 	.option("-g, --global", "Target global plugins")
 	.option("-l, --local", "Target project-local plugins")
 	.option("--json", "Output as JSON")
-	.action(enablePlugin);
+	.action(withErrorHandling(enablePlugin));
 
 program
 	.command("disable <name>")
@@ -166,13 +176,15 @@ program
 	.option("-g, --global", "Target global plugins")
 	.option("-l, --local", "Target project-local plugins")
 	.option("--json", "Output as JSON")
-	.action(disablePlugin);
+	.action(withErrorHandling(disablePlugin));
 
 program
 	.command("migrate")
 	.description("Migrate from legacy manifest.json to npm-native format")
-	.action(async () => {
-		await migrateToNpm();
-	});
+	.action(
+		withErrorHandling(async () => {
+			await migrateToNpm();
+		}),
+	);
 
 program.parse();

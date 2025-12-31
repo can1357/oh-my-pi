@@ -1,10 +1,23 @@
 import { existsSync, lstatSync } from "node:fs";
 import { mkdir, readlink, rm, symlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { platform } from "node:os";
 import type { OmpInstallEntry, PluginPackageJson } from "@omp/manifest";
 import { getPluginSourceDir } from "@omp/manifest";
 import { PI_CONFIG_DIR, PROJECT_PI_DIR } from "@omp/paths";
 import chalk from "chalk";
+
+const isWindows = platform() === "win32";
+
+/**
+ * Format permission-related errors with actionable guidance
+ */
+function formatPermissionError(err: NodeJS.ErrnoException, path: string): string {
+	if (err.code === "EACCES" || err.code === "EPERM") {
+		return `Permission denied: Cannot write to ${path}. Check directory permissions or run with appropriate privileges.`;
+	}
+	return err.message;
+}
 
 /**
  * Validates that a target path stays within the base directory.
@@ -92,18 +105,41 @@ export async function createPluginSymlinks(
 				await rm(dest, { force: true, recursive: true });
 			} catch {}
 
-			// Create symlink
-			await symlink(src, dest);
+			// Create symlink (use junctions on Windows for directories to avoid admin requirement)
+			try {
+				if (isWindows) {
+					const stats = lstatSync(src);
+					if (stats.isDirectory()) {
+						await symlink(src, dest, "junction");
+					} else {
+						await symlink(src, dest, "file");
+					}
+				} else {
+					await symlink(src, dest);
+				}
+			} catch (symlinkErr) {
+				const error = symlinkErr as NodeJS.ErrnoException;
+				if (isWindows && error.code === "EPERM") {
+					console.log(chalk.red(`  Permission denied creating symlink.`));
+					console.log(chalk.dim("  On Windows, enable Developer Mode or run as Administrator."));
+					console.log(chalk.dim("  Settings > Update & Security > For developers > Developer Mode"));
+				}
+				throw symlinkErr;
+			}
 			result.created.push(entry.dest);
 
 			if (verbose) {
 				console.log(chalk.dim(`  Linked: ${entry.dest} → ${entry.src}`));
 			}
 		} catch (err) {
-			const msg = `Failed to link ${entry.dest}: ${(err as Error).message}`;
+			const error = err as NodeJS.ErrnoException;
+			const msg = `Failed to link ${entry.dest}: ${formatPermissionError(error, join(baseDir, entry.dest))}`;
 			result.errors.push(msg);
 			if (verbose) {
 				console.log(chalk.red(`  ✗ ${msg}`));
+				if (error.code === "EACCES" || error.code === "EPERM") {
+					console.log(chalk.dim("  Check directory permissions or run with appropriate privileges."));
+				}
 			}
 		}
 	}
@@ -160,10 +196,14 @@ export async function removePluginSymlinks(
 				}
 			}
 		} catch (err) {
-			const msg = `Failed to remove ${entry.dest}: ${(err as Error).message}`;
+			const error = err as NodeJS.ErrnoException;
+			const msg = `Failed to remove ${entry.dest}: ${formatPermissionError(error, dest)}`;
 			result.errors.push(msg);
 			if (verbose) {
 				console.log(chalk.yellow(`  ⚠ ${msg}`));
+				if (error.code === "EACCES" || error.code === "EPERM") {
+					console.log(chalk.dim("  Check directory permissions or run with appropriate privileges."));
+				}
 			}
 		}
 	}

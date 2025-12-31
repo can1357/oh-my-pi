@@ -3,6 +3,16 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { PROJECT_PI_DIR, PROJECT_PLUGINS_JSON } from "@omp/paths";
 import chalk from "chalk";
 
+/**
+ * Format permission-related errors with actionable guidance
+ */
+function formatPermissionError(err: NodeJS.ErrnoException, path: string): string {
+	if (err.code === "EACCES" || err.code === "EPERM") {
+		return `Permission denied: Cannot write to ${path}. Check directory permissions or run with appropriate privileges.`;
+	}
+	return err.message;
+}
+
 export interface InitOptions {
 	force?: boolean;
 }
@@ -38,7 +48,13 @@ export async function initProject(options: InitOptions = {}): Promise<void> {
 		console.log(chalk.dim("  2. Or edit plugins.json directly"));
 		console.log(chalk.dim("  3. Run: omp install (to install all)"));
 	} catch (err) {
-		console.log(chalk.red(`Error initializing project: ${(err as Error).message}`));
+		const error = err as NodeJS.ErrnoException;
+		if (error.code === "EACCES" || error.code === "EPERM") {
+			console.log(chalk.red(formatPermissionError(error, PROJECT_PI_DIR)));
+			console.log(chalk.dim("  Check directory permissions or run with appropriate privileges."));
+		} else {
+			console.log(chalk.red(`Error initializing project: ${error.message}`));
+		}
 		process.exitCode = 1;
 	}
 }

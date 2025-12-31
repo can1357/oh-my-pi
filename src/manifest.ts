@@ -10,6 +10,16 @@ import {
 } from "@omp/paths";
 
 /**
+ * Format permission-related errors with actionable guidance
+ */
+function formatPermissionError(err: NodeJS.ErrnoException, path: string): string {
+	if (err.code === "EACCES" || err.code === "EPERM") {
+		return `Permission denied: Cannot write to ${path}. Check directory permissions or run with appropriate privileges.`;
+	}
+	return err.message;
+}
+
+/**
  * OMP field in package.json - defines what files to install
  */
 export interface OmpInstallEntry {
@@ -68,17 +78,25 @@ export interface LegacyManifest {
  * Initialize the global plugins directory with package.json
  */
 export async function initGlobalPlugins(): Promise<void> {
-	await mkdir(PLUGINS_DIR, { recursive: true });
+	try {
+		await mkdir(PLUGINS_DIR, { recursive: true });
 
-	if (!existsSync(GLOBAL_PACKAGE_JSON)) {
-		const packageJson = {
-			name: "pi-plugins",
-			version: "1.0.0",
-			private: true,
-			description: "Global pi plugins managed by omp",
-			dependencies: {},
-		};
-		await writeFile(GLOBAL_PACKAGE_JSON, JSON.stringify(packageJson, null, 2));
+		if (!existsSync(GLOBAL_PACKAGE_JSON)) {
+			const packageJson = {
+				name: "pi-plugins",
+				version: "1.0.0",
+				private: true,
+				description: "Global pi plugins managed by omp",
+				dependencies: {},
+			};
+			await writeFile(GLOBAL_PACKAGE_JSON, JSON.stringify(packageJson, null, 2));
+		}
+	} catch (err) {
+		const error = err as NodeJS.ErrnoException;
+		if (error.code === "EACCES" || error.code === "EPERM") {
+			throw new Error(formatPermissionError(error, PLUGINS_DIR));
+		}
+		throw err;
 	}
 }
 
@@ -120,43 +138,52 @@ export async function loadPluginsJson(global = true): Promise<PluginsJson> {
  */
 export async function savePluginsJson(data: PluginsJson, global = true): Promise<void> {
 	const path = global ? GLOBAL_PACKAGE_JSON : PROJECT_PLUGINS_JSON;
-	await mkdir(dirname(path), { recursive: true });
 
-	if (global) {
-		// Read existing package.json and update dependencies
-		let existing: Record<string, unknown> = {};
-		try {
-			existing = JSON.parse(await readFile(path, "utf-8"));
-		} catch {
-			existing = {
-				name: "pi-plugins",
-				version: "1.0.0",
-				private: true,
-				description: "Global pi plugins managed by omp",
-			};
-		}
+	try {
+		await mkdir(dirname(path), { recursive: true });
 
-		existing.dependencies = data.plugins;
-		if (data.devDependencies && Object.keys(data.devDependencies).length > 0) {
-			existing.devDependencies = data.devDependencies;
+		if (global) {
+			// Read existing package.json and update dependencies
+			let existing: Record<string, unknown> = {};
+			try {
+				existing = JSON.parse(await readFile(path, "utf-8"));
+			} catch {
+				existing = {
+					name: "pi-plugins",
+					version: "1.0.0",
+					private: true,
+					description: "Global pi plugins managed by omp",
+				};
+			}
+
+			existing.dependencies = data.plugins;
+			if (data.devDependencies && Object.keys(data.devDependencies).length > 0) {
+				existing.devDependencies = data.devDependencies;
+			} else {
+				delete existing.devDependencies;
+			}
+			if (data.disabled?.length) {
+				existing.omp = { ...((existing.omp as Record<string, unknown>) || {}), disabled: data.disabled };
+			}
+
+			await writeFile(path, JSON.stringify(existing, null, 2));
 		} else {
-			delete existing.devDependencies;
+			// Project uses simple plugins.json format
+			const output: Record<string, unknown> = { plugins: data.plugins };
+			if (data.devDependencies && Object.keys(data.devDependencies).length > 0) {
+				output.devDependencies = data.devDependencies;
+			}
+			if (data.disabled?.length) {
+				output.disabled = data.disabled;
+			}
+			await writeFile(path, JSON.stringify(output, null, 2));
 		}
-		if (data.disabled?.length) {
-			existing.omp = { ...((existing.omp as Record<string, unknown>) || {}), disabled: data.disabled };
+	} catch (err) {
+		const error = err as NodeJS.ErrnoException;
+		if (error.code === "EACCES" || error.code === "EPERM") {
+			throw new Error(formatPermissionError(error, path));
 		}
-
-		await writeFile(path, JSON.stringify(existing, null, 2));
-	} else {
-		// Project uses simple plugins.json format
-		const output: Record<string, unknown> = { plugins: data.plugins };
-		if (data.devDependencies && Object.keys(data.devDependencies).length > 0) {
-			output.devDependencies = data.devDependencies;
-		}
-		if (data.disabled?.length) {
-			output.disabled = data.disabled;
-		}
-		await writeFile(path, JSON.stringify(output, null, 2));
+		throw err;
 	}
 }
 
