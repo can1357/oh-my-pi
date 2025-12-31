@@ -39,7 +39,6 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 
 	const isGlobal = resolveScope(options);
 	const prefix = isGlobal ? PLUGINS_DIR : getProjectPiDir();
-	const _nodeModules = getNodeModulesDir(isGlobal);
 
 	const pluginsJson = await loadPluginsJson(isGlobal);
 	const pluginNames = Object.keys(pluginsJson.plugins);
@@ -267,23 +266,27 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 			const packagesToRestore = Array.from(oldPkgJsons.entries()).map(
 				([pluginName, pkgJson]) => `${pluginName}@${pkgJson.version}`,
 			);
+			let npmRestoreSuccess = false;
 			if (packagesToRestore.length > 0) {
 				log(chalk.dim("  Restoring package versions..."));
 				try {
 					const { npmInstall } = await import("@omp/npm");
 					await npmInstall(packagesToRestore, prefix, { save: false });
+					npmRestoreSuccess = true;
 				} catch (restoreErr) {
 					log(chalk.red(`  Failed to restore package versions: ${(restoreErr as Error).message}`));
 				}
 			}
 
-			// Restore symlinks after node_modules are restored
-			log(chalk.dim("  Restoring symlinks..."));
-			for (const [pluginName, pkgJson] of oldPkgJsons) {
-				try {
-					await createPluginSymlinks(pluginName, pkgJson, isGlobal);
-				} catch (restoreErr) {
-					log(chalk.red(`  Failed to restore symlinks for ${pluginName}: ${(restoreErr as Error).message}`));
+			// Restore symlinks only if node_modules were successfully restored
+			if (npmRestoreSuccess) {
+				log(chalk.dim("  Restoring symlinks..."));
+				for (const [pluginName, pkgJson] of oldPkgJsons) {
+					try {
+						await createPluginSymlinks(pluginName, pkgJson, isGlobal);
+					} catch (restoreErr) {
+						log(chalk.red(`  Failed to restore symlinks for ${pluginName}: ${(restoreErr as Error).message}`));
+					}
 				}
 			}
 		}

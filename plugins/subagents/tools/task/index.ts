@@ -22,10 +22,11 @@
  * Parameters:
  *   - tasks: Array of {agent, task} to run in parallel
  *   - context: (optional) Shared context prepended to all task prompts
- *   - write: (optional) Write results to /tmp/task_{agent}_{i}.md
+ *   Results are written to /tmp/pi-task-{runId}/task_{agent}_{i}.md
  *   - agentScope: "user" | "project" | "both"
  */
 
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -162,7 +163,7 @@ interface TaskDetails {
   projectAgentsDir: string | null;
   results: SingleResult[];
   totalDurationMs: number;
-  /** Output paths when write=true */
+  /** Output file paths */
   outputPaths?: string[];
   /** For streaming progress updates */
   progress?: AgentProgress[];
@@ -465,7 +466,12 @@ function writePromptToTempFile(
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-task-agent-"));
   const safeName = agentName.replace(/[^\w.-]+/g, "_");
   const filePath = path.join(tmpDir, `prompt-${safeName}.md`);
-  fs.writeFileSync(filePath, prompt, { encoding: "utf-8", mode: 0o600 });
+  try {
+    fs.writeFileSync(filePath, prompt, { encoding: "utf-8", mode: 0o600 });
+  } catch (err) {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    throw err;
+  }
   return { dir: tmpDir, filePath };
 }
 
@@ -639,7 +645,7 @@ async function runSingleAgent(
             const lastMsg = messages.findLast(
               (m: any) => m.role === "assistant",
             );
-            if (lastMsg?.content) {
+            if (lastMsg?.content && Array.isArray(lastMsg.content)) {
               const textParts = lastMsg.content
                 .filter((c: any) => c.type === "text")
                 .map((c: any) => c.text);
@@ -768,13 +774,6 @@ const TaskParams = Type.Object({
     Type.String({ description: "Shared context prepended to all tasks" }),
   ),
   tasks: Type.Array(TaskItem, { description: "Tasks to run in parallel" }),
-  write: Type.Optional(
-    Type.Boolean({
-      description:
-        "Write results to /tmp/task_{agent}_{index}.md instead of returning inline",
-      default: false,
-    }),
-  ),
   agentScope: Type.Optional(AgentScopeSchema),
 });
 
@@ -882,10 +881,11 @@ function buildDescription(pi: ToolAPI): string {
     "- context: (optional) Shared context string prepended to all task prompts - use this to avoid repeating instructions",
   );
   lines.push(
-    "- write: (optional) If true, results written to /tmp/task_{agent}_{index}.md instead of returned inline",
-  );
-  lines.push(
     '- agentScope: (optional) "user" | "project" | "both" - which agent directories to use',
+  );
+  lines.push("");
+  lines.push(
+    "Results are always written to /tmp/pi-task-{runId}/task_{agent}_{index}.md",
   );
   lines.push("");
   lines.push("Example usage:");
@@ -945,18 +945,30 @@ function buildDescription(pi: ToolAPI): string {
   lines.push('    { "agent": "explore", "task": "Search in src/" },');
   lines.push('    { "agent": "explore", "task": "Search in lib/" },');
   lines.push('    { "agent": "explore", "task": "Search in tests/" }');
-  lines.push("  ],");
-  lines.push('  "write": true');
+  lines.push("  ]");
   lines.push("}");
-  lines.push(
-    "Results written to /tmp/task_explore_0.md, /tmp/task_explore_1.md, /tmp/task_explore_2.md",
-  );
+  lines.push("Results → /tmp/pi-task-{runId}/task_explore_*.md");
   lines.push("</example>");
 
   return lines.join("\n");
 }
 
+const NANOID_ALPHABET =
+  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+function nanoid(size = 12): string {
+  const bytes = crypto.randomBytes(size);
+  let id = "";
+  for (let i = 0; i < size; i++) {
+    id += NANOID_ALPHABET[bytes[i] % NANOID_ALPHABET.length];
+  }
+  return id;
+}
+
 const factory: CustomToolFactory = (pi) => {
+  const runId = nanoid(8);
+  const outputDir = path.join(os.tmpdir(), `pi-task-${runId}`);
+
   const tool: CustomAgentTool<typeof TaskParams, TaskDetails> = {
     name: "task",
     label: "Task",
@@ -971,7 +983,6 @@ const factory: CustomToolFactory = (pi) => {
       const discovery = discoverAgents(pi.cwd, agentScope);
       const agents = discovery.agents;
       const context = params.context;
-      const write = params.write ?? false;
 
       if (!params.tasks || params.tasks.length === 0) {
         const available =
@@ -1055,12 +1066,11 @@ const factory: CustomToolFactory = (pi) => {
         model: t.model,
       }));
 
-      // Generate output paths if write=true
-      const outputPaths: string[] = write
-        ? params.tasks.map(
-            (t, i) => `/tmp/task_${sanitizeAgentName(t.agent)}_${i}.md`,
-          )
-        : [];
+      // Generate output paths
+      fs.mkdirSync(outputDir, { recursive: true });
+      const outputPaths = params.tasks.map(
+        (t, i) => path.join(outputDir, `task_${sanitizeAgentName(t.agent)}_${i}.md`),
+      );
 
       const results = await mapWithConcurrencyLimit(
         tasksWithContext,
@@ -1083,17 +1093,15 @@ const factory: CustomToolFactory = (pi) => {
             },
           );
 
-          // Write output to file if write=true
-          if (write && outputPaths[idx]) {
-            const content =
-              result.stdout.trim() || result.stderr.trim() || "(no output)";
-            try {
-              fs.writeFileSync(outputPaths[idx], content, {
-                encoding: "utf-8",
-              });
-            } catch (e) {
-              result.stderr += `\nFailed to write output: ${e}`;
-            }
+          // Write output to file
+          const content =
+            result.stdout.trim() || result.stderr.trim() || "(no output)";
+          try {
+            fs.writeFileSync(outputPaths[idx], content, {
+              encoding: "utf-8",
+            });
+          } catch (e) {
+            result.stderr += `\nFailed to write output: ${e}`;
           }
 
           return result;
@@ -1108,14 +1116,8 @@ const factory: CustomToolFactory = (pi) => {
         const status =
           r.exitCode === 0 ? "completed" : `failed (exit ${r.exitCode})`;
         const output = r.stdout.trim() || r.stderr.trim() || "(no output)";
-
-        if (write && outputPaths[i]) {
-          const preview = previewFirstLines(output, 5);
-          return `[${r.agent}] ${status} → ${outputPaths[i]}\n${preview}`;
-        } else {
-          const preview = previewFirstLines(output, 5);
-          return `[${r.agent}] ${status} (${formatDuration(r.durationMs)})\n${preview}`;
-        }
+        const preview = previewFirstLines(output, 5);
+        return `[${r.agent}] ${status} → ${outputPaths[i]}\n${preview}`;
       });
 
       return {
@@ -1130,7 +1132,7 @@ const factory: CustomToolFactory = (pi) => {
           projectAgentsDir: discovery.projectAgentsDir,
           results,
           totalDurationMs: totalDuration,
-          outputPaths: write ? outputPaths : undefined,
+          outputPaths,
         },
       };
     },
@@ -1166,7 +1168,10 @@ const factory: CustomToolFactory = (pi) => {
         const completedCount = details.progress.filter(
           (p) => p.status === "completed",
         ).length;
-        const writeNote = details.outputPaths ? " → /tmp" : "";
+        const outputDir = details.outputPaths?.[0]
+          ? path.dirname(details.outputPaths[0])
+          : null;
+        const writeNote = outputDir ? ` → ${outputDir}` : "";
 
         let headerText: string;
         if (completedCount === count) {
@@ -1258,7 +1263,10 @@ const factory: CustomToolFactory = (pi) => {
       const icon = allSuccess
         ? theme.fg("success", "●")
         : theme.fg("warning", "●");
-      const writeNote = details.outputPaths ? " → /tmp" : "";
+      const outputDir = details.outputPaths?.[0]
+        ? path.dirname(details.outputPaths[0])
+        : null;
+      const writeNote = outputDir ? ` → ${outputDir}` : "";
 
       let text =
         icon +

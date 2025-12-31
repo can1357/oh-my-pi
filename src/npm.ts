@@ -22,7 +22,7 @@ export function checkNpmAvailable(): NpmAvailability {
 
 		// Parse version and check minimum (npm 7+)
 		const major = parseInt(version.split(".")[0], 10);
-		if (major < 7) {
+		if (isNaN(major) || major < 7) {
 			return {
 				available: false,
 				version,

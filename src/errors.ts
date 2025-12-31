@@ -11,7 +11,7 @@ export function withErrorHandling<T extends (...args: any[]) => Promise<void>>(f
 		try {
 			await fn(...args);
 		} catch (err) {
-			const error = err as Error;
+			const error = err instanceof Error ? err : new Error(String(err));
 			console.log(chalk.red(`Error: ${error.message}`));
 			if (process.env.DEBUG) {
 				console.log(chalk.dim(error.stack));

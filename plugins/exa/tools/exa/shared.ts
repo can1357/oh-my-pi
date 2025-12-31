@@ -142,7 +142,7 @@ export async function fetchExaTools(
   apiKey: string,
   toolNames: string[],
 ): Promise<MCPTool[]> {
-  const url = `${EXA_MCP_URL}?exaApiKey=${apiKey}&tools=${toolNames.join(",")}`;
+  const url = `${EXA_MCP_URL}?exaApiKey=${encodeURIComponent(apiKey)}&tools=${encodeURIComponent(toolNames.join(","))}`;
 
   try {
     const response = (await callMCP(url, "tools/list")) as MCPToolsResponse;
@@ -160,7 +160,7 @@ export async function fetchExaTools(
  * Fetch available tools from Websets MCP server
  */
 export async function fetchWebsetsTools(apiKey: string): Promise<MCPTool[]> {
-  const url = `${WEBSETS_MCP_URL}?exaApiKey=${apiKey}`;
+  const url = `${WEBSETS_MCP_URL}?exaApiKey=${encodeURIComponent(apiKey)}`;
 
   try {
     const response = (await callMCP(url, "tools/list")) as MCPToolsResponse;
@@ -183,7 +183,7 @@ export async function callExaTool(
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  const url = `${EXA_MCP_URL}?exaApiKey=${apiKey}&tools=${toolNames.join(",")}`;
+  const url = `${EXA_MCP_URL}?exaApiKey=${encodeURIComponent(apiKey)}&tools=${encodeURIComponent(toolNames.join(","))}`;
   return callMCPTool(url, toolName, args);
 }
 
@@ -195,7 +195,7 @@ export async function callWebsetsTool(
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  const url = `${WEBSETS_MCP_URL}?exaApiKey=${apiKey}`;
+  const url = `${WEBSETS_MCP_URL}?exaApiKey=${encodeURIComponent(apiKey)}`;
   return callMCPTool(url, toolName, args);
 }
 
@@ -247,10 +247,17 @@ export function createToolWrapper(
 ): CustomAgentTool<TSchema, unknown> {
   return {
     name: renamedName,
+    label: renamedName.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
     description: mcpTool.description,
     parameters: mcpTool.inputSchema,
-    async execute(args) {
-      return callFn(mcpTool.name, args as Record<string, unknown>);
+    async execute(_toolCallId, params) {
+      const result = await callFn(mcpTool.name, (params ?? {}) as Record<string, unknown>);
+      // Return in AgentToolResult format: { content: [...], details: ... }
+      const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+      return {
+        content: [{ type: "text" as const, text }],
+        details: result,
+      };
     },
   };
 }

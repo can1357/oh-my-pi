@@ -90,14 +90,16 @@ export async function generateEnvScript(global = true, shell: "sh" | "fish" = "s
 	const vars = await getPluginEnvVars(global);
 
 	if (shell === "fish") {
+		// Fish doesn't expand variables in single quotes
 		return Object.entries(vars)
-			.map(([k, v]) => `set -gx ${k} ${JSON.stringify(v)}`)
+			.map(([k, v]) => `set -gx ${k} '${v.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`)
 			.join("\n");
 	}
 
-	// POSIX sh/bash/zsh
+	// POSIX sh/bash/zsh - use single quotes with proper escaping
+	// Replace ' with '\'' (end quote, escaped quote, start quote)
 	return Object.entries(vars)
-		.map(([k, v]) => `export ${k}=${JSON.stringify(v)}`)
+		.map(([k, v]) => `export ${k}='${v.replace(/'/g, "'\\''")}'`)
 		.join("\n");
 }
 

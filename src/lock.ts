@@ -39,7 +39,13 @@ async function tryCleanStaleLock(lockPath: string): Promise<boolean> {
 	let pid: number;
 	let timestamp: number;
 	try {
-		({ pid, timestamp } = JSON.parse(content));
+		const parsed = JSON.parse(content);
+		pid = parsed.pid;
+		timestamp = parsed.timestamp;
+		// Validate required fields exist and are numbers
+		if (typeof pid !== "number" || typeof timestamp !== "number") {
+			return false;
+		}
 	} catch {
 		// JSON parse error = lock file being written or corrupted - don't touch
 		return false;
@@ -93,6 +99,9 @@ export async function acquireLock(global = true): Promise<boolean> {
 export async function releaseLock(global = true): Promise<void> {
 	const lockPath = getLockPath(global);
 
+	// NOTE: TOCTOU race exists between reading lock, checking PID, and rm().
+	// Another process could acquire the lock between our check and removal.
+	// Proper fix requires file locking primitives (flock) not worth the complexity.
 	try {
 		// Validate PID ownership before releasing
 		const content = await readFile(lockPath, "utf-8");

@@ -87,7 +87,11 @@ export async function whyFile(filePath: string, options: WhyOptions = {}): Promi
 
 	let target: string | null = null;
 	if (isSymlink) {
-		target = await readlink(fullPath);
+		try {
+			target = await readlink(fullPath);
+		} catch {
+			// Permission denied or other edge case - continue without target
+		}
 	}
 
 	// Search through installed plugins

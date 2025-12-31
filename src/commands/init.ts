@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import chalk from "chalk";
@@ -25,14 +24,6 @@ export interface InitOptions {
  * Initialize .pi/plugins.json in current project
  */
 export async function initProject(options: InitOptions = {}): Promise<void> {
-	// Check if already exists
-	if (existsSync(PROJECT_PLUGINS_JSON) && !options.force) {
-		console.log(chalk.yellow(`${PROJECT_PLUGINS_JSON} already exists.`));
-		console.log(chalk.dim("Use --force to overwrite"));
-		process.exitCode = 1;
-		return;
-	}
-
 	try {
 		// Create .pi directory
 		await mkdir(PROJECT_PI_DIR, { recursive: true });
@@ -43,7 +34,9 @@ export async function initProject(options: InitOptions = {}): Promise<void> {
 			disabled: [],
 		};
 
-		await writeFile(PROJECT_PLUGINS_JSON, JSON.stringify(pluginsJson, null, 2));
+		// Use 'wx' flag for atomic create-if-not-exists (unless --force)
+		const writeFlag = options.force ? "w" : "wx";
+		await writeFile(PROJECT_PLUGINS_JSON, JSON.stringify(pluginsJson, null, 2), { flag: writeFlag });
 
 		console.log(chalk.green(`✓ Created ${PROJECT_PLUGINS_JSON}`));
 		console.log();
@@ -53,7 +46,10 @@ export async function initProject(options: InitOptions = {}): Promise<void> {
 		console.log(chalk.dim("  3. Run: omp install (to install all)"));
 	} catch (err) {
 		const error = err as NodeJS.ErrnoException;
-		if (error.code === "EACCES" || error.code === "EPERM") {
+		if (error.code === "EEXIST") {
+			console.log(chalk.yellow(`${PROJECT_PLUGINS_JSON} already exists.`));
+			console.log(chalk.dim("Use --force to overwrite"));
+		} else if (error.code === "EACCES" || error.code === "EPERM") {
 			console.log(chalk.red(formatPermissionError(error, PROJECT_PI_DIR)));
 			console.log(chalk.dim("  Check directory permissions or run with appropriate privileges."));
 		} else {

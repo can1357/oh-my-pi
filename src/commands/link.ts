@@ -2,7 +2,7 @@ import { existsSync, lstatSync } from "node:fs";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { loadPluginsJson, type PluginPackageJson, savePluginsJson } from "@omp/manifest";
+import { loadPluginsJson, type OmpInstallEntry, type PluginPackageJson, savePluginsJson } from "@omp/manifest";
 import { getNodeModulesDir, resolveScope } from "@omp/paths";
 import { createPluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
@@ -57,17 +57,30 @@ export async function linkPlugin(localPath: string, options: LinkOptions = {}): 
 	const localOmpJsonPath = join(localPath, "omp.json");
 
 	if (existsSync(localPkgJsonPath)) {
-		pkgJson = JSON.parse(await readFile(localPkgJsonPath, "utf-8"));
+		try {
+			pkgJson = JSON.parse(await readFile(localPkgJsonPath, "utf-8"));
+		} catch (err) {
+			console.log(chalk.red(`Error: Invalid JSON in ${localPkgJsonPath}: ${(err as Error).message}`));
+			process.exitCode = 1;
+			return;
+		}
 	} else if (existsSync(localOmpJsonPath)) {
 		// Convert legacy omp.json to package.json format
-		const ompJson = JSON.parse(await readFile(localOmpJsonPath, "utf-8"));
+		let ompJson: Record<string, unknown>;
+		try {
+			ompJson = JSON.parse(await readFile(localOmpJsonPath, "utf-8"));
+		} catch (err) {
+			console.log(chalk.red(`Error: Invalid JSON in ${localOmpJsonPath}: ${(err as Error).message}`));
+			process.exitCode = 1;
+			return;
+		}
 		pkgJson = {
-			name: ompJson.name || options.name || basename(localPath),
-			version: ompJson.version || "0.0.0-dev",
-			description: ompJson.description,
+			name: (ompJson.name as string) || options.name || basename(localPath),
+			version: (ompJson.version as string) || "0.0.0-dev",
+			description: ompJson.description as string | undefined,
 			keywords: ["omp-plugin"],
 			omp: {
-				install: ompJson.install,
+				install: ompJson.install as OmpInstallEntry[] | undefined,
 			},
 		};
 
@@ -96,6 +109,11 @@ export async function linkPlugin(localPath: string, options: LinkOptions = {}): 
 	}
 
 	const pluginName = options.name || pkgJson.name;
+	if (!pluginName) {
+		console.log(chalk.red("Error: Plugin name is required. Set 'name' in package.json or use --name option."));
+		process.exitCode = 1;
+		return;
+	}
 	const pluginDir = join(nodeModules, pluginName);
 
 	// Check if already installed

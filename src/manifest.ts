@@ -389,14 +389,14 @@ function isPluginPathWithinNodeModules(nodeModules: string, pluginName: string):
 export async function readPluginPackageJson(pluginName: string, global = true): Promise<PluginPackageJson | null> {
 	// Validate plugin name to prevent path traversal attacks
 	if (!isValidPluginName(pluginName)) {
-		return null;
+		throw new Error(`Invalid plugin name: ${pluginName}`);
 	}
 
 	const nodeModules = global ? NODE_MODULES_DIR : join(getProjectPiDir(), "node_modules");
 
 	// Double-check the resolved path stays within node_modules
 	if (!isPluginPathWithinNodeModules(nodeModules, pluginName)) {
-		return null;
+		throw new Error(`Plugin path escapes node_modules: ${pluginName}`);
 	}
 
 	const pkgPath = join(nodeModules, pluginName, "package.json");
@@ -406,15 +406,20 @@ export async function readPluginPackageJson(pluginName: string, global = true): 
 		return JSON.parse(data) as PluginPackageJson;
 	} catch (err) {
 		const error = err as NodeJS.ErrnoException;
-		// Only warn for non-ENOENT errors (corrupt JSON, permission issues, etc.)
 		// ENOENT is expected when checking if a plugin is installed
-		if (error.code !== "ENOENT") {
-			logError(chalk.yellow(`⚠ Failed to read package.json for '${pluginName}': ${error.message}`));
-			if (process.env.DEBUG) {
-				logError(chalk.dim((error as Error).stack));
-			}
+		if (error.code === "ENOENT") {
+			return null;
 		}
-		return null;
+		// JSON parse errors indicate corrupt package.json - throw to distinguish from missing
+		if (error instanceof SyntaxError) {
+			throw new Error(`Corrupt package.json for '${pluginName}': ${error.message}`);
+		}
+		// Other errors (permission issues, etc.) - log and throw
+		logError(chalk.yellow(`⚠ Failed to read package.json for '${pluginName}': ${error.message}`));
+		if (process.env.DEBUG) {
+			logError(chalk.dim((error as Error).stack));
+		}
+		throw error;
 	}
 }
 

@@ -169,23 +169,26 @@ async function applyFeatureChanges(
 	currentlyEnabled: string[],
 	newEnabled: string[],
 	isGlobal: boolean,
+	jsonMode?: boolean,
 ): Promise<void> {
 	// Compute what changed
 	const toDisable = currentlyEnabled.filter((f) => !newEnabled.includes(f));
 	const toEnable = newEnabled.filter((f) => !currentlyEnabled.includes(f));
 
 	if (toDisable.length === 0 && toEnable.length === 0) {
-		console.log(chalk.yellow("\nNo changes to feature configuration."));
+		if (!jsonMode) console.log(chalk.yellow("\nNo changes to feature configuration."));
 		return;
 	}
 
-	console.log(chalk.blue(`\nApplying changes...`));
+	if (!jsonMode) {
+		console.log(chalk.blue(`\nApplying changes...`));
 
-	if (toDisable.length > 0) {
-		console.log(chalk.dim(`  Disabling: ${toDisable.join(", ")}`));
-	}
-	if (toEnable.length > 0) {
-		console.log(chalk.dim(`  Enabling: ${toEnable.join(", ")}`));
+		if (toDisable.length > 0) {
+			console.log(chalk.dim(`  Disabling: ${toDisable.join(", ")}`));
+		}
+		if (toEnable.length > 0) {
+			console.log(chalk.dim(`  Enabling: ${toEnable.join(", ")}`));
+		}
 	}
 
 	// Write runtime.json FIRST (for runtime feature detection)
@@ -202,11 +205,13 @@ async function applyFeatureChanges(
 	pluginsJson.config[name].features = newEnabled;
 	await savePluginsJson(pluginsJson, isGlobal);
 
-	console.log(chalk.green(`\n✓ Features updated`));
-	if (newEnabled.length > 0) {
-		console.log(chalk.dim(`  Enabled: ${newEnabled.join(", ")}`));
-	} else {
-		console.log(chalk.dim(`  Enabled: none`));
+	if (!jsonMode) {
+		console.log(chalk.green(`\n✓ Features updated`));
+		if (newEnabled.length > 0) {
+			console.log(chalk.dim(`  Enabled: ${newEnabled.join(", ")}`));
+		} else {
+			console.log(chalk.dim(`  Enabled: none`));
+		}
 	}
 }
 
@@ -314,7 +319,7 @@ export async function configureFeatures(name: string, options: FeaturesOptions =
 		}
 	}
 
-	await applyFeatureChanges(name, runtimePath, features, currentlyEnabled, newEnabled, isGlobal);
+	await applyFeatureChanges(name, runtimePath, features, currentlyEnabled, newEnabled, isGlobal, options.json);
 
 	if (options.json) {
 		console.log(JSON.stringify({ plugin: name, enabled: newEnabled }, null, 2));

@@ -91,6 +91,9 @@ async function acquireLockfileLock(lockfilePath: string): Promise<void> {
 					const { timestamp } = JSON.parse(content);
 					if (Date.now() - timestamp > 30000) {
 						// Stale lock, remove and retry
+						// Note: TOCTOU race exists here - another process could acquire
+						// between our staleness check and unlink. Acceptable for this
+						// use case since unlink will fail safely and we'll retry.
 						await unlink(advisoryLockPath).catch(() => {});
 						continue;
 					}
@@ -127,15 +130,19 @@ export async function saveLockFile(lockFile: LockFile, global = true): Promise<v
 
 	// Write to temp file first
 	const handle = await open(tempPath, "w");
+	let handleClosed = false;
 	try {
 		await handle.writeFile(JSON.stringify(lockFile, null, 2));
 		await handle.sync(); // Ensure data is flushed to disk
 		await handle.close();
+		handleClosed = true;
 
 		// Atomic rename to replace original
 		await rename(tempPath, path);
 	} catch (err) {
-		await handle.close().catch(() => {});
+		if (!handleClosed) {
+			await handle.close().catch(() => {});
+		}
 		await unlink(tempPath).catch(() => {});
 		throw err;
 	}

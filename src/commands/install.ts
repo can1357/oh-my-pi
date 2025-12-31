@@ -302,6 +302,11 @@ async function promptConflictResolution(conflict: Conflict): Promise<number | nu
 	return new Promise((resolve) => {
 		displayPrompt(true);
 
+		// Handle EOF (Ctrl+D) - resolve with null (abort)
+		rl.on("close", () => {
+			resolve(null);
+		});
+
 		const askQuestion = () => {
 			rl.question("  Choose: ", (answer) => {
 				const trimmed = answer.trim();
@@ -445,6 +450,10 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 		const lockFile = await import("@omp/lockfile").then((m) => m.loadLockFile(isGlobal));
 		packages = await Promise.all(
 			Object.entries(pluginsJson.plugins).map(async ([name, version]) => {
+				// Local file: paths should not be reconstructed as name@file:path
+				if (version.startsWith("file:")) {
+					return version.slice(5); // Return just the path for local plugins
+				}
 				// Use locked version if available for reproducibility
 				const lockedVersion = lockFile?.packages[name]?.version;
 				return `${name}@${lockedVersion || version}`;
@@ -1243,25 +1252,55 @@ async function installLocalPlugin(
 		await cp(localPath, pluginDir, { recursive: true });
 		log(chalk.dim(`  Copied to ${pluginDir}`));
 
-		// Update plugins.json/package.json
-		const pluginsJson = await loadPluginsJson(isGlobal);
-		if (options.saveDev) {
-			if (!pluginsJson.devDependencies) {
-				pluginsJson.devDependencies = {};
+		// Track state for rollback
+		let pluginCopied = true;
+		let symlinksCreated = false;
+
+		try {
+			// Create symlinks
+			await createPluginSymlinks(pluginName, pkgJson, isGlobal);
+			symlinksCreated = true;
+
+			// Update plugins.json/package.json
+			const pluginsJson = await loadPluginsJson(isGlobal);
+			if (options.saveDev) {
+				if (!pluginsJson.devDependencies) {
+					pluginsJson.devDependencies = {};
+				}
+				pluginsJson.devDependencies[pluginName] = `file:${localPath}`;
+				// Remove from plugins if it was there
+				delete pluginsJson.plugins[pluginName];
+			} else {
+				pluginsJson.plugins[pluginName] = `file:${localPath}`;
 			}
-			pluginsJson.devDependencies[pluginName] = `file:${localPath}`;
-			// Remove from plugins if it was there
-			delete pluginsJson.plugins[pluginName];
-		} else {
-			pluginsJson.plugins[pluginName] = `file:${localPath}`;
+			await savePluginsJson(pluginsJson, isGlobal);
+
+			// Update lock file for local plugin
+			await updateLockFile(pluginName, { version: pkgJson.version }, isGlobal);
+		} catch (err) {
+			// Rollback: remove copied plugin directory
+			if (pluginCopied) {
+				log(chalk.dim("  Rolling back copied plugin..."));
+				try {
+					await rm(pluginDir, { recursive: true, force: true });
+				} catch {
+					// Ignore cleanup errors
+				}
+			}
+			// Rollback: remove symlinks if they were created
+			if (symlinksCreated && pkgJson.omp?.install) {
+				log(chalk.dim("  Rolling back symlinks..."));
+				const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
+				for (const entry of pkgJson.omp.install) {
+					try {
+						await rm(join(baseDir, entry.dest), { force: true, recursive: true });
+					} catch {
+						// Ignore cleanup errors
+					}
+				}
+			}
+			throw err;
 		}
-		await savePluginsJson(pluginsJson, isGlobal);
-
-		// Create symlinks
-		await createPluginSymlinks(pluginName, pkgJson, isGlobal);
-
-		// Update lock file for local plugin
-		await updateLockFile(pluginName, pkgJson.version, isGlobal);
 
 		log(chalk.green(`✓ Installed ${pluginName}@${pkgJson.version}`));
 		return { name: pluginName, version: pkgJson.version, success: true };

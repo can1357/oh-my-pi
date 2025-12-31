@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import chalk from "chalk";
 
@@ -277,6 +277,12 @@ Provide instructions for the agent here.
 		console.log(chalk.dim("  4. Test locally: omp link ."));
 		console.log(chalk.dim("  5. Publish: npm publish"));
 	} catch (err) {
+		// Clean up partially created directory
+		try {
+			await rm(pluginDir, { recursive: true, force: true });
+		} catch {
+			// Ignore cleanup errors
+		}
 		console.log(chalk.red(`Error creating plugin: ${(err as Error).message}`));
 		process.exitCode = 1;
 	}

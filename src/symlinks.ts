@@ -250,10 +250,14 @@ export function readRuntimeConfig(runtimePath: string): PluginRuntimeConfig {
 	try {
 		const content = readFileSync(runtimePath, "utf-8");
 		return JSON.parse(content) as PluginRuntimeConfig;
-	} catch {
-		// Return empty object (not {features: []}) so callers detect missing config
-		// and can fall back to plugin defaults instead of treating as "all disabled"
-		return {};
+	} catch (err) {
+		const error = err as NodeJS.ErrnoException;
+		if (error.code === "ENOENT") {
+			// Return empty object (not {features: []}) so callers detect missing config
+			// and can fall back to plugin defaults instead of treating as "all disabled"
+			return {};
+		}
+		throw err;
 	}
 }
 
@@ -426,8 +430,8 @@ export async function checkPluginSymlinks(
 
 			// For symlinks, verify they point to valid sources
 			if (stats.isSymbolicLink()) {
-				const _target = await readlink(dest);
-				if (existsSync(src)) {
+				const target = await readlink(dest);
+				if (existsSync(src) && resolve(target) === resolve(src)) {
 					result.valid.push(entry.dest);
 				} else {
 					result.broken.push(entry.dest);
@@ -474,7 +478,10 @@ export async function traceInstalledFile(
 	// Normalize the path relative to the base directory
 	const baseDir = getBaseDir(global);
 	let relativePath = filePath;
-	if (filePath.startsWith(baseDir)) {
+	const isWindows = platform() === "win32";
+	const normalizedFilePath = isWindows ? filePath.toLowerCase() : filePath;
+	const normalizedBaseDir = isWindows ? baseDir.toLowerCase() : baseDir;
+	if (normalizedFilePath.startsWith(normalizedBaseDir)) {
 		relativePath = filePath.slice(baseDir.length + 1);
 	}
 

@@ -32,7 +32,7 @@ export async function searchPlugins(query: string, options: SearchOptions = {}):
 			return;
 		}
 
-		const limit = options.limit || 20;
+		const limit = options.limit ?? 20;
 		const displayResults = results.slice(0, limit);
 
 		if (options.json) {

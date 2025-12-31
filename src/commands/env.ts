@@ -18,22 +18,27 @@ export interface EnvOptions {
 export async function envCommand(options: EnvOptions = {}): Promise<void> {
 	const isGlobal = resolveScope(options);
 
-	if (options.json) {
-		const vars = await getEnvJson(isGlobal);
-		console.log(JSON.stringify(vars, null, 2));
-		return;
-	}
+	try {
+		if (options.json) {
+			const vars = await getEnvJson(isGlobal);
+			console.log(JSON.stringify(vars, null, 2));
+			return;
+		}
 
-	const shell = options.fish ? "fish" : "sh";
-	const script = await generateEnvScript(isGlobal, shell);
+		const shell = options.fish ? "fish" : "sh";
+		const script = await generateEnvScript(isGlobal, shell);
 
-	if (script.length === 0) {
-		console.error(chalk.yellow("No environment variables configured."));
-		console.error(chalk.dim("Set variables with: omp config <plugin> <variable> <value>"));
+		if (script.length === 0) {
+			console.error(chalk.yellow("No environment variables configured."));
+			console.error(chalk.dim("Set variables with: omp config <plugin> <variable> <value>"));
+			process.exitCode = 1;
+			return;
+		}
+
+		// Output script directly (for eval or sourcing)
+		console.log(script);
+	} catch (err) {
+		console.error(chalk.red(`Error loading environment: ${(err as Error).message}`));
 		process.exitCode = 1;
-		return;
 	}
-
-	// Output script directly (for eval or sourcing)
-	console.log(script);
 }
