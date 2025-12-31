@@ -1,0 +1,108 @@
+import { existsSync } from "node:fs";
+import { mkdir, readFile, rm, symlink } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
+import chalk from "chalk";
+import { loadPluginsJson, type PluginPackageJson, savePluginsJson } from "../manifest.js";
+import { NODE_MODULES_DIR, PROJECT_NODE_MODULES } from "../paths.js";
+import { createPluginSymlinks } from "../symlinks.js";
+
+export interface LinkOptions {
+	name?: string;
+	global?: boolean;
+}
+
+/**
+ * Link a local plugin directory for development
+ * Creates a symlink in node_modules pointing to the local directory
+ */
+export async function linkPlugin(localPath: string, options: LinkOptions = {}): Promise<void> {
+	const isGlobal = options.global !== false;
+	const nodeModules = isGlobal ? NODE_MODULES_DIR : PROJECT_NODE_MODULES;
+
+	// Expand ~ to home directory
+	if (localPath.startsWith("~")) {
+		localPath = join(process.env.HOME || "", localPath.slice(1));
+	}
+	localPath = resolve(localPath);
+
+	// Verify the path exists
+	if (!existsSync(localPath)) {
+		console.log(chalk.red(`Error: Path does not exist: ${localPath}`));
+		return;
+	}
+
+	// Read package.json from local path
+	let pkgJson: PluginPackageJson;
+	const localPkgJsonPath = join(localPath, "package.json");
+	const localOmpJsonPath = join(localPath, "omp.json");
+
+	if (existsSync(localPkgJsonPath)) {
+		pkgJson = JSON.parse(await readFile(localPkgJsonPath, "utf-8"));
+	} else if (existsSync(localOmpJsonPath)) {
+		// Convert legacy omp.json to package.json format
+		const ompJson = JSON.parse(await readFile(localOmpJsonPath, "utf-8"));
+		pkgJson = {
+			name: ompJson.name || options.name || basename(localPath),
+			version: ompJson.version || "0.0.0-dev",
+			description: ompJson.description,
+			keywords: ["omp-plugin"],
+			omp: {
+				install: ompJson.install,
+			},
+		};
+	} else {
+		pkgJson = {
+			name: options.name || basename(localPath),
+			version: "0.0.0-dev",
+			keywords: ["omp-plugin"],
+		};
+		console.log(chalk.yellow("  Warning: No package.json or omp.json found"));
+	}
+
+	const pluginName = options.name || pkgJson.name;
+	const pluginDir = join(nodeModules, pluginName);
+
+	// Check if already installed
+	const pluginsJson = await loadPluginsJson(isGlobal);
+	if (pluginsJson.plugins[pluginName]) {
+		console.log(chalk.yellow(`Plugin "${pluginName}" is already installed.`));
+		console.log(chalk.dim("Use omp uninstall first, or specify a different name with -n"));
+		return;
+	}
+
+	try {
+		console.log(chalk.blue(`Linking ${localPath}...`));
+
+		// Create parent directory (handles scoped packages like @org/name)
+		await mkdir(dirname(pluginDir), { recursive: true });
+
+		// Remove existing if present
+		if (existsSync(pluginDir)) {
+			await rm(pluginDir, { force: true, recursive: true });
+		}
+
+		// Create symlink to the plugin directory
+		await symlink(localPath, pluginDir);
+		console.log(chalk.dim(`  Symlinked: ${pluginDir} → ${localPath}`));
+
+		// Update plugins.json with file: protocol
+		pluginsJson.plugins[pluginName] = `file:${localPath}`;
+		await savePluginsJson(pluginsJson, isGlobal);
+
+		// Create symlinks for omp.install entries
+		if (pkgJson.omp?.install?.length) {
+			await createPluginSymlinks(pluginName, pkgJson, isGlobal);
+		}
+
+		console.log(
+			chalk.green(`\n✓ Linked "${pluginName}"${pkgJson.version ? ` v${pkgJson.version}` : ""} (development mode)`),
+		);
+		console.log(chalk.dim("  Changes to the source will be reflected immediately"));
+	} catch (err) {
+		console.log(chalk.red(`Error linking plugin: ${(err as Error).message}`));
+		// Cleanup on failure
+		try {
+			await rm(pluginDir, { force: true });
+		} catch {}
+	}
+}
