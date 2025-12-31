@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/cli",
-	"version": "0.8.2",
+	"version": "0.8.3",
 	"description": "Plugin manager for pi - install and manage pi config plugins from git repos",
 	"type": "module",
 	"main": "./dist/cli.js",

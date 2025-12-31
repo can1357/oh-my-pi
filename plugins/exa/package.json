@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/exa",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Exa AI web search and websets tools for pi",
   "keywords": [
     "omp-plugin",
