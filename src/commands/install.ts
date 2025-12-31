@@ -10,7 +10,9 @@ import {
 	initGlobalPlugins,
 	initProjectPlugins,
 	loadPluginsJson,
+	type PluginConfig,
 	type PluginPackageJson,
+	type PluginsJson,
 	readPluginPackageJson,
 	savePluginsJson,
 } from "@omp/manifest";
@@ -23,8 +25,151 @@ import {
 	PROJECT_PI_DIR,
 	resolveScope,
 } from "@omp/paths";
-import { createPluginSymlinks } from "@omp/symlinks";
+import { createPluginSymlinks, getAllFeatureNames, getDefaultFeatures } from "@omp/symlinks";
 import chalk from "chalk";
+
+/**
+ * Parsed package specifier with optional features
+ */
+export interface ParsedPackageSpec {
+	name: string;
+	version: string;
+	/** null = not specified, [] = explicit empty, string[] = specific features */
+	features: string[] | null;
+	/** true if [*] was used */
+	allFeatures: boolean;
+}
+
+/**
+ * Parse package specifier with optional features bracket syntax.
+ * Examples:
+ *   "exa" -> { name: "exa", version: "latest", features: null }
+ *   "exa@^1.0" -> { name: "exa", version: "^1.0", features: null }
+ *   "exa[search]" -> { name: "exa", version: "latest", features: ["search"] }
+ *   "exa[search,websets]@^1.0" -> { name: "exa", version: "^1.0", features: ["search", "websets"] }
+ *   "@scope/exa[*]" -> { name: "@scope/exa", version: "latest", allFeatures: true }
+ *   "exa[]" -> { name: "exa", version: "latest", features: [] } (no optional features)
+ */
+export function parsePackageSpecWithFeatures(spec: string): ParsedPackageSpec {
+	// Regex breakdown:
+	// ^(@?[^@[\]]+)  - Capture name (optionally scoped with @, no @ [ or ] in name)
+	// (?:\[([^\]]*)\])?  - Optionally capture features inside []
+	// (?:@(.+))?$  - Optionally capture version after @
+	const match = spec.match(/^(@?[^@[\]]+)(?:\[([^\]]*)\])?(?:@(.+))?$/);
+
+	if (!match) {
+		// Fallback: treat as plain name
+		return { name: spec, version: "latest", features: null, allFeatures: false };
+	}
+
+	const [, name, featuresStr, version = "latest"] = match;
+
+	// No bracket at all
+	if (featuresStr === undefined) {
+		return { name, version, features: null, allFeatures: false };
+	}
+
+	// [*] = all features
+	if (featuresStr === "*") {
+		return { name, version, features: null, allFeatures: true };
+	}
+
+	// [] = explicit empty (no optional features, core only)
+	if (featuresStr === "") {
+		return { name, version, features: [], allFeatures: false };
+	}
+
+	// [f1,f2,...] = specific features
+	const features = featuresStr.split(",").map((f) => f.trim()).filter(Boolean);
+	return { name, version, features, allFeatures: false };
+}
+
+/**
+ * Resolve which features to enable based on user request, existing config, and plugin defaults.
+ *
+ * Resolution order:
+ * 1. User explicitly requested [*] -> all features
+ * 2. User explicitly specified [f1,f2] -> exactly those features
+ * 3. Reinstall with no bracket -> preserve existing selection
+ * 4. First install with no bracket -> ALL features
+ */
+export function resolveFeatures(
+	pkgJson: PluginPackageJson,
+	requested: ParsedPackageSpec,
+	existingConfig: PluginConfig | undefined,
+	isReinstall: boolean,
+): { enabledFeatures: string[]; configToStore: PluginConfig | undefined } {
+	const pluginFeatures = pkgJson.omp?.features || {};
+	const allFeatureNames = Object.keys(pluginFeatures);
+
+	// No features defined in plugin -> nothing to configure
+	if (allFeatureNames.length === 0) {
+		return { enabledFeatures: [], configToStore: undefined };
+	}
+
+	// Case 1: User explicitly requested [*] -> all features
+	if (requested.allFeatures) {
+		return {
+			enabledFeatures: allFeatureNames,
+			configToStore: { features: ["*"] },
+		};
+	}
+
+	// Case 2: User explicitly specified features -> use exactly those
+	if (requested.features !== null) {
+		// Validate requested features exist
+		for (const f of requested.features) {
+			if (!pluginFeatures[f]) {
+				throw new Error(`Unknown feature "${f}". Available: ${allFeatureNames.join(", ")}`);
+			}
+		}
+		return {
+			enabledFeatures: requested.features,
+			configToStore: { features: requested.features },
+		};
+	}
+
+	// Case 3: Reinstall with no bracket -> preserve existing config
+	if (isReinstall && existingConfig?.features !== undefined) {
+		const storedFeatures = existingConfig.features;
+
+		// null means "first install, got all"
+		if (storedFeatures === null) {
+			return {
+				enabledFeatures: allFeatureNames,
+				configToStore: undefined, // Keep existing
+			};
+		}
+
+		// ["*"] means explicitly all
+		if (Array.isArray(storedFeatures) && storedFeatures.includes("*")) {
+			return {
+				enabledFeatures: allFeatureNames,
+				configToStore: undefined,
+			};
+		}
+
+		// Specific features
+		return {
+			enabledFeatures: storedFeatures as string[],
+			configToStore: undefined,
+		};
+	}
+
+	// Case 4: First install with no bracket -> ALL features
+	if (!isReinstall) {
+		return {
+			enabledFeatures: allFeatureNames,
+			configToStore: { features: null }, // null = "first install, got all"
+		};
+	}
+
+	// Case 5: Reinstall, no existing config -> use defaults
+	return {
+		enabledFeatures: getDefaultFeatures(pluginFeatures),
+		configToStore: undefined,
+	};
+}
 
 /**
  * Process omp dependencies recursively with cycle detection.
@@ -88,34 +233,6 @@ async function promptConflictResolution(conflict: Conflict): Promise<number | nu
 }
 
 /**
- * Parse package specifier into name and version
- */
-function parsePackageSpec(spec: string): { name: string; version: string } {
-	// Handle scoped packages: @scope/name@version
-	if (spec.startsWith("@")) {
-		const lastAt = spec.lastIndexOf("@");
-		if (lastAt > 0) {
-			return {
-				name: spec.slice(0, lastAt),
-				version: spec.slice(lastAt + 1),
-			};
-		}
-		return { name: spec, version: "latest" };
-	}
-
-	// Handle regular packages: name@version
-	const atIndex = spec.indexOf("@");
-	if (atIndex > 0) {
-		return {
-			name: spec.slice(0, atIndex),
-			version: spec.slice(atIndex + 1),
-		};
-	}
-
-	return { name: spec, version: "latest" };
-}
-
-/**
  * Check if a path looks like a local path
  */
 function isLocalPath(spec: string): boolean {
@@ -171,6 +288,9 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 
 	const results: Array<{ name: string; version: string; success: boolean; error?: string }> = [];
 
+	// Load plugins.json once for reinstall detection and config storage
+	let pluginsJson = await loadPluginsJson(isGlobal);
+
 	for (const spec of packages) {
 		// Check if it's a local path
 		if (isLocalPath(spec)) {
@@ -179,13 +299,18 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			continue;
 		}
 
-		const { name, version } = parsePackageSpec(spec);
+		const parsed = parsePackageSpecWithFeatures(spec);
+		const { name, version } = parsed;
 		const pkgSpec = version === "latest" ? name : `${name}@${version}`;
 
 		// Track installation state for rollback
 		let npmInstallSucceeded = false;
 		let createdSymlinks: string[] = [];
 		let resolvedVersion = version;
+
+		// Check if this is a reinstall (plugin already exists)
+		const isReinstall = existingPlugins.has(name) || !!pluginsJson.plugins[name];
+		const existingConfig = pluginsJson.config?.[name];
 
 		try {
 			console.log(chalk.blue(`\nInstalling ${pkgSpec}...`));
@@ -337,19 +462,40 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 				}
 			}
 
-			// 6. Create symlinks for omp.install entries (skip destinations user assigned to existing plugins)
-			const symlinkResult = await createPluginSymlinks(name, pkgJson, isGlobal, true, skipDestinations);
+			// 6. Resolve features and create symlinks
+			const { enabledFeatures, configToStore } = resolveFeatures(
+				pkgJson,
+				parsed,
+				existingConfig,
+				isReinstall,
+			);
+
+			// Log feature selection if plugin has features
+			const allFeatureNames = getAllFeatureNames(pkgJson);
+			if (allFeatureNames.length > 0) {
+				if (enabledFeatures.length === allFeatureNames.length) {
+					console.log(chalk.dim(`  Features: all (${enabledFeatures.join(", ")})`));
+				} else if (enabledFeatures.length === 0) {
+					console.log(chalk.dim(`  Features: none (core only)`));
+				} else {
+					console.log(chalk.dim(`  Features: ${enabledFeatures.join(", ")}`));
+				}
+			}
+
+			// Create symlinks for omp.install entries (skip destinations user assigned to existing plugins)
+			const symlinkResult = await createPluginSymlinks(name, pkgJson, isGlobal, true, skipDestinations, enabledFeatures);
 			createdSymlinks = symlinkResult.created;
 
 			// 7. Process dependencies with omp field (with cycle detection)
 			await processOmpDependencies(pkgJson, isGlobal, new Set([name]));
 
-			// 8. Update manifest if --save or --save-dev was passed
+			// 8. Update manifest and config
 			// For global mode, npm --save already updates package.json dependencies
-			// but we need to handle devDependencies manually
+			// but we need to handle devDependencies and config manually
 			// For project-local mode, we must manually update plugins.json
-			if (options.save || options.saveDev) {
-				const pluginsJson = await loadPluginsJson(isGlobal);
+			if (options.save || options.saveDev || configToStore) {
+				// Reload to avoid stale data if multiple packages are being installed
+				pluginsJson = await loadPluginsJson(isGlobal);
 				if (options.saveDev) {
 					// Save to devDependencies
 					if (!pluginsJson.devDependencies) {
@@ -362,6 +508,18 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 					// Save to plugins (project-local mode only - npm handles global)
 					pluginsJson.plugins[name] = info.version;
 				}
+
+				// Store feature config if changed
+				if (configToStore) {
+					if (!pluginsJson.config) {
+						pluginsJson.config = {};
+					}
+					pluginsJson.config[name] = {
+						...pluginsJson.config[name],
+						...configToStore,
+					};
+				}
+
 				await savePluginsJson(pluginsJson, isGlobal);
 			}
 

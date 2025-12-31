@@ -108,9 +108,80 @@ Initialize a project-local config with `omp init`.
 | `omp why <file>` | | Show which plugin installed a file |
 | `omp enable <name>` | | Enable a disabled plugin |
 | `omp disable <name>` | | Disable plugin without uninstalling |
+| `omp features <name>` | | List or configure plugin features |
+| `omp config <name>` | | Get or set plugin configuration variables |
+| `omp env` | | Print environment variables for shell eval |
 | `omp migrate` | | Migrate from legacy manifest.json format |
 
 Most commands accept `-g`/`--global` or `-l`/`--local` flags to override scope auto-detection.
+
+## Feature Selection
+
+Plugins can expose optional features that you can selectively enable. Use pip-style bracket syntax during install:
+
+```bash
+# Install with all features (default for first install)
+omp install @oh-my-pi/exa
+
+# Install with specific features only
+omp install @oh-my-pi/exa[search]
+omp install @oh-my-pi/exa[search,websets]
+
+# Explicitly all features
+omp install @oh-my-pi/exa[*]
+
+# No optional features (core only)
+omp install @oh-my-pi/exa[]
+
+# Reinstall preserves feature selection unless you specify new ones
+omp install @oh-my-pi/exa              # Keeps existing features
+omp install @oh-my-pi/exa[search]      # Reconfigures to search only
+```
+
+Manage features after install with `omp features`:
+
+```bash
+# List available features and their current state
+omp features @oh-my-pi/exa
+
+# Enable/disable specific features
+omp features @oh-my-pi/exa --enable websets
+omp features @oh-my-pi/exa --disable search
+
+# Set exact feature list
+omp features @oh-my-pi/exa --set search,websets
+```
+
+## Plugin Configuration
+
+Plugins can define configurable variables. Manage them with `omp config`:
+
+```bash
+# List all variables for a plugin
+omp config @oh-my-pi/exa
+
+# Get a specific value
+omp config @oh-my-pi/exa apiKey
+
+# Set a value
+omp config @oh-my-pi/exa apiKey sk-xxx
+
+# Reset to default
+omp config @oh-my-pi/exa apiKey --delete
+```
+
+Variables with `env` mappings can be exported as environment variables:
+
+```bash
+# Print shell exports
+eval "$(omp env)"
+
+# Fish shell
+omp env --fish | source
+
+# Persist in your shell config
+omp env >> ~/.bashrc
+```
 
 ## Creating Plugins
 
@@ -124,12 +195,57 @@ Plugins are npm packages with an `omp` field in `package.json`:
   "omp": {
     "install": [
       { "src": "agents/researcher.md", "dest": "agent/agents/researcher.md" },
-      { "src": "commands/research.md", "dest": "agent/commands/research.md" },
-      { "src": "tools/search/index.ts", "dest": "agent/tools/search/index.ts" },
-      { "src": "themes/dark.json", "dest": "agent/themes/dark.json" }
+      { "src": "commands/research.md", "dest": "agent/commands/research.md" }
     ]
   },
   "files": ["agents", "commands", "tools", "themes"]
+}
+```
+
+### Features and Variables
+
+Plugins can define optional features and configurable variables:
+
+```json
+{
+  "name": "@oh-my-pi/exa",
+  "version": "1.0.0",
+  "keywords": ["omp-plugin"],
+  "omp": {
+    "install": [
+      { "src": "tools/core.ts", "dest": "agent/tools/exa/core.ts" }
+    ],
+    "variables": {
+      "apiKey": {
+        "type": "string",
+        "env": "EXA_API_KEY",
+        "description": "Exa API key",
+        "required": true
+      }
+    },
+    "features": {
+      "search": {
+        "description": "Web search capabilities",
+        "default": true,
+        "install": [
+          { "src": "tools/search.ts", "dest": "agent/tools/exa/search.ts" }
+        ]
+      },
+      "websets": {
+        "description": "Curated content collections",
+        "default": false,
+        "install": [
+          { "src": "tools/websets.ts", "dest": "agent/tools/exa/websets.ts" }
+        ],
+        "variables": {
+          "defaultCollection": {
+            "type": "string",
+            "default": "general"
+          }
+        }
+      }
+    }
+  }
 }
 ```
 
@@ -184,6 +300,8 @@ cd my-plugin && npm publish
 
 - **[@oh-my-pi/subagents](https://npmjs.com/package/@oh-my-pi/subagents)**: Task delegation with specialized sub-agents (task, planner, explore, reviewer)
 - **[@oh-my-pi/metal-theme](https://npmjs.com/package/@oh-my-pi/metal-theme)**: A metal theme
+- **[@oh-my-pi/exa](https://npmjs.com/package/@oh-my-pi/exa)**: Exa AI-powered web search and websets tools
+- **[@oh-my-pi/user-prompt](https://npmjs.com/package/@oh-my-pi/user-prompt)**: Interactive user prompting for gathering input during agent execution
 
 ## Troubleshooting
 

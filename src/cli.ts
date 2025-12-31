@@ -1,8 +1,11 @@
 #!/usr/bin/env bun
 
+import { configCommand } from "@omp/commands/config";
 import { createPlugin } from "@omp/commands/create";
 import { runDoctor } from "@omp/commands/doctor";
 import { disablePlugin, enablePlugin } from "@omp/commands/enable";
+import { envCommand } from "@omp/commands/env";
+import { featuresCommand } from "@omp/commands/features";
 import { showInfo } from "@omp/commands/info";
 import { initProject } from "@omp/commands/init";
 import { installPlugin } from "@omp/commands/install";
@@ -48,11 +51,14 @@ program
 		"after",
 		`
 Examples:
-  $ omp install @oh-my-pi/subagents         # Install from npm
-  $ omp install @oh-my-pi/subagents@^2.0.0  # Specific version range
-  $ omp install @myorg/cool-theme           # Scoped package
-  $ omp install ./local/path            # Local directory (copies)
-  $ omp install                         # Install all from plugins.json
+  $ omp install @oh-my-pi/subagents             # Install from npm (all features)
+  $ omp install @oh-my-pi/exa[search]           # Install with specific features
+  $ omp install @oh-my-pi/exa[search,websets]   # Multiple features
+  $ omp install @oh-my-pi/exa[*]                # Explicitly all features
+  $ omp install @oh-my-pi/exa[]                 # No optional features (core only)
+  $ omp install @oh-my-pi/subagents@^2.0.0      # Specific version range
+  $ omp install ./local/path                    # Local directory (copies)
+  $ omp install                                 # Install all from plugins.json
 `,
 	)
 	.option("-g, --global", "Install globally to ~/.pi")
@@ -180,6 +186,67 @@ program
 	.option("-l, --local", "Target project-local plugins")
 	.option("--json", "Output as JSON")
 	.action(withErrorHandling(disablePlugin));
+
+program
+	.command("features <name>")
+	.description("List or configure plugin features")
+	.addHelpText(
+		"after",
+		`
+Examples:
+  $ omp features @oh-my-pi/exa                     # List available features
+  $ omp features @oh-my-pi/exa --enable websets    # Enable a feature
+  $ omp features @oh-my-pi/exa --disable search    # Disable a feature
+  $ omp features @oh-my-pi/exa --set search,websets # Set exact features
+  $ omp features @oh-my-pi/exa --set '*'           # Enable all features
+  $ omp features @oh-my-pi/exa --set ''            # Disable all optional features
+`,
+	)
+	.option("-g, --global", "Target global plugins")
+	.option("-l, --local", "Target project-local plugins")
+	.option("--enable <features...>", "Enable specific features")
+	.option("--disable <features...>", "Disable specific features")
+	.option("--set <features>", "Set exact feature list (comma-separated, '*' for all, '' for none)")
+	.option("--json", "Output as JSON")
+	.action(withErrorHandling(featuresCommand));
+
+program
+	.command("config <name> [key] [value]")
+	.description("Get or set plugin configuration variables")
+	.addHelpText(
+		"after",
+		`
+Examples:
+  $ omp config @oh-my-pi/exa                 # List all variables
+  $ omp config @oh-my-pi/exa apiKey          # Get value of apiKey
+  $ omp config @oh-my-pi/exa apiKey sk-xxx   # Set apiKey to sk-xxx
+  $ omp config @oh-my-pi/exa apiKey --delete # Reset apiKey to default
+`,
+	)
+	.option("-g, --global", "Target global plugins")
+	.option("-l, --local", "Target project-local plugins")
+	.option("--delete", "Delete/reset the variable to its default")
+	.option("--json", "Output as JSON")
+	.action(withErrorHandling(configCommand));
+
+program
+	.command("env")
+	.description("Print plugin environment variables for shell eval")
+	.addHelpText(
+		"after",
+		`
+Examples:
+  $ eval "$(omp env)"              # Load env vars in current shell
+  $ omp env >> ~/.bashrc           # Persist to shell config
+  $ omp env --fish | source        # Fish shell syntax
+  $ omp env --json                 # JSON format for scripts
+`,
+	)
+	.option("-g, --global", "Target global plugins")
+	.option("-l, --local", "Target project-local plugins")
+	.option("--fish", "Output fish shell syntax instead of POSIX")
+	.option("--json", "Output as JSON")
+	.action(withErrorHandling(envCommand));
 
 program
 	.command("migrate")

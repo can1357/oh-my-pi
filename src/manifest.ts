@@ -28,8 +28,39 @@ export interface OmpInstallEntry {
 	dest: string;
 }
 
-export interface OmpField {
+/**
+ * Runtime variable definition with type, default, and metadata
+ */
+export interface OmpVariable {
+	type: "string" | "number" | "boolean" | "string[]";
+	default?: string | number | boolean | string[];
+	description?: string;
+	required?: boolean;
+	/** Environment variable name if injected as env (e.g., "EXA_API_KEY") */
+	env?: string;
+}
+
+/**
+ * Feature definition - groups install entries and variables
+ */
+export interface OmpFeature {
+	description?: string;
+	/** Install entries belonging to this feature */
 	install?: OmpInstallEntry[];
+	/** Runtime variables specific to this feature */
+	variables?: Record<string, OmpVariable>;
+	/** Default enabled state (default: true) */
+	default?: boolean;
+}
+
+export interface OmpField {
+	/** Top-level install entries (always installed, not feature-gated) */
+	install?: OmpInstallEntry[];
+	/** Top-level runtime variables (always available) */
+	variables?: Record<string, OmpVariable>;
+	/** Named features with their own install entries and variables */
+	features?: Record<string, OmpFeature>;
+	/** Disabled state (managed by omp, not plugin author) */
 	disabled?: boolean;
 }
 
@@ -48,12 +79,30 @@ export interface PluginPackageJson {
 }
 
 /**
+ * Per-plugin configuration stored in plugins.json
+ */
+export interface PluginConfig {
+	/**
+	 * Enabled feature names:
+	 * - null/undefined: use plugin defaults (first install = all, reinstall = preserve)
+	 * - ["*"]: explicitly all features
+	 * - []: no optional features (core only)
+	 * - ["f1", "f2"]: specific features
+	 */
+	features?: string[] | null;
+	/** Runtime variable overrides */
+	variables?: Record<string, string | number | boolean | string[]>;
+}
+
+/**
  * Global/project plugins.json structure
  */
 export interface PluginsJson {
 	plugins: Record<string, string>; // name -> version specifier
 	devDependencies?: Record<string, string>; // dev dependencies
 	disabled?: string[]; // disabled plugin names
+	/** Per-plugin feature and variable config */
+	config?: Record<string, PluginConfig>;
 }
 
 /**
@@ -153,6 +202,7 @@ export async function loadPluginsJson(global = true): Promise<PluginsJson> {
 				plugins: parsed.dependencies || {},
 				devDependencies: parsed.devDependencies || {},
 				disabled: parsed.omp?.disabled || [],
+				config: parsed.omp?.config || {},
 			};
 		}
 
@@ -161,10 +211,11 @@ export async function loadPluginsJson(global = true): Promise<PluginsJson> {
 			plugins: parsed.plugins || {},
 			devDependencies: parsed.devDependencies || {},
 			disabled: parsed.disabled || [],
+			config: parsed.config || {},
 		};
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-			return { plugins: {}, devDependencies: {}, disabled: [] };
+			return { plugins: {}, devDependencies: {}, disabled: [], config: {} };
 		}
 		throw err;
 	}
@@ -225,8 +276,23 @@ export async function savePluginsJson(data: PluginsJson, global = true): Promise
 			} else {
 				delete existing.devDependencies;
 			}
+
+			// Build omp field with disabled and config
+			const ompField: Record<string, unknown> = (existing.omp as Record<string, unknown>) || {};
 			if (data.disabled?.length) {
-				existing.omp = { ...((existing.omp as Record<string, unknown>) || {}), disabled: data.disabled };
+				ompField.disabled = data.disabled;
+			} else {
+				delete ompField.disabled;
+			}
+			if (data.config && Object.keys(data.config).length > 0) {
+				ompField.config = data.config;
+			} else {
+				delete ompField.config;
+			}
+			if (Object.keys(ompField).length > 0) {
+				existing.omp = ompField;
+			} else {
+				delete existing.omp;
 			}
 
 			await writeFile(path, JSON.stringify(existing, null, 2));
@@ -238,6 +304,9 @@ export async function savePluginsJson(data: PluginsJson, global = true): Promise
 			}
 			if (data.disabled?.length) {
 				output.disabled = data.disabled;
+			}
+			if (data.config && Object.keys(data.config).length > 0) {
+				output.config = data.config;
 			}
 			await writeFile(path, JSON.stringify(output, null, 2));
 

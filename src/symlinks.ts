@@ -2,10 +2,56 @@ import { existsSync, lstatSync } from "node:fs";
 import { mkdir, readlink, rm, symlink } from "node:fs/promises";
 import { platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import type { OmpInstallEntry, PluginPackageJson } from "@omp/manifest";
+import type { OmpFeature, OmpInstallEntry, PluginPackageJson } from "@omp/manifest";
 import { getPluginSourceDir } from "@omp/manifest";
 import { PI_CONFIG_DIR, PROJECT_PI_DIR } from "@omp/paths";
 import chalk from "chalk";
+
+/**
+ * Get all install entries for enabled features + top-level entries.
+ * If enabledFeatures is undefined, returns only top-level entries (backward compatible).
+ * If enabledFeatures is provided, includes top-level + entries from those features.
+ */
+export function getEnabledInstallEntries(
+	pkgJson: PluginPackageJson,
+	enabledFeatures?: string[],
+): OmpInstallEntry[] {
+	const entries: OmpInstallEntry[] = [];
+
+	// Always include top-level install entries
+	if (pkgJson.omp?.install) {
+		entries.push(...pkgJson.omp.install);
+	}
+
+	// If features specified, include install entries from enabled features
+	if (enabledFeatures && pkgJson.omp?.features) {
+		const features = pkgJson.omp.features;
+		for (const featureName of enabledFeatures) {
+			const feature = features[featureName];
+			if (feature?.install) {
+				entries.push(...feature.install);
+			}
+		}
+	}
+
+	return entries;
+}
+
+/**
+ * Get all available feature names from a plugin
+ */
+export function getAllFeatureNames(pkgJson: PluginPackageJson): string[] {
+	return Object.keys(pkgJson.omp?.features || {});
+}
+
+/**
+ * Get features that are enabled by default (default !== false)
+ */
+export function getDefaultFeatures(features: Record<string, OmpFeature>): string[] {
+	return Object.entries(features)
+		.filter(([_, f]) => f.default !== false)
+		.map(([name]) => name);
+}
 
 const isWindows = platform() === "win32";
 
@@ -51,6 +97,7 @@ export interface SymlinkRemovalResult {
 /**
  * Create symlinks for a plugin's omp.install entries
  * @param skipDestinations - Set of destination paths to skip (e.g., due to conflict resolution)
+ * @param enabledFeatures - If provided, only install entries from these features (plus top-level)
  */
 export async function createPluginSymlinks(
 	pluginName: string,
@@ -58,11 +105,13 @@ export async function createPluginSymlinks(
 	global = true,
 	verbose = true,
 	skipDestinations?: Set<string>,
+	enabledFeatures?: string[],
 ): Promise<SymlinkResult> {
 	const result: SymlinkResult = { created: [], errors: [] };
 	const sourceDir = getPluginSourceDir(pluginName, global);
 
-	if (!pkgJson.omp?.install?.length) {
+	const installEntries = getEnabledInstallEntries(pkgJson, enabledFeatures);
+	if (installEntries.length === 0) {
 		if (verbose) {
 			console.log(chalk.dim("  No omp.install entries found"));
 		}
@@ -71,7 +120,7 @@ export async function createPluginSymlinks(
 
 	const baseDir = getBaseDir(global);
 
-	for (const entry of pkgJson.omp.install) {
+	for (const entry of installEntries) {
 		// Skip destinations that the user chose to keep from existing plugins
 		if (skipDestinations?.has(entry.dest)) {
 			if (verbose) {
@@ -155,22 +204,25 @@ export async function createPluginSymlinks(
 
 /**
  * Remove symlinks for a plugin's omp.install entries
+ * @param enabledFeatures - If provided, only remove entries from these features (plus top-level)
  */
 export async function removePluginSymlinks(
 	_pluginName: string,
 	pkgJson: PluginPackageJson,
 	global = true,
 	verbose = true,
+	enabledFeatures?: string[],
 ): Promise<SymlinkRemovalResult> {
 	const result: SymlinkRemovalResult = { removed: [], errors: [], skippedNonSymlinks: [] };
 
-	if (!pkgJson.omp?.install?.length) {
+	const installEntries = getEnabledInstallEntries(pkgJson, enabledFeatures);
+	if (installEntries.length === 0) {
 		return result;
 	}
 
 	const baseDir = getBaseDir(global);
 
-	for (const entry of pkgJson.omp.install) {
+	for (const entry of installEntries) {
 		// Validate dest path stays within base directory (prevents path traversal attacks)
 		if (!isPathWithinBase(baseDir, entry.dest)) {
 			const msg = `Path traversal blocked: ${entry.dest} escapes base directory`;
@@ -218,21 +270,24 @@ export async function removePluginSymlinks(
 
 /**
  * Check symlink health for a plugin
+ * @param enabledFeatures - If provided, only check entries from these features (plus top-level)
  */
 export async function checkPluginSymlinks(
 	pluginName: string,
 	pkgJson: PluginPackageJson,
 	global = true,
+	enabledFeatures?: string[],
 ): Promise<{ valid: string[]; broken: string[]; missing: string[] }> {
 	const result = { valid: [] as string[], broken: [] as string[], missing: [] as string[] };
 	const sourceDir = getPluginSourceDir(pluginName, global);
 	const baseDir = getBaseDir(global);
 
-	if (!pkgJson.omp?.install?.length) {
+	const installEntries = getEnabledInstallEntries(pkgJson, enabledFeatures);
+	if (installEntries.length === 0) {
 		return result;
 	}
 
-	for (const entry of pkgJson.omp.install) {
+	for (const entry of installEntries) {
 		// Skip entries with path traversal (treat as broken)
 		if (!isPathWithinBase(baseDir, entry.dest)) {
 			result.broken.push(entry.dest);
