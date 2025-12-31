@@ -1,5 +1,5 @@
+import { loadPluginsJson, readPluginPackageJson } from "@omp/manifest";
 import chalk from "chalk";
-import { loadPluginsJson, readPluginPackageJson } from "../manifest.js";
 
 export interface ListOptions {
 	global?: boolean;

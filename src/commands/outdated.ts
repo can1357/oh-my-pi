@@ -1,7 +1,7 @@
+import { loadPluginsJson } from "@omp/manifest";
+import { npmOutdated } from "@omp/npm";
+import { PLUGINS_DIR } from "@omp/paths";
 import chalk from "chalk";
-import { loadPluginsJson } from "../manifest.js";
-import { npmOutdated } from "../npm.js";
-import { PLUGINS_DIR } from "../paths.js";
 
 export interface OutdatedOptions {
 	global?: boolean;

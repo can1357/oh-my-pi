@@ -1,4 +1,4 @@
-import type { PluginPackageJson } from "./manifest.js";
+import type { PluginPackageJson } from "@omp/manifest";
 
 export interface Conflict {
 	dest: string;

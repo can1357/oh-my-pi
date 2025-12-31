@@ -1,5 +1,5 @@
+import { npmInfo } from "@omp/npm";
 import chalk from "chalk";
-import { npmInfo } from "../npm.js";
 
 export interface InfoOptions {
 	json?: boolean;

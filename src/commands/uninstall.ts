@@ -1,11 +1,11 @@
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
+import { loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
+import { npmUninstall } from "@omp/npm";
+import { NODE_MODULES_DIR, PLUGINS_DIR, PROJECT_NODE_MODULES } from "@omp/paths";
+import { removePluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
-import { loadPluginsJson, readPluginPackageJson, savePluginsJson } from "../manifest.js";
-import { npmUninstall } from "../npm.js";
-import { NODE_MODULES_DIR, PLUGINS_DIR, PROJECT_NODE_MODULES } from "../paths.js";
-import { removePluginSymlinks } from "../symlinks.js";
 
 export interface UninstallOptions {
 	global?: boolean;

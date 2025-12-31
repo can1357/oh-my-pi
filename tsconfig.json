@@ -1,7 +1,7 @@
 {
 	"compilerOptions": {
 		"target": "ES2022",
-		"module": "Node16",
+		"module": "ESNext",
 		"lib": ["ES2022"],
 		"strict": true,
 		"esModuleInterop": true,
@@ -12,12 +12,16 @@
 		"sourceMap": true,
 		"inlineSources": true,
 		"inlineSourceMap": false,
-		"moduleResolution": "Node16",
+		"moduleResolution": "bundler",
 		"resolveJsonModule": true,
 		"allowImportingTsExtensions": false,
 		"outDir": "./dist",
 		"rootDir": "./src",
-		"types": ["node", "bun-types"]
+		"types": ["node", "bun-types"],
+		"baseUrl": ".",
+		"paths": {
+			"@omp/*": ["src/*"]
+		}
 	},
 	"include": ["src/**/*"],
 	"exclude": ["node_modules", "dist"]

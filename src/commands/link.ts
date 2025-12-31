@@ -1,10 +1,10 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, symlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { loadPluginsJson, type PluginPackageJson, savePluginsJson } from "@omp/manifest";
+import { NODE_MODULES_DIR, PROJECT_NODE_MODULES } from "@omp/paths";
+import { createPluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
-import { loadPluginsJson, type PluginPackageJson, savePluginsJson } from "../manifest.js";
-import { NODE_MODULES_DIR, PROJECT_NODE_MODULES } from "../paths.js";
-import { createPluginSymlinks } from "../symlinks.js";
 
 export interface LinkOptions {
 	name?: string;

@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+import { PROJECT_PI_DIR, PROJECT_PLUGINS_JSON } from "@omp/paths";
 import chalk from "chalk";
-import { PROJECT_PI_DIR, PROJECT_PLUGINS_JSON } from "../paths.js";
 
 export interface InitOptions {
 	force?: boolean;

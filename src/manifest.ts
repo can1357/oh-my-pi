@@ -7,7 +7,7 @@ import {
 	NODE_MODULES_DIR,
 	PLUGINS_DIR,
 	PROJECT_PLUGINS_JSON,
-} from "./paths.js";
+} from "@omp/paths";
 
 /**
  * OMP field in package.json - defines what files to install

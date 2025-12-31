@@ -1,8 +1,8 @@
+import { loadPluginsJson, readPluginPackageJson } from "@omp/manifest";
+import { npmUpdate } from "@omp/npm";
+import { NODE_MODULES_DIR, PLUGINS_DIR, PROJECT_NODE_MODULES } from "@omp/paths";
+import { createPluginSymlinks, removePluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
-import { loadPluginsJson, readPluginPackageJson } from "../manifest.js";
-import { npmUpdate } from "../npm.js";
-import { NODE_MODULES_DIR, PLUGINS_DIR, PROJECT_NODE_MODULES } from "../paths.js";
-import { createPluginSymlinks, removePluginSymlinks } from "../symlinks.js";
 
 export interface UpdateOptions {
 	global?: boolean;

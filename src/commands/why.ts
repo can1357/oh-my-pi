@@ -1,10 +1,10 @@
 import { existsSync, lstatSync } from "node:fs";
 import { readlink } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { getInstalledPlugins, readPluginPackageJson } from "@omp/manifest";
+import { PI_CONFIG_DIR } from "@omp/paths";
+import { traceInstalledFile } from "@omp/symlinks";
 import chalk from "chalk";
-import { getInstalledPlugins, readPluginPackageJson } from "../manifest.js";
-import { PI_CONFIG_DIR } from "../paths.js";
-import { traceInstalledFile } from "../symlinks.js";
 
 export interface WhyOptions {
 	global?: boolean;

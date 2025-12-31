@@ -1,5 +1,5 @@
+import { npmSearch } from "@omp/npm";
 import chalk from "chalk";
-import { npmSearch } from "../npm.js";
 
 export interface SearchOptions {
 	json?: boolean;

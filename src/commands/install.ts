@@ -3,8 +3,7 @@ import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import chalk from "chalk";
-import { type Conflict, detectConflicts, formatConflicts } from "../conflicts.js";
+import { type Conflict, detectConflicts, formatConflicts } from "@omp/conflicts";
 import {
 	getInstalledPlugins,
 	initGlobalPlugins,
@@ -12,10 +11,11 @@ import {
 	type PluginPackageJson,
 	readPluginPackageJson,
 	savePluginsJson,
-} from "../manifest.js";
-import { npmInfo, npmInstall } from "../npm.js";
-import { NODE_MODULES_DIR, PLUGINS_DIR, PROJECT_NODE_MODULES, PROJECT_PLUGINS_JSON } from "../paths.js";
-import { createPluginSymlinks } from "../symlinks.js";
+} from "@omp/manifest";
+import { npmInfo, npmInstall } from "@omp/npm";
+import { NODE_MODULES_DIR, PLUGINS_DIR, PROJECT_NODE_MODULES, PROJECT_PLUGINS_JSON } from "@omp/paths";
+import { createPluginSymlinks } from "@omp/symlinks";
+import chalk from "chalk";
 
 export interface InstallOptions {
 	global?: boolean;

@@ -1,20 +1,20 @@
 #!/usr/bin/env bun
 
+import { createPlugin } from "@omp/commands/create";
+import { runDoctor } from "@omp/commands/doctor";
+import { disablePlugin, enablePlugin } from "@omp/commands/enable";
+import { showInfo } from "@omp/commands/info";
+import { initProject } from "@omp/commands/init";
+import { installPlugin } from "@omp/commands/install";
+import { linkPlugin } from "@omp/commands/link";
+import { listPlugins } from "@omp/commands/list";
+import { showOutdated } from "@omp/commands/outdated";
+import { searchPlugins } from "@omp/commands/search";
+import { uninstallPlugin } from "@omp/commands/uninstall";
+import { updatePlugin } from "@omp/commands/update";
+import { whyFile } from "@omp/commands/why";
+import { checkMigration, migrateToNpm } from "@omp/migrate";
 import { program } from "commander";
-import { createPlugin } from "./commands/create.js";
-import { runDoctor } from "./commands/doctor.js";
-import { disablePlugin, enablePlugin } from "./commands/enable.js";
-import { showInfo } from "./commands/info.js";
-import { initProject } from "./commands/init.js";
-import { installPlugin } from "./commands/install.js";
-import { linkPlugin } from "./commands/link.js";
-import { listPlugins } from "./commands/list.js";
-import { showOutdated } from "./commands/outdated.js";
-import { searchPlugins } from "./commands/search.js";
-import { uninstallPlugin } from "./commands/uninstall.js";
-import { updatePlugin } from "./commands/update.js";
-import { whyFile } from "./commands/why.js";
-import { checkMigration, migrateToNpm } from "./migrate.js";
 
 program.name("omp").description("Oh My Pi - Plugin manager for pi configuration").version("0.1.0");
 

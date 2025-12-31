@@ -2,7 +2,6 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
-import chalk from "chalk";
 import {
 	hasLegacyManifest,
 	type LegacyPluginInfo,
@@ -10,8 +9,9 @@ import {
 	type PluginPackageJson,
 	type PluginsJson,
 	savePluginsJson,
-} from "./manifest.js";
-import { LEGACY_MANIFEST_PATH, NODE_MODULES_DIR, PLUGINS_DIR } from "./paths.js";
+} from "@omp/manifest";
+import { LEGACY_MANIFEST_PATH, NODE_MODULES_DIR, PLUGINS_DIR } from "@omp/paths";
+import chalk from "chalk";
 
 /**
  * Prompt user for migration

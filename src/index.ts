@@ -1,43 +1,37 @@
-// Core commands
-
-export { createPlugin } from "./commands/create.js";
-export { runDoctor } from "./commands/doctor.js";
-export { disablePlugin, enablePlugin } from "./commands/enable.js";
-export { showInfo } from "./commands/info.js";
-// New commands
-export { initProject } from "./commands/init.js";
-export { installPlugin } from "./commands/install.js";
-export { linkPlugin } from "./commands/link.js";
-export { listPlugins } from "./commands/list.js";
-export { showOutdated } from "./commands/outdated.js";
-export { searchPlugins } from "./commands/search.js";
-export { uninstallPlugin } from "./commands/uninstall.js";
-export { updatePlugin } from "./commands/update.js";
-export { whyFile } from "./commands/why.js";
+export { createPlugin } from "@omp/commands/create";
+export { runDoctor } from "@omp/commands/doctor";
+export { disablePlugin, enablePlugin } from "@omp/commands/enable";
+export { showInfo } from "@omp/commands/info";
+export { initProject } from "@omp/commands/init";
+export { installPlugin } from "@omp/commands/install";
+export { linkPlugin } from "@omp/commands/link";
+export { listPlugins } from "@omp/commands/list";
+export { showOutdated } from "@omp/commands/outdated";
+export { searchPlugins } from "@omp/commands/search";
+export { uninstallPlugin } from "@omp/commands/uninstall";
+export { updatePlugin } from "@omp/commands/update";
+export { whyFile } from "@omp/commands/why";
 export {
 	detectAllConflicts,
 	detectConflicts,
 	formatConflicts,
-} from "./conflicts.js";
+} from "@omp/conflicts";
 
-// Types
 export type {
 	OmpField,
 	OmpInstallEntry,
 	PluginPackageJson,
 	PluginsJson,
-} from "./manifest.js";
+} from "@omp/manifest";
 
-// Utilities
 export {
 	getInstalledPlugins,
 	initGlobalPlugins,
 	loadPluginsJson,
 	readPluginPackageJson,
 	savePluginsJson,
-} from "./manifest.js";
-// Migration
-export { checkMigration, migrateToNpm } from "./migrate.js";
+} from "@omp/manifest";
+export { checkMigration, migrateToNpm } from "@omp/migrate";
 export {
 	npmInfo,
 	npmInstall,
@@ -45,9 +39,9 @@ export {
 	npmSearch,
 	npmUninstall,
 	npmUpdate,
-} from "./npm.js";
+} from "@omp/npm";
 export {
 	checkPluginSymlinks,
 	createPluginSymlinks,
 	removePluginSymlinks,
-} from "./symlinks.js";
+} from "@omp/symlinks";

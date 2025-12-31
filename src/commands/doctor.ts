@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
+import { detectAllConflicts, formatConflicts } from "@omp/conflicts";
+import { getInstalledPlugins, loadPluginsJson, readPluginPackageJson } from "@omp/manifest";
+import { GLOBAL_PACKAGE_JSON, NODE_MODULES_DIR, PLUGINS_DIR } from "@omp/paths";
+import { checkPluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
-import { detectAllConflicts, formatConflicts } from "../conflicts.js";
-import { getInstalledPlugins, loadPluginsJson, readPluginPackageJson } from "../manifest.js";
-import { GLOBAL_PACKAGE_JSON, NODE_MODULES_DIR, PLUGINS_DIR } from "../paths.js";
-import { checkPluginSymlinks } from "../symlinks.js";
 
 export interface DoctorOptions {
 	global?: boolean;

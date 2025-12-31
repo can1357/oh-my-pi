@@ -1,10 +1,10 @@
 import { existsSync, lstatSync } from "node:fs";
 import { mkdir, readlink, rm, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { OmpInstallEntry, PluginPackageJson } from "@omp/manifest";
+import { getPluginSourceDir } from "@omp/manifest";
+import { PI_CONFIG_DIR } from "@omp/paths";
 import chalk from "chalk";
-import type { OmpInstallEntry, PluginPackageJson } from "./manifest.js";
-import { getPluginSourceDir } from "./manifest.js";
-import { PI_CONFIG_DIR } from "./paths.js";
 
 export interface SymlinkResult {
 	created: string[];

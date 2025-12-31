@@ -1,6 +1,6 @@
+import { loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
+import { createPluginSymlinks, removePluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
-import { loadPluginsJson, readPluginPackageJson, savePluginsJson } from "../manifest.js";
-import { createPluginSymlinks, removePluginSymlinks } from "../symlinks.js";
 
 export interface EnableDisableOptions {
 	global?: boolean;
