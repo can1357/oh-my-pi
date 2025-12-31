@@ -1,13 +1,11 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Oh My Pi" height="300">
+  <img src="assets/banner.png?q" alt="Oh My Pi" >
 </p>
 
 <p align="center">
-  <strong>Plugin manager for <a href="https://github.com/badlogic/pi-mono">pi</a>.</strong>
-</p>
-
-<p align="center">
-  Like oh-my-zsh, but for your AI coding assistant.
+  <strong>
+    Think oh-my-zsh, but for <a href="https://github.com/badlogic/pi-mono">pi</a>.
+  </strong>
 </p>
 
 <p align="center">
@@ -18,7 +16,7 @@
 
 ---
 
-## Plugins
+## Built-ins
 
 | Plugin                                                                       | Description                                                                    |
 | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
@@ -29,11 +27,7 @@
 
 ---
 
-**Oh My Pi won't make Claude write better code...** but it might make _you_ feel like it does.
-
-Install community plugins with a single command. Themes, custom agents, slash commands, tools — all managed through npm, all a `omp install` away.
-
-No more copy-pasting prompt files. No more manually symlinking configs. Just vibes.
+Install community plugins with a single command. Themes, custom agents, slash commands, tools — sourced through npm/git, all a `omp install` away.
 
 ## Installation
 

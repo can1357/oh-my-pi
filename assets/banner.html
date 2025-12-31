@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Oh My Pi Logo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: #000;
+      font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+    }
+    .logo-container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      background: linear-gradient(135deg, #0d0d0d 0%, #1a1a1a 50%, #0f0f0f 100%);
+      overflow: hidden;
+    }
+    .grid {
+      position: absolute;
+      inset: 0;
+      opacity: 0.03;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px);
+      background-size: 40px 40px;
+    }
+    .circuit {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      opacity: 0.2;
+    }
+    .circuit.left { left: 38px; }
+    .circuit.right { right: 38px; }
+    .content {
+      position: relative;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+    }
+    .pi-container {
+      position: relative;
+      margin-bottom: 24px;
+    }
+    .glow {
+      position: absolute;
+      inset: 0;
+      filter: blur(32px);
+      opacity: 0.3;
+      background: radial-gradient(circle, #f97316 0%, transparent 70%);
+      transform: scale(1.5);
+    }
+    .pi-symbol { position: relative; }
+    .title {
+      font-size: 36px;
+      font-weight: bold;
+      letter-spacing: 0.3em;
+      color: rgba(255,255,255,0.9);
+      text-shadow: 0 0 40px rgba(249, 115, 22, 0.3);
+      margin-bottom: 12px;
+    }
+    .tagline {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: rgba(255,255,255,0.4);
+    }
+    .tagline .bracket { font-size: 18px; font-weight: 300; }
+    .tagline .text { font-size: 14px; letter-spacing: 0.4em; text-transform: uppercase; }
+    .status {
+      margin-top: 24px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: rgba(255,255,255,0.3);
+      letter-spacing: 0.05em;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #10b981;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    .corner {
+      position: absolute;
+      width: 32px;
+      height: 32px;
+      border-color: rgba(255,255,255,0.1);
+      border-style: solid;
+      border-width: 0;
+    }
+    .corner.tl { top: 16px; left: 16px; border-top-width: 2px; border-left-width: 2px; }
+    .corner.tr { top: 16px; right: 16px; border-top-width: 2px; border-right-width: 2px; }
+    .corner.bl { bottom: 16px; left: 16px; border-bottom-width: 2px; border-left-width: 2px; }
+    .corner.br { bottom: 16px; right: 16px; border-bottom-width: 2px; border-right-width: 2px; }
+    .bottom-glow {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 96px;
+      opacity: 0.5;
+      background: linear-gradient(to top, rgba(249, 115, 22, 0.05), transparent);
+    }
+  </style>
+</head>
+<body>
+  <div class="logo-container">
+    <div class="grid"></div>
+
+    <!-- Circuit traces - left -->
+    <svg class="circuit left" width="60" height="200" viewBox="0 0 60 200">
+      <path d="M30 0 L30 60 L10 80 L10 120 L30 140 L30 200" stroke="#f97316" stroke-width="2" fill="none"/>
+      <circle cx="30" cy="60" r="4" fill="#f97316"/>
+      <circle cx="10" cy="80" r="3" fill="#f97316"/>
+      <circle cx="10" cy="120" r="3" fill="#f97316"/>
+      <circle cx="30" cy="140" r="4" fill="#f97316"/>
+      <rect x="5" y="95" width="10" height="10" fill="none" stroke="#f97316" stroke-width="1.5"/>
+    </svg>
+
+    <!-- Circuit traces - right -->
+    <svg class="circuit right" width="60" height="200" viewBox="0 0 60 200">
+      <path d="M30 0 L30 60 L50 80 L50 120 L30 140 L30 200" stroke="#f97316" stroke-width="2" fill="none"/>
+      <circle cx="30" cy="60" r="4" fill="#f97316"/>
+      <circle cx="50" cy="80" r="3" fill="#f97316"/>
+      <circle cx="50" cy="120" r="3" fill="#f97316"/>
+      <circle cx="30" cy="140" r="4" fill="#f97316"/>
+      <rect x="45" y="95" width="10" height="10" fill="none" stroke="#f97316" stroke-width="1.5"/>
+    </svg>
+
+    <div class="content">
+      <div class="pi-container">
+        <div class="glow"></div>
+        <svg class="pi-symbol" width="120" height="90" viewBox="0 0 120 90">
+          <rect x="10" y="8" width="100" height="12" rx="2" fill="#fafafa"/>
+          <rect x="25" y="20" width="12" height="62" rx="2" fill="#fafafa"/>
+          <rect x="75" y="20" width="12" height="45" rx="2" fill="#fafafa"/>
+          <g>
+            <rect x="71" y="55" width="20" height="16" rx="3" fill="#f97316"/>
+            <rect x="76" y="59" width="3" height="8" rx="1" fill="#0d0d0d"/>
+            <rect x="82" y="59" width="3" height="8" rx="1" fill="#0d0d0d"/>
+          </g>
+          <circle cx="18" cy="14" r="2" fill="#f97316" opacity="0.8"/>
+          <circle cx="102" cy="14" r="2" fill="#f97316" opacity="0.8"/>
+        </svg>
+      </div>
+
+      <div class="title">oh my PI</div>
+
+      <div class="tagline">
+        <span class="bracket">[</span>
+        <span class="text">pi plugin-manager</span>
+        <span class="bracket">]</span>
+      </div>
+
+      <div class="status">
+        <div class="status-dot"></div>
+        <span>Themes · Agents · Tools · Skills</span>
+      </div>
+    </div>
+
+    <div class="corner tl"></div>
+    <div class="corner tr"></div>
+    <div class="corner bl"></div>
+    <div class="corner br"></div>
+    <div class="bottom-glow"></div>
+  </div>
+</body>
+</html>
