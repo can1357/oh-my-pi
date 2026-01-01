@@ -46,8 +46,6 @@ Examples:
   $ omp install --dry-run                       # Preview changes without installing
 `,
 	)
-	.option("-g, --global", "Install globally to ~/.pi")
-	.option("-l, --local", "Install to project-local .pi/")
 	.option("-S, --save", "Add to plugins.json")
 	.option("-D, --save-dev", "Add as dev dependency")
 	.option("--force", "Overwrite conflicts without prompting")
@@ -70,8 +68,6 @@ program
 	.command("uninstall <name>")
 	.alias("rm")
 	.description("Remove plugin and its symlinks")
-	.option("-g, --global", "Uninstall from ~/.pi")
-	.option("-l, --local", "Uninstall from project-local .pi/")
 	.option("--dry-run", "Show what would be deleted without making changes")
 	.option("--json", "Output as JSON")
 	.action(withErrorHandling(uninstallPlugin));
@@ -80,8 +76,6 @@ program
 	.command("update [name]")
 	.alias("up")
 	.description("Update to latest within semver range")
-	.option("-g, --global", "Update global plugins")
-	.option("-l, --local", "Update project-local plugins")
 	.option("--dry-run", "Show what would be updated without making changes")
 	.option("--json", "Output as JSON")
 	.action(withErrorHandling(updatePlugin));
@@ -90,8 +84,6 @@ program
 	.command("list")
 	.alias("ls")
 	.description("Show installed plugins")
-	.option("-g, --global", "List global plugins")
-	.option("-l, --local", "List project-local plugins")
 	.option("--json", "Output as JSON")
 	.action(withErrorHandling(listPlugins));
 
@@ -106,8 +98,6 @@ so changes are reflected immediately without reinstalling.
 `,
 	)
 	.option("-n, --name <name>", "Custom name for the plugin")
-	.option("-g, --global", "Link globally")
-	.option("-l, --local", "Link to project-local .pi/")
 	.option("--force", "Overwrite existing npm-installed plugin")
 	.action(withErrorHandling(linkPlugin));
 
@@ -117,8 +107,8 @@ so changes are reflected immediately without reinstalling.
 
 program
 	.command("init")
-	.description("Create .pi/plugins.json in current project")
-	.option("--force", "Overwrite existing plugins.json")
+	.description("Create .pi/overrides.json for project-local config")
+	.option("--force", "Overwrite existing overrides.json")
 	.action(withErrorHandling(initProject));
 
 program
@@ -141,16 +131,12 @@ program
 program
 	.command("outdated")
 	.description("List plugins with newer versions")
-	.option("-g, --global", "Check global plugins")
-	.option("-l, --local", "Check project-local plugins")
 	.option("--json", "Output as JSON")
 	.action(withErrorHandling(showOutdated));
 
 program
 	.command("doctor")
 	.description("Check for broken symlinks, conflicts")
-	.option("-g, --global", "Check global plugins")
-	.option("-l, --local", "Check project-local plugins")
 	.option("--fix", "Attempt to fix issues")
 	.option("--json", "Output as JSON")
 	.action(withErrorHandling(runDoctor));
@@ -165,24 +151,20 @@ program
 program
 	.command("why <file>")
 	.description("Show which plugin installed a file")
-	.option("-g, --global", "Check global plugins")
-	.option("-l, --local", "Check project-local plugins")
 	.option("--json", "Output as JSON")
 	.action(withErrorHandling(whyFile));
 
 program
 	.command("enable <name>")
 	.description("Enable a disabled plugin")
-	.option("-g, --global", "Target global plugins")
-	.option("-l, --local", "Target project-local plugins")
+	.option("-l, --local", "Use project-local overrides (.pi/)")
 	.option("--json", "Output as JSON")
 	.action(withErrorHandling(enablePlugin));
 
 program
 	.command("disable <name>")
 	.description("Disable plugin without uninstalling")
-	.option("-g, --global", "Target global plugins")
-	.option("-l, --local", "Target project-local plugins")
+	.option("-l, --local", "Use project-local overrides (.pi/)")
 	.option("--json", "Output as JSON")
 	.action(withErrorHandling(disablePlugin));
 
@@ -201,8 +183,7 @@ Examples:
   $ omp features @oh-my-pi/exa --set ''            # Disable all optional features
 `,
 	)
-	.option("-g, --global", "Target global plugins")
-	.option("-l, --local", "Target project-local plugins")
+	.option("-l, --local", "Use project-local overrides (.pi/)")
 	.option("--enable <features...>", "Enable specific features")
 	.option("--disable <features...>", "Disable specific features")
 	.option("--set <features>", "Set exact feature list (comma-separated, '*' for all, '' for none)")
@@ -217,7 +198,6 @@ program
 		`
 Examples:
   $ omp config:validate           # Validate all enabled plugins
-  $ omp config:validate --global  # Validate global plugins only
   $ omp config:validate --json    # JSON output for CI
 
 Validates that:
@@ -227,8 +207,6 @@ Validates that:
 Returns exit code 1 if validation fails.
 `,
 	)
-	.option("-g, --global", "Target global plugins")
-	.option("-l, --local", "Target project-local plugins")
 	.option("--json", "Output as JSON")
 	.action(withErrorHandling(validateConfig));
 
@@ -248,8 +226,7 @@ See also:
   $ omp config:validate                      # Validate all config
 `,
 	)
-	.option("-g, --global", "Target global plugins")
-	.option("-l, --local", "Target project-local plugins")
+	.option("-l, --local", "Use project-local overrides (.pi/)")
 	.option("--delete", "Delete/reset the variable to its default")
 	.option("--json", "Output as JSON")
 	.action(withErrorHandling(configCommand));
@@ -267,8 +244,7 @@ Examples:
   $ omp env --json                 # JSON format for scripts
 `,
 	)
-	.option("-g, --global", "Target global plugins")
-	.option("-l, --local", "Target project-local plugins")
+	.option("-l, --local", "Use project-local overrides (.pi/)")
 	.option("--fish", "Output fish shell syntax instead of POSIX")
 	.option("--json", "Output as JSON")
 	.action(withErrorHandling(envCommand));
