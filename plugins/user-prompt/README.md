@@ -39,13 +39,8 @@ Asks the user questions during execution and returns their response. Useful for:
 
 ```json
 {
-	"question": "Which database would you like to use?",
-	"options": [
-		{ "label": "PostgreSQL (Recommended)" },
-		{ "label": "MySQL" },
-		{ "label": "SQLite" },
-		{ "label": "MongoDB" }
-	]
+   "question": "Which database would you like to use?",
+   "options": [{ "label": "PostgreSQL (Recommended)" }, { "label": "MySQL" }, { "label": "SQLite" }, { "label": "MongoDB" }]
 }
 ```
 
@@ -53,15 +48,15 @@ Asks the user questions during execution and returns their response. Useful for:
 
 ```json
 {
-	"question": "Which features should I implement?",
-	"options": [
-		{ "label": "Authentication" },
-		{ "label": "API endpoints" },
-		{ "label": "Database models" },
-		{ "label": "Unit tests" },
-		{ "label": "Documentation" }
-	],
-	"multi": true
+   "question": "Which features should I implement?",
+   "options": [
+      { "label": "Authentication" },
+      { "label": "API endpoints" },
+      { "label": "Database models" },
+      { "label": "Unit tests" },
+      { "label": "Documentation" }
+   ],
+   "multi": true
 }
 ```
 

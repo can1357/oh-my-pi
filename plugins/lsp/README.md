@@ -68,24 +68,24 @@ Override or add servers via `~/.pi/lsp.json` or `.pi/lsp.json`:
 
 ```json
 {
-	"rust": {
-		"command": "rust-analyzer",
-		"args": [],
-		"fileTypes": [".rs"],
-		"rootMarkers": ["Cargo.toml"],
-		"initOptions": {
-			"checkOnSave": { "command": "clippy", "extraArgs": ["--all-targets"] }
-		}
-	},
-	"ocaml": {
-		"command": "ocamllsp",
-		"args": [],
-		"fileTypes": [".ml", ".mli"],
-		"rootMarkers": ["dune-project"]
-	},
-	"typescript": {
-		"disabled": true
-	}
+   "rust": {
+      "command": "rust-analyzer",
+      "args": [],
+      "fileTypes": [".rs"],
+      "rootMarkers": ["Cargo.toml"],
+      "initOptions": {
+         "checkOnSave": { "command": "clippy", "extraArgs": ["--all-targets"] }
+      }
+   },
+   "ocaml": {
+      "command": "ocamllsp",
+      "args": [],
+      "fileTypes": [".ml", ".mli"],
+      "rootMarkers": ["dune-project"]
+   },
+   "typescript": {
+      "disabled": true
+   }
 }
 ```
 

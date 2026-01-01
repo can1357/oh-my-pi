@@ -20,54 +20,40 @@
  *   - webset_monitor_create: Auto-update webset on schedule
  */
 
-import type { TSchema } from "@sinclair/typebox";
-import type {
-  CustomAgentTool,
-  CustomToolFactory,
-  ToolAPI,
-} from "@mariozechner/pi-coding-agent";
-import {
-  callWebsetsTool,
-  createToolWrapper,
-  fetchWebsetsTools,
-  findApiKey,
-} from "./shared";
+import type { CustomAgentTool, CustomToolFactory, ToolAPI } from '@mariozechner/pi-coding-agent'
+import type { TSchema } from '@sinclair/typebox'
+import { callWebsetsTool, createToolWrapper, fetchWebsetsTools, findApiKey } from './shared'
 
 // Tool name mapping: MCP name -> exposed name
 const NAME_MAP: Record<string, string> = {
-  create_webset: "webset_create",
-  list_websets: "webset_list",
-  get_webset: "webset_get",
-  update_webset: "webset_update",
-  delete_webset: "webset_delete",
-  list_webset_items: "webset_items_list",
-  get_item: "webset_item_get",
-  create_search: "webset_search_create",
-  get_search: "webset_search_get",
-  cancel_search: "webset_search_cancel",
-  create_enrichment: "webset_enrichment_create",
-  get_enrichment: "webset_enrichment_get",
-  update_enrichment: "webset_enrichment_update",
-  delete_enrichment: "webset_enrichment_delete",
-  cancel_enrichment: "webset_enrichment_cancel",
-  create_monitor: "webset_monitor_create",
-};
+   create_webset: 'webset_create',
+   list_websets: 'webset_list',
+   get_webset: 'webset_get',
+   update_webset: 'webset_update',
+   delete_webset: 'webset_delete',
+   list_webset_items: 'webset_items_list',
+   get_item: 'webset_item_get',
+   create_search: 'webset_search_create',
+   get_search: 'webset_search_get',
+   cancel_search: 'webset_search_cancel',
+   create_enrichment: 'webset_enrichment_create',
+   get_enrichment: 'webset_enrichment_get',
+   update_enrichment: 'webset_enrichment_update',
+   delete_enrichment: 'webset_enrichment_delete',
+   cancel_enrichment: 'webset_enrichment_cancel',
+   create_monitor: 'webset_monitor_create',
+}
 
-const factory: CustomToolFactory = async (
-  _toolApi: ToolAPI,
-): Promise<CustomAgentTool<TSchema, unknown>[] | null> => {
-  const apiKey = findApiKey();
-  if (!apiKey) return null;
+const factory: CustomToolFactory = async (_toolApi: ToolAPI): Promise<CustomAgentTool<TSchema, unknown>[] | null> => {
+   const apiKey = findApiKey()
+   if (!apiKey) return null
 
-  const mcpTools = await fetchWebsetsTools(apiKey);
-  if (mcpTools.length === 0) return null;
+   const mcpTools = await fetchWebsetsTools(apiKey)
+   if (mcpTools.length === 0) return null
 
-  const callFn = (toolName: string, args: Record<string, unknown>) =>
-    callWebsetsTool(apiKey, toolName, args);
+   const callFn = (toolName: string, args: Record<string, unknown>) => callWebsetsTool(apiKey, toolName, args)
 
-  return mcpTools.map((tool) =>
-    createToolWrapper(tool, NAME_MAP[tool.name] ?? tool.name, callFn),
-  );
-};
+   return mcpTools.map(tool => createToolWrapper(tool, NAME_MAP[tool.name] ?? tool.name, callFn))
+}
 
-export default factory;
+export default factory

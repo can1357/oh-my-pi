@@ -214,16 +214,16 @@ Plugins are npm packages with an `omp` field in `package.json`:
 
 ```json
 {
-	"name": "my-cool-plugin",
-	"version": "1.0.0",
-	"keywords": ["omp-plugin"],
-	"omp": {
-		"install": [
-			{ "src": "agents/researcher.md", "dest": "agent/agents/researcher.md" },
-			{ "src": "commands/research.md", "dest": "agent/commands/research.md" }
-		]
-	},
-	"files": ["agents", "commands"]
+   "name": "my-cool-plugin",
+   "version": "1.0.0",
+   "keywords": ["omp-plugin"],
+   "omp": {
+      "install": [
+         { "src": "agents/researcher.md", "dest": "agent/agents/researcher.md" },
+         { "src": "commands/research.md", "dest": "agent/commands/research.md" }
+      ]
+   },
+   "files": ["agents", "commands"]
 }
 ```
 
@@ -233,16 +233,16 @@ For plugins with custom tools, use the `tools` field instead of `install`:
 
 ```json
 {
-	"name": "@oh-my-pi/my-tools",
-	"version": "1.0.0",
-	"keywords": ["omp-plugin"],
-	"omp": {
-		"tools": "tools"
-	},
-	"files": ["tools"],
-	"dependencies": {
-		"some-npm-package": "^1.0.0"
-	}
+   "name": "@oh-my-pi/my-tools",
+   "version": "1.0.0",
+   "keywords": ["omp-plugin"],
+   "omp": {
+      "tools": "tools"
+   },
+   "files": ["tools"],
+   "dependencies": {
+      "some-npm-package": "^1.0.0"
+   }
 }
 ```
 
@@ -254,37 +254,37 @@ Plugins can define optional features and configurable variables:
 
 ```json
 {
-	"name": "@oh-my-pi/exa",
-	"version": "1.0.0",
-	"keywords": ["omp-plugin"],
-	"omp": {
-		"tools": "tools",
-		"runtime": "tools/runtime.json",
-		"variables": {
-			"apiKey": {
-				"type": "string",
-				"env": "EXA_API_KEY",
-				"description": "Exa API key",
-				"required": true
-			}
-		},
-		"features": {
-			"search": {
-				"description": "Web search capabilities",
-				"default": true
-			},
-			"websets": {
-				"description": "Curated content collections",
-				"default": false,
-				"variables": {
-					"defaultCollection": {
-						"type": "string",
-						"default": "general"
-					}
-				}
-			}
-		}
-	}
+   "name": "@oh-my-pi/exa",
+   "version": "1.0.0",
+   "keywords": ["omp-plugin"],
+   "omp": {
+      "tools": "tools",
+      "runtime": "tools/runtime.json",
+      "variables": {
+         "apiKey": {
+            "type": "string",
+            "env": "EXA_API_KEY",
+            "description": "Exa API key",
+            "required": true
+         }
+      },
+      "features": {
+         "search": {
+            "description": "Web search capabilities",
+            "default": true
+         },
+         "websets": {
+            "description": "Curated content collections",
+            "default": false,
+            "variables": {
+               "defaultCollection": {
+                  "type": "string",
+                  "default": "general"
+               }
+            }
+         }
+      }
+   }
 }
 ```
 
