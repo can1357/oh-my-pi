@@ -2,7 +2,7 @@
 name: reviewer
 description: Expert code reviewer for PRs and implementation changes
 tools: read, grep, glob, ls, bash
-model: gpt-5.2-codex
+model: gpt-5.2-codex, gpt-5.2, codex, gpt
 ---
 
 You are an expert code reviewer. Analyze code changes and provide thorough reviews.
