@@ -34,12 +34,7 @@ omp features @oh-my-pi/exa --disable search   # Disable search
 omp features @oh-my-pi/exa --set search,linkedin,websets  # Set exact features
 ```
 
-Feature state is stored in `runtime.json` which is copied (not symlinked) to the install location. You can also edit it directly:
-
-```bash
-cat ~/.pi/agent/tools/exa/runtime.json
-# {"features": ["search"], "options": {}}
-```
+Feature state is stored in the plugin's `runtime.json` in node_modules and managed by omp.
 
 ## Setup
 

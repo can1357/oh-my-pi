@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/perplexity",
-  "version": "0.8.3",
+  "version": "0.9.0",
   "description": "Perplexity AI search tools for pi",
   "keywords": [
     "omp-plugin",
@@ -17,25 +17,8 @@
     "directory": "plugins/perplexity"
   },
   "omp": {
-    "install": [
-      {
-        "src": "tools/runtime.json",
-        "dest": "agent/tools/perplexity/runtime.json",
-        "copy": true
-      },
-      {
-        "src": "tools/index.ts",
-        "dest": "agent/tools/perplexity/index.ts"
-      },
-      {
-        "src": "tools/shared.ts",
-        "dest": "agent/tools/perplexity/shared.ts"
-      },
-      {
-        "src": "tools/search.ts",
-        "dest": "agent/tools/perplexity/search.ts"
-      }
-    ],
+    "tools": "tools",
+    "runtime": "tools/runtime.json",
     "variables": {
       "apiKey": {
         "type": "string",

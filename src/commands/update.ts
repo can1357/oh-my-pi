@@ -1,5 +1,6 @@
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
+import { writeLoader } from "@omp/loader";
 import { loadPluginsJson, type OmpInstallEntry, type PluginPackageJson, readPluginPackageJson } from "@omp/manifest";
 import { npmUpdate, requireNpm } from "@omp/npm";
 import { log, outputJson, setJsonMode } from "@omp/output";
@@ -251,6 +252,12 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 		}
 
 		const updated = results.filter((r) => r.from !== r.to);
+
+		// Ensure the OMP loader is in place
+		if (results.length > 0) {
+			await writeLoader(isGlobal);
+		}
+
 		log();
 		log(chalk.dim(`Updated: ${updated.length}, Already latest: ${results.length - updated.length}`));
 

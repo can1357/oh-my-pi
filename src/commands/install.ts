@@ -4,6 +4,7 @@ import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { type Conflict, detectConflicts, detectIntraPluginDuplicates, formatConflicts } from "@omp/conflicts";
+import { writeLoader } from "@omp/loader";
 import { getLockedPackage, updateLockFile, verifyIntegrity } from "@omp/lockfile";
 import {
 	getInstalledPlugins,
@@ -1082,6 +1083,11 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 	// Summary
 	const successful = results.filter((r) => r.success);
 	const failed = results.filter((r) => !r.success);
+
+	// Ensure the OMP loader is in place (only if not dry-run and we installed something)
+	if (!options.dryRun && successful.length > 0) {
+		await writeLoader(isGlobal);
+	}
 
 	log();
 	if (options.dryRun) {

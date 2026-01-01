@@ -1,3 +1,4 @@
+import { writeLoader } from "@omp/loader";
 import { loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
 import { resolveScope } from "@omp/paths";
 import { checkPluginSymlinks, createPluginSymlinks, removePluginSymlinks } from "@omp/symlinks";
@@ -74,6 +75,9 @@ export async function enablePlugin(name: string, options: EnableDisableOptions =
 			}
 			throw saveErr;
 		}
+
+		// Ensure the OMP loader is in place
+		await writeLoader(isGlobal);
 
 		if (options.json) {
 			console.log(JSON.stringify({ name, enabled: true }, null, 2));

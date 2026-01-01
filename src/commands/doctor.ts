@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { detectAllConflicts, formatConflicts } from "@omp/conflicts";
+import { writeLoader } from "@omp/loader";
 import type { OmpInstallEntry } from "@omp/manifest";
 import {
 	getInstalledPlugins,
@@ -623,6 +624,9 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 				console.log(chalk.dim(`  - ${conflict}`));
 			}
 		}
+
+		// Always ensure the OMP loader and tools.json are up to date
+		await writeLoader(isGlobal);
 
 		if (fixedAnything) {
 			console.log(chalk.green("\n✓ Fixes applied. Run 'omp doctor' again to verify."));
