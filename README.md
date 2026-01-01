@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.png?q" alt="Oh My Pi" >
+  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/banner.png" alt="Oh My Pi" >
 </p>
 
 <p align="center">
