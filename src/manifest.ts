@@ -63,6 +63,8 @@ export interface OmpField {
    install?: OmpInstallEntry[]
    /** Path to tools factory (relative to package root, e.g. "tools" or "tools/index.ts") */
    tools?: string
+   /** Path to hooks factory (relative to package root, e.g. "hooks" or "hooks/index.ts") */
+   hooks?: string
    /** Path to runtime config JSON (relative to package root, e.g. "tools/runtime.json") */
    runtime?: string
    /** Top-level runtime variables (always available) */

@@ -67,18 +67,20 @@ omp installs plugins globally via npm and sets up your pi configuration:
 ├── agent/                    # Pi's agent directory
 │   ├── agents/               # Agent definitions (.md) - symlinked
 │   ├── commands/             # Slash commands (.md) - symlinked
+│   ├── hooks/omp/            # Hook loader
+│   │   └── index.ts          # Generated loader - imports hooks from node_modules
 │   ├── tools/omp/            # Tool loader
 │   │   └── index.ts          # Generated loader - imports tools from node_modules
 │   └── themes/               # Theme files (.json) - symlinked
 └── plugins/
     ├── package.json          # Installed plugins manifest
-    ├── node_modules/         # Plugin packages (tools loaded directly from here)
+    ├── node_modules/         # Plugin packages (tools/hooks loaded directly from here)
     └── store/                # Runtime configs (survives npm updates)
 ```
 
 **Non-tool files** (agents, commands, themes) are symlinked via `omp.install` entries.
 
-**Tools** are loaded directly from node_modules via a generated loader. Plugins specify `omp.tools` pointing to their tool factory. This allows tools to use npm dependencies without workarounds.
+**Tools and Hooks** are loaded directly from node_modules via generated loaders. Plugins specify `omp.tools` and/or `omp.hooks` pointing to their factory modules. This allows using npm dependencies without workarounds.
 
 ## Project-Level Overrides
 
@@ -247,6 +249,24 @@ For plugins with custom tools, use the `tools` field instead of `install`:
 ```
 
 The `tools` field points to a directory containing an `index.ts` that exports a tool factory. Tools are loaded directly from node_modules, so npm dependencies work normally.
+
+### Hooks
+
+For plugins with lifecycle hooks, use the `hooks` field:
+
+```json
+{
+   "name": "@oh-my-pi/my-hooks",
+   "version": "1.0.0",
+   "keywords": ["omp-plugin"],
+   "omp": {
+      "hooks": "hooks"
+   },
+   "files": ["hooks"]
+}
+```
+
+The `hooks` field points to a directory containing an `index.ts` that exports a hook factory (`HookFactory`). Hooks subscribe to agent events like `tool_call`, `session`, etc.
 
 ### Features and Variables
 
