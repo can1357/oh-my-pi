@@ -57,6 +57,8 @@
 		"toolDiffRemoved": "red",
 		"toolDiffContext": "gray",
 
+		"link": "#0088fa",
+
 		"syntaxComment": "#6A9955",
 		"syntaxKeyword": "#569CD6",
 		"syntaxFunction": "#DCDCAA",
