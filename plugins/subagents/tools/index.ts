@@ -131,6 +131,8 @@ interface AgentProgress {
    task: string
    currentTool?: string
    currentToolDescription?: string
+   currentToolStartMs?: number
+   recentTools: Array<{ tool: string; desc: string; durationMs: number }>
    toolCount: number
    tokens: number
    durationMs: number
@@ -547,6 +549,8 @@ async function runSingleAgent(
          task,
          currentTool: undefined,
          currentToolDescription: 'Initializing…',
+         currentToolStartMs: undefined,
+         recentTools: [],
          toolCount: 0,
          tokens: 0,
          durationMs: 0,
@@ -565,6 +569,9 @@ async function runSingleAgent(
          let tokens = 0
          let currentTool: string | undefined
          let currentToolDescription: string | undefined
+         let currentToolStartMs: number | undefined
+         const recentTools: Array<{ tool: string; desc: string; durationMs: number }> = []
+         const MAX_RECENT_TOOLS = 5
          let lastTextContent = ''
          let stderrContent = ''
          let aborted = false
@@ -595,6 +602,8 @@ async function runSingleAgent(
                task,
                currentTool,
                currentToolDescription,
+               currentToolStartMs,
+               recentTools: recentTools.slice(),
                toolCount,
                tokens,
                durationMs: Date.now() - startTime,
@@ -611,14 +620,27 @@ async function runSingleAgent(
                if (event.type === 'tool_execution_start') {
                   toolCount++
                   currentTool = event.toolName
+                  currentToolStartMs = Date.now()
                   // Extract tool args for description
                   const args = event.toolArgs || event.args || {}
                   const argPreview = formatToolArgs(event.toolName, args)
                   currentToolDescription = argPreview
                   emitProgress()
                } else if (event.type === 'tool_execution_end') {
+                  // Record completed tool in recent history
+                  if (currentTool && currentToolDescription && currentToolStartMs) {
+                     recentTools.push({
+                        tool: currentTool,
+                        desc: currentToolDescription,
+                        durationMs: Date.now() - currentToolStartMs,
+                     })
+                     if (recentTools.length > MAX_RECENT_TOOLS) {
+                        recentTools.shift()
+                     }
+                  }
                   currentTool = undefined
                   currentToolDescription = undefined
+                  currentToolStartMs = undefined
                } else if (event.type === 'message_update' || event.type === 'message_end') {
                   // Extract tokens from usage
                   const usage = event.message?.usage
@@ -968,6 +990,8 @@ const factory: CustomToolFactory = pi => {
                task: t.task,
                currentTool: undefined,
                currentToolDescription: 'Queued…',
+               currentToolStartMs: undefined,
+               recentTools: [],
                toolCount: 0,
                tokens: 0,
                durationMs: 0,
@@ -1124,8 +1148,23 @@ const factory: CustomToolFactory = pi => {
                      theme.fg('muted', taskPreview) +
                      theme.fg('dim', ` · ${stats}`)
 
-                  const statusLine = p.currentToolDescription || p.currentTool || 'Initializing…'
+                  // Show current tool with duration if it's been running a while
+                  let statusLine = p.currentToolDescription || p.currentTool || 'Initializing…'
+                  if (p.currentToolStartMs) {
+                     const toolDurationMs = Date.now() - p.currentToolStartMs
+                     if (toolDurationMs > 5000) {
+                        statusLine += theme.fg('warning', ` (${formatDuration(toolDurationMs)})`)
+                     }
+                  }
                   text += `\n ${theme.fg('dim', `${cont}  ${TREE_HOOK} `)}${theme.fg('dim', statusLine)}`
+
+                  // In expanded mode, show recent tool history
+                  if (expanded && p.recentTools && p.recentTools.length > 0) {
+                     for (const rt of p.recentTools) {
+                        const dur = formatDuration(rt.durationMs)
+                        text += `\n ${theme.fg('dim', `${cont}     `)}${theme.fg('muted', `↳ ${rt.tool}: ${rt.desc}`)} ${theme.fg('dim', `(${dur})`)}`
+                     }
+                  }
                }
             }
 
