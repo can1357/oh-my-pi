@@ -17,7 +17,7 @@
   "omp": {
     "install": [
       {
-        "src": "tools/task/index.ts",
+        "src": "tools/index.ts",
         "dest": "agent/tools/task/index.ts"
       },
       {

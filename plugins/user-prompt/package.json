@@ -19,7 +19,7 @@
   "omp": {
     "install": [
       {
-        "src": "tools/user-prompt/index.ts",
+        "src": "tools/index.ts",
         "dest": "agent/tools/user-prompt/index.ts"
       }
     ]

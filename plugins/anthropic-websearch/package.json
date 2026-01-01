@@ -18,12 +18,12 @@
   "omp": {
     "install": [
       {
-        "src": "tools/anthropic-websearch/runtime.json",
+        "src": "tools/runtime.json",
         "dest": "agent/tools/anthropic-websearch/runtime.json",
         "copy": true
       },
       {
-        "src": "tools/anthropic-websearch/index.ts",
+        "src": "tools/index.ts",
         "dest": "agent/tools/anthropic-websearch/index.ts"
       }
     ],

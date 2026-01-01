@@ -76,6 +76,36 @@ function getBaseDir(global: boolean): string {
 	return global ? PI_CONFIG_DIR : getProjectPiDir();
 }
 
+/**
+ * Remap tool paths to go through the omp loader.
+ *
+ * Transforms: agent/tools/[name]/... -> agent/tools/omp/[name]/...
+ *
+ * This allows the omp loader (at agent/tools/omp/index.ts) to:
+ * 1. Patch Node's module resolution to include ~/.pi/plugins/node_modules
+ * 2. Discover and load all plugin tools dynamically
+ *
+ * The loader itself is excluded from remapping.
+ */
+function remapToolPath(dest: string, _pluginName: string): string {
+	// Match agent/tools/[name]/... but not agent/tools/omp/...
+	const toolsMatch = dest.match(/^agent\/tools\/([^/]+)(\/.*)?$/);
+	if (toolsMatch) {
+		const toolName = toolsMatch[1];
+		const rest = toolsMatch[2] || "";
+
+		// Don't remap the loader itself or paths already under omp/
+		if (toolName === "omp") {
+			return dest;
+		}
+
+		// Remap to agent/tools/omp/[toolName]/...
+		return `agent/tools/omp/${toolName}${rest}`;
+	}
+
+	return dest;
+}
+
 export interface SymlinkResult {
 	created: string[];
 	errors: string[];
@@ -122,9 +152,12 @@ export async function createPluginSymlinks(
 			continue;
 		}
 
+		// Remap tool paths to go through omp loader
+		const destPath = remapToolPath(entry.dest, pluginName);
+
 		// Validate dest path stays within base directory (prevents path traversal attacks)
-		if (!isPathWithinBase(baseDir, entry.dest)) {
-			const msg = `Path traversal blocked: ${entry.dest} escapes base directory`;
+		if (!isPathWithinBase(baseDir, destPath)) {
+			const msg = `Path traversal blocked: ${destPath} escapes base directory`;
 			result.errors.push(msg);
 			if (verbose) {
 				log(chalk.red(`  ✗ ${msg}`));
@@ -134,7 +167,7 @@ export async function createPluginSymlinks(
 
 		try {
 			const src = join(sourceDir, entry.src);
-			const dest = join(baseDir, entry.dest);
+			const dest = join(baseDir, destPath);
 
 			// Check if source exists
 			if (!existsSync(src)) {
@@ -219,7 +252,7 @@ export async function createPluginSymlinks(
 			}
 		} catch (err) {
 			const error = err as NodeJS.ErrnoException;
-			const msg = `Failed to install ${entry.dest}: ${formatPermissionError(error, join(baseDir, entry.dest))}`;
+			const msg = `Failed to install ${destPath}: ${formatPermissionError(error, join(baseDir, destPath))}`;
 			result.errors.push(msg);
 			if (verbose) {
 				log(chalk.red(`  ✗ ${msg}`));
@@ -303,7 +336,7 @@ export function getRuntimeConfigPath(pkgJson: PluginPackageJson, global = true):
  * Remove symlinks and copied files for a plugin's omp.install entries
  */
 export async function removePluginSymlinks(
-	_pluginName: string,
+	pluginName: string,
 	pkgJson: PluginPackageJson,
 	global = true,
 	verbose = true,
@@ -322,9 +355,12 @@ export async function removePluginSymlinks(
 	const baseDir = getBaseDir(global);
 
 	for (const entry of installEntries) {
+		// Remap tool paths to go through omp loader
+		const destPath = remapToolPath(entry.dest, pluginName);
+
 		// Validate dest path stays within base directory (prevents path traversal attacks)
-		if (!isPathWithinBase(baseDir, entry.dest)) {
-			const msg = `Path traversal blocked: ${entry.dest} escapes base directory`;
+		if (!isPathWithinBase(baseDir, destPath)) {
+			const msg = `Path traversal blocked: ${destPath} escapes base directory`;
 			result.errors.push(msg);
 			if (verbose) {
 				log(chalk.red(`  ✗ ${msg}`));
@@ -332,7 +368,7 @@ export async function removePluginSymlinks(
 			continue;
 		}
 
-		const dest = join(baseDir, entry.dest);
+		const dest = join(baseDir, destPath);
 
 		try {
 			if (existsSync(dest)) {
@@ -401,17 +437,20 @@ export async function checkPluginSymlinks(
 	}
 
 	for (const entry of installEntries) {
+		// Remap tool paths to go through omp loader
+		const destPath = remapToolPath(entry.dest, pluginName);
+
 		// Skip entries with path traversal (treat as broken)
-		if (!isPathWithinBase(baseDir, entry.dest)) {
-			result.broken.push(entry.dest);
+		if (!isPathWithinBase(baseDir, destPath)) {
+			result.broken.push(destPath);
 			continue;
 		}
 
 		const src = join(sourceDir, entry.src);
-		const dest = join(baseDir, entry.dest);
+		const dest = join(baseDir, destPath);
 
 		if (!existsSync(dest)) {
-			result.missing.push(entry.dest);
+			result.missing.push(destPath);
 			continue;
 		}
 
@@ -421,9 +460,9 @@ export async function checkPluginSymlinks(
 			// For copy entries, just check the file exists
 			if (entry.copy) {
 				if (stats.isFile()) {
-					result.valid.push(entry.dest);
+					result.valid.push(destPath);
 				} else {
-					result.broken.push(entry.dest);
+					result.broken.push(destPath);
 				}
 				continue;
 			}
@@ -432,16 +471,16 @@ export async function checkPluginSymlinks(
 			if (stats.isSymbolicLink()) {
 				const target = await readlink(dest);
 				if (existsSync(src) && resolve(target) === resolve(src)) {
-					result.valid.push(entry.dest);
+					result.valid.push(destPath);
 				} else {
-					result.broken.push(entry.dest);
+					result.broken.push(destPath);
 				}
 			} else {
 				// Not a symlink, might be a file that was overwritten
-				result.broken.push(entry.dest);
+				result.broken.push(destPath);
 			}
 		} catch {
-			result.broken.push(entry.dest);
+			result.broken.push(destPath);
 		}
 	}
 

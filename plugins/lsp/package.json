@@ -8,8 +8,8 @@
    "type": "module",
    "omp": {
       "install": [
-         { "src": "tools/lsp/index.ts", "dest": "agent/tools/lsp/index.ts" },
-         { "src": "tools/lsp/config.ts", "dest": "agent/tools/lsp/config.ts" }
+         { "src": "tools/index.ts", "dest": "agent/tools/lsp/index.ts" },
+         { "src": "tools/config.ts", "dest": "agent/tools/lsp/config.ts" }
       ]
    },
    "dependencies": {

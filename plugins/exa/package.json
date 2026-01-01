@@ -19,36 +19,36 @@
   "omp": {
     "install": [
       {
-        "src": "tools/exa/runtime.json",
+        "src": "tools/runtime.json",
         "dest": "agent/tools/exa/runtime.json",
         "copy": true
       },
       {
-        "src": "tools/exa/index.ts",
+        "src": "tools/index.ts",
         "dest": "agent/tools/exa/index.ts"
       },
       {
-        "src": "tools/exa/shared.ts",
+        "src": "tools/shared.ts",
         "dest": "agent/tools/exa/shared.ts"
       },
       {
-        "src": "tools/exa/search.ts",
+        "src": "tools/search.ts",
         "dest": "agent/tools/exa/search.ts"
       },
       {
-        "src": "tools/exa/linkedin.ts",
+        "src": "tools/linkedin.ts",
         "dest": "agent/tools/exa/linkedin.ts"
       },
       {
-        "src": "tools/exa/company.ts",
+        "src": "tools/company.ts",
         "dest": "agent/tools/exa/company.ts"
       },
       {
-        "src": "tools/exa/researcher.ts",
+        "src": "tools/researcher.ts",
         "dest": "agent/tools/exa/researcher.ts"
       },
       {
-        "src": "tools/exa/websets.ts",
+        "src": "tools/websets.ts",
         "dest": "agent/tools/exa/websets.ts"
       }
     ],

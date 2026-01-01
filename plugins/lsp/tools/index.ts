@@ -5,20 +5,10 @@ import { Text } from "@mariozechner/pi-tui";
 import * as cp from "node:child_process";
 import * as path from "node:path";
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
 
-// Resolve plugin root for node_modules
-const __filename = fileURLToPath(import.meta.url);
-const realFilePath = fs.realpathSync(__filename);
-const realDir = path.dirname(realFilePath);
-const pluginRoot = path.resolve(realDir, "../..");
-
-// Import LSP protocol
-const require = createRequire(import.meta.url);
-const lsp = require(path.join(pluginRoot, "node_modules/vscode-languageserver-protocol/lib/node/main.js"));
-
-const {
+// These imports work because the omp loader patches Node's module resolution
+// to include ~/.pi/plugins/node_modules
+import {
    createMessageConnection,
    StreamMessageReader,
    StreamMessageWriter,
@@ -39,7 +29,7 @@ const {
    WorkspaceSymbolRequest,
    DiagnosticSeverity,
    CodeActionKind,
-} = lsp;
+} from "vscode-languageserver-protocol/node";
 
 import {
    loadConfig,

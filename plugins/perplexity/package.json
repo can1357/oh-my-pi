@@ -19,20 +19,20 @@
   "omp": {
     "install": [
       {
-        "src": "tools/perplexity/runtime.json",
+        "src": "tools/runtime.json",
         "dest": "agent/tools/perplexity/runtime.json",
         "copy": true
       },
       {
-        "src": "tools/perplexity/index.ts",
+        "src": "tools/index.ts",
         "dest": "agent/tools/perplexity/index.ts"
       },
       {
-        "src": "tools/perplexity/shared.ts",
+        "src": "tools/shared.ts",
         "dest": "agent/tools/perplexity/shared.ts"
       },
       {
-        "src": "tools/perplexity/search.ts",
+        "src": "tools/search.ts",
         "dest": "agent/tools/perplexity/search.ts"
       }
     ],
