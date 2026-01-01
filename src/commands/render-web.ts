@@ -1238,14 +1238,20 @@ async function handleNpm(url: string, timeout: number): Promise<RenderResult | n
       if (parsed.hostname !== 'www.npmjs.com' && parsed.hostname !== 'npmjs.com') return null
 
       // Extract package name from /package/[scope/]name
-      const match = parsed.pathname.match(/^\/package\/((?:@[^/]+\/)?[^/]+)/)
+      const match = parsed.pathname.match(/^\/package\/(.+?)(?:\/|$)/)
       if (!match) return null
 
-      const packageName = match[1]
+      let packageName = decodeURIComponent(match[1])
+      // Handle scoped packages: /package/@scope/name
+      if (packageName.startsWith('@')) {
+         const scopeMatch = parsed.pathname.match(/^\/package\/(@[^/]+\/[^/]+)/)
+         if (scopeMatch) packageName = decodeURIComponent(scopeMatch[1])
+      }
+
       const fetchedAt = new Date().toISOString()
 
       // Fetch from npm registry
-      const registryUrl = `https://registry.npmjs.org/${encodeURIComponent(packageName).replace('%40', '@')}`
+      const registryUrl = `https://registry.npmjs.org/${packageName}`
       const result = await loadPage(registryUrl, { timeout })
 
       if (!result.ok) return null
