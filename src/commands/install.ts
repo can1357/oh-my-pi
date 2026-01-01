@@ -9,7 +9,6 @@ import { getLockedPackage, updateLockFile, verifyIntegrity } from "@omp/lockfile
 import {
 	getInstalledPlugins,
 	initGlobalPlugins,
-	initProjectPlugins,
 	loadPluginsJson,
 	type PluginConfig,
 	type PluginPackageJson,
@@ -18,7 +17,7 @@ import {
 } from "@omp/manifest";
 import { npmInfo, npmInstall, requireNpm } from "@omp/npm";
 import { log, outputJson, setJsonMode } from "@omp/output";
-import { getNodeModulesDir, getProjectPiDir, PI_CONFIG_DIR, PLUGINS_DIR, resolveScope } from "@omp/paths";
+import { NODE_MODULES_DIR, PI_CONFIG_DIR, PLUGINS_DIR } from "@omp/paths";
 import { createProgress } from "@omp/progress";
 import { createPluginSymlinks, getAllFeatureNames, getDefaultFeatures } from "@omp/symlinks";
 import chalk from "chalk";
@@ -184,7 +183,6 @@ export function resolveFeatures(
  */
 async function processOmpDependencies(
 	pkgJson: PluginPackageJson,
-	isGlobal: boolean,
 	seen: Set<string>,
 	parentPluginName: string,
 	transitiveDeps: Map<string, string> = new Map(),
@@ -198,19 +196,19 @@ async function processOmpDependencies(
 		}
 		seen.add(depName);
 
-		const depPkgJson = await readPluginPackageJson(depName, isGlobal);
+		const depPkgJson = await readPluginPackageJson(depName);
 		if (!depPkgJson) continue;
 
 		// Create symlinks if this dependency has omp.install entries
 		if (depPkgJson.omp?.install) {
 			log(chalk.dim(`  Processing dependency: ${depName}`));
-			await createPluginSymlinks(depName, depPkgJson, isGlobal);
+			await createPluginSymlinks(depName, depPkgJson, true);
 			// Track this as a transitive dep (points to the top-level parent that pulled it in)
 			transitiveDeps.set(depName, parentPluginName);
 		}
 
 		// Always recurse into transitive dependencies to find nested omp.install entries
-		await processOmpDependencies(depPkgJson, isGlobal, seen, parentPluginName, transitiveDeps);
+		await processOmpDependencies(depPkgJson, seen, parentPluginName, transitiveDeps);
 	}
 
 	return transitiveDeps;
@@ -266,8 +264,6 @@ async function collectTransitiveOmpDeps(
 export type ConflictResolution = "abort" | "overwrite" | "skip" | "prompt";
 
 export interface InstallOptions {
-	global?: boolean;
-	local?: boolean;
 	save?: boolean;
 	saveDev?: boolean;
 	force?: boolean;
@@ -338,9 +334,16 @@ async function promptConflictResolution(conflict: Conflict): Promise<number | nu
 }
 
 /**
- * Check if a path looks like a local path
+ * Check if a spec is a file: protocol path (for linked plugins)
  */
-function isLocalPath(spec: string): boolean {
+function isFileProtocol(spec: string): boolean {
+	return spec.startsWith("file:");
+}
+
+/**
+ * Check if a path looks like a local directory path (not file: protocol)
+ */
+function isLocalDirectoryPath(spec: string): boolean {
 	return spec.startsWith("/") || spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("~");
 }
 
@@ -432,28 +435,19 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 		log(chalk.cyan("🔍 DRY-RUN MODE: No changes will be made\n"));
 	}
 
-	const isGlobal = resolveScope(options);
-	const prefix = isGlobal ? PLUGINS_DIR : getProjectPiDir();
-	const _nodeModules = getNodeModulesDir(isGlobal);
-
-	// Initialize plugins directory if needed
-	if (isGlobal) {
-		await initGlobalPlugins();
-	} else {
-		// Initialize project .pi directory with both plugins.json and package.json
-		await initProjectPlugins();
-	}
+	// Initialize global plugins directory
+	await initGlobalPlugins();
 
 	// If no packages specified, install from plugins.json
 	if (!packages || packages.length === 0) {
-		const pluginsJson = await loadPluginsJson(isGlobal);
+		const pluginsJson = await loadPluginsJson();
 		// Prefer locked versions for reproducible installs
-		const lockFile = await import("@omp/lockfile").then((m) => m.loadLockFile(isGlobal));
+		const lockFile = await import("@omp/lockfile").then((m) => m.loadLockFile());
 		packages = await Promise.all(
 			Object.entries(pluginsJson.plugins).map(async ([name, version]) => {
-				// Local file: paths should not be reconstructed as name@file:path
+				// file: protocol paths need special handling
 				if (version.startsWith("file:")) {
-					return version.slice(5); // Return just the path for local plugins
+					return version; // Keep the file: protocol for linked plugins
 				}
 				// Use locked version if available for reproducibility
 				const lockedVersion = lockFile?.packages[name]?.version;
@@ -463,16 +457,16 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 
 		if (packages.length === 0) {
 			log(chalk.yellow("No plugins to install."));
-			log(chalk.dim(isGlobal ? "Add plugins with: omp install <package>" : "Add plugins to .pi/plugins.json"));
+			log(chalk.dim("Add plugins with: omp install <package>"));
 			process.exitCode = 1;
 			return;
 		}
 
-		log(chalk.blue(`Installing ${packages.length} plugin(s) from ${isGlobal ? "package.json" : "plugins.json"}...`));
+		log(chalk.blue(`Installing ${packages.length} plugin(s) from package.json...`));
 	}
 
 	// Get existing plugins for conflict detection
-	const existingPlugins = await getInstalledPlugins(isGlobal);
+	const existingPlugins = await getInstalledPlugins();
 
 	const results: Array<{
 		name: string;
@@ -482,13 +476,26 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 	}> = [];
 
 	// Load plugins.json once for reinstall detection and config storage
-	let pluginsJson = await loadPluginsJson(isGlobal);
+	let pluginsJson = await loadPluginsJson();
 
 	for (const spec of packages) {
-		// Check if it's a local path
-		if (isLocalPath(spec)) {
-			const result = await installLocalPlugin(spec, isGlobal, options);
+		// Handle file: protocol paths (linked plugins)
+		if (isFileProtocol(spec)) {
+			const localPath = spec.slice(5); // Remove "file:" prefix
+			const result = await installLocalPlugin(localPath, options);
 			results.push(result);
+			continue;
+		}
+
+		// Reject local directory paths - only file: protocol is supported
+		if (isLocalDirectoryPath(spec)) {
+			log(chalk.red(`Error: Local directory paths are not supported. Use 'omp link ${spec}' instead.`));
+			results.push({
+				name: basename(spec),
+				version: "local",
+				success: false,
+				error: "Use 'omp link' for local plugins",
+			});
 			continue;
 		}
 
@@ -537,7 +544,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			resolvedVersion = info.version;
 
 			// Verify integrity if package was previously locked
-			const lockedEntry = await getLockedPackage(name, isGlobal);
+			const lockedEntry = await getLockedPackage(name);
 			if (lockedEntry?.integrity && info.dist?.integrity) {
 				if (!verifyIntegrity(lockedEntry.integrity, info.dist.integrity)) {
 					log(
@@ -707,12 +714,12 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			// 3. Dry-run mode: compute and display operations, skip execution
 			if (options.dryRun) {
 				const dryRunOps: DryRunOperation[] = [];
-				const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
+				const baseDir = PI_CONFIG_DIR;
 
 				// npm install operation
 				dryRunOps.push({
 					type: "npm-install",
-					description: `npm install ${pkgSpec} --prefix ${prefix}`,
+					description: `npm install ${pkgSpec} --prefix ${PLUGINS_DIR}`,
 				});
 
 				// Compute symlink/copy operations from registry metadata
@@ -753,11 +760,10 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 				}
 
 				// Manifest updates
-				if (options.save || options.saveDev || !isGlobal) {
-					const manifestFile = isGlobal ? "package.json" : "plugins.json";
+				if (options.save || options.saveDev) {
 					dryRunOps.push({
 						type: "manifest-update",
-						description: `Add ${name}@${info.version} to ${manifestFile}`,
+						description: `Add ${name}@${info.version} to package.json`,
 					});
 				}
 
@@ -774,11 +780,11 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 
 			// 3. npm install - only reached if no conflicts or user resolved them
 			log(chalk.dim(`  Fetching from npm...`));
-			await npmInstall([pkgSpec], prefix, { save: options.save || isGlobal });
+			await npmInstall([pkgSpec], PLUGINS_DIR, { save: options.save ?? true });
 			npmInstallSucceeded = true;
 
 			// 4. Read package.json from installed package
-			const pkgJson = await readPluginPackageJson(name, isGlobal);
+			const pkgJson = await readPluginPackageJson(name);
 			if (!pkgJson) {
 				log(chalk.yellow(`  ⚠ Installed but no package.json found`));
 				results.push({ name, version: info.version, success: true });
@@ -796,7 +802,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 						log(chalk.red(`    ${dupe.dest} ← ${dupe.sources.join(", ")}`));
 					}
 					// Rollback: uninstall the package
-					execFileSync("npm", ["uninstall", "--prefix", prefix, name], {
+					execFileSync("npm", ["uninstall", "--prefix", PLUGINS_DIR, name], {
 						stdio: "pipe",
 					});
 					process.exitCode = 1;
@@ -817,7 +823,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 						for (const depName of Object.keys(deps)) {
 							if (seen.has(depName)) continue;
 							seen.add(depName);
-							const depPkgJson = await readPluginPackageJson(depName, isGlobal);
+							const depPkgJson = await readPluginPackageJson(depName);
 							if (depPkgJson?.omp?.install) {
 								installedTransitiveDeps.set(depName, depPkgJson);
 							}
@@ -849,7 +855,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 							log(chalk.yellow(`  ⚠ ${formatConflicts([conflict])[0]}`));
 						}
 						// Rollback: uninstall the package
-						execFileSync("npm", ["uninstall", "--prefix", prefix, name], {
+						execFileSync("npm", ["uninstall", "--prefix", PLUGINS_DIR, name], {
 							stdio: "pipe",
 						});
 						process.exitCode = 1;
@@ -869,7 +875,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 							log(chalk.yellow(`  ⚠ ${formatConflicts([conflict])[0]}`));
 						}
 						// Rollback: uninstall the package
-						execFileSync("npm", ["uninstall", "--prefix", prefix, name], {
+						execFileSync("npm", ["uninstall", "--prefix", PLUGINS_DIR, name], {
 							stdio: "pipe",
 						});
 						process.exitCode = 1;
@@ -911,7 +917,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 						if (abort) {
 							log(chalk.yellow(`  Aborted due to conflicts`));
 							// Rollback: uninstall the package
-							execFileSync("npm", ["uninstall", "--prefix", prefix, name], {
+							execFileSync("npm", ["uninstall", "--prefix", PLUGINS_DIR, name], {
 								stdio: "pipe",
 							});
 							process.exitCode = 1;
@@ -943,30 +949,20 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			}
 
 			// Create symlinks for omp.install entries (skip destinations user assigned to existing plugins)
-			const symlinkResult = await createPluginSymlinks(
-				name,
-				pkgJson,
-				isGlobal,
-				true,
-				skipDestinations,
-				enabledFeatures,
-			);
+			const symlinkResult = await createPluginSymlinks(name, pkgJson, true, skipDestinations, enabledFeatures);
 			createdSymlinks = symlinkResult.created;
 
 			// 7. Process dependencies with omp field (with cycle detection)
-			const autoLinkedTransitiveDeps = await processOmpDependencies(pkgJson, isGlobal, new Set([name]), name);
+			const autoLinkedTransitiveDeps = await processOmpDependencies(pkgJson, new Set([name]), name);
 
 			// 8. Stage manifest and config changes (written only after full success)
-			// For global mode, npm --save already updates package.json dependencies
+			// npm --save already updates package.json dependencies
 			// but we need to handle devDependencies and config manually
-			// For project-local mode, we must manually update plugins.json
 			// Also register any auto-linked transitive deps
 			const hasTransitiveDeps = autoLinkedTransitiveDeps.size > 0;
-			if (options.save || options.saveDev || configToStore || hasTransitiveDeps) {
+			if (options.saveDev || configToStore || hasTransitiveDeps) {
 				if (options.saveDev) {
 					pendingPluginEntry = { name, version: info.version, isDev: true };
-				} else if (!isGlobal) {
-					pendingPluginEntry = { name, version: info.version, isDev: false };
 				}
 
 				if (configToStore) {
@@ -989,7 +985,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			// This ensures plugins.json is only written if npm install + symlinks both succeeded
 			if (pendingPluginEntry || pendingConfig || hasTransitiveDeps) {
 				// Reload to avoid stale data if multiple packages are being installed
-				pluginsJson = await loadPluginsJson(isGlobal);
+				pluginsJson = await loadPluginsJson();
 
 				if (pendingPluginEntry) {
 					if (pendingPluginEntry.isDev) {
@@ -1023,20 +1019,16 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 					}
 				}
 
-				await savePluginsJson(pluginsJson, isGlobal);
+				await savePluginsJson(pluginsJson);
 			}
 
 			// Update lock file with exact version and integrity (after manifest is committed)
 			if (pendingLockUpdate) {
-				await updateLockFile(
-					pendingLockUpdate.name,
-					{
-						version: pendingLockUpdate.version,
-						resolved: pendingLockUpdate.resolved,
-						integrity: pendingLockUpdate.integrity,
-					},
-					isGlobal,
-				);
+				await updateLockFile(pendingLockUpdate.name, {
+					version: pendingLockUpdate.version,
+					resolved: pendingLockUpdate.resolved,
+					integrity: pendingLockUpdate.integrity,
+				});
 			}
 
 			log(chalk.green(`✓ Installed ${name}@${info.version}`));
@@ -1048,10 +1040,9 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			// Rollback: remove any symlinks that were created
 			if (createdSymlinks.length > 0) {
 				log(chalk.dim("  Rolling back symlinks..."));
-				const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
 				for (const dest of createdSymlinks) {
 					try {
-						await rm(join(baseDir, dest), { force: true, recursive: true });
+						await rm(join(PI_CONFIG_DIR, dest), { force: true, recursive: true });
 					} catch {
 						// Ignore cleanup errors
 					}
@@ -1062,7 +1053,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 			if (npmInstallSucceeded) {
 				log(chalk.dim("  Rolling back npm install..."));
 				try {
-					execFileSync("npm", ["uninstall", "--prefix", prefix, name], {
+					execFileSync("npm", ["uninstall", "--prefix", PLUGINS_DIR, name], {
 						stdio: "pipe",
 					});
 				} catch {
@@ -1086,7 +1077,7 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 
 	// Ensure the OMP loader is in place (only if not dry-run and we installed something)
 	if (!options.dryRun && successful.length > 0) {
-		await writeLoader(isGlobal);
+		await writeLoader();
 	}
 
 	log();
@@ -1111,11 +1102,10 @@ export async function installPlugin(packages?: string[], options: InstallOptions
 }
 
 /**
- * Install a local plugin (copy or link based on path type)
+ * Install a local plugin from file: protocol path (used for linked plugins)
  */
 async function installLocalPlugin(
 	localPath: string,
-	isGlobal: boolean,
 	options: InstallOptions,
 ): Promise<{
 	name: string;
@@ -1140,8 +1130,7 @@ async function installLocalPlugin(
 		};
 	}
 
-	const _prefix = isGlobal ? PLUGINS_DIR : getProjectPiDir();
-	const nodeModules = getNodeModulesDir(isGlobal);
+	const nodeModules = NODE_MODULES_DIR;
 
 	try {
 		// Read package.json from local path
@@ -1196,7 +1185,6 @@ async function installLocalPlugin(
 		// Dry-run mode: compute and display operations, skip execution
 		if (options.dryRun) {
 			const dryRunOps: DryRunOperation[] = [];
-			const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
 
 			// Copy operation
 			dryRunOps.push({
@@ -1213,14 +1201,14 @@ async function installLocalPlugin(
 						dryRunOps.push({
 							type: "copy",
 							description: `Copy ${entry.src} to ${entry.dest}`,
-							path: join(baseDir, entry.dest),
+							path: join(PI_CONFIG_DIR, entry.dest),
 							target: entry.src,
 						});
 					} else {
 						dryRunOps.push({
 							type: "symlink",
 							description: `Symlink ${entry.dest} → ${entry.src}`,
-							path: join(baseDir, entry.dest),
+							path: join(PI_CONFIG_DIR, entry.dest),
 							target: entry.src,
 						});
 					}
@@ -1228,10 +1216,9 @@ async function installLocalPlugin(
 			}
 
 			// Manifest update
-			const manifestFile = isGlobal ? "package.json" : "plugins.json";
 			dryRunOps.push({
 				type: "manifest-update",
-				description: `Add ${pluginName}@file:${localPath} to ${manifestFile}`,
+				description: `Add ${pluginName}@file:${localPath} to package.json`,
 			});
 
 			// Lockfile update
@@ -1264,11 +1251,11 @@ async function installLocalPlugin(
 
 		try {
 			// Create symlinks
-			await createPluginSymlinks(pluginName, pkgJson, isGlobal);
+			await createPluginSymlinks(pluginName, pkgJson);
 			symlinksCreated = true;
 
-			// Update plugins.json/package.json
-			const pluginsJson = await loadPluginsJson(isGlobal);
+			// Update package.json
+			const pluginsJson = await loadPluginsJson();
 			if (options.saveDev) {
 				if (!pluginsJson.devDependencies) {
 					pluginsJson.devDependencies = {};
@@ -1279,10 +1266,10 @@ async function installLocalPlugin(
 			} else {
 				pluginsJson.plugins[pluginName] = `file:${localPath}`;
 			}
-			await savePluginsJson(pluginsJson, isGlobal);
+			await savePluginsJson(pluginsJson);
 
 			// Update lock file for local plugin
-			await updateLockFile(pluginName, { version: pkgJson.version }, isGlobal);
+			await updateLockFile(pluginName, { version: pkgJson.version });
 		} catch (err) {
 			// Rollback: remove copied plugin directory
 			if (pluginCopied) {
@@ -1296,10 +1283,9 @@ async function installLocalPlugin(
 			// Rollback: remove symlinks if they were created
 			if (symlinksCreated && pkgJson.omp?.install) {
 				log(chalk.dim("  Rolling back symlinks..."));
-				const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
 				for (const entry of pkgJson.omp.install) {
 					try {
-						await rm(join(baseDir, entry.dest), { force: true, recursive: true });
+						await rm(join(PI_CONFIG_DIR, entry.dest), { force: true, recursive: true });
 					} catch {
 						// Ignore cleanup errors
 					}

@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { writeLoader } from "@omp/loader";
 import { loadPluginsJson, type OmpInstallEntry, type PluginPackageJson, savePluginsJson } from "@omp/manifest";
-import { getNodeModulesDir, resolveScope } from "@omp/paths";
+import { NODE_MODULES_DIR } from "@omp/paths";
 import { createPluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 
@@ -25,8 +25,6 @@ async function confirmCreate(path: string): Promise<boolean> {
 
 export interface LinkOptions {
 	name?: string;
-	global?: boolean;
-	local?: boolean;
 	force?: boolean;
 	yes?: boolean;
 }
@@ -36,8 +34,7 @@ export interface LinkOptions {
  * Creates a symlink in node_modules pointing to the local directory
  */
 export async function linkPlugin(localPath: string, options: LinkOptions = {}): Promise<void> {
-	const isGlobal = resolveScope(options);
-	const nodeModules = getNodeModulesDir(isGlobal);
+	const nodeModules = NODE_MODULES_DIR;
 
 	// Expand ~ to home directory
 	if (localPath.startsWith("~")) {
@@ -118,7 +115,7 @@ export async function linkPlugin(localPath: string, options: LinkOptions = {}): 
 	const pluginDir = join(nodeModules, pluginName);
 
 	// Check if already installed
-	const pluginsJson = await loadPluginsJson(isGlobal);
+	const pluginsJson = await loadPluginsJson();
 	if (pluginsJson.plugins[pluginName]) {
 		const existingSpec = pluginsJson.plugins[pluginName];
 		const isLinked = existingSpec.startsWith("file:");
@@ -195,15 +192,15 @@ export async function linkPlugin(localPath: string, options: LinkOptions = {}): 
 
 		// Update plugins.json with file: protocol
 		pluginsJson.plugins[pluginName] = `file:${localPath}`;
-		await savePluginsJson(pluginsJson, isGlobal);
+		await savePluginsJson(pluginsJson);
 
 		// Create symlinks for omp.install entries
 		if (pkgJson.omp?.install?.length) {
-			await createPluginSymlinks(pluginName, pkgJson, isGlobal);
+			await createPluginSymlinks(pluginName, pkgJson);
 		}
 
 		// Ensure the OMP loader is in place
-		await writeLoader(isGlobal);
+		await writeLoader();
 
 		console.log(
 			chalk.green(`\n✓ Linked "${pluginName}"${pkgJson.version ? ` v${pkgJson.version}` : ""} (development mode)`),

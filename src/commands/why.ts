@@ -2,13 +2,11 @@ import { existsSync, lstatSync } from "node:fs";
 import { readlink } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { getInstalledPlugins, getPluginSourceDir, readPluginPackageJson } from "@omp/manifest";
-import { getProjectPiDir, PI_CONFIG_DIR, resolveScope } from "@omp/paths";
+import { PI_CONFIG_DIR } from "@omp/paths";
 import { traceInstalledFile } from "@omp/symlinks";
 import chalk from "chalk";
 
 export interface WhyOptions {
-	global?: boolean;
-	local?: boolean;
 	json?: boolean;
 }
 
@@ -29,27 +27,14 @@ function isPathWithinBase(basePath: string, targetPath: string): boolean {
  * Show which plugin installed a file
  */
 export async function whyFile(filePath: string, options: WhyOptions = {}): Promise<void> {
-	const isGlobal = resolveScope(options);
+	const baseDir = PI_CONFIG_DIR;
 
-	// Determine the base directory based on scope
-	const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
-
-	// Normalize path - make it relative to the appropriate base directory
+	// Normalize path - make it relative to ~/.pi/
 	let relativePath = filePath;
-	if (isGlobal) {
-		if (filePath.startsWith(PI_CONFIG_DIR)) {
-			relativePath = relative(PI_CONFIG_DIR, filePath);
-		} else if (filePath.startsWith("~/.pi/")) {
-			relativePath = filePath.slice(6); // Remove ~/.pi/
-		}
-	} else {
-		// Project-local mode
-		const projectPiDir = getProjectPiDir();
-		if (filePath.startsWith(projectPiDir)) {
-			relativePath = relative(projectPiDir, filePath);
-		} else if (filePath.startsWith(".pi/")) {
-			relativePath = filePath.slice(4); // Remove .pi/
-		}
+	if (filePath.startsWith(PI_CONFIG_DIR)) {
+		relativePath = relative(PI_CONFIG_DIR, filePath);
+	} else if (filePath.startsWith("~/.pi/")) {
+		relativePath = filePath.slice(6); // Remove ~/.pi/
 	}
 
 	// Validate path doesn't escape base directory (prevents path traversal attacks)
@@ -94,9 +79,9 @@ export async function whyFile(filePath: string, options: WhyOptions = {}): Promi
 		}
 	}
 
-	// Search through installed plugins
-	const installedPlugins = await getInstalledPlugins(isGlobal);
-	const result = await traceInstalledFile(relativePath, installedPlugins, isGlobal);
+	// Search through installed plugins (global only)
+	const installedPlugins = await getInstalledPlugins();
+	const result = await traceInstalledFile(relativePath, installedPlugins);
 
 	if (options.json) {
 		console.log(
@@ -134,7 +119,7 @@ export async function whyFile(filePath: string, options: WhyOptions = {}): Promi
 			console.log(chalk.dim(`  Expected to be installed by: ${result.plugin}`));
 		} else {
 			// Verify symlink points to correct source
-			const expectedSrc = join(getPluginSourceDir(result.plugin, isGlobal), result.entry.src);
+			const expectedSrc = join(getPluginSourceDir(result.plugin), result.entry.src);
 			// Resolve the symlink target to an absolute path (readlink returns raw value, often relative)
 			const resolvedTarget = resolve(fullPath, "..", target!);
 			if (resolvedTarget !== expectedSrc) {
@@ -150,7 +135,7 @@ export async function whyFile(filePath: string, options: WhyOptions = {}): Promi
 		}
 
 		// Get plugin info
-		const pkgJson = await readPluginPackageJson(result.plugin, isGlobal);
+		const pkgJson = await readPluginPackageJson(result.plugin);
 		if (pkgJson) {
 			console.log();
 			console.log(chalk.dim(`Plugin version: ${pkgJson.version}`));

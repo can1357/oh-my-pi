@@ -12,21 +12,11 @@ import {
 	readPluginPackageJson,
 	savePluginsJson,
 } from "@omp/manifest";
-import {
-	GLOBAL_PACKAGE_JSON,
-	getNodeModulesDir,
-	getPluginsJsonPath,
-	getProjectPiDir,
-	PI_CONFIG_DIR,
-	PLUGINS_DIR,
-	resolveScope,
-} from "@omp/paths";
+import { GLOBAL_PACKAGE_JSON, NODE_MODULES_DIR, PI_CONFIG_DIR, PLUGINS_DIR } from "@omp/paths";
 import { checkPluginSymlinks, createPluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 
 export interface DoctorOptions {
-	global?: boolean;
-	local?: boolean;
 	fix?: boolean;
 	json?: boolean;
 	force?: boolean;
@@ -133,68 +123,64 @@ function validatePluginPackageJson(
  * Run health checks on the plugin system
  */
 export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
-	const isGlobal = resolveScope(options);
 	const results: DiagnosticResult[] = [];
 
 	console.log(chalk.blue("Running health checks...\n"));
 
 	// 1. Check plugins directory exists
-	const pluginsDir = isGlobal ? PLUGINS_DIR : ".pi";
-	if (!existsSync(pluginsDir)) {
+	if (!existsSync(PLUGINS_DIR)) {
 		results.push({
 			check: "Plugins directory",
 			status: "warning",
-			message: `${pluginsDir} does not exist`,
+			message: `${PLUGINS_DIR} does not exist`,
 			fix: "Run: omp install <package>",
 		});
 	} else {
 		results.push({
 			check: "Plugins directory",
 			status: "ok",
-			message: pluginsDir,
+			message: PLUGINS_DIR,
 		});
 	}
 
 	// 2. Check package.json exists
-	const packageJsonPath = isGlobal ? GLOBAL_PACKAGE_JSON : getPluginsJsonPath();
-	if (!existsSync(packageJsonPath)) {
+	if (!existsSync(GLOBAL_PACKAGE_JSON)) {
 		results.push({
 			check: "Package manifest",
 			status: "warning",
-			message: `${packageJsonPath} does not exist`,
-			fix: isGlobal ? "Run: omp install <package>" : "Run: omp init",
+			message: `${GLOBAL_PACKAGE_JSON} does not exist`,
+			fix: "Run: omp install <package>",
 		});
 	} else {
 		results.push({
 			check: "Package manifest",
 			status: "ok",
-			message: packageJsonPath,
+			message: GLOBAL_PACKAGE_JSON,
 		});
 	}
 
 	// 3. Check node_modules exists
-	const nodeModules = getNodeModulesDir(isGlobal);
-	if (!existsSync(nodeModules)) {
+	if (!existsSync(NODE_MODULES_DIR)) {
 		results.push({
 			check: "Node modules",
 			status: "warning",
-			message: `${nodeModules} does not exist`,
+			message: `${NODE_MODULES_DIR} does not exist`,
 		});
 	} else {
 		results.push({
 			check: "Node modules",
 			status: "ok",
-			message: nodeModules,
+			message: NODE_MODULES_DIR,
 		});
 	}
 
 	// 4. Check each plugin's symlinks
-	const installedPlugins = await getInstalledPlugins(isGlobal);
+	const installedPlugins = await getInstalledPlugins();
 	const brokenSymlinks: string[] = [];
 	const missingSymlinks: string[] = [];
 
 	for (const [name, pkgJson] of installedPlugins) {
-		const symlinkStatus = await checkPluginSymlinks(name, pkgJson, isGlobal);
+		const symlinkStatus = await checkPluginSymlinks(name, pkgJson);
 
 		if (symlinkStatus.broken.length > 0) {
 			brokenSymlinks.push(...symlinkStatus.broken.map((s) => `${name}: ${s}`));
@@ -245,10 +231,10 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 	}
 
 	// 6. Check for orphaned entries in package.json
-	const pluginsJson = await loadPluginsJson(isGlobal);
+	const pluginsJson = await loadPluginsJson();
 	const orphaned: string[] = [];
 	for (const name of Object.keys(pluginsJson.plugins)) {
-		const pkgJson = await readPluginPackageJson(name, isGlobal);
+		const pkgJson = await readPluginPackageJson(name);
 		if (!pkgJson) {
 			orphaned.push(name);
 		}
@@ -269,7 +255,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 	for (const [name, pkgJson] of installedPlugins) {
 		if (pkgJson.dependencies) {
 			for (const depName of Object.keys(pkgJson.dependencies)) {
-				const depPkgJson = await readPluginPackageJson(depName, isGlobal);
+				const depPkgJson = await readPluginPackageJson(depName);
 				if (!depPkgJson) {
 					// Dependency not found in node_modules
 					// Check if it's supposed to be an omp plugin by looking in the plugins manifest
@@ -292,18 +278,17 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 			check: "Missing omp dependencies",
 			status: "warning",
 			message: missingDeps.join("; "),
-			fix: isGlobal ? "Run: npm install in ~/.pi/plugins" : "Run: npm install in .pi",
+			fix: "Run: npm install in ~/.pi/plugins",
 		});
 	}
 
 	// 8. Validate omp.install entries for all plugins
-	const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
 	const malformedInstallEntries: string[] = [];
 	for (const [name, pkgJson] of installedPlugins) {
 		const installEntries = pkgJson.omp?.install ?? [];
 		for (let i = 0; i < installEntries.length; i++) {
 			const entry = installEntries[i];
-			const validation = validateInstallEntry(entry, baseDir);
+			const validation = validateInstallEntry(entry, PI_CONFIG_DIR);
 			if (!validation.valid) {
 				malformedInstallEntries.push(`${name} omp.install[${i}]: ${validation.reason}`);
 			}
@@ -328,7 +313,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 	// 9. Validate plugin package.json schema
 	const schemaErrors: string[] = [];
 	for (const name of Object.keys(pluginsJson.plugins)) {
-		const pkgPath = join(nodeModules, name, "package.json");
+		const pkgPath = join(NODE_MODULES_DIR, name, "package.json");
 		try {
 			const raw = await readFile(pkgPath, "utf-8");
 			let parsed: unknown;
@@ -375,7 +360,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 		if (peerDeps) {
 			for (const [peerName, _peerVersion] of Object.entries(peerDeps)) {
 				// Check if peer dep is installed
-				const peerPkgJson = await readPluginPackageJson(peerName, isGlobal);
+				const peerPkgJson = await readPluginPackageJson(peerName);
 				if (!peerPkgJson) {
 					// Peer dep not in node_modules - missing
 					unsatisfiedPeerDeps.push(`${name} peerDependencies: ${peerName} is not installed`);
@@ -419,7 +404,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 					continue;
 				}
 				// If present, check it's valid
-				const optPkgJson = await readPluginPackageJson(optName, isGlobal);
+				const optPkgJson = await readPluginPackageJson(optName);
 				if (optPkgJson) {
 					// It's installed, validate its package.json
 					const validation = validatePluginPackageJson(optPkgJson, optName);
@@ -593,7 +578,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 		if (brokenSymlinks.length > 0 || missingSymlinks.length > 0) {
 			console.log(chalk.blue("\nAttempting to fix broken/missing symlinks..."));
 			for (const [name, pkgJson] of installedPlugins) {
-				const symlinkResult = await createPluginSymlinks(name, pkgJson, isGlobal, false);
+				const symlinkResult = await createPluginSymlinks(name, pkgJson, false);
 				if (symlinkResult.created.length > 0) {
 					fixedAnything = true;
 					console.log(chalk.green(`  ✓ Re-created symlinks for ${name}`));
@@ -613,7 +598,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 				delete pluginsJson.plugins[name];
 				console.log(chalk.green(`  ✓ Removed ${name}`));
 			}
-			await savePluginsJson(pluginsJson, isGlobal);
+			await savePluginsJson(pluginsJson);
 			fixedAnything = true;
 		}
 
@@ -626,7 +611,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<void> {
 		}
 
 		// Always ensure the OMP loader and tools.json are up to date
-		await writeLoader(isGlobal);
+		await writeLoader();
 
 		if (fixedAnything) {
 			console.log(chalk.green("\n✓ Fixes applied. Run 'omp doctor' again to verify."));

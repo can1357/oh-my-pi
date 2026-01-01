@@ -1,6 +1,5 @@
 import { loadPluginsJson, type PluginPackageJson, readPluginPackageJson } from "@omp/manifest";
 import { sanitize } from "@omp/output";
-import { resolveScope } from "@omp/paths";
 import chalk from "chalk";
 
 /**
@@ -24,8 +23,6 @@ async function parallelLimit<T, R>(items: T[], limit: number, fn: (item: T) => P
 }
 
 export interface ListOptions {
-	global?: boolean;
-	local?: boolean;
 	json?: boolean;
 }
 
@@ -151,8 +148,7 @@ function formatContributes(files: string[]): string[] {
  * List all installed plugins
  */
 export async function listPlugins(options: ListOptions = {}): Promise<void> {
-	const isGlobal = resolveScope(options);
-	const pluginsJson = await loadPluginsJson(isGlobal);
+	const pluginsJson = await loadPluginsJson();
 	const pluginNames = Object.keys(pluginsJson.plugins);
 
 	if (pluginNames.length === 0) {
@@ -167,7 +163,7 @@ export async function listPlugins(options: ListOptions = {}): Promise<void> {
 	const pkgJsonMap = new Map<string, PluginPackageJson | null>();
 	const pkgJsonResults = await parallelLimit(pluginNames, CONCURRENCY_LIMIT, async (name) => ({
 		name,
-		pkgJson: await readPluginPackageJson(name, isGlobal),
+		pkgJson: await readPluginPackageJson(name),
 	}));
 	for (const { name, pkgJson } of pkgJsonResults) {
 		pkgJsonMap.set(name, pkgJson);
@@ -189,8 +185,7 @@ export async function listPlugins(options: ListOptions = {}): Promise<void> {
 		return;
 	}
 
-	const location = isGlobal ? "~/.pi/plugins" : ".pi";
-	console.log(chalk.bold(`Installed plugins (${pluginNames.length}) [${location}]:\n`));
+	console.log(chalk.bold(`Installed plugins (${pluginNames.length}) [~/.pi/plugins]:\n`));
 
 	for (const name of pluginNames.sort()) {
 		const pkgJson = pkgJsonMap.get(name);

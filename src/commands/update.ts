@@ -4,13 +4,11 @@ import { writeLoader } from "@omp/loader";
 import { loadPluginsJson, type OmpInstallEntry, type PluginPackageJson, readPluginPackageJson } from "@omp/manifest";
 import { npmUpdate, requireNpm } from "@omp/npm";
 import { log, outputJson, setJsonMode } from "@omp/output";
-import { getProjectPiDir, PI_CONFIG_DIR, PLUGINS_DIR, resolveScope } from "@omp/paths";
+import { PI_CONFIG_DIR, PLUGINS_DIR } from "@omp/paths";
 import { createPluginSymlinks, removePluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 
 export interface UpdateOptions {
-	global?: boolean;
-	local?: boolean;
 	json?: boolean;
 	dryRun?: boolean;
 }
@@ -38,10 +36,7 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 		log(chalk.cyan("🔍 DRY-RUN MODE: No changes will be made\n"));
 	}
 
-	const isGlobal = resolveScope(options);
-	const prefix = isGlobal ? PLUGINS_DIR : getProjectPiDir();
-
-	const pluginsJson = await loadPluginsJson(isGlobal);
+	const pluginsJson = await loadPluginsJson();
 	const pluginNames = Object.keys(pluginsJson.plugins);
 
 	if (pluginNames.length === 0) {
@@ -96,12 +91,11 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 
 	// Dry-run mode: compute and display what would happen
 	if (options.dryRun) {
-		const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
 		const dryRunOps: DryRunUpdateOp[] = [];
 
 		// Collect current state
 		for (const pluginName of npmPlugins) {
-			const pkgJson = await readPluginPackageJson(pluginName, isGlobal);
+			const pkgJson = await readPluginPackageJson(pluginName);
 			if (pkgJson) {
 				beforeVersions[pluginName] = pkgJson.version;
 
@@ -111,7 +105,7 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 						dryRunOps.push({
 							type: "symlink-remove",
 							description: `Remove symlink: ${entry.dest}`,
-							path: join(baseDir, entry.dest),
+							path: join(PI_CONFIG_DIR, entry.dest),
 						});
 					}
 				}
@@ -121,18 +115,18 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 		// npm update operation
 		dryRunOps.push({
 			type: "npm-update",
-			description: `npm update ${npmPlugins.join(" ")} --prefix ${prefix}`,
+			description: `npm update ${npmPlugins.join(" ")} --prefix ${PLUGINS_DIR}`,
 		});
 
 		// Symlinks that would be recreated (same as before unless plugin changes)
 		for (const pluginName of npmPlugins) {
-			const pkgJson = await readPluginPackageJson(pluginName, isGlobal);
+			const pkgJson = await readPluginPackageJson(pluginName);
 			if (pkgJson?.omp?.install) {
 				for (const entry of pkgJson.omp.install) {
 					dryRunOps.push({
 						type: "symlink-create",
 						description: `Create symlink: ${entry.dest} → ${entry.src}`,
-						path: join(baseDir, entry.dest),
+						path: join(PI_CONFIG_DIR, entry.dest),
 					});
 				}
 			}
@@ -186,7 +180,7 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 	try {
 		// Get current versions and install entries before update
 		for (const pluginName of npmPlugins) {
-			const pkgJson = await readPluginPackageJson(pluginName, isGlobal);
+			const pkgJson = await readPluginPackageJson(pluginName);
 			if (pkgJson) {
 				oldPkgJsons.set(pluginName, pkgJson);
 				beforeVersions[pluginName] = pkgJson.version;
@@ -197,19 +191,16 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 				}
 
 				// Remove old symlinks before update
-				await removePluginSymlinks(pluginName, pkgJson, isGlobal);
+				await removePluginSymlinks(pluginName, pkgJson);
 			}
 		}
 
 		// npm update
-		await npmUpdate(npmPlugins, prefix);
-
-		// Base directory for symlink destinations
-		const baseDir = isGlobal ? PI_CONFIG_DIR : getProjectPiDir();
+		await npmUpdate(npmPlugins, PLUGINS_DIR);
 
 		// Re-process symlinks for each updated plugin
 		for (const pluginName of npmPlugins) {
-			const pkgJson = await readPluginPackageJson(pluginName, isGlobal);
+			const pkgJson = await readPluginPackageJson(pluginName);
 			if (pkgJson) {
 				const beforeVersion = beforeVersions[pluginName] || "unknown";
 				const afterVersion = pkgJson.version;
@@ -222,7 +213,7 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 				for (const oldEntry of oldEntries) {
 					if (!newDests.has(oldEntry.dest)) {
 						// This destination was in the old version but not in the new one
-						const dest = join(baseDir, oldEntry.dest);
+						const dest = join(PI_CONFIG_DIR, oldEntry.dest);
 						try {
 							await rm(dest, { force: true });
 							log(chalk.dim(`  Removed orphaned: ${oldEntry.dest}`));
@@ -233,7 +224,7 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 				}
 
 				// Create new symlinks (handles overwrites for existing destinations)
-				await createPluginSymlinks(pluginName, pkgJson, isGlobal);
+				await createPluginSymlinks(pluginName, pkgJson);
 
 				const changed = beforeVersion !== afterVersion;
 				if (changed) {
@@ -255,7 +246,7 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 
 		// Ensure the OMP loader is in place
 		if (results.length > 0) {
-			await writeLoader(isGlobal);
+			await writeLoader();
 		}
 
 		log();
@@ -278,7 +269,7 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 				log(chalk.dim("  Restoring package versions..."));
 				try {
 					const { npmInstall } = await import("@omp/npm");
-					await npmInstall(packagesToRestore, prefix, { save: false });
+					await npmInstall(packagesToRestore, PLUGINS_DIR, { save: false });
 					npmRestoreSuccess = true;
 				} catch (restoreErr) {
 					log(chalk.red(`  Failed to restore package versions: ${(restoreErr as Error).message}`));
@@ -290,7 +281,7 @@ export async function updatePlugin(name?: string, options: UpdateOptions = {}): 
 				log(chalk.dim("  Restoring symlinks..."));
 				for (const [pluginName, pkgJson] of oldPkgJsons) {
 					try {
-						await createPluginSymlinks(pluginName, pkgJson, isGlobal);
+						await createPluginSymlinks(pluginName, pkgJson);
 					} catch (restoreErr) {
 						log(chalk.red(`  Failed to restore symlinks for ${pluginName}: ${(restoreErr as Error).message}`));
 					}

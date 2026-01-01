@@ -1,12 +1,10 @@
 import { loadPluginsJson } from "@omp/manifest";
 import { npmOutdated, requireNpm } from "@omp/npm";
 import { padEnd, sanitize, truncate } from "@omp/output";
-import { PLUGINS_DIR, resolveScope } from "@omp/paths";
+import { PLUGINS_DIR } from "@omp/paths";
 import chalk from "chalk";
 
 export interface OutdatedOptions {
-	global?: boolean;
-	local?: boolean;
 	json?: boolean;
 }
 
@@ -16,14 +14,13 @@ export interface OutdatedOptions {
 export async function showOutdated(options: OutdatedOptions = {}): Promise<void> {
 	requireNpm();
 
-	const isGlobal = resolveScope(options);
-	const prefix = isGlobal ? PLUGINS_DIR : ".pi";
+	const prefix = PLUGINS_DIR;
 
 	console.log(chalk.blue("Checking for outdated plugins..."));
 
 	try {
 		const outdated = await npmOutdated(prefix);
-		const pluginsJson = await loadPluginsJson(isGlobal);
+		const pluginsJson = await loadPluginsJson();
 
 		// Filter to only show plugins we manage AND are not local
 		const managedOutdated = Object.entries(outdated).filter(([name]) => {
