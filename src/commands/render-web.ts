@@ -92,10 +92,12 @@ function exec(
 }
 
 /**
- * Check if a command exists
+ * Check if a command exists (cross-platform)
  */
 function hasCommand(cmd: string): boolean {
-   const result = spawnSync('which', [cmd], { encoding: 'utf-8' })
+   const isWindows = process.platform === 'win32'
+   const checkCmd = isWindows ? 'where' : 'which'
+   const result = spawnSync(checkCmd, [cmd], { encoding: 'utf-8', shell: isWindows })
    return result.status === 0
 }
 
@@ -397,7 +399,9 @@ function renderWithLynx(html: string, timeout: number): { content: string; ok: b
    const tmpFile = path.join(os.tmpdir(), `omp-render-${Date.now()}.html`)
    try {
       fs.writeFileSync(tmpFile, html)
-      const result = exec('lynx', ['-dump', '-nolist', '-width', '120', `file://${tmpFile}`], { timeout })
+      // Convert path to file URL (handles Windows paths correctly)
+      const fileUrl = `file://${tmpFile.replace(/\\/g, '/')}`
+      const result = exec('lynx', ['-dump', '-nolist', '-width', '120', fileUrl], { timeout })
       return { content: result.stdout, ok: result.ok }
    } finally {
       try {
