@@ -12,6 +12,7 @@ import { installPlugin } from '@omp/commands/install'
 import { linkPlugin } from '@omp/commands/link'
 import { listPlugins } from '@omp/commands/list'
 import { showOutdated } from '@omp/commands/outdated'
+import { renderWeb } from '@omp/commands/render-web'
 import { searchPlugins } from '@omp/commands/search'
 import { uninstallPlugin } from '@omp/commands/uninstall'
 import { updatePlugin } from '@omp/commands/update'
@@ -242,5 +243,36 @@ Examples:
    .option('--fish', 'Output fish shell syntax instead of POSIX')
    .option('--json', 'Output as JSON')
    .action(withErrorHandling(envCommand))
+
+// ============================================================================
+// Utility Commands
+// ============================================================================
+
+program
+   .command('render-web <url>')
+   .description('Fetch and render a URL to clean text for LLM consumption')
+   .addHelpText(
+      'after',
+      `
+Renders a web page to clean, readable text using a multi-step pipeline:
+
+1. Check for LLM-friendly endpoints (llms.txt, llms.md)
+2. Try content negotiation for markdown/plain text
+3. Check for alternate feeds (RSS, Atom, JSON feed)
+4. Fall back to lynx for HTML→text rendering
+5. Format JSON/XML if applicable
+
+Examples:
+  $ omp render-web https://example.com           # Render to text
+  $ omp render-web example.com                   # Auto-adds https://
+  $ omp render-web https://api.example.com/data  # Pretty-print JSON
+  $ omp render-web https://example.com --raw     # Just the content
+  $ omp render-web https://example.com --json    # Structured output
+`
+   )
+   .option('--json', 'Output as JSON with metadata')
+   .option('--raw', 'Output only the rendered content (no headers)')
+   .option('--timeout <seconds>', 'Request timeout in seconds', '20')
+   .action(withErrorHandling(renderWeb))
 
 program.parse()

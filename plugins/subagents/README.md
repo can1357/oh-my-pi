@@ -20,6 +20,7 @@ omp install @oh-my-pi/subagents
 - `agents/planner.md` - Software architect for designing implementation plans
 - `agents/explore.md` - Fast read-only codebase scout
 - `agents/reviewer.md` - Expert code reviewer
+- `agents/browser.md` - Single-URL content fetcher and extractor
 
 ### Commands
 
