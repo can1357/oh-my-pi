@@ -1,7 +1,13 @@
-import type { OmpVariable, PluginsJson } from "@omp/manifest";
-import { loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
+import type { OmpVariable, PluginConfig, PluginPackageJson, PluginsJson } from "@omp/manifest";
+import {
+	loadPluginsJson,
+	loadProjectOverrides,
+	readPluginPackageJson,
+	savePluginsJson,
+	saveProjectOverrides,
+} from "@omp/manifest";
 import { log, outputJson, setJsonMode } from "@omp/output";
-import { resolveScope } from "@omp/paths";
+import { getProjectRuntimeConfigPath, getRuntimeConfigPath, writeRuntimeConfig } from "@omp/symlinks";
 import chalk from "chalk";
 
 export interface ConfigOptions {
@@ -130,6 +136,62 @@ function resolveEnabledFeatures(
 		.map(([name]) => name);
 }
 
+function isLocalScope(options: { local?: boolean; global?: boolean }): boolean {
+	return options.local === true;
+}
+
+function mergePluginConfig(base?: PluginConfig, override?: PluginConfig): PluginConfig | undefined {
+	if (!base && !override) return undefined;
+
+	const merged: PluginConfig = {};
+
+	if (override && Object.hasOwn(override, "features")) {
+		merged.features = override.features;
+	} else if (base && Object.hasOwn(base, "features")) {
+		merged.features = base.features;
+	}
+
+	const mergedVariables = {
+		...(base?.variables ?? {}),
+		...(override?.variables ?? {}),
+	};
+
+	if (Object.keys(mergedVariables).length > 0) {
+		merged.variables = mergedVariables;
+	}
+
+	if (Object.keys(merged).length === 0) return undefined;
+	return merged;
+}
+
+function mergePluginConfigs(
+	base?: Record<string, PluginConfig>,
+	overrides?: Record<string, PluginConfig>,
+): Record<string, PluginConfig> {
+	const merged: Record<string, PluginConfig> = {};
+	const names = new Set([...(base ? Object.keys(base) : []), ...(overrides ? Object.keys(overrides) : [])]);
+
+	for (const name of names) {
+		const mergedConfig = mergePluginConfig(base?.[name], overrides?.[name]);
+		if (mergedConfig) {
+			merged[name] = mergedConfig;
+		}
+	}
+
+	return merged;
+}
+
+async function writeRuntimeOption(
+	pkgJson: PluginPackageJson,
+	key: string,
+	value: string | number | boolean | string[] | undefined,
+	useLocal: boolean,
+): Promise<void> {
+	const runtimePath = useLocal ? getProjectRuntimeConfigPath(pkgJson) : getRuntimeConfigPath(pkgJson);
+	if (!runtimePath) return;
+	await writeRuntimeConfig(runtimePath, { options: { [key]: value } });
+}
+
 /**
  * List all configurable variables for a plugin
  * omp config @oh-my-pi/exa
@@ -139,8 +201,12 @@ export async function listConfig(name: string, options: ConfigOptions = {}): Pro
 		setJsonMode(true);
 	}
 
-	const isGlobal = resolveScope(options);
-	const pluginsJson = await loadPluginsJson(isGlobal);
+	const useLocal = isLocalScope(options);
+	const pluginsJson = await loadPluginsJson();
+	const projectOverrides = useLocal ? await loadProjectOverrides() : undefined;
+	const mergedConfig = useLocal
+		? mergePluginConfigs(pluginsJson.config, projectOverrides?.config)
+		: pluginsJson.config;
 
 	if (!pluginsJson.plugins[name]) {
 		log(chalk.yellow(`Plugin "${name}" is not installed.`));
@@ -148,7 +214,7 @@ export async function listConfig(name: string, options: ConfigOptions = {}): Pro
 		return;
 	}
 
-	const pkgJson = await readPluginPackageJson(name, isGlobal);
+	const pkgJson = await readPluginPackageJson(name);
 	if (!pkgJson) {
 		log(chalk.red(`Could not read package.json for ${name}`));
 		process.exitCode = 1;
@@ -156,7 +222,7 @@ export async function listConfig(name: string, options: ConfigOptions = {}): Pro
 	}
 
 	const allFeatureNames = Object.keys(pkgJson.omp?.features || {});
-	const config = pluginsJson.config?.[name];
+	const config = mergedConfig?.[name];
 	const enabledFeatures = resolveEnabledFeatures(allFeatureNames, config?.features, pkgJson.omp?.features || {});
 	const variables = collectVariables(pkgJson, enabledFeatures);
 
@@ -229,8 +295,12 @@ export async function getConfig(name: string, key: string, options: ConfigOption
 		setJsonMode(true);
 	}
 
-	const isGlobal = resolveScope(options);
-	const pluginsJson = await loadPluginsJson(isGlobal);
+	const useLocal = isLocalScope(options);
+	const pluginsJson = await loadPluginsJson();
+	const projectOverrides = useLocal ? await loadProjectOverrides() : undefined;
+	const mergedConfig = useLocal
+		? mergePluginConfigs(pluginsJson.config, projectOverrides?.config)
+		: pluginsJson.config;
 
 	if (!pluginsJson.plugins[name]) {
 		log(chalk.yellow(`Plugin "${name}" is not installed.`));
@@ -238,7 +308,7 @@ export async function getConfig(name: string, key: string, options: ConfigOption
 		return;
 	}
 
-	const pkgJson = await readPluginPackageJson(name, isGlobal);
+	const pkgJson = await readPluginPackageJson(name);
 	if (!pkgJson) {
 		log(chalk.red(`Could not read package.json for ${name}`));
 		process.exitCode = 1;
@@ -246,7 +316,7 @@ export async function getConfig(name: string, key: string, options: ConfigOption
 	}
 
 	const allFeatureNames = Object.keys(pkgJson.omp?.features || {});
-	const config = pluginsJson.config?.[name];
+	const config = mergedConfig?.[name];
 	const enabledFeatures = resolveEnabledFeatures(allFeatureNames, config?.features, pkgJson.omp?.features || {});
 	const variables = collectVariables(pkgJson, enabledFeatures);
 
@@ -282,8 +352,12 @@ export async function setConfig(name: string, key: string, value: string, option
 		setJsonMode(true);
 	}
 
-	const isGlobal = resolveScope(options);
-	const pluginsJson = await loadPluginsJson(isGlobal);
+	const useLocal = isLocalScope(options);
+	const pluginsJson = await loadPluginsJson();
+	const projectOverrides = useLocal ? await loadProjectOverrides() : undefined;
+	const mergedConfig = useLocal
+		? mergePluginConfigs(pluginsJson.config, projectOverrides?.config)
+		: pluginsJson.config;
 
 	if (!pluginsJson.plugins[name]) {
 		log(chalk.yellow(`Plugin "${name}" is not installed.`));
@@ -291,7 +365,7 @@ export async function setConfig(name: string, key: string, value: string, option
 		return;
 	}
 
-	const pkgJson = await readPluginPackageJson(name, isGlobal);
+	const pkgJson = await readPluginPackageJson(name);
 	if (!pkgJson) {
 		log(chalk.red(`Could not read package.json for ${name}`));
 		process.exitCode = 1;
@@ -299,7 +373,7 @@ export async function setConfig(name: string, key: string, value: string, option
 	}
 
 	const allFeatureNames = Object.keys(pkgJson.omp?.features || {});
-	const config = pluginsJson.config?.[name];
+	const config = mergedConfig?.[name];
 	const enabledFeatures = resolveEnabledFeatures(allFeatureNames, config?.features, pkgJson.omp?.features || {});
 	const variables = collectVariables(pkgJson, enabledFeatures);
 
@@ -322,12 +396,24 @@ export async function setConfig(name: string, key: string, value: string, option
 	}
 
 	// Update config
-	if (!pluginsJson.config) pluginsJson.config = {};
-	if (!pluginsJson.config[name]) pluginsJson.config[name] = {};
-	if (!pluginsJson.config[name].variables) pluginsJson.config[name].variables = {};
+	if (useLocal) {
+		const overrides = projectOverrides ?? {};
+		if (!overrides.config) overrides.config = {};
+		if (!overrides.config[name]) overrides.config[name] = {};
+		if (!overrides.config[name].variables) overrides.config[name].variables = {};
 
-	pluginsJson.config[name].variables[key] = parsed;
-	await savePluginsJson(pluginsJson, isGlobal);
+		overrides.config[name].variables[key] = parsed;
+		await saveProjectOverrides(overrides);
+	} else {
+		if (!pluginsJson.config) pluginsJson.config = {};
+		if (!pluginsJson.config[name]) pluginsJson.config[name] = {};
+		if (!pluginsJson.config[name].variables) pluginsJson.config[name].variables = {};
+
+		pluginsJson.config[name].variables[key] = parsed;
+		await savePluginsJson(pluginsJson);
+	}
+
+	await writeRuntimeOption(pkgJson, key, parsed, useLocal);
 
 	log(chalk.green(`✓ Set ${name}.${key} = ${JSON.stringify(parsed)}`));
 
@@ -350,8 +436,9 @@ export async function deleteConfig(name: string, key: string, options: ConfigOpt
 		setJsonMode(true);
 	}
 
-	const isGlobal = resolveScope(options);
-	const pluginsJson = await loadPluginsJson(isGlobal);
+	const useLocal = isLocalScope(options);
+	const pluginsJson = await loadPluginsJson();
+	const projectOverrides = useLocal ? await loadProjectOverrides() : undefined;
 
 	if (!pluginsJson.plugins[name]) {
 		log(chalk.yellow(`Plugin "${name}" is not installed.`));
@@ -359,27 +446,63 @@ export async function deleteConfig(name: string, key: string, options: ConfigOpt
 		return;
 	}
 
-	const config = pluginsJson.config?.[name];
-	// Check key presence with hasOwnProperty, not truthiness (allows deleting falsy values like false, 0, "", [])
-	if (!config?.variables || !Object.hasOwn(config.variables, key)) {
-		log(chalk.yellow(`Variable "${key}" is not set for ${name}.`));
+	const pkgJson = await readPluginPackageJson(name);
+	if (!pkgJson) {
+		log(chalk.red(`Could not read package.json for ${name}`));
+		process.exitCode = 1;
 		return;
 	}
 
-	delete pluginsJson.config![name].variables![key];
+	if (useLocal) {
+		const overrides = projectOverrides ?? {};
+		const config = overrides.config?.[name];
+		// Check key presence with hasOwnProperty, not truthiness (allows deleting falsy values like false, 0, "", [])
+		if (!config?.variables || !Object.hasOwn(config.variables, key)) {
+			log(chalk.yellow(`Variable "${key}" is not set for ${name}.`));
+			return;
+		}
 
-	// Clean up empty objects
-	if (Object.keys(pluginsJson.config![name].variables!).length === 0) {
-		delete pluginsJson.config![name].variables;
-	}
-	if (Object.keys(pluginsJson.config![name]).length === 0) {
-		delete pluginsJson.config![name];
-	}
-	if (Object.keys(pluginsJson.config!).length === 0) {
-		delete pluginsJson.config;
+		delete config.variables[key];
+
+		// Clean up empty objects
+		if (Object.keys(config.variables).length === 0) {
+			delete config.variables;
+		}
+		if (Object.keys(config).length === 0) {
+			if (overrides.config) {
+				delete overrides.config[name];
+			}
+		}
+		if (overrides.config && Object.keys(overrides.config).length === 0) {
+			delete overrides.config;
+		}
+
+		await saveProjectOverrides(overrides);
+	} else {
+		const config = pluginsJson.config?.[name];
+		// Check key presence with hasOwnProperty, not truthiness (allows deleting falsy values like false, 0, "", [])
+		if (!config?.variables || !Object.hasOwn(config.variables, key)) {
+			log(chalk.yellow(`Variable "${key}" is not set for ${name}.`));
+			return;
+		}
+
+		delete pluginsJson.config![name].variables![key];
+
+		// Clean up empty objects
+		if (Object.keys(pluginsJson.config![name].variables!).length === 0) {
+			delete pluginsJson.config![name].variables;
+		}
+		if (Object.keys(pluginsJson.config![name]).length === 0) {
+			delete pluginsJson.config![name];
+		}
+		if (Object.keys(pluginsJson.config!).length === 0) {
+			delete pluginsJson.config;
+		}
+
+		await savePluginsJson(pluginsJson);
 	}
 
-	await savePluginsJson(pluginsJson, isGlobal);
+	await writeRuntimeOption(pkgJson, key, undefined, useLocal);
 
 	log(chalk.green(`✓ Deleted ${name}.${key} (reverted to default)`));
 
@@ -441,14 +564,10 @@ function validateValueType(value: unknown, varDef: OmpVariable): { valid: boolea
  * Validate configuration for a single plugin
  * Returns list of validation errors
  */
-async function validatePluginConfig(
-	name: string,
-	pluginsJson: PluginsJson,
-	isGlobal: boolean,
-): Promise<ValidationError[]> {
+async function validatePluginConfig(name: string, pluginsJson: PluginsJson): Promise<ValidationError[]> {
 	const errors: ValidationError[] = [];
 
-	const pkgJson = await readPluginPackageJson(name, isGlobal);
+	const pkgJson = await readPluginPackageJson(name);
 	if (!pkgJson) {
 		errors.push({
 			plugin: name,
@@ -524,11 +643,21 @@ export async function validateConfig(options: ValidateOptions = {}): Promise<voi
 		setJsonMode(true);
 	}
 
-	const isGlobal = resolveScope(options);
-	const pluginsJson = await loadPluginsJson(isGlobal);
+	const useLocal = isLocalScope(options);
+	const pluginsJson = await loadPluginsJson();
+	const projectOverrides = useLocal ? await loadProjectOverrides() : undefined;
+	const mergedConfig = useLocal
+		? mergePluginConfigs(pluginsJson.config, projectOverrides?.config)
+		: pluginsJson.config;
+	const disabledPlugins = new Set(pluginsJson.disabled || []);
+
+	if (useLocal && projectOverrides?.disabled) {
+		for (const name of projectOverrides.disabled) {
+			disabledPlugins.add(name);
+		}
+	}
 
 	const pluginNames = Object.keys(pluginsJson.plugins);
-	const disabledPlugins = new Set(pluginsJson.disabled || []);
 
 	// Filter to only enabled plugins
 	const enabledPlugins = pluginNames.filter((name) => !disabledPlugins.has(name));
@@ -543,9 +672,10 @@ export async function validateConfig(options: ValidateOptions = {}): Promise<voi
 	}
 
 	const allErrors: ValidationError[] = [];
+	const effectivePluginsJson: PluginsJson = { ...pluginsJson, config: mergedConfig };
 
 	for (const name of enabledPlugins) {
-		const errors = await validatePluginConfig(name, pluginsJson, isGlobal);
+		const errors = await validatePluginConfig(name, effectivePluginsJson);
 		allErrors.push(...errors);
 	}
 

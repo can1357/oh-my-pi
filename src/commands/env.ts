@@ -1,4 +1,3 @@
-import { resolveScope } from "@omp/paths";
 import { generateEnvScript, getEnvJson } from "@omp/runtime";
 import chalk from "chalk";
 
@@ -16,17 +15,17 @@ export interface EnvOptions {
  * omp env --json              # Print as JSON
  */
 export async function envCommand(options: EnvOptions = {}): Promise<void> {
-	const isGlobal = resolveScope(options);
+	const useProjectOverrides = options.local === true;
 
 	try {
 		if (options.json) {
-			const vars = await getEnvJson(isGlobal);
+			const vars = await getEnvJson(useProjectOverrides);
 			console.log(JSON.stringify(vars, null, 2));
 			return;
 		}
 
 		const shell = options.fish ? "fish" : "sh";
-		const script = await generateEnvScript(isGlobal, shell);
+		const script = await generateEnvScript(useProjectOverrides, shell);
 
 		if (script.length === 0) {
 			console.error(chalk.yellow("No environment variables configured."));

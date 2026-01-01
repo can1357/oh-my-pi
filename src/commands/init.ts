@@ -4,7 +4,7 @@ import chalk from "chalk";
 
 // init always operates on CWD, using local paths intentionally
 const PROJECT_PI_DIR = resolve(".pi");
-const PROJECT_PLUGINS_JSON = resolve(".pi", "plugins.json");
+const PROJECT_OVERRIDES_JSON = resolve(".pi", "overrides.json");
 
 /**
  * Format permission-related errors with actionable guidance
@@ -21,33 +21,32 @@ export interface InitOptions {
 }
 
 /**
- * Initialize .pi/plugins.json in current project
+ * Initialize .pi/overrides.json in current project for project-level plugin overrides
  */
 export async function initProject(options: InitOptions = {}): Promise<void> {
 	try {
 		// Create .pi directory
 		await mkdir(PROJECT_PI_DIR, { recursive: true });
 
-		// Create plugins.json
-		const pluginsJson = {
-			plugins: {},
+		// Create overrides.json
+		const overridesJson = {
 			disabled: [],
+			config: {},
 		};
 
 		// Use 'wx' flag for atomic create-if-not-exists (unless --force)
 		const writeFlag = options.force ? "w" : "wx";
-		await writeFile(PROJECT_PLUGINS_JSON, JSON.stringify(pluginsJson, null, 2), { flag: writeFlag });
+		await writeFile(PROJECT_OVERRIDES_JSON, JSON.stringify(overridesJson, null, 2), { flag: writeFlag });
 
-		console.log(chalk.green(`✓ Created ${PROJECT_PLUGINS_JSON}`));
+		console.log(chalk.green(`✓ Created ${PROJECT_OVERRIDES_JSON}`));
 		console.log();
 		console.log(chalk.dim("Next steps:"));
-		console.log(chalk.dim("  1. Add plugins: omp install <package> --save"));
-		console.log(chalk.dim("  2. Or edit plugins.json directly"));
-		console.log(chalk.dim("  3. Run: omp install (to install all)"));
+		console.log(chalk.dim("  1. Disable plugins with: omp disable <name> -l"));
+		console.log(chalk.dim("  2. Configure features with: omp features <name> -l"));
 	} catch (err) {
 		const error = err as NodeJS.ErrnoException;
 		if (error.code === "EEXIST") {
-			console.log(chalk.yellow(`${PROJECT_PLUGINS_JSON} already exists.`));
+			console.log(chalk.yellow(`${PROJECT_OVERRIDES_JSON} already exists.`));
 			console.log(chalk.dim("Use --force to overwrite"));
 		} else if (error.code === "EACCES" || error.code === "EPERM") {
 			console.log(chalk.red(formatPermissionError(error, PROJECT_PI_DIR)));

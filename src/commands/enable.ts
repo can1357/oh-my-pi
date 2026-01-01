@@ -1,6 +1,11 @@
 import { writeLoader } from "@omp/loader";
-import { loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
-import { resolveScope } from "@omp/paths";
+import {
+	loadPluginsJson,
+	loadProjectOverrides,
+	readPluginPackageJson,
+	savePluginsJson,
+	saveProjectOverrides,
+} from "@omp/manifest";
 import { checkPluginSymlinks, createPluginSymlinks, removePluginSymlinks } from "@omp/symlinks";
 import chalk from "chalk";
 
@@ -11,26 +16,57 @@ export interface EnableDisableOptions {
 }
 
 /**
- * Enable a disabled plugin (re-create symlinks)
+ * Enable a disabled plugin (re-create symlinks or update project overrides)
  */
 export async function enablePlugin(name: string, options: EnableDisableOptions = {}): Promise<void> {
-	const isGlobal = resolveScope(options);
-
-	const pluginsJson = await loadPluginsJson(isGlobal);
+	const useProjectOverrides = options.local === true;
+	const pluginsJson = await loadPluginsJson();
 
 	// Check if plugin exists
 	if (!pluginsJson.plugins[name]) {
 		if (!options.json) {
-			console.log(chalk.yellow(`Plugin "${name}" is not installed.`));
+			console.log(chalk.yellow(`Plugin "${name}" is not installed globally.`));
 		}
 		process.exitCode = 1;
 		return;
 	}
 
-	// Check if already enabled
+	if (useProjectOverrides) {
+		const overrides = await loadProjectOverrides();
+
+		const disabled = overrides.disabled ?? [];
+
+		// Check if already enabled for project
+		if (!disabled.includes(name)) {
+			if (!options.json) {
+				console.log(chalk.yellow(`Plugin "${name}" is already enabled for this project.`));
+			}
+			process.exitCode = 1;
+			return;
+		}
+
+		try {
+			overrides.disabled = disabled.filter((n) => n !== name);
+			await saveProjectOverrides(overrides);
+
+			if (options.json) {
+				console.log(JSON.stringify({ name, enabled: true }, null, 2));
+			} else {
+				console.log(chalk.green(`✓ Enabled "${name}" for this project`));
+			}
+		} catch (err) {
+			if (!options.json) {
+				console.log(chalk.red(`Error enabling plugin for project: ${(err as Error).message}`));
+			}
+			process.exitCode = 1;
+		}
+		return;
+	}
+
+	// Check if already enabled globally
 	if (!pluginsJson.disabled?.includes(name)) {
 		if (!options.json) {
-			console.log(chalk.yellow(`Plugin "${name}" is already enabled.`));
+			console.log(chalk.yellow(`Plugin "${name}" is already enabled globally.`));
 		}
 		process.exitCode = 1;
 		return;
@@ -38,7 +74,7 @@ export async function enablePlugin(name: string, options: EnableDisableOptions =
 
 	try {
 		// Read package.json
-		const pkgJson = await readPluginPackageJson(name, isGlobal);
+		const pkgJson = await readPluginPackageJson(name);
 		if (!pkgJson) {
 			if (!options.json) {
 				console.log(chalk.red(`Could not read package.json for ${name}`));
@@ -48,7 +84,7 @@ export async function enablePlugin(name: string, options: EnableDisableOptions =
 		}
 
 		// Check if symlinks are already in place
-		const symlinkStatus = await checkPluginSymlinks(name, pkgJson, isGlobal);
+		const symlinkStatus = await checkPluginSymlinks(name, pkgJson);
 		let symlinksCreated = false;
 
 		if (symlinkStatus.valid.length > 0 && symlinkStatus.broken.length === 0 && symlinkStatus.missing.length === 0) {
@@ -58,61 +94,92 @@ export async function enablePlugin(name: string, options: EnableDisableOptions =
 		} else {
 			// Re-create symlinks
 			if (!options.json) {
-				console.log(chalk.blue(`Enabling ${name}...`));
+				console.log(chalk.blue(`Enabling ${name} globally...`));
 			}
-			await createPluginSymlinks(name, pkgJson, isGlobal);
+			await createPluginSymlinks(name, pkgJson);
 			symlinksCreated = true;
 		}
 
 		// Remove from disabled list
-		pluginsJson.disabled = pluginsJson.disabled.filter((n) => n !== name);
+		pluginsJson.disabled = (pluginsJson.disabled ?? []).filter((n) => n !== name);
 		try {
-			await savePluginsJson(pluginsJson, isGlobal);
+			await savePluginsJson(pluginsJson);
 		} catch (saveErr) {
 			// Rollback symlinks if we created them
 			if (symlinksCreated) {
-				await removePluginSymlinks(name, pkgJson, isGlobal).catch(() => {});
+				await removePluginSymlinks(name, pkgJson).catch(() => {});
 			}
 			throw saveErr;
 		}
 
 		// Ensure the OMP loader is in place
-		await writeLoader(isGlobal);
+		await writeLoader();
 
 		if (options.json) {
 			console.log(JSON.stringify({ name, enabled: true }, null, 2));
 		} else {
-			console.log(chalk.green(`✓ Enabled "${name}"`));
+			console.log(chalk.green(`✓ Enabled "${name}" globally`));
 		}
 	} catch (err) {
 		if (!options.json) {
-			console.log(chalk.red(`Error enabling plugin: ${(err as Error).message}`));
+			console.log(chalk.red(`Error enabling plugin globally: ${(err as Error).message}`));
 		}
 		process.exitCode = 1;
 	}
 }
 
 /**
- * Disable a plugin (remove symlinks but keep installed)
+ * Disable a plugin (remove symlinks or update project overrides)
  */
 export async function disablePlugin(name: string, options: EnableDisableOptions = {}): Promise<void> {
-	const isGlobal = resolveScope(options);
-
-	const pluginsJson = await loadPluginsJson(isGlobal);
+	const useProjectOverrides = options.local === true;
+	const pluginsJson = await loadPluginsJson();
 
 	// Check if plugin exists
 	if (!pluginsJson.plugins[name]) {
 		if (!options.json) {
-			console.log(chalk.yellow(`Plugin "${name}" is not installed.`));
+			console.log(chalk.yellow(`Plugin "${name}" is not installed globally.`));
 		}
 		process.exitCode = 1;
 		return;
 	}
 
-	// Check if already disabled
+	if (useProjectOverrides) {
+		const overrides = await loadProjectOverrides();
+
+		// Check if already disabled for project
+		if (overrides.disabled?.includes(name)) {
+			if (!options.json) {
+				console.log(chalk.yellow(`Plugin "${name}" is already disabled for this project.`));
+			}
+			process.exitCode = 1;
+			return;
+		}
+
+		try {
+			overrides.disabled = [...(overrides.disabled ?? []), name];
+			await saveProjectOverrides(overrides);
+
+			if (options.json) {
+				console.log(JSON.stringify({ name, enabled: false }, null, 2));
+			} else {
+				console.log(chalk.green(`✓ Disabled "${name}" for this project`));
+				console.log(chalk.dim("  Global install unchanged; project override added"));
+				console.log(chalk.dim(`  Re-enable for this project with: omp enable -l ${name}`));
+			}
+		} catch (err) {
+			if (!options.json) {
+				console.log(chalk.red(`Error disabling plugin for project: ${(err as Error).message}`));
+			}
+			process.exitCode = 1;
+		}
+		return;
+	}
+
+	// Check if already disabled globally
 	if (pluginsJson.disabled?.includes(name)) {
 		if (!options.json) {
-			console.log(chalk.yellow(`Plugin "${name}" is already disabled.`));
+			console.log(chalk.yellow(`Plugin "${name}" is already disabled globally.`));
 		}
 		process.exitCode = 1;
 		return;
@@ -120,7 +187,7 @@ export async function disablePlugin(name: string, options: EnableDisableOptions 
 
 	try {
 		// Read package.json
-		const pkgJson = await readPluginPackageJson(name, isGlobal);
+		const pkgJson = await readPluginPackageJson(name);
 		if (!pkgJson) {
 			if (!options.json) {
 				console.log(chalk.red(`Could not read package.json for ${name}`));
@@ -131,9 +198,9 @@ export async function disablePlugin(name: string, options: EnableDisableOptions 
 
 		// Remove symlinks
 		if (!options.json) {
-			console.log(chalk.blue(`Disabling ${name}...`));
+			console.log(chalk.blue(`Disabling ${name} globally...`));
 		}
-		await removePluginSymlinks(name, pkgJson, isGlobal);
+		await removePluginSymlinks(name, pkgJson);
 
 		// Add to disabled list
 		if (!pluginsJson.disabled) {
@@ -141,23 +208,23 @@ export async function disablePlugin(name: string, options: EnableDisableOptions 
 		}
 		pluginsJson.disabled.push(name);
 		try {
-			await savePluginsJson(pluginsJson, isGlobal);
+			await savePluginsJson(pluginsJson);
 		} catch (saveErr) {
 			// Rollback: re-create symlinks since we removed them
-			await createPluginSymlinks(name, pkgJson, isGlobal).catch(() => {});
+			await createPluginSymlinks(name, pkgJson).catch(() => {});
 			throw saveErr;
 		}
 
 		if (options.json) {
 			console.log(JSON.stringify({ name, enabled: false }, null, 2));
 		} else {
-			console.log(chalk.green(`✓ Disabled "${name}"`));
-			console.log(chalk.dim("  Plugin is still installed, symlinks removed"));
-			console.log(chalk.dim(`  Re-enable with: omp enable ${name}`));
+			console.log(chalk.green(`✓ Disabled "${name}" globally`));
+			console.log(chalk.dim("  Plugin is still installed globally, symlinks removed"));
+			console.log(chalk.dim(`  Re-enable globally with: omp enable ${name}`));
 		}
 	} catch (err) {
 		if (!options.json) {
-			console.log(chalk.red(`Error disabling plugin: ${(err as Error).message}`));
+			console.log(chalk.red(`Error disabling plugin globally: ${(err as Error).message}`));
 		}
 		process.exitCode = 1;
 	}

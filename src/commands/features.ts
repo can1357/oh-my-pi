@@ -1,7 +1,17 @@
 import { checkbox } from "@inquirer/prompts";
-import { loadPluginsJson, readPluginPackageJson, savePluginsJson } from "@omp/manifest";
-import { resolveScope } from "@omp/paths";
-import { getDefaultFeatures, getRuntimeConfigPath, readRuntimeConfig, writeRuntimeConfig } from "@omp/symlinks";
+import {
+	loadPluginsJson,
+	loadProjectOverrides,
+	readPluginPackageJson,
+	savePluginsJson,
+	saveProjectOverrides,
+} from "@omp/manifest";
+import {
+	getProjectRuntimeConfigPath,
+	getRuntimeConfigPath,
+	readRuntimeConfig,
+	writeRuntimeConfig,
+} from "@omp/symlinks";
 import chalk from "chalk";
 
 export interface FeaturesOptions {
@@ -13,13 +23,38 @@ export interface FeaturesOptions {
 	set?: string;
 }
 
+function resolveEnabledFeatures(
+	allFeatureNames: string[],
+	pluginFeatures: Record<string, { description?: string; default?: boolean }>,
+	storedFeatures: string[] | null | undefined,
+	runtimePath?: string | null,
+): string[] {
+	if (Array.isArray(storedFeatures)) {
+		if (storedFeatures.includes("*")) return allFeatureNames;
+		return storedFeatures;
+	}
+
+	if (runtimePath) {
+		const runtimeConfig = readRuntimeConfig(runtimePath);
+		if (Array.isArray(runtimeConfig.features)) {
+			if (runtimeConfig.features.includes("*")) return allFeatureNames;
+			return runtimeConfig.features;
+		}
+	}
+
+	// Compute defaults inline - features with default !== false
+	return Object.entries(pluginFeatures)
+		.filter(([_, f]) => f.default !== false)
+		.map(([name]) => name);
+}
+
 /**
  * Interactive feature selection for a plugin
  * omp features @oh-my-pi/exa
  */
 export async function interactiveFeatures(name: string, options: FeaturesOptions = {}): Promise<void> {
-	const isGlobal = resolveScope(options);
-	const pluginsJson = await loadPluginsJson(isGlobal);
+	const useLocal = Boolean(options.local);
+	const pluginsJson = await loadPluginsJson();
 
 	// Check if plugin exists
 	if (!pluginsJson.plugins[name]) {
@@ -28,7 +63,7 @@ export async function interactiveFeatures(name: string, options: FeaturesOptions
 		return;
 	}
 
-	const pkgJson = await readPluginPackageJson(name, isGlobal);
+	const pkgJson = await readPluginPackageJson(name);
 	if (!pkgJson) {
 		console.log(chalk.red(`Could not read package.json for ${name}`));
 		process.exitCode = 1;
@@ -41,24 +76,28 @@ export async function interactiveFeatures(name: string, options: FeaturesOptions
 		return;
 	}
 
-	// Get runtime config path
-	const runtimePath = getRuntimeConfigPath(pkgJson, isGlobal);
+	const allFeatureNames = Object.keys(features);
+	const globalRuntimePath = getRuntimeConfigPath(pkgJson);
+
+	// Get runtime config path to write to
+	const runtimePath = useLocal ? getProjectRuntimeConfigPath(pkgJson) : globalRuntimePath;
 	if (!runtimePath) {
 		console.log(chalk.yellow(`Plugin "${name}" does not have a runtime.json config file.`));
 		return;
 	}
 
 	// Determine currently enabled features:
-	// 1. Check plugins.json config (source of truth after omp features changes)
-	// 2. Fall back to runtime.json
-	// 3. Fall back to plugin defaults
-	const pluginConfig = pluginsJson.config?.[name];
-	let enabledFeatures: string[];
-	if (Array.isArray(pluginConfig?.features)) {
-		enabledFeatures = pluginConfig.features;
-	} else {
-		const runtimeConfig = readRuntimeConfig(runtimePath);
-		enabledFeatures = runtimeConfig.features ?? getDefaultFeatures(features);
+	// 1. Use global config (source of truth) or global runtime.json/defaults
+	// 2. Merge project overrides (if -l), which take precedence
+	const globalConfig = pluginsJson.config?.[name];
+	let enabledFeatures = resolveEnabledFeatures(allFeatureNames, features, globalConfig?.features, globalRuntimePath);
+
+	if (useLocal) {
+		const projectOverrides = await loadProjectOverrides();
+		const localConfig = projectOverrides.config?.[name];
+		if (localConfig?.features !== undefined) {
+			enabledFeatures = resolveEnabledFeatures(allFeatureNames, features, localConfig.features);
+		}
 	}
 
 	// JSON output mode - just list
@@ -109,7 +148,7 @@ export async function interactiveFeatures(name: string, options: FeaturesOptions
 		});
 
 		// Apply changes
-		await applyFeatureChanges(name, runtimePath, features, enabledFeatures, selected, isGlobal);
+		await applyFeatureChanges(name, runtimePath, features, enabledFeatures, selected, useLocal);
 	} catch (_err) {
 		// User cancelled (Ctrl+C)
 		console.log(chalk.dim("\nCancelled."));
@@ -153,7 +192,7 @@ function listFeaturesNonInteractive(
 }
 
 /**
- * Apply feature changes - update both plugins.json (for config/env) and runtime.json (for runtime)
+ * Apply feature changes - update runtime.json and config source (global or project overrides)
  */
 async function applyFeatureChanges(
 	name: string,
@@ -168,7 +207,7 @@ async function applyFeatureChanges(
 	>,
 	currentlyEnabled: string[],
 	newEnabled: string[],
-	isGlobal: boolean,
+	useLocal: boolean,
 	jsonMode?: boolean,
 ): Promise<void> {
 	// Compute what changed
@@ -192,18 +231,24 @@ async function applyFeatureChanges(
 	}
 
 	// Write runtime.json FIRST (for runtime feature detection)
-	// This order ensures consistency: if runtime.json write succeeds but plugins.json fails,
+	// This order ensures consistency: if runtime.json write succeeds but config save fails,
 	// the runtime behavior matches reality. If runtime.json fails, we bail before touching
-	// plugins.json, avoiding state divergence.
+	// config, avoiding state divergence.
 	await writeRuntimeConfig(runtimePath, { features: newEnabled });
 
-	// Update plugins.json (source of truth for config/env commands)
-	// Only written after runtime.json succeeds
-	const pluginsJson = await loadPluginsJson(isGlobal);
-	if (!pluginsJson.config) pluginsJson.config = {};
-	if (!pluginsJson.config[name]) pluginsJson.config[name] = {};
-	pluginsJson.config[name].features = newEnabled;
-	await savePluginsJson(pluginsJson, isGlobal);
+	if (useLocal) {
+		const overrides = await loadProjectOverrides();
+		if (!overrides.config) overrides.config = {};
+		if (!overrides.config[name]) overrides.config[name] = {};
+		overrides.config[name].features = newEnabled;
+		await saveProjectOverrides(overrides);
+	} else {
+		const pluginsJson = await loadPluginsJson();
+		if (!pluginsJson.config) pluginsJson.config = {};
+		if (!pluginsJson.config[name]) pluginsJson.config[name] = {};
+		pluginsJson.config[name].features = newEnabled;
+		await savePluginsJson(pluginsJson);
+	}
 
 	if (!jsonMode) {
 		console.log(chalk.green(`\n✓ Features updated`));
@@ -221,8 +266,8 @@ async function applyFeatureChanges(
  * omp features @oh-my-pi/exa --set search,websets
  */
 export async function configureFeatures(name: string, options: FeaturesOptions = {}): Promise<void> {
-	const isGlobal = resolveScope(options);
-	const pluginsJson = await loadPluginsJson(isGlobal);
+	const useLocal = Boolean(options.local);
+	const pluginsJson = await loadPluginsJson();
 
 	// Check if plugin exists
 	if (!pluginsJson.plugins[name]) {
@@ -231,7 +276,7 @@ export async function configureFeatures(name: string, options: FeaturesOptions =
 		return;
 	}
 
-	const pkgJson = await readPluginPackageJson(name, isGlobal);
+	const pkgJson = await readPluginPackageJson(name);
 	if (!pkgJson) {
 		console.log(chalk.red(`Could not read package.json for ${name}`));
 		process.exitCode = 1;
@@ -246,9 +291,10 @@ export async function configureFeatures(name: string, options: FeaturesOptions =
 	}
 
 	const allFeatureNames = Object.keys(features);
+	const globalRuntimePath = getRuntimeConfigPath(pkgJson);
+	const runtimePath = useLocal ? getProjectRuntimeConfigPath(pkgJson) : globalRuntimePath;
 
 	// Get runtime config path
-	const runtimePath = getRuntimeConfigPath(pkgJson, isGlobal);
 	if (!runtimePath) {
 		console.log(chalk.yellow(`Plugin "${name}" does not have a runtime.json config file.`));
 		process.exitCode = 1;
@@ -256,16 +302,17 @@ export async function configureFeatures(name: string, options: FeaturesOptions =
 	}
 
 	// Determine currently enabled features:
-	// 1. Check plugins.json config (source of truth after omp features changes)
-	// 2. Fall back to runtime.json
-	// 3. Fall back to plugin defaults
-	const pluginConfig = pluginsJson.config?.[name];
-	let currentlyEnabled: string[];
-	if (Array.isArray(pluginConfig?.features)) {
-		currentlyEnabled = pluginConfig.features;
-	} else {
-		const runtimeConfig = readRuntimeConfig(runtimePath);
-		currentlyEnabled = runtimeConfig.features ?? getDefaultFeatures(features);
+	// 1. Use global config (source of truth) or global runtime.json/defaults
+	// 2. Merge project overrides (if -l), which take precedence
+	const globalConfig = pluginsJson.config?.[name];
+	let currentlyEnabled = resolveEnabledFeatures(allFeatureNames, features, globalConfig?.features, globalRuntimePath);
+
+	if (useLocal) {
+		const projectOverrides = await loadProjectOverrides();
+		const localConfig = projectOverrides.config?.[name];
+		if (localConfig?.features !== undefined) {
+			currentlyEnabled = resolveEnabledFeatures(allFeatureNames, features, localConfig.features);
+		}
 	}
 
 	let newEnabled: string[];
@@ -319,7 +366,7 @@ export async function configureFeatures(name: string, options: FeaturesOptions =
 		}
 	}
 
-	await applyFeatureChanges(name, runtimePath, features, currentlyEnabled, newEnabled, isGlobal, options.json);
+	await applyFeatureChanges(name, runtimePath, features, currentlyEnabled, newEnabled, useLocal, options.json);
 
 	if (options.json) {
 		console.log(JSON.stringify({ plugin: name, enabled: newEnabled }, null, 2));
