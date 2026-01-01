@@ -1,5 +1,3 @@
-#!/usr/bin/env bun
-
 import { configCommand, validateConfig } from '@omp/commands/config'
 import { createPlugin } from '@omp/commands/create'
 import { runDoctor } from '@omp/commands/doctor'

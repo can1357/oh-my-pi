@@ -13,7 +13,7 @@
 		"README.md"
 	],
 	"scripts": {
-		"build": "bun build src/cli.ts --outdir dist --target bun && tsc --emitDeclarationOnly",
+		"build": "bun build src/cli.ts --outdir dist --target node && tsc --emitDeclarationOnly",
 		"dev": "bun --watch src/cli.ts",
 		"lint": "biome check --write .",
 		"format": "prettier --write \"**/*.md\" && biome check --write .",
