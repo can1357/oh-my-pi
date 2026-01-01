@@ -249,8 +249,7 @@ The omp loader patches Node's module resolution to include `~/.pi/plugins/node_m
 }
 ```
 
-Note: The `hooks` field loads hook factories via the omp loader (like tools).
-Simple hooks can also be symlinked via `install` to `agent/hooks/`.
+**Important**: The `hooks` field loads hook factories via the omp loader (like tools). Do NOT use `install` for hooks — that only works for static files (agents, commands, themes).
 
 ### Plugin with Required API Key
 

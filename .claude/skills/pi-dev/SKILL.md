@@ -325,6 +325,7 @@ const factory: CustomToolFactory = (_pi) => {
    "name": "@oh-my-pi/my-plugin",
    "omp": {
       "tools": "tools",
+      "hooks": "hooks",
       "runtime": "tools/runtime.json",
       "variables": {
          "apiKey": { "type": "string", "env": "MY_API_KEY", "required": true }
@@ -332,18 +333,20 @@ const factory: CustomToolFactory = (_pi) => {
       "features": {
          "basic": { "description": "Core functionality", "default": true }
       },
-      "install": [
-         { "src": "agents/my-agent.md", "dest": "agent/agents/my-agent.md" },
-         { "src": "hooks/my-hook.ts", "dest": "agent/hooks/my-hook.ts" }
-      ]
+      "install": [{ "src": "agents/my-agent.md", "dest": "agent/agents/my-agent.md" }]
    },
+   "files": ["tools", "hooks", "agents"],
    "dependencies": {
       "cli-highlight": "^2.1.11"
    }
 }
 ```
 
-**Key advantage**: omp plugins support npm dependencies!
+**Important**:
+
+- `tools` and `hooks` fields load TypeScript factories via the omp loader (from node_modules)
+- `install` is ONLY for static files (agents, commands, themes) — NOT for tools or hooks
+- omp plugins support npm dependencies!
 
 ---
 
