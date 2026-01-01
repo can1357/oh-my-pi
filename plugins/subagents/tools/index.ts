@@ -133,6 +133,7 @@ interface AgentProgress {
    currentToolDescription?: string
    currentToolStartMs?: number
    recentTools: Array<{ tool: string; desc: string; durationMs: number }>
+   recentOutput: string[]
    toolCount: number
    tokens: number
    durationMs: number
@@ -551,6 +552,7 @@ async function runSingleAgent(
          currentToolDescription: 'Initializing…',
          currentToolStartMs: undefined,
          recentTools: [],
+         recentOutput: [],
          toolCount: 0,
          tokens: 0,
          durationMs: 0,
@@ -572,6 +574,8 @@ async function runSingleAgent(
          let currentToolStartMs: number | undefined
          const recentTools: Array<{ tool: string; desc: string; durationMs: number }> = []
          const MAX_RECENT_TOOLS = 5
+         const recentOutput: string[] = []
+         const MAX_RECENT_OUTPUT_LINES = 8
          let lastTextContent = ''
          let stderrContent = ''
          let aborted = false
@@ -604,6 +608,7 @@ async function runSingleAgent(
                currentToolDescription,
                currentToolStartMs,
                recentTools: recentTools.slice(),
+               recentOutput: recentOutput.slice(),
                toolCount,
                tokens,
                durationMs: Date.now() - startTime,
@@ -646,6 +651,25 @@ async function runSingleAgent(
                   const usage = event.message?.usage
                   if (usage?.totalTokens) {
                      tokens = usage.totalTokens
+                  }
+                  // Extract recent text/thinking content
+                  const content = event.message?.content
+                  if (Array.isArray(content)) {
+                     for (const block of content) {
+                        if (block.type === 'thinking' && block.thinking) {
+                           const lines = block.thinking.split('\n').filter((l: string) => l.trim())
+                           for (const line of lines.slice(-3)) {
+                              recentOutput.push(`💭 ${line.slice(0, 120)}`)
+                              if (recentOutput.length > MAX_RECENT_OUTPUT_LINES) recentOutput.shift()
+                           }
+                        } else if (block.type === 'text' && block.text) {
+                           const lines = block.text.split('\n').filter((l: string) => l.trim())
+                           for (const line of lines.slice(-3)) {
+                              recentOutput.push(line.slice(0, 120))
+                              if (recentOutput.length > MAX_RECENT_OUTPUT_LINES) recentOutput.shift()
+                           }
+                        }
+                     }
                   }
                } else if (event.type === 'agent_end') {
                   // Extract final text from the last assistant message
@@ -992,6 +1016,7 @@ const factory: CustomToolFactory = pi => {
                currentToolDescription: 'Queued…',
                currentToolStartMs: undefined,
                recentTools: [],
+               recentOutput: [],
                toolCount: 0,
                tokens: 0,
                durationMs: 0,
@@ -1158,11 +1183,23 @@ const factory: CustomToolFactory = pi => {
                   }
                   text += `\n ${theme.fg('dim', `${cont}  ${TREE_HOOK} `)}${theme.fg('dim', statusLine)}`
 
-                  // In expanded mode, show recent tool history
-                  if (expanded && p.recentTools && p.recentTools.length > 0) {
-                     for (const rt of p.recentTools) {
-                        const dur = formatDuration(rt.durationMs)
-                        text += `\n ${theme.fg('dim', `${cont}     `)}${theme.fg('muted', `↳ ${rt.tool}: ${rt.desc}`)} ${theme.fg('dim', `(${dur})`)}`
+                  // In expanded mode, show recent output and tool history
+                  if (expanded) {
+                     // Show recent text/thinking output
+                     if (p.recentOutput && p.recentOutput.length > 0) {
+                        for (const line of p.recentOutput) {
+                           const isThinking = line.startsWith('💭')
+                           const color = isThinking ? 'muted' : 'dim'
+                           text += `\n ${theme.fg('dim', `${cont}     `)}${theme.fg(color, line)}`
+                        }
+                     }
+                     // Show recent tool history
+                     if (p.recentTools && p.recentTools.length > 0) {
+                        text += `\n ${theme.fg('dim', `${cont}     `)}`
+                        for (const rt of p.recentTools) {
+                           const dur = formatDuration(rt.durationMs)
+                           text += `\n ${theme.fg('dim', `${cont}     `)}${theme.fg('muted', `↳ ${rt.tool}: ${rt.desc}`)} ${theme.fg('dim', `(${dur})`)}`
+                        }
                      }
                   }
                }
