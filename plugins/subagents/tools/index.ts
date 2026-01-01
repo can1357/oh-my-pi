@@ -27,6 +27,12 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
+
+/** pi command: 'pi.cmd' on Windows, 'pi' elsewhere */
+const PI_CMD = process.platform === 'win32' ? 'pi.cmd' : 'pi'
+/** Windows shell option for spawn/spawnSync when using PI_CMD */
+const PI_SHELL_OPT = process.platform === 'win32'
+
 import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
@@ -49,9 +55,10 @@ function getAvailableModels(): string[] {
    if (cachedModels !== null) return cachedModels
 
    try {
-      const result = spawnSync('pi', ['--list-models'], {
+      const result = spawnSync(PI_CMD, ['--list-models'], {
          encoding: 'utf-8',
          timeout: 5000,
+         shell: PI_SHELL_OPT,
       })
 
       if (result.status !== 0 || !result.stdout) {
@@ -463,20 +470,6 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
    return results
 }
 
-function writePromptToTempFile(agentName: string, prompt: string): { dir: string; filePath: string } {
-   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-task-agent-'))
-   const safeName = agentName.replace(/[^\w.-]+/g, '_')
-   const filePath = path.join(tmpDir, `prompt-${safeName}.md`)
-   try {
-      // mode: 0o600 restricts file permissions on Unix; ignored on Windows
-      fs.writeFileSync(filePath, prompt, { encoding: 'utf-8', mode: 0o600 })
-   } catch (err) {
-      fs.rmSync(tmpDir, { recursive: true, force: true })
-      throw err
-   }
-   return { dir: tmpDir, filePath }
-}
-
 interface RunAgentOptions {
    onProgress?: (progress: AgentProgress) => void
    index?: number
@@ -539,17 +532,22 @@ async function runSingleAgent(
    }
 
    let tmpPromptDir: string | null = null
-   let tmpPromptPath: string | null = null
 
    try {
+      // Create temp dir for task file (avoids Windows shell escaping issues with long/complex CLI args)
+      tmpPromptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-task-agent-'))
+
       if (agent.systemPrompt.trim()) {
-         const tmp = writePromptToTempFile(agent.name, agent.systemPrompt)
-         tmpPromptDir = tmp.dir
-         tmpPromptPath = tmp.filePath
-         args.push('--append-system-prompt', tmpPromptPath)
+         const systemFilePath = path.join(tmpPromptDir, `system-${agent.name.replace(/[^\w.-]+/g, '_')}.md`)
+         fs.writeFileSync(systemFilePath, agent.systemPrompt, { encoding: 'utf-8', mode: 0o600 })
+         args.push('--append-system-prompt', systemFilePath)
       }
 
-      args.push(`Task: ${task}`)
+      // Write task to file and pass as @file to avoid shell escaping issues on Windows
+      const taskFilePath = path.join(tmpPromptDir, `task-${agent.name.replace(/[^\w.-]+/g, '_')}.md`)
+      fs.writeFileSync(taskFilePath, task, { encoding: 'utf-8', mode: 0o600 })
+      // Use forward slashes for the @file syntax (works on all platforms)
+      args.push(`@${taskFilePath.replace(/\\/g, '/')}`)
 
       // Emit initial "Initializing" state
       options?.onProgress?.({
@@ -571,9 +569,10 @@ async function runSingleAgent(
       })
 
       return await new Promise<SingleResult>(resolve => {
-         const proc = spawn('pi', args, {
+         const proc = spawn(PI_CMD, args, {
             cwd,
             stdio: ['ignore', 'pipe', 'pipe'],
+            shell: PI_SHELL_OPT,
          })
 
          let toolCount = 0
@@ -782,16 +781,10 @@ async function runSingleAgent(
          })
       })
    } finally {
-      if (tmpPromptPath) {
-         try {
-            fs.unlinkSync(tmpPromptPath)
-         } catch {
-            /* ignore */
-         }
-      }
+      // Clean up temp directory (contains system prompt and task files)
       if (tmpPromptDir) {
          try {
-            fs.rmdirSync(tmpPromptDir)
+            fs.rmSync(tmpPromptDir, { recursive: true, force: true })
          } catch {
             /* ignore */
          }

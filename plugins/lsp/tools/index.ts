@@ -1,6 +1,9 @@
 import * as cp from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+
+const isWindows = process.platform === 'win32'
+
 import { StringEnum } from '@mariozechner/pi-ai'
 import type { CustomToolFactory } from '@mariozechner/pi-coding-agent'
 import { Text } from '@mariozechner/pi-tui'
@@ -419,6 +422,7 @@ const factory: CustomToolFactory = pi => {
          cwd: pi.cwd,
          stdio: ['pipe', 'pipe', 'pipe'],
          env: { ...process.env },
+         shell: isWindows,
       })
 
       if (!proc.stdin || !proc.stdout) {
