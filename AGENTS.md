@@ -20,37 +20,39 @@ Version/publish scripts: `bun scripts/bump-version.ts`, `bun scripts/publish.ts 
 
 **oh-my-pi** (`omp`) is a plugin manager for [pi](https://github.com/badlogic/pi-mono) that:
 
-- Installs plugins via npm into `~/.pi/plugins/node_modules/`
+- Installs plugins globally via npm into `~/.pi/plugins/node_modules/`
 - Symlinks non-tool files (agents, commands, themes) into `~/.pi/agent/`
 - Loads tools directly from node_modules via a generated loader
+- Supports project-level overrides via `.pi/overrides.json` and `.pi/store/`
 
 ### Core Modules (src/)
 
-| File           | Responsibility                                                                                                                    |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `cli.ts`       | Commander.js entry point; wires commands to handlers                                                                              |
-| `manifest.ts`  | Plugin manifest types (`omp` field in package.json), loading/saving `plugins.json`, reading plugin package.json from node_modules |
-| `symlinks.ts`  | Create/remove/check symlinks for `omp.install` entries (non-tool files only); path traversal protection                           |
-| `paths.ts`     | All path constants and scope resolution (global `~/.pi/` vs project-local `.pi/`)                                                 |
-| `conflicts.ts` | Detect destination collisions between plugins before install                                                                      |
-| `lockfile.ts`  | `omp-lock.json` for integrity verification (tarball hashes)                                                                       |
-| `npm.ts`       | npm CLI wrapper (`npm install`, `npm view`, `npm search`)                                                                         |
-| `lock.ts`      | File-based mutex for concurrent CLI invocations                                                                                   |
-| `progress.ts`  | Spinner/progress output utilities                                                                                                 |
-| `output.ts`    | Console output helpers, JSON mode support                                                                                         |
-| `errors.ts`    | Error handling wrapper for commands                                                                                               |
-| `runtime.ts`   | Runtime config resolution (env vars from plugin variables)                                                                        |
-| `loader.ts`    | Generates `~/.pi/agent/tools/omp/index.ts` - loads tools from node_modules, patches runtime configs from store                    |
+| File           | Responsibility                                                                                                                     |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `cli.ts`       | Commander.js entry point; wires commands to handlers                                                                               |
+| `manifest.ts`  | Plugin manifest types (`omp` field in package.json), loading/saving global config and project overrides                            |
+| `symlinks.ts`  | Create/remove/check symlinks for `omp.install` entries (non-tool files only); path traversal protection                            |
+| `paths.ts`     | All path constants (global `~/.pi/`) and project override paths (`.pi/overrides.json`, `.pi/store/`)                               |
+| `conflicts.ts` | Detect destination collisions between plugins before install                                                                       |
+| `lockfile.ts`  | `omp-lock.json` for integrity verification (tarball hashes)                                                                        |
+| `npm.ts`       | npm CLI wrapper (`npm install`, `npm view`, `npm search`)                                                                          |
+| `lock.ts`      | File-based mutex for concurrent CLI invocations                                                                                    |
+| `progress.ts`  | Spinner/progress output utilities                                                                                                  |
+| `output.ts`    | Console output helpers, JSON mode support                                                                                          |
+| `errors.ts`    | Error handling wrapper for commands                                                                                                |
+| `runtime.ts`   | Runtime config resolution (env vars from plugin variables), merges project overrides                                               |
+| `loader.ts`    | Generates `~/.pi/agent/tools/omp/index.ts` - loads tools from node_modules, patches runtime configs from store + project overrides |
 
 ### Commands (src/commands/)
 
-Each command is a separate file exporting an async handler. Pattern: receive CLI options, resolve scope, load manifests, perform operation, update state.
+Each command is a separate file exporting an async handler. Pattern: receive CLI options, load manifests, perform operation, update state.
 
 Key commands:
 
 - `install.ts` — Most complex; handles npm install, transitive omp deps, conflict detection, feature resolution, symlink creation
 - `doctor.ts` — Health checks: broken symlinks, orphaned files, config validation
-- `features.ts` / `config.ts` — Runtime configuration of installed plugins
+- `features.ts` / `config.ts` — Runtime configuration of installed plugins (supports `-l` for project overrides)
+- `enable.ts` / `disable.ts` — Enable/disable plugins globally or per-project with `-l`
 
 ### Plugin Structure (plugins/)
 
@@ -65,22 +67,26 @@ Built-in plugins ship in `plugins/` and are published separately. Each has:
 - `tools`: Path to tools factory (e.g., `"tools"`) - loaded directly from node_modules
 - `runtime`: Path to runtime config JSON (e.g., `"tools/runtime.json"`) - overridden from store
 
-### Scope Resolution
+### Storage Model
 
-- Global: `~/.pi/plugins/` (npm), `~/.pi/agent/` (symlinks)
-- Local: `.pi/plugins.json` + `.pi/node_modules/`, `.pi/agent/`
-- Auto-detection: if `.pi/plugins.json` exists in cwd or parent, use local; else global
-- Explicit: `-g`/`--global` or `-l`/`--local` flags override
+Plugins are installed globally only. Per-project customization uses overrides:
+
+- **Global install**: `~/.pi/plugins/node_modules/`, `~/.pi/plugins/package.json`
+- **Global config**: `~/.pi/plugins/store/<plugin>.json` (feature/config state)
+- **Project overrides**: `.pi/overrides.json` (disabled list), `.pi/store/<plugin>.json` (feature/config)
+
+The loader merges project store over global store at runtime. Commands with `-l` flag write to project overrides.
 
 ### Feature System
 
 Plugins can define optional features in `omp.features`. Feature state is:
 
-1. Stored in `plugins.json` config (source of truth for omp)
+1. Stored in global `package.json` omp.config (source of truth for omp)
 2. Written to `~/.pi/plugins/store/<plugin>.json` (persistent across npm updates)
-3. Injected into the plugin's runtime.json via `Object.assign` at load time
+3. Optionally overridden by `.pi/store/<plugin>.json` for project-specific config
+4. Injected into the plugin's runtime.json via `Object.assign` at load time
 
-The loader imports the plugin's runtime.json, reads the store, and patches the module cache before tools load.
+The loader imports the plugin's runtime.json, reads the store (global + project merged), and patches the module cache before tools load.
 
 ## Style
 

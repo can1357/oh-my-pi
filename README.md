@@ -60,7 +60,7 @@ omp update
 
 ## How It Works
 
-omp installs plugins via npm and sets up your pi configuration:
+omp installs plugins globally via npm and sets up your pi configuration:
 
 ```
 ~/.pi/
@@ -80,49 +80,54 @@ omp installs plugins via npm and sets up your pi configuration:
 
 **Tools** are loaded directly from node_modules via a generated loader. Plugins specify `omp.tools` pointing to their tool factory. This allows tools to use npm dependencies without workarounds.
 
-## Global vs Local Plugins
+## Project-Level Overrides
 
-omp supports both global and project-local plugin configurations:
-
-| Scope  | Config Location  | Agent Directory | Use Case                 |
-| ------ | ---------------- | --------------- | ------------------------ |
-| Global | `~/.pi/plugins/` | `~/.pi/agent/`  | Personal defaults        |
-| Local  | `.pi/`           | `.pi/agent/`    | Project-specific plugins |
+While plugins are installed globally, you can customize their behavior per-project using `.pi/overrides.json`:
 
 ```bash
-# Explicit scope
-omp install -g @oh-my-pi/subagents   # Global
-omp install -l @oh-my-pi/subagents   # Local
+# Initialize project overrides
+omp init
 
-# Auto-detect: uses local if .pi/plugins.json exists, otherwise global
-omp install @oh-my-pi/subagents
+# Disable a plugin for this project only
+omp disable @oh-my-pi/subagents -l
+
+# Enable different features in this project
+omp features @oh-my-pi/exa --set search -l
+
+# Override config variables for this project
+omp config @oh-my-pi/exa apiKey sk-project-specific -l
 ```
 
-Initialize a project-local config with `omp init`.
+Project overrides are stored in:
+
+- `.pi/overrides.json` - disabled plugins list
+- `.pi/store/` - feature and config overrides (merged with global, project takes precedence)
+
+The loader automatically merges project overrides at runtime.
 
 ## Commands
 
-| Command                | Alias | Description                                            |
-| ---------------------- | ----- | ------------------------------------------------------ |
-| `omp install [pkg...]` | `i`   | Install plugin(s). No args = install from plugins.json |
-| `omp uninstall <pkg>`  | `rm`  | Remove plugin and its symlinks                         |
-| `omp update [pkg]`     | `up`  | Update to latest within semver range                   |
-| `omp list`             | `ls`  | Show installed plugins                                 |
-| `omp search <query>`   |       | Search npm for plugins                                 |
-| `omp info <pkg>`       |       | Show plugin details before install                     |
-| `omp outdated`         |       | List plugins with newer versions                       |
-| `omp doctor`           |       | Check for broken symlinks, conflicts                   |
-| `omp link <path>`      |       | Symlink local plugin (dev mode)                        |
-| `omp create <name>`    |       | Scaffold new plugin from template                      |
-| `omp init`             |       | Create .pi/plugins.json in current project             |
-| `omp why <file>`       |       | Show which plugin installed a file                     |
-| `omp enable <name>`    |       | Enable a disabled plugin                               |
-| `omp disable <name>`   |       | Disable plugin without uninstalling                    |
-| `omp features <name>`  |       | List or configure plugin features                      |
-| `omp config <name>`    |       | Get or set plugin configuration variables              |
-| `omp env`              |       | Print environment variables for shell eval             |
+| Command                | Alias | Description                                              |
+| ---------------------- | ----- | -------------------------------------------------------- |
+| `omp install [pkg...]` | `i`   | Install plugin(s). No args = install from package.json   |
+| `omp uninstall <pkg>`  | `rm`  | Remove plugin and its symlinks                           |
+| `omp update [pkg]`     | `up`  | Update to latest within semver range                     |
+| `omp list`             | `ls`  | Show installed plugins                                   |
+| `omp search <query>`   |       | Search npm for plugins                                   |
+| `omp info <pkg>`       |       | Show plugin details before install                       |
+| `omp outdated`         |       | List plugins with newer versions                         |
+| `omp doctor`           |       | Check for broken symlinks, conflicts                     |
+| `omp link <path>`      |       | Symlink local plugin (dev mode)                          |
+| `omp create <name>`    |       | Scaffold new plugin from template                        |
+| `omp init`             |       | Create .pi/overrides.json for project-local config       |
+| `omp why <file>`       |       | Show which plugin installed a file                       |
+| `omp enable <name>`    |       | Enable a disabled plugin (-l for project override)       |
+| `omp disable <name>`   |       | Disable plugin without uninstalling (-l for project)     |
+| `omp features <name>`  |       | List or configure plugin features (-l for project)       |
+| `omp config <name>`    |       | Get or set plugin configuration (-l for project)         |
+| `omp env`              |       | Print environment variables for shell eval (-l to merge) |
 
-Most commands accept `-g`/`--global` or `-l`/`--local` flags to override scope auto-detection.
+Commands that modify plugin state (enable, disable, features, config, env) accept `-l`/`--local` to use project-level overrides instead of global config.
 
 ## Feature Selection
 
@@ -161,6 +166,9 @@ omp features @oh-my-pi/exa --disable search
 
 # Set exact feature list
 omp features @oh-my-pi/exa --set search,websets
+
+# Override features for current project only
+omp features @oh-my-pi/exa --set search -l
 ```
 
 ## Plugin Configuration
@@ -179,6 +187,9 @@ omp config @oh-my-pi/exa apiKey sk-xxx
 
 # Reset to default
 omp config @oh-my-pi/exa apiKey --delete
+
+# Override for current project only
+omp config @oh-my-pi/exa apiKey sk-project -l
 ```
 
 Variables with `env` mappings can be exported as environment variables:
@@ -189,6 +200,9 @@ eval "$(omp env)"
 
 # Fish shell
 omp env --fish | source
+
+# Merge project overrides
+eval "$(omp env -l)"
 
 # Persist in your shell config
 omp env >> ~/.bashrc
@@ -337,6 +351,9 @@ omp disable @oh-my-pi/subagents
 
 # Re-enable it later
 omp enable @oh-my-pi/subagents
+
+# Disable just for this project
+omp disable @oh-my-pi/subagents -l
 ```
 
 ## Credits
