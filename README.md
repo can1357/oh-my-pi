@@ -9,25 +9,30 @@
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@oh-my-pi/cli"><img src="https://img.shields.io/npm/v/@oh-my-pi/cli?style=flat&colorA=18181B&colorB=F0DB4F" alt="npm version"></a>
-  <a href="https://github.com/can1357/oh-my-pi/actions"><img src="https://img.shields.io/github/actions/workflow/status/can1357/oh-my-pi/ci.yml?style=flat&colorA=18181B" alt="CI"></a>
-  <a href="https://github.com/can1357/oh-my-pi/blob/main/LICENSE"><img src="https://img.shields.io/github/license/can1357/oh-my-pi?style=flat&colorA=18181B" alt="License"></a>
+  <a href="https://www.npmjs.com/package/@oh-my-pi/cli"><img src="https://img.shields.io/npm/v/@oh-my-pi/cli?style=flat&colorA=222222&colorB=CB3837" alt="npm version"></a>
+  <a href="https://github.com/can1357/oh-my-pi/blob/main/CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-keep-E05735?style=flat&colorA=222222" alt="Changelog"></a>
+  <a href="https://www.npmjs.com/package/@oh-my-pi/cli"><img src="https://img.shields.io/npm/dm/@oh-my-pi/cli?style=flat&colorA=222222&colorB=28A745" alt="npm downloads"></a>
+  <a href="https://github.com/can1357/oh-my-pi/actions"><img src="https://img.shields.io/github/actions/workflow/status/can1357/oh-my-pi/ci.yml?style=flat&colorA=222222&colorB=3FB950" alt="CI"></a>
+  <a href="https://github.com/can1357/oh-my-pi/blob/main/LICENSE"><img src="https://img.shields.io/github/license/can1357/oh-my-pi?style=flat&colorA=222222&colorB=58A6FF" alt="License"></a>
+  <a href="https://www.typescriptlang.org"><img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&colorA=222222&logo=typescript&logoColor=white" alt="TypeScript"></a>
+  <a href="https://github.com/can1357/oh-my-pi/pulls"><img src="https://img.shields.io/badge/PRs-welcome-A855F7?style=flat&colorA=222222" alt="PRs welcome"></a>
+  <a href="https://bun.sh"><img src="https://img.shields.io/badge/runtime-Bun-f472b6?style=flat&colorA=222222" alt="Bun"></a>
 </p>
 
 ---
 
-## Built-ins
+## Core Plugins
 
-| Plugin                                                                                       | Description                                                                    |
-| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| **[@oh-my-pi/subagents](https://npmjs.com/package/@oh-my-pi/subagents)**                     | Task delegation with specialized sub-agents (task, planner, explore, reviewer) |
-| **[@oh-my-pi/lsp](https://npmjs.com/package/@oh-my-pi/lsp)**                                 | Language Server Protocol for code intelligence, diagnostics, and refactoring   |
-| **[@oh-my-pi/anthropic-websearch](https://npmjs.com/package/@oh-my-pi/anthropic-websearch)** | Claude web search using Anthropic's built-in web_search tool                   |
-| **[@oh-my-pi/exa](https://npmjs.com/package/@oh-my-pi/exa)**                                 | Exa AI-powered web search, company/people lookup, and websets                  |
-| **[@oh-my-pi/perplexity](https://npmjs.com/package/@oh-my-pi/perplexity)**                   | Perplexity AI search with Sonar models (fast and pro)                          |
-| **[@oh-my-pi/user-prompt](https://npmjs.com/package/@oh-my-pi/user-prompt)**                 | Interactive user prompting for gathering input during execution                |
-| **[@oh-my-pi/init](https://npmjs.com/package/@oh-my-pi/init)**                               | `/init` command to generate AGENTS.md documentation for a codebase             |
-| **[@oh-my-pi/metal-theme](https://npmjs.com/package/@oh-my-pi/metal-theme)**                 | A metal theme 🤘                                                               |
+|                                                                                                                                                | Plugin                                                   | Description                                                                    |
+| ---------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| [![npm](https://img.shields.io/badge/npm-FF4F84?style=flat&logo=npm&logoColor=white)](https://npmjs.com/package/@oh-my-pi/subagents)           | **[subagents](./plugins/subagents)**                     | Task delegation with specialized sub-agents (task, planner, explore, reviewer) |
+| [![npm](https://img.shields.io/badge/npm-31D6FF?style=flat&logo=npm&logoColor=white)](https://npmjs.com/package/@oh-my-pi/lsp)                 | **[lsp](./plugins/lsp)**                                 | Language Server Protocol for code intelligence, diagnostics, and refactoring   |
+| [![npm](https://img.shields.io/badge/npm-00E1B3?style=flat&logo=npm&logoColor=white)](https://npmjs.com/package/@oh-my-pi/anthropic-websearch) | **[anthropic-websearch](./plugins/anthropic-websearch)** | Claude web search using Anthropic's built-in web_search tool                   |
+| [![npm](https://img.shields.io/badge/npm-FF9638?style=flat&logo=npm&logoColor=white)](https://npmjs.com/package/@oh-my-pi/exa)                 | **[exa](./plugins/exa)**                                 | Exa AI-powered web search, company/people lookup, and websets                  |
+| [![npm](https://img.shields.io/badge/npm-BDFF4F?style=flat&logo=npm&logoColor=222)](https://npmjs.com/package/@oh-my-pi/perplexity)            | **[perplexity](./plugins/perplexity)**                   | Perplexity AI search with Sonar models (fast and pro)                          |
+| [![npm](https://img.shields.io/badge/npm-D7A6FF?style=flat&logo=npm&logoColor=222)](https://npmjs.com/package/@oh-my-pi/user-prompt)           | **[user-prompt](./plugins/user-prompt)**                 | Interactive user prompting for gathering input during execution                |
+| [![npm](https://img.shields.io/badge/npm-4FF1FF?style=flat&logo=npm&logoColor=222)](https://npmjs.com/package/@oh-my-pi/init)                  | **[init](./plugins/init)**                               | `/init` command to generate AGENTS.md documentation for a codebase             |
+| [![npm](https://img.shields.io/badge/npm-FFD16C?style=flat&logo=npm&logoColor=222)](https://npmjs.com/package/@oh-my-pi/metal-theme)           | **[metal-theme](./plugins/metal-theme)**                 | A metal theme 🤘                                                               |
 
 ---
 
