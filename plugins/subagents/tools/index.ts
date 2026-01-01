@@ -32,6 +32,8 @@ import { spawn, spawnSync } from 'node:child_process'
 const PI_CMD = process.platform === 'win32' ? 'pi.cmd' : 'pi'
 /** Windows shell option for spawn/spawnSync when using PI_CMD */
 const PI_SHELL_OPT = process.platform === 'win32'
+/** Env var set to inhibit subagent spawning (prevents infinite recursion) */
+const PI_NO_SUBAGENTS_ENV = 'PI_NO_SUBAGENTS'
 
 import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
@@ -252,12 +254,15 @@ function loadAgentsFromDir(dir: string, source: 'user' | 'project'): AgentConfig
       const forkContext =
          frontmatter.forkContext === undefined ? undefined : frontmatter.forkContext === 'true' || frontmatter.forkContext === '1'
 
+      const recursive = frontmatter.recursive === undefined ? undefined : frontmatter.recursive === 'true' || frontmatter.recursive === '1'
+
       agents.push({
          name: frontmatter.name,
          description: frontmatter.description,
          tools: tools && tools.length > 0 ? tools : undefined,
          model: frontmatter.model,
          forkContext,
+         recursive,
          systemPrompt: body,
          source,
          filePath,
@@ -569,10 +574,14 @@ async function runSingleAgent(
       })
 
       return await new Promise<SingleResult>(resolve => {
+         // Unless agent has recursive: true, set env var to inhibit nested subagents
+         const spawnEnv = agent.recursive ? process.env : { ...process.env, [PI_NO_SUBAGENTS_ENV]: '1' }
+
          const proc = spawn(PI_CMD, args, {
             cwd,
             stdio: ['ignore', 'pipe', 'pipe'],
             shell: PI_SHELL_OPT,
+            env: spawnEnv,
          })
 
          let toolCount = 0
@@ -961,6 +970,11 @@ function nanoid(size = 12): string {
 }
 
 const factory: CustomToolFactory = pi => {
+   // Check if subagent spawning is inhibited (we're inside a non-recursive subagent)
+   if (process.env[PI_NO_SUBAGENTS_ENV]) {
+      return [] // No Task tool available in this context
+   }
+
    const runId = nanoid(8)
    const outputDir = path.join(os.tmpdir(), `pi-task-${runId}`)
 
