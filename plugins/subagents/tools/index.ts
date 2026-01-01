@@ -1140,7 +1140,7 @@ const factory: CustomToolFactory = (pi) => {
     renderCall(args, theme) {
       // Return minimal - renderResult handles the full display
       if (!args.tasks || args.tasks.length === 0) {
-        return new Text(theme.fg("error", "task: no tasks provided"), 0, 0);
+        return new Text(theme.fg("dim", "task: initializing..."), 0, 0);
       }
       return new Text("", 0, 0);
     },
