@@ -68,6 +68,10 @@ export interface OmpFeature {
 export interface OmpField {
 	/** Top-level install entries (always installed, not feature-gated) */
 	install?: OmpInstallEntry[];
+	/** Path to tools factory (relative to package root, e.g. "tools" or "tools/index.ts") */
+	tools?: string;
+	/** Path to runtime config JSON (relative to package root, e.g. "tools/runtime.json") */
+	runtime?: string;
 	/** Top-level runtime variables (always available) */
 	variables?: Record<string, OmpVariable>;
 	/** Named features with their own install entries and variables */

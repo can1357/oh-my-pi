@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/exa",
-  "version": "0.8.3",
+  "version": "0.9.0",
   "description": "Exa AI web search and websets tools for pi",
   "keywords": [
     "omp-plugin",
@@ -17,41 +17,8 @@
     "directory": "plugins/exa"
   },
   "omp": {
-    "install": [
-      {
-        "src": "tools/runtime.json",
-        "dest": "agent/tools/exa/runtime.json",
-        "copy": true
-      },
-      {
-        "src": "tools/index.ts",
-        "dest": "agent/tools/exa/index.ts"
-      },
-      {
-        "src": "tools/shared.ts",
-        "dest": "agent/tools/exa/shared.ts"
-      },
-      {
-        "src": "tools/search.ts",
-        "dest": "agent/tools/exa/search.ts"
-      },
-      {
-        "src": "tools/linkedin.ts",
-        "dest": "agent/tools/exa/linkedin.ts"
-      },
-      {
-        "src": "tools/company.ts",
-        "dest": "agent/tools/exa/company.ts"
-      },
-      {
-        "src": "tools/researcher.ts",
-        "dest": "agent/tools/exa/researcher.ts"
-      },
-      {
-        "src": "tools/websets.ts",
-        "dest": "agent/tools/exa/websets.ts"
-      }
-    ],
+    "tools": "tools",
+    "runtime": "tools/runtime.json",
     "variables": {
       "apiKey": {
         "type": "string",

@@ -2,6 +2,7 @@ import { existsSync, lstatSync } from "node:fs";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { writeLoader } from "@omp/loader";
 import { loadPluginsJson, type OmpInstallEntry, type PluginPackageJson, savePluginsJson } from "@omp/manifest";
 import { getNodeModulesDir, resolveScope } from "@omp/paths";
 import { createPluginSymlinks } from "@omp/symlinks";
@@ -200,6 +201,9 @@ export async function linkPlugin(localPath: string, options: LinkOptions = {}): 
 		if (pkgJson.omp?.install?.length) {
 			await createPluginSymlinks(pluginName, pkgJson, isGlobal);
 		}
+
+		// Ensure the OMP loader is in place
+		await writeLoader(isGlobal);
 
 		console.log(
 			chalk.green(`\n✓ Linked "${pluginName}"${pkgJson.version ? ` v${pkgJson.version}` : ""} (development mode)`),

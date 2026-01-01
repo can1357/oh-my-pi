@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { OmpFeature, OmpInstallEntry, PluginPackageJson, PluginRuntimeConfig } from "@omp/manifest";
 import { getPluginSourceDir } from "@omp/manifest";
 import { log, logError } from "@omp/output";
-import { getProjectPiDir, PI_CONFIG_DIR } from "@omp/paths";
+import { getProjectPiDir, NODE_MODULES_DIR, PI_CONFIG_DIR, PLUGINS_DIR } from "@omp/paths";
 import chalk from "chalk";
 
 /**
@@ -76,36 +76,6 @@ function getBaseDir(global: boolean): string {
 	return global ? PI_CONFIG_DIR : getProjectPiDir();
 }
 
-/**
- * Remap tool paths to go through the omp loader.
- *
- * Transforms: agent/tools/[name]/... -> agent/tools/omp/[name]/...
- *
- * This allows the omp loader (at agent/tools/omp/index.ts) to:
- * 1. Patch Node's module resolution to include ~/.pi/plugins/node_modules
- * 2. Discover and load all plugin tools dynamically
- *
- * The loader itself is excluded from remapping.
- */
-function remapToolPath(dest: string, _pluginName: string): string {
-	// Match agent/tools/[name]/... but not agent/tools/omp/...
-	const toolsMatch = dest.match(/^agent\/tools\/([^/]+)(\/.*)?$/);
-	if (toolsMatch) {
-		const toolName = toolsMatch[1];
-		const rest = toolsMatch[2] || "";
-
-		// Don't remap the loader itself or paths already under omp/
-		if (toolName === "omp") {
-			return dest;
-		}
-
-		// Remap to agent/tools/omp/[toolName]/...
-		return `agent/tools/omp/${toolName}${rest}`;
-	}
-
-	return dest;
-}
-
 export interface SymlinkResult {
 	created: string[];
 	errors: string[];
@@ -152,12 +122,9 @@ export async function createPluginSymlinks(
 			continue;
 		}
 
-		// Remap tool paths to go through omp loader
-		const destPath = remapToolPath(entry.dest, pluginName);
-
 		// Validate dest path stays within base directory (prevents path traversal attacks)
-		if (!isPathWithinBase(baseDir, destPath)) {
-			const msg = `Path traversal blocked: ${destPath} escapes base directory`;
+		if (!isPathWithinBase(baseDir, entry.dest)) {
+			const msg = `Path traversal blocked: ${entry.dest} escapes base directory`;
 			result.errors.push(msg);
 			if (verbose) {
 				log(chalk.red(`  ✗ ${msg}`));
@@ -167,7 +134,7 @@ export async function createPluginSymlinks(
 
 		try {
 			const src = join(sourceDir, entry.src);
-			const dest = join(baseDir, destPath);
+			const dest = join(baseDir, entry.dest);
 
 			// Check if source exists
 			if (!existsSync(src)) {
@@ -252,7 +219,7 @@ export async function createPluginSymlinks(
 			}
 		} catch (err) {
 			const error = err as NodeJS.ErrnoException;
-			const msg = `Failed to install ${destPath}: ${formatPermissionError(error, join(baseDir, destPath))}`;
+			const msg = `Failed to install ${entry.dest}: ${formatPermissionError(error, join(baseDir, entry.dest))}`;
 			result.errors.push(msg);
 			if (verbose) {
 				log(chalk.red(`  ✗ ${msg}`));
@@ -263,11 +230,10 @@ export async function createPluginSymlinks(
 		}
 	}
 
-	// If enabledFeatures provided and plugin has a runtime.json entry, update it
-	if (enabledFeatures !== undefined) {
-		const runtimeEntry = installEntries.find((e) => e.copy && e.dest.endsWith("runtime.json"));
-		if (runtimeEntry) {
-			const runtimePath = join(baseDir, runtimeEntry.dest);
+	// If enabledFeatures provided and plugin has a runtime config, update it
+	if (enabledFeatures !== undefined && pkgJson.omp?.runtime) {
+		const runtimePath = getRuntimeConfigPath(pkgJson, global);
+		if (runtimePath) {
 			await writeRuntimeConfig(runtimePath, { features: enabledFeatures }, verbose);
 		}
 	}
@@ -295,7 +261,7 @@ export function readRuntimeConfig(runtimePath: string): PluginRuntimeConfig {
 }
 
 /**
- * Write runtime.json config to a plugin's installed location
+ * Write runtime config to the store location
  */
 export async function writeRuntimeConfig(
 	runtimePath: string,
@@ -303,6 +269,12 @@ export async function writeRuntimeConfig(
 	verbose = false,
 ): Promise<void> {
 	try {
+		// Ensure store directory exists
+		const storeDir = dirname(runtimePath);
+		if (!existsSync(storeDir)) {
+			await mkdir(storeDir, { recursive: true });
+		}
+
 		const existing = readRuntimeConfig(runtimePath);
 		const merged: PluginRuntimeConfig = {
 			features: config.features ?? existing.features ?? [],
@@ -323,20 +295,42 @@ export async function writeRuntimeConfig(
 }
 
 /**
- * Get the path to a plugin's runtime.json in the installed location
+ * Get the store directory for runtime configs
+ */
+function getStoreDir(global = true): string {
+	const pluginsDir = global ? PLUGINS_DIR : getProjectPiDir();
+	return join(pluginsDir, "store");
+}
+
+/**
+ * Get the path to a plugin's runtime config in the store
+ * Uses the omp.runtime field from package.json
+ * Store path: ~/.pi/plugins/store/@scope__name.json
  */
 export function getRuntimeConfigPath(pkgJson: PluginPackageJson, global = true): string | null {
-	const entries = getInstallEntries(pkgJson);
-	const runtimeEntry = entries.find((e) => e.copy && e.dest.endsWith("runtime.json"));
-	if (!runtimeEntry) return null;
-	return join(getBaseDir(global), runtimeEntry.dest);
+	if (!pkgJson.omp?.runtime) return null;
+
+	const storeDir = getStoreDir(global);
+	const storeName = pkgJson.name.replace(/\//g, "__"); // @oh-my-pi/exa -> @oh-my-pi__exa
+	return join(storeDir, `${storeName}.json`);
+}
+
+/**
+ * Get the default runtime config path in node_modules (for copying defaults)
+ */
+export function getDefaultRuntimeConfigPath(pkgJson: PluginPackageJson, global = true): string | null {
+	const runtimePath = pkgJson.omp?.runtime;
+	if (!runtimePath) return null;
+
+	const nodeModulesDir = global ? NODE_MODULES_DIR : join(getProjectPiDir(), "node_modules");
+	return join(nodeModulesDir, pkgJson.name, runtimePath);
 }
 
 /**
  * Remove symlinks and copied files for a plugin's omp.install entries
  */
 export async function removePluginSymlinks(
-	pluginName: string,
+	_pluginName: string,
 	pkgJson: PluginPackageJson,
 	global = true,
 	verbose = true,
@@ -355,12 +349,9 @@ export async function removePluginSymlinks(
 	const baseDir = getBaseDir(global);
 
 	for (const entry of installEntries) {
-		// Remap tool paths to go through omp loader
-		const destPath = remapToolPath(entry.dest, pluginName);
-
 		// Validate dest path stays within base directory (prevents path traversal attacks)
-		if (!isPathWithinBase(baseDir, destPath)) {
-			const msg = `Path traversal blocked: ${destPath} escapes base directory`;
+		if (!isPathWithinBase(baseDir, entry.dest)) {
+			const msg = `Path traversal blocked: ${entry.dest} escapes base directory`;
 			result.errors.push(msg);
 			if (verbose) {
 				log(chalk.red(`  ✗ ${msg}`));
@@ -368,7 +359,7 @@ export async function removePluginSymlinks(
 			continue;
 		}
 
-		const dest = join(baseDir, destPath);
+		const dest = join(baseDir, entry.dest);
 
 		try {
 			if (existsSync(dest)) {
@@ -437,20 +428,17 @@ export async function checkPluginSymlinks(
 	}
 
 	for (const entry of installEntries) {
-		// Remap tool paths to go through omp loader
-		const destPath = remapToolPath(entry.dest, pluginName);
-
 		// Skip entries with path traversal (treat as broken)
-		if (!isPathWithinBase(baseDir, destPath)) {
-			result.broken.push(destPath);
+		if (!isPathWithinBase(baseDir, entry.dest)) {
+			result.broken.push(entry.dest);
 			continue;
 		}
 
 		const src = join(sourceDir, entry.src);
-		const dest = join(baseDir, destPath);
+		const dest = join(baseDir, entry.dest);
 
 		if (!existsSync(dest)) {
-			result.missing.push(destPath);
+			result.missing.push(entry.dest);
 			continue;
 		}
 
@@ -460,9 +448,9 @@ export async function checkPluginSymlinks(
 			// For copy entries, just check the file exists
 			if (entry.copy) {
 				if (stats.isFile()) {
-					result.valid.push(destPath);
+					result.valid.push(entry.dest);
 				} else {
-					result.broken.push(destPath);
+					result.broken.push(entry.dest);
 				}
 				continue;
 			}
@@ -471,16 +459,16 @@ export async function checkPluginSymlinks(
 			if (stats.isSymbolicLink()) {
 				const target = await readlink(dest);
 				if (existsSync(src) && resolve(target) === resolve(src)) {
-					result.valid.push(destPath);
+					result.valid.push(entry.dest);
 				} else {
-					result.broken.push(destPath);
+					result.broken.push(entry.dest);
 				}
 			} else {
 				// Not a symlink, might be a file that was overwritten
-				result.broken.push(destPath);
+				result.broken.push(entry.dest);
 			}
 		} catch {
-			result.broken.push(destPath);
+			result.broken.push(entry.dest);
 		}
 	}
 

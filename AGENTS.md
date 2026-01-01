@@ -22,20 +22,21 @@ Version/publish scripts: `bun scripts/bump-version.ts`, `bun scripts/publish.ts 
 
 ### Core Modules (src/)
 
-| File           | Responsibility                                                                                                                                |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cli.ts`       | Commander.js entry point; wires commands to handlers                                                                                          |
-| `manifest.ts`  | Plugin manifest types (`omp` field in package.json), loading/saving `plugins.json`, reading plugin package.json from node_modules             |
-| `symlinks.ts`  | Create/remove/check symlinks for `omp.install` entries; handles `copy: true` for mutable files like `runtime.json`; path traversal protection |
-| `paths.ts`     | All path constants and scope resolution (global `~/.pi/` vs project-local `.pi/`)                                                             |
-| `conflicts.ts` | Detect destination collisions between plugins before install                                                                                  |
-| `lockfile.ts`  | `omp-lock.json` for integrity verification (tarball hashes)                                                                                   |
-| `npm.ts`       | npm CLI wrapper (`npm install`, `npm view`, `npm search`)                                                                                     |
-| `lock.ts`      | File-based mutex for concurrent CLI invocations                                                                                               |
-| `progress.ts`  | Spinner/progress output utilities                                                                                                             |
-| `output.ts`    | Console output helpers, JSON mode support                                                                                                     |
-| `errors.ts`    | Error handling wrapper for commands                                                                                                           |
-| `runtime.ts`   | Runtime config resolution (env vars from plugin variables)                                                                                    |
+| File           | Responsibility                                                                                                                    |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `cli.ts`       | Commander.js entry point; wires commands to handlers                                                                              |
+| `manifest.ts`  | Plugin manifest types (`omp` field in package.json), loading/saving `plugins.json`, reading plugin package.json from node_modules |
+| `symlinks.ts`  | Create/remove/check symlinks for `omp.install` entries; path traversal protection                                                 |
+| `paths.ts`     | All path constants and scope resolution (global `~/.pi/` vs project-local `.pi/`)                                                 |
+| `conflicts.ts` | Detect destination collisions between plugins before install                                                                      |
+| `lockfile.ts`  | `omp-lock.json` for integrity verification (tarball hashes)                                                                       |
+| `npm.ts`       | npm CLI wrapper (`npm install`, `npm view`, `npm search`)                                                                         |
+| `lock.ts`      | File-based mutex for concurrent CLI invocations                                                                                   |
+| `progress.ts`  | Spinner/progress output utilities                                                                                                 |
+| `output.ts`    | Console output helpers, JSON mode support                                                                                         |
+| `errors.ts`    | Error handling wrapper for commands                                                                                               |
+| `runtime.ts`   | Runtime config resolution (env vars from plugin variables)                                                                        |
+| `loader.ts`    | Generates `~/.pi/agent/tools/omp/index.ts` loader that imports plugin tools from node_modules                                     |
 
 ### Commands (src/commands/)
 
@@ -65,7 +66,7 @@ Built-in plugins ship in `plugins/` and are published separately. Each has:
 
 ### Feature System
 
-Plugins can define optional features in `omp.features`. Feature enablement is stored in `plugins.json` config and written to `runtime.json` (a `copy: true` file). All plugin files are always symlinked; runtime.json controls which features are active at pi runtime.
+Plugins can define optional features in `omp.features`. Feature enablement is stored in `plugins.json` config and written to the plugin's runtime.json in node_modules (via `omp.runtime` field). Runtime.json controls which features are active at pi runtime.
 
 ## Style
 
