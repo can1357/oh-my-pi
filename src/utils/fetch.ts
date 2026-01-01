@@ -1,4 +1,4 @@
-const MAX_BYTES = 10 * 1024 * 1024 // 10MB
+const MAX_BYTES = 32 * 1024 * 1024 // 32MB
 
 const USER_AGENTS = [
    'Mozilla/5.0 (compatible; TextBot/1.0)',
