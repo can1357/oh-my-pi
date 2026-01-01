@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.377] - 2026-01-01
+
+### Added
+
+- `rg` tool: ripgrep-based text search for fast regex pattern matching across codebases
+- `glob` tool: fd-based file pattern matching with modification time sorting
+- `replace_all` tool: sd-based find and replace for literal and regex string replacement across files
+- `ast` tool: ast-grep structural search and replace for AST-level code transformations
+- `notebook_edit` tool: cell-level editing of Jupyter notebook files
+- `git-status` hook: injects repository state at conversation start
+- Subagent session persistence: when `persistSessions` is enabled, subagent sessions and outputs are stored alongside the parent session in `<session-dir>/<session-name>/<agent>_<id>.{jsonl,out.md,in.md}`
+- Recursive subagent option: agents can now set `recursive: true` in frontmatter to allow nested Task tool invocations
+
+### Fixed
+
+- Runtime config loader now uses deep merge to preserve nested defaults when merging store overrides
+- Documentation now correctly states that hooks must use `omp.hooks` field, not `install` (which is only for static files like agents, commands, themes)
+
 ## [1.3.376] - 2026-01-01
 
 ### Added
@@ -31,7 +49,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Windows compatibility: subagent spawns `pi.cmd` with proper shell option on Windows
 - Windows compatibility: LSP server spawn uses shell option on Windows
 - Windows compatibility: render-web external commands (markitdown, lynx) use shell for proper PATHEXT resolution
-
 
 ## [1.3.372] - 2026-01-01
 
