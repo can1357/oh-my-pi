@@ -69,8 +69,11 @@ const CONVERTIBLE_EXTENSIONS = new Set([
    '.ogg',
 ])
 
+const isWindows = process.platform === 'win32'
+
 /**
  * Execute a command and return stdout
+ * Uses shell on all platforms for reliable command resolution
  */
 function exec(
    cmd: string,
@@ -83,6 +86,7 @@ function exec(
       timeout,
       maxBuffer: MAX_BYTES,
       input: options?.input,
+      shell: true,
    })
    return {
       stdout: result.stdout?.toString() ?? '',
@@ -95,9 +99,8 @@ function exec(
  * Check if a command exists (cross-platform)
  */
 function hasCommand(cmd: string): boolean {
-   const isWindows = process.platform === 'win32'
    const checkCmd = isWindows ? 'where' : 'which'
-   const result = spawnSync(checkCmd, [cmd], { encoding: 'utf-8', shell: isWindows })
+   const result = spawnSync(checkCmd, [cmd], { encoding: 'utf-8', shell: true })
    return result.status === 0
 }
 

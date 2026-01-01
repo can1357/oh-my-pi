@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.376] - 2026-01-01
+
 ### Added
 
 - Model fallback aliases (`haiku, flash`) for subagents to improve compatibility across providers
@@ -25,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Windows compatibility: LSP plugin uses `where` instead of `which` for command detection
 - Windows compatibility: LSP file URIs use correct `file:///C:/` format on Windows
 - Windows compatibility: path construction uses proper `path.join()` segments throughout
+- Windows compatibility: subagent tasks now passed via temp file instead of CLI args to avoid shell escaping issues
+- Windows compatibility: subagent spawns `pi.cmd` with proper shell option on Windows
+- Windows compatibility: LSP server spawn uses shell option on Windows
+- Windows compatibility: render-web external commands (markitdown, lynx) use shell for proper PATHEXT resolution
+
 
 ## [1.3.372] - 2026-01-01
 
