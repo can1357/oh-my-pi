@@ -209,6 +209,9 @@ export async function disablePlugin(name: string, options: EnableDisableOptions 
          throw saveErr
       }
 
+      // Regenerate loaders without the disabled plugin
+      await writeLoader()
+
       if (options.json) {
          console.log(JSON.stringify({ name, enabled: false }, null, 2))
       } else {

@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
+import { writeLoader } from '@omp/loader'
 import { getInstalledPlugins, loadPluginsJson, readPluginPackageJson, savePluginsJson } from '@omp/manifest'
 import { npmUninstall, requireNpm } from '@omp/npm'
 import { NODE_MODULES_DIR, PI_CONFIG_DIR, PLUGINS_DIR } from '@omp/paths'
@@ -222,6 +223,9 @@ export async function uninstallPlugin(name: string, options: UninstallOptions = 
          pluginsJson.disabled = pluginsJson.disabled.filter(n => n !== name)
       }
       await savePluginsJson(pluginsJson)
+
+      // 5. Regenerate loaders (tools + hooks)
+      await writeLoader()
 
       console.log(chalk.green(`✓ Uninstalled "${name}"`))
 

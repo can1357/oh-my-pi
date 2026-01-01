@@ -1,8 +1,11 @@
 /**
- * OMP Tool Loader Generator
+ * OMP Loader Generator
  *
- * Generates ~/.pi/agent/tools/omp/index.ts with hardcoded tool paths.
- * No symlinks needed - tools are imported directly from node_modules.
+ * Generates:
+ * - ~/.pi/agent/tools/omp/index.ts (tool loader)
+ * - ~/.pi/agent/hooks/omp/index.ts (hook loader)
+ *
+ * No symlinks needed - modules are imported directly from node_modules.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -12,11 +15,12 @@ import { GLOBAL_PACKAGE_JSON, getAgentDir } from '@omp/paths'
 
 interface PluginInfo {
    tools?: string // e.g. "@oh-my-pi/exa/tools"
+   hooks?: string // e.g. "@oh-my-pi/some-plugin/hooks"
    runtime?: string // e.g. "@oh-my-pi/exa/tools/runtime.json"
 }
 
 /**
- * Get plugin info (tools and runtime paths) from installed plugins (global only)
+ * Get plugin info (tools, hooks, and runtime paths) from installed plugins (global only)
  */
 async function getPluginInfo(): Promise<Map<string, PluginInfo>> {
    if (!existsSync(GLOBAL_PACKAGE_JSON)) return new Map()
@@ -34,11 +38,14 @@ async function getPluginInfo(): Promise<Map<string, PluginInfo>> {
       if (pluginPkgJson.omp.tools) {
          info.tools = `${pluginName}/${pluginPkgJson.omp.tools}`
       }
+      if (pluginPkgJson.omp.hooks) {
+         info.hooks = `${pluginName}/${pluginPkgJson.omp.hooks}`
+      }
       if (pluginPkgJson.omp.runtime) {
          info.runtime = `${pluginName}/${pluginPkgJson.omp.runtime}`
       }
 
-      if (info.tools || info.runtime) {
+      if (info.tools || info.hooks || info.runtime) {
          plugins.set(pluginName, info)
       }
    }
@@ -47,15 +54,80 @@ async function getPluginInfo(): Promise<Map<string, PluginInfo>> {
 }
 
 /**
- * Write the OMP loader with hardcoded tool paths and runtime redirects (global only)
+ * Generate the bootstrap code shared between tool and hook loaders.
+ * Patches module resolution and loads runtime configs from store.
  */
-export async function writeLoader(): Promise<void> {
+function generateBootstrapCode(runtimeRedirects: string[]): string {
+   return `
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const piDir = path.resolve(__dirname, "../../.."); // ~/.pi
+const pluginNodeModules = path.join(piDir, "plugins/node_modules");
+const globalStoreDir = path.join(piDir, "plugins/store");
+const projectStoreDir = path.join(process.cwd(), ".pi/store");
+
+// Ensure global store directory exists
+fs.mkdirSync(globalStoreDir, { recursive: true });
+
+if (fs.existsSync(pluginNodeModules)) {
+   try {
+      const Module = await import("node:module");
+      const ModuleClass = (Module as any).default?.Module || (Module as any).Module;
+
+      // Patch _nodeModulePaths to include plugins/node_modules
+      if (ModuleClass?._nodeModulePaths) {
+         const original = ModuleClass._nodeModulePaths;
+         ModuleClass._nodeModulePaths = (from: string) => {
+            const paths = original(from);
+            if (!paths.includes(pluginNodeModules)) {
+               paths.push(pluginNodeModules);
+            }
+            return paths;
+         };
+      }
+   } catch (e) {
+      console.error("omp-loader: Failed to patch module resolution:", e);
+   }
+}
+
+// Runtime config: [moduleSpecifier, storeFilename]
+const runtimeConfigs: [string, string][] = [
+${runtimeRedirects.join(',\n')}
+];
+
+// Load runtime configs: import module, read global store, merge project store (local precedence)
+for (const [moduleSpec, storeFile] of runtimeConfigs) {
+   try {
+      const runtime = await import(moduleSpec);
+      const globalStorePath = path.join(globalStoreDir, storeFile);
+      const projectStorePath = path.join(projectStoreDir, storeFile);
+      
+      // Start with global store
+      if (fs.existsSync(globalStorePath)) {
+         const globalData = JSON.parse(fs.readFileSync(globalStorePath, "utf-8"));
+         Object.assign(runtime.default, globalData);
+      }
+      
+      // Merge project store (takes precedence)
+      if (fs.existsSync(projectStorePath)) {
+         const projectData = JSON.parse(fs.readFileSync(projectStorePath, "utf-8"));
+         Object.assign(runtime.default, projectData);
+      }
+   } catch {
+      // Module not found or store read failed - skip
+   }
+}
+`
+}
+
+/**
+ * Write the OMP tool loader with hardcoded tool paths and runtime redirects
+ */
+async function writeToolLoader(plugins: Map<string, PluginInfo>): Promise<void> {
    const agentDir = getAgentDir()
    const ompDir = join(agentDir, 'tools', 'omp')
 
    mkdirSync(ompDir, { recursive: true })
 
-   const plugins = await getPluginInfo()
    const toolPaths = [...plugins.values()].filter(p => p.tools).map(p => `"${p.tools}"`)
 
    // Build runtime redirects: maps full module path to store filename
@@ -87,68 +159,10 @@ const toolPaths = [
 ${toolPaths.map(p => ` ${p}`).join(',\n')}
 ];
 
-// Runtime config: [moduleSpecifier, storeFilename]
-const runtimeConfigs: [string, string][] = [
-${runtimeRedirects.join(',\n')}
-];
-
 // ============================================================================
 // Bootstrap: Patch module resolution and load runtime configs from store
 // ============================================================================
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const piDir = path.resolve(__dirname, "../../.."); // ~/.pi
-const pluginNodeModules = path.join(piDir, "plugins/node_modules");
-const globalStoreDir = path.join(piDir, "plugins/store");
-const projectStoreDir = path.join(process.cwd(), ".pi/store");
-
-// Ensure global store directory exists
-fs.mkdirSync(globalStoreDir, { recursive: true });
-
-if (fs.existsSync(pluginNodeModules)) {
-   try {
-      const Module = await import("node:module");
-      const ModuleClass = (Module as any).default?.Module || (Module as any).Module;
-
-      // Patch _nodeModulePaths to include plugins/node_modules
-      if (ModuleClass?._nodeModulePaths) {
-         const original = ModuleClass._nodeModulePaths;
-         ModuleClass._nodeModulePaths = (from: string) => {
-            const paths = original(from);
-            if (!paths.includes(pluginNodeModules)) {
-               paths.push(pluginNodeModules);
-            }
-            return paths;
-         };
-      }
-   } catch (e) {
-      console.error("omp-loader: Failed to patch module resolution:", e);
-   }
-}
-
-// Load runtime configs: import module, read global store, merge project store (local precedence)
-for (const [moduleSpec, storeFile] of runtimeConfigs) {
-   try {
-      const runtime = await import(moduleSpec);
-      const globalStorePath = path.join(globalStoreDir, storeFile);
-      const projectStorePath = path.join(projectStoreDir, storeFile);
-      
-      // Start with global store
-      if (fs.existsSync(globalStorePath)) {
-         const globalData = JSON.parse(fs.readFileSync(globalStorePath, "utf-8"));
-         Object.assign(runtime.default, globalData);
-      }
-      
-      // Merge project store (takes precedence)
-      if (fs.existsSync(projectStorePath)) {
-         const projectData = JSON.parse(fs.readFileSync(projectStorePath, "utf-8"));
-         Object.assign(runtime.default, projectData);
-      }
-   } catch {
-      // Module not found or store read failed - skip
-   }
-}
-
+${generateBootstrapCode(runtimeRedirects)}
 // ============================================================================
 // Tool loader factory
 // ============================================================================
@@ -184,9 +198,119 @@ export default factory;
 }
 
 /**
- * Check if the OMP loader exists (global only)
+ * Write the OMP hook loader with hardcoded hook paths and runtime redirects
  */
-export function loaderExists(): boolean {
+async function writeHookLoader(plugins: Map<string, PluginInfo>): Promise<void> {
+   const agentDir = getAgentDir()
+   const ompDir = join(agentDir, 'hooks', 'omp')
+
+   mkdirSync(ompDir, { recursive: true })
+
+   const hookPaths = [...plugins.values()].filter(p => p.hooks).map(p => `"${p.hooks}"`)
+
+   // Build runtime redirects (same as tools - hooks may need runtime config too)
+   const runtimeRedirects: string[] = []
+   for (const [name, info] of plugins) {
+      if (info.runtime) {
+         const storeName = name.replace(/\//g, '__')
+         runtimeRedirects.push(`  ["${info.runtime}", "${storeName}.json"]`)
+      }
+   }
+
+   const source = `/**
+ * OMP Hook Loader
+ *
+ * Auto-generated by omp. Do not edit.
+ */
+
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import type { HookFactory, HookAPI } from "@mariozechner/pi-coding-agent";
+
+// ============================================================================
+// Hook registry (regenerated on plugin install/uninstall)
+// ============================================================================
+
+const hookPaths = [
+${hookPaths.map(p => ` ${p}`).join(',\n')}
+];
+
+// ============================================================================
+// Bootstrap: Patch module resolution and load runtime configs from store
+// ============================================================================
+${generateBootstrapCode(runtimeRedirects)}
+// ============================================================================
+// Preload hook factories at module load time (top-level await)
+// ============================================================================
+
+const hookFactories: HookFactory[] = [];
+
+for (const hookPath of hookPaths) {
+   try {
+      const module = await import(hookPath);
+      const pluginFactory = module.default as HookFactory;
+
+      if (typeof pluginFactory !== "function") {
+         console.error(\`omp-hooks: \${hookPath} does not export a factory function\`);
+         continue;
+      }
+
+      hookFactories.push(pluginFactory);
+   } catch (e) {
+      console.error(\`omp-hooks: Failed to load \${hookPath}:\`, e);
+   }
+}
+
+// ============================================================================
+// Hook loader factory - invokes all preloaded factories synchronously
+// ============================================================================
+
+const factory: HookFactory = (pi: HookAPI) => {
+   for (const pluginFactory of hookFactories) {
+      try {
+         pluginFactory(pi);
+      } catch (e) {
+         console.error(\`omp-hooks: Failed to initialize hook:\`, e);
+      }
+   }
+};
+
+export default factory;
+`
+
+   writeFileSync(join(ompDir, 'index.ts'), source, 'utf-8')
+}
+
+/**
+ * Write both OMP loaders (tools and hooks)
+ */
+export async function writeLoader(): Promise<void> {
+   const plugins = await getPluginInfo()
+   await writeToolLoader(plugins)
+   await writeHookLoader(plugins)
+}
+
+/**
+ * Check if the OMP tool loader exists
+ */
+export function toolLoaderExists(): boolean {
    const agentDir = getAgentDir()
    return existsSync(join(agentDir, 'tools', 'omp', 'index.ts'))
+}
+
+/**
+ * Check if the OMP hook loader exists
+ */
+export function hookLoaderExists(): boolean {
+   const agentDir = getAgentDir()
+   return existsSync(join(agentDir, 'hooks', 'omp', 'index.ts'))
+}
+
+/**
+ * Check if both OMP loaders exist
+ * @deprecated Use toolLoaderExists() and hookLoaderExists() instead
+ */
+export function loaderExists(): boolean {
+   return toolLoaderExists()
 }
