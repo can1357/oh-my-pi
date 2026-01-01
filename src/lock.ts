@@ -1,11 +1,11 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { getProjectPiDir, PI_CONFIG_DIR } from "@omp/paths";
+import { PI_CONFIG_DIR } from "@omp/paths";
 
 const LOCK_TIMEOUT_MS = 60000; // 1 minute
 
-function getLockPath(global: boolean): string {
-	return global ? join(PI_CONFIG_DIR, ".lock") : join(getProjectPiDir(), ".lock");
+function getLockPath(): string {
+	return join(PI_CONFIG_DIR, ".lock");
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -66,8 +66,8 @@ async function tryCleanStaleLock(lockPath: string): Promise<boolean> {
 	return false;
 }
 
-export async function acquireLock(global = true): Promise<boolean> {
-	const lockPath = getLockPath(global);
+export async function acquireLock(): Promise<boolean> {
+	const lockPath = getLockPath();
 
 	try {
 		await mkdir(dirname(lockPath), { recursive: true });
@@ -96,8 +96,8 @@ export async function acquireLock(global = true): Promise<boolean> {
 	}
 }
 
-export async function releaseLock(global = true): Promise<void> {
-	const lockPath = getLockPath(global);
+export async function releaseLock(): Promise<void> {
+	const lockPath = getLockPath();
 
 	// NOTE: TOCTOU race exists between reading lock, checking PID, and rm().
 	// Another process could acquire the lock between our check and removal.

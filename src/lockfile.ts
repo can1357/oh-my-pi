@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { GLOBAL_LOCK_FILE, PROJECT_PLUGINS_LOCK } from "@omp/paths";
+import { GLOBAL_LOCK_FILE } from "@omp/paths";
 import chalk from "chalk";
 
 /**
@@ -35,8 +35,8 @@ export interface LockFile {
  * - File contains invalid JSON (corrupted)
  * - File has invalid/incompatible schema
  */
-export async function loadLockFile(global = true): Promise<LockFile | null> {
-	const path = global ? GLOBAL_LOCK_FILE : PROJECT_PLUGINS_LOCK;
+export async function loadLockFile(): Promise<LockFile | null> {
+	const path = GLOBAL_LOCK_FILE;
 	try {
 		if (!existsSync(path)) return null;
 		const data = await readFile(path, "utf-8");
@@ -124,8 +124,8 @@ async function releaseLockfileLock(lockfilePath: string): Promise<void> {
  * Save lock file atomically using temp-file-plus-rename pattern.
  * This ensures the lockfile is never left in a partially-written state.
  */
-export async function saveLockFile(lockFile: LockFile, global = true): Promise<void> {
-	const path = global ? GLOBAL_LOCK_FILE : PROJECT_PLUGINS_LOCK;
+export async function saveLockFile(lockFile: LockFile): Promise<void> {
+	const path = GLOBAL_LOCK_FILE;
 	const tempPath = join(dirname(path), `.omp-lockfile-${process.pid}-${Date.now()}.tmp`);
 
 	// Write to temp file first
@@ -163,14 +163,14 @@ export function createLockFile(): LockFile {
  *
  * @returns The loaded lock file, a new empty lock file if corrupted/missing, or null if validation fails
  */
-export async function validateOrRegenerateLockFile(global = true): Promise<LockFile> {
-	const existing = await loadLockFile(global);
+export async function validateOrRegenerateLockFile(): Promise<LockFile> {
+	const existing = await loadLockFile();
 	if (existing) {
 		return existing;
 	}
 
 	// Lock file is missing or corrupted - create a fresh one
-	const path = global ? GLOBAL_LOCK_FILE : PROJECT_PLUGINS_LOCK;
+	const path = GLOBAL_LOCK_FILE;
 	if (existsSync(path)) {
 		console.log(chalk.yellow(`Regenerating corrupted lock file: ${path}`));
 	}
@@ -181,8 +181,8 @@ export async function validateOrRegenerateLockFile(global = true): Promise<LockF
 /**
  * Get the locked version for a package, if it exists in the lock file.
  */
-export async function getLockedVersion(packageName: string, global = true): Promise<string | null> {
-	const lockFile = await loadLockFile(global);
+export async function getLockedVersion(packageName: string): Promise<string | null> {
+	const lockFile = await loadLockFile();
 	if (!lockFile) return null;
 
 	const entry = lockFile.packages[packageName];
@@ -203,12 +203,8 @@ export interface LockFileUpdateData {
  * Update the lock file with a package's exact version and integrity data.
  * Uses advisory locking to prevent concurrent read-modify-write corruption.
  */
-export async function updateLockFile(
-	packageName: string,
-	data: string | LockFileUpdateData,
-	global = true,
-): Promise<void> {
-	const lockfilePath = global ? GLOBAL_LOCK_FILE : PROJECT_PLUGINS_LOCK;
+export async function updateLockFile(packageName: string, data: string | LockFileUpdateData): Promise<void> {
+	const lockfilePath = GLOBAL_LOCK_FILE;
 
 	// Normalize string version to full data object
 	const entry: LockFilePackage =
@@ -223,14 +219,14 @@ export async function updateLockFile(
 
 	await acquireLockfileLock(lockfilePath);
 	try {
-		let lockFile = await loadLockFile(global);
+		let lockFile = await loadLockFile();
 		if (!lockFile) {
 			lockFile = createLockFile();
 		}
 
 		lockFile.packages[packageName] = entry;
 
-		await saveLockFile(lockFile, global);
+		await saveLockFile(lockFile);
 	} finally {
 		await releaseLockfileLock(lockfilePath);
 	}
@@ -239,8 +235,8 @@ export async function updateLockFile(
 /**
  * Get a locked package entry, if it exists in the lock file.
  */
-export async function getLockedPackage(packageName: string, global = true): Promise<LockFilePackage | null> {
-	const lockFile = await loadLockFile(global);
+export async function getLockedPackage(packageName: string): Promise<LockFilePackage | null> {
+	const lockFile = await loadLockFile();
 	if (!lockFile) return null;
 	return lockFile.packages[packageName] ?? null;
 }
