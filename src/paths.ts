@@ -17,33 +17,24 @@ export const GLOBAL_PACKAGE_JSON = join(PLUGINS_DIR, "package.json");
 // Global omp lock file (separate from npm's package-lock.json)
 export const GLOBAL_LOCK_FILE = join(PLUGINS_DIR, "omp-lock.json");
 
-// Project-local config directory
-export const PROJECT_PI_DIR = ".pi";
+// Global store directory for plugin configs
+export const GLOBAL_STORE_DIR = join(PLUGINS_DIR, "store");
 
-// Project-local plugins.json
-export const PROJECT_PLUGINS_JSON = join(PROJECT_PI_DIR, "plugins.json");
-
-// Project-local package.json (for npm operations)
-export const PROJECT_PACKAGE_JSON = join(PROJECT_PI_DIR, "package.json");
-
-// Project-local lock file
-export const PROJECT_PLUGINS_LOCK = join(PROJECT_PI_DIR, "plugins-lock.json");
-
-// Project-local node_modules
-export const PROJECT_NODE_MODULES = join(PROJECT_PI_DIR, "node_modules");
+// Global agent directory
+export const GLOBAL_AGENT_DIR = join(PI_CONFIG_DIR, "agent");
 
 /**
- * Find the project root by walking up parent directories looking for .pi/plugins.json.
+ * Find the project root by walking up parent directories looking for .pi/overrides.json.
  * Similar to how git finds .git directories.
  *
  * @returns The absolute path to the project root, or null if not found
  */
-export function findProjectRoot(): string | null {
+export function findProjectOverridesRoot(): string | null {
 	let dir = process.cwd();
 	const root = resolve("/");
 
 	while (dir !== root) {
-		if (existsSync(join(dir, ".pi", "plugins.json"))) {
+		if (existsSync(join(dir, ".pi", "overrides.json"))) {
 			return dir;
 		}
 		const parent = dirname(dir);
@@ -55,91 +46,42 @@ export function findProjectRoot(): string | null {
 }
 
 /**
- * Check if a project-local .pi/plugins.json exists in the current directory or any parent
+ * Check if a project-local .pi/overrides.json exists in the current directory or any parent
  */
-export function hasProjectPlugins(): boolean {
-	return findProjectRoot() !== null;
+export function hasProjectOverrides(): boolean {
+	return findProjectOverridesRoot() !== null;
 }
 
 /**
- * Get the project .pi directory path.
- * Uses findProjectRoot() to locate the project, or falls back to cwd.
+ * Get the project overrides.json path.
+ * Uses findProjectOverridesRoot() to locate the project, or falls back to cwd/.pi/overrides.json.
  */
-export function getProjectPiDir(): string {
-	const projectRoot = findProjectRoot();
+export function getProjectOverridesPath(): string {
+	const projectRoot = findProjectOverridesRoot();
 	if (projectRoot) {
-		return join(projectRoot, ".pi");
+		return join(projectRoot, ".pi", "overrides.json");
 	}
 	// Fallback to cwd (e.g., for init command)
-	return resolve(PROJECT_PI_DIR);
+	return resolve(".pi", "overrides.json");
 }
 
 /**
- * Get the plugins directory for the given scope
+ * Get the project store directory for project-level config overrides.
+ * Uses findProjectOverridesRoot() to locate the project, or falls back to cwd/.pi/store.
  */
-export function getPluginsDir(global = true): string {
-	if (global) {
-		return PLUGINS_DIR;
+export function getProjectStoreDir(): string {
+	const projectRoot = findProjectOverridesRoot();
+	if (projectRoot) {
+		return join(projectRoot, ".pi", "store");
 	}
-	return getProjectPiDir();
+	// Fallback to cwd
+	return resolve(".pi", "store");
 }
 
 /**
- * Get the node_modules directory for the given scope
+ * Get the agent directory (where symlinks are installed).
+ * Always returns global agent directory.
  */
-export function getNodeModulesDir(global = true): string {
-	if (global) {
-		return NODE_MODULES_DIR;
-	}
-	return join(getProjectPiDir(), "node_modules");
-}
-
-/**
- * Get the package.json path for the given scope
- */
-export function getPackageJsonPath(global = true): string {
-	if (global) {
-		return GLOBAL_PACKAGE_JSON;
-	}
-	return join(getProjectPiDir(), "package.json");
-}
-
-/**
- * Get the plugins.json path for project-local scope.
- * For global scope, use GLOBAL_PACKAGE_JSON instead (dependencies are in package.json).
- */
-export function getPluginsJsonPath(): string {
-	return join(getProjectPiDir(), "plugins.json");
-}
-
-/**
- * Get the agent directory (where symlinks are installed)
- */
-export function getAgentDir(global = true): string {
-	if (global) {
-		return join(PI_CONFIG_DIR, "agent");
-	}
-	return join(getProjectPiDir(), "agent");
-}
-
-/**
- * Resolve whether to use global or local scope based on CLI flags and auto-detection.
- *
- * Logic:
- * - If --global is passed: use global mode
- * - If --local is passed: use local mode
- * - If neither: check if .pi/plugins.json exists in cwd, if so use local, otherwise use global
- *
- * @param options - CLI options containing global and local flags
- * @returns true if global scope should be used, false for local
- */
-export function resolveScope(options: { global?: boolean; local?: boolean }): boolean {
-	if (options.global) {
-		return true;
-	}
-	if (options.local) {
-		return false;
-	}
-	// Auto-detect: if project-local plugins.json exists, use local mode
-	return !hasProjectPlugins();
+export function getAgentDir(): string {
+	return GLOBAL_AGENT_DIR;
 }

@@ -2,14 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { logError } from "@omp/output";
-import {
-	GLOBAL_PACKAGE_JSON,
-	getPackageJsonPath,
-	getPluginsJsonPath,
-	getProjectPiDir,
-	NODE_MODULES_DIR,
-	PLUGINS_DIR,
-} from "@omp/paths";
+import { GLOBAL_PACKAGE_JSON, getProjectOverridesPath, NODE_MODULES_DIR, PLUGINS_DIR } from "@omp/paths";
 import chalk from "chalk";
 
 /**
@@ -111,7 +104,7 @@ export interface PluginConfig {
 }
 
 /**
- * Global/project plugins.json structure
+ * Global plugins.json structure (stored in ~/.pi/plugins/package.json)
  */
 export interface PluginsJson {
 	plugins: Record<string, string>; // name -> version specifier
@@ -121,6 +114,15 @@ export interface PluginsJson {
 	config?: Record<string, PluginConfig>;
 	/** Auto-linked transitive omp dependencies (name -> parent plugin that pulled it in) */
 	transitiveDeps?: Record<string, string>;
+}
+
+/**
+ * Project-level overrides (stored in .pi/overrides.json)
+ * Allows disabling plugins and overriding config per-project without affecting global state
+ */
+export interface ProjectOverrides {
+	disabled?: string[];
+	config?: Record<string, PluginConfig>;
 }
 
 /**
@@ -150,71 +152,20 @@ export async function initGlobalPlugins(): Promise<void> {
 }
 
 /**
- * Initialize the project-local .pi directory with plugins.json and package.json
+ * Load plugins.json from global ~/.pi/plugins/package.json
  */
-export async function initProjectPlugins(): Promise<void> {
-	const projectPiDir = getProjectPiDir();
-	const pluginsJsonPath = join(projectPiDir, "plugins.json");
-	const packageJsonPath = join(projectPiDir, "package.json");
+export async function loadPluginsJson(): Promise<PluginsJson> {
 	try {
-		await mkdir(projectPiDir, { recursive: true });
-
-		// Create plugins.json if it doesn't exist
-		if (!existsSync(pluginsJsonPath)) {
-			const pluginsJson = {
-				plugins: {},
-			};
-			await writeFile(pluginsJsonPath, JSON.stringify(pluginsJson, null, 2));
-		}
-
-		// Create package.json if it doesn't exist (for npm operations)
-		if (!existsSync(packageJsonPath)) {
-			const packageJson = {
-				name: "pi-project-plugins",
-				version: "1.0.0",
-				private: true,
-				description: "Project-local pi plugins managed by omp",
-				dependencies: {},
-			};
-			await writeFile(packageJsonPath, JSON.stringify(packageJson, null, 2));
-		}
-	} catch (err) {
-		const error = err as NodeJS.ErrnoException;
-		if (error.code === "EACCES" || error.code === "EPERM") {
-			throw new Error(formatPermissionError(error, projectPiDir));
-		}
-		throw err;
-	}
-}
-
-/**
- * Load plugins.json (global or project)
- */
-export async function loadPluginsJson(global = true): Promise<PluginsJson> {
-	const path = global ? GLOBAL_PACKAGE_JSON : getPluginsJsonPath();
-
-	try {
-		const data = await readFile(path, "utf-8");
+		const data = await readFile(GLOBAL_PACKAGE_JSON, "utf-8");
 		const parsed = JSON.parse(data);
 
-		if (global) {
-			// Global uses standard package.json format
-			return {
-				plugins: parsed.dependencies || {},
-				devDependencies: parsed.devDependencies || {},
-				disabled: parsed.omp?.disabled || [],
-				config: parsed.omp?.config || {},
-				transitiveDeps: parsed.omp?.transitiveDeps || {},
-			};
-		}
-
-		// Project uses plugins.json format
+		// Global uses standard package.json format
 		return {
-			plugins: parsed.plugins || {},
+			plugins: parsed.dependencies || {},
 			devDependencies: parsed.devDependencies || {},
-			disabled: parsed.disabled || [],
-			config: parsed.config || {},
-			transitiveDeps: parsed.transitiveDeps || {},
+			disabled: parsed.omp?.disabled || [],
+			config: parsed.omp?.config || {},
+			transitiveDeps: parsed.omp?.transitiveDeps || {},
 		};
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code === "ENOENT") {
@@ -225,106 +176,111 @@ export async function loadPluginsJson(global = true): Promise<PluginsJson> {
 }
 
 /**
- * Sync .pi/package.json with plugins.json for npm operations in project-local mode
+ * Save plugins.json to global ~/.pi/plugins/package.json
  */
-async function syncProjectPackageJson(data: PluginsJson): Promise<void> {
-	const packageJsonPath = getPackageJsonPath(false);
-	let existing: Record<string, unknown> = {};
+export async function savePluginsJson(data: PluginsJson): Promise<void> {
 	try {
-		existing = JSON.parse(await readFile(packageJsonPath, "utf-8"));
-	} catch {
-		existing = {
-			name: "pi-project-plugins",
-			version: "1.0.0",
-			private: true,
-			description: "Project-local pi plugins managed by omp",
-		};
-	}
+		await mkdir(dirname(GLOBAL_PACKAGE_JSON), { recursive: true });
 
-	existing.dependencies = data.plugins;
-	if (data.devDependencies && Object.keys(data.devDependencies).length > 0) {
-		existing.devDependencies = data.devDependencies;
-	} else {
-		delete existing.devDependencies;
-	}
+		// Read existing package.json and update dependencies
+		let existing: Record<string, unknown> = {};
+		try {
+			existing = JSON.parse(await readFile(GLOBAL_PACKAGE_JSON, "utf-8"));
+		} catch {
+			existing = {
+				name: "pi-plugins",
+				version: "1.0.0",
+				private: true,
+				description: "Global pi plugins managed by omp",
+			};
+		}
 
-	await writeFile(packageJsonPath, JSON.stringify(existing, null, 2));
+		existing.dependencies = data.plugins;
+		if (data.devDependencies && Object.keys(data.devDependencies).length > 0) {
+			existing.devDependencies = data.devDependencies;
+		} else {
+			delete existing.devDependencies;
+		}
+
+		// Build omp field with disabled, config, and transitiveDeps
+		const ompField: Record<string, unknown> = (existing.omp as Record<string, unknown>) || {};
+		if (data.disabled?.length) {
+			ompField.disabled = data.disabled;
+		} else {
+			delete ompField.disabled;
+		}
+		if (data.config && Object.keys(data.config).length > 0) {
+			ompField.config = data.config;
+		} else {
+			delete ompField.config;
+		}
+		if (data.transitiveDeps && Object.keys(data.transitiveDeps).length > 0) {
+			ompField.transitiveDeps = data.transitiveDeps;
+		} else {
+			delete ompField.transitiveDeps;
+		}
+		if (Object.keys(ompField).length > 0) {
+			existing.omp = ompField;
+		} else {
+			delete existing.omp;
+		}
+
+		await writeFile(GLOBAL_PACKAGE_JSON, JSON.stringify(existing, null, 2));
+	} catch (err) {
+		const error = err as NodeJS.ErrnoException;
+		if (error.code === "EACCES" || error.code === "EPERM") {
+			throw new Error(formatPermissionError(error, GLOBAL_PACKAGE_JSON));
+		}
+		throw err;
+	}
 }
 
 /**
- * Save plugins.json (global or project)
+ * Load project overrides from .pi/overrides.json
+ * Returns empty object if file doesn't exist
  */
-export async function savePluginsJson(data: PluginsJson, global = true): Promise<void> {
-	const path = global ? GLOBAL_PACKAGE_JSON : getPluginsJsonPath();
+export async function loadProjectOverrides(): Promise<ProjectOverrides> {
+	const path = getProjectOverridesPath();
+	if (!path) {
+		return {};
+	}
+
+	try {
+		const data = await readFile(path, "utf-8");
+		const parsed = JSON.parse(data);
+		return {
+			disabled: parsed.disabled || [],
+			config: parsed.config || {},
+		};
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+			return {};
+		}
+		throw err;
+	}
+}
+
+/**
+ * Save project overrides to .pi/overrides.json
+ */
+export async function saveProjectOverrides(data: ProjectOverrides): Promise<void> {
+	const path = getProjectOverridesPath();
+	if (!path) {
+		throw new Error("No project root found. Run 'omp init' to create .pi/overrides.json");
+	}
 
 	try {
 		await mkdir(dirname(path), { recursive: true });
 
-		if (global) {
-			// Read existing package.json and update dependencies
-			let existing: Record<string, unknown> = {};
-			try {
-				existing = JSON.parse(await readFile(path, "utf-8"));
-			} catch {
-				existing = {
-					name: "pi-plugins",
-					version: "1.0.0",
-					private: true,
-					description: "Global pi plugins managed by omp",
-				};
-			}
-
-			existing.dependencies = data.plugins;
-			if (data.devDependencies && Object.keys(data.devDependencies).length > 0) {
-				existing.devDependencies = data.devDependencies;
-			} else {
-				delete existing.devDependencies;
-			}
-
-			// Build omp field with disabled, config, and transitiveDeps
-			const ompField: Record<string, unknown> = (existing.omp as Record<string, unknown>) || {};
-			if (data.disabled?.length) {
-				ompField.disabled = data.disabled;
-			} else {
-				delete ompField.disabled;
-			}
-			if (data.config && Object.keys(data.config).length > 0) {
-				ompField.config = data.config;
-			} else {
-				delete ompField.config;
-			}
-			if (data.transitiveDeps && Object.keys(data.transitiveDeps).length > 0) {
-				ompField.transitiveDeps = data.transitiveDeps;
-			} else {
-				delete ompField.transitiveDeps;
-			}
-			if (Object.keys(ompField).length > 0) {
-				existing.omp = ompField;
-			} else {
-				delete existing.omp;
-			}
-
-			await writeFile(path, JSON.stringify(existing, null, 2));
-		} else {
-			// Project uses simple plugins.json format
-			const output: Record<string, unknown> = { plugins: data.plugins };
-			if (data.devDependencies && Object.keys(data.devDependencies).length > 0) {
-				output.devDependencies = data.devDependencies;
-			}
-			if (data.disabled?.length) {
-				output.disabled = data.disabled;
-			}
-			if (data.config && Object.keys(data.config).length > 0) {
-				output.config = data.config;
-			}
-			if (data.transitiveDeps && Object.keys(data.transitiveDeps).length > 0) {
-				output.transitiveDeps = data.transitiveDeps;
-			}
-			await writeFile(path, JSON.stringify(output, null, 2));
-
-			// Sync .pi/package.json for npm operations
-			await syncProjectPackageJson(data);
+		const output: Record<string, unknown> = {};
+		if (data.disabled?.length) {
+			output.disabled = data.disabled;
 		}
+		if (data.config && Object.keys(data.config).length > 0) {
+			output.config = data.config;
+		}
+
+		await writeFile(path, JSON.stringify(output, null, 2));
 	} catch (err) {
 		const error = err as NodeJS.ErrnoException;
 		if (error.code === "EACCES" || error.code === "EPERM") {
@@ -390,20 +346,18 @@ function isPluginPathWithinNodeModules(nodeModules: string, pluginName: string):
 /**
  * Read a plugin's package.json from node_modules
  */
-export async function readPluginPackageJson(pluginName: string, global = true): Promise<PluginPackageJson | null> {
+export async function readPluginPackageJson(pluginName: string): Promise<PluginPackageJson | null> {
 	// Validate plugin name to prevent path traversal attacks
 	if (!isValidPluginName(pluginName)) {
 		throw new Error(`Invalid plugin name: ${pluginName}`);
 	}
 
-	const nodeModules = global ? NODE_MODULES_DIR : join(getProjectPiDir(), "node_modules");
-
 	// Double-check the resolved path stays within node_modules
-	if (!isPluginPathWithinNodeModules(nodeModules, pluginName)) {
+	if (!isPluginPathWithinNodeModules(NODE_MODULES_DIR, pluginName)) {
 		throw new Error(`Plugin path escapes node_modules: ${pluginName}`);
 	}
 
-	const pkgPath = join(nodeModules, pluginName, "package.json");
+	const pkgPath = join(NODE_MODULES_DIR, pluginName, "package.json");
 
 	try {
 		const data = await readFile(pkgPath, "utf-8");
@@ -431,31 +385,29 @@ export async function readPluginPackageJson(pluginName: string, global = true): 
  * Get the source directory for a plugin in node_modules.
  * Throws on invalid plugin names to prevent path traversal attacks.
  */
-export function getPluginSourceDir(pluginName: string, global = true): string {
+export function getPluginSourceDir(pluginName: string): string {
 	// Validate plugin name to prevent path traversal attacks
 	if (!isValidPluginName(pluginName)) {
 		throw new Error(`Invalid plugin name: ${pluginName}`);
 	}
 
-	const nodeModules = global ? NODE_MODULES_DIR : join(getProjectPiDir(), "node_modules");
-
 	// Double-check the resolved path stays within node_modules
-	if (!isPluginPathWithinNodeModules(nodeModules, pluginName)) {
+	if (!isPluginPathWithinNodeModules(NODE_MODULES_DIR, pluginName)) {
 		throw new Error(`Plugin path escapes node_modules: ${pluginName}`);
 	}
 
-	return join(nodeModules, pluginName);
+	return join(NODE_MODULES_DIR, pluginName);
 }
 
 /**
  * Get all installed plugins with their info
  */
-export async function getInstalledPlugins(global = true): Promise<Map<string, PluginPackageJson>> {
-	const pluginsJson = await loadPluginsJson(global);
+export async function getInstalledPlugins(): Promise<Map<string, PluginPackageJson>> {
+	const pluginsJson = await loadPluginsJson();
 	const plugins = new Map<string, PluginPackageJson>();
 
 	for (const name of Object.keys(pluginsJson.plugins)) {
-		const pkgJson = await readPluginPackageJson(name, global);
+		const pkgJson = await readPluginPackageJson(name);
 		if (pkgJson) {
 			plugins.set(name, pkgJson);
 		}
