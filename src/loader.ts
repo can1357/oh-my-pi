@@ -89,6 +89,28 @@ if (fs.existsSync(pluginNodeModules)) {
    }
 }
 
+// Deep merge: recursively merge source into target, preserving nested defaults
+function deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): void {
+   for (const key of Object.keys(source)) {
+      const sourceVal = source[key];
+      const targetVal = target[key];
+      
+      // Both are plain objects (not null, not array) -> recurse
+      if (
+         sourceVal !== null &&
+         targetVal !== null &&
+         typeof sourceVal === "object" &&
+         typeof targetVal === "object" &&
+         !Array.isArray(sourceVal) &&
+         !Array.isArray(targetVal)
+      ) {
+         deepMerge(targetVal as Record<string, unknown>, sourceVal as Record<string, unknown>);
+      } else {
+         target[key] = sourceVal;
+      }
+   }
+}
+
 // Runtime config: [moduleSpecifier, storeFilename]
 const runtimeConfigs: [string, string][] = [
 ${runtimeRedirects.join(',\n')}
@@ -104,13 +126,13 @@ for (const [moduleSpec, storeFile] of runtimeConfigs) {
       // Start with global store
       if (fs.existsSync(globalStorePath)) {
          const globalData = JSON.parse(fs.readFileSync(globalStorePath, "utf-8"));
-         Object.assign(runtime.default, globalData);
+         deepMerge(runtime.default, globalData);
       }
       
       // Merge project store (takes precedence)
       if (fs.existsSync(projectStorePath)) {
          const projectData = JSON.parse(fs.readFileSync(projectStorePath, "utf-8"));
-         Object.assign(runtime.default, projectData);
+         deepMerge(runtime.default, projectData);
       }
    } catch {
       // Module not found or store read failed - skip
