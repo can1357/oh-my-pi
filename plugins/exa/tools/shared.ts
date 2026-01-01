@@ -14,8 +14,8 @@ export const EXA_MCP_URL = 'https://mcp.exa.ai/mcp'
 export const WEBSETS_MCP_URL = 'https://websetsmcp.exa.ai/mcp'
 
 // Log paths
-const EXA_ERROR_LOG = path.join(os.homedir(), '.pi/exa_errors.log')
-const VIEW_ERROR_LOG = path.join(os.homedir(), '.pi/view_errors.log')
+const EXA_ERROR_LOG = path.join(os.homedir(), '.pi', 'exa_errors.log')
+const VIEW_ERROR_LOG = path.join(os.homedir(), '.pi', 'view_errors.log')
 
 function logExaError(msg: string): void {
    fs.appendFileSync(EXA_ERROR_LOG, `[${new Date().toISOString()}] ${msg}\n`)

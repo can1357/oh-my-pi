@@ -1,5 +1,6 @@
 import { existsSync, lstatSync } from 'node:fs'
 import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { writeLoader } from '@omp/loader'
@@ -38,7 +39,7 @@ export async function linkPlugin(localPath: string, options: LinkOptions = {}): 
 
    // Expand ~ to home directory
    if (localPath.startsWith('~')) {
-      localPath = join(process.env.HOME || '', localPath.slice(1))
+      localPath = join(homedir(), localPath.slice(1))
    }
    localPath = resolve(localPath)
 

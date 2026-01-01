@@ -4,6 +4,12 @@ import { logError } from '@omp/output'
 import { createProgress } from '@omp/progress'
 import chalk from 'chalk'
 
+/** npm command: 'npm.cmd' on Windows, 'npm' elsewhere */
+export const NPM_CMD = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+
+/** Windows shell option for execFileSync when using NPM_CMD */
+export const NPM_SHELL_OPT = process.platform === 'win32'
+
 export interface NpmAvailability {
    available: boolean
    version?: string
@@ -15,7 +21,8 @@ export interface NpmAvailability {
  */
 export function checkNpmAvailable(): NpmAvailability {
    try {
-      const version = execFileSync('npm', ['--version'], {
+      const version = execFileSync(NPM_CMD, ['--version'], {
+         shell: process.platform === 'win32',
          encoding: 'utf-8',
          stdio: ['pipe', 'pipe', 'pipe'],
       }).trim()
@@ -87,11 +94,12 @@ const DEFAULT_TIMEOUT_MS = 60000 // 60 seconds
  */
 export function npmExec(args: string[], cwd?: string, timeout = DEFAULT_TIMEOUT_MS): string {
    try {
-      return execFileSync('npm', args, {
+      return execFileSync(NPM_CMD, args, {
          cwd,
          stdio: ['pipe', 'pipe', 'pipe'],
          encoding: 'utf-8',
          timeout,
+         shell: process.platform === 'win32',
       })
    } catch (err) {
       const error = err as { killed?: boolean; code?: string; message: string }
@@ -107,10 +115,11 @@ export function npmExec(args: string[], cwd?: string, timeout = DEFAULT_TIMEOUT_
  */
 export function npmExecWithPrefix(args: string[], prefix: string, timeout = DEFAULT_TIMEOUT_MS): string {
    try {
-      return execFileSync('npm', ['--prefix', prefix, ...args], {
+      return execFileSync(NPM_CMD, ['--prefix', prefix, ...args], {
          stdio: ['pipe', 'pipe', 'pipe'],
          encoding: 'utf-8',
          timeout,
+         shell: process.platform === 'win32',
       })
    } catch (err) {
       const error = err as { killed?: boolean; code?: string; message: string }
