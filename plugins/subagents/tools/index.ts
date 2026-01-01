@@ -279,10 +279,10 @@ function isDirectory(p: string): boolean {
   }
 }
 
-function findNearestProjectAgentsDir(cwd: string): string | null {
+function findNearestDir(cwd: string, relPath: string): string | null {
   let currentDir = cwd;
   while (true) {
-    const candidate = path.join(currentDir, ".pi", "agents");
+    const candidate = path.join(currentDir, relPath);
     if (isDirectory(candidate)) return candidate;
 
     const parentDir = path.dirname(currentDir);
@@ -295,29 +295,50 @@ function discoverAgents(
   cwd: string,
   scope: AgentScope,
 ): { agents: AgentConfig[]; projectAgentsDir: string | null } {
-  const userDir = path.join(os.homedir(), ".pi", "agent", "agents");
-  const projectAgentsDir = findNearestProjectAgentsDir(cwd);
+  // Primary directories (.pi)
+  const userPiDir = path.join(os.homedir(), ".pi", "agent", "agents");
+  const projectPiDir = findNearestDir(cwd, ".pi/agents");
 
-  const userAgents =
-    scope === "project" ? [] : loadAgentsFromDir(userDir, "user");
-  const projectAgents =
-    scope === "user" || !projectAgentsDir
-      ? []
-      : loadAgentsFromDir(projectAgentsDir, "project");
+  // Fallback directories (.claude) - only load agents not already present
+  const userClaudeDir = path.join(os.homedir(), ".claude", "agents");
+  const projectClaudeDir = findNearestDir(cwd, ".claude/agents");
 
   const agentMap = new Map<string, AgentConfig>();
 
+  // Load from .pi directories first (primary)
+  const userPiAgents =
+    scope === "project" ? [] : loadAgentsFromDir(userPiDir, "user");
+  const projectPiAgents =
+    scope === "user" || !projectPiDir
+      ? []
+      : loadAgentsFromDir(projectPiDir, "project");
+
+  // Load from .claude directories (fallback)
+  const userClaudeAgents =
+    scope === "project" ? [] : loadAgentsFromDir(userClaudeDir, "user");
+  const projectClaudeAgents =
+    scope === "user" || !projectClaudeDir
+      ? []
+      : loadAgentsFromDir(projectClaudeDir, "project");
+
   if (scope === "both") {
-    // Explicit opt-in: project agents override user agents with the same name.
-    for (const agent of userAgents) agentMap.set(agent.name, agent);
-    for (const agent of projectAgents) agentMap.set(agent.name, agent);
+    // Order: user .claude → user .pi → project .claude → project .pi
+    // Later entries override earlier ones, so .pi takes precedence over .claude
+    for (const agent of userClaudeAgents) agentMap.set(agent.name, agent);
+    for (const agent of userPiAgents) agentMap.set(agent.name, agent);
+    for (const agent of projectClaudeAgents) agentMap.set(agent.name, agent);
+    for (const agent of projectPiAgents) agentMap.set(agent.name, agent);
   } else if (scope === "user") {
-    for (const agent of userAgents) agentMap.set(agent.name, agent);
+    // user .claude → user .pi (later overrides earlier)
+    for (const agent of userClaudeAgents) agentMap.set(agent.name, agent);
+    for (const agent of userPiAgents) agentMap.set(agent.name, agent);
   } else {
-    for (const agent of projectAgents) agentMap.set(agent.name, agent);
+    // project .claude → project .pi
+    for (const agent of projectClaudeAgents) agentMap.set(agent.name, agent);
+    for (const agent of projectPiAgents) agentMap.set(agent.name, agent);
   }
 
-  return { agents: Array.from(agentMap.values()), projectAgentsDir };
+  return { agents: Array.from(agentMap.values()), projectAgentsDir: projectPiDir };
 }
 
 function truncateOutput(output: string): { text: string; truncated: boolean } {
