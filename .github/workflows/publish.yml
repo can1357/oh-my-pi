@@ -93,12 +93,28 @@ jobs:
 
       - name: Publish @oh-my-pi/cli
         if: ${{ !inputs.skip_npm }}
-        run: npm publish --access public --provenance
+        run: |
+          output=$(npm publish --access public --provenance 2>&1) && echo "$output" && exit 0
+          echo "$output"
+          if echo "$output" | grep -q "previously published\|cannot publish over"; then
+            echo "✓ Already published, skipping"
+          else
+            exit 1
+          fi
 
       - name: Publish plugins
         if: ${{ !inputs.skip_npm }}
         run: |
+          failed=0
           for dir in plugins/*/; do
             echo "Publishing $dir"
-            (cd "$dir" && npm publish --access public --provenance)
+            output=$(cd "$dir" && npm publish --access public --provenance 2>&1) && echo "$output" && continue
+            echo "$output"
+            if echo "$output" | grep -q "previously published\|cannot publish over"; then
+              echo "✓ Already published, skipping"
+            else
+              echo "✗ Failed to publish"
+              failed=1
+            fi
           done
+          exit $failed
