@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/lsp",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "LSP (Language Server Protocol) tool for Pi - provides code intelligence, diagnostics, refactoring, and more",
   "keywords": [
     "pi",

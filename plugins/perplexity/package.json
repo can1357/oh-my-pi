@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/perplexity",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Perplexity AI search tools for pi",
   "keywords": [
     "omp-plugin",

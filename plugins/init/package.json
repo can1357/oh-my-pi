@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/init",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Initialize AGENTS.md documentation for a codebase",
   "keywords": [
     "omp-plugin",

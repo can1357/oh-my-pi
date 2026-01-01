@@ -19,7 +19,7 @@ import { whyFile } from "@omp/commands/why";
 import { withErrorHandling } from "@omp/errors";
 import { program } from "commander";
 
-program.name("omp").description("Oh My Pi - Plugin manager for pi configuration").version("0.9.0");
+program.name("omp").description("Oh My Pi - Plugin manager for pi configuration").version("0.9.1");
 
 // ============================================================================
 // Core Commands
