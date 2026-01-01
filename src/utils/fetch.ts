@@ -1,6 +1,7 @@
 const MAX_BYTES = 32 * 1024 * 1024 // 32MB
 
 const USER_AGENTS = [
+   'curl/8.0',
    'Mozilla/5.0 (compatible; TextBot/1.0)',
    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
 ]
@@ -54,6 +55,8 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
             signal: controller.signal,
             headers: {
                'User-Agent': userAgent,
+               Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+               'Accept-Language': 'en-US,en;q=0.5',
                ...headers,
             },
             redirect: 'follow',

@@ -826,7 +826,8 @@ async function handleGitHub(url: string, timeout: number): Promise<RenderResult 
 // Twitter/X Special Handling (via Nitter)
 // =============================================================================
 
-const NITTER_INSTANCES = ['nitter.poast.org', 'nitter.privacydev.net', 'nitter.woodland.cafe']
+// Active Nitter instances - check https://status.d420.de/instances for current status
+const NITTER_INSTANCES = ['nitter.privacyredirect.com', 'nitter.tiekoetter.com', 'nitter.poast.org', 'nitter.woodland.cafe']
 
 /**
  * Handle Twitter/X URLs via Nitter
@@ -888,7 +889,18 @@ async function handleTwitter(url: string, timeout: number): Promise<RenderResult
       }
    } catch {}
 
-   return null
+   // X.com blocks all bots - return a helpful error instead of falling through
+   return {
+      url,
+      finalUrl: url,
+      contentType: 'text/plain',
+      method: 'twitter-blocked',
+      content:
+         'Twitter/X blocks automated access. Nitter instances were unavailable.\n\nTry:\n- Opening the link in a browser\n- Using a different Nitter instance manually\n- Checking if the tweet is available via an archive service',
+      fetchedAt: new Date().toISOString(),
+      truncated: false,
+      notes: ['X.com blocks bots; Nitter instances unavailable'],
+   }
 }
 
 // =============================================================================
@@ -1002,7 +1014,7 @@ function htmlToBasicMarkdown(html: string): string {
       .replace(/<li>/g, '- ')
       .replace(/<\/li>/g, '\n')
       .replace(/<\/?[uo]l>/g, '\n')
-      .replace(/<h(\d)>/g, (_, n) => '\n' + '#'.repeat(parseInt(n)) + ' ')
+      .replace(/<h(\d)>/g, (_, n) => `\n${'#'.repeat(parseInt(n, 10))} `)
       .replace(/<\/h\d>/g, '\n')
       .replace(/<blockquote>/g, '\n> ')
       .replace(/<\/blockquote>/g, '\n')
@@ -1140,9 +1152,9 @@ async function handleReddit(url: string, timeout: number): Promise<RenderResult 
       const fetchedAt = new Date().toISOString()
 
       // Append .json to get JSON response
-      let jsonUrl = url.replace(/\/$/, '') + '.json'
+      let jsonUrl = `${url.replace(/\/$/, '')}.json`
       if (parsed.search) {
-         jsonUrl = url.replace(/\/$/, '').replace(parsed.search, '') + '.json' + parsed.search
+         jsonUrl = `${url.replace(/\/$/, '').replace(parsed.search, '')}.json${parsed.search}`
       }
 
       const result = await loadPage(jsonUrl, { timeout })
@@ -1169,9 +1181,7 @@ async function handleReddit(url: string, timeout: number): Promise<RenderResult 
             // Add comments if available
             if (data.length >= 2 && data[1]?.data?.children) {
                md += `---\n\n## Top Comments\n\n`
-               const comments = data[1].data.children
-                  .filter((c: { kind: string }) => c.kind === 't1')
-                  .slice(0, 10)
+               const comments = data[1].data.children.filter((c: { kind: string }) => c.kind === 't1').slice(0, 10)
 
                for (const { data: comment } of comments as Array<{ data: RedditComment }>) {
                   md += `### u/${comment.author} · ${comment.score} points\n\n`
@@ -1212,22 +1222,6 @@ async function handleReddit(url: string, timeout: number): Promise<RenderResult 
 // =============================================================================
 // NPM Special Handling
 // =============================================================================
-
-interface NpmPackage {
-   name: string
-   description?: string
-   'dist-tags': { latest: string }
-   versions: Record<string, {
-      dependencies?: Record<string, string>
-      devDependencies?: Record<string, string>
-   }>
-   readme?: string
-   homepage?: string
-   repository?: { url: string }
-   license?: string
-   keywords?: string[]
-   maintainers?: Array<{ name: string }>
-}
 
 /**
  * Handle NPM URLs via registry API
@@ -1350,9 +1344,15 @@ async function handleArxiv(url: string, timeout: number): Promise<RenderResult |
 
       const title = entry.querySelector('title')?.text?.trim()?.replace(/\s+/g, ' ')
       const summary = entry.querySelector('summary')?.text?.trim()
-      const authors = entry.querySelectorAll('author name').map(n => n.text?.trim()).filter(Boolean)
+      const authors = entry
+         .querySelectorAll('author name')
+         .map(n => n.text?.trim())
+         .filter(Boolean)
       const published = entry.querySelector('published')?.text?.trim()?.split('T')[0]
-      const categories = entry.querySelectorAll('category').map(c => c.getAttribute('term')).filter(Boolean)
+      const categories = entry
+         .querySelectorAll('category')
+         .map(c => c.getAttribute('term'))
+         .filter(Boolean)
       const pdfLink = entry.querySelector('link[title="pdf"]')?.getAttribute('href')
 
       let md = `# ${title || 'arXiv Paper'}\n\n`
