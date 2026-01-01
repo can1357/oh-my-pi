@@ -21,6 +21,7 @@
 | Plugin                                                                                       | Description                                                                    |
 | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | **[@oh-my-pi/subagents](https://npmjs.com/package/@oh-my-pi/subagents)**                     | Task delegation with specialized sub-agents (task, planner, explore, reviewer) |
+| **[@oh-my-pi/lsp](https://npmjs.com/package/@oh-my-pi/lsp)**                                 | Language Server Protocol for code intelligence, diagnostics, and refactoring   |
 | **[@oh-my-pi/anthropic-websearch](https://npmjs.com/package/@oh-my-pi/anthropic-websearch)** | Claude web search using Anthropic's built-in web_search tool                   |
 | **[@oh-my-pi/exa](https://npmjs.com/package/@oh-my-pi/exa)**                                 | Exa AI-powered web search, company/people lookup, and websets                  |
 | **[@oh-my-pi/perplexity](https://npmjs.com/package/@oh-my-pi/perplexity)**                   | Perplexity AI search with Sonar models (fast and pro)                          |

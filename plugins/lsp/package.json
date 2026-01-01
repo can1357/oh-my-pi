@@ -1,0 +1,19 @@
+{
+   "name": "@oh-my-pi/lsp",
+   "version": "0.1.0",
+   "description": "LSP (Language Server Protocol) tool for Pi - provides code intelligence, diagnostics, refactoring, and more",
+   "keywords": ["pi", "omp", "lsp", "language-server", "rust-analyzer", "typescript", "diagnostics", "refactoring"],
+   "author": "can1357",
+   "license": "MIT",
+   "type": "module",
+   "omp": {
+      "install": [
+         { "src": "tools/lsp/index.ts", "dest": "agent/tools/lsp/index.ts" },
+         { "src": "tools/lsp/config.ts", "dest": "agent/tools/lsp/config.ts" }
+      ]
+   },
+   "dependencies": {
+      "vscode-jsonrpc": "^8.2.0",
+      "vscode-languageserver-protocol": "^3.17.5"
+   }
+}
