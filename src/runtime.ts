@@ -1,5 +1,5 @@
-import type { OmpVariable, PluginPackageJson } from "@omp/manifest";
-import { loadPluginsJson, readPluginPackageJson } from "@omp/manifest";
+import type { OmpVariable, PluginConfig, PluginPackageJson } from "@omp/manifest";
+import { loadPluginsJson, loadProjectOverrides, readPluginPackageJson } from "@omp/manifest";
 
 /**
  * Collect all variables from a plugin (top-level + enabled features)
@@ -48,21 +48,60 @@ function resolveEnabledFeatures(
 		.map(([name]) => name);
 }
 
+function mergePluginConfig(globalConfig?: PluginConfig, localConfig?: PluginConfig): PluginConfig | undefined {
+	if (!globalConfig && !localConfig) return undefined;
+
+	const merged: PluginConfig = {};
+
+	if (localConfig && "features" in localConfig) {
+		merged.features = localConfig.features;
+	} else if (globalConfig && "features" in globalConfig) {
+		merged.features = globalConfig.features;
+	}
+
+	const mergedVars = {
+		...(globalConfig?.variables ?? {}),
+		...(localConfig?.variables ?? {}),
+	};
+	if (Object.keys(mergedVars).length > 0) {
+		merged.variables = mergedVars;
+	}
+
+	return merged;
+}
+
 /**
  * Get all environment variables for enabled plugins
  */
-export async function getPluginEnvVars(global = true): Promise<Record<string, string>> {
-	const pluginsJson = await loadPluginsJson(global);
+export async function getPluginEnvVars(local = false): Promise<Record<string, string>> {
+	const pluginsJson = await loadPluginsJson();
 	const env: Record<string, string> = {};
+	const disabled = new Set(pluginsJson.disabled || []);
+	const configByPlugin: Record<string, PluginConfig> = { ...(pluginsJson.config || {}) };
+
+	if (local) {
+		const overrides = await loadProjectOverrides();
+		for (const name of overrides.disabled || []) {
+			disabled.add(name);
+		}
+		if (overrides.config) {
+			for (const [name, localConfig] of Object.entries(overrides.config)) {
+				const merged = mergePluginConfig(configByPlugin[name], localConfig);
+				if (merged) {
+					configByPlugin[name] = merged;
+				}
+			}
+		}
+	}
 
 	for (const pluginName of Object.keys(pluginsJson.plugins)) {
 		// Skip disabled plugins
-		if (pluginsJson.disabled?.includes(pluginName)) continue;
+		if (disabled.has(pluginName)) continue;
 
-		const pkgJson = await readPluginPackageJson(pluginName, global);
+		const pkgJson = await readPluginPackageJson(pluginName);
 		if (!pkgJson?.omp) continue;
 
-		const config = pluginsJson.config?.[pluginName];
+		const config = configByPlugin[pluginName];
 		const allFeatureNames = Object.keys(pkgJson.omp.features || {});
 		const enabledFeatures = resolveEnabledFeatures(allFeatureNames, config?.features, pkgJson.omp.features || {});
 
@@ -86,8 +125,8 @@ export async function getPluginEnvVars(global = true): Promise<Record<string, st
  * Generate shell export statements
  * omp env > ~/.pi/env.sh && source ~/.pi/env.sh
  */
-export async function generateEnvScript(global = true, shell: "sh" | "fish" = "sh"): Promise<string> {
-	const vars = await getPluginEnvVars(global);
+export async function generateEnvScript(local = false, shell: "sh" | "fish" = "sh"): Promise<string> {
+	const vars = await getPluginEnvVars(local);
 
 	if (shell === "fish") {
 		// Fish doesn't expand variables in single quotes
@@ -106,6 +145,6 @@ export async function generateEnvScript(global = true, shell: "sh" | "fish" = "s
 /**
  * Get environment variables as a JSON object for programmatic use
  */
-export async function getEnvJson(global = true): Promise<Record<string, string>> {
-	return getPluginEnvVars(global);
+export async function getEnvJson(local = false): Promise<Record<string, string>> {
+	return getPluginEnvVars(local);
 }
