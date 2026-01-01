@@ -1141,7 +1141,8 @@ const factory: CustomToolFactory = pi => {
             } else {
                headerText = theme.fg('toolTitle', `Running ${count} ${pluralize(count, 'agent')}`)
             }
-            let text = headerText + theme.fg('dim', writeNote)
+            const expandHint = expanded ? '' : theme.fg('dim', ' (Ctrl+O for details)')
+            let text = headerText + theme.fg('dim', writeNote) + expandHint
 
             for (let i = 0; i < details.progress.length; i++) {
                const p = details.progress[i]
