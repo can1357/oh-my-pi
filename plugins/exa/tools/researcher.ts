@@ -3,7 +3,7 @@
  *
  * Tools:
  *   - web_search_researcher_start: Start comprehensive AI research tasks
- *   - web_search_researcher_check: Check research task status
+ *   - web_search_researcher_poll: Check research task status
  */
 
 import type { CustomAgentTool, CustomToolFactory, ToolAPI } from '@mariozechner/pi-coding-agent'
@@ -16,7 +16,7 @@ const TOOL_NAMES = ['deep_researcher_start', 'deep_researcher_check']
 // Tool name mapping: MCP name -> exposed name
 const NAME_MAP: Record<string, string> = {
    deep_researcher_start: 'web_search_researcher_start',
-   deep_researcher_check: 'web_search_researcher_check',
+   deep_researcher_check: 'web_search_researcher_poll',
 }
 
 const factory: CustomToolFactory = async (_toolApi: ToolAPI): Promise<CustomAgentTool<TSchema, unknown>[] | null> => {

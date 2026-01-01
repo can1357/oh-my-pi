@@ -2,7 +2,7 @@
  * Exa Company Research Tool
  *
  * Tools:
- *   - web_search_company_research: Comprehensive company research
+ *   - web_search_company: Comprehensive company research
  */
 
 import type { CustomAgentTool, CustomToolFactory, ToolAPI } from '@mariozechner/pi-coding-agent'
@@ -14,7 +14,7 @@ const TOOL_NAMES = ['company_research_exa']
 
 // Tool name mapping: MCP name -> exposed name
 const NAME_MAP: Record<string, string> = {
-   company_research_exa: 'web_search_company_research',
+   company_research_exa: 'web_search_company',
 }
 
 const factory: CustomToolFactory = async (_toolApi: ToolAPI): Promise<CustomAgentTool<TSchema, unknown>[] | null> => {

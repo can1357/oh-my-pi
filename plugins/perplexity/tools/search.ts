@@ -7,8 +7,43 @@
  */
 
 import type { CustomAgentTool, CustomToolFactory, ToolAPI } from '@mariozechner/pi-coding-agent'
+import { Text } from '@mariozechner/pi-tui'
 import { type TSchema, Type } from '@sinclair/typebox'
-import { callPerplexity, findApiKey, formatResponse, type PerplexityRequest } from './shared'
+import { callPerplexity, findApiKey, formatResponse, type PerplexityRequest, type SearchResult } from './shared'
+
+// Tree rendering constants
+const TREE_MID = '├─'
+const TREE_END = '└─'
+const TREE_PIPE = '│'
+const TREE_SPACE = ' '
+
+/**
+ * Truncate text to max length with ellipsis
+ */
+function truncate(text: string, maxLen: number): string {
+   if (text.length <= maxLen) return text
+   return `${text.slice(0, maxLen - 1)}…`
+}
+
+/**
+ * Extract domain from URL
+ */
+function getDomain(url: string): string {
+   try {
+      const u = new URL(url)
+      return u.hostname.replace(/^www\./, '')
+   } catch {
+      return url
+   }
+}
+
+/**
+ * Get first N lines of text as preview
+ */
+function getPreviewLines(text: string, maxLines: number, maxLineLen: number): string[] {
+   const lines = text.split('\n').filter(l => l.trim())
+   return lines.slice(0, maxLines).map(l => truncate(l.trim(), maxLineLen))
+}
 
 const RecencyFilter = Type.Optional(
    Type.Union([Type.Literal('day'), Type.Literal('week'), Type.Literal('month'), Type.Literal('year')], {
@@ -145,6 +180,98 @@ function createSearchTool(
                details: { error: message },
             }
          }
+      },
+
+      renderResult(result, { expanded }, theme) {
+         const { details } = result
+
+         // Handle error case
+         if (details && typeof details === 'object' && 'error' in details) {
+            const errDetails = details as { error: string }
+            return new Text(theme.fg('error', `Error: ${errDetails.error}`), 0, 0)
+         }
+
+         // Type for the details object
+         interface PerplexityDetails {
+            model: string
+            usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+            citations?: string[]
+            search_results?: SearchResult[]
+            related_questions?: string[]
+         }
+
+         const data = details as PerplexityDetails | undefined
+         const answer = result.content[0]?.type === 'text' ? result.content[0].text : ''
+
+         // Build header with metadata
+         const meta: string[] = []
+         if (data?.model) meta.push(data.model)
+         if (data?.usage?.total_tokens) meta.push(`${data.usage.total_tokens} tokens`)
+
+         const citationCount = data?.citations?.length ?? 0
+         const icon = citationCount > 0 ? theme.fg('success', '●') : theme.fg('warning', '●')
+         const expandHint = expanded ? '' : theme.fg('dim', ' (Ctrl+O to expand)')
+         let text = `${icon} ${theme.fg('toolTitle', 'Perplexity Search')} ${theme.fg('dim', meta.join(' · '))}${expandHint}`
+
+         if (!answer) {
+            text += `\n ${theme.fg('dim', TREE_END)} ${theme.fg('muted', 'No answer returned')}`
+            return new Text(text, 0, 0)
+         }
+
+         if (expanded) {
+            // Full answer
+            const answerLines = answer.split('\n')
+            for (const line of answerLines) {
+               text += `\n ${theme.fg('dim', TREE_PIPE)}  ${line}`
+            }
+
+            // Citations tree
+            if (data?.citations && data.citations.length > 0) {
+               text += `\n ${theme.fg('dim', TREE_MID)} ${theme.fg('accent', 'Citations')}`
+               for (let i = 0; i < data.citations.length; i++) {
+                  const citation = data.citations[i]
+                  const isLast = i === data.citations.length - 1 && !data.related_questions?.length
+                  const branch = isLast ? TREE_END : TREE_MID
+                  const domain = getDomain(citation)
+
+                  // Find matching search result for title
+                  const searchResult = data.search_results?.find(r => r.url === citation)
+                  const title = searchResult?.title ? truncate(searchResult.title, 60) : domain
+
+                  text += `\n ${theme.fg('dim', TREE_PIPE)} ${theme.fg('dim', branch)} ${theme.fg('accent', title)}`
+                  text += theme.fg('dim', ` (${domain})`)
+               }
+            }
+
+            // Related questions tree
+            if (data?.related_questions && data.related_questions.length > 0) {
+               text += `\n ${theme.fg('dim', TREE_END)} ${theme.fg('accent', 'Related Questions')}`
+               for (let i = 0; i < data.related_questions.length; i++) {
+                  const question = data.related_questions[i]
+                  const isLast = i === data.related_questions.length - 1
+                  const branch = isLast ? TREE_END : TREE_MID
+                  text += `\n ${theme.fg('dim', TREE_SPACE)} ${theme.fg('dim', branch)} ${theme.fg('muted', question)}`
+               }
+            }
+         } else {
+            // Collapsed: preview lines
+            const preview = getPreviewLines(answer, 3, 100)
+            for (const line of preview) {
+               text += `\n ${theme.fg('dim', TREE_PIPE)}  ${theme.fg('dim', line)}`
+            }
+
+            const totalLines = answer.split('\n').filter(l => l.trim()).length
+            if (totalLines > 3) {
+               text += `\n ${theme.fg('dim', TREE_PIPE)}  ${theme.fg('muted', `… ${totalLines - 3} more lines`)}`
+            }
+
+            // Citation count summary
+            if (citationCount > 0) {
+               text += `\n ${theme.fg('dim', TREE_END)} ${theme.fg('muted', `${citationCount} citation${citationCount !== 1 ? 's' : ''}`)}`
+            }
+         }
+
+         return new Text(text, 0, 0)
       },
    }
 }

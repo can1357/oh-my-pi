@@ -59,10 +59,10 @@ Get your API key from: https://dashboard.exa.ai/api-keys
 
 | Tool                      | Description                                          |
 | ------------------------- | ---------------------------------------------------- |
-| `web_search_general`      | Real-time web searches with content extraction       |
+| `web_search`              | Real-time web searches with content extraction       |
 | `web_search_deep`         | Natural language web search with synthesized results |
 | `web_search_code_context` | Search code snippets, docs, and examples             |
-| `web_search_crawl_url`    | Extract content from specific URLs                   |
+| `web_search_crawl`        | Extract content from specific URLs                   |
 
 ### linkedin
 
@@ -72,16 +72,16 @@ Get your API key from: https://dashboard.exa.ai/api-keys
 
 ### company
 
-| Tool                          | Description                    |
-| ----------------------------- | ------------------------------ |
-| `web_search_company_research` | Comprehensive company research |
+| Tool                 | Description                    |
+| -------------------- | ------------------------------ |
+| `web_search_company` | Comprehensive company research |
 
 ### researcher
 
 | Tool                          | Description                                  |
 | ----------------------------- | -------------------------------------------- |
 | `web_search_researcher_start` | Start comprehensive AI-powered research task |
-| `web_search_researcher_check` | Check research task status and get results   |
+| `web_search_researcher_poll`  | Check research task status and get results   |
 
 ### websets
 

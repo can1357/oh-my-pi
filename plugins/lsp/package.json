@@ -24,6 +24,7 @@
     "tools": "tools"
   },
   "dependencies": {
+    "cli-highlight": "^2.1.11",
     "vscode-jsonrpc": "^8.2.0",
     "vscode-languageserver-protocol": "^3.17.5"
   }

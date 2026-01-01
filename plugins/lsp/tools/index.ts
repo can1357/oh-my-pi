@@ -5,6 +5,7 @@ import { StringEnum } from '@mariozechner/pi-ai'
 import type { CustomToolFactory } from '@mariozechner/pi-coding-agent'
 import { Text } from '@mariozechner/pi-tui'
 import { Type } from '@sinclair/typebox'
+import { highlight, supportsLanguage } from 'cli-highlight'
 
 // These imports work because the omp loader patches Node's module resolution
 // to include ~/.pi/plugins/node_modules
@@ -1067,23 +1068,337 @@ const factory: CustomToolFactory = pi => {
       },
 
       renderResult(result, { expanded }, theme) {
+         const TREE_MID = '├─'
+         const TREE_END = '└─'
+         const TREE_PIPE = '│'
+
          const content = result.content?.[0]
          if (!content || content.type !== 'text') return new Text(theme.fg('error', 'No result'), 0, 0)
 
          const text = content.text
-         const lines = text.split('\n')
+         const lines = text.split('\n').filter(l => l.trim())
+
+         // Detect hover output (contains code blocks)
+         const codeBlockMatch = text.match(/```(\w*)\n([\s\S]*?)```/)
+         const isHover = codeBlockMatch !== null
+
+         if (isHover) {
+            const lang = codeBlockMatch[1] || ''
+            const code = codeBlockMatch[2].trim()
+            // Extract doc comment after the code block
+            const afterCode = text.slice(text.indexOf('```', 3) + 3).trim()
+
+            // Syntax highlight the code
+            const highlightCode = (codeText: string, language: string): string[] => {
+               const validLang = language && supportsLanguage(language) ? language : undefined
+               try {
+                  // Build a theme using the pi theme colors
+                  const cliTheme = {
+                     keyword: (s: string) => theme.fg('syntaxKeyword', s),
+                     built_in: (s: string) => theme.fg('syntaxType', s),
+                     literal: (s: string) => theme.fg('syntaxNumber', s),
+                     number: (s: string) => theme.fg('syntaxNumber', s),
+                     string: (s: string) => theme.fg('syntaxString', s),
+                     comment: (s: string) => theme.fg('syntaxComment', s),
+                     function: (s: string) => theme.fg('syntaxFunction', s),
+                     title: (s: string) => theme.fg('syntaxFunction', s),
+                     class: (s: string) => theme.fg('syntaxType', s),
+                     type: (s: string) => theme.fg('syntaxType', s),
+                     attr: (s: string) => theme.fg('syntaxVariable', s),
+                     variable: (s: string) => theme.fg('syntaxVariable', s),
+                     params: (s: string) => theme.fg('syntaxVariable', s),
+                     operator: (s: string) => theme.fg('syntaxOperator', s),
+                     punctuation: (s: string) => theme.fg('syntaxPunctuation', s),
+                  }
+                  return highlight(codeText, { language: validLang, ignoreIllegals: true, theme: cliTheme }).split('\n')
+               } catch {
+                  return codeText.split('\n')
+               }
+            }
+
+            const icon = theme.fg('accent', '●')
+            const langLabel = lang ? theme.fg('mdCodeBlockBorder', ` ${lang}`) : ''
+            const codeLines = highlightCode(code, lang)
+
+            if (expanded) {
+               // Full view: show code with syntax highlighting
+               let output = `${icon} ${theme.fg('toolTitle', 'Hover')}${langLabel}`
+               output += `\n ${theme.fg('mdCodeBlockBorder', '┌───')}`
+               for (const line of codeLines) {
+                  output += `\n ${theme.fg('mdCodeBlockBorder', '│')} ${line}`
+               }
+               output += `\n ${theme.fg('mdCodeBlockBorder', '└───')}`
+               if (afterCode) {
+                  output += `\n ${theme.fg('muted', afterCode)}`
+               }
+               return new Text(output, 0, 0)
+            }
+
+            // Collapsed: show first line of code + doc preview
+            const firstCodeLine = codeLines[0] || ''
+            const expandHint = theme.fg('dim', ' (Ctrl+O to expand)')
+
+            let output = `${icon} ${theme.fg('toolTitle', 'Hover')}${langLabel}${expandHint}`
+            output += `\n ${theme.fg('mdCodeBlockBorder', '│')} ${firstCodeLine}`
+
+            if (codeLines.length > 1) {
+               output += `\n ${theme.fg('mdCodeBlockBorder', '│')} ${theme.fg('muted', `… ${codeLines.length - 1} more lines`)}`
+            }
+
+            if (afterCode) {
+               const docPreview = afterCode.length > 60 ? `${afterCode.slice(0, 60)}…` : afterCode
+               output += `\n ${theme.fg('dim', TREE_END)} ${theme.fg('muted', docPreview)}`
+            } else {
+               output += `\n ${theme.fg('mdCodeBlockBorder', '└───')}`
+            }
+
+            return new Text(output, 0, 0)
+         }
+
+         // Detect diagnostic output: "N error(s)" or lines with "✗"
+         const errorMatch = text.match(/(\d+)\s+error\(s\)/)
+         const warningMatch = text.match(/(\d+)\s+warning\(s\)/)
+         const isDiagnostics = errorMatch || warningMatch || text.includes('✗')
+
+         // Detect references output: "N reference(s)"
+         const refMatch = text.match(/(\d+)\s+reference\(s\)/)
+         const isReferences = refMatch !== null
+
+         // Detect symbols output: "Symbols in file:"
+         const symbolsMatch = text.match(/Symbols in (.+):/)
+         const isSymbols = symbolsMatch !== null
+
+         if (isDiagnostics) {
+            const errorCount = errorMatch ? Number.parseInt(errorMatch[1], 10) : 0
+            const warnCount = warningMatch ? Number.parseInt(warningMatch[1], 10) : 0
+            const icon = errorCount > 0 ? theme.fg('error', '●') : warnCount > 0 ? theme.fg('warning', '●') : theme.fg('success', '●')
+
+            const meta: string[] = []
+            if (errorCount > 0) meta.push(`${errorCount} error${errorCount !== 1 ? 's' : ''}`)
+            if (warnCount > 0) meta.push(`${warnCount} warning${warnCount !== 1 ? 's' : ''}`)
+            if (meta.length === 0) meta.push('No issues')
+
+            // Extract diagnostic lines (file:line:col [type] message)
+            const diagLines = lines.filter(l => l.includes('✗') || /:\d+:\d+/.test(l))
+
+            if (expanded) {
+               let output = `${icon} ${theme.fg('toolTitle', 'Diagnostics')} ${theme.fg('dim', meta.join(', '))}`
+               for (let i = 0; i < diagLines.length; i++) {
+                  const isLast = i === diagLines.length - 1
+                  const branch = isLast ? TREE_END : TREE_MID
+                  const line = diagLines[i].trim()
+                  // Color errors red, warnings yellow
+                  const color = line.includes('[error]') ? 'error' : line.includes('[warning]') ? 'warning' : 'dim'
+                  output += `\n ${theme.fg('dim', branch)} ${theme.fg(color, line)}`
+               }
+               return new Text(output, 0, 0)
+            }
+
+            const expandHint = theme.fg('dim', ' (Ctrl+O to expand)')
+            let output = `${icon} ${theme.fg('toolTitle', 'Diagnostics')} ${theme.fg('dim', meta.join(', '))}${expandHint}`
+
+            // Show first 4 diagnostic lines as tree
+            const previewLines = diagLines.length > 0 ? diagLines.slice(0, 4) : lines.slice(0, 4)
+            for (let i = 0; i < previewLines.length; i++) {
+               const isLast = i === previewLines.length - 1 && diagLines.length <= 4
+               const branch = isLast ? TREE_END : TREE_MID
+               output += `\n ${theme.fg('dim', branch)} ${previewLines[i].trim()}`
+            }
+            if (diagLines.length > 4) {
+               output += `\n ${theme.fg('dim', TREE_END)} ${theme.fg('muted', `… ${diagLines.length - 4} more`)}`
+            }
+            return new Text(output, 0, 0)
+         }
+
+         if (isReferences) {
+            const refCount = refMatch ? Number.parseInt(refMatch[1], 10) : 0
+            const icon = refCount > 0 ? theme.fg('success', '●') : theme.fg('warning', '●')
+
+            // Extract location lines and group by file
+            const locLines = lines.filter(l => /^\s*\S+:\d+:\d+/.test(l))
+
+            // Group references by file: { file: [[line, col], ...] }
+            const byFile = new Map<string, Array<[string, string]>>()
+            for (const loc of locLines) {
+               const match = loc.trim().match(/^(.+):(\d+):(\d+)$/)
+               if (match) {
+                  const [, file, line, col] = match
+                  if (!byFile.has(file)) byFile.set(file, [])
+                  byFile.get(file)!.push([line, col])
+               }
+            }
+
+            const files = Array.from(byFile.keys())
+
+            // Helper to render grouped refs
+            const renderGrouped = (maxFiles: number, maxLocsPerFile: number, showHint: boolean) => {
+               const expandHint = showHint ? theme.fg('dim', ' (Ctrl+O to expand)') : ''
+               let output = `${icon} ${theme.fg('toolTitle', 'References')} ${theme.fg('dim', `${refCount} found`)}${expandHint}`
+
+               const filesToShow = files.slice(0, maxFiles)
+               for (let fi = 0; fi < filesToShow.length; fi++) {
+                  const file = filesToShow[fi]
+                  const locs = byFile.get(file)!
+                  const isLastFile = fi === filesToShow.length - 1 && files.length <= maxFiles
+                  const fileBranch = isLastFile ? TREE_END : TREE_MID
+                  const fileCont = isLastFile ? '   ' : `${TREE_PIPE}  `
+
+                  if (locs.length === 1) {
+                     // Single ref - show inline
+                     output += `\n ${theme.fg('dim', fileBranch)} ${theme.fg('accent', file)}:${theme.fg('muted', `${locs[0][0]}:${locs[0][1]}`)}`
+                  } else {
+                     // Multiple refs - show file then locations
+                     output += `\n ${theme.fg('dim', fileBranch)} ${theme.fg('accent', file)}`
+
+                     // Format locations as compact list
+                     const locsToShow = locs.slice(0, maxLocsPerFile)
+                     const locStrs = locsToShow.map(([l, c]) => `${l}:${c}`)
+                     const locsText = locStrs.join(', ')
+                     const hasMore = locs.length > maxLocsPerFile
+
+                     output += `\n ${theme.fg('dim', fileCont)}${theme.fg('dim', TREE_END)} ${theme.fg('muted', locsText)}`
+                     if (hasMore) {
+                        output += theme.fg('dim', ` … +${locs.length - maxLocsPerFile} more`)
+                     }
+                  }
+               }
+
+               if (files.length > maxFiles) {
+                  output += `\n ${theme.fg('dim', TREE_END)} ${theme.fg('muted', `… ${files.length - maxFiles} more files`)}`
+               }
+
+               return output
+            }
+
+            if (expanded) {
+               return new Text(renderGrouped(files.length, 30, false), 0, 0)
+            }
+
+            return new Text(renderGrouped(4, 10, true), 0, 0)
+         }
+
+         if (isSymbols) {
+            const fileName = symbolsMatch[1]
+            const icon = theme.fg('accent', '●')
+
+            // Parse symbol lines into structured data
+            // Format: "  symbolName @ line N" with indentation showing hierarchy
+            const symbolLines = lines.filter(l => l.includes('@') && l.includes('line'))
+
+            interface SymbolInfo {
+               name: string
+               line: string
+               indent: number
+            }
+
+            const symbols: SymbolInfo[] = []
+            for (const line of symbolLines) {
+               const indent = line.match(/^(\s*)/)?.[1].length ?? 0
+               const symMatch = line.trim().match(/^(.+?)\s*@\s*line\s*(\d+)/)
+               if (symMatch) {
+                  symbols.push({ name: symMatch[1], line: symMatch[2], indent })
+               }
+            }
+
+            // Check if symbol at index i is the last sibling at its indent level
+            const isLastSibling = (i: number): boolean => {
+               const myIndent = symbols[i].indent
+               for (let j = i + 1; j < symbols.length; j++) {
+                  const nextIndent = symbols[j].indent
+                  if (nextIndent === myIndent) return false // found sibling
+                  if (nextIndent < myIndent) return true // went up to parent, no more siblings
+               }
+               return true // end of list
+            }
+
+            // Build prefix for tree drawing based on parent lastness
+            const getPrefix = (i: number): string => {
+               const myIndent = symbols[i].indent
+               if (myIndent === 0) return ' '
+
+               // For each ancestor level, check if that ancestor was last
+               let prefix = ' '
+               for (let level = 2; level <= myIndent; level += 2) {
+                  // Find the ancestor at this level that contains us
+                  let ancestorIdx = -1
+                  for (let j = i - 1; j >= 0; j--) {
+                     if (symbols[j].indent === level - 2) {
+                        ancestorIdx = j
+                        break
+                     }
+                  }
+                  if (ancestorIdx >= 0 && isLastSibling(ancestorIdx)) {
+                     prefix += '   '
+                  } else {
+                     prefix += `${TREE_PIPE}  `
+                  }
+               }
+               return prefix
+            }
+
+            // Count top-level symbols
+            const topLevelCount = symbols.filter(s => s.indent === 0).length
+
+            if (expanded) {
+               let output = `${icon} ${theme.fg('toolTitle', 'Symbols')} ${theme.fg('dim', `in ${fileName}`)}`
+
+               for (let i = 0; i < symbols.length; i++) {
+                  const sym = symbols[i]
+                  const prefix = getPrefix(i)
+                  const branch = isLastSibling(i) ? TREE_END : TREE_MID
+                  output += `\n${prefix}${theme.fg('dim', branch)} ${theme.fg('accent', sym.name)} ${theme.fg('muted', `@${sym.line}`)}`
+               }
+               return new Text(output, 0, 0)
+            }
+
+            const expandHint = theme.fg('dim', ' (Ctrl+O to expand)')
+            let output = `${icon} ${theme.fg('toolTitle', 'Symbols')} ${theme.fg('dim', `in ${fileName}`)}${expandHint}`
+
+            // Show first 4 top-level symbols only
+            const topLevel = symbols.filter(s => s.indent === 0).slice(0, 4)
+            for (let i = 0; i < topLevel.length; i++) {
+               const sym = topLevel[i]
+               const isLast = i === topLevel.length - 1 && topLevelCount <= 4
+               const branch = isLast ? TREE_END : TREE_MID
+               output += `\n ${theme.fg('dim', branch)} ${theme.fg('accent', sym.name)} ${theme.fg('muted', `@${sym.line}`)}`
+            }
+            if (topLevelCount > 4) {
+               output += `\n ${theme.fg('dim', TREE_END)} ${theme.fg('muted', `… ${topLevelCount - 4} more`)}`
+            }
+            return new Text(output, 0, 0)
+         }
+
+         // Default: show first line with styling + line count
          const hasError = text.includes('Error:') || text.includes('✗')
          const hasSuccess = text.includes('✓') || text.includes('Applied')
 
-         let summary =
-            hasError && !hasSuccess
-               ? theme.fg('error', lines[0])
-               : hasSuccess && !hasError
-                 ? theme.fg('success', lines[0])
-                 : theme.fg('toolOutput', lines[0])
+         const icon =
+            hasError && !hasSuccess ? theme.fg('error', '●') : hasSuccess && !hasError ? theme.fg('success', '●') : theme.fg('accent', '●')
 
-         if (!expanded && lines.length > 1) summary += theme.fg('dim', ` (+${lines.length - 1} lines)`)
-         return new Text(expanded ? text : summary, 0, 0)
+         if (expanded) {
+            let output = `${icon} ${theme.fg('toolTitle', 'LSP')}`
+            for (const line of lines) {
+               output += `\n ${line}`
+            }
+            return new Text(output, 0, 0)
+         }
+
+         const firstLine = lines[0] || 'No output'
+         const expandHint = lines.length > 1 ? theme.fg('dim', ' (Ctrl+O to expand)') : ''
+         let output = `${icon} ${theme.fg('toolTitle', 'LSP')} ${theme.fg('dim', firstLine.slice(0, 60))}${expandHint}`
+
+         if (lines.length > 1) {
+            const previewLines = lines.slice(1, 4)
+            for (let i = 0; i < previewLines.length; i++) {
+               const isLast = i === previewLines.length - 1 && lines.length <= 4
+               const branch = isLast ? TREE_END : TREE_MID
+               output += `\n ${theme.fg('dim', branch)} ${theme.fg('dim', previewLines[i].trim().slice(0, 80))}`
+            }
+            if (lines.length > 4) {
+               output += `\n ${theme.fg('dim', TREE_END)} ${theme.fg('muted', `… ${lines.length - 4} more lines`)}`
+            }
+         }
+         return new Text(output, 0, 0)
       },
 
       dispose() {

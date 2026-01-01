@@ -14,6 +14,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { CustomAgentTool, CustomToolFactory, ToolAPI } from '@mariozechner/pi-coding-agent'
+import { Text } from '@mariozechner/pi-tui'
 import { type TSchema, Type } from '@sinclair/typebox'
 import runtime from './runtime.json'
 
@@ -435,6 +436,67 @@ type SearchParams = {
    max_tokens?: number
 }
 
+// Tree formatting helpers
+const TREE_MID = '├─'
+const TREE_END = '└─'
+const TREE_PIPE = '│'
+const TREE_SPACE = ' '
+const TREE_HOOK = '⎿'
+
+/**
+ * Truncate text to max length with ellipsis
+ */
+function truncate(text: string, maxLen: number): string {
+   if (text.length <= maxLen) return text
+   return `${text.slice(0, maxLen - 1)}…`
+}
+
+/**
+ * Extract domain from URL
+ */
+function getDomain(url: string): string {
+   try {
+      const u = new URL(url)
+      return u.hostname.replace(/^www\./, '')
+   } catch {
+      return url
+   }
+}
+
+/**
+ * Format age string (e.g. "2 days ago", "3 weeks ago")
+ */
+function formatAge(ageSeconds: number | null | undefined): string {
+   if (!ageSeconds) return ''
+   const mins = Math.floor(ageSeconds / 60)
+   const hours = Math.floor(mins / 60)
+   const days = Math.floor(hours / 24)
+   const weeks = Math.floor(days / 7)
+   const months = Math.floor(days / 30)
+
+   if (months > 0) return `${months}mo ago`
+   if (weeks > 0) return `${weeks}w ago`
+   if (days > 0) return `${days}d ago`
+   if (hours > 0) return `${hours}h ago`
+   if (mins > 0) return `${mins}m ago`
+   return 'just now'
+}
+
+/**
+ * Get first N lines of text as preview
+ */
+function getPreviewLines(text: string, maxLines: number, maxLineLen: number): string[] {
+   const lines = text.split('\n').filter(l => l.trim())
+   return lines.slice(0, maxLines).map(l => truncate(l.trim(), maxLineLen))
+}
+
+interface RenderDetails {
+   model?: string
+   usage?: { input_tokens: number; output_tokens: number }
+   sources?: Array<{ title: string; url: string; age?: string | null; age_seconds?: number }>
+   error?: string
+}
+
 const factory: CustomToolFactory = async (_toolApi: ToolAPI): Promise<CustomAgentTool<TSchema, unknown>[] | null> => {
    const auth = findAuthConfig()
    if (!auth) {
@@ -465,6 +527,74 @@ const factory: CustomToolFactory = async (_toolApi: ToolAPI): Promise<CustomAgen
                details: { error: message },
             }
          }
+      },
+
+      renderResult(result, { expanded }, theme) {
+         const details = result.details as RenderDetails | undefined
+
+         // Handle error case
+         if (details?.error) {
+            return new Text(theme.fg('error', `Error: ${details.error}`), 0, 0)
+         }
+
+         const sources = details?.sources ?? []
+         const sourceCount = sources.length
+         const modelName = details?.model ?? model
+
+         // Build header: ● Web Search (model) · N sources
+         const icon = sourceCount > 0 ? theme.fg('success', '●') : theme.fg('warning', '●')
+         const expandHint = expanded ? '' : theme.fg('dim', ' (Ctrl+O to expand)')
+         let text = `${icon} ${theme.fg('toolTitle', 'Web Search')} ${theme.fg('dim', `(${modelName})`)} · ${theme.fg('dim', `${sourceCount} source${sourceCount !== 1 ? 's' : ''}`)}${expandHint}`
+
+         // Get answer text from content
+         const contentText = result.content[0]?.type === 'text' ? result.content[0].text : ''
+
+         if (!expanded) {
+            // Collapsed view: show 2-3 preview lines of answer
+            const previewLines = getPreviewLines(contentText, 3, 100)
+            for (const line of previewLines) {
+               text += `\n ${theme.fg('dim', TREE_PIPE)}  ${theme.fg('dim', line)}`
+            }
+            const totalLines = contentText.split('\n').filter(l => l.trim()).length
+            if (totalLines > 3) {
+               text += `\n ${theme.fg('dim', TREE_PIPE)}  ${theme.fg('muted', `… ${totalLines - 3} more lines`)}`
+            }
+
+            // Show source count summary
+            if (sourceCount > 0) {
+               text += `\n ${theme.fg('dim', TREE_END)} ${theme.fg('muted', `${sourceCount} source${sourceCount !== 1 ? 's' : ''}`)}`
+            }
+         } else {
+            // Expanded view: full answer + source tree
+            const answerLines = contentText.split('\n')
+            for (const line of answerLines) {
+               text += `\n ${theme.fg('dim', TREE_PIPE)}  ${line}`
+            }
+
+            // Render sources as tree
+            if (sourceCount > 0) {
+               text += `\n ${theme.fg('dim', TREE_PIPE)}`
+               text += `\n ${theme.fg('dim', TREE_END)} ${theme.fg('accent', 'Sources')}`
+
+               for (let i = 0; i < sources.length; i++) {
+                  const src = sources[i]
+                  const isLast = i === sources.length - 1
+                  const branch = isLast ? TREE_END : TREE_MID
+                  const cont = isLast ? TREE_SPACE : TREE_PIPE
+
+                  // Title + domain + age
+                  const title = truncate(src.title, 60)
+                  const domain = getDomain(src.url)
+                  const ageStr = src.age ?? (src.age_seconds ? formatAge(src.age_seconds) : '')
+                  const agePart = ageStr ? theme.fg('muted', ` · ${ageStr}`) : ''
+
+                  text += `\n    ${theme.fg('dim', branch)} ${theme.fg('accent', title)} ${theme.fg('dim', `(${domain})`)}${agePart}`
+                  text += `\n    ${theme.fg('dim', `${cont}  ${TREE_HOOK} `)}${theme.fg('link', src.url)}`
+               }
+            }
+         }
+
+         return new Text(text, 0, 0)
       },
    }
 
