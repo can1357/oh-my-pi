@@ -822,6 +822,575 @@ async function handleGitHub(url: string, timeout: number): Promise<RenderResult 
    return null
 }
 
+// =============================================================================
+// Twitter/X Special Handling (via Nitter)
+// =============================================================================
+
+const NITTER_INSTANCES = ['nitter.poast.org', 'nitter.privacydev.net', 'nitter.woodland.cafe']
+
+/**
+ * Handle Twitter/X URLs via Nitter
+ */
+async function handleTwitter(url: string, timeout: number): Promise<RenderResult | null> {
+   try {
+      const parsed = new URL(url)
+      if (!['twitter.com', 'x.com', 'www.twitter.com', 'www.x.com'].includes(parsed.hostname)) {
+         return null
+      }
+
+      const fetchedAt = new Date().toISOString()
+
+      // Try Nitter instances
+      for (const instance of NITTER_INSTANCES) {
+         const nitterUrl = `https://${instance}${parsed.pathname}`
+         const result = await loadPage(nitterUrl, { timeout: Math.min(timeout, 10) })
+
+         if (result.ok && result.content.length > 500) {
+            // Parse the Nitter HTML
+            const doc = parseHtml(result.content)
+
+            // Extract tweet content
+            const tweetContent = doc.querySelector('.tweet-content')?.text?.trim()
+            const fullname = doc.querySelector('.fullname')?.text?.trim()
+            const username = doc.querySelector('.username')?.text?.trim()
+            const date = doc.querySelector('.tweet-date a')?.text?.trim()
+            const stats = doc.querySelector('.tweet-stats')?.text?.trim()
+
+            if (tweetContent) {
+               let md = `# Tweet by ${fullname || 'Unknown'} (${username || '@?'})\n\n`
+               if (date) md += `*${date}*\n\n`
+               md += `${tweetContent}\n\n`
+               if (stats) md += `---\n${stats.replace(/\s+/g, ' ')}\n`
+
+               // Check for replies/thread
+               const replies = doc.querySelectorAll('.timeline-item .tweet-content')
+               if (replies.length > 1) {
+                  md += `\n---\n\n## Thread/Replies\n\n`
+                  for (const reply of Array.from(replies).slice(1, 10)) {
+                     const replyUser = reply.parentNode?.querySelector('.username')?.text?.trim()
+                     md += `**${replyUser || '@?'}**: ${reply.text?.trim()}\n\n`
+                  }
+               }
+
+               const output = finalizeOutput(md)
+               return {
+                  url,
+                  finalUrl: nitterUrl,
+                  contentType: 'text/markdown',
+                  method: 'twitter-nitter',
+                  content: output.content,
+                  fetchedAt,
+                  truncated: output.truncated,
+                  notes: [`Via Nitter: ${instance}`],
+               }
+            }
+         }
+      }
+   } catch {}
+
+   return null
+}
+
+// =============================================================================
+// Stack Overflow Special Handling
+// =============================================================================
+
+interface SOQuestion {
+   title: string
+   body: string
+   score: number
+   owner: { display_name: string }
+   creation_date: number
+   tags: string[]
+   answer_count: number
+   is_answered: boolean
+}
+
+interface SOAnswer {
+   body: string
+   score: number
+   is_accepted: boolean
+   owner: { display_name: string }
+   creation_date: number
+}
+
+/**
+ * Handle Stack Overflow URLs via API
+ */
+async function handleStackOverflow(url: string, timeout: number): Promise<RenderResult | null> {
+   try {
+      const parsed = new URL(url)
+      if (!parsed.hostname.includes('stackoverflow.com') && !parsed.hostname.includes('stackexchange.com')) {
+         return null
+      }
+
+      // Extract question ID from URL patterns like /questions/12345/...
+      const match = parsed.pathname.match(/\/questions\/(\d+)/)
+      if (!match) return null
+
+      const questionId = match[1]
+      const site = parsed.hostname.includes('stackoverflow') ? 'stackoverflow' : parsed.hostname.split('.')[0]
+      const fetchedAt = new Date().toISOString()
+
+      // Fetch question with answers
+      const apiUrl = `https://api.stackexchange.com/2.3/questions/${questionId}?order=desc&sort=votes&site=${site}&filter=withbody`
+      const qResult = await loadPage(apiUrl, { timeout })
+
+      if (!qResult.ok) return null
+
+      const qData = JSON.parse(qResult.content) as { items: SOQuestion[] }
+      if (!qData.items?.length) return null
+
+      const question = qData.items[0]
+
+      let md = `# ${question.title}\n\n`
+      md += `**Score:** ${question.score} · **Answers:** ${question.answer_count}`
+      md += question.is_answered ? ' ✓ Answered' : ''
+      md += `\n**Tags:** ${question.tags.join(', ')}\n`
+      md += `**Asked by:** ${question.owner.display_name} · ${new Date(question.creation_date * 1000).toISOString().split('T')[0]}\n\n`
+      md += `---\n\n## Question\n\n${htmlToBasicMarkdown(question.body)}\n\n`
+
+      // Fetch answers
+      const aUrl = `https://api.stackexchange.com/2.3/questions/${questionId}/answers?order=desc&sort=votes&site=${site}&filter=withbody`
+      const aResult = await loadPage(aUrl, { timeout })
+
+      if (aResult.ok) {
+         const aData = JSON.parse(aResult.content) as { items: SOAnswer[] }
+         if (aData.items?.length) {
+            md += `---\n\n## Answers\n\n`
+            for (const answer of aData.items.slice(0, 5)) {
+               const accepted = answer.is_accepted ? ' ✓ Accepted' : ''
+               md += `### Score: ${answer.score}${accepted} · by ${answer.owner.display_name}\n\n`
+               md += `${htmlToBasicMarkdown(answer.body)}\n\n---\n\n`
+            }
+         }
+      }
+
+      const output = finalizeOutput(md)
+      return {
+         url,
+         finalUrl: url,
+         contentType: 'text/markdown',
+         method: 'stackoverflow',
+         content: output.content,
+         fetchedAt,
+         truncated: output.truncated,
+         notes: ['Fetched via Stack Exchange API'],
+      }
+   } catch {}
+
+   return null
+}
+
+/**
+ * Convert basic HTML to markdown (for SO bodies)
+ */
+function htmlToBasicMarkdown(html: string): string {
+   return html
+      .replace(/<pre><code[^>]*>/g, '\n```\n')
+      .replace(/<\/code><\/pre>/g, '\n```\n')
+      .replace(/<code>/g, '`')
+      .replace(/<\/code>/g, '`')
+      .replace(/<strong>/g, '**')
+      .replace(/<\/strong>/g, '**')
+      .replace(/<em>/g, '*')
+      .replace(/<\/em>/g, '*')
+      .replace(/<a href="([^"]+)"[^>]*>([^<]+)<\/a>/g, '[$2]($1)')
+      .replace(/<p>/g, '\n\n')
+      .replace(/<\/p>/g, '')
+      .replace(/<br\s*\/?>/g, '\n')
+      .replace(/<li>/g, '- ')
+      .replace(/<\/li>/g, '\n')
+      .replace(/<\/?[uo]l>/g, '\n')
+      .replace(/<h(\d)>/g, (_, n) => '\n' + '#'.repeat(parseInt(n)) + ' ')
+      .replace(/<\/h\d>/g, '\n')
+      .replace(/<blockquote>/g, '\n> ')
+      .replace(/<\/blockquote>/g, '\n')
+      .replace(/<[^>]+>/g, '') // Strip remaining tags
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/\n{3,}/g, '\n\n')
+      .trim()
+}
+
+// =============================================================================
+// Wikipedia Special Handling
+// =============================================================================
+
+/**
+ * Handle Wikipedia URLs via API
+ */
+async function handleWikipedia(url: string, timeout: number): Promise<RenderResult | null> {
+   try {
+      const parsed = new URL(url)
+      // Match *.wikipedia.org
+      const wikiMatch = parsed.hostname.match(/^(\w+)\.wikipedia\.org$/)
+      if (!wikiMatch) return null
+
+      const lang = wikiMatch[1]
+      const titleMatch = parsed.pathname.match(/\/wiki\/(.+)/)
+      if (!titleMatch) return null
+
+      const title = decodeURIComponent(titleMatch[1])
+      const fetchedAt = new Date().toISOString()
+
+      // Use Wikipedia API to get plain text extract
+      const apiUrl = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`
+      const summaryResult = await loadPage(apiUrl, { timeout })
+
+      let md = ''
+
+      if (summaryResult.ok) {
+         const summary = JSON.parse(summaryResult.content) as {
+            title: string
+            description?: string
+            extract: string
+         }
+         md = `# ${summary.title}\n\n`
+         if (summary.description) md += `*${summary.description}*\n\n`
+         md += `${summary.extract}\n\n---\n\n`
+      }
+
+      // Get full article content via mobile-html or parse API
+      const contentUrl = `https://${lang}.wikipedia.org/api/rest_v1/page/mobile-html/${encodeURIComponent(title)}`
+      const contentResult = await loadPage(contentUrl, { timeout })
+
+      if (contentResult.ok) {
+         const doc = parseHtml(contentResult.content)
+
+         // Extract main content sections
+         const sections = doc.querySelectorAll('section')
+         for (const section of sections) {
+            const heading = section.querySelector('h2, h3, h4')
+            const headingText = heading?.text?.trim()
+
+            // Skip certain sections
+            if (headingText && ['References', 'External links', 'See also', 'Notes', 'Further reading'].includes(headingText)) {
+               continue
+            }
+
+            if (headingText) {
+               const level = heading?.tagName === 'H2' ? '##' : '###'
+               md += `${level} ${headingText}\n\n`
+            }
+
+            const paragraphs = section.querySelectorAll('p')
+            for (const p of paragraphs) {
+               const text = p.text?.trim()
+               if (text && text.length > 20) {
+                  md += `${text}\n\n`
+               }
+            }
+         }
+      }
+
+      if (!md) return null
+
+      const output = finalizeOutput(md)
+      return {
+         url,
+         finalUrl: url,
+         contentType: 'text/markdown',
+         method: 'wikipedia',
+         content: output.content,
+         fetchedAt,
+         truncated: output.truncated,
+         notes: ['Fetched via Wikipedia API'],
+      }
+   } catch {}
+
+   return null
+}
+
+// =============================================================================
+// Reddit Special Handling
+// =============================================================================
+
+interface RedditPost {
+   title: string
+   selftext: string
+   author: string
+   score: number
+   num_comments: number
+   created_utc: number
+   subreddit: string
+   url: string
+   is_self: boolean
+}
+
+interface RedditComment {
+   body: string
+   author: string
+   score: number
+   created_utc: number
+   replies?: { data: { children: Array<{ data: RedditComment }> } }
+}
+
+/**
+ * Handle Reddit URLs via JSON API
+ */
+async function handleReddit(url: string, timeout: number): Promise<RenderResult | null> {
+   try {
+      const parsed = new URL(url)
+      if (!parsed.hostname.includes('reddit.com')) return null
+
+      const fetchedAt = new Date().toISOString()
+
+      // Append .json to get JSON response
+      let jsonUrl = url.replace(/\/$/, '') + '.json'
+      if (parsed.search) {
+         jsonUrl = url.replace(/\/$/, '').replace(parsed.search, '') + '.json' + parsed.search
+      }
+
+      const result = await loadPage(jsonUrl, { timeout })
+      if (!result.ok) return null
+
+      const data = JSON.parse(result.content)
+      let md = ''
+
+      // Handle different Reddit URL types
+      if (Array.isArray(data) && data.length >= 1) {
+         // Post page (with comments)
+         const postData = data[0]?.data?.children?.[0]?.data as RedditPost | undefined
+         if (postData) {
+            md = `# ${postData.title}\n\n`
+            md += `**r/${postData.subreddit}** · u/${postData.author} · ${postData.score} points · ${postData.num_comments} comments\n`
+            md += `*${new Date(postData.created_utc * 1000).toISOString().split('T')[0]}*\n\n`
+
+            if (postData.is_self && postData.selftext) {
+               md += `---\n\n${postData.selftext}\n\n`
+            } else if (!postData.is_self) {
+               md += `**Link:** ${postData.url}\n\n`
+            }
+
+            // Add comments if available
+            if (data.length >= 2 && data[1]?.data?.children) {
+               md += `---\n\n## Top Comments\n\n`
+               const comments = data[1].data.children
+                  .filter((c: { kind: string }) => c.kind === 't1')
+                  .slice(0, 10)
+
+               for (const { data: comment } of comments as Array<{ data: RedditComment }>) {
+                  md += `### u/${comment.author} · ${comment.score} points\n\n`
+                  md += `${comment.body}\n\n---\n\n`
+               }
+            }
+         }
+      } else if (data?.data?.children) {
+         // Subreddit or listing page
+         const posts = data.data.children.slice(0, 20) as Array<{ data: RedditPost }>
+         const subreddit = posts[0]?.data?.subreddit
+
+         md = `# r/${subreddit || 'Reddit'}\n\n`
+         for (const { data: post } of posts) {
+            md += `- **${post.title}** (${post.score} pts, ${post.num_comments} comments)\n`
+            md += `  by u/${post.author}\n\n`
+         }
+      }
+
+      if (!md) return null
+
+      const output = finalizeOutput(md)
+      return {
+         url,
+         finalUrl: url,
+         contentType: 'text/markdown',
+         method: 'reddit',
+         content: output.content,
+         fetchedAt,
+         truncated: output.truncated,
+         notes: ['Fetched via Reddit JSON API'],
+      }
+   } catch {}
+
+   return null
+}
+
+// =============================================================================
+// NPM Special Handling
+// =============================================================================
+
+interface NpmPackage {
+   name: string
+   description?: string
+   'dist-tags': { latest: string }
+   versions: Record<string, {
+      dependencies?: Record<string, string>
+      devDependencies?: Record<string, string>
+   }>
+   readme?: string
+   homepage?: string
+   repository?: { url: string }
+   license?: string
+   keywords?: string[]
+   maintainers?: Array<{ name: string }>
+}
+
+/**
+ * Handle NPM URLs via registry API
+ */
+async function handleNpm(url: string, timeout: number): Promise<RenderResult | null> {
+   try {
+      const parsed = new URL(url)
+      if (parsed.hostname !== 'www.npmjs.com' && parsed.hostname !== 'npmjs.com') return null
+
+      // Extract package name from /package/[scope/]name
+      const match = parsed.pathname.match(/^\/package\/((?:@[^/]+\/)?[^/]+)/)
+      if (!match) return null
+
+      const packageName = match[1]
+      const fetchedAt = new Date().toISOString()
+
+      // Fetch from npm registry
+      const registryUrl = `https://registry.npmjs.org/${encodeURIComponent(packageName).replace('%40', '@')}`
+      const result = await loadPage(registryUrl, { timeout })
+
+      if (!result.ok) return null
+
+      const pkg = JSON.parse(result.content) as NpmPackage
+      const latest = pkg['dist-tags']?.latest
+      const latestVersion = latest ? pkg.versions?.[latest] : undefined
+
+      let md = `# ${pkg.name}\n\n`
+      if (pkg.description) md += `${pkg.description}\n\n`
+
+      md += `**Latest:** ${latest || 'unknown'}`
+      if (pkg.license) md += ` · **License:** ${pkg.license}`
+      md += '\n\n'
+
+      if (pkg.homepage) md += `**Homepage:** ${pkg.homepage}\n`
+      if (pkg.repository?.url) md += `**Repository:** ${pkg.repository.url.replace(/^git\+/, '').replace(/\.git$/, '')}\n`
+      if (pkg.keywords?.length) md += `**Keywords:** ${pkg.keywords.join(', ')}\n`
+      if (pkg.maintainers?.length) md += `**Maintainers:** ${pkg.maintainers.map(m => m.name).join(', ')}\n`
+
+      if (latestVersion?.dependencies && Object.keys(latestVersion.dependencies).length > 0) {
+         md += `\n## Dependencies\n\n`
+         for (const [dep, version] of Object.entries(latestVersion.dependencies)) {
+            md += `- ${dep}: ${version}\n`
+         }
+      }
+
+      if (pkg.readme) {
+         md += `\n---\n\n## README\n\n${pkg.readme}\n`
+      }
+
+      const output = finalizeOutput(md)
+      return {
+         url,
+         finalUrl: url,
+         contentType: 'text/markdown',
+         method: 'npm',
+         content: output.content,
+         fetchedAt,
+         truncated: output.truncated,
+         notes: ['Fetched via npm registry'],
+      }
+   } catch {}
+
+   return null
+}
+
+// =============================================================================
+// arXiv Special Handling
+// =============================================================================
+
+/**
+ * Handle arXiv URLs - fetch abstract + optionally PDF
+ */
+async function handleArxiv(url: string, timeout: number): Promise<RenderResult | null> {
+   try {
+      const parsed = new URL(url)
+      if (parsed.hostname !== 'arxiv.org') return null
+
+      // Extract paper ID from various URL formats
+      // /abs/1234.56789, /pdf/1234.56789, /abs/cs/0123456
+      const match = parsed.pathname.match(/\/(abs|pdf)\/(.+?)(?:\.pdf)?$/)
+      if (!match) return null
+
+      const paperId = match[2]
+      const fetchedAt = new Date().toISOString()
+      const notes: string[] = []
+
+      // Fetch metadata via arXiv API
+      const apiUrl = `https://export.arxiv.org/api/query?id_list=${paperId}`
+      const result = await loadPage(apiUrl, { timeout })
+
+      if (!result.ok) return null
+
+      // Parse the Atom feed response
+      const doc = parseHtml(result.content, { parseNoneClosedTags: true })
+      const entry = doc.querySelector('entry')
+
+      if (!entry) return null
+
+      const title = entry.querySelector('title')?.text?.trim()?.replace(/\s+/g, ' ')
+      const summary = entry.querySelector('summary')?.text?.trim()
+      const authors = entry.querySelectorAll('author name').map(n => n.text?.trim()).filter(Boolean)
+      const published = entry.querySelector('published')?.text?.trim()?.split('T')[0]
+      const categories = entry.querySelectorAll('category').map(c => c.getAttribute('term')).filter(Boolean)
+      const pdfLink = entry.querySelector('link[title="pdf"]')?.getAttribute('href')
+
+      let md = `# ${title || 'arXiv Paper'}\n\n`
+      if (authors.length) md += `**Authors:** ${authors.join(', ')}\n`
+      if (published) md += `**Published:** ${published}\n`
+      if (categories.length) md += `**Categories:** ${categories.join(', ')}\n`
+      md += `**arXiv:** ${paperId}\n\n`
+      md += `---\n\n## Abstract\n\n${summary || 'No abstract available.'}\n\n`
+
+      // If it was a PDF link or we want full content, try to fetch and convert PDF
+      if (match[1] === 'pdf' || parsed.pathname.includes('.pdf')) {
+         if (pdfLink) {
+            notes.push('Fetching PDF for full content...')
+            const pdfResult = await fetchBinary(pdfLink, timeout)
+            if (pdfResult.ok) {
+               const converted = convertWithMarkitdown(pdfResult.buffer, '.pdf', timeout)
+               if (converted.ok && converted.content.length > 500) {
+                  md += `---\n\n## Full Paper\n\n${converted.content}\n`
+                  notes.push('PDF converted via markitdown')
+               }
+            }
+         }
+      }
+
+      const output = finalizeOutput(md)
+      return {
+         url,
+         finalUrl: url,
+         contentType: 'text/markdown',
+         method: 'arxiv',
+         content: output.content,
+         fetchedAt,
+         truncated: output.truncated,
+         notes: notes.length ? notes : ['Fetched via arXiv API'],
+      }
+   } catch {}
+
+   return null
+}
+
+// =============================================================================
+// Unified Special Handler Dispatch
+// =============================================================================
+
+/**
+ * Try all special handlers
+ */
+async function handleSpecialUrls(url: string, timeout: number): Promise<RenderResult | null> {
+   // Order matters - more specific first
+   return (
+      (await handleGitHub(url, timeout)) ||
+      (await handleTwitter(url, timeout)) ||
+      (await handleStackOverflow(url, timeout)) ||
+      (await handleWikipedia(url, timeout)) ||
+      (await handleReddit(url, timeout)) ||
+      (await handleNpm(url, timeout)) ||
+      (await handleArxiv(url, timeout))
+   )
+}
+
 /**
  * Main render function implementing the full pipeline
  */
@@ -829,9 +1398,9 @@ async function renderUrl(url: string, timeout: number): Promise<RenderResult> {
    const notes: string[] = []
    const fetchedAt = new Date().toISOString()
 
-   // Step 0: Handle GitHub URLs specially
-   const githubResult = await handleGitHub(url, timeout)
-   if (githubResult) return githubResult
+   // Step 0: Try special handlers for known sites
+   const specialResult = await handleSpecialUrls(url, timeout)
+   if (specialResult) return specialResult
 
    // Step 1: Normalize URL
    url = normalizeUrl(url)
