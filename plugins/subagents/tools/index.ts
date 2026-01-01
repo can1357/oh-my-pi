@@ -41,7 +41,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import * as readline from 'node:readline'
 import { StringEnum } from '@mariozechner/pi-ai'
-import type { CustomAgentTool, CustomToolFactory, ToolAPI } from '@mariozechner/pi-coding-agent'
+import type { CustomAgentTool, CustomToolFactory, ToolAPI, ToolSessionEvent } from '@mariozechner/pi-coding-agent'
 import { Text } from '@mariozechner/pi-tui'
 import { Type } from '@sinclair/typebox'
 import runtime from './runtime.json'
@@ -120,6 +120,22 @@ const MAX_PARALLEL_TASKS = runtime.options.maxParallelTasks ?? 32
 const MAX_CONCURRENCY = runtime.options.maxConcurrency ?? 16
 const MAX_AGENTS_IN_DESCRIPTION = runtime.options.maxAgentsInDescription ?? 10
 
+const PERSIST_SESSIONS = runtime.options.persistSessions ?? false
+
+/**
+ * Derive a session artifacts directory from a session file path.
+ * /path/to/sessions/project/2026-01-01T14-28-11-636Z_uuid.jsonl
+ *   → /path/to/sessions/project/2026-01-01T14-28-11-636Z_uuid/
+ */
+function getSessionArtifactsDir(sessionFile: string | null): string | null {
+   if (!sessionFile) return null
+   // Strip .jsonl extension to get directory path
+   if (sessionFile.endsWith('.jsonl')) {
+      return sessionFile.slice(0, -6)
+   }
+   return sessionFile
+}
+
 type AgentScope = 'user' | 'project' | 'both'
 
 interface AgentConfig {
@@ -128,6 +144,8 @@ interface AgentConfig {
    tools?: string[]
    model?: string
    forkContext?: boolean
+   /** If true, this agent can spawn subagents. Default: false (subagents inhibited) */
+   recursive?: boolean
    systemPrompt: string
    source: 'user' | 'project'
    filePath: string
@@ -480,6 +498,10 @@ interface RunAgentOptions {
    index?: number
    signal?: AbortSignal
    model?: string
+   /** Session file path. If provided, uses --session flag; otherwise --no-session. */
+   sessionFile?: string
+   /** Input file path. If provided, task is written here (persistent); otherwise uses temp file. */
+   inputFile?: string
 }
 
 async function runSingleAgent(
@@ -522,7 +544,14 @@ async function runSingleAgent(
       }
    }
 
-   const args: string[] = ['-p', '--no-session', '--mode', 'json']
+   const args: string[] = ['-p', '--mode', 'json']
+
+   // Session persistence: use --session <file> if provided, otherwise --no-session
+   if (options?.sessionFile) {
+      args.push('--session', options.sessionFile)
+   } else {
+      args.push('--no-session')
+   }
 
    // "default" means no model override - use pi's configured default
    const modelOverride = options?.model
@@ -536,22 +565,31 @@ async function runSingleAgent(
       args.push('--tools', agent.tools.join(','))
    }
 
+   // Use provided inputFile (persistent) or create temp file
    let tmpPromptDir: string | null = null
+   let taskFilePath: string
+
+   if (options?.inputFile) {
+      // Persistent: write to provided path
+      taskFilePath = options.inputFile
+      fs.writeFileSync(taskFilePath, task, { encoding: 'utf-8' })
+   } else {
+      // Ephemeral: use temp directory (cleaned up after)
+      tmpPromptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-task-agent-'))
+      taskFilePath = path.join(tmpPromptDir, `task-${agent.name.replace(/[^\w.-]+/g, '_')}.md`)
+      fs.writeFileSync(taskFilePath, task, { encoding: 'utf-8', mode: 0o600 })
+   }
 
    try {
-      // Create temp dir for task file (avoids Windows shell escaping issues with long/complex CLI args)
-      tmpPromptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-task-agent-'))
-
       if (agent.systemPrompt.trim()) {
+         // System prompt always goes to temp (not worth persisting)
+         if (!tmpPromptDir) tmpPromptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-task-agent-'))
          const systemFilePath = path.join(tmpPromptDir, `system-${agent.name.replace(/[^\w.-]+/g, '_')}.md`)
          fs.writeFileSync(systemFilePath, agent.systemPrompt, { encoding: 'utf-8', mode: 0o600 })
          args.push('--append-system-prompt', systemFilePath)
       }
 
-      // Write task to file and pass as @file to avoid shell escaping issues on Windows
-      const taskFilePath = path.join(tmpPromptDir, `task-${agent.name.replace(/[^\w.-]+/g, '_')}.md`)
-      fs.writeFileSync(taskFilePath, task, { encoding: 'utf-8', mode: 0o600 })
-      // Use forward slashes for the @file syntax (works on all platforms)
+      // Pass task file via @file syntax
       args.push(`@${taskFilePath.replace(/\\/g, '/')}`)
 
       // Emit initial "Initializing" state
@@ -976,7 +1014,22 @@ const factory: CustomToolFactory = pi => {
    }
 
    const runId = nanoid(8)
-   const outputDir = path.join(os.tmpdir(), `pi-task-${runId}`)
+
+   // Session artifacts directory (sibling to .jsonl file, without extension)
+   // e.g., /path/to/sessions/project/2026-01-01T14-28-11-636Z_uuid/
+   let artifactsDir: string | null = null
+   const tempDir = path.join(os.tmpdir(), `pi-task-${runId}`)
+
+   const updateSessionDir = (event: ToolSessionEvent) => {
+      if (PERSIST_SESSIONS && event.sessionFile) {
+         // Artifacts go in folder matching session file (without .jsonl)
+         // e.g., /path/to/2026-01-01T14-28-11-636Z_uuid/
+         artifactsDir = getSessionArtifactsDir(event.sessionFile)
+         if (artifactsDir) fs.mkdirSync(artifactsDir, { recursive: true })
+      } else {
+         artifactsDir = null
+      }
+   }
 
    const tool: CustomAgentTool<typeof TaskParams, TaskDetails> = {
       name: 'task',
@@ -1073,15 +1126,31 @@ const factory: CustomToolFactory = pi => {
             model: t.model,
          }))
 
-         // Generate output paths
-         fs.mkdirSync(outputDir, { recursive: true })
-         const outputPaths = params.tasks.map((t, i) => path.join(outputDir, `task_${sanitizeAgentName(t.agent)}_${i}.md`))
+         // Generate paths for each agent invocation
+         // Persisted:  <artifactsDir>/<agent>_<nanoid>.{jsonl,out.md,in.md}
+         // Ephemeral:  <tempDir>/task_<agent>_<idx>.md
+         const agentIds = params.tasks.map(t => `${sanitizeAgentName(t.agent)}_${nanoid(8)}`)
+
+         let outputPaths: string[]
+         let sessionFiles: string[] | undefined
+         let inputFiles: string[] | undefined
+
+         if (artifactsDir) {
+            outputPaths = agentIds.map(id => path.join(artifactsDir!, `${id}.out.md`))
+            sessionFiles = agentIds.map(id => path.join(artifactsDir!, `${id}.jsonl`))
+            inputFiles = agentIds.map(id => path.join(artifactsDir!, `${id}.in.md`))
+         } else {
+            fs.mkdirSync(tempDir, { recursive: true })
+            outputPaths = params.tasks.map((t, i) => path.join(tempDir, `task_${sanitizeAgentName(t.agent)}_${i}.md`))
+         }
 
          const results = await mapWithConcurrencyLimit(tasksWithContext, MAX_CONCURRENCY, async (t, idx) => {
             const result = await runSingleAgent(pi.cwd, agents, t.agent, t.task, undefined, {
                index: idx,
                signal,
                model: t.model,
+               sessionFile: sessionFiles?.[idx],
+               inputFile: inputFiles?.[idx],
                onProgress: progress => {
                   progressMap.set(idx, progress)
                   emitProgress()
@@ -1128,6 +1197,9 @@ const factory: CustomToolFactory = pi => {
             },
          }
       },
+
+      // Track parent session for subagent persistence
+      onSession: updateSessionDir,
 
       renderCall(args, theme) {
          // Return minimal - renderResult handles the full display

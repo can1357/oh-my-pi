@@ -4,6 +4,7 @@
     "maxOutputBytes": 500000,
     "maxParallelTasks": 32,
     "maxConcurrency": 16,
-    "maxAgentsInDescription": 10
+    "maxAgentsInDescription": 10,
+    "persistSessions": true
   }
 }
