@@ -132,7 +132,7 @@ interface AgentProgress {
    currentTool?: string
    currentToolDescription?: string
    currentToolStartMs?: number
-   recentTools: Array<{ tool: string; desc: string; durationMs: number }>
+   recentTools: Array<{ tool: string; desc: string; endMs: number }>
    recentOutput: string[]
    toolCount: number
    tokens: number
@@ -423,6 +423,14 @@ function formatDuration(ms: number): string {
    return `${mins}m${secs}s`
 }
 
+function formatTimeAgo(timestampMs: number): string {
+   const ago = Date.now() - timestampMs
+   if (ago < 1000) return 'just now'
+   if (ago < 60000) return `${Math.round(ago / 1000)}s ago`
+   const mins = Math.floor(ago / 60000)
+   return `${mins}m ago`
+}
+
 function formatTokens(tokens: number): string {
    if (tokens < 1000) return `${tokens}`
    if (tokens < 10000) return `${(tokens / 1000).toFixed(1)}k`
@@ -572,7 +580,7 @@ async function runSingleAgent(
          let currentTool: string | undefined
          let currentToolDescription: string | undefined
          let currentToolStartMs: number | undefined
-         const recentTools: Array<{ tool: string; desc: string; durationMs: number }> = []
+         const recentTools: Array<{ tool: string; desc: string; endMs: number }> = []
          const MAX_RECENT_TOOLS = 5
          const recentOutput: string[] = []
          const MAX_RECENT_OUTPUT_LINES = 8
@@ -633,11 +641,13 @@ async function runSingleAgent(
                   emitProgress()
                } else if (event.type === 'tool_execution_end') {
                   // Record completed tool in recent history
-                  if (currentTool && currentToolDescription && currentToolStartMs) {
+                  if (currentTool && currentToolStartMs) {
+                     // Extract just the preview part (after "tool: ")
+                     const desc = currentToolDescription?.replace(/^[^:]+:\s*/, '') || ''
                      recentTools.push({
                         tool: currentTool,
-                        desc: currentToolDescription,
-                        durationMs: Date.now() - currentToolStartMs,
+                        desc,
+                        endMs: Date.now(),
                      })
                      if (recentTools.length > MAX_RECENT_TOOLS) {
                         recentTools.shift()
@@ -659,14 +669,22 @@ async function runSingleAgent(
                         if (block.type === 'thinking' && block.thinking) {
                            const lines = block.thinking.split('\n').filter((l: string) => l.trim())
                            for (const line of lines.slice(-3)) {
-                              recentOutput.push(`💭 ${line.slice(0, 120)}`)
-                              if (recentOutput.length > MAX_RECENT_OUTPUT_LINES) recentOutput.shift()
+                              const formatted = `💭 ${line.slice(0, 120)}`
+                              // Dedupe: don't add if same as last line
+                              if (recentOutput[recentOutput.length - 1] !== formatted) {
+                                 recentOutput.push(formatted)
+                                 if (recentOutput.length > MAX_RECENT_OUTPUT_LINES) recentOutput.shift()
+                              }
                            }
                         } else if (block.type === 'text' && block.text) {
                            const lines = block.text.split('\n').filter((l: string) => l.trim())
                            for (const line of lines.slice(-3)) {
-                              recentOutput.push(line.slice(0, 120))
-                              if (recentOutput.length > MAX_RECENT_OUTPUT_LINES) recentOutput.shift()
+                              const formatted = line.slice(0, 120)
+                              // Dedupe: don't add if same as last line
+                              if (recentOutput[recentOutput.length - 1] !== formatted) {
+                                 recentOutput.push(formatted)
+                                 if (recentOutput.length > MAX_RECENT_OUTPUT_LINES) recentOutput.shift()
+                              }
                            }
                         }
                      }
@@ -1198,8 +1216,9 @@ const factory: CustomToolFactory = pi => {
                      if (p.recentTools && p.recentTools.length > 0) {
                         text += `\n ${theme.fg('dim', `${cont}     `)}`
                         for (const rt of p.recentTools) {
-                           const dur = formatDuration(rt.durationMs)
-                           text += `\n ${theme.fg('dim', `${cont}     `)}${theme.fg('muted', `↳ ${rt.tool}: ${rt.desc}`)} ${theme.fg('dim', `(${dur})`)}`
+                           const ago = formatTimeAgo(rt.endMs)
+                           const desc = rt.desc ? `${rt.tool}: ${rt.desc}` : rt.tool
+                           text += `\n ${theme.fg('dim', `${cont}     `)}${theme.fg('muted', `↳ ${desc}`)} ${theme.fg('dim', `(${ago})`)}`
                         }
                      }
                   }
