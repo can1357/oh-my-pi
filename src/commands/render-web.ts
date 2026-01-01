@@ -1403,6 +1403,152 @@ async function handleArxiv(url: string, timeout: number): Promise<RenderResult |
 }
 
 // =============================================================================
+// IACR ePrint Special Handling
+// =============================================================================
+
+/**
+ * Handle IACR Cryptology ePrint Archive URLs
+ */
+async function handleIacr(url: string, timeout: number): Promise<RenderResult | null> {
+   try {
+      const parsed = new URL(url)
+      if (parsed.hostname !== 'eprint.iacr.org') return null
+
+      // Extract paper ID from /year/number or /year/number.pdf
+      const match = parsed.pathname.match(/\/(\d{4})\/(\d+)(?:\.pdf)?$/)
+      if (!match) return null
+
+      const [, year, number] = match
+      const paperId = `${year}/${number}`
+      const fetchedAt = new Date().toISOString()
+      const notes: string[] = []
+
+      // Fetch the HTML page for metadata
+      const pageUrl = `https://eprint.iacr.org/${paperId}`
+      const result = await loadPage(pageUrl, { timeout })
+
+      if (!result.ok) return null
+
+      const doc = parseHtml(result.content)
+
+      // Extract metadata from the page
+      const title = doc.querySelector('h3.mb-3')?.text?.trim() || doc.querySelector('meta[name="citation_title"]')?.getAttribute('content')
+      const authors = doc
+         .querySelectorAll('meta[name="citation_author"]')
+         .map(m => m.getAttribute('content'))
+         .filter(Boolean)
+      // Abstract is in <p> after <h5>Abstract</h5>
+      const abstractHeading = doc.querySelectorAll('h5').find(h => h.text?.includes('Abstract'))
+      const abstract =
+         abstractHeading?.parentNode?.querySelector('p')?.text?.trim() ||
+         doc.querySelector('meta[name="description"]')?.getAttribute('content')
+      const keywords = doc.querySelector('.keywords')?.text?.replace('Keywords:', '').trim()
+      const pubDate = doc.querySelector('meta[name="citation_publication_date"]')?.getAttribute('content')
+
+      let md = `# ${title || 'IACR ePrint Paper'}\n\n`
+      if (authors.length) md += `**Authors:** ${authors.join(', ')}\n`
+      if (pubDate) md += `**Date:** ${pubDate}\n`
+      md += `**ePrint:** ${paperId}\n`
+      if (keywords) md += `**Keywords:** ${keywords}\n`
+      md += `\n---\n\n## Abstract\n\n${abstract || 'No abstract available.'}\n\n`
+
+      // If it was a PDF link, try to fetch and convert PDF
+      if (parsed.pathname.endsWith('.pdf')) {
+         const pdfUrl = `https://eprint.iacr.org/${paperId}.pdf`
+         notes.push('Fetching PDF for full content...')
+         const pdfResult = await fetchBinary(pdfUrl, timeout)
+         if (pdfResult.ok) {
+            const converted = convertWithMarkitdown(pdfResult.buffer, '.pdf', timeout)
+            if (converted.ok && converted.content.length > 500) {
+               md += `---\n\n## Full Paper\n\n${converted.content}\n`
+               notes.push('PDF converted via markitdown')
+            }
+         }
+      }
+
+      const output = finalizeOutput(md)
+      return {
+         url,
+         finalUrl: url,
+         contentType: 'text/markdown',
+         method: 'iacr',
+         content: output.content,
+         fetchedAt,
+         truncated: output.truncated,
+         notes: notes.length ? notes : ['Fetched from IACR ePrint Archive'],
+      }
+   } catch {}
+
+   return null
+}
+
+// =============================================================================
+// GitHub Gist Special Handling
+// =============================================================================
+
+/**
+ * Handle GitHub Gist URLs via API
+ */
+async function handleGitHubGist(url: string, timeout: number): Promise<RenderResult | null> {
+   try {
+      const parsed = new URL(url)
+      if (parsed.hostname !== 'gist.github.com') return null
+
+      // Extract gist ID from /username/gistId or just /gistId
+      const parts = parsed.pathname.split('/').filter(Boolean)
+      if (parts.length === 0) return null
+
+      // Gist ID is always the last path segment (or only segment for anonymous gists)
+      // Old gists have short numeric IDs, newer ones have 32 char hashes
+      const gistId = parts[parts.length - 1]
+      if (!gistId || !/^[a-f0-9]+$/i.test(gistId)) return null
+
+      const fetchedAt = new Date().toISOString()
+
+      // Fetch via GitHub API
+      const result = await fetchGitHubApi(`/gists/${gistId}`, timeout)
+      if (!result.ok || !result.data) return null
+
+      const gist = result.data as {
+         description: string | null
+         owner?: { login: string }
+         created_at: string
+         updated_at: string
+         files: Record<string, { filename: string; language: string | null; size: number; content: string }>
+         html_url: string
+      }
+
+      const files = Object.values(gist.files)
+      const owner = gist.owner?.login || 'anonymous'
+
+      let md = `# Gist by ${owner}\n\n`
+      if (gist.description) md += `${gist.description}\n\n`
+      md += `**Created:** ${gist.created_at} · **Updated:** ${gist.updated_at}\n`
+      md += `**Files:** ${files.length}\n\n`
+
+      for (const file of files) {
+         const lang = file.language?.toLowerCase() || ''
+         md += `---\n\n## ${file.filename}\n\n`
+         md += `\`\`\`${lang}\n${file.content}\n\`\`\`\n\n`
+      }
+
+      const output = finalizeOutput(md)
+      return {
+         url,
+         finalUrl: url,
+         contentType: 'text/markdown',
+         method: 'github-gist',
+         content: output.content,
+         fetchedAt,
+         truncated: output.truncated,
+         notes: ['Fetched via GitHub API'],
+      }
+   } catch {}
+
+   return null
+}
+
+// =============================================================================
 // Unified Special Handler Dispatch
 // =============================================================================
 
@@ -1412,13 +1558,15 @@ async function handleArxiv(url: string, timeout: number): Promise<RenderResult |
 async function handleSpecialUrls(url: string, timeout: number): Promise<RenderResult | null> {
    // Order matters - more specific first
    return (
+      (await handleGitHubGist(url, timeout)) ||
       (await handleGitHub(url, timeout)) ||
       (await handleTwitter(url, timeout)) ||
       (await handleStackOverflow(url, timeout)) ||
       (await handleWikipedia(url, timeout)) ||
       (await handleReddit(url, timeout)) ||
       (await handleNpm(url, timeout)) ||
-      (await handleArxiv(url, timeout))
+      (await handleArxiv(url, timeout)) ||
+      (await handleIacr(url, timeout))
    )
 }
 
