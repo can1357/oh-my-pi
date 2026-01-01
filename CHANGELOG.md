@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.378] - 2026-01-01
+
+### Fixed
+
+- `git-status` hook now fires only once at session start instead of every turn
+
 ## [1.3.377] - 2026-01-01
 
 ### Added
@@ -258,7 +264,9 @@ _Documentation updates for npm-based tool loading and config persistence._
 - Load tools directly from node_modules via generated loader
 - Project-level overrides via `.pi/overrides.json` and `.pi/store/`
 
-[Unreleased]: https://github.com/can1357/oh-my-pi/compare/v1.3.372...HEAD
+[Unreleased]: https://github.com/can1357/oh-my-pi/compare/v1.3.377...HEAD
+[1.3.377]: https://github.com/can1357/oh-my-pi/compare/v1.3.376...v1.3.377
+[1.3.376]: https://github.com/can1357/oh-my-pi/compare/v1.3.372...v1.3.376
 [1.3.372]: https://github.com/can1357/oh-my-pi/compare/v1.3.371...v1.3.372
 [1.3.371]: https://github.com/can1357/oh-my-pi/compare/v1.3.37...v1.3.371
 [1.3.37]: https://github.com/can1357/oh-my-pi/compare/v0.9.2...v1.3.37

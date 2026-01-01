@@ -10,8 +10,8 @@ import runtime from './runtime.json'
 
 export default function (pi: HookAPI) {
    console.log('[git-status] registering hook')
-   pi.on('before_agent_start', async (_event, _ctx) => {
-      console.log('[git-status] before_agent_start fired')
+   pi.on('session_start', async (_event, _ctx) => {
+      console.log('[git-status] session_start fired')
       // Check if feature is enabled (runtime.features is patched by omp loader)
       const features = (runtime as { features?: string[] }).features ?? []
       console.log('[git-status] features:', features)
