@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/lsp",
-  "version": "1.3.37",
+  "version": "1.3.371",
   "description": "LSP (Language Server Protocol) tool for Pi - provides code intelligence, diagnostics, refactoring, and more",
   "repository": {
     "type": "git",

@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/subagents",
-  "version": "1.3.37",
+  "version": "1.3.371",
   "description": "Task delegation system with specialized subagents (task, planner, explore, reviewer)",
   "keywords": [
     "omp-plugin",
