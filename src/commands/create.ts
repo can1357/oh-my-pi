@@ -168,8 +168,11 @@ export async function createPlugin(name: string, options: CreateOptions = {}): P
 			keywords: ["omp-plugin"],
 			author: options.author || "",
 			license: "MIT",
+			type: "module",
 			omp: {
 				install: [],
+				// Uncomment to add tools:
+				// tools: "tools",
 			},
 			files: ["agents", "tools", "themes", "commands"],
 		};
@@ -195,7 +198,7 @@ Add agent markdown files to \`agents/\` directory.
 
 ### Tools
 
-Add tool implementations to \`tools/\` directory.
+Add tool implementations to \`tools/\` directory. Set \`"tools": "tools"\` in package.json omp field to enable.
 
 ### Themes
 
@@ -207,18 +210,21 @@ Add command markdown files to \`commands/\` directory.
 
 ## Configuration
 
-Edit \`package.json\` to configure which files are installed:
+Edit \`package.json\` to configure your plugin:
 
 \`\`\`json
 {
   "omp": {
     "install": [
-      { "src": "agents/my-agent.md", "dest": "agent/agents/my-agent.md" },
-      { "src": "tools/my-tool/", "dest": "agent/tools/my-tool/" }
-    ]
+      { "src": "agents/my-agent.md", "dest": "agent/agents/my-agent.md" }
+    ],
+    "tools": "tools"
   }
 }
 \`\`\`
+
+- \`install\`: Symlinks files (agents, commands, themes) into ~/.pi/agent/
+- \`tools\`: Points to tool factory directory (loaded from node_modules)
 
 ## Publishing
 
@@ -250,6 +256,30 @@ Provide instructions for the agent here.
 
 		await writeFile(join(pluginDir, "agents", "example.md"), exampleAgent);
 
+		// Create example tool
+		const exampleTool = `import type { CustomToolFactory } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
+
+const factory: CustomToolFactory = (pi) => {
+  return {
+    name: "example_tool",
+    label: "Example Tool",
+    description: "An example tool for ${pluginName}",
+    parameters: Type.Object({
+      message: Type.String({ description: "A message to echo" }),
+    }),
+    async execute({ message }) {
+      return {
+        content: [{ type: "text", text: \`Echo: \${message}\` }],
+      };
+    },
+  };
+};
+
+export default factory;
+`;
+		await writeFile(join(pluginDir, "tools", "index.ts"), exampleTool);
+
 		// Create .gitignore
 		const gitignore = `node_modules/
 .DS_Store
@@ -267,6 +297,7 @@ Provide instructions for the agent here.
 		console.log(chalk.dim("  ├── agents/"));
 		console.log(chalk.dim("  │   └── example.md"));
 		console.log(chalk.dim("  ├── tools/"));
+		console.log(chalk.dim("  │   └── index.ts"));
 		console.log(chalk.dim("  ├── themes/"));
 		console.log(chalk.dim("  └── commands/"));
 		console.log();

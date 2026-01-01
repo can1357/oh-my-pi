@@ -18,7 +18,11 @@ Version/publish scripts: `bun scripts/bump-version.ts`, `bun scripts/publish.ts 
 
 ## Architecture
 
-**oh-my-pi** (`omp`) is a plugin manager for [pi](https://github.com/badlogic/pi-mono) that installs plugins via npm and symlinks their contents into `~/.pi/agent/` (or `.pi/agent/` for project-local).
+**oh-my-pi** (`omp`) is a plugin manager for [pi](https://github.com/badlogic/pi-mono) that:
+
+- Installs plugins via npm into `~/.pi/plugins/node_modules/`
+- Symlinks non-tool files (agents, commands, themes) into `~/.pi/agent/`
+- Loads tools directly from node_modules via a generated loader
 
 ### Core Modules (src/)
 
@@ -26,7 +30,7 @@ Version/publish scripts: `bun scripts/bump-version.ts`, `bun scripts/publish.ts 
 | -------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `cli.ts`       | Commander.js entry point; wires commands to handlers                                                                              |
 | `manifest.ts`  | Plugin manifest types (`omp` field in package.json), loading/saving `plugins.json`, reading plugin package.json from node_modules |
-| `symlinks.ts`  | Create/remove/check symlinks for `omp.install` entries; path traversal protection                                                 |
+| `symlinks.ts`  | Create/remove/check symlinks for `omp.install` entries (non-tool files only); path traversal protection                           |
 | `paths.ts`     | All path constants and scope resolution (global `~/.pi/` vs project-local `.pi/`)                                                 |
 | `conflicts.ts` | Detect destination collisions between plugins before install                                                                      |
 | `lockfile.ts`  | `omp-lock.json` for integrity verification (tarball hashes)                                                                       |
@@ -36,7 +40,7 @@ Version/publish scripts: `bun scripts/bump-version.ts`, `bun scripts/publish.ts 
 | `output.ts`    | Console output helpers, JSON mode support                                                                                         |
 | `errors.ts`    | Error handling wrapper for commands                                                                                               |
 | `runtime.ts`   | Runtime config resolution (env vars from plugin variables)                                                                        |
-| `loader.ts`    | Generates `~/.pi/agent/tools/omp/index.ts` loader that imports plugin tools from node_modules                                     |
+| `loader.ts`    | Generates `~/.pi/agent/tools/omp/index.ts` - loads tools from node_modules, patches runtime configs from store                    |
 
 ### Commands (src/commands/)
 
@@ -52,10 +56,14 @@ Key commands:
 
 Built-in plugins ship in `plugins/` and are published separately. Each has:
 
-- `package.json` with `omp` field defining install mappings and features
+- `package.json` with `omp` field defining install mappings, tools, and features
 - Source files (agents/_.md, commands/_.md, tools/_.ts, themes/_.json)
 
-`omp.install` entries map `src` (relative to plugin) → `dest` (relative to agent dir).
+**Key `omp` fields:**
+
+- `install`: Array of `{src, dest}` for non-tool files (symlinked to agent dir)
+- `tools`: Path to tools factory (e.g., `"tools"`) - loaded directly from node_modules
+- `runtime`: Path to runtime config JSON (e.g., `"tools/runtime.json"`) - overridden from store
 
 ### Scope Resolution
 
@@ -66,7 +74,13 @@ Built-in plugins ship in `plugins/` and are published separately. Each has:
 
 ### Feature System
 
-Plugins can define optional features in `omp.features`. Feature enablement is stored in `plugins.json` config and written to the plugin's runtime.json in node_modules (via `omp.runtime` field). Runtime.json controls which features are active at pi runtime.
+Plugins can define optional features in `omp.features`. Feature state is:
+
+1. Stored in `plugins.json` config (source of truth for omp)
+2. Written to `~/.pi/plugins/store/<plugin>.json` (persistent across npm updates)
+3. Injected into the plugin's runtime.json via `Object.assign` at load time
+
+The loader imports the plugin's runtime.json, reads the store, and patches the module cache before tools load.
 
 ## Style
 

@@ -60,21 +60,25 @@ omp update
 
 ## How It Works
 
-omp installs plugins via npm and symlinks their files into your pi configuration directory:
+omp installs plugins via npm and sets up your pi configuration:
 
 ```
 ~/.pi/
-├── agent/              # Where plugin files get symlinked
-│   ├── agents/         # Agent definitions (.md)
-│   ├── commands/       # Slash commands (.md)
-│   ├── tools/          # Custom tools (.ts)
-│   └── themes/         # Theme files (.json)
-└── plugins/            # Plugin storage
-    ├── package.json    # Installed plugins manifest
-    └── node_modules/   # Actual plugin packages
+├── agent/                    # Pi's agent directory
+│   ├── agents/               # Agent definitions (.md) - symlinked
+│   ├── commands/             # Slash commands (.md) - symlinked
+│   ├── tools/omp/            # Tool loader
+│   │   └── index.ts          # Generated loader - imports tools from node_modules
+│   └── themes/               # Theme files (.json) - symlinked
+└── plugins/
+    ├── package.json          # Installed plugins manifest
+    ├── node_modules/         # Plugin packages (tools loaded directly from here)
+    └── store/                # Runtime configs (survives npm updates)
 ```
 
-Plugins declare which files to install via the `omp.install` field in their `package.json`. omp creates symlinks from the plugin's files into the appropriate `~/.pi/agent/` subdirectories.
+**Non-tool files** (agents, commands, themes) are symlinked via `omp.install` entries.
+
+**Tools** are loaded directly from node_modules via a generated loader. Plugins specify `omp.tools` pointing to their tool factory. This allows tools to use npm dependencies without workarounds.
 
 ## Global vs Local Plugins
 
@@ -205,9 +209,30 @@ Plugins are npm packages with an `omp` field in `package.json`:
 			{ "src": "commands/research.md", "dest": "agent/commands/research.md" }
 		]
 	},
-	"files": ["agents", "commands", "tools", "themes"]
+	"files": ["agents", "commands"]
 }
 ```
+
+### Tools
+
+For plugins with custom tools, use the `tools` field instead of `install`:
+
+```json
+{
+	"name": "@oh-my-pi/my-tools",
+	"version": "1.0.0",
+	"keywords": ["omp-plugin"],
+	"omp": {
+		"tools": "tools"
+	},
+	"files": ["tools"],
+	"dependencies": {
+		"some-npm-package": "^1.0.0"
+	}
+}
+```
+
+The `tools` field points to a directory containing an `index.ts` that exports a tool factory. Tools are loaded directly from node_modules, so npm dependencies work normally.
 
 ### Features and Variables
 
@@ -219,7 +244,8 @@ Plugins can define optional features and configurable variables:
 	"version": "1.0.0",
 	"keywords": ["omp-plugin"],
 	"omp": {
-		"install": [{ "src": "tools/core.ts", "dest": "agent/tools/exa/core.ts" }],
+		"tools": "tools",
+		"runtime": "tools/runtime.json",
 		"variables": {
 			"apiKey": {
 				"type": "string",
@@ -231,13 +257,11 @@ Plugins can define optional features and configurable variables:
 		"features": {
 			"search": {
 				"description": "Web search capabilities",
-				"default": true,
-				"install": [{ "src": "tools/search.ts", "dest": "agent/tools/exa/search.ts" }]
+				"default": true
 			},
 			"websets": {
 				"description": "Curated content collections",
 				"default": false,
-				"install": [{ "src": "tools/websets.ts", "dest": "agent/tools/exa/websets.ts" }],
 				"variables": {
 					"defaultCollection": {
 						"type": "string",
@@ -249,6 +273,8 @@ Plugins can define optional features and configurable variables:
 	}
 }
 ```
+
+The `runtime` field points to a JSON file that the plugin imports to check feature state. omp stores user's feature selections in `~/.pi/plugins/store/` and injects them at load time, so they persist across npm updates.
 
 ### Plugin Structure
 
