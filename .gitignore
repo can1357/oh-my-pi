@@ -1,3 +1,6 @@
+# Include .claude (override global gitignore)
+!.claude/
+
 # Logs
 logs
 *.log
