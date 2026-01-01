@@ -36,6 +36,7 @@ import { StringEnum } from '@mariozechner/pi-ai'
 import type { CustomAgentTool, CustomToolFactory, ToolAPI } from '@mariozechner/pi-coding-agent'
 import { Text } from '@mariozechner/pi-tui'
 import { Type } from '@sinclair/typebox'
+import runtime from './runtime.json'
 
 /** Cache for available models (refreshed once per tool factory instantiation) */
 let cachedModels: string[] | null = null
@@ -104,11 +105,11 @@ function resolveModelPattern(pattern: string, availableModels?: string[]): strin
    return undefined
 }
 
-const MAX_OUTPUT_LINES = 5000
-const MAX_OUTPUT_BYTES = 500_000
-const MAX_PARALLEL_TASKS = 32
-const MAX_CONCURRENCY = 16
-const MAX_AGENTS_IN_DESCRIPTION = 10
+const MAX_OUTPUT_LINES = runtime.options.maxOutputLines ?? 5000
+const MAX_OUTPUT_BYTES = runtime.options.maxOutputBytes ?? 500_000
+const MAX_PARALLEL_TASKS = runtime.options.maxParallelTasks ?? 32
+const MAX_CONCURRENCY = runtime.options.maxConcurrency ?? 16
+const MAX_AGENTS_IN_DESCRIPTION = runtime.options.maxAgentsInDescription ?? 10
 
 type AgentScope = 'user' | 'project' | 'both'
 

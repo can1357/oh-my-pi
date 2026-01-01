@@ -16,6 +16,7 @@
   },
   "omp": {
     "tools": "tools",
+    "runtime": "tools/runtime.json",
     "install": [
       {
         "src": "agents/task.md",
