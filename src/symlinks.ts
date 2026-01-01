@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { OmpFeature, OmpInstallEntry, PluginPackageJson, PluginRuntimeConfig } from "@omp/manifest";
 import { getPluginSourceDir } from "@omp/manifest";
 import { log, logError } from "@omp/output";
-import { getProjectPiDir, NODE_MODULES_DIR, PI_CONFIG_DIR, PLUGINS_DIR } from "@omp/paths";
+import { getProjectStoreDir, NODE_MODULES_DIR, PI_CONFIG_DIR, PLUGINS_DIR } from "@omp/paths";
 import chalk from "chalk";
 
 /**
@@ -70,10 +70,10 @@ function isPathWithinBase(basePath: string, targetPath: string): boolean {
 }
 
 /**
- * Get the base directory for symlink destinations based on scope
+ * Get the base directory for symlink destinations (always global)
  */
-function getBaseDir(global: boolean): string {
-	return global ? PI_CONFIG_DIR : getProjectPiDir();
+function getBaseDir(): string {
+	return PI_CONFIG_DIR;
 }
 
 export interface SymlinkResult {
@@ -95,13 +95,12 @@ export interface SymlinkRemovalResult {
 export async function createPluginSymlinks(
 	pluginName: string,
 	pkgJson: PluginPackageJson,
-	global = true,
 	verbose = true,
 	skipDestinations?: Set<string>,
 	enabledFeatures?: string[],
 ): Promise<SymlinkResult> {
 	const result: SymlinkResult = { created: [], errors: [] };
-	const sourceDir = getPluginSourceDir(pluginName, global);
+	const sourceDir = getPluginSourceDir(pluginName);
 
 	const installEntries = getInstallEntries(pkgJson);
 	if (installEntries.length === 0) {
@@ -111,7 +110,7 @@ export async function createPluginSymlinks(
 		return result;
 	}
 
-	const baseDir = getBaseDir(global);
+	const baseDir = getBaseDir();
 
 	for (const entry of installEntries) {
 		// Skip destinations that the user chose to keep from existing plugins
@@ -232,7 +231,7 @@ export async function createPluginSymlinks(
 
 	// If enabledFeatures provided and plugin has a runtime config, update it
 	if (enabledFeatures !== undefined && pkgJson.omp?.runtime) {
-		const runtimePath = getRuntimeConfigPath(pkgJson, global);
+		const runtimePath = getRuntimeConfigPath(pkgJson);
 		if (runtimePath) {
 			await writeRuntimeConfig(runtimePath, { features: enabledFeatures }, verbose);
 		}
@@ -295,34 +294,44 @@ export async function writeRuntimeConfig(
 }
 
 /**
- * Get the store directory for runtime configs
+ * Get the global store directory for runtime configs
  */
-function getStoreDir(global = true): string {
-	const pluginsDir = global ? PLUGINS_DIR : getProjectPiDir();
-	return join(pluginsDir, "store");
+function getGlobalStoreDir(): string {
+	return join(PLUGINS_DIR, "store");
 }
 
 /**
- * Get the path to a plugin's runtime config in the store
+ * Get the path to a plugin's runtime config in the global store
  * Uses the omp.runtime field from package.json
  * Store path: ~/.pi/plugins/store/@scope__name.json
  */
-export function getRuntimeConfigPath(pkgJson: PluginPackageJson, global = true): string | null {
+export function getRuntimeConfigPath(pkgJson: PluginPackageJson): string | null {
 	if (!pkgJson.omp?.runtime) return null;
 
-	const storeDir = getStoreDir(global);
+	const storeDir = getGlobalStoreDir();
 	const storeName = pkgJson.name.replace(/\//g, "__"); // @oh-my-pi/exa -> @oh-my-pi__exa
 	return join(storeDir, `${storeName}.json`);
 }
 
 /**
+ * Get the path to a plugin's runtime config in the project store for local overrides
+ * Store path: cwd/.pi/store/@scope__name.json
+ */
+export function getProjectRuntimeConfigPath(pkgJson: PluginPackageJson): string | null {
+	if (!pkgJson.omp?.runtime) return null;
+
+	const storeName = pkgJson.name.replace(/\//g, "__"); // @oh-my-pi/exa -> @oh-my-pi__exa
+	return join(getProjectStoreDir(), `${storeName}.json`);
+}
+
+/**
  * Get the default runtime config path in node_modules (for copying defaults)
  */
-export function getDefaultRuntimeConfigPath(pkgJson: PluginPackageJson, global = true): string | null {
+export function getDefaultRuntimeConfigPath(pkgJson: PluginPackageJson): string | null {
 	const runtimePath = pkgJson.omp?.runtime;
 	if (!runtimePath) return null;
 
-	const nodeModulesDir = global ? NODE_MODULES_DIR : join(getProjectPiDir(), "node_modules");
+	const nodeModulesDir = NODE_MODULES_DIR;
 	return join(nodeModulesDir, pkgJson.name, runtimePath);
 }
 
@@ -332,7 +341,6 @@ export function getDefaultRuntimeConfigPath(pkgJson: PluginPackageJson, global =
 export async function removePluginSymlinks(
 	_pluginName: string,
 	pkgJson: PluginPackageJson,
-	global = true,
 	verbose = true,
 ): Promise<SymlinkRemovalResult> {
 	const result: SymlinkRemovalResult = {
@@ -346,7 +354,7 @@ export async function removePluginSymlinks(
 		return result;
 	}
 
-	const baseDir = getBaseDir(global);
+	const baseDir = getBaseDir();
 
 	for (const entry of installEntries) {
 		// Validate dest path stays within base directory (prevents path traversal attacks)
@@ -412,15 +420,14 @@ export async function removePluginSymlinks(
 export async function checkPluginSymlinks(
 	pluginName: string,
 	pkgJson: PluginPackageJson,
-	global = true,
 ): Promise<{ valid: string[]; broken: string[]; missing: string[] }> {
 	const result = {
 		valid: [] as string[],
 		broken: [] as string[],
 		missing: [] as string[],
 	};
-	const sourceDir = getPluginSourceDir(pluginName, global);
-	const baseDir = getBaseDir(global);
+	const sourceDir = getPluginSourceDir(pluginName);
+	const baseDir = getBaseDir();
 
 	const installEntries = getInstallEntries(pkgJson);
 	if (installEntries.length === 0) {
@@ -500,10 +507,9 @@ export async function getPluginForSymlink(
 export async function traceInstalledFile(
 	filePath: string,
 	installedPlugins: Map<string, PluginPackageJson>,
-	global = true,
 ): Promise<{ plugin: string; entry: OmpInstallEntry } | null> {
 	// Normalize the path relative to the base directory
-	const baseDir = getBaseDir(global);
+	const baseDir = getBaseDir();
 	let relativePath = filePath;
 	const isWindows = platform() === "win32";
 	const normalizedFilePath = isWindows ? filePath.toLowerCase() : filePath;

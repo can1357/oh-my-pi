@@ -8,7 +8,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readPluginPackageJson } from "@omp/manifest";
-import { getAgentDir, getPackageJsonPath } from "@omp/paths";
+import { GLOBAL_PACKAGE_JSON, getAgentDir } from "@omp/paths";
 
 interface PluginInfo {
 	tools?: string; // e.g. "@oh-my-pi/exa/tools"
@@ -16,19 +16,18 @@ interface PluginInfo {
 }
 
 /**
- * Get plugin info (tools and runtime paths) from installed plugins
+ * Get plugin info (tools and runtime paths) from installed plugins (global only)
  */
-async function getPluginInfo(global: boolean): Promise<Map<string, PluginInfo>> {
-	const pkgJsonPath = getPackageJsonPath(global);
-	if (!existsSync(pkgJsonPath)) return new Map();
+async function getPluginInfo(): Promise<Map<string, PluginInfo>> {
+	if (!existsSync(GLOBAL_PACKAGE_JSON)) return new Map();
 
-	const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf-8"));
+	const pkgJson = JSON.parse(readFileSync(GLOBAL_PACKAGE_JSON, "utf-8"));
 	const deps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
 
 	const plugins = new Map<string, PluginInfo>();
 
 	for (const pluginName of Object.keys(deps)) {
-		const pluginPkgJson = await readPluginPackageJson(pluginName, global);
+		const pluginPkgJson = await readPluginPackageJson(pluginName);
 		if (!pluginPkgJson?.omp) continue;
 
 		const info: PluginInfo = {};
@@ -48,15 +47,15 @@ async function getPluginInfo(global: boolean): Promise<Map<string, PluginInfo>> 
 }
 
 /**
- * Write the OMP loader with hardcoded tool paths and runtime redirects
+ * Write the OMP loader with hardcoded tool paths and runtime redirects (global only)
  */
-export async function writeLoader(global = true): Promise<void> {
-	const agentDir = getAgentDir(global);
+export async function writeLoader(): Promise<void> {
+	const agentDir = getAgentDir();
 	const ompDir = join(agentDir, "tools", "omp");
 
 	mkdirSync(ompDir, { recursive: true });
 
-	const plugins = await getPluginInfo(global);
+	const plugins = await getPluginInfo();
 	const toolPaths = [...plugins.values()].filter((p) => p.tools).map((p) => `"${p.tools}"`);
 
 	// Build runtime redirects: maps full module path to store filename
@@ -100,10 +99,11 @@ ${runtimeRedirects.join(",\n")}
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const piDir = path.resolve(__dirname, "../../.."); // ~/.pi
 const pluginNodeModules = path.join(piDir, "plugins/node_modules");
-const storeDir = path.join(piDir, "plugins/store");
+const globalStoreDir = path.join(piDir, "plugins/store");
+const projectStoreDir = path.join(process.cwd(), ".pi/store");
 
-// Ensure store directory exists
-fs.mkdirSync(storeDir, { recursive: true });
+// Ensure global store directory exists
+fs.mkdirSync(globalStoreDir, { recursive: true });
 
 if (fs.existsSync(pluginNodeModules)) {
    try {
@@ -126,15 +126,23 @@ if (fs.existsSync(pluginNodeModules)) {
    }
 }
 
-// Load runtime configs: import module, read store, assign to module cache
+// Load runtime configs: import module, read global store, merge project store (local precedence)
 for (const [moduleSpec, storeFile] of runtimeConfigs) {
    try {
       const runtime = await import(moduleSpec);
-      const storePath = path.join(storeDir, storeFile);
+      const globalStorePath = path.join(globalStoreDir, storeFile);
+      const projectStorePath = path.join(projectStoreDir, storeFile);
       
-      if (fs.existsSync(storePath)) {
-         const storeData = JSON.parse(fs.readFileSync(storePath, "utf-8"));
-         Object.assign(runtime.default, storeData);
+      // Start with global store
+      if (fs.existsSync(globalStorePath)) {
+         const globalData = JSON.parse(fs.readFileSync(globalStorePath, "utf-8"));
+         Object.assign(runtime.default, globalData);
+      }
+      
+      // Merge project store (takes precedence)
+      if (fs.existsSync(projectStorePath)) {
+         const projectData = JSON.parse(fs.readFileSync(projectStorePath, "utf-8"));
+         Object.assign(runtime.default, projectData);
       }
    } catch {
       // Module not found or store read failed - skip
@@ -176,9 +184,9 @@ export default factory;
 }
 
 /**
- * Check if the OMP loader exists
+ * Check if the OMP loader exists (global only)
  */
-export function loaderExists(global = true): boolean {
-	const agentDir = getAgentDir(global);
+export function loaderExists(): boolean {
+	const agentDir = getAgentDir();
 	return existsSync(join(agentDir, "tools", "omp", "index.ts"));
 }
