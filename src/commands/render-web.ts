@@ -484,12 +484,354 @@ async function fetchBinary(
    }
 }
 
+// =============================================================================
+// GitHub Special Handling
+// =============================================================================
+
+interface GitHubUrl {
+   type: 'blob' | 'tree' | 'repo' | 'issue' | 'issues' | 'pull' | 'pulls' | 'discussion' | 'discussions' | 'other'
+   owner: string
+   repo: string
+   ref?: string
+   path?: string
+   number?: number
+}
+
+/**
+ * Parse GitHub URL into components
+ */
+function parseGitHubUrl(url: string): GitHubUrl | null {
+   try {
+      const parsed = new URL(url)
+      if (parsed.hostname !== 'github.com') return null
+
+      const parts = parsed.pathname.split('/').filter(Boolean)
+      if (parts.length < 2) return null
+
+      const [owner, repo, ...rest] = parts
+
+      if (rest.length === 0) {
+         return { type: 'repo', owner, repo }
+      }
+
+      const [section, ...subParts] = rest
+
+      switch (section) {
+         case 'blob':
+         case 'tree': {
+            const [ref, ...pathParts] = subParts
+            return { type: section, owner, repo, ref, path: pathParts.join('/') }
+         }
+         case 'issues':
+            if (subParts.length > 0 && /^\d+$/.test(subParts[0])) {
+               return { type: 'issue', owner, repo, number: parseInt(subParts[0], 10) }
+            }
+            return { type: 'issues', owner, repo }
+         case 'pull':
+            if (subParts.length > 0 && /^\d+$/.test(subParts[0])) {
+               return { type: 'pull', owner, repo, number: parseInt(subParts[0], 10) }
+            }
+            return { type: 'pulls', owner, repo }
+         case 'pulls':
+            return { type: 'pulls', owner, repo }
+         case 'discussions':
+            if (subParts.length > 0 && /^\d+$/.test(subParts[0])) {
+               return { type: 'discussion', owner, repo, number: parseInt(subParts[0], 10) }
+            }
+            return { type: 'discussions', owner, repo }
+         default:
+            return { type: 'other', owner, repo }
+      }
+   } catch {
+      return null
+   }
+}
+
+/**
+ * Convert GitHub blob URL to raw URL
+ */
+function toRawGitHubUrl(gh: GitHubUrl): string {
+   return `https://raw.githubusercontent.com/${gh.owner}/${gh.repo}/refs/heads/${gh.ref}/${gh.path}`
+}
+
+/**
+ * Fetch from GitHub API
+ */
+async function fetchGitHubApi(endpoint: string, timeout: number): Promise<{ data: unknown; ok: boolean }> {
+   try {
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), timeout * 1000)
+
+      const headers: Record<string, string> = {
+         Accept: 'application/vnd.github.v3+json',
+         'User-Agent': 'omp-render-web/1.0',
+      }
+
+      // Use GITHUB_TOKEN if available
+      const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
+      if (token) {
+         headers.Authorization = `Bearer ${token}`
+      }
+
+      const response = await fetch(`https://api.github.com${endpoint}`, {
+         signal: controller.signal,
+         headers,
+      })
+
+      clearTimeout(timeoutId)
+
+      if (!response.ok) {
+         return { data: null, ok: false }
+      }
+
+      return { data: await response.json(), ok: true }
+   } catch {
+      return { data: null, ok: false }
+   }
+}
+
+/**
+ * Render GitHub issue/PR to markdown
+ */
+async function renderGitHubIssue(gh: GitHubUrl, timeout: number): Promise<{ content: string; ok: boolean }> {
+   const endpoint =
+      gh.type === 'pull' ? `/repos/${gh.owner}/${gh.repo}/pulls/${gh.number}` : `/repos/${gh.owner}/${gh.repo}/issues/${gh.number}`
+
+   const result = await fetchGitHubApi(endpoint, timeout)
+   if (!result.ok || !result.data) return { content: '', ok: false }
+
+   const issue = result.data as {
+      title: string
+      number: number
+      state: string
+      user: { login: string }
+      created_at: string
+      updated_at: string
+      body: string | null
+      labels: Array<{ name: string }>
+      comments: number
+      html_url: string
+   }
+
+   let md = `# ${issue.title}\n\n`
+   md += `**#${issue.number}** · ${issue.state} · opened by @${issue.user.login}\n`
+   md += `Created: ${issue.created_at} · Updated: ${issue.updated_at}\n`
+   if (issue.labels.length > 0) {
+      md += `Labels: ${issue.labels.map(l => l.name).join(', ')}\n`
+   }
+   md += `\n---\n\n`
+   md += issue.body || '*No description provided.*'
+   md += `\n\n---\n\n`
+
+   // Fetch comments if any
+   if (issue.comments > 0) {
+      const commentsResult = await fetchGitHubApi(`/repos/${gh.owner}/${gh.repo}/issues/${gh.number}/comments?per_page=50`, timeout)
+      if (commentsResult.ok && Array.isArray(commentsResult.data)) {
+         md += `## Comments (${issue.comments})\n\n`
+         for (const comment of commentsResult.data as Array<{
+            user: { login: string }
+            created_at: string
+            body: string
+         }>) {
+            md += `### @${comment.user.login} · ${comment.created_at}\n\n`
+            md += `${comment.body}\n\n---\n\n`
+         }
+      }
+   }
+
+   return { content: md, ok: true }
+}
+
+/**
+ * Render GitHub issues list to markdown
+ */
+async function renderGitHubIssuesList(gh: GitHubUrl, timeout: number): Promise<{ content: string; ok: boolean }> {
+   const result = await fetchGitHubApi(`/repos/${gh.owner}/${gh.repo}/issues?state=open&per_page=30`, timeout)
+   if (!result.ok || !Array.isArray(result.data)) return { content: '', ok: false }
+
+   const issues = result.data as Array<{
+      number: number
+      title: string
+      state: string
+      user: { login: string }
+      created_at: string
+      comments: number
+      labels: Array<{ name: string }>
+      pull_request?: unknown
+   }>
+
+   let md = `# ${gh.owner}/${gh.repo} - Open Issues\n\n`
+
+   for (const issue of issues) {
+      if (issue.pull_request) continue // Skip PRs in issues list
+      const labels = issue.labels.length > 0 ? ` [${issue.labels.map(l => l.name).join(', ')}]` : ''
+      md += `- **#${issue.number}** ${issue.title}${labels}\n`
+      md += `  by @${issue.user.login} · ${issue.comments} comments · ${issue.created_at}\n\n`
+   }
+
+   return { content: md, ok: true }
+}
+
+/**
+ * Render GitHub repo to markdown (file list + README)
+ */
+async function renderGitHubRepo(gh: GitHubUrl, timeout: number): Promise<{ content: string; ok: boolean }> {
+   // Fetch repo info
+   const repoResult = await fetchGitHubApi(`/repos/${gh.owner}/${gh.repo}`, timeout)
+   if (!repoResult.ok) return { content: '', ok: false }
+
+   const repo = repoResult.data as {
+      full_name: string
+      description: string | null
+      stargazers_count: number
+      forks_count: number
+      open_issues_count: number
+      default_branch: string
+      language: string | null
+      license: { name: string } | null
+   }
+
+   let md = `# ${repo.full_name}\n\n`
+   if (repo.description) md += `${repo.description}\n\n`
+   md += `⭐ ${repo.stargazers_count} · 🍴 ${repo.forks_count} · 📝 ${repo.open_issues_count} issues\n`
+   if (repo.language) md += `Language: ${repo.language}\n`
+   if (repo.license) md += `License: ${repo.license.name}\n`
+   md += `\n---\n\n`
+
+   // Fetch file tree
+   const treeResult = await fetchGitHubApi(`/repos/${gh.owner}/${gh.repo}/git/trees/${repo.default_branch}?recursive=1`, timeout)
+   if (treeResult.ok && treeResult.data) {
+      const tree = (treeResult.data as { tree: Array<{ path: string; type: string }> }).tree
+      md += `## Files\n\n`
+      md += '```\n'
+      for (const item of tree.slice(0, 100)) {
+         const prefix = item.type === 'tree' ? '📁 ' : '   '
+         md += `${prefix}${item.path}\n`
+      }
+      if (tree.length > 100) {
+         md += `... and ${tree.length - 100} more files\n`
+      }
+      md += '```\n\n'
+   }
+
+   // Fetch README
+   const readmeResult = await fetchGitHubApi(`/repos/${gh.owner}/${gh.repo}/readme`, timeout)
+   if (readmeResult.ok && readmeResult.data) {
+      const readme = readmeResult.data as { content: string; encoding: string }
+      if (readme.encoding === 'base64') {
+         const decoded = Buffer.from(readme.content, 'base64').toString('utf-8')
+         md += `## README\n\n${decoded}`
+      }
+   }
+
+   return { content: md, ok: true }
+}
+
+/**
+ * Handle GitHub URLs specially
+ */
+async function handleGitHub(url: string, timeout: number): Promise<RenderResult | null> {
+   const gh = parseGitHubUrl(url)
+   if (!gh) return null
+
+   const fetchedAt = new Date().toISOString()
+   const notes: string[] = []
+
+   switch (gh.type) {
+      case 'blob': {
+         // Convert to raw URL and fetch
+         const rawUrl = toRawGitHubUrl(gh)
+         notes.push(`Fetched raw: ${rawUrl}`)
+         const result = await loadPage(rawUrl, { timeout })
+         if (result.ok) {
+            const output = finalizeOutput(result.content)
+            return {
+               url,
+               finalUrl: rawUrl,
+               contentType: 'text/plain',
+               method: 'github-raw',
+               content: output.content,
+               fetchedAt,
+               truncated: output.truncated,
+               notes,
+            }
+         }
+         break
+      }
+
+      case 'issue':
+      case 'pull': {
+         notes.push(`Fetched via GitHub API`)
+         const result = await renderGitHubIssue(gh, timeout)
+         if (result.ok) {
+            const output = finalizeOutput(result.content)
+            return {
+               url,
+               finalUrl: url,
+               contentType: 'text/markdown',
+               method: gh.type === 'pull' ? 'github-pr' : 'github-issue',
+               content: output.content,
+               fetchedAt,
+               truncated: output.truncated,
+               notes,
+            }
+         }
+         break
+      }
+
+      case 'issues': {
+         notes.push(`Fetched via GitHub API`)
+         const result = await renderGitHubIssuesList(gh, timeout)
+         if (result.ok) {
+            const output = finalizeOutput(result.content)
+            return {
+               url,
+               finalUrl: url,
+               contentType: 'text/markdown',
+               method: 'github-issues',
+               content: output.content,
+               fetchedAt,
+               truncated: output.truncated,
+               notes,
+            }
+         }
+         break
+      }
+
+      case 'repo': {
+         notes.push(`Fetched via GitHub API`)
+         const result = await renderGitHubRepo(gh, timeout)
+         if (result.ok) {
+            const output = finalizeOutput(result.content)
+            return {
+               url,
+               finalUrl: url,
+               contentType: 'text/markdown',
+               method: 'github-repo',
+               content: output.content,
+               fetchedAt,
+               truncated: output.truncated,
+               notes,
+            }
+         }
+         break
+      }
+   }
+
+   // Fall back to null (let normal rendering handle it)
+   return null
+}
+
 /**
  * Main render function implementing the full pipeline
  */
 async function renderUrl(url: string, timeout: number): Promise<RenderResult> {
    const notes: string[] = []
    const fetchedAt = new Date().toISOString()
+
+   // Step 0: Handle GitHub URLs specially
+   const githubResult = await handleGitHub(url, timeout)
+   if (githubResult) return githubResult
 
    // Step 1: Normalize URL
    url = normalizeUrl(url)
