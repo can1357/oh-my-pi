@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/basics",
-  "version": "1.3.378",
+  "version": "1.3.3710",
   "type": "module",
   "description": "Essential tools for pi: rg (ripgrep), glob (fd), notebook_edit, and git status hook",
   "keywords": [

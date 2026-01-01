@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/user-prompt",
-  "version": "1.3.378",
+  "version": "1.3.3710",
   "description": "Interactive user prompting tool for gathering user input during execution",
   "keywords": [
     "omp-plugin",

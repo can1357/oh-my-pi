@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/anthropic-websearch",
-  "version": "1.3.378",
+  "version": "1.3.3710",
   "description": "Anthropic Claude web search tool for pi",
   "keywords": [
     "omp-plugin",

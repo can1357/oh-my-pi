@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.3710] - 2026-01-01
+
+### Added
+
+- `thinkingText` color for reasoning output
+
 ## [1.3.379] - 2026-01-01
 
 ### Added
@@ -271,7 +277,8 @@ _Documentation updates for npm-based tool loading and config persistence._
 - Load tools directly from node_modules via generated loader
 - Project-level overrides via `.pi/overrides.json` and `.pi/store/`
 
-[Unreleased]: https://github.com/can1357/oh-my-pi/compare/v1.3.379...HEAD
+[Unreleased]: https://github.com/can1357/oh-my-pi/compare/v1.3.3710...HEAD
+[1.3.3710]: https://github.com/can1357/oh-my-pi/compare/v1.3.379...v1.3.3710
 [1.3.379]: https://github.com/can1357/oh-my-pi/compare/v1.3.378...v1.3.379
 [1.3.378]: https://github.com/can1357/oh-my-pi/compare/v1.3.377...v1.3.378
 [1.3.377]: https://github.com/can1357/oh-my-pi/compare/v1.3.376...v1.3.377
