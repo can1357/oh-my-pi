@@ -22,7 +22,7 @@
  * Parameters:
  *   - tasks: Array of {agent, task} to run in parallel
  *   - context: (optional) Shared context prepended to all task prompts
- *   Results are written to /tmp/pi-task-{runId}/task_{agent}_{i}.md
+ *   Results are written to the system temp directory: pi-task-{runId}/task_{agent}_{i}.md
  *   - agentScope: "user" | "project" | "both"
  */
 
@@ -468,6 +468,7 @@ function writePromptToTempFile(agentName: string, prompt: string): { dir: string
    const safeName = agentName.replace(/[^\w.-]+/g, '_')
    const filePath = path.join(tmpDir, `prompt-${safeName}.md`)
    try {
+      // mode: 0o600 restricts file permissions on Unix; ignored on Windows
       fs.writeFileSync(filePath, prompt, { encoding: 'utf-8', mode: 0o600 })
    } catch (err) {
       fs.rmSync(tmpDir, { recursive: true, force: true })
@@ -906,7 +907,7 @@ function buildDescription(pi: ToolAPI): string {
    lines.push('- context: (optional) Shared context string prepended to all task prompts - use this to avoid repeating instructions')
    lines.push('- agentScope: (optional) "user" | "project" | "both" - which agent directories to use')
    lines.push('')
-   lines.push('Results are always written to /tmp/pi-task-{runId}/task_{agent}_{index}.md')
+   lines.push('Results are always written to {tempdir}/pi-task-{runId}/task_{agent}_{index}.md')
    lines.push('')
    lines.push('Example usage:')
    lines.push('')
@@ -949,7 +950,7 @@ function buildDescription(pi: ToolAPI): string {
    lines.push('    { "agent": "explore", "task": "Search in tests/" }')
    lines.push('  ]')
    lines.push('}')
-   lines.push('Results → /tmp/pi-task-{runId}/task_explore_*.md')
+   lines.push('Results → {tempdir}/pi-task-{runId}/task_explore_*.md')
    lines.push('</example>')
 
    return lines.join('\n')

@@ -1,5 +1,6 @@
 import * as cp from 'node:child_process'
 import * as fs from 'node:fs'
+import { homedir } from 'node:os'
 import * as path from 'node:path'
 
 export interface LSPServerConfig {
@@ -82,7 +83,8 @@ const KNOWN_SERVERS: Record<string, LSPServerConfig> = {
 
 function commandExists(cmd: string): boolean {
    try {
-      cp.execSync(`which ${cmd}`, { stdio: 'ignore' })
+      const whichCmd = process.platform === 'win32' ? 'where' : 'which'
+      cp.execSync(`${whichCmd} ${cmd}`, { stdio: 'ignore', shell: true })
       return true
    } catch {
       return false
@@ -103,7 +105,7 @@ function hasRootMarkers(dir: string, markers: string[]): boolean {
  */
 export function loadConfig(cwd: string): LSPConfig {
    // Try to load user config
-   const configPaths = [path.join(cwd, '.pi', 'lsp.json'), path.join(process.env.HOME || '', '.pi', 'lsp.json')]
+   const configPaths = [path.join(cwd, '.pi', 'lsp.json'), path.join(homedir(), '.pi', 'lsp.json')]
 
    for (const configPath of configPaths) {
       if (fs.existsSync(configPath)) {

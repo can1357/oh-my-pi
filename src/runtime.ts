@@ -125,21 +125,26 @@ export async function getPluginEnvVars(local = false): Promise<Record<string, st
  * Generate shell export statements
  * omp env > ~/.pi/env.sh && source ~/.pi/env.sh
  */
-export async function generateEnvScript(local = false, shell: 'sh' | 'fish' = 'sh'): Promise<string> {
+export async function generateEnvScript(local = false, shell: 'sh' | 'fish' | 'cmd' | 'powershell' = 'sh'): Promise<string> {
    const vars = await getPluginEnvVars(local)
+   const entries = Object.entries(vars)
 
    if (shell === 'fish') {
       // Fish doesn't expand variables in single quotes
-      return Object.entries(vars)
-         .map(([k, v]) => `set -gx ${k} '${v.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`)
-         .join('\n')
+      return entries.map(([k, v]) => `set -gx ${k} '${v.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`).join('\n')
+   }
+
+   if (shell === 'cmd') {
+      return entries.map(([k, v]) => `set ${k}=${v}`).join('\r\n')
+   }
+
+   if (shell === 'powershell') {
+      return entries.map(([k, v]) => `$env:${k} = "${v.replace(/"/g, '`"')}"`).join('\r\n')
    }
 
    // POSIX sh/bash/zsh - use single quotes with proper escaping
    // Replace ' with '\'' (end quote, escaped quote, start quote)
-   return Object.entries(vars)
-      .map(([k, v]) => `export ${k}='${v.replace(/'/g, "'\\''")}'`)
-      .join('\n')
+   return entries.map(([k, v]) => `export ${k}='${v.replace(/'/g, "'\\''")}'`).join('\n')
 }
 
 /**

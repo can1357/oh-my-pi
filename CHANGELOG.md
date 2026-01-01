@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Model fallback aliases (`haiku, flash`) for subagents to improve compatibility across providers
+- Windows shell support (`cmd`, `powershell`) in `omp env` command
+
+### Changed
+
+- Build target switched from Bun to Node for broader runtime compatibility
+
+### Fixed
+
+- Cross-platform command detection and Windows path handling in web renderer
+- Windows compatibility: npm commands now use `npm.cmd` on Windows
+- Windows compatibility: atomic file rename in lockfile now handles EEXIST
+- Windows compatibility: `~` path expansion uses `os.homedir()` instead of `$HOME`
+- Windows compatibility: LSP plugin uses `where` instead of `which` for command detection
+- Windows compatibility: LSP file URIs use correct `file:///C:/` format on Windows
+- Windows compatibility: path construction uses proper `path.join()` segments throughout
+
 ## [1.3.372] - 2026-01-01
 
 ### Added

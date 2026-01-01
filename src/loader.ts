@@ -61,9 +61,9 @@ function generateBootstrapCode(runtimeRedirects: string[]): string {
    return `
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const piDir = path.resolve(__dirname, "../../.."); // ~/.pi
-const pluginNodeModules = path.join(piDir, "plugins/node_modules");
-const globalStoreDir = path.join(piDir, "plugins/store");
-const projectStoreDir = path.join(process.cwd(), ".pi/store");
+const pluginNodeModules = path.join(piDir, "plugins", "node_modules");
+const globalStoreDir = path.join(piDir, "plugins", "store");
+const projectStoreDir = path.join(process.cwd(), ".pi", "store");
 
 // Ensure global store directory exists
 fs.mkdirSync(globalStoreDir, { recursive: true });

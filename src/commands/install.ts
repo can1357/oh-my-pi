@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { cp, mkdir, readFile, rm } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { type Conflict, detectConflicts, detectIntraPluginDuplicates, formatConflicts } from '@omp/conflicts'
@@ -15,7 +16,7 @@ import {
    readPluginPackageJson,
    savePluginsJson,
 } from '@omp/manifest'
-import { npmInfo, npmInstall, requireNpm } from '@omp/npm'
+import { NPM_CMD, npmInfo, npmInstall, requireNpm } from '@omp/npm'
 import { log, outputJson, setJsonMode } from '@omp/output'
 import { NODE_MODULES_DIR, PI_CONFIG_DIR, PLUGINS_DIR } from '@omp/paths'
 import { createProgress } from '@omp/progress'
@@ -344,7 +345,7 @@ function isFileProtocol(spec: string): boolean {
  * Check if a path looks like a local directory path (not file: protocol)
  */
 function isLocalDirectoryPath(spec: string): boolean {
-   return spec.startsWith('/') || spec.startsWith('./') || spec.startsWith('../') || spec.startsWith('~')
+   return spec.startsWith('/') || spec.startsWith('./') || spec.startsWith('../') || spec.startsWith('~') || /^[A-Za-z]:[\\/]/.test(spec)
 }
 
 /**
@@ -796,8 +797,9 @@ export async function installPlugin(packages?: string[], options: InstallOptions
                   log(chalk.red(`    ${dupe.dest} ← ${dupe.sources.join(', ')}`))
                }
                // Rollback: uninstall the package
-               execFileSync('npm', ['uninstall', '--prefix', PLUGINS_DIR, name], {
+               execFileSync(NPM_CMD, ['uninstall', '--prefix', PLUGINS_DIR, name], {
                   stdio: 'pipe',
+                  shell: process.platform === 'win32',
                })
                process.exitCode = 1
                results.push({
@@ -845,8 +847,9 @@ export async function installPlugin(packages?: string[], options: InstallOptions
                      log(chalk.yellow(`  ⚠ ${formatConflicts([conflict])[0]}`))
                   }
                   // Rollback: uninstall the package
-                  execFileSync('npm', ['uninstall', '--prefix', PLUGINS_DIR, name], {
+                  execFileSync(NPM_CMD, ['uninstall', '--prefix', PLUGINS_DIR, name], {
                      stdio: 'pipe',
+                     shell: process.platform === 'win32',
                   })
                   process.exitCode = 1
                   results.push({
@@ -865,8 +868,9 @@ export async function installPlugin(packages?: string[], options: InstallOptions
                      log(chalk.yellow(`  ⚠ ${formatConflicts([conflict])[0]}`))
                   }
                   // Rollback: uninstall the package
-                  execFileSync('npm', ['uninstall', '--prefix', PLUGINS_DIR, name], {
+                  execFileSync(NPM_CMD, ['uninstall', '--prefix', PLUGINS_DIR, name], {
                      stdio: 'pipe',
+                     shell: process.platform === 'win32',
                   })
                   process.exitCode = 1
                   results.push({
@@ -907,8 +911,9 @@ export async function installPlugin(packages?: string[], options: InstallOptions
                   if (abort) {
                      log(chalk.yellow(`  Aborted due to conflicts`))
                      // Rollback: uninstall the package
-                     execFileSync('npm', ['uninstall', '--prefix', PLUGINS_DIR, name], {
+                     execFileSync(NPM_CMD, ['uninstall', '--prefix', PLUGINS_DIR, name], {
                         stdio: 'pipe',
+                        shell: process.platform === 'win32',
                      })
                      process.exitCode = 1
                      results.push({
@@ -1043,8 +1048,9 @@ export async function installPlugin(packages?: string[], options: InstallOptions
          if (npmInstallSucceeded) {
             log(chalk.dim('  Rolling back npm install...'))
             try {
-               execFileSync('npm', ['uninstall', '--prefix', PLUGINS_DIR, name], {
+               execFileSync(NPM_CMD, ['uninstall', '--prefix', PLUGINS_DIR, name], {
                   stdio: 'pipe',
+                  shell: process.platform === 'win32',
                })
             } catch {
                // Ignore cleanup errors
@@ -1105,7 +1111,7 @@ async function installLocalPlugin(
 }> {
    // Expand ~ to home directory
    if (localPath.startsWith('~')) {
-      localPath = join(process.env.HOME || '', localPath.slice(1))
+      localPath = join(homedir(), localPath.slice(1))
    }
    localPath = resolve(localPath)
 

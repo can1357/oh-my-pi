@@ -400,7 +400,9 @@ function renderWithLynx(html: string, timeout: number): { content: string; ok: b
    try {
       fs.writeFileSync(tmpFile, html)
       // Convert path to file URL (handles Windows paths correctly)
-      const fileUrl = `file://${tmpFile.replace(/\\/g, '/')}`
+      // Windows: file:///C:/path, Unix: file:///path
+      const normalizedPath = tmpFile.replace(/\\/g, '/')
+      const fileUrl = normalizedPath.startsWith('/') ? `file://${normalizedPath}` : `file:///${normalizedPath}`
       const result = exec('lynx', ['-dump', '-nolist', '-width', '120', fileUrl], { timeout })
       return { content: result.stdout, ok: result.ok }
    } finally {

@@ -144,9 +144,18 @@ const LANGUAGE_MAP: Record<string, string> = {
 
 const detectLanguageId = (filePath: string): string => LANGUAGE_MAP[path.extname(filePath).toLowerCase()] || 'plaintext'
 
-const fileToUri = (filePath: string): string => `file://${path.resolve(filePath)}`
+const fileToUri = (filePath: string): string => {
+   const resolved = path.resolve(filePath)
+   return process.platform === 'win32' ? `file:///${resolved.replace(/\\/g, '/')}` : `file://${resolved}`
+}
 
-const uriToFile = (uri: string): string => (uri.startsWith('file://') ? decodeURIComponent(uri.slice(7)) : uri)
+const uriToFile = (uri: string): string => {
+   if (!uri.startsWith('file://')) return uri
+   let p = decodeURIComponent(uri.slice(7))
+   // Windows: file:///C:/path -> C:/path (strip leading slash before drive letter)
+   if (process.platform === 'win32' && p.startsWith('/') && /^[A-Za-z]:/.test(p.slice(1))) p = p.slice(1)
+   return p
+}
 
 const severityToString = (severity: number | undefined): string => {
    switch (severity) {

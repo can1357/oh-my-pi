@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { open, readFile, rename, unlink } from 'node:fs/promises'
+import { platform } from 'node:os'
 import { dirname, join } from 'node:path'
 import { GLOBAL_LOCK_FILE } from '@omp/paths'
 import chalk from 'chalk'
@@ -134,6 +135,10 @@ export async function saveLockFile(lockFile: LockFile): Promise<void> {
       handleClosed = true
 
       // Atomic rename to replace original
+      // Windows rename fails with EEXIST if destination exists; remove it first
+      if (platform() === 'win32') {
+         await unlink(path).catch(() => {})
+      }
       await rename(tempPath, path)
    } catch (err) {
       if (!handleClosed) {
