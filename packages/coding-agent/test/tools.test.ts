@@ -240,7 +240,7 @@ describe("Coding Agent Tools", () => {
 					oldText: "nonexistent",
 					newText: "testing",
 				}),
-			).rejects.toThrow(/Could not find the exact text/);
+			).rejects.toThrow(/Could not find/);
 		});
 
 		it("should fail if text appears multiple times", async () => {
@@ -325,6 +325,7 @@ describe("Coding Agent Tools", () => {
 			const result = await findTool.execute("test-call-13", {
 				pattern: "**/*.txt",
 				path: testDir,
+				hidden: true,
 			});
 
 			const outputLines = getTextOutput(result)

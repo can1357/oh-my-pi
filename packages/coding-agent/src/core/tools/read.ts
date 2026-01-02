@@ -113,7 +113,7 @@ Usage:
 								const base64 = buffer.toString("base64");
 
 								content = [
-									{ type: "text", text: `Read image file [$mimeType]` },
+									{ type: "text", text: `Read image file [${mimeType}]` },
 									{ type: "image", data: base64, mimeType },
 								];
 							} else if (CONVERTIBLE_EXTENSIONS.has(ext)) {
