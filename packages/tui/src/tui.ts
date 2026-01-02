@@ -320,8 +320,10 @@ export class TUI extends Container {
 					...newLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
 					"",
 				].join("\n");
-				fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
-				fs.writeFileSync(crashLogPath, crashData);
+				try {
+					fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
+					fs.writeFileSync(crashLogPath, crashData);
+				} catch {}
 				throw new Error(`Rendered line ${i} exceeds terminal width. Debug log written to ${crashLogPath}`);
 			}
 			buffer += line;

@@ -11,8 +11,7 @@
  * The isContextOverflow() function must return true for all providers.
  */
 
-import type { ChildProcess } from "child_process";
-import { execSync, spawn } from "child_process";
+import type { Subprocess } from "bun";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
 import { complete } from "../src/stream.js";
@@ -427,24 +426,24 @@ describe("Context overflow error handling", () => {
 	// Check if ollama is installed
 	let ollamaInstalled = false;
 	try {
-		execSync("which ollama", { stdio: "ignore" });
+		Bun.spawnSync(["which", "ollama"]);
 		ollamaInstalled = true;
 	} catch {
 		ollamaInstalled = false;
 	}
 
 	describe.skipIf(!ollamaInstalled)("Ollama (local)", () => {
-		let ollamaProcess: ChildProcess | null = null;
+		let ollamaProcess: Subprocess | null = null;
 		let model: Model<"openai-completions">;
 
 		beforeAll(async () => {
 			// Check if model is available, if not pull it
 			try {
-				execSync("ollama list | grep -q 'gpt-oss:20b'", { stdio: "ignore" });
+				Bun.spawnSync(["sh", "-c", "ollama list | grep -q 'gpt-oss:20b'"]);
 			} catch {
 				console.log("Pulling gpt-oss:20b model for Ollama overflow tests...");
 				try {
-					execSync("ollama pull gpt-oss:20b", { stdio: "inherit" });
+					await Bun.spawn(["ollama", "pull", "gpt-oss:20b"], { stdout: "inherit" }).exited;
 				} catch (_e) {
 					console.warn("Failed to pull gpt-oss:20b model, tests will be skipped");
 					return;
@@ -452,9 +451,9 @@ describe("Context overflow error handling", () => {
 			}
 
 			// Start ollama server
-			ollamaProcess = spawn("ollama", ["serve"], {
-				detached: false,
-				stdio: "ignore",
+			ollamaProcess = Bun.spawn(["ollama", "serve"], {
+				stdout: "ignore",
+				stderr: "ignore",
 			});
 
 			// Wait for server to be ready
@@ -490,7 +489,7 @@ describe("Context overflow error handling", () => {
 
 		afterAll(() => {
 			if (ollamaProcess) {
-				ollamaProcess.kill("SIGTERM");
+				ollamaProcess.kill();
 				ollamaProcess = null;
 			}
 		});
@@ -519,8 +518,8 @@ describe("Context overflow error handling", () => {
 
 	let lmStudioRunning = false;
 	try {
-		execSync("curl -s --max-time 1 http://localhost:1234/v1/models > /dev/null", { stdio: "ignore" });
-		lmStudioRunning = true;
+		const result = Bun.spawnSync(["curl", "-s", "--max-time", "1", "http://localhost:1234/v1/models"]);
+		lmStudioRunning = result.exitCode === 0;
 	} catch {
 		lmStudioRunning = false;
 	}
@@ -554,8 +553,8 @@ describe("Context overflow error handling", () => {
 
 	let llamaCppRunning = false;
 	try {
-		execSync("curl -s --max-time 1 http://localhost:8081/health > /dev/null", { stdio: "ignore" });
-		llamaCppRunning = true;
+		const result = Bun.spawnSync(["curl", "-s", "--max-time", "1", "http://localhost:8081/health"]);
+		llamaCppRunning = result.exitCode === 0;
 	} catch {
 		llamaCppRunning = false;
 	}

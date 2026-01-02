@@ -10,6 +10,9 @@
  * - MomSettingsManager: Simple settings for mom (compaction, retry, model preferences)
  */
 
+import { randomBytes } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import {
 	buildSessionContext,
@@ -22,9 +25,6 @@ import {
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
 } from "@mariozechner/pi-coding-agent";
-import { randomBytes } from "crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
 
 function uuidv4(): string {
 	const bytes = randomBytes(16);

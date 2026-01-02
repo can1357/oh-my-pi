@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync } from "fs";
-import { appendFile, writeFile } from "fs/promises";
-import { join } from "path";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFile } from "node:fs/promises";
+import { join } from "node:path";
 import * as log from "./log.js";
 
 export interface Attachment {
@@ -229,6 +229,6 @@ export class ChannelStore {
 		}
 
 		const buffer = await response.arrayBuffer();
-		await writeFile(filePath, Buffer.from(buffer));
+		await Bun.write(filePath, new Uint8Array(buffer));
 	}
 }

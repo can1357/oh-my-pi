@@ -1,7 +1,7 @@
 import { dirname, join } from "node:path";
 import * as readline from "node:readline";
 import { fileURLToPath } from "node:url";
-import { RpcClient } from "../src/modes/rpc/rpc-client.js";
+import { RpcClient } from "../src/modes/rpc/rpc-client.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -12,7 +12,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 async function main() {
 	const client = new RpcClient({
-		cliPath: join(__dirname, "../dist/cli.js"),
+		cliPath: join(__dirname, "../src/cli.ts"),
 		provider: "anthropic",
 		model: "claude-sonnet-4-20250514",
 		args: ["--no-session"],

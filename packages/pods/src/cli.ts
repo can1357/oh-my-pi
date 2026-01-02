@@ -1,19 +1,13 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import chalk from "chalk";
-import { spawn } from "child_process";
-import { readFileSync } from "fs";
-import { dirname, join } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import { listModels, showKnownModels, startModel, stopAllModels, stopModel, viewLogs } from "./commands/models.js";
 import { listPods, removePodCommand, setupPod, switchActivePod } from "./commands/pods.js";
 import { promptModel } from "./commands/prompt.js";
 import { getActivePod, loadConfig } from "./config.js";
 import { sshExecStream } from "./ssh.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-const packageJson = JSON.parse(readFileSync(join(__dirname, "../package.json"), "utf-8"));
+const packageJson = JSON.parse(await Bun.file(join(import.meta.dir, "../package.json")).text());
 
 function printHelp() {
 	console.log(`pi v${packageJson.version} - Manage vLLM deployments on GPU pods
@@ -75,7 +69,7 @@ try {
 	if (command === "pods") {
 		if (!subcommand) {
 			// pi pods - list all pods
-			listPods();
+			await listPods();
 		} else if (subcommand === "setup") {
 			// pi pods setup <name> "<ssh>" [--mount "<mount>"] [--models-path <path>] [--vllm release|nightly|gpt-oss]
 			const name = args[2];
@@ -128,7 +122,7 @@ try {
 				console.error("Usage: pi pods active <name>");
 				process.exit(1);
 			}
-			switchActivePod(name);
+			await switchActivePod(name);
 		} else if (subcommand === "remove") {
 			// pi pods remove <name>
 			const name = args[2];
@@ -136,7 +130,7 @@ try {
 				console.error("Usage: pi pods remove <name>");
 				process.exit(1);
 			}
-			removePodCommand(name);
+			await removePodCommand(name);
 		} else {
 			console.error(`Unknown pods subcommand: ${subcommand}`);
 			process.exit(1);
@@ -159,13 +153,13 @@ try {
 				let podInfo: { name: string; pod: import("./types.js").Pod } | null = null;
 
 				if (podName) {
-					const config = loadConfig();
+					const config = await loadConfig();
 					const pod = config.pods[podName];
 					if (pod) {
 						podInfo = { name: podName, pod };
 					}
 				} else {
-					podInfo = getActivePod();
+					podInfo = await getActivePod();
 				}
 
 				if (!podInfo) {
@@ -181,14 +175,15 @@ try {
 
 				// Execute SSH in interactive mode
 				const sshArgs = podInfo.pod.ssh.split(" ").slice(1); // Remove 'ssh' from command
-				const sshProcess = spawn("ssh", sshArgs, {
-					stdio: "inherit",
+				const sshProcess = Bun.spawn(["ssh", ...sshArgs], {
+					stdin: "inherit",
+					stdout: "inherit",
+					stderr: "inherit",
 					env: process.env,
 				});
 
-				sshProcess.on("exit", (code) => {
-					process.exit(code || 0);
-				});
+				const exitCode = await sshProcess.exited;
+				process.exit(exitCode);
 				break;
 			}
 			case "ssh": {
@@ -211,13 +206,13 @@ try {
 				let podInfo: { name: string; pod: import("./types.js").Pod } | null = null;
 
 				if (podName) {
-					const config = loadConfig();
+					const config = await loadConfig();
 					const pod = config.pods[podName];
 					if (pod) {
 						podInfo = { name: podName, pod };
 					}
 				} else {
-					podInfo = getActivePod();
+					podInfo = await getActivePod();
 				}
 
 				if (!podInfo) {

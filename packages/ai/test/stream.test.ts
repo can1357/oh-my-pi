@@ -1,6 +1,5 @@
 import { Type } from "@sinclair/typebox";
-import { type ChildProcess, execSync, spawn } from "child_process";
-import { readFileSync } from "fs";
+import type { Subprocess } from "bun";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -220,8 +219,8 @@ async function handleImage<TApi extends Api>(model: Model<TApi>, options?: Optio
 
 	// Read the test image
 	const imagePath = join(__dirname, "data", "red-circle.png");
-	const imageBuffer = readFileSync(imagePath);
-	const base64Image = imageBuffer.toString("base64");
+	const imageBuffer = await Bun.file(imagePath).arrayBuffer();
+	const base64Image = Buffer.from(imageBuffer).toString("base64");
 
 	const imageContent: ImageContent = {
 		type: "image",
@@ -841,7 +840,7 @@ describe("Generate E2E Tests", () => {
 	// Check if ollama is installed
 	let ollamaInstalled = false;
 	try {
-		execSync("which ollama", { stdio: "ignore" });
+		Bun.spawnSync(["which", "ollama"]);
 		ollamaInstalled = true;
 	} catch {
 		ollamaInstalled = false;
@@ -849,16 +848,16 @@ describe("Generate E2E Tests", () => {
 
 	describe.skipIf(!ollamaInstalled)("Ollama Provider (gpt-oss-20b via OpenAI Completions)", () => {
 		let llm: Model<"openai-completions">;
-		let ollamaProcess: ChildProcess | null = null;
+		let ollamaProcess: Subprocess | null = null;
 
 		beforeAll(async () => {
 			// Check if model is available, if not pull it
 			try {
-				execSync("ollama list | grep -q 'gpt-oss:20b'", { stdio: "ignore" });
+				Bun.spawnSync(["sh", "-c", "ollama list | grep -q 'gpt-oss:20b'"]);
 			} catch {
 				console.log("Pulling gpt-oss:20b model for Ollama tests...");
 				try {
-					execSync("ollama pull gpt-oss:20b", { stdio: "inherit" });
+					await Bun.spawn(["ollama", "pull", "gpt-oss:20b"], { stdout: "inherit" }).exited;
 				} catch (_e) {
 					console.warn("Failed to pull gpt-oss:20b model, tests will be skipped");
 					return;
@@ -866,9 +865,9 @@ describe("Generate E2E Tests", () => {
 			}
 
 			// Start ollama server
-			ollamaProcess = spawn("ollama", ["serve"], {
-				detached: false,
-				stdio: "ignore",
+			ollamaProcess = Bun.spawn(["ollama", "serve"], {
+				stdout: "ignore",
+				stderr: "ignore",
 			});
 
 			// Wait for server to be ready
@@ -910,7 +909,7 @@ describe("Generate E2E Tests", () => {
 		afterAll(() => {
 			// Kill ollama server
 			if (ollamaProcess) {
-				ollamaProcess.kill("SIGTERM");
+				ollamaProcess.kill();
 				ollamaProcess = null;
 			}
 		});

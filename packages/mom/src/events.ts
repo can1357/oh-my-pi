@@ -1,7 +1,7 @@
+import { existsSync, type FSWatcher, mkdirSync, readdirSync, statSync, unlinkSync, watch } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { Cron } from "croner";
-import { existsSync, type FSWatcher, mkdirSync, readdirSync, statSync, unlinkSync, watch } from "fs";
-import { readFile } from "fs/promises";
-import { join } from "path";
 import * as log from "./log.js";
 import type { SlackBot, SlackEvent } from "./slack.js";
 

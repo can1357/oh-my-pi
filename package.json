@@ -7,39 +7,35 @@
 		"packages/web-ui/example"
 	],
 	"scripts": {
-		"clean": "npm run clean --workspaces",
-		"build": "npm run build -w @mariozechner/pi-tui && npm run build -w @mariozechner/pi-ai && npm run build -w @mariozechner/pi-agent-core && npm run build -w @mariozechner/pi-coding-agent && npm run build -w @mariozechner/pi-mom && npm run build -w @mariozechner/pi-web-ui && npm run build -w @mariozechner/pi",
-		"dev": "concurrently --names \"ai,agent,coding-agent,mom,web-ui,tui\" --prefix-colors \"cyan,yellow,red,white,green,magenta\" \"npm run dev -w @mariozechner/pi-ai\" \"npm run dev -w @mariozechner/pi-agent-core\" \"npm run dev -w @mariozechner/pi-coding-agent\" \"npm run dev -w @mariozechner/pi-mom\" \"npm run dev -w @mariozechner/pi-web-ui\" \"npm run dev -w @mariozechner/pi-tui\"",
-		"dev:tsc": "concurrently --names \"ai,web-ui\" --prefix-colors \"cyan,green\" \"npm run dev:tsc -w @mariozechner/pi-ai\" \"npm run dev:tsc -w @mariozechner/pi-web-ui\"",
-		"check": "biome check --write . && tsgo --noEmit && npm run check -w @mariozechner/pi-web-ui",
-		"test": "npm run test --workspaces --if-present",
-		"version:patch": "npm version patch -ws --no-git-tag-version && node scripts/sync-versions.js && rm -rf node_modules packages/*/node_modules package-lock.json && npm install",
-		"version:minor": "npm version minor -ws --no-git-tag-version && node scripts/sync-versions.js && rm -rf node_modules packages/*/node_modules package-lock.json && npm install",
-		"version:major": "npm version major -ws --no-git-tag-version && node scripts/sync-versions.js && rm -rf node_modules packages/*/node_modules package-lock.json && npm install",
+		"build": "bun --cwd=packages/web-ui run build:css",
+		"dev": "bun --cwd=packages/web-ui run dev",
+		"check": "biome check --write . && bun --cwd=packages/web-ui run check",
+		"test": "bun run --filter '*' test",
+		"version:patch": "npm version patch -ws --no-git-tag-version && bun scripts/sync-versions.js && rm -rf node_modules packages/*/node_modules bun.lockb && bun install",
+		"version:minor": "npm version minor -ws --no-git-tag-version && bun scripts/sync-versions.js && rm -rf node_modules packages/*/node_modules bun.lockb && bun install",
+		"version:major": "npm version major -ws --no-git-tag-version && bun scripts/sync-versions.js && rm -rf node_modules packages/*/node_modules bun.lockb && bun install",
 		"version:set": "npm version -ws",
-		"prepublishOnly": "npm run clean && npm run build && npm run check",
-		"publish": "npm run prepublishOnly && npm publish -ws --access public",
-		"publish:dry": "npm run prepublishOnly && npm publish -ws --access public --dry-run",
-		"release:patch": "node scripts/release.mjs patch",
-		"release:minor": "node scripts/release.mjs minor",
-		"release:major": "node scripts/release.mjs major",
+		"prepublishOnly": "bun run build && bun run check",
+		"publish": "bun run prepublishOnly && npm publish -ws --access public",
+		"publish:dry": "bun run prepublishOnly && npm publish -ws --access public --dry-run",
+		"release:patch": "bun scripts/release.mjs patch",
+		"release:minor": "bun scripts/release.mjs minor",
+		"release:major": "bun scripts/release.mjs major",
 		"prepare": "husky"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.3.5",
+		"@biomejs/biome": "2.3.10",
+		"@types/bun": "^1.2.17",
 		"@types/node": "^22.10.5",
-		"@typescript/native-preview": "7.0.0-dev.20251212.1",
 		"concurrently": "^9.2.1",
-		"husky": "^9.1.7",
-		"tsx": "^4.20.3",
-		"typescript": "^5.9.2"
+		"husky": "^9.1.7"
 	},
 	"engines": {
-		"node": ">=20.0.0"
+		"bun": ">=1.0.0"
 	},
 	"version": "0.0.3",
 	"dependencies": {
-		"@mariozechner/pi-coding-agent": "^0.30.2",
+		"@sinclair/typebox": "^0.34.46",
 		"get-east-asian-width": "^1.4.0"
 	}
 }

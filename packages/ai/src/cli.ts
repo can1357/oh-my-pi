@@ -1,7 +1,5 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
-import { existsSync, readFileSync, writeFileSync } from "fs";
-import { createInterface } from "readline";
 import { loginAnthropic } from "./utils/oauth/anthropic.js";
 import { loginGitHubCopilot } from "./utils/oauth/github-copilot.js";
 import { loginAntigravity } from "./utils/oauth/google-antigravity.js";
@@ -12,88 +10,90 @@ import type { OAuthCredentials, OAuthProvider } from "./utils/oauth/types.js";
 const AUTH_FILE = "auth.json";
 const PROVIDERS = getOAuthProviders();
 
-function prompt(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
-	return new Promise((resolve) => rl.question(question, resolve));
+function prompt(question: string): Promise<string> {
+	return new Promise((resolve) => {
+		process.stdout.write(question);
+		process.stdin.resume();
+		process.stdin.once("data", (data) => {
+			process.stdin.pause();
+			resolve(data.toString().trim());
+		});
+	});
 }
 
-function loadAuth(): Record<string, { type: "oauth" } & OAuthCredentials> {
-	if (!existsSync(AUTH_FILE)) return {};
+async function loadAuth(): Promise<Record<string, { type: "oauth" } & OAuthCredentials>> {
+	const file = Bun.file(AUTH_FILE);
+	if (!(await file.exists())) return {};
 	try {
-		return JSON.parse(readFileSync(AUTH_FILE, "utf-8"));
+		return await file.json();
 	} catch {
 		return {};
 	}
 }
 
-function saveAuth(auth: Record<string, { type: "oauth" } & OAuthCredentials>): void {
-	writeFileSync(AUTH_FILE, JSON.stringify(auth, null, 2), "utf-8");
+async function saveAuth(auth: Record<string, { type: "oauth" } & OAuthCredentials>): Promise<void> {
+	await Bun.write(AUTH_FILE, JSON.stringify(auth, null, 2));
 }
 
 async function login(provider: OAuthProvider): Promise<void> {
-	const rl = createInterface({ input: process.stdin, output: process.stdout });
+	const promptFn = (msg: string) => prompt(`${msg} `);
 
-	const promptFn = (msg: string) => prompt(rl, `${msg} `);
+	let credentials: OAuthCredentials;
 
-	try {
-		let credentials: OAuthCredentials;
+	switch (provider) {
+		case "anthropic":
+			credentials = await loginAnthropic(
+				(url) => {
+					console.log(`\nOpen this URL in your browser:\n${url}\n`);
+				},
+				async () => {
+					return await promptFn("Paste the authorization code:");
+				},
+			);
+			break;
 
-		switch (provider) {
-			case "anthropic":
-				credentials = await loginAnthropic(
-					(url) => {
-						console.log(`\nOpen this URL in your browser:\n${url}\n`);
-					},
-					async () => {
-						return await promptFn("Paste the authorization code:");
-					},
-				);
-				break;
+		case "github-copilot":
+			credentials = await loginGitHubCopilot({
+				onAuth: (url, instructions) => {
+					console.log(`\nOpen this URL in your browser:\n${url}`);
+					if (instructions) console.log(instructions);
+					console.log();
+				},
+				onPrompt: async (p) => {
+					return await promptFn(`${p.message}${p.placeholder ? ` (${p.placeholder})` : ""}:`);
+				},
+				onProgress: (msg) => console.log(msg),
+			});
+			break;
 
-			case "github-copilot":
-				credentials = await loginGitHubCopilot({
-					onAuth: (url, instructions) => {
-						console.log(`\nOpen this URL in your browser:\n${url}`);
-						if (instructions) console.log(instructions);
-						console.log();
-					},
-					onPrompt: async (p) => {
-						return await promptFn(`${p.message}${p.placeholder ? ` (${p.placeholder})` : ""}:`);
-					},
-					onProgress: (msg) => console.log(msg),
-				});
-				break;
+		case "google-gemini-cli":
+			credentials = await loginGeminiCli(
+				(info) => {
+					console.log(`\nOpen this URL in your browser:\n${info.url}`);
+					if (info.instructions) console.log(info.instructions);
+					console.log();
+				},
+				(msg) => console.log(msg),
+			);
+			break;
 
-			case "google-gemini-cli":
-				credentials = await loginGeminiCli(
-					(info) => {
-						console.log(`\nOpen this URL in your browser:\n${info.url}`);
-						if (info.instructions) console.log(info.instructions);
-						console.log();
-					},
-					(msg) => console.log(msg),
-				);
-				break;
-
-			case "google-antigravity":
-				credentials = await loginAntigravity(
-					(info) => {
-						console.log(`\nOpen this URL in your browser:\n${info.url}`);
-						if (info.instructions) console.log(info.instructions);
-						console.log();
-					},
-					(msg) => console.log(msg),
-				);
-				break;
-		}
-
-		const auth = loadAuth();
-		auth[provider] = { type: "oauth", ...credentials };
-		saveAuth(auth);
-
-		console.log(`\nCredentials saved to ${AUTH_FILE}`);
-	} finally {
-		rl.close();
+		case "google-antigravity":
+			credentials = await loginAntigravity(
+				(info) => {
+					console.log(`\nOpen this URL in your browser:\n${info.url}`);
+					if (info.instructions) console.log(info.instructions);
+					console.log();
+				},
+				(msg) => console.log(msg),
+			);
+			break;
 	}
+
+	const auth = await loadAuth();
+	auth[provider] = { type: "oauth", ...credentials };
+	await saveAuth(auth);
+
+	console.log(`\nCredentials saved to ${AUTH_FILE}`);
 }
 
 async function main(): Promise<void> {
@@ -133,15 +133,13 @@ Examples:
 		let provider = args[1] as OAuthProvider | undefined;
 
 		if (!provider) {
-			const rl = createInterface({ input: process.stdin, output: process.stdout });
 			console.log("Select a provider:\n");
 			for (let i = 0; i < PROVIDERS.length; i++) {
 				console.log(`  ${i + 1}. ${PROVIDERS[i].name}`);
 			}
 			console.log();
 
-			const choice = await prompt(rl, "Enter number (1-4): ");
-			rl.close();
+			const choice = await prompt("Enter number (1-4): ");
 
 			const index = parseInt(choice, 10) - 1;
 			if (index < 0 || index >= PROVIDERS.length) {

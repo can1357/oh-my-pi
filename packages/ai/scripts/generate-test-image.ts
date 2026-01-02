@@ -1,7 +1,6 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env bun
 
 import { createCanvas } from "canvas";
-import { writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -27,8 +26,7 @@ const buffer = canvas.toBuffer("image/png");
 const outputPath = join(__dirname, "..", "test", "data", "red-circle.png");
 
 // Ensure the directory exists
-import { mkdirSync } from "fs";
-mkdirSync(join(__dirname, "..", "test", "data"), { recursive: true });
+await Bun.write(join(__dirname, "..", "test", "data", ".keep"), "");
 
-writeFileSync(outputPath, buffer);
+await Bun.write(outputPath, buffer);
 console.log(`Generated test image at: ${outputPath}`);

@@ -1,5 +1,3 @@
-import { spawn } from "child_process";
-
 export type SandboxConfig = { type: "host" } | { type: "docker"; container: string };
 
 export function parseSandboxArg(value: string): SandboxConfig {
@@ -48,22 +46,12 @@ export async function validateSandbox(config: SandboxConfig): Promise<void> {
 	console.log(`  Docker container '${config.container}' is running.`);
 }
 
-function execSimple(cmd: string, args: string[]): Promise<string> {
-	return new Promise((resolve, reject) => {
-		const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
-		let stdout = "";
-		let stderr = "";
-		child.stdout?.on("data", (d) => {
-			stdout += d;
-		});
-		child.stderr?.on("data", (d) => {
-			stderr += d;
-		});
-		child.on("close", (code) => {
-			if (code === 0) resolve(stdout);
-			else reject(new Error(stderr || `Exit code ${code}`));
-		});
-	});
+async function execSimple(cmd: string, args: string[]): Promise<string> {
+	const proc = Bun.spawn([cmd, ...args], { stdout: "pipe", stderr: "pipe" });
+	const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+	const code = await proc.exited;
+	if (code === 0) return stdout;
+	throw new Error(stderr || `Exit code ${code}`);
 }
 
 /**
@@ -103,72 +91,78 @@ export interface ExecResult {
 
 class HostExecutor implements Executor {
 	async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
-		return new Promise((resolve, reject) => {
-			const shell = process.platform === "win32" ? "cmd" : "sh";
-			const shellArgs = process.platform === "win32" ? ["/c"] : ["-c"];
+		const shell = process.platform === "win32" ? "cmd" : "sh";
+		const shellArgs = process.platform === "win32" ? ["/c"] : ["-c"];
 
-			const child = spawn(shell, [...shellArgs, command], {
-				detached: true,
-				stdio: ["ignore", "pipe", "pipe"],
-			});
+		let timedOut = false;
+		let proc: ReturnType<typeof Bun.spawn> | null = null;
 
-			let stdout = "";
-			let stderr = "";
-			let timedOut = false;
+		const timeoutHandle =
+			options?.timeout && options.timeout > 0
+				? setTimeout(() => {
+						timedOut = true;
+						if (proc) killProcessTree(proc.pid);
+					}, options.timeout * 1000)
+				: undefined;
 
-			const timeoutHandle =
-				options?.timeout && options.timeout > 0
-					? setTimeout(() => {
-							timedOut = true;
-							killProcessTree(child.pid!);
-						}, options.timeout * 1000)
-					: undefined;
+		const onAbort = () => {
+			if (proc) killProcessTree(proc.pid);
+		};
 
-			const onAbort = () => {
-				if (child.pid) killProcessTree(child.pid);
-			};
-
-			if (options?.signal) {
-				if (options.signal.aborted) {
-					onAbort();
-				} else {
-					options.signal.addEventListener("abort", onAbort, { once: true });
-				}
+		if (options?.signal) {
+			if (options.signal.aborted) {
+				onAbort();
+			} else {
+				options.signal.addEventListener("abort", onAbort, { once: true });
 			}
+		}
 
-			child.stdout?.on("data", (data) => {
-				stdout += data.toString();
-				if (stdout.length > 10 * 1024 * 1024) {
-					stdout = stdout.slice(0, 10 * 1024 * 1024);
-				}
-			});
-
-			child.stderr?.on("data", (data) => {
-				stderr += data.toString();
-				if (stderr.length > 10 * 1024 * 1024) {
-					stderr = stderr.slice(0, 10 * 1024 * 1024);
-				}
-			});
-
-			child.on("close", (code) => {
-				if (timeoutHandle) clearTimeout(timeoutHandle);
-				if (options?.signal) {
-					options.signal.removeEventListener("abort", onAbort);
-				}
-
-				if (options?.signal?.aborted) {
-					reject(new Error(`${stdout}\n${stderr}\nCommand aborted`.trim()));
-					return;
-				}
-
-				if (timedOut) {
-					reject(new Error(`${stdout}\n${stderr}\nCommand timed out after ${options?.timeout} seconds`.trim()));
-					return;
-				}
-
-				resolve({ stdout, stderr, code: code ?? 0 });
-			});
+		proc = Bun.spawn([shell, ...shellArgs, command], {
+			stdout: "pipe",
+			stderr: "pipe",
 		});
+
+		const MAX_BYTES = 10 * 1024 * 1024;
+
+		// Stream and truncate stdout/stderr
+		const readStream = async (stream: ReadableStream<Uint8Array>): Promise<string> => {
+			const reader = stream.getReader();
+			const decoder = new TextDecoder();
+			let result = "";
+			try {
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					result += decoder.decode(value, { stream: true });
+					if (result.length > MAX_BYTES) {
+						result = result.slice(0, MAX_BYTES);
+						break;
+					}
+				}
+			} finally {
+				reader.releaseLock();
+			}
+			return result;
+		};
+
+		const [stdout, stderr] = await Promise.all([readStream(proc.stdout), readStream(proc.stderr)]);
+
+		const code = await proc.exited;
+
+		if (timeoutHandle) clearTimeout(timeoutHandle);
+		if (options?.signal) {
+			options.signal.removeEventListener("abort", onAbort);
+		}
+
+		if (options?.signal?.aborted) {
+			throw new Error(`${stdout}\n${stderr}\nCommand aborted`.trim());
+		}
+
+		if (timedOut) {
+			throw new Error(`${stdout}\n${stderr}\nCommand timed out after ${options?.timeout} seconds`.trim());
+		}
+
+		return { stdout, stderr, code };
 	}
 
 	getWorkspacePath(hostPath: string): string {
@@ -195,10 +189,7 @@ class DockerExecutor implements Executor {
 function killProcessTree(pid: number): void {
 	if (process.platform === "win32") {
 		try {
-			spawn("taskkill", ["/F", "/T", "/PID", String(pid)], {
-				stdio: "ignore",
-				detached: true,
-			});
+			Bun.spawn(["taskkill", "/F", "/T", "/PID", String(pid)], { stdout: "ignore", stderr: "ignore" });
 		} catch {
 			// Ignore errors
 		}

@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env bun
 /**
  * Count tokens in system prompts using Anthropic's token counter API
  */

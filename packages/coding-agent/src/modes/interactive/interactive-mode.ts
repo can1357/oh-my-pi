@@ -23,7 +23,6 @@ import {
 	TUI,
 	visibleWidth,
 } from "@mariozechner/pi-tui";
-import { exec, spawnSync } from "child_process";
 import { APP_NAME, getAuthPath, getDebugLogPath } from "../../config.js";
 import type { AgentSession, AgentSessionEvent } from "../../core/agent-session.js";
 import type { CustomToolSessionEvent, LoadedCustomTool } from "../../core/custom-tools/index.js";
@@ -1394,8 +1393,10 @@ export class InteractiveMode {
 			const [editor, ...editorArgs] = editorCmd.split(" ");
 
 			// Spawn editor synchronously with inherited stdio for interactive editing
-			const result = spawnSync(editor, [...editorArgs, tmpFile], {
-				stdio: "inherit",
+			const result = Bun.spawnSync([editor, ...editorArgs, tmpFile], {
+				stdin: "inherit",
+				stdout: "inherit",
+				stderr: "inherit",
 			});
 
 			// On successful exit (status 0), replace editor content
@@ -1823,7 +1824,7 @@ export class InteractiveMode {
 											: process.platform === "win32"
 												? "start"
 												: "xdg-open";
-									exec(`${openCmd} "${info.url}"`);
+									Bun.spawn([openCmd, info.url], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 								},
 								onPrompt: async (prompt: { message: string; placeholder?: string }) => {
 									this.chatContainer.addChild(new Spacer(1));

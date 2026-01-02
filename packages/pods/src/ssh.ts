@@ -1,5 +1,3 @@
-import { type SpawnOptions, spawn } from "child_process";
-
 export interface SSHResult {
 	stdout: string;
 	stderr: string;
@@ -14,52 +12,60 @@ export const sshExec = async (
 	command: string,
 	options?: { keepAlive?: boolean },
 ): Promise<SSHResult> => {
-	return new Promise((resolve) => {
-		// Parse SSH command (e.g., "ssh root@1.2.3.4" or "ssh -p 22 root@1.2.3.4")
-		const sshParts = sshCmd.split(" ").filter((p) => p);
-		const sshBinary = sshParts[0];
-		let sshArgs = [...sshParts.slice(1)];
+	// Parse SSH command (e.g., "ssh root@1.2.3.4" or "ssh -p 22 root@1.2.3.4")
+	const sshParts = sshCmd.split(" ").filter((p) => p);
+	const sshBinary = sshParts[0];
+	let sshArgs = [...sshParts.slice(1)];
 
-		// Add SSH keepalive options for long-running commands
-		if (options?.keepAlive) {
-			// ServerAliveInterval=30 sends keepalive every 30 seconds
-			// ServerAliveCountMax=120 allows up to 120 failures (60 minutes total)
-			sshArgs = ["-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=120", ...sshArgs];
-		}
+	// Add SSH keepalive options for long-running commands
+	if (options?.keepAlive) {
+		// ServerAliveInterval=30 sends keepalive every 30 seconds
+		// ServerAliveCountMax=120 allows up to 120 failures (60 minutes total)
+		sshArgs = ["-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=120", ...sshArgs];
+	}
 
-		sshArgs.push(command);
+	sshArgs.push(command);
 
-		const proc = spawn(sshBinary, sshArgs, {
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-
-		let stdout = "";
-		let stderr = "";
-
-		proc.stdout.on("data", (data) => {
-			stdout += data.toString();
-		});
-
-		proc.stderr.on("data", (data) => {
-			stderr += data.toString();
-		});
-
-		proc.on("close", (code) => {
-			resolve({
-				stdout,
-				stderr,
-				exitCode: code || 0,
-			});
-		});
-
-		proc.on("error", (err) => {
-			resolve({
-				stdout,
-				stderr: err.message,
-				exitCode: 1,
-			});
-		});
+	const proc = Bun.spawn([sshBinary, ...sshArgs], {
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
 	});
+
+	let stdout = "";
+	let stderr = "";
+
+	const stdoutReader = proc.stdout.getReader();
+	const stderrReader = proc.stderr.getReader();
+
+	// Read stdout
+	const stdoutPromise = (async () => {
+		const decoder = new TextDecoder();
+		while (true) {
+			const { done, value } = await stdoutReader.read();
+			if (done) break;
+			stdout += decoder.decode(value, { stream: true });
+		}
+	})();
+
+	// Read stderr
+	const stderrPromise = (async () => {
+		const decoder = new TextDecoder();
+		while (true) {
+			const { done, value } = await stderrReader.read();
+			if (done) break;
+			stderr += decoder.decode(value, { stream: true });
+		}
+	})();
+
+	// Wait for process and streams
+	await Promise.all([stdoutPromise, stderrPromise, proc.exited]);
+
+	return {
+		stdout,
+		stderr,
+		exitCode: proc.exitCode || 0,
+	};
 };
 
 /**
@@ -70,41 +76,33 @@ export const sshExecStream = async (
 	command: string,
 	options?: { silent?: boolean; forceTTY?: boolean; keepAlive?: boolean },
 ): Promise<number> => {
-	return new Promise((resolve) => {
-		const sshParts = sshCmd.split(" ").filter((p) => p);
-		const sshBinary = sshParts[0];
+	const sshParts = sshCmd.split(" ").filter((p) => p);
+	const sshBinary = sshParts[0];
 
-		// Build SSH args
-		let sshArgs = [...sshParts.slice(1)];
+	// Build SSH args
+	let sshArgs = [...sshParts.slice(1)];
 
-		// Add -t flag if requested and not already present
-		if (options?.forceTTY && !sshParts.includes("-t")) {
-			sshArgs = ["-t", ...sshArgs];
-		}
+	// Add -t flag if requested and not already present
+	if (options?.forceTTY && !sshParts.includes("-t")) {
+		sshArgs = ["-t", ...sshArgs];
+	}
 
-		// Add SSH keepalive options for long-running commands
-		if (options?.keepAlive) {
-			// ServerAliveInterval=30 sends keepalive every 30 seconds
-			// ServerAliveCountMax=120 allows up to 120 failures (60 minutes total)
-			sshArgs = ["-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=120", ...sshArgs];
-		}
+	// Add SSH keepalive options for long-running commands
+	if (options?.keepAlive) {
+		// ServerAliveInterval=30 sends keepalive every 30 seconds
+		// ServerAliveCountMax=120 allows up to 120 failures (60 minutes total)
+		sshArgs = ["-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=120", ...sshArgs];
+	}
 
-		sshArgs.push(command);
+	sshArgs.push(command);
 
-		const spawnOptions: SpawnOptions = options?.silent
-			? { stdio: ["ignore", "ignore", "ignore"] }
-			: { stdio: "inherit" };
-
-		const proc = spawn(sshBinary, sshArgs, spawnOptions);
-
-		proc.on("close", (code) => {
-			resolve(code || 0);
-		});
-
-		proc.on("error", () => {
-			resolve(1);
-		});
+	const proc = Bun.spawn([sshBinary, ...sshArgs], {
+		stdin: options?.silent ? "ignore" : "inherit",
+		stdout: options?.silent ? "ignore" : "inherit",
+		stderr: options?.silent ? "ignore" : "inherit",
 	});
+
+	return proc.exited;
 };
 
 /**
@@ -137,15 +135,12 @@ export const scpFile = async (sshCmd: string, localPath: string, remotePath: str
 	// Build SCP command
 	const scpArgs = ["-P", port, localPath, `${host}:${remotePath}`];
 
-	return new Promise((resolve) => {
-		const proc = spawn("scp", scpArgs, { stdio: "inherit" });
-
-		proc.on("close", (code) => {
-			resolve(code === 0);
-		});
-
-		proc.on("error", () => {
-			resolve(false);
-		});
+	const proc = Bun.spawn(["scp", ...scpArgs], {
+		stdin: "inherit",
+		stdout: "inherit",
+		stderr: "inherit",
 	});
+
+	const exitCode = await proc.exited;
+	return exitCode === 0;
 };

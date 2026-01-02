@@ -1,4 +1,3 @@
-import { readFileSync } from "fs";
 import { Image } from "../src/components/image.js";
 import { Spacer } from "../src/components/spacer.js";
 import { Text } from "../src/components/text.js";
@@ -6,21 +5,22 @@ import { ProcessTerminal } from "../src/terminal.js";
 import { getCapabilities, getImageDimensions } from "../src/terminal-image.js";
 import { TUI } from "../src/tui.js";
 
-const testImagePath = process.argv[2] || "/tmp/test-image.png";
+const testImagePath = Bun.argv[2] || "/tmp/test-image.png";
 
 console.log("Terminal capabilities:", getCapabilities());
 console.log("Loading image from:", testImagePath);
 
-let imageBuffer: Buffer;
+let imageBuffer: Uint8Array;
 try {
-	imageBuffer = readFileSync(testImagePath);
+	const file = Bun.file(testImagePath);
+	imageBuffer = await file.bytes();
 } catch (_e) {
 	console.error(`Failed to load image: ${testImagePath}`);
-	console.error("Usage: npx tsx test/image-test.ts [path-to-image.png]");
+	console.error("Usage: bun test/image-test.ts [path-to-image.png]");
 	process.exit(1);
 }
 
-const base64Data = imageBuffer.toString("base64");
+const base64Data = Buffer.from(imageBuffer).toString("base64");
 const dims = getImageDimensions(base64Data, "image/png");
 
 console.log("Image dimensions:", dims);

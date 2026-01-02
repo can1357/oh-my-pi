@@ -13,8 +13,7 @@ import {
 	type StopReason,
 	type ToolCall,
 } from "@mariozechner/pi-ai";
-// Internal import for JSON parsing utility
-import { parseStreamingJson } from "@mariozechner/pi-ai/dist/utils/json-parse.js";
+import { parseStreamingJson } from "@mariozechner/pi-ai/utils/json-parse";
 
 // Create stream class matching ProxyMessageEventStream
 class ProxyMessageEventStream extends EventStream<AssistantMessageEvent, AssistantMessage> {

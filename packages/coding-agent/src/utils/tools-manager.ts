@@ -1,10 +1,7 @@
+import { chmodSync, createWriteStream, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { arch, platform } from "node:os";
+import { join } from "node:path";
 import chalk from "chalk";
-import { spawnSync } from "child_process";
-import { chmodSync, createWriteStream, existsSync, mkdirSync, renameSync, rmSync } from "fs";
-import { arch, platform } from "os";
-import { join } from "path";
-import { Readable } from "stream";
-import { finished } from "stream/promises";
 import { APP_NAME, getToolsDir } from "../config.js";
 
 const TOOLS_DIR = getToolsDir();
@@ -63,9 +60,8 @@ const TOOLS: Record<string, ToolConfig> = {
 // Check if a command exists in PATH by trying to run it
 function commandExists(cmd: string): boolean {
 	try {
-		const result = spawnSync(cmd, ["--version"], { stdio: "pipe" });
-		// Check for ENOENT error (command not found)
-		return result.error === undefined || result.error === null;
+		const proc = Bun.spawnSync([cmd, "--version"], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+		return proc.exitCode !== null;
 	} catch {
 		return false;
 	}
@@ -117,7 +113,17 @@ async function downloadFile(url: string, dest: string): Promise<void> {
 	}
 
 	const fileStream = createWriteStream(dest);
-	await finished(Readable.fromWeb(response.body as any).pipe(fileStream));
+	const reader = response.body.getReader();
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		fileStream.write(Buffer.from(value));
+	}
+	fileStream.end();
+	await new Promise((resolve, reject) => {
+		fileStream.on("finish", resolve);
+		fileStream.on("error", reject);
+	});
 }
 
 // Download and install a tool
@@ -154,9 +160,17 @@ async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 
 	try {
 		if (assetName.endsWith(".tar.gz")) {
-			spawnSync("tar", ["xzf", archivePath, "-C", extractDir], { stdio: "pipe" });
+			Bun.spawnSync(["tar", "xzf", archivePath, "-C", extractDir], {
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe",
+			});
 		} else if (assetName.endsWith(".zip")) {
-			spawnSync("unzip", ["-o", archivePath, "-d", extractDir], { stdio: "pipe" });
+			Bun.spawnSync(["unzip", "-o", archivePath, "-d", extractDir], {
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe",
+			});
 		}
 
 		// Find the binary in extracted files

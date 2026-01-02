@@ -1,9 +1,7 @@
-import { createInterface } from "node:readline";
+import { readFileSync, type Stats, statSync } from "node:fs";
+import path from "node:path";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
-import { spawn } from "child_process";
-import { readFileSync, type Stats, statSync } from "fs";
-import path from "path";
 import { ensureTool } from "../../utils/tools-manager.js";
 import { resolveToCwd } from "./path-utils.js";
 import {

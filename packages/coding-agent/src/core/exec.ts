@@ -2,7 +2,7 @@
  * Shared command execution utilities for hooks and custom tools.
  */
 
-import { spawn } from "node:child_process";
+import type { Subprocess } from "bun";
 
 /**
  * Options for executing shell commands.
@@ -37,25 +37,28 @@ export async function execCommand(
 	options?: ExecOptions,
 ): Promise<ExecResult> {
 	return new Promise((resolve) => {
-		const proc = spawn(command, args, {
+		const proc: Subprocess = Bun.spawn([command, ...args], {
 			cwd,
-			shell: false,
-			stdio: ["ignore", "pipe", "pipe"],
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
 		});
 
 		let stdout = "";
 		let stderr = "";
 		let killed = false;
-		let timeoutId: NodeJS.Timeout | undefined;
+		let timeoutId: Timer | undefined;
 
 		const killProcess = () => {
 			if (!killed) {
 				killed = true;
-				proc.kill("SIGTERM");
-				// Force kill after 5 seconds if SIGTERM doesn't work
+				proc.kill();
+				// Force kill after 5 seconds if first kill doesn't work
 				setTimeout(() => {
-					if (!proc.killed) {
-						proc.kill("SIGKILL");
+					try {
+						proc.kill(9);
+					} catch {
+						// Ignore if already dead
 					}
 				}, 5000);
 			}
@@ -77,28 +80,50 @@ export async function execCommand(
 			}, options.timeout);
 		}
 
-		proc.stdout?.on("data", (data) => {
-			stdout += data.toString();
-		});
+		// Read streams asynchronously
+		(async () => {
+			try {
+				const stdoutReader = proc.stdout.getReader();
+				const stderrReader = proc.stderr.getReader();
 
-		proc.stderr?.on("data", (data) => {
-			stderr += data.toString();
-		});
+				const [stdoutResult, stderrResult] = await Promise.all([
+					(async () => {
+						const chunks: Uint8Array[] = [];
+						while (true) {
+							const { done, value } = await stdoutReader.read();
+							if (done) break;
+							chunks.push(value);
+						}
+						return Buffer.concat(chunks).toString();
+					})(),
+					(async () => {
+						const chunks: Uint8Array[] = [];
+						while (true) {
+							const { done, value } = await stderrReader.read();
+							if (done) break;
+							chunks.push(value);
+						}
+						return Buffer.concat(chunks).toString();
+					})(),
+				]);
 
-		proc.on("close", (code) => {
-			if (timeoutId) clearTimeout(timeoutId);
-			if (options?.signal) {
-				options.signal.removeEventListener("abort", killProcess);
+				stdout = stdoutResult;
+				stderr = stderrResult;
+
+				const exitCode = await proc.exited;
+
+				if (timeoutId) clearTimeout(timeoutId);
+				if (options?.signal) {
+					options.signal.removeEventListener("abort", killProcess);
+				}
+				resolve({ stdout, stderr, code: exitCode ?? 0, killed });
+			} catch (_err) {
+				if (timeoutId) clearTimeout(timeoutId);
+				if (options?.signal) {
+					options.signal.removeEventListener("abort", killProcess);
+				}
+				resolve({ stdout, stderr, code: 1, killed });
 			}
-			resolve({ stdout, stderr, code: code ?? 0, killed });
-		});
-
-		proc.on("error", (_err) => {
-			if (timeoutId) clearTimeout(timeoutId);
-			if (options?.signal) {
-				options.signal.removeEventListener("abort", killProcess);
-			}
-			resolve({ stdout, stderr, code: 1, killed });
-		});
+		})();
 	});
 }

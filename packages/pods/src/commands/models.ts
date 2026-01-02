@@ -1,8 +1,5 @@
 import chalk from "chalk";
-import { spawn } from "child_process";
-import { readFileSync } from "fs";
-import { dirname, join } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import { getActivePod, loadConfig, saveConfig } from "../config.js";
 import { getModelConfig, getModelName, isKnownModel } from "../model-configs.js";
 import { sshExec } from "../ssh.js";
@@ -11,9 +8,9 @@ import type { Pod } from "../types.js";
 /**
  * Get the pod to use (active or override)
  */
-const getPod = (podOverride?: string): { name: string; pod: Pod } => {
+const getPod = async (podOverride?: string): Promise<{ name: string; pod: Pod }> => {
 	if (podOverride) {
-		const config = loadConfig();
+		const config = await loadConfig();
 		const pod = config.pods[podOverride];
 		if (!pod) {
 			console.error(chalk.red(`Pod '${podOverride}' not found`));
@@ -22,7 +19,7 @@ const getPod = (podOverride?: string): { name: string; pod: Pod } => {
 		return { name: podOverride, pod };
 	}
 
-	const active = getActivePod();
+	const active = await getActivePod();
 	if (!active) {
 		console.error(chalk.red("No active pod. Use 'pi pods active <name>' to set one."));
 		process.exit(1);
@@ -196,8 +193,8 @@ export const startModel = async (
 	console.log("");
 
 	// Read and customize model_run.sh script with our values
-	const scriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../scripts/model_run.sh");
-	let scriptContent = readFileSync(scriptPath, "utf-8");
+	const scriptPath = join(import.meta.dir, "../../scripts/model_run.sh");
+	let scriptContent = await Bun.file(scriptPath).text();
 
 	// Replace placeholders - no escaping needed, heredoc with 'EOF' is literal
 	scriptContent = scriptContent
@@ -258,9 +255,9 @@ WRAPPER
 	}
 
 	// Save to config
-	const config = loadConfig();
+	const config = await loadConfig();
 	config.pods[podName].models[name] = { model: modelId, port, gpu: gpus, pid };
-	saveConfig(config);
+	await saveConfig(config);
 
 	console.log(`Model runner started with PID: ${pid}`);
 	console.log("Streaming logs... (waiting for startup)\n");
@@ -278,8 +275,10 @@ WRAPPER
 	// Build the full args array for spawn
 	const fullArgs = [...sshArgs, tailCmd];
 
-	const logProcess = spawn(sshCommand, fullArgs, {
-		stdio: ["inherit", "pipe", "pipe"], // capture stdout and stderr
+	const logProcess = Bun.spawn([sshCommand, ...fullArgs], {
+		stdin: "inherit",
+		stdout: "pipe",
+		stderr: "pipe",
 		env: { ...process.env, FORCE_COLOR: "1" },
 	});
 
@@ -296,8 +295,8 @@ WRAPPER
 	process.on("SIGINT", sigintHandler);
 
 	// Process log output line by line
-	const processOutput = (data: Buffer) => {
-		const lines = data.toString().split("\n");
+	const processOutput = (text: string) => {
+		const lines = text.split("\n");
 		for (const line of lines) {
 			if (line) {
 				console.log(line); // Echo the line to console
@@ -333,10 +332,20 @@ WRAPPER
 		}
 	};
 
-	logProcess.stdout?.on("data", processOutput);
-	logProcess.stderr?.on("data", processOutput);
+	// Read stdout and stderr streams
+	const decoder = new TextDecoder();
+	const stdoutReader = logProcess.stdout.getReader();
+	const stderrReader = logProcess.stderr.getReader();
 
-	await new Promise<void>((resolve) => logProcess.on("exit", resolve));
+	const readStream = async (reader: ReadableStreamDefaultReader<Uint8Array>) => {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			processOutput(decoder.decode(value, { stream: true }));
+		}
+	};
+
+	await Promise.all([readStream(stdoutReader), readStream(stderrReader), logProcess.exited]);
 	process.removeListener("SIGINT", sigintHandler);
 
 	if (startupFailed) {
@@ -344,9 +353,9 @@ WRAPPER
 		console.log(`\n${chalk.red(`✗ Model failed to start: ${failureReason}`)}`);
 
 		// Remove the failed model from config
-		const config = loadConfig();
+		const config = await loadConfig();
 		delete config.pods[podName].models[name];
-		saveConfig(config);
+		await saveConfig(config);
 
 		console.log(chalk.yellow("\nModel has been removed from configuration."));
 
@@ -416,7 +425,7 @@ WRAPPER
  * Stop a model
  */
 export const stopModel = async (name: string, options: { pod?: string }) => {
-	const { name: podName, pod } = getPod(options.pod);
+	const { name: podName, pod } = await getPod(options.pod);
 
 	const model = pod.models[name];
 	if (!model) {
@@ -436,9 +445,9 @@ export const stopModel = async (name: string, options: { pod?: string }) => {
 	await sshExec(pod.ssh, killCmd);
 
 	// Remove from config
-	const config = loadConfig();
+	const config = await loadConfig();
 	delete config.pods[podName].models[name];
-	saveConfig(config);
+	await saveConfig(config);
 
 	console.log(chalk.green(`✓ Model '${name}' stopped`));
 };
@@ -447,7 +456,7 @@ export const stopModel = async (name: string, options: { pod?: string }) => {
  * Stop all models on a pod
  */
 export const stopAllModels = async (options: { pod?: string }) => {
-	const { name: podName, pod } = getPod(options.pod);
+	const { name: podName, pod } = await getPod(options.pod);
 
 	const modelNames = Object.keys(pod.models);
 	if (modelNames.length === 0) {
@@ -468,9 +477,9 @@ export const stopAllModels = async (options: { pod?: string }) => {
 	await sshExec(pod.ssh, killCmd);
 
 	// Clear all models from config
-	const config = loadConfig();
+	const config = await loadConfig();
 	config.pods[podName].models = {};
-	saveConfig(config);
+	await saveConfig(config);
 
 	console.log(chalk.green(`✓ Stopped all models: ${modelNames.join(", ")}`));
 };
@@ -479,7 +488,7 @@ export const stopAllModels = async (options: { pod?: string }) => {
  * List all models
  */
 export const listModels = async (options: { pod?: string }) => {
-	const { name: podName, pod } = getPod(options.pod);
+	const { name: podName, pod } = await getPod(options.pod);
 
 	const modelNames = Object.keys(pod.models);
 	if (modelNames.length === 0) {
@@ -556,7 +565,7 @@ export const listModels = async (options: { pod?: string }) => {
  * View model logs
  */
 export const viewLogs = async (name: string, options: { pod?: string }) => {
-	const { name: podName, pod } = getPod(options.pod);
+	const { name: podName, pod } = await getPod(options.pod);
 
 	const model = pod.models[name];
 	if (!model) {
@@ -574,8 +583,10 @@ export const viewLogs = async (name: string, options: { pod?: string }) => {
 	const sshArgs = sshParts.slice(1); // ["root@86.38.238.55"]
 	const tailCmd = `tail -f ~/.vllm_logs/${name}.log`;
 
-	const logProcess = spawn(sshCommand, [...sshArgs, tailCmd], {
-		stdio: "inherit",
+	const logProcess = Bun.spawn([sshCommand, ...sshArgs, tailCmd], {
+		stdin: "inherit",
+		stdout: "inherit",
+		stderr: "inherit",
 		env: {
 			...process.env,
 			FORCE_COLOR: "1",
@@ -583,23 +594,19 @@ export const viewLogs = async (name: string, options: { pod?: string }) => {
 	});
 
 	// Wait for process to exit
-	await new Promise<void>((resolve) => {
-		logProcess.on("exit", () => resolve());
-	});
+	await logProcess.exited;
 };
 
 /**
  * Show known models and their hardware requirements
  */
 export const showKnownModels = async () => {
-	const __filename = fileURLToPath(import.meta.url);
-	const __dirname = dirname(__filename);
-	const modelsJsonPath = join(__dirname, "..", "models.json");
-	const modelsJson = JSON.parse(readFileSync(modelsJsonPath, "utf-8"));
+	const modelsJsonPath = join(import.meta.dir, "..", "models.json");
+	const modelsJson = JSON.parse(await Bun.file(modelsJsonPath).text());
 	const models = modelsJson.models;
 
 	// Get active pod info if available
-	const activePod = getActivePod();
+	const activePod = await getActivePod();
 	let podGpuCount = 0;
 	let podGpuType = "";
 

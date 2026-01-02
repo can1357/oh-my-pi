@@ -1,25 +1,25 @@
 {
 	"name": "@mariozechner/pi-ai",
-	"version": "0.30.2",
+	"version": "1.337.0",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"type": "module",
-	"main": "./dist/index.js",
-	"types": "./dist/index.d.ts",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"exports": {
+		".": "./src/index.ts",
+		"./utils/json-parse": "./src/utils/json-parse.ts"
+	},
 	"bin": {
-		"pi-ai": "./dist/cli.js"
+		"pi-ai": "./src/cli.ts"
 	},
 	"files": [
-		"dist",
+		"src",
 		"README.md"
 	],
 	"scripts": {
-		"clean": "rm -rf dist",
-		"generate-models": "npx tsx scripts/generate-models.ts",
-		"build": "npm run generate-models && tsgo -p tsconfig.build.json",
-		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
-		"dev:tsc": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
+		"generate-models": "bun scripts/generate-models.ts",
 		"test": "vitest --run",
-		"prepublishOnly": "npm run clean && npm run build"
+		"prepublishOnly": "bun run generate-models"
 	},
 	"dependencies": {
 		"@anthropic-ai/sdk": "0.71.2",
@@ -50,7 +50,7 @@
 		"directory": "packages/ai"
 	},
 	"engines": {
-		"node": ">=20.0.0"
+		"bun": ">=1.0.0"
 	},
 	"devDependencies": {
 		"@types/node": "^24.3.0",

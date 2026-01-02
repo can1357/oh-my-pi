@@ -1,5 +1,4 @@
-import assert from "node:assert";
-import { describe, it } from "node:test";
+import { describe, expect, it } from "bun:test";
 import { Chalk } from "chalk";
 import { TruncatedText } from "../src/components/truncated-text.js";
 import { visibleWidth } from "../src/utils.js";
@@ -13,11 +12,11 @@ describe("TruncatedText component", () => {
 		const lines = text.render(50);
 
 		// Should have exactly one content line (no vertical padding)
-		assert.strictEqual(lines.length, 1);
+		expect(lines.length).toBe(1);
 
 		// Line should be exactly 50 visible characters
 		const visibleLen = visibleWidth(lines[0]);
-		assert.strictEqual(visibleLen, 50);
+		expect(visibleLen).toBe(50);
 	});
 
 	it("pads output with vertical padding lines to width", () => {
@@ -25,11 +24,11 @@ describe("TruncatedText component", () => {
 		const lines = text.render(40);
 
 		// Should have 2 padding lines + 1 content line + 2 padding lines = 5 total
-		assert.strictEqual(lines.length, 5);
+		expect(lines.length).toBe(5);
 
 		// All lines should be exactly 40 characters
 		for (const line of lines) {
-			assert.strictEqual(visibleWidth(line), 40);
+			expect(visibleWidth(line)).toBe(40);
 		}
 	});
 
@@ -38,14 +37,14 @@ describe("TruncatedText component", () => {
 		const text = new TruncatedText(longText, 1, 0);
 		const lines = text.render(30);
 
-		assert.strictEqual(lines.length, 1);
+		expect(lines.length).toBe(1);
 
 		// Should be exactly 30 characters
-		assert.strictEqual(visibleWidth(lines[0]), 30);
+		expect(visibleWidth(lines[0])).toBe(30);
 
 		// Should contain ellipsis
 		const stripped = lines[0].replace(/\x1b\[[0-9;]*m/g, "");
-		assert.ok(stripped.includes("..."));
+		expect(stripped.includes("...")).toBeTruthy();
 	});
 
 	it("preserves ANSI codes in output and pads correctly", () => {
@@ -53,13 +52,13 @@ describe("TruncatedText component", () => {
 		const text = new TruncatedText(styledText, 1, 0);
 		const lines = text.render(40);
 
-		assert.strictEqual(lines.length, 1);
+		expect(lines.length).toBe(1);
 
 		// Should be exactly 40 visible characters (ANSI codes don't count)
-		assert.strictEqual(visibleWidth(lines[0]), 40);
+		expect(visibleWidth(lines[0])).toBe(40);
 
 		// Should preserve the color codes
-		assert.ok(lines[0].includes("\x1b["));
+		expect(lines[0].includes("\x1b[")).toBeTruthy();
 	});
 
 	it("truncates styled text and adds reset code before ellipsis", () => {
@@ -67,13 +66,13 @@ describe("TruncatedText component", () => {
 		const text = new TruncatedText(longStyledText, 1, 0);
 		const lines = text.render(20);
 
-		assert.strictEqual(lines.length, 1);
+		expect(lines.length).toBe(1);
 
 		// Should be exactly 20 visible characters
-		assert.strictEqual(visibleWidth(lines[0]), 20);
+		expect(visibleWidth(lines[0])).toBe(20);
 
 		// Should contain reset code before ellipsis
-		assert.ok(lines[0].includes("\x1b[0m..."));
+		expect(lines[0].includes("\x1b[0m...")).toBeTruthy();
 	});
 
 	it("handles text that fits exactly", () => {
@@ -82,20 +81,20 @@ describe("TruncatedText component", () => {
 		const text = new TruncatedText("Hello world", 1, 0);
 		const lines = text.render(30);
 
-		assert.strictEqual(lines.length, 1);
-		assert.strictEqual(visibleWidth(lines[0]), 30);
+		expect(lines.length).toBe(1);
+		expect(visibleWidth(lines[0])).toBe(30);
 
 		// Should NOT contain ellipsis
 		const stripped = lines[0].replace(/\x1b\[[0-9;]*m/g, "");
-		assert.ok(!stripped.includes("..."));
+		expect(!stripped.includes("...")).toBeTruthy();
 	});
 
 	it("handles empty text", () => {
 		const text = new TruncatedText("", 1, 0);
 		const lines = text.render(30);
 
-		assert.strictEqual(lines.length, 1);
-		assert.strictEqual(visibleWidth(lines[0]), 30);
+		expect(lines.length).toBe(1);
+		expect(visibleWidth(lines[0])).toBe(30);
 	});
 
 	it("stops at newline and only shows first line", () => {
@@ -103,14 +102,14 @@ describe("TruncatedText component", () => {
 		const text = new TruncatedText(multilineText, 1, 0);
 		const lines = text.render(40);
 
-		assert.strictEqual(lines.length, 1);
-		assert.strictEqual(visibleWidth(lines[0]), 40);
+		expect(lines.length).toBe(1);
+		expect(visibleWidth(lines[0])).toBe(40);
 
 		// Should only contain "First line"
 		const stripped = lines[0].replace(/\x1b\[[0-9;]*m/g, "").trim();
-		assert.ok(stripped.includes("First line"));
-		assert.ok(!stripped.includes("Second line"));
-		assert.ok(!stripped.includes("Third line"));
+		expect(stripped.includes("First line")).toBeTruthy();
+		expect(!stripped.includes("Second line")).toBeTruthy();
+		expect(!stripped.includes("Third line")).toBeTruthy();
 	});
 
 	it("truncates first line even with newlines in text", () => {
@@ -118,12 +117,12 @@ describe("TruncatedText component", () => {
 		const text = new TruncatedText(longMultilineText, 1, 0);
 		const lines = text.render(25);
 
-		assert.strictEqual(lines.length, 1);
-		assert.strictEqual(visibleWidth(lines[0]), 25);
+		expect(lines.length).toBe(1);
+		expect(visibleWidth(lines[0])).toBe(25);
 
 		// Should contain ellipsis and not second line
 		const stripped = lines[0].replace(/\x1b\[[0-9;]*m/g, "");
-		assert.ok(stripped.includes("..."));
-		assert.ok(!stripped.includes("Second line"));
+		expect(stripped.includes("...")).toBeTruthy();
+		expect(!stripped.includes("Second line")).toBeTruthy();
 	});
 });

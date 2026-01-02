@@ -6,7 +6,6 @@
  * It is only intended for CLI use, not browser environments.
  */
 
-import type { Server } from "http";
 import { generatePKCE } from "./pkce.js";
 import type { OAuthCredentials } from "./types.js";
 
@@ -29,11 +28,9 @@ const CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com";
  * Start a local HTTP server to receive the OAuth callback
  */
 async function startCallbackServer(): Promise<{
-	server: Server;
+	server: { stop: () => void };
 	getCode: () => Promise<{ code: string; state: string }>;
 }> {
-	const { createServer } = await import("http");
-
 	return new Promise((resolve, reject) => {
 		let codeResolve: (value: { code: string; state: string }) => void;
 		let codeReject: (error: Error) => void;
@@ -43,51 +40,51 @@ async function startCallbackServer(): Promise<{
 			codeReject = rej;
 		});
 
-		const server = createServer((req, res) => {
-			const url = new URL(req.url || "", `http://localhost:8085`);
+		const server = Bun.serve({
+			port: 8085,
+			hostname: "127.0.0.1",
+			fetch(req) {
+				const url = new URL(req.url);
 
-			if (url.pathname === "/oauth2callback") {
-				const code = url.searchParams.get("code");
-				const state = url.searchParams.get("state");
-				const error = url.searchParams.get("error");
+				if (url.pathname === "/oauth2callback") {
+					const code = url.searchParams.get("code");
+					const state = url.searchParams.get("state");
+					const error = url.searchParams.get("error");
 
-				if (error) {
-					res.writeHead(400, { "Content-Type": "text/html" });
-					res.end(
-						`<html><body><h1>Authentication Failed</h1><p>Error: ${error}</p><p>You can close this window.</p></body></html>`,
-					);
-					codeReject(new Error(`OAuth error: ${error}`));
-					return;
-				}
+					if (error) {
+						codeReject(new Error(`OAuth error: ${error}`));
+						return new Response(
+							`<html><body><h1>Authentication Failed</h1><p>Error: ${error}</p><p>You can close this window.</p></body></html>`,
+							{ status: 400, headers: { "Content-Type": "text/html" } },
+						);
+					}
 
-				if (code && state) {
-					res.writeHead(200, { "Content-Type": "text/html" });
-					res.end(
-						`<html><body><h1>Authentication Successful</h1><p>You can close this window and return to the terminal.</p></body></html>`,
-					);
-					codeResolve({ code, state });
-				} else {
-					res.writeHead(400, { "Content-Type": "text/html" });
-					res.end(
-						`<html><body><h1>Authentication Failed</h1><p>Missing code or state parameter.</p></body></html>`,
-					);
+					if (code && state) {
+						codeResolve({ code, state });
+						return new Response(
+							`<html><body><h1>Authentication Successful</h1><p>You can close this window and return to the terminal.</p></body></html>`,
+							{ status: 200, headers: { "Content-Type": "text/html" } },
+						);
+					}
+
 					codeReject(new Error("Missing code or state in callback"));
+					return new Response(
+						`<html><body><h1>Authentication Failed</h1><p>Missing code or state parameter.</p></body></html>`,
+						{ status: 400, headers: { "Content-Type": "text/html" } },
+					);
 				}
-			} else {
-				res.writeHead(404);
-				res.end();
-			}
+
+				return new Response(null, { status: 404 });
+			},
+			error(err) {
+				reject(err);
+				return new Response("Internal Server Error", { status: 500 });
+			},
 		});
 
-		server.on("error", (err) => {
-			reject(err);
-		});
-
-		server.listen(8085, "127.0.0.1", () => {
-			resolve({
-				server,
-				getCode: () => codePromise,
-			});
+		resolve({
+			server,
+			getCode: () => codePromise,
 		});
 	});
 }
@@ -351,6 +348,6 @@ export async function loginGeminiCli(
 
 		return credentials;
 	} finally {
-		server.close();
+		server.stop();
 	}
 }

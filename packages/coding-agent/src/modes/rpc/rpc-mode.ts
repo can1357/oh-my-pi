@@ -11,8 +11,6 @@
  * - Hook UI: Hook UI requests are emitted, client responds with hook_ui_response
  */
 
-import * as crypto from "node:crypto";
-import * as readline from "readline";
 import type { AgentSession } from "../../core/agent-session.js";
 import type { HookUIContext } from "../../core/hooks/index.js";
 import type { RpcCommand, RpcHookUIRequest, RpcHookUIResponse, RpcResponse, RpcSessionState } from "./rpc-types.js";
@@ -392,36 +390,52 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 		}
 	};
 
-	// Listen for JSON input
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-		terminal: false,
-	});
+	// Listen for JSON input - use Bun's ReadableStream
+	const stdinReader = process.stdin
+		.pipeThrough(new TextDecoderStream())
+		.pipeThrough(
+			new TransformStream({
+				transform(chunk, controller) {
+					const lines = chunk.split("\n");
+					for (const line of lines) {
+						if (line.trim()) {
+							controller.enqueue(line);
+						}
+					}
+				},
+			}),
+		)
+		.getReader();
 
-	rl.on("line", async (line: string) => {
-		try {
-			const parsed = JSON.parse(line);
+	// Process lines in background
+	(async () => {
+		while (true) {
+			const { done, value: line } = await stdinReader.read();
+			if (done) break;
 
-			// Handle hook UI responses
-			if (parsed.type === "hook_ui_response") {
-				const response = parsed as RpcHookUIResponse;
-				const pending = pendingHookRequests.get(response.id);
-				if (pending) {
-					pendingHookRequests.delete(response.id);
-					pending.resolve(response);
+			try {
+				const parsed = JSON.parse(line);
+
+				// Handle hook UI responses
+				if (parsed.type === "hook_ui_response") {
+					const response = parsed as RpcHookUIResponse;
+					const pending = pendingHookRequests.get(response.id);
+					if (pending) {
+						pendingHookRequests.delete(response.id);
+						pending.resolve(response);
+					}
+					return;
 				}
-				return;
-			}
 
-			// Handle regular commands
-			const command = parsed as RpcCommand;
-			const response = await handleCommand(command);
-			output(response);
-		} catch (e: any) {
-			output(error(undefined, "parse", `Failed to parse command: ${e.message}`));
+				// Handle regular commands
+				const command = parsed as RpcCommand;
+				const response = await handleCommand(command);
+				output(response);
+			} catch (e: any) {
+				output(error(undefined, "parse", `Failed to parse command: ${e.message}`));
+			}
 		}
-	});
+	})();
 
 	// Keep process alive forever
 	return new Promise(() => {});

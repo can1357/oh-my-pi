@@ -1,5 +1,4 @@
-import assert from "node:assert";
-import { describe, it } from "node:test";
+import { describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { Editor } from "../src/components/editor.js";
 import { visibleWidth } from "../src/utils.js";
@@ -12,7 +11,7 @@ describe("Editor component", () => {
 
 			editor.handleInput("\x1b[A"); // Up arrow
 
-			assert.strictEqual(editor.getText(), "");
+			expect(editor.getText()).toBe("");
 		});
 
 		it("shows most recent history entry on Up arrow when editor is empty", () => {
@@ -23,7 +22,7 @@ describe("Editor component", () => {
 
 			editor.handleInput("\x1b[A"); // Up arrow
 
-			assert.strictEqual(editor.getText(), "second prompt");
+			expect(editor.getText()).toBe("second prompt");
 		});
 
 		it("cycles through history entries on repeated Up arrow", () => {
@@ -34,16 +33,16 @@ describe("Editor component", () => {
 			editor.addToHistory("third");
 
 			editor.handleInput("\x1b[A"); // Up - shows "third"
-			assert.strictEqual(editor.getText(), "third");
+			expect(editor.getText()).toBe("third");
 
 			editor.handleInput("\x1b[A"); // Up - shows "second"
-			assert.strictEqual(editor.getText(), "second");
+			expect(editor.getText()).toBe("second");
 
 			editor.handleInput("\x1b[A"); // Up - shows "first"
-			assert.strictEqual(editor.getText(), "first");
+			expect(editor.getText()).toBe("first");
 
 			editor.handleInput("\x1b[A"); // Up - stays at "first" (oldest)
-			assert.strictEqual(editor.getText(), "first");
+			expect(editor.getText()).toBe("first");
 		});
 
 		it("returns to empty editor on Down arrow after browsing history", () => {
@@ -52,10 +51,10 @@ describe("Editor component", () => {
 			editor.addToHistory("prompt");
 
 			editor.handleInput("\x1b[A"); // Up - shows "prompt"
-			assert.strictEqual(editor.getText(), "prompt");
+			expect(editor.getText()).toBe("prompt");
 
 			editor.handleInput("\x1b[B"); // Down - clears editor
-			assert.strictEqual(editor.getText(), "");
+			expect(editor.getText()).toBe("");
 		});
 
 		it("navigates forward through history with Down arrow", () => {
@@ -72,13 +71,13 @@ describe("Editor component", () => {
 
 			// Navigate back
 			editor.handleInput("\x1b[B"); // second
-			assert.strictEqual(editor.getText(), "second");
+			expect(editor.getText()).toBe("second");
 
 			editor.handleInput("\x1b[B"); // third
-			assert.strictEqual(editor.getText(), "third");
+			expect(editor.getText()).toBe("third");
 
 			editor.handleInput("\x1b[B"); // empty
-			assert.strictEqual(editor.getText(), "");
+			expect(editor.getText()).toBe("");
 		});
 
 		it("exits history mode when typing a character", () => {
@@ -89,7 +88,7 @@ describe("Editor component", () => {
 			editor.handleInput("\x1b[A"); // Up - shows "old prompt"
 			editor.handleInput("x"); // Type a character - exits history mode
 
-			assert.strictEqual(editor.getText(), "old promptx");
+			expect(editor.getText()).toBe("old promptx");
 		});
 
 		it("exits history mode on setText", () => {
@@ -103,7 +102,7 @@ describe("Editor component", () => {
 
 			// Up should start fresh from most recent
 			editor.handleInput("\x1b[A");
-			assert.strictEqual(editor.getText(), "second");
+			expect(editor.getText()).toBe("second");
 		});
 
 		it("does not add empty strings to history", () => {
@@ -114,11 +113,11 @@ describe("Editor component", () => {
 			editor.addToHistory("valid");
 
 			editor.handleInput("\x1b[A");
-			assert.strictEqual(editor.getText(), "valid");
+			expect(editor.getText()).toBe("valid");
 
 			// Should not have more entries
 			editor.handleInput("\x1b[A");
-			assert.strictEqual(editor.getText(), "valid");
+			expect(editor.getText()).toBe("valid");
 		});
 
 		it("does not add consecutive duplicates to history", () => {
@@ -129,10 +128,10 @@ describe("Editor component", () => {
 			editor.addToHistory("same");
 
 			editor.handleInput("\x1b[A"); // "same"
-			assert.strictEqual(editor.getText(), "same");
+			expect(editor.getText()).toBe("same");
 
 			editor.handleInput("\x1b[A"); // stays at "same" (only one entry)
-			assert.strictEqual(editor.getText(), "same");
+			expect(editor.getText()).toBe("same");
 		});
 
 		it("allows non-consecutive duplicates in history", () => {
@@ -143,13 +142,13 @@ describe("Editor component", () => {
 			editor.addToHistory("first"); // Not consecutive, should be added
 
 			editor.handleInput("\x1b[A"); // "first"
-			assert.strictEqual(editor.getText(), "first");
+			expect(editor.getText()).toBe("first");
 
 			editor.handleInput("\x1b[A"); // "second"
-			assert.strictEqual(editor.getText(), "second");
+			expect(editor.getText()).toBe("second");
 
 			editor.handleInput("\x1b[A"); // "first" (older one)
-			assert.strictEqual(editor.getText(), "first");
+			expect(editor.getText()).toBe("first");
 		});
 
 		it("uses cursor movement instead of history when editor has content", () => {
@@ -165,7 +164,7 @@ describe("Editor component", () => {
 			editor.handleInput("X");
 
 			// X should be inserted in line1, not replace with history
-			assert.strictEqual(editor.getText(), "line1X\nline2");
+			expect(editor.getText()).toBe("line1X\nline2");
 		});
 
 		it("limits history to 100 entries", () => {
@@ -182,11 +181,11 @@ describe("Editor component", () => {
 			}
 
 			// Should be at entry 5 (oldest kept), not entry 0
-			assert.strictEqual(editor.getText(), "prompt 5");
+			expect(editor.getText()).toBe("prompt 5");
 
 			// One more Up should not change anything
 			editor.handleInput("\x1b[A");
-			assert.strictEqual(editor.getText(), "prompt 5");
+			expect(editor.getText()).toBe("prompt 5");
 		});
 
 		it("allows cursor movement within multi-line history entry with Down", () => {
@@ -196,11 +195,11 @@ describe("Editor component", () => {
 
 			// Browse to the multi-line entry
 			editor.handleInput("\x1b[A"); // Up - shows entry, cursor at end of line3
-			assert.strictEqual(editor.getText(), "line1\nline2\nline3");
+			expect(editor.getText()).toBe("line1\nline2\nline3");
 
 			// Down should exit history since cursor is on last line
 			editor.handleInput("\x1b[B"); // Down
-			assert.strictEqual(editor.getText(), ""); // Exited to empty
+			expect(editor.getText()).toBe(""); // Exited to empty
 		});
 
 		it("allows cursor movement within multi-line history entry with Up", () => {
@@ -214,14 +213,14 @@ describe("Editor component", () => {
 
 			// Up should move cursor within the entry (not on first line yet)
 			editor.handleInput("\x1b[A"); // Up - cursor moves to line2
-			assert.strictEqual(editor.getText(), "line1\nline2\nline3"); // Still same entry
+			expect(editor.getText()).toBe("line1\nline2\nline3"); // Still same entry
 
 			editor.handleInput("\x1b[A"); // Up - cursor moves to line1 (now on first visual line)
-			assert.strictEqual(editor.getText(), "line1\nline2\nline3"); // Still same entry
+			expect(editor.getText()).toBe("line1\nline2\nline3"); // Still same entry
 
 			// Now Up should navigate to older history entry
 			editor.handleInput("\x1b[A"); // Up - navigate to older
-			assert.strictEqual(editor.getText(), "older entry");
+			expect(editor.getText()).toBe("older entry");
 		});
 
 		it("navigates from multi-line entry back to newer via Down after cursor movement", () => {
@@ -236,14 +235,14 @@ describe("Editor component", () => {
 
 			// Now Down should move cursor down within the entry
 			editor.handleInput("\x1b[B"); // Down - cursor to line2
-			assert.strictEqual(editor.getText(), "line1\nline2\nline3");
+			expect(editor.getText()).toBe("line1\nline2\nline3");
 
 			editor.handleInput("\x1b[B"); // Down - cursor to line3
-			assert.strictEqual(editor.getText(), "line1\nline2\nline3");
+			expect(editor.getText()).toBe("line1\nline2\nline3");
 
 			// Now on last line, Down should exit history
 			editor.handleInput("\x1b[B"); // Down - exit to empty
-			assert.strictEqual(editor.getText(), "");
+			expect(editor.getText()).toBe("");
 		});
 	});
 
@@ -251,16 +250,16 @@ describe("Editor component", () => {
 		it("returns cursor position", () => {
 			const editor = new Editor(defaultEditorTheme);
 
-			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 0 });
+			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
 
 			editor.handleInput("a");
 			editor.handleInput("b");
 			editor.handleInput("c");
 
-			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 3 });
+			expect(editor.getCursor()).toEqual({ line: 0, col: 3 });
 
 			editor.handleInput("\x1b[D"); // Left
-			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 2 });
+			expect(editor.getCursor()).toEqual({ line: 0, col: 2 });
 		});
 
 		it("returns lines as a defensive copy", () => {
@@ -268,10 +267,10 @@ describe("Editor component", () => {
 			editor.setText("a\nb");
 
 			const lines = editor.getLines();
-			assert.deepStrictEqual(lines, ["a", "b"]);
+			expect(lines).toEqual(["a", "b"]);
 
 			lines[0] = "mutated";
-			assert.deepStrictEqual(editor.getLines(), ["a", "b"]);
+			expect(editor.getLines()).toEqual(["a", "b"]);
 		});
 	});
 
@@ -292,7 +291,7 @@ describe("Editor component", () => {
 			editor.handleInput("😀");
 
 			const text = editor.getText();
-			assert.strictEqual(text, "Hello äöü 😀");
+			expect(text).toBe("Hello äöü 😀");
 		});
 
 		it("deletes single-code-unit unicode characters (umlauts) with Backspace", () => {
@@ -306,7 +305,7 @@ describe("Editor component", () => {
 			editor.handleInput("\x7f"); // Backspace
 
 			const text = editor.getText();
-			assert.strictEqual(text, "äö");
+			expect(text).toBe("äö");
 		});
 
 		it("deletes multi-code-unit emojis with single Backspace", () => {
@@ -319,7 +318,7 @@ describe("Editor component", () => {
 			editor.handleInput("\x7f"); // Backspace
 
 			const text = editor.getText();
-			assert.strictEqual(text, "😀");
+			expect(text).toBe("😀");
 		});
 
 		it("inserts characters at the correct position after cursor movement over umlauts", () => {
@@ -337,7 +336,7 @@ describe("Editor component", () => {
 			editor.handleInput("x");
 
 			const text = editor.getText();
-			assert.strictEqual(text, "äxöü");
+			expect(text).toBe("äxöü");
 		});
 
 		it("moves cursor across multi-code-unit emojis with single arrow key", () => {
@@ -357,7 +356,7 @@ describe("Editor component", () => {
 			editor.handleInput("x");
 
 			const text = editor.getText();
-			assert.strictEqual(text, "😀x👍🎉");
+			expect(text).toBe("😀x👍🎉");
 		});
 
 		it("preserves umlauts across line breaks", () => {
@@ -372,7 +371,7 @@ describe("Editor component", () => {
 			editor.handleInput("Ü");
 
 			const text = editor.getText();
-			assert.strictEqual(text, "äöü\nÄÖÜ");
+			expect(text).toBe("äöü\nÄÖÜ");
 		});
 
 		it("replaces the entire document with unicode text via setText (paste simulation)", () => {
@@ -382,7 +381,7 @@ describe("Editor component", () => {
 			editor.setText("Hällö Wörld! 😀 äöüÄÖÜß");
 
 			const text = editor.getText();
-			assert.strictEqual(text, "Hällö Wörld! 😀 äöüÄÖÜß");
+			expect(text).toBe("Hällö Wörld! 😀 äöüÄÖÜß");
 		});
 
 		it("moves cursor to document start on Ctrl+A and inserts at the beginning", () => {
@@ -394,7 +393,7 @@ describe("Editor component", () => {
 			editor.handleInput("x"); // Insert at start
 
 			const text = editor.getText();
-			assert.strictEqual(text, "xab");
+			expect(text).toBe("xab");
 		});
 
 		it("deletes words correctly with Ctrl+W and Alt+Backspace", () => {
@@ -403,39 +402,39 @@ describe("Editor component", () => {
 			// Basic word deletion
 			editor.setText("foo bar baz");
 			editor.handleInput("\x17"); // Ctrl+W
-			assert.strictEqual(editor.getText(), "foo bar ");
+			expect(editor.getText()).toBe("foo bar ");
 
 			// Trailing whitespace
 			editor.setText("foo bar   ");
 			editor.handleInput("\x17");
-			assert.strictEqual(editor.getText(), "foo ");
+			expect(editor.getText()).toBe("foo ");
 
 			// Punctuation run
 			editor.setText("foo bar...");
 			editor.handleInput("\x17");
-			assert.strictEqual(editor.getText(), "foo bar");
+			expect(editor.getText()).toBe("foo bar");
 
 			// Delete across multiple lines
 			editor.setText("line one\nline two");
 			editor.handleInput("\x17");
-			assert.strictEqual(editor.getText(), "line one\nline ");
+			expect(editor.getText()).toBe("line one\nline ");
 
 			// Delete empty line (merge)
 			editor.setText("line one\n");
 			editor.handleInput("\x17");
-			assert.strictEqual(editor.getText(), "line one");
+			expect(editor.getText()).toBe("line one");
 
 			// Grapheme safety (emoji as a word)
 			editor.setText("foo 😀😀 bar");
 			editor.handleInput("\x17");
-			assert.strictEqual(editor.getText(), "foo 😀😀 ");
+			expect(editor.getText()).toBe("foo 😀😀 ");
 			editor.handleInput("\x17");
-			assert.strictEqual(editor.getText(), "foo ");
+			expect(editor.getText()).toBe("foo ");
 
 			// Alt+Backspace
 			editor.setText("foo bar");
 			editor.handleInput("\x1b\x7f"); // Alt+Backspace (legacy)
-			assert.strictEqual(editor.getText(), "foo ");
+			expect(editor.getText()).toBe("foo ");
 		});
 
 		it("navigates words correctly with Ctrl+Left/Right", () => {
@@ -446,33 +445,33 @@ describe("Editor component", () => {
 
 			// Move left over baz
 			editor.handleInput("\x1b[1;5D"); // Ctrl+Left
-			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 11 }); // after '...'
+			expect(editor.getCursor()).toEqual({ line: 0, col: 11 }); // after '...'
 
 			// Move left over punctuation
 			editor.handleInput("\x1b[1;5D"); // Ctrl+Left
-			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 7 }); // after 'bar'
+			expect(editor.getCursor()).toEqual({ line: 0, col: 7 }); // after 'bar'
 
 			// Move left over bar
 			editor.handleInput("\x1b[1;5D"); // Ctrl+Left
-			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 4 }); // after 'foo '
+			expect(editor.getCursor()).toEqual({ line: 0, col: 4 }); // after 'foo '
 
 			// Move right over bar
 			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
-			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 7 }); // at end of 'bar'
+			expect(editor.getCursor()).toEqual({ line: 0, col: 7 }); // at end of 'bar'
 
 			// Move right over punctuation run
 			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
-			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 10 }); // after '...'
+			expect(editor.getCursor()).toEqual({ line: 0, col: 10 }); // after '...'
 
 			// Move right skips space and lands after baz
 			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
-			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 14 }); // end of line
+			expect(editor.getCursor()).toEqual({ line: 0, col: 14 }); // end of line
 
 			// Test forward from start with leading whitespace
 			editor.setText("   foo bar");
 			editor.handleInput("\x01"); // Ctrl+A to go to start
 			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
-			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 6 }); // after 'foo'
+			expect(editor.getCursor()).toEqual({ line: 0, col: 6 }); // after 'foo'
 		});
 	});
 
@@ -488,7 +487,7 @@ describe("Editor component", () => {
 			// All content lines (between borders) should fit within width
 			for (let i = 1; i < lines.length - 1; i++) {
 				const lineWidth = visibleWidth(lines[i]!);
-				assert.strictEqual(lineWidth, width, `Line ${i} has width ${lineWidth}, expected ${width}`);
+				expect(lineWidth).toBe(width, `Line ${i} has width ${lineWidth}, expected ${width}`);
 			}
 		});
 
@@ -505,7 +504,7 @@ describe("Editor component", () => {
 			// First line: 5 emojis (10 cols), second line: 1 emoji (2 cols) + padding
 			for (let i = 1; i < lines.length - 1; i++) {
 				const lineWidth = visibleWidth(lines[i]!);
-				assert.strictEqual(lineWidth, width, `Line ${i} has width ${lineWidth}, expected ${width}`);
+				expect(lineWidth).toBe(width, `Line ${i} has width ${lineWidth}, expected ${width}`);
 			}
 		});
 
@@ -519,14 +518,14 @@ describe("Editor component", () => {
 
 			for (let i = 1; i < lines.length - 1; i++) {
 				const lineWidth = visibleWidth(lines[i]!);
-				assert.strictEqual(lineWidth, width, `Line ${i} has width ${lineWidth}, expected ${width}`);
+				expect(lineWidth).toBe(width, `Line ${i} has width ${lineWidth}, expected ${width}`);
 			}
 
 			// Verify content split correctly
 			const contentLines = lines.slice(1, -1).map((l) => stripVTControlCharacters(l).trim());
-			assert.strictEqual(contentLines.length, 2);
-			assert.strictEqual(contentLines[0], "日本語テス"); // 5 chars = 10 columns
-			assert.strictEqual(contentLines[1], "ト"); // 1 char = 2 columns (+ padding)
+			expect(contentLines.length).toBe(2);
+			expect(contentLines[0]).toBe("日本語テス"); // 5 chars = 10 columns
+			expect(contentLines[1]).toBe("ト"); // 1 char = 2 columns (+ padding)
 		});
 
 		it("handles mixed ASCII and wide characters in wrapping", () => {
@@ -539,10 +538,10 @@ describe("Editor component", () => {
 
 			// Should fit in one content line
 			const contentLines = lines.slice(1, -1);
-			assert.strictEqual(contentLines.length, 1);
+			expect(contentLines.length).toBe(1);
 
 			const lineWidth = visibleWidth(contentLines[0]!);
-			assert.strictEqual(lineWidth, width);
+			expect(lineWidth).toBe(width);
 		});
 
 		it("renders cursor correctly on wide characters", () => {
@@ -555,10 +554,10 @@ describe("Editor component", () => {
 
 			// The cursor (reverse video space) should be visible
 			const contentLine = lines[1]!;
-			assert.ok(contentLine.includes("\x1b[7m"), "Should have reverse video cursor");
+			expect(contentLine.includes("\x1b[7m")).toBeTruthy();
 
 			// Line should still be correct width
-			assert.strictEqual(visibleWidth(contentLine), width);
+			expect(visibleWidth(contentLine)).toBe(width);
 		});
 
 		it("does not exceed terminal width with emoji at wrap boundary", () => {
@@ -572,7 +571,7 @@ describe("Editor component", () => {
 
 			for (let i = 1; i < lines.length - 1; i++) {
 				const lineWidth = visibleWidth(lines[i]!);
-				assert.ok(lineWidth <= width, `Line ${i} has width ${lineWidth}, exceeds max ${width}`);
+				expect(lineWidth <= width).toBeTruthy();
 			}
 		});
 	});

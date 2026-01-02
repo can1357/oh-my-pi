@@ -1,5 +1,4 @@
 import { existsSync } from "node:fs";
-import { spawn, spawnSync } from "child_process";
 import { SettingsManager } from "../core/settings-manager.js";
 
 let cachedShellConfig: { shell: string; args: string[] } | null = null;
@@ -9,9 +8,9 @@ let cachedShellConfig: { shell: string; args: string[] } | null = null;
  */
 function findBashOnPath(): string | null {
 	try {
-		const result = spawnSync("where", ["bash.exe"], { encoding: "utf-8", timeout: 5000 });
-		if (result.status === 0 && result.stdout) {
-			const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
+		const result = Bun.spawnSync(["where", "bash.exe"], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+		if (result.exitCode === 0 && result.stdout) {
+			const firstMatch = result.stdout.toString().trim().split(/\r?\n/)[0];
 			if (firstMatch && existsSync(firstMatch)) {
 				return firstMatch;
 			}
@@ -141,9 +140,10 @@ export function killProcessTree(pid: number): void {
 	if (process.platform === "win32") {
 		// Use taskkill on Windows to kill process tree
 		try {
-			spawn("taskkill", ["/F", "/T", "/PID", String(pid)], {
-				stdio: "ignore",
-				detached: true,
+			Bun.spawn(["taskkill", "/F", "/T", "/PID", String(pid)], {
+				stdin: "ignore",
+				stdout: "ignore",
+				stderr: "ignore",
 			});
 		} catch {
 			// Ignore errors if taskkill fails

@@ -1,9 +1,8 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
-import { spawnSync } from "child_process";
-import { existsSync } from "fs";
 import { globSync } from "glob";
-import path from "path";
 import { ensureTool } from "../../utils/tools-manager.js";
 import { resolveToCwd } from "./path-utils.js";
 import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
@@ -93,22 +92,18 @@ export function createFindTool(cwd: string): AgentTool<typeof findSchema> {
 						args.push(pattern, searchPath);
 
 						// Run fd
-						const result = spawnSync(fdPath, args, {
-							encoding: "utf-8",
-							maxBuffer: 10 * 1024 * 1024, // 10MB
+						const result = Bun.spawnSync([fdPath, ...args], {
+							stdin: "ignore",
+							stdout: "pipe",
+							stderr: "pipe",
 						});
 
 						signal?.removeEventListener("abort", onAbort);
 
-						if (result.error) {
-							reject(new Error(`Failed to run fd: ${result.error.message}`));
-							return;
-						}
+						const output = result.stdout.toString().trim();
 
-						const output = result.stdout?.trim() || "";
-
-						if (result.status !== 0) {
-							const errorMsg = result.stderr?.trim() || `fd exited with code ${result.status}`;
+						if (result.exitCode !== 0) {
+							const errorMsg = result.stderr.toString().trim() || `fd exited with code ${result.exitCode}`;
 							// fd returns non-zero for some errors but may still have partial output
 							if (!output) {
 								reject(new Error(errorMsg));

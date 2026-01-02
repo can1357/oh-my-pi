@@ -4,10 +4,9 @@
  * Spawns the agent in RPC mode and provides a typed API for all operations.
  */
 
-import { type ChildProcess, spawn } from "node:child_process";
-import * as readline from "node:readline";
 import type { AgentEvent, AgentMessage, ThinkingLevel } from "@mariozechner/pi-agent-core";
 import type { ImageContent } from "@mariozechner/pi-ai";
+import type { Subprocess } from "bun";
 import type { SessionStats } from "../../core/agent-session.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type { CompactionResult } from "../../core/compaction/index.js";
@@ -52,8 +51,8 @@ export type RpcEventListener = (event: AgentEvent) => void;
 // ============================================================================
 
 export class RpcClient {
-	private process: ChildProcess | null = null;
-	private rl: readline.Interface | null = null;
+	private process: Subprocess | null = null;
+	private lineReader: ReadableStreamDefaultReader<string> | null = null;
 	private eventListeners: RpcEventListener[] = [];
 	private pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
@@ -83,32 +82,68 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		this.process = spawn("node", [cliPath, ...args], {
+		this.process = Bun.spawn(["bun", cliPath, ...args], {
 			cwd: this.options.cwd,
 			env: { ...process.env, ...this.options.env },
-			stdio: ["pipe", "pipe", "pipe"],
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
 		});
 
 		// Collect stderr for debugging
-		this.process.stderr?.on("data", (data) => {
-			this.stderr += data.toString();
-		});
+		(async () => {
+			const reader = this.process!.stderr.getReader();
+			const decoder = new TextDecoder();
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				this.stderr += decoder.decode(value);
+			}
+		})();
 
 		// Set up line reader for stdout
-		this.rl = readline.createInterface({
-			input: this.process.stdout!,
-			terminal: false,
-		});
+		const textStream = this.process.stdout.pipeThrough(new TextDecoderStream());
+		this.lineReader = textStream
+			.pipeThrough(
+				new TransformStream({
+					transform(chunk, controller) {
+						const lines = chunk.split("\n");
+						for (const line of lines) {
+							if (line.trim()) {
+								controller.enqueue(line);
+							}
+						}
+					},
+				}),
+			)
+			.getReader();
 
-		this.rl.on("line", (line) => {
-			this.handleLine(line);
-		});
+		// Process lines in background
+		(async () => {
+			try {
+				while (true) {
+					const { done, value } = await this.lineReader!.read();
+					if (done) break;
+					this.handleLine(value);
+				}
+			} catch {
+				// Stream closed
+			}
+		})();
 
 		// Wait a moment for process to initialize
 		await new Promise((resolve) => setTimeout(resolve, 100));
 
-		if (this.process.exitCode !== null) {
-			throw new Error(`Agent process exited immediately with code ${this.process.exitCode}. Stderr: ${this.stderr}`);
+		try {
+			const exitCode = await Promise.race([
+				this.process.exited,
+				new Promise<null>((resolve) => setTimeout(() => resolve(null), 50)),
+			]);
+			if (exitCode !== null) {
+				throw new Error(`Agent process exited immediately with code ${exitCode}. Stderr: ${this.stderr}`);
+			}
+		} catch {
+			// Process still running, which is what we want
 		}
 	}
 
@@ -118,24 +153,26 @@ export class RpcClient {
 	async stop(): Promise<void> {
 		if (!this.process) return;
 
-		this.rl?.close();
-		this.process.kill("SIGTERM");
+		this.lineReader?.cancel();
+		this.process.kill();
 
 		// Wait for process to exit
-		await new Promise<void>((resolve) => {
-			const timeout = setTimeout(() => {
-				this.process?.kill("SIGKILL");
-				resolve();
-			}, 1000);
-
-			this.process?.on("exit", () => {
-				clearTimeout(timeout);
-				resolve();
-			});
-		});
+		await Promise.race([
+			this.process.exited,
+			new Promise<void>((resolve) => {
+				setTimeout(() => {
+					try {
+						this.process?.kill(9);
+					} catch {
+						// Already dead
+					}
+					resolve();
+				}, 1000);
+			}),
+		]);
 
 		this.process = null;
-		this.rl = null;
+		this.lineReader = null;
 		this.pendingRequests.clear();
 	}
 
@@ -445,8 +482,6 @@ export class RpcClient {
 		const fullCommand = { ...command, id } as RpcCommand;
 
 		return new Promise((resolve, reject) => {
-			this.pendingRequests.set(id, { resolve, reject });
-
 			const timeout = setTimeout(() => {
 				this.pendingRequests.delete(id);
 				reject(new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.stderr}`));
@@ -463,7 +498,9 @@ export class RpcClient {
 				},
 			});
 
-			this.process!.stdin!.write(`${JSON.stringify(fullCommand)}\n`);
+			const writer = this.process!.stdin.getWriter();
+			writer.write(new TextEncoder().encode(`${JSON.stringify(fullCommand)}\n`));
+			writer.releaseLock();
 		});
 	}
 

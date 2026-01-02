@@ -1,10 +1,5 @@
-import { readFileSync } from "fs";
-import { dirname, join } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import type { GPU } from "./types.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 interface ModelConfig {
 	gpuCount: number;
@@ -25,8 +20,8 @@ interface ModelsData {
 }
 
 // Load models configuration - resolve relative to this file
-const modelsJsonPath = join(__dirname, "models.json");
-const modelsData: ModelsData = JSON.parse(readFileSync(modelsJsonPath, "utf-8"));
+const modelsJsonPath = join(import.meta.dir, "models.json");
+const modelsData: ModelsData = JSON.parse(await Bun.file(modelsJsonPath).text());
 
 /**
  * Get the best configuration for a model based on available GPUs

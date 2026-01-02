@@ -5,7 +5,6 @@
  * OAuth tokens are automatically refreshed if expired and saved back to auth.json.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { getOAuthApiKey } from "../src/utils/oauth/index.js";
@@ -26,25 +25,23 @@ type AuthCredential = ApiKeyCredential | OAuthCredentialEntry;
 
 type AuthStorage = Record<string, AuthCredential>;
 
-function loadAuthStorage(): AuthStorage {
-	if (!existsSync(AUTH_PATH)) {
+async function loadAuthStorage(): Promise<AuthStorage> {
+	const file = Bun.file(AUTH_PATH);
+	if (!(await file.exists())) {
 		return {};
 	}
 	try {
-		const content = readFileSync(AUTH_PATH, "utf-8");
-		return JSON.parse(content);
+		return await file.json();
 	} catch {
 		return {};
 	}
 }
 
-function saveAuthStorage(storage: AuthStorage): void {
+async function saveAuthStorage(storage: AuthStorage): Promise<void> {
 	const configDir = dirname(AUTH_PATH);
-	if (!existsSync(configDir)) {
-		mkdirSync(configDir, { recursive: true, mode: 0o700 });
-	}
-	writeFileSync(AUTH_PATH, JSON.stringify(storage, null, 2), "utf-8");
-	chmodSync(AUTH_PATH, 0o600);
+	await Bun.write(join(configDir, ".keep"), "");
+	await Bun.write(AUTH_PATH, JSON.stringify(storage, null, 2));
+	await Bun.spawn(["chmod", "600", AUTH_PATH]).exited;
 }
 
 /**
@@ -56,7 +53,7 @@ function saveAuthStorage(storage: AuthStorage): void {
  * For google-gemini-cli and google-antigravity, returns JSON-encoded { token, projectId }
  */
 export async function resolveApiKey(provider: string): Promise<string | undefined> {
-	const storage = loadAuthStorage();
+	const storage = await loadAuthStorage();
 	const entry = storage[provider];
 
 	if (!entry) return undefined;
@@ -80,7 +77,7 @@ export async function resolveApiKey(provider: string): Promise<string | undefine
 
 		// Save refreshed credentials back to auth.json
 		storage[provider] = { type: "oauth", ...result.newCredentials };
-		saveAuthStorage(storage);
+		await saveAuthStorage(storage);
 
 		return result.apiKey;
 	}

@@ -67,8 +67,6 @@
  * ============================================================================
  */
 
-import { execSync } from "node:child_process";
-import { mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -87,35 +85,43 @@ const TEMP_DIR = join(__dirname, ".temp-images");
  */
 function generateImage(width: number, height: number, filename: string): string {
 	const filepath = join(TEMP_DIR, filename);
-	execSync(`magick -size ${width}x${height} xc:red "${filepath}"`, { stdio: "ignore" });
-	const buffer = require("fs").readFileSync(filepath);
-	return buffer.toString("base64");
+	Bun.spawnSync(["magick", "-size", `${width}x${height}`, "xc:red", filepath]);
+	const buffer = Bun.file(filepath).arrayBuffer();
+	return Buffer.from(buffer).toString("base64");
 }
 
 /**
  * Generate a valid PNG image of approximately the specified size in bytes
  */
-function generateImageWithSize(targetBytes: number, filename: string): string {
+async function generateImageWithSize(targetBytes: number, filename: string): Promise<string> {
 	const filepath = join(TEMP_DIR, filename);
 	// Use uncompressed PNG to get predictable sizes
 	// Each pixel is 3 bytes (RGB), plus PNG overhead (~100 bytes)
 	// For a square image: side = sqrt(targetBytes / 3)
 	const side = Math.ceil(Math.sqrt(targetBytes / 3));
 	// Use noise pattern to prevent compression from shrinking the file
-	execSync(`magick -size ${side}x${side} xc: +noise Random -depth 8 PNG24:"${filepath}"`, { stdio: "ignore" });
+	Bun.spawnSync(["magick", "-size", `${side}x${side}`, "xc:", "+noise", "Random", "-depth", "8", `PNG24:${filepath}`]);
 
 	// Check actual size and adjust if needed
-	const stats = require("fs").statSync(filepath);
-	if (stats.size < targetBytes * 0.8) {
+	const file = Bun.file(filepath);
+	if (file.size < targetBytes * 0.8) {
 		// If too small, increase dimensions
-		const newSide = Math.ceil(side * Math.sqrt(targetBytes / stats.size));
-		execSync(`magick -size ${newSide}x${newSide} xc: +noise Random -depth 8 PNG24:"${filepath}"`, {
-			stdio: "ignore",
-		});
+		const newSide = Math.ceil(side * Math.sqrt(targetBytes / file.size));
+		Bun.spawnSync([
+			"magick",
+			"-size",
+			`${newSide}x${newSide}`,
+			"xc:",
+			"+noise",
+			"Random",
+			"-depth",
+			"8",
+			`PNG24:${filepath}`,
+		]);
 	}
 
-	const buffer = require("fs").readFileSync(filepath);
-	return buffer.toString("base64");
+	const buffer = await file.arrayBuffer();
+	return Buffer.from(buffer).toString("base64");
 }
 
 /**
@@ -264,17 +270,17 @@ async function findLimit(
 describe("Image Limits E2E Tests", () => {
 	let smallImage: string; // 100x100 for count tests
 
-	beforeAll(() => {
+	beforeAll(async () => {
 		// Create temp directory
-		mkdirSync(TEMP_DIR, { recursive: true });
+		await Bun.write(join(TEMP_DIR, ".keep"), "");
 
 		// Generate small test image for count tests
 		smallImage = generateImage(100, 100, "small.png");
 	});
 
-	afterAll(() => {
+	afterAll(async () => {
 		// Clean up temp directory
-		rmSync(TEMP_DIR, { recursive: true, force: true });
+		await Bun.spawn(["rm", "-rf", TEMP_DIR]).exited;
 	});
 
 	// -------------------------------------------------------------------------

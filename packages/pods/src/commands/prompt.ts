@@ -16,7 +16,8 @@ interface PromptOptions {
 
 export async function promptModel(modelName: string, userArgs: string[], opts: PromptOptions = {}) {
 	// Get pod and model configuration
-	const activePod = opts.pod ? { name: opts.pod, pod: loadConfig().pods[opts.pod] } : getActivePod();
+	const config = await loadConfig();
+	const activePod = opts.pod ? { name: opts.pod, pod: config.pods[opts.pod] } : await getActivePod();
 
 	if (!activePod) {
 		console.error(chalk.red("No active pod. Use 'pi pods active <name>' to set one."));

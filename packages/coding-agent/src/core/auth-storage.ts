@@ -3,6 +3,8 @@
  * Handles loading, saving, and refreshing credentials from auth.json.
  */
 
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import {
 	getEnvApiKey,
 	getOAuthApiKey,
@@ -13,8 +15,6 @@ import {
 	type OAuthCredentials,
 	type OAuthProvider,
 } from "@mariozechner/pi-ai";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname } from "path";
 
 export type ApiKeyCredential = {
 	type: "api_key";
@@ -73,7 +73,8 @@ export class AuthStorage {
 			return;
 		}
 		try {
-			this.data = JSON.parse(readFileSync(this.authPath, "utf-8"));
+			const file = Bun.file(this.authPath);
+			this.data = JSON.parse(file.text() as unknown as string);
 		} catch {
 			this.data = {};
 		}
@@ -87,7 +88,7 @@ export class AuthStorage {
 		if (!existsSync(dir)) {
 			mkdirSync(dir, { recursive: true, mode: 0o700 });
 		}
-		writeFileSync(this.authPath, JSON.stringify(this.data, null, 2), "utf-8");
+		Bun.write(this.authPath, JSON.stringify(this.data, null, 2));
 		chmodSync(this.authPath, 0o600);
 	}
 

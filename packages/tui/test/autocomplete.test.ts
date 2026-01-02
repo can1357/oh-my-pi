@@ -1,5 +1,4 @@
-import assert from "node:assert";
-import { describe, it } from "node:test";
+import { describe, expect, it } from "bun:test";
 import { CombinedAutocompleteProvider } from "../src/autocomplete.js";
 
 describe("CombinedAutocompleteProvider", () => {
@@ -12,9 +11,9 @@ describe("CombinedAutocompleteProvider", () => {
 
 			const result = provider.getForceFileSuggestions(lines, cursorLine, cursorCol);
 
-			assert.notEqual(result, null, "Should return suggestions for root directory");
+			expect(result).not.toBeNull();
 			if (result) {
-				assert.strictEqual(result.prefix, "/", "Prefix should be '/'");
+				expect(result.prefix).toBe("/");
 			}
 		});
 
@@ -30,7 +29,7 @@ describe("CombinedAutocompleteProvider", () => {
 			// This might return null if /A doesn't match anything, which is fine
 			// We're mainly testing that the prefix extraction works
 			if (result) {
-				assert.strictEqual(result.prefix, "/A", "Prefix should be '/A'");
+				expect(result.prefix).toBe("/A");
 			}
 		});
 
@@ -43,7 +42,7 @@ describe("CombinedAutocompleteProvider", () => {
 			const result = provider.getForceFileSuggestions(lines, cursorLine, cursorCol);
 
 			console.log("Result:", result);
-			assert.strictEqual(result, null, "Should not trigger for slash commands");
+			expect(result).toBe(null);
 		});
 
 		it("triggers for absolute paths after slash command argument", () => {
@@ -55,9 +54,9 @@ describe("CombinedAutocompleteProvider", () => {
 			const result = provider.getForceFileSuggestions(lines, cursorLine, cursorCol);
 
 			console.log("Result:", result);
-			assert.notEqual(result, null, "Should trigger for absolute paths in command arguments");
+			expect(result).not.toBeNull();
 			if (result) {
-				assert.strictEqual(result.prefix, "/", "Prefix should be '/'");
+				expect(result.prefix).toBe("/");
 			}
 		});
 	});

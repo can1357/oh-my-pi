@@ -1,4 +1,3 @@
-import { spawnSync } from "child_process";
 import { readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join } from "path";
@@ -17,17 +16,17 @@ function walkDirectoryWithFd(
 		args.push(query);
 	}
 
-	const result = spawnSync(fdPath, args, {
-		encoding: "utf-8",
-		stdio: ["pipe", "pipe", "pipe"],
-		maxBuffer: 10 * 1024 * 1024,
+	const result = Bun.spawnSync([fdPath, ...args], {
+		stdout: "pipe",
+		stderr: "pipe",
 	});
 
-	if (result.status !== 0 || !result.stdout) {
+	if (!result.success || !result.stdout) {
 		return [];
 	}
 
-	const lines = result.stdout.trim().split("\n").filter(Boolean);
+	const stdout = new TextDecoder().decode(result.stdout);
+	const lines = stdout.trim().split("\n").filter(Boolean);
 	const results: Array<{ path: string; isDirectory: boolean }> = [];
 
 	for (const line of lines) {

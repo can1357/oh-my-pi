@@ -6,11 +6,10 @@
  * - Direct calls from modes that need bash execution
  */
 
-import { randomBytes } from "node:crypto";
 import { createWriteStream, type WriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type ChildProcess, spawn } from "child_process";
+import type { Subprocess } from "bun";
 import stripAnsi from "strip-ansi";
 import { getShellConfig, killProcessTree, sanitizeBinaryOutput } from "../utils/shell.js";
 import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.js";
@@ -60,9 +59,10 @@ export interface BashResult {
 export function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {
 	return new Promise((resolve, reject) => {
 		const { shell, args } = getShellConfig();
-		const child: ChildProcess = spawn(shell, [...args, command], {
-			detached: true,
-			stdio: ["ignore", "pipe", "pipe"],
+		const child: Subprocess = Bun.spawn([shell, ...args, command], {
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
 		});
 
 		// Track sanitized output for truncation
@@ -77,9 +77,7 @@ export function executeBash(command: string, options?: BashExecutorOptions): Pro
 
 		// Handle abort signal
 		const abortHandler = () => {
-			if (child.pid) {
-				killProcessTree(child.pid);
-			}
+			killProcessTree(child.pid);
 		};
 
 		if (options?.signal) {
@@ -105,7 +103,8 @@ export function executeBash(command: string, options?: BashExecutorOptions): Pro
 
 			// Start writing to temp file if exceeds threshold
 			if (totalBytes > DEFAULT_MAX_BYTES && !tempFilePath) {
-				const id = randomBytes(8).toString("hex");
+				const randomId = crypto.getRandomValues(new Uint8Array(8));
+				const id = Array.from(randomId, (b) => b.toString(16).padStart(2, "0")).join("");
 				tempFilePath = join(tmpdir(), `pi-bash-${id}.log`);
 				tempFileStream = createWriteStream(tempFilePath);
 				// Write already-buffered chunks to temp file
@@ -132,46 +131,66 @@ export function executeBash(command: string, options?: BashExecutorOptions): Pro
 			}
 		};
 
-		child.stdout?.on("data", handleData);
-		child.stderr?.on("data", handleData);
+		// Read streams asynchronously
+		(async () => {
+			try {
+				const stdoutReader = child.stdout.getReader();
+				const stderrReader = child.stderr.getReader();
 
-		child.on("close", (code) => {
-			// Clean up abort listener
-			if (options?.signal) {
-				options.signal.removeEventListener("abort", abortHandler);
+				await Promise.all([
+					(async () => {
+						while (true) {
+							const { done, value } = await stdoutReader.read();
+							if (done) break;
+							handleData(Buffer.from(value));
+						}
+					})(),
+					(async () => {
+						while (true) {
+							const { done, value } = await stderrReader.read();
+							if (done) break;
+							handleData(Buffer.from(value));
+						}
+					})(),
+				]);
+
+				const exitCode = await child.exited;
+
+				// Clean up abort listener
+				if (options?.signal) {
+					options.signal.removeEventListener("abort", abortHandler);
+				}
+
+				if (tempFileStream) {
+					tempFileStream.end();
+				}
+
+				// Combine buffered chunks for truncation (already sanitized)
+				const fullOutput = outputChunks.join("");
+				const truncationResult = truncateTail(fullOutput);
+
+				// Non-zero exit codes or signal-killed processes are considered cancelled if killed via signal
+				const cancelled = exitCode === null || (exitCode !== 0 && options?.signal?.aborted);
+
+				resolve({
+					output: truncationResult.truncated ? truncationResult.content : fullOutput,
+					exitCode: cancelled ? undefined : exitCode,
+					cancelled,
+					truncated: truncationResult.truncated,
+					fullOutputPath: tempFilePath,
+				});
+			} catch (err) {
+				// Clean up abort listener
+				if (options?.signal) {
+					options.signal.removeEventListener("abort", abortHandler);
+				}
+
+				if (tempFileStream) {
+					tempFileStream.end();
+				}
+
+				reject(err);
 			}
-
-			if (tempFileStream) {
-				tempFileStream.end();
-			}
-
-			// Combine buffered chunks for truncation (already sanitized)
-			const fullOutput = outputChunks.join("");
-			const truncationResult = truncateTail(fullOutput);
-
-			// code === null means killed (cancelled)
-			const cancelled = code === null;
-
-			resolve({
-				output: truncationResult.truncated ? truncationResult.content : fullOutput,
-				exitCode: cancelled ? undefined : code,
-				cancelled,
-				truncated: truncationResult.truncated,
-				fullOutputPath: tempFilePath,
-			});
-		});
-
-		child.on("error", (err) => {
-			// Clean up abort listener
-			if (options?.signal) {
-				options.signal.removeEventListener("abort", abortHandler);
-			}
-
-			if (tempFileStream) {
-				tempFileStream.end();
-			}
-
-			reject(err);
-		});
+		})();
 	});
 }

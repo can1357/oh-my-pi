@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
@@ -32,8 +31,8 @@ async function handleToolWithImageResult<TApi extends Api>(model: Model<TApi>, o
 
 	// Read the test image
 	const imagePath = join(__dirname, "data", "red-circle.png");
-	const imageBuffer = readFileSync(imagePath);
-	const base64Image = imageBuffer.toString("base64");
+	const imageBuffer = await Bun.file(imagePath).arrayBuffer();
+	const base64Image = Buffer.from(imageBuffer).toString("base64");
 
 	// Define a tool that returns only an image (no text)
 	const getImageSchema = Type.Object({});
@@ -120,8 +119,8 @@ async function handleToolWithTextAndImageResult<TApi extends Api>(model: Model<T
 
 	// Read the test image
 	const imagePath = join(__dirname, "data", "red-circle.png");
-	const imageBuffer = readFileSync(imagePath);
-	const base64Image = imageBuffer.toString("base64");
+	const imageBuffer = await Bun.file(imagePath).arrayBuffer();
+	const base64Image = Buffer.from(imageBuffer).toString("base64");
 
 	// Define a tool that returns both text and an image
 	const getImageSchema = Type.Object({});

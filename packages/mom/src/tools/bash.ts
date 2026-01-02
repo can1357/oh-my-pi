@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import { createWriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
@@ -39,7 +38,6 @@ export function createBashTool(executor: Executor): AgentTool<typeof bashSchema>
 		) => {
 			// Track output for potential temp file writing
 			let tempFilePath: string | undefined;
-			let tempFileStream: ReturnType<typeof createWriteStream> | undefined;
 
 			const result = await executor.exec(command, { timeout, signal });
 			let output = "";
@@ -54,9 +52,7 @@ export function createBashTool(executor: Executor): AgentTool<typeof bashSchema>
 			// Write to temp file if output exceeds limit
 			if (totalBytes > DEFAULT_MAX_BYTES) {
 				tempFilePath = getTempFilePath();
-				tempFileStream = createWriteStream(tempFilePath);
-				tempFileStream.write(output);
-				tempFileStream.end();
+				await Bun.write(tempFilePath, output);
 			}
 
 			// Apply tail truncation

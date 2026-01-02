@@ -1,10 +1,8 @@
-import { randomBytes } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
-import { spawn } from "child_process";
 import { getShellConfig, killProcessTree } from "../../utils/shell.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateTail } from "./truncate.js";
 
@@ -12,7 +10,8 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult
  * Generate a unique temp file path for bash output
  */
 function getTempFilePath(): string {
-	const id = randomBytes(8).toString("hex");
+	const randomId = crypto.getRandomValues(new Uint8Array(8));
+	const id = Array.from(randomId, (b) => b.toString(16).padStart(2, "0")).join("");
 	return join(tmpdir(), `pi-bash-${id}.log`);
 }
 
@@ -42,8 +41,10 @@ export function createBashTool(cwd: string): AgentTool<typeof bashSchema> {
 				const { shell, args } = getShellConfig();
 				const child = spawn(shell, [...args, command], {
 					cwd,
-					detached: true,
-					stdio: ["ignore", "pipe", "pipe"],
+
+					stdin: "ignore",
+					stdout: "pipe",
+					stderr: "pipe",
 				});
 
 				// We'll stream to a temp file if output gets large

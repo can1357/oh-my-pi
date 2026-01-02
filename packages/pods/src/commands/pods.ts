@@ -1,18 +1,14 @@
 import chalk from "chalk";
-import { dirname, join } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import { addPod, loadConfig, removePod, setActivePod } from "../config.js";
 import { scpFile, sshExec, sshExecStream } from "../ssh.js";
 import type { GPU, Pod } from "../types.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
 /**
  * List all pods
  */
-export const listPods = () => {
-	const config = loadConfig();
+export const listPods = async () => {
+	const config = await loadConfig();
 	const podNames = Object.keys(config.pods);
 
 	if (podNames.length === 0) {
@@ -100,7 +96,7 @@ export const setupPod = async (
 
 	// Copy setup script
 	console.log("Copying setup script...");
-	const scriptPath = join(__dirname, "../../scripts/pod_setup.sh");
+	const scriptPath = join(import.meta.dir, "../../scripts/pod_setup.sh");
 	const success = await scpFile(sshCmd, scriptPath, "/tmp/pod_setup.sh");
 	if (!success) {
 		console.error(chalk.red("Failed to copy setup script"));
@@ -163,7 +159,7 @@ export const setupPod = async (
 		vllmVersion: options.vllm || "release",
 	};
 
-	addPod(name, pod);
+	await addPod(name, pod);
 	console.log("");
 	console.log(chalk.green(`✓ Pod '${name}' setup complete and set as active pod`));
 	console.log("");
@@ -174,8 +170,8 @@ export const setupPod = async (
 /**
  * Switch active pod
  */
-export const switchActivePod = (name: string) => {
-	const config = loadConfig();
+export const switchActivePod = async (name: string) => {
+	const config = await loadConfig();
 	if (!config.pods[name]) {
 		console.error(chalk.red(`Pod '${name}' not found`));
 		console.log("\nAvailable pods:");
@@ -185,21 +181,21 @@ export const switchActivePod = (name: string) => {
 		process.exit(1);
 	}
 
-	setActivePod(name);
+	await setActivePod(name);
 	console.log(chalk.green(`✓ Switched active pod to '${name}'`));
 };
 
 /**
  * Remove a pod from config
  */
-export const removePodCommand = (name: string) => {
-	const config = loadConfig();
+export const removePodCommand = async (name: string) => {
+	const config = await loadConfig();
 	if (!config.pods[name]) {
 		console.error(chalk.red(`Pod '${name}' not found`));
 		process.exit(1);
 	}
 
-	removePod(name);
+	await removePod(name);
 	console.log(chalk.green(`✓ Removed pod '${name}' from configuration`));
 	console.log(chalk.yellow("Note: This only removes the local configuration. The remote pod is not affected."));
 };
