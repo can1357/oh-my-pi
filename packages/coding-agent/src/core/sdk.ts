@@ -664,8 +664,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let allToolsArray: Tool[] = [...builtInTools, ...wrappedCustomTools];
 	time("combineTools");
 
-	// Apply bash interception to redirect common shell patterns to proper tools
-	allToolsArray = applyBashInterception(allToolsArray);
+	// Apply bash interception to redirect common shell patterns to proper tools (if enabled)
+	if (settingsManager.getBashInterceptorEnabled()) {
+		allToolsArray = applyBashInterception(allToolsArray);
+	}
 	time("applyBashInterception");
 
 	if (hookRunner) {

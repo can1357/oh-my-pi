@@ -1,7 +1,6 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import {
 	Container,
-	getCapabilities,
 	isArrowLeft,
 	isArrowRight,
 	isEscape,
@@ -17,55 +16,11 @@ import {
 	type TabBarTheme,
 	Text,
 } from "@oh-my-pi/pi-tui";
+import type { SettingsManager } from "../../../core/settings-manager.js";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 import { PluginSettingsComponent } from "./plugin-settings.js";
-
-const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
-	off: "No reasoning",
-	minimal: "Very brief reasoning (~1k tokens)",
-	low: "Light reasoning (~2k tokens)",
-	medium: "Moderate reasoning (~8k tokens)",
-	high: "Deep reasoning (~16k tokens)",
-	xhigh: "Maximum reasoning (~32k tokens)",
-};
-
-export interface ExaToolsConfig {
-	enabled: boolean;
-	enableSearch: boolean;
-	enableLinkedin: boolean;
-	enableCompany: boolean;
-	enableResearcher: boolean;
-	enableWebsets: boolean;
-}
-
-export interface SettingsConfig {
-	autoCompact: boolean;
-	showImages: boolean;
-	queueMode: "all" | "one-at-a-time";
-	thinkingLevel: ThinkingLevel;
-	availableThinkingLevels: ThinkingLevel[];
-	currentTheme: string;
-	availableThemes: string[];
-	hideThinkingBlock: boolean;
-	collapseChangelog: boolean;
-	cwd: string;
-	exa: ExaToolsConfig;
-}
-
-export interface SettingsCallbacks {
-	onAutoCompactChange: (enabled: boolean) => void;
-	onShowImagesChange: (enabled: boolean) => void;
-	onQueueModeChange: (mode: "all" | "one-at-a-time") => void;
-	onThinkingLevelChange: (level: ThinkingLevel) => void;
-	onThemeChange: (theme: string) => void;
-	onThemePreview?: (theme: string) => void;
-	onHideThinkingBlockChange: (hidden: boolean) => void;
-	onCollapseChangelogChange: (collapsed: boolean) => void;
-	onPluginsChanged?: () => void;
-	onExaSettingChange: (setting: keyof ExaToolsConfig, enabled: boolean) => void;
-	onCancel: () => void;
-}
+import { getSettingsForTab, type SettingDef } from "./settings-defs.js";
 
 function getTabBarTheme(): TabBarTheme {
 	return {
@@ -147,7 +102,40 @@ const SETTINGS_TABS: Tab[] = [
 ];
 
 /**
+ * Dynamic context for settings that need runtime data.
+ * Some settings (like thinking level) are managed by the session, not SettingsManager.
+ */
+export interface SettingsRuntimeContext {
+	/** Available thinking levels (from session) */
+	availableThinkingLevels: ThinkingLevel[];
+	/** Current thinking level (from session) */
+	thinkingLevel: ThinkingLevel;
+	/** Available themes */
+	availableThemes: string[];
+	/** Working directory for plugins tab */
+	cwd: string;
+}
+
+/**
+ * Callback when any setting changes.
+ * The handler should dispatch based on settingId.
+ */
+export type SettingChangeHandler = (settingId: string, newValue: string | boolean) => void;
+
+export interface SettingsCallbacks {
+	/** Called when any setting value changes */
+	onChange: SettingChangeHandler;
+	/** Called for theme preview while browsing */
+	onThemePreview?: (theme: string) => void;
+	/** Called when plugins change */
+	onPluginsChanged?: () => void;
+	/** Called when settings panel is closed */
+	onCancel: () => void;
+}
+
+/**
  * Main tabbed settings selector component.
+ * Uses declarative settings definitions from settings-defs.ts.
  */
 export class SettingsSelectorComponent extends Container {
 	private tabBar: TabBar;
@@ -155,13 +143,15 @@ export class SettingsSelectorComponent extends Container {
 	private currentSubmenu: Container | null = null;
 	private pluginComponent: PluginSettingsComponent | null = null;
 
-	private config: SettingsConfig;
+	private settingsManager: SettingsManager;
+	private context: SettingsRuntimeContext;
 	private callbacks: SettingsCallbacks;
 
-	constructor(config: SettingsConfig, callbacks: SettingsCallbacks) {
+	constructor(settingsManager: SettingsManager, context: SettingsRuntimeContext, callbacks: SettingsCallbacks) {
 		super();
 
-		this.config = config;
+		this.settingsManager = settingsManager;
+		this.context = context;
 		this.callbacks = callbacks;
 
 		// Add top border
@@ -201,10 +191,8 @@ export class SettingsSelectorComponent extends Container {
 
 		switch (tabId) {
 			case "config":
-				this.showConfigTab();
-				break;
 			case "exa":
-				this.showExaTab();
+				this.showSettingsTab(tabId);
 				break;
 			case "plugins":
 				this.showPluginsTab();
@@ -215,98 +203,115 @@ export class SettingsSelectorComponent extends Container {
 		this.addChild(bottomBorder);
 	}
 
-	private showConfigTab(): void {
-		const supportsImages = getCapabilities().images;
+	/**
+	 * Convert a setting definition to a SettingItem for the UI.
+	 */
+	private defToItem(def: SettingDef): SettingItem | null {
+		// Check condition
+		if (def.type === "boolean" && def.condition && !def.condition()) {
+			return null;
+		}
 
-		const items: SettingItem[] = [
-			{
-				id: "autocompact",
-				label: "Auto-compact",
-				description: "Automatically compact context when it gets too large",
-				currentValue: this.config.autoCompact ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "queue-mode",
-				label: "Queue mode",
-				description: "How to process queued messages while agent is working",
-				currentValue: this.config.queueMode,
-				values: ["one-at-a-time", "all"],
-			},
-			{
-				id: "hide-thinking",
-				label: "Hide thinking",
-				description: "Hide thinking blocks in assistant responses",
-				currentValue: this.config.hideThinkingBlock ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "collapse-changelog",
-				label: "Collapse changelog",
-				description: "Show condensed changelog after updates",
-				currentValue: this.config.collapseChangelog ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "thinking",
-				label: "Thinking level",
-				description: "Reasoning depth for thinking-capable models",
-				currentValue: this.config.thinkingLevel,
-				submenu: (currentValue, done) =>
-					new SelectSubmenu(
-						"Thinking Level",
-						"Select reasoning depth for thinking-capable models",
-						this.config.availableThinkingLevels.map((level) => ({
-							value: level,
-							label: level,
-							description: THINKING_DESCRIPTIONS[level],
-						})),
-						currentValue,
-						(value) => {
-							this.callbacks.onThinkingLevelChange(value as ThinkingLevel);
-							done(value);
-						},
-						() => done(),
-					),
-			},
-			{
-				id: "theme",
-				label: "Theme",
-				description: "Color theme for the interface",
-				currentValue: this.config.currentTheme,
-				submenu: (currentValue, done) =>
-					new SelectSubmenu(
-						"Theme",
-						"Select color theme",
-						this.config.availableThemes.map((t) => ({
-							value: t,
-							label: t,
-						})),
-						currentValue,
-						(value) => {
-							this.callbacks.onThemeChange(value);
-							done(value);
-						},
-						() => {
-							this.callbacks.onThemePreview?.(currentValue);
-							done();
-						},
-						(value) => {
-							this.callbacks.onThemePreview?.(value);
-						},
-					),
-			},
-		];
+		const currentValue = this.getCurrentValue(def);
 
-		// Add image toggle if supported
-		if (supportsImages) {
-			items.splice(1, 0, {
-				id: "show-images",
-				label: "Show images",
-				description: "Render images inline in terminal",
-				currentValue: this.config.showImages ? "true" : "false",
-				values: ["true", "false"],
+		switch (def.type) {
+			case "boolean":
+				return {
+					id: def.id,
+					label: def.label,
+					description: def.description,
+					currentValue: currentValue ? "true" : "false",
+					values: ["true", "false"],
+				};
+
+			case "enum":
+				return {
+					id: def.id,
+					label: def.label,
+					description: def.description,
+					currentValue: currentValue as string,
+					values: [...def.values],
+				};
+
+			case "submenu":
+				return {
+					id: def.id,
+					label: def.label,
+					description: def.description,
+					currentValue: currentValue as string,
+					submenu: (cv, done) => this.createSubmenu(def, cv, done),
+				};
+		}
+	}
+
+	/**
+	 * Get the current value for a setting, using runtime context for special cases.
+	 */
+	private getCurrentValue(def: SettingDef): string | boolean {
+		// Special cases that come from runtime context instead of SettingsManager
+		switch (def.id) {
+			case "thinkingLevel":
+				return this.context.thinkingLevel;
+			default:
+				return def.get(this.settingsManager);
+		}
+	}
+
+	/**
+	 * Create a submenu for a submenu-type setting.
+	 */
+	private createSubmenu(
+		def: SettingDef & { type: "submenu" },
+		currentValue: string,
+		done: (value?: string) => void,
+	): Container {
+		let options = def.getOptions(this.settingsManager);
+
+		// Special case: inject runtime options
+		if (def.id === "thinkingLevel") {
+			options = this.context.availableThinkingLevels.map((level) => {
+				const baseOpt = def.getOptions(this.settingsManager).find((o) => o.value === level);
+				return baseOpt || { value: level, label: level };
 			});
+		} else if (def.id === "theme") {
+			options = this.context.availableThemes.map((t) => ({ value: t, label: t }));
+		}
+
+		const onPreview = def.id === "theme" ? this.callbacks.onThemePreview : undefined;
+		const onPreviewCancel = def.id === "theme" ? () => this.callbacks.onThemePreview?.(currentValue) : undefined;
+
+		return new SelectSubmenu(
+			def.label,
+			def.description,
+			options,
+			currentValue,
+			(value) => {
+				// Persist to SettingsManager
+				def.set(this.settingsManager, value);
+				// Notify for side effects
+				this.callbacks.onChange(def.id, value);
+				done(value);
+			},
+			() => {
+				onPreviewCancel?.();
+				done();
+			},
+			onPreview,
+		);
+	}
+
+	/**
+	 * Show a settings tab (config or exa) using definitions.
+	 */
+	private showSettingsTab(tabId: "config" | "exa"): void {
+		const defs = getSettingsForTab(tabId);
+		const items: SettingItem[] = [];
+
+		for (const def of defs) {
+			const item = this.defToItem(def);
+			if (item) {
+				items.push(item);
+			}
 		}
 
 		this.currentList = new SettingsList(
@@ -314,102 +319,19 @@ export class SettingsSelectorComponent extends Container {
 			10,
 			getSettingsListTheme(),
 			(id, newValue) => {
-				switch (id) {
-					case "autocompact":
-						this.callbacks.onAutoCompactChange(newValue === "true");
-						break;
-					case "show-images":
-						this.callbacks.onShowImagesChange(newValue === "true");
-						break;
-					case "queue-mode":
-						this.callbacks.onQueueModeChange(newValue as "all" | "one-at-a-time");
-						break;
-					case "hide-thinking":
-						this.callbacks.onHideThinkingBlockChange(newValue === "true");
-						break;
-					case "collapse-changelog":
-						this.callbacks.onCollapseChangelogChange(newValue === "true");
-						break;
+				const def = defs.find((d) => d.id === id);
+				if (!def) return;
+
+				// Persist to SettingsManager based on type
+				if (def.type === "boolean") {
+					const boolValue = newValue === "true";
+					def.set(this.settingsManager, boolValue);
+					this.callbacks.onChange(id, boolValue);
+				} else if (def.type === "enum") {
+					def.set(this.settingsManager, newValue);
+					this.callbacks.onChange(id, newValue);
 				}
-			},
-			() => this.callbacks.onCancel(),
-		);
-
-		this.addChild(this.currentList);
-	}
-
-	private showExaTab(): void {
-		const items: SettingItem[] = [
-			{
-				id: "exa-enabled",
-				label: "Exa enabled",
-				description: "Master toggle for all Exa search tools",
-				currentValue: this.config.exa.enabled ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "exa-search",
-				label: "Exa search",
-				description: "Basic search, deep search, code search, crawl",
-				currentValue: this.config.exa.enableSearch ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "exa-linkedin",
-				label: "Exa LinkedIn",
-				description: "Search LinkedIn for people and companies",
-				currentValue: this.config.exa.enableLinkedin ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "exa-company",
-				label: "Exa company",
-				description: "Comprehensive company research tool",
-				currentValue: this.config.exa.enableCompany ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "exa-researcher",
-				label: "Exa researcher",
-				description: "AI-powered deep research tasks",
-				currentValue: this.config.exa.enableResearcher ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "exa-websets",
-				label: "Exa websets",
-				description: "Webset management and enrichment tools",
-				currentValue: this.config.exa.enableWebsets ? "true" : "false",
-				values: ["true", "false"],
-			},
-		];
-
-		this.currentList = new SettingsList(
-			items,
-			10,
-			getSettingsListTheme(),
-			(id, newValue) => {
-				const enabled = newValue === "true";
-				switch (id) {
-					case "exa-enabled":
-						this.callbacks.onExaSettingChange("enabled", enabled);
-						break;
-					case "exa-search":
-						this.callbacks.onExaSettingChange("enableSearch", enabled);
-						break;
-					case "exa-linkedin":
-						this.callbacks.onExaSettingChange("enableLinkedin", enabled);
-						break;
-					case "exa-company":
-						this.callbacks.onExaSettingChange("enableCompany", enabled);
-						break;
-					case "exa-researcher":
-						this.callbacks.onExaSettingChange("enableResearcher", enabled);
-						break;
-					case "exa-websets":
-						this.callbacks.onExaSettingChange("enableWebsets", enabled);
-						break;
-				}
+				// Submenu types are handled in createSubmenu
 			},
 			() => this.callbacks.onCancel(),
 		);
@@ -418,7 +340,7 @@ export class SettingsSelectorComponent extends Container {
 	}
 
 	private showPluginsTab(): void {
-		this.pluginComponent = new PluginSettingsComponent(this.config.cwd, {
+		this.pluginComponent = new PluginSettingsComponent(this.context.cwd, {
 			onClose: () => this.callbacks.onCancel(),
 			onPluginChanged: () => this.callbacks.onPluginsChanged?.(),
 		});

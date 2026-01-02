@@ -234,13 +234,19 @@ ${chalk.bold("Environment Variables:")}
   ${chalk.dim("# Configuration")}
   ${ENV_AGENT_DIR.padEnd(23)} - Session storage directory (default: ~/${CONFIG_DIR_NAME}/agent)
 
-${chalk.bold("Available Tools (default: read, bash, edit, write):")}
-  read   - Read file contents
-  bash   - Execute bash commands
-  edit   - Edit files with find/replace
-  write  - Write files (creates/overwrites)
-  grep   - Search file contents (read-only, off by default)
-  find   - Find files by glob pattern (read-only, off by default)
-  ls     - List directory contents (read-only, off by default)
+${chalk.bold("Available Tools (all enabled by default):")}
+  read       - Read file contents
+  bash       - Execute bash commands
+  edit       - Edit files with find/replace
+  write      - Write files (creates/overwrites)
+  grep       - Search file contents
+  find       - Find files by glob pattern
+  ls         - List directory contents
+  lsp        - Language server protocol (code intelligence)
+  notebook   - Edit Jupyter notebooks
+  task       - Launch sub-agents for parallel tasks
+  web_fetch  - Fetch and process web pages
+  web_search - Search the web
+  ask        - Ask user questions (interactive mode only)
 `);
 }

@@ -6,7 +6,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, OAuthProvider } from "@oh-my-pi/pi-ai";
 import type { SlashCommand } from "@oh-my-pi/pi-tui";
 import {
@@ -1597,48 +1597,15 @@ export class InteractiveMode {
 	private showSettingsSelector(): void {
 		this.showSelector((done) => {
 			const selector = new SettingsSelectorComponent(
+				this.settingsManager,
 				{
-					autoCompact: this.session.autoCompactionEnabled,
-					showImages: this.settingsManager.getShowImages(),
-					queueMode: this.session.queueMode,
-					thinkingLevel: this.session.thinkingLevel,
 					availableThinkingLevels: this.session.getAvailableThinkingLevels(),
-					currentTheme: this.settingsManager.getTheme() || "dark",
+					thinkingLevel: this.session.thinkingLevel,
 					availableThemes: getAvailableThemes(),
-					hideThinkingBlock: this.hideThinkingBlock,
-					collapseChangelog: this.settingsManager.getCollapseChangelog(),
 					cwd: process.cwd(),
-					exa: this.settingsManager.getExaSettings(),
 				},
 				{
-					onAutoCompactChange: (enabled) => {
-						this.session.setAutoCompactionEnabled(enabled);
-						this.footer.setAutoCompactEnabled(enabled);
-					},
-					onShowImagesChange: (enabled) => {
-						this.settingsManager.setShowImages(enabled);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
-								child.setShowImages(enabled);
-							}
-						}
-					},
-					onQueueModeChange: (mode) => {
-						this.session.setQueueMode(mode);
-					},
-					onThinkingLevelChange: (level) => {
-						this.session.setThinkingLevel(level);
-						this.footer.invalidate();
-						this.updateEditorBorderColor();
-					},
-					onThemeChange: (themeName) => {
-						const result = setTheme(themeName, true);
-						this.settingsManager.setTheme(themeName);
-						this.ui.invalidate();
-						if (!result.success) {
-							this.showError(`Failed to load theme "${themeName}": ${result.error}\nFell back to dark theme.`);
-						}
-					},
+					onChange: (id, value) => this.handleSettingChange(id, value),
 					onThemePreview: (themeName) => {
 						const result = setTheme(themeName, true);
 						if (result.success) {
@@ -1646,45 +1613,8 @@ export class InteractiveMode {
 							this.ui.requestRender();
 						}
 					},
-					onHideThinkingBlockChange: (hidden) => {
-						this.hideThinkingBlock = hidden;
-						this.settingsManager.setHideThinkingBlock(hidden);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof AssistantMessageComponent) {
-								child.setHideThinkingBlock(hidden);
-							}
-						}
-						this.chatContainer.clear();
-						this.rebuildChatFromMessages();
-					},
-					onCollapseChangelogChange: (collapsed) => {
-						this.settingsManager.setCollapseChangelog(collapsed);
-					},
 					onPluginsChanged: () => {
-						// Plugin config changed - could trigger reload if needed
 						this.ui.requestRender();
-					},
-					onExaSettingChange: (setting, enabled) => {
-						switch (setting) {
-							case "enabled":
-								this.settingsManager.setExaEnabled(enabled);
-								break;
-							case "enableSearch":
-								this.settingsManager.setExaSearchEnabled(enabled);
-								break;
-							case "enableLinkedin":
-								this.settingsManager.setExaLinkedinEnabled(enabled);
-								break;
-							case "enableCompany":
-								this.settingsManager.setExaCompanyEnabled(enabled);
-								break;
-							case "enableResearcher":
-								this.settingsManager.setExaResearcherEnabled(enabled);
-								break;
-							case "enableWebsets":
-								this.settingsManager.setExaWebsetsEnabled(enabled);
-								break;
-						}
 					},
 					onCancel: () => {
 						done();
@@ -1694,6 +1624,59 @@ export class InteractiveMode {
 			);
 			return { component: selector, focus: selector };
 		});
+	}
+
+	/**
+	 * Handle setting changes from the settings selector.
+	 * Most settings are saved directly via SettingsManager in the definitions.
+	 * This handles side effects and session-specific settings.
+	 */
+	private handleSettingChange(id: string, value: string | boolean): void {
+		switch (id) {
+			// Session-managed settings (not in SettingsManager)
+			case "autoCompact":
+				this.session.setAutoCompactionEnabled(value as boolean);
+				this.footer.setAutoCompactEnabled(value as boolean);
+				break;
+			case "queueMode":
+				this.session.setQueueMode(value as "all" | "one-at-a-time");
+				break;
+			case "thinkingLevel":
+				this.session.setThinkingLevel(value as ThinkingLevel);
+				this.footer.invalidate();
+				this.updateEditorBorderColor();
+				break;
+
+			// Settings with UI side effects
+			case "showImages":
+				for (const child of this.chatContainer.children) {
+					if (child instanceof ToolExecutionComponent) {
+						child.setShowImages(value as boolean);
+					}
+				}
+				break;
+			case "hideThinking":
+				this.hideThinkingBlock = value as boolean;
+				for (const child of this.chatContainer.children) {
+					if (child instanceof AssistantMessageComponent) {
+						child.setHideThinkingBlock(value as boolean);
+					}
+				}
+				this.chatContainer.clear();
+				this.rebuildChatFromMessages();
+				break;
+			case "theme": {
+				const result = setTheme(value as string, true);
+				this.ui.invalidate();
+				if (!result.success) {
+					this.showError(`Failed to load theme "${value}": ${result.error}\nFell back to dark theme.`);
+				}
+				break;
+			}
+
+			// All other settings are handled by the definitions (get/set on SettingsManager)
+			// No additional side effects needed
+		}
 	}
 
 	private showModelSelector(): void {

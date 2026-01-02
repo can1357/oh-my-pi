@@ -43,6 +43,10 @@ export interface ExaSettings {
 	enableWebsets?: boolean; // default: false
 }
 
+export interface BashInterceptorSettings {
+	enabled?: boolean; // default: false (blocks shell commands that have dedicated tools)
+}
+
 export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
@@ -62,6 +66,7 @@ export interface Settings {
 	terminal?: TerminalSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
 	exa?: ExaSettings;
+	bashInterceptor?: BashInterceptorSettings;
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -438,6 +443,18 @@ export class SettingsManager {
 			this.globalSettings.exa = {};
 		}
 		this.globalSettings.exa.enableWebsets = enabled;
+		this.save();
+	}
+
+	getBashInterceptorEnabled(): boolean {
+		return this.settings.bashInterceptor?.enabled ?? false;
+	}
+
+	setBashInterceptorEnabled(enabled: boolean): void {
+		if (!this.globalSettings.bashInterceptor) {
+			this.globalSettings.bashInterceptor = {};
+		}
+		this.globalSettings.bashInterceptor.enabled = enabled;
 		this.save();
 	}
 }
