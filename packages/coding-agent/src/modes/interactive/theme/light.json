@@ -74,7 +74,21 @@
 		"thinkingHigh": "#875f87",
 		"thinkingXhigh": "#8b008b",
 
-		"bashMode": "green"
+		"bashMode": "green",
+
+		"footerIcon": 31,
+		"footerSep": 246,
+		"footerModel": 236,
+		"footerPath": 31,
+		"footerBranch": 28,
+		"footerStaged": 28,
+		"footerDirty": 136,
+		"footerUntracked": 31,
+		"footerInput": 28,
+		"footerOutput": 133,
+		"footerCacheRead": 28,
+		"footerCacheWrite": 28,
+		"footerCost": 133
 	},
 	"export": {
 		"pageBg": "#f8f8f8",

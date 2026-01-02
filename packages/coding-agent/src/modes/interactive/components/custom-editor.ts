@@ -28,6 +28,7 @@ export class CustomEditor extends Editor {
 	public onCtrlT?: () => void;
 	public onCtrlG?: () => void;
 	public onCtrlZ?: () => void;
+	public onQuestionMark?: () => void;
 
 	handleInput(data: string): void {
 		// Intercept Ctrl+G for external editor
@@ -97,6 +98,12 @@ export class CustomEditor extends Editor {
 				this.onCtrlD();
 			}
 			// Always consume Ctrl+D (don't pass to parent)
+			return;
+		}
+
+		// Intercept ? when editor is empty to show hotkeys
+		if (data === "?" && this.getText().length === 0 && this.onQuestionMark) {
+			this.onQuestionMark();
 			return;
 		}
 

@@ -23,7 +23,7 @@ import {
 	TUI,
 	visibleWidth,
 } from "@mariozechner/pi-tui";
-import { APP_NAME, getAuthPath, getDebugLogPath } from "../../config.js";
+import { getAuthPath, getDebugLogPath } from "../../config.js";
 import type { AgentSession, AgentSessionEvent } from "../../core/agent-session.js";
 import type { CustomToolSessionEvent, LoadedCustomTool } from "../../core/custom-tools/index.js";
 import type { HookUIContext } from "../../core/hooks/index.js";
@@ -55,6 +55,7 @@ import { ToolExecutionComponent } from "./components/tool-execution.js";
 import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
+import { WelcomeComponent } from "./components/welcome.js";
 import {
 	getAvailableThemes,
 	getEditorTheme,
@@ -178,6 +179,7 @@ export class InteractiveMode {
 			{ name: "share", description: "Share session as a secret GitHub gist" },
 			{ name: "copy", description: "Copy last agent message to clipboard" },
 			{ name: "session", description: "Show session info and stats" },
+			{ name: "status", description: "Show loaded extensions (context, skills, tools, hooks)" },
 			{ name: "changelog", description: "Show changelog entries" },
 			{ name: "hotkeys", description: "Show all keyboard shortcuts" },
 			{ name: "branch", description: "Create a new branch from a previous message" },
@@ -216,58 +218,16 @@ export class InteractiveMode {
 	async init(): Promise<void> {
 		if (this.isInitialized) return;
 
-		// Add header
-		const logo = theme.bold(theme.fg("accent", APP_NAME)) + theme.fg("dim", ` v${this.version}`);
-		const instructions =
-			theme.fg("dim", "esc") +
-			theme.fg("muted", " to interrupt") +
-			"\n" +
-			theme.fg("dim", "ctrl+c") +
-			theme.fg("muted", " to clear") +
-			"\n" +
-			theme.fg("dim", "ctrl+c twice") +
-			theme.fg("muted", " to exit") +
-			"\n" +
-			theme.fg("dim", "ctrl+d") +
-			theme.fg("muted", " to exit (empty)") +
-			"\n" +
-			theme.fg("dim", "ctrl+z") +
-			theme.fg("muted", " to suspend") +
-			"\n" +
-			theme.fg("dim", "ctrl+k") +
-			theme.fg("muted", " to delete line") +
-			"\n" +
-			theme.fg("dim", "shift+tab") +
-			theme.fg("muted", " to cycle thinking") +
-			"\n" +
-			theme.fg("dim", "ctrl+p/shift+ctrl+p") +
-			theme.fg("muted", " to cycle models") +
-			"\n" +
-			theme.fg("dim", "ctrl+l") +
-			theme.fg("muted", " to select model") +
-			"\n" +
-			theme.fg("dim", "ctrl+o") +
-			theme.fg("muted", " to expand tools") +
-			"\n" +
-			theme.fg("dim", "ctrl+t") +
-			theme.fg("muted", " to toggle thinking") +
-			"\n" +
-			theme.fg("dim", "ctrl+g") +
-			theme.fg("muted", " for external editor") +
-			"\n" +
-			theme.fg("dim", "/") +
-			theme.fg("muted", " for commands") +
-			"\n" +
-			theme.fg("dim", "!") +
-			theme.fg("muted", " to run bash") +
-			"\n" +
-			theme.fg("dim", "drop files") +
-			theme.fg("muted", " to attach");
-		const header = new Text(`${logo}\n${instructions}`, 1, 0);
+		// Get current model info for welcome screen
+		const modelName = this.session.model?.name ?? "Unknown";
+		const providerName = this.session.model?.provider ?? "Unknown";
+
+		// Add welcome header
+		const welcome = new WelcomeComponent(this.version, modelName, providerName);
 
 		// Setup UI layout
 		this.ui.addChild(new Spacer(1));
-		this.ui.addChild(header);
+		this.ui.addChild(welcome);
 		this.ui.addChild(new Spacer(1));
 
 		// Add changelog if provided
@@ -329,43 +289,6 @@ export class InteractiveMode {
 	 * Initialize the hook system with TUI-based UI context.
 	 */
 	private async initHooksAndCustomTools(): Promise<void> {
-		// Show loaded project context files
-		const contextFiles = loadProjectContextFiles();
-		if (contextFiles.length > 0) {
-			const contextList = contextFiles.map((f) => theme.fg("dim", `  ${f.path}`)).join("\n");
-			this.chatContainer.addChild(new Text(theme.fg("muted", "Loaded context:\n") + contextList, 0, 0));
-			this.chatContainer.addChild(new Spacer(1));
-		}
-
-		// Show loaded skills
-		const skillsSettings = this.session.skillsSettings;
-		if (skillsSettings?.enabled !== false) {
-			const { skills, warnings: skillWarnings } = loadSkills(skillsSettings ?? {});
-			if (skills.length > 0) {
-				const skillList = skills.map((s) => theme.fg("dim", `  ${s.filePath}`)).join("\n");
-				this.chatContainer.addChild(new Text(theme.fg("muted", "Loaded skills:\n") + skillList, 0, 0));
-				this.chatContainer.addChild(new Spacer(1));
-			}
-
-			// Show skill warnings if any
-			if (skillWarnings.length > 0) {
-				const warningList = skillWarnings
-					.map((w) => theme.fg("warning", `  ${w.skillPath}: ${w.message}`))
-					.join("\n");
-				this.chatContainer.addChild(new Text(theme.fg("warning", "Skill warnings:\n") + warningList, 0, 0));
-				this.chatContainer.addChild(new Spacer(1));
-			}
-		}
-
-		// Show loaded custom tools
-		if (this.customTools.size > 0) {
-			const toolList = Array.from(this.customTools.values())
-				.map((ct) => theme.fg("dim", `  ${ct.tool.name} (${ct.path})`))
-				.join("\n");
-			this.chatContainer.addChild(new Text(theme.fg("muted", "Loaded custom tools:\n") + toolList, 0, 0));
-			this.chatContainer.addChild(new Spacer(1));
-		}
-
 		// Create and set hook & tool UI context
 		const uiContext: HookUIContext = {
 			select: (title, options) => this.showHookSelector(title, options),
@@ -490,14 +413,6 @@ export class InteractiveMode {
 		hookRunner.onError((error) => {
 			this.showHookError(error.hookPath, error.error);
 		});
-
-		// Show loaded hooks
-		const hookPaths = hookRunner.getHookPaths();
-		if (hookPaths.length > 0) {
-			const hookList = hookPaths.map((p) => theme.fg("dim", `  ${p}`)).join("\n");
-			this.chatContainer.addChild(new Text(theme.fg("muted", "Loaded hooks:\n") + hookList, 0, 0));
-			this.chatContainer.addChild(new Spacer(1));
-		}
 
 		// Emit session_start event
 		await hookRunner.emit({
@@ -770,6 +685,7 @@ export class InteractiveMode {
 		this.editor.onCtrlO = () => this.toggleToolOutputExpansion();
 		this.editor.onCtrlT = () => this.toggleThinkingBlockVisibility();
 		this.editor.onCtrlG = () => this.openExternalEditor();
+		this.editor.onQuestionMark = () => this.handleHotkeysCommand();
 
 		this.editor.onChange = (text: string) => {
 			const wasBashMode = this.isBashMode;
@@ -823,6 +739,11 @@ export class InteractiveMode {
 			}
 			if (text === "/hotkeys") {
 				this.handleHotkeysCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/status") {
+				this.handleStatusCommand();
 				this.editor.setText("");
 				return;
 			}
@@ -2273,6 +2194,80 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Markdown(hotkeys.trim(), 1, 1, getMarkdownTheme()));
 		this.chatContainer.addChild(new DynamicBorder());
+		this.ui.requestRender();
+	}
+
+	private handleStatusCommand(): void {
+		const sections: string[] = [];
+
+		// Loaded context files
+		const contextFiles = loadProjectContextFiles();
+		if (contextFiles.length > 0) {
+			sections.push(
+				theme.bold(theme.fg("accent", "Context Files")) +
+					"\n" +
+					contextFiles.map((f) => theme.fg("dim", `  ${f.path}`)).join("\n"),
+			);
+		}
+
+		// Loaded skills
+		const skillsSettings = this.session.skillsSettings;
+		if (skillsSettings?.enabled !== false) {
+			const { skills, warnings: skillWarnings } = loadSkills(skillsSettings ?? {});
+			if (skills.length > 0) {
+				sections.push(
+					theme.bold(theme.fg("accent", "Skills")) +
+						"\n" +
+						skills.map((s) => theme.fg("dim", `  ${s.filePath}`)).join("\n"),
+				);
+			}
+			if (skillWarnings.length > 0) {
+				sections.push(
+					theme.bold(theme.fg("warning", "Skill Warnings")) +
+						"\n" +
+						skillWarnings.map((w) => theme.fg("warning", `  ${w.skillPath}: ${w.message}`)).join("\n"),
+				);
+			}
+		}
+
+		// Loaded custom tools
+		if (this.customTools.size > 0) {
+			sections.push(
+				theme.bold(theme.fg("accent", "Custom Tools")) +
+					"\n" +
+					Array.from(this.customTools.values())
+						.map((ct) => theme.fg("dim", `  ${ct.tool.name} (${ct.path})`))
+						.join("\n"),
+			);
+		}
+
+		// Loaded hooks
+		const hookRunner = this.session.hookRunner;
+		if (hookRunner) {
+			const hookPaths = hookRunner.getHookPaths();
+			if (hookPaths.length > 0) {
+				sections.push(
+					theme.bold(theme.fg("accent", "Hooks")) +
+						"\n" +
+						hookPaths.map((p) => theme.fg("dim", `  ${p}`)).join("\n"),
+				);
+			}
+		}
+
+		if (sections.length === 0) {
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(theme.fg("muted", "No extensions loaded."), 1, 0));
+		} else {
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new DynamicBorder());
+			this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Loaded Extensions")), 1, 0));
+			this.chatContainer.addChild(new Spacer(1));
+			for (const section of sections) {
+				this.chatContainer.addChild(new Text(section, 1, 0));
+				this.chatContainer.addChild(new Spacer(1));
+			}
+			this.chatContainer.addChild(new DynamicBorder());
+		}
 		this.ui.requestRender();
 	}
 

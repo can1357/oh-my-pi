@@ -77,7 +77,21 @@
 		"thinkingHigh": "#b281d6",
 		"thinkingXhigh": "#e5c1ff",
 
-		"bashMode": "cyan"
+		"bashMode": "cyan",
+
+		"footerIcon": 39,
+		"footerSep": 244,
+		"footerModel": 255,
+		"footerPath": 39,
+		"footerBranch": 76,
+		"footerStaged": 70,
+		"footerDirty": 178,
+		"footerUntracked": 39,
+		"footerInput": 76,
+		"footerOutput": 205,
+		"footerCacheRead": 76,
+		"footerCacheWrite": 76,
+		"footerCost": 205
 	},
 	"export": {
 		"pageBg": "#18181e",

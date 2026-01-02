@@ -81,6 +81,20 @@ const ThemeJsonSchema = Type.Object({
 		thinkingXhigh: ColorValueSchema,
 		// Bash Mode (1 color)
 		bashMode: ColorValueSchema,
+		// Footer Status Line (10 colors)
+		footerIcon: ColorValueSchema,
+		footerSep: ColorValueSchema,
+		footerModel: ColorValueSchema,
+		footerPath: ColorValueSchema,
+		footerBranch: ColorValueSchema,
+		footerStaged: ColorValueSchema,
+		footerDirty: ColorValueSchema,
+		footerUntracked: ColorValueSchema,
+		footerInput: ColorValueSchema,
+		footerOutput: ColorValueSchema,
+		footerCacheRead: ColorValueSchema,
+		footerCacheWrite: ColorValueSchema,
+		footerCost: ColorValueSchema,
 	}),
 	export: Type.Optional(
 		Type.Object({
@@ -141,7 +155,20 @@ export type ThemeColor =
 	| "thinkingMedium"
 	| "thinkingHigh"
 	| "thinkingXhigh"
-	| "bashMode";
+	| "bashMode"
+	| "footerIcon"
+	| "footerSep"
+	| "footerModel"
+	| "footerPath"
+	| "footerBranch"
+	| "footerStaged"
+	| "footerDirty"
+	| "footerUntracked"
+	| "footerInput"
+	| "footerOutput"
+	| "footerCacheRead"
+	| "footerCacheWrite"
+	| "footerCost";
 
 export type ThemeBg =
 	| "selectedBg"

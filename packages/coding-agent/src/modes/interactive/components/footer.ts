@@ -1,9 +1,19 @@
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import { type Component, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { execSync } from "child_process";
 import { existsSync, type FSWatcher, readFileSync, watch } from "fs";
 import { dirname, join } from "path";
 import type { AgentSession } from "../../../core/agent-session.js";
 import { theme } from "../theme/theme.js";
+
+// Nerd Font icons (matching Claude/statusline-nerd.sh)
+const ICONS = {
+	model: "\uf4bc", //  robot/model
+	folder: "\uf115", //  folder
+	branch: "\uf126", //  git branch
+	sep: "\ue0b1", //  powerline thin chevron
+	tokens: "\uf0ce", //  table/tokens
+} as const;
 
 /**
  * Sanitize text for display in a single-line status.
@@ -152,10 +162,54 @@ export class FooterComponent implements Component {
 		return this.cachedBranch;
 	}
 
+	/**
+	 * Get git status indicators (staged, unstaged, untracked counts).
+	 * Returns null if not in a git repo.
+	 */
+	private getGitStatus(): { staged: number; unstaged: number; untracked: number } | null {
+		try {
+			const output = execSync("git status --porcelain 2>/dev/null", {
+				encoding: "utf8",
+				timeout: 1000,
+				stdio: ["pipe", "pipe", "pipe"],
+			});
+
+			let staged = 0;
+			let unstaged = 0;
+			let untracked = 0;
+
+			for (const line of output.split("\n")) {
+				if (!line) continue;
+				const x = line[0]; // Index (staged) status
+				const y = line[1]; // Working tree status
+
+				// Untracked files
+				if (x === "?" && y === "?") {
+					untracked++;
+					continue;
+				}
+
+				// Staged changes (first column is not space or ?)
+				if (x && x !== " " && x !== "?") {
+					staged++;
+				}
+
+				// Unstaged changes (second column is not space)
+				if (y && y !== " ") {
+					unstaged++;
+				}
+			}
+
+			return { staged, unstaged, untracked };
+		} catch {
+			return null;
+		}
+	}
+
 	render(width: number): string[] {
 		const state = this.session.state;
 
-		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
+		// Calculate cumulative usage from ALL session entries
 		let totalInput = 0;
 		let totalOutput = 0;
 		let totalCacheRead = 0;
@@ -172,13 +226,12 @@ export class FooterComponent implements Component {
 			}
 		}
 
-		// Get last assistant message for context percentage calculation (skip aborted messages)
+		// Get context percentage from last assistant message
 		const lastAssistantMessage = state.messages
 			.slice()
 			.reverse()
 			.find((m) => m.role === "assistant" && m.stopReason !== "aborted") as AssistantMessage | undefined;
 
-		// Calculate context percentage from last message (input + output + cacheRead + cacheWrite)
 		const contextTokens = lastAssistantMessage
 			? lastAssistantMessage.usage.input +
 				lastAssistantMessage.usage.output +
@@ -187,136 +240,140 @@ export class FooterComponent implements Component {
 			: 0;
 		const contextWindow = state.model?.contextWindow || 0;
 		const contextPercentValue = contextWindow > 0 ? (contextTokens / contextWindow) * 100 : 0;
-		const contextPercent = contextPercentValue.toFixed(1);
 
-		// Format token counts (similar to web-ui)
-		const formatTokens = (count: number): string => {
-			if (count < 1000) return count.toString();
-			if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-			if (count < 1000000) return `${Math.round(count / 1000)}k`;
-			if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
-			return `${Math.round(count / 1000000)}M`;
+		// Format helpers
+		const formatTokens = (n: number): string => {
+			if (n < 1000) return n.toString();
+			if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
+			if (n < 1000000) return `${Math.round(n / 1000)}k`;
+			if (n < 10000000) return `${(n / 1000000).toFixed(1)}M`;
+			return `${Math.round(n / 1000000)}M`;
 		};
 
-		// Replace home directory with ~
+		// Powerline separator (very dim)
+		const sep = theme.fg("footerSep", ` ${ICONS.sep} `);
+
+		// ═══════════════════════════════════════════════════════════════════════
+		// SEGMENT 1: Model (Gold/White)
+		// ═══════════════════════════════════════════════════════════════════════
+		const modelName = state.model?.id || "no-model";
+		let modelSegment = theme.fg("footerModel", `${ICONS.model} ${modelName}`);
+		if (state.model?.reasoning) {
+			const level = state.thinkingLevel || "off";
+			if (level !== "off") {
+				modelSegment += theme.fg("footerSep", " · ") + theme.fg("footerModel", level);
+			}
+		}
+
+		// ═══════════════════════════════════════════════════════════════════════
+		// SEGMENT 2: Path (Cyan with dim separators)
+		// Replace home with ~, strip /work/, color separators
+		// ═══════════════════════════════════════════════════════════════════════
 		let pwd = process.cwd();
 		const home = process.env.HOME || process.env.USERPROFILE;
 		if (home && pwd.startsWith(home)) {
 			pwd = `~${pwd.slice(home.length)}`;
 		}
-
-		// Add git branch if available
-		const branch = this.getCurrentBranch();
-		if (branch) {
-			pwd = `${pwd} (${branch})`;
+		// Strip /work/ prefix
+		if (pwd.startsWith("/work/")) {
+			pwd = pwd.slice(6);
 		}
+		// Color path with dim separators: ~/foo/bar -> ~/foo/bar (separators dim)
+		const pathColored = pwd
+			.split("/")
+			.map((part) => theme.fg("footerPath", part))
+			.join(theme.fg("footerSep", "/"));
+		const pathSegment = theme.fg("footerIcon", `${ICONS.folder}  `) + pathColored;
 
-		// Truncate path if too long to fit width
-		if (pwd.length > width) {
-			const half = Math.floor(width / 2) - 2;
-			if (half > 0) {
-				const start = pwd.slice(0, half);
-				const end = pwd.slice(-(half - 1));
-				pwd = `${start}...${end}`;
-			} else {
-				pwd = pwd.slice(0, Math.max(1, width));
+		// ═══════════════════════════════════════════════════════════════════════
+		// SEGMENT 3: Git Branch + Status (Green/Yellow)
+		// ═══════════════════════════════════════════════════════════════════════
+		const branch = this.getCurrentBranch();
+		let gitSegment = "";
+		if (branch) {
+			const gitStatus = this.getGitStatus();
+			const isDirty = gitStatus && (gitStatus.staged > 0 || gitStatus.unstaged > 0 || gitStatus.untracked > 0);
+
+			// Branch name - green if clean, yellow if dirty
+			const branchColor = isDirty ? "footerDirty" : "footerBranch";
+			gitSegment = theme.fg("footerIcon", `${ICONS.branch} `) + theme.fg(branchColor, branch);
+
+			// Add status indicators
+			if (gitStatus) {
+				const indicators: string[] = [];
+				if (gitStatus.unstaged > 0) {
+					indicators.push(theme.fg("footerDirty", `*${gitStatus.unstaged}`));
+				}
+				if (gitStatus.staged > 0) {
+					indicators.push(theme.fg("footerStaged", `+${gitStatus.staged}`));
+				}
+				if (gitStatus.untracked > 0) {
+					indicators.push(theme.fg("footerUntracked", `!${gitStatus.untracked}`));
+				}
+				if (indicators.length > 0) {
+					gitSegment += ` ${indicators.join(" ")}`;
+				}
 			}
 		}
 
-		// Build stats line
-		const statsParts = [];
-		if (totalInput) statsParts.push(`↑${formatTokens(totalInput)}`);
-		if (totalOutput) statsParts.push(`↓${formatTokens(totalOutput)}`);
-		if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
-		if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
+		// ═══════════════════════════════════════════════════════════════════════
+		// SEGMENT 4: Stats (Pink/Magenta tones)
+		// Concise: total tokens, cost, context%
+		// ═══════════════════════════════════════════════════════════════════════
+		const statParts: string[] = [];
 
-		// Show cost with "(sub)" indicator if using OAuth subscription
+		// Total tokens (input + output + cache)
+		const totalTokens = totalInput + totalOutput + totalCacheRead + totalCacheWrite;
+		if (totalTokens) {
+			statParts.push(theme.fg("footerOutput", `${ICONS.tokens} ${formatTokens(totalTokens)}`));
+		}
+
+		// Cost (pink)
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
 		if (totalCost || usingSubscription) {
-			const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
-			statsParts.push(costStr);
+			const costDisplay = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
+			statParts.push(theme.fg("footerCost", costDisplay));
 		}
 
-		// Colorize context percentage based on usage
-		let contextPercentStr: string;
+		// Context percentage with severity coloring
 		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
-		const contextPercentDisplay = `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
+		const contextDisplay = `${contextPercentValue.toFixed(1)}%/${formatTokens(contextWindow)}${autoIndicator}`;
+		let contextColored: string;
 		if (contextPercentValue > 90) {
-			contextPercentStr = theme.fg("error", contextPercentDisplay);
+			contextColored = theme.fg("error", contextDisplay);
 		} else if (contextPercentValue > 70) {
-			contextPercentStr = theme.fg("warning", contextPercentDisplay);
+			contextColored = theme.fg("warning", contextDisplay);
 		} else {
-			contextPercentStr = contextPercentDisplay;
+			contextColored = theme.fg("footerSep", contextDisplay);
 		}
-		statsParts.push(contextPercentStr);
+		statParts.push(contextColored);
 
-		let statsLeft = statsParts.join(" ");
+		const statsSegment = statParts.join("  ");
 
-		// Add model name on the right side, plus thinking level if model supports it
-		const modelName = state.model?.id || "no-model";
+		// ═══════════════════════════════════════════════════════════════════════
+		// Assemble single powerline-style line
+		// [Model] > [Path] > [Git] > [Stats]
+		// ═══════════════════════════════════════════════════════════════════════
+		const segments = [modelSegment, pathSegment];
+		if (gitSegment) segments.push(gitSegment);
+		segments.push(statsSegment);
 
-		// Add thinking level hint if model supports reasoning and thinking is enabled
-		let rightSide = modelName;
-		if (state.model?.reasoning) {
-			const thinkingLevel = state.thinkingLevel || "off";
-			if (thinkingLevel !== "off") {
-				rightSide = `${modelName} • ${thinkingLevel}`;
-			}
-		}
+		let statusLine = segments.join(sep);
 
-		let statsLeftWidth = visibleWidth(statsLeft);
-		const rightSideWidth = visibleWidth(rightSide);
-
-		// If statsLeft is too wide, truncate it
-		if (statsLeftWidth > width) {
-			// Truncate statsLeft to fit width (no room for right side)
-			const plainStatsLeft = statsLeft.replace(/\x1b\[[0-9;]*m/g, "");
-			statsLeft = `${plainStatsLeft.substring(0, width - 3)}...`;
-			statsLeftWidth = visibleWidth(statsLeft);
+		// Truncate if needed
+		if (visibleWidth(statusLine) > width) {
+			statusLine = truncateToWidth(statusLine, width, theme.fg("footerSep", "…"));
 		}
 
-		// Calculate available space for padding (minimum 2 spaces between stats and model)
-		const minPadding = 2;
-		const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
+		const lines = [statusLine];
 
-		let statsLine: string;
-		if (totalNeeded <= width) {
-			// Both fit - add padding to right-align model
-			const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
-			statsLine = statsLeft + padding + rightSide;
-		} else {
-			// Need to truncate right side
-			const availableForRight = width - statsLeftWidth - minPadding;
-			if (availableForRight > 3) {
-				// Truncate to fit (strip ANSI codes for length calculation, then truncate raw string)
-				const plainRightSide = rightSide.replace(/\x1b\[[0-9;]*m/g, "");
-				const truncatedPlain = plainRightSide.substring(0, availableForRight);
-				// For simplicity, just use plain truncated version (loses color, but fits)
-				const padding = " ".repeat(width - statsLeftWidth - truncatedPlain.length);
-				statsLine = statsLeft + padding + truncatedPlain;
-			} else {
-				// Not enough space for right side at all
-				statsLine = statsLeft;
-			}
-		}
-
-		// Apply dim to each part separately. statsLeft may contain color codes (for context %)
-		// that end with a reset, which would clear an outer dim wrapper. So we dim the parts
-		// before and after the colored section independently.
-		const dimStatsLeft = theme.fg("dim", statsLeft);
-		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
-		const dimRemainder = theme.fg("dim", remainder);
-
-		const lines = [theme.fg("dim", pwd), dimStatsLeft + dimRemainder];
-
-		// Add hook statuses on a single line, sorted by key alphabetically
+		// Hook statuses (optional second line)
 		if (this.hookStatuses.size > 0) {
 			const sortedStatuses = Array.from(this.hookStatuses.entries())
 				.sort(([a], [b]) => a.localeCompare(b))
 				.map(([, text]) => sanitizeStatusText(text));
-			const statusLine = sortedStatuses.join(" ");
-			// Truncate to terminal width with dim ellipsis for consistency with footer style
-			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+			const hookLine = sortedStatuses.join(" ");
+			lines.push(truncateToWidth(hookLine, width, theme.fg("footerSep", "…")));
 		}
 
 		return lines;
