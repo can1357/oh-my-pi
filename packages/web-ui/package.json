@@ -48,5 +48,10 @@
 		"mini-lit"
 	],
 	"author": "Mario Zechner",
-	"license": "MIT"
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/can1357/oh-my-pi.git",
+		"directory": "packages/web-ui"
+	}
 }
