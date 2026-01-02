@@ -2,11 +2,19 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import {
 	Container,
 	getCapabilities,
+	isArrowLeft,
+	isArrowRight,
+	isEscape,
+	isShiftTab,
+	isTab,
 	type SelectItem,
 	SelectList,
 	type SettingItem,
 	SettingsList,
 	Spacer,
+	type Tab,
+	TabBar,
+	type TabBarTheme,
 	Text,
 } from "@oh-my-pi/pi-tui";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.js";
@@ -57,6 +65,15 @@ export interface SettingsCallbacks {
 	onPluginsChanged?: () => void;
 	onExaSettingChange: (setting: keyof ExaToolsConfig, enabled: boolean) => void;
 	onCancel: () => void;
+}
+
+function getTabBarTheme(): TabBarTheme {
+	return {
+		label: (text) => theme.bold(theme.fg("accent", text)),
+		activeTab: (text) => theme.bold(theme.bg("selectedBg", theme.fg("text", text))),
+		inactiveTab: (text) => theme.fg("muted", text),
+		hint: (text) => theme.fg("dim", text),
+	};
 }
 
 /**
@@ -121,96 +138,84 @@ class SelectSubmenu extends Container {
 	}
 }
 
-/**
- * Submenu for Exa tool settings
- */
-class ExaSettingsSubmenu extends Container {
-	private settingsList: SettingsList;
+type TabId = "config" | "exa" | "plugins";
 
-	constructor(
-		config: ExaToolsConfig,
-		onChange: (setting: keyof ExaToolsConfig, enabled: boolean) => void,
-		onCancel: () => void,
-	) {
-		super();
-
-		this.addChild(new Text(theme.bold(theme.fg("accent", "Exa Tools")), 0, 0));
-		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("muted", "Configure which Exa search tools are available"), 0, 0));
-		this.addChild(new Spacer(1));
-
-		const items: SettingItem[] = [
-			{
-				id: "enabled",
-				label: "Exa enabled",
-				description: "Master toggle for all Exa tools",
-				currentValue: config.enabled ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "enableSearch",
-				label: "Search tools",
-				description: "Basic search, deep search, code search, crawl",
-				currentValue: config.enableSearch ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "enableLinkedin",
-				label: "LinkedIn search",
-				description: "Search LinkedIn for people and companies",
-				currentValue: config.enableLinkedin ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "enableCompany",
-				label: "Company research",
-				description: "Comprehensive company research tool",
-				currentValue: config.enableCompany ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "enableResearcher",
-				label: "Deep researcher",
-				description: "AI-powered deep research tasks",
-				currentValue: config.enableResearcher ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "enableWebsets",
-				label: "Websets",
-				description: "Webset management and enrichment tools",
-				currentValue: config.enableWebsets ? "true" : "false",
-				values: ["true", "false"],
-			},
-		];
-
-		this.settingsList = new SettingsList(
-			items,
-			8,
-			getSettingsListTheme(),
-			(id, newValue) => {
-				onChange(id as keyof ExaToolsConfig, newValue === "true");
-			},
-			onCancel,
-		);
-
-		this.addChild(this.settingsList);
-	}
-
-	handleInput(data: string): void {
-		this.settingsList.handleInput(data);
-	}
-}
+const SETTINGS_TABS: Tab[] = [
+	{ id: "config", label: "Config" },
+	{ id: "exa", label: "Exa" },
+	{ id: "plugins", label: "Plugins" },
+];
 
 /**
- * Main settings selector component.
+ * Main tabbed settings selector component.
  */
 export class SettingsSelectorComponent extends Container {
-	private settingsList: SettingsList;
+	private tabBar: TabBar;
+	private currentList: SettingsList | null = null;
+	private currentSubmenu: Container | null = null;
+	private pluginComponent: PluginSettingsComponent | null = null;
+
+	private config: SettingsConfig;
+	private callbacks: SettingsCallbacks;
 
 	constructor(config: SettingsConfig, callbacks: SettingsCallbacks) {
 		super();
 
+		this.config = config;
+		this.callbacks = callbacks;
+
+		// Add top border
+		this.addChild(new DynamicBorder());
+
+		// Tab bar
+		this.tabBar = new TabBar("Settings", SETTINGS_TABS, getTabBarTheme());
+		this.tabBar.onTabChange = () => {
+			this.switchToTab(this.tabBar.getActiveTab().id as TabId);
+		};
+		this.addChild(this.tabBar);
+
+		// Spacer after tab bar
+		this.addChild(new Spacer(1));
+
+		// Initialize with first tab
+		this.switchToTab("config");
+
+		// Add bottom border
+		this.addChild(new DynamicBorder());
+	}
+
+	private switchToTab(tabId: TabId): void {
+		// Remove current content
+		if (this.currentList) {
+			this.removeChild(this.currentList);
+			this.currentList = null;
+		}
+		if (this.pluginComponent) {
+			this.removeChild(this.pluginComponent);
+			this.pluginComponent = null;
+		}
+
+		// Remove bottom border temporarily
+		const bottomBorder = this.children[this.children.length - 1];
+		this.removeChild(bottomBorder);
+
+		switch (tabId) {
+			case "config":
+				this.showConfigTab();
+				break;
+			case "exa":
+				this.showExaTab();
+				break;
+			case "plugins":
+				this.showPluginsTab();
+				break;
+		}
+
+		// Re-add bottom border
+		this.addChild(bottomBorder);
+	}
+
+	private showConfigTab(): void {
 		const supportsImages = getCapabilities().images;
 
 		const items: SettingItem[] = [
@@ -218,47 +223,47 @@ export class SettingsSelectorComponent extends Container {
 				id: "autocompact",
 				label: "Auto-compact",
 				description: "Automatically compact context when it gets too large",
-				currentValue: config.autoCompact ? "true" : "false",
+				currentValue: this.config.autoCompact ? "true" : "false",
 				values: ["true", "false"],
 			},
 			{
 				id: "queue-mode",
 				label: "Queue mode",
 				description: "How to process queued messages while agent is working",
-				currentValue: config.queueMode,
+				currentValue: this.config.queueMode,
 				values: ["one-at-a-time", "all"],
 			},
 			{
 				id: "hide-thinking",
 				label: "Hide thinking",
 				description: "Hide thinking blocks in assistant responses",
-				currentValue: config.hideThinkingBlock ? "true" : "false",
+				currentValue: this.config.hideThinkingBlock ? "true" : "false",
 				values: ["true", "false"],
 			},
 			{
 				id: "collapse-changelog",
 				label: "Collapse changelog",
 				description: "Show condensed changelog after updates",
-				currentValue: config.collapseChangelog ? "true" : "false",
+				currentValue: this.config.collapseChangelog ? "true" : "false",
 				values: ["true", "false"],
 			},
 			{
 				id: "thinking",
 				label: "Thinking level",
 				description: "Reasoning depth for thinking-capable models",
-				currentValue: config.thinkingLevel,
+				currentValue: this.config.thinkingLevel,
 				submenu: (currentValue, done) =>
 					new SelectSubmenu(
 						"Thinking Level",
 						"Select reasoning depth for thinking-capable models",
-						config.availableThinkingLevels.map((level) => ({
+						this.config.availableThinkingLevels.map((level) => ({
 							value: level,
 							label: level,
 							description: THINKING_DESCRIPTIONS[level],
 						})),
 						currentValue,
 						(value) => {
-							callbacks.onThinkingLevelChange(value as ThinkingLevel);
+							this.callbacks.onThinkingLevelChange(value as ThinkingLevel);
 							done(value);
 						},
 						() => done(),
@@ -268,104 +273,181 @@ export class SettingsSelectorComponent extends Container {
 				id: "theme",
 				label: "Theme",
 				description: "Color theme for the interface",
-				currentValue: config.currentTheme,
+				currentValue: this.config.currentTheme,
 				submenu: (currentValue, done) =>
 					new SelectSubmenu(
 						"Theme",
 						"Select color theme",
-						config.availableThemes.map((t) => ({
+						this.config.availableThemes.map((t) => ({
 							value: t,
 							label: t,
 						})),
 						currentValue,
 						(value) => {
-							callbacks.onThemeChange(value);
+							this.callbacks.onThemeChange(value);
 							done(value);
 						},
 						() => {
-							// Restore original theme on cancel
-							callbacks.onThemePreview?.(currentValue);
+							this.callbacks.onThemePreview?.(currentValue);
 							done();
 						},
 						(value) => {
-							// Preview theme on selection change
-							callbacks.onThemePreview?.(value);
+							this.callbacks.onThemePreview?.(value);
 						},
 					),
-			},
-			{
-				id: "exa",
-				label: "Exa tools",
-				description: "Configure Exa search and research tools",
-				currentValue: config.exa.enabled ? "→" : "off",
-				submenu: (_currentValue, done) =>
-					new ExaSettingsSubmenu(
-						config.exa,
-						(setting, enabled) => {
-							callbacks.onExaSettingChange(setting, enabled);
-						},
-						() => done(),
-					),
-			},
-			{
-				id: "plugins",
-				label: "Plugins",
-				description: "Manage installed plugins and their settings",
-				currentValue: "→",
-				submenu: (_currentValue, done) =>
-					new PluginSettingsComponent(config.cwd, {
-						onClose: () => done(),
-						onPluginChanged: () => callbacks.onPluginsChanged?.(),
-					}),
 			},
 		];
 
-		// Only show image toggle if terminal supports it
+		// Add image toggle if supported
 		if (supportsImages) {
-			// Insert after autocompact
 			items.splice(1, 0, {
 				id: "show-images",
 				label: "Show images",
 				description: "Render images inline in terminal",
-				currentValue: config.showImages ? "true" : "false",
+				currentValue: this.config.showImages ? "true" : "false",
 				values: ["true", "false"],
 			});
 		}
 
-		// Add borders
-		this.addChild(new DynamicBorder());
-
-		this.settingsList = new SettingsList(
+		this.currentList = new SettingsList(
 			items,
 			10,
 			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {
 					case "autocompact":
-						callbacks.onAutoCompactChange(newValue === "true");
+						this.callbacks.onAutoCompactChange(newValue === "true");
 						break;
 					case "show-images":
-						callbacks.onShowImagesChange(newValue === "true");
+						this.callbacks.onShowImagesChange(newValue === "true");
 						break;
 					case "queue-mode":
-						callbacks.onQueueModeChange(newValue as "all" | "one-at-a-time");
+						this.callbacks.onQueueModeChange(newValue as "all" | "one-at-a-time");
 						break;
 					case "hide-thinking":
-						callbacks.onHideThinkingBlockChange(newValue === "true");
+						this.callbacks.onHideThinkingBlockChange(newValue === "true");
 						break;
 					case "collapse-changelog":
-						callbacks.onCollapseChangelogChange(newValue === "true");
+						this.callbacks.onCollapseChangelogChange(newValue === "true");
 						break;
 				}
 			},
-			callbacks.onCancel,
+			() => this.callbacks.onCancel(),
 		);
 
-		this.addChild(this.settingsList);
-		this.addChild(new DynamicBorder());
+		this.addChild(this.currentList);
 	}
 
-	getSettingsList(): SettingsList {
-		return this.settingsList;
+	private showExaTab(): void {
+		const items: SettingItem[] = [
+			{
+				id: "exa-enabled",
+				label: "Exa enabled",
+				description: "Master toggle for all Exa search tools",
+				currentValue: this.config.exa.enabled ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "exa-search",
+				label: "Exa search",
+				description: "Basic search, deep search, code search, crawl",
+				currentValue: this.config.exa.enableSearch ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "exa-linkedin",
+				label: "Exa LinkedIn",
+				description: "Search LinkedIn for people and companies",
+				currentValue: this.config.exa.enableLinkedin ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "exa-company",
+				label: "Exa company",
+				description: "Comprehensive company research tool",
+				currentValue: this.config.exa.enableCompany ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "exa-researcher",
+				label: "Exa researcher",
+				description: "AI-powered deep research tasks",
+				currentValue: this.config.exa.enableResearcher ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "exa-websets",
+				label: "Exa websets",
+				description: "Webset management and enrichment tools",
+				currentValue: this.config.exa.enableWebsets ? "true" : "false",
+				values: ["true", "false"],
+			},
+		];
+
+		this.currentList = new SettingsList(
+			items,
+			10,
+			getSettingsListTheme(),
+			(id, newValue) => {
+				const enabled = newValue === "true";
+				switch (id) {
+					case "exa-enabled":
+						this.callbacks.onExaSettingChange("enabled", enabled);
+						break;
+					case "exa-search":
+						this.callbacks.onExaSettingChange("enableSearch", enabled);
+						break;
+					case "exa-linkedin":
+						this.callbacks.onExaSettingChange("enableLinkedin", enabled);
+						break;
+					case "exa-company":
+						this.callbacks.onExaSettingChange("enableCompany", enabled);
+						break;
+					case "exa-researcher":
+						this.callbacks.onExaSettingChange("enableResearcher", enabled);
+						break;
+					case "exa-websets":
+						this.callbacks.onExaSettingChange("enableWebsets", enabled);
+						break;
+				}
+			},
+			() => this.callbacks.onCancel(),
+		);
+
+		this.addChild(this.currentList);
+	}
+
+	private showPluginsTab(): void {
+		this.pluginComponent = new PluginSettingsComponent(this.config.cwd, {
+			onClose: () => this.callbacks.onCancel(),
+			onPluginChanged: () => this.callbacks.onPluginsChanged?.(),
+		});
+		this.addChild(this.pluginComponent);
+	}
+
+	getFocusComponent(): SettingsList | PluginSettingsComponent {
+		// Return the current focusable component - one of these will always be set
+		return (this.currentList || this.pluginComponent)!;
+	}
+
+	handleInput(data: string): void {
+		// Handle tab switching first (tab, shift+tab, or left/right arrows)
+		if (isTab(data) || isShiftTab(data) || isArrowLeft(data) || isArrowRight(data)) {
+			this.tabBar.handleInput(data);
+			return;
+		}
+
+		// Escape at top level cancels
+		if (isEscape(data) && !this.currentSubmenu) {
+			this.callbacks.onCancel();
+			return;
+		}
+
+		// Pass to current content
+		if (this.currentList) {
+			this.currentList.handleInput(data);
+		} else if (this.pluginComponent) {
+			this.pluginComponent.handleInput(data);
+		}
 	}
 }

@@ -127,9 +127,6 @@ function generateAntiBashRules(tools: ToolName[]): string | null {
 		lines.push("- **What type is X?** → `lsp hover`");
 		lines.push("- **What symbols are in this file?** → `lsp symbols`");
 		lines.push("- **Find symbol across codebase** → `lsp workspace_symbols`\n");
-		lines.push(
-			"LSP returns **precise, compiler-verified results**. Grep returns text matches that may include comments, strings, or false positives.",
-		);
 	}
 
 	// Add search-first protocol

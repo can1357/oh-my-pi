@@ -503,6 +503,10 @@ export class Editor implements Component {
 			// Left
 			this.moveCursor(0, -1);
 		}
+		// Shift+Space via Kitty protocol (sends \x1b[32;2u instead of plain space)
+		else if (data === "\x1b[32;2u" || data.match(/^\x1b\[32;\d+u$/)) {
+			this.insertCharacter(" ");
+		}
 		// Regular characters (printable characters and unicode, but not control characters)
 		else if (data.charCodeAt(0) >= 32) {
 			this.insertCharacter(data);
