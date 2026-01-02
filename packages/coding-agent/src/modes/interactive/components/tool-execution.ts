@@ -126,13 +126,12 @@ export class ToolExecutionComponent extends Container {
 		const path = this.args?.path;
 		const oldText = this.args?.oldText;
 		const newText = this.args?.newText;
-		const fuzzy = this.args?.fuzzy ?? false;
 
 		// Need all three params to compute diff
 		if (!path || oldText === undefined || newText === undefined) return;
 
 		// Create a key to track which args this computation is for
-		const argsKey = JSON.stringify({ path, oldText, newText, fuzzy });
+		const argsKey = JSON.stringify({ path, oldText, newText });
 
 		// Skip if we already computed for these exact args
 		if (this.editDiffArgsKey === argsKey) return;
@@ -140,7 +139,7 @@ export class ToolExecutionComponent extends Container {
 		this.editDiffArgsKey = argsKey;
 
 		// Compute diff async
-		computeEditDiff(path, oldText, newText, this.cwd, fuzzy).then((result) => {
+		computeEditDiff(path, oldText, newText, this.cwd).then((result) => {
 			// Only update if args haven't changed since we started
 			if (this.editDiffArgsKey === argsKey) {
 				this.editDiffPreview = result;

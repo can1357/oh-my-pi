@@ -256,7 +256,9 @@ export function formatEditMatchError(
 	options: { allowFuzzy: boolean; similarityThreshold: number; fuzzyMatches?: number },
 ): string {
 	if (!closest) {
-		return `Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`;
+		return options.allowFuzzy
+			? `Could not find a close enough match in ${path}.`
+			: `Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`;
 	}
 
 	const similarity = Math.round(closest.confidence * 100);
@@ -272,7 +274,9 @@ export function formatEditMatchError(
 		: "Hint: Use fuzzy=true to accept high-confidence matches.";
 
 	return [
-		`Could not find the exact text in ${path}.`,
+		options.allowFuzzy
+			? `Could not find a close enough match in ${path}.`
+			: `Could not find the exact text in ${path}.`,
 		``,
 		`Closest match (${similarity}% similar) at line ${closest.startLine}:`,
 		`  - ${oldLine}`,

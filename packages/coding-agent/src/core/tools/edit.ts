@@ -16,14 +16,10 @@ import { resolveToCwd } from "./path-utils.js";
 
 const editSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
-	oldText: Type.String({ description: "Exact text to find and replace (must match exactly)" }),
+	oldText: Type.String({
+		description: "Text to find and replace (high-confidence fuzzy matching for whitespace/indentation is always on)",
+	}),
 	newText: Type.String({ description: "New text to replace the old text with" }),
-	fuzzy: Type.Optional(
-		Type.Boolean({
-			description:
-				"Enable fuzzy matching when oldText differs only in whitespace or indentation (high-confidence only)",
-		}),
-	),
 });
 
 export interface EditToolDetails {
@@ -38,11 +34,11 @@ export function createEditTool(cwd: string): AgentTool<typeof editSchema> {
 		name: "edit",
 		label: "edit",
 		description:
-			"Edit a file by replacing exact text. The oldText must match exactly (including whitespace). Set fuzzy=true to accept high-confidence fuzzy matches.",
+			"Edit a file by replacing text. High-confidence fuzzy matching for whitespace/indentation differences is always enabled.",
 		parameters: editSchema,
 		execute: async (
 			_toolCallId: string,
-			{ path, oldText, newText, fuzzy }: { path: string; oldText: string; newText: string; fuzzy?: boolean },
+			{ path, oldText, newText }: { path: string; oldText: string; newText: string },
 			signal?: AbortSignal,
 		) => {
 			const absolutePath = resolveToCwd(path, cwd);
@@ -105,7 +101,7 @@ export function createEditTool(cwd: string): AgentTool<typeof editSchema> {
 						const normalizedNewText = normalizeToLF(newText);
 
 						const matchOutcome = findEditMatch(normalizedContent, normalizedOldText, {
-							allowFuzzy: fuzzy ?? false,
+							allowFuzzy: true,
 							similarityThreshold: DEFAULT_FUZZY_THRESHOLD,
 						});
 
@@ -128,7 +124,7 @@ export function createEditTool(cwd: string): AgentTool<typeof editSchema> {
 							reject(
 								new Error(
 									formatEditMatchError(path, normalizedOldText, matchOutcome.closest, {
-										allowFuzzy: fuzzy ?? false,
+										allowFuzzy: true,
 										similarityThreshold: DEFAULT_FUZZY_THRESHOLD,
 										fuzzyMatches: matchOutcome.fuzzyMatches,
 									}),

@@ -59,6 +59,7 @@ import { time } from "./timings.js";
 import { createToolContextStore } from "./tools/context.js";
 import {
 	allTools,
+	applyBashInterception,
 	bashTool,
 	codingTools,
 	createBashTool,
@@ -638,6 +639,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	let allToolsArray: Tool[] = [...builtInTools, ...wrappedCustomTools];
 	time("combineTools");
+
+	// Apply bash interception to redirect common shell patterns to proper tools
+	allToolsArray = applyBashInterception(allToolsArray);
+	time("applyBashInterception");
+
 	if (hookRunner) {
 		allToolsArray = wrapToolsWithHooks(allToolsArray, hookRunner) as Tool[];
 	}

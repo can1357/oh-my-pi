@@ -28,6 +28,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { askTool, createAskTool } from "./ask.js";
 import { astTool, createAstTool } from "./ast.js";
 import { bashTool, createBashTool } from "./bash.js";
+import { checkBashInterception, checkSimpleLsInterception } from "./bash-interceptor.js";
 import { createEditTool, editTool } from "./edit.js";
 import { createFindTool, findTool } from "./find.js";
 import { createGrepTool, grepTool } from "./grep.js";
@@ -138,4 +139,61 @@ export function createAllTools(cwd: string, sessionContext?: SessionContext): Re
 	return Object.fromEntries(
 		Object.entries(toolDefs).map(([name, def]) => [name, def.create(cwd, sessionContext)]),
 	) as Record<ToolName, Tool>;
+}
+
+/**
+ * Wrap a bash tool with interception that redirects common patterns to specialized tools.
+ * This helps prevent LLMs from falling back to shell commands when better tools exist.
+ *
+ * @param bashTool - The bash tool to wrap
+ * @param availableTools - Set of tool names that are available (for context-aware blocking)
+ * @returns Wrapped bash tool with interception
+ */
+export function wrapBashWithInterception(bashTool: Tool, availableTools: Set<string>): Tool {
+	const originalExecute = bashTool.execute;
+
+	return {
+		...bashTool,
+		execute: async (toolCallId, params, signal, onUpdate, context) => {
+			const command = (params as { command: string }).command;
+
+			// Check for forbidden patterns
+			const interception = checkBashInterception(command, availableTools);
+			if (interception.block) {
+				throw new Error(interception.message);
+			}
+
+			// Check for simple ls that should use ls tool
+			const lsInterception = checkSimpleLsInterception(command, availableTools);
+			if (lsInterception.block) {
+				throw new Error(lsInterception.message);
+			}
+
+			// Pass through to original bash tool
+			return originalExecute(toolCallId, params, signal, onUpdate, context);
+		},
+	};
+}
+
+/**
+ * Apply bash interception to a set of tools.
+ * Finds the bash tool and wraps it with interception based on other available tools.
+ *
+ * @param tools - Array of tools to process
+ * @returns Tools with bash interception applied
+ */
+export function applyBashInterception(tools: Tool[]): Tool[] {
+	const toolNames = new Set(tools.map((t) => t.name));
+
+	// If bash isn't in the tools, nothing to do
+	if (!toolNames.has("bash")) {
+		return tools;
+	}
+
+	return tools.map((tool) => {
+		if (tool.name === "bash") {
+			return wrapBashWithInterception(tool, toolNames);
+		}
+		return tool;
+	});
 }
