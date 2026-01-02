@@ -29,6 +29,7 @@
 		"CHANGELOG.md"
 	],
 	"scripts": {
+		"check": "tsgo --noEmit",
 		"clean": "rm -rf dist",
 		"build": "tsgo -p tsconfig.build.json && chmod +x dist/cli.js && npm run copy-assets",
 		"build:binary": "npm run build && bun build --compile ./dist/cli.js --outfile dist/pi && npm run copy-binary-assets",
