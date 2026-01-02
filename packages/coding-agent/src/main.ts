@@ -28,7 +28,7 @@ import { resolvePromptInput } from "./core/system-prompt.js";
 import { printTimings, time } from "./core/timings.js";
 import { allTools } from "./core/tools/index.js";
 import { runMigrations } from "./migrations.js";
-import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.js";
+import { InteractiveMode, installTerminalCrashHandlers, runPrintMode, runRpcMode } from "./modes/index.js";
 import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.js";
 import { getChangelogPath, getNewEntries, parseChangelog } from "./utils/changelog.js";
 import { ensureTool } from "./utils/tools-manager.js";
@@ -424,6 +424,7 @@ export async function main(args: string[]) {
 		const fdPath = await ensureTool("fd");
 		time("ensureTool(fd)");
 
+		installTerminalCrashHandlers();
 		printTimings();
 		await runInteractiveMode(
 			session,

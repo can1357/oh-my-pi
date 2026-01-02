@@ -1,6 +1,31 @@
 /**
  * Minimal terminal interface for TUI
  */
+
+// Track active terminal for emergency cleanup on crash
+let activeTerminal: ProcessTerminal | null = null;
+
+/**
+ * Emergency terminal restore - call this from signal/crash handlers
+ * Resets terminal state without requiring access to the ProcessTerminal instance
+ */
+export function emergencyTerminalRestore(): void {
+	if (activeTerminal) {
+		activeTerminal.stop();
+		activeTerminal.showCursor();
+		activeTerminal = null;
+	} else {
+		// Blind restore if no instance tracked - covers edge cases
+		process.stdout.write(
+			"\x1b[?2004l" + // Disable bracketed paste
+				"\x1b[<u" + // Pop kitty keyboard protocol
+				"\x1b[?25h", // Show cursor
+		);
+		if (process.stdin.setRawMode) {
+			process.stdin.setRawMode(false);
+		}
+	}
+}
 export interface Terminal {
 	// Start the terminal with input and resize handlers
 	start(onInput: (data: string) => void, onResize: () => void): void;
@@ -40,6 +65,9 @@ export class ProcessTerminal implements Terminal {
 		this.inputHandler = onInput;
 		this.resizeHandler = onResize;
 
+		// Register for emergency cleanup
+		activeTerminal = this;
+
 		// Save previous state and enable raw mode
 		this.wasRaw = process.stdin.isRaw || false;
 		if (process.stdin.setRawMode) {
@@ -63,6 +91,11 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	stop(): void {
+		// Unregister from emergency cleanup
+		if (activeTerminal === this) {
+			activeTerminal = null;
+		}
+
 		// Disable bracketed paste mode
 		process.stdout.write("\x1b[?2004l");
 

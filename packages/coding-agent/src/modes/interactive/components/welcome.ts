@@ -43,6 +43,7 @@ export class WelcomeComponent implements Component {
 		const rightCol = boxWidth - leftCol - 3; // 3 = │ + │ + │
 
 		// Block-based Pi logo (gradient: magenta → cyan)
+		// biome-ignore format: preserve ASCII art layout
 		const piLogo = [
 			"▀████████████▀",
 			" ╘███    ███  ",
@@ -67,27 +68,29 @@ export class WelcomeComponent implements Component {
 
 		// Right column separator
 		const separatorWidth = rightCol - 2; // padding on each side
-		const separator = " " + theme.fg("dim", "─".repeat(separatorWidth));
+		const separator = ` ${theme.fg("dim", "─".repeat(separatorWidth))}`;
 
 		// Recent sessions content
 		const sessionLines: string[] = [];
 		if (this.recentSessions.length === 0) {
-			sessionLines.push(" " + theme.fg("dim", "No recent sessions"));
+			sessionLines.push(` ${theme.fg("dim", "No recent sessions")}`);
 		} else {
 			for (const session of this.recentSessions.slice(0, 3)) {
-				sessionLines.push(" " + theme.fg("dim", "▪ ") + theme.fg("muted", session.name) + theme.fg("dim", ` (${session.timeAgo})`));
+				sessionLines.push(
+					` ${theme.fg("dim", "▪ ")}${theme.fg("muted", session.name)}${theme.fg("dim", ` (${session.timeAgo})`)}`,
+				);
 			}
 		}
 
 		// Right column
 		const rightLines = [
-			" " + theme.bold(theme.fg("accent", "Tips")),
-			" " + theme.fg("dim", "?") + theme.fg("muted", " for keyboard shortcuts"),
-			" " + theme.fg("dim", "/") + theme.fg("muted", " for commands"),
-			" " + theme.fg("dim", "!") + theme.fg("muted", " to run bash"),
-			" " + theme.fg("dim", "/status") + theme.fg("muted", " for loaded extensions"),
+			` ${theme.bold(theme.fg("accent", "Tips"))}`,
+			` ${theme.fg("dim", "?")}${theme.fg("muted", " for keyboard shortcuts")}`,
+			` ${theme.fg("dim", "/")}${theme.fg("muted", " for commands")}`,
+			` ${theme.fg("dim", "!")}${theme.fg("muted", " to run bash")}`,
+			` ${theme.fg("dim", "/status")}${theme.fg("muted", " for loaded extensions")}`,
 			separator,
-			" " + theme.bold(theme.fg("accent", "Recent sessions")),
+			` ${theme.bold(theme.fg("accent", "Recent sessions"))}`,
 			...sessionLines,
 			"",
 		];
@@ -179,7 +182,7 @@ export class WelcomeComponent implements Component {
 					currentWidth++;
 				}
 			}
-			return truncated + "…";
+			return `${truncated}…`;
 		}
 		return str + " ".repeat(width - visLen);
 	}
