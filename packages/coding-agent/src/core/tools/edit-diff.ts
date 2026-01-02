@@ -29,6 +29,258 @@ export function stripBom(content: string): { bom: string; text: string } {
 	return content.startsWith("\uFEFF") ? { bom: "\uFEFF", text: content.slice(1) } : { bom: "", text: content };
 }
 
+export const DEFAULT_FUZZY_THRESHOLD = 0.95;
+
+export interface EditMatch {
+	actualText: string;
+	startIndex: number;
+	startLine: number;
+	confidence: number;
+}
+
+export interface EditMatchOutcome {
+	match?: EditMatch;
+	closest?: EditMatch;
+	occurrences?: number;
+	fuzzyMatches?: number;
+}
+
+function countLeadingWhitespace(line: string): number {
+	let count = 0;
+	for (let i = 0; i < line.length; i++) {
+		const char = line[i];
+		if (char === " " || char === "\t") {
+			count++;
+			continue;
+		}
+		break;
+	}
+	return count;
+}
+
+function computeRelativeIndentDepths(lines: string[]): number[] {
+	const indents = lines.map(countLeadingWhitespace);
+	const nonEmptyIndents: number[] = [];
+	for (let i = 0; i < lines.length; i++) {
+		if (lines[i].trim().length > 0) {
+			nonEmptyIndents.push(indents[i]);
+		}
+	}
+	const minIndent = nonEmptyIndents.length > 0 ? Math.min(...nonEmptyIndents) : 0;
+	const indentSteps = nonEmptyIndents.map((indent) => indent - minIndent).filter((step) => step > 0);
+	const indentUnit = indentSteps.length > 0 ? Math.min(...indentSteps) : 1;
+
+	return lines.map((line, index) => {
+		if (line.trim().length === 0) {
+			return 0;
+		}
+		if (indentUnit <= 0) {
+			return 0;
+		}
+		const relativeIndent = indents[index] - minIndent;
+		return Math.round(relativeIndent / indentUnit);
+	});
+}
+
+function normalizeLinesForMatch(lines: string[]): string[] {
+	const indentDepths = computeRelativeIndentDepths(lines);
+	return lines.map((line, index) => {
+		const trimmed = line.trim();
+		if (trimmed.length === 0) {
+			return `${indentDepths[index]}|`;
+		}
+		const collapsed = trimmed.replace(/[ \t]+/g, " ");
+		return `${indentDepths[index]}|${collapsed}`;
+	});
+}
+
+function levenshteinDistance(a: string, b: string): number {
+	if (a === b) return 0;
+	const aLen = a.length;
+	const bLen = b.length;
+	if (aLen === 0) return bLen;
+	if (bLen === 0) return aLen;
+
+	let prev = new Array<number>(bLen + 1);
+	let curr = new Array<number>(bLen + 1);
+	for (let j = 0; j <= bLen; j++) {
+		prev[j] = j;
+	}
+
+	for (let i = 1; i <= aLen; i++) {
+		curr[0] = i;
+		const aCode = a.charCodeAt(i - 1);
+		for (let j = 1; j <= bLen; j++) {
+			const cost = aCode === b.charCodeAt(j - 1) ? 0 : 1;
+			const deletion = prev[j] + 1;
+			const insertion = curr[j - 1] + 1;
+			const substitution = prev[j - 1] + cost;
+			curr[j] = Math.min(deletion, insertion, substitution);
+		}
+		const tmp = prev;
+		prev = curr;
+		curr = tmp;
+	}
+
+	return prev[bLen];
+}
+
+function similarityScore(a: string, b: string): number {
+	if (a.length === 0 && b.length === 0) {
+		return 1;
+	}
+	const maxLen = Math.max(a.length, b.length);
+	if (maxLen === 0) {
+		return 1;
+	}
+	const distance = levenshteinDistance(a, b);
+	return 1 - distance / maxLen;
+}
+
+function computeLineOffsets(lines: string[]): number[] {
+	const offsets: number[] = [];
+	let offset = 0;
+	for (let i = 0; i < lines.length; i++) {
+		offsets.push(offset);
+		offset += lines[i].length;
+		if (i < lines.length - 1) {
+			offset += 1;
+		}
+	}
+	return offsets;
+}
+
+function findBestFuzzyMatch(
+	content: string,
+	target: string,
+	threshold: number,
+): { best?: EditMatch; aboveThresholdCount: number } {
+	const contentLines = content.split("\n");
+	const targetLines = target.split("\n");
+	if (targetLines.length === 0 || target.length === 0) {
+		return { aboveThresholdCount: 0 };
+	}
+	if (targetLines.length > contentLines.length) {
+		return { aboveThresholdCount: 0 };
+	}
+
+	const targetNormalized = normalizeLinesForMatch(targetLines);
+	const offsets = computeLineOffsets(contentLines);
+
+	let best: EditMatch | undefined;
+	let bestScore = -1;
+	let aboveThresholdCount = 0;
+
+	for (let start = 0; start <= contentLines.length - targetLines.length; start++) {
+		const windowLines = contentLines.slice(start, start + targetLines.length);
+		const windowNormalized = normalizeLinesForMatch(windowLines);
+		let score = 0;
+		for (let i = 0; i < targetLines.length; i++) {
+			score += similarityScore(targetNormalized[i], windowNormalized[i]);
+		}
+		score = score / targetLines.length;
+
+		if (score >= threshold) {
+			aboveThresholdCount++;
+		}
+
+		if (score > bestScore) {
+			bestScore = score;
+			best = {
+				actualText: windowLines.join("\n"),
+				startIndex: offsets[start],
+				startLine: start + 1,
+				confidence: score,
+			};
+		}
+	}
+
+	return { best, aboveThresholdCount };
+}
+
+export function findEditMatch(
+	content: string,
+	target: string,
+	options: { allowFuzzy: boolean; similarityThreshold?: number },
+): EditMatchOutcome {
+	if (target.length === 0) {
+		return {};
+	}
+
+	const exactIndex = content.indexOf(target);
+	if (exactIndex !== -1) {
+		const occurrences = content.split(target).length - 1;
+		if (occurrences > 1) {
+			return { occurrences };
+		}
+		const startLine = content.slice(0, exactIndex).split("\n").length;
+		return {
+			match: {
+				actualText: target,
+				startIndex: exactIndex,
+				startLine,
+				confidence: 1,
+			},
+		};
+	}
+
+	const threshold = options.similarityThreshold ?? DEFAULT_FUZZY_THRESHOLD;
+	const { best, aboveThresholdCount } = findBestFuzzyMatch(content, target, threshold);
+	if (!best) {
+		return {};
+	}
+
+	if (options.allowFuzzy && best.confidence >= threshold && aboveThresholdCount === 1) {
+		return { match: best, closest: best };
+	}
+
+	return { closest: best, fuzzyMatches: aboveThresholdCount };
+}
+
+function findFirstDifferentLine(oldLines: string[], newLines: string[]): { oldLine: string; newLine: string } {
+	const max = Math.max(oldLines.length, newLines.length);
+	for (let i = 0; i < max; i++) {
+		const oldLine = oldLines[i] ?? "";
+		const newLine = newLines[i] ?? "";
+		if (oldLine !== newLine) {
+			return { oldLine, newLine };
+		}
+	}
+	return { oldLine: oldLines[0] ?? "", newLine: newLines[0] ?? "" };
+}
+
+export function formatEditMatchError(
+	path: string,
+	normalizedOldText: string,
+	closest: EditMatch | undefined,
+	options: { allowFuzzy: boolean; similarityThreshold: number; fuzzyMatches?: number },
+): string {
+	if (!closest) {
+		return `Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`;
+	}
+
+	const similarity = Math.round(closest.confidence * 100);
+	const oldLines = normalizedOldText.split("\n");
+	const actualLines = closest.actualText.split("\n");
+	const { oldLine, newLine } = findFirstDifferentLine(oldLines, actualLines);
+	const thresholdPercent = Math.round(options.similarityThreshold * 100);
+
+	const hint = options.allowFuzzy
+		? options.fuzzyMatches && options.fuzzyMatches > 1
+			? `Found ${options.fuzzyMatches} high-confidence matches. Provide more context to make it unique.`
+			: `Closest match was below the ${thresholdPercent}% similarity threshold.`
+		: "Hint: Use fuzzy=true to accept high-confidence matches.";
+
+	return [
+		`Could not find the exact text in ${path}.`,
+		``,
+		`Closest match (${similarity}% similar) at line ${closest.startLine}:`,
+		`  - ${oldLine}`,
+		`  + ${newLine}`,
+		hint,
+	].join("\n");
+}
+
 /**
  * Generate a unified diff string with line numbers and context.
  * Returns both the diff string and the first changed line number (in the new file).
@@ -153,6 +405,7 @@ export async function computeEditDiff(
 	oldText: string,
 	newText: string,
 	cwd: string,
+	fuzzy = false,
 ): Promise<EditDiffResult | EditDiffError> {
 	const absolutePath = resolveToCwd(path, cwd);
 
@@ -174,27 +427,34 @@ export async function computeEditDiff(
 		const normalizedOldText = normalizeToLF(oldText);
 		const normalizedNewText = normalizeToLF(newText);
 
-		// Check if old text exists
-		if (!normalizedContent.includes(normalizedOldText)) {
+		const matchOutcome = findEditMatch(normalizedContent, normalizedOldText, {
+			allowFuzzy: fuzzy,
+			similarityThreshold: DEFAULT_FUZZY_THRESHOLD,
+		});
+
+		if (matchOutcome.occurrences && matchOutcome.occurrences > 1) {
 			return {
-				error: `Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`,
+				error: `Found ${matchOutcome.occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context to make it unique.`,
 			};
 		}
 
-		// Count occurrences
-		const occurrences = normalizedContent.split(normalizedOldText).length - 1;
-		if (occurrences > 1) {
+		if (!matchOutcome.match) {
 			return {
-				error: `Found ${occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context to make it unique.`,
+				error: formatEditMatchError(path, normalizedOldText, matchOutcome.closest, {
+					allowFuzzy: fuzzy,
+					similarityThreshold: DEFAULT_FUZZY_THRESHOLD,
+					fuzzyMatches: matchOutcome.fuzzyMatches,
+				}),
 			};
 		}
+
+		const match = matchOutcome.match;
 
 		// Compute the new content
-		const index = normalizedContent.indexOf(normalizedOldText);
 		const normalizedNewContent =
-			normalizedContent.substring(0, index) +
+			normalizedContent.substring(0, match.startIndex) +
 			normalizedNewText +
-			normalizedContent.substring(index + normalizedOldText.length);
+			normalizedContent.substring(match.startIndex + match.actualText.length);
 
 		// Check if it would actually change anything
 		if (normalizedContent === normalizedNewContent) {

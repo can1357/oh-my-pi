@@ -2,13 +2,28 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import { constants } from "fs";
 import { access, readFile, writeFile } from "fs/promises";
-import { detectLineEnding, generateDiffString, normalizeToLF, restoreLineEndings, stripBom } from "./edit-diff.js";
+import {
+	DEFAULT_FUZZY_THRESHOLD,
+	detectLineEnding,
+	findEditMatch,
+	formatEditMatchError,
+	generateDiffString,
+	normalizeToLF,
+	restoreLineEndings,
+	stripBom,
+} from "./edit-diff.js";
 import { resolveToCwd } from "./path-utils.js";
 
 const editSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
 	oldText: Type.String({ description: "Exact text to find and replace (must match exactly)" }),
 	newText: Type.String({ description: "New text to replace the old text with" }),
+	fuzzy: Type.Optional(
+		Type.Boolean({
+			description:
+				"Enable fuzzy matching when oldText differs only in whitespace or indentation (high-confidence only)",
+		}),
+	),
 });
 
 export interface EditToolDetails {
@@ -23,11 +38,11 @@ export function createEditTool(cwd: string): AgentTool<typeof editSchema> {
 		name: "edit",
 		label: "edit",
 		description:
-			"Edit a file by replacing exact text. The oldText must match exactly (including whitespace). Use this for precise, surgical edits.",
+			"Edit a file by replacing exact text. The oldText must match exactly (including whitespace). Set fuzzy=true to accept high-confidence fuzzy matches.",
 		parameters: editSchema,
 		execute: async (
 			_toolCallId: string,
-			{ path, oldText, newText }: { path: string; oldText: string; newText: string },
+			{ path, oldText, newText, fuzzy }: { path: string; oldText: string; newText: string; fuzzy?: boolean },
 			signal?: AbortSignal,
 		) => {
 			const absolutePath = resolveToCwd(path, cwd);
@@ -89,46 +104,50 @@ export function createEditTool(cwd: string): AgentTool<typeof editSchema> {
 						const normalizedOldText = normalizeToLF(oldText);
 						const normalizedNewText = normalizeToLF(newText);
 
-						// Check if old text exists
-						if (!normalizedContent.includes(normalizedOldText)) {
+						const matchOutcome = findEditMatch(normalizedContent, normalizedOldText, {
+							allowFuzzy: fuzzy ?? false,
+							similarityThreshold: DEFAULT_FUZZY_THRESHOLD,
+						});
+
+						if (matchOutcome.occurrences && matchOutcome.occurrences > 1) {
 							if (signal) {
 								signal.removeEventListener("abort", onAbort);
 							}
 							reject(
 								new Error(
-									`Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`,
+									`Found ${matchOutcome.occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context to make it unique.`,
 								),
 							);
 							return;
 						}
 
-						// Count occurrences
-						const occurrences = normalizedContent.split(normalizedOldText).length - 1;
-
-						if (occurrences > 1) {
+						if (!matchOutcome.match) {
 							if (signal) {
 								signal.removeEventListener("abort", onAbort);
 							}
 							reject(
 								new Error(
-									`Found ${occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context to make it unique.`,
+									formatEditMatchError(path, normalizedOldText, matchOutcome.closest, {
+										allowFuzzy: fuzzy ?? false,
+										similarityThreshold: DEFAULT_FUZZY_THRESHOLD,
+										fuzzyMatches: matchOutcome.fuzzyMatches,
+									}),
 								),
 							);
 							return;
 						}
+
+						const match = matchOutcome.match;
 
 						// Check if aborted before writing
 						if (aborted) {
 							return;
 						}
 
-						// Perform replacement using indexOf + substring (raw string replace, no special character interpretation)
-						// String.replace() interprets $ in the replacement string, so we do manual replacement
-						const index = normalizedContent.indexOf(normalizedOldText);
 						const normalizedNewContent =
-							normalizedContent.substring(0, index) +
+							normalizedContent.substring(0, match.startIndex) +
 							normalizedNewText +
-							normalizedContent.substring(index + normalizedOldText.length);
+							normalizedContent.substring(match.startIndex + match.actualText.length);
 
 						// Verify the replacement actually changed something
 						if (normalizedContent === normalizedNewContent) {
