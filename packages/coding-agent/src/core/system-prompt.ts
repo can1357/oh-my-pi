@@ -10,6 +10,56 @@ import type { SkillsSettings } from "./settings-manager.js";
 import { formatSkillsForPrompt, loadSkills, type Skill } from "./skills.js";
 import type { ToolName } from "./tools/index.js";
 
+/**
+ * Execute a git command synchronously and return stdout or null on failure.
+ */
+function execGit(args: string[], cwd: string): string | null {
+	const result = Bun.spawnSync(["git", ...args], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+	if (result.exitCode !== 0) return null;
+	return result.stdout.toString().trim() || null;
+}
+
+/**
+ * Load git context for the system prompt.
+ * Returns formatted git status or null if not in a git repo.
+ */
+export function loadGitContext(cwd: string): string | null {
+	// Check if inside a git repo
+	const isGitRepo = execGit(["rev-parse", "--is-inside-work-tree"], cwd);
+	if (isGitRepo !== "true") return null;
+
+	// Get current branch
+	const currentBranch = execGit(["rev-parse", "--abbrev-ref", "HEAD"], cwd);
+	if (!currentBranch) return null;
+
+	// Detect main branch (check for 'main' first, then 'master')
+	let mainBranch = "main";
+	const mainExists = execGit(["rev-parse", "--verify", "main"], cwd);
+	if (mainExists === null) {
+		const masterExists = execGit(["rev-parse", "--verify", "master"], cwd);
+		if (masterExists !== null) mainBranch = "master";
+	}
+
+	// Get git status (porcelain format for parsing)
+	const gitStatus = execGit(["status", "--porcelain"], cwd);
+	const statusText = gitStatus?.trim() || "(clean)";
+
+	// Get recent commits
+	const recentCommits = execGit(["log", "--oneline", "-5"], cwd);
+	const commitsText = recentCommits?.trim() || "(no commits)";
+
+	return `This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.
+Current branch: ${currentBranch}
+
+Main branch (you will usually use this for PRs): ${mainBranch}
+
+Status:
+${statusText}
+
+Recent commits:
+${commitsText}`;
+}
+
 /** Tool descriptions for system prompt */
 const toolDescriptions: Record<ToolName, string> = {
 	read: "Read file contents",
@@ -189,6 +239,12 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 			}
 		}
 
+		// Append git context if in a git repo
+		const gitContext = loadGitContext(resolvedCwd);
+		if (gitContext) {
+			prompt += `\n\n# Git Status\n\n${gitContext}`;
+		}
+
 		// Append skills section (only if read tool is available)
 		const customPromptHasRead = !selectedTools || selectedTools.includes("read");
 		if (customPromptHasRead && skills.length > 0) {
@@ -295,6 +351,12 @@ Documentation:
 		for (const { path: filePath, content } of contextFiles) {
 			prompt += `## ${filePath}\n\n${content}\n\n`;
 		}
+	}
+
+	// Append git context if in a git repo
+	const gitContext = loadGitContext(resolvedCwd);
+	if (gitContext) {
+		prompt += `\n\n# Git Status\n\n${gitContext}`;
 	}
 
 	// Append skills section (only if read tool is available)
