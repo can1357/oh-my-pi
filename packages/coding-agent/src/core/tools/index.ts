@@ -1,5 +1,4 @@
 export { type AskToolDetails, askTool, createAskTool } from "./ask.js";
-export { type AstToolDetails, astTool, createAstTool } from "./ast.js";
 export { type BashToolDetails, bashTool, createBashTool } from "./bash.js";
 export { createEditTool, editTool } from "./edit.js";
 // Exa MCP tools (22 tools)
@@ -11,7 +10,6 @@ export { createLsTool, type LsToolDetails, lsTool } from "./ls.js";
 export { createLspTool, type LspToolDetails, lspTool } from "./lsp/index.js";
 export { createNotebookTool, type NotebookToolDetails, notebookTool } from "./notebook.js";
 export { createReadTool, type ReadToolDetails, readTool } from "./read.js";
-export { createReplaceTool, type ReplaceToolDetails, replaceTool } from "./replace.js";
 export { BUNDLED_AGENTS, createTaskTool, taskTool } from "./task/index.js";
 export type { TruncationResult } from "./truncate.js";
 export { createWebFetchTool, type WebFetchToolDetails, webFetchCustomTool, webFetchTool } from "./web-fetch.js";
@@ -26,7 +24,6 @@ export { createWriteTool, writeTool } from "./write.js";
 
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { askTool, createAskTool } from "./ask.js";
-import { astTool, createAstTool } from "./ast.js";
 import { bashTool, createBashTool } from "./bash.js";
 import { checkBashInterception, checkSimpleLsInterception } from "./bash-interceptor.js";
 import { createEditTool, editTool } from "./edit.js";
@@ -36,7 +33,6 @@ import { createLsTool, lsTool } from "./ls.js";
 import { createLspTool, lspTool } from "./lsp/index.js";
 import { createNotebookTool, notebookTool } from "./notebook.js";
 import { createReadTool, readTool } from "./read.js";
-import { createReplaceTool, replaceTool } from "./replace.js";
 import { createTaskTool, taskTool } from "./task/index.js";
 import { createWebFetchTool, webFetchTool } from "./web-fetch.js";
 import { createWebSearchTool, webSearchTool } from "./web-search/index.js";
@@ -56,7 +52,6 @@ type ToolFactory = (cwd: string, sessionContext?: SessionContext) => Tool;
 // Tool definitions: static tools and their factory functions
 const toolDefs: Record<string, { tool: Tool; create: ToolFactory }> = {
 	ask: { tool: askTool, create: createAskTool },
-	ast: { tool: astTool, create: createAstTool },
 	read: { tool: readTool, create: createReadTool },
 	bash: { tool: bashTool, create: createBashTool },
 	edit: { tool: editTool, create: createEditTool },
@@ -66,7 +61,6 @@ const toolDefs: Record<string, { tool: Tool; create: ToolFactory }> = {
 	ls: { tool: lsTool, create: createLsTool },
 	lsp: { tool: lspTool, create: createLspTool },
 	notebook: { tool: notebookTool, create: createNotebookTool },
-	replace: { tool: replaceTool, create: createReplaceTool },
 	task: { tool: taskTool, create: (cwd, ctx) => createTaskTool(cwd, ctx) },
 	web_fetch: { tool: webFetchTool, create: createWebFetchTool },
 	web_search: { tool: webSearchTool, create: createWebSearchTool },
@@ -86,10 +80,8 @@ const baseCodingToolNames: ToolName[] = [
 	"grep",
 	"find",
 	"ls",
-	"ast",
 	"lsp",
 	"notebook",
-	"replace",
 	"task",
 	"web_fetch",
 	"web_search",

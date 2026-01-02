@@ -10,6 +10,7 @@ import { Type } from "@sinclair/typebox";
 import type { Theme } from "../../../modes/interactive/theme/theme.js";
 import type { CustomTool, CustomToolContext, RenderResultOptions } from "../../custom-tools/types.js";
 import { searchAnthropic } from "./providers/anthropic.js";
+import { findApiKey as findExaKey, searchExa } from "./providers/exa.js";
 import { findApiKey as findPerplexityKey, searchPerplexity } from "./providers/perplexity.js";
 import { formatAge, renderWebSearchCall, renderWebSearchResult, type WebSearchRenderDetails } from "./render.js";
 import type { WebSearchProvider, WebSearchResponse } from "./types.js";
@@ -19,9 +20,9 @@ export const webSearchSchema = Type.Object({
 	// Common
 	query: Type.String({ description: "Search query" }),
 	provider: Type.Optional(
-		Type.Union([Type.Literal("anthropic"), Type.Literal("perplexity")], {
+		Type.Union([Type.Literal("exa"), Type.Literal("anthropic"), Type.Literal("perplexity")], {
 			description: "Search provider (auto-detected if omitted based on API keys)",
-		}),
+		})
 	),
 	num_results: Type.Optional(Type.Number({ description: "Maximum number of results to return" })),
 
@@ -29,47 +30,47 @@ export const webSearchSchema = Type.Object({
 	system_prompt: Type.Optional(
 		Type.String({
 			description: "System prompt to guide response style",
-		}),
+		})
 	),
 	max_tokens: Type.Optional(
 		Type.Number({
 			description: "Maximum tokens in response, 1-16384, default 4096 (Anthropic only)",
 			minimum: 1,
 			maximum: 16384,
-		}),
+		})
 	),
 
 	// Perplexity-specific
 	model: Type.Optional(
 		Type.Union([Type.Literal("sonar"), Type.Literal("sonar-pro")], {
 			description: "Perplexity model - sonar (fast) or sonar-pro (comprehensive research)",
-		}),
+		})
 	),
 	search_recency_filter: Type.Optional(
 		Type.Union([Type.Literal("day"), Type.Literal("week"), Type.Literal("month"), Type.Literal("year")], {
 			description: "Filter results by recency (Perplexity only)",
-		}),
+		})
 	),
 	search_domain_filter: Type.Optional(
 		Type.Array(Type.String(), {
 			description: "Domain filter - include domains, prefix with - to exclude (Perplexity only)",
-		}),
+		})
 	),
 	search_context_size: Type.Optional(
 		Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], {
 			description: "Context size for cost control (Perplexity only)",
-		}),
+		})
 	),
 	return_related_questions: Type.Optional(
 		Type.Boolean({
 			description: "Include follow-up question suggestions, default true (Perplexity only)",
-		}),
+		})
 	),
 });
 
 export type WebSearchParams = {
 	query: string;
-	provider?: "anthropic" | "perplexity";
+	provider?: "exa" | "anthropic" | "perplexity";
 	num_results?: number;
 	// Anthropic
 	system_prompt?: string;
@@ -82,9 +83,13 @@ export type WebSearchParams = {
 	return_related_questions?: boolean;
 };
 
-/** Detect provider based on available API keys */
+/** Detect provider based on available API keys (priority: exa > perplexity > anthropic) */
 async function detectProvider(): Promise<WebSearchProvider> {
-	// Perplexity takes priority if key exists (more specialized)
+	// Exa takes highest priority if key exists
+	const exaKey = await findExaKey();
+	if (exaKey) return "exa";
+
+	// Perplexity second priority
 	const perplexityKey = await findPerplexityKey();
 	if (perplexityKey) return "perplexity";
 
@@ -125,13 +130,18 @@ function formatForLLM(response: WebSearchResponse): string {
 /** Execute web search */
 async function executeWebSearch(
 	_toolCallId: string,
-	params: WebSearchParams,
+	params: WebSearchParams
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: WebSearchRenderDetails }> {
 	try {
 		const provider = params.provider ?? (await detectProvider());
 
 		let response: WebSearchResponse;
-		if (provider === "anthropic") {
+		if (provider === "exa") {
+			response = await searchExa({
+				query: params.query,
+				num_results: params.num_results,
+			});
+		} else if (provider === "anthropic") {
 			response = await searchAnthropic({
 				query: params.query,
 				system_prompt: params.system_prompt,
@@ -166,13 +176,16 @@ async function executeWebSearch(
 	}
 }
 
-const WEB_SEARCH_DESCRIPTION = `Search the web using Anthropic or Perplexity. Returns synthesized answers with citations.
-
-Provider auto-detected by API key presence, or specify explicitly.
+const WEB_SEARCH_DESCRIPTION = `Allows Pi to search the web and use the results to inform responses
+- Provides up-to-date information for current events and recent data
+- Returns search result information formatted as search result blocks, including links as markdown hyperlinks
+- Use this tool for accessing information beyond Claude's knowledge cutoff
+- Searches are performed automatically within a single API call
 
 Common: system_prompt (guides response style)
 Anthropic-specific: max_tokens
-Perplexity-specific: model (sonar/sonar-pro), search_recency_filter, search_domain_filter, search_context_size, return_related_questions`;
+Perplexity-specific: model (sonar/sonar-pro), search_recency_filter, search_domain_filter, search_context_size, return_related_questions
+Exa-specific: num_results`;
 
 /** Web search tool as AgentTool (for allTools export) */
 export const webSearchTool: AgentTool<typeof webSearchSchema> = {
@@ -197,7 +210,7 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, WebSearchRe
 		params: WebSearchParams,
 		_onUpdate,
 		_ctx: CustomToolContext,
-		_signal?: AbortSignal,
+		_signal?: AbortSignal
 	) {
 		return executeWebSearch(toolCallId, params);
 	},

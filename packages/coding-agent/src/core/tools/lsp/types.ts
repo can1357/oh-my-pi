@@ -17,6 +17,8 @@ export const lspSchema = Type.Object({
 			Type.Literal("workspace_symbols"),
 			Type.Literal("rename"),
 			Type.Literal("actions"),
+			Type.Literal("incoming_calls"),
+			Type.Literal("outgoing_calls"),
 			Type.Literal("status"),
 			// Rust-analyzer specific operations
 			Type.Literal("flycheck"),
@@ -375,6 +377,31 @@ export interface LspClient {
 	isReading: boolean;
 	serverCapabilities?: LspServerCapabilities;
 	lastActivity: number;
+}
+
+// =============================================================================
+// Call Hierarchy Types
+// =============================================================================
+
+export interface CallHierarchyItem {
+	name: string;
+	kind: SymbolKind;
+	tags?: number[];
+	detail?: string;
+	uri: string;
+	range: Range;
+	selectionRange: Range;
+	data?: unknown;
+}
+
+export interface CallHierarchyIncomingCall {
+	from: CallHierarchyItem;
+	fromRanges: Range[];
+}
+
+export interface CallHierarchyOutgoingCall {
+	to: CallHierarchyItem;
+	fromRanges: Range[];
 }
 
 // =============================================================================

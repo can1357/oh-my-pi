@@ -214,6 +214,7 @@ ${chalk.bold("Examples:")}
   ${APP_NAME} --export session.jsonl output.html
 
 ${chalk.bold("Environment Variables:")}
+  ${chalk.dim("# Model providers")}
   ANTHROPIC_API_KEY       - Anthropic Claude API key
   ANTHROPIC_OAUTH_TOKEN   - Anthropic OAuth token (alternative to API key)
   OPENAI_API_KEY          - OpenAI GPT API key
@@ -222,7 +223,15 @@ ${chalk.bold("Environment Variables:")}
   CEREBRAS_API_KEY        - Cerebras API key
   XAI_API_KEY             - xAI Grok API key
   OPENROUTER_API_KEY      - OpenRouter API key
+  MISTRAL_API_KEY         - Mistral API key
   ZAI_API_KEY             - ZAI API key
+  GITHUB_TOKEN            - GitHub Copilot models (or GH_TOKEN, COPILOT_GITHUB_TOKEN)
+
+  ${chalk.dim("# Web search providers")}
+  EXA_API_KEY             - Exa search API key
+  PERPLEXITY_API_KEY      - Perplexity search API key
+
+  ${chalk.dim("# Configuration")}
   ${ENV_AGENT_DIR.padEnd(23)} - Session storage directory (default: ~/${CONFIG_DIR_NAME}/agent)
 
 ${chalk.bold("Available Tools (default: read, bash, edit, write):")}

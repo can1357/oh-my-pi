@@ -824,6 +824,67 @@ async function renderGitHubIssuesList(gh: GitHubUrl, timeout: number): Promise<{
 }
 
 /**
+ * Render GitHub tree (directory) to markdown
+ */
+async function renderGitHubTree(gh: GitHubUrl, timeout: number): Promise<{ content: string; ok: boolean }> {
+	// Fetch repo info first to get default branch if ref not specified
+	const repoResult = await fetchGitHubApi(`/repos/${gh.owner}/${gh.repo}`, timeout);
+	if (!repoResult.ok) return { content: "", ok: false };
+
+	const repo = repoResult.data as {
+		full_name: string;
+		default_branch: string;
+	};
+
+	const ref = gh.ref || repo.default_branch;
+	const dirPath = gh.path || "";
+
+	let md = `# ${repo.full_name}/${dirPath || "(root)"}\n\n`;
+	md += `**Branch:** ${ref}\n\n`;
+
+	// Fetch directory contents
+	const contentsResult = await fetchGitHubApi(`/repos/${gh.owner}/${gh.repo}/contents/${dirPath}?ref=${ref}`, timeout);
+
+	if (contentsResult.ok && Array.isArray(contentsResult.data)) {
+		const items = contentsResult.data as Array<{
+			name: string;
+			type: "file" | "dir" | "symlink" | "submodule";
+			size?: number;
+			path: string;
+		}>;
+
+		// Sort: directories first, then files, alphabetically
+		items.sort((a, b) => {
+			if (a.type === "dir" && b.type !== "dir") return -1;
+			if (a.type !== "dir" && b.type === "dir") return 1;
+			return a.name.localeCompare(b.name);
+		});
+
+		md += `## Contents\n\n`;
+		md += "```\n";
+		for (const item of items) {
+			const prefix = item.type === "dir" ? "[dir] " : "      ";
+			const size = item.size ? ` (${item.size} bytes)` : "";
+			md += `${prefix}${item.name}${item.type === "file" ? size : ""}\n`;
+		}
+		md += "```\n\n";
+
+		// Look for README in this directory
+		const readmeFile = items.find((item) => item.type === "file" && /^readme\.md$/i.test(item.name));
+		if (readmeFile) {
+			const readmePath = dirPath ? `${dirPath}/${readmeFile.name}` : readmeFile.name;
+			const rawUrl = `https://raw.githubusercontent.com/${gh.owner}/${gh.repo}/refs/heads/${ref}/${readmePath}`;
+			const readmeResult = await loadPage(rawUrl, { timeout });
+			if (readmeResult.ok) {
+				md += `---\n\n## README\n\n${readmeResult.content}`;
+			}
+		}
+	}
+
+	return { content: md, ok: true };
+}
+
+/**
  * Render GitHub repo to markdown (file list + README)
  */
 async function renderGitHubRepo(gh: GitHubUrl, timeout: number): Promise<{ content: string; ok: boolean }> {
@@ -904,6 +965,25 @@ async function handleGitHub(url: string, timeout: number): Promise<RenderResult 
 					finalUrl: rawUrl,
 					contentType: "text/plain",
 					method: "github-raw",
+					content: output.content,
+					fetchedAt,
+					truncated: output.truncated,
+					notes,
+				};
+			}
+			break;
+		}
+
+		case "tree": {
+			notes.push(`Fetched via GitHub API`);
+			const result = await renderGitHubTree(gh, timeout);
+			if (result.ok) {
+				const output = finalizeOutput(result.content);
+				return {
+					url,
+					finalUrl: url,
+					contentType: "text/markdown",
+					method: "github-tree",
 					content: output.content,
 					fetchedAt,
 					truncated: output.truncated,
@@ -2049,7 +2129,12 @@ export function createWebFetchTool(_cwd: string): AgentTool<typeof webFetchSchem
 	return {
 		name: "web_fetch",
 		label: "web_fetch",
-		description: `Fetch and render a URL into clean, readable text optimized for LLM consumption.
+		description: `Fetches content from a specified URL and processes it using an AI model
+- Takes a URL and a prompt as input
+- Fetches the URL content, converts HTML to markdown
+- Processes the content with the prompt using a small, fast model
+- Returns the model's response about the content
+- Use this tool when you need to retrieve and analyze web content
 
 Features:
 - Site-specific handlers for GitHub (issues, PRs, repos, gists), Stack Overflow, Wikipedia, Reddit, NPM, arXiv, IACR, and Twitter/X
@@ -2059,7 +2144,15 @@ Features:
 - RSS/Atom feed parsing
 - JSON pretty-printing
 
-Returns structured markdown content with metadata about how the content was fetched.`,
+Usage notes:
+- IMPORTANT: If an MCP-provided web fetch tool is available, prefer using that tool instead of this one, as it may have fewer restrictions.
+- The URL must be a fully-formed valid URL
+- HTTP URLs will be automatically upgraded to HTTPS
+- The prompt should describe what information you want to extract from the page
+- This tool is read-only and does not modify any files
+- Results may be summarized if the content is very large
+- Includes a self-cleaning 15-minute cache for faster responses when repeatedly accessing the same URL
+- When a URL redirects to a different host, the tool will inform you and provide the redirect URL in a special format. You should then make a new WebFetch request with the redirect URL to fetch the content.`,
 		parameters: webFetchSchema,
 		execute: async (
 			_toolCallId: string,

@@ -82,6 +82,7 @@ export async function callMCP(url: string, method: string, params?: Record<strin
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
+			Accept: "application/json, text/event-stream",
 		},
 		body: JSON.stringify(body),
 	});

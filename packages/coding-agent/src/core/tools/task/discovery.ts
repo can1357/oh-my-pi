@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { loadBundledAgents } from "./agents.js";
-import type { AgentDefinition, AgentScope, AgentSource } from "./types.js";
+import type { AgentDefinition, AgentSource } from "./types.js";
 
 /** Result of agent discovery */
 export interface DiscoveryResult {
@@ -153,12 +153,12 @@ function findNearestDir(cwd: string, relPath: string): string | null {
 /**
  * Discover agents from filesystem and merge with bundled agents.
  *
- * Precedence: project > user > bundled
+ * Precedence (highest wins): project > user > bundled
+ * Within each level: .pi > .claude
  *
  * @param cwd - Current working directory for project agent discovery
- * @param scope - Which agents to discover: 'user', 'project', or 'both'
  */
-export function discoverAgents(cwd: string, scope: AgentScope): DiscoveryResult {
+export function discoverAgents(cwd: string): DiscoveryResult {
 	// Primary directories (.pi)
 	const userPiDir = path.join(os.homedir(), ".pi", "agent", "agents");
 	const projectPiDir = findNearestDir(cwd, ".pi/agents");
@@ -169,36 +169,28 @@ export function discoverAgents(cwd: string, scope: AgentScope): DiscoveryResult 
 
 	const agentMap = new Map<string, AgentDefinition>();
 
-	// Start with bundled agents (lowest priority)
+	// 1. Bundled agents (lowest priority)
 	for (const agent of loadBundledAgents()) {
 		agentMap.set(agent.name, agent);
 	}
 
-	// Load user agents if scope includes user
-	if (scope === "user" || scope === "both") {
-		// .claude first (lower priority within user)
-		for (const agent of loadAgentsFromDir(userClaudeDir, "user")) {
-			agentMap.set(agent.name, agent);
-		}
-		// .pi second (higher priority within user)
-		for (const agent of loadAgentsFromDir(userPiDir, "user")) {
+	// 2. User agents (.claude then .pi - .pi overrides .claude)
+	for (const agent of loadAgentsFromDir(userClaudeDir, "user")) {
+		agentMap.set(agent.name, agent);
+	}
+	for (const agent of loadAgentsFromDir(userPiDir, "user")) {
+		agentMap.set(agent.name, agent);
+	}
+
+	// 3. Project agents (highest priority - .claude then .pi)
+	if (projectClaudeDir) {
+		for (const agent of loadAgentsFromDir(projectClaudeDir, "project")) {
 			agentMap.set(agent.name, agent);
 		}
 	}
-
-	// Load project agents if scope includes project
-	if (scope === "project" || scope === "both") {
-		// .claude first (lower priority within project)
-		if (projectClaudeDir) {
-			for (const agent of loadAgentsFromDir(projectClaudeDir, "project")) {
-				agentMap.set(agent.name, agent);
-			}
-		}
-		// .pi second (higher priority within project)
-		if (projectPiDir) {
-			for (const agent of loadAgentsFromDir(projectPiDir, "project")) {
-				agentMap.set(agent.name, agent);
-			}
+	if (projectPiDir) {
+		for (const agent of loadAgentsFromDir(projectPiDir, "project")) {
+			agentMap.set(agent.name, agent);
 		}
 	}
 

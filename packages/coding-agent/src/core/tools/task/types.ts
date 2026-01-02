@@ -1,8 +1,4 @@
-import { StringEnum } from "@oh-my-pi/pi-ai";
 import { type Static, Type } from "@sinclair/typebox";
-
-/** Scope for agent discovery */
-export type AgentScope = "user" | "project" | "both";
 
 /** Source of an agent definition */
 export type AgentSource = "bundled" | "user" | "project";
@@ -36,27 +32,11 @@ export const PI_NO_SUBAGENTS_ENV = "PI_NO_SUBAGENTS";
 
 /** Task tool parameters */
 export const taskSchema = Type.Object({
-	// Single mode
-	prompt: Type.Optional(Type.String({ description: "Task description for the sub-agent (single mode)" })),
-	agent: Type.Optional(Type.String({ description: "Agent name (defaults to 'task')" })),
-	model: Type.Optional(Type.String({ description: "Model override (fuzzy pattern like 'haiku' or 'opus')" })),
-
-	// Parallel mode
-	tasks: Type.Optional(
-		Type.Array(taskItemSchema, {
-			description: "Array of tasks to run in parallel",
-			maxItems: MAX_PARALLEL_TASKS,
-		}),
-	),
-
-	// Common
 	context: Type.Optional(Type.String({ description: "Shared context prepended to all task prompts" })),
-	agentScope: Type.Optional(
-		StringEnum(["user", "project", "both"], {
-			description: "Agent discovery scope: user (~/.pi), project (.pi), or both",
-		}),
-	),
-	background: Type.Optional(Type.Boolean({ description: "Run in background" })),
+	tasks: Type.Array(taskItemSchema, {
+		description: "Tasks to run in parallel",
+		maxItems: MAX_PARALLEL_TASKS,
+	}),
 });
 
 export type TaskParams = Static<typeof taskSchema>;
@@ -111,8 +91,6 @@ export interface SingleResult {
 
 /** Tool details for TUI rendering */
 export interface TaskToolDetails {
-	mode: "single" | "parallel";
-	agentScope: AgentScope;
 	projectAgentsDir: string | null;
 	results: SingleResult[];
 	totalDurationMs: number;

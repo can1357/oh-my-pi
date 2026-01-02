@@ -19,10 +19,9 @@ import { cleanupTempDir, createTempArtifactsDir, getArtifactsDir, writeArtifacts
 import { discoverAgents, getAgent } from "./discovery.js";
 import { runSubprocess } from "./executor.js";
 import { mapWithConcurrencyLimit } from "./parallel.js";
-import { renderCall, renderResult } from "./render.js";
+import { formatDuration, renderCall, renderResult } from "./render.js";
 import {
 	type AgentProgress,
-	type AgentScope,
 	MAX_AGENTS_IN_DESCRIPTION,
 	MAX_CONCURRENCY,
 	MAX_PARALLEL_TASKS,
@@ -41,64 +40,125 @@ interface SessionContext {
 export { loadBundledAgents as BUNDLED_AGENTS } from "./agents.js";
 export { discoverCommands, expandCommand, getCommand } from "./commands.js";
 export { discoverAgents, getAgent } from "./discovery.js";
-export type { AgentDefinition, AgentProgress, AgentScope, SingleResult, TaskParams, TaskToolDetails } from "./types.js";
+export type { AgentDefinition, AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "./types.js";
 export { taskSchema } from "./types.js";
 
 /**
  * Build dynamic tool description listing available agents.
  */
 function buildDescription(cwd: string): string {
-	const { agents, projectAgentsDir } = discoverAgents(cwd, "both");
+	const { agents } = discoverAgents(cwd);
 
-	// Group agents by source
-	const bundled = agents.filter((a) => a.source === "bundled");
-	const user = agents.filter((a) => a.source === "user");
-	const project = agents.filter((a) => a.source === "project");
+	const lines: string[] = [];
 
-	const lines: string[] = ["Spawn a sub-agent to handle complex tasks. Each agent runs in an isolated context.", ""];
-
-	// Bundled agents
-	if (bundled.length > 0) {
-		lines.push("**Bundled agents:**");
-		for (const agent of bundled.slice(0, MAX_AGENTS_IN_DESCRIPTION)) {
-			const tools = agent.tools ? ` (${agent.tools.join(", ")})` : "";
-			lines.push(`- \`${agent.name}\`: ${agent.description}${tools}`);
-		}
-		lines.push("");
-	}
-
-	// User agents
-	if (user.length > 0) {
-		lines.push("**User agents (~/.pi/agent/agents/):**");
-		for (const agent of user.slice(0, MAX_AGENTS_IN_DESCRIPTION)) {
-			lines.push(`- \`${agent.name}\`: ${agent.description}`);
-		}
-		if (user.length > MAX_AGENTS_IN_DESCRIPTION) {
-			lines.push(`- ... and ${user.length - MAX_AGENTS_IN_DESCRIPTION} more`);
-		}
-		lines.push("");
-	}
-
-	// Project agents
-	if (project.length > 0) {
-		const dir = projectAgentsDir || ".pi/agents/";
-		lines.push(`**Project agents (${dir}):**`);
-		for (const agent of project.slice(0, MAX_AGENTS_IN_DESCRIPTION)) {
-			lines.push(`- \`${agent.name}\`: ${agent.description}`);
-		}
-		if (project.length > MAX_AGENTS_IN_DESCRIPTION) {
-			lines.push(`- ... and ${project.length - MAX_AGENTS_IN_DESCRIPTION} more`);
-		}
-		lines.push("");
-	}
-
-	// Usage
-	lines.push("**Usage:**");
-	lines.push("- Single: `{ agent: 'explore', prompt: 'find auth code' }`");
-	lines.push("- Parallel: `{ tasks: [{ agent: 'explore', task: '...' }, ...] }`");
-	lines.push("- With context: `{ context: 'shared info', tasks: [...] }`");
+	lines.push("Launch a new agent to handle complex, multi-step tasks autonomously.");
 	lines.push("");
-	lines.push("**When NOT to use:** For simple file reads, use Read directly.");
+	lines.push(
+		"The Task tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.",
+	);
+	lines.push("");
+	lines.push("Available agent types and the tools they have access to:");
+
+	for (const agent of agents.slice(0, MAX_AGENTS_IN_DESCRIPTION)) {
+		const tools = agent.tools?.join(", ") || "All tools";
+		lines.push(`- ${agent.name}: ${agent.description} (Tools: ${tools})`);
+	}
+	if (agents.length > MAX_AGENTS_IN_DESCRIPTION) {
+		lines.push(`  ...and ${agents.length - MAX_AGENTS_IN_DESCRIPTION} more agents`);
+	}
+
+	lines.push("");
+	lines.push("When NOT to use the Task tool:");
+	lines.push(
+		"- If you want to read a specific file path, use the Read or Glob tool instead of the Task tool, to find the match more quickly",
+	);
+	lines.push(
+		'- If you are searching for a specific class definition like "class Foo", use the Glob tool instead, to find the match more quickly',
+	);
+	lines.push(
+		"- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Task tool, to find the match more quickly",
+	);
+	lines.push("- Other tasks that are not related to the agent descriptions above");
+	lines.push("");
+	lines.push("");
+	lines.push("Usage notes:");
+	lines.push("- Always include a short description of the task in the task parameter");
+	lines.push("- Launch multiple agents concurrently whenever possible, to maximize performance");
+	lines.push(
+		"- When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.",
+	);
+	lines.push(
+		"- Each agent invocation is stateless. You will not be able to send additional messages to the agent, nor will the agent be able to communicate with you outside of its final report. Therefore, your task should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.",
+	);
+	lines.push(
+		"- IMPORTANT: Agent results are intermediate data, not task completions. Use the agent's findings to continue executing the user's request. Do not treat agent reports as 'task complete' signals - they provide context for you to perform the actual work.",
+	);
+	lines.push("- The agent's outputs should generally be trusted");
+	lines.push(
+		"- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent",
+	);
+	lines.push(
+		"- If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.",
+	);
+	lines.push("");
+	lines.push("Parameters:");
+	lines.push(
+		`- tasks: Array of {agent, task, model?} - tasks to run in parallel (max ${MAX_PARALLEL_TASKS}, ${MAX_CONCURRENCY} concurrent)`,
+	);
+	lines.push(
+		'  - model: (optional) Override the agent\'s default model with fuzzy matching (e.g., "sonnet", "codex", "5.2"). Supports comma-separated fallbacks: "gpt, opus" tries gpt first, then opus. Use "default" for pi\'s default model',
+	);
+	lines.push(
+		"- context: (optional) Shared context string prepended to all task prompts - use this to avoid repeating instructions",
+	);
+	lines.push("");
+	lines.push("Results are always written to {tempdir}/pi-task-{runId}/task_{agent}_{index}.md");
+	lines.push("");
+	lines.push("Example usage:");
+	lines.push("");
+	lines.push("<example_agent_descriptions>");
+	lines.push('"code-reviewer": use this agent after you are done writing a significant piece of code');
+	lines.push('"explore": use this agent for fast codebase exploration and research');
+	lines.push("</example_agent_descriptions>");
+	lines.push("");
+	lines.push("<example>");
+	lines.push('user: "Please write a function that checks if a number is prime"');
+	lines.push("assistant: Sure let me write a function that checks if a number is prime");
+	lines.push("assistant: I'm going to use the Write tool to write the following code:");
+	lines.push("<code>");
+	lines.push("function isPrime(n) {");
+	lines.push("  if (n <= 1) return false");
+	lines.push("  for (let i = 2; i * i <= n; i++) {");
+	lines.push("    if (n % i === 0) return false");
+	lines.push("  }");
+	lines.push("  return true");
+	lines.push("}");
+	lines.push("</code>");
+	lines.push("<commentary>");
+	lines.push(
+		"Since a significant piece of code was written and the task was completed, now use the code-reviewer agent to review the code",
+	);
+	lines.push("</commentary>");
+	lines.push("assistant: Now let me use the code-reviewer agent to review the code");
+	lines.push(
+		'assistant: Uses the Task tool: { tasks: [{ agent: "code-reviewer", task: "Review the isPrime function" }] }',
+	);
+	lines.push("</example>");
+	lines.push("");
+	lines.push("<example>");
+	lines.push('user: "Find all TODO comments in the codebase"');
+	lines.push("assistant: I'll use multiple explore agents to search different directories in parallel");
+	lines.push("assistant: Uses the Task tool:");
+	lines.push("{");
+	lines.push('  "context": "Find all TODO comments. Return file:line:content format.",');
+	lines.push('  "tasks": [');
+	lines.push('    { "agent": "explore", "task": "Search in src/" },');
+	lines.push('    { "agent": "explore", "task": "Search in lib/" },');
+	lines.push('    { "agent": "explore", "task": "Search in tests/" }');
+	lines.push("  ]");
+	lines.push("}");
+	lines.push("Results → {tempdir}/pi-task-{runId}/task_explore_*.md");
+	lines.push("</example>");
 
 	return lines.join("\n");
 }
@@ -120,8 +180,6 @@ export function createTaskTool(
 			execute: async () => ({
 				content: [{ type: "text", text: "Sub-agents are disabled for this agent (recursion prevention)." }],
 				details: {
-					mode: "single",
-					agentScope: "both",
 					projectAgentsDir: null,
 					results: [],
 					totalDurationMs: 0,
@@ -139,17 +197,49 @@ export function createTaskTool(
 		renderResult,
 		execute: async (_toolCallId, params, signal, onUpdate) => {
 			const startTime = Date.now();
-			const agentScope: AgentScope = (params.agentScope as AgentScope) || "both";
-			const { agents, projectAgentsDir } = discoverAgents(cwd, agentScope);
+			const { agents, projectAgentsDir } = discoverAgents(cwd);
+			const context = params.context;
+
+			// Handle empty or missing tasks
+			if (!params.tasks || params.tasks.length === 0) {
+				const available = agents.map((a) => a.name).join(", ") || "none";
+				return {
+					content: [
+						{
+							type: "text",
+							text: `No tasks provided. Use: { tasks: [{agent, task}, ...] }\nAvailable agents: ${available}`,
+						},
+					],
+					details: {
+						projectAgentsDir,
+						results: [],
+						totalDurationMs: 0,
+					},
+				};
+			}
+
+			// Validate task count
+			if (params.tasks.length > MAX_PARALLEL_TASKS) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Too many tasks (${params.tasks.length}). Max is ${MAX_PARALLEL_TASKS}.`,
+						},
+					],
+					details: {
+						projectAgentsDir,
+						results: [],
+						totalDurationMs: 0,
+					},
+				};
+			}
 
 			// Derive artifacts directory
 			const sessionFile = sessionContext?.getSessionFile() ?? null;
 			const artifactsDir = sessionFile ? getArtifactsDir(sessionFile) : null;
 			const tempArtifactsDir = artifactsDir ? null : createTempArtifactsDir();
 			const effectiveArtifactsDir = artifactsDir || tempArtifactsDir!;
-
-			// Determine mode
-			const isParallel = params.tasks && params.tasks.length > 0;
 
 			// Initialize progress tracking
 			const progressMap = new Map<number, AgentProgress>();
@@ -158,10 +248,8 @@ export function createTaskTool(
 			const emitProgress = () => {
 				const progress = Array.from(progressMap.values()).sort((a, b) => a.index - b.index);
 				onUpdate?.({
-					content: [{ type: "text", text: "Running..." }],
+					content: [{ type: "text", text: `Running ${params.tasks.length} agents...` }],
 					details: {
-						mode: isParallel ? "parallel" : "single",
-						agentScope,
 						projectAgentsDir,
 						results: [],
 						totalDurationMs: Date.now() - startTime,
@@ -171,158 +259,74 @@ export function createTaskTool(
 			};
 
 			try {
-				let results: SingleResult[];
+				const tasks = params.tasks;
 
-				if (isParallel) {
-					// Parallel mode
-					const tasks = params.tasks!;
-
-					// Validate task count
-					if (tasks.length > MAX_PARALLEL_TASKS) {
-						return {
-							content: [
-								{
-									type: "text",
-									text: `Error: Maximum ${MAX_PARALLEL_TASKS} tasks allowed, got ${tasks.length}`,
-								},
-							],
-							details: {
-								mode: "parallel",
-								agentScope,
-								projectAgentsDir,
-								results: [],
-								totalDurationMs: Date.now() - startTime,
-							},
-						};
-					}
-
-					// Validate all agents exist
-					for (const task of tasks) {
-						if (!getAgent(agents, task.agent)) {
-							const available = agents.map((a) => a.name).join(", ");
-							return {
-								content: [{ type: "text", text: `Unknown agent: ${task.agent}. Available: ${available}` }],
-								details: {
-									mode: "parallel",
-									agentScope,
-									projectAgentsDir,
-									results: [],
-									totalDurationMs: Date.now() - startTime,
-								},
-							};
-						}
-					}
-
-					// Initialize progress for all tasks
-					for (let i = 0; i < tasks.length; i++) {
-						progressMap.set(i, {
-							index: i,
-							agent: tasks[i].agent,
-							agentSource: getAgent(agents, tasks[i].agent)!.source,
-							status: "pending",
-							task: tasks[i].task,
-							recentTools: [],
-							recentOutput: [],
-							toolCount: 0,
-							tokens: 0,
-							durationMs: 0,
-							modelOverride: tasks[i].model,
-						});
-					}
-					emitProgress();
-
-					// Execute in parallel with concurrency limit
-					results = await mapWithConcurrencyLimit(tasks, MAX_CONCURRENCY, async (task, index) => {
-						const agent = getAgent(agents, task.agent)!;
-						return runSubprocess({
-							cwd,
-							agent,
-							task: task.task,
-							index,
-							context: params.context,
-							modelOverride: task.model,
-							sessionFile,
-							persistArtifacts: !!artifactsDir,
-							artifactsDir: effectiveArtifactsDir,
-							signal,
-							onProgress: (progress) => {
-								progressMap.set(index, progress);
-								emitProgress();
-							},
-						});
-					});
-				} else {
-					// Single mode
-					const agentName = params.agent || "task";
-					const agent = getAgent(agents, agentName);
-
-					if (!agent) {
+				// Validate all agents exist
+				for (const task of tasks) {
+					if (!getAgent(agents, task.agent)) {
 						const available = agents.map((a) => a.name).join(", ");
 						return {
-							content: [{ type: "text", text: `Unknown agent: ${agentName}. Available: ${available}` }],
+							content: [{ type: "text", text: `Unknown agent: ${task.agent}. Available: ${available}` }],
 							details: {
-								mode: "single",
-								agentScope,
 								projectAgentsDir,
 								results: [],
 								totalDurationMs: Date.now() - startTime,
 							},
 						};
 					}
+				}
 
-					if (!params.prompt) {
-						return {
-							content: [{ type: "text", text: "Error: 'prompt' is required for single agent mode" }],
-							details: {
-								mode: "single",
-								agentScope,
-								projectAgentsDir,
-								results: [],
-								totalDurationMs: Date.now() - startTime,
-							},
-						};
-					}
-
-					// Initialize progress
-					progressMap.set(0, {
-						index: 0,
-						agent: agentName,
-						agentSource: agent.source,
+				// Initialize progress for all tasks
+				for (let i = 0; i < tasks.length; i++) {
+					const agentCfg = getAgent(agents, tasks[i].agent);
+					progressMap.set(i, {
+						index: i,
+						agent: tasks[i].agent,
+						agentSource: agentCfg?.source ?? "user",
 						status: "pending",
-						task: params.prompt,
+						task: tasks[i].task,
 						recentTools: [],
 						recentOutput: [],
 						toolCount: 0,
 						tokens: 0,
 						durationMs: 0,
-						modelOverride: params.model,
+						modelOverride: tasks[i].model,
 					});
-					emitProgress();
+				}
+				emitProgress();
 
-					const result = await runSubprocess({
+				// Build full prompts with context prepended
+				const tasksWithContext = tasks.map((t) => ({
+					agent: t.agent,
+					task: context ? `${context}\n\n${t.task}` : t.task,
+					model: t.model,
+				}));
+
+				// Execute in parallel with concurrency limit
+				const results = await mapWithConcurrencyLimit(tasksWithContext, MAX_CONCURRENCY, async (task, index) => {
+					const agent = getAgent(agents, task.agent)!;
+					return runSubprocess({
 						cwd,
 						agent,
-						task: params.prompt,
-						index: 0,
-						context: params.context,
-						modelOverride: params.model,
+						task: task.task,
+						index,
+						context: undefined, // Already prepended above
+						modelOverride: task.model,
 						sessionFile,
 						persistArtifacts: !!artifactsDir,
 						artifactsDir: effectiveArtifactsDir,
 						signal,
 						onProgress: (progress) => {
-							progressMap.set(0, progress);
+							progressMap.set(index, progress);
 							emitProgress();
 						},
 					});
-
-					results = [result];
-				}
+				});
 
 				// Write artifacts
 				const outputPaths: string[] = [];
 				for (const result of results) {
-					const fullTask = params.context ? `${params.context}\n\n${result.task}` : result.task;
+					const fullTask = context ? `${context}\n\n${result.task}` : result.task;
 					const paths = await writeArtifacts(
 						effectiveArtifactsDir,
 						result.agent,
@@ -335,25 +339,18 @@ export function createTaskTool(
 					result.artifactPaths = paths;
 				}
 
-				// Build final output
+				// Build final output - match plugin format
 				const successCount = results.filter((r) => r.exitCode === 0).length;
-				const failCount = results.length - successCount;
+				const totalDuration = Date.now() - startTime;
 
-				let summary: string;
-				if (results.length === 1) {
-					const r = results[0];
-					summary = r.exitCode === 0 ? r.output : `Error: ${r.error || r.stderr || "Unknown error"}`;
-				} else {
-					summary = `Completed ${successCount}/${results.length} tasks`;
-					if (failCount > 0) {
-						summary += ` (${failCount} failed)`;
-					}
-					summary += "\n\n";
-					for (const r of results) {
-						const status = r.exitCode === 0 ? "✓" : "✗";
-						summary += `${status} ${r.agent}: ${r.output.split("\n")[0] || "(no output)"}\n`;
-					}
-				}
+				const summaries = results.map((r, i) => {
+					const status = r.exitCode === 0 ? "completed" : `failed (exit ${r.exitCode})`;
+					const output = r.output.trim() || r.stderr.trim() || "(no output)";
+					const preview = output.split("\n").slice(0, 5).join("\n");
+					return `[${r.agent}] ${status} → ${outputPaths[i]}\n${preview}`;
+				});
+
+				const summary = `${successCount}/${results.length} succeeded [${formatDuration(totalDuration)}]\n\n${summaries.join("\n\n---\n\n")}`;
 
 				// Cleanup temp directory if used
 				if (tempArtifactsDir) {
@@ -363,11 +360,9 @@ export function createTaskTool(
 				return {
 					content: [{ type: "text", text: summary }],
 					details: {
-						mode: isParallel ? "parallel" : "single",
-						agentScope,
 						projectAgentsDir,
 						results,
-						totalDurationMs: Date.now() - startTime,
+						totalDurationMs: totalDuration,
 						outputPaths,
 					},
 				};
@@ -380,8 +375,6 @@ export function createTaskTool(
 				return {
 					content: [{ type: "text", text: `Task execution failed: ${err}` }],
 					details: {
-						mode: isParallel ? "parallel" : "single",
-						agentScope,
 						projectAgentsDir,
 						results: [],
 						totalDurationMs: Date.now() - startTime,

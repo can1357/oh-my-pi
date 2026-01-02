@@ -9,6 +9,9 @@ import { applyWorkspaceEdit } from "./edits.js";
 import { renderCall, renderResult } from "./render.js";
 import * as rustAnalyzer from "./rust-analyzer.js";
 import {
+	type CallHierarchyIncomingCall,
+	type CallHierarchyItem,
+	type CallHierarchyOutgoingCall,
 	type CodeAction,
 	type Command,
 	type Diagnostic,
@@ -140,7 +143,7 @@ export function createLspTool(cwd: string): AgentTool<typeof lspSchema, LspToolD
 	return {
 		name: "lsp",
 		label: "LSP",
-		description: `Language server integration for code intelligence.
+		description: `Interact with Language Server Protocol (LSP) servers to get code intelligence features.
 
 Standard operations:
 - diagnostics: Get errors/warnings for a file
@@ -151,6 +154,8 @@ Standard operations:
 - workspace_symbols: Search for symbols across the project
 - rename: Rename a symbol across the codebase
 - actions: List and apply code actions (quick fixes, refactors)
+- incoming_calls: Find all callers of a function
+- outgoing_calls: Find all functions called by a function
 - status: Show active language servers
 
 Rust-analyzer specific (require rust-analyzer):
@@ -569,6 +574,55 @@ Rust-analyzer specific (require rust-analyzer):
 							output = `Available code actions:\n${lines.join(
 								"\n",
 							)}\n\nUse action_index parameter to apply a specific action.`;
+						}
+						break;
+					}
+
+					case "incoming_calls":
+					case "outgoing_calls": {
+						// First, prepare the call hierarchy item at the cursor position
+						const prepareResult = (await sendRequest(client, "textDocument/prepareCallHierarchy", {
+							textDocument: { uri },
+							position,
+						})) as CallHierarchyItem[] | null;
+
+						if (!prepareResult || prepareResult.length === 0) {
+							output = "No callable symbol found at this position";
+							break;
+						}
+
+						const item = prepareResult[0];
+
+						if (action === "incoming_calls") {
+							const calls = (await sendRequest(client, "callHierarchy/incomingCalls", { item })) as
+								| CallHierarchyIncomingCall[]
+								| null;
+
+							if (!calls || calls.length === 0) {
+								output = `No callers found for "${item.name}"`;
+							} else {
+								const lines = calls.map((call) => {
+									const loc = { uri: call.from.uri, range: call.from.selectionRange };
+									const detail = call.from.detail ? ` (${call.from.detail})` : "";
+									return `  ${call.from.name}${detail} @ ${formatLocation(loc, cwd)}`;
+								});
+								output = `Found ${calls.length} caller(s) of "${item.name}":\n${lines.join("\n")}`;
+							}
+						} else {
+							const calls = (await sendRequest(client, "callHierarchy/outgoingCalls", { item })) as
+								| CallHierarchyOutgoingCall[]
+								| null;
+
+							if (!calls || calls.length === 0) {
+								output = `"${item.name}" doesn't call any functions`;
+							} else {
+								const lines = calls.map((call) => {
+									const loc = { uri: call.to.uri, range: call.to.selectionRange };
+									const detail = call.to.detail ? ` (${call.to.detail})` : "";
+									return `  ${call.to.name}${detail} @ ${formatLocation(loc, cwd)}`;
+								});
+								output = `"${item.name}" calls ${calls.length} function(s):\n${lines.join("\n")}`;
+							}
 						}
 						break;
 					}

@@ -9,14 +9,12 @@ import { Text } from "@oh-my-pi/pi-tui";
 import type { Theme } from "../../modes/interactive/theme/theme.js";
 import type { RenderResultOptions } from "../custom-tools/types.js";
 import type { AskToolDetails } from "./ask.js";
-import type { AstToolDetails } from "./ast.js";
 import type { FindToolDetails } from "./find.js";
 import type { GrepToolDetails } from "./grep.js";
 import type { LsToolDetails } from "./ls.js";
 import { renderCall as renderLspCall, renderResult as renderLspResult } from "./lsp/render.js";
 import type { LspToolDetails } from "./lsp/types.js";
 import type { NotebookToolDetails } from "./notebook.js";
-import type { ReplaceToolDetails } from "./replace.js";
 import { renderCall as renderTaskCall, renderResult as renderTaskResult } from "./task/render.js";
 import type { TaskToolDetails } from "./task/types.js";
 import { renderWebFetchCall, renderWebFetchResult, type WebFetchToolDetails } from "./web-fetch.js";
@@ -264,187 +262,6 @@ const findRenderer: ToolRenderer<FindArgs, FindToolDetails> = {
 			if (!expanded && files.length > 8) {
 				text += `\n ${theme.fg("dim", TREE_END)} ${theme.fg("muted", `… ${files.length - 8} more files`)}`;
 			}
-		}
-
-		return new Text(text, 0, 0);
-	},
-};
-
-// ============================================================================
-// Replace Renderer
-// ============================================================================
-
-interface ReplaceArgs {
-	pattern: string;
-	replacement: string;
-	path?: string;
-	glob?: string;
-	literal?: boolean;
-	dry_run?: boolean;
-}
-
-const replaceRenderer: ToolRenderer<ReplaceArgs, ReplaceToolDetails> = {
-	renderCall(args, theme) {
-		let text = theme.fg("toolTitle", theme.bold("replace "));
-		text += theme.fg("accent", `'${args.pattern}'`);
-		text += theme.fg("dim", " → ");
-		text += theme.fg("accent", `'${args.replacement}'`);
-
-		const meta: string[] = [];
-		if (args.glob) meta.push(`glob:${args.glob}`);
-		if (args.path) meta.push(args.path);
-		if (args.dry_run !== false) meta.push("preview");
-		if (args.literal) meta.push("-s");
-
-		if (meta.length > 0) {
-			text += ` ${theme.fg("muted", meta.join(" "))}`;
-		}
-
-		return new Text(text, 0, 0);
-	},
-
-	renderResult(result, { expanded }, theme) {
-		const details = result.details;
-
-		const filesChanged = details?.filesChanged ?? 0;
-		const filesFailed = details?.filesFailed ?? 0;
-		const preview = details?.preview ?? false;
-		const changed = details?.changed ?? [];
-		const failed = details?.failed ?? [];
-		const truncated = details?.truncated ?? false;
-
-		// No changes
-		if (filesChanged === 0 && filesFailed === 0) {
-			const msg = preview ? "No changes would be made" : "No changes made";
-			return new Text(`${theme.fg("warning", ICON_WARNING)} ${theme.fg("muted", msg)}`, 0, 0);
-		}
-
-		// Build summary
-		const hasErrors = filesFailed > 0;
-		const icon = hasErrors ? theme.fg("warning", ICON_WARNING) : theme.fg("success", ICON_SUCCESS);
-
-		const parts: string[] = [];
-		if (filesChanged > 0) {
-			const verb = preview ? "would change" : "changed";
-			parts.push(`${verb} ${filesChanged} file${filesChanged !== 1 ? "s" : ""}`);
-		}
-		if (filesFailed > 0) {
-			parts.push(theme.fg("error", `${filesFailed} failed`));
-		}
-
-		let summary = parts.join(", ");
-		if (truncated) {
-			summary += theme.fg("warning", " (truncated)");
-		}
-		const expandHint = expanded ? "" : theme.fg("dim", " (Ctrl+O to expand)");
-		let text = `${icon} ${theme.fg("toolTitle", "replace")} ${theme.fg("dim", summary)}${expandHint}`;
-
-		// Show file tree
-		const allFiles = [...changed, ...failed.map((f) => f.file)];
-		const maxFiles = expanded ? allFiles.length : Math.min(allFiles.length, 8);
-
-		for (let i = 0; i < maxFiles; i++) {
-			const isLast = i === maxFiles - 1 && (expanded || allFiles.length <= 8);
-			const branch = isLast ? TREE_END : TREE_MID;
-			const file = allFiles[i];
-			const isFailed = i >= changed.length;
-			const color = isFailed ? "error" : "accent";
-			text += `\n ${theme.fg("dim", branch)} ${theme.fg(color, file)}`;
-		}
-
-		if (!expanded && allFiles.length > 8) {
-			text += `\n ${theme.fg("dim", TREE_END)} ${theme.fg("muted", `… ${allFiles.length - 8} more files`)}`;
-		}
-
-		return new Text(text, 0, 0);
-	},
-};
-
-// ============================================================================
-// AST Renderer
-// ============================================================================
-
-interface AstArgs {
-	action: string;
-	pattern: string;
-	replacement?: string;
-	path?: string;
-	lang?: string;
-}
-
-const astRenderer: ToolRenderer<AstArgs, AstToolDetails> = {
-	renderCall(args, theme) {
-		let text = theme.fg("toolTitle", theme.bold("ast "));
-		text += theme.fg("accent", `'${args.pattern}'`);
-
-		if (args.replacement) {
-			text += theme.fg("dim", " → ");
-			text += theme.fg("accent", `'${args.replacement}'`);
-		}
-
-		const meta: string[] = [];
-		if (args.lang) meta.push(`lang:${args.lang}`);
-		if (args.action && args.action !== "search") meta.push(args.action);
-		if (args.path) meta.push(args.path);
-
-		if (meta.length > 0) {
-			text += ` ${theme.fg("muted", meta.join(" "))}`;
-		}
-
-		return new Text(text, 0, 0);
-	},
-
-	renderResult(result, { expanded }, theme) {
-		const details = result.details;
-
-		// Error case
-		if (details?.error) {
-			return new Text(`${theme.fg("error", ICON_ERROR)} ${theme.fg("error", details.error)}`, 0, 0);
-		}
-
-		const matchCount = details?.matchCount ?? 0;
-		const fileCount = details?.fileCount ?? 0;
-		const mode = details?.mode ?? "search";
-		const truncated = details?.truncated ?? details?.truncation?.truncated ?? false;
-		const files = details?.files ?? [];
-
-		// No matches
-		if (matchCount === 0) {
-			return new Text(`${theme.fg("warning", ICON_WARNING)} ${theme.fg("muted", "No matches found")}`, 0, 0);
-		}
-
-		// Build summary
-		const icon = mode === "apply" ? theme.fg("success", ICON_SUCCESS) : theme.fg("accent", ICON_INFO);
-		let summary: string;
-		if (mode === "apply") {
-			summary = `Applied ${matchCount} replacement${matchCount !== 1 ? "s" : ""} in ${fileCount} file${
-				fileCount !== 1 ? "s" : ""
-			}`;
-		} else if (mode === "preview") {
-			summary = `Preview: ${matchCount} replacement${matchCount !== 1 ? "s" : ""} in ${fileCount} file${
-				fileCount !== 1 ? "s" : ""
-			}`;
-		} else {
-			summary = `${matchCount} match${matchCount !== 1 ? "es" : ""} in ${fileCount} file${fileCount !== 1 ? "s" : ""}`;
-		}
-
-		if (truncated) {
-			summary += theme.fg("warning", " (truncated)");
-		}
-
-		const expandHint = expanded ? "" : theme.fg("dim", " (Ctrl+O to expand)");
-		let text = `${icon} ${theme.fg("toolTitle", "ast")} ${theme.fg("dim", summary)}${expandHint}`;
-
-		// Show file tree
-		const maxFiles = expanded ? files.length : Math.min(files.length, 8);
-		for (let i = 0; i < maxFiles; i++) {
-			const isLast = i === maxFiles - 1 && (expanded || files.length <= 8);
-			const branch = isLast ? TREE_END : TREE_MID;
-			text += `\n ${theme.fg("dim", branch)} ${theme.fg("accent", files[i])}`;
-		}
-
-		if (!expanded && files.length > 8) {
-			text += `\n ${theme.fg("dim", TREE_END)} ${theme.fg("muted", `… ${files.length - 8} more files`)}`;
 		}
 
 		return new Text(text, 0, 0);
@@ -715,8 +532,6 @@ export const toolRenderers: Record<
 	ask: askRenderer,
 	grep: grepRenderer,
 	find: findRenderer,
-	replace: replaceRenderer,
-	ast: astRenderer,
 	notebook: notebookRenderer,
 	ls: lsRenderer,
 	lsp: lspRenderer,

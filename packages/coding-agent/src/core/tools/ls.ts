@@ -20,10 +20,8 @@ export interface LsToolDetails {
 export function createLsTool(cwd: string): AgentTool<typeof lsSchema> {
 	return {
 		name: "ls",
-		label: "ls",
-		description: `List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to ${DEFAULT_LIMIT} entries or ${
-			DEFAULT_MAX_BYTES / 1024
-		}KB (whichever is hit first).`,
+		label: "Ls",
+		description: `List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to 500 entries or 50KB (whichever is hit first). List structure helps with directory navigation and finding target files.`,
 		parameters: lsSchema,
 		execute: async (
 			_toolCallId: string,

@@ -63,7 +63,6 @@ ${commitsText}`;
 /** Tool descriptions for system prompt */
 const toolDescriptions: Record<ToolName, string> = {
 	ask: "Ask user for input or clarification",
-	ast: "Perform AST-level code analysis and transformations",
 	read: "Read file contents",
 	bash: "Execute bash commands (git, npm, docker, etc.)",
 	edit: "Make surgical edits to files (find exact text and replace)",
@@ -73,77 +72,10 @@ const toolDescriptions: Record<ToolName, string> = {
 	ls: "List directory contents",
 	lsp: "PREFERRED for semantic code queries: go-to-definition, find-all-references, hover (type info), call hierarchy. Returns precise, deterministic results. Use BEFORE grep for symbol lookups.",
 	notebook: "Edit Jupyter notebook cells",
-	replace: "Find and replace text across multiple files",
 	task: "Spawn a sub-agent to handle complex tasks",
 	web_fetch: "Fetch and render URLs into clean text for LLM consumption",
 	web_search: "Search the web for information",
 };
-
-/**
- * Anti-bash rules - explicit patterns that MUST use specialized tools instead of bash.
- * These rules are critical for preventing LLM from falling back to shell commands.
- */
-const _antiBashRules = `## Tool Usage Rules — MANDATORY
-
-### Forbidden Bash Patterns
-NEVER use bash for these operations:
-
-| Operation | Forbidden | Required Tool |
-|-----------|-----------|---------------|
-| File reading | cat, head, tail, less, more | read |
-| Content search | grep, rg, ag, ack | grep |
-| File finding | find, fd, locate | find |
-| Directory listing | ls | ls (or find) |
-| File editing | sed, awk, perl -pi, echo >, cat <<EOF | edit or replace |
-
-### Tool Preference Ladder (highest → lowest priority)
-1. **lsp** — Go-to-definition, find references, hover info — DETERMINISTIC
-2. **ast** — Structural code search/replace (function shapes, impl blocks, patterns)
-3. **grep** — Text/regex search in file contents
-4. **find** — Locate files by glob pattern
-5. **read** — Read file contents (with offset/limit for large files)
-6. **edit** — Precise text replacement (old text must exist exactly)
-7. **replace** — Multi-file regex find/replace
-8. **bash** — ONLY for commands that have no tool equivalent (git, npm, docker, make, cargo, etc.)
-
-### LSP — Preferred for Semantic Queries
-Use \`lsp\` instead of grep/bash when you need:
-- **Where is X defined?** → \`lsp goToDefinition\`
-- **What calls X?** → \`lsp findReferences\` or \`lsp incomingCalls\`
-- **What does X call?** → \`lsp outgoingCalls\`
-- **What type is X?** → \`lsp hover\`
-- **What symbols are in this file?** → \`lsp documentSymbol\`
-- **Find symbol across codebase** → \`lsp workspaceSymbol\`
-
-LSP returns **precise, compiler-verified results**. Grep returns text matches that may include comments, strings, or false positives.
-
-### AST Tool Patterns (ast-grep)
-Use \`ast\` for patterns that grep cannot express:
-
-**Rust examples:**
-- Find unsafe blocks: \`unsafe { $$BODY }\`
-- Find trait impls: \`impl $TRAIT for $TYPE { $$BODY }\`
-- Find unwrap calls: \`$EXPR.unwrap()\`
-- Find function signatures: \`fn $NAME($$PARAMS) -> Result<$T, $E>\`
-- Find async functions: \`async fn $NAME($$PARAMS) $BODY\`
-- Find macro invocations: \`$MACRO!($$ARGS)\`
-
-**TypeScript/JavaScript examples:**
-- Find React components: \`function $NAME($$PROPS) { $$BODY }\` with JSX
-- Find async arrow functions: \`async ($$PARAMS) => $$BODY\`
-- Find imports: \`import { $$NAMES } from "$MODULE"\`
-
-**When to use AST vs Grep:**
-- **ast**: Code structure (function shapes, impl blocks, call patterns, type patterns)
-- **grep**: Text content (strings, comments, error messages, config values, symbols)
-
-### Search-First Protocol
-Before reading any file:
-1. If you don't know the codebase structure → \`find pattern: "*.rs"\` to see layout
-2. If you know roughly where to look → \`grep\` for the specific symbol/error
-3. Use \`read offset/limit\` for specific line ranges, not entire large files
-4. Never read an entire large file hoping to find something — search first
-`;
 
 /**
  * Generate anti-bash rules section if the agent has both bash and specialized tools.
@@ -158,12 +90,10 @@ function generateAntiBashRules(tools: ToolName[]): string | null {
 	const hasFind = tools.includes("find");
 	const hasLs = tools.includes("ls");
 	const hasEdit = tools.includes("edit");
-	const hasReplace = tools.includes("replace");
-	const hasAst = tools.includes("ast");
 	const hasLsp = tools.includes("lsp");
 
 	// Only show rules if we have specialized tools that should be preferred
-	const hasSpecializedTools = hasRead || hasGrep || hasFind || hasLs || hasEdit || hasReplace;
+	const hasSpecializedTools = hasRead || hasGrep || hasFind || hasLs || hasEdit;
 	if (!hasSpecializedTools) return null;
 
 	const lines: string[] = [];
@@ -175,18 +105,15 @@ function generateAntiBashRules(tools: ToolName[]): string | null {
 	if (hasGrep) lines.push("- **Content search**: Use `grep` instead of grep/rg/ag/ack");
 	if (hasFind) lines.push("- **File finding**: Use `find` instead of find/fd/locate");
 	if (hasLs) lines.push("- **Directory listing**: Use `ls` instead of bash ls");
-	if (hasEdit || hasReplace)
-		lines.push("- **File editing**: Use `edit`/`replace` instead of sed/awk/perl -pi/echo >/cat <<EOF");
+	if (hasEdit) lines.push("- **File editing**: Use `edit` instead of sed/awk/perl -pi/echo >/cat <<EOF");
 
 	lines.push("\n### Tool Preference (highest → lowest priority)");
 	const ladder: string[] = [];
 	if (hasLsp) ladder.push("lsp (go-to-definition, references, type info) — DETERMINISTIC");
-	if (hasAst) ladder.push("ast (structural code patterns)");
 	if (hasGrep) ladder.push("grep (text/regex search)");
 	if (hasFind) ladder.push("find (locate files by pattern)");
 	if (hasRead) ladder.push("read (view file contents)");
 	if (hasEdit) ladder.push("edit (precise text replacement)");
-	if (hasReplace) ladder.push("replace (multi-file find/replace)");
 	ladder.push("bash (ONLY for git, npm, docker, make, cargo, etc.)");
 	lines.push(ladder.map((t, i) => `${i + 1}. ${t}`).join("\n"));
 
@@ -194,22 +121,15 @@ function generateAntiBashRules(tools: ToolName[]): string | null {
 	if (hasLsp) {
 		lines.push("\n### LSP — Preferred for Semantic Queries");
 		lines.push("Use `lsp` instead of grep/bash when you need:");
-		lines.push("- **Where is X defined?** → `lsp goToDefinition`");
-		lines.push("- **What calls X?** → `lsp findReferences` or `lsp incomingCalls`");
-		lines.push("- **What does X call?** → `lsp outgoingCalls`");
+		lines.push("- **Where is X defined?** → `lsp definition`");
+		lines.push("- **What calls X?** → `lsp incoming_calls`");
+		lines.push("- **What does X call?** → `lsp outgoing_calls`");
 		lines.push("- **What type is X?** → `lsp hover`");
-		lines.push("- **What symbols are in this file?** → `lsp documentSymbol`");
-		lines.push("- **Find symbol across codebase** → `lsp workspaceSymbol`\n");
-		lines.push("LSP returns **precise, compiler-verified results**. Grep returns text matches that may include comments, strings, or false positives.");
-	}
-
-	// Add AST examples if ast tool is available
-	if (hasAst) {
-		lines.push("\n### AST Tool Patterns");
-		lines.push("Use `ast` for structural patterns that grep cannot express:\n");
-		lines.push("**Rust**: `unsafe { $$BODY }`, `impl $TRAIT for $TYPE { $$BODY }`, `$EXPR.unwrap()`");
-		lines.push('**JS/TS**: `async ($$PARAMS) => $$BODY`, `import { $$NAMES } from "$MODULE"`\n');
-		lines.push("**ast vs grep**: ast for code structure, grep for text/strings/comments");
+		lines.push("- **What symbols are in this file?** → `lsp symbols`");
+		lines.push("- **Find symbol across codebase** → `lsp workspace_symbols`\n");
+		lines.push(
+			"LSP returns **precise, compiler-verified results**. Grep returns text matches that may include comments, strings, or false positives.",
+		);
 	}
 
 	// Add search-first protocol
