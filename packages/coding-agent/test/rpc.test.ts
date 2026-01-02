@@ -1,12 +1,9 @@
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { AgentEvent } from "@mariozechner/pi-agent-core";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { RpcClient } from "../src/modes/rpc/rpc-client.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
  * RPC mode tests.
@@ -18,8 +15,8 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 	beforeEach(() => {
 		sessionDir = join(tmpdir(), `pi-rpc-test-${Date.now()}`);
 		client = new RpcClient({
-			cliPath: join(__dirname, "..", "dist", "cli.js"),
-			cwd: join(__dirname, ".."),
+			cliPath: join(import.meta.dir, "..", "dist", "cli.js"),
+			cwd: join(import.meta.dir, ".."),
 			env: { PI_CODING_AGENT_DIR: sessionDir },
 			provider: "anthropic",
 			model: "claude-sonnet-4-5",
@@ -237,7 +234,7 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 		expect(stats.assistantMessages).toBeGreaterThanOrEqual(1);
 	}, 90000);
 
-	test("should reset session", async () => {
+	test("should create new session", async () => {
 		await client.start();
 
 		// Send a prompt
@@ -247,8 +244,8 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 		let state = await client.getState();
 		expect(state.messageCount).toBeGreaterThan(0);
 
-		// Reset
-		await client.reset();
+		// New session
+		await client.newSession();
 
 		// Verify messages cleared
 		state = await client.getState();

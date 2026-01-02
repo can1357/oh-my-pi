@@ -1,6 +1,5 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@mariozechner/pi-ai";
-import { randomUUID } from "crypto";
 import {
 	appendFileSync,
 	closeSync,
@@ -31,7 +30,11 @@ export interface SessionHeader {
 	id: string;
 	timestamp: string;
 	cwd: string;
-	branchedFrom?: string;
+	parentSession?: string;
+}
+
+export interface NewSessionOptions {
+	parentSession?: string;
 }
 
 export interface SessionEntryBase {
@@ -178,11 +181,11 @@ export type ReadonlySessionManager = Pick<
 /** Generate a unique short ID (8 hex chars, collision-checked) */
 function generateId(byId: { has(id: string): boolean }): string {
 	for (let i = 0; i < 100; i++) {
-		const id = randomUUID().slice(0, 8);
+		const id = crypto.randomUUID().slice(0, 8);
 		if (!byId.has(id)) return id;
 	}
 	// Fallback to full UUID if somehow we have collisions
-	return randomUUID();
+	return crypto.randomUUID();
 }
 
 /** Migrate v1 → v2: add id/parentId tree structure. Mutates in place. */
@@ -495,7 +498,7 @@ export class SessionManager {
 		if (existsSync(this.sessionFile)) {
 			this.fileEntries = loadEntriesFromFile(this.sessionFile);
 			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
-			this.sessionId = header?.id ?? randomUUID();
+			this.sessionId = header?.id ?? crypto.randomUUID();
 
 			if (migrateToCurrentVersion(this.fileEntries)) {
 				this._rewriteFile();
@@ -508,8 +511,8 @@ export class SessionManager {
 		}
 	}
 
-	newSession(): string | undefined {
-		this.sessionId = randomUUID();
+	newSession(options?: NewSessionOptions): string | undefined {
+		this.sessionId = crypto.randomUUID();
 		const timestamp = new Date().toISOString();
 		const header: SessionHeader = {
 			type: "session",
@@ -517,11 +520,13 @@ export class SessionManager {
 			id: this.sessionId,
 			timestamp,
 			cwd: this.cwd,
+			parentSession: options?.parentSession,
 		};
 		this.fileEntries = [header];
 		this.byId.clear();
 		this.leafId = null;
 		this.flushed = false;
+
 		// Only generate filename if persisting and not already set (e.g., via --session flag)
 		if (this.persist && !this.sessionFile) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
@@ -918,7 +923,7 @@ export class SessionManager {
 		// Filter out LabelEntry from path - we'll recreate them from the resolved map
 		const pathWithoutLabels = path.filter((e) => e.type !== "label");
 
-		const newSessionId = randomUUID();
+		const newSessionId = crypto.randomUUID();
 		const timestamp = new Date().toISOString();
 		const fileTimestamp = timestamp.replace(/[:.]/g, "-");
 		const newSessionFile = join(this.getSessionDir(), `${fileTimestamp}_${newSessionId}.jsonl`);
@@ -929,7 +934,7 @@ export class SessionManager {
 			id: newSessionId,
 			timestamp,
 			cwd: this.cwd,
-			branchedFrom: this.persist ? this.sessionFile : undefined,
+			parentSession: this.persist ? this.sessionFile : undefined,
 		};
 
 		// Collect labels for entries in the path

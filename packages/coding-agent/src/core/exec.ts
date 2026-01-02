@@ -83,8 +83,8 @@ export async function execCommand(
 		// Read streams asynchronously
 		(async () => {
 			try {
-				const stdoutReader = proc.stdout.getReader();
-				const stderrReader = proc.stderr.getReader();
+				const stdoutReader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
+				const stderrReader = (proc.stderr as ReadableStream<Uint8Array>).getReader();
 
 				const [stdoutResult, stderrResult] = await Promise.all([
 					(async () => {

@@ -230,10 +230,49 @@ interface CustomToolContext {
   sessionManager: ReadonlySessionManager;  // Read-only access to session
   modelRegistry: ModelRegistry;            // For API key resolution
   model: Model | undefined;                // Current model (may be undefined)
+  isIdle(): boolean;                       // Whether agent is streaming
+  hasQueuedMessages(): boolean;            // Whether user has queued messages
+  abort(): void;                           // Abort current operation (fire-and-forget)
 }
 ```
 
 Use `ctx.sessionManager.getBranch()` to get entries on the current branch for state reconstruction.
+
+### Checking Queue State
+
+Interactive tools can skip prompts when the user has already queued a message:
+
+```typescript
+async execute(toolCallId, params, onUpdate, ctx, signal) {
+  // If user already queued a message, skip the interactive prompt
+  if (ctx.hasQueuedMessages()) {
+    return {
+      content: [{ type: "text", text: "Skipped - user has queued input" }],
+    };
+  }
+
+  // Otherwise, prompt for input
+  const answer = await pi.ui.input("What would you like to do?");
+  // ...
+}
+```
+
+### Multi-line Editor
+
+For longer text editing, use `pi.ui.editor()` which supports Ctrl+G for external editor:
+
+```typescript
+async execute(toolCallId, params, onUpdate, ctx, signal) {
+  const text = await pi.ui.editor("Edit your response:", "prefilled text");
+  // Returns edited text or undefined if cancelled (Escape)
+  // Ctrl+Enter to submit, Ctrl+G to open $VISUAL or $EDITOR
+  
+  if (!text) {
+    return { content: [{ type: "text", text: "Cancelled" }] };
+  }
+  // ...
+}
+```
 
 ## Session Lifecycle
 
@@ -241,18 +280,19 @@ Tools can implement `onSession` to react to session changes:
 
 ```typescript
 interface CustomToolSessionEvent {
-  reason: "start" | "switch" | "branch" | "new" | "tree" | "shutdown";
+  reason: "start" | "switch" | "branch" | "tree" | "shutdown";
   previousSessionFile: string | undefined;
 }
 ```
 
 **Reasons:**
 - `start`: Initial session load on startup
-- `switch`: User switched to a different session (`/resume`)
+- `switch`: User started a new session (`/new`) or switched to a different session (`/resume`)
 - `branch`: User branched from a previous message (`/branch`)
-- `new`: User started a new session (`/new`)
 - `tree`: User navigated to a different point in the session tree (`/tree`)
 - `shutdown`: Process is exiting (Ctrl+C, Ctrl+D, or SIGTERM) - use to cleanup resources
+
+To check if a session is fresh (no messages), use `ctx.sessionManager.getEntries().length === 0`.
 
 ### State Management Pattern
 

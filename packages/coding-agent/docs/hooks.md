@@ -123,13 +123,9 @@ user sends prompt ────────────────────�
                                                            │
 user sends another prompt ◄────────────────────────────────┘
 
-/new (new session)
-  ├─► session_before_new (can cancel)
-  └─► session_new
-
-/resume (switch session)
-  ├─► session_before_switch (can cancel)
-  └─► session_switch
+/new (new session) or /resume (switch session)
+  ├─► session_before_switch (can cancel, has reason: "new" | "resume")
+  └─► session_switch (has reason: "new" | "resume")
 
 /branch
   ├─► session_before_branch (can cancel)
@@ -161,31 +157,24 @@ pi.on("session_start", async (_event, ctx) => {
 
 #### session_before_switch / session_switch
 
-Fired when switching sessions via `/resume`.
+Fired when starting a new session (`/new`) or switching sessions (`/resume`).
 
 ```typescript
 pi.on("session_before_switch", async (event, ctx) => {
-  // event.targetSessionFile - session we're switching to
-  return { cancel: true }; // Cancel the switch
+  // event.reason - "new" (starting fresh) or "resume" (switching to existing)
+  // event.targetSessionFile - session we're switching to (only for "resume")
+  
+  if (event.reason === "new") {
+    const ok = await ctx.ui.confirm("Clear?", "Delete all messages?");
+    if (!ok) return { cancel: true };
+  }
+  
+  return { cancel: true }; // Cancel the switch/new
 });
 
 pi.on("session_switch", async (event, ctx) => {
+  // event.reason - "new" or "resume"
   // event.previousSessionFile - session we came from
-});
-```
-
-#### session_before_new / session_new
-
-Fired when starting a new session via `/new`.
-
-```typescript
-pi.on("session_before_new", async (_event, ctx) => {
-  const ok = await ctx.ui.confirm("Clear?", "Delete all messages?");
-  if (!ok) return { cancel: true };
-});
-
-pi.on("session_new", async (_event, ctx) => {
-  // New session started
 });
 ```
 
@@ -416,12 +405,21 @@ const choice = await ctx.ui.select("Pick one:", ["A", "B", "C"]);
 const ok = await ctx.ui.confirm("Delete?", "This cannot be undone");
 // Returns true or false
 
-// Text input
+// Text input (single line)
 const name = await ctx.ui.input("Name:", "placeholder");
 // Returns string or undefined if cancelled
 
+// Multi-line editor (with Ctrl+G for external editor)
+const text = await ctx.ui.editor("Edit prompt:", "prefilled text");
+// Returns edited text or undefined if cancelled (Escape)
+// Ctrl+Enter to submit, Ctrl+G to open $VISUAL or $EDITOR
+
 // Notification (non-blocking)
 ctx.ui.notify("Done!", "info");  // "info" | "warning" | "error"
+
+// Set status text in footer (persistent until cleared)
+ctx.ui.setStatus("my-hook", "Processing 5/10...");  // Set status
+ctx.ui.setStatus("my-hook", undefined);              // Clear status
 
 // Set the core input editor text (pre-fill prompts, generated content)
 ctx.ui.setEditorText("Generated prompt text here...");
@@ -429,6 +427,30 @@ ctx.ui.setEditorText("Generated prompt text here...");
 // Get current editor text
 const currentText = ctx.ui.getEditorText();
 ```
+
+**Status text notes:**
+- Multiple hooks can set their own status using unique keys
+- Statuses are displayed on a single line in the footer, sorted alphabetically by key
+- Text is sanitized (newlines/tabs replaced with spaces) and truncated to terminal width
+- Use `ctx.ui.theme` to style status text with theme colors (see below)
+
+**Styling with theme colors:**
+
+Use `ctx.ui.theme` to apply consistent colors that respect the user's theme:
+
+```typescript
+const theme = ctx.ui.theme;
+
+// Foreground colors
+ctx.ui.setStatus("my-hook", theme.fg("success", "✓") + theme.fg("dim", " Ready"));
+ctx.ui.setStatus("my-hook", theme.fg("error", "✗") + theme.fg("dim", " Failed"));
+ctx.ui.setStatus("my-hook", theme.fg("accent", "●") + theme.fg("dim", " Working..."));
+
+// Available fg colors: accent, success, error, warning, muted, dim, text, and more
+// See docs/theme.md for the full list of theme colors
+```
+
+See [examples/hooks/status-line.ts](../examples/hooks/status-line.ts) for a complete example.
 
 **Custom components:**
 
@@ -521,6 +543,91 @@ if (ctx.model) {
   const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
   // Use with @mariozechner/pi-ai complete()
 }
+```
+
+### ctx.isIdle()
+
+Returns `true` if the agent is not currently streaming:
+
+```typescript
+if (ctx.isIdle()) {
+  // Agent is not processing
+}
+```
+
+### ctx.abort()
+
+Abort the current agent operation (fire-and-forget, does not wait):
+
+```typescript
+await ctx.abort();
+```
+
+### ctx.hasQueuedMessages()
+
+Check if there are messages queued (user typed while agent was streaming):
+
+```typescript
+if (ctx.hasQueuedMessages()) {
+  // Skip interactive prompt, let queued message take over
+  return;
+}
+```
+
+## HookCommandContext (Slash Commands Only)
+
+Slash command handlers receive `HookCommandContext`, which extends `HookContext` with session control methods. These methods are only safe in user-initiated commands because they can cause deadlocks if called from event handlers (which run inside the agent loop).
+
+### ctx.waitForIdle()
+
+Wait for the agent to finish streaming:
+
+```typescript
+await ctx.waitForIdle();
+// Agent is now idle
+```
+
+### ctx.newSession(options?)
+
+Create a new session, optionally with initialization:
+
+```typescript
+const result = await ctx.newSession({
+  parentSession: ctx.sessionManager.getSessionFile(), // Track lineage
+  setup: async (sm) => {
+    // Initialize the new session
+    sm.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: "Context from previous session..." }],
+      timestamp: Date.now(),
+    });
+  },
+});
+
+if (result.cancelled) {
+  // A hook cancelled the new session
+}
+```
+
+### ctx.branch(entryId)
+
+Branch from a specific entry, creating a new session file:
+
+```typescript
+const result = await ctx.branch("entry-id-123");
+if (!result.cancelled) {
+  // Now in the branched session
+}
+```
+
+### ctx.navigateTree(targetId, options?)
+
+Navigate to a different point in the session tree:
+
+```typescript
+const result = await ctx.navigateTree("entry-id-456", {
+  summarize: true, // Summarize the abandoned branch
+});
 ```
 
 ## HookAPI Methods
@@ -731,7 +838,7 @@ See [examples/hooks/snake.ts](../examples/hooks/snake.ts) for a complete example
 | RPC | JSON protocol | Host handles UI |
 | Print (`-p`) | No-op (returns null/false) | Hooks run but can't prompt |
 
-In print mode, `select()` returns `undefined`, `confirm()` returns `false`, `input()` returns `undefined`, `getEditorText()` returns `""`, and `setEditorText()` is a no-op. Design hooks to handle this by checking `ctx.hasUI`.
+In print mode, `select()` returns `undefined`, `confirm()` returns `false`, `input()` returns `undefined`, `getEditorText()` returns `""`, and `setEditorText()`/`setStatus()` are no-ops. Design hooks to handle this by checking `ctx.hasUI`.
 
 ## Error Handling
 

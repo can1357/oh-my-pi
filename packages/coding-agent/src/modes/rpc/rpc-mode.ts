@@ -13,6 +13,7 @@
 
 import type { AgentSession } from "../../core/agent-session.js";
 import type { HookUIContext } from "../../core/hooks/index.js";
+import { theme } from "../interactive/theme/theme.js";
 import type { RpcCommand, RpcHookUIRequest, RpcHookUIResponse, RpcResponse, RpcSessionState } from "./rpc-types.js";
 
 // Re-export types for consumers
@@ -117,6 +118,17 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			} as RpcHookUIRequest);
 		},
 
+		setStatus(key: string, text: string | undefined): void {
+			// Fire and forget - no response needed
+			output({
+				type: "hook_ui_request",
+				id: crypto.randomUUID(),
+				method: "setStatus",
+				statusKey: key,
+				statusText: text,
+			} as RpcHookUIRequest);
+		},
+
 		async custom() {
 			// Custom UI not supported in RPC mode
 			return undefined as never;
@@ -136,6 +148,29 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// Synchronous method can't wait for RPC response
 			// Host should track editor state locally if needed
 			return "";
+		},
+
+		async editor(title: string, prefill?: string): Promise<string | undefined> {
+			const id = crypto.randomUUID();
+			return new Promise((resolve, reject) => {
+				pendingHookRequests.set(id, {
+					resolve: (response: RpcHookUIResponse) => {
+						if ("cancelled" in response && response.cancelled) {
+							resolve(undefined);
+						} else if ("value" in response) {
+							resolve(response.value);
+						} else {
+							resolve(undefined);
+						}
+					},
+					reject,
+				});
+				output({ type: "hook_ui_request", id, method: "editor", title, prefill } as RpcHookUIRequest);
+			});
+		},
+
+		get theme() {
+			return theme;
 		},
 	});
 
@@ -178,6 +213,11 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 						sessionManager: session.sessionManager,
 						modelRegistry: session.modelRegistry,
 						model: session.model,
+						isIdle: () => !session.isStreaming,
+						hasQueuedMessages: () => session.queuedMessageCount > 0,
+						abort: () => {
+							session.abort();
+						},
 					},
 				);
 			} catch (_err) {
@@ -221,9 +261,10 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 				return success(id, "abort");
 			}
 
-			case "reset": {
-				const cancelled = !(await session.reset());
-				return success(id, "reset", { cancelled });
+			case "new_session": {
+				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
+				const cancelled = !(await session.newSession(options));
+				return success(id, "new_session", { cancelled });
 			}
 
 			// =================================================================
@@ -391,7 +432,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 	};
 
 	// Listen for JSON input - use Bun's ReadableStream
-	const stdinReader = process.stdin
+	const stdinReader = (Bun.stdin.stream() as ReadableStream<Uint8Array>)
 		.pipeThrough(new TextDecoderStream())
 		.pipeThrough(
 			new TransformStream({

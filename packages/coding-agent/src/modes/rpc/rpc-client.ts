@@ -92,7 +92,7 @@ export class RpcClient {
 
 		// Collect stderr for debugging
 		(async () => {
-			const reader = this.process!.stderr.getReader();
+			const reader = (this.process!.stderr as ReadableStream<Uint8Array>).getReader();
 			const decoder = new TextDecoder();
 			while (true) {
 				const { done, value } = await reader.read();
@@ -102,10 +102,10 @@ export class RpcClient {
 		})();
 
 		// Set up line reader for stdout
-		const textStream = this.process.stdout.pipeThrough(new TextDecoderStream());
+		const textStream = (this.process.stdout as ReadableStream<Uint8Array>).pipeThrough(new TextDecoderStream());
 		this.lineReader = textStream
 			.pipeThrough(
-				new TransformStream({
+				new TransformStream<string, string>({
 					transform(chunk, controller) {
 						const lines = chunk.split("\n");
 						for (const line of lines) {
@@ -116,7 +116,7 @@ export class RpcClient {
 					},
 				}),
 			)
-			.getReader();
+			.getReader() as ReadableStreamDefaultReader<string>;
 
 		// Process lines in background
 		(async () => {
@@ -224,11 +224,12 @@ export class RpcClient {
 	}
 
 	/**
-	 * Reset session (clear all messages).
-	 * @returns Object with `cancelled: true` if a hook cancelled the reset
+	 * Start a new session, optionally with parent tracking.
+	 * @param parentSession - Optional parent session path for lineage tracking
+	 * @returns Object with `cancelled: true` if a hook cancelled the new session
 	 */
-	async reset(): Promise<{ cancelled: boolean }> {
-		const response = await this.send({ type: "reset" });
+	async newSession(parentSession?: string): Promise<{ cancelled: boolean }> {
+		const response = await this.send({ type: "new_session", parentSession });
 		return this.getData(response);
 	}
 
@@ -498,7 +499,7 @@ export class RpcClient {
 				},
 			});
 
-			const writer = this.process!.stdin.getWriter();
+			const writer = (this.process!.stdin as unknown as WritableStream<Uint8Array>).getWriter();
 			writer.write(new TextEncoder().encode(`${JSON.stringify(fullCommand)}\n`));
 			writer.releaseLock();
 		});

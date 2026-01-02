@@ -1,12 +1,9 @@
 #!/usr/bin/env bun
 
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import { Api, KnownProvider, Model } from "../src/types.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const packageRoot = join(__dirname, "..");
+const packageRoot = join(import.meta.dir, "..");
 
 interface ModelsDevModel {
 	id: string;

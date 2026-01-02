@@ -243,7 +243,7 @@ describe("Markdown component", () => {
 			const tableLines = plainLines.filter((line) => line.startsWith("│"));
 			for (const line of tableLines) {
 				const borderCount = line.split("│").length - 1;
-				expect(borderCount).toBe(2, `Expected 2 borders, got ${borderCount}: "${line}"`);
+				expect(borderCount).toBe(2);
 			}
 
 			// Strip box drawing characters + whitespace so we can assert the URL is preserved
@@ -279,7 +279,7 @@ describe("Markdown component", () => {
 			const tableLines = plainLines.filter((line) => line.startsWith("│"));
 			for (const line of tableLines) {
 				const borderCount = line.split("│").length - 1;
-				expect(borderCount).toBe(2, `Expected 2 borders, got ${borderCount}: "${line}"`);
+				expect(borderCount).toBe(2);
 			}
 		});
 
@@ -468,11 +468,7 @@ again, hello world`,
 			const afterBackticks = plainLines.slice(closingBackticksIndex + 1);
 			const emptyLineCount = afterBackticks.findIndex((line) => line !== "");
 
-			expect(
-				emptyLineCount,
-				1,
-				`Expected 1 empty line after code block, but found ${emptyLineCount}. Lines after backticks: ${JSON.stringify(afterBackticks.slice(0, 5))}`,
-			);
+			expect(emptyLineCount).toBe(1);
 		});
 	});
 
@@ -498,11 +494,7 @@ again, hello world`,
 			const afterDivider = plainLines.slice(dividerIndex + 1);
 			const emptyLineCount = afterDivider.findIndex((line) => line !== "");
 
-			expect(
-				emptyLineCount,
-				1,
-				`Expected 1 empty line after divider, but found ${emptyLineCount}. Lines after divider: ${JSON.stringify(afterDivider.slice(0, 5))}`,
-			);
+			expect(emptyLineCount).toBe(1);
 		});
 	});
 
@@ -526,11 +518,7 @@ This is a paragraph`,
 			const afterHeading = plainLines.slice(headingIndex + 1);
 			const emptyLineCount = afterHeading.findIndex((line) => line !== "");
 
-			expect(
-				emptyLineCount,
-				1,
-				`Expected 1 empty line after heading, but found ${emptyLineCount}. Lines after heading: ${JSON.stringify(afterHeading.slice(0, 5))}`,
-			);
+			expect(emptyLineCount).toBe(1);
 		});
 	});
 
@@ -556,11 +544,7 @@ again, hello world`,
 			const afterQuote = plainLines.slice(quoteIndex + 1);
 			const emptyLineCount = afterQuote.findIndex((line) => line !== "");
 
-			expect(
-				emptyLineCount,
-				1,
-				`Expected 1 empty line after blockquote, but found ${emptyLineCount}. Lines after quote: ${JSON.stringify(afterQuote.slice(0, 5))}`,
-			);
+			expect(emptyLineCount).toBe(1);
 		});
 	});
 

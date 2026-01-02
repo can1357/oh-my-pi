@@ -13,7 +13,13 @@ import type { CompactionPreparation, CompactionResult } from "../compaction/inde
 import type { ExecOptions, ExecResult } from "../exec.js";
 import type { HookMessage } from "../messages.js";
 import type { ModelRegistry } from "../model-registry.js";
-import type { BranchSummaryEntry, CompactionEntry, ReadonlySessionManager, SessionEntry } from "../session-manager.js";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	ReadonlySessionManager,
+	SessionEntry,
+	SessionManager,
+} from "../session-manager.js";
 
 import type { EditToolDetails } from "../tools/edit.js";
 import type {
@@ -56,6 +62,17 @@ export interface HookUIContext {
 	 * Show a notification to the user.
 	 */
 	notify(message: string, type?: "info" | "warning" | "error"): void;
+
+	/**
+	 * Set status text in the footer/status bar.
+	 * Pass undefined as text to clear the status for this key.
+	 * Text can include ANSI escape codes for styling.
+	 * Note: Newlines, tabs, and carriage returns are replaced with spaces.
+	 * The combined status line is truncated to terminal width.
+	 * @param key - Unique key to identify this status (e.g., hook name)
+	 * @param text - Status text to display, or undefined to clear
+	 */
+	setStatus(key: string, text: string | undefined): void;
 
 	/**
 	 * Show a custom component with keyboard focus.
@@ -101,10 +118,30 @@ export interface HookUIContext {
 	 * @returns Current editor text
 	 */
 	getEditorText(): string;
+
+	/**
+	 * Show a multi-line editor for text editing.
+	 * Supports Ctrl+G to open external editor ($VISUAL or $EDITOR).
+	 * @param title - Title describing what is being edited
+	 * @param prefill - Optional initial text
+	 * @returns Edited text, or undefined if cancelled (Escape)
+	 */
+	editor(title: string, prefill?: string): Promise<string | undefined>;
+
+	/**
+	 * Get the current theme for styling text with ANSI codes.
+	 * Use theme.fg() and theme.bg() to style status text.
+	 *
+	 * @example
+	 * const theme = ctx.ui.theme;
+	 * ctx.ui.setStatus("my-hook", theme.fg("success", "✓") + " Ready");
+	 */
+	readonly theme: Theme;
 }
 
 /**
- * Context passed to hook event and command handlers.
+ * Context passed to hook event handlers.
+ * For command handlers, see HookCommandContext which extends this with session control methods.
  */
 export interface HookContext {
 	/** UI methods for user interaction */
@@ -119,6 +156,63 @@ export interface HookContext {
 	modelRegistry: ModelRegistry;
 	/** Current model (may be undefined if no model is selected yet) */
 	model: Model<any> | undefined;
+	/** Whether the agent is idle (not streaming) */
+	isIdle(): boolean;
+	/** Abort the current agent operation (fire-and-forget, does not wait) */
+	abort(): void;
+	/** Whether there are queued messages waiting to be processed */
+	hasQueuedMessages(): boolean;
+}
+
+/**
+ * Extended context for slash command handlers.
+ * Includes session control methods that are only safe in user-initiated commands.
+ *
+ * These methods are not available in event handlers because they can cause
+ * deadlocks when called from within the agent loop (e.g., tool_call, context events).
+ */
+export interface HookCommandContext extends HookContext {
+	/** Wait for the agent to finish streaming */
+	waitForIdle(): Promise<void>;
+
+	/**
+	 * Start a new session, optionally with a setup callback to initialize it.
+	 * The setup callback receives a writable SessionManager for the new session.
+	 *
+	 * @param options.parentSession - Path to parent session for lineage tracking
+	 * @param options.setup - Async callback to initialize the new session (e.g., append messages)
+	 * @returns Object with `cancelled: true` if a hook cancelled the new session
+	 *
+	 * @example
+	 * // Handoff: summarize current session and start fresh with context
+	 * await ctx.newSession({
+	 *   parentSession: ctx.sessionManager.getSessionFile(),
+	 *   setup: async (sm) => {
+	 *     sm.appendMessage({ role: "user", content: [{ type: "text", text: summary }] });
+	 *   }
+	 * });
+	 */
+	newSession(options?: {
+		parentSession?: string;
+		setup?: (sessionManager: SessionManager) => Promise<void>;
+	}): Promise<{ cancelled: boolean }>;
+
+	/**
+	 * Branch from a specific entry, creating a new session file.
+	 *
+	 * @param entryId - ID of the entry to branch from
+	 * @returns Object with `cancelled: true` if a hook cancelled the branch
+	 */
+	branch(entryId: string): Promise<{ cancelled: boolean }>;
+
+	/**
+	 * Navigate to a different point in the session tree (in-place).
+	 *
+	 * @param targetId - ID of the entry to navigate to
+	 * @param options.summarize - Whether to summarize the abandoned branch
+	 * @returns Object with `cancelled: true` if a hook cancelled the navigation
+	 */
+	navigateTree(targetId: string, options?: { summarize?: boolean }): Promise<{ cancelled: boolean }>;
 }
 
 // ============================================================================
@@ -133,25 +227,19 @@ export interface SessionStartEvent {
 /** Fired before switching to another session (can be cancelled) */
 export interface SessionBeforeSwitchEvent {
 	type: "session_before_switch";
-	/** Session file we're switching to */
-	targetSessionFile: string;
+	/** Reason for the switch */
+	reason: "new" | "resume";
+	/** Session file we're switching to (only for "resume") */
+	targetSessionFile?: string;
 }
 
 /** Fired after switching to another session */
 export interface SessionSwitchEvent {
 	type: "session_switch";
+	/** Reason for the switch */
+	reason: "new" | "resume";
 	/** Session file we came from */
 	previousSessionFile: string | undefined;
-}
-
-/** Fired before creating a new session (can be cancelled) */
-export interface SessionBeforeNewEvent {
-	type: "session_before_new";
-}
-
-/** Fired after creating a new session */
-export interface SessionNewEvent {
-	type: "session_new";
 }
 
 /** Fired before branching a session (can be cancelled) */
@@ -234,8 +322,6 @@ export type SessionEvent =
 	| SessionStartEvent
 	| SessionBeforeSwitchEvent
 	| SessionSwitchEvent
-	| SessionBeforeNewEvent
-	| SessionNewEvent
 	| SessionBeforeBranchEvent
 	| SessionBranchEvent
 	| SessionBeforeCompactEvent
@@ -484,12 +570,6 @@ export interface SessionBeforeSwitchResult {
 	cancel?: boolean;
 }
 
-/** Return type for session_before_new handlers */
-export interface SessionBeforeNewResult {
-	/** If true, cancel the new session */
-	cancel?: boolean;
-}
-
 /** Return type for session_before_branch handlers */
 export interface SessionBeforeBranchResult {
 	/**
@@ -567,7 +647,7 @@ export interface RegisteredCommand {
 	name: string;
 	description?: string;
 
-	handler: (args: string, ctx: HookContext) => Promise<void>;
+	handler: (args: string, ctx: HookCommandContext) => Promise<void>;
 }
 
 /**
@@ -579,8 +659,6 @@ export interface HookAPI {
 	on(event: "session_start", handler: HookHandler<SessionStartEvent>): void;
 	on(event: "session_before_switch", handler: HookHandler<SessionBeforeSwitchEvent, SessionBeforeSwitchResult>): void;
 	on(event: "session_switch", handler: HookHandler<SessionSwitchEvent>): void;
-	on(event: "session_before_new", handler: HookHandler<SessionBeforeNewEvent, SessionBeforeNewResult>): void;
-	on(event: "session_new", handler: HookHandler<SessionNewEvent>): void;
 	on(event: "session_before_branch", handler: HookHandler<SessionBeforeBranchEvent, SessionBeforeBranchResult>): void;
 	on(event: "session_branch", handler: HookHandler<SessionBranchEvent>): void;
 	on(
@@ -659,7 +737,7 @@ export interface HookAPI {
 
 	/**
 	 * Register a custom slash command.
-	 * Handler receives HookCommandContext.
+	 * Handler receives HookCommandContext with session control methods.
 	 */
 	registerCommand(name: string, options: { description?: string; handler: RegisteredCommand["handler"] }): void;
 

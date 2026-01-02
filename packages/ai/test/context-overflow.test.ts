@@ -424,13 +424,7 @@ describe("Context overflow error handling", () => {
 	// =============================================================================
 
 	// Check if ollama is installed
-	let ollamaInstalled = false;
-	try {
-		Bun.spawnSync(["which", "ollama"]);
-		ollamaInstalled = true;
-	} catch {
-		ollamaInstalled = false;
-	}
+	const ollamaInstalled = Bun.which("ollama") !== null;
 
 	describe.skipIf(!ollamaInstalled)("Ollama (local)", () => {
 		let ollamaProcess: Subprocess | null = null;

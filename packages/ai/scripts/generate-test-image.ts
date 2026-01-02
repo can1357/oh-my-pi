@@ -1,11 +1,7 @@
 #!/usr/bin/env bun
 
 import { createCanvas } from "canvas";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+import { join } from "path";
 
 // Create a 200x200 canvas
 const canvas = createCanvas(200, 200);
@@ -23,10 +19,10 @@ ctx.fill();
 
 // Save the image
 const buffer = canvas.toBuffer("image/png");
-const outputPath = join(__dirname, "..", "test", "data", "red-circle.png");
+const outputPath = join(import.meta.dir, "..", "test", "data", "red-circle.png");
 
 // Ensure the directory exists
-await Bun.write(join(__dirname, "..", "test", "data", ".keep"), "");
+await Bun.write(join(import.meta.dir, "..", "test", "data", ".keep"), "");
 
 await Bun.write(outputPath, buffer);
 console.log(`Generated test image at: ${outputPath}`);

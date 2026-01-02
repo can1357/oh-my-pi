@@ -145,7 +145,10 @@ class HostExecutor implements Executor {
 			return result;
 		};
 
-		const [stdout, stderr] = await Promise.all([readStream(proc.stdout), readStream(proc.stderr)]);
+		const [stdout, stderr] = await Promise.all([
+			readStream(proc.stdout as ReadableStream<Uint8Array>),
+			readStream(proc.stderr as ReadableStream<Uint8Array>),
+		]);
 
 		const code = await proc.exited;
 

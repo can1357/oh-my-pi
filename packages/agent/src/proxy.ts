@@ -148,12 +148,12 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 				throw new Error(errorMessage);
 			}
 
-			reader = response.body!.getReader();
+			reader = response.body!.getReader() as ReadableStreamDefaultReader<Uint8Array>;
 			const decoder = new TextDecoder();
 			let buffer = "";
 
 			while (true) {
-				const { done, value } = await reader.read();
+				const { done, value } = await reader!.read();
 				if (done) break;
 
 				if (options.signal?.aborted) {

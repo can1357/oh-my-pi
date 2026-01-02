@@ -1,21 +1,40 @@
-import { execSync } from "child_process";
 import { platform } from "os";
 
-export function copyToClipboard(text: string): void {
+async function spawnWithTimeout(cmd: string[], input: string, timeoutMs: number): Promise<void> {
+	const proc = Bun.spawn(cmd, { stdin: "pipe" });
+
+	const timeoutPromise = new Promise<never>((_, reject) => {
+		setTimeout(() => reject(new Error("Clipboard operation timed out")), timeoutMs);
+	});
+
+	try {
+		proc.stdin.write(input);
+		proc.stdin.end();
+		await Promise.race([proc.exited, timeoutPromise]);
+
+		if (proc.exitCode !== 0) {
+			throw new Error(`Command failed with exit code ${proc.exitCode}`);
+		}
+	} finally {
+		proc.kill();
+	}
+}
+
+export async function copyToClipboard(text: string): Promise<void> {
 	const p = platform();
-	const options = { input: text, timeout: 5000 };
+	const timeout = 5000;
 
 	try {
 		if (p === "darwin") {
-			execSync("pbcopy", options);
+			await spawnWithTimeout(["pbcopy"], text, timeout);
 		} else if (p === "win32") {
-			execSync("clip", options);
+			await spawnWithTimeout(["clip"], text, timeout);
 		} else {
 			// Linux - try xclip first, fall back to xsel
 			try {
-				execSync("xclip -selection clipboard", options);
+				await spawnWithTimeout(["xclip", "-selection", "clipboard"], text, timeout);
 			} catch {
-				execSync("xsel --clipboard --input", options);
+				await spawnWithTimeout(["xsel", "--clipboard", "--input"], text, timeout);
 			}
 		}
 	} catch (error) {

@@ -83,7 +83,7 @@ export const startModel = async (
 		gpus?: number;
 	},
 ) => {
-	const { name: podName, pod } = getPod(options.pod);
+	const { name: podName, pod } = await getPod(options.pod);
 
 	// Validation
 	if (!pod.modelsPath) {
@@ -334,8 +334,12 @@ WRAPPER
 
 	// Read stdout and stderr streams
 	const decoder = new TextDecoder();
-	const stdoutReader = logProcess.stdout.getReader();
-	const stderrReader = logProcess.stderr.getReader();
+	const stdoutReader = (
+		logProcess.stdout as ReadableStream<Uint8Array>
+	).getReader() as ReadableStreamDefaultReader<Uint8Array>;
+	const stderrReader = (
+		logProcess.stderr as ReadableStream<Uint8Array>
+	).getReader() as ReadableStreamDefaultReader<Uint8Array>;
 
 	const readStream = async (reader: ReadableStreamDefaultReader<Uint8Array>) => {
 		while (true) {

@@ -1,9 +1,6 @@
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import * as readline from "node:readline";
-import { fileURLToPath } from "node:url";
-import { RpcClient } from "../src/modes/rpc/rpc-client.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { RpcClient } from "../src/modes/rpc/rpc-client.js";
 
 /**
  * Interactive example of using coding-agent via RpcClient.
@@ -12,7 +9,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 async function main() {
 	const client = new RpcClient({
-		cliPath: join(__dirname, "../src/cli.ts"),
+		cliPath: join(import.meta.dir, "../src/cli.ts"),
 		provider: "anthropic",
 		model: "claude-sonnet-4-20250514",
 		args: ["--no-session"],

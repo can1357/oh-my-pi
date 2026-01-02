@@ -1,7 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { Subprocess } from "bun";
-import { dirname, join } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
 import { complete, stream } from "../src/stream.js";
@@ -9,8 +8,7 @@ import type { Api, Context, ImageContent, Model, OptionsForApi, Tool, ToolResult
 import { StringEnum } from "../src/utils/typebox-helpers.js";
 import { resolveApiKey } from "./oauth.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const dir = import.meta.dir;
 
 // Resolve OAuth tokens at module level (async, runs before tests)
 const oauthTokens = await Promise.all([
@@ -218,7 +216,7 @@ async function handleImage<TApi extends Api>(model: Model<TApi>, options?: Optio
 	}
 
 	// Read the test image
-	const imagePath = join(__dirname, "data", "red-circle.png");
+	const imagePath = join(dir, "data", "red-circle.png");
 	const imageBuffer = await Bun.file(imagePath).arrayBuffer();
 	const base64Image = Buffer.from(imageBuffer).toString("base64");
 
@@ -838,13 +836,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	// Check if ollama is installed
-	let ollamaInstalled = false;
-	try {
-		Bun.spawnSync(["which", "ollama"]);
-		ollamaInstalled = true;
-	} catch {
-		ollamaInstalled = false;
-	}
+	const ollamaInstalled = Bun.which("ollama") !== null;
 
 	describe.skipIf(!ollamaInstalled)("Ollama Provider (gpt-oss-20b via OpenAI Completions)", () => {
 		let llm: Model<"openai-completions">;

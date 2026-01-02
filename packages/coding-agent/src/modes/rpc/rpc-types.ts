@@ -20,7 +20,7 @@ export type RpcCommand =
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "queue_message"; message: string }
 	| { id?: string; type: "abort" }
-	| { id?: string; type: "reset" }
+	| { id?: string; type: "new_session"; parentSession?: string }
 
 	// State
 	| { id?: string; type: "get_state" }
@@ -87,7 +87,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "prompt"; success: true }
 	| { id?: string; type: "response"; command: "queue_message"; success: true }
 	| { id?: string; type: "response"; command: "abort"; success: true }
-	| { id?: string; type: "response"; command: "reset"; success: true; data: { cancelled: boolean } }
+	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
@@ -175,6 +175,7 @@ export type RpcHookUIRequest =
 	| { type: "hook_ui_request"; id: string; method: "select"; title: string; options: string[] }
 	| { type: "hook_ui_request"; id: string; method: "confirm"; title: string; message: string }
 	| { type: "hook_ui_request"; id: string; method: "input"; title: string; placeholder?: string }
+	| { type: "hook_ui_request"; id: string; method: "editor"; title: string; prefill?: string }
 	| {
 			type: "hook_ui_request";
 			id: string;
@@ -182,6 +183,7 @@ export type RpcHookUIRequest =
 			message: string;
 			notifyType?: "info" | "warning" | "error";
 	  }
+	| { type: "hook_ui_request"; id: string; method: "setStatus"; statusKey: string; statusText: string | undefined }
 	| { type: "hook_ui_request"; id: string; method: "set_editor_text"; text: string };
 
 // ============================================================================

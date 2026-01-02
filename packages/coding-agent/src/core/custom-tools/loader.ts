@@ -14,6 +14,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
 import { getAgentDir, isBunBinary } from "../../config.js";
+import { theme } from "../../modes/interactive/theme/theme.js";
 import type { ExecOptions } from "../exec.js";
 import { execCommand } from "../exec.js";
 import type { HookUIContext } from "../hooks/types.js";
@@ -90,9 +91,14 @@ function createNoOpUIContext(): HookUIContext {
 		confirm: async () => false,
 		input: async () => undefined,
 		notify: () => {},
+		setStatus: () => {},
 		custom: async () => undefined as never,
 		setEditorText: () => {},
 		getEditorText: () => "",
+		editor: async () => undefined,
+		get theme() {
+			return theme;
+		},
 	};
 }
 

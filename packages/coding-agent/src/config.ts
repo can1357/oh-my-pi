@@ -1,14 +1,10 @@
 import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join, resolve } from "path";
-import { fileURLToPath } from "url";
 
 // =============================================================================
 // Package Detection
 // =============================================================================
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 /**
  * Detect if we're running as a Bun compiled binary.
@@ -32,8 +28,8 @@ export function getPackageDir(): string {
 		// Bun binary: process.execPath points to the compiled executable
 		return dirname(process.execPath);
 	}
-	// Node.js: walk up from __dirname until we find package.json
-	let dir = __dirname;
+	// Node.js: walk up from import.meta.dir until we find package.json
+	let dir = import.meta.dir;
 	while (dir !== dirname(dir)) {
 		if (existsSync(join(dir, "package.json"))) {
 			return dir;
@@ -41,7 +37,7 @@ export function getPackageDir(): string {
 		dir = dirname(dir);
 	}
 	// Fallback (shouldn't happen)
-	return __dirname;
+	return import.meta.dir;
 }
 
 /**
@@ -58,6 +54,21 @@ export function getThemesDir(): string {
 	const packageDir = getPackageDir();
 	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
 	return join(packageDir, srcOrDist, "modes", "interactive", "theme");
+}
+
+/**
+ * Get path to HTML export template directory (shipped with package)
+ * - For Bun binary: export-html/ next to executable
+ * - For Node.js (dist/): dist/core/export-html/
+ * - For tsx (src/): src/core/export-html/
+ */
+export function getExportTemplateDir(): string {
+	if (isBunBinary) {
+		return join(dirname(process.execPath), "export-html");
+	}
+	const packageDir = getPackageDir();
+	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
+	return join(packageDir, srcOrDist, "core", "export-html");
 }
 
 /** Get path to package.json */

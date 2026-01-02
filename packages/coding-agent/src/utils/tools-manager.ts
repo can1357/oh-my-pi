@@ -120,7 +120,7 @@ async function downloadFile(url: string, dest: string): Promise<void> {
 		fileStream.write(Buffer.from(value));
 	}
 	fileStream.end();
-	await new Promise((resolve, reject) => {
+	await new Promise<void>((resolve, reject) => {
 		fileStream.on("finish", resolve);
 		fileStream.on("error", reject);
 	});

@@ -12,7 +12,6 @@
  * Uses JSON mode to capture structured output from subagents.
  */
 
-import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -289,7 +288,12 @@ async function runSingleAgent(
 		let wasAborted = false;
 
 		const exitCode = await new Promise<number>((resolve) => {
-			const proc = spawn("pi", args, { cwd: cwd ?? pi.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+			const proc = Bun.spawn(["pi", ...args], {
+				cwd: cwd ?? pi.cwd,
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe",
+			});
 			let buffer = "";
 
 			const processLine = (line: string) => {
@@ -329,24 +333,40 @@ async function runSingleAgent(
 				}
 			};
 
-			proc.stdout.on("data", (data) => {
-				buffer += data.toString();
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-				for (const line of lines) processLine(line);
-			});
+			(async () => {
+				const decoder = new TextDecoder();
+				const reader = proc.stdout.getReader();
+				try {
+					while (true) {
+						const { done, value } = await reader.read();
+						if (done) break;
+						buffer += decoder.decode(value, { stream: true });
+						const lines = buffer.split("\n");
+						buffer = lines.pop() || "";
+						for (const line of lines) processLine(line);
+					}
+					if (buffer.trim()) processLine(buffer);
+				} finally {
+					reader.releaseLock();
+				}
+			})();
 
-			proc.stderr.on("data", (data) => {
-				currentResult.stderr += data.toString();
-			});
+			(async () => {
+				const decoder = new TextDecoder();
+				const reader = proc.stderr.getReader();
+				try {
+					while (true) {
+						const { done, value } = await reader.read();
+						if (done) break;
+						currentResult.stderr += decoder.decode(value, { stream: true });
+					}
+				} finally {
+					reader.releaseLock();
+				}
+			})();
 
-			proc.on("close", (code) => {
-				if (buffer.trim()) processLine(buffer);
-				resolve(code ?? 0);
-			});
-
-			proc.on("error", () => {
-				resolve(1);
+			proc.exited.then((code) => {
+				resolve(code);
 			});
 
 			if (signal) {

@@ -487,7 +487,7 @@ describe("Editor component", () => {
 			// All content lines (between borders) should fit within width
 			for (let i = 1; i < lines.length - 1; i++) {
 				const lineWidth = visibleWidth(lines[i]!);
-				expect(lineWidth).toBe(width, `Line ${i} has width ${lineWidth}, expected ${width}`);
+				expect(lineWidth).toBe(width);
 			}
 		});
 
@@ -504,7 +504,7 @@ describe("Editor component", () => {
 			// First line: 5 emojis (10 cols), second line: 1 emoji (2 cols) + padding
 			for (let i = 1; i < lines.length - 1; i++) {
 				const lineWidth = visibleWidth(lines[i]!);
-				expect(lineWidth).toBe(width, `Line ${i} has width ${lineWidth}, expected ${width}`);
+				expect(lineWidth).toBe(width);
 			}
 		});
 
@@ -518,7 +518,7 @@ describe("Editor component", () => {
 
 			for (let i = 1; i < lines.length - 1; i++) {
 				const lineWidth = visibleWidth(lines[i]!);
-				expect(lineWidth).toBe(width, `Line ${i} has width ${lineWidth}, expected ${width}`);
+				expect(lineWidth).toBe(width);
 			}
 
 			// Verify content split correctly

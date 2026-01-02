@@ -47,13 +47,19 @@ export interface CustomToolContext {
 	modelRegistry: ModelRegistry;
 	/** Current model (may be undefined if no model is selected yet) */
 	model: Model<any> | undefined;
+	/** Whether the agent is idle (not streaming) */
+	isIdle(): boolean;
+	/** Whether there are queued messages waiting to be processed */
+	hasQueuedMessages(): boolean;
+	/** Abort the current agent operation (fire-and-forget, does not wait) */
+	abort(): void;
 }
 
 /** Session event passed to onSession callback */
 export interface CustomToolSessionEvent {
 	/** Reason for the session event */
-	reason: "start" | "switch" | "branch" | "new" | "tree" | "shutdown";
-	/** Previous session file path, or undefined for "start", "new", and "shutdown" */
+	reason: "start" | "switch" | "branch" | "tree" | "shutdown";
+	/** Previous session file path, or undefined for "start" and "shutdown" */
 	previousSessionFile: string | undefined;
 }
 

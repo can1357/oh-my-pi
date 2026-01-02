@@ -134,8 +134,8 @@ export function executeBash(command: string, options?: BashExecutorOptions): Pro
 		// Read streams asynchronously
 		(async () => {
 			try {
-				const stdoutReader = child.stdout.getReader();
-				const stderrReader = child.stderr.getReader();
+				const stdoutReader = (child.stdout as ReadableStream<Uint8Array>).getReader();
+				const stderrReader = (child.stderr as ReadableStream<Uint8Array>).getReader();
 
 				await Promise.all([
 					(async () => {
@@ -170,7 +170,7 @@ export function executeBash(command: string, options?: BashExecutorOptions): Pro
 				const truncationResult = truncateTail(fullOutput);
 
 				// Non-zero exit codes or signal-killed processes are considered cancelled if killed via signal
-				const cancelled = exitCode === null || (exitCode !== 0 && options?.signal?.aborted);
+				const cancelled = exitCode === null || (exitCode !== 0 && (options?.signal?.aborted ?? false));
 
 				resolve({
 					output: truncationResult.truncated ? truncationResult.content : fullOutput,

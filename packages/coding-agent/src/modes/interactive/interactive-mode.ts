@@ -37,11 +37,13 @@ import { copyToClipboard } from "../../utils/clipboard.js";
 import { ArminComponent } from "./components/armin.js";
 import { AssistantMessageComponent } from "./components/assistant-message.js";
 import { BashExecutionComponent } from "./components/bash-execution.js";
+import { BorderedLoader } from "./components/bordered-loader.js";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.js";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.js";
 import { CustomEditor } from "./components/custom-editor.js";
 import { DynamicBorder } from "./components/dynamic-border.js";
 import { FooterComponent } from "./components/footer.js";
+import { HookEditorComponent } from "./components/hook-editor.js";
 import { HookInputComponent } from "./components/hook-input.js";
 import { HookMessageComponent } from "./components/hook-message.js";
 import { HookSelectorComponent } from "./components/hook-selector.js";
@@ -130,6 +132,7 @@ export class InteractiveMode {
 	// Hook UI state
 	private hookSelector: HookSelectorComponent | undefined = undefined;
 	private hookInput: HookInputComponent | undefined = undefined;
+	private hookEditor: HookEditorComponent | undefined = undefined;
 
 	// Custom tools for custom rendering
 	private customTools: Map<string, LoadedCustomTool>;
@@ -172,6 +175,7 @@ export class InteractiveMode {
 			{ name: "settings", description: "Open settings menu" },
 			{ name: "model", description: "Select model (opens selector UI)" },
 			{ name: "export", description: "Export session to HTML file" },
+			{ name: "share", description: "Share session as a secret GitHub gist" },
 			{ name: "copy", description: "Copy last agent message to clipboard" },
 			{ name: "session", description: "Show session info and stats" },
 			{ name: "changelog", description: "Show changelog entries" },
@@ -368,9 +372,14 @@ export class InteractiveMode {
 			confirm: (title, message) => this.showHookConfirm(title, message),
 			input: (title, placeholder) => this.showHookInput(title, placeholder),
 			notify: (message, type) => this.showHookNotify(message, type),
+			setStatus: (key, text) => this.setHookStatus(key, text),
 			custom: (factory) => this.showHookCustom(factory),
 			setEditorText: (text) => this.editor.setText(text),
 			getEditorText: () => this.editor.getText(),
+			editor: (title, prefill) => this.showHookEditor(title, prefill),
+			get theme() {
+				return theme;
+			},
 		};
 		this.setToolUIContext(uiContext, true);
 
@@ -405,6 +414,74 @@ export class InteractiveMode {
 			appendEntryHandler: (customType, data) => {
 				this.sessionManager.appendCustomEntry(customType, data);
 			},
+			newSessionHandler: async (options) => {
+				// Stop any loading animation
+				if (this.loadingAnimation) {
+					this.loadingAnimation.stop();
+					this.loadingAnimation = undefined;
+				}
+				this.statusContainer.clear();
+
+				// Create new session
+				const success = await this.session.newSession({ parentSession: options?.parentSession });
+				if (!success) {
+					return { cancelled: true };
+				}
+
+				// Call setup callback if provided
+				if (options?.setup) {
+					await options.setup(this.sessionManager);
+				}
+
+				// Clear UI state
+				this.chatContainer.clear();
+				this.pendingMessagesContainer.clear();
+				this.streamingComponent = undefined;
+				this.streamingMessage = undefined;
+				this.pendingTools.clear();
+
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(new Text(`${theme.fg("accent", "✓ New session started")}`, 1, 1));
+				this.ui.requestRender();
+
+				return { cancelled: false };
+			},
+			branchHandler: async (entryId) => {
+				const result = await this.session.branch(entryId);
+				if (result.cancelled) {
+					return { cancelled: true };
+				}
+
+				// Update UI
+				this.chatContainer.clear();
+				this.renderInitialMessages();
+				this.editor.setText(result.selectedText);
+				this.showStatus("Branched to new session");
+
+				return { cancelled: false };
+			},
+			navigateTreeHandler: async (targetId, options) => {
+				const result = await this.session.navigateTree(targetId, { summarize: options?.summarize });
+				if (result.cancelled) {
+					return { cancelled: true };
+				}
+
+				// Update UI
+				this.chatContainer.clear();
+				this.renderInitialMessages();
+				if (result.editorText) {
+					this.editor.setText(result.editorText);
+				}
+				this.showStatus("Navigated to selected point");
+
+				return { cancelled: false };
+			},
+			isIdle: () => !this.session.isStreaming,
+			waitForIdle: () => this.session.agent.waitForIdle(),
+			abort: () => {
+				this.session.abort();
+			},
+			hasQueuedMessages: () => this.session.queuedMessageCount > 0,
 			uiContext,
 			hasUI: true,
 		});
@@ -439,6 +516,11 @@ export class InteractiveMode {
 						sessionManager: this.session.sessionManager,
 						modelRegistry: this.session.modelRegistry,
 						model: this.session.model,
+						isIdle: () => !this.session.isStreaming,
+						hasQueuedMessages: () => this.session.queuedMessageCount > 0,
+						abort: () => {
+							this.session.abort();
+						},
 					});
 				} catch (err) {
 					this.showToolError(tool.name, err instanceof Error ? err.message : String(err));
@@ -453,6 +535,14 @@ export class InteractiveMode {
 	private showToolError(toolName: string, error: string): void {
 		const errorText = new Text(theme.fg("error", `Tool "${toolName}" error: ${error}`), 1, 0);
 		this.chatContainer.addChild(errorText);
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Set hook status text in the footer.
+	 */
+	private setHookStatus(key: string, text: string | undefined): void {
+		this.footer.setHookStatus(key, text);
 		this.ui.requestRender();
 	}
 
@@ -532,6 +622,43 @@ export class InteractiveMode {
 		this.editorContainer.clear();
 		this.editorContainer.addChild(this.editor);
 		this.hookInput = undefined;
+		this.ui.setFocus(this.editor);
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Show a multi-line editor for hooks (with Ctrl+G support).
+	 */
+	private showHookEditor(title: string, prefill?: string): Promise<string | undefined> {
+		return new Promise((resolve) => {
+			this.hookEditor = new HookEditorComponent(
+				this.ui,
+				title,
+				prefill,
+				(value) => {
+					this.hideHookEditor();
+					resolve(value);
+				},
+				() => {
+					this.hideHookEditor();
+					resolve(undefined);
+				},
+			);
+
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.hookEditor);
+			this.ui.setFocus(this.hookEditor);
+			this.ui.requestRender();
+		});
+	}
+
+	/**
+	 * Hide the hook editor.
+	 */
+	private hideHookEditor(): void {
+		this.editorContainer.clear();
+		this.editorContainer.addChild(this.editor);
+		this.hookEditor = undefined;
 		this.ui.setFocus(this.editor);
 		this.ui.requestRender();
 	}
@@ -674,8 +801,13 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/share") {
+				await this.handleShareCommand();
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/copy") {
-				this.handleCopyCommand();
+				await this.handleCopyCommand();
 				this.editor.setText("");
 				return;
 			}
@@ -901,6 +1033,11 @@ export class InteractiveMode {
 							});
 						}
 						this.pendingTools.clear();
+					} else {
+						// Args are now complete - trigger diff computation for edit tools
+						for (const [, component] of this.pendingTools.entries()) {
+							component.setArgsComplete();
+						}
 					}
 					this.streamingComponent = undefined;
 					this.streamingMessage = undefined;
@@ -1399,8 +1536,8 @@ export class InteractiveMode {
 				stderr: "inherit",
 			});
 
-			// On successful exit (status 0), replace editor content
-			if (result.status === 0) {
+			// On successful exit (exitCode 0), replace editor content
+			if (result.exitCode === 0) {
 				const newContent = fs.readFileSync(tmpFile, "utf-8").replace(/\n$/, "");
 				this.editor.setText(newContent);
 			}
@@ -1910,7 +2047,123 @@ export class InteractiveMode {
 		}
 	}
 
-	private handleCopyCommand(): void {
+	private async handleShareCommand(): Promise<void> {
+		// Check if gh is available and logged in
+		try {
+			const authResult = Bun.spawnSync(["gh", "auth", "status"]);
+			if (authResult.exitCode !== 0) {
+				this.showError("GitHub CLI is not logged in. Run 'gh auth login' first.");
+				return;
+			}
+		} catch {
+			this.showError("GitHub CLI (gh) is not installed. Install it from https://cli.github.com/");
+			return;
+		}
+
+		// Export to a temp file
+		const tmpFile = path.join(os.tmpdir(), "session.html");
+		try {
+			this.session.exportToHtml(tmpFile);
+		} catch (error: unknown) {
+			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
+			return;
+		}
+
+		// Show cancellable loader, replacing the editor
+		const loader = new BorderedLoader(this.ui, theme, "Creating gist...");
+		this.editorContainer.clear();
+		this.editorContainer.addChild(loader);
+		this.ui.setFocus(loader);
+		this.ui.requestRender();
+
+		const restoreEditor = () => {
+			loader.dispose();
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+			this.ui.setFocus(this.editor);
+			try {
+				fs.unlinkSync(tmpFile);
+			} catch {
+				// Ignore cleanup errors
+			}
+		};
+
+		// Create a secret gist asynchronously
+		let proc: ReturnType<typeof Bun.spawn> | null = null;
+
+		loader.onAbort = () => {
+			proc?.kill();
+			restoreEditor();
+			this.showStatus("Share cancelled");
+		};
+
+		try {
+			const result = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve) => {
+				proc = Bun.spawn(["gh", "gist", "create", "--public=false", tmpFile], {
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				let stdout = "";
+				let stderr = "";
+
+				const stdoutReader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
+				const stderrReader = (proc.stderr as ReadableStream<Uint8Array>).getReader();
+				const decoder = new TextDecoder();
+
+				(async () => {
+					try {
+						while (true) {
+							const { done, value } = await stdoutReader.read();
+							if (done) break;
+							stdout += decoder.decode(value);
+						}
+					} catch {}
+				})();
+
+				(async () => {
+					try {
+						while (true) {
+							const { done, value } = await stderrReader.read();
+							if (done) break;
+							stderr += decoder.decode(value);
+						}
+					} catch {}
+				})();
+
+				proc.exited.then((code) => resolve({ stdout, stderr, code }));
+			});
+
+			if (loader.signal.aborted) return;
+
+			restoreEditor();
+
+			if (result.code !== 0) {
+				const errorMsg = result.stderr?.trim() || "Unknown error";
+				this.showError(`Failed to create gist: ${errorMsg}`);
+				return;
+			}
+
+			// Extract gist ID from the URL returned by gh
+			// gh returns something like: https://gist.github.com/username/GIST_ID
+			const gistUrl = result.stdout?.trim();
+			const gistId = gistUrl?.split("/").pop();
+			if (!gistId) {
+				this.showError("Failed to parse gist ID from gh output");
+				return;
+			}
+
+			// Create the preview URL
+			const previewUrl = `https://shittycodingagent.ai/session?${gistId}`;
+			this.showStatus(`Share URL: ${previewUrl}\nGist: ${gistUrl}`);
+		} catch (error: unknown) {
+			if (!loader.signal.aborted) {
+				restoreEditor();
+				this.showError(`Failed to create gist: ${error instanceof Error ? error.message : "Unknown error"}`);
+			}
+		}
+	}
+
+	private async handleCopyCommand(): Promise<void> {
 		const text = this.session.getLastAssistantText();
 		if (!text) {
 			this.showError("No agent messages to copy yet.");
@@ -1918,7 +2171,7 @@ export class InteractiveMode {
 		}
 
 		try {
-			copyToClipboard(text);
+			await copyToClipboard(text);
 			this.showStatus("Copied last agent message to clipboard");
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
@@ -2031,8 +2284,8 @@ export class InteractiveMode {
 		}
 		this.statusContainer.clear();
 
-		// Reset via session (emits hook and tool session events)
-		await this.session.reset();
+		// New session via session (emits hook and tool session events)
+		await this.session.newSession();
 
 		// Clear UI state
 		this.chatContainer.clear();

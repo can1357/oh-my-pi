@@ -2,21 +2,21 @@
 	"$schema": "https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/theme-schema.json",
 	"name": "dark",
 	"vars": {
-		"cyan": "#00d7ff",
-		"blue": "#5f87ff",
-		"green": "#b5bd68",
-		"red": "#cc6666",
-		"yellow": "#ffff00",
-		"gray": "#808080",
-		"dimGray": "#666666",
-		"darkGray": "#505050",
-		"accent": "#8abeb7",
-		"selectedBg": "#3a3a4a",
-		"userMsgBg": "#343541",
-		"toolPendingBg": "#282832",
-		"toolSuccessBg": "#283228",
-		"toolErrorBg": "#3c2828",
-		"customMsgBg": "#2d2838"
+		"cyan": "#0088fa",
+		"blue": "#178fb9",
+		"green": "#89d281",
+		"red": "#fc3a4b",
+		"yellow": "#e4c00f",
+		"gray": "#777d88",
+		"dimGray": "#5f6673",
+		"darkGray": "#3d424a",
+		"accent": "#febc38",
+		"selectedBg": "#31363f",
+		"userMsgBg": "#221d1a",
+		"toolPendingBg": "#1d2129",
+		"toolSuccessBg": "#161a1f",
+		"toolErrorBg": "#291d1d",
+		"customMsgBg": "#2a2530"
 	},
 	"colors": {
 		"accent": "accent",
@@ -36,27 +36,29 @@
 		"userMessageText": "",
 		"customMessageBg": "customMsgBg",
 		"customMessageText": "",
-		"customMessageLabel": "#9575cd",
+		"customMessageLabel": "#b281d6",
 		"toolPendingBg": "toolPendingBg",
 		"toolSuccessBg": "toolSuccessBg",
 		"toolErrorBg": "toolErrorBg",
 		"toolTitle": "",
 		"toolOutput": "gray",
 
-		"mdHeading": "#f0c674",
-		"mdLink": "#81a2be",
+		"mdHeading": "#febc38",
+		"mdLink": "#0088fa",
 		"mdLinkUrl": "dimGray",
-		"mdCode": "accent",
-		"mdCodeBlock": "green",
-		"mdCodeBlockBorder": "gray",
+		"mdCode": "#e5c1ff",
+		"mdCodeBlock": "#9CDCFE",
+		"mdCodeBlockBorder": "darkGray",
 		"mdQuote": "gray",
-		"mdQuoteBorder": "gray",
-		"mdHr": "gray",
+		"mdQuoteBorder": "darkGray",
+		"mdHr": "darkGray",
 		"mdListBullet": "accent",
 
 		"toolDiffAdded": "green",
 		"toolDiffRemoved": "red",
 		"toolDiffContext": "gray",
+
+		"link": "#0088fa",
 
 		"syntaxComment": "#6A9955",
 		"syntaxKeyword": "#569CD6",
@@ -69,12 +71,17 @@
 		"syntaxPunctuation": "#D4D4D4",
 
 		"thinkingOff": "darkGray",
-		"thinkingMinimal": "#6e6e6e",
-		"thinkingLow": "#5f87af",
-		"thinkingMedium": "#81a2be",
-		"thinkingHigh": "#b294bb",
-		"thinkingXhigh": "#d183e8",
+		"thinkingMinimal": "dimGray",
+		"thinkingLow": "#178fb9",
+		"thinkingMedium": "#0088fa",
+		"thinkingHigh": "#b281d6",
+		"thinkingXhigh": "#e5c1ff",
 
-		"bashMode": "green"
+		"bashMode": "cyan"
+	},
+	"export": {
+		"pageBg": "#18181e",
+		"cardBg": "#1e1e24",
+		"infoBg": "#3c3728"
 	}
 }

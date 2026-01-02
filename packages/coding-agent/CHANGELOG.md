@@ -2,9 +2,14 @@
 
 ## [Unreleased]
 
+## [0.31.1] - 2026-01-02
+
 ### Fixed
 
-- Crash when displaying bash output containing Unicode format characters like U+0600-U+0604 ([#372](https://github.com/badlogic/pi-mono/pull/372) by [@HACKE-RC](https://github.com/HACKE-RC))
+- Model selector no longer allows negative index when pressing arrow keys before models finish loading ([#398](https://github.com/badlogic/pi-mono/pull/398) by [@mitsuhiko](https://github.com/mitsuhiko))
+- Type guard functions (`isBashToolResult`, etc.) now exported at runtime, not just in type declarations ([#397](https://github.com/badlogic/pi-mono/issues/397))
+
+## [0.31.0] - 2026-01-02
 
 This release introduces session trees for in-place branching, major API changes to hooks and custom tools, and structured compaction with file tracking.
 
@@ -24,10 +29,11 @@ The hooks API has been restructured with more granular events and better session
 
 **Type renames:**
 - `HookEventContext` → `HookContext`
-- `HookCommandContext` removed (use `HookContext` for command handlers)
+- `HookCommandContext` is now a new interface extending `HookContext` with session control methods
 
 **Event changes:**
-- The monolithic `session` event is now split into granular events: `session_start`, `session_before_switch`, `session_switch`, `session_before_new`, `session_new`, `session_before_branch`, `session_branch`, `session_before_compact`, `session_compact`, `session_shutdown`
+- The monolithic `session` event is now split into granular events: `session_start`, `session_before_switch`, `session_switch`, `session_before_branch`, `session_branch`, `session_before_compact`, `session_compact`, `session_shutdown`
+- `session_before_switch` and `session_switch` events now include `reason: "new" | "resume"` to distinguish between `/new` and `/resume`
 - New `session_before_tree` and `session_tree` events for `/tree` navigation (hook can provide custom branch summary)
 - New `before_agent_start` event: inject messages before the agent loop starts
 - New `context` event: modify messages non-destructively before each LLM call
@@ -36,12 +42,24 @@ The hooks API has been restructured with more granular events and better session
 **API changes:**
 - `pi.send(text, attachments?)` → `pi.sendMessage(message, triggerTurn?)` (creates `CustomMessageEntry`)
 - New `pi.appendEntry(customType, data?)` for hook state persistence (not in LLM context)
-- New `pi.registerCommand(name, options)` for custom slash commands
+- New `pi.registerCommand(name, options)` for custom slash commands (handler receives `HookCommandContext`)
 - New `pi.registerMessageRenderer(customType, renderer)` for custom TUI rendering
+- New `ctx.isIdle()`, `ctx.abort()`, `ctx.hasQueuedMessages()` for agent state (available in all events)
+- New `ctx.ui.editor(title, prefill?)` for multi-line text editing with Ctrl+G external editor support
 - New `ctx.ui.custom(component)` for full TUI component rendering with keyboard focus
+- New `ctx.ui.setStatus(key, text)` for persistent status text in footer (multiple hooks can set their own)
+- New `ctx.ui.theme` getter for styling text with theme colors
 - `ctx.exec()` moved to `pi.exec()`
 - `ctx.sessionFile` → `ctx.sessionManager.getSessionFile()`
 - New `ctx.modelRegistry` and `ctx.model` for API key resolution
+
+**HookCommandContext (slash commands only):**
+- `ctx.waitForIdle()` - wait for agent to finish streaming
+- `ctx.newSession(options?)` - create new sessions with optional setup callback
+- `ctx.branch(entryId)` - branch from a specific entry
+- `ctx.navigateTree(targetId, options?)` - navigate the session tree
+
+These methods are only on `HookCommandContext` (not `HookContext`) because they can deadlock if called from event handlers that run inside the agent loop.
 
 **Removed:**
 - `hookTimeout` setting (hooks no longer have timeouts; use Ctrl+C to abort)
@@ -68,12 +86,15 @@ execute(toolCallId, params, signal, onUpdate)
 execute(toolCallId, params, onUpdate, ctx, signal?)
 ```
 
-The new `ctx: CustomToolContext` provides `sessionManager`, `modelRegistry`, and `model`.
+The new `ctx: CustomToolContext` provides `sessionManager`, `modelRegistry`, `model`, and agent state methods:
+- `ctx.isIdle()` - check if agent is streaming
+- `ctx.hasQueuedMessages()` - check if user has queued messages (skip interactive prompts)
+- `ctx.abort()` - abort current operation (fire-and-forget)
 
 **Session event changes:**
 - `CustomToolSessionEvent` now only has `reason` and `previousSessionFile`
 - Session entries are no longer in the event. Use `ctx.sessionManager.getBranch()` or `ctx.sessionManager.getEntries()` to reconstruct state
-- New reasons: `"tree"` (for `/tree` navigation) and `"shutdown"` (for cleanup on exit)
+- Reasons: `"start" | "switch" | "branch" | "tree" | "shutdown"` (no separate `"new"` reason; `/new` triggers `"switch"`)
 - `dispose()` method removed. Use `onSession` with `reason: "shutdown"` for cleanup
 
 See [docs/custom-tools.md](docs/custom-tools.md) and [examples/custom-tools/](examples/custom-tools/) for the current API.
@@ -87,10 +108,11 @@ See [docs/custom-tools.md](docs/custom-tools.md) and [examples/custom-tools/](ex
 - `model` returns `Model | undefined` (was `Model | null`)
 - `Attachment` type removed. Use `ImageContent` from `@mariozechner/pi-ai` instead. Add images directly to message content arrays.
 
-**AgentSession branching API:**
+**AgentSession API:**
 - `branch(entryIndex: number)` → `branch(entryId: string)`
 - `getUserMessagesForBranching()` returns `{ entryId, text }` instead of `{ entryIndex, text }`
-- `reset()` and `switchSession()` now return `Promise<boolean>` (false if cancelled by hook)
+- `reset()` → `newSession(options?)` where options has optional `parentSession` for lineage tracking
+- `newSession()` and `switchSession()` now return `Promise<boolean>` (false if cancelled by hook)
 - New `navigateTree(targetId, options?)` for in-place tree navigation
 
 **Hook integration:**
@@ -99,8 +121,9 @@ See [docs/custom-tools.md](docs/custom-tools.md) and [examples/custom-tools/](ex
 **SessionManager API:**
 - Method renames: `saveXXX()` → `appendXXX()` (e.g., `appendMessage`, `appendCompaction`)
 - `branchInPlace()` → `branch()`
-- `reset()` → `newSession()`
+- `reset()` → `newSession(options?)` with optional `parentSession` for lineage tracking
 - `createBranchedSessionFromEntries(entries, index)` → `createBranchedSession(leafId)`
+- `SessionHeader.branchedFrom` → `SessionHeader.parentSession`
 - `saveCompaction(entry)` → `appendCompaction(summary, firstKeptEntryId, tokensBefore, details?)`
 - `getEntries()` now excludes the session header (use `getHeader()` separately)
 - `getSessionFile()` returns `string | undefined` (undefined for in-memory sessions)
@@ -140,6 +163,9 @@ This replaces the old `resolveApiKey` callback pattern. Hooks and custom tools a
 See [docs/sdk.md](docs/sdk.md) and [examples/sdk/](examples/sdk/) for the current API.
 
 ### RPC Migration
+
+**Session commands:**
+- `reset` command → `new_session` command with optional `parentSession` field
 
 **Branching commands:**
 - `branch` command: `entryIndex` → `entryId`
@@ -193,6 +219,13 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 
 ### Added
 
+- `ctx.ui.setStatus(key, text)` for hooks to display persistent status text in the footer ([#385](https://github.com/badlogic/pi-mono/pull/385) by [@prateekmedia](https://github.com/prateekmedia))
+- `ctx.ui.theme` getter for styling status text and other output with theme colors
+- `/share` command to upload session as a secret GitHub gist and get a shareable URL via shittycodingagent.ai ([#380](https://github.com/badlogic/pi-mono/issues/380))
+- HTML export now includes a tree visualization sidebar for navigating session branches ([#375](https://github.com/badlogic/pi-mono/issues/375))
+- HTML export supports keyboard shortcuts: Ctrl+T to toggle thinking blocks, Ctrl+O to toggle tool outputs
+- HTML export supports theme-configurable background colors via optional `export` section in theme JSON ([#387](https://github.com/badlogic/pi-mono/pull/387) by [@mitsuhiko](https://github.com/mitsuhiko))
+- HTML export syntax highlighting now uses theme colors and matches TUI rendering
 - **Snake game example hook**: Demonstrates `ui.custom()`, `registerCommand()`, and session persistence. See [examples/hooks/snake.ts](examples/hooks/snake.ts).
 - **`thinkingText` theme token**: Configurable color for thinking block text. ([#366](https://github.com/badlogic/pi-mono/pull/366) by [@paulbettner](https://github.com/paulbettner))
 
@@ -200,15 +233,19 @@ Total color count increased from 46 to 50. See [docs/theme.md](docs/theme.md) fo
 
 - **Entry IDs**: Session entries now use short 8-character hex IDs instead of full UUIDs
 - **API key priority**: `ANTHROPIC_OAUTH_TOKEN` now takes precedence over `ANTHROPIC_API_KEY`
+- HTML export template split into separate files (template.html, template.css, template.js) for easier maintenance
 
 ### Fixed
 
+- HTML export now properly sanitizes user messages containing HTML tags like `<style>` that could break DOM rendering
+- Crash when displaying bash output containing Unicode format characters like U+0600-U+0604 ([#372](https://github.com/badlogic/pi-mono/pull/372) by [@HACKE-RC](https://github.com/HACKE-RC))
 - **Footer shows full session stats**: Token usage and cost now include all messages, not just those after compaction. ([#322](https://github.com/badlogic/pi-mono/issues/322))
 - **Status messages spam chat log**: Rapidly changing settings (e.g., thinking level via Shift+Tab) would add multiple status lines. Sequential status updates now coalesce into a single line. ([#365](https://github.com/badlogic/pi-mono/pull/365) by [@paulbettner](https://github.com/paulbettner))
 - **Toggling thinking blocks during streaming shows nothing**: Pressing Ctrl+T while streaming would hide the current message until streaming completed.
 - **Resuming session resets thinking level to off**: Initial model and thinking level were not saved to session file, causing `--resume`/`--continue` to default to `off`. ([#342](https://github.com/badlogic/pi-mono/issues/342) by [@aliou](https://github.com/aliou))
 - **Hook `tool_result` event ignores errors from custom tools**: The `tool_result` hook event was never emitted when tools threw errors, and always had `isError: false` for successful executions. Now emits the event with correct `isError` value in both success and error cases. ([#374](https://github.com/badlogic/pi-mono/issues/374) by [@nicobailon](https://github.com/nicobailon))
 - **Edit tool fails on Windows due to CRLF line endings**: Files with CRLF line endings now match correctly when LLMs send LF-only text. Line endings are normalized before matching and restored to original style on write. ([#355](https://github.com/badlogic/pi-mono/issues/355) by [@Pratham-Dubey](https://github.com/Pratham-Dubey))
+- **Edit tool fails on files with UTF-8 BOM**: Files with UTF-8 BOM marker could cause "text not found" errors since the LLM doesn't include the invisible BOM character. BOM is now stripped before matching and restored on write. ([#394](https://github.com/badlogic/pi-mono/pull/394) by [@prathamdby](https://github.com/prathamdby))
 - **Use bash instead of sh on Unix**: Fixed shell commands using `/bin/sh` instead of `/bin/bash` on Unix systems. ([#328](https://github.com/badlogic/pi-mono/pull/328) by [@dnouri](https://github.com/dnouri))
 - **OAuth login URL clickable**: Made OAuth login URLs clickable in terminal. ([#349](https://github.com/badlogic/pi-mono/pull/349) by [@Cursivez](https://github.com/Cursivez))
 - **Improved error messages**: Better error messages when `apiKey` or `model` are missing. ([#346](https://github.com/badlogic/pi-mono/pull/346) by [@ronyrus](https://github.com/ronyrus))

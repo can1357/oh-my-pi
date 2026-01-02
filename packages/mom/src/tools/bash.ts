@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
@@ -10,7 +9,8 @@ import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult
  * Generate a unique temp file path for bash output
  */
 function getTempFilePath(): string {
-	const id = randomBytes(8).toString("hex");
+	const bytes = crypto.getRandomValues(new Uint8Array(8));
+	const id = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 	return join(tmpdir(), `mom-bash-${id}.log`);
 }
 
