@@ -133,32 +133,140 @@ export function sanitizeBinaryOutput(str: string): string {
 		.join("");
 }
 
+let pgrepAvailable: boolean | null = null;
+
 /**
- * Kill a process and all its children (cross-platform)
+ * Check if pgrep is available on this system (cached).
  */
-export function killProcessTree(pid: number): void {
-	if (process.platform === "win32") {
-		// Use taskkill on Windows to kill process tree
+function hasPgrep(): boolean {
+	if (pgrepAvailable === null) {
 		try {
-			Bun.spawn(["taskkill", "/F", "/T", "/PID", String(pid)], {
+			const result = Bun.spawnSync(["pgrep", "--version"], {
 				stdin: "ignore",
 				stdout: "ignore",
 				stderr: "ignore",
 			});
+			// pgrep exists if it ran (exit 0 or 1 are both valid)
+			pgrepAvailable = result.exitCode !== null;
 		} catch {
-			// Ignore errors if taskkill fails
-		}
-	} else {
-		// Use SIGKILL on Unix/Linux/Mac
-		try {
-			process.kill(-pid, "SIGKILL");
-		} catch {
-			// Fallback to killing just the child if process group kill fails
-			try {
-				process.kill(pid, "SIGKILL");
-			} catch {
-				// Process already dead
-			}
+			pgrepAvailable = false;
 		}
 	}
+	return pgrepAvailable;
+}
+
+/**
+ * Get direct children of a PID using pgrep.
+ */
+function getChildrenViaPgrep(pid: number): number[] {
+	const result = Bun.spawnSync(["pgrep", "-P", String(pid)], {
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "ignore",
+	});
+
+	if (result.exitCode !== 0 || !result.stdout) return [];
+
+	const children: number[] = [];
+	for (const line of result.stdout.toString().trim().split("\n")) {
+		const childPid = parseInt(line, 10);
+		if (!Number.isNaN(childPid)) children.push(childPid);
+	}
+	return children;
+}
+
+/**
+ * Get direct children of a PID using /proc (Linux only).
+ */
+function getChildrenViaProc(pid: number): number[] {
+	try {
+		const result = Bun.spawnSync(
+			["sh", "-c", `for p in /proc/[0-9]*/stat; do cat "$p" 2>/dev/null; done | awk -v ppid=${pid} '$4 == ppid { print $1 }'`],
+			{ stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+		);
+		if (result.exitCode !== 0 || !result.stdout) return [];
+
+		const children: number[] = [];
+		for (const line of result.stdout.toString().trim().split("\n")) {
+			const childPid = parseInt(line, 10);
+			if (!Number.isNaN(childPid)) children.push(childPid);
+		}
+		return children;
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Collect all descendant PIDs breadth-first.
+ * Returns deepest descendants first (reverse BFS order) for proper kill ordering.
+ */
+function getDescendantPids(pid: number): number[] {
+	const getChildren = hasPgrep() ? getChildrenViaPgrep : getChildrenViaProc;
+	const descendants: number[] = [];
+	const queue = [pid];
+
+	while (queue.length > 0) {
+		const current = queue.shift()!;
+		const children = getChildren(current);
+		for (const child of children) {
+			descendants.push(child);
+			queue.push(child);
+		}
+	}
+
+	// Reverse so deepest children are killed first
+	return descendants.reverse();
+}
+
+function tryKill(pid: number, signal: NodeJS.Signals): boolean {
+	try {
+		process.kill(pid, signal);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Kill a process and all its descendants.
+ * @param gracePeriodMs - Time to wait after SIGTERM before SIGKILL (0 = immediate SIGKILL)
+ */
+export function killProcessTree(pid: number, gracePeriodMs = 0): void {
+	if (process.platform === "win32") {
+		Bun.spawnSync(["taskkill", "/F", "/T", "/PID", String(pid)], {
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		return;
+	}
+
+	const signal = gracePeriodMs > 0 ? "SIGTERM" : "SIGKILL";
+
+	// Fast path: process group kill (works if pid is group leader)
+	try {
+		process.kill(-pid, signal);
+		if (gracePeriodMs > 0) {
+			Bun.sleepSync(gracePeriodMs);
+			try {
+				process.kill(-pid, "SIGKILL");
+			} catch {
+				// Already dead
+			}
+		}
+		return;
+	} catch {
+		// Not a process group leader, fall through
+	}
+
+	// Collect descendants BEFORE killing to minimize race window
+	const allPids = [...getDescendantPids(pid), pid];
+
+	if (gracePeriodMs > 0) {
+		for (const p of allPids) tryKill(p, "SIGTERM");
+		Bun.sleepSync(gracePeriodMs);
+	}
+
+	for (const p of allPids) tryKill(p, "SIGKILL");
 }
