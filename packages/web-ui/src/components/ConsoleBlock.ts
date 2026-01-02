@@ -57,7 +57,9 @@ export class ConsoleBlock extends LitElement {
 					</button>
 				</div>
 				<div class="console-scroll overflow-auto max-h-64">
-					<pre class="!bg-background !border-0 !rounded-none m-0 p-3 text-xs ${textClass} font-mono whitespace-pre-wrap">
+					<pre
+						class="!bg-background !border-0 !rounded-none m-0 p-3 text-xs ${textClass} font-mono whitespace-pre-wrap"
+					>
 ${this.content || ""}</pre
 					>
 				</div>

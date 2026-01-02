@@ -1,7 +1,7 @@
 {
-	"name": "@mariozechner/pi-web-ui",
+	"name": "@oh-my-pi/pi-web-ui",
 	"version": "1.337.0",
-	"description": "Reusable web UI components for AI chat interfaces powered by @mariozechner/pi-ai",
+	"description": "Reusable web UI components for AI chat interfaces powered by @oh-my-pi/pi-ai",
 	"type": "module",
 	"main": "src/index.ts",
 	"types": "src/index.ts",
@@ -18,9 +18,9 @@
 	},
 	"dependencies": {
 		"@lmstudio/sdk": "^1.5.0",
-		"@mariozechner/pi-agent-core": "workspace:*",
-		"@mariozechner/pi-ai": "workspace:*",
-		"@mariozechner/pi-tui": "workspace:*",
+		"@oh-my-pi/pi-agent-core": "workspace:*",
+		"@oh-my-pi/pi-ai": "workspace:*",
+		"@oh-my-pi/pi-tui": "workspace:*",
 		"docx-preview": "^0.3.7",
 		"highlight.js": "^11.11.1",
 		"jszip": "^3.10.1",

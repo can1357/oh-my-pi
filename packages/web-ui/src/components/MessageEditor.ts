@@ -1,7 +1,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
-import type { Model } from "@mariozechner/pi-ai";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
@@ -9,7 +9,7 @@ import { Brain, Loader2, Paperclip, Send, Sparkles, Square } from "lucide";
 import { type Attachment, loadAttachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 import "./AttachmentTile.js";
-import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
+import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 
 @customElement("message-editor")
 export class MessageEditor extends LitElement {
@@ -239,7 +239,9 @@ export class MessageEditor extends LitElement {
 
 		return html`
 			<div
-				class="bg-card rounded-xl border shadow-sm relative ${this.isDragging ? "border-primary border-2 bg-primary/5" : "border-border"}"
+				class="bg-card rounded-xl border shadow-sm relative ${
+					this.isDragging ? "border-primary border-2 bg-primary/5" : "border-border"
+				}"
 				@dragover=${this.handleDragOver}
 				@dragleave=${this.handleDragLeave}
 				@drop=${this.handleDrop}
@@ -248,10 +250,12 @@ export class MessageEditor extends LitElement {
 				${
 					this.isDragging
 						? html`
-					<div class="absolute inset-0 bg-primary/10 rounded-xl pointer-events-none z-10 flex items-center justify-center">
-						<div class="text-primary font-medium">${i18n("Drop files here")}</div>
-					</div>
-				`
+							<div
+								class="absolute inset-0 bg-primary/10 rounded-xl pointer-events-none z-10 flex items-center justify-center"
+							>
+								<div class="text-primary font-medium">${i18n("Drop files here")}</div>
+							</div>
+					  `
 						: ""
 				}
 
@@ -270,7 +274,7 @@ export class MessageEditor extends LitElement {
 									`,
 								)}
 							</div>
-						`
+					  `
 						: ""
 				}
 
@@ -307,7 +311,7 @@ export class MessageEditor extends LitElement {
 										<div class="h-8 w-8 flex items-center justify-center">
 											${icon(Loader2, "sm", "animate-spin text-muted-foreground")}
 										</div>
-									`
+								  `
 									: html`
 										${Button({
 											variant: "ghost",
@@ -316,7 +320,7 @@ export class MessageEditor extends LitElement {
 											onClick: this.handleAttachmentClick,
 											children: icon(Paperclip, "sm"),
 										})}
-									`
+								  `
 								: ""
 						}
 						${
@@ -340,7 +344,7 @@ export class MessageEditor extends LitElement {
 										variant: "ghost",
 										fitContent: true,
 									})}
-								`
+							  `
 								: ""
 						}
 					</div>
@@ -367,7 +371,7 @@ export class MessageEditor extends LitElement {
 										`,
 										className: "h-8 text-xs truncate",
 									})}
-								`
+							  `
 								: ""
 						}
 						${
@@ -380,7 +384,7 @@ export class MessageEditor extends LitElement {
 										children: icon(Square, "sm"),
 										className: "h-8 w-8",
 									})}
-								`
+							  `
 								: html`
 									${Button({
 										variant: "ghost",
@@ -390,7 +394,7 @@ export class MessageEditor extends LitElement {
 										children: html`<div style="transform: rotate(-45deg)">${icon(Send, "sm")}</div>`,
 										className: "h-8 w-8",
 									})}
-								`
+							  `
 						}
 					</div>
 				</div>

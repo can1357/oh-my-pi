@@ -14,7 +14,7 @@ import {
 	loginGitHubCopilot,
 	type OAuthCredentials,
 	type OAuthProvider,
-} from "@mariozechner/pi-ai";
+} from "@oh-my-pi/pi-ai";
 
 export type ApiKeyCredential = {
 	type: "api_key";

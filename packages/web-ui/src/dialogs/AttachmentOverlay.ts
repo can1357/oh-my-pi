@@ -217,9 +217,9 @@ export class AttachmentOverlay extends LitElement {
 		if (this.showExtractedText && fileType !== "image") {
 			return html`
 				<div class="bg-card border border-border text-foreground p-6 w-full h-full max-w-4xl overflow-auto">
-					<pre class="whitespace-pre-wrap font-mono text-xs leading-relaxed">${
-						this.attachment.extractedText || i18n("No text content available")
-					}</pre>
+					<pre class="whitespace-pre-wrap font-mono text-xs leading-relaxed">
+${this.attachment.extractedText || i18n("No text content available")}</pre
+					>
 				</div>
 			`;
 		}
@@ -229,7 +229,11 @@ export class AttachmentOverlay extends LitElement {
 			case "image": {
 				const imageUrl = `data:${this.attachment.mimeType};base64,${this.attachment.content}`;
 				return html`
-					<img src="${imageUrl}" class="max-w-full max-h-full object-contain rounded-lg shadow-lg" alt="${this.attachment.fileName}" />
+					<img
+						src="${imageUrl}"
+						class="max-w-full max-h-full object-contain rounded-lg shadow-lg"
+						alt="${this.attachment.fileName}"
+					/>
 				`;
 			}
 
@@ -263,9 +267,9 @@ export class AttachmentOverlay extends LitElement {
 			default:
 				return html`
 					<div class="bg-card border border-border text-foreground p-6 w-full h-full max-w-4xl overflow-auto">
-						<pre class="whitespace-pre-wrap font-mono text-sm">${
-							this.attachment.extractedText || i18n("No content available")
-						}</pre>
+						<pre class="whitespace-pre-wrap font-mono text-sm">
+${this.attachment.extractedText || i18n("No content available")}</pre
+						>
 					</div>
 				`;
 		}

@@ -5,7 +5,7 @@
  * provider-specific parameters exposed conditionally.
  */
 
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import type { Theme } from "../../../modes/interactive/theme/theme.js";
 import type { CustomTool, CustomToolContext, RenderResultOptions } from "../../custom-tools/types.js";

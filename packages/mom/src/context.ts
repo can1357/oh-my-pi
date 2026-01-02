@@ -12,7 +12,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	buildSessionContext,
 	type CompactionEntry,
@@ -23,7 +23,7 @@ import {
 	type SessionEntryBase,
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
-} from "@mariozechner/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 
 function uuidv4(): string {
 	const bytes = crypto.getRandomValues(new Uint8Array(16));

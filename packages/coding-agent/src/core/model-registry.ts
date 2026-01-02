@@ -10,7 +10,7 @@ import {
 	type KnownProvider,
 	type Model,
 	normalizeDomain,
-} from "@mariozechner/pi-ai";
+} from "@oh-my-pi/pi-ai";
 import { type Static, Type } from "@sinclair/typebox";
 import AjvModule from "ajv";
 import { existsSync, readFileSync } from "fs";
@@ -196,7 +196,9 @@ export class ModelRegistry {
 			}
 			return {
 				models: [],
-				error: `Failed to load models.json: ${error instanceof Error ? error.message : error}\n\nFile: ${modelsJsonPath}`,
+				error: `Failed to load models.json: ${
+					error instanceof Error ? error.message : error
+				}\n\nFile: ${modelsJsonPath}`,
 			};
 		}
 	}

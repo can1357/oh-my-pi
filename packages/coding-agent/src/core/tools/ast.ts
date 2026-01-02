@@ -1,4 +1,4 @@
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import type { Subprocess } from "bun";
 import { ensureTool } from "../../utils/tools-manager.js";
@@ -218,10 +218,14 @@ Output truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB.
 			// Format output based on action
 			let formattedOutput: string;
 			if (action === "apply") {
-				formattedOutput = `Applied ${matchCount} replacement${matchCount !== 1 ? "s" : ""} in ${fileCount} file${fileCount !== 1 ? "s" : ""}:\n`;
+				formattedOutput = `Applied ${matchCount} replacement${matchCount !== 1 ? "s" : ""} in ${fileCount} file${
+					fileCount !== 1 ? "s" : ""
+				}:\n`;
 				formattedOutput += Array.from(files).join("\n");
 			} else if (action === "preview") {
-				formattedOutput = `Preview of ${matchCount} replacement${matchCount !== 1 ? "s" : ""} in ${fileCount} file${fileCount !== 1 ? "s" : ""}:\n\n`;
+				formattedOutput = `Preview of ${matchCount} replacement${matchCount !== 1 ? "s" : ""} in ${fileCount} file${
+					fileCount !== 1 ? "s" : ""
+				}:\n\n`;
 				for (const m of matches) {
 					formattedOutput += `${m.file}:${m.line}\n`;
 					formattedOutput += `  - ${m.text}\n`;
@@ -232,7 +236,9 @@ Output truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB.
 				}
 			} else {
 				// search mode
-				formattedOutput = `Found ${matchCount} match${matchCount !== 1 ? "es" : ""} in ${fileCount} file${fileCount !== 1 ? "s" : ""}:\n\n`;
+				formattedOutput = `Found ${matchCount} match${matchCount !== 1 ? "es" : ""} in ${fileCount} file${
+					fileCount !== 1 ? "s" : ""
+				}:\n\n`;
 				for (const m of matches) {
 					formattedOutput += `${m.file}:${m.line}: ${m.text}\n`;
 				}
@@ -255,7 +261,9 @@ Output truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB.
 				if (truncation.truncatedBy === "lines") {
 					finalOutput += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}]`;
 				} else {
-					finalOutput += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit)]`;
+					finalOutput += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(
+						DEFAULT_MAX_BYTES,
+					)} limit)]`;
 				}
 			}
 

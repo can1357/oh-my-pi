@@ -12,7 +12,7 @@ import {
 	isEscape,
 	isShiftCtrlP,
 	isShiftTab,
-} from "@mariozechner/pi-tui";
+} from "@oh-my-pi/pi-tui";
 
 /**
  * Custom editor that handles Escape and Ctrl+C keys for coding-agent

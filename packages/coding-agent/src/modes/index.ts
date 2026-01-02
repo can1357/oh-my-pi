@@ -2,7 +2,7 @@
  * Run modes for the coding agent.
  */
 
-import { emergencyTerminalRestore } from "@mariozechner/pi-tui";
+import { emergencyTerminalRestore } from "@oh-my-pi/pi-tui";
 
 /**
  * Install handlers that restore terminal state on crash/signal.

@@ -1,5 +1,5 @@
-import type { AgentTool } from "@mariozechner/pi-agent-core";
-import type { ImageContent, TextContent } from "@mariozechner/pi-ai";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { spawnSync } from "child_process";
 import { constants } from "fs";
@@ -46,7 +46,9 @@ export function createReadTool(cwd: string): AgentTool<typeof readSchema> {
 		name: "read",
 		label: "read",
 		description: `Read the contents of a file. Supports:
-- Text files (truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB, use offset/limit for large files)
+- Text files (truncated to ${DEFAULT_MAX_LINES} lines or ${
+			DEFAULT_MAX_BYTES / 1024
+		}KB, use offset/limit for large files)
 - Images (jpg, png, gif, webp) - sent as attachments
 - Documents (pdf, docx, pptx, xlsx, epub, rtf) - converted to markdown via markitdown if available`,
 		parameters: readSchema,
@@ -113,7 +115,9 @@ export function createReadTool(cwd: string): AgentTool<typeof readSchema> {
 									let outputText = truncation.content;
 
 									if (truncation.truncated) {
-										outputText += `\n\n[Document converted via markitdown. Output truncated to ${formatSize(DEFAULT_MAX_BYTES)}]`;
+										outputText += `\n\n[Document converted via markitdown. Output truncated to ${formatSize(
+											DEFAULT_MAX_BYTES,
+										)}]`;
 										details = { truncation };
 									}
 
@@ -160,7 +164,9 @@ export function createReadTool(cwd: string): AgentTool<typeof readSchema> {
 								if (truncation.firstLineExceedsLimit) {
 									// First line at offset exceeds 30KB - tell model to use bash
 									const firstLineSize = formatSize(Buffer.byteLength(allLines[startLine], "utf-8"));
-									outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
+									outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(
+										DEFAULT_MAX_BYTES,
+									)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
 									details = { truncation };
 								} else if (truncation.truncated) {
 									// Truncation occurred - build actionable notice
@@ -172,7 +178,9 @@ export function createReadTool(cwd: string): AgentTool<typeof readSchema> {
 									if (truncation.truncatedBy === "lines") {
 										outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines}. Use offset=${nextOffset} to continue]`;
 									} else {
-										outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset} to continue]`;
+										outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines} (${formatSize(
+											DEFAULT_MAX_BYTES,
+										)} limit). Use offset=${nextOffset} to continue]`;
 									}
 									details = { truncation };
 								} else if (userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length) {

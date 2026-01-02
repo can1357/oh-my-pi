@@ -7,7 +7,7 @@
 import type { TSchema } from "@sinclair/typebox";
 import type { CustomTool, CustomToolResult } from "../custom-tools/types.js";
 import { callTool } from "./client.js";
-import type { MCPContent, MCPServerConnection, MCPToolDefinition, MCPToolWithServer } from "./types.js";
+import type { MCPContent, MCPServerConnection, MCPToolDefinition } from "./types.js";
 
 /** Details included in MCP tool results for rendering */
 export interface MCPToolDetails {

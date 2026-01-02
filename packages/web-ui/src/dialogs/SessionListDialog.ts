@@ -116,30 +116,37 @@ export class SessionListDialog extends DialogBase {
 									? html`<div class="text-center py-8 text-muted-foreground">${i18n("No sessions yet")}</div>`
 									: this.sessions.map(
 											(session) => html`
-											<div
-												class="group flex items-start gap-3 p-3 rounded-lg border border-border hover:bg-secondary/50 cursor-pointer transition-colors"
-												@click=${() => this.handleSelect(session.id)}
-											>
-												<div class="flex-1 min-w-0">
-													<div class="font-medium text-sm text-foreground truncate">${session.title}</div>
-													<div class="text-xs text-muted-foreground mt-1">${this.formatDate(session.lastModified)}</div>
-													<div class="text-xs text-muted-foreground mt-1">
-														${session.messageCount} ${i18n("messages")} · ${formatUsage(session.usage)}
-													</div>
+										<div
+											class="group flex items-start gap-3 p-3 rounded-lg border border-border hover:bg-secondary/50 cursor-pointer transition-colors"
+											@click=${() => this.handleSelect(session.id)}
+										>
+											<div class="flex-1 min-w-0">
+												<div class="font-medium text-sm text-foreground truncate">${session.title}</div>
+												<div class="text-xs text-muted-foreground mt-1">${this.formatDate(session.lastModified)}</div>
+												<div class="text-xs text-muted-foreground mt-1">
+													${session.messageCount} ${i18n("messages")} · ${formatUsage(session.usage)}
 												</div>
-												<button
-													class="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-destructive/10 text-destructive transition-opacity"
-													@click=${(e: Event) => this.handleDelete(session.id, e)}
-													title=${i18n("Delete")}
-												>
-													<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-														<path d="M3 6h18"></path>
-														<path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
-														<path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
-													</svg>
-												</button>
 											</div>
-										`,
+											<button
+												class="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-destructive/10 text-destructive transition-opacity"
+												@click=${(e: Event) => this.handleDelete(session.id, e)}
+												title=${i18n("Delete")}
+											>
+												<svg
+													width="16"
+													height="16"
+													viewBox="0 0 24 24"
+													fill="none"
+													stroke="currentColor"
+													stroke-width="2"
+												>
+													<path d="M3 6h18"></path>
+													<path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
+													<path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+												</svg>
+											</button>
+										</div>
+									`,
 										)
 						}
 					</div>

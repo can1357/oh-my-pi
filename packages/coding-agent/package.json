@@ -1,5 +1,5 @@
 {
-	"name": "@mariozechner/pi-coding-agent",
+	"name": "@oh-my-pi/pi-coding-agent",
 	"version": "1.337.0",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"type": "module",
@@ -38,9 +38,11 @@
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
-		"@mariozechner/pi-agent-core": "workspace:*",
-		"@mariozechner/pi-ai": "workspace:*",
-		"@mariozechner/pi-tui": "workspace:*",
+		"@oh-my-pi/pi-agent-core": "workspace:*",
+		"@oh-my-pi/pi-ai": "workspace:*",
+		"@oh-my-pi/pi-tui": "workspace:*",
+		"@sinclair/typebox": "^0.34.46",
+		"ajv": "^8.17.1",
 		"chalk": "^5.5.0",
 		"node-html-parser": "^6.1.13",
 		"cli-highlight": "^2.1.11",
@@ -69,7 +71,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/badlogic/pi-mono.git",
+		"url": "git+https://github.com/can1357/oh-my-pi.git",
 		"directory": "packages/coding-agent"
 	},
 	"engines": {

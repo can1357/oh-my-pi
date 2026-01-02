@@ -4,8 +4,8 @@
  * Tree-based rendering with collapsed/expanded states for Exa search results.
  */
 
-import type { Component } from "@mariozechner/pi-tui";
-import { Text } from "@mariozechner/pi-tui";
+import type { Component } from "@oh-my-pi/pi-tui";
+import { Text } from "@oh-my-pi/pi-tui";
 import type { Theme } from "../../../modes/interactive/theme/theme.js";
 import type { RenderResultOptions } from "../../custom-tools/types.js";
 import { logViewError } from "./logger.js";
@@ -81,7 +81,10 @@ export function renderExaResult(
 	const expandHint = expanded ? "" : theme.fg("dim", " (Ctrl+O to expand)");
 	const toolLabel = details?.toolName ?? "Exa Search";
 
-	let headerParts = `${icon} ${theme.fg("toolTitle", toolLabel)} · ${theme.fg("dim", `${resultCount} result${resultCount !== 1 ? "s" : ""}`)}`;
+	let headerParts = `${icon} ${theme.fg("toolTitle", toolLabel)} · ${theme.fg(
+		"dim",
+		`${resultCount} result${resultCount !== 1 ? "s" : ""}`,
+	)}`;
 
 	if (cost !== undefined) {
 		headerParts += ` · ${theme.fg("muted", `$${cost.toFixed(4)}`)}`;
@@ -109,7 +112,10 @@ export function renderExaResult(
 			}
 
 			if (resultCount > 1) {
-				text += `\n ${theme.fg("dim", TREE_END)} ${theme.fg("muted", `${resultCount - 1} more result${resultCount !== 2 ? "s" : ""}`)}`;
+				text += `\n ${theme.fg("dim", TREE_END)} ${theme.fg(
+					"muted",
+					`${resultCount - 1} more result${resultCount !== 2 ? "s" : ""}`,
+				)}`;
 			}
 		}
 	} else {
@@ -129,7 +135,10 @@ export function renderExaResult(
 				const domain = res.url ? getDomain(res.url) : "";
 				const domainPart = domain ? theme.fg("dim", ` (${domain})`) : "";
 
-				text += `\n ${theme.fg("dim", TREE_SPACE)} ${theme.fg("dim", branch)} ${theme.fg("accent", title)}${domainPart}`;
+				text += `\n ${theme.fg("dim", TREE_SPACE)} ${theme.fg("dim", branch)} ${theme.fg(
+					"accent",
+					title,
+				)}${domainPart}`;
 
 				// URL
 				if (res.url) {

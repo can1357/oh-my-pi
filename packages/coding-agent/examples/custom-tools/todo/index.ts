@@ -13,7 +13,7 @@ import type {
 	CustomToolContext,
 	CustomToolFactory,
 	CustomToolSessionEvent,
-} from "@mariozechner/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 
 interface Todo {
 	id: number;
@@ -188,10 +188,7 @@ const factory: CustomToolFactory = (pi) => {
 				case "add": {
 					const added = todoList[todoList.length - 1];
 					return new Text(
-						theme.fg("success", "✓ Added ") +
-							theme.fg("accent", `#${added.id}`) +
-							" " +
-							theme.fg("muted", added.text),
+						`${theme.fg("success", "✓ Added ") + theme.fg("accent", `#${added.id}`)} ${theme.fg("muted", added.text)}`,
 						0,
 						0,
 					);

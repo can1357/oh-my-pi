@@ -1,61 +1,144 @@
-# Pi Monorepo
+<p align="center">
+  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/banner.png" alt="Pi Monorepo">
+</p>
 
-Tools for building AI agents and managing LLM deployments.
+<p align="center">
+  <strong>AI coding agent for the terminal</strong>
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent"><img src="https://img.shields.io/npm/v/@oh-my-pi/pi-coding-agent?style=flat&colorA=222222&colorB=CB3837" alt="npm version"></a>
+  <a href="https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-keep-E05735?style=flat&colorA=222222" alt="Changelog"></a>
+  <a href="https://github.com/can1357/oh-my-pi/actions"><img src="https://img.shields.io/github/actions/workflow/status/can1357/oh-my-pi/ci.yml?style=flat&colorA=222222&colorB=3FB950" alt="CI"></a>
+  <a href="https://github.com/can1357/oh-my-pi/blob/main/LICENSE"><img src="https://img.shields.io/github/license/can1357/oh-my-pi?style=flat&colorA=222222&colorB=58A6FF" alt="License"></a>
+  <a href="https://www.typescriptlang.org"><img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&colorA=222222&logo=typescript&logoColor=white" alt="TypeScript"></a>
+  <a href="https://bun.sh"><img src="https://img.shields.io/badge/runtime-Bun-f472b6?style=flat&colorA=222222" alt="Bun"></a>
+</p>
+
+<p align="center">
+  Fork of <a href="https://github.com/badlogic/pi-mono">badlogic/pi-mono</a> by <a href="https://github.com/mariozechner">@mariozechner</a>
+</p>
+
+---
+
+## Fork Enhancements
+
+Features added on top of upstream pi:
+
+### MCP & Plugin System
+
+Full Model Context Protocol support with external tool integration:
+
+- Stdio and HTTP transports for connecting to MCP servers
+- Plugin CLI (`pi plugin install/enable/configure/doctor`)
+- Hot-loadable plugins from `~/.pi/plugins/` with npm/bun integration
+- 22 pre-built Exa MCP tools for web research, LinkedIn, fact-finding
+
+### LSP Tool (Language Server Protocol)
+
+IDE-like code intelligence via rust-analyzer and extensible to other languages:
+
+- File diagnostics with error/warning/info classification
+- Hover documentation, symbol references, implementations
+- Code actions and refactoring suggestions
+- Workspace-wide symbol search
+
+### Task Tool (Subagent System)
+
+Parallel execution framework with specialized agents:
+
+- **5 bundled agents**: explore, plan, browser, task, reviewer
+- User-level (`~/.pi/agent/agents/`) and project-level (`.pi/agents/`) custom agents
+- Concurrency-limited batch execution with progress tracking
+- Pre-defined commands: implement, architect-plan, implement-with-critic
+
+### Web Search & Fetch
+
+Multi-provider search and full-page scraping:
+
+- Anthropic and Perplexity search integration with caching
+- HTML-to-markdown conversion with link preservation
+- JavaScript rendering support, image handling
+
+### TUI Overhaul
+
+- **Welcome screen**: Logo, tips, recent sessions with selection
+- **Powerline footer**: Model, cwd, git branch/status, token usage, context %
+- **Hotkeys**: `?` displays shortcuts when editor empty
+- **Emergency terminal restore**: Crash handlers prevent terminal corruption
+
+### Git Context
+
+System prompt includes repo awareness:
+
+- Current branch, main branch auto-detection
+- Git status snapshot (staged/unstaged/untracked)
+- Recent 5 commits summary
+
+### Bun Runtime
+
+Migrated from Node.js for native TypeScript:
+
+- Runs `.ts` files directly without build step
+- Faster CLI startup times
+- All 7 packages converted to Bun APIs
+
+### Additional Tools
+
+- **Ask Tool**: Interactive user questioning (211 lines)
+- **AST Tool**: Structural code analysis via ast-grep (271 lines)
+- **Replace Tool**: Find & replace across files (297 lines)
+
+---
 
 ## Packages
 
-| Package                                                    | Description                                                      |
-| ---------------------------------------------------------- | ---------------------------------------------------------------- |
-| **[@mariozechner/pi-ai](packages/ai)**                     | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
-| **[@mariozechner/pi-agent-core](packages/agent)**          | Agent runtime with tool calling and state management             |
-| **[@mariozechner/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI                                     |
-| **[@mariozechner/pi-mom](packages/mom)**                   | Slack bot that delegates messages to the pi coding agent         |
-| **[@mariozechner/pi-tui](packages/tui)**                   | Terminal UI library with differential rendering                  |
-| **[@mariozechner/pi-web-ui](packages/web-ui)**             | Web components for AI chat interfaces                            |
-| **[@mariozechner/pi-pods](packages/pods)**                 | CLI for managing vLLM deployments on GPU pods                    |
+| Package                                                | Description                                                      |
+| ------------------------------------------------------ | ---------------------------------------------------------------- |
+| **[@oh-my-pi/pi-ai](packages/ai)**                     | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
+| **[@oh-my-pi/pi-agent-core](packages/agent)**          | Agent runtime with tool calling and state management             |
+| **[@oh-my-pi/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI                                     |
+| **[@oh-my-pi/pi-mom](packages/mom)**                   | Slack bot that delegates messages to the pi coding agent         |
+| **[@oh-my-pi/pi-tui](packages/tui)**                   | Terminal UI library with differential rendering                  |
+| **[@oh-my-pi/pi-web-ui](packages/web-ui)**             | Web components for AI chat interfaces                            |
+
+---
 
 ## Development
 
 ### Setup
 
 ```bash
-bun install          # Install all dependencies
-bun run build        # Build all packages
-bun run check        # Lint, format, and type check
+bun run dev:install   # Install deps and link all packages
+bun run build         # Build all packages
+bun run check         # Lint, format, and type check
 ```
 
-> **Note:** `bun run check` requires `bun run build` to be run first. The web-ui package uses `tsc` which needs compiled `.d.ts` files from dependencies.
+> **Note:** `bun run check` requires `bun run build` first. The web-ui package uses `tsc` which needs compiled `.d.ts` files from dependencies.
 
-### CI
-
-GitHub Actions runs on push to `main` and on pull requests. The workflow runs `bun run check` and `bun test` for each package in parallel.
-
-**Do not add LLM API keys as secrets to this repository.** Tests that require LLM access use `describe.skipIf()` to skip when API keys are missing. This is intentional:
-
-- PRs from external contributors would have access to secrets in the CI environment
-- Malicious PR code could exfiltrate API keys
-- Tests that need LLM calls are skipped on CI and run locally by developers who have keys configured
-
-If you need to run LLM-dependent tests, run them locally with your own API keys.
-
-### Development
-
-Start watch builds for all packages:
+### Watch Mode
 
 ```bash
 bun run dev
 ```
 
-Then run directly with Bun:
+Then run directly:
 
 ```bash
 cd packages/coding-agent && bunx tsx src/cli.ts
-cd packages/pods && bunx tsx src/cli.ts
 ```
 
-### Versioning (Lockstep)
+### CI
 
-**All packages MUST always have the same version number.** Use these commands to bump versions:
+GitHub Actions runs on push to `main` and on pull requests. The workflow runs `bun run check` and `bun test` for each package in parallel.
+
+**Do not add LLM API keys as secrets.** Tests requiring LLM access use `describe.skipIf()` and run locally.
+
+---
+
+## Versioning
+
+All packages use lockstep versioning:
 
 ```bash
 bun run version:patch    # 0.7.5 -> 0.7.6
@@ -63,17 +146,11 @@ bun run version:minor    # 0.7.5 -> 0.8.0
 bun run version:major    # 0.7.5 -> 1.0.0
 ```
 
-These commands:
+**Never manually edit version numbers.**
 
-1. Update all package versions to the same number
-2. Update inter-package dependency versions (e.g., `pi-agent` depends on `pi-ai@^0.7.7`)
-3. Update `bun.lockb`
+---
 
-**Note:** Version bumping uses `npm version -ws` since Bun doesn't yet have workspace version equivalent.
-
-**Never manually edit version numbers.** The lockstep system ensures consistency across the monorepo.
-
-### Publishing
+## Publishing
 
 ```bash
 bun run release:patch    # Bug fixes
@@ -81,16 +158,10 @@ bun run release:minor    # New features
 bun run release:major    # Breaking changes
 ```
 
-This handles version bump, CHANGELOG updates, commit, tag, publish, and push.
+Requires an npm token with "Bypass 2FA on publish" enabled.
 
-**Note:** Publishing uses `npm publish` since Bun delegates to npm for publishing.
-
-**NPM Token Setup**: Requires a granular access token with "Bypass 2FA on publish" enabled.
-
-- Go to https://www.npmjs.com/settings/badlogic/tokens/
-- Create a new "Granular Access Token" with "Bypass 2FA on publish"
-- Set the token: `npm config set //registry.npmjs.org/:_authToken=YOUR_TOKEN`
+---
 
 ## License
 
-MIT
+MIT - Original work copyright Mario Zechner

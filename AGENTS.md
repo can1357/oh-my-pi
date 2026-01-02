@@ -10,7 +10,6 @@ read README.md, then ask which module(s) to work on. Based on the answer, read t
 - packages/agent/README.md
 - packages/coding-agent/README.md
 - packages/mom/README.md
-- packages/pods/README.md
 - packages/web-ui/README.md
 
 ## Code Quality
@@ -287,7 +286,7 @@ When reading issues:
 When creating issues:
 
 - Add `pkg:*` labels to indicate which package(s) the issue affects
-  - Available labels: `pkg:agent`, `pkg:ai`, `pkg:coding-agent`, `pkg:mom`, `pkg:pods`, `pkg:tui`, `pkg:web-ui`
+  - Available labels: `pkg:agent`, `pkg:ai`, `pkg:coding-agent`, `pkg:mom`, `pkg:tui`, `pkg:web-ui`
 - If an issue spans multiple packages, add all relevant labels
 
 When closing issues via commit:
@@ -298,7 +297,7 @@ When closing issues via commit:
 ## Tools
 
 - GitHub CLI for issues/PRs
-- Add package labels to issues/PRs: pkg:agent, pkg:ai, pkg:coding-agent, pkg:mom, pkg:pods, pkg:tui, pkg:web-ui
+- Add package labels to issues/PRs: pkg:agent, pkg:ai, pkg:coding-agent, pkg:mom, pkg:tui, pkg:web-ui
 - TUI interaction: use tmux
 
 ## Style

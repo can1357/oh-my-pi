@@ -1,5 +1,5 @@
 {
-	"name": "@mariozechner/pi-agent-core",
+	"name": "@oh-my-pi/pi-agent-core",
 	"version": "1.337.0",
 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
 	"type": "module",
@@ -13,8 +13,8 @@
 		"test": "vitest --run"
 	},
 	"dependencies": {
-		"@mariozechner/pi-ai": "workspace:*",
-		"@mariozechner/pi-tui": "workspace:*"
+		"@oh-my-pi/pi-ai": "workspace:*",
+		"@oh-my-pi/pi-tui": "workspace:*"
 	},
 	"keywords": [
 		"ai",
@@ -27,7 +27,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/badlogic/pi-mono.git",
+		"url": "git+https://github.com/can1357/oh-my-pi.git",
 		"directory": "packages/agent"
 	},
 	"engines": {

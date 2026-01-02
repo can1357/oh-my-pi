@@ -20,7 +20,7 @@ import {
 	readOnlyTools, // read, grep, find, ls - uses process.cwd()
 	readTool,
 	SessionManager,
-} from "@mariozechner/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 
 // Read-only mode (no edit/write) - uses process.cwd()

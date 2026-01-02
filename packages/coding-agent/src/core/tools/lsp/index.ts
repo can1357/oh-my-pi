@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import path from "node:path";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Theme } from "../../../modes/interactive/theme/theme.js";
 import { resolveToCwd } from "../path-utils.js";
 import { ensureFileOpen, getOrCreateClient, refreshFile, sendRequest } from "./client.js";
@@ -429,7 +429,9 @@ Rust-analyzer specific (require rust-analyzer):
 							output = `No symbols matching "${query}"`;
 						} else {
 							const lines = result.map((s) => formatSymbolInformation(s, cwd));
-							output = `Found ${result.length} symbol(s) matching "${query}":\n${lines.map((l) => `  ${l}`).join("\n")}`;
+							output = `Found ${result.length} symbol(s) matching "${query}":\n${lines
+								.map((l) => `  ${l}`)
+								.join("\n")}`;
 						}
 						break;
 					}
@@ -564,7 +566,9 @@ Rust-analyzer specific (require rust-analyzer):
 								}
 								return `  [${i}] ${actionItem.title}`;
 							});
-							output = `Available code actions:\n${lines.join("\n")}\n\nUse action_index parameter to apply a specific action.`;
+							output = `Available code actions:\n${lines.join(
+								"\n",
+							)}\n\nUse action_index parameter to apply a specific action.`;
 						}
 						break;
 					}

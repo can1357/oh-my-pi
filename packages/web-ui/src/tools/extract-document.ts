@@ -1,5 +1,5 @@
-import type { AgentTool } from "@mariozechner/pi-agent-core";
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { type Static, Type } from "@sinclair/typebox";
 import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
@@ -206,7 +206,9 @@ export const extractDocumentRenderer: ToolRenderer<ExtractDocumentParams, Extrac
 			const title = details
 				? result.isError
 					? `Failed to extract ${details.fileName || "document"}`
-					: `Extracted text from ${details.fileName} (${details.format.toUpperCase()}, ${(details.size / 1024).toFixed(1)}KB)`
+					: `Extracted text from ${details.fileName} (${details.format.toUpperCase()}, ${(
+							details.size / 1024
+						).toFixed(1)}KB)`
 				: result.isError
 					? "Failed to extract document"
 					: "Extracted text from document";
@@ -224,16 +226,10 @@ export const extractDocumentRenderer: ToolRenderer<ExtractDocumentParams, Extrac
 						<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300 space-y-3">
 							${
 								params.url
-									? html`<div class="text-sm text-gray-600 dark:text-gray-400">
-										<strong>URL:</strong> ${params.url}
-								  </div>`
+									? html`<div class="text-sm text-gray-600 dark:text-gray-400"><strong>URL:</strong> ${params.url}</div>`
 									: ""
 							}
-							${
-								output && !result.isError
-									? html`<code-block .code=${output} language="plaintext"></code-block>`
-									: ""
-							}
+							${output && !result.isError ? html`<code-block .code=${output} language="plaintext"></code-block>` : ""}
 							${
 								result.isError && output
 									? html`<console-block .content=${output} .variant=${"error"}></console-block>`

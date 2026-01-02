@@ -10,7 +10,7 @@ import {
 	Spacer,
 	Text,
 	truncateToWidth,
-} from "@mariozechner/pi-tui";
+} from "@oh-my-pi/pi-tui";
 import type { SessionInfo } from "../../../core/session-manager.js";
 import { fuzzyFilter } from "../../../utils/fuzzy.js";
 import { theme } from "../theme/theme.js";

@@ -4,8 +4,8 @@
  * Tree-based rendering with collapsed/expanded states for web search results.
  */
 
-import type { Component } from "@mariozechner/pi-tui";
-import { Text } from "@mariozechner/pi-tui";
+import type { Component } from "@oh-my-pi/pi-tui";
+import { Text } from "@oh-my-pi/pi-tui";
 import type { Theme } from "../../../modes/interactive/theme/theme.js";
 import type { RenderResultOptions } from "../../custom-tools/types.js";
 import type { WebSearchResponse } from "./types.js";
@@ -89,7 +89,10 @@ export function renderWebSearchResult(
 	const icon = sourceCount > 0 ? theme.fg("success", "●") : theme.fg("warning", "●");
 	const expandHint = expanded ? "" : theme.fg("dim", " (Ctrl+O to expand)");
 	const providerLabel = provider === "anthropic" ? "Anthropic" : "Perplexity";
-	let text = `${icon} ${theme.fg("toolTitle", "Web Search")} ${theme.fg("dim", `(${providerLabel})`)} · ${theme.fg("dim", `${sourceCount} source${sourceCount !== 1 ? "s" : ""}`)}${expandHint}`;
+	let text = `${icon} ${theme.fg("toolTitle", "Web Search")} ${theme.fg("dim", `(${providerLabel})`)} · ${theme.fg(
+		"dim",
+		`${sourceCount} source${sourceCount !== 1 ? "s" : ""}`,
+	)}${expandHint}`;
 
 	// Get answer text
 	const contentText = response.answer ?? result.content[0]?.text ?? "";
@@ -107,7 +110,10 @@ export function renderWebSearchResult(
 
 		// Show source count summary
 		if (sourceCount > 0) {
-			text += `\n ${theme.fg("dim", TREE_END)} ${theme.fg("muted", `${sourceCount} source${sourceCount !== 1 ? "s" : ""}`)}`;
+			text += `\n ${theme.fg("dim", TREE_END)} ${theme.fg(
+				"muted",
+				`${sourceCount} source${sourceCount !== 1 ? "s" : ""}`,
+			)}`;
 		}
 	} else {
 		// Expanded view: full answer + source tree
@@ -137,8 +143,14 @@ export function renderWebSearchResult(
 				const age = formatAge(src.ageSeconds) || src.publishedDate;
 				const agePart = age ? theme.fg("muted", ` · ${age}`) : "";
 
-				text += `\n ${theme.fg("dim", indent)} ${theme.fg("dim", branch)} ${theme.fg("accent", title)} ${theme.fg("dim", `(${domain})`)}${agePart}`;
-				text += `\n ${theme.fg("dim", indent)} ${theme.fg("dim", `${cont}  ${TREE_HOOK} `)}${theme.fg("mdLinkUrl", src.url)}`;
+				text += `\n ${theme.fg("dim", indent)} ${theme.fg("dim", branch)} ${theme.fg("accent", title)} ${theme.fg(
+					"dim",
+					`(${domain})`,
+				)}${agePart}`;
+				text += `\n ${theme.fg("dim", indent)} ${theme.fg("dim", `${cont}  ${TREE_HOOK} `)}${theme.fg(
+					"mdLinkUrl",
+					src.url,
+				)}`;
 			}
 		}
 

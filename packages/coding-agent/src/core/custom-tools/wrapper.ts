@@ -2,7 +2,7 @@
  * Wraps CustomTool instances into AgentTool for use with the agent.
  */
 
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { CustomTool, CustomToolContext, LoadedCustomTool } from "./types.js";
 
 /**

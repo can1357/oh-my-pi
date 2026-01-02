@@ -2,7 +2,7 @@
  * Simple text input component for hooks.
  */
 
-import { Container, Input, isEnter, isEscape, Spacer, Text } from "@mariozechner/pi-tui";
+import { Container, Input, isEnter, isEscape, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 

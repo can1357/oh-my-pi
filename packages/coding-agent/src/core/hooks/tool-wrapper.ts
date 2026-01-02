@@ -2,7 +2,7 @@
  * Tool wrapper - wraps tools with hook callbacks for interception.
  */
 
-import type { AgentTool, AgentToolContext, AgentToolUpdateCallback } from "@mariozechner/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { HookRunner } from "./runner.js";
 import type { ToolCallEventResult, ToolResultEventResult } from "./types.js";
 

@@ -1,4 +1,4 @@
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { html } from "lit";
 import { Code } from "lucide";
 import { i18n } from "../../utils/i18n.js";
@@ -48,9 +48,9 @@ export class DefaultRenderer implements ToolRenderer {
 						${
 							paramsJson
 								? html`<div>
-							<div class="text-xs font-medium mb-1 text-muted-foreground">${i18n("Input")}</div>
-							<code-block .code=${paramsJson} language="json"></code-block>
-						</div>`
+									<div class="text-xs font-medium mb-1 text-muted-foreground">${i18n("Input")}</div>
+									<code-block .code=${paramsJson} language="json"></code-block>
+							  </div>`
 								: ""
 						}
 						<div>
@@ -67,11 +67,7 @@ export class DefaultRenderer implements ToolRenderer {
 		if (params) {
 			if (isStreaming && (!paramsJson || paramsJson === "{}" || paramsJson === "null")) {
 				return {
-					content: html`
-						<div>
-							${renderHeader(state, Code, "Preparing tool parameters...")}
-						</div>
-					`,
+					content: html` <div>${renderHeader(state, Code, "Preparing tool parameters...")}</div> `,
 					isCustom: false,
 				};
 			}
@@ -92,11 +88,7 @@ export class DefaultRenderer implements ToolRenderer {
 
 		// No params or result yet
 		return {
-			content: html`
-				<div>
-					${renderHeader(state, Code, "Preparing tool...")}
-				</div>
-			`,
+			content: html` <div>${renderHeader(state, Code, "Preparing tool...")}</div> `,
 			isCustom: false,
 		};
 	}

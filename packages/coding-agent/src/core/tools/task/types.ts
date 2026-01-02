@@ -1,4 +1,4 @@
-import { StringEnum } from "@mariozechner/pi-ai";
+import { StringEnum } from "@oh-my-pi/pi-ai";
 import { type Static, Type } from "@sinclair/typebox";
 
 /** Scope for agent discovery */

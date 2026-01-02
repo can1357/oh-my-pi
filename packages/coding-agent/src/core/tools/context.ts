@@ -1,8 +1,8 @@
-import type { AgentToolContext } from "@mariozechner/pi-agent-core";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { CustomToolContext } from "../custom-tools/types.js";
 import type { HookUIContext } from "../hooks/types.js";
 
-declare module "@mariozechner/pi-agent-core" {
+declare module "@oh-my-pi/pi-agent-core" {
 	interface AgentToolContext extends CustomToolContext {
 		ui?: HookUIContext;
 		hasUI?: boolean;

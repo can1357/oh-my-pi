@@ -101,7 +101,8 @@ export class GenericArtifact extends ArtifactElement {
 						</svg>
 						<div class="font-medium text-foreground mb-2">${this.filename}</div>
 						<p class="text-sm">
-							${i18n("Preview not available for this file type.")} ${i18n("Click the download button above to view it on your computer.")}
+							${i18n("Preview not available for this file type.")}
+							${i18n("Click the download button above to view it on your computer.")}
 						</p>
 					</div>
 				</div>

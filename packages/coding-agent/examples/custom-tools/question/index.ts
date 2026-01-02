@@ -2,7 +2,7 @@
  * Question Tool - Let the LLM ask the user a question with options
  */
 
-import type { CustomTool, CustomToolFactory } from "@mariozechner/pi-coding-agent";
+import type { CustomTool, CustomToolFactory } from "@oh-my-pi/pi-coding-agent";
 
 interface QuestionDetails {
 	question: string;

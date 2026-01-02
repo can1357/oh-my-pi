@@ -101,7 +101,7 @@ async function main(): Promise<void> {
 	const command = args[0];
 
 	if (!command || command === "help" || command === "--help" || command === "-h") {
-		console.log(`Usage: npx @mariozechner/pi-ai <command> [provider]
+		console.log(`Usage: npx @oh-my-pi/pi-ai <command> [provider]
 
 Commands:
   login [provider]  Login to an OAuth provider
@@ -114,9 +114,9 @@ Providers:
   google-antigravity Antigravity (Gemini 3, Claude, GPT-OSS)
 
 Examples:
-  npx @mariozechner/pi-ai login              # interactive provider selection
-  npx @mariozechner/pi-ai login anthropic    # login to specific provider
-  npx @mariozechner/pi-ai list               # list providers
+  npx @oh-my-pi/pi-ai login              # interactive provider selection
+  npx @oh-my-pi/pi-ai login anthropic    # login to specific provider
+  npx @oh-my-pi/pi-ai list               # list providers
 `);
 		return;
 	}
@@ -151,7 +151,7 @@ Examples:
 
 		if (!PROVIDERS.some((p) => p.id === provider)) {
 			console.error(`Unknown provider: ${provider}`);
-			console.error(`Use 'npx @mariozechner/pi-ai list' to see available providers`);
+			console.error(`Use 'npx @oh-my-pi/pi-ai list' to see available providers`);
 			process.exit(1);
 		}
 
@@ -161,7 +161,7 @@ Examples:
 	}
 
 	console.error(`Unknown command: ${command}`);
-	console.error(`Use 'npx @mariozechner/pi-ai --help' for usage`);
+	console.error(`Use 'npx @oh-my-pi/pi-ai --help' for usage`);
 	process.exit(1);
 }
 

@@ -1,5 +1,5 @@
-import type { AssistantMessage } from "@mariozechner/pi-ai";
-import { type Component, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { execSync } from "child_process";
 import { existsSync, type FSWatcher, readFileSync, watch } from "fs";
 import { dirname, join } from "path";

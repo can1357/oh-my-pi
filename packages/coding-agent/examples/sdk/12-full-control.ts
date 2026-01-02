@@ -8,7 +8,7 @@
  * paths relative to your cwd.
  */
 
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel } from "@oh-my-pi/pi-ai";
 import {
 	AuthStorage,
 	type CustomTool,
@@ -19,7 +19,7 @@ import {
 	ModelRegistry,
 	SessionManager,
 	SettingsManager,
-} from "@mariozechner/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 
 // Custom auth storage location

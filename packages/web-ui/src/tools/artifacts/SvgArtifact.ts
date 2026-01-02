@@ -45,9 +45,13 @@ export class SvgArtifact extends ArtifactElement {
 
 		return html`
 			<div class="flex items-center gap-2">
-				${toggle}
-				${copyButton}
-				${DownloadButton({ content: this._content, filename: this.filename, mimeType: "image/svg+xml", title: i18n("Download SVG") })}
+				${toggle} ${copyButton}
+				${DownloadButton({
+					content: this._content,
+					filename: this.filename,
+					mimeType: "image/svg+xml",
+					title: i18n("Download SVG"),
+				})}
 			</div>
 		`;
 	}
@@ -60,7 +64,7 @@ export class SvgArtifact extends ArtifactElement {
 						this.viewMode === "preview"
 							? html`<div class="h-full flex items-center justify-center">
 								${unsafeHTML(this.content.replace(/<svg(\s|>)/i, (_m, p1) => `<svg class="w-full h-full"${p1}`))}
-							</div>`
+						  </div>`
 							: html`<pre class="m-0 p-4 text-xs"><code class="hljs language-xml">${unsafeHTML(
 									hljs.highlight(this.content, { language: "xml", ignoreIllegals: true }).value,
 								)}</code></pre>`

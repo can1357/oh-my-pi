@@ -33,7 +33,9 @@ export class ThinkingBlock extends LitElement {
 					class="thinking-header cursor-pointer select-none flex items-center gap-2 py-1 text-sm text-muted-foreground hover:text-foreground transition-colors"
 					@click=${this.toggleExpanded}
 				>
-					<span class="transition-transform inline-block ${this.isExpanded ? "rotate-90" : ""}">${icon(ChevronRight, "sm")}</span>
+					<span class="transition-transform inline-block ${this.isExpanded ? "rotate-90" : ""}"
+						>${icon(ChevronRight, "sm")}</span
+					>
 					<span class="${shimmerClasses}">Thinking...</span>
 				</div>
 				${this.isExpanded ? html`<markdown-block .content=${this.content} .isThinking=${true}></markdown-block>` : ""}

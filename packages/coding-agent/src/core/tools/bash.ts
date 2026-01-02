@@ -1,7 +1,7 @@
 import { createWriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import type { Subprocess } from "bun";
 import { getShellConfig, killProcessTree } from "../../utils/shell.js";
@@ -30,7 +30,9 @@ export function createBashTool(cwd: string): AgentTool<typeof bashSchema> {
 	return {
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${
+			DEFAULT_MAX_BYTES / 1024
+		}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
 		parameters: bashSchema,
 		execute: async (
 			_toolCallId: string,
@@ -187,11 +189,15 @@ export function createBashTool(cwd: string): AgentTool<typeof bashSchema> {
 
 				if (truncation.lastLinePartial) {
 					const lastLineSize = formatSize(Buffer.byteLength(fullOutput.split("\n").pop() || "", "utf-8"));
-					outputText += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${tempFilePath}]`;
+					outputText += `\n\n[Showing last ${formatSize(
+						truncation.outputBytes,
+					)} of line ${endLine} (line is ${lastLineSize}). Full output: ${tempFilePath}]`;
 				} else if (truncation.truncatedBy === "lines") {
 					outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${tempFilePath}]`;
 				} else {
-					outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${tempFilePath}]`;
+					outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(
+						DEFAULT_MAX_BYTES,
+					)} limit). Full output: ${tempFilePath}]`;
 				}
 			}
 

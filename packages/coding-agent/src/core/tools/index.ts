@@ -24,7 +24,7 @@ export {
 } from "./web-search/index.js";
 export { createWriteTool, writeTool } from "./write.js";
 
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { askTool, createAskTool } from "./ask.js";
 import { astTool, createAstTool } from "./ast.js";
 import { bashTool, createBashTool } from "./bash.js";

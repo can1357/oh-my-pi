@@ -1,6 +1,6 @@
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
-import { Agent, type AgentMessage } from "@mariozechner/pi-agent-core";
-import { getModel } from "@mariozechner/pi-ai";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { getModel } from "@oh-my-pi/pi-ai";
 import {
 	type AgentState,
 	ApiKeyPromptDialog,
@@ -18,7 +18,7 @@ import {
 	SettingsDialog,
 	SettingsStore,
 	setAppStorage,
-} from "@mariozechner/pi-web-ui";
+} from "@oh-my-pi/pi-web-ui";
 import { html, render } from "lit";
 import { Bell, History, Plus, Settings } from "lucide";
 import "./app.css";
@@ -284,7 +284,6 @@ const renderApp = () => {
 						onClick: newSession,
 						title: "New Session",
 					})}
-
 					${
 						currentTitle
 							? isEditingTitle
@@ -317,7 +316,7 @@ const renderApp = () => {
 											}
 										},
 									})}
-								</div>`
+							  </div>`
 								: html`<button
 									class="px-2 py-1 text-sm text-foreground hover:bg-secondary rounded transition-colors"
 									@click=${() => {
@@ -332,9 +331,9 @@ const renderApp = () => {
 										});
 									}}
 									title="Click to edit title"
-								>
+							  >
 									${currentTitle}
-								</button>`
+							  </button>`
 							: html`<span class="text-base font-semibold text-foreground">Pi Web UI Example</span>`
 					}
 				</div>

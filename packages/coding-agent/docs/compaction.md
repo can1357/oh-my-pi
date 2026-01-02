@@ -3,6 +3,7 @@
 LLMs have limited context windows. When conversations grow too long, pi uses compaction to summarize older content while preserving recent work. This page covers both auto-compaction and branch summarization.
 
 **Source files:**
+
 - [`src/core/compaction/compaction.ts`](../src/core/compaction/compaction.ts) - Auto-compaction logic
 - [`src/core/compaction/branch-summarization.ts`](../src/core/compaction/branch-summarization.ts) - Branch summarization
 - [`src/core/compaction/utils.ts`](../src/core/compaction/utils.ts) - Shared utilities (file tracking, serialization)
@@ -13,10 +14,10 @@ LLMs have limited context windows. When conversations grow too long, pi uses com
 
 Pi has two summarization mechanisms:
 
-| Mechanism | Trigger | Purpose |
-|-----------|---------|---------|
-| Compaction | Context exceeds threshold, or `/compact` | Summarize old messages to free up context |
-| Branch summarization | `/tree` navigation | Preserve context when switching branches |
+| Mechanism            | Trigger                                  | Purpose                                   |
+| -------------------- | ---------------------------------------- | ----------------------------------------- |
+| Compaction           | Context exceeds threshold, or `/compact` | Summarize old messages to free up context |
+| Branch summarization | `/tree` navigation                       | Preserve context when switching branches  |
 
 Both use the same structured summary format and track file operations cumulatively.
 
@@ -99,12 +100,14 @@ Split turn (one huge turn exceeds budget):
 ```
 
 For split turns, pi generates two summaries and merges them:
+
 1. **History summary**: Previous context (if any)
 2. **Turn prefix summary**: The early part of the split turn
 
 ### Cut Point Rules
 
 Valid cut points are:
+
 - User messages
 - Assistant messages
 - BashExecution messages
@@ -118,21 +121,21 @@ Defined in [`src/core/session-manager.ts`](../src/core/session-manager.ts):
 
 ```typescript
 interface CompactionEntry<T = unknown> {
-  type: "compaction";
-  id: string;
-  parentId: string;
-  timestamp: number;
-  summary: string;
-  firstKeptEntryId: string;
-  tokensBefore: number;
-  fromHook?: boolean;  // true if hook provided the compaction
-  details?: T;         // hook-specific data
+	type: "compaction";
+	id: string;
+	parentId: string;
+	timestamp: number;
+	summary: string;
+	firstKeptEntryId: string;
+	tokensBefore: number;
+	fromHook?: boolean; // true if hook provided the compaction
+	details?: T; // hook-specific data
 }
 
 // Default compaction uses this for details (from compaction.ts):
 interface CompactionDetails {
-  readFiles: string[];
-  modifiedFiles: string[];
+	readFiles: string[];
+	modifiedFiles: string[];
 }
 ```
 
@@ -174,6 +177,7 @@ After navigation with summary:
 ### Cumulative File Tracking
 
 Both compaction and branch summarization track files cumulatively. When generating a summary, pi extracts file operations from:
+
 - Tool calls in the messages being summarized
 - Previous compaction or branch summary `details` (if any)
 
@@ -185,20 +189,20 @@ Defined in [`src/core/session-manager.ts`](../src/core/session-manager.ts):
 
 ```typescript
 interface BranchSummaryEntry<T = unknown> {
-  type: "branch_summary";
-  id: string;
-  parentId: string;
-  timestamp: number;
-  summary: string;
-  fromId: string;      // Entry we navigated from
-  fromHook?: boolean;  // true if hook provided the summary
-  details?: T;         // hook-specific data
+	type: "branch_summary";
+	id: string;
+	parentId: string;
+	timestamp: number;
+	summary: string;
+	fromId: string; // Entry we navigated from
+	fromHook?: boolean; // true if hook provided the summary
+	details?: T; // hook-specific data
 }
 
 // Default branch summarization uses this for details (from branch-summarization.ts):
 interface BranchSummaryDetails {
-  readFiles: string[];
-  modifiedFiles: string[];
+	readFiles: string[];
+	modifiedFiles: string[];
 }
 ```
 
@@ -212,28 +216,37 @@ Both compaction and branch summarization use the same structured format:
 
 ```markdown
 ## Goal
+
 [What the user is trying to accomplish]
 
 ## Constraints & Preferences
+
 - [Requirements mentioned by user]
 
 ## Progress
+
 ### Done
+
 - [x] [Completed tasks]
 
 ### In Progress
+
 - [ ] [Current work]
 
 ### Blocked
+
 - [Issues, if any]
 
 ## Key Decisions
+
 - **[Decision]**: [Rationale]
 
 ## Next Steps
+
 1. [What should happen next]
 
 ## Critical Context
+
 - [Data needed to continue]
 
 <read-files>
@@ -270,31 +283,33 @@ Fired before auto-compaction or `/compact`. Can cancel or provide custom summary
 
 ```typescript
 pi.on("session_before_compact", async (event, ctx) => {
-  const { preparation, branchEntries, customInstructions, signal } = event;
+	const { preparation, branchEntries, customInstructions, signal } = event;
 
-  // preparation.messagesToSummarize - messages to summarize
-  // preparation.turnPrefixMessages - split turn prefix (if isSplitTurn)
-  // preparation.previousSummary - previous compaction summary
-  // preparation.fileOps - extracted file operations
-  // preparation.tokensBefore - context tokens before compaction
-  // preparation.firstKeptEntryId - where kept messages start
-  // preparation.settings - compaction settings
+	// preparation.messagesToSummarize - messages to summarize
+	// preparation.turnPrefixMessages - split turn prefix (if isSplitTurn)
+	// preparation.previousSummary - previous compaction summary
+	// preparation.fileOps - extracted file operations
+	// preparation.tokensBefore - context tokens before compaction
+	// preparation.firstKeptEntryId - where kept messages start
+	// preparation.settings - compaction settings
 
-  // branchEntries - all entries on current branch (for custom state)
-  // signal - AbortSignal (pass to LLM calls)
+	// branchEntries - all entries on current branch (for custom state)
+	// signal - AbortSignal (pass to LLM calls)
 
-  // Cancel:
-  return { cancel: true };
+	// Cancel:
+	return { cancel: true };
 
-  // Custom summary:
-  return {
-    compaction: {
-      summary: "Your summary...",
-      firstKeptEntryId: preparation.firstKeptEntryId,
-      tokensBefore: preparation.tokensBefore,
-      details: { /* custom data */ },
-    }
-  };
+	// Custom summary:
+	return {
+		compaction: {
+			summary: "Your summary...",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {
+				/* custom data */
+			},
+		},
+	};
 });
 ```
 
@@ -303,32 +318,30 @@ pi.on("session_before_compact", async (event, ctx) => {
 To generate a summary with your own model, convert messages to text using `serializeConversation`:
 
 ```typescript
-import { convertToLlm, serializeConversation } from "@mariozechner/pi-coding-agent";
+import { convertToLlm, serializeConversation } from "@oh-my-pi/pi-coding-agent";
 
 pi.on("session_before_compact", async (event, ctx) => {
-  const { preparation } = event;
-  
-  // Convert AgentMessage[] to Message[], then serialize to text
-  const conversationText = serializeConversation(
-    convertToLlm(preparation.messagesToSummarize)
-  );
-  // Returns:
-  // [User]: message text
-  // [Assistant thinking]: thinking content
-  // [Assistant]: response text
-  // [Assistant tool calls]: read(path="..."); bash(command="...")
-  // [Tool result]: output text
+	const { preparation } = event;
 
-  // Now send to your model for summarization
-  const summary = await myModel.summarize(conversationText);
-  
-  return {
-    compaction: {
-      summary,
-      firstKeptEntryId: preparation.firstKeptEntryId,
-      tokensBefore: preparation.tokensBefore,
-    }
-  };
+	// Convert AgentMessage[] to Message[], then serialize to text
+	const conversationText = serializeConversation(convertToLlm(preparation.messagesToSummarize));
+	// Returns:
+	// [User]: message text
+	// [Assistant thinking]: thinking content
+	// [Assistant]: response text
+	// [Assistant tool calls]: read(path="..."); bash(command="...")
+	// [Tool result]: output text
+
+	// Now send to your model for summarization
+	const summary = await myModel.summarize(conversationText);
+
+	return {
+		compaction: {
+			summary,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+		},
+	};
 });
 ```
 
@@ -340,26 +353,28 @@ Fired before `/tree` navigation. Always fires regardless of whether user chose t
 
 ```typescript
 pi.on("session_before_tree", async (event, ctx) => {
-  const { preparation, signal } = event;
+	const { preparation, signal } = event;
 
-  // preparation.targetId - where we're navigating to
-  // preparation.oldLeafId - current position (being abandoned)
-  // preparation.commonAncestorId - shared ancestor
-  // preparation.entriesToSummarize - entries that would be summarized
-  // preparation.userWantsSummary - whether user chose to summarize
+	// preparation.targetId - where we're navigating to
+	// preparation.oldLeafId - current position (being abandoned)
+	// preparation.commonAncestorId - shared ancestor
+	// preparation.entriesToSummarize - entries that would be summarized
+	// preparation.userWantsSummary - whether user chose to summarize
 
-  // Cancel navigation entirely:
-  return { cancel: true };
+	// Cancel navigation entirely:
+	return { cancel: true };
 
-  // Provide custom summary (only used if userWantsSummary is true):
-  if (preparation.userWantsSummary) {
-    return {
-      summary: {
-        summary: "Your summary...",
-        details: { /* custom data */ },
-      }
-    };
-  }
+	// Provide custom summary (only used if userWantsSummary is true):
+	if (preparation.userWantsSummary) {
+		return {
+			summary: {
+				summary: "Your summary...",
+				details: {
+					/* custom data */
+				},
+			},
+		};
+	}
 });
 ```
 
@@ -371,18 +386,18 @@ Configure compaction in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settin
 
 ```json
 {
-  "compaction": {
-    "enabled": true,
-    "reserveTokens": 16384,
-    "keepRecentTokens": 20000
-  }
+	"compaction": {
+		"enabled": true,
+		"reserveTokens": 16384,
+		"keepRecentTokens": 20000
+	}
 }
 ```
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `enabled` | `true` | Enable auto-compaction |
-| `reserveTokens` | `16384` | Tokens to reserve for LLM response |
+| Setting            | Default | Description                            |
+| ------------------ | ------- | -------------------------------------- |
+| `enabled`          | `true`  | Enable auto-compaction                 |
+| `reserveTokens`    | `16384` | Tokens to reserve for LLM response     |
 | `keepRecentTokens` | `20000` | Recent tokens to keep (not summarized) |
 
 Disable auto-compaction with `"enabled": false`. You can still compact manually with `/compact`.

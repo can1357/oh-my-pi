@@ -8,7 +8,7 @@
 
 ### Breaking Changes
 
-- `AgentTool` import moved from `@mariozechner/pi-ai` to `@mariozechner/pi-agent-core`
+- `AgentTool` import moved from `@oh-my-pi/pi-ai` to `@oh-my-pi/pi-agent-core`
 - `AppMessage` type renamed to `AgentMessage`
 - `Attachment` type replaced with `ImageContent` for image handling
 - `MomSessionManager.loadSession()` renamed to `buildSessionContex()`
@@ -101,6 +101,7 @@
 ### Changed
 
 - Complete rewrite of message handling architecture (#115)
+
   - Now uses `AgentSession` from coding-agent for session management
   - Brings auto-compaction, overflow handling, and proper prompt caching
   - `log.jsonl` is the source of truth for all channel messages
@@ -110,12 +111,14 @@
   - Tool results preserved in context.jsonl for multi-turn continuity
 
 - Backfill improvements
+
   - Only backfills channels that already have a `log.jsonl` file
   - Strips @mentions from backfilled messages (consistent with live messages)
   - Uses largest timestamp in log for efficient incremental backfill
   - Fetches DM channels in addition to public/private channels
 
 - Message handling improvements
+
   - Channel chatter (messages without @mention) logged but doesn't trigger processing
   - Messages sent while mom is busy are logged and synced on next run
   - Pre-startup messages (replayed by Slack on reconnect) logged but not auto-processed
@@ -129,12 +132,14 @@
 ### Fixed
 
 - Slack API errors (msg_too_long) no longer crash the process
+
   - Added try/catch error handling to all Slack API calls in the message queue
   - Main channel messages truncated at 35K with note to ask for elaboration
   - Thread messages truncated at 20K
   - replaceMessage also truncated at 35K
 
 - Private channel messages not being logged
+
   - Added `message.groups` to required bot events in README
   - Added `groups:history` and `groups:read` to required scopes in README
 

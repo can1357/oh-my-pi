@@ -15,7 +15,7 @@
  *     and add "(Recommended)" at the end of the label
  */
 
-import type { AgentTool, AgentToolContext, AgentToolUpdateCallback } from "@mariozechner/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 
 // =============================================================================

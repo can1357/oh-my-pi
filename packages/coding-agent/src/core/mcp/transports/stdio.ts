@@ -187,7 +187,7 @@ export class StdioTransport implements MCPTransport {
 				reject,
 			});
 
-			const message = JSON.stringify(request) + "\n";
+			const message = `${JSON.stringify(request)}\n`;
 			try {
 				// Bun's FileSink has write() method directly
 				this.process!.stdin.write(message);
@@ -210,7 +210,7 @@ export class StdioTransport implements MCPTransport {
 			params: params ?? {},
 		};
 
-		const message = JSON.stringify(notification) + "\n";
+		const message = `${JSON.stringify(notification)}\n`;
 		// Bun's FileSink has write() method directly
 		this.process.stdin.write(message);
 		this.process.stdin.flush();

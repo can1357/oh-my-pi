@@ -5,9 +5,9 @@
  * and interact with the user via UI primitives.
  */
 
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { ImageContent, Message, Model, TextContent, ToolResultMessage } from "@mariozechner/pi-ai";
-import type { Component, TUI } from "@mariozechner/pi-tui";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent, Message, Model, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { Theme } from "../../modes/interactive/theme/theme.js";
 import type { CompactionPreparation, CompactionResult } from "../compaction/index.js";
 import type { ExecOptions, ExecResult } from "../exec.js";

@@ -2,7 +2,7 @@ import { Badge } from "@mariozechner/mini-lit/dist/Badge.js";
 import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import "./components/AgentInterface.js";
-import type { Agent, AgentTool } from "@mariozechner/pi-agent-core";
+import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AgentInterface } from "./components/AgentInterface.js";
 import { ArtifactsRuntimeProvider } from "./components/sandbox/ArtifactsRuntimeProvider.js";
 import { AttachmentsRuntimeProvider } from "./components/sandbox/AttachmentsRuntimeProvider.js";
@@ -171,34 +171,45 @@ export class ChatPanel extends LitElement {
 
 		return html`
 			<div class="relative w-full h-full overflow-hidden flex">
-				<div class="h-full" style="${!isMobile && this.showArtifactsPanel && this.hasArtifacts ? "width: 50%;" : "width: 100%;"}">
-						${this.agentInterface}
-					</div>
+				<div
+					class="h-full"
+					style="${!isMobile && this.showArtifactsPanel && this.hasArtifacts ? "width: 50%;" : "width: 100%;"}"
+				>
+					${this.agentInterface}
+				</div>
 
-					<!-- Floating pill when artifacts exist and panel is collapsed -->
-					${
-						this.hasArtifacts && !this.showArtifactsPanel
-							? html`
-								<button
-									class="absolute z-30 top-4 left-1/2 -translate-x-1/2 pointer-events-auto"
-									@click=${() => {
-										this.showArtifactsPanel = true;
-										this.requestUpdate();
-									}}
-									title=${i18n("Show artifacts")}
-								>
-									${Badge(html`
-										<span class="inline-flex items-center gap-1">
-											<span>${i18n("Artifacts")}</span>
-											<span class="text-[10px] leading-none bg-primary-foreground/20 text-primary-foreground rounded px-1 font-mono tabular-nums">${this.artifactCount}</span>
-										</span>
-									`)}
-								</button>
-							`
-							: ""
-					}
+				<!-- Floating pill when artifacts exist and panel is collapsed -->
+				${
+					this.hasArtifacts && !this.showArtifactsPanel
+						? html`
+							<button
+								class="absolute z-30 top-4 left-1/2 -translate-x-1/2 pointer-events-auto"
+								@click=${() => {
+									this.showArtifactsPanel = true;
+									this.requestUpdate();
+								}}
+								title=${i18n("Show artifacts")}
+							>
+								${Badge(html`
+									<span class="inline-flex items-center gap-1">
+										<span>${i18n("Artifacts")}</span>
+										<span
+											class="text-[10px] leading-none bg-primary-foreground/20 text-primary-foreground rounded px-1 font-mono tabular-nums"
+											>${this.artifactCount}</span
+										>
+									</span>
+								`)}
+							</button>
+					  `
+						: ""
+				}
 
-				<div class="h-full ${isMobile ? "absolute inset-0 pointer-events-none" : ""}" style="${!isMobile ? (!this.hasArtifacts || !this.showArtifactsPanel ? "display: none;" : "width: 50%;") : ""}">
+				<div
+					class="h-full ${isMobile ? "absolute inset-0 pointer-events-none" : ""}"
+					style="${
+						!isMobile ? (!this.hasArtifacts || !this.showArtifactsPanel ? "display: none;" : "width: 50%;") : ""
+					}"
+				>
 					${this.artifactsPanel}
 				</div>
 			</div>

@@ -13,9 +13,9 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
-import type { Agent, AgentEvent, AgentMessage, AgentState, ThinkingLevel } from "@mariozechner/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@mariozechner/pi-ai";
-import { isContextOverflow, modelsAreEqual, supportsXhigh } from "@mariozechner/pi-ai";
+import type { Agent, AgentEvent, AgentMessage, AgentState, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
+import { isContextOverflow, modelsAreEqual, supportsXhigh } from "@oh-my-pi/pi-ai";
 import { getAuthPath } from "../config.js";
 import { type BashResult, executeBash as executeBashCommand } from "./bash-executor.js";
 import {
@@ -1162,7 +1162,9 @@ export class AgentSession {
 
 			if (reason === "overflow") {
 				throw new Error(
-					`Context overflow: ${error instanceof Error ? error.message : "compaction failed"}. Your input may be too large for the context window.`,
+					`Context overflow: ${
+						error instanceof Error ? error.message : "compaction failed"
+					}. Your input may be too large for the context window.`,
 				);
 			}
 		} finally {

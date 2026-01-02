@@ -2,7 +2,7 @@
 
 RPC mode enables headless operation of the coding agent via a JSON protocol over stdin/stdout. This is useful for embedding the agent in other applications, IDEs, or custom UIs.
 
-**Note for Node.js/TypeScript users**: If you're building a Node.js application, consider using `AgentSession` directly from `@mariozechner/pi-coding-agent` instead of spawning a subprocess. See [`src/core/agent-session.ts`](../src/core/agent-session.ts) for the API. For a subprocess-based TypeScript client, see [`src/modes/rpc/rpc-client.ts`](../src/modes/rpc/rpc-client.ts).
+**Note for Node.js/TypeScript users**: If you're building a Node.js application, consider using `AgentSession` directly from `@oh-my-pi/pi-coding-agent` instead of spawning a subprocess. See [`src/core/agent-session.ts`](../src/core/agent-session.ts) for the API. For a subprocess-based TypeScript client, see [`src/modes/rpc/rpc-client.ts`](../src/modes/rpc/rpc-client.ts).
 
 ## Starting RPC Mode
 
@@ -11,6 +11,7 @@ pi --mode rpc [options]
 ```
 
 Common options:
+
 - `--provider <name>`: Set the LLM provider (anthropic, openai, google, etc.)
 - `--model <id>`: Set the model ID
 - `--no-session`: Disable session persistence
@@ -33,17 +34,23 @@ All commands support an optional `id` field for request/response correlation. If
 Send a user prompt to the agent. Returns immediately; events stream asynchronously.
 
 ```json
-{"id": "req-1", "type": "prompt", "message": "Hello, world!"}
+{ "id": "req-1", "type": "prompt", "message": "Hello, world!" }
 ```
 
 With images:
+
 ```json
-{"type": "prompt", "message": "What's in this image?", "images": [{"type": "image", "source": {"type": "base64", "mediaType": "image/png", "data": "..."}}]}
+{
+	"type": "prompt",
+	"message": "What's in this image?",
+	"images": [{ "type": "image", "source": { "type": "base64", "mediaType": "image/png", "data": "..." } }]
+}
 ```
 
 Response:
+
 ```json
-{"id": "req-1", "type": "response", "command": "prompt", "success": true}
+{ "id": "req-1", "type": "response", "command": "prompt", "success": true }
 ```
 
 The `images` field is optional. Each image uses `ImageContent` format with base64 or URL source.
@@ -53,12 +60,13 @@ The `images` field is optional. Each image uses `ImageContent` format with base6
 Queue a message to be injected at the next agent turn. Queued messages are added to the conversation without triggering a new prompt. Useful for injecting context mid-conversation.
 
 ```json
-{"type": "queue_message", "message": "Additional context"}
+{ "type": "queue_message", "message": "Additional context" }
 ```
 
 Response:
+
 ```json
-{"type": "response", "command": "queue_message", "success": true}
+{ "type": "response", "command": "queue_message", "success": true }
 ```
 
 See [set_queue_mode](#set_queue_mode) for controlling how queued messages are processed.
@@ -68,12 +76,13 @@ See [set_queue_mode](#set_queue_mode) for controlling how queued messages are pr
 Abort the current agent operation.
 
 ```json
-{"type": "abort"}
+{ "type": "abort" }
 ```
 
 Response:
+
 ```json
-{"type": "response", "command": "abort", "success": true}
+{ "type": "response", "command": "abort", "success": true }
 ```
 
 #### new_session
@@ -81,22 +90,25 @@ Response:
 Start a fresh session. Can be cancelled by a `session_before_switch` hook.
 
 ```json
-{"type": "new_session"}
+{ "type": "new_session" }
 ```
 
 With optional parent session tracking:
+
 ```json
-{"type": "new_session", "parentSession": "/path/to/parent-session.jsonl"}
+{ "type": "new_session", "parentSession": "/path/to/parent-session.jsonl" }
 ```
 
 Response:
+
 ```json
-{"type": "response", "command": "new_session", "success": true, "data": {"cancelled": false}}
+{ "type": "response", "command": "new_session", "success": true, "data": { "cancelled": false } }
 ```
 
 If a hook cancelled:
+
 ```json
-{"type": "response", "command": "new_session", "success": true, "data": {"cancelled": true}}
+{ "type": "response", "command": "new_session", "success": true, "data": { "cancelled": true } }
 ```
 
 ### State
@@ -106,10 +118,11 @@ If a hook cancelled:
 Get current session state.
 
 ```json
-{"type": "get_state"}
+{ "type": "get_state" }
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -137,10 +150,11 @@ The `model` field is a full [Model](#model) object or `null`.
 Get all messages in the conversation.
 
 ```json
-{"type": "get_messages"}
+{ "type": "get_messages" }
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -159,10 +173,11 @@ Messages are `AgentMessage` objects (see [Message Types](#message-types)).
 Switch to a specific model.
 
 ```json
-{"type": "set_model", "provider": "anthropic", "modelId": "claude-sonnet-4-20250514"}
+{ "type": "set_model", "provider": "anthropic", "modelId": "claude-sonnet-4-20250514" }
 ```
 
 Response contains the full [Model](#model) object:
+
 ```json
 {
   "type": "response",
@@ -177,10 +192,11 @@ Response contains the full [Model](#model) object:
 Cycle to the next available model. Returns `null` data if only one model available.
 
 ```json
-{"type": "cycle_model"}
+{ "type": "cycle_model" }
 ```
 
 Response:
+
 ```json
 {
   "type": "response",
@@ -201,10 +217,11 @@ The `model` field is a full [Model](#model) object.
 List all configured models.
 
 ```json
-{"type": "get_available_models"}
+{ "type": "get_available_models" }
 ```
 
 Response contains an array of full [Model](#model) objects:
+
 ```json
 {
   "type": "response",
@@ -223,7 +240,7 @@ Response contains an array of full [Model](#model) objects:
 Set the reasoning/thinking level for models that support it.
 
 ```json
-{"type": "set_thinking_level", "level": "high"}
+{ "type": "set_thinking_level", "level": "high" }
 ```
 
 Levels: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`
@@ -231,8 +248,9 @@ Levels: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`
 Note: `"xhigh"` is only supported by OpenAI codex-max models.
 
 Response:
+
 ```json
-{"type": "response", "command": "set_thinking_level", "success": true}
+{ "type": "response", "command": "set_thinking_level", "success": true }
 ```
 
 #### cycle_thinking_level
@@ -240,16 +258,17 @@ Response:
 Cycle through available thinking levels. Returns `null` data if model doesn't support thinking.
 
 ```json
-{"type": "cycle_thinking_level"}
+{ "type": "cycle_thinking_level" }
 ```
 
 Response:
+
 ```json
 {
-  "type": "response",
-  "command": "cycle_thinking_level",
-  "success": true,
-  "data": {"level": "high"}
+	"type": "response",
+	"command": "cycle_thinking_level",
+	"success": true,
+	"data": { "level": "high" }
 }
 ```
 
@@ -260,16 +279,18 @@ Response:
 Control how queued messages (from `queue_message`) are injected into the conversation.
 
 ```json
-{"type": "set_queue_mode", "mode": "one-at-a-time"}
+{ "type": "set_queue_mode", "mode": "one-at-a-time" }
 ```
 
 Modes:
+
 - `"all"`: Inject all queued messages at the next turn
 - `"one-at-a-time"`: Inject one queued message per turn (default)
 
 Response:
+
 ```json
-{"type": "response", "command": "set_queue_mode", "success": true}
+{ "type": "response", "command": "set_queue_mode", "success": true }
 ```
 
 ### Compaction
@@ -279,26 +300,28 @@ Response:
 Manually compact conversation context to reduce token usage.
 
 ```json
-{"type": "compact"}
+{ "type": "compact" }
 ```
 
 With custom instructions:
+
 ```json
-{"type": "compact", "customInstructions": "Focus on code changes"}
+{ "type": "compact", "customInstructions": "Focus on code changes" }
 ```
 
 Response:
+
 ```json
 {
-  "type": "response",
-  "command": "compact",
-  "success": true,
-  "data": {
-    "summary": "Summary of conversation...",
-    "firstKeptEntryId": "abc123",
-    "tokensBefore": 150000,
-    "details": {}
-  }
+	"type": "response",
+	"command": "compact",
+	"success": true,
+	"data": {
+		"summary": "Summary of conversation...",
+		"firstKeptEntryId": "abc123",
+		"tokensBefore": 150000,
+		"details": {}
+	}
 }
 ```
 
@@ -307,12 +330,13 @@ Response:
 Enable or disable automatic compaction when context is nearly full.
 
 ```json
-{"type": "set_auto_compaction", "enabled": true}
+{ "type": "set_auto_compaction", "enabled": true }
 ```
 
 Response:
+
 ```json
-{"type": "response", "command": "set_auto_compaction", "success": true}
+{ "type": "response", "command": "set_auto_compaction", "success": true }
 ```
 
 ### Retry
@@ -322,12 +346,13 @@ Response:
 Enable or disable automatic retry on transient errors (overloaded, rate limit, 5xx).
 
 ```json
-{"type": "set_auto_retry", "enabled": true}
+{ "type": "set_auto_retry", "enabled": true }
 ```
 
 Response:
+
 ```json
-{"type": "response", "command": "set_auto_retry", "success": true}
+{ "type": "response", "command": "set_auto_retry", "success": true }
 ```
 
 #### abort_retry
@@ -335,12 +360,13 @@ Response:
 Abort an in-progress retry (cancel the delay and stop retrying).
 
 ```json
-{"type": "abort_retry"}
+{ "type": "abort_retry" }
 ```
 
 Response:
+
 ```json
-{"type": "response", "command": "abort_retry", "success": true}
+{ "type": "response", "command": "abort_retry", "success": true }
 ```
 
 ### Bash
@@ -350,37 +376,39 @@ Response:
 Execute a shell command and add output to conversation context.
 
 ```json
-{"type": "bash", "command": "ls -la"}
+{ "type": "bash", "command": "ls -la" }
 ```
 
 Response:
+
 ```json
 {
-  "type": "response",
-  "command": "bash",
-  "success": true,
-  "data": {
-    "output": "total 48\ndrwxr-xr-x ...",
-    "exitCode": 0,
-    "cancelled": false,
-    "truncated": false
-  }
+	"type": "response",
+	"command": "bash",
+	"success": true,
+	"data": {
+		"output": "total 48\ndrwxr-xr-x ...",
+		"exitCode": 0,
+		"cancelled": false,
+		"truncated": false
+	}
 }
 ```
 
 If output was truncated, includes `fullOutputPath`:
+
 ```json
 {
-  "type": "response",
-  "command": "bash",
-  "success": true,
-  "data": {
-    "output": "truncated output...",
-    "exitCode": 0,
-    "cancelled": false,
-    "truncated": true,
-    "fullOutputPath": "/tmp/pi-bash-abc123.log"
-  }
+	"type": "response",
+	"command": "bash",
+	"success": true,
+	"data": {
+		"output": "truncated output...",
+		"exitCode": 0,
+		"cancelled": false,
+		"truncated": true,
+		"fullOutputPath": "/tmp/pi-bash-abc123.log"
+	}
 }
 ```
 
@@ -399,6 +427,7 @@ drwxr-xr-x ...
 ```
 
 This means:
+
 1. Bash output is included in the LLM context on the **next prompt**, not immediately
 2. Multiple bash commands can be executed before a prompt; all outputs will be included
 3. No event is emitted for the `BashExecutionMessage` itself
@@ -408,12 +437,13 @@ This means:
 Abort a running bash command.
 
 ```json
-{"type": "abort_bash"}
+{ "type": "abort_bash" }
 ```
 
 Response:
+
 ```json
-{"type": "response", "command": "abort_bash", "success": true}
+{ "type": "response", "command": "abort_bash", "success": true }
 ```
 
 ### Session
@@ -423,32 +453,33 @@ Response:
 Get token usage and cost statistics.
 
 ```json
-{"type": "get_session_stats"}
+{ "type": "get_session_stats" }
 ```
 
 Response:
+
 ```json
 {
-  "type": "response",
-  "command": "get_session_stats",
-  "success": true,
-  "data": {
-    "sessionFile": "/path/to/session.jsonl",
-    "sessionId": "abc123",
-    "userMessages": 5,
-    "assistantMessages": 5,
-    "toolCalls": 12,
-    "toolResults": 12,
-    "totalMessages": 22,
-    "tokens": {
-      "input": 50000,
-      "output": 10000,
-      "cacheRead": 40000,
-      "cacheWrite": 5000,
-      "total": 105000
-    },
-    "cost": 0.45
-  }
+	"type": "response",
+	"command": "get_session_stats",
+	"success": true,
+	"data": {
+		"sessionFile": "/path/to/session.jsonl",
+		"sessionId": "abc123",
+		"userMessages": 5,
+		"assistantMessages": 5,
+		"toolCalls": 12,
+		"toolResults": 12,
+		"totalMessages": 22,
+		"tokens": {
+			"input": 50000,
+			"output": 10000,
+			"cacheRead": 40000,
+			"cacheWrite": 5000,
+			"total": 105000
+		},
+		"cost": 0.45
+	}
 }
 ```
 
@@ -457,21 +488,23 @@ Response:
 Export session to an HTML file.
 
 ```json
-{"type": "export_html"}
+{ "type": "export_html" }
 ```
 
 With custom path:
+
 ```json
-{"type": "export_html", "outputPath": "/tmp/session.html"}
+{ "type": "export_html", "outputPath": "/tmp/session.html" }
 ```
 
 Response:
+
 ```json
 {
-  "type": "response",
-  "command": "export_html",
-  "success": true,
-  "data": {"path": "/tmp/session.html"}
+	"type": "response",
+	"command": "export_html",
+	"success": true,
+	"data": { "path": "/tmp/session.html" }
 }
 ```
 
@@ -480,17 +513,19 @@ Response:
 Load a different session file. Can be cancelled by a `before_switch` hook.
 
 ```json
-{"type": "switch_session", "sessionPath": "/path/to/session.jsonl"}
+{ "type": "switch_session", "sessionPath": "/path/to/session.jsonl" }
 ```
 
 Response:
+
 ```json
-{"type": "response", "command": "switch_session", "success": true, "data": {"cancelled": false}}
+{ "type": "response", "command": "switch_session", "success": true, "data": { "cancelled": false } }
 ```
 
 If a hook cancelled the switch:
+
 ```json
-{"type": "response", "command": "switch_session", "success": true, "data": {"cancelled": true}}
+{ "type": "response", "command": "switch_session", "success": true, "data": { "cancelled": true } }
 ```
 
 #### branch
@@ -498,26 +533,28 @@ If a hook cancelled the switch:
 Create a new branch from a previous user message. Can be cancelled by a `before_branch` hook. Returns the text of the message being branched from.
 
 ```json
-{"type": "branch", "entryId": "abc123"}
+{ "type": "branch", "entryId": "abc123" }
 ```
 
 Response:
+
 ```json
 {
-  "type": "response",
-  "command": "branch",
-  "success": true,
-  "data": {"text": "The original prompt text...", "cancelled": false}
+	"type": "response",
+	"command": "branch",
+	"success": true,
+	"data": { "text": "The original prompt text...", "cancelled": false }
 }
 ```
 
 If a hook cancelled the branch:
+
 ```json
 {
-  "type": "response",
-  "command": "branch",
-  "success": true,
-  "data": {"text": "The original prompt text...", "cancelled": true}
+	"type": "response",
+	"command": "branch",
+	"success": true,
+	"data": { "text": "The original prompt text...", "cancelled": true }
 }
 ```
 
@@ -526,21 +563,22 @@ If a hook cancelled the branch:
 Get user messages available for branching.
 
 ```json
-{"type": "get_branch_messages"}
+{ "type": "get_branch_messages" }
 ```
 
 Response:
+
 ```json
 {
-  "type": "response",
-  "command": "get_branch_messages",
-  "success": true,
-  "data": {
-    "messages": [
-      {"entryId": "abc123", "text": "First prompt..."},
-      {"entryId": "def456", "text": "Second prompt..."}
-    ]
-  }
+	"type": "response",
+	"command": "get_branch_messages",
+	"success": true,
+	"data": {
+		"messages": [
+			{ "entryId": "abc123", "text": "First prompt..." },
+			{ "entryId": "def456", "text": "Second prompt..." }
+		]
+	}
 }
 ```
 
@@ -549,16 +587,17 @@ Response:
 Get the text content of the last assistant message.
 
 ```json
-{"type": "get_last_assistant_text"}
+{ "type": "get_last_assistant_text" }
 ```
 
 Response:
+
 ```json
 {
-  "type": "response",
-  "command": "get_last_assistant_text",
-  "success": true,
-  "data": {"text": "The assistant's response..."}
+	"type": "response",
+	"command": "get_last_assistant_text",
+	"success": true,
+	"data": { "text": "The assistant's response..." }
 }
 ```
 
@@ -570,30 +609,30 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 
 ### Event Types
 
-| Event | Description |
-|-------|-------------|
-| `agent_start` | Agent begins processing |
-| `agent_end` | Agent completes (includes all generated messages) |
-| `turn_start` | New turn begins |
-| `turn_end` | Turn completes (includes assistant message and tool results) |
-| `message_start` | Message begins |
-| `message_update` | Streaming update (text/thinking/toolcall deltas) |
-| `message_end` | Message completes |
-| `tool_execution_start` | Tool begins execution |
-| `tool_execution_update` | Tool execution progress (streaming output) |
-| `tool_execution_end` | Tool completes |
-| `auto_compaction_start` | Auto-compaction begins |
-| `auto_compaction_end` | Auto-compaction completes |
-| `auto_retry_start` | Auto-retry begins (after transient error) |
-| `auto_retry_end` | Auto-retry completes (success or final failure) |
-| `hook_error` | Hook threw an error |
+| Event                   | Description                                                  |
+| ----------------------- | ------------------------------------------------------------ |
+| `agent_start`           | Agent begins processing                                      |
+| `agent_end`             | Agent completes (includes all generated messages)            |
+| `turn_start`            | New turn begins                                              |
+| `turn_end`              | Turn completes (includes assistant message and tool results) |
+| `message_start`         | Message begins                                               |
+| `message_update`        | Streaming update (text/thinking/toolcall deltas)             |
+| `message_end`           | Message completes                                            |
+| `tool_execution_start`  | Tool begins execution                                        |
+| `tool_execution_update` | Tool execution progress (streaming output)                   |
+| `tool_execution_end`    | Tool completes                                               |
+| `auto_compaction_start` | Auto-compaction begins                                       |
+| `auto_compaction_end`   | Auto-compaction completes                                    |
+| `auto_retry_start`      | Auto-retry begins (after transient error)                    |
+| `auto_retry_end`        | Auto-retry completes (success or final failure)              |
+| `hook_error`            | Hook threw an error                                          |
 
 ### agent_start
 
 Emitted when the agent begins processing a prompt.
 
 ```json
-{"type": "agent_start"}
+{ "type": "agent_start" }
 ```
 
 ### agent_end
@@ -612,7 +651,7 @@ Emitted when the agent completes. Contains all messages generated during this ru
 A turn consists of one assistant response plus any resulting tool calls and results.
 
 ```json
-{"type": "turn_start"}
+{ "type": "turn_start" }
 ```
 
 ```json
@@ -651,22 +690,23 @@ Emitted during streaming of assistant messages. Contains both the partial messag
 
 The `assistantMessageEvent` field contains one of these delta types:
 
-| Type | Description |
-|------|-------------|
-| `start` | Message generation started |
-| `text_start` | Text content block started |
-| `text_delta` | Text content chunk |
-| `text_end` | Text content block ended |
-| `thinking_start` | Thinking block started |
-| `thinking_delta` | Thinking content chunk |
-| `thinking_end` | Thinking block ended |
-| `toolcall_start` | Tool call started |
-| `toolcall_delta` | Tool call arguments chunk |
-| `toolcall_end` | Tool call ended (includes full `toolCall` object) |
-| `done` | Message complete (reason: `"stop"`, `"length"`, `"toolUse"`) |
-| `error` | Error occurred (reason: `"aborted"`, `"error"`) |
+| Type             | Description                                                  |
+| ---------------- | ------------------------------------------------------------ |
+| `start`          | Message generation started                                   |
+| `text_start`     | Text content block started                                   |
+| `text_delta`     | Text content chunk                                           |
+| `text_end`       | Text content block ended                                     |
+| `thinking_start` | Thinking block started                                       |
+| `thinking_delta` | Thinking content chunk                                       |
+| `thinking_end`   | Thinking block ended                                         |
+| `toolcall_start` | Tool call started                                            |
+| `toolcall_delta` | Tool call arguments chunk                                    |
+| `toolcall_end`   | Tool call ended (includes full `toolCall` object)            |
+| `done`           | Message complete (reason: `"stop"`, `"length"`, `"toolUse"`) |
+| `error`          | Error occurred (reason: `"aborted"`, `"error"`)              |
 
 Example streaming a text response:
+
 ```json
 {"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_start","contentIndex":0,"partial":{...}}}
 {"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello","partial":{...}}}
@@ -680,10 +720,10 @@ Emitted when a tool begins, streams progress, and completes execution.
 
 ```json
 {
-  "type": "tool_execution_start",
-  "toolCallId": "call_abc123",
-  "toolName": "bash",
-  "args": {"command": "ls -la"}
+	"type": "tool_execution_start",
+	"toolCallId": "call_abc123",
+	"toolName": "bash",
+	"args": { "command": "ls -la" }
 }
 ```
 
@@ -691,14 +731,14 @@ During execution, `tool_execution_update` events stream partial results (e.g., b
 
 ```json
 {
-  "type": "tool_execution_update",
-  "toolCallId": "call_abc123",
-  "toolName": "bash",
-  "args": {"command": "ls -la"},
-  "partialResult": {
-    "content": [{"type": "text", "text": "partial output so far..."}],
-    "details": {"truncation": null, "fullOutputPath": null}
-  }
+	"type": "tool_execution_update",
+	"toolCallId": "call_abc123",
+	"toolName": "bash",
+	"args": { "command": "ls -la" },
+	"partialResult": {
+		"content": [{ "type": "text", "text": "partial output so far..." }],
+		"details": { "truncation": null, "fullOutputPath": null }
+	}
 }
 ```
 
@@ -724,22 +764,22 @@ Use `toolCallId` to correlate events. The `partialResult` in `tool_execution_upd
 Emitted when automatic compaction runs (when context is nearly full).
 
 ```json
-{"type": "auto_compaction_start", "reason": "threshold"}
+{ "type": "auto_compaction_start", "reason": "threshold" }
 ```
 
 The `reason` field is `"threshold"` (context getting large) or `"overflow"` (context exceeded limit).
 
 ```json
 {
-  "type": "auto_compaction_end",
-  "result": {
-    "summary": "Summary of conversation...",
-    "firstKeptEntryId": "abc123",
-    "tokensBefore": 150000,
-    "details": {}
-  },
-  "aborted": false,
-  "willRetry": false
+	"type": "auto_compaction_end",
+	"result": {
+		"summary": "Summary of conversation...",
+		"firstKeptEntryId": "abc123",
+		"tokensBefore": 150000,
+		"details": {}
+	},
+	"aborted": false,
+	"willRetry": false
 }
 ```
 
@@ -753,29 +793,30 @@ Emitted when automatic retry is triggered after a transient error (overloaded, r
 
 ```json
 {
-  "type": "auto_retry_start",
-  "attempt": 1,
-  "maxAttempts": 3,
-  "delayMs": 2000,
-  "errorMessage": "529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"
+	"type": "auto_retry_start",
+	"attempt": 1,
+	"maxAttempts": 3,
+	"delayMs": 2000,
+	"errorMessage": "529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"
 }
 ```
 
 ```json
 {
-  "type": "auto_retry_end",
-  "success": true,
-  "attempt": 2
+	"type": "auto_retry_end",
+	"success": true,
+	"attempt": 2
 }
 ```
 
 On final failure (max retries exceeded):
+
 ```json
 {
-  "type": "auto_retry_end",
-  "success": false,
-  "attempt": 3,
-  "finalError": "529 overloaded_error: Overloaded"
+	"type": "auto_retry_end",
+	"success": false,
+	"attempt": 3,
+	"finalError": "529 overloaded_error: Overloaded"
 }
 ```
 
@@ -785,10 +826,10 @@ Emitted when a hook throws an error.
 
 ```json
 {
-  "type": "hook_error",
-  "hookPath": "/path/to/hook.ts",
-  "event": "tool_call",
-  "error": "Error message..."
+	"type": "hook_error",
+	"hookPath": "/path/to/hook.ts",
+	"event": "tool_call",
+	"error": "Error message..."
 }
 ```
 
@@ -798,10 +839,10 @@ Failed commands return a response with `success: false`:
 
 ```json
 {
-  "type": "response",
-  "command": "set_model",
-  "success": false,
-  "error": "Model not found: invalid/model"
+	"type": "response",
+	"command": "set_model",
+	"success": false,
+	"error": "Model not found: invalid/model"
 }
 ```
 
@@ -809,16 +850,17 @@ Parse errors:
 
 ```json
 {
-  "type": "response",
-  "command": "parse",
-  "success": false,
-  "error": "Failed to parse command: Unexpected token..."
+	"type": "response",
+	"command": "parse",
+	"success": false,
+	"error": "Failed to parse command: Unexpected token..."
 }
 ```
 
 ## Types
 
 Source files:
+
 - [`packages/ai/src/types.ts`](../../ai/src/types.ts) - `Model`, `UserMessage`, `AssistantMessage`, `ToolResultMessage`
 - [`packages/agent/src/types.ts`](../../agent/src/types.ts) - `AgentMessage`, `AgentEvent`
 - [`src/core/messages.ts`](../src/core/messages.ts) - `BashExecutionMessage`
@@ -828,21 +870,21 @@ Source files:
 
 ```json
 {
-  "id": "claude-sonnet-4-20250514",
-  "name": "Claude Sonnet 4",
-  "api": "anthropic-messages",
-  "provider": "anthropic",
-  "baseUrl": "https://api.anthropic.com",
-  "reasoning": true,
-  "input": ["text", "image"],
-  "contextWindow": 200000,
-  "maxTokens": 16384,
-  "cost": {
-    "input": 3.0,
-    "output": 15.0,
-    "cacheRead": 0.3,
-    "cacheWrite": 3.75
-  }
+	"id": "claude-sonnet-4-20250514",
+	"name": "Claude Sonnet 4",
+	"api": "anthropic-messages",
+	"provider": "anthropic",
+	"baseUrl": "https://api.anthropic.com",
+	"reasoning": true,
+	"input": ["text", "image"],
+	"contextWindow": 200000,
+	"maxTokens": 16384,
+	"cost": {
+		"input": 3.0,
+		"output": 15.0,
+		"cacheRead": 0.3,
+		"cacheWrite": 3.75
+	}
 }
 ```
 
@@ -850,10 +892,10 @@ Source files:
 
 ```json
 {
-  "role": "user",
-  "content": "Hello!",
-  "timestamp": 1733234567890,
-  "attachments": []
+	"role": "user",
+	"content": "Hello!",
+	"timestamp": 1733234567890,
+	"attachments": []
 }
 ```
 
@@ -863,24 +905,24 @@ The `content` field can be a string or an array of `TextContent`/`ImageContent` 
 
 ```json
 {
-  "role": "assistant",
-  "content": [
-    {"type": "text", "text": "Hello! How can I help?"},
-    {"type": "thinking", "thinking": "User is greeting me..."},
-    {"type": "toolCall", "id": "call_123", "name": "bash", "arguments": {"command": "ls"}}
-  ],
-  "api": "anthropic-messages",
-  "provider": "anthropic",
-  "model": "claude-sonnet-4-20250514",
-  "usage": {
-    "input": 100,
-    "output": 50,
-    "cacheRead": 0,
-    "cacheWrite": 0,
-    "cost": {"input": 0.0003, "output": 0.00075, "cacheRead": 0, "cacheWrite": 0, "total": 0.00105}
-  },
-  "stopReason": "stop",
-  "timestamp": 1733234567890
+	"role": "assistant",
+	"content": [
+		{ "type": "text", "text": "Hello! How can I help?" },
+		{ "type": "thinking", "thinking": "User is greeting me..." },
+		{ "type": "toolCall", "id": "call_123", "name": "bash", "arguments": { "command": "ls" } }
+	],
+	"api": "anthropic-messages",
+	"provider": "anthropic",
+	"model": "claude-sonnet-4-20250514",
+	"usage": {
+		"input": 100,
+		"output": 50,
+		"cacheRead": 0,
+		"cacheWrite": 0,
+		"cost": { "input": 0.0003, "output": 0.00075, "cacheRead": 0, "cacheWrite": 0, "total": 0.00105 }
+	},
+	"stopReason": "stop",
+	"timestamp": 1733234567890
 }
 ```
 
@@ -890,12 +932,12 @@ Stop reasons: `"stop"`, `"length"`, `"toolUse"`, `"error"`, `"aborted"`
 
 ```json
 {
-  "role": "toolResult",
-  "toolCallId": "call_123",
-  "toolName": "bash",
-  "content": [{"type": "text", "text": "total 48\ndrwxr-xr-x ..."}],
-  "isError": false,
-  "timestamp": 1733234567890
+	"role": "toolResult",
+	"toolCallId": "call_123",
+	"toolName": "bash",
+	"content": [{ "type": "text", "text": "total 48\ndrwxr-xr-x ..." }],
+	"isError": false,
+	"timestamp": 1733234567890
 }
 ```
 
@@ -905,14 +947,14 @@ Created by the `bash` RPC command (not by LLM tool calls):
 
 ```json
 {
-  "role": "bashExecution",
-  "command": "ls -la",
-  "output": "total 48\ndrwxr-xr-x ...",
-  "exitCode": 0,
-  "cancelled": false,
-  "truncated": false,
-  "fullOutputPath": null,
-  "timestamp": 1733234567890
+	"role": "bashExecution",
+	"command": "ls -la",
+	"output": "total 48\ndrwxr-xr-x ...",
+	"exitCode": 0,
+	"cancelled": false,
+	"truncated": false,
+	"fullOutputPath": null,
+	"timestamp": 1733234567890
 }
 ```
 
@@ -920,14 +962,14 @@ Created by the `bash` RPC command (not by LLM tool calls):
 
 ```json
 {
-  "id": "img1",
-  "type": "image",
-  "fileName": "photo.jpg",
-  "mimeType": "image/jpeg",
-  "size": 102400,
-  "content": "base64-encoded-data...",
-  "extractedText": null,
-  "preview": null
+	"id": "img1",
+	"type": "image",
+	"fileName": "photo.jpg",
+	"mimeType": "image/jpeg",
+	"size": 102400,
+	"content": "base64-encoded-data...",
+	"extractedText": null,
+	"preview": null
 }
 ```
 
@@ -961,7 +1003,7 @@ for event in read_events():
         delta = event.get("assistantMessageEvent", {})
         if delta.get("type") == "text_delta":
             print(delta["delta"], end="", flush=True)
-    
+
     if event.get("type") == "agent_end":
         print()
         break
@@ -978,14 +1020,14 @@ const readline = require("readline");
 const agent = spawn("pi", ["--mode", "rpc", "--no-session"]);
 
 readline.createInterface({ input: agent.stdout }).on("line", (line) => {
-    const event = JSON.parse(line);
-    
-    if (event.type === "message_update") {
-        const { assistantMessageEvent } = event;
-        if (assistantMessageEvent.type === "text_delta") {
-            process.stdout.write(assistantMessageEvent.delta);
-        }
-    }
+	const event = JSON.parse(line);
+
+	if (event.type === "message_update") {
+		const { assistantMessageEvent } = event;
+		if (assistantMessageEvent.type === "text_delta") {
+			process.stdout.write(assistantMessageEvent.delta);
+		}
+	}
 });
 
 // Send prompt
@@ -993,6 +1035,6 @@ agent.stdin.write(JSON.stringify({ type: "prompt", message: "Hello" }) + "\n");
 
 // Abort on Ctrl+C
 process.on("SIGINT", () => {
-    agent.stdin.write(JSON.stringify({ type: "abort" }) + "\n");
+	agent.stdin.write(JSON.stringify({ type: "abort" }) + "\n");
 });
 ```

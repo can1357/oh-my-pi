@@ -4,10 +4,8 @@
  * Integrates MCP tool discovery with the custom tools system.
  */
 
-import type { TSchema } from "@sinclair/typebox";
 import type { LoadedCustomTool } from "../custom-tools/types.js";
-import { createMCPManager, type MCPLoadResult, MCPManager } from "./manager.js";
-import type { MCPToolDetails } from "./tool-bridge.js";
+import { type MCPLoadResult, MCPManager } from "./manager.js";
 
 /** Result from loading MCP tools */
 export interface MCPToolsLoadResult {

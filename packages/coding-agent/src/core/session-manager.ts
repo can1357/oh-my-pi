@@ -1,5 +1,5 @@
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { ImageContent, Message, TextContent } from "@mariozechner/pi-ai";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
 import {
 	appendFileSync,
 	closeSync,

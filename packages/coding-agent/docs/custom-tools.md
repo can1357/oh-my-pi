@@ -5,6 +5,7 @@
 Custom tools are additional tools that the LLM can call directly, just like the built-in `read`, `write`, `edit`, and `bash` tools. They are TypeScript modules that define callable functions with parameters, return values, and optional TUI rendering.
 
 **Key capabilities:**
+
 - **User interaction** - Prompt users via `pi.ui` (select, confirm, input dialogs)
 - **Custom rendering** - Control how tool calls and results appear via `renderCall`/`renderResult`
 - **TUI components** - Render custom components with `pi.ui.custom()` (see [tui.md](tui.md))
@@ -12,6 +13,7 @@ Custom tools are additional tools that the LLM can call directly, just like the 
 - **Streaming results** - Send partial updates via `onUpdate` callback
 
 **Example use cases:**
+
 - Interactive dialogs (questions with selectable options)
 - Stateful tools (todo lists, connection pools)
 - Rich output rendering (progress indicators, structured views)
@@ -19,12 +21,12 @@ Custom tools are additional tools that the LLM can call directly, just like the 
 
 **When to use custom tools vs. alternatives:**
 
-| Need | Solution |
-|------|----------|
-| Always-needed context (conventions, commands) | AGENTS.md |
-| User triggers a specific prompt template | Slash command |
-| On-demand capability package (workflows, scripts, setup) | Skill |
-| Additional tool directly callable by the LLM | **Custom tool** |
+| Need                                                     | Solution        |
+| -------------------------------------------------------- | --------------- |
+| Always-needed context (conventions, commands)            | AGENTS.md       |
+| User triggers a specific prompt template                 | Slash command   |
+| On-demand capability package (workflows, scripts, setup) | Skill           |
+| Additional tool directly callable by the LLM             | **Custom tool** |
 
 See [examples/custom-tools/](../examples/custom-tools/) for working examples.
 
@@ -33,23 +35,23 @@ See [examples/custom-tools/](../examples/custom-tools/) for working examples.
 Create a file `~/.pi/agent/tools/hello/index.ts`:
 
 ```typescript
-import type { CustomToolFactory } from "@mariozechner/pi-coding-agent";
+import type { CustomToolFactory } from "@oh-my-pi/pi-coding-agent";
 
 const factory: CustomToolFactory = (pi) => ({
-  name: "hello",
-  label: "Hello",
-  description: "A simple greeting tool",
-  parameters: pi.typebox.Type.Object({
-    name: pi.typebox.Type.String({ description: "Name to greet" }),
-  }),
+	name: "hello",
+	label: "Hello",
+	description: "A simple greeting tool",
+	parameters: pi.typebox.Type.Object({
+		name: pi.typebox.Type.String({ description: "Name to greet" }),
+	}),
 
-  async execute(toolCallId, params, onUpdate, ctx, signal) {
-    const { name } = params as { name: string };
-    return {
-      content: [{ type: "text", text: `Hello, ${name}!` }],
-      details: { greeted: name },
-    };
-  },
+	async execute(toolCallId, params, onUpdate, ctx, signal) {
+		const { name } = params as { name: string };
+		return {
+			content: [{ type: "text", text: `Hello, ${name}!` }],
+			details: { greeted: name },
+		};
+	},
 });
 
 export default factory;
@@ -61,14 +63,15 @@ The tool is automatically discovered and available in your next pi session.
 
 Tools must be in a subdirectory with an `index.ts` entry point:
 
-| Location | Scope | Auto-discovered |
-|----------|-------|-----------------|
-| `~/.pi/agent/tools/*/index.ts` | Global (all projects) | Yes |
-| `.pi/tools/*/index.ts` | Project-local | Yes |
-| `settings.json` `customTools` array | Configured paths | Yes |
-| `--tool <path>` CLI flag | One-off/debugging | No |
+| Location                            | Scope                 | Auto-discovered |
+| ----------------------------------- | --------------------- | --------------- |
+| `~/.pi/agent/tools/*/index.ts`      | Global (all projects) | Yes             |
+| `.pi/tools/*/index.ts`              | Project-local         | Yes             |
+| `settings.json` `customTools` array | Configured paths      | Yes             |
+| `--tool <path>` CLI flag            | One-off/debugging     | No              |
 
 **Example structure:**
+
 ```
 ~/.pi/agent/tools/
 ├── hello/
@@ -87,12 +90,12 @@ Tools must be in a subdirectory with an `index.ts` entry point:
 
 Custom tools can import from these packages:
 
-| Package | Purpose | Import Method |
-|---------|---------|---------------|
-| `@sinclair/typebox` | Schema definitions (`Type.Object`, `Type.String`, etc.) | Via `pi.typebox.*` (injected) |
-| `@mariozechner/pi-coding-agent` | Types and utilities | Via `pi.pi.*` (injected) or direct import for types |
-| `@mariozechner/pi-ai` | AI utilities (`StringEnum` for Google-compatible enums) | Via `pi.pi.*` (re-exported through coding-agent) |
-| `@mariozechner/pi-tui` | TUI components (`Text`, `Box`, etc. for custom rendering) | Via `pi.pi.*` (re-exported through coding-agent) |
+| Package                     | Purpose                                                   | Import Method                                       |
+| --------------------------- | --------------------------------------------------------- | --------------------------------------------------- |
+| `@sinclair/typebox`         | Schema definitions (`Type.Object`, `Type.String`, etc.)   | Via `pi.typebox.*` (injected)                       |
+| `@oh-my-pi/pi-coding-agent` | Types and utilities                                       | Via `pi.pi.*` (injected) or direct import for types |
+| `@oh-my-pi/pi-ai`           | AI utilities (`StringEnum` for Google-compatible enums)   | Via `pi.pi.*` (re-exported through coding-agent)    |
+| `@oh-my-pi/pi-tui`          | TUI components (`Text`, `Box`, etc. for custom rendering) | Via `pi.pi.*` (re-exported through coding-agent)    |
 
 Node.js built-in modules (`node:fs`, `node:path`, etc.) are also available.
 
@@ -102,51 +105,57 @@ Node.js built-in modules (`node:fs`, `node:path`, etc.) are also available.
 
 ```typescript
 import type {
-  CustomTool,
-  CustomToolContext,
-  CustomToolFactory,
-  CustomToolSessionEvent,
-} from "@mariozechner/pi-coding-agent";
+	CustomTool,
+	CustomToolContext,
+	CustomToolFactory,
+	CustomToolSessionEvent,
+} from "@oh-my-pi/pi-coding-agent";
 
 const factory: CustomToolFactory = (pi) => {
-  // Destructure injected dependencies
-  const { Type } = pi.typebox;
-  const { StringEnum } = pi.pi;
-  const { Text } = pi.pi;
+	// Destructure injected dependencies
+	const { Type } = pi.typebox;
+	const { StringEnum } = pi.pi;
+	const { Text } = pi.pi;
 
-  return {
-    name: "my_tool",
-    label: "My Tool",
-    description: "What this tool does (be specific for LLM)",
-    parameters: Type.Object({
-      // Use StringEnum for string enums (Google API compatible)
-      action: StringEnum(["list", "add", "remove"] as const),
-      text: Type.Optional(Type.String()),
-    }),
+	return {
+		name: "my_tool",
+		label: "My Tool",
+		description: "What this tool does (be specific for LLM)",
+		parameters: Type.Object({
+			// Use StringEnum for string enums (Google API compatible)
+			action: StringEnum(["list", "add", "remove"] as const),
+			text: Type.Optional(Type.String()),
+		}),
 
-  async execute(toolCallId, params, onUpdate, ctx, signal) {
-    // signal - AbortSignal for cancellation
-    // onUpdate - Callback for streaming partial results
-    // ctx - CustomToolContext with sessionManager, modelRegistry, model
-    return {
-      content: [{ type: "text", text: "Result for LLM" }],
-      details: { /* structured data for rendering */ },
-    };
-  },
+		async execute(toolCallId, params, onUpdate, ctx, signal) {
+			// signal - AbortSignal for cancellation
+			// onUpdate - Callback for streaming partial results
+			// ctx - CustomToolContext with sessionManager, modelRegistry, model
+			return {
+				content: [{ type: "text", text: "Result for LLM" }],
+				details: {
+					/* structured data for rendering */
+				},
+			};
+		},
 
-  // Optional: Session lifecycle callback
-  onSession(event, ctx) {
-    if (event.reason === "shutdown") {
-      // Cleanup resources (close connections, save state, etc.)
-      return;
-    }
-    // Reconstruct state from ctx.sessionManager.getBranch()
-  },
+		// Optional: Session lifecycle callback
+		onSession(event, ctx) {
+			if (event.reason === "shutdown") {
+				// Cleanup resources (close connections, save state, etc.)
+				return;
+			}
+			// Reconstruct state from ctx.sessionManager.getBranch()
+		},
 
-    // Optional: Custom rendering
-    renderCall(args, theme) { /* return Component */ },
-    renderResult(result, options, theme) { /* return Component */ },
-  };
+		// Optional: Custom rendering
+		renderCall(args, theme) {
+			/* return Component */
+		},
+		renderResult(result, options, theme) {
+			/* return Component */
+		},
+	};
 };
 
 export default factory;
@@ -160,32 +169,32 @@ The factory receives a `CustomToolAPI` object (named `pi` by convention):
 
 ```typescript
 interface CustomToolAPI {
-  cwd: string;  // Current working directory
-  exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
-  ui: ToolUIContext;
-  hasUI: boolean;  // false in --print or --mode rpc
-  typebox: typeof import("@sinclair/typebox");  // Injected @sinclair/typebox
-  pi: typeof import("@mariozechner/pi-coding-agent");  // Injected pi-coding-agent exports
+	cwd: string; // Current working directory
+	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
+	ui: ToolUIContext;
+	hasUI: boolean; // false in --print or --mode rpc
+	typebox: typeof import("@sinclair/typebox"); // Injected @sinclair/typebox
+	pi: typeof import("@oh-my-pi/pi-coding-agent"); // Injected pi-coding-agent exports
 }
 
 interface ToolUIContext {
-  select(title: string, options: string[]): Promise<string | undefined>;
-  confirm(title: string, message: string): Promise<boolean>;
-  input(title: string, placeholder?: string): Promise<string | undefined>;
-  notify(message: string, type?: "info" | "warning" | "error"): void;
-  custom(component: Component & { dispose?(): void }): { close: () => void; requestRender: () => void };
+	select(title: string, options: string[]): Promise<string | undefined>;
+	confirm(title: string, message: string): Promise<boolean>;
+	input(title: string, placeholder?: string): Promise<string | undefined>;
+	notify(message: string, type?: "info" | "warning" | "error"): void;
+	custom(component: Component & { dispose?(): void }): { close: () => void; requestRender: () => void };
 }
 
 interface ExecOptions {
-  signal?: AbortSignal;  // Cancel the process
-  timeout?: number;      // Timeout in milliseconds
+	signal?: AbortSignal; // Cancel the process
+	timeout?: number; // Timeout in milliseconds
 }
 
 interface ExecResult {
-  stdout: string;
-  stderr: string;
-  code: number;
-  killed?: boolean;  // True if process was killed by signal/timeout
+	stdout: string;
+	stderr: string;
+	code: number;
+	killed?: boolean; // True if process was killed by signal/timeout
 }
 ```
 
@@ -212,18 +221,19 @@ async execute(toolCallId, params, onUpdate, ctx, signal) {
 ```typescript
 async execute(toolCallId, params, onUpdate, ctx, signal) {
   const { path } = params as { path: string };
-  
+
   // Throw on error - pi will catch it and report to the LLM
   if (!fs.existsSync(path)) {
     throw new Error(`File not found: ${path}`);
   }
-  
+
   // Return content only on success
   return { content: [{ type: "text", text: "Success" }] };
 }
 ```
 
 Thrown errors are:
+
 - Reported to the LLM as tool errors (with `isError: true`)
 - Emitted to hooks via `tool_result` event (hooks can inspect `event.isError`)
 - Displayed in the TUI with error styling
@@ -234,12 +244,12 @@ The `execute` and `onSession` callbacks receive a `CustomToolContext`:
 
 ```typescript
 interface CustomToolContext {
-  sessionManager: ReadonlySessionManager;  // Read-only access to session
-  modelRegistry: ModelRegistry;            // For API key resolution
-  model: Model | undefined;                // Current model (may be undefined)
-  isIdle(): boolean;                       // Whether agent is streaming
-  hasQueuedMessages(): boolean;            // Whether user has queued messages
-  abort(): void;                           // Abort current operation (fire-and-forget)
+	sessionManager: ReadonlySessionManager; // Read-only access to session
+	modelRegistry: ModelRegistry; // For API key resolution
+	model: Model | undefined; // Current model (may be undefined)
+	isIdle(): boolean; // Whether agent is streaming
+	hasQueuedMessages(): boolean; // Whether user has queued messages
+	abort(): void; // Abort current operation (fire-and-forget)
 }
 ```
 
@@ -273,7 +283,7 @@ async execute(toolCallId, params, onUpdate, ctx, signal) {
   const text = await pi.ui.editor("Edit your response:", "prefilled text");
   // Returns edited text or undefined if cancelled (Escape)
   // Ctrl+Enter to submit, Ctrl+G to open $VISUAL or $EDITOR
-  
+
   if (!text) {
     return { content: [{ type: "text", text: "Cancelled" }] };
   }
@@ -287,12 +297,13 @@ Tools can implement `onSession` to react to session changes:
 
 ```typescript
 interface CustomToolSessionEvent {
-  reason: "start" | "switch" | "branch" | "tree" | "shutdown";
-  previousSessionFile: string | undefined;
+	reason: "start" | "switch" | "branch" | "tree" | "shutdown";
+	previousSessionFile: string | undefined;
 }
 ```
 
 **Reasons:**
+
 - `start`: Initial session load on startup
 - `switch`: User started a new session (`/new`) or switched to a different session (`/resume`)
 - `branch`: User branched from a previous message (`/branch`)
@@ -357,6 +368,7 @@ const factory: CustomToolFactory = (pi) => {
 ```
 
 This pattern ensures:
+
 - When user branches, state is correct for that point in history
 - When user switches sessions, state matches that session
 - When user starts a new session, state resets
@@ -368,6 +380,7 @@ Custom tools can provide `renderCall` and `renderResult` methods to control how 
 ### How It Works
 
 Tool output is wrapped in a `Box` component that handles:
+
 - Padding (1 character horizontal, 1 line vertical)
 - Background color based on state (pending/success/error)
 
@@ -389,6 +402,7 @@ renderCall(args, theme) {
 ```
 
 Called when:
+
 - Tool call starts (may have partial args during streaming)
 - Args are updated during streaming
 
@@ -412,7 +426,7 @@ renderResult(result, { expanded, isPartial }, theme) {
 
   // Normal result
   let text = theme.fg("success", "✓ ") + theme.fg("muted", "Done");
-  
+
   // Support expanded view (Ctrl+O)
   if (expanded && details?.items) {
     for (const item of details.items) {
@@ -425,6 +439,7 @@ renderResult(result, { expanded, isPartial }, theme) {
 ```
 
 **Options:**
+
 - `expanded`: User pressed Ctrl+O to expand
 - `isPartial`: Result is from `onUpdate` (streaming), not final
 
@@ -441,23 +456,24 @@ renderResult(result, { expanded, isPartial }, theme) {
 
 ```typescript
 // Foreground
-theme.fg("toolTitle", text)   // Tool names
-theme.fg("accent", text)      // Highlights
-theme.fg("success", text)     // Success
-theme.fg("error", text)       // Errors
-theme.fg("warning", text)     // Warnings
-theme.fg("muted", text)       // Secondary text
-theme.fg("dim", text)         // Tertiary text
-theme.fg("toolOutput", text)  // Output content
+theme.fg("toolTitle", text); // Tool names
+theme.fg("accent", text); // Highlights
+theme.fg("success", text); // Success
+theme.fg("error", text); // Errors
+theme.fg("warning", text); // Warnings
+theme.fg("muted", text); // Secondary text
+theme.fg("dim", text); // Tertiary text
+theme.fg("toolOutput", text); // Output content
 
 // Styles
-theme.bold(text)
-theme.italic(text)
+theme.bold(text);
+theme.italic(text);
 ```
 
 ### Fallback Behavior
 
 If `renderCall` or `renderResult` is not defined or throws an error:
+
 - `renderCall`: Shows tool name
 - `renderResult`: Shows raw text output from `content`
 
@@ -513,11 +529,13 @@ const factory: CustomToolFactory = (pi) => {
 ## Examples
 
 See [`examples/custom-tools/todo/index.ts`](../examples/custom-tools/todo/index.ts) for a complete example with:
+
 - `onSession` for state reconstruction
 - Custom `renderCall` and `renderResult`
 - Proper branching support via details storage
 
 Test with:
+
 ```bash
 pi --tool packages/coding-agent/examples/custom-tools/todo/index.ts
 ```

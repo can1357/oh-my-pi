@@ -5,7 +5,7 @@
  * Shows turn progress with themed colors.
  */
 
-import type { HookAPI } from "@mariozechner/pi-coding-agent";
+import type { HookAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: HookAPI) {
 	let turnCount = 0;

@@ -1,5 +1,5 @@
 {
-	"name": "@mariozechner/pi-mom",
+	"name": "@oh-my-pi/pi-mom",
 	"version": "1.337.0",
 	"description": "Slack bot that delegates messages to the pi coding agent",
 	"type": "module",
@@ -11,9 +11,9 @@
 	},
 	"dependencies": {
 		"@anthropic-ai/sandbox-runtime": "^0.0.16",
-		"@mariozechner/pi-agent-core": "workspace:*",
-		"@mariozechner/pi-ai": "workspace:*",
-		"@mariozechner/pi-coding-agent": "workspace:*",
+		"@oh-my-pi/pi-agent-core": "workspace:*",
+		"@oh-my-pi/pi-ai": "workspace:*",
+		"@oh-my-pi/pi-coding-agent": "workspace:*",
 		"@sinclair/typebox": "^0.34.0",
 		"@slack/socket-mode": "^2.0.0",
 		"@slack/web-api": "^7.0.0",
@@ -35,7 +35,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/badlogic/pi-mono.git",
+		"url": "git+https://github.com/can1357/oh-my-pi.git",
 		"directory": "packages/mom"
 	},
 	"engines": {

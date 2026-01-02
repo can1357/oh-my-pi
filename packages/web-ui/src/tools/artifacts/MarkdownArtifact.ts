@@ -46,8 +46,7 @@ export class MarkdownArtifact extends ArtifactElement {
 
 		return html`
 			<div class="flex items-center gap-2">
-				${toggle}
-				${copyButton}
+				${toggle} ${copyButton}
 				${DownloadButton({
 					content: this._content,
 					filename: this.filename,
@@ -65,9 +64,11 @@ export class MarkdownArtifact extends ArtifactElement {
 					${
 						this.viewMode === "preview"
 							? html`<div class="p-4"><markdown-block .content=${this.content}></markdown-block></div>`
-							: html`<pre class="m-0 p-4 text-xs whitespace-pre-wrap break-words"><code class="hljs language-markdown">${unsafeHTML(
-									hljs.highlight(this.content, { language: "markdown", ignoreIllegals: true }).value,
-								)}</code></pre>`
+							: html`<pre
+								class="m-0 p-4 text-xs whitespace-pre-wrap break-words"
+						  ><code class="hljs language-markdown">${unsafeHTML(
+								hljs.highlight(this.content, { language: "markdown", ignoreIllegals: true }).value,
+							)}</code></pre>`
 					}
 				</div>
 			</div>

@@ -1,6 +1,6 @@
 import { i18n } from "@mariozechner/mini-lit";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { type Static, Type } from "@sinclair/typebox";
 import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
@@ -68,7 +68,9 @@ export async function executeJavaScript(
 		// Add return value if present
 		if (result.returnValue !== undefined) {
 			if (output) output += "\n";
-			output += `=> ${typeof result.returnValue === "object" ? JSON.stringify(result.returnValue, null, 2) : result.returnValue}`;
+			output += `=> ${
+				typeof result.returnValue === "object" ? JSON.stringify(result.returnValue, null, 2) : result.returnValue
+			}`;
 		}
 
 		// Add file notifications
@@ -251,10 +253,24 @@ export const javascriptReplRenderer: ToolRenderer<JavaScriptReplParams, JavaScri
 			return {
 				content: html`
 					<div>
-						${renderCollapsibleHeader(state, Code, params.title ? params.title : i18n("Executing JavaScript"), codeContentRef, codeChevronRef, false)}
+						${renderCollapsibleHeader(
+							state,
+							Code,
+							params.title ? params.title : i18n("Executing JavaScript"),
+							codeContentRef,
+							codeChevronRef,
+							false,
+						)}
 						<div ${ref(codeContentRef)} class="max-h-0 overflow-hidden transition-all duration-300 space-y-3">
 							<code-block .code=${params.code || ""} language="javascript"></code-block>
-							${output ? html`<console-block .content=${output} .variant=${result.isError ? "error" : "default"}></console-block>` : ""}
+							${
+								output
+									? html`<console-block
+										.content=${output}
+										.variant=${result.isError ? "error" : "default"}
+								  ></console-block>`
+									: ""
+							}
 						</div>
 						${
 							attachments.length
@@ -274,7 +290,14 @@ export const javascriptReplRenderer: ToolRenderer<JavaScriptReplParams, JavaScri
 			return {
 				content: html`
 					<div>
-						${renderCollapsibleHeader(state, Code, params.title ? params.title : i18n("Executing JavaScript"), codeContentRef, codeChevronRef, false)}
+						${renderCollapsibleHeader(
+							state,
+							Code,
+							params.title ? params.title : i18n("Executing JavaScript"),
+							codeContentRef,
+							codeChevronRef,
+							false,
+						)}
 						<div ${ref(codeContentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
 							${params.code ? html`<code-block .code=${params.code} language="javascript"></code-block>` : ""}
 						</div>

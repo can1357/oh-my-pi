@@ -4,8 +4,8 @@
  * Run with: npx tsx test/streaming-render-debug.ts
  */
 
-import type { AssistantMessage } from "@mariozechner/pi-ai";
-import { ProcessTerminal, TUI } from "@mariozechner/pi-tui";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";

@@ -1,6 +1,6 @@
 import { readFileSync, type Stats, statSync } from "node:fs";
 import nodePath from "node:path";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import type { Subprocess } from "bun";
 import { ensureTool } from "../../utils/tools-manager.js";
@@ -64,7 +64,9 @@ export function createGrepTool(cwd: string): AgentTool<typeof grepSchema> {
 	return {
 		name: "grep",
 		label: "grep",
-		description: `Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} matches or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Long lines are truncated to ${GREP_MAX_LINE_LENGTH} chars.`,
+		description: `Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} matches or ${
+			DEFAULT_MAX_BYTES / 1024
+		}KB (whichever is hit first). Long lines are truncated to ${GREP_MAX_LINE_LENGTH} chars.`,
 		parameters: grepSchema,
 		execute: async (
 			_toolCallId: string,

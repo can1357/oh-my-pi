@@ -28,9 +28,9 @@ The coding-agent is structured into distinct layers:
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                   External Dependencies                     │
-│  @mariozechner/pi-agent (Agent, tools)                     │
-│  @mariozechner/pi-ai (models, providers)                   │
-│  @mariozechner/pi-tui (TUI components)                     │
+│  @oh-my-pi/pi-agent (Agent, tools)                     │
+│  @oh-my-pi/pi-ai (models, providers)                   │
+│  @oh-my-pi/pi-tui (TUI components)                     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -65,7 +65,7 @@ src/
 │   ├── system-prompt.ts      # buildSystemPrompt(), loadProjectContextFiles()
 │   │
 │   ├── oauth/                # OAuth authentication (thin wrapper)
-│   │   └── index.ts          # Re-exports from @mariozechner/pi-ai with convenience wrappers
+│   │   └── index.ts          # Re-exports from @oh-my-pi/pi-ai with convenience wrappers
 │   │
 │   ├── hooks/                # Hook system for extending behavior
 │   │   ├── index.ts          # Hook exports
@@ -143,6 +143,7 @@ src/
 ### AgentSession (core/agent-session.ts)
 
 The central abstraction that wraps the low-level `Agent` with:
+
 - Session persistence (via SessionManager)
 - Settings persistence (via SettingsManager)
 - Model cycling with scoped models
@@ -157,6 +158,7 @@ All three modes (interactive, print, rpc) use AgentSession.
 ### InteractiveMode (modes/interactive/interactive-mode.ts)
 
 Handles TUI rendering and user interaction:
+
 - Subscribes to AgentSession events
 - Renders messages, tool executions, streaming
 - Manages editor, selectors, key handlers
@@ -175,6 +177,7 @@ The RPC mode exposes the full AgentSession API via JSON commands. See [docs/rpc.
 ### SessionManager (core/session-manager.ts)
 
 Handles session persistence:
+
 - JSONL format for append-only writes
 - Session file location management
 - Message loading/saving
@@ -183,6 +186,7 @@ Handles session persistence:
 ### SettingsManager (core/settings-manager.ts)
 
 Handles user preferences:
+
 - Default model/provider
 - Theme selection
 - Queue mode
@@ -193,6 +197,7 @@ Handles user preferences:
 ### Hook System (core/hooks/)
 
 Extensibility layer for intercepting agent behavior:
+
 - **loader.ts**: Discovers and loads hooks from `~/.pi/agent/hooks/`, `.pi/hooks/`, and CLI
 - **runner.ts**: Dispatches events to registered hooks
 - **tool-wrapper.ts**: Wraps tools to emit `tool_call` and `tool_result` events
@@ -203,6 +208,7 @@ See [docs/hooks.md](docs/hooks.md) for full documentation.
 ### Custom Tools (core/custom-tools/)
 
 System for adding LLM-callable tools:
+
 - **loader.ts**: Discovers and loads tools from `~/.pi/agent/tools/`, `.pi/tools/`, and CLI
 - **types.ts**: `CustomToolFactory`, `CustomToolDefinition`, `CustomToolResult`
 
@@ -211,6 +217,7 @@ See [docs/custom-tools.md](docs/custom-tools.md) for full documentation.
 ### Skills (core/skills.ts)
 
 On-demand capability packages:
+
 - Discovers SKILL.md files from multiple locations
 - Provides specialized workflows and instructions
 - Loaded when task matches description

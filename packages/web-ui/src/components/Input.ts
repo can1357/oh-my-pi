@@ -82,7 +82,7 @@ export const Input = fc<InputProps>(
 							<label class="text-sm font-medium text-foreground">
 								${label} ${required ? html`<span class="text-destructive">${i18n("*")}</span>` : ""}
 							</label>
-						`
+					  `
 						: ""
 				}
 				<input

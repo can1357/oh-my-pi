@@ -5,7 +5,7 @@ import type {
 	ToolCall,
 	ToolResultMessage as ToolResultMessageType,
 	UserMessage as UserMessageType,
-} from "@mariozechner/pi-ai";
+} from "@oh-my-pi/pi-ai";
 import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { renderTool } from "../tools/index.js";
@@ -13,7 +13,7 @@ import type { Attachment } from "../utils/attachment-utils.js";
 import { formatUsage } from "../utils/format.js";
 import { i18n } from "../utils/i18n.js";
 import "./ThinkingBlock.js";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 
 export type UserMessageWithAttachments = {
 	role: "user-with-attachments";
@@ -32,7 +32,7 @@ export interface ArtifactMessage {
 	timestamp: string;
 }
 
-declare module "@mariozechner/pi-agent-core" {
+declare module "@oh-my-pi/pi-agent-core" {
 	interface CustomAgentMessages {
 		"user-with-attachments": UserMessageWithAttachments;
 		artifact: ArtifactMessage;
@@ -72,7 +72,7 @@ export class UserMessage extends LitElement {
 										(attachment) => html` <attachment-tile .attachment=${attachment}></attachment-tile> `,
 									)}
 								</div>
-							`
+						  `
 							: ""
 					}
 				</div>
@@ -138,7 +138,14 @@ export class AssistantMessage extends LitElement {
 				${
 					this.message.usage && !this.isStreaming
 						? this.onCostClick
-							? html` <div class="px-4 mt-2 text-xs text-muted-foreground cursor-pointer hover:text-foreground transition-colors" @click=${this.onCostClick}>${formatUsage(this.message.usage)}</div> `
+							? html`
+								<div
+									class="px-4 mt-2 text-xs text-muted-foreground cursor-pointer hover:text-foreground transition-colors"
+									@click=${this.onCostClick}
+								>
+									${formatUsage(this.message.usage)}
+								</div>
+						  `
 							: html` <div class="px-4 mt-2 text-xs text-muted-foreground">${formatUsage(this.message.usage)}</div> `
 						: ""
 				}
@@ -148,7 +155,7 @@ export class AssistantMessage extends LitElement {
 							<div class="mx-4 mt-3 p-3 bg-destructive/10 text-destructive rounded-lg text-sm overflow-hidden">
 								<strong>${i18n("Error:")}</strong> ${this.message.errorMessage}
 							</div>
-						`
+					  `
 						: ""
 				}
 				${
@@ -290,8 +297,8 @@ export class AbortedMessage extends LitElement {
 // Default Message Transformer
 // ============================================================================
 
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { Message } from "@mariozechner/pi-ai";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { Message } from "@oh-my-pi/pi-ai";
 
 /**
  * Convert attachments to content blocks for LLM.

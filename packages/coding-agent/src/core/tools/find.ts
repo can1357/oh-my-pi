@@ -1,6 +1,6 @@
 import { existsSync, type Stats, statSync } from "node:fs";
 import path from "node:path";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import { globSync } from "glob";
 import { ensureTool } from "../../utils/tools-manager.js";
@@ -41,7 +41,9 @@ export function createFindTool(cwd: string): AgentTool<typeof findSchema> {
 	return {
 		name: "find",
 		label: "find",
-		description: `Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} results or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first).`,
+		description: `Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} results or ${
+			DEFAULT_MAX_BYTES / 1024
+		}KB (whichever is hit first).`,
 		parameters: findSchema,
 		execute: async (
 			_toolCallId: string,

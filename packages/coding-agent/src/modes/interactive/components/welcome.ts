@@ -1,4 +1,4 @@
-import { type Component, visibleWidth } from "@mariozechner/pi-tui";
+import { type Component, visibleWidth } from "@oh-my-pi/pi-tui";
 import { APP_NAME } from "../../../config.js";
 import { theme } from "../theme/theme.js";
 
@@ -44,13 +44,7 @@ export class WelcomeComponent implements Component {
 
 		// Block-based Pi logo (gradient: magenta → cyan)
 		// biome-ignore format: preserve ASCII art layout
-		const piLogo = [
-			"▀████████████▀",
-			" ╘███    ███  ",
-			"  ███    ███  ",
-			"  ███    ███  ",
-			" ▄███▄  ▄███▄ ",
-		];
+		const piLogo = ["▀████████████▀", " ╘███    ███  ", "  ███    ███  ", "  ███    ███  ", " ▄███▄  ▄███▄ "];
 
 		// Apply gradient to logo
 		const logoColored = piLogo.map((line) => this.gradientLine(line));

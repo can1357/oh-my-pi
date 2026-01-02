@@ -2,7 +2,7 @@
  * List available models with optional fuzzy search
  */
 
-import type { Api, Model } from "@mariozechner/pi-ai";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../core/model-registry.js";
 import { fuzzyFilter } from "../utils/fuzzy.js";
 

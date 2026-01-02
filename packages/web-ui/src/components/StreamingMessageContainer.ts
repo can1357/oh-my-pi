@@ -1,5 +1,5 @@
-import type { AgentMessage, AgentTool } from "@mariozechner/pi-agent-core";
-import type { ToolResultMessage } from "@mariozechner/pi-ai";
+import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { html, LitElement } from "lit";
 import { property, state } from "lit/decorators.js";
 
@@ -90,7 +90,11 @@ export class StreamingMessageContainer extends LitElement {
 						.hideToolCalls=${false}
 						.onCostClick=${this.onCostClick}
 					></assistant-message>
-					${this.isStreaming ? html`<span class="mx-4 inline-block w-2 h-4 bg-muted-foreground animate-pulse"></span>` : ""}
+					${
+						this.isStreaming
+							? html`<span class="mx-4 inline-block w-2 h-4 bg-muted-foreground animate-pulse"></span>`
+							: ""
+					}
 				</div>
 			`;
 		}

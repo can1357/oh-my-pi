@@ -132,7 +132,7 @@ export class TextArtifact extends ArtifactElement {
 										ignoreIllegals: true,
 									}).value,
 								)}</code></pre>
-							`
+						  `
 							: html` <pre class="m-0 p-4 text-xs font-mono">${this.content}</pre> `
 					}
 				</div>

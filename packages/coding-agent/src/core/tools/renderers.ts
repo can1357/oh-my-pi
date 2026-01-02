@@ -4,8 +4,8 @@
  * These provide rich visualization for tool calls and results in the TUI.
  */
 
-import type { Component } from "@mariozechner/pi-tui";
-import { Text } from "@mariozechner/pi-tui";
+import type { Component } from "@oh-my-pi/pi-tui";
+import { Text } from "@oh-my-pi/pi-tui";
 import type { Theme } from "../../modes/interactive/theme/theme.js";
 import type { RenderResultOptions } from "../custom-tools/types.js";
 import type { AskToolDetails } from "./ask.js";
@@ -217,7 +217,10 @@ const findRenderer: ToolRenderer<FindArgs, FindToolDetails> = {
 			const displayLines = lines.slice(0, maxLines);
 			const remaining = lines.length - maxLines;
 
-			let text = `${theme.fg("success", ICON_SUCCESS)} ${theme.fg("toolTitle", "find")} ${theme.fg("dim", `${lines.length} file${lines.length !== 1 ? "s" : ""}`)}`;
+			let text = `${theme.fg("success", ICON_SUCCESS)} ${theme.fg("toolTitle", "find")} ${theme.fg(
+				"dim",
+				`${lines.length} file${lines.length !== 1 ? "s" : ""}`,
+			)}`;
 			for (let i = 0; i < displayLines.length; i++) {
 				const isLast = i === displayLines.length - 1 && remaining === 0;
 				const branch = isLast ? TREE_END : TREE_MID;
@@ -414,9 +417,13 @@ const astRenderer: ToolRenderer<AstArgs, AstToolDetails> = {
 		const icon = mode === "apply" ? theme.fg("success", ICON_SUCCESS) : theme.fg("accent", ICON_INFO);
 		let summary: string;
 		if (mode === "apply") {
-			summary = `Applied ${matchCount} replacement${matchCount !== 1 ? "s" : ""} in ${fileCount} file${fileCount !== 1 ? "s" : ""}`;
+			summary = `Applied ${matchCount} replacement${matchCount !== 1 ? "s" : ""} in ${fileCount} file${
+				fileCount !== 1 ? "s" : ""
+			}`;
 		} else if (mode === "preview") {
-			summary = `Preview: ${matchCount} replacement${matchCount !== 1 ? "s" : ""} in ${fileCount} file${fileCount !== 1 ? "s" : ""}`;
+			summary = `Preview: ${matchCount} replacement${matchCount !== 1 ? "s" : ""} in ${fileCount} file${
+				fileCount !== 1 ? "s" : ""
+			}`;
 		} else {
 			summary = `${matchCount} match${matchCount !== 1 ? "es" : ""} in ${fileCount} file${fileCount !== 1 ? "s" : ""}`;
 		}
@@ -636,7 +643,9 @@ const lsRenderer: ToolRenderer<LsArgs, LsToolDetails> = {
 		const truncated = details?.truncation?.truncated || details?.entryLimitReached;
 		const icon = truncated ? theme.fg("warning", ICON_WARNING) : theme.fg("success", ICON_SUCCESS);
 
-		let summary = `${dirs.length} dir${dirs.length !== 1 ? "s" : ""}, ${files.length} file${files.length !== 1 ? "s" : ""}`;
+		let summary = `${dirs.length} dir${dirs.length !== 1 ? "s" : ""}, ${files.length} file${
+			files.length !== 1 ? "s" : ""
+		}`;
 		if (truncated) {
 			summary += theme.fg("warning", " (truncated)");
 		}

@@ -3,7 +3,7 @@ import { Dialog, DialogContent, DialogHeader } from "@mariozechner/mini-lit/dist
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { Label } from "@mariozechner/mini-lit/dist/Label.js";
 import { Switch } from "@mariozechner/mini-lit/dist/Switch.js";
-import { getProviders } from "@mariozechner/pi-ai";
+import { getProviders } from "@oh-my-pi/pi-ai";
 import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import "../components/ProviderKeyInput.js";
@@ -78,7 +78,9 @@ export class ProxyTab extends SettingsTab {
 		return html`
 			<div class="flex flex-col gap-4">
 				<p class="text-sm text-muted-foreground">
-					${i18n("Allows browser-based apps to bypass CORS restrictions when calling LLM providers. Required for Z-AI and Anthropic with OAuth token.")}
+					${i18n(
+						"Allows browser-based apps to bypass CORS restrictions when calling LLM providers. Required for Z-AI and Anthropic with OAuth token.",
+					)}
 				</p>
 
 				<div class="flex items-center justify-between">

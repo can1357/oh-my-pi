@@ -8,8 +8,8 @@
  * - Collapsible/expandable views
  */
 
-import type { AgentToolResult, RenderResultOptions } from "@mariozechner/pi-agent-core";
-import { Text } from "@mariozechner/pi-tui";
+import type { AgentToolResult, RenderResultOptions } from "@oh-my-pi/pi-agent-core";
+import { Text } from "@oh-my-pi/pi-tui";
 import { highlight, supportsLanguage } from "cli-highlight";
 import type { Theme } from "../../../modes/interactive/theme/theme.js";
 import type { LspParams, LspToolDetails } from "./types.js";
@@ -273,7 +273,10 @@ function renderReferences(refMatch: RegExpMatchArray, lines: string[], expanded:
 			const fileCont = isLastFile ? "   " : `${TREE_PIPE}  `;
 
 			if (locs.length === 1) {
-				output += `\n ${theme.fg("dim", fileBranch)} ${theme.fg("accent", file)}:${theme.fg("muted", `${locs[0][0]}:${locs[0][1]}`)}`;
+				output += `\n ${theme.fg("dim", fileBranch)} ${theme.fg("accent", file)}:${theme.fg(
+					"muted",
+					`${locs[0][0]}:${locs[0][1]}`,
+				)}`;
 			} else {
 				output += `\n ${theme.fg("dim", fileBranch)} ${theme.fg("accent", file)}`;
 
@@ -372,7 +375,10 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 			const sym = symbols[i];
 			const prefix = getPrefix(i);
 			const branch = isLastSibling(i) ? TREE_END : TREE_MID;
-			output += `\n${prefix}${theme.fg("dim", branch)} ${theme.fg("accent", sym.name)} ${theme.fg("muted", `@${sym.line}`)}`;
+			output += `\n${prefix}${theme.fg("dim", branch)} ${theme.fg("accent", sym.name)} ${theme.fg(
+				"muted",
+				`@${sym.line}`,
+			)}`;
 		}
 		return new Text(output, 0, 0);
 	}

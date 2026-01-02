@@ -2,8 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { Agent, type AgentEvent } from "@mariozechner/pi-agent-core";
-import { getModel, type ImageContent } from "@mariozechner/pi-ai";
+import { Agent, type AgentEvent } from "@oh-my-pi/pi-agent-core";
+import { getModel, type ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	AgentSession,
 	AuthStorage,
@@ -12,7 +12,7 @@ import {
 	loadSkillsFromDir,
 	ModelRegistry,
 	type Skill,
-} from "@mariozechner/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import { MomSessionManager, MomSettingsManager } from "./context.js";
 import * as log from "./log.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
@@ -237,7 +237,9 @@ You can schedule events that wake you up at specific times or when external thin
 
 **Periodic** - Triggers on a cron schedule. Use for recurring tasks.
 \`\`\`json
-{"type": "periodic", "channelId": "${channelId}", "text": "Check inbox and summarize", "schedule": "0 9 * * 1-5", "timezone": "${Intl.DateTimeFormat().resolvedOptions().timeZone}"}
+{"type": "periodic", "channelId": "${channelId}", "text": "Check inbox and summarize", "schedule": "0 9 * * 1-5", "timezone": "${
+		Intl.DateTimeFormat().resolvedOptions().timeZone
+	}"}
 \`\`\`
 
 ### Cron Format
@@ -248,7 +250,9 @@ You can schedule events that wake you up at specific times or when external thin
 - \`0 0 1 * *\` = first of each month at midnight
 
 ### Timezones
-All \`at\` timestamps must include offset (e.g., \`+01:00\`). Periodic events use IANA timezone names. The harness runs in ${Intl.DateTimeFormat().resolvedOptions().timeZone}. When users mention times without timezone, assume ${Intl.DateTimeFormat().resolvedOptions().timeZone}.
+All \`at\` timestamps must include offset (e.g., \`+01:00\`). Periodic events use IANA timezone names. The harness runs in ${
+		Intl.DateTimeFormat().resolvedOptions().timeZone
+	}. When users mention times without timezone, assume ${Intl.DateTimeFormat().resolvedOptions().timeZone}.
 
 ### Creating Events
 Use unique filenames to avoid overwriting existing events. Include a timestamp or random suffix:
@@ -711,7 +715,9 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			const offsetSign = offset >= 0 ? "+" : "-";
 			const offsetHours = pad(Math.floor(Math.abs(offset) / 60));
 			const offsetMins = pad(Math.abs(offset) % 60);
-			const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
+			const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(
+				now.getHours(),
+			)}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
 			let userMessage = `[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
 
 			const imageAttachments: ImageContent[] = [];

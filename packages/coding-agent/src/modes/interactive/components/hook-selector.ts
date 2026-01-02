@@ -3,7 +3,7 @@
  * Displays a list of string options with keyboard navigation.
  */
 
-import { Container, isArrowDown, isArrowUp, isEnter, isEscape, Spacer, Text } from "@mariozechner/pi-tui";
+import { Container, isArrowDown, isArrowUp, isEnter, isEscape, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 

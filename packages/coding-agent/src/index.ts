@@ -1,7 +1,7 @@
 // Core session management
 
 // Re-export TUI components for custom tool rendering
-export { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
+export { Container, Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
 export {
 	AgentSession,
 	type AgentSessionConfig,

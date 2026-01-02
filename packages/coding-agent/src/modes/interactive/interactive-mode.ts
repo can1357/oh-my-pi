@@ -6,9 +6,9 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, OAuthProvider } from "@mariozechner/pi-ai";
-import type { SlashCommand } from "@mariozechner/pi-tui";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, ImageContent, Message, OAuthProvider } from "@oh-my-pi/pi-ai";
+import type { SlashCommand } from "@oh-my-pi/pi-tui";
 import {
 	CombinedAutocompleteProvider,
 	type Component,
@@ -22,7 +22,7 @@ import {
 	TruncatedText,
 	TUI,
 	visibleWidth,
-} from "@mariozechner/pi-tui";
+} from "@oh-my-pi/pi-tui";
 import { getAuthPath, getDebugLogPath } from "../../config.js";
 import type { AgentSession, AgentSessionEvent } from "../../core/agent-session.js";
 import type { CustomToolSessionEvent, LoadedCustomTool } from "../../core/custom-tools/index.js";
@@ -1543,7 +1543,7 @@ export class InteractiveMode {
 				theme.bold(theme.fg("warning", "Update Available")) +
 					"\n" +
 					theme.fg("muted", `New version ${newVersion} is available. Run: `) +
-					theme.fg("accent", "npm install -g @mariozechner/pi-coding-agent"),
+					theme.fg("accent", "npm install -g @oh-my-pi/pi-coding-agent"),
 				1,
 				0,
 			),
@@ -2289,9 +2289,7 @@ export class InteractiveMode {
 			const hookPaths = hookRunner.getHookPaths();
 			if (hookPaths.length > 0) {
 				sections.push(
-					theme.bold(theme.fg("accent", "Hooks")) +
-						"\n" +
-						hookPaths.map((p) => theme.fg("dim", `  ${p}`)).join("\n"),
+					`${theme.bold(theme.fg("accent", "Hooks"))}\n${hookPaths.map((p) => theme.fg("dim", `  ${p}`)).join("\n")}`,
 				);
 			}
 		}

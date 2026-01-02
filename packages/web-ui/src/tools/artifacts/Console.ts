@@ -56,35 +56,44 @@ export class Console extends LitElement {
 					${
 						this.expanded
 							? html`
-							<button
-								@click=${() => {
-									this.autoscroll = !this.autoscroll;
-								}}
-								class="p-1 rounded transition-colors ${this.autoscroll ? "bg-accent text-accent-foreground" : "hover:bg-muted"}"
-								title=${this.autoscroll ? i18n("Autoscroll enabled") : i18n("Autoscroll disabled")}
-							>
-								${icon(this.autoscroll ? ChevronsDown : Lock, "sm")}
-							</button>
-							<copy-button .text=${this.getLogsText()} title=${i18n("Copy logs")} .showText=${false} class="!bg-transparent hover:!bg-accent"></copy-button>
-						`
+								<button
+									@click=${() => {
+										this.autoscroll = !this.autoscroll;
+									}}
+									class="p-1 rounded transition-colors ${
+										this.autoscroll ? "bg-accent text-accent-foreground" : "hover:bg-muted"
+									}"
+									title=${this.autoscroll ? i18n("Autoscroll enabled") : i18n("Autoscroll disabled")}
+								>
+									${icon(this.autoscroll ? ChevronsDown : Lock, "sm")}
+								</button>
+								<copy-button
+									.text=${this.getLogsText()}
+									title=${i18n("Copy logs")}
+									.showText=${false}
+									class="!bg-transparent hover:!bg-accent"
+								></copy-button>
+						  `
 							: ""
 					}
 				</div>
 				${
 					this.expanded
 						? html`
-						<div class="max-h-48 overflow-y-auto space-y-1 mt-2" ${ref(this.logsContainerRef)}>
-							${repeat(
-								this.logs,
-								(_log, index) => index,
-								(log) => html`
-									<div class="text-xs font-mono ${log.type === "error" ? "text-destructive" : "text-muted-foreground"}">
-										[${log.type}] ${log.text}
-									</div>
-								`,
-							)}
-						</div>
-					`
+							<div class="max-h-48 overflow-y-auto space-y-1 mt-2" ${ref(this.logsContainerRef)}>
+								${repeat(
+									this.logs,
+									(_log, index) => index,
+									(log) => html`
+										<div
+											class="text-xs font-mono ${log.type === "error" ? "text-destructive" : "text-muted-foreground"}"
+										>
+											[${log.type}] ${log.text}
+										</div>
+									`,
+								)}
+							</div>
+					  `
 						: ""
 				}
 			</div>

@@ -2,8 +2,8 @@
  * Snake game hook - play snake with /snake command
  */
 
-import type { HookAPI } from "@mariozechner/pi-coding-agent";
-import { isArrowDown, isArrowLeft, isArrowRight, isArrowUp, isEscape, visibleWidth } from "@mariozechner/pi-tui";
+import type { HookAPI } from "@oh-my-pi/pi-coding-agent";
+import { isArrowDown, isArrowLeft, isArrowRight, isArrowUp, isEscape, visibleWidth } from "@oh-my-pi/pi-tui";
 
 const GAME_WIDTH = 40;
 const GAME_HEIGHT = 15;

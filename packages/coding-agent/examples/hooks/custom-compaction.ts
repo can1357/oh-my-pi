@@ -13,9 +13,9 @@
  *   pi --hook examples/hooks/custom-compaction.ts
  */
 
-import { complete, getModel } from "@mariozechner/pi-ai";
-import type { HookAPI } from "@mariozechner/pi-coding-agent";
-import { convertToLlm, serializeConversation } from "@mariozechner/pi-coding-agent";
+import { complete, getModel } from "@oh-my-pi/pi-ai";
+import type { HookAPI } from "@oh-my-pi/pi-coding-agent";
+import { convertToLlm, serializeConversation } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: HookAPI) {
 	pi.on("session_before_compact", async (event, ctx) => {
@@ -42,7 +42,9 @@ export default function (pi: HookAPI) {
 		const allMessages = [...messagesToSummarize, ...turnPrefixMessages];
 
 		ctx.ui.notify(
-			`Custom compaction: summarizing ${allMessages.length} messages (${tokensBefore.toLocaleString()} tokens) with ${model.id}...`,
+			`Custom compaction: summarizing ${allMessages.length} messages (${tokensBefore.toLocaleString()} tokens) with ${
+				model.id
+			}...`,
 			"info",
 		);
 

@@ -10,56 +10,56 @@ Every theme must define all color tokens. There are no optional colors.
 
 ### Core UI (10 colors)
 
-| Token | Purpose | Examples |
-|-------|---------|----------|
-| `accent` | Primary accent color | Logo, selected items, cursor (›) |
-| `border` | Normal borders | Selector borders, horizontal lines |
-| `borderAccent` | Highlighted borders | Changelog borders, special panels |
-| `borderMuted` | Subtle borders | Editor borders, secondary separators |
-| `success` | Success states | Success messages, diff additions |
-| `error` | Error states | Error messages, diff deletions |
-| `warning` | Warning states | Warning messages |
-| `muted` | Secondary/dimmed text | Metadata, descriptions, output |
-| `dim` | Very dimmed text | Less important info, placeholders |
-| `text` | Default text color | Main content (usually `""`) |
-| `thinkingText` | Thinking block text | Assistant reasoning traces |
+| Token          | Purpose               | Examples                             |
+| -------------- | --------------------- | ------------------------------------ |
+| `accent`       | Primary accent color  | Logo, selected items, cursor (›)     |
+| `border`       | Normal borders        | Selector borders, horizontal lines   |
+| `borderAccent` | Highlighted borders   | Changelog borders, special panels    |
+| `borderMuted`  | Subtle borders        | Editor borders, secondary separators |
+| `success`      | Success states        | Success messages, diff additions     |
+| `error`        | Error states          | Error messages, diff deletions       |
+| `warning`      | Warning states        | Warning messages                     |
+| `muted`        | Secondary/dimmed text | Metadata, descriptions, output       |
+| `dim`          | Very dimmed text      | Less important info, placeholders    |
+| `text`         | Default text color    | Main content (usually `""`)          |
+| `thinkingText` | Thinking block text   | Assistant reasoning traces           |
 
 ### Backgrounds & Content Text (11 colors)
 
-| Token | Purpose |
-|-------|---------|
-| `selectedBg` | Selected/active line background (e.g., tree selector) |
-| `userMessageBg` | User message background |
-| `userMessageText` | User message text color |
-| `customMessageBg` | Hook custom message background |
-| `customMessageText` | Hook custom message text color |
-| `customMessageLabel` | Hook custom message label/type text |
-| `toolPendingBg` | Tool execution box (pending state) |
-| `toolSuccessBg` | Tool execution box (success state) |
-| `toolErrorBg` | Tool execution box (error state) |
-| `toolTitle` | Tool execution title/heading (e.g., `$ command`, `read file.txt`) |
-| `toolOutput` | Tool execution output text |
+| Token                | Purpose                                                           |
+| -------------------- | ----------------------------------------------------------------- |
+| `selectedBg`         | Selected/active line background (e.g., tree selector)             |
+| `userMessageBg`      | User message background                                           |
+| `userMessageText`    | User message text color                                           |
+| `customMessageBg`    | Hook custom message background                                    |
+| `customMessageText`  | Hook custom message text color                                    |
+| `customMessageLabel` | Hook custom message label/type text                               |
+| `toolPendingBg`      | Tool execution box (pending state)                                |
+| `toolSuccessBg`      | Tool execution box (success state)                                |
+| `toolErrorBg`        | Tool execution box (error state)                                  |
+| `toolTitle`          | Tool execution title/heading (e.g., `$ command`, `read file.txt`) |
+| `toolOutput`         | Tool execution output text                                        |
 
 ### Markdown (10 colors)
 
-| Token | Purpose |
-|-------|---------|
-| `mdHeading` | Heading text (`#`, `##`, etc) |
-| `mdLink` | Link text |
-| `mdLinkUrl` | Link URL (in parentheses) |
-| `mdCode` | Inline code (backticks) |
-| `mdCodeBlock` | Code block content |
-| `mdCodeBlockBorder` | Code block fences (```) |
-| `mdQuote` | Blockquote text |
-| `mdQuoteBorder` | Blockquote border (`│`) |
-| `mdHr` | Horizontal rule (`---`) |
-| `mdListBullet` | List bullets/numbers |
+| Token               | Purpose                       |
+| ------------------- | ----------------------------- |
+| `mdHeading`         | Heading text (`#`, `##`, etc) |
+| `mdLink`            | Link text                     |
+| `mdLinkUrl`         | Link URL (in parentheses)     |
+| `mdCode`            | Inline code (backticks)       |
+| `mdCodeBlock`       | Code block content            |
+| `mdCodeBlockBorder` | Code block fences (```)       |
+| `mdQuote`           | Blockquote text               |
+| `mdQuoteBorder`     | Blockquote border (`│`)       |
+| `mdHr`              | Horizontal rule (`---`)       |
+| `mdListBullet`      | List bullets/numbers          |
 
 ### Tool Diffs (3 colors)
 
-| Token | Purpose |
-|-------|---------|
-| `toolDiffAdded` | Added lines in tool diffs |
+| Token             | Purpose                     |
+| ----------------- | --------------------------- |
+| `toolDiffAdded`   | Added lines in tool diffs   |
 | `toolDiffRemoved` | Removed lines in tool diffs |
 | `toolDiffContext` | Context lines in tool diffs |
 
@@ -69,37 +69,37 @@ Note: Diff colors are specific to tool execution boxes and must work with tool b
 
 Future-proofing for syntax highlighting support:
 
-| Token | Purpose |
-|-------|---------|
-| `syntaxComment` | Comments |
-| `syntaxKeyword` | Keywords (`if`, `function`, etc) |
-| `syntaxFunction` | Function names |
-| `syntaxVariable` | Variable names |
-| `syntaxString` | String literals |
-| `syntaxNumber` | Number literals |
-| `syntaxType` | Type names |
-| `syntaxOperator` | Operators (`+`, `-`, etc) |
-| `syntaxPunctuation` | Punctuation (`;`, `,`, etc) |
+| Token               | Purpose                          |
+| ------------------- | -------------------------------- |
+| `syntaxComment`     | Comments                         |
+| `syntaxKeyword`     | Keywords (`if`, `function`, etc) |
+| `syntaxFunction`    | Function names                   |
+| `syntaxVariable`    | Variable names                   |
+| `syntaxString`      | String literals                  |
+| `syntaxNumber`      | Number literals                  |
+| `syntaxType`        | Type names                       |
+| `syntaxOperator`    | Operators (`+`, `-`, etc)        |
+| `syntaxPunctuation` | Punctuation (`;`, `,`, etc)      |
 
 ### Thinking Level Borders (6 colors)
 
 Editor border colors that indicate the current thinking/reasoning level:
 
-| Token | Purpose |
-|-------|---------|
-| `thinkingOff` | Border when thinking is off (most subtle) |
-| `thinkingMinimal` | Border for minimal thinking |
-| `thinkingLow` | Border for low thinking |
-| `thinkingMedium` | Border for medium thinking |
-| `thinkingHigh` | Border for high thinking |
-| `thinkingXhigh` | Border for xhigh thinking (most prominent, OpenAI codex-max only) |
+| Token             | Purpose                                                           |
+| ----------------- | ----------------------------------------------------------------- |
+| `thinkingOff`     | Border when thinking is off (most subtle)                         |
+| `thinkingMinimal` | Border for minimal thinking                                       |
+| `thinkingLow`     | Border for low thinking                                           |
+| `thinkingMedium`  | Border for medium thinking                                        |
+| `thinkingHigh`    | Border for high thinking                                          |
+| `thinkingXhigh`   | Border for xhigh thinking (most prominent, OpenAI codex-max only) |
 
 These create a visual hierarchy: off → minimal → low → medium → high → xhigh
 
 ### Bash Mode (1 color)
 
-| Token | Purpose |
-|-------|---------|
+| Token      | Purpose                                          |
+| ---------- | ------------------------------------------------ |
 | `bashMode` | Editor border color when in bash mode (! prefix) |
 
 **Total: 50 color tokens** (all required)
@@ -108,20 +108,21 @@ These create a visual hierarchy: off → minimal → low → medium → high →
 
 The `export` section is optional and controls colors used when exporting sessions to HTML via `/export`. If not specified, these colors are automatically derived from `userMessageBg` based on luminance detection.
 
-| Token | Purpose |
-|-------|---------|
-| `pageBg` | Page background color |
-| `cardBg` | Card/container background (headers, stats boxes) |
+| Token    | Purpose                                                       |
+| -------- | ------------------------------------------------------------- |
+| `pageBg` | Page background color                                         |
+| `cardBg` | Card/container background (headers, stats boxes)              |
 | `infoBg` | Info sections background (system prompt, notices, compaction) |
 
 Example:
+
 ```json
 {
-  "export": {
-    "pageBg": "#18181e",
-    "cardBg": "#1e1e24",
-    "infoBg": "#3c3728"
-  }
+	"export": {
+		"pageBg": "#18181e",
+		"cardBg": "#1e1e24",
+		"infoBg": "#3c3728"
+	}
 }
 ```
 
@@ -163,21 +164,22 @@ The optional `vars` section allows you to define reusable colors:
 
 ```json
 {
-  "vars": {
-    "nord0": "#2E3440",
-    "nord1": "#3B4252",
-    "nord8": "#88C0D0",
-    "brightBlue": 39
-  },
-  "colors": {
-    "accent": "nord8",
-    "muted": "nord1",
-    "mdLink": "brightBlue"
-  }
+	"vars": {
+		"nord0": "#2E3440",
+		"nord1": "#3B4252",
+		"nord8": "#88C0D0",
+		"brightBlue": 39
+	},
+	"colors": {
+		"accent": "nord8",
+		"muted": "nord1",
+		"mdLink": "brightBlue"
+	}
 }
 ```
 
 Benefits:
+
 - Reuse colors across multiple tokens
 - Easier to maintain theme consistency
 - Can reference standard color palettes
@@ -190,13 +192,14 @@ Use `""` (empty string) to inherit the terminal's default foreground/background 
 
 ```json
 {
-  "colors": {
-    "text": ""  // Uses terminal's default text color
-  }
+	"colors": {
+		"text": "" // Uses terminal's default text color
+	}
 }
 ```
 
 This is useful for:
+
 - Main text color (adapts to user's terminal theme)
 - Creating themes that blend with terminal appearance
 
@@ -218,7 +221,7 @@ Themes are configured in the settings (accessible via `/settings`):
 
 ```json
 {
-  "theme": "dark"
+	"theme": "dark"
 }
 ```
 
@@ -235,73 +238,76 @@ Custom themes are loaded from `~/.pi/agent/themes/*.json`.
 ### Creating a Custom Theme
 
 1. **Create theme directory:**
+
    ```bash
    mkdir -p ~/.pi/agent/themes
    ```
 
 2. **Create theme file:**
+
    ```bash
    vim ~/.pi/agent/themes/my-theme.json
    ```
 
 3. **Define all colors:**
+
    ```json
    {
-     "$schema": "https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/theme-schema.json",
-     "name": "my-theme",
-     "vars": {
-       "primary": "#00aaff",
-       "secondary": 242,
-       "brightGreen": 46
-     },
-     "colors": {
-       "accent": "primary",
-       "border": "primary",
-       "borderAccent": "#00ffff",
-       "borderMuted": "secondary",
-       "success": "brightGreen",
-       "error": "#ff0000",
-       "warning": "#ffff00",
-       "muted": "secondary",
-       "text": "",
-       
-       "userMessageBg": "#2d2d30",
-       "userMessageText": "",
-       "toolPendingBg": "#1e1e2e",
-       "toolSuccessBg": "#1e2e1e",
-       "toolErrorBg": "#2e1e1e",
-       "toolText": "",
-       
-       "mdHeading": "#ffaa00",
-       "mdLink": "primary",
-       "mdCode": "#00ffff",
-       "mdCodeBlock": "#00ff00",
-       "mdCodeBlockBorder": "secondary",
-       "mdQuote": "secondary",
-       "mdQuoteBorder": "secondary",
-       "mdHr": "secondary",
-       "mdListBullet": "#00ffff",
-       
-       "toolDiffAdded": "#00ff00",
-       "toolDiffRemoved": "#ff0000",
-       "toolDiffContext": "secondary",
-       
-       "syntaxComment": "secondary",
-       "syntaxKeyword": "primary",
-       "syntaxFunction": "#00aaff",
-       "syntaxVariable": "#ffaa00",
-       "syntaxString": "#00ff00",
-       "syntaxNumber": "#ff00ff",
-       "syntaxType": "#00aaff",
-       "syntaxOperator": "primary",
-       "syntaxPunctuation": "secondary",
-       
-       "thinkingOff": "secondary",
-       "thinkingMinimal": "primary",
-       "thinkingLow": "#00aaff",
-       "thinkingMedium": "#00ffff",
-       "thinkingHigh": "#ff00ff"
-     }
+   	"$schema": "https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/theme-schema.json",
+   	"name": "my-theme",
+   	"vars": {
+   		"primary": "#00aaff",
+   		"secondary": 242,
+   		"brightGreen": 46
+   	},
+   	"colors": {
+   		"accent": "primary",
+   		"border": "primary",
+   		"borderAccent": "#00ffff",
+   		"borderMuted": "secondary",
+   		"success": "brightGreen",
+   		"error": "#ff0000",
+   		"warning": "#ffff00",
+   		"muted": "secondary",
+   		"text": "",
+
+   		"userMessageBg": "#2d2d30",
+   		"userMessageText": "",
+   		"toolPendingBg": "#1e1e2e",
+   		"toolSuccessBg": "#1e2e1e",
+   		"toolErrorBg": "#2e1e1e",
+   		"toolText": "",
+
+   		"mdHeading": "#ffaa00",
+   		"mdLink": "primary",
+   		"mdCode": "#00ffff",
+   		"mdCodeBlock": "#00ff00",
+   		"mdCodeBlockBorder": "secondary",
+   		"mdQuote": "secondary",
+   		"mdQuoteBorder": "secondary",
+   		"mdHr": "secondary",
+   		"mdListBullet": "#00ffff",
+
+   		"toolDiffAdded": "#00ff00",
+   		"toolDiffRemoved": "#ff0000",
+   		"toolDiffContext": "secondary",
+
+   		"syntaxComment": "secondary",
+   		"syntaxKeyword": "primary",
+   		"syntaxFunction": "#00aaff",
+   		"syntaxVariable": "#ffaa00",
+   		"syntaxString": "#00ff00",
+   		"syntaxNumber": "#ff00ff",
+   		"syntaxType": "#00aaff",
+   		"syntaxOperator": "primary",
+   		"syntaxPunctuation": "secondary",
+
+   		"thinkingOff": "secondary",
+   		"thinkingMinimal": "primary",
+   		"thinkingLow": "#00aaff",
+   		"thinkingMedium": "#00ffff",
+   		"thinkingHigh": "#ff00ff"
+   	}
    }
    ```
 
@@ -314,11 +320,13 @@ Custom themes are loaded from `~/.pi/agent/themes/*.json`.
 ### Light vs Dark Themes
 
 **For dark terminals:**
+
 - Use bright, saturated colors
 - Higher contrast
 - Example: `#00ffff` (bright cyan)
 
 **For light terminals:**
+
 - Use darker, muted colors
 - Lower contrast to avoid eye strain
 - Example: `#008888` (dark cyan)
@@ -332,6 +340,7 @@ Custom themes are loaded from `~/.pi/agent/themes/*.json`.
 ### Testing
 
 Test your theme with:
+
 - Different message types (user, assistant, errors)
 - Tool executions (success and error states)
 - Markdown content (headings, code, lists, etc)
@@ -342,6 +351,7 @@ Test your theme with:
 ### Hex Colors
 
 Standard 6-digit hex format:
+
 - `"#ff0000"` - Red
 - `"#00ff00"` - Green
 - `"#0000ff"` - Blue
@@ -356,6 +366,7 @@ RGB values: `#RRGGBB` where each component is `00-ff` (0-255)
 Use numeric indices (0-255) to reference the xterm 256-color palette:
 
 **Colors 0-15:** Basic ANSI colors (terminal-dependent, may be themed)
+
 - `0` - Black
 - `1` - Red
 - `2` - Green
@@ -367,29 +378,33 @@ Use numeric indices (0-255) to reference the xterm 256-color palette:
 - `8-15` - Bright variants
 
 **Colors 16-231:** 6×6×6 RGB cube (standardized)
+
 - Formula: `16 + 36×R + 6×G + B` where R, G, B are 0-5
 - Example: `39` = bright cyan, `196` = bright red
 
 **Colors 232-255:** Grayscale ramp (standardized)
+
 - `232` - Darkest gray
 - `255` - Near white
 
 Example usage:
+
 ```json
 {
-  "vars": {
-    "gray": 242,
-    "brightCyan": 51,
-    "darkBlue": 18
-  },
-  "colors": {
-    "muted": "gray",
-    "accent": "brightCyan"
-  }
+	"vars": {
+		"gray": 242,
+		"brightCyan": 51,
+		"darkBlue": 18
+	},
+	"colors": {
+		"muted": "gray",
+		"accent": "brightCyan"
+	}
 }
 ```
 
 **Benefits:**
+
 - Works everywhere (`TERM=xterm-256color`)
 - No truecolor detection needed
 - Standardized RGB cube (16-231) looks the same on all terminals
@@ -406,6 +421,7 @@ Pi uses 24-bit RGB colors (`\x1b[38;2;R;G;Bm`). Most modern terminals support th
 For older terminals with only 256-color support, Pi automatically falls back to the nearest 256-color approximation.
 
 To check if your terminal supports truecolor:
+
 ```bash
 echo $COLORTERM  # Should output "truecolor" or "24bit"
 ```
@@ -413,6 +429,7 @@ echo $COLORTERM  # Should output "truecolor" or "24bit"
 ## Example Themes
 
 See the built-in themes for complete examples:
+
 - [Dark theme](../src/themes/dark.json)
 - [Light theme](../src/themes/light.json)
 
@@ -421,6 +438,7 @@ See the built-in themes for complete examples:
 Themes are validated on load using [TypeBox](https://github.com/sinclairzx81/typebox) + [Ajv](https://ajv.js.org/).
 
 Invalid themes will show an error with details about what's wrong:
+
 ```
 Error loading theme 'my-theme':
   - colors.accent: must be string or number
@@ -428,11 +446,13 @@ Error loading theme 'my-theme':
 ```
 
 For editor support, the JSON schema is available at:
+
 ```
 https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/theme-schema.json
 ```
 
 Add to your theme file for auto-completion and validation:
+
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/theme-schema.json",
@@ -448,16 +468,16 @@ Themes are loaded and converted to a `Theme` class that provides type-safe color
 
 ```typescript
 class Theme {
-  // Apply foreground color
-  fg(color: ThemeColor, text: string): string
-  
-  // Apply background color
-  bg(color: ThemeBg, text: string): string
-  
-  // Text attributes (preserve current colors)
-  bold(text: string): string
-  italic(text: string): string
-  underline(text: string): string
+	// Apply foreground color
+	fg(color: ThemeColor, text: string): string;
+
+	// Apply background color
+	bg(color: ThemeBg, text: string): string;
+
+	// Text attributes (preserve current colors)
+	bold(text: string): string;
+	italic(text: string): string;
+	underline(text: string): string;
 }
 ```
 
@@ -470,37 +490,37 @@ The active theme is available as a global singleton in `coding-agent`:
 export let theme: Theme;
 
 export function setTheme(name: string) {
-  theme = loadTheme(name);
+	theme = loadTheme(name);
 }
 
 // Usage throughout coding-agent
-import { theme } from './theme.js';
+import { theme } from "./theme.js";
 
-theme.fg('accent', 'Selected')
-theme.bg('userMessageBg', content)
+theme.fg("accent", "Selected");
+theme.bg("userMessageBg", content);
 ```
 
 ### TUI Component Theming
 
-TUI components (like `Markdown`, `SelectList`, `Editor`) are in the `@mariozechner/pi-tui` package and don't have direct access to the theme. Instead, they define interfaces for the colors they need:
+TUI components (like `Markdown`, `SelectList`, `Editor`) are in the `@oh-my-pi/pi-tui` package and don't have direct access to the theme. Instead, they define interfaces for the colors they need:
 
 ```typescript
-// In @mariozechner/pi-tui
+// In @oh-my-pi/pi-tui
 export interface MarkdownTheme {
-  heading: (text: string) => string;
-  link: (text: string) => string;
-  linkUrl: (text: string) => string;
-  code: (text: string) => string;
-  codeBlock: (text: string) => string;
-  codeBlockBorder: (text: string) => string;
-  quote: (text: string) => string;
-  quoteBorder: (text: string) => string;
-  hr: (text: string) => string;
-  listBullet: (text: string) => string;
-  bold: (text: string) => string;
-  italic: (text: string) => string;
-  strikethrough: (text: string) => string;
-  underline: (text: string) => string;
+	heading: (text: string) => string;
+	link: (text: string) => string;
+	linkUrl: (text: string) => string;
+	code: (text: string) => string;
+	codeBlock: (text: string) => string;
+	codeBlockBorder: (text: string) => string;
+	quote: (text: string) => string;
+	quoteBorder: (text: string) => string;
+	hr: (text: string) => string;
+	listBullet: (text: string) => string;
+	bold: (text: string) => string;
+	italic: (text: string) => string;
+	strikethrough: (text: string) => string;
+	underline: (text: string) => string;
 }
 ```
 
@@ -508,70 +528,66 @@ The `coding-agent` provides themed functions when creating components:
 
 ```typescript
 // In coding-agent
-import { theme } from './theme.js';
-import { Markdown } from '@mariozechner/pi-tui';
+import { theme } from "./theme.js";
+import { Markdown } from "@oh-my-pi/pi-tui";
 
 // Helper to create markdown theme functions
 function getMarkdownTheme(): MarkdownTheme {
-  return {
-    heading: (text) => theme.fg('mdHeading', text),
-    link: (text) => theme.fg('mdLink', text),
-    linkUrl: (text) => theme.fg('mdLinkUrl', text),
-    code: (text) => theme.fg('mdCode', text),
-    codeBlock: (text) => theme.fg('mdCodeBlock', text),
-    codeBlockBorder: (text) => theme.fg('mdCodeBlockBorder', text),
-    quote: (text) => theme.fg('mdQuote', text),
-    quoteBorder: (text) => theme.fg('mdQuoteBorder', text),
-    hr: (text) => theme.fg('mdHr', text),
-    listBullet: (text) => theme.fg('mdListBullet', text),
-    bold: (text) => theme.bold(text),
-    italic: (text) => theme.italic(text),
-    underline: (text) => theme.underline(text),
-    strikethrough: (text) => chalk.strikethrough(text),
-  };
+	return {
+		heading: (text) => theme.fg("mdHeading", text),
+		link: (text) => theme.fg("mdLink", text),
+		linkUrl: (text) => theme.fg("mdLinkUrl", text),
+		code: (text) => theme.fg("mdCode", text),
+		codeBlock: (text) => theme.fg("mdCodeBlock", text),
+		codeBlockBorder: (text) => theme.fg("mdCodeBlockBorder", text),
+		quote: (text) => theme.fg("mdQuote", text),
+		quoteBorder: (text) => theme.fg("mdQuoteBorder", text),
+		hr: (text) => theme.fg("mdHr", text),
+		listBullet: (text) => theme.fg("mdListBullet", text),
+		bold: (text) => theme.bold(text),
+		italic: (text) => theme.italic(text),
+		underline: (text) => theme.underline(text),
+		strikethrough: (text) => chalk.strikethrough(text),
+	};
 }
 
 // Create markdown with theme
-const md = new Markdown(
-  text,
-  1, 1,
-  { bgColor: theme.bg('userMessageBg') },
-  getMarkdownTheme()
-);
+const md = new Markdown(text, 1, 1, { bgColor: theme.bg("userMessageBg") }, getMarkdownTheme());
 ```
 
 This approach:
+
 - Keeps TUI components theme-agnostic (reusable in other projects)
 - Maintains type safety via interfaces
 - Allows components to have sensible defaults if no theme provided
 - Centralizes theme access in `coding-agent`
 
 **Example usage:**
+
 ```typescript
-const theme = loadTheme('dark');
+const theme = loadTheme("dark");
 
 // Apply foreground colors
-theme.fg('accent', 'Selected')
-theme.fg('success', '✓ Done')
-theme.fg('error', 'Failed')
+theme.fg("accent", "Selected");
+theme.fg("success", "✓ Done");
+theme.fg("error", "Failed");
 
 // Apply background colors
-theme.bg('userMessageBg', content)
-theme.bg('toolSuccessBg', output)
+theme.bg("userMessageBg", content);
+theme.bg("toolSuccessBg", output);
 
 // Combine styles
-theme.bold(theme.fg('accent', 'Title'))
-theme.italic(theme.fg('muted', 'metadata'))
+theme.bold(theme.fg("accent", "Title"));
+theme.italic(theme.fg("muted", "metadata"));
 
 // Nested foreground + background
-const userMsg = theme.bg('userMessageBg',
-  theme.fg('userMessageText', 'Hello')
-)
+const userMsg = theme.bg("userMessageBg", theme.fg("userMessageText", "Hello"));
 ```
 
 **Color resolution:**
 
 1. **Detect terminal capabilities:**
+
    - Check `$COLORTERM` env var (`truecolor` or `24bit` → truecolor support)
    - Check `$TERM` env var (`*-256color` → 256-color support)
    - Fallback to 256-color mode if detection fails
@@ -579,37 +595,41 @@ const userMsg = theme.bg('userMessageBg',
 2. **Load JSON theme file**
 
 3. **Resolve `vars` references recursively:**
+
    ```json
    {
-     "vars": {
-       "primary": "#0066cc",
-       "accent": "primary"
-     },
-     "colors": {
-       "accent": "accent"  // → "primary" → "#0066cc"
-     }
+   	"vars": {
+   		"primary": "#0066cc",
+   		"accent": "primary"
+   	},
+   	"colors": {
+   		"accent": "accent" // → "primary" → "#0066cc"
+   	}
    }
    ```
 
 4. **Convert colors to ANSI codes based on terminal capability:**
-   
+
    **Truecolor mode (24-bit):**
+
    - Hex (`"#ff0000"`) → `\x1b[38;2;255;0;0m`
    - 256-color (`42`) → `\x1b[38;5;42m` (keep as-is)
    - Empty string (`""`) → `\x1b[39m`
-   
+
    **256-color mode:**
+
    - Hex (`"#ff0000"`) → convert to nearest RGB cube color → `\x1b[38;5;196m`
    - 256-color (`42`) → `\x1b[38;5;42m` (keep as-is)
    - Empty string (`""`) → `\x1b[39m`
-   
+
    **Hex to 256-color conversion:**
+
    ```typescript
    // Convert RGB to 6x6x6 cube (colors 16-231)
-   r_index = Math.round(r / 255 * 5)
-   g_index = Math.round(g / 255 * 5)
-   b_index = Math.round(b / 255 * 5)
-   color_index = 16 + 36 * r_index + 6 * g_index + b_index
+   r_index = Math.round((r / 255) * 5);
+   g_index = Math.round((g / 255) * 5);
+   b_index = Math.round((b / 255) * 5);
+   color_index = 16 + 36 * r_index + 6 * g_index + b_index;
    ```
 
 5. **Cache as `Theme` instance**

@@ -72,7 +72,12 @@ export class HtmlArtifact extends ArtifactElement {
 					children: icon(RefreshCw, "sm"),
 				})}
 				${copyButton}
-				${DownloadButton({ content: downloadContent, filename: this.filename, mimeType: "text/html", title: i18n("Download HTML") })}
+				${DownloadButton({
+					content: downloadContent,
+					filename: this.filename,
+					mimeType: "text/html",
+					title: i18n("Download HTML"),
+				})}
 			</div>
 		`;
 	}
@@ -183,7 +188,10 @@ export class HtmlArtifact extends ArtifactElement {
 					</div>
 
 					<!-- Code view - always in DOM, just hidden when not active -->
-					<div class="absolute inset-0 overflow-auto bg-background" style="display: ${this.viewMode === "code" ? "block" : "none"}">
+					<div
+						class="absolute inset-0 overflow-auto bg-background"
+						style="display: ${this.viewMode === "code" ? "block" : "none"}"
+					>
 						<pre class="m-0 p-4 text-xs"><code class="hljs language-html">${unsafeHTML(
 							hljs.highlight(this._content, { language: "html" }).value,
 						)}</code></pre>

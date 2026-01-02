@@ -1,26 +1,26 @@
 #!/usr/bin/env node
 
 /**
- * Syncs ALL @mariozechner/* package dependency versions to match their current versions.
+ * Syncs ALL @oh-my-pi/* package dependency versions to match their current versions.
  * This ensures lockstep versioning across the monorepo.
  */
 
-import { readFileSync, writeFileSync, readdirSync } from 'fs';
-import { join } from 'path';
+import { readFileSync, writeFileSync, readdirSync } from "fs";
+import { join } from "path";
 
-const packagesDir = join(process.cwd(), 'packages');
+const packagesDir = join(process.cwd(), "packages");
 const packageDirs = readdirSync(packagesDir, { withFileTypes: true })
-	.filter(dirent => dirent.isDirectory())
-	.map(dirent => dirent.name);
+	.filter((dirent) => dirent.isDirectory())
+	.map((dirent) => dirent.name);
 
 // Read all package.json files and build version map
 const packages = {};
 const versionMap = {};
 
 for (const dir of packageDirs) {
-	const pkgPath = join(packagesDir, dir, 'package.json');
+	const pkgPath = join(packagesDir, dir, "package.json");
 	try {
-		const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+		const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
 		packages[dir] = { path: pkgPath, data: pkg };
 		versionMap[pkg.name] = pkg.version;
 	} catch (e) {
@@ -28,7 +28,7 @@ for (const dir of packageDirs) {
 	}
 }
 
-console.log('Current versions:');
+console.log("Current versions:");
 for (const [name, version] of Object.entries(versionMap).sort()) {
 	console.log(`  ${name}: ${version}`);
 }
@@ -36,21 +36,21 @@ for (const [name, version] of Object.entries(versionMap).sort()) {
 // Verify all versions are the same (lockstep)
 const versions = new Set(Object.values(versionMap));
 if (versions.size > 1) {
-	console.error('\n❌ ERROR: Not all packages have the same version!');
-	console.error('Expected lockstep versioning. Run one of:');
-	console.error('  npm run version:patch');
-	console.error('  npm run version:minor');
-	console.error('  npm run version:major');
+	console.error("\n❌ ERROR: Not all packages have the same version!");
+	console.error("Expected lockstep versioning. Run one of:");
+	console.error("  npm run version:patch");
+	console.error("  npm run version:minor");
+	console.error("  npm run version:major");
 	process.exit(1);
 }
 
-console.log('\n✅ All packages at same version (lockstep)');
+console.log("\n✅ All packages at same version (lockstep)");
 
 // Update all inter-package dependencies
 let totalUpdates = 0;
 for (const [dir, pkg] of Object.entries(packages)) {
 	let updated = false;
-	
+
 	// Check dependencies
 	if (pkg.data.dependencies) {
 		for (const [depName, currentVersion] of Object.entries(pkg.data.dependencies)) {
@@ -66,7 +66,7 @@ for (const [dir, pkg] of Object.entries(packages)) {
 			}
 		}
 	}
-	
+
 	// Check devDependencies
 	if (pkg.data.devDependencies) {
 		for (const [depName, currentVersion] of Object.entries(pkg.data.devDependencies)) {
@@ -82,15 +82,15 @@ for (const [dir, pkg] of Object.entries(packages)) {
 			}
 		}
 	}
-	
+
 	// Write if updated
 	if (updated) {
-		writeFileSync(pkg.path, JSON.stringify(pkg.data, null, '\t') + '\n');
+		writeFileSync(pkg.path, JSON.stringify(pkg.data, null, "\t") + "\n");
 	}
 }
 
 if (totalUpdates === 0) {
-	console.log('\nAll inter-package dependencies already in sync.');
+	console.log("\nAll inter-package dependencies already in sync.");
 } else {
 	console.log(`\n✅ Updated ${totalUpdates} dependency version(s)`);
 }

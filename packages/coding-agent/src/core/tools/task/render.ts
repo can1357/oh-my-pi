@@ -6,8 +6,8 @@
  */
 
 import path from "node:path";
-import type { Component } from "@mariozechner/pi-tui";
-import { Text } from "@mariozechner/pi-tui";
+import type { Component } from "@oh-my-pi/pi-tui";
+import { Text } from "@oh-my-pi/pi-tui";
 import type { Theme } from "../../../modes/interactive/theme/theme.js";
 import type { RenderResultOptions } from "../../custom-tools/types.js";
 import type { AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "./types.js";

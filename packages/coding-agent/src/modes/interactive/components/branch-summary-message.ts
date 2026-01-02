@@ -1,4 +1,4 @@
-import { Box, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
+import { Box, Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { BranchSummaryMessage } from "../../../core/messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
 

@@ -38,25 +38,20 @@ export function renderHeader(
 		case "inprogress":
 			return html`
 				<div class="flex items-center justify-between gap-2 text-sm text-muted-foreground">
-					<div class="flex items-center gap-2">
-						${statusIcon(toolIcon, "text-foreground")}
-						${text}
-					</div>
+					<div class="flex items-center gap-2">${statusIcon(toolIcon, "text-foreground")} ${text}</div>
 					${statusIcon(Loader, "text-foreground animate-spin")}
 				</div>
 			`;
 		case "complete":
 			return html`
 				<div class="flex items-center gap-2 text-sm text-muted-foreground">
-					${statusIcon(toolIcon, "text-green-600 dark:text-green-500")}
-					${text}
+					${statusIcon(toolIcon, "text-green-600 dark:text-green-500")} ${text}
 				</div>
 			`;
 		case "error":
 			return html`
 				<div class="flex items-center gap-2 text-sm text-muted-foreground">
-					${statusIcon(toolIcon, "text-destructive")}
-					${text}
+					${statusIcon(toolIcon, "text-destructive")} ${text}
 				</div>
 			`;
 	}
@@ -115,11 +110,13 @@ export function renderCollapsibleHeader(
 				: "text-foreground";
 
 	return html`
-		<button @click=${toggleContent} class="flex items-center justify-between gap-2 text-sm text-muted-foreground w-full text-left hover:text-foreground transition-colors cursor-pointer">
+		<button
+			@click=${toggleContent}
+			class="flex items-center justify-between gap-2 text-sm text-muted-foreground w-full text-left hover:text-foreground transition-colors cursor-pointer"
+		>
 			<div class="flex items-center gap-2">
 				${state === "inprogress" ? statusIcon(Loader, "text-foreground animate-spin") : ""}
-				${statusIcon(toolIcon, toolIconColor)}
-				${text}
+				${statusIcon(toolIcon, toolIconColor)} ${text}
 			</div>
 			<span class="inline-block text-muted-foreground" ${ref(chevronRef)}>
 				<span class="chevron-up ${defaultExpanded ? "" : "hidden"}">${icon(ChevronUp, "sm")}</span>

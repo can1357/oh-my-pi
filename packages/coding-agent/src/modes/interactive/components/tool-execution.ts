@@ -9,7 +9,7 @@ import {
 	Spacer,
 	Text,
 	type TUI,
-} from "@mariozechner/pi-tui";
+} from "@oh-my-pi/pi-tui";
 import stripAnsi from "strip-ansi";
 import type { CustomTool } from "../../../core/custom-tools/types.js";
 import { computeEditDiff, type EditDiffError, type EditDiffResult } from "../../../core/tools/edit-diff.js";
@@ -366,7 +366,9 @@ export class ToolExecutionComponent extends Container {
 						warnings.push(`Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines`);
 					} else {
 						warnings.push(
-							`Truncated: ${truncation.outputLines} lines shown (${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit)`,
+							`Truncated: ${truncation.outputLines} lines shown (${formatSize(
+								truncation.maxBytes ?? DEFAULT_MAX_BYTES,
+							)} limit)`,
 						);
 					}
 				}
@@ -452,14 +454,18 @@ export class ToolExecutionComponent extends Container {
 							"\n" +
 							theme.fg(
 								"warning",
-								`[Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines (${truncation.maxLines ?? DEFAULT_MAX_LINES} line limit)]`,
+								`[Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines (${
+									truncation.maxLines ?? DEFAULT_MAX_LINES
+								} line limit)]`,
 							);
 					} else {
 						text +=
 							"\n" +
 							theme.fg(
 								"warning",
-								`[Truncated: ${truncation.outputLines} lines shown (${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit)]`,
+								`[Truncated: ${truncation.outputLines} lines shown (${formatSize(
+									truncation.maxBytes ?? DEFAULT_MAX_BYTES,
+								)} limit)]`,
 							);
 					}
 				}

@@ -5,6 +5,7 @@
 The SDK provides programmatic access to pi's agent capabilities. Use it to embed pi in other applications, build custom interfaces, or integrate with automated workflows.
 
 **Example use cases:**
+
 - Build a custom UI (web, desktop, mobile)
 - Integrate agent capabilities into existing applications
 - Create automated pipelines with agent reasoning
@@ -16,22 +17,22 @@ See [examples/sdk/](../examples/sdk/) for working examples from minimal to full 
 ## Quick Start
 
 ```typescript
-import { createAgentSession, discoverAuthStorage, discoverModels, SessionManager } from "@mariozechner/pi-coding-agent";
+import { createAgentSession, discoverAuthStorage, discoverModels, SessionManager } from "@oh-my-pi/pi-coding-agent";
 
 // Set up credential storage and model registry
 const authStorage = discoverAuthStorage();
 const modelRegistry = discoverModels(authStorage);
 
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.inMemory(),
-  authStorage,
-  modelRegistry,
+	sessionManager: SessionManager.inMemory(),
+	authStorage,
+	modelRegistry,
 });
 
 session.subscribe((event) => {
-  if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-    process.stdout.write(event.assistantMessageEvent.delta);
-  }
+	if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+		process.stdout.write(event.assistantMessageEvent.delta);
+	}
 });
 
 await session.prompt("What files are in the current directory?");
@@ -40,7 +41,7 @@ await session.prompt("What files are in the current directory?");
 ## Installation
 
 ```bash
-npm install @mariozechner/pi-coding-agent
+npm install @oh-my-pi/pi-coding-agent
 ```
 
 The SDK is included in the main package. No separate installation needed.
@@ -52,21 +53,22 @@ The SDK is included in the main package. No separate installation needed.
 The main factory function. Creates an `AgentSession` with configurable options.
 
 **Philosophy:** "Omit to discover, provide to override."
+
 - Omit an option → pi discovers/loads from standard locations
 - Provide an option → your value is used, discovery skipped for that option
 
 ```typescript
-import { createAgentSession } from "@mariozechner/pi-coding-agent";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent";
 
 // Minimal: all defaults (discovers everything from cwd and ~/.pi/agent)
 const { session } = await createAgentSession();
 
 // Custom: override specific options
 const { session } = await createAgentSession({
-  model: myModel,
-  systemPrompt: "You are helpful.",
-  tools: [readTool, bashTool],
-  sessionManager: SessionManager.inMemory(),
+	model: myModel,
+	systemPrompt: "You are helpful.",
+	tools: [readTool, bashTool],
+	sessionManager: SessionManager.inMemory(),
 });
 ```
 
@@ -76,55 +78,58 @@ The session manages the agent lifecycle, message history, and event streaming.
 
 ```typescript
 interface AgentSession {
-  // Send a prompt and wait for completion
-  prompt(text: string, options?: PromptOptions): Promise<void>;
-  
-  // Subscribe to events (returns unsubscribe function)
-  subscribe(listener: (event: AgentSessionEvent) => void): () => void;
-  
-  // Session info
-  sessionFile: string | undefined;  // undefined for in-memory
-  sessionId: string;
-  
-  // Model control
-  setModel(model: Model): Promise<void>;
-  setThinkingLevel(level: ThinkingLevel): void;
-  cycleModel(): Promise<ModelCycleResult | undefined>;
-  cycleThinkingLevel(): ThinkingLevel | undefined;
-  
-  // State access
-  agent: Agent;
-  model: Model | undefined;
-  thinkingLevel: ThinkingLevel;
-  messages: AgentMessage[];
-  isStreaming: boolean;
-  
-  // Session management
-  newSession(options?: { parentSession?: string }): Promise<boolean>;  // Returns false if cancelled by hook
-  switchSession(sessionPath: string): Promise<boolean>;
-  
-  // Branching
-  branch(entryId: string): Promise<{ selectedText: string; cancelled: boolean }>;  // Creates new session file
-  navigateTree(targetId: string, options?: { summarize?: boolean }): Promise<{ editorText?: string; cancelled: boolean }>;  // In-place navigation
-  
-  // Hook message injection
-  sendHookMessage(message: HookMessage, triggerTurn?: boolean): Promise<void>;
-  
-  // Compaction
-  compact(customInstructions?: string): Promise<CompactionResult>;
-  abortCompaction(): void;
-  
-  // Abort current operation
-  abort(): Promise<void>;
-  
-  // Cleanup
-  dispose(): void;
+	// Send a prompt and wait for completion
+	prompt(text: string, options?: PromptOptions): Promise<void>;
+
+	// Subscribe to events (returns unsubscribe function)
+	subscribe(listener: (event: AgentSessionEvent) => void): () => void;
+
+	// Session info
+	sessionFile: string | undefined; // undefined for in-memory
+	sessionId: string;
+
+	// Model control
+	setModel(model: Model): Promise<void>;
+	setThinkingLevel(level: ThinkingLevel): void;
+	cycleModel(): Promise<ModelCycleResult | undefined>;
+	cycleThinkingLevel(): ThinkingLevel | undefined;
+
+	// State access
+	agent: Agent;
+	model: Model | undefined;
+	thinkingLevel: ThinkingLevel;
+	messages: AgentMessage[];
+	isStreaming: boolean;
+
+	// Session management
+	newSession(options?: { parentSession?: string }): Promise<boolean>; // Returns false if cancelled by hook
+	switchSession(sessionPath: string): Promise<boolean>;
+
+	// Branching
+	branch(entryId: string): Promise<{ selectedText: string; cancelled: boolean }>; // Creates new session file
+	navigateTree(
+		targetId: string,
+		options?: { summarize?: boolean }
+	): Promise<{ editorText?: string; cancelled: boolean }>; // In-place navigation
+
+	// Hook message injection
+	sendHookMessage(message: HookMessage, triggerTurn?: boolean): Promise<void>;
+
+	// Compaction
+	compact(customInstructions?: string): Promise<CompactionResult>;
+	abortCompaction(): void;
+
+	// Abort current operation
+	abort(): Promise<void>;
+
+	// Cleanup
+	dispose(): void;
 }
 ```
 
 ### Agent and AgentState
 
-The `Agent` class (from `@mariozechner/pi-agent-core`) handles the core LLM interaction. Access it via `session.agent`.
+The `Agent` class (from `@oh-my-pi/pi-agent-core`) handles the core LLM interaction. Access it via `session.agent`.
 
 ```typescript
 // Access current state
@@ -149,59 +154,59 @@ Subscribe to events to receive streaming output and lifecycle notifications.
 
 ```typescript
 session.subscribe((event) => {
-  switch (event.type) {
-    // Streaming text from assistant
-    case "message_update":
-      if (event.assistantMessageEvent.type === "text_delta") {
-        process.stdout.write(event.assistantMessageEvent.delta);
-      }
-      if (event.assistantMessageEvent.type === "thinking_delta") {
-        // Thinking output (if thinking enabled)
-      }
-      break;
-    
-    // Tool execution
-    case "tool_execution_start":
-      console.log(`Tool: ${event.toolName}`);
-      break;
-    case "tool_execution_update":
-      // Streaming tool output
-      break;
-    case "tool_execution_end":
-      console.log(`Result: ${event.isError ? "error" : "success"}`);
-      break;
-    
-    // Message lifecycle
-    case "message_start":
-      // New message starting
-      break;
-    case "message_end":
-      // Message complete
-      break;
-    
-    // Agent lifecycle
-    case "agent_start":
-      // Agent started processing prompt
-      break;
-    case "agent_end":
-      // Agent finished (event.messages contains new messages)
-      break;
-    
-    // Turn lifecycle (one LLM response + tool calls)
-    case "turn_start":
-      break;
-    case "turn_end":
-      // event.message: assistant response
-      // event.toolResults: tool results from this turn
-      break;
-    
-    // Session events (auto-compaction, retry)
-    case "auto_compaction_start":
-    case "auto_compaction_end":
-    case "auto_retry_start":
-    case "auto_retry_end":
-      break;
-  }
+	switch (event.type) {
+		// Streaming text from assistant
+		case "message_update":
+			if (event.assistantMessageEvent.type === "text_delta") {
+				process.stdout.write(event.assistantMessageEvent.delta);
+			}
+			if (event.assistantMessageEvent.type === "thinking_delta") {
+				// Thinking output (if thinking enabled)
+			}
+			break;
+
+		// Tool execution
+		case "tool_execution_start":
+			console.log(`Tool: ${event.toolName}`);
+			break;
+		case "tool_execution_update":
+			// Streaming tool output
+			break;
+		case "tool_execution_end":
+			console.log(`Result: ${event.isError ? "error" : "success"}`);
+			break;
+
+		// Message lifecycle
+		case "message_start":
+			// New message starting
+			break;
+		case "message_end":
+			// Message complete
+			break;
+
+		// Agent lifecycle
+		case "agent_start":
+			// Agent started processing prompt
+			break;
+		case "agent_end":
+			// Agent finished (event.messages contains new messages)
+			break;
+
+		// Turn lifecycle (one LLM response + tool calls)
+		case "turn_start":
+			break;
+		case "turn_end":
+			// event.message: assistant response
+			// event.toolResults: tool results from this turn
+			break;
+
+		// Session events (auto-compaction, retry)
+		case "auto_compaction_start":
+		case "auto_compaction_end":
+		case "auto_retry_start":
+		case "auto_retry_end":
+			break;
+	}
 });
 ```
 
@@ -211,15 +216,16 @@ session.subscribe((event) => {
 
 ```typescript
 const { session } = await createAgentSession({
-  // Working directory for project-local discovery
-  cwd: process.cwd(), // default
-  
-  // Global config directory
-  agentDir: "~/.pi/agent", // default (expands ~)
+	// Working directory for project-local discovery
+	cwd: process.cwd(), // default
+
+	// Global config directory
+	agentDir: "~/.pi/agent", // default (expands ~)
 });
 ```
 
 `cwd` is used for:
+
 - Project hooks (`.pi/hooks/`)
 - Project tools (`.pi/tools/`)
 - Project skills (`.pi/skills/`)
@@ -228,6 +234,7 @@ const { session } = await createAgentSession({
 - Session directory naming
 
 `agentDir` is used for:
+
 - Global hooks (`hooks/`)
 - Global tools (`tools/`)
 - Global skills (`skills/`)
@@ -241,8 +248,8 @@ const { session } = await createAgentSession({
 ### Model
 
 ```typescript
-import { getModel } from "@mariozechner/pi-ai";
-import { discoverAuthStorage, discoverModels } from "@mariozechner/pi-coding-agent";
+import { getModel } from "@oh-my-pi/pi-ai";
+import { discoverAuthStorage, discoverModels } from "@oh-my-pi/pi-coding-agent";
 
 const authStorage = discoverAuthStorage();
 const modelRegistry = discoverModels(authStorage);
@@ -259,21 +266,22 @@ const customModel = modelRegistry.find("my-provider", "my-model");
 const available = await modelRegistry.getAvailable();
 
 const { session } = await createAgentSession({
-  model: opus,
-  thinkingLevel: "medium", // off, minimal, low, medium, high, xhigh
-  
-  // Models for cycling (Ctrl+P in interactive mode)
-  scopedModels: [
-    { model: opus, thinkingLevel: "high" },
-    { model: haiku, thinkingLevel: "off" },
-  ],
-  
-  authStorage,
-  modelRegistry,
+	model: opus,
+	thinkingLevel: "medium", // off, minimal, low, medium, high, xhigh
+
+	// Models for cycling (Ctrl+P in interactive mode)
+	scopedModels: [
+		{ model: opus, thinkingLevel: "high" },
+		{ model: haiku, thinkingLevel: "off" },
+	],
+
+	authStorage,
+	modelRegistry,
 });
 ```
 
 If no model is provided:
+
 1. Tries to restore from session (if continuing)
 2. Uses default from settings
 3. Falls back to first available model
@@ -283,22 +291,23 @@ If no model is provided:
 ### API Keys and OAuth
 
 API key resolution priority (handled by AuthStorage):
+
 1. Runtime overrides (via `setRuntimeApiKey`, not persisted)
 2. Stored credentials in `auth.json` (API keys or OAuth tokens)
 3. Environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.)
 4. Fallback resolver (for custom provider keys from `models.json`)
 
 ```typescript
-import { AuthStorage, ModelRegistry, discoverAuthStorage, discoverModels } from "@mariozechner/pi-coding-agent";
+import { AuthStorage, ModelRegistry, discoverAuthStorage, discoverModels } from "@oh-my-pi/pi-coding-agent";
 
 // Default: uses ~/.pi/agent/auth.json and ~/.pi/agent/models.json
 const authStorage = discoverAuthStorage();
 const modelRegistry = discoverModels(authStorage);
 
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.inMemory(),
-  authStorage,
-  modelRegistry,
+	sessionManager: SessionManager.inMemory(),
+	authStorage,
+	modelRegistry,
 });
 
 // Runtime API key override (not persisted to disk)
@@ -309,9 +318,9 @@ const customAuth = new AuthStorage("/my/app/auth.json");
 const customRegistry = new ModelRegistry(customAuth, "/my/app/models.json");
 
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.inMemory(),
-  authStorage: customAuth,
-  modelRegistry: customRegistry,
+	sessionManager: SessionManager.inMemory(),
+	authStorage: customAuth,
+	modelRegistry: customRegistry,
 });
 
 // No custom models.json (built-in models only)
@@ -324,13 +333,13 @@ const simpleRegistry = new ModelRegistry(authStorage);
 
 ```typescript
 const { session } = await createAgentSession({
-  // Replace entirely
-  systemPrompt: "You are a helpful assistant.",
-  
-  // Or modify default (receives default, returns modified)
-  systemPrompt: (defaultPrompt) => {
-    return `${defaultPrompt}\n\n## Additional Rules\n- Be concise`;
-  },
+	// Replace entirely
+	systemPrompt: "You are a helpful assistant.",
+
+	// Or modify default (receives default, returns modified)
+	systemPrompt: (defaultPrompt) => {
+		return `${defaultPrompt}\n\n## Additional Rules\n- Be concise`;
+	},
 });
 ```
 
@@ -340,20 +349,25 @@ const { session } = await createAgentSession({
 
 ```typescript
 import {
-  codingTools,   // read, bash, edit, write (default)
-  readOnlyTools, // read, grep, find, ls
-  readTool, bashTool, editTool, writeTool,
-  grepTool, findTool, lsTool,
-} from "@mariozechner/pi-coding-agent";
+	codingTools, // read, bash, edit, write (default)
+	readOnlyTools, // read, grep, find, ls
+	readTool,
+	bashTool,
+	editTool,
+	writeTool,
+	grepTool,
+	findTool,
+	lsTool,
+} from "@oh-my-pi/pi-coding-agent";
 
 // Use built-in tool set
 const { session } = await createAgentSession({
-  tools: readOnlyTools,
+	tools: readOnlyTools,
 });
 
 // Pick specific tools
 const { session } = await createAgentSession({
-  tools: [readTool, bashTool, grepTool],
+	tools: [readTool, bashTool, grepTool],
 });
 ```
 
@@ -363,37 +377,39 @@ const { session } = await createAgentSession({
 
 ```typescript
 import {
-  createCodingTools,    // Creates [read, bash, edit, write] for specific cwd
-  createReadOnlyTools,  // Creates [read, grep, find, ls] for specific cwd
-  createReadTool,
-  createBashTool,
-  createEditTool,
-  createWriteTool,
-  createGrepTool,
-  createFindTool,
-  createLsTool,
-} from "@mariozechner/pi-coding-agent";
+	createCodingTools, // Creates [read, bash, edit, write] for specific cwd
+	createReadOnlyTools, // Creates [read, grep, find, ls] for specific cwd
+	createReadTool,
+	createBashTool,
+	createEditTool,
+	createWriteTool,
+	createGrepTool,
+	createFindTool,
+	createLsTool,
+} from "@oh-my-pi/pi-coding-agent";
 
 const cwd = "/path/to/project";
 
 // Use factory for tool sets
 const { session } = await createAgentSession({
-  cwd,
-  tools: createCodingTools(cwd),  // Tools resolve paths relative to cwd
+	cwd,
+	tools: createCodingTools(cwd), // Tools resolve paths relative to cwd
 });
 
 // Or pick specific tools
 const { session } = await createAgentSession({
-  cwd,
-  tools: [createReadTool(cwd), createBashTool(cwd), createGrepTool(cwd)],
+	cwd,
+	tools: [createReadTool(cwd), createBashTool(cwd), createGrepTool(cwd)],
 });
 ```
 
 **When you don't need factories:**
+
 - If you omit `tools`, pi automatically creates them with the correct `cwd`
 - If you use `process.cwd()` as your `cwd`, the pre-built instances work fine
 
 **When you must use factories:**
+
 - When you specify both `cwd` (different from `process.cwd()`) AND `tools`
 
 > See [examples/sdk/05-tools.ts](../examples/sdk/05-tools.ts)
@@ -402,36 +418,36 @@ const { session } = await createAgentSession({
 
 ```typescript
 import { Type } from "@sinclair/typebox";
-import { createAgentSession, discoverCustomTools, type CustomTool } from "@mariozechner/pi-coding-agent";
+import { createAgentSession, discoverCustomTools, type CustomTool } from "@oh-my-pi/pi-coding-agent";
 
 // Inline custom tool
 const myTool: CustomTool = {
-  name: "my_tool",
-  label: "My Tool",
-  description: "Does something useful",
-  parameters: Type.Object({
-    input: Type.String({ description: "Input value" }),
-  }),
-  execute: async (toolCallId, params) => ({
-    content: [{ type: "text", text: `Result: ${params.input}` }],
-    details: {},
-  }),
+	name: "my_tool",
+	label: "My Tool",
+	description: "Does something useful",
+	parameters: Type.Object({
+		input: Type.String({ description: "Input value" }),
+	}),
+	execute: async (toolCallId, params) => ({
+		content: [{ type: "text", text: `Result: ${params.input}` }],
+		details: {},
+	}),
 };
 
 // Replace discovery with inline tools
 const { session } = await createAgentSession({
-  customTools: [{ tool: myTool }],
+	customTools: [{ tool: myTool }],
 });
 
 // Merge with discovered tools
 const discovered = await discoverCustomTools();
 const { session } = await createAgentSession({
-  customTools: [...discovered, { tool: myTool }],
+	customTools: [...discovered, { tool: myTool }],
 });
 
 // Add paths without replacing discovery
 const { session } = await createAgentSession({
-  additionalCustomToolPaths: ["/extra/tools"],
+	additionalCustomToolPaths: ["/extra/tools"],
 });
 ```
 
@@ -440,67 +456,71 @@ const { session } = await createAgentSession({
 ### Hooks
 
 ```typescript
-import { createAgentSession, discoverHooks, type HookFactory } from "@mariozechner/pi-coding-agent";
+import { createAgentSession, discoverHooks, type HookFactory } from "@oh-my-pi/pi-coding-agent";
 
 // Inline hook
 const loggingHook: HookFactory = (api) => {
-  // Log tool calls
-  api.on("tool_call", async (event) => {
-    console.log(`Tool: ${event.toolName}`);
-    return undefined; // Don't block
-  });
-  
-  // Block dangerous commands
-  api.on("tool_call", async (event) => {
-    if (event.toolName === "bash" && event.input.command?.includes("rm -rf")) {
-      return { block: true, reason: "Dangerous command" };
-    }
-    return undefined;
-  });
-  
-  // Register custom slash command
-  api.registerCommand("stats", {
-    description: "Show session stats",
-    handler: async (ctx) => {
-      const entries = ctx.sessionManager.getEntries();
-      ctx.ui.notify(`${entries.length} entries`, "info");
-    },
-  });
-  
-  // Inject messages
-  api.sendMessage({
-    customType: "my-hook",
-    content: "Hook initialized",
-    display: false,  // Hidden from TUI
-  }, false);  // Don't trigger agent turn
-  
-  // Persist hook state
-  api.appendEntry("my-hook", { initialized: true });
+	// Log tool calls
+	api.on("tool_call", async (event) => {
+		console.log(`Tool: ${event.toolName}`);
+		return undefined; // Don't block
+	});
+
+	// Block dangerous commands
+	api.on("tool_call", async (event) => {
+		if (event.toolName === "bash" && event.input.command?.includes("rm -rf")) {
+			return { block: true, reason: "Dangerous command" };
+		}
+		return undefined;
+	});
+
+	// Register custom slash command
+	api.registerCommand("stats", {
+		description: "Show session stats",
+		handler: async (ctx) => {
+			const entries = ctx.sessionManager.getEntries();
+			ctx.ui.notify(`${entries.length} entries`, "info");
+		},
+	});
+
+	// Inject messages
+	api.sendMessage(
+		{
+			customType: "my-hook",
+			content: "Hook initialized",
+			display: false, // Hidden from TUI
+		},
+		false
+	); // Don't trigger agent turn
+
+	// Persist hook state
+	api.appendEntry("my-hook", { initialized: true });
 };
 
 // Replace discovery
 const { session } = await createAgentSession({
-  hooks: [{ factory: loggingHook }],
+	hooks: [{ factory: loggingHook }],
 });
 
 // Disable all hooks
 const { session } = await createAgentSession({
-  hooks: [],
+	hooks: [],
 });
 
 // Merge with discovered
 const discovered = await discoverHooks();
 const { session } = await createAgentSession({
-  hooks: [...discovered, { factory: loggingHook }],
+	hooks: [...discovered, { factory: loggingHook }],
 });
 
 // Add paths without replacing
 const { session } = await createAgentSession({
-  additionalHookPaths: ["/extra/hooks"],
+	additionalHookPaths: ["/extra/hooks"],
 });
 ```
 
 Hook API methods:
+
 - `api.on(event, handler)` - Subscribe to events
 - `api.sendMessage(message, triggerTurn?)` - Inject message (creates `CustomMessageEntry`)
 - `api.appendEntry(customType, data?)` - Persist hook state (not in LLM context)
@@ -513,34 +533,34 @@ Hook API methods:
 ### Skills
 
 ```typescript
-import { createAgentSession, discoverSkills, type Skill } from "@mariozechner/pi-coding-agent";
+import { createAgentSession, discoverSkills, type Skill } from "@oh-my-pi/pi-coding-agent";
 
 // Discover and filter
 const allSkills = discoverSkills();
-const filtered = allSkills.filter(s => s.name.includes("search"));
+const filtered = allSkills.filter((s) => s.name.includes("search"));
 
 // Custom skill
 const mySkill: Skill = {
-  name: "my-skill",
-  description: "Custom instructions",
-  filePath: "/path/to/SKILL.md",
-  baseDir: "/path/to",
-  source: "custom",
+	name: "my-skill",
+	description: "Custom instructions",
+	filePath: "/path/to/SKILL.md",
+	baseDir: "/path/to",
+	source: "custom",
 };
 
 const { session } = await createAgentSession({
-  skills: [...filtered, mySkill],
+	skills: [...filtered, mySkill],
 });
 
 // Disable skills
 const { session } = await createAgentSession({
-  skills: [],
+	skills: [],
 });
 
 // Discovery with settings filter
 const skills = discoverSkills(process.cwd(), undefined, {
-  ignoredSkills: ["browser-*"],  // glob patterns to exclude
-  includeSkills: ["search-*"],   // glob patterns to include (empty = all)
+	ignoredSkills: ["browser-*"], // glob patterns to exclude
+	includeSkills: ["search-*"], // glob patterns to include (empty = all)
 });
 ```
 
@@ -549,25 +569,25 @@ const skills = discoverSkills(process.cwd(), undefined, {
 ### Context Files
 
 ```typescript
-import { createAgentSession, discoverContextFiles } from "@mariozechner/pi-coding-agent";
+import { createAgentSession, discoverContextFiles } from "@oh-my-pi/pi-coding-agent";
 
 // Discover AGENTS.md files
 const discovered = discoverContextFiles();
 
 // Add custom context
 const { session } = await createAgentSession({
-  contextFiles: [
-    ...discovered,
-    {
-      path: "/virtual/AGENTS.md",
-      content: "# Guidelines\n\n- Be concise\n- Use TypeScript",
-    },
-  ],
+	contextFiles: [
+		...discovered,
+		{
+			path: "/virtual/AGENTS.md",
+			content: "# Guidelines\n\n- Be concise\n- Use TypeScript",
+		},
+	],
 });
 
 // Disable context files
 const { session } = await createAgentSession({
-  contextFiles: [],
+	contextFiles: [],
 });
 ```
 
@@ -576,19 +596,19 @@ const { session } = await createAgentSession({
 ### Slash Commands
 
 ```typescript
-import { createAgentSession, discoverSlashCommands, type FileSlashCommand } from "@mariozechner/pi-coding-agent";
+import { createAgentSession, discoverSlashCommands, type FileSlashCommand } from "@oh-my-pi/pi-coding-agent";
 
 const discovered = discoverSlashCommands();
 
 const customCommand: FileSlashCommand = {
-  name: "deploy",
-  description: "Deploy the application",
-  source: "(custom)",
-  content: "# Deploy\n\n1. Build\n2. Test\n3. Deploy",
+	name: "deploy",
+	description: "Deploy the application",
+	source: "(custom)",
+	content: "# Deploy\n\n1. Build\n2. Test\n3. Deploy",
 };
 
 const { session } = await createAgentSession({
-  slashCommands: [...discovered, customCommand],
+	slashCommands: [...discovered, customCommand],
 });
 ```
 
@@ -599,41 +619,41 @@ const { session } = await createAgentSession({
 Sessions use a tree structure with `id`/`parentId` linking, enabling in-place branching.
 
 ```typescript
-import { createAgentSession, SessionManager } from "@mariozechner/pi-coding-agent";
+import { createAgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
 
 // In-memory (no persistence)
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.inMemory(),
+	sessionManager: SessionManager.inMemory(),
 });
 
 // New persistent session
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.create(process.cwd()),
+	sessionManager: SessionManager.create(process.cwd()),
 });
 
 // Continue most recent
 const { session, modelFallbackMessage } = await createAgentSession({
-  sessionManager: SessionManager.continueRecent(process.cwd()),
+	sessionManager: SessionManager.continueRecent(process.cwd()),
 });
 if (modelFallbackMessage) {
-  console.log("Note:", modelFallbackMessage);
+	console.log("Note:", modelFallbackMessage);
 }
 
 // Open specific file
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.open("/path/to/session.jsonl"),
+	sessionManager: SessionManager.open("/path/to/session.jsonl"),
 });
 
 // List available sessions
 const sessions = SessionManager.list(process.cwd());
 for (const info of sessions) {
-  console.log(`${info.id}: ${info.firstMessage} (${info.messageCount} messages)`);
+	console.log(`${info.id}: ${info.firstMessage} (${info.messageCount} messages)`);
 }
 
 // Custom session directory (no cwd encoding)
 const customDir = "/path/to/my-sessions";
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.create(process.cwd(), customDir),
+	sessionManager: SessionManager.create(process.cwd(), customDir),
 });
 ```
 
@@ -643,21 +663,21 @@ const { session } = await createAgentSession({
 const sm = SessionManager.open("/path/to/session.jsonl");
 
 // Tree traversal
-const entries = sm.getEntries();        // All entries (excludes header)
-const tree = sm.getTree();              // Full tree structure
-const path = sm.getPath();              // Path from root to current leaf
-const leaf = sm.getLeafEntry();         // Current leaf entry
-const entry = sm.getEntry(id);          // Get entry by ID
-const children = sm.getChildren(id);    // Direct children of entry
+const entries = sm.getEntries(); // All entries (excludes header)
+const tree = sm.getTree(); // Full tree structure
+const path = sm.getPath(); // Path from root to current leaf
+const leaf = sm.getLeafEntry(); // Current leaf entry
+const entry = sm.getEntry(id); // Get entry by ID
+const children = sm.getChildren(id); // Direct children of entry
 
 // Labels
-const label = sm.getLabel(id);          // Get label for entry
+const label = sm.getLabel(id); // Get label for entry
 sm.appendLabelChange(id, "checkpoint"); // Set label
 
 // Branching
-sm.branch(entryId);                     // Move leaf to earlier entry
-sm.branchWithSummary(id, "Summary...");  // Branch with context summary
-sm.createBranchedSession(leafId);       // Extract path to new file
+sm.branch(entryId); // Move leaf to earlier entry
+sm.branchWithSummary(id, "Summary..."); // Branch with context summary
+sm.createBranchedSession(leafId); // Extract path to new file
 ```
 
 > See [examples/sdk/11-sessions.ts](../examples/sdk/11-sessions.ts) and [docs/session.md](session.md)
@@ -665,40 +685,42 @@ sm.createBranchedSession(leafId);       // Extract path to new file
 ### Settings Management
 
 ```typescript
-import { createAgentSession, SettingsManager, SessionManager } from "@mariozechner/pi-coding-agent";
+import { createAgentSession, SettingsManager, SessionManager } from "@oh-my-pi/pi-coding-agent";
 
 // Default: loads from files (global + project merged)
 const { session } = await createAgentSession({
-  settingsManager: SettingsManager.create(),
+	settingsManager: SettingsManager.create(),
 });
 
 // With overrides
 const settingsManager = SettingsManager.create();
 settingsManager.applyOverrides({
-  compaction: { enabled: false },
-  retry: { enabled: true, maxRetries: 5 },
+	compaction: { enabled: false },
+	retry: { enabled: true, maxRetries: 5 },
 });
 const { session } = await createAgentSession({ settingsManager });
 
 // In-memory (no file I/O, for testing)
 const { session } = await createAgentSession({
-  settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
-  sessionManager: SessionManager.inMemory(),
+	settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
+	sessionManager: SessionManager.inMemory(),
 });
 
 // Custom directories
 const { session } = await createAgentSession({
-  settingsManager: SettingsManager.create("/custom/cwd", "/custom/agent"),
+	settingsManager: SettingsManager.create("/custom/cwd", "/custom/agent"),
 });
 ```
 
 **Static factories:**
+
 - `SettingsManager.create(cwd?, agentDir?)` - Load from files
 - `SettingsManager.inMemory(settings?)` - No file I/O
 
 **Project-specific settings:**
 
 Settings load from two locations and merge:
+
 1. Global: `~/.pi/agent/settings.json`
 2. Project: `<cwd>/.pi/settings.json`
 
@@ -711,27 +733,27 @@ Project overrides global. Nested objects merge keys. Setters only modify global 
 All discovery functions accept optional `cwd` and `agentDir` parameters.
 
 ```typescript
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel } from "@oh-my-pi/pi-ai";
 import {
-  AuthStorage,
-  ModelRegistry,
-  discoverAuthStorage,
-  discoverModels,
-  discoverSkills,
-  discoverHooks,
-  discoverCustomTools,
-  discoverContextFiles,
-  discoverSlashCommands,
-  loadSettings,
-  buildSystemPrompt,
-} from "@mariozechner/pi-coding-agent";
+	AuthStorage,
+	ModelRegistry,
+	discoverAuthStorage,
+	discoverModels,
+	discoverSkills,
+	discoverHooks,
+	discoverCustomTools,
+	discoverContextFiles,
+	discoverSlashCommands,
+	loadSettings,
+	buildSystemPrompt,
+} from "@oh-my-pi/pi-coding-agent";
 
 // Auth and Models
-const authStorage = discoverAuthStorage();           // ~/.pi/agent/auth.json
-const modelRegistry = discoverModels(authStorage);   // + ~/.pi/agent/models.json
-const allModels = modelRegistry.getAll();            // All models (built-in + custom)
+const authStorage = discoverAuthStorage(); // ~/.pi/agent/auth.json
+const modelRegistry = discoverModels(authStorage); // + ~/.pi/agent/models.json
+const allModels = modelRegistry.getAll(); // All models (built-in + custom)
 const available = await modelRegistry.getAvailable(); // Only models with API keys
-const model = modelRegistry.find("provider", "id");   // Find specific model
+const model = modelRegistry.find("provider", "id"); // Find specific model
 const builtIn = getModel("anthropic", "claude-opus-4-5"); // Built-in only
 
 // Skills
@@ -754,10 +776,10 @@ const settings = loadSettings(cwd, agentDir);
 
 // Build system prompt manually
 const prompt = buildSystemPrompt({
-  skills,
-  contextFiles,
-  appendPrompt: "Additional instructions",
-  cwd,
+	skills,
+	contextFiles,
+	appendPrompt: "Additional instructions",
+	cwd,
 });
 ```
 
@@ -767,43 +789,43 @@ const prompt = buildSystemPrompt({
 
 ```typescript
 interface CreateAgentSessionResult {
-  // The session
-  session: AgentSession;
-  
-  // Custom tools (for UI setup)
-  customToolsResult: {
-    tools: LoadedCustomTool[];
-    setUIContext: (ctx, hasUI) => void;
-  };
-  
-  // Warning if session model couldn't be restored
-  modelFallbackMessage?: string;
+	// The session
+	session: AgentSession;
+
+	// Custom tools (for UI setup)
+	customToolsResult: {
+		tools: LoadedCustomTool[];
+		setUIContext: (ctx, hasUI) => void;
+	};
+
+	// Warning if session model couldn't be restored
+	modelFallbackMessage?: string;
 }
 ```
 
 ## Complete Example
 
 ```typescript
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel } from "@oh-my-pi/pi-ai";
 import { Type } from "@sinclair/typebox";
 import {
-  AuthStorage,
-  createAgentSession,
-  ModelRegistry,
-  SessionManager,
-  SettingsManager,
-  readTool,
-  bashTool,
-  type HookFactory,
-  type CustomTool,
-} from "@mariozechner/pi-coding-agent";
+	AuthStorage,
+	createAgentSession,
+	ModelRegistry,
+	SessionManager,
+	SettingsManager,
+	readTool,
+	bashTool,
+	type HookFactory,
+	type CustomTool,
+} from "@oh-my-pi/pi-coding-agent";
 
 // Set up auth storage (custom location)
 const authStorage = new AuthStorage("/custom/agent/auth.json");
 
 // Runtime API key override (not persisted)
 if (process.env.MY_KEY) {
-  authStorage.setRuntimeApiKey("anthropic", process.env.MY_KEY);
+	authStorage.setRuntimeApiKey("anthropic", process.env.MY_KEY);
 }
 
 // Model registry (no custom models.json)
@@ -811,22 +833,22 @@ const modelRegistry = new ModelRegistry(authStorage);
 
 // Inline hook
 const auditHook: HookFactory = (api) => {
-  api.on("tool_call", async (event) => {
-    console.log(`[Audit] ${event.toolName}`);
-    return undefined;
-  });
+	api.on("tool_call", async (event) => {
+		console.log(`[Audit] ${event.toolName}`);
+		return undefined;
+	});
 };
 
 // Inline tool
 const statusTool: CustomTool = {
-  name: "status",
-  label: "Status",
-  description: "Get system status",
-  parameters: Type.Object({}),
-  execute: async () => ({
-    content: [{ type: "text", text: `Uptime: ${process.uptime()}s` }],
-    details: {},
-  }),
+	name: "status",
+	label: "Status",
+	description: "Get system status",
+	parameters: Type.Object({}),
+	execute: async () => ({
+		content: [{ type: "text", text: `Uptime: ${process.uptime()}s` }],
+		details: {},
+	}),
 };
 
 const model = getModel("anthropic", "claude-opus-4-5");
@@ -834,36 +856,36 @@ if (!model) throw new Error("Model not found");
 
 // In-memory settings with overrides
 const settingsManager = SettingsManager.inMemory({
-  compaction: { enabled: false },
-  retry: { enabled: true, maxRetries: 2 },
+	compaction: { enabled: false },
+	retry: { enabled: true, maxRetries: 2 },
 });
 
 const { session } = await createAgentSession({
-  cwd: process.cwd(),
-  agentDir: "/custom/agent",
-  
-  model,
-  thinkingLevel: "off",
-  authStorage,
-  modelRegistry,
-  
-  systemPrompt: "You are a minimal assistant. Be concise.",
-  
-  tools: [readTool, bashTool],
-  customTools: [{ tool: statusTool }],
-  hooks: [{ factory: auditHook }],
-  skills: [],
-  contextFiles: [],
-  slashCommands: [],
-  
-  sessionManager: SessionManager.inMemory(),
-  settingsManager,
+	cwd: process.cwd(),
+	agentDir: "/custom/agent",
+
+	model,
+	thinkingLevel: "off",
+	authStorage,
+	modelRegistry,
+
+	systemPrompt: "You are a minimal assistant. Be concise.",
+
+	tools: [readTool, bashTool],
+	customTools: [{ tool: statusTool }],
+	hooks: [{ factory: auditHook }],
+	skills: [],
+	contextFiles: [],
+	slashCommands: [],
+
+	sessionManager: SessionManager.inMemory(),
+	settingsManager,
 });
 
 session.subscribe((event) => {
-  if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-    process.stdout.write(event.assistantMessageEvent.delta);
-  }
+	if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+		process.stdout.write(event.assistantMessageEvent.delta);
+	}
 });
 
 await session.prompt("Get status and list files.");
@@ -880,12 +902,14 @@ pi --mode rpc --no-session
 See [RPC documentation](rpc.md) for the JSON protocol.
 
 The SDK is preferred when:
+
 - You want type safety
 - You're in the same Node.js process
 - You need direct access to agent state
 - You want to customize tools/hooks programmatically
 
 RPC mode is preferred when:
+
 - You're integrating from another language
 - You want process isolation
 - You're building a language-agnostic client
@@ -947,24 +971,24 @@ For hook types, import from the hooks subpath:
 
 ```typescript
 import type {
-  HookAPI,
-  HookMessage,
-  HookFactory,
-  HookEventContext,
-  HookCommandContext,
-  ToolCallEvent,
-  ToolResultEvent,
-} from "@mariozechner/pi-coding-agent/hooks";
+	HookAPI,
+	HookMessage,
+	HookFactory,
+	HookEventContext,
+	HookCommandContext,
+	ToolCallEvent,
+	ToolResultEvent,
+} from "@oh-my-pi/pi-coding-agent/hooks";
 ```
 
 For message utilities:
 
 ```typescript
-import { isHookMessage, createHookMessage } from "@mariozechner/pi-coding-agent";
+import { isHookMessage, createHookMessage } from "@oh-my-pi/pi-coding-agent";
 ```
 
 For config utilities:
 
 ```typescript
-import { getAgentDir } from "@mariozechner/pi-coding-agent/config";
+import { getAgentDir } from "@oh-my-pi/pi-coding-agent/config";
 ```

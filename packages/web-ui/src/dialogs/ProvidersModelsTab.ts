@@ -1,6 +1,6 @@
 import { i18n } from "@mariozechner/mini-lit";
 import { Select } from "@mariozechner/mini-lit/dist/Select.js";
-import { getProviders } from "@mariozechner/pi-ai";
+import { getProviders } from "@oh-my-pi/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import "../components/CustomProviderCard.js";
@@ -125,7 +125,7 @@ export class ProvidersModelsTab extends SettingsTab {
 							<div class="text-sm text-muted-foreground text-center py-8">
 								No custom providers configured. Click 'Add Provider' to get started.
 							</div>
-						`
+					  `
 						: html`
 							<div class="flex flex-col gap-4">
 								${this.customProviders.map(
@@ -141,7 +141,7 @@ export class ProvidersModelsTab extends SettingsTab {
 									`,
 								)}
 							</div>
-						`
+					  `
 				}
 			</div>
 		`;

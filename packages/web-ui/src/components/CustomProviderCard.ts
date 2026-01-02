@@ -20,9 +20,7 @@ export class CustomProviderCard extends LitElement {
 	private renderStatus(): TemplateResult {
 		if (!this.isAutoDiscovery) {
 			return html`
-				<div class="text-xs text-muted-foreground mt-1">
-					${i18n("Models")}: ${this.provider.models?.length || 0}
-				</div>
+				<div class="text-xs text-muted-foreground mt-1">${i18n("Models")}: ${this.provider.models?.length || 0}</div>
 			`;
 		}
 
@@ -43,9 +41,7 @@ export class CustomProviderCard extends LitElement {
 					: i18n("Disconnected");
 
 		return html`
-			<div class="text-xs text-muted-foreground mt-1 flex items-center gap-1">
-				${statusIcon} ${statusText}
-			</div>
+			<div class="text-xs text-muted-foreground mt-1 flex items-center gap-1">${statusIcon} ${statusText}</div>
 		`;
 	}
 

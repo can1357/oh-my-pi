@@ -5,7 +5,7 @@
  * Discover, filter, merge, or replace them.
  */
 
-import { createAgentSession, discoverSkills, SessionManager, type Skill } from "@mariozechner/pi-coding-agent";
+import { createAgentSession, discoverSkills, SessionManager, type Skill } from "@oh-my-pi/pi-coding-agent";
 
 // Discover all skills from cwd/.pi/skills, ~/.pi/agent/skills, etc.
 const allSkills = discoverSkills();

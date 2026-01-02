@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import { parse as parseHtml } from "node-html-parser";
 
@@ -1152,7 +1152,9 @@ async function handleStackOverflow(url: string, timeout: number): Promise<Render
 		md += `**Score:** ${question.score} · **Answers:** ${question.answer_count}`;
 		md += question.is_answered ? " (Answered)" : "";
 		md += `\n**Tags:** ${question.tags.join(", ")}\n`;
-		md += `**Asked by:** ${question.owner.display_name} · ${new Date(question.creation_date * 1000).toISOString().split("T")[0]}\n\n`;
+		md += `**Asked by:** ${question.owner.display_name} · ${
+			new Date(question.creation_date * 1000).toISOString().split("T")[0]
+		}\n\n`;
 		md += `---\n\n## Question\n\n${htmlToBasicMarkdown(question.body)}\n\n`;
 
 		// Fetch answers
@@ -2106,8 +2108,8 @@ export const webFetchTool = createWebFetchTool(process.cwd());
 // TUI Rendering
 // =============================================================================
 
-import type { Component } from "@mariozechner/pi-tui";
-import { Text } from "@mariozechner/pi-tui";
+import type { Component } from "@oh-my-pi/pi-tui";
+import { Text } from "@oh-my-pi/pi-tui";
 import type { Theme } from "../../modes/interactive/theme/theme.js";
 import type { CustomTool, CustomToolContext, RenderResultOptions } from "../custom-tools/types.js";
 
@@ -2167,7 +2169,10 @@ export function renderWebFetchResult(
 	// Build header: ● Web Fetch (domain) · method
 	const icon = details.truncated ? theme.fg("warning", "●") : theme.fg("success", "●");
 	const expandHint = expanded ? "" : theme.fg("dim", " (Ctrl+O to expand)");
-	let text = `${icon} ${theme.fg("toolTitle", "Web Fetch")} ${theme.fg("accent", `(${domain})`)} · ${theme.fg("dim", details.method)}${expandHint}`;
+	let text = `${icon} ${theme.fg("toolTitle", "Web Fetch")} ${theme.fg("accent", `(${domain})`)} · ${theme.fg(
+		"dim",
+		details.method,
+	)}${expandHint}`;
 
 	// Get content text
 	const contentText = result.content[0]?.text ?? "";
@@ -2202,17 +2207,31 @@ export function renderWebFetchResult(
 		if (hasMeta) {
 			// Metadata section
 			text += `\n ${theme.fg("dim", TREE_MID)} ${theme.fg("accent", "Metadata")}`;
-			text += `\n ${theme.fg("dim", TREE_PIPE)}  ${theme.fg("dim", TREE_MID)} ${theme.fg("muted", "Content-Type:")} ${details.contentType}`;
+			text += `\n ${theme.fg("dim", TREE_PIPE)}  ${theme.fg("dim", TREE_MID)} ${theme.fg("muted", "Content-Type:")} ${
+				details.contentType
+			}`;
 			if (hasRedirect) {
-				text += `\n ${theme.fg("dim", TREE_PIPE)}  ${theme.fg("dim", TREE_MID)} ${theme.fg("muted", "Redirected from:")} ${theme.fg("mdLinkUrl", details.url)}`;
-				text += `\n ${theme.fg("dim", TREE_PIPE)}  ${theme.fg("dim", `${TREE_PIPE}  ${TREE_HOOK} `)}${theme.fg("mdLinkUrl", details.finalUrl)}`;
+				text += `\n ${theme.fg("dim", TREE_PIPE)}  ${theme.fg("dim", TREE_MID)} ${theme.fg(
+					"muted",
+					"Redirected from:",
+				)} ${theme.fg("mdLinkUrl", details.url)}`;
+				text += `\n ${theme.fg("dim", TREE_PIPE)}  ${theme.fg("dim", `${TREE_PIPE}  ${TREE_HOOK} `)}${theme.fg(
+					"mdLinkUrl",
+					details.finalUrl,
+				)}`;
 			}
 			if (details.truncated) {
-				text += `\n ${theme.fg("dim", TREE_PIPE)}  ${theme.fg("dim", TREE_MID)} ${theme.fg("warning", "⚠ Output was truncated")}`;
+				text += `\n ${theme.fg("dim", TREE_PIPE)}  ${theme.fg("dim", TREE_MID)} ${theme.fg(
+					"warning",
+					"⚠ Output was truncated",
+				)}`;
 			}
 			if (hasNotes) {
 				const notesBranch = TREE_END;
-				text += `\n ${theme.fg("dim", TREE_PIPE)}  ${theme.fg("dim", notesBranch)} ${theme.fg("muted", "Notes:")} ${details.notes.join("; ")}`;
+				text += `\n ${theme.fg("dim", TREE_PIPE)}  ${theme.fg("dim", notesBranch)} ${theme.fg(
+					"muted",
+					"Notes:",
+				)} ${details.notes.join("; ")}`;
 			}
 		}
 

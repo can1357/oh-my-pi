@@ -5,7 +5,7 @@
  * When branching, offers to restore code to that point in history.
  */
 
-import type { HookAPI } from "@mariozechner/pi-coding-agent";
+import type { HookAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: HookAPI) {
 	const checkpoints = new Map<string, string>();

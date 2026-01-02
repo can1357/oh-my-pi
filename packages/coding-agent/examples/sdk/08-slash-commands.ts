@@ -9,7 +9,7 @@ import {
 	discoverSlashCommands,
 	type FileSlashCommand,
 	SessionManager,
-} from "@mariozechner/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 
 // Discover commands from cwd/.pi/commands/ and ~/.pi/agent/commands/
 const discovered = discoverSlashCommands();

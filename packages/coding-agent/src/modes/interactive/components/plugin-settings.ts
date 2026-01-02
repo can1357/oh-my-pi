@@ -17,7 +17,7 @@ import {
 	SettingsList,
 	Spacer,
 	Text,
-} from "@mariozechner/pi-tui";
+} from "@oh-my-pi/pi-tui";
 import { PluginManager } from "../../../core/plugins/manager.js";
 import type { InstalledPlugin, PluginSettingSchema } from "../../../core/plugins/types.js";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.js";
@@ -416,8 +416,6 @@ export class PluginSettingsComponent extends Container {
 	private manager: PluginManager;
 	private callbacks: PluginSettingsCallbacks;
 	private viewComponent: (Container & InputHandler) | null = null;
-	private currentView: "list" | "detail" = "list";
-	private currentPlugin: InstalledPlugin | null = null;
 
 	constructor(cwd: string, callbacks: PluginSettingsCallbacks) {
 		super();
