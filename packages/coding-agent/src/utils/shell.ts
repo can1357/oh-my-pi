@@ -83,13 +83,21 @@ export function getShellConfig(): { shell: string; args: string[] } {
 		);
 	}
 
-	// Unix: prefer bash over sh
-	if (existsSync("/bin/bash")) {
-		cachedShellConfig = { shell: "/bin/bash", args: ["-c"] };
+	// Unix: prefer user's shell from $SHELL, fallback to bash, then sh
+	const userShell = process.env.SHELL;
+	if (userShell && existsSync(userShell)) {
+		cachedShellConfig = { shell: userShell, args: ["-c"] };
 		return cachedShellConfig;
 	}
 
-	cachedShellConfig = { shell: "sh", args: ["-c"] };
+	const bashPath = Bun.which("bash");
+	if (bashPath) {
+		cachedShellConfig = { shell: bashPath, args: ["-c"] };
+		return cachedShellConfig;
+	}
+
+	const shPath = Bun.which("sh");
+	cachedShellConfig = { shell: shPath || "sh", args: ["-c"] };
 	return cachedShellConfig;
 }
 

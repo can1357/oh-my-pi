@@ -95,14 +95,9 @@ const TOOLS: Record<string, ToolConfig> = {
 	},
 };
 
-// Check if a command exists in PATH by trying to run it
-function commandExists(cmd: string): boolean {
-	try {
-		const proc = Bun.spawnSync([cmd, "--version"], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-		return proc.exitCode !== null;
-	} catch {
-		return false;
-	}
+// Check if a command exists in PATH
+function commandExists(cmd: string): string | null {
+	return Bun.which(cmd);
 }
 
 // Get the path to a tool (system-wide or in our tools dir)
@@ -116,12 +111,8 @@ export function getToolPath(tool: "fd" | "rg" | "sd" | "sg"): string | null {
 		return localPath;
 	}
 
-	// Check system PATH - if found, just return the command name (it's in PATH)
-	if (commandExists(config.binaryName)) {
-		return config.binaryName;
-	}
-
-	return null;
+	// Check system PATH
+	return commandExists(config.binaryName);
 }
 
 // Fetch latest release version from GitHub
