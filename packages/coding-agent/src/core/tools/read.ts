@@ -1,11 +1,35 @@
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import type { ImageContent, TextContent } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
+import { spawnSync } from "child_process";
 import { constants } from "fs";
 import { access, readFile } from "fs/promises";
+import { extname } from "path";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.js";
 import { resolveReadPath } from "./path-utils.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
+
+// Document types convertible via markitdown
+const CONVERTIBLE_EXTENSIONS = new Set([".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".rtf", ".epub"]);
+
+function convertWithMarkitdown(filePath: string): { content: string; ok: boolean; error?: string } {
+	const cmd = Bun.which("markitdown");
+	if (!cmd) {
+		return { content: "", ok: false, error: "markitdown not found" };
+	}
+
+	const result = spawnSync(cmd, [filePath], {
+		encoding: "utf-8",
+		timeout: 60000,
+		maxBuffer: 50 * 1024 * 1024,
+	});
+
+	if (result.status === 0 && result.stdout && result.stdout.length > 0) {
+		return { content: result.stdout, ok: true };
+	}
+
+	return { content: "", ok: false, error: result.stderr || "Conversion failed" };
+}
 
 const readSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
@@ -21,7 +45,10 @@ export function createReadTool(cwd: string): AgentTool<typeof readSchema> {
 	return {
 		name: "read",
 		label: "read",
-		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files.`,
+		description: `Read the contents of a file. Supports:
+- Text files (truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB, use offset/limit for large files)
+- Images (jpg, png, gif, webp) - sent as attachments
+- Documents (pdf, docx, pptx, xlsx, epub, rtf) - converted to markdown via markitdown if available`,
 		parameters: readSchema,
 		execute: async (
 			_toolCallId: string,
@@ -62,6 +89,7 @@ export function createReadTool(cwd: string): AgentTool<typeof readSchema> {
 							}
 
 							const mimeType = await detectSupportedImageMimeTypeFromFile(absolutePath);
+							const ext = extname(absolutePath).toLowerCase();
 
 							// Read the file based on type
 							let content: (TextContent | ImageContent)[];
@@ -76,6 +104,28 @@ export function createReadTool(cwd: string): AgentTool<typeof readSchema> {
 									{ type: "text", text: `Read image file [${mimeType}]` },
 									{ type: "image", data: base64, mimeType },
 								];
+							} else if (CONVERTIBLE_EXTENSIONS.has(ext)) {
+								// Convert document via markitdown
+								const result = convertWithMarkitdown(absolutePath);
+								if (result.ok) {
+									// Apply truncation to converted content
+									const truncation = truncateHead(result.content);
+									let outputText = truncation.content;
+
+									if (truncation.truncated) {
+										outputText += `\n\n[Document converted via markitdown. Output truncated to ${formatSize(DEFAULT_MAX_BYTES)}]`;
+										details = { truncation };
+									}
+
+									content = [{ type: "text", text: outputText }];
+								} else {
+									// markitdown not available or failed
+									const errorMsg =
+										result.error === "markitdown not found"
+											? `markitdown not installed. Install with: pip install markitdown`
+											: result.error || "conversion failed";
+									content = [{ type: "text", text: `[Cannot read ${ext} file: ${errorMsg}]` }];
+								}
 							} else {
 								// Read as text
 								const textContent = await readFile(absolutePath, "utf-8");

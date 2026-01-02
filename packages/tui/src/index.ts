@@ -44,6 +44,7 @@ export {
 	isCtrlRight,
 	isCtrlT,
 	isCtrlU,
+	isCtrlV,
 	isCtrlW,
 	isCtrlZ,
 	isDelete,

@@ -34,6 +34,10 @@ export interface CustomToolAPI {
 	ui: CustomToolUIContext;
 	/** Whether UI is available (false in print/RPC mode) */
 	hasUI: boolean;
+	/** Injected @sinclair/typebox module */
+	typebox: typeof import("@sinclair/typebox");
+	/** Injected pi-coding-agent exports */
+	pi: typeof import("../../index.js");
 }
 
 /**

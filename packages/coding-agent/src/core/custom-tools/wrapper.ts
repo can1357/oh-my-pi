@@ -15,8 +15,8 @@ export function wrapCustomTool(tool: CustomTool, getContext: () => CustomToolCon
 		label: tool.label,
 		description: tool.description,
 		parameters: tool.parameters,
-		execute: (toolCallId, params, signal, onUpdate) =>
-			tool.execute(toolCallId, params, onUpdate, getContext(), signal),
+		execute: (toolCallId, params, signal, onUpdate, context) =>
+			tool.execute(toolCallId, params, onUpdate, context ?? getContext(), signal),
 	};
 }
 

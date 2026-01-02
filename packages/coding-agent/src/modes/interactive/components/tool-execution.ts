@@ -13,6 +13,7 @@ import {
 import stripAnsi from "strip-ansi";
 import type { CustomTool } from "../../../core/custom-tools/types.js";
 import { computeEditDiff, type EditDiffError, type EditDiffResult } from "../../../core/tools/edit-diff.js";
+import { toolRenderers } from "../../../core/tools/renderers.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "../../../core/tools/truncate.js";
 import { sanitizeBinaryOutput } from "../../../utils/shell.js";
 import { getLanguageFromPath, highlightCode, theme } from "../theme/theme.js";
@@ -87,11 +88,13 @@ export class ToolExecutionComponent extends Container {
 
 		this.addChild(new Spacer(1));
 
-		// Always create both - contentBox for custom tools/bash, contentText for other built-ins
+		// Always create both - contentBox for custom tools/bash/tools with renderers, contentText for other built-ins
 		this.contentBox = new Box(1, 1, (text: string) => theme.bg("toolPendingBg", text));
 		this.contentText = new Text("", 1, 1, (text: string) => theme.bg("toolPendingBg", text));
 
-		if (customTool || toolName === "bash") {
+		// Use Box for custom tools, bash, or built-in tools that have renderers
+		const hasRenderer = toolName in toolRenderers;
+		if (customTool || toolName === "bash" || hasRenderer) {
 			this.addChild(this.contentBox);
 		} else {
 			this.addChild(this.contentText);
@@ -229,6 +232,42 @@ export class ToolExecutionComponent extends Container {
 			this.contentBox.setBgFn(bgFn);
 			this.contentBox.clear();
 			this.renderBashContent();
+		} else if (this.toolName in toolRenderers) {
+			// Built-in tools with custom renderers
+			const renderer = toolRenderers[this.toolName];
+			this.contentBox.setBgFn(bgFn);
+			this.contentBox.clear();
+
+			// Render call component
+			try {
+				const callComponent = renderer.renderCall(this.args, theme);
+				if (callComponent) {
+					this.contentBox.addChild(callComponent);
+				}
+			} catch {
+				// Fall back to default on error
+				this.contentBox.addChild(new Text(theme.fg("toolTitle", theme.bold(this.toolName)), 0, 0));
+			}
+
+			// Render result component if we have a result
+			if (this.result) {
+				try {
+					const resultComponent = renderer.renderResult(
+						{ content: this.result.content as any, details: this.result.details },
+						{ expanded: this.expanded, isPartial: this.isPartial },
+						theme,
+					);
+					if (resultComponent) {
+						this.contentBox.addChild(resultComponent);
+					}
+				} catch {
+					// Fall back to showing raw output on error
+					const output = this.getTextOutput();
+					if (output) {
+						this.contentBox.addChild(new Text(theme.fg("toolOutput", output), 0, 0));
+					}
+				}
+			}
 		} else {
 			// Other built-in tools: use Text directly with caching
 			this.contentText.setCustomBgFn(bgFn);

@@ -155,6 +155,7 @@ async function runLoop(
 				signal,
 				stream,
 				config.getQueuedMessages,
+				config.getToolContext,
 			);
 			toolResults.push(...toolExecution.toolResults);
 			queuedAfterTools = toolExecution.queuedMessages ?? null;
@@ -280,6 +281,7 @@ async function executeToolCalls(
 	signal: AbortSignal | undefined,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
 	getQueuedMessages?: AgentLoopConfig["getQueuedMessages"],
+	getToolContext?: AgentLoopConfig["getToolContext"],
 ): Promise<{ toolResults: ToolResultMessage[]; queuedMessages?: AgentMessage[] }> {
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
 	const results: ToolResultMessage[] = [];
@@ -303,16 +305,23 @@ async function executeToolCalls(
 			if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
 
 			const validatedArgs = validateToolArguments(tool, toolCall);
+			const toolContext = getToolContext?.();
 
-			result = await tool.execute(toolCall.id, validatedArgs, signal, (partialResult) => {
-				stream.push({
-					type: "tool_execution_update",
-					toolCallId: toolCall.id,
-					toolName: toolCall.name,
-					args: toolCall.arguments,
-					partialResult,
-				});
-			});
+			result = await tool.execute(
+				toolCall.id,
+				validatedArgs,
+				signal,
+				(partialResult) => {
+					stream.push({
+						type: "tool_execution_update",
+						toolCallId: toolCall.id,
+						toolName: toolCall.name,
+						args: toolCall.arguments,
+						partialResult,
+					});
+				},
+				toolContext,
+			);
 		} catch (e) {
 			result = {
 				content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],

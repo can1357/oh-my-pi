@@ -11,6 +11,7 @@ import {
 } from "@mariozechner/pi-tui";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
+import { PluginSettingsComponent } from "./plugin-settings.js";
 
 const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	off: "No reasoning",
@@ -31,6 +32,7 @@ export interface SettingsConfig {
 	availableThemes: string[];
 	hideThinkingBlock: boolean;
 	collapseChangelog: boolean;
+	cwd: string;
 }
 
 export interface SettingsCallbacks {
@@ -42,6 +44,7 @@ export interface SettingsCallbacks {
 	onThemePreview?: (theme: string) => void;
 	onHideThinkingBlockChange: (hidden: boolean) => void;
 	onCollapseChangelogChange: (collapsed: boolean) => void;
+	onPluginsChanged?: () => void;
 	onCancel: () => void;
 }
 
@@ -197,6 +200,17 @@ export class SettingsSelectorComponent extends Container {
 							callbacks.onThemePreview?.(value);
 						},
 					),
+			},
+			{
+				id: "plugins",
+				label: "Plugins",
+				description: "Manage installed plugins and their settings",
+				currentValue: "→",
+				submenu: (_currentValue, done) =>
+					new PluginSettingsComponent(config.cwd, {
+						onClose: () => done(),
+						onPluginChanged: () => callbacks.onPluginsChanged?.(),
+					}),
 			},
 		];
 

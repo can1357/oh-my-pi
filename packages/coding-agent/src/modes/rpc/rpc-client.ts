@@ -474,7 +474,7 @@ export class RpcClient {
 		}
 	}
 
-	private async send(command: RpcCommandBody): Promise<RpcResponse> {
+	private send(command: RpcCommandBody): Promise<RpcResponse> {
 		if (!this.process?.stdin) {
 			throw new Error("Client not started");
 		}
@@ -499,9 +499,18 @@ export class RpcClient {
 				},
 			});
 
-			const writer = (this.process!.stdin as unknown as WritableStream<Uint8Array>).getWriter();
-			writer.write(new TextEncoder().encode(`${JSON.stringify(fullCommand)}\n`));
-			writer.releaseLock();
+			// Write to stdin after registering the handler
+			const stdin = this.process!.stdin as import("bun").FileSink;
+			stdin.write(new TextEncoder().encode(`${JSON.stringify(fullCommand)}\n`));
+			// flush() returns number | Promise<number> - handle both cases
+			const flushResult = stdin.flush();
+			if (flushResult instanceof Promise) {
+				flushResult.catch((err: Error) => {
+					this.pendingRequests.delete(id);
+					clearTimeout(timeout);
+					reject(err);
+				});
+			}
 		});
 	}
 

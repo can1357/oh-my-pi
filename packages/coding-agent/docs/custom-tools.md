@@ -33,15 +33,14 @@ See [examples/custom-tools/](../examples/custom-tools/) for working examples.
 Create a file `~/.pi/agent/tools/hello/index.ts`:
 
 ```typescript
-import { Type } from "@sinclair/typebox";
 import type { CustomToolFactory } from "@mariozechner/pi-coding-agent";
 
 const factory: CustomToolFactory = (pi) => ({
   name: "hello",
   label: "Hello",
   description: "A simple greeting tool",
-  parameters: Type.Object({
-    name: Type.String({ description: "Name to greet" }),
+  parameters: pi.typebox.Type.Object({
+    name: pi.typebox.Type.String({ description: "Name to greet" }),
   }),
 
   async execute(toolCallId, params, onUpdate, ctx, signal) {
@@ -86,23 +85,22 @@ Tools must be in a subdirectory with an `index.ts` entry point:
 
 ## Available Imports
 
-Custom tools can import from these packages (automatically resolved by pi):
+Custom tools can import from these packages:
 
-| Package | Purpose |
-|---------|---------|
-| `@sinclair/typebox` | Schema definitions (`Type.Object`, `Type.String`, etc.) |
-| `@mariozechner/pi-coding-agent` | Types (`CustomToolFactory`, `CustomTool`, `CustomToolContext`, etc.) |
-| `@mariozechner/pi-ai` | AI utilities (`StringEnum` for Google-compatible enums) |
-| `@mariozechner/pi-tui` | TUI components (`Text`, `Box`, etc. for custom rendering) |
+| Package | Purpose | Import Method |
+|---------|---------|---------------|
+| `@sinclair/typebox` | Schema definitions (`Type.Object`, `Type.String`, etc.) | Via `pi.typebox.*` (injected) |
+| `@mariozechner/pi-coding-agent` | Types and utilities | Via `pi.pi.*` (injected) or direct import for types |
+| `@mariozechner/pi-ai` | AI utilities (`StringEnum` for Google-compatible enums) | Via `pi.pi.*` (re-exported through coding-agent) |
+| `@mariozechner/pi-tui` | TUI components (`Text`, `Box`, etc. for custom rendering) | Via `pi.pi.*` (re-exported through coding-agent) |
 
 Node.js built-in modules (`node:fs`, `node:path`, etc.) are also available.
+
+**Important:** Use `pi.typebox.Type.*` instead of importing from `@sinclair/typebox` directly. Dependencies are injected via the `CustomToolAPI` to avoid import resolution issues.
 
 ## Tool Definition
 
 ```typescript
-import { Type } from "@sinclair/typebox";
-import { StringEnum } from "@mariozechner/pi-ai";
-import { Text } from "@mariozechner/pi-tui";
 import type {
   CustomTool,
   CustomToolContext,
@@ -110,15 +108,21 @@ import type {
   CustomToolSessionEvent,
 } from "@mariozechner/pi-coding-agent";
 
-const factory: CustomToolFactory = (pi) => ({
-  name: "my_tool",
-  label: "My Tool",
-  description: "What this tool does (be specific for LLM)",
-  parameters: Type.Object({
-    // Use StringEnum for string enums (Google API compatible)
-    action: StringEnum(["list", "add", "remove"] as const),
-    text: Type.Optional(Type.String()),
-  }),
+const factory: CustomToolFactory = (pi) => {
+  // Destructure injected dependencies
+  const { Type } = pi.typebox;
+  const { StringEnum } = pi.pi;
+  const { Text } = pi.pi;
+
+  return {
+    name: "my_tool",
+    label: "My Tool",
+    description: "What this tool does (be specific for LLM)",
+    parameters: Type.Object({
+      // Use StringEnum for string enums (Google API compatible)
+      action: StringEnum(["list", "add", "remove"] as const),
+      text: Type.Optional(Type.String()),
+    }),
 
   async execute(toolCallId, params, onUpdate, ctx, signal) {
     // signal - AbortSignal for cancellation
@@ -139,15 +143,16 @@ const factory: CustomToolFactory = (pi) => ({
     // Reconstruct state from ctx.sessionManager.getBranch()
   },
 
-  // Optional: Custom rendering
-  renderCall(args, theme) { /* return Component */ },
-  renderResult(result, options, theme) { /* return Component */ },
-});
+    // Optional: Custom rendering
+    renderCall(args, theme) { /* return Component */ },
+    renderResult(result, options, theme) { /* return Component */ },
+  };
+};
 
 export default factory;
 ```
 
-**Important:** Use `StringEnum` from `@mariozechner/pi-ai` instead of `Type.Union`/`Type.Literal` for string enums. The latter doesn't work with Google's API.
+**Important:** Use `StringEnum` from `pi.pi` instead of `Type.Union`/`Type.Literal` for string enums. The latter doesn't work with Google's API.
 
 ## CustomToolAPI Object
 
@@ -159,6 +164,8 @@ interface CustomToolAPI {
   exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
   ui: ToolUIContext;
   hasUI: boolean;  // false in --print or --mode rpc
+  typebox: typeof import("@sinclair/typebox");  // Injected @sinclair/typebox
+  pi: typeof import("@mariozechner/pi-coding-agent");  // Injected pi-coding-agent exports
 }
 
 interface ToolUIContext {
@@ -304,20 +311,22 @@ interface MyToolDetails {
 }
 
 const factory: CustomToolFactory = (pi) => {
+  const { Type } = pi.typebox;
+
   // In-memory state
   let items: string[] = [];
 
   // Reconstruct state from session entries
   const reconstructState = (event: CustomToolSessionEvent, ctx: CustomToolContext) => {
     if (event.reason === "shutdown") return;
-    
+
     items = [];
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type !== "message") continue;
       const msg = entry.message;
       if (msg.role !== "toolResult") continue;
       if (msg.toolName !== "my_tool") continue;
-      
+
       const details = msg.details as MyToolDetails | undefined;
       if (details) {
         items = details.items;
@@ -330,13 +339,13 @@ const factory: CustomToolFactory = (pi) => {
     label: "My Tool",
     description: "...",
     parameters: Type.Object({ ... }),
-    
+
     onSession: reconstructState,
-    
+
     async execute(toolCallId, params, onUpdate, ctx, signal) {
       // Modify items...
       items.push("new item");
-      
+
       return {
         content: [{ type: "text", text: "Added item" }],
         // Store current state in details for reconstruction

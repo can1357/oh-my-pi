@@ -101,7 +101,11 @@ export function substituteArgs(content: string, args: string[]): string {
 /**
  * Recursively scan a directory for .md files (and symlinks to .md files) and load them as slash commands
  */
-function loadCommandsFromDir(dir: string, source: "user" | "project", subdir: string = ""): FileSlashCommand[] {
+function loadCommandsFromDir(
+	dir: string,
+	source: "builtin" | "user" | "project",
+	subdir: string = "",
+): FileSlashCommand[] {
 	const commands: FileSlashCommand[] = [];
 
 	if (!existsSync(dir)) {
@@ -127,7 +131,9 @@ function loadCommandsFromDir(dir: string, source: "user" | "project", subdir: st
 
 					// Build source string
 					let sourceStr: string;
-					if (source === "user") {
+					if (source === "builtin") {
+						sourceStr = subdir ? `(builtin:${subdir})` : "(builtin)";
+					} else if (source === "user") {
 						sourceStr = subdir ? `(user:${subdir})` : "(user)";
 					} else {
 						sourceStr = subdir ? `(project:${subdir})` : "(project)";
@@ -174,23 +180,49 @@ export interface LoadSlashCommandsOptions {
 
 /**
  * Load all custom slash commands from:
- * 1. Global: agentDir/commands/
- * 2. Project: cwd/{CONFIG_DIR_NAME}/commands/
+ * 1. Builtin: package commands/
+ * 2. Global: agentDir/commands/
+ * 3. Project: cwd/{CONFIG_DIR_NAME}/commands/
  */
 export function loadSlashCommands(options: LoadSlashCommandsOptions = {}): FileSlashCommand[] {
 	const resolvedCwd = options.cwd ?? process.cwd();
 	const resolvedAgentDir = options.agentDir ?? getCommandsDir();
 
 	const commands: FileSlashCommand[] = [];
+	const seenNames = new Set<string>();
 
-	// 1. Load global commands from agentDir/commands/
+	// 1. Builtin commands (from package)
+	const builtinDir = join(import.meta.dir, "../commands");
+	if (existsSync(builtinDir)) {
+		const builtinCommands = loadCommandsFromDir(builtinDir, "builtin");
+		for (const cmd of builtinCommands) {
+			if (!seenNames.has(cmd.name)) {
+				commands.push(cmd);
+				seenNames.add(cmd.name);
+			}
+		}
+	}
+
+	// 2. Load global commands from agentDir/commands/
 	// Note: if agentDir is provided, it should be the agent dir, not the commands dir
 	const globalCommandsDir = options.agentDir ? join(options.agentDir, "commands") : resolvedAgentDir;
-	commands.push(...loadCommandsFromDir(globalCommandsDir, "user"));
+	const globalCommands = loadCommandsFromDir(globalCommandsDir, "user");
+	for (const cmd of globalCommands) {
+		if (!seenNames.has(cmd.name)) {
+			commands.push(cmd);
+			seenNames.add(cmd.name);
+		}
+	}
 
-	// 2. Load project commands from cwd/{CONFIG_DIR_NAME}/commands/
+	// 3. Load project commands from cwd/{CONFIG_DIR_NAME}/commands/
 	const projectCommandsDir = resolve(resolvedCwd, CONFIG_DIR_NAME, "commands");
-	commands.push(...loadCommandsFromDir(projectCommandsDir, "project"));
+	const projectCommands = loadCommandsFromDir(projectCommandsDir, "project");
+	for (const cmd of projectCommands) {
+		if (!seenNames.has(cmd.name)) {
+			commands.push(cmd);
+			seenNames.add(cmd.name);
+		}
+	}
 
 	return commands;
 }

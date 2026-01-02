@@ -1,52 +1,22 @@
 /**
- * Custom tool loader - loads TypeScript tool modules using jiti.
+ * Custom tool loader - loads TypeScript tool modules using native Bun import.
  *
- * For Bun compiled binaries, custom tools that import from @mariozechner/* packages
- * are not supported because Bun's plugin system doesn't intercept imports from
- * external files loaded at runtime. Users should use the npm-installed version
- * for custom tools that depend on pi packages.
+ * Dependencies (@sinclair/typebox and pi-coding-agent) are injected via the CustomToolAPI
+ * to avoid import resolution issues with custom tools loaded from user directories.
  */
 
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
-import { createJiti } from "jiti";
-import { getAgentDir, isBunBinary } from "../../config.js";
+import * as typebox from "@sinclair/typebox";
+import { getAgentDir } from "../../config.js";
+import * as piCodingAgent from "../../index.js";
 import { theme } from "../../modes/interactive/theme/theme.js";
 import type { ExecOptions } from "../exec.js";
 import { execCommand } from "../exec.js";
 import type { HookUIContext } from "../hooks/types.js";
+import { getAllPluginToolPaths } from "../plugins/loader.js";
 import type { CustomToolAPI, CustomToolFactory, CustomToolsLoadResult, LoadedCustomTool } from "./types.js";
-
-// Create require function to resolve module paths at runtime
-const require = createRequire(import.meta.url);
-
-// Lazily computed aliases - resolved at runtime to handle global installs
-let _aliases: Record<string, string> | null = null;
-function getAliases(): Record<string, string> {
-	if (_aliases) return _aliases;
-
-	const __dirname = path.dirname(fileURLToPath(import.meta.url));
-	const packageIndex = path.resolve(__dirname, "../..", "index.js");
-
-	// For typebox, we need the package root directory (not the entry file)
-	// because jiti's alias is prefix-based: imports like "@sinclair/typebox/compiler"
-	// get the alias prepended. If we alias to the entry file (.../build/cjs/index.js),
-	// then "@sinclair/typebox/compiler" becomes ".../build/cjs/index.js/compiler" (invalid).
-	// By aliasing to the package root, it becomes ".../typebox/compiler" which resolves correctly.
-	const typeboxEntry = require.resolve("@sinclair/typebox");
-	const typeboxRoot = typeboxEntry.replace(/\/build\/cjs\/index\.js$/, "");
-
-	_aliases = {
-		"@mariozechner/pi-coding-agent": packageIndex,
-		"@mariozechner/pi-tui": require.resolve("@mariozechner/pi-tui"),
-		"@mariozechner/pi-ai": require.resolve("@mariozechner/pi-ai"),
-		"@sinclair/typebox": typeboxRoot,
-	};
-	return _aliases;
-}
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 
@@ -103,19 +73,16 @@ function createNoOpUIContext(): HookUIContext {
 }
 
 /**
- * Load a tool in Bun binary mode.
- *
- * Since Bun plugins don't work for dynamically loaded external files,
- * custom tools that import from @mariozechner/* packages won't work.
- * Tools that only use standard npm packages (installed in the tool's directory)
- * may still work.
+ * Load a single tool module using native Bun import.
  */
-async function loadToolWithBun(
-	resolvedPath: string,
+async function loadTool(
+	toolPath: string,
+	cwd: string,
 	sharedApi: CustomToolAPI,
 ): Promise<{ tools: LoadedCustomTool[] | null; error: string | null }> {
+	const resolvedPath = resolveToolPath(toolPath, cwd);
+
 	try {
-		// Try to import directly - will work for tools without @mariozechner/* imports
 		const module = await import(resolvedPath);
 		const factory = (module.default ?? module) as CustomToolFactory;
 
@@ -125,68 +92,6 @@ async function loadToolWithBun(
 
 		const toolResult = await factory(sharedApi);
 		const toolsArray = Array.isArray(toolResult) ? toolResult : [toolResult];
-
-		const loadedTools: LoadedCustomTool[] = toolsArray.map((tool) => ({
-			path: resolvedPath,
-			resolvedPath,
-			tool,
-		}));
-
-		return { tools: loadedTools, error: null };
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-
-		// Check if it's a module resolution error for our packages
-		if (message.includes("Cannot find module") && message.includes("@mariozechner/")) {
-			return {
-				tools: null,
-				error:
-					`${message}\n` +
-					"Note: Custom tools importing from @mariozechner/* packages are not supported in the standalone binary.\n" +
-					"Please install pi via npm: npm install -g @mariozechner/pi-coding-agent",
-			};
-		}
-
-		return { tools: null, error: `Failed to load tool: ${message}` };
-	}
-}
-
-/**
- * Load a single tool module using jiti (or Bun.build for compiled binaries).
- */
-async function loadTool(
-	toolPath: string,
-	cwd: string,
-	sharedApi: CustomToolAPI,
-): Promise<{ tools: LoadedCustomTool[] | null; error: string | null }> {
-	const resolvedPath = resolveToolPath(toolPath, cwd);
-
-	// Use Bun.build for compiled binaries since jiti can't resolve bundled modules
-	if (isBunBinary) {
-		return loadToolWithBun(resolvedPath, sharedApi);
-	}
-
-	try {
-		// Create jiti instance for TypeScript/ESM loading
-		// Use aliases to resolve package imports since tools are loaded from user directories
-		// (e.g. ~/.pi/agent/tools) but import from packages installed with pi-coding-agent
-		const jiti = createJiti(import.meta.url, {
-			alias: getAliases(),
-		});
-
-		// Import the module
-		const module = await jiti.import(resolvedPath, { default: true });
-		const factory = module as CustomToolFactory;
-
-		if (typeof factory !== "function") {
-			return { tools: null, error: "Tool must export a default function" };
-		}
-
-		// Call factory with shared API
-		const result = await factory(sharedApi);
-
-		// Handle single tool or array of tools
-		const toolsArray = Array.isArray(result) ? result : [result];
 
 		const loadedTools: LoadedCustomTool[] = toolsArray.map((tool) => ({
 			path: toolPath,
@@ -223,6 +128,8 @@ export async function loadCustomTools(
 			execCommand(command, args, options?.cwd ?? cwd, options),
 		ui: createNoOpUIContext(),
 		hasUI: false,
+		typebox,
+		pi: piCodingAgent,
 	};
 
 	for (const toolPath of paths) {
@@ -294,6 +201,7 @@ function discoverToolsInDir(dir: string): string[] {
  * Discover and load tools from standard locations:
  * 1. agentDir/tools/*.ts (global)
  * 2. cwd/.pi/tools/*.ts (project-local)
+ * 3. Installed plugins (~/.pi/plugins/node_modules/*)
  *
  * Plus any explicitly configured paths from settings or CLI.
  *
@@ -330,7 +238,10 @@ export async function discoverAndLoadCustomTools(
 	const localToolsDir = path.join(cwd, ".pi", "tools");
 	addPaths(discoverToolsInDir(localToolsDir));
 
-	// 3. Explicitly configured paths (can override/add)
+	// 3. Plugin tools: ~/.pi/plugins/node_modules/*/
+	addPaths(getAllPluginToolPaths(cwd));
+
+	// 4. Explicitly configured paths (can override/add)
 	addPaths(configuredPaths.map((p) => resolveToolPath(p, cwd)));
 
 	return loadCustomTools(allPaths, cwd, builtInToolNames);

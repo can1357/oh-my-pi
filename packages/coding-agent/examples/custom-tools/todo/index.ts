@@ -8,15 +8,12 @@
  * The onSession callback reconstructs state by scanning past tool results.
  */
 
-import { StringEnum } from "@mariozechner/pi-ai";
 import type {
 	CustomTool,
 	CustomToolContext,
 	CustomToolFactory,
 	CustomToolSessionEvent,
 } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
 
 interface Todo {
 	id: number;
@@ -32,14 +29,16 @@ interface TodoDetails {
 	error?: string;
 }
 
-// Define schema separately for proper type inference
-const TodoParams = Type.Object({
-	action: StringEnum(["list", "add", "toggle", "clear"] as const),
-	text: Type.Optional(Type.String({ description: "Todo text (for add)" })),
-	id: Type.Optional(Type.Number({ description: "Todo ID (for toggle)" })),
-});
+const factory: CustomToolFactory = (pi) => {
+	const { Type } = pi.typebox;
+	const { StringEnum, Text } = pi.pi;
 
-const factory: CustomToolFactory = (_pi) => {
+	// Define schema separately for proper type inference
+	const TodoParams = Type.Object({
+		action: StringEnum(["list", "add", "toggle", "clear"] as const),
+		text: Type.Optional(Type.String({ description: "Todo text (for add)" })),
+		id: Type.Optional(Type.Number({ description: "Todo ID (for toggle)" })),
+	});
 	// In-memory state (reconstructed from session on load)
 	let todos: Todo[] = [];
 	let nextId = 1;
@@ -148,7 +147,7 @@ const factory: CustomToolFactory = (_pi) => {
 		},
 
 		renderCall(args, theme) {
-			let text = theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", args.action);
+			let text = theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", String(args.action));
 			if (args.text) text += ` ${theme.fg("dim", `"${args.text}"`)}`;
 			if (args.id !== undefined) text += ` ${theme.fg("accent", `#${args.id}`)}`;
 			return new Text(text, 0, 0);

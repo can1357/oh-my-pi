@@ -152,6 +152,9 @@ const agent = new Agent({
 
   // Dynamic API key resolution (for expiring OAuth tokens)
   getApiKey: async (provider) => refreshToken(),
+
+  // Tool execution context (late-bound UI/session access)
+  getToolContext: () => ({ /* app-defined */ }),
 });
 ```
 
@@ -282,7 +285,7 @@ const readFileTool: AgentTool = {
   parameters: Type.Object({
     path: Type.String({ description: "File path" }),
   }),
-  execute: async (toolCallId, params, signal, onUpdate) => {
+  execute: async (toolCallId, params, signal, onUpdate, context) => {
     const content = await fs.readFile(params.path, "utf-8");
 
     // Optional: stream progress

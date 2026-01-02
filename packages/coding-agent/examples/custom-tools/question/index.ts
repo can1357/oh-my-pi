@@ -3,8 +3,6 @@
  */
 
 import type { CustomTool, CustomToolFactory } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
 
 interface QuestionDetails {
 	question: string;
@@ -12,12 +10,15 @@ interface QuestionDetails {
 	answer: string | null;
 }
 
-const QuestionParams = Type.Object({
-	question: Type.String({ description: "The question to ask the user" }),
-	options: Type.Array(Type.String(), { description: "Options for the user to choose from" }),
-});
-
 const factory: CustomToolFactory = (pi) => {
+	const { Type } = pi.typebox;
+	const { Text } = pi.pi;
+
+	const QuestionParams = Type.Object({
+		question: Type.String({ description: "The question to ask the user" }),
+		options: Type.Array(Type.String(), { description: "Options for the user to choose from" }),
+	});
+
 	const tool: CustomTool<typeof QuestionParams, QuestionDetails> = {
 		name: "question",
 		label: "Question",

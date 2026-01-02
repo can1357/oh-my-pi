@@ -34,6 +34,15 @@ export interface TerminalSettings {
 	showImages?: boolean; // default: true (only relevant if terminal supports images)
 }
 
+export interface ExaSettings {
+	enabled?: boolean; // default: true (master toggle for all Exa tools)
+	enableSearch?: boolean; // default: true (search, deep, code, crawl)
+	enableLinkedin?: boolean; // default: true
+	enableCompany?: boolean; // default: true
+	enableResearcher?: boolean; // default: true
+	enableWebsets?: boolean; // default: true
+}
+
 export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
@@ -52,6 +61,7 @@ export interface Settings {
 	skills?: SkillsSettings;
 	terminal?: TerminalSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
+	exa?: ExaSettings;
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -370,5 +380,24 @@ export class SettingsManager {
 
 	getEnabledModels(): string[] | undefined {
 		return this.settings.enabledModels;
+	}
+
+	getExaSettings(): Required<ExaSettings> {
+		return {
+			enabled: this.settings.exa?.enabled ?? true,
+			enableSearch: this.settings.exa?.enableSearch ?? true,
+			enableLinkedin: this.settings.exa?.enableLinkedin ?? true,
+			enableCompany: this.settings.exa?.enableCompany ?? true,
+			enableResearcher: this.settings.exa?.enableResearcher ?? true,
+			enableWebsets: this.settings.exa?.enableWebsets ?? true,
+		};
+	}
+
+	setExaEnabled(enabled: boolean): void {
+		if (!this.globalSettings.exa) {
+			this.globalSettings.exa = {};
+		}
+		this.globalSettings.exa.enabled = enabled;
+		this.save();
 	}
 }

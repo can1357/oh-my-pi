@@ -55,6 +55,44 @@ const TOOLS: Record<string, ToolConfig> = {
 			return null;
 		},
 	},
+	sd: {
+		name: "sd",
+		repo: "chmln/sd",
+		binaryName: "sd",
+		tagPrefix: "v",
+		getAssetName: (version, plat, architecture) => {
+			if (plat === "darwin") {
+				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
+				return `sd-v${version}-${archStr}-apple-darwin.tar.gz`;
+			} else if (plat === "linux") {
+				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
+				return `sd-v${version}-${archStr}-unknown-linux-musl.tar.gz`;
+			} else if (plat === "win32") {
+				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
+				return `sd-v${version}-${archStr}-pc-windows-msvc.zip`;
+			}
+			return null;
+		},
+	},
+	sg: {
+		name: "ast-grep",
+		repo: "ast-grep/ast-grep",
+		binaryName: "sg",
+		tagPrefix: "",
+		getAssetName: (_version, plat, architecture) => {
+			if (plat === "darwin") {
+				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
+				return `ast-grep-${archStr}-apple-darwin.zip`;
+			} else if (plat === "linux") {
+				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
+				return `ast-grep-${archStr}-unknown-linux-gnu.zip`;
+			} else if (plat === "win32") {
+				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
+				return `ast-grep-${archStr}-pc-windows-msvc.zip`;
+			}
+			return null;
+		},
+	},
 };
 
 // Check if a command exists in PATH by trying to run it
@@ -68,7 +106,7 @@ function commandExists(cmd: string): boolean {
 }
 
 // Get the path to a tool (system-wide or in our tools dir)
-export function getToolPath(tool: "fd" | "rg"): string | null {
+export function getToolPath(tool: "fd" | "rg" | "sd" | "sg"): string | null {
 	const config = TOOLS[tool];
 	if (!config) return null;
 
@@ -127,7 +165,7 @@ async function downloadFile(url: string, dest: string): Promise<void> {
 }
 
 // Download and install a tool
-async function downloadTool(tool: "fd" | "rg"): Promise<string> {
+async function downloadTool(tool: "fd" | "rg" | "sd" | "sg"): Promise<string> {
 	const config = TOOLS[tool];
 	if (!config) throw new Error(`Unknown tool: ${tool}`);
 
@@ -174,8 +212,14 @@ async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 		}
 
 		// Find the binary in extracted files
-		const extractedDir = join(extractDir, assetName.replace(/\.(tar\.gz|zip)$/, ""));
-		const extractedBinary = join(extractedDir, config.binaryName + binaryExt);
+		// ast-grep releases the binary directly in the zip, not in a subdirectory
+		let extractedBinary: string;
+		if (tool === "sg") {
+			extractedBinary = join(extractDir, config.binaryName + binaryExt);
+		} else {
+			const extractedDir = join(extractDir, assetName.replace(/\.(tar\.gz|zip)$/, ""));
+			extractedBinary = join(extractedDir, config.binaryName + binaryExt);
+		}
 
 		if (existsSync(extractedBinary)) {
 			renameSync(extractedBinary, binaryPath);
@@ -198,7 +242,10 @@ async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 
 // Ensure a tool is available, downloading if necessary
 // Returns the path to the tool, or null if unavailable
-export async function ensureTool(tool: "fd" | "rg", silent: boolean = false): Promise<string | undefined> {
+export async function ensureTool(
+	tool: "fd" | "rg" | "sd" | "sg",
+	silent: boolean = false,
+): Promise<string | undefined> {
 	const existingPath = getToolPath(tool);
 	if (existingPath) {
 		return existingPath;

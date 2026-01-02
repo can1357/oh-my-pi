@@ -17,15 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Message } from "@mariozechner/pi-ai";
-import { StringEnum } from "@mariozechner/pi-ai";
-import {
-	type CustomTool,
-	type CustomToolAPI,
-	type CustomToolFactory,
-	getMarkdownTheme,
-} from "@mariozechner/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
+import type { CustomTool, CustomToolAPI, CustomToolFactory } from "@mariozechner/pi-coding-agent";
 import { type AgentConfig, type AgentScope, discoverAgents, formatAgentList } from "./agents.js";
 
 const MAX_PARALLEL_TASKS = 8;
@@ -401,36 +393,39 @@ async function runSingleAgent(
 	}
 }
 
-const TaskItem = Type.Object({
-	agent: Type.String({ description: "Name of the agent to invoke" }),
-	task: Type.String({ description: "Task to delegate to the agent" }),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
-});
-
-const ChainItem = Type.Object({
-	agent: Type.String({ description: "Name of the agent to invoke" }),
-	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
-});
-
-const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
-	description: 'Which agent directories to use. Default: "user". Use "both" to include project-local agents.',
-	default: "user",
-});
-
-const SubagentParams = Type.Object({
-	agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (for single mode)" })),
-	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
-	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
-	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
-	agentScope: Type.Optional(AgentScopeSchema),
-	confirmProjectAgents: Type.Optional(
-		Type.Boolean({ description: "Prompt before running project-local agents. Default: true.", default: true }),
-	),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
-});
-
 const factory: CustomToolFactory = (pi) => {
+	const { Type } = pi.typebox;
+	const { StringEnum, Container, Markdown, Spacer, Text, getMarkdownTheme } = pi.pi;
+
+	const TaskItem = Type.Object({
+		agent: Type.String({ description: "Name of the agent to invoke" }),
+		task: Type.String({ description: "Task to delegate to the agent" }),
+		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+	});
+
+	const ChainItem = Type.Object({
+		agent: Type.String({ description: "Name of the agent to invoke" }),
+		task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
+		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+	});
+
+	const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
+		description: 'Which agent directories to use. Default: "user". Use "both" to include project-local agents.',
+		default: "user",
+	});
+
+	const SubagentParams = Type.Object({
+		agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (for single mode)" })),
+		task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
+		tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
+		chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
+		agentScope: Type.Optional(AgentScopeSchema),
+		confirmProjectAgents: Type.Optional(
+			Type.Boolean({ description: "Prompt before running project-local agents. Default: true.", default: true }),
+		),
+		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
+	});
+
 	const tool: CustomTool<typeof SubagentParams, SubagentDetails> = {
 		name: "subagent",
 		label: "Subagent",
@@ -454,7 +449,7 @@ const factory: CustomToolFactory = (pi) => {
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, onUpdate, _ctx, signal) {
-			const agentScope: AgentScope = params.agentScope ?? "user";
+			const agentScope = (params.agentScope ?? "user") as AgentScope;
 			const discovery = discoverAgents(pi.cwd, agentScope);
 			const agents = discovery.agents;
 			const confirmProjectAgents = params.confirmProjectAgents ?? true;
@@ -683,7 +678,7 @@ const factory: CustomToolFactory = (pi) => {
 		},
 
 		renderCall(args, theme) {
-			const scope: AgentScope = args.agentScope ?? "user";
+			const scope = (args.agentScope ?? "user") as AgentScope;
 			if (args.chain && args.chain.length > 0) {
 				let text =
 					theme.fg("toolTitle", theme.bold("subagent ")) +

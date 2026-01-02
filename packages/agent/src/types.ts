@@ -81,6 +81,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * If messages are returned, they're added to the context before the next LLM call.
 	 */
 	getQueuedMessages?: () => Promise<AgentMessage[]>;
+
+	/**
+	 * Provides tool execution context, resolved per tool call.
+	 * Use for late-bound UI or session state access.
+	 */
+	getToolContext?: () => AgentToolContext | undefined;
 }
 
 /**
@@ -139,8 +145,25 @@ export interface AgentToolResult<T> {
 // Callback for streaming tool execution updates
 export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;
 
+/** Options passed to renderResult */
+export interface RenderResultOptions {
+	/** Whether the result view is expanded */
+	expanded: boolean;
+	/** Whether this is a partial/streaming result */
+	isPartial: boolean;
+}
+
+/**
+ * Context passed to tool execution.
+ * Apps can extend via declaration merging.
+ */
+export interface AgentToolContext {
+	// Empty by default - apps extend via declaration merging
+}
+
 // AgentTool extends Tool but adds the execute function
-export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
+export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any, TTheme = unknown>
+	extends Tool<TParameters> {
 	// A human-readable label for the tool to be displayed in UI
 	label: string;
 	execute: (
@@ -148,7 +171,14 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 		params: Static<TParameters>,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TDetails>,
+		context?: AgentToolContext,
 	) => Promise<AgentToolResult<TDetails>>;
+
+	/** Optional custom rendering for tool call display (returns UI component) */
+	renderCall?: (args: Static<TParameters>, theme: TTheme) => unknown;
+
+	/** Optional custom rendering for tool result display (returns UI component) */
+	renderResult?: (result: AgentToolResult<TDetails>, options: RenderResultOptions, theme: TTheme) => unknown;
 }
 
 // AgentContext is like Context but uses AgentTool

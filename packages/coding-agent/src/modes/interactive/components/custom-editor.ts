@@ -7,6 +7,7 @@ import {
 	isCtrlO,
 	isCtrlP,
 	isCtrlT,
+	isCtrlV,
 	isCtrlZ,
 	isEscape,
 	isShiftCtrlP,
@@ -29,8 +30,16 @@ export class CustomEditor extends Editor {
 	public onCtrlG?: () => void;
 	public onCtrlZ?: () => void;
 	public onQuestionMark?: () => void;
+	/** Called when Ctrl+V is pressed. Returns true if handled (image found), false to fall through to text paste. */
+	public onCtrlV?: () => Promise<boolean>;
 
 	handleInput(data: string): void {
+		// Intercept Ctrl+V for image paste (async - fires and handles result)
+		if (isCtrlV(data) && this.onCtrlV) {
+			void this.onCtrlV();
+			return;
+		}
+
 		// Intercept Ctrl+G for external editor
 		if (isCtrlG(data) && this.onCtrlG) {
 			this.onCtrlG();

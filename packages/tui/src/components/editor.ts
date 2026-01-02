@@ -628,6 +628,22 @@ export class Editor implements Component {
 		this.setTextInternal(text);
 	}
 
+	/** Insert text at the current cursor position */
+	insertText(text: string): void {
+		this.historyIndex = -1;
+
+		const line = this.state.lines[this.state.cursorLine] || "";
+		const before = line.slice(0, this.state.cursorCol);
+		const after = line.slice(this.state.cursorCol);
+
+		this.state.lines[this.state.cursorLine] = before + text + after;
+		this.state.cursorCol += text.length;
+
+		if (this.onChange) {
+			this.onChange(this.getText());
+		}
+	}
+
 	// All the editor methods from before...
 	private insertCharacter(char: string): void {
 		this.historyIndex = -1; // Exit history browsing mode

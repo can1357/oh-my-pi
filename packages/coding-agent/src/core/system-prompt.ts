@@ -62,6 +62,8 @@ ${commitsText}`;
 
 /** Tool descriptions for system prompt */
 const toolDescriptions: Record<ToolName, string> = {
+	ask: "Ask user for input or clarification",
+	ast: "Perform AST-level code analysis and transformations",
 	read: "Read file contents",
 	bash: "Execute bash commands (ls, grep, find, etc.)",
 	edit: "Make surgical edits to files (find exact text and replace)",
@@ -69,6 +71,12 @@ const toolDescriptions: Record<ToolName, string> = {
 	grep: "Search file contents for patterns (respects .gitignore)",
 	find: "Find files by glob pattern (respects .gitignore)",
 	ls: "List directory contents",
+	lsp: "Language server integration for code intelligence",
+	notebook: "Edit Jupyter notebook cells",
+	replace: "Find and replace text across multiple files",
+	task: "Spawn a sub-agent to handle complex tasks",
+	web_fetch: "Fetch and render URLs into clean text for LLM consumption",
+	web_search: "Search the web for information",
 };
 
 /** Resolve input as file path or literal string */

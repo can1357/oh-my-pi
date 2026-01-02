@@ -1,47 +1,18 @@
 /**
- * Hook loader - loads TypeScript hook modules using jiti.
+ * Hook loader - loads TypeScript hook modules using native Bun import.
  */
 
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
-import { createJiti } from "jiti";
+import * as typebox from "@sinclair/typebox";
 import { getAgentDir } from "../../config.js";
+import * as piCodingAgent from "../../index.js";
 import type { HookMessage } from "../messages.js";
+import { getAllPluginHookPaths } from "../plugins/loader.js";
 import type { SessionManager } from "../session-manager.js";
 import { execCommand } from "./runner.js";
 import type { ExecOptions, HookAPI, HookFactory, HookMessageRenderer, RegisteredCommand } from "./types.js";
-
-// Create require function to resolve module paths at runtime
-const require = createRequire(import.meta.url);
-
-// Lazily computed aliases - resolved at runtime to handle global installs
-let _aliases: Record<string, string> | null = null;
-function getAliases(): Record<string, string> {
-	if (_aliases) return _aliases;
-
-	const __dirname = path.dirname(fileURLToPath(import.meta.url));
-	const packageIndex = path.resolve(__dirname, "../..", "index.js");
-
-	// For typebox, we need the package root directory (not the entry file)
-	// because jiti's alias is prefix-based: imports like "@sinclair/typebox/compiler"
-	// get the alias prepended. If we alias to the entry file (.../build/cjs/index.js),
-	// then "@sinclair/typebox/compiler" becomes ".../build/cjs/index.js/compiler" (invalid).
-	// By aliasing to the package root, it becomes ".../typebox/compiler" which resolves correctly.
-	const typeboxEntry = require.resolve("@sinclair/typebox");
-	const typeboxRoot = typeboxEntry.replace(/\/build\/cjs\/index\.js$/, "");
-
-	_aliases = {
-		"@mariozechner/pi-coding-agent": packageIndex,
-		"@mariozechner/pi-coding-agent/hooks": path.resolve(__dirname, "index.js"),
-		"@mariozechner/pi-tui": require.resolve("@mariozechner/pi-tui"),
-		"@mariozechner/pi-ai": require.resolve("@mariozechner/pi-ai"),
-		"@sinclair/typebox": typeboxRoot,
-	};
-	return _aliases;
-}
 
 /**
  * Generic handler function type.
@@ -192,6 +163,8 @@ function createHookAPI(
 		exec(command: string, args: string[], options?: ExecOptions) {
 			return execCommand(command, args, options?.cwd ?? cwd, options);
 		},
+		typebox,
+		pi: piCodingAgent,
 	} as HookAPI;
 
 	return {
@@ -208,22 +181,15 @@ function createHookAPI(
 }
 
 /**
- * Load a single hook module using jiti.
+ * Load a single hook module using native Bun import.
  */
 async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHook | null; error: string | null }> {
 	const resolvedPath = resolveHookPath(hookPath, cwd);
 
 	try {
-		// Create jiti instance for TypeScript/ESM loading
-		// Use aliases to resolve package imports since hooks are loaded from user directories
-		// (e.g. ~/.pi/agent/hooks) but import from packages installed with pi-coding-agent
-		const jiti = createJiti(import.meta.url, {
-			alias: getAliases(),
-		});
-
-		// Import the module
-		const module = await jiti.import(resolvedPath, { default: true });
-		const factory = module as HookFactory;
+		// Import the module using native Bun import
+		const module = await import(resolvedPath);
+		const factory = module.default as HookFactory;
 
 		if (typeof factory !== "function") {
 			return { hook: null, error: "Hook must export a default function" };
@@ -305,6 +271,7 @@ function discoverHooksInDir(dir: string): string[] {
  * Discover and load hooks from standard locations:
  * 1. agentDir/hooks/*.ts (global)
  * 2. cwd/.pi/hooks/*.ts (project-local)
+ * 3. Installed plugins (~/.pi/plugins/node_modules/*)
  *
  * Plus any explicitly configured paths from settings.
  */
@@ -335,7 +302,10 @@ export async function discoverAndLoadHooks(
 	const localHooksDir = path.join(cwd, ".pi", "hooks");
 	addPaths(discoverHooksInDir(localHooksDir));
 
-	// 3. Explicitly configured paths (can override/add)
+	// 3. Plugin hooks: ~/.pi/plugins/node_modules/*/
+	addPaths(getAllPluginHookPaths(cwd));
+
+	// 4. Explicitly configured paths (can override/add)
 	addPaths(configuredPaths.map((p) => resolveHookPath(p, cwd)));
 
 	return loadHooks(allPaths, cwd);

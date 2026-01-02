@@ -12,10 +12,10 @@ import { join } from "path";
 import { type Args, parseArgs, printHelp } from "./cli/args.js";
 import { processFileArguments } from "./cli/file-processor.js";
 import { listModels } from "./cli/list-models.js";
+import { parsePluginArgs, printPluginHelp, runPluginCommand } from "./cli/plugin-cli.js";
 import { selectSession } from "./cli/session-picker.js";
 import { CONFIG_DIR_NAME, getAgentDir, getModelsPath, VERSION } from "./config.js";
 import type { AgentSession } from "./core/agent-session.js";
-
 import type { LoadedCustomTool } from "./core/custom-tools/index.js";
 import { exportFromFile } from "./core/export-html/index.js";
 import type { HookUIContext } from "./core/index.js";
@@ -35,7 +35,7 @@ import { ensureTool } from "./utils/tools-manager.js";
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 	try {
-		const response = await fetch("https://registry.npmjs.org/@mariozechner/pi -coding-agent/latest");
+		const response = await fetch("https://registry.npmjs.org/@mariozechner/pi-coding-agent/latest");
 		if (!response.ok) return undefined;
 
 		const data = (await response.json()) as { version?: string };
@@ -109,9 +109,9 @@ async function runInteractiveMode(
 	}
 
 	while (true) {
-		const userInput = await mode.getUserInput();
+		const { text, images } = await mode.getUserInput();
 		try {
-			await session.prompt(userInput);
+			await session.prompt(text, { images });
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);
@@ -283,6 +283,17 @@ function buildSessionOptions(
 export async function main(args: string[]) {
 	time("start");
 
+	// Handle plugin subcommand before regular parsing
+	const pluginCmd = parsePluginArgs(args);
+	if (pluginCmd) {
+		if (args.includes("--help") || args.includes("-h")) {
+			printPluginHelp();
+			return;
+		}
+		await runPluginCommand(pluginCmd);
+		return;
+	}
+
 	// Run migrations
 	const { migratedAuthProviders: migratedProviders } = runMigrations();
 
@@ -370,6 +381,7 @@ export async function main(args: string[]) {
 	const sessionOptions = buildSessionOptions(parsed, scopedModels, sessionManager, modelRegistry);
 	sessionOptions.authStorage = authStorage;
 	sessionOptions.modelRegistry = modelRegistry;
+	sessionOptions.hasUI = isInteractive;
 
 	// Handle CLI --api-key as runtime override (not persisted)
 	if (parsed.apiKey) {

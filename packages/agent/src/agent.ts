@@ -20,6 +20,7 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	AgentToolContext,
 	StreamFn,
 	ThinkingLevel,
 } from "./types.js";
@@ -61,6 +62,11 @@ export interface AgentOptions {
 	 * Useful for expiring tokens (e.g., GitHub Copilot OAuth).
 	 */
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
+
+	/**
+	 * Provides tool execution context, resolved per tool call.
+	 */
+	getToolContext?: () => AgentToolContext | undefined;
 }
 
 export class Agent {
@@ -84,6 +90,7 @@ export class Agent {
 	private queueMode: "all" | "one-at-a-time";
 	public streamFn: StreamFn;
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
+	private getToolContext?: () => AgentToolContext | undefined;
 	private runningPrompt?: Promise<void>;
 	private resolveRunningPrompt?: () => void;
 
@@ -94,6 +101,7 @@ export class Agent {
 		this.queueMode = opts.queueMode || "one-at-a-time";
 		this.streamFn = opts.streamFn || streamSimple;
 		this.getApiKey = opts.getApiKey;
+		this.getToolContext = opts.getToolContext;
 	}
 
 	get state(): AgentState {
@@ -247,6 +255,7 @@ export class Agent {
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
 			getApiKey: this.getApiKey,
+			getToolContext: this.getToolContext,
 			getQueuedMessages: async () => {
 				if (this.queueMode === "one-at-a-time") {
 					if (this.messageQueue.length > 0) {

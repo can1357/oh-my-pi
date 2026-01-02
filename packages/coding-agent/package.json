@@ -42,12 +42,12 @@
 		"@mariozechner/pi-ai": "workspace:*",
 		"@mariozechner/pi-tui": "workspace:*",
 		"chalk": "^5.5.0",
+		"node-html-parser": "^6.1.13",
 		"cli-highlight": "^2.1.11",
 		"diff": "^8.0.2",
 		"file-type": "^21.1.1",
 		"glob": "^11.0.3",
 		"highlight.js": "^11.11.1",
-		"jiti": "^2.6.1",
 		"marked": "^15.0.12",
 		"minimatch": "^10.1.1",
 		"strip-ansi": "^7.1.2"

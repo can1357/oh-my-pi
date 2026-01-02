@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { AssistantMessage, Message, OAuthProvider } from "@mariozechner/pi-ai";
+import type { AssistantMessage, ImageContent, Message, OAuthProvider } from "@mariozechner/pi-ai";
 import type { SlashCommand } from "@mariozechner/pi-tui";
 import {
 	CombinedAutocompleteProvider,
@@ -33,7 +33,7 @@ import { loadSkills } from "../../core/skills.js";
 import { loadProjectContextFiles } from "../../core/system-prompt.js";
 import type { TruncationResult } from "../../core/tools/truncate.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
-import { copyToClipboard } from "../../utils/clipboard.js";
+import { copyToClipboard, readImageFromClipboard } from "../../utils/clipboard.js";
 import { ArminComponent } from "./components/armin.js";
 import { AssistantMessageComponent } from "./components/assistant-message.js";
 import { BashExecutionComponent } from "./components/bash-execution.js";
@@ -86,7 +86,7 @@ export class InteractiveMode {
 	private footer: FooterComponent;
 	private version: string;
 	private isInitialized = false;
-	private onInputCallback?: (text: string) => void;
+	private onInputCallback?: (input: { text: string; images?: ImageContent[] }) => void;
 	private loadingAnimation: Loader | undefined = undefined;
 
 	private lastSigintTime = 0;
@@ -121,6 +121,9 @@ export class InteractiveMode {
 
 	// Track pending bash components (shown in pending area, moved to chat on submit)
 	private pendingBashComponents: BashExecutionComponent[] = [];
+
+	// Track pending images from clipboard paste (attached to next message)
+	private pendingImages: ImageContent[] = [];
 
 	// Auto-compaction state
 	private autoCompactionLoader: Loader | undefined = undefined;
@@ -686,6 +689,7 @@ export class InteractiveMode {
 		this.editor.onCtrlT = () => this.toggleThinkingBlockVisibility();
 		this.editor.onCtrlG = () => this.openExternalEditor();
 		this.editor.onQuestionMark = () => this.handleHotkeysCommand();
+		this.editor.onCtrlV = () => this.handleImagePaste();
 
 		this.editor.onChange = (text: string) => {
 			const wasBashMode = this.isBashMode;
@@ -850,7 +854,10 @@ export class InteractiveMode {
 			this.flushPendingBashComponents();
 
 			if (this.onInputCallback) {
-				this.onInputCallback(text);
+				// Include any pending images from clipboard paste
+				const images = this.pendingImages.length > 0 ? [...this.pendingImages] : undefined;
+				this.pendingImages = [];
+				this.onInputCallback({ text, images });
 			}
 			this.editor.addToHistory(text);
 		};
@@ -1294,11 +1301,11 @@ export class InteractiveMode {
 		}
 	}
 
-	async getUserInput(): Promise<string> {
+	async getUserInput(): Promise<{ text: string; images?: ImageContent[] }> {
 		return new Promise((resolve) => {
-			this.onInputCallback = (text: string) => {
+			this.onInputCallback = (input) => {
 				this.onInputCallback = undefined;
-				resolve(text);
+				resolve(input);
 			};
 		});
 	}
@@ -1360,6 +1367,35 @@ export class InteractiveMode {
 
 		// Send SIGTSTP to process group (pid=0 means all processes in group)
 		process.kill(0, "SIGTSTP");
+	}
+
+	/**
+	 * Handle Ctrl+V for image paste from clipboard.
+	 * Returns true if an image was found and added, false otherwise.
+	 */
+	private async handleImagePaste(): Promise<boolean> {
+		try {
+			const image = await readImageFromClipboard();
+			if (image) {
+				this.pendingImages.push({
+					type: "image",
+					data: image.data,
+					mimeType: image.mimeType,
+				});
+				// Insert styled placeholder at cursor like Claude does
+				const imageNum = this.pendingImages.length;
+				const placeholder = theme.bold(theme.underline(`[Image #${imageNum}]`));
+				this.editor.insertText(`${placeholder} `);
+				this.ui.requestRender();
+				return true;
+			}
+			// No image in clipboard - show hint
+			this.showStatus("No image in clipboard (use terminal paste for text)");
+			return false;
+		} catch {
+			this.showStatus("Failed to read clipboard");
+			return false;
+		}
 	}
 
 	private updateEditorBorderColor(): void {
@@ -1483,6 +1519,7 @@ export class InteractiveMode {
 
 	clearEditor(): void {
 		this.editor.setText("");
+		this.pendingImages = [];
 		this.ui.requestRender();
 	}
 
@@ -1570,6 +1607,7 @@ export class InteractiveMode {
 					availableThemes: getAvailableThemes(),
 					hideThinkingBlock: this.hideThinkingBlock,
 					collapseChangelog: this.settingsManager.getCollapseChangelog(),
+					cwd: process.cwd(),
 				},
 				{
 					onAutoCompactChange: (enabled) => {
@@ -1620,6 +1658,10 @@ export class InteractiveMode {
 					},
 					onCollapseChangelogChange: (collapsed) => {
 						this.settingsManager.setCollapseChangelog(collapsed);
+					},
+					onPluginsChanged: () => {
+						// Plugin config changed - could trigger reload if needed
+						this.ui.requestRender();
 					},
 					onCancel: () => {
 						done();

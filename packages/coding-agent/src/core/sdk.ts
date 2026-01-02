@@ -44,6 +44,7 @@ import {
 import type { CustomTool } from "./custom-tools/types.js";
 import { discoverAndLoadHooks, HookRunner, type LoadedHook, wrapToolsWithHooks } from "./hooks/index.js";
 import type { HookFactory } from "./hooks/types.js";
+import { discoverAndLoadMCPTools, type MCPManager, type MCPToolsLoadResult } from "./mcp/index.js";
 import { convertToLlm } from "./messages.js";
 import { ModelRegistry } from "./model-registry.js";
 import { SessionManager } from "./session-manager.js";
@@ -55,6 +56,7 @@ import {
 	loadProjectContextFiles as loadContextFilesInternal,
 } from "./system-prompt.js";
 import { time } from "./timings.js";
+import { createToolContextStore } from "./tools/context.js";
 import {
 	allTools,
 	bashTool,
@@ -120,11 +122,17 @@ export interface CreateAgentSessionOptions {
 	/** Slash commands. Default: discovered from cwd/.pi/commands/ + agentDir/commands/ */
 	slashCommands?: FileSlashCommand[];
 
+	/** Enable MCP server discovery from .mcp.json files. Default: true */
+	enableMCP?: boolean;
+
 	/** Session manager. Default: SessionManager.create(cwd) */
 	sessionManager?: SessionManager;
 
 	/** Settings manager. Default: SettingsManager.create(cwd, agentDir) */
 	settingsManager?: SettingsManager;
+
+	/** Whether UI is available (enables interactive tools like ask). Default: false */
+	hasUI?: boolean;
 }
 
 /** Result from createAgentSession */
@@ -133,6 +141,8 @@ export interface CreateAgentSessionResult {
 	session: AgentSession;
 	/** Custom tools result (for UI context setup in interactive mode) */
 	customToolsResult: CustomToolsLoadResult;
+	/** MCP manager for server lifecycle management (undefined if MCP disabled) */
+	mcpManager?: MCPManager;
 	/** Warning if session was restored with a different model than saved */
 	modelFallbackMessage?: string;
 }
@@ -141,6 +151,7 @@ export interface CreateAgentSessionResult {
 
 export type { CustomTool } from "./custom-tools/types.js";
 export type { HookAPI, HookCommandContext, HookContext, HookFactory } from "./hooks/types.js";
+export type { MCPManager, MCPServerConfig, MCPServerConnection, MCPToolsLoadResult } from "./mcp/index.js";
 export type { Settings, SkillsSettings } from "./settings-manager.js";
 export type { Skill } from "./skills.js";
 export type { FileSlashCommand } from "./slash-commands.js";
@@ -268,6 +279,15 @@ export function discoverSlashCommands(cwd?: string, agentDir?: string): FileSlas
 		cwd: cwd ?? process.cwd(),
 		agentDir: agentDir ?? getDefaultAgentDir(),
 	});
+}
+
+/**
+ * Discover MCP servers from .mcp.json files.
+ * Returns the manager and loaded tools.
+ */
+export async function discoverMCPServers(cwd?: string): Promise<MCPToolsLoadResult> {
+	const resolvedCwd = cwd ?? process.cwd();
+	return discoverAndLoadMCPTools(resolvedCwd);
 }
 
 // API Key Helpers
@@ -522,7 +542,30 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const contextFiles = options.contextFiles ?? discoverContextFiles(cwd, agentDir);
 	time("discoverContextFiles");
 
-	const builtInTools = options.tools ?? createCodingTools(cwd);
+	// Hook runner - created early for hooks
+	let hookRunner: HookRunner | undefined;
+	if (options.hooks !== undefined) {
+		if (options.hooks.length > 0) {
+			const loadedHooks = createLoadedHooksFromDefinitions(options.hooks);
+			hookRunner = new HookRunner(loadedHooks, cwd, sessionManager, modelRegistry);
+		}
+	} else {
+		// Discover hooks, merging with additional paths
+		const configuredPaths = [...settingsManager.getHookPaths(), ...(options.additionalHookPaths ?? [])];
+		const { hooks, errors } = await discoverAndLoadHooks(configuredPaths, cwd, agentDir);
+		time("discoverAndLoadHooks");
+		for (const { path, error } of errors) {
+			console.error(`Failed to load hook "${path}": ${error}`);
+		}
+		if (hooks.length > 0) {
+			hookRunner = new HookRunner(hooks, cwd, sessionManager, modelRegistry);
+		}
+	}
+
+	const sessionContext = {
+		getSessionFile: () => sessionManager.getSessionFile() ?? null,
+	};
+	const builtInTools = options.tools ?? createCodingTools(cwd, options.hasUI ?? false, sessionContext);
 	time("createCodingTools");
 
 	let customToolsResult: CustomToolsLoadResult;
@@ -548,29 +591,31 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 
-	let hookRunner: HookRunner | undefined;
-	if (options.hooks !== undefined) {
-		if (options.hooks.length > 0) {
-			const loadedHooks = createLoadedHooksFromDefinitions(options.hooks);
-			hookRunner = new HookRunner(loadedHooks, cwd, sessionManager, modelRegistry);
+	// Discover MCP tools from .mcp.json files
+	let mcpManager: MCPManager | undefined;
+	const enableMCP = options.enableMCP ?? true;
+	if (enableMCP) {
+		const mcpResult = await discoverAndLoadMCPTools(cwd);
+		time("discoverAndLoadMCPTools");
+		mcpManager = mcpResult.manager;
+
+		// Log MCP errors
+		for (const { path, error } of mcpResult.errors) {
+			console.error(`MCP "${path}": ${error}`);
 		}
-	} else {
-		// Discover hooks, merging with additional paths
-		const configuredPaths = [...settingsManager.getHookPaths(), ...(options.additionalHookPaths ?? [])];
-		const { hooks, errors } = await discoverAndLoadHooks(configuredPaths, cwd, agentDir);
-		time("discoverAndLoadHooks");
-		for (const { path, error } of errors) {
-			console.error(`Failed to load hook "${path}": ${error}`);
-		}
-		if (hooks.length > 0) {
-			hookRunner = new HookRunner(hooks, cwd, sessionManager, modelRegistry);
+
+		// Merge MCP tools into custom tools result
+		if (mcpResult.tools.length > 0) {
+			customToolsResult = {
+				...customToolsResult,
+				tools: [...customToolsResult.tools, ...mcpResult.tools],
+			};
 		}
 	}
 
-	// Wrap custom tools with context getter (agent/session assigned below, accessed at execute time)
 	let agent: Agent;
 	let session: AgentSession;
-	const wrappedCustomTools = wrapCustomTools(customToolsResult.tools, () => ({
+	const getSessionContext = () => ({
 		sessionManager,
 		modelRegistry,
 		model: agent.state.model,
@@ -579,7 +624,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		abort: () => {
 			session.abort();
 		},
-	}));
+	});
+	const toolContextStore = createToolContextStore(getSessionContext);
+	const wrappedCustomTools = wrapCustomTools(customToolsResult.tools, getSessionContext);
+	const baseSetUIContext = customToolsResult.setUIContext;
+	customToolsResult = {
+		...customToolsResult,
+		setUIContext: (uiContext, hasUI) => {
+			toolContextStore.setUIContext(uiContext, hasUI);
+			baseSetUIContext(uiContext, hasUI);
+		},
+	};
 
 	let allToolsArray: Tool[] = [...builtInTools, ...wrappedCustomTools];
 	time("combineTools");
@@ -627,6 +682,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 			: undefined,
 		queueMode: settingsManager.getQueueMode(),
+		getToolContext: toolContextStore.getContext,
 		getApiKey: async () => {
 			const currentModel = agent.state.model;
 			if (!currentModel) {
@@ -668,6 +724,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	return {
 		session,
 		customToolsResult,
+		mcpManager,
 		modelFallbackMessage,
 	};
 }

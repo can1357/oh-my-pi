@@ -35,6 +35,7 @@ const CODEPOINTS = {
 	p: 112,
 	t: 116,
 	u: 117,
+	v: 118,
 	w: 119,
 	z: 122,
 
@@ -170,6 +171,7 @@ export const Keys = {
 	CTRL_P: kittySequence(CODEPOINTS.p, MODIFIERS.ctrl),
 	CTRL_T: kittySequence(CODEPOINTS.t, MODIFIERS.ctrl),
 	CTRL_U: kittySequence(CODEPOINTS.u, MODIFIERS.ctrl),
+	CTRL_V: kittySequence(CODEPOINTS.v, MODIFIERS.ctrl),
 	CTRL_W: kittySequence(CODEPOINTS.w, MODIFIERS.ctrl),
 	CTRL_Z: kittySequence(CODEPOINTS.z, MODIFIERS.ctrl),
 
@@ -227,6 +229,7 @@ const RAW = {
 	CTRL_P: "\x10",
 	CTRL_T: "\x14",
 	CTRL_U: "\x15",
+	CTRL_V: "\x16",
 	CTRL_W: "\x17",
 	CTRL_Z: "\x1a",
 	ALT_BACKSPACE: "\x1b\x7f",
@@ -350,6 +353,16 @@ export function isCtrlT(data: string): boolean {
  */
 export function isCtrlU(data: string): boolean {
 	return data === RAW.CTRL_U || data === Keys.CTRL_U || matchesKittySequence(data, CODEPOINTS.u, MODIFIERS.ctrl);
+}
+
+/**
+ * Check if input matches Ctrl+V (raw byte or Kitty protocol).
+ * Ignores lock key bits.
+ * Note: In most terminals, Ctrl+V triggers paste which sends bracketed paste markers,
+ * but raw mode can intercept the key before the terminal processes it.
+ */
+export function isCtrlV(data: string): boolean {
+	return data === RAW.CTRL_V || data === Keys.CTRL_V || matchesKittySequence(data, CODEPOINTS.v, MODIFIERS.ctrl);
 }
 
 /**

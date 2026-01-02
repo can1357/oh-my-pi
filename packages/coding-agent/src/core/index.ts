@@ -35,3 +35,18 @@ export {
 	type HookUIContext,
 	loadHooks,
 } from "./hooks/index.js";
+export {
+	createMCPManager,
+	discoverAndLoadMCPTools,
+	expandEnvVars,
+	loadAllMCPConfigs,
+	type MCPConfigFile,
+	type MCPLoadResult,
+	MCPManager,
+	type MCPServerConfig,
+	type MCPServerConnection,
+	type MCPToolDefinition,
+	type MCPToolDetails,
+	type MCPToolsLoadResult,
+	type MCPTransport,
+} from "./mcp/index.js";

@@ -1,68 +1,141 @@
+export { type AskToolDetails, askTool, createAskTool } from "./ask.js";
+export { type AstToolDetails, astTool, createAstTool } from "./ast.js";
 export { type BashToolDetails, bashTool, createBashTool } from "./bash.js";
 export { createEditTool, editTool } from "./edit.js";
+// Exa MCP tools (22 tools)
+export { exaTools } from "./exa/index.js";
+export type { ExaRenderDetails, ExaSearchResponse, ExaSearchResult } from "./exa/types.js";
 export { createFindTool, type FindToolDetails, findTool } from "./find.js";
 export { createGrepTool, type GrepToolDetails, grepTool } from "./grep.js";
 export { createLsTool, type LsToolDetails, lsTool } from "./ls.js";
+export { createLspTool, type LspToolDetails, lspTool } from "./lsp/index.js";
+export { createNotebookTool, type NotebookToolDetails, notebookTool } from "./notebook.js";
 export { createReadTool, type ReadToolDetails, readTool } from "./read.js";
+export { createReplaceTool, type ReplaceToolDetails, replaceTool } from "./replace.js";
+export { BUNDLED_AGENTS, createTaskTool, taskTool } from "./task/index.js";
 export type { TruncationResult } from "./truncate.js";
+export { createWebFetchTool, type WebFetchToolDetails, webFetchCustomTool, webFetchTool } from "./web-fetch.js";
+export {
+	createWebSearchTool,
+	type WebSearchProvider,
+	type WebSearchResponse,
+	webSearchCustomTool,
+	webSearchTool,
+} from "./web-search/index.js";
 export { createWriteTool, writeTool } from "./write.js";
 
 import type { AgentTool } from "@mariozechner/pi-agent-core";
+import { askTool, createAskTool } from "./ask.js";
+import { astTool, createAstTool } from "./ast.js";
 import { bashTool, createBashTool } from "./bash.js";
 import { createEditTool, editTool } from "./edit.js";
 import { createFindTool, findTool } from "./find.js";
 import { createGrepTool, grepTool } from "./grep.js";
 import { createLsTool, lsTool } from "./ls.js";
+import { createLspTool, lspTool } from "./lsp/index.js";
+import { createNotebookTool, notebookTool } from "./notebook.js";
 import { createReadTool, readTool } from "./read.js";
+import { createReplaceTool, replaceTool } from "./replace.js";
+import { createTaskTool, taskTool } from "./task/index.js";
+import { createWebFetchTool, webFetchTool } from "./web-fetch.js";
+import { createWebSearchTool, webSearchTool } from "./web-search/index.js";
 import { createWriteTool, writeTool } from "./write.js";
 
 /** Tool type (AgentTool from pi-ai) */
-export type Tool = AgentTool<any>;
+export type Tool = AgentTool<any, any, any>;
 
-// Default tools for full access mode (using process.cwd())
-export const codingTools: Tool[] = [readTool, bashTool, editTool, writeTool];
+/** Context for tools that need session information */
+export interface SessionContext {
+	getSessionFile: () => string | null;
+}
 
-// Read-only tools for exploration without modification (using process.cwd())
-export const readOnlyTools: Tool[] = [readTool, grepTool, findTool, lsTool];
+// Factory function type
+type ToolFactory = (cwd: string, sessionContext?: SessionContext) => Tool;
 
-// All available tools (using process.cwd())
-export const allTools = {
-	read: readTool,
-	bash: bashTool,
-	edit: editTool,
-	write: writeTool,
-	grep: grepTool,
-	find: findTool,
-	ls: lsTool,
+// Tool definitions: static tools and their factory functions
+const toolDefs: Record<string, { tool: Tool; create: ToolFactory }> = {
+	ask: { tool: askTool, create: createAskTool },
+	ast: { tool: astTool, create: createAstTool },
+	read: { tool: readTool, create: createReadTool },
+	bash: { tool: bashTool, create: createBashTool },
+	edit: { tool: editTool, create: createEditTool },
+	write: { tool: writeTool, create: createWriteTool },
+	grep: { tool: grepTool, create: createGrepTool },
+	find: { tool: findTool, create: createFindTool },
+	ls: { tool: lsTool, create: createLsTool },
+	lsp: { tool: lspTool, create: createLspTool },
+	notebook: { tool: notebookTool, create: createNotebookTool },
+	replace: { tool: replaceTool, create: createReplaceTool },
+	task: { tool: taskTool, create: (cwd, ctx) => createTaskTool(cwd, ctx) },
+	web_fetch: { tool: webFetchTool, create: createWebFetchTool },
+	web_search: { tool: webSearchTool, create: createWebSearchTool },
 };
 
-export type ToolName = keyof typeof allTools;
+export type ToolName = keyof typeof toolDefs;
+
+// Tools that require UI (excluded when hasUI is false)
+const uiToolNames: ToolName[] = ["ask"];
+
+// Tool sets defined by name (base sets, without UI-only tools)
+const baseCodingToolNames: ToolName[] = [
+	"read",
+	"bash",
+	"edit",
+	"write",
+	"grep",
+	"find",
+	"ls",
+	"ast",
+	"lsp",
+	"notebook",
+	"replace",
+	"task",
+	"web_fetch",
+	"web_search",
+];
+const baseReadOnlyToolNames: ToolName[] = ["read", "grep", "find", "ls"];
+
+// Default tools for full access mode (using process.cwd(), no UI)
+export const codingTools: Tool[] = baseCodingToolNames.map((name) => toolDefs[name].tool);
+
+// Read-only tools for exploration without modification (using process.cwd(), no UI)
+export const readOnlyTools: Tool[] = baseReadOnlyToolNames.map((name) => toolDefs[name].tool);
+
+// All available tools (using process.cwd(), no UI)
+export const allTools = Object.fromEntries(Object.entries(toolDefs).map(([name, def]) => [name, def.tool])) as Record<
+	ToolName,
+	Tool
+>;
 
 /**
  * Create coding tools configured for a specific working directory.
+ * @param cwd - Working directory for tools
+ * @param hasUI - Whether UI is available (includes ask tool if true)
+ * @param sessionContext - Optional session context for tools that need it
  */
-export function createCodingTools(cwd: string): Tool[] {
-	return [createReadTool(cwd), createBashTool(cwd), createEditTool(cwd), createWriteTool(cwd)];
+export function createCodingTools(cwd: string, hasUI = false, sessionContext?: SessionContext): Tool[] {
+	const names = hasUI ? [...baseCodingToolNames, ...uiToolNames] : baseCodingToolNames;
+	return names.map((name) => toolDefs[name].create(cwd, sessionContext));
 }
 
 /**
  * Create read-only tools configured for a specific working directory.
+ * @param cwd - Working directory for tools
+ * @param hasUI - Whether UI is available (includes ask tool if true)
+ * @param sessionContext - Optional session context for tools that need it
  */
-export function createReadOnlyTools(cwd: string): Tool[] {
-	return [createReadTool(cwd), createGrepTool(cwd), createFindTool(cwd), createLsTool(cwd)];
+export function createReadOnlyTools(cwd: string, hasUI = false, sessionContext?: SessionContext): Tool[] {
+	const names = hasUI ? [...baseReadOnlyToolNames, ...uiToolNames] : baseReadOnlyToolNames;
+	return names.map((name) => toolDefs[name].create(cwd, sessionContext));
 }
 
 /**
  * Create all tools configured for a specific working directory.
+ * @param cwd - Working directory for tools
+ * @param sessionContext - Optional session context for tools that need it
  */
-export function createAllTools(cwd: string): Record<ToolName, Tool> {
-	return {
-		read: createReadTool(cwd),
-		bash: createBashTool(cwd),
-		edit: createEditTool(cwd),
-		write: createWriteTool(cwd),
-		grep: createGrepTool(cwd),
-		find: createFindTool(cwd),
-		ls: createLsTool(cwd),
-	};
+export function createAllTools(cwd: string, sessionContext?: SessionContext): Record<ToolName, Tool> {
+	return Object.fromEntries(
+		Object.entries(toolDefs).map(([name, def]) => [name, def.create(cwd, sessionContext)]),
+	) as Record<ToolName, Tool>;
 }

@@ -746,6 +746,11 @@ export interface HookAPI {
 	 * Supports timeout and abort signal.
 	 */
 	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
+
+	/** Injected @sinclair/typebox module */
+	typebox: typeof import("@sinclair/typebox");
+	/** Injected pi-coding-agent exports */
+	pi: typeof import("../../index.js");
 }
 
 /**

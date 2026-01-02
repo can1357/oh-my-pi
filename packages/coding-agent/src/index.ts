@@ -1,4 +1,7 @@
 // Core session management
+
+// Re-export TUI components for custom tool rendering
+export { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 export {
 	AgentSession,
 	type AgentSessionConfig,
@@ -155,7 +158,19 @@ export {
 } from "./core/tools/index.js";
 // Main entry point
 export { main } from "./main.js";
-// UI components for hooks
+// UI components for hooks and custom tools
 export { BorderedLoader } from "./modes/interactive/components/bordered-loader.js";
 // Theme utilities for custom tools
 export { getMarkdownTheme } from "./modes/interactive/theme/theme.js";
+
+// TypeBox helper for string enums (convenience for custom tools)
+import { type TSchema, Type } from "@sinclair/typebox";
+export function StringEnum<T extends readonly string[]>(
+	values: T,
+	options?: { description?: string; default?: T[number] },
+): TSchema {
+	return Type.Union(
+		values.map((v) => Type.Literal(v)),
+		options,
+	);
+}
