@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [1.337.1] - 2026-01-02
+
+### Added
+
+- TabBar component for horizontal tab navigation
+- Emergency terminal restore to prevent corrupted state on crashes
+- Overhauled UI with welcome screen and powerline footer
+- Theme-configurable HTML export colors
+- `ctx.ui.theme` getter for styling status text with theme colors
+
+### Changed
+
+- Forked to @oh-my-pi scope with unified versioning across all packages
+
+### Fixed
+
+- Strip OSC 8 hyperlink sequences in `visibleWidth()`
+- Crash on Unicode format characters in `visibleWidth()`
+- Markdown code block syntax highlighting
+
+## [1.337.0] - 2026-01-02
+
+Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mono](https://github.com/badlogic/pi-mono).
+
 ## [0.31.1] - 2026-01-02
 
 ### Fixed

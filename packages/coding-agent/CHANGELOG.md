@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [1.337.1] - 2026-01-02
+
+### Added
+
+- MCP support and plugin system for external tool integration
+- Git context to system prompt for repo awareness
+- Bash interception to guide tool selection
+- Fuzzy matching to handle indentation variance in edit tool
+- Specialized Exa tools with granular toggles
+- `/share` command for exporting conversations to HTML
+- Edit diff preview before tool execution
+
+### Changed
+
+- Renamed package scope to @oh-my-pi for consistent branding
+- Simplified toolset and enhanced navigation
+- Improved process cleanup with tree kill
+- Updated CI/CD workflows for GitHub Actions with provenance-signed npm publishing
+
+### Fixed
+
+- Template string interpolation in image read output
+- Prevented full re-renders during write tool streaming
+- Edit tool failing on files with UTF-8 BOM
+
+## [1.337.0] - 2026-01-02
+
+Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mono](https://github.com/badlogic/pi-mono).
+
 ## [0.31.1] - 2026-01-02
 
 ### Fixed
