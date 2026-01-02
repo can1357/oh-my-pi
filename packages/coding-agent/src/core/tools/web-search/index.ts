@@ -1,16 +1,26 @@
 /**
  * Unified Web Search Tool
  *
- * Single tool supporting Anthropic and Perplexity providers with
+ * Single tool supporting Anthropic, Perplexity, and Exa providers with
  * provider-specific parameters exposed conditionally.
+ *
+ * When EXA_API_KEY is available, additional specialized tools are exposed:
+ * - web_search_deep: Natural language web search with synthesized results
+ * - web_search_code_context: Search code snippets, docs, and examples
+ * - web_search_crawl: Extract content from specific URLs
+ * - web_search_linkedin: Search LinkedIn profiles and companies
+ * - web_search_company: Comprehensive company research
  */
 
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import type { Theme } from "../../../modes/interactive/theme/theme.js";
 import type { CustomTool, CustomToolContext, RenderResultOptions } from "../../custom-tools/types.js";
+import { callExaTool, findApiKey as findExaKey, formatSearchResults, isSearchResponse } from "../exa/mcp-client.js";
+import { renderExaCall, renderExaResult } from "../exa/render.js";
+import type { ExaRenderDetails } from "../exa/types.js";
 import { searchAnthropic } from "./providers/anthropic.js";
-import { findApiKey as findExaKey, searchExa } from "./providers/exa.js";
+import { searchExa } from "./providers/exa.js";
 import { findApiKey as findPerplexityKey, searchPerplexity } from "./providers/perplexity.js";
 import { formatAge, renderWebSearchCall, renderWebSearchResult, type WebSearchRenderDetails } from "./render.js";
 import type { WebSearchProvider, WebSearchResponse } from "./types.js";
@@ -22,7 +32,7 @@ export const webSearchSchema = Type.Object({
 	provider: Type.Optional(
 		Type.Union([Type.Literal("exa"), Type.Literal("anthropic"), Type.Literal("perplexity")], {
 			description: "Search provider (auto-detected if omitted based on API keys)",
-		})
+		}),
 	),
 	num_results: Type.Optional(Type.Number({ description: "Maximum number of results to return" })),
 
@@ -30,41 +40,41 @@ export const webSearchSchema = Type.Object({
 	system_prompt: Type.Optional(
 		Type.String({
 			description: "System prompt to guide response style",
-		})
+		}),
 	),
 	max_tokens: Type.Optional(
 		Type.Number({
 			description: "Maximum tokens in response, 1-16384, default 4096 (Anthropic only)",
 			minimum: 1,
 			maximum: 16384,
-		})
+		}),
 	),
 
 	// Perplexity-specific
 	model: Type.Optional(
 		Type.Union([Type.Literal("sonar"), Type.Literal("sonar-pro")], {
 			description: "Perplexity model - sonar (fast) or sonar-pro (comprehensive research)",
-		})
+		}),
 	),
 	search_recency_filter: Type.Optional(
 		Type.Union([Type.Literal("day"), Type.Literal("week"), Type.Literal("month"), Type.Literal("year")], {
 			description: "Filter results by recency (Perplexity only)",
-		})
+		}),
 	),
 	search_domain_filter: Type.Optional(
 		Type.Array(Type.String(), {
 			description: "Domain filter - include domains, prefix with - to exclude (Perplexity only)",
-		})
+		}),
 	),
 	search_context_size: Type.Optional(
 		Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], {
 			description: "Context size for cost control (Perplexity only)",
-		})
+		}),
 	),
 	return_related_questions: Type.Optional(
 		Type.Boolean({
 			description: "Include follow-up question suggestions, default true (Perplexity only)",
-		})
+		}),
 	),
 });
 
@@ -130,7 +140,7 @@ function formatForLLM(response: WebSearchResponse): string {
 /** Execute web search */
 async function executeWebSearch(
 	_toolCallId: string,
-	params: WebSearchParams
+	params: WebSearchParams,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: WebSearchRenderDetails }> {
 	try {
 		const provider = params.provider ?? (await detectProvider());
@@ -210,7 +220,7 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, WebSearchRe
 		params: WebSearchParams,
 		_onUpdate,
 		_ctx: CustomToolContext,
-		_signal?: AbortSignal
+		_signal?: AbortSignal,
 	) {
 		return executeWebSearch(toolCallId, params);
 	},
@@ -227,6 +237,301 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, WebSearchRe
 /** Factory function for backward compatibility */
 export function createWebSearchTool(_cwd: string): AgentTool<typeof webSearchSchema> {
 	return webSearchTool;
+}
+
+// ============================================================================
+// Exa-specific tools (available when EXA_API_KEY is present)
+// ============================================================================
+
+/** Schema for deep search */
+const webSearchDeepSchema = Type.Object({
+	query: Type.String({ description: "Research query" }),
+	type: Type.Optional(
+		Type.Union([Type.Literal("keyword"), Type.Literal("neural"), Type.Literal("auto")], {
+			description: "Search type - neural (semantic), keyword (exact), or auto",
+		}),
+	),
+	include_domains: Type.Optional(
+		Type.Array(Type.String(), { description: "Only include results from these domains" }),
+	),
+	exclude_domains: Type.Optional(Type.Array(Type.String(), { description: "Exclude results from these domains" })),
+	start_published_date: Type.Optional(
+		Type.String({ description: "Filter results published after this date (ISO 8601)" }),
+	),
+	end_published_date: Type.Optional(
+		Type.String({ description: "Filter results published before this date (ISO 8601)" }),
+	),
+	num_results: Type.Optional(
+		Type.Number({ description: "Maximum results (default: 10, max: 100)", minimum: 1, maximum: 100 }),
+	),
+});
+
+/** Schema for code context search */
+const webSearchCodeContextSchema = Type.Object({
+	query: Type.String({ description: "Code or technical search query" }),
+	code_context: Type.Optional(Type.String({ description: "Additional context about what you're looking for" })),
+});
+
+/** Schema for URL crawling */
+const webSearchCrawlSchema = Type.Object({
+	url: Type.String({ description: "URL to crawl and extract content from" }),
+	text: Type.Optional(Type.Boolean({ description: "Include full page text content (default: false)" })),
+	highlights: Type.Optional(Type.Boolean({ description: "Include highlighted relevant snippets (default: false)" })),
+});
+
+/** Schema for LinkedIn search */
+const webSearchLinkedinSchema = Type.Object({
+	query: Type.String({ description: 'LinkedIn search query (e.g., "Software Engineer at OpenAI")' }),
+});
+
+/** Schema for company research */
+const webSearchCompanySchema = Type.Object({
+	company_name: Type.String({ description: "Name of the company to research" }),
+});
+
+/** Helper to execute Exa tool and format response */
+async function executeExaTool(
+	mcpToolName: string,
+	params: Record<string, unknown>,
+	toolName: string,
+): Promise<{ content: Array<{ type: "text"; text: string }>; details: ExaRenderDetails }> {
+	try {
+		const apiKey = await findExaKey();
+		if (!apiKey) {
+			return {
+				content: [{ type: "text" as const, text: "Error: EXA_API_KEY not found" }],
+				details: { error: "EXA_API_KEY not found", toolName },
+			};
+		}
+
+		const response = await callExaTool(mcpToolName, params, apiKey);
+
+		if (isSearchResponse(response)) {
+			const formatted = formatSearchResults(response);
+			return {
+				content: [{ type: "text" as const, text: formatted }],
+				details: { response, toolName },
+			};
+		}
+
+		return {
+			content: [{ type: "text" as const, text: JSON.stringify(response, null, 2) }],
+			details: { raw: response, toolName },
+		};
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return {
+			content: [{ type: "text" as const, text: `Error: ${message}` }],
+			details: { error: message, toolName },
+		};
+	}
+}
+
+/** Deep search - AI-synthesized research with multiple sources */
+export const webSearchDeepTool: CustomTool<typeof webSearchDeepSchema, ExaRenderDetails> = {
+	name: "web_search_deep",
+	label: "Deep Search",
+	description: `Natural language web search with synthesized results (requires Exa).
+
+Performs AI-powered deep research that synthesizes information from multiple sources.
+Best for complex research queries that need comprehensive answers.
+
+Parameters:
+- query: Research query (required)
+- type: Search type - neural (semantic), keyword (exact), or auto
+- include_domains/exclude_domains: Domain filters
+- start/end_published_date: Date range filter (ISO 8601)
+- num_results: Maximum results (default: 10)`,
+	parameters: webSearchDeepSchema,
+
+	async execute(_toolCallId, params, _onUpdate, _ctx, _signal) {
+		return executeExaTool("deep_search_exa", params as Record<string, unknown>, "web_search_deep");
+	},
+
+	renderCall(args, theme) {
+		return renderExaCall(args as Record<string, unknown>, "Deep Search", theme);
+	},
+
+	renderResult(result, options, theme) {
+		return renderExaResult(result, options, theme);
+	},
+};
+
+/** Code context search - optimized for code snippets and documentation */
+export const webSearchCodeContextTool: CustomTool<typeof webSearchCodeContextSchema, ExaRenderDetails> = {
+	name: "web_search_code_context",
+	label: "Code Search",
+	description: `Search code snippets, documentation, and technical examples (requires Exa).
+
+Optimized for finding:
+- Code examples and snippets
+- API documentation
+- Technical tutorials
+- Stack Overflow answers
+- GitHub code references
+
+Parameters:
+- query: Code or technical search query (required)
+- code_context: Additional context about what you're looking for`,
+	parameters: webSearchCodeContextSchema,
+
+	async execute(_toolCallId, params, _onUpdate, _ctx, _signal) {
+		return executeExaTool("get_code_context_exa", params as Record<string, unknown>, "web_search_code_context");
+	},
+
+	renderCall(args, theme) {
+		return renderExaCall(args as Record<string, unknown>, "Code Search", theme);
+	},
+
+	renderResult(result, options, theme) {
+		return renderExaResult(result, options, theme);
+	},
+};
+
+/** URL crawl - extract content from specific URLs */
+export const webSearchCrawlTool: CustomTool<typeof webSearchCrawlSchema, ExaRenderDetails> = {
+	name: "web_search_crawl",
+	label: "Crawl URL",
+	description: `Extract content from a specific URL (requires Exa).
+
+Fetches and extracts content from a URL with optional text and highlights.
+Useful when you have a specific URL and want its content.
+
+Parameters:
+- url: URL to crawl (required)
+- text: Include full page text content (default: false)
+- highlights: Include highlighted snippets (default: false)`,
+	parameters: webSearchCrawlSchema,
+
+	async execute(_toolCallId, params, _onUpdate, _ctx, _signal) {
+		return executeExaTool("crawling_exa", params as Record<string, unknown>, "web_search_crawl");
+	},
+
+	renderCall(args, theme) {
+		const url = (args as { url: string }).url;
+		return renderExaCall({ query: url }, "Crawl URL", theme);
+	},
+
+	renderResult(result, options, theme) {
+		return renderExaResult(result, options, theme);
+	},
+};
+
+/** LinkedIn search - search LinkedIn profiles and companies */
+export const webSearchLinkedinTool: CustomTool<typeof webSearchLinkedinSchema, ExaRenderDetails> = {
+	name: "web_search_linkedin",
+	label: "LinkedIn Search",
+	description: `Search LinkedIn for people, companies, and professional content (requires Exa + LinkedIn addon).
+
+Returns LinkedIn profiles, company pages, posts, and professional content.
+
+Examples:
+- "Software Engineer at OpenAI"
+- "Y Combinator companies"
+- "CEO fintech startup San Francisco"
+
+Parameters:
+- query: LinkedIn search query (required)`,
+	parameters: webSearchLinkedinSchema,
+
+	async execute(_toolCallId, params, _onUpdate, _ctx, _signal) {
+		return executeExaTool("linkedin_search_exa", params as Record<string, unknown>, "web_search_linkedin");
+	},
+
+	renderCall(args, theme) {
+		return renderExaCall(args as Record<string, unknown>, "LinkedIn Search", theme);
+	},
+
+	renderResult(result, options, theme) {
+		return renderExaResult(result, options, theme);
+	},
+};
+
+/** Company research - comprehensive company information */
+export const webSearchCompanyTool: CustomTool<typeof webSearchCompanySchema, ExaRenderDetails> = {
+	name: "web_search_company",
+	label: "Company Research",
+	description: `Comprehensive company research (requires Exa + Company addon).
+
+Returns detailed company information including:
+- Company overview and description
+- Recent news and announcements
+- Key people and leadership
+- Funding and financial information
+- Products and services
+
+Parameters:
+- company_name: Name of the company to research (required)`,
+	parameters: webSearchCompanySchema,
+
+	async execute(_toolCallId, params, _onUpdate, _ctx, _signal) {
+		return executeExaTool("company_research_exa", params as Record<string, unknown>, "web_search_company");
+	},
+
+	renderCall(args, theme) {
+		const name = (args as { company_name: string }).company_name;
+		return renderExaCall({ query: name }, "Company Research", theme);
+	},
+
+	renderResult(result, options, theme) {
+		return renderExaResult(result, options, theme);
+	},
+};
+
+/** All Exa-specific web search tools */
+export const exaWebSearchTools: CustomTool<any, ExaRenderDetails>[] = [
+	webSearchDeepTool,
+	webSearchCodeContextTool,
+	webSearchCrawlTool,
+];
+
+/** LinkedIn-specific tool (requires LinkedIn addon on Exa account) */
+export const linkedinWebSearchTools: CustomTool<any, ExaRenderDetails>[] = [webSearchLinkedinTool];
+
+/** Company-specific tool (requires Company addon on Exa account) */
+export const companyWebSearchTools: CustomTool<any, ExaRenderDetails>[] = [webSearchCompanyTool];
+
+export interface WebSearchToolsOptions {
+	/** Enable LinkedIn search tool (requires Exa LinkedIn addon) */
+	enableLinkedin?: boolean;
+	/** Enable company research tool (requires Exa Company addon) */
+	enableCompany?: boolean;
+}
+
+/**
+ * Get all available web search tools based on API key availability.
+ *
+ * Returns:
+ * - Always: web_search (unified, works with Anthropic/Perplexity/Exa)
+ * - With EXA_API_KEY: web_search_deep, web_search_code_context, web_search_crawl
+ * - With EXA_API_KEY + options.enableLinkedin: web_search_linkedin
+ * - With EXA_API_KEY + options.enableCompany: web_search_company
+ */
+export async function getWebSearchTools(options: WebSearchToolsOptions = {}): Promise<CustomTool<any, any>[]> {
+	const tools: CustomTool<any, any>[] = [webSearchCustomTool];
+
+	// Check for Exa API key
+	const exaKey = await findExaKey();
+	if (exaKey) {
+		tools.push(...exaWebSearchTools);
+
+		if (options.enableLinkedin) {
+			tools.push(...linkedinWebSearchTools);
+		}
+		if (options.enableCompany) {
+			tools.push(...companyWebSearchTools);
+		}
+	}
+
+	return tools;
+}
+
+/**
+ * Check if Exa-specific web search tools are available.
+ */
+export async function hasExaWebSearch(): Promise<boolean> {
+	const exaKey = await findExaKey();
+	return exaKey !== null;
 }
 
 export type { WebSearchProvider, WebSearchResponse } from "./types.js";

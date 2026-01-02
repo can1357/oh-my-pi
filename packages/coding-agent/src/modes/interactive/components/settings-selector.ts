@@ -22,6 +22,15 @@ const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	xhigh: "Maximum reasoning (~32k tokens)",
 };
 
+export interface ExaToolsConfig {
+	enabled: boolean;
+	enableSearch: boolean;
+	enableLinkedin: boolean;
+	enableCompany: boolean;
+	enableResearcher: boolean;
+	enableWebsets: boolean;
+}
+
 export interface SettingsConfig {
 	autoCompact: boolean;
 	showImages: boolean;
@@ -33,6 +42,7 @@ export interface SettingsConfig {
 	hideThinkingBlock: boolean;
 	collapseChangelog: boolean;
 	cwd: string;
+	exa: ExaToolsConfig;
 }
 
 export interface SettingsCallbacks {
@@ -45,6 +55,7 @@ export interface SettingsCallbacks {
 	onHideThinkingBlockChange: (hidden: boolean) => void;
 	onCollapseChangelogChange: (collapsed: boolean) => void;
 	onPluginsChanged?: () => void;
+	onExaSettingChange: (setting: keyof ExaToolsConfig, enabled: boolean) => void;
 	onCancel: () => void;
 }
 
@@ -107,6 +118,87 @@ class SelectSubmenu extends Container {
 
 	handleInput(data: string): void {
 		this.selectList.handleInput(data);
+	}
+}
+
+/**
+ * Submenu for Exa tool settings
+ */
+class ExaSettingsSubmenu extends Container {
+	private settingsList: SettingsList;
+
+	constructor(
+		config: ExaToolsConfig,
+		onChange: (setting: keyof ExaToolsConfig, enabled: boolean) => void,
+		onCancel: () => void,
+	) {
+		super();
+
+		this.addChild(new Text(theme.bold(theme.fg("accent", "Exa Tools")), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("muted", "Configure which Exa search tools are available"), 0, 0));
+		this.addChild(new Spacer(1));
+
+		const items: SettingItem[] = [
+			{
+				id: "enabled",
+				label: "Exa enabled",
+				description: "Master toggle for all Exa tools",
+				currentValue: config.enabled ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "enableSearch",
+				label: "Search tools",
+				description: "Basic search, deep search, code search, crawl",
+				currentValue: config.enableSearch ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "enableLinkedin",
+				label: "LinkedIn search",
+				description: "Search LinkedIn for people and companies",
+				currentValue: config.enableLinkedin ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "enableCompany",
+				label: "Company research",
+				description: "Comprehensive company research tool",
+				currentValue: config.enableCompany ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "enableResearcher",
+				label: "Deep researcher",
+				description: "AI-powered deep research tasks",
+				currentValue: config.enableResearcher ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "enableWebsets",
+				label: "Websets",
+				description: "Webset management and enrichment tools",
+				currentValue: config.enableWebsets ? "true" : "false",
+				values: ["true", "false"],
+			},
+		];
+
+		this.settingsList = new SettingsList(
+			items,
+			8,
+			getSettingsListTheme(),
+			(id, newValue) => {
+				onChange(id as keyof ExaToolsConfig, newValue === "true");
+			},
+			onCancel,
+		);
+
+		this.addChild(this.settingsList);
+	}
+
+	handleInput(data: string): void {
+		this.settingsList.handleInput(data);
 	}
 }
 
@@ -199,6 +291,20 @@ export class SettingsSelectorComponent extends Container {
 							// Preview theme on selection change
 							callbacks.onThemePreview?.(value);
 						},
+					),
+			},
+			{
+				id: "exa",
+				label: "Exa tools",
+				description: "Configure Exa search and research tools",
+				currentValue: config.exa.enabled ? "→" : "off",
+				submenu: (_currentValue, done) =>
+					new ExaSettingsSubmenu(
+						config.exa,
+						(setting, enabled) => {
+							callbacks.onExaSettingChange(setting, enabled);
+						},
+						() => done(),
 					),
 			},
 			{

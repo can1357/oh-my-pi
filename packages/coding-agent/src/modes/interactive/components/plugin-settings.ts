@@ -416,6 +416,10 @@ export class PluginSettingsComponent extends Container {
 	private manager: PluginManager;
 	private callbacks: PluginSettingsCallbacks;
 	private viewComponent: (Container & InputHandler) | null = null;
+	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: state tracking for view management
+	private currentView: "list" | "detail" = "list";
+	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: state tracking for view management
+	private currentPlugin: InstalledPlugin | null = null;
 
 	constructor(cwd: string, callbacks: PluginSettingsCallbacks) {
 		super();

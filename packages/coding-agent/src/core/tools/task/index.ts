@@ -26,7 +26,6 @@ import {
 	MAX_CONCURRENCY,
 	MAX_PARALLEL_TASKS,
 	PI_NO_SUBAGENTS_ENV,
-	type SingleResult,
 	type TaskToolDetails,
 	taskSchema,
 } from "./types.js";

@@ -1608,6 +1608,7 @@ export class InteractiveMode {
 					hideThinkingBlock: this.hideThinkingBlock,
 					collapseChangelog: this.settingsManager.getCollapseChangelog(),
 					cwd: process.cwd(),
+					exa: this.settingsManager.getExaSettings(),
 				},
 				{
 					onAutoCompactChange: (enabled) => {
@@ -1662,6 +1663,28 @@ export class InteractiveMode {
 					onPluginsChanged: () => {
 						// Plugin config changed - could trigger reload if needed
 						this.ui.requestRender();
+					},
+					onExaSettingChange: (setting, enabled) => {
+						switch (setting) {
+							case "enabled":
+								this.settingsManager.setExaEnabled(enabled);
+								break;
+							case "enableSearch":
+								this.settingsManager.setExaSearchEnabled(enabled);
+								break;
+							case "enableLinkedin":
+								this.settingsManager.setExaLinkedinEnabled(enabled);
+								break;
+							case "enableCompany":
+								this.settingsManager.setExaCompanyEnabled(enabled);
+								break;
+							case "enableResearcher":
+								this.settingsManager.setExaResearcherEnabled(enabled);
+								break;
+							case "enableWebsets":
+								this.settingsManager.setExaWebsetsEnabled(enabled);
+								break;
+						}
 					},
 					onCancel: () => {
 						done();

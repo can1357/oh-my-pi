@@ -614,6 +614,30 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 
+	// Add specialized Exa web search tools if EXA_API_KEY is available
+	const exaSettings = settingsManager.getExaSettings();
+	if (exaSettings.enabled && exaSettings.enableSearch) {
+		const { getWebSearchTools } = await import("./tools/web-search/index.js");
+		const exaWebSearchTools = await getWebSearchTools({
+			enableLinkedin: exaSettings.enableLinkedin,
+			enableCompany: exaSettings.enableCompany,
+		});
+		// Filter out the base web_search (already in built-in tools), add specialized Exa tools
+		const specializedTools = exaWebSearchTools.filter((t) => t.name !== "web_search");
+		if (specializedTools.length > 0) {
+			const loadedExaTools: LoadedCustomTool[] = specializedTools.map((tool) => ({
+				path: "<exa>",
+				resolvedPath: "<exa>",
+				tool,
+			}));
+			customToolsResult = {
+				...customToolsResult,
+				tools: [...customToolsResult.tools, ...loadedExaTools],
+			};
+		}
+		time("getWebSearchTools");
+	}
+
 	let agent: Agent;
 	let session: AgentSession;
 	const getSessionContext = () => ({

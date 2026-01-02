@@ -37,10 +37,10 @@ export interface TerminalSettings {
 export interface ExaSettings {
 	enabled?: boolean; // default: true (master toggle for all Exa tools)
 	enableSearch?: boolean; // default: true (search, deep, code, crawl)
-	enableLinkedin?: boolean; // default: true
-	enableCompany?: boolean; // default: true
-	enableResearcher?: boolean; // default: true
-	enableWebsets?: boolean; // default: true
+	enableLinkedin?: boolean; // default: false
+	enableCompany?: boolean; // default: false
+	enableResearcher?: boolean; // default: false
+	enableWebsets?: boolean; // default: false
 }
 
 export interface Settings {
@@ -386,10 +386,10 @@ export class SettingsManager {
 		return {
 			enabled: this.settings.exa?.enabled ?? true,
 			enableSearch: this.settings.exa?.enableSearch ?? true,
-			enableLinkedin: this.settings.exa?.enableLinkedin ?? true,
-			enableCompany: this.settings.exa?.enableCompany ?? true,
-			enableResearcher: this.settings.exa?.enableResearcher ?? true,
-			enableWebsets: this.settings.exa?.enableWebsets ?? true,
+			enableLinkedin: this.settings.exa?.enableLinkedin ?? false,
+			enableCompany: this.settings.exa?.enableCompany ?? false,
+			enableResearcher: this.settings.exa?.enableResearcher ?? false,
+			enableWebsets: this.settings.exa?.enableWebsets ?? false,
 		};
 	}
 
@@ -398,6 +398,46 @@ export class SettingsManager {
 			this.globalSettings.exa = {};
 		}
 		this.globalSettings.exa.enabled = enabled;
+		this.save();
+	}
+
+	setExaSearchEnabled(enabled: boolean): void {
+		if (!this.globalSettings.exa) {
+			this.globalSettings.exa = {};
+		}
+		this.globalSettings.exa.enableSearch = enabled;
+		this.save();
+	}
+
+	setExaLinkedinEnabled(enabled: boolean): void {
+		if (!this.globalSettings.exa) {
+			this.globalSettings.exa = {};
+		}
+		this.globalSettings.exa.enableLinkedin = enabled;
+		this.save();
+	}
+
+	setExaCompanyEnabled(enabled: boolean): void {
+		if (!this.globalSettings.exa) {
+			this.globalSettings.exa = {};
+		}
+		this.globalSettings.exa.enableCompany = enabled;
+		this.save();
+	}
+
+	setExaResearcherEnabled(enabled: boolean): void {
+		if (!this.globalSettings.exa) {
+			this.globalSettings.exa = {};
+		}
+		this.globalSettings.exa.enableResearcher = enabled;
+		this.save();
+	}
+
+	setExaWebsetsEnabled(enabled: boolean): void {
+		if (!this.globalSettings.exa) {
+			this.globalSettings.exa = {};
+		}
+		this.globalSettings.exa.enableWebsets = enabled;
 		this.save();
 	}
 }

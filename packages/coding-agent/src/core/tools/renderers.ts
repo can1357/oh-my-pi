@@ -28,7 +28,6 @@ const TREE_END = "└─";
 const ICON_SUCCESS = "●";
 const ICON_WARNING = "●";
 const ICON_ERROR = "●";
-const ICON_INFO = "●";
 
 interface ToolRenderer<TArgs = any, TDetails = any> {
 	renderCall(args: TArgs, theme: Theme): Component;

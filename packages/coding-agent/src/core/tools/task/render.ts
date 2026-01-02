@@ -61,16 +61,16 @@ function getStatusIcon(status: AgentProgress["status"]): string {
 export function renderCall(args: TaskParams, theme: Theme): Component {
 	const label = theme.fg("toolTitle", theme.bold("task"));
 
-	if (args.tasks && args.tasks.length > 0) {
-		// Parallel mode
-		const agents = args.tasks.map((t) => t.agent).join(", ");
-		return new Text(`${label} ${theme.fg("muted", `${args.tasks.length} agents: ${truncate(agents, 50)}`)}`, 0, 0);
+	if (args.tasks.length === 1) {
+		// Single task - show agent and task preview
+		const task = args.tasks[0];
+		const taskPreview = truncate(task.task, 60);
+		return new Text(`${label} ${theme.fg("accent", task.agent)}: ${theme.fg("muted", taskPreview)}`, 0, 0);
 	}
 
-	// Single mode
-	const agentName = args.agent || "task";
-	const taskPreview = args.prompt ? truncate(args.prompt, 60) : "";
-	return new Text(`${label} ${theme.fg("accent", agentName)}: ${theme.fg("muted", taskPreview)}`, 0, 0);
+	// Multiple tasks - show count and agent names
+	const agents = args.tasks.map((t) => t.agent).join(", ");
+	return new Text(`${label} ${theme.fg("muted", `${args.tasks.length} agents: ${truncate(agents, 50)}`)}`, 0, 0);
 }
 
 /**

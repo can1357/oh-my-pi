@@ -14,10 +14,21 @@ export { BUNDLED_AGENTS, createTaskTool, taskTool } from "./task/index.js";
 export type { TruncationResult } from "./truncate.js";
 export { createWebFetchTool, type WebFetchToolDetails, webFetchCustomTool, webFetchTool } from "./web-fetch.js";
 export {
+	companyWebSearchTools,
 	createWebSearchTool,
+	exaWebSearchTools,
+	getWebSearchTools,
+	hasExaWebSearch,
+	linkedinWebSearchTools,
 	type WebSearchProvider,
 	type WebSearchResponse,
+	type WebSearchToolsOptions,
+	webSearchCodeContextTool,
+	webSearchCompanyTool,
+	webSearchCrawlTool,
 	webSearchCustomTool,
+	webSearchDeepTool,
+	webSearchLinkedinTool,
 	webSearchTool,
 } from "./web-search/index.js";
 export { createWriteTool, writeTool } from "./write.js";
