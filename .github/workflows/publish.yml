@@ -1,0 +1,113 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      skip_npm:
+        description: 'Skip npm publish (build binaries only)'
+        type: boolean
+        default: false
+
+jobs:
+  build-binaries:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: bun-linux-x64
+            artifact: pi-linux-x64
+          - os: ubuntu-latest
+            target: bun-linux-arm64
+            artifact: pi-linux-arm64
+          - os: macos-latest
+            target: bun-darwin-x64
+            artifact: pi-darwin-x64
+          - os: macos-latest
+            target: bun-darwin-arm64
+            artifact: pi-darwin-arm64
+          - os: ubuntu-latest
+            target: bun-windows-x64
+            artifact: pi-windows-x64.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build packages
+        run: bun run build
+
+      - name: Build standalone binary
+        run: bun build packages/coding-agent/dist/cli.js --compile --target ${{ matrix.target }} --outfile ${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: build-binaries
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build
+        run: bun run build
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: binaries/*
+          generate_release_notes: true
+
+      - name: Publish packages to npm
+        if: ${{ !inputs.skip_npm }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for pkg in packages/*/; do
+            pkg_name=$(basename "$pkg")
+            echo "Publishing $pkg_name..."
+            output=$(cd "$pkg" && npm publish --access public --provenance 2>&1) && echo "$output" && continue
+            echo "$output"
+            if echo "$output" | grep -q "previously published\|cannot publish over"; then
+              echo "✓ Already published, skipping"
+            else
+              echo "✗ Failed to publish $pkg_name"
+              exit 1
+            fi
+          done

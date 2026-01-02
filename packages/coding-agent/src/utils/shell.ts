@@ -181,7 +181,11 @@ function getChildrenViaPgrep(pid: number): number[] {
 function getChildrenViaProc(pid: number): number[] {
 	try {
 		const result = Bun.spawnSync(
-			["sh", "-c", `for p in /proc/[0-9]*/stat; do cat "$p" 2>/dev/null; done | awk -v ppid=${pid} '$4 == ppid { print $1 }'`],
+			[
+				"sh",
+				"-c",
+				`for p in /proc/[0-9]*/stat; do cat "$p" 2>/dev/null; done | awk -v ppid=${pid} '$4 == ppid { print $1 }'`,
+			],
 			{ stdin: "ignore", stdout: "pipe", stderr: "ignore" },
 		);
 		if (result.exitCode !== 0 || !result.stdout) return [];
