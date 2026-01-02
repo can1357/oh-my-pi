@@ -7,6 +7,7 @@
 		"packages/web-ui/example"
 	],
 	"scripts": {
+		"dev:install": "bun install && bun --cwd=packages/coding-agent link && bun --cwd=packages/ai link && bun --cwd=packages/mom link && bun --cwd=packages/pods link",
 		"build": "bun --cwd=packages/web-ui run build:css",
 		"dev": "bun --cwd=packages/web-ui run dev",
 		"check": "biome check --write . && bun --cwd=packages/web-ui run check",
