@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Bash interceptor setting to block shell commands that have dedicated tools (disabled by default, enable via `/settings`)
+
+### Changed
+
+- Refactored settings UI to declarative definitions for easier maintenance
+- Shell detection now respects `$SHELL` environment variable before falling back to bash/sh
+- Tool binary detection now uses `Bun.which()` instead of spawning processes
+
+### Fixed
+
+- CLI help text now accurately lists all default tools
+
 ## [1.337.1] - 2026-01-02
 
 ### Added
