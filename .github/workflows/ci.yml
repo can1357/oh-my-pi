@@ -28,7 +28,7 @@ jobs:
         run: bun install
 
       - name: Build
-        run: bun run build
+        run: bun run build && bun --cwd=packages/coding-agent run build
 
       - name: Check (lint + typecheck)
         run: bun run check

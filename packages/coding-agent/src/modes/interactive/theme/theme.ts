@@ -107,8 +107,8 @@ const ThemeJsonSchema = Type.Object({
 
 type ThemeJson = Static<typeof ThemeJsonSchema>;
 
-// @ts-expect-error TypeBox CJS/ESM type mismatch
-const validateThemeJson = TypeCompiler.Compile(ThemeJsonSchema);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- TypeBox CJS/ESM type mismatch
+const validateThemeJson = TypeCompiler.Compile(ThemeJsonSchema as any);
 
 export type ThemeColor =
 	| "accent"

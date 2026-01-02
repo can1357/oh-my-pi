@@ -45,7 +45,7 @@ jobs:
         run: bun install
 
       - name: Build packages
-        run: bun run build
+        run: bun run build && bun --cwd=packages/coding-agent run build
 
       - name: Build standalone binary
         run: bun build packages/coding-agent/dist/cli.js --compile --target ${{ matrix.target }} --outfile ${{ matrix.artifact }}
@@ -79,7 +79,7 @@ jobs:
         run: bun install
 
       - name: Build
-        run: bun run build
+        run: bun run build && bun --cwd=packages/coding-agent run build
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
