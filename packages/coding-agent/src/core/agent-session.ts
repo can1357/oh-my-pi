@@ -1858,6 +1858,68 @@ export class AgentSession {
 		return text.trim() || undefined;
 	}
 
+	/**
+	 * Format the entire session as plain text for clipboard export.
+	 * Includes user messages, assistant text, thinking blocks, tool calls, and tool results.
+	 */
+	formatSessionAsText(): string {
+		const lines: string[] = [];
+
+		for (const msg of this.messages) {
+			if (msg.role === "user") {
+				lines.push("## User\n");
+				if (typeof msg.content === "string") {
+					lines.push(msg.content);
+				} else {
+					for (const c of msg.content) {
+						if (c.type === "text") {
+							lines.push(c.text);
+						} else if (c.type === "image") {
+							lines.push("[Image]");
+						}
+					}
+				}
+				lines.push("\n");
+			} else if (msg.role === "assistant") {
+				const assistantMsg = msg as AssistantMessage;
+				lines.push("## Assistant\n");
+
+				for (const c of assistantMsg.content) {
+					if (c.type === "text") {
+						lines.push(c.text);
+					} else if (c.type === "thinking") {
+						lines.push("<thinking>");
+						lines.push(c.thinking);
+						lines.push("</thinking>\n");
+					} else if (c.type === "toolCall") {
+						lines.push(`### Tool: ${c.name}`);
+						lines.push("```json");
+						lines.push(JSON.stringify(c.arguments, null, 2));
+						lines.push("```\n");
+					}
+				}
+				lines.push("");
+			} else if (msg.role === "toolResult") {
+				lines.push(`### Tool Result: ${msg.toolName}`);
+				if (msg.isError) {
+					lines.push("(error)");
+				}
+				for (const c of msg.content) {
+					if (c.type === "text") {
+						lines.push("```");
+						lines.push(c.text);
+						lines.push("```");
+					} else if (c.type === "image") {
+						lines.push("[Image output]");
+					}
+				}
+				lines.push("");
+			}
+		}
+
+		return lines.join("\n").trim();
+	}
+
 	// =========================================================================
 	// Hook System
 	// =========================================================================

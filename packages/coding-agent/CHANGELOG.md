@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/export --copy` option to copy entire session as formatted text to clipboard
+
 ## [1.341.0] - 2026-01-03
 ### Added
 

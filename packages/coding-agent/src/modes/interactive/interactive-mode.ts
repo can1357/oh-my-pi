@@ -185,7 +185,7 @@ export class InteractiveMode {
 		const slashCommands: SlashCommand[] = [
 			{ name: "settings", description: "Open settings menu" },
 			{ name: "model", description: "Select model (opens selector UI)" },
-			{ name: "export", description: "Export session to HTML file" },
+			{ name: "export", description: "Export session to HTML file or clipboard (--copy)" },
 			{ name: "share", description: "Share session as a secret GitHub gist" },
 			{ name: "copy", description: "Copy last agent message to clipboard" },
 			{ name: "session", description: "Show session info and stats" },
@@ -745,7 +745,7 @@ export class InteractiveMode {
 				return;
 			}
 			if (text.startsWith("/export")) {
-				this.handleExportCommand(text);
+				await this.handleExportCommand(text);
 				this.editor.setText("");
 				return;
 			}
@@ -2081,12 +2081,29 @@ export class InteractiveMode {
 	// Command handlers
 	// =========================================================================
 
-	private handleExportCommand(text: string): void {
+	private async handleExportCommand(text: string): Promise<void> {
 		const parts = text.split(/\s+/);
-		const outputPath = parts.length > 1 ? parts[1] : undefined;
+		const arg = parts.length > 1 ? parts[1] : undefined;
 
+		// Check for clipboard export
+		if (arg === "--copy" || arg === "clipboard" || arg === "copy") {
+			try {
+				const formatted = this.session.formatSessionAsText();
+				if (!formatted) {
+					this.showError("No messages to export yet.");
+					return;
+				}
+				await copyToClipboard(formatted);
+				this.showStatus("Session copied to clipboard");
+			} catch (error: unknown) {
+				this.showError(`Failed to copy session: ${error instanceof Error ? error.message : "Unknown error"}`);
+			}
+			return;
+		}
+
+		// HTML file export
 		try {
-			const filePath = this.session.exportToHtml(outputPath);
+			const filePath = this.session.exportToHtml(arg);
 			this.showStatus(`Session exported to: ${filePath}`);
 		} catch (error: unknown) {
 			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
