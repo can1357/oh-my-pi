@@ -33,6 +33,9 @@ export interface ScopedModel {
 /** Priority chain for auto-discovering small/fast models */
 export const SMALL_MODEL_PRIORITY = ["claude-haiku-4-5", "haiku", "flash", "mini"];
 
+/** Priority chain for auto-discovering slow/comprehensive models (reasoning, codex) */
+export const SLOW_MODEL_PRIORITY = ["gpt-5.2-codex", "gpt-5.2", "codex", "gpt", "opus", "pro"];
+
 /**
  * Parse a model string in "provider/modelId" format.
  * Returns undefined if the format is invalid.
@@ -438,6 +441,45 @@ export async function findSmallModel(
 
 	// 2. Try priority chain
 	for (const pattern of SMALL_MODEL_PRIORITY) {
+		// Try exact match first
+		const exactMatch = availableModels.find((m) => m.id.toLowerCase() === pattern.toLowerCase());
+		if (exactMatch) return exactMatch;
+
+		// Try fuzzy match (substring)
+		const fuzzyMatch = availableModels.find((m) => m.id.toLowerCase().includes(pattern.toLowerCase()));
+		if (fuzzyMatch) return fuzzyMatch;
+	}
+
+	// 3. Fallback to first available (same as default)
+	return availableModels[0];
+}
+
+/**
+ * Find a slow/comprehensive model using the priority chain.
+ * Prioritizes reasoning and codex models for thorough analysis.
+ *
+ * @param modelRegistry The model registry to search
+ * @param savedModel Optional saved model string from settings (provider/modelId)
+ * @returns The best available slow model, or undefined if none found
+ */
+export async function findSlowModel(
+	modelRegistry: ModelRegistry,
+	savedModel?: string,
+): Promise<Model<Api> | undefined> {
+	const availableModels = await modelRegistry.getAvailable();
+	if (availableModels.length === 0) return undefined;
+
+	// 1. Try saved model from settings
+	if (savedModel) {
+		const parsed = parseModelString(savedModel);
+		if (parsed) {
+			const match = availableModels.find((m) => m.provider === parsed.provider && m.id === parsed.id);
+			if (match) return match;
+		}
+	}
+
+	// 2. Try priority chain
+	for (const pattern of SLOW_MODEL_PRIORITY) {
 		// Try exact match first
 		const exactMatch = availableModels.find((m) => m.id.toLowerCase() === pattern.toLowerCase());
 		if (exactMatch) return exactMatch;

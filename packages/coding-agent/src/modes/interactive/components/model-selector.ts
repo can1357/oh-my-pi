@@ -33,6 +33,7 @@ export class ModelSelectorComponent extends Container {
 	private currentModel?: Model<any>;
 	private defaultModel?: Model<any>;
 	private smallModel?: Model<any>;
+	private slowModel?: Model<any>;
 	private settingsManager: SettingsManager;
 	private modelRegistry: ModelRegistry;
 	private onSelectCallback: (model: Model<any>, role: string) => void;
@@ -73,7 +74,7 @@ export class ModelSelectorComponent extends Container {
 				? "Showing models from --models scope"
 				: "Only showing models with configured API keys (see README for details)";
 		this.addChild(new Text(theme.fg("warning", hintText), 0, 0));
-		this.addChild(new Text(theme.fg("muted", "Enter: set default  S: set small  Esc: close"), 0, 0));
+		this.addChild(new Text(theme.fg("muted", "Enter: default  S: small  L: slow  Esc: close"), 0, 0));
 		this.addChild(new Spacer(1));
 
 		// Create search input
@@ -124,6 +125,15 @@ export class ModelSelectorComponent extends Container {
 			const parsed = parseModelString(smallStr);
 			if (parsed) {
 				this.smallModel = allModels.find((m) => m.provider === parsed.provider && m.id === parsed.id);
+			}
+		}
+
+		// Load slow model
+		const slowStr = roles.slow;
+		if (slowStr) {
+			const parsed = parseModelString(slowStr);
+			if (parsed) {
+				this.slowModel = allModels.find((m) => m.provider === parsed.provider && m.id === parsed.id);
 			}
 		}
 	}
@@ -202,11 +212,13 @@ export class ModelSelectorComponent extends Container {
 			const isSelected = i === this.selectedIndex;
 			const isDefault = modelsAreEqual(this.defaultModel, item.model);
 			const isSmall = modelsAreEqual(this.smallModel, item.model);
+			const isSlow = modelsAreEqual(this.slowModel, item.model);
 
-			// Build role markers: ✓ for default, ⚡ for small
+			// Build role markers: ✓ for default, ⚡ for small, 🧠 for slow
 			let markers = "";
 			if (isDefault) markers += theme.fg("success", " ✓");
 			if (isSmall) markers += theme.fg("warning", " ⚡");
+			if (isSlow) markers += theme.fg("accent", " 🧠");
 
 			let line = "";
 			if (isSelected) {
@@ -268,6 +280,13 @@ export class ModelSelectorComponent extends Container {
 				this.handleSelect(selectedModel.model, "small");
 			}
 		}
+		// L key - set as slow model (don't close)
+		else if (keyData === "l" || keyData === "L") {
+			const selectedModel = this.filteredModels[this.selectedIndex];
+			if (selectedModel) {
+				this.handleSelect(selectedModel.model, "slow");
+			}
+		}
 		// Escape - close
 		else if (isEscape(keyData)) {
 			this.onCancelCallback();
@@ -288,6 +307,8 @@ export class ModelSelectorComponent extends Container {
 			this.defaultModel = model;
 		} else if (role === "small") {
 			this.smallModel = model;
+		} else if (role === "slow") {
+			this.slowModel = model;
 		}
 
 		// Notify caller (for updating agent state if needed)

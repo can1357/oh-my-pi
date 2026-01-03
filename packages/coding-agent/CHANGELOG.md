@@ -12,11 +12,12 @@
 
 ### Added
 
-- Model roles: Configure different models for different purposes (default, small, etc.) via `/model` selector
-- Model selector dual-key binding: Enter sets default model, S sets small model, Escape closes
-- Model selector shows role markers: checkmark for default, lightning bolt for small
-- `pi/<role>` model aliases in Task tool agent definitions (e.g., `model: pi/small, haiku, flash, mini`)
+- Model roles: Configure different models for different purposes (default, small, slow) via `/model` selector
+- Model selector key bindings: Enter sets default, S sets small, L sets slow, Escape closes
+- Model selector shows role markers: ✓ for default, ⚡ for small, 🧠 for slow
+- `pi/<role>` model aliases in Task tool agent definitions (e.g., `model: pi/smol, haiku, flash, mini`)
 - Small model auto-discovery using priority chain: haiku > flash > mini
+- Slow model auto-discovery using priority chain: gpt-5.2-codex > codex > gpt > opus > pro
 - Title generation now uses configured small model from settings
 
 - LSP diagnostics on edit: Edit tool can now return LSP diagnostics after editing code files. Disabled by default to avoid noise during multi-edit sequences. Enable via `lsp.diagnosticsOnEdit` setting.
