@@ -14,7 +14,8 @@
 		"dev:example": "bun --cwd=example run dev",
 		"dev": "bun run dev:css & bun run dev:example",
 		"build:css": "tailwindcss -i ./src/app.css -o ./dist/app.css --minify",
-		"check": "biome check --write . && tsgo --noEmit && bun --cwd=example run check"
+		"check": "biome check --write . && tsgo --noEmit && bun --cwd=example run check",
+		"fix": "biome check --write --unsafe . && bun --cwd=example run fix"
 	},
 	"dependencies": {
 		"@lmstudio/sdk": "^1.5.0",

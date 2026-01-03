@@ -11,6 +11,7 @@
 		"build": "bun --cwd=packages/web-ui run build:css",
 		"dev": "bun --cwd=packages/web-ui run dev",
 		"check": "biome check --write . && bun --cwd=packages/coding-agent run check && bun --cwd=packages/web-ui run check",
+		"fix": "biome check --write --unsafe . && bun --cwd=packages/web-ui run fix",
 		"test": "bun run --filter '*' test",
 		"version:patch": "npm version patch -ws --no-git-tag-version && bun scripts/sync-versions.js && rm -rf node_modules packages/*/node_modules bun.lockb && bun install",
 		"version:minor": "npm version minor -ws --no-git-tag-version && bun scripts/sync-versions.js && rm -rf node_modules packages/*/node_modules bun.lockb && bun install",

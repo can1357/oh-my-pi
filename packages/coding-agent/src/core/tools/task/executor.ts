@@ -232,6 +232,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	let stderr = "";
 	let finalOutput = "";
 	let resolved = false;
+	let pendingTermination = false; // Set when shouldTerminate fires, wait for message_end
 	const jsonlEvents: string[] = [];
 
 	// Handle abort signal
@@ -308,8 +309,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 								isError: event.isError,
 							})
 						) {
-							proc.kill("SIGTERM");
-							resolved = true;
+							// Don't kill immediately - wait for message_end to get token counts
+							pendingTermination = true;
+							// Safety timeout in case message_end never arrives
+							setTimeout(() => {
+								if (!resolved) {
+									proc.kill("SIGTERM");
+									resolved = true;
+								}
+							}, 2000);
 						}
 					}
 					break;
@@ -345,7 +353,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					// Extract usage (prefer message.usage, fallback to event.usage)
 					const messageUsage = event.message?.usage || event.usage;
 					if (messageUsage) {
-						progress.tokens = (messageUsage.input_tokens || 0) + (messageUsage.output_tokens || 0);
+						// Accumulate tokens across messages (not overwrite)
+						progress.tokens += (messageUsage.input_tokens || 0) + (messageUsage.output_tokens || 0);
+					}
+					// If pending termination, now we have tokens - terminate
+					if (pendingTermination && !resolved) {
+						proc.kill("SIGTERM");
+						resolved = true;
 					}
 					break;
 				}

@@ -57,7 +57,6 @@ export interface ReviewSummary {
 	overall_correctness: "correct" | "incorrect";
 	explanation: string;
 	confidence: number;
-	findings_count: number;
 }
 
 /** Structured review data extracted from reviewer agent */

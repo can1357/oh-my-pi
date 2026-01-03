@@ -22,6 +22,10 @@ export class Text implements Component {
 		this.customBgFn = customBgFn;
 	}
 
+	getText(): string {
+		return this.text;
+	}
+
 	setText(text: string): void {
 		this.text = text;
 		this.cachedText = undefined;

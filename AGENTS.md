@@ -272,10 +272,12 @@ See `docs/bun-migration-guide.md` for full migration reference.
 
 ## Commands
 
-- After code changes: `npm run check` (get full output, no tail)
-- NEVER run: `npm run dev`, `npm run build`, `npm test`
-- Only run specific tests if user instructs: `npm test -- test/specific.test.ts`
+- After code changes: `bun run check` (get full output, no tail)
+- For auto-fixable lint issues: `bun run fix` (includes unsafe fixes)
+- NEVER run: `bun run dev`, `bun run build`, `bun test`
+- Only run specific tests if user instructs: `bun test test/specific.test.ts`
 - NEVER commit unless user asks
+- Do NOT use `tsc` or `npx tsc` - always use `bun run check` which runs the correct type checker
 
 ## GitHub Issues
 

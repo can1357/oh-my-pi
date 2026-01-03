@@ -1,9 +1,10 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Added
 
+- Added subprocess tool registry for extracting and rendering tool data from subprocess agents in real-time
+- Added combined review result rendering showing verdict and findings in a tree structure
 - Auto-read file mentions: Reference files with `@path/to/file.ext` syntax in prompts to automatically inject their contents, eliminating manual Read tool calls
 - Added `hidden` property for custom tools to exclude them from default tool list unless explicitly requested
 - Added `explicitTools` option to `createAgentSession` for enabling hidden tools by name
@@ -16,8 +17,17 @@
 
 ### Changed
 
+- Changed `/review` command from markdown to interactive TypeScript with mode selection menu (branch comparison, uncommitted changes, commit review, custom)
+- Changed bundled commands to be overridable by user/project commands with same name
+- Changed subprocess termination to wait for message_end event to capture accurate token counts
+- Changed token counting in subprocess to accumulate across messages instead of overwriting
 - Updated bundled `reviewer` agent to use structured review tools with priority-based findings (P0-P3) and formal verdict submission
 - Task tool now streams artifacts in real-time: input written before spawn, session jsonl written by subprocess, output written at completion
+
+### Removed
+
+- Removed `findings_count` parameter from `submit_review` tool - findings are now counted automatically
+- Removed artifacts location display from task tool output
 
 ### Fixed
 

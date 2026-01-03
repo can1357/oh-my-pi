@@ -91,7 +91,7 @@ export type CustomCommandFactory = (
 ) => CustomCommand | CustomCommand[] | Promise<CustomCommand | CustomCommand[]>;
 
 /** Source of a loaded custom command */
-export type CustomCommandSource = "user" | "project";
+export type CustomCommandSource = "bundled" | "user" | "project";
 
 /** Loaded custom command with metadata */
 export interface LoadedCustomCommand {

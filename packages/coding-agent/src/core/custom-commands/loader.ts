@@ -11,6 +11,7 @@ import * as typebox from "@sinclair/typebox";
 import { CONFIG_DIR_NAME, getAgentDir } from "../../config";
 import * as piCodingAgent from "../../index";
 import { execCommand } from "../exec";
+import { createReviewCommand } from "./bundled/review";
 import type {
 	CustomCommand,
 	CustomCommandAPI,
@@ -142,6 +143,24 @@ export interface LoadCustomCommandsOptions {
 }
 
 /**
+ * Load bundled commands (shipped with pi-coding-agent).
+ */
+function loadBundledCommands(sharedApi: CustomCommandAPI): LoadedCustomCommand[] {
+	const bundled: LoadedCustomCommand[] = [];
+
+	// Add bundled commands here
+	const reviewCommand = createReviewCommand(sharedApi);
+	bundled.push({
+		path: "bundled:review",
+		resolvedPath: "bundled:review",
+		command: reviewCommand,
+		source: "bundled",
+	});
+
+	return bundled;
+}
+
+/**
  * Discover and load custom commands from standard locations.
  */
 export async function loadCustomCommands(options: LoadCustomCommandsOptions = {}): Promise<CustomCommandsLoadResult> {
@@ -163,6 +182,13 @@ export async function loadCustomCommands(options: LoadCustomCommandsOptions = {}
 		pi: piCodingAgent,
 	};
 
+	// 1. Load bundled commands first (lowest priority - can be overridden)
+	for (const loaded of loadBundledCommands(sharedApi)) {
+		seenNames.add(loaded.command.name);
+		commands.push(loaded);
+	}
+
+	// 2. Load user/project commands (can override bundled)
 	for (const { path: commandPath, source } of paths) {
 		const { commands: loadedCommands, error } = await loadCommandModule(commandPath, cwd, sharedApi);
 
@@ -173,13 +199,22 @@ export async function loadCustomCommands(options: LoadCustomCommandsOptions = {}
 
 		if (loadedCommands) {
 			for (const command of loadedCommands) {
-				// Check for name conflicts
-				if (seenNames.has(command.name)) {
-					errors.push({
-						path: commandPath,
-						error: `Command name "${command.name}" conflicts with existing command`,
-					});
-					continue;
+				// Allow overriding bundled commands, but not user/project conflicts
+				const existingIdx = commands.findIndex((c) => c.command.name === command.name);
+				if (existingIdx !== -1) {
+					const existing = commands[existingIdx];
+					if (existing.source === "bundled") {
+						// Override bundled command
+						commands.splice(existingIdx, 1);
+						seenNames.delete(command.name);
+					} else {
+						// Conflict between user/project commands
+						errors.push({
+							path: commandPath,
+							error: `Command name "${command.name}" conflicts with existing command`,
+						});
+						continue;
+					}
 				}
 
 				seenNames.add(command.name);

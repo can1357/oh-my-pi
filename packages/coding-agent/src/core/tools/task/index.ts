@@ -30,6 +30,9 @@ import {
 	taskSchema,
 } from "./types";
 
+// Import review tools for side effects (registers subprocess tool handlers)
+import "../review";
+
 /** Session context interface */
 interface SessionContext {
 	getSessionFile: () => string | null;

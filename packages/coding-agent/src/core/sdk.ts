@@ -582,12 +582,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const contextFiles = options.contextFiles ?? discoverContextFiles(cwd, agentDir);
 	time("discoverContextFiles");
 
-	// Hook runner - created early for hooks
-	let hookRunner: HookRunner | undefined;
+	// Hook runner - always created (needed for custom command context even without hooks)
+	let loadedHooks: LoadedHook[] = [];
 	if (options.hooks !== undefined) {
 		if (options.hooks.length > 0) {
-			const loadedHooks = createLoadedHooksFromDefinitions(options.hooks);
-			hookRunner = new HookRunner(loadedHooks, cwd, sessionManager, modelRegistry);
+			loadedHooks = createLoadedHooksFromDefinitions(options.hooks);
 		}
 	} else {
 		// Discover hooks, merging with additional paths
@@ -597,10 +596,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		for (const { path, error } of errors) {
 			console.error(`Failed to load hook "${path}": ${error}`);
 		}
-		if (hooks.length > 0) {
-			hookRunner = new HookRunner(hooks, cwd, sessionManager, modelRegistry);
-		}
+		loadedHooks = hooks;
 	}
+	const hookRunner = new HookRunner(loadedHooks, cwd, sessionManager, modelRegistry);
 
 	const sessionContext = {
 		getSessionFile: () => sessionManager.getSessionFile() ?? null,

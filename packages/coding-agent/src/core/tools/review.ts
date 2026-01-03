@@ -18,7 +18,7 @@ const PRIORITY_LABELS: Record<number, string> = {
 	3: "P3",
 };
 
-const PRIORITY_DESCRIPTIONS: Record<number, string> = {
+const _PRIORITY_DESCRIPTIONS: Record<number, string> = {
 	0: "Drop everything to fix. Blocking release, operations, or major usage.",
 	1: "Urgent. Should be addressed in the next cycle.",
 	2: "Normal. To be fixed eventually.",
@@ -121,16 +121,12 @@ const SubmitReviewParams = Type.Object({
 		maximum: 1,
 		description: "Overall confidence score 0.0-1.0",
 	}),
-	findings_count: Type.Number({
-		description: "Total number of findings reported",
-	}),
 });
 
 interface SubmitReviewDetails {
 	overall_correctness: "correct" | "incorrect";
 	explanation: string;
 	confidence: number;
-	findings_count: number;
 }
 
 export const submitReviewTool: AgentTool<typeof SubmitReviewParams, SubmitReviewDetails, Theme> = {
@@ -141,17 +137,16 @@ export const submitReviewTool: AgentTool<typeof SubmitReviewParams, SubmitReview
 	hidden: true,
 
 	async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-		const { overall_correctness, explanation, confidence, findings_count } = params;
+		const { overall_correctness, explanation, confidence } = params;
 
 		let summary = `## Review Summary\n\n`;
 		summary += `**Verdict:** ${overall_correctness === "correct" ? "✓ Patch is correct" : "✗ Patch is incorrect"}\n`;
-		summary += `**Confidence:** ${(confidence * 100).toFixed(0)}%\n`;
-		summary += `**Findings:** ${findings_count}\n\n`;
+		summary += `**Confidence:** ${(confidence * 100).toFixed(0)}%\n\n`;
 		summary += explanation;
 
 		return {
 			content: [{ type: "text", text: summary }],
-			details: { overall_correctness, explanation, confidence, findings_count },
+			details: { overall_correctness, explanation, confidence },
 		};
 	},
 
@@ -184,11 +179,6 @@ export const submitReviewTool: AgentTool<typeof SubmitReviewParams, SubmitReview
 			),
 		);
 
-		if (details.findings_count > 0) {
-			container.addChild(new Spacer(1));
-			container.addChild(new Text(theme.fg("muted", `${details.findings_count} finding(s) reported`), 0, 0));
-		}
-
 		if (expanded) {
 			container.addChild(new Spacer(1));
 			container.addChild(new Text(theme.fg("dim", details.explanation), 0, 0));
@@ -205,3 +195,74 @@ export function createReportFindingTool(): AgentTool<typeof ReportFindingParams,
 export function createSubmitReviewTool(): AgentTool<typeof SubmitReviewParams, SubmitReviewDetails, Theme> {
 	return submitReviewTool;
 }
+
+// Re-export types for external use
+export type { ReportFindingDetails, SubmitReviewDetails };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Subprocess tool handlers - registered for extraction/rendering in task tool
+// ─────────────────────────────────────────────────────────────────────────────
+
+import path from "node:path";
+import { subprocessToolRegistry } from "./task/subprocess-tool-registry";
+
+// Register report_finding handler
+subprocessToolRegistry.register<ReportFindingDetails>("report_finding", {
+	extractData: (event) => event.result?.details as ReportFindingDetails | undefined,
+
+	renderInline: (data, theme) => {
+		const priority = PRIORITY_LABELS[data.priority] ?? "P?";
+		const color = data.priority === 0 ? "error" : data.priority === 1 ? "warning" : "muted";
+		const titleText = data.title.replace(/^\[P\d\]\s*/, "");
+		const loc = `${path.basename(data.file_path)}:${data.line_start}`;
+		return new Text(`${theme.fg(color, `[${priority}]`)} ${titleText} ${theme.fg("dim", loc)}`, 0, 0);
+	},
+
+	renderFinal: (allData, theme, expanded) => {
+		const container = new Container();
+		const displayCount = expanded ? allData.length : Math.min(3, allData.length);
+
+		for (let i = 0; i < displayCount; i++) {
+			const data = allData[i];
+			const priority = PRIORITY_LABELS[data.priority] ?? "P?";
+			const color = data.priority === 0 ? "error" : data.priority === 1 ? "warning" : "muted";
+			const titleText = data.title.replace(/^\[P\d\]\s*/, "");
+			const loc = `${path.basename(data.file_path)}:${data.line_start}`;
+
+			container.addChild(
+				new Text(`  ${theme.fg(color, `[${priority}]`)} ${titleText} ${theme.fg("dim", loc)}`, 0, 0),
+			);
+
+			if (expanded && data.body) {
+				container.addChild(new Text(`    ${theme.fg("dim", data.body)}`, 0, 0));
+			}
+		}
+
+		if (allData.length > displayCount) {
+			container.addChild(new Text(theme.fg("dim", `  ... ${allData.length - displayCount} more findings`), 0, 0));
+		}
+
+		return container;
+	},
+});
+
+// Register submit_review handler
+subprocessToolRegistry.register<SubmitReviewDetails>("submit_review", {
+	extractData: (event) => event.result?.details as SubmitReviewDetails | undefined,
+
+	// Terminate subprocess after review is submitted
+	shouldTerminate: () => true,
+
+	renderInline: (data, theme) => {
+		const verdictColor = data.overall_correctness === "correct" ? "success" : "error";
+		const verdictIcon = data.overall_correctness === "correct" ? "✓" : "✗";
+		return new Text(
+			`${theme.fg(verdictColor, verdictIcon)} Review: ${theme.fg(verdictColor, data.overall_correctness)} (${(data.confidence * 100).toFixed(0)}%)`,
+			0,
+			0,
+		);
+	},
+
+	// Note: renderFinal is NOT used for submit_review - we use the combined
+	// renderReviewResult in render.ts to show verdict + findings together
+});

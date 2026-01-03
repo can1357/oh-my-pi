@@ -10,8 +10,17 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { Container, Text } from "@oh-my-pi/pi-tui";
 import type { Theme } from "../../../modes/interactive/theme/theme";
 import type { RenderResultOptions } from "../../custom-tools/types";
+import type { ReportFindingDetails, SubmitReviewDetails } from "../review";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import type { AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "./types";
+
+/** Priority labels for review findings */
+const PRIORITY_LABELS: Record<number, string> = {
+	0: "P0",
+	1: "P1",
+	2: "P2",
+	3: "P3",
+};
 
 /**
  * Format token count for display (e.g., 1.5k, 25k).
@@ -161,6 +170,78 @@ function renderAgentProgress(progress: AgentProgress, isLast: boolean, expanded:
 }
 
 /**
+ * Render review result with combined verdict + findings in tree structure.
+ */
+function renderReviewResult(
+	summary: SubmitReviewDetails,
+	findings: ReportFindingDetails[],
+	continuePrefix: string,
+	expanded: boolean,
+	theme: Theme,
+): string[] {
+	const lines: string[] = [];
+
+	// Verdict line
+	const verdictColor = summary.overall_correctness === "correct" ? "success" : "error";
+	const verdictIcon = summary.overall_correctness === "correct" ? "✓" : "✗";
+	lines.push(
+		`${continuePrefix}${theme.fg(verdictColor, verdictIcon)} Patch is ${theme.fg(verdictColor, summary.overall_correctness)} ${theme.fg("dim", `(${(summary.confidence * 100).toFixed(0)}% confidence)`)}`,
+	);
+
+	// Explanation preview (first ~80 chars when collapsed, full when expanded)
+	if (summary.explanation) {
+		if (expanded) {
+			// Full explanation, wrapped
+			const explanationLines = summary.explanation.split("\n");
+			for (const line of explanationLines) {
+				lines.push(`${continuePrefix}${theme.fg("dim", line)}`);
+			}
+		} else {
+			// Preview: first sentence or ~100 chars
+			const preview = truncate(`${summary.explanation.split(/[.!?]/)[0]}.`, 100);
+			lines.push(`${continuePrefix}${theme.fg("dim", preview)}`);
+		}
+	}
+
+	// Findings in tree structure
+	if (findings.length > 0) {
+		lines.push(`${continuePrefix}`); // Spacing
+		const displayCount = expanded ? findings.length : Math.min(3, findings.length);
+
+		for (let i = 0; i < displayCount; i++) {
+			const finding = findings[i];
+			const isLastFinding = i === displayCount - 1 && (expanded || findings.length <= 3);
+			const findingPrefix = isLastFinding ? "└─" : "├─";
+			const findingContinue = isLastFinding ? "   " : "│  ";
+
+			const priority = PRIORITY_LABELS[finding.priority] ?? "P?";
+			const color = finding.priority === 0 ? "error" : finding.priority === 1 ? "warning" : "muted";
+			const titleText = finding.title.replace(/^\[P\d\]\s*/, "");
+			const loc = `${path.basename(finding.file_path)}:${finding.line_start}`;
+
+			lines.push(
+				`${continuePrefix}${findingPrefix} ${theme.fg(color, `[${priority}]`)} ${titleText} ${theme.fg("dim", loc)}`,
+			);
+
+			// Show body when expanded
+			if (expanded && finding.body) {
+				// Wrap body text
+				const bodyLines = finding.body.split("\n");
+				for (const bodyLine of bodyLines) {
+					lines.push(`${continuePrefix}${findingContinue}${theme.fg("dim", bodyLine)}`);
+				}
+			}
+		}
+
+		if (!expanded && findings.length > 3) {
+			lines.push(`${continuePrefix}${theme.fg("dim", `... ${findings.length - 3} more findings`)}`);
+		}
+	}
+
+	return lines;
+}
+
+/**
  * Render final result for a single agent.
  */
 function renderAgentResult(result: SingleResult, isLast: boolean, expanded: boolean, theme: Theme): string[] {
@@ -177,7 +258,9 @@ function renderAgentResult(result: SingleResult, isLast: boolean, expanded: bool
 	// Main status line
 	let statusLine = `${prefix} ${theme.fg(iconColor, icon)} ${theme.fg("accent", result.agent)}`;
 	statusLine += `: ${theme.fg(iconColor, statusText)}`;
-	statusLine += ` · ${theme.fg("dim", `${formatTokens(result.tokens)} tokens`)}`;
+	if (result.tokens > 0) {
+		statusLine += ` · ${theme.fg("dim", `${formatTokens(result.tokens)} tokens`)}`;
+	}
 	statusLine += ` · ${theme.fg("dim", formatDuration(result.durationMs))}`;
 
 	if (result.truncated) {
@@ -186,10 +269,25 @@ function renderAgentResult(result: SingleResult, isLast: boolean, expanded: bool
 
 	lines.push(statusLine);
 
-	// Check for extracted tool data with custom renderers
+	// Check for review result (submit_review + report_finding)
+	const submitReviewData = result.extractedToolData?.submit_review as SubmitReviewDetails[] | undefined;
+	const reportFindingData = result.extractedToolData?.report_finding as ReportFindingDetails[] | undefined;
+
+	if (submitReviewData && submitReviewData.length > 0) {
+		// Use combined review renderer
+		const summary = submitReviewData[submitReviewData.length - 1];
+		const findings = reportFindingData ?? [];
+		lines.push(...renderReviewResult(summary, findings, continuePrefix, expanded, theme));
+		return lines;
+	}
+
+	// Check for extracted tool data with custom renderers (skip review tools)
 	let hasCustomRendering = false;
 	if (result.extractedToolData) {
 		for (const [toolName, dataArray] of Object.entries(result.extractedToolData)) {
+			// Skip review tools - handled above
+			if (toolName === "submit_review" || toolName === "report_finding") continue;
+
 			const handler = subprocessToolRegistry.getHandler(toolName);
 			if (handler?.renderFinal && (dataArray as unknown[]).length > 0) {
 				hasCustomRendering = true;
@@ -287,11 +385,7 @@ export function renderResult(
 		summary += ` · ${theme.fg("dim", formatDuration(details.totalDurationMs))}`;
 		lines.push(summary);
 
-		// Artifacts location
-		if (details.outputPaths && details.outputPaths.length > 0) {
-			const artifactsDir = path.dirname(details.outputPaths[0]);
-			lines.push(`${theme.fg("dim", "Artifacts:")} ${theme.fg("muted", artifactsDir)}`);
-		}
+		// Artifacts suppressed from user view - available via session file
 	}
 
 	if (lines.length === 0) {
