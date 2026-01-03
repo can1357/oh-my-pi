@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/hero.png" alt="Pi Monorepo">
+  <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/hero.png?raw=true" alt="Pi Monorepo">
 </p>
 
 <p align="center">
@@ -23,7 +23,7 @@
 ## + LSP Integration (Language Server Protocol)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/lspv.webp" alt="lsp">
+  <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/lspv.webp?raw=true" alt="lsp">
 </p>
 
 Full IDE-like code intelligence with automatic formatting and diagnostics:
@@ -38,7 +38,7 @@ Full IDE-like code intelligence with automatic formatting and diagnostics:
 ## + Task Tool (Subagent System)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/task.webp" alt="task">
+  <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/task.webp?raw=true" alt="task">
 </p>
 
 Parallel execution framework with specialized agents and real-time streaming:
@@ -53,7 +53,7 @@ Parallel execution framework with specialized agents and real-time streaming:
 ## + Model Roles
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/models.webp" alt="models">
+  <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/models.webp?raw=true" alt="models">
 </p>
 
 Configure different models for different purposes with automatic discovery:
@@ -67,7 +67,7 @@ Configure different models for different purposes with automatic discovery:
 ## + Ask Tool (Interactive Questioning)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/ask.webp" alt="ask">
+  <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/ask.webp?raw=true" alt="ask">
 </p>
 
 Structured user interaction with typed options:
@@ -78,7 +78,7 @@ Structured user interaction with typed options:
 ## + Interactive Code Review
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/review.webp" alt="review">
+  <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/review.webp?raw=true" alt="review">
 </p>
 
 Structured code review with priority-based findings:
@@ -91,7 +91,7 @@ Structured code review with priority-based findings:
 ## + Custom TypeScript Slash Commands
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/slash.webp" alt="slash">
+  <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/slash.webp?raw=true" alt="slash">
 </p>
 
 Programmable commands with full API access:
@@ -105,7 +105,7 @@ Programmable commands with full API access:
 ## + MCP & Plugin System
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/perplexity.webp" alt="perplexity">
+  <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/perplexity.webp?raw=true" alt="perplexity">
 </p>
 
 Full Model Context Protocol support with external tool integration:
@@ -118,7 +118,7 @@ Full Model Context Protocol support with external tool integration:
 ## + Web Search & Fetch
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/arxiv.webp" alt="arxiv">
+  <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/arxiv.webp?raw=true" alt="arxiv">
 </p>
 
 Multi-provider search and full-page scraping:
