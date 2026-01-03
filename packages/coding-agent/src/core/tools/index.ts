@@ -1,12 +1,12 @@
-export { type AskToolDetails, askTool, createAskTool } from "./ask.js";
-export { type BashToolDetails, bashTool, createBashTool } from "./bash.js";
-export { createEditTool, type EditToolOptions, editTool } from "./edit.js";
+export { type AskToolDetails, askTool, createAskTool } from "./ask";
+export { type BashToolDetails, bashTool, createBashTool } from "./bash";
+export { createEditTool, type EditToolOptions, editTool } from "./edit";
 // Exa MCP tools (22 tools)
-export { exaTools } from "./exa/index.js";
-export type { ExaRenderDetails, ExaSearchResponse, ExaSearchResult } from "./exa/types.js";
-export { createFindTool, type FindToolDetails, findTool } from "./find.js";
-export { createGrepTool, type GrepToolDetails, grepTool } from "./grep.js";
-export { createLsTool, type LsToolDetails, lsTool } from "./ls.js";
+export { exaTools } from "./exa/index";
+export type { ExaRenderDetails, ExaSearchResponse, ExaSearchResult } from "./exa/types";
+export { createFindTool, type FindToolDetails, findTool } from "./find";
+export { createGrepTool, type GrepToolDetails, grepTool } from "./grep";
+export { createLsTool, type LsToolDetails, lsTool } from "./ls";
 export {
 	createLspTool,
 	type FileDiagnosticsResult,
@@ -19,12 +19,13 @@ export {
 	type LspWarmupResult,
 	lspTool,
 	warmupLspServers,
-} from "./lsp/index.js";
-export { createNotebookTool, type NotebookToolDetails, notebookTool } from "./notebook.js";
-export { createReadTool, type ReadToolDetails, readTool } from "./read.js";
-export { BUNDLED_AGENTS, createTaskTool, taskTool } from "./task/index.js";
-export type { TruncationResult } from "./truncate.js";
-export { createWebFetchTool, type WebFetchToolDetails, webFetchCustomTool, webFetchTool } from "./web-fetch.js";
+} from "./lsp/index";
+export { createNotebookTool, type NotebookToolDetails, notebookTool } from "./notebook";
+export { createReadTool, type ReadToolDetails, readTool } from "./read";
+export { createReportFindingTool, createSubmitReviewTool, reportFindingTool, submitReviewTool } from "./review";
+export { BUNDLED_AGENTS, createTaskTool, taskTool } from "./task/index";
+export type { TruncationResult } from "./truncate";
+export { createWebFetchTool, type WebFetchToolDetails, webFetchCustomTool, webFetchTool } from "./web-fetch";
 export {
 	companyWebSearchTools,
 	createWebSearchTool,
@@ -42,24 +43,25 @@ export {
 	webSearchDeepTool,
 	webSearchLinkedinTool,
 	webSearchTool,
-} from "./web-search/index.js";
-export { createWriteTool, type WriteToolDetails, type WriteToolOptions, writeTool } from "./write.js";
+} from "./web-search/index";
+export { createWriteTool, type WriteToolDetails, type WriteToolOptions, writeTool } from "./write";
 
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
-import { askTool, createAskTool } from "./ask.js";
-import { bashTool, createBashTool } from "./bash.js";
-import { checkBashInterception, checkSimpleLsInterception } from "./bash-interceptor.js";
-import { createEditTool, editTool } from "./edit.js";
-import { createFindTool, findTool } from "./find.js";
-import { createGrepTool, grepTool } from "./grep.js";
-import { createLsTool, lsTool } from "./ls.js";
-import { createLspTool, formatFile, getDiagnosticsForFile, lspTool } from "./lsp/index.js";
-import { createNotebookTool, notebookTool } from "./notebook.js";
-import { createReadTool, readTool } from "./read.js";
-import { createTaskTool, taskTool } from "./task/index.js";
-import { createWebFetchTool, webFetchTool } from "./web-fetch.js";
-import { createWebSearchTool, webSearchTool } from "./web-search/index.js";
-import { createWriteTool, writeTool } from "./write.js";
+import { askTool, createAskTool } from "./ask";
+import { bashTool, createBashTool } from "./bash";
+import { checkBashInterception, checkSimpleLsInterception } from "./bash-interceptor";
+import { createEditTool, editTool } from "./edit";
+import { createFindTool, findTool } from "./find";
+import { createGrepTool, grepTool } from "./grep";
+import { createLsTool, lsTool } from "./ls";
+import { createLspTool, formatFile, getDiagnosticsForFile, lspTool } from "./lsp/index";
+import { createNotebookTool, notebookTool } from "./notebook";
+import { createReadTool, readTool } from "./read";
+import { createReportFindingTool, createSubmitReviewTool, reportFindingTool, submitReviewTool } from "./review";
+import { createTaskTool, taskTool } from "./task/index";
+import { createWebFetchTool, webFetchTool } from "./web-fetch";
+import { createWebSearchTool, webSearchTool } from "./web-search/index";
+import { createWriteTool, writeTool } from "./write";
 
 /** Tool type (AgentTool from pi-ai) */
 export type Tool = AgentTool<any, any, any>;
@@ -118,6 +120,8 @@ const toolDefs: Record<string, { tool: Tool; create: ToolFactory }> = {
 	task: { tool: taskTool, create: (cwd, ctx) => createTaskTool(cwd, ctx) },
 	web_fetch: { tool: webFetchTool, create: createWebFetchTool },
 	web_search: { tool: webSearchTool, create: createWebSearchTool },
+	report_finding: { tool: reportFindingTool, create: createReportFindingTool },
+	submit_review: { tool: submitReviewTool, create: createSubmitReviewTool },
 };
 
 export type ToolName = keyof typeof toolDefs;
