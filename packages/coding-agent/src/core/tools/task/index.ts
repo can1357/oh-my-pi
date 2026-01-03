@@ -25,6 +25,7 @@ import {
 	MAX_AGENTS_IN_DESCRIPTION,
 	MAX_CONCURRENCY,
 	MAX_PARALLEL_TASKS,
+	PI_BLOCKED_AGENT_ENV,
 	PI_NO_SUBAGENTS_ENV,
 	type TaskToolDetails,
 	taskSchema,
@@ -172,7 +173,7 @@ export function createTaskTool(
 	cwd: string,
 	sessionContext?: SessionContext,
 ): AgentTool<typeof taskSchema, TaskToolDetails, Theme> {
-	// Check if subagents are inhibited (recursion prevention)
+	// Check if subagents are completely inhibited (legacy recursion prevention)
 	if (process.env[PI_NO_SUBAGENTS_ENV]) {
 		return {
 			name: "task",
@@ -189,6 +190,9 @@ export function createTaskTool(
 			}),
 		};
 	}
+
+	// Check for same-agent blocking (allows other agent types)
+	const blockedAgent = process.env[PI_BLOCKED_AGENT_ENV];
 
 	return {
 		name: "task",
@@ -261,7 +265,31 @@ export function createTaskTool(
 			};
 
 			try {
-				const tasks = params.tasks;
+				let tasks = params.tasks;
+				let skippedSelfRecursion = 0;
+
+				// Filter out blocked agent (self-recursion prevention)
+				if (blockedAgent) {
+					const blockedTasks = tasks.filter((t) => t.agent === blockedAgent);
+					tasks = tasks.filter((t) => t.agent !== blockedAgent);
+					skippedSelfRecursion = blockedTasks.length;
+
+					if (skippedSelfRecursion > 0 && tasks.length === 0) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Cannot spawn ${blockedAgent} agent from within itself (recursion prevention). Use a different agent type.`,
+								},
+							],
+							details: {
+								projectAgentsDir,
+								results: [],
+								totalDurationMs: Date.now() - startTime,
+							},
+						};
+					}
+				}
 
 				// Validate all agents exist
 				for (const task of tasks) {
@@ -344,7 +372,11 @@ export function createTaskTool(
 					return `[${r.agent}] ${status} → ${outputPaths[i]}\n${preview}`;
 				});
 
-				const summary = `${successCount}/${results.length} succeeded [${formatDuration(totalDuration)}]\n\n${summaries.join("\n\n---\n\n")}`;
+				const skippedNote =
+					skippedSelfRecursion > 0
+						? ` (${skippedSelfRecursion} ${blockedAgent} task${skippedSelfRecursion > 1 ? "s" : ""} skipped - self-recursion blocked)`
+						: "";
+				const summary = `${successCount}/${results.length} succeeded${skippedNote} [${formatDuration(totalDuration)}]\n\n${summaries.join("\n\n---\n\n")}`;
 
 				// Cleanup temp directory if used
 				if (tempArtifactsDir) {

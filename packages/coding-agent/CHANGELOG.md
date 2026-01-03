@@ -1,8 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Added
 
+- Added `task` tool to reviewer agent, enabling parallel exploration of large codebases during reviews
 - Added subprocess tool registry for extracting and rendering tool data from subprocess agents in real-time
 - Added combined review result rendering showing verdict and findings in a tree structure
 - Auto-read file mentions: Reference files with `@path/to/file.ext` syntax in prompts to automatically inject their contents, eliminating manual Read tool calls
@@ -17,6 +19,7 @@
 
 ### Changed
 
+- Changed subagent recursion prevention from blanket blocking to same-agent blocking. Non-recursive agents can now spawn other agent types (e.g., reviewer can spawn explore agents) but cannot spawn themselves.
 - Changed `/review` command from markdown to interactive TypeScript with mode selection menu (branch comparison, uncommitted changes, commit review, custom)
 - Changed bundled commands to be overridable by user/project commands with same name
 - Changed subprocess termination to wait for message_end event to capture accurate token counts

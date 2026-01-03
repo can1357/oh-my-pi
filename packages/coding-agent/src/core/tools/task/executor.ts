@@ -18,7 +18,7 @@ import {
 	type AgentProgress,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
-	PI_NO_SUBAGENTS_ENV,
+	PI_BLOCKED_AGENT_ENV,
 	type SingleResult,
 } from "./types";
 
@@ -214,10 +214,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// Add task as prompt
 	args.push("--prompt", fullTask);
 
-	// Set up environment
+	// Set up environment - block same-agent recursion unless explicitly recursive
 	const env = { ...process.env };
 	if (!agent.recursive) {
-		env[PI_NO_SUBAGENTS_ENV] = "1";
+		env[PI_BLOCKED_AGENT_ENV] = agent.name;
 	}
 
 	// Spawn subprocess

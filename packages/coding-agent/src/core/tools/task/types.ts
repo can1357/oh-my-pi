@@ -27,8 +27,11 @@ export const MAX_OUTPUT_LINES = 5000;
 /** Maximum agents to show in description */
 export const MAX_AGENTS_IN_DESCRIPTION = 10;
 
-/** Environment variable to inhibit subagent spawning */
+/** Environment variable to inhibit subagent spawning (legacy, still checked for backwards compat) */
 export const PI_NO_SUBAGENTS_ENV = "PI_NO_SUBAGENTS";
+
+/** Environment variable containing blocked agent name (self-recursion prevention) */
+export const PI_BLOCKED_AGENT_ENV = "PI_BLOCKED_AGENT";
 
 /** Task tool parameters */
 export const taskSchema = Type.Object({
