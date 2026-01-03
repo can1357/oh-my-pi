@@ -145,6 +145,15 @@ export const SETTINGS_DEFS: SettingDef[] = [
 		set: (sm, v) => sm.setLspDiagnosticsOnWrite(v),
 	},
 	{
+		id: "editFuzzyMatch",
+		tab: "config",
+		type: "boolean",
+		label: "Edit fuzzy match",
+		description: "Accept high-confidence fuzzy matches for whitespace/indentation differences",
+		get: (sm) => sm.getEditFuzzyMatch(),
+		set: (sm, v) => sm.setEditFuzzyMatch(v),
+	},
+	{
 		id: "thinkingLevel",
 		tab: "config",
 		type: "submenu",

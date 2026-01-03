@@ -29,7 +29,13 @@ export interface EditToolDetails {
 	firstChangedLine?: number;
 }
 
-export function createEditTool(cwd: string): AgentTool<typeof editSchema> {
+export interface EditToolOptions {
+	/** Whether to accept high-confidence fuzzy matches for whitespace/indentation (default: true) */
+	fuzzyMatch?: boolean;
+}
+
+export function createEditTool(cwd: string, options: EditToolOptions = {}): AgentTool<typeof editSchema> {
+	const allowFuzzy = options.fuzzyMatch ?? true;
 	return {
 		name: "edit",
 		label: "Edit",
@@ -108,7 +114,7 @@ Usage:
 						const normalizedNewText = normalizeToLF(newText);
 
 						const matchOutcome = findEditMatch(normalizedContent, normalizedOldText, {
-							allowFuzzy: true,
+							allowFuzzy,
 							similarityThreshold: DEFAULT_FUZZY_THRESHOLD,
 						});
 
@@ -131,7 +137,7 @@ Usage:
 							reject(
 								new Error(
 									formatEditMatchError(path, normalizedOldText, matchOutcome.closest, {
-										allowFuzzy: true,
+										allowFuzzy,
 										similarityThreshold: DEFAULT_FUZZY_THRESHOLD,
 										fuzzyMatches: matchOutcome.fuzzyMatches,
 									}),

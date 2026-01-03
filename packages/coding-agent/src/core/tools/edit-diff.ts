@@ -271,7 +271,7 @@ export function formatEditMatchError(
 		? options.fuzzyMatches && options.fuzzyMatches > 1
 			? `Found ${options.fuzzyMatches} high-confidence matches. Provide more context to make it unique.`
 			: `Closest match was below the ${thresholdPercent}% similarity threshold.`
-		: "Hint: Use fuzzy=true to accept high-confidence matches.";
+		: "Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept high-confidence matches.";
 
 	return [
 		options.allowFuzzy
@@ -409,7 +409,7 @@ export async function computeEditDiff(
 	oldText: string,
 	newText: string,
 	cwd: string,
-	fuzzy = false,
+	fuzzy = true,
 ): Promise<EditDiffResult | EditDiffError> {
 	const absolutePath = resolveToCwd(path, cwd);
 

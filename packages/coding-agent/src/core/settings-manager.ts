@@ -55,6 +55,10 @@ export interface LspSettings {
 	diagnosticsOnWrite?: boolean; // default: true (return LSP diagnostics after write tool writes code files)
 }
 
+export interface EditSettings {
+	fuzzyMatch?: boolean; // default: true (accept high-confidence fuzzy matches for whitespace/indentation)
+}
+
 export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
@@ -77,6 +81,7 @@ export interface Settings {
 	bashInterceptor?: BashInterceptorSettings;
 	mcp?: MCPSettings;
 	lsp?: LspSettings;
+	edit?: EditSettings;
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -489,6 +494,18 @@ export class SettingsManager {
 			this.globalSettings.lsp = {};
 		}
 		this.globalSettings.lsp.diagnosticsOnWrite = enabled;
+		this.save();
+	}
+
+	getEditFuzzyMatch(): boolean {
+		return this.settings.edit?.fuzzyMatch ?? true;
+	}
+
+	setEditFuzzyMatch(enabled: boolean): void {
+		if (!this.globalSettings.edit) {
+			this.globalSettings.edit = {};
+		}
+		this.globalSettings.edit.fuzzyMatch = enabled;
 		this.save();
 	}
 }

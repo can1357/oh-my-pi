@@ -5,7 +5,10 @@
 ### Added
 
 - LSP diagnostics on write: Write tool now returns LSP diagnostics (errors/warnings) after writing code files. This gives immediate feedback on syntax errors and type issues. Controlled via `lsp.diagnosticsOnWrite` setting (enabled by default).
+- Edit fuzzy match setting: Added `edit.fuzzyMatch` setting (enabled by default) to control whether the edit tool accepts high-confidence fuzzy matches for whitespace/indentation differences. Toggle via `/settings`.
 - Multi-server LSP diagnostics: Diagnostics now query all applicable language servers for a file type. For TypeScript/JavaScript projects with Biome, this means both type errors (from tsserver) and lint errors (from Biome) are reported together.
+- Comprehensive LSP server configurations for 40+ languages including Rust, Go, Python, Java, Kotlin, Scala, Haskell, OCaml, Elixir, Ruby, PHP, C#, Lua, Nix, and many more. Each server includes sensible defaults for args, settings, and init options.
+- Extended LSP config file search paths: Now searches for `lsp.json`, `.lsp.json` in project root and `.pi/` subdirectory, plus user-level configs in `~/.pi/` and home directory.
 
 ## [1.340.0] - 2026-01-03
 

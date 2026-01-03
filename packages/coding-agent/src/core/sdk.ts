@@ -78,6 +78,7 @@ import {
 	readOnlyTools,
 	readTool,
 	type Tool,
+	warmupLspServers,
 	writeTool,
 } from "./tools/index.js";
 
@@ -146,6 +147,8 @@ export interface CreateAgentSessionResult {
 	mcpManager?: MCPManager;
 	/** Warning if session was restored with a different model than saved */
 	modelFallbackMessage?: string;
+	/** LSP servers that were warmed up at startup */
+	lspServers?: Array<{ name: string; status: "ready" | "error"; fileTypes: string[] }>;
 }
 
 // Re-exports
@@ -570,6 +573,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		options.tools ??
 		createCodingTools(cwd, options.hasUI ?? false, sessionContext, {
 			lspDiagnosticsOnWrite: settingsManager.getLspDiagnosticsOnWrite(),
+			editFuzzyMatch: settingsManager.getEditFuzzyMatch(),
 		});
 	time("createCodingTools");
 
@@ -771,10 +775,23 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	});
 	time("createAgentSession");
 
+	// Warm up LSP servers (connects to detected servers)
+	let lspServers: CreateAgentSessionResult["lspServers"];
+	if (settingsManager.getLspDiagnosticsOnWrite()) {
+		try {
+			const result = await warmupLspServers(cwd);
+			lspServers = result.servers;
+			time("warmupLspServers");
+		} catch {
+			// Ignore warmup errors
+		}
+	}
+
 	return {
 		session,
 		customToolsResult,
 		mcpManager,
 		modelFallbackMessage,
+		lspServers,
 	};
 }

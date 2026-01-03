@@ -3,7 +3,14 @@ import path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Theme } from "../../../modes/interactive/theme/theme.js";
 import { resolveToCwd } from "../path-utils.js";
-import { ensureFileOpen, getOrCreateClient, refreshFile, sendRequest } from "./client.js";
+import {
+	ensureFileOpen,
+	getActiveClients,
+	getOrCreateClient,
+	type LspServerStatus,
+	refreshFile,
+	sendRequest,
+} from "./client.js";
 import { getServerForFile, getServersForFile, hasCapability, type LspConfig, loadConfig } from "./config.js";
 import { applyWorkspaceEdit } from "./edits.js";
 import { renderCall, renderResult } from "./render.js";
@@ -41,7 +48,66 @@ import {
 	uriToFile,
 } from "./utils.js";
 
+export type { LspServerStatus } from "./client.js";
 export type { LspToolDetails } from "./types.js";
+
+/** Result from warming up LSP servers */
+export interface LspWarmupResult {
+	servers: Array<{
+		name: string;
+		status: "ready" | "error";
+		fileTypes: string[];
+		error?: string;
+	}>;
+}
+
+/**
+ * Warm up LSP servers for a directory by connecting to all detected servers.
+ * This should be called at startup to avoid cold-start delays.
+ *
+ * @param cwd - Working directory to detect and start servers for
+ * @returns Status of each server that was started
+ */
+export async function warmupLspServers(cwd: string): Promise<LspWarmupResult> {
+	const config = loadConfig(cwd);
+	const servers: LspWarmupResult["servers"] = [];
+
+	// Start all detected servers in parallel
+	const results = await Promise.allSettled(
+		Object.entries(config.servers).map(async ([name, serverConfig]) => {
+			const client = await getOrCreateClient(serverConfig, cwd);
+			return { name, client, fileTypes: serverConfig.fileTypes };
+		}),
+	);
+
+	for (const result of results) {
+		if (result.status === "fulfilled") {
+			servers.push({
+				name: result.value.name,
+				status: "ready",
+				fileTypes: result.value.fileTypes,
+			});
+		} else {
+			// Extract server name from error if possible
+			const errorMsg = result.reason?.message ?? String(result.reason);
+			servers.push({
+				name: "unknown",
+				status: "error",
+				fileTypes: [],
+				error: errorMsg,
+			});
+		}
+	}
+
+	return { servers };
+}
+
+/**
+ * Get status of currently active LSP servers.
+ */
+export function getLspStatus(): LspServerStatus[] {
+	return getActiveClients();
+}
 
 // Cache config per cwd to avoid repeated file I/O
 const configCache = new Map<string, LspConfig>();
@@ -161,13 +227,13 @@ export interface FileDiagnosticsResult {
  *
  * @param absolutePath - Absolute path to the file
  * @param cwd - Working directory for LSP config resolution
- * @param timeoutMs - Timeout for waiting for diagnostics per server (default: 2000ms)
+ * @param timeoutMs - Timeout for waiting for diagnostics (default: 5000ms)
  * @returns Diagnostic results or null if no LSP server available
  */
 export async function getDiagnosticsForFile(
 	absolutePath: string,
 	cwd: string,
-	timeoutMs = 2000,
+	timeoutMs = 5000,
 ): Promise<FileDiagnosticsResult> {
 	const config = getConfig(cwd);
 	const servers = getServersForFile(config, absolutePath);
