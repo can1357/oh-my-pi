@@ -550,6 +550,24 @@ export class ToolExecutionComponent extends Container {
 					text += `\n\n${renderDiff(this.editDiffPreview.diff, { filePath: rawPath })}`;
 				}
 			}
+
+			// Show LSP diagnostics if available
+			if (this.result?.details?.diagnostics?.available) {
+				const diag = this.result.details.diagnostics;
+				if (diag.diagnostics.length > 0) {
+					const icon = diag.hasErrors ? theme.fg("error", "●") : theme.fg("warning", "●");
+					text += `\n\n${icon} ${theme.fg("toolTitle", "LSP Diagnostics")} ${theme.fg("dim", `(${diag.summary})`)}`;
+					const maxDiags = this.expanded ? diag.diagnostics.length : 5;
+					const displayDiags = diag.diagnostics.slice(0, maxDiags);
+					for (const d of displayDiags) {
+						const color = d.includes("[error]") ? "error" : d.includes("[warning]") ? "warning" : "dim";
+						text += `\n  ${theme.fg(color, d)}`;
+					}
+					if (diag.diagnostics.length > maxDiags) {
+						text += theme.fg("dim", `\n  ... (${diag.diagnostics.length - maxDiags} more)`);
+					}
+				}
+			}
 		} else if (this.toolName === "ls") {
 			const path = shortenPath(this.args?.path || ".");
 			const limit = this.args?.limit;
