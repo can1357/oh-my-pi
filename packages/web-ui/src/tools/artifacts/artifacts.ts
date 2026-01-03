@@ -8,27 +8,27 @@ import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, type Ref, ref } from "lit/directives/ref.js";
 import { X } from "lucide";
-import type { ArtifactMessage } from "../../components/Messages.js";
-import { ArtifactsRuntimeProvider } from "../../components/sandbox/ArtifactsRuntimeProvider.js";
-import { AttachmentsRuntimeProvider } from "../../components/sandbox/AttachmentsRuntimeProvider.js";
-import type { SandboxRuntimeProvider } from "../../components/sandbox/SandboxRuntimeProvider.js";
+import type { ArtifactMessage } from "../../components/Messages";
+import { ArtifactsRuntimeProvider } from "../../components/sandbox/ArtifactsRuntimeProvider";
+import { AttachmentsRuntimeProvider } from "../../components/sandbox/AttachmentsRuntimeProvider";
+import type { SandboxRuntimeProvider } from "../../components/sandbox/SandboxRuntimeProvider";
 import {
 	ARTIFACTS_RUNTIME_PROVIDER_DESCRIPTION_RO,
 	ARTIFACTS_TOOL_DESCRIPTION,
 	ATTACHMENTS_RUNTIME_DESCRIPTION,
-} from "../../prompts/prompts.js";
-import type { Attachment } from "../../utils/attachment-utils.js";
-import { i18n } from "../../utils/i18n.js";
-import type { ArtifactElement } from "./ArtifactElement.js";
-import { DocxArtifact } from "./DocxArtifact.js";
-import { ExcelArtifact } from "./ExcelArtifact.js";
-import { GenericArtifact } from "./GenericArtifact.js";
-import { HtmlArtifact } from "./HtmlArtifact.js";
-import { ImageArtifact } from "./ImageArtifact.js";
-import { MarkdownArtifact } from "./MarkdownArtifact.js";
-import { PdfArtifact } from "./PdfArtifact.js";
-import { SvgArtifact } from "./SvgArtifact.js";
-import { TextArtifact } from "./TextArtifact.js";
+} from "../../prompts/prompts";
+import type { Attachment } from "../../utils/attachment-utils";
+import { i18n } from "../../utils/i18n";
+import type { ArtifactElement } from "./ArtifactElement";
+import { DocxArtifact } from "./DocxArtifact";
+import { ExcelArtifact } from "./ExcelArtifact";
+import { GenericArtifact } from "./GenericArtifact";
+import { HtmlArtifact } from "./HtmlArtifact";
+import { ImageArtifact } from "./ImageArtifact";
+import { MarkdownArtifact } from "./MarkdownArtifact";
+import { PdfArtifact } from "./PdfArtifact";
+import { SvgArtifact } from "./SvgArtifact";
+import { TextArtifact } from "./TextArtifact";
 
 // Simple artifact model
 export interface Artifact {

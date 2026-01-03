@@ -1,7 +1,7 @@
 import { mkdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
-import type { CreateFile, DeleteFile, RenameFile, TextDocumentEdit, TextEdit, WorkspaceEdit } from "./types.js";
-import { uriToFile } from "./utils.js";
+import type { CreateFile, DeleteFile, RenameFile, TextDocumentEdit, TextEdit, WorkspaceEdit } from "./types";
+import { uriToFile } from "./utils";
 
 // =============================================================================
 // Text Edit Application

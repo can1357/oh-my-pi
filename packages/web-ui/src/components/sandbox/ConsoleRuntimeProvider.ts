@@ -1,4 +1,4 @@
-import type { SandboxRuntimeProvider } from "./SandboxRuntimeProvider.js";
+import type { SandboxRuntimeProvider } from "./SandboxRuntimeProvider";
 
 export interface ConsoleLog {
 	type: "log" | "warn" | "error" | "info";

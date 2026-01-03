@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
 
-import { loginAnthropic } from "./utils/oauth/anthropic.js";
-import { loginGitHubCopilot } from "./utils/oauth/github-copilot.js";
-import { loginAntigravity } from "./utils/oauth/google-antigravity.js";
-import { loginGeminiCli } from "./utils/oauth/google-gemini-cli.js";
-import { getOAuthProviders } from "./utils/oauth/index.js";
-import type { OAuthCredentials, OAuthProvider } from "./utils/oauth/types.js";
+import { loginAnthropic } from "./utils/oauth/anthropic";
+import { loginGitHubCopilot } from "./utils/oauth/github-copilot";
+import { loginAntigravity } from "./utils/oauth/google-antigravity";
+import { loginGeminiCli } from "./utils/oauth/google-gemini-cli";
+import { getOAuthProviders } from "./utils/oauth/index";
+import type { OAuthCredentials, OAuthProvider } from "./utils/oauth/types";
 
 const AUTH_FILE = "auth.json";
 const PROVIDERS = getOAuthProviders();

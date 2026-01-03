@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import { Editor } from "../src/components/editor.js";
-import { visibleWidth } from "../src/utils.js";
-import { defaultEditorTheme } from "./test-themes.js";
+import { Editor } from "../src/components/editor";
+import { visibleWidth } from "../src/utils";
+import { defaultEditorTheme } from "./test-themes";
 
 describe("Editor component", () => {
 	describe("Prompt history navigation", () => {

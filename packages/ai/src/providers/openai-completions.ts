@@ -8,8 +8,8 @@ import type {
 	ChatCompletionMessageParam,
 	ChatCompletionToolMessageParam,
 } from "openai/resources/chat/completions.js";
-import { calculateCost } from "../models.js";
-import { getEnvApiKey } from "../stream.js";
+import { calculateCost } from "../models";
+import { getEnvApiKey } from "../stream";
 import type {
 	AssistantMessage,
 	Context,
@@ -23,11 +23,11 @@ import type {
 	ThinkingContent,
 	Tool,
 	ToolCall,
-} from "../types.js";
-import { AssistantMessageEventStream } from "../utils/event-stream.js";
-import { parseStreamingJson } from "../utils/json-parse.js";
-import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
-import { transformMessages } from "./transorm-messages.js";
+} from "../types";
+import { AssistantMessageEventStream } from "../utils/event-stream";
+import { parseStreamingJson } from "../utils/json-parse";
+import { sanitizeSurrogates } from "../utils/sanitize-unicode";
+import { transformMessages } from "./transorm-messages";
 
 /**
  * Normalize tool call ID for Mistral.

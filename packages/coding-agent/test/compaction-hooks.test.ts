@@ -8,20 +8,20 @@ import { join } from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { getModel } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AgentSession } from "../src/core/agent-session.js";
-import { AuthStorage } from "../src/core/auth-storage.js";
+import { AgentSession } from "../src/core/agent-session";
+import { AuthStorage } from "../src/core/auth-storage";
 import {
 	HookRunner,
 	type LoadedHook,
 	type SessionBeforeCompactEvent,
 	type SessionCompactEvent,
 	type SessionEvent,
-} from "../src/core/hooks/index.js";
-import { ModelRegistry } from "../src/core/model-registry.js";
-import { SessionManager } from "../src/core/session-manager.js";
-import { SettingsManager } from "../src/core/settings-manager.js";
-import { codingTools } from "../src/core/tools/index.js";
-import { theme } from "../src/modes/interactive/theme/theme.js";
+} from "../src/core/hooks/index";
+import { ModelRegistry } from "../src/core/model-registry";
+import { SessionManager } from "../src/core/session-manager";
+import { SettingsManager } from "../src/core/settings-manager";
+import { codingTools } from "../src/core/tools/index";
+import { theme } from "../src/modes/interactive/theme/theme";
 
 const API_KEY = process.env.ANTHROPIC_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
 

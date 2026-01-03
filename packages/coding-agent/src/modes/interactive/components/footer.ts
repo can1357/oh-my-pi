@@ -1,10 +1,10 @@
+import { execSync } from "node:child_process";
+import { existsSync, type FSWatcher, readFileSync, watch } from "node:fs";
+import { dirname, join } from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
-import { execSync } from "child_process";
-import { existsSync, type FSWatcher, readFileSync, watch } from "fs";
-import { dirname, join } from "path";
-import type { AgentSession } from "../../../core/agent-session.js";
-import { theme } from "../theme/theme.js";
+import type { AgentSession } from "../../../core/agent-session";
+import { theme } from "../theme/theme";
 
 // Nerd Font icons (matching Claude/statusline-nerd.sh)
 const ICONS = {

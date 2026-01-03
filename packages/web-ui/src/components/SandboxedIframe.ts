@@ -1,9 +1,9 @@
 import { LitElement } from "lit";
 import { customElement, property } from "lit/decorators.js";
-import { ConsoleRuntimeProvider } from "./sandbox/ConsoleRuntimeProvider.js";
-import { RuntimeMessageBridge } from "./sandbox/RuntimeMessageBridge.js";
-import { type MessageConsumer, RUNTIME_MESSAGE_ROUTER } from "./sandbox/RuntimeMessageRouter.js";
-import type { SandboxRuntimeProvider } from "./sandbox/SandboxRuntimeProvider.js";
+import { ConsoleRuntimeProvider } from "./sandbox/ConsoleRuntimeProvider";
+import { RuntimeMessageBridge } from "./sandbox/RuntimeMessageBridge";
+import { type MessageConsumer, RUNTIME_MESSAGE_ROUTER } from "./sandbox/RuntimeMessageRouter";
+import type { SandboxRuntimeProvider } from "./sandbox/SandboxRuntimeProvider";
 
 export interface SandboxFile {
 	fileName: string;

@@ -1,7 +1,7 @@
+import { constants } from "node:fs";
+import { access, readFile, writeFile } from "node:fs/promises";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
-import { constants } from "fs";
-import { access, readFile, writeFile } from "fs/promises";
 import {
 	DEFAULT_FUZZY_THRESHOLD,
 	detectLineEnding,
@@ -11,9 +11,9 @@ import {
 	normalizeToLF,
 	restoreLineEndings,
 	stripBom,
-} from "./edit-diff.js";
-import type { FileDiagnosticsResult } from "./lsp/index.js";
-import { resolveToCwd } from "./path-utils.js";
+} from "./edit-diff";
+import type { FileDiagnosticsResult } from "./lsp/index";
+import { resolveToCwd } from "./path-utils";
 
 const editSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),

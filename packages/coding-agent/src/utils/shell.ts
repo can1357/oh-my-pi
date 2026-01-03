@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { SettingsManager } from "../core/settings-manager.js";
+import { SettingsManager } from "../core/settings-manager";
 
 let cachedShellConfig: { shell: string; args: string[] } | null = null;
 

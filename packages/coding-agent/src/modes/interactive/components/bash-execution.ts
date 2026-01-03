@@ -9,10 +9,10 @@ import {
 	DEFAULT_MAX_LINES,
 	type TruncationResult,
 	truncateTail,
-} from "../../../core/tools/truncate.js";
-import { theme } from "../theme/theme.js";
-import { DynamicBorder } from "./dynamic-border.js";
-import { truncateToVisualLines } from "./visual-truncate.js";
+} from "../../../core/tools/truncate";
+import { theme } from "../theme/theme";
+import { DynamicBorder } from "./dynamic-border";
+import { truncateToVisualLines } from "./visual-truncate";
 
 // Preview line limit when not expanded (matches tool execution behavior)
 const PREVIEW_LINES = 20;

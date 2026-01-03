@@ -3,10 +3,10 @@
  * Used by both edit.ts (for execution) and tool-execution.ts (for preview rendering).
  */
 
+import { constants } from "node:fs";
+import { access, readFile } from "node:fs/promises";
 import * as Diff from "diff";
-import { constants } from "fs";
-import { access, readFile } from "fs/promises";
-import { resolveToCwd } from "./path-utils.js";
+import { resolveToCwd } from "./path-utils";
 
 export function detectLineEnding(content: string): "\r\n" | "\n" {
 	const crlfIdx = content.indexOf("\r\n");

@@ -1,6 +1,6 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { Container, Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
-import { getMarkdownTheme, theme } from "../theme/theme.js";
+import { getMarkdownTheme, theme } from "../theme/theme";
 
 /**
  * Component that renders a complete assistant message

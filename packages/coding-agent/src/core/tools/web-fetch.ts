@@ -2203,8 +2203,8 @@ export const webFetchTool = createWebFetchTool(process.cwd());
 
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import type { Theme } from "../../modes/interactive/theme/theme.js";
-import type { CustomTool, CustomToolContext, RenderResultOptions } from "../custom-tools/types.js";
+import type { Theme } from "../../modes/interactive/theme/theme";
+import type { CustomTool, CustomToolContext, RenderResultOptions } from "../custom-tools/types";
 
 // Tree formatting constants
 const TREE_MID = "├─";

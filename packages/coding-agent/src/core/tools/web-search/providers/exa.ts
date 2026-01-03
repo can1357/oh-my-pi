@@ -6,7 +6,7 @@
  */
 
 import * as os from "node:os";
-import type { WebSearchResponse, WebSearchSource } from "../types.js";
+import type { WebSearchResponse, WebSearchSource } from "../types";
 
 const EXA_MCP_URL = "https://mcp.exa.ai/mcp";
 

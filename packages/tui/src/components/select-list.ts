@@ -1,6 +1,6 @@
-import { isArrowDown, isArrowUp, isCtrlC, isEnter, isEscape } from "../keys.js";
-import type { Component } from "../tui.js";
-import { truncateToWidth } from "../utils.js";
+import { isArrowDown, isArrowUp, isCtrlC, isEnter, isEscape } from "../keys";
+import type { Component } from "../tui";
+import { truncateToWidth } from "../utils";
 
 export interface SelectItem {
 	value: string;

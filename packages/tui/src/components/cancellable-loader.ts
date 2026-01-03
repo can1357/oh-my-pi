@@ -1,5 +1,5 @@
-import { isEscape } from "../keys.js";
-import { Loader } from "./loader.js";
+import { isEscape } from "../keys";
+import { Loader } from "./loader";
 
 /**
  * Loader that can be cancelled with Escape.

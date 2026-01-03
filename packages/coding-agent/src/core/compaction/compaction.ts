@@ -8,8 +8,8 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model, Usage } from "@oh-my-pi/pi-ai";
 import { complete, completeSimple } from "@oh-my-pi/pi-ai";
-import { convertToLlm, createBranchSummaryMessage, createHookMessage } from "../messages.js";
-import type { CompactionEntry, SessionEntry } from "../session-manager.js";
+import { convertToLlm, createBranchSummaryMessage, createHookMessage } from "../messages";
+import type { CompactionEntry, SessionEntry } from "../session-manager";
 import {
 	computeFileLists,
 	createFileOps,
@@ -18,7 +18,7 @@ import {
 	formatFileOperations,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
-} from "./utils.js";
+} from "./utils";
 
 // ============================================================================
 // File Operation Tracking

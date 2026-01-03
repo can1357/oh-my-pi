@@ -4,8 +4,8 @@ import { join } from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import type { Subprocess } from "bun";
-import { getShellConfig, killProcessTree } from "../../utils/shell.js";
-import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateTail } from "./truncate.js";
+import { getShellConfig, killProcessTree } from "../../utils/shell";
+import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateTail } from "./truncate";
 
 /**
  * Generate a unique temp file path for bash output

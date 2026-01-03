@@ -2,8 +2,8 @@
  * GitHub Copilot OAuth flow
  */
 
-import { getModels } from "../../models.js";
-import type { OAuthCredentials } from "./types.js";
+import { getModels } from "../../models";
+import type { OAuthCredentials } from "./types";
 
 const decode = (s: string) => atob(s);
 const CLIENT_ID = decode("SXYxLmI1MDdhMDhjODdlY2ZlOTg=");

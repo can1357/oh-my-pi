@@ -1,8 +1,8 @@
 import {
 	ARTIFACTS_RUNTIME_PROVIDER_DESCRIPTION_RO,
 	ARTIFACTS_RUNTIME_PROVIDER_DESCRIPTION_RW,
-} from "../../prompts/prompts.js";
-import type { SandboxRuntimeProvider } from "./SandboxRuntimeProvider.js";
+} from "../../prompts/prompts";
+import type { SandboxRuntimeProvider } from "./SandboxRuntimeProvider";
 
 // Define minimal interface for ArtifactsPanel to avoid circular dependencies
 interface ArtifactsPanelLike {

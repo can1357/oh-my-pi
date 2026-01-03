@@ -1,9 +1,9 @@
 import type { TextContent } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Box, Container, Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
-import type { HookMessageRenderer } from "../../../core/hooks/types.js";
-import type { HookMessage } from "../../../core/messages.js";
-import { getMarkdownTheme, theme } from "../theme/theme.js";
+import type { HookMessageRenderer } from "../../../core/hooks/types";
+import type { HookMessage } from "../../../core/messages";
+import { getMarkdownTheme, theme } from "../theme/theme";
 
 /**
  * Component that renders a custom message entry from hooks.

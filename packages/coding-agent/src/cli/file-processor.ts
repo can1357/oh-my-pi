@@ -3,11 +3,11 @@
  */
 
 import { access, readFile, stat } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import chalk from "chalk";
-import { resolve } from "path";
-import { resolveReadPath } from "../core/tools/path-utils.js";
-import { detectSupportedImageMimeTypeFromFile } from "../utils/mime.js";
+import { resolveReadPath } from "../core/tools/path-utils";
+import { detectSupportedImageMimeTypeFromFile } from "../utils/mime";
 
 export interface ProcessedFiles {
 	text: string;

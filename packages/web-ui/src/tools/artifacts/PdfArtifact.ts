@@ -2,8 +2,8 @@ import { DownloadButton } from "@mariozechner/mini-lit/dist/DownloadButton.js";
 import { html, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import * as pdfjsLib from "pdfjs-dist";
-import { i18n } from "../../utils/i18n.js";
-import { ArtifactElement } from "./ArtifactElement.js";
+import { i18n } from "../../utils/i18n";
+import { ArtifactElement } from "./ArtifactElement";
 
 // Configure PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();

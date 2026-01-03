@@ -18,10 +18,10 @@ import {
 	Spacer,
 	Text,
 } from "@oh-my-pi/pi-tui";
-import { PluginManager } from "../../../core/plugins/manager.js";
-import type { InstalledPlugin, PluginSettingSchema } from "../../../core/plugins/types.js";
-import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.js";
-import { DynamicBorder } from "./dynamic-border.js";
+import { PluginManager } from "../../../core/plugins/manager";
+import type { InstalledPlugin, PluginSettingSchema } from "../../../core/plugins/types";
+import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme";
+import { DynamicBorder } from "./dynamic-border";
 
 // =============================================================================
 // Plugin List Component

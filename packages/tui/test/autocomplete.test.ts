@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { CombinedAutocompleteProvider } from "../src/autocomplete.js";
+import { CombinedAutocompleteProvider } from "../src/autocomplete";
 
 describe("CombinedAutocompleteProvider", () => {
 	describe("extractPathPrefix", () => {

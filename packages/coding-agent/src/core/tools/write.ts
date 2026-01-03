@@ -1,9 +1,9 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
-import { mkdir, writeFile } from "fs/promises";
-import { dirname } from "path";
-import type { FileDiagnosticsResult, FileFormatResult } from "./lsp/index.js";
-import { resolveToCwd } from "./path-utils.js";
+import type { FileDiagnosticsResult, FileFormatResult } from "./lsp/index";
+import { resolveToCwd } from "./path-utils";
 
 const writeSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to write (relative or absolute)" }),

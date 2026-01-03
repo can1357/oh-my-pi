@@ -13,8 +13,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadBundledAgents } from "./agents.js";
-import type { AgentDefinition, AgentSource } from "./types.js";
+import { loadBundledAgents } from "./agents";
+import type { AgentDefinition, AgentSource } from "./types";
 
 /** Result of agent discovery */
 export interface DiscoveryResult {

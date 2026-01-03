@@ -17,9 +17,9 @@ import {
 	TruncatedText,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
-import type { SessionTreeNode } from "../../../core/session-manager.js";
-import { theme } from "../theme/theme.js";
-import { DynamicBorder } from "./dynamic-border.js";
+import type { SessionTreeNode } from "../../../core/session-manager";
+import { theme } from "../theme/theme";
+import { DynamicBorder } from "./dynamic-border";
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
 interface GutterInfo {

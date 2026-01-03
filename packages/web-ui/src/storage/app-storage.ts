@@ -1,8 +1,8 @@
-import type { CustomProvidersStore } from "./stores/custom-providers-store.js";
-import type { ProviderKeysStore } from "./stores/provider-keys-store.js";
-import type { SessionsStore } from "./stores/sessions-store.js";
-import type { SettingsStore } from "./stores/settings-store.js";
-import type { StorageBackend } from "./types.js";
+import type { CustomProvidersStore } from "./stores/custom-providers-store";
+import type { ProviderKeysStore } from "./stores/provider-keys-store";
+import type { SessionsStore } from "./stores/sessions-store";
+import type { SettingsStore } from "./stores/settings-store";
+import type { StorageBackend } from "./types";
 
 /**
  * High-level storage API providing access to all storage operations.

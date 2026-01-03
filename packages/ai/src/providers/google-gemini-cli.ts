@@ -5,7 +5,7 @@
  */
 
 import type { Content, ThinkingConfig } from "@google/genai";
-import { calculateCost } from "../models.js";
+import { calculateCost } from "../models";
 import type {
 	Api,
 	AssistantMessage,
@@ -16,10 +16,10 @@ import type {
 	TextContent,
 	ThinkingContent,
 	ToolCall,
-} from "../types.js";
-import { AssistantMessageEventStream } from "../utils/event-stream.js";
-import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
-import { convertMessages, convertTools, mapStopReasonString, mapToolChoice } from "./google-shared.js";
+} from "../types";
+import { AssistantMessageEventStream } from "../utils/event-stream";
+import { sanitizeSurrogates } from "../utils/sanitize-unicode";
+import { convertMessages, convertTools, mapStopReasonString, mapToolChoice } from "./google-shared";
 
 /**
  * Thinking level for Gemini 3 models.

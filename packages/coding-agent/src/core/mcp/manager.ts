@@ -6,12 +6,12 @@
  */
 
 import type { TSchema } from "@sinclair/typebox";
-import type { CustomTool } from "../custom-tools/types.js";
-import { connectToServer, disconnectServer, listTools } from "./client.js";
-import { type LoadMCPConfigsOptions, loadAllMCPConfigs, validateServerConfig } from "./config.js";
-import type { MCPToolDetails } from "./tool-bridge.js";
-import { createMCPTools } from "./tool-bridge.js";
-import type { MCPServerConfig, MCPServerConnection } from "./types.js";
+import type { CustomTool } from "../custom-tools/types";
+import { connectToServer, disconnectServer, listTools } from "./client";
+import { type LoadMCPConfigsOptions, loadAllMCPConfigs, validateServerConfig } from "./config";
+import type { MCPToolDetails } from "./tool-bridge";
+import { createMCPTools } from "./tool-bridge";
+import type { MCPServerConfig, MCPServerConnection } from "./types";
 
 /** Result of loading MCP tools */
 export interface MCPLoadResult {

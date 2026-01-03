@@ -2,9 +2,9 @@
  * One-time migrations that run on startup.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
-import { getAgentDir } from "./config.js";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { getAgentDir } from "./config";
 
 /**
  * Migrate legacy oauth.json and settings.json apiKeys to auth.json.

@@ -4,10 +4,10 @@
  * Append-only logging to ~/.pi/ for debugging production issues.
  */
 
-import { appendFileSync, existsSync, mkdirSync } from "fs";
-import { homedir } from "os";
-import { join } from "path";
-import { CONFIG_DIR_NAME } from "../../../config.js";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { CONFIG_DIR_NAME } from "../../../config";
 
 /** Get the base config directory (e.g., ~/.pi/) */
 function getConfigDir(): string {

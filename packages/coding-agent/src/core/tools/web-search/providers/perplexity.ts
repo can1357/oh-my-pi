@@ -12,7 +12,7 @@ import type {
 	WebSearchCitation,
 	WebSearchResponse,
 	WebSearchSource,
-} from "../types.js";
+} from "../types";
 
 const PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions";
 

@@ -1,5 +1,5 @@
-import { Store } from "../store.js";
-import type { StoreConfig } from "../types.js";
+import { Store } from "../store";
+import type { StoreConfig } from "../types";
 
 /**
  * Store for LLM provider API keys (Anthropic, OpenAI, etc.).

@@ -10,7 +10,7 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AnthropicAuthConfig, AuthJson, ModelsJson } from "./types.js";
+import type { AnthropicAuthConfig, AuthJson, ModelsJson } from "./types";
 
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
 

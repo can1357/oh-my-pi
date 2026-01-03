@@ -4,8 +4,8 @@
  * Handles connection initialization, tool listing, and tool calling.
  */
 
-import { createHttpTransport } from "./transports/http.js";
-import { createStdioTransport } from "./transports/stdio.js";
+import { createHttpTransport } from "./transports/http";
+import { createStdioTransport } from "./transports/stdio";
 import type {
 	MCPHttpServerConfig,
 	MCPInitializeParams,
@@ -20,7 +20,7 @@ import type {
 	MCPToolDefinition,
 	MCPToolsListResult,
 	MCPTransport,
-} from "./types.js";
+} from "./types";
 
 /** MCP protocol version we support */
 const PROTOCOL_VERSION = "2025-03-26";

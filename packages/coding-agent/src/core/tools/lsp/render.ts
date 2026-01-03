@@ -11,8 +11,8 @@
 import type { AgentToolResult, RenderResultOptions } from "@oh-my-pi/pi-agent-core";
 import { Text } from "@oh-my-pi/pi-tui";
 import { highlight, supportsLanguage } from "cli-highlight";
-import type { Theme } from "../../../modes/interactive/theme/theme.js";
-import type { LspParams, LspToolDetails } from "./types.js";
+import type { Theme } from "../../../modes/interactive/theme/theme";
+import type { LspParams, LspToolDetails } from "./types";
 
 // =============================================================================
 // Tree Drawing Characters

@@ -13,9 +13,9 @@ import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createHookMessage,
-} from "../messages.js";
-import type { ReadonlySessionManager, SessionEntry } from "../session-manager.js";
-import { estimateTokens } from "./compaction.js";
+} from "../messages";
+import type { ReadonlySessionManager, SessionEntry } from "../session-manager";
+import { estimateTokens } from "./compaction";
 import {
 	computeFileLists,
 	createFileOps,
@@ -24,7 +24,7 @@ import {
 	formatFileOperations,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
-} from "./utils.js";
+} from "./utils";
 
 // ============================================================================
 // Types
@@ -44,7 +44,7 @@ export interface BranchSummaryDetails {
 	modifiedFiles: string[];
 }
 
-export type { FileOperations } from "./utils.js";
+export type { FileOperations } from "./utils";
 
 export interface BranchPreparation {
 	/** Messages extracted for summarization, in chronological order */

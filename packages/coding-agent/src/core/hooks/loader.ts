@@ -6,13 +6,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as typebox from "@sinclair/typebox";
-import { getAgentDir } from "../../config.js";
-import * as piCodingAgent from "../../index.js";
-import type { HookMessage } from "../messages.js";
-import { getAllPluginHookPaths } from "../plugins/loader.js";
-import type { SessionManager } from "../session-manager.js";
-import { execCommand } from "./runner.js";
-import type { ExecOptions, HookAPI, HookFactory, HookMessageRenderer, RegisteredCommand } from "./types.js";
+import { getAgentDir } from "../../config";
+import * as piCodingAgent from "../../index";
+import type { HookMessage } from "../messages";
+import { getAllPluginHookPaths } from "../plugins/loader";
+import type { SessionManager } from "../session-manager";
+import { execCommand } from "./runner";
+import type { ExecOptions, HookAPI, HookFactory, HookMessageRenderer, RegisteredCommand } from "./types";
 
 /**
  * Generic handler function type.

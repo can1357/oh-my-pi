@@ -1,9 +1,9 @@
+import { existsSync, readdirSync, statSync } from "node:fs";
+import nodePath from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
-import { existsSync, readdirSync, statSync } from "fs";
-import nodePath from "path";
-import { resolveToCwd } from "./path-utils.js";
-import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
+import { resolveToCwd } from "./path-utils";
+import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate";
 
 const lsSchema = Type.Object({
 	path: Type.Optional(Type.String({ description: "Directory to list (default: current directory)" })),

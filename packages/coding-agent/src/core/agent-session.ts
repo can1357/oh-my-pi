@@ -16,8 +16,8 @@
 import type { Agent, AgentEvent, AgentMessage, AgentState, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { isContextOverflow, modelsAreEqual, supportsXhigh } from "@oh-my-pi/pi-ai";
-import { getAuthPath } from "../config.js";
-import { type BashResult, executeBash as executeBashCommand } from "./bash-executor.js";
+import { getAuthPath } from "../config";
+import { type BashResult, executeBash as executeBashCommand } from "./bash-executor";
 import {
 	type CompactionResult,
 	calculateContextTokens,
@@ -26,10 +26,10 @@ import {
 	generateBranchSummary,
 	prepareCompaction,
 	shouldCompact,
-} from "./compaction/index.js";
-import type { LoadedCustomCommand } from "./custom-commands/index.js";
-import type { CustomToolContext, CustomToolSessionEvent, LoadedCustomTool } from "./custom-tools/index.js";
-import { exportSessionToHtml } from "./export-html/index.js";
+} from "./compaction/index";
+import type { LoadedCustomCommand } from "./custom-commands/index";
+import type { CustomToolContext, CustomToolSessionEvent, LoadedCustomTool } from "./custom-tools/index";
+import { exportSessionToHtml } from "./export-html/index";
 import type {
 	HookRunner,
 	SessionBeforeBranchResult,
@@ -39,12 +39,12 @@ import type {
 	TreePreparation,
 	TurnEndEvent,
 	TurnStartEvent,
-} from "./hooks/index.js";
-import type { BashExecutionMessage, HookMessage } from "./messages.js";
-import type { ModelRegistry } from "./model-registry.js";
-import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions, SessionManager } from "./session-manager.js";
-import type { SettingsManager, SkillsSettings } from "./settings-manager.js";
-import { expandSlashCommand, type FileSlashCommand, parseCommandArgs } from "./slash-commands.js";
+} from "./hooks/index";
+import type { BashExecutionMessage, HookMessage } from "./messages";
+import type { ModelRegistry } from "./model-registry";
+import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions, SessionManager } from "./session-manager";
+import type { SettingsManager, SkillsSettings } from "./settings-manager";
+import { expandSlashCommand, type FileSlashCommand, parseCommandArgs } from "./slash-commands";
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =

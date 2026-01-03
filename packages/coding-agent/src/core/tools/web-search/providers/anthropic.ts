@@ -5,7 +5,7 @@
  * Returns synthesized answers with citations and source metadata.
  */
 
-import { buildAnthropicHeaders, buildAnthropicUrl, findAnthropicAuth, getEnv } from "../auth.js";
+import { buildAnthropicHeaders, buildAnthropicUrl, findAnthropicAuth, getEnv } from "../auth";
 import type {
 	AnthropicApiResponse,
 	AnthropicAuthConfig,
@@ -13,7 +13,7 @@ import type {
 	WebSearchCitation,
 	WebSearchResponse,
 	WebSearchSource,
-} from "../types.js";
+} from "../types";
 
 const DEFAULT_MODEL = "claude-sonnet-4-5-20250514";
 const DEFAULT_MAX_TOKENS = 4096;

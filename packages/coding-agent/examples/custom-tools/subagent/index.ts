@@ -18,7 +18,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Message } from "@oh-my-pi/pi-ai";
 import type { CustomTool, CustomToolAPI, CustomToolFactory } from "@oh-my-pi/pi-coding-agent";
-import { type AgentConfig, type AgentScope, discoverAgents, formatAgentList } from "./agents.js";
+import { type AgentConfig, type AgentScope, discoverAgents, formatAgentList } from "./agents";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;

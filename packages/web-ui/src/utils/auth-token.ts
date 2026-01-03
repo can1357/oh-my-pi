@@ -1,5 +1,5 @@
 import PromptDialog from "@mariozechner/mini-lit/dist/PromptDialog.js";
-import { i18n } from "./i18n.js";
+import { i18n } from "./i18n";
 
 export async function getAuthToken(): Promise<string | undefined> {
 	let authToken: string | undefined = localStorage.getItem(`auth-token`) || "";

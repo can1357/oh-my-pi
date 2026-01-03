@@ -10,7 +10,7 @@
 
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getCapabilities } from "@oh-my-pi/pi-tui";
-import type { SettingsManager } from "../../../core/settings-manager.js";
+import type { SettingsManager } from "../../../core/settings-manager";
 
 // Setting value types
 export type SettingValue = boolean | string;

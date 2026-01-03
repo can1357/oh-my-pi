@@ -9,8 +9,8 @@
  * - Shift+Tab / Arrow Left: Previous tab (wraps around)
  */
 
-import { isArrowLeft, isArrowRight, isShiftTab, isTab } from "../keys.js";
-import type { Component } from "../tui.js";
+import { isArrowLeft, isArrowRight, isShiftTab, isTab } from "../keys";
+import type { Component } from "../tui";
 
 /** Tab definition */
 export interface Tab {

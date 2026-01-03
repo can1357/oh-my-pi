@@ -5,10 +5,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isShiftCtrlD } from "./keys.js";
-import type { Terminal } from "./terminal.js";
-import { getCapabilities, setCellDimensions } from "./terminal-image.js";
-import { visibleWidth } from "./utils.js";
+import { isShiftCtrlD } from "./keys";
+import type { Terminal } from "./terminal";
+import { getCapabilities, setCellDimensions } from "./terminal-image";
+import { visibleWidth } from "./utils";
 
 /**
  * Component interface - all components must implement this

@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { HookAPI, SessionBeforeCompactEvent, SessionCompactEvent } from "../src/core/hooks/index.js";
+import type { HookAPI, SessionBeforeCompactEvent, SessionCompactEvent } from "../src/core/hooks/index";
 
 describe("Documentation example", () => {
 	it("custom compaction example should type-check correctly", () => {

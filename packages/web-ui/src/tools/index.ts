@@ -1,10 +1,10 @@
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 import "./javascript-repl.js"; // Auto-registers the renderer
 import "./extract-document.js"; // Auto-registers the renderer
-import { getToolRenderer, registerToolRenderer } from "./renderer-registry.js";
-import { BashRenderer } from "./renderers/BashRenderer.js";
-import { DefaultRenderer } from "./renderers/DefaultRenderer.js";
-import type { ToolRenderResult } from "./types.js";
+import { getToolRenderer, registerToolRenderer } from "./renderer-registry";
+import { BashRenderer } from "./renderers/BashRenderer";
+import { DefaultRenderer } from "./renderers/DefaultRenderer";
+import type { ToolRenderResult } from "./types";
 
 // Register all built-in tool renderers
 registerToolRenderer("bash", new BashRenderer());

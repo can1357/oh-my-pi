@@ -6,10 +6,10 @@
 
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import type { Theme } from "../../../modes/interactive/theme/theme.js";
-import type { RenderResultOptions } from "../../custom-tools/types.js";
-import { logViewError } from "./logger.js";
-import type { ExaRenderDetails } from "./types.js";
+import type { Theme } from "../../../modes/interactive/theme/theme";
+import type { RenderResultOptions } from "../../custom-tools/types";
+import { logViewError } from "./logger";
+import type { ExaRenderDetails } from "./types";
 
 // Tree formatting constants
 const TREE_MID = "├─";

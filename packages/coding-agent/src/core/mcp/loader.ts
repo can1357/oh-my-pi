@@ -4,8 +4,8 @@
  * Integrates MCP tool discovery with the custom tools system.
  */
 
-import type { LoadedCustomTool } from "../custom-tools/types.js";
-import { type MCPLoadResult, MCPManager } from "./manager.js";
+import type { LoadedCustomTool } from "../custom-tools/types";
+import { type MCPLoadResult, MCPManager } from "./manager";
 
 /** Result from loading MCP tools */
 export interface MCPToolsLoadResult {

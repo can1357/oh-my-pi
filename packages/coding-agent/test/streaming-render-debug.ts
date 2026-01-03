@@ -4,12 +4,12 @@
  * Run with: npx tsx test/streaming-render-debug.ts
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
-import { readFileSync } from "fs";
-import { join } from "path";
-import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message";
+import { initTheme } from "../src/modes/interactive/theme/theme";
 
 // Initialize dark theme with full color support
 process.env.COLORTERM = "truecolor";

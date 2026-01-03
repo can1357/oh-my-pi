@@ -5,15 +5,10 @@
  * based on manifest entries and enabled features.
  */
 
-import { existsSync, readFileSync } from "fs";
-import { join } from "path";
-import {
-	getPluginsLockfile,
-	getPluginsNodeModules,
-	getPluginsPackageJson,
-	getProjectPluginOverrides,
-} from "./paths.js";
-import type { InstalledPlugin, PluginManifest, PluginRuntimeConfig, ProjectPluginOverrides } from "./types.js";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { getPluginsLockfile, getPluginsNodeModules, getPluginsPackageJson, getProjectPluginOverrides } from "./paths";
+import type { InstalledPlugin, PluginManifest, PluginRuntimeConfig, ProjectPluginOverrides } from "./types";
 
 // =============================================================================
 // Runtime Config Loading

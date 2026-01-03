@@ -5,9 +5,9 @@
  */
 
 import { Type } from "@sinclair/typebox";
-import type { CustomTool } from "../../custom-tools/types.js";
-import { callWebsetsTool, findApiKey } from "./mcp-client.js";
-import type { ExaRenderDetails } from "./types.js";
+import type { CustomTool } from "../../custom-tools/types";
+import { callWebsetsTool, findApiKey } from "./mcp-client";
+import type { ExaRenderDetails } from "./types";
 
 /** Helper to create a websets tool with proper execute signature */
 function createWebsetTool(

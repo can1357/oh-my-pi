@@ -3,8 +3,8 @@
  */
 
 import type { AgentTool, AgentToolContext, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { HookRunner } from "./runner.js";
-import type { ToolCallEventResult, ToolResultEventResult } from "./types.js";
+import type { HookRunner } from "./runner";
+import type { ToolCallEventResult, ToolResultEventResult } from "./types";
 
 /**
  * Wrap a tool with hook callbacks.

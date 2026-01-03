@@ -13,13 +13,13 @@ import { join } from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { getModel } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AgentSession } from "../src/core/agent-session.js";
-import { AuthStorage } from "../src/core/auth-storage.js";
-import { ModelRegistry } from "../src/core/model-registry.js";
-import { SessionManager } from "../src/core/session-manager.js";
-import { SettingsManager } from "../src/core/settings-manager.js";
-import { codingTools } from "../src/core/tools/index.js";
-import { API_KEY } from "./utilities.js";
+import { AgentSession } from "../src/core/agent-session";
+import { AuthStorage } from "../src/core/auth-storage";
+import { ModelRegistry } from "../src/core/model-registry";
+import { SessionManager } from "../src/core/session-manager";
+import { SettingsManager } from "../src/core/settings-manager";
+import { codingTools } from "../src/core/tools/index";
+import { API_KEY } from "./utilities";
 
 describe.skipIf(!API_KEY)("AgentSession branching", () => {
 	let session: AgentSession;

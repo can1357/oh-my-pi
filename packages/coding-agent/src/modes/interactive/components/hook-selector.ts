@@ -4,8 +4,8 @@
  */
 
 import { Container, isArrowDown, isArrowUp, isEnter, isEscape, Spacer, Text } from "@oh-my-pi/pi-tui";
-import { theme } from "../theme/theme.js";
-import { DynamicBorder } from "./dynamic-border.js";
+import { theme } from "../theme/theme";
+import { DynamicBorder } from "./dynamic-border";
 
 export class HookSelectorComponent extends Container {
 	private options: string[];

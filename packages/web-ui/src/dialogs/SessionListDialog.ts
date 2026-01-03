@@ -2,10 +2,10 @@ import { DialogContent, DialogHeader } from "@mariozechner/mini-lit/dist/Dialog.
 import { DialogBase } from "@mariozechner/mini-lit/dist/DialogBase.js";
 import { html } from "lit";
 import { customElement, state } from "lit/decorators.js";
-import { getAppStorage } from "../storage/app-storage.js";
-import type { SessionMetadata } from "../storage/types.js";
-import { formatUsage } from "../utils/format.js";
-import { i18n } from "../utils/i18n.js";
+import { getAppStorage } from "../storage/app-storage";
+import type { SessionMetadata } from "../storage/types";
+import { formatUsage } from "../utils/format";
+import { i18n } from "../utils/i18n";
 
 @customElement("session-list-dialog")
 export class SessionListDialog extends DialogBase {

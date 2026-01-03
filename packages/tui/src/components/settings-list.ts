@@ -1,6 +1,6 @@
-import { isArrowDown, isArrowUp, isCtrlC, isEnter, isEscape } from "../keys.js";
-import type { Component } from "../tui.js";
-import { truncateToWidth, visibleWidth } from "../utils.js";
+import { isArrowDown, isArrowUp, isCtrlC, isEnter, isEscape } from "../keys";
+import type { Component } from "../tui";
+import { truncateToWidth, visibleWidth } from "../utils";
 
 export interface SettingItem {
 	/** Unique identifier for this setting */

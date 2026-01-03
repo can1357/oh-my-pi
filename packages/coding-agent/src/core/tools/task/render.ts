@@ -8,9 +8,9 @@
 import path from "node:path";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import type { Theme } from "../../../modes/interactive/theme/theme.js";
-import type { RenderResultOptions } from "../../custom-tools/types.js";
-import type { AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "./types.js";
+import type { Theme } from "../../../modes/interactive/theme/theme";
+import type { RenderResultOptions } from "../../custom-tools/types";
+import type { AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "./types";
 
 /**
  * Format token count for display (e.g., 1.5k, 25k).

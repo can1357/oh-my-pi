@@ -3,7 +3,7 @@ import JSZip from "jszip";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import * as pdfjsLib from "pdfjs-dist";
 import * as XLSX from "xlsx";
-import { i18n } from "./i18n.js";
+import { i18n } from "./i18n";
 
 // Configure PDF.js worker - we'll need to bundle this
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();

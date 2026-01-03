@@ -5,7 +5,7 @@ import { customElement, property, state } from "lit/decorators.js";
 import { createRef, type Ref, ref } from "lit/directives/ref.js";
 import { repeat } from "lit/directives/repeat.js";
 import { ChevronDown, ChevronRight, ChevronsDown, Lock } from "lucide";
-import { i18n } from "../../utils/i18n.js";
+import { i18n } from "../../utils/i18n";
 
 interface LogEntry {
 	type: "log" | "error";

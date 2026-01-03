@@ -5,7 +5,7 @@ import { type Static, Type } from "@sinclair/typebox";
 import { TypeCompiler } from "@sinclair/typebox/compiler";
 import chalk from "chalk";
 import { highlight, supportsLanguage } from "cli-highlight";
-import { getCustomThemesDir, getThemesDir } from "../../../config.js";
+import { getCustomThemesDir, getThemesDir } from "../../../config";
 
 // ============================================================================
 // Types & Schema

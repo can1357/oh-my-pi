@@ -1,6 +1,6 @@
 import type { Model } from "@oh-my-pi/pi-ai";
-import { Store } from "../store.js";
-import type { StoreConfig } from "../types.js";
+import { Store } from "../store";
+import type { StoreConfig } from "../types";
 
 export type AutoDiscoveryProviderType = "ollama" | "llama.cpp" | "vllm" | "lmstudio";
 

@@ -8,7 +8,7 @@ import type {
 	SymbolKind,
 	TextEdit,
 	WorkspaceEdit,
-} from "./types.js";
+} from "./types";
 
 // =============================================================================
 // Language Detection

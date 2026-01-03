@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
-import * as log from "./log.js";
+import * as log from "./log";
 
 export interface Attachment {
 	original: string; // original filename from uploader

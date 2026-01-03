@@ -1,13 +1,13 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "fs";
-import { join, resolve } from "path";
-import { extractPackageName, parsePluginSpec } from "./parser.js";
+import { existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { extractPackageName, parsePluginSpec } from "./parser";
 import {
 	getPluginsDir,
 	getPluginsLockfile,
 	getPluginsNodeModules,
 	getPluginsPackageJson,
 	getProjectPluginOverrides,
-} from "./paths.js";
+} from "./paths";
 import type {
 	DoctorCheck,
 	DoctorOptions,
@@ -17,7 +17,7 @@ import type {
 	PluginRuntimeConfig,
 	PluginSettingSchema,
 	ProjectPluginOverrides,
-} from "./types.js";
+} from "./types";
 
 // =============================================================================
 // Validation

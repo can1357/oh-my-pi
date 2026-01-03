@@ -1,8 +1,8 @@
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
-import { getModel } from "../src/models.js";
-import { complete } from "../src/stream.js";
-import type { Api, AssistantMessage, Context, Message, Model, Tool, ToolResultMessage } from "../src/types.js";
+import { getModel } from "../src/models";
+import { complete } from "../src/stream";
+import type { Api, AssistantMessage, Context, Message, Model, Tool, ToolResultMessage } from "../src/types";
 
 // Tool for testing
 const weatherSchema = Type.Object({

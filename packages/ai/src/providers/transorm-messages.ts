@@ -1,4 +1,4 @@
-import type { Api, AssistantMessage, Message, Model, ToolCall, ToolResultMessage } from "../types.js";
+import type { Api, AssistantMessage, Message, Model, ToolCall, ToolResultMessage } from "../types";
 
 /**
  * Normalize tool call ID for GitHub Copilot cross-API compatibility.

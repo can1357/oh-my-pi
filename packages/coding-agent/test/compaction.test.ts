@@ -1,8 +1,8 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { getModel } from "@oh-my-pi/pi-ai";
-import { readFileSync } from "fs";
-import { join } from "path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
 	type CompactionSettings,
@@ -13,7 +13,7 @@ import {
 	getLastAssistantUsage,
 	prepareCompaction,
 	shouldCompact,
-} from "../src/core/compaction/index.js";
+} from "../src/core/compaction/index";
 import {
 	buildSessionContext,
 	type CompactionEntry,
@@ -23,7 +23,7 @@ import {
 	type SessionEntry,
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
-} from "../src/core/session-manager.js";
+} from "../src/core/session-manager";
 
 // ============================================================================
 // Test fixtures

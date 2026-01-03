@@ -6,8 +6,8 @@
  * Example: npx tsx scripts/migrate-timestamps.ts ./data
  */
 
-import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from "fs";
-import { join } from "path";
+import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from "node:fs";
+import { join } from "node:path";
 
 function isMillisecondTimestamp(ts: string): boolean {
 	// Slack timestamps are seconds.microseconds, like "1764279530.533489"

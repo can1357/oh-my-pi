@@ -1,7 +1,7 @@
-import { existsSync, readdirSync, readFileSync } from "fs";
-import { homedir } from "os";
-import { join, resolve } from "path";
-import { CONFIG_DIR_NAME, getCommandsDir } from "../config.js";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { CONFIG_DIR_NAME, getCommandsDir } from "../config";
 
 /**
  * Represents a custom slash command loaded from a file

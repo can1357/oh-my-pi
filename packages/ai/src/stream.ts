@@ -1,13 +1,13 @@
-import { supportsXhigh } from "./models.js";
-import { type AnthropicOptions, streamAnthropic } from "./providers/anthropic.js";
-import { type GoogleOptions, streamGoogle } from "./providers/google.js";
+import { supportsXhigh } from "./models";
+import { type AnthropicOptions, streamAnthropic } from "./providers/anthropic";
+import { type GoogleOptions, streamGoogle } from "./providers/google";
 import {
 	type GoogleGeminiCliOptions,
 	type GoogleThinkingLevel,
 	streamGoogleGeminiCli,
-} from "./providers/google-gemini-cli.js";
-import { type OpenAICompletionsOptions, streamOpenAICompletions } from "./providers/openai-completions.js";
-import { type OpenAIResponsesOptions, streamOpenAIResponses } from "./providers/openai-responses.js";
+} from "./providers/google-gemini-cli";
+import { type OpenAICompletionsOptions, streamOpenAICompletions } from "./providers/openai-completions";
+import { type OpenAIResponsesOptions, streamOpenAIResponses } from "./providers/openai-responses";
 import type {
 	Api,
 	AssistantMessage,
@@ -18,7 +18,7 @@ import type {
 	OptionsForApi,
 	ReasoningEffort,
 	SimpleStreamOptions,
-} from "./types.js";
+} from "./types";
 
 /**
  * Get API key for provider from known environment variables, e.g. OPENAI_API_KEY.

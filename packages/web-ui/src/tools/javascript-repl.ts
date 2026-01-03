@@ -5,12 +5,12 @@ import { type Static, Type } from "@sinclair/typebox";
 import { html } from "lit";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Code } from "lucide";
-import { type SandboxFile, SandboxIframe, type SandboxResult } from "../components/SandboxedIframe.js";
-import type { SandboxRuntimeProvider } from "../components/sandbox/SandboxRuntimeProvider.js";
-import { JAVASCRIPT_REPL_TOOL_DESCRIPTION } from "../prompts/prompts.js";
-import type { Attachment } from "../utils/attachment-utils.js";
-import { registerToolRenderer, renderCollapsibleHeader, renderHeader } from "./renderer-registry.js";
-import type { ToolRenderer, ToolRenderResult } from "./types.js";
+import { type SandboxFile, SandboxIframe, type SandboxResult } from "../components/SandboxedIframe";
+import type { SandboxRuntimeProvider } from "../components/sandbox/SandboxRuntimeProvider";
+import { JAVASCRIPT_REPL_TOOL_DESCRIPTION } from "../prompts/prompts";
+import type { Attachment } from "../utils/attachment-utils";
+import { registerToolRenderer, renderCollapsibleHeader, renderHeader } from "./renderer-registry";
+import type { ToolRenderer, ToolRenderResult } from "./types";
 
 // Execute JavaScript code with attachments using SandboxedIframe
 export async function executeJavaScript(

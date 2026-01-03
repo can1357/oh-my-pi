@@ -23,40 +23,40 @@ import {
 	TUI,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { getAuthPath, getDebugLogPath } from "../../config.js";
-import type { AgentSession, AgentSessionEvent } from "../../core/agent-session.js";
-import type { CustomToolSessionEvent, LoadedCustomTool } from "../../core/custom-tools/index.js";
-import type { HookUIContext } from "../../core/hooks/index.js";
-import { createCompactionSummaryMessage } from "../../core/messages.js";
-import { getRecentSessions, type SessionContext, SessionManager } from "../../core/session-manager.js";
-import { loadSkills } from "../../core/skills.js";
-import { loadProjectContextFiles } from "../../core/system-prompt.js";
-import { generateSessionTitle, setTerminalTitle } from "../../core/title-generator.js";
-import type { TruncationResult } from "../../core/tools/truncate.js";
-import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
-import { copyToClipboard, readImageFromClipboard } from "../../utils/clipboard.js";
-import { ArminComponent } from "./components/armin.js";
-import { AssistantMessageComponent } from "./components/assistant-message.js";
-import { BashExecutionComponent } from "./components/bash-execution.js";
-import { BorderedLoader } from "./components/bordered-loader.js";
-import { BranchSummaryMessageComponent } from "./components/branch-summary-message.js";
-import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.js";
-import { CustomEditor } from "./components/custom-editor.js";
-import { DynamicBorder } from "./components/dynamic-border.js";
-import { FooterComponent } from "./components/footer.js";
-import { HookEditorComponent } from "./components/hook-editor.js";
-import { HookInputComponent } from "./components/hook-input.js";
-import { HookMessageComponent } from "./components/hook-message.js";
-import { HookSelectorComponent } from "./components/hook-selector.js";
-import { ModelSelectorComponent } from "./components/model-selector.js";
-import { OAuthSelectorComponent } from "./components/oauth-selector.js";
-import { SessionSelectorComponent } from "./components/session-selector.js";
-import { SettingsSelectorComponent } from "./components/settings-selector.js";
-import { ToolExecutionComponent } from "./components/tool-execution.js";
-import { TreeSelectorComponent } from "./components/tree-selector.js";
-import { UserMessageComponent } from "./components/user-message.js";
-import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
-import { WelcomeComponent } from "./components/welcome.js";
+import { getAuthPath, getDebugLogPath } from "../../config";
+import type { AgentSession, AgentSessionEvent } from "../../core/agent-session";
+import type { CustomToolSessionEvent, LoadedCustomTool } from "../../core/custom-tools/index";
+import type { HookUIContext } from "../../core/hooks/index";
+import { createCompactionSummaryMessage } from "../../core/messages";
+import { getRecentSessions, type SessionContext, SessionManager } from "../../core/session-manager";
+import { loadSkills } from "../../core/skills";
+import { loadProjectContextFiles } from "../../core/system-prompt";
+import { generateSessionTitle, setTerminalTitle } from "../../core/title-generator";
+import type { TruncationResult } from "../../core/tools/truncate";
+import { getChangelogPath, parseChangelog } from "../../utils/changelog";
+import { copyToClipboard, readImageFromClipboard } from "../../utils/clipboard";
+import { ArminComponent } from "./components/armin";
+import { AssistantMessageComponent } from "./components/assistant-message";
+import { BashExecutionComponent } from "./components/bash-execution";
+import { BorderedLoader } from "./components/bordered-loader";
+import { BranchSummaryMessageComponent } from "./components/branch-summary-message";
+import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message";
+import { CustomEditor } from "./components/custom-editor";
+import { DynamicBorder } from "./components/dynamic-border";
+import { FooterComponent } from "./components/footer";
+import { HookEditorComponent } from "./components/hook-editor";
+import { HookInputComponent } from "./components/hook-input";
+import { HookMessageComponent } from "./components/hook-message";
+import { HookSelectorComponent } from "./components/hook-selector";
+import { ModelSelectorComponent } from "./components/model-selector";
+import { OAuthSelectorComponent } from "./components/oauth-selector";
+import { SessionSelectorComponent } from "./components/session-selector";
+import { SettingsSelectorComponent } from "./components/settings-selector";
+import { ToolExecutionComponent } from "./components/tool-execution";
+import { TreeSelectorComponent } from "./components/tree-selector";
+import { UserMessageComponent } from "./components/user-message";
+import { UserMessageSelectorComponent } from "./components/user-message-selector";
+import { WelcomeComponent } from "./components/welcome";
 import {
 	getAvailableThemes,
 	getEditorTheme,
@@ -65,7 +65,7 @@ import {
 	setTheme,
 	type Theme,
 	theme,
-} from "./theme/theme.js";
+} from "./theme/theme";
 
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {

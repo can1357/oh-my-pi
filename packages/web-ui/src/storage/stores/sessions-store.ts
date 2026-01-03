@@ -1,6 +1,6 @@
 import type { AgentState } from "@oh-my-pi/pi-agent-core";
-import { Store } from "../store.js";
-import type { SessionData, SessionMetadata, StoreConfig } from "../types.js";
+import { Store } from "../store";
+import type { SessionData, SessionMetadata, StoreConfig } from "../types";
 
 /**
  * Store for chat sessions (data and metadata).

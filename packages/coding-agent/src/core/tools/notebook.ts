@@ -1,6 +1,6 @@
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
-import { resolveToCwd } from "./path-utils.js";
+import { resolveToCwd } from "./path-utils";
 
 const notebookSchema = Type.Object({
 	action: Type.Union([Type.Literal("edit"), Type.Literal("insert"), Type.Literal("delete")], {

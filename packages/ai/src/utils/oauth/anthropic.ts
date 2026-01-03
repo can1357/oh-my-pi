@@ -2,8 +2,8 @@
  * Anthropic OAuth flow (Claude Pro/Max)
  */
 
-import { generatePKCE } from "./pkce.js";
-import type { OAuthCredentials } from "./types.js";
+import { generatePKCE } from "./pkce";
+import type { OAuthCredentials } from "./types";
 
 const decode = (s: string) => atob(s);
 const CLIENT_ID = decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");

@@ -5,7 +5,7 @@
  */
 
 import chalk from "chalk";
-import { PluginManager, parseSettingValue, validateSetting } from "../core/plugins/index.js";
+import { PluginManager, parseSettingValue, validateSetting } from "../core/plugins/index";
 
 // =============================================================================
 // Types

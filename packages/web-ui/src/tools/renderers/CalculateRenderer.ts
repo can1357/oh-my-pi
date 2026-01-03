@@ -1,9 +1,9 @@
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { html } from "lit";
 import { Calculator } from "lucide";
-import { i18n } from "../../utils/i18n.js";
-import { renderHeader } from "../renderer-registry.js";
-import type { ToolRenderer, ToolRenderResult } from "../types.js";
+import { i18n } from "../../utils/i18n";
+import { renderHeader } from "../renderer-registry";
+import type { ToolRenderer, ToolRenderResult } from "../types";
 
 interface CalculateParams {
 	expression: string;

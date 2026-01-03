@@ -11,10 +11,10 @@ import {
 	Text,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
-import type { SessionInfo } from "../../../core/session-manager.js";
-import { fuzzyFilter } from "../../../utils/fuzzy.js";
-import { theme } from "../theme/theme.js";
-import { DynamicBorder } from "./dynamic-border.js";
+import type { SessionInfo } from "../../../core/session-manager";
+import { fuzzyFilter } from "../../../utils/fuzzy";
+import { theme } from "../theme/theme";
+import { DynamicBorder } from "./dynamic-border";
 
 /**
  * Custom session list component with multi-line items and search

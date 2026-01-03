@@ -1,6 +1,6 @@
-import { homedir } from "os";
-import { join } from "path";
-import { CONFIG_DIR_NAME } from "../../config.js";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { CONFIG_DIR_NAME } from "../../config";
 
 // =============================================================================
 // Plugin Directory Paths

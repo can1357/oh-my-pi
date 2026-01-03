@@ -1,7 +1,7 @@
-import { mkdir } from "fs/promises";
-import { join, resolve } from "path";
-import { getAgentDir } from "../../config.js";
-import type { InstalledPlugin } from "./types.js";
+import { mkdir } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { getAgentDir } from "../../config";
+import type { InstalledPlugin } from "./types";
 
 const PLUGINS_DIR = join(getAgentDir(), "plugins");
 

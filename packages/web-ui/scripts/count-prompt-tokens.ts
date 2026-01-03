@@ -3,7 +3,7 @@
  * Count tokens in system prompts using Anthropic's token counter API
  */
 
-import * as prompts from "../src/prompts/prompts.js";
+import * as prompts from "../src/prompts/prompts";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 

@@ -9,8 +9,8 @@ export {
 	type NavigateTreeHandler,
 	type NewSessionHandler,
 	type SendMessageHandler,
-} from "./loader.js";
-export { execCommand, HookRunner, type HookErrorListener } from "./runner.js";
-export { wrapToolsWithHooks, wrapToolWithHooks } from "./tool-wrapper.js";
-export * from "./types.js";
-export type { ReadonlySessionManager } from "../session-manager.js";
+} from "./loader";
+export { execCommand, HookRunner, type HookErrorListener } from "./runner";
+export { wrapToolsWithHooks, wrapToolWithHooks } from "./tool-wrapper";
+export * from "./types";
+export type { ReadonlySessionManager } from "../session-manager";

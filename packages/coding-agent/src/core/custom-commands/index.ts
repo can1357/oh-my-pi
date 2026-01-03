@@ -4,7 +4,7 @@ export {
 	discoverCustomCommands,
 	type LoadCustomCommandsOptions,
 	loadCustomCommands,
-} from "./loader.js";
+} from "./loader";
 export type {
 	CustomCommand,
 	CustomCommandAPI,
@@ -12,4 +12,4 @@ export type {
 	CustomCommandSource,
 	CustomCommandsLoadResult,
 	LoadedCustomCommand,
-} from "./types.js";
+} from "./types";

@@ -1,7 +1,7 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, type TemplateResult } from "lit";
 import { FileCode2 } from "lucide";
-import type { ArtifactsPanel } from "./artifacts.js";
+import type { ArtifactsPanel } from "./artifacts";
 
 export function ArtifactPill(filename: string, artifactsPanel?: ArtifactsPanel): TemplateResult {
 	const handleClick = (e: Event) => {

@@ -2,6 +2,7 @@
  * Model registry - manages built-in and custom models, provides API key resolution.
  */
 
+import { existsSync, readFileSync } from "node:fs";
 import {
 	type Api,
 	getGitHubCopilotBaseUrl,
@@ -13,8 +14,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { type Static, Type } from "@sinclair/typebox";
 import AjvModule from "ajv";
-import { existsSync, readFileSync } from "fs";
-import type { AuthStorage } from "./auth-storage.js";
+import type { AuthStorage } from "./auth-storage";
 
 const Ajv = (AjvModule as any).default || AjvModule;
 

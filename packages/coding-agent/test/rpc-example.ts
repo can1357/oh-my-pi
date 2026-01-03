@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import * as readline from "node:readline";
-import { RpcClient } from "../src/modes/rpc/rpc-client.js";
+import { RpcClient } from "../src/modes/rpc/rpc-client";
 
 /**
  * Interactive example of using coding-agent via RpcClient.

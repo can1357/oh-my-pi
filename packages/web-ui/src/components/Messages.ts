@@ -8,10 +8,10 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property } from "lit/decorators.js";
-import { renderTool } from "../tools/index.js";
-import type { Attachment } from "../utils/attachment-utils.js";
-import { formatUsage } from "../utils/format.js";
-import { i18n } from "../utils/i18n.js";
+import { renderTool } from "../tools/index";
+import type { Attachment } from "../utils/attachment-utils";
+import { formatUsage } from "../utils/format";
+import { i18n } from "../utils/i18n";
 import "./ThinkingBlock.js";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 

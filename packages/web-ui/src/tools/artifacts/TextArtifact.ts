@@ -4,8 +4,8 @@ import hljs from "highlight.js";
 import { html } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
-import { i18n } from "../../utils/i18n.js";
-import { ArtifactElement } from "./ArtifactElement.js";
+import { i18n } from "../../utils/i18n";
+import { ArtifactElement } from "./ArtifactElement";
 
 // Known code file extensions for highlighting
 const CODE_EXTENSIONS = [

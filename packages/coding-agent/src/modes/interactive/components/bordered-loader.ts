@@ -1,6 +1,6 @@
 import { CancellableLoader, Container, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
-import type { Theme } from "../theme/theme.js";
-import { DynamicBorder } from "./dynamic-border.js";
+import type { Theme } from "../theme/theme";
+import { DynamicBorder } from "./dynamic-border";
 
 /** Loader wrapped with borders for hook UI */
 export class BorderedLoader extends Container {

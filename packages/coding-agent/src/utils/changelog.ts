@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync } from "node:fs";
 
 export interface ChangelogEntry {
 	major: number;
@@ -96,4 +96,4 @@ export function getNewEntries(entries: ChangelogEntry[], lastVersion: string): C
 }
 
 // Re-export getChangelogPath from paths.ts for convenience
-export { getChangelogPath } from "../config.js";
+export { getChangelogPath } from "../config";

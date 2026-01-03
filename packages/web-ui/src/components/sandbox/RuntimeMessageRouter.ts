@@ -1,4 +1,4 @@
-import type { SandboxRuntimeProvider } from "./SandboxRuntimeProvider.js";
+import type { SandboxRuntimeProvider } from "./SandboxRuntimeProvider";
 
 // Type declaration for chrome extension API (when available)
 declare const chrome: any;

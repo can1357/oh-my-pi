@@ -1,4 +1,4 @@
-import type { AutocompleteProvider, CombinedAutocompleteProvider } from "../autocomplete.js";
+import type { AutocompleteProvider, CombinedAutocompleteProvider } from "../autocomplete";
 import {
 	isAltBackspace,
 	isAltEnter,
@@ -24,10 +24,10 @@ import {
 	isHome,
 	isShiftEnter,
 	isTab,
-} from "../keys.js";
-import type { Component } from "../tui.js";
-import { getSegmenter, isPunctuationChar, isWhitespaceChar, visibleWidth } from "../utils.js";
-import { SelectList, type SelectListTheme } from "./select-list.js";
+} from "../keys";
+import type { Component } from "../tui";
+import { getSegmenter, isPunctuationChar, isWhitespaceChar, visibleWidth } from "../utils";
+import { SelectList, type SelectListTheme } from "./select-list";
 
 const segmenter = getSegmenter();
 

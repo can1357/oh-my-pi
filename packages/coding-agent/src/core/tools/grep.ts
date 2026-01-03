@@ -3,8 +3,8 @@ import nodePath from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import type { Subprocess } from "bun";
-import { ensureTool } from "../../utils/tools-manager.js";
-import { resolveToCwd } from "./path-utils.js";
+import { ensureTool } from "../../utils/tools-manager";
+import { resolveToCwd } from "./path-utils";
 import {
 	DEFAULT_MAX_BYTES,
 	formatSize,
@@ -12,7 +12,7 @@ import {
 	type TruncationResult,
 	truncateHead,
 	truncateLine,
-} from "./truncate.js";
+} from "./truncate";
 
 const grepSchema = Type.Object({
 	pattern: Type.String({ description: "Search pattern (regex or literal string)" }),

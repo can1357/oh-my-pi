@@ -69,9 +69,9 @@
 
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { getModel } from "../src/models.js";
-import { complete } from "../src/stream.js";
-import type { Api, Context, ImageContent, Model, OptionsForApi, UserMessage } from "../src/types.js";
+import { getModel } from "../src/models";
+import { complete } from "../src/stream";
+import type { Api, Context, ImageContent, Model, OptionsForApi, UserMessage } from "../src/types";
 
 const dir = import.meta.dir;
 

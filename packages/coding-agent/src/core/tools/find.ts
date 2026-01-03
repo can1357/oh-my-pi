@@ -3,9 +3,9 @@ import path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import { globSync } from "glob";
-import { ensureTool } from "../../utils/tools-manager.js";
-import { resolveToCwd } from "./path-utils.js";
-import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
+import { ensureTool } from "../../utils/tools-manager";
+import { resolveToCwd } from "./path-utils";
+import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate";
 
 const findSchema = Type.Object({
 	pattern: Type.String({

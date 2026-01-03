@@ -1,6 +1,6 @@
 import { marked, type Token } from "marked";
-import type { Component } from "../tui.js";
-import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.js";
+import type { Component } from "../tui";
+import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils";
 
 /**
  * Default text styling for markdown content.

@@ -14,9 +14,9 @@ import {
 	isCtrlW,
 	isDelete,
 	isEnter,
-} from "../keys.js";
-import type { Component } from "../tui.js";
-import { getSegmenter, isPunctuationChar, isWhitespaceChar, visibleWidth } from "../utils.js";
+} from "../keys";
+import type { Component } from "../tui";
+import { getSegmenter, isPunctuationChar, isWhitespaceChar, visibleWidth } from "../utils";
 
 const segmenter = getSegmenter();
 

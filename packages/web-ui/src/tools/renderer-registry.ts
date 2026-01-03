@@ -3,7 +3,7 @@ import { html, type TemplateResult } from "lit";
 import type { Ref } from "lit/directives/ref.js";
 import { ref } from "lit/directives/ref.js";
 import { ChevronsUpDown, ChevronUp, Loader } from "lucide";
-import type { ToolRenderer } from "./types.js";
+import type { ToolRenderer } from "./types";
 
 // Registry of tool renderers
 export const toolRenderers = new Map<string, ToolRenderer>();

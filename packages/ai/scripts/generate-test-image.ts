@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { createCanvas } from "canvas";
-import { join } from "path";
+import { join } from "node:path";
 
 // Create a 200x200 canvas
 const canvas = createCanvas(200, 200);

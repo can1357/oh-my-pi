@@ -19,7 +19,7 @@ import type {
 	AgentTool,
 	AgentToolResult,
 	StreamFn,
-} from "./types.js";
+} from "./types";
 
 /**
  * Start an agent loop with a new prompt message.

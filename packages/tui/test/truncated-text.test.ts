@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { Chalk } from "chalk";
-import { TruncatedText } from "../src/components/truncated-text.js";
-import { visibleWidth } from "../src/utils.js";
+import { TruncatedText } from "../src/components/truncated-text";
+import { visibleWidth } from "../src/utils";
 
 // Force full color in CI so ANSI assertions are deterministic
 const chalk = new Chalk({ level: 3 });

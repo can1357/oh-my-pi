@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { applyWorkspaceEdit } from "./edits.js";
+import { applyWorkspaceEdit } from "./edits";
 import type {
 	Diagnostic,
 	LspClient,
@@ -8,8 +8,8 @@ import type {
 	LspJsonRpcResponse,
 	ServerConfig,
 	WorkspaceEdit,
-} from "./types.js";
-import { detectLanguageId, fileToUri } from "./utils.js";
+} from "./types";
+import { detectLanguageId, fileToUri } from "./utils";
 
 // =============================================================================
 // Client State

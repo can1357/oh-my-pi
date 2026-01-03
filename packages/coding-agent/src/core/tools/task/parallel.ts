@@ -2,7 +2,7 @@
  * Parallel execution with concurrency control.
  */
 
-import { MAX_CONCURRENCY } from "./types.js";
+import { MAX_CONCURRENCY } from "./types";
 
 /**
  * Execute items with a concurrency limit using a worker pool pattern.

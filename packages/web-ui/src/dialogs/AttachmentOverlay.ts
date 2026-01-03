@@ -7,8 +7,8 @@ import { state } from "lit/decorators.js";
 import { Download, X } from "lucide";
 import * as pdfjsLib from "pdfjs-dist";
 import * as XLSX from "xlsx";
-import type { Attachment } from "../utils/attachment-utils.js";
-import { i18n } from "../utils/i18n.js";
+import type { Attachment } from "../utils/attachment-utils";
+import { i18n } from "../utils/i18n";
 
 type FileType = "image" | "pdf" | "docx" | "pptx" | "excel" | "text";
 

@@ -1,13 +1,13 @@
+import { spawnSync } from "node:child_process";
+import { constants } from "node:fs";
+import { access, readFile } from "node:fs/promises";
+import { extname } from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { Type } from "@sinclair/typebox";
-import { spawnSync } from "child_process";
-import { constants } from "fs";
-import { access, readFile } from "fs/promises";
-import { extname } from "path";
-import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.js";
-import { resolveReadPath } from "./path-utils.js";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
+import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime";
+import { resolveReadPath } from "./path-utils";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate";
 
 // Document types convertible via markitdown
 const CONVERTIBLE_EXTENSIONS = new Set([".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".rtf", ".epub"]);

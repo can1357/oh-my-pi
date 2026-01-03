@@ -2,7 +2,7 @@ import { chmodSync, createWriteStream, existsSync, mkdirSync, renameSync, rmSync
 import { arch, platform } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
-import { APP_NAME, getToolsDir } from "../config.js";
+import { APP_NAME, getToolsDir } from "../config";
 
 const TOOLS_DIR = getToolsDir();
 

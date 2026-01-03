@@ -1,8 +1,8 @@
 import { DownloadButton } from "@mariozechner/mini-lit/dist/DownloadButton.js";
 import { html, type TemplateResult } from "lit";
 import { customElement, property } from "lit/decorators.js";
-import { i18n } from "../../utils/i18n.js";
-import { ArtifactElement } from "./ArtifactElement.js";
+import { i18n } from "../../utils/i18n";
+import { ArtifactElement } from "./ArtifactElement";
 
 @customElement("image-artifact")
 export class ImageArtifact extends ArtifactElement {

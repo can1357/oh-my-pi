@@ -1,20 +1,20 @@
 import { streamSimple, type ToolResultMessage, type Usage } from "@oh-my-pi/pi-ai";
 import { html, LitElement } from "lit";
 import { customElement, property, query } from "lit/decorators.js";
-import { ModelSelector } from "../dialogs/ModelSelector.js";
-import type { MessageEditor } from "./MessageEditor.js";
+import { ModelSelector } from "../dialogs/ModelSelector";
+import type { MessageEditor } from "./MessageEditor";
 import "./MessageEditor.js";
 import "./MessageList.js";
 import "./Messages.js"; // Import for side effects to register the custom elements
-import { getAppStorage } from "../storage/app-storage.js";
+import { getAppStorage } from "../storage/app-storage";
 import "./StreamingMessageContainer.js";
 import type { Agent, AgentEvent } from "@oh-my-pi/pi-agent-core";
-import type { Attachment } from "../utils/attachment-utils.js";
-import { formatUsage } from "../utils/format.js";
-import { i18n } from "../utils/i18n.js";
-import { createStreamFn } from "../utils/proxy-utils.js";
-import type { UserMessageWithAttachments } from "./Messages.js";
-import type { StreamingMessageContainer } from "./StreamingMessageContainer.js";
+import type { Attachment } from "../utils/attachment-utils";
+import { formatUsage } from "../utils/format";
+import { i18n } from "../utils/i18n";
+import { createStreamFn } from "../utils/proxy-utils";
+import type { UserMessageWithAttachments } from "./Messages";
+import type { StreamingMessageContainer } from "./StreamingMessageContainer";
 
 @customElement("agent-interface")
 export class AgentInterface extends LitElement {

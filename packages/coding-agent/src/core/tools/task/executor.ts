@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
-import { resolveModelPattern } from "./model-resolver.js";
+import { resolveModelPattern } from "./model-resolver";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -18,7 +18,7 @@ import {
 	MAX_OUTPUT_LINES,
 	PI_NO_SUBAGENTS_ENV,
 	type SingleResult,
-} from "./types.js";
+} from "./types";
 
 /** pi command: 'pi.cmd' on Windows, 'pi' elsewhere */
 const PI_CMD = process.platform === "win32" ? "pi.cmd" : "pi";

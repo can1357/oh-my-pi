@@ -1,5 +1,5 @@
 import { Container, Markdown, Spacer } from "@oh-my-pi/pi-tui";
-import { getMarkdownTheme, theme } from "../theme/theme.js";
+import { getMarkdownTheme, theme } from "../theme/theme";
 
 /**
  * Component that renders a user message

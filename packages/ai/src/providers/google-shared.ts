@@ -3,9 +3,9 @@
  */
 
 import { type Content, FinishReason, FunctionCallingConfigMode, type Part, type Schema } from "@google/genai";
-import type { Context, ImageContent, Model, StopReason, TextContent, Tool } from "../types.js";
-import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
-import { transformMessages } from "./transorm-messages.js";
+import type { Context, ImageContent, Model, StopReason, TextContent, Tool } from "../types";
+import { sanitizeSurrogates } from "../utils/sanitize-unicode";
+import { transformMessages } from "./transorm-messages";
 
 type GoogleApiType = "google-generative-ai" | "google-gemini-cli";
 

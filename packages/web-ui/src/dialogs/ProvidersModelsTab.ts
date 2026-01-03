@@ -5,15 +5,15 @@ import { html, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import "../components/CustomProviderCard.js";
 import "../components/ProviderKeyInput.js";
-import { getAppStorage } from "../storage/app-storage.js";
+import { getAppStorage } from "../storage/app-storage";
 import type {
 	AutoDiscoveryProviderType,
 	CustomProvider,
 	CustomProviderType,
-} from "../storage/stores/custom-providers-store.js";
-import { discoverModels } from "../utils/model-discovery.js";
-import { CustomProviderDialog } from "./CustomProviderDialog.js";
-import { SettingsTab } from "./SettingsDialog.js";
+} from "../storage/stores/custom-providers-store";
+import { discoverModels } from "../utils/model-discovery";
+import { CustomProviderDialog } from "./CustomProviderDialog";
+import { SettingsTab } from "./SettingsDialog";
 
 @customElement("providers-models-tab")
 export class ProvidersModelsTab extends SettingsTab {

@@ -7,10 +7,10 @@
 import type { AgentEvent, AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { Subprocess } from "bun";
-import type { SessionStats } from "../../core/agent-session.js";
-import type { BashResult } from "../../core/bash-executor.js";
-import type { CompactionResult } from "../../core/compaction/index.js";
-import type { RpcCommand, RpcResponse, RpcSessionState } from "./rpc-types.js";
+import type { SessionStats } from "../../core/agent-session";
+import type { BashResult } from "../../core/bash-executor";
+import type { CompactionResult } from "../../core/compaction/index";
+import type { RpcCommand, RpcResponse, RpcSessionState } from "./rpc-types";
 
 // ============================================================================
 // Types

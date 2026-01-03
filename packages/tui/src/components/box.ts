@@ -1,5 +1,5 @@
-import type { Component } from "../tui.js";
-import { applyBackgroundToLine, visibleWidth } from "../utils.js";
+import type { Component } from "../tui";
+import { applyBackgroundToLine, visibleWidth } from "../utils";
 
 /**
  * Box component - a container that applies padding and background to all children

@@ -2,12 +2,12 @@ import hljs from "highlight.js";
 import { html } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
-import { i18n } from "../../utils/i18n.js";
+import { i18n } from "../../utils/i18n";
 import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import { CopyButton } from "@mariozechner/mini-lit/dist/CopyButton.js";
 import { DownloadButton } from "@mariozechner/mini-lit/dist/DownloadButton.js";
 import { PreviewCodeToggle } from "@mariozechner/mini-lit/dist/PreviewCodeToggle.js";
-import { ArtifactElement } from "./ArtifactElement.js";
+import { ArtifactElement } from "./ArtifactElement";
 
 @customElement("markdown-artifact")
 export class MarkdownArtifact extends ArtifactElement {

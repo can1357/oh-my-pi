@@ -6,10 +6,10 @@
  */
 
 // Client
-export { callTool, connectToServer, disconnectServer, listTools, serverSupportsTools } from "./client.js";
+export { callTool, connectToServer, disconnectServer, listTools, serverSupportsTools } from "./client";
 
 // Config
-export type { ExaFilterResult, LoadMCPConfigsOptions, LoadMCPConfigsResult } from "./config.js";
+export type { ExaFilterResult, LoadMCPConfigsOptions, LoadMCPConfigsResult } from "./config";
 export {
 	expandEnvVars,
 	extractExaApiKey,
@@ -20,19 +20,19 @@ export {
 	loadMCPConfigFile,
 	mergeMCPConfigs,
 	validateServerConfig,
-} from "./config.js";
+} from "./config";
 // Loader (for SDK integration)
-export type { MCPToolsLoadOptions, MCPToolsLoadResult } from "./loader.js";
-export { discoverAndLoadMCPTools } from "./loader.js";
+export type { MCPToolsLoadOptions, MCPToolsLoadResult } from "./loader";
+export { discoverAndLoadMCPTools } from "./loader";
 // Manager
-export type { MCPDiscoverOptions, MCPLoadResult } from "./manager.js";
-export { createMCPManager, MCPManager } from "./manager.js";
+export type { MCPDiscoverOptions, MCPLoadResult } from "./manager";
+export { createMCPManager, MCPManager } from "./manager";
 // Tool bridge
-export type { MCPToolDetails } from "./tool-bridge.js";
-export { createMCPTool, createMCPToolName, createMCPTools, parseMCPToolName } from "./tool-bridge.js";
+export type { MCPToolDetails } from "./tool-bridge";
+export { createMCPTool, createMCPToolName, createMCPTools, parseMCPToolName } from "./tool-bridge";
 // Transports
-export { createHttpTransport, HttpTransport } from "./transports/http.js";
-export { createStdioTransport, StdioTransport } from "./transports/stdio.js";
+export { createHttpTransport, HttpTransport } from "./transports/http";
+export { createStdioTransport, StdioTransport } from "./transports/stdio";
 // Types
 export type {
 	MCPConfigFile,
@@ -46,4 +46,4 @@ export type {
 	MCPToolDefinition,
 	MCPToolWithServer,
 	MCPTransport,
-} from "./types.js";
+} from "./types";

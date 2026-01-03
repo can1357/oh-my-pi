@@ -1,12 +1,12 @@
+import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { Subprocess } from "bun";
-import { join } from "path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { getModel } from "../src/models.js";
-import { complete, stream } from "../src/stream.js";
-import type { Api, Context, ImageContent, Model, OptionsForApi, Tool, ToolResultMessage } from "../src/types.js";
-import { StringEnum } from "../src/utils/typebox-helpers.js";
-import { resolveApiKey } from "./oauth.js";
+import { getModel } from "../src/models";
+import { complete, stream } from "../src/stream";
+import type { Api, Context, ImageContent, Model, OptionsForApi, Tool, ToolResultMessage } from "../src/types";
+import { StringEnum } from "../src/utils/typebox-helpers";
+import { resolveApiKey } from "./oauth";
 
 const dir = import.meta.dir;
 

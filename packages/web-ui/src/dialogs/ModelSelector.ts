@@ -8,12 +8,12 @@ import { html, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
 import { Brain, Image as ImageIcon } from "lucide";
-import { Input } from "../components/Input.js";
-import { getAppStorage } from "../storage/app-storage.js";
-import type { AutoDiscoveryProviderType } from "../storage/stores/custom-providers-store.js";
-import { formatModelCost } from "../utils/format.js";
-import { i18n } from "../utils/i18n.js";
-import { discoverModels } from "../utils/model-discovery.js";
+import { Input } from "../components/Input";
+import { getAppStorage } from "../storage/app-storage";
+import type { AutoDiscoveryProviderType } from "../storage/stores/custom-providers-store";
+import { formatModelCost } from "../utils/format";
+import { i18n } from "../utils/i18n";
+import { discoverModels } from "../utils/model-discovery";
 
 @customElement("agent-model-selector")
 export class ModelSelector extends DialogBase {

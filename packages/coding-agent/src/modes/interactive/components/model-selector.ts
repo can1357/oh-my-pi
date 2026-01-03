@@ -1,11 +1,11 @@
 import { type Model, modelsAreEqual } from "@oh-my-pi/pi-ai";
 import { Container, Input, isArrowDown, isArrowUp, isEnter, isEscape, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
-import type { ModelRegistry } from "../../../core/model-registry.js";
-import { parseModelString } from "../../../core/model-resolver.js";
-import type { SettingsManager } from "../../../core/settings-manager.js";
-import { fuzzyFilter } from "../../../utils/fuzzy.js";
-import { theme } from "../theme/theme.js";
-import { DynamicBorder } from "./dynamic-border.js";
+import type { ModelRegistry } from "../../../core/model-registry";
+import { parseModelString } from "../../../core/model-resolver";
+import type { SettingsManager } from "../../../core/settings-manager";
+import { fuzzyFilter } from "../../../utils/fuzzy";
+import { theme } from "../theme/theme";
+import { DynamicBorder } from "./dynamic-border";
 
 interface ModelItem {
 	provider: string;

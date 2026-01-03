@@ -7,7 +7,7 @@
  */
 
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import type { AgentSession } from "../core/agent-session.js";
+import type { AgentSession } from "../core/agent-session";
 
 /**
  * Run in print (single-shot) mode.

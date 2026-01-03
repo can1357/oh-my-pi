@@ -3,7 +3,7 @@ import { LitElement } from "lit";
 import { property, state } from "lit/decorators.js";
 import { html } from "lit/html.js";
 import { Check, Copy } from "lucide";
-import { i18n } from "../utils/i18n.js";
+import { i18n } from "../utils/i18n";
 
 export class ConsoleBlock extends LitElement {
 	@property() content: string = "";

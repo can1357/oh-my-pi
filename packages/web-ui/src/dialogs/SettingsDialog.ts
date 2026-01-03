@@ -7,7 +7,7 @@ import { getProviders } from "@oh-my-pi/pi-ai";
 import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import "../components/ProviderKeyInput.js";
-import { getAppStorage } from "../storage/app-storage.js";
+import { getAppStorage } from "../storage/app-storage";
 
 // Base class for settings tabs
 export abstract class SettingsTab extends LitElement {

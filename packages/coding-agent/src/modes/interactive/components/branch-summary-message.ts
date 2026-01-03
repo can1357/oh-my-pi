@@ -1,6 +1,6 @@
 import { Box, Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
-import type { BranchSummaryMessage } from "../../../core/messages.js";
-import { getMarkdownTheme, theme } from "../theme/theme.js";
+import type { BranchSummaryMessage } from "../../../core/messages";
+import { getMarkdownTheme, theme } from "../theme/theme";
 
 /**
  * Component that renders a branch summary message with collapsed/expanded state.

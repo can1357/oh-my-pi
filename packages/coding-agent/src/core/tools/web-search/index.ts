@@ -14,16 +14,16 @@
 
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
-import type { Theme } from "../../../modes/interactive/theme/theme.js";
-import type { CustomTool, CustomToolContext, RenderResultOptions } from "../../custom-tools/types.js";
-import { callExaTool, findApiKey as findExaKey, formatSearchResults, isSearchResponse } from "../exa/mcp-client.js";
-import { renderExaCall, renderExaResult } from "../exa/render.js";
-import type { ExaRenderDetails } from "../exa/types.js";
-import { searchAnthropic } from "./providers/anthropic.js";
-import { searchExa } from "./providers/exa.js";
-import { findApiKey as findPerplexityKey, searchPerplexity } from "./providers/perplexity.js";
-import { formatAge, renderWebSearchCall, renderWebSearchResult, type WebSearchRenderDetails } from "./render.js";
-import type { WebSearchProvider, WebSearchResponse } from "./types.js";
+import type { Theme } from "../../../modes/interactive/theme/theme";
+import type { CustomTool, CustomToolContext, RenderResultOptions } from "../../custom-tools/types";
+import { callExaTool, findApiKey as findExaKey, formatSearchResults, isSearchResponse } from "../exa/mcp-client";
+import { renderExaCall, renderExaResult } from "../exa/render";
+import type { ExaRenderDetails } from "../exa/types";
+import { searchAnthropic } from "./providers/anthropic";
+import { searchExa } from "./providers/exa";
+import { findApiKey as findPerplexityKey, searchPerplexity } from "./providers/perplexity";
+import { formatAge, renderWebSearchCall, renderWebSearchResult, type WebSearchRenderDetails } from "./render";
+import type { WebSearchProvider, WebSearchResponse } from "./types";
 
 /** Web search parameters schema */
 export const webSearchSchema = Type.Object({
@@ -534,4 +534,4 @@ export async function hasExaWebSearch(): Promise<boolean> {
 	return exaKey !== null;
 }
 
-export type { WebSearchProvider, WebSearchResponse } from "./types.js";
+export type { WebSearchProvider, WebSearchResponse } from "./types";

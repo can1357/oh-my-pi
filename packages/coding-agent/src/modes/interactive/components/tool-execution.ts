@@ -11,14 +11,14 @@ import {
 	type TUI,
 } from "@oh-my-pi/pi-tui";
 import stripAnsi from "strip-ansi";
-import type { CustomTool } from "../../../core/custom-tools/types.js";
-import { computeEditDiff, type EditDiffError, type EditDiffResult } from "../../../core/tools/edit-diff.js";
-import { toolRenderers } from "../../../core/tools/renderers.js";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "../../../core/tools/truncate.js";
-import { sanitizeBinaryOutput } from "../../../utils/shell.js";
-import { getLanguageFromPath, highlightCode, theme } from "../theme/theme.js";
-import { renderDiff } from "./diff.js";
-import { truncateToVisualLines } from "./visual-truncate.js";
+import type { CustomTool } from "../../../core/custom-tools/types";
+import { computeEditDiff, type EditDiffError, type EditDiffResult } from "../../../core/tools/edit-diff";
+import { toolRenderers } from "../../../core/tools/renderers";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "../../../core/tools/truncate";
+import { sanitizeBinaryOutput } from "../../../utils/shell";
+import { getLanguageFromPath, highlightCode, theme } from "../theme/theme";
+import { renderDiff } from "./diff";
+import { truncateToVisualLines } from "./visual-truncate";
 
 // Preview line limit for bash when not expanded
 const BASH_PREVIEW_LINES = 5;

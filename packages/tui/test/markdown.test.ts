@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { Chalk } from "chalk";
-import { Markdown } from "../src/components/markdown.js";
-import { defaultMarkdownTheme } from "./test-themes.js";
+import { Markdown } from "../src/components/markdown";
+import { defaultMarkdownTheme } from "./test-themes";
 
 // Force full color in CI so ANSI assertions are deterministic
 const chalk = new Chalk({ level: 3 });

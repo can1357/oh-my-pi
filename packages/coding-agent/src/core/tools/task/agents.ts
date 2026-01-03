@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentDefinition, AgentSource } from "./types.js";
+import type { AgentDefinition, AgentSource } from "./types";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BUNDLED_AGENTS_DIR = path.join(__dirname, "bundled-agents");

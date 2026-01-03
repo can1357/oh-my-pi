@@ -2,13 +2,13 @@
  * System prompt construction and project context loading
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import chalk from "chalk";
-import { existsSync, readFileSync } from "fs";
-import { join, resolve } from "path";
-import { getAgentDir, getDocsPath, getExamplesPath, getReadmePath } from "../config.js";
-import type { SkillsSettings } from "./settings-manager.js";
-import { formatSkillsForPrompt, loadSkills, type Skill } from "./skills.js";
-import type { ToolName } from "./tools/index.js";
+import { getAgentDir, getDocsPath, getExamplesPath, getReadmePath } from "../config";
+import type { SkillsSettings } from "./settings-manager";
+import { formatSkillsForPrompt, loadSkills, type Skill } from "./skills";
+import type { ToolName } from "./tools/index";
 
 /**
  * Execute a git command synchronously and return stdout or null on failure.

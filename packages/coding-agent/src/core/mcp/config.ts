@@ -8,7 +8,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { MCPConfigFile, MCPServerConfig } from "./types.js";
+import type { MCPConfigFile, MCPServerConfig } from "./types";
 
 /** Environment variable expansion pattern: ${VAR} or ${VAR:-default} */
 const ENV_VAR_PATTERN = /\$\{([^}:]+)(?::-([^}]*))?\}/g;

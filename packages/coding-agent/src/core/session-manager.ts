@@ -1,5 +1,3 @@
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
 import {
 	appendFileSync,
 	closeSync,
@@ -11,16 +9,18 @@ import {
 	readSync,
 	statSync,
 	writeFileSync,
-} from "fs";
-import { join, resolve } from "path";
-import { getAgentDir as getDefaultAgentDir } from "../config.js";
+} from "node:fs";
+import { join, resolve } from "node:path";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import { getAgentDir as getDefaultAgentDir } from "../config";
 import {
 	type BashExecutionMessage,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createHookMessage,
 	type HookMessage,
-} from "./messages.js";
+} from "./messages";
 
 export const CURRENT_SESSION_VERSION = 2;
 

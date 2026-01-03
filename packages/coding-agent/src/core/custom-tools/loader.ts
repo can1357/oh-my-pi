@@ -9,14 +9,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as typebox from "@sinclair/typebox";
-import { getAgentDir } from "../../config.js";
-import * as piCodingAgent from "../../index.js";
-import { theme } from "../../modes/interactive/theme/theme.js";
-import type { ExecOptions } from "../exec.js";
-import { execCommand } from "../exec.js";
-import type { HookUIContext } from "../hooks/types.js";
-import { getAllPluginToolPaths } from "../plugins/loader.js";
-import type { CustomToolAPI, CustomToolFactory, CustomToolsLoadResult, LoadedCustomTool } from "./types.js";
+import { getAgentDir } from "../../config";
+import * as piCodingAgent from "../../index";
+import { theme } from "../../modes/interactive/theme/theme";
+import type { ExecOptions } from "../exec";
+import { execCommand } from "../exec";
+import type { HookUIContext } from "../hooks/types";
+import { getAllPluginToolPaths } from "../plugins/loader";
+import type { CustomToolAPI, CustomToolFactory, CustomToolsLoadResult, LoadedCustomTool } from "./types";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 

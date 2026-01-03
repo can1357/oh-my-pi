@@ -6,9 +6,9 @@
 
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import type { Theme } from "../../../modes/interactive/theme/theme.js";
-import type { RenderResultOptions } from "../../custom-tools/types.js";
-import type { WebSearchResponse } from "./types.js";
+import type { Theme } from "../../../modes/interactive/theme/theme";
+import type { RenderResultOptions } from "../../custom-tools/types";
+import type { WebSearchResponse } from "./types";
 
 // Tree formatting constants
 const TREE_MID = "├─";

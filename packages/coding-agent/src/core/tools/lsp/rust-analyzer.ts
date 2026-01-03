@@ -1,6 +1,6 @@
-import { sendNotification, sendRequest } from "./client.js";
-import type { Diagnostic, ExpandMacroResult, LspClient, RelatedTest, Runnable, WorkspaceEdit } from "./types.js";
-import { fileToUri } from "./utils.js";
+import { sendNotification, sendRequest } from "./client";
+import type { Diagnostic, ExpandMacroResult, LspClient, RelatedTest, Runnable, WorkspaceEdit } from "./types";
+import { fileToUri } from "./utils";
 
 /**
  * Wait for specified milliseconds.

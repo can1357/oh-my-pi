@@ -3,14 +3,14 @@ import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import "./components/AgentInterface.js";
 import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AgentInterface } from "./components/AgentInterface.js";
-import { ArtifactsRuntimeProvider } from "./components/sandbox/ArtifactsRuntimeProvider.js";
-import { AttachmentsRuntimeProvider } from "./components/sandbox/AttachmentsRuntimeProvider.js";
-import type { SandboxRuntimeProvider } from "./components/sandbox/SandboxRuntimeProvider.js";
-import { ArtifactsPanel, ArtifactsToolRenderer } from "./tools/artifacts/index.js";
-import { registerToolRenderer } from "./tools/renderer-registry.js";
-import type { Attachment } from "./utils/attachment-utils.js";
-import { i18n } from "./utils/i18n.js";
+import type { AgentInterface } from "./components/AgentInterface";
+import { ArtifactsRuntimeProvider } from "./components/sandbox/ArtifactsRuntimeProvider";
+import { AttachmentsRuntimeProvider } from "./components/sandbox/AttachmentsRuntimeProvider";
+import type { SandboxRuntimeProvider } from "./components/sandbox/SandboxRuntimeProvider";
+import { ArtifactsPanel, ArtifactsToolRenderer } from "./tools/artifacts/index";
+import { registerToolRenderer } from "./tools/renderer-registry";
+import type { Attachment } from "./utils/attachment-utils";
+import { i18n } from "./utils/i18n";
 
 const BREAKPOINT = 800; // px - switch between overlay and side-by-side
 

@@ -1,9 +1,9 @@
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import type { AgentState } from "@oh-my-pi/pi-agent-core";
-import { existsSync, readFileSync, writeFileSync } from "fs";
-import { basename, join } from "path";
-import { APP_NAME, getExportTemplateDir } from "../../config.js";
-import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.js";
-import { SessionManager } from "../session-manager.js";
+import { APP_NAME, getExportTemplateDir } from "../../config";
+import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme";
+import { SessionManager } from "../session-manager";
 
 // Cached minified assets (populated on first use)
 let cachedTemplate: string | null = null;

@@ -9,14 +9,14 @@
  * - 14 websets tools (CRUD, items, search, enrichment, monitor)
  */
 
-import type { CustomTool } from "../../custom-tools/types.js";
-import type { ExaSettings } from "../../settings-manager.js";
-import { companyTool } from "./company.js";
-import { linkedinTool } from "./linkedin.js";
-import { researcherTools } from "./researcher.js";
-import { searchTools } from "./search.js";
-import type { ExaRenderDetails } from "./types.js";
-import { websetsTools } from "./websets.js";
+import type { CustomTool } from "../../custom-tools/types";
+import type { ExaSettings } from "../../settings-manager";
+import { companyTool } from "./company";
+import { linkedinTool } from "./linkedin";
+import { researcherTools } from "./researcher";
+import { searchTools } from "./search";
+import type { ExaRenderDetails } from "./types";
+import { websetsTools } from "./websets";
 
 /** All Exa tools (22 total) - static export for backward compatibility */
 export const exaTools: CustomTool<any, ExaRenderDetails>[] = [
@@ -42,9 +42,9 @@ export function getExaTools(settings: Required<ExaSettings>): CustomTool<any, Ex
 	return tools;
 }
 
-export { companyTool } from "./company.js";
-export { linkedinTool } from "./linkedin.js";
-export { logExaError, logViewError } from "./logger.js";
+export { companyTool } from "./company";
+export { linkedinTool } from "./linkedin";
+export { logExaError, logViewError } from "./logger";
 export {
 	callExaTool,
 	callWebsetsTool,
@@ -54,11 +54,11 @@ export {
 	findApiKey,
 	formatSearchResults,
 	isSearchResponse,
-} from "./mcp-client.js";
-export { renderExaCall, renderExaResult } from "./render.js";
-export { researcherTools } from "./researcher.js";
+} from "./mcp-client";
+export { renderExaCall, renderExaResult } from "./render";
+export { researcherTools } from "./researcher";
 // Re-export individual modules for selective importing
-export { searchTools } from "./search.js";
+export { searchTools } from "./search";
 // Re-export types and utilities
-export type { ExaRenderDetails, ExaSearchResponse, ExaSearchResult, MCPToolWrapperConfig } from "./types.js";
-export { websetsTools } from "./websets.js";
+export type { ExaRenderDetails, ExaSearchResponse, ExaSearchResult, MCPToolWrapperConfig } from "./types";
+export { websetsTools } from "./websets";

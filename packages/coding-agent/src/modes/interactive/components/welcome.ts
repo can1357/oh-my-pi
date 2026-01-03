@@ -1,6 +1,6 @@
 import { type Component, visibleWidth } from "@oh-my-pi/pi-tui";
-import { APP_NAME } from "../../../config.js";
-import { theme } from "../theme/theme.js";
+import { APP_NAME } from "../../../config";
+import { theme } from "../theme/theme";
 
 export interface RecentSession {
 	name: string;

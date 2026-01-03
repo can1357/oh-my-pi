@@ -10,9 +10,9 @@ export {
 	type ModelCycleResult,
 	type PromptOptions,
 	type SessionStats,
-} from "./agent-session.js";
-export { type BashExecutorOptions, type BashResult, executeBash } from "./bash-executor.js";
-export type { CompactionResult } from "./compaction/index.js";
+} from "./agent-session";
+export { type BashExecutorOptions, type BashResult, executeBash } from "./bash-executor";
+export type { CompactionResult } from "./compaction/index";
 export {
 	type CustomTool,
 	type CustomToolAPI,
@@ -24,7 +24,7 @@ export {
 	type LoadedCustomTool,
 	loadCustomTools,
 	type RenderResultOptions,
-} from "./custom-tools/index.js";
+} from "./custom-tools/index";
 export {
 	type HookAPI,
 	type HookContext,
@@ -34,7 +34,7 @@ export {
 	HookRunner,
 	type HookUIContext,
 	loadHooks,
-} from "./hooks/index.js";
+} from "./hooks/index";
 export {
 	createMCPManager,
 	discoverAndLoadMCPTools,
@@ -49,4 +49,4 @@ export {
 	type MCPToolDetails,
 	type MCPToolsLoadResult,
 	type MCPTransport,
-} from "./mcp/index.js";
+} from "./mcp/index";

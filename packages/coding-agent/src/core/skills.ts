@@ -1,9 +1,9 @@
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { minimatch } from "minimatch";
-import { homedir } from "os";
-import { basename, dirname, join, resolve } from "path";
-import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
-import type { SkillsSettings } from "./settings-manager.js";
+import { CONFIG_DIR_NAME, getAgentDir } from "../config";
+import type { SkillsSettings } from "./settings-manager";
 
 /**
  * Standard frontmatter fields per Agent Skills spec.

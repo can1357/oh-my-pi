@@ -5,6 +5,6 @@
  *
  * Test with: npx tsx src/cli-new.ts [args...]
  */
-import { main } from "./main.js";
+import { main } from "./main";
 
 main(process.argv.slice(2));

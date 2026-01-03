@@ -7,9 +7,9 @@ import { Select } from "@mariozechner/mini-lit/dist/Select.js";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { html, type TemplateResult } from "lit";
 import { state } from "lit/decorators.js";
-import { getAppStorage } from "../storage/app-storage.js";
-import type { CustomProvider, CustomProviderType } from "../storage/stores/custom-providers-store.js";
-import { discoverModels } from "../utils/model-discovery.js";
+import { getAppStorage } from "../storage/app-storage";
+import type { CustomProvider, CustomProviderType } from "../storage/stores/custom-providers-store";
+import { discoverModels } from "../utils/model-discovery";
 
 export class CustomProviderDialog extends DialogBase {
 	private provider?: CustomProvider;

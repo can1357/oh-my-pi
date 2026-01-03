@@ -3,7 +3,7 @@ import { DialogContent, DialogHeader } from "@mariozechner/mini-lit/dist/Dialog.
 import { DialogBase } from "@mariozechner/mini-lit/dist/DialogBase.js";
 import { html } from "lit";
 import { customElement, state } from "lit/decorators.js";
-import { i18n } from "../utils/i18n.js";
+import { i18n } from "../utils/i18n";
 
 @customElement("persistent-storage-dialog")
 export class PersistentStorageDialog extends DialogBase {

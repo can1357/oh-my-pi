@@ -1,6 +1,6 @@
 import { getModel } from "@oh-my-pi/pi-ai";
 import { describe, expect, it } from "vitest";
-import { Agent } from "../src/index.js";
+import { Agent } from "../src/index";
 
 describe("Agent", () => {
 	it("should create an agent instance with default state", () => {

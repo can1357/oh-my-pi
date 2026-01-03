@@ -2,17 +2,17 @@
 
 export type { Agent, AgentMessage, AgentState, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 export type { Model } from "@oh-my-pi/pi-ai";
-export { ChatPanel } from "./ChatPanel.js";
+export { ChatPanel } from "./ChatPanel";
 // Components
-export { AgentInterface } from "./components/AgentInterface.js";
-export { AttachmentTile } from "./components/AttachmentTile.js";
-export { ConsoleBlock } from "./components/ConsoleBlock.js";
-export { ExpandableSection } from "./components/ExpandableSection.js";
-export { Input } from "./components/Input.js";
-export { MessageEditor } from "./components/MessageEditor.js";
-export { MessageList } from "./components/MessageList.js";
+export { AgentInterface } from "./components/AgentInterface";
+export { AttachmentTile } from "./components/AttachmentTile";
+export { ConsoleBlock } from "./components/ConsoleBlock";
+export { ExpandableSection } from "./components/ExpandableSection";
+export { Input } from "./components/Input";
+export { MessageEditor } from "./components/MessageEditor";
+export { MessageList } from "./components/MessageList";
 // Message components
-export type { ArtifactMessage, UserMessageWithAttachments } from "./components/Messages.js";
+export type { ArtifactMessage, UserMessageWithAttachments } from "./components/Messages";
 export {
 	AssistantMessage,
 	convertAttachments,
@@ -21,7 +21,7 @@ export {
 	isUserMessageWithAttachments,
 	ToolMessage,
 	UserMessage,
-} from "./components/Messages.js";
+} from "./components/Messages";
 // Message renderer registry
 export {
 	getMessageRenderer,
@@ -29,53 +29,53 @@ export {
 	type MessageRole,
 	registerMessageRenderer,
 	renderMessage,
-} from "./components/message-renderer-registry.js";
+} from "./components/message-renderer-registry";
 export {
 	type SandboxFile,
 	SandboxIframe,
 	type SandboxResult,
 	type SandboxUrlProvider,
-} from "./components/SandboxedIframe.js";
-export { StreamingMessageContainer } from "./components/StreamingMessageContainer.js";
+} from "./components/SandboxedIframe";
+export { StreamingMessageContainer } from "./components/StreamingMessageContainer";
 // Sandbox Runtime Providers
-export { ArtifactsRuntimeProvider } from "./components/sandbox/ArtifactsRuntimeProvider.js";
-export { AttachmentsRuntimeProvider } from "./components/sandbox/AttachmentsRuntimeProvider.js";
-export { type ConsoleLog, ConsoleRuntimeProvider } from "./components/sandbox/ConsoleRuntimeProvider.js";
+export { ArtifactsRuntimeProvider } from "./components/sandbox/ArtifactsRuntimeProvider";
+export { AttachmentsRuntimeProvider } from "./components/sandbox/AttachmentsRuntimeProvider";
+export { type ConsoleLog, ConsoleRuntimeProvider } from "./components/sandbox/ConsoleRuntimeProvider";
 export {
 	type DownloadableFile,
 	FileDownloadRuntimeProvider,
-} from "./components/sandbox/FileDownloadRuntimeProvider.js";
-export { RuntimeMessageBridge } from "./components/sandbox/RuntimeMessageBridge.js";
-export { RUNTIME_MESSAGE_ROUTER } from "./components/sandbox/RuntimeMessageRouter.js";
-export type { SandboxRuntimeProvider } from "./components/sandbox/SandboxRuntimeProvider.js";
-export { ThinkingBlock } from "./components/ThinkingBlock.js";
-export { ApiKeyPromptDialog } from "./dialogs/ApiKeyPromptDialog.js";
-export { AttachmentOverlay } from "./dialogs/AttachmentOverlay.js";
+} from "./components/sandbox/FileDownloadRuntimeProvider";
+export { RuntimeMessageBridge } from "./components/sandbox/RuntimeMessageBridge";
+export { RUNTIME_MESSAGE_ROUTER } from "./components/sandbox/RuntimeMessageRouter";
+export type { SandboxRuntimeProvider } from "./components/sandbox/SandboxRuntimeProvider";
+export { ThinkingBlock } from "./components/ThinkingBlock";
+export { ApiKeyPromptDialog } from "./dialogs/ApiKeyPromptDialog";
+export { AttachmentOverlay } from "./dialogs/AttachmentOverlay";
 // Dialogs
-export { ModelSelector } from "./dialogs/ModelSelector.js";
-export { PersistentStorageDialog } from "./dialogs/PersistentStorageDialog.js";
-export { ProvidersModelsTab } from "./dialogs/ProvidersModelsTab.js";
-export { SessionListDialog } from "./dialogs/SessionListDialog.js";
-export { ApiKeysTab, ProxyTab, SettingsDialog, SettingsTab } from "./dialogs/SettingsDialog.js";
+export { ModelSelector } from "./dialogs/ModelSelector";
+export { PersistentStorageDialog } from "./dialogs/PersistentStorageDialog";
+export { ProvidersModelsTab } from "./dialogs/ProvidersModelsTab";
+export { SessionListDialog } from "./dialogs/SessionListDialog";
+export { ApiKeysTab, ProxyTab, SettingsDialog, SettingsTab } from "./dialogs/SettingsDialog";
 // Prompts
 export {
 	ARTIFACTS_RUNTIME_PROVIDER_DESCRIPTION_RO,
 	ARTIFACTS_RUNTIME_PROVIDER_DESCRIPTION_RW,
 	ATTACHMENTS_RUNTIME_DESCRIPTION,
-} from "./prompts/prompts.js";
+} from "./prompts/prompts";
 // Storage
-export { AppStorage, getAppStorage, setAppStorage } from "./storage/app-storage.js";
-export { IndexedDBStorageBackend } from "./storage/backends/indexeddb-storage-backend.js";
-export { Store } from "./storage/store.js";
+export { AppStorage, getAppStorage, setAppStorage } from "./storage/app-storage";
+export { IndexedDBStorageBackend } from "./storage/backends/indexeddb-storage-backend";
+export { Store } from "./storage/store";
 export type {
 	AutoDiscoveryProviderType,
 	CustomProvider,
 	CustomProviderType,
-} from "./storage/stores/custom-providers-store.js";
-export { CustomProvidersStore } from "./storage/stores/custom-providers-store.js";
-export { ProviderKeysStore } from "./storage/stores/provider-keys-store.js";
-export { SessionsStore } from "./storage/stores/sessions-store.js";
-export { SettingsStore } from "./storage/stores/settings-store.js";
+} from "./storage/stores/custom-providers-store";
+export { CustomProvidersStore } from "./storage/stores/custom-providers-store";
+export { ProviderKeysStore } from "./storage/stores/provider-keys-store";
+export { SessionsStore } from "./storage/stores/sessions-store";
+export { SettingsStore } from "./storage/stores/settings-store";
 export type {
 	IndexConfig,
 	IndexedDBConfig,
@@ -84,32 +84,32 @@ export type {
 	StorageBackend,
 	StorageTransaction,
 	StoreConfig,
-} from "./storage/types.js";
+} from "./storage/types";
 // Artifacts
-export { ArtifactElement } from "./tools/artifacts/ArtifactElement.js";
-export { ArtifactPill } from "./tools/artifacts/ArtifactPill.js";
-export { type Artifact, ArtifactsPanel, type ArtifactsParams } from "./tools/artifacts/artifacts.js";
-export { ArtifactsToolRenderer } from "./tools/artifacts/artifacts-tool-renderer.js";
-export { HtmlArtifact } from "./tools/artifacts/HtmlArtifact.js";
-export { ImageArtifact } from "./tools/artifacts/ImageArtifact.js";
-export { MarkdownArtifact } from "./tools/artifacts/MarkdownArtifact.js";
-export { SvgArtifact } from "./tools/artifacts/SvgArtifact.js";
-export { TextArtifact } from "./tools/artifacts/TextArtifact.js";
-export { createExtractDocumentTool, extractDocumentTool } from "./tools/extract-document.js";
+export { ArtifactElement } from "./tools/artifacts/ArtifactElement";
+export { ArtifactPill } from "./tools/artifacts/ArtifactPill";
+export { type Artifact, ArtifactsPanel, type ArtifactsParams } from "./tools/artifacts/artifacts";
+export { ArtifactsToolRenderer } from "./tools/artifacts/artifacts-tool-renderer";
+export { HtmlArtifact } from "./tools/artifacts/HtmlArtifact";
+export { ImageArtifact } from "./tools/artifacts/ImageArtifact";
+export { MarkdownArtifact } from "./tools/artifacts/MarkdownArtifact";
+export { SvgArtifact } from "./tools/artifacts/SvgArtifact";
+export { TextArtifact } from "./tools/artifacts/TextArtifact";
+export { createExtractDocumentTool, extractDocumentTool } from "./tools/extract-document";
 // Tools
-export { getToolRenderer, registerToolRenderer, renderTool, setShowJsonMode } from "./tools/index.js";
-export { createJavaScriptReplTool, javascriptReplTool } from "./tools/javascript-repl.js";
-export { renderCollapsibleHeader, renderHeader } from "./tools/renderer-registry.js";
-export { BashRenderer } from "./tools/renderers/BashRenderer.js";
-export { CalculateRenderer } from "./tools/renderers/CalculateRenderer.js";
+export { getToolRenderer, registerToolRenderer, renderTool, setShowJsonMode } from "./tools/index";
+export { createJavaScriptReplTool, javascriptReplTool } from "./tools/javascript-repl";
+export { renderCollapsibleHeader, renderHeader } from "./tools/renderer-registry";
+export { BashRenderer } from "./tools/renderers/BashRenderer";
+export { CalculateRenderer } from "./tools/renderers/CalculateRenderer";
 // Tool renderers
-export { DefaultRenderer } from "./tools/renderers/DefaultRenderer.js";
-export { GetCurrentTimeRenderer } from "./tools/renderers/GetCurrentTimeRenderer.js";
-export type { ToolRenderer, ToolRenderResult } from "./tools/types.js";
-export type { Attachment } from "./utils/attachment-utils.js";
+export { DefaultRenderer } from "./tools/renderers/DefaultRenderer";
+export { GetCurrentTimeRenderer } from "./tools/renderers/GetCurrentTimeRenderer";
+export type { ToolRenderer, ToolRenderResult } from "./tools/types";
+export type { Attachment } from "./utils/attachment-utils";
 // Utils
-export { loadAttachment } from "./utils/attachment-utils.js";
-export { clearAuthToken, getAuthToken } from "./utils/auth-token.js";
-export { formatCost, formatModelCost, formatTokenCount, formatUsage } from "./utils/format.js";
-export { i18n, setLanguage, translations } from "./utils/i18n.js";
-export { applyProxyIfNeeded, createStreamFn, isCorsError, shouldUseProxyForProvider } from "./utils/proxy-utils.js";
+export { loadAttachment } from "./utils/attachment-utils";
+export { clearAuthToken, getAuthToken } from "./utils/auth-token";
+export { formatCost, formatModelCost, formatTokenCount, formatUsage } from "./utils/format";
+export { i18n, setLanguage, translations } from "./utils/i18n";
+export { applyProxyIfNeeded, createStreamFn, isCorsError, shouldUseProxyForProvider } from "./utils/proxy-utils";

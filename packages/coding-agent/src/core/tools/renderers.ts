@@ -6,19 +6,19 @@
 
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import type { Theme } from "../../modes/interactive/theme/theme.js";
-import type { RenderResultOptions } from "../custom-tools/types.js";
-import type { AskToolDetails } from "./ask.js";
-import type { FindToolDetails } from "./find.js";
-import type { GrepToolDetails } from "./grep.js";
-import type { LsToolDetails } from "./ls.js";
-import { renderCall as renderLspCall, renderResult as renderLspResult } from "./lsp/render.js";
-import type { LspToolDetails } from "./lsp/types.js";
-import type { NotebookToolDetails } from "./notebook.js";
-import { renderCall as renderTaskCall, renderResult as renderTaskResult } from "./task/render.js";
-import type { TaskToolDetails } from "./task/types.js";
-import { renderWebFetchCall, renderWebFetchResult, type WebFetchToolDetails } from "./web-fetch.js";
-import { renderWebSearchCall, renderWebSearchResult, type WebSearchRenderDetails } from "./web-search/render.js";
+import type { Theme } from "../../modes/interactive/theme/theme";
+import type { RenderResultOptions } from "../custom-tools/types";
+import type { AskToolDetails } from "./ask";
+import type { FindToolDetails } from "./find";
+import type { GrepToolDetails } from "./grep";
+import type { LsToolDetails } from "./ls";
+import { renderCall as renderLspCall, renderResult as renderLspResult } from "./lsp/render";
+import type { LspToolDetails } from "./lsp/types";
+import type { NotebookToolDetails } from "./notebook";
+import { renderCall as renderTaskCall, renderResult as renderTaskResult } from "./task/render";
+import type { TaskToolDetails } from "./task/types";
+import { renderWebFetchCall, renderWebFetchResult, type WebFetchToolDetails } from "./web-fetch";
+import { renderWebSearchCall, renderWebSearchResult, type WebSearchRenderDetails } from "./web-search/render";
 
 // Tree drawing characters
 const TREE_MID = "├─";

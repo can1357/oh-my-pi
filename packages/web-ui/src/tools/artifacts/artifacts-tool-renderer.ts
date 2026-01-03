@@ -5,11 +5,11 @@ import { FileCode2 } from "lucide";
 import "../../components/ConsoleBlock.js";
 import { Diff } from "@mariozechner/mini-lit/dist/Diff.js";
 import { html, type TemplateResult } from "lit";
-import { i18n } from "../../utils/i18n.js";
-import { renderCollapsibleHeader, renderHeader } from "../renderer-registry.js";
-import type { ToolRenderer, ToolRenderResult } from "../types.js";
-import { ArtifactPill } from "./ArtifactPill.js";
-import type { ArtifactsPanel, ArtifactsParams } from "./artifacts.js";
+import { i18n } from "../../utils/i18n";
+import { renderCollapsibleHeader, renderHeader } from "../renderer-registry";
+import type { ToolRenderer, ToolRenderResult } from "../types";
+import { ArtifactPill } from "./ArtifactPill";
+import type { ArtifactsPanel, ArtifactsParams } from "./artifacts";
 
 // Helper to extract text from content blocks
 function getTextOutput(result: ToolResultMessage<any> | undefined): string {

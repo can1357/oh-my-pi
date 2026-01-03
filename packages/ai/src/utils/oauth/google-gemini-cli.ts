@@ -6,8 +6,8 @@
  * It is only intended for CLI use, not browser environments.
  */
 
-import { generatePKCE } from "./pkce.js";
-import type { OAuthCredentials } from "./types.js";
+import { generatePKCE } from "./pkce";
+import type { OAuthCredentials } from "./types";
 
 const decode = (s: string) => atob(s);
 const CLIENT_ID = decode(

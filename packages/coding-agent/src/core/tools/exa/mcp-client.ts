@@ -5,8 +5,8 @@
  */
 
 import type { TSchema } from "@sinclair/typebox";
-import type { CustomTool } from "../../custom-tools/types.js";
-import { logExaError } from "./logger.js";
+import type { CustomTool } from "../../custom-tools/types";
+import { logExaError } from "./logger";
 import type {
 	ExaRenderDetails,
 	ExaSearchResponse,
@@ -15,7 +15,7 @@ import type {
 	MCPTool,
 	MCPToolsResponse,
 	MCPToolWrapperConfig,
-} from "./types.js";
+} from "./types";
 
 /** Find EXA_API_KEY from process.env or .env files */
 export async function findApiKey(): Promise<string | null> {

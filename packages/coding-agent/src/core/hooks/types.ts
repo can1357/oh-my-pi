@@ -8,30 +8,24 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Message, Model, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
-import type { Theme } from "../../modes/interactive/theme/theme.js";
-import type { CompactionPreparation, CompactionResult } from "../compaction/index.js";
-import type { ExecOptions, ExecResult } from "../exec.js";
-import type { HookMessage } from "../messages.js";
-import type { ModelRegistry } from "../model-registry.js";
+import type { Theme } from "../../modes/interactive/theme/theme";
+import type { CompactionPreparation, CompactionResult } from "../compaction/index";
+import type { ExecOptions, ExecResult } from "../exec";
+import type { HookMessage } from "../messages";
+import type { ModelRegistry } from "../model-registry";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
 	ReadonlySessionManager,
 	SessionEntry,
 	SessionManager,
-} from "../session-manager.js";
+} from "../session-manager";
 
-import type { EditToolDetails } from "../tools/edit.js";
-import type {
-	BashToolDetails,
-	FindToolDetails,
-	GrepToolDetails,
-	LsToolDetails,
-	ReadToolDetails,
-} from "../tools/index.js";
+import type { EditToolDetails } from "../tools/edit";
+import type { BashToolDetails, FindToolDetails, GrepToolDetails, LsToolDetails, ReadToolDetails } from "../tools/index";
 
 // Re-export for backward compatibility
-export type { ExecOptions, ExecResult } from "../exec.js";
+export type { ExecOptions, ExecResult } from "../exec";
 
 /**
  * UI context for hooks to request interactive UI from the harness.

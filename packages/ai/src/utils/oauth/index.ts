@@ -10,36 +10,36 @@
  */
 
 // Anthropic
-export { loginAnthropic, refreshAnthropicToken } from "./anthropic.js";
+export { loginAnthropic, refreshAnthropicToken } from "./anthropic";
 // GitHub Copilot
 export {
 	getGitHubCopilotBaseUrl,
 	loginGitHubCopilot,
 	normalizeDomain,
 	refreshGitHubCopilotToken,
-} from "./github-copilot.js";
+} from "./github-copilot";
 // Google Antigravity
 export {
 	loginAntigravity,
 	refreshAntigravityToken,
-} from "./google-antigravity.js";
+} from "./google-antigravity";
 // Google Gemini CLI
 export {
 	loginGeminiCli,
 	refreshGoogleCloudToken,
-} from "./google-gemini-cli.js";
+} from "./google-gemini-cli";
 
-export * from "./types.js";
+export * from "./types";
 
 // ============================================================================
 // High-level API
 // ============================================================================
 
-import { refreshAnthropicToken } from "./anthropic.js";
-import { refreshGitHubCopilotToken } from "./github-copilot.js";
-import { refreshAntigravityToken } from "./google-antigravity.js";
-import { refreshGoogleCloudToken } from "./google-gemini-cli.js";
-import type { OAuthCredentials, OAuthProvider, OAuthProviderInfo } from "./types.js";
+import { refreshAnthropicToken } from "./anthropic";
+import { refreshGitHubCopilotToken } from "./github-copilot";
+import { refreshAntigravityToken } from "./google-antigravity";
+import { refreshGoogleCloudToken } from "./google-gemini-cli";
+import type { OAuthCredentials, OAuthProvider, OAuthProviderInfo } from "./types";
 
 /**
  * Refresh token for any OAuth provider.

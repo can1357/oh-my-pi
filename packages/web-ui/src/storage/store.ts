@@ -1,4 +1,4 @@
-import type { StorageBackend, StoreConfig } from "./types.js";
+import type { StorageBackend, StoreConfig } from "./types";
 
 /**
  * Base class for all storage stores.

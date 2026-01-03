@@ -1,5 +1,5 @@
 // Plugin system exports
-export { formatDoctorResults, runDoctorChecks } from "./doctor.js";
+export { formatDoctorResults, runDoctorChecks } from "./doctor";
 export {
 	getAllPluginCommandPaths,
 	getAllPluginHookPaths,
@@ -9,16 +9,16 @@ export {
 	resolvePluginCommandPaths,
 	resolvePluginHookPaths,
 	resolvePluginToolPaths,
-} from "./loader.js";
-export { PluginManager, parseSettingValue, validateSetting } from "./manager.js";
-export { extractPackageName, formatPluginSpec, parsePluginSpec } from "./parser.js";
+} from "./loader";
+export { PluginManager, parseSettingValue, validateSetting } from "./manager";
+export { extractPackageName, formatPluginSpec, parsePluginSpec } from "./parser";
 export {
 	getPluginsDir,
 	getPluginsLockfile,
 	getPluginsNodeModules,
 	getPluginsPackageJson,
 	getProjectPluginOverrides,
-} from "./paths.js";
+} from "./paths";
 export type {
 	BooleanSetting,
 	DoctorCheck,
@@ -35,4 +35,4 @@ export type {
 	PluginSettingType,
 	ProjectPluginOverrides,
 	StringSetting,
-} from "./types.js";
+} from "./types";

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { RpcClient } from "../src/modes/rpc/rpc-client.js";
+import { RpcClient } from "../src/modes/rpc/rpc-client";
 
 /**
  * RPC mode tests.

@@ -8,9 +8,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as typebox from "@sinclair/typebox";
-import { CONFIG_DIR_NAME, getAgentDir } from "../../config.js";
-import * as piCodingAgent from "../../index.js";
-import { execCommand } from "../exec.js";
+import { CONFIG_DIR_NAME, getAgentDir } from "../../config";
+import * as piCodingAgent from "../../index";
+import { execCommand } from "../exec";
 import type {
 	CustomCommand,
 	CustomCommandAPI,
@@ -18,7 +18,7 @@ import type {
 	CustomCommandSource,
 	CustomCommandsLoadResult,
 	LoadedCustomCommand,
-} from "./types.js";
+} from "./types";
 
 /**
  * Load a single command module using native Bun import.

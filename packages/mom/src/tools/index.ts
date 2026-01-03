@@ -1,12 +1,12 @@
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { Executor } from "../sandbox.js";
-import { attachTool } from "./attach.js";
-import { createBashTool } from "./bash.js";
-import { createEditTool } from "./edit.js";
-import { createReadTool } from "./read.js";
-import { createWriteTool } from "./write.js";
+import type { Executor } from "../sandbox";
+import { attachTool } from "./attach";
+import { createBashTool } from "./bash";
+import { createEditTool } from "./edit";
+import { createReadTool } from "./read";
+import { createWriteTool } from "./write";
 
-export { setUploadFunction } from "./attach.js";
+export { setUploadFunction } from "./attach";
 
 export function createMomTools(executor: Executor): AgentTool<any>[] {
 	return [

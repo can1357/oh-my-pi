@@ -4,8 +4,8 @@ import {
 	GoogleGenAI,
 	type ThinkingConfig,
 } from "@google/genai";
-import { calculateCost } from "../models.js";
-import { getEnvApiKey } from "../stream.js";
+import { calculateCost } from "../models";
+import { getEnvApiKey } from "../stream";
 import type {
 	Api,
 	AssistantMessage,
@@ -16,11 +16,11 @@ import type {
 	TextContent,
 	ThinkingContent,
 	ToolCall,
-} from "../types.js";
-import { AssistantMessageEventStream } from "../utils/event-stream.js";
-import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
-import type { GoogleThinkingLevel } from "./google-gemini-cli.js";
-import { convertMessages, convertTools, mapStopReason, mapToolChoice } from "./google-shared.js";
+} from "../types";
+import { AssistantMessageEventStream } from "../utils/event-stream";
+import { sanitizeSurrogates } from "../utils/sanitize-unicode";
+import type { GoogleThinkingLevel } from "./google-gemini-cli";
+import { convertMessages, convertTools, mapStopReason, mapToolChoice } from "./google-shared";
 
 export interface GoogleOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "any";

@@ -11,13 +11,13 @@
  * - Hook UI: Hook UI requests are emitted, client responds with hook_ui_response
  */
 
-import type { AgentSession } from "../../core/agent-session.js";
-import type { HookUIContext } from "../../core/hooks/index.js";
-import { theme } from "../interactive/theme/theme.js";
-import type { RpcCommand, RpcHookUIRequest, RpcHookUIResponse, RpcResponse, RpcSessionState } from "./rpc-types.js";
+import type { AgentSession } from "../../core/agent-session";
+import type { HookUIContext } from "../../core/hooks/index";
+import { theme } from "../interactive/theme/theme";
+import type { RpcCommand, RpcHookUIRequest, RpcHookUIResponse, RpcResponse, RpcSessionState } from "./rpc-types";
 
 // Re-export types for consumers
-export type { RpcCommand, RpcHookUIRequest, RpcHookUIResponse, RpcResponse, RpcSessionState } from "./rpc-types.js";
+export type { RpcCommand, RpcHookUIRequest, RpcHookUIResponse, RpcResponse, RpcSessionState } from "./rpc-types";
 
 /**
  * Run in RPC mode.

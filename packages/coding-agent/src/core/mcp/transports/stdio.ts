@@ -6,7 +6,7 @@
  */
 
 import { type Subprocess, spawn } from "bun";
-import type { JsonRpcResponse, MCPStdioServerConfig, MCPTransport } from "../types.js";
+import type { JsonRpcResponse, MCPStdioServerConfig, MCPTransport } from "../types";
 
 /** Generate unique request ID */
 function generateId(): string {

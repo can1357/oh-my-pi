@@ -10,8 +10,8 @@ import {
 	Text,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
-import { theme } from "../theme/theme.js";
-import { DynamicBorder } from "./dynamic-border.js";
+import { theme } from "../theme/theme";
+import { DynamicBorder } from "./dynamic-border";
 
 interface UserMessageItem {
 	id: string; // Entry ID in the session

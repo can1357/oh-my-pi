@@ -1,6 +1,6 @@
-import { readdirSync, statSync } from "fs";
-import { homedir } from "os";
-import { basename, dirname, join } from "path";
+import { readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join } from "node:path";
 
 // Use fd to walk directory tree (fast, respects .gitignore)
 function walkDirectoryWithFd(

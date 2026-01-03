@@ -1,4 +1,4 @@
-import { platform } from "os";
+import { platform } from "node:os";
 
 async function spawnWithTimeout(cmd: string[], input: string, timeoutMs: number): Promise<void> {
 	const proc = Bun.spawn(cmd, { stdin: "pipe" });

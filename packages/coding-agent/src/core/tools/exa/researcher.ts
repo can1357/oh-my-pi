@@ -5,9 +5,9 @@
  */
 
 import { Type } from "@sinclair/typebox";
-import type { CustomTool } from "../../custom-tools/types.js";
-import { callExaTool, findApiKey } from "./mcp-client.js";
-import type { ExaRenderDetails } from "./types.js";
+import type { CustomTool } from "../../custom-tools/types";
+import { callExaTool, findApiKey } from "./mcp-client";
+import type { ExaRenderDetails } from "./types";
 
 const researcherStartTool: CustomTool<any, ExaRenderDetails> = {
 	name: "exa_researcher_start",

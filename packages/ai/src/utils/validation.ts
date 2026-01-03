@@ -5,7 +5,7 @@ import addFormatsModule from "ajv-formats";
 const Ajv = (AjvModule as any).default || AjvModule;
 const addFormats = (addFormatsModule as any).default || addFormatsModule;
 
-import type { Tool, ToolCall } from "../types.js";
+import type { Tool, ToolCall } from "../types";
 
 // Detect if we're in a browser extension environment with strict CSP
 // Chrome extensions with Manifest V3 don't allow eval/Function constructor

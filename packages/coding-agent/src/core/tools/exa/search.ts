@@ -5,8 +5,8 @@
  */
 
 import { Type } from "@sinclair/typebox";
-import type { CustomTool } from "../../custom-tools/types.js";
-import type { ExaRenderDetails } from "./types.js";
+import type { CustomTool } from "../../custom-tools/types";
+import type { ExaRenderDetails } from "./types";
 
 /** exa_search - Basic neural/keyword search */
 const exaSearchTool: CustomTool<any, ExaRenderDetails> = {

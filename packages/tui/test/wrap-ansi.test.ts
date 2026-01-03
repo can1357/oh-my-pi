@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { visibleWidth, wrapTextWithAnsi } from "../src/utils.js";
+import { visibleWidth, wrapTextWithAnsi } from "../src/utils";
 
 describe("wrapTextWithAnsi", () => {
 	describe("underline styling", () => {

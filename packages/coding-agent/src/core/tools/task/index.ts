@@ -14,12 +14,12 @@
  */
 
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { Theme } from "../../../modes/interactive/theme/theme.js";
-import { cleanupTempDir, createTempArtifactsDir, getArtifactsDir, writeArtifacts } from "./artifacts.js";
-import { discoverAgents, getAgent } from "./discovery.js";
-import { runSubprocess } from "./executor.js";
-import { mapWithConcurrencyLimit } from "./parallel.js";
-import { formatDuration, renderCall, renderResult } from "./render.js";
+import type { Theme } from "../../../modes/interactive/theme/theme";
+import { cleanupTempDir, createTempArtifactsDir, getArtifactsDir, writeArtifacts } from "./artifacts";
+import { discoverAgents, getAgent } from "./discovery";
+import { runSubprocess } from "./executor";
+import { mapWithConcurrencyLimit } from "./parallel";
+import { formatDuration, renderCall, renderResult } from "./render";
 import {
 	type AgentProgress,
 	MAX_AGENTS_IN_DESCRIPTION,
@@ -28,7 +28,7 @@ import {
 	PI_NO_SUBAGENTS_ENV,
 	type TaskToolDetails,
 	taskSchema,
-} from "./types.js";
+} from "./types";
 
 /** Session context interface */
 interface SessionContext {
@@ -36,11 +36,11 @@ interface SessionContext {
 }
 
 // Re-export types and utilities
-export { loadBundledAgents as BUNDLED_AGENTS } from "./agents.js";
-export { discoverCommands, expandCommand, getCommand } from "./commands.js";
-export { discoverAgents, getAgent } from "./discovery.js";
-export type { AgentDefinition, AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "./types.js";
-export { taskSchema } from "./types.js";
+export { loadBundledAgents as BUNDLED_AGENTS } from "./agents";
+export { discoverCommands, expandCommand, getCommand } from "./commands";
+export { discoverAgents, getAgent } from "./discovery";
+export type { AgentDefinition, AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "./types";
+export { taskSchema } from "./types";
 
 /**
  * Build dynamic tool description listing available agents.

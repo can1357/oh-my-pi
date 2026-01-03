@@ -4,9 +4,9 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { type Context, complete, getModel } from "@oh-my-pi/pi-ai";
 import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { getAppStorage } from "../storage/app-storage.js";
-import { applyProxyIfNeeded } from "../utils/proxy-utils.js";
-import { Input } from "./Input.js";
+import { getAppStorage } from "../storage/app-storage";
+import { applyProxyIfNeeded } from "../utils/proxy-utils";
+import { Input } from "./Input";
 
 // Test models for each provider
 const TEST_MODELS: Record<string, string> = {

@@ -1,4 +1,4 @@
-import type { DoctorCheck } from "./types.js";
+import type { DoctorCheck } from "./types";
 
 export async function runDoctorChecks(): Promise<DoctorCheck[]> {
 	const checks: DoctorCheck[] = [];

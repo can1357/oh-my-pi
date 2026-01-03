@@ -6,8 +6,8 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type Api, type KnownProvider, type Model, modelsAreEqual } from "@oh-my-pi/pi-ai";
 import chalk from "chalk";
 import { minimatch } from "minimatch";
-import { isValidThinkingLevel } from "../cli/args.js";
-import type { ModelRegistry } from "./model-registry.js";
+import { isValidThinkingLevel } from "../cli/args";
+import type { ModelRegistry } from "./model-registry";
 
 /** Default model IDs for each known provider */
 export const defaultModelPerProvider: Record<KnownProvider, string> = {

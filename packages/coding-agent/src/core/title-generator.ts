@@ -4,8 +4,8 @@
 
 import type { Model } from "@oh-my-pi/pi-ai";
 import { completeSimple } from "@oh-my-pi/pi-ai";
-import type { ModelRegistry } from "./model-registry.js";
-import { findSmolModel } from "./model-resolver.js";
+import type { ModelRegistry } from "./model-registry";
+import { findSmolModel } from "./model-resolver";
 
 const TITLE_SYSTEM_PROMPT = `Generate a very short title (3-6 words) for a coding session based on the user's first message. The title should capture the main task or topic. Output ONLY the title, nothing else. No quotes, no punctuation at the end.
 

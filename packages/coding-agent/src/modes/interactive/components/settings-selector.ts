@@ -16,11 +16,11 @@ import {
 	type TabBarTheme,
 	Text,
 } from "@oh-my-pi/pi-tui";
-import type { SettingsManager } from "../../../core/settings-manager.js";
-import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.js";
-import { DynamicBorder } from "./dynamic-border.js";
-import { PluginSettingsComponent } from "./plugin-settings.js";
-import { getSettingsForTab, type SettingDef } from "./settings-defs.js";
+import type { SettingsManager } from "../../../core/settings-manager";
+import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme";
+import { DynamicBorder } from "./dynamic-border";
+import { PluginSettingsComponent } from "./plugin-settings";
+import { getSettingsForTab, type SettingDef } from "./settings-defs";
 
 function getTabBarTheme(): TabBarTheme {
 	return {

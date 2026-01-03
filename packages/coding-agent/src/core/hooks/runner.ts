@@ -4,9 +4,9 @@
 
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { theme } from "../../modes/interactive/theme/theme.js";
-import type { ModelRegistry } from "../model-registry.js";
-import type { SessionManager } from "../session-manager.js";
+import { theme } from "../../modes/interactive/theme/theme";
+import type { ModelRegistry } from "../model-registry";
+import type { SessionManager } from "../session-manager";
 import type {
 	AppendEntryHandler,
 	BranchHandler,
@@ -14,7 +14,7 @@ import type {
 	NavigateTreeHandler,
 	NewSessionHandler,
 	SendMessageHandler,
-} from "./loader.js";
+} from "./loader";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -32,7 +32,7 @@ import type {
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolResultEventResult,
-} from "./types.js";
+} from "./types";
 
 /**
  * Listener for hook errors.
@@ -40,7 +40,7 @@ import type {
 export type HookErrorListener = (error: HookError) => void;
 
 // Re-export execCommand for backward compatibility
-export { execCommand } from "../exec.js";
+export { execCommand } from "../exec";
 
 /** No-op UI context used when no UI is available */
 const noOpUIContext: HookUIContext = {

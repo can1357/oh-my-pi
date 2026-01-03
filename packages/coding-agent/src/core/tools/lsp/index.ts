@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { Theme } from "../../../modes/interactive/theme/theme.js";
-import { resolveToCwd } from "../path-utils.js";
+import type { Theme } from "../../../modes/interactive/theme/theme";
+import { resolveToCwd } from "../path-utils";
 import {
 	ensureFileOpen,
 	getActiveClients,
@@ -11,11 +11,11 @@ import {
 	refreshFile,
 	sendRequest,
 	setIdleTimeout,
-} from "./client.js";
-import { getServerForFile, getServersForFile, hasCapability, type LspConfig, loadConfig } from "./config.js";
-import { applyTextEdits, applyWorkspaceEdit } from "./edits.js";
-import { renderCall, renderResult } from "./render.js";
-import * as rustAnalyzer from "./rust-analyzer.js";
+} from "./client";
+import { getServerForFile, getServersForFile, hasCapability, type LspConfig, loadConfig } from "./config";
+import { applyTextEdits, applyWorkspaceEdit } from "./edits";
+import { renderCall, renderResult } from "./render";
+import * as rustAnalyzer from "./rust-analyzer";
 import {
 	type CallHierarchyIncomingCall,
 	type CallHierarchyItem,
@@ -35,7 +35,7 @@ import {
 	type SymbolInformation,
 	type TextEdit,
 	type WorkspaceEdit,
-} from "./types.js";
+} from "./types";
 import {
 	extractHoverText,
 	fileToUri,
@@ -48,10 +48,10 @@ import {
 	sleep,
 	symbolKindToIcon,
 	uriToFile,
-} from "./utils.js";
+} from "./utils";
 
-export type { LspServerStatus } from "./client.js";
-export type { LspToolDetails } from "./types.js";
+export type { LspServerStatus } from "./client";
+export type { LspToolDetails } from "./types";
 
 /** Result from warming up LSP servers */
 export interface LspWarmupResult {

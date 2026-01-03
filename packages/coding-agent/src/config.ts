@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "fs";
-import { homedir } from "os";
-import { dirname, join, resolve } from "path";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 
 // =============================================================================
 // Package Detection

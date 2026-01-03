@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { isCtrlC } from "../src/keys.js";
-import { ProcessTerminal } from "../src/terminal.js";
-import { type Component, TUI } from "../src/tui.js";
+import { isCtrlC } from "../src/keys";
+import { ProcessTerminal } from "../src/terminal";
+import { type Component, TUI } from "../src/tui";
 
 /**
  * Simple key code logger component

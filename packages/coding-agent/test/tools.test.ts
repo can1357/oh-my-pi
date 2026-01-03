@@ -1,14 +1,14 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { bashTool } from "../src/core/tools/bash.js";
-import { editTool } from "../src/core/tools/edit.js";
-import { findTool } from "../src/core/tools/find.js";
-import { grepTool } from "../src/core/tools/grep.js";
-import { lsTool } from "../src/core/tools/ls.js";
-import { readTool } from "../src/core/tools/read.js";
-import { writeTool } from "../src/core/tools/write.js";
+import { bashTool } from "../src/core/tools/bash";
+import { editTool } from "../src/core/tools/edit";
+import { findTool } from "../src/core/tools/find";
+import { grepTool } from "../src/core/tools/grep";
+import { lsTool } from "../src/core/tools/ls";
+import { readTool } from "../src/core/tools/read";
+import { writeTool } from "../src/core/tools/write";
 
 // Helper to extract text from content blocks
 function getTextOutput(result: any): string {

@@ -1,5 +1,5 @@
-import type { TUI } from "../tui.js";
-import { Text } from "./text.js";
+import type { TUI } from "../tui";
+import { Text } from "./text";
 
 /**
  * Loader component that updates every 80ms with spinning animation

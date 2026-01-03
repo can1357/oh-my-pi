@@ -6,21 +6,21 @@ export {
 	type AutocompleteProvider,
 	CombinedAutocompleteProvider,
 	type SlashCommand,
-} from "./autocomplete.js";
+} from "./autocomplete";
 // Components
-export { Box } from "./components/box.js";
-export { CancellableLoader } from "./components/cancellable-loader.js";
-export { Editor, type EditorTheme } from "./components/editor.js";
-export { Image, type ImageOptions, type ImageTheme } from "./components/image.js";
-export { Input } from "./components/input.js";
-export { Loader } from "./components/loader.js";
-export { type DefaultTextStyle, Markdown, type MarkdownTheme } from "./components/markdown.js";
-export { type SelectItem, SelectList, type SelectListTheme } from "./components/select-list.js";
-export { type SettingItem, SettingsList, type SettingsListTheme } from "./components/settings-list.js";
-export { Spacer } from "./components/spacer.js";
-export { type Tab, TabBar, type TabBarTheme } from "./components/tab-bar.js";
-export { Text } from "./components/text.js";
-export { TruncatedText } from "./components/truncated-text.js";
+export { Box } from "./components/box";
+export { CancellableLoader } from "./components/cancellable-loader";
+export { Editor, type EditorTheme } from "./components/editor";
+export { Image, type ImageOptions, type ImageTheme } from "./components/image";
+export { Input } from "./components/input";
+export { Loader } from "./components/loader";
+export { type DefaultTextStyle, Markdown, type MarkdownTheme } from "./components/markdown";
+export { type SelectItem, SelectList, type SelectListTheme } from "./components/select-list";
+export { type SettingItem, SettingsList, type SettingsListTheme } from "./components/settings-list";
+export { Spacer } from "./components/spacer";
+export { type Tab, TabBar, type TabBarTheme } from "./components/tab-bar";
+export { Text } from "./components/text";
+export { TruncatedText } from "./components/truncated-text";
 // Kitty keyboard protocol helpers
 export {
 	isAltBackspace,
@@ -60,9 +60,9 @@ export {
 	isShiftTab,
 	isTab,
 	Keys,
-} from "./keys.js";
+} from "./keys";
 // Terminal interface and implementations
-export { emergencyTerminalRestore, ProcessTerminal, type Terminal } from "./terminal.js";
+export { emergencyTerminalRestore, ProcessTerminal, type Terminal } from "./terminal";
 // Terminal image support
 export {
 	type CellDimensions,
@@ -85,7 +85,7 @@ export {
 	resetCapabilitiesCache,
 	setCellDimensions,
 	type TerminalCapabilities,
-} from "./terminal-image.js";
-export { type Component, Container, TUI } from "./tui.js";
+} from "./terminal-image";
+export { type Component, Container, TUI } from "./tui";
 // Utilities
-export { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "./utils.js";
+export { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "./utils";
