@@ -5,6 +5,34 @@ import { APP_NAME, getExportTemplateDir } from "../../config.js";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.js";
 import { SessionManager } from "../session-manager.js";
 
+// Cached minified assets (populated on first use)
+let cachedTemplate: string | null = null;
+let cachedJs: string | null = null;
+
+/** Minify CSS by removing comments, unnecessary whitespace, and newlines. */
+function minifyCss(css: string): string {
+	return css
+		.replace(/\/\*[\s\S]*?\*\//g, "") // Remove comments
+		.replace(/\s+/g, " ") // Collapse whitespace
+		.replace(/\s*([{}:;,>+~])\s*/g, "$1") // Remove space around punctuation
+		.replace(/;}/g, "}") // Remove trailing semicolons
+		.trim();
+}
+
+/** Minify JS using Bun's transpiler. */
+function minifyJs(js: string): string {
+	const transpiler = new Bun.Transpiler({ loader: "js", minifyWhitespace: true });
+	return transpiler.transformSync(js);
+}
+
+/** Minify HTML by collapsing whitespace outside of tags. */
+function minifyHtml(html: string): string {
+	return html
+		.replace(/>\s+</g, "><") // Remove whitespace between tags
+		.replace(/\s{2,}/g, " ") // Collapse multiple spaces
+		.trim();
+}
+
 export interface ExportOptions {
 	outputPath?: string;
 	themeName?: string;
@@ -111,11 +139,16 @@ interface SessionData {
  */
 function generateHtml(sessionData: SessionData, themeName?: string): string {
 	const templateDir = getExportTemplateDir();
-	const template = readFileSync(join(templateDir, "template.html"), "utf-8");
+
+	// Load and minify assets on first use
+	if (!cachedTemplate) {
+		cachedTemplate = minifyHtml(readFileSync(join(templateDir, "template.html"), "utf-8"));
+	}
+	if (!cachedJs) {
+		cachedJs = minifyJs(readFileSync(join(templateDir, "template.js"), "utf-8"));
+	}
+
 	const templateCss = readFileSync(join(templateDir, "template.css"), "utf-8");
-	const templateJs = readFileSync(join(templateDir, "template.js"), "utf-8");
-	const markedJs = readFileSync(join(templateDir, "vendor", "marked.min.js"), "utf-8");
-	const hljsJs = readFileSync(join(templateDir, "vendor", "highlight.min.js"), "utf-8");
 
 	const themeVars = generateThemeVars(themeName);
 	const colors = getResolvedThemeColors(themeName);
@@ -127,19 +160,19 @@ function generateHtml(sessionData: SessionData, themeName?: string): string {
 	// Base64 encode session data to avoid escaping issues
 	const sessionDataBase64 = Buffer.from(JSON.stringify(sessionData)).toString("base64");
 
-	// Build the CSS with theme variables injected
-	const css = templateCss
-		.replace("{{THEME_VARS}}", themeVars)
-		.replace("{{BODY_BG}}", bodyBg)
-		.replace("{{CONTAINER_BG}}", containerBg)
-		.replace("{{INFO_BG}}", infoBg);
+	// Build and minify the CSS with theme variables injected
+	const css = minifyCss(
+		templateCss
+			.replace("{{THEME_VARS}}", themeVars)
+			.replace("{{BODY_BG}}", bodyBg)
+			.replace("{{CONTAINER_BG}}", containerBg)
+			.replace("{{INFO_BG}}", infoBg),
+	);
 
-	return template
+	return cachedTemplate
 		.replace("{{CSS}}", css)
-		.replace("{{JS}}", templateJs)
-		.replace("{{SESSION_DATA}}", sessionDataBase64)
-		.replace("{{MARKED_JS}}", markedJs)
-		.replace("{{HIGHLIGHT_JS}}", hljsJs);
+		.replace("{{JS}}", cachedJs)
+		.replace("{{SESSION_DATA}}", sessionDataBase64);
 }
 
 /**

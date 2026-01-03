@@ -2122,7 +2122,7 @@ export class InteractiveMode {
 			}
 
 			// Create the preview URL
-			const previewUrl = `https://shittycodingagent.ai/session?${gistId}`;
+			const previewUrl = `https://gistpreview.github.io/?${gistId}`;
 			this.showStatus(`Share URL: ${previewUrl}\nGist: ${gistUrl}`);
 		} catch (error: unknown) {
 			if (!loader.signal.aborted) {
