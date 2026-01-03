@@ -17,6 +17,11 @@
 
 - Updated bundled `reviewer` agent to use structured review tools with priority-based findings (P0-P3) and formal verdict submission
 
+### Fixed
+
+- Fixed Task tool output artifacts (`out.md`) containing duplicated text from streaming updates
+- Fixed Task tool progress display showing repeated nearly-identical lines during streaming
+
 ## [1.341.0] - 2026-01-03
 ### Added
 

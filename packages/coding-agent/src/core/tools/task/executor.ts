@@ -259,22 +259,29 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					progress.currentToolStartMs = undefined;
 					break;
 
-				case "message_update":
+				case "message_update": {
+					// Extract text for progress display only (replace, don't accumulate)
+					const updateContent = event.message?.content || event.content;
+					if (updateContent && Array.isArray(updateContent)) {
+						const allText: string[] = [];
+						for (const block of updateContent) {
+							if (block.type === "text" && block.text) {
+								const lines = block.text.split("\n").filter((l: string) => l.trim());
+								allText.push(...lines);
+							}
+						}
+						// Show last 8 lines from current state (not accumulated)
+						progress.recentOutput = allText.slice(-8).reverse();
+					}
+					break;
+				}
+
 				case "message_end": {
-					// Extract text content for recent output (prefer message.content, fallback to event.content)
+					// Extract final text content from completed message
 					const messageContent = event.message?.content || event.content;
 					if (messageContent && Array.isArray(messageContent)) {
 						for (const block of messageContent) {
 							if (block.type === "text" && block.text) {
-								const lines = block.text.split("\n").filter((l: string) => l.trim());
-								for (const l of lines) {
-									if (!progress.recentOutput.includes(l)) {
-										progress.recentOutput.unshift(l);
-										if (progress.recentOutput.length > 8) {
-											progress.recentOutput.pop();
-										}
-									}
-								}
 								output += block.text;
 							}
 						}
