@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [1.5.1] - 2026-01-03
 ### Added
 
 - Added shell environment snapshot to preserve user aliases, functions, and shell options when executing bash commands
