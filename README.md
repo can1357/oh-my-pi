@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/banner.png" alt="Pi Monorepo">
+  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/hero.png" alt="Pi Monorepo">
 </p>
 
 <p align="center">
@@ -19,13 +19,12 @@
   Fork of <a href="https://github.com/badlogic/pi-mono">badlogic/pi-mono</a> by <a href="https://github.com/mariozechner">@mariozechner</a>
 </p>
 
----
 
-## Fork Enhancements
+## + LSP Integration (Language Server Protocol)
 
-Features added on top of upstream pi:
-
-### LSP Integration (Language Server Protocol)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/lspv.webp" alt="lsp">
+</p>
 
 Full IDE-like code intelligence with automatic formatting and diagnostics:
 
@@ -36,7 +35,11 @@ Full IDE-like code intelligence with automatic formatting and diagnostics:
 - **Local binary resolution**: Auto-discovers project-local LSP servers in `node_modules/.bin/`, `.venv/bin/`, etc.
 - Hover docs, symbol references, code actions, workspace-wide symbol search
 
-### Task Tool (Subagent System)
+## + Task Tool (Subagent System)
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/task.webp" alt="task">
+</p>
 
 Parallel execution framework with specialized agents and real-time streaming:
 
@@ -47,7 +50,11 @@ Parallel execution framework with specialized agents and real-time streaming:
 - User-level (`~/.pi/agent/agents/`) and project-level (`.pi/agents/`) custom agents
 - Concurrency-limited batch execution with progress tracking
 
-### Model Roles
+## + Model Roles
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/models.webp" alt="models">
+</p>
 
 Configure different models for different purposes with automatic discovery:
 
@@ -57,22 +64,22 @@ Configure different models for different purposes with automatic discovery:
 - CLI args (`--smol`, `--slow`) and env vars (`PI_SMOL_MODEL`, `PI_SLOW_MODEL`)
 - Configure via `/model` selector with keybindings (Enter=default, S=smol, L=slow)
 
-### Ask Tool (Interactive Questioning)
+## + Ask Tool (Interactive Questioning)
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/ask.webp" alt="ask">
+</p>
 
 Structured user interaction with typed options:
 
 - **Multiple choice questions**: Present options with descriptions for user selection
 - **Multi-select support**: Allow multiple answers when choices aren't mutually exclusive
 
-### Edit Fuzzy Matching
+## + Interactive Code Review
 
-Handles whitespace and indentation variance automatically:
-
-- High-confidence fuzzy matching for `oldText` in edit operations
-- Fixes the #1 pain point: edits failing due to invisible whitespace differences
-- Configurable via `edit.fuzzyMatch` setting (enabled by default)
-
-### Interactive Code Review
+<p align="center">
+  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/review.webp" alt="review">
+</p>
 
 Structured code review with priority-based findings:
 
@@ -81,7 +88,11 @@ Structured code review with priority-based findings:
 - **Verdict rendering**: `submit_review` aggregates findings into approve/request-changes/comment
 - Combined result tree showing verdict and all findings
 
-### Custom TypeScript Slash Commands
+## + Custom TypeScript Slash Commands
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/slash.webp" alt="slash">
+</p>
 
 Programmable commands with full API access:
 
@@ -91,7 +102,11 @@ Programmable commands with full API access:
 - Return string to send as LLM prompt, or void for fire-and-forget actions
 - Also loads from Claude Code directories (`~/.claude/commands/`, `.claude/commands/`)
 
-### MCP & Plugin System
+## + MCP & Plugin System
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/perplexity.webp" alt="perplexity">
+</p>
 
 Full Model Context Protocol support with external tool integration:
 
@@ -100,7 +115,19 @@ Full Model Context Protocol support with external tool integration:
 - Hot-loadable plugins from `~/.pi/plugins/` with npm/bun integration
 - Automatic Exa MCP server filtering with API key extraction
 
-### TUI Overhaul
+## + Web Search & Fetch
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/can1357/oh-my-pi/main/assets/arxiv.webp" alt="arxiv">
+</p>
+
+Multi-provider search and full-page scraping:
+
+- Anthropic, Perplexity, and Exa search integration with caching
+- HTML-to-markdown conversion with link preservation
+- JavaScript rendering support, image handling
+
+## + TUI Overhaul
 
 Modern terminal interface with smart session management:
 
@@ -111,15 +138,15 @@ Modern terminal interface with smart session management:
 - **Hotkeys**: `?` displays shortcuts when editor empty
 - **Emergency terminal restore**: Crash handlers prevent terminal corruption
 
-### Web Search & Fetch
+## + Edit Fuzzy Matching
 
-Multi-provider search and full-page scraping:
+Handles whitespace and indentation variance automatically:
 
-- Anthropic, Perplexity, and Exa search integration with caching
-- HTML-to-markdown conversion with link preservation
-- JavaScript rendering support, image handling
+- High-confidence fuzzy matching for `oldText` in edit operations
+- Fixes the #1 pain point: edits failing due to invisible whitespace differences
+- Configurable via `edit.fuzzyMatch` setting (enabled by default)
 
-### ... and many more
+## ... and many more
 
 - **Git context**: System prompt includes branch, status, recent commits
 - **Bun runtime**: Native TypeScript execution, faster startup, all packages migrated
