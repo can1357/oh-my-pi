@@ -174,6 +174,8 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	extends Tool<TParameters> {
 	// A human-readable label for the tool to be displayed in UI
 	label: string;
+	/** If true, tool is excluded unless explicitly listed in --tools or agent's tools field */
+	hidden?: boolean;
 	execute: (
 		toolCallId: string,
 		params: Static<TParameters>,

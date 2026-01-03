@@ -10,9 +10,9 @@ export {
 	type ModelCycleResult,
 	type PromptOptions,
 	type SessionStats,
-} from "./core/agent-session.js";
+} from "./core/agent-session";
 // Auth and model registry
-export { type ApiKeyCredential, type AuthCredential, AuthStorage, type OAuthCredential } from "./core/auth-storage.js";
+export { type ApiKeyCredential, type AuthCredential, AuthStorage, type OAuthCredential } from "./core/auth-storage";
 // Compaction
 export {
 	type BranchPreparation,
@@ -35,7 +35,16 @@ export {
 	prepareBranchEntries,
 	serializeConversation,
 	shouldCompact,
-} from "./core/compaction/index.js";
+} from "./core/compaction/index";
+// Custom commands
+export type {
+	CustomCommand,
+	CustomCommandAPI,
+	CustomCommandFactory,
+	CustomCommandSource,
+	CustomCommandsLoadResult,
+	LoadedCustomCommand,
+} from "./core/custom-commands/types";
 // Custom tools
 export type {
 	AgentToolUpdateCallback,
@@ -49,9 +58,9 @@ export type {
 	ExecResult,
 	LoadedCustomTool,
 	RenderResultOptions,
-} from "./core/custom-tools/index.js";
-export { discoverAndLoadCustomTools, loadCustomTools } from "./core/custom-tools/index.js";
-export type * from "./core/hooks/index.js";
+} from "./core/custom-tools/index";
+export { discoverAndLoadCustomTools, loadCustomTools } from "./core/custom-tools/index";
+export type * from "./core/hooks/index";
 // Hook system types and type guards
 export {
 	isBashToolResult,
@@ -61,9 +70,9 @@ export {
 	isLsToolResult,
 	isReadToolResult,
 	isWriteToolResult,
-} from "./core/hooks/index.js";
-export { convertToLlm } from "./core/messages.js";
-export { ModelRegistry } from "./core/model-registry.js";
+} from "./core/hooks/index";
+export { convertToLlm } from "./core/messages";
+export { ModelRegistry } from "./core/model-registry";
 // SDK for programmatic usage
 export {
 	type BuildSystemPromptOptions,
@@ -98,7 +107,7 @@ export {
 	loadSettings,
 	// Pre-built tools (use process.cwd())
 	readOnlyTools,
-} from "./core/sdk.js";
+} from "./core/sdk";
 export {
 	type BranchSummaryEntry,
 	buildSessionContext,
@@ -120,7 +129,7 @@ export {
 	SessionManager,
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
-} from "./core/session-manager.js";
+} from "./core/session-manager";
 export {
 	type CompactionSettings,
 	type LspSettings,
@@ -128,7 +137,7 @@ export {
 	type Settings,
 	SettingsManager,
 	type SkillsSettings,
-} from "./core/settings-manager.js";
+} from "./core/settings-manager";
 // Skills
 export {
 	formatSkillsForPrompt,
@@ -139,7 +148,7 @@ export {
 	type Skill,
 	type SkillFrontmatter,
 	type SkillWarning,
-} from "./core/skills.js";
+} from "./core/skills";
 // Tools
 export {
 	type BashToolDetails,
@@ -159,14 +168,14 @@ export {
 	type WriteToolDetails,
 	type WriteToolOptions,
 	writeTool,
-} from "./core/tools/index.js";
-export type { FileDiagnosticsResult } from "./core/tools/lsp/index.js";
+} from "./core/tools/index";
+export type { FileDiagnosticsResult } from "./core/tools/lsp/index";
 // Main entry point
-export { main } from "./main.js";
+export { main } from "./main";
 // UI components for hooks and custom tools
-export { BorderedLoader } from "./modes/interactive/components/bordered-loader.js";
+export { BorderedLoader } from "./modes/interactive/components/bordered-loader";
 // Theme utilities for custom tools
-export { getMarkdownTheme } from "./modes/interactive/theme/theme.js";
+export { getMarkdownTheme } from "./modes/interactive/theme/theme";
 
 // TypeBox helper for string enums (convenience for custom tools)
 import { type TSchema, Type } from "@sinclair/typebox";

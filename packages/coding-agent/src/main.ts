@@ -5,33 +5,33 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { type ImageContent, supportsXhigh } from "@oh-my-pi/pi-ai";
 import chalk from "chalk";
-import { existsSync } from "fs";
-import { join } from "path";
-import { type Args, parseArgs, printHelp } from "./cli/args.js";
-import { processFileArguments } from "./cli/file-processor.js";
-import { listModels } from "./cli/list-models.js";
-import { parsePluginArgs, printPluginHelp, runPluginCommand } from "./cli/plugin-cli.js";
-import { selectSession } from "./cli/session-picker.js";
-import { CONFIG_DIR_NAME, getAgentDir, getModelsPath, VERSION } from "./config.js";
-import type { AgentSession } from "./core/agent-session.js";
-import type { LoadedCustomTool } from "./core/custom-tools/index.js";
-import { exportFromFile } from "./core/export-html/index.js";
-import type { HookUIContext } from "./core/index.js";
-import type { ModelRegistry } from "./core/model-registry.js";
-import { resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
-import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage, discoverModels } from "./core/sdk.js";
-import { SessionManager } from "./core/session-manager.js";
-import { SettingsManager } from "./core/settings-manager.js";
-import { resolvePromptInput } from "./core/system-prompt.js";
-import { printTimings, time } from "./core/timings.js";
-import { allTools } from "./core/tools/index.js";
-import { runMigrations } from "./migrations.js";
-import { InteractiveMode, installTerminalCrashHandlers, runPrintMode, runRpcMode } from "./modes/index.js";
-import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.js";
-import { getChangelogPath, getNewEntries, parseChangelog } from "./utils/changelog.js";
-import { ensureTool } from "./utils/tools-manager.js";
+import { type Args, parseArgs, printHelp } from "./cli/args";
+import { processFileArguments } from "./cli/file-processor";
+import { listModels } from "./cli/list-models";
+import { parsePluginArgs, printPluginHelp, runPluginCommand } from "./cli/plugin-cli";
+import { selectSession } from "./cli/session-picker";
+import { CONFIG_DIR_NAME, getAgentDir, getModelsPath, VERSION } from "./config";
+import type { AgentSession } from "./core/agent-session";
+import type { LoadedCustomTool } from "./core/custom-tools/index";
+import { exportFromFile } from "./core/export-html/index";
+import type { HookUIContext } from "./core/index";
+import type { ModelRegistry } from "./core/model-registry";
+import { resolveModelScope, type ScopedModel } from "./core/model-resolver";
+import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage, discoverModels } from "./core/sdk";
+import { SessionManager } from "./core/session-manager";
+import { SettingsManager } from "./core/settings-manager";
+import { resolvePromptInput } from "./core/system-prompt";
+import { printTimings, time } from "./core/timings";
+import { allTools } from "./core/tools/index";
+import { runMigrations } from "./migrations";
+import { InteractiveMode, installTerminalCrashHandlers, runPrintMode, runRpcMode } from "./modes/index";
+import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme";
+import { getChangelogPath, getNewEntries, parseChangelog } from "./utils/changelog";
+import { ensureTool } from "./utils/tools-manager";
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 	try {
@@ -269,6 +269,7 @@ function buildSessionOptions(
 	// Tools
 	if (parsed.tools) {
 		options.tools = parsed.tools.map((name) => allTools[name]);
+		options.explicitTools = parsed.tools;
 	}
 
 	// Skills

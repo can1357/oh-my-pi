@@ -1,12 +1,21 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Added
 
+- Added `hidden` property for custom tools to exclude them from default tool list unless explicitly requested
+- Added `explicitTools` option to `createAgentSession` for enabling hidden tools by name
+- Added example review tools (`report_finding`, `submit_review`) with structured findings accumulation and verdict rendering
+- Added `/review` example command for interactive code review with branch comparison, uncommitted changes, and commit review modes
 - Custom TypeScript slash commands: Create programmable commands at `~/.pi/agent/commands/[name]/index.ts` or `.pi/commands/[name]/index.ts`. Commands export a factory returning `{ name, description, execute(args, ctx) }`. Return a string to send as LLM prompt, or void for fire-and-forget actions. Full access to `HookCommandContext` for UI dialogs, session control, and shell execution.
 - Claude command directories: Markdown slash commands now also load from `~/.claude/commands/` and `.claude/commands/` (parallel to existing `.pi/commands/` support)
 - `commands.enableClaudeUser` and `commands.enableClaudeProject` settings to disable Claude command directory loading
 - `/export --copy` option to copy entire session as formatted text to clipboard
+
+### Changed
+
+- Updated bundled `reviewer` agent to use structured review tools with priority-based findings (P0-P3) and formal verdict submission
 
 ## [1.341.0] - 2026-01-03
 ### Added
