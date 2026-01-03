@@ -20,6 +20,7 @@
 ### Fixed
 
 - Recent sessions now show in welcome banner (was never wired up).
+- Auto-generated session titles: Sessions are now automatically titled based on the first message using a small model (Haiku/GPT-4o-mini/Flash). Titles are shown in the terminal window title, recent sessions list, and --resume picker. The resume picker shows title with dimmed first message preview below.
 
 ## [1.340.0] - 2026-01-03
 

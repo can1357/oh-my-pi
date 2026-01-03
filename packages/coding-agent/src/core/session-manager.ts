@@ -156,6 +156,7 @@ export interface SessionContext {
 export interface SessionInfo {
 	path: string;
 	id: string;
+	title?: string;
 	created: Date;
 	modified: Date;
 	messageCount: number;
@@ -486,15 +487,16 @@ export function getRecentSessions(sessionDir: string, limit = 3): RecentSessionI
 			.filter(isValidSessionFile)
 			.map((path) => {
 				const stat = statSync(path);
-				// Try to get session name from first line
+				// Try to get session title or id from first line
 				let name = path.split("/").pop()?.replace(".jsonl", "") ?? "Unknown";
 				try {
 					const content = readFileSync(path, "utf-8");
 					const firstLine = content.split("\n")[0];
 					if (firstLine) {
 						const header = JSON.parse(firstLine) as SessionHeader;
-						if (header.type === "session" && header.id) {
-							name = header.id;
+						if (header.type === "session") {
+							// Prefer title over id
+							name = header.title ?? header.id ?? name;
 						}
 					}
 				} catch {
@@ -506,7 +508,7 @@ export function getRecentSessions(sessionDir: string, limit = 3): RecentSessionI
 			.slice(0, limit);
 
 		return files.map((f) => ({
-			name: f.name.length > 30 ? `${f.name.slice(0, 27)}...` : f.name,
+			name: f.name.length > 40 ? `${f.name.slice(0, 37)}...` : f.name,
 			path: f.path,
 			timeAgo: formatTimeAgo(f.mtime),
 		}));
@@ -528,6 +530,7 @@ export function getRecentSessions(sessionDir: string, limit = 3): RecentSessionI
  */
 export class SessionManager {
 	private sessionId: string = "";
+	private sessionTitle: string | undefined;
 	private sessionFile: string | undefined;
 	private sessionDir: string;
 	private cwd: string;
@@ -560,6 +563,7 @@ export class SessionManager {
 			this.fileEntries = loadEntriesFromFile(this.sessionFile);
 			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
 			this.sessionId = header?.id ?? crypto.randomUUID();
+			this.sessionTitle = header?.title;
 
 			if (migrateToCurrentVersion(this.fileEntries)) {
 				this._rewriteFile();
@@ -638,6 +642,31 @@ export class SessionManager {
 
 	getSessionFile(): string | undefined {
 		return this.sessionFile;
+	}
+
+	getSessionTitle(): string | undefined {
+		return this.sessionTitle;
+	}
+
+	setSessionTitle(title: string): void {
+		this.sessionTitle = title;
+		// Update the session file header with the title
+		if (this.persist && this.sessionFile && existsSync(this.sessionFile)) {
+			try {
+				const content = readFileSync(this.sessionFile, "utf-8");
+				const lines = content.split("\n");
+				if (lines.length > 0) {
+					const header = JSON.parse(lines[0]) as SessionHeader;
+					if (header.type === "session") {
+						header.title = title;
+						lines[0] = JSON.stringify(header);
+						writeFileSync(this.sessionFile, lines.join("\n"));
+					}
+				}
+			} catch {
+				// Ignore errors updating title
+			}
+		}
 	}
 
 	_persist(entry: SessionEntry): void {
@@ -1122,7 +1151,7 @@ export class SessionManager {
 					if (lines.length === 0) continue;
 
 					// Check first line for valid session header
-					let header: { type: string; id: string; timestamp: string } | null = null;
+					let header: { type: string; id: string; title?: string; timestamp: string } | null = null;
 					try {
 						const first = JSON.parse(lines[0]);
 						if (first.type === "session" && first.id) {
@@ -1168,6 +1197,7 @@ export class SessionManager {
 					sessions.push({
 						path: file,
 						id: header.id,
+						title: header.title,
 						created: new Date(header.timestamp),
 						modified: stats.mtime,
 						messageCount,

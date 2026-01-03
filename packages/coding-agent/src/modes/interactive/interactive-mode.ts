@@ -31,6 +31,7 @@ import { createCompactionSummaryMessage } from "../../core/messages.js";
 import { getRecentSessions, type SessionContext, SessionManager } from "../../core/session-manager.js";
 import { loadSkills } from "../../core/skills.js";
 import { loadProjectContextFiles } from "../../core/system-prompt.js";
+import { generateSessionTitle, setTerminalTitle } from "../../core/title-generator.js";
 import type { TruncationResult } from "../../core/tools/truncate.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
 import { copyToClipboard, readImageFromClipboard } from "../../utils/clipboard.js";
@@ -141,6 +142,9 @@ export class InteractiveMode {
 	// Custom tools for custom rendering
 	private customTools: Map<string, LoadedCustomTool>;
 
+	// Title generation state
+	private titleGenerationAttempted = false;
+
 	// Convenience accessors
 	private get agent() {
 		return this.session.agent;
@@ -244,6 +248,13 @@ export class InteractiveMode {
 
 		// Add welcome header
 		const welcome = new WelcomeComponent(this.version, modelName, providerName, recentSessions, lspServerInfo);
+
+		// Set terminal title if session already has one (resumed session)
+		const existingTitle = this.sessionManager.getSessionTitle();
+		if (existingTitle) {
+			setTerminalTitle(`pi: ${existingTitle}`);
+			this.titleGenerationAttempted = true; // Don't try to generate again
+		}
 
 		// Setup UI layout
 		this.ui.addChild(new Spacer(1));
@@ -1042,6 +1053,12 @@ export class InteractiveMode {
 				}
 				this.pendingTools.clear();
 				this.ui.requestRender();
+
+				// Generate session title after first turn (if not already titled)
+				if (!this.titleGenerationAttempted && !this.sessionManager.getSessionTitle()) {
+					this.titleGenerationAttempted = true;
+					this.maybeGenerateTitle();
+				}
 				break;
 
 			case "auto_compaction_start": {
@@ -1567,6 +1584,41 @@ export class InteractiveMode {
 		);
 		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
 		this.ui.requestRender();
+	}
+
+	/**
+	 * Generate a title for the session based on the first user message.
+	 * Runs in background, doesn't block UI.
+	 */
+	private maybeGenerateTitle(): void {
+		// Find the first user message
+		const messages = this.agent.state.messages;
+		const firstUserMessage = messages.find((m) => m.role === "user");
+		if (!firstUserMessage) return;
+
+		// Extract text content
+		let messageText = "";
+		for (const content of firstUserMessage.content) {
+			if (typeof content === "string") {
+				messageText += content;
+			} else if (content.type === "text") {
+				messageText += content.text;
+			}
+		}
+		if (!messageText.trim()) return;
+
+		// Generate title in background
+		const registry = this.session.modelRegistry;
+		generateSessionTitle(messageText, registry)
+			.then((title) => {
+				if (title) {
+					this.sessionManager.setSessionTitle(title);
+					setTerminalTitle(`pi: ${title}`);
+				}
+			})
+			.catch(() => {
+				// Ignore title generation errors
+			});
 	}
 
 	private updatePendingMessagesDisplay(): void {

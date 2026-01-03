@@ -90,7 +90,7 @@ class SessionList implements Component {
 		);
 		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredSessions.length);
 
-		// Render visible sessions (2 lines per session + blank line)
+		// Render visible sessions (2-3 lines per session + blank line)
 		for (let i = startIndex; i < endIndex; i++) {
 			const session = this.filteredSessions[i];
 			const isSelected = i === this.selectedIndex;
@@ -98,19 +98,32 @@ class SessionList implements Component {
 			// Normalize first message to single line
 			const normalizedMessage = session.firstMessage.replace(/\n/g, " ").trim();
 
-			// First line: cursor + message (truncate to visible width)
+			// First line: cursor + title (or first message if no title)
 			const cursor = isSelected ? theme.fg("accent", "› ") : "  ";
-			const maxMsgWidth = width - 2; // Account for cursor (2 visible chars)
-			const truncatedMsg = truncateToWidth(normalizedMessage, maxMsgWidth, "...");
-			const messageLine = cursor + (isSelected ? theme.bold(truncatedMsg) : truncatedMsg);
+			const maxWidth = width - 2; // Account for cursor (2 visible chars)
 
-			// Second line: metadata (dimmed) - also truncate for safety
+			if (session.title) {
+				// Has title: show title on first line, dimmed first message on second line
+				const truncatedTitle = truncateToWidth(session.title, maxWidth, "...");
+				const titleLine = cursor + (isSelected ? theme.bold(truncatedTitle) : truncatedTitle);
+				lines.push(titleLine);
+
+				// Second line: dimmed first message preview
+				const truncatedPreview = truncateToWidth(normalizedMessage, maxWidth, "...");
+				lines.push(`  ${theme.fg("dim", truncatedPreview)}`);
+			} else {
+				// No title: show first message as main line
+				const truncatedMsg = truncateToWidth(normalizedMessage, maxWidth, "...");
+				const messageLine = cursor + (isSelected ? theme.bold(truncatedMsg) : truncatedMsg);
+				lines.push(messageLine);
+			}
+
+			// Metadata line: date + message count
 			const modified = formatDate(session.modified);
 			const msgCount = `${session.messageCount} message${session.messageCount !== 1 ? "s" : ""}`;
 			const metadata = `  ${modified} · ${msgCount}`;
 			const metadataLine = theme.fg("dim", truncateToWidth(metadata, width, ""));
 
-			lines.push(messageLine);
 			lines.push(metadataLine);
 			lines.push(""); // Blank line between sessions
 		}
