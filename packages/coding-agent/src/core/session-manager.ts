@@ -518,7 +518,10 @@ function getSortedSessions(sessionDir: string): RecentSessionInfo[] {
 			// Find end of first JSON line
 			const eol = sub.indexOf("}\n");
 			if (eol <= 0) return null;
-			return JSON.parse(sub.toString("utf8", 0, eol + 1));
+			const header = JSON.parse(sub.toString("utf8", 0, eol + 1));
+			// Validate session header
+			if (header.type !== "session" || typeof header.id !== "string") return null;
+			return header;
 		};
 
 		return readdirSync(sessionDir)
