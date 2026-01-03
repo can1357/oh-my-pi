@@ -41,6 +41,31 @@ export const taskSchema = Type.Object({
 
 export type TaskParams = Static<typeof taskSchema>;
 
+/** A code review finding reported by the reviewer agent */
+export interface ReviewFinding {
+	title: string;
+	body: string;
+	priority: number;
+	confidence: number;
+	file_path: string;
+	line_start: number;
+	line_end: number;
+}
+
+/** Review summary submitted by the reviewer agent */
+export interface ReviewSummary {
+	overall_correctness: "correct" | "incorrect";
+	explanation: string;
+	confidence: number;
+	findings_count: number;
+}
+
+/** Structured review data extracted from reviewer agent */
+export interface ReviewData {
+	findings: ReviewFinding[];
+	summary?: ReviewSummary;
+}
+
 /** Agent definition (bundled or discovered) */
 export interface AgentDefinition {
 	name: string;
@@ -58,7 +83,7 @@ export interface AgentProgress {
 	index: number;
 	agent: string;
 	agentSource: AgentSource;
-	status: "pending" | "running" | "completed" | "failed";
+	status: "pending" | "running" | "completed" | "failed" | "aborted";
 	task: string;
 	currentTool?: string;
 	currentToolArgs?: string;
@@ -69,6 +94,8 @@ export interface AgentProgress {
 	tokens: number;
 	durationMs: number;
 	modelOverride?: string;
+	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
+	extractedToolData?: Record<string, unknown[]>;
 }
 
 /** Result from a single agent execution */
@@ -85,8 +112,11 @@ export interface SingleResult {
 	tokens: number;
 	modelOverride?: string;
 	error?: string;
+	aborted?: boolean;
 	jsonlEvents?: string[];
 	artifactPaths?: { inputPath: string; outputPath: string; jsonlPath?: string };
+	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
+	extractedToolData?: Record<string, unknown[]>;
 }
 
 /** Tool details for TUI rendering */

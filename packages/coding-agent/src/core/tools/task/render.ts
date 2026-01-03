@@ -7,9 +7,10 @@
 
 import path from "node:path";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
+import { Container, Text } from "@oh-my-pi/pi-tui";
 import type { Theme } from "../../../modes/interactive/theme/theme";
 import type { RenderResultOptions } from "../../custom-tools/types";
+import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import type { AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "./types";
 
 /**
@@ -52,6 +53,8 @@ function getStatusIcon(status: AgentProgress["status"]): string {
 			return "✓";
 		case "failed":
 			return "✗";
+		case "aborted":
+			return "⊘";
 	}
 }
 
@@ -82,7 +85,12 @@ function renderAgentProgress(progress: AgentProgress, isLast: boolean, expanded:
 	const continuePrefix = isLast ? "   " : "│  ";
 
 	const icon = getStatusIcon(progress.status);
-	const iconColor = progress.status === "completed" ? "success" : progress.status === "failed" ? "error" : "accent";
+	const iconColor =
+		progress.status === "completed"
+			? "success"
+			: progress.status === "failed" || progress.status === "aborted"
+				? "error"
+				: "accent";
 
 	// Main status line
 	let statusLine = `${prefix} ${theme.fg(iconColor, icon)} ${theme.fg("accent", progress.agent)}`;
@@ -98,6 +106,8 @@ function renderAgentProgress(progress: AgentProgress, isLast: boolean, expanded:
 		statusLine += `: ${theme.fg("success", "done")}`;
 		statusLine += ` · ${theme.fg("dim", `${progress.toolCount} tools`)}`;
 		statusLine += ` · ${theme.fg("dim", `${formatTokens(progress.tokens)} tokens`)}`;
+	} else if (progress.status === "aborted") {
+		statusLine += `: ${theme.fg("error", "aborted")}`;
 	} else if (progress.status === "failed") {
 		statusLine += `: ${theme.fg("error", "failed")}`;
 	}
@@ -119,6 +129,26 @@ function renderAgentProgress(progress: AgentProgress, isLast: boolean, expanded:
 		lines.push(toolLine);
 	}
 
+	// Render extracted tool data inline (e.g., review findings)
+	if (progress.extractedToolData) {
+		for (const [toolName, dataArray] of Object.entries(progress.extractedToolData)) {
+			const handler = subprocessToolRegistry.getHandler(toolName);
+			if (handler?.renderInline) {
+				// Show last few items inline
+				const recentData = (dataArray as unknown[]).slice(-3);
+				for (const data of recentData) {
+					const component = handler.renderInline(data, theme);
+					if (component instanceof Text) {
+						lines.push(`${continuePrefix}${component.getText()}`);
+					}
+				}
+				if (dataArray.length > 3) {
+					lines.push(`${continuePrefix}${theme.fg("dim", `... ${dataArray.length - 3} more`)}`);
+				}
+			}
+		}
+	}
+
 	// Expanded view: recent output and tools
 	if (expanded && progress.status === "running") {
 		// Recent output
@@ -138,13 +168,15 @@ function renderAgentResult(result: SingleResult, isLast: boolean, expanded: bool
 	const prefix = isLast ? "└─" : "├─";
 	const continuePrefix = isLast ? "   " : "│  ";
 
-	const success = result.exitCode === 0;
-	const icon = success ? "✓" : "✗";
+	const aborted = result.aborted ?? false;
+	const success = !aborted && result.exitCode === 0;
+	const icon = aborted ? "⊘" : success ? "✓" : "✗";
 	const iconColor = success ? "success" : "error";
+	const statusText = aborted ? "aborted" : success ? "done" : "failed";
 
 	// Main status line
 	let statusLine = `${prefix} ${theme.fg(iconColor, icon)} ${theme.fg("accent", result.agent)}`;
-	statusLine += `: ${theme.fg(iconColor, success ? "done" : "failed")}`;
+	statusLine += `: ${theme.fg(iconColor, statusText)}`;
 	statusLine += ` · ${theme.fg("dim", `${formatTokens(result.tokens)} tokens`)}`;
 	statusLine += ` · ${theme.fg("dim", formatDuration(result.durationMs))}`;
 
@@ -154,16 +186,46 @@ function renderAgentResult(result: SingleResult, isLast: boolean, expanded: bool
 
 	lines.push(statusLine);
 
-	// Output preview
-	const outputLines = result.output.split("\n").filter((l) => l.trim());
-	const previewCount = expanded ? 8 : 3;
-
-	for (const line of outputLines.slice(0, previewCount)) {
-		lines.push(`${continuePrefix}${theme.fg("dim", truncate(line, 70))}`);
+	// Check for extracted tool data with custom renderers
+	let hasCustomRendering = false;
+	if (result.extractedToolData) {
+		for (const [toolName, dataArray] of Object.entries(result.extractedToolData)) {
+			const handler = subprocessToolRegistry.getHandler(toolName);
+			if (handler?.renderFinal && (dataArray as unknown[]).length > 0) {
+				hasCustomRendering = true;
+				const component = handler.renderFinal(dataArray as unknown[], theme, expanded);
+				if (component instanceof Text) {
+					// Prefix each line with continuePrefix
+					const text = component.getText();
+					for (const line of text.split("\n")) {
+						if (line.trim()) {
+							lines.push(`${continuePrefix}${line}`);
+						}
+					}
+				} else if (component instanceof Container) {
+					// For containers, render each child
+					for (const child of (component as Container).children) {
+						if (child instanceof Text) {
+							lines.push(`${continuePrefix}${child.getText()}`);
+						}
+					}
+				}
+			}
+		}
 	}
 
-	if (outputLines.length > previewCount) {
-		lines.push(`${continuePrefix}${theme.fg("dim", `... ${outputLines.length - previewCount} more lines`)}`);
+	// Fallback to output preview if no custom rendering
+	if (!hasCustomRendering) {
+		const outputLines = result.output.split("\n").filter((l) => l.trim());
+		const previewCount = expanded ? 8 : 3;
+
+		for (const line of outputLines.slice(0, previewCount)) {
+			lines.push(`${continuePrefix}${theme.fg("dim", truncate(line, 70))}`);
+		}
+
+		if (outputLines.length > previewCount) {
+			lines.push(`${continuePrefix}${theme.fg("dim", `... ${outputLines.length - previewCount} more lines`)}`);
+		}
 	}
 
 	// Error message
@@ -207,12 +269,20 @@ export function renderResult(
 		});
 
 		// Summary line
-		const successCount = details.results.filter((r) => r.exitCode === 0).length;
-		const failCount = details.results.length - successCount;
+		const abortedCount = details.results.filter((r) => r.aborted).length;
+		const successCount = details.results.filter((r) => !r.aborted && r.exitCode === 0).length;
+		const failCount = details.results.length - successCount - abortedCount;
 		let summary = `\n${theme.fg("dim", "Total:")} `;
-		summary += theme.fg("success", `${successCount} succeeded`);
+		if (abortedCount > 0) {
+			summary += theme.fg("error", `${abortedCount} aborted`);
+			if (successCount > 0 || failCount > 0) summary += ", ";
+		}
+		if (successCount > 0) {
+			summary += theme.fg("success", `${successCount} succeeded`);
+			if (failCount > 0) summary += ", ";
+		}
 		if (failCount > 0) {
-			summary += `, ${theme.fg("error", `${failCount} failed`)}`;
+			summary += theme.fg("error", `${failCount} failed`);
 		}
 		summary += ` · ${theme.fg("dim", formatDuration(details.totalDurationMs))}`;
 		lines.push(summary);

@@ -12,6 +12,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { ensureArtifactsDir, getArtifactPaths } from "./artifacts";
 import { resolveModelPattern } from "./model-resolver";
+import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -262,7 +263,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					progress.currentToolStartMs = now;
 					break;
 
-				case "tool_execution_end":
+				case "tool_execution_end": {
 					if (progress.currentTool) {
 						progress.recentTools.unshift({
 							tool: progress.currentTool,
@@ -277,7 +278,42 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					progress.currentTool = undefined;
 					progress.currentToolArgs = undefined;
 					progress.currentToolStartMs = undefined;
+
+					// Check for registered subprocess tool handler
+					const handler = subprocessToolRegistry.getHandler(event.toolName);
+					if (handler) {
+						// Extract data using handler
+						if (handler.extractData) {
+							const data = handler.extractData({
+								toolName: event.toolName,
+								toolCallId: event.toolCallId,
+								args: event.args,
+								result: event.result,
+								isError: event.isError,
+							});
+							if (data !== undefined) {
+								progress.extractedToolData = progress.extractedToolData || {};
+								progress.extractedToolData[event.toolName] = progress.extractedToolData[event.toolName] || [];
+								progress.extractedToolData[event.toolName].push(data);
+							}
+						}
+
+						// Check if handler wants to terminate subprocess
+						if (
+							handler.shouldTerminate?.({
+								toolName: event.toolName,
+								toolCallId: event.toolCallId,
+								args: event.args,
+								result: event.result,
+								isError: event.isError,
+							})
+						) {
+							proc.kill("SIGTERM");
+							resolved = true;
+						}
+					}
 					break;
+				}
 
 				case "message_update": {
 					// Extract text for progress display only (replace, don't accumulate)
@@ -381,7 +417,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	// Update final progress
-	progress.status = exitCode === 0 ? "completed" : "failed";
+	const wasAborted = signal?.aborted ?? false;
+	progress.status = wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
 	progress.durationMs = Date.now() - startTime;
 	onProgress?.(progress);
 
@@ -398,7 +435,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		tokens: progress.tokens,
 		modelOverride,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
+		aborted: wasAborted,
 		jsonlEvents,
 		artifactPaths,
+		extractedToolData: progress.extractedToolData,
 	};
 }
