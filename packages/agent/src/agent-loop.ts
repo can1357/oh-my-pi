@@ -156,6 +156,7 @@ async function runLoop(
 				stream,
 				config.getQueuedMessages,
 				config.getToolContext,
+				config.interruptMode,
 			);
 			toolResults.push(...toolExecution.toolResults);
 			queuedAfterTools = toolExecution.queuedMessages ?? null;
@@ -282,6 +283,7 @@ async function executeToolCalls(
 	stream: EventStream<AgentEvent, AgentMessage[]>,
 	getQueuedMessages?: AgentLoopConfig["getQueuedMessages"],
 	getToolContext?: AgentLoopConfig["getToolContext"],
+	interruptMode?: AgentLoopConfig["interruptMode"],
 ): Promise<{ toolResults: ToolResultMessage[]; queuedMessages?: AgentMessage[] }> {
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
 	const results: ToolResultMessage[] = [];
@@ -353,7 +355,8 @@ async function executeToolCalls(
 		stream.push({ type: "message_end", message: toolResultMessage });
 
 		// Check for queued messages - skip remaining tools if user interrupted
-		if (getQueuedMessages) {
+		// Only interrupt mid-execution if interruptMode is "immediate" (default)
+		if (interruptMode !== "wait" && getQueuedMessages) {
 			const queued = await getQueuedMessages();
 			if (queued.length > 0) {
 				queuedMessages = queued;

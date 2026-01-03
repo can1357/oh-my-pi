@@ -1711,6 +1711,9 @@ export class InteractiveMode {
 			case "queueMode":
 				this.session.setQueueMode(value as "all" | "one-at-a-time");
 				break;
+			case "interruptMode":
+				this.session.setInterruptMode(value as "immediate" | "wait");
+				break;
 			case "thinkingLevel":
 				this.session.setThinkingLevel(value as ThinkingLevel);
 				this.footer.invalidate();

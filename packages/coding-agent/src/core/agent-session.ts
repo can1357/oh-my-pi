@@ -424,6 +424,11 @@ export class AgentSession {
 		return this.agent.getQueueMode();
 	}
 
+	/** Current interrupt mode */
+	get interruptMode(): "immediate" | "wait" {
+		return this.agent.getInterruptMode();
+	}
+
 	/** Current session file path, or undefined if sessions are disabled */
 	get sessionFile(): string | undefined {
 		return this.sessionManager.getSessionFile();
@@ -859,6 +864,15 @@ export class AgentSession {
 	setQueueMode(mode: "all" | "one-at-a-time"): void {
 		this.agent.setQueueMode(mode);
 		this.settingsManager.setQueueMode(mode);
+	}
+
+	/**
+	 * Set interrupt mode.
+	 * Saves to settings.
+	 */
+	setInterruptMode(mode: "immediate" | "wait"): void {
+		this.agent.setInterruptMode(mode);
+		this.settingsManager.setInterruptMode(mode);
 	}
 
 	// =========================================================================

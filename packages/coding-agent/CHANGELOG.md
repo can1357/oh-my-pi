@@ -1,17 +1,12 @@
 # Changelog
 
 ## [Unreleased]
-
-### Changed
-
-- LSP settings moved to dedicated "LSP" tab in `/settings` for better organization
-- Improved grep tool description to document pagination options (`headLimit`, `offset`) and clarify recursive search behavior
-- LSP idle timeout now disabled by default. Configure via `idleTimeoutMs` in lsp.json to auto-shutdown inactive servers.
-- Model settings now use role-based storage (`modelRoles` map) instead of single `defaultProvider`/`defaultModel` fields. Supports multiple model roles (default, small, etc.)
-- Session model persistence now uses `"provider/modelId"` string format with optional role field
-
 ### Added
 
+- Added interruptMode setting to control when queued messages are processed during tool execution.
+- Implemented getter and setter methods in SettingsManager for interrupt mode persistence.
+- Exposed interruptMode configuration in interactive settings UI with immediate/wait options.
+- Wired interrupt mode through AgentSession and SDK to enable runtime configuration.
 - Model roles: Configure different models for different purposes (default, smol, slow) via `/model` selector
 - Model selector key bindings: Enter sets default, S sets smol, L sets slow, Escape closes
 - Model selector shows role markers: ✓ for default, ⚡ for smol, 🧠 for slow
@@ -21,7 +16,6 @@
 - CLI args for model roles: `--smol <model>` and `--slow <model>` (ephemeral, not persisted)
 - Env var overrides: `PI_SMOL_MODEL` and `PI_SLOW_MODEL`
 - Title generation now uses configured smol model from settings
-
 - LSP diagnostics on edit: Edit tool can now return LSP diagnostics after editing code files. Disabled by default to avoid noise during multi-edit sequences. Enable via `lsp.diagnosticsOnEdit` setting.
 - LSP workspace diagnostics: New `lsp action=workspace_diagnostics` command checks the entire project for errors. Auto-detects project type and uses appropriate checker (rust-analyzer/cargo for Rust, tsc for TypeScript, go build for Go, pyright for Python).
 - LSP local binary resolution: LSP servers installed in project-local directories are now discovered automatically. Checks `node_modules/.bin/` for Node.js projects, `.venv/bin/`/`venv/bin/` for Python projects, and `vendor/bundle/bin/` for Ruby projects before falling back to `$PATH`.
@@ -33,6 +27,14 @@
 - Multi-server LSP diagnostics: Diagnostics now query all applicable language servers for a file type. For TypeScript/JavaScript projects with Biome, this means both type errors (from tsserver) and lint errors (from Biome) are reported together.
 - Comprehensive LSP server configurations for 40+ languages including Rust, Go, Python, Java, Kotlin, Scala, Haskell, OCaml, Elixir, Ruby, PHP, C#, Lua, Nix, and many more. Each server includes sensible defaults for args, settings, and init options.
 - Extended LSP config file search paths: Now searches for `lsp.json`, `.lsp.json` in project root and `.pi/` subdirectory, plus user-level configs in `~/.pi/` and home directory.
+
+### Changed
+
+- LSP settings moved to dedicated "LSP" tab in `/settings` for better organization
+- Improved grep tool description to document pagination options (`headLimit`, `offset`) and clarify recursive search behavior
+- LSP idle timeout now disabled by default. Configure via `idleTimeoutMs` in lsp.json to auto-shutdown inactive servers.
+- Model settings now use role-based storage (`modelRoles` map) instead of single `defaultProvider`/`defaultModel` fields. Supports multiple model roles (default, small, etc.)
+- Session model persistence now uses `"provider/modelId"` string format with optional role field
 
 ### Fixed
 

@@ -747,6 +747,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 			: undefined,
 		queueMode: settingsManager.getQueueMode(),
+		interruptMode: settingsManager.getInterruptMode(),
 		getToolContext: toolContextStore.getContext,
 		getApiKey: async () => {
 			const currentModel = agent.state.model;

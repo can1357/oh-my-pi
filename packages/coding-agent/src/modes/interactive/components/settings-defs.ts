@@ -100,6 +100,16 @@ export const SETTINGS_DEFS: SettingDef[] = [
 		set: (sm, v) => sm.setQueueMode(v as "all" | "one-at-a-time"), // Also handled in session
 	},
 	{
+		id: "interruptMode",
+		tab: "config",
+		type: "enum",
+		label: "Interrupt mode",
+		description: "When to process queued messages: immediately (interrupt tools) or wait for turn to complete",
+		values: ["immediate", "wait"],
+		get: (sm) => sm.getInterruptMode(),
+		set: (sm, v) => sm.setInterruptMode(v as "immediate" | "wait"), // Also handled in session
+	},
+	{
 		id: "hideThinking",
 		tab: "config",
 		type: "boolean",

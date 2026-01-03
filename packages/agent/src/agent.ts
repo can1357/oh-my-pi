@@ -53,6 +53,12 @@ export interface AgentOptions {
 	queueMode?: "all" | "one-at-a-time";
 
 	/**
+	 * Interrupt mode: "immediate" = check queue after each tool (interrupt remaining),
+	 * "wait" = only process queue after turn completes
+	 */
+	interruptMode?: "immediate" | "wait";
+
+	/**
 	 * Custom stream function (for proxy backends, etc.). Default uses streamSimple.
 	 */
 	streamFn?: StreamFn;
@@ -88,6 +94,7 @@ export class Agent {
 	private transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	private messageQueue: AgentMessage[] = [];
 	private queueMode: "all" | "one-at-a-time";
+	private interruptMode: "immediate" | "wait";
 	public streamFn: StreamFn;
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	private getToolContext?: () => AgentToolContext | undefined;
@@ -99,6 +106,7 @@ export class Agent {
 		this.convertToLlm = opts.convertToLlm || defaultConvertToLlm;
 		this.transformContext = opts.transformContext;
 		this.queueMode = opts.queueMode || "one-at-a-time";
+		this.interruptMode = opts.interruptMode || "immediate";
 		this.streamFn = opts.streamFn || streamSimple;
 		this.getApiKey = opts.getApiKey;
 		this.getToolContext = opts.getToolContext;
@@ -132,6 +140,14 @@ export class Agent {
 
 	getQueueMode(): "all" | "one-at-a-time" {
 		return this.queueMode;
+	}
+
+	setInterruptMode(mode: "immediate" | "wait") {
+		this.interruptMode = mode;
+	}
+
+	getInterruptMode(): "immediate" | "wait" {
+		return this.interruptMode;
 	}
 
 	setTools(t: AgentTool<any>[]) {
@@ -256,6 +272,7 @@ export class Agent {
 			transformContext: this.transformContext,
 			getApiKey: this.getApiKey,
 			getToolContext: this.getToolContext,
+			interruptMode: this.interruptMode,
 			getQueuedMessages: async () => {
 				if (this.queueMode === "one-at-a-time") {
 					if (this.messageQueue.length > 0) {

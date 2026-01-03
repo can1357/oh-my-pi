@@ -83,6 +83,14 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	getQueuedMessages?: () => Promise<AgentMessage[]>;
 
 	/**
+	 * Controls when queued messages interrupt tool execution.
+	 *
+	 * - "immediate" (default): Check queue after each tool, interrupt remaining tools if messages exist
+	 * - "wait": Only process queued messages after the entire turn completes
+	 */
+	interruptMode?: "immediate" | "wait";
+
+	/**
 	 * Provides tool execution context, resolved per tool call.
 	 * Use for late-bound UI or session state access.
 	 */

@@ -67,6 +67,7 @@ export interface Settings {
 	modelRoles?: Record<string, string>;
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 	queueMode?: "all" | "one-at-a-time";
+	interruptMode?: "immediate" | "wait";
 	theme?: string;
 	compaction?: CompactionSettings;
 	branchSummary?: BranchSummarySettings;
@@ -243,6 +244,15 @@ export class SettingsManager {
 
 	setQueueMode(mode: "all" | "one-at-a-time"): void {
 		this.globalSettings.queueMode = mode;
+		this.save();
+	}
+
+	getInterruptMode(): "immediate" | "wait" {
+		return this.settings.interruptMode || "immediate";
+	}
+
+	setInterruptMode(mode: "immediate" | "wait"): void {
+		this.globalSettings.interruptMode = mode;
 		this.save();
 	}
 

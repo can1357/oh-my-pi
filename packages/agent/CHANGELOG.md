@@ -1,6 +1,12 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `interruptMode` option to control when queued messages interrupt tool execution.
+- Implemented "immediate" mode (default) to check queue after each tool and interrupt remaining tools.
+- Implemented "wait" mode to defer queue processing until the entire turn completes.
+- Added getter and setter methods for `interruptMode` on Agent class.
 
 ## [1.338.0] - 2026-01-03
 
