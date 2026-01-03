@@ -34,6 +34,13 @@ import {
 // Import review tools for side effects (registers subprocess tool handlers)
 import "../review";
 
+/** Format byte count for display */
+function formatBytes(bytes: number): string {
+	if (bytes < 1024) return `${bytes}B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}K`;
+	return `${(bytes / (1024 * 1024)).toFixed(1)}M`;
+}
+
 /** Session context interface */
 interface SessionContext {
 	getSessionFile: () => string | null;
@@ -365,11 +372,16 @@ export function createTaskTool(
 				const successCount = results.filter((r) => r.exitCode === 0).length;
 				const totalDuration = Date.now() - startTime;
 
-				const summaries = results.map((r, i) => {
+				const summaries = results.map((r) => {
 					const status = r.exitCode === 0 ? "completed" : `failed (exit ${r.exitCode})`;
 					const output = r.output.trim() || r.stderr.trim() || "(no output)";
 					const preview = output.split("\n").slice(0, 5).join("\n");
-					return `[${r.agent}] ${status} → ${outputPaths[i]}\n${preview}`;
+					// Include output metadata if available, and use simpler ID format
+					const outputId = `${r.agent}_${r.index}`;
+					const meta = r.outputMeta
+						? ` [${r.outputMeta.lineCount} lines, ${formatBytes(r.outputMeta.charCount)}]`
+						: "";
+					return `[${r.agent}] ${status}${meta} → ${outputId}\n${preview}`;
 				});
 
 				const skippedNote =

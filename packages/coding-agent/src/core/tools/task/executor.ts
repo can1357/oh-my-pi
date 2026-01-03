@@ -422,9 +422,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const { text: truncatedOutput, truncated } = truncateOutput(rawOutput);
 
 	// Write output artifact (input and jsonl already written in real-time)
+	// Compute output metadata for Output tool integration
+	let outputMeta: { lineCount: number; charCount: number } | undefined;
 	if (artifactPaths) {
 		try {
 			fs.writeFileSync(artifactPaths.outputPath, rawOutput, "utf-8");
+			outputMeta = {
+				lineCount: rawOutput.split("\n").length,
+				charCount: rawOutput.length,
+			};
 		} catch {
 			// Non-fatal
 		}
@@ -453,5 +459,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		jsonlEvents,
 		artifactPaths,
 		extractedToolData: progress.extractedToolData,
+		outputMeta,
 	};
 }

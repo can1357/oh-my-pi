@@ -21,6 +21,7 @@ export {
 	warmupLspServers,
 } from "./lsp/index";
 export { createNotebookTool, type NotebookToolDetails, notebookTool } from "./notebook";
+export { createOutputTool, type OutputToolDetails, outputTool } from "./output";
 export { createReadTool, type ReadToolDetails, readTool } from "./read";
 export { createReportFindingTool, createSubmitReviewTool, reportFindingTool, submitReviewTool } from "./review";
 export { BUNDLED_AGENTS, createTaskTool, taskTool } from "./task/index";
@@ -56,6 +57,7 @@ import { createGrepTool, grepTool } from "./grep";
 import { createLsTool, lsTool } from "./ls";
 import { createLspTool, formatFile, getDiagnosticsForFile, lspTool } from "./lsp/index";
 import { createNotebookTool, notebookTool } from "./notebook";
+import { createOutputTool, outputTool } from "./output";
 import { createReadTool, readTool } from "./read";
 import { createReportFindingTool, createSubmitReviewTool, reportFindingTool, submitReviewTool } from "./review";
 import { createTaskTool, taskTool } from "./task/index";
@@ -117,6 +119,7 @@ const toolDefs: Record<string, { tool: Tool; create: ToolFactory }> = {
 	ls: { tool: lsTool, create: createLsTool },
 	lsp: { tool: lspTool, create: createLspTool },
 	notebook: { tool: notebookTool, create: createNotebookTool },
+	output: { tool: outputTool, create: (cwd, ctx) => createOutputTool(cwd, ctx) },
 	task: { tool: taskTool, create: (cwd, ctx) => createTaskTool(cwd, ctx) },
 	web_fetch: { tool: webFetchTool, create: createWebFetchTool },
 	web_search: { tool: webSearchTool, create: createWebSearchTool },
@@ -140,6 +143,7 @@ const baseCodingToolNames: ToolName[] = [
 	"ls",
 	"lsp",
 	"notebook",
+	"output",
 	"task",
 	"web_fetch",
 	"web_search",

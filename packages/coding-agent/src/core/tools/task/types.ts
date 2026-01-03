@@ -119,6 +119,8 @@ export interface SingleResult {
 	artifactPaths?: { inputPath: string; outputPath: string; jsonlPath?: string };
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
+	/** Output metadata for Output tool integration */
+	outputMeta?: { lineCount: number; charCount: number };
 }
 
 /** Tool details for TUI rendering */

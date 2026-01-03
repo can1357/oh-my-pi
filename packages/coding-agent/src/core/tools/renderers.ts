@@ -15,6 +15,7 @@ import type { LsToolDetails } from "./ls";
 import { renderCall as renderLspCall, renderResult as renderLspResult } from "./lsp/render";
 import type { LspToolDetails } from "./lsp/types";
 import type { NotebookToolDetails } from "./notebook";
+import type { OutputToolDetails } from "./output";
 import { renderCall as renderTaskCall, renderResult as renderTaskResult } from "./task/render";
 import type { TaskToolDetails } from "./task/types";
 import { renderWebFetchCall, renderWebFetchResult, type WebFetchToolDetails } from "./web-fetch";
@@ -417,6 +418,83 @@ const lspRenderer: ToolRenderer<LspArgs, LspToolDetails> = {
 };
 
 // ============================================================================
+// Output Renderer
+// ============================================================================
+
+interface OutputArgs {
+	ids: string[];
+	format?: "raw" | "json" | "stripped";
+}
+
+/** Format byte count for display */
+function formatBytes(bytes: number): string {
+	if (bytes < 1024) return `${bytes}B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}K`;
+	return `${(bytes / (1024 * 1024)).toFixed(1)}M`;
+}
+
+const outputRenderer: ToolRenderer<OutputArgs, OutputToolDetails> = {
+	renderCall(args, theme) {
+		const ids = args.ids?.join(", ") ?? "?";
+		const label = theme.fg("toolTitle", theme.bold("output"));
+		const format = args.format && args.format !== "raw" ? theme.fg("muted", ` (${args.format})`) : "";
+		return new Text(`${label} ${theme.fg("dim", ids)}${format}`, 0, 0);
+	},
+
+	renderResult(result, { expanded }, theme) {
+		const details = result.details;
+
+		// Error case: some IDs not found
+		if (details?.notFound?.length) {
+			let text = `${theme.fg("error", ICON_ERROR)} Not found: ${details.notFound.join(", ")}`;
+			if (details.availableIds?.length) {
+				text += `\n${theme.fg("dim", "Available:")} ${details.availableIds.join(", ")}`;
+			} else {
+				text += `\n${theme.fg("dim", "No outputs available in current session")}`;
+			}
+			return new Text(text, 0, 0);
+		}
+
+		const outputs = details?.outputs ?? [];
+
+		// No session case
+		if (outputs.length === 0) {
+			const textContent = result.content?.find((c: any) => c.type === "text")?.text;
+			return new Text(
+				`${theme.fg("warning", ICON_WARNING)} ${theme.fg("muted", textContent || "No outputs")}`,
+				0,
+				0,
+			);
+		}
+
+		// Success: single output
+		if (outputs.length === 1) {
+			const o = outputs[0];
+			const summary = `read ${o.id}.out.md (${o.lineCount} lines, ${formatBytes(o.charCount)})`;
+			return new Text(`${theme.fg("success", ICON_SUCCESS)} ${theme.fg("dim", summary)}`, 0, 0);
+		}
+
+		// Success: multiple outputs (tree display)
+		const expandHint = expanded ? "" : theme.fg("dim", " (Ctrl+O to expand)");
+		let text = `${theme.fg("success", ICON_SUCCESS)} ${theme.fg("dim", `read ${outputs.length} outputs`)}${expandHint}`;
+
+		const maxOutputs = expanded ? outputs.length : Math.min(outputs.length, 5);
+		for (let i = 0; i < maxOutputs; i++) {
+			const o = outputs[i];
+			const isLast = i === maxOutputs - 1 && (expanded || outputs.length <= 5);
+			const branch = isLast ? TREE_END : TREE_MID;
+			text += `\n ${theme.fg("dim", branch)} ${theme.fg("accent", o.id)} ${theme.fg("dim", `(${o.lineCount} lines)`)}`;
+		}
+
+		if (!expanded && outputs.length > 5) {
+			text += `\n ${theme.fg("dim", TREE_END)} ${theme.fg("muted", `… ${outputs.length - 5} more outputs`)}`;
+		}
+
+		return new Text(text, 0, 0);
+	},
+};
+
+// ============================================================================
 // Task Renderer
 // ============================================================================
 
@@ -534,6 +612,7 @@ export const toolRenderers: Record<
 	notebook: notebookRenderer,
 	ls: lsRenderer,
 	lsp: lspRenderer,
+	output: outputRenderer,
 	task: taskRenderer,
 	web_fetch: webFetchRenderer,
 	web_search: webSearchRenderer,

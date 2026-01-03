@@ -1,9 +1,9 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Added
 
+- Added `output` tool to read full agent/task outputs by ID when truncated previews are insufficient
 - Added `task` tool to reviewer agent, enabling parallel exploration of large codebases during reviews
 - Added subprocess tool registry for extracting and rendering tool data from subprocess agents in real-time
 - Added combined review result rendering showing verdict and findings in a tree structure
@@ -19,6 +19,7 @@
 
 ### Changed
 
+- Changed Task tool output references to use simpler ID format (e.g., `reviewer_0`) with line/char counts for Output tool integration
 - Changed subagent recursion prevention from blanket blocking to same-agent blocking. Non-recursive agents can now spawn other agent types (e.g., reviewer can spawn explore agents) but cannot spawn themselves.
 - Changed `/review` command from markdown to interactive TypeScript with mode selection menu (branch comparison, uncommitted changes, commit review, custom)
 - Changed bundled commands to be overridable by user/project commands with same name
