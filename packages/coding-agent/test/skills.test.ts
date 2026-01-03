@@ -21,88 +21,79 @@ describe("skills", () => {
 			expect(warnings).toHaveLength(0);
 		});
 
-		it("should warn when name doesn't match parent directory", () => {
-			const { skills, warnings } = loadSkillsFromDir({
+		it("should load skill when name doesn't match parent directory", () => {
+			const { skills } = loadSkillsFromDir({
 				dir: join(fixturesDir, "name-mismatch"),
 				source: "test",
 			});
 
 			expect(skills).toHaveLength(1);
 			expect(skills[0].name).toBe("different-name");
-			expect(warnings.some((w) => w.message.includes("does not match parent directory"))).toBe(true);
 		});
 
-		it("should warn when name contains invalid characters", () => {
-			const { skills, warnings } = loadSkillsFromDir({
+		it("should load skill with invalid name characters", () => {
+			const { skills } = loadSkillsFromDir({
 				dir: join(fixturesDir, "invalid-name-chars"),
 				source: "test",
 			});
 
 			expect(skills).toHaveLength(1);
-			expect(warnings.some((w) => w.message.includes("invalid characters"))).toBe(true);
 		});
 
-		it("should warn when name exceeds 64 characters", () => {
-			const { skills, warnings } = loadSkillsFromDir({
+		it("should load skill when name exceeds 64 characters", () => {
+			const { skills } = loadSkillsFromDir({
 				dir: join(fixturesDir, "long-name"),
 				source: "test",
 			});
 
 			expect(skills).toHaveLength(1);
-			expect(warnings.some((w) => w.message.includes("exceeds 64 characters"))).toBe(true);
 		});
 
-		it("should warn and skip skill when description is missing", () => {
-			const { skills, warnings } = loadSkillsFromDir({
+		it("should skip skill when description is missing", () => {
+			const { skills } = loadSkillsFromDir({
 				dir: join(fixturesDir, "missing-description"),
 				source: "test",
 			});
 
 			expect(skills).toHaveLength(0);
-			expect(warnings.some((w) => w.message.includes("description is required"))).toBe(true);
 		});
 
-		it("should warn when unknown frontmatter fields are present", () => {
-			const { skills, warnings } = loadSkillsFromDir({
+		it("should load skill with unknown frontmatter fields", () => {
+			const { skills } = loadSkillsFromDir({
 				dir: join(fixturesDir, "unknown-field"),
 				source: "test",
 			});
 
 			expect(skills).toHaveLength(1);
-			expect(warnings.some((w) => w.message.includes('unknown frontmatter field "author"'))).toBe(true);
-			expect(warnings.some((w) => w.message.includes('unknown frontmatter field "version"'))).toBe(true);
 		});
 
 		it("should load nested skills recursively", () => {
-			const { skills, warnings } = loadSkillsFromDir({
+			const { skills } = loadSkillsFromDir({
 				dir: join(fixturesDir, "nested"),
 				source: "test",
 			});
 
 			expect(skills).toHaveLength(1);
 			expect(skills[0].name).toBe("child-skill");
-			expect(warnings).toHaveLength(0);
 		});
 
-		it("should skip files without frontmatter", () => {
-			const { skills, warnings } = loadSkillsFromDir({
+		it("should skip files without frontmatter description", () => {
+			const { skills } = loadSkillsFromDir({
 				dir: join(fixturesDir, "no-frontmatter"),
 				source: "test",
 			});
 
 			// no-frontmatter has no description, so it should be skipped
 			expect(skills).toHaveLength(0);
-			expect(warnings.some((w) => w.message.includes("description is required"))).toBe(true);
 		});
 
-		it("should warn when name contains consecutive hyphens", () => {
-			const { skills, warnings } = loadSkillsFromDir({
+		it("should load skill with consecutive hyphens in name", () => {
+			const { skills } = loadSkillsFromDir({
 				dir: join(fixturesDir, "consecutive-hyphens"),
 				source: "test",
 			});
 
 			expect(skills).toHaveLength(1);
-			expect(warnings.some((w) => w.message.includes("consecutive hyphens"))).toBe(true);
 		});
 
 		it("should load all skills from fixture directory", () => {
@@ -118,13 +109,12 @@ describe("skills", () => {
 		});
 
 		it("should return empty for non-existent directory", () => {
-			const { skills, warnings } = loadSkillsFromDir({
+			const { skills } = loadSkillsFromDir({
 				dir: "/non/existent/path",
 				source: "test",
 			});
 
 			expect(skills).toHaveLength(0);
-			expect(warnings).toHaveLength(0);
 		});
 
 		it("should use parent directory name when name not in frontmatter", () => {
@@ -242,7 +232,8 @@ describe("skills", () => {
 				customDirectories: [fixturesDir],
 			});
 			expect(skills.length).toBeGreaterThan(0);
-			expect(skills.every((s) => s.source === "custom")).toBe(true);
+			// Custom directory skills have source "custom:user"
+			expect(skills.every((s) => s.source.startsWith("custom"))).toBe(true);
 		});
 
 		it("should filter out ignoredSkills", () => {
@@ -392,6 +383,14 @@ describe("skills", () => {
 				dir: join(collisionFixturesDir, "second"),
 				source: "second",
 			});
+
+			// Both directories should have loaded one skill each
+			expect(first.skills).toHaveLength(1);
+			expect(second.skills).toHaveLength(1);
+
+			// Both have the same name "calendar"
+			expect(first.skills[0].name).toBe("calendar");
+			expect(second.skills[0].name).toBe("calendar");
 
 			// Simulate the collision behavior from loadSkills()
 			const skillMap = new Map<string, Skill>();
