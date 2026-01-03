@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [1.341.0] - 2026-01-03
 ### Added
 
 - Added interruptMode setting to control when queued messages are processed during tool execution.

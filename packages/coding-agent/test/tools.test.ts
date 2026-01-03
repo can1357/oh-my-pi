@@ -197,7 +197,12 @@ describe("Coding Agent Tools", () => {
 
 			expect(getTextOutput(result)).toContain("Successfully wrote");
 			expect(getTextOutput(result)).toContain(testFile);
-			expect(result.details).toBeUndefined();
+			expect(result.details).toEqual({
+				wasFormatted: false,
+				formatResult: undefined,
+				hasDiagnostics: false,
+				diagnostics: undefined,
+			});
 		});
 
 		it("should create parent directories", async () => {

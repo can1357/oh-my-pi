@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [1.341.0] - 2026-01-03
 ### Added
 
 - Added `interruptMode` option to control when queued messages interrupt tool execution.
