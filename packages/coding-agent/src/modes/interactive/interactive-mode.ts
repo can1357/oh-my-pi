@@ -2414,10 +2414,30 @@ export class InteractiveMode {
 
 		const renderSourceText = (text: string): string => text.replace(/\bvia\b/, theme.italic("via"));
 
-		const truncateText = (text: string, maxLen: number): string => {
-			if (text.length <= maxLen) return text;
-			if (maxLen <= 3) return text.slice(0, Math.max(0, maxLen));
-			return `${text.slice(0, maxLen - 3)}...`;
+		const truncateText = (text: string, maxWidth: number): string => {
+			const textWidth = visibleWidth(text);
+			if (textWidth <= maxWidth) return text;
+			if (maxWidth <= 3) {
+				let acc = "";
+				let width = 0;
+				for (const char of text) {
+					const charWidth = visibleWidth(char);
+					if (width + charWidth > maxWidth) break;
+					width += charWidth;
+					acc += char;
+				}
+				return acc;
+			}
+			const targetWidth = maxWidth - 3;
+			let acc = "";
+			let width = 0;
+			for (const char of text) {
+				const charWidth = visibleWidth(char);
+				if (width + charWidth > targetWidth) break;
+				width += charWidth;
+				acc += char;
+			}
+			return `${acc}...`;
 		};
 
 		// Helper to format a section with consistent column alignment
@@ -2438,26 +2458,23 @@ export class InteractiveMode {
 				return { name, sourceText, nameWithSource, desc };
 			});
 
-			const maxNameWidth = Math.min(60, Math.max(...lineItems.map((line) => line.nameWithSource.length)));
+			const maxNameWidth = Math.min(60, Math.max(...lineItems.map((line) => visibleWidth(line.nameWithSource))));
 			const formattedLines = lineItems.map((line) => {
 				let nameText = line.name;
 				let sourceText = line.sourceText;
 
 				if (sourceText) {
-					let availableForName = maxNameWidth - sourceText.length - 1;
-					if (availableForName < 1) {
-						sourceText = truncateText(sourceText, Math.max(0, maxNameWidth - 4));
-						availableForName = maxNameWidth - sourceText.length - 1;
-					}
-					nameText = truncateText(nameText, Math.max(1, availableForName));
-				} else {
-					nameText = truncateText(nameText, maxNameWidth);
+					const maxSourceWidth = Math.max(0, maxNameWidth - 2);
+					sourceText = truncateText(sourceText, maxSourceWidth);
 				}
+				const sourceWidth = sourceText ? visibleWidth(sourceText) : 0;
+				const availableForName = sourceText ? Math.max(1, maxNameWidth - sourceWidth - 1) : maxNameWidth;
+				nameText = truncateText(nameText, availableForName);
 
 				const nameWithSourcePlain = sourceText ? `${nameText} ${sourceText}` : nameText;
 				const sourceRendered = sourceText ? renderSourceText(sourceText) : "";
 				const nameRendered = sourceText ? `${theme.bold(nameText)} ${sourceRendered}` : theme.bold(nameText);
-				const pad = Math.max(0, maxNameWidth - nameWithSourcePlain.length);
+				const pad = Math.max(0, maxNameWidth - visibleWidth(nameWithSourcePlain));
 				const desc = line.desc?.trim();
 				const descPart = desc ? `  ${theme.fg("dim", desc.slice(0, 50) + (desc.length > 50 ? "..." : ""))}` : "";
 				return `  ${nameRendered}${" ".repeat(pad)}${descPart}`;

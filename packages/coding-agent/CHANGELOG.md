@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [3.1.1337] - 2026-01-03
 ### Added
 
 - Added `spawns` frontmatter field for agent definitions to control which sub-agents can be spawned
