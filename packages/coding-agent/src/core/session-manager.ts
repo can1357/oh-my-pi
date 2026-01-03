@@ -59,7 +59,7 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	type: "model_change";
 	/** Model in "provider/modelId" format */
 	model: string;
-	/** Role: "default", "small", etc. Undefined treated as "default" */
+	/** Role: "default", "smol", "slow", etc. Undefined treated as "default" */
 	role?: string;
 }
 

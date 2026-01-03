@@ -362,7 +362,7 @@ export async function main(args: string[]) {
 	const slowModel = parsed.slow ?? process.env.PI_SLOW_MODEL;
 	if (smolModel || slowModel) {
 		const roleOverrides: Record<string, string> = {};
-		if (smolModel) roleOverrides.small = smolModel;
+		if (smolModel) roleOverrides.smol = smolModel;
 		if (slowModel) roleOverrides.slow = slowModel;
 		settingsManager.applyOverrides({ modelRoles: roleOverrides });
 	}

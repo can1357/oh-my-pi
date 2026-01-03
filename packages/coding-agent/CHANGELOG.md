@@ -12,15 +12,15 @@
 
 ### Added
 
-- Model roles: Configure different models for different purposes (default, small, slow) via `/model` selector
-- Model selector key bindings: Enter sets default, S sets small, L sets slow, Escape closes
-- Model selector shows role markers: ✓ for default, ⚡ for small, 🧠 for slow
+- Model roles: Configure different models for different purposes (default, smol, slow) via `/model` selector
+- Model selector key bindings: Enter sets default, S sets smol, L sets slow, Escape closes
+- Model selector shows role markers: ✓ for default, ⚡ for smol, 🧠 for slow
 - `pi/<role>` model aliases in Task tool agent definitions (e.g., `model: pi/smol, haiku, flash, mini`)
-- Small model auto-discovery using priority chain: haiku > flash > mini
+- Smol model auto-discovery using priority chain: haiku > flash > mini
 - Slow model auto-discovery using priority chain: gpt-5.2-codex > codex > gpt > opus > pro
 - CLI args for model roles: `--smol <model>` and `--slow <model>` (ephemeral, not persisted)
 - Env var overrides: `PI_SMOL_MODEL` and `PI_SLOW_MODEL`
-- Title generation now uses configured small model from settings
+- Title generation now uses configured smol model from settings
 
 - LSP diagnostics on edit: Edit tool can now return LSP diagnostics after editing code files. Disabled by default to avoid noise during multi-edit sequences. Enable via `lsp.diagnosticsOnEdit` setting.
 - LSP workspace diagnostics: New `lsp action=workspace_diagnostics` command checks the entire project for errors. Auto-detects project type and uses appropriate checker (rust-analyzer/cargo for Rust, tsc for TypeScript, go build for Go, pyright for Python).

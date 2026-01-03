@@ -21,7 +21,8 @@ interface ScopedModelItem {
 /**
  * Component that renders a model selector with search.
  * - Enter: Set selected model as default
- * - S: Set selected model as small
+ * - S: Set selected model as smol
+ * - L: Set selected model as slow
  * - Escape: Close selector
  */
 export class ModelSelectorComponent extends Container {
@@ -32,7 +33,7 @@ export class ModelSelectorComponent extends Container {
 	private selectedIndex: number = 0;
 	private currentModel?: Model<any>;
 	private defaultModel?: Model<any>;
-	private smallModel?: Model<any>;
+	private smolModel?: Model<any>;
 	private slowModel?: Model<any>;
 	private settingsManager: SettingsManager;
 	private modelRegistry: ModelRegistry;
@@ -74,7 +75,7 @@ export class ModelSelectorComponent extends Container {
 				? "Showing models from --models scope"
 				: "Only showing models with configured API keys (see README for details)";
 		this.addChild(new Text(theme.fg("warning", hintText), 0, 0));
-		this.addChild(new Text(theme.fg("muted", "Enter: default  S: small  L: slow  Esc: close"), 0, 0));
+		this.addChild(new Text(theme.fg("muted", "Enter: default  S: smol  L: slow  Esc: close"), 0, 0));
 		this.addChild(new Spacer(1));
 
 		// Create search input
@@ -119,12 +120,12 @@ export class ModelSelectorComponent extends Container {
 			}
 		}
 
-		// Load small model
-		const smallStr = roles.small;
-		if (smallStr) {
-			const parsed = parseModelString(smallStr);
+		// Load smol model
+		const smolStr = roles.smol;
+		if (smolStr) {
+			const parsed = parseModelString(smolStr);
 			if (parsed) {
-				this.smallModel = allModels.find((m) => m.provider === parsed.provider && m.id === parsed.id);
+				this.smolModel = allModels.find((m) => m.provider === parsed.provider && m.id === parsed.id);
 			}
 		}
 
@@ -211,13 +212,13 @@ export class ModelSelectorComponent extends Container {
 
 			const isSelected = i === this.selectedIndex;
 			const isDefault = modelsAreEqual(this.defaultModel, item.model);
-			const isSmall = modelsAreEqual(this.smallModel, item.model);
+			const isSmol = modelsAreEqual(this.smolModel, item.model);
 			const isSlow = modelsAreEqual(this.slowModel, item.model);
 
-			// Build role markers: ✓ for default, ⚡ for small, 🧠 for slow
+			// Build role markers: ✓ for default, ⚡ for smol, 🧠 for slow
 			let markers = "";
 			if (isDefault) markers += theme.fg("success", " ✓");
-			if (isSmall) markers += theme.fg("warning", " ⚡");
+			if (isSmol) markers += theme.fg("warning", " ⚡");
 			if (isSlow) markers += theme.fg("accent", " 🧠");
 
 			let line = "";
@@ -273,11 +274,11 @@ export class ModelSelectorComponent extends Container {
 				this.handleSelect(selectedModel.model, "default");
 			}
 		}
-		// S key - set as small model (don't close)
+		// S key - set as smol model (don't close)
 		else if (keyData === "s" || keyData === "S") {
 			const selectedModel = this.filteredModels[this.selectedIndex];
 			if (selectedModel) {
-				this.handleSelect(selectedModel.model, "small");
+				this.handleSelect(selectedModel.model, "smol");
 			}
 		}
 		// L key - set as slow model (don't close)
@@ -305,8 +306,8 @@ export class ModelSelectorComponent extends Container {
 		// Update local state for UI
 		if (role === "default") {
 			this.defaultModel = model;
-		} else if (role === "small") {
-			this.smallModel = model;
+		} else if (role === "smol") {
+			this.smolModel = model;
 		} else if (role === "slow") {
 			this.slowModel = model;
 		}

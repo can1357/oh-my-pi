@@ -154,7 +154,7 @@ ${chalk.bold("Usage:")}
 ${chalk.bold("Options:")}
   --provider <name>              Provider name (default: google)
   --model <id>                   Model ID (default: gemini-2.5-flash)
-  --smol <id>                    Small/fast model for lightweight tasks (or PI_SMOL_MODEL env)
+  --smol <id>                    Smol/fast model for lightweight tasks (or PI_SMOL_MODEL env)
   --slow <id>                    Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)
   --api-key <key>                API key (defaults to env vars)
   --system-prompt <text>         System prompt (default: coding assistant prompt)

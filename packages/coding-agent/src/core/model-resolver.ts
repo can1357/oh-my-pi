@@ -30,8 +30,8 @@ export interface ScopedModel {
 	thinkingLevel: ThinkingLevel;
 }
 
-/** Priority chain for auto-discovering small/fast models */
-export const SMALL_MODEL_PRIORITY = ["claude-haiku-4-5", "haiku", "flash", "mini"];
+/** Priority chain for auto-discovering smol/fast models */
+export const SMOL_MODEL_PRIORITY = ["claude-haiku-4-5", "haiku", "flash", "mini"];
 
 /** Priority chain for auto-discovering slow/comprehensive models (reasoning, codex) */
 export const SLOW_MODEL_PRIORITY = ["gpt-5.2-codex", "gpt-5.2", "codex", "gpt", "opus", "pro"];
@@ -416,14 +416,14 @@ export async function restoreModelFromSession(
 }
 
 /**
- * Find a small/fast model using the priority chain.
+ * Find a smol/fast model using the priority chain.
  * Tries exact matches first, then fuzzy matches.
  *
  * @param modelRegistry The model registry to search
  * @param savedModel Optional saved model string from settings (provider/modelId)
- * @returns The best available small model, or undefined if none found
+ * @returns The best available smol model, or undefined if none found
  */
-export async function findSmallModel(
+export async function findSmolModel(
 	modelRegistry: ModelRegistry,
 	savedModel?: string,
 ): Promise<Model<Api> | undefined> {
@@ -440,7 +440,7 @@ export async function findSmallModel(
 	}
 
 	// 2. Try priority chain
-	for (const pattern of SMALL_MODEL_PRIORITY) {
+	for (const pattern of SMOL_MODEL_PRIORITY) {
 		// Try exact match first
 		const exactMatch = availableModels.find((m) => m.id.toLowerCase() === pattern.toLowerCase());
 		if (exactMatch) return exactMatch;

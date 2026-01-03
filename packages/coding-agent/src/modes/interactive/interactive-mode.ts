@@ -1609,8 +1609,8 @@ export class InteractiveMode {
 
 		// Generate title in background
 		const registry = this.session.modelRegistry;
-		const smallModel = this.settingsManager.getModelRole("small");
-		generateSessionTitle(messageText, registry, smallModel)
+		const smolModel = this.settingsManager.getModelRole("smol");
+		generateSessionTitle(messageText, registry, smolModel)
 			.then((title) => {
 				if (title) {
 					this.sessionManager.setSessionTitle(title);
@@ -1766,7 +1766,7 @@ export class InteractiveMode {
 							this.updateEditorBorderColor();
 						}
 						// For other roles (small), just show status - settings already updated by selector
-						const roleLabel = role === "default" ? "Default" : role === "small" ? "Small" : role;
+						const roleLabel = role === "default" ? "Default" : role === "smol" ? "Smol" : role;
 						this.showStatus(`${roleLabel} model: ${model.id}`);
 					} catch (error) {
 						this.showError(error instanceof Error ? error.message : String(error));

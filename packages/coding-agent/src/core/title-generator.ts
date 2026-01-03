@@ -1,11 +1,11 @@
 /**
- * Generate session titles using a small, fast model.
+ * Generate session titles using a smol, fast model.
  */
 
 import type { Model } from "@oh-my-pi/pi-ai";
 import { completeSimple } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "./model-registry.js";
-import { findSmallModel } from "./model-resolver.js";
+import { findSmolModel } from "./model-resolver.js";
 
 const TITLE_SYSTEM_PROMPT = `Generate a very short title (3-6 words) for a coding session based on the user's first message. The title should capture the main task or topic. Output ONLY the title, nothing else. No quotes, no punctuation at the end.
 
@@ -20,13 +20,13 @@ const MAX_INPUT_CHARS = 2000;
 
 /**
  * Find the best available model for title generation.
- * Uses the configured small model if set, otherwise auto-discovers using priority chain.
+ * Uses the configured smol model if set, otherwise auto-discovers using priority chain.
  *
  * @param registry Model registry
- * @param savedSmallModel Optional saved small model from settings (provider/modelId format)
+ * @param savedSmolModel Optional saved smol model from settings (provider/modelId format)
  */
-export async function findTitleModel(registry: ModelRegistry, savedSmallModel?: string): Promise<Model<any> | null> {
-	const model = await findSmallModel(registry, savedSmallModel);
+export async function findTitleModel(registry: ModelRegistry, savedSmolModel?: string): Promise<Model<any> | null> {
+	const model = await findSmolModel(registry, savedSmolModel);
 	return model ?? null;
 }
 
@@ -35,14 +35,14 @@ export async function findTitleModel(registry: ModelRegistry, savedSmallModel?: 
  *
  * @param firstMessage The first user message
  * @param registry Model registry
- * @param savedSmallModel Optional saved small model from settings (provider/modelId format)
+ * @param savedSmolModel Optional saved smol model from settings (provider/modelId format)
  */
 export async function generateSessionTitle(
 	firstMessage: string,
 	registry: ModelRegistry,
-	savedSmallModel?: string,
+	savedSmolModel?: string,
 ): Promise<string | null> {
-	const model = await findTitleModel(registry, savedSmallModel);
+	const model = await findTitleModel(registry, savedSmolModel);
 	if (!model) return null;
 
 	const apiKey = await registry.getApiKey(model);

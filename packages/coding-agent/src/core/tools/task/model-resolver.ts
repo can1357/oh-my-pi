@@ -7,7 +7,7 @@
  *   - Comma fallback: "gpt, opus" → tries gpt first, then opus
  *   - "default" → undefined (use system default)
  *   - "pi/default" → configured default model from settings
- *   - "pi/small" or "pi/smol" → configured small model from settings
+ *   - "pi/smol" → configured smol model from settings
  */
 
 import { spawnSync } from "node:child_process";
