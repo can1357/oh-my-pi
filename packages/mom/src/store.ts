@@ -39,6 +39,8 @@ export class ChannelStore {
 	// Track recently logged message timestamps to prevent duplicates
 	// Key: "channelId:ts", automatically cleaned up after 60 seconds
 	private recentlyLogged = new Map<string, number>();
+	// Track in-flight messages being written to prevent duplicate concurrent writes
+	private inFlightWrites = new Set<string>();
 
 	constructor(config: ChannelStoreConfig) {
 		this.workingDir = config.workingDir;
@@ -116,33 +118,42 @@ export class ChannelStore {
 	async logMessage(channelId: string, message: LoggedMessage): Promise<boolean> {
 		// Check for duplicate (same channel + timestamp)
 		const dedupeKey = `${channelId}:${message.ts}`;
-		if (this.recentlyLogged.has(dedupeKey)) {
-			return false; // Already logged
+		if (this.recentlyLogged.has(dedupeKey) || this.inFlightWrites.has(dedupeKey)) {
+			return false; // Already logged or currently being written
 		}
 
-		// Mark as logged and schedule cleanup after 60 seconds
-		this.recentlyLogged.set(dedupeKey, Date.now());
-		setTimeout(() => this.recentlyLogged.delete(dedupeKey), 60000);
+		// Mark as in-flight to prevent concurrent writes
+		this.inFlightWrites.add(dedupeKey);
 
-		const logPath = join(this.getChannelDir(channelId), "log.jsonl");
+		try {
+			const logPath = join(this.getChannelDir(channelId), "log.jsonl");
 
-		// Ensure message has a date field
-		if (!message.date) {
-			// Parse timestamp to get date
-			let date: Date;
-			if (message.ts.includes(".")) {
-				// Slack timestamp format (1234567890.123456)
-				date = new Date(parseFloat(message.ts) * 1000);
-			} else {
-				// Epoch milliseconds
-				date = new Date(parseInt(message.ts, 10));
+			// Ensure message has a date field
+			if (!message.date) {
+				// Parse timestamp to get date
+				let date: Date;
+				if (message.ts.includes(".")) {
+					// Slack timestamp format (1234567890.123456)
+					date = new Date(parseFloat(message.ts) * 1000);
+				} else {
+					// Epoch milliseconds
+					date = new Date(parseInt(message.ts, 10));
+				}
+				message.date = date.toISOString();
 			}
-			message.date = date.toISOString();
-		}
 
-		const line = `${JSON.stringify(message)}\n`;
-		await appendFile(logPath, line, "utf-8");
-		return true;
+			const line = `${JSON.stringify(message)}\n`;
+			await appendFile(logPath, line, "utf-8");
+
+			// Mark as logged and schedule cleanup after 60 seconds
+			this.recentlyLogged.set(dedupeKey, Date.now());
+			setTimeout(() => this.recentlyLogged.delete(dedupeKey), 60000);
+
+			return true;
+		} finally {
+			// Always remove from in-flight set, even if write fails
+			this.inFlightWrites.delete(dedupeKey);
+		}
 	}
 
 	/**
@@ -188,9 +199,15 @@ export class ChannelStore {
 	 * Process the download queue in the background
 	 */
 	private async processDownloadQueue(): Promise<void> {
+		// Atomically check and set download flag to prevent concurrent processing
 		if (this.isDownloading || this.pendingDownloads.length === 0) return;
-
 		this.isDownloading = true;
+
+		// Re-check after setting flag (another call may have emptied queue)
+		if (this.pendingDownloads.length === 0) {
+			this.isDownloading = false;
+			return;
+		}
 
 		while (this.pendingDownloads.length > 0) {
 			const item = this.pendingDownloads.shift();

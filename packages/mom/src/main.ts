@@ -86,7 +86,7 @@ await validateSandbox(sandbox);
 
 interface ChannelState {
 	running: boolean;
-	runner: AgentRunner;
+	runner: Promise<AgentRunner>;
 	store: ChannelStore;
 	stopRequested: boolean;
 	stopMessageTs?: string;
@@ -245,7 +245,7 @@ const handler: MomHandler = {
 		const state = channelStates.get(channelId);
 		if (state?.running) {
 			state.stopRequested = true;
-			state.runner.abort();
+			(await state.runner).abort();
 			const ts = await slack.postMessage(channelId, "_Stopping..._");
 			state.stopMessageTs = ts; // Save for updating later
 		} else {
@@ -278,7 +278,8 @@ const handler: MomHandler = {
 			// Run the agent
 			await ctx.setTyping(true);
 			await ctx.setWorking(true);
-			const result = await state.runner.run(ctx as any, state.store);
+			const runner = await state.runner;
+			const result = await runner.run(ctx as any, state.store);
 			await ctx.setWorking(false);
 
 			if (result.stopReason === "aborted" && state.stopRequested) {

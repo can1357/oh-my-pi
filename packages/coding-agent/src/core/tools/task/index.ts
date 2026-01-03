@@ -362,7 +362,7 @@ export function createTaskTool(
 						artifactsDir: effectiveArtifactsDir,
 						signal,
 						onProgress: (progress) => {
-							progressMap.set(index, progress);
+							progressMap.set(index, structuredClone(progress));
 							emitProgress();
 						},
 					});

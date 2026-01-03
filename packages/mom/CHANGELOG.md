@@ -1,6 +1,16 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added mutex-based synchronization to prevent race conditions in session context operations
+- Added in-flight tracking to prevent duplicate concurrent runner creation and message writes
+
+### Fixed
+
+- Fixed race condition in event queue where size check and enqueue were not atomic
+- Fixed potential race condition in command execution where abort signal could be missed
+- Fixed duplicate file processing in events watcher by marking files as known before processing
 
 ## [1.341.0] - 2026-01-03
 

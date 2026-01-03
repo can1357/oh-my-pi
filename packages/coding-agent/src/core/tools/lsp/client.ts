@@ -16,6 +16,8 @@ import { detectLanguageId, fileToUri } from "./utils";
 // =============================================================================
 
 const clients = new Map<string, LspClient>();
+const clientLocks = new Map<string, Promise<LspClient>>();
+const fileOperationLocks = new Map<string, Promise<void>>();
 
 // Idle timeout configuration (disabled by default)
 let idleTimeoutMs: number | null = null;
@@ -233,13 +235,17 @@ async function startMessageReader(client: LspClient): Promise<void> {
 			const { done, value } = await reader.read();
 			if (done) break;
 
-			client.messageBuffer = concatBuffers(client.messageBuffer, value);
+			// Atomically update buffer before processing
+			const currentBuffer = concatBuffers(client.messageBuffer, value);
+			client.messageBuffer = currentBuffer;
 
 			// Process all complete messages in buffer
-			let parsed = parseMessage(client.messageBuffer);
+			// Use local variable to avoid race with concurrent buffer updates
+			let workingBuffer = currentBuffer;
+			let parsed = parseMessage(workingBuffer);
 			while (parsed) {
 				const { message, remaining } = parsed;
-				client.messageBuffer = remaining;
+				workingBuffer = remaining;
 
 				// Route message
 				if ("id" in message && message.id !== undefined) {
@@ -263,8 +269,11 @@ async function startMessageReader(client: LspClient): Promise<void> {
 					}
 				}
 
-				parsed = parseMessage(client.messageBuffer);
+				parsed = parseMessage(workingBuffer);
 			}
+
+			// Atomically commit processed buffer
+			client.messageBuffer = workingBuffer;
 		}
 	} catch (err) {
 		// Connection closed or error - reject all pending requests
@@ -368,71 +377,88 @@ async function sendResponse(
 export async function getOrCreateClient(config: ServerConfig, cwd: string): Promise<LspClient> {
 	const key = `${config.command}:${cwd}`;
 
-	if (clients.has(key)) {
-		const client = clients.get(key)!;
-		client.lastActivity = Date.now();
-		return client;
+	// Check if client already exists
+	const existingClient = clients.get(key);
+	if (existingClient) {
+		existingClient.lastActivity = Date.now();
+		return existingClient;
 	}
 
-	const args = config.args ?? [];
-	const command = config.resolvedCommand ?? config.command;
-	const proc = Bun.spawn([command, ...args], {
-		cwd,
-		stdin: "pipe",
-		stdout: "pipe",
-		stderr: "pipe",
-	});
+	// Check if another coroutine is already creating this client
+	const existingLock = clientLocks.get(key);
+	if (existingLock) {
+		return existingLock;
+	}
 
-	const client: LspClient = {
-		name: key,
-		cwd,
-		process: proc,
-		config,
-		requestId: 0,
-		diagnostics: new Map(),
-		openFiles: new Map(),
-		pendingRequests: new Map(),
-		messageBuffer: new Uint8Array(0),
-		isReading: false,
-		lastActivity: Date.now(),
-	};
-	clients.set(key, client);
+	// Create new client with lock
+	const clientPromise = (async () => {
+		const args = config.args ?? [];
+		const command = config.resolvedCommand ?? config.command;
+		const proc = Bun.spawn([command, ...args], {
+			cwd,
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+		});
 
-	// Register crash recovery - remove client on process exit
-	proc.exited.then(() => {
-		clients.delete(key);
-	});
+		const client: LspClient = {
+			name: key,
+			cwd,
+			process: proc,
+			config,
+			requestId: 0,
+			diagnostics: new Map(),
+			openFiles: new Map(),
+			pendingRequests: new Map(),
+			messageBuffer: new Uint8Array(0),
+			isReading: false,
+			lastActivity: Date.now(),
+		};
+		clients.set(key, client);
 
-	// Start background message reader
-	startMessageReader(client);
+		// Register crash recovery - remove client on process exit
+		proc.exited.then(() => {
+			clients.delete(key);
+			clientLocks.delete(key);
+		});
 
-	try {
-		// Send initialize request
-		const initResult = (await sendRequest(client, "initialize", {
-			processId: process.pid,
-			rootUri: fileToUri(cwd),
-			rootPath: cwd,
-			capabilities: CLIENT_CAPABILITIES,
-			initializationOptions: config.initOptions ?? {},
-			workspaceFolders: [{ uri: fileToUri(cwd), name: cwd.split("/").pop() ?? "workspace" }],
-		})) as { capabilities?: unknown };
+		// Start background message reader
+		startMessageReader(client);
 
-		if (!initResult) {
-			throw new Error("Failed to initialize LSP: no response");
+		try {
+			// Send initialize request
+			const initResult = (await sendRequest(client, "initialize", {
+				processId: process.pid,
+				rootUri: fileToUri(cwd),
+				rootPath: cwd,
+				capabilities: CLIENT_CAPABILITIES,
+				initializationOptions: config.initOptions ?? {},
+				workspaceFolders: [{ uri: fileToUri(cwd), name: cwd.split("/").pop() ?? "workspace" }],
+			})) as { capabilities?: unknown };
+
+			if (!initResult) {
+				throw new Error("Failed to initialize LSP: no response");
+			}
+
+			client.serverCapabilities = initResult.capabilities as LspClient["serverCapabilities"];
+
+			// Send initialized notification
+			await sendNotification(client, "initialized", {});
+
+			return client;
+		} catch (err) {
+			// Clean up on initialization failure
+			clients.delete(key);
+			clientLocks.delete(key);
+			proc.kill();
+			throw err;
+		} finally {
+			clientLocks.delete(key);
 		}
+	})();
 
-		client.serverCapabilities = initResult.capabilities as LspClient["serverCapabilities"];
-
-		// Send initialized notification
-		await sendNotification(client, "initialized", {});
-
-		return client;
-	} catch (err) {
-		// Clean up on initialization failure
-		clients.delete(key);
-		proc.kill();
-		throw err;
-	}
+	clientLocks.set(key, clientPromise);
+	return clientPromise;
 }
 
 /**
@@ -441,24 +467,49 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string): Prom
  */
 export async function ensureFileOpen(client: LspClient, filePath: string): Promise<void> {
 	const uri = fileToUri(filePath);
+	const lockKey = `${client.name}:${uri}`;
+
+	// Check if file is already open
 	if (client.openFiles.has(uri)) {
 		return;
 	}
 
-	const content = fs.readFileSync(filePath, "utf-8");
-	const languageId = detectLanguageId(filePath);
+	// Check if another operation is already opening this file
+	const existingLock = fileOperationLocks.get(lockKey);
+	if (existingLock) {
+		await existingLock;
+		return;
+	}
 
-	await sendNotification(client, "textDocument/didOpen", {
-		textDocument: {
-			uri,
-			languageId,
-			version: 1,
-			text: content,
-		},
-	});
+	// Lock and open file
+	const openPromise = (async () => {
+		// Double-check after acquiring lock
+		if (client.openFiles.has(uri)) {
+			return;
+		}
 
-	client.openFiles.set(uri, { version: 1, languageId });
-	client.lastActivity = Date.now();
+		const content = fs.readFileSync(filePath, "utf-8");
+		const languageId = detectLanguageId(filePath);
+
+		await sendNotification(client, "textDocument/didOpen", {
+			textDocument: {
+				uri,
+				languageId,
+				version: 1,
+				text: content,
+			},
+		});
+
+		client.openFiles.set(uri, { version: 1, languageId });
+		client.lastActivity = Date.now();
+	})();
+
+	fileOperationLocks.set(lockKey, openPromise);
+	try {
+		await openPromise;
+	} finally {
+		fileOperationLocks.delete(lockKey);
+	}
 }
 
 /**
@@ -467,27 +518,45 @@ export async function ensureFileOpen(client: LspClient, filePath: string): Promi
  */
 export async function refreshFile(client: LspClient, filePath: string): Promise<void> {
 	const uri = fileToUri(filePath);
-	const info = client.openFiles.get(uri);
+	const lockKey = `${client.name}:${uri}`;
 
-	if (!info) {
-		await ensureFileOpen(client, filePath);
-		return;
+	// Check if another operation is in progress
+	const existingLock = fileOperationLocks.get(lockKey);
+	if (existingLock) {
+		await existingLock;
 	}
 
-	const content = fs.readFileSync(filePath, "utf-8");
-	info.version++;
+	// Lock and refresh file
+	const refreshPromise = (async () => {
+		const info = client.openFiles.get(uri);
 
-	await sendNotification(client, "textDocument/didChange", {
-		textDocument: { uri, version: info.version },
-		contentChanges: [{ text: content }],
-	});
+		if (!info) {
+			await ensureFileOpen(client, filePath);
+			return;
+		}
 
-	await sendNotification(client, "textDocument/didSave", {
-		textDocument: { uri },
-		text: content,
-	});
+		const content = fs.readFileSync(filePath, "utf-8");
+		const version = ++info.version;
 
-	client.lastActivity = Date.now();
+		await sendNotification(client, "textDocument/didChange", {
+			textDocument: { uri, version },
+			contentChanges: [{ text: content }],
+		});
+
+		await sendNotification(client, "textDocument/didSave", {
+			textDocument: { uri },
+			text: content,
+		});
+
+		client.lastActivity = Date.now();
+	})();
+
+	fileOperationLocks.set(lockKey, refreshPromise);
+	try {
+		await refreshPromise;
+	} finally {
+		fileOperationLocks.delete(lockKey);
+	}
 }
 
 /**
@@ -519,7 +588,9 @@ export function shutdownClient(key: string): void {
  * Send an LSP request and wait for response.
  */
 export async function sendRequest(client: LspClient, method: string, params: unknown): Promise<unknown> {
+	// Atomically increment and capture request ID
 	const id = ++client.requestId;
+
 	const request: LspJsonRpcRequest = {
 		jsonrpc: "2.0",
 		id,

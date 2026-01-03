@@ -314,8 +314,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 							// Safety timeout in case message_end never arrives
 							setTimeout(() => {
 								if (!resolved) {
-									proc.kill("SIGTERM");
 									resolved = true;
+									proc.kill("SIGTERM");
 								}
 							}, 2000);
 						}
@@ -358,8 +358,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					}
 					// If pending termination, now we have tokens - terminate
 					if (pendingTermination && !resolved) {
-						proc.kill("SIGTERM");
 						resolved = true;
+						proc.kill("SIGTERM");
 					}
 					break;
 				}
@@ -381,7 +381,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			progress.durationMs = now - startTime;
-			onProgress?.(progress);
+			// Clone progress object before passing to callback to prevent mutation during render
+			onProgress?.({ ...progress });
 		} catch {
 			// Ignore non-JSON lines
 		}
@@ -393,16 +394,35 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		stderr += stderrDecoder.decode(chunk, { stream: true });
 	});
 
-	// Wait for process to exit
+	// Wait for readline to finish BEFORE resolving
 	const exitCode = await new Promise<number>((resolve) => {
-		proc.on("close", (code) => {
-			resolved = true;
-			resolve(code ?? 1);
+		let code: number | null = null;
+		let rlClosed = false;
+		let procClosed = false;
+
+		const maybeResolve = () => {
+			if (rlClosed && procClosed) {
+				resolved = true;
+				resolve(code ?? 1);
+			}
+		};
+
+		rl.on("close", () => {
+			rlClosed = true;
+			maybeResolve();
 		});
+
+		proc.on("close", (c) => {
+			code = c;
+			procClosed = true;
+			maybeResolve();
+		});
+
 		proc.on("error", (err) => {
-			resolved = true;
 			stderr += `\nProcess error: ${err.message}`;
-			resolve(1);
+			code = 1;
+			procClosed = true;
+			maybeResolve();
 		});
 	});
 

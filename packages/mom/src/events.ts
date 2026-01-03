@@ -180,6 +180,9 @@ export class EventsWatcher {
 	private async handleFile(filename: string): Promise<void> {
 		const filePath = join(this.eventsDir, filename);
 
+		// Mark as known immediately to prevent duplicate processing
+		this.knownFiles.add(filename);
+
 		// Parse with retries
 		let event: MomEvent | null = null;
 		let lastError: Error | null = null;
@@ -202,8 +205,6 @@ export class EventsWatcher {
 			this.deleteFile(filename);
 			return;
 		}
-
-		this.knownFiles.add(filename);
 
 		// Schedule based on type
 		switch (event.type) {

@@ -87,31 +87,39 @@ export async function execCommand(
 				const stdoutReader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
 				const stderrReader = (proc.stderr as ReadableStream<Uint8Array>).getReader();
 
-				const [stdoutResult, stderrResult] = await Promise.all([
+				// Read both streams and wait for process exit
+				const [stdoutResult, stderrResult, exitCode] = await Promise.all([
 					(async () => {
 						const chunks: Uint8Array[] = [];
-						while (true) {
-							const { done, value } = await stdoutReader.read();
-							if (done) break;
-							chunks.push(value);
+						try {
+							while (true) {
+								const { done, value } = await stdoutReader.read();
+								if (done) break;
+								chunks.push(value);
+							}
+						} finally {
+							stdoutReader.releaseLock();
 						}
 						return Buffer.concat(chunks).toString();
 					})(),
 					(async () => {
 						const chunks: Uint8Array[] = [];
-						while (true) {
-							const { done, value } = await stderrReader.read();
-							if (done) break;
-							chunks.push(value);
+						try {
+							while (true) {
+								const { done, value } = await stderrReader.read();
+								if (done) break;
+								chunks.push(value);
+							}
+						} finally {
+							stderrReader.releaseLock();
 						}
 						return Buffer.concat(chunks).toString();
 					})(),
+					proc.exited,
 				]);
 
 				stdout = stdoutResult;
 				stderr = stderrResult;
-
-				const exitCode = await proc.exited;
 
 				if (timeoutId) clearTimeout(timeoutId);
 				if (options?.signal) {

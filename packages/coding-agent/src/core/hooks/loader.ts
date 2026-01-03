@@ -132,12 +132,8 @@ function createHookAPI(
 	setSendMessageHandler: (handler: SendMessageHandler) => void;
 	setAppendEntryHandler: (handler: AppendEntryHandler) => void;
 } {
-	let sendMessageHandler: SendMessageHandler = () => {
-		// Default no-op until mode sets the handler
-	};
-	let appendEntryHandler: AppendEntryHandler = () => {
-		// Default no-op until mode sets the handler
-	};
+	let sendMessageHandler: SendMessageHandler | null = null;
+	let appendEntryHandler: AppendEntryHandler | null = null;
 	const messageRenderers = new Map<string, HookMessageRenderer>();
 	const commands = new Map<string, RegisteredCommand>();
 
@@ -145,14 +141,21 @@ function createHookAPI(
 	// but the interface has specific overloads for type safety in hooks
 	const api = {
 		on(event: string, handler: HandlerFn): void {
-			const list = handlers.get(event) ?? [];
-			list.push(handler);
-			handlers.set(event, list);
+			if (!handlers.has(event)) {
+				handlers.set(event, []);
+			}
+			handlers.get(event)!.push(handler);
 		},
 		sendMessage<T = unknown>(message: HookMessage<T>, triggerTurn?: boolean): void {
+			if (!sendMessageHandler) {
+				throw new Error("sendMessage handler not initialized");
+			}
 			sendMessageHandler(message, triggerTurn);
 		},
 		appendEntry<T = unknown>(customType: string, data?: T): void {
+			if (!appendEntryHandler) {
+				throw new Error("appendEntry handler not initialized");
+			}
 			appendEntryHandler(customType, data);
 		},
 		registerMessageRenderer<T = unknown>(customType: string, renderer: HookMessageRenderer<T>): void {

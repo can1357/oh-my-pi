@@ -232,6 +232,9 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 		output(event);
 	});
 
+	// Serialize prompt commands to prevent concurrent execution
+	let activePrompt: Promise<void> | null = null;
+
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
@@ -242,13 +245,18 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// =================================================================
 
 			case "prompt": {
-				// Don't await - events will stream
-				// Hook commands and file slash commands are handled in session.prompt()
-				session
+				// Serialize prompts to prevent concurrent execution
+				if (activePrompt) {
+					await activePrompt;
+				}
+				activePrompt = session
 					.prompt(command.message, {
 						images: command.images,
 					})
-					.catch((e) => output(error(id, "prompt", e.message)));
+					.catch((e) => output(error(id, "prompt", e.message)))
+					.finally(() => {
+						activePrompt = null;
+					});
 				return success(id, "prompt");
 			}
 
@@ -463,6 +471,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 					const response = parsed as RpcHookUIResponse;
 					const pending = pendingHookRequests.get(response.id);
 					if (pending) {
+						// Atomic delete: remove before resolve to prevent double-resolution
 						pendingHookRequests.delete(response.id);
 						pending.resolve(response);
 					}

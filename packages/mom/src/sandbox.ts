@@ -96,27 +96,35 @@ class HostExecutor implements Executor {
 		const shell = process.platform === "win32" ? "cmd" : "sh";
 		const shellArgs = process.platform === "win32" ? ["/c"] : ["-c"];
 
-		let timedOut = false;
+		// Fix 4: Use object for flag visibility across async boundaries
+		const state = { timedOut: false };
 		let proc: ReturnType<typeof Bun.spawn> | null = null;
+		let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+		const abortControllers: AbortController[] = [];
 
-		const timeoutHandle =
-			options?.timeout && options.timeout > 0
-				? setTimeout(() => {
-						timedOut = true;
-						if (proc) killProcessTree(proc.pid);
-					}, options.timeout * 1000)
-				: undefined;
-
-		const onAbort = () => {
-			if (proc) killProcessTree(proc.pid);
+		const cleanup = () => {
+			if (timeoutHandle) clearTimeout(timeoutHandle);
+			if (options?.signal) {
+				options.signal.removeEventListener("abort", onAbort);
+			}
+			// Cancel all stream readers
+			for (const controller of abortControllers) {
+				controller.abort();
+			}
 		};
 
+		const onAbort = () => {
+			// Fix 1: Capture process reference atomically
+			const p = proc;
+			if (p) killProcessTree(p.pid);
+		};
+
+		// Fix 2: Register signal listener before spawning process
 		if (options?.signal) {
 			if (options.signal.aborted) {
-				onAbort();
-			} else {
-				options.signal.addEventListener("abort", onAbort, { once: true });
+				throw new Error("Command aborted");
 			}
+			options.signal.addEventListener("abort", onAbort, { once: true });
 		}
 
 		proc = Bun.spawn([shell, ...shellArgs, command], {
@@ -124,15 +132,26 @@ class HostExecutor implements Executor {
 			stderr: "pipe",
 		});
 
+		// Start timeout after process is spawned
+		if (options?.timeout && options.timeout > 0) {
+			timeoutHandle = setTimeout(() => {
+				state.timedOut = true;
+				// Fix 1: Capture process reference atomically
+				const p = proc;
+				if (p) killProcessTree(p.pid);
+			}, options.timeout * 1000);
+		}
+
 		const MAX_BYTES = 10 * 1024 * 1024;
 
-		// Stream and truncate stdout/stderr
-		const readStream = async (stream: ReadableStream<Uint8Array>): Promise<string> => {
+		// Fix 3: Make stream readers cancellable
+		const readStream = async (stream: ReadableStream<Uint8Array>, abortSignal: AbortSignal): Promise<string> => {
 			const reader = stream.getReader();
 			const decoder = new TextDecoder();
 			let result = "";
 			try {
 				while (true) {
+					if (abortSignal.aborted) break;
 					const { done, value } = await reader.read();
 					if (done) break;
 					result += decoder.decode(value, { stream: true });
@@ -147,23 +166,24 @@ class HostExecutor implements Executor {
 			return result;
 		};
 
+		const stdoutController = new AbortController();
+		const stderrController = new AbortController();
+		abortControllers.push(stdoutController, stderrController);
+
 		const [stdout, stderr] = await Promise.all([
-			readStream(proc.stdout as ReadableStream<Uint8Array>),
-			readStream(proc.stderr as ReadableStream<Uint8Array>),
+			readStream(proc.stdout as ReadableStream<Uint8Array>, stdoutController.signal),
+			readStream(proc.stderr as ReadableStream<Uint8Array>, stderrController.signal),
 		]);
 
 		const code = await proc.exited;
 
-		if (timeoutHandle) clearTimeout(timeoutHandle);
-		if (options?.signal) {
-			options.signal.removeEventListener("abort", onAbort);
-		}
+		cleanup();
 
 		if (options?.signal?.aborted) {
 			throw new Error(`${stdout}\n${stderr}\nCommand aborted`.trim());
 		}
 
-		if (timedOut) {
+		if (state.timedOut) {
 			throw new Error(`${stdout}\n${stderr}\nCommand timed out after ${options?.timeout} seconds`.trim());
 		}
 

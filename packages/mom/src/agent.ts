@@ -392,25 +392,43 @@ function formatToolArgsForSlack(_toolName: string, args: Record<string, unknown>
 
 // Cache runners per channel
 const channelRunners = new Map<string, AgentRunner>();
+// Track in-flight runner creation to prevent duplicate creation
+const pendingRunners = new Set<string>();
 
 /**
  * Get or create an AgentRunner for a channel.
  * Runners are cached - one per channel, persistent across messages.
  */
-export function getOrCreateRunner(sandboxConfig: SandboxConfig, channelId: string, channelDir: string): AgentRunner {
+export async function getOrCreateRunner(
+	sandboxConfig: SandboxConfig,
+	channelId: string,
+	channelDir: string,
+): Promise<AgentRunner> {
+	// Fast path: runner already exists
 	const existing = channelRunners.get(channelId);
 	if (existing) return existing;
 
-	const runner = createRunner(sandboxConfig, channelId, channelDir);
-	channelRunners.set(channelId, runner);
-	return runner;
+	// Atomic check-and-set: if already being created by another concurrent call, fail fast
+	if (pendingRunners.has(channelId)) {
+		throw new Error(`Runner for channel ${channelId} is already being created`);
+	}
+
+	// Mark as in-flight, create, then mark complete atomically
+	pendingRunners.add(channelId);
+	try {
+		const runner = await createRunner(sandboxConfig, channelId, channelDir);
+		channelRunners.set(channelId, runner);
+		return runner;
+	} finally {
+		pendingRunners.delete(channelId);
+	}
 }
 
 /**
  * Create a new AgentRunner for a channel.
  * Sets up the session and subscribes to events once.
  */
-function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDir: string): AgentRunner {
+async function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDir: string): Promise<AgentRunner> {
 	const executor = createExecutor(sandboxConfig);
 	const workspacePath = executor.getWorkspacePath(channelDir.replace(`/${channelId}`, ""));
 
@@ -444,7 +462,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	});
 
 	// Load existing messages
-	const loadedSession = sessionManager.buildSessionContex();
+	const loadedSession = await sessionManager.buildSessionContex();
 	if (loadedSession.messages.length > 0) {
 		agent.replaceMessages(loadedSession.messages);
 		log.logInfo(`[${channelId}] Loaded ${loadedSession.messages.length} messages from context.jsonl`);
@@ -547,15 +565,22 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				}
 
 				if (assistantMsg.usage) {
-					runState.totalUsage.input += assistantMsg.usage.input;
-					runState.totalUsage.output += assistantMsg.usage.output;
-					runState.totalUsage.cacheRead += assistantMsg.usage.cacheRead;
-					runState.totalUsage.cacheWrite += assistantMsg.usage.cacheWrite;
-					runState.totalUsage.cost.input += assistantMsg.usage.cost.input;
-					runState.totalUsage.cost.output += assistantMsg.usage.cost.output;
-					runState.totalUsage.cost.cacheRead += assistantMsg.usage.cost.cacheRead;
-					runState.totalUsage.cost.cacheWrite += assistantMsg.usage.cost.cacheWrite;
-					runState.totalUsage.cost.total += assistantMsg.usage.cost.total;
+					// Atomic update: read current values, compute new values, write back
+					// This prevents race conditions from concurrent message_end events
+					const usage = assistantMsg.usage;
+					runState.totalUsage = {
+						input: runState.totalUsage.input + usage.input,
+						output: runState.totalUsage.output + usage.output,
+						cacheRead: runState.totalUsage.cacheRead + usage.cacheRead,
+						cacheWrite: runState.totalUsage.cacheWrite + usage.cacheWrite,
+						cost: {
+							input: runState.totalUsage.cost.input + usage.cost.input,
+							output: runState.totalUsage.cost.output + usage.cost.output,
+							cacheRead: runState.totalUsage.cost.cacheRead + usage.cost.cacheRead,
+							cacheWrite: runState.totalUsage.cost.cacheWrite + usage.cost.cacheWrite,
+							total: runState.totalUsage.cost.total + usage.cost.total,
+						},
+					};
 				}
 
 				const content = agentEvent.message.content;
@@ -631,7 +656,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 
 			// Reload messages from context.jsonl
 			// This picks up any messages synced from log.jsonl before this run
-			const reloadedSession = sessionManager.buildSessionContex();
+			const reloadedSession = await sessionManager.buildSessionContex();
 			if (reloadedSession.messages.length > 0) {
 				agent.replaceMessages(reloadedSession.messages);
 				log.logInfo(`[${channelId}] Reloaded ${reloadedSession.messages.length} messages from context`);

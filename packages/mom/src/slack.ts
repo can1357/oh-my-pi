@@ -101,6 +101,15 @@ class ChannelQueue {
 		this.processNext();
 	}
 
+	tryEnqueue(work: QueuedWork, maxSize: number): boolean {
+		if (this.queue.length >= maxSize) {
+			return false;
+		}
+		this.queue.push(work);
+		this.processNext();
+		return true;
+	}
+
 	size(): number {
 		return this.queue.length;
 	}
@@ -248,12 +257,12 @@ export class SlackBot {
 	 */
 	enqueueEvent(event: SlackEvent): boolean {
 		const queue = this.getQueue(event.channel);
-		if (queue.size() >= 5) {
+		const enqueued = queue.tryEnqueue(() => this.handler.handleEvent(event, this, true), 5);
+		if (!enqueued) {
 			log.logWarning(`Event queue full for ${event.channel}, discarding: ${event.text.substring(0, 50)}`);
 			return false;
 		}
-		log.logInfo(`Enqueueing event for ${event.channel}: ${event.text.substring(0, 50)}`);
-		queue.enqueue(() => this.handler.handleEvent(event, this, true));
+		log.logInfo(`Enqueued event for ${event.channel}: ${event.text.substring(0, 50)}`);
 		return true;
 	}
 

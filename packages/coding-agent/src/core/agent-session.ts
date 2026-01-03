@@ -207,7 +207,9 @@ export class AgentSession {
 
 	/** Emit an event to all listeners */
 	private _emit(event: AgentSessionEvent): void {
-		for (const l of this._eventListeners) {
+		// Copy array before iteration to avoid mutation during iteration
+		const listeners = [...this._eventListeners];
+		for (const l of listeners) {
 			l(event);
 		}
 	}
@@ -1127,6 +1129,10 @@ export class AgentSession {
 		const settings = this.settingsManager.getCompactionSettings();
 
 		this._emit({ type: "auto_compaction_start", reason });
+		// Properly abort and null existing controller before replacing
+		if (this._autoCompactionAbortController) {
+			this._autoCompactionAbortController.abort();
+		}
 		this._autoCompactionAbortController = new AbortController();
 
 		try {
@@ -1300,7 +1306,8 @@ export class AgentSession {
 		this._retryAttempt++;
 
 		// Create retry promise on first attempt so waitForRetry() can await it
-		if (this._retryAttempt === 1 && !this._retryPromise) {
+		// Ensure only one promise exists (avoid orphaned promises from concurrent calls)
+		if (!this._retryPromise) {
 			this._retryPromise = new Promise((resolve) => {
 				this._retryResolve = resolve;
 			});
@@ -1336,6 +1343,10 @@ export class AgentSession {
 		}
 
 		// Wait with exponential backoff (abortable)
+		// Properly abort and null existing controller before replacing
+		if (this._retryAbortController) {
+			this._retryAbortController.abort();
+		}
 		this._retryAbortController = new AbortController();
 		try {
 			await this._sleep(delayMs, this._retryAbortController.signal);

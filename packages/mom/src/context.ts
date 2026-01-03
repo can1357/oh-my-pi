@@ -25,6 +25,7 @@ import {
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
 } from "@oh-my-pi/pi-coding-agent";
+import { Mutex } from "async-mutex";
 
 function uuidv4(): string {
 	const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -52,6 +53,7 @@ export class MomSessionManager {
 	private flushed: boolean = false;
 	private inMemoryEntries: FileEntry[] = [];
 	private leafId: string | null = null;
+	private readonly mutex = new Mutex();
 
 	constructor(channelDir: string) {
 		this.channelDir = channelDir;
@@ -106,7 +108,7 @@ export class MomSessionManager {
 		return base;
 	}
 
-	private _persist(entry: SessionEntry): void {
+	private _persistLocked(entry: SessionEntry): void {
 		const hasAssistant = this.inMemoryEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 		if (!hasAssistant) return;
 
@@ -135,117 +137,119 @@ export class MomSessionManager {
 	 *
 	 * @param excludeSlackTs Slack timestamp of current message (will be added via prompt(), not sync)
 	 */
-	syncFromLog(excludeSlackTs?: string): void {
-		if (!existsSync(this.logFile)) return;
+	syncFromLog(excludeSlackTs?: string): Promise<void> {
+		return this.mutex.runExclusive(() => {
+			if (!existsSync(this.logFile)) return;
 
-		// Build set of Slack timestamps already in context
-		// We store slackTs in the message content or can extract from formatted messages
-		// For messages synced from log, we use the log's date as the entry timestamp
-		// For messages added via prompt(), they have different timestamps
-		// So we need to match by content OR by stored slackTs
-		const contextSlackTimestamps = new Set<string>();
-		const contextMessageTexts = new Set<string>();
+			// Build set of Slack timestamps already in context
+			// We store slackTs in the message content or can extract from formatted messages
+			// For messages synced from log, we use the log's date as the entry timestamp
+			// For messages added via prompt(), they have different timestamps
+			// So we need to match by content OR by stored slackTs
+			const contextSlackTimestamps = new Set<string>();
+			const contextMessageTexts = new Set<string>();
 
-		for (const entry of this.inMemoryEntries) {
-			if (entry.type === "message") {
-				const msgEntry = entry as SessionMessageEntry;
-				// Store the entry timestamp (which is the log date for synced messages)
-				contextSlackTimestamps.add(entry.timestamp);
+			for (const entry of this.inMemoryEntries) {
+				if (entry.type === "message") {
+					const msgEntry = entry as SessionMessageEntry;
+					// Store the entry timestamp (which is the log date for synced messages)
+					contextSlackTimestamps.add(entry.timestamp);
 
-				// Also store message text to catch duplicates added via prompt()
-				// AgentMessage has different shapes, check for content property
-				const msg = msgEntry.message as { role: string; content?: unknown };
-				if (msg.role === "user" && msg.content !== undefined) {
-					const content = msg.content;
-					if (typeof content === "string") {
-						contextMessageTexts.add(content);
-					} else if (Array.isArray(content)) {
-						for (const part of content) {
-							if (
-								typeof part === "object" &&
-								part !== null &&
-								"type" in part &&
-								part.type === "text" &&
-								"text" in part
-							) {
-								contextMessageTexts.add((part as { type: "text"; text: string }).text);
+					// Also store message text to catch duplicates added via prompt()
+					// AgentMessage has different shapes, check for content property
+					const msg = msgEntry.message as { role: string; content?: unknown };
+					if (msg.role === "user" && msg.content !== undefined) {
+						const content = msg.content;
+						if (typeof content === "string") {
+							contextMessageTexts.add(content);
+						} else if (Array.isArray(content)) {
+							for (const part of content) {
+								if (
+									typeof part === "object" &&
+									part !== null &&
+									"type" in part &&
+									part.type === "text" &&
+									"text" in part
+								) {
+									contextMessageTexts.add((part as { type: "text"; text: string }).text);
+								}
 							}
 						}
 					}
 				}
 			}
-		}
 
-		// Read log.jsonl and find user messages not in context
-		const logContent = readFileSync(this.logFile, "utf-8");
-		const logLines = logContent.trim().split("\n").filter(Boolean);
+			// Read log.jsonl and find user messages not in context
+			const logContent = readFileSync(this.logFile, "utf-8");
+			const logLines = logContent.trim().split("\n").filter(Boolean);
 
-		interface LogMessage {
-			date?: string;
-			ts?: string;
-			user?: string;
-			userName?: string;
-			text?: string;
-			isBot?: boolean;
-		}
-
-		const newMessages: Array<{ timestamp: string; slackTs: string; message: AgentMessage }> = [];
-
-		for (const line of logLines) {
-			try {
-				const logMsg: LogMessage = JSON.parse(line);
-
-				const slackTs = logMsg.ts;
-				const date = logMsg.date;
-				if (!slackTs || !date) continue;
-
-				// Skip the current message being processed (will be added via prompt())
-				if (excludeSlackTs && slackTs === excludeSlackTs) continue;
-
-				// Skip bot messages - added through agent flow
-				if (logMsg.isBot) continue;
-
-				// Skip if this date is already in context (was synced before)
-				if (contextSlackTimestamps.has(date)) continue;
-
-				// Build the message text as it would appear in context
-				const messageText = `[${logMsg.userName || logMsg.user || "unknown"}]: ${logMsg.text || ""}`;
-
-				// Skip if this exact message text is already in context (added via prompt())
-				if (contextMessageTexts.has(messageText)) continue;
-
-				const msgTime = new Date(date).getTime() || Date.now();
-				const userMessage: AgentMessage = {
-					role: "user",
-					content: messageText,
-					timestamp: msgTime,
-				};
-
-				newMessages.push({ timestamp: date, slackTs, message: userMessage });
-			} catch (err) {
-				logger.debug("Context parsing error", { error: String(err) });
+			interface LogMessage {
+				date?: string;
+				ts?: string;
+				user?: string;
+				userName?: string;
+				text?: string;
+				isBot?: boolean;
 			}
-		}
 
-		if (newMessages.length === 0) return;
+			const newMessages: Array<{ timestamp: string; slackTs: string; message: AgentMessage }> = [];
 
-		// Sort by timestamp and add to context
-		newMessages.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+			for (const line of logLines) {
+				try {
+					const logMsg: LogMessage = JSON.parse(line);
 
-		for (const { timestamp, message } of newMessages) {
-			const id = uuidv4();
-			const entry: SessionMessageEntry = {
-				type: "message",
-				id,
-				parentId: this.leafId,
-				timestamp, // Use log date as entry timestamp for consistent deduplication
-				message,
-			};
-			this.leafId = id;
+					const slackTs = logMsg.ts;
+					const date = logMsg.date;
+					if (!slackTs || !date) continue;
 
-			this.inMemoryEntries.push(entry);
-			appendFileSync(this.contextFile, `${JSON.stringify(entry)}\n`);
-		}
+					// Skip the current message being processed (will be added via prompt())
+					if (excludeSlackTs && slackTs === excludeSlackTs) continue;
+
+					// Skip bot messages - added through agent flow
+					if (logMsg.isBot) continue;
+
+					// Skip if this date is already in context (was synced before)
+					if (contextSlackTimestamps.has(date)) continue;
+
+					// Build the message text as it would appear in context
+					const messageText = `[${logMsg.userName || logMsg.user || "unknown"}]: ${logMsg.text || ""}`;
+
+					// Skip if this exact message text is already in context (added via prompt())
+					if (contextMessageTexts.has(messageText)) continue;
+
+					const msgTime = new Date(date).getTime() || Date.now();
+					const userMessage: AgentMessage = {
+						role: "user",
+						content: messageText,
+						timestamp: msgTime,
+					};
+
+					newMessages.push({ timestamp: date, slackTs, message: userMessage });
+				} catch (err) {
+					logger.debug("Context parsing error", { error: String(err) });
+				}
+			}
+
+			if (newMessages.length === 0) return;
+
+			// Sort by timestamp and add to context
+			newMessages.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+			for (const { timestamp, message } of newMessages) {
+				const id = uuidv4();
+				const entry: SessionMessageEntry = {
+					type: "message",
+					id,
+					parentId: this.leafId,
+					timestamp, // Use log date as entry timestamp for consistent deduplication
+					message,
+				};
+				this.leafId = id;
+
+				this.inMemoryEntries.push(entry);
+				appendFileSync(this.contextFile, `${JSON.stringify(entry)}\n`);
+			}
+		});
 	}
 
 	private extractSessionId(): string | null {
@@ -277,43 +281,53 @@ export class MomSessionManager {
 		return entries;
 	}
 
-	saveMessage(message: AgentMessage): void {
-		const entry: SessionMessageEntry = { ...this._createEntryBase(), type: "message", message };
-		this.inMemoryEntries.push(entry);
-		this._persist(entry);
+	saveMessage(message: AgentMessage): Promise<void> {
+		return this.mutex.runExclusive(() => {
+			const entry: SessionMessageEntry = { ...this._createEntryBase(), type: "message", message };
+			this.inMemoryEntries.push(entry);
+			this._persistLocked(entry);
+		});
 	}
 
-	saveThinkingLevelChange(thinkingLevel: string): void {
-		const entry: ThinkingLevelChangeEntry = {
-			...this._createEntryBase(),
-			type: "thinking_level_change",
-			thinkingLevel,
-		};
-		this.inMemoryEntries.push(entry);
-		this._persist(entry);
+	saveThinkingLevelChange(thinkingLevel: string): Promise<void> {
+		return this.mutex.runExclusive(() => {
+			const entry: ThinkingLevelChangeEntry = {
+				...this._createEntryBase(),
+				type: "thinking_level_change",
+				thinkingLevel,
+			};
+			this.inMemoryEntries.push(entry);
+			this._persistLocked(entry);
+		});
 	}
 
-	saveModelChange(model: string, role?: string): void {
-		const entry: ModelChangeEntry = { ...this._createEntryBase(), type: "model_change", model, role };
-		this.inMemoryEntries.push(entry);
-		this._persist(entry);
+	saveModelChange(model: string, role?: string): Promise<void> {
+		return this.mutex.runExclusive(() => {
+			const entry: ModelChangeEntry = { ...this._createEntryBase(), type: "model_change", model, role };
+			this.inMemoryEntries.push(entry);
+			this._persistLocked(entry);
+		});
 	}
 
-	saveCompaction(entry: CompactionEntry): void {
-		this.inMemoryEntries.push(entry);
-		this._persist(entry);
+	saveCompaction(entry: CompactionEntry): Promise<void> {
+		return this.mutex.runExclusive(() => {
+			this.inMemoryEntries.push(entry);
+			this._persistLocked(entry);
+		});
 	}
 
 	/** Load session with compaction support */
-	buildSessionContex(): SessionContext {
-		const entries = this.loadEntries();
+	async buildSessionContex(): Promise<SessionContext> {
+		const entries = await this.loadEntries();
 		return buildSessionContext(entries);
 	}
 
-	loadEntries(): SessionEntry[] {
-		// Re-read from file to get latest state
-		const entries = existsSync(this.contextFile) ? this.loadEntriesFromFile() : this.inMemoryEntries;
-		return entries.filter((e): e is SessionEntry => e.type !== "session");
+	loadEntries(): Promise<SessionEntry[]> {
+		return this.mutex.runExclusive(() => {
+			// Re-read from file to get latest state
+			const entries = existsSync(this.contextFile) ? this.loadEntriesFromFile() : this.inMemoryEntries;
+			return entries.filter((e): e is SessionEntry => e.type !== "session");
+		});
 	}
 
 	getSessionId(): string {
@@ -325,21 +339,23 @@ export class MomSessionManager {
 	}
 
 	/** Reset session (clears context.jsonl) */
-	reset(): void {
-		this.sessionId = uuidv4();
-		this.flushed = false;
-		this.inMemoryEntries = [
-			{
-				type: "session",
-				id: this.sessionId,
-				timestamp: new Date().toISOString(),
-				cwd: this.channelDir,
-			},
-		];
-		// Truncate the context file
-		if (existsSync(this.contextFile)) {
-			writeFileSync(this.contextFile, "");
-		}
+	reset(): Promise<void> {
+		return this.mutex.runExclusive(() => {
+			this.sessionId = uuidv4();
+			this.flushed = false;
+			this.inMemoryEntries = [
+				{
+					type: "session",
+					id: this.sessionId,
+					timestamp: new Date().toISOString(),
+					cwd: this.channelDir,
+				},
+			];
+			// Truncate the context file
+			if (existsSync(this.contextFile)) {
+				writeFileSync(this.contextFile, "");
+			}
+		});
 	}
 
 	// Compatibility methods for AgentSession
@@ -351,16 +367,18 @@ export class MomSessionManager {
 		// No-op for mom - we always use the channel's context.jsonl
 	}
 
-	loadModel(): { provider: string; modelId: string } | null {
-		const defaultModel = this.buildSessionContex().models.default;
+	async loadModel(): Promise<{ provider: string; modelId: string } | null> {
+		const session = await this.buildSessionContex();
+		const defaultModel = session.models.default;
 		if (!defaultModel) return null;
 		const slashIdx = defaultModel.indexOf("/");
 		if (slashIdx <= 0) return null;
 		return { provider: defaultModel.slice(0, slashIdx), modelId: defaultModel.slice(slashIdx + 1) };
 	}
 
-	loadThinkingLevel(): string {
-		return this.buildSessionContex().thinkingLevel;
+	async loadThinkingLevel(): Promise<string> {
+		const session = await this.buildSessionContex();
+		return session.thinkingLevel;
 	}
 
 	/** Not used by mom but required by AgentSession interface */

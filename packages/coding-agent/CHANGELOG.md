@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Added
 
 - Added centralized file logger with daily rotation to `~/.pi/logs/` for debugging production issues
@@ -41,6 +42,14 @@
 
 ### Fixed
 
+- Fixed race condition in event listener iteration by copying array before iteration to prevent mutation during callbacks
+- Fixed potential memory leak from orphaned abort controllers by properly aborting existing controllers before replacement
+- Fixed stream reader resource leak by adding proper `releaseLock()` calls in finally blocks
+- Fixed hook API methods throwing clear errors when handlers are not initialized instead of silently failing
+- Fixed LSP client race conditions with concurrent client creation and file operations using proper locking
+- Fixed Task tool progress display showing stale data by cloning progress objects before passing to callbacks
+- Fixed Task tool missing final progress events by waiting for readline to close before resolving
+- Fixed RPC mode race condition with concurrent prompt commands by serializing execution
 - Fixed pre-commit hook race condition causing `index.lock` errors when GitKraken/IDE git integrations detect file changes during formatting
 - Fixed Task tool output artifacts (`out.md`) containing duplicated text from streaming updates
 - Fixed Task tool progress display showing repeated nearly-identical lines during streaming
