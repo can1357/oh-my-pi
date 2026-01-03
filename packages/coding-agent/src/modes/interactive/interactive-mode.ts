@@ -413,6 +413,7 @@ export class InteractiveMode {
 				this.streamingComponent = undefined;
 				this.streamingMessage = undefined;
 				this.pendingTools.clear();
+				this.titleGenerationAttempted = false;
 
 				this.chatContainer.addChild(new Spacer(1));
 				this.chatContainer.addChild(new Text(`${theme.fg("accent", "✓ New session started")}`, 1, 1));
@@ -1674,11 +1675,11 @@ export class InteractiveMode {
 			.then((title) => {
 				if (title) {
 					this.sessionManager.setSessionTitle(title);
-					setTerminalTitle(`pi: ${title}`);
+					setTerminalTitle(`omp: ${title}`);
 				}
 			})
 			.catch(() => {
-				// Ignore title generation errors
+				// Errors logged via logger in title-generator
 			});
 	}
 

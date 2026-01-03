@@ -633,7 +633,8 @@ function detectCompatFromUrl(baseUrl: string): Required<OpenAICompat> {
 		baseUrl.includes("cerebras.ai") ||
 		baseUrl.includes("api.x.ai") ||
 		baseUrl.includes("mistral.ai") ||
-		baseUrl.includes("chutes.ai");
+		baseUrl.includes("chutes.ai") ||
+		baseUrl.includes("localhost");
 
 	const useMaxTokens = baseUrl.includes("mistral.ai") || baseUrl.includes("chutes.ai");
 

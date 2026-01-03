@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed title generation flag not resetting when starting a new session
 
 ## [3.4.1337] - 2026-01-03
 

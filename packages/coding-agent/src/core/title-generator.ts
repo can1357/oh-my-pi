@@ -4,6 +4,7 @@
 
 import type { Model } from "@oh-my-pi/pi-ai";
 import { completeSimple } from "@oh-my-pi/pi-ai";
+import { logger } from "./logger";
 import type { ModelRegistry } from "./model-registry";
 import { findSmolModel } from "./model-resolver";
 
@@ -43,21 +44,35 @@ export async function generateSessionTitle(
 	savedSmolModel?: string,
 ): Promise<string | null> {
 	const model = await findTitleModel(registry, savedSmolModel);
-	if (!model) return null;
+	if (!model) {
+		logger.debug("title-generator: no smol model found");
+		return null;
+	}
 
 	const apiKey = await registry.getApiKey(model);
-	if (!apiKey) return null;
+	if (!apiKey) {
+		logger.debug("title-generator: no API key for model", { provider: model.provider, id: model.id });
+		return null;
+	}
 
 	// Truncate message if too long
 	const truncatedMessage =
 		firstMessage.length > MAX_INPUT_CHARS ? `${firstMessage.slice(0, MAX_INPUT_CHARS)}...` : firstMessage;
 
+	const request = {
+		model: `${model.provider}/${model.id}`,
+		systemPrompt: TITLE_SYSTEM_PROMPT,
+		userMessage: `<user-message>\n${truncatedMessage}\n</user-message>`,
+		maxTokens: 30,
+	};
+	logger.debug("title-generator: request", request);
+
 	try {
 		const response = await completeSimple(
 			model,
 			{
-				systemPrompt: TITLE_SYSTEM_PROMPT,
-				messages: [{ role: "user", content: truncatedMessage, timestamp: Date.now() }],
+				systemPrompt: request.systemPrompt,
+				messages: [{ role: "user", content: request.userMessage, timestamp: Date.now() }],
 			},
 			{
 				apiKey,
@@ -74,13 +89,20 @@ export async function generateSessionTitle(
 		}
 		title = title.trim();
 
-		if (!title || title.length > 60) {
+		logger.debug("title-generator: response", {
+			title,
+			usage: response.usage,
+			stopReason: response.stopReason,
+		});
+
+		if (!title) {
 			return null;
 		}
 
 		// Clean up: remove quotes, trailing punctuation
 		return title.replace(/^["']|["']$/g, "").replace(/[.!?]$/, "");
-	} catch {
+	} catch (err) {
+		logger.debug("title-generator: error", { error: err instanceof Error ? err.message : String(err) });
 		return null;
 	}
 }
