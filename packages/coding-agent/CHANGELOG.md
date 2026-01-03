@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.3.1337] - 2026-01-03
+
 ### Changed
 
 - Improved `/status` command output formatting to use consistent column alignment across all sections
