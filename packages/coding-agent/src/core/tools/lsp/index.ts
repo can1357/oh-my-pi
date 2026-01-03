@@ -10,6 +10,7 @@ import {
 	type LspServerStatus,
 	refreshFile,
 	sendRequest,
+	setIdleTimeout,
 } from "./client.js";
 import { getServerForFile, getServersForFile, hasCapability, type LspConfig, loadConfig } from "./config.js";
 import { applyTextEdits, applyWorkspaceEdit } from "./edits.js";
@@ -71,6 +72,7 @@ export interface LspWarmupResult {
  */
 export async function warmupLspServers(cwd: string): Promise<LspWarmupResult> {
 	const config = loadConfig(cwd);
+	setIdleTimeout(config.idleTimeoutMs);
 	const servers: LspWarmupResult["servers"] = [];
 
 	// Start all detected servers in parallel
@@ -117,6 +119,7 @@ function getConfig(cwd: string): LspConfig {
 	let config = configCache.get(cwd);
 	if (!config) {
 		config = loadConfig(cwd);
+		setIdleTimeout(config.idleTimeoutMs);
 		configCache.set(cwd, config);
 	}
 	return config;

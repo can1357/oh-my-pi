@@ -17,20 +17,32 @@ import { detectLanguageId, fileToUri } from "./utils.js";
 
 const clients = new Map<string, LspClient>();
 
-// Idle timeout: shutdown clients after 5 minutes of inactivity
-const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+// Idle timeout configuration (disabled by default)
+let idleTimeoutMs: number | null = null;
+let idleCheckInterval: Timer | null = null;
 const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
 
-// Background task to shutdown idle clients
-let idleCheckInterval: Timer | null = null;
+/**
+ * Configure the idle timeout for LSP clients.
+ * @param ms - Timeout in milliseconds, or null/undefined to disable
+ */
+export function setIdleTimeout(ms: number | null | undefined): void {
+	idleTimeoutMs = ms ?? null;
+
+	if (idleTimeoutMs && idleTimeoutMs > 0) {
+		startIdleChecker();
+	} else {
+		stopIdleChecker();
+	}
+}
 
 function startIdleChecker(): void {
 	if (idleCheckInterval) return;
 	idleCheckInterval = setInterval(() => {
+		if (!idleTimeoutMs) return;
 		const now = Date.now();
 		for (const [key, client] of Array.from(clients.entries())) {
-			if (now - client.lastActivity > IDLE_TIMEOUT_MS) {
-				console.log(`[LSP] Shutting down idle client: ${key}`);
+			if (now - client.lastActivity > idleTimeoutMs) {
 				shutdownClient(key);
 			}
 		}
@@ -385,16 +397,9 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string): Prom
 	};
 	clients.set(key, client);
 
-	// Start idle checker if not already running
-	startIdleChecker();
-
 	// Register crash recovery - remove client on process exit
 	proc.exited.then(() => {
-		console.log(`[LSP] Process exited: ${key}`);
 		clients.delete(key);
-		if (clients.size === 0) {
-			stopIdleChecker();
-		}
 	});
 
 	// Start background message reader
@@ -503,10 +508,6 @@ export function shutdownClient(key: string): void {
 	// Kill process
 	client.process.kill();
 	clients.delete(key);
-
-	if (clients.size === 0) {
-		stopIdleChecker();
-	}
 }
 
 // =============================================================================
@@ -576,8 +577,6 @@ export async function sendNotification(client: LspClient, method: string, params
  * Shutdown all LSP clients.
  */
 export function shutdownAll(): void {
-	stopIdleChecker();
-
 	for (const client of Array.from(clients.values())) {
 		// Reject all pending requests
 		for (const pending of Array.from(client.pendingRequests.values())) {

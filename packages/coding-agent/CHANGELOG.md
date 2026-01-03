@@ -5,6 +5,7 @@
 ### Changed
 
 - Improved grep tool description to document pagination options (`headLimit`, `offset`) and clarify recursive search behavior
+- LSP idle timeout now disabled by default. Configure via `idleTimeoutMs` in lsp.json to auto-shutdown inactive servers.
 
 ### Added
 
