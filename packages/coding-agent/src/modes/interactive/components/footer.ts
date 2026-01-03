@@ -58,6 +58,10 @@ export class FooterComponent implements Component {
 	private autoCompactEnabled: boolean = true;
 	private hookStatuses: Map<string, string> = new Map();
 
+	// Git status caching (1s TTL to avoid excessive subprocess spawns)
+	private cachedGitStatus: { staged: number; unstaged: number; untracked: number } | null = null;
+	private gitStatusLastFetch = 0;
+
 	constructor(session: AgentSession) {
 		this.session = session;
 	}
@@ -165,8 +169,14 @@ export class FooterComponent implements Component {
 	/**
 	 * Get git status indicators (staged, unstaged, untracked counts).
 	 * Returns null if not in a git repo.
+	 * Cached for 1s to avoid excessive subprocess spawns.
 	 */
 	private getGitStatus(): { staged: number; unstaged: number; untracked: number } | null {
+		const now = Date.now();
+		if (now - this.gitStatusLastFetch < 1000) {
+			return this.cachedGitStatus;
+		}
+
 		try {
 			const output = execSync("git status --porcelain 2>/dev/null", {
 				encoding: "utf8",
@@ -200,8 +210,12 @@ export class FooterComponent implements Component {
 				}
 			}
 
-			return { staged, unstaged, untracked };
+			this.cachedGitStatus = { staged, unstaged, untracked };
+			this.gitStatusLastFetch = now;
+			return this.cachedGitStatus;
 		} catch {
+			this.cachedGitStatus = null;
+			this.gitStatusLastFetch = now;
 			return null;
 		}
 	}

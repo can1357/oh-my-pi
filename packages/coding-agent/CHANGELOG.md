@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed excessive subprocess spawns by caching git status for 1 second in the footer component
 
 ## [3.3.1337] - 2026-01-03
 
