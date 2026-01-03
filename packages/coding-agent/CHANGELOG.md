@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.340.0] - 2026-01-03
+
+### Changed
+
+- Replaced vendored highlight.js and marked.js with CDN-hosted versions for smaller exports
+- Added runtime minification for HTML, CSS, and JS in session exports
+- Session share URL now uses gistpreview.github.io instead of shittycodingagent.ai
+
 ## [1.339.0] - 2026-01-03
 
 ### Added
