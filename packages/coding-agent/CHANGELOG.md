@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [1.5.0] - 2026-01-03
 ### Added
 
 - Added provider tabs to model selector with Tab/Arrow navigation for filtering models by provider

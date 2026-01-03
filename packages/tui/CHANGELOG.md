@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [1.5.0] - 2026-01-03
 ### Added
 
 - Added `getText()` method to Text component for retrieving current text content

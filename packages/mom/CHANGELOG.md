@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [1.5.0] - 2026-01-03
 ### Added
 
 - Added mutex-based synchronization to prevent race conditions in session context operations
