@@ -5,6 +5,7 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import { completeSimple } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "./model-registry.js";
+import { findSmallModel } from "./model-resolver.js";
 
 const TITLE_SYSTEM_PROMPT = `Generate a very short title (3-6 words) for a coding session based on the user's first message. The title should capture the main task or topic. Output ONLY the title, nothing else. No quotes, no punctuation at the end.
 
@@ -19,44 +20,29 @@ const MAX_INPUT_CHARS = 2000;
 
 /**
  * Find the best available model for title generation.
- * Prefers small, fast models in this order:
- * 1. Claude Haiku (anthropic)
- * 2. GPT-4o-mini (openai)
- * 3. Gemini Flash (google)
- * 4. Any available model
+ * Uses the configured small model if set, otherwise auto-discovers using priority chain.
+ *
+ * @param registry Model registry
+ * @param savedSmallModel Optional saved small model from settings (provider/modelId format)
  */
-export async function findTitleModel(registry: ModelRegistry): Promise<Model<any> | null> {
-	const preferences = [
-		{ provider: "anthropic", pattern: /haiku/i },
-		{ provider: "openai", pattern: /gpt-4o-mini|gpt-4\.1-mini/i },
-		{ provider: "google", pattern: /flash/i },
-		{ provider: "anthropic", pattern: /sonnet/i },
-	];
-
-	for (const pref of preferences) {
-		const models = registry.getAll().filter((m) => m.provider === pref.provider && pref.pattern.test(m.id));
-		for (const model of models) {
-			if (await registry.getApiKey(model)) {
-				return model;
-			}
-		}
-	}
-
-	// Fallback to any available model
-	for (const model of registry.getAll()) {
-		if (await registry.getApiKey(model)) {
-			return model;
-		}
-	}
-
-	return null;
+export async function findTitleModel(registry: ModelRegistry, savedSmallModel?: string): Promise<Model<any> | null> {
+	const model = await findSmallModel(registry, savedSmallModel);
+	return model ?? null;
 }
 
 /**
  * Generate a title for a session based on the first user message.
+ *
+ * @param firstMessage The first user message
+ * @param registry Model registry
+ * @param savedSmallModel Optional saved small model from settings (provider/modelId format)
  */
-export async function generateSessionTitle(firstMessage: string, registry: ModelRegistry): Promise<string | null> {
-	const model = await findTitleModel(registry);
+export async function generateSessionTitle(
+	firstMessage: string,
+	registry: ModelRegistry,
+	savedSmallModel?: string,
+): Promise<string | null> {
+	const model = await findTitleModel(registry, savedSmallModel);
 	if (!model) return null;
 
 	const apiKey = await registry.getApiKey(model);

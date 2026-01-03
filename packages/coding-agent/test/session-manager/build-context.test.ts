@@ -57,7 +57,7 @@ function thinkingLevel(id: string, parentId: string | null, level: string): Thin
 }
 
 function modelChange(id: string, parentId: string | null, provider: string, modelId: string): ModelChangeEntry {
-	return { type: "model_change", id, parentId, timestamp: "2025-01-01T00:00:00Z", provider, modelId };
+	return { type: "model_change", id, parentId, timestamp: "2025-01-01T00:00:00Z", model: `${provider}/${modelId}` };
 }
 
 describe("buildSessionContext", () => {
@@ -66,7 +66,7 @@ describe("buildSessionContext", () => {
 			const ctx = buildSessionContext([]);
 			expect(ctx.messages).toEqual([]);
 			expect(ctx.thinkingLevel).toBe("off");
-			expect(ctx.model).toBeNull();
+			expect(ctx.models).toEqual({});
 		});
 
 		it("single user message", () => {
@@ -102,7 +102,7 @@ describe("buildSessionContext", () => {
 		it("tracks model from assistant message", () => {
 			const entries: SessionEntry[] = [msg("1", null, "user", "hello"), msg("2", "1", "assistant", "hi")];
 			const ctx = buildSessionContext(entries);
-			expect(ctx.model).toEqual({ provider: "anthropic", modelId: "claude-test" });
+			expect(ctx.models.default).toBe("anthropic/claude-test");
 		});
 
 		it("tracks model from model change entry", () => {
@@ -113,7 +113,7 @@ describe("buildSessionContext", () => {
 			];
 			const ctx = buildSessionContext(entries);
 			// Assistant message overwrites model change
-			expect(ctx.model).toEqual({ provider: "anthropic", modelId: "claude-test" });
+			expect(ctx.models.default).toBe("anthropic/claude-test");
 		});
 	});
 

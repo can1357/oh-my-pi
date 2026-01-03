@@ -626,6 +626,51 @@ export function hasRootMarkers(cwd: string, markers: string[]): boolean {
 	});
 }
 
+// =============================================================================
+// Local Binary Resolution
+// =============================================================================
+
+/**
+ * Local bin directories to check before $PATH, ordered by priority.
+ * Each entry maps a root marker to the bin directory to check.
+ */
+const LOCAL_BIN_PATHS: Array<{ markers: string[]; binDir: string }> = [
+	// Node.js - check node_modules/.bin/
+	{ markers: ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"], binDir: "node_modules/.bin" },
+	// Python - check virtual environment bin directories
+	{ markers: ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"], binDir: ".venv/bin" },
+	{ markers: ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"], binDir: "venv/bin" },
+	{ markers: ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"], binDir: ".env/bin" },
+	// Ruby - check vendor bundle and binstubs
+	{ markers: ["Gemfile", "Gemfile.lock"], binDir: "vendor/bundle/bin" },
+	{ markers: ["Gemfile", "Gemfile.lock"], binDir: "bin" },
+	// Go - check project-local bin
+	{ markers: ["go.mod", "go.sum"], binDir: "bin" },
+];
+
+/**
+ * Resolve a command to an executable path.
+ * Checks project-local bin directories first, then falls back to $PATH.
+ *
+ * @param command - The command name (e.g., "typescript-language-server")
+ * @param cwd - Working directory to search from
+ * @returns Absolute path to the executable, or null if not found
+ */
+export function resolveCommand(command: string, cwd: string): string | null {
+	// Check local bin directories based on project markers
+	for (const { markers, binDir } of LOCAL_BIN_PATHS) {
+		if (hasRootMarkers(cwd, markers)) {
+			const localPath = join(cwd, binDir, command);
+			if (existsSync(localPath)) {
+				return localPath;
+			}
+		}
+	}
+
+	// Fall back to $PATH
+	return Bun.which(command);
+}
+
 /**
  * Configuration file search paths (in priority order).
  * Supports both visible and hidden variants, and both .pi subdirectory and root.
@@ -701,8 +746,9 @@ export function loadConfig(cwd: string): LspConfig {
 				const available: Record<string, ServerConfig> = {};
 				for (const [name, config] of Object.entries(merged)) {
 					if (config.disabled) continue;
-					if (!Bun.which(config.command)) continue;
-					available[name] = config;
+					const resolved = resolveCommand(config.command, cwd);
+					if (!resolved) continue;
+					available[name] = { ...config, resolvedCommand: resolved };
 				}
 
 				return { servers: available };
@@ -719,10 +765,11 @@ export function loadConfig(cwd: string): LspConfig {
 		// Check if project has root markers for this language
 		if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
 
-		// Check if the language server binary is available
-		if (!Bun.which(config.command)) continue;
+		// Check if the language server binary is available (local or $PATH)
+		const resolved = resolveCommand(config.command, cwd);
+		if (!resolved) continue;
 
-		detected[name] = config;
+		detected[name] = { ...config, resolvedCommand: resolved };
 	}
 
 	return { servers: detected };

@@ -356,7 +356,7 @@ class TreeList implements Component {
 				parts.push("branch summary", entry.summary);
 				break;
 			case "model_change":
-				parts.push("model", entry.modelId);
+				parts.push("model", entry.model);
 				break;
 			case "thinking_level_change":
 				parts.push("thinking", entry.thinkingLevel);
@@ -558,7 +558,7 @@ class TreeList implements Component {
 				result = theme.fg("warning", `[branch summary]: `) + normalize(entry.summary);
 				break;
 			case "model_change":
-				result = theme.fg("dim", `[model: ${entry.modelId}]`);
+				result = theme.fg("dim", `[model: ${entry.model}]`);
 				break;
 			case "thinking_level_change":
 				result = theme.fg("dim", `[thinking: ${entry.thinkingLevel}]`);

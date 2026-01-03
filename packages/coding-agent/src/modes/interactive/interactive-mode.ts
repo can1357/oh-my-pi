@@ -1609,7 +1609,8 @@ export class InteractiveMode {
 
 		// Generate title in background
 		const registry = this.session.modelRegistry;
-		generateSessionTitle(messageText, registry)
+		const smallModel = this.settingsManager.getModelRole("small");
+		generateSessionTitle(messageText, registry, smallModel)
 			.then((title) => {
 				if (title) {
 					this.sessionManager.setSessionTitle(title);
@@ -1756,17 +1757,21 @@ export class InteractiveMode {
 				this.settingsManager,
 				this.session.modelRegistry,
 				this.session.scopedModels,
-				async (model) => {
+				async (model, role) => {
 					try {
-						await this.session.setModel(model);
-						this.footer.invalidate();
-						this.updateEditorBorderColor();
-						done();
-						this.showStatus(`Model: ${model.id}`);
+						// Only update agent state for default role
+						if (role === "default") {
+							await this.session.setModel(model, role);
+							this.footer.invalidate();
+							this.updateEditorBorderColor();
+						}
+						// For other roles (small), just show status - settings already updated by selector
+						const roleLabel = role === "default" ? "Default" : role === "small" ? "Small" : role;
+						this.showStatus(`${roleLabel} model: ${model.id}`);
 					} catch (error) {
-						done();
 						this.showError(error instanceof Error ? error.message : String(error));
 					}
+					// Don't call done() - selector stays open
 				},
 				() => {
 					done();

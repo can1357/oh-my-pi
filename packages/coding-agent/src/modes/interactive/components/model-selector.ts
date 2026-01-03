@@ -1,6 +1,7 @@
 import { type Model, modelsAreEqual } from "@oh-my-pi/pi-ai";
 import { Container, Input, isArrowDown, isArrowUp, isEnter, isEscape, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../../core/model-registry.js";
+import { parseModelString } from "../../../core/model-resolver.js";
 import type { SettingsManager } from "../../../core/settings-manager.js";
 import { fuzzyFilter } from "../../../utils/fuzzy.js";
 import { theme } from "../theme/theme.js";
@@ -18,7 +19,10 @@ interface ScopedModelItem {
 }
 
 /**
- * Component that renders a model selector with search
+ * Component that renders a model selector with search.
+ * - Enter: Set selected model as default
+ * - S: Set selected model as small
+ * - Escape: Close selector
  */
 export class ModelSelectorComponent extends Container {
 	private searchInput: Input;
@@ -27,9 +31,11 @@ export class ModelSelectorComponent extends Container {
 	private filteredModels: ModelItem[] = [];
 	private selectedIndex: number = 0;
 	private currentModel?: Model<any>;
+	private defaultModel?: Model<any>;
+	private smallModel?: Model<any>;
 	private settingsManager: SettingsManager;
 	private modelRegistry: ModelRegistry;
-	private onSelectCallback: (model: Model<any>) => void;
+	private onSelectCallback: (model: Model<any>, role: string) => void;
 	private onCancelCallback: () => void;
 	private errorMessage?: string;
 	private tui: TUI;
@@ -41,7 +47,7 @@ export class ModelSelectorComponent extends Container {
 		settingsManager: SettingsManager,
 		modelRegistry: ModelRegistry,
 		scopedModels: ReadonlyArray<ScopedModelItem>,
-		onSelect: (model: Model<any>) => void,
+		onSelect: (model: Model<any>, role: string) => void,
 		onCancel: () => void,
 	) {
 		super();
@@ -54,24 +60,28 @@ export class ModelSelectorComponent extends Container {
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
 
+		// Load current role assignments from settings
+		this._loadRoleModels();
+
 		// Add top border
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
 
-		// Add hint about model filtering
+		// Add hint about model filtering and key bindings
 		const hintText =
 			scopedModels.length > 0
 				? "Showing models from --models scope"
 				: "Only showing models with configured API keys (see README for details)";
 		this.addChild(new Text(theme.fg("warning", hintText), 0, 0));
+		this.addChild(new Text(theme.fg("muted", "Enter: set default  S: set small  Esc: close"), 0, 0));
 		this.addChild(new Spacer(1));
 
 		// Create search input
 		this.searchInput = new Input();
 		this.searchInput.onSubmit = () => {
-			// Enter on search input selects the first filtered item
+			// Enter on search input sets as default
 			if (this.filteredModels[this.selectedIndex]) {
-				this.handleSelect(this.filteredModels[this.selectedIndex].model);
+				this.handleSelect(this.filteredModels[this.selectedIndex].model, "default");
 			}
 		};
 		this.addChild(this.searchInput);
@@ -93,6 +103,29 @@ export class ModelSelectorComponent extends Container {
 			// Request re-render after models are loaded
 			this.tui.requestRender();
 		});
+	}
+
+	private _loadRoleModels(): void {
+		const roles = this.settingsManager.getModelRoles();
+		const allModels = this.modelRegistry.getAll();
+
+		// Load default model
+		const defaultStr = roles.default;
+		if (defaultStr) {
+			const parsed = parseModelString(defaultStr);
+			if (parsed) {
+				this.defaultModel = allModels.find((m) => m.provider === parsed.provider && m.id === parsed.id);
+			}
+		}
+
+		// Load small model
+		const smallStr = roles.small;
+		if (smallStr) {
+			const parsed = parseModelString(smallStr);
+			if (parsed) {
+				this.smallModel = allModels.find((m) => m.provider === parsed.provider && m.id === parsed.id);
+			}
+		}
 	}
 
 	private async loadModels(): Promise<void> {
@@ -167,20 +200,24 @@ export class ModelSelectorComponent extends Container {
 			if (!item) continue;
 
 			const isSelected = i === this.selectedIndex;
-			const isCurrent = modelsAreEqual(this.currentModel, item.model);
+			const isDefault = modelsAreEqual(this.defaultModel, item.model);
+			const isSmall = modelsAreEqual(this.smallModel, item.model);
+
+			// Build role markers: ✓ for default, ⚡ for small
+			let markers = "";
+			if (isDefault) markers += theme.fg("success", " ✓");
+			if (isSmall) markers += theme.fg("warning", " ⚡");
 
 			let line = "";
 			if (isSelected) {
 				const prefix = theme.fg("accent", "→ ");
 				const modelText = `${item.id}`;
 				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
-				line = `${prefix + theme.fg("accent", modelText)} ${providerBadge}${checkmark}`;
+				line = `${prefix + theme.fg("accent", modelText)} ${providerBadge}${markers}`;
 			} else {
 				const modelText = `  ${item.id}`;
 				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
-				line = `${modelText} ${providerBadge}${checkmark}`;
+				line = `${modelText} ${providerBadge}${markers}`;
 			}
 
 			this.listContainer.addChild(new Text(line, 0, 0));
@@ -217,14 +254,21 @@ export class ModelSelectorComponent extends Container {
 			this.selectedIndex = this.selectedIndex === this.filteredModels.length - 1 ? 0 : this.selectedIndex + 1;
 			this.updateList();
 		}
-		// Enter
+		// Enter - set as default model (don't close)
 		else if (isEnter(keyData)) {
 			const selectedModel = this.filteredModels[this.selectedIndex];
 			if (selectedModel) {
-				this.handleSelect(selectedModel.model);
+				this.handleSelect(selectedModel.model, "default");
 			}
 		}
-		// Escape
+		// S key - set as small model (don't close)
+		else if (keyData === "s" || keyData === "S") {
+			const selectedModel = this.filteredModels[this.selectedIndex];
+			if (selectedModel) {
+				this.handleSelect(selectedModel.model, "small");
+			}
+		}
+		// Escape - close
 		else if (isEscape(keyData)) {
 			this.onCancelCallback();
 		}
@@ -235,10 +279,22 @@ export class ModelSelectorComponent extends Container {
 		}
 	}
 
-	private handleSelect(model: Model<any>): void {
-		// Save as new default
-		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
-		this.onSelectCallback(model);
+	private handleSelect(model: Model<any>, role: string): void {
+		// Save to settings
+		this.settingsManager.setModelRole(role, `${model.provider}/${model.id}`);
+
+		// Update local state for UI
+		if (role === "default") {
+			this.defaultModel = model;
+		} else if (role === "small") {
+			this.smallModel = model;
+		}
+
+		// Notify caller (for updating agent state if needed)
+		this.onSelectCallback(model, role);
+
+		// Update list to show new markers
+		this.updateList();
 	}
 
 	getSearchInput(): Input {

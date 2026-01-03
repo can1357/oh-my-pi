@@ -30,6 +30,26 @@ export interface ScopedModel {
 	thinkingLevel: ThinkingLevel;
 }
 
+/** Priority chain for auto-discovering small/fast models */
+export const SMALL_MODEL_PRIORITY = ["claude-haiku-4-5", "haiku", "flash", "mini"];
+
+/**
+ * Parse a model string in "provider/modelId" format.
+ * Returns undefined if the format is invalid.
+ */
+export function parseModelString(modelStr: string): { provider: string; id: string } | undefined {
+	const slashIdx = modelStr.indexOf("/");
+	if (slashIdx <= 0) return undefined;
+	return { provider: modelStr.slice(0, slashIdx), id: modelStr.slice(slashIdx + 1) };
+}
+
+/**
+ * Format a model as "provider/modelId" string.
+ */
+export function formatModelString(model: Model<Api>): string {
+	return `${model.provider}/${model.id}`;
+}
+
 /**
  * Helper to check if a model ID looks like an alias (no date suffix)
  * Dates are typically in format: -20241022 or -20250929
@@ -390,4 +410,43 @@ export async function restoreModelFromSession(
 
 	// No models available
 	return { model: undefined, fallbackMessage: undefined };
+}
+
+/**
+ * Find a small/fast model using the priority chain.
+ * Tries exact matches first, then fuzzy matches.
+ *
+ * @param modelRegistry The model registry to search
+ * @param savedModel Optional saved model string from settings (provider/modelId)
+ * @returns The best available small model, or undefined if none found
+ */
+export async function findSmallModel(
+	modelRegistry: ModelRegistry,
+	savedModel?: string,
+): Promise<Model<Api> | undefined> {
+	const availableModels = await modelRegistry.getAvailable();
+	if (availableModels.length === 0) return undefined;
+
+	// 1. Try saved model from settings
+	if (savedModel) {
+		const parsed = parseModelString(savedModel);
+		if (parsed) {
+			const match = availableModels.find((m) => m.provider === parsed.provider && m.id === parsed.id);
+			if (match) return match;
+		}
+	}
+
+	// 2. Try priority chain
+	for (const pattern of SMALL_MODEL_PRIORITY) {
+		// Try exact match first
+		const exactMatch = availableModels.find((m) => m.id.toLowerCase() === pattern.toLowerCase());
+		if (exactMatch) return exactMatch;
+
+		// Try fuzzy match (substring)
+		const fuzzyMatch = availableModels.find((m) => m.id.toLowerCase().includes(pattern.toLowerCase()));
+		if (fuzzyMatch) return fuzzyMatch;
+	}
+
+	// 3. Fallback to first available (same as default)
+	return availableModels[0];
 }

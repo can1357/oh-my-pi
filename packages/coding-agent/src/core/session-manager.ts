@@ -57,8 +57,10 @@ export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 
 export interface ModelChangeEntry extends SessionEntryBase {
 	type: "model_change";
-	provider: string;
-	modelId: string;
+	/** Model in "provider/modelId" format */
+	model: string;
+	/** Role: "default", "small", etc. Undefined treated as "default" */
+	role?: string;
 }
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
@@ -150,7 +152,8 @@ export interface SessionTreeNode {
 export interface SessionContext {
 	messages: AgentMessage[];
 	thinkingLevel: string;
-	model: { provider: string; modelId: string } | null;
+	/** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
+	models: Record<string, string>;
 }
 
 export interface SessionInfo {
@@ -292,7 +295,7 @@ export function buildSessionContext(
 	let leaf: SessionEntry | undefined;
 	if (leafId === null) {
 		// Explicitly null - return no messages (navigated to before first entry)
-		return { messages: [], thinkingLevel: "off", model: null };
+		return { messages: [], thinkingLevel: "off", models: {} };
 	}
 	if (leafId) {
 		leaf = byId.get(leafId);
@@ -303,7 +306,7 @@ export function buildSessionContext(
 	}
 
 	if (!leaf) {
-		return { messages: [], thinkingLevel: "off", model: null };
+		return { messages: [], thinkingLevel: "off", models: {} };
 	}
 
 	// Walk from leaf to root, collecting path
@@ -316,16 +319,21 @@ export function buildSessionContext(
 
 	// Extract settings and find compaction
 	let thinkingLevel = "off";
-	let model: { provider: string; modelId: string } | null = null;
+	const models: Record<string, string> = {};
 	let compaction: CompactionEntry | null = null;
 
 	for (const entry of path) {
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel;
 		} else if (entry.type === "model_change") {
-			model = { provider: entry.provider, modelId: entry.modelId };
+			// New format: { model: "provider/id", role?: string }
+			if (entry.model) {
+				const role = entry.role ?? "default";
+				models[role] = entry.model;
+			}
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			model = { provider: entry.message.provider, modelId: entry.message.model };
+			// Infer default model from assistant messages
+			models.default = `${entry.message.provider}/${entry.message.model}`;
 		} else if (entry.type === "compaction") {
 			compaction = entry;
 		}
@@ -381,7 +389,7 @@ export function buildSessionContext(
 		}
 	}
 
-	return { messages, thinkingLevel, model };
+	return { messages, thinkingLevel, models };
 }
 
 /**
@@ -723,15 +731,19 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/** Append a model change as child of current leaf, then advance leaf. Returns entry id. */
-	appendModelChange(provider: string, modelId: string): string {
+	/**
+	 * Append a model change as child of current leaf, then advance leaf. Returns entry id.
+	 * @param model Model in "provider/modelId" format
+	 * @param role Optional role (default: "default")
+	 */
+	appendModelChange(model: string, role?: string): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
-			provider,
-			modelId,
+			model,
+			role,
 		};
 		this._appendEntry(entry);
 		return entry.id;

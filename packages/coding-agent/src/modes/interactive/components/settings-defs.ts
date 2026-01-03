@@ -20,7 +20,7 @@ interface BaseSettingDef {
 	id: string;
 	label: string;
 	description: string;
-	tab: "config" | "exa";
+	tab: string;
 }
 
 // Boolean toggle setting
@@ -136,24 +136,6 @@ export const SETTINGS_DEFS: SettingDef[] = [
 		set: (sm, v) => sm.setMCPProjectConfigEnabled(v),
 	},
 	{
-		id: "lspFormatOnWrite",
-		tab: "config",
-		type: "boolean",
-		label: "LSP format on write",
-		description: "Automatically format code files using LSP after writing",
-		get: (sm) => sm.getLspFormatOnWrite(),
-		set: (sm, v) => sm.setLspFormatOnWrite(v),
-	},
-	{
-		id: "lspDiagnosticsOnWrite",
-		tab: "config",
-		type: "boolean",
-		label: "LSP diagnostics on write",
-		description: "Return LSP diagnostics (errors/warnings) after writing code files",
-		get: (sm) => sm.getLspDiagnosticsOnWrite(),
-		set: (sm, v) => sm.setLspDiagnosticsOnWrite(v),
-	},
-	{
 		id: "editFuzzyMatch",
 		tab: "config",
 		type: "boolean",
@@ -186,6 +168,35 @@ export const SETTINGS_DEFS: SettingDef[] = [
 		get: (sm) => sm.getTheme() ?? "dark",
 		set: (sm, v) => sm.setTheme(v),
 		getOptions: () => [], // Filled dynamically from context
+	},
+
+	// LSP tab
+	{
+		id: "lspFormatOnWrite",
+		tab: "lsp",
+		type: "boolean",
+		label: "Format on write",
+		description: "Automatically format code files using LSP after writing",
+		get: (sm) => sm.getLspFormatOnWrite(),
+		set: (sm, v) => sm.setLspFormatOnWrite(v),
+	},
+	{
+		id: "lspDiagnosticsOnWrite",
+		tab: "lsp",
+		type: "boolean",
+		label: "Diagnostics on write",
+		description: "Return LSP diagnostics (errors/warnings) after writing code files",
+		get: (sm) => sm.getLspDiagnosticsOnWrite(),
+		set: (sm, v) => sm.setLspDiagnosticsOnWrite(v),
+	},
+	{
+		id: "lspDiagnosticsOnEdit",
+		tab: "lsp",
+		type: "boolean",
+		label: "Diagnostics on edit",
+		description: "Return LSP diagnostics (errors/warnings) after editing code files",
+		get: (sm) => sm.getLspDiagnosticsOnEdit(),
+		set: (sm, v) => sm.setLspDiagnosticsOnEdit(v),
 	},
 
 	// Exa tab
@@ -246,7 +257,7 @@ export const SETTINGS_DEFS: SettingDef[] = [
 ];
 
 /** Get settings for a specific tab */
-export function getSettingsForTab(tab: "config" | "exa"): SettingDef[] {
+export function getSettingsForTab(tab: string): SettingDef[] {
 	return SETTINGS_DEFS.filter((def) => def.tab === tab);
 }
 

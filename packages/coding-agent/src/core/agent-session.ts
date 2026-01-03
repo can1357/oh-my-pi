@@ -701,15 +701,15 @@ export class AgentSession {
 	 * Validates API key, saves to session and settings.
 	 * @throws Error if no API key available for the model
 	 */
-	async setModel(model: Model<any>): Promise<void> {
+	async setModel(model: Model<any>, role: string = "default"): Promise<void> {
 		const apiKey = await this._modelRegistry.getApiKey(model);
 		if (!apiKey) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
 		this.agent.setModel(model);
-		this.sessionManager.appendModelChange(model.provider, model.id);
-		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+		this.sessionManager.appendModelChange(`${model.provider}/${model.id}`, role);
+		this.settingsManager.setModelRole(role, `${model.provider}/${model.id}`);
 
 		// Re-clamp thinking level for new model's capabilities
 		this.setThinkingLevel(this.thinkingLevel);
@@ -747,8 +747,8 @@ export class AgentSession {
 
 		// Apply model
 		this.agent.setModel(next.model);
-		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
-		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
+		this.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
+		this.settingsManager.setModelRole("default", `${next.model.provider}/${next.model.id}`);
 
 		// Apply thinking level (setThinkingLevel clamps to model capabilities)
 		this.setThinkingLevel(next.thinkingLevel);
@@ -774,8 +774,8 @@ export class AgentSession {
 		}
 
 		this.agent.setModel(nextModel);
-		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
-		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
+		this.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
+		this.settingsManager.setModelRole("default", `${nextModel.provider}/${nextModel.id}`);
 
 		// Re-clamp thinking level for new model's capabilities
 		this.setThinkingLevel(this.thinkingLevel);
@@ -1472,13 +1472,17 @@ export class AgentSession {
 		this.agent.replaceMessages(sessionContext.messages);
 
 		// Restore model if saved
-		if (sessionContext.model) {
-			const availableModels = await this._modelRegistry.getAvailable();
-			const match = availableModels.find(
-				(m) => m.provider === sessionContext.model!.provider && m.id === sessionContext.model!.modelId,
-			);
-			if (match) {
-				this.agent.setModel(match);
+		const defaultModelStr = sessionContext.models.default;
+		if (defaultModelStr) {
+			const slashIdx = defaultModelStr.indexOf("/");
+			if (slashIdx > 0) {
+				const provider = defaultModelStr.slice(0, slashIdx);
+				const modelId = defaultModelStr.slice(slashIdx + 1);
+				const availableModels = await this._modelRegistry.getAvailable();
+				const match = availableModels.find((m) => m.provider === provider && m.id === modelId);
+				if (match) {
+					this.agent.setModel(match);
+				}
 			}
 		}
 

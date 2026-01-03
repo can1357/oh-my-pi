@@ -6,9 +6,14 @@
  *   - Fuzzy match: "opus" → "claude-opus-4-5"
  *   - Comma fallback: "gpt, opus" → tries gpt first, then opus
  *   - "default" → undefined (use system default)
+ *   - "pi/default" → configured default model from settings
+ *   - "pi/small" or "pi/smol" → configured small model from settings
  */
 
 import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 /** pi command: 'pi.cmd' on Windows, 'pi' elsewhere */
 const PI_CMD = process.platform === "win32" ? "pi.cmd" : "pi";
@@ -75,6 +80,42 @@ export function clearModelCache(): void {
 }
 
 /**
+ * Load model roles from settings file.
+ */
+function loadModelRoles(): Record<string, string> {
+	try {
+		const settingsPath = join(homedir(), ".pi", "agent", "settings.json");
+		if (!existsSync(settingsPath)) return {};
+		const content = readFileSync(settingsPath, "utf-8");
+		const settings = JSON.parse(content);
+		return settings.modelRoles ?? {};
+	} catch {
+		return {};
+	}
+}
+
+/**
+ * Resolve a pi/<role> alias to a model string.
+ * Looks up the role in settings.modelRoles and returns the configured model.
+ * Returns undefined if the role isn't configured.
+ */
+function resolvePiAlias(role: string, availableModels: string[]): string | undefined {
+	const roles = loadModelRoles();
+
+	// Look up role in settings (case-insensitive)
+	const configured = roles[role] || roles[role.toLowerCase()];
+	if (!configured) return undefined;
+
+	// configured is in "provider/modelId" format, extract just the modelId for matching
+	const slashIdx = configured.indexOf("/");
+	if (slashIdx <= 0) return undefined;
+
+	const modelId = configured.slice(slashIdx + 1);
+	// Find in available models
+	return availableModels.find((m) => m.toLowerCase() === modelId.toLowerCase());
+}
+
+/**
  * Resolve a fuzzy model pattern to an actual model name.
  *
  * Supports comma-separated patterns (e.g., "gpt, opus") - tries each in order.
@@ -97,16 +138,24 @@ export function resolveModelPattern(pattern: string | undefined, availableModels
 	// Split by comma, try each pattern in order
 	const patterns = pattern
 		.split(",")
-		.map((p) => p.trim().toLowerCase())
+		.map((p) => p.trim())
 		.filter(Boolean);
 
 	for (const p of patterns) {
+		// Handle pi/<role> aliases - looks up role in settings.modelRoles
+		if (p.toLowerCase().startsWith("pi/")) {
+			const role = p.slice(3); // Remove "pi/" prefix
+			const resolved = resolvePiAlias(role, models);
+			if (resolved) return resolved;
+			continue; // Role not configured, try next pattern
+		}
+
 		// Try exact match first
-		const exactMatch = models.find((m) => m.toLowerCase() === p);
+		const exactMatch = models.find((m) => m.toLowerCase() === p.toLowerCase());
 		if (exactMatch) return exactMatch;
 
 		// Try fuzzy match (substring)
-		const fuzzyMatch = models.find((m) => m.toLowerCase().includes(p));
+		const fuzzyMatch = models.find((m) => m.toLowerCase().includes(p.toLowerCase()));
 		if (fuzzyMatch) return fuzzyMatch;
 	}
 

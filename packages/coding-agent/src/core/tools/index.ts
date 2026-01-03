@@ -73,6 +73,8 @@ export interface SessionContext {
 export interface CodingToolsOptions {
 	/** Whether to fetch LSP diagnostics after write tool writes files (default: true) */
 	lspDiagnosticsOnWrite?: boolean;
+	/** Whether to fetch LSP diagnostics after edit tool edits files (default: false) */
+	lspDiagnosticsOnEdit?: boolean;
 	/** Whether to format files using LSP after write tool writes (default: true) */
 	lspFormatOnWrite?: boolean;
 	/** Whether to accept high-confidence fuzzy matches in edit tool (default: true) */
@@ -89,7 +91,13 @@ const toolDefs: Record<string, { tool: Tool; create: ToolFactory }> = {
 	bash: { tool: bashTool, create: createBashTool },
 	edit: {
 		tool: editTool,
-		create: (cwd, _ctx, options) => createEditTool(cwd, { fuzzyMatch: options?.editFuzzyMatch ?? true }),
+		create: (cwd, _ctx, options) => {
+			const enableDiagnostics = options?.lspDiagnosticsOnEdit ?? false;
+			return createEditTool(cwd, {
+				fuzzyMatch: options?.editFuzzyMatch ?? true,
+				getDiagnostics: enableDiagnostics ? (absolutePath) => getDiagnosticsForFile(absolutePath, cwd) : undefined,
+			});
+		},
 	},
 	write: {
 		tool: writeTool,

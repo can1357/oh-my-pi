@@ -292,8 +292,8 @@ export class MomSessionManager {
 		this._persist(entry);
 	}
 
-	saveModelChange(provider: string, modelId: string): void {
-		const entry: ModelChangeEntry = { ...this._createEntryBase(), type: "model_change", provider, modelId };
+	saveModelChange(model: string, role?: string): void {
+		const entry: ModelChangeEntry = { ...this._createEntryBase(), type: "model_change", model, role };
 		this.inMemoryEntries.push(entry);
 		this._persist(entry);
 	}
@@ -351,7 +351,11 @@ export class MomSessionManager {
 	}
 
 	loadModel(): { provider: string; modelId: string } | null {
-		return this.buildSessionContex().model;
+		const defaultModel = this.buildSessionContex().models.default;
+		if (!defaultModel) return null;
+		const slashIdx = defaultModel.indexOf("/");
+		if (slashIdx <= 0) return null;
+		return { provider: defaultModel.slice(0, slashIdx), modelId: defaultModel.slice(slashIdx + 1) };
 	}
 
 	loadThinkingLevel(): string {

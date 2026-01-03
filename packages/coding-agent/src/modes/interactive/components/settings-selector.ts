@@ -93,10 +93,11 @@ class SelectSubmenu extends Container {
 	}
 }
 
-type TabId = "config" | "exa" | "plugins";
+type TabId = string;
 
 const SETTINGS_TABS: Tab[] = [
 	{ id: "config", label: "Config" },
+	{ id: "lsp", label: "LSP" },
 	{ id: "exa", label: "Exa" },
 	{ id: "plugins", label: "Plugins" },
 ];
@@ -189,14 +190,10 @@ export class SettingsSelectorComponent extends Container {
 		const bottomBorder = this.children[this.children.length - 1];
 		this.removeChild(bottomBorder);
 
-		switch (tabId) {
-			case "config":
-			case "exa":
-				this.showSettingsTab(tabId);
-				break;
-			case "plugins":
-				this.showPluginsTab();
-				break;
+		if (tabId === "plugins") {
+			this.showPluginsTab();
+		} else {
+			this.showSettingsTab(tabId);
 		}
 
 		// Re-add bottom border
@@ -301,9 +298,9 @@ export class SettingsSelectorComponent extends Container {
 	}
 
 	/**
-	 * Show a settings tab (config or exa) using definitions.
+	 * Show a settings tab using definitions.
 	 */
-	private showSettingsTab(tabId: "config" | "exa"): void {
+	private showSettingsTab(tabId: string): void {
 		const defs = getSettingsForTab(tabId);
 		const items: SettingItem[] = [];
 

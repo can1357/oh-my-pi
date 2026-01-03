@@ -113,8 +113,7 @@ function createModelChangeEntry(provider: string, modelId: string): ModelChangeE
 		id,
 		parentId: lastId,
 		timestamp: new Date().toISOString(),
-		provider,
-		modelId,
+		model: `${provider}/${modelId}`,
 	};
 	lastId = id;
 	return entry;
@@ -284,7 +283,7 @@ describe("buildSessionContext", () => {
 		const loaded = buildSessionContext(entries);
 		expect(loaded.messages.length).toBe(4);
 		expect(loaded.thinkingLevel).toBe("off");
-		expect(loaded.model).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
+		expect(loaded.models.default).toBe("anthropic/claude-sonnet-4-5");
 	});
 
 	it("should handle single compaction", () => {
@@ -353,7 +352,7 @@ describe("buildSessionContext", () => {
 
 		const loaded = buildSessionContext(entries);
 		// model_change is later overwritten by assistant message's model info
-		expect(loaded.model).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
+		expect(loaded.models.default).toBe("anthropic/claude-sonnet-4-5");
 		expect(loaded.thinkingLevel).toBe("high");
 	});
 });
@@ -386,7 +385,7 @@ describe("Large session fixture", () => {
 		const loaded = buildSessionContext(entries);
 
 		expect(loaded.messages.length).toBeGreaterThan(100);
-		expect(loaded.model).not.toBeNull();
+		expect(Object.keys(loaded.models).length).toBeGreaterThan(0);
 	});
 });
 

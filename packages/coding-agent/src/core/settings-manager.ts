@@ -54,6 +54,7 @@ export interface MCPSettings {
 export interface LspSettings {
 	formatOnWrite?: boolean; // default: true (format files using LSP after write tool writes code files)
 	diagnosticsOnWrite?: boolean; // default: true (return LSP diagnostics after write tool writes code files)
+	diagnosticsOnEdit?: boolean; // default: false (return LSP diagnostics after edit tool edits code files)
 }
 
 export interface EditSettings {
@@ -62,8 +63,8 @@ export interface EditSettings {
 
 export interface Settings {
 	lastChangelogVersion?: string;
-	defaultProvider?: string;
-	defaultModel?: string;
+	/** Model roles map: { default: "provider/modelId", small: "provider/modelId", ... } */
+	modelRoles?: Record<string, string>;
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 	queueMode?: "all" | "one-at-a-time";
 	theme?: string;
@@ -211,28 +212,29 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getDefaultProvider(): string | undefined {
-		return this.settings.defaultProvider;
+	/**
+	 * Get model for a role. Returns "provider/modelId" string or undefined.
+	 */
+	getModelRole(role: string): string | undefined {
+		return this.settings.modelRoles?.[role];
 	}
 
-	getDefaultModel(): string | undefined {
-		return this.settings.defaultModel;
-	}
-
-	setDefaultProvider(provider: string): void {
-		this.globalSettings.defaultProvider = provider;
+	/**
+	 * Set model for a role. Model should be "provider/modelId" format.
+	 */
+	setModelRole(role: string, model: string): void {
+		if (!this.globalSettings.modelRoles) {
+			this.globalSettings.modelRoles = {};
+		}
+		this.globalSettings.modelRoles[role] = model;
 		this.save();
 	}
 
-	setDefaultModel(modelId: string): void {
-		this.globalSettings.defaultModel = modelId;
-		this.save();
-	}
-
-	setDefaultModelAndProvider(provider: string, modelId: string): void {
-		this.globalSettings.defaultProvider = provider;
-		this.globalSettings.defaultModel = modelId;
-		this.save();
+	/**
+	 * Get all model roles.
+	 */
+	getModelRoles(): Record<string, string> {
+		return { ...this.settings.modelRoles };
 	}
 
 	getQueueMode(): "all" | "one-at-a-time" {
@@ -507,6 +509,18 @@ export class SettingsManager {
 			this.globalSettings.lsp = {};
 		}
 		this.globalSettings.lsp.diagnosticsOnWrite = enabled;
+		this.save();
+	}
+
+	getLspDiagnosticsOnEdit(): boolean {
+		return this.settings.lsp?.diagnosticsOnEdit ?? false;
+	}
+
+	setLspDiagnosticsOnEdit(enabled: boolean): void {
+		if (!this.globalSettings.lsp) {
+			this.globalSettings.lsp = {};
+		}
+		this.globalSettings.lsp.diagnosticsOnEdit = enabled;
 		this.save();
 	}
 

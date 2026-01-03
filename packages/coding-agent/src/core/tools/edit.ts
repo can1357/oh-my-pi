@@ -12,6 +12,7 @@ import {
 	restoreLineEndings,
 	stripBom,
 } from "./edit-diff.js";
+import type { FileDiagnosticsResult } from "./lsp/index.js";
 import { resolveToCwd } from "./path-utils.js";
 
 const editSchema = Type.Object({
@@ -27,11 +28,17 @@ export interface EditToolDetails {
 	diff: string;
 	/** Line number of the first change in the new file (for editor navigation) */
 	firstChangedLine?: number;
+	/** Whether LSP diagnostics were retrieved */
+	hasDiagnostics?: boolean;
+	/** Diagnostic result (if available) */
+	diagnostics?: FileDiagnosticsResult;
 }
 
 export interface EditToolOptions {
 	/** Whether to accept high-confidence fuzzy matches for whitespace/indentation (default: true) */
 	fuzzyMatch?: boolean;
+	/** Callback to get LSP diagnostics after editing a file */
+	getDiagnostics?: (absolutePath: string) => Promise<FileDiagnosticsResult>;
 }
 
 export function createEditTool(cwd: string, options: EditToolOptions = {}): AgentTool<typeof editSchema> {
@@ -185,14 +192,39 @@ Usage:
 						}
 
 						const diffResult = generateDiffString(normalizedContent, normalizedNewContent);
+
+						// Get LSP diagnostics if callback provided
+						let diagnosticsResult: FileDiagnosticsResult | undefined;
+						if (options.getDiagnostics) {
+							try {
+								diagnosticsResult = await options.getDiagnostics(absolutePath);
+							} catch {
+								// Ignore diagnostics errors - don't fail the edit
+							}
+						}
+
+						// Build result text
+						let resultText = `Successfully replaced text in ${path}.`;
+
+						// Append diagnostics if available and there are issues
+						if (diagnosticsResult?.available && diagnosticsResult.diagnostics.length > 0) {
+							resultText += `\n\nLSP Diagnostics (${diagnosticsResult.summary}):\n`;
+							resultText += diagnosticsResult.diagnostics.map((d) => `  ${d}`).join("\n");
+						}
+
 						resolve({
 							content: [
 								{
 									type: "text",
-									text: `Successfully replaced text in ${path}.`,
+									text: resultText,
 								},
 							],
-							details: { diff: diffResult.diff, firstChangedLine: diffResult.firstChangedLine },
+							details: {
+								diff: diffResult.diff,
+								firstChangedLine: diffResult.firstChangedLine,
+								hasDiagnostics: diagnosticsResult?.available ?? false,
+								diagnostics: diagnosticsResult,
+							},
 						});
 					} catch (error: any) {
 						// Clean up abort handler

@@ -10,6 +10,7 @@ export const lspSchema = Type.Object({
 		[
 			// Standard LSP operations
 			Type.Literal("diagnostics"),
+			Type.Literal("workspace_diagnostics"),
 			Type.Literal("references"),
 			Type.Literal("definition"),
 			Type.Literal("hover"),
@@ -338,6 +339,8 @@ export interface ServerConfig {
 	capabilities?: ServerCapabilities;
 	/** If true, this is a linter/formatter server (e.g., Biome) - used only for diagnostics/actions, not type intelligence */
 	isLinter?: boolean;
+	/** Resolved absolute path to the command binary (set during config loading) */
+	resolvedCommand?: string;
 }
 
 // =============================================================================

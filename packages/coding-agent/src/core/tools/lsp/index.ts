@@ -209,6 +209,111 @@ async function waitForDiagnostics(client: LspClient, uri: string, timeoutMs = 30
 	return client.diagnostics.get(uri) ?? [];
 }
 
+/** Project type detection result */
+interface ProjectType {
+	type: "rust" | "typescript" | "go" | "python" | "unknown";
+	command?: string[];
+	description: string;
+}
+
+/** Detect project type from root markers */
+function detectProjectType(cwd: string): ProjectType {
+	// Check for Rust (Cargo.toml)
+	if (fs.existsSync(path.join(cwd, "Cargo.toml"))) {
+		return { type: "rust", command: ["cargo", "check", "--message-format=short"], description: "Rust (cargo check)" };
+	}
+
+	// Check for TypeScript (tsconfig.json)
+	if (fs.existsSync(path.join(cwd, "tsconfig.json"))) {
+		return { type: "typescript", command: ["npx", "tsc", "--noEmit"], description: "TypeScript (tsc --noEmit)" };
+	}
+
+	// Check for Go (go.mod)
+	if (fs.existsSync(path.join(cwd, "go.mod"))) {
+		return { type: "go", command: ["go", "build", "./..."], description: "Go (go build)" };
+	}
+
+	// Check for Python (pyproject.toml or pyrightconfig.json)
+	if (fs.existsSync(path.join(cwd, "pyproject.toml")) || fs.existsSync(path.join(cwd, "pyrightconfig.json"))) {
+		return { type: "python", command: ["pyright"], description: "Python (pyright)" };
+	}
+
+	return { type: "unknown", description: "Unknown project type" };
+}
+
+/** Run workspace diagnostics command and parse output */
+async function runWorkspaceDiagnostics(
+	cwd: string,
+	config: LspConfig,
+): Promise<{ output: string; projectType: ProjectType }> {
+	const projectType = detectProjectType(cwd);
+
+	// For Rust, use flycheck via rust-analyzer if available
+	if (projectType.type === "rust") {
+		const rustServer = getRustServer(config);
+		if (rustServer && hasCapability(rustServer[1], "flycheck")) {
+			const [_serverName, serverConfig] = rustServer;
+			try {
+				const client = await getOrCreateClient(serverConfig, cwd);
+				await rustAnalyzer.flycheck(client);
+
+				const collected: Array<{ filePath: string; diagnostic: Diagnostic }> = [];
+				for (const [diagUri, diags] of client.diagnostics.entries()) {
+					const relPath = path.relative(cwd, uriToFile(diagUri));
+					for (const diag of diags) {
+						collected.push({ filePath: relPath, diagnostic: diag });
+					}
+				}
+
+				if (collected.length === 0) {
+					return { output: "No issues found", projectType };
+				}
+
+				const summary = formatDiagnosticsSummary(collected.map((d) => d.diagnostic));
+				const formatted = collected.slice(0, 50).map((d) => formatDiagnostic(d.diagnostic, d.filePath));
+				const more = collected.length > 50 ? `\n  ... and ${collected.length - 50} more` : "";
+				return { output: `${summary}:\n${formatted.map((f) => `  ${f}`).join("\n")}${more}`, projectType };
+			} catch (e) {
+				// Fall through to shell command
+			}
+		}
+	}
+
+	// Fall back to shell command
+	if (!projectType.command) {
+		return {
+			output: `Cannot detect project type. Supported: Rust (Cargo.toml), TypeScript (tsconfig.json), Go (go.mod), Python (pyproject.toml)`,
+			projectType,
+		};
+	}
+
+	try {
+		const proc = Bun.spawn(projectType.command, {
+			cwd,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+
+		const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+		await proc.exited;
+
+		const combined = (stdout + stderr).trim();
+		if (!combined) {
+			return { output: "No issues found", projectType };
+		}
+
+		// Limit output length
+		const lines = combined.split("\n");
+		if (lines.length > 50) {
+			return { output: lines.slice(0, 50).join("\n") + `\n... and ${lines.length - 50} more lines`, projectType };
+		}
+
+		return { output: combined, projectType };
+	} catch (e) {
+		return { output: `Failed to run ${projectType.command.join(" ")}: ${e}`, projectType };
+	}
+}
+
 /** Result from getDiagnosticsForFile */
 export interface FileDiagnosticsResult {
 	/** Whether an LSP server was available for the file type */
@@ -409,6 +514,7 @@ export function createLspTool(cwd: string): AgentTool<typeof lspSchema, LspToolD
 
 Standard operations:
 - diagnostics: Get errors/warnings for a file
+- workspace_diagnostics: Check entire project for errors (uses tsc, cargo check, go build, etc.)
 - definition: Go to symbol definition
 - references: Find all references to a symbol
 - hover: Get type info and documentation
@@ -459,6 +565,20 @@ Rust-analyzer specific (require rust-analyzer):
 						: "No language servers configured for this project";
 				return {
 					content: [{ type: "text", text: output }],
+					details: { action, success: true },
+				};
+			}
+
+			// Workspace diagnostics - check entire project
+			if (action === "workspace_diagnostics") {
+				const result = await runWorkspaceDiagnostics(cwd, config);
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Workspace diagnostics (${result.projectType.description}):\n${result.output}`,
+						},
+					],
 					details: { action, success: true },
 				};
 			}

@@ -47,7 +47,7 @@ describe("SessionManager append and tree traversal", () => {
 			const session = SessionManager.inMemory();
 
 			const msgId = session.appendMessage(userMsg("hello"));
-			const modelId = session.appendModelChange("openai", "gpt-4");
+			const modelId = session.appendModelChange("openai/gpt-4");
 			const _msg2Id = session.appendMessage(assistantMsg("response"));
 
 			const entries = session.getEntries();
@@ -56,8 +56,7 @@ describe("SessionManager append and tree traversal", () => {
 			expect(modelEntry?.id).toBe(modelId);
 			expect(modelEntry?.parentId).toBe(msgId);
 			if (modelEntry?.type === "model_change") {
-				expect(modelEntry.provider).toBe("openai");
-				expect(modelEntry.modelId).toBe("gpt-4");
+				expect(modelEntry.model).toBe("openai/gpt-4");
 			}
 
 			expect(entries[2].parentId).toBe(modelId);

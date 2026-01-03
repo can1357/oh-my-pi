@@ -375,7 +375,8 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string): Prom
 	}
 
 	const args = config.args ?? [];
-	const proc = Bun.spawn([config.command, ...args], {
+	const command = config.resolvedCommand ?? config.command;
+	const proc = Bun.spawn([command, ...args], {
 		cwd,
 		stdin: "pipe",
 		stdout: "pipe",

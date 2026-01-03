@@ -326,8 +326,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 export function loadSettings(cwd?: string, agentDir?: string): Settings {
 	const manager = SettingsManager.create(cwd ?? process.cwd(), agentDir ?? getDefaultAgentDir());
 	return {
-		defaultProvider: manager.getDefaultProvider(),
-		defaultModel: manager.getDefaultModel(),
+		modelRoles: manager.getModelRoles(),
 		defaultThinkingLevel: manager.getDefaultThinkingLevel(),
 		queueMode: manager.getQueueMode(),
 		theme: manager.getTheme(),
@@ -482,24 +481,34 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let modelFallbackMessage: string | undefined;
 
 	// If session has data, try to restore model from it
-	if (!model && hasExistingSession && existingSession.model) {
-		const restoredModel = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
-		if (restoredModel && (await modelRegistry.getApiKey(restoredModel))) {
-			model = restoredModel;
-		}
-		if (!model) {
-			modelFallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
+	const defaultModelStr = existingSession.models.default;
+	if (!model && hasExistingSession && defaultModelStr) {
+		const slashIdx = defaultModelStr.indexOf("/");
+		if (slashIdx > 0) {
+			const provider = defaultModelStr.slice(0, slashIdx);
+			const modelId = defaultModelStr.slice(slashIdx + 1);
+			const restoredModel = modelRegistry.find(provider, modelId);
+			if (restoredModel && (await modelRegistry.getApiKey(restoredModel))) {
+				model = restoredModel;
+			}
+			if (!model) {
+				modelFallbackMessage = `Could not restore model ${defaultModelStr}`;
+			}
 		}
 	}
 
 	// If still no model, try settings default
 	if (!model) {
-		const defaultProvider = settingsManager.getDefaultProvider();
-		const defaultModelId = settingsManager.getDefaultModel();
-		if (defaultProvider && defaultModelId) {
-			const settingsModel = modelRegistry.find(defaultProvider, defaultModelId);
-			if (settingsModel && (await modelRegistry.getApiKey(settingsModel))) {
-				model = settingsModel;
+		const settingsDefaultModel = settingsManager.getModelRole("default");
+		if (settingsDefaultModel) {
+			const slashIdx = settingsDefaultModel.indexOf("/");
+			if (slashIdx > 0) {
+				const provider = settingsDefaultModel.slice(0, slashIdx);
+				const modelId = settingsDefaultModel.slice(slashIdx + 1);
+				const settingsModel = modelRegistry.find(provider, modelId);
+				if (settingsModel && (await modelRegistry.getApiKey(settingsModel))) {
+					model = settingsModel;
+				}
 			}
 		}
 	}
@@ -574,6 +583,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		createCodingTools(cwd, options.hasUI ?? false, sessionContext, {
 			lspFormatOnWrite: settingsManager.getLspFormatOnWrite(),
 			lspDiagnosticsOnWrite: settingsManager.getLspDiagnosticsOnWrite(),
+			lspDiagnosticsOnEdit: settingsManager.getLspDiagnosticsOnEdit(),
 			editFuzzyMatch: settingsManager.getEditFuzzyMatch(),
 		});
 	time("createCodingTools");
@@ -758,7 +768,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	} else {
 		// Save initial model and thinking level for new sessions so they can be restored on resume
 		if (model) {
-			sessionManager.appendModelChange(model.provider, model.id);
+			sessionManager.appendModelChange(`${model.provider}/${model.id}`);
 		}
 		sessionManager.appendThinkingLevelChange(thinkingLevel);
 	}

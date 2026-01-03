@@ -4,11 +4,24 @@
 
 ### Changed
 
+- LSP settings moved to dedicated "LSP" tab in `/settings` for better organization
 - Improved grep tool description to document pagination options (`headLimit`, `offset`) and clarify recursive search behavior
 - LSP idle timeout now disabled by default. Configure via `idleTimeoutMs` in lsp.json to auto-shutdown inactive servers.
+- Model settings now use role-based storage (`modelRoles` map) instead of single `defaultProvider`/`defaultModel` fields. Supports multiple model roles (default, small, etc.)
+- Session model persistence now uses `"provider/modelId"` string format with optional role field
 
 ### Added
 
+- Model roles: Configure different models for different purposes (default, small, etc.) via `/model` selector
+- Model selector dual-key binding: Enter sets default model, S sets small model, Escape closes
+- Model selector shows role markers: checkmark for default, lightning bolt for small
+- `pi/<role>` model aliases in Task tool agent definitions (e.g., `model: pi/small, haiku, flash, mini`)
+- Small model auto-discovery using priority chain: haiku > flash > mini
+- Title generation now uses configured small model from settings
+
+- LSP diagnostics on edit: Edit tool can now return LSP diagnostics after editing code files. Disabled by default to avoid noise during multi-edit sequences. Enable via `lsp.diagnosticsOnEdit` setting.
+- LSP workspace diagnostics: New `lsp action=workspace_diagnostics` command checks the entire project for errors. Auto-detects project type and uses appropriate checker (rust-analyzer/cargo for Rust, tsc for TypeScript, go build for Go, pyright for Python).
+- LSP local binary resolution: LSP servers installed in project-local directories are now discovered automatically. Checks `node_modules/.bin/` for Node.js projects, `.venv/bin/`/`venv/bin/` for Python projects, and `vendor/bundle/bin/` for Ruby projects before falling back to `$PATH`.
 - LSP format on write: Write tool now automatically formats code files using LSP after writing. Uses the language server's built-in formatter (e.g., rustfmt for Rust, gofmt for Go). Controlled via `lsp.formatOnWrite` setting (enabled by default).
 - LSP diagnostics on write: Write tool now returns LSP diagnostics (errors/warnings) after writing code files. This gives immediate feedback on syntax errors and type issues. Controlled via `lsp.diagnosticsOnWrite` setting (enabled by default).
 - LSP server warmup at startup: LSP servers are now started at launch to avoid cold-start delays when first writing files.
