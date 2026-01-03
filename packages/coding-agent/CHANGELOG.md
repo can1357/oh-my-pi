@@ -1,9 +1,11 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Added
 
+- Added provider tabs to model selector with Tab/Arrow navigation for filtering models by provider
+- Added context menu to model selector for choosing model role (Default, Smol, Slow) instead of keyboard shortcuts
+- Added LSP diagnostics display in tool execution output showing errors and warnings after file edits
 - Added centralized file logger with daily rotation to `~/.pi/logs/` for debugging production issues
 - Added `logger` property to hook and custom tool APIs for error/warning/debug logging
 - Added `output` tool to read full agent/task outputs by ID when truncated previews are insufficient
@@ -22,6 +24,9 @@
 
 ### Changed
 
+- Changed model selector keyboard shortcuts from S/L keys to a context menu opened with Enter
+- Changed model role indicators from symbols (✓ ⚡ 🧠) to labeled badges ([ DEFAULT ] [ SMOL ] [ SLOW ])
+- Changed model list sorting to include secondary sort by model ID within each provider
 - Changed silent error suppression to log warnings and debug info for tool errors, theme loading, and command loading failures
 - Changed Task tool progress display to show agent index (e.g., `reviewer(0)`) for easier Output tool ID derivation
 - Changed Task tool output to only include file paths when Output tool is unavailable, providing Read tool fallback

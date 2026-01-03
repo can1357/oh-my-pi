@@ -1,5 +1,19 @@
 import { type Model, modelsAreEqual } from "@oh-my-pi/pi-ai";
-import { Container, Input, isArrowDown, isArrowUp, isEnter, isEscape, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
+import {
+	Container,
+	Input,
+	isArrowDown,
+	isArrowLeft,
+	isArrowRight,
+	isArrowUp,
+	isEnter,
+	isEscape,
+	isShiftTab,
+	isTab,
+	Spacer,
+	Text,
+	type TUI,
+} from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../../core/model-registry";
 import { parseModelString } from "../../../core/model-resolver";
 import type { SettingsManager } from "../../../core/settings-manager";
@@ -18,16 +32,33 @@ interface ScopedModelItem {
 	thinkingLevel: string;
 }
 
+type ModelRole = "default" | "smol" | "slow";
+
+interface MenuAction {
+	label: string;
+	role: ModelRole;
+}
+
+const MENU_ACTIONS: MenuAction[] = [
+	{ label: "Set as Default", role: "default" },
+	{ label: "Set as Smol (Fast)", role: "smol" },
+	{ label: "Set as Slow (Thinking)", role: "slow" },
+];
+
+const ALL_TAB = "ALL";
+
 /**
- * Component that renders a model selector with search.
- * - Enter: Set selected model as default
- * - S: Set selected model as smol
- * - L: Set selected model as slow
- * - Escape: Close selector
+ * Component that renders a model selector with provider tabs and context menu.
+ * - Tab/Arrow Left/Right: Switch between provider tabs
+ * - Arrow Up/Down: Navigate model list
+ * - Enter: Open context menu to select action
+ * - Escape: Close menu or selector
  */
 export class ModelSelectorComponent extends Container {
 	private searchInput: Input;
+	private headerContainer: Container;
 	private listContainer: Container;
+	private menuContainer: Container;
 	private allModels: ModelItem[] = [];
 	private filteredModels: ModelItem[] = [];
 	private selectedIndex: number = 0;
@@ -42,6 +73,14 @@ export class ModelSelectorComponent extends Container {
 	private errorMessage?: string;
 	private tui: TUI;
 	private scopedModels: ReadonlyArray<ScopedModelItem>;
+
+	// Tab state
+	private providers: string[] = [ALL_TAB];
+	private activeTabIndex: number = 0;
+
+	// Context menu state
+	private isMenuOpen: boolean = false;
+	private menuSelectedIndex: number = 0;
 
 	constructor(
 		tui: TUI,
@@ -69,21 +108,26 @@ export class ModelSelectorComponent extends Container {
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
 
-		// Add hint about model filtering and key bindings
+		// Add hint about model filtering
 		const hintText =
 			scopedModels.length > 0
 				? "Showing models from --models scope"
 				: "Only showing models with configured API keys (see README for details)";
 		this.addChild(new Text(theme.fg("warning", hintText), 0, 0));
-		this.addChild(new Text(theme.fg("muted", "Enter: default  S: smol  L: slow  Esc: close"), 0, 0));
+		this.addChild(new Spacer(1));
+
+		// Create header container for tab bar
+		this.headerContainer = new Container();
+		this.addChild(this.headerContainer);
+
 		this.addChild(new Spacer(1));
 
 		// Create search input
 		this.searchInput = new Input();
 		this.searchInput.onSubmit = () => {
-			// Enter on search input sets as default
+			// Enter on search input opens menu if we have a selection
 			if (this.filteredModels[this.selectedIndex]) {
-				this.handleSelect(this.filteredModels[this.selectedIndex].model, "default");
+				this.openMenu();
 			}
 		};
 		this.addChild(this.searchInput);
@@ -94,6 +138,10 @@ export class ModelSelectorComponent extends Container {
 		this.listContainer = new Container();
 		this.addChild(this.listContainer);
 
+		// Create menu container (hidden by default)
+		this.menuContainer = new Container();
+		this.addChild(this.menuContainer);
+
 		this.addChild(new Spacer(1));
 
 		// Add bottom border
@@ -101,6 +149,8 @@ export class ModelSelectorComponent extends Container {
 
 		// Load models and do initial render
 		this.loadModels().then(() => {
+			this.buildProviderTabs();
+			this.updateTabBar();
 			this.updateList();
 			// Request re-render after models are loaded
 			this.tui.requestRender();
@@ -175,13 +225,15 @@ export class ModelSelectorComponent extends Container {
 			}
 		}
 
-		// Sort: current model first, then by provider
+		// Sort: current model first, then by provider, then by id
 		models.sort((a, b) => {
 			const aIsCurrent = modelsAreEqual(this.currentModel, a.model);
 			const bIsCurrent = modelsAreEqual(this.currentModel, b.model);
 			if (aIsCurrent && !bIsCurrent) return -1;
 			if (!aIsCurrent && bIsCurrent) return 1;
-			return a.provider.localeCompare(b.provider);
+			const providerCmp = a.provider.localeCompare(b.provider);
+			if (providerCmp !== 0) return providerCmp;
+			return a.id.localeCompare(b.id);
 		});
 
 		this.allModels = models;
@@ -189,10 +241,79 @@ export class ModelSelectorComponent extends Container {
 		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, models.length - 1));
 	}
 
+	private buildProviderTabs(): void {
+		// Extract unique providers from models
+		const providerSet = new Set<string>();
+		for (const item of this.allModels) {
+			providerSet.add(item.provider.toUpperCase());
+		}
+		// Sort providers alphabetically
+		const sortedProviders = Array.from(providerSet).sort();
+		this.providers = [ALL_TAB, ...sortedProviders];
+	}
+
+	private updateTabBar(): void {
+		this.headerContainer.clear();
+
+		// Build tab bar line
+		const parts: string[] = [];
+		parts.push(theme.fg("muted", "Provider:"));
+		parts.push("  ");
+
+		for (let i = 0; i < this.providers.length; i++) {
+			const provider = this.providers[i]!;
+			const isActive = i === this.activeTabIndex;
+
+			if (isActive) {
+				parts.push(theme.fg("accent", `[ ${provider} ]`));
+			} else {
+				parts.push(theme.fg("muted", `  ${provider}  `));
+			}
+
+			if (i < this.providers.length - 1) {
+				parts.push(" ");
+			}
+		}
+
+		parts.push("  ");
+		parts.push(theme.fg("dim", "(←/→ or Tab to switch)"));
+
+		this.headerContainer.addChild(new Text(parts.join(""), 0, 0));
+	}
+
+	private getActiveProvider(): string {
+		return this.providers[this.activeTabIndex] ?? ALL_TAB;
+	}
+
 	private filterModels(query: string): void {
-		this.filteredModels = fuzzyFilter(this.allModels, query, ({ id, provider }) => `${id} ${provider}`);
+		const activeProvider = this.getActiveProvider();
+
+		// Start with all models or filter by provider
+		let baseModels = this.allModels;
+		if (activeProvider !== ALL_TAB) {
+			baseModels = this.allModels.filter((m) => m.provider.toUpperCase() === activeProvider);
+		}
+
+		// Apply fuzzy filter if query is present
+		if (query.trim()) {
+			// If user is searching, auto-switch to ALL tab to show global results
+			if (activeProvider !== ALL_TAB) {
+				this.activeTabIndex = 0;
+				this.updateTabBar();
+				baseModels = this.allModels;
+			}
+			this.filteredModels = fuzzyFilter(baseModels, query, ({ id, provider }) => `${id} ${provider}`);
+		} else {
+			this.filteredModels = baseModels;
+		}
+
 		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
 		this.updateList();
+	}
+
+	private applyTabFilter(): void {
+		const query = this.searchInput.getValue();
+		this.filterModels(query);
 	}
 
 	private updateList(): void {
@@ -205,6 +326,9 @@ export class ModelSelectorComponent extends Container {
 		);
 		const endIndex = Math.min(startIndex + maxVisible, this.filteredModels.length);
 
+		const activeProvider = this.getActiveProvider();
+		const showProvider = activeProvider === ALL_TAB;
+
 		// Show visible slice of filtered models
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = this.filteredModels[i];
@@ -215,22 +339,31 @@ export class ModelSelectorComponent extends Container {
 			const isSmol = modelsAreEqual(this.smolModel, item.model);
 			const isSlow = modelsAreEqual(this.slowModel, item.model);
 
-			// Build role markers: ✓ for default, ⚡ for smol, 🧠 for slow
-			let markers = "";
-			if (isDefault) markers += theme.fg("success", " ✓");
-			if (isSmol) markers += theme.fg("warning", " ⚡");
-			if (isSlow) markers += theme.fg("accent", " 🧠");
+			// Build role badges (right-aligned style)
+			const badges: string[] = [];
+			if (isDefault) badges.push(theme.fg("success", "[ DEFAULT ]"));
+			if (isSmol) badges.push(theme.fg("warning", "[ SMOL ]"));
+			if (isSlow) badges.push(theme.fg("accent", "[ SLOW ]"));
+			const badgeText = badges.length > 0 ? ` ${badges.join(" ")}` : "";
 
 			let line = "";
 			if (isSelected) {
 				const prefix = theme.fg("accent", "→ ");
-				const modelText = `${item.id}`;
-				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				line = `${prefix + theme.fg("accent", modelText)} ${providerBadge}${markers}`;
+				const modelText = item.id;
+				if (showProvider) {
+					const providerBadge = theme.fg("muted", `[${item.provider}]`);
+					line = `${prefix}${theme.fg("accent", modelText)} ${providerBadge}${badgeText}`;
+				} else {
+					line = `${prefix}${theme.fg("accent", modelText)}${badgeText}`;
+				}
 			} else {
-				const modelText = `  ${item.id}`;
-				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				line = `${modelText} ${providerBadge}${markers}`;
+				const prefix = "  ";
+				if (showProvider) {
+					const providerBadge = theme.fg("muted", `[${item.provider}]`);
+					line = `${prefix}${item.id} ${providerBadge}${badgeText}`;
+				} else {
+					line = `${prefix}${item.id}${badgeText}`;
+				}
 			}
 
 			this.listContainer.addChild(new Text(line, 0, 0));
@@ -244,7 +377,6 @@ export class ModelSelectorComponent extends Container {
 
 		// Show error message or "no results" if empty
 		if (this.errorMessage) {
-			// Show error in red
 			const errorLines = this.errorMessage.split("\n");
 			for (const line of errorLines) {
 				this.listContainer.addChild(new Text(theme.fg("error", line), 0, 0));
@@ -254,52 +386,142 @@ export class ModelSelectorComponent extends Container {
 		}
 	}
 
+	private openMenu(): void {
+		if (this.filteredModels.length === 0) return;
+
+		this.isMenuOpen = true;
+		this.menuSelectedIndex = 0;
+		this.updateMenu();
+	}
+
+	private closeMenu(): void {
+		this.isMenuOpen = false;
+		this.menuContainer.clear();
+	}
+
+	private updateMenu(): void {
+		this.menuContainer.clear();
+
+		const selectedModel = this.filteredModels[this.selectedIndex];
+		if (!selectedModel) return;
+
+		// Menu header
+		this.menuContainer.addChild(new Spacer(1));
+		this.menuContainer.addChild(new Text(theme.fg("border", "─".repeat(40)), 0, 0));
+		this.menuContainer.addChild(new Text(theme.fg("text", `  Action for: ${theme.bold(selectedModel.id)}`), 0, 0));
+		this.menuContainer.addChild(new Spacer(1));
+
+		// Menu options
+		for (let i = 0; i < MENU_ACTIONS.length; i++) {
+			const action = MENU_ACTIONS[i]!;
+			const isSelected = i === this.menuSelectedIndex;
+
+			let line: string;
+			if (isSelected) {
+				line = theme.fg("accent", `  → ${action.label}`);
+			} else {
+				line = theme.fg("muted", `    ${action.label}`);
+			}
+			this.menuContainer.addChild(new Text(line, 0, 0));
+		}
+
+		this.menuContainer.addChild(new Spacer(1));
+		this.menuContainer.addChild(new Text(theme.fg("dim", "  Enter: confirm  Esc: cancel"), 0, 0));
+		this.menuContainer.addChild(new Text(theme.fg("border", "─".repeat(40)), 0, 0));
+	}
+
 	handleInput(keyData: string): void {
-		// Up arrow - wrap to bottom when at top
+		if (this.isMenuOpen) {
+			this.handleMenuInput(keyData);
+			return;
+		}
+
+		// Tab bar navigation: Left/Right arrows or Tab/Shift+Tab
+		if (isArrowLeft(keyData) || isShiftTab(keyData)) {
+			this.activeTabIndex = (this.activeTabIndex - 1 + this.providers.length) % this.providers.length;
+			this.updateTabBar();
+			this.selectedIndex = 0;
+			this.applyTabFilter();
+			return;
+		}
+
+		if (isArrowRight(keyData) || isTab(keyData)) {
+			this.activeTabIndex = (this.activeTabIndex + 1) % this.providers.length;
+			this.updateTabBar();
+			this.selectedIndex = 0;
+			this.applyTabFilter();
+			return;
+		}
+
+		// Up arrow - navigate list (wrap to bottom when at top)
 		if (isArrowUp(keyData)) {
 			if (this.filteredModels.length === 0) return;
 			this.selectedIndex = this.selectedIndex === 0 ? this.filteredModels.length - 1 : this.selectedIndex - 1;
 			this.updateList();
+			return;
 		}
-		// Down arrow - wrap to top when at bottom
-		else if (isArrowDown(keyData)) {
+
+		// Down arrow - navigate list (wrap to top when at bottom)
+		if (isArrowDown(keyData)) {
 			if (this.filteredModels.length === 0) return;
 			this.selectedIndex = this.selectedIndex === this.filteredModels.length - 1 ? 0 : this.selectedIndex + 1;
 			this.updateList();
+			return;
 		}
-		// Enter - set as default model (don't close)
-		else if (isEnter(keyData)) {
-			const selectedModel = this.filteredModels[this.selectedIndex];
-			if (selectedModel) {
-				this.handleSelect(selectedModel.model, "default");
+
+		// Enter - open context menu
+		if (isEnter(keyData)) {
+			if (this.filteredModels[this.selectedIndex]) {
+				this.openMenu();
 			}
+			return;
 		}
-		// S key - set as smol model (don't close)
-		else if (keyData === "s" || keyData === "S") {
-			const selectedModel = this.filteredModels[this.selectedIndex];
-			if (selectedModel) {
-				this.handleSelect(selectedModel.model, "smol");
-			}
-		}
-		// L key - set as slow model (don't close)
-		else if (keyData === "l" || keyData === "L") {
-			const selectedModel = this.filteredModels[this.selectedIndex];
-			if (selectedModel) {
-				this.handleSelect(selectedModel.model, "slow");
-			}
-		}
-		// Escape - close
-		else if (isEscape(keyData)) {
+
+		// Escape - close selector
+		if (isEscape(keyData)) {
 			this.onCancelCallback();
+			return;
 		}
+
 		// Pass everything else to search input
-		else {
-			this.searchInput.handleInput(keyData);
-			this.filterModels(this.searchInput.getValue());
+		this.searchInput.handleInput(keyData);
+		this.filterModels(this.searchInput.getValue());
+	}
+
+	private handleMenuInput(keyData: string): void {
+		// Up arrow - navigate menu
+		if (isArrowUp(keyData)) {
+			this.menuSelectedIndex = (this.menuSelectedIndex - 1 + MENU_ACTIONS.length) % MENU_ACTIONS.length;
+			this.updateMenu();
+			return;
+		}
+
+		// Down arrow - navigate menu
+		if (isArrowDown(keyData)) {
+			this.menuSelectedIndex = (this.menuSelectedIndex + 1) % MENU_ACTIONS.length;
+			this.updateMenu();
+			return;
+		}
+
+		// Enter - confirm selection
+		if (isEnter(keyData)) {
+			const selectedModel = this.filteredModels[this.selectedIndex];
+			const action = MENU_ACTIONS[this.menuSelectedIndex];
+			if (selectedModel && action) {
+				this.handleSelect(selectedModel.model, action.role);
+				this.closeMenu();
+			}
+			return;
+		}
+
+		// Escape - close menu only
+		if (isEscape(keyData)) {
+			this.closeMenu();
+			return;
 		}
 	}
 
-	private handleSelect(model: Model<any>, role: string): void {
+	private handleSelect(model: Model<any>, role: ModelRole): void {
 		// Save to settings
 		this.settingsManager.setModelRole(role, `${model.provider}/${model.id}`);
 
@@ -315,7 +537,7 @@ export class ModelSelectorComponent extends Container {
 		// Notify caller (for updating agent state if needed)
 		this.onSelectCallback(model, role);
 
-		// Update list to show new markers
+		// Update list to show new badges
 		this.updateList();
 	}
 
