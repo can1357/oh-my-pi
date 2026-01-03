@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [1.5.1] - 2026-01-03
+## [2.0.1337] - 2026-01-03
 ### Added
 
 - Added shell environment snapshot to preserve user aliases, functions, and shell options when executing bash commands
@@ -14,7 +14,7 @@
 - Changed shell detection to prefer user's `$SHELL` when it's bash or zsh, with improved fallback path resolution
 - Changed Edit tool to reject `.ipynb` files with guidance to use NotebookEdit tool instead
 
-## [1.5.0] - 2026-01-03
+## [1.500.0] - 2026-01-03
 ### Added
 
 - Added provider tabs to model selector with Tab/Arrow navigation for filtering models by provider

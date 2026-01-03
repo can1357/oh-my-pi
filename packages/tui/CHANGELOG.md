@@ -2,9 +2,9 @@
 
 ## [Unreleased]
 
-## [1.5.1] - 2026-01-03
+## [2.0.1337] - 2026-01-03
 
-## [1.5.0] - 2026-01-03
+## [1.500.0] - 2026-01-03
 ### Added
 
 - Added `getText()` method to Text component for retrieving current text content
