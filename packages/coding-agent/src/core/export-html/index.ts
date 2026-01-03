@@ -5,8 +5,8 @@ import { APP_NAME } from "../../config";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme";
 import { SessionManager } from "../session-manager";
 
-// Bun macro: bundles HTML+CSS+JS at compile time, evaluated at bundle time
-import { getTemplate } from "./template.macro" with { type: "macro" };
+// Pre-generated template (created by scripts/generate-template.ts at publish time)
+import { TEMPLATE } from "./template.generated";
 
 export interface ExportOptions {
 	outputPath?: string;
@@ -101,14 +101,14 @@ interface SessionData {
 }
 
 /** Generate HTML from bundled template with runtime substitutions. */
-async function generateHtml(sessionData: SessionData, themeName?: string): Promise<string> {
+function generateHtml(sessionData: SessionData, themeName?: string): string {
 	const themeVars = generateThemeVars(themeName);
 	const sessionDataBase64 = Buffer.from(JSON.stringify(sessionData)).toString("base64");
-	const template = await getTemplate();
 
-	return template
-		.replace("<theme-vars/>", `<style>:root { ${themeVars} }</style>`)
-		.replace("{{SESSION_DATA}}", sessionDataBase64);
+	return TEMPLATE.replace("<theme-vars/>", `<style>:root { ${themeVars} }</style>`).replace(
+		"{{SESSION_DATA}}",
+		sessionDataBase64,
+	);
 }
 
 /** Export session to HTML using SessionManager and AgentState. */
@@ -131,7 +131,7 @@ export async function exportSessionToHtml(
 		tools: state?.tools?.map((t) => ({ name: t.name, description: t.description })),
 	};
 
-	const html = await generateHtml(sessionData, opts.themeName);
+	const html = generateHtml(sessionData, opts.themeName);
 	const outputPath = opts.outputPath || `${APP_NAME}-session-${basename(sessionFile, ".jsonl")}.html`;
 
 	writeFileSync(outputPath, html, "utf8");
@@ -151,7 +151,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		leafId: sm.getLeafId(),
 	};
 
-	const html = await generateHtml(sessionData, opts.themeName);
+	const html = generateHtml(sessionData, opts.themeName);
 	const outputPath = opts.outputPath || `${APP_NAME}-session-${basename(inputPath, ".jsonl")}.html`;
 
 	writeFileSync(outputPath, html, "utf8");

@@ -20,7 +20,7 @@
     },
     "packages/agent": {
       "name": "@oh-my-pi/pi-agent-core",
-      "version": "2.2.1337",
+      "version": "2.3.1337",
       "dependencies": {
         "@oh-my-pi/pi-ai": "workspace:*",
         "@oh-my-pi/pi-tui": "workspace:*",
@@ -32,7 +32,7 @@
     },
     "packages/ai": {
       "name": "@oh-my-pi/pi-ai",
-      "version": "2.2.1337",
+      "version": "2.3.1337",
       "bin": {
         "pi-ai": "./src/cli.ts",
       },
@@ -56,7 +56,7 @@
     },
     "packages/coding-agent": {
       "name": "@oh-my-pi/pi-coding-agent",
-      "version": "2.2.1337",
+      "version": "2.3.1337",
       "bin": {
         "pi": "src/cli.ts",
       },
@@ -87,7 +87,7 @@
     },
     "packages/mom": {
       "name": "@oh-my-pi/pi-mom",
-      "version": "2.2.1337",
+      "version": "2.3.1337",
       "bin": {
         "mom": "src/main.ts",
       },
@@ -111,7 +111,7 @@
     },
     "packages/tui": {
       "name": "@oh-my-pi/pi-tui",
-      "version": "2.2.1337",
+      "version": "2.3.1337",
       "dependencies": {
         "@types/mime-types": "^2.1.4",
         "chalk": "^5.5.0",
@@ -126,7 +126,7 @@
     },
     "packages/web-ui": {
       "name": "@oh-my-pi/pi-web-ui",
-      "version": "2.2.1337",
+      "version": "2.3.1337",
       "dependencies": {
         "@lmstudio/sdk": "^1.5.0",
         "@oh-my-pi/pi-agent-core": "workspace:*",

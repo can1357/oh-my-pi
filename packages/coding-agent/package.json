@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "2.2.1337",
+	"version": "2.3.1337",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"type": "module",
 	"piConfig": {
@@ -33,8 +33,10 @@
 		"clean": "rm -rf dist",
 		"build": "tsgo -p tsconfig.build.json && chmod +x dist/cli.js",
 		"build:binary": "bun build --compile ./src/cli.ts --outfile dist/pi",
+		"generate-template": "bun scripts/generate-template.ts",
+		"postinstall": "[ -f scripts/generate-template.ts ] && bun run generate-template || true",
 		"test": "bun test",
-		"prepublishOnly": "npm run clean && npm run build"
+		"prepublishOnly": "bun run generate-template && bun run clean && bun run build"
 	},
 	"dependencies": {
 		"@oh-my-pi/pi-agent-core": "workspace:*",
