@@ -25,6 +25,72 @@
 
 Features added on top of upstream pi:
 
+### LSP Integration (Language Server Protocol)
+
+Full IDE-like code intelligence with automatic formatting and diagnostics:
+
+- **Format-on-write**: Auto-format code using the language server's formatter (rustfmt, gofmt, prettier, etc.)
+- **Diagnostics on write/edit**: Immediate feedback on syntax errors and type issues after every file change
+- **Workspace diagnostics**: Check entire project for errors (`lsp action=workspace_diagnostics`)
+- **40+ language configs**: Out-of-the-box support for Rust, Go, Python, TypeScript, Java, Kotlin, Scala, Haskell, OCaml, Elixir, Ruby, PHP, C#, Lua, Nix, and many more
+- **Local binary resolution**: Auto-discovers project-local LSP servers in `node_modules/.bin/`, `.venv/bin/`, etc.
+- Hover docs, symbol references, code actions, workspace-wide symbol search
+
+### Task Tool (Subagent System)
+
+Parallel execution framework with specialized agents and real-time streaming:
+
+- **5 bundled agents**: explore, plan, browser, task, reviewer
+- **Parallel exploration**: Reviewer agent can spawn explore agents for large codebase analysis
+- **Real-time artifact streaming**: Task outputs stream as they're created, not just at completion
+- **Output tool**: Read full agent outputs by ID when truncated previews aren't sufficient
+- User-level (`~/.pi/agent/agents/`) and project-level (`.pi/agents/`) custom agents
+- Concurrency-limited batch execution with progress tracking
+
+### Model Roles
+
+Configure different models for different purposes with automatic discovery:
+
+- **Three roles**: `default` (main model), `smol` (fast/cheap), `slow` (comprehensive reasoning)
+- **Auto-discovery**: Smol finds haiku → flash → mini; Slow finds codex → gpt → opus → pro
+- **Role-based selection**: Task tool agents can use `model: pi/smol` for cost-effective exploration
+- CLI args (`--smol`, `--slow`) and env vars (`PI_SMOL_MODEL`, `PI_SLOW_MODEL`)
+- Configure via `/model` selector with keybindings (Enter=default, S=smol, L=slow)
+
+### Ask Tool (Interactive Questioning)
+
+Structured user interaction with typed options:
+
+- **Multiple choice questions**: Present options with descriptions for user selection
+- **Multi-select support**: Allow multiple answers when choices aren't mutually exclusive
+
+### Edit Fuzzy Matching
+
+Handles whitespace and indentation variance automatically:
+
+- High-confidence fuzzy matching for `oldText` in edit operations
+- Fixes the #1 pain point: edits failing due to invisible whitespace differences
+- Configurable via `edit.fuzzyMatch` setting (enabled by default)
+
+### Interactive Code Review
+
+Structured code review with priority-based findings:
+
+- **`/review` command**: Interactive mode selection (branch comparison, uncommitted changes, commit review)
+- **Structured findings**: `report_finding` tool with priority levels (P0-P3: critical → nit)
+- **Verdict rendering**: `submit_review` aggregates findings into approve/request-changes/comment
+- Combined result tree showing verdict and all findings
+
+### Custom TypeScript Slash Commands
+
+Programmable commands with full API access:
+
+- Create at `~/.pi/agent/commands/[name]/index.ts` or `.pi/commands/[name]/index.ts`
+- Export factory returning `{ name, description, execute(args, ctx) }`
+- Full access to `HookCommandContext` for UI dialogs, session control, shell execution
+- Return string to send as LLM prompt, or void for fire-and-forget actions
+- Also loads from Claude Code directories (`~/.claude/commands/`, `.claude/commands/`)
+
 ### MCP & Plugin System
 
 Full Model Context Protocol support with external tool integration:
@@ -32,62 +98,37 @@ Full Model Context Protocol support with external tool integration:
 - Stdio and HTTP transports for connecting to MCP servers
 - Plugin CLI (`pi plugin install/enable/configure/doctor`)
 - Hot-loadable plugins from `~/.pi/plugins/` with npm/bun integration
-- 22 pre-built Exa MCP tools for web research, LinkedIn, fact-finding
+- Automatic Exa MCP server filtering with API key extraction
 
-### LSP Tool (Language Server Protocol)
+### TUI Overhaul
 
-IDE-like code intelligence via rust-analyzer and extensible to other languages:
+Modern terminal interface with smart session management:
 
-- File diagnostics with error/warning/info classification
-- Hover documentation, symbol references, implementations
-- Code actions and refactoring suggestions
-- Workspace-wide symbol search
-
-### Task Tool (Subagent System)
-
-Parallel execution framework with specialized agents:
-
-- **5 bundled agents**: explore, plan, browser, task, reviewer
-- User-level (`~/.pi/agent/agents/`) and project-level (`.pi/agents/`) custom agents
-- Concurrency-limited batch execution with progress tracking
-- Pre-defined commands: implement, architect-plan, implement-with-critic
+- **Auto session titles**: Sessions automatically titled based on first message using smol model
+- **Welcome screen**: Logo, tips, recent sessions with selection
+- **Powerline footer**: Model, cwd, git branch/status, token usage, context %
+- **LSP status**: Shows which language servers are active and ready
+- **Hotkeys**: `?` displays shortcuts when editor empty
+- **Emergency terminal restore**: Crash handlers prevent terminal corruption
 
 ### Web Search & Fetch
 
 Multi-provider search and full-page scraping:
 
-- Anthropic and Perplexity search integration with caching
+- Anthropic, Perplexity, and Exa search integration with caching
 - HTML-to-markdown conversion with link preservation
 - JavaScript rendering support, image handling
 
-### TUI Overhaul
+### ... and many more
 
-- **Welcome screen**: Logo, tips, recent sessions with selection
-- **Powerline footer**: Model, cwd, git branch/status, token usage, context %
-- **Hotkeys**: `?` displays shortcuts when editor empty
-- **Emergency terminal restore**: Crash handlers prevent terminal corruption
-
-### Git Context
-
-System prompt includes repo awareness:
-
-- Current branch, main branch auto-detection
-- Git status snapshot (staged/unstaged/untracked)
-- Recent 5 commits summary
-
-### Bun Runtime
-
-Migrated from Node.js for native TypeScript:
-
-- Runs `.ts` files directly without build step
-- Faster CLI startup times
-- All 7 packages converted to Bun APIs
-
-### Additional Tools
-
-- **Ask Tool**: Interactive user questioning (211 lines)
-- **AST Tool**: Structural code analysis via ast-grep (271 lines)
-- **Replace Tool**: Find & replace across files (297 lines)
+- **Git context**: System prompt includes branch, status, recent commits
+- **Bun runtime**: Native TypeScript execution, faster startup, all packages migrated
+- **Centralized file logging**: Debug logs with daily rotation to `~/.pi/logs/`
+- **Clipboard export**: `/export --copy` copies session as formatted text
+- **Bash interceptor**: Optionally block shell commands that have dedicated tools
+- **Hidden tools**: Custom tools can be excluded from default list unless explicitly requested
+- **@file auto-read**: Type `@path/to/file` in prompts to inject file contents inline
+- **Additional tools**: AST (structural code analysis), Replace (find & replace across files)
 
 ---
 
