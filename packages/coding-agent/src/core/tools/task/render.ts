@@ -101,8 +101,9 @@ function renderAgentProgress(progress: AgentProgress, isLast: boolean, expanded:
 				? "error"
 				: "accent";
 
-	// Main status line
-	let statusLine = `${prefix} ${theme.fg(iconColor, icon)} ${theme.fg("accent", progress.agent)}`;
+	// Main status line - include index for Output tool ID derivation
+	const agentId = `${progress.agent}(${progress.index})`;
+	let statusLine = `${prefix} ${theme.fg(iconColor, icon)} ${theme.fg("accent", agentId)}`;
 
 	if (progress.status === "running") {
 		const taskPreview = truncate(progress.task, 40);
@@ -255,8 +256,9 @@ function renderAgentResult(result: SingleResult, isLast: boolean, expanded: bool
 	const iconColor = success ? "success" : "error";
 	const statusText = aborted ? "aborted" : success ? "done" : "failed";
 
-	// Main status line
-	let statusLine = `${prefix} ${theme.fg(iconColor, icon)} ${theme.fg("accent", result.agent)}`;
+	// Main status line - include index for Output tool ID derivation
+	const agentId = `${result.agent}(${result.index})`;
+	let statusLine = `${prefix} ${theme.fg(iconColor, icon)} ${theme.fg("accent", agentId)}`;
 	statusLine += `: ${theme.fg(iconColor, statusText)}`;
 	if (result.tokens > 0) {
 		statusLine += ` · ${theme.fg("dim", `${formatTokens(result.tokens)} tokens`)}`;

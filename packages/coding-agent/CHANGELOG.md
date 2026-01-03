@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Added
 
 - Added `output` tool to read full agent/task outputs by ID when truncated previews are insufficient
@@ -19,6 +20,8 @@
 
 ### Changed
 
+- Changed Task tool progress display to show agent index (e.g., `reviewer(0)`) for easier Output tool ID derivation
+- Changed Task tool output to only include file paths when Output tool is unavailable, providing Read tool fallback
 - Changed Task tool output references to use simpler ID format (e.g., `reviewer_0`) with line/char counts for Output tool integration
 - Changed subagent recursion prevention from blanket blocking to same-agent blocking. Non-recursive agents can now spawn other agent types (e.g., reviewer can spawn explore agents) but cannot spawn themselves.
 - Changed `/review` command from markdown to interactive TypeScript with mode selection menu (branch comparison, uncommitted changes, commit review, custom)

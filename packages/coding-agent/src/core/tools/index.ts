@@ -83,6 +83,8 @@ export interface CodingToolsOptions {
 	lspFormatOnWrite?: boolean;
 	/** Whether to accept high-confidence fuzzy matches in edit tool (default: true) */
 	editFuzzyMatch?: boolean;
+	/** Set of tool names available to the agent (for cross-tool awareness) */
+	availableTools?: Set<string>;
 }
 
 // Factory function type
@@ -120,7 +122,7 @@ const toolDefs: Record<string, { tool: Tool; create: ToolFactory }> = {
 	lsp: { tool: lspTool, create: createLspTool },
 	notebook: { tool: notebookTool, create: createNotebookTool },
 	output: { tool: outputTool, create: (cwd, ctx) => createOutputTool(cwd, ctx) },
-	task: { tool: taskTool, create: (cwd, ctx) => createTaskTool(cwd, ctx) },
+	task: { tool: taskTool, create: (cwd, ctx, opts) => createTaskTool(cwd, ctx, opts) },
 	web_fetch: { tool: webFetchTool, create: createWebFetchTool },
 	web_search: { tool: webSearchTool, create: createWebSearchTool },
 	report_finding: { tool: reportFindingTool, create: createReportFindingTool },
@@ -176,7 +178,8 @@ export function createCodingTools(
 	options?: CodingToolsOptions,
 ): Tool[] {
 	const names = hasUI ? [...baseCodingToolNames, ...uiToolNames] : baseCodingToolNames;
-	return names.map((name) => toolDefs[name].create(cwd, sessionContext, options));
+	const optionsWithTools = { ...options, availableTools: new Set(names) };
+	return names.map((name) => toolDefs[name].create(cwd, sessionContext, optionsWithTools));
 }
 
 /**
@@ -193,7 +196,8 @@ export function createReadOnlyTools(
 	options?: CodingToolsOptions,
 ): Tool[] {
 	const names = hasUI ? [...baseReadOnlyToolNames, ...uiToolNames] : baseReadOnlyToolNames;
-	return names.map((name) => toolDefs[name].create(cwd, sessionContext, options));
+	const optionsWithTools = { ...options, availableTools: new Set(names) };
+	return names.map((name) => toolDefs[name].create(cwd, sessionContext, optionsWithTools));
 }
 
 /**
@@ -207,8 +211,10 @@ export function createAllTools(
 	sessionContext?: SessionContext,
 	options?: CodingToolsOptions,
 ): Record<ToolName, Tool> {
+	const names = Object.keys(toolDefs);
+	const optionsWithTools = { ...options, availableTools: new Set(names) };
 	return Object.fromEntries(
-		Object.entries(toolDefs).map(([name, def]) => [name, def.create(cwd, sessionContext, options)]),
+		Object.entries(toolDefs).map(([name, def]) => [name, def.create(cwd, sessionContext, optionsWithTools)]),
 	) as Record<ToolName, Tool>;
 }
 

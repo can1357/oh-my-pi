@@ -46,6 +46,12 @@ interface SessionContext {
 	getSessionFile: () => string | null;
 }
 
+/** Task tool options */
+interface TaskToolOptions {
+	/** Set of available tool names (for cross-tool awareness) */
+	availableTools?: Set<string>;
+}
+
 // Re-export types and utilities
 export { loadBundledAgents as BUNDLED_AGENTS } from "./agents";
 export { discoverCommands, expandCommand, getCommand } from "./commands";
@@ -179,7 +185,9 @@ function buildDescription(cwd: string): string {
 export function createTaskTool(
 	cwd: string,
 	sessionContext?: SessionContext,
+	options?: TaskToolOptions,
 ): AgentTool<typeof taskSchema, TaskToolDetails, Theme> {
+	const hasOutputTool = options?.availableTools?.has("output") ?? false;
 	// Check if subagents are completely inhibited (legacy recursion prevention)
 	if (process.env[PI_NO_SUBAGENTS_ENV]) {
 		return {
@@ -376,12 +384,13 @@ export function createTaskTool(
 					const status = r.exitCode === 0 ? "completed" : `failed (exit ${r.exitCode})`;
 					const output = r.output.trim() || r.stderr.trim() || "(no output)";
 					const preview = output.split("\n").slice(0, 5).join("\n");
-					// Include output metadata if available, and use simpler ID format
+					// Include output metadata and ID; include path only if Output tool unavailable (for Read fallback)
 					const outputId = `${r.agent}_${r.index}`;
 					const meta = r.outputMeta
 						? ` [${r.outputMeta.lineCount} lines, ${formatBytes(r.outputMeta.charCount)}]`
 						: "";
-					return `[${r.agent}] ${status}${meta} → ${outputId}\n${preview}`;
+					const pathInfo = !hasOutputTool && r.artifactPaths?.outputPath ? ` (${r.artifactPaths.outputPath})` : "";
+					return `[${r.agent}] ${status}${meta} → ${outputId}${pathInfo}\n${preview}`;
 				});
 
 				const skippedNote =
