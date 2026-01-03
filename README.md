@@ -232,7 +232,7 @@ Handles whitespace and indentation variance automatically:
 ### Setup
 
 ```bash
-bun run dev:install   # Install deps and link all packages
+bun run install:dev   # Install deps and link all packages
 bun run build         # Build all packages
 bun run check         # Lint, format, and type check
 ```

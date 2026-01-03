@@ -2391,13 +2391,25 @@ export class InteractiveMode {
 	}
 
 	private handleStatusCommand(): void {
-		const sections: string[] = [];
-
 		type StatusSource =
 			| { provider: string; level: string }
 			| { mcpServer: string; provider?: string }
 			| "builtin"
 			| "unknown";
+
+		type StatusLine = {
+			name: string;
+			sourceText: string;
+			nameWithSource: string;
+			desc?: string;
+		};
+
+		type LineSection = {
+			title: string;
+			lines: StatusLine[];
+		};
+
+		type Section = { kind: "lines"; section: LineSection } | { kind: "text"; text: string };
 
 		const capitalize = (value: string): string => value.charAt(0).toUpperCase() + value.slice(1);
 
@@ -2440,26 +2452,28 @@ export class InteractiveMode {
 			return `${acc}...`;
 		};
 
-		// Helper to format a section with consistent column alignment
-		const formatSection = <T>(
+		const buildLineSection = <T>(
 			title: string,
 			items: readonly T[],
 			getName: (item: T) => string,
 			getDesc: (item: T) => string | undefined,
 			getSource: (item: T) => StatusSource,
-		): string => {
-			if (items.length === 0) return "";
+		): LineSection | null => {
+			if (items.length === 0) return null;
 
-			const lineItems = items.map((item) => {
+			const lines = items.map((item) => {
 				const name = getName(item);
-				const desc = getDesc(item);
+				const desc = getDesc(item)?.trim();
 				const sourceText = resolveSourceText(getSource(item));
 				const nameWithSource = sourceText ? `${name} ${sourceText}` : name;
 				return { name, sourceText, nameWithSource, desc };
 			});
 
-			const maxNameWidth = Math.min(60, Math.max(...lineItems.map((line) => visibleWidth(line.nameWithSource))));
-			const formattedLines = lineItems.map((line) => {
+			return { title, lines };
+		};
+
+		const renderLineSection = (section: LineSection, maxNameWidth: number): string => {
+			const formattedLines = section.lines.map((line) => {
 				let nameText = line.name;
 				let sourceText = line.sourceText;
 
@@ -2475,94 +2489,94 @@ export class InteractiveMode {
 				const sourceRendered = sourceText ? renderSourceText(sourceText) : "";
 				const nameRendered = sourceText ? `${theme.bold(nameText)} ${sourceRendered}` : theme.bold(nameText);
 				const pad = Math.max(0, maxNameWidth - visibleWidth(nameWithSourcePlain));
-				const desc = line.desc?.trim();
-				const descPart = desc ? `  ${theme.fg("dim", desc.slice(0, 50) + (desc.length > 50 ? "..." : ""))}` : "";
+				const desc = line.desc;
+				const descPart = desc
+					? `  ${theme.fg("dim", desc.slice(0, 50) + (desc.length > 50 ? "..." : ""))}`
+					: "";
 				return `  ${nameRendered}${" ".repeat(pad)}${descPart}`;
 			});
 
-			return `${theme.bold(theme.fg("accent", title))}\n${formattedLines.join("\n")}`;
+			return `${theme.bold(theme.fg("accent", section.title))}\n${formattedLines.join("\n")}`;
+		};
+
+		const sections: Section[] = [];
+		const pushLineSection = <T>(
+			title: string,
+			items: readonly T[],
+			getName: (item: T) => string,
+			getDesc: (item: T) => string | undefined,
+			getSource: (item: T) => StatusSource,
+		): void => {
+			const section = buildLineSection(title, items, getName, getDesc, getSource);
+			if (section) {
+				sections.push({ kind: "lines", section });
+			}
 		};
 
 		// Loaded context files
 		const contextFilesResult = loadSync(contextFileCapability.id, { cwd: process.cwd() });
 		const contextFiles = contextFilesResult.items as ContextFile[];
-		if (contextFiles.length > 0) {
-			sections.push(
-				formatSection(
-					"Context Files",
-					contextFiles,
-					(f) => basename(f.path),
-					() => undefined,
-					(f) => ({ provider: f._source.providerName, level: f.level }),
-				),
-			);
-		}
+		pushLineSection(
+			"Context Files",
+			contextFiles,
+			(f) => basename(f.path),
+			() => undefined,
+			(f) => ({ provider: f._source.providerName, level: f.level }),
+		);
 
 		// Loaded skills
 		const skillsSettings = this.session.skillsSettings;
 		if (skillsSettings?.enabled !== false) {
 			const { skills, warnings: skillWarnings } = loadSkills(skillsSettings ?? {});
-			if (skills.length > 0) {
-				sections.push(
-					formatSection(
-						"Skills",
-						skills,
-						(s) => s.name,
-						(s) => s.description,
-						(s) => (s._source ? { provider: s._source.providerName, level: s._source.level } : "unknown"),
-					),
-				);
-			}
+			pushLineSection(
+				"Skills",
+				skills,
+				(s) => s.name,
+				(s) => s.description,
+				(s) => (s._source ? { provider: s._source.providerName, level: s._source.level } : "unknown"),
+			);
 			if (skillWarnings.length > 0) {
 				sections.push(
-					theme.bold(theme.fg("warning", "Skill Warnings")) +
-						"\n" +
-						skillWarnings.map((w) => theme.fg("warning", `  ${w.skillPath}: ${w.message}`)).join("\n"),
+					{
+						kind: "text",
+						text:
+							theme.bold(theme.fg("warning", "Skill Warnings")) +
+							"\n" +
+							skillWarnings.map((w) => theme.fg("warning", `  ${w.skillPath}: ${w.message}`)).join("\n"),
+					},
 				);
 			}
 		}
 
 		// Loaded rules
 		const rulesResult = loadSync<Rule>(ruleCapability.id, { cwd: process.cwd() });
-		if (rulesResult.items.length > 0) {
-			sections.push(
-				formatSection(
-					"Rules",
-					rulesResult.items,
-					(r) => r.name,
-					(r) => r.description,
-					(r) => ({ provider: r._source.providerName, level: r._source.level }),
-				),
-			);
-		}
+		pushLineSection(
+			"Rules",
+			rulesResult.items,
+			(r) => r.name,
+			(r) => r.description,
+			(r) => ({ provider: r._source.providerName, level: r._source.level }),
+		);
 
 		// Loaded prompts
 		const promptsResult = loadSync<Prompt>(promptCapability.id, { cwd: process.cwd() });
-		if (promptsResult.items.length > 0) {
-			sections.push(
-				formatSection(
-					"Prompts",
-					promptsResult.items,
-					(p) => p.name,
-					() => undefined,
-					(p) => ({ provider: p._source.providerName, level: p._source.level }),
-				),
-			);
-		}
+		pushLineSection(
+			"Prompts",
+			promptsResult.items,
+			(p) => p.name,
+			() => undefined,
+			(p) => ({ provider: p._source.providerName, level: p._source.level }),
+		);
 
 		// Loaded instructions
 		const instructionsResult = loadSync<Instruction>(instructionCapability.id, { cwd: process.cwd() });
-		if (instructionsResult.items.length > 0) {
-			sections.push(
-				formatSection(
-					"Instructions",
-					instructionsResult.items,
-					(i) => i.name,
-					(i) => (i.applyTo ? `applies to: ${i.applyTo}` : undefined),
-					(i) => ({ provider: i._source.providerName, level: i._source.level }),
-				),
-			);
-		}
+		pushLineSection(
+			"Instructions",
+			instructionsResult.items,
+			(i) => i.name,
+			(i) => (i.applyTo ? `applies to: ${i.applyTo}` : undefined),
+			(i) => ({ provider: i._source.providerName, level: i._source.level }),
+		);
 
 		// Loaded custom tools - split MCP from non-MCP
 		if (this.customTools.size > 0) {
@@ -2572,55 +2586,47 @@ export class InteractiveMode {
 
 			// MCP Tools section
 			if (mcpTools.length > 0) {
-				sections.push(
-					formatSection(
-						"MCP Tools",
-						mcpTools,
-						(ct) => ct.tool.label || ct.tool.name,
-						() => undefined,
-						(ct) => {
-							const match = ct.path.match(/^mcp:(.+?) via (.+)$/);
-							if (match) {
-								const [, serverName, providerName] = match;
-								return { mcpServer: serverName, provider: providerName };
-							}
-							return ct.path.startsWith("mcp:") ? { mcpServer: ct.path.slice(4) } : "unknown";
-						},
-					),
+				pushLineSection(
+					"MCP Tools",
+					mcpTools,
+					(ct) => ct.tool.label || ct.tool.name,
+					() => undefined,
+					(ct) => {
+						const match = ct.path.match(/^mcp:(.+?) via (.+)$/);
+						if (match) {
+							const [, serverName, providerName] = match;
+							return { mcpServer: serverName, provider: providerName };
+						}
+						return ct.path.startsWith("mcp:") ? { mcpServer: ct.path.slice(4) } : "unknown";
+					},
 				);
 			}
 
 			// Custom Tools section
 			if (customTools.length > 0) {
-				sections.push(
-					formatSection(
-						"Custom Tools",
-						customTools,
-						(ct) => ct.tool.label || ct.tool.name,
-						(ct) => ct.tool.description,
-						(ct) => {
-							if (ct.source?.provider === "builtin") return "builtin";
-							if (ct.path === "<exa>") return "builtin";
-							return ct.source ? { provider: ct.source.providerName, level: ct.source.level } : "unknown";
-						},
-					),
+				pushLineSection(
+					"Custom Tools",
+					customTools,
+					(ct) => ct.tool.label || ct.tool.name,
+					(ct) => ct.tool.description,
+					(ct) => {
+						if (ct.source?.provider === "builtin") return "builtin";
+						if (ct.path === "<exa>") return "builtin";
+						return ct.source ? { provider: ct.source.providerName, level: ct.source.level } : "unknown";
+					},
 				);
 			}
 		}
 
 		// Loaded slash commands (file-based)
 		const fileCommands = this.session.fileCommands;
-		if (fileCommands.length > 0) {
-			sections.push(
-				formatSection(
-					"Slash Commands",
-					fileCommands,
-					(cmd) => `/${cmd.name}`,
-					(cmd) => cmd.description,
-					(cmd) => (cmd._source ? { provider: cmd._source.providerName, level: cmd._source.level } : "unknown"),
-				),
-			);
-		}
+		pushLineSection(
+			"Slash Commands",
+			fileCommands,
+			(cmd) => `/${cmd.name}`,
+			(cmd) => cmd.description,
+			(cmd) => (cmd._source ? { provider: cmd._source.providerName, level: cmd._source.level } : "unknown"),
+		);
 
 		// Loaded hooks
 		const hookRunner = this.session.hookRunner;
@@ -2628,12 +2634,30 @@ export class InteractiveMode {
 			const hookPaths = hookRunner.getHookPaths();
 			if (hookPaths.length > 0) {
 				sections.push(
-					`${theme.bold(theme.fg("accent", "Hooks"))}\n${hookPaths.map((p) => `  ${theme.bold(basename(p))} ${theme.fg("dim", "hook")}`).join("\n")}`,
+					{
+						kind: "text",
+						text:
+							`${theme.bold(theme.fg("accent", "Hooks"))}\n` +
+							hookPaths.map((p) => `  ${theme.bold(basename(p))} ${theme.fg("dim", "hook")}`).join("\n"),
+					},
 				);
 			}
 		}
 
-		if (sections.length === 0) {
+		const lineSections = sections.filter((section): section is { kind: "lines"; section: LineSection } => {
+			return section.kind === "lines";
+		});
+		const allLines = lineSections.flatMap((section) => section.section.lines);
+		const maxNameWidth = allLines.length
+			? Math.min(60, Math.max(...allLines.map((line) => visibleWidth(line.nameWithSource))))
+			: 0;
+		const renderedSections = sections
+			.map((section) =>
+				section.kind === "lines" ? renderLineSection(section.section, maxNameWidth) : section.text,
+			)
+			.filter((section) => section.length > 0);
+
+		if (renderedSections.length === 0) {
 			this.chatContainer.addChild(new Spacer(1));
 			this.chatContainer.addChild(new Text(theme.fg("muted", "No extensions loaded."), 1, 0));
 		} else {
@@ -2641,7 +2665,7 @@ export class InteractiveMode {
 			this.chatContainer.addChild(new DynamicBorder());
 			this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Loaded Extensions")), 1, 0));
 			this.chatContainer.addChild(new Spacer(1));
-			for (const section of sections) {
+			for (const section of renderedSections) {
 				this.chatContainer.addChild(new Text(section, 1, 0));
 				this.chatContainer.addChild(new Spacer(1));
 			}

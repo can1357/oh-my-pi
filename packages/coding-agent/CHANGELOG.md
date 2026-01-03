@@ -1,8 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Changed
 
+- Improved `/status` command output formatting to use consistent column alignment across all sections
 - Updated version update notification to suggest `omp update` instead of manual npm install command
 
 ## [3.1.1337] - 2026-01-03
