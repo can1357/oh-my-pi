@@ -5,14 +5,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import chalk from "chalk";
 import { contextFileCapability } from "../capability/context-file";
+import type { Rule } from "../capability/rule";
 import { systemPromptCapability } from "../capability/system-prompt";
 import { getDocsPath, getExamplesPath, getReadmePath } from "../config";
 import { type ContextFile, loadSync, type SystemPrompt as SystemPromptFile } from "../discovery/index";
-import type { Rule } from "../capability/rule";
 import type { SkillsSettings } from "./settings-manager";
 import { formatSkillsForPrompt, loadSkills, type Skill } from "./skills";
-import { formatRulesForPrompt } from "./tools/rulebook";
 import type { ToolName } from "./tools/index";
+import { formatRulesForPrompt } from "./tools/rulebook";
 
 /**
  * Execute a git command synchronously and return stdout or null on failure.

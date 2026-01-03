@@ -7,8 +7,34 @@
  */
 
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import { APP_NAME, VERSION } from "../config";
 import type { AgentSession } from "../core/agent-session";
 import { logger } from "../core/logger";
+
+/**
+ * Print session header to stderr (text mode only).
+ */
+function printHeader(session: AgentSession): void {
+	const model = session.model;
+	const lines = [
+		`${APP_NAME} v${VERSION}`,
+		"--------",
+		`workdir: ${process.cwd()}`,
+		`model: ${model?.id ?? "unknown"}`,
+		`provider: ${model?.provider ?? "unknown"}`,
+		`thinking: ${session.thinkingLevel}`,
+		`session: ${session.sessionId}`,
+		"--------",
+	];
+	console.error(lines.join("\n"));
+}
+
+/**
+ * Print session footer to stderr (text mode only).
+ */
+function printFooter(): void {
+	console.error("--------");
+}
 
 /**
  * Run in print (single-shot) mode.
@@ -27,6 +53,11 @@ export async function runPrintMode(
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 ): Promise<void> {
+	// Print header to stderr (text mode only)
+	if (mode === "text") {
+		printHeader(session);
+	}
+
 	// Hook runner already has no-op UI context by default (set in main.ts)
 	// Set up hooks for print mode (no UI)
 	const hookRunner = session.hookRunner;
@@ -116,6 +147,9 @@ export async function runPrintMode(
 				}
 			}
 		}
+
+		// Print footer to stderr
+		printFooter();
 	}
 
 	// Ensure stdout is fully flushed before returning

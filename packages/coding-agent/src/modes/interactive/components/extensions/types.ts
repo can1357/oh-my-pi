@@ -98,38 +98,55 @@ export interface FlatTreeItem {
 }
 
 /**
- * Focus pane in the dashboard.
+ * Focus region in the tabbed dashboard.
  */
-export type FocusPane = "sidebar" | "main" | "inspector";
+export type FocusRegion = "tabs" | "list";
 
 /**
- * Dashboard state.
+ * Provider tab representation.
+ */
+export interface ProviderTab {
+	/** Provider ID (or "all" for the ALL tab) */
+	id: string;
+	/** Display label */
+	label: string;
+	/** Whether provider is enabled (always true for "all") */
+	enabled: boolean;
+	/** Extension count for this provider */
+	count: number;
+}
+
+/**
+ * Tabbed dashboard state.
  */
 export interface DashboardState {
-	/** Currently focused pane */
-	focusPane: FocusPane;
-
-	/** Sidebar tree nodes */
-	sidebarTree: TreeNode[];
-	/** Flattened tree for navigation */
-	flatTree: FlatTreeItem[];
-	/** Selected index in flattened tree */
-	sidebarIndex: number;
+	/** Provider tabs */
+	tabs: ProviderTab[];
+	/** Active tab index */
+	activeTabIndex: number;
 
 	/** All extensions (unfiltered) */
 	extensions: Extension[];
-	/** Filtered extensions (after search) */
-	filtered: Extension[];
+	/** Extensions filtered by active tab */
+	tabFiltered: Extension[];
+	/** Extensions filtered by search (applied after tab filter) */
+	searchFiltered: Extension[];
 	/** Current search query */
 	searchQuery: string;
+
 	/** Selected index in main list */
-	mainIndex: number;
+	listIndex: number;
 	/** Scroll offset for main list */
 	scrollOffset: number;
 
 	/** Currently selected extension for inspector */
 	selected: Extension | null;
 }
+
+/**
+ * @deprecated Use FocusRegion instead
+ */
+export type FocusPane = "sidebar" | "main" | "inspector";
 
 /**
  * Callbacks from dashboard to parent.

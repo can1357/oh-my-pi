@@ -24,6 +24,12 @@ export { createNotebookTool, type NotebookToolDetails, notebookTool } from "./no
 export { createOutputTool, type OutputToolDetails, outputTool } from "./output";
 export { createReadTool, type ReadToolDetails, readTool } from "./read";
 export { createReportFindingTool, createSubmitReviewTool, reportFindingTool, submitReviewTool } from "./review";
+export {
+	createRulebookTool,
+	filterRulebookRules,
+	formatRulesForPrompt,
+	type RulebookToolDetails,
+} from "./rulebook";
 export { BUNDLED_AGENTS, createTaskTool, taskTool } from "./task/index";
 export type { TruncationResult } from "./truncate";
 export { createWebFetchTool, type WebFetchToolDetails, webFetchCustomTool, webFetchTool } from "./web-fetch";
@@ -46,12 +52,6 @@ export {
 	webSearchTool,
 } from "./web-search/index";
 export { createWriteTool, type WriteToolDetails, type WriteToolOptions, writeTool } from "./write";
-export {
-	createRulebookTool,
-	filterRulebookRules,
-	formatRulesForPrompt,
-	type RulebookToolDetails,
-} from "./rulebook";
 
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { askTool, createAskTool } from "./ask";

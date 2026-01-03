@@ -4,11 +4,17 @@
 
 ### Added
 
+- Added session header and footer output in text mode showing version, model, provider, thinking level, and session ID
 - Added Extension Control Center dashboard accessible via `/extensions` command for unified management of all providers and extensions
 - Added ability to enable/disable individual extensions with persistent settings
 - Added three-column dashboard layout with sidebar tree, extension list, and inspector panel
 - Added fuzzy search filtering for extensions in the dashboard
 - Added keyboard navigation with Tab to cycle panes, j/k for navigation, Space to toggle, Enter to expand/collapse
+
+### Changed
+
+- Redesigned Extension Control Center from 3-column layout to tabbed interface with horizontal provider tabs and 2-column grid
+- Replaced sidebar tree navigation with provider tabs using TAB/Shift+TAB cycling
 
 ### Fixed
 

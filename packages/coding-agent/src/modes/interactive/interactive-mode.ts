@@ -6,7 +6,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { basename } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, OAuthProvider } from "@oh-my-pi/pi-ai";
 import type { SlashCommand } from "@oh-my-pi/pi-tui";
@@ -24,28 +23,15 @@ import {
 	TUI,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { contextFileCapability } from "../../capability/context-file";
-import { instructionCapability } from "../../capability/instruction";
-import { promptCapability } from "../../capability/prompt";
-import { ruleCapability } from "../../capability/rule";
 import { getAuthPath, getDebugLogPath } from "../../config";
 import type { AgentSession, AgentSessionEvent } from "../../core/agent-session";
 import type { CustomToolSessionEvent, LoadedCustomTool } from "../../core/custom-tools/index";
 import type { HookUIContext } from "../../core/hooks/index";
 import { createCompactionSummaryMessage } from "../../core/messages";
 import { getRecentSessions, type SessionContext, SessionManager } from "../../core/session-manager";
-import { loadSkills } from "../../core/skills";
 import { generateSessionTitle, setTerminalTitle } from "../../core/title-generator";
 import type { TruncationResult } from "../../core/tools/truncate";
-import {
-	type ContextFile,
-	disableProvider,
-	enableProvider,
-	type Instruction,
-	loadSync,
-	type Prompt,
-	type Rule,
-} from "../../discovery";
+import { disableProvider, enableProvider } from "../../discovery";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog";
 import { copyToClipboard, readImageFromClipboard } from "../../utils/clipboard";
 import { ArminComponent } from "./components/armin";
@@ -56,6 +42,7 @@ import { BranchSummaryMessageComponent } from "./components/branch-summary-messa
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message";
 import { CustomEditor } from "./components/custom-editor";
 import { DynamicBorder } from "./components/dynamic-border";
+import { ExtensionDashboard } from "./components/extensions";
 import { FooterComponent } from "./components/footer";
 import { HookEditorComponent } from "./components/hook-editor";
 import { HookInputComponent } from "./components/hook-input";
@@ -65,7 +52,6 @@ import { ModelSelectorComponent } from "./components/model-selector";
 import { OAuthSelectorComponent } from "./components/oauth-selector";
 import { SessionSelectorComponent } from "./components/session-selector";
 import { SettingsSelectorComponent } from "./components/settings-selector";
-import { ExtensionDashboard } from "./components/extensions";
 import { ToolExecutionComponent } from "./components/tool-execution";
 import { TreeSelectorComponent } from "./components/tree-selector";
 import { TtsrNotificationComponent } from "./components/ttsr-notification";

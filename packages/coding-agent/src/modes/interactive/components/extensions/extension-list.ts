@@ -1,475 +1,477 @@
 /**
- * ExtensionList - Tree view with grouping and fuzzy search.
+ * ExtensionList - Inventory list with Master Switch and fuzzy search.
  *
- * Displays extensions grouped by kind with collapsible headers.
- * Supports filtering via fuzzy search (flattens tree when active).
+ * When viewing a specific provider (not "ALL"), Row #0 is the Master Switch
+ * that toggles the entire provider. All items below are dimmed when the
+ * master switch is off.
  */
 
 import {
-   type Component,
-   isArrowDown,
-   isArrowLeft,
-   isArrowRight,
-   isArrowUp,
-   isBackspace,
-   isEnter,
-   truncateToWidth,
-   visibleWidth,
+	type Component,
+	isArrowDown,
+	isArrowUp,
+	isBackspace,
+	isEnter,
+	truncateToWidth,
+	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { isProviderEnabled } from "../../../../discovery";
 import { theme } from "../../theme/theme";
 import { applyFilter } from "./state-manager";
 import type { Extension, ExtensionKind, ExtensionState } from "./types";
 
 export interface ExtensionListCallbacks {
-   /** Called when selection changes */
-   onSelectionChange?: (extension: Extension | null) => void;
-   /** Called when extension is toggled (Enter pressed on item) */
-   onToggle?: (extensionId: string, enabled: boolean) => void;
+	/** Called when selection changes */
+	onSelectionChange?: (extension: Extension | null) => void;
+	/** Called when extension is toggled */
+	onToggle?: (extensionId: string, enabled: boolean) => void;
+	/** Called when master switch is toggled */
+	onMasterToggle?: (providerId: string) => void;
+	/** Provider ID for master switch (null = no master switch) */
+	masterSwitchProvider?: string | null;
 }
 
-const MAX_VISIBLE = 30;
+const MAX_VISIBLE = 25;
 
-/** Tree group for a kind of extensions */
-interface TreeGroup {
-   id: string;
-   kind: ExtensionKind;
-   label: string;
-   icon: string;
-   collapsed: boolean;
-   items: Extension[];
-}
-
-/** Flattened tree item for rendering */
-type FlatItem =
-   | { type: "group"; group: TreeGroup }
-   | { type: "item"; item: Extension; group: TreeGroup };
+/** Flattened list item for rendering */
+type ListItem =
+	| { type: "master"; providerId: string; providerName: string; enabled: boolean }
+	| { type: "kind-header"; kind: ExtensionKind; label: string; icon: string; count: number }
+	| { type: "extension"; item: Extension };
 
 export class ExtensionList implements Component {
-   private extensions: Extension[] = [];
-   private groups: TreeGroup[] = [];
-   private flatItems: FlatItem[] = [];
-   private selectedIndex = 0;
-   private scrollOffset = 0;
-   private searchQuery = "";
-   private focused = false;
-   private callbacks: ExtensionListCallbacks;
-   /** True when there's an active filter (query.length > 0) */
-   private hasFilter = false;
+	private extensions: Extension[] = [];
+	private listItems: ListItem[] = [];
+	private selectedIndex = 0;
+	private scrollOffset = 0;
+	private searchQuery = "";
+	private focused = false;
+	private callbacks: ExtensionListCallbacks;
+	private masterSwitchProvider: string | null = null;
 
-   constructor(extensions: Extension[], callbacks: ExtensionListCallbacks = {}) {
-      this.extensions = extensions;
-      this.callbacks = callbacks;
-      this.rebuildGroups();
-   }
+	constructor(extensions: Extension[], callbacks: ExtensionListCallbacks = {}) {
+		this.extensions = extensions;
+		this.callbacks = callbacks;
+		this.masterSwitchProvider = callbacks.masterSwitchProvider ?? null;
+		this.rebuildList();
+	}
 
-   setExtensions(extensions: Extension[]): void {
-      this.extensions = extensions;
-      this.rebuildGroups();
-      this.clampSelection();
-   }
+	setExtensions(extensions: Extension[]): void {
+		this.extensions = extensions;
+		this.rebuildList();
+		this.clampSelection();
+	}
 
-   setFocused(focused: boolean): void {
-      this.focused = focused;
-   }
+	setFocused(focused: boolean): void {
+		this.focused = focused;
+	}
 
-   getSelectedExtension(): Extension | null {
-      const item = this.flatItems[this.selectedIndex];
-      if (item?.type === "item") {
-         return item.item;
-      }
-      return null;
-   }
+	setMasterSwitchProvider(providerId: string | null): void {
+		this.masterSwitchProvider = providerId;
+		this.rebuildList();
+	}
 
-   setSearchQuery(query: string): void {
-      this.searchQuery = query;
-      this.hasFilter = query.length > 0;
-      this.rebuildGroups();
-      this.selectedIndex = 0;
-      this.scrollOffset = 0;
-      this.notifySelectionChange();
-   }
+	getSearchQuery(): string {
+		return this.searchQuery;
+	}
 
-   /** Clear search filter */
-   clearSearch(): void {
-      this.setSearchQuery("");
-   }
+	resetSelection(): void {
+		this.selectedIndex = 0;
+		this.scrollOffset = 0;
+		this.notifySelectionChange();
+	}
 
-   invalidate(): void {}
+	getSelectedExtension(): Extension | null {
+		const item = this.listItems[this.selectedIndex];
+		return item?.type === "extension" ? item.item : null;
+	}
 
-   render(width: number): string[] {
-      const lines: string[] = [];
+	/** Get the currently selected kind header (for preview purposes) */
+	getSelectedKind(): ExtensionKind | null {
+		const item = this.listItems[this.selectedIndex];
+		return item?.type === "kind-header" ? item.kind : null;
+	}
 
-      // Search bar - cursor shown when focused
-      const searchPrefix = theme.fg("muted", "Search: ");
-      const searchText = this.searchQuery || (this.focused ? "" : theme.fg("dim", "type to filter"));
-      const cursor = this.focused ? theme.fg("accent", "_") : "";
-      lines.push(searchPrefix + searchText + cursor);
-      lines.push("");
+	setSearchQuery(query: string): void {
+		this.searchQuery = query;
+		this.rebuildList();
+		this.selectedIndex = 0;
+		this.scrollOffset = 0;
+		this.notifySelectionChange();
+	}
 
-      if (this.flatItems.length === 0) {
-         lines.push(theme.fg("muted", "  No extensions found"));
-         return lines;
-      }
+	clearSearch(): void {
+		this.setSearchQuery("");
+	}
 
-      // Calculate visible range
-      const startIdx = this.scrollOffset;
-      const endIdx = Math.min(startIdx + MAX_VISIBLE, this.flatItems.length);
+	invalidate(): void {}
 
-      // Render visible items
-      for (let i = startIdx; i < endIdx; i++) {
-         const flatItem = this.flatItems[i];
-         const isSelected = this.focused && i === this.selectedIndex;
+	render(width: number): string[] {
+		const lines: string[] = [];
 
-         if (flatItem.type === "group") {
-            lines.push(this.renderGroupHeader(flatItem.group, isSelected, width));
-         } else {
-            lines.push(this.renderExtensionRow(flatItem.item, isSelected, width));
-         }
-      }
+		// Search bar
+		const searchPrefix = theme.fg("muted", "Search: ");
+		const searchText = this.searchQuery || (this.focused ? "" : theme.fg("dim", "type to filter"));
+		const cursor = this.focused ? theme.fg("accent", "_") : "";
+		lines.push(searchPrefix + searchText + cursor);
+		lines.push("");
 
-      // Scroll indicator
-      if (this.flatItems.length > MAX_VISIBLE) {
-         const indicator = theme.fg("muted", `  (${this.selectedIndex + 1}/${this.flatItems.length})`);
-         lines.push(indicator);
-      }
+		if (this.listItems.length === 0) {
+			lines.push(theme.fg("muted", "  No extensions found for this provider."));
+			return lines;
+		}
 
-      return lines;
-   }
+		// Determine if master switch is off (for dimming child items)
+		const masterDisabled = this.masterSwitchProvider !== null && !isProviderEnabled(this.masterSwitchProvider);
 
-   private renderGroupHeader(group: TreeGroup, isSelected: boolean, width: number): string {
-      const kindIcon = group.icon;
-      const countStr = `(${group.items.length})`;
+		// Calculate visible range
+		const startIdx = this.scrollOffset;
+		const endIdx = Math.min(startIdx + MAX_VISIBLE, this.listItems.length);
 
-      let line = `${kindIcon} ${group.label} ${theme.fg("muted", countStr)}`;
+		// Render visible items
+		for (let i = startIdx; i < endIdx; i++) {
+			const listItem = this.listItems[i];
+			const isSelected = this.focused && i === this.selectedIndex;
 
-      if (isSelected) {
-         line = theme.bold(theme.fg("accent", line));
-         line = theme.bg("selectedBg", line);
-      }
+			if (listItem.type === "master") {
+				lines.push(this.renderMasterSwitch(listItem, isSelected, width));
+			} else if (listItem.type === "kind-header") {
+				lines.push(this.renderKindHeader(listItem, isSelected, width));
+			} else {
+				lines.push(this.renderExtensionRow(listItem.item, isSelected, width, masterDisabled));
+			}
+		}
 
-      return truncateToWidth(line, width);
-   }
+		// Scroll indicator
+		if (this.listItems.length > MAX_VISIBLE) {
+			const indicator = theme.fg("muted", `  (${this.selectedIndex + 1}/${this.listItems.length})`);
+			lines.push(indicator);
+		}
 
-   private renderExtensionRow(ext: Extension, isSelected: boolean, width: number): string {
-      // Status icon
-      const stateIcon = this.getStateIcon(ext.state);
+		return lines;
+	}
 
-      // Name
-      let name = ext.displayName;
-      const nameWidth = Math.min(28, width - 10);
+	private renderMasterSwitch(item: ListItem & { type: "master" }, isSelected: boolean, width: number): string {
+		const checkbox = item.enabled ? theme.fg("success", "[x]") : theme.fg("dim", "[ ]");
+		const icon = "📦";
+		let label = `Enable ${item.providerName}`;
+		const badge = theme.fg("warning", "(Master Switch)");
 
-      // Trigger (if present)
-      const trigger = ext.trigger ? theme.fg("dim", ext.trigger) : "";
+		let line = `${checkbox} ${icon} ${label}  ${badge}`;
 
-      // Build the line with tree branch structure
-      let line = `  ├─ ${stateIcon} `;
+		if (isSelected) {
+			line = theme.bold(theme.fg("accent", line));
+			line = theme.bg("selectedBg", line);
+		} else if (!item.enabled) {
+			line = theme.fg("dim", line);
+		}
 
-      if (isSelected) {
-         name = theme.bold(theme.fg("accent", name));
-      } else if (ext.state === "disabled") {
-         name = theme.fg("dim", name);
-      } else if (ext.state === "shadowed") {
-         name = theme.fg("warning", name);
-      }
+		return truncateToWidth(line, width);
+	}
 
-      // Pad name
-      const namePadded = this.padText(name, nameWidth);
-      line += namePadded;
+	private renderKindHeader(item: ListItem & { type: "kind-header" }, isSelected: boolean, width: number): string {
+		const countBadge = theme.fg("muted", `(${item.count})`);
+		let line = `${item.icon} ${item.label} ${countBadge}`;
 
-      // Add trigger with spacing
-      if (trigger) {
-         const remainingWidth = width - visibleWidth(line) - 2;
-         if (remainingWidth > 5) {
-            line += "  " + truncateToWidth(trigger, remainingWidth);
-         }
-      }
+		if (isSelected) {
+			line = theme.bold(theme.fg("accent", line));
+			line = theme.bg("selectedBg", line);
+		} else {
+			line = theme.fg("muted", line);
+		}
 
-      // Apply selection background
-      if (isSelected) {
-         line = theme.bg("selectedBg", line);
-      }
+		return truncateToWidth(line, width);
+	}
 
-      return truncateToWidth(line, width);
-   }
+	private renderExtensionRow(ext: Extension, isSelected: boolean, width: number, masterDisabled: boolean): string {
+		// When master is disabled, all items appear dimmed
+		const effectivelyDisabled = masterDisabled || ext.state === "disabled";
 
-   private getKindIcon(kind: ExtensionKind): string {
-      switch (kind) {
-         case "skill":
-            return "⚡";
-         case "tool":
-         case "slash-command":
-            return "🛠️";
-         case "mcp":
-            return "📦";
-         case "rule":
-            return "📋";
-         case "hook":
-            return "🪝";
-         case "prompt":
-            return "💬";
-         case "context-file":
-            return "📄";
-         case "instruction":
-            return "📌";
-         default:
-            return "•";
-      }
-   }
+		// Status icon
+		const stateIcon = this.getStateIcon(ext.state, masterDisabled);
 
-   private getStateIcon(state: ExtensionState): string {
-      switch (state) {
-         case "active":
-            return theme.fg("success", "●");
-         case "disabled":
-            return theme.fg("dim", "○");
-         case "shadowed":
-            return theme.fg("warning", "◐");
-      }
-   }
+		// Name
+		let name = ext.displayName;
+		const nameWidth = Math.min(24, width - 16);
 
-   private padText(text: string, targetWidth: number): string {
-      const width = visibleWidth(text);
-      if (width >= targetWidth) {
-         return truncateToWidth(text, targetWidth);
-      }
-      return text + " ".repeat(targetWidth - width);
-   }
+		// Build the line with indentation (visually "inside" the master switch)
+		let line = `   ${stateIcon} `;
 
-   private rebuildGroups(): void {
-      if (this.hasFilter) {
-         // Flatten: show only matching items, no group headers
-         const filtered = applyFilter(this.extensions, this.searchQuery);
-         this.flatItems = filtered.map((item) => ({
-            type: "item" as const,
-            item,
-            group: this.findGroupForKind(item.kind),
-         }));
-      } else {
-         // Build groups from extensions
-         this.groups = this.buildGroupsFromExtensions();
+		if (isSelected && !masterDisabled) {
+			name = theme.bold(theme.fg("accent", name));
+		} else if (effectivelyDisabled) {
+			name = theme.fg("dim", name);
+		} else if (ext.state === "shadowed") {
+			name = theme.fg("warning", name);
+		}
 
-         // Flatten tree based on collapsed state
-         this.flatItems = [];
-         for (const group of this.groups) {
-            // Add group header
-            this.flatItems.push({ type: "group", group });
+		// Pad name
+		const namePadded = this.padText(name, nameWidth);
+		line += namePadded;
 
-            // Add items if not collapsed
-            if (!group.collapsed) {
-               for (const item of group.items) {
-                  this.flatItems.push({ type: "item", item, group });
-               }
-            }
-         }
-      }
-   }
+		// Trigger hint
+		if (ext.trigger) {
+			const triggerStyle = effectivelyDisabled ? "dim" : "muted";
+			const remainingWidth = width - visibleWidth(line) - 2;
+			if (remainingWidth > 5) {
+				line += "  " + truncateToWidth(theme.fg(triggerStyle as "dim" | "muted", ext.trigger), remainingWidth);
+			}
+		}
 
-   private buildGroupsFromExtensions(): TreeGroup[] {
-      // Group extensions by kind
-      const kindMap = new Map<ExtensionKind, Extension[]>();
+		// Apply selection background
+		if (isSelected) {
+			line = theme.bg("selectedBg", line);
+		}
 
-      for (const ext of this.extensions) {
-         const items = kindMap.get(ext.kind) ?? [];
-         items.push(ext);
-         kindMap.set(ext.kind, items);
-      }
+		return truncateToWidth(line, width);
+	}
 
-      // Create groups with labels and icons
-      const groups: TreeGroup[] = [];
-      const kindOrder: ExtensionKind[] = [
-         "skill",
-         "tool",
-         "slash-command",
-         "context-file",
-         "rule",
-         "mcp",
-         "hook",
-         "prompt",
-         "instruction",
-      ];
+	private getKindIcon(kind: ExtensionKind): string {
+		switch (kind) {
+			case "skill":
+				return "⚡";
+			case "tool":
+				return "🔧";
+			case "slash-command":
+				return "🔗";
+			case "mcp":
+				return "🔄";
+			case "rule":
+				return "📋";
+			case "hook":
+				return "🪝";
+			case "prompt":
+				return "💬";
+			case "context-file":
+				return "📄";
+			case "instruction":
+				return "📌";
+			default:
+				return "•";
+		}
+	}
 
-      for (const kind of kindOrder) {
-         const items = kindMap.get(kind);
-         if (items && items.length > 0) {
-            groups.push({
-               id: `group:${kind}`,
-               kind,
-               label: this.getKindLabel(kind),
-               icon: this.getKindIcon(kind),
-               collapsed: false,
-               items,
-            });
-         }
-      }
+	private getStateIcon(state: ExtensionState, masterDisabled: boolean): string {
+		if (masterDisabled) {
+			return theme.fg("dim", "○");
+		}
+		switch (state) {
+			case "active":
+				return theme.fg("success", "●");
+			case "disabled":
+				return theme.fg("dim", "⊘");
+			case "shadowed":
+				return theme.fg("warning", "◐");
+		}
+	}
 
-      return groups;
-   }
+	private padText(text: string, targetWidth: number): string {
+		const width = visibleWidth(text);
+		if (width >= targetWidth) {
+			return truncateToWidth(text, targetWidth);
+		}
+		return text + " ".repeat(targetWidth - width);
+	}
 
-   private findGroupForKind(kind: ExtensionKind): TreeGroup {
-      return (
-         this.groups.find((g) => g.kind === kind) ?? {
-            id: `group:${kind}`,
-            kind,
-            label: this.getKindLabel(kind),
-            icon: this.getKindIcon(kind),
-            collapsed: false,
-            items: [],
-         }
-      );
-   }
+	private rebuildList(): void {
+		this.listItems = [];
 
-   private getKindLabel(kind: ExtensionKind): string {
-      switch (kind) {
-         case "skill":
-            return "Skills";
-         case "tool":
-            return "Custom Tools";
-         case "slash-command":
-            return "Slash Commands";
-         case "mcp":
-            return "MCP Servers";
-         case "rule":
-            return "Rules";
-         case "hook":
-            return "Hooks";
-         case "prompt":
-            return "Prompts";
-         case "context-file":
-            return "Context Files";
-         case "instruction":
-            return "Instructions";
-         default:
-            return "Other";
-      }
-   }
+		// Apply search filter
+		const filtered = this.searchQuery.length > 0 ? applyFilter(this.extensions, this.searchQuery) : this.extensions;
 
-   private clampSelection(): void {
-      if (this.flatItems.length === 0) {
-         this.selectedIndex = 0;
-         this.scrollOffset = 0;
-         return;
-      }
+		// When searching, show flat list
+		if (this.searchQuery.length > 0) {
+			for (const ext of filtered) {
+				this.listItems.push({ type: "extension", item: ext });
+			}
+			return;
+		}
 
-      this.selectedIndex = Math.min(this.selectedIndex, this.flatItems.length - 1);
-      this.selectedIndex = Math.max(0, this.selectedIndex);
+		// Provider-specific view: Master switch + flat list
+		if (this.masterSwitchProvider) {
+			const providerName = filtered[0]?.source.providerName ?? this.masterSwitchProvider;
+			const enabled = isProviderEnabled(this.masterSwitchProvider);
 
-      // Adjust scroll offset
-      if (this.selectedIndex < this.scrollOffset) {
-         this.scrollOffset = this.selectedIndex;
-      } else if (this.selectedIndex >= this.scrollOffset + MAX_VISIBLE) {
-         this.scrollOffset = this.selectedIndex - MAX_VISIBLE + 1;
-      }
-   }
+			this.listItems.push({
+				type: "master",
+				providerId: this.masterSwitchProvider,
+				providerName,
+				enabled,
+			});
 
-   handleInput(data: string): void {
-      const charCode = data.length === 1 ? data.charCodeAt(0) : -1;
+			for (const ext of filtered) {
+				this.listItems.push({ type: "extension", item: ext });
+			}
+			return;
+		}
 
-      // Navigation - j/k or arrows
-      if (isArrowUp(data) || data === "k") {
-         this.moveSelectionUp();
-         return;
-      }
+		// ALL view: Group by kind with headers
+		const byKind = new Map<ExtensionKind, Extension[]>();
+		for (const ext of filtered) {
+			const list = byKind.get(ext.kind) ?? [];
+			list.push(ext);
+			byKind.set(ext.kind, list);
+		}
 
-      if (isArrowDown(data) || data === "j") {
-         this.moveSelectionDown();
-         return;
-      }
+		const kindOrder: ExtensionKind[] = [
+			"skill",
+			"tool",
+			"slash-command",
+			"rule",
+			"mcp",
+			"hook",
+			"prompt",
+			"context-file",
+			"instruction",
+		];
 
-      // Left arrow: collapse current group or move to parent group
-      if (isArrowLeft(data)) {
-         const item = this.flatItems[this.selectedIndex];
-         if (item?.type === "group" && !item.group.collapsed) {
-            item.group.collapsed = true;
-            this.rebuildGroups();
-            this.clampSelection();
-         } else if (item?.type === "item") {
-            // Move selection to parent group header
-            const groupIndex = this.flatItems.findIndex(
-               (fi) => fi.type === "group" && fi.group.kind === item.group.kind
-            );
-            if (groupIndex >= 0) {
-               this.selectedIndex = groupIndex;
-               this.clampSelection();
-               this.notifySelectionChange();
-            }
-         }
-         return;
-      }
+		for (const kind of kindOrder) {
+			const items = byKind.get(kind);
+			if (!items || items.length === 0) continue;
 
-      // Right arrow: expand current group
-      if (isArrowRight(data)) {
-         const item = this.flatItems[this.selectedIndex];
-         if (item?.type === "group" && item.group.collapsed) {
-            item.group.collapsed = false;
-            this.rebuildGroups();
-            this.clampSelection();
-         }
-         return;
-      }
+			this.listItems.push({
+				type: "kind-header",
+				kind,
+				label: this.getKindLabel(kind),
+				icon: this.getKindIcon(kind),
+				count: items.length,
+			});
 
-      // Space: TOGGLE item enabled/disabled
-      if (data === " ") {
-         const item = this.flatItems[this.selectedIndex];
-         if (item?.type === "item") {
-            const newEnabled = item.item.state === "disabled";
-            this.callbacks.onToggle?.(item.item.id, newEnabled);
-         }
-         return;
-      }
+			for (const ext of items) {
+				this.listItems.push({ type: "extension", item: ext });
+			}
+		}
+	}
 
-      // Enter: expand/collapse group
-      if (isEnter(data)) {
-         const item = this.flatItems[this.selectedIndex];
-         if (item?.type === "group") {
-            item.group.collapsed = !item.group.collapsed;
-            this.rebuildGroups();
-            this.clampSelection();
-         }
-         return;
-      }
+	private getKindLabel(kind: ExtensionKind): string {
+		switch (kind) {
+			case "skill":
+				return "Skills";
+			case "tool":
+				return "Tools";
+			case "slash-command":
+				return "Commands";
+			case "rule":
+				return "Rules";
+			case "mcp":
+				return "MCP Servers";
+			case "hook":
+				return "Hooks";
+			case "prompt":
+				return "Prompts";
+			case "context-file":
+				return "Context";
+			case "instruction":
+				return "Instructions";
+			default:
+				return kind;
+		}
+	}
 
-      // Backspace: delete from search query
-      if (isBackspace(data)) {
-         if (this.searchQuery.length > 0) {
-            this.setSearchQuery(this.searchQuery.slice(0, -1));
-         }
-         return;
-      }
+	private clampSelection(): void {
+		if (this.listItems.length === 0) {
+			this.selectedIndex = 0;
+			this.scrollOffset = 0;
+			return;
+		}
 
-      // Printable characters (except special keys) -> search
-      // Skip j/k (navigation), skip space, skip control chars
-      if (data.length === 1 && charCode > 32 && charCode < 127) {
-         // Skip j/k as they're navigation
-         if (data === "j" || data === "k") {
-            return;
-         }
-         this.setSearchQuery(this.searchQuery + data);
-         return;
-      }
-   }
+		this.selectedIndex = Math.min(this.selectedIndex, this.listItems.length - 1);
+		this.selectedIndex = Math.max(0, this.selectedIndex);
 
-   private moveSelectionUp(): void {
-      if (this.selectedIndex > 0) {
-         this.selectedIndex--;
-         if (this.selectedIndex < this.scrollOffset) {
-            this.scrollOffset = this.selectedIndex;
-         }
-         this.notifySelectionChange();
-      }
-   }
+		// Adjust scroll offset
+		if (this.selectedIndex < this.scrollOffset) {
+			this.scrollOffset = this.selectedIndex;
+		} else if (this.selectedIndex >= this.scrollOffset + MAX_VISIBLE) {
+			this.scrollOffset = this.selectedIndex - MAX_VISIBLE + 1;
+		}
+	}
 
-   private moveSelectionDown(): void {
-      if (this.selectedIndex < this.flatItems.length - 1) {
-         this.selectedIndex++;
-         if (this.selectedIndex >= this.scrollOffset + MAX_VISIBLE) {
-            this.scrollOffset = this.selectedIndex - MAX_VISIBLE + 1;
-         }
-         this.notifySelectionChange();
-      }
-   }
+	handleInput(data: string): void {
+		const charCode = data.length === 1 ? data.charCodeAt(0) : -1;
 
-   private notifySelectionChange(): void {
-      const ext = this.getSelectedExtension();
-      this.callbacks.onSelectionChange?.(ext);
-   }
+		// Navigation
+		if (isArrowUp(data) || data === "k") {
+			this.moveSelectionUp();
+			return;
+		}
+
+		if (isArrowDown(data) || data === "j") {
+			this.moveSelectionDown();
+			return;
+		}
+
+		// Space: Toggle selected item
+		if (data === " ") {
+			const item = this.listItems[this.selectedIndex];
+			if (item?.type === "master") {
+				this.callbacks.onMasterToggle?.(item.providerId);
+			} else if (item?.type === "extension") {
+				// Only allow toggling if master is enabled
+				const masterDisabled = this.masterSwitchProvider !== null && !isProviderEnabled(this.masterSwitchProvider);
+				if (!masterDisabled) {
+					const newEnabled = item.item.state === "disabled";
+					this.callbacks.onToggle?.(item.item.id, newEnabled);
+				}
+			}
+			return;
+		}
+
+		// Enter: Same as space - toggle selected item
+		if (isEnter(data)) {
+			const item = this.listItems[this.selectedIndex];
+			if (item?.type === "master") {
+				this.callbacks.onMasterToggle?.(item.providerId);
+			} else if (item?.type === "extension") {
+				const masterDisabled = this.masterSwitchProvider !== null && !isProviderEnabled(this.masterSwitchProvider);
+				if (!masterDisabled) {
+					const newEnabled = item.item.state === "disabled";
+					this.callbacks.onToggle?.(item.item.id, newEnabled);
+				}
+			}
+			return;
+		}
+
+		// Backspace: Delete from search query
+		if (isBackspace(data)) {
+			if (this.searchQuery.length > 0) {
+				this.setSearchQuery(this.searchQuery.slice(0, -1));
+			}
+			return;
+		}
+
+		// Printable characters -> search
+		if (data.length === 1 && charCode > 32 && charCode < 127) {
+			// Skip j/k as they're navigation
+			if (data === "j" || data === "k") {
+				return;
+			}
+			this.setSearchQuery(this.searchQuery + data);
+			return;
+		}
+	}
+
+	private moveSelectionUp(): void {
+		if (this.selectedIndex > 0) {
+			this.selectedIndex--;
+			if (this.selectedIndex < this.scrollOffset) {
+				this.scrollOffset = this.selectedIndex;
+			}
+			this.notifySelectionChange();
+		}
+	}
+
+	private moveSelectionDown(): void {
+		if (this.selectedIndex < this.listItems.length - 1) {
+			this.selectedIndex++;
+			if (this.selectedIndex >= this.scrollOffset + MAX_VISIBLE) {
+				this.scrollOffset = this.selectedIndex - MAX_VISIBLE + 1;
+			}
+			this.notifySelectionChange();
+		}
+	}
+
+	private notifySelectionChange(): void {
+		const ext = this.getSelectedExtension();
+		this.callbacks.onSelectionChange?.(ext);
+	}
 }
