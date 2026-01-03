@@ -51,6 +51,10 @@ export interface MCPSettings {
 	enableProjectConfig?: boolean; // default: true (load .mcp.json from project root)
 }
 
+export interface LspSettings {
+	diagnosticsOnWrite?: boolean; // default: true (return LSP diagnostics after write tool writes code files)
+}
+
 export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
@@ -72,6 +76,7 @@ export interface Settings {
 	exa?: ExaSettings;
 	bashInterceptor?: BashInterceptorSettings;
 	mcp?: MCPSettings;
+	lsp?: LspSettings;
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -472,6 +477,18 @@ export class SettingsManager {
 			this.globalSettings.mcp = {};
 		}
 		this.globalSettings.mcp.enableProjectConfig = enabled;
+		this.save();
+	}
+
+	getLspDiagnosticsOnWrite(): boolean {
+		return this.settings.lsp?.diagnosticsOnWrite ?? true;
+	}
+
+	setLspDiagnosticsOnWrite(enabled: boolean): void {
+		if (!this.globalSettings.lsp) {
+			this.globalSettings.lsp = {};
+		}
+		this.globalSettings.lsp.diagnosticsOnWrite = enabled;
 		this.save();
 	}
 }

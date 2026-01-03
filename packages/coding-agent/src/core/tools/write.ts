@@ -2,6 +2,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import { mkdir, writeFile } from "fs/promises";
 import { dirname } from "path";
+import type { FileDiagnosticsResult } from "./lsp/index.js";
 import { resolveToCwd } from "./path-utils.js";
 
 const writeSchema = Type.Object({
@@ -9,7 +10,24 @@ const writeSchema = Type.Object({
 	content: Type.String({ description: "Content to write to the file" }),
 });
 
-export function createWriteTool(cwd: string): AgentTool<typeof writeSchema> {
+/** Options for creating the write tool */
+export interface WriteToolOptions {
+	/** Callback to get LSP diagnostics after writing a file */
+	getDiagnostics?: (absolutePath: string) => Promise<FileDiagnosticsResult>;
+}
+
+/** Details returned by the write tool for TUI rendering */
+export interface WriteToolDetails {
+	/** Whether LSP diagnostics were retrieved */
+	hasDiagnostics: boolean;
+	/** Diagnostic result (if available) */
+	diagnostics?: FileDiagnosticsResult;
+}
+
+export function createWriteTool(
+	cwd: string,
+	options: WriteToolOptions = {},
+): AgentTool<typeof writeSchema, WriteToolDetails> {
 	return {
 		name: "write",
 		label: "Write",
@@ -30,7 +48,7 @@ Usage:
 			const absolutePath = resolveToCwd(path, cwd);
 			const dir = dirname(absolutePath);
 
-			return new Promise<{ content: Array<{ type: "text"; text: string }>; details: undefined }>(
+			return new Promise<{ content: Array<{ type: "text"; text: string }>; details: WriteToolDetails }>(
 				(resolve, reject) => {
 					// Check if already aborted
 					if (signal?.aborted) {
@@ -74,9 +92,31 @@ Usage:
 								signal.removeEventListener("abort", onAbort);
 							}
 
+							// Get LSP diagnostics if callback provided
+							let diagnosticsResult: FileDiagnosticsResult | undefined;
+							if (options.getDiagnostics) {
+								try {
+									diagnosticsResult = await options.getDiagnostics(absolutePath);
+								} catch {
+									// Ignore diagnostics errors - don't fail the write
+								}
+							}
+
+							// Build result text
+							let resultText = `Successfully wrote ${content.length} bytes to ${path}`;
+
+							// Append diagnostics if available and there are issues
+							if (diagnosticsResult?.available && diagnosticsResult.diagnostics.length > 0) {
+								resultText += `\n\nLSP Diagnostics (${diagnosticsResult.summary}):\n`;
+								resultText += diagnosticsResult.diagnostics.map((d) => `  ${d}`).join("\n");
+							}
+
 							resolve({
-								content: [{ type: "text", text: `Successfully wrote ${content.length} bytes to ${path}` }],
-								details: undefined,
+								content: [{ type: "text", text: resultText }],
+								details: {
+									hasDiagnostics: diagnosticsResult?.available ?? false,
+									diagnostics: diagnosticsResult,
+								},
 							});
 						} catch (error: any) {
 							// Clean up abort handler

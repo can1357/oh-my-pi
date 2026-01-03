@@ -33,6 +33,14 @@ export const SERVERS: Record<string, ServerConfig> = {
 		fileTypes: [".ts", ".tsx", ".js", ".jsx"],
 		rootMarkers: ["package.json", "tsconfig.json", "jsconfig.json"],
 	},
+	biome: {
+		command: "biome",
+		args: ["lsp-proxy"],
+		fileTypes: [".ts", ".tsx", ".js", ".jsx", ".json", ".jsonc"],
+		rootMarkers: ["biome.json", "biome.jsonc"],
+		// Biome is a linter/formatter, not a type-checker - used for supplementary diagnostics
+		isLinter: true,
+	},
 	gopls: {
 		command: "gopls",
 		args: ["serve"],
@@ -123,17 +131,34 @@ export function loadConfig(cwd: string): LspConfig {
 }
 
 /**
- * Find the appropriate server for a file based on extension
+ * Find all servers that can handle a file based on extension.
+ * Returns servers sorted with primary (non-linter) servers first.
  */
-export function getServerForFile(config: LspConfig, filePath: string): [string, ServerConfig] | null {
+export function getServersForFile(config: LspConfig, filePath: string): Array<[string, ServerConfig]> {
 	const ext = extname(filePath).toLowerCase();
+	const matches: Array<[string, ServerConfig]> = [];
 
 	for (const [name, serverConfig] of Object.entries(config.servers)) {
 		if (serverConfig.fileTypes.includes(ext)) {
-			return [name, serverConfig];
+			matches.push([name, serverConfig]);
 		}
 	}
-	return null;
+
+	// Sort: primary servers (non-linters) first, then linters
+	return matches.sort((a, b) => {
+		const aIsLinter = a[1].isLinter ? 1 : 0;
+		const bIsLinter = b[1].isLinter ? 1 : 0;
+		return aIsLinter - bIsLinter;
+	});
+}
+
+/**
+ * Find the primary server for a file (prefers type-checkers over linters).
+ * Used for operations like definition, hover, references that need type intelligence.
+ */
+export function getServerForFile(config: LspConfig, filePath: string): [string, ServerConfig] | null {
+	const servers = getServersForFile(config, filePath);
+	return servers.length > 0 ? servers[0] : null;
 }
 
 /**

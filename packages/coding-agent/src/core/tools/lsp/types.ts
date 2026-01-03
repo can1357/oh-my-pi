@@ -336,6 +336,8 @@ export interface ServerConfig {
 	settings?: Record<string, unknown>;
 	disabled?: boolean;
 	capabilities?: ServerCapabilities;
+	/** If true, this is a linter/formatter server (e.g., Biome) - used only for diagnostics/actions, not type intelligence */
+	isLinter?: boolean;
 }
 
 // =============================================================================

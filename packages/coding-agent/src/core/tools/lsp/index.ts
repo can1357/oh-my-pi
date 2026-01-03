@@ -4,7 +4,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Theme } from "../../../modes/interactive/theme/theme.js";
 import { resolveToCwd } from "../path-utils.js";
 import { ensureFileOpen, getOrCreateClient, refreshFile, sendRequest } from "./client.js";
-import { getServerForFile, hasCapability, type LspConfig, loadConfig } from "./config.js";
+import { getServerForFile, getServersForFile, hasCapability, type LspConfig, loadConfig } from "./config.js";
 import { applyWorkspaceEdit } from "./edits.js";
 import { renderCall, renderResult } from "./render.js";
 import * as rustAnalyzer from "./rust-analyzer.js";
@@ -139,6 +139,119 @@ async function waitForDiagnostics(client: LspClient, uri: string, timeoutMs = 30
 	return client.diagnostics.get(uri) ?? [];
 }
 
+/** Result from getDiagnosticsForFile */
+export interface FileDiagnosticsResult {
+	/** Whether an LSP server was available for the file type */
+	available: boolean;
+	/** Name of the LSP server used (if available) */
+	serverName?: string;
+	/** Formatted diagnostic messages */
+	diagnostics: string[];
+	/** Summary string (e.g., "2 error(s), 1 warning(s)") */
+	summary: string;
+	/** Whether there are any errors (severity 1) */
+	hasErrors: boolean;
+	/** Whether there are any warnings (severity 2) */
+	hasWarnings: boolean;
+}
+
+/**
+ * Get LSP diagnostics for a file after it has been written.
+ * Queries all applicable language servers (e.g., TypeScript + Biome) and merges results.
+ *
+ * @param absolutePath - Absolute path to the file
+ * @param cwd - Working directory for LSP config resolution
+ * @param timeoutMs - Timeout for waiting for diagnostics per server (default: 2000ms)
+ * @returns Diagnostic results or null if no LSP server available
+ */
+export async function getDiagnosticsForFile(
+	absolutePath: string,
+	cwd: string,
+	timeoutMs = 2000,
+): Promise<FileDiagnosticsResult> {
+	const config = getConfig(cwd);
+	const servers = getServersForFile(config, absolutePath);
+
+	if (servers.length === 0) {
+		return {
+			available: false,
+			diagnostics: [],
+			summary: "",
+			hasErrors: false,
+			hasWarnings: false,
+		};
+	}
+
+	const uri = fileToUri(absolutePath);
+	const relPath = path.relative(cwd, absolutePath);
+	const allDiagnostics: Diagnostic[] = [];
+	const serverNames: string[] = [];
+
+	// Query all applicable servers in parallel
+	const results = await Promise.allSettled(
+		servers.map(async ([serverName, serverConfig]) => {
+			const client = await getOrCreateClient(serverConfig, cwd);
+			await refreshFile(client, absolutePath);
+			const diagnostics = await waitForDiagnostics(client, uri, timeoutMs);
+			return { serverName, diagnostics };
+		}),
+	);
+
+	for (const result of results) {
+		if (result.status === "fulfilled") {
+			serverNames.push(result.value.serverName);
+			allDiagnostics.push(...result.value.diagnostics);
+		}
+	}
+
+	if (serverNames.length === 0) {
+		// All servers failed
+		return {
+			available: false,
+			diagnostics: [],
+			summary: "",
+			hasErrors: false,
+			hasWarnings: false,
+		};
+	}
+
+	if (allDiagnostics.length === 0) {
+		return {
+			available: true,
+			serverName: serverNames.join(", "),
+			diagnostics: [],
+			summary: "No issues",
+			hasErrors: false,
+			hasWarnings: false,
+		};
+	}
+
+	// Deduplicate diagnostics by range + message (different servers might report similar issues)
+	const seen = new Set<string>();
+	const uniqueDiagnostics: Diagnostic[] = [];
+	for (const d of allDiagnostics) {
+		const key = `${d.range.start.line}:${d.range.start.character}:${d.range.end.line}:${d.range.end.character}:${d.message}`;
+		if (!seen.has(key)) {
+			seen.add(key);
+			uniqueDiagnostics.push(d);
+		}
+	}
+
+	const formatted = uniqueDiagnostics.map((d) => formatDiagnostic(d, relPath));
+	const summary = formatDiagnosticsSummary(uniqueDiagnostics);
+	const hasErrors = uniqueDiagnostics.some((d) => d.severity === 1);
+	const hasWarnings = uniqueDiagnostics.some((d) => d.severity === 2);
+
+	return {
+		available: true,
+		serverName: serverNames.join(", "),
+		diagnostics: formatted,
+		summary,
+		hasErrors,
+		hasWarnings,
+	};
+}
+
 export function createLspTool(cwd: string): AgentTool<typeof lspSchema, LspToolDetails, Theme> {
 	return {
 		name: "lsp",
@@ -201,7 +314,7 @@ Rust-analyzer specific (require rust-analyzer):
 				};
 			}
 
-			// Diagnostics can be batch or single-file
+			// Diagnostics can be batch or single-file - queries all applicable servers
 			if (action === "diagnostics") {
 				const targets = files?.length ? files : file ? [file] : null;
 				if (!targets) {
@@ -213,49 +326,67 @@ Rust-analyzer specific (require rust-analyzer):
 
 				const detailed = Boolean(files?.length);
 				const results: string[] = [];
-				let lastServerName: string | undefined;
+				const allServerNames = new Set<string>();
 
 				for (const target of targets) {
 					const resolved = resolveToCwd(target, cwd);
-					const serverInfo = getServerForFile(config, resolved);
-					if (!serverInfo) {
+					const servers = getServersForFile(config, resolved);
+					if (servers.length === 0) {
 						results.push(`✗ ${target}: No language server found`);
 						continue;
 					}
 
-					const [serverName, serverConfig] = serverInfo;
-					lastServerName = serverName;
-
-					const client = await getOrCreateClient(serverConfig, cwd);
-					await refreshFile(client, resolved);
-
 					const uri = fileToUri(resolved);
-					const diagnostics = await waitForDiagnostics(client, uri);
 					const relPath = path.relative(cwd, resolved);
+					const allDiagnostics: Diagnostic[] = [];
+
+					// Query all applicable servers for this file
+					for (const [serverName, serverConfig] of servers) {
+						allServerNames.add(serverName);
+						try {
+							const client = await getOrCreateClient(serverConfig, cwd);
+							await refreshFile(client, resolved);
+							const diagnostics = await waitForDiagnostics(client, uri);
+							allDiagnostics.push(...diagnostics);
+						} catch {
+							// Server failed, continue with others
+						}
+					}
+
+					// Deduplicate diagnostics
+					const seen = new Set<string>();
+					const uniqueDiagnostics: Diagnostic[] = [];
+					for (const d of allDiagnostics) {
+						const key = `${d.range.start.line}:${d.range.start.character}:${d.range.end.line}:${d.range.end.character}:${d.message}`;
+						if (!seen.has(key)) {
+							seen.add(key);
+							uniqueDiagnostics.push(d);
+						}
+					}
 
 					if (!detailed && targets.length === 1) {
-						if (diagnostics.length === 0) {
+						if (uniqueDiagnostics.length === 0) {
 							return {
 								content: [{ type: "text", text: "No diagnostics" }],
-								details: { action, serverName, success: true },
+								details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
 							};
 						}
 
-						const summary = formatDiagnosticsSummary(diagnostics);
-						const formatted = diagnostics.map((d) => formatDiagnostic(d, relPath));
+						const summary = formatDiagnosticsSummary(uniqueDiagnostics);
+						const formatted = uniqueDiagnostics.map((d) => formatDiagnostic(d, relPath));
 						const output = `${summary}:\n${formatted.map((f) => `  ${f}`).join("\n")}`;
 						return {
 							content: [{ type: "text", text: output }],
-							details: { action, serverName, success: true },
+							details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
 						};
 					}
 
-					if (diagnostics.length === 0) {
+					if (uniqueDiagnostics.length === 0) {
 						results.push(`✓ ${relPath}: no issues`);
 					} else {
-						const summary = formatDiagnosticsSummary(diagnostics);
+						const summary = formatDiagnosticsSummary(uniqueDiagnostics);
 						results.push(`✗ ${relPath}: ${summary}`);
-						for (const diag of diagnostics) {
+						for (const diag of uniqueDiagnostics) {
 							results.push(`  ${formatDiagnostic(diag, relPath)}`);
 						}
 					}
@@ -263,7 +394,7 @@ Rust-analyzer specific (require rust-analyzer):
 
 				return {
 					content: [{ type: "text", text: results.join("\n") }],
-					details: { action, serverName: lastServerName, success: true },
+					details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
 				};
 			}
 

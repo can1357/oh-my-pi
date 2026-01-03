@@ -31,7 +31,7 @@ export {
 	webSearchLinkedinTool,
 	webSearchTool,
 } from "./web-search/index.js";
-export { createWriteTool, writeTool } from "./write.js";
+export { createWriteTool, type WriteToolDetails, type WriteToolOptions, writeTool } from "./write.js";
 
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { askTool, createAskTool } from "./ask.js";
@@ -41,7 +41,7 @@ import { createEditTool, editTool } from "./edit.js";
 import { createFindTool, findTool } from "./find.js";
 import { createGrepTool, grepTool } from "./grep.js";
 import { createLsTool, lsTool } from "./ls.js";
-import { createLspTool, lspTool } from "./lsp/index.js";
+import { createLspTool, getDiagnosticsForFile, lspTool } from "./lsp/index.js";
 import { createNotebookTool, notebookTool } from "./notebook.js";
 import { createReadTool, readTool } from "./read.js";
 import { createTaskTool, taskTool } from "./task/index.js";
@@ -57,8 +57,14 @@ export interface SessionContext {
 	getSessionFile: () => string | null;
 }
 
+/** Options for creating coding tools */
+export interface CodingToolsOptions {
+	/** Whether to fetch LSP diagnostics after write tool writes files (default: true) */
+	lspDiagnosticsOnWrite?: boolean;
+}
+
 // Factory function type
-type ToolFactory = (cwd: string, sessionContext?: SessionContext) => Tool;
+type ToolFactory = (cwd: string, sessionContext?: SessionContext, options?: CodingToolsOptions) => Tool;
 
 // Tool definitions: static tools and their factory functions
 const toolDefs: Record<string, { tool: Tool; create: ToolFactory }> = {
@@ -66,7 +72,15 @@ const toolDefs: Record<string, { tool: Tool; create: ToolFactory }> = {
 	read: { tool: readTool, create: createReadTool },
 	bash: { tool: bashTool, create: createBashTool },
 	edit: { tool: editTool, create: createEditTool },
-	write: { tool: writeTool, create: createWriteTool },
+	write: {
+		tool: writeTool,
+		create: (cwd, _ctx, options) => {
+			const enableDiagnostics = options?.lspDiagnosticsOnWrite ?? true;
+			return createWriteTool(cwd, {
+				getDiagnostics: enableDiagnostics ? (absolutePath) => getDiagnosticsForFile(absolutePath, cwd) : undefined,
+			});
+		},
+	},
 	grep: { tool: grepTool, create: createGrepTool },
 	find: { tool: findTool, create: createFindTool },
 	ls: { tool: lsTool, create: createLsTool },
@@ -116,10 +130,16 @@ export const allTools = Object.fromEntries(Object.entries(toolDefs).map(([name, 
  * @param cwd - Working directory for tools
  * @param hasUI - Whether UI is available (includes ask tool if true)
  * @param sessionContext - Optional session context for tools that need it
+ * @param options - Options for tool configuration
  */
-export function createCodingTools(cwd: string, hasUI = false, sessionContext?: SessionContext): Tool[] {
+export function createCodingTools(
+	cwd: string,
+	hasUI = false,
+	sessionContext?: SessionContext,
+	options?: CodingToolsOptions,
+): Tool[] {
 	const names = hasUI ? [...baseCodingToolNames, ...uiToolNames] : baseCodingToolNames;
-	return names.map((name) => toolDefs[name].create(cwd, sessionContext));
+	return names.map((name) => toolDefs[name].create(cwd, sessionContext, options));
 }
 
 /**
@@ -127,20 +147,31 @@ export function createCodingTools(cwd: string, hasUI = false, sessionContext?: S
  * @param cwd - Working directory for tools
  * @param hasUI - Whether UI is available (includes ask tool if true)
  * @param sessionContext - Optional session context for tools that need it
+ * @param options - Options for tool configuration
  */
-export function createReadOnlyTools(cwd: string, hasUI = false, sessionContext?: SessionContext): Tool[] {
+export function createReadOnlyTools(
+	cwd: string,
+	hasUI = false,
+	sessionContext?: SessionContext,
+	options?: CodingToolsOptions,
+): Tool[] {
 	const names = hasUI ? [...baseReadOnlyToolNames, ...uiToolNames] : baseReadOnlyToolNames;
-	return names.map((name) => toolDefs[name].create(cwd, sessionContext));
+	return names.map((name) => toolDefs[name].create(cwd, sessionContext, options));
 }
 
 /**
  * Create all tools configured for a specific working directory.
  * @param cwd - Working directory for tools
  * @param sessionContext - Optional session context for tools that need it
+ * @param options - Options for tool configuration
  */
-export function createAllTools(cwd: string, sessionContext?: SessionContext): Record<ToolName, Tool> {
+export function createAllTools(
+	cwd: string,
+	sessionContext?: SessionContext,
+	options?: CodingToolsOptions,
+): Record<ToolName, Tool> {
 	return Object.fromEntries(
-		Object.entries(toolDefs).map(([name, def]) => [name, def.create(cwd, sessionContext)]),
+		Object.entries(toolDefs).map(([name, def]) => [name, def.create(cwd, sessionContext, options)]),
 	) as Record<ToolName, Tool>;
 }
 

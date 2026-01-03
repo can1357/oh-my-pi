@@ -136,6 +136,15 @@ export const SETTINGS_DEFS: SettingDef[] = [
 		set: (sm, v) => sm.setMCPProjectConfigEnabled(v),
 	},
 	{
+		id: "lspDiagnosticsOnWrite",
+		tab: "config",
+		type: "boolean",
+		label: "LSP diagnostics on write",
+		description: "Return LSP diagnostics (errors/warnings) after writing code files",
+		get: (sm) => sm.getLspDiagnosticsOnWrite(),
+		set: (sm, v) => sm.setLspDiagnosticsOnWrite(v),
+	},
+	{
 		id: "thinkingLevel",
 		tab: "config",
 		type: "submenu",

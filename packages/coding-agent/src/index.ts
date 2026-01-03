@@ -123,6 +123,7 @@ export {
 } from "./core/session-manager.js";
 export {
 	type CompactionSettings,
+	type LspSettings,
 	type RetrySettings,
 	type Settings,
 	SettingsManager,
@@ -143,6 +144,7 @@ export {
 export {
 	type BashToolDetails,
 	bashTool,
+	type CodingToolsOptions,
 	codingTools,
 	editTool,
 	type FindToolDetails,
@@ -154,8 +156,11 @@ export {
 	type ReadToolDetails,
 	readTool,
 	type TruncationResult,
+	type WriteToolDetails,
+	type WriteToolOptions,
 	writeTool,
 } from "./core/tools/index.js";
+export type { FileDiagnosticsResult } from "./core/tools/lsp/index.js";
 // Main entry point
 export { main } from "./main.js";
 // UI components for hooks and custom tools

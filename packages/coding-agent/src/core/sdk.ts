@@ -566,7 +566,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const sessionContext = {
 		getSessionFile: () => sessionManager.getSessionFile() ?? null,
 	};
-	const builtInTools = options.tools ?? createCodingTools(cwd, options.hasUI ?? false, sessionContext);
+	const builtInTools =
+		options.tools ??
+		createCodingTools(cwd, options.hasUI ?? false, sessionContext, {
+			lspDiagnosticsOnWrite: settingsManager.getLspDiagnosticsOnWrite(),
+		});
 	time("createCodingTools");
 
 	let customToolsResult: CustomToolsLoadResult;

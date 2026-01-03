@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- LSP diagnostics on write: Write tool now returns LSP diagnostics (errors/warnings) after writing code files. This gives immediate feedback on syntax errors and type issues. Controlled via `lsp.diagnosticsOnWrite` setting (enabled by default).
+- Multi-server LSP diagnostics: Diagnostics now query all applicable language servers for a file type. For TypeScript/JavaScript projects with Biome, this means both type errors (from tsserver) and lint errors (from Biome) are reported together.
+
 ## [1.340.0] - 2026-01-03
 
 ### Changed
