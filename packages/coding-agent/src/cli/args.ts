@@ -12,6 +12,8 @@ export type Mode = "text" | "json" | "rpc";
 export interface Args {
 	provider?: string;
 	model?: string;
+	smol?: string;
+	slow?: string;
 	apiKey?: string;
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
@@ -69,6 +71,10 @@ export function parseArgs(args: string[]): Args {
 			result.provider = args[++i];
 		} else if (arg === "--model" && i + 1 < args.length) {
 			result.model = args[++i];
+		} else if (arg === "--smol" && i + 1 < args.length) {
+			result.smol = args[++i];
+		} else if (arg === "--slow" && i + 1 < args.length) {
+			result.slow = args[++i];
 		} else if (arg === "--api-key" && i + 1 < args.length) {
 			result.apiKey = args[++i];
 		} else if (arg === "--system-prompt" && i + 1 < args.length) {
@@ -148,6 +154,8 @@ ${chalk.bold("Usage:")}
 ${chalk.bold("Options:")}
   --provider <name>              Provider name (default: google)
   --model <id>                   Model ID (default: gemini-2.5-flash)
+  --smol <id>                    Small/fast model for lightweight tasks (or PI_SMOL_MODEL env)
+  --slow <id>                    Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)
   --api-key <key>                API key (defaults to env vars)
   --system-prompt <text>         System prompt (default: coding assistant prompt)
   --append-system-prompt <text>  Append text or file contents to the system prompt
