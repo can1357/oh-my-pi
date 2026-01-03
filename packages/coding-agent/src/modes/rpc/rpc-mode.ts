@@ -11,6 +11,7 @@
  * - Hook UI: Hook UI requests are emitted, client responds with hook_ui_response
  */
 
+import { nanoid } from "nanoid";
 import type { AgentSession } from "../../core/agent-session";
 import type { HookUIContext } from "../../core/hooks/index";
 import { logger } from "../../core/logger";
@@ -52,7 +53,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 	 */
 	const createHookUIContext = (): HookUIContext => ({
 		async select(title: string, options: string[]): Promise<string | undefined> {
-			const id = crypto.randomUUID();
+			const id = nanoid();
 			return new Promise((resolve, reject) => {
 				pendingHookRequests.set(id, {
 					resolve: (response: RpcHookUIResponse) => {
@@ -71,7 +72,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 		},
 
 		async confirm(title: string, message: string): Promise<boolean> {
-			const id = crypto.randomUUID();
+			const id = nanoid();
 			return new Promise((resolve, reject) => {
 				pendingHookRequests.set(id, {
 					resolve: (response: RpcHookUIResponse) => {
@@ -90,7 +91,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 		},
 
 		async input(title: string, placeholder?: string): Promise<string | undefined> {
-			const id = crypto.randomUUID();
+			const id = nanoid();
 			return new Promise((resolve, reject) => {
 				pendingHookRequests.set(id, {
 					resolve: (response: RpcHookUIResponse) => {
@@ -112,7 +113,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// Fire and forget - no response needed
 			output({
 				type: "hook_ui_request",
-				id: crypto.randomUUID(),
+				id: nanoid(),
 				method: "notify",
 				message,
 				notifyType: type,
@@ -123,7 +124,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// Fire and forget - no response needed
 			output({
 				type: "hook_ui_request",
-				id: crypto.randomUUID(),
+				id: nanoid(),
 				method: "setStatus",
 				statusKey: key,
 				statusText: text,
@@ -139,7 +140,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// Fire and forget - host can implement editor control
 			output({
 				type: "hook_ui_request",
-				id: crypto.randomUUID(),
+				id: nanoid(),
 				method: "set_editor_text",
 				text,
 			} as RpcHookUIRequest);
@@ -152,7 +153,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 		},
 
 		async editor(title: string, prefill?: string): Promise<string | undefined> {
-			const id = crypto.randomUUID();
+			const id = nanoid();
 			return new Promise((resolve, reject) => {
 				pendingHookRequests.set(id, {
 					resolve: (response: RpcHookUIResponse) => {

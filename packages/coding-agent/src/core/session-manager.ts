@@ -13,6 +13,7 @@ import {
 import { join, resolve } from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import { nanoid } from "nanoid";
 import { getAgentDir as getDefaultAgentDir } from "../config";
 import {
 	type BashExecutionMessage,
@@ -196,11 +197,10 @@ export type ReadonlySessionManager = Pick<
 /** Generate a unique short ID (8 hex chars, collision-checked) */
 function generateId(byId: { has(id: string): boolean }): string {
 	for (let i = 0; i < 100; i++) {
-		const id = crypto.randomUUID().slice(0, 8);
+		const id = nanoid(8);
 		if (!byId.has(id)) return id;
 	}
-	// Fallback to full UUID if somehow we have collisions
-	return crypto.randomUUID();
+	return nanoid(); // fallback to full nanoid
 }
 
 /** Migrate v1 → v2: add id/parentId tree structure. Mutates in place. */
@@ -451,42 +451,105 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	return entries;
 }
 
-function isValidSessionFile(filePath: string): boolean {
+/**
+ * Lightweight metadata for a session file, used in session picker UI.
+ * Uses lazy getters to defer string formatting until actually displayed.
+ */
+class RecentSessionInfo {
+	readonly path: string;
+	readonly mtime: number;
+
+	#fullName: string | undefined;
+	#name: string | undefined;
+	#timeAgo: string | undefined;
+
+	constructor(path: string, mtime: number, header: Record<string, unknown>) {
+		this.path = path;
+		this.mtime = mtime;
+
+		// Extract title from session header, falling back to id if title is missing
+		const trystr = (v: unknown) => (typeof v === "string" ? v : undefined);
+		this.#fullName = trystr(header.title) ?? trystr(header.id);
+	}
+
+	/** Full session name from header, or filename without extension as fallback */
+	get fullName(): string {
+		if (this.#fullName) return this.#fullName;
+		this.#fullName = this.path.split("/").pop()?.replace(".jsonl", "") ?? "Unknown";
+		return this.#fullName;
+	}
+
+	/** Truncated name for display (max 40 chars) */
+	get name(): string {
+		if (this.#name) return this.#name;
+		const fullName = this.fullName;
+		this.#name = fullName.length <= 40 ? fullName : `${fullName.slice(0, 37)}...`;
+		return this.#name;
+	}
+
+	/** Human-readable relative time (e.g., "2 hours ago") */
+	get timeAgo(): string {
+		if (this.#timeAgo) return this.#timeAgo;
+		this.#timeAgo = formatTimeAgo(new Date(this.mtime));
+		return this.#timeAgo;
+	}
+}
+
+/**
+ * Reads all session files from the directory and returns them sorted by mtime (newest first).
+ * Uses low-level file I/O to efficiently read only the first 512 bytes of each file
+ * to extract the JSON header without loading entire session logs into memory.
+ */
+function getSortedSessions(sessionDir: string): RecentSessionInfo[] {
 	try {
-		const fd = openSync(filePath, "r");
-		const buffer = Buffer.alloc(512);
-		const bytesRead = readSync(fd, buffer, 0, 512, 0);
-		closeSync(fd);
-		const firstLine = buffer.toString("utf8", 0, bytesRead).split("\n")[0];
-		if (!firstLine) return false;
-		const header = JSON.parse(firstLine);
-		return header.type === "session" && typeof header.id === "string";
+		// Reusable buffer for reading file headers
+		const buf = Buffer.allocUnsafe(512);
+
+		/**
+		 * Reads the first line (JSON header) from an open file descriptor.
+		 * Returns null if the file is empty or doesn't start with valid JSON.
+		 */
+		const readHeader = (fd: number) => {
+			const bytesRead = readSync(fd, buf, 0, 512, 0);
+			if (bytesRead === 0) return null;
+			const sub = buf.subarray(0, bytesRead);
+			// Quick check: first char must be '{' for valid JSON object
+			if (sub.at(0) !== "{".charCodeAt(0)) return null;
+			// Find end of first JSON line
+			const eol = sub.indexOf("}\n");
+			if (eol <= 0) return null;
+			return JSON.parse(sub.toString("utf8", 0, eol + 1));
+		};
+
+		return readdirSync(sessionDir)
+			.map((f) => {
+				try {
+					if (!f.endsWith(".jsonl")) return null;
+					const path = join(sessionDir, f);
+					const fd = openSync(path, "r");
+					try {
+						const header = readHeader(fd);
+						if (!header) return null;
+						const mtime = statSync(path).mtimeMs;
+						return new RecentSessionInfo(path, mtime, header);
+					} finally {
+						closeSync(fd);
+					}
+				} catch {
+					return null;
+				}
+			})
+			.filter((x) => x !== null)
+			.sort((a, b) => b.mtime - a.mtime); // Sort newest first
 	} catch {
-		return false;
+		return [];
 	}
 }
 
 /** Exported for testing */
 export function findMostRecentSession(sessionDir: string): string | null {
-	try {
-		const files = readdirSync(sessionDir)
-			.filter((f) => f.endsWith(".jsonl"))
-			.map((f) => join(sessionDir, f))
-			.filter(isValidSessionFile)
-			.map((path) => ({ path, mtime: statSync(path).mtime }))
-			.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
-
-		return files[0]?.path || null;
-	} catch {
-		return null;
-	}
-}
-
-/** Recent session info for display */
-export interface RecentSessionInfo {
-	name: string;
-	path: string;
-	timeAgo: string;
+	const sessions = getSortedSessions(sessionDir);
+	return sessions[0]?.path || null;
 }
 
 /** Format a time difference as a human-readable string */
@@ -506,41 +569,7 @@ function formatTimeAgo(date: Date): string {
 
 /** Get recent sessions for display in welcome screen */
 export function getRecentSessions(sessionDir: string, limit = 3): RecentSessionInfo[] {
-	try {
-		const files = readdirSync(sessionDir)
-			.filter((f) => f.endsWith(".jsonl"))
-			.map((f) => join(sessionDir, f))
-			.filter(isValidSessionFile)
-			.map((path) => {
-				const stat = statSync(path);
-				// Try to get session title or id from first line
-				let name = path.split("/").pop()?.replace(".jsonl", "") ?? "Unknown";
-				try {
-					const content = readFileSync(path, "utf-8");
-					const firstLine = content.split("\n")[0];
-					if (firstLine) {
-						const header = JSON.parse(firstLine) as SessionHeader;
-						if (header.type === "session") {
-							// Prefer title over id
-							name = header.title ?? header.id ?? name;
-						}
-					}
-				} catch {
-					// Use filename as fallback
-				}
-				return { path, name, mtime: stat.mtime };
-			})
-			.sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
-			.slice(0, limit);
-
-		return files.map((f) => ({
-			name: f.name.length > 40 ? `${f.name.slice(0, 37)}...` : f.name,
-			path: f.path,
-			timeAgo: formatTimeAgo(f.mtime),
-		}));
-	} catch {
-		return [];
-	}
+	return getSortedSessions(sessionDir).slice(0, limit);
 }
 
 /**
@@ -588,7 +617,7 @@ export class SessionManager {
 		if (existsSync(this.sessionFile)) {
 			this.fileEntries = loadEntriesFromFile(this.sessionFile);
 			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
-			this.sessionId = header?.id ?? crypto.randomUUID();
+			this.sessionId = header?.id ?? nanoid();
 			this.sessionTitle = header?.title;
 
 			if (migrateToCurrentVersion(this.fileEntries)) {
@@ -603,7 +632,7 @@ export class SessionManager {
 	}
 
 	newSession(options?: NewSessionOptions): string | undefined {
-		this.sessionId = crypto.randomUUID();
+		this.sessionId = nanoid();
 		const timestamp = new Date().toISOString();
 		const header: SessionHeader = {
 			type: "session",
@@ -1081,7 +1110,7 @@ export class SessionManager {
 		// Filter out LabelEntry from path - we'll recreate them from the resolved map
 		const pathWithoutLabels = path.filter((e) => e.type !== "label");
 
-		const newSessionId = crypto.randomUUID();
+		const newSessionId = nanoid();
 		const timestamp = new Date().toISOString();
 		const fileTimestamp = timestamp.replace(/[:.]/g, "-");
 		const newSessionFile = join(this.getSessionDir(), `${fileTimestamp}_${newSessionId}.jsonl`);

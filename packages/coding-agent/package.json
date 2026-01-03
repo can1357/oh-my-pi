@@ -52,6 +52,7 @@
 		"highlight.js": "^11.11.1",
 		"marked": "^15.0.12",
 		"minimatch": "^10.1.1",
+		"nanoid": "^5.1.6",
 		"node-html-parser": "^6.1.13",
 		"smol-toml": "^1.6.0",
 		"strip-ansi": "^7.1.2",
