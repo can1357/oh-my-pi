@@ -4,41 +4,16 @@ import type { AgentState } from "@oh-my-pi/pi-agent-core";
 import { APP_NAME } from "../../config";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme";
 import { SessionManager } from "../session-manager";
-// Embed template files at build time
-import templateCss from "./template-css.txt" with { type: "text" };
-import templateHtml from "./template-html.txt" with { type: "text" };
-import templateJs from "./template-js.txt" with { type: "text" };
 
-/** Minify CSS by removing comments, unnecessary whitespace, and newlines. */
-function minifyCss(css: string): string {
-	return css
-		.replace(/\/\*[\s\S]*?\*\//g, "") // Remove comments
-		.replace(/\s+/g, " ") // Collapse whitespace
-		.replace(/\s*([{}:;,>+~])\s*/g, "$1") // Remove space around punctuation
-		.replace(/;}/g, "}") // Remove trailing semicolons
-		.trim();
-}
-
-/** Minify JS using Bun's transpiler. */
-function minifyJs(js: string): string {
-	const transpiler = new Bun.Transpiler({ loader: "js", minifyWhitespace: true });
-	return transpiler.transformSync(js);
-}
-
-/** Minify HTML by collapsing whitespace outside of tags. */
-function minifyHtml(html: string): string {
-	return html
-		.replace(/>\s+</g, "><") // Remove whitespace between tags
-		.replace(/\s{2,}/g, " ") // Collapse multiple spaces
-		.trim();
-}
+// Bun macro: bundles HTML+CSS+JS at compile time, evaluated at bundle time
+import { getTemplate } from "./template.macro" with { type: "macro" };
 
 export interface ExportOptions {
 	outputPath?: string;
 	themeName?: string;
 }
 
-/** Parse a color string to RGB values. Supports hex (#RRGGBB) and rgb(r,g,b) formats. */
+/** Parse a color string to RGB values. */
 function parseColor(color: string): { r: number; g: number; b: number } | undefined {
 	const hexMatch = color.match(/^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/);
 	if (hexMatch) {
@@ -68,7 +43,7 @@ function getLuminance(r: number, g: number, b: number): number {
 	return 0.2126 * toLinear(r) + 0.7152 * toLinear(g) + 0.0722 * toLinear(b);
 }
 
-/** Adjust color brightness. Factor > 1 lightens, < 1 darkens. */
+/** Adjust color brightness. */
 function adjustBrightness(color: string, factor: number): string {
 	const parsed = parseColor(color);
 	if (!parsed) return color;
@@ -76,21 +51,15 @@ function adjustBrightness(color: string, factor: number): string {
 	return `rgb(${adjust(parsed.r)}, ${adjust(parsed.g)}, ${adjust(parsed.b)})`;
 }
 
-/** Derive export background colors from a base color (e.g., userMessageBg). */
+/** Derive export background colors from a base color. */
 function deriveExportColors(baseColor: string): { pageBg: string; cardBg: string; infoBg: string } {
 	const parsed = parseColor(baseColor);
 	if (!parsed) {
-		return {
-			pageBg: "rgb(24, 24, 30)",
-			cardBg: "rgb(30, 30, 36)",
-			infoBg: "rgb(60, 55, 40)",
-		};
+		return { pageBg: "rgb(24, 24, 30)", cardBg: "rgb(30, 30, 36)", infoBg: "rgb(60, 55, 40)" };
 	}
 
 	const luminance = getLuminance(parsed.r, parsed.g, parsed.b);
-	const isLight = luminance > 0.5;
-
-	if (isLight) {
+	if (luminance > 0.5) {
 		return {
 			pageBg: adjustBrightness(baseColor, 0.96),
 			cardBg: baseColor,
@@ -104,9 +73,7 @@ function deriveExportColors(baseColor: string): { pageBg: string; cardBg: string
 	};
 }
 
-/**
- * Generate CSS custom property declarations from theme colors.
- */
+/** Generate CSS custom properties for theme. */
 function generateThemeVars(themeName?: string): string {
 	const colors = getResolvedThemeColors(themeName);
 	const lines: string[] = [];
@@ -114,16 +81,15 @@ function generateThemeVars(themeName?: string): string {
 		lines.push(`--${key}: ${value};`);
 	}
 
-	// Use explicit theme export colors if available, otherwise derive from userMessageBg
 	const themeExport = getThemeExportColors(themeName);
 	const userMessageBg = colors.userMessageBg || "#343541";
-	const derivedColors = deriveExportColors(userMessageBg);
+	const derived = deriveExportColors(userMessageBg);
 
-	lines.push(`--exportPageBg: ${themeExport.pageBg ?? derivedColors.pageBg};`);
-	lines.push(`--exportCardBg: ${themeExport.cardBg ?? derivedColors.cardBg};`);
-	lines.push(`--exportInfoBg: ${themeExport.infoBg ?? derivedColors.infoBg};`);
+	lines.push(`--body-bg: ${themeExport.pageBg ?? derived.pageBg};`);
+	lines.push(`--container-bg: ${themeExport.cardBg ?? derived.cardBg};`);
+	lines.push(`--info-bg: ${themeExport.infoBg ?? derived.infoBg};`);
 
-	return lines.join("\n      ");
+	return lines.join(" ");
 }
 
 interface SessionData {
@@ -134,61 +100,28 @@ interface SessionData {
 	tools?: { name: string; description: string }[];
 }
 
-// Pre-minified embedded assets (cached on first use)
-let cachedTemplate: string | null = null;
-let cachedJs: string | null = null;
-
-/**
- * Core HTML generation logic shared by both export functions.
- */
-function generateHtml(sessionData: SessionData, themeName?: string): string {
-	// Minify embedded assets on first use
-	if (!cachedTemplate) {
-		cachedTemplate = minifyHtml(templateHtml);
-	}
-	if (!cachedJs) {
-		cachedJs = minifyJs(templateJs);
-	}
-
+/** Generate HTML from bundled template with runtime substitutions. */
+async function generateHtml(sessionData: SessionData, themeName?: string): Promise<string> {
 	const themeVars = generateThemeVars(themeName);
-	const colors = getResolvedThemeColors(themeName);
-	const exportColors = deriveExportColors(colors.userMessageBg || "#343541");
-	const bodyBg = exportColors.pageBg;
-	const containerBg = exportColors.cardBg;
-	const infoBg = exportColors.infoBg;
-
-	// Base64 encode session data to avoid escaping issues
 	const sessionDataBase64 = Buffer.from(JSON.stringify(sessionData)).toString("base64");
+	const template = await getTemplate();
 
-	// Build and minify the CSS with theme variables injected
-	const css = minifyCss(
-		templateCss
-			.replace("{{THEME_VARS}}", themeVars)
-			.replace("{{BODY_BG}}", bodyBg)
-			.replace("{{CONTAINER_BG}}", containerBg)
-			.replace("{{INFO_BG}}", infoBg),
-	);
-
-	return cachedTemplate
-		.replace("{{CSS}}", css)
-		.replace("{{JS}}", cachedJs)
+	return template
+		.replace("<theme-vars/>", `<style>:root { ${themeVars} }</style>`)
 		.replace("{{SESSION_DATA}}", sessionDataBase64);
 }
 
-/**
- * Export session to HTML using SessionManager and AgentState.
- * Used by TUI's /export command.
- */
-export function exportSessionToHtml(sm: SessionManager, state?: AgentState, options?: ExportOptions | string): string {
+/** Export session to HTML using SessionManager and AgentState. */
+export async function exportSessionToHtml(
+	sm: SessionManager,
+	state?: AgentState,
+	options?: ExportOptions | string,
+): Promise<string> {
 	const opts: ExportOptions = typeof options === "string" ? { outputPath: options } : options || {};
 
 	const sessionFile = sm.getSessionFile();
-	if (!sessionFile) {
-		throw new Error("Cannot export in-memory session to HTML");
-	}
-	if (!existsSync(sessionFile)) {
-		throw new Error("Nothing to export yet - start a conversation first");
-	}
+	if (!sessionFile) throw new Error("Cannot export in-memory session to HTML");
+	if (!existsSync(sessionFile)) throw new Error("Nothing to export yet - start a conversation first");
 
 	const sessionData: SessionData = {
 		header: sm.getHeader(),
@@ -198,46 +131,28 @@ export function exportSessionToHtml(sm: SessionManager, state?: AgentState, opti
 		tools: state?.tools?.map((t) => ({ name: t.name, description: t.description })),
 	};
 
-	const html = generateHtml(sessionData, opts.themeName);
-
-	let outputPath = opts.outputPath;
-	if (!outputPath) {
-		const sessionBasename = basename(sessionFile, ".jsonl");
-		outputPath = `${APP_NAME}-session-${sessionBasename}.html`;
-	}
+	const html = await generateHtml(sessionData, opts.themeName);
+	const outputPath = opts.outputPath || `${APP_NAME}-session-${basename(sessionFile, ".jsonl")}.html`;
 
 	writeFileSync(outputPath, html, "utf8");
 	return outputPath;
 }
 
-/**
- * Export session file to HTML (standalone, without AgentState).
- * Used by CLI for exporting arbitrary session files.
- */
-export function exportFromFile(inputPath: string, options?: ExportOptions | string): string {
+/** Export session file to HTML (standalone). */
+export async function exportFromFile(inputPath: string, options?: ExportOptions | string): Promise<string> {
 	const opts: ExportOptions = typeof options === "string" ? { outputPath: options } : options || {};
 
-	if (!existsSync(inputPath)) {
-		throw new Error(`File not found: ${inputPath}`);
-	}
+	if (!existsSync(inputPath)) throw new Error(`File not found: ${inputPath}`);
 
 	const sm = SessionManager.open(inputPath);
-
 	const sessionData: SessionData = {
 		header: sm.getHeader(),
 		entries: sm.getEntries(),
 		leafId: sm.getLeafId(),
-		systemPrompt: undefined,
-		tools: undefined,
 	};
 
-	const html = generateHtml(sessionData, opts.themeName);
-
-	let outputPath = opts.outputPath;
-	if (!outputPath) {
-		const inputBasename = basename(inputPath, ".jsonl");
-		outputPath = `${APP_NAME}-session-${inputBasename}.html`;
-	}
+	const html = await generateHtml(sessionData, opts.themeName);
+	const outputPath = opts.outputPath || `${APP_NAME}-session-${basename(inputPath, ".jsonl")}.html`;
 
 	writeFileSync(outputPath, html, "utf8");
 	return outputPath;

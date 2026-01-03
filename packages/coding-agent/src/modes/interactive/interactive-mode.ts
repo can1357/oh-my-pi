@@ -2130,7 +2130,7 @@ export class InteractiveMode {
 
 		// HTML file export
 		try {
-			const filePath = this.session.exportToHtml(arg);
+			const filePath = await this.session.exportToHtml(arg);
 			this.showStatus(`Session exported to: ${filePath}`);
 		} catch (error: unknown) {
 			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
@@ -2153,7 +2153,7 @@ export class InteractiveMode {
 		// Export to a temp file
 		const tmpFile = path.join(os.tmpdir(), "session.html");
 		try {
-			this.session.exportToHtml(tmpFile);
+			await this.session.exportToHtml(tmpFile);
 		} catch (error: unknown) {
 			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
 			return;

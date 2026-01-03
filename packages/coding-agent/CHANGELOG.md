@@ -1,8 +1,15 @@
 # Changelog
 
 ## [Unreleased]
+
+### Added
+
+- Added `pi update` command to check for and install updates from GitHub releases or via bun
+
 ### Changed
 
+- Changed HTML export to use compile-time bundled templates via Bun macros for improved performance
+- Changed `exportToHtml` and `exportFromFile` functions to be async
 - Simplified build process by embedding assets (themes, templates, agents, commands) directly into the binary at compile time
 - Removed separate asset copying steps from build scripts
 

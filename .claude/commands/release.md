@@ -4,7 +4,7 @@ Release all packages with the specified version.
 
 ## Arguments
 
-- `$ARGUMENTS`: The version number (e.g., `1.342.0`)
+- `$ARGUMENTS`: The version number (semver)
 
 ## Pre-flight Checks
 

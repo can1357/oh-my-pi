@@ -14,6 +14,7 @@ import { processFileArguments } from "./cli/file-processor";
 import { listModels } from "./cli/list-models";
 import { parsePluginArgs, printPluginHelp, runPluginCommand } from "./cli/plugin-cli";
 import { selectSession } from "./cli/session-picker";
+import { parseUpdateArgs, printUpdateHelp, runUpdateCommand } from "./cli/update-cli";
 import { CONFIG_DIR_NAME, getAgentDir, getModelsPath, VERSION } from "./config";
 import type { AgentSession } from "./core/agent-session";
 import type { LoadedCustomTool } from "./core/custom-tools/index";
@@ -308,6 +309,17 @@ export async function main(args: string[]) {
 		return;
 	}
 
+	// Handle update subcommand
+	const updateCmd = parseUpdateArgs(args);
+	if (updateCmd) {
+		if (args.includes("--help") || args.includes("-h")) {
+			printUpdateHelp();
+			return;
+		}
+		await runUpdateCommand(updateCmd);
+		return;
+	}
+
 	// Run migrations
 	const { migratedAuthProviders: migratedProviders } = runMigrations();
 
@@ -338,7 +350,7 @@ export async function main(args: string[]) {
 	if (parsed.export) {
 		try {
 			const outputPath = parsed.messages.length > 0 ? parsed.messages[0] : undefined;
-			const result = exportFromFile(parsed.export, outputPath);
+			const result = await exportFromFile(parsed.export, outputPath);
 			console.log(`Exported to: ${result}`);
 			return;
 		} catch (error: unknown) {

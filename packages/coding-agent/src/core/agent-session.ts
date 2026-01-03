@@ -1900,7 +1900,7 @@ export class AgentSession {
 	 * @param outputPath Optional output path (defaults to session directory)
 	 * @returns Path to exported file
 	 */
-	exportToHtml(outputPath?: string): string {
+	async exportToHtml(outputPath?: string): Promise<string> {
 		const themeName = this.settingsManager.getTheme();
 		return exportSessionToHtml(this.sessionManager, this.state, { outputPath, themeName });
 	}

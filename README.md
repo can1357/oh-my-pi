@@ -19,6 +19,35 @@
   Fork of <a href="https://github.com/badlogic/pi-mono">badlogic/pi-mono</a> by <a href="https://github.com/mariozechner">@mariozechner</a>
 </p>
 
+---
+
+## Installation
+
+### Via Bun (recommended)
+
+Requires [Bun](https://bun.sh) runtime:
+
+```bash
+bun install -g @oh-my-pi/pi-coding-agent
+```
+
+### Via installer script
+
+**Linux / macOS:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.sh | sh
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1 | iex
+```
+
+### Manual download
+
+Download binaries directly from [GitHub Releases](https://github.com/can1357/oh-my-pi/releases/latest).
+
+---
 
 ## + LSP Integration (Language Server Protocol)
 
