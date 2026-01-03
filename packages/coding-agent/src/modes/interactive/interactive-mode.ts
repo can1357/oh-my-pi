@@ -940,6 +940,12 @@ export class InteractiveMode {
 				);
 				this.statusContainer.addChild(this.loadingAnimation);
 				this.ui.requestRender();
+
+				// Generate session title on first turn (runs in parallel with agent work)
+				if (!this.titleGenerationAttempted && !this.sessionManager.getSessionTitle()) {
+					this.titleGenerationAttempted = true;
+					this.maybeGenerateTitle();
+				}
 				break;
 
 			case "message_start":
@@ -1085,12 +1091,6 @@ export class InteractiveMode {
 				}
 				this.pendingTools.clear();
 				this.ui.requestRender();
-
-				// Generate session title after first turn (if not already titled)
-				if (!this.titleGenerationAttempted && !this.sessionManager.getSessionTitle()) {
-					this.titleGenerationAttempted = true;
-					this.maybeGenerateTitle();
-				}
 				break;
 
 			case "auto_compaction_start": {
