@@ -1,9 +1,11 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Added
 
+- Added support for custom TypeScript slash commands loaded from `~/.pi/commands/` and `.pi/commands/` directories
+- Added support for loading markdown slash commands from Claude's `~/.claude/commands/` and `.claude/commands/` directories
+- Added `commands.enableClaudeUser` and `commands.enableClaudeProject` settings to control Claude command directory loading
 - `/export --copy` option to copy entire session as formatted text to clipboard
 
 ## [1.341.0] - 2026-01-03

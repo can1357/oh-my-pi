@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from "fs";
+import { homedir } from "os";
 import { join, resolve } from "path";
 import { CONFIG_DIR_NAME, getCommandsDir } from "../config.js";
 
@@ -98,14 +99,12 @@ export function substituteArgs(content: string, args: string[]): string {
 	return result;
 }
 
+type CommandSource = "builtin" | "claude-user" | "claude-project" | "user" | "project";
+
 /**
  * Recursively scan a directory for .md files (and symlinks to .md files) and load them as slash commands
  */
-function loadCommandsFromDir(
-	dir: string,
-	source: "builtin" | "user" | "project",
-	subdir: string = "",
-): FileSlashCommand[] {
+function loadCommandsFromDir(dir: string, source: CommandSource, subdir: string = ""): FileSlashCommand[] {
 	const commands: FileSlashCommand[] = [];
 
 	if (!existsSync(dir)) {
@@ -129,15 +128,18 @@ function loadCommandsFromDir(
 
 					const name = entry.name.slice(0, -3); // Remove .md extension
 
-					// Build source string
-					let sourceStr: string;
-					if (source === "builtin") {
-						sourceStr = subdir ? `(builtin:${subdir})` : "(builtin)";
-					} else if (source === "user") {
-						sourceStr = subdir ? `(user:${subdir})` : "(user)";
-					} else {
-						sourceStr = subdir ? `(project:${subdir})` : "(project)";
-					}
+					// Build source string based on source type
+					const sourceLabel =
+						source === "builtin"
+							? "builtin"
+							: source === "claude-user"
+								? "claude-user"
+								: source === "claude-project"
+									? "claude-project"
+									: source === "user"
+										? "user"
+										: "project";
+					const sourceStr = subdir ? `(${sourceLabel}:${subdir})` : `(${sourceLabel})`;
 
 					// Get description from frontmatter or first non-empty line
 					let description = frontmatter.description || "";
@@ -176,53 +178,65 @@ export interface LoadSlashCommandsOptions {
 	cwd?: string;
 	/** Agent config directory for global commands. Default: from getCommandsDir() */
 	agentDir?: string;
+	/** Enable loading from ~/.claude/commands/. Default: true */
+	enableClaudeUser?: boolean;
+	/** Enable loading from .claude/commands/. Default: true */
+	enableClaudeProject?: boolean;
 }
 
 /**
  * Load all custom slash commands from:
  * 1. Builtin: package commands/
- * 2. Global: agentDir/commands/
- * 3. Project: cwd/{CONFIG_DIR_NAME}/commands/
+ * 2. Claude user: ~/.claude/commands/
+ * 3. Claude project: .claude/commands/
+ * 4. Pi user: agentDir/commands/
+ * 5. Pi project: cwd/{CONFIG_DIR_NAME}/commands/
+ *
+ * First occurrence wins (earlier sources have priority).
  */
 export function loadSlashCommands(options: LoadSlashCommandsOptions = {}): FileSlashCommand[] {
 	const resolvedCwd = options.cwd ?? process.cwd();
 	const resolvedAgentDir = options.agentDir ?? getCommandsDir();
+	const enableClaudeUser = options.enableClaudeUser ?? true;
+	const enableClaudeProject = options.enableClaudeProject ?? true;
 
 	const commands: FileSlashCommand[] = [];
 	const seenNames = new Set<string>();
 
-	// 1. Builtin commands (from package)
-	const builtinDir = join(import.meta.dir, "../commands");
-	if (existsSync(builtinDir)) {
-		const builtinCommands = loadCommandsFromDir(builtinDir, "builtin");
-		for (const cmd of builtinCommands) {
+	const addCommands = (newCommands: FileSlashCommand[]) => {
+		for (const cmd of newCommands) {
 			if (!seenNames.has(cmd.name)) {
 				commands.push(cmd);
 				seenNames.add(cmd.name);
 			}
 		}
+	};
+
+	// 1. Builtin commands (from package)
+	const builtinDir = join(import.meta.dir, "../commands");
+	if (existsSync(builtinDir)) {
+		addCommands(loadCommandsFromDir(builtinDir, "builtin"));
 	}
 
-	// 2. Load global commands from agentDir/commands/
-	// Note: if agentDir is provided, it should be the agent dir, not the commands dir
+	// 2. Claude user commands (~/.claude/commands/)
+	if (enableClaudeUser) {
+		const claudeUserDir = join(homedir(), ".claude", "commands");
+		addCommands(loadCommandsFromDir(claudeUserDir, "claude-user"));
+	}
+
+	// 3. Claude project commands (.claude/commands/)
+	if (enableClaudeProject) {
+		const claudeProjectDir = resolve(resolvedCwd, ".claude", "commands");
+		addCommands(loadCommandsFromDir(claudeProjectDir, "claude-project"));
+	}
+
+	// 4. Pi user commands (agentDir/commands/)
 	const globalCommandsDir = options.agentDir ? join(options.agentDir, "commands") : resolvedAgentDir;
-	const globalCommands = loadCommandsFromDir(globalCommandsDir, "user");
-	for (const cmd of globalCommands) {
-		if (!seenNames.has(cmd.name)) {
-			commands.push(cmd);
-			seenNames.add(cmd.name);
-		}
-	}
+	addCommands(loadCommandsFromDir(globalCommandsDir, "user"));
 
-	// 3. Load project commands from cwd/{CONFIG_DIR_NAME}/commands/
+	// 5. Pi project commands (cwd/{CONFIG_DIR_NAME}/commands/)
 	const projectCommandsDir = resolve(resolvedCwd, CONFIG_DIR_NAME, "commands");
-	const projectCommands = loadCommandsFromDir(projectCommandsDir, "project");
-	for (const cmd of projectCommands) {
-		if (!seenNames.has(cmd.name)) {
-			commands.push(cmd);
-			seenNames.add(cmd.name);
-		}
-	}
+	addCommands(loadCommandsFromDir(projectCommandsDir, "project"));
 
 	return commands;
 }

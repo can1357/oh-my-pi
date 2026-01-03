@@ -27,6 +27,7 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.js";
+import type { LoadedCustomCommand } from "./custom-commands/index.js";
 import type { CustomToolContext, CustomToolSessionEvent, LoadedCustomTool } from "./custom-tools/index.js";
 import { exportSessionToHtml } from "./export-html/index.js";
 import type {
@@ -43,7 +44,7 @@ import type { BashExecutionMessage, HookMessage } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
 import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions, SessionManager } from "./session-manager.js";
 import type { SettingsManager, SkillsSettings } from "./settings-manager.js";
-import { expandSlashCommand, type FileSlashCommand } from "./slash-commands.js";
+import { expandSlashCommand, type FileSlashCommand, parseCommandArgs } from "./slash-commands.js";
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
@@ -72,6 +73,8 @@ export interface AgentSessionConfig {
 	hookRunner?: HookRunner;
 	/** Custom tools for session lifecycle events */
 	customTools?: LoadedCustomTool[];
+	/** Custom commands (TypeScript slash commands) */
+	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: Required<SkillsSettings>;
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
@@ -166,6 +169,9 @@ export class AgentSession {
 	// Custom tools for session lifecycle
 	private _customTools: LoadedCustomTool[] = [];
 
+	// Custom commands (TypeScript slash commands)
+	private _customCommands: LoadedCustomCommand[] = [];
+
 	private _skillsSettings: Required<SkillsSettings> | undefined;
 
 	// Model registry for API key resolution
@@ -179,6 +185,7 @@ export class AgentSession {
 		this._fileCommands = config.fileCommands ?? [];
 		this._hookRunner = config.hookRunner;
 		this._customTools = config.customTools ?? [];
+		this._customCommands = config.customCommands ?? [];
 		this._skillsSettings = config.skillsSettings;
 		this._modelRegistry = config.modelRegistry;
 
@@ -449,6 +456,11 @@ export class AgentSession {
 		return this._fileCommands;
 	}
 
+	/** Custom commands (TypeScript slash commands) */
+	get customCommands(): ReadonlyArray<LoadedCustomCommand> {
+		return this._customCommands;
+	}
+
 	// =========================================================================
 	// Prompting
 	// =========================================================================
@@ -472,6 +484,17 @@ export class AgentSession {
 			if (handled) {
 				// Hook command executed, no prompt to send
 				return;
+			}
+
+			// Try custom commands (TypeScript slash commands)
+			const customResult = await this._tryExecuteCustomCommand(text);
+			if (customResult !== null) {
+				if (customResult === "") {
+					// Command handled, nothing to send
+					return;
+				}
+				// Command returned a prompt - use it instead of the original text
+				text = customResult;
 			}
 		}
 
@@ -563,6 +586,43 @@ export class AgentSession {
 				error: err instanceof Error ? err.message : String(err),
 			});
 			return true;
+		}
+	}
+
+	/**
+	 * Try to execute a custom command. Returns the prompt string if found, null otherwise.
+	 * If the command returns void, returns empty string to indicate it was handled.
+	 */
+	private async _tryExecuteCustomCommand(text: string): Promise<string | null> {
+		if (this._customCommands.length === 0) return null;
+		if (!this._hookRunner) return null; // Need hook runner for command context
+
+		// Parse command name and args
+		const spaceIndex = text.indexOf(" ");
+		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+		const argsString = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
+
+		// Find matching command
+		const loaded = this._customCommands.find((c) => c.command.name === commandName);
+		if (!loaded) return null;
+
+		// Get command context from hook runner (includes session control methods)
+		const ctx = this._hookRunner.createCommandContext();
+
+		try {
+			const args = parseCommandArgs(argsString);
+			const result = await loaded.command.execute(args, ctx);
+			// If result is a string, it's a prompt to send to LLM
+			// If void/undefined, command handled everything
+			return result ?? "";
+		} catch (err) {
+			// Emit error via hook runner
+			this._hookRunner.emitError({
+				hookPath: `custom-command:${commandName}`,
+				event: "command",
+				error: err instanceof Error ? err.message : String(err),
+			});
+			return ""; // Command was handled (with error)
 		}
 	}
 

@@ -36,6 +36,10 @@ import { getAgentDir } from "../config.js";
 import { AgentSession } from "./agent-session.js";
 import { AuthStorage } from "./auth-storage.js";
 import {
+	type CustomCommandsLoadResult,
+	loadCustomCommands as loadCustomCommandsInternal,
+} from "./custom-commands/index.js";
+import {
 	type CustomToolsLoadResult,
 	discoverAndLoadCustomTools,
 	type LoadedCustomTool,
@@ -153,6 +157,7 @@ export interface CreateAgentSessionResult {
 
 // Re-exports
 
+export type { CustomCommand, CustomCommandFactory } from "./custom-commands/types.js";
 export type { CustomTool } from "./custom-tools/types.js";
 export type { HookAPI, HookCommandContext, HookContext, HookFactory } from "./hooks/types.js";
 export type { MCPManager, MCPServerConfig, MCPServerConnection, MCPToolsLoadResult } from "./mcp/index.js";
@@ -282,6 +287,19 @@ export function discoverSlashCommands(cwd?: string, agentDir?: string): FileSlas
 	return loadSlashCommandsInternal({
 		cwd: cwd ?? process.cwd(),
 		agentDir: agentDir ?? getDefaultAgentDir(),
+	});
+}
+
+/**
+ * Discover custom commands (TypeScript slash commands) from cwd and agentDir.
+ */
+export async function discoverCustomTSCommands(cwd?: string, agentDir?: string): Promise<CustomCommandsLoadResult> {
+	const resolvedCwd = cwd ?? process.cwd();
+	const resolvedAgentDir = agentDir ?? getDefaultAgentDir();
+
+	return loadCustomCommandsInternal({
+		cwd: resolvedCwd,
+		agentDir: resolvedAgentDir,
 	});
 }
 
@@ -733,6 +751,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const slashCommands = options.slashCommands ?? discoverSlashCommands(cwd, agentDir);
 	time("discoverSlashCommands");
 
+	// Discover custom commands (TypeScript slash commands)
+	const customCommandsResult = await loadCustomCommandsInternal({ cwd, agentDir });
+	time("discoverCustomCommands");
+	for (const { path, error } of customCommandsResult.errors) {
+		console.error(`Failed to load custom command "${path}": ${error}`);
+	}
+
 	agent = new Agent({
 		initialState: {
 			systemPrompt,
@@ -782,6 +807,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		fileCommands: slashCommands,
 		hookRunner,
 		customTools: customToolsResult.tools,
+		customCommands: customCommandsResult.commands,
 		skillsSettings: settingsManager.getSkillsSettings(),
 		modelRegistry,
 	});

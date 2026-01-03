@@ -30,6 +30,11 @@ export interface SkillsSettings {
 	includeSkills?: string[]; // default: [] (empty = include all; glob patterns to filter)
 }
 
+export interface CommandsSettings {
+	enableClaudeUser?: boolean; // default: true (load from ~/.claude/commands/)
+	enableClaudeProject?: boolean; // default: true (load from .claude/commands/)
+}
+
 export interface TerminalSettings {
 	showImages?: boolean; // default: true (only relevant if terminal supports images)
 }
@@ -78,6 +83,7 @@ export interface Settings {
 	hooks?: string[]; // Array of hook file paths
 	customTools?: string[]; // Array of custom tool file paths
 	skills?: SkillsSettings;
+	commands?: CommandsSettings;
 	terminal?: TerminalSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
 	exa?: ExaSettings;
@@ -396,6 +402,13 @@ export class SettingsManager {
 			customDirectories: [...(this.settings.skills?.customDirectories ?? [])],
 			ignoredSkills: [...(this.settings.skills?.ignoredSkills ?? [])],
 			includeSkills: [...(this.settings.skills?.includeSkills ?? [])],
+		};
+	}
+
+	getCommandsSettings(): Required<CommandsSettings> {
+		return {
+			enableClaudeUser: this.settings.commands?.enableClaudeUser ?? true,
+			enableClaudeProject: this.settings.commands?.enableClaudeProject ?? true,
 		};
 	}
 

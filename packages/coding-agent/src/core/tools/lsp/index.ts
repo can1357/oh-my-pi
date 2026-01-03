@@ -273,7 +273,7 @@ async function runWorkspaceDiagnostics(
 				const formatted = collected.slice(0, 50).map((d) => formatDiagnostic(d.diagnostic, d.filePath));
 				const more = collected.length > 50 ? `\n  ... and ${collected.length - 50} more` : "";
 				return { output: `${summary}:\n${formatted.map((f) => `  ${f}`).join("\n")}${more}`, projectType };
-			} catch (e) {
+			} catch (_e) {
 				// Fall through to shell command
 			}
 		}
@@ -305,7 +305,7 @@ async function runWorkspaceDiagnostics(
 		// Limit output length
 		const lines = combined.split("\n");
 		if (lines.length > 50) {
-			return { output: lines.slice(0, 50).join("\n") + `\n... and ${lines.length - 50} more lines`, projectType };
+			return { output: `${lines.slice(0, 50).join("\n")}\n... and ${lines.length - 50} more lines`, projectType };
 		}
 
 		return { output: combined, projectType };

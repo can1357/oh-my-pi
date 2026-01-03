@@ -216,9 +216,15 @@ export class InteractiveMode {
 			description: cmd.description ?? "(hook command)",
 		}));
 
+		// Convert custom commands (TypeScript) to SlashCommand format
+		const customCommands: SlashCommand[] = this.session.customCommands.map((loaded) => ({
+			name: loaded.command.name,
+			description: `${loaded.command.description} (${loaded.source})`,
+		}));
+
 		// Setup autocomplete
 		const autocompleteProvider = new CombinedAutocompleteProvider(
-			[...slashCommands, ...fileSlashCommands, ...hookCommands],
+			[...slashCommands, ...fileSlashCommands, ...hookCommands, ...customCommands],
 			process.cwd(),
 			fdPath,
 		);
