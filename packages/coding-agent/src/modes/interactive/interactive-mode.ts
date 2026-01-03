@@ -1617,7 +1617,7 @@ export class InteractiveMode {
 				theme.bold(theme.fg("warning", "Update Available")) +
 					"\n" +
 					theme.fg("muted", `New version ${newVersion} is available. Run: `) +
-					theme.fg("accent", "npm install -g @oh-my-pi/pi-coding-agent"),
+					theme.fg("accent", "omp update"),
 				1,
 				0,
 			),

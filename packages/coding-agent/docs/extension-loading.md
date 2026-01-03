@@ -775,7 +775,7 @@ Update argument parsing:
   result.noHooks = true;
 ```
 
-Add subcommand handling for `pi install`, `pi remove`, `pi update`.
+Add subcommand handling for `omp install`, `omp remove`, `omp update`.
 
 ### `src/core/hooks/loader.ts`
 
@@ -949,7 +949,7 @@ if (settings.skills?.customDirectories) {
 5. **Phase 5: CLI updates**
    - Add new flags to args.ts
    - Update help text
-   - Add `pi install`, `pi remove`, `pi update` subcommands
+   - Add `omp install`, `omp remove`, `omp update` subcommands
 
 6. **Phase 6: Integration**
    - Update sdk.ts

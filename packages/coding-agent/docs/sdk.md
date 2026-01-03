@@ -54,7 +54,7 @@ The main factory function. Creates an `AgentSession` with configurable options.
 
 **Philosophy:** "Omit to discover, provide to override."
 
-- Omit an option → pi discovers/loads from standard locations
+- Omit an option → omp discovers/loads from standard locations
 - Provide an option → your value is used, discovery skipped for that option
 
 ```typescript
@@ -405,7 +405,7 @@ const { session } = await createAgentSession({
 
 **When you don't need factories:**
 
-- If you omit `tools`, pi automatically creates them with the correct `cwd`
+- If you omit `tools`, omp automatically creates them with the correct `cwd`
 - If you use `process.cwd()` as your `cwd`, the pre-built instances work fine
 
 **When you must use factories:**

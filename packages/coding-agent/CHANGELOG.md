@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Updated version update notification to suggest `omp update` instead of manual npm install command
 
 ## [3.1.1337] - 2026-01-03
 ### Added
