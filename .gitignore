@@ -33,3 +33,8 @@ pi-*.html
 out.html
 
 *.kate-swp
+
+# Claude Code - allow commands to be tracked
+!.claude/
+.claude/*
+!.claude/commands/
