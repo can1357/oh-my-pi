@@ -596,9 +596,23 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let mcpManager: MCPManager | undefined;
 	const enableMCP = options.enableMCP ?? true;
 	if (enableMCP) {
-		const mcpResult = await discoverAndLoadMCPTools(cwd);
+		const mcpResult = await discoverAndLoadMCPTools(cwd, {
+			onConnecting: (serverNames) => {
+				if (options.hasUI && serverNames.length > 0) {
+					process.stderr.write(`\x1b[90mConnecting to MCP servers: ${serverNames.join(", ")}...\x1b[0m\n`);
+				}
+			},
+			enableProjectConfig: settingsManager.getMCPProjectConfigEnabled(),
+			// Always filter Exa - we have native integration
+			filterExa: true,
+		});
 		time("discoverAndLoadMCPTools");
 		mcpManager = mcpResult.manager;
+
+		// If we extracted Exa API keys from MCP configs and EXA_API_KEY isn't set, use the first one
+		if (mcpResult.exaApiKeys.length > 0 && !process.env.EXA_API_KEY) {
+			process.env.EXA_API_KEY = mcpResult.exaApiKeys[0];
+		}
 
 		// Log MCP errors
 		for (const { path, error } of mcpResult.errors) {

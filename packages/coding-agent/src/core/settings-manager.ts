@@ -47,6 +47,10 @@ export interface BashInterceptorSettings {
 	enabled?: boolean; // default: false (blocks shell commands that have dedicated tools)
 }
 
+export interface MCPSettings {
+	enableProjectConfig?: boolean; // default: true (load .mcp.json from project root)
+}
+
 export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
@@ -67,6 +71,7 @@ export interface Settings {
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
 	exa?: ExaSettings;
 	bashInterceptor?: BashInterceptorSettings;
+	mcp?: MCPSettings;
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -455,6 +460,18 @@ export class SettingsManager {
 			this.globalSettings.bashInterceptor = {};
 		}
 		this.globalSettings.bashInterceptor.enabled = enabled;
+		this.save();
+	}
+
+	getMCPProjectConfigEnabled(): boolean {
+		return this.settings.mcp?.enableProjectConfig ?? true;
+	}
+
+	setMCPProjectConfigEnabled(enabled: boolean): void {
+		if (!this.globalSettings.mcp) {
+			this.globalSettings.mcp = {};
+		}
+		this.globalSettings.mcp.enableProjectConfig = enabled;
 		this.save();
 	}
 }

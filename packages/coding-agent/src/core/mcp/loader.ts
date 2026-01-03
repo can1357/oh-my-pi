@@ -17,24 +17,49 @@ export interface MCPToolsLoadResult {
 	errors: Array<{ path: string; error: string }>;
 	/** Connected server names */
 	connectedServers: string[];
+	/** Extracted Exa API keys from filtered MCP servers */
+	exaApiKeys: string[];
+}
+
+/** Options for loading MCP tools */
+export interface MCPToolsLoadOptions {
+	/** Additional environment variables for expansion */
+	extraEnv?: Record<string, string>;
+	/** Called when starting to connect to servers */
+	onConnecting?: (serverNames: string[]) => void;
+	/** Whether to load project-level config (default: true) */
+	enableProjectConfig?: boolean;
+	/** Whether to filter out Exa MCP servers (default: true) */
+	filterExa?: boolean;
 }
 
 /**
  * Discover and load MCP tools from .mcp.json files.
  *
  * @param cwd Working directory (project root)
- * @param extraEnv Additional environment variables for expansion
+ * @param options Load options including extraEnv and progress callbacks
  * @returns MCP tools in LoadedCustomTool format for integration
  */
 export async function discoverAndLoadMCPTools(
 	cwd: string,
-	extraEnv?: Record<string, string>,
+	options?: MCPToolsLoadOptions | Record<string, string>,
 ): Promise<MCPToolsLoadResult> {
+	// Support old signature: discoverAndLoadMCPTools(cwd, extraEnv)
+	const opts: MCPToolsLoadOptions =
+		options && ("extraEnv" in options || "onConnecting" in options || "enableProjectConfig" in options)
+			? (options as MCPToolsLoadOptions)
+			: { extraEnv: options as Record<string, string> | undefined };
+
 	const manager = new MCPManager(cwd);
 
 	let result: MCPLoadResult;
 	try {
-		result = await manager.discoverAndConnect(extraEnv);
+		result = await manager.discoverAndConnect({
+			extraEnv: opts.extraEnv,
+			onConnecting: opts.onConnecting,
+			enableProjectConfig: opts.enableProjectConfig,
+			filterExa: opts.filterExa,
+		});
 	} catch (error) {
 		// If discovery fails entirely, return empty result
 		const message = error instanceof Error ? error.message : String(error);
@@ -43,6 +68,7 @@ export async function discoverAndLoadMCPTools(
 			tools: [],
 			errors: [{ path: ".mcp.json", error: message }],
 			connectedServers: [],
+			exaApiKeys: [],
 		};
 	}
 
@@ -64,5 +90,6 @@ export async function discoverAndLoadMCPTools(
 		tools: loadedTools,
 		errors,
 		connectedServers: result.connectedServers,
+		exaApiKeys: result.exaApiKeys,
 	};
 }

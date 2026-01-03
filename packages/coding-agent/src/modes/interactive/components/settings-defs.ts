@@ -127,6 +127,15 @@ export const SETTINGS_DEFS: SettingDef[] = [
 		set: (sm, v) => sm.setBashInterceptorEnabled(v),
 	},
 	{
+		id: "mcpProjectConfig",
+		tab: "config",
+		type: "boolean",
+		label: "MCP project config",
+		description: "Load .mcp.json/mcp.json from project root",
+		get: (sm) => sm.getMCPProjectConfigEnabled(),
+		set: (sm, v) => sm.setMCPProjectConfigEnabled(v),
+	},
+	{
 		id: "thinkingLevel",
 		tab: "config",
 		type: "submenu",

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.339.0] - 2026-01-03
+
+### Added
+
+- MCP project config setting to disable loading `.mcp.json`/`mcp.json` from project root
+- Support for both `mcp.json` and `.mcp.json` filenames (prefers `mcp.json` if both exist)
+- Automatic Exa MCP server filtering with API key extraction for native integration
+
 ## [1.338.0] - 2026-01-03
 
 ### Added

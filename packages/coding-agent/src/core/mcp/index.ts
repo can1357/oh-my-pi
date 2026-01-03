@@ -9,19 +9,23 @@
 export { callTool, connectToServer, disconnectServer, listTools, serverSupportsTools } from "./client.js";
 
 // Config
+export type { ExaFilterResult, LoadMCPConfigsOptions, LoadMCPConfigsResult } from "./config.js";
 export {
 	expandEnvVars,
+	extractExaApiKey,
+	filterExaMCPServers,
 	getMCPConfigPaths,
+	isExaMCPServer,
 	loadAllMCPConfigs,
 	loadMCPConfigFile,
 	mergeMCPConfigs,
 	validateServerConfig,
 } from "./config.js";
 // Loader (for SDK integration)
-export type { MCPToolsLoadResult } from "./loader.js";
+export type { MCPToolsLoadOptions, MCPToolsLoadResult } from "./loader.js";
 export { discoverAndLoadMCPTools } from "./loader.js";
 // Manager
-export type { MCPLoadResult } from "./manager.js";
+export type { MCPDiscoverOptions, MCPLoadResult } from "./manager.js";
 export { createMCPManager, MCPManager } from "./manager.js";
 // Tool bridge
 export type { MCPToolDetails } from "./tool-bridge.js";

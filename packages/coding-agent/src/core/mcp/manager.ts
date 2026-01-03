@@ -8,7 +8,7 @@
 import type { TSchema } from "@sinclair/typebox";
 import type { CustomTool } from "../custom-tools/types.js";
 import { connectToServer, disconnectServer, listTools } from "./client.js";
-import { loadAllMCPConfigs, validateServerConfig } from "./config.js";
+import { type LoadMCPConfigsOptions, loadAllMCPConfigs, validateServerConfig } from "./config.js";
 import type { MCPToolDetails } from "./tool-bridge.js";
 import { createMCPTools } from "./tool-bridge.js";
 import type { MCPServerConfig, MCPServerConnection } from "./types.js";
@@ -21,6 +21,14 @@ export interface MCPLoadResult {
 	errors: Map<string, string>;
 	/** Connected server names */
 	connectedServers: string[];
+	/** Extracted Exa API keys from filtered MCP servers */
+	exaApiKeys: string[];
+}
+
+/** Options for discovering and connecting to MCP servers */
+export interface MCPDiscoverOptions extends LoadMCPConfigsOptions {
+	/** Called when starting to connect to servers */
+	onConnecting?: (serverNames: string[]) => void;
 }
 
 /**
@@ -38,18 +46,48 @@ export class MCPManager {
 	 * Discover and connect to all MCP servers from .mcp.json files.
 	 * Returns tools and any connection errors.
 	 */
-	async discoverAndConnect(extraEnv?: Record<string, string>): Promise<MCPLoadResult> {
-		const configs = loadAllMCPConfigs(this.cwd, extraEnv);
-		return this.connectServers(configs);
+	async discoverAndConnect(
+		extraEnvOrOptions?: Record<string, string> | MCPDiscoverOptions,
+		onConnecting?: (serverNames: string[]) => void,
+	): Promise<MCPLoadResult> {
+		// Support old signature: discoverAndConnect(extraEnv, onConnecting)
+		const opts: MCPDiscoverOptions =
+			extraEnvOrOptions &&
+			("extraEnv" in extraEnvOrOptions ||
+				"enableProjectConfig" in extraEnvOrOptions ||
+				"filterExa" in extraEnvOrOptions ||
+				"onConnecting" in extraEnvOrOptions)
+				? (extraEnvOrOptions as MCPDiscoverOptions)
+				: { extraEnv: extraEnvOrOptions as Record<string, string> | undefined, onConnecting };
+
+		const { configs, exaApiKeys } = loadAllMCPConfigs(this.cwd, {
+			extraEnv: opts.extraEnv,
+			enableProjectConfig: opts.enableProjectConfig,
+			filterExa: opts.filterExa,
+		});
+		const result = await this.connectServers(configs, opts.onConnecting);
+		result.exaApiKeys = exaApiKeys;
+		return result;
 	}
 
 	/**
 	 * Connect to specific MCP servers.
+	 * Connections are made in parallel for faster startup.
 	 */
-	async connectServers(configs: Record<string, MCPServerConfig>): Promise<MCPLoadResult> {
+	async connectServers(
+		configs: Record<string, MCPServerConfig>,
+		onConnecting?: (serverNames: string[]) => void,
+	): Promise<MCPLoadResult> {
 		const errors = new Map<string, string>();
 		const connectedServers: string[] = [];
 		const allTools: CustomTool<TSchema, MCPToolDetails>[] = [];
+
+		// Prepare connection tasks
+		const connectionTasks: Array<{
+			name: string;
+			config: MCPServerConfig;
+			validationErrors: string[];
+		}> = [];
 
 		for (const [name, config] of Object.entries(configs)) {
 			// Skip if already connected
@@ -65,17 +103,37 @@ export class MCPManager {
 				continue;
 			}
 
-			try {
+			connectionTasks.push({ name, config, validationErrors });
+		}
+
+		// Notify about servers we're connecting to
+		if (connectionTasks.length > 0 && onConnecting) {
+			onConnecting(connectionTasks.map((t) => t.name));
+		}
+
+		// Connect to all servers in parallel
+		const results = await Promise.allSettled(
+			connectionTasks.map(async ({ name, config }) => {
 				const connection = await connectToServer(name, config);
+				const serverTools = await listTools(connection);
+				return { name, connection, serverTools };
+			}),
+		);
+
+		// Process results
+		for (let i = 0; i < results.length; i++) {
+			const result = results[i];
+			const { name } = connectionTasks[i];
+
+			if (result.status === "fulfilled") {
+				const { connection, serverTools } = result.value;
 				this.connections.set(name, connection);
 				connectedServers.push(name);
 
-				// Load tools from this server
-				const serverTools = await listTools(connection);
 				const customTools = createMCPTools(connection, serverTools);
 				allTools.push(...customTools);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
+			} else {
+				const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
 				errors.set(name, message);
 			}
 		}
@@ -87,6 +145,7 @@ export class MCPManager {
 			tools: allTools,
 			errors,
 			connectedServers,
+			exaApiKeys: [], // Will be populated by discoverAndConnect
 		};
 	}
 

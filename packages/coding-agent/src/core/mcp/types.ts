@@ -41,8 +41,14 @@ export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcRespo
 // MCP Server Configuration (.mcp.json format)
 // =============================================================================
 
+/** Base server config with shared options */
+interface MCPServerConfigBase {
+	/** Connection timeout in milliseconds (default: 30000) */
+	timeout?: number;
+}
+
 /** Stdio server configuration */
-export interface MCPStdioServerConfig {
+export interface MCPStdioServerConfig extends MCPServerConfigBase {
 	type?: "stdio"; // Default if not specified
 	command: string;
 	args?: string[];
@@ -51,14 +57,14 @@ export interface MCPStdioServerConfig {
 }
 
 /** HTTP server configuration (Streamable HTTP transport) */
-export interface MCPHttpServerConfig {
+export interface MCPHttpServerConfig extends MCPServerConfigBase {
 	type: "http";
 	url: string;
 	headers?: Record<string, string>;
 }
 
 /** SSE server configuration (deprecated, use HTTP) */
-export interface MCPSseServerConfig {
+export interface MCPSseServerConfig extends MCPServerConfigBase {
 	type: "sse";
 	url: string;
 	headers?: Record<string, string>;

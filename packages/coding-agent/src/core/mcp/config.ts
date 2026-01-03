@@ -91,11 +91,17 @@ export interface MCPConfigLocations {
  */
 export function getMCPConfigPaths(cwd: string): MCPConfigLocations {
 	const home = homedir();
+
+	// Project-level: check both mcp.json and .mcp.json (prefer mcp.json if both exist)
+	const mcpJson = join(cwd, "mcp.json");
+	const dotMcpJson = join(cwd, ".mcp.json");
+	const projectPath = existsSync(mcpJson) ? mcpJson : dotMcpJson;
+
 	return {
 		// User-level: ~/.pi/mcp.json (our standard)
 		user: join(home, ".pi", "mcp.json"),
-		// Project-level: .mcp.json at project root
-		project: join(cwd, ".mcp.json"),
+		// Project-level: mcp.json or .mcp.json at project root
+		project: projectPath,
 	};
 }
 
@@ -115,17 +121,157 @@ export function mergeMCPConfigs(...configs: (MCPConfigFile | null)[]): Record<st
 	return result;
 }
 
+/** Options for loading MCP configs */
+export interface LoadMCPConfigsOptions {
+	/** Additional environment variables for expansion */
+	extraEnv?: Record<string, string>;
+	/** Whether to load project-level config (default: true) */
+	enableProjectConfig?: boolean;
+	/** Whether to filter out Exa MCP servers (default: true) */
+	filterExa?: boolean;
+}
+
+/** Result of loading MCP configs */
+export interface LoadMCPConfigsResult {
+	/** Loaded server configs */
+	configs: Record<string, MCPServerConfig>;
+	/** Extracted Exa API keys (if any were filtered) */
+	exaApiKeys: string[];
+}
+
 /**
  * Load all MCP server configs from standard locations.
  * Returns merged config with project overriding user.
+ *
+ * @param cwd Working directory (project root)
+ * @param options Load options or extraEnv for backwards compatibility
  */
-export function loadAllMCPConfigs(cwd: string, extraEnv?: Record<string, string>): Record<string, MCPServerConfig> {
+export function loadAllMCPConfigs(
+	cwd: string,
+	options?: LoadMCPConfigsOptions | Record<string, string>,
+): LoadMCPConfigsResult {
+	// Support old signature: loadAllMCPConfigs(cwd, extraEnv)
+	const opts: LoadMCPConfigsOptions =
+		options && ("extraEnv" in options || "enableProjectConfig" in options || "filterExa" in options)
+			? (options as LoadMCPConfigsOptions)
+			: { extraEnv: options as Record<string, string> | undefined };
+
+	const enableProjectConfig = opts.enableProjectConfig ?? true;
+	const filterExa = opts.filterExa ?? true;
+
 	const paths = getMCPConfigPaths(cwd);
 
-	const userConfig = paths.user ? loadMCPConfigFile(paths.user, extraEnv) : null;
-	const projectConfig = paths.project ? loadMCPConfigFile(paths.project, extraEnv) : null;
+	const userConfig = paths.user ? loadMCPConfigFile(paths.user, opts.extraEnv) : null;
+	const projectConfig = enableProjectConfig && paths.project ? loadMCPConfigFile(paths.project, opts.extraEnv) : null;
 
-	return mergeMCPConfigs(userConfig, projectConfig);
+	let configs = mergeMCPConfigs(userConfig, projectConfig);
+	let exaApiKeys: string[] = [];
+
+	if (filterExa) {
+		const result = filterExaMCPServers(configs);
+		configs = result.configs;
+		exaApiKeys = result.exaApiKeys;
+	}
+
+	return { configs, exaApiKeys };
+}
+
+/** Pattern to match Exa MCP servers */
+const EXA_MCP_URL_PATTERN = /mcp\.exa\.ai/i;
+const EXA_API_KEY_PATTERN = /exaApiKey=([^&\s]+)/i;
+
+/**
+ * Check if a server config is an Exa MCP server.
+ */
+export function isExaMCPServer(name: string, config: MCPServerConfig): boolean {
+	// Check by server name
+	if (name.toLowerCase() === "exa") {
+		return true;
+	}
+
+	// Check by URL for HTTP/SSE servers
+	if (config.type === "http" || config.type === "sse") {
+		const httpConfig = config as { url?: string };
+		if (httpConfig.url && EXA_MCP_URL_PATTERN.test(httpConfig.url)) {
+			return true;
+		}
+	}
+
+	// Check by args for stdio servers (e.g., mcp-remote to exa)
+	if (!config.type || config.type === "stdio") {
+		const stdioConfig = config as { args?: string[] };
+		if (stdioConfig.args?.some((arg) => EXA_MCP_URL_PATTERN.test(arg))) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/**
+ * Extract Exa API key from an MCP server config.
+ */
+export function extractExaApiKey(config: MCPServerConfig): string | undefined {
+	// Check URL for HTTP/SSE servers
+	if (config.type === "http" || config.type === "sse") {
+		const httpConfig = config as { url?: string };
+		if (httpConfig.url) {
+			const match = EXA_API_KEY_PATTERN.exec(httpConfig.url);
+			if (match) return match[1];
+		}
+	}
+
+	// Check args for stdio servers
+	if (!config.type || config.type === "stdio") {
+		const stdioConfig = config as { args?: string[] };
+		if (stdioConfig.args) {
+			for (const arg of stdioConfig.args) {
+				const match = EXA_API_KEY_PATTERN.exec(arg);
+				if (match) return match[1];
+			}
+		}
+	}
+
+	// Check env vars
+	if ("env" in config && config.env) {
+		const envConfig = config as { env: Record<string, string> };
+		if (envConfig.env.EXA_API_KEY) {
+			return envConfig.env.EXA_API_KEY;
+		}
+	}
+
+	return undefined;
+}
+
+/** Result of filtering Exa MCP servers */
+export interface ExaFilterResult {
+	/** Configs with Exa servers removed */
+	configs: Record<string, MCPServerConfig>;
+	/** Extracted Exa API keys (if any) */
+	exaApiKeys: string[];
+}
+
+/**
+ * Filter out Exa MCP servers and extract their API keys.
+ * Since we have native Exa integration, we don't need the MCP server.
+ */
+export function filterExaMCPServers(configs: Record<string, MCPServerConfig>): ExaFilterResult {
+	const filtered: Record<string, MCPServerConfig> = {};
+	const exaApiKeys: string[] = [];
+
+	for (const [name, config] of Object.entries(configs)) {
+		if (isExaMCPServer(name, config)) {
+			// Extract API key before filtering
+			const apiKey = extractExaApiKey(config);
+			if (apiKey) {
+				exaApiKeys.push(apiKey);
+			}
+		} else {
+			filtered[name] = config;
+		}
+	}
+
+	return { configs: filtered, exaApiKeys };
 }
 
 /**

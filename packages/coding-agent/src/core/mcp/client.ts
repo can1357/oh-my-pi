@@ -25,11 +25,31 @@ import type {
 /** MCP protocol version we support */
 const PROTOCOL_VERSION = "2025-03-26";
 
+/** Default connection timeout in ms */
+const CONNECTION_TIMEOUT_MS = 30_000;
+
 /** Client info sent during initialization */
 const CLIENT_INFO = {
 	name: "pi-coding-agent",
 	version: "1.0.0",
 };
+
+/** Wrap a promise with a timeout */
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error(message)), ms);
+		promise.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(error) => {
+				clearTimeout(timer);
+				reject(error);
+			},
+		);
+	});
+}
 
 /**
  * Create a transport for the given server config.
@@ -73,24 +93,31 @@ async function initializeConnection(transport: MCPTransport): Promise<MCPInitial
 
 /**
  * Connect to an MCP server.
+ * Has a 30 second timeout to prevent blocking startup.
  */
 export async function connectToServer(name: string, config: MCPServerConfig): Promise<MCPServerConnection> {
-	const transport = await createTransport(config);
+	const timeoutMs = config.timeout ?? CONNECTION_TIMEOUT_MS;
 
-	try {
-		const initResult = await initializeConnection(transport);
+	const connect = async (): Promise<MCPServerConnection> => {
+		const transport = await createTransport(config);
 
-		return {
-			name,
-			config,
-			transport,
-			serverInfo: initResult.serverInfo,
-			capabilities: initResult.capabilities,
-		};
-	} catch (error) {
-		await transport.close();
-		throw error;
-	}
+		try {
+			const initResult = await initializeConnection(transport);
+
+			return {
+				name,
+				config,
+				transport,
+				serverInfo: initResult.serverInfo,
+				capabilities: initResult.capabilities,
+			};
+		} catch (error) {
+			await transport.close();
+			throw error;
+		}
+	};
+
+	return withTimeout(connect(), timeoutMs, `Connection to MCP server "${name}" timed out after ${timeoutMs}ms`);
 }
 
 /**
