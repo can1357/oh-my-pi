@@ -1,17 +1,24 @@
 /**
  * Bundled agent definitions.
  *
- * Agents are loaded from .md files in the bundled-agents directory.
- * These serve as defaults when no user/project agents are discovered.
+ * Agents are embedded at build time via Bun's import with { type: "text" }.
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+// Embed agent markdown files at build time
+import browserMd from "./bundled-agents/browser.md" with { type: "text" };
+import exploreMd from "./bundled-agents/explore.md" with { type: "text" };
+import planMd from "./bundled-agents/plan.md" with { type: "text" };
+import reviewerMd from "./bundled-agents/reviewer.md" with { type: "text" };
+import taskMd from "./bundled-agents/task.md" with { type: "text" };
 import type { AgentDefinition, AgentSource } from "./types";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const BUNDLED_AGENTS_DIR = path.join(__dirname, "bundled-agents");
+const EMBEDDED_AGENTS: { name: string; content: string }[] = [
+	{ name: "browser.md", content: browserMd },
+	{ name: "explore.md", content: exploreMd },
+	{ name: "plan.md", content: planMd },
+	{ name: "reviewer.md", content: reviewerMd },
+	{ name: "task.md", content: taskMd },
+];
 
 /**
  * Parse YAML frontmatter from markdown content.
@@ -47,16 +54,9 @@ function parseFrontmatter(content: string): { frontmatter: Record<string, string
 }
 
 /**
- * Load a single agent from a markdown file.
+ * Parse an agent from embedded content.
  */
-function loadAgentFromFile(filePath: string, source: AgentSource): AgentDefinition | null {
-	let content: string;
-	try {
-		content = fs.readFileSync(filePath, "utf-8");
-	} catch {
-		return null;
-	}
-
+function parseAgent(fileName: string, content: string, source: AgentSource): AgentDefinition | null {
 	const { frontmatter, body } = parseFrontmatter(content);
 
 	if (!frontmatter.name || !frontmatter.description) {
@@ -79,7 +79,7 @@ function loadAgentFromFile(filePath: string, source: AgentSource): AgentDefiniti
 		recursive,
 		systemPrompt: body,
 		source,
-		filePath,
+		filePath: `embedded:${fileName}`,
 	};
 }
 
@@ -87,7 +87,7 @@ function loadAgentFromFile(filePath: string, source: AgentSource): AgentDefiniti
 let bundledAgentsCache: AgentDefinition[] | null = null;
 
 /**
- * Load all bundled agents from the bundled-agents directory.
+ * Load all bundled agents from embedded content.
  * Results are cached after first load.
  */
 export function loadBundledAgents(): AgentDefinition[] {
@@ -97,24 +97,8 @@ export function loadBundledAgents(): AgentDefinition[] {
 
 	const agents: AgentDefinition[] = [];
 
-	if (!fs.existsSync(BUNDLED_AGENTS_DIR)) {
-		bundledAgentsCache = agents;
-		return agents;
-	}
-
-	let entries: fs.Dirent[];
-	try {
-		entries = fs.readdirSync(BUNDLED_AGENTS_DIR, { withFileTypes: true });
-	} catch {
-		bundledAgentsCache = agents;
-		return agents;
-	}
-
-	for (const entry of entries) {
-		if (!entry.name.endsWith(".md")) continue;
-
-		const filePath = path.join(BUNDLED_AGENTS_DIR, entry.name);
-		const agent = loadAgentFromFile(filePath, "bundled");
+	for (const { name, content } of EMBEDDED_AGENTS) {
+		const agent = parseAgent(name, content, "bundled");
 		if (agent) {
 			agents.push(agent);
 		}

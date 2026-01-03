@@ -5,8 +5,11 @@ import { type Static, Type } from "@sinclair/typebox";
 import { TypeCompiler } from "@sinclair/typebox/compiler";
 import chalk from "chalk";
 import { highlight, supportsLanguage } from "cli-highlight";
-import { getCustomThemesDir, getThemesDir } from "../../../config";
+import { getCustomThemesDir } from "../../../config";
 import { logger } from "../../../core/logger";
+// Embed theme JSON files at build time
+import darkThemeJson from "./dark.json" with { type: "json" };
+import lightThemeJson from "./light.json" with { type: "json" };
 
 // ============================================================================
 // Types & Schema
@@ -450,18 +453,12 @@ export class Theme {
 // Theme Loading
 // ============================================================================
 
-let BUILTIN_THEMES: Record<string, ThemeJson> | undefined;
+const BUILTIN_THEMES: Record<string, ThemeJson> = {
+	dark: darkThemeJson as ThemeJson,
+	light: lightThemeJson as ThemeJson,
+};
 
 function getBuiltinThemes(): Record<string, ThemeJson> {
-	if (!BUILTIN_THEMES) {
-		const themesDir = getThemesDir();
-		const darkPath = path.join(themesDir, "dark.json");
-		const lightPath = path.join(themesDir, "light.json");
-		BUILTIN_THEMES = {
-			dark: JSON.parse(fs.readFileSync(darkPath, "utf-8")) as ThemeJson,
-			light: JSON.parse(fs.readFileSync(lightPath, "utf-8")) as ThemeJson,
-		};
-	}
 	return BUILTIN_THEMES;
 }
 

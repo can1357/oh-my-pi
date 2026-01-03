@@ -1,17 +1,23 @@
 /**
  * Workflow commands for orchestrating multi-agent workflows.
  *
- * Commands are loaded from .md files with YAML frontmatter.
- * They define multi-step workflows that chain agent outputs.
+ * Commands are embedded at build time via Bun's import with { type: "text" }.
  */
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const BUNDLED_COMMANDS_DIR = path.join(__dirname, "bundled-commands");
+// Embed command markdown files at build time
+import architectPlanMd from "./bundled-commands/architect-plan.md" with { type: "text" };
+import implementMd from "./bundled-commands/implement.md" with { type: "text" };
+import implementWithCriticMd from "./bundled-commands/implement-with-critic.md" with { type: "text" };
+
+const EMBEDDED_COMMANDS: { name: string; content: string }[] = [
+	{ name: "architect-plan.md", content: architectPlanMd },
+	{ name: "implement-with-critic.md", content: implementWithCriticMd },
+	{ name: "implement.md", content: implementMd },
+];
 
 /** Workflow command definition */
 export interface WorkflowCommand {
@@ -56,9 +62,9 @@ function parseFrontmatter(content: string): { frontmatter: Record<string, string
 }
 
 /**
- * Load commands from a directory.
+ * Load commands from a directory (for user/project commands).
  */
-function loadCommandsFromDir(dir: string, source: "bundled" | "user" | "project"): WorkflowCommand[] {
+function loadCommandsFromDir(dir: string, source: "user" | "project"): WorkflowCommand[] {
 	const commands: WorkflowCommand[] = [];
 
 	if (!fs.existsSync(dir)) {
@@ -137,15 +143,30 @@ function findNearestDir(cwd: string, relPath: string): string | null {
 let bundledCommandsCache: WorkflowCommand[] | null = null;
 
 /**
- * Load all bundled commands.
+ * Load all bundled commands from embedded content.
  */
 export function loadBundledCommands(): WorkflowCommand[] {
 	if (bundledCommandsCache !== null) {
 		return bundledCommandsCache;
 	}
 
-	bundledCommandsCache = loadCommandsFromDir(BUNDLED_COMMANDS_DIR, "bundled");
-	return bundledCommandsCache;
+	const commands: WorkflowCommand[] = [];
+
+	for (const { name, content } of EMBEDDED_COMMANDS) {
+		const { frontmatter, body } = parseFrontmatter(content);
+		const cmdName = name.replace(/\.md$/, "");
+
+		commands.push({
+			name: cmdName,
+			description: frontmatter.description || "",
+			instructions: body,
+			source: "bundled",
+			filePath: `embedded:${name}`,
+		});
+	}
+
+	bundledCommandsCache = commands;
+	return commands;
 }
 
 /**

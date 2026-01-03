@@ -1,13 +1,13 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { existsSync, writeFileSync } from "node:fs";
+import { basename } from "node:path";
 import type { AgentState } from "@oh-my-pi/pi-agent-core";
-import { APP_NAME, getExportTemplateDir } from "../../config";
+import { APP_NAME } from "../../config";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme";
 import { SessionManager } from "../session-manager";
-
-// Cached minified assets (populated on first use)
-let cachedTemplate: string | null = null;
-let cachedJs: string | null = null;
+// Embed template files at build time
+import templateCss from "./template-css.txt" with { type: "text" };
+import templateHtml from "./template-html.txt" with { type: "text" };
+import templateJs from "./template-js.txt" with { type: "text" };
 
 /** Minify CSS by removing comments, unnecessary whitespace, and newlines. */
 function minifyCss(css: string): string {
@@ -134,21 +134,21 @@ interface SessionData {
 	tools?: { name: string; description: string }[];
 }
 
+// Pre-minified embedded assets (cached on first use)
+let cachedTemplate: string | null = null;
+let cachedJs: string | null = null;
+
 /**
  * Core HTML generation logic shared by both export functions.
  */
 function generateHtml(sessionData: SessionData, themeName?: string): string {
-	const templateDir = getExportTemplateDir();
-
-	// Load and minify assets on first use
+	// Minify embedded assets on first use
 	if (!cachedTemplate) {
-		cachedTemplate = minifyHtml(readFileSync(join(templateDir, "template.html"), "utf-8"));
+		cachedTemplate = minifyHtml(templateHtml);
 	}
 	if (!cachedJs) {
-		cachedJs = minifyJs(readFileSync(join(templateDir, "template.js"), "utf-8"));
+		cachedJs = minifyJs(templateJs);
 	}
-
-	const templateCss = readFileSync(join(templateDir, "template.css"), "utf-8");
 
 	const themeVars = generateThemeVars(themeName);
 	const colors = getResolvedThemeColors(themeName);

@@ -97,14 +97,14 @@ jobs:
       - name: Publish packages to npm
         if: ${{ !inputs.skip_npm }}
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for pkg in packages/*/; do
             pkg_name=$(basename "$pkg")
             echo "Publishing $pkg_name..."
-            output=$(cd "$pkg" && npm publish --access public --provenance 2>&1) && echo "$output" && continue
+            output=$(cd "$pkg" && bun publish --access public 2>&1) && echo "$output" && continue
             echo "$output"
-            if echo "$output" | grep -q "previously published\|cannot publish over"; then
+            if echo "$output" | grep -q "previously published\|cannot publish over\|You cannot publish over"; then
               echo "✓ Already published, skipping"
             else
               echo "✗ Failed to publish $pkg_name"

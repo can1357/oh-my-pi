@@ -3,7 +3,7 @@
  * Handles loading, saving, and refreshing credentials from auth.json.
  */
 
-import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
 	getEnvApiKey,
@@ -73,8 +73,7 @@ export class AuthStorage {
 			return;
 		}
 		try {
-			const file = Bun.file(this.authPath);
-			this.data = JSON.parse(file.text() as unknown as string);
+			this.data = JSON.parse(readFileSync(this.authPath, "utf-8"));
 		} catch {
 			this.data = {};
 		}

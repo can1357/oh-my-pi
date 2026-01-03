@@ -31,11 +31,9 @@
 	"scripts": {
 		"check": "tsgo --noEmit",
 		"clean": "rm -rf dist",
-		"build": "tsgo -p tsconfig.build.json && chmod +x dist/cli.js && npm run copy-assets",
-		"build:binary": "npm run build && bun build --compile ./dist/cli.js --outfile dist/pi && npm run copy-binary-assets",
-		"copy-assets": "mkdir -p dist/modes/interactive/theme && cp src/modes/interactive/theme/*.json dist/modes/interactive/theme/ && mkdir -p dist/core/export-html && cp src/core/export-html/template.html src/core/export-html/template.css src/core/export-html/template.js dist/core/export-html/ && mkdir -p dist/core/tools/task/bundled-agents && cp src/core/tools/task/bundled-agents/*.md dist/core/tools/task/bundled-agents/",
-		"copy-binary-assets": "cp package.json dist/ && cp README.md dist/ && cp CHANGELOG.md dist/ && mkdir -p dist/theme && cp src/modes/interactive/theme/*.json dist/theme/ && mkdir -p dist/export-html && cp src/core/export-html/template.html src/core/export-html/template.css src/core/export-html/template.js dist/export-html/ && cp -r docs dist/ && cp -r examples dist/",
-		"test": "vitest --run",
+		"build": "tsgo -p tsconfig.build.json && chmod +x dist/cli.js",
+		"build:binary": "bun build --compile ./src/cli.ts --outfile dist/pi",
+		"test": "bun test",
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {

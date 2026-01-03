@@ -1,34 +1,31 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
+// Embed package.json at build time for config
+import packageJson from "../package.json" with { type: "json" };
+
 // =============================================================================
-// Package Detection
+// App Config (from embedded package.json)
+// =============================================================================
+
+export const APP_NAME: string = (packageJson as { piConfig?: { name?: string } }).piConfig?.name || "pi";
+export const CONFIG_DIR_NAME: string =
+	(packageJson as { piConfig?: { configDir?: string } }).piConfig?.configDir || ".pi";
+export const VERSION: string = (packageJson as { version: string }).version;
+
+// e.g., PI_CODING_AGENT_DIR or TAU_CODING_AGENT_DIR
+export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
+
+// =============================================================================
+// Package Directory (for optional external docs/examples)
 // =============================================================================
 
 /**
- * Detect if we're running as a Bun compiled binary.
- * Bun binaries have import.meta.url containing "$bunfs", "~BUN", or "%7EBUN" (Bun's virtual filesystem path)
- */
-export const isBunBinary =
-	import.meta.url.includes("$bunfs") || import.meta.url.includes("~BUN") || import.meta.url.includes("%7EBUN");
-
-// =============================================================================
-// Package Asset Paths (shipped with executable)
-// =============================================================================
-
-/**
- * Get the base directory for resolving package assets (themes, package.json, README.md, CHANGELOG.md).
- * - For Bun binary: returns the directory containing the executable
- * - For Node.js (dist/): returns __dirname (the dist/ directory)
- * - For tsx (src/): returns parent directory (the package root)
+ * Get the base directory for resolving optional package assets (docs, examples).
+ * Walk up from import.meta.dir until we find package.json, or fall back to cwd.
  */
 export function getPackageDir(): string {
-	if (isBunBinary) {
-		// Bun binary: process.execPath points to the compiled executable
-		return dirname(process.execPath);
-	}
-	// Node.js: walk up from import.meta.dir until we find package.json
 	let dir = import.meta.dir;
 	while (dir !== dirname(dir)) {
 		if (existsSync(join(dir, "package.json"))) {
@@ -36,78 +33,29 @@ export function getPackageDir(): string {
 		}
 		dir = dirname(dir);
 	}
-	// Fallback (shouldn't happen)
-	return import.meta.dir;
+	// Fallback to cwd (docs/examples won't be found, but that's fine)
+	return process.cwd();
 }
 
-/**
- * Get path to built-in themes directory (shipped with package)
- * - For Bun binary: theme/ next to executable
- * - For Node.js (dist/): dist/modes/interactive/theme/
- * - For tsx (src/): src/modes/interactive/theme/
- */
-export function getThemesDir(): string {
-	if (isBunBinary) {
-		return join(dirname(process.execPath), "theme");
-	}
-	// Theme is in modes/interactive/theme/ relative to src/ or dist/
-	const packageDir = getPackageDir();
-	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
-	return join(packageDir, srcOrDist, "modes", "interactive", "theme");
-}
-
-/**
- * Get path to HTML export template directory (shipped with package)
- * - For Bun binary: export-html/ next to executable
- * - For Node.js (dist/): dist/core/export-html/
- * - For tsx (src/): src/core/export-html/
- */
-export function getExportTemplateDir(): string {
-	if (isBunBinary) {
-		return join(dirname(process.execPath), "export-html");
-	}
-	const packageDir = getPackageDir();
-	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
-	return join(packageDir, srcOrDist, "core", "export-html");
-}
-
-/** Get path to package.json */
-export function getPackageJsonPath(): string {
-	return join(getPackageDir(), "package.json");
-}
-
-/** Get path to README.md */
+/** Get path to README.md (optional, may not exist in binary) */
 export function getReadmePath(): string {
 	return resolve(join(getPackageDir(), "README.md"));
 }
 
-/** Get path to docs directory */
+/** Get path to docs directory (optional, may not exist in binary) */
 export function getDocsPath(): string {
 	return resolve(join(getPackageDir(), "docs"));
 }
 
-/** Get path to examples directory */
+/** Get path to examples directory (optional, may not exist in binary) */
 export function getExamplesPath(): string {
 	return resolve(join(getPackageDir(), "examples"));
 }
 
-/** Get path to CHANGELOG.md */
+/** Get path to CHANGELOG.md (optional, may not exist in binary) */
 export function getChangelogPath(): string {
 	return resolve(join(getPackageDir(), "CHANGELOG.md"));
 }
-
-// =============================================================================
-// App Config (from package.json piConfig)
-// =============================================================================
-
-const pkg = JSON.parse(readFileSync(getPackageJsonPath(), "utf-8"));
-
-export const APP_NAME: string = pkg.piConfig?.name || "pi";
-export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".pi";
-export const VERSION: string = pkg.version;
-
-// e.g., PI_CODING_AGENT_DIR or TAU_CODING_AGENT_DIR
-export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
 
 // =============================================================================
 // User Config Paths (~/.pi/agent/*)

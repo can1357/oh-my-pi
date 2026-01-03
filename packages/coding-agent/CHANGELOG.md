@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Simplified build process by embedding assets (themes, templates, agents, commands) directly into the binary at compile time
+- Removed separate asset copying steps from build scripts
 
 ## [2.0.1337] - 2026-01-03
 ### Added
