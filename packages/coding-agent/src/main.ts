@@ -370,6 +370,11 @@ export async function main(args: string[]) {
 	const settingsManager = SettingsManager.create(cwd);
 	time("SettingsManager.create");
 
+	// Initialize discovery system with settings for provider persistence
+	const { initializeWithSettings } = await import("./discovery");
+	initializeWithSettings(settingsManager);
+	time("initializeWithSettings");
+
 	// Apply model role overrides from CLI args or env vars (ephemeral, not persisted)
 	const smolModel = parsed.smol ?? process.env.OMP_SMOL_MODEL;
 	const slowModel = parsed.slow ?? process.env.OMP_SLOW_MODEL;

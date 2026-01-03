@@ -1,133 +1,16 @@
 /**
  * MCP configuration loader.
  *
- * Loads .mcp.json files from project root with environment variable expansion.
- * Supports ${VAR} and ${VAR:-default} syntax.
+ * Uses the capability system to load MCP servers from multiple sources.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { getConfigDirPaths } from "../../config";
-import type { MCPConfigFile, MCPServerConfig } from "./types";
-
-/** Environment variable expansion pattern: ${VAR} or ${VAR:-default} */
-const ENV_VAR_PATTERN = /\$\{([^}:]+)(?::-([^}]*))?\}/g;
-
-/**
- * Expand environment variables in a string.
- * Supports ${VAR} and ${VAR:-default} syntax.
- */
-export function expandEnvVars(value: string, extraEnv?: Record<string, string>): string {
-	return value.replace(ENV_VAR_PATTERN, (_, varName: string, defaultValue?: string) => {
-		const envValue = extraEnv?.[varName] ?? process.env[varName];
-		if (envValue !== undefined) {
-			return envValue;
-		}
-		if (defaultValue !== undefined) {
-			return defaultValue;
-		}
-		// If no value and no default, leave the placeholder (will likely cause an error later)
-		return `\${${varName}}`;
-	});
-}
-
-/**
- * Recursively expand environment variables in an object.
- */
-function expandEnvVarsInObject<T>(obj: T, extraEnv?: Record<string, string>): T {
-	if (typeof obj === "string") {
-		return expandEnvVars(obj, extraEnv) as T;
-	}
-	if (Array.isArray(obj)) {
-		return obj.map((item) => expandEnvVarsInObject(item, extraEnv)) as T;
-	}
-	if (obj !== null && typeof obj === "object") {
-		const result: Record<string, unknown> = {};
-		for (const [key, value] of Object.entries(obj)) {
-			result[key] = expandEnvVarsInObject(value, extraEnv);
-		}
-		return result as T;
-	}
-	return obj;
-}
-
-/**
- * Load and parse an .mcp.json file.
- * Returns null if file doesn't exist or is invalid.
- */
-export function loadMCPConfigFile(filePath: string, extraEnv?: Record<string, string>): MCPConfigFile | null {
-	if (!existsSync(filePath)) {
-		return null;
-	}
-
-	try {
-		const content = readFileSync(filePath, "utf-8");
-		const parsed = JSON.parse(content) as MCPConfigFile;
-
-		// Expand environment variables in server configs
-		if (parsed.mcpServers) {
-			parsed.mcpServers = expandEnvVarsInObject(parsed.mcpServers, extraEnv);
-		}
-
-		return parsed;
-	} catch (error) {
-		console.error(`Warning: Failed to parse ${filePath}: ${error}`);
-		return null;
-	}
-}
-
-/**
- * Configuration locations (in order of priority, later overrides earlier).
- */
-export interface MCPConfigLocations {
-	/** User-level config paths: ~/.omp/mcp.json, ~/.pi/mcp.json, ~/.claude/mcp.json */
-	userPaths: string[];
-	/** Project-level config: <cwd>/mcp.json or <cwd>/.mcp.json */
-	project?: string;
-}
-
-/**
- * Get standard MCP config file paths.
- * User-level checks .omp, .pi, .claude directories for fallback support.
- */
-export function getMCPConfigPaths(cwd: string): MCPConfigLocations {
-	// User-level: check all config dirs (not under agent/)
-	// mcp.json lives at ~/.omp/mcp.json, not ~/.omp/agent/mcp.json
-	const userPaths = getConfigDirPaths("mcp.json", { project: false }).map((p) =>
-		p.replace("/agent/mcp.json", "/mcp.json"),
-	);
-
-	// Project-level: check both mcp.json and .mcp.json (prefer mcp.json if both exist)
-	const mcpJson = join(cwd, "mcp.json");
-	const dotMcpJson = join(cwd, ".mcp.json");
-	const projectPath = existsSync(mcpJson) ? mcpJson : dotMcpJson;
-
-	return {
-		userPaths,
-		project: projectPath,
-	};
-}
-
-/**
- * Merge MCP configs from multiple sources.
- * Later sources override earlier ones for servers with same name.
- */
-export function mergeMCPConfigs(...configs: (MCPConfigFile | null)[]): Record<string, MCPServerConfig> {
-	const result: Record<string, MCPServerConfig> = {};
-
-	for (const config of configs) {
-		if (config?.mcpServers) {
-			Object.assign(result, config.mcpServers);
-		}
-	}
-
-	return result;
-}
+import { mcpCapability } from "../../capability/mcp";
+import type { MCPServer } from "../../discovery";
+import { load } from "../../discovery";
+import type { MCPServerConfig } from "./types";
 
 /** Options for loading MCP configs */
 export interface LoadMCPConfigsOptions {
-	/** Additional environment variables for expansion */
-	extraEnv?: Record<string, string>;
 	/** Whether to load project-level config (default: true) */
 	enableProjectConfig?: boolean;
 	/** Whether to filter out Exa MCP servers (default: true) */
@@ -140,49 +23,87 @@ export interface LoadMCPConfigsResult {
 	configs: Record<string, MCPServerConfig>;
 	/** Extracted Exa API keys (if any were filtered) */
 	exaApiKeys: string[];
+	/** Source metadata for each server */
+	sources: Record<string, import("../../capability/types").SourceMeta>;
+}
+
+/**
+ * Convert canonical MCPServer to legacy MCPServerConfig.
+ */
+function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
+	// Determine transport type
+	const transport = server.transport ?? (server.command ? "stdio" : server.url ? "http" : "stdio");
+
+	if (transport === "stdio") {
+		const config: MCPServerConfig = {
+			type: "stdio" as const,
+			command: server.command ?? "",
+		};
+		if (server.args) config.args = server.args;
+		if (server.env) config.env = server.env;
+		return config;
+	}
+
+	if (transport === "http") {
+		const config: MCPServerConfig = {
+			type: "http" as const,
+			url: server.url ?? "",
+		};
+		if (server.headers) config.headers = server.headers;
+		return config;
+	}
+
+	if (transport === "sse") {
+		const config: MCPServerConfig = {
+			type: "sse" as const,
+			url: server.url ?? "",
+		};
+		if (server.headers) config.headers = server.headers;
+		return config;
+	}
+
+	// Fallback to stdio
+	return {
+		type: "stdio" as const,
+		command: server.command ?? "",
+	};
 }
 
 /**
  * Load all MCP server configs from standard locations.
- * Returns merged config with project overriding user.
+ * Uses the capability system for multi-source discovery.
  *
  * @param cwd Working directory (project root)
- * @param options Load options or extraEnv for backwards compatibility
+ * @param options Load options
  */
-export function loadAllMCPConfigs(
-	cwd: string,
-	options?: LoadMCPConfigsOptions | Record<string, string>,
-): LoadMCPConfigsResult {
-	// Support old signature: loadAllMCPConfigs(cwd, extraEnv)
-	const opts: LoadMCPConfigsOptions =
-		options && ("extraEnv" in options || "enableProjectConfig" in options || "filterExa" in options)
-			? (options as LoadMCPConfigsOptions)
-			: { extraEnv: options as Record<string, string> | undefined };
+export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOptions): Promise<LoadMCPConfigsResult> {
+	const enableProjectConfig = options?.enableProjectConfig ?? true;
+	const filterExa = options?.filterExa ?? true;
 
-	const enableProjectConfig = opts.enableProjectConfig ?? true;
-	const filterExa = opts.filterExa ?? true;
+	// Load MCP servers via capability system
+	const result = await load<MCPServer>(mcpCapability.id, { cwd });
 
-	const paths = getMCPConfigPaths(cwd);
+	// Filter out project-level configs if disabled
+	const servers = enableProjectConfig
+		? result.items
+		: result.items.filter((server) => server._source.level !== "project");
 
-	// Load first existing user config (fallback support)
-	let userConfig: MCPConfigFile | null = null;
-	for (const userPath of paths.userPaths) {
-		userConfig = loadMCPConfigFile(userPath, opts.extraEnv);
-		if (userConfig) break;
+	// Convert to legacy format and preserve source metadata
+	const configs: Record<string, MCPServerConfig> = {};
+	const sources: Record<string, import("../../capability/types").SourceMeta> = {};
+	for (const server of servers) {
+		configs[server.name] = convertToLegacyConfig(server);
+		sources[server.name] = server._source;
 	}
 
-	const projectConfig = enableProjectConfig && paths.project ? loadMCPConfigFile(paths.project, opts.extraEnv) : null;
-
-	let configs = mergeMCPConfigs(userConfig, projectConfig);
-	let exaApiKeys: string[] = [];
+	const exaApiKeys: string[] = [];
 
 	if (filterExa) {
-		const result = filterExaMCPServers(configs);
-		configs = result.configs;
-		exaApiKeys = result.exaApiKeys;
+		const filterResult = filterExaMCPServers(configs, sources);
+		return { configs: filterResult.configs, exaApiKeys: filterResult.exaApiKeys, sources: filterResult.sources };
 	}
 
-	return { configs, exaApiKeys };
+	return { configs, exaApiKeys, sources };
 }
 
 /** Pattern to match Exa MCP servers */
@@ -258,14 +179,20 @@ export interface ExaFilterResult {
 	configs: Record<string, MCPServerConfig>;
 	/** Extracted Exa API keys (if any) */
 	exaApiKeys: string[];
+	/** Source metadata for remaining servers */
+	sources: Record<string, import("../../capability/types").SourceMeta>;
 }
 
 /**
  * Filter out Exa MCP servers and extract their API keys.
  * Since we have native Exa integration, we don't need the MCP server.
  */
-export function filterExaMCPServers(configs: Record<string, MCPServerConfig>): ExaFilterResult {
+export function filterExaMCPServers(
+	configs: Record<string, MCPServerConfig>,
+	sources: Record<string, import("../../capability/types").SourceMeta>,
+): ExaFilterResult {
 	const filtered: Record<string, MCPServerConfig> = {};
+	const filteredSources: Record<string, import("../../capability/types").SourceMeta> = {};
 	const exaApiKeys: string[] = [];
 
 	for (const [name, config] of Object.entries(configs)) {
@@ -277,10 +204,13 @@ export function filterExaMCPServers(configs: Record<string, MCPServerConfig>): E
 			}
 		} else {
 			filtered[name] = config;
+			if (sources[name]) {
+				filteredSources[name] = sources[name];
+			}
 		}
 	}
 
-	return { configs: filtered, exaApiKeys };
+	return { configs: filtered, exaApiKeys, sources: filteredSources };
 }
 
 /**
@@ -290,6 +220,15 @@ export function validateServerConfig(name: string, config: MCPServerConfig): str
 	const errors: string[] = [];
 
 	const serverType = config.type ?? "stdio";
+
+	// Check for conflicting transport fields
+	const hasCommand = "command" in config && config.command;
+	const hasUrl = "url" in config && (config as { url?: string }).url;
+	if (hasCommand && hasUrl) {
+		errors.push(
+			`Server "${name}": both "command" and "url" are set - server should be either stdio (command) OR http/sse (url), not both`,
+		);
+	}
 
 	if (serverType === "stdio") {
 		const stdioConfig = config as { command?: string };

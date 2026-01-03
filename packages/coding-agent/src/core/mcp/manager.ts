@@ -8,7 +8,7 @@
 import type { TSchema } from "@sinclair/typebox";
 import type { CustomTool } from "../custom-tools/types";
 import { connectToServer, disconnectServer, listTools } from "./client";
-import { type LoadMCPConfigsOptions, loadAllMCPConfigs, validateServerConfig } from "./config";
+import { loadAllMCPConfigs, validateServerConfig } from "./config";
 import type { MCPToolDetails } from "./tool-bridge";
 import { createMCPTools } from "./tool-bridge";
 import type { MCPServerConfig, MCPServerConnection } from "./types";
@@ -26,7 +26,11 @@ export interface MCPLoadResult {
 }
 
 /** Options for discovering and connecting to MCP servers */
-export interface MCPDiscoverOptions extends LoadMCPConfigsOptions {
+export interface MCPDiscoverOptions {
+	/** Whether to load project-level config (default: true) */
+	enableProjectConfig?: boolean;
+	/** Whether to filter out Exa MCP servers (default: true) */
+	filterExa?: boolean;
 	/** Called when starting to connect to servers */
 	onConnecting?: (serverNames: string[]) => void;
 }
@@ -46,26 +50,12 @@ export class MCPManager {
 	 * Discover and connect to all MCP servers from .mcp.json files.
 	 * Returns tools and any connection errors.
 	 */
-	async discoverAndConnect(
-		extraEnvOrOptions?: Record<string, string> | MCPDiscoverOptions,
-		onConnecting?: (serverNames: string[]) => void,
-	): Promise<MCPLoadResult> {
-		// Support old signature: discoverAndConnect(extraEnv, onConnecting)
-		const opts: MCPDiscoverOptions =
-			extraEnvOrOptions &&
-			("extraEnv" in extraEnvOrOptions ||
-				"enableProjectConfig" in extraEnvOrOptions ||
-				"filterExa" in extraEnvOrOptions ||
-				"onConnecting" in extraEnvOrOptions)
-				? (extraEnvOrOptions as MCPDiscoverOptions)
-				: { extraEnv: extraEnvOrOptions as Record<string, string> | undefined, onConnecting };
-
-		const { configs, exaApiKeys } = loadAllMCPConfigs(this.cwd, {
-			extraEnv: opts.extraEnv,
-			enableProjectConfig: opts.enableProjectConfig,
-			filterExa: opts.filterExa,
+	async discoverAndConnect(options?: MCPDiscoverOptions): Promise<MCPLoadResult> {
+		const { configs, exaApiKeys, sources } = await loadAllMCPConfigs(this.cwd, {
+			enableProjectConfig: options?.enableProjectConfig,
+			filterExa: options?.filterExa,
 		});
-		const result = await this.connectServers(configs, opts.onConnecting);
+		const result = await this.connectServers(configs, sources, options?.onConnecting);
 		result.exaApiKeys = exaApiKeys;
 		return result;
 	}
@@ -76,6 +66,7 @@ export class MCPManager {
 	 */
 	async connectServers(
 		configs: Record<string, MCPServerConfig>,
+		sources: Record<string, import("../../capability/types").SourceMeta>,
 		onConnecting?: (serverNames: string[]) => void,
 	): Promise<MCPLoadResult> {
 		const errors = new Map<string, string>();
@@ -115,6 +106,10 @@ export class MCPManager {
 		const results = await Promise.allSettled(
 			connectionTasks.map(async ({ name, config }) => {
 				const connection = await connectToServer(name, config);
+				// Attach source metadata to connection
+				if (sources[name]) {
+					connection._source = sources[name];
+				}
 				const serverTools = await listTools(connection);
 				return { name, connection, serverTools };
 			}),
@@ -229,12 +224,12 @@ export class MCPManager {
  */
 export async function createMCPManager(
 	cwd: string,
-	extraEnv?: Record<string, string>,
+	options?: MCPDiscoverOptions,
 ): Promise<{
 	manager: MCPManager;
 	result: MCPLoadResult;
 }> {
 	const manager = new MCPManager(cwd);
-	const result = await manager.discoverAndConnect(extraEnv);
+	const result = await manager.discoverAndConnect(options);
 	return { manager, result };
 }

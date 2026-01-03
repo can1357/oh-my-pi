@@ -32,6 +32,8 @@
 import { join } from "node:path";
 import { Agent, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+// Import discovery to register all providers on startup
+import "../discovery";
 import { getAgentDir, getConfigDirPaths } from "../config";
 import { AgentSession } from "./agent-session";
 import { AuthStorage } from "./auth-storage";
@@ -237,12 +239,11 @@ export function discoverModels(authStorage: AuthStorage, agentDir: string = getD
  */
 export async function discoverHooks(
 	cwd?: string,
-	agentDir?: string,
+	_agentDir?: string,
 ): Promise<Array<{ path: string; factory: HookFactory }>> {
 	const resolvedCwd = cwd ?? process.cwd();
-	const resolvedAgentDir = agentDir ?? getDefaultAgentDir();
 
-	const { hooks, errors } = await discoverAndLoadHooks([], resolvedCwd, resolvedAgentDir);
+	const { hooks, errors } = await discoverAndLoadHooks([], resolvedCwd);
 
 	// Log errors but don't fail
 	for (const { path, error } of errors) {
@@ -260,12 +261,11 @@ export async function discoverHooks(
  */
 export async function discoverCustomTools(
 	cwd?: string,
-	agentDir?: string,
+	_agentDir?: string,
 ): Promise<Array<{ path: string; tool: CustomTool }>> {
 	const resolvedCwd = cwd ?? process.cwd();
-	const resolvedAgentDir = agentDir ?? getDefaultAgentDir();
 
-	const { tools, errors } = await discoverAndLoadCustomTools([], resolvedCwd, Object.keys(allTools), resolvedAgentDir);
+	const { tools, errors } = await discoverAndLoadCustomTools([], resolvedCwd, Object.keys(allTools));
 
 	// Log errors but don't fail
 	for (const { path, error } of errors) {
@@ -281,22 +281,24 @@ export async function discoverCustomTools(
 /**
  * Discover skills from cwd and agentDir.
  */
-export function discoverSkills(cwd?: string, agentDir?: string, settings?: SkillsSettings): Skill[] {
+export function discoverSkills(cwd?: string, _agentDir?: string, settings?: SkillsSettings): Skill[] {
 	const { skills } = loadSkillsInternal({
 		...settings,
 		cwd: cwd ?? process.cwd(),
-		agentDir: agentDir ?? getDefaultAgentDir(),
 	});
 	return skills;
 }
 
 /**
  * Discover context files (AGENTS.md) walking up from cwd.
+ * Returns files sorted by depth (farther from cwd first, so closer files appear last/more prominent).
  */
-export function discoverContextFiles(cwd?: string, agentDir?: string): Array<{ path: string; content: string }> {
+export function discoverContextFiles(
+	cwd?: string,
+	_agentDir?: string,
+): Array<{ path: string; content: string; depth?: number }> {
 	return loadContextFilesInternal({
 		cwd: cwd ?? process.cwd(),
-		agentDir: agentDir ?? getDefaultAgentDir(),
 	});
 }
 
@@ -305,14 +307,11 @@ export function discoverContextFiles(cwd?: string, agentDir?: string): Array<{ p
  */
 export function discoverSlashCommands(
 	cwd?: string,
-	agentDir?: string,
-	settings?: CommandsSettings,
+	_agentDir?: string,
+	_settings?: CommandsSettings,
 ): FileSlashCommand[] {
 	return loadSlashCommandsInternal({
 		cwd: cwd ?? process.cwd(),
-		agentDir: agentDir ?? getDefaultAgentDir(),
-		enableClaudeUser: settings?.enableClaudeUser,
-		enableClaudeProject: settings?.enableClaudeProject,
 	});
 }
 
@@ -513,6 +512,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	time("settingsManager");
+
+	// Initialize discovery system with settings for provider persistence
+	const { initializeWithSettings } = await import("../discovery");
+	initializeWithSettings(settingsManager);
+	time("initializeWithSettings");
+
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd);
 	time("sessionManager");
 
@@ -608,7 +613,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	} else {
 		// Discover hooks, merging with additional paths
 		const configuredPaths = [...settingsManager.getHookPaths(), ...(options.additionalHookPaths ?? [])];
-		const { hooks, errors } = await discoverAndLoadHooks(configuredPaths, cwd, agentDir);
+		const { hooks, errors } = await discoverAndLoadHooks(configuredPaths, cwd);
 		time("discoverAndLoadHooks");
 		for (const { path, error } of errors) {
 			console.error(`Failed to load hook "${path}": ${error}`);
@@ -646,7 +651,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	} else {
 		// Discover custom tools, merging with additional paths
 		const configuredPaths = [...settingsManager.getCustomToolPaths(), ...(options.additionalCustomToolPaths ?? [])];
-		customToolsResult = await discoverAndLoadCustomTools(configuredPaths, cwd, Object.keys(allTools), agentDir);
+		customToolsResult = await discoverAndLoadCustomTools(configuredPaths, cwd, Object.keys(allTools));
 		time("discoverAndLoadCustomTools");
 		for (const { path, error } of customToolsResult.errors) {
 			console.error(`Failed to load custom tool "${path}": ${error}`);
@@ -704,6 +709,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				path: "<exa>",
 				resolvedPath: "<exa>",
 				tool,
+				source: { provider: "builtin", providerName: "builtin", level: "user" },
 			}));
 			customToolsResult = {
 				...customToolsResult,
@@ -760,7 +766,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let systemPrompt: string;
 	const defaultPrompt = buildSystemPromptInternal({
 		cwd,
-		agentDir,
 		skills,
 		contextFiles,
 	});
@@ -771,7 +776,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	} else if (typeof options.systemPrompt === "string") {
 		systemPrompt = buildSystemPromptInternal({
 			cwd,
-			agentDir,
 			skills,
 			contextFiles,
 			customPrompt: options.systemPrompt,

@@ -142,6 +142,21 @@ Programmable commands with full API access:
 - Return string to send as LLM prompt, or void for fire-and-forget actions
 - Also loads from Claude Code directories (`~/.claude/commands/`, `.claude/commands/`)
 
+## + Universal Config Discovery
+
+<p align="center">
+  <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/discovery.webp?raw=true" alt="discovery">
+</p>
+
+Unified capability-based discovery that loads configuration from 8 AI coding tools:
+
+- **Multi-tool support**: Claude Code, Cursor, Windsurf, Gemini, Codex, Cline, GitHub Copilot, VS Code
+- **Discovers everything**: MCP servers, rules, skills, hooks, tools, slash commands, prompts, context files
+- **Native format support**: Cursor MDC frontmatter, Windsurf rules, Cline `.clinerules`, Copilot `applyTo` globs, Gemini `system.md`, Codex `AGENTS.md`
+- **Provider attribution**: See which tool contributed each configuration item
+- **Discovery settings**: Enable/disable individual providers via `/config` interactive tab
+- **Priority ordering**: Multi-path resolution across `.omp`, `.pi`, and `.claude` directories
+
 ## + MCP & Plugin System
 
 <p align="center">

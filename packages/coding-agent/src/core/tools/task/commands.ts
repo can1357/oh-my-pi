@@ -4,9 +4,9 @@
  * Commands are embedded at build time via Bun's import with { type: "text" }.
  */
 
-import * as fs from "node:fs";
 import * as path from "node:path";
-import { findAllNearestProjectConfigDirs, getConfigDirs } from "../../../config";
+import { type SlashCommand, slashCommandCapability } from "../../../capability/slash-command";
+import { loadSync } from "../../../discovery";
 
 // Embed command markdown files at build time
 import architectPlanMd from "./bundled-commands/architect-plan.md" with { type: "text" };
@@ -61,58 +61,6 @@ function parseFrontmatter(content: string): { frontmatter: Record<string, string
 	return { frontmatter, body };
 }
 
-/**
- * Load commands from a directory (for user/project commands).
- */
-function loadCommandsFromDir(dir: string, source: "user" | "project"): WorkflowCommand[] {
-	const commands: WorkflowCommand[] = [];
-
-	if (!fs.existsSync(dir)) {
-		return commands;
-	}
-
-	let entries: fs.Dirent[];
-	try {
-		entries = fs.readdirSync(dir, { withFileTypes: true });
-	} catch {
-		return commands;
-	}
-
-	for (const entry of entries) {
-		if (!entry.name.endsWith(".md")) continue;
-
-		const filePath = path.resolve(dir, entry.name);
-
-		try {
-			if (!fs.statSync(filePath).isFile()) continue;
-		} catch {
-			continue;
-		}
-
-		let content: string;
-		try {
-			content = fs.readFileSync(filePath, "utf-8");
-		} catch {
-			continue;
-		}
-
-		const { frontmatter, body } = parseFrontmatter(content);
-
-		// Name is filename without extension
-		const name = entry.name.replace(/\.md$/, "");
-
-		commands.push({
-			name,
-			description: frontmatter.description || "",
-			instructions: body,
-			source,
-			filePath,
-		});
-	}
-
-	return commands;
-}
-
 /** Cache for bundled commands */
 let bundledCommandsCache: WorkflowCommand[] | null = null;
 
@@ -150,46 +98,33 @@ export function loadBundledCommands(): WorkflowCommand[] {
  */
 export function discoverCommands(cwd: string): WorkflowCommand[] {
 	const resolvedCwd = path.resolve(cwd);
-	const commandSources = Array.from(new Set(getConfigDirs("", { project: false }).map((entry) => entry.source)));
 
-	const userDirs = getConfigDirs("commands", { project: false })
-		.filter((entry) => commandSources.includes(entry.source))
-		.map((entry) => ({
-			...entry,
-			path: path.resolve(entry.path),
-		}));
-
-	const projectDirs = findAllNearestProjectConfigDirs("commands", resolvedCwd)
-		.filter((entry) => commandSources.includes(entry.source))
-		.map((entry) => ({
-			...entry,
-			path: path.resolve(entry.path),
-		}));
-
-	const orderedSources = commandSources.filter(
-		(source) =>
-			userDirs.some((entry) => entry.source === source) || projectDirs.some((entry) => entry.source === source),
-	);
-
-	const orderedDirs: Array<{ dir: string; source: "user" | "project" }> = [];
-	for (const source of orderedSources) {
-		const project = projectDirs.find((entry) => entry.source === source);
-		if (project) orderedDirs.push({ dir: project.path, source: "project" });
-		const user = userDirs.find((entry) => entry.source === source);
-		if (user) orderedDirs.push({ dir: user.path, source: "user" });
-	}
+	// Load slash commands from capability API
+	const result = loadSync<SlashCommand>(slashCommandCapability.id, { cwd: resolvedCwd });
 
 	const commands: WorkflowCommand[] = [];
 	const seen = new Set<string>();
 
-	for (const { dir, source } of orderedDirs) {
-		for (const cmd of loadCommandsFromDir(dir, source)) {
-			if (seen.has(cmd.name)) continue;
-			commands.push(cmd);
-			seen.add(cmd.name);
-		}
+	// Convert SlashCommand to WorkflowCommand format
+	for (const cmd of result.items) {
+		if (seen.has(cmd.name)) continue;
+
+		const { frontmatter, body } = parseFrontmatter(cmd.content);
+
+		// Map capability levels to WorkflowCommand source
+		const source: "bundled" | "user" | "project" = cmd.level === "native" ? "bundled" : cmd.level;
+
+		commands.push({
+			name: cmd.name,
+			description: frontmatter.description || "",
+			instructions: body,
+			source,
+			filePath: cmd.path,
+		});
+		seen.add(cmd.name);
 	}
 
+	// Add bundled commands if not already present
 	for (const cmd of loadBundledCommands()) {
 		if (seen.has(cmd.name)) continue;
 		commands.push(cmd);

@@ -6,6 +6,7 @@
 
 import type { LoadedCustomTool } from "../custom-tools/types";
 import { type MCPLoadResult, MCPManager } from "./manager";
+import { parseMCPToolName } from "./tool-bridge";
 
 /** Result from loading MCP tools */
 export interface MCPToolsLoadResult {
@@ -23,8 +24,6 @@ export interface MCPToolsLoadResult {
 
 /** Options for loading MCP tools */
 export interface MCPToolsLoadOptions {
-	/** Additional environment variables for expansion */
-	extraEnv?: Record<string, string>;
 	/** Called when starting to connect to servers */
 	onConnecting?: (serverNames: string[]) => void;
 	/** Whether to load project-level config (default: true) */
@@ -37,28 +36,18 @@ export interface MCPToolsLoadOptions {
  * Discover and load MCP tools from .mcp.json files.
  *
  * @param cwd Working directory (project root)
- * @param options Load options including extraEnv and progress callbacks
+ * @param options Load options including progress callbacks
  * @returns MCP tools in LoadedCustomTool format for integration
  */
-export async function discoverAndLoadMCPTools(
-	cwd: string,
-	options?: MCPToolsLoadOptions | Record<string, string>,
-): Promise<MCPToolsLoadResult> {
-	// Support old signature: discoverAndLoadMCPTools(cwd, extraEnv)
-	const opts: MCPToolsLoadOptions =
-		options && ("extraEnv" in options || "onConnecting" in options || "enableProjectConfig" in options)
-			? (options as MCPToolsLoadOptions)
-			: { extraEnv: options as Record<string, string> | undefined };
-
+export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoadOptions): Promise<MCPToolsLoadResult> {
 	const manager = new MCPManager(cwd);
 
 	let result: MCPLoadResult;
 	try {
 		result = await manager.discoverAndConnect({
-			extraEnv: opts.extraEnv,
-			onConnecting: opts.onConnecting,
-			enableProjectConfig: opts.enableProjectConfig,
-			filterExa: opts.filterExa,
+			onConnecting: options?.onConnecting,
+			enableProjectConfig: options?.enableProjectConfig,
+			filterExa: options?.filterExa,
 		});
 	} catch (error) {
 		// If discovery fails entirely, return empty result
@@ -73,11 +62,26 @@ export async function discoverAndLoadMCPTools(
 	}
 
 	// Convert MCP tools to LoadedCustomTool format
-	const loadedTools: LoadedCustomTool[] = result.tools.map((tool) => ({
-		path: `mcp:${tool.name}`,
-		resolvedPath: `mcp:${tool.name}`,
-		tool: tool as any, // MCPToolDetails is compatible with CustomTool<TSchema, any>
-	}));
+	const loadedTools: LoadedCustomTool[] = result.tools.map((tool) => {
+		// Parse the MCP tool name to get server name
+		const parsed = parseMCPToolName(tool.name);
+		const serverName = parsed?.serverName;
+
+		// Get provider info from manager's connection if available
+		const connection = serverName ? manager.getConnection(serverName) : undefined;
+		const provider = connection?._source?.provider;
+
+		// Format path with provider info if available
+		// Format: "mcp:serverName via providerName" (e.g., "mcp:agentx via Claude Code")
+		const path =
+			provider && serverName ? `mcp:${serverName} via ${connection._source!.providerName}` : `mcp:${tool.name}`;
+
+		return {
+			path,
+			resolvedPath: `mcp:${tool.name}`,
+			tool: tool as any, // MCPToolDetails is compatible with CustomTool<TSchema, any>
+		};
+	});
 
 	// Convert error map to array format
 	const errors: Array<{ path: string; error: string }> = [];

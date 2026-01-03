@@ -163,12 +163,21 @@ export interface LoadedCustomTool {
 	resolvedPath: string;
 	/** The original custom tool instance */
 	tool: CustomTool;
+	/** Source metadata (provider and level) */
+	source?: { provider: string; providerName: string; level: "user" | "project" };
+}
+
+/** Error with source metadata */
+export interface ToolLoadError {
+	path: string;
+	error: string;
+	source?: { provider: string; providerName: string; level: "user" | "project" };
 }
 
 /** Result from loading custom tools */
 export interface CustomToolsLoadResult {
 	tools: LoadedCustomTool[];
-	errors: Array<{ path: string; error: string }>;
+	errors: ToolLoadError[];
 	/** Update the UI context for all loaded tools. Call when mode initializes. */
 	setUIContext(uiContext: CustomToolUIContext, hasUI: boolean): void;
 }

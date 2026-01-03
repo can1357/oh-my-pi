@@ -11,14 +11,10 @@ export { callTool, connectToServer, disconnectServer, listTools, serverSupportsT
 // Config
 export type { ExaFilterResult, LoadMCPConfigsOptions, LoadMCPConfigsResult } from "./config";
 export {
-	expandEnvVars,
 	extractExaApiKey,
 	filterExaMCPServers,
-	getMCPConfigPaths,
 	isExaMCPServer,
 	loadAllMCPConfigs,
-	loadMCPConfigFile,
-	mergeMCPConfigs,
 	validateServerConfig,
 } from "./config";
 // Loader (for SDK integration)

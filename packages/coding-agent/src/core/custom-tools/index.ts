@@ -17,5 +17,6 @@ export type {
 	ExecResult,
 	LoadedCustomTool,
 	RenderResultOptions,
+	ToolLoadError,
 } from "./types";
 export { wrapCustomTool, wrapCustomTools } from "./wrapper";

@@ -38,7 +38,6 @@ export {
 export {
 	createMCPManager,
 	discoverAndLoadMCPTools,
-	expandEnvVars,
 	loadAllMCPConfigs,
 	type MCPConfigFile,
 	type MCPLoadResult,

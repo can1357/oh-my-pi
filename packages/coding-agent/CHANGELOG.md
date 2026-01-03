@@ -1,8 +1,19 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Added
 
+- Added unified capability-based discovery system for loading configuration from multiple AI coding tools (Claude Code, Cursor, Windsurf, Gemini, Codex, Cline, GitHub Copilot, VS Code)
+- Added support for discovering MCP servers, rules, skills, hooks, tools, slash commands, prompts, and context files from tool-specific config directories
+- Added Discovery settings tab in interactive mode to enable/disable individual configuration providers
+- Added provider source attribution showing which tool contributed each configuration item
+- Added support for Cursor MDC rule format with frontmatter (description, globs, alwaysApply)
+- Added support for Windsurf rules from .windsurf/rules/*.md and global_rules.md
+- Added support for Cline rules from .clinerules file or directory
+- Added support for GitHub Copilot instructions with applyTo glob patterns
+- Added support for Gemini extensions and system.md customization files
+- Added support for Codex AGENTS.md and config.toml settings
 - Added automatic migration of `PI_*` environment variables to `OMP_*` equivalents for backwards compatibility
 - Added multi-path config discovery supporting `.omp`, `.pi`, and `.claude` directories with priority ordering
 - Added `getConfigDirPaths()`, `findConfigFile()`, and `readConfigFile()` functions for unified config resolution
@@ -10,6 +21,8 @@
 
 ### Changed
 
+- Changed MCP tool name parsing to use last underscore separator for better server name handling
+- Changed /config output to show provider attribution for discovered items
 - Renamed CLI binary from `pi` to `omp` and updated all command references
 - Changed config directory from `.pi` to `.omp` with fallback support for legacy paths
 - Renamed environment variables from `PI_*` to `OMP_*` prefix (e.g., `OMP_SMOL_MODEL`, `OMP_SLOW_MODEL`)

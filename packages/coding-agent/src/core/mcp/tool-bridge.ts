@@ -19,6 +19,10 @@ export interface MCPToolDetails {
 	isError?: boolean;
 	/** Raw content from MCP response */
 	rawContent?: MCPContent[];
+	/** Provider ID (e.g., "claude", "mcp-json") */
+	provider?: string;
+	/** Provider display name (e.g., "Claude Code", "MCP Config") */
+	providerName?: string;
 }
 
 /**
@@ -74,7 +78,7 @@ export function parseMCPToolName(name: string): { serverName: string; toolName: 
 	if (!name.startsWith("mcp_")) return null;
 
 	const rest = name.slice(4);
-	const underscoreIdx = rest.indexOf("_");
+	const underscoreIdx = rest.lastIndexOf("_");
 	if (underscoreIdx === -1) return null;
 
 	return {
@@ -109,6 +113,8 @@ export function createMCPTool(
 					mcpToolName: tool.name,
 					isError: result.isError,
 					rawContent: result.content,
+					provider: connection._source?.provider,
+					providerName: connection._source?.providerName,
 				};
 
 				if (result.isError) {
@@ -130,6 +136,8 @@ export function createMCPTool(
 						serverName: connection.name,
 						mcpToolName: tool.name,
 						isError: true,
+						provider: connection._source?.provider,
+						providerName: connection._source?.providerName,
 					},
 				};
 			}

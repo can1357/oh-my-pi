@@ -6,6 +6,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { basename } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, OAuthProvider } from "@oh-my-pi/pi-ai";
 import type { SlashCommand } from "@oh-my-pi/pi-tui";
@@ -23,6 +24,10 @@ import {
 	TUI,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { contextFileCapability } from "../../capability/context-file";
+import { instructionCapability } from "../../capability/instruction";
+import { promptCapability } from "../../capability/prompt";
+import { ruleCapability } from "../../capability/rule";
 import { getAuthPath, getDebugLogPath } from "../../config";
 import type { AgentSession, AgentSessionEvent } from "../../core/agent-session";
 import type { CustomToolSessionEvent, LoadedCustomTool } from "../../core/custom-tools/index";
@@ -30,9 +35,17 @@ import type { HookUIContext } from "../../core/hooks/index";
 import { createCompactionSummaryMessage } from "../../core/messages";
 import { getRecentSessions, type SessionContext, SessionManager } from "../../core/session-manager";
 import { loadSkills } from "../../core/skills";
-import { loadProjectContextFiles } from "../../core/system-prompt";
 import { generateSessionTitle, setTerminalTitle } from "../../core/title-generator";
 import type { TruncationResult } from "../../core/tools/truncate";
+import {
+	type ContextFile,
+	disableProvider,
+	enableProvider,
+	type Instruction,
+	loadSync,
+	type Prompt,
+	type Rule,
+} from "../../discovery";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog";
 import { copyToClipboard, readImageFromClipboard } from "../../utils/clipboard";
 import { ArminComponent } from "./components/armin";
@@ -1729,6 +1742,17 @@ export class InteractiveMode {
 	 * This handles side effects and session-specific settings.
 	 */
 	private handleSettingChange(id: string, value: string | boolean): void {
+		// Discovery provider toggles
+		if (id.startsWith("discovery.")) {
+			const providerId = id.replace("discovery.", "");
+			if (value) {
+				enableProvider(providerId);
+			} else {
+				disableProvider(providerId);
+			}
+			return;
+		}
+
 		switch (id) {
 			// Session-managed settings (not in SettingsManager)
 			case "autoCompact":
@@ -2369,13 +2393,87 @@ export class InteractiveMode {
 	private handleStatusCommand(): void {
 		const sections: string[] = [];
 
+		type StatusSource =
+			| { provider: string; level: string }
+			| { mcpServer: string; provider?: string }
+			| "builtin"
+			| "unknown";
+
+		const capitalize = (value: string): string => value.charAt(0).toUpperCase() + value.slice(1);
+
+		const renderSource = (source: StatusSource): { plain: string; rendered: string } => {
+			if (source === "builtin") {
+				return { plain: "builtin", rendered: theme.fg("dim", "builtin") };
+			}
+			if (source === "unknown") {
+				return { plain: "unknown", rendered: theme.fg("dim", "unknown") };
+			}
+			if ("mcpServer" in source) {
+				if (!source.provider) {
+					const label = `mcp:${source.mcpServer}`;
+					return { plain: label, rendered: label };
+				}
+				const label = `${source.mcpServer} via ${source.provider}`;
+				return {
+					plain: label,
+					rendered: `${source.mcpServer} ${theme.italic("via")} ${source.provider}`,
+				};
+			}
+			const levelLabel = capitalize(source.level);
+			const label = `via ${source.provider} (${levelLabel})`;
+			return {
+				plain: label,
+				rendered: `${theme.italic("via")} ${source.provider} (${levelLabel})`,
+			};
+		};
+
+		// Helper to format a section with consistent column alignment
+		const formatSection = <T>(
+			title: string,
+			items: readonly T[],
+			getName: (item: T) => string,
+			getDesc: (item: T) => string | undefined,
+			getSource: (item: T) => StatusSource,
+		): string => {
+			if (items.length === 0) return "";
+
+			const lines = items.map((item) => {
+				const name = getName(item);
+				const desc = getDesc(item);
+				const source = renderSource(getSource(item));
+				const nameWithSource = source.plain ? `${name} ${source.plain}` : name;
+				return {
+					name,
+					nameWithSource,
+					nameRendered: source.plain ? `${theme.bold(name)} ${source.rendered}` : theme.bold(name),
+					desc,
+				};
+			});
+
+			const maxNameWidth = Math.min(50, Math.max(...lines.map((line) => line.nameWithSource.length)));
+			const formattedLines = lines.map((line) => {
+				const pad = Math.max(0, maxNameWidth - line.nameWithSource.length);
+				const paddedName = line.nameRendered + " ".repeat(pad);
+				const desc = line.desc?.trim();
+				const descPart = desc ? `  ${theme.fg("dim", desc.slice(0, 50) + (desc.length > 50 ? "…" : ""))}` : "";
+				return `  ${paddedName}${descPart}`;
+			});
+
+			return `${theme.bold(theme.fg("accent", title))}\n${formattedLines.join("\n")}`;
+		};
+
 		// Loaded context files
-		const contextFiles = loadProjectContextFiles();
+		const contextFilesResult = loadSync(contextFileCapability.id, { cwd: process.cwd() });
+		const contextFiles = contextFilesResult.items as ContextFile[];
 		if (contextFiles.length > 0) {
 			sections.push(
-				theme.bold(theme.fg("accent", "Context Files")) +
-					"\n" +
-					contextFiles.map((f) => theme.fg("dim", `  ${f.path}`)).join("\n"),
+				formatSection(
+					"Context Files",
+					contextFiles,
+					(f) => basename(f.path),
+					() => undefined,
+					(f) => ({ provider: f._source.providerName, level: f.level }),
+				),
 			);
 		}
 
@@ -2385,9 +2483,13 @@ export class InteractiveMode {
 			const { skills, warnings: skillWarnings } = loadSkills(skillsSettings ?? {});
 			if (skills.length > 0) {
 				sections.push(
-					theme.bold(theme.fg("accent", "Skills")) +
-						"\n" +
-						skills.map((s) => theme.fg("dim", `  ${s.filePath}`)).join("\n"),
+					formatSection(
+						"Skills",
+						skills,
+						(s) => s.name,
+						(s) => s.description,
+						(s) => (s._source ? { provider: s._source.providerName, level: s._source.level } : "unknown"),
+					),
 				);
 			}
 			if (skillWarnings.length > 0) {
@@ -2399,14 +2501,103 @@ export class InteractiveMode {
 			}
 		}
 
-		// Loaded custom tools
-		if (this.customTools.size > 0) {
+		// Loaded rules
+		const rulesResult = loadSync<Rule>(ruleCapability.id, { cwd: process.cwd() });
+		if (rulesResult.items.length > 0) {
 			sections.push(
-				theme.bold(theme.fg("accent", "Custom Tools")) +
-					"\n" +
-					Array.from(this.customTools.values())
-						.map((ct) => theme.fg("dim", `  ${ct.tool.name} (${ct.path})`))
-						.join("\n"),
+				formatSection(
+					"Rules",
+					rulesResult.items,
+					(r) => r.name,
+					(r) => r.description,
+					(r) => ({ provider: r._source.providerName, level: r._source.level }),
+				),
+			);
+		}
+
+		// Loaded prompts
+		const promptsResult = loadSync<Prompt>(promptCapability.id, { cwd: process.cwd() });
+		if (promptsResult.items.length > 0) {
+			sections.push(
+				formatSection(
+					"Prompts",
+					promptsResult.items,
+					(p) => p.name,
+					() => undefined,
+					(p) => ({ provider: p._source.providerName, level: p._source.level }),
+				),
+			);
+		}
+
+		// Loaded instructions
+		const instructionsResult = loadSync<Instruction>(instructionCapability.id, { cwd: process.cwd() });
+		if (instructionsResult.items.length > 0) {
+			sections.push(
+				formatSection(
+					"Instructions",
+					instructionsResult.items,
+					(i) => i.name,
+					(i) => (i.applyTo ? `applies to: ${i.applyTo}` : undefined),
+					(i) => ({ provider: i._source.providerName, level: i._source.level }),
+				),
+			);
+		}
+
+		// Loaded custom tools - split MCP from non-MCP
+		if (this.customTools.size > 0) {
+			const allTools = Array.from(this.customTools.values());
+			const mcpTools = allTools.filter((ct) => ct.path.startsWith("mcp:"));
+			const customTools = allTools.filter((ct) => !ct.path.startsWith("mcp:"));
+
+			// MCP Tools section
+			if (mcpTools.length > 0) {
+				sections.push(
+					formatSection(
+						"MCP Tools",
+						mcpTools,
+						(ct) => ct.tool.label || ct.tool.name,
+						() => undefined,
+						(ct) => {
+							const match = ct.path.match(/^mcp:(.+?) via (.+)$/);
+							if (match) {
+								const [, serverName, providerName] = match;
+								return { mcpServer: serverName, provider: providerName };
+							}
+							return ct.path.startsWith("mcp:") ? { mcpServer: ct.path.slice(4) } : "unknown";
+						},
+					),
+				);
+			}
+
+			// Custom Tools section
+			if (customTools.length > 0) {
+				sections.push(
+					formatSection(
+						"Custom Tools",
+						customTools,
+						(ct) => ct.tool.label || ct.tool.name,
+						(ct) => ct.tool.description,
+						(ct) => {
+							if (ct.source?.provider === "builtin") return "builtin";
+							if (ct.path === "<exa>") return "builtin";
+							return ct.source ? { provider: ct.source.providerName, level: ct.source.level } : "unknown";
+						},
+					),
+				);
+			}
+		}
+
+		// Loaded slash commands (file-based)
+		const fileCommands = this.session.fileCommands;
+		if (fileCommands.length > 0) {
+			sections.push(
+				formatSection(
+					"Slash Commands",
+					fileCommands,
+					(cmd) => `/${cmd.name}`,
+					(cmd) => cmd.description,
+					(cmd) => (cmd._source ? { provider: cmd._source.providerName, level: cmd._source.level } : "unknown"),
+				),
 			);
 		}
 
@@ -2416,7 +2607,7 @@ export class InteractiveMode {
 			const hookPaths = hookRunner.getHookPaths();
 			if (hookPaths.length > 0) {
 				sections.push(
-					`${theme.bold(theme.fg("accent", "Hooks"))}\n${hookPaths.map((p) => theme.fg("dim", `  ${p}`)).join("\n")}`,
+					`${theme.bold(theme.fg("accent", "Hooks"))}\n${hookPaths.map((p) => `  ${theme.bold(basename(p))} ${theme.fg("dim", "hook")}`).join("\n")}`,
 				);
 			}
 		}

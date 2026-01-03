@@ -2,15 +2,15 @@
  * Hook loader - loads TypeScript hook modules using native Bun import.
  */
 
-import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as typebox from "@sinclair/typebox";
-import { getAgentDir, getConfigDirPaths } from "../../config";
+import { hookCapability } from "../../capability/hook";
+import type { Hook } from "../../discovery";
+import { loadSync } from "../../discovery";
 import * as piCodingAgent from "../../index";
 import { logger } from "../logger";
 import type { HookMessage } from "../messages";
-import { getAllPluginHookPaths } from "../plugins/loader";
 import type { SessionManager } from "../session-manager";
 import { execCommand } from "./runner";
 import type { ExecOptions, HookAPI, HookFactory, HookMessageRenderer, RegisteredCommand } from "./types";
@@ -254,37 +254,15 @@ export async function loadHooks(paths: string[], cwd: string): Promise<LoadHooks
 }
 
 /**
- * Discover hook files from a directory.
- * Returns all .ts files (and symlinks to .ts files) in the directory (non-recursive).
- */
-function discoverHooksInDir(dir: string): string[] {
-	if (!fs.existsSync(dir)) {
-		return [];
-	}
-
-	try {
-		const entries = fs.readdirSync(dir, { withFileTypes: true });
-		return entries
-			.filter((e) => (e.isFile() || e.isSymbolicLink()) && e.name.endsWith(".ts"))
-			.map((e) => path.join(dir, e.name));
-	} catch {
-		return [];
-	}
-}
-
-/**
- * Discover and load hooks from standard locations:
- * 1. agentDir/hooks/*.ts (global)
- * 2. cwd/{.omp,.pi,.claude}/hooks/*.ts (project-local, with fallbacks)
- * 3. Installed plugins (~/.omp/plugins/node_modules/*)
+ * Discover and load hooks from all registered providers.
+ * Uses the capability API to discover hook paths from:
+ * 1. OMP native configs (.omp/.pi hooks/)
+ * 2. Installed plugins
+ * 3. Other editor/IDE configurations
  *
  * Plus any explicitly configured paths from settings.
  */
-export async function discoverAndLoadHooks(
-	configuredPaths: string[],
-	cwd: string,
-	agentDir: string = getAgentDir(),
-): Promise<LoadHooksResult> {
+export async function discoverAndLoadHooks(configuredPaths: string[], cwd: string): Promise<LoadHooksResult> {
 	const allPaths: string[] = [];
 	const seen = new Set<string>();
 
@@ -299,19 +277,11 @@ export async function discoverAndLoadHooks(
 		}
 	};
 
-	// 1. Global hooks: agentDir/hooks/
-	const globalHooksDir = path.join(agentDir, "hooks");
-	addPaths(discoverHooksInDir(globalHooksDir));
+	// 1. Discover hooks via capability API
+	const discovered = loadSync<Hook>(hookCapability.id, { cwd });
+	addPaths(discovered.items.map((hook) => hook.path));
 
-	// 2. Project-local hooks: cwd/{.omp,.pi,.claude}/hooks/
-	for (const localHooksDir of getConfigDirPaths("hooks", { user: false, cwd })) {
-		addPaths(discoverHooksInDir(localHooksDir));
-	}
-
-	// 3. Plugin hooks: ~/.omp/plugins/node_modules/*/
-	addPaths(getAllPluginHookPaths(cwd));
-
-	// 4. Explicitly configured paths (can override/add)
+	// 2. Explicitly configured paths (can override/add)
 	addPaths(configuredPaths.map((p) => resolveHookPath(p, cwd)));
 
 	return loadHooks(allPaths, cwd);

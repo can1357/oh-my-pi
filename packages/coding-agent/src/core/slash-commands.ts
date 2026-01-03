@@ -1,8 +1,7 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { getCommandsDir, getConfigDirPaths } from "../config";
-import { logger } from "./logger";
+import { slashCommandCapability } from "../capability/slash-command";
+import type { SlashCommand } from "../discovery";
+import { loadSync } from "../discovery";
+import { parseFrontmatter } from "../discovery/helpers";
 
 /**
  * Represents a custom slash command loaded from a file
@@ -11,37 +10,9 @@ export interface FileSlashCommand {
 	name: string;
 	description: string;
 	content: string;
-	source: string; // e.g., "(user)", "(project)", "(project:frontend)"
-}
-
-/**
- * Parse YAML frontmatter from markdown content
- * Returns { frontmatter, content } where content has frontmatter stripped
- */
-function parseFrontmatter(content: string): { frontmatter: Record<string, string>; content: string } {
-	const frontmatter: Record<string, string> = {};
-
-	if (!content.startsWith("---")) {
-		return { frontmatter, content };
-	}
-
-	const endIndex = content.indexOf("\n---", 3);
-	if (endIndex === -1) {
-		return { frontmatter, content };
-	}
-
-	const frontmatterBlock = content.slice(4, endIndex);
-	const remainingContent = content.slice(endIndex + 4).trim();
-
-	// Simple YAML parsing - just key: value pairs
-	for (const line of frontmatterBlock.split("\n")) {
-		const match = line.match(/^(\w+):\s*(.*)$/);
-		if (match) {
-			frontmatter[match[1]] = match[2].trim();
-		}
-	}
-
-	return { frontmatter, content: remainingContent };
+	source: string; // e.g., "via Claude Code (User)"
+	/** Source metadata for display */
+	_source?: { providerName: string; level: "user" | "project" | "native" };
 }
 
 /**
@@ -100,147 +71,44 @@ export function substituteArgs(content: string, args: string[]): string {
 	return result;
 }
 
-type CommandSource = "builtin" | "claude-user" | "claude-project" | "user" | "project";
-
-/**
- * Recursively scan a directory for .md files (and symlinks to .md files) and load them as slash commands
- */
-function loadCommandsFromDir(dir: string, source: CommandSource, subdir: string = ""): FileSlashCommand[] {
-	const commands: FileSlashCommand[] = [];
-
-	if (!existsSync(dir)) {
-		return commands;
-	}
-
-	try {
-		const entries = readdirSync(dir, { withFileTypes: true });
-
-		for (const entry of entries) {
-			const fullPath = join(dir, entry.name);
-
-			if (entry.isDirectory()) {
-				// Recurse into subdirectory
-				const newSubdir = subdir ? `${subdir}:${entry.name}` : entry.name;
-				commands.push(...loadCommandsFromDir(fullPath, source, newSubdir));
-			} else if ((entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md")) {
-				try {
-					const rawContent = readFileSync(fullPath, "utf-8");
-					const { frontmatter, content } = parseFrontmatter(rawContent);
-
-					const name = entry.name.slice(0, -3); // Remove .md extension
-
-					// Build source string based on source type
-					const sourceLabel =
-						source === "builtin"
-							? "builtin"
-							: source === "claude-user"
-								? "claude-user"
-								: source === "claude-project"
-									? "claude-project"
-									: source === "user"
-										? "user"
-										: "project";
-					const sourceStr = subdir ? `(${sourceLabel}:${subdir})` : `(${sourceLabel})`;
-
-					// Get description from frontmatter or first non-empty line
-					let description = frontmatter.description || "";
-					if (!description) {
-						const firstLine = content.split("\n").find((line) => line.trim());
-						if (firstLine) {
-							// Truncate if too long
-							description = firstLine.slice(0, 60);
-							if (firstLine.length > 60) description += "...";
-						}
-					}
-
-					// Append source to description
-					description = description ? `${description} ${sourceStr}` : sourceStr;
-
-					commands.push({
-						name,
-						description,
-						content,
-						source: sourceStr,
-					});
-				} catch (err) {
-					logger.debug("Failed to read slash command file", { error: String(err) });
-				}
-			}
-		}
-	} catch (err) {
-		logger.debug("Failed to read slash command directory", { error: String(err) });
-	}
-
-	return commands;
-}
-
 export interface LoadSlashCommandsOptions {
 	/** Working directory for project-local commands. Default: process.cwd() */
 	cwd?: string;
-	/** Agent config directory for global commands. Default: from getCommandsDir() */
-	agentDir?: string;
-	/** Enable loading from ~/.claude/commands/. Default: true */
-	enableClaudeUser?: boolean;
-	/** Enable loading from .claude/commands/. Default: true */
-	enableClaudeProject?: boolean;
 }
 
 /**
- * Load all custom slash commands from:
- * 1. Builtin: package commands/
- * 2. Claude user: ~/.claude/commands/
- * 3. Claude project: .claude/commands/
- * 4. OMP user: agentDir/commands/
- * 5. OMP project: cwd/.omp/commands/ (and legacy .pi/commands/)
- *
- * First occurrence wins (earlier sources have priority).
+ * Load all custom slash commands using the capability API.
+ * Loads from all registered providers (builtin, user, project).
  */
 export function loadSlashCommands(options: LoadSlashCommandsOptions = {}): FileSlashCommand[] {
-	const resolvedCwd = options.cwd ?? process.cwd();
-	const resolvedAgentDir = options.agentDir ?? getCommandsDir();
-	const enableClaudeUser = options.enableClaudeUser ?? true;
-	const enableClaudeProject = options.enableClaudeProject ?? true;
+	const result = loadSync<SlashCommand>(slashCommandCapability.id, { cwd: options.cwd });
 
-	const commands: FileSlashCommand[] = [];
-	const seenNames = new Set<string>();
+	return result.items.map((cmd) => {
+		const { frontmatter, body } = parseFrontmatter(cmd.content);
+		const frontmatterDesc = typeof frontmatter.description === "string" ? frontmatter.description.trim() : "";
 
-	const addCommands = (newCommands: FileSlashCommand[]) => {
-		for (const cmd of newCommands) {
-			if (!seenNames.has(cmd.name)) {
-				commands.push(cmd);
-				seenNames.add(cmd.name);
+		// Get description from frontmatter or first non-empty line
+		let description = frontmatterDesc;
+		if (!description) {
+			const firstLine = body.split("\n").find((line) => line.trim());
+			if (firstLine) {
+				description = firstLine.slice(0, 60);
+				if (firstLine.length > 60) description += "...";
 			}
 		}
-	};
 
-	// 1. Builtin commands (from package)
-	const builtinDir = join(import.meta.dir, "../commands");
-	if (existsSync(builtinDir)) {
-		addCommands(loadCommandsFromDir(builtinDir, "builtin"));
-	}
+		// Format source label: "via ProviderName Level"
+		const capitalizedLevel = cmd.level.charAt(0).toUpperCase() + cmd.level.slice(1);
+		const sourceStr = `via ${cmd._source.providerName} ${capitalizedLevel}`;
 
-	// 2. Claude user commands (~/.claude/commands/)
-	if (enableClaudeUser) {
-		const claudeUserDir = join(homedir(), ".claude", "commands");
-		addCommands(loadCommandsFromDir(claudeUserDir, "claude-user"));
-	}
-
-	// 3. Claude project commands (.claude/commands/)
-	if (enableClaudeProject) {
-		const claudeProjectDir = resolve(resolvedCwd, ".claude", "commands");
-		addCommands(loadCommandsFromDir(claudeProjectDir, "claude-project"));
-	}
-
-	// 4. OMP user commands (agentDir/commands/)
-	const globalCommandsDir = options.agentDir ? join(options.agentDir, "commands") : resolvedAgentDir;
-	addCommands(loadCommandsFromDir(globalCommandsDir, "user"));
-
-	// 5. OMP project commands (cwd/.omp/commands/ and legacy .pi/commands/)
-	for (const dir of getConfigDirPaths("commands", { user: false, cwd: resolvedCwd })) {
-		addCommands(loadCommandsFromDir(dir, "project"));
-	}
-
-	return commands;
+		return {
+			name: cmd.name,
+			description,
+			content: body,
+			source: sourceStr,
+			_source: { providerName: cmd._source.providerName, level: cmd.level },
+		};
+	});
 }
 
 /**

@@ -11,6 +11,7 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getCapabilities } from "@oh-my-pi/pi-tui";
 import type { SettingsManager } from "../../../core/settings-manager";
+import { getAllProvidersInfo, isProviderEnabled } from "../../../discovery";
 
 // Setting value types
 export type SettingValue = boolean | string;
@@ -266,12 +267,47 @@ export const SETTINGS_DEFS: SettingDef[] = [
 	},
 ];
 
+/**
+ * Get discovery provider settings dynamically.
+ * These are generated at runtime from getAllProvidersInfo().
+ */
+function getDiscoverySettings(): SettingDef[] {
+	const providers = getAllProvidersInfo();
+	const settings: SettingDef[] = [];
+
+	for (const provider of providers) {
+		// Skip native provider - it can't be disabled
+		if (provider.id === "native") {
+			continue;
+		}
+
+		settings.push({
+			id: `discovery.${provider.id}`,
+			tab: "discovery",
+			type: "boolean",
+			label: provider.displayName,
+			description: provider.description,
+			get: () => isProviderEnabled(provider.id),
+			set: () => {}, // Handled in interactive-mode.ts
+		});
+	}
+
+	return settings;
+}
+
+/**
+ * All settings with dynamic discovery settings merged in.
+ */
+function getAllSettings(): SettingDef[] {
+	return [...SETTINGS_DEFS, ...getDiscoverySettings()];
+}
+
 /** Get settings for a specific tab */
 export function getSettingsForTab(tab: string): SettingDef[] {
-	return SETTINGS_DEFS.filter((def) => def.tab === tab);
+	return getAllSettings().filter((def) => def.tab === tab);
 }
 
 /** Get a setting definition by id */
 export function getSettingDef(id: string): SettingDef | undefined {
-	return SETTINGS_DEFS.find((def) => def.id === id);
+	return getAllSettings().find((def) => def.id === id);
 }

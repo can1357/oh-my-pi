@@ -12,7 +12,8 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { readConfigFile } from "../../../config";
+import { type Settings, settingsCapability } from "../../../capability/settings";
+import { loadSync } from "../../../discovery";
 
 /** omp command: 'omp.cmd' on Windows, 'omp' elsewhere */
 const OMP_CMD = process.platform === "win32" ? "omp.cmd" : "omp";
@@ -80,16 +81,22 @@ export function clearModelCache(): void {
 	cacheExpiry = 0;
 }
 
-interface SettingsWithRoles {
-	modelRoles?: Record<string, string>;
-}
-
 /**
- * Load model roles from settings file (checks .omp first, then .pi fallback).
+ * Load model roles from settings files using capability API.
  */
 function loadModelRoles(): Record<string, string> {
-	const result = readConfigFile<SettingsWithRoles>("settings.json", { project: false });
-	return result?.content.modelRoles ?? {};
+	const result = loadSync<Settings>(settingsCapability.id, { cwd: process.cwd() });
+
+	// Merge all settings, prioritizing first (highest priority)
+	let modelRoles: Record<string, string> = {};
+	for (const settings of result.items.reverse()) {
+		const roles = settings.data.modelRoles as Record<string, string> | undefined;
+		if (roles) {
+			modelRoles = { ...modelRoles, ...roles };
+		}
+	}
+
+	return modelRoles;
 }
 
 /**

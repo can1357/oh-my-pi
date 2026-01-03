@@ -217,6 +217,8 @@ export interface MCPServerConnection {
 	capabilities: MCPServerCapabilities;
 	/** Cached tools (populated on demand) */
 	tools?: MCPToolDefinition[];
+	/** Source metadata (for display) */
+	_source?: import("../../capability/types").SourceMeta;
 }
 
 /** MCP tool with server context */

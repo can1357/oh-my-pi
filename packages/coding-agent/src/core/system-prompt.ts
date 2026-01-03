@@ -3,9 +3,11 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
 import chalk from "chalk";
-import { getAgentDir, getDocsPath, getExamplesPath, getReadmePath } from "../config";
+import { contextFileCapability } from "../capability/context-file";
+import { systemPromptCapability } from "../capability/system-prompt";
+import { getDocsPath, getExamplesPath, getReadmePath } from "../config";
+import { type ContextFile, loadSync, type SystemPrompt as SystemPromptFile } from "../discovery/index";
 import type { SkillsSettings } from "./settings-manager";
 import { formatSkillsForPrompt, loadSkills, type Skill } from "./skills";
 import type { ToolName } from "./tools/index";
@@ -160,81 +162,65 @@ export function resolvePromptInput(input: string | undefined, description: strin
 	return input;
 }
 
-/** Look for AGENTS.md or CLAUDE.md in a directory (prefers AGENTS.md) */
-function loadContextFileFromDir(dir: string): { path: string; content: string } | null {
-	const candidates = ["AGENTS.md", "CLAUDE.md"];
-	for (const filename of candidates) {
-		const filePath = join(dir, filename);
-		if (existsSync(filePath)) {
-			try {
-				return {
-					path: filePath,
-					content: readFileSync(filePath, "utf-8"),
-				};
-			} catch (error) {
-				console.error(chalk.yellow(`Warning: Could not read ${filePath}: ${error}`));
-			}
-		}
-	}
-	return null;
-}
-
 export interface LoadContextFilesOptions {
 	/** Working directory to start walking up from. Default: process.cwd() */
 	cwd?: string;
-	/** Agent config directory for global context. Default: from getAgentDir() */
-	agentDir?: string;
 }
 
 /**
- * Load all project context files in order:
- * 1. Global: agentDir/AGENTS.md or CLAUDE.md
- * 2. Parent directories (top-most first) down to cwd
- * Each returns {path, content} for separate messages
+ * Load all project context files using the capability API.
+ * Returns {path, content, depth} entries for all discovered context files.
+ * Files are sorted by depth (descending) so files closer to cwd appear last/more prominent.
  */
 export function loadProjectContextFiles(
 	options: LoadContextFilesOptions = {},
-): Array<{ path: string; content: string }> {
+): Array<{ path: string; content: string; depth?: number }> {
 	const resolvedCwd = options.cwd ?? process.cwd();
-	const resolvedAgentDir = options.agentDir ?? getAgentDir();
 
-	const contextFiles: Array<{ path: string; content: string }> = [];
-	const seenPaths = new Set<string>();
+	const result = loadSync(contextFileCapability.id, { cwd: resolvedCwd });
 
-	// 1. Load global context from agentDir
-	const globalContext = loadContextFileFromDir(resolvedAgentDir);
-	if (globalContext) {
-		contextFiles.push(globalContext);
-		seenPaths.add(globalContext.path);
+	// Convert ContextFile items and preserve depth info
+	const files = result.items.map((item) => {
+		const contextFile = item as ContextFile;
+		return {
+			path: contextFile.path,
+			content: contextFile.content,
+			depth: contextFile.depth,
+		};
+	});
+
+	// Sort by depth (descending): higher depth (farther from cwd) comes first,
+	// so files closer to cwd appear later and are more prominent
+	files.sort((a, b) => {
+		const depthA = a.depth ?? -1;
+		const depthB = b.depth ?? -1;
+		return depthB - depthA;
+	});
+
+	return files;
+}
+
+/**
+ * Load system prompt customization files (SYSTEM.md).
+ * Returns combined content from all discovered SYSTEM.md files.
+ */
+export function loadSystemPromptFiles(options: LoadContextFilesOptions = {}): string | null {
+	const resolvedCwd = options.cwd ?? process.cwd();
+
+	const result = loadSync<SystemPromptFile>(systemPromptCapability.id, { cwd: resolvedCwd });
+
+	if (result.items.length === 0) return null;
+
+	// Combine all SYSTEM.md contents (user-level first, then project-level)
+	const userLevel = result.items.filter((item) => item.level === "user");
+	const projectLevel = result.items.filter((item) => item.level === "project");
+
+	const parts: string[] = [];
+	for (const item of [...userLevel, ...projectLevel]) {
+		parts.push(item.content);
 	}
 
-	// 2. Walk up from cwd to root, collecting all context files
-	const ancestorContextFiles: Array<{ path: string; content: string }> = [];
-
-	let currentDir = resolvedCwd;
-	const root = resolve("/");
-
-	while (true) {
-		const contextFile = loadContextFileFromDir(currentDir);
-		if (contextFile && !seenPaths.has(contextFile.path)) {
-			// Add to beginning so we get top-most parent first
-			ancestorContextFiles.unshift(contextFile);
-			seenPaths.add(contextFile.path);
-		}
-
-		// Stop if we've reached root
-		if (currentDir === root) break;
-
-		// Move up one directory
-		const parentDir = resolve(currentDir, "..");
-		if (parentDir === currentDir) break; // Safety check
-		currentDir = parentDir;
-	}
-
-	// Add ancestor files in order (top-most → cwd)
-	contextFiles.push(...ancestorContextFiles);
-
-	return contextFiles;
+	return parts.join("\n\n");
 }
 
 export interface BuildSystemPromptOptions {
@@ -248,10 +234,8 @@ export interface BuildSystemPromptOptions {
 	skillsSettings?: SkillsSettings;
 	/** Working directory. Default: process.cwd() */
 	cwd?: string;
-	/** Agent config directory. Default: from getAgentDir() */
-	agentDir?: string;
 	/** Pre-loaded context files (skips discovery if provided). */
-	contextFiles?: Array<{ path: string; content: string }>;
+	contextFiles?: Array<{ path: string; content: string; depth?: number }>;
 	/** Pre-loaded skills (skips discovery if provided). */
 	skills?: Skill[];
 }
@@ -264,13 +248,15 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 		appendSystemPrompt,
 		skillsSettings,
 		cwd,
-		agentDir,
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
 	} = options;
 	const resolvedCwd = cwd ?? process.cwd();
 	const resolvedCustomPrompt = resolvePromptInput(customPrompt, "system prompt");
 	const resolvedAppendPrompt = resolvePromptInput(appendSystemPrompt, "append system prompt");
+
+	// Load SYSTEM.md customization (prepended to prompt)
+	const systemPromptCustomization = loadSystemPromptFiles({ cwd: resolvedCwd });
 
 	const now = new Date();
 	const dateTime = now.toLocaleString("en-US", {
@@ -287,15 +273,17 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 	const appendSection = resolvedAppendPrompt ? `\n\n${resolvedAppendPrompt}` : "";
 
 	// Resolve context files: use provided or discover
-	const contextFiles = providedContextFiles ?? loadProjectContextFiles({ cwd: resolvedCwd, agentDir });
+	const contextFiles = providedContextFiles ?? loadProjectContextFiles({ cwd: resolvedCwd });
 
 	// Resolve skills: use provided or discover
 	const skills =
 		providedSkills ??
-		(skillsSettings?.enabled !== false ? loadSkills({ ...skillsSettings, cwd: resolvedCwd, agentDir }).skills : []);
+		(skillsSettings?.enabled !== false ? loadSkills({ ...skillsSettings, cwd: resolvedCwd }).skills : []);
 
 	if (resolvedCustomPrompt) {
-		let prompt = resolvedCustomPrompt;
+		let prompt = systemPromptCustomization
+			? `${systemPromptCustomization}\n\n${resolvedCustomPrompt}`
+			: resolvedCustomPrompt;
 
 		if (appendSection) {
 			prompt += appendSection;
@@ -434,6 +422,11 @@ Documentation:
 	// Add date/time and working directory last
 	prompt += `\nCurrent date and time: ${dateTime}`;
 	prompt += `\nCurrent working directory: ${resolvedCwd}`;
+
+	// Prepend SYSTEM.md customization if present
+	if (systemPromptCustomization) {
+		prompt = `${systemPromptCustomization}\n\n${prompt}`;
+	}
 
 	return prompt;
 }

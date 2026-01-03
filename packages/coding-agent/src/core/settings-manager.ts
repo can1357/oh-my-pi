@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { getAgentDir, readConfigFile } from "../config";
+import { type Settings as SettingsItem, settingsCapability } from "../capability/settings";
+import { getAgentDir } from "../config";
+import { loadSync } from "../discovery";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -91,6 +93,7 @@ export interface Settings {
 	mcp?: MCPSettings;
 	lsp?: LspSettings;
 	edit?: EditSettings;
+	disabledProviders?: string[]; // Discovery provider IDs that are disabled
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -143,7 +146,22 @@ export class SettingsManager {
 	/** Create a SettingsManager that loads from files */
 	static create(cwd: string = process.cwd(), agentDir: string = getAgentDir()): SettingsManager {
 		const settingsPath = join(agentDir, "settings.json");
-		const globalSettings = SettingsManager.loadFromFile(settingsPath);
+
+		// Use capability API to load user-level settings from all providers
+		const result = loadSync(settingsCapability.id, { cwd });
+
+		// Merge all user-level settings
+		let globalSettings: Settings = {};
+		for (const item of result.items as SettingsItem[]) {
+			if (item.level === "user") {
+				globalSettings = deepMergeSettings(globalSettings, item.data as Settings);
+			}
+		}
+
+		// Also load from agentDir for backward compatibility (if not covered by providers)
+		const legacySettings = SettingsManager.loadFromFile(settingsPath);
+		globalSettings = deepMergeSettings(globalSettings, legacySettings);
+
 		return new SettingsManager(settingsPath, cwd, globalSettings, true);
 	}
 
@@ -168,9 +186,18 @@ export class SettingsManager {
 	private loadProjectSettings(): Settings {
 		if (!this.cwd) return {};
 
-		// Use readConfigFile to search .omp, .pi, .claude in priority order
-		const result = readConfigFile<Settings>("settings.json", { user: false, cwd: this.cwd });
-		return result?.content ?? {};
+		// Use capability API to discover settings from all providers
+		const result = loadSync(settingsCapability.id, { cwd: this.cwd });
+
+		// Merge only project-level settings (user-level settings are handled separately via globalSettings)
+		let merged: Settings = {};
+		for (const item of result.items as SettingsItem[]) {
+			if (item.level === "project") {
+				merged = deepMergeSettings(merged, item.data as Settings);
+			}
+		}
+
+		return merged;
 	}
 
 	/** Apply additional overrides on top of current settings */
@@ -544,6 +571,15 @@ export class SettingsManager {
 			this.globalSettings.edit = {};
 		}
 		this.globalSettings.edit.fuzzyMatch = enabled;
+		this.save();
+	}
+
+	getDisabledProviders(): string[] {
+		return [...(this.settings.disabledProviders ?? [])];
+	}
+
+	setDisabledProviders(providerIds: string[]): void {
+		this.globalSettings.disabledProviders = providerIds;
 		this.save();
 	}
 }

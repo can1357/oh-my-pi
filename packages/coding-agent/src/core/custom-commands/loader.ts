@@ -5,10 +5,10 @@
  * to avoid import resolution issues with custom commands loaded from user directories.
  */
 
-import * as fs from "node:fs";
+import { type Dirent, existsSync, readdirSync } from "node:fs";
 import * as path from "node:path";
 import * as typebox from "@sinclair/typebox";
-import { getAgentDir, getConfigDirPaths } from "../../config";
+import { getAgentDir, getConfigDirs } from "../../config";
 import * as piCodingAgent from "../../index";
 import { execCommand } from "../exec";
 import { createReviewCommand } from "./bundled/review";
@@ -60,36 +60,6 @@ async function loadCommandModule(
 	}
 }
 
-/**
- * Discover command modules from a directory.
- * Loads index.ts files from subdirectories (e.g., commands/deploy/index.ts).
- */
-function discoverCommandsInDir(dir: string): string[] {
-	if (!fs.existsSync(dir)) {
-		return [];
-	}
-
-	const commands: string[] = [];
-
-	try {
-		const entries = fs.readdirSync(dir, { withFileTypes: true });
-
-		for (const entry of entries) {
-			if (entry.isDirectory() || entry.isSymbolicLink()) {
-				// Check for index.ts in subdirectory
-				const indexPath = path.join(dir, entry.name, "index.ts");
-				if (fs.existsSync(indexPath)) {
-					commands.push(indexPath);
-				}
-			}
-		}
-	} catch {
-		return [];
-	}
-
-	return commands;
-}
-
 export interface DiscoverCustomCommandsOptions {
 	/** Current working directory. Default: process.cwd() */
 	cwd?: string;
@@ -103,34 +73,57 @@ export interface DiscoverCustomCommandsResult {
 }
 
 /**
- * Discover custom command modules from standard locations:
- * - agentDir/commands/[name]/index.ts (user)
- * - cwd/.omp/commands/[name]/index.ts (project)
+ * Discover custom command modules (TypeScript slash commands).
+ * Markdown slash commands are handled by core/slash-commands.ts.
  */
 export function discoverCustomCommands(options: DiscoverCustomCommandsOptions = {}): DiscoverCustomCommandsResult {
 	const cwd = options.cwd ?? process.cwd();
 	const agentDir = options.agentDir ?? getAgentDir();
-
 	const paths: Array<{ path: string; source: CustomCommandSource }> = [];
 	const seen = new Set<string>();
 
-	const addPaths = (modulePaths: string[], source: CustomCommandSource) => {
-		for (const p of modulePaths) {
-			const resolved = path.resolve(p);
-			if (!seen.has(resolved)) {
-				seen.add(resolved);
-				paths.push({ path: p, source });
-			}
-		}
+	const addPath = (commandPath: string, source: CustomCommandSource): void => {
+		const resolved = path.resolve(commandPath);
+		if (seen.has(resolved)) return;
+		seen.add(resolved);
+		paths.push({ path: resolved, source });
 	};
 
-	// 1. User commands: agentDir/commands/
-	const userCommandsDir = path.join(agentDir, "commands");
-	addPaths(discoverCommandsInDir(userCommandsDir), "user");
+	const commandDirs: Array<{ path: string; source: CustomCommandSource }> = [];
+	if (agentDir) {
+		const userCommandsDir = path.join(agentDir, "commands");
+		if (existsSync(userCommandsDir)) {
+			commandDirs.push({ path: userCommandsDir, source: "user" });
+		}
+	}
 
-	// 2. Project commands: cwd/{.omp,.pi,.claude}/commands/
-	for (const projectCommandsDir of getConfigDirPaths("commands", { user: false, cwd })) {
-		addPaths(discoverCommandsInDir(projectCommandsDir), "project");
+	for (const entry of getConfigDirs("commands", { cwd, existingOnly: true })) {
+		const source = entry.level === "user" ? "user" : "project";
+		if (!commandDirs.some((d) => d.path === entry.path)) {
+			commandDirs.push({ path: entry.path, source });
+		}
+	}
+
+	const indexCandidates = ["index.ts", "index.js", "index.mjs", "index.cjs"];
+	for (const { path: commandsDir, source } of commandDirs) {
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(commandsDir, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+			const commandDir = path.join(commandsDir, entry.name);
+
+			for (const filename of indexCandidates) {
+				const candidate = path.join(commandDir, filename);
+				if (existsSync(candidate)) {
+					addPath(candidate, source);
+					break;
+				}
+			}
+		}
 	}
 
 	return { paths };
