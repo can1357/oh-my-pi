@@ -19,6 +19,7 @@ import {
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
 	OMP_BLOCKED_AGENT_ENV,
+	OMP_SPAWNS_ENV,
 	type SingleResult,
 } from "./types";
 
@@ -193,7 +194,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 	// Add tools if specified
 	if (agent.tools && agent.tools.length > 0) {
-		args.push("--tools", agent.tools.join(","));
+		let toolList = agent.tools;
+		// Auto-include task tool if spawns defined but task not in tools
+		if (agent.spawns !== undefined && !toolList.includes("task")) {
+			toolList = [...toolList, "task"];
+		}
+		args.push("--tools", toolList.join(","));
 	}
 
 	// Resolve and add model
@@ -218,6 +224,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const env = { ...process.env };
 	if (!agent.recursive) {
 		env[OMP_BLOCKED_AGENT_ENV] = agent.name;
+	}
+
+	// Propagate spawn restrictions to subprocess
+	if (agent.spawns === undefined) {
+		env[OMP_SPAWNS_ENV] = ""; // No spawns = deny all
+	} else if (agent.spawns === "*") {
+		env[OMP_SPAWNS_ENV] = "*";
+	} else {
+		env[OMP_SPAWNS_ENV] = agent.spawns.join(",");
 	}
 
 	// Spawn subprocess

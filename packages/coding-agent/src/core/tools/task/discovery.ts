@@ -106,6 +106,26 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentDefinition[] 
 			.map((t) => t.trim())
 			.filter(Boolean);
 
+		// Parse spawns field
+		let spawns: string[] | "*" | undefined;
+		if (frontmatter.spawns !== undefined) {
+			const spawnsRaw = frontmatter.spawns.trim();
+			if (spawnsRaw === "*") {
+				spawns = "*";
+			} else if (spawnsRaw) {
+				spawns = spawnsRaw
+					.split(",")
+					.map((s) => s.trim())
+					.filter(Boolean);
+				if (spawns.length === 0) spawns = undefined;
+			}
+		}
+
+		// Backward compat: infer spawns: "*" when tools includes "task"
+		if (spawns === undefined && tools?.includes("task")) {
+			spawns = "*";
+		}
+
 		const recursive =
 			frontmatter.recursive === undefined
 				? undefined
@@ -115,6 +135,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentDefinition[] 
 			name: frontmatter.name,
 			description: frontmatter.description,
 			tools: tools && tools.length > 0 ? tools : undefined,
+			spawns,
 			model: frontmatter.model,
 			recursive,
 			systemPrompt: body,

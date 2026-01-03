@@ -46,6 +46,30 @@ export interface LoadSkillsFromDirOptions {
 export function loadSkillsFromDir(options: LoadSkillsFromDirOptions): LoadSkillsResult {
 	const skills: Skill[] = [];
 	const warnings: SkillWarning[] = [];
+	const seenPaths = new Set<string>();
+
+	function addSkill(skillFile: string, skillDir: string, dirName: string) {
+		if (seenPaths.has(skillFile)) return;
+		try {
+			const content = readFileSync(skillFile, "utf-8");
+			const { frontmatter } = parseFrontmatter(content);
+			const name = (frontmatter.name as string) || dirName;
+			const description = frontmatter.description as string;
+
+			if (description) {
+				seenPaths.add(skillFile);
+				skills.push({
+					name,
+					description,
+					filePath: skillFile,
+					baseDir: skillDir,
+					source: options.source,
+				});
+			}
+		} catch {
+			// Skip invalid skills
+		}
+	}
 
 	function scanDir(dir: string) {
 		try {
@@ -59,45 +83,14 @@ export function loadSkillsFromDir(options: LoadSkillsFromDirOptions): LoadSkills
 					try {
 						const stat = statSync(skillFile);
 						if (stat.isFile()) {
-							const content = readFileSync(skillFile, "utf-8");
-							const { frontmatter } = parseFrontmatter(content);
-							const name = (frontmatter.name as string) || entry.name;
-							const description = frontmatter.description as string;
-
-							if (description) {
-								skills.push({
-									name,
-									description,
-									filePath: skillFile,
-									baseDir: fullPath,
-									source: options.source,
-								});
-							}
+							addSkill(skillFile, fullPath, entry.name);
 						}
 					} catch {
-						// Skip invalid skills
+						// No SKILL.md in this directory
 					}
-
 					scanDir(fullPath);
 				} else if (entry.isFile() && entry.name === "SKILL.md") {
-					try {
-						const content = readFileSync(fullPath, "utf-8");
-						const { frontmatter } = parseFrontmatter(content);
-						const name = (frontmatter.name as string) || basename(dir);
-						const description = frontmatter.description as string;
-
-						if (description) {
-							skills.push({
-								name,
-								description,
-								filePath: fullPath,
-								baseDir: dir,
-								source: options.source,
-							});
-						}
-					} catch {
-						// Skip invalid skills
-					}
+					addSkill(fullPath, dir, basename(dir));
 				}
 			}
 		} catch (err) {
@@ -117,6 +110,30 @@ export function loadSkillsFromDir(options: LoadSkillsFromDirOptions): LoadSkills
 function scanDirectoryForSkills(dir: string): LoadSkillsResult {
 	const skills: Skill[] = [];
 	const warnings: SkillWarning[] = [];
+	const seenPaths = new Set<string>();
+
+	function addSkill(skillFile: string, skillDir: string, dirName: string) {
+		if (seenPaths.has(skillFile)) return;
+		try {
+			const content = readFileSync(skillFile, "utf-8");
+			const { frontmatter } = parseFrontmatter(content);
+			const name = (frontmatter.name as string) || dirName;
+			const description = frontmatter.description as string;
+
+			if (description) {
+				seenPaths.add(skillFile);
+				skills.push({
+					name,
+					description,
+					filePath: skillFile,
+					baseDir: skillDir,
+					source: "custom",
+				});
+			}
+		} catch {
+			// Skip invalid skills
+		}
+	}
 
 	function scanDir(currentDir: string) {
 		try {
@@ -130,45 +147,14 @@ function scanDirectoryForSkills(dir: string): LoadSkillsResult {
 					try {
 						const stat = statSync(skillFile);
 						if (stat.isFile()) {
-							const content = readFileSync(skillFile, "utf-8");
-							const { frontmatter } = parseFrontmatter(content);
-							const name = (frontmatter.name as string) || entry.name;
-							const description = frontmatter.description as string;
-
-							if (description) {
-								skills.push({
-									name,
-									description,
-									filePath: skillFile,
-									baseDir: fullPath,
-									source: "custom",
-								});
-							}
+							addSkill(skillFile, fullPath, entry.name);
 						}
 					} catch {
-						// Skip invalid skills
+						// No SKILL.md in this directory
 					}
-
 					scanDir(fullPath);
 				} else if (entry.isFile() && entry.name === "SKILL.md") {
-					try {
-						const content = readFileSync(fullPath, "utf-8");
-						const { frontmatter } = parseFrontmatter(content);
-						const name = (frontmatter.name as string) || basename(currentDir);
-						const description = frontmatter.description as string;
-
-						if (description) {
-							skills.push({
-								name,
-								description,
-								filePath: fullPath,
-								baseDir: currentDir,
-								source: "custom",
-							});
-						}
-					} catch {
-						// Skip invalid skills
-					}
+					addSkill(fullPath, currentDir, basename(currentDir));
 				}
 			}
 		} catch (err) {

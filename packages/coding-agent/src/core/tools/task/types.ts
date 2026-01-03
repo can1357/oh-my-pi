@@ -33,6 +33,9 @@ export const OMP_NO_SUBAGENTS_ENV = "OMP_NO_SUBAGENTS";
 /** Environment variable containing blocked agent name (self-recursion prevention) */
 export const OMP_BLOCKED_AGENT_ENV = "OMP_BLOCKED_AGENT";
 
+/** Environment variable containing allowed spawn list (propagated to subprocesses) */
+export const OMP_SPAWNS_ENV = "OMP_SPAWNS";
+
 /** Task tool parameters */
 export const taskSchema = Type.Object({
 	context: Type.Optional(Type.String({ description: "Shared context prepended to all task prompts" })),
@@ -74,6 +77,7 @@ export interface AgentDefinition {
 	description: string;
 	systemPrompt: string;
 	tools?: string[];
+	spawns?: string[] | "*";
 	model?: string;
 	recursive?: boolean;
 	source: AgentSource;

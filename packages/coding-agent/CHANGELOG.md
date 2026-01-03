@@ -1,6 +1,14 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `spawns` frontmatter field for agent definitions to control which sub-agents can be spawned
+- Added spawn restriction enforcement preventing agents from spawning unauthorized sub-agents
+
+### Fixed
+
+- Fixed duplicate skill loading when the same SKILL.md file was discovered through multiple paths
 
 ## [3.0.1337] - 2026-01-03
 

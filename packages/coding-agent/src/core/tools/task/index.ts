@@ -27,6 +27,7 @@ import {
 	MAX_PARALLEL_TASKS,
 	OMP_BLOCKED_AGENT_ENV,
 	OMP_NO_SUBAGENTS_ENV,
+	OMP_SPAWNS_ENV,
 	type TaskToolDetails,
 	taskSchema,
 } from "./types";
@@ -312,6 +313,30 @@ export function createTaskTool(
 						const available = agents.map((a) => a.name).join(", ");
 						return {
 							content: [{ type: "text", text: `Unknown agent: ${task.agent}. Available: ${available}` }],
+							details: {
+								projectAgentsDir,
+								results: [],
+								totalDurationMs: Date.now() - startTime,
+							},
+						};
+					}
+				}
+
+				// Check spawn restrictions from parent
+				const parentSpawns = process.env[OMP_SPAWNS_ENV];
+				const isSpawnAllowed = (agentName: string): boolean => {
+					if (parentSpawns === undefined) return true; // Root = allow all
+					if (parentSpawns === "") return false; // Empty = deny all
+					if (parentSpawns === "*") return true; // Wildcard = allow all
+					const allowed = new Set(parentSpawns.split(",").map((s) => s.trim()));
+					return allowed.has(agentName);
+				};
+
+				for (const task of tasks) {
+					if (!isSpawnAllowed(task.agent)) {
+						const allowed = parentSpawns === "" ? "none (spawns disabled for this agent)" : parentSpawns;
+						return {
+							content: [{ type: "text", text: `Cannot spawn '${task.agent}'. Allowed: ${allowed}` }],
 							details: {
 								projectAgentsDir,
 								results: [],
