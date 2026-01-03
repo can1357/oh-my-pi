@@ -52,7 +52,7 @@ import { discoverAndLoadMCPTools, type MCPManager, type MCPToolsLoadResult } fro
 import { convertToLlm } from "./messages.js";
 import { ModelRegistry } from "./model-registry.js";
 import { SessionManager } from "./session-manager.js";
-import { type Settings, SettingsManager, type SkillsSettings } from "./settings-manager.js";
+import { type CommandsSettings, type Settings, SettingsManager, type SkillsSettings } from "./settings-manager.js";
 import { loadSkills as loadSkillsInternal, type Skill } from "./skills.js";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./slash-commands.js";
 import {
@@ -283,10 +283,16 @@ export function discoverContextFiles(cwd?: string, agentDir?: string): Array<{ p
 /**
  * Discover slash commands from cwd and agentDir.
  */
-export function discoverSlashCommands(cwd?: string, agentDir?: string): FileSlashCommand[] {
+export function discoverSlashCommands(
+	cwd?: string,
+	agentDir?: string,
+	settings?: CommandsSettings,
+): FileSlashCommand[] {
 	return loadSlashCommandsInternal({
 		cwd: cwd ?? process.cwd(),
 		agentDir: agentDir ?? getDefaultAgentDir(),
+		enableClaudeUser: settings?.enableClaudeUser,
+		enableClaudeProject: settings?.enableClaudeProject,
 	});
 }
 
@@ -748,7 +754,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		systemPrompt = options.systemPrompt(defaultPrompt);
 	}
 
-	const slashCommands = options.slashCommands ?? discoverSlashCommands(cwd, agentDir);
+	const commandsSettings = settingsManager.getCommandsSettings();
+	const slashCommands = options.slashCommands ?? discoverSlashCommands(cwd, agentDir, commandsSettings);
 	time("discoverSlashCommands");
 
 	// Discover custom commands (TypeScript slash commands)

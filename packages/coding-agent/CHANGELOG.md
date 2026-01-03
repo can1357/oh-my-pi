@@ -3,9 +3,9 @@
 ## [Unreleased]
 ### Added
 
-- Added support for custom TypeScript slash commands loaded from `~/.pi/commands/` and `.pi/commands/` directories
-- Added support for loading markdown slash commands from Claude's `~/.claude/commands/` and `.claude/commands/` directories
-- Added `commands.enableClaudeUser` and `commands.enableClaudeProject` settings to control Claude command directory loading
+- Custom TypeScript slash commands: Create programmable commands at `~/.pi/agent/commands/[name]/index.ts` or `.pi/commands/[name]/index.ts`. Commands export a factory returning `{ name, description, execute(args, ctx) }`. Return a string to send as LLM prompt, or void for fire-and-forget actions. Full access to `HookCommandContext` for UI dialogs, session control, and shell execution.
+- Claude command directories: Markdown slash commands now also load from `~/.claude/commands/` and `.claude/commands/` (parallel to existing `.pi/commands/` support)
+- `commands.enableClaudeUser` and `commands.enableClaudeProject` settings to disable Claude command directory loading
 - `/export --copy` option to copy entire session as formatted text to clipboard
 
 ## [1.341.0] - 2026-01-03
