@@ -75,6 +75,35 @@ Full IDE-like code intelligence with automatic formatting and diagnostics:
 - **Local binary resolution**: Auto-discovers project-local LSP servers in `node_modules/.bin/`, `.venv/bin/`, etc.
 - Hover docs, symbol references, code actions, workspace-wide symbol search
 
+## + Time Traveling Streamed Rules (TTSR)
+
+<p align="center">
+  <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/ttsr.webp?raw=true" alt="ttsr">
+</p>
+
+Zero context-use rules that inject themselves only when needed:
+
+- **Pattern-triggered injection**: Rules define regex triggers that watch the model's output stream
+- **Just-in-time activation**: When a pattern matches, the stream aborts, the rule injects as a system reminder, and the request retries
+- **Zero upfront cost**: TTSR rules consume no context until they're actually relevant
+- **One-shot per session**: Each rule only triggers once, preventing loops
+- Define via `ttsrTrigger` field in rule files (regex pattern)
+
+Example: A "don't use deprecated API" rule only activates when the model starts writing deprecated code, saving context for sessions that never touch that API.
+
+## + Interactive Code Review
+
+<p align="center">
+  <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/review.webp?raw=true" alt="review">
+</p>
+
+Structured code review with priority-based findings:
+
+- **`/review` command**: Interactive mode selection (branch comparison, uncommitted changes, commit review)
+- **Structured findings**: `report_finding` tool with priority levels (P0-P3: critical → nit)
+- **Verdict rendering**: `submit_review` aggregates findings into approve/request-changes/comment
+- Combined result tree showing verdict and all findings
+
 ## + Task Tool (Subagent System)
 
 <p align="center">
@@ -114,19 +143,6 @@ Structured user interaction with typed options:
 
 - **Multiple choice questions**: Present options with descriptions for user selection
 - **Multi-select support**: Allow multiple answers when choices aren't mutually exclusive
-
-## + Interactive Code Review
-
-<p align="center">
-  <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/review.webp?raw=true" alt="review">
-</p>
-
-Structured code review with priority-based findings:
-
-- **`/review` command**: Interactive mode selection (branch comparison, uncommitted changes, commit review)
-- **Structured findings**: `report_finding` tool with priority levels (P0-P3: critical → nit)
-- **Verdict rendering**: `submit_review` aggregates findings into approve/request-changes/comment
-- Combined result tree showing verdict and all findings
 
 ## + Custom TypeScript Slash Commands
 

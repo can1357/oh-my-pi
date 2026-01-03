@@ -52,6 +52,7 @@ function loadRules(ctx: LoadContext): LoadResult<Rule> {
 					globs,
 					alwaysApply: typeof frontmatter.alwaysApply === "boolean" ? frontmatter.alwaysApply : undefined,
 					description: typeof frontmatter.description === "string" ? frontmatter.description : undefined,
+					ttsrTrigger: typeof frontmatter.ttsr_trigger === "string" ? frontmatter.ttsr_trigger : undefined,
 					_source: source,
 				};
 			},
@@ -85,6 +86,7 @@ function loadRules(ctx: LoadContext): LoadResult<Rule> {
 			globs,
 			alwaysApply: typeof frontmatter.alwaysApply === "boolean" ? frontmatter.alwaysApply : undefined,
 			description: typeof frontmatter.description === "string" ? frontmatter.description : undefined,
+			ttsrTrigger: typeof frontmatter.ttsr_trigger === "string" ? frontmatter.ttsr_trigger : undefined,
 			_source: source,
 		});
 	}

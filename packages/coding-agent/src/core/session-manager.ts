@@ -107,6 +107,13 @@ export interface LabelEntry extends SessionEntryBase {
 	label: string | undefined;
 }
 
+/** TTSR injection entry - tracks which time-traveling rules have been injected this session. */
+export interface TtsrInjectionEntry extends SessionEntryBase {
+	type: "ttsr_injection";
+	/** Names of rules that were injected */
+	injectedRules: string[];
+}
+
 /**
  * Custom message entry for hooks to inject messages into LLM context.
  * Use customType to identify your hook's entries.
@@ -136,7 +143,8 @@ export type SessionEntry =
 	| BranchSummaryEntry
 	| CustomEntry
 	| CustomMessageEntry
-	| LabelEntry;
+	| LabelEntry
+	| TtsrInjectionEntry;
 
 /** Raw file entry (includes header) */
 export type FileEntry = SessionHeader | SessionEntry;
@@ -154,6 +162,8 @@ export interface SessionContext {
 	thinkingLevel: string;
 	/** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
 	models: Record<string, string>;
+	/** Names of TTSR rules that have been injected this session */
+	injectedTtsrRules: string[];
 }
 
 export interface SessionInfo {
@@ -295,7 +305,7 @@ export function buildSessionContext(
 	let leaf: SessionEntry | undefined;
 	if (leafId === null) {
 		// Explicitly null - return no messages (navigated to before first entry)
-		return { messages: [], thinkingLevel: "off", models: {} };
+		return { messages: [], thinkingLevel: "off", models: {}, injectedTtsrRules: [] };
 	}
 	if (leafId) {
 		leaf = byId.get(leafId);
@@ -306,7 +316,7 @@ export function buildSessionContext(
 	}
 
 	if (!leaf) {
-		return { messages: [], thinkingLevel: "off", models: {} };
+		return { messages: [], thinkingLevel: "off", models: {}, injectedTtsrRules: [] };
 	}
 
 	// Walk from leaf to root, collecting path
@@ -321,6 +331,7 @@ export function buildSessionContext(
 	let thinkingLevel = "off";
 	const models: Record<string, string> = {};
 	let compaction: CompactionEntry | null = null;
+	const injectedTtsrRulesSet = new Set<string>();
 
 	for (const entry of path) {
 		if (entry.type === "thinking_level_change") {
@@ -336,8 +347,15 @@ export function buildSessionContext(
 			models.default = `${entry.message.provider}/${entry.message.model}`;
 		} else if (entry.type === "compaction") {
 			compaction = entry;
+		} else if (entry.type === "ttsr_injection") {
+			// Collect injected TTSR rule names
+			for (const ruleName of entry.injectedRules) {
+				injectedTtsrRulesSet.add(ruleName);
+			}
 		}
 	}
+
+	const injectedTtsrRules = Array.from(injectedTtsrRulesSet);
 
 	// Build messages and collect corresponding entries
 	// When there's a compaction, we need to:
@@ -389,7 +407,7 @@ export function buildSessionContext(
 		}
 	}
 
-	return { messages, thinkingLevel, models };
+	return { messages, thinkingLevel, models, injectedTtsrRules };
 }
 
 /**
@@ -812,6 +830,44 @@ export class SessionManager {
 		};
 		this._appendEntry(entry);
 		return entry.id;
+	}
+
+	// =========================================================================
+	// TTSR (Time Traveling Stream Rules)
+	// =========================================================================
+
+	/**
+	 * Append a TTSR injection entry recording which rules were injected.
+	 * @param ruleNames Names of rules that were injected
+	 * @returns Entry id
+	 */
+	appendTtsrInjection(ruleNames: string[]): string {
+		const entry: TtsrInjectionEntry = {
+			type: "ttsr_injection",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			injectedRules: ruleNames,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/**
+	 * Get all unique TTSR rule names that have been injected in the current branch.
+	 * Scans from root to current leaf for ttsr_injection entries.
+	 */
+	getInjectedTtsrRules(): string[] {
+		const path = this.getBranch();
+		const ruleNames = new Set<string>();
+		for (const entry of path) {
+			if (entry.type === "ttsr_injection") {
+				for (const name of entry.injectedRules) {
+					ruleNames.add(name);
+				}
+			}
+		}
+		return Array.from(ruleNames);
 	}
 
 	// =========================================================================

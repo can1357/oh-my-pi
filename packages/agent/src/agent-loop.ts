@@ -225,6 +225,11 @@ async function streamAssistantResponse(
 	let addedPartial = false;
 
 	for await (const event of response) {
+		// Check abort early - allows TTSR and other abort sources to break immediately
+		if (signal?.aborted) {
+			break;
+		}
+
 		switch (event.type) {
 			case "start":
 				partialMessage = event.partial;
@@ -268,6 +273,22 @@ async function streamAssistantResponse(
 				return finalMessage;
 			}
 		}
+
+		// Check abort after processing - allows handlers to abort mid-stream
+		if (signal?.aborted) {
+			break;
+		}
+	}
+
+	// If we broke out due to abort, return an aborted message
+	if (signal?.aborted && partialMessage) {
+		const abortedMessage: AssistantMessage = {
+			...partialMessage,
+			stopReason: "aborted",
+		};
+		context.messages[context.messages.length - 1] = abortedMessage;
+		stream.push({ type: "message_end", message: abortedMessage });
+		return abortedMessage;
 	}
 
 	return await response.result();

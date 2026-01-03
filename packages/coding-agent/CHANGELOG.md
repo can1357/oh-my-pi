@@ -1,6 +1,13 @@
 # Changelog
 
 ## [Unreleased]
+
+### Added
+
+- Added Time Traveling Stream Rules (TTSR) feature that monitors agent output for pattern matches and injects rule reminders mid-stream
+- Added `ttsr_trigger` frontmatter field for rules to define regex patterns that trigger mid-stream injection
+- Added TTSR settings for enabled state, context mode (keep/discard partial output), and repeat mode (once/after-gap)
+
 ### Fixed
 
 - Fixed excessive subprocess spawns by caching git status for 1 second in the footer component

@@ -1,6 +1,14 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `popMessage()` method to Agent class for removing and retrieving the last message
+- Added abort signal checks during response streaming for faster interruption handling
+
+### Fixed
+
+- Fixed abort handling to properly return aborted message state when stream is interrupted mid-response
 
 ## [3.3.1337] - 2026-01-03
 

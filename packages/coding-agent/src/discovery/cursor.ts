@@ -163,6 +163,7 @@ function transformMDCRule(
 	// Extract frontmatter fields
 	const description = typeof frontmatter.description === "string" ? frontmatter.description : undefined;
 	const alwaysApply = frontmatter.alwaysApply === true;
+	const ttsrTrigger = typeof frontmatter.ttsr_trigger === "string" ? frontmatter.ttsr_trigger : undefined;
 
 	// Parse globs (can be array or single string)
 	let globs: string[] | undefined;
@@ -182,6 +183,7 @@ function transformMDCRule(
 		description,
 		alwaysApply,
 		globs,
+		ttsrTrigger,
 		_source: source,
 	};
 }

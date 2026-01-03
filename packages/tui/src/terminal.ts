@@ -10,10 +10,10 @@ let activeTerminal: ProcessTerminal | null = null;
  * Resets terminal state without requiring access to the ProcessTerminal instance
  */
 export function emergencyTerminalRestore(): void {
-	if (activeTerminal) {
-		activeTerminal.stop();
-		activeTerminal.showCursor();
-		activeTerminal = null;
+	const terminal = activeTerminal;
+	if (terminal) {
+		terminal.stop();
+		terminal.showCursor();
 	} else {
 		// Blind restore if no instance tracked - covers edge cases
 		process.stdout.write(

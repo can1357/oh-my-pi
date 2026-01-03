@@ -128,6 +128,7 @@ function loadRules(ctx: LoadContext): LoadResult<Rule> {
 				globs,
 				alwaysApply: frontmatter.alwaysApply as boolean | undefined,
 				description: frontmatter.description as string | undefined,
+				ttsrTrigger: typeof frontmatter.ttsr_trigger === "string" ? frontmatter.ttsr_trigger : undefined,
 				_source: createSourceMeta(PROVIDER_ID, userPath, "user"),
 			});
 		}
@@ -157,6 +158,7 @@ function loadRules(ctx: LoadContext): LoadResult<Rule> {
 					globs,
 					alwaysApply: frontmatter.alwaysApply as boolean | undefined,
 					description: frontmatter.description as string | undefined,
+					ttsrTrigger: typeof frontmatter.ttsr_trigger === "string" ? frontmatter.ttsr_trigger : undefined,
 					_source: source,
 				};
 			},
@@ -187,6 +189,7 @@ function loadRules(ctx: LoadContext): LoadResult<Rule> {
 				globs,
 				alwaysApply: frontmatter.alwaysApply as boolean | undefined,
 				description: frontmatter.description as string | undefined,
+				ttsrTrigger: typeof frontmatter.ttsr_trigger === "string" ? frontmatter.ttsr_trigger : undefined,
 				_source: createSourceMeta(PROVIDER_ID, legacyPath, "project"),
 			});
 		}

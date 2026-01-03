@@ -174,6 +174,14 @@ export class Agent {
 		this._state.messages = [];
 	}
 
+	/** Remove and return the last message from the message list */
+	popMessage(): AgentMessage | undefined {
+		if (this._state.messages.length === 0) return undefined;
+		const popped = this._state.messages[this._state.messages.length - 1];
+		this._state.messages = this._state.messages.slice(0, -1);
+		return popped;
+	}
+
 	abort() {
 		this.abortController?.abort();
 	}

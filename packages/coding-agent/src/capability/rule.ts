@@ -15,6 +15,8 @@ export interface RuleFrontmatter {
 	description?: string;
 	globs?: string[];
 	alwaysApply?: boolean;
+	/** Regex pattern that triggers time-traveling rule injection */
+	ttsr_trigger?: string;
 	[key: string]: unknown;
 }
 
@@ -34,6 +36,8 @@ export interface Rule {
 	alwaysApply?: boolean;
 	/** Description (for agent-requested rules) */
 	description?: string;
+	/** Regex pattern that triggers time-traveling rule injection */
+	ttsrTrigger?: string;
 	/** Source metadata */
 	_source: SourceMeta;
 }

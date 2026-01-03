@@ -34,6 +34,8 @@ import { Agent, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 // Import discovery to register all providers on startup
 import "../discovery";
+import { loadSync as loadCapability } from "../capability/index";
+import { type Rule, ruleCapability } from "../capability/rule";
 import { getAgentDir, getConfigDirPaths } from "../config";
 import { AgentSession } from "./agent-session";
 import { AuthStorage } from "./auth-storage";
@@ -88,6 +90,7 @@ import {
 	warmupLspServers,
 	writeTool,
 } from "./tools/index";
+import { createTtsrManager } from "./ttsr";
 
 // Types
 
@@ -601,6 +604,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const skills = options.skills ?? discoverSkills(cwd, agentDir, settingsManager.getSkillsSettings());
 	time("discoverSkills");
 
+	// Discover TTSR rules
+	const ttsrManager = createTtsrManager(settingsManager.getTtsrSettings());
+	const rulesResult = loadCapability<Rule>(ruleCapability.id, { cwd });
+	for (const rule of rulesResult.items) {
+		if (rule.ttsrTrigger) {
+			ttsrManager.addRule(rule);
+		}
+	}
+	time("discoverTtsrRules");
+
 	const contextFiles = options.contextFiles ?? discoverContextFiles(cwd, agentDir);
 	time("discoverContextFiles");
 
@@ -847,6 +860,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		customCommands: customCommandsResult.commands,
 		skillsSettings: settingsManager.getSkillsSettings(),
 		modelRegistry,
+		ttsrManager,
 	});
 	time("createAgentSession");
 

@@ -68,6 +68,16 @@ export interface EditSettings {
 	fuzzyMatch?: boolean; // default: true (accept high-confidence fuzzy matches for whitespace/indentation)
 }
 
+export interface TtsrSettings {
+	enabled?: boolean; // default: true
+	/** What to do with partial output when TTSR triggers: "keep" shows interrupted attempt, "discard" removes it */
+	contextMode?: "keep" | "discard"; // default: "discard"
+	/** How TTSR rules repeat: "once" = only trigger once per session, "after-gap" = can repeat after N messages */
+	repeatMode?: "once" | "after-gap"; // default: "once"
+	/** Number of messages before a rule can trigger again (only used when repeatMode is "after-gap") */
+	repeatGap?: number; // default: 10
+}
+
 export interface Settings {
 	lastChangelogVersion?: string;
 	/** Model roles map: { default: "provider/modelId", small: "provider/modelId", ... } */
@@ -93,6 +103,7 @@ export interface Settings {
 	mcp?: MCPSettings;
 	lsp?: LspSettings;
 	edit?: EditSettings;
+	ttsr?: TtsrSettings;
 	disabledProviders?: string[]; // Discovery provider IDs that are disabled
 }
 
@@ -580,6 +591,63 @@ export class SettingsManager {
 
 	setDisabledProviders(providerIds: string[]): void {
 		this.globalSettings.disabledProviders = providerIds;
+		this.save();
+	}
+
+	getTtsrSettings(): TtsrSettings {
+		return this.settings.ttsr ?? {};
+	}
+
+	setTtsrSettings(settings: TtsrSettings): void {
+		this.globalSettings.ttsr = { ...this.globalSettings.ttsr, ...settings };
+		this.save();
+	}
+
+	getTtsrEnabled(): boolean {
+		return this.settings.ttsr?.enabled ?? true;
+	}
+
+	setTtsrEnabled(enabled: boolean): void {
+		if (!this.globalSettings.ttsr) {
+			this.globalSettings.ttsr = {};
+		}
+		this.globalSettings.ttsr.enabled = enabled;
+		this.save();
+	}
+
+	getTtsrContextMode(): "keep" | "discard" {
+		return this.settings.ttsr?.contextMode ?? "discard";
+	}
+
+	setTtsrContextMode(mode: "keep" | "discard"): void {
+		if (!this.globalSettings.ttsr) {
+			this.globalSettings.ttsr = {};
+		}
+		this.globalSettings.ttsr.contextMode = mode;
+		this.save();
+	}
+
+	getTtsrRepeatMode(): "once" | "after-gap" {
+		return this.settings.ttsr?.repeatMode ?? "once";
+	}
+
+	setTtsrRepeatMode(mode: "once" | "after-gap"): void {
+		if (!this.globalSettings.ttsr) {
+			this.globalSettings.ttsr = {};
+		}
+		this.globalSettings.ttsr.repeatMode = mode;
+		this.save();
+	}
+
+	getTtsrRepeatGap(): number {
+		return this.settings.ttsr?.repeatGap ?? 10;
+	}
+
+	setTtsrRepeatGap(gap: number): void {
+		if (!this.globalSettings.ttsr) {
+			this.globalSettings.ttsr = {};
+		}
+		this.globalSettings.ttsr.repeatGap = gap;
 		this.save();
 	}
 }

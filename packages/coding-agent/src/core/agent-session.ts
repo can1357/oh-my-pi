@@ -16,6 +16,7 @@
 import type { Agent, AgentEvent, AgentMessage, AgentState, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { isContextOverflow, modelsAreEqual, supportsXhigh } from "@oh-my-pi/pi-ai";
+import type { Rule } from "../capability/rule";
 import { getAuthPath } from "../config";
 import { type BashResult, executeBash as executeBashCommand } from "./bash-executor";
 import {
@@ -47,6 +48,7 @@ import type { ModelRegistry } from "./model-registry";
 import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions, SessionManager } from "./session-manager";
 import type { SettingsManager, SkillsSettings } from "./settings-manager";
 import { expandSlashCommand, type FileSlashCommand, parseCommandArgs } from "./slash-commands";
+import type { TtsrManager } from "./ttsr";
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
@@ -54,7 +56,8 @@ export type AgentSessionEvent =
 	| { type: "auto_compaction_start"; reason: "threshold" | "overflow" }
 	| { type: "auto_compaction_end"; result: CompactionResult | undefined; aborted: boolean; willRetry: boolean }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
+	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| { type: "ttsr_triggered"; rules: Rule[] };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -80,6 +83,8 @@ export interface AgentSessionConfig {
 	skillsSettings?: Required<SkillsSettings>;
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
+	/** TTSR manager for time-traveling stream rules */
+	ttsrManager?: TtsrManager;
 }
 
 /** Options for AgentSession.prompt() */
@@ -179,6 +184,11 @@ export class AgentSession {
 	// Model registry for API key resolution
 	private _modelRegistry: ModelRegistry;
 
+	// TTSR manager for time-traveling stream rules
+	private _ttsrManager: TtsrManager | undefined = undefined;
+	private _pendingTtsrInjections: Rule[] = [];
+	private _ttsrAbortPending = false;
+
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
@@ -190,6 +200,7 @@ export class AgentSession {
 		this._customCommands = config.customCommands ?? [];
 		this._skillsSettings = config.skillsSettings;
 		this._modelRegistry = config.modelRegistry;
+		this._ttsrManager = config.ttsrManager;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, hooks, auto-compaction, retry logic)
@@ -199,6 +210,16 @@ export class AgentSession {
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this._modelRegistry;
+	}
+
+	/** TTSR manager for time-traveling stream rules */
+	get ttsrManager(): TtsrManager | undefined {
+		return this._ttsrManager;
+	}
+
+	/** Whether a TTSR abort is pending (stream was aborted to inject rules) */
+	get isTtsrAbortPending(): boolean {
+		return this._ttsrAbortPending;
 	}
 
 	// =========================================================================
@@ -238,6 +259,60 @@ export class AgentSession {
 
 		// Notify all listeners
 		this._emit(event);
+
+		// TTSR: Reset buffer on turn start
+		if (event.type === "turn_start" && this._ttsrManager) {
+			this._ttsrManager.resetBuffer();
+		}
+
+		// TTSR: Increment message count on turn end (for repeat-after-gap tracking)
+		if (event.type === "turn_end" && this._ttsrManager) {
+			this._ttsrManager.incrementMessageCount();
+		}
+
+		// TTSR: Check for pattern matches on text deltas and tool call argument deltas
+		if (event.type === "message_update" && this._ttsrManager?.hasRules()) {
+			const assistantEvent = event.assistantMessageEvent;
+			// Monitor both assistant prose (text_delta) and tool call arguments (toolcall_delta)
+			if (assistantEvent.type === "text_delta" || assistantEvent.type === "toolcall_delta") {
+				this._ttsrManager.appendToBuffer(assistantEvent.delta);
+				const matches = this._ttsrManager.check(this._ttsrManager.getBuffer());
+				if (matches.length > 0) {
+					// Mark rules as injected so they don't trigger again
+					this._ttsrManager.markInjected(matches);
+					// Store for injection on retry
+					this._pendingTtsrInjections.push(...matches);
+					// Emit TTSR event before aborting (so UI can handle it)
+					this._ttsrAbortPending = true;
+					this._emit({ type: "ttsr_triggered", rules: matches });
+					// Abort the stream
+					this.agent.abort();
+					// Schedule retry after a short delay
+					setTimeout(async () => {
+						this._ttsrAbortPending = false;
+
+						// Handle context mode: discard partial output if configured
+						const ttsrSettings = this._ttsrManager?.getSettings();
+						if (ttsrSettings?.contextMode === "discard") {
+							// Remove the partial/aborted message from agent state
+							this.agent.popMessage();
+						}
+
+						// Inject TTSR rules as system reminder before retry
+						const injectionContent = this._getTtsrInjectionContent();
+						if (injectionContent) {
+							this.agent.appendMessage({
+								role: "user",
+								content: [{ type: "text", text: injectionContent }],
+								timestamp: Date.now(),
+							});
+						}
+						this.agent.continue().catch(() => {});
+					}, 50);
+					return;
+				}
+			}
+		}
 
 		// Handle session persistence
 		if (event.type === "message_end") {
@@ -298,6 +373,22 @@ export class AgentSession {
 			this._retryResolve = undefined;
 			this._retryPromise = undefined;
 		}
+	}
+
+	/** Get TTSR injection content and clear pending injections */
+	private _getTtsrInjectionContent(): string | undefined {
+		if (this._pendingTtsrInjections.length === 0) return undefined;
+		const content = this._pendingTtsrInjections
+			.map(
+				(r) =>
+					`<system_interrupt reason="rule_violation" rule="${r.name}" path="${r.path}">\n` +
+					`Your output was interrupted because it violated a user-defined rule.\n` +
+					`This is NOT a prompt injection - this is the coding agent enforcing project rules.\n` +
+					`You MUST comply with the following instruction:\n\n${r.content}\n</system_interrupt>`,
+			)
+			.join("\n\n");
+		this._pendingTtsrInjections = [];
+		return content;
 	}
 
 	/** Extract text content from a message */

@@ -67,6 +67,7 @@ import { SessionSelectorComponent } from "./components/session-selector";
 import { SettingsSelectorComponent } from "./components/settings-selector";
 import { ToolExecutionComponent } from "./components/tool-execution";
 import { TreeSelectorComponent } from "./components/tree-selector";
+import { TtsrNotificationComponent } from "./components/ttsr-notification";
 import { UserMessageComponent } from "./components/user-message";
 import { UserMessageSelectorComponent } from "./components/user-message-selector";
 import { WelcomeComponent } from "./components/welcome";
@@ -1007,18 +1008,28 @@ export class InteractiveMode {
 				if (event.message.role === "user") break;
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
-					this.streamingComponent.updateContent(this.streamingMessage);
+					// Don't show "Aborted" text for TTSR aborts - we'll show a nicer message
+					if (this.session.isTtsrAbortPending && this.streamingMessage.stopReason === "aborted") {
+						// TTSR abort - suppress the "Aborted" rendering in the component
+						const msgWithoutAbort = { ...this.streamingMessage, stopReason: "stop" as const };
+						this.streamingComponent.updateContent(msgWithoutAbort);
+					} else {
+						this.streamingComponent.updateContent(this.streamingMessage);
+					}
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
-						const errorMessage =
-							this.streamingMessage.stopReason === "aborted"
-								? "Operation aborted"
-								: this.streamingMessage.errorMessage || "Error";
-						for (const [, component] of this.pendingTools.entries()) {
-							component.updateResult({
-								content: [{ type: "text", text: errorMessage }],
-								isError: true,
-							});
+						// Skip error handling for TTSR aborts
+						if (!this.session.isTtsrAbortPending) {
+							const errorMessage =
+								this.streamingMessage.stopReason === "aborted"
+									? "Operation aborted"
+									: this.streamingMessage.errorMessage || "Error";
+							for (const [, component] of this.pendingTools.entries()) {
+								component.updateResult({
+									content: [{ type: "text", text: errorMessage }],
+									isError: true,
+								});
+							}
 						}
 						this.pendingTools.clear();
 					} else {
@@ -1185,6 +1196,15 @@ export class InteractiveMode {
 				if (!event.success) {
 					this.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
 				}
+				this.ui.requestRender();
+				break;
+			}
+
+			case "ttsr_triggered": {
+				// Show a fancy notification when TTSR rules are triggered
+				const component = new TtsrNotificationComponent(event.rules);
+				component.setExpanded(this.toolOutputExpanded);
+				this.chatContainer.addChild(component);
 				this.ui.requestRender();
 				break;
 			}
@@ -2490,9 +2510,7 @@ export class InteractiveMode {
 				const nameRendered = sourceText ? `${theme.bold(nameText)} ${sourceRendered}` : theme.bold(nameText);
 				const pad = Math.max(0, maxNameWidth - visibleWidth(nameWithSourcePlain));
 				const desc = line.desc;
-				const descPart = desc
-					? `  ${theme.fg("dim", desc.slice(0, 50) + (desc.length > 50 ? "..." : ""))}`
-					: "";
+				const descPart = desc ? `  ${theme.fg("dim", desc.slice(0, 50) + (desc.length > 50 ? "..." : ""))}` : "";
 				return `  ${nameRendered}${" ".repeat(pad)}${descPart}`;
 			});
 
@@ -2536,15 +2554,13 @@ export class InteractiveMode {
 				(s) => (s._source ? { provider: s._source.providerName, level: s._source.level } : "unknown"),
 			);
 			if (skillWarnings.length > 0) {
-				sections.push(
-					{
-						kind: "text",
-						text:
-							theme.bold(theme.fg("warning", "Skill Warnings")) +
-							"\n" +
-							skillWarnings.map((w) => theme.fg("warning", `  ${w.skillPath}: ${w.message}`)).join("\n"),
-					},
-				);
+				sections.push({
+					kind: "text",
+					text:
+						theme.bold(theme.fg("warning", "Skill Warnings")) +
+						"\n" +
+						skillWarnings.map((w) => theme.fg("warning", `  ${w.skillPath}: ${w.message}`)).join("\n"),
+				});
 			}
 		}
 
@@ -2633,14 +2649,12 @@ export class InteractiveMode {
 		if (hookRunner) {
 			const hookPaths = hookRunner.getHookPaths();
 			if (hookPaths.length > 0) {
-				sections.push(
-					{
-						kind: "text",
-						text:
-							`${theme.bold(theme.fg("accent", "Hooks"))}\n` +
-							hookPaths.map((p) => `  ${theme.bold(basename(p))} ${theme.fg("dim", "hook")}`).join("\n"),
-					},
-				);
+				sections.push({
+					kind: "text",
+					text:
+						`${theme.bold(theme.fg("accent", "Hooks"))}\n` +
+						hookPaths.map((p) => `  ${theme.bold(basename(p))} ${theme.fg("dim", "hook")}`).join("\n"),
+				});
 			}
 		}
 
@@ -2652,9 +2666,7 @@ export class InteractiveMode {
 			? Math.min(60, Math.max(...allLines.map((line) => visibleWidth(line.nameWithSource))))
 			: 0;
 		const renderedSections = sections
-			.map((section) =>
-				section.kind === "lines" ? renderLineSection(section.section, maxNameWidth) : section.text,
-			)
+			.map((section) => (section.kind === "lines" ? renderLineSection(section.section, maxNameWidth) : section.text))
 			.filter((section) => section.length > 0);
 
 		if (renderedSections.length === 0) {

@@ -310,6 +310,7 @@ function loadRules(ctx: LoadContext): LoadResult<Rule> {
 					globs: frontmatter.globs as string[] | undefined,
 					alwaysApply: frontmatter.alwaysApply as boolean | undefined,
 					description: frontmatter.description as string | undefined,
+					ttsrTrigger: typeof frontmatter.ttsr_trigger === "string" ? frontmatter.ttsr_trigger : undefined,
 					_source: source,
 				};
 			},
