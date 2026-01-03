@@ -27,7 +27,7 @@ Extensions can be loaded from:
 ### Directories
 ```
 ./my-hooks/
-~/.pi/agent/hooks/
+~/.omp/agent/hooks/
 ```
 
 ### npm Packages
@@ -51,7 +51,7 @@ git:https://github.com/user/repo#branch      # branch
 
 ### Permanent (settings.json)
 ```
-~/.pi/agent/
+~/.omp/agent/
   hooks/
     my-local-hook.ts                    # root-level file
     complex-hook/                       # directory with entry point
@@ -86,7 +86,7 @@ git:https://github.com/user/repo#branch      # branch
 
 ### Ephemeral (CLI flags)
 ```
-/tmp/pi-extensions/
+/tmp/omp-extensions/
   hooks/
     npm/
       my-hook@1.0.0/
@@ -148,8 +148,8 @@ scan(baseDir, config):
 ```
 
 **Default directories scanned (always, regardless of settings.json):**
-- `~/.pi/agent/<type>/`
-- `<cwd>/.pi/<type>/`
+- `~/.omp/agent/<type>/`
+- `<cwd>/.omp/<type>/`
 
 ## Extension Packs
 
@@ -248,58 +248,58 @@ Patterns are glob patterns matched against extension paths.
 
 ### Adding Sources
 ```bash
-pi --hook <path|npm:|git:>      # add hook source (repeatable)
-pi --tool <path|npm:|git:>      # add custom tool source (repeatable)
-pi --skill <path|npm:|git:>     # add skill source (repeatable)
-pi --theme <path|npm:|git:>     # add theme source (repeatable)
+omp --hook <path|npm:|git:>      # add hook source (repeatable)
+omp --tool <path|npm:|git:>      # add custom tool source (repeatable)
+omp --skill <path|npm:|git:>     # add skill source (repeatable)
+omp --theme <path|npm:|git:>     # add theme source (repeatable)
 ```
 
 **Installation locations for npm/git sources:**
 
 | Source | Install location |
 |--------|------------------|
-| CLI flags | `/tmp/pi-extensions/<type>/npm/` or `git/` |
-| Global settings (`~/.pi/agent/settings.json`) | `~/.pi/agent/<type>/npm/` or `git/` |
-| Project settings (`<cwd>/.pi/settings.json`) | `<cwd>/.pi/<type>/npm/` or `git/` |
+| CLI flags | `/tmp/omp-extensions/<type>/npm/` or `git/` |
+| Global settings (`~/.omp/agent/settings.json`) | `~/.omp/agent/<type>/npm/` or `git/` |
+| Project settings (`<cwd>/.omp/settings.json`) | `<cwd>/.omp/<type>/npm/` or `git/` |
 
 File/directory paths are used directly (no installation).
 
 - **CLI = ephemeral**: cached in temp until OS clears `/tmp/`
 - **Global settings = permanent**: installed to user's agent directory
-- **Project settings = project-local**: installed to project's `.pi/` directory
+- **Project settings = project-local**: installed to project's `.omp/` directory
 
 Examples:
-- `--hook npm:my-hook@1.0.0` → `/tmp/pi-extensions/hooks/npm/my-hook@1.0.0/`
-- Global settings.json `npm:my-hook@1.0.0` → `~/.pi/agent/hooks/npm/my-hook@1.0.0/`
-- Project settings.json `npm:my-hook@1.0.0` → `<cwd>/.pi/hooks/npm/my-hook@1.0.0/`
+- `--hook npm:my-hook@1.0.0` → `/tmp/omp-extensions/hooks/npm/my-hook@1.0.0/`
+- Global settings.json `npm:my-hook@1.0.0` → `~/.omp/agent/hooks/npm/my-hook@1.0.0/`
+- Project settings.json `npm:my-hook@1.0.0` → `<cwd>/.omp/hooks/npm/my-hook@1.0.0/`
 
 This encourages: try via CLI, if you like it, add to settings.json for permanent install.
 
 ### Filtering
 ```bash
-pi --hooks "pattern1,pattern2,!excluded"       # filter hooks
-pi --custom-tools "pattern1,!excluded"         # filter custom tools
-pi --skills "pattern1,pattern2"                # filter skills
-pi --themes "pattern1"                         # filter themes
+omp --hooks "pattern1,pattern2,!excluded"       # filter hooks
+omp --custom-tools "pattern1,!excluded"         # filter custom tools
+omp --skills "pattern1,pattern2"                # filter skills
+omp --themes "pattern1"                         # filter themes
 ```
 
 ### Disabling
 ```bash
-pi --no-hooks                   # disable all hooks
-pi --no-custom-tools            # disable all custom tools
-pi --no-skills                  # disable all skills (already exists)
+omp --no-hooks                   # disable all hooks
+omp --no-custom-tools            # disable all custom tools
+omp --no-skills                  # disable all skills (already exists)
 ```
 
 ### Built-in Tools
 ```bash
-pi --tools read,bash,edit,write    # select which built-in tools to enable (unchanged)
+omp --tools read,bash,edit,write    # select which built-in tools to enable (unchanged)
 ```
 
 ## Settings Hierarchy
 
 Extensions are configured in settings.json at two levels:
-- **Global**: `~/.pi/agent/settings.json`
-- **Project**: `<cwd>/.pi/settings.json`
+- **Global**: `~/.omp/agent/settings.json`
+- **Project**: `<cwd>/.omp/settings.json`
 
 **Merge behavior:**
 - `paths`: **additive** - project paths are added to global paths
@@ -307,7 +307,7 @@ Extensions are configured in settings.json at two levels:
 
 **Example:**
 ```json
-// Global: ~/.pi/agent/settings.json
+// Global: ~/.omp/agent/settings.json
 {
   "hooks": {
     "paths": ["npm:audit-hooks@1.0.0"],
@@ -315,7 +315,7 @@ Extensions are configured in settings.json at two levels:
   }
 }
 
-// Project: .pi/settings.json
+// Project: .omp/settings.json
 {
   "hooks": {
     "paths": ["./project-hooks/"],
@@ -368,9 +368,9 @@ Extensions are configured in settings.json at two levels:
 ## Installation Flow
 
 Target directory depends on source:
-- **CLI flags**: `/tmp/pi-extensions/<type>/npm/` or `git/`
-- **Global settings.json**: `~/.pi/agent/<type>/npm/` or `git/`
-- **Project settings.json**: `<cwd>/.pi/<type>/npm/` or `git/`
+- **CLI flags**: `/tmp/omp-extensions/<type>/npm/` or `git/`
+- **Global settings.json**: `~/.omp/agent/<type>/npm/` or `git/`
+- **Project settings.json**: `<cwd>/.omp/<type>/npm/` or `git/`
 
 ### Atomic Installation
 
@@ -382,7 +382,7 @@ To prevent corrupted state from interrupted installs (Ctrl+C):
 
 ### npm Packages
 1. Parse specifier: `npm:@scope/pkg@1.2.3` → name: `@scope/pkg`, version: `1.2.3`
-2. Determine target dir based on source (CLI → temp, global → agent dir, project → cwd/.pi/)
+2. Determine target dir based on source (CLI → temp, global → agent dir, project → cwd/.omp/)
 3. If `<target>/` exists and has matching version in package.json → skip install
 4. Otherwise:
    - Remove stale `<target>.installing/` if exists
@@ -393,7 +393,7 @@ To prevent corrupted state from interrupted installs (Ctrl+C):
 
 ### Git Repositories
 1. Parse specifier: `git:https://github.com/user/repo@v1.0.0`
-2. Determine target dir based on source (CLI → temp, global → agent dir, project → cwd/.pi/)
+2. Determine target dir based on source (CLI → temp, global → agent dir, project → cwd/.omp/)
 3. If `<target>/` exists → skip clone
 4. Otherwise:
    - Remove stale `<target>.installing/` if exists
@@ -409,18 +409,18 @@ To prevent corrupted state from interrupted installs (Ctrl+C):
 Adds extension to settings.json and installs to disk.
 
 ```bash
-pi install <type> <source>              # global (default)
-pi install <type> -p <source>           # project-local
-pi install <type> --project <source>    # project-local
+omp install <type> <source>              # global (default)
+omp install <type> -p <source>           # project-local
+omp install <type> --project <source>    # project-local
 
 # Examples:
-pi install hook npm:@scope/my-hook@1.0.0
-  # → adds to ~/.pi/agent/settings.json
-  # → installs to ~/.pi/agent/hooks/npm/@scope/my-hook@1.0.0/
+omp install hook npm:@scope/my-hook@1.0.0
+  # → adds to ~/.omp/agent/settings.json
+  # → installs to ~/.omp/agent/hooks/npm/@scope/my-hook@1.0.0/
 
-pi install tool -p git:https://github.com/user/tool@v1.0.0
-  # → adds to <cwd>/.pi/settings.json
-  # → installs to <cwd>/.pi/tools/git/github.com/user/tool@v1.0.0/
+omp install tool -p git:https://github.com/user/tool@v1.0.0
+  # → adds to <cwd>/.omp/settings.json
+  # → installs to <cwd>/.omp/tools/git/github.com/user/tool@v1.0.0/
 ```
 
 ### Remove
@@ -428,12 +428,12 @@ pi install tool -p git:https://github.com/user/tool@v1.0.0
 Removes extension from settings.json and deletes from disk.
 
 ```bash
-pi remove <type> <name>                 # from global
-pi remove <type> -p <name>              # from project
+omp remove <type> <name>                 # from global
+omp remove <type> -p <name>              # from project
 
 # Examples:
-pi remove hook my-hook                  # from ~/.pi/agent/settings.json + delete
-pi remove skill -p brave-search         # from <cwd>/.pi/settings.json + delete
+omp remove hook my-hook                  # from ~/.omp/agent/settings.json + delete
+omp remove skill -p brave-search         # from <cwd>/.omp/settings.json + delete
 ```
 
 ### Update
@@ -441,15 +441,15 @@ pi remove skill -p brave-search         # from <cwd>/.pi/settings.json + delete
 Updates npm/git extensions to latest versions.
 
 ```bash
-pi update                               # all (project + global)
-pi update -p                            # project only
-pi update <type>...                     # specific types
-pi update -p <type>...                  # project, specific types
+omp update                               # all (project + global)
+omp update -p                            # project only
+omp update <type>...                     # specific types
+omp update -p <type>...                  # project, specific types
 
 # Examples:
-pi update                               # update everything
-pi update hook tool                     # update hooks and tools
-pi update -p skill                      # update project skills only
+omp update                               # update everything
+omp update hook tool                     # update hooks and tools
+omp update -p skill                      # update project skills only
 ```
 
 **Update behavior:**
@@ -461,13 +461,13 @@ pi update -p skill                      # update project skills only
 ## Loading Flow (Full)
 
 1. **Collect sources:**
-   - Default directories: `~/.pi/agent/<type>/`, `./.pi/<type>/`
+   - Default directories: `~/.omp/agent/<type>/`, `./.omp/<type>/`
    - settings.json `<type>.paths`
    - CLI `--<type>` arguments
 
-2. **Install remote sources:**
+3. **Install remote sources:**
    - Process `npm:` and `git:` specifiers
-   - Install to `~/.pi/agent/<type>/npm/` or `git/`
+   - Install to `~/.omp/agent/<type>/npm/` or `git/`
 
 3. **Scan all sources:**
    - Recursively discover extensions
@@ -621,7 +621,7 @@ export interface LoadExtensionsOptions {
   cwd: string;
   agentDir: string;
   globalPaths: string[];              // from global settings.json → install to agentDir
-  projectPaths: string[];             // from project settings.json → install to cwd/.pi/
+  projectPaths: string[];             // from project settings.json → install to cwd/.omp/
   cliPaths: string[];                 // from CLI flags → install to /tmp/
   filter: string[];                   // combined filter patterns
 }
@@ -656,7 +656,7 @@ export function getSkillsDir(): string {
 
 // getToolsDir() already exists
 // getThemesDir() = bundled themes (in package)
-// getCustomThemesDir() = ~/.pi/agent/themes/ (user themes) - already exists
+// getCustomThemesDir() = ~/.omp/agent/themes/ (user themes) - already exists
 ```
 
 ### `src/core/settings-manager.ts`

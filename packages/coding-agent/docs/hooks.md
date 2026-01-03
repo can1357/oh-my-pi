@@ -1,8 +1,8 @@
-> pi can create hooks. Ask it to build one for your use case.
+> omp can create hooks. Ask it to build one for your use case.
 
 # Hooks
 
-Hooks are TypeScript modules that extend pi's behavior by subscribing to lifecycle events. They can intercept tool calls, prompt the user, modify results, inject messages, and more.
+Hooks are TypeScript modules that extend omp's behavior by subscribing to lifecycle events. They can intercept tool calls, prompt the user, modify results, inject messages, and more.
 
 **Key capabilities:**
 
@@ -24,7 +24,7 @@ See [examples/hooks/](../examples/hooks/) for working implementations, including
 
 ## Quick Start
 
-Create `~/.pi/agent/hooks/my-hook.ts`:
+Create `~/.omp/agent/hooks/my-hook.ts`:
 
 ```typescript
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent";
@@ -46,17 +46,17 @@ export default function (pi: HookAPI) {
 Test with `--hook` flag:
 
 ```bash
-pi --hook ./my-hook.ts
+omp --hook ./my-hook.ts
 ```
 
 ## Hook Locations
 
 Hooks are auto-discovered from:
 
-| Location                 | Scope                 |
-| ------------------------ | --------------------- |
-| `~/.pi/agent/hooks/*.ts` | Global (all projects) |
-| `.pi/hooks/*.ts`         | Project-local         |
+| Location                  | Scope                 |
+| ------------------------- | --------------------- |
+| `~/.omp/agent/hooks/*.ts` | Global (all projects) |
+| `.omp/hooks/*.ts`         | Project-local         |
 
 Additional paths via `settings.json`:
 
@@ -99,7 +99,7 @@ Hooks are loaded via [jiti](https://github.com/unjs/jiti), so TypeScript works w
 ### Lifecycle Overview
 
 ```
-pi starts
+omp starts
   │
   └─► session_start
       │
@@ -509,7 +509,7 @@ Read-only access to session state. See `ReadonlySessionManager` in [`src/core/se
 ```typescript
 // Session info
 ctx.sessionManager.getCwd(); // Working directory
-ctx.sessionManager.getSessionDir(); // Session directory (~/.pi/agent/sessions)
+ctx.sessionManager.getSessionDir(); // Session directory (~/.omp/agent/sessions)
 ctx.sessionManager.getSessionId(); // Current session ID
 ctx.sessionManager.getSessionFile(); // Session file path (undefined with --no-session)
 
@@ -864,4 +864,4 @@ In print mode, `select()` returns `undefined`, `confirm()` returns `false`, `inp
 1. Open VS Code in hooks directory
 2. Open JavaScript Debug Terminal (Ctrl+Shift+P → "JavaScript Debug Terminal")
 3. Set breakpoints
-4. Run `pi --hook ./my-hook.ts`
+4. Run `omp --hook ./my-hook.ts`

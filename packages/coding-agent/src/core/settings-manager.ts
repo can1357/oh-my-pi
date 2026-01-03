@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { CONFIG_DIR_NAME, getAgentDir } from "../config";
+import { getAgentDir, readConfigFile } from "../config";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -126,19 +126,14 @@ function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 
 export class SettingsManager {
 	private settingsPath: string | null;
-	private projectSettingsPath: string | null;
+	private cwd: string | null;
 	private globalSettings: Settings;
 	private settings: Settings;
 	private persist: boolean;
 
-	private constructor(
-		settingsPath: string | null,
-		projectSettingsPath: string | null,
-		initialSettings: Settings,
-		persist: boolean,
-	) {
+	private constructor(settingsPath: string | null, cwd: string | null, initialSettings: Settings, persist: boolean) {
 		this.settingsPath = settingsPath;
-		this.projectSettingsPath = projectSettingsPath;
+		this.cwd = cwd;
 		this.persist = persist;
 		this.globalSettings = initialSettings;
 		const projectSettings = this.loadProjectSettings();
@@ -148,9 +143,8 @@ export class SettingsManager {
 	/** Create a SettingsManager that loads from files */
 	static create(cwd: string = process.cwd(), agentDir: string = getAgentDir()): SettingsManager {
 		const settingsPath = join(agentDir, "settings.json");
-		const projectSettingsPath = join(cwd, CONFIG_DIR_NAME, "settings.json");
 		const globalSettings = SettingsManager.loadFromFile(settingsPath);
-		return new SettingsManager(settingsPath, projectSettingsPath, globalSettings, true);
+		return new SettingsManager(settingsPath, cwd, globalSettings, true);
 	}
 
 	/** Create an in-memory SettingsManager (no file I/O) */
@@ -172,17 +166,11 @@ export class SettingsManager {
 	}
 
 	private loadProjectSettings(): Settings {
-		if (!this.projectSettingsPath || !existsSync(this.projectSettingsPath)) {
-			return {};
-		}
+		if (!this.cwd) return {};
 
-		try {
-			const content = readFileSync(this.projectSettingsPath, "utf-8");
-			return JSON.parse(content);
-		} catch (error) {
-			console.error(`Warning: Could not read project settings file: ${error}`);
-			return {};
-		}
+		// Use readConfigFile to search .omp, .pi, .claude in priority order
+		const result = readConfigFile<Settings>("settings.json", { user: false, cwd: this.cwd });
+		return result?.content ?? {};
 	}
 
 	/** Apply additional overrides on top of current settings */

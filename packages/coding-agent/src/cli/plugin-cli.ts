@@ -1,10 +1,11 @@
 /**
  * Plugin CLI command handlers.
  *
- * Handles `pi plugin <command>` subcommands for plugin lifecycle management.
+ * Handles `omp plugin <command>` subcommands for plugin lifecycle management.
  */
 
 import chalk from "chalk";
+import { APP_NAME } from "../config";
 import { PluginManager, parseSettingValue, validateSetting } from "../core/plugins/index";
 
 // =============================================================================
@@ -153,12 +154,12 @@ async function handleInstall(
 	flags: { json?: boolean; force?: boolean; dryRun?: boolean },
 ): Promise<void> {
 	if (packages.length === 0) {
-		console.error(chalk.red("Usage: pi plugin install <package[@version]>[features] ..."));
+		console.error(chalk.red(`Usage: ${APP_NAME} plugin install <package[@version]>[features] ...`));
 		console.error(chalk.dim("Examples:"));
-		console.error(chalk.dim("  pi plugin install @oh-my-pi/exa"));
-		console.error(chalk.dim("  pi plugin install @oh-my-pi/exa[search,websets]"));
-		console.error(chalk.dim("  pi plugin install @oh-my-pi/exa[*]  # all features"));
-		console.error(chalk.dim("  pi plugin install @oh-my-pi/exa[]   # no optional features"));
+		console.error(chalk.dim(`  ${APP_NAME} plugin install @oh-my-pi/exa`));
+		console.error(chalk.dim(`  ${APP_NAME} plugin install @oh-my-pi/exa[search,websets]`));
+		console.error(chalk.dim(`  ${APP_NAME} plugin install @oh-my-pi/exa[*]  # all features`));
+		console.error(chalk.dim(`  ${APP_NAME} plugin install @oh-my-pi/exa[]   # no optional features`));
 		process.exit(1);
 	}
 
@@ -190,7 +191,7 @@ async function handleInstall(
 
 async function handleUninstall(manager: PluginManager, packages: string[], flags: { json?: boolean }): Promise<void> {
 	if (packages.length === 0) {
-		console.error(chalk.red("Usage: pi plugin uninstall <package> ..."));
+		console.error(chalk.red(`Usage: ${APP_NAME} plugin uninstall <package> ...`));
 		process.exit(1);
 	}
 
@@ -220,7 +221,7 @@ async function handleList(manager: PluginManager, flags: { json?: boolean }): Pr
 
 	if (plugins.length === 0) {
 		console.log(chalk.dim("No plugins installed"));
-		console.log(chalk.dim("\nInstall plugins with: pi plugin install <package>"));
+		console.log(chalk.dim(`\nInstall plugins with: ${APP_NAME} plugin install <package>`));
 		return;
 	}
 
@@ -254,7 +255,7 @@ async function handleList(manager: PluginManager, flags: { json?: boolean }): Pr
 
 async function handleLink(manager: PluginManager, paths: string[], flags: { json?: boolean }): Promise<void> {
 	if (paths.length === 0) {
-		console.error(chalk.red("Usage: pi plugin link <path>"));
+		console.error(chalk.red(`Usage: ${APP_NAME} plugin link <path>`));
 		process.exit(1);
 	}
 
@@ -313,7 +314,9 @@ async function handleFeatures(
 	flags: { json?: boolean; enable?: string; disable?: string; set?: string },
 ): Promise<void> {
 	if (args.length === 0) {
-		console.error(chalk.red("Usage: pi plugin features <plugin> [--enable f1,f2] [--disable f1] [--set f1,f2]"));
+		console.error(
+			chalk.red(`Usage: ${APP_NAME} plugin features <plugin> [--enable f1,f2] [--disable f1] [--set f1,f2]`),
+		);
 		process.exit(1);
 	}
 
@@ -404,7 +407,9 @@ async function handleConfig(
 	flags: { json?: boolean; local?: boolean },
 ): Promise<void> {
 	if (args.length === 0) {
-		console.error(chalk.red("Usage: pi plugin config <list|get|set|delete|validate> <plugin> [key] [value]"));
+		console.error(
+			chalk.red(`Usage: ${APP_NAME} plugin config <list|get|set|delete|validate> <plugin> [key] [value]`),
+		);
 		process.exit(1);
 	}
 
@@ -560,7 +565,7 @@ async function handleConfigValidate(manager: PluginManager, flags: { json?: bool
 
 async function handleEnable(manager: PluginManager, plugins: string[], flags: { json?: boolean }): Promise<void> {
 	if (plugins.length === 0) {
-		console.error(chalk.red("Usage: pi plugin enable <plugin> ..."));
+		console.error(chalk.red(`Usage: ${APP_NAME} plugin enable <plugin> ...`));
 		process.exit(1);
 	}
 
@@ -582,7 +587,7 @@ async function handleEnable(manager: PluginManager, plugins: string[], flags: { 
 
 async function handleDisable(manager: PluginManager, plugins: string[], flags: { json?: boolean }): Promise<void> {
 	if (plugins.length === 0) {
-		console.error(chalk.red("Usage: pi plugin disable <plugin> ..."));
+		console.error(chalk.red(`Usage: ${APP_NAME} plugin disable <plugin> ...`));
 		process.exit(1);
 	}
 
@@ -607,7 +612,7 @@ async function handleDisable(manager: PluginManager, plugins: string[], flags: {
 // =============================================================================
 
 export function printPluginHelp(): void {
-	console.log(`${chalk.bold("pi plugin")} - Plugin lifecycle management
+	console.log(`${chalk.bold(`${APP_NAME} plugin`)} - Plugin lifecycle management
 
 ${chalk.bold("Commands:")}
   install <pkg[@ver]>[features]  Install plugins from npm
@@ -641,10 +646,10 @@ ${chalk.bold("Options:")}
   -l, --local  Use project-local overrides
 
 ${chalk.bold("Examples:")}
-  pi plugin install @oh-my-pi/exa[search]
-  pi plugin list --json
-  pi plugin features my-plugin --enable search,web
-  pi plugin config set my-plugin apiKey sk-xxx
-  pi plugin doctor --fix
+  ${APP_NAME} plugin install @oh-my-pi/exa[search]
+  ${APP_NAME} plugin list --json
+  ${APP_NAME} plugin features my-plugin --enable search,web
+  ${APP_NAME} plugin config set my-plugin apiKey sk-xxx
+  ${APP_NAME} plugin doctor --fix
 `);
 }

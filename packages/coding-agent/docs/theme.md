@@ -1,6 +1,6 @@
-> pi can create themes. Ask it to build one for your use case.
+> omp can create themes. Ask it to build one for your use case.
 
-# Pi Coding Agent Themes
+# OMP Coding Agent Themes
 
 Themes allow you to customize the colors used throughout the coding agent TUI.
 
@@ -205,7 +205,7 @@ This is useful for:
 
 ## Built-in Themes
 
-Pi comes with two built-in themes:
+OMP comes with two built-in themes:
 
 ### `dark` (default)
 
@@ -227,26 +227,26 @@ Themes are configured in the settings (accessible via `/settings`):
 
 Or use the `/theme` command interactively.
 
-On first run, Pi detects your terminal's background and sets a sensible default (`dark` or `light`).
+On first run, OMP detects your terminal's background and sets a sensible default (`dark` or `light`).
 
 ## Custom Themes
 
 ### Theme Locations
 
-Custom themes are loaded from `~/.pi/agent/themes/*.json`.
+Custom themes are loaded from `~/.omp/agent/themes/*.json`.
 
 ### Creating a Custom Theme
 
 1. **Create theme directory:**
 
    ```bash
-   mkdir -p ~/.pi/agent/themes
+   mkdir -p ~/.omp/agent/themes
    ```
 
 2. **Create theme file:**
 
    ```bash
-   vim ~/.pi/agent/themes/my-theme.json
+   vim ~/.omp/agent/themes/my-theme.json
    ```
 
 3. **Define all colors:**
@@ -411,14 +411,14 @@ Example usage:
 
 ### Terminal Compatibility
 
-Pi uses 24-bit RGB colors (`\x1b[38;2;R;G;Bm`). Most modern terminals support this:
+OMP uses 24-bit RGB colors (`\x1b[38;2;R;G;Bm`). Most modern terminals support this:
 
 - ✅ iTerm2, Alacritty, Kitty, WezTerm
 - ✅ Windows Terminal
 - ✅ VS Code integrated terminal
 - ✅ Modern GNOME Terminal, Konsole
 
-For older terminals with only 256-color support, Pi automatically falls back to the nearest 256-color approximation.
+For older terminals with only 256-color support, OMP automatically falls back to the nearest 256-color approximation.
 
 To check if your terminal supports truecolor:
 

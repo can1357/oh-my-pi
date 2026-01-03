@@ -309,7 +309,7 @@ function convertWithMarkitdown(
 
 	// Write to temp file with extension hint
 	const ext = extensionHint || ".bin";
-	const tmpFile = path.join(os.tmpdir(), `pi-convert-${Date.now()}${ext}`);
+	const tmpFile = path.join(os.tmpdir(), `omp-convert-${Date.now()}${ext}`);
 
 	try {
 		fs.writeFileSync(tmpFile, content);
@@ -531,7 +531,7 @@ function parseFeedToMarkdown(content: string, maxItems = 10): string {
  * Render HTML to text using lynx
  */
 function renderWithLynx(html: string, timeout: number): { content: string; ok: boolean } {
-	const tmpFile = path.join(os.tmpdir(), `pi-render-${Date.now()}.html`);
+	const tmpFile = path.join(os.tmpdir(), `omp-render-${Date.now()}.html`);
 	try {
 		fs.writeFileSync(tmpFile, html);
 		// Convert path to file URL (handles Windows paths correctly)
@@ -712,7 +712,7 @@ async function fetchGitHubApi(endpoint: string, timeout: number): Promise<{ data
 
 		const headers: Record<string, string> = {
 			Accept: "application/vnd.github.v3+json",
-			"User-Agent": "pi-web-fetch/1.0",
+			"User-Agent": "omp-web-fetch/1.0",
 		};
 
 		// Use GITHUB_TOKEN if available

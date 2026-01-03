@@ -1,4 +1,4 @@
-> pi can create TUI components. Ask it to build one for your use case.
+> omp can create TUI components. Ask it to build one for your use case.
 
 # TUI Components
 

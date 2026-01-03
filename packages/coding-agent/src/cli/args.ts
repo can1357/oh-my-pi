@@ -153,8 +153,8 @@ ${chalk.bold("Usage:")}
 
 ${chalk.bold("Options:")}
   --model <pattern>              Model to use (fuzzy match: "opus", "gpt-5.2", or "p-openai/gpt-5.2")
-  --smol <id>                    Smol/fast model for lightweight tasks (or PI_SMOL_MODEL env)
-  --slow <id>                    Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)
+   --smol <id>                    Smol/fast model for lightweight tasks (or OMP_SMOL_MODEL env)
+   --slow <id>                    Slow/reasoning model for thorough analysis (or OMP_SLOW_MODEL env)
   --api-key <key>                API key (defaults to env vars)
   --system-prompt <text>         System prompt (default: coding assistant prompt)
   --append-system-prompt <text>  Append text or file contents to the system prompt

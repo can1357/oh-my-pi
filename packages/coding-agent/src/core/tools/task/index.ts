@@ -2,9 +2,9 @@
  * Task tool - Delegate tasks to specialized agents.
  *
  * Discovers agent definitions from:
- *   - Bundled agents (shipped with pi-coding-agent)
- *   - ~/.pi/agent/agents/*.md (user-level)
- *   - .pi/agents/*.md (project-level)
+ *   - Bundled agents (shipped with omp-coding-agent)
+ *   - ~/.omp/agent/agents/*.md (user-level)
+ *   - .omp/agents/*.md (project-level)
  *
  * Supports:
  *   - Single agent execution
@@ -25,8 +25,8 @@ import {
 	MAX_AGENTS_IN_DESCRIPTION,
 	MAX_CONCURRENCY,
 	MAX_PARALLEL_TASKS,
-	PI_BLOCKED_AGENT_ENV,
-	PI_NO_SUBAGENTS_ENV,
+	OMP_BLOCKED_AGENT_ENV,
+	OMP_NO_SUBAGENTS_ENV,
 	type TaskToolDetails,
 	taskSchema,
 } from "./types";
@@ -122,13 +122,13 @@ function buildDescription(cwd: string): string {
 		`- tasks: Array of {agent, task, model?} - tasks to run in parallel (max ${MAX_PARALLEL_TASKS}, ${MAX_CONCURRENCY} concurrent)`,
 	);
 	lines.push(
-		'  - model: (optional) Override the agent\'s default model with fuzzy matching (e.g., "sonnet", "codex", "5.2"). Supports comma-separated fallbacks: "gpt, opus" tries gpt first, then opus. Use "default" for pi\'s default model',
+		'  - model: (optional) Override the agent\'s default model with fuzzy matching (e.g., "sonnet", "codex", "5.2"). Supports comma-separated fallbacks: "gpt, opus" tries gpt first, then opus. Use "default" for omp\'s default model',
 	);
 	lines.push(
 		"- context: (optional) Shared context string prepended to all task prompts - use this to avoid repeating instructions",
 	);
 	lines.push("");
-	lines.push("Results are always written to {tempdir}/pi-task-{runId}/task_{agent}_{index}.md");
+	lines.push("Results are always written to {tempdir}/omp-task-{runId}/task_{agent}_{index}.md");
 	lines.push("");
 	lines.push("Example usage:");
 	lines.push("");
@@ -173,7 +173,7 @@ function buildDescription(cwd: string): string {
 	lines.push('    { "agent": "explore", "task": "Search in tests/" }');
 	lines.push("  ]");
 	lines.push("}");
-	lines.push("Results → {tempdir}/pi-task-{runId}/task_explore_*.md");
+	lines.push("Results → {tempdir}/omp-task-{runId}/task_explore_*.md");
 	lines.push("</example>");
 
 	return lines.join("\n");
@@ -189,7 +189,7 @@ export function createTaskTool(
 ): AgentTool<typeof taskSchema, TaskToolDetails, Theme> {
 	const hasOutputTool = options?.availableTools?.has("output") ?? false;
 	// Check if subagents are completely inhibited (legacy recursion prevention)
-	if (process.env[PI_NO_SUBAGENTS_ENV]) {
+	if (process.env[OMP_NO_SUBAGENTS_ENV]) {
 		return {
 			name: "task",
 			label: "Task",
@@ -207,7 +207,7 @@ export function createTaskTool(
 	}
 
 	// Check for same-agent blocking (allows other agent types)
-	const blockedAgent = process.env[PI_BLOCKED_AGENT_ENV];
+	const blockedAgent = process.env[OMP_BLOCKED_AGENT_ENV];
 
 	return {
 		name: "task",

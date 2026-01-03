@@ -18,19 +18,19 @@ jobs:
         include:
           - os: ubuntu-latest
             target: bun-linux-x64
-            artifact: pi-linux-x64
+            artifact: omp-linux-x64
           - os: ubuntu-latest
             target: bun-linux-arm64
-            artifact: pi-linux-arm64
+            artifact: omp-linux-arm64
           - os: macos-latest
             target: bun-darwin-x64
-            artifact: pi-darwin-x64
+            artifact: omp-darwin-x64
           - os: macos-latest
             target: bun-darwin-arm64
-            artifact: pi-darwin-arm64
+            artifact: omp-darwin-arm64
           - os: ubuntu-latest
             target: bun-windows-x64
-            artifact: pi-windows-x64.exe
+            artifact: omp-windows-x64.exe
 
     runs-on: ${{ matrix.os }}
 

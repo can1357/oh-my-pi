@@ -1,7 +1,7 @@
 /**
- * Centralized file logger for pi.
+ * Centralized file logger for omp.
  *
- * Logs to ~/.pi/logs/ with size-based rotation, supporting concurrent pi instances.
+ * Logs to ~/.omp/logs/ with size-based rotation, supporting concurrent omp instances.
  * Each log entry includes process.pid for traceability.
  */
 
@@ -12,7 +12,7 @@ import winston from "winston";
 import DailyRotateFile from "winston-daily-rotate-file";
 import { CONFIG_DIR_NAME } from "../config";
 
-/** Get the logs directory (~/.pi/logs/) */
+/** Get the logs directory (~/.omp/logs/) */
 function getLogsDir(): string {
 	return join(homedir(), CONFIG_DIR_NAME, "logs");
 }
@@ -49,7 +49,7 @@ const logFormat = winston.format.combine(
 /** Size-based rotating file transport */
 const fileTransport = new DailyRotateFile({
 	dirname: ensureLogsDir(),
-	filename: "pi.%DATE%.log",
+	filename: "omp.%DATE%.log",
 	datePattern: "YYYY-MM-DD",
 	maxSize: "10m",
 	maxFiles: 5,
@@ -73,10 +73,10 @@ export interface Logger {
 }
 
 /**
- * Centralized logger for pi.
+ * Centralized logger for omp.
  *
- * Logs to ~/.pi/logs/pi.YYYY-MM-DD.log with size-based rotation.
- * Safe for concurrent access from multiple pi instances.
+ * Logs to ~/.omp/logs/omp.YYYY-MM-DD.log with size-based rotation.
+ * Safe for concurrent access from multiple omp instances.
  *
  * @example
  * ```typescript

@@ -3,12 +3,12 @@
 	"version": "2.3.1337",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"type": "module",
-	"piConfig": {
-		"name": "pi",
-		"configDir": ".pi"
+	"ompConfig": {
+		"name": "omp",
+		"configDir": ".omp"
 	},
 	"bin": {
-		"pi": "src/cli.ts"
+		"omp": "src/cli.ts"
 	},
 	"main": "./src/index.ts",
 	"types": "./src/index.ts",
@@ -32,7 +32,7 @@
 		"check": "tsgo --noEmit",
 		"clean": "rm -rf dist",
 		"build": "tsgo -p tsconfig.build.json && chmod +x dist/cli.js",
-		"build:binary": "bun build --compile ./src/cli.ts --outfile dist/pi",
+		"build:binary": "bun build --compile ./src/cli.ts --outfile dist/omp",
 		"generate-template": "bun scripts/generate-template.ts",
 		"postinstall": "[ -f scripts/generate-template.ts ] && bun run generate-template || true",
 		"test": "bun test",

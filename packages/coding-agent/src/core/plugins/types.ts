@@ -115,7 +115,7 @@ export interface InstalledPlugin {
 }
 
 // =============================================================================
-// Runtime Config Types (stored in pi-plugins.lock.json)
+// Runtime Config Types (stored in omp-plugins.lock.json)
 // =============================================================================
 
 /**
@@ -131,7 +131,7 @@ export interface PluginRuntimeState {
 }
 
 /**
- * Runtime configuration persisted to pi-plugins.lock.json.
+ * Runtime configuration persisted to omp-plugins.lock.json.
  * Tracks plugin states and settings across sessions.
  */
 export interface PluginRuntimeConfig {
@@ -146,7 +146,7 @@ export interface PluginRuntimeConfig {
 // =============================================================================
 
 /**
- * Project-local plugin overrides (stored in .pi/plugin-overrides.json).
+ * Project-local plugin overrides (stored in .omp/plugin-overrides.json).
  * Allows per-project plugin configuration without modifying global state.
  */
 export interface ProjectPluginOverrides {

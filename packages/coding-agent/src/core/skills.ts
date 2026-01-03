@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "n
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { minimatch } from "minimatch";
-import { CONFIG_DIR_NAME, getAgentDir } from "../config";
+import { getAgentDir, getConfigDirPaths } from "../config";
 import type { SkillsSettings } from "./settings-manager";
 
 /**
@@ -331,7 +331,7 @@ function escapeXml(str: string): string {
 export interface LoadSkillsOptions extends SkillsSettings {
 	/** Working directory for project-local skills. Default: process.cwd() */
 	cwd?: string;
-	/** Agent config directory for global skills. Default: ~/.pi/agent */
+	/** Agent config directory for global skills. Default: ~/.omp/agent */
 	agentDir?: string;
 }
 
@@ -424,7 +424,9 @@ export function loadSkills(options: LoadSkillsOptions = {}): LoadSkillsResult {
 		addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", "recursive"));
 	}
 	if (enablePiProject) {
-		addSkills(loadSkillsFromDirInternal(resolve(cwd, CONFIG_DIR_NAME, "skills"), "project", "recursive"));
+		for (const dir of getConfigDirPaths("skills", { user: false, cwd, existingOnly: true })) {
+			addSkills(loadSkillsFromDirInternal(dir, "project", "recursive"));
+		}
 	}
 	for (const customDir of customDirectories) {
 		addSkills(loadSkillsFromDirInternal(customDir.replace(/^~(?=$|[\\/])/, homedir()), "custom", "recursive"));

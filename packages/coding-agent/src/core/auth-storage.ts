@@ -15,6 +15,7 @@ import {
 	type OAuthCredentials,
 	type OAuthProvider,
 } from "@oh-my-pi/pi-ai";
+import { logger } from "./logger";
 
 export type ApiKeyCredential = {
 	type: "api_key";
@@ -31,13 +32,21 @@ export type AuthStorageData = Record<string, AuthCredential>;
 
 /**
  * Credential storage backed by a JSON file.
+ * Reads from multiple fallback paths, writes to primary path.
  */
 export class AuthStorage {
 	private data: AuthStorageData = {};
 	private runtimeOverrides: Map<string, string> = new Map();
 	private fallbackResolver?: (provider: string) => string | undefined;
 
-	constructor(private authPath: string) {
+	/**
+	 * @param authPath - Primary path for reading/writing auth.json
+	 * @param fallbackPaths - Additional paths to check when reading (legacy support)
+	 */
+	constructor(
+		private authPath: string,
+		private fallbackPaths: string[] = [],
+	) {
 		this.reload();
 	}
 
@@ -66,17 +75,31 @@ export class AuthStorage {
 
 	/**
 	 * Reload credentials from disk.
+	 * Checks primary path first, then fallback paths.
 	 */
 	reload(): void {
-		if (!existsSync(this.authPath)) {
-			this.data = {};
-			return;
+		const pathsToCheck = [this.authPath, ...this.fallbackPaths];
+
+		logger.debug("AuthStorage.reload checking paths", { paths: pathsToCheck });
+
+		for (const authPath of pathsToCheck) {
+			const exists = existsSync(authPath);
+			logger.debug("AuthStorage.reload path check", { path: authPath, exists });
+
+			if (exists) {
+				try {
+					this.data = JSON.parse(readFileSync(authPath, "utf-8"));
+					logger.debug("AuthStorage.reload loaded", { path: authPath, providers: Object.keys(this.data) });
+					return;
+				} catch (e) {
+					logger.error("AuthStorage failed to parse auth file", { path: authPath, error: String(e) });
+					// Continue to next path on parse error
+				}
+			}
 		}
-		try {
-			this.data = JSON.parse(readFileSync(this.authPath, "utf-8"));
-		} catch {
-			this.data = {};
-		}
+
+		logger.warn("AuthStorage no auth file found", { checkedPaths: pathsToCheck });
+		this.data = {};
 	}
 
 	/**

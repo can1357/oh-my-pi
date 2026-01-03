@@ -1,10 +1,10 @@
-> pi can create skills. Ask it to build one for your use case.
+> omp can create skills. Ask it to build one for your use case.
 
 # Skills
 
 Skills are self-contained capability packages that the agent loads on-demand. A skill provides specialized workflows, setup instructions, helper scripts, and reference documentation for specific tasks.
 
-Pi implements the [Agent Skills standard](https://agentskills.io/specification).
+OMP implements the [Agent Skills standard](https://agentskills.io/specification).
 
 **Example use cases:**
 - Web search and content extraction (Brave Search API)
@@ -144,12 +144,12 @@ Skills are discovered from these locations (later wins on name collision):
 1. `~/.codex/skills/**/SKILL.md` (Codex CLI, recursive)
 2. `~/.claude/skills/*/SKILL.md` (Claude Code user, one level)
 3. `<cwd>/.claude/skills/*/SKILL.md` (Claude Code project, one level)
-4. `~/.pi/agent/skills/**/SKILL.md` (Pi user, recursive)
-5. `<cwd>/.pi/skills/**/SKILL.md` (Pi project, recursive)
+4. `~/.omp/agent/skills/**/SKILL.md` (OMP user, recursive)
+5. `<cwd>/.omp/skills/**/SKILL.md` (OMP project, recursive)
 
 ## Configuration
 
-Configure skill loading in `~/.pi/agent/settings.json`:
+Configure skill loading in `~/.omp/agent/settings.json`:
 
 ```json
 {
@@ -173,8 +173,8 @@ Configure skill loading in `~/.pi/agent/settings.json`:
 | `enableCodexUser` | `true` | Load from `~/.codex/skills/` |
 | `enableClaudeUser` | `true` | Load from `~/.claude/skills/` |
 | `enableClaudeProject` | `true` | Load from `<cwd>/.claude/skills/` |
-| `enablePiUser` | `true` | Load from `~/.pi/agent/skills/` |
-| `enablePiProject` | `true` | Load from `<cwd>/.pi/skills/` |
+| `enableOmpUser` | `true` | Load from `~/.omp/agent/skills/` |
+| `enableOmpProject` | `true` | Load from `<cwd>/.omp/skills/` |
 | `customDirectories` | `[]` | Additional directories to scan (supports `~` expansion) |
 | `ignoredSkills` | `[]` | Glob patterns to exclude (e.g., `["deprecated-*", "test-skill"]`) |
 | `includeSkills` | `[]` | Glob patterns to include (empty = all; e.g., `["git-*", "docker"]`) |
@@ -187,20 +187,20 @@ Use `--skills` to filter skills for a specific invocation:
 
 ```bash
 # Only load specific skills
-pi --skills git,docker
+omp --skills git,docker
 
 # Glob patterns
-pi --skills "git-*,docker-*"
+omp --skills "git-*,docker-*"
 
 # All skills matching a prefix
-pi --skills "aws-*"
+omp --skills "aws-*"
 ```
 
 This overrides the `includeSkills` setting for the current session.
 
 ## How Skills Work
 
-1. At startup, pi scans skill locations and extracts names + descriptions
+1. At startup, omp scans skill locations and extracts names + descriptions
 2. The system prompt includes available skills in XML format
 3. When a task matches, the agent uses `read` to load the full SKILL.md
 4. The agent follows the instructions, using relative paths to reference scripts/assets
@@ -209,7 +209,7 @@ This is progressive disclosure: only descriptions are always in context, full in
 
 ## Validation Warnings
 
-Pi validates skills against the Agent Skills standard and warns (but still loads) non-compliant skills:
+OMP validates skills against the Agent Skills standard and warns (but still loads) non-compliant skills:
 
 - Name doesn't match parent directory
 - Name exceeds 64 characters
@@ -260,9 +260,9 @@ cd /path/to/brave-search && npm install
 
 ## Compatibility
 
-**Claude Code**: Pi reads skills from `~/.claude/skills/*/SKILL.md`. The `allowed-tools` and `model` frontmatter fields are ignored.
+**Claude Code**: OMP reads skills from `~/.claude/skills/*/SKILL.md`. The `allowed-tools` and `model` frontmatter fields are ignored.
 
-**Codex CLI**: Pi reads skills from `~/.codex/skills/` recursively. Hidden files/directories and symlinks are skipped.
+**Codex CLI**: OMP reads skills from `~/.codex/skills/` recursively. Hidden files/directories and symlinks are skipped.
 
 ## Skill Repositories
 
@@ -275,10 +275,10 @@ For inspiration and ready-to-use skills:
 
 CLI:
 ```bash
-pi --no-skills
+omp --no-skills
 ```
 
-Settings (`~/.pi/agent/settings.json`):
+Settings (`~/.omp/agent/settings.json`):
 ```json
 {
   "skills": {

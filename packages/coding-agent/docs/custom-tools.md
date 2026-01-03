@@ -1,4 +1,4 @@
-> pi can create custom tools. Ask it to build one for your use case.
+> omp can create custom tools. Ask it to build one for your use case.
 
 # Custom Tools
 
@@ -32,7 +32,7 @@ See [examples/custom-tools/](../examples/custom-tools/) for working examples.
 
 ## Quick Start
 
-Create a file `~/.pi/agent/tools/hello/index.ts`:
+Create a file `~/.omp/agent/tools/hello/index.ts`:
 
 ```typescript
 import type { CustomToolFactory } from "@oh-my-pi/pi-coding-agent";
@@ -57,7 +57,7 @@ const factory: CustomToolFactory = (pi) => ({
 export default factory;
 ```
 
-The tool is automatically discovered and available in your next pi session.
+The tool is automatically discovered and available in your next omp session.
 
 ## Tool Locations
 
@@ -65,15 +65,15 @@ Tools must be in a subdirectory with an `index.ts` entry point:
 
 | Location                            | Scope                 | Auto-discovered |
 | ----------------------------------- | --------------------- | --------------- |
-| `~/.pi/agent/tools/*/index.ts`      | Global (all projects) | Yes             |
-| `.pi/tools/*/index.ts`              | Project-local         | Yes             |
+| `~/.omp/agent/tools/*/index.ts`      | Global (all projects) | Yes             |
+| `.omp/tools/*/index.ts`              | Project-local         | Yes             |
 | `settings.json` `customTools` array | Configured paths      | Yes             |
 | `--tool <path>` CLI flag            | One-off/debugging     | No              |
 
 **Example structure:**
 
 ```
-~/.pi/agent/tools/
+~/.omp/agent/tools/
 ├── hello/
 │   └── index.ts        # Entry point (auto-discovered)
 └── complex-tool/
@@ -222,7 +222,7 @@ async execute(toolCallId, params, onUpdate, ctx, signal) {
 async execute(toolCallId, params, onUpdate, ctx, signal) {
   const { path } = params as { path: string };
 
-  // Throw on error - pi will catch it and report to the LLM
+  // Throw on error - omp will catch it and report to the LLM
   if (!fs.existsSync(path)) {
     throw new Error(`File not found: ${path}`);
   }
@@ -537,5 +537,5 @@ See [`examples/custom-tools/todo/index.ts`](../examples/custom-tools/todo/index.
 Test with:
 
 ```bash
-pi --tool packages/coding-agent/examples/custom-tools/todo/index.ts
+omp --tool packages/coding-agent/examples/custom-tools/todo/index.ts
 ```

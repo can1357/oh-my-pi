@@ -26,13 +26,13 @@ function isExecutable(path: string): boolean {
  * Build the spawn environment (cached).
  */
 function buildSpawnEnv(shell: string): Record<string, string | undefined> {
-	const noCI = process.env.PI_BASH_NO_CI || process.env.CLAUDE_BASH_NO_CI;
+	const noCI = process.env.OMP_BASH_NO_CI || process.env.CLAUDE_BASH_NO_CI;
 	return {
 		...process.env,
 		SHELL: shell,
 		GIT_EDITOR: "true",
 		GPG_TTY: "not a tty",
-		PICODE: "1",
+		OMPCODE: "1",
 		CLAUDECODE: "1",
 		...(noCI ? {} : { CI: "true" }),
 	};
@@ -40,10 +40,10 @@ function buildSpawnEnv(shell: string): Record<string, string | undefined> {
 
 /**
  * Get shell args, optionally including login shell flag.
- * Supports PI_BASH_NO_LOGIN and CLAUDE_BASH_NO_LOGIN to skip -l.
+ * Supports OMP_BASH_NO_LOGIN and CLAUDE_BASH_NO_LOGIN to skip -l.
  */
 function getShellArgs(): string[] {
-	const noLogin = process.env.PI_BASH_NO_LOGIN || process.env.CLAUDE_BASH_NO_LOGIN;
+	const noLogin = process.env.OMP_BASH_NO_LOGIN || process.env.CLAUDE_BASH_NO_LOGIN;
 	return noLogin ? ["-c"] : ["-l", "-c"];
 }
 
@@ -51,7 +51,7 @@ function getShellArgs(): string[] {
  * Get shell prefix for wrapping commands (profilers, strace, etc.).
  */
 function getShellPrefix(): string | undefined {
-	return process.env.PI_SHELL_PREFIX || process.env.CLAUDE_CODE_SHELL_PREFIX;
+	return process.env.OMP_SHELL_PREFIX || process.env.CLAUDE_CODE_SHELL_PREFIX;
 }
 
 /**
@@ -107,7 +107,7 @@ export function getShellConfig(): ShellConfig {
 			return cachedShellConfig;
 		}
 		throw new Error(
-			`Custom shell path not found: ${customShellPath}\nPlease update shellPath in ~/.pi/agent/settings.json`,
+			`Custom shell path not found: ${customShellPath}\nPlease update shellPath in ~/.omp/agent/settings.json`,
 		);
 	}
 
@@ -141,7 +141,7 @@ export function getShellConfig(): ShellConfig {
 			`No bash shell found. Options:\n` +
 				`  1. Install Git for Windows: https://git-scm.com/download/win\n` +
 				`  2. Add your bash to PATH (Cygwin, MSYS2, etc.)\n` +
-				`  3. Set shellPath in ~/.pi/agent/settings.json\n\n` +
+				`  3. Set shellPath in ~/.omp/agent/settings.json\n\n` +
 				`Searched Git Bash in:\n${paths.map((p) => `  ${p}`).join("\n")}`,
 		);
 	}

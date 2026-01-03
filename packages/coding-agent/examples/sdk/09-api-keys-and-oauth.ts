@@ -13,8 +13,8 @@ import {
 	SessionManager,
 } from "@oh-my-pi/pi-coding-agent";
 
-// Default: discoverAuthStorage() uses ~/.pi/agent/auth.json
-// discoverModels() loads built-in + custom models from ~/.pi/agent/models.json
+// Default: discoverAuthStorage() uses ~/.omp/agent/auth.json
+// discoverModels() loads built-in + custom models from ~/.omp/agent/models.json
 const authStorage = discoverAuthStorage();
 const modelRegistry = discoverModels(authStorage);
 

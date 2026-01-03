@@ -1,15 +1,15 @@
 # Hooks Examples
 
-Example hooks for pi-coding-agent.
+Example hooks for omp-coding-agent.
 
 ## Usage
 
 ```bash
 # Load a hook with --hook flag
-pi --hook examples/hooks/permission-gate.ts
+omp --hook examples/hooks/permission-gate.ts
 
 # Or copy to hooks directory for auto-discovery
-cp permission-gate.ts ~/.pi/agent/hooks/
+cp permission-gate.ts ~/.omp/agent/hooks/
 ```
 
 ## Examples

@@ -1,7 +1,7 @@
 /**
  * Subagent Tool - Delegate tasks to specialized agents
  *
- * Spawns a separate `pi` process for each subagent invocation,
+ * Spawns a separate `omp` process for each subagent invocation,
  * giving it an isolated context window.
  *
  * Supports three modes:
@@ -205,7 +205,7 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 }
 
 function writePromptToTempFile(agentName: string, prompt: string): { dir: string; filePath: string } {
-	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-"));
+	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-subagent-"));
 	const safeName = agentName.replace(/[^\w.-]+/g, "_");
 	const filePath = path.join(tmpDir, `prompt-${safeName}.md`);
 	fs.writeFileSync(filePath, prompt, { encoding: "utf-8", mode: 0o600 });
@@ -280,7 +280,7 @@ async function runSingleAgent(
 		let wasAborted = false;
 
 		const exitCode = await new Promise<number>((resolve) => {
-			const proc = Bun.spawn(["pi", ...args], {
+			const proc = Bun.spawn(["omp", ...args], {
 				cwd: cwd ?? pi.cwd,
 				stdin: "ignore",
 				stdout: "pipe",
@@ -440,8 +440,8 @@ const factory: CustomToolFactory = (pi) => {
 			return [
 				"Delegate tasks to specialized subagents with isolated context.",
 				"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
-				'Default agent scope is "user" (from ~/.pi/agent/agents).',
-				'To enable project-local agents in .pi/agents, set agentScope: "both" (or "project").',
+				'Default agent scope is "user" (from ~/.omp/agent/agents).',
+				'To enable project-local agents in .omp/agents, set agentScope: "both" (or "project").',
 				`User agents: ${userList.text}${userSuffix}.`,
 				`Project agents${projectDirNote}: ${projectList.text}${projectSuffix}.`,
 			].join(" ");

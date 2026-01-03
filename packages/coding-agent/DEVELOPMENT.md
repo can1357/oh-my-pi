@@ -61,7 +61,7 @@ src/
 │   ├── session-manager.ts    # SessionManager class - JSONL persistence
 │   ├── settings-manager.ts   # SettingsManager class - user preferences
 │   ├── skills.ts             # loadSkills(), skill discovery from multiple locations
-│   ├── slash-commands.ts     # loadSlashCommands() from ~/.pi/agent/commands/
+│   ├── slash-commands.ts     # loadSlashCommands() from ~/.omp/agent/commands/
 │   ├── system-prompt.ts      # buildSystemPrompt(), loadProjectContextFiles()
 │   │
 │   ├── oauth/                # OAuth authentication (thin wrapper)
@@ -198,7 +198,7 @@ Handles user preferences:
 
 Extensibility layer for intercepting agent behavior:
 
-- **loader.ts**: Discovers and loads hooks from `~/.pi/agent/hooks/`, `.pi/hooks/`, and CLI
+- **loader.ts**: Discovers and loads hooks from `~/.omp/agent/hooks/`, `.omp/hooks/`, and CLI
 - **runner.ts**: Dispatches events to registered hooks
 - **tool-wrapper.ts**: Wraps tools to emit `tool_call` and `tool_result` events
 - **types.ts**: Event types (`session`, `tool_call`, `tool_result`, `message`, `error`)
@@ -209,7 +209,7 @@ See [docs/hooks.md](docs/hooks.md) for full documentation.
 
 System for adding LLM-callable tools:
 
-- **loader.ts**: Discovers and loads tools from `~/.pi/agent/tools/`, `.pi/tools/`, and CLI
+- **loader.ts**: Discovers and loads tools from `~/.omp/agent/tools/`, `.omp/tools/`, and CLI
 - **types.ts**: `CustomToolFactory`, `CustomToolDefinition`, `CustomToolResult`
 
 See [docs/custom-tools.md](docs/custom-tools.md) for full documentation.

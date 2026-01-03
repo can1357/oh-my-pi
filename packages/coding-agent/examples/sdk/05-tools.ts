@@ -82,7 +82,7 @@ session.subscribe((event) => {
 await session.prompt("What's the weather in Tokyo?");
 console.log();
 
-// Merge with discovered tools from cwd/.pi/tools and ~/.pi/agent/tools:
+// Merge with discovered tools from cwd/.omp/tools and ~/.omp/agent/tools:
 // const discovered = await discoverCustomTools();
 // customTools: [...discovered, { tool: myTool }]
 

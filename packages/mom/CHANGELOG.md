@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Updated configuration directory from `~/.pi/mom/` to `~/.omp/mom/` for auth and custom tools
 
 ## [2.3.1337] - 2026-01-03
 
@@ -60,7 +63,7 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 
 ### Added
 
-- Support for OAuth login via coding agent's `/login` command (link `~/.pi/agent/auth.json` to `~/.pi/mom/auth.json`)
+- Support for OAuth login via coding agent's `/login` command (link `~/.omp/agent/auth.json` to `~/.omp/mom/auth.json`)
 
 ## [0.20.2] - 2025-12-13
 

@@ -52,7 +52,7 @@ export class PluginListComponent extends Container {
 		if (plugins.length === 0) {
 			this.addChild(new Text(theme.fg("muted", "  No plugins installed"), 0, 0));
 			this.addChild(new Spacer(1));
-			this.addChild(new Text(theme.fg("dim", "  Install with: pi plugin install <package>"), 0, 0));
+			this.addChild(new Text(theme.fg("dim", "  Install with: omp plugin install <package>"), 0, 0));
 			this.addChild(new Spacer(1));
 			this.addChild(new DynamicBorder());
 

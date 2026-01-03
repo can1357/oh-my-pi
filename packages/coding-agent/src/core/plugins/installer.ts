@@ -39,7 +39,7 @@ export async function installPlugin(packageName: string): Promise<InstalledPlugi
 	// Initialize package.json if it doesn't exist
 	const pkgJsonPath = join(PLUGINS_DIR, "package.json");
 	if (!(await Bun.file(pkgJsonPath).exists())) {
-		await Bun.write(pkgJsonPath, JSON.stringify({ name: "pi-plugins", private: true, dependencies: {} }, null, 2));
+		await Bun.write(pkgJsonPath, JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }, null, 2));
 	}
 
 	// Run npm install in plugins directory

@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as typebox from "@sinclair/typebox";
-import { getAgentDir } from "../../config";
+import { getAgentDir, getConfigDirPaths } from "../../config";
 import * as piCodingAgent from "../../index";
 import { theme } from "../../modes/interactive/theme/theme";
 import type { ExecOptions } from "../exec";
@@ -202,8 +202,8 @@ function discoverToolsInDir(dir: string): string[] {
 /**
  * Discover and load tools from standard locations:
  * 1. agentDir/tools/*.ts (global)
- * 2. cwd/.pi/tools/*.ts (project-local)
- * 3. Installed plugins (~/.pi/plugins/node_modules/*)
+ * 2. cwd/{.omp,.pi,.claude}/tools/*.ts (project-local, with fallbacks)
+ * 3. Installed plugins (~/.omp/plugins/node_modules/*)
  *
  * Plus any explicitly configured paths from settings or CLI.
  *
@@ -236,11 +236,12 @@ export async function discoverAndLoadCustomTools(
 	const globalToolsDir = path.join(agentDir, "tools");
 	addPaths(discoverToolsInDir(globalToolsDir));
 
-	// 2. Project-local tools: cwd/.pi/tools/
-	const localToolsDir = path.join(cwd, ".pi", "tools");
-	addPaths(discoverToolsInDir(localToolsDir));
+	// 2. Project-local tools: cwd/{.omp,.pi,.claude}/tools/
+	for (const localToolsDir of getConfigDirPaths("tools", { user: false, cwd })) {
+		addPaths(discoverToolsInDir(localToolsDir));
+	}
 
-	// 3. Plugin tools: ~/.pi/plugins/node_modules/*/
+	// 3. Plugin tools: ~/.omp/plugins/node_modules/*/
 	addPaths(getAllPluginToolPaths(cwd));
 
 	// 4. Explicitly configured paths (can override/add)

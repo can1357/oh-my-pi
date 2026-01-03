@@ -84,7 +84,7 @@ export async function writeArtifacts(
  */
 export function createTempArtifactsDir(runId?: string): string {
 	const id = runId || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-	const dir = path.join(os.tmpdir(), `pi-task-${id}`);
+	const dir = path.join(os.tmpdir(), `omp-task-${id}`);
 	ensureArtifactsDir(dir);
 	return dir;
 }

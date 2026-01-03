@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as typebox from "@sinclair/typebox";
-import { CONFIG_DIR_NAME, getAgentDir } from "../../config";
+import { getAgentDir, getConfigDirPaths } from "../../config";
 import * as piCodingAgent from "../../index";
 import { execCommand } from "../exec";
 import { createReviewCommand } from "./bundled/review";
@@ -105,7 +105,7 @@ export interface DiscoverCustomCommandsResult {
 /**
  * Discover custom command modules from standard locations:
  * - agentDir/commands/[name]/index.ts (user)
- * - cwd/.pi/commands/[name]/index.ts (project)
+ * - cwd/.omp/commands/[name]/index.ts (project)
  */
 export function discoverCustomCommands(options: DiscoverCustomCommandsOptions = {}): DiscoverCustomCommandsResult {
 	const cwd = options.cwd ?? process.cwd();
@@ -128,9 +128,10 @@ export function discoverCustomCommands(options: DiscoverCustomCommandsOptions = 
 	const userCommandsDir = path.join(agentDir, "commands");
 	addPaths(discoverCommandsInDir(userCommandsDir), "user");
 
-	// 2. Project commands: cwd/.pi/commands/
-	const projectCommandsDir = path.join(cwd, CONFIG_DIR_NAME, "commands");
-	addPaths(discoverCommandsInDir(projectCommandsDir), "project");
+	// 2. Project commands: cwd/{.omp,.pi,.claude}/commands/
+	for (const projectCommandsDir of getConfigDirPaths("commands", { user: false, cwd })) {
+		addPaths(discoverCommandsInDir(projectCommandsDir), "project");
+	}
 
 	return { paths };
 }

@@ -11,7 +11,7 @@ import {
 	SessionManager,
 } from "@oh-my-pi/pi-coding-agent";
 
-// Discover commands from cwd/.pi/commands/ and ~/.pi/agent/commands/
+// Discover commands from cwd/.omp/commands/ and ~/.omp/agent/commands/
 const discovered = discoverSlashCommands();
 console.log("Discovered slash commands:");
 for (const cmd of discovered) {

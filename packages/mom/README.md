@@ -64,7 +64,7 @@ export MOM_SLACK_APP_TOKEN=xapp-...
 export MOM_SLACK_BOT_TOKEN=xoxb-...
 # Option 1: Anthropic API key
 export ANTHROPIC_API_KEY=sk-ant-...
-# Option 2: use /login command in pi agent, then copy/link auth.json to ~/.pi/mom/
+# Option 2: use /login command in omp agent, then copy/link auth.json to ~/.omp/mom/
 
 # Create Docker sandbox (recommended)
 docker run -d \
@@ -113,7 +113,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 - enter `/login` command
   - choose "Anthropic" provider
   - follow instructions in the browser
-- link `auth.json` to mom: `ln -s ~/.pi/agent/auth.json ~/.pi/mom/auth.json`
+- link `auth.json` to mom: `ln -s ~/.omp/agent/auth.json ~/.omp/mom/auth.json`
 
 ## How Mom Works
 

@@ -186,7 +186,7 @@ async function executeWebSearch(
 	}
 }
 
-const WEB_SEARCH_DESCRIPTION = `Allows Pi to search the web and use the results to inform responses
+const WEB_SEARCH_DESCRIPTION = `Allows OMP to search the web and use the results to inform responses
 - Provides up-to-date information for current events and recent data
 - Returns search result information formatted as search result blocks, including links as markdown hyperlinks
 - Use this tool for accessing information beyond Claude's knowledge cutoff

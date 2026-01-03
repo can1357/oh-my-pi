@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { CONFIG_DIR_NAME, getCommandsDir } from "../config";
+import { getCommandsDir, getConfigDirPaths } from "../config";
 import { logger } from "./logger";
 
 /**
@@ -190,8 +190,8 @@ export interface LoadSlashCommandsOptions {
  * 1. Builtin: package commands/
  * 2. Claude user: ~/.claude/commands/
  * 3. Claude project: .claude/commands/
- * 4. Pi user: agentDir/commands/
- * 5. Pi project: cwd/{CONFIG_DIR_NAME}/commands/
+ * 4. OMP user: agentDir/commands/
+ * 5. OMP project: cwd/.omp/commands/ (and legacy .pi/commands/)
  *
  * First occurrence wins (earlier sources have priority).
  */
@@ -231,13 +231,14 @@ export function loadSlashCommands(options: LoadSlashCommandsOptions = {}): FileS
 		addCommands(loadCommandsFromDir(claudeProjectDir, "claude-project"));
 	}
 
-	// 4. Pi user commands (agentDir/commands/)
+	// 4. OMP user commands (agentDir/commands/)
 	const globalCommandsDir = options.agentDir ? join(options.agentDir, "commands") : resolvedAgentDir;
 	addCommands(loadCommandsFromDir(globalCommandsDir, "user"));
 
-	// 5. Pi project commands (cwd/{CONFIG_DIR_NAME}/commands/)
-	const projectCommandsDir = resolve(resolvedCwd, CONFIG_DIR_NAME, "commands");
-	addCommands(loadCommandsFromDir(projectCommandsDir, "project"));
+	// 5. OMP project commands (cwd/.omp/commands/ and legacy .pi/commands/)
+	for (const dir of getConfigDirPaths("commands", { user: false, cwd: resolvedCwd })) {
+		addCommands(loadCommandsFromDir(dir, "project"));
+	}
 
 	return commands;
 }

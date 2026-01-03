@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-# Pi Coding Agent Installer
+# OMP Coding Agent Installer
 # Usage: curl -fsSL https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.sh | sh
 #
 # Options:
@@ -9,8 +9,8 @@ set -e
 #   --binary  Always install prebuilt binary
 
 REPO="can1357/oh-my-pi"
-PACKAGE="@oh-my-pi/pi-coding-agent"
-INSTALL_DIR="${PI_INSTALL_DIR:-$HOME/.local/bin}"
+PACKAGE="@oh-my-pi/omp-coding-agent"
+INSTALL_DIR="${OMP_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Parse arguments
 MODE=""
@@ -39,8 +39,8 @@ install_via_bun() {
     echo "Installing via bun..."
     bun install -g "$PACKAGE"
     echo ""
-    echo "✓ Installed pi via bun"
-    echo "Run 'pi' to get started!"
+    echo "✓ Installed omp via bun"
+    echo "Run 'omp' to get started!"
 }
 
 # Install binary from GitHub releases
@@ -61,7 +61,7 @@ install_binary() {
         *)             echo "Unsupported architecture: $ARCH"; exit 1 ;;
     esac
 
-    BINARY="pi-${PLATFORM}-${ARCH}"
+    BINARY="omp-${PLATFORM}-${ARCH}"
 
     # Get latest release tag
     echo "Fetching latest release..."
@@ -77,16 +77,16 @@ install_binary() {
     echo "Downloading ${BINARY}..."
 
     mkdir -p "$INSTALL_DIR"
-    curl -fsSL "$URL" -o "${INSTALL_DIR}/pi"
-    chmod +x "${INSTALL_DIR}/pi"
+    curl -fsSL "$URL" -o "${INSTALL_DIR}/omp"
+    chmod +x "${INSTALL_DIR}/omp"
 
     echo ""
-    echo "✓ Installed pi to ${INSTALL_DIR}/pi"
+    echo "✓ Installed omp to ${INSTALL_DIR}/omp"
 
     # Check if in PATH
     case ":$PATH:" in
-        *":$INSTALL_DIR:"*) echo "Run 'pi' to get started!" ;;
-        *) echo "Add ${INSTALL_DIR} to your PATH, then run 'pi'" ;;
+        *":$INSTALL_DIR:"*) echo "Run 'omp' to get started!" ;;
+        *) echo "Add ${INSTALL_DIR} to your PATH, then run 'omp'" ;;
     esac
 }
 

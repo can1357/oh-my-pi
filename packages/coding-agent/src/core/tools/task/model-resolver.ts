@@ -8,19 +8,17 @@
  *   - Fuzzy match: "opus" → "p-anthropic/claude-opus-4-5"
  *   - Comma fallback: "gpt, opus" → tries gpt first, then opus
  *   - "default" → undefined (use system default)
- *   - "pi/slow" → configured slow model from settings
+ *   - "omp/slow" → configured slow model from settings
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { readConfigFile } from "../../../config";
 
-/** pi command: 'pi.cmd' on Windows, 'pi' elsewhere */
-const PI_CMD = process.platform === "win32" ? "pi.cmd" : "pi";
+/** omp command: 'omp.cmd' on Windows, 'omp' elsewhere */
+const OMP_CMD = process.platform === "win32" ? "omp.cmd" : "omp";
 
 /** Windows shell option for spawn/spawnSync */
-const PI_SHELL_OPT = process.platform === "win32";
+const OMP_SHELL_OPT = process.platform === "win32";
 
 /** Cache for available models (provider/modelId format) */
 let cachedModels: string[] | null = null;
@@ -31,7 +29,7 @@ let cacheExpiry = 0;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 /**
- * Get available models from `pi --list-models`.
+ * Get available models from `omp --list-models`.
  * Returns models in "provider/modelId" format.
  * Caches the result for performance.
  */
@@ -42,10 +40,10 @@ export function getAvailableModels(): string[] {
 	}
 
 	try {
-		const result = spawnSync(PI_CMD, ["--list-models"], {
+		const result = spawnSync(OMP_CMD, ["--list-models"], {
 			encoding: "utf-8",
 			timeout: 5000,
-			shell: PI_SHELL_OPT,
+			shell: OMP_SHELL_OPT,
 		});
 
 		if (result.status !== 0 || !result.stdout) {
@@ -82,27 +80,24 @@ export function clearModelCache(): void {
 	cacheExpiry = 0;
 }
 
-/**
- * Load model roles from settings file.
- */
-function loadModelRoles(): Record<string, string> {
-	try {
-		const settingsPath = join(homedir(), ".pi", "agent", "settings.json");
-		if (!existsSync(settingsPath)) return {};
-		const content = readFileSync(settingsPath, "utf-8");
-		const settings = JSON.parse(content);
-		return settings.modelRoles ?? {};
-	} catch {
-		return {};
-	}
+interface SettingsWithRoles {
+	modelRoles?: Record<string, string>;
 }
 
 /**
- * Resolve a pi/<role> alias to a model string.
+ * Load model roles from settings file (checks .omp first, then .pi fallback).
+ */
+function loadModelRoles(): Record<string, string> {
+	const result = readConfigFile<SettingsWithRoles>("settings.json", { project: false });
+	return result?.content.modelRoles ?? {};
+}
+
+/**
+ * Resolve an omp/<role> alias to a model string.
  * Looks up the role in settings.modelRoles and returns the configured model.
  * Returns undefined if the role isn't configured.
  */
-function resolvePiAlias(role: string, availableModels: string[]): string | undefined {
+function resolveOmpAlias(role: string, availableModels: string[]): string | undefined {
 	const roles = loadModelRoles();
 
 	// Look up role in settings (case-insensitive)
@@ -148,10 +143,10 @@ export function resolveModelPattern(pattern: string | undefined, availableModels
 		.filter(Boolean);
 
 	for (const p of patterns) {
-		// Handle pi/<role> aliases - looks up role in settings.modelRoles
-		if (p.toLowerCase().startsWith("pi/")) {
-			const role = p.slice(3); // Remove "pi/" prefix
-			const resolved = resolvePiAlias(role, models);
+		// Handle omp/<role> aliases - looks up role in settings.modelRoles
+		if (p.toLowerCase().startsWith("omp/")) {
+			const role = p.slice(4); // Remove "omp/" prefix
+			const resolved = resolveOmpAlias(role, models);
 			if (resolved) return resolved;
 			continue; // Role not configured, try next pattern
 		}

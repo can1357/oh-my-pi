@@ -30,7 +30,7 @@ const CONNECTION_TIMEOUT_MS = 30_000;
 
 /** Client info sent during initialization */
 const CLIENT_INFO = {
-	name: "pi-coding-agent",
+	name: "omp-coding-agent",
 	version: "1.0.0",
 };
 

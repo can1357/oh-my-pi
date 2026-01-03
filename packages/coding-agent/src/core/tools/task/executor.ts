@@ -1,7 +1,7 @@
 /**
  * Subprocess execution for subagents.
  *
- * Spawns `pi` in JSON mode to execute tasks with isolated context.
+ * Spawns `omp` in JSON mode to execute tasks with isolated context.
  * Parses JSON events for progress tracking.
  */
 
@@ -18,15 +18,15 @@ import {
 	type AgentProgress,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
-	PI_BLOCKED_AGENT_ENV,
+	OMP_BLOCKED_AGENT_ENV,
 	type SingleResult,
 } from "./types";
 
-/** pi command: 'pi.cmd' on Windows, 'pi' elsewhere */
-const PI_CMD = process.platform === "win32" ? "pi.cmd" : "pi";
+/** omp command: 'omp.cmd' on Windows, 'omp' elsewhere */
+const OMP_CMD = process.platform === "win32" ? "omp.cmd" : "omp";
 
 /** Windows shell option for spawn */
-const PI_SHELL_OPT = process.platform === "win32";
+const OMP_SHELL_OPT = process.platform === "win32";
 
 /** Options for subprocess execution */
 export interface ExecutorOptions {
@@ -143,7 +143,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const tempDir = os.tmpdir();
 	const promptFile = path.join(
 		tempDir,
-		`pi-agent-${agent.name}-${Date.now()}-${Math.random().toString(36).slice(2)}.md`,
+		`omp-agent-${agent.name}-${Date.now()}-${Math.random().toString(36).slice(2)}.md`,
 	);
 
 	try {
@@ -217,14 +217,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// Set up environment - block same-agent recursion unless explicitly recursive
 	const env = { ...process.env };
 	if (!agent.recursive) {
-		env[PI_BLOCKED_AGENT_ENV] = agent.name;
+		env[OMP_BLOCKED_AGENT_ENV] = agent.name;
 	}
 
 	// Spawn subprocess
-	const proc = spawn(PI_CMD, args, {
+	const proc = spawn(OMP_CMD, args, {
 		cwd,
 		stdio: ["ignore", "pipe", "pipe"],
-		shell: PI_SHELL_OPT,
+		shell: OMP_SHELL_OPT,
 		env,
 	});
 

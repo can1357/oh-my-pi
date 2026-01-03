@@ -1,4 +1,4 @@
-# Pi Coding Agent Installer for Windows
+# OMP Coding Agent Installer for Windows
 # Usage: irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1 | iex
 #
 # Or with options:
@@ -13,9 +13,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Repo = "can1357/oh-my-pi"
-$Package = "@oh-my-pi/pi-coding-agent"
-$InstallDir = if ($env:PI_INSTALL_DIR) { $env:PI_INSTALL_DIR } else { "$env:LOCALAPPDATA\pi" }
-$BinaryName = "pi-windows-x64.exe"
+$Package = "@oh-my-pi/omp-coding-agent"
+$InstallDir = if ($env:OMP_INSTALL_DIR) { $env:OMP_INSTALL_DIR } else { "$env:LOCALAPPDATA\omp" }
+$BinaryName = "omp-windows-x64.exe"
 
 function Test-BunInstalled {
     try {
@@ -37,8 +37,8 @@ function Install-ViaBun {
     Write-Host "Installing via bun..."
     bun install -g $Package
     Write-Host ""
-    Write-Host "✓ Installed pi via bun" -ForegroundColor Green
-    Write-Host "Run 'pi' to get started!"
+    Write-Host "✓ Installed omp via bun" -ForegroundColor Green
+    Write-Host "Run 'omp' to get started!"
 }
 
 function Install-Binary {
@@ -53,20 +53,20 @@ function Install-Binary {
     Write-Host "Downloading $BinaryName..."
 
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    $OutPath = Join-Path $InstallDir "pi.exe"
+    $OutPath = Join-Path $InstallDir "omp.exe"
     Invoke-WebRequest -Uri $Url -OutFile $OutPath
 
     Write-Host ""
-    Write-Host "✓ Installed pi to $OutPath" -ForegroundColor Green
+    Write-Host "✓ Installed omp to $OutPath" -ForegroundColor Green
 
     # Add to PATH if not already there
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ($UserPath -notlike "*$InstallDir*") {
         Write-Host "Adding $InstallDir to PATH..."
         [Environment]::SetEnvironmentVariable("Path", "$UserPath;$InstallDir", "User")
-        Write-Host "Restart your terminal, then run 'pi' to get started!"
+        Write-Host "Restart your terminal, then run 'omp' to get started!"
     } else {
-        Write-Host "Run 'pi' to get started!"
+        Write-Host "Run 'omp' to get started!"
     }
 }
 

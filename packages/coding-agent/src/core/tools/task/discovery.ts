@@ -2,17 +2,19 @@
  * Agent discovery from filesystem.
  *
  * Discovers agent definitions from:
- *   - ~/.pi/agent/agents/*.md (user-level, primary)
- *   - ~/.claude/agents/*.md (user-level, fallback)
- *   - .pi/agents/*.md (project-level, primary)
- *   - .claude/agents/*.md (project-level, fallback)
+ *   - ~/.omp/agent/agents/*.md (user-level, primary)
+ *   - ~/.pi/agent/agents/*.md (user-level, legacy)
+ *   - ~/.claude/agents/*.md (user-level, legacy)
+ *   - .omp/agents/*.md (project-level, primary)
+ *   - .pi/agents/*.md (project-level, legacy)
+ *   - .claude/agents/*.md (project-level, legacy)
  *
  * Agent files use markdown with YAML frontmatter.
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import { findAllNearestProjectConfigDirs, getConfigDirs } from "../../../config";
 import { loadBundledAgents } from "./agents";
 import type { AgentDefinition, AgentSource } from "./types";
 
@@ -76,7 +78,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentDefinition[] 
 	for (const entry of entries) {
 		if (!entry.name.endsWith(".md")) continue;
 
-		const filePath = path.join(dir, entry.name);
+		const filePath = path.resolve(dir, entry.name);
 
 		// Handle both regular files and symlinks
 		try {
@@ -125,79 +127,65 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentDefinition[] 
 }
 
 /**
- * Check if path is a directory.
- */
-function isDirectory(p: string): boolean {
-	try {
-		return fs.statSync(p).isDirectory();
-	} catch {
-		return false;
-	}
-}
-
-/**
- * Find nearest directory by walking up from cwd.
- */
-function findNearestDir(cwd: string, relPath: string): string | null {
-	let currentDir = cwd;
-	while (true) {
-		const candidate = path.join(currentDir, relPath);
-		if (isDirectory(candidate)) return candidate;
-
-		const parentDir = path.dirname(currentDir);
-		if (parentDir === currentDir) return null;
-		currentDir = parentDir;
-	}
-}
-
-/**
  * Discover agents from filesystem and merge with bundled agents.
  *
- * Precedence (highest wins): project > user > bundled
- * Within each level: .pi > .claude
+ * Precedence (highest wins): .omp > .pi > .claude (project before user), then bundled
  *
  * @param cwd - Current working directory for project agent discovery
  */
 export function discoverAgents(cwd: string): DiscoveryResult {
-	// Primary directories (.pi)
-	const userPiDir = path.join(os.homedir(), ".pi", "agent", "agents");
-	const projectPiDir = findNearestDir(cwd, ".pi/agents");
+	const resolvedCwd = path.resolve(cwd);
+	const agentSources = Array.from(new Set(getConfigDirs("", { project: false }).map((entry) => entry.source)));
 
-	// Fallback directories (.claude)
-	const userClaudeDir = path.join(os.homedir(), ".claude", "agents");
-	const projectClaudeDir = findNearestDir(cwd, ".claude/agents");
+	// Get user directories (priority order: .omp, .pi, .claude, ...)
+	const userDirs = getConfigDirs("agents", { project: false })
+		.filter((entry) => agentSources.includes(entry.source))
+		.map((entry) => ({
+			...entry,
+			path: path.resolve(entry.path),
+		}));
 
-	const agentMap = new Map<string, AgentDefinition>();
+	// Get project directories by walking up from cwd (priority order)
+	const projectDirs = findAllNearestProjectConfigDirs("agents", resolvedCwd)
+		.filter((entry) => agentSources.includes(entry.source))
+		.map((entry) => ({
+			...entry,
+			path: path.resolve(entry.path),
+		}));
 
-	// 1. Bundled agents (lowest priority)
+	const orderedSources = agentSources.filter(
+		(source) =>
+			userDirs.some((entry) => entry.source === source) || projectDirs.some((entry) => entry.source === source),
+	);
+
+	const orderedDirs: Array<{ dir: string; source: AgentSource }> = [];
+	for (const source of orderedSources) {
+		const project = projectDirs.find((entry) => entry.source === source);
+		if (project) orderedDirs.push({ dir: project.path, source: "project" });
+		const user = userDirs.find((entry) => entry.source === source);
+		if (user) orderedDirs.push({ dir: user.path, source: "user" });
+	}
+
+	const agents: AgentDefinition[] = [];
+	const seen = new Set<string>();
+
+	for (const { dir, source } of orderedDirs) {
+		for (const agent of loadAgentsFromDir(dir, source)) {
+			if (seen.has(agent.name)) continue;
+			agents.push(agent);
+			seen.add(agent.name);
+		}
+	}
+
 	for (const agent of loadBundledAgents()) {
-		agentMap.set(agent.name, agent);
+		if (seen.has(agent.name)) continue;
+		agents.push(agent);
+		seen.add(agent.name);
 	}
 
-	// 2. User agents (.claude then .pi - .pi overrides .claude)
-	for (const agent of loadAgentsFromDir(userClaudeDir, "user")) {
-		agentMap.set(agent.name, agent);
-	}
-	for (const agent of loadAgentsFromDir(userPiDir, "user")) {
-		agentMap.set(agent.name, agent);
-	}
+	const projectAgentsDir = projectDirs.length > 0 ? projectDirs[0].path : null;
 
-	// 3. Project agents (highest priority - .claude then .pi)
-	if (projectClaudeDir) {
-		for (const agent of loadAgentsFromDir(projectClaudeDir, "project")) {
-			agentMap.set(agent.name, agent);
-		}
-	}
-	if (projectPiDir) {
-		for (const agent of loadAgentsFromDir(projectPiDir, "project")) {
-			agentMap.set(agent.name, agent);
-		}
-	}
-
-	return {
-		agents: Array.from(agentMap.values()),
-		projectAgentsDir: projectPiDir,
-	};
+	return { agents, projectAgentsDir };
 }
 
 /**

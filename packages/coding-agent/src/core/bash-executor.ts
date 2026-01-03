@@ -132,7 +132,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			if (totalBytes > DEFAULT_MAX_BYTES && !tempFilePath) {
 				const randomId = crypto.getRandomValues(new Uint8Array(8));
 				const id = Array.from(randomId, (b) => b.toString(16).padStart(2, "0")).join("");
-				tempFilePath = join(tmpdir(), `pi-bash-${id}.log`);
+				tempFilePath = join(tmpdir(), `omp-bash-${id}.log`);
 				tempFileStream = createWriteStream(tempFilePath);
 				// Write already-buffered chunks to temp file
 				for (const chunk of outputChunks) {

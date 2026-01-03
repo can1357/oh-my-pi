@@ -1,8 +1,8 @@
-> pi can help you use the SDK. Ask it to build an integration for your use case.
+> omp can help you use the SDK. Ask it to build an integration for your use case.
 
 # SDK
 
-The SDK provides programmatic access to pi's agent capabilities. Use it to embed pi in other applications, build custom interfaces, or integrate with automated workflows.
+The SDK provides programmatic access to omp's agent capabilities. Use it to embed omp in other applications, build custom interfaces, or integrate with automated workflows.
 
 **Example use cases:**
 
@@ -60,7 +60,7 @@ The main factory function. Creates an `AgentSession` with configurable options.
 ```typescript
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent";
 
-// Minimal: all defaults (discovers everything from cwd and ~/.pi/agent)
+// Minimal: all defaults (discovers everything from cwd and ~/.omp/agent)
 const { session } = await createAgentSession();
 
 // Custom: override specific options
@@ -220,16 +220,16 @@ const { session } = await createAgentSession({
 	cwd: process.cwd(), // default
 
 	// Global config directory
-	agentDir: "~/.pi/agent", // default (expands ~)
+	agentDir: "~/.omp/agent", // default (expands ~)
 });
 ```
 
 `cwd` is used for:
 
-- Project hooks (`.pi/hooks/`)
-- Project tools (`.pi/tools/`)
-- Project skills (`.pi/skills/`)
-- Project commands (`.pi/commands/`)
+- Project hooks (`.omp/hooks/`)
+- Project tools (`.omp/tools/`)
+- Project skills (`.omp/skills/`)
+- Project commands (`.omp/commands/`)
 - Context files (`AGENTS.md` walking up from cwd)
 - Session directory naming
 
@@ -300,7 +300,7 @@ API key resolution priority (handled by AuthStorage):
 ```typescript
 import { AuthStorage, ModelRegistry, discoverAuthStorage, discoverModels } from "@oh-my-pi/pi-coding-agent";
 
-// Default: uses ~/.pi/agent/auth.json and ~/.pi/agent/models.json
+// Default: uses ~/.omp/agent/auth.json and ~/.omp/agent/models.json
 const authStorage = discoverAuthStorage();
 const modelRegistry = discoverModels(authStorage);
 
@@ -721,8 +721,8 @@ const { session } = await createAgentSession({
 
 Settings load from two locations and merge:
 
-1. Global: `~/.pi/agent/settings.json`
-2. Project: `<cwd>/.pi/settings.json`
+1. Global: `~/.omp/agent/settings.json`
+2. Project: `<cwd>/.omp/settings.json`
 
 Project overrides global. Nested objects merge keys. Setters only modify global (project is read-only for version control).
 
@@ -749,8 +749,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent";
 
 // Auth and Models
-const authStorage = discoverAuthStorage(); // ~/.pi/agent/auth.json
-const modelRegistry = discoverModels(authStorage); // + ~/.pi/agent/models.json
+const authStorage = discoverAuthStorage(); // ~/.omp/agent/auth.json
+const modelRegistry = discoverModels(authStorage); // + ~/.omp/agent/models.json
 const allModels = modelRegistry.getAll(); // All models (built-in + custom)
 const available = await modelRegistry.getAvailable(); // Only models with API keys
 const model = modelRegistry.find("provider", "id"); // Find specific model
@@ -896,7 +896,7 @@ await session.prompt("Get status and list files.");
 For subprocess-based integration, use RPC mode instead of the SDK:
 
 ```bash
-pi --mode rpc --no-session
+omp --mode rpc --no-session
 ```
 
 See [RPC documentation](rpc.md) for the JSON protocol.

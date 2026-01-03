@@ -1,7 +1,7 @@
 /**
  * Update CLI command handler.
  *
- * Handles `pi update` to check for and install updates.
+ * Handles `omp update` to check for and install updates.
  * Uses bun if available, otherwise downloads binary from GitHub releases.
  */
 
@@ -11,7 +11,7 @@ import { dirname } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import chalk from "chalk";
-import { VERSION } from "../config";
+import { APP_NAME, VERSION } from "../config";
 
 /**
  * Detect if we're running as a Bun compiled binary.
@@ -129,9 +129,9 @@ function getBinaryName(): string {
 	}
 
 	if (os === "windows") {
-		return `pi-${os}-${archName}.exe`;
+		return `${APP_NAME}-${os}-${archName}.exe`;
 	}
-	return `pi-${os}-${archName}`;
+	return `${APP_NAME}-${os}-${archName}`;
 }
 
 /**
@@ -193,7 +193,7 @@ async function updateViaBinary(release: ReleaseInfo): Promise<void> {
 		unlinkSync(backupPath);
 
 		console.log(chalk.green(`\n✓ Updated to ${release.version}`));
-		console.log(chalk.dim("Restart pi to use the new version"));
+		console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
 	} catch (err) {
 		// Restore from backup if possible
 		if (existsSync(backupPath) && !existsSync(execPath)) {
@@ -256,18 +256,18 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
  * Print update command help.
  */
 export function printUpdateHelp(): void {
-	console.log(`${chalk.bold("pi update")} - Check for and install updates
+	console.log(`${chalk.bold(`${APP_NAME} update`)} - Check for and install updates
 
 ${chalk.bold("Usage:")}
-  pi update [options]
+  ${APP_NAME} update [options]
 
 ${chalk.bold("Options:")}
   -c, --check   Check for updates without installing
   -f, --force   Force reinstall even if up to date
 
 ${chalk.bold("Examples:")}
-  pi update           Update to latest version
-  pi update --check   Check if updates are available
-  pi update --force   Force reinstall
+  ${APP_NAME} update           Update to latest version
+  ${APP_NAME} update --check   Check if updates are available
+  ${APP_NAME} update --force   Force reinstall
 `);
 }

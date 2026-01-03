@@ -1,4 +1,4 @@
-# pi
+# omp
 
 A terminal-based coding agent with multi-model support, mid-session model switching, and a simple CLI for headless coding tasks.
 
@@ -51,7 +51,7 @@ Works on Linux, macOS, and Windows (requires bash; see [Windows Setup](#windows-
 **npm (recommended):**
 
 ```bash
-npm install -g @oh-my-pi/pi-coding-agent
+npm install -g @oh-my-pi/omp-coding-agent
 ```
 
 **Standalone binary:**
@@ -60,23 +60,23 @@ Download from [GitHub Releases](https://github.com/badlogic/pi-mono/releases):
 
 | Platform            | Archive                  |
 | ------------------- | ------------------------ |
-| macOS Apple Silicon | `pi-darwin-arm64.tar.gz` |
-| macOS Intel         | `pi-darwin-x64.tar.gz`   |
-| Linux x64           | `pi-linux-x64.tar.gz`    |
-| Linux ARM64         | `pi-linux-arm64.tar.gz`  |
-| Windows x64         | `pi-windows-x64.zip`     |
+| macOS Apple Silicon | `omp-darwin-arm64.tar.gz` |
+| macOS Intel         | `omp-darwin-x64.tar.gz`   |
+| Linux x64           | `omp-linux-x64.tar.gz`    |
+| Linux ARM64         | `omp-linux-arm64.tar.gz`  |
+| Windows x64         | `omp-windows-x64.zip`     |
 
 ```bash
 # macOS/Linux
-tar -xzf pi-darwin-arm64.tar.gz
-./pi
+tar -xzf omp-darwin-arm64.tar.gz
+./omp
 
 # Windows
-unzip pi-windows-x64.zip
-pi.exe
+unzip omp-windows-x64.zip
+omp.exe
 ```
 
-**macOS note:** The binary is unsigned. If blocked, run: `xattr -c ./pi`
+**macOS note:** The binary is unsigned. If blocked, run: `xattr -c ./omp`
 
 **Build from source** (requires [Bun](https://bun.sh) 1.0+):
 
@@ -84,14 +84,14 @@ pi.exe
 git clone https://github.com/can1357/oh-my-pi.git
 cd pi-mono && npm install
 cd packages/coding-agent && npm run build:binary
-./dist/pi
+./dist/omp
 ```
 
 ### Windows Setup
 
-Pi requires a bash shell on Windows. Checked locations (in order):
+Omp requires a bash shell on Windows. Checked locations (in order):
 
-1. Custom path from `~/.pi/agent/settings.json`
+1. Custom path from `~/.omp/agent/settings.json`
 2. Git Bash (`C:\Program Files\Git\bin\bash.exe`)
 3. `bash.exe` on PATH (Cygwin, MSYS2, WSL)
 
@@ -100,7 +100,7 @@ For most users, [Git for Windows](https://git-scm.com/download/win) is sufficien
 **Custom shell path:**
 
 ```json
-// ~/.pi/agent/settings.json
+// ~/.omp/agent/settings.json
 {
 	"shellPath": "C:\\cygwin64\\bin\\bash.exe"
 }
@@ -110,7 +110,7 @@ For most users, [Git for Windows](https://git-scm.com/download/win) is sufficien
 
 **Option 1: Auth file** (recommended)
 
-Add API keys to `~/.pi/agent/auth.json`:
+Add API keys to `~/.omp/agent/auth.json`:
 
 ```json
 {
@@ -148,7 +148,7 @@ Use `/login` to authenticate with subscription-based or free-tier providers:
 | Google Antigravity         | Gemini 3, Claude, GPT-OSS                       | Free (Google account) |
 
 ```bash
-pi
+omp
 /login  # Select provider, authorize in browser
 ```
 
@@ -165,13 +165,13 @@ pi
 - Antigravity uses a sandbox endpoint with access to Gemini 3, Claude (sonnet/opus thinking), and GPT-OSS models
 - Both are free with any Google account, subject to rate limits
 
-Credentials stored in `~/.pi/agent/auth.json`. Use `/logout` to clear.
+Credentials stored in `~/.omp/agent/auth.json`. Use `/logout` to clear.
 
 ### Quick Start
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-pi
+omp
 ```
 
 Then chat:
@@ -303,18 +303,18 @@ See [docs/session.md](docs/session.md) for the file format and programmatic API.
 
 ### Session Management
 
-Sessions auto-save to `~/.pi/agent/sessions/` organized by working directory.
+Sessions auto-save to `~/.omp/agent/sessions/` organized by working directory.
 
 ```bash
-pi --continue      # Continue most recent session
-pi -c              # Short form
+omp --continue      # Continue most recent session
+omp -c              # Short form
 
-pi --resume        # Browse and select from past sessions
-pi -r              # Short form
+omp --resume        # Browse and select from past sessions
+omp -r              # Short form
 
-pi --no-session    # Ephemeral mode (don't save)
+omp --no-session    # Ephemeral mode (don't save)
 
-pi --session /path/to/file.jsonl  # Use specific session file
+omp --session /path/to/file.jsonl  # Use specific session file
 ```
 
 ### Context Compaction
@@ -330,7 +330,7 @@ Long sessions can exhaust context windows. Compaction summarizes older messages 
 
 When disabled, neither case triggers automatic compaction (use `/compact` manually if needed).
 
-**Configuration** (`~/.pi/agent/settings.json`):
+**Configuration** (`~/.omp/agent/settings.json`):
 
 ```json
 {
@@ -368,9 +368,9 @@ See [docs/compaction.md](docs/compaction.md) for how compaction works internally
 
 ### Project Context Files
 
-Pi loads `AGENTS.md` (or `CLAUDE.md`) files at startup in this order:
+Omp loads `AGENTS.md` (or `CLAUDE.md`) files at startup in this order:
 
-1. **Global:** `~/.pi/agent/AGENTS.md`
+1. **Global:** `~/.omp/agent/AGENTS.md`
 2. **Parent directories:** Walking up from current directory
 3. **Current directory:** `./AGENTS.md`
 
@@ -398,10 +398,10 @@ Use these for:
 
 Replace the default system prompt entirely by creating a `SYSTEM.md` file:
 
-1. **Project-local:** `.pi/SYSTEM.md` (takes precedence)
-2. **Global:** `~/.pi/agent/SYSTEM.md` (fallback)
+1. **Project-local:** `.omp/SYSTEM.md` (takes precedence)
+2. **Global:** `~/.omp/agent/SYSTEM.md` (fallback)
 
-This is useful when using pi as different types of agents across repos (coding assistant, personal assistant, domain-specific agent, etc.).
+This is useful when using omp as different types of agents across repos (coding assistant, personal assistant, domain-specific agent, etc.).
 
 ```markdown
 You are a technical writing assistant. Help users write clear documentation.
@@ -417,7 +417,7 @@ The `--system-prompt` CLI flag overrides both files. Use `--append-system-prompt
 
 ### Custom Models and Providers
 
-Add custom models (Ollama, vLLM, LM Studio, etc.) via `~/.pi/agent/models.json`:
+Add custom models (Ollama, vLLM, LM Studio, etc.) via `~/.omp/agent/models.json`:
 
 ```json
 {
@@ -488,18 +488,18 @@ Add custom models (Ollama, vLLM, LM Studio, etc.) via `~/.pi/agent/models.json`:
 4. Saved default from settings
 5. First available model with valid API key
 
-> pi can help you create custom provider and model configurations.
+> omp can help you create custom provider and model configurations.
 
 ### Settings File
 
 Settings are loaded from two locations and merged:
 
-1. **Global:** `~/.pi/agent/settings.json` - user preferences
-2. **Project:** `<cwd>/.pi/settings.json` - project-specific overrides (version control friendly)
+1. **Global:** `~/.omp/agent/settings.json` - user preferences
+2. **Project:** `<cwd>/.omp/settings.json` - project-specific overrides (version control friendly)
 
 Project settings override global settings. For nested objects, individual keys merge. Settings changed via TUI (model, thinking level, etc.) are saved to global preferences only.
 
-Global `~/.pi/agent/settings.json` stores persistent preferences:
+Global `~/.omp/agent/settings.json` stores persistent preferences:
 
 ```json
 {
@@ -563,18 +563,18 @@ Global `~/.pi/agent/settings.json` stores persistent preferences:
 
 Built-in themes: `dark` (default), `light`. Auto-detected on first run.
 
-Select theme via `/settings` or set in `~/.pi/agent/settings.json`.
+Select theme via `/settings` or set in `~/.omp/agent/settings.json`.
 
-**Custom themes:** Create `~/.pi/agent/themes/*.json`. Custom themes support live reload.
+**Custom themes:** Create `~/.omp/agent/themes/*.json`. Custom themes support live reload.
 
 ```bash
-mkdir -p ~/.pi/agent/themes
-cp $(npm root -g)/@oh-my-pi/pi-coding-agent/dist/theme/dark.json ~/.pi/agent/themes/my-theme.json
+mkdir -p ~/.omp/agent/themes
+cp $(npm root -g)/@oh-my-pi/omp-coding-agent/dist/theme/dark.json ~/.omp/agent/themes/my-theme.json
 ```
 
 Select with `/settings`, then edit the file. Changes apply on save.
 
-> See [Theme Documentation](docs/theme.md) on how to create custom themes in detail. Pi can help you create a new one.
+> See [Theme Documentation](docs/theme.md) on how to create custom themes in detail. Omp can help you create a new one.
 
 **VS Code terminal fix:** Set `terminal.integrated.minimumContrastRatio` to `1` for accurate colors.
 
@@ -584,8 +584,8 @@ Define reusable prompts as Markdown files:
 
 **Locations:**
 
-- Global: `~/.pi/agent/commands/*.md`
-- Project: `.pi/commands/*.md`
+- Global: `~/.omp/agent/commands/*.md`
+- Project: `.omp/commands/*.md`
 
 **Format:**
 
@@ -618,11 +618,11 @@ Usage: `/component Button "onClick handler" "disabled support"`
 - `$1` = `Button`
 - `$@` = all arguments joined
 
-**Namespacing:** Subdirectories create prefixes. `.pi/commands/frontend/component.md` → `/component (project:frontend)`
+**Namespacing:** Subdirectories create prefixes. `.omp/commands/frontend/component.md` → `/component (project:frontend)`
 
 ### Skills
 
-Skills are self-contained capability packages that the agent loads on-demand. Pi implements the [Agent Skills standard](https://agentskills.io/specification), warning about violations but remaining lenient.
+Skills are self-contained capability packages that the agent loads on-demand. Omp implements the [Agent Skills standard](https://agentskills.io/specification), warning about violations but remaining lenient.
 
 A skill provides specialized workflows, setup instructions, helper scripts, and reference documentation for specific tasks. Skills are loaded when the agent decides a task matches the description, or when you explicitly ask to use one.
 
@@ -637,8 +637,8 @@ A skill provides specialized workflows, setup instructions, helper scripts, and 
 
 **Skill locations:**
 
-- Pi user: `~/.pi/agent/skills/**/SKILL.md` (recursive)
-- Pi project: `.pi/skills/**/SKILL.md` (recursive)
+- Omp user: `~/.omp/agent/skills/**/SKILL.md` (recursive)
+- Omp project: `.omp/skills/**/SKILL.md` (recursive)
 - Claude Code: `~/.claude/skills/*/SKILL.md` and `.claude/skills/*/SKILL.md`
 - Codex CLI: `~/.codex/skills/**/SKILL.md` (recursive)
 
@@ -669,13 +669,13 @@ cd /path/to/brave-search && npm install
 - `name`: Required. Must match parent directory name. Lowercase, hyphens, max 64 chars.
 - `description`: Required. Max 1024 chars. Determines when the skill is loaded.
 
-**Disable skills:** `pi --no-skills` or set `skills.enabled: false` in settings.
+**Disable skills:** `omp --no-skills` or set `skills.enabled: false` in settings.
 
-> See [docs/skills.md](docs/skills.md) for details, examples, and links to skill repositories. pi can help you create new skills.
+> See [docs/skills.md](docs/skills.md) for details, examples, and links to skill repositories. omp can help you create new skills.
 
 ### Hooks
 
-Hooks are TypeScript modules that extend pi's behavior by subscribing to lifecycle events. Use them to:
+Hooks are TypeScript modules that extend omp's behavior by subscribing to lifecycle events. Use them to:
 
 - **Block dangerous commands** (permission gates for `rm -rf`, `sudo`, etc.)
 - **Checkpoint code state** (git stash at each turn, restore on `/branch`)
@@ -685,17 +685,17 @@ Hooks are TypeScript modules that extend pi's behavior by subscribing to lifecyc
 
 **Hook locations:**
 
-- Global: `~/.pi/agent/hooks/*.ts`
-- Project: `.pi/hooks/*.ts`
+- Global: `~/.omp/agent/hooks/*.ts`
+- Project: `.omp/hooks/*.ts`
 - CLI: `--hook <path>` (for debugging)
 
 **Quick example** (permission gate):
 
 ```typescript
-import type { HookAPI } from "@oh-my-pi/pi-coding-agent/hooks";
+import type { HookAPI } from "@oh-my-pi/omp-coding-agent/hooks";
 
-export default function (pi: HookAPI) {
-	pi.on("tool_call", async (event, ctx) => {
+export default function (omp: HookAPI) {
+	omp.on("tool_call", async (event, ctx) => {
 		if (event.toolName === "bash" && /sudo/.test(event.input.command as string)) {
 			const ok = await ctx.ui.confirm("Allow sudo?", event.input.command as string);
 			if (!ok) return { block: true, reason: "Blocked by user" };
@@ -707,18 +707,18 @@ export default function (pi: HookAPI) {
 
 **Sending messages from hooks:**
 
-Use `pi.sendMessage(message, triggerTurn?)` to inject messages into the session. Messages are persisted as `CustomMessageEntry` and sent to the LLM. If the agent is streaming, the message is queued; otherwise a new agent loop starts if `triggerTurn` is true.
+Use `omp.sendMessage(message, triggerTurn?)` to inject messages into the session. Messages are persisted as `CustomMessageEntry` and sent to the LLM. If the agent is streaming, the message is queued; otherwise a new agent loop starts if `triggerTurn` is true.
 
 ```typescript
 import * as fs from "node:fs";
-import type { HookAPI } from "@oh-my-pi/pi-coding-agent/hooks";
+import type { HookAPI } from "@oh-my-pi/omp-coding-agent/hooks";
 
-export default function (pi: HookAPI) {
-	pi.on("session_start", async () => {
+export default function (omp: HookAPI) {
+	omp.on("session_start", async () => {
 		fs.watch("/tmp/trigger.txt", () => {
 			const content = fs.readFileSync("/tmp/trigger.txt", "utf-8").trim();
 			if (content) {
-				pi.sendMessage(
+				omp.sendMessage(
 					{
 						customType: "file-trigger",
 						content,
@@ -732,7 +732,7 @@ export default function (pi: HookAPI) {
 }
 ```
 
-> See [Hooks Documentation](docs/hooks.md) for full API reference. pi can help you create new hooks
+> See [Hooks Documentation](docs/hooks.md) for full API reference. omp can help you create new hooks
 
 > See [examples/hooks/](examples/hooks/) for working examples including permission gates, git checkpointing, and path protection.
 
@@ -742,8 +742,8 @@ Custom tools let you extend the built-in toolset (read, write, edit, bash, ...) 
 
 **Tool locations (auto-discovered):**
 
-- Global: `~/.pi/agent/tools/*/index.ts`
-- Project: `.pi/tools/*/index.ts`
+- Global: `~/.omp/agent/tools/*/index.ts`
+- Project: `.omp/tools/*/index.ts`
 
 **Explicit paths:**
 
@@ -754,9 +754,9 @@ Custom tools let you extend the built-in toolset (read, write, edit, bash, ...) 
 
 ```typescript
 import { Type } from "@sinclair/typebox";
-import type { CustomToolFactory } from "@oh-my-pi/pi-coding-agent";
+import type { CustomToolFactory } from "@oh-my-pi/omp-coding-agent";
 
-const factory: CustomToolFactory = (pi) => ({
+const factory: CustomToolFactory = (omp) => ({
 	name: "greet",
 	label: "Greeting",
 	description: "Generate a greeting",
@@ -778,14 +778,14 @@ export default factory;
 
 **Features:**
 
-- Access to `pi.cwd`, `pi.exec()`, `pi.ui` (select/confirm/input dialogs)
+- Access to `omp.cwd`, `omp.exec()`, `omp.ui` (select/confirm/input dialogs)
 - Session lifecycle via `onSession` callback (for state reconstruction)
 - Custom rendering via `renderCall()` and `renderResult()` methods
 - Streaming results via `onUpdate` callback
 - Abort handling via `signal` parameter
 - Multiple tools from one factory (return an array)
 
-> See [Custom Tools Documentation](docs/custom-tools.md) for the full API reference, TUI component guide, and examples. pi can help you create custom tools.
+> See [Custom Tools Documentation](docs/custom-tools.md) for the full API reference, TUI component guide, and examples. omp can help you create custom tools.
 
 > See [examples/custom-tools/](examples/custom-tools/) for working examples including a todo list with session state management and a question tool with UI interaction.
 
@@ -794,7 +794,7 @@ export default factory;
 ## CLI Reference
 
 ```bash
-pi [options] [@files...] [messages...]
+omp [options] [@files...] [messages...]
 ```
 
 ### Options
@@ -828,9 +828,9 @@ pi [options] [@files...] [messages...]
 Include files with `@` prefix:
 
 ```bash
-pi @prompt.md "Answer this"
-pi @screenshot.png "What's in this image?"
-pi @requirements.md @design.png "Implement this"
+omp @prompt.md "Answer this"
+omp @screenshot.png "What's in this image?"
+omp @requirements.md @design.png "Implement this"
 ```
 
 Text files wrapped in `<file name="path">content</file>`. Images attached as base64.
@@ -839,40 +839,40 @@ Text files wrapped in `<file name="path">content</file>`. Images attached as bas
 
 ```bash
 # Interactive mode
-pi
+omp
 
 # Interactive with initial prompt
-pi "List all .ts files in src/"
+omp "List all .ts files in src/"
 
 # Non-interactive
-pi -p "List all .ts files in src/"
+omp -p "List all .ts files in src/"
 
 # With files
-pi -p @code.ts "Review this code"
+omp -p @code.ts "Review this code"
 
 # JSON event stream
-pi --mode json "List files"
+omp --mode json "List files"
 
 # RPC mode (headless)
-pi --mode rpc --no-session
+omp --mode rpc --no-session
 
 # Continue session
-pi -c "What did we discuss?"
+omp -c "What did we discuss?"
 
 # Specific model
-pi --provider openai --model gpt-4o "Help me refactor"
+omp --provider openai --model gpt-4o "Help me refactor"
 
 # Model cycling with thinking levels
-pi --models sonnet:high,haiku:low
+omp --models sonnet:high,haiku:low
 
 # Limit to specific provider with glob pattern
-pi --models "github-copilot/*"
+omp --models "github-copilot/*"
 
 # Read-only mode
-pi --tools read,grep,find,ls -p "Review the architecture"
+omp --tools read,grep,find,ls -p "Review the architecture"
 
 # Export session
-pi --export session.jsonl output.html
+omp --export session.jsonl output.html
 ```
 
 ---
@@ -908,10 +908,10 @@ For adding new tools, see [Custom Tools](#custom-tools) in the Configuration sec
 
 ### SDK
 
-For embedding pi in Node.js/TypeScript applications, use the SDK:
+For embedding omp in Node.js/TypeScript applications, use the SDK:
 
 ```typescript
-import { createAgentSession, discoverAuthStorage, discoverModels, SessionManager } from "@oh-my-pi/pi-coding-agent";
+import { createAgentSession, discoverAuthStorage, discoverModels, SessionManager } from "@oh-my-pi/omp-coding-agent";
 
 const authStorage = discoverAuthStorage();
 const modelRegistry = discoverModels(authStorage);
@@ -942,16 +942,16 @@ The SDK provides full control over:
 - Settings (`SettingsManager`)
 - API key resolution and OAuth
 
-**Philosophy:** "Omit to discover, provide to override." Omit an option and pi discovers from standard locations. Provide an option and your value is used.
+**Philosophy:** "Omit to discover, provide to override." Omit an option and omp discovers from standard locations. Provide an option and your value is used.
 
 > See [SDK Documentation](docs/sdk.md) for the full API reference. See [examples/sdk/](examples/sdk/) for working examples from minimal to full control.
 
 ### RPC Mode
 
-For embedding pi from other languages or with process isolation:
+For embedding omp from other languages or with process isolation:
 
 ```bash
-pi --mode rpc --no-session
+omp --mode rpc --no-session
 ```
 
 Send JSON commands on stdin:
@@ -966,8 +966,8 @@ Send JSON commands on stdin:
 ### HTML Export
 
 ```bash
-pi --export session.jsonl              # Auto-generated filename
-pi --export session.jsonl output.html  # Custom filename
+omp --export session.jsonl              # Auto-generated filename
+omp --export session.jsonl output.html  # Custom filename
 ```
 
 Works with both session files and streaming event logs from `--mode json`.
@@ -976,11 +976,11 @@ Works with both session files and streaming event logs from `--mode json`.
 
 ## Philosophy
 
-Pi is opinionated about what it won't do. These are intentional design decisions to minimize context bloat and avoid anti-patterns.
+Omp is opinionated about what it won't do. These are intentional design decisions to minimize context bloat and avoid anti-patterns.
 
 **No MCP.** Build CLI tools with READMEs (see [Skills](#skills)). The agent reads them on demand. [Would you like to know more?](https://mariozechner.at/posts/2025-11-02-what-if-you-dont-need-mcp/)
 
-**No sub-agents.** Spawn pi instances via tmux, or [build your own sub-agent tool](examples/custom-tools/subagent/) with [custom tools](#custom-tools). Full observability and steerability.
+**No sub-agents.** Spawn omp instances via tmux, or [build your own sub-agent tool](examples/custom-tools/subagent/) with [custom tools](#custom-tools). Full observability and steerability.
 
 **No permission popups.** Security theater. Run in a container or build your own with [Hooks](#hooks).
 
@@ -1002,9 +1002,9 @@ Configure via `package.json`:
 
 ```json
 {
-	"piConfig": {
-		"name": "pi",
-		"configDir": ".pi"
+	"ompConfig": {
+		"name": "omp",
+		"configDir": ".omp"
 	}
 }
 ```
@@ -1025,7 +1025,7 @@ Never use `__dirname` directly for package assets.
 
 ### Debug Command
 
-`/debug` (hidden) writes rendered lines with ANSI codes to `~/.pi/agent/pi-debug.log` for TUI debugging, as well as the last set of messages that were sent to the LLM.
+`/debug` (hidden) writes rendered lines with ANSI codes to `~/.omp/agent/omp-debug.log` for TUI debugging, as well as the last set of messages that were sent to the LLM.
 
 For architecture and contribution guidelines, see [DEVELOPMENT.md](./DEVELOPMENT.md).
 
@@ -1037,5 +1037,5 @@ MIT
 
 ## See Also
 
-- [@oh-my-pi/pi-ai](https://www.npmjs.com/package/@oh-my-pi/pi-ai): Core LLM toolkit
-- [@oh-my-pi/pi-agent](https://www.npmjs.com/package/@oh-my-pi/pi-agent): Agent framework
+- [@oh-my-pi/omp-ai](https://www.npmjs.com/package/@oh-my-pi/omp-ai): Core LLM toolkit
+- [@oh-my-pi/omp-agent](https://www.npmjs.com/package/@oh-my-pi/omp-agent): Agent framework

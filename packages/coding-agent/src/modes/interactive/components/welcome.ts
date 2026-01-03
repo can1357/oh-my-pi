@@ -14,7 +14,7 @@ export interface LspServerInfo {
 }
 
 /**
- * Premium welcome screen with block-based Pi logo and two-column layout.
+ * Premium welcome screen with block-based OMP logo and two-column layout.
  */
 export class WelcomeComponent implements Component {
 	private version: string;
@@ -60,7 +60,7 @@ export class WelcomeComponent implements Component {
 		const leftCol = 26;
 		const rightCol = boxWidth - leftCol - 3; // 3 = │ + │ + │
 
-		// Block-based Pi logo (gradient: magenta → cyan)
+		// Block-based OMP logo (gradient: magenta → cyan)
 		// biome-ignore format: preserve ASCII art layout
 		const piLogo = ["▀████████████▀", " ╘███    ███  ", "  ███    ███  ", "  ███    ███  ", " ▄███▄  ▄███▄ "];
 

@@ -3,13 +3,14 @@
  *
  * 4-tier auth resolution:
  *   1. ANTHROPIC_SEARCH_API_KEY / ANTHROPIC_SEARCH_BASE_URL env vars
- *   2. Provider with api="anthropic-messages" in ~/.pi/agent/models.json
- *   3. OAuth credentials in ~/.pi/agent/auth.json (with expiry check)
+ *   2. Provider with api="anthropic-messages" in ~/.omp/agent/models.json
+ *   3. OAuth credentials in ~/.omp/agent/auth.json (with expiry check)
  *   4. ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL fallback
  */
 
 import * as os from "node:os";
 import * as path from "node:path";
+import { getConfigDirPaths } from "../../../config";
 import type { AnthropicAuthConfig, AuthJson, ModelsJson } from "./types";
 
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
@@ -83,7 +84,8 @@ export function isOAuthToken(apiKey: string): boolean {
  *   4. ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL fallback
  */
 export async function findAnthropicAuth(): Promise<AnthropicAuthConfig | null> {
-	const piAgentDir = path.join(os.homedir(), ".pi", "agent");
+	// Get all config directories (user-level only) for fallback support
+	const configDirs = getConfigDirPaths("", { project: false });
 
 	// 1. Explicit search-specific env vars
 	const searchApiKey = await getEnv("ANTHROPIC_SEARCH_API_KEY");
@@ -96,41 +98,45 @@ export async function findAnthropicAuth(): Promise<AnthropicAuthConfig | null> {
 		};
 	}
 
-	// 2. Provider with api="anthropic-messages" in models.json
-	const modelsJson = await readJson<ModelsJson>(path.join(piAgentDir, "models.json"));
-	if (modelsJson?.providers) {
-		// First pass: look for providers with actual API keys
-		for (const [_name, provider] of Object.entries(modelsJson.providers)) {
-			if (provider.api === "anthropic-messages" && provider.apiKey && provider.apiKey !== "none") {
-				return {
-					apiKey: provider.apiKey,
-					baseUrl: provider.baseUrl ?? DEFAULT_BASE_URL,
-					isOAuth: isOAuthToken(provider.apiKey),
-				};
+	// 2. Provider with api="anthropic-messages" in models.json (check all config dirs)
+	for (const configDir of configDirs) {
+		const modelsJson = await readJson<ModelsJson>(path.join(configDir, "models.json"));
+		if (modelsJson?.providers) {
+			// First pass: look for providers with actual API keys
+			for (const [_name, provider] of Object.entries(modelsJson.providers)) {
+				if (provider.api === "anthropic-messages" && provider.apiKey && provider.apiKey !== "none") {
+					return {
+						apiKey: provider.apiKey,
+						baseUrl: provider.baseUrl ?? DEFAULT_BASE_URL,
+						isOAuth: isOAuthToken(provider.apiKey),
+					};
+				}
 			}
-		}
-		// Second pass: check for proxy mode (baseUrl but apiKey="none")
-		for (const [_name, provider] of Object.entries(modelsJson.providers)) {
-			if (provider.api === "anthropic-messages" && provider.baseUrl) {
-				return {
-					apiKey: provider.apiKey ?? "",
-					baseUrl: provider.baseUrl,
-					isOAuth: false,
-				};
+			// Second pass: check for proxy mode (baseUrl but apiKey="none")
+			for (const [_name, provider] of Object.entries(modelsJson.providers)) {
+				if (provider.api === "anthropic-messages" && provider.baseUrl) {
+					return {
+						apiKey: provider.apiKey ?? "",
+						baseUrl: provider.baseUrl,
+						isOAuth: false,
+					};
+				}
 			}
 		}
 	}
 
-	// 3. OAuth credentials in auth.json (with 5-minute expiry buffer)
-	const authJson = await readJson<AuthJson>(path.join(piAgentDir, "auth.json"));
-	if (authJson?.anthropic?.type === "oauth" && authJson.anthropic.access) {
-		const expiryBuffer = 5 * 60 * 1000; // 5 minutes
-		if (authJson.anthropic.expires > Date.now() + expiryBuffer) {
-			return {
-				apiKey: authJson.anthropic.access,
-				baseUrl: DEFAULT_BASE_URL,
-				isOAuth: true,
-			};
+	// 3. OAuth credentials in auth.json (with 5-minute expiry buffer, check all config dirs)
+	for (const configDir of configDirs) {
+		const authJson = await readJson<AuthJson>(path.join(configDir, "auth.json"));
+		if (authJson?.anthropic?.type === "oauth" && authJson.anthropic.access) {
+			const expiryBuffer = 5 * 60 * 1000; // 5 minutes
+			if (authJson.anthropic.expires > Date.now() + expiryBuffer) {
+				return {
+					apiKey: authJson.anthropic.access,
+					baseUrl: DEFAULT_BASE_URL,
+					isOAuth: true,
+				};
+			}
 		}
 	}
 
@@ -163,7 +169,7 @@ export function buildAnthropicHeaders(auth: AnthropicAuthConfig): Record<string,
 			"content-type": "application/json",
 			"anthropic-dangerous-direct-browser-access": "true",
 			"anthropic-beta": betas.join(","),
-			"user-agent": "pi-coding-agent/1.0.0 (cli)",
+			"user-agent": "claude-code/2.0.20",
 			"x-app": "cli",
 			// Stainless SDK telemetry headers (required for OAuth)
 			"x-stainless-arch": process.arch,

@@ -5,8 +5,6 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { type ImageContent, supportsXhigh } from "@oh-my-pi/pi-ai";
 import chalk from "chalk";
 import { type Args, parseArgs, printHelp } from "./cli/args";
@@ -15,7 +13,7 @@ import { listModels } from "./cli/list-models";
 import { parsePluginArgs, printPluginHelp, runPluginCommand } from "./cli/plugin-cli";
 import { selectSession } from "./cli/session-picker";
 import { parseUpdateArgs, printUpdateHelp, runUpdateCommand } from "./cli/update-cli";
-import { CONFIG_DIR_NAME, getAgentDir, getModelsPath, VERSION } from "./config";
+import { findConfigFile, getModelsPath, VERSION } from "./config";
 import type { AgentSession } from "./core/agent-session";
 import type { LoadedCustomTool } from "./core/custom-tools/index";
 import { exportFromFile } from "./core/export-html/index";
@@ -199,18 +197,16 @@ function createSessionManager(parsed: Args, cwd: string): SessionManager | undef
 
 /** Discover SYSTEM.md file if no CLI system prompt was provided */
 function discoverSystemPromptFile(): string | undefined {
-	// Check project-local first: .pi/SYSTEM.md
-	const projectPath = join(process.cwd(), CONFIG_DIR_NAME, "SYSTEM.md");
-	if (existsSync(projectPath)) {
+	// Check project-local first (.omp/SYSTEM.md, .pi/SYSTEM.md legacy)
+	const projectPath = findConfigFile("SYSTEM.md", { user: false });
+	if (projectPath) {
 		return projectPath;
 	}
-
-	// Fall back to global: ~/.pi/agent/SYSTEM.md
-	const globalPath = join(getAgentDir(), "SYSTEM.md");
-	if (existsSync(globalPath)) {
+	// If not found, check SYSTEM.md file in the global directory.
+	const globalPath = findConfigFile("SYSTEM.md", { user: true });
+	if (globalPath) {
 		return globalPath;
 	}
-
 	return undefined;
 }
 
@@ -375,8 +371,8 @@ export async function main(args: string[]) {
 	time("SettingsManager.create");
 
 	// Apply model role overrides from CLI args or env vars (ephemeral, not persisted)
-	const smolModel = parsed.smol ?? process.env.PI_SMOL_MODEL;
-	const slowModel = parsed.slow ?? process.env.PI_SLOW_MODEL;
+	const smolModel = parsed.smol ?? process.env.OMP_SMOL_MODEL;
+	const slowModel = parsed.slow ?? process.env.OMP_SLOW_MODEL;
 	if (smolModel || slowModel) {
 		const roleOverrides: Record<string, string> = {};
 		if (smolModel) roleOverrides.smol = smolModel;

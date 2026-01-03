@@ -6,8 +6,8 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { getConfigDirPaths } from "../../config";
 import type { MCPConfigFile, MCPServerConfig } from "./types";
 
 /** Environment variable expansion pattern: ${VAR} or ${VAR:-default} */
@@ -80,17 +80,22 @@ export function loadMCPConfigFile(filePath: string, extraEnv?: Record<string, st
  * Configuration locations (in order of priority, later overrides earlier).
  */
 export interface MCPConfigLocations {
-	/** User-level config: ~/.pi/mcp.json or ~/.claude.json */
-	user?: string;
-	/** Project-level config: <cwd>/.mcp.json */
+	/** User-level config paths: ~/.omp/mcp.json, ~/.pi/mcp.json, ~/.claude/mcp.json */
+	userPaths: string[];
+	/** Project-level config: <cwd>/mcp.json or <cwd>/.mcp.json */
 	project?: string;
 }
 
 /**
  * Get standard MCP config file paths.
+ * User-level checks .omp, .pi, .claude directories for fallback support.
  */
 export function getMCPConfigPaths(cwd: string): MCPConfigLocations {
-	const home = homedir();
+	// User-level: check all config dirs (not under agent/)
+	// mcp.json lives at ~/.omp/mcp.json, not ~/.omp/agent/mcp.json
+	const userPaths = getConfigDirPaths("mcp.json", { project: false }).map((p) =>
+		p.replace("/agent/mcp.json", "/mcp.json"),
+	);
 
 	// Project-level: check both mcp.json and .mcp.json (prefer mcp.json if both exist)
 	const mcpJson = join(cwd, "mcp.json");
@@ -98,9 +103,7 @@ export function getMCPConfigPaths(cwd: string): MCPConfigLocations {
 	const projectPath = existsSync(mcpJson) ? mcpJson : dotMcpJson;
 
 	return {
-		// User-level: ~/.pi/mcp.json (our standard)
-		user: join(home, ".pi", "mcp.json"),
-		// Project-level: mcp.json or .mcp.json at project root
+		userPaths,
 		project: projectPath,
 	};
 }
@@ -161,7 +164,13 @@ export function loadAllMCPConfigs(
 
 	const paths = getMCPConfigPaths(cwd);
 
-	const userConfig = paths.user ? loadMCPConfigFile(paths.user, opts.extraEnv) : null;
+	// Load first existing user config (fallback support)
+	let userConfig: MCPConfigFile | null = null;
+	for (const userPath of paths.userPaths) {
+		userConfig = loadMCPConfigFile(userPath, opts.extraEnv);
+		if (userConfig) break;
+	}
+
 	const projectConfig = enableProjectConfig && paths.project ? loadMCPConfigFile(paths.project, opts.extraEnv) : null;
 
 	let configs = mergeMCPConfigs(userConfig, projectConfig);

@@ -15,6 +15,7 @@ import {
 import { type Static, Type } from "@sinclair/typebox";
 import AjvModule from "ajv";
 import type { AuthStorage } from "./auth-storage";
+import { logger } from "./logger";
 
 const Ajv = (AjvModule as any).default || AjvModule;
 
@@ -92,9 +93,15 @@ export class ModelRegistry {
 	private customProviderApiKeys: Map<string, string> = new Map();
 	private loadError: string | undefined = undefined;
 
+	/**
+	 * @param authStorage - Auth storage for API key resolution
+	 * @param modelsJsonPath - Primary path for models.json
+	 * @param fallbackPaths - Additional paths to check (legacy support)
+	 */
 	constructor(
 		readonly authStorage: AuthStorage,
 		private modelsJsonPath: string | undefined = undefined,
+		private fallbackPaths: string[] = [],
 	) {
 		// Set up fallback resolver for custom provider API keys
 		this.authStorage.setFallbackResolver((provider) => {
@@ -133,15 +140,25 @@ export class ModelRegistry {
 			builtInModels.push(...(providerModels as Model<Api>[]));
 		}
 
-		// Load custom models from models.json (if path provided)
+		// Load custom models from models.json (check primary path, then fallbacks)
 		let customModels: Model<Api>[] = [];
-		if (this.modelsJsonPath) {
-			const result = this.loadCustomModels(this.modelsJsonPath);
-			if (result.error) {
-				this.loadError = result.error;
-				// Keep built-in models even if custom models failed to load
-			} else {
-				customModels = result.models;
+		const pathsToCheck = this.modelsJsonPath ? [this.modelsJsonPath, ...this.fallbackPaths] : this.fallbackPaths;
+
+		if (pathsToCheck.length > 0) {
+			logger.debug("ModelRegistry.loadModels checking paths", { paths: pathsToCheck });
+		}
+
+		for (const modelsPath of pathsToCheck) {
+			if (existsSync(modelsPath)) {
+				logger.debug("ModelRegistry.loadModels loading", { path: modelsPath });
+				const result = this.loadCustomModels(modelsPath);
+				if (result.error) {
+					this.loadError = result.error;
+					// Keep built-in models even if custom models failed to load
+				} else {
+					customModels = result.models;
+				}
+				break; // Use first existing file
 			}
 		}
 

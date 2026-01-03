@@ -7,7 +7,7 @@ RPC mode enables headless operation of the coding agent via a JSON protocol over
 ## Starting RPC Mode
 
 ```bash
-pi --mode rpc [options]
+omp --mode rpc [options]
 ```
 
 Common options:
@@ -407,7 +407,7 @@ If output was truncated, includes `fullOutputPath`:
 		"exitCode": 0,
 		"cancelled": false,
 		"truncated": true,
-		"fullOutputPath": "/tmp/pi-bash-abc123.log"
+		"fullOutputPath": "/tmp/omp-bash-abc123.log"
 	}
 }
 ```
@@ -980,7 +980,7 @@ import subprocess
 import json
 
 proc = subprocess.Popen(
-    ["pi", "--mode", "rpc", "--no-session"],
+    ["omp", "--mode", "rpc", "--no-session"],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
     text=True
@@ -1017,7 +1017,7 @@ See [`test/rpc-example.ts`](../test/rpc-example.ts) for a complete interactive e
 const { spawn } = require("child_process");
 const readline = require("readline");
 
-const agent = spawn("pi", ["--mode", "rpc", "--no-session"]);
+const agent = spawn("omp", ["--mode", "rpc", "--no-session"]);
 
 readline.createInterface({ input: agent.stdout }).on("line", (line) => {
 	const event = JSON.parse(line);

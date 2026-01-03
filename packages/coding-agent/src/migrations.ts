@@ -7,6 +7,22 @@ import { dirname, join } from "node:path";
 import { getAgentDir } from "./config";
 
 /**
+ * Migrate PI_* environment variables to OMP_* equivalents.
+ * If PI_XX is set and OMP_XX is not, set OMP_XX to PI_XX's value.
+ * This provides backwards compatibility for users with existing PI_* env vars.
+ */
+export function migrateEnvVars(): void {
+	for (const [key, value] of Object.entries(process.env)) {
+		if (key.startsWith("PI_") && value !== undefined) {
+			const ompKey = `OMP_${key.slice(3)}`; // PI_FOO -> OMP_FOO
+			if (process.env[ompKey] === undefined) {
+				process.env[ompKey] = value;
+			}
+		}
+	}
+}
+
+/**
  * Migrate legacy oauth.json and settings.json apiKeys to auth.json.
  *
  * @returns Array of provider names that were migrated
@@ -66,10 +82,10 @@ export function migrateAuthToAuthJson(): string[] {
 }
 
 /**
- * Migrate sessions from ~/.pi/agent/*.jsonl to proper session directories.
+ * Migrate sessions from ~/.omp/agent/*.jsonl to proper session directories.
  *
- * Bug in v0.30.0: Sessions were saved to ~/.pi/agent/ instead of
- * ~/.pi/agent/sessions/<encoded-cwd>/. This migration moves them
+ * Bug in v0.30.0: Sessions were saved to ~/.omp/agent/ instead of
+ * ~/.omp/agent/sessions/<encoded-cwd>/. This migration moves them
  * to the correct location based on the cwd in their session header.
  *
  * See: https://github.com/badlogic/pi-mono/issues/320
@@ -129,7 +145,12 @@ export function migrateSessionsFromAgentRoot(): void {
  * @returns Object with migration results
  */
 export function runMigrations(): { migratedAuthProviders: string[] } {
+	// First: migrate env vars (before anything else reads them)
+	migrateEnvVars();
+
+	// Then: run data migrations
 	const migratedAuthProviders = migrateAuthToAuthJson();
 	migrateSessionsFromAgentRoot();
+
 	return { migratedAuthProviders };
 }

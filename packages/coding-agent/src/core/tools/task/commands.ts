@@ -5,8 +5,8 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import { findAllNearestProjectConfigDirs, getConfigDirs } from "../../../config";
 
 // Embed command markdown files at build time
 import architectPlanMd from "./bundled-commands/architect-plan.md" with { type: "text" };
@@ -81,7 +81,7 @@ function loadCommandsFromDir(dir: string, source: "user" | "project"): WorkflowC
 	for (const entry of entries) {
 		if (!entry.name.endsWith(".md")) continue;
 
-		const filePath = path.join(dir, entry.name);
+		const filePath = path.resolve(dir, entry.name);
 
 		try {
 			if (!fs.statSync(filePath).isFile()) continue;
@@ -111,32 +111,6 @@ function loadCommandsFromDir(dir: string, source: "user" | "project"): WorkflowC
 	}
 
 	return commands;
-}
-
-/**
- * Check if path is a directory.
- */
-function isDirectory(p: string): boolean {
-	try {
-		return fs.statSync(p).isDirectory();
-	} catch {
-		return false;
-	}
-}
-
-/**
- * Find nearest directory by walking up from cwd.
- */
-function findNearestDir(cwd: string, relPath: string): string | null {
-	let currentDir = cwd;
-	while (true) {
-		const candidate = path.join(currentDir, relPath);
-		if (isDirectory(candidate)) return candidate;
-
-		const parentDir = path.dirname(currentDir);
-		if (parentDir === currentDir) return null;
-		currentDir = parentDir;
-	}
 }
 
 /** Cache for bundled commands */
@@ -172,43 +146,57 @@ export function loadBundledCommands(): WorkflowCommand[] {
 /**
  * Discover all available commands.
  *
- * Precedence: project > user > bundled
+ * Precedence (highest wins): .omp > .pi > .claude (project before user), then bundled
  */
 export function discoverCommands(cwd: string): WorkflowCommand[] {
-	const commandMap = new Map<string, WorkflowCommand>();
+	const resolvedCwd = path.resolve(cwd);
+	const commandSources = Array.from(new Set(getConfigDirs("", { project: false }).map((entry) => entry.source)));
 
-	// Bundled commands (lowest priority)
+	const userDirs = getConfigDirs("commands", { project: false })
+		.filter((entry) => commandSources.includes(entry.source))
+		.map((entry) => ({
+			...entry,
+			path: path.resolve(entry.path),
+		}));
+
+	const projectDirs = findAllNearestProjectConfigDirs("commands", resolvedCwd)
+		.filter((entry) => commandSources.includes(entry.source))
+		.map((entry) => ({
+			...entry,
+			path: path.resolve(entry.path),
+		}));
+
+	const orderedSources = commandSources.filter(
+		(source) =>
+			userDirs.some((entry) => entry.source === source) || projectDirs.some((entry) => entry.source === source),
+	);
+
+	const orderedDirs: Array<{ dir: string; source: "user" | "project" }> = [];
+	for (const source of orderedSources) {
+		const project = projectDirs.find((entry) => entry.source === source);
+		if (project) orderedDirs.push({ dir: project.path, source: "project" });
+		const user = userDirs.find((entry) => entry.source === source);
+		if (user) orderedDirs.push({ dir: user.path, source: "user" });
+	}
+
+	const commands: WorkflowCommand[] = [];
+	const seen = new Set<string>();
+
+	for (const { dir, source } of orderedDirs) {
+		for (const cmd of loadCommandsFromDir(dir, source)) {
+			if (seen.has(cmd.name)) continue;
+			commands.push(cmd);
+			seen.add(cmd.name);
+		}
+	}
+
 	for (const cmd of loadBundledCommands()) {
-		commandMap.set(cmd.name, cmd);
+		if (seen.has(cmd.name)) continue;
+		commands.push(cmd);
+		seen.add(cmd.name);
 	}
 
-	// User commands
-	const userPiDir = path.join(os.homedir(), ".pi", "agent", "commands");
-	const userClaudeDir = path.join(os.homedir(), ".claude", "commands");
-
-	for (const cmd of loadCommandsFromDir(userClaudeDir, "user")) {
-		commandMap.set(cmd.name, cmd);
-	}
-	for (const cmd of loadCommandsFromDir(userPiDir, "user")) {
-		commandMap.set(cmd.name, cmd);
-	}
-
-	// Project commands (highest priority)
-	const projectPiDir = findNearestDir(cwd, ".pi/commands");
-	const projectClaudeDir = findNearestDir(cwd, ".claude/commands");
-
-	if (projectClaudeDir) {
-		for (const cmd of loadCommandsFromDir(projectClaudeDir, "project")) {
-			commandMap.set(cmd.name, cmd);
-		}
-	}
-	if (projectPiDir) {
-		for (const cmd of loadCommandsFromDir(projectPiDir, "project")) {
-			commandMap.set(cmd.name, cmd);
-		}
-	}
-
-	return Array.from(commandMap.values());
+	return commands;
 }
 
 /**

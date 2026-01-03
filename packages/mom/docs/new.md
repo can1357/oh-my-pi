@@ -754,7 +754,7 @@ export interface ToolAPI {
 Tools are discovered from:
 
 1. `data/tools/**/index.ts` (workspace-local, recursive)
-2. `~/.pi/mom/tools/**/index.ts` (global, recursive)
+2. `~/.omp/mom/tools/**/index.ts` (global, recursive)
 
 ```typescript
 // loader.ts
@@ -770,7 +770,7 @@ async function loadCustomTools(dataDir: string): Promise<LoadedTool[]> {
 	const jiti = createJiti(import.meta.url, { alias: getAliases() });
 
 	// Discover tool directories
-	const toolDirs = [path.join(dataDir, "tools"), path.join(os.homedir(), ".pi", "mom", "tools")];
+	const toolDirs = [path.join(dataDir, "tools"), path.join(os.homedir(), ".omp", "mom", "tools")];
 
 	for (const dir of toolDirs) {
 		if (!fs.existsSync(dir)) continue;

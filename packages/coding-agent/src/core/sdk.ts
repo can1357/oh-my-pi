@@ -32,7 +32,7 @@
 import { join } from "node:path";
 import { Agent, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { getAgentDir } from "../config";
+import { getAgentDir, getConfigDirPaths } from "../config";
 import { AgentSession } from "./agent-session";
 import { AuthStorage } from "./auth-storage";
 import {
@@ -48,6 +48,7 @@ import {
 import type { CustomTool } from "./custom-tools/types";
 import { discoverAndLoadHooks, HookRunner, type LoadedHook, wrapToolsWithHooks } from "./hooks/index";
 import type { HookFactory } from "./hooks/types";
+import { logger } from "./logger";
 import { discoverAndLoadMCPTools, type MCPManager, type MCPToolsLoadResult } from "./mcp/index";
 import { convertToLlm } from "./messages";
 import { ModelRegistry } from "./model-registry";
@@ -91,7 +92,7 @@ import {
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
-	/** Global config directory. Default: ~/.pi/agent */
+	/** Global config directory. Default: ~/.omp/agent */
 	agentDir?: string;
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
@@ -125,7 +126,7 @@ export interface CreateAgentSessionOptions {
 	skills?: Skill[];
 	/** Context files (AGENTS.md content). Default: discovered walking up from cwd */
 	contextFiles?: Array<{ path: string; content: string }>;
-	/** Slash commands. Default: discovered from cwd/.pi/commands/ + agentDir/commands/ */
+	/** Slash commands. Default: discovered from cwd/.omp/commands/ + agentDir/commands/ */
 	slashCommands?: FileSlashCommand[];
 
 	/** Enable MCP server discovery from .mcp.json files. Default: true */
@@ -202,17 +203,33 @@ function getDefaultAgentDir(): string {
 // Discovery Functions
 
 /**
- * Create an AuthStorage instance for the given agent directory.
+ * Create an AuthStorage instance with fallback support.
+ * Reads from primary path first, then falls back to legacy paths (.pi, .claude).
  */
 export function discoverAuthStorage(agentDir: string = getDefaultAgentDir()): AuthStorage {
-	return new AuthStorage(join(agentDir, "auth.json"));
+	const primaryPath = join(agentDir, "auth.json");
+	// Get all auth.json paths (user-level only), excluding the primary
+	const allPaths = getConfigDirPaths("auth.json", { project: false });
+	const fallbackPaths = allPaths.filter((p) => p !== primaryPath);
+
+	logger.debug("discoverAuthStorage", { agentDir, primaryPath, allPaths, fallbackPaths });
+
+	return new AuthStorage(primaryPath, fallbackPaths);
 }
 
 /**
- * Create a ModelRegistry for the given agent directory.
+ * Create a ModelRegistry with fallback support.
+ * Reads from primary path first, then falls back to legacy paths (.pi, .claude).
  */
 export function discoverModels(authStorage: AuthStorage, agentDir: string = getDefaultAgentDir()): ModelRegistry {
-	return new ModelRegistry(authStorage, join(agentDir, "models.json"));
+	const primaryPath = join(agentDir, "models.json");
+	// Get all models.json paths (user-level only), excluding the primary
+	const allPaths = getConfigDirPaths("models.json", { project: false });
+	const fallbackPaths = allPaths.filter((p) => p !== primaryPath);
+
+	logger.debug("discoverModels", { primaryPath, fallbackPaths });
+
+	return new ModelRegistry(authStorage, primaryPath, fallbackPaths);
 }
 
 /**
@@ -348,7 +365,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 // Settings
 
 /**
- * Load settings from agentDir/settings.json merged with cwd/.pi/settings.json.
+ * Load settings from agentDir/settings.json merged with cwd/.omp/settings.json.
  */
 export function loadSettings(cwd?: string, agentDir?: string): Settings {
 	const manager = SettingsManager.create(cwd ?? process.cwd(), agentDir ?? getDefaultAgentDir());

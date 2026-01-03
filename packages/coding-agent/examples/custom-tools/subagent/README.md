@@ -4,7 +4,7 @@ Delegate tasks to specialized subagents with isolated context windows.
 
 ## Features
 
-- **Isolated context**: Each subagent runs in a separate `pi` process
+- **Isolated context**: Each subagent runs in a separate `omp` process
 - **Streaming output**: See tool calls and progress as they happen
 - **Parallel streaming**: All parallel tasks stream updates simultaneously
 - **Markdown rendering**: Final output rendered with proper formatting (expanded view)
@@ -35,30 +35,30 @@ From the repository root, symlink the files:
 
 ```bash
 # Symlink the tool (must be in a subdirectory with index.ts)
-mkdir -p ~/.pi/agent/tools/subagent
-ln -sf "$(pwd)/packages/coding-agent/examples/custom-tools/subagent/subagent.ts" ~/.pi/agent/tools/subagent/index.ts
-ln -sf "$(pwd)/packages/coding-agent/examples/custom-tools/subagent/agents.ts" ~/.pi/agent/tools/subagent/agents.ts
+mkdir -p ~/.omp/agent/tools/subagent
+ln -sf "$(pwd)/packages/coding-agent/examples/custom-tools/subagent/subagent.ts" ~/.omp/agent/tools/subagent/index.ts
+ln -sf "$(pwd)/packages/coding-agent/examples/custom-tools/subagent/agents.ts" ~/.omp/agent/tools/subagent/agents.ts
 
 # Symlink agents
-mkdir -p ~/.pi/agent/agents
+mkdir -p ~/.omp/agent/agents
 for f in packages/coding-agent/examples/custom-tools/subagent/agents/*.md; do
-  ln -sf "$(pwd)/$f" ~/.pi/agent/agents/$(basename "$f")
+  ln -sf "$(pwd)/$f" ~/.omp/agent/agents/$(basename "$f")
 done
 
 # Symlink workflow commands
-mkdir -p ~/.pi/agent/commands
+mkdir -p ~/.omp/agent/commands
 for f in packages/coding-agent/examples/custom-tools/subagent/commands/*.md; do
-  ln -sf "$(pwd)/$f" ~/.pi/agent/commands/$(basename "$f")
+  ln -sf "$(pwd)/$f" ~/.omp/agent/commands/$(basename "$f")
 done
 ```
 
 ## Security Model
 
-This tool executes a separate `pi` subprocess with a delegated system prompt and tool/model configuration.
+This tool executes a separate `omp` subprocess with a delegated system prompt and tool/model configuration.
 
-**Project-local agents** (`.pi/agents/*.md`) are repo-controlled prompts that can instruct the model to read files, run bash commands, etc.
+**Project-local agents** (`.omp/agents/*.md`) are repo-controlled prompts that can instruct the model to read files, run bash commands, etc.
 
-**Default behavior:** Only loads **user-level agents** from `~/.pi/agent/agents`.
+**Default behavior:** Only loads **user-level agents** from `~/.omp/agent/agents`.
 
 To enable project-local agents, pass `agentScope: "both"` (or `"project"`). Only do this for repositories you trust.
 
@@ -136,8 +136,8 @@ System prompt for the agent goes here.
 ```
 
 **Locations:**
-- `~/.pi/agent/agents/*.md` - User-level (always loaded)
-- `.pi/agents/*.md` - Project-level (only with `agentScope: "project"` or `"both"`)
+- `~/.omp/agent/agents/*.md` - User-level (always loaded)
+- `.omp/agents/*.md` - Project-level (only with `agentScope: "project"` or `"both"`)
 
 Project agents override user agents with the same name when `agentScope: "both"`.
 

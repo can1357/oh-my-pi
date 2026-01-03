@@ -87,7 +87,7 @@ Parallel execution framework with specialized agents and real-time streaming:
 - **Parallel exploration**: Reviewer agent can spawn explore agents for large codebase analysis
 - **Real-time artifact streaming**: Task outputs stream as they're created, not just at completion
 - **Output tool**: Read full agent outputs by ID when truncated previews aren't sufficient
-- User-level (`~/.pi/agent/agents/`) and project-level (`.pi/agents/`) custom agents
+- User-level (`~/.omp/agent/agents/`) and project-level (`.omp/agents/`) custom agents
 - Concurrency-limited batch execution with progress tracking
 
 ## + Model Roles
@@ -101,7 +101,7 @@ Configure different models for different purposes with automatic discovery:
 - **Three roles**: `default` (main model), `smol` (fast/cheap), `slow` (comprehensive reasoning)
 - **Auto-discovery**: Smol finds haiku → flash → mini; Slow finds codex → gpt → opus → pro
 - **Role-based selection**: Task tool agents can use `model: pi/smol` for cost-effective exploration
-- CLI args (`--smol`, `--slow`) and env vars (`PI_SMOL_MODEL`, `PI_SLOW_MODEL`)
+- CLI args (`--smol`, `--slow`) and env vars (`OMP_SMOL_MODEL`, `OMP_SLOW_MODEL`)
 - Configure via `/model` selector with keybindings (Enter=default, S=smol, L=slow)
 
 ## + Ask Tool (Interactive Questioning)
@@ -136,7 +136,7 @@ Structured code review with priority-based findings:
 
 Programmable commands with full API access:
 
-- Create at `~/.pi/agent/commands/[name]/index.ts` or `.pi/commands/[name]/index.ts`
+- Create at `~/.omp/agent/commands/[name]/index.ts` or `.omp/commands/[name]/index.ts`
 - Export factory returning `{ name, description, execute(args, ctx) }`
 - Full access to `HookCommandContext` for UI dialogs, session control, shell execution
 - Return string to send as LLM prompt, or void for fire-and-forget actions
@@ -151,8 +151,8 @@ Programmable commands with full API access:
 Full Model Context Protocol support with external tool integration:
 
 - Stdio and HTTP transports for connecting to MCP servers
-- Plugin CLI (`pi plugin install/enable/configure/doctor`)
-- Hot-loadable plugins from `~/.pi/plugins/` with npm/bun integration
+- Plugin CLI (`omp plugin install/enable/configure/doctor`)
+- Hot-loadable plugins from `~/.omp/plugins/` with npm/bun integration
 - Automatic Exa MCP server filtering with API key extraction
 
 ## + Web Search & Fetch
@@ -190,7 +190,7 @@ Handles whitespace and indentation variance automatically:
 
 - **Git context**: System prompt includes branch, status, recent commits
 - **Bun runtime**: Native TypeScript execution, faster startup, all packages migrated
-- **Centralized file logging**: Debug logs with daily rotation to `~/.pi/logs/`
+- **Centralized file logging**: Debug logs with daily rotation to `~/.omp/logs/`
 - **Clipboard export**: `/export --copy` copies session as formatted text
 - **Bash interceptor**: Optionally block shell commands that have dedicated tools
 - **Hidden tools**: Custom tools can be excluded from default list unless explicitly requested

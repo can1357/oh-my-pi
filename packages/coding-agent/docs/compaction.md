@@ -1,6 +1,6 @@
 # Compaction & Branch Summarization
 
-LLMs have limited context windows. When conversations grow too long, pi uses compaction to summarize older content while preserving recent work. This page covers both auto-compaction and branch summarization.
+LLMs have limited context windows. When conversations grow too long, omp uses compaction to summarize older content while preserving recent work. This page covers both auto-compaction and branch summarization.
 
 **Source files:**
 
@@ -12,7 +12,7 @@ LLMs have limited context windows. When conversations grow too long, pi uses com
 
 ## Overview
 
-Pi has two summarization mechanisms:
+OMP has two summarization mechanisms:
 
 | Mechanism            | Trigger                                  | Purpose                                   |
 | -------------------- | ---------------------------------------- | ----------------------------------------- |
@@ -31,13 +31,13 @@ Auto-compaction triggers when:
 contextTokens > contextWindow - reserveTokens
 ```
 
-By default, `reserveTokens` is 16384 tokens (configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`). This leaves room for the LLM's response.
+By default, `reserveTokens` is 16384 tokens (configurable in `~/.omp/agent/settings.json` or `<project-dir>/.omp/settings.json`). This leaves room for the LLM's response.
 
 You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary.
 
 ### How It Works
 
-1. **Find cut point**: Walk backwards from newest message, accumulating token estimates until `keepRecentTokens` (default 20k, configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`) is reached
+2. **Find cut point**: Walk backwards from newest message, accumulating token estimates until `keepRecentTokens` (default 20k, configurable in `~/.omp/agent/settings.json` or `<project-dir>/.omp/settings.json`) is reached
 2. **Extract messages**: Collect messages from previous compaction (or start) up to cut point
 3. **Generate summary**: Call LLM to summarize with structured format
 4. **Append entry**: Save `CompactionEntry` with summary and `firstKeptEntryId`
@@ -99,7 +99,7 @@ Split turn (one huge turn exceeds budget):
   turnPrefixMessages = [usr, ass, tool, ass, tool, tool]
 ```
 
-For split turns, pi generates two summaries and merges them:
+For split turns, omp generates two summaries and merges them:
 
 1. **History summary**: Previous context (if any)
 2. **Turn prefix summary**: The early part of the split turn
@@ -147,7 +147,7 @@ See [`prepareCompaction()`](../src/core/compaction/compaction.ts) and [`compact(
 
 ### When It Triggers
 
-When you use `/tree` to navigate to a different branch, pi offers to summarize the work you're leaving. This injects context from the left branch into the new branch.
+When you use `/tree` to navigate to a different branch, omp offers to summarize the work you're leaving. This injects context from the left branch into the new branch.
 
 ### How It Works
 
@@ -176,7 +176,7 @@ After navigation with summary:
 
 ### Cumulative File Tracking
 
-Both compaction and branch summarization track files cumulatively. When generating a summary, pi extracts file operations from:
+Both compaction and branch summarization track files cumulatively. When generating a summary, omp extracts file operations from:
 
 - Tool calls in the messages being summarized
 - Previous compaction or branch summary `details` (if any)
@@ -382,7 +382,7 @@ See `SessionBeforeTreeEvent` and `TreePreparation` in the types file.
 
 ## Settings
 
-Configure compaction in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`:
+Configure compaction in `~/.omp/agent/settings.json` or `<project-dir>/.omp/settings.json`:
 
 ```json
 {

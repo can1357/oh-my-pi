@@ -287,14 +287,14 @@ describe("skills", () => {
 		});
 
 		it("should expand ~ in customDirectories", () => {
-			const homeSkillsDir = join(homedir(), ".pi/agent/skills");
+			const homeSkillsDir = join(homedir(), ".omp/agent/skills");
 			const { skills: withTilde } = loadSkills({
 				enableCodexUser: false,
 				enableClaudeUser: false,
 				enableClaudeProject: false,
 				enablePiUser: false,
 				enablePiProject: false,
-				customDirectories: ["~/.pi/agent/skills"],
+				customDirectories: ["~/.omp/agent/skills"],
 			});
 			const { skills: withoutTilde } = loadSkills({
 				enableCodexUser: false,

@@ -199,7 +199,7 @@ async function readImageMacOS(timeout: number): Promise<ClipboardImage | null> {
 
 	// Read the actual image data using a temp file approach
 	// osascript can't output binary directly, so we write to a temp file
-	const tempFile = `/tmp/pi-clipboard-${Date.now()}.${imageType === "png" ? "png" : "jpg"}`;
+	const tempFile = `/tmp/omp-clipboard-${Date.now()}.${imageType === "png" ? "png" : "jpg"}`;
 	const clipboardClass = imageType === "png" ? "«class PNGf»" : "«class JPEG»";
 
 	const readScript = `

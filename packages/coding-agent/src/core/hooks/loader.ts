@@ -6,7 +6,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as typebox from "@sinclair/typebox";
-import { getAgentDir } from "../../config";
+import { getAgentDir, getConfigDirPaths } from "../../config";
 import * as piCodingAgent from "../../index";
 import { logger } from "../logger";
 import type { HookMessage } from "../messages";
@@ -275,8 +275,8 @@ function discoverHooksInDir(dir: string): string[] {
 /**
  * Discover and load hooks from standard locations:
  * 1. agentDir/hooks/*.ts (global)
- * 2. cwd/.pi/hooks/*.ts (project-local)
- * 3. Installed plugins (~/.pi/plugins/node_modules/*)
+ * 2. cwd/{.omp,.pi,.claude}/hooks/*.ts (project-local, with fallbacks)
+ * 3. Installed plugins (~/.omp/plugins/node_modules/*)
  *
  * Plus any explicitly configured paths from settings.
  */
@@ -303,11 +303,12 @@ export async function discoverAndLoadHooks(
 	const globalHooksDir = path.join(agentDir, "hooks");
 	addPaths(discoverHooksInDir(globalHooksDir));
 
-	// 2. Project-local hooks: cwd/.pi/hooks/
-	const localHooksDir = path.join(cwd, ".pi", "hooks");
-	addPaths(discoverHooksInDir(localHooksDir));
+	// 2. Project-local hooks: cwd/{.omp,.pi,.claude}/hooks/
+	for (const localHooksDir of getConfigDirPaths("hooks", { user: false, cwd })) {
+		addPaths(discoverHooksInDir(localHooksDir));
+	}
 
-	// 3. Plugin hooks: ~/.pi/plugins/node_modules/*/
+	// 3. Plugin hooks: ~/.omp/plugins/node_modules/*/
 	addPaths(getAllPluginHookPaths(cwd));
 
 	// 4. Explicitly configured paths (can override/add)

@@ -1,6 +1,6 @@
 # Examples
 
-Example code for pi-coding-agent SDK, hooks, and custom tools.
+Example code for omp-coding-agent SDK, hooks, and custom tools.
 
 ## Directories
 

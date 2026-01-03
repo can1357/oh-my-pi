@@ -110,7 +110,7 @@ export class PluginManager {
 				pkgJsonPath,
 				JSON.stringify(
 					{
-						name: "pi-plugins",
+						name: "omp-plugins",
 						private: true,
 						dependencies: {},
 					},
@@ -516,7 +516,7 @@ export class PluginManager {
 				status: hasManifest ? "ok" : "warning",
 				message: hasManifest
 					? `v${pluginPkg.version}${pluginPkg.description ? ` - ${pluginPkg.description}` : ""}`
-					: `v${pluginPkg.version} - No omp/pi manifest (not a pi plugin)`,
+					: `v${pluginPkg.version} - No omp/pi manifest (not an omp plugin)`,
 			});
 
 			// Check tools path exists if specified

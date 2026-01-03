@@ -46,7 +46,7 @@ async function getAnthropicApiKey(authStorage: AuthStorage): Promise<string> {
 		throw new Error(
 			"No API key found for anthropic.\n\n" +
 				"Set an API key environment variable, or use /login with Anthropic and link to auth.json from " +
-				join(homedir(), ".pi", "mom", "auth.json"),
+				join(homedir(), ".omp", "mom", "auth.json"),
 		);
 	}
 	return key;
@@ -446,7 +446,7 @@ async function createRunner(sandboxConfig: SandboxConfig, channelId: string, cha
 
 	// Create AuthStorage and ModelRegistry
 	// Auth stored outside workspace so agent can't access it
-	const authStorage = new AuthStorage(join(homedir(), ".pi", "mom", "auth.json"));
+	const authStorage = new AuthStorage(join(homedir(), ".omp", "mom", "auth.json"));
 	const modelRegistry = new ModelRegistry(authStorage);
 
 	// Create agent

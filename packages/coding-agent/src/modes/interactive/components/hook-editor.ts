@@ -89,7 +89,7 @@ export class HookEditorComponent extends Container {
 		}
 
 		const currentText = this.editor.getText();
-		const tmpFile = path.join(os.tmpdir(), `pi-hook-editor-${Date.now()}.md`);
+		const tmpFile = path.join(os.tmpdir(), `omp-hook-editor-${Date.now()}.md`);
 
 		try {
 			fs.writeFileSync(tmpFile, currentText, "utf-8");

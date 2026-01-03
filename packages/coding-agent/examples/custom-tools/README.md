@@ -1,6 +1,6 @@
 # Custom Tools Examples
 
-Example custom tools for pi-coding-agent.
+Example custom tools for omp-coding-agent.
 
 ## Examples
 
@@ -38,13 +38,13 @@ See [subagent/README.md](subagent/README.md) for full documentation.
 
 ```bash
 # Test directly (can point to any .ts file)
-pi --tool examples/custom-tools/todo/index.ts
+omp --tool examples/custom-tools/todo/index.ts
 
 # Or copy entire folder to tools directory for persistent use
-cp -r todo ~/.pi/agent/tools/
+cp -r todo ~/.omp/agent/tools/
 ```
 
-Then in pi:
+Then in omp:
 
 ```
 > add a todo "test custom tools"

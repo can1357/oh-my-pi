@@ -32,7 +32,7 @@ describe.skipIf(!API_KEY)("Compaction hooks", () => {
 	let capturedEvents: SessionEvent[];
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `pi-compaction-hooks-test-${Date.now()}`);
+		tempDir = join(tmpdir(), `omp-compaction-hooks-test-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 		capturedEvents = [];
 	});

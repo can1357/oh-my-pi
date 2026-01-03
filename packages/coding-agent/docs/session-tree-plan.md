@@ -87,7 +87,7 @@ export interface BranchSummaryEntry extends SessionEntryBase {
 ```
 
 - [x] `fromId` field references the abandoned leaf
-- [x] `fromHook` field distinguishes pi-generated vs hook-generated summaries
+- [x] `fromHook` field distinguishes omp-generated vs hook-generated summaries
 - [x] `details` field for file tracking
 - [x] Branch summarizer implemented with structured output format
 - [x] Uses serialization approach (same as compaction) to prevent model confusion

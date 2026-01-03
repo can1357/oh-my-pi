@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join } from "node:path";
+import { getConfigDirPaths } from "../../../config.js";
 import type { ServerConfig } from "./types";
 
 export interface LspConfig {
@@ -94,7 +95,7 @@ export const SERVERS: Record<string, ServerConfig> = {
 		fileTypes: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
 		rootMarkers: ["package.json", "tsconfig.json", "jsconfig.json"],
 		initOptions: {
-			hostInfo: "pi-coding-agent",
+			hostInfo: "omp-coding-agent",
 			preferences: {
 				includeInlayParameterNameHints: "all",
 				includeInlayVariableTypeHints: true,
@@ -673,30 +674,50 @@ export function resolveCommand(command: string, cwd: string): string | null {
 
 /**
  * Configuration file search paths (in priority order).
- * Supports both visible and hidden variants, and both .pi subdirectory and root.
+ * Supports both visible and hidden variants at each config location.
  */
 function getConfigPaths(cwd: string): string[] {
-	return [
-		// Project-level configs (highest priority)
-		join(cwd, "lsp.json"),
-		join(cwd, ".lsp.json"),
-		join(cwd, ".pi", "lsp.json"),
-		join(cwd, ".pi", ".lsp.json"),
-		// User-level configs (fallback)
-		join(homedir(), ".pi", "lsp.json"),
-		join(homedir(), ".pi", ".lsp.json"),
-		join(homedir(), "lsp.json"),
-		join(homedir(), ".lsp.json"),
-	];
+	const filenames = ["lsp.json", ".lsp.json"];
+	const paths: string[] = [];
+
+	// Project root files (highest priority)
+	for (const filename of filenames) {
+		paths.push(join(cwd, filename));
+	}
+
+	// Project config directories (.omp/, .pi/, .claude/)
+	const projectDirs = getConfigDirPaths("", { user: false, project: true, cwd });
+	for (const dir of projectDirs) {
+		for (const filename of filenames) {
+			paths.push(join(dir, filename));
+		}
+	}
+
+	// User config directories (~/.omp/agent/, ~/.pi/agent/, ~/.claude/)
+	const userDirs = getConfigDirPaths("", { user: true, project: false });
+	for (const dir of userDirs) {
+		for (const filename of filenames) {
+			paths.push(join(dir, filename));
+		}
+	}
+
+	// User home root files (lowest priority fallback)
+	for (const filename of filenames) {
+		paths.push(join(homedir(), filename));
+	}
+
+	return paths;
 }
 
 /**
  * Load LSP configuration.
  *
  * Priority:
- * 1. Project-level config: lsp.json, .lsp.json, .pi/lsp.json, .pi/.lsp.json
- * 2. User-level config: ~/.pi/lsp.json, ~/.pi/.lsp.json, ~/lsp.json, ~/.lsp.json
- * 3. Auto-detect from project markers + available binaries
+ * 1. Project root: lsp.json, .lsp.json
+ * 2. Project config dirs: .omp/lsp.json, .pi/lsp.json, .claude/lsp.json (+ hidden variants)
+ * 3. User config dirs: ~/.omp/agent/lsp.json, ~/.pi/agent/lsp.json, ~/.claude/lsp.json (+ hidden variants)
+ * 4. User home root: ~/lsp.json, ~/.lsp.json
+ * 5. Auto-detect from project markers + available binaries
  *
  * Config file format:
  * ```json

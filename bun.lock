@@ -58,7 +58,7 @@
       "name": "@oh-my-pi/pi-coding-agent",
       "version": "2.3.1337",
       "bin": {
-        "pi": "src/cli.ts",
+        "omp": "src/cli.ts",
       },
       "dependencies": {
         "@oh-my-pi/pi-agent-core": "workspace:*",

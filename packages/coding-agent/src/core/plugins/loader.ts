@@ -7,7 +7,12 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getPluginsLockfile, getPluginsNodeModules, getPluginsPackageJson, getProjectPluginOverrides } from "./paths";
+import {
+	getAllProjectPluginOverridePaths,
+	getPluginsLockfile,
+	getPluginsNodeModules,
+	getPluginsPackageJson,
+} from "./paths";
 import type { InstalledPlugin, PluginManifest, PluginRuntimeConfig, ProjectPluginOverrides } from "./types";
 
 // =============================================================================
@@ -30,18 +35,19 @@ function loadRuntimeConfig(): PluginRuntimeConfig {
 }
 
 /**
- * Load project-local plugin overrides.
+ * Load project-local plugin overrides (checks .omp and .pi directories).
  */
 function loadProjectOverrides(cwd: string): ProjectPluginOverrides {
-	const overridesPath = getProjectPluginOverrides(cwd);
-	if (!existsSync(overridesPath)) {
-		return {};
+	for (const overridesPath of getAllProjectPluginOverridePaths(cwd)) {
+		if (existsSync(overridesPath)) {
+			try {
+				return JSON.parse(readFileSync(overridesPath, "utf-8"));
+			} catch {
+				// Continue to next path
+			}
+		}
 	}
-	try {
-		return JSON.parse(readFileSync(overridesPath, "utf-8"));
-	} catch {
-		return {};
-	}
+	return {};
 }
 
 // =============================================================================
@@ -79,7 +85,7 @@ export function getEnabledPlugins(cwd: string): InstalledPlugin[] {
 		const manifest: PluginManifest | undefined = pluginPkg.omp || pluginPkg.pi;
 
 		if (!manifest) {
-			// Not a pi plugin, skip
+			// Not an omp plugin, skip
 			continue;
 		}
 
