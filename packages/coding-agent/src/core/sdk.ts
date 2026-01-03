@@ -572,6 +572,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const builtInTools =
 		options.tools ??
 		createCodingTools(cwd, options.hasUI ?? false, sessionContext, {
+			lspFormatOnWrite: settingsManager.getLspFormatOnWrite(),
 			lspDiagnosticsOnWrite: settingsManager.getLspDiagnosticsOnWrite(),
 			editFuzzyMatch: settingsManager.getEditFuzzyMatch(),
 		});

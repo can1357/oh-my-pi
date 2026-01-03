@@ -7,6 +7,12 @@ export interface RecentSession {
 	timeAgo: string;
 }
 
+export interface LspServerInfo {
+	name: string;
+	status: "ready" | "error" | "connecting";
+	fileTypes: string[];
+}
+
 /**
  * Premium welcome screen with block-based Pi logo and two-column layout.
  */
@@ -15,12 +21,20 @@ export class WelcomeComponent implements Component {
 	private modelName: string;
 	private providerName: string;
 	private recentSessions: RecentSession[];
+	private lspServers: LspServerInfo[];
 
-	constructor(version: string, modelName: string, providerName: string, recentSessions: RecentSession[] = []) {
+	constructor(
+		version: string,
+		modelName: string,
+		providerName: string,
+		recentSessions: RecentSession[] = [],
+		lspServers: LspServerInfo[] = [],
+	) {
 		this.version = version;
 		this.modelName = modelName;
 		this.providerName = providerName;
 		this.recentSessions = recentSessions;
+		this.lspServers = lspServers;
 	}
 
 	invalidate(): void {}
@@ -32,6 +46,10 @@ export class WelcomeComponent implements Component {
 
 	setRecentSessions(sessions: RecentSession[]): void {
 		this.recentSessions = sessions;
+	}
+
+	setLspServers(servers: LspServerInfo[]): void {
+		this.lspServers = servers;
 	}
 
 	render(termWidth: number): string[] {
@@ -76,13 +94,32 @@ export class WelcomeComponent implements Component {
 			}
 		}
 
+		// LSP servers content
+		const lspLines: string[] = [];
+		if (this.lspServers.length === 0) {
+			lspLines.push(` ${theme.fg("dim", "No LSP servers")}`);
+		} else {
+			for (const server of this.lspServers) {
+				const icon =
+					server.status === "ready"
+						? theme.fg("success", "●")
+						: server.status === "connecting"
+							? theme.fg("warning", "○")
+							: theme.fg("error", "●");
+				const exts = server.fileTypes.slice(0, 3).join(" ");
+				lspLines.push(` ${icon} ${theme.fg("muted", server.name)} ${theme.fg("dim", exts)}`);
+			}
+		}
+
 		// Right column
 		const rightLines = [
 			` ${theme.bold(theme.fg("accent", "Tips"))}`,
 			` ${theme.fg("dim", "?")}${theme.fg("muted", " for keyboard shortcuts")}`,
 			` ${theme.fg("dim", "/")}${theme.fg("muted", " for commands")}`,
 			` ${theme.fg("dim", "!")}${theme.fg("muted", " to run bash")}`,
-			` ${theme.fg("dim", "/status")}${theme.fg("muted", " for loaded extensions")}`,
+			separator,
+			` ${theme.bold(theme.fg("accent", "LSP Servers"))}`,
+			...lspLines,
 			separator,
 			` ${theme.bold(theme.fg("accent", "Recent sessions"))}`,
 			...sessionLines,

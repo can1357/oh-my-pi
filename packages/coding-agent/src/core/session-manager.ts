@@ -28,6 +28,7 @@ export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
 	id: string;
+	title?: string; // Auto-generated title from first message
 	timestamp: string;
 	cwd: string;
 	parentSession?: string;
@@ -451,6 +452,66 @@ export function findMostRecentSession(sessionDir: string): string | null {
 		return files[0]?.path || null;
 	} catch {
 		return null;
+	}
+}
+
+/** Recent session info for display */
+export interface RecentSessionInfo {
+	name: string;
+	path: string;
+	timeAgo: string;
+}
+
+/** Format a time difference as a human-readable string */
+function formatTimeAgo(date: Date): string {
+	const now = Date.now();
+	const diffMs = now - date.getTime();
+	const diffMins = Math.floor(diffMs / 60000);
+	const diffHours = Math.floor(diffMs / 3600000);
+	const diffDays = Math.floor(diffMs / 86400000);
+
+	if (diffMins < 1) return "just now";
+	if (diffMins < 60) return `${diffMins}m ago`;
+	if (diffHours < 24) return `${diffHours}h ago`;
+	if (diffDays < 7) return `${diffDays}d ago`;
+	return date.toLocaleDateString();
+}
+
+/** Get recent sessions for display in welcome screen */
+export function getRecentSessions(sessionDir: string, limit = 3): RecentSessionInfo[] {
+	try {
+		const files = readdirSync(sessionDir)
+			.filter((f) => f.endsWith(".jsonl"))
+			.map((f) => join(sessionDir, f))
+			.filter(isValidSessionFile)
+			.map((path) => {
+				const stat = statSync(path);
+				// Try to get session name from first line
+				let name = path.split("/").pop()?.replace(".jsonl", "") ?? "Unknown";
+				try {
+					const content = readFileSync(path, "utf-8");
+					const firstLine = content.split("\n")[0];
+					if (firstLine) {
+						const header = JSON.parse(firstLine) as SessionHeader;
+						if (header.type === "session" && header.id) {
+							name = header.id;
+						}
+					}
+				} catch {
+					// Use filename as fallback
+				}
+				return { path, name, mtime: stat.mtime };
+			})
+			.sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
+			.slice(0, limit);
+
+		return files.map((f) => ({
+			name: f.name.length > 30 ? `${f.name.slice(0, 27)}...` : f.name,
+			path: f.path,
+			timeAgo: formatTimeAgo(f.mtime),
+		}));
+	} catch {
+		return [];
 	}
 }
 

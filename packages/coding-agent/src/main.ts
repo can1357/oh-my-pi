@@ -62,11 +62,20 @@ async function runInteractiveMode(
 	initialMessages: string[],
 	customTools: LoadedCustomTool[],
 	setToolUIContext: (uiContext: HookUIContext, hasUI: boolean) => void,
+	lspServers: Array<{ name: string; status: "ready" | "error"; fileTypes: string[] }> | undefined,
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 	fdPath: string | undefined = undefined,
 ): Promise<void> {
-	const mode = new InteractiveMode(session, version, changelogMarkdown, customTools, setToolUIContext, fdPath);
+	const mode = new InteractiveMode(
+		session,
+		version,
+		changelogMarkdown,
+		customTools,
+		setToolUIContext,
+		lspServers,
+		fdPath,
+	);
 
 	await mode.init();
 
@@ -393,7 +402,7 @@ export async function main(args: string[]) {
 	}
 
 	time("buildSessionOptions");
-	const { session, customToolsResult, modelFallbackMessage } = await createAgentSession(sessionOptions);
+	const { session, customToolsResult, modelFallbackMessage, lspServers } = await createAgentSession(sessionOptions);
 	time("createAgentSession");
 
 	if (!isInteractive && !session.model) {
@@ -449,6 +458,7 @@ export async function main(args: string[]) {
 			parsed.messages,
 			customToolsResult.tools,
 			customToolsResult.setUIContext,
+			lspServers,
 			initialMessage,
 			initialImages,
 			fdPath,

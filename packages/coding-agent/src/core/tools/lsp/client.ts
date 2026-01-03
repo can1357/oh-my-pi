@@ -98,6 +98,12 @@ const CLIENT_CAPABILITIES = {
 				properties: ["edit"],
 			},
 		},
+		formatting: {
+			dynamicRegistration: false,
+		},
+		rangeFormatting: {
+			dynamicRegistration: false,
+		},
 		publishDiagnostics: {
 			relatedInformation: true,
 			versionSupport: false,
@@ -585,6 +591,25 @@ export function shutdownAll(): void {
 		client.process.kill();
 	}
 	clients.clear();
+}
+
+/** Status of an LSP server */
+export interface LspServerStatus {
+	name: string;
+	status: "connecting" | "ready" | "error";
+	fileTypes: string[];
+	error?: string;
+}
+
+/**
+ * Get status of all active LSP clients.
+ */
+export function getActiveClients(): LspServerStatus[] {
+	return Array.from(clients.values()).map((client) => ({
+		name: client.config.command,
+		status: "ready" as const,
+		fileTypes: client.config.fileTypes,
+	}));
 }
 
 // =============================================================================

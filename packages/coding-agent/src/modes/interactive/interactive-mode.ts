@@ -28,7 +28,7 @@ import type { AgentSession, AgentSessionEvent } from "../../core/agent-session.j
 import type { CustomToolSessionEvent, LoadedCustomTool } from "../../core/custom-tools/index.js";
 import type { HookUIContext } from "../../core/hooks/index.js";
 import { createCompactionSummaryMessage } from "../../core/messages.js";
-import { type SessionContext, SessionManager } from "../../core/session-manager.js";
+import { getRecentSessions, type SessionContext, SessionManager } from "../../core/session-manager.js";
 import { loadSkills } from "../../core/skills.js";
 import { loadProjectContextFiles } from "../../core/system-prompt.js";
 import type { TruncationResult } from "../../core/tools/truncate.js";
@@ -158,6 +158,9 @@ export class InteractiveMode {
 		changelogMarkdown: string | undefined = undefined,
 		customTools: LoadedCustomTool[] = [],
 		private setToolUIContext: (uiContext: HookUIContext, hasUI: boolean) => void = () => {},
+		private lspServers:
+			| Array<{ name: string; status: "ready" | "error"; fileTypes: string[] }>
+			| undefined = undefined,
 		fdPath: string | undefined = undefined,
 	) {
 		this.session = session;
@@ -225,8 +228,22 @@ export class InteractiveMode {
 		const modelName = this.session.model?.name ?? "Unknown";
 		const providerName = this.session.model?.provider ?? "Unknown";
 
+		// Get recent sessions
+		const recentSessions = getRecentSessions(this.sessionManager.getSessionDir()).map((s) => ({
+			name: s.name,
+			timeAgo: s.timeAgo,
+		}));
+
+		// Convert LSP servers to welcome format
+		const lspServerInfo =
+			this.lspServers?.map((s) => ({
+				name: s.name,
+				status: s.status as "ready" | "error" | "connecting",
+				fileTypes: s.fileTypes,
+			})) ?? [];
+
 		// Add welcome header
-		const welcome = new WelcomeComponent(this.version, modelName, providerName);
+		const welcome = new WelcomeComponent(this.version, modelName, providerName, recentSessions, lspServerInfo);
 
 		// Setup UI layout
 		this.ui.addChild(new Spacer(1));

@@ -12,7 +12,7 @@ import {
 	sendRequest,
 } from "./client.js";
 import { getServerForFile, getServersForFile, hasCapability, type LspConfig, loadConfig } from "./config.js";
-import { applyWorkspaceEdit } from "./edits.js";
+import { applyTextEdits, applyWorkspaceEdit } from "./edits.js";
 import { renderCall, renderResult } from "./render.js";
 import * as rustAnalyzer from "./rust-analyzer.js";
 import {
@@ -32,6 +32,7 @@ import {
 	lspSchema,
 	type ServerConfig,
 	type SymbolInformation,
+	type TextEdit,
 	type WorkspaceEdit,
 } from "./types.js";
 import {
@@ -316,6 +317,85 @@ export async function getDiagnosticsForFile(
 		hasErrors,
 		hasWarnings,
 	};
+}
+
+/** Result from formatFile */
+export interface FileFormatResult {
+	/** Whether an LSP server with formatting support was available */
+	available: boolean;
+	/** Name of the LSP server used (if available) */
+	serverName?: string;
+	/** Whether formatting was applied */
+	formatted: boolean;
+	/** Error message if formatting failed */
+	error?: string;
+}
+
+/** Default formatting options for LSP */
+const DEFAULT_FORMAT_OPTIONS = {
+	tabSize: 3,
+	insertSpaces: true,
+	trimTrailingWhitespace: true,
+	insertFinalNewline: true,
+	trimFinalNewlines: true,
+};
+
+/**
+ * Format a file using LSP.
+ * Uses the first available server that supports formatting.
+ *
+ * @param absolutePath - Absolute path to the file
+ * @param cwd - Working directory for LSP config resolution
+ * @returns Format result indicating success/failure
+ */
+export async function formatFile(absolutePath: string, cwd: string): Promise<FileFormatResult> {
+	const config = getConfig(cwd);
+	const servers = getServersForFile(config, absolutePath);
+
+	if (servers.length === 0) {
+		return { available: false, formatted: false };
+	}
+
+	const uri = fileToUri(absolutePath);
+
+	// Try each server until one successfully formats
+	for (const [serverName, serverConfig] of servers) {
+		try {
+			const client = await getOrCreateClient(serverConfig, cwd);
+
+			// Check if server supports formatting
+			const caps = client.serverCapabilities;
+			if (!caps?.documentFormattingProvider) {
+				continue;
+			}
+
+			// Ensure file is open and synced
+			await ensureFileOpen(client, absolutePath);
+			await refreshFile(client, absolutePath);
+
+			// Request formatting
+			const edits = (await sendRequest(client, "textDocument/formatting", {
+				textDocument: { uri },
+				options: DEFAULT_FORMAT_OPTIONS,
+			})) as TextEdit[] | null;
+
+			if (!edits || edits.length === 0) {
+				// No changes needed - file already formatted
+				return { available: true, serverName, formatted: false };
+			}
+
+			// Apply the formatting edits
+			await applyTextEdits(absolutePath, edits);
+
+			// Notify LSP of the change so diagnostics update
+			await refreshFile(client, absolutePath);
+
+			return { available: true, serverName, formatted: true };
+		} catch {}
+	}
+
+	// No server could format
+	return { available: false, formatted: false };
 }
 
 export function createLspTool(cwd: string): AgentTool<typeof lspSchema, LspToolDetails, Theme> {

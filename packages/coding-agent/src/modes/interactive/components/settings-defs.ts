@@ -136,6 +136,15 @@ export const SETTINGS_DEFS: SettingDef[] = [
 		set: (sm, v) => sm.setMCPProjectConfigEnabled(v),
 	},
 	{
+		id: "lspFormatOnWrite",
+		tab: "config",
+		type: "boolean",
+		label: "LSP format on write",
+		description: "Automatically format code files using LSP after writing",
+		get: (sm) => sm.getLspFormatOnWrite(),
+		set: (sm, v) => sm.setLspFormatOnWrite(v),
+	},
+	{
 		id: "lspDiagnosticsOnWrite",
 		tab: "config",
 		type: "boolean",

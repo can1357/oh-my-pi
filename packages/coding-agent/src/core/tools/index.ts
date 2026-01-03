@@ -1,13 +1,25 @@
 export { type AskToolDetails, askTool, createAskTool } from "./ask.js";
 export { type BashToolDetails, bashTool, createBashTool } from "./bash.js";
-export { createEditTool, editTool } from "./edit.js";
+export { createEditTool, type EditToolOptions, editTool } from "./edit.js";
 // Exa MCP tools (22 tools)
 export { exaTools } from "./exa/index.js";
 export type { ExaRenderDetails, ExaSearchResponse, ExaSearchResult } from "./exa/types.js";
 export { createFindTool, type FindToolDetails, findTool } from "./find.js";
 export { createGrepTool, type GrepToolDetails, grepTool } from "./grep.js";
 export { createLsTool, type LsToolDetails, lsTool } from "./ls.js";
-export { createLspTool, type LspToolDetails, lspTool } from "./lsp/index.js";
+export {
+	createLspTool,
+	type FileDiagnosticsResult,
+	type FileFormatResult,
+	formatFile,
+	getDiagnosticsForFile,
+	getLspStatus,
+	type LspServerStatus,
+	type LspToolDetails,
+	type LspWarmupResult,
+	lspTool,
+	warmupLspServers,
+} from "./lsp/index.js";
 export { createNotebookTool, type NotebookToolDetails, notebookTool } from "./notebook.js";
 export { createReadTool, type ReadToolDetails, readTool } from "./read.js";
 export { BUNDLED_AGENTS, createTaskTool, taskTool } from "./task/index.js";
@@ -41,7 +53,7 @@ import { createEditTool, editTool } from "./edit.js";
 import { createFindTool, findTool } from "./find.js";
 import { createGrepTool, grepTool } from "./grep.js";
 import { createLsTool, lsTool } from "./ls.js";
-import { createLspTool, getDiagnosticsForFile, lspTool } from "./lsp/index.js";
+import { createLspTool, formatFile, getDiagnosticsForFile, lspTool } from "./lsp/index.js";
 import { createNotebookTool, notebookTool } from "./notebook.js";
 import { createReadTool, readTool } from "./read.js";
 import { createTaskTool, taskTool } from "./task/index.js";
@@ -61,6 +73,10 @@ export interface SessionContext {
 export interface CodingToolsOptions {
 	/** Whether to fetch LSP diagnostics after write tool writes files (default: true) */
 	lspDiagnosticsOnWrite?: boolean;
+	/** Whether to format files using LSP after write tool writes (default: true) */
+	lspFormatOnWrite?: boolean;
+	/** Whether to accept high-confidence fuzzy matches in edit tool (default: true) */
+	editFuzzyMatch?: boolean;
 }
 
 // Factory function type
@@ -71,12 +87,17 @@ const toolDefs: Record<string, { tool: Tool; create: ToolFactory }> = {
 	ask: { tool: askTool, create: createAskTool },
 	read: { tool: readTool, create: createReadTool },
 	bash: { tool: bashTool, create: createBashTool },
-	edit: { tool: editTool, create: createEditTool },
+	edit: {
+		tool: editTool,
+		create: (cwd, _ctx, options) => createEditTool(cwd, { fuzzyMatch: options?.editFuzzyMatch ?? true }),
+	},
 	write: {
 		tool: writeTool,
 		create: (cwd, _ctx, options) => {
+			const enableFormat = options?.lspFormatOnWrite ?? true;
 			const enableDiagnostics = options?.lspDiagnosticsOnWrite ?? true;
 			return createWriteTool(cwd, {
+				formatOnWrite: enableFormat ? (absolutePath) => formatFile(absolutePath, cwd) : undefined,
 				getDiagnostics: enableDiagnostics ? (absolutePath) => getDiagnosticsForFile(absolutePath, cwd) : undefined,
 			});
 		},

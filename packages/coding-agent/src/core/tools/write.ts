@@ -2,7 +2,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import { mkdir, writeFile } from "fs/promises";
 import { dirname } from "path";
-import type { FileDiagnosticsResult } from "./lsp/index.js";
+import type { FileDiagnosticsResult, FileFormatResult } from "./lsp/index.js";
 import { resolveToCwd } from "./path-utils.js";
 
 const writeSchema = Type.Object({
@@ -12,12 +12,18 @@ const writeSchema = Type.Object({
 
 /** Options for creating the write tool */
 export interface WriteToolOptions {
+	/** Callback to format file using LSP after writing */
+	formatOnWrite?: (absolutePath: string) => Promise<FileFormatResult>;
 	/** Callback to get LSP diagnostics after writing a file */
 	getDiagnostics?: (absolutePath: string) => Promise<FileDiagnosticsResult>;
 }
 
 /** Details returned by the write tool for TUI rendering */
 export interface WriteToolDetails {
+	/** Whether the file was formatted */
+	wasFormatted: boolean;
+	/** Format result (if available) */
+	formatResult?: FileFormatResult;
 	/** Whether LSP diagnostics were retrieved */
 	hasDiagnostics: boolean;
 	/** Diagnostic result (if available) */
@@ -92,7 +98,17 @@ Usage:
 								signal.removeEventListener("abort", onAbort);
 							}
 
-							// Get LSP diagnostics if callback provided
+							// Format file if callback provided (before diagnostics)
+							let formatResult: FileFormatResult | undefined;
+							if (options.formatOnWrite) {
+								try {
+									formatResult = await options.formatOnWrite(absolutePath);
+								} catch {
+									// Ignore formatting errors - don't fail the write
+								}
+							}
+
+							// Get LSP diagnostics if callback provided (after formatting)
 							let diagnosticsResult: FileDiagnosticsResult | undefined;
 							if (options.getDiagnostics) {
 								try {
@@ -105,6 +121,11 @@ Usage:
 							// Build result text
 							let resultText = `Successfully wrote ${content.length} bytes to ${path}`;
 
+							// Note if file was formatted
+							if (formatResult?.formatted) {
+								resultText += ` (formatted by ${formatResult.serverName})`;
+							}
+
 							// Append diagnostics if available and there are issues
 							if (diagnosticsResult?.available && diagnosticsResult.diagnostics.length > 0) {
 								resultText += `\n\nLSP Diagnostics (${diagnosticsResult.summary}):\n`;
@@ -114,6 +135,8 @@ Usage:
 							resolve({
 								content: [{ type: "text", text: resultText }],
 								details: {
+									wasFormatted: formatResult?.formatted ?? false,
+									formatResult,
 									hasDiagnostics: diagnosticsResult?.available ?? false,
 									diagnostics: diagnosticsResult,
 								},

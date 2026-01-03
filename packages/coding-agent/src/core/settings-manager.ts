@@ -52,6 +52,7 @@ export interface MCPSettings {
 }
 
 export interface LspSettings {
+	formatOnWrite?: boolean; // default: true (format files using LSP after write tool writes code files)
 	diagnosticsOnWrite?: boolean; // default: true (return LSP diagnostics after write tool writes code files)
 }
 
@@ -482,6 +483,18 @@ export class SettingsManager {
 			this.globalSettings.mcp = {};
 		}
 		this.globalSettings.mcp.enableProjectConfig = enabled;
+		this.save();
+	}
+
+	getLspFormatOnWrite(): boolean {
+		return this.settings.lsp?.formatOnWrite ?? true;
+	}
+
+	setLspFormatOnWrite(enabled: boolean): void {
+		if (!this.globalSettings.lsp) {
+			this.globalSettings.lsp = {};
+		}
+		this.globalSettings.lsp.formatOnWrite = enabled;
 		this.save();
 	}
 
