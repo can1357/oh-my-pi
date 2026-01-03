@@ -79,8 +79,10 @@ import {
 	createLsTool,
 	createReadOnlyTools,
 	createReadTool,
+	createRulebookTool,
 	createWriteTool,
 	editTool,
+	filterRulebookRules,
 	findTool,
 	grepTool,
 	lsTool,
@@ -604,7 +606,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const skills = options.skills ?? discoverSkills(cwd, agentDir, settingsManager.getSkillsSettings());
 	time("discoverSkills");
 
-	// Discover TTSR rules
+	// Discover rules
 	const ttsrManager = createTtsrManager(settingsManager.getTtsrSettings());
 	const rulesResult = loadCapability<Rule>(ruleCapability.id, { cwd });
 	for (const rule of rulesResult.items) {
@@ -613,6 +615,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 	time("discoverTtsrRules");
+
+	// Filter rules for the rulebook (non-TTSR, non-alwaysApply, with descriptions)
+	const rulebookRules = filterRulebookRules(rulesResult.items);
+	time("filterRulebookRules");
 
 	const contextFiles = options.contextFiles ?? discoverContextFiles(cwd, agentDir);
 	time("discoverContextFiles");
@@ -757,6 +763,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	let allToolsArray: Tool[] = [...builtInTools, ...wrappedCustomTools];
 
+	// Add rulebook tool if there are rules with descriptions (always enabled, regardless of --tools)
+	if (rulebookRules.length > 0) {
+		allToolsArray.push(createRulebookTool(rulebookRules));
+	}
+
 	// Filter out hidden tools unless explicitly requested
 	if (options.explicitTools) {
 		const explicitSet = new Set(options.explicitTools);
@@ -781,6 +792,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		cwd,
 		skills,
 		contextFiles,
+		rulebookRules,
 	});
 	time("buildSystemPrompt");
 
@@ -791,6 +803,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			cwd,
 			skills,
 			contextFiles,
+			rulebookRules,
 			customPrompt: options.systemPrompt,
 		});
 	} else {

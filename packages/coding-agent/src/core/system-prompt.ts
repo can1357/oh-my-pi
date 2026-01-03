@@ -8,8 +8,10 @@ import { contextFileCapability } from "../capability/context-file";
 import { systemPromptCapability } from "../capability/system-prompt";
 import { getDocsPath, getExamplesPath, getReadmePath } from "../config";
 import { type ContextFile, loadSync, type SystemPrompt as SystemPromptFile } from "../discovery/index";
+import type { Rule } from "../capability/rule";
 import type { SkillsSettings } from "./settings-manager";
 import { formatSkillsForPrompt, loadSkills, type Skill } from "./skills";
+import { formatRulesForPrompt } from "./tools/rulebook";
 import type { ToolName } from "./tools/index";
 
 /**
@@ -238,6 +240,8 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string; depth?: number }>;
 	/** Pre-loaded skills (skips discovery if provided). */
 	skills?: Skill[];
+	/** Pre-loaded rulebook rules (rules with descriptions, excluding TTSR and always-apply). */
+	rulebookRules?: Rule[];
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -250,6 +254,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 		cwd,
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
+		rulebookRules,
 	} = options;
 	const resolvedCwd = cwd ?? process.cwd();
 	const resolvedCustomPrompt = resolvePromptInput(customPrompt, "system prompt");
@@ -308,6 +313,11 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 		const customPromptHasRead = !selectedTools || selectedTools.includes("read");
 		if (customPromptHasRead && skills.length > 0) {
 			prompt += formatSkillsForPrompt(skills);
+		}
+
+		// Append rules section (always enabled when rules exist)
+		if (rulebookRules && rulebookRules.length > 0) {
+			prompt += formatRulesForPrompt(rulebookRules);
 		}
 
 		// Add date/time and working directory last
@@ -417,6 +427,11 @@ Documentation:
 	// Append skills section (only if read tool is available)
 	if (hasRead && skills.length > 0) {
 		prompt += formatSkillsForPrompt(skills);
+	}
+
+	// Append rules section (always enabled when rules exist)
+	if (rulebookRules && rulebookRules.length > 0) {
+		prompt += formatRulesForPrompt(rulebookRules);
 	}
 
 	// Add date/time and working directory last

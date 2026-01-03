@@ -46,6 +46,12 @@ export {
 	webSearchTool,
 } from "./web-search/index";
 export { createWriteTool, type WriteToolDetails, type WriteToolOptions, writeTool } from "./write";
+export {
+	createRulebookTool,
+	filterRulebookRules,
+	formatRulesForPrompt,
+	type RulebookToolDetails,
+} from "./rulebook";
 
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { askTool, createAskTool } from "./ask";
