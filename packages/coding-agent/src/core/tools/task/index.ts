@@ -15,7 +15,7 @@
 
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Theme } from "../../../modes/interactive/theme/theme";
-import { cleanupTempDir, createTempArtifactsDir, getArtifactsDir, writeArtifacts } from "./artifacts";
+import { cleanupTempDir, createTempArtifactsDir, getArtifactsDir } from "./artifacts";
 import { discoverAgents, getAgent } from "./discovery";
 import { runSubprocess } from "./executor";
 import { mapWithConcurrencyLimit } from "./parallel";
@@ -322,20 +322,12 @@ export function createTaskTool(
 					});
 				});
 
-				// Write artifacts
+				// Collect output paths (artifacts already written by executor in real-time)
 				const outputPaths: string[] = [];
 				for (const result of results) {
-					const fullTask = context ? `${context}\n\n${result.task}` : result.task;
-					const paths = await writeArtifacts(
-						effectiveArtifactsDir,
-						result.agent,
-						result.index,
-						fullTask,
-						result.output,
-						result.jsonlEvents,
-					);
-					outputPaths.push(paths.outputPath);
-					result.artifactPaths = paths;
+					if (result.artifactPaths) {
+						outputPaths.push(result.artifactPaths.outputPath);
+					}
 				}
 
 				// Build final output - match plugin format

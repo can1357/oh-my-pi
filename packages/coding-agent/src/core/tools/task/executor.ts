@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import { ensureArtifactsDir, getArtifactPaths } from "./artifacts";
 import { resolveModelPattern } from "./model-resolver";
 import {
 	type AgentDefinition,
@@ -166,6 +167,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// Build full task with context
 	const fullTask = context ? `${context}\n\n${task}` : task;
 
+	// Set up artifact paths and write input file upfront if artifacts dir provided
+	let artifactPaths: { inputPath: string; outputPath: string; jsonlPath: string } | undefined;
+	let subtaskSessionFile: string | undefined;
+
+	if (options.artifactsDir) {
+		ensureArtifactsDir(options.artifactsDir);
+		artifactPaths = getArtifactPaths(options.artifactsDir, agent.name, index);
+		subtaskSessionFile = artifactPaths.jsonlPath;
+
+		// Write input file immediately (real-time visibility)
+		try {
+			fs.writeFileSync(artifactPaths.inputPath, fullTask, "utf-8");
+		} catch {
+			// Non-fatal, continue without input artifact
+		}
+	}
+
 	// Build args
 	const args: string[] = ["--mode", "json", "--non-interactive"];
 
@@ -183,8 +201,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		args.push("--model", resolvedModel);
 	}
 
-	// Add session options
-	if (options.sessionFile) {
+	// Add session options - use subtask-specific session file for real-time streaming
+	if (subtaskSessionFile) {
+		args.push("--session", subtaskSessionFile);
+	} else if (options.sessionFile) {
 		args.push("--session", options.sessionFile);
 	} else {
 		args.push("--no-session");
@@ -351,6 +371,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const rawOutput = finalOutput || output;
 	const { text: truncatedOutput, truncated } = truncateOutput(rawOutput);
 
+	// Write output artifact (input and jsonl already written in real-time)
+	if (artifactPaths) {
+		try {
+			fs.writeFileSync(artifactPaths.outputPath, rawOutput, "utf-8");
+		} catch {
+			// Non-fatal
+		}
+	}
+
 	// Update final progress
 	progress.status = exitCode === 0 ? "completed" : "failed";
 	progress.durationMs = Date.now() - startTime;
@@ -370,5 +399,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		modelOverride,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		jsonlEvents,
+		artifactPaths,
 	};
 }

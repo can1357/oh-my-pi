@@ -16,6 +16,7 @@
 ### Changed
 
 - Updated bundled `reviewer` agent to use structured review tools with priority-based findings (P0-P3) and formal verdict submission
+- Task tool now streams artifacts in real-time: input written before spawn, session jsonl written by subprocess, output written at completion
 
 ### Fixed
 
