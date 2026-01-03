@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.0.1337] - 2026-01-03
+
 ### Added
 
 - Added unified capability-based discovery system for loading configuration from multiple AI coding tools (Claude Code, Cursor, Windsurf, Gemini, Codex, Cline, GitHub Copilot, VS Code)

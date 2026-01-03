@@ -2401,30 +2401,23 @@ export class InteractiveMode {
 
 		const capitalize = (value: string): string => value.charAt(0).toUpperCase() + value.slice(1);
 
-		const renderSource = (source: StatusSource): { plain: string; rendered: string } => {
-			if (source === "builtin") {
-				return { plain: "builtin", rendered: theme.fg("dim", "builtin") };
-			}
-			if (source === "unknown") {
-				return { plain: "unknown", rendered: theme.fg("dim", "unknown") };
-			}
+		const resolveSourceText = (source: StatusSource): string => {
+			if (source === "builtin") return "builtin";
+			if (source === "unknown") return "unknown";
 			if ("mcpServer" in source) {
-				if (!source.provider) {
-					const label = `mcp:${source.mcpServer}`;
-					return { plain: label, rendered: label };
-				}
-				const label = `${source.mcpServer} via ${source.provider}`;
-				return {
-					plain: label,
-					rendered: `${source.mcpServer} ${theme.italic("via")} ${source.provider}`,
-				};
+				if (!source.provider) return `mcp:${source.mcpServer}`;
+				return `${source.mcpServer} via ${source.provider}`;
 			}
 			const levelLabel = capitalize(source.level);
-			const label = `via ${source.provider} (${levelLabel})`;
-			return {
-				plain: label,
-				rendered: `${theme.italic("via")} ${source.provider} (${levelLabel})`,
-			};
+			return `via ${source.provider} (${levelLabel})`;
+		};
+
+		const renderSourceText = (text: string): string => text.replace(/\bvia\b/, theme.italic("via"));
+
+		const truncateText = (text: string, maxLen: number): string => {
+			if (text.length <= maxLen) return text;
+			if (maxLen <= 3) return text.slice(0, Math.max(0, maxLen));
+			return `${text.slice(0, maxLen - 3)}...`;
 		};
 
 		// Helper to format a section with consistent column alignment
@@ -2437,26 +2430,37 @@ export class InteractiveMode {
 		): string => {
 			if (items.length === 0) return "";
 
-			const lines = items.map((item) => {
+			const lineItems = items.map((item) => {
 				const name = getName(item);
 				const desc = getDesc(item);
-				const source = renderSource(getSource(item));
-				const nameWithSource = source.plain ? `${name} ${source.plain}` : name;
-				return {
-					name,
-					nameWithSource,
-					nameRendered: source.plain ? `${theme.bold(name)} ${source.rendered}` : theme.bold(name),
-					desc,
-				};
+				const sourceText = resolveSourceText(getSource(item));
+				const nameWithSource = sourceText ? `${name} ${sourceText}` : name;
+				return { name, sourceText, nameWithSource, desc };
 			});
 
-			const maxNameWidth = Math.min(50, Math.max(...lines.map((line) => line.nameWithSource.length)));
-			const formattedLines = lines.map((line) => {
-				const pad = Math.max(0, maxNameWidth - line.nameWithSource.length);
-				const paddedName = line.nameRendered + " ".repeat(pad);
+			const maxNameWidth = Math.min(60, Math.max(...lineItems.map((line) => line.nameWithSource.length)));
+			const formattedLines = lineItems.map((line) => {
+				let nameText = line.name;
+				let sourceText = line.sourceText;
+
+				if (sourceText) {
+					let availableForName = maxNameWidth - sourceText.length - 1;
+					if (availableForName < 1) {
+						sourceText = truncateText(sourceText, Math.max(0, maxNameWidth - 4));
+						availableForName = maxNameWidth - sourceText.length - 1;
+					}
+					nameText = truncateText(nameText, Math.max(1, availableForName));
+				} else {
+					nameText = truncateText(nameText, maxNameWidth);
+				}
+
+				const nameWithSourcePlain = sourceText ? `${nameText} ${sourceText}` : nameText;
+				const sourceRendered = sourceText ? renderSourceText(sourceText) : "";
+				const nameRendered = sourceText ? `${theme.bold(nameText)} ${sourceRendered}` : theme.bold(nameText);
+				const pad = Math.max(0, maxNameWidth - nameWithSourcePlain.length);
 				const desc = line.desc?.trim();
-				const descPart = desc ? `  ${theme.fg("dim", desc.slice(0, 50) + (desc.length > 50 ? "…" : ""))}` : "";
-				return `  ${paddedName}${descPart}`;
+				const descPart = desc ? `  ${theme.fg("dim", desc.slice(0, 50) + (desc.length > 50 ? "..." : ""))}` : "";
+				return `  ${nameRendered}${" ".repeat(pad)}${descPart}`;
 			});
 
 			return `${theme.bold(theme.fg("accent", title))}\n${formattedLines.join("\n")}`;

@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [3.0.1337] - 2026-01-03
 ### Changed
 
 - Updated configuration directory from `~/.pi/mom/` to `~/.omp/mom/` for auth and custom tools
