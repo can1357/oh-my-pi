@@ -91,7 +91,7 @@ Parameters:
 					details: { error: "EXA_API_KEY not found", toolName: "exa_search" },
 				};
 			}
-			const response = await callExaTool("web_search", params, apiKey);
+			const response = await callExaTool("web_search_exa", params, apiKey);
 
 			if (isSearchResponse(response)) {
 				const formatted = formatSearchResults(response);
@@ -187,7 +187,8 @@ Similar parameters to exa_search, optimized for research depth.`,
 					details: { error: "EXA_API_KEY not found", toolName: "exa_search_deep" },
 				};
 			}
-			const response = await callExaTool("deep_search_exa", params, apiKey);
+			const args = { ...params, type: "deep" };
+			const response = await callExaTool("web_search_exa", args, apiKey);
 
 			if (isSearchResponse(response)) {
 				const formatted = formatSearchResults(response);
@@ -305,7 +306,7 @@ Parameters:
 					details: { error: "EXA_API_KEY not found", toolName: "exa_crawl" },
 				};
 			}
-			const response = await callExaTool("crawling_exa", params, apiKey);
+			const response = await callExaTool("crawling", params, apiKey);
 
 			if (isSearchResponse(response)) {
 				const formatted = formatSearchResults(response);

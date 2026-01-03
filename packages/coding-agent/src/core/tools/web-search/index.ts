@@ -345,7 +345,9 @@ Parameters:
 	parameters: webSearchDeepSchema,
 
 	async execute(_toolCallId, params, _onUpdate, _ctx, _signal) {
-		return executeExaTool("deep_search_exa", params as Record<string, unknown>, "web_search_deep");
+		const { num_results, ...rest } = params as Record<string, unknown>;
+		const args = { ...rest, type: "deep", numResults: num_results ?? 10 };
+		return executeExaTool("web_search_exa", args, "web_search_deep");
 	},
 
 	renderCall(args, theme) {
@@ -404,7 +406,7 @@ Parameters:
 	parameters: webSearchCrawlSchema,
 
 	async execute(_toolCallId, params, _onUpdate, _ctx, _signal) {
-		return executeExaTool("crawling_exa", params as Record<string, unknown>, "web_search_crawl");
+		return executeExaTool("crawling", params as Record<string, unknown>, "web_search_crawl");
 	},
 
 	renderCall(args, theme) {
@@ -435,7 +437,7 @@ Parameters:
 	parameters: webSearchLinkedinSchema,
 
 	async execute(_toolCallId, params, _onUpdate, _ctx, _signal) {
-		return executeExaTool("linkedin_search_exa", params as Record<string, unknown>, "web_search_linkedin");
+		return executeExaTool("linkedin_search", params as Record<string, unknown>, "web_search_linkedin");
 	},
 
 	renderCall(args, theme) {
@@ -465,7 +467,7 @@ Parameters:
 	parameters: webSearchCompanySchema,
 
 	async execute(_toolCallId, params, _onUpdate, _ctx, _signal) {
-		return executeExaTool("company_research_exa", params as Record<string, unknown>, "web_search_company");
+		return executeExaTool("company_research", params as Record<string, unknown>, "web_search_company");
 	},
 
 	renderCall(args, theme) {

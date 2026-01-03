@@ -248,10 +248,8 @@ export async function searchExa(params: ExaSearchParams): Promise<WebSearchRespo
 
 	const args: Record<string, unknown> = {
 		query: params.query,
-		num_results: params.num_results ?? 10,
+		numResults: params.num_results ?? 10,
 		type: params.type ?? "auto",
-		text: true, // Include text for richer results
-		highlights: true,
 	};
 
 	if (params.include_domains?.length) {
@@ -267,7 +265,7 @@ export async function searchExa(params: ExaSearchParams): Promise<WebSearchRespo
 		args.end_published_date = params.end_published_date;
 	}
 
-	const response = await callExaMCP(apiKey, "web_search", args);
+	const response = await callExaMCP(apiKey, "web_search_exa", args);
 
 	if (response.error) {
 		throw new Error(`Exa MCP error: ${response.error.message}`);

@@ -34,7 +34,7 @@ Parameters:
 					details: { error: "EXA_API_KEY not found", toolName: "exa_company" },
 				};
 			}
-			const response = await callExaTool("company_research_exa", params, apiKey);
+			const response = await callExaTool("company_research", params, apiKey);
 
 			if (isSearchResponse(response)) {
 				const formatted = formatSearchResults(response);

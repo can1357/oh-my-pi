@@ -23,7 +23,7 @@ export interface MCPToolWrapperConfig {
 	name: string;
 	/** Display label for UI */
 	label: string;
-	/** MCP tool name to call (e.g., "web_search") */
+	/** MCP tool name to call (e.g., "web_search_exa") */
 	mcpToolName: string;
 	/** Whether this is a websets tool (uses different MCP endpoint) */
 	isWebsetsTool?: boolean;
@@ -121,14 +121,13 @@ export interface WebsetEnrichment {
 /** Tool name mappings: MCP name -> our tool name */
 export const EXA_TOOL_MAPPINGS = {
 	// Search tools
-	web_search: "exa_search",
-	deep_search_exa: "exa_search_deep",
+	web_search_exa: "exa_search",
 	get_code_context_exa: "exa_search_code",
-	crawling_exa: "exa_crawl",
+	crawling: "exa_crawl",
 	// LinkedIn
-	linkedin_search_exa: "exa_linkedin",
+	linkedin_search: "exa_linkedin",
 	// Company
-	company_research_exa: "exa_company",
+	company_research: "exa_company",
 	// Researcher
 	deep_researcher_start: "exa_researcher_start",
 	deep_researcher_check: "exa_researcher_poll",
