@@ -31,6 +31,7 @@
 
 ### Fixed
 
+- Fixed pre-commit hook race condition causing `index.lock` errors when GitKraken/IDE git integrations detect file changes during formatting
 - Fixed Task tool output artifacts (`out.md`) containing duplicated text from streaming updates
 - Fixed Task tool progress display showing repeated nearly-identical lines during streaming
 - Fixed Task tool subprocess model selection ignoring agent's configured model and falling back to settings default. The `--model` flag now accepts `provider/model` format directly.

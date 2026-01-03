@@ -1,21 +1,19 @@
 #!/bin/sh
 
-# Get list of staged files before running check
-STAGED_FILES=$(git diff --cached --name-only)
-
-# Run the check script (formatting, linting, and type checking)
-echo "Running formatting, linting, and type checking..."
-npm run check
+# Run lint-staged (formats only staged files, no re-staging race condition)
+echo "Running lint-staged..."
+bunx lint-staged
 if [ $? -ne 0 ]; then
-  echo "❌ Checks failed. Please fix the errors before committing."
+  echo "❌ lint-staged failed. Please fix the errors before committing."
   exit 1
 fi
 
-# Restage files that were previously staged and may have been modified by formatting
-for file in $STAGED_FILES; do
-  if [ -f "$file" ]; then
-    git add "$file"
-  fi
-done
+# Run type checking
+echo "Running type checks..."
+bun --cwd=packages/coding-agent run check && bun --cwd=packages/web-ui run check
+if [ $? -ne 0 ]; then
+  echo "❌ Type checks failed. Please fix the errors before committing."
+  exit 1
+fi
 
 echo "✅ All pre-commit checks passed!"
