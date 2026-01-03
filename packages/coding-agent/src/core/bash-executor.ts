@@ -12,6 +12,7 @@ import { join } from "node:path";
 import type { Subprocess } from "bun";
 import stripAnsi from "strip-ansi";
 import { getShellConfig, killProcessTree, sanitizeBinaryOutput } from "../utils/shell";
+import { getOrCreateSnapshot, getSnapshotSourceCommand } from "../utils/shell-snapshot";
 import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate";
 
 // ============================================================================
@@ -56,13 +57,23 @@ export interface BashResult {
  * @param options - Optional streaming callback and abort signal
  * @returns Promise resolving to execution result
  */
-export function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {
+export async function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {
+	const { shell, args, env, prefix } = getShellConfig();
+
+	// Get or create shell snapshot (for aliases, functions, options)
+	const snapshotPath = await getOrCreateSnapshot(shell, env);
+	const snapshotPrefix = getSnapshotSourceCommand(snapshotPath);
+
+	// Build final command: snapshot + prefix + command
+	const prefixedCommand = prefix ? `${prefix} ${command}` : command;
+	const finalCommand = `${snapshotPrefix}${prefixedCommand}`;
+
 	return new Promise((resolve, reject) => {
-		const { shell, args } = getShellConfig();
-		const child: Subprocess = Bun.spawn([shell, ...args, command], {
+		const child: Subprocess = Bun.spawn([shell, ...args, finalCommand], {
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "pipe",
+			env,
 		});
 
 		// Track sanitized output for truncation

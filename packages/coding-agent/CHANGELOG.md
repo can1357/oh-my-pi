@@ -1,6 +1,16 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added shell environment snapshot to preserve user aliases, functions, and shell options when executing bash commands
+- Added support for `PI_BASH_NO_CI`, `PI_BASH_NO_LOGIN`, and `PI_SHELL_PREFIX` environment variables for shell customization
+- Added zsh support alongside bash for shell detection and configuration
+
+### Changed
+
+- Changed shell detection to prefer user's `$SHELL` when it's bash or zsh, with improved fallback path resolution
+- Changed Edit tool to reject `.ipynb` files with guidance to use NotebookEdit tool instead
 
 ## [1.5.0] - 2026-01-03
 ### Added

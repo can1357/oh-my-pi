@@ -63,6 +63,14 @@ Usage:
 		) => {
 			const absolutePath = resolveToCwd(path, cwd);
 
+			// Reject .ipynb files - use NotebookEdit tool instead
+			if (absolutePath.endsWith(".ipynb")) {
+				return {
+					content: [{ type: "text", text: "Cannot edit Jupyter notebooks with the Edit tool. Use the NotebookEdit tool instead." }],
+					details: undefined,
+				};
+			}
+
 			return new Promise<{
 				content: Array<{ type: "text"; text: string }>;
 				details: EditToolDetails | undefined;

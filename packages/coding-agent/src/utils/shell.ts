@@ -1,7 +1,58 @@
-import { existsSync } from "node:fs";
+import { existsSync, accessSync, constants } from "node:fs";
 import { SettingsManager } from "../core/settings-manager";
 
-let cachedShellConfig: { shell: string; args: string[] } | null = null;
+export interface ShellConfig {
+   shell: string;
+   args: string[];
+   env: Record<string, string | undefined>;
+   prefix: string | undefined;
+}
+
+let cachedShellConfig: ShellConfig | null = null;
+
+/**
+ * Check if a shell binary is executable.
+ */
+function isExecutable(path: string): boolean {
+   try {
+      accessSync(path, constants.X_OK);
+      return true;
+   } catch {
+      return false;
+   }
+}
+
+/**
+ * Build the spawn environment (cached).
+ */
+function buildSpawnEnv(shell: string): Record<string, string | undefined> {
+   const noCI = process.env.PI_BASH_NO_CI || process.env.CLAUDE_BASH_NO_CI;
+   return {
+      ...process.env,
+      SHELL: shell,
+      GIT_EDITOR: "true",
+      GPG_TTY: "not a tty",
+      PICODE: "1",
+      CLAUDECODE: "1",
+      ...(noCI ? {} : { CI: "true" }),
+   };
+}
+
+/**
+ * Get shell args, optionally including login shell flag.
+ * Supports PI_BASH_NO_LOGIN and CLAUDE_BASH_NO_LOGIN to skip -l.
+ */
+function getShellArgs(): string[] {
+   const noLogin = process.env.PI_BASH_NO_LOGIN || process.env.CLAUDE_BASH_NO_LOGIN;
+   return noLogin ? ["-c"] : ["-l", "-c"];
+}
+
+/**
+ * Get shell prefix for wrapping commands (profilers, strace, etc.).
+ */
+function getShellPrefix(): string | undefined {
+   return process.env.PI_SHELL_PREFIX || process.env.CLAUDE_CODE_SHELL_PREFIX;
+}
 
 /**
  * Find bash executable on PATH (Windows)
@@ -22,83 +73,112 @@ function findBashOnPath(): string | null {
 }
 
 /**
+ * Build full shell config from a shell path.
+ */
+function buildConfig(shell: string): ShellConfig {
+   return {
+      shell,
+      args: getShellArgs(),
+      env: buildSpawnEnv(shell),
+      prefix: getShellPrefix(),
+   };
+}
+
+/**
  * Get shell configuration based on platform.
  * Resolution order:
  * 1. User-specified shellPath in settings.json
  * 2. On Windows: Git Bash in known locations, then bash on PATH
- * 3. On Unix: /bin/bash
+ * 3. On Unix: $SHELL if bash/zsh, then fallback paths
  * 4. Fallback: sh
  */
-export function getShellConfig(): { shell: string; args: string[] } {
-	if (cachedShellConfig) {
-		return cachedShellConfig;
-	}
+export function getShellConfig(): ShellConfig {
+   if (cachedShellConfig) {
+      return cachedShellConfig;
+   }
 
-	const settings = SettingsManager.create();
-	const customShellPath = settings.getShellPath();
+   const settings = SettingsManager.create();
+   const customShellPath = settings.getShellPath();
 
-	// 1. Check user-specified shell path
-	if (customShellPath) {
-		if (existsSync(customShellPath)) {
-			cachedShellConfig = { shell: customShellPath, args: ["-c"] };
-			return cachedShellConfig;
-		}
-		throw new Error(
-			`Custom shell path not found: ${customShellPath}\nPlease update shellPath in ~/.pi/agent/settings.json`,
-		);
-	}
+   // 1. Check user-specified shell path
+   if (customShellPath) {
+      if (existsSync(customShellPath)) {
+         cachedShellConfig = buildConfig(customShellPath);
+         return cachedShellConfig;
+      }
+      throw new Error(
+         `Custom shell path not found: ${customShellPath}\nPlease update shellPath in ~/.pi/agent/settings.json`,
+      );
+   }
 
-	if (process.platform === "win32") {
-		// 2. Try Git Bash in known locations
-		const paths: string[] = [];
-		const programFiles = process.env.ProgramFiles;
-		if (programFiles) {
-			paths.push(`${programFiles}\\Git\\bin\\bash.exe`);
-		}
-		const programFilesX86 = process.env["ProgramFiles(x86)"];
-		if (programFilesX86) {
-			paths.push(`${programFilesX86}\\Git\\bin\\bash.exe`);
-		}
+   if (process.platform === "win32") {
+      // 2. Try Git Bash in known locations
+      const paths: string[] = [];
+      const programFiles = process.env.ProgramFiles;
+      if (programFiles) {
+         paths.push(`${programFiles}\\Git\\bin\\bash.exe`);
+      }
+      const programFilesX86 = process.env["ProgramFiles(x86)"];
+      if (programFilesX86) {
+         paths.push(`${programFilesX86}\\Git\\bin\\bash.exe`);
+      }
 
-		for (const path of paths) {
-			if (existsSync(path)) {
-				cachedShellConfig = { shell: path, args: ["-c"] };
-				return cachedShellConfig;
-			}
-		}
+      for (const path of paths) {
+         if (existsSync(path)) {
+            cachedShellConfig = buildConfig(path);
+            return cachedShellConfig;
+         }
+      }
 
-		// 3. Fallback: search bash.exe on PATH (Cygwin, MSYS2, WSL, etc.)
-		const bashOnPath = findBashOnPath();
-		if (bashOnPath) {
-			cachedShellConfig = { shell: bashOnPath, args: ["-c"] };
-			return cachedShellConfig;
-		}
+      // 3. Fallback: search bash.exe on PATH (Cygwin, MSYS2, WSL, etc.)
+      const bashOnPath = findBashOnPath();
+      if (bashOnPath) {
+         cachedShellConfig = buildConfig(bashOnPath);
+         return cachedShellConfig;
+      }
 
-		throw new Error(
-			`No bash shell found. Options:\n` +
-				`  1. Install Git for Windows: https://git-scm.com/download/win\n` +
-				`  2. Add your bash to PATH (Cygwin, MSYS2, etc.)\n` +
-				`  3. Set shellPath in ~/.pi/agent/settings.json\n\n` +
-				`Searched Git Bash in:\n${paths.map((p) => `  ${p}`).join("\n")}`,
-		);
-	}
+      throw new Error(
+         `No bash shell found. Options:\n` +
+            `  1. Install Git for Windows: https://git-scm.com/download/win\n` +
+            `  2. Add your bash to PATH (Cygwin, MSYS2, etc.)\n` +
+            `  3. Set shellPath in ~/.pi/agent/settings.json\n\n` +
+            `Searched Git Bash in:\n${paths.map((p) => `  ${p}`).join("\n")}`,
+      );
+   }
 
-	// Unix: prefer user's shell from $SHELL, fallback to bash, then sh
-	const userShell = process.env.SHELL;
-	if (userShell && existsSync(userShell)) {
-		cachedShellConfig = { shell: userShell, args: ["-c"] };
-		return cachedShellConfig;
-	}
+   // Unix: prefer user's shell from $SHELL if it's bash/zsh and executable
+   const userShell = process.env.SHELL;
+   const isValidShell = userShell && (userShell.includes("bash") || userShell.includes("zsh"));
+   if (isValidShell && isExecutable(userShell)) {
+      cachedShellConfig = buildConfig(userShell);
+      return cachedShellConfig;
+   }
 
-	const bashPath = Bun.which("bash");
-	if (bashPath) {
-		cachedShellConfig = { shell: bashPath, args: ["-c"] };
-		return cachedShellConfig;
-	}
+   // Fallback paths (Claude's approach: check known locations)
+   const fallbackPaths = ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"];
+   const preferZsh = !userShell?.includes("bash");
+   const shellOrder = preferZsh ? ["zsh", "bash"] : ["bash", "zsh"];
 
-	const shPath = Bun.which("sh");
-	cachedShellConfig = { shell: shPath || "sh", args: ["-c"] };
-	return cachedShellConfig;
+   for (const shellName of shellOrder) {
+      for (const dir of fallbackPaths) {
+         const shellPath = `${dir}/${shellName}`;
+         if (isExecutable(shellPath)) {
+            cachedShellConfig = buildConfig(shellPath);
+            return cachedShellConfig;
+         }
+      }
+   }
+
+   // Last resort: use Bun.which
+   const bashPath = Bun.which("bash");
+   if (bashPath) {
+      cachedShellConfig = buildConfig(bashPath);
+      return cachedShellConfig;
+   }
+
+   const shPath = Bun.which("sh");
+   cachedShellConfig = buildConfig(shPath || "sh");
+   return cachedShellConfig;
 }
 
 /**
