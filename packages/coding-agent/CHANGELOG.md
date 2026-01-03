@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.5.1337] - 2026-01-03
+
 ### Added
 
 - Added session header and footer output in text mode showing version, model, provider, thinking level, and session ID

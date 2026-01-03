@@ -154,7 +154,7 @@ export class ExtensionList implements Component {
 	private renderMasterSwitch(item: ListItem & { type: "master" }, isSelected: boolean, width: number): string {
 		const checkbox = item.enabled ? theme.fg("success", "[x]") : theme.fg("dim", "[ ]");
 		const icon = "📦";
-		let label = `Enable ${item.providerName}`;
+		const label = `Enable ${item.providerName}`;
 		const badge = theme.fg("warning", "(Master Switch)");
 
 		let line = `${checkbox} ${icon} ${label}  ${badge}`;
@@ -214,7 +214,7 @@ export class ExtensionList implements Component {
 			const triggerStyle = effectivelyDisabled ? "dim" : "muted";
 			const remainingWidth = width - visibleWidth(line) - 2;
 			if (remainingWidth > 5) {
-				line += "  " + truncateToWidth(theme.fg(triggerStyle as "dim" | "muted", ext.trigger), remainingWidth);
+				line += `  ${truncateToWidth(theme.fg(triggerStyle as "dim" | "muted", ext.trigger), remainingWidth)}`;
 			}
 		}
 

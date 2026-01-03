@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-web-ui",
-	"version": "3.4.1337",
+	"version": "3.5.1337",
 	"description": "Reusable web UI components for AI chat interfaces powered by @oh-my-pi/pi-ai",
 	"type": "module",
 	"main": "src/index.ts",

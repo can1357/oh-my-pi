@@ -118,7 +118,7 @@ export class ExtensionDashboard extends Container {
 			}
 
 			// Apply strikethrough for disabled providers
-			const displayLabel = isDisabled ? label.split("").join("\u0336") + "\u0336" : label;
+			const displayLabel = isDisabled ? `${label.split("").join("\u0336")}\u0336` : label;
 
 			if (isActive) {
 				// Active tab: background highlight

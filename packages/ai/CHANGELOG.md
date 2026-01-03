@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [3.5.1337] - 2026-01-03
 ### Added
 
 - Added localhost URL detection for OpenAI-compatible provider auto-configuration
