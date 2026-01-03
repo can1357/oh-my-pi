@@ -152,8 +152,7 @@ ${chalk.bold("Usage:")}
   ${APP_NAME} [options] [@files...] [messages...]
 
 ${chalk.bold("Options:")}
-  --provider <name>              Provider name (default: google)
-  --model <id>                   Model ID (default: gemini-2.5-flash)
+  --model <pattern>              Model to use (fuzzy match: "opus", "gpt-5.2", or "p-openai/gpt-5.2")
   --smol <id>                    Smol/fast model for lightweight tasks (or PI_SMOL_MODEL env)
   --slow <id>                    Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)
   --api-key <key>                API key (defaults to env vars)
@@ -199,8 +198,8 @@ ${chalk.bold("Examples:")}
   # Continue previous session
   ${APP_NAME} --continue "What did we discuss?"
 
-  # Use different model
-  ${APP_NAME} --provider openai --model gpt-4o-mini "Help me refactor this code"
+  # Use different model (fuzzy matching)
+  ${APP_NAME} --model opus "Help me refactor this code"
 
   # Limit model cycling to specific models
   ${APP_NAME} --models claude-sonnet,claude-haiku,gpt-4o

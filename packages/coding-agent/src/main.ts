@@ -20,7 +20,7 @@ import type { LoadedCustomTool } from "./core/custom-tools/index";
 import { exportFromFile } from "./core/export-html/index";
 import type { HookUIContext } from "./core/index";
 import type { ModelRegistry } from "./core/model-registry";
-import { resolveModelScope, type ScopedModel } from "./core/model-resolver";
+import { parseModelPattern, resolveModelScope, type ScopedModel } from "./core/model-resolver";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage, discoverModels } from "./core/sdk";
 import { SessionManager } from "./core/session-manager";
 import { SettingsManager } from "./core/settings-manager";
@@ -213,12 +213,12 @@ function discoverSystemPromptFile(): string | undefined {
 	return undefined;
 }
 
-function buildSessionOptions(
+async function buildSessionOptions(
 	parsed: Args,
 	scopedModels: ScopedModel[],
 	sessionManager: SessionManager | undefined,
 	modelRegistry: ModelRegistry,
-): CreateAgentSessionOptions {
+): Promise<CreateAgentSessionOptions> {
 	const options: CreateAgentSessionOptions = {};
 
 	// Auto-discover SYSTEM.md if no CLI system prompt provided
@@ -230,11 +230,15 @@ function buildSessionOptions(
 		options.sessionManager = sessionManager;
 	}
 
-	// Model from CLI
-	if (parsed.provider && parsed.model) {
-		const model = modelRegistry.find(parsed.provider, parsed.model);
+	// Model from CLI (--model) - uses same fuzzy matching as --models
+	if (parsed.model) {
+		const available = await modelRegistry.getAvailable();
+		const { model, warning } = parseModelPattern(parsed.model, available);
+		if (warning) {
+			console.warn(chalk.yellow(`Warning: ${warning}`));
+		}
 		if (!model) {
-			console.error(chalk.red(`Model ${parsed.provider}/${parsed.model} not found`));
+			console.error(chalk.red(`Model "${parsed.model}" not found`));
 			process.exit(1);
 		}
 		options.model = model;
@@ -399,7 +403,7 @@ export async function main(args: string[]) {
 		sessionManager = SessionManager.open(selectedPath);
 	}
 
-	const sessionOptions = buildSessionOptions(parsed, scopedModels, sessionManager, modelRegistry);
+	const sessionOptions = await buildSessionOptions(parsed, scopedModels, sessionManager, modelRegistry);
 	sessionOptions.authStorage = authStorage;
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.hasUI = isInteractive;
