@@ -26,7 +26,15 @@ Verify:
 grep -h '"version"' packages/*/package.json
 ```
 
-### 2. Update Changelogs
+### 2. Regenerate Lockfile
+
+Regenerate `bun.lock` so workspace dependencies resolve to the new version:
+
+```bash
+rm bun.lock && bun install
+```
+
+### 3. Update Changelogs
 
 Replace `[Unreleased]` with the version and date in all changelogs:
 
@@ -52,7 +60,7 @@ Fix any duplicate `[Unreleased]` sections:
 sd '## \[Unreleased\]\n\n## \[Unreleased\]' '## [Unreleased]' packages/*/CHANGELOG.md
 ```
 
-### 3. Commit and Tag
+### 4. Commit and Tag
 
 ```bash
 git add .
@@ -60,14 +68,14 @@ git commit -m "chore: bump version to $ARGUMENTS"
 git tag v$ARGUMENTS
 ```
 
-### 4. Push
+### 5. Push
 
 ```bash
 git push origin main
 git push origin v$ARGUMENTS
 ```
 
-### 5. Watch CI
+### 6. Watch CI
 
 Monitor the GitHub Actions workflow:
 
@@ -79,7 +87,7 @@ gh run list --limit 1 --json databaseId,status
 gh run watch <RUN_ID> --exit-status
 ```
 
-### 6. Handle CI Failures
+### 7. Handle CI Failures
 
 If CI fails:
 
