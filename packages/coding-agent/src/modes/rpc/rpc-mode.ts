@@ -13,6 +13,7 @@
 
 import type { AgentSession } from "../../core/agent-session";
 import type { HookUIContext } from "../../core/hooks/index";
+import { logger } from "../../core/logger";
 import { theme } from "../interactive/theme/theme";
 import type { RpcCommand, RpcHookUIRequest, RpcHookUIResponse, RpcResponse, RpcSessionState } from "./rpc-types";
 
@@ -220,8 +221,8 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 						},
 					},
 				);
-			} catch (_err) {
-				// Silently ignore tool errors
+			} catch (err) {
+				logger.warn("Tool onSession error", { error: String(err) });
 			}
 		}
 	}

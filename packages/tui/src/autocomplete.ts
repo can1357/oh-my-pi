@@ -387,7 +387,8 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 						const fullPath = join(searchDir, entry.name);
 						isDirectory = statSync(fullPath).isDirectory();
 					} catch {
-						// Broken symlink or permission error - treat as file
+						// Broken symlink, file deleted between readdir and stat, or permission error
+						continue;
 					}
 				}
 
@@ -459,7 +460,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			});
 
 			return suggestions;
-		} catch (_e) {
+		} catch {
 			// Directory doesn't exist or not accessible
 			return [];
 		}
@@ -527,6 +528,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 			return suggestions;
 		} catch {
+			// Directory doesn't exist or not accessible
 			return [];
 		}
 	}

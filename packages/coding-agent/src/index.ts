@@ -71,6 +71,8 @@ export {
 	isReadToolResult,
 	isWriteToolResult,
 } from "./core/hooks/index";
+// Logging
+export { type Logger, logger } from "./core/logger";
 export { convertToLlm } from "./core/messages";
 export { ModelRegistry } from "./core/model-registry";
 // SDK for programmatic usage

@@ -17,6 +17,7 @@ import {
 	buildSessionContext,
 	type CompactionEntry,
 	type FileEntry,
+	logger,
 	type ModelChangeEntry,
 	type SessionContext,
 	type SessionEntry,
@@ -221,8 +222,8 @@ export class MomSessionManager {
 				};
 
 				newMessages.push({ timestamp: date, slackTs, message: userMessage });
-			} catch {
-				// Skip malformed lines
+			} catch (err) {
+				logger.debug("Context parsing error", { error: String(err) });
 			}
 		}
 
@@ -268,8 +269,8 @@ export class MomSessionManager {
 			try {
 				const entry = JSON.parse(line) as FileEntry;
 				entries.push(entry);
-			} catch {
-				// Skip malformed lines
+			} catch (err) {
+				logger.debug("Context parsing error", { error: String(err) });
 			}
 		}
 
@@ -425,7 +426,8 @@ export class MomSettingsManager {
 		try {
 			const content = readFileSync(this.settingsPath, "utf-8");
 			return JSON.parse(content);
-		} catch {
+		} catch (err) {
+			logger.debug("Context parsing error", { error: String(err) });
 			return {};
 		}
 	}
@@ -557,7 +559,9 @@ export function syncLogToContext(channelDir: string, excludeAfterTs?: string): n
 				if (excludeAfterTs && entry.ts >= excludeAfterTs) continue;
 				logMessages.push(entry);
 			}
-		} catch {}
+		} catch (err) {
+			logger.debug("Context parsing error", { error: String(err) });
+		}
 	}
 
 	if (logMessages.length === 0) return 0;
@@ -574,7 +578,9 @@ export function syncLogToContext(channelDir: string, excludeAfterTs?: string): n
 					// We store the original slack ts in a way we can recover
 					// Actually, let's just check by content match since ts formats differ
 				}
-			} catch {}
+			} catch (err) {
+				logger.debug("Context parsing error", { error: String(err) });
+			}
 		}
 	}
 
@@ -602,7 +608,9 @@ export function syncLogToContext(channelDir: string, excludeAfterTs?: string): n
 						existingMessages.add(content);
 					}
 				}
-			} catch {}
+			} catch (err) {
+				logger.debug("Context parsing error", { error: String(err) });
+			}
 		}
 	}
 

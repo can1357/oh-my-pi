@@ -44,7 +44,6 @@ export function getExaTools(settings: Required<ExaSettings>): CustomTool<any, Ex
 
 export { companyTool } from "./company";
 export { linkedinTool } from "./linkedin";
-export { logExaError, logViewError } from "./logger";
 export {
 	callExaTool,
 	callWebsetsTool,

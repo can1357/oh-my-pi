@@ -86,6 +86,7 @@ export class TUI extends Container {
 	private cursorRow = 0; // Track where cursor is (0-indexed, relative to our first line)
 	private inputBuffer = ""; // Buffer for parsing terminal responses
 	private cellSizeQueryPending = false;
+	private inputQueue: string[] = []; // Queue input during cell size query to avoid interleaving
 
 	constructor(terminal: Terminal) {
 		super();
@@ -142,9 +143,24 @@ export class TUI extends Container {
 			this.inputBuffer += data;
 			const filtered = this.parseCellSizeResponse();
 			if (filtered.length === 0) return;
-			data = filtered;
+			if (filtered.length > 0) {
+				this.inputQueue.push(filtered);
+			}
+			// Process queued input after cell size response completes
+			if (!this.cellSizeQueryPending && this.inputQueue.length > 0) {
+				const queued = this.inputQueue;
+				this.inputQueue = [];
+				for (const item of queued) {
+					this.processInput(item);
+				}
+			}
+			return;
 		}
 
+		this.processInput(data);
+	}
+
+	private processInput(data: string): void {
 		// Global debug key handler (Shift+Ctrl+D)
 		if (isShiftCtrlD(data) && this.onDebug) {
 			this.onDebug();
@@ -169,16 +185,17 @@ export class TUI extends Container {
 			const heightPx = parseInt(match[1], 10);
 			const widthPx = parseInt(match[2], 10);
 
+			// Remove the response from buffer first
+			this.inputBuffer = this.inputBuffer.replace(responsePattern, "");
+			this.cellSizeQueryPending = false;
+
 			if (heightPx > 0 && widthPx > 0) {
 				setCellDimensions({ widthPx, heightPx });
 				// Invalidate all components so images re-render with correct dimensions
+				// This is safe now because cellSizeQueryPending=false prevents race with render
 				this.invalidate();
 				this.requestRender();
 			}
-
-			// Remove the response from buffer
-			this.inputBuffer = this.inputBuffer.replace(responsePattern, "");
-			this.cellSizeQueryPending = false;
 		}
 
 		// Check if we have a partial cell size response starting (wait for more data)
@@ -206,8 +223,11 @@ export class TUI extends Container {
 	}
 
 	private doRender(): void {
+		// Capture terminal dimensions at start to ensure consistency throughout render
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
+		// Snapshot cursor position at start of render for consistent viewport calculations
+		const currentCursorRow = this.cursorRow;
 
 		// Render all components to get new lines
 		const newLines = this.render(width);
@@ -267,10 +287,10 @@ export class TUI extends Container {
 		}
 
 		// Check if firstChanged is outside the viewport
-		// cursorRow is the line where cursor is (0-indexed)
-		// Viewport shows lines from (cursorRow - height + 1) to cursorRow
+		// Use snapshotted cursor position for consistent viewport calculation
+		// Viewport shows lines from (currentCursorRow - height + 1) to currentCursorRow
 		// If firstChanged < viewportTop, we need full re-render
-		const viewportTop = this.cursorRow - height + 1;
+		const viewportTop = currentCursorRow - height + 1;
 		if (firstChanged < viewportTop) {
 			// First change is above viewport - need full re-render
 			let buffer = "\x1b[?2026h"; // Begin synchronized output
@@ -291,8 +311,8 @@ export class TUI extends Container {
 		// Build buffer with all updates wrapped in synchronized output
 		let buffer = "\x1b[?2026h"; // Begin synchronized output
 
-		// Move cursor to first changed line
-		const lineDiff = firstChanged - this.cursorRow;
+		// Move cursor to first changed line using snapshotted position
+		const lineDiff = firstChanged - currentCursorRow;
 		if (lineDiff > 0) {
 			buffer += `\x1b[${lineDiff}B`; // Move down
 		} else if (lineDiff < 0) {
@@ -323,7 +343,9 @@ export class TUI extends Container {
 				try {
 					fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
 					fs.writeFileSync(crashLogPath, crashData);
-				} catch {}
+				} catch {
+					// Ignore - crash log is best-effort
+				}
 				throw new Error(`Rendered line ${i} exceeds terminal width. Debug log written to ${crashLogPath}`);
 			}
 			buffer += line;

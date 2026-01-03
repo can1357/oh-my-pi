@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { CONFIG_DIR_NAME, getCommandsDir } from "../config";
+import { logger } from "./logger";
 
 /**
  * Represents a custom slash command loaded from a file
@@ -161,13 +162,13 @@ function loadCommandsFromDir(dir: string, source: CommandSource, subdir: string 
 						content,
 						source: sourceStr,
 					});
-				} catch (_error) {
-					// Silently skip files that can't be read
+				} catch (err) {
+					logger.debug("Failed to read slash command file", { error: String(err) });
 				}
 			}
 		}
-	} catch (_error) {
-		// Silently skip directories that can't be read
+	} catch (err) {
+		logger.debug("Failed to read slash command directory", { error: String(err) });
 	}
 
 	return commands;

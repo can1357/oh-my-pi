@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import { parse as parseHtml } from "node-html-parser";
+import { logger } from "../logger";
 
 // =============================================================================
 // Types and Constants
@@ -174,9 +175,10 @@ async function loadPage(url: string, options: LoadPageOptions = {}): Promise<Loa
 			}
 
 			return { content, contentType, finalUrl, ok: true, status: response.status };
-		} catch (_err) {
+		} catch (err) {
 			// On last attempt, return failure
 			if (attempt === USER_AGENTS.length - 1) {
+				logger.debug("Web fetch failed after retries", { url, error: String(err) });
 				return { content: "", contentType: "", finalUrl: url, ok: false };
 			}
 			// Otherwise retry with next UA

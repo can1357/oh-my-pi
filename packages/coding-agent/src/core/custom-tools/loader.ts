@@ -15,6 +15,7 @@ import { theme } from "../../modes/interactive/theme/theme";
 import type { ExecOptions } from "../exec";
 import { execCommand } from "../exec";
 import type { HookUIContext } from "../hooks/types";
+import { logger } from "../logger";
 import { getAllPluginToolPaths } from "../plugins/loader";
 import type { CustomToolAPI, CustomToolFactory, CustomToolsLoadResult, LoadedCustomTool } from "./types";
 
@@ -128,6 +129,7 @@ export async function loadCustomTools(
 			execCommand(command, args, options?.cwd ?? cwd, options),
 		ui: createNoOpUIContext(),
 		hasUI: false,
+		logger,
 		typebox,
 		pi: piCodingAgent,
 	};

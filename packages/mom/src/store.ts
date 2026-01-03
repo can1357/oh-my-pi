@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
+import { logger } from "@oh-my-pi/pi-coding-agent";
 import * as log from "./log";
 
 export interface Attachment {
@@ -177,7 +178,8 @@ export class ChannelStore {
 			const lastLine = lines[lines.length - 1];
 			const message = JSON.parse(lastLine) as LoggedMessage;
 			return message.ts;
-		} catch {
+		} catch (err) {
+			logger.debug("Failed to parse last message timestamp", { error: String(err) });
 			return null;
 		}
 	}

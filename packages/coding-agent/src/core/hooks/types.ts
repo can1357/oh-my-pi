@@ -11,6 +11,7 @@ import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { Theme } from "../../modes/interactive/theme/theme";
 import type { CompactionPreparation, CompactionResult } from "../compaction/index";
 import type { ExecOptions, ExecResult } from "../exec";
+import type { Logger } from "../logger";
 import type { HookMessage } from "../messages";
 import type { ModelRegistry } from "../model-registry";
 import type {
@@ -741,6 +742,8 @@ export interface HookAPI {
 	 */
 	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
 
+	/** File logger for error/warning/debug messages */
+	logger: Logger;
 	/** Injected @sinclair/typebox module */
 	typebox: typeof import("@sinclair/typebox");
 	/** Injected pi-coding-agent exports */

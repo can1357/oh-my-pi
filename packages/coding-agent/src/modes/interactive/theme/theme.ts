@@ -6,6 +6,7 @@ import { TypeCompiler } from "@sinclair/typebox/compiler";
 import chalk from "chalk";
 import { highlight, supportsLanguage } from "cli-highlight";
 import { getCustomThemesDir, getThemesDir } from "../../../config";
+import { logger } from "../../../core/logger";
 
 // ============================================================================
 // Types & Schema
@@ -590,8 +591,8 @@ export function initTheme(themeName?: string, enableWatcher: boolean = false): v
 		if (enableWatcher) {
 			startThemeWatcher();
 		}
-	} catch (_error) {
-		// Theme is invalid - fall back to dark theme silently
+	} catch (err) {
+		logger.debug("Theme loading failed, falling back to dark theme", { error: String(err) });
 		currentThemeName = "dark";
 		theme = loadTheme("dark");
 		// Don't start watcher for fallback theme
@@ -654,8 +655,8 @@ function startThemeWatcher(): void {
 						if (onThemeChangeCallback) {
 							onThemeChangeCallback();
 						}
-					} catch (_error) {
-						// Ignore errors (file might be in invalid state while being edited)
+					} catch (err) {
+						logger.debug("Theme reload error during file change", { error: String(err) });
 					}
 				}, 100);
 			} else if (eventType === "rename") {
@@ -675,8 +676,8 @@ function startThemeWatcher(): void {
 				}, 100);
 			}
 		});
-	} catch (_error) {
-		// Ignore errors starting watcher
+	} catch (err) {
+		logger.debug("Failed to start theme watcher", { error: String(err) });
 	}
 }
 

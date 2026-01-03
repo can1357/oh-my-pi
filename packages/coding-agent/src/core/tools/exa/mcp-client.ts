@@ -6,7 +6,7 @@
 
 import type { TSchema } from "@sinclair/typebox";
 import type { CustomTool } from "../../custom-tools/types";
-import { logExaError } from "./logger";
+import { logger } from "../../logger";
 import type {
 	ExaRenderDetails,
 	ExaSearchResponse,
@@ -89,7 +89,7 @@ export async function callMCP(url: string, method: string, params?: Record<strin
 
 	if (!response.ok) {
 		const errorMsg = `MCP request failed: ${response.status} ${response.statusText}`;
-		logExaError(errorMsg, { url, method, params });
+		logger.error(errorMsg, { url, method, params });
 		throw new Error(errorMsg);
 	}
 
@@ -97,7 +97,7 @@ export async function callMCP(url: string, method: string, params?: Record<strin
 	const result = parseSSE(text);
 
 	if (!result) {
-		logExaError("Failed to parse MCP response", { url, method, responseText: text.slice(0, 500) });
+		logger.error("Failed to parse MCP response", { url, method, responseText: text.slice(0, 500) });
 		throw new Error("Failed to parse MCP response");
 	}
 
@@ -110,7 +110,7 @@ export async function fetchExaTools(apiKey: string, toolNames: string[]): Promis
 	const response = (await callMCP(url, "tools/list")) as MCPToolsResponse;
 
 	if (response.error) {
-		logExaError("MCP tools/list error", { toolNames, error: response.error });
+		logger.error("MCP tools/list error", { toolNames, error: response.error });
 		throw new Error(`MCP error: ${response.error.message}`);
 	}
 
@@ -123,7 +123,7 @@ export async function fetchWebsetsTools(apiKey: string): Promise<MCPTool[]> {
 	const response = (await callMCP(url, "tools/list")) as MCPToolsResponse;
 
 	if (response.error) {
-		logExaError("Websets MCP tools/list error", { error: response.error });
+		logger.error("Websets MCP tools/list error", { error: response.error });
 		throw new Error(`MCP error: ${response.error.message}`);
 	}
 
@@ -139,7 +139,7 @@ export async function callExaTool(toolName: string, args: Record<string, unknown
 	})) as MCPCallResponse;
 
 	if (response.error) {
-		logExaError("MCP tools/call error", { toolName, args, error: response.error });
+		logger.error("MCP tools/call error", { toolName, args, error: response.error });
 		throw new Error(`MCP error: ${response.error.message}`);
 	}
 
@@ -159,7 +159,7 @@ export async function callWebsetsTool(
 	})) as MCPCallResponse;
 
 	if (response.error) {
-		logExaError("Websets MCP tools/call error", { toolName, args, error: response.error });
+		logger.error("Websets MCP tools/call error", { toolName, args, error: response.error });
 		throw new Error(`MCP error: ${response.error.message}`);
 	}
 

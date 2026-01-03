@@ -1,9 +1,10 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Added
 
+- Added centralized file logger with daily rotation to `~/.pi/logs/` for debugging production issues
+- Added `logger` property to hook and custom tool APIs for error/warning/debug logging
 - Added `output` tool to read full agent/task outputs by ID when truncated previews are insufficient
 - Added `task` tool to reviewer agent, enabling parallel exploration of large codebases during reviews
 - Added subprocess tool registry for extracting and rendering tool data from subprocess agents in real-time
@@ -20,6 +21,7 @@
 
 ### Changed
 
+- Changed silent error suppression to log warnings and debug info for tool errors, theme loading, and command loading failures
 - Changed Task tool progress display to show agent index (e.g., `reviewer(0)`) for easier Output tool ID derivation
 - Changed Task tool output to only include file paths when Output tool is unavailable, providing Read tool fallback
 - Changed Task tool output references to use simpler ID format (e.g., `reviewer_0`) with line/char counts for Output tool integration
@@ -33,6 +35,7 @@
 
 ### Removed
 
+- Removed separate Exa error logger in favor of centralized logging system
 - Removed `findings_count` parameter from `submit_review` tool - findings are now counted automatically
 - Removed artifacts location display from task tool output
 

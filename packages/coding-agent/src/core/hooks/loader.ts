@@ -8,6 +8,7 @@ import * as path from "node:path";
 import * as typebox from "@sinclair/typebox";
 import { getAgentDir } from "../../config";
 import * as piCodingAgent from "../../index";
+import { logger } from "../logger";
 import type { HookMessage } from "../messages";
 import { getAllPluginHookPaths } from "../plugins/loader";
 import type { SessionManager } from "../session-manager";
@@ -163,6 +164,7 @@ function createHookAPI(
 		exec(command: string, args: string[], options?: ExecOptions) {
 			return execCommand(command, args, options?.cwd ?? cwd, options);
 		},
+		logger,
 		typebox,
 		pi: piCodingAgent,
 	} as HookAPI;

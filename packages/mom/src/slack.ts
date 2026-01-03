@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { logger } from "@oh-my-pi/pi-coding-agent";
 import { SocketModeClient } from "@slack/socket-mode";
 import { WebClient } from "@slack/web-api";
 import * as log from "./log";
@@ -445,7 +446,9 @@ export class SlackBot {
 			try {
 				const entry = JSON.parse(line);
 				if (entry.ts) timestamps.add(entry.ts);
-			} catch {}
+			} catch (err) {
+				logger.debug("Failed to parse log entry JSON", { error: String(err) });
+			}
 		}
 		return timestamps;
 	}

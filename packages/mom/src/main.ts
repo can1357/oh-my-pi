@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { join, resolve } from "node:path";
+import { logger } from "@oh-my-pi/pi-coding-agent";
 import { type AgentRunner, getOrCreateRunner } from "./agent";
 import { syncLogToContext } from "./context";
 import { downloadChannel } from "./download";
@@ -214,8 +215,8 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 				for (let i = threadMessageTs.length - 1; i >= 0; i--) {
 					try {
 						await slack.deleteMessage(event.channel, threadMessageTs[i]);
-					} catch {
-						// Ignore errors deleting thread messages
+					} catch (err) {
+						logger.debug("Failed to delete thread message", { error: String(err) });
 					}
 				}
 				threadMessageTs.length = 0;

@@ -8,6 +8,7 @@
 
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import type { AgentSession } from "../core/agent-session";
+import { logger } from "../core/logger";
 
 /**
  * Run in print (single-shot) mode.
@@ -70,8 +71,8 @@ export async function runPrintMode(
 						},
 					},
 				);
-			} catch (_err) {
-				// Silently ignore tool errors
+			} catch (err) {
+				logger.warn("Tool onSession error", { error: String(err) });
 			}
 		}
 	}

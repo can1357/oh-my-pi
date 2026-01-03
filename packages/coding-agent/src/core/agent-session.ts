@@ -41,6 +41,7 @@ import type {
 	TurnEndEvent,
 	TurnStartEvent,
 } from "./hooks/index";
+import { logger } from "./logger";
 import type { BashExecutionMessage, HookMessage } from "./messages";
 import type { ModelRegistry } from "./model-registry";
 import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions, SessionManager } from "./session-manager";
@@ -2039,8 +2040,8 @@ export class AgentSession {
 			if (tool.onSession) {
 				try {
 					await tool.onSession(event, ctx);
-				} catch (_err) {
-					// Silently ignore tool errors during session events
+				} catch (err) {
+					logger.warn("Tool onSession error", { error: String(err) });
 				}
 			}
 		}

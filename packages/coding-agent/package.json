@@ -53,7 +53,9 @@
 		"highlight.js": "^11.11.1",
 		"marked": "^15.0.12",
 		"minimatch": "^10.1.1",
-		"strip-ansi": "^7.1.2"
+		"strip-ansi": "^7.1.2",
+		"winston": "^3.17.0",
+		"winston-daily-rotate-file": "^5.0.0"
 	},
 	"devDependencies": {
 		"@types/diff": "^7.0.2",

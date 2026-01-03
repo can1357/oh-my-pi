@@ -10,6 +10,7 @@ import {
 	convertToLlm,
 	formatSkillsForPrompt,
 	loadSkillsFromDir,
+	logger,
 	ModelRegistry,
 	type Skill,
 } from "@oh-my-pi/pi-coding-agent";
@@ -686,8 +687,8 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 							log.logWarning(`Slack API error (${errorContext})`, errMsg);
 							try {
 								await ctx.respondInThread(`_Error: ${errMsg}_`);
-							} catch {
-								// Ignore
+							} catch (err) {
+								logger.warn("Failed to respond in thread", { error: String(err) });
 							}
 						}
 					});
@@ -734,7 +735,8 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 							mimeType,
 							data: readFileSync(fullPath).toString("base64"),
 						});
-					} catch {
+					} catch (err) {
+						logger.debug("Failed to read file as image", { path: fullPath, error: String(err) });
 						nonImagePaths.push(fullPath);
 					}
 				} else {

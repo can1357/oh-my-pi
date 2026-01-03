@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { logger } from "@oh-my-pi/pi-coding-agent";
 import { loginAnthropic } from "./utils/oauth/anthropic";
 import { loginGitHubCopilot } from "./utils/oauth/github-copilot";
 import { loginAntigravity } from "./utils/oauth/google-antigravity";
@@ -26,7 +27,8 @@ async function loadAuth(): Promise<Record<string, { type: "oauth" } & OAuthCrede
 	if (!(await file.exists())) return {};
 	try {
 		return await file.json();
-	} catch {
+	} catch (err) {
+		logger.debug("Failed to parse config file", { error: String(err) });
 		return {};
 	}
 }

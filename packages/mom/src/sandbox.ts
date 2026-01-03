@@ -1,3 +1,5 @@
+import { logger } from "@oh-my-pi/pi-coding-agent";
+
 export type SandboxConfig = { type: "host" } | { type: "docker"; container: string };
 
 export function parseSandboxArg(value: string): SandboxConfig {
@@ -193,17 +195,18 @@ function killProcessTree(pid: number): void {
 	if (process.platform === "win32") {
 		try {
 			Bun.spawn(["taskkill", "/F", "/T", "/PID", String(pid)], { stdout: "ignore", stderr: "ignore" });
-		} catch {
-			// Ignore errors
+		} catch (err) {
+			logger.debug("Process kill failed", { pid, error: String(err) });
 		}
 	} else {
 		try {
 			process.kill(-pid, "SIGKILL");
-		} catch {
+		} catch (err) {
+			logger.debug("Process kill failed", { pid, error: String(err) });
 			try {
 				process.kill(pid, "SIGKILL");
-			} catch {
-				// Process already dead
+			} catch (err) {
+				logger.debug("Process kill failed", { pid, error: String(err) });
 			}
 		}
 	}

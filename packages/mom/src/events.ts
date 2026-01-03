@@ -1,6 +1,7 @@
 import { existsSync, type FSWatcher, mkdirSync, readdirSync, statSync, unlinkSync, watch } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { logger } from "@oh-my-pi/pi-coding-agent";
 import { Cron } from "croner";
 import * as log from "./log";
 import type { SlackBot, SlackEvent } from "./slack";
@@ -266,8 +267,8 @@ export class EventsWatcher {
 				this.deleteFile(filename);
 				return;
 			}
-		} catch {
-			// File may have been deleted
+		} catch (err) {
+			logger.debug("File stat failed", { filename, error: String(err) });
 			return;
 		}
 

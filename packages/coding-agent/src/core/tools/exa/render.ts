@@ -8,7 +8,7 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import type { Theme } from "../../../modes/interactive/theme/theme";
 import type { RenderResultOptions } from "../../custom-tools/types";
-import { logViewError } from "./logger";
+import { logger } from "../../logger";
 import type { ExaRenderDetails } from "./types";
 
 // Tree formatting constants
@@ -51,7 +51,7 @@ export function renderExaResult(
 
 	// Handle error case
 	if (details?.error) {
-		logViewError("Exa render error", { error: details.error, toolName: details.toolName });
+		logger.error("Exa render error", { error: details.error, toolName: details.toolName });
 		return new Text(theme.fg("error", `Error: ${details.error}`), 0, 0);
 	}
 

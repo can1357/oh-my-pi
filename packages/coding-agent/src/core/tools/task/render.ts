@@ -207,36 +207,51 @@ function renderReviewResult(
 	// Findings in tree structure
 	if (findings.length > 0) {
 		lines.push(`${continuePrefix}`); // Spacing
-		const displayCount = expanded ? findings.length : Math.min(3, findings.length);
+		lines.push(...renderFindings(findings, continuePrefix, expanded, theme));
+	}
 
-		for (let i = 0; i < displayCount; i++) {
-			const finding = findings[i];
-			const isLastFinding = i === displayCount - 1 && (expanded || findings.length <= 3);
-			const findingPrefix = isLastFinding ? "└─" : "├─";
-			const findingContinue = isLastFinding ? "   " : "│  ";
+	return lines;
+}
 
-			const priority = PRIORITY_LABELS[finding.priority] ?? "P?";
-			const color = finding.priority === 0 ? "error" : finding.priority === 1 ? "warning" : "muted";
-			const titleText = finding.title.replace(/^\[P\d\]\s*/, "");
-			const loc = `${path.basename(finding.file_path)}:${finding.line_start}`;
+/**
+ * Render review findings list (used with and without submit_review).
+ */
+function renderFindings(
+	findings: ReportFindingDetails[],
+	continuePrefix: string,
+	expanded: boolean,
+	theme: Theme,
+): string[] {
+	const lines: string[] = [];
+	const displayCount = expanded ? findings.length : Math.min(3, findings.length);
 
-			lines.push(
-				`${continuePrefix}${findingPrefix} ${theme.fg(color, `[${priority}]`)} ${titleText} ${theme.fg("dim", loc)}`,
-			);
+	for (let i = 0; i < displayCount; i++) {
+		const finding = findings[i];
+		const isLastFinding = i === displayCount - 1 && (expanded || findings.length <= 3);
+		const findingPrefix = isLastFinding ? "└─" : "├─";
+		const findingContinue = isLastFinding ? "   " : "│  ";
 
-			// Show body when expanded
-			if (expanded && finding.body) {
-				// Wrap body text
-				const bodyLines = finding.body.split("\n");
-				for (const bodyLine of bodyLines) {
-					lines.push(`${continuePrefix}${findingContinue}${theme.fg("dim", bodyLine)}`);
-				}
+		const priority = PRIORITY_LABELS[finding.priority] ?? "P?";
+		const color = finding.priority === 0 ? "error" : finding.priority === 1 ? "warning" : "muted";
+		const titleText = finding.title.replace(/^\[P\d\]\s*/, "");
+		const loc = `${path.basename(finding.file_path)}:${finding.line_start}`;
+
+		lines.push(
+			`${continuePrefix}${findingPrefix} ${theme.fg(color, `[${priority}]`)} ${titleText} ${theme.fg("dim", loc)}`,
+		);
+
+		// Show body when expanded
+		if (expanded && finding.body) {
+			// Wrap body text
+			const bodyLines = finding.body.split("\n");
+			for (const bodyLine of bodyLines) {
+				lines.push(`${continuePrefix}${findingContinue}${theme.fg("dim", bodyLine)}`);
 			}
 		}
+	}
 
-		if (!expanded && findings.length > 3) {
-			lines.push(`${continuePrefix}${theme.fg("dim", `... ${findings.length - 3} more findings`)}`);
-		}
+	if (!expanded && findings.length > 3) {
+		lines.push(`${continuePrefix}${theme.fg("dim", `... ${findings.length - 3} more findings`)}`);
 	}
 
 	return lines;
@@ -280,6 +295,14 @@ function renderAgentResult(result: SingleResult, isLast: boolean, expanded: bool
 		const summary = submitReviewData[submitReviewData.length - 1];
 		const findings = reportFindingData ?? [];
 		lines.push(...renderReviewResult(summary, findings, continuePrefix, expanded, theme));
+		return lines;
+	}
+	if (reportFindingData && reportFindingData.length > 0) {
+		lines.push(
+			`${continuePrefix}${theme.fg("warning", "!")} ${theme.fg("dim", "Review summary missing (submit_review not called)")}`,
+		);
+		lines.push(`${continuePrefix}`); // Spacing
+		lines.push(...renderFindings(reportFindingData, continuePrefix, expanded, theme));
 		return lines;
 	}
 

@@ -3,6 +3,7 @@
  */
 
 import type { Subprocess } from "bun";
+import { logger } from "./logger";
 
 /**
  * Options for executing shell commands.
@@ -117,7 +118,8 @@ export async function execCommand(
 					options.signal.removeEventListener("abort", killProcess);
 				}
 				resolve({ stdout, stderr, code: exitCode ?? 0, killed });
-			} catch (_err) {
+			} catch (err) {
+				logger.debug("Process stream error", { error: String(err) });
 				if (timeoutId) clearTimeout(timeoutId);
 				if (options?.signal) {
 					options.signal.removeEventListener("abort", killProcess);
