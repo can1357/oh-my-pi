@@ -44,11 +44,8 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Build packages
-        run: bun run build && bun --cwd=packages/coding-agent run build
-
       - name: Build standalone binary
-        run: bun build packages/coding-agent/dist/cli.js --compile --target ${{ matrix.target }} --outfile ${{ matrix.artifact }}
+        run: bun build packages/coding-agent/src/cli.ts --compile --target ${{ matrix.target }} --outfile ${{ matrix.artifact }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -77,9 +74,6 @@ jobs:
 
       - name: Install dependencies
         run: bun install
-
-      - name: Build
-        run: bun run build && bun --cwd=packages/coding-agent run build
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4

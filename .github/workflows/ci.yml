@@ -27,9 +27,6 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Build
-        run: bun run build && bun --cwd=packages/coding-agent run build
-
       - name: Check (lint + typecheck)
         run: bun run check
 
@@ -38,5 +35,5 @@ jobs:
 
       - name: Test CLI
         run: |
-          bun packages/coding-agent/dist/cli.js --version
-          bun packages/coding-agent/dist/cli.js --help
+          bun packages/coding-agent/src/cli.ts --version
+          bun packages/coding-agent/src/cli.ts --help

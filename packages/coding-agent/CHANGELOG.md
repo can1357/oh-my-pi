@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.1.1337] - 2026-01-03
+
 ### Added
 
 - Added `pi update` command to check for and install updates from GitHub releases or via bun
