@@ -29,38 +29,38 @@
  * ```
  */
 
+import { join } from "node:path";
 import { Agent, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { join } from "path";
-import { getAgentDir } from "../config.js";
-import { AgentSession } from "./agent-session.js";
-import { AuthStorage } from "./auth-storage.js";
+import { getAgentDir } from "../config";
+import { AgentSession } from "./agent-session";
+import { AuthStorage } from "./auth-storage";
 import {
 	type CustomCommandsLoadResult,
 	loadCustomCommands as loadCustomCommandsInternal,
-} from "./custom-commands/index.js";
+} from "./custom-commands/index";
 import {
 	type CustomToolsLoadResult,
 	discoverAndLoadCustomTools,
 	type LoadedCustomTool,
 	wrapCustomTools,
-} from "./custom-tools/index.js";
-import type { CustomTool } from "./custom-tools/types.js";
-import { discoverAndLoadHooks, HookRunner, type LoadedHook, wrapToolsWithHooks } from "./hooks/index.js";
-import type { HookFactory } from "./hooks/types.js";
-import { discoverAndLoadMCPTools, type MCPManager, type MCPToolsLoadResult } from "./mcp/index.js";
-import { convertToLlm } from "./messages.js";
-import { ModelRegistry } from "./model-registry.js";
-import { SessionManager } from "./session-manager.js";
-import { type CommandsSettings, type Settings, SettingsManager, type SkillsSettings } from "./settings-manager.js";
-import { loadSkills as loadSkillsInternal, type Skill } from "./skills.js";
-import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./slash-commands.js";
+} from "./custom-tools/index";
+import type { CustomTool } from "./custom-tools/types";
+import { discoverAndLoadHooks, HookRunner, type LoadedHook, wrapToolsWithHooks } from "./hooks/index";
+import type { HookFactory } from "./hooks/types";
+import { discoverAndLoadMCPTools, type MCPManager, type MCPToolsLoadResult } from "./mcp/index";
+import { convertToLlm } from "./messages";
+import { ModelRegistry } from "./model-registry";
+import { SessionManager } from "./session-manager";
+import { type CommandsSettings, type Settings, SettingsManager, type SkillsSettings } from "./settings-manager";
+import { loadSkills as loadSkillsInternal, type Skill } from "./skills";
+import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./slash-commands";
 import {
 	buildSystemPrompt as buildSystemPromptInternal,
 	loadProjectContextFiles as loadContextFilesInternal,
-} from "./system-prompt.js";
-import { time } from "./timings.js";
-import { createToolContextStore } from "./tools/context.js";
+} from "./system-prompt";
+import { time } from "./timings";
+import { createToolContextStore } from "./tools/context";
 import {
 	allTools,
 	applyBashInterception,
@@ -84,7 +84,7 @@ import {
 	type Tool,
 	warmupLspServers,
 	writeTool,
-} from "./tools/index.js";
+} from "./tools/index";
 
 // Types
 
@@ -131,6 +131,9 @@ export interface CreateAgentSessionOptions {
 	/** Enable MCP server discovery from .mcp.json files. Default: true */
 	enableMCP?: boolean;
 
+	/** Tool names explicitly requested (enables disabled-by-default tools) */
+	explicitTools?: string[];
+
 	/** Session manager. Default: SessionManager.create(cwd) */
 	sessionManager?: SessionManager;
 
@@ -157,14 +160,14 @@ export interface CreateAgentSessionResult {
 
 // Re-exports
 
-export type { CustomCommand, CustomCommandFactory } from "./custom-commands/types.js";
-export type { CustomTool } from "./custom-tools/types.js";
-export type { HookAPI, HookCommandContext, HookContext, HookFactory } from "./hooks/types.js";
-export type { MCPManager, MCPServerConfig, MCPServerConnection, MCPToolsLoadResult } from "./mcp/index.js";
-export type { Settings, SkillsSettings } from "./settings-manager.js";
-export type { Skill } from "./skills.js";
-export type { FileSlashCommand } from "./slash-commands.js";
-export type { Tool } from "./tools/index.js";
+export type { CustomCommand, CustomCommandFactory } from "./custom-commands/types";
+export type { CustomTool } from "./custom-tools/types";
+export type { HookAPI, HookCommandContext, HookContext, HookFactory } from "./hooks/types";
+export type { MCPManager, MCPServerConfig, MCPServerConnection, MCPToolsLoadResult } from "./mcp/index";
+export type { Settings, SkillsSettings } from "./settings-manager";
+export type { Skill } from "./skills";
+export type { FileSlashCommand } from "./slash-commands";
+export type { Tool } from "./tools/index";
 
 export {
 	// Pre-built tools (use process.cwd())
@@ -719,6 +722,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	let allToolsArray: Tool[] = [...builtInTools, ...wrappedCustomTools];
+
+	// Filter out hidden tools unless explicitly requested
+	if (options.explicitTools) {
+		const explicitSet = new Set(options.explicitTools);
+		allToolsArray = allToolsArray.filter((tool) => !tool.hidden || explicitSet.has(tool.name));
+	} else {
+		allToolsArray = allToolsArray.filter((tool) => !tool.hidden);
+	}
 	time("combineTools");
 
 	// Apply bash interception to redirect common shell patterns to proper tools (if enabled)

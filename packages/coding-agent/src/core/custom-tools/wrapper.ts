@@ -3,7 +3,7 @@
  */
 
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { CustomTool, CustomToolContext, LoadedCustomTool } from "./types.js";
+import type { CustomTool, CustomToolContext, LoadedCustomTool } from "./types";
 
 /**
  * Wrap a CustomTool into an AgentTool.
@@ -15,6 +15,7 @@ export function wrapCustomTool(tool: CustomTool, getContext: () => CustomToolCon
 		label: tool.label,
 		description: tool.description,
 		parameters: tool.parameters,
+		hidden: tool.hidden,
 		execute: (toolCallId, params, signal, onUpdate, context) =>
 			tool.execute(toolCallId, params, onUpdate, context ?? getContext(), signal),
 	};

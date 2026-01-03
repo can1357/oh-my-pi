@@ -9,11 +9,11 @@ import type { AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agen
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import type { Static, TSchema } from "@sinclair/typebox";
-import type { Theme } from "../../modes/interactive/theme/theme.js";
-import type { ExecOptions, ExecResult } from "../exec.js";
-import type { HookUIContext } from "../hooks/types.js";
-import type { ModelRegistry } from "../model-registry.js";
-import type { ReadonlySessionManager } from "../session-manager.js";
+import type { Theme } from "../../modes/interactive/theme/theme";
+import type { ExecOptions, ExecResult } from "../exec";
+import type { HookUIContext } from "../hooks/types";
+import type { ModelRegistry } from "../model-registry";
+import type { ReadonlySessionManager } from "../session-manager";
 
 /** Alias for clarity */
 export type CustomToolUIContext = HookUIContext;
@@ -22,7 +22,7 @@ export type CustomToolUIContext = HookUIContext;
 export type { AgentToolResult, AgentToolUpdateCallback };
 
 // Re-export for backward compatibility
-export type { ExecOptions, ExecResult } from "../exec.js";
+export type { ExecOptions, ExecResult } from "../exec";
 
 /** API passed to custom tool factory (stable across session changes) */
 export interface CustomToolAPI {
@@ -119,6 +119,8 @@ export interface CustomTool<TParams extends TSchema = TSchema, TDetails = any> {
 	description: string;
 	/** Parameter schema (TypeBox) */
 	parameters: TParams;
+	/** If true, tool is excluded unless explicitly listed in --tools or agent's tools field */
+	hidden?: boolean;
 
 	/**
 	 * Execute the tool.
