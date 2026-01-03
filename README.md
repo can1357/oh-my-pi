@@ -43,6 +43,17 @@ curl -fsSL https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/insta
 irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1 | iex
 ```
 
+By default, the installer uses bun if available, otherwise downloads the prebuilt binary.
+
+Options:
+- `--source` / `-Source`: Install via bun (installs bun first if needed)
+- `--binary` / `-Binary`: Always use prebuilt binary
+
+```bash
+# Force bun installation
+curl -fsSL .../install.sh | sh -s -- --source
+```
+
 ### Manual download
 
 Download binaries directly from [GitHub Releases](https://github.com/can1357/oh-my-pi/releases/latest).
