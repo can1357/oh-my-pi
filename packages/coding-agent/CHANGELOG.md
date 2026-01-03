@@ -4,6 +4,7 @@
 
 ### Added
 
+- Auto-read file mentions: Reference files with `@path/to/file.ext` syntax in prompts to automatically inject their contents, eliminating manual Read tool calls
 - Added `hidden` property for custom tools to exclude them from default tool list unless explicitly requested
 - Added `explicitTools` option to `createAgentSession` for enabling hidden tools by name
 - Added example review tools (`report_finding`, `submit_review`) with structured findings accumulation and verdict rendering

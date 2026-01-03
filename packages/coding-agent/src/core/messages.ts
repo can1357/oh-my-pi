@@ -64,6 +64,19 @@ export interface CompactionSummaryMessage {
 	timestamp: number;
 }
 
+/**
+ * Message type for auto-read file mentions via @filepath syntax.
+ */
+export interface FileMentionMessage {
+	role: "fileMention";
+	files: Array<{
+		path: string;
+		content: string;
+		lineCount: number;
+	}>;
+	timestamp: number;
+}
+
 // Extend CustomAgentMessages via declaration merging
 declare module "@oh-my-pi/pi-agent-core" {
 	interface CustomAgentMessages {
@@ -71,6 +84,7 @@ declare module "@oh-my-pi/pi-agent-core" {
 		hookMessage: HookMessage;
 		branchSummary: BranchSummaryMessage;
 		compactionSummary: CompactionSummaryMessage;
+		fileMention: FileMentionMessage;
 	}
 }
 
@@ -175,6 +189,14 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						],
 						timestamp: m.timestamp,
 					};
+				case "fileMention": {
+					const fileContents = m.files.map((f) => `<file path="${f.path}">\n${f.content}\n</file>`).join("\n\n");
+					return {
+						role: "user",
+						content: [{ type: "text" as const, text: `<system-reminder>\n${fileContents}\n</system-reminder>` }],
+						timestamp: m.timestamp,
+					};
+				}
 				case "user":
 				case "assistant":
 				case "toolResult":

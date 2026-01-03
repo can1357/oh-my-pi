@@ -873,6 +873,19 @@ export class InteractiveMode {
 				}
 			}
 
+			// Custom commands (TypeScript slash commands) - route through session.prompt()
+			if (text.startsWith("/") && this.session.customCommands.length > 0) {
+				const spaceIndex = text.indexOf(" ");
+				const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+				const hasCustomCommand = this.session.customCommands.some((c) => c.command.name === commandName);
+				if (hasCustomCommand) {
+					this.editor.addToHistory(text);
+					this.editor.setText("");
+					await this.session.prompt(text);
+					return;
+				}
+			}
+
 			// Queue regular messages if agent is streaming
 			if (this.session.isStreaming) {
 				await this.session.queueMessage(text);
@@ -1236,6 +1249,14 @@ export class InteractiveMode {
 				const component = new BranchSummaryMessageComponent(message);
 				component.setExpanded(this.toolOutputExpanded);
 				this.chatContainer.addChild(component);
+				break;
+			}
+			case "fileMention": {
+				// Render compact file mention display
+				for (const file of message.files) {
+					const text = `${theme.fg("dim", "⎿ ")}${theme.fg("muted", "Read")} ${theme.fg("accent", file.path)} ${theme.fg("dim", `(${file.lineCount} lines)`)}`;
+					this.chatContainer.addChild(new Text(text, 0, 0));
+				}
 				break;
 			}
 			case "user": {

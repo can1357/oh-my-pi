@@ -30,6 +30,7 @@ import {
 import type { LoadedCustomCommand } from "./custom-commands/index";
 import type { CustomToolContext, CustomToolSessionEvent, LoadedCustomTool } from "./custom-tools/index";
 import { exportSessionToHtml } from "./export-html/index";
+import { extractFileMentions, generateFileMentionMessages } from "./file-mentions";
 import type {
 	HookRunner,
 	SessionBeforeBranchResult,
@@ -538,6 +539,13 @@ export class AgentSession {
 			content: userContent,
 			timestamp: Date.now(),
 		});
+
+		// Auto-read @filepath mentions
+		const fileMentions = extractFileMentions(expandedText);
+		if (fileMentions.length > 0) {
+			const fileMentionMessages = await generateFileMentionMessages(fileMentions, this.sessionManager.getCwd());
+			messages.push(...fileMentionMessages);
+		}
 
 		// Emit before_agent_start hook event
 		if (this._hookRunner) {
