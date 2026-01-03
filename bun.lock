@@ -15,13 +15,12 @@
         "@typescript/native-preview": "^7.0.0-dev.20260102.1",
         "bun-types": "^1.3.5",
         "concurrently": "^9.2.1",
-        "husky": "^9.1.7",
         "lint-staged": "^16.2.7",
       },
     },
     "packages/agent": {
       "name": "@oh-my-pi/pi-agent-core",
-      "version": "1.341.0",
+      "version": "1.5.0",
       "dependencies": {
         "@oh-my-pi/pi-ai": "workspace:*",
         "@oh-my-pi/pi-tui": "workspace:*",
@@ -33,7 +32,7 @@
     },
     "packages/ai": {
       "name": "@oh-my-pi/pi-ai",
-      "version": "1.341.0",
+      "version": "1.5.0",
       "bin": {
         "pi-ai": "./src/cli.ts",
       },
@@ -57,7 +56,7 @@
     },
     "packages/coding-agent": {
       "name": "@oh-my-pi/pi-coding-agent",
-      "version": "1.341.0",
+      "version": "1.5.0",
       "bin": {
         "pi": "src/cli.ts",
       },
@@ -88,7 +87,7 @@
     },
     "packages/mom": {
       "name": "@oh-my-pi/pi-mom",
-      "version": "1.341.0",
+      "version": "1.5.0",
       "bin": {
         "mom": "src/main.ts",
       },
@@ -112,7 +111,7 @@
     },
     "packages/tui": {
       "name": "@oh-my-pi/pi-tui",
-      "version": "1.341.0",
+      "version": "1.5.0",
       "dependencies": {
         "@types/mime-types": "^2.1.4",
         "chalk": "^5.5.0",
@@ -127,7 +126,7 @@
     },
     "packages/web-ui": {
       "name": "@oh-my-pi/pi-web-ui",
-      "version": "1.341.0",
+      "version": "1.5.0",
       "dependencies": {
         "@lmstudio/sdk": "^1.5.0",
         "@oh-my-pi/pi-agent-core": "workspace:*",
@@ -743,8 +742,6 @@
     "html-parse-string": ["html-parse-string@0.0.9", "", {}, "sha512-wyGnsOolHbNrcb8N6bdJF4EHyzd3zVGCb9/mBxeNjAYBDOZqD7YkqLBz7kXtdgHwNnV8lN/BpSDpsI1zm8Sd8g=="],
 
     "https-proxy-agent": ["https-proxy-agent@7.0.6", "", { "dependencies": { "agent-base": "^7.1.2", "debug": "4" } }, "sha512-vK9P5/iUfdl95AI+JVyUuIcVtd4ofvtrOr3HNtM2yxC9bnMbEdp3x01OhQNnjb8IJYi38VlTE3mBXwcfvywuSw=="],
-
-    "husky": ["husky@9.1.7", "", { "bin": { "husky": "bin.js" } }, "sha512-5gs5ytaNjBrh5Ow3zrvdUUY+0VxIuWVL4i9irt6friV+BqdCfmV11CQTWMiBYWHbXhco+J1kHfTOUkePhCDvMA=="],
 
     "ieee754": ["ieee754@1.2.1", "", {}, "sha512-dcyqhDvX1C46lXZcVqCpK+FtMRQVdIMN6/Df5js2zouUsqG7I6sFxitIC+7KYK29KdXOLHdu9zL4sFnoVQnqaA=="],
 

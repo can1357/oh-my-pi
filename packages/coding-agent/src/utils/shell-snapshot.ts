@@ -6,7 +6,7 @@
  * shell experience.
  */
 
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,10 +17,10 @@ let cleanupRegistered = false;
  * Get the user's shell config file path.
  */
 function getShellConfigFile(shell: string): string {
-   const home = homedir();
-   if (shell.includes("zsh")) return join(home, ".zshrc");
-   if (shell.includes("bash")) return join(home, ".bashrc");
-   return join(home, ".profile");
+	const home = homedir();
+	if (shell.includes("zsh")) return join(home, ".zshrc");
+	if (shell.includes("bash")) return join(home, ".bashrc");
+	return join(home, ".profile");
 }
 
 /**
@@ -29,15 +29,15 @@ function getShellConfigFile(shell: string): string {
  * Matches Claude Code's snapshot generation logic.
  */
 function generateSnapshotScript(shell: string, snapshotPath: string, rcFile: string): string {
-   const hasRcFile = existsSync(rcFile);
-   const isZsh = shell.includes("zsh");
+	const hasRcFile = existsSync(rcFile);
+	const isZsh = shell.includes("zsh");
 
-   // Escape the snapshot path for shell
-   const escapedPath = snapshotPath.replace(/'/g, "'\\''");
+	// Escape the snapshot path for shell
+	const escapedPath = snapshotPath.replace(/'/g, "'\\''");
 
-   // Function extraction differs between bash and zsh
-   const functionScript = isZsh
-      ? `
+	// Function extraction differs between bash and zsh
+	const functionScript = isZsh
+		? `
 echo "# Functions" >> "$SNAPSHOT_FILE"
 # Force autoload all functions first
 typeset -f > /dev/null 2>&1
@@ -46,7 +46,7 @@ typeset +f 2>/dev/null | grep -vE '^(_|__)' | while read func; do
    typeset -f "$func" >> "$SNAPSHOT_FILE" 2>/dev/null
 done
 `
-      : `
+		: `
 echo "# Functions" >> "$SNAPSHOT_FILE"
 # Force autoload all functions first
 declare -f > /dev/null 2>&1
@@ -57,20 +57,20 @@ declare -F 2>/dev/null | cut -d' ' -f3 | grep -vE '^(_|__)' | while read func; d
 done
 `;
 
-   // Shell options extraction
-   const optionsScript = isZsh
-      ? `
+	// Shell options extraction
+	const optionsScript = isZsh
+		? `
 echo "# Shell Options" >> "$SNAPSHOT_FILE"
 setopt 2>/dev/null | sed 's/^/setopt /' | head -n 1000 >> "$SNAPSHOT_FILE"
 `
-      : `
+		: `
 echo "# Shell Options" >> "$SNAPSHOT_FILE"
 shopt -p 2>/dev/null | head -n 1000 >> "$SNAPSHOT_FILE"
 set -o 2>/dev/null | grep "on" | awk '{print "set -o " $1}' | head -n 1000 >> "$SNAPSHOT_FILE"
 echo "shopt -s expand_aliases" >> "$SNAPSHOT_FILE"
 `;
 
-   return `
+	return `
 SNAPSHOT_FILE='${escapedPath}'
 
 # Source user's rc file if it exists
@@ -110,55 +110,58 @@ fi
  * Create a shell snapshot, caching the result.
  * Returns the path to the snapshot file, or null if creation failed.
  */
-export async function getOrCreateSnapshot(shell: string, env: Record<string, string | undefined>): Promise<string | null> {
-   // Return cached snapshot if valid
-   if (cachedSnapshotPath && existsSync(cachedSnapshotPath)) {
-      return cachedSnapshotPath;
-   }
+export async function getOrCreateSnapshot(
+	shell: string,
+	env: Record<string, string | undefined>,
+): Promise<string | null> {
+	// Return cached snapshot if valid
+	if (cachedSnapshotPath && existsSync(cachedSnapshotPath)) {
+		return cachedSnapshotPath;
+	}
 
-   // Skip on Windows (no .bashrc in standard location)
-   if (process.platform === "win32") {
-      return null;
-   }
+	// Skip on Windows (no .bashrc in standard location)
+	if (process.platform === "win32") {
+		return null;
+	}
 
-   const rcFile = getShellConfigFile(shell);
+	const rcFile = getShellConfigFile(shell);
 
-   // Create snapshot directory
-   const snapshotDir = join(tmpdir(), "pi-shell-snapshots");
-   try {
-      mkdirSync(snapshotDir, { recursive: true });
-   } catch {
-      return null;
-   }
+	// Create snapshot directory
+	const snapshotDir = join(tmpdir(), "pi-shell-snapshots");
+	try {
+		mkdirSync(snapshotDir, { recursive: true });
+	} catch {
+		return null;
+	}
 
-   // Generate unique snapshot path
-   const timestamp = Date.now();
-   const random = Math.random().toString(36).substring(2, 8);
-   const shellName = shell.includes("zsh") ? "zsh" : shell.includes("bash") ? "bash" : "sh";
-   const snapshotPath = join(snapshotDir, `snapshot-${shellName}-${timestamp}-${random}.sh`);
+	// Generate unique snapshot path
+	const timestamp = Date.now();
+	const random = Math.random().toString(36).substring(2, 8);
+	const shellName = shell.includes("zsh") ? "zsh" : shell.includes("bash") ? "bash" : "sh";
+	const snapshotPath = join(snapshotDir, `snapshot-${shellName}-${timestamp}-${random}.sh`);
 
-   // Generate and execute snapshot script
-   const script = generateSnapshotScript(shell, snapshotPath, rcFile);
+	// Generate and execute snapshot script
+	const script = generateSnapshotScript(shell, snapshotPath, rcFile);
 
-   try {
-      const result = Bun.spawnSync([shell, "-l", "-c", script], {
-         stdin: "ignore",
-         stdout: "pipe",
-         stderr: "pipe",
-         env,
-         timeout: 10000, // 10 second timeout
-      });
+	try {
+		const result = Bun.spawnSync([shell, "-l", "-c", script], {
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+			env,
+			timeout: 10000, // 10 second timeout
+		});
 
-      if (result.exitCode === 0 && existsSync(snapshotPath)) {
-         cachedSnapshotPath = snapshotPath;
-         registerCleanup();
-         return snapshotPath;
-      }
-   } catch {
-      // Snapshot creation failed, proceed without it
-   }
+		if (result.exitCode === 0 && existsSync(snapshotPath)) {
+			cachedSnapshotPath = snapshotPath;
+			registerCleanup();
+			return snapshotPath;
+		}
+	} catch {
+		// Snapshot creation failed, proceed without it
+	}
 
-   return null;
+	return null;
 }
 
 /**
@@ -166,50 +169,50 @@ export async function getOrCreateSnapshot(shell: string, env: Record<string, str
  * Returns empty string if no snapshot available.
  */
 export function getSnapshotSourceCommand(snapshotPath: string | null): string {
-   if (!snapshotPath) return "";
-   // Escape for shell
-   const escaped = snapshotPath.replace(/'/g, "'\\''");
-   return `source '${escaped}' 2>/dev/null && `;
+	if (!snapshotPath) return "";
+	// Escape for shell
+	const escaped = snapshotPath.replace(/'/g, "'\\''");
+	return `source '${escaped}' 2>/dev/null && `;
 }
 
 /**
  * Register cleanup handler to delete snapshot on process exit.
  */
 function registerCleanup(): void {
-   if (cleanupRegistered) return;
-   cleanupRegistered = true;
+	if (cleanupRegistered) return;
+	cleanupRegistered = true;
 
-   const cleanup = () => {
-      if (cachedSnapshotPath && existsSync(cachedSnapshotPath)) {
-         try {
-            unlinkSync(cachedSnapshotPath);
-         } catch {
-            // Ignore cleanup errors
-         }
-      }
-   };
+	const cleanup = () => {
+		if (cachedSnapshotPath && existsSync(cachedSnapshotPath)) {
+			try {
+				unlinkSync(cachedSnapshotPath);
+			} catch {
+				// Ignore cleanup errors
+			}
+		}
+	};
 
-   process.on("exit", cleanup);
-   process.on("SIGINT", () => {
-      cleanup();
-      process.exit(130);
-   });
-   process.on("SIGTERM", () => {
-      cleanup();
-      process.exit(143);
-   });
+	process.on("exit", cleanup);
+	process.on("SIGINT", () => {
+		cleanup();
+		process.exit(130);
+	});
+	process.on("SIGTERM", () => {
+		cleanup();
+		process.exit(143);
+	});
 }
 
 /**
  * Clear the cached snapshot (for testing or forced refresh).
  */
 export function clearSnapshotCache(): void {
-   if (cachedSnapshotPath && existsSync(cachedSnapshotPath)) {
-      try {
-         unlinkSync(cachedSnapshotPath);
-      } catch {
-         // Ignore
-      }
-   }
-   cachedSnapshotPath = null;
+	if (cachedSnapshotPath && existsSync(cachedSnapshotPath)) {
+		try {
+			unlinkSync(cachedSnapshotPath);
+		} catch {
+			// Ignore
+		}
+	}
+	cachedSnapshotPath = null;
 }

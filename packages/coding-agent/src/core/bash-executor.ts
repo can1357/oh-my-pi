@@ -20,6 +20,10 @@ import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate";
 // ============================================================================
 
 export interface BashExecutorOptions {
+	/** Working directory for command execution */
+	cwd?: string;
+	/** Timeout in milliseconds */
+	timeout?: number;
 	/** Callback for streaming output chunks (already sanitized) */
 	onChunk?: (chunk: string) => void;
 	/** AbortSignal for cancellation */
@@ -70,6 +74,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 	return new Promise((resolve, reject) => {
 		const child: Subprocess = Bun.spawn([shell, ...args, finalCommand], {
+			cwd: options?.cwd,
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "pipe",
@@ -85,16 +90,27 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		let tempFilePath: string | undefined;
 		let tempFileStream: WriteStream | undefined;
 		let totalBytes = 0;
+		let timedOut = false;
 
-		// Handle abort signal
+		// Handle abort signal and timeout
 		const abortHandler = () => {
 			killProcessTree(child.pid);
 		};
+
+		// Set up timeout if specified
+		let timeoutHandle: Timer | undefined;
+		if (options?.timeout && options.timeout > 0) {
+			timeoutHandle = setTimeout(() => {
+				timedOut = true;
+				abortHandler();
+			}, options.timeout);
+		}
 
 		if (options?.signal) {
 			if (options.signal.aborted) {
 				// Already aborted, don't even start
 				child.kill();
+				if (timeoutHandle) clearTimeout(timeoutHandle);
 				resolve({
 					output: "",
 					exitCode: undefined,
@@ -167,11 +183,11 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 				const exitCode = await child.exited;
 
-				// Clean up abort listener
+				// Clean up
+				if (timeoutHandle) clearTimeout(timeoutHandle);
 				if (options?.signal) {
 					options.signal.removeEventListener("abort", abortHandler);
 				}
-
 				if (tempFileStream) {
 					tempFileStream.end();
 				}
@@ -179,6 +195,19 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				// Combine buffered chunks for truncation (already sanitized)
 				const fullOutput = outputChunks.join("");
 				const truncationResult = truncateTail(fullOutput);
+
+				// Handle timeout
+				if (timedOut) {
+					const timeoutSecs = Math.round((options?.timeout || 0) / 1000);
+					resolve({
+						output: `${fullOutput}\n\nCommand timed out after ${timeoutSecs} seconds`,
+						exitCode: undefined,
+						cancelled: true,
+						truncated: truncationResult.truncated,
+						fullOutputPath: tempFilePath,
+					});
+					return;
+				}
 
 				// Non-zero exit codes or signal-killed processes are considered cancelled if killed via signal
 				const cancelled = exitCode === null || (exitCode !== 0 && (options?.signal?.aborted ?? false));
@@ -191,11 +220,11 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 					fullOutputPath: tempFilePath,
 				});
 			} catch (err) {
-				// Clean up abort listener
+				// Clean up
+				if (timeoutHandle) clearTimeout(timeoutHandle);
 				if (options?.signal) {
 					options.signal.removeEventListener("abort", abortHandler);
 				}
-
 				if (tempFileStream) {
 					tempFileStream.end();
 				}

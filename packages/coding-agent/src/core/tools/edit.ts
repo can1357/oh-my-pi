@@ -66,7 +66,12 @@ Usage:
 			// Reject .ipynb files - use NotebookEdit tool instead
 			if (absolutePath.endsWith(".ipynb")) {
 				return {
-					content: [{ type: "text", text: "Cannot edit Jupyter notebooks with the Edit tool. Use the NotebookEdit tool instead." }],
+					content: [
+						{
+							type: "text",
+							text: "Cannot edit Jupyter notebooks with the Edit tool. Use the NotebookEdit tool instead.",
+						},
+					],
 					details: undefined,
 				};
 			}
