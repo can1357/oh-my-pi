@@ -65,6 +65,7 @@ import { ModelSelectorComponent } from "./components/model-selector";
 import { OAuthSelectorComponent } from "./components/oauth-selector";
 import { SessionSelectorComponent } from "./components/session-selector";
 import { SettingsSelectorComponent } from "./components/settings-selector";
+import { ExtensionDashboard } from "./components/extensions";
 import { ToolExecutionComponent } from "./components/tool-execution";
 import { TreeSelectorComponent } from "./components/tree-selector";
 import { TtsrNotificationComponent } from "./components/ttsr-notification";
@@ -203,7 +204,8 @@ export class InteractiveMode {
 			{ name: "share", description: "Share session as a secret GitHub gist" },
 			{ name: "copy", description: "Copy last agent message to clipboard" },
 			{ name: "session", description: "Show session info and stats" },
-			{ name: "status", description: "Show loaded extensions (context, skills, tools, hooks)" },
+			{ name: "extensions", description: "Open Extension Control Center dashboard" },
+			{ name: "status", description: "Alias for /extensions" },
 			{ name: "changelog", description: "Show changelog entries" },
 			{ name: "hotkeys", description: "Show all keyboard shortcuts" },
 			{ name: "branch", description: "Create a new branch from a previous message" },
@@ -795,8 +797,8 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/status") {
-				this.handleStatusCommand();
+			if (text === "/extensions" || text === "/status") {
+				this.showExtensionsDashboard();
 				this.editor.setText("");
 				return;
 			}
@@ -1758,6 +1760,21 @@ export class InteractiveMode {
 	}
 
 	/**
+	 * Show the Extension Control Center dashboard.
+	 * Replaces /status with a unified view of all providers and extensions.
+	 */
+	private showExtensionsDashboard(): void {
+		this.showSelector((done) => {
+			const dashboard = new ExtensionDashboard(process.cwd(), this.settingsManager);
+			dashboard.onClose = () => {
+				done();
+				this.ui.requestRender();
+			};
+			return { component: dashboard, focus: dashboard };
+		});
+	}
+
+	/**
 	 * Handle setting changes from the settings selector.
 	 * Most settings are saved directly via SettingsManager in the definitions.
 	 * This handles side effects and session-specific settings.
@@ -2408,282 +2425,6 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Markdown(hotkeys.trim(), 1, 1, getMarkdownTheme()));
 		this.chatContainer.addChild(new DynamicBorder());
-		this.ui.requestRender();
-	}
-
-	private handleStatusCommand(): void {
-		type StatusSource =
-			| { provider: string; level: string }
-			| { mcpServer: string; provider?: string }
-			| "builtin"
-			| "unknown";
-
-		type StatusLine = {
-			name: string;
-			sourceText: string;
-			nameWithSource: string;
-			desc?: string;
-		};
-
-		type LineSection = {
-			title: string;
-			lines: StatusLine[];
-		};
-
-		type Section = { kind: "lines"; section: LineSection } | { kind: "text"; text: string };
-
-		const capitalize = (value: string): string => value.charAt(0).toUpperCase() + value.slice(1);
-
-		const resolveSourceText = (source: StatusSource): string => {
-			if (source === "builtin") return "builtin";
-			if (source === "unknown") return "unknown";
-			if ("mcpServer" in source) {
-				if (!source.provider) return `mcp:${source.mcpServer}`;
-				return `${source.mcpServer} via ${source.provider}`;
-			}
-			const levelLabel = capitalize(source.level);
-			return `via ${source.provider} (${levelLabel})`;
-		};
-
-		const renderSourceText = (text: string): string => text.replace(/\bvia\b/, theme.italic("via"));
-
-		const truncateText = (text: string, maxWidth: number): string => {
-			const textWidth = visibleWidth(text);
-			if (textWidth <= maxWidth) return text;
-			if (maxWidth <= 3) {
-				let acc = "";
-				let width = 0;
-				for (const char of text) {
-					const charWidth = visibleWidth(char);
-					if (width + charWidth > maxWidth) break;
-					width += charWidth;
-					acc += char;
-				}
-				return acc;
-			}
-			const targetWidth = maxWidth - 3;
-			let acc = "";
-			let width = 0;
-			for (const char of text) {
-				const charWidth = visibleWidth(char);
-				if (width + charWidth > targetWidth) break;
-				width += charWidth;
-				acc += char;
-			}
-			return `${acc}...`;
-		};
-
-		const buildLineSection = <T>(
-			title: string,
-			items: readonly T[],
-			getName: (item: T) => string,
-			getDesc: (item: T) => string | undefined,
-			getSource: (item: T) => StatusSource,
-		): LineSection | null => {
-			if (items.length === 0) return null;
-
-			const lines = items.map((item) => {
-				const name = getName(item);
-				const desc = getDesc(item)?.trim();
-				const sourceText = resolveSourceText(getSource(item));
-				const nameWithSource = sourceText ? `${name} ${sourceText}` : name;
-				return { name, sourceText, nameWithSource, desc };
-			});
-
-			return { title, lines };
-		};
-
-		const renderLineSection = (section: LineSection, maxNameWidth: number): string => {
-			const formattedLines = section.lines.map((line) => {
-				let nameText = line.name;
-				let sourceText = line.sourceText;
-
-				if (sourceText) {
-					const maxSourceWidth = Math.max(0, maxNameWidth - 2);
-					sourceText = truncateText(sourceText, maxSourceWidth);
-				}
-				const sourceWidth = sourceText ? visibleWidth(sourceText) : 0;
-				const availableForName = sourceText ? Math.max(1, maxNameWidth - sourceWidth - 1) : maxNameWidth;
-				nameText = truncateText(nameText, availableForName);
-
-				const nameWithSourcePlain = sourceText ? `${nameText} ${sourceText}` : nameText;
-				const sourceRendered = sourceText ? renderSourceText(sourceText) : "";
-				const nameRendered = sourceText ? `${theme.bold(nameText)} ${sourceRendered}` : theme.bold(nameText);
-				const pad = Math.max(0, maxNameWidth - visibleWidth(nameWithSourcePlain));
-				const desc = line.desc;
-				const descPart = desc ? `  ${theme.fg("dim", desc.slice(0, 50) + (desc.length > 50 ? "..." : ""))}` : "";
-				return `  ${nameRendered}${" ".repeat(pad)}${descPart}`;
-			});
-
-			return `${theme.bold(theme.fg("accent", section.title))}\n${formattedLines.join("\n")}`;
-		};
-
-		const sections: Section[] = [];
-		const pushLineSection = <T>(
-			title: string,
-			items: readonly T[],
-			getName: (item: T) => string,
-			getDesc: (item: T) => string | undefined,
-			getSource: (item: T) => StatusSource,
-		): void => {
-			const section = buildLineSection(title, items, getName, getDesc, getSource);
-			if (section) {
-				sections.push({ kind: "lines", section });
-			}
-		};
-
-		// Loaded context files
-		const contextFilesResult = loadSync(contextFileCapability.id, { cwd: process.cwd() });
-		const contextFiles = contextFilesResult.items as ContextFile[];
-		pushLineSection(
-			"Context Files",
-			contextFiles,
-			(f) => basename(f.path),
-			() => undefined,
-			(f) => ({ provider: f._source.providerName, level: f.level }),
-		);
-
-		// Loaded skills
-		const skillsSettings = this.session.skillsSettings;
-		if (skillsSettings?.enabled !== false) {
-			const { skills, warnings: skillWarnings } = loadSkills(skillsSettings ?? {});
-			pushLineSection(
-				"Skills",
-				skills,
-				(s) => s.name,
-				(s) => s.description,
-				(s) => (s._source ? { provider: s._source.providerName, level: s._source.level } : "unknown"),
-			);
-			if (skillWarnings.length > 0) {
-				sections.push({
-					kind: "text",
-					text:
-						theme.bold(theme.fg("warning", "Skill Warnings")) +
-						"\n" +
-						skillWarnings.map((w) => theme.fg("warning", `  ${w.skillPath}: ${w.message}`)).join("\n"),
-				});
-			}
-		}
-
-		// Loaded rules
-		const rulesResult = loadSync<Rule>(ruleCapability.id, { cwd: process.cwd() });
-		pushLineSection(
-			"Rules",
-			rulesResult.items,
-			(r) => r.name,
-			(r) => r.description,
-			(r) => ({ provider: r._source.providerName, level: r._source.level }),
-		);
-
-		// Loaded prompts
-		const promptsResult = loadSync<Prompt>(promptCapability.id, { cwd: process.cwd() });
-		pushLineSection(
-			"Prompts",
-			promptsResult.items,
-			(p) => p.name,
-			() => undefined,
-			(p) => ({ provider: p._source.providerName, level: p._source.level }),
-		);
-
-		// Loaded instructions
-		const instructionsResult = loadSync<Instruction>(instructionCapability.id, { cwd: process.cwd() });
-		pushLineSection(
-			"Instructions",
-			instructionsResult.items,
-			(i) => i.name,
-			(i) => (i.applyTo ? `applies to: ${i.applyTo}` : undefined),
-			(i) => ({ provider: i._source.providerName, level: i._source.level }),
-		);
-
-		// Loaded custom tools - split MCP from non-MCP
-		if (this.customTools.size > 0) {
-			const allTools = Array.from(this.customTools.values());
-			const mcpTools = allTools.filter((ct) => ct.path.startsWith("mcp:"));
-			const customTools = allTools.filter((ct) => !ct.path.startsWith("mcp:"));
-
-			// MCP Tools section
-			if (mcpTools.length > 0) {
-				pushLineSection(
-					"MCP Tools",
-					mcpTools,
-					(ct) => ct.tool.label || ct.tool.name,
-					() => undefined,
-					(ct) => {
-						const match = ct.path.match(/^mcp:(.+?) via (.+)$/);
-						if (match) {
-							const [, serverName, providerName] = match;
-							return { mcpServer: serverName, provider: providerName };
-						}
-						return ct.path.startsWith("mcp:") ? { mcpServer: ct.path.slice(4) } : "unknown";
-					},
-				);
-			}
-
-			// Custom Tools section
-			if (customTools.length > 0) {
-				pushLineSection(
-					"Custom Tools",
-					customTools,
-					(ct) => ct.tool.label || ct.tool.name,
-					(ct) => ct.tool.description,
-					(ct) => {
-						if (ct.source?.provider === "builtin") return "builtin";
-						if (ct.path === "<exa>") return "builtin";
-						return ct.source ? { provider: ct.source.providerName, level: ct.source.level } : "unknown";
-					},
-				);
-			}
-		}
-
-		// Loaded slash commands (file-based)
-		const fileCommands = this.session.fileCommands;
-		pushLineSection(
-			"Slash Commands",
-			fileCommands,
-			(cmd) => `/${cmd.name}`,
-			(cmd) => cmd.description,
-			(cmd) => (cmd._source ? { provider: cmd._source.providerName, level: cmd._source.level } : "unknown"),
-		);
-
-		// Loaded hooks
-		const hookRunner = this.session.hookRunner;
-		if (hookRunner) {
-			const hookPaths = hookRunner.getHookPaths();
-			if (hookPaths.length > 0) {
-				sections.push({
-					kind: "text",
-					text:
-						`${theme.bold(theme.fg("accent", "Hooks"))}\n` +
-						hookPaths.map((p) => `  ${theme.bold(basename(p))} ${theme.fg("dim", "hook")}`).join("\n"),
-				});
-			}
-		}
-
-		const lineSections = sections.filter((section): section is { kind: "lines"; section: LineSection } => {
-			return section.kind === "lines";
-		});
-		const allLines = lineSections.flatMap((section) => section.section.lines);
-		const maxNameWidth = allLines.length
-			? Math.min(60, Math.max(...allLines.map((line) => visibleWidth(line.nameWithSource))))
-			: 0;
-		const renderedSections = sections
-			.map((section) => (section.kind === "lines" ? renderLineSection(section.section, maxNameWidth) : section.text))
-			.filter((section) => section.length > 0);
-
-		if (renderedSections.length === 0) {
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(new Text(theme.fg("muted", "No extensions loaded."), 1, 0));
-		} else {
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(new DynamicBorder());
-			this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Loaded Extensions")), 1, 0));
-			this.chatContainer.addChild(new Spacer(1));
-			for (const section of renderedSections) {
-				this.chatContainer.addChild(new Text(section, 1, 0));
-				this.chatContainer.addChild(new Spacer(1));
-			}
-			this.chatContainer.addChild(new DynamicBorder());
-		}
 		this.ui.requestRender();
 	}
 

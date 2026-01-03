@@ -1,6 +1,15 @@
 # Changelog
 
 ## [Unreleased]
+
+### Added
+
+- Added Extension Control Center dashboard accessible via `/extensions` command for unified management of all providers and extensions
+- Added ability to enable/disable individual extensions with persistent settings
+- Added three-column dashboard layout with sidebar tree, extension list, and inspector panel
+- Added fuzzy search filtering for extensions in the dashboard
+- Added keyboard navigation with Tab to cycle panes, j/k for navigation, Space to toggle, Enter to expand/collapse
+
 ### Fixed
 
 - Fixed title generation flag not resetting when starting a new session

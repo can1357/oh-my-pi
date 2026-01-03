@@ -105,6 +105,7 @@ export interface Settings {
 	edit?: EditSettings;
 	ttsr?: TtsrSettings;
 	disabledProviders?: string[]; // Discovery provider IDs that are disabled
+	disabledExtensions?: string[]; // Individual extension IDs that are disabled (e.g., "skill:commit")
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -592,6 +593,38 @@ export class SettingsManager {
 	setDisabledProviders(providerIds: string[]): void {
 		this.globalSettings.disabledProviders = providerIds;
 		this.save();
+	}
+
+	getDisabledExtensions(): string[] {
+		return [...(this.settings.disabledExtensions ?? [])];
+	}
+
+	setDisabledExtensions(extensionIds: string[]): void {
+		this.globalSettings.disabledExtensions = extensionIds;
+		this.save();
+	}
+
+	isExtensionEnabled(extensionId: string): boolean {
+		return !(this.settings.disabledExtensions ?? []).includes(extensionId);
+	}
+
+	enableExtension(extensionId: string): void {
+		const disabled = this.globalSettings.disabledExtensions ?? [];
+		const index = disabled.indexOf(extensionId);
+		if (index !== -1) {
+			disabled.splice(index, 1);
+			this.globalSettings.disabledExtensions = disabled;
+			this.save();
+		}
+	}
+
+	disableExtension(extensionId: string): void {
+		const disabled = this.globalSettings.disabledExtensions ?? [];
+		if (!disabled.includes(extensionId)) {
+			disabled.push(extensionId);
+			this.globalSettings.disabledExtensions = disabled;
+			this.save();
+		}
 	}
 
 	getTtsrSettings(): TtsrSettings {

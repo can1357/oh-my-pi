@@ -99,7 +99,6 @@ const SETTINGS_TABS: Tab[] = [
 	{ id: "config", label: "Config" },
 	{ id: "lsp", label: "LSP" },
 	{ id: "exa", label: "Exa" },
-	{ id: "discovery", label: "Discovery" },
 	{ id: "plugins", label: "Plugins" },
 ];
 
