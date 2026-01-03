@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.4.1337] - 2026-01-03
+
 ### Added
 
 - Added Time Traveling Stream Rules (TTSR) feature that monitors agent output for pattern matches and injects rule reminders mid-stream

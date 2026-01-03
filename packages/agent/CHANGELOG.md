@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [3.4.1337] - 2026-01-03
 ### Added
 
 - Added `popMessage()` method to Agent class for removing and retrieving the last message
