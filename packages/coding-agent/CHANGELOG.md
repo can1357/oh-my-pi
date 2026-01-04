@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [3.7.1337] - 2026-01-04
 ### Added
 
 - Added `EditMatchError` class for structured error handling in edit operations
