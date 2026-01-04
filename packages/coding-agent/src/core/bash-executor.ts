@@ -14,6 +14,7 @@ import stripAnsi from "strip-ansi";
 import { getShellConfig, killProcessTree, sanitizeBinaryOutput } from "../utils/shell";
 import { getOrCreateSnapshot, getSnapshotSourceCommand } from "../utils/shell-snapshot";
 import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate";
+import { ScopeSignal } from "./utils";
 
 // ============================================================================
 // Types
@@ -47,6 +48,70 @@ export interface BashResult {
 // Implementation
 // ============================================================================
 
+function createSanitizer(): TransformStream<Uint8Array, string> {
+	const decoder = new TextDecoder();
+	return new TransformStream({
+		transform(chunk, controller) {
+			const text = sanitizeBinaryOutput(stripAnsi(decoder.decode(chunk, { stream: true }))).replace(/\r/g, "");
+			controller.enqueue(text);
+		},
+	});
+}
+
+function createOutputSink(
+	spillThreshold: number,
+	maxBuffer: number,
+	onChunk?: (text: string) => void,
+): WritableStream<string> & {
+	dump: (annotation?: string) => { output: string; truncated: boolean; fullOutputPath?: string };
+} {
+	const chunks: string[] = [];
+	let chunkBytes = 0;
+	let totalBytes = 0;
+	let fullOutputPath: string | undefined;
+	let fullOutputStream: WriteStream | undefined;
+
+	const sink = new WritableStream<string>({
+		write(text) {
+			totalBytes += text.length;
+
+			// Spill to temp file if needed
+			if (totalBytes > spillThreshold && !fullOutputPath) {
+				fullOutputPath = join(tmpdir(), `omp-${crypto.randomUUID()}.buffer`);
+				const ts = createWriteStream(fullOutputPath);
+				chunks.forEach((c) => {
+					ts.write(c);
+				});
+				fullOutputStream = ts;
+			}
+			fullOutputStream?.write(text);
+
+			// Rolling buffer
+			chunks.push(text);
+			chunkBytes += text.length;
+			while (chunkBytes > maxBuffer && chunks.length > 1) {
+				chunkBytes -= chunks.shift()!.length;
+			}
+
+			onChunk?.(text);
+		},
+		close() {
+			fullOutputStream?.end();
+		},
+	});
+
+	return Object.assign(sink, {
+		dump(annotation?: string) {
+			if (annotation) {
+				chunks.push(`\n\n${annotation}`);
+			}
+			const full = chunks.join("");
+			const { content, truncated } = truncateTail(full);
+			return { output: truncated ? content : full, truncated, fullOutputPath: fullOutputPath };
+		},
+	});
+}
+
 /**
  * Execute a bash command with optional streaming and cancellation support.
  *
@@ -72,165 +137,61 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const prefixedCommand = prefix ? `${prefix} ${command}` : command;
 	const finalCommand = `${snapshotPrefix}${prefixedCommand}`;
 
-	return new Promise((resolve, reject) => {
-		const child: Subprocess = Bun.spawn([shell, ...args, finalCommand], {
-			cwd: options?.cwd,
-			stdin: "ignore",
-			stdout: "pipe",
-			stderr: "pipe",
-			env,
-		});
+	using signal = new ScopeSignal(options);
 
-		// Track sanitized output for truncation
-		const outputChunks: string[] = [];
-		let outputBytes = 0;
-		const maxOutputBytes = DEFAULT_MAX_BYTES * 2;
-
-		// Temp file for large output
-		let tempFilePath: string | undefined;
-		let tempFileStream: WriteStream | undefined;
-		let totalBytes = 0;
-		let timedOut = false;
-
-		// Handle abort signal and timeout
-		const abortHandler = () => {
-			killProcessTree(child.pid);
-		};
-
-		// Set up timeout if specified
-		let timeoutHandle: Timer | undefined;
-		if (options?.timeout && options.timeout > 0) {
-			timeoutHandle = setTimeout(() => {
-				timedOut = true;
-				abortHandler();
-			}, options.timeout);
-		}
-
-		if (options?.signal) {
-			if (options.signal.aborted) {
-				// Already aborted, don't even start
-				child.kill();
-				if (timeoutHandle) clearTimeout(timeoutHandle);
-				resolve({
-					output: "",
-					exitCode: undefined,
-					cancelled: true,
-					truncated: false,
-				});
-				return;
-			}
-			options.signal.addEventListener("abort", abortHandler, { once: true });
-		}
-
-		const handleData = (data: Buffer) => {
-			totalBytes += data.length;
-
-			// Sanitize once at the source: strip ANSI, replace binary garbage, normalize newlines
-			const text = sanitizeBinaryOutput(stripAnsi(data.toString())).replace(/\r/g, "");
-
-			// Start writing to temp file if exceeds threshold
-			if (totalBytes > DEFAULT_MAX_BYTES && !tempFilePath) {
-				const randomId = crypto.getRandomValues(new Uint8Array(8));
-				const id = Array.from(randomId, (b) => b.toString(16).padStart(2, "0")).join("");
-				tempFilePath = join(tmpdir(), `omp-bash-${id}.log`);
-				tempFileStream = createWriteStream(tempFilePath);
-				// Write already-buffered chunks to temp file
-				for (const chunk of outputChunks) {
-					tempFileStream.write(chunk);
-				}
-			}
-
-			if (tempFileStream) {
-				tempFileStream.write(text);
-			}
-
-			// Keep rolling buffer of sanitized text
-			outputChunks.push(text);
-			outputBytes += text.length;
-			while (outputBytes > maxOutputBytes && outputChunks.length > 1) {
-				const removed = outputChunks.shift()!;
-				outputBytes -= removed.length;
-			}
-
-			// Stream to callback if provided
-			if (options?.onChunk) {
-				options.onChunk(text);
-			}
-		};
-
-		// Read streams asynchronously
-		(async () => {
-			try {
-				const stdoutReader = (child.stdout as ReadableStream<Uint8Array>).getReader();
-				const stderrReader = (child.stderr as ReadableStream<Uint8Array>).getReader();
-
-				await Promise.all([
-					(async () => {
-						while (true) {
-							const { done, value } = await stdoutReader.read();
-							if (done) break;
-							handleData(Buffer.from(value));
-						}
-					})(),
-					(async () => {
-						while (true) {
-							const { done, value } = await stderrReader.read();
-							if (done) break;
-							handleData(Buffer.from(value));
-						}
-					})(),
-				]);
-
-				const exitCode = await child.exited;
-
-				// Clean up
-				if (timeoutHandle) clearTimeout(timeoutHandle);
-				if (options?.signal) {
-					options.signal.removeEventListener("abort", abortHandler);
-				}
-				if (tempFileStream) {
-					tempFileStream.end();
-				}
-
-				// Combine buffered chunks for truncation (already sanitized)
-				const fullOutput = outputChunks.join("");
-				const truncationResult = truncateTail(fullOutput);
-
-				// Handle timeout
-				if (timedOut) {
-					const timeoutSecs = Math.round((options?.timeout || 0) / 1000);
-					resolve({
-						output: `${fullOutput}\n\nCommand timed out after ${timeoutSecs} seconds`,
-						exitCode: undefined,
-						cancelled: true,
-						truncated: truncationResult.truncated,
-						fullOutputPath: tempFilePath,
-					});
-					return;
-				}
-
-				// Non-zero exit codes or signal-killed processes are considered cancelled if killed via signal
-				const cancelled = exitCode === null || (exitCode !== 0 && (options?.signal?.aborted ?? false));
-
-				resolve({
-					output: truncationResult.truncated ? truncationResult.content : fullOutput,
-					exitCode: cancelled ? undefined : exitCode,
-					cancelled,
-					truncated: truncationResult.truncated,
-					fullOutputPath: tempFilePath,
-				});
-			} catch (err) {
-				// Clean up
-				if (timeoutHandle) clearTimeout(timeoutHandle);
-				if (options?.signal) {
-					options.signal.removeEventListener("abort", abortHandler);
-				}
-				if (tempFileStream) {
-					tempFileStream.end();
-				}
-
-				reject(err);
-			}
-		})();
+	const child: Subprocess = Bun.spawn([shell, ...args, finalCommand], {
+		cwd: options?.cwd,
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+		env,
 	});
+
+	signal.catch(() => {
+		killProcessTree(child.pid);
+	});
+
+	const sink = createOutputSink(DEFAULT_MAX_BYTES, DEFAULT_MAX_BYTES * 2, options?.onChunk);
+
+	const writer = sink.getWriter();
+	try {
+		async function pumpStream(readable: ReadableStream<Uint8Array>) {
+			const reader = readable.pipeThrough(createSanitizer()).getReader();
+			try {
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					await writer.write(value);
+				}
+			} finally {
+				reader.releaseLock();
+			}
+		}
+		await Promise.all([
+			pumpStream(child.stdout as ReadableStream<Uint8Array>),
+			pumpStream(child.stderr as ReadableStream<Uint8Array>),
+		]);
+	} finally {
+		await writer.close();
+	}
+
+	// Non-zero exit codes or signal-killed processes are considered cancelled if killed via signal
+	const exitCode = await child.exited;
+
+	const cancelled = exitCode === null || (exitCode !== 0 && (options?.signal?.aborted ?? false));
+
+	if (signal.timedOut()) {
+		const secs = Math.round(options!.timeout! / 1000);
+		return {
+			exitCode: undefined,
+			cancelled: true,
+			...sink.dump(`Command timed out after ${secs} seconds`),
+		};
+	}
+
+	return {
+		exitCode: cancelled ? undefined : exitCode,
+		cancelled,
+		...sink.dump(),
+	};
 }

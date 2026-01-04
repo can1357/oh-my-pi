@@ -2,8 +2,10 @@ import * as fs from "node:fs";
 import path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { BunFile } from "bun";
+import { utils } from "packages/coding-agent/src/core";
 import type { Theme } from "../../../modes/interactive/theme/theme";
 import { logger } from "../../logger";
+import { untilAborted } from "../../utils";
 import { resolveToCwd } from "../path-utils";
 import {
 	ensureFileOpen,
@@ -53,8 +55,6 @@ import {
 	symbolKindToIcon,
 	uriToFile,
 } from "./utils";
-import { utils } from "packages/coding-agent/src/core";
-import { untilAborted } from "../../utils";
 
 export type { LspServerStatus } from "./client";
 export type { LspToolDetails } from "./types";

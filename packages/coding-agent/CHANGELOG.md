@@ -13,6 +13,10 @@
 - Simplified FileDiagnosticsResult interface with renamed fields: `diagnostics` → `messages`, `hasErrors` → `errored`, `serverName` → `server`
 - Session title generation now triggers before sending the first message rather than after agent work begins
 
+### Fixed
+
+- Fixed potential text decoding issues in bash executor by using streaming TextDecoder instead of Buffer.toString()
+
 ## [3.6.1337] - 2026-01-03
 
 ## [3.5.1337] - 2026-01-03

@@ -1,5 +1,6 @@
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
+import { untilAborted } from "../utils";
 import { resolveToCwd } from "./path-utils";
 
 const notebookSchema = Type.Object({
@@ -66,160 +67,104 @@ export function createNotebookTool(cwd: string): AgentTool<typeof notebookSchema
 		) => {
 			const absolutePath = resolveToCwd(notebook_path, cwd);
 
-			return new Promise<{
-				content: Array<{ type: "text"; text: string }>;
-				details: NotebookToolDetails | undefined;
-			}>((resolve, reject) => {
-				if (signal?.aborted) {
-					reject(new Error("Operation aborted"));
-					return;
+			return untilAborted(signal, async () => {
+				// Check if file exists
+				const file = Bun.file(absolutePath);
+				if (!(await file.exists())) {
+					throw new Error(`Notebook not found: ${notebook_path}`);
 				}
 
-				let aborted = false;
-
-				const onAbort = () => {
-					aborted = true;
-					reject(new Error("Operation aborted"));
-				};
-
-				if (signal) {
-					signal.addEventListener("abort", onAbort, { once: true });
+				// Read and parse notebook
+				let notebook: Notebook;
+				try {
+					notebook = await file.json();
+				} catch {
+					throw new Error(`Invalid JSON in notebook: ${notebook_path}`);
 				}
 
-				(async () => {
-					try {
-						// Check if file exists
-						const file = Bun.file(absolutePath);
-						if (!(await file.exists())) {
-							if (signal) signal.removeEventListener("abort", onAbort);
-							reject(new Error(`Notebook not found: ${notebook_path}`));
-							return;
-						}
+				// Validate notebook structure
+				if (!notebook.cells || !Array.isArray(notebook.cells)) {
+					throw new Error(`Invalid notebook structure (missing cells array): ${notebook_path}`);
+				}
 
-						if (aborted) return;
+				const cellCount = notebook.cells.length;
 
-						// Read and parse notebook
-						let notebook: Notebook;
-						try {
-							notebook = await file.json();
-						} catch {
-							if (signal) signal.removeEventListener("abort", onAbort);
-							reject(new Error(`Invalid JSON in notebook: ${notebook_path}`));
-							return;
-						}
-
-						if (aborted) return;
-
-						// Validate notebook structure
-						if (!notebook.cells || !Array.isArray(notebook.cells)) {
-							if (signal) signal.removeEventListener("abort", onAbort);
-							reject(new Error(`Invalid notebook structure (missing cells array): ${notebook_path}`));
-							return;
-						}
-
-						const cellCount = notebook.cells.length;
-
-						// Validate cell_index based on action
-						if (action === "insert") {
-							if (cell_index < 0 || cell_index > cellCount) {
-								if (signal) signal.removeEventListener("abort", onAbort);
-								reject(
-									new Error(
-										`Cell index ${cell_index} out of range for insert (0-${cellCount}) in ${notebook_path}`,
-									),
-								);
-								return;
-							}
-						} else {
-							if (cell_index < 0 || cell_index >= cellCount) {
-								if (signal) signal.removeEventListener("abort", onAbort);
-								reject(
-									new Error(`Cell index ${cell_index} out of range (0-${cellCount - 1}) in ${notebook_path}`),
-								);
-								return;
-							}
-						}
-
-						// Validate content for edit/insert
-						if ((action === "edit" || action === "insert") && content === undefined) {
-							if (signal) signal.removeEventListener("abort", onAbort);
-							reject(new Error(`Content is required for ${action} action`));
-							return;
-						}
-
-						if (aborted) return;
-
-						// Perform the action
-						let resultMessage: string;
-						let finalCellType: string | undefined;
-
-						switch (action) {
-							case "edit": {
-								const sourceLines = splitIntoLines(content!);
-								notebook.cells[cell_index].source = sourceLines;
-								finalCellType = notebook.cells[cell_index].cell_type;
-								resultMessage = `Replaced cell ${cell_index} (${finalCellType})`;
-								break;
-							}
-							case "insert": {
-								const sourceLines = splitIntoLines(content!);
-								const newCellType = (cell_type as "code" | "markdown") || "code";
-								const newCell: NotebookCell = {
-									cell_type: newCellType,
-									source: sourceLines,
-									metadata: {},
-								};
-								if (newCellType === "code") {
-									newCell.execution_count = null;
-									newCell.outputs = [];
-								}
-								notebook.cells.splice(cell_index, 0, newCell);
-								finalCellType = newCellType;
-								resultMessage = `Inserted ${newCellType} cell at position ${cell_index}`;
-								break;
-							}
-							case "delete": {
-								finalCellType = notebook.cells[cell_index].cell_type;
-								notebook.cells.splice(cell_index, 1);
-								resultMessage = `Deleted cell ${cell_index} (${finalCellType})`;
-								break;
-							}
-							default: {
-								if (signal) signal.removeEventListener("abort", onAbort);
-								reject(new Error(`Invalid action: ${action}`));
-								return;
-							}
-						}
-
-						if (aborted) return;
-
-						// Write back with single-space indentation
-						await Bun.write(absolutePath, JSON.stringify(notebook, null, 1));
-
-						if (aborted) return;
-
-						if (signal) signal.removeEventListener("abort", onAbort);
-
-						const newCellCount = notebook.cells.length;
-						resolve({
-							content: [
-								{
-									type: "text",
-									text: `${resultMessage}. Notebook now has ${newCellCount} cells.`,
-								},
-							],
-							details: {
-								action: action as "edit" | "insert" | "delete",
-								cellIndex: cell_index,
-								cellType: finalCellType,
-								totalCells: newCellCount,
-							},
-						});
-					} catch (error: any) {
-						if (signal) signal.removeEventListener("abort", onAbort);
-						if (!aborted) reject(error);
+				// Validate cell_index based on action
+				if (action === "insert") {
+					if (cell_index < 0 || cell_index > cellCount) {
+						throw new Error(
+							`Cell index ${cell_index} out of range for insert (0-${cellCount}) in ${notebook_path}`,
+						);
 					}
-				})();
+				} else {
+					if (cell_index < 0 || cell_index >= cellCount) {
+						throw new Error(`Cell index ${cell_index} out of range (0-${cellCount - 1}) in ${notebook_path}`);
+					}
+				}
+
+				// Validate content for edit/insert
+				if ((action === "edit" || action === "insert") && content === undefined) {
+					throw new Error(`Content is required for ${action} action`);
+				}
+
+				// Perform the action
+				let resultMessage: string;
+				let finalCellType: string | undefined;
+
+				switch (action) {
+					case "edit": {
+						const sourceLines = splitIntoLines(content!);
+						notebook.cells[cell_index].source = sourceLines;
+						finalCellType = notebook.cells[cell_index].cell_type;
+						resultMessage = `Replaced cell ${cell_index} (${finalCellType})`;
+						break;
+					}
+					case "insert": {
+						const sourceLines = splitIntoLines(content!);
+						const newCellType = (cell_type as "code" | "markdown") || "code";
+						const newCell: NotebookCell = {
+							cell_type: newCellType,
+							source: sourceLines,
+							metadata: {},
+						};
+						if (newCellType === "code") {
+							newCell.execution_count = null;
+							newCell.outputs = [];
+						}
+						notebook.cells.splice(cell_index, 0, newCell);
+						finalCellType = newCellType;
+						resultMessage = `Inserted ${newCellType} cell at position ${cell_index}`;
+						break;
+					}
+					case "delete": {
+						finalCellType = notebook.cells[cell_index].cell_type;
+						notebook.cells.splice(cell_index, 1);
+						resultMessage = `Deleted cell ${cell_index} (${finalCellType})`;
+						break;
+					}
+					default: {
+						throw new Error(`Invalid action: ${action}`);
+					}
+				}
+
+				// Write back with single-space indentation
+				await Bun.write(absolutePath, JSON.stringify(notebook, null, 1));
+
+				const newCellCount = notebook.cells.length;
+				return {
+					content: [
+						{
+							type: "text",
+							text: `${resultMessage}. Notebook now has ${newCellCount} cells.`,
+						},
+					],
+					details: {
+						action: action as "edit" | "insert" | "delete",
+						cellIndex: cell_index,
+						cellType: finalCellType,
+						totalCells: newCellCount,
+					},
+				};
 			});
 		},
 	};
