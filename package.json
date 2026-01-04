@@ -20,9 +20,7 @@
 		"prepublishOnly": "bun run build && bun run check",
 		"publish": "bun run prepublishOnly && npm publish -ws --access public",
 		"publish:dry": "bun run prepublishOnly && npm publish -ws --access public --dry-run",
-		"release:patch": "bun scripts/release.mjs patch",
-		"release:minor": "bun scripts/release.mjs minor",
-		"release:major": "bun scripts/release.mjs major"
+		"release": "bun scripts/release.ts"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.3.10",
