@@ -11,8 +11,6 @@ export {
 	createLspTool,
 	type FileDiagnosticsResult,
 	type FileFormatResult,
-	formatFile,
-	getDiagnosticsForFile,
 	getLspStatus,
 	type LspServerStatus,
 	type LspToolDetails,
@@ -61,7 +59,7 @@ import { createEditTool, editTool } from "./edit";
 import { createFindTool, findTool } from "./find";
 import { createGrepTool, grepTool } from "./grep";
 import { createLsTool, lsTool } from "./ls";
-import { createLspTool, formatFile, getDiagnosticsForFile, lspTool } from "./lsp/index";
+import { createLspTool, createLspWritethrough, lspTool } from "./lsp/index";
 import { createNotebookTool, notebookTool } from "./notebook";
 import { createOutputTool, outputTool } from "./output";
 import { createReadTool, readTool } from "./read";
@@ -105,10 +103,12 @@ const toolDefs: Record<string, { tool: Tool; create: ToolFactory }> = {
 		tool: editTool,
 		create: (cwd, _ctx, options) => {
 			const enableDiagnostics = options?.lspDiagnosticsOnEdit ?? false;
-			return createEditTool(cwd, {
-				fuzzyMatch: options?.editFuzzyMatch ?? true,
-				getDiagnostics: enableDiagnostics ? (absolutePath) => getDiagnosticsForFile(absolutePath, cwd) : undefined,
+			const enableFormat = options?.lspFormatOnWrite ?? true;
+			const writethrough = createLspWritethrough(cwd, {
+				enableFormat,
+				enableDiagnostics,
 			});
+			return createEditTool(cwd, { fuzzyMatch: options?.editFuzzyMatch ?? true, writethrough });
 		},
 	},
 	write: {
@@ -116,10 +116,11 @@ const toolDefs: Record<string, { tool: Tool; create: ToolFactory }> = {
 		create: (cwd, _ctx, options) => {
 			const enableFormat = options?.lspFormatOnWrite ?? true;
 			const enableDiagnostics = options?.lspDiagnosticsOnWrite ?? true;
-			return createWriteTool(cwd, {
-				formatOnWrite: enableFormat ? (absolutePath) => formatFile(absolutePath, cwd) : undefined,
-				getDiagnostics: enableDiagnostics ? (absolutePath) => getDiagnosticsForFile(absolutePath, cwd) : undefined,
+			const writethrough = createLspWritethrough(cwd, {
+				enableFormat,
+				enableDiagnostics,
 			});
+			return createWriteTool(cwd, { writethrough });
 		},
 	},
 	grep: { tool: grepTool, create: createGrepTool },

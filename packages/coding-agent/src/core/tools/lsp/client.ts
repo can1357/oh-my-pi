@@ -513,6 +513,69 @@ export async function ensureFileOpen(client: LspClient, filePath: string): Promi
 }
 
 /**
+ * Sync in-memory content to the LSP client without reading from disk.
+ * Use this to provide instant feedback during edits before the file is saved.
+ */
+export async function syncContent(client: LspClient, filePath: string, content: string): Promise<void> {
+	const uri = fileToUri(filePath);
+	const lockKey = `${client.name}:${uri}`;
+
+	const existingLock = fileOperationLocks.get(lockKey);
+	if (existingLock) {
+		await existingLock;
+	}
+
+	const syncPromise = (async () => {
+		const info = client.openFiles.get(uri);
+
+		if (!info) {
+			// Open file with provided content instead of reading from disk
+			const languageId = detectLanguageId(filePath);
+			await sendNotification(client, "textDocument/didOpen", {
+				textDocument: {
+					uri,
+					languageId,
+					version: 1,
+					text: content,
+				},
+			});
+			client.openFiles.set(uri, { version: 1, languageId });
+			client.lastActivity = Date.now();
+			return;
+		}
+
+		const version = ++info.version;
+		await sendNotification(client, "textDocument/didChange", {
+			textDocument: { uri, version },
+			contentChanges: [{ text: content }],
+		});
+		client.lastActivity = Date.now();
+	})();
+
+	fileOperationLocks.set(lockKey, syncPromise);
+	try {
+		await syncPromise;
+	} finally {
+		fileOperationLocks.delete(lockKey);
+	}
+}
+
+/**
+ * Notify LSP that a file was saved.
+ * Assumes content was already synced via syncContent - just sends didSave.
+ */
+export async function notifySaved(client: LspClient, filePath: string): Promise<void> {
+	const uri = fileToUri(filePath);
+	const info = client.openFiles.get(uri);
+	if (!info) return; // File not open, nothing to notify
+
+	await sendNotification(client, "textDocument/didSave", {
+		textDocument: { uri },
+	});
+	client.lastActivity = Date.now();
+}
+
+/**
  * Refresh a file in the LSP client.
  * Increments version, sends didChange and didSave notifications.
  */

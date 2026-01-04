@@ -1,6 +1,17 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `EditMatchError` class for structured error handling in edit operations
+- Added `utils` module export with `once` and `untilAborted` helper functions
+- Added in-memory LSP content sync via `syncContent` and `notifySaved` client methods
+
+### Changed
+
+- Refactored LSP integration to use writethrough callbacks for edit and write tools, improving performance by syncing content in-memory before disk writes
+- Simplified FileDiagnosticsResult interface with renamed fields: `diagnostics` → `messages`, `hasErrors` → `errored`, `serverName` → `server`
+- Session title generation now triggers before sending the first message rather than after agent work begins
 
 ## [3.6.1337] - 2026-01-03
 

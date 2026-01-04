@@ -1,18 +1,16 @@
-import { constants } from "node:fs";
-import { access, readFile, writeFile } from "node:fs/promises";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import {
 	DEFAULT_FUZZY_THRESHOLD,
 	detectLineEnding,
+	EditMatchError,
 	findEditMatch,
-	formatEditMatchError,
 	generateDiffString,
 	normalizeToLF,
 	restoreLineEndings,
 	stripBom,
 } from "./edit-diff";
-import type { FileDiagnosticsResult } from "./lsp/index";
+import { type FileDiagnosticsResult, type WritethroughCallback, writethroughNoop } from "./lsp/index";
 import { resolveToCwd } from "./path-utils";
 
 const editSchema = Type.Object({
@@ -28,8 +26,6 @@ export interface EditToolDetails {
 	diff: string;
 	/** Line number of the first change in the new file (for editor navigation) */
 	firstChangedLine?: number;
-	/** Whether LSP diagnostics were retrieved */
-	hasDiagnostics?: boolean;
 	/** Diagnostic result (if available) */
 	diagnostics?: FileDiagnosticsResult;
 }
@@ -37,12 +33,13 @@ export interface EditToolDetails {
 export interface EditToolOptions {
 	/** Whether to accept high-confidence fuzzy matches for whitespace/indentation (default: true) */
 	fuzzyMatch?: boolean;
-	/** Callback to get LSP diagnostics after editing a file */
-	getDiagnostics?: (absolutePath: string) => Promise<FileDiagnosticsResult>;
+	/** Writethrough callback to get LSP diagnostics after editing a file */
+	writethrough?: WritethroughCallback;
 }
 
 export function createEditTool(cwd: string, options: EditToolOptions = {}): AgentTool<typeof editSchema> {
 	const allowFuzzy = options.fuzzyMatch ?? true;
+	const writethrough = options.writethrough ?? writethroughNoop;
 	return {
 		name: "edit",
 		label: "Edit",
@@ -61,196 +58,87 @@ Usage:
 			{ path, oldText, newText }: { path: string; oldText: string; newText: string },
 			signal?: AbortSignal,
 		) => {
-			const absolutePath = resolveToCwd(path, cwd);
-
 			// Reject .ipynb files - use NotebookEdit tool instead
-			if (absolutePath.endsWith(".ipynb")) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: "Cannot edit Jupyter notebooks with the Edit tool. Use the NotebookEdit tool instead.",
-						},
-					],
-					details: undefined,
-				};
+			if (path.endsWith(".ipynb")) {
+				throw new Error("Cannot edit Jupyter notebooks with the Edit tool. Use the NotebookEdit tool instead.");
 			}
 
-			return new Promise<{
-				content: Array<{ type: "text"; text: string }>;
-				details: EditToolDetails | undefined;
-			}>((resolve, reject) => {
-				// Check if already aborted
-				if (signal?.aborted) {
-					reject(new Error("Operation aborted"));
-					return;
-				}
+			const absolutePath = resolveToCwd(path, cwd);
 
-				let aborted = false;
+			const file = Bun.file(absolutePath);
+			if (!(await file.exists())) {
+				throw new Error(`File not found: ${path}`);
+			}
 
-				// Set up abort handler
-				const onAbort = () => {
-					aborted = true;
-					reject(new Error("Operation aborted"));
-				};
+			const rawContent = await file.text();
 
-				if (signal) {
-					signal.addEventListener("abort", onAbort, { once: true });
-				}
+			// Strip BOM before matching (LLM won't include invisible BOM in oldText)
+			const { bom, text: content } = stripBom(rawContent);
 
-				// Perform the edit operation
-				(async () => {
-					try {
-						// Check if file exists
-						try {
-							await access(absolutePath, constants.R_OK | constants.W_OK);
-						} catch {
-							if (signal) {
-								signal.removeEventListener("abort", onAbort);
-							}
-							reject(new Error(`File not found: ${path}`));
-							return;
-						}
+			const originalEnding = detectLineEnding(content);
+			const normalizedContent = normalizeToLF(content);
+			const normalizedOldText = normalizeToLF(oldText);
+			const normalizedNewText = normalizeToLF(newText);
 
-						// Check if aborted before reading
-						if (aborted) {
-							return;
-						}
-
-						// Read the file
-						const rawContent = await readFile(absolutePath, "utf-8");
-
-						// Check if aborted after reading
-						if (aborted) {
-							return;
-						}
-
-						// Strip BOM before matching (LLM won't include invisible BOM in oldText)
-						const { bom, text: content } = stripBom(rawContent);
-
-						const originalEnding = detectLineEnding(content);
-						const normalizedContent = normalizeToLF(content);
-						const normalizedOldText = normalizeToLF(oldText);
-						const normalizedNewText = normalizeToLF(newText);
-
-						const matchOutcome = findEditMatch(normalizedContent, normalizedOldText, {
-							allowFuzzy,
-							similarityThreshold: DEFAULT_FUZZY_THRESHOLD,
-						});
-
-						if (matchOutcome.occurrences && matchOutcome.occurrences > 1) {
-							if (signal) {
-								signal.removeEventListener("abort", onAbort);
-							}
-							reject(
-								new Error(
-									`Found ${matchOutcome.occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context to make it unique.`,
-								),
-							);
-							return;
-						}
-
-						if (!matchOutcome.match) {
-							if (signal) {
-								signal.removeEventListener("abort", onAbort);
-							}
-							reject(
-								new Error(
-									formatEditMatchError(path, normalizedOldText, matchOutcome.closest, {
-										allowFuzzy,
-										similarityThreshold: DEFAULT_FUZZY_THRESHOLD,
-										fuzzyMatches: matchOutcome.fuzzyMatches,
-									}),
-								),
-							);
-							return;
-						}
-
-						const match = matchOutcome.match;
-
-						// Check if aborted before writing
-						if (aborted) {
-							return;
-						}
-
-						const normalizedNewContent =
-							normalizedContent.substring(0, match.startIndex) +
-							normalizedNewText +
-							normalizedContent.substring(match.startIndex + match.actualText.length);
-
-						// Verify the replacement actually changed something
-						if (normalizedContent === normalizedNewContent) {
-							if (signal) {
-								signal.removeEventListener("abort", onAbort);
-							}
-							reject(
-								new Error(
-									`No changes made to ${path}. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected.`,
-								),
-							);
-							return;
-						}
-
-						const finalContent = bom + restoreLineEndings(normalizedNewContent, originalEnding);
-						await writeFile(absolutePath, finalContent, "utf-8");
-
-						// Check if aborted after writing
-						if (aborted) {
-							return;
-						}
-
-						// Clean up abort handler
-						if (signal) {
-							signal.removeEventListener("abort", onAbort);
-						}
-
-						const diffResult = generateDiffString(normalizedContent, normalizedNewContent);
-
-						// Get LSP diagnostics if callback provided
-						let diagnosticsResult: FileDiagnosticsResult | undefined;
-						if (options.getDiagnostics) {
-							try {
-								diagnosticsResult = await options.getDiagnostics(absolutePath);
-							} catch {
-								// Ignore diagnostics errors - don't fail the edit
-							}
-						}
-
-						// Build result text
-						let resultText = `Successfully replaced text in ${path}.`;
-
-						// Append diagnostics if available and there are issues
-						if (diagnosticsResult?.available && diagnosticsResult.diagnostics.length > 0) {
-							resultText += `\n\nLSP Diagnostics (${diagnosticsResult.summary}):\n`;
-							resultText += diagnosticsResult.diagnostics.map((d) => `  ${d}`).join("\n");
-						}
-
-						resolve({
-							content: [
-								{
-									type: "text",
-									text: resultText,
-								},
-							],
-							details: {
-								diff: diffResult.diff,
-								firstChangedLine: diffResult.firstChangedLine,
-								hasDiagnostics: diagnosticsResult?.available ?? false,
-								diagnostics: diagnosticsResult,
-							},
-						});
-					} catch (error: any) {
-						// Clean up abort handler
-						if (signal) {
-							signal.removeEventListener("abort", onAbort);
-						}
-
-						if (!aborted) {
-							reject(error);
-						}
-					}
-				})();
+			const matchOutcome = findEditMatch(normalizedContent, normalizedOldText, {
+				allowFuzzy,
+				similarityThreshold: DEFAULT_FUZZY_THRESHOLD,
 			});
+
+			if (matchOutcome.occurrences && matchOutcome.occurrences > 1) {
+				throw new Error(
+					`Found ${matchOutcome.occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context to make it unique.`,
+				);
+			}
+
+			if (!matchOutcome.match) {
+				throw new EditMatchError(path, normalizedOldText, matchOutcome.closest, {
+					allowFuzzy,
+					similarityThreshold: DEFAULT_FUZZY_THRESHOLD,
+					fuzzyMatches: matchOutcome.fuzzyMatches,
+				});
+			}
+
+			const match = matchOutcome.match;
+			const normalizedNewContent =
+				normalizedContent.substring(0, match.startIndex) +
+				normalizedNewText +
+				normalizedContent.substring(match.startIndex + match.actualText.length);
+
+			// Verify the replacement actually changed something
+			if (normalizedContent === normalizedNewContent) {
+				throw new Error(
+					`No changes made to ${path}. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected.`,
+				);
+			}
+
+			const finalContent = bom + restoreLineEndings(normalizedNewContent, originalEnding);
+			const diagnostics = await writethrough(absolutePath, finalContent, signal, file);
+
+			const diffResult = generateDiffString(normalizedContent, normalizedNewContent);
+
+			// Build result text
+			let resultText = `Successfully replaced text in ${path}.`;
+
+			const messages = diagnostics?.messages;
+			if (messages && messages.length > 0) {
+				resultText += `\n\nLSP Diagnostics (${diagnostics.summary}):\n`;
+				resultText += messages.map((d) => `  ${d}`).join("\n");
+			}
+
+			return {
+				content: [
+					{
+						type: "text",
+						text: resultText,
+					},
+				],
+				details: {
+					diff: diffResult.diff,
+					firstChangedLine: diffResult.firstChangedLine,
+					diagnostics: diagnostics,
+				},
+			};
 		},
 	};
 }

@@ -143,9 +143,6 @@ export class InteractiveMode {
 	// Custom tools for custom rendering
 	private customTools: Map<string, LoadedCustomTool>;
 
-	// Title generation state
-	private titleGenerationAttempted = false;
-
 	// Convenience accessors
 	private get agent() {
 		return this.session.agent;
@@ -261,7 +258,6 @@ export class InteractiveMode {
 		const existingTitle = this.sessionManager.getSessionTitle();
 		if (existingTitle) {
 			setTerminalTitle(`pi: ${existingTitle}`);
-			this.titleGenerationAttempted = true; // Don't try to generate again
 		}
 
 		// Setup UI layout
@@ -401,7 +397,6 @@ export class InteractiveMode {
 				this.streamingComponent = undefined;
 				this.streamingMessage = undefined;
 				this.pendingTools.clear();
-				this.titleGenerationAttempted = false;
 
 				this.chatContainer.addChild(new Spacer(1));
 				this.chatContainer.addChild(new Text(`${theme.fg("accent", "✓ New session started")}`, 1, 1));
@@ -903,6 +898,21 @@ export class InteractiveMode {
 			// First, move any pending bash components to chat
 			this.flushPendingBashComponents();
 
+			// Generate session title on first message
+			const hasUserMessages = this.agent.state.messages.some((m) => m.role === "user");
+			if (!hasUserMessages && !this.sessionManager.getSessionTitle()) {
+				const registry = this.session.modelRegistry;
+				const smolModel = this.settingsManager.getModelRole("smol");
+				generateSessionTitle(text, registry, smolModel)
+					.then((title) => {
+						if (title) {
+							this.sessionManager.setSessionTitle(title);
+							setTerminalTitle(`omp: ${title}`);
+						}
+					})
+					.catch(() => {});
+			}
+
 			if (this.onInputCallback) {
 				// Include any pending images from clipboard paste
 				const images = this.pendingImages.length > 0 ? [...this.pendingImages] : undefined;
@@ -940,12 +950,6 @@ export class InteractiveMode {
 				);
 				this.statusContainer.addChild(this.loadingAnimation);
 				this.ui.requestRender();
-
-				// Generate session title on first turn (runs in parallel with agent work)
-				if (!this.titleGenerationAttempted && !this.sessionManager.getSessionTitle()) {
-					this.titleGenerationAttempted = true;
-					this.maybeGenerateTitle();
-				}
 				break;
 
 			case "message_start":
@@ -1633,42 +1637,6 @@ export class InteractiveMode {
 		);
 		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
 		this.ui.requestRender();
-	}
-
-	/**
-	 * Generate a title for the session based on the first user message.
-	 * Runs in background, doesn't block UI.
-	 */
-	private maybeGenerateTitle(): void {
-		// Find the first user message
-		const messages = this.agent.state.messages;
-		const firstUserMessage = messages.find((m) => m.role === "user");
-		if (!firstUserMessage) return;
-
-		// Extract text content
-		let messageText = "";
-		for (const content of firstUserMessage.content) {
-			if (typeof content === "string") {
-				messageText += content;
-			} else if (content.type === "text") {
-				messageText += content.text;
-			}
-		}
-		if (!messageText.trim()) return;
-
-		// Generate title in background
-		const registry = this.session.modelRegistry;
-		const smolModel = this.settingsManager.getModelRole("smol");
-		generateSessionTitle(messageText, registry, smolModel)
-			.then((title) => {
-				if (title) {
-					this.sessionManager.setSessionTitle(title);
-					setTerminalTitle(`omp: ${title}`);
-				}
-			})
-			.catch(() => {
-				// Errors logged via logger in title-generator
-			});
 	}
 
 	private updatePendingMessagesDisplay(): void {

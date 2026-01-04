@@ -503,19 +503,19 @@ export class ToolExecutionComponent extends Container {
 			}
 
 			// Show LSP diagnostics if available
-			if (this.result?.details?.diagnostics?.available) {
+			if (this.result?.details?.diagnostics) {
 				const diag = this.result.details.diagnostics;
-				if (diag.diagnostics.length > 0) {
-					const icon = diag.hasErrors ? theme.fg("error", "●") : theme.fg("warning", "●");
+				if (diag.messages.length > 0) {
+					const icon = diag.errored ? theme.fg("error", "●") : theme.fg("warning", "●");
 					text += `\n\n${icon} ${theme.fg("toolTitle", "LSP Diagnostics")} ${theme.fg("dim", `(${diag.summary})`)}`;
-					const maxDiags = this.expanded ? diag.diagnostics.length : 5;
-					const displayDiags = diag.diagnostics.slice(0, maxDiags);
+					const maxDiags = this.expanded ? diag.messages.length : 5;
+					const displayDiags = diag.messages.slice(0, maxDiags);
 					for (const d of displayDiags) {
 						const color = d.includes("[error]") ? "error" : d.includes("[warning]") ? "warning" : "dim";
 						text += `\n  ${theme.fg(color, d)}`;
 					}
-					if (diag.diagnostics.length > maxDiags) {
-						text += theme.fg("dim", `\n  ... (${diag.diagnostics.length - maxDiags} more)`);
+					if (diag.messages.length > maxDiags) {
+						text += theme.fg("dim", `\n  ... (${diag.messages.length - maxDiags} more)`);
 					}
 				}
 			}
@@ -552,19 +552,19 @@ export class ToolExecutionComponent extends Container {
 			}
 
 			// Show LSP diagnostics if available
-			if (this.result?.details?.diagnostics?.available) {
+			if (this.result?.details?.diagnostics) {
 				const diag = this.result.details.diagnostics;
-				if (diag.diagnostics.length > 0) {
-					const icon = diag.hasErrors ? theme.fg("error", "●") : theme.fg("warning", "●");
+				if (diag.messages.length > 0) {
+					const icon = diag.errored ? theme.fg("error", "●") : theme.fg("warning", "●");
 					text += `\n\n${icon} ${theme.fg("toolTitle", "LSP Diagnostics")} ${theme.fg("dim", `(${diag.summary})`)}`;
-					const maxDiags = this.expanded ? diag.diagnostics.length : 5;
-					const displayDiags = diag.diagnostics.slice(0, maxDiags);
+					const maxDiags = this.expanded ? diag.messages.length : 5;
+					const displayDiags = diag.messages.slice(0, maxDiags);
 					for (const d of displayDiags) {
 						const color = d.includes("[error]") ? "error" : d.includes("[warning]") ? "warning" : "dim";
 						text += `\n  ${theme.fg(color, d)}`;
 					}
-					if (diag.diagnostics.length > maxDiags) {
-						text += theme.fg("dim", `\n  ... (${diag.diagnostics.length - maxDiags} more)`);
+					if (diag.messages.length > maxDiags) {
+						text += theme.fg("dim", `\n  ... (${diag.messages.length - maxDiags} more)`);
 					}
 				}
 			}

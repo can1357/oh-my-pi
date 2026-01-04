@@ -8,11 +8,10 @@ import { uriToFile } from "./utils";
 // =============================================================================
 
 /**
- * Apply text edits to a file.
+ * Apply text edits to a string in-memory.
  * Edits are applied in reverse order (bottom-to-top) to preserve line/character indices.
  */
-export async function applyTextEdits(filePath: string, edits: TextEdit[]): Promise<void> {
-	const content = await Bun.file(filePath).text();
+export function applyTextEditsToString(content: string, edits: TextEdit[]): string {
 	const lines = content.split("\n");
 
 	// Sort edits in reverse order (bottom-to-top, right-to-left)
@@ -39,7 +38,17 @@ export async function applyTextEdits(filePath: string, edits: TextEdit[]): Promi
 		}
 	}
 
-	await Bun.write(filePath, lines.join("\n"));
+	return lines.join("\n");
+}
+
+/**
+ * Apply text edits to a file.
+ * Edits are applied in reverse order (bottom-to-top) to preserve line/character indices.
+ */
+export async function applyTextEdits(filePath: string, edits: TextEdit[]): Promise<void> {
+	const content = await Bun.file(filePath).text();
+	const result = applyTextEditsToString(content, edits);
+	await Bun.write(filePath, result);
 }
 
 // =============================================================================

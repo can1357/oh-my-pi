@@ -249,40 +249,52 @@ function findFirstDifferentLine(oldLines: string[], newLines: string[]): { oldLi
 	return { oldLine: oldLines[0] ?? "", newLine: newLines[0] ?? "" };
 }
 
-export function formatEditMatchError(
-	path: string,
-	normalizedOldText: string,
-	closest: EditMatch | undefined,
-	options: { allowFuzzy: boolean; similarityThreshold: number; fuzzyMatches?: number },
-): string {
-	if (!closest) {
-		return options.allowFuzzy
-			? `Could not find a close enough match in ${path}.`
-			: `Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`;
+export class EditMatchError extends Error {
+	constructor(
+		public readonly path: string,
+		public readonly normalizedOldText: string,
+		public readonly closest: EditMatch | undefined,
+		public readonly options: { allowFuzzy: boolean; similarityThreshold: number; fuzzyMatches?: number },
+	) {
+		super(EditMatchError.formatMessage(path, normalizedOldText, closest, options));
+		this.name = "EditMatchError";
 	}
 
-	const similarity = Math.round(closest.confidence * 100);
-	const oldLines = normalizedOldText.split("\n");
-	const actualLines = closest.actualText.split("\n");
-	const { oldLine, newLine } = findFirstDifferentLine(oldLines, actualLines);
-	const thresholdPercent = Math.round(options.similarityThreshold * 100);
+	static formatMessage(
+		path: string,
+		normalizedOldText: string,
+		closest: EditMatch | undefined,
+		options: { allowFuzzy: boolean; similarityThreshold: number; fuzzyMatches?: number },
+	): string {
+		if (!closest) {
+			return options.allowFuzzy
+				? `Could not find a close enough match in ${path}.`
+				: `Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`;
+		}
 
-	const hint = options.allowFuzzy
-		? options.fuzzyMatches && options.fuzzyMatches > 1
-			? `Found ${options.fuzzyMatches} high-confidence matches. Provide more context to make it unique.`
-			: `Closest match was below the ${thresholdPercent}% similarity threshold.`
-		: "Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept high-confidence matches.";
+		const similarity = Math.round(closest.confidence * 100);
+		const oldLines = normalizedOldText.split("\n");
+		const actualLines = closest.actualText.split("\n");
+		const { oldLine, newLine } = findFirstDifferentLine(oldLines, actualLines);
+		const thresholdPercent = Math.round(options.similarityThreshold * 100);
 
-	return [
-		options.allowFuzzy
-			? `Could not find a close enough match in ${path}.`
-			: `Could not find the exact text in ${path}.`,
-		``,
-		`Closest match (${similarity}% similar) at line ${closest.startLine}:`,
-		`  - ${oldLine}`,
-		`  + ${newLine}`,
-		hint,
-	].join("\n");
+		const hint = options.allowFuzzy
+			? options.fuzzyMatches && options.fuzzyMatches > 1
+				? `Found ${options.fuzzyMatches} high-confidence matches. Provide more context to make it unique.`
+				: `Closest match was below the ${thresholdPercent}% similarity threshold.`
+			: "Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept high-confidence matches.";
+
+		return [
+			options.allowFuzzy
+				? `Could not find a close enough match in ${path}.`
+				: `Could not find the exact text in ${path}.`,
+			``,
+			`Closest match (${similarity}% similar) at line ${closest.startLine}:`,
+			`  - ${oldLine}`,
+			`  + ${newLine}`,
+			hint,
+		].join("\n");
+	}
 }
 
 /**
@@ -444,7 +456,7 @@ export async function computeEditDiff(
 
 		if (!matchOutcome.match) {
 			return {
-				error: formatEditMatchError(path, normalizedOldText, matchOutcome.closest, {
+				error: EditMatchError.formatMessage(path, normalizedOldText, matchOutcome.closest, {
 					allowFuzzy: fuzzy,
 					similarityThreshold: DEFAULT_FUZZY_THRESHOLD,
 					fuzzyMatches: matchOutcome.fuzzyMatches,

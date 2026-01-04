@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { BunFile } from "bun";
 import type { Theme } from "../../../modes/interactive/theme/theme";
 import { logger } from "../../logger";
 import { resolveToCwd } from "../path-utils";
@@ -9,12 +10,14 @@ import {
 	getActiveClients,
 	getOrCreateClient,
 	type LspServerStatus,
+	notifySaved,
 	refreshFile,
 	sendRequest,
 	setIdleTimeout,
+	syncContent,
 } from "./client";
 import { getServerForFile, getServersForFile, hasCapability, type LspConfig, loadConfig } from "./config";
-import { applyTextEdits, applyWorkspaceEdit } from "./edits";
+import { applyTextEditsToString, applyWorkspaceEdit } from "./edits";
 import { renderCall, renderResult } from "./render";
 import * as rustAnalyzer from "./rust-analyzer";
 import {
@@ -50,6 +53,8 @@ import {
 	symbolKindToIcon,
 	uriToFile,
 } from "./utils";
+import { utils } from "packages/coding-agent/src/core";
+import { untilAborted } from "../../utils";
 
 export type { LspServerStatus } from "./client";
 export type { LspToolDetails } from "./types";
@@ -111,6 +116,50 @@ export async function warmupLspServers(cwd: string): Promise<LspWarmupResult> {
  */
 export function getLspStatus(): LspServerStatus[] {
 	return getActiveClients();
+}
+
+/**
+ * Sync in-memory file content to all applicable LSP servers.
+ * Sends didOpen (if new) or didChange (if already open).
+ *
+ * @param absolutePath - Absolute path to the file
+ * @param content - The new file content
+ * @param cwd - Working directory for LSP config resolution
+ * @param servers - Servers to sync to
+ */
+async function syncFileContent(
+	absolutePath: string,
+	content: string,
+	cwd: string,
+	servers: Array<[string, ServerConfig]>,
+): Promise<void> {
+	await Promise.allSettled(
+		servers.map(async ([_serverName, serverConfig]) => {
+			const client = await getOrCreateClient(serverConfig, cwd);
+			await syncContent(client, absolutePath, content);
+		}),
+	);
+}
+
+/**
+ * Notify all LSP servers that a file was saved.
+ * Assumes content was already synced via syncFileContent.
+ *
+ * @param absolutePath - Absolute path to the file
+ * @param cwd - Working directory for LSP config resolution
+ * @param servers - Servers to notify
+ */
+async function notifyFileSaved(
+	absolutePath: string,
+	cwd: string,
+	servers: Array<[string, ServerConfig]>,
+): Promise<void> {
+	await Promise.allSettled(
+		servers.map(async ([_serverName, serverConfig]) => {
+			const client = await getOrCreateClient(serverConfig, cwd);
+			await notifySaved(client, absolutePath);
+		}),
+	);
 }
 
 // Cache config per cwd to avoid repeated file I/O
@@ -318,45 +367,34 @@ async function runWorkspaceDiagnostics(
 
 /** Result from getDiagnosticsForFile */
 export interface FileDiagnosticsResult {
-	/** Whether an LSP server was available for the file type */
-	available: boolean;
 	/** Name of the LSP server used (if available) */
-	serverName?: string;
+	server?: string;
 	/** Formatted diagnostic messages */
-	diagnostics: string[];
+	messages: string[];
 	/** Summary string (e.g., "2 error(s), 1 warning(s)") */
 	summary: string;
 	/** Whether there are any errors (severity 1) */
-	hasErrors: boolean;
-	/** Whether there are any warnings (severity 2) */
-	hasWarnings: boolean;
+	errored: boolean;
+	/** Whether the file was formatted */
+	formatter?: FileFormatResult;
 }
 
 /**
- * Get LSP diagnostics for a file after it has been written.
- * Queries all applicable language servers (e.g., TypeScript + Biome) and merges results.
+ * Get LSP diagnostics for a file.
+ * Assumes content was synced and didSave was sent - just waits for diagnostics.
  *
  * @param absolutePath - Absolute path to the file
  * @param cwd - Working directory for LSP config resolution
- * @param timeoutMs - Timeout for waiting for diagnostics (default: 5000ms)
- * @returns Diagnostic results or null if no LSP server available
+ * @param servers - Servers to query diagnostics for
+ * @returns Diagnostic results or undefined if no servers
  */
-export async function getDiagnosticsForFile(
+async function getDiagnosticsForFile(
 	absolutePath: string,
 	cwd: string,
-	timeoutMs = 5000,
-): Promise<FileDiagnosticsResult> {
-	const config = getConfig(cwd);
-	const servers = getServersForFile(config, absolutePath);
-
+	servers: Array<[string, ServerConfig]>,
+): Promise<FileDiagnosticsResult | undefined> {
 	if (servers.length === 0) {
-		return {
-			available: false,
-			diagnostics: [],
-			summary: "",
-			hasErrors: false,
-			hasWarnings: false,
-		};
+		return undefined;
 	}
 
 	const uri = fileToUri(absolutePath);
@@ -364,12 +402,12 @@ export async function getDiagnosticsForFile(
 	const allDiagnostics: Diagnostic[] = [];
 	const serverNames: string[] = [];
 
-	// Query all applicable servers in parallel
+	// Wait for diagnostics from all servers in parallel
 	const results = await Promise.allSettled(
 		servers.map(async ([serverName, serverConfig]) => {
 			const client = await getOrCreateClient(serverConfig, cwd);
-			await refreshFile(client, absolutePath);
-			const diagnostics = await waitForDiagnostics(client, uri, timeoutMs);
+			// Content already synced + didSave sent, just wait for diagnostics
+			const diagnostics = await waitForDiagnostics(client, uri);
 			return { serverName, diagnostics };
 		}),
 	);
@@ -382,24 +420,15 @@ export async function getDiagnosticsForFile(
 	}
 
 	if (serverNames.length === 0) {
-		// All servers failed
-		return {
-			available: false,
-			diagnostics: [],
-			summary: "",
-			hasErrors: false,
-			hasWarnings: false,
-		};
+		return undefined;
 	}
 
 	if (allDiagnostics.length === 0) {
 		return {
-			available: true,
-			serverName: serverNames.join(", "),
-			diagnostics: [],
-			summary: "No issues",
-			hasErrors: false,
-			hasWarnings: false,
+			server: serverNames.join(", "),
+			messages: [],
+			summary: "OK",
+			errored: false,
 		};
 	}
 
@@ -417,28 +446,18 @@ export async function getDiagnosticsForFile(
 	const formatted = uniqueDiagnostics.map((d) => formatDiagnostic(d, relPath));
 	const summary = formatDiagnosticsSummary(uniqueDiagnostics);
 	const hasErrors = uniqueDiagnostics.some((d) => d.severity === 1);
-	const hasWarnings = uniqueDiagnostics.some((d) => d.severity === 2);
 
 	return {
-		available: true,
-		serverName: serverNames.join(", "),
-		diagnostics: formatted,
+		server: serverNames.join(", "),
+		messages: formatted,
 		summary,
-		hasErrors,
-		hasWarnings,
+		errored: hasErrors,
 	};
 }
 
-/** Result from formatFile */
-export interface FileFormatResult {
-	/** Whether an LSP server with formatting support was available */
-	available: boolean;
-	/** Name of the LSP server used (if available) */
-	serverName?: string;
-	/** Whether formatting was applied */
-	formatted: boolean;
-	/** Error message if formatting failed */
-	error?: string;
+export enum FileFormatResult {
+	UNCHANGED = "unchanged",
+	FORMATTED = "formatted",
 }
 
 /** Default formatting options for LSP */
@@ -451,63 +470,151 @@ const DEFAULT_FORMAT_OPTIONS = {
 };
 
 /**
- * Format a file using LSP.
- * Uses the first available server that supports formatting.
+ * Format content in-memory using LSP.
+ * Assumes content was already synced to all servers via syncFileContent.
+ * Requests formatting from first capable server, applies edits in-memory.
  *
- * @param absolutePath - Absolute path to the file
+ * @param absolutePath - Absolute path (for URI)
+ * @param content - Content to format
  * @param cwd - Working directory for LSP config resolution
- * @returns Format result indicating success/failure
+ * @param servers - Servers to try formatting with
+ * @returns Formatted content, or original if no formatter available
  */
-export async function formatFile(absolutePath: string, cwd: string): Promise<FileFormatResult> {
-	const config = getConfig(cwd);
-	const servers = getServersForFile(config, absolutePath);
-
+async function formatContent(
+	absolutePath: string,
+	content: string,
+	cwd: string,
+	servers: Array<[string, ServerConfig]>,
+): Promise<string> {
 	if (servers.length === 0) {
-		return { available: false, formatted: false };
+		return content;
 	}
 
 	const uri = fileToUri(absolutePath);
 
-	// Try each server until one successfully formats
-	for (const [serverName, serverConfig] of servers) {
+	for (const [_serverName, serverConfig] of servers) {
 		try {
 			const client = await getOrCreateClient(serverConfig, cwd);
 
-			// Check if server supports formatting
 			const caps = client.serverCapabilities;
 			if (!caps?.documentFormattingProvider) {
 				continue;
 			}
 
-			// Ensure file is open and synced
-			await ensureFileOpen(client, absolutePath);
-			await refreshFile(client, absolutePath);
-
-			// Request formatting
+			// Request formatting (content already synced)
 			const edits = (await sendRequest(client, "textDocument/formatting", {
 				textDocument: { uri },
 				options: DEFAULT_FORMAT_OPTIONS,
 			})) as TextEdit[] | null;
 
 			if (!edits || edits.length === 0) {
-				// No changes needed - file already formatted
-				return { available: true, serverName, formatted: false };
+				return content;
 			}
 
-			// Apply the formatting edits
-			await applyTextEdits(absolutePath, edits);
-
-			// Notify LSP of the change so diagnostics update
-			await refreshFile(client, absolutePath);
-
-			return { available: true, serverName, formatted: true };
+			// Apply edits in-memory and return
+			return applyTextEditsToString(content, edits);
 		} catch {}
 	}
 
-	// No server could format
-	return { available: false, formatted: false };
+	return content;
 }
 
+/** Options for creating the LSP writethrough callback */
+export interface WritethroughOptions {
+	/** Whether to format the file using LSP after writing */
+	enableFormat?: boolean;
+	/** Whether to get LSP diagnostics after writing */
+	enableDiagnostics?: boolean;
+}
+
+/** Callback type for the LSP writethrough */
+export type WritethroughCallback = (
+	dst: string,
+	content: string,
+	signal?: AbortSignal,
+	file?: BunFile,
+) => Promise<FileDiagnosticsResult | undefined>;
+
+/** No-op writethrough callback */
+export async function writethroughNoop(
+	dst: string,
+	content: string,
+	_signal?: AbortSignal,
+	file?: BunFile,
+): Promise<FileDiagnosticsResult | undefined> {
+	if (file) {
+		await file.write(content);
+	} else {
+		await Bun.write(dst, content);
+	}
+	return undefined;
+}
+
+/** Create a writethrough callback for LSP aware write operations */
+export function createLspWritethrough(cwd: string, options?: WritethroughOptions): WritethroughCallback {
+	const { enableFormat = false, enableDiagnostics = false } = options ?? {};
+	if (!enableFormat && !enableDiagnostics) {
+		return writethroughNoop;
+	}
+	return async (dst: string, content: string, signal?: AbortSignal, file?: BunFile) => {
+		const config = getConfig(cwd);
+		const servers = getServersForFile(config, dst);
+		if (servers.length === 0) {
+			return writethroughNoop(dst, content, signal, file);
+		}
+
+		let finalContent = content;
+		const getWritePromise = utils.once(() => (file ? file.write(finalContent) : Bun.write(dst, finalContent)));
+
+		let formatter: FileFormatResult | undefined;
+		let diagnostics: FileDiagnosticsResult | undefined;
+		try {
+			signal ??= AbortSignal.timeout(10_000);
+			await untilAborted(signal, async () => {
+				// 1. Sync original content to ALL servers
+				await syncFileContent(dst, content, cwd, servers);
+
+				// 2. Format in-memory (servers already have content)
+				if (enableFormat) {
+					finalContent = await formatContent(dst, content, cwd, servers);
+					formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
+				}
+
+				// 3. If formatted, sync formatted content to ALL servers
+				if (finalContent !== content) {
+					await syncFileContent(dst, finalContent, cwd, servers);
+				}
+
+				// 4. Write to disk
+				await getWritePromise();
+
+				// 5. Notify saved to ALL servers
+				await notifyFileSaved(dst, cwd, servers);
+
+				// 6. Get diagnostics from ALL servers
+				if (enableDiagnostics) {
+					diagnostics = await getDiagnosticsForFile(dst, cwd, servers);
+				}
+			});
+		} catch {
+			await getWritePromise();
+		}
+
+		if (formatter !== undefined) {
+			diagnostics ??= {
+				server: servers.map(([name]) => name).join(", "),
+				messages: [],
+				summary: "OK",
+				errored: false,
+			};
+			diagnostics.formatter = formatter;
+		}
+
+		return diagnostics;
+	};
+}
+
+/** Create an LSP tool */
 export function createLspTool(cwd: string): AgentTool<typeof lspSchema, LspToolDetails, Theme> {
 	return {
 		name: "lsp",
