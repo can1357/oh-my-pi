@@ -61,7 +61,39 @@ const MAX_QUERY_LEN = 90;
 const MAX_REQUEST_ID_LEN = 36;
 
 function formatCount(label: string, count: number): string {
-	return `${count} ${label}${count === 1 ? "" : "s"}`;
+	const safeCount = Number.isFinite(count) ? count : 0;
+	return `${safeCount} ${label}${safeCount === 1 ? "" : "s"}`;
+}
+
+function renderFallbackText(contentText: string, expanded: boolean, theme: Theme): Component {
+	const lines = contentText.split("\n").filter((line) => line.trim());
+	const maxLines = expanded ? lines.length : 6;
+	const displayLines = lines.slice(0, maxLines).map((line) => truncate(line.trim(), 110, theme.format.ellipsis));
+	const remaining = lines.length - displayLines.length;
+
+	const headerIcon = theme.fg("warning", theme.status.warning);
+	const expandHint = expanded ? "" : theme.fg("dim", " (Ctrl+O to expand)");
+	let text = `${headerIcon} ${theme.fg("toolTitle", "Web Search")}${expandHint}`;
+
+	if (displayLines.length === 0) {
+		text += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg("muted", "No response data")}`;
+		return new Text(text, 0, 0);
+	}
+
+	for (let i = 0; i < displayLines.length; i++) {
+		const isLast = i === displayLines.length - 1 && remaining === 0;
+		const branch = isLast ? theme.tree.last : theme.tree.branch;
+		text += `\n ${theme.fg("dim", branch)} ${theme.fg("dim", displayLines[i])}`;
+	}
+
+	if (!expanded && remaining > 0) {
+		text += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg(
+			"muted",
+			`${theme.format.ellipsis} ${remaining} more line${remaining === 1 ? "" : "s"}`,
+		)}`;
+	}
+
+	return new Text(text, 0, 0);
 }
 
 export interface WebSearchRenderDetails {
@@ -83,21 +115,34 @@ export function renderWebSearchResult(
 		return new Text(theme.fg("error", `Error: ${details.error}`), 0, 0);
 	}
 
+	const rawText = result.content?.find((block) => block.type === "text")?.text?.trim() ?? "";
 	const response = details?.response;
 	if (!response) {
-		return new Text(theme.fg("error", "No response data"), 0, 0);
+		return renderFallbackText(rawText, expanded, theme);
 	}
 
-	const sources = response.sources ?? [];
+	const sources = Array.isArray(response.sources) ? response.sources : [];
 	const sourceCount = sources.length;
-	const citations = response.citations ?? [];
+	const citations = Array.isArray(response.citations) ? response.citations : [];
 	const citationCount = citations.length;
-	const related = response.relatedQuestions ?? [];
+	const related = Array.isArray(response.relatedQuestions)
+		? response.relatedQuestions.filter((item) => typeof item === "string")
+		: [];
 	const relatedCount = related.length;
+	const searchQueries = Array.isArray(response.searchQueries)
+		? response.searchQueries.filter((item) => typeof item === "string")
+		: [];
 	const provider = response.provider;
 
 	// Build header: status icon Web Search (provider) · counts
-	const providerLabel = provider === "anthropic" ? "Anthropic" : provider === "perplexity" ? "Perplexity" : "Exa";
+	const providerLabel =
+		provider === "anthropic"
+			? "Anthropic"
+			: provider === "perplexity"
+				? "Perplexity"
+				: provider === "exa"
+					? "Exa"
+					: "Unknown";
 	const headerIcon =
 		sourceCount > 0 ? theme.fg("success", theme.status.success) : theme.fg("warning", theme.status.warning);
 	const expandHint = expanded ? "" : theme.fg("dim", " (Ctrl+O to expand)");
@@ -107,7 +152,8 @@ export function renderWebSearchResult(
 	)}${expandHint}`;
 
 	// Get answer text
-	const contentText = response.answer?.trim() ?? result.content[0]?.text?.trim() ?? "";
+	const answerText = typeof response.answer === "string" ? response.answer.trim() : "";
+	const contentText = answerText || rawText;
 	const totalAnswerLines = contentText ? contentText.split("\n").filter((l) => l.trim()).length : 0;
 	const answerLimit = expanded ? MAX_EXPANDED_ANSWER_LINES : MAX_COLLAPSED_ANSWER_LINES;
 	const answerPreview = contentText
@@ -165,11 +211,21 @@ export function renderWebSearchResult(
 		sourceLines.push(theme.fg("muted", "No sources returned"));
 	} else {
 		for (const src of sources) {
-			const title = truncate(src.title, 70, theme.format.ellipsis);
-			const domain = getDomain(src.url);
-			const age = formatAge(src.ageSeconds) || src.publishedDate;
-			const metaParts: string[] = [theme.fg("dim", `(${domain})`)];
-			if (src.author) {
+			const titleText =
+				typeof src.title === "string" && src.title.trim()
+					? src.title
+					: typeof src.url === "string" && src.url.trim()
+						? src.url
+						: "Untitled";
+			const title = truncate(titleText, 70, theme.format.ellipsis);
+			const url = typeof src.url === "string" ? src.url : "";
+			const domain = url ? getDomain(url) : "";
+			const age = formatAge(src.ageSeconds) || (typeof src.publishedDate === "string" ? src.publishedDate : "");
+			const metaParts: string[] = [];
+			if (domain) {
+				metaParts.push(theme.fg("dim", `(${domain})`));
+			}
+			if (typeof src.author === "string" && src.author.trim()) {
 				metaParts.push(theme.fg("muted", src.author));
 			}
 			if (age) {
@@ -179,9 +235,10 @@ export function renderWebSearchResult(
 			const metaSuffix = metaParts.length > 0 ? ` ${metaParts.join(metaSep)}` : "";
 			sourceLines.push(`${theme.fg("accent", title)}${metaSuffix}`);
 
-			if (src.snippet) {
+			const snippetText = typeof src.snippet === "string" ? src.snippet : "";
+			if (snippetText.trim()) {
 				const snippetLines = getPreviewLines(
-					src.snippet,
+					snippetText,
 					MAX_SNIPPET_LINES,
 					MAX_SNIPPET_LINE_LEN,
 					theme.format.ellipsis,
@@ -191,7 +248,9 @@ export function renderWebSearchResult(
 				}
 			}
 
-			sourceLines.push(theme.fg("mdLinkUrl", src.url));
+			if (url) {
+				sourceLines.push(theme.fg("mdLinkUrl", url));
+			}
 		}
 	}
 
@@ -245,20 +304,18 @@ export function renderWebSearchResult(
 			)}`,
 		);
 	}
-	if (response.searchQueries && response.searchQueries.length > 0) {
-		metaLines.push(
-			`${theme.fg("muted", "Search queries:")} ${theme.fg("text", String(response.searchQueries.length))}`,
-		);
-		const queryPreview = response.searchQueries.slice(0, MAX_QUERY_PREVIEW);
+	if (searchQueries.length > 0) {
+		metaLines.push(`${theme.fg("muted", "Search queries:")} ${theme.fg("text", String(searchQueries.length))}`);
+		const queryPreview = searchQueries.slice(0, MAX_QUERY_PREVIEW);
 		for (const q of queryPreview) {
 			metaLines.push(theme.fg("muted", `${theme.format.dash} ${truncate(q, MAX_QUERY_LEN, theme.format.ellipsis)}`));
 		}
-		if (response.searchQueries.length > MAX_QUERY_PREVIEW) {
+		if (searchQueries.length > MAX_QUERY_PREVIEW) {
 			metaLines.push(
 				theme.fg(
 					"muted",
-					`${theme.format.ellipsis} ${response.searchQueries.length - MAX_QUERY_PREVIEW} more query${
-						response.searchQueries.length - MAX_QUERY_PREVIEW === 1 ? "" : "s"
+					`${theme.format.ellipsis} ${searchQueries.length - MAX_QUERY_PREVIEW} more query${
+						searchQueries.length - MAX_QUERY_PREVIEW === 1 ? "" : "s"
 					}`,
 				),
 			);

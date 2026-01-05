@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Added
 
 - Added `status.shadowed` symbol for theme customization to properly indicate shadowed extension state
@@ -19,6 +20,8 @@
 
 ### Changed
 
+- Changed Exa web search provider from MCP protocol to direct REST API for simpler integration
+- Changed web search result rendering to handle malformed response data with fallback text display
 - Changed compaction prompts to preserve tool outputs, command results, and repository state in context summaries
 - Changed init prompt to include runtime/tooling preferences section and improved formatting guidelines
 - Changed reviewer prompt to require evidence-backed findings anchored to diff hunks with stricter suggestion block formatting
