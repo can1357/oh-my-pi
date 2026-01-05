@@ -57,12 +57,14 @@
 		"node-html-parser": "^6.1.13",
 		"smol-toml": "^1.6.0",
 		"strip-ansi": "^7.1.2",
+		"sharp": "^0.34.2",
 		"winston": "^3.17.0",
 		"winston-daily-rotate-file": "^5.0.0",
 		"yaml": "^2.8.2"
 	},
 	"devDependencies": {
 		"@types/diff": "^7.0.2",
+		"@types/ndjson": "^2.0.4",
 		"@types/node": "^24.3.0",
 		"vitest": "^3.2.4"
 	},
