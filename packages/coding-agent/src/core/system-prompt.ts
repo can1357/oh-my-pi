@@ -127,6 +127,277 @@ function buildPromptFooter(dateTime: string, cwd: string): string {
 	return `Current date and time: ${dateTime}\nCurrent working directory: ${cwd}`;
 }
 
+function execCommand(args: string[]): string | null {
+	const result = Bun.spawnSync(args, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+	if (result.exitCode !== 0) return null;
+	const output = result.stdout.toString().trim();
+	return output.length > 0 ? output : null;
+}
+
+function execIfExists(command: string, args: string[]): string | null {
+	if (!Bun.which(command)) return null;
+	return execCommand([command, ...args]);
+}
+
+function firstNonEmpty(values: Array<string | undefined | null>): string | null {
+	for (const value of values) {
+		const trimmed = value?.trim();
+		if (trimmed) return trimmed;
+	}
+	return null;
+}
+
+function firstNonEmptyLine(value: string | null): string | null {
+	if (!value) return null;
+	const line = value
+		.split("\n")
+		.map((entry) => entry.trim())
+		.filter(Boolean)[0];
+	return line ?? null;
+}
+
+function parseWmicTable(output: string, header: string): string | null {
+	const lines = output
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean);
+	const filtered = lines.filter((line) => line.toLowerCase() !== header.toLowerCase());
+	return filtered[0] ?? null;
+}
+
+function parseKeyValueOutput(output: string): Record<string, string> {
+	const result: Record<string, string> = {};
+	for (const line of output.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		const [key, ...rest] = trimmed.split("=");
+		if (!key || rest.length === 0) continue;
+		const value = rest.join("=").trim();
+		if (value) result[key.trim()] = value;
+	}
+	return result;
+}
+
+function stripQuotes(value: string): string {
+	return value.replace(/^"|"$/g, "");
+}
+
+function getOsName(): string {
+	switch (process.platform) {
+		case "win32":
+			return "Windows";
+		case "darwin":
+			return "macOS";
+		case "linux":
+			return "Linux";
+		case "freebsd":
+			return "FreeBSD";
+		case "openbsd":
+			return "OpenBSD";
+		case "netbsd":
+			return "NetBSD";
+		case "aix":
+			return "AIX";
+		default:
+			return process.platform || "unknown";
+	}
+}
+
+function getKernelVersion(): string {
+	if (process.platform === "win32") {
+		return execCommand(["cmd", "/c", "ver"]) ?? "unknown";
+	}
+
+	return execCommand(["uname", "-sr"]) ?? "unknown";
+}
+
+function getOsDistro(): string | null {
+	switch (process.platform) {
+		case "win32": {
+			const output = execIfExists("wmic", ["os", "get", "Caption,Version", "/value"]);
+			if (!output) return null;
+			const parsed = parseKeyValueOutput(output);
+			const caption = parsed.Caption;
+			const version = parsed.Version;
+			if (caption && version) return `${caption} ${version}`.trim();
+			return caption ?? version ?? null;
+		}
+		case "darwin": {
+			const name = firstNonEmptyLine(execIfExists("sw_vers", ["-productName"]));
+			const version = firstNonEmptyLine(execIfExists("sw_vers", ["-productVersion"]));
+			if (name && version) return `${name} ${version}`.trim();
+			return name ?? version ?? null;
+		}
+		case "linux": {
+			const lsb = firstNonEmptyLine(execIfExists("lsb_release", ["-ds"]));
+			if (lsb) return stripQuotes(lsb);
+			const osRelease = execIfExists("cat", ["/etc/os-release"]);
+			if (!osRelease) return null;
+			const parsed = parseKeyValueOutput(osRelease);
+			const pretty = parsed.PRETTY_NAME ?? parsed.NAME;
+			const version = parsed.VERSION ?? parsed.VERSION_ID;
+			if (pretty) return stripQuotes(pretty);
+			if (parsed.NAME && version) return `${stripQuotes(parsed.NAME)} ${stripQuotes(version)}`.trim();
+			return parsed.NAME ? stripQuotes(parsed.NAME) : null;
+		}
+		default:
+			return null;
+	}
+}
+
+function getCpuArch(): string {
+	return process.arch || "unknown";
+}
+
+function getCpuModel(): string | null {
+	switch (process.platform) {
+		case "win32": {
+			const output = execIfExists("wmic", ["cpu", "get", "Name"]);
+			return output ? parseWmicTable(output, "Name") : null;
+		}
+		case "darwin": {
+			return firstNonEmptyLine(execIfExists("sysctl", ["-n", "machdep.cpu.brand_string"]));
+		}
+		case "linux": {
+			const lscpu = execIfExists("lscpu", []);
+			if (lscpu) {
+				const match = lscpu
+					.split("\n")
+					.map((line) => line.trim())
+					.find((line) => line.toLowerCase().startsWith("model name:"));
+				if (match) return match.split(":").slice(1).join(":").trim();
+			}
+			const cpuInfo = execIfExists("cat", ["/proc/cpuinfo"]);
+			if (!cpuInfo) return null;
+			for (const line of cpuInfo.split("\n")) {
+				const [key, ...rest] = line.split(":");
+				if (!key || rest.length === 0) continue;
+				const normalized = key.trim().toLowerCase();
+				if (normalized === "model name" || normalized === "hardware" || normalized === "processor") {
+					return rest.join(":").trim();
+				}
+			}
+			return null;
+		}
+		default:
+			return null;
+	}
+}
+
+function getGpuModel(): string | null {
+	switch (process.platform) {
+		case "win32": {
+			const output = execIfExists("wmic", ["path", "win32_VideoController", "get", "name"]);
+			return output ? parseWmicTable(output, "Name") : null;
+		}
+		case "linux": {
+			const output = execIfExists("lspci", []);
+			if (!output) return null;
+			for (const line of output.split("\n")) {
+				if (!/(VGA|3D|Display)/i.test(line)) continue;
+				const parts = line.split(":");
+				return parts.length > 1 ? parts.slice(1).join(":").trim() : line.trim();
+			}
+			return null;
+		}
+		default:
+			return null;
+	}
+}
+
+function getShellName(): string {
+	const shell = firstNonEmpty([process.env.SHELL, process.env.ComSpec]);
+	return shell ?? "unknown";
+}
+
+function getTerminalName(): string {
+	const termProgram = process.env.TERM_PROGRAM;
+	const termProgramVersion = process.env.TERM_PROGRAM_VERSION;
+	if (termProgram) {
+		return termProgramVersion ? `${termProgram} ${termProgramVersion}` : termProgram;
+	}
+
+	if (process.env.WT_SESSION) return "Windows Terminal";
+
+	const term = firstNonEmpty([process.env.TERM, process.env.COLORTERM, process.env.TERMINAL_EMULATOR]);
+	return term ?? "unknown";
+}
+
+function normalizeDesktopValue(value: string): string {
+	const trimmed = value.trim();
+	if (!trimmed) return "unknown";
+	const parts = trimmed
+		.split(":")
+		.map((part) => part.trim())
+		.filter(Boolean);
+	return parts[0] ?? trimmed;
+}
+
+function getDesktopEnvironment(): string {
+	if (process.env.KDE_FULL_SESSION === "true") return "KDE";
+	const raw = firstNonEmpty([
+		process.env.XDG_CURRENT_DESKTOP,
+		process.env.DESKTOP_SESSION,
+		process.env.XDG_SESSION_DESKTOP,
+		process.env.GDMSESSION,
+	]);
+	return raw ? normalizeDesktopValue(raw) : "unknown";
+}
+
+function matchKnownWindowManager(value: string): string | null {
+	const normalized = value.toLowerCase();
+	const candidates = [
+		"sway",
+		"i3",
+		"i3wm",
+		"bspwm",
+		"openbox",
+		"awesome",
+		"herbstluftwm",
+		"fluxbox",
+		"icewm",
+		"dwm",
+		"hyprland",
+		"wayfire",
+		"river",
+		"labwc",
+		"qtile",
+	];
+	for (const candidate of candidates) {
+		if (normalized.includes(candidate)) return candidate;
+	}
+	return null;
+}
+
+function getWindowManager(): string {
+	const explicit = firstNonEmpty([process.env.WINDOWMANAGER]);
+	if (explicit) return explicit;
+
+	const desktop = firstNonEmpty([process.env.XDG_CURRENT_DESKTOP, process.env.DESKTOP_SESSION]);
+	if (desktop) {
+		const matched = matchKnownWindowManager(desktop);
+		if (matched) return matched;
+	}
+
+	return "unknown";
+}
+
+function formatEnvironmentInfo(): string {
+	const items: Array<[string, string]> = [
+		["OS", getOsName()],
+		["Distro", getOsDistro() ?? "unknown"],
+		["Kernel", getKernelVersion()],
+		["Arch", getCpuArch()],
+		["CPU", getCpuModel() ?? "unknown"],
+		["GPU", getGpuModel() ?? "unknown"],
+		["Shell", getShellName()],
+		["Terminal", getTerminalName()],
+		["DE", getDesktopEnvironment()],
+		["WM", getWindowManager()],
+	];
+	return items.map(([label, value]) => `- ${label}: ${value}`).join("\n");
+}
+
 /**
  * Generate anti-bash rules section if the agent has both bash and specialized tools.
  * Only include rules for tools that are actually available.
@@ -400,6 +671,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 
 	// Generate anti-bash rules (returns null if not applicable)
 	const antiBashSection = generateAntiBashRules(Array.from(tools?.keys() ?? []));
+	const environmentInfo = formatEnvironmentInfo();
 
 	// Build guidelines based on which tools are actually available
 	const guidelinesList: string[] = [];
@@ -457,6 +729,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 		toolsList,
 		antiBashSection: antiBashBlock,
 		guidelines,
+		environmentInfo,
 		readmePath,
 		docsPath,
 		examplesPath,

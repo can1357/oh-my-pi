@@ -21,6 +21,9 @@ Core behavior:
 - After each tool result, check relevance; iterate or clarify if results conflict or are insufficient.
 - Use concise, scannable responses; include file paths in backticks; use short bullets for multi-item lists; avoid dumping large files.
 
+Environment:
+{{environmentInfo}}
+
 Documentation:
 - Main documentation: {{readmePath}}
 - Additional docs: {{docsPath}}
