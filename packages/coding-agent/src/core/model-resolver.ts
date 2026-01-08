@@ -33,7 +33,7 @@ export interface ScopedModel {
 }
 
 /** Priority chain for auto-discovering smol/fast models */
-export const SMOL_MODEL_PRIORITY = ["claude-haiku-4-5", "haiku", "flash", "mini"];
+export const SMOL_MODEL_PRIORITY = ["cerebras/zai-glm-4.6", "claude-haiku-4-5", "haiku", "flash", "mini"];
 
 /** Priority chain for auto-discovering slow/comprehensive models (reasoning, codex) */
 export const SLOW_MODEL_PRIORITY = ["gpt-5.2-codex", "gpt-5.2", "codex", "gpt", "opus", "pro"];
@@ -79,7 +79,7 @@ function tryMatchModel(modelPattern: string, availableModels: Model<Api>[]): Mod
 		const provider = modelPattern.substring(0, slashIndex);
 		const modelId = modelPattern.substring(slashIndex + 1);
 		const providerMatch = availableModels.find(
-			(m) => m.provider.toLowerCase() === provider.toLowerCase() && m.id.toLowerCase() === modelId.toLowerCase(),
+			(m) => m.provider.toLowerCase() === provider.toLowerCase() && m.id.toLowerCase() === modelId.toLowerCase()
 		);
 		if (providerMatch) {
 			return providerMatch;
@@ -97,7 +97,7 @@ function tryMatchModel(modelPattern: string, availableModels: Model<Api>[]): Mod
 	const matches = availableModels.filter(
 		(m) =>
 			m.id.toLowerCase().includes(modelPattern.toLowerCase()) ||
-			m.name?.toLowerCase().includes(modelPattern.toLowerCase()),
+			m.name?.toLowerCase().includes(modelPattern.toLowerCase())
 	);
 
 	if (matches.length === 0) {
@@ -351,7 +351,7 @@ export async function restoreModelFromSession(
 	savedModelId: string,
 	currentModel: Model<Api> | undefined,
 	shouldPrintMessages: boolean,
-	modelRegistry: ModelRegistry,
+	modelRegistry: ModelRegistry
 ): Promise<{ model: Model<Api> | undefined; fallbackMessage: string | undefined }> {
 	const restoredModel = modelRegistry.find(savedProvider, savedModelId);
 
@@ -427,7 +427,7 @@ export async function restoreModelFromSession(
  */
 export async function findSmolModel(
 	modelRegistry: ModelRegistry,
-	savedModel?: string,
+	savedModel?: string
 ): Promise<Model<Api> | undefined> {
 	const availableModels = modelRegistry.getAvailable();
 	if (availableModels.length === 0) return undefined;
@@ -443,12 +443,16 @@ export async function findSmolModel(
 
 	// 2. Try priority chain
 	for (const pattern of SMOL_MODEL_PRIORITY) {
+		// Try exact match with provider prefix
+		const providerMatch = availableModels.find((m) => `${m.provider}/${m.id}`.toLowerCase() === pattern);
+		if (providerMatch) return providerMatch;
+
 		// Try exact match first
-		const exactMatch = availableModels.find((m) => m.id.toLowerCase() === pattern.toLowerCase());
+		const exactMatch = availableModels.find((m) => m.id.toLowerCase() === pattern);
 		if (exactMatch) return exactMatch;
 
 		// Try fuzzy match (substring)
-		const fuzzyMatch = availableModels.find((m) => m.id.toLowerCase().includes(pattern.toLowerCase()));
+		const fuzzyMatch = availableModels.find((m) => m.id.toLowerCase().includes(pattern));
 		if (fuzzyMatch) return fuzzyMatch;
 	}
 
@@ -466,7 +470,7 @@ export async function findSmolModel(
  */
 export async function findSlowModel(
 	modelRegistry: ModelRegistry,
-	savedModel?: string,
+	savedModel?: string
 ): Promise<Model<Api> | undefined> {
 	const availableModels = modelRegistry.getAvailable();
 	if (availableModels.length === 0) return undefined;

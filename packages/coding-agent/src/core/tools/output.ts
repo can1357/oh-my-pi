@@ -189,11 +189,46 @@ function parseOutputProvenance(id: string): OutputProvenance | undefined {
 function extractPreviewLines(content: string, maxLines: number): string[] {
 	const lines = content.split("\n");
 	const preview: string[] = [];
+	const structuralTokens = new Set(["{", "}", "[", "]"]);
+
+	const isStructuralLine = (line: string): boolean => {
+		const trimmed = line.trim();
+		if (!trimmed) return true;
+		const cleaned = trimmed.replace(/,+$/, "");
+		return structuralTokens.has(cleaned);
+	};
+
+	const trimmedContent = content.trim();
+	const firstMeaningful = lines.find((line) => line.trim());
+	if (
+		firstMeaningful &&
+		isStructuralLine(firstMeaningful) &&
+		(trimmedContent.startsWith("{") || trimmedContent.startsWith("[")) &&
+		trimmedContent.length <= 200_000
+	) {
+		try {
+			const parsed = JSON.parse(trimmedContent);
+			const minified = JSON.stringify(parsed);
+			if (minified) return [minified];
+		} catch {
+			// Fall back to line-based previews.
+		}
+	}
+
 	for (const line of lines) {
-		if (!line.trim()) continue;
+		if (isStructuralLine(line)) continue;
 		preview.push(line);
 		if (preview.length >= maxLines) break;
 	}
+
+	if (preview.length === 0) {
+		for (const line of lines) {
+			if (!line.trim()) continue;
+			preview.push(line);
+			if (preview.length >= maxLines) break;
+		}
+	}
+
 	return preview;
 }
 

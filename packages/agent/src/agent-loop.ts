@@ -98,6 +98,32 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 	);
 }
 
+function normalizeMessagesForProvider(
+	messages: Context["messages"],
+	model: AgentLoopConfig["model"],
+): Context["messages"] {
+	if (model.provider !== "cerebras") {
+		return messages;
+	}
+
+	let changed = false;
+	const normalized = messages.map((message) => {
+		if (message.role !== "assistant" || !Array.isArray(message.content)) {
+			return message;
+		}
+
+		const filtered = message.content.filter((block) => block.type !== "thinking");
+		if (filtered.length === message.content.length) {
+			return message;
+		}
+
+		changed = true;
+		return { ...message, content: filtered };
+	});
+
+	return changed ? normalized : messages;
+}
+
 /**
  * Main loop logic shared by agentLoop and agentLoopContinue.
  */
@@ -218,11 +244,12 @@ async function streamAssistantResponse(
 
 	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
 	const llmMessages = await config.convertToLlm(messages);
+	const normalizedMessages = normalizeMessagesForProvider(llmMessages, config.model);
 
 	// Build LLM context
 	const llmContext: Context = {
 		systemPrompt: context.systemPrompt,
-		messages: llmMessages,
+		messages: normalizedMessages,
 		tools: context.tools,
 	};
 
@@ -244,8 +271,9 @@ async function streamAssistantResponse(
 	for await (const event of response) {
 		// Check for abort signal before processing each event
 		if (signal?.aborted) {
+			const errorMessage = "Request was aborted";
 			const abortedMessage: AssistantMessage = partialMessage
-				? { ...partialMessage, stopReason: "aborted" }
+				? { ...partialMessage, stopReason: "aborted", errorMessage }
 				: {
 						role: "assistant",
 						content: [],
@@ -261,6 +289,7 @@ async function streamAssistantResponse(
 							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 						},
 						stopReason: "aborted",
+						errorMessage,
 						timestamp: Date.now(),
 					};
 			if (addedPartial) {

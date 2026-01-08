@@ -421,6 +421,7 @@ export async function main(args: string[]) {
 
 	const cwd = process.cwd();
 	const settingsManager = SettingsManager.create(cwd);
+	settingsManager.applyEnvironmentVariables();
 	time("SettingsManager.create");
 	const { initialMessage, initialImages } = await prepareInitialMessage(parsed, settingsManager.getImageAutoResize());
 	time("prepareInitialMessage");

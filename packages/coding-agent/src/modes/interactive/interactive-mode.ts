@@ -1215,6 +1215,9 @@ export class InteractiveMode {
 					this.editor.setText("");
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
+				} else if (event.message.role === "fileMention") {
+					this.addMessageToChat(event.message);
+					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
 					this.streamingComponent = new AssistantMessageComponent(undefined, this.hideThinkingBlock);
 					this.streamingMessage = event.message;
@@ -1566,7 +1569,7 @@ export class InteractiveMode {
 			case "fileMention": {
 				// Render compact file mention display
 				for (const file of message.files) {
-					const text = `${theme.fg("dim", `${theme.tree.hook} `)}${theme.fg("muted", "Read")} ${theme.fg(
+					const text = `${theme.fg("dim", `${theme.tree.last} `)}${theme.fg("muted", "Read")} ${theme.fg(
 						"accent",
 						file.path,
 					)} ${theme.fg("dim", `(${file.lineCount} lines)`)}`;

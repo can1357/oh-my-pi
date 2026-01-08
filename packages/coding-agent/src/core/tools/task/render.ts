@@ -131,7 +131,7 @@ function renderJsonTreeLines(
 			pushLine(`${prefix}${iconArray} ${header}`);
 			if (val.length === 0) {
 				pushLine(
-					`${buildTreePrefix([...ancestors, !isLast], theme)}${theme.fg("dim", theme.tree.hook)} ${theme.fg(
+					`${buildTreePrefix([...ancestors, !isLast], theme)}${theme.fg("dim", theme.tree.last)} ${theme.fg(
 						"dim",
 						"[]",
 					)}`,
@@ -140,7 +140,7 @@ function renderJsonTreeLines(
 			}
 			if (depth >= maxDepth) {
 				pushLine(
-					`${buildTreePrefix([...ancestors, !isLast], theme)}${theme.fg("dim", theme.tree.hook)} ${theme.fg(
+					`${buildTreePrefix([...ancestors, !isLast], theme)}${theme.fg("dim", theme.tree.last)} ${theme.fg(
 						"dim",
 						theme.format.ellipsis,
 					)}`,
@@ -164,7 +164,7 @@ function renderJsonTreeLines(
 			const entries = Object.entries(val as Record<string, unknown>);
 			if (entries.length === 0) {
 				pushLine(
-					`${buildTreePrefix([...ancestors, !isLast], theme)}${theme.fg("dim", theme.tree.hook)} ${theme.fg(
+					`${buildTreePrefix([...ancestors, !isLast], theme)}${theme.fg("dim", theme.tree.last)} ${theme.fg(
 						"dim",
 						"{}",
 					)}`,
@@ -173,7 +173,7 @@ function renderJsonTreeLines(
 			}
 			if (depth >= maxDepth) {
 				pushLine(
-					`${buildTreePrefix([...ancestors, !isLast], theme)}${theme.fg("dim", theme.tree.hook)} ${theme.fg(
+					`${buildTreePrefix([...ancestors, !isLast], theme)}${theme.fg("dim", theme.tree.last)} ${theme.fg(
 						"dim",
 						theme.format.ellipsis,
 					)}`,
@@ -288,10 +288,8 @@ function renderAgentProgress(
 	spinnerFrame?: number,
 ): string[] {
 	const lines: string[] = [];
-	const prefix = isLast
-		? `${theme.boxSharp.bottomLeft}${theme.boxSharp.horizontal}`
-		: `${theme.boxSharp.teeRight}${theme.boxSharp.horizontal}`;
-	const continuePrefix = isLast ? "   " : `${theme.boxSharp.vertical}  `;
+	const prefix = isLast ? theme.tree.last : theme.tree.branch;
+	const continuePrefix = isLast ? "   " : `${theme.tree.vertical}  `;
 
 	const icon = getStatusIcon(progress.status, theme, spinnerFrame);
 	const iconColor =
@@ -460,10 +458,8 @@ function renderFindings(
 	for (let i = 0; i < displayCount; i++) {
 		const finding = findings[i];
 		const isLastFinding = i === displayCount - 1 && (expanded || findings.length <= 3);
-		const findingPrefix = isLastFinding
-			? `${theme.boxSharp.bottomLeft}${theme.boxSharp.horizontal}`
-			: `${theme.boxSharp.teeRight}${theme.boxSharp.horizontal}`;
-		const findingContinue = isLastFinding ? "   " : `${theme.boxSharp.vertical}  `;
+		const findingPrefix = isLastFinding ? theme.tree.last : theme.tree.branch;
+		const findingContinue = isLastFinding ? "   " : `${theme.tree.vertical}  `;
 
 		const priority = PRIORITY_LABELS[finding.priority] ?? "P?";
 		const color = finding.priority === 0 ? "error" : finding.priority === 1 ? "warning" : "muted";
@@ -496,10 +492,8 @@ function renderFindings(
  */
 function renderAgentResult(result: SingleResult, isLast: boolean, expanded: boolean, theme: Theme): string[] {
 	const lines: string[] = [];
-	const prefix = isLast
-		? `${theme.boxSharp.bottomLeft}${theme.boxSharp.horizontal}`
-		: `${theme.boxSharp.teeRight}${theme.boxSharp.horizontal}`;
-	const continuePrefix = isLast ? "   " : `${theme.boxSharp.vertical}  `;
+	const prefix = isLast ? theme.tree.last : theme.tree.branch;
+	const continuePrefix = isLast ? "   " : `${theme.tree.vertical}  `;
 
 	const aborted = result.aborted ?? false;
 	const success = !aborted && result.exitCode === 0;

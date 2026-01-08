@@ -11,6 +11,7 @@ import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
+	type FileMentionMessage,
 	type HookMessage,
 } from "./messages";
 import type { SessionStorage, SessionStorageWriter } from "./session-storage";
@@ -1179,7 +1180,7 @@ export class SessionManager {
 	 * so it is easier to find them.
 	 * These need to be appended via appendCompaction() and appendBranchSummary() methods.
 	 */
-	appendMessage(message: Message | CustomMessage | HookMessage | BashExecutionMessage): string {
+	appendMessage(message: Message | CustomMessage | HookMessage | BashExecutionMessage | FileMentionMessage): string {
 		const entry: SessionMessageEntry = {
 			type: "message",
 			id: generateId(this.byId),

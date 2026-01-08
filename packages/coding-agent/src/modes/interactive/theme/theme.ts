@@ -209,8 +209,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"tree.vertical": "│",
 	// pick: ─ | alt: ━ ═ ╌ ┄
 	"tree.horizontal": "─",
-	// pick: ⎿ | alt: └ ╰ ↳
-	"tree.hook": "⎿",
+	// pick: └ | alt: ⎿ ╰ ↳
+	"tree.hook": "\u2514",
 	// Box Drawing - Rounded
 	// pick: ╭ | alt: ┌ ┏ ╔
 	"boxRound.topLeft": "╭",

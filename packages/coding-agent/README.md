@@ -338,9 +338,21 @@ When disabled, neither case triggers automatic compaction (use `/compact` manual
 		"enabled": true,
 		"reserveTokens": 16384,
 		"keepRecentTokens": 20000
+	},
+	"env": {
+		"ANTHROPIC_API_KEY": "sk-ant-...",
+		"OPENAI_API_KEY": "sk-proj-...",
+		"GEMINI_API_KEY": "AIzaSyD...",
+		"CUSTOM_VAR": "custom-value"
 	}
 }
 ```
+
+**Environment Variables (`env`):**
+- Automatically sets environment variables when the application starts
+- Only sets variables that aren't already present in `process.env`
+- Supports any environment variable, not just API keys
+- Order of precedence: existing env vars > settings.json env vars > auth.json env vars
 
 > **Note:** Compaction is lossy. The agent loses full conversation access afterward. Size tasks to avoid context limits when possible. For critical context, ask the agent to write a summary to a file, iterate on it until it covers everything, then start a new session with that file. The full session history is preserved in the JSONL file; use `/tree` to revisit any previous point.
 

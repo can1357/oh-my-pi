@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+- Added `env` support in `settings.json` for automatically setting environment variables on startup
+- Added environment variable management methods to SettingsManager (get/set/clear)
+
+### Fixed
+- Fixed bash output previews to recompute on resize, preventing TUI line width overflow crashes
+- Fixed session title generation to retry alternate smol models when the primary model errors or is rate-limited
+- Fixed file mentions to resolve extensionless paths and directories, using read tool truncation limits for injected content
+- Fixed interactive UI to show auto-read file mention indicators
+- Fixed task tool tree rendering to use consistent tree connectors for progress, findings, and results
+- Fixed last-branch tree connector symbol in the TUI
+- Fixed output tool previews to use compact JSON when outputs are formatted with leading braces
+
 ## [3.32.0] - 2026-01-08
 ### Added
 

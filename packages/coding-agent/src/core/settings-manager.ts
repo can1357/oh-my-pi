@@ -179,6 +179,8 @@ export interface Settings {
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
 	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
 	doubleEscapeAction?: "branch" | "tree"; // Action for double-escape with empty editor (default: "tree")
+	/** Environment variables to set automatically on startup */
+	env?: Record<string, string>;
 	extensions?: string[]; // Array of extension file paths
 	skills?: SkillsSettings;
 	commands?: CommandsSettings;
@@ -379,6 +381,29 @@ export class SettingsManager {
 		this.globalSettings = initialSettings;
 		const projectSettings = this.loadProjectSettings();
 		this.settings = normalizeSettings(deepMergeSettings(this.globalSettings, projectSettings));
+
+		// Apply environment variables from settings
+		this.applyEnvironmentVariables();
+	}
+
+	/**
+	 * Apply environment variables from settings to process.env
+	 * Only sets variables that are not already set in the environment
+	 */
+	applyEnvironmentVariables(): void {
+		const envVars = this.settings.env;
+		if (!envVars || typeof envVars !== "object") {
+			return;
+		}
+
+		for (const [key, value] of Object.entries(envVars)) {
+			if (typeof key === "string" && typeof value === "string") {
+				// Only set if not already present in environment (allow override with env vars)
+				if (!(key in process.env)) {
+					process.env[key] = value;
+				}
+			}
+		}
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -1168,5 +1193,50 @@ export class SettingsManager {
 	setDoubleEscapeAction(action: "branch" | "tree"): void {
 		this.globalSettings.doubleEscapeAction = action;
 		this.save();
+	}
+
+	/**
+	 * Get environment variables from settings
+	 */
+	getEnvironmentVariables(): Record<string, string> {
+		return { ...(this.settings.env ?? {}) };
+	}
+
+	/**
+	 * Set environment variables in settings (not process.env)
+	 * This will be applied on next startup or reload
+	 */
+	setEnvironmentVariables(envVars: Record<string, string>): void {
+		this.globalSettings.env = { ...envVars };
+		this.save();
+	}
+
+	/**
+	 * Clear all environment variables from settings
+	 */
+	clearEnvironmentVariables(): void {
+		delete this.globalSettings.env;
+		this.save();
+	}
+
+	/**
+	 * Set a single environment variable in settings
+	 */
+	setEnvironmentVariable(key: string, value: string): void {
+		if (!this.globalSettings.env) {
+			this.globalSettings.env = {};
+		}
+		this.globalSettings.env[key] = value;
+		this.save();
+	}
+
+	/**
+	 * Remove a single environment variable from settings
+	 */
+	removeEnvironmentVariable(key: string): void {
+		if (this.globalSettings.env) {
+			delete this.globalSettings.env[key];
+			this.save();
+		}
 	}
 }

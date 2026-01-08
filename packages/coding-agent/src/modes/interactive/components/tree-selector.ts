@@ -437,13 +437,10 @@ class TreeList implements Component {
 
 			// Build prefix with gutters at their correct positions
 			// Each gutter has a position (displayIndent where its connector was shown)
-			const connector =
-				flatNode.showConnector && !flatNode.isVirtualRootChild
-					? flatNode.isLast
-						? `${theme.boxSharp.bottomLeft}${theme.boxSharp.horizontal} `
-						: `${theme.boxSharp.teeRight}${theme.boxSharp.horizontal} `
-					: "";
-			const connectorPosition = connector ? displayIndent - 1 : -1;
+			const hasConnector = flatNode.showConnector && !flatNode.isVirtualRootChild;
+			const connectorSymbol = hasConnector ? (flatNode.isLast ? theme.tree.last : theme.tree.branch) : "";
+			const connectorChars = hasConnector ? Array.from(connectorSymbol) : [];
+			const connectorPosition = hasConnector ? displayIndent - 1 : -1;
 
 			// Build prefix char by char, placing gutters and connector at their positions
 			const totalChars = displayIndent * 3;
@@ -456,18 +453,18 @@ class TreeList implements Component {
 				const gutter = flatNode.gutters.find((g) => g.position === level);
 				if (gutter) {
 					if (posInLevel === 0) {
-						prefixChars.push(gutter.show ? theme.boxSharp.vertical : " ");
+						prefixChars.push(gutter.show ? theme.tree.vertical : " ");
 					} else {
 						prefixChars.push(" ");
 					}
-				} else if (connector && level === connectorPosition) {
+				} else if (hasConnector && level === connectorPosition) {
 					// Connector at this level
 					if (posInLevel === 0) {
-						prefixChars.push(flatNode.isLast ? theme.boxSharp.bottomLeft : theme.boxSharp.teeRight);
+						prefixChars.push(connectorChars[0] ?? " ");
 					} else if (posInLevel === 1) {
-						prefixChars.push(theme.boxSharp.horizontal);
+						prefixChars.push(connectorChars[1] ?? theme.tree.horizontal);
 					} else {
-						prefixChars.push(" ");
+						prefixChars.push(connectorChars[2] ?? " ");
 					}
 				} else {
 					prefixChars.push(" ");

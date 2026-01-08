@@ -377,7 +377,8 @@ export class AgentSession {
 			} else if (
 				event.message.role === "user" ||
 				event.message.role === "assistant" ||
-				event.message.role === "toolResult"
+				event.message.role === "toolResult" ||
+				event.message.role === "fileMention"
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
 				this.sessionManager.appendMessage(event.message);

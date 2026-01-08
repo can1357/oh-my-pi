@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Ensured aborted assistant responses always include an error message for callers.
+- Filtered thinking blocks from Cerebras request context to keep multi-turn prompts compatible.
+
 ## [3.32.0] - 2026-01-08
 
 ## [3.31.0] - 2026-01-08

@@ -27,12 +27,10 @@ export class BashExecutionComponent extends Container {
 	private fullOutputPath?: string;
 	private expanded = false;
 	private contentContainer: Container;
-	private ui: TUI;
 
 	constructor(command: string, ui: TUI, excludeFromContext = false) {
 		super();
 		this.command = command;
-		this.ui = ui;
 
 		// Use dim border for excluded-from-context commands (!! prefix)
 		const colorKey = excludeFromContext ? "dim" : "bashMode";
@@ -142,15 +140,16 @@ export class BashExecutionComponent extends Container {
 				const displayText = availableLines.map((line) => theme.fg("muted", line)).join("\n");
 				this.contentContainer.addChild(new Text(`\n${displayText}`, 1, 0));
 			} else {
-				// Use shared visual truncation utility
+				// Use shared visual truncation utility, recomputed per render width
 				const styledOutput = previewLogicalLines.map((line) => theme.fg("muted", line)).join("\n");
-				const { visualLines } = truncateToVisualLines(
-					`\n${styledOutput}`,
-					PREVIEW_LINES,
-					this.ui.terminal.columns,
-					1, // padding
-				);
-				this.contentContainer.addChild({ render: () => visualLines, invalidate: () => {} });
+				const previewText = `\n${styledOutput}`;
+				this.contentContainer.addChild({
+					render: (width: number) => {
+						const { visualLines } = truncateToVisualLines(previewText, PREVIEW_LINES, width, 1);
+						return visualLines;
+					},
+					invalidate: () => {},
+				});
 			}
 		}
 

@@ -2,16 +2,53 @@
  * Generate session titles using a smol, fast model.
  */
 
-import type { Model } from "@mariozechner/pi-ai";
+import type { Api, Model } from "@mariozechner/pi-ai";
 import { completeSimple } from "@mariozechner/pi-ai";
 import titleSystemPrompt from "../prompts/title-system.md" with { type: "text" };
 import { logger } from "./logger";
 import type { ModelRegistry } from "./model-registry";
-import { findSmolModel } from "./model-resolver";
+import { parseModelString, SMOL_MODEL_PRIORITY } from "./model-resolver";
 
 const TITLE_SYSTEM_PROMPT = titleSystemPrompt;
 
 const MAX_INPUT_CHARS = 2000;
+
+function getTitleModelCandidates(registry: ModelRegistry, savedSmolModel?: string): Model<Api>[] {
+	const availableModels = registry.getAvailable();
+	if (availableModels.length === 0) return [];
+
+	const candidates: Model<Api>[] = [];
+	const addCandidate = (model?: Model<Api>): void => {
+		if (!model) return;
+		const exists = candidates.some((candidate) => candidate.provider === model.provider && candidate.id === model.id);
+		if (!exists) {
+			candidates.push(model);
+		}
+	};
+
+	if (savedSmolModel) {
+		const parsed = parseModelString(savedSmolModel);
+		if (parsed) {
+			const match = availableModels.find((model) => model.provider === parsed.provider && model.id === parsed.id);
+			addCandidate(match);
+		}
+	}
+
+	for (const pattern of SMOL_MODEL_PRIORITY) {
+		const needle = pattern.toLowerCase();
+		const exactMatch = availableModels.find((model) => model.id.toLowerCase() === needle);
+		addCandidate(exactMatch);
+
+		const fuzzyMatch = availableModels.find((model) => model.id.toLowerCase().includes(needle));
+		addCandidate(fuzzyMatch);
+	}
+
+	for (const model of availableModels) {
+		addCandidate(model);
+	}
+
+	return candidates;
+}
 
 /**
  * Find the best available model for title generation.
@@ -20,9 +57,9 @@ const MAX_INPUT_CHARS = 2000;
  * @param registry Model registry
  * @param savedSmolModel Optional saved smol model from settings (provider/modelId format)
  */
-export async function findTitleModel(registry: ModelRegistry, savedSmolModel?: string): Promise<Model<any> | null> {
-	const model = await findSmolModel(registry, savedSmolModel);
-	return model ?? null;
+export async function findTitleModel(registry: ModelRegistry, savedSmolModel?: string): Promise<Model<Api> | null> {
+	const candidates = getTitleModelCandidates(registry, savedSmolModel);
+	return candidates[0] ?? null;
 }
 
 /**
@@ -37,68 +74,85 @@ export async function generateSessionTitle(
 	registry: ModelRegistry,
 	savedSmolModel?: string,
 ): Promise<string | null> {
-	const model = await findTitleModel(registry, savedSmolModel);
-	if (!model) {
+	const candidates = getTitleModelCandidates(registry, savedSmolModel);
+	if (candidates.length === 0) {
 		logger.debug("title-generator: no smol model found");
-		return null;
-	}
-
-	const apiKey = await registry.getApiKey(model);
-	if (!apiKey) {
-		logger.debug("title-generator: no API key for model", { provider: model.provider, id: model.id });
 		return null;
 	}
 
 	// Truncate message if too long
 	const truncatedMessage =
 		firstMessage.length > MAX_INPUT_CHARS ? `${firstMessage.slice(0, MAX_INPUT_CHARS)}...` : firstMessage;
+	const userMessage = `<user-message>\n${truncatedMessage}\n</user-message>`;
 
-	const request = {
-		model: `${model.provider}/${model.id}`,
-		systemPrompt: TITLE_SYSTEM_PROMPT,
-		userMessage: `<user-message>\n${truncatedMessage}\n</user-message>`,
-		maxTokens: 30,
-	};
-	logger.debug("title-generator: request", request);
+	for (const model of candidates) {
+		const apiKey = await registry.getApiKey(model);
+		if (!apiKey) {
+			logger.debug("title-generator: no API key for model", { provider: model.provider, id: model.id });
+			continue;
+		}
 
-	try {
-		const response = await completeSimple(
-			model,
-			{
-				systemPrompt: request.systemPrompt,
-				messages: [{ role: "user", content: request.userMessage, timestamp: Date.now() }],
-			},
-			{
-				apiKey,
-				maxTokens: 30,
-			},
-		);
+		const request = {
+			model: `${model.provider}/${model.id}`,
+			systemPrompt: TITLE_SYSTEM_PROMPT,
+			userMessage,
+			maxTokens: 30,
+		};
+		logger.debug("title-generator: request", request);
 
-		// Extract title from response text content
-		let title = "";
-		for (const content of response.content) {
-			if (content.type === "text") {
-				title += content.text;
+		try {
+			const response = await completeSimple(
+				model,
+				{
+					systemPrompt: request.systemPrompt,
+					messages: [{ role: "user", content: request.userMessage, timestamp: Date.now() }],
+				},
+				{
+					apiKey,
+					maxTokens: 30,
+				},
+			);
+
+			if (response.stopReason === "error") {
+				logger.debug("title-generator: response error", {
+					model: request.model,
+					stopReason: response.stopReason,
+					errorMessage: response.errorMessage,
+				});
+				continue;
 			}
+
+			// Extract title from response text content
+			let title = "";
+			for (const content of response.content) {
+				if (content.type === "text") {
+					title += content.text;
+				}
+			}
+			title = title.trim();
+
+			logger.debug("title-generator: response", {
+				model: request.model,
+				title,
+				usage: response.usage,
+				stopReason: response.stopReason,
+			});
+
+			if (!title) {
+				continue;
+			}
+
+			// Clean up: remove quotes, trailing punctuation
+			return title.replace(/^["']|["']$/g, "").replace(/[.!?]$/, "");
+		} catch (err) {
+			logger.debug("title-generator: error", {
+				model: request.model,
+				error: err instanceof Error ? err.message : String(err),
+			});
 		}
-		title = title.trim();
-
-		logger.debug("title-generator: response", {
-			title,
-			usage: response.usage,
-			stopReason: response.stopReason,
-		});
-
-		if (!title) {
-			return null;
-		}
-
-		// Clean up: remove quotes, trailing punctuation
-		return title.replace(/^["']|["']$/g, "").replace(/[.!?]$/, "");
-	} catch (err) {
-		logger.debug("title-generator: error", { error: err instanceof Error ? err.message : String(err) });
-		return null;
 	}
+
+	return null;
 }
 
 /**
