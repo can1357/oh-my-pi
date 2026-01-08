@@ -1,8 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Added
 
+- Added caching for system environment detection to improve startup performance
 - Added disk usage information to automatic environment detection in system prompt
 - Added `compat` option for SSH hosts to wrap commands in a POSIX shell on Windows systems
 - Added automatic working directory handling for PowerShell and cmd.exe on Windows SSH hosts
@@ -12,6 +14,7 @@
 
 ### Changed
 
+- Changed GPU detection on Linux to prioritize discrete GPUs (NVIDIA, AMD) over integrated graphics and skip server management adapters
 - Changed SSH host info cache to use versioned format for automatic refresh on schema changes
 - Changed SSH compat shell detection to actively probe for bash/sh availability on Windows hosts
 - Changed SSH tool description to show detected shell type and available commands per host

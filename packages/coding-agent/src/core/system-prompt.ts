@@ -2,7 +2,9 @@
  * System prompt construction and project context loading
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import chalk from "chalk";
 import { contextFileCapability } from "../capability/context-file";
 import type { Rule } from "../capability/rule";
@@ -293,12 +295,35 @@ function getGpuModel(): string | null {
 		case "linux": {
 			const output = execIfExists("lspci", []);
 			if (!output) return null;
+			const gpus: Array<{ name: string; priority: number }> = [];
 			for (const line of output.split("\n")) {
 				if (!/(VGA|3D|Display)/i.test(line)) continue;
 				const parts = line.split(":");
-				return parts.length > 1 ? parts.slice(1).join(":").trim() : line.trim();
+				const name = parts.length > 1 ? parts.slice(1).join(":").trim() : line.trim();
+				const nameLower = name.toLowerCase();
+				// Skip BMC/server management adapters
+				if (/aspeed|matrox g200|mgag200/i.test(name)) continue;
+				// Prioritize discrete GPUs
+				let priority = 0;
+				if (
+					nameLower.includes("nvidia") ||
+					nameLower.includes("geforce") ||
+					nameLower.includes("quadro") ||
+					nameLower.includes("rtx")
+				) {
+					priority = 3;
+				} else if (nameLower.includes("amd") || nameLower.includes("radeon") || nameLower.includes("rx ")) {
+					priority = 3;
+				} else if (nameLower.includes("intel")) {
+					priority = 1;
+				} else {
+					priority = 2;
+				}
+				gpus.push({ name, priority });
 			}
-			return null;
+			if (gpus.length === 0) return null;
+			gpus.sort((a, b) => b.priority - a.priority);
+			return gpus[0].name;
 		}
 		default:
 			return null;
@@ -382,6 +407,57 @@ function getWindowManager(): string {
 	return "unknown";
 }
 
+/** Cached system info structure */
+interface SystemInfoCache {
+	os: string;
+	distro: string;
+	kernel: string;
+	arch: string;
+	cpu: string;
+	gpu: string;
+	disk: string;
+}
+
+function getSystemInfoCachePath(): string {
+	return join(homedir(), ".omp", "system_info.json");
+}
+
+function loadSystemInfoCache(): SystemInfoCache | null {
+	try {
+		const cachePath = getSystemInfoCachePath();
+		if (!existsSync(cachePath)) return null;
+		const content = readFileSync(cachePath, "utf-8");
+		return JSON.parse(content) as SystemInfoCache;
+	} catch {
+		return null;
+	}
+}
+
+function saveSystemInfoCache(info: SystemInfoCache): void {
+	try {
+		const cachePath = getSystemInfoCachePath();
+		const dir = join(homedir(), ".omp");
+		if (!existsSync(dir)) {
+			mkdirSync(dir, { recursive: true });
+		}
+		writeFileSync(cachePath, JSON.stringify(info, null, "\t"), "utf-8");
+	} catch {
+		// Silently ignore cache write failures
+	}
+}
+
+function collectSystemInfo(): SystemInfoCache {
+	return {
+		os: getOsName(),
+		distro: getOsDistro() ?? "unknown",
+		kernel: getKernelVersion(),
+		arch: getCpuArch(),
+		cpu: getCpuModel() ?? "unknown",
+		gpu: getGpuModel() ?? "unknown",
+		disk: getDiskInfo() ?? "unknown",
+	};
+}
+
 function formatBytes(bytes: number): string {
 	if (bytes < 1024) return `${bytes}B`;
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
@@ -429,14 +505,22 @@ function getDiskInfo(): string | null {
 }
 
 function formatEnvironmentInfo(): string {
+	// Load cached system info or collect fresh
+	let sysInfo = loadSystemInfoCache();
+	if (!sysInfo) {
+		sysInfo = collectSystemInfo();
+		saveSystemInfoCache(sysInfo);
+	}
+
+	// Session-specific values (not cached)
 	const items: Array<[string, string]> = [
-		["OS", getOsName()],
-		["Distro", getOsDistro() ?? "unknown"],
-		["Kernel", getKernelVersion()],
-		["Arch", getCpuArch()],
-		["CPU", getCpuModel() ?? "unknown"],
-		["GPU", getGpuModel() ?? "unknown"],
-		["Disk", getDiskInfo() ?? "unknown"],
+		["OS", sysInfo.os],
+		["Distro", sysInfo.distro],
+		["Kernel", sysInfo.kernel],
+		["Arch", sysInfo.arch],
+		["CPU", sysInfo.cpu],
+		["GPU", sysInfo.gpu],
+		["Disk", sysInfo.disk],
 		["Shell", getShellName()],
 		["Terminal", getTerminalName()],
 		["DE", getDesktopEnvironment()],
@@ -524,7 +608,9 @@ function generateAntiBashRules(tools: ToolName[]): string | null {
 	const hasSSH = tools.includes("ssh");
 	if (hasSSH) {
 		lines.push("\n### SSH Command Execution");
-		lines.push("**Critical**: Each SSH host runs a specific shell. **You MUST match commands to the host's shell type**.");
+		lines.push(
+			"**Critical**: Each SSH host runs a specific shell. **You MUST match commands to the host's shell type**.",
+		);
 		lines.push("Check the host list in the ssh tool description. Shell types:");
 		lines.push("- linux/bash, linux/zsh, macos/bash, macos/zsh: ls, cat, grep, find, ps, df, uname");
 		lines.push("- windows/bash, windows/sh: ls, cat, grep, find (Windows with WSL/Cygwin — Unix commands)");
