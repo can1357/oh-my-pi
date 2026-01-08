@@ -1,6 +1,14 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added progress indicator when starting LSP servers at session startup
+- Added bundled `/init` slash command available by default
+
+### Changed
+
+- Changed LSP server warmup to use a 5-second timeout, falling back to lazy initialization for slow servers
 
 ## [3.31.0] - 2026-01-08
 

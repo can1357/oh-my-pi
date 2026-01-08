@@ -373,10 +373,16 @@ async function sendResponse(
 // Client Management
 // =============================================================================
 
+/** Timeout for warmup initialize requests (5 seconds) */
+export const WARMUP_TIMEOUT_MS = 5000;
+
 /**
  * Get or create an LSP client for the given server configuration and working directory.
+ * @param config - Server configuration
+ * @param cwd - Working directory
+ * @param initTimeoutMs - Optional timeout for the initialize request (defaults to 30s)
  */
-export async function getOrCreateClient(config: ServerConfig, cwd: string): Promise<LspClient> {
+export async function getOrCreateClient(config: ServerConfig, cwd: string, initTimeoutMs?: number): Promise<LspClient> {
 	const key = `${config.command}:${cwd}`;
 
 	// Check if client already exists
@@ -430,14 +436,20 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string): Prom
 
 		try {
 			// Send initialize request
-			const initResult = (await sendRequest(client, "initialize", {
-				processId: process.pid,
-				rootUri: fileToUri(cwd),
-				rootPath: cwd,
-				capabilities: CLIENT_CAPABILITIES,
-				initializationOptions: config.initOptions ?? {},
-				workspaceFolders: [{ uri: fileToUri(cwd), name: cwd.split("/").pop() ?? "workspace" }],
-			})) as { capabilities?: unknown };
+			const initResult = (await sendRequest(
+				client,
+				"initialize",
+				{
+					processId: process.pid,
+					rootUri: fileToUri(cwd),
+					rootPath: cwd,
+					capabilities: CLIENT_CAPABILITIES,
+					initializationOptions: config.initOptions ?? {},
+					workspaceFolders: [{ uri: fileToUri(cwd), name: cwd.split("/").pop() ?? "workspace" }],
+				},
+				undefined, // signal
+				initTimeoutMs,
+			)) as { capabilities?: unknown };
 
 			if (!initResult) {
 				throw new Error("Failed to initialize LSP: no response");
@@ -662,6 +674,9 @@ export function shutdownClient(key: string): void {
 // LSP Protocol Methods
 // =============================================================================
 
+/** Default timeout for LSP requests (30 seconds) */
+const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
+
 /**
  * Send an LSP request and wait for response.
  */
@@ -670,6 +685,7 @@ export async function sendRequest(
 	method: string,
 	params: unknown,
 	signal?: AbortSignal,
+	timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<unknown> {
 	// Atomically increment and capture request ID
 	const id = ++client.requestId;
@@ -712,7 +728,7 @@ export async function sendRequest(
 				cleanup();
 				reject(err);
 			}
-		}, 30000);
+		}, timeoutMs);
 		if (signal) {
 			signal.addEventListener("abort", abortHandler, { once: true });
 			if (signal.aborted) {

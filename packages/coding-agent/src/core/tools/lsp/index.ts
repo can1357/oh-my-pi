@@ -19,6 +19,7 @@ import {
 	sendRequest,
 	setIdleTimeout,
 	syncContent,
+	WARMUP_TIMEOUT_MS,
 } from "./client";
 import { getLinterClient } from "./clients";
 import { getServersForFile, hasCapability, type LspConfig, loadConfig } from "./config";
@@ -72,23 +73,36 @@ export interface LspWarmupResult {
 	}>;
 }
 
+/** Options for warming up LSP servers */
+export interface LspWarmupOptions {
+	/** Called when starting to connect to servers */
+	onConnecting?: (serverNames: string[]) => void;
+}
+
 /**
  * Warm up LSP servers for a directory by connecting to all detected servers.
  * This should be called at startup to avoid cold-start delays.
  *
  * @param cwd - Working directory to detect and start servers for
+ * @param options - Optional callbacks for progress reporting
  * @returns Status of each server that was started
  */
-export async function warmupLspServers(cwd: string): Promise<LspWarmupResult> {
+export async function warmupLspServers(cwd: string, options?: LspWarmupOptions): Promise<LspWarmupResult> {
 	const config = await loadConfig(cwd);
 	setIdleTimeout(config.idleTimeoutMs);
 	const servers: LspWarmupResult["servers"] = [];
 	const lspServers = getLspServers(config);
 
-	// Start all detected servers in parallel
+	// Notify caller which servers we're connecting to
+	if (lspServers.length > 0 && options?.onConnecting) {
+		options.onConnecting(lspServers.map(([name]) => name));
+	}
+
+	// Start all detected servers in parallel with a short timeout
+	// Servers that don't respond quickly will be initialized lazily on first use
 	const results = await Promise.allSettled(
 		lspServers.map(async ([name, serverConfig]) => {
-			const client = await getOrCreateClient(serverConfig, cwd);
+			const client = await getOrCreateClient(serverConfig, cwd, WARMUP_TIMEOUT_MS);
 			return { name, client, fileTypes: serverConfig.fileTypes };
 		}),
 	);

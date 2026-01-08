@@ -931,7 +931,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let lspServers: CreateAgentSessionResult["lspServers"];
 	if (settingsManager.getLspDiagnosticsOnWrite()) {
 		try {
-			const result = await warmupLspServers(cwd);
+			const result = await warmupLspServers(cwd, {
+				onConnecting: (serverNames) => {
+					if (options.hasUI && serverNames.length > 0) {
+						process.stderr.write(chalk.gray(`Starting LSP servers: ${serverNames.join(", ")}...\n`));
+					}
+				},
+			});
 			lspServers = result.servers;
 			time("warmupLspServers");
 		} catch {

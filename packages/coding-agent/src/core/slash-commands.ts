@@ -2,6 +2,7 @@ import { slashCommandCapability } from "../capability/slash-command";
 import type { SlashCommand } from "../discovery";
 import { loadSync } from "../discovery";
 import { parseFrontmatter } from "../discovery/helpers";
+import { EMBEDDED_COMMAND_TEMPLATES } from "./tools/task/commands";
 
 /**
  * Represents a custom slash command loaded from a file
@@ -13,6 +14,25 @@ export interface FileSlashCommand {
 	source: string; // e.g., "via Claude Code (User)"
 	/** Source metadata for display */
 	_source?: { providerName: string; level: "user" | "project" | "native" };
+}
+
+const EMBEDDED_SLASH_COMMANDS = EMBEDDED_COMMAND_TEMPLATES;
+
+function parseCommandTemplate(content: string): { description: string; body: string } {
+	const { frontmatter, body } = parseFrontmatter(content);
+	const frontmatterDesc = typeof frontmatter.description === "string" ? frontmatter.description.trim() : "";
+
+	// Get description from frontmatter or first non-empty line
+	let description = frontmatterDesc;
+	if (!description) {
+		const firstLine = body.split("\n").find((line) => line.trim());
+		if (firstLine) {
+			description = firstLine.slice(0, 60);
+			if (firstLine.length > 60) description += "...";
+		}
+	}
+
+	return { description, body };
 }
 
 /**
@@ -90,19 +110,8 @@ export interface LoadSlashCommandsOptions {
 export function loadSlashCommands(options: LoadSlashCommandsOptions = {}): FileSlashCommand[] {
 	const result = loadSync<SlashCommand>(slashCommandCapability.id, { cwd: options.cwd });
 
-	return result.items.map((cmd) => {
-		const { frontmatter, body } = parseFrontmatter(cmd.content);
-		const frontmatterDesc = typeof frontmatter.description === "string" ? frontmatter.description.trim() : "";
-
-		// Get description from frontmatter or first non-empty line
-		let description = frontmatterDesc;
-		if (!description) {
-			const firstLine = body.split("\n").find((line) => line.trim());
-			if (firstLine) {
-				description = firstLine.slice(0, 60);
-				if (firstLine.length > 60) description += "...";
-			}
-		}
+	const fileCommands: FileSlashCommand[] = result.items.map((cmd) => {
+		const { description, body } = parseCommandTemplate(cmd.content);
 
 		// Format source label: "via ProviderName Level"
 		const capitalizedLevel = cmd.level.charAt(0).toUpperCase() + cmd.level.slice(1);
@@ -116,6 +125,23 @@ export function loadSlashCommands(options: LoadSlashCommandsOptions = {}): FileS
 			_source: { providerName: cmd._source.providerName, level: cmd.level },
 		};
 	});
+
+	const seenNames = new Set(fileCommands.map((cmd) => cmd.name));
+	for (const cmd of EMBEDDED_SLASH_COMMANDS) {
+		const name = cmd.name.replace(/\.md$/, "");
+		if (seenNames.has(name)) continue;
+
+		const { description, body } = parseCommandTemplate(cmd.content);
+		fileCommands.push({
+			name,
+			description,
+			content: body,
+			source: "bundled",
+		});
+		seenNames.add(name);
+	}
+
+	return fileCommands;
 }
 
 /**

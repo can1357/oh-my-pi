@@ -12,12 +12,16 @@ import { loadSync } from "../../../discovery";
 import architectPlanMd from "../../../prompts/architect-plan.md" with { type: "text" };
 import implementMd from "../../../prompts/implement.md" with { type: "text" };
 import implementWithCriticMd from "../../../prompts/implement-with-critic.md" with { type: "text" };
+import initMd from "../../../prompts/init.md" with { type: "text" };
 
 const EMBEDDED_COMMANDS: { name: string; content: string }[] = [
 	{ name: "architect-plan.md", content: architectPlanMd },
 	{ name: "implement-with-critic.md", content: implementWithCriticMd },
 	{ name: "implement.md", content: implementMd },
+	{ name: "init.md", content: initMd },
 ];
+
+export const EMBEDDED_COMMAND_TEMPLATES: ReadonlyArray<{ name: string; content: string }> = EMBEDDED_COMMANDS;
 
 /** Workflow command definition */
 export interface WorkflowCommand {

@@ -5,10 +5,10 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { type ImageContent, supportsXhigh } from "@mariozechner/pi-ai";
-import chalk from "chalk";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { type ImageContent, supportsXhigh } from "@mariozechner/pi-ai";
+import chalk from "chalk";
 import { type Args, parseArgs, printHelp } from "./cli/args";
 import { processFileArguments } from "./cli/file-processor";
 import { listModels } from "./cli/list-models";

@@ -1906,31 +1906,6 @@ export class InteractiveMode {
 		this.voiceSupervisor.notifyProgress(text);
 	}
 
-	private async toggleVoiceListening(): Promise<void> {
-		if (!this.settingsManager.getVoiceEnabled()) {
-			this.settingsManager.setVoiceEnabled(true);
-			this.showStatus("Voice mode enabled.");
-		}
-
-		if (this.voiceAutoModeEnabled) {
-			this.voiceAutoModeEnabled = false;
-			this.stopVoiceProgressTimer();
-			await this.voiceSupervisor.stop();
-			this.setVoiceStatus(undefined);
-			this.showStatus("Voice mode disabled.");
-			return;
-		}
-
-		this.voiceAutoModeEnabled = true;
-		try {
-			await this.voiceSupervisor.start();
-		} catch (error) {
-			this.voiceAutoModeEnabled = false;
-			this.setVoiceStatus(undefined);
-			this.showError(error instanceof Error ? error.message : String(error));
-		}
-	}
-
 	private async submitVoiceText(text: string): Promise<void> {
 		const cleaned = text.trim();
 		if (!cleaned) {
