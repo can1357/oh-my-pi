@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AssistantMessage, Usage } from "@mariozechner/pi-ai";
-import { getModel } from "@mariozechner/pi-ai";
+import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
+import { getModel } from "@oh-my-pi/pi-ai";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionSettings,
@@ -216,7 +216,7 @@ describe("findCutPoint", () => {
 		for (let i = 0; i < 10; i++) {
 			entries.push(createMessageEntry(createUserMessage(`User ${i}`)));
 			entries.push(
-				createMessageEntry(createAssistantMessage(`Assistant ${i}`, createMockUsage(0, 100, (i + 1) * 1000, 0))),
+				createMessageEntry(createAssistantMessage(`Assistant ${i}`, createMockUsage(0, 100, (i + 1) * 1000, 0)))
 			);
 		}
 

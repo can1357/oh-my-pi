@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel } from "@oh-my-pi/pi-ai";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { nanoid } from "nanoid";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session";
@@ -201,7 +201,7 @@ describe.skipIf(!API_KEY)("AgentSession compaction e2e", () => {
 
 		// Check that no auto_compaction events were emitted for manual compaction
 		const autoCompactionEvents = events.filter(
-			(e) => e.type === "auto_compaction_start" || e.type === "auto_compaction_end",
+			(e) => e.type === "auto_compaction_start" || e.type === "auto_compaction_end"
 		);
 		// Manual compaction doesn't emit auto_compaction events
 		expect(autoCompactionEvents.length).toBe(0);

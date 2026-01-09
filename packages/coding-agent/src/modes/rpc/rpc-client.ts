@@ -4,7 +4,7 @@
  * Spawns the agent in RPC mode and provides a typed API for all operations.
  */
 
-import type { ImageContent } from "@mariozechner/pi-ai";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { AgentEvent, AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Subprocess } from "bun";
 import type { SessionStats } from "../../core/agent-session";
@@ -114,7 +114,7 @@ export class RpcClient {
 							}
 						}
 					},
-				}),
+				})
 			)
 			.getReader() as ReadableStreamDefaultReader<string>;
 

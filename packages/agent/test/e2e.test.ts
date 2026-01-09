@@ -1,5 +1,5 @@
-import type { AssistantMessage, Model, ToolResultMessage, UserMessage } from "@mariozechner/pi-ai";
-import { getModel } from "@mariozechner/pi-ai";
+import type { AssistantMessage, Model, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
+import { getModel } from "@oh-my-pi/pi-ai";
 import { describe, expect, it } from "vitest";
 import { Agent } from "../src/index";
 import { calculateTool } from "./utils/calculate";
@@ -414,8 +414,7 @@ describe("Agent.continue()", () => {
 		it("should continue and process tool results", async () => {
 			const agent = new Agent({
 				initialState: {
-					systemPrompt:
-						"You are a helpful assistant. After getting a calculation result, state the answer clearly.",
+					systemPrompt: "You are a helpful assistant. After getting a calculation result, state the answer clearly.",
 					model,
 					thinkingLevel: "off",
 					tools: [calculateTool],

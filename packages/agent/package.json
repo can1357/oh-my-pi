@@ -13,7 +13,7 @@
 		"test": "vitest --run"
 	},
 	"dependencies": {
-		"@mariozechner/pi-ai": "^0.37.8",
+		"@oh-my-pi/pi-ai": "workspace:*",
 		"@oh-my-pi/pi-tui": "workspace:*"
 	},
 	"keywords": [

@@ -13,7 +13,7 @@
  * 5. Parent can send { type: "abort" } to request cancellation
  */
 
-import type { Api, Model } from "@mariozechner/pi-ai";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
 import type { AgentEvent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AgentSessionEvent } from "../../agent-session";
 import { parseModelPattern, parseModelString } from "../../model-resolver";
@@ -88,7 +88,7 @@ let pendingAbort = false;
  */
 function resolveModelOverride(
 	override: string | undefined,
-	modelRegistry: { getAvailable: () => Model<Api>[]; find: (provider: string, id: string) => Model<Api> | undefined },
+	modelRegistry: { getAvailable: () => Model<Api>[]; find: (provider: string, id: string) => Model<Api> | undefined }
 ): { model?: Model<Api>; thinkingLevel?: ThinkingLevel } {
 	if (!override) return {};
 
@@ -190,7 +190,7 @@ async function runTask(runState: RunState, payload: SubagentWorkerStartPayload):
 			() => {
 				void session.abort();
 			},
-			{ once: true, signal: sessionAbortController.signal },
+			{ once: true, signal: sessionAbortController.signal }
 		);
 
 		// Initialize extensions (equivalent to CLI's extension initialization)

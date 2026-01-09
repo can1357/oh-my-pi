@@ -72,7 +72,7 @@ Additional paths via `settings.json`:
 | --------------------------------- | --------------------------------------------- |
 | `@oh-my-pi/pi-coding-agent/hooks` | Hook types (`HookAPI`, `HookContext`, events) |
 | `@oh-my-pi/pi-coding-agent`       | Additional types if needed                    |
-| `@mariozechner/pi-ai`             | AI utilities                                  |
+| `@oh-my-pi/pi-ai`                 | AI utilities                                  |
 | `@oh-my-pi/pi-tui`                | TUI components                                |
 
 Node.js built-ins (`node:fs`, `node:path`, etc.) are also available.
@@ -548,7 +548,7 @@ Current model, or `undefined` if none selected yet. Use for LLM calls in hooks:
 ```typescript
 if (ctx.model) {
 	const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
-	// Use with @mariozechner/pi-ai complete()
+	// Use with @oh-my-pi/pi-ai complete()
 }
 ```
 

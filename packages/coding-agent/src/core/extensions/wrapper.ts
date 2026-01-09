@@ -2,7 +2,7 @@
  * Tool wrappers for extensions.
  */
 
-import type { ImageContent, TextContent } from "@mariozechner/pi-ai";
+import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import type { AgentTool, AgentToolContext, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Theme } from "../../modes/interactive/theme/theme";
 import type { ExtensionRunner } from "./runner";
@@ -26,7 +26,7 @@ export function wrapRegisteredTool(registeredTool: RegisteredTool, getContext: (
 					definition.renderResult?.(
 						result,
 						{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
-						theme as Theme,
+						theme as Theme
 					)
 			: undefined,
 	};
@@ -37,7 +37,7 @@ export function wrapRegisteredTool(registeredTool: RegisteredTool, getContext: (
  */
 export function wrapRegisteredTools(
 	registeredTools: RegisteredTool[],
-	getContext: () => ExtensionContext,
+	getContext: () => ExtensionContext
 ): AgentTool[] {
 	return registeredTools.map((rt) => wrapRegisteredTool(rt, getContext));
 }
@@ -55,7 +55,7 @@ export function wrapToolWithExtensions<T>(tool: AgentTool<any, T>, runner: Exten
 			params: Record<string, unknown>,
 			signal?: AbortSignal,
 			onUpdate?: AgentToolUpdateCallback<T>,
-			context?: AgentToolContext,
+			context?: AgentToolContext
 		) => {
 			// Emit tool_call event - extensions can block execution
 			if (runner.hasHandlers("tool_call")) {
@@ -113,8 +113,7 @@ export function wrapToolWithExtensions<T>(tool: AgentTool<any, T>, runner: Exten
 					if (resultResult.isError === true && !executionError) {
 						// Extension marks a successful result as error
 						const textBlocks = (modifiedContent ?? []).filter((c): c is TextContent => c.type === "text");
-						const errorText =
-							textBlocks.map((t) => t.text).join("\n") || "Tool result marked as error by extension";
+						const errorText = textBlocks.map((t) => t.text).join("\n") || "Tool result marked as error by extension";
 						throw new Error(errorText);
 					}
 					if (resultResult.isError === false && executionError) {

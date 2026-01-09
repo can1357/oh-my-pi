@@ -33,8 +33,6 @@ Upstream uses different package scopes. Replace them consistently.
   - `@mariozechner/pi-coding-agent` -> `@oh-my-pi/pi-coding-agent`
   - `@mariozechner/pi-agent-core` -> `@oh-my-pi/pi-agent-core`
   - `@mariozechner/tui` -> `@oh-my-pi/pi-tui`
-- But! Do not switch the ones we use from upstream:
-  - `@mariozechner/pi-ai` should stay as `@mariozechner/pi-ai`
 
 ## 4) Use Bun APIs where they improve on Node
 

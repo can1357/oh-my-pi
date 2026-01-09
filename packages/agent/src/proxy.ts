@@ -12,8 +12,8 @@ import {
 	type SimpleStreamOptions,
 	type StopReason,
 	type ToolCall,
-} from "@mariozechner/pi-ai";
-import { parseStreamingJson } from "@mariozechner/pi-ai/dist/utils/json-parse.js";
+} from "@oh-my-pi/pi-ai";
+import { parseStreamingJson } from "@oh-my-pi/pi-ai/src/utils/json-parse";
 
 // Create stream class matching ProxyMessageEventStream
 class ProxyMessageEventStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -24,7 +24,7 @@ class ProxyMessageEventStream extends EventStream<AssistantMessageEvent, Assista
 				if (event.type === "done") return event.message;
 				if (event.type === "error") return event.error;
 				throw new Error("Unexpected event type");
-			},
+			}
 		);
 	}
 }
@@ -209,7 +209,7 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
  */
 function processProxyEvent(
 	proxyEvent: ProxyAssistantMessageEvent,
-	partial: AssistantMessage,
+	partial: AssistantMessage
 ): AssistantMessageEvent | undefined {
 	switch (proxyEvent.type) {
 		case "start":

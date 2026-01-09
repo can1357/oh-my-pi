@@ -11,7 +11,7 @@ import {
 	type KnownProvider,
 	type Model,
 	normalizeDomain,
-} from "@mariozechner/pi-ai";
+} from "@oh-my-pi/pi-ai";
 import { type Static, Type } from "@sinclair/typebox";
 import AjvModule from "ajv";
 import type { AuthStorage } from "./auth-storage";
@@ -39,7 +39,7 @@ const ModelDefinitionSchema = Type.Object({
 			Type.Literal("anthropic-messages"),
 			Type.Literal("google-generative-ai"),
 			Type.Literal("google-vertex"),
-		]),
+		])
 	),
 	reasoning: Type.Boolean(),
 	input: Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")])),
@@ -66,7 +66,7 @@ const ProviderConfigSchema = Type.Object({
 			Type.Literal("anthropic-messages"),
 			Type.Literal("google-generative-ai"),
 			Type.Literal("google-vertex"),
-		]),
+		])
 	),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
 	authHeader: Type.Optional(Type.Boolean()),
@@ -126,7 +126,7 @@ export class ModelRegistry {
 	constructor(
 		readonly authStorage: AuthStorage,
 		private modelsJsonPath: string | undefined = undefined,
-		private fallbackPaths: string[] = [],
+		private fallbackPaths: string[] = []
 	) {
 		// Set up fallback resolver for custom provider API keys
 		this.authStorage.setFallbackResolver((provider) => {
@@ -189,9 +189,7 @@ export class ModelRegistry {
 		// Update github-copilot base URL based on OAuth credentials
 		const copilotCred = this.authStorage.get("github-copilot");
 		if (copilotCred?.type === "oauth") {
-			const domain = copilotCred.enterpriseUrl
-				? (normalizeDomain(copilotCred.enterpriseUrl) ?? undefined)
-				: undefined;
+			const domain = copilotCred.enterpriseUrl ? normalizeDomain(copilotCred.enterpriseUrl) ?? undefined : undefined;
 			const baseUrl = getGitHubCopilotBaseUrl(copilotCred.access, domain);
 			this.models = combined.map((m) => (m.provider === "github-copilot" ? { ...m, baseUrl } : m));
 		} else {
@@ -267,7 +265,7 @@ export class ModelRegistry {
 				return emptyCustomModelsResult(`Failed to parse models.json: ${error.message}\n\nFile: ${modelsJsonPath}`);
 			}
 			return emptyCustomModelsResult(
-				`Failed to load models.json: ${error instanceof Error ? error.message : error}\n\nFile: ${modelsJsonPath}`,
+				`Failed to load models.json: ${error instanceof Error ? error.message : error}\n\nFile: ${modelsJsonPath}`
 			);
 		}
 	}
@@ -281,7 +279,7 @@ export class ModelRegistry {
 				// Override-only config: just needs baseUrl (to override built-in)
 				if (!providerConfig.baseUrl) {
 					throw new Error(
-						`Provider ${providerName}: must specify either "baseUrl" (for override) or "models" (for replacement).`,
+						`Provider ${providerName}: must specify either "baseUrl" (for override) or "models" (for replacement).`
 					);
 				}
 			} else {
@@ -299,7 +297,7 @@ export class ModelRegistry {
 
 				if (!hasProviderApi && !hasModelApi) {
 					throw new Error(
-						`Provider ${providerName}, model ${modelDef.id}: no "api" specified. Set at provider or model level.`,
+						`Provider ${providerName}, model ${modelDef.id}: no "api" specified. Set at provider or model level.`
 					);
 				}
 
@@ -331,9 +329,7 @@ export class ModelRegistry {
 
 				// Merge headers: provider headers are base, model headers override
 				let headers =
-					providerConfig.headers || modelDef.headers
-						? { ...providerConfig.headers, ...modelDef.headers }
-						: undefined;
+					providerConfig.headers || modelDef.headers ? { ...providerConfig.headers, ...modelDef.headers } : undefined;
 
 				// If authHeader is true, add Authorization header with resolved API key
 				if (providerConfig.authHeader && providerConfig.apiKey) {

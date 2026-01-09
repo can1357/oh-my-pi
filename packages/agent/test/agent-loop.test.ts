@@ -5,7 +5,7 @@ import {
 	type Message,
 	type Model,
 	type UserMessage,
-} from "@mariozechner/pi-ai";
+} from "@oh-my-pi/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { agentLoop, agentLoopContinue } from "../src/agent-loop";
@@ -20,7 +20,7 @@ class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMe
 				if (event.type === "done") return event.message;
 				if (event.type === "error") return event.error;
 				throw new Error("Unexpected event type");
-			},
+			}
 		);
 	}
 }
@@ -53,7 +53,7 @@ function createModel(): Model<"openai-responses"> {
 
 function createAssistantMessage(
 	content: AssistantMessage["content"],
-	stopReason: AssistantMessage["stopReason"] = "stop",
+	stopReason: AssistantMessage["stopReason"] = "stop"
 ): AssistantMessage {
 	return {
 		role: "assistant",
@@ -209,7 +209,7 @@ describe("agentLoop with AgentMessage", () => {
 			},
 			convertToLlm: (messages) => {
 				convertedMessages = messages.filter(
-					(m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult",
+					(m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult"
 				) as Message[];
 				return convertedMessages;
 			},
@@ -274,7 +274,7 @@ describe("agentLoop with AgentMessage", () => {
 					// First call: return tool call
 					const message = createAssistantMessage(
 						[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
-						"toolUse",
+						"toolUse"
 					);
 					stream.push({ type: "done", reason: "toolUse", message });
 				} else {
@@ -355,7 +355,7 @@ describe("agentLoop with AgentMessage", () => {
 			// Check if interrupt message is in context on second call
 			if (callIndex === 1) {
 				sawInterruptInContext = ctx.messages.some(
-					(m) => m.role === "user" && typeof m.content === "string" && m.content === "interrupt",
+					(m) => m.role === "user" && typeof m.content === "string" && m.content === "interrupt"
 				);
 			}
 
@@ -368,7 +368,7 @@ describe("agentLoop with AgentMessage", () => {
 							{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
 							{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
 						],
-						"toolUse",
+						"toolUse"
 					);
 					mockStream.push({ type: "done", reason: "toolUse", message });
 				} else {
@@ -390,7 +390,7 @@ describe("agentLoop with AgentMessage", () => {
 
 		// Second tool should be skipped
 		const toolEnds = events.filter(
-			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end"
 		);
 		expect(toolEnds.length).toBe(2);
 		expect(toolEnds[0].isError).toBeFalsy();
@@ -405,7 +405,7 @@ describe("agentLoop with AgentMessage", () => {
 				e.type === "message_start" &&
 				e.message.role === "user" &&
 				typeof e.message.content === "string" &&
-				e.message.content === "interrupt",
+				e.message.content === "interrupt"
 		);
 		expect(queuedMessageEvent).toBeDefined();
 

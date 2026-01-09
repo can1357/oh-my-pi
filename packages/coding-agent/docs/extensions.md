@@ -167,7 +167,7 @@ The `package.json` approach enables:
 | --------------------------- | ------------------------------------------------------------ |
 | `@oh-my-pi/pi-coding-agent` | Extension types (`ExtensionAPI`, `ExtensionContext`, events) |
 | `@sinclair/typebox`         | Schema definitions for tool parameters                       |
-| `@mariozechner/pi-ai`       | AI utilities (`StringEnum` for Google-compatible enums)      |
+| `@oh-my-pi/pi-ai`           | AI utilities (`StringEnum` for Google-compatible enums)      |
 | `@oh-my-pi/pi-tui`          | TUI components for custom rendering                          |
 
 npm dependencies work too. Add a `package.json` next to your extension (or in a parent directory), run `npm install`, and imports from `node_modules/` are resolved automatically.
@@ -608,7 +608,7 @@ Register a custom tool callable by the LLM. See [Custom Tools](#custom-tools) fo
 
 ```typescript
 import { Type } from "@sinclair/typebox";
-import { StringEnum } from "@mariozechner/pi-ai";
+import { StringEnum } from "@oh-my-pi/pi-ai";
 
 pi.registerTool({
   name: "my_tool",
@@ -793,7 +793,7 @@ Register tools the LLM can call via `pi.registerTool()`. Tools appear in the sys
 
 ```typescript
 import { Type } from "@sinclair/typebox";
-import { StringEnum } from "@mariozechner/pi-ai";
+import { StringEnum } from "@oh-my-pi/pi-ai";
 import { Text } from "@oh-my-pi/pi-tui";
 
 pi.registerTool({
@@ -833,7 +833,7 @@ pi.registerTool({
 });
 ```
 
-**Important:** Use `StringEnum` from `@mariozechner/pi-ai` for string enums. `Type.Union`/`Type.Literal` doesn't work with Google's API.
+**Important:** Use `StringEnum` from `@oh-my-pi/pi-ai` for string enums. `Type.Union`/`Type.Literal` doesn't work with Google's API.
 
 ### Multiple Tools
 

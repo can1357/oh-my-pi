@@ -2,8 +2,8 @@
  * Generate session titles using a smol, fast model.
  */
 
-import type { Api, Model } from "@mariozechner/pi-ai";
-import { completeSimple } from "@mariozechner/pi-ai";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { completeSimple } from "@oh-my-pi/pi-ai";
 import titleSystemPrompt from "../prompts/title-system.md" with { type: "text" };
 import { logger } from "./logger";
 import type { ModelRegistry } from "./model-registry";

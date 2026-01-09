@@ -1,4 +1,4 @@
-import { type Model, modelsAreEqual } from "@mariozechner/pi-ai";
+import { type Model, modelsAreEqual } from "@oh-my-pi/pi-ai";
 import {
 	Container,
 	Input,
@@ -93,7 +93,7 @@ export class ModelSelectorComponent extends Container {
 		scopedModels: ReadonlyArray<ScopedModelItem>,
 		onSelect: (model: Model<any>, role: string) => void,
 		onCancel: () => void,
-		options?: { temporaryOnly?: boolean },
+		options?: { temporaryOnly?: boolean }
 	) {
 		super();
 
@@ -327,7 +327,7 @@ export class ModelSelectorComponent extends Container {
 		const maxVisible = 10;
 		const startIndex = Math.max(
 			0,
-			Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredModels.length - maxVisible),
+			Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredModels.length - maxVisible)
 		);
 		const endIndex = Math.min(startIndex + maxVisible, this.filteredModels.length);
 
@@ -419,7 +419,7 @@ export class ModelSelectorComponent extends Container {
 		const menuWidth = Math.max(
 			visibleWidth(headerText),
 			visibleWidth(hintText),
-			...actionLines.map((line) => visibleWidth(line)),
+			...actionLines.map((line) => visibleWidth(line))
 		);
 
 		// Menu header

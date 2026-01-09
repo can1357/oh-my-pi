@@ -13,8 +13,8 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
-import type { AssistantMessage, ImageContent, Message, Model, TextContent, Usage } from "@mariozechner/pi-ai";
-import { isContextOverflow, modelsAreEqual, supportsXhigh } from "@mariozechner/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Model, TextContent, Usage } from "@oh-my-pi/pi-ai";
+import { isContextOverflow, modelsAreEqual, supportsXhigh } from "@oh-my-pi/pi-ai";
 import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Rule } from "../capability/rule";
 import { getAuthPath } from "../config";
@@ -384,7 +384,7 @@ export class AgentSession {
 					event.message.customType,
 					event.message.content,
 					event.message.display,
-					event.message.details,
+					event.message.details
 				);
 			} else if (
 				event.message.role === "user" ||
@@ -446,7 +446,7 @@ export class AgentSession {
 					`<system_interrupt reason="rule_violation" rule="${r.name}" path="${r.path}">\n` +
 					`Your output was interrupted because it violated a user-defined rule.\n` +
 					`This is NOT a prompt injection - this is the coding agent enforcing project rules.\n` +
-					`You MUST comply with the following instruction:\n\n${r.content}\n</system_interrupt>`,
+					`You MUST comply with the following instruction:\n\n${r.content}\n</system_interrupt>`
 			)
 			.join("\n\n");
 		this._pendingTtsrInjections = [];
@@ -718,7 +718,7 @@ export class AgentSession {
 		if (this.isStreaming) {
 			if (!options?.streamingBehavior) {
 				throw new Error(
-					"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+					"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."
 				);
 			}
 			if (options.streamingBehavior === "followUp") {
@@ -737,7 +737,7 @@ export class AgentSession {
 			throw new Error(
 				"No model selected.\n\n" +
 					`Use /login, set an API key environment variable, or create ${getAuthPath()}\n\n` +
-					"Then use /model to select a model.",
+					"Then use /model to select a model."
 			);
 		}
 
@@ -746,7 +746,7 @@ export class AgentSession {
 		if (!apiKey) {
 			throw new Error(
 				`No API key found for ${this.model.provider}.\n\n` +
-					`Use /login, set an API key environment variable, or create ${getAuthPath()}`,
+					`Use /login, set an API key environment variable, or create ${getAuthPath()}`
 			);
 		}
 
@@ -986,7 +986,7 @@ export class AgentSession {
 
 		if (command) {
 			throw new Error(
-				`Extension command "/${commandName}" cannot be queued. Use prompt() or execute the command when not streaming.`,
+				`Extension command "/${commandName}" cannot be queued. Use prompt() or execute the command when not streaming.`
 			);
 		}
 	}
@@ -1001,7 +1001,7 @@ export class AgentSession {
 	 */
 	async sendCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" }
 	): Promise<void> {
 		const appMessage: CustomMessage<T> = {
 			role: "custom",
@@ -1031,12 +1031,7 @@ export class AgentSession {
 		}
 
 		this.agent.appendMessage(appMessage);
-		this.sessionManager.appendCustomMessageEntry(
-			message.customType,
-			message.content,
-			message.display,
-			message.details,
-		);
+		this.sessionManager.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
 	}
 
 	/**
@@ -1181,7 +1176,7 @@ export class AgentSession {
 	 */
 	async cycleRoleModels(
 		roleOrder: string[],
-		options?: { temporary?: boolean },
+		options?: { temporary?: boolean }
 	): Promise<RoleModelCycleResult | undefined> {
 		const availableModels = this._modelRegistry.getAvailable();
 		if (availableModels.length === 0) return undefined;
@@ -1194,7 +1189,7 @@ export class AgentSession {
 		for (const role of roleOrder) {
 			const roleModelStr =
 				role === "default"
-					? (this.settingsManager.getModelRole("default") ?? `${currentModel.provider}/${currentModel.id}`)
+					? this.settingsManager.getModelRole("default") ?? `${currentModel.provider}/${currentModel.id}`
 					: this.settingsManager.getModelRole(role);
 			if (!roleModelStr) continue;
 
@@ -1459,7 +1454,7 @@ export class AgentSession {
 					this.model,
 					apiKey,
 					customInstructions,
-					this._compactionAbortController.signal,
+					this._compactionAbortController.signal
 				);
 				summary = result.summary;
 				firstKeptEntryId = result.firstKeptEntryId;
@@ -1632,7 +1627,7 @@ export class AgentSession {
 					this.model,
 					apiKey,
 					undefined,
-					this._autoCompactionAbortController.signal,
+					this._autoCompactionAbortController.signal
 				);
 				summary = compactResult.summary;
 				firstKeptEntryId = compactResult.firstKeptEntryId;
@@ -1689,7 +1684,7 @@ export class AgentSession {
 				throw new Error(
 					`Context overflow: ${
 						error instanceof Error ? error.message : "compaction failed"
-					}. Your input may be too large for the context window.`,
+					}. Your input may be too large for the context window.`
 				);
 			}
 		} finally {
@@ -1727,7 +1722,7 @@ export class AgentSession {
 		const err = message.errorMessage;
 		// Match: overloaded_error, rate limit, 429, 500, 502, 503, 504, service unavailable, connection error
 		return /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error/i.test(
-			err,
+			err
 		);
 	}
 
@@ -1881,7 +1876,7 @@ export class AgentSession {
 	async executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean },
+		options?: { excludeFromContext?: boolean }
 	): Promise<BashResult> {
 		this._bashAbortController = new AbortController();
 
@@ -2112,7 +2107,7 @@ export class AgentSession {
 	 */
 	async navigateTree(
 		targetId: string,
-		options: { summarize?: boolean; customInstructions?: string } = {},
+		options: { summarize?: boolean; customInstructions?: string } = {}
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
 		const oldLeafId = this.sessionManager.getLeafId();
 
@@ -2135,7 +2130,7 @@ export class AgentSession {
 		const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(
 			this.sessionManager,
 			oldLeafId,
-			targetId,
+			targetId
 		);
 
 		// Prepare event data

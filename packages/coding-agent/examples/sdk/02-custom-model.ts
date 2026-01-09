@@ -4,7 +4,7 @@
  * Shows how to select a specific model and thinking level.
  */
 
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel } from "@oh-my-pi/pi-ai";
 import { createAgentSession, discoverAuthStorage, discoverModels } from "@oh-my-pi/pi-coding-agent";
 
 // Set up auth storage and model registry
@@ -27,7 +27,7 @@ if (customModel) {
 const available = modelRegistry.getAvailable();
 console.log(
 	"Available models:",
-	available.map((m) => `${m.provider}/${m.id}`),
+	available.map((m) => `${m.provider}/${m.id}`)
 );
 
 if (available.length > 0) {

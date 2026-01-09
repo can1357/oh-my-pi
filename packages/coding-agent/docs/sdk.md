@@ -248,7 +248,7 @@ const { session } = await createAgentSession({
 ### Model
 
 ```typescript
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel } from "@oh-my-pi/pi-ai";
 import { discoverAuthStorage, discoverModels } from "@oh-my-pi/pi-coding-agent";
 
 const authStorage = discoverAuthStorage();
@@ -385,11 +385,7 @@ All tools are defined in `BUILTIN_TOOLS`:
 For advanced use cases, you can create tools directly using `createTools`:
 
 ```typescript
-import {
-	BUILTIN_TOOLS,
-	createTools,
-	type ToolSession,
-} from "@oh-my-pi/pi-coding-agent";
+import { BUILTIN_TOOLS, createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent";
 
 const session: ToolSession = {
 	cwd: "/path/to/project",
@@ -733,7 +729,7 @@ Project overrides global. Nested objects merge keys. Setters only modify global 
 All discovery functions accept optional `cwd` and `agentDir` parameters.
 
 ```typescript
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel } from "@oh-my-pi/pi-ai";
 import {
 	AuthStorage,
 	ModelRegistry,
@@ -806,7 +802,7 @@ interface CreateAgentSessionResult {
 ## Complete Example
 
 ```typescript
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel } from "@oh-my-pi/pi-ai";
 import { Type } from "@sinclair/typebox";
 import {
 	AuthStorage,

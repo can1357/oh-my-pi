@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Model } from "@mariozechner/pi-ai";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { parseModelPattern } from "../src/core/model-resolver";
 
 // Mock models for testing

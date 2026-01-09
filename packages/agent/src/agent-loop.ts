@@ -10,7 +10,7 @@ import {
 	streamSimple,
 	type ToolResultMessage,
 	validateToolArguments,
-} from "@mariozechner/pi-ai";
+} from "@oh-my-pi/pi-ai";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -30,7 +30,7 @@ export function agentLoop(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	streamFn?: StreamFn
 ): EventStream<AgentEvent, AgentMessage[]> {
 	const stream = createAgentStream();
 
@@ -66,7 +66,7 @@ export function agentLoopContinue(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	streamFn?: StreamFn
 ): EventStream<AgentEvent, AgentMessage[]> {
 	if (context.messages.length === 0) {
 		throw new Error("Cannot continue: no messages in context");
@@ -94,13 +94,13 @@ export function agentLoopContinue(
 function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 	return new EventStream<AgentEvent, AgentMessage[]>(
 		(event: AgentEvent) => event.type === "agent_end",
-		(event: AgentEvent) => (event.type === "agent_end" ? event.messages : []),
+		(event: AgentEvent) => (event.type === "agent_end" ? event.messages : [])
 	);
 }
 
 function normalizeMessagesForProvider(
 	messages: Context["messages"],
-	model: AgentLoopConfig["model"],
+	model: AgentLoopConfig["model"]
 ): Context["messages"] {
 	if (model.provider !== "cerebras") {
 		return messages;
@@ -133,7 +133,7 @@ async function runLoop(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
-	streamFn?: StreamFn,
+	streamFn?: StreamFn
 ): Promise<void> {
 	let firstTurn = true;
 	// Check for steering messages at start (user may have typed while waiting)
@@ -187,7 +187,7 @@ async function runLoop(
 					stream,
 					config.getSteeringMessages,
 					config.getToolContext,
-					config.interruptMode,
+					config.interruptMode
 				);
 				toolResults.push(...toolExecution.toolResults);
 				steeringAfterTools = toolExecution.steeringMessages ?? null;
@@ -234,7 +234,7 @@ async function streamAssistantResponse(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
-	streamFn?: StreamFn,
+	streamFn?: StreamFn
 ): Promise<AssistantMessage> {
 	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
 	let messages = context.messages;
@@ -291,7 +291,7 @@ async function streamAssistantResponse(
 						stopReason: "aborted",
 						errorMessage,
 						timestamp: Date.now(),
-					};
+				  };
 			if (addedPartial) {
 				context.messages[context.messages.length - 1] = abortedMessage;
 			} else {
@@ -360,7 +360,7 @@ async function executeToolCalls(
 	stream: EventStream<AgentEvent, AgentMessage[]>,
 	getSteeringMessages?: AgentLoopConfig["getSteeringMessages"],
 	getToolContext?: AgentLoopConfig["getToolContext"],
-	interruptMode: AgentLoopConfig["interruptMode"] = "immediate",
+	interruptMode: AgentLoopConfig["interruptMode"] = "immediate"
 ): Promise<{ toolResults: ToolResultMessage[]; steeringMessages?: AgentMessage[] }> {
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
 	const results: ToolResultMessage[] = [];
@@ -400,7 +400,7 @@ async function executeToolCalls(
 						partialResult,
 					});
 				},
-				toolContext,
+				toolContext
 			);
 		} catch (e) {
 			result = {
@@ -451,7 +451,7 @@ async function executeToolCalls(
 
 function skipToolCall(
 	toolCall: Extract<AssistantMessage["content"][number], { type: "toolCall" }>,
-	stream: EventStream<AgentEvent, AgentMessage[]>,
+	stream: EventStream<AgentEvent, AgentMessage[]>
 ): ToolResultMessage {
 	const result: AgentToolResult<any> = {
 		content: [{ type: "text", text: "Skipped due to queued user message." }],

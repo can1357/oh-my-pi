@@ -27,7 +27,7 @@
  */
 
 import { join } from "node:path";
-import type { Model } from "@mariozechner/pi-ai";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { Agent, type AgentTool, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import chalk from "chalk";
@@ -248,7 +248,7 @@ export async function discoverAuthStorage(agentDir: string = getDefaultAgentDir(
  */
 export async function discoverModels(
 	authStorage: AuthStorage,
-	agentDir: string = getDefaultAgentDir(),
+	agentDir: string = getDefaultAgentDir()
 ): Promise<ModelRegistry> {
 	const primaryPath = join(agentDir, "models.json");
 	// Get all models.json paths (user-level only), excluding the primary
@@ -288,7 +288,7 @@ export function discoverSkills(cwd?: string, _agentDir?: string, settings?: Skil
  */
 export function discoverContextFiles(
 	cwd?: string,
-	_agentDir?: string,
+	_agentDir?: string
 ): Array<{ path: string; content: string; depth?: number }> {
 	return loadContextFilesInternal({
 		cwd: cwd ?? process.cwd(),
@@ -436,11 +436,11 @@ function customToolToDefinition(tool: CustomTool): ToolDefinition {
 					const component = tool.renderResult?.(
 						result,
 						{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
-						theme,
+						theme
 					);
 					// Return empty component if undefined to match Component type requirement
 					return component ?? ({ render: () => [] } as unknown as Component);
-				}
+			  }
 			: undefined,
 		[TOOL_DEFINITION_MARKER]: true,
 	};
@@ -465,19 +465,19 @@ function createCustomToolsExtension(tools: CustomTool[]): ExtensionFactory {
 		};
 
 		api.on("session_start", async (_event, ctx) =>
-			runOnSession({ reason: "start", previousSessionFile: undefined }, ctx),
+			runOnSession({ reason: "start", previousSessionFile: undefined }, ctx)
 		);
 		api.on("session_switch", async (event, ctx) =>
-			runOnSession({ reason: "switch", previousSessionFile: event.previousSessionFile }, ctx),
+			runOnSession({ reason: "switch", previousSessionFile: event.previousSessionFile }, ctx)
 		);
 		api.on("session_branch", async (event, ctx) =>
-			runOnSession({ reason: "branch", previousSessionFile: event.previousSessionFile }, ctx),
+			runOnSession({ reason: "branch", previousSessionFile: event.previousSessionFile }, ctx)
 		);
 		api.on("session_tree", async (_event, ctx) =>
-			runOnSession({ reason: "tree", previousSessionFile: undefined }, ctx),
+			runOnSession({ reason: "tree", previousSessionFile: undefined }, ctx)
 		);
 		api.on("session_shutdown", async (_event, ctx) =>
-			runOnSession({ reason: "shutdown", previousSessionFile: undefined }, ctx),
+			runOnSession({ reason: "shutdown", previousSessionFile: undefined }, ctx)
 		);
 	};
 }
@@ -493,7 +493,7 @@ function createCustomToolsExtension(tools: CustomTool[]): ExtensionFactory {
  * const { session } = await createAgentSession();
  *
  * // With explicit model
- * import { getModel } from '@mariozechner/pi-ai';
+ * import { getModel } from '@oh-my-pi/pi-ai';
  * const { session } = await createAgentSession({
  *   model: getModel('anthropic', 'claude-opus-4-5'),
  *   thinkingLevel: 'high',
@@ -659,7 +659,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				if (options.hasUI && serverNames.length > 0) {
 					process.stderr.write(
 						chalk.gray(`Connecting to MCP servers: ${serverNames.join(", ")}...
-`),
+`)
 					);
 				}
 			},
@@ -728,7 +728,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			configuredPaths,
 			cwd,
 			eventBus,
-			settingsManager.getDisabledExtensions(),
+			settingsManager.getDisabledExtensions()
 		);
 		time("discoverAndLoadExtensions");
 		for (const { path, error } of extensionsResult.errors) {
@@ -905,7 +905,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		transformContext: extensionRunner
 			? async (messages) => {
 					return extensionRunner.emitContext(messages);
-				}
+			  }
 			: undefined,
 		steeringMode: settingsManager.getSteeringMode(),
 		followUpMode: settingsManager.getFollowUpMode(),

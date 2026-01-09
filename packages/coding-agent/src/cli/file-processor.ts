@@ -4,7 +4,7 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import type { ImageContent } from "@mariozechner/pi-ai";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import chalk from "chalk";
 import { resolveReadPath } from "../core/tools/path-utils";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";

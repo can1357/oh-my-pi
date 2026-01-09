@@ -1,4 +1,4 @@
-import type { ImageContent } from "@mariozechner/pi-ai";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getImageDimensionsWithImageMagick, resizeWithImageMagick } from "./image-magick.js";
 
 export interface ImageResizeOptions {
@@ -33,7 +33,7 @@ const DEFAULT_OPTIONS: Required<ImageResizeOptions> = {
  */
 async function resizeImageWithImageMagick(
 	img: ImageContent,
-	opts: Required<ImageResizeOptions>,
+	opts: Required<ImageResizeOptions>
 ): Promise<ResizedImage> {
 	// Try to get dimensions first
 	const dims = await getImageDimensionsWithImageMagick(img.data);
@@ -47,7 +47,7 @@ async function resizeImageWithImageMagick(
 		opts.maxWidth,
 		opts.maxHeight,
 		opts.maxBytes,
-		opts.jpegQuality,
+		opts.jpegQuality
 	);
 
 	if (result) {
@@ -77,7 +77,7 @@ async function resizeImageWithImageMagick(
 /** Helper to pick the smaller of two buffers */
 function pickSmaller(
 	a: { buffer: Buffer; mimeType: string },
-	b: { buffer: Buffer; mimeType: string },
+	b: { buffer: Buffer; mimeType: string }
 ): { buffer: Buffer; mimeType: string } {
 	return a.buffer.length <= b.buffer.length ? a : b;
 }
@@ -145,11 +145,9 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 	async function tryBothFormats(
 		width: number,
 		height: number,
-		jpegQuality: number,
+		jpegQuality: number
 	): Promise<{ buffer: Buffer; mimeType: string }> {
-		const resized = await sharp!(buffer)
-			.resize(width, height, { fit: "inside", withoutEnlargement: true })
-			.toBuffer();
+		const resized = await sharp!(buffer).resize(width, height, { fit: "inside", withoutEnlargement: true }).toBuffer();
 
 		const [pngBuffer, jpegBuffer] = await Promise.all([
 			sharp!(resized).png({ compressionLevel: 9 }).toBuffer(),

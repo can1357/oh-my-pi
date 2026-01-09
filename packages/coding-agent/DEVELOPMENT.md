@@ -29,7 +29,7 @@ The coding-agent is structured into distinct layers:
 ┌─────────────────────────────────────────────────────────────┐
 │                   External Dependencies                     │
 │  @oh-my-pi/pi-agent-core (Agent core)                      │
-│  @mariozechner/pi-ai (models, providers)                   │
+│  @oh-my-pi/pi-ai (models, providers)                   │
 │  @oh-my-pi/pi-tui (TUI components)                         │
 │  @oh-my-pi/pi-git-tool (Git tool)                          │
 └─────────────────────────────────────────────────────────────┘
@@ -469,7 +469,7 @@ This is part of a monorepo with the following packages:
 - `@oh-my-pi/pi-agent-core` - Core agent implementation
 - `@oh-my-pi/pi-tui` - TUI components
 - `@oh-my-pi/pi-git-tool` - Git tool integration
-- `@mariozechner/pi-ai` - External AI provider library
+- `@oh-my-pi/pi-ai` - External AI provider library
 
 ## Documentation
 

@@ -1,4 +1,4 @@
-import type { TextContent } from "@mariozechner/pi-ai";
+import type { TextContent } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Box, Container, Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { HookMessageRenderer } from "../../../core/hooks/types";
@@ -90,7 +90,7 @@ export class HookMessageComponent extends Container {
 		this.box.addChild(
 			new Markdown(text, 0, 0, getMarkdownTheme(), {
 				color: (text: string) => theme.fg("customMessageText", text),
-			}),
+			})
 		);
 	}
 }

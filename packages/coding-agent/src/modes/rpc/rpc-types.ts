@@ -5,7 +5,7 @@
  * Responses and events are emitted as JSON lines on stdout.
  */
 
-import type { ImageContent, Model } from "@mariozechner/pi-ai";
+import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { SessionStats } from "../../core/agent-session";
 import type { BashResult } from "../../core/bash-executor";

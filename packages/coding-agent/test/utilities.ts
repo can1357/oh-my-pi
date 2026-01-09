@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel } from "@oh-my-pi/pi-ai";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { nanoid } from "nanoid";
 import { AgentSession } from "../src/core/agent-session";
@@ -145,7 +145,7 @@ export function buildTestTree(
 	session: SessionManager,
 	structure: {
 		messages: Array<{ role: "user" | "assistant"; text: string; branchFrom?: string }>;
-	},
+	}
 ): Map<string, string> {
 	const ids = new Map<string, string>();
 

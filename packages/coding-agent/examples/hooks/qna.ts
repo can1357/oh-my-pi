@@ -7,7 +7,7 @@
  * 3. Loads the result into the editor for user to fill in answers
  */
 
-import { complete, type UserMessage } from "@mariozechner/pi-ai";
+import { complete, type UserMessage } from "@oh-my-pi/pi-ai";
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent";
 import { BorderedLoader } from "@oh-my-pi/pi-coding-agent";
 
@@ -87,7 +87,7 @@ export default function (pi: HookAPI) {
 					const response = await complete(
 						ctx.model!,
 						{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-						{ apiKey, signal: loader.signal },
+						{ apiKey, signal: loader.signal }
 					);
 
 					if (response.stopReason === "aborted") {

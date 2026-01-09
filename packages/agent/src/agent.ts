@@ -3,14 +3,7 @@
  * No transport abstraction - calls streamSimple via the loop.
  */
 
-import {
-	getModel,
-	type ImageContent,
-	type Message,
-	type Model,
-	streamSimple,
-	type TextContent,
-} from "@mariozechner/pi-ai";
+import { getModel, type ImageContent, type Message, type Model, streamSimple, type TextContent } from "@oh-my-pi/pi-ai";
 import { agentLoop, agentLoopContinue } from "./agent-loop";
 import type {
 	AgentContext,
@@ -271,7 +264,7 @@ export class Agent {
 	async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageContent[]) {
 		if (this._state.isStreaming) {
 			throw new Error(
-				"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
+				"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
 			);
 		}
 
@@ -445,7 +438,7 @@ export class Agent {
 					(c) =>
 						(c.type === "thinking" && c.thinking.trim().length > 0) ||
 						(c.type === "text" && c.text.trim().length > 0) ||
-						(c.type === "toolCall" && c.name.trim().length > 0),
+						(c.type === "toolCall" && c.name.trim().length > 0)
 				);
 				if (!onlyEmpty) {
 					this.appendMessage(partial);

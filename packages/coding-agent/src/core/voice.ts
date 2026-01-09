@@ -1,7 +1,7 @@
 import { unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { completeSimple, type Model } from "@mariozechner/pi-ai";
+import { completeSimple, type Model } from "@oh-my-pi/pi-ai";
 import { nanoid } from "nanoid";
 import voiceSummaryPrompt from "../prompts/voice-summary.md" with { type: "text" };
 import { logger } from "./logger";

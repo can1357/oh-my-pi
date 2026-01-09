@@ -12,7 +12,7 @@
  * The generated prompt appears as a draft in the editor for review/editing.
  */
 
-import { complete, type Message } from "@mariozechner/pi-ai";
+import { complete, type Message } from "@oh-my-pi/pi-ai";
 import type { HookAPI, SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import { BorderedLoader, convertToLlm, serializeConversation } from "@oh-my-pi/pi-coding-agent";
 
@@ -96,7 +96,7 @@ export default function (pi: HookAPI) {
 					const response = await complete(
 						ctx.model!,
 						{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-						{ apiKey, signal: loader.signal },
+						{ apiKey, signal: loader.signal }
 					);
 
 					if (response.stopReason === "aborted") {

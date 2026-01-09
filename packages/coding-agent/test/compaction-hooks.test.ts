@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel } from "@oh-my-pi/pi-ai";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { nanoid } from "nanoid";
 import { AgentSession } from "../src/core/agent-session";
@@ -49,7 +49,7 @@ describe.skipIf(!API_KEY)("Compaction hooks", () => {
 
 	function createHook(
 		onBeforeCompact?: (event: SessionBeforeCompactEvent) => { cancel?: boolean; compaction?: any } | undefined,
-		onCompact?: (event: SessionCompactEvent) => void,
+		onCompact?: (event: SessionCompactEvent) => void
 	): LoadedHook {
 		const handlers = new Map<string, ((event: any, ctx: any) => Promise<any>)[]>();
 
@@ -154,7 +154,7 @@ describe.skipIf(!API_KEY)("Compaction hooks", () => {
 		await session.compact();
 
 		const beforeCompactEvents = capturedEvents.filter(
-			(e): e is SessionBeforeCompactEvent => e.type === "session_before_compact",
+			(e): e is SessionBeforeCompactEvent => e.type === "session_before_compact"
 		);
 		const compactEvents = capturedEvents.filter((e): e is SessionCompactEvent => e.type === "session_compact");
 

@@ -1,5 +1,5 @@
 import { basename, join, resolve } from "node:path";
-import type { ImageContent, Message, TextContent, Usage } from "@mariozechner/pi-ai";
+import type { ImageContent, Message, TextContent, Usage } from "@oh-my-pi/pi-ai";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { nanoid } from "nanoid";
 import { getAgentDir as getDefaultAgentDir } from "../config";
@@ -304,7 +304,7 @@ function toError(value: unknown): Error {
 export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,
-	byId?: Map<string, SessionEntry>,
+	byId?: Map<string, SessionEntry>
 ): SessionContext {
 	// Build uuid index if not available
 	if (!byId) {
@@ -382,7 +382,7 @@ export function buildSessionContext(
 			messages.push(entry.message);
 		} else if (entry.type === "custom_message") {
 			messages.push(
-				createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
+				createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp)
 			);
 		} else if (entry.type === "branch_summary" && entry.summary) {
 			messages.push(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
@@ -540,7 +540,7 @@ function getSortedSessions(sessionDir: string, storage: SessionStorage): RecentS
 /** Exported for testing */
 export function findMostRecentSession(
 	sessionDir: string,
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = new FileSessionStorage()
 ): string | null {
 	const sessions = getSortedSessions(sessionDir, storage);
 	return sessions[0]?.path || null;
@@ -645,7 +645,7 @@ async function truncateForPersistence<T>(obj: T, key?: string): Promise<T> {
 				const newItem = await truncateForPersistence(item, key);
 				if (newItem !== item) changed = true;
 				return newItem;
-			}),
+			})
 		);
 		return changed ? (result as T) : obj;
 	}
@@ -800,7 +800,7 @@ class NdjsonFileWriter {
 export function getRecentSessions(
 	sessionDir: string,
 	limit = 3,
-	storage: SessionStorage = new FileSessionStorage(),
+	storage: SessionStorage = new FileSessionStorage()
 ): RecentSessionInfo[] {
 	return getSortedSessions(sessionDir, storage).slice(0, limit);
 }
@@ -1021,7 +1021,7 @@ export class SessionManager {
 			async () => {
 				await this._closePersistWriterInternal();
 			},
-			{ ignoreError: true },
+			{ ignoreError: true }
 		);
 	}
 
@@ -1229,7 +1229,7 @@ export class SessionManager {
 		firstKeptEntryId: string,
 		tokensBefore: number,
 		details?: T,
-		fromExtension?: boolean,
+		fromExtension?: boolean
 	): string {
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
@@ -1272,7 +1272,7 @@ export class SessionManager {
 		customType: string,
 		content: string | (TextContent | ImageContent)[],
 		display: boolean,
-		details?: T,
+		details?: T
 	): string {
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
@@ -1632,7 +1632,7 @@ export class SessionManager {
 	static async open(
 		path: string,
 		sessionDir?: string,
-		storage: SessionStorage = new FileSessionStorage(),
+		storage: SessionStorage = new FileSessionStorage()
 	): Promise<SessionManager> {
 		// Extract cwd from session header if possible, otherwise use process.cwd()
 		const entries = loadEntriesFromFile(path, storage);
@@ -1653,7 +1653,7 @@ export class SessionManager {
 	static async continueRecent(
 		cwd: string,
 		sessionDir?: string,
-		storage: SessionStorage = new FileSessionStorage(),
+		storage: SessionStorage = new FileSessionStorage()
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? getDefaultSessionDir(cwd, storage);
 		const mostRecent = findMostRecentSession(dir, storage);

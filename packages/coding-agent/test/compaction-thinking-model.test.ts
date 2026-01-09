@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModel, type Model } from "@mariozechner/pi-ai";
+import { getModel, type Model } from "@oh-my-pi/pi-ai";
 import { Agent, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { nanoid } from "nanoid";
 import { AgentSession } from "../src/core/agent-session";
@@ -47,7 +47,7 @@ describe.skipIf(!HAS_ANTIGRAVITY_AUTH)("Compaction with thinking models (Antigra
 
 	async function createSession(
 		modelId: "claude-opus-4-5-thinking" | "claude-sonnet-4-5",
-		thinkingLevel: ThinkingLevel = "high",
+		thinkingLevel: ThinkingLevel = "high"
 	) {
 		const toolSession: ToolSession = {
 			cwd: tempDir,

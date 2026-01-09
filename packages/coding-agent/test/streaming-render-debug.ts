@@ -6,7 +6,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AssistantMessage } from "@mariozechner/pi-ai";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message";
 import { initTheme } from "../src/modes/interactive/theme/theme";
@@ -17,7 +17,7 @@ initTheme("dark");
 
 // Load the real fixture that caused the bug
 const fixtureMessage: AssistantMessage = JSON.parse(
-	readFileSync(join(import.meta.dir, "fixtures/assistant-message-with-thinking-code.json"), "utf-8"),
+	readFileSync(join(import.meta.dir, "fixtures/assistant-message-with-thinking-code.json"), "utf-8")
 );
 
 // Extract thinking and text content

@@ -5,7 +5,7 @@
  * They can provide custom rendering for tool calls and results in the TUI.
  */
 
-import type { Model } from "@mariozechner/pi-ai";
+import type { Model } from "@oh-my-pi/pi-ai";
 import type { AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import type { Static, TSchema } from "@sinclair/typebox";
@@ -140,7 +140,7 @@ export interface CustomTool<TParams extends TSchema = TSchema, TDetails = any> {
 		params: Static<TParams>,
 		onUpdate: AgentToolUpdateCallback<TDetails> | undefined,
 		ctx: CustomToolContext,
-		signal?: AbortSignal,
+		signal?: AbortSignal
 	): Promise<AgentToolResult<TDetails>>;
 
 	/** Called on session lifecycle events - use to reconstruct state or cleanup resources */
@@ -154,7 +154,7 @@ export interface CustomTool<TParams extends TSchema = TSchema, TDetails = any> {
 
 /** Factory function that creates a custom tool or array of tools */
 export type CustomToolFactory = (
-	pi: CustomToolAPI,
+	pi: CustomToolAPI
 ) => CustomTool<any, any> | CustomTool<any, any>[] | Promise<CustomTool<any, any> | CustomTool<any, any>[]>;
 
 /** Loaded custom tool with metadata and wrapped AgentTool */

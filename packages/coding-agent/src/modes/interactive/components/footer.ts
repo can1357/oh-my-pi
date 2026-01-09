@@ -1,5 +1,5 @@
 import { existsSync, type FSWatcher, readFileSync, watch } from "node:fs";
-import type { AssistantMessage } from "@mariozechner/pi-ai";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { dirname, join } from "path";
 import type { AgentSession } from "../../../core/agent-session";
@@ -181,9 +181,9 @@ export class FooterComponent implements Component {
 		// Calculate context percentage from last message (input + output + cacheRead + cacheWrite)
 		const contextTokens = lastAssistantMessage
 			? lastAssistantMessage.usage.input +
-				lastAssistantMessage.usage.output +
-				lastAssistantMessage.usage.cacheRead +
-				lastAssistantMessage.usage.cacheWrite
+			  lastAssistantMessage.usage.output +
+			  lastAssistantMessage.usage.cacheRead +
+			  lastAssistantMessage.usage.cacheWrite
 			: 0;
 		const contextWindow = state.model?.contextWindow || 0;
 		const contextPercentValue = contextWindow > 0 ? (contextTokens / contextWindow) * 100 : 0;

@@ -6,7 +6,7 @@
  * - `omp --mode json "prompt"` - JSON event stream
  */
 
-import type { AssistantMessage, ImageContent } from "@mariozechner/pi-ai";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import type { AgentSession } from "../core/agent-session";
 
 /**
@@ -24,7 +24,7 @@ export async function runPrintMode(
 	mode: "text" | "json",
 	messages: string[],
 	initialMessage?: string,
-	initialImages?: ImageContent[],
+	initialImages?: ImageContent[]
 ): Promise<void> {
 	// Extension runner already has no-op UI context by default (set in loader)
 	// Set up extensions for print mode (no UI)

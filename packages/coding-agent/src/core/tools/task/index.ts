@@ -13,7 +13,7 @@
  *   - Session artifacts for debugging
  */
 
-import type { Usage } from "@mariozechner/pi-ai";
+import type { Usage } from "@oh-my-pi/pi-ai";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Theme } from "../../../modes/interactive/theme/theme";
 import taskDescriptionTemplate from "../../../prompts/tools/task.md" with { type: "text" };

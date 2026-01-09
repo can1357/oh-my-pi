@@ -1,4 +1,4 @@
-import type { Usage } from "@mariozechner/pi-ai";
+import type { Usage } from "@oh-my-pi/pi-ai";
 import { type Static, Type } from "@sinclair/typebox";
 
 /** Source of an agent definition */
@@ -59,12 +59,12 @@ export const taskSchema = Type.Object({
 	model: Type.Optional(
 		Type.String({
 			description: "Model override for all tasks (fuzzy matching, e.g. 'sonnet', 'opus')",
-		}),
+		})
 	),
 	output: Type.Optional(
 		Type.Any({
 			description: "JTD schema for structured subagent output (used by the complete tool)",
-		}),
+		})
 	),
 	tasks: Type.Array(taskItemSchema, {
 		description: "Tasks to run in parallel",

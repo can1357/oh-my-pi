@@ -2,7 +2,7 @@
  * Hook runner - executes hooks and manages their lifecycle.
  */
 
-import type { Model } from "@mariozechner/pi-ai";
+import type { Model } from "@oh-my-pi/pi-ai";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { theme } from "../../modes/interactive/theme/theme";
 import type { ModelRegistry } from "../model-registry";
@@ -272,7 +272,7 @@ export class HookRunner {
 	 * Check if event type is a session "before_*" event that can be cancelled.
 	 */
 	private isSessionBeforeEvent(
-		type: string,
+		type: string
 	): type is "session_before_switch" | "session_before_branch" | "session_before_compact" | "session_before_tree" {
 		return (
 			type === "session_before_switch" ||
@@ -287,7 +287,7 @@ export class HookRunner {
 	 * Returns the result from session before_* / tool_result events (if any handler returns one).
 	 */
 	async emit(
-		event: HookEvent,
+		event: HookEvent
 	): Promise<SessionBeforeCompactResult | SessionBeforeTreeResult | ToolResultEventResult | undefined> {
 		const ctx = this.createContext();
 		let result: SessionBeforeCompactResult | SessionBeforeTreeResult | ToolResultEventResult | undefined;
@@ -400,7 +400,7 @@ export class HookRunner {
 	 */
 	async emitBeforeAgentStart(
 		prompt: string,
-		images?: import("@mariozechner/pi-ai").ImageContent[],
+		images?: import("@oh-my-pi/pi-ai").ImageContent[]
 	): Promise<BeforeAgentStartEventResult | undefined> {
 		const ctx = this.createContext();
 		let result: BeforeAgentStartEventResult | undefined;

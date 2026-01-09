@@ -2,7 +2,7 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
-import type { ImageContent, Model } from "@mariozechner/pi-ai";
+import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { theme } from "../../modes/interactive/theme/theme";
@@ -53,7 +53,7 @@ export type BranchHandler = (entryId: string) => Promise<{ cancelled: boolean }>
 
 export type NavigateTreeHandler = (
 	targetId: string,
-	options?: { summarize?: boolean },
+	options?: { summarize?: boolean }
 ) => Promise<{ cancelled: boolean }>;
 
 const noOpUIContext: ExtensionUIContext = {
@@ -94,7 +94,7 @@ export class ExtensionRunner {
 		extensions: LoadedExtension[],
 		cwd: string,
 		sessionManager: SessionManager,
-		modelRegistry: ModelRegistry,
+		modelRegistry: ModelRegistry
 	) {
 		this.extensions = extensions;
 		this.uiContext = noOpUIContext;
@@ -215,7 +215,7 @@ export class ExtensionRunner {
 
 				if (ExtensionRunner.RESERVED_SHORTCUTS.has(normalizedKey)) {
 					console.warn(
-						`Extension shortcut '${key}' from ${shortcut.extensionPath} conflicts with built-in shortcut. Skipping.`,
+						`Extension shortcut '${key}' from ${shortcut.extensionPath} conflicts with built-in shortcut. Skipping.`
 					);
 					continue;
 				}
@@ -223,7 +223,7 @@ export class ExtensionRunner {
 				const existing = allShortcuts.get(normalizedKey);
 				if (existing) {
 					console.warn(
-						`Extension shortcut conflict: '${key}' registered by both ${existing.extensionPath} and ${shortcut.extensionPath}. Using ${shortcut.extensionPath}.`,
+						`Extension shortcut conflict: '${key}' registered by both ${existing.extensionPath} and ${shortcut.extensionPath}. Using ${shortcut.extensionPath}.`
 					);
 				}
 				allShortcuts.set(normalizedKey, shortcut);
@@ -309,7 +309,7 @@ export class ExtensionRunner {
 	}
 
 	private isSessionBeforeEvent(
-		type: string,
+		type: string
 	): type is "session_before_switch" | "session_before_branch" | "session_before_compact" | "session_before_tree" {
 		return (
 			type === "session_before_switch" ||
@@ -320,7 +320,7 @@ export class ExtensionRunner {
 	}
 
 	async emit(
-		event: ExtensionEvent,
+		event: ExtensionEvent
 	): Promise<SessionBeforeCompactResult | SessionBeforeTreeResult | ToolResultEventResult | undefined> {
 		const ctx = this.createContext();
 		let result: SessionBeforeCompactResult | SessionBeforeTreeResult | ToolResultEventResult | undefined;
@@ -428,7 +428,7 @@ export class ExtensionRunner {
 
 	async emitBeforeAgentStart(
 		prompt: string,
-		images?: ImageContent[],
+		images?: ImageContent[]
 	): Promise<BeforeAgentStartCombinedResult | undefined> {
 		const ctx = this.createContext();
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];

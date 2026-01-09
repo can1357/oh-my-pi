@@ -39,7 +39,7 @@
 		"prepublishOnly": "bun run generate-template && bun run clean && bun run build"
 	},
 	"dependencies": {
-		"@mariozechner/pi-ai": "^0.37.8",
+		"@oh-my-pi/pi-ai": "workspace:*",
 		"@oh-my-pi/pi-agent-core": "workspace:*",
 		"@oh-my-pi/pi-git-tool": "workspace:*",
 		"@oh-my-pi/pi-tui": "workspace:*",

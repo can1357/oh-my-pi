@@ -5,7 +5,7 @@
  * and interact with the user via UI primitives.
  */
 
-import type { ImageContent, Message, Model, TextContent, ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ImageContent, Message, Model, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { Theme } from "../../modes/interactive/theme/theme";
@@ -97,8 +97,8 @@ export interface HookUIContext {
 		factory: (
 			tui: TUI,
 			theme: Theme,
-			done: (result: T) => void,
-		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
+			done: (result: T) => void
+		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>
 	): Promise<T>;
 
 	/**
@@ -632,7 +632,7 @@ export interface HookMessageRenderOptions {
 export type HookMessageRenderer<T = unknown> = (
 	message: HookMessage<T>,
 	options: HookMessageRenderOptions,
-	theme: Theme,
+	theme: Theme
 ) => Component | undefined;
 
 /**
@@ -658,7 +658,7 @@ export interface HookAPI {
 	on(event: "session_branch", handler: HookHandler<SessionBranchEvent>): void;
 	on(
 		event: "session_before_compact",
-		handler: HookHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>,
+		handler: HookHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>
 	): void;
 	on(event: "session_compact", handler: HookHandler<SessionCompactEvent>): void;
 	on(event: "session_shutdown", handler: HookHandler<SessionShutdownEvent>): void;
@@ -692,7 +692,7 @@ export interface HookAPI {
 	 */
 	sendMessage<T = unknown>(
 		message: Pick<HookMessage<T>, "customType" | "content" | "display" | "details">,
-		triggerTurn?: boolean,
+		triggerTurn?: boolean
 	): void;
 
 	/**

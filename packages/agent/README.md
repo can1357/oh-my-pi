@@ -1,6 +1,6 @@
 # @oh-my-pi/pi-agent
 
-Stateful agent with tool execution and event streaming. Built on `@mariozechner/pi-ai`.
+Stateful agent with tool execution and event streaming. Built on `@oh-my-pi/pi-ai`.
 
 ## Installation
 
@@ -12,7 +12,7 @@ npm install @oh-my-pi/pi-agent
 
 ```typescript
 import { Agent } from "@oh-my-pi/pi-agent";
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel } from "@oh-my-pi/pi-ai";
 
 const agent = new Agent({
 	initialState: {

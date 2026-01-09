@@ -8,7 +8,7 @@
  * - Interact with the user via UI primitives
  */
 
-import type { ImageContent, Model, TextContent, ToolResultMessage } from "@mariozechner/pi-ai";
+import type { ImageContent, Model, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { AgentMessage, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Component, KeyId, TUI } from "@oh-my-pi/pi-tui";
 import type { Static, TSchema } from "@sinclair/typebox";
@@ -67,8 +67,8 @@ export interface ExtensionUIContext {
 		factory: (
 			tui: TUI,
 			theme: Theme,
-			done: (result: T) => void,
-		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
+			done: (result: T) => void
+		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>
 	): Promise<T>;
 
 	/** Set the text in the core input editor. */
@@ -178,7 +178,7 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		params: Static<TParams>,
 		onUpdate: AgentToolUpdateCallback<TDetails> | undefined,
 		ctx: ExtensionContext,
-		signal?: AbortSignal,
+		signal?: AbortSignal
 	): Promise<AgentToolResult<TDetails>>;
 
 	/** Called on session lifecycle events - use to reconstruct state or cleanup resources */
@@ -490,7 +490,7 @@ export interface MessageRenderOptions {
 export type MessageRenderer<T = unknown> = (
 	message: CustomMessage<T>,
 	options: MessageRenderOptions,
-	theme: Theme,
+	theme: Theme
 ) => Component | undefined;
 
 // ============================================================================
@@ -535,17 +535,17 @@ export interface ExtensionAPI {
 	on(event: "session_start", handler: ExtensionHandler<SessionStartEvent>): void;
 	on(
 		event: "session_before_switch",
-		handler: ExtensionHandler<SessionBeforeSwitchEvent, SessionBeforeSwitchResult>,
+		handler: ExtensionHandler<SessionBeforeSwitchEvent, SessionBeforeSwitchResult>
 	): void;
 	on(event: "session_switch", handler: ExtensionHandler<SessionSwitchEvent>): void;
 	on(
 		event: "session_before_branch",
-		handler: ExtensionHandler<SessionBeforeBranchEvent, SessionBeforeBranchResult>,
+		handler: ExtensionHandler<SessionBeforeBranchEvent, SessionBeforeBranchResult>
 	): void;
 	on(event: "session_branch", handler: ExtensionHandler<SessionBranchEvent>): void;
 	on(
 		event: "session_before_compact",
-		handler: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>,
+		handler: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>
 	): void;
 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): void;
 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): void;
@@ -580,7 +580,7 @@ export interface ExtensionAPI {
 		options: {
 			description?: string;
 			handler: (ctx: ExtensionContext) => Promise<void> | void;
-		},
+		}
 	): void;
 
 	/** Register a CLI flag. */
@@ -590,7 +590,7 @@ export interface ExtensionAPI {
 			description?: string;
 			type: "boolean" | "string";
 			default?: boolean | string;
-		},
+		}
 	): void;
 
 	/** Get the value of a registered CLI flag. */
@@ -610,7 +610,7 @@ export interface ExtensionAPI {
 	/** Send a custom message to the session. */
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" }
 	): void;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
@@ -663,7 +663,7 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 
 export type SendMessageHandler = <T = unknown>(
 	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" }
 ) => void;
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;

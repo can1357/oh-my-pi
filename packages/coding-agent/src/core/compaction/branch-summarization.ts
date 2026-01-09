@@ -5,8 +5,8 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { Model } from "@mariozechner/pi-ai";
-import { completeSimple } from "@mariozechner/pi-ai";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { completeSimple } from "@oh-my-pi/pi-ai";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import branchSummaryPrompt from "../../prompts/branch-summary.md" with { type: "text" };
 import branchSummaryPreamble from "../../prompts/branch-summary-preamble.md" with { type: "text" };
