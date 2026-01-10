@@ -16,11 +16,11 @@ const isBrowserExtension = typeof globalThis !== "undefined" && (globalThis as a
 let ajv: any = null;
 if (!isBrowserExtension) {
 	try {
-	ajv = new Ajv({
-		allErrors: true,
-		strict: false,
-		coerceTypes: true,
-	});
+		ajv = new Ajv({
+			allErrors: true,
+			strict: false,
+			coerceTypes: true,
+		});
 		addFormats(ajv);
 	} catch (_e) {
 		// AJV initialization failed (likely CSP restriction)

@@ -1,8 +1,8 @@
+import { relative, resolve, sep } from "node:path";
 import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { relative, resolve, sep } from "node:path";
 import type { Theme } from "../../modes/interactive/theme/theme";
 import bashDescription from "../../prompts/tools/bash.md" with { type: "text" };
 import { executeBash } from "../bash-executor";

@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [3.37.0] - 2026-01-10
 ### Changed
 
 - Improved bash command display to show relative paths for working directories within the current directory, and hide redundant `cd` prefix when working directory matches current directory

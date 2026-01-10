@@ -20,7 +20,7 @@
     },
     "packages/agent": {
       "name": "@oh-my-pi/pi-agent-core",
-      "version": "3.36.0",
+      "version": "3.37.0",
       "dependencies": {
         "@oh-my-pi/pi-ai": "workspace:*",
         "@oh-my-pi/pi-tui": "workspace:*",
@@ -32,7 +32,7 @@
     },
     "packages/ai": {
       "name": "@oh-my-pi/pi-ai",
-      "version": "3.36.0",
+      "version": "3.37.0",
       "bin": {
         "pi-ai": "./src/cli.ts",
       },
@@ -54,7 +54,7 @@
     },
     "packages/coding-agent": {
       "name": "@oh-my-pi/pi-coding-agent",
-      "version": "3.36.0",
+      "version": "3.37.0",
       "bin": {
         "omp": "src/cli.ts",
       },
@@ -95,7 +95,7 @@
     },
     "packages/git-tool": {
       "name": "@oh-my-pi/pi-git-tool",
-      "version": "3.36.0",
+      "version": "3.37.0",
       "devDependencies": {
         "@types/node": "^24.3.0",
         "vitest": "^3.2.4",
@@ -103,7 +103,7 @@
     },
     "packages/tui": {
       "name": "@oh-my-pi/pi-tui",
-      "version": "3.36.0",
+      "version": "3.37.0",
       "dependencies": {
         "@types/mime-types": "^2.1.4",
         "chalk": "^5.5.0",

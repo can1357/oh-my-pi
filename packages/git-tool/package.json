@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-git-tool",
-	"version": "3.36.0",
+	"version": "3.37.0",
 	"description": "Structured Git tool with safety guards and typed output",
 	"type": "module",
 	"main": "./src/index.ts",
