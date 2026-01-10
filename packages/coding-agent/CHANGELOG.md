@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed completion notification to only send when interactive mode is in foreground
+- Improved completion notification message to include session title when available
 
 ## [3.35.0] - 2026-01-09
 ### Added

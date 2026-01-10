@@ -1484,11 +1484,14 @@ export class InteractiveMode {
 	}
 
 	private sendCompletionNotification(): void {
+		if (this.isBackgrounded === false) return;
 		if (isNotificationSuppressed()) return;
 		const method = this.settingsManager.getNotificationOnComplete();
 		if (method === "off") return;
 		const protocol = method === "auto" ? detectNotificationProtocol() : method;
-		sendNotification(protocol, "Agent complete");
+		const title = this.sessionManager.getSessionTitle();
+		const message = title ? `${title}: Complete` : "Complete";
+		sendNotification(protocol, message);
 	}
 
 	/** Extract text content from a user message */
