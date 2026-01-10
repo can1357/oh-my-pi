@@ -1,6 +1,14 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added automatic type coercion for tool arguments when LLMs return JSON-encoded strings instead of native types (numbers, booleans, arrays, objects)
+
+### Changed
+
+- Changed tool argument validation to attempt JSON parsing and type coercion before rejecting mismatched types
+- Changed validation error messages to include both original and normalized arguments when coercion was attempted
 
 ## [3.37.0] - 2026-01-10
 ### Changed
