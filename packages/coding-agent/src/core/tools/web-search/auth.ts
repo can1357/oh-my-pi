@@ -10,6 +10,7 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
+import { buildBetaHeader, claudeCodeHeaders, claudeCodeVersion } from "@oh-my-pi/pi-ai";
 import { getConfigDirPaths } from "../../../config";
 import type { AnthropicAuthConfig, AnthropicOAuthCredential, AuthJson, ModelsJson } from "./types";
 
@@ -162,46 +163,50 @@ export async function findAnthropicAuth(): Promise<AnthropicAuthConfig | null> {
 	return null;
 }
 
+function isAnthropicBaseUrl(baseUrl: string): boolean {
+	try {
+		const url = new URL(baseUrl);
+		return url.protocol === "https:" && url.hostname === "api.anthropic.com";
+	} catch {
+		return false;
+	}
+}
+
 /** Build headers for Anthropic API request */
 export function buildAnthropicHeaders(auth: AnthropicAuthConfig): Record<string, string> {
-	const betas = ["web-search-2025-03-05"];
+	const baseBetas = auth.isOAuth
+		? [
+				"claude-code-20250219",
+				"oauth-2025-04-20",
+				"interleaved-thinking-2025-05-14",
+				"fine-grained-tool-streaming-2025-05-14",
+			]
+		: ["fine-grained-tool-streaming-2025-05-14"];
+	const betaHeader = buildBetaHeader(baseBetas, ["web-search-2025-03-05"]);
 
-	if (auth.isOAuth) {
-		// OAuth requires additional beta headers and stainless telemetry
-		betas.push("oauth-2025-04-20", "claude-code-20250219", "prompt-caching-2024-07-31");
-
-		return {
-			"anthropic-version": "2023-06-01",
-			authorization: `Bearer ${auth.apiKey}`,
-			accept: "application/json",
-			"content-type": "application/json",
-			"anthropic-dangerous-direct-browser-access": "true",
-			"anthropic-beta": betas.join(","),
-			"user-agent": "claude-code/2.0.20",
-			"x-app": "cli",
-			// Stainless SDK telemetry headers (required for OAuth)
-			"x-stainless-arch": process.arch,
-			"x-stainless-lang": "js",
-			"x-stainless-os": process.platform,
-			"x-stainless-package-version": "1.0.0",
-			"x-stainless-retry-count": "0",
-			"x-stainless-runtime": "bun",
-			"x-stainless-runtime-version": Bun.version,
-		};
-	}
-
-	// Standard API key auth
-	return {
-		"anthropic-version": "2023-06-01",
-		"x-api-key": auth.apiKey,
+	const headers: Record<string, string> = {
 		accept: "application/json",
 		"content-type": "application/json",
-		"anthropic-beta": betas.join(","),
+		"anthropic-dangerous-direct-browser-access": "true",
+		"anthropic-beta": betaHeader,
+		"user-agent": `claude-cli/${claudeCodeVersion} (external, cli)`,
+		"x-app": "cli",
+		"accept-encoding": "gzip, deflate, br, zstd",
+		connection: "keep-alive",
+		...claudeCodeHeaders,
 	};
+
+	if (auth.isOAuth || !isAnthropicBaseUrl(auth.baseUrl)) {
+		headers.authorization = `Bearer ${auth.apiKey}`;
+	} else {
+		headers["x-api-key"] = auth.apiKey;
+	}
+
+	return headers;
 }
 
 /** Build API URL (OAuth requires ?beta=true) */
 export function buildAnthropicUrl(auth: AnthropicAuthConfig): string {
 	const base = `${auth.baseUrl}/v1/messages`;
-	return auth.isOAuth ? `${base}?beta=true` : base;
+	return `${base}?beta=true`;
 }

@@ -41,7 +41,7 @@ export function installTerminalCrashHandlers(): void {
 	});
 }
 
-export { InteractiveMode } from "./interactive/interactive-mode";
+export { InteractiveMode, type InteractiveModeOptions } from "./interactive/interactive-mode";
 export { type PrintModeOptions, runPrintMode } from "./print-mode";
 export { type ModelInfo, RpcClient, type RpcClientOptions, type RpcEventListener } from "./rpc/rpc-client";
 export { runRpcMode } from "./rpc/rpc-mode";

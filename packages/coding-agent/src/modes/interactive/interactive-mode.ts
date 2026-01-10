@@ -79,6 +79,20 @@ import {
 	theme,
 } from "./theme/theme";
 
+/** Options for creating an InteractiveMode instance (for future API use) */
+export interface InteractiveModeOptions {
+	/** Providers that were migrated during startup */
+	migratedProviders?: string[];
+	/** Warning message if model fallback occurred */
+	modelFallbackMessage?: string;
+	/** Initial message to send */
+	initialMessage?: string;
+	/** Initial images to include with the message */
+	initialImages?: ImageContent[];
+	/** Additional initial messages to queue */
+	initialMessages?: string[];
+}
+
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
 	setExpanded(expanded: boolean): void;
@@ -199,7 +213,6 @@ export class InteractiveMode {
 		private lspServers:
 			| Array<{ name: string; status: "ready" | "error"; fileTypes: string[] }>
 			| undefined = undefined,
-		fdPath: string | undefined = undefined,
 	) {
 		this.session = session;
 		this.version = version;
@@ -286,7 +299,6 @@ export class InteractiveMode {
 		const autocompleteProvider = new CombinedAutocompleteProvider(
 			[...slashCommands, ...fileSlashCommands, ...hookCommands, ...customCommands],
 			process.cwd(),
-			fdPath,
 		);
 		this.editor.setAutocompleteProvider(autocompleteProvider);
 	}
@@ -421,6 +433,9 @@ export class InteractiveMode {
 				// Theme object passed directly - not supported in current implementation
 				return { success: false, error: "Direct theme object not supported" };
 			},
+			setFooter: () => {},
+			setHeader: () => {},
+			setEditorComponent: () => {},
 		};
 		this.setToolUIContext(uiContext, true);
 
@@ -735,6 +750,9 @@ export class InteractiveMode {
 			getAllThemes: () => [],
 			getTheme: () => undefined,
 			setTheme: () => ({ success: false, error: "Background mode" }),
+			setFooter: () => {},
+			setHeader: () => {},
+			setEditorComponent: () => {},
 		};
 	}
 

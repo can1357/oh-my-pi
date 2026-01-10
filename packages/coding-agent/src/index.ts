@@ -214,10 +214,47 @@ export type { FileDiagnosticsResult } from "./core/tools/lsp/index";
 // Main entry point
 export { main } from "./main";
 // Run modes for programmatic SDK usage
-export { InteractiveMode, type PrintModeOptions, runPrintMode, runRpcMode } from "./modes/index";
-// UI components for hooks and custom tools
-export { BorderedLoader } from "./modes/interactive/components/bordered-loader";
-export { DynamicBorder } from "./modes/interactive/components/dynamic-border";
+export {
+	InteractiveMode,
+	type InteractiveModeOptions,
+	type PrintModeOptions,
+	runPrintMode,
+	runRpcMode,
+} from "./modes/index";
+// UI components for extensions
+export {
+	ArminComponent,
+	AssistantMessageComponent,
+	BashExecutionComponent,
+	BorderedLoader,
+	BranchSummaryMessageComponent,
+	CompactionSummaryMessageComponent,
+	CustomEditor,
+	CustomMessageComponent,
+	DynamicBorder,
+	FooterComponent,
+	HookEditorComponent as ExtensionEditorComponent,
+	HookInputComponent as ExtensionInputComponent,
+	HookSelectorComponent as ExtensionSelectorComponent,
+	LoginDialogComponent,
+	ModelSelectorComponent,
+	OAuthSelectorComponent,
+	type RenderDiffOptions,
+	renderDiff,
+	SessionSelectorComponent,
+	type SettingsCallbacks,
+	SettingsSelectorComponent,
+	ShowImagesSelectorComponent,
+	ThemeSelectorComponent,
+	ThinkingSelectorComponent,
+	ToolExecutionComponent,
+	type ToolExecutionOptions,
+	TreeSelectorComponent,
+	truncateToVisualLines,
+	UserMessageComponent,
+	UserMessageSelectorComponent,
+	type VisualTruncateResult,
+} from "./modes/interactive/components/index";
 // Theme utilities for custom tools
 export {
 	getMarkdownTheme,

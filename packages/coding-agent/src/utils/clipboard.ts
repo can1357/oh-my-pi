@@ -92,12 +92,12 @@ export async function copyToClipboard(text: string): Promise<void> {
 			if (wayland) {
 				const wlCopyPath = Bun.which("wl-copy");
 				if (wlCopyPath) {
-					try {
-						await spawnWithTimeout([wlCopyPath], text, timeout);
-						return;
-					} catch {
-						// Fall back to xclip/xsel (works on XWayland)
-					}
+					// Fire-and-forget: wl-copy may not exit promptly, so we unref to avoid blocking
+					const proc = Bun.spawn([wlCopyPath], { stdin: "pipe" });
+					proc.stdin.write(text);
+					proc.stdin.end();
+					proc.unref();
+					return;
 				}
 			}
 

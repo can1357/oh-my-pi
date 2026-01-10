@@ -30,7 +30,6 @@ import { runMigrations, showDeprecationWarnings } from "./migrations";
 import { InteractiveMode, installTerminalCrashHandlers, runPrintMode, runRpcMode } from "./modes/index";
 import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme";
 import { getChangelogPath, getNewEntries, parseChangelog } from "./utils/changelog";
-import { ensureTool } from "./utils/tools-manager";
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 	try {
@@ -63,9 +62,8 @@ async function runInteractiveMode(
 	lspServers: Array<{ name: string; status: "ready" | "error"; fileTypes: string[] }> | undefined,
 	initialMessage?: string,
 	initialImages?: ImageContent[],
-	fdPath: string | undefined = undefined,
 ): Promise<void> {
-	const mode = new InteractiveMode(session, version, changelogMarkdown, setExtensionUIContext, lspServers, fdPath);
+	const mode = new InteractiveMode(session, version, changelogMarkdown, setExtensionUIContext, lspServers);
 
 	await mode.init();
 
@@ -336,7 +334,9 @@ async function buildSessionOptions(
 		const defaultThinkingLevel = settingsManager.getDefaultThinkingLevel() ?? "off";
 		options.scopedModels = scopedModels.map((scopedModel) => ({
 			model: scopedModel.model,
-			thinkingLevel: scopedModel.explicitThinkingLevel ? scopedModel.thinkingLevel : defaultThinkingLevel,
+			thinkingLevel: scopedModel.explicitThinkingLevel
+				? (scopedModel.thinkingLevel ?? defaultThinkingLevel)
+				: defaultThinkingLevel,
 		}));
 	}
 
@@ -599,9 +599,6 @@ export async function main(args: string[]) {
 			console.log(chalk.dim(`Model scope: ${modelList} ${chalk.gray("(Ctrl+P to cycle)")}`));
 		}
 
-		const fdPath = await ensureTool("fd");
-		time("ensureTool(fd)");
-
 		installTerminalCrashHandlers();
 		printTimings();
 		await runInteractiveMode(
@@ -617,7 +614,6 @@ export async function main(args: string[]) {
 			lspServers,
 			initialMessage,
 			initialImages,
-			fdPath,
 		);
 	} else {
 		await runPrintMode(session, {

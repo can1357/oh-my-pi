@@ -1,8 +1,18 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Added
 
+- Exported `InteractiveModeOptions` type for programmatic SDK usage
+- Exported additional UI components for extensions: `ArminComponent`, `AssistantMessageComponent`, `BashExecutionComponent`, `BranchSummaryMessageComponent`, `CompactionSummaryMessageComponent`, `CustomEditor`, `CustomMessageComponent`, `FooterComponent`, `ExtensionEditorComponent`, `ExtensionInputComponent`, `ExtensionSelectorComponent`, `LoginDialogComponent`, `ModelSelectorComponent`, `OAuthSelectorComponent`, `SessionSelectorComponent`, `SettingsSelectorComponent`, `ShowImagesSelectorComponent`, `ThemeSelectorComponent`, `ThinkingSelectorComponent`, `ToolExecutionComponent`, `TreeSelectorComponent`, `UserMessageComponent`, `UserMessageSelectorComponent`
+- Exported `renderDiff`, `truncateToVisualLines`, and related types for extension use
+- `setFooter()` and `setHeader()` methods on `ExtensionUIContext` for custom footer/header components
+- `setEditorComponent()` method on `ExtensionUIContext` for custom editor components
+- `supportsUsageInStreaming` model config option to control `stream_options: { include_usage: true }` behavior
+- Terminal setup documentation for Kitty keyboard protocol configuration (Ghostty, wezterm, Windows Terminal)
+- Documentation for paid Cloud Code Assist subscriptions via `GOOGLE_CLOUD_PROJECT` env var
+- Environment variables reference section in README
 - `--no-tools` flag to disable all built-in tools, enabling extension-only setups
 - `--no-extensions` flag to disable extension discovery while still allowing explicit `-e` paths
 - `blockImages` setting to prevent images from being sent to LLM providers
@@ -36,6 +46,9 @@
 
 ### Changed
 
+- Bash tool output truncation now recalculates on terminal resize instead of using cached width
+- Web search tool headers updated to match Claude Code client format for better compatibility
+- `discoverSkills()` return type documented as `{ skills: Skill[], warnings: SkillWarning[] }` in SDK docs
 - Default model for OpenCode provider changed from `claude-sonnet-4-5` to `claude-opus-4-5`
 - Terminal color mode detection defaults to truecolor for modern terminals instead of 256color
 - System prompt restructured with XML tags and clearer instructions format
@@ -46,6 +59,8 @@
 
 ### Fixed
 
+- Wayland clipboard copy (`wl-copy`) no longer blocks when the process doesn't exit promptly
+- Empty `--tools` flag now correctly enables all built-in tools instead of disabling them
 - Bash tool handles spawn errors gracefully instead of crashing the agent
 - Components properly rebuild their content on theme change via `invalidate()` override
 - `setTheme()` triggers a full rerender so previously rendered components update with new theme colors

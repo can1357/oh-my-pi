@@ -177,6 +177,9 @@ const noOpUIContext: ExtensionUIContext = {
 	getAllThemes: () => [],
 	getTheme: () => undefined,
 	setTheme: (_theme) => ({ success: false, error: "UI not available" }),
+	setFooter: () => {},
+	setHeader: () => {},
+	setEditorComponent: () => {},
 };
 
 async function cleanupSshResources(): Promise<void> {

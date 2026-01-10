@@ -532,7 +532,7 @@ Hook API methods:
 import { createAgentSession, discoverSkills, type Skill } from "@oh-my-pi/pi-coding-agent";
 
 // Discover and filter
-const allSkills = discoverSkills();
+const { skills: allSkills, warnings } = discoverSkills();
 const filtered = allSkills.filter((s) => s.name.includes("search"));
 
 // Custom skill
@@ -554,7 +554,7 @@ const { session } = await createAgentSession({
 });
 
 // Discovery with settings filter
-const skills = discoverSkills(process.cwd(), undefined, {
+const { skills } = discoverSkills(process.cwd(), undefined, {
 	ignoredSkills: ["browser-*"], // glob patterns to exclude
 	includeSkills: ["search-*"], // glob patterns to include (empty = all)
 });
@@ -753,7 +753,7 @@ const model = modelRegistry.find("provider", "id"); // Find specific model
 const builtIn = getModel("anthropic", "claude-opus-4-5"); // Built-in only
 
 // Skills
-const skills = discoverSkills(cwd, agentDir, skillsSettings);
+const { skills, warnings } = discoverSkills(cwd, agentDir, skillsSettings);
 
 // Hooks (async - loads TypeScript)
 const hooks = await discoverHooks(cwd, agentDir);

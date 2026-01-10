@@ -260,7 +260,7 @@ pi starts
       ▼
 user sends prompt ─────────────────────────────────────────┐
   │                                                        │
-  ├─► before_agent_start (can inject message, append to system prompt)
+  ├─► before_agent_start (can inject message, modify system prompt)
   ├─► agent_start                                          │
   │                                                        │
   │   ┌─── turn (repeats while LLM calls tools) ───┐       │
@@ -311,6 +311,8 @@ pi.on("session_start", async (_event, ctx) => {
 });
 ```
 
+**Examples:** [claude-rules.ts](../examples/extensions/claude-rules.ts), [custom-header.ts](../examples/extensions/custom-header.ts), [file-trigger.ts](../examples/extensions/file-trigger.ts), [status-line.ts](../examples/extensions/status-line.ts), [todo.ts](../examples/extensions/todo.ts), [tools.ts](../examples/extensions/tools.ts)
+
 #### session_before_switch / session_switch
 
 Fired when starting a new session (`/new`) or switching sessions (`/resume`).
@@ -332,6 +334,8 @@ pi.on("session_switch", async (event, ctx) => {
 });
 ```
 
+**Examples:** [confirm-destructive.ts](../examples/extensions/confirm-destructive.ts), [dirty-repo-guard.ts](../examples/extensions/dirty-repo-guard.ts), [status-line.ts](../examples/extensions/status-line.ts), [todo.ts](../examples/extensions/todo.ts)
+
 #### session_before_branch / session_branch
 
 Fired when branching via `/branch`.
@@ -348,6 +352,8 @@ pi.on("session_branch", async (event, ctx) => {
 	// event.previousSessionFile - previous session file
 });
 ```
+
+**Examples:** [confirm-destructive.ts](../examples/extensions/confirm-destructive.ts), [dirty-repo-guard.ts](../examples/extensions/dirty-repo-guard.ts), [git-checkpoint.ts](../examples/extensions/git-checkpoint.ts), [todo.ts](../examples/extensions/todo.ts), [tools.ts](../examples/extensions/tools.ts)
 
 #### session_before_compact / session_compact
 
@@ -376,6 +382,8 @@ pi.on("session_compact", async (event, ctx) => {
 });
 ```
 
+**Examples:** [custom-compaction.ts](../examples/extensions/custom-compaction.ts)
+
 #### session_before_tree / session_tree
 
 Fired on `/tree` navigation.
@@ -393,6 +401,8 @@ pi.on("session_tree", async (event, ctx) => {
 });
 ```
 
+**Examples:** [todo.ts](../examples/extensions/todo.ts), [tools.ts](../examples/extensions/tools.ts)
+
 #### session_shutdown
 
 Fired on exit (Ctrl+C, Ctrl+D, SIGTERM).
@@ -403,16 +413,19 @@ pi.on("session_shutdown", async (_event, ctx) => {
 });
 ```
 
+**Examples:** [auto-commit-on-exit.ts](../examples/extensions/auto-commit-on-exit.ts)
+
 ### Agent Events
 
 #### before_agent_start
 
-Fired after user submits prompt, before agent loop. Can inject a message and/or append to the system prompt.
+Fired after user submits prompt, before agent loop. Can inject a message and/or modify the system prompt.
 
 ```typescript
 pi.on("before_agent_start", async (event, ctx) => {
 	// event.prompt - user's prompt text
 	// event.images - attached images (if any)
+	// event.systemPrompt - current system prompt
 
 	return {
 		// Inject a persistent message (stored in session, sent to LLM)
@@ -421,11 +434,13 @@ pi.on("before_agent_start", async (event, ctx) => {
 			content: "Additional context for the LLM",
 			display: true,
 		},
-		// Append to system prompt for this turn only
-		systemPromptAppend: "Extra instructions for this turn...",
+		// Replace the system prompt for this turn (chained across extensions)
+		systemPrompt: event.systemPrompt + "\n\nExtra instructions for this turn...",
 	};
 });
 ```
+
+**Examples:** [claude-rules.ts](../examples/extensions/claude-rules.ts), [pirate.ts](../examples/extensions/pirate.ts), [plan-mode.ts](../examples/extensions/plan-mode.ts), [preset.ts](../examples/extensions/preset.ts), [ssh.ts](../examples/extensions/ssh.ts)
 
 #### agent_start / agent_end
 
@@ -438,6 +453,8 @@ pi.on("agent_end", async (event, ctx) => {
 	// event.messages - messages from this prompt
 });
 ```
+
+**Examples:** [chalk-logger.ts](../examples/extensions/chalk-logger.ts), [git-checkpoint.ts](../examples/extensions/git-checkpoint.ts), [plan-mode.ts](../examples/extensions/plan-mode.ts)
 
 #### turn_start / turn_end
 
@@ -453,6 +470,8 @@ pi.on("turn_end", async (event, ctx) => {
 });
 ```
 
+**Examples:** [git-checkpoint.ts](../examples/extensions/git-checkpoint.ts), [plan-mode.ts](../examples/extensions/plan-mode.ts), [status-line.ts](../examples/extensions/status-line.ts)
+
 #### context
 
 Fired before each LLM call. Modify messages non-destructively.
@@ -464,6 +483,8 @@ pi.on("context", async (event, ctx) => {
 	return { messages: filtered };
 });
 ```
+
+**Examples:** [plan-mode.ts](../examples/extensions/plan-mode.ts)
 
 ### Tool Events
 
@@ -482,6 +503,8 @@ pi.on("tool_call", async (event, ctx) => {
 	}
 });
 ```
+
+**Examples:** [chalk-logger.ts](../examples/extensions/chalk-logger.ts), [permission-gate.ts](../examples/extensions/permission-gate.ts), [plan-mode.ts](../examples/extensions/plan-mode.ts), [protected-paths.ts](../examples/extensions/protected-paths.ts)
 
 #### tool_result
 
@@ -502,6 +525,8 @@ pi.on("tool_result", async (event, ctx) => {
   return { content: [...], details: {...}, isError: false };
 });
 ```
+
+**Examples:** [git-checkpoint.ts](../examples/extensions/git-checkpoint.ts), [plan-mode.ts](../examples/extensions/plan-mode.ts)
 
 ## ExtensionContext
 

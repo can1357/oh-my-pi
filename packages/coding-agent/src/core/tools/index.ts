@@ -89,19 +89,6 @@ import { createWriteTool } from "./write";
 /** Tool type (AgentTool from pi-ai) */
 export type Tool = AgentTool<any, any, any>;
 
-/**
- * Pluggable file operations for tools.
- * Override these to delegate file editing to remote systems (e.g., SSH).
- */
-export interface FileOperations {
-	/** Read file contents as text */
-	readFile: (absolutePath: string) => Promise<string>;
-	/** Write content to a file */
-	writeFile: (absolutePath: string, content: string) => Promise<void>;
-	/** Check if file exists */
-	exists: (absolutePath: string) => Promise<boolean>;
-}
-
 /** Session context for tool factories */
 export interface ToolSession {
 	/** Current working directory */
@@ -136,8 +123,6 @@ export interface ToolSession {
 		getBashInterceptorSimpleLsEnabled(): boolean;
 		getBashInterceptorRules(): BashInterceptorRule[];
 	};
-	/** Custom file operations (for remote editing, e.g., SSH) */
-	fileOperations?: FileOperations;
 }
 
 type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;
@@ -175,7 +160,7 @@ export type ToolName = keyof typeof BUILTIN_TOOLS;
  */
 export async function createTools(session: ToolSession, toolNames?: string[]): Promise<Tool[]> {
 	const includeComplete = session.requireCompleteTool === true;
-	const requestedTools = toolNames ? [...new Set(toolNames)] : undefined;
+	const requestedTools = toolNames && toolNames.length > 0 ? [...new Set(toolNames)] : undefined;
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
 	if (includeComplete && requestedTools && !requestedTools.includes("complete")) {
 		requestedTools.push("complete");

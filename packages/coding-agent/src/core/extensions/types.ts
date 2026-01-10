@@ -10,7 +10,7 @@
 
 import type { AgentMessage, AgentToolResult, AgentToolUpdateCallback, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import type { Component, KeyId, TUI } from "@oh-my-pi/pi-tui";
+import type { Component, EditorComponent, EditorTheme, KeyId, TUI } from "@oh-my-pi/pi-tui";
 import type { Static, TSchema } from "@sinclair/typebox";
 import type * as piCodingAgent from "../../index";
 import type { Theme } from "../../modes/interactive/theme/theme";
@@ -72,6 +72,12 @@ export interface ExtensionUIContext {
 	setWidget(key: string, content: string[] | undefined): void;
 	setWidget(key: string, content: ((tui: TUI, theme: Theme) => Component & { dispose?(): void }) | undefined): void;
 
+	/** Set a custom footer component, or undefined to restore the built-in footer. */
+	setFooter(factory: ((tui: TUI, theme: Theme) => Component & { dispose?(): void }) | undefined): void;
+
+	/** Set a custom header component, or undefined to restore the built-in header. */
+	setHeader(factory: ((tui: TUI, theme: Theme) => Component & { dispose?(): void }) | undefined): void;
+
 	/** Set the terminal window/tab title. */
 	setTitle(title: string): void;
 
@@ -94,6 +100,11 @@ export interface ExtensionUIContext {
 
 	/** Show a multi-line editor for text editing. */
 	editor(title: string, prefill?: string): Promise<string | undefined>;
+
+	/** Set a custom editor component via factory function, or undefined to restore the default editor. */
+	setEditorComponent(
+		factory: ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => EditorComponent) | undefined,
+	): void;
 
 	/** Get the current theme for styling. */
 	readonly theme: Theme;

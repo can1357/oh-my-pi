@@ -81,11 +81,14 @@ const noOpUIContext: ExtensionUIContext = {
 	notify: () => {},
 	setStatus: () => {},
 	setWidget: () => {},
+	setFooter: () => {},
+	setHeader: () => {},
 	setTitle: () => {},
 	custom: async () => undefined as never,
 	setEditorText: () => {},
 	getEditorText: () => "",
 	editor: async () => undefined,
+	setEditorComponent: () => {},
 	get theme() {
 		return theme;
 	},

@@ -9,6 +9,7 @@ Works on Linux, macOS, and Windows (requires bash; see [Windows Setup](#windows-
 - [Getting Started](#getting-started)
   - [Installation](#installation)
   - [Windows Setup](#windows-setup)
+  - [Terminal Setup](#terminal-setup)
   - [API Keys & OAuth](#api-keys--oauth)
   - [Quick Start](#quick-start)
 - [Usage](#usage)
@@ -106,6 +107,30 @@ For most users, [Git for Windows](https://git-scm.com/download/win) is sufficien
 }
 ```
 
+### Terminal Setup
+
+Pi uses the [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/) for reliable modifier key detection. Most modern terminals support this protocol, but some require configuration.
+
+**Kitty, iTerm2:** Work out of the box.
+
+**Ghostty:** Add to your Ghostty config (`~/.config/ghostty/config`):
+
+```
+keybind = alt+backspace=text:\x1b\x7f
+keybind = shift+enter=text:\n
+```
+
+**wezterm:** Create `~/.wezterm.lua`:
+
+```lua
+local wezterm = require 'wezterm'
+local config = wezterm.config_builder()
+config.enable_kitty_keyboard = true
+return config
+```
+
+**Windows Terminal:** Does not support the Kitty keyboard protocol. Shift+Enter cannot be distinguished from Enter. Use Ctrl+Enter for multi-line input instead. All other keybindings work correctly.
+
 ### API Keys & OAuth
 
 **Option 1: Auth file** (recommended)
@@ -169,6 +194,7 @@ omp
 - Gemini CLI uses the production Cloud Code Assist endpoint (standard Gemini models)
 - Antigravity uses a sandbox endpoint with access to Gemini 3, Claude (sonnet/opus thinking), and GPT-OSS models
 - Both are free with any Google account, subject to rate limits
+- Paid Cloud Code Assist subscriptions: set `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_PROJECT_ID` env var to your project ID
 
 Credentials stored in `~/.omp/agent/auth.json`. Use `/logout` to clear.
 
@@ -196,7 +222,7 @@ The agent reads, writes, and edits files, and executes commands via bash.
 | Command                   | Description                                                                 |
 | ------------------------- | --------------------------------------------------------------------------- |
 | `/settings`               | Open settings menu (thinking, theme, queue mode, toggles)                   |
-| `/model`                  | Switch models mid-session (fuzzy search, arrow keys, Enter to select)       |
+| `/model`                  | Switch models mid-session. Use `/model <search>` or `provider/model` to prefilter/disambiguate. |
 | `/export [file\|--copy]`  | Export session to HTML file or copy to clipboard                            |
 | `/share`                  | Upload session as secret GitHub gist, get shareable URL (requires `gh` CLI) |
 | `/session`                | Show session info: path, message counts, token usage, cost                  |
@@ -239,7 +265,7 @@ The agent reads, writes, and edits files, and executes commands via bash.
 | Key                       | Action                       |
 | ------------------------- | ---------------------------- |
 | Enter                     | Send message                 |
-| Shift+Enter / Alt+Enter   | New line (Ctrl+Enter on WSL) |
+| Shift+Enter               | New line (Ctrl+Enter on Windows Terminal) |
 | Ctrl+W / Option+Backspace | Delete word backwards        |
 | Ctrl+U                    | Delete to start of line      |
 | Ctrl+K                    | Delete to end of line        |
@@ -320,7 +346,10 @@ omp -r              # Short form
 omp --no-session    # Ephemeral mode (don't save)
 
 omp --session /path/to/file.jsonl  # Use specific session file
+omp --session a8ec1c2a             # Resume by session ID (partial UUID)
 ```
+
+**Resuming by session ID:** The `--session` flag accepts a session UUID (or prefix). Session IDs are visible in filenames under `~/.omp/agent/sessions/<project>/` (e.g., `2025-12-13T17-47-46-817Z_a8ec1c2a-5a5f-4699-88cb-03e7d3cb9292.jsonl`). The UUID is the part after the underscore. You can also search by session ID in the `omp -r` picker.
 
 ### Context Compaction
 
@@ -493,6 +522,7 @@ Add custom models (Ollama, vLLM, LM Studio, etc.) via `~/.omp/agent/models.json`
 | `supportsStore`           | Whether provider supports `store` field     |
 | `supportsDeveloperRole`   | Use `developer` vs `system` role            |
 | `supportsReasoningEffort` | Support for `reasoning_effort` parameter    |
+| `supportsUsageInStreaming` | Whether provider supports `stream_options: { include_usage: true }`. Default: `true` |
 | `maxTokensField`          | Use `max_completion_tokens` or `max_tokens` |
 
 **Live reload:** The file reloads each time you open `/model`. Edit during session; no restart needed.
@@ -831,9 +861,11 @@ omp [options] [@files...] [messages...]
 | `--continue`, `-c`                    | Continue most recent session                                                                                                                                                 |
 | `--resume`, `-r`                      | Select session to resume                                                                                                                                                     |
 | `--models <patterns>`                 | Comma-separated patterns for Ctrl+P cycling. Supports glob patterns (e.g., `anthropic/*`, `*sonnet*:high`) and fuzzy matching (e.g., `sonnet,haiku:low`)                     |
+| `--no-tools`                          | Disable all built-in tools                                                                                                                                                   |
 | `--tools <tools>`                     | Comma-separated tool list (default: `read,bash,edit,write`)                                                                                                                  |
 | `--thinking <level>`                  | Thinking level: `off`, `minimal`, `low`, `medium`, `high`                                                                                                                    |
-| `--hook <path>`                       | Load a hook file (can be used multiple times)                                                                                                                                |
+| `--extension <path>`, `-e`            | Load an extension file (can be used multiple times)                                                                                                                          |
+| `--no-extensions`                     | Disable extension discovery (explicit `-e` paths still work)                                                                                                                 |
 | `--no-skills`                         | Disable skills discovery and loading                                                                                                                                         |
 | `--skills <patterns>`                 | Comma-separated glob patterns to filter skills (e.g., `git-*,docker`)                                                                                                        |
 | `--export <file> [output]`            | Export session to HTML                                                                                                                                                       |
@@ -891,6 +923,15 @@ omp --tools read,grep,find,ls -p "Review the architecture"
 # Export session
 omp --export session.jsonl output.html
 ```
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc. | API keys for providers (see [API Keys & OAuth](#api-keys--oauth)) |
+| `PI_CODING_AGENT_DIR` | Override the agent config directory (default: `~/.omp/agent`) |
+| `PI_SKIP_VERSION_CHECK` | Skip new version check at startup (useful for Nix or other package manager installs) |
+| `VISUAL`, `EDITOR` | External editor for Ctrl+G (e.g., `vim`, `code --wait`) |
 
 ---
 

@@ -3,6 +3,7 @@ import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate";
 import type { Theme } from "../../modes/interactive/theme/theme";
 import bashDescription from "../../prompts/tools/bash.md" with { type: "text" };
 import { type BashExecutorOptions, executeBash, executeBashWithOperations } from "../bash-executor";
@@ -163,12 +164,12 @@ interface BashRenderArgs {
 }
 
 interface BashRenderContext {
-	/** Visual lines for truncated output (pre-computed by tool-execution) */
-	visualLines?: string[];
-	/** Number of lines skipped */
-	skippedCount?: number;
-	/** Total visual lines */
-	totalVisualLines?: number;
+	/** Raw output text */
+	output?: string;
+	/** Whether output is expanded */
+	expanded?: boolean;
+	/** Number of preview lines when collapsed */
+	previewLines?: number;
 }
 
 export const bashToolRenderer = {
@@ -209,51 +210,18 @@ export const bashToolRenderer = {
 		uiTheme: Theme,
 	): Component {
 		const ui = createToolUIKit(uiTheme);
-		const { expanded, renderContext } = options;
+		const { renderContext } = options;
 		const details = result.details;
-		const lines: string[] = [];
 
-		// Get output text
-		const textContent = result.content?.find((c) => c.type === "text")?.text ?? "";
-		const output = textContent.trim();
+		// Get output from context (preferred) or fall back to result content
+		const output = renderContext?.output ?? (result.content?.find((c) => c.type === "text")?.text ?? "").trim();
+		const expanded = renderContext?.expanded ?? options.expanded;
+		const previewLines = renderContext?.previewLines ?? 5;
 
-		if (output) {
-			if (expanded) {
-				// Show all lines when expanded
-				const styledOutput = output
-					.split("\n")
-					.map((line) => uiTheme.fg("toolOutput", line))
-					.join("\n");
-				lines.push(styledOutput);
-			} else if (renderContext?.visualLines) {
-				// Use pre-computed visual lines from tool-execution
-				const { visualLines, skippedCount = 0, totalVisualLines = visualLines.length } = renderContext;
-				if (skippedCount > 0) {
-					lines.push(
-						uiTheme.fg(
-							"dim",
-							`${uiTheme.format.ellipsis} (${skippedCount} earlier lines, showing ${visualLines.length} of ${totalVisualLines}) (ctrl+o to expand)`,
-						),
-					);
-				}
-				lines.push(...visualLines);
-			} else {
-				// Fallback: show first few lines
-				const outputLines = output.split("\n");
-				const maxLines = 5;
-				const displayLines = outputLines.slice(0, maxLines);
-				const remaining = outputLines.length - maxLines;
-
-				lines.push(...displayLines.map((line) => uiTheme.fg("toolOutput", line)));
-				if (remaining > 0) {
-					lines.push(uiTheme.fg("dim", `${uiTheme.format.ellipsis} (${remaining} more lines) (ctrl+o to expand)`));
-				}
-			}
-		}
-
-		// Truncation warnings
+		// Build truncation warning lines (static, doesn't depend on width)
 		const truncation = details?.truncation;
 		const fullOutputPath = details?.fullOutputPath;
+		let warningLine: string | undefined;
 		if (truncation?.truncated || fullOutputPath) {
 			const warnings: string[] = [];
 			if (fullOutputPath) {
@@ -268,9 +236,64 @@ export const bashToolRenderer = {
 					);
 				}
 			}
-			lines.push(uiTheme.fg("warning", ui.wrapBrackets(warnings.join(". "))));
+			warningLine = uiTheme.fg("warning", ui.wrapBrackets(warnings.join(". ")));
 		}
 
-		return new Text(lines.join("\n"), 0, 0);
+		if (!output) {
+			// No output - just show warning if any
+			return new Text(warningLine ?? "", 0, 0);
+		}
+
+		if (expanded) {
+			// Show all lines when expanded
+			const styledOutput = output
+				.split("\n")
+				.map((line) => uiTheme.fg("toolOutput", line))
+				.join("\n");
+			const lines = warningLine ? [styledOutput, warningLine] : [styledOutput];
+			return new Text(lines.join("\n"), 0, 0);
+		}
+
+		// Collapsed: use width-aware caching component
+		const styledOutput = output
+			.split("\n")
+			.map((line) => uiTheme.fg("toolOutput", line))
+			.join("\n");
+		const textContent = `\n${styledOutput}`;
+
+		let cachedWidth: number | undefined;
+		let cachedLines: string[] | undefined;
+		let cachedSkipped: number | undefined;
+
+		return {
+			render: (width: number): string[] => {
+				if (cachedLines === undefined || cachedWidth !== width) {
+					const result = truncateToVisualLines(textContent, previewLines, width);
+					cachedLines = result.visualLines;
+					cachedSkipped = result.skippedCount;
+					cachedWidth = width;
+				}
+				const outputLines: string[] = [];
+				if (cachedSkipped && cachedSkipped > 0) {
+					outputLines.push("");
+					outputLines.push(
+						uiTheme.fg(
+							"dim",
+							`${uiTheme.format.ellipsis} (${cachedSkipped} earlier lines, showing ${cachedLines.length} of ${cachedSkipped + cachedLines.length}) (ctrl+o to expand)`,
+						),
+					);
+				}
+				outputLines.push(...cachedLines);
+				if (warningLine) {
+					outputLines.push(warningLine);
+				}
+				return outputLines;
+			},
+			invalidate: () => {
+				cachedWidth = undefined;
+				cachedLines = undefined;
+				cachedSkipped = undefined;
+			},
+		};
 	},
 };

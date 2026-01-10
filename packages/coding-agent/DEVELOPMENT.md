@@ -419,7 +419,6 @@ Built-in tools support pluggable operations for remote execution:
 - **LsOperations**: Remote directory listing
 - **GrepOperations**: Remote content search
 - **FindOperations**: Remote file search
-- **FileOperations**: Remote file read/write/edit
 
 Example: SSH extension overriding bash execution:
 

@@ -30,10 +30,10 @@ import { sanitizeSurrogates } from "../utils/sanitize-unicode";
 import { transformMessages } from "./transorm-messages";
 
 // Stealth mode: Mimic Claude Code headers while avoiding tool name collisions.
-const claudeCodeVersion = "1.0.83";
-const claudeToolPrefix = "proxy_";
-const claudeCodeSystemInstruction = "You are Claude Code, Anthropic's official CLI for Claude.";
-const claudeCodeHeaders = {
+export const claudeCodeVersion = "1.0.83";
+export const claudeToolPrefix = "proxy_";
+export const claudeCodeSystemInstruction = "You are Claude Code, Anthropic's official CLI for Claude.";
+export const claudeCodeHeaders = {
 	"anthropic-version": "2023-06-01",
 	"x-stainless-helper-method": "stream",
 	"x-stainless-retry-count": "0",
@@ -46,12 +46,12 @@ const claudeCodeHeaders = {
 	"x-stainless-timeout": "60",
 } as const;
 
-const applyClaudeToolPrefix = (name: string) => {
+export const applyClaudeToolPrefix = (name: string) => {
 	if (!claudeToolPrefix || name.startsWith(claudeToolPrefix)) return name;
 	return `${claudeToolPrefix}${name}`;
 };
 
-const stripClaudeToolPrefix = (name: string) => {
+export const stripClaudeToolPrefix = (name: string) => {
 	if (!claudeToolPrefix || !name.startsWith(claudeToolPrefix)) return name;
 	return name.slice(claudeToolPrefix.length);
 };
@@ -312,14 +312,14 @@ function isOAuthToken(apiKey: string): boolean {
 	return apiKey.includes("sk-ant-oat");
 }
 
-function normalizeExtraBetas(betas?: string[] | string): string[] {
+export function normalizeExtraBetas(betas?: string[] | string): string[] {
 	if (!betas) return [];
 	const raw = Array.isArray(betas) ? betas : betas.split(",");
 	return raw.map((beta) => beta.trim()).filter((beta) => beta.length > 0);
 }
 
 // Build deduplicated beta header string
-function buildBetaHeader(baseBetas: string[], extraBetas: string[]): string {
+export function buildBetaHeader(baseBetas: string[], extraBetas: string[]): string {
 	const seen = new Set<string>();
 	const result: string[] = [];
 	for (const beta of [...baseBetas, ...extraBetas]) {
@@ -342,17 +342,12 @@ function createClient(
 
 	// Base betas required for Claude Code compatibility
 	const baseBetas = oauthToken
-		? [
-				"claude-code-20250219",
-				"oauth-2025-04-20",
-				"interleaved-thinking-2025-05-14",
-				"fine-grained-tool-streaming-2025-05-14",
-			]
+		? ["claude-code-20250219", "oauth-2025-04-20", "fine-grained-tool-streaming-2025-05-14"]
 		: ["fine-grained-tool-streaming-2025-05-14"];
 
-	// Add interleaved thinking if requested (and not already in base)
+	// Add interleaved thinking if requested
 	const mergedBetas: string[] = [];
-	if (interleavedThinking && !oauthToken) {
+	if (interleavedThinking) {
 		mergedBetas.push("interleaved-thinking-2025-05-14");
 	}
 
@@ -417,18 +412,43 @@ function createClient(
 	return { client, isOAuthToken: false };
 }
 
-type SystemBlock = { type: "text"; text: string; cache_control: { type: "ephemeral" } };
+export type AnthropicSystemBlock = {
+	type: "text";
+	text: string;
+	cache_control?: { type: "ephemeral" };
+};
 
-function buildSystemBlocks(systemPrompt: string | undefined, includeClaudeCode: boolean): SystemBlock[] | undefined {
-	const blocks: SystemBlock[] = [];
+type SystemBlockOptions = {
+	includeClaudeCodeInstruction?: boolean;
+	includeCacheControl?: boolean;
+	extraInstructions?: string[];
+};
+
+export function buildAnthropicSystemBlocks(
+	systemPrompt: string | undefined,
+	options: SystemBlockOptions = {},
+): AnthropicSystemBlock[] | undefined {
+	const { includeClaudeCodeInstruction = false, includeCacheControl = true, extraInstructions = [] } = options;
+	const blocks: AnthropicSystemBlock[] = [];
 	const sanitizedPrompt = systemPrompt ? sanitizeSurrogates(systemPrompt) : "";
 	const hasClaudeCodeInstruction = sanitizedPrompt.includes(claudeCodeSystemInstruction);
+	const cacheControl = includeCacheControl ? { type: "ephemeral" as const } : undefined;
 
-	if (includeClaudeCode && !hasClaudeCodeInstruction) {
+	if (includeClaudeCodeInstruction && !hasClaudeCodeInstruction) {
 		blocks.push({
 			type: "text",
 			text: claudeCodeSystemInstruction,
-			cache_control: { type: "ephemeral" },
+			...(cacheControl ? { cache_control: cacheControl } : {}),
+		});
+	}
+
+	for (const instruction of extraInstructions) {
+		const trimmed = instruction.trim();
+		if (!trimmed) continue;
+		blocks.push({
+			type: "text",
+			text: trimmed,
+			...(cacheControl ? { cache_control: cacheControl } : {}),
 		});
 	}
 
@@ -436,7 +456,7 @@ function buildSystemBlocks(systemPrompt: string | undefined, includeClaudeCode: 
 		blocks.push({
 			type: "text",
 			text: sanitizedPrompt,
-			cache_control: { type: "ephemeral" },
+			...(cacheControl ? { cache_control: cacheControl } : {}),
 		});
 	}
 
@@ -479,8 +499,11 @@ function buildParams(
 		stream: true,
 	};
 
-	const includeClaudeCodeSystem = isOAuthToken && !model.id.startsWith("claude-3-5-haiku");
-	const systemBlocks = buildSystemBlocks(context.systemPrompt, includeClaudeCodeSystem);
+	const includeClaudeCodeSystem = !model.id.startsWith("claude-3-5-haiku");
+	const systemBlocks = buildAnthropicSystemBlocks(context.systemPrompt, {
+		includeClaudeCodeInstruction: includeClaudeCodeSystem,
+		includeCacheControl: true,
+	});
 	if (systemBlocks) {
 		params.system = systemBlocks;
 	}

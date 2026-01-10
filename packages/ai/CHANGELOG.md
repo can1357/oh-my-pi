@@ -1,7 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Added
 
 - Added `betas` option in `AnthropicOptions` for passing custom Anthropic beta feature flags
@@ -17,6 +16,7 @@
 
 ### Changed
 
+- Changed Anthropic provider to include Claude Code system instruction for all API key types, not just OAuth tokens (except Haiku models)
 - Changed Anthropic OAuth tool naming to use `proxy_` prefix instead of mapping to Claude Code tool names, avoiding potential name collisions
 - Changed Anthropic provider to include Claude Code headers for all requests, not just OAuth tokens
 - Anthropic provider now maps tool names to Claude Code's exact tool names (Read, Write, Edit, Bash, Grep, Glob) instead of using prefixed names

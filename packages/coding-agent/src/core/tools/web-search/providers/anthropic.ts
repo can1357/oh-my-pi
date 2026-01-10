@@ -5,6 +5,7 @@
  * Returns synthesized answers with citations and source metadata.
  */
 
+import { applyClaudeToolPrefix, buildAnthropicSystemBlocks, stripClaudeToolPrefix } from "@oh-my-pi/pi-ai";
 import { buildAnthropicHeaders, buildAnthropicUrl, findAnthropicAuth, getEnv } from "../auth";
 import type {
 	AnthropicApiResponse,
@@ -18,6 +19,12 @@ import { WebSearchProviderError } from "../types";
 
 const DEFAULT_MODEL = "claude-haiku-4-5";
 const DEFAULT_MAX_TOKENS = 4096;
+const WEB_SEARCH_TOOL_NAME = "web_search";
+const WEB_SEARCH_TOOL_TYPE = "web_search_20250305";
+
+const applySearchToolPrefix = (name: string, isOAuth: boolean): string => {
+	return isOAuth ? applyClaudeToolPrefix(name) : name;
+};
 
 export interface AnthropicSearchParams {
 	query: string;
@@ -31,6 +38,21 @@ async function getModel(): Promise<string> {
 	return (await getEnv("ANTHROPIC_SEARCH_MODEL")) ?? DEFAULT_MODEL;
 }
 
+function buildSystemBlocks(
+	auth: AnthropicAuthConfig,
+	model: string,
+	systemPrompt?: string,
+): ReturnType<typeof buildAnthropicSystemBlocks> {
+	const includeClaudeCode = !model.startsWith("claude-3-5-haiku");
+	const extraInstructions = auth.isOAuth ? ["You are a helpful AI assistant with web search capabilities."] : [];
+
+	return buildAnthropicSystemBlocks(systemPrompt, {
+		includeClaudeCodeInstruction: includeClaudeCode,
+		includeCacheControl: auth.isOAuth,
+		extraInstructions,
+	});
+}
+
 /** Call Anthropic API with web search */
 async function callWebSearch(
 	auth: AnthropicAuthConfig,
@@ -42,34 +64,21 @@ async function callWebSearch(
 	const url = buildAnthropicUrl(auth);
 	const headers = buildAnthropicHeaders(auth);
 
-	// Build system blocks
-	const systemBlocks: Array<{ type: string; text: string; cache_control?: { type: string } }> = [];
-
-	if (auth.isOAuth) {
-		// OAuth requires Claude Code identity with cache_control
-		systemBlocks.push({
-			type: "text",
-			text: "You are a helpful AI assistant with web search capabilities.",
-			cache_control: { type: "ephemeral" },
-		});
-	}
-
-	if (systemPrompt) {
-		systemBlocks.push({
-			type: "text",
-			text: systemPrompt,
-			...(auth.isOAuth ? { cache_control: { type: "ephemeral" } } : {}),
-		});
-	}
+	const systemBlocks = buildSystemBlocks(auth, model, systemPrompt);
 
 	const body: Record<string, unknown> = {
 		model,
 		max_tokens: maxTokens ?? DEFAULT_MAX_TOKENS,
 		messages: [{ role: "user", content: query }],
-		tools: [{ type: "web_search_20250305", name: "web_search" }],
+		tools: [
+			{
+				type: WEB_SEARCH_TOOL_TYPE,
+				name: applySearchToolPrefix(WEB_SEARCH_TOOL_NAME, auth.isOAuth),
+			},
+		],
 	};
 
-	if (systemBlocks.length > 0) {
+	if (systemBlocks && systemBlocks.length > 0) {
 		body.system = systemBlocks;
 	}
 
@@ -131,7 +140,11 @@ function parseResponse(response: AnthropicApiResponse): WebSearchResponse {
 	const citations: WebSearchCitation[] = [];
 
 	for (const block of response.content) {
-		if (block.type === "server_tool_use" && block.name === "web_search") {
+		if (
+			block.type === "server_tool_use" &&
+			block.name &&
+			stripClaudeToolPrefix(block.name) === WEB_SEARCH_TOOL_NAME
+		) {
 			// Intermediate search query
 			if (block.input?.query) {
 				searchQueries.push(block.input.query);

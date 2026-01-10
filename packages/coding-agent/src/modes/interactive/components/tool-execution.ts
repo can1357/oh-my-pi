@@ -17,7 +17,6 @@ import { convertToPng } from "../../../utils/image-convert";
 import { sanitizeBinaryOutput } from "../../../utils/shell";
 import { theme } from "../theme/theme";
 import { renderDiff } from "./diff";
-import { truncateToVisualLines } from "./visual-truncate";
 
 // Preview line limit for bash when not expanded
 const BASH_PREVIEW_LINES = 5;
@@ -482,22 +481,11 @@ export class ToolExecutionComponent extends Container {
 		const context: Record<string, unknown> = {};
 
 		if (this.toolName === "bash" && this.result) {
-			// Bash needs visual line truncation context
+			// Pass raw output and expanded state - renderer handles width-aware truncation
 			const output = this.getTextOutput().trim();
-			if (output && !this.expanded) {
-				const styledOutput = output
-					.split("\n")
-					.map((line) => theme.fg("toolOutput", line))
-					.join("\n");
-				const { visualLines, skippedCount } = truncateToVisualLines(
-					`\n${styledOutput}`,
-					BASH_PREVIEW_LINES,
-					this.ui.terminal.columns - 2,
-				);
-				context.visualLines = visualLines;
-				context.skippedCount = skippedCount;
-				context.totalVisualLines = skippedCount + visualLines.length;
-			}
+			context.output = output;
+			context.expanded = this.expanded;
+			context.previewLines = BASH_PREVIEW_LINES;
 		} else if (this.toolName === "edit") {
 			// Edit needs diff preview and renderDiff function
 			context.editDiffPreview = this.editDiffPreview;
