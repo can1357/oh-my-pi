@@ -1,10 +1,14 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Added
 
 - Added `--no-lsp` to disable LSP tools, formatting, diagnostics, and warmup for a session
+
+### Changed
+
+- Updated `plan` agent with enhanced structured planning process, parallel exploration via `explore` agent spawning, and improved output format with examples
+- Removed `planner` agent command template, consolidating planning functionality into the `plan` agent
 
 ## [4.2.1] - 2026-01-11
 ### Added

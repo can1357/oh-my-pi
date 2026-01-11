@@ -10,12 +10,10 @@ import { loadSync } from "../../../discovery";
 
 // Embed command markdown files at build time
 import initMd from "../../../prompts/agents/init.md" with { type: "text" };
-import plannerMd from "../../../prompts/agents/planner.md" with { type: "text" };
 import { renderPromptTemplate } from "../../prompt-templates";
 
 const EMBEDDED_COMMANDS: { name: string; content: string }[] = [
 	{ name: "init.md", content: renderPromptTemplate(initMd) },
-	{ name: "planner.md", content: renderPromptTemplate(plannerMd) },
 ];
 
 export const EMBEDDED_COMMAND_TEMPLATES: ReadonlyArray<{ name: string; content: string }> = EMBEDDED_COMMANDS;
