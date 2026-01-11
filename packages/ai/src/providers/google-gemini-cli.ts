@@ -695,7 +695,7 @@ function buildRequest(
 	}
 
 	if (context.tools && context.tools.length > 0) {
-		request.tools = convertTools(context.tools);
+		request.tools = convertTools(context.tools, model);
 		if (options.toolChoice) {
 			request.toolConfig = {
 				functionCallingConfig: {

@@ -326,7 +326,7 @@ function buildParams(
 	const config: GenerateContentConfig = {
 		...(Object.keys(generationConfig).length > 0 && generationConfig),
 		...(context.systemPrompt && { systemInstruction: sanitizeSurrogates(context.systemPrompt) }),
-		...(context.tools && context.tools.length > 0 && { tools: convertTools(context.tools) }),
+		...(context.tools && context.tools.length > 0 && { tools: convertTools(context.tools, model) }),
 	};
 
 	if (context.tools && context.tools.length > 0 && options.toolChoice) {

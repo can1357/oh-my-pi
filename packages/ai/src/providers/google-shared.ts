@@ -240,22 +240,31 @@ export function sanitizeSchemaForGoogle(value: unknown): unknown {
 	return result;
 }
 
+function sanitizeToolNoop(tool: Tool): Tool {
+	return {
+		name: tool.name,
+		description: tool.description,
+		parameters: structuredClone(tool.parameters),
+	};
+}
+function sanitizeToolGoogle(tool: Tool): Tool {
+	return {
+		name: tool.name,
+		description: tool.description,
+		parameters: sanitizeSchemaForGoogle(tool.parameters) as any,
+	};
+}
+
 /**
  * Convert tools to Gemini function declarations format.
  */
 export function convertTools(
 	tools: Tool[],
+	model: Model<"google-generative-ai" | "google-gemini-cli" | "google-vertex">,
 ): { functionDeclarations: { name: string; description?: string; parameters: Schema }[] }[] | undefined {
 	if (tools.length === 0) return undefined;
-	return [
-		{
-			functionDeclarations: tools.map((tool) => ({
-				name: tool.name,
-				description: tool.description,
-				parameters: sanitizeSchemaForGoogle(tool.parameters) as Schema,
-			})),
-		},
-	];
+	const toolSanitizer = model?.id.startsWith("gemini-") ? sanitizeToolGoogle : sanitizeToolNoop;
+	return [{ functionDeclarations: tools.map(toolSanitizer) }];
 }
 
 /**
