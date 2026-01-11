@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [4.2.2] - 2026-01-11
 ### Added
 
 - Added persistent cache storage for Codex usage data that survives application restarts

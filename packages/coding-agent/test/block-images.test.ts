@@ -32,14 +32,14 @@ describe("blockImages setting", () => {
 			expect(manager.getBlockImages()).toBe(true);
 		});
 
-		it("should persist blockImages setting via setBlockImages", () => {
+		it("should persist blockImages setting via setBlockImages", async () => {
 			const manager = SettingsManager.inMemory({});
 			expect(manager.getBlockImages()).toBe(false);
 
-			manager.setBlockImages(true);
+			await manager.setBlockImages(true);
 			expect(manager.getBlockImages()).toBe(true);
 
-			manager.setBlockImages(false);
+			await manager.setBlockImages(false);
 			expect(manager.getBlockImages()).toBe(false);
 		});
 
