@@ -119,6 +119,15 @@ function getModelId(fullModel: string): string {
 }
 
 /**
+ * Extract provider from "provider/modelId" format.
+ * Returns undefined if no provider prefix.
+ */
+function getProvider(fullModel: string): string | undefined {
+	const slashIdx = fullModel.indexOf("/");
+	return slashIdx > 0 ? fullModel.slice(0, slashIdx) : undefined;
+}
+
+/**
  * Resolve a fuzzy model pattern to "provider/modelId" format.
  *
  * Supports comma-separated patterns (e.g., "gpt, opus") - tries each in order.
@@ -165,8 +174,25 @@ export async function resolveModelPattern(
 		const exactId = models.find((m) => getModelId(m).toLowerCase() === p.toLowerCase());
 		if (exactId) return exactId;
 
-		// Try fuzzy match on model ID (substring)
-		const fuzzyMatch = models.find((m) => getModelId(m).toLowerCase().includes(p.toLowerCase()));
+		// Check if pattern has provider prefix (e.g., "zai/glm-4.7")
+		const patternProvider = getProvider(p);
+		const patternModelId = getModelId(p);
+
+		// If pattern has provider prefix, fuzzy match must stay within that provider
+		// (don't cross provider boundaries when user explicitly specifies provider)
+		if (patternProvider) {
+			const providerFuzzyMatch = models.find(
+				(m) =>
+					getProvider(m)?.toLowerCase() === patternProvider.toLowerCase() &&
+					getModelId(m).toLowerCase().includes(patternModelId.toLowerCase()),
+			);
+			if (providerFuzzyMatch) return providerFuzzyMatch;
+			// No match in specified provider - don't fall through to other providers
+			continue;
+		}
+
+		// No provider prefix - fall back to general fuzzy match on model ID (substring)
+		const fuzzyMatch = models.find((m) => getModelId(m).toLowerCase().includes(patternModelId.toLowerCase()));
 		if (fuzzyMatch) return fuzzyMatch;
 	}
 
