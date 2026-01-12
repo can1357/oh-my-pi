@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Add `omp config` subcommand for managing settings (`list`, `get`, `set`, `reset`, `path`)
 - Add `todoCompletion` setting to warn agent when it stops with incomplete todos (up to 3 reminders)
 
 ### Changed

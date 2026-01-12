@@ -10,6 +10,7 @@ import { join, resolve } from "node:path";
 import { type ImageContent, supportsXhigh } from "@oh-my-pi/pi-ai";
 import chalk from "chalk";
 import { type Args, parseArgs, printHelp } from "./cli/args";
+import { parseConfigArgs, printConfigHelp, runConfigCommand } from "./cli/config-cli";
 import { processFileArguments } from "./cli/file-processor";
 import { listModels } from "./cli/list-models";
 import { parsePluginArgs, printPluginHelp, runPluginCommand } from "./cli/plugin-cli";
@@ -415,6 +416,17 @@ export async function main(args: string[]) {
 			return;
 		}
 		await runUpdateCommand(updateCmd);
+		return;
+	}
+
+	// Handle config subcommand
+	const configCmd = parseConfigArgs(args);
+	if (configCmd) {
+		if (args.includes("--help") || args.includes("-h")) {
+			printConfigHelp();
+			return;
+		}
+		await runConfigCommand(configCmd);
 		return;
 	}
 
