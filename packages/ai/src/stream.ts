@@ -179,6 +179,26 @@ export async function completeSimple<TApi extends Api>(
 	return s.result();
 }
 
+const MIN_OUTPUT_TOKENS = 1024;
+export const OUTPUT_FALLBACK_BUFFER = 4000;
+const ANTHROPIC_USE_INTERLEAVED_THINKING = true;
+
+const ANTHROPIC_THINKING: Record<ThinkingLevel, number> = {
+	minimal: 3072,
+	low: 6144,
+	medium: 12288,
+	high: 24576,
+	xhigh: 49152,
+};
+
+const GOOGLE_THINKING: Record<ThinkingLevel, number> = {
+	minimal: 1024,
+	low: 4096,
+	medium: 8192,
+	high: 16384,
+	xhigh: 24575,
+};
+
 function mapOptionsForApi<TApi extends Api>(
 	model: Model<TApi>,
 	options?: SimpleStreamOptions,
@@ -199,37 +219,43 @@ function mapOptionsForApi<TApi extends Api>(
 	switch (model.api) {
 		case "anthropic-messages": {
 			// Explicitly disable thinking when reasoning is not specified
-			if (!options?.reasoning) {
+			const reasoning = options?.reasoning;
+			if (!reasoning) {
 				return { ...base, thinkingEnabled: false } satisfies AnthropicOptions;
 			}
 
-			// Claude requires max_tokens > thinking.budget_tokens
-			// So we need to ensure maxTokens accounts for both thinking and output
-			const defaultBudgets: ThinkingBudgets = {
-				minimal: 1024,
-				low: 2048,
-				medium: 8192,
-				high: 16384,
-			};
-			const budgets = { ...defaultBudgets, ...options?.thinkingBudgets };
+			let thinkingBudget = options.thinkingBudgets?.[reasoning] ?? ANTHROPIC_THINKING[reasoning];
+			if (thinkingBudget <= 0) {
+				return { ...base, thinkingEnabled: false } satisfies AnthropicOptions;
+			}
 
-			const minOutputTokens = 1024;
-			const level = clampReasoning(options.reasoning)!;
-			let thinkingBudget = budgets[level]!;
+			if (ANTHROPIC_USE_INTERLEAVED_THINKING) {
+				return {
+					...base,
+					thinkingEnabled: true,
+					thinkingBudgetTokens: thinkingBudget,
+				} satisfies AnthropicOptions;
+			}
+
 			// Caller's maxTokens is the desired output; add thinking budget on top, capped at model limit
 			const maxTokens = Math.min((base.maxTokens || 0) + thinkingBudget, model.maxTokens);
 
 			// If not enough room for thinking + output, reduce thinking budget
 			if (maxTokens <= thinkingBudget) {
-				thinkingBudget = Math.max(0, maxTokens - minOutputTokens);
+				thinkingBudget = maxTokens - MIN_OUTPUT_TOKENS;
 			}
 
-			return {
-				...base,
-				maxTokens,
-				thinkingEnabled: true,
-				thinkingBudgetTokens: thinkingBudget,
-			} satisfies AnthropicOptions;
+			// If thinking budget is too low, disable thinking
+			if (thinkingBudget <= 0) {
+				return { ...base, thinkingEnabled: false } satisfies AnthropicOptions;
+			} else {
+				return {
+					...base,
+					maxTokens,
+					thinkingEnabled: true,
+					thinkingBudgetTokens: thinkingBudget,
+				} satisfies AnthropicOptions;
+			}
 		}
 
 		case "openai-completions":
@@ -299,35 +325,26 @@ function mapOptionsForApi<TApi extends Api>(
 				} satisfies GoogleGeminiCliOptions;
 			}
 
-			// Models using thinkingBudget (Gemini 2.x, Claude via Antigravity)
-			// Claude requires max_tokens > thinking.budget_tokens
-			// So we need to ensure maxTokens accounts for both thinking and output
-			const defaultBudgets: ThinkingBudgets = {
-				minimal: 1024,
-				low: 2048,
-				medium: 8192,
-				high: 16384,
-			};
-			const budgets = { ...defaultBudgets, ...options?.thinkingBudgets };
+			let thinkingBudget = options.thinkingBudgets?.[effort] ?? GOOGLE_THINKING[effort];
 
-			const minOutputTokens = 1024;
-			let thinkingBudget = budgets[effort]!;
 			// Caller's maxTokens is the desired output; add thinking budget on top, capped at model limit
 			const maxTokens = Math.min((base.maxTokens || 0) + thinkingBudget, model.maxTokens);
 
 			// If not enough room for thinking + output, reduce thinking budget
 			if (maxTokens <= thinkingBudget) {
-				thinkingBudget = Math.max(0, maxTokens - minOutputTokens);
+				thinkingBudget = Math.max(0, maxTokens - MIN_OUTPUT_TOKENS) ?? 0;
 			}
 
-			return {
-				...base,
-				maxTokens,
-				thinking: {
-					enabled: true,
-					budgetTokens: thinkingBudget,
-				},
-			} satisfies GoogleGeminiCliOptions;
+			// If thinking budget is too low, disable thinking
+			if (thinkingBudget <= 0) {
+				return { ...base, thinking: { enabled: false } } satisfies GoogleGeminiCliOptions;
+			} else {
+				return {
+					...base,
+					maxTokens,
+					thinking: { enabled: true, budgetTokens: thinkingBudget },
+				} satisfies GoogleGeminiCliOptions;
+			}
 		}
 
 		case "google-vertex": {

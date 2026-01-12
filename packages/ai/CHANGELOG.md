@@ -1,6 +1,15 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added support for `xhigh` thinking level in `thinkingBudgets` configuration
+
+### Changed
+
+- Changed Anthropic thinking token budgets: minimal (1024→3072), low (2048→6144), medium (8192→12288), high (16384→24576)
+- Changed Google thinking token budgets: minimal (1024), low (2048→4096), medium (8192), high (16384), xhigh (24575)
+- Changed `supportsXhigh()` to return true for all Anthropic models
 
 ## [4.9.0] - 2026-01-12
 

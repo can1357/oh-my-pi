@@ -82,12 +82,7 @@ export type Provider = KnownProvider | string;
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
 
 /** Token budgets for each thinking level (token-based providers only) */
-export interface ThinkingBudgets {
-	minimal?: number;
-	low?: number;
-	medium?: number;
-	high?: number;
-}
+export type ThinkingBudgets = { [key in ThinkingLevel]?: number };
 
 // Base options all providers share
 export interface StreamOptions {

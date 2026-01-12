@@ -53,7 +53,7 @@ const XHIGH_MODELS = new Set(["gpt-5.1-codex-max", "gpt-5.2", "gpt-5.2-codex"]);
  * Currently only certain OpenAI Codex models support this.
  */
 export function supportsXhigh<TApi extends Api>(model: Model<TApi>): boolean {
-	return XHIGH_MODELS.has(model.id);
+	return XHIGH_MODELS.has(model.id) || model.api === "anthropic-messages";
 }
 
 /**

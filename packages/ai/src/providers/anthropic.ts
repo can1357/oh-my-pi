@@ -5,7 +5,7 @@ import type {
 	MessageParam,
 } from "@anthropic-ai/sdk/resources/messages";
 import { calculateCost } from "../models";
-import { getEnvApiKey } from "../stream";
+import { getEnvApiKey, OUTPUT_FALLBACK_BUFFER } from "../stream";
 import type {
 	Api,
 	AssistantMessage,
@@ -479,10 +479,9 @@ function ensureMaxTokensForThinking(params: MessageCreateParamsStreaming, model:
 	if (budgetTokens <= 0) return;
 
 	const maxTokens = params.max_tokens ?? 0;
-	const fallbackBuffer = 4000;
-	const requiredMaxTokens = model.maxTokens > 0 ? model.maxTokens : budgetTokens + fallbackBuffer;
+	const requiredMaxTokens = model.maxTokens > 0 ? model.maxTokens : budgetTokens + OUTPUT_FALLBACK_BUFFER;
 	if (maxTokens < requiredMaxTokens) {
-		params.max_tokens = requiredMaxTokens;
+		params.max_tokens = Math.min(requiredMaxTokens, model.maxTokens);
 	}
 }
 
@@ -535,7 +534,10 @@ function buildParams(
 	}
 
 	disableThinkingIfToolChoiceForced(params);
-	ensureMaxTokensForThinking(params, model);
+
+	if (!options?.interleavedThinking) {
+		ensureMaxTokensForThinking(params, model);
+	}
 
 	return params;
 }
