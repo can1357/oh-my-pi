@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [4.4.8] - 2026-01-12
 ### Changed
 
 - Changed review finding priority format from numeric (0-3) to string labels (P0-P3) for clearer severity indication

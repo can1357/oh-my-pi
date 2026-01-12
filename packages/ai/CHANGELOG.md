@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [4.4.8] - 2026-01-12
 ### Fixed
 
 - Fixed Google provider schema sanitization to properly collapse `anyOf`/`oneOf` with const values into enum arrays
