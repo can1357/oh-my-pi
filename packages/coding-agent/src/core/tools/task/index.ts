@@ -29,6 +29,7 @@ import {
 	MAX_AGENTS_IN_DESCRIPTION,
 	MAX_CONCURRENCY,
 	MAX_PARALLEL_TASKS,
+	type SingleResult,
 	type TaskToolDetails,
 	taskSchema,
 } from "./types";
@@ -337,7 +338,7 @@ export async function createTaskTool(
 				emitProgress();
 
 				// Execute in parallel with concurrency limit
-				const results = await mapWithConcurrencyLimit(
+				const { results: partialResults, aborted } = await mapWithConcurrencyLimit(
 					tasksWithContext,
 					MAX_CONCURRENCY,
 					async (task, index) => {
@@ -371,6 +372,29 @@ export async function createTaskTool(
 					signal,
 				);
 
+				// Fill in skipped tasks (undefined entries from abort) with placeholder results
+				const results: SingleResult[] = partialResults.map((result, index) => {
+					if (result !== undefined) return result;
+					const task = tasksWithContext[index];
+					return {
+						index,
+						taskId: task.taskId,
+						agent: agentName,
+						agentSource: agent.source,
+						task: task.task,
+						description: task.description,
+						exitCode: 1,
+						output: "",
+						stderr: "Skipped (cancelled before start)",
+						truncated: false,
+						durationMs: 0,
+						tokens: 0,
+						modelOverride,
+						error: "Skipped",
+						aborted: true,
+					};
+				});
+
 				// Aggregate usage from executor results (already accumulated incrementally)
 				const aggregatedUsage = createUsageTotals();
 				let hasAggregatedUsage = false;
@@ -391,10 +415,11 @@ export async function createTaskTool(
 
 				// Build final output - match plugin format
 				const successCount = results.filter((r) => r.exitCode === 0).length;
+				const cancelledCount = results.filter((r) => r.aborted).length;
 				const totalDuration = Date.now() - startTime;
 
 				const summaries = results.map((r) => {
-					const status = r.exitCode === 0 ? "completed" : `failed (exit ${r.exitCode})`;
+					const status = r.aborted ? "cancelled" : r.exitCode === 0 ? "completed" : `failed (exit ${r.exitCode})`;
 					const output = r.output.trim() || r.stderr.trim() || "(no output)";
 					const preview = output.split("\n").slice(0, 5).join("\n");
 					const meta = r.outputMeta
@@ -403,13 +428,14 @@ export async function createTaskTool(
 					return `[${r.agent}] ${status}${meta} ${r.taskId}\n${preview}`;
 				});
 
-				const outputIds = results.map((r) => r.taskId);
+				const outputIds = results.filter((r) => !r.aborted || r.output.trim()).map((r) => r.taskId);
 				const outputHint =
 					outputIds.length > 0 ? `\n\nUse output tool for full logs: output ids ${outputIds.join(", ")}` : "";
 				const schemaNote = schemaOverridden
 					? `\n\nNote: Agent '${agentName}' has a fixed output schema; your 'output' parameter was ignored.\nRequired schema: ${JSON.stringify(agent.output)}`
 					: "";
-				const summary = `${successCount}/${results.length} succeeded [${formatDuration(
+				const cancelledNote = aborted && cancelledCount > 0 ? ` (${cancelledCount} cancelled)` : "";
+				const summary = `${successCount}/${results.length} succeeded${cancelledNote} [${formatDuration(
 					totalDuration,
 				)}]\n\n${summaries.join("\n\n---\n\n")}${outputHint}${schemaNote}`;
 

@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Fixed task tool abort to return partial results instead of failing (completed tasks preserved, cancelled tasks shown as skipped)
 - Fixed TUI crash when bash output metadata lines exceed terminal width on narrow terminals
 - Fixed find tool not matching `**/filename` patterns (was incorrectly using `--full-path` for glob depth wildcards)
 
