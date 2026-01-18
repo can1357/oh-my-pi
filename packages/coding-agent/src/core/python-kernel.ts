@@ -5,6 +5,7 @@ import { nanoid } from "nanoid";
 import { getShellConfig, killProcessTree } from "../utils/shell";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
 import { logger } from "./logger";
+import { acquireSharedGateway, releaseSharedGateway } from "./python-gateway-coordinator";
 import { PYTHON_PRELUDE } from "./python-prelude";
 import { htmlToBasicMarkdown } from "./tools/web-scrapers/types";
 import { ScopeSignal } from "./utils";
@@ -124,6 +125,7 @@ export interface PreludeHelper {
 interface KernelStartOptions {
 	cwd: string;
 	env?: Record<string, string | undefined>;
+	useSharedGateway?: boolean;
 }
 
 export interface PythonKernelAvailability {
@@ -373,6 +375,7 @@ export class PythonKernel {
 	readonly gatewayUrl: string;
 	readonly sessionId: string;
 	readonly username: string;
+	readonly isSharedGateway: boolean;
 	readonly #authToken?: string;
 
 	#ws: WebSocket | null = null;
@@ -390,6 +393,7 @@ export class PythonKernel {
 		gatewayUrl: string,
 		sessionId: string,
 		username: string,
+		isSharedGateway: boolean,
 		authToken?: string,
 	) {
 		this.id = id;
@@ -398,6 +402,7 @@ export class PythonKernel {
 		this.gatewayUrl = gatewayUrl;
 		this.sessionId = sessionId;
 		this.username = username;
+		this.isSharedGateway = isSharedGateway;
 		this.#authToken = authToken;
 
 		if (this.gatewayProcess) {
@@ -423,6 +428,20 @@ export class PythonKernel {
 			return PythonKernel.startWithExternalGateway(externalConfig);
 		}
 
+		// Try shared gateway first (unless explicitly disabled)
+		if (options.useSharedGateway !== false) {
+			try {
+				const sharedResult = await acquireSharedGateway(options.cwd);
+				if (sharedResult) {
+					return PythonKernel.startWithSharedGateway(sharedResult.url, options.cwd);
+				}
+			} catch (err) {
+				logger.warn("Failed to acquire shared gateway, falling back to local", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+
 		return PythonKernel.startWithLocalGateway(options);
 	}
 
@@ -445,7 +464,38 @@ export class PythonKernel {
 		const kernelInfo = (await createResponse.json()) as { id: string };
 		const kernelId = kernelInfo.id;
 
-		const kernel = new PythonKernel(nanoid(), kernelId, null, config.url, nanoid(), "omp", config.token);
+		const kernel = new PythonKernel(nanoid(), kernelId, null, config.url, nanoid(), "omp", false, config.token);
+
+		try {
+			await kernel.connectWebSocket();
+			kernel.startHeartbeat();
+			const preludeResult = await kernel.execute(PYTHON_PRELUDE, { silent: true, storeHistory: false });
+			if (preludeResult.cancelled || preludeResult.status === "error") {
+				throw new Error("Failed to initialize Python kernel prelude");
+			}
+			return kernel;
+		} catch (err: unknown) {
+			await kernel.shutdown();
+			throw err;
+		}
+	}
+
+	private static async startWithSharedGateway(gatewayUrl: string, _cwd: string): Promise<PythonKernel> {
+		const createResponse = await fetch(`${gatewayUrl}/api/kernels`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name: "python3" }),
+		});
+
+		if (!createResponse.ok) {
+			await releaseSharedGateway();
+			throw new Error(`Failed to create kernel on shared gateway: ${await createResponse.text()}`);
+		}
+
+		const kernelInfo = (await createResponse.json()) as { id: string };
+		const kernelId = kernelInfo.id;
+
+		const kernel = new PythonKernel(nanoid(), kernelId, null, gatewayUrl, nanoid(), "omp", true);
 
 		try {
 			await kernel.connectWebSocket();
@@ -560,7 +610,7 @@ export class PythonKernel {
 		const kernelInfo = (await createResponse.json()) as { id: string };
 		const kernelId = kernelInfo.id;
 
-		const kernel = new PythonKernel(nanoid(), kernelId, gatewayProcess, gatewayUrl, nanoid(), "omp");
+		const kernel = new PythonKernel(nanoid(), kernelId, gatewayProcess, gatewayUrl, nanoid(), "omp", false);
 
 		try {
 			await kernel.connectWebSocket();
@@ -868,7 +918,9 @@ export class PythonKernel {
 			this.#ws = null;
 		}
 
-		if (this.gatewayProcess) {
+		if (this.isSharedGateway) {
+			await releaseSharedGateway();
+		} else if (this.gatewayProcess) {
 			try {
 				killProcessTree(this.gatewayProcess.pid);
 			} catch (err: unknown) {
@@ -946,7 +998,17 @@ export class PythonKernel {
 			});
 		}
 
-		const data = serializeWebSocketMessage(msg);
-		this.#ws.send(data);
+		const payload = {
+			channel: msg.channel,
+			header: msg.header,
+			parent_header: msg.parent_header,
+			metadata: msg.metadata,
+			content: msg.content,
+		};
+		if (msg.buffers && msg.buffers.length > 0) {
+			this.#ws.send(serializeWebSocketMessage(msg));
+			return;
+		}
+		this.#ws.send(JSON.stringify(payload));
 	}
 }

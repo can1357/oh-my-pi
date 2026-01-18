@@ -25,7 +25,7 @@ import { createAgentSession, discoverAuthStorage, discoverModels } from "../../s
 import { SessionManager } from "../../session-manager";
 import { SettingsManager } from "../../settings-manager";
 import { untilAborted } from "../../utils";
-import { pythonSchema } from "../python";
+import { createPythonTool, type PythonProxyExecutor, type PythonToolDetails, type PythonToolParams } from "../python";
 import type {
 	MCPToolCallResponse,
 	MCPToolMetadata,
@@ -126,7 +126,7 @@ function callMCPToolViaParent(
 }
 
 function callPythonToolViaParent(
-	params: Record<string, unknown>,
+	params: PythonToolParams,
 	signal?: AbortSignal,
 	timeoutMs = PYTHON_CALL_TIMEOUT_MS,
 ): Promise<PythonToolCallResponse["result"]> {
@@ -233,7 +233,7 @@ function createMCPProxyTool(metadata: MCPToolMetadata): CustomTool<TSchema> {
 	};
 }
 
-function getPythonCallTimeoutMs(params: Record<string, unknown>): number {
+function getPythonCallTimeoutMs(params: PythonToolParams): number {
 	const timeout = params.timeout;
 	if (typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0) {
 		return timeout * 1000 + 5000;
@@ -241,39 +241,19 @@ function getPythonCallTimeoutMs(params: Record<string, unknown>): number {
 	return PYTHON_CALL_TIMEOUT_MS;
 }
 
-function createPythonProxyTool(): CustomTool<TSchema> {
+const pythonProxyExecutor: PythonProxyExecutor = async (params, signal) => {
+	const timeoutMs = getPythonCallTimeoutMs(params);
+	const result = await callPythonToolViaParent(params, signal, timeoutMs);
 	return {
-		name: "python",
-		label: "Python",
-		description: "Execute Python code via the parent kernel.",
-		parameters: pythonSchema,
-		execute: async (_toolCallId, params, _onUpdate, _ctx, signal) => {
-			try {
-				const timeoutMs = getPythonCallTimeoutMs(params as Record<string, unknown>);
-				const result = await callPythonToolViaParent(params as Record<string, unknown>, signal, timeoutMs);
-				return {
-					content:
-						result?.content?.map((c) =>
-							c.type === "text"
-								? { type: "text" as const, text: c.text ?? "" }
-								: { type: "text" as const, text: JSON.stringify(c) },
-						) ?? [],
-					details: result?.details,
-				};
-			} catch (error) {
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text: `Python error: ${error instanceof Error ? error.message : String(error)}`,
-						},
-					],
-					details: { isError: true },
-				};
-			}
-		},
+		content:
+			result?.content?.map((c) =>
+				c.type === "text"
+					? { type: "text" as const, text: c.text ?? "" }
+					: { type: "text" as const, text: JSON.stringify(c) },
+			) ?? [],
+		details: result?.details as PythonToolDetails | undefined,
 	};
-}
+};
 
 interface WorkerMessageEvent<T> {
 	data: T;
@@ -404,7 +384,9 @@ async function runTask(runState: RunState, payload: SubagentWorkerStartPayload):
 
 		// Create MCP/python proxy tools if provided
 		const mcpProxyTools = payload.mcpTools?.map(createMCPProxyTool) ?? [];
-		const pythonProxyTools = payload.pythonToolProxy ? [createPythonProxyTool()] : [];
+		const pythonProxyTools = payload.pythonToolProxy
+			? [createPythonTool(null, { proxyExecutor: pythonProxyExecutor })]
+			: [];
 		const proxyTools = [...mcpProxyTools, ...pythonProxyTools];
 
 		// Resolve model override (equivalent to CLI's parseModelPattern with --model)

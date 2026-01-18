@@ -78,8 +78,9 @@ class FakeWebSocket {
 	onerror?: (event: unknown) => void;
 	onclose?: () => void;
 	readonly url: string;
-	readonly sent: ArrayBuffer[] = [];
-	private handleSend: ((data: ArrayBuffer) => void) | null = null;
+	readonly sent: (ArrayBuffer | string)[] = [];
+	private handleSend: ((data: ArrayBuffer | string) => void) | null = null;
+	private pendingMessages: (ArrayBuffer | string)[] = [];
 
 	constructor(url: string) {
 		this.url = url;
@@ -87,13 +88,21 @@ class FakeWebSocket {
 		queueMicrotask(() => this.onopen?.());
 	}
 
-	setSendHandler(handler: (data: ArrayBuffer) => void) {
+	setSendHandler(handler: (data: ArrayBuffer | string) => void) {
 		this.handleSend = handler;
+		for (const msg of this.pendingMessages) {
+			handler(msg);
+		}
+		this.pendingMessages = [];
 	}
 
-	send(data: ArrayBuffer) {
+	send(data: ArrayBuffer | string) {
 		this.sent.push(data);
-		this.handleSend?.(data);
+		if (this.handleSend) {
+			this.handleSend(data);
+		} else {
+			this.pendingMessages.push(data);
+		}
 	}
 
 	close() {
@@ -109,6 +118,7 @@ describe("PythonKernel (external gateway)", () => {
 
 	beforeEach(() => {
 		process.env.OMP_PYTHON_GATEWAY_URL = "http://gateway.test";
+		process.env.OMP_PYTHON_SKIP_CHECK = "1";
 		globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
 	});
 
@@ -241,10 +251,11 @@ describe("PythonKernel (external gateway)", () => {
 		});
 
 		const kernelPromise = PythonKernel.start({ cwd: "/" });
+		await Bun.sleep(10);
 		const ws = FakeWebSocket.lastInstance;
 		if (!ws) throw new Error("WebSocket not initialized");
 		ws.setSendHandler((data) => {
-			const msg = decodeMessage(data);
+			const msg = typeof data === "string" ? (JSON.parse(data) as JupyterMessage) : decodeMessage(data);
 			const handler = responseQueue.shift();
 			if (!handler) {
 				throw new Error(`Unexpected message: ${msg.header.msg_type}`);
@@ -325,10 +336,11 @@ describe("PythonKernel (external gateway)", () => {
 		];
 
 		const kernelPromise = PythonKernel.start({ cwd: "/" });
+		await Bun.sleep(10);
 		const ws = FakeWebSocket.lastInstance;
 		if (!ws) throw new Error("WebSocket not initialized");
 		ws.setSendHandler((data) => {
-			const msg = decodeMessage(data);
+			const msg = typeof data === "string" ? (JSON.parse(data) as JupyterMessage) : decodeMessage(data);
 			const handler = responseQueue.shift();
 			if (!handler) {
 				throw new Error(`Unexpected message: ${msg.header.msg_type}`);
@@ -392,10 +404,11 @@ describe("PythonKernel (external gateway)", () => {
 		];
 
 		const kernelPromise = PythonKernel.start({ cwd: "/" });
+		await Bun.sleep(10);
 		const ws = FakeWebSocket.lastInstance;
 		if (!ws) throw new Error("WebSocket not initialized");
 		ws.setSendHandler((data) => {
-			const msg = decodeMessage(data);
+			const msg = typeof data === "string" ? (JSON.parse(data) as JupyterMessage) : decodeMessage(data);
 			const handler = responseQueue.shift();
 			if (!handler) {
 				throw new Error(`Unexpected message: ${msg.header.msg_type}`);
@@ -511,10 +524,11 @@ describe("PythonKernel (external gateway)", () => {
 		];
 
 		const kernelPromise = PythonKernel.start({ cwd: "/" });
+		await Bun.sleep(10);
 		const ws = FakeWebSocket.lastInstance;
 		if (!ws) throw new Error("WebSocket not initialized");
 		ws.setSendHandler((data) => {
-			const msg = decodeMessage(data);
+			const msg = typeof data === "string" ? (JSON.parse(data) as JupyterMessage) : decodeMessage(data);
 			const handler = responseQueue.shift();
 			if (!handler) {
 				throw new Error(`Unexpected message: ${msg.header.msg_type}`);

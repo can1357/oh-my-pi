@@ -118,6 +118,7 @@ export type PythonKernelMode = "session" | "per-call";
 export interface PythonSettings {
 	toolMode?: PythonToolMode;
 	kernelMode?: PythonKernelMode;
+	sharedGateway?: boolean;
 }
 
 export interface EditSettings {
@@ -316,7 +317,7 @@ const DEFAULT_SETTINGS: Settings = {
 	git: { enabled: false },
 	mcp: { enableProjectConfig: true },
 	lsp: { formatOnWrite: false, diagnosticsOnWrite: true, diagnosticsOnEdit: false },
-	python: { toolMode: "ipy-only", kernelMode: "session" },
+	python: { toolMode: "ipy-only", kernelMode: "session", sharedGateway: true },
 	edit: { fuzzyMatch: true },
 	ttsr: { enabled: true, contextMode: "discard", repeatMode: "once", repeatGap: 10 },
 	voice: {
@@ -400,6 +401,7 @@ function normalizeSettings(settings: Settings): Settings {
 function normalizePythonSettings(settings: PythonSettings | undefined): PythonSettings {
 	const toolMode = settings?.toolMode;
 	const kernelMode = settings?.kernelMode;
+	const sharedGateway = settings?.sharedGateway;
 	return {
 		toolMode:
 			toolMode === "ipy-only" || toolMode === "bash-only" || toolMode === "both"
@@ -409,6 +411,8 @@ function normalizePythonSettings(settings: PythonSettings | undefined): PythonSe
 			kernelMode === "session" || kernelMode === "per-call"
 				? kernelMode
 				: (DEFAULT_SETTINGS.python?.kernelMode ?? "session"),
+		sharedGateway:
+			typeof sharedGateway === "boolean" ? sharedGateway : (DEFAULT_SETTINGS.python?.sharedGateway ?? true),
 	};
 }
 
@@ -1179,6 +1183,18 @@ export class SettingsManager {
 			this.globalSettings.python = {};
 		}
 		this.globalSettings.python.kernelMode = mode;
+		await this.save();
+	}
+
+	getPythonSharedGateway(): boolean {
+		return this.settings.python?.sharedGateway ?? true;
+	}
+
+	async setPythonSharedGateway(enabled: boolean): Promise<void> {
+		if (!this.globalSettings.python) {
+			this.globalSettings.python = {};
+		}
+		this.globalSettings.python.sharedGateway = enabled;
 		await this.save();
 	}
 

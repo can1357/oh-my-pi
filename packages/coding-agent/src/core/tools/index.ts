@@ -65,7 +65,8 @@ export { createWriteTool, type WriteToolDetails } from "./write";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { EventBus } from "../event-bus";
 import { logger } from "../logger";
-import { warmPythonEnvironment } from "../python-executor";
+import { getPreludeDocs, warmPythonEnvironment } from "../python-executor";
+import { checkPythonKernelAvailability } from "../python-kernel";
 import type { BashInterceptorRule } from "../settings-manager";
 import { createAskTool } from "./ask";
 import { createBashTool } from "./bash";
@@ -211,12 +212,19 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const shouldCheckPython =
 		pythonMode !== "bash-only" &&
 		(requestedTools === undefined || requestedTools.includes("python") || pythonMode === "ipy-only");
+	const isTestEnv = process.env.BUN_ENV === "test" || process.env.NODE_ENV === "test";
 	if (shouldCheckPython) {
-		const warmup = await warmPythonEnvironment(session.cwd, session.getSessionFile?.() ?? `cwd:${session.cwd}`);
-		pythonAvailable = warmup.ok;
-		if (!warmup.ok) {
+		const availability = await checkPythonKernelAvailability(session.cwd);
+		pythonAvailable = availability.ok;
+		if (!availability.ok) {
 			logger.warn("Python kernel unavailable, falling back to bash", {
-				reason: warmup.reason,
+				reason: availability.reason,
+			});
+		} else if (!isTestEnv && getPreludeDocs().length === 0) {
+			void warmPythonEnvironment(session.cwd, session.getSessionFile?.() ?? `cwd:${session.cwd}`).catch((err) => {
+				logger.warn("Failed to warm Python environment", {
+					error: err instanceof Error ? err.message : String(err),
+				});
 			});
 		}
 	}

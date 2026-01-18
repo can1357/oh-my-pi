@@ -47,6 +47,15 @@ export const pythonSchema = Type.Object({
 	reset: Type.Optional(Type.Boolean({ description: "Restart the kernel before executing this code" })),
 });
 
+export type PythonToolParams = { code: string; timeout?: number; workdir?: string; reset?: boolean };
+
+export type PythonToolResult = {
+	content: Array<{ type: "text"; text: string }>;
+	details: PythonToolDetails | undefined;
+};
+
+export type PythonProxyExecutor = (params: PythonToolParams, signal?: AbortSignal) => Promise<PythonToolResult>;
+
 export interface PythonToolDetails {
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
@@ -99,21 +108,43 @@ function renderJsonTree(value: unknown, theme: Theme, expanded: boolean, maxDept
 	return renderNode(value, "", 0, true);
 }
 
-export function createPythonTool(session: ToolSession): AgentTool<typeof pythonSchema> {
+export function getPythonToolDescription(): string {
 	const helpers = getPreludeDocs();
 	const categories = groupPreludeHelpers(helpers);
+	return renderPromptTemplate(pythonDescription, { categories });
+}
+
+interface CreatePythonToolOptions {
+	proxyExecutor?: PythonProxyExecutor;
+}
+
+export function createPythonTool(
+	session: ToolSession | null,
+	options?: CreatePythonToolOptions,
+): AgentTool<typeof pythonSchema> {
+	const { proxyExecutor } = options ?? {};
+
 	return {
 		name: "python",
 		label: "Python",
-		description: renderPromptTemplate(pythonDescription, { categories }),
+		description: getPythonToolDescription(),
 		parameters: pythonSchema,
 		execute: async (
 			_toolCallId: string,
-			{ code, timeout, workdir, reset }: { code: string; timeout?: number; workdir?: string; reset?: boolean },
+			params: PythonToolParams,
 			signal?: AbortSignal,
 			onUpdate?,
 			_ctx?: AgentToolContext,
 		) => {
+			if (proxyExecutor) {
+				return proxyExecutor(params, signal);
+			}
+
+			if (!session) {
+				throw new Error("Python tool requires a session when not using proxy executor");
+			}
+
+			const { code, timeout, workdir, reset } = params;
 			const controller = new AbortController();
 			const onAbort = () => controller.abort();
 			signal?.addEventListener("abort", onAbort, { once: true });

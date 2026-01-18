@@ -29,6 +29,8 @@ export interface PythonExecutorOptions {
 	kernelMode?: PythonKernelMode;
 	/** Restart the kernel before executing */
 	reset?: boolean;
+	/** Use shared gateway across pi instances (default: true) */
+	useSharedGateway?: boolean;
 }
 
 export interface PythonKernelExecutor {
@@ -84,6 +86,7 @@ async function ensureKernelAvailable(cwd: string): Promise<void> {
 export async function warmPythonEnvironment(
 	cwd: string,
 	sessionId?: string,
+	useSharedGateway?: boolean,
 ): Promise<{ ok: boolean; reason?: string; docs: PreludeHelper[] }> {
 	try {
 		await ensureKernelAvailable(cwd);
@@ -97,7 +100,12 @@ export async function warmPythonEnvironment(
 	}
 	const resolvedSessionId = sessionId ?? `session:${cwd}`;
 	try {
-		const docs = await withKernelSession(resolvedSessionId, cwd, async (kernel) => kernel.introspectPrelude());
+		const docs = await withKernelSession(
+			resolvedSessionId,
+			cwd,
+			async (kernel) => kernel.introspectPrelude(),
+			useSharedGateway,
+		);
 		cachedPreludeDocs = docs;
 		return { ok: true, docs };
 	} catch (err: unknown) {
@@ -111,8 +119,8 @@ export function getPreludeDocs(): PreludeHelper[] {
 	return cachedPreludeDocs ?? [];
 }
 
-async function createKernelSession(sessionId: string, cwd: string): Promise<KernelSession> {
-	const kernel = await PythonKernel.start({ cwd });
+async function createKernelSession(sessionId: string, cwd: string, useSharedGateway?: boolean): Promise<KernelSession> {
+	const kernel = await PythonKernel.start({ cwd, useSharedGateway });
 	const session: KernelSession = {
 		id: sessionId,
 		kernel,
@@ -133,7 +141,7 @@ async function createKernelSession(sessionId: string, cwd: string): Promise<Kern
 	return session;
 }
 
-async function restartKernelSession(session: KernelSession, cwd: string): Promise<void> {
+async function restartKernelSession(session: KernelSession, cwd: string, useSharedGateway?: boolean): Promise<void> {
 	session.restartCount += 1;
 	if (session.restartCount > 1) {
 		throw new Error("Python kernel restarted too many times in this session");
@@ -143,7 +151,7 @@ async function restartKernelSession(session: KernelSession, cwd: string): Promis
 	} catch (err) {
 		logger.warn("Failed to shutdown crashed kernel", { error: err instanceof Error ? err.message : String(err) });
 	}
-	const kernel = await PythonKernel.start({ cwd });
+	const kernel = await PythonKernel.start({ cwd, useSharedGateway });
 	session.kernel = kernel;
 	session.dead = false;
 	session.lastUsedAt = Date.now();
@@ -165,17 +173,18 @@ async function withKernelSession<T>(
 	sessionId: string,
 	cwd: string,
 	handler: (kernel: PythonKernel) => Promise<T>,
+	useSharedGateway?: boolean,
 ): Promise<T> {
 	let session = kernelSessions.get(sessionId);
 	if (!session) {
-		session = await createKernelSession(sessionId, cwd);
+		session = await createKernelSession(sessionId, cwd, useSharedGateway);
 		kernelSessions.set(sessionId, session);
 	}
 
 	const run = async (): Promise<T> => {
 		session!.lastUsedAt = Date.now();
 		if (session!.dead || !session!.kernel.isAlive()) {
-			await restartKernelSession(session!, cwd);
+			await restartKernelSession(session!, cwd, useSharedGateway);
 		}
 		try {
 			const result = await handler(session!.kernel);
@@ -185,7 +194,7 @@ async function withKernelSession<T>(
 			if (!session!.dead && session!.kernel.isAlive()) {
 				throw err;
 			}
-			await restartKernelSession(session!, cwd);
+			await restartKernelSession(session!, cwd, useSharedGateway);
 			const result = await handler(session!.kernel);
 			session!.restartCount = 0;
 			return result;
@@ -274,8 +283,9 @@ export async function executePython(code: string, options?: PythonExecutorOption
 	await ensureKernelAvailable(cwd);
 
 	const kernelMode = options?.kernelMode ?? "session";
+	const useSharedGateway = options?.useSharedGateway;
 	if (kernelMode === "per-call") {
-		const kernel = await PythonKernel.start({ cwd });
+		const kernel = await PythonKernel.start({ cwd, useSharedGateway });
 		try {
 			return await executeWithKernel(kernel, code, options);
 		} finally {
@@ -290,5 +300,10 @@ export async function executePython(code: string, options?: PythonExecutorOption
 			await disposeKernelSession(existing);
 		}
 	}
-	return await withKernelSession(sessionId, cwd, async (kernel) => executeWithKernel(kernel, code, options));
+	return await withKernelSession(
+		sessionId,
+		cwd,
+		async (kernel) => executeWithKernel(kernel, code, options),
+		useSharedGateway,
+	);
 }

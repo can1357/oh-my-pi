@@ -1,8 +1,14 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Added
 
+- Added shared Python gateway coordinator for resource-efficient kernel management across sessions
+- Added Python shared gateway setting with session-scoped kernel reuse and fallback behavior
+- Added automatic idle shutdown for shared Python gateway after 30 seconds of inactivity
+- Added environment filtering for shared Python gateway to exclude sensitive API keys
+- Added virtual environment detection and automatic PATH configuration for Python gateway
 - Added IPython-backed Python tool with streaming output, image/JSON rendering, and Jupyter kernel gateway integration
 - Added Python prelude with 30+ shell-like utility functions for file operations
 - Added Python tool exposure settings with session-scoped kernel reuse and fallback behavior
@@ -24,6 +30,10 @@
 
 ### Changed
 
+- Improved Python kernel startup to use shared gateway by default for better resource utilization
+- Updated Python tool to support proxy execution mode for worker processes
+- Enhanced Python kernel availability checking with faster validation
+- Optimized Python environment warming to avoid blocking during tool initialization
 - Reorganized settings interface into behavior, tools, display, voice, status, lsp, and exa tabs
 - Migrated environment variables from PI_ to OMP_ prefix with automatic migration
 - Updated model selector to use TabBar component for provider navigation
@@ -37,6 +47,9 @@
 
 ### Fixed
 
+- Fixed Python tool session requirement when using proxy executor in worker processes
+- Fixed WebSocket message handling to support both binary and JSON message formats
+- Fixed Python gateway process cleanup and reference counting for shared instances
 - Fixed duplicate custom message rendering in event controller
 - Fixed --no-extensions flag handling
 - Fixed model selection to respect remembered model roles

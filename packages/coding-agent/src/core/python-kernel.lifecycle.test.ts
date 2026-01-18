@@ -101,24 +101,15 @@ describe("PythonKernel gateway lifecycle", () => {
 		FakeWebSocket.instances = [];
 		globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
 
-		Object.defineProperty(Bun, "spawn", {
-			value: ((cmd: string[] | string, options?: SpawnOptions) => {
-				const normalized = Array.isArray(cmd) ? cmd : [cmd];
-				env.spawnCalls.push({ cmd: normalized, options: options ?? {} });
-				return createFakeProcess();
-			}) as typeof Bun.spawn,
-			configurable: true,
-		});
+		Bun.spawn = ((cmd: string[] | string, options?: SpawnOptions) => {
+			const normalized = Array.isArray(cmd) ? cmd : [cmd];
+			env.spawnCalls.push({ cmd: normalized, options: options ?? {} });
+			return createFakeProcess();
+		}) as typeof Bun.spawn;
 
-		Object.defineProperty(Bun, "sleep", {
-			value: (async () => undefined) as typeof Bun.sleep,
-			configurable: true,
-		});
+		Bun.sleep = (async () => undefined) as typeof Bun.sleep;
 
-		Object.defineProperty(Bun, "which", {
-			value: (() => "/usr/bin/python") as typeof Bun.which,
-			configurable: true,
-		});
+		Bun.which = (() => "/usr/bin/python") as typeof Bun.which;
 
 		Object.defineProperty(PythonKernel.prototype, "execute", {
 			value: (async () => ({
@@ -155,9 +146,9 @@ describe("PythonKernel gateway lifecycle", () => {
 		globalThis.fetch = originalFetch;
 		globalThis.WebSocket = originalWebSocket;
 
-		Object.defineProperty(Bun, "spawn", { value: originalSpawn, configurable: true });
-		Object.defineProperty(Bun, "sleep", { value: originalSleep, configurable: true });
-		Object.defineProperty(Bun, "which", { value: originalWhich, configurable: true });
+		Bun.spawn = originalSpawn;
+		Bun.sleep = originalSleep;
+		Bun.which = originalWhich;
 		Object.defineProperty(PythonKernel.prototype, "execute", { value: originalExecute, configurable: true });
 	});
 
@@ -180,7 +171,7 @@ describe("PythonKernel gateway lifecycle", () => {
 			return createResponse({ ok: true }) as unknown as Response;
 		}) as typeof fetch;
 
-		const kernel = await PythonKernel.start({ cwd: tempDir });
+		const kernel = await PythonKernel.start({ cwd: tempDir, useSharedGateway: false });
 
 		expect(env.spawnCalls).toHaveLength(1);
 		expect(env.spawnCalls[0].cmd).toEqual(
@@ -191,7 +182,7 @@ describe("PythonKernel gateway lifecycle", () => {
 				"--JupyterApp.answer_yes=true",
 			]),
 		);
-		expect(env.fetchCalls.filter((call) => call.url.endsWith("/api/kernelspecs"))).toHaveLength(3);
+		expect(env.fetchCalls.filter((call) => call.url.endsWith("/api/kernelspecs"))).toHaveLength(2);
 		expect(env.fetchCalls.some((call) => call.url.endsWith("/api/kernels") && call.init?.method === "POST")).toBe(
 			true,
 		);
@@ -223,8 +214,10 @@ describe("PythonKernel gateway lifecycle", () => {
 				return createResponse({ ok: true }) as unknown as Response;
 			}) as typeof fetch;
 
-			await expect(PythonKernel.start({ cwd: tempDir })).rejects.toThrow("Kernel gateway failed to start");
-			expect(env.spawnCalls).toHaveLength(1);
+			await expect(PythonKernel.start({ cwd: tempDir, useSharedGateway: false })).rejects.toThrow(
+				"Kernel gateway failed to start",
+			);
+			expect(env.spawnCalls).toHaveLength(3);
 		} finally {
 			Date.now = originalNow;
 		}
