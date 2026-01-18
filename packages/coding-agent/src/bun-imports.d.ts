@@ -14,3 +14,9 @@ declare module "*.txt" {
 	const content: string;
 	export default content;
 }
+
+// Python files imported as text
+declare module "*.py" {
+	const content: string;
+	export default content;
+}

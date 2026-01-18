@@ -25,9 +25,11 @@ import { createAgentSession, discoverAuthStorage, discoverModels } from "../../s
 import { SessionManager } from "../../session-manager";
 import { SettingsManager } from "../../settings-manager";
 import { untilAborted } from "../../utils";
+import { pythonSchema } from "../python";
 import type {
 	MCPToolCallResponse,
 	MCPToolMetadata,
+	PythonToolCallResponse,
 	SubagentWorkerRequest,
 	SubagentWorkerResponse,
 	SubagentWorkerStartPayload,
@@ -49,12 +51,25 @@ interface PendingMCPCall {
 	timeoutId: ReturnType<typeof setTimeout>;
 }
 
+interface PendingPythonCall {
+	resolve: (result: PythonToolCallResponse["result"]) => void;
+	reject: (error: Error) => void;
+	timeoutId: ReturnType<typeof setTimeout>;
+}
+
 const pendingMCPCalls = new Map<string, PendingMCPCall>();
+const pendingPythonCalls = new Map<string, PendingPythonCall>();
 const MCP_CALL_TIMEOUT_MS = 60_000;
+const PYTHON_CALL_TIMEOUT_MS = 300_000;
 let mcpCallIdCounter = 0;
+let pythonCallIdCounter = 0;
 
 function generateMCPCallId(): string {
 	return `mcp_${Date.now()}_${++mcpCallIdCounter}`;
+}
+
+function generatePythonCallId(): string {
+	return `python_${Date.now()}_${++pythonCallIdCounter}`;
 }
 
 function callMCPToolViaParent(
@@ -110,8 +125,69 @@ function callMCPToolViaParent(
 	});
 }
 
+function callPythonToolViaParent(
+	params: Record<string, unknown>,
+	signal?: AbortSignal,
+	timeoutMs = PYTHON_CALL_TIMEOUT_MS,
+): Promise<PythonToolCallResponse["result"]> {
+	return new Promise((resolve, reject) => {
+		const callId = generatePythonCallId();
+		if (signal?.aborted) {
+			reject(new Error("Aborted"));
+			return;
+		}
+
+		const timeoutId = setTimeout(() => {
+			pendingPythonCalls.delete(callId);
+			reject(new Error(`Python call timed out after ${timeoutMs}ms`));
+		}, timeoutMs);
+
+		const cleanup = () => {
+			clearTimeout(timeoutId);
+			pendingPythonCalls.delete(callId);
+		};
+
+		signal?.addEventListener(
+			"abort",
+			() => {
+				cleanup();
+				reject(new Error("Aborted"));
+			},
+			{ once: true },
+		);
+
+		pendingPythonCalls.set(callId, {
+			resolve: (result) => {
+				cleanup();
+				resolve(result ?? { content: [] });
+			},
+			reject: (error) => {
+				cleanup();
+				reject(error);
+			},
+			timeoutId,
+		});
+
+		postMessageSafe({
+			type: "python_tool_call",
+			callId,
+			params,
+		} as SubagentWorkerResponse);
+	});
+}
+
 function handleMCPToolResult(response: MCPToolCallResponse): void {
 	const pending = pendingMCPCalls.get(response.callId);
+	if (!pending) return;
+	if (response.error) {
+		pending.reject(new Error(response.error));
+	} else {
+		pending.resolve(response.result);
+	}
+}
+
+function handlePythonToolResult(response: PythonToolCallResponse): void {
+	const pending = pendingPythonCalls.get(response.callId);
 	if (!pending) return;
 	if (response.error) {
 		pending.reject(new Error(response.error));
@@ -151,6 +227,48 @@ function createMCPProxyTool(metadata: MCPToolMetadata): CustomTool<TSchema> {
 						},
 					],
 					details: { serverName: metadata.serverName, mcpToolName: metadata.mcpToolName, isError: true },
+				};
+			}
+		},
+	};
+}
+
+function getPythonCallTimeoutMs(params: Record<string, unknown>): number {
+	const timeout = params.timeout;
+	if (typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0) {
+		return timeout * 1000 + 5000;
+	}
+	return PYTHON_CALL_TIMEOUT_MS;
+}
+
+function createPythonProxyTool(): CustomTool<TSchema> {
+	return {
+		name: "python",
+		label: "Python",
+		description: "Execute Python code via the parent kernel.",
+		parameters: pythonSchema,
+		execute: async (_toolCallId, params, _onUpdate, _ctx, signal) => {
+			try {
+				const timeoutMs = getPythonCallTimeoutMs(params as Record<string, unknown>);
+				const result = await callPythonToolViaParent(params as Record<string, unknown>, signal, timeoutMs);
+				return {
+					content:
+						result?.content?.map((c) =>
+							c.type === "text"
+								? { type: "text" as const, text: c.text ?? "" }
+								: { type: "text" as const, text: JSON.stringify(c) },
+						) ?? [],
+					details: result?.details,
+				};
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Python error: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					details: { isError: true },
 				};
 			}
 		},
@@ -284,8 +402,10 @@ async function runTask(runState: RunState, payload: SubagentWorkerStartPayload):
 			checkAbort();
 		}
 
-		// Create MCP proxy tools if provided
+		// Create MCP/python proxy tools if provided
 		const mcpProxyTools = payload.mcpTools?.map(createMCPProxyTool) ?? [];
+		const pythonProxyTools = payload.pythonToolProxy ? [createPythonProxyTool()] : [];
+		const proxyTools = [...mcpProxyTools, ...pythonProxyTools];
 
 		// Resolve model override (equivalent to CLI's parseModelPattern with --model)
 		const { model, thinkingLevel: modelThinkingLevel } = resolveModelOverride(payload.model, modelRegistry);
@@ -325,8 +445,8 @@ async function runTask(runState: RunState, payload: SubagentWorkerStartPayload):
 			enableLsp: payload.enableLsp ?? true,
 			// Disable local MCP discovery if using proxy tools
 			enableMCP: !payload.mcpTools,
-			// Add MCP proxy tools
-			customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+			// Add proxy tools
+			customTools: proxyTools.length > 0 ? proxyTools : undefined,
 		});
 
 		runState.session = session;
@@ -565,6 +685,11 @@ globalThis.addEventListener("message", (event: WorkerMessageEvent<SubagentWorker
 
 	if (message.type === "mcp_tool_result") {
 		handleMCPToolResult(message);
+		return;
+	}
+
+	if (message.type === "python_tool_result") {
+		handlePythonToolResult(message);
 		return;
 	}
 

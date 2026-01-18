@@ -10,6 +10,9 @@ import type { EventBus } from "../../event-bus";
 import { callTool } from "../../mcp/client";
 import type { MCPManager } from "../../mcp/manager";
 import type { ModelRegistry } from "../../model-registry";
+import { checkPythonKernelAvailability } from "../../python-kernel";
+import type { ToolSession } from "..";
+import { createPythonTool } from "../python";
 import { ensureArtifactsDir, getArtifactPaths } from "./artifacts";
 import { resolveModelPattern } from "./model-resolver";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
@@ -26,6 +29,7 @@ import {
 import type {
 	MCPToolCallRequest,
 	MCPToolMetadata,
+	PythonToolCallRequest,
 	SubagentWorkerRequest,
 	SubagentWorkerResponse,
 } from "./worker-protocol";
@@ -52,7 +56,11 @@ export interface ExecutorOptions {
 	mcpManager?: MCPManager;
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
-	settingsManager?: { serialize: () => import("../../settings-manager").Settings };
+	settingsManager?: {
+		serialize: () => import("../../settings-manager").Settings;
+		getPythonToolMode?: () => "ipy-only" | "bash-only" | "both";
+		getPythonKernelMode?: () => "session" | "per-call";
+	};
 }
 
 /**
@@ -269,13 +277,34 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		}
 	}
 
+	const pythonToolMode = options.settingsManager?.getPythonToolMode?.() ?? "ipy-only";
+	if (toolNames?.includes("exec")) {
+		const expanded = toolNames.filter((name) => name !== "exec");
+		if (pythonToolMode === "bash-only") {
+			expanded.push("bash");
+		} else if (pythonToolMode === "ipy-only") {
+			expanded.push("python");
+		} else {
+			expanded.push("python", "bash");
+		}
+		toolNames = Array.from(new Set(expanded));
+	}
+
 	const serializedSettings = options.settingsManager?.serialize();
 	const availableModels = options.modelRegistry?.getAvailable().map((model) => `${model.provider}/${model.id}`);
 
 	// Resolve and add model
 	const resolvedModel = await resolveModelPattern(modelOverride || agent.model, availableModels, serializedSettings);
-	const sessionFile = subtaskSessionFile ?? options.sessionFile ?? null;
+	const parentSessionFile = options.sessionFile ?? null;
+	const sessionFile = subtaskSessionFile ?? parentSessionFile;
 	const spawnsEnv = agent.spawns === undefined ? "" : agent.spawns === "*" ? "*" : agent.spawns.join(",");
+
+	const pythonToolRequested = toolNames === undefined || toolNames.includes("python");
+	let pythonProxyEnabled = pythonToolRequested && pythonToolMode !== "bash-only";
+	if (pythonProxyEnabled) {
+		const availability = await checkPythonKernelAvailability(cwd);
+		pythonProxyEnabled = availability.ok;
+	}
 
 	let worker: Worker;
 	try {
@@ -311,6 +340,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	let finalize: ((message: Extract<SubagentWorkerResponse, { type: "done" }>) => void) | null = null;
 	const listenerController = new AbortController();
 	const listenerSignal = listenerController.signal;
+
+	const pythonToolSession: ToolSession = {
+		cwd,
+		hasUI: false,
+		enableLsp: false,
+		getSessionFile: () => parentSessionFile,
+		getSessionSpawns: () => spawnsEnv,
+		settings: options.settingsManager as ToolSession["settings"],
+		settingsManager: options.settingsManager,
+	};
+	const pythonTool = pythonProxyEnabled ? createPythonTool(pythonToolSession) : null;
 
 	// Accumulate usage incrementally from message_end events (no memory for streaming events)
 	const accumulatedUsage = {
@@ -606,6 +646,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			serializedModels: options.modelRegistry?.serialize(),
 			serializedSettings,
 			mcpTools: options.mcpManager ? extractMCPToolMetadata(options.mcpManager) : undefined,
+			pythonToolProxy: pythonProxyEnabled,
 		},
 	};
 
@@ -657,11 +698,44 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 		};
 
+		const handlePythonCall = async (request: PythonToolCallRequest) => {
+			if (!pythonTool) {
+				worker.postMessage({
+					type: "python_tool_result",
+					callId: request.callId,
+					error: "Python proxy not available",
+				});
+				return;
+			}
+			try {
+				const result = await pythonTool.execute(
+					request.callId,
+					request.params as { code: string; timeout?: number; workdir?: string; reset?: boolean },
+					signal,
+				);
+				worker.postMessage({
+					type: "python_tool_result",
+					callId: request.callId,
+					result: { content: result.content ?? [], details: result.details },
+				});
+			} catch (error) {
+				worker.postMessage({
+					type: "python_tool_result",
+					callId: request.callId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		};
+
 		const onMessage = (event: WorkerMessageEvent<SubagentWorkerResponse>) => {
 			const message = event.data;
 			if (!message || resolved) return;
 			if (message.type === "mcp_tool_call") {
 				handleMCPCall(message as MCPToolCallRequest);
+				return;
+			}
+			if (message.type === "python_tool_call") {
+				handlePythonCall(message as PythonToolCallRequest);
 				return;
 			}
 			if (message.type === "event") {

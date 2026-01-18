@@ -49,7 +49,7 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	codexMode?: boolean;
 }
 
-const CODEX_DEBUG = process.env.PI_CODEX_DEBUG === "1" || process.env.PI_CODEX_DEBUG === "true";
+const CODEX_DEBUG = process.env.OMP_CODEX_DEBUG === "1" || process.env.OMP_CODEX_DEBUG === "true";
 const CODEX_MAX_RETRIES = 2;
 const CODEX_RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 const CODEX_RETRY_DELAY_MS = 500;

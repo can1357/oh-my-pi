@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-
+import "./utils/migrate-env";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "readline";
 import { loginAnthropic } from "./utils/oauth/anthropic";

@@ -114,7 +114,10 @@ class SelectSubmenu extends Container {
 type TabId = string;
 
 const SETTINGS_TABS: Tab[] = [
-	{ id: "config", label: "Config" },
+	{ id: "behavior", label: "Behavior" },
+	{ id: "tools", label: "Tools" },
+	{ id: "display", label: "Display" },
+	{ id: "voice", label: "Voice" },
 	{ id: "status", label: "Status" },
 	{ id: "lsp", label: "LSP" },
 	{ id: "exa", label: "Exa" },
@@ -168,7 +171,7 @@ export class SettingsSelectorComponent extends Container {
 	private pluginComponent: PluginSettingsComponent | null = null;
 	private statusPreviewContainer: Container | null = null;
 	private statusPreviewText: Text | null = null;
-	private currentTabId: TabId = "config";
+	private currentTabId: TabId = "behavior";
 
 	private settingsManager: SettingsManager;
 	private context: SettingsRuntimeContext;
@@ -195,7 +198,7 @@ export class SettingsSelectorComponent extends Container {
 		this.addChild(new Spacer(1));
 
 		// Initialize with first tab
-		this.switchToTab("config");
+		this.switchToTab("behavior");
 
 		// Add bottom border
 		this.addChild(new DynamicBorder());

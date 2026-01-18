@@ -39,6 +39,23 @@ export interface MCPToolCallResponse {
 	error?: string;
 }
 
+export interface PythonToolCallRequest {
+	type: "python_tool_call";
+	callId: string;
+	params: Record<string, unknown>;
+}
+
+export interface PythonToolCallResponse {
+	type: "python_tool_result";
+	callId: string;
+	result?: {
+		content: Array<{ type: string; text?: string; [key: string]: unknown }>;
+		details?: unknown;
+		isError?: boolean;
+	};
+	error?: string;
+}
+
 export interface SubagentWorkerStartPayload {
 	cwd: string;
 	task: string;
@@ -54,14 +71,17 @@ export interface SubagentWorkerStartPayload {
 	serializedModels?: SerializedModelRegistry;
 	serializedSettings?: Settings;
 	mcpTools?: MCPToolMetadata[];
+	pythonToolProxy?: boolean;
 }
 
 export type SubagentWorkerRequest =
 	| { type: "start"; payload: SubagentWorkerStartPayload }
 	| { type: "abort" }
-	| MCPToolCallResponse;
+	| MCPToolCallResponse
+	| PythonToolCallResponse;
 
 export type SubagentWorkerResponse =
 	| { type: "event"; event: AgentEvent }
 	| { type: "done"; exitCode: number; durationMs: number; error?: string; aborted?: boolean }
-	| MCPToolCallRequest;
+	| MCPToolCallRequest
+	| PythonToolCallRequest;

@@ -24,6 +24,7 @@ export {
 } from "./lsp/index";
 export { createNotebookTool, type NotebookToolDetails } from "./notebook";
 export { createOutputTool, type OutputToolDetails } from "./output";
+export { createPythonTool, type PythonToolDetails } from "./python";
 export { createReadTool, type ReadToolDetails } from "./read";
 export { reportFindingTool, type SubmitReviewDetails } from "./review";
 export { createSshTool, type SSHToolDetails } from "./ssh";
@@ -63,6 +64,8 @@ export { createWriteTool, type WriteToolDetails } from "./write";
 
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { EventBus } from "../event-bus";
+import { logger } from "../logger";
+import { warmPythonEnvironment } from "../python-executor";
 import type { BashInterceptorRule } from "../settings-manager";
 import { createAskTool } from "./ask";
 import { createBashTool } from "./bash";
@@ -76,6 +79,7 @@ import { createLsTool } from "./ls";
 import { createLspTool } from "./lsp/index";
 import { createNotebookTool } from "./notebook";
 import { createOutputTool } from "./output";
+import { createPythonTool } from "./python";
 import { createReadTool } from "./read";
 import { reportFindingTool } from "./review";
 import { createSshTool } from "./ssh";
@@ -129,6 +133,8 @@ export interface ToolSession {
 		getBashInterceptorEnabled(): boolean;
 		getBashInterceptorSimpleLsEnabled(): boolean;
 		getBashInterceptorRules(): BashInterceptorRule[];
+		getPythonToolMode?(): "ipy-only" | "bash-only" | "both";
+		getPythonKernelMode?(): "session" | "per-call";
 	};
 }
 
@@ -137,6 +143,7 @@ type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;
 export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	ask: createAskTool,
 	bash: createBashTool,
+	python: createPythonTool,
 	calc: createCalculatorTool,
 	ssh: createSshTool,
 	edit: createEditTool,
@@ -162,6 +169,36 @@ export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
 
 export type ToolName = keyof typeof BUILTIN_TOOLS;
 
+export type PythonToolMode = "ipy-only" | "bash-only" | "both";
+
+/**
+ * Parse OMP_PY environment variable to determine Python tool mode.
+ * Returns null if not set or invalid.
+ *
+ * Values:
+ * - "0" or "bash" → bash-only
+ * - "1" or "py" → ipy-only
+ * - "mix" or "both" → both
+ */
+function getPythonModeFromEnv(): PythonToolMode | null {
+	const value = process.env.OMP_PY?.toLowerCase();
+	if (!value) return null;
+
+	switch (value) {
+		case "0":
+		case "bash":
+			return "bash-only";
+		case "1":
+		case "py":
+			return "ipy-only";
+		case "mix":
+		case "both":
+			return "both";
+		default:
+			return null;
+	}
+}
+
 /**
  * Create tools from BUILTIN_TOOLS registry.
  */
@@ -169,8 +206,39 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const includeComplete = session.requireCompleteTool === true;
 	const enableLsp = session.enableLsp ?? true;
 	const requestedTools = toolNames && toolNames.length > 0 ? [...new Set(toolNames)] : undefined;
+	const pythonMode = getPythonModeFromEnv() ?? session.settings?.getPythonToolMode?.() ?? "ipy-only";
+	let pythonAvailable = true;
+	const shouldCheckPython =
+		pythonMode !== "bash-only" &&
+		(requestedTools === undefined || requestedTools.includes("python") || pythonMode === "ipy-only");
+	if (shouldCheckPython) {
+		const warmup = await warmPythonEnvironment(session.cwd, session.getSessionFile?.() ?? `cwd:${session.cwd}`);
+		pythonAvailable = warmup.ok;
+		if (!warmup.ok) {
+			logger.warn("Python kernel unavailable, falling back to bash", {
+				reason: warmup.reason,
+			});
+		}
+	}
+	const effectiveMode = pythonAvailable ? pythonMode : "bash-only";
+	const allowBash = effectiveMode !== "ipy-only";
+	const allowPython = effectiveMode !== "bash-only";
+	if (
+		requestedTools &&
+		allowBash &&
+		!allowPython &&
+		requestedTools.includes("python") &&
+		!requestedTools.includes("bash")
+	) {
+		requestedTools.push("bash");
+	}
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
-	const isToolAllowed = (name: string) => (name === "lsp" ? enableLsp : true);
+	const isToolAllowed = (name: string) => {
+		if (name === "lsp") return enableLsp;
+		if (name === "bash") return allowBash;
+		if (name === "python") return allowPython;
+		return true;
+	};
 	if (includeComplete && requestedTools && !requestedTools.includes("complete")) {
 		requestedTools.push("complete");
 	}

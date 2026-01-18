@@ -6,16 +6,12 @@
  * - Direct calls from modes that need bash execution
  */
 
-import { createWriteStream, type WriteStream } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { Subprocess } from "bun";
-import { nanoid } from "nanoid";
-import stripAnsi from "strip-ansi";
-import { getShellConfig, killProcessTree, sanitizeBinaryOutput } from "../utils/shell";
+import { getShellConfig, killProcessTree } from "../utils/shell";
 import { getOrCreateSnapshot, getSnapshotSourceCommand } from "../utils/shell-snapshot";
+import { createOutputSink, pumpStream } from "./streaming-output";
 import type { BashOperations } from "./tools/bash";
-import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate";
+import { DEFAULT_MAX_BYTES } from "./tools/truncate";
 import { ScopeSignal } from "./utils";
 
 // ============================================================================
@@ -49,83 +45,6 @@ export interface BashResult {
 // ============================================================================
 // Implementation
 // ============================================================================
-
-function createSanitizer(): TransformStream<Uint8Array, string> {
-	const decoder = new TextDecoder();
-	return new TransformStream({
-		transform(chunk, controller) {
-			const text = sanitizeBinaryOutput(stripAnsi(decoder.decode(chunk, { stream: true }))).replace(/\r/g, "");
-			controller.enqueue(text);
-		},
-	});
-}
-
-async function pumpStream(readable: ReadableStream<Uint8Array>, writer: WritableStreamDefaultWriter<string>) {
-	const reader = readable.pipeThrough(createSanitizer()).getReader();
-	try {
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			await writer.write(value);
-		}
-	} finally {
-		reader.releaseLock();
-	}
-}
-
-function createOutputSink(
-	spillThreshold: number,
-	maxBuffer: number,
-	onChunk?: (text: string) => void,
-): WritableStream<string> & {
-	dump: (annotation?: string) => { output: string; truncated: boolean; fullOutputPath?: string };
-} {
-	const chunks: string[] = [];
-	let chunkBytes = 0;
-	let totalBytes = 0;
-	let fullOutputPath: string | undefined;
-	let fullOutputStream: WriteStream | undefined;
-
-	const sink = new WritableStream<string>({
-		write(text) {
-			totalBytes += text.length;
-
-			// Spill to temp file if needed
-			if (totalBytes > spillThreshold && !fullOutputPath) {
-				fullOutputPath = join(tmpdir(), `omp-${nanoid()}.buffer`);
-				const ts = createWriteStream(fullOutputPath);
-				chunks.forEach((c) => {
-					ts.write(c);
-				});
-				fullOutputStream = ts;
-			}
-			fullOutputStream?.write(text);
-
-			// Rolling buffer
-			chunks.push(text);
-			chunkBytes += text.length;
-			while (chunkBytes > maxBuffer && chunks.length > 1) {
-				chunkBytes -= chunks.shift()!.length;
-			}
-
-			onChunk?.(text);
-		},
-		close() {
-			fullOutputStream?.end();
-		},
-	});
-
-	return Object.assign(sink, {
-		dump(annotation?: string) {
-			if (annotation) {
-				chunks.push(`\n\n${annotation}`);
-			}
-			const full = chunks.join("");
-			const { content, truncated } = truncateTail(full);
-			return { output: truncated ? content : full, truncated, fullOutputPath: fullOutputPath };
-		},
-	});
-}
 
 /**
  * Execute a bash command with optional streaming and cancellation support.

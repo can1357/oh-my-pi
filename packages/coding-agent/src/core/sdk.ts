@@ -66,6 +66,7 @@ import { convertToLlm } from "./messages";
 import { ModelRegistry } from "./model-registry";
 import { formatModelString, parseModelString } from "./model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./prompt-templates";
+import { disposeAllKernelSessions } from "./python-executor";
 import { SessionManager } from "./session-manager";
 import { type Settings, SettingsManager, type SkillsSettings } from "./settings-manager";
 import { loadSkills as loadSkillsInternal, type Skill, type SkillWarning } from "./skills";
@@ -88,6 +89,7 @@ import {
 	createGitTool,
 	createGrepTool,
 	createLsTool,
+	createPythonTool,
 	createReadTool,
 	createSshTool,
 	createTools,
@@ -217,6 +219,7 @@ export {
 	// Individual tool factories (for custom usage)
 	createReadTool,
 	createBashTool,
+	createPythonTool,
 	createSshTool,
 	createEditTool,
 	createWriteTool,
@@ -441,6 +444,16 @@ function registerSshCleanup(): void {
 	registerAsyncCleanup(() => cleanupSshResources());
 }
 
+let pythonCleanupRegistered = false;
+
+function registerPythonCleanup(): void {
+	if (pythonCleanupRegistered) return;
+	pythonCleanupRegistered = true;
+	registerAsyncCleanup(async () => {
+		await disposeAllKernelSessions();
+	});
+}
+
 function customToolToDefinition(tool: CustomTool): ToolDefinition {
 	const definition: ToolDefinition & { [TOOL_DEFINITION_MARKER]: true } = {
 		name: tool.name,
@@ -541,6 +554,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const eventBus = options.eventBus ?? createEventBus();
 
 	registerSshCleanup();
+	registerPythonCleanup();
 
 	// Use provided or create AuthStorage and ModelRegistry
 	const authStorage = options.authStorage ?? (await discoverAuthStorage(agentDir));

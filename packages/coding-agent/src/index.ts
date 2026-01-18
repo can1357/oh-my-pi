@@ -209,6 +209,7 @@ export {
 	type LsOperations,
 	type LsToolDetails,
 	type LsToolOptions,
+	type PythonToolDetails,
 	type ReadToolDetails,
 	type TruncationOptions,
 	type TruncationResult,

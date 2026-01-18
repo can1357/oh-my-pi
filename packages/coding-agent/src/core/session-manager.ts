@@ -468,6 +468,14 @@ export function loadEntriesFromFile(filePath: string, storage: SessionStorage = 
  * Lightweight metadata for a session file, used in session picker UI.
  * Uses lazy getters to defer string formatting until actually displayed.
  */
+function sanitizeSessionName(value: string | undefined): string | undefined {
+	if (!value) return undefined;
+	const firstLine = value.split(/\r?\n/)[0] ?? "";
+	const stripped = firstLine.replace(/[\x00-\x1F\x7F]/g, "");
+	const trimmed = stripped.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
 class RecentSessionInfo {
 	readonly path: string;
 	readonly mtime: number;
@@ -476,13 +484,16 @@ class RecentSessionInfo {
 	#name: string | undefined;
 	#timeAgo: string | undefined;
 
-	constructor(path: string, mtime: number, header: Record<string, unknown>) {
+	constructor(path: string, mtime: number, header: Record<string, unknown>, firstPrompt?: string) {
 		this.path = path;
 		this.mtime = mtime;
 
-		// Extract title from session header, falling back to id if title is missing
+		// Extract title from session header, falling back to first user prompt, then id
 		const trystr = (v: unknown) => (typeof v === "string" ? v : undefined);
-		this.#fullName = trystr(header.title) ?? trystr(header.id);
+		this.#fullName =
+			sanitizeSessionName(trystr(header.title)) ??
+			sanitizeSessionName(firstPrompt) ??
+			sanitizeSessionName(trystr(header.id));
 	}
 
 	/** Full session name from header, or filename without extension as fallback */
@@ -509,25 +520,57 @@ class RecentSessionInfo {
 }
 
 /**
+ * Extracts the text content from a user message entry.
+ * Returns undefined if the entry is not a user message or has no text.
+ */
+function extractFirstUserPrompt(lines: string[]): string | undefined {
+	for (let i = 1; i < lines.length; i++) {
+		const line = lines[i];
+		if (!line?.trim()) continue;
+		try {
+			const entry = JSON.parse(line) as Record<string, unknown>;
+			if (entry.type !== "message") continue;
+			const message = entry.message as Record<string, unknown> | undefined;
+			if (message?.role !== "user") continue;
+			const content = message.content;
+			if (typeof content === "string") return content;
+			if (Array.isArray(content)) {
+				for (const block of content) {
+					if (typeof block === "object" && block !== null && "text" in block) {
+						const text = (block as { text: unknown }).text;
+						if (typeof text === "string") return text;
+					}
+				}
+			}
+		} catch {
+			// Invalid JSON, skip to next line
+		}
+	}
+	return undefined;
+}
+
+/**
  * Reads all session files from the directory and returns them sorted by mtime (newest first).
- * Uses low-level file I/O to efficiently read only the first 512 bytes of each file
- * to extract the JSON header without loading entire session logs into memory.
+ * Uses low-level file I/O to efficiently read only the first 4KB of each file
+ * to extract the JSON header and first user message without loading entire session logs into memory.
  */
 function getSortedSessions(sessionDir: string, storage: SessionStorage): RecentSessionInfo[] {
 	try {
-		const buf = Buffer.alloc(512);
+		const buf = Buffer.alloc(4096);
 		const files: string[] = storage.listFilesSync(sessionDir, "*.jsonl");
 		return files
 			.map((path: string) => {
 				try {
 					const length = storage.readTextPrefixSync(path, buf);
 					const content = buf.toString("utf-8", 0, length);
-					const firstLine = content.split("\n")[0];
+					const lines = content.split("\n");
+					const firstLine = lines[0];
 					if (!firstLine || !firstLine.trim()) return null;
 					const header = JSON.parse(firstLine) as Record<string, unknown>;
 					if (header.type !== "session" || typeof header.id !== "string") return null;
 					const mtime = storage.statSync(path).mtimeMs;
-					return new RecentSessionInfo(path, mtime, header);
+					const firstPrompt = header.title ? undefined : extractFirstUserPrompt(lines);
+					return new RecentSessionInfo(path, mtime, header, firstPrompt);
 				} catch {
 					return null;
 				}

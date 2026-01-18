@@ -17,6 +17,7 @@ import { lsToolRenderer } from "./ls";
 import { lspToolRenderer } from "./lsp/render";
 import { notebookToolRenderer } from "./notebook";
 import { outputToolRenderer } from "./output";
+import { pythonToolRenderer } from "./python";
 import { readToolRenderer } from "./read";
 import { sshToolRenderer } from "./ssh";
 import { taskToolRenderer } from "./task/render";
@@ -41,6 +42,7 @@ type ToolRenderer = {
 export const toolRenderers: Record<string, ToolRenderer> = {
 	ask: askToolRenderer as ToolRenderer,
 	bash: bashToolRenderer as ToolRenderer,
+	python: pythonToolRenderer as ToolRenderer,
 	calc: calculatorToolRenderer as ToolRenderer,
 	edit: editToolRenderer as ToolRenderer,
 	find: findToolRenderer as ToolRenderer,

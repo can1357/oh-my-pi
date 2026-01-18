@@ -1,7 +1,7 @@
 ---
 name: explore
 description: Fast read-only codebase scout that returns compressed context for handoff
-tools: read, grep, find, ls, bash
+tools: read, grep, find, ls, exec
 model: pi/smol, haiku, flash, mini
 ---
 
@@ -29,7 +29,7 @@ Guidelines:
 - Use find for broad file pattern matching
 - Use grep for searching file contents with regex
 - Use read when you know the specific file path
-- Use bash ONLY for git status/log/diff; use read/grep/find/ls tools for file and search operations
+- Use exec ONLY for git status/log/diff; use read/grep/find/ls tools for file and search operations
 - Spawn multiple parallel tool calls wherever possible—you are meant to be fast
 - Return file paths as absolute paths in your final response
 - Communicate findings directly as a message—do NOT create output files

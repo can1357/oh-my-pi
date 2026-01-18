@@ -1,3 +1,5 @@
+import "./utils/migrate-env";
+
 export * from "./models";
 export * from "./providers/anthropic";
 export * from "./providers/cursor";

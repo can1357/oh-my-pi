@@ -1,12 +1,29 @@
 import { describe, expect, it } from "bun:test";
 import { BUILTIN_TOOLS, createTools, HIDDEN_TOOLS, type ToolSession } from "./index";
 
+process.env.OMP_PYTHON_SKIP_CHECK = "1";
+
 function createTestSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
 		cwd: "/tmp/test",
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
+		...overrides,
+	};
+}
+
+function createBaseSettings(overrides: Partial<NonNullable<ToolSession["settings"]>> = {}) {
+	return {
+		getImageAutoResize: () => true,
+		getLspFormatOnWrite: () => true,
+		getLspDiagnosticsOnWrite: () => true,
+		getLspDiagnosticsOnEdit: () => false,
+		getEditFuzzyMatch: () => true,
+		getGitToolEnabled: () => true,
+		getBashInterceptorEnabled: () => true,
+		getBashInterceptorSimpleLsEnabled: () => true,
+		getBashInterceptorRules: () => [],
 		...overrides,
 	};
 }
@@ -18,7 +35,8 @@ describe("createTools", () => {
 		const names = tools.map((t) => t.name);
 
 		// Core tools should always be present
-		expect(names).toContain("bash");
+		expect(names).toContain("python");
+		expect(names).not.toContain("bash");
 		expect(names).toContain("calc");
 		expect(names).toContain("read");
 		expect(names).toContain("edit");
@@ -33,6 +51,34 @@ describe("createTools", () => {
 		expect(names).toContain("output");
 		expect(names).toContain("web_fetch");
 		expect(names).toContain("web_search");
+	});
+
+	it("includes bash and python when python mode is both", async () => {
+		const session = createTestSession({
+			settings: createBaseSettings({
+				getPythonToolMode: () => "both",
+				getPythonKernelMode: () => "session",
+			}),
+		});
+		const tools = await createTools(session);
+		const names = tools.map((t) => t.name);
+
+		expect(names).toContain("bash");
+		expect(names).toContain("python");
+	});
+
+	it("includes bash only when python mode is bash-only", async () => {
+		const session = createTestSession({
+			settings: createBaseSettings({
+				getPythonToolMode: () => "bash-only",
+				getPythonKernelMode: () => "session",
+			}),
+		});
+		const tools = await createTools(session);
+		const names = tools.map((t) => t.name);
+
+		expect(names).toContain("bash");
+		expect(names).not.toContain("python");
 	});
 
 	it("excludes lsp tool when session disables LSP", async () => {
@@ -93,17 +139,7 @@ describe("createTools", () => {
 
 	it("excludes git tool when disabled in settings", async () => {
 		const session = createTestSession({
-			settings: {
-				getImageAutoResize: () => true,
-				getLspFormatOnWrite: () => true,
-				getLspDiagnosticsOnWrite: () => true,
-				getLspDiagnosticsOnEdit: () => false,
-				getEditFuzzyMatch: () => true,
-				getGitToolEnabled: () => false,
-				getBashInterceptorEnabled: () => true,
-				getBashInterceptorSimpleLsEnabled: () => true,
-				getBashInterceptorRules: () => [],
-			},
+			settings: createBaseSettings({ getGitToolEnabled: () => false }),
 		});
 		const tools = await createTools(session);
 		const names = tools.map((t) => t.name);
@@ -113,17 +149,7 @@ describe("createTools", () => {
 
 	it("includes git tool when enabled in settings", async () => {
 		const session = createTestSession({
-			settings: {
-				getImageAutoResize: () => true,
-				getLspFormatOnWrite: () => true,
-				getLspDiagnosticsOnWrite: () => true,
-				getLspDiagnosticsOnEdit: () => false,
-				getEditFuzzyMatch: () => true,
-				getGitToolEnabled: () => true,
-				getBashInterceptorEnabled: () => true,
-				getBashInterceptorSimpleLsEnabled: () => true,
-				getBashInterceptorRules: () => [],
-			},
+			settings: createBaseSettings({ getGitToolEnabled: () => true }),
 		});
 		const tools = await createTools(session);
 		const names = tools.map((t) => t.name);
@@ -153,6 +179,7 @@ describe("createTools", () => {
 		const expectedTools = [
 			"ask",
 			"bash",
+			"python",
 			"calc",
 			"ssh",
 			"edit",

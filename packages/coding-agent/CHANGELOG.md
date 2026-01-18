@@ -1,9 +1,12 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Added
 
+- Added IPython-backed Python tool with streaming output, image/JSON rendering, and Jupyter kernel gateway integration
+- Added Python prelude with 30+ shell-like utility functions for file operations
+- Added Python tool exposure settings with session-scoped kernel reuse and fallback behavior
+- Added streaming output system with automatic spill-to-disk for large outputs
 - Added extension input interception with source metadata and command argument completion
 - Added extension command context `compact()` helper plus context usage accessors
 - Added ExtensionAPI `setLabel()` for extension and entry labels
@@ -21,6 +24,8 @@
 
 ### Changed
 
+- Reorganized settings interface into behavior, tools, display, voice, status, lsp, and exa tabs
+- Migrated environment variables from PI_ to OMP_ prefix with automatic migration
 - Updated model selector to use TabBar component for provider navigation
 - Changed role badges to inverted style with colored backgrounds
 - Added support for /models command alias in addition to /model

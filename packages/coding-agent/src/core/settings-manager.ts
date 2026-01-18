@@ -112,6 +112,14 @@ export interface LspSettings {
 	diagnosticsOnEdit?: boolean; // default: false (return LSP diagnostics after edit tool edits code files)
 }
 
+export type PythonToolMode = "ipy-only" | "bash-only" | "both";
+export type PythonKernelMode = "session" | "per-call";
+
+export interface PythonSettings {
+	toolMode?: PythonToolMode;
+	kernelMode?: PythonKernelMode;
+}
+
 export interface EditSettings {
 	fuzzyMatch?: boolean; // default: true (accept high-confidence fuzzy matches for whitespace/indentation)
 }
@@ -215,6 +223,7 @@ export interface Settings {
 	git?: GitSettings;
 	mcp?: MCPSettings;
 	lsp?: LspSettings;
+	python?: PythonSettings;
 	edit?: EditSettings;
 	ttsr?: TtsrSettings;
 	todoCompletion?: TodoCompletionSettings;
@@ -307,6 +316,7 @@ const DEFAULT_SETTINGS: Settings = {
 	git: { enabled: false },
 	mcp: { enableProjectConfig: true },
 	lsp: { formatOnWrite: false, diagnosticsOnWrite: true, diagnosticsOnEdit: false },
+	python: { toolMode: "ipy-only", kernelMode: "session" },
 	edit: { fuzzyMatch: true },
 	ttsr: { enabled: true, contextMode: "discard", repeatMode: "once", repeatGap: 10 },
 	voice: {
@@ -383,6 +393,22 @@ function normalizeSettings(settings: Settings): Settings {
 		...merged,
 		symbolPreset,
 		bashInterceptor: normalizeBashInterceptorSettings(merged.bashInterceptor),
+		python: normalizePythonSettings(merged.python),
+	};
+}
+
+function normalizePythonSettings(settings: PythonSettings | undefined): PythonSettings {
+	const toolMode = settings?.toolMode;
+	const kernelMode = settings?.kernelMode;
+	return {
+		toolMode:
+			toolMode === "ipy-only" || toolMode === "bash-only" || toolMode === "both"
+				? toolMode
+				: (DEFAULT_SETTINGS.python?.toolMode ?? "ipy-only"),
+		kernelMode:
+			kernelMode === "session" || kernelMode === "per-call"
+				? kernelMode
+				: (DEFAULT_SETTINGS.python?.kernelMode ?? "session"),
 	};
 }
 
@@ -787,6 +813,30 @@ export class SettingsManager {
 		};
 	}
 
+	getRetryMaxRetries(): number {
+		return this.settings.retry?.maxRetries ?? 3;
+	}
+
+	async setRetryMaxRetries(maxRetries: number): Promise<void> {
+		if (!this.globalSettings.retry) {
+			this.globalSettings.retry = {};
+		}
+		this.globalSettings.retry.maxRetries = maxRetries;
+		await this.save();
+	}
+
+	getRetryBaseDelayMs(): number {
+		return this.settings.retry?.baseDelayMs ?? 2000;
+	}
+
+	async setRetryBaseDelayMs(baseDelayMs: number): Promise<void> {
+		if (!this.globalSettings.retry) {
+			this.globalSettings.retry = {};
+		}
+		this.globalSettings.retry.baseDelayMs = baseDelayMs;
+		await this.save();
+	}
+
 	getTodoCompletionSettings(): { enabled: boolean; maxReminders: number } {
 		return {
 			enabled: this.settings.todoCompletion?.enabled ?? false,
@@ -901,11 +951,43 @@ export class SettingsManager {
 		return this.settings.skills?.enableSkillCommands ?? true;
 	}
 
+	async setEnableSkillCommands(enabled: boolean): Promise<void> {
+		if (!this.globalSettings.skills) {
+			this.globalSettings.skills = {};
+		}
+		this.globalSettings.skills.enableSkillCommands = enabled;
+		await this.save();
+	}
+
 	getCommandsSettings(): Required<CommandsSettings> {
 		return {
 			enableClaudeUser: this.settings.commands?.enableClaudeUser ?? true,
 			enableClaudeProject: this.settings.commands?.enableClaudeProject ?? true,
 		};
+	}
+
+	getCommandsEnableClaudeUser(): boolean {
+		return this.settings.commands?.enableClaudeUser ?? true;
+	}
+
+	async setCommandsEnableClaudeUser(enabled: boolean): Promise<void> {
+		if (!this.globalSettings.commands) {
+			this.globalSettings.commands = {};
+		}
+		this.globalSettings.commands.enableClaudeUser = enabled;
+		await this.save();
+	}
+
+	getCommandsEnableClaudeProject(): boolean {
+		return this.settings.commands?.enableClaudeProject ?? true;
+	}
+
+	async setCommandsEnableClaudeProject(enabled: boolean): Promise<void> {
+		if (!this.globalSettings.commands) {
+			this.globalSettings.commands = {};
+		}
+		this.globalSettings.commands.enableClaudeProject = enabled;
+		await this.save();
 	}
 
 	getShowImages(): boolean {
@@ -1064,8 +1146,40 @@ export class SettingsManager {
 		await this.save();
 	}
 
+	async setBashInterceptorSimpleLsEnabled(enabled: boolean): Promise<void> {
+		if (!this.globalSettings.bashInterceptor) {
+			this.globalSettings.bashInterceptor = {};
+		}
+		this.globalSettings.bashInterceptor.simpleLs = enabled;
+		await this.save();
+	}
+
 	getGitToolEnabled(): boolean {
 		return this.settings.git?.enabled ?? false;
+	}
+
+	getPythonToolMode(): PythonToolMode {
+		return this.settings.python?.toolMode ?? "ipy-only";
+	}
+
+	async setPythonToolMode(mode: PythonToolMode): Promise<void> {
+		if (!this.globalSettings.python) {
+			this.globalSettings.python = {};
+		}
+		this.globalSettings.python.toolMode = mode;
+		await this.save();
+	}
+
+	getPythonKernelMode(): PythonKernelMode {
+		return this.settings.python?.kernelMode ?? "session";
+	}
+
+	async setPythonKernelMode(mode: PythonKernelMode): Promise<void> {
+		if (!this.globalSettings.python) {
+			this.globalSettings.python = {};
+		}
+		this.globalSettings.python.kernelMode = mode;
+		await this.save();
 	}
 
 	async setGitToolEnabled(enabled: boolean): Promise<void> {
@@ -1262,6 +1376,42 @@ export class SettingsManager {
 		await this.save();
 	}
 
+	getVoiceTtsModel(): string {
+		return this.settings.voice?.ttsModel ?? "gpt-4o-mini-tts";
+	}
+
+	async setVoiceTtsModel(model: string): Promise<void> {
+		if (!this.globalSettings.voice) {
+			this.globalSettings.voice = {};
+		}
+		this.globalSettings.voice.ttsModel = model;
+		await this.save();
+	}
+
+	getVoiceTtsVoice(): string {
+		return this.settings.voice?.ttsVoice ?? "alloy";
+	}
+
+	async setVoiceTtsVoice(voice: string): Promise<void> {
+		if (!this.globalSettings.voice) {
+			this.globalSettings.voice = {};
+		}
+		this.globalSettings.voice.ttsVoice = voice;
+		await this.save();
+	}
+
+	getVoiceTtsFormat(): "wav" | "mp3" | "opus" | "aac" | "flac" {
+		return this.settings.voice?.ttsFormat ?? "wav";
+	}
+
+	async setVoiceTtsFormat(format: "wav" | "mp3" | "opus" | "aac" | "flac"): Promise<void> {
+		if (!this.globalSettings.voice) {
+			this.globalSettings.voice = {};
+		}
+		this.globalSettings.voice.ttsFormat = format;
+		await this.save();
+	}
+
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Status Line Settings
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -1398,7 +1548,7 @@ export class SettingsManager {
 			return this.settings.showHardwareCursor;
 		}
 		// Check env var override
-		const envVar = process.env.PI_HARDWARE_CURSOR?.toLowerCase();
+		const envVar = process.env.OMP_HARDWARE_CURSOR?.toLowerCase();
 		if (envVar === "0" || envVar === "false") return false;
 		if (envVar === "1" || envVar === "true") return true;
 		// Default to true on Linux/macOS for IME support

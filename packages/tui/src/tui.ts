@@ -227,7 +227,7 @@ export class TUI extends Container {
 	private hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
 	private inputBuffer = ""; // Buffer for parsing terminal responses
 	private cellSizeQueryPending = false;
-	private showHardwareCursor = process.env.PI_HARDWARE_CURSOR === "1";
+	private showHardwareCursor = process.env.OMP_HARDWARE_CURSOR === "1";
 
 	// Overlay stack for modal components rendered on top of base content
 	private overlayStack: {

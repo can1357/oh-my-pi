@@ -13,6 +13,7 @@ import {
 import stripAnsi from "strip-ansi";
 import { BASH_DEFAULT_PREVIEW_LINES } from "../../../core/tools/bash";
 import { computeEditDiff, type EditDiffError, type EditDiffResult } from "../../../core/tools/edit-diff";
+import { PYTHON_DEFAULT_PREVIEW_LINES } from "../../../core/tools/python";
 import { toolRenderers } from "../../../core/tools/renderers";
 import { convertToPng } from "../../../utils/image-convert";
 import { sanitizeBinaryOutput } from "../../../utils/shell";
@@ -507,6 +508,12 @@ export class ToolExecutionComponent extends Container {
 			context.output = output;
 			context.expanded = this.expanded;
 			context.previewLines = BASH_DEFAULT_PREVIEW_LINES;
+			context.timeout = typeof this.args?.timeout === "number" ? this.args.timeout : undefined;
+		} else if (this.toolName === "python" && this.result) {
+			const output = this.getTextOutput().trim();
+			context.output = output;
+			context.expanded = this.expanded;
+			context.previewLines = PYTHON_DEFAULT_PREVIEW_LINES;
 			context.timeout = typeof this.args?.timeout === "number" ? this.args.timeout : undefined;
 		} else if (this.toolName === "edit") {
 			// Edit needs diff preview and renderDiff function

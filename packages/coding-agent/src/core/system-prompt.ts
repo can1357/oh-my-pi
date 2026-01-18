@@ -76,6 +76,7 @@ const toolDescriptions: Record<ToolName, string> = {
 	ask: "Ask user for input or clarification",
 	read: "Read file contents",
 	bash: "Execute bash commands (npm, docker, etc.)",
+	python: "Execute Python code via a session-backed IPython kernel",
 	calc: "{ calculations: array of { expression: string, prefix: string, suffix: string } } Basic calculations.",
 	ssh: "Execute commands on remote hosts via SSH",
 	edit: "Make surgical edits to files (find exact text and replace)",
@@ -672,7 +673,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 
 	// Build tool descriptions array
 	// Priority: toolNames (explicit list) > tools (Map) > defaults
-	const defaultToolNames: ToolName[] = ["read", "bash", "edit", "write"];
+	// Default includes both bash and python; actual availability determined by settings in createTools
+	const defaultToolNames: ToolName[] = ["read", "bash", "python", "edit", "write"];
 	let toolNamesArray: string[];
 	if (toolNames !== undefined) {
 		// Explicit toolNames list provided (could be empty)

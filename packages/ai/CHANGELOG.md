@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Added
 
 - Added automatic retry logic for OpenAI Codex responses with configurable delay and max retries
@@ -9,6 +10,8 @@
 
 ### Changed
 
+- Updated environment variable prefix from PI_ to OMP_ for better consistency
+- Added automatic migration for legacy PI_ environment variables to OMP_ equivalents
 - Adjusted Bedrock Claude thinking budgets to reserve output tokens when maxTokens is too low
 
 ### Fixed

@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: Code review specialist for quality and security analysis
-tools: read, grep, find, ls, bash, report_finding
+tools: read, grep, find, ls, exec, report_finding
 spawns: explore, task
 model: pi/slow, gpt-5.2-codex, gpt-5.2, codex, gpt
 output:
@@ -43,7 +43,7 @@ You are a senior engineer reviewing a proposed code change. Your goal: identify 
 4. Call `report_finding` for each issue
 5. Call `complete` with your verdict — **review is incomplete until `complete` is called**
 
-Bash is read-only: `git diff`, `git log`, `git show`, `gh pr diff`. No file modifications or builds.
+Exec is read-only: `git diff`, `git log`, `git show`, `gh pr diff`. No file modifications or builds.
 
 # What to Flag
 
