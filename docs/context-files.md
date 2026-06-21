@@ -138,7 +138,7 @@ You MUST follow the context files below for all tasks:
 </repo-rules>
 ```
 
-When `SYSTEM.md` selects the bundled custom-prompt template, the same files are emitted in that template's `<project>` / `<instructions>` section instead. In either mode, the agent sees each file's absolute path and fully expanded Markdown content (with `@` imports already resolved).
+Context files always render in the Project zone (`project-prompt.md`) as `<repo-rules>` entries. `SYSTEM.md` replaces only the System zone and does not move these files into a separate custom-prompt template. The agent sees each file's absolute path and fully expanded Markdown content (with `@` imports already resolved).
 
 Loading is automatic — there is no need to instruct the agent to search for `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, or similar files during a session.
 

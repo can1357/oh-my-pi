@@ -233,13 +233,13 @@ After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` appl
 ### `description`
 
 - Required for inclusion in rulebook.
-- Rendered in the system prompt rulebook block (`<domain-rules>` in the default template, `<rules>` in the custom-prompt template).
+- Rendered in the system prompt rulebook block (`<domain-rules>` in the unified template).
 - Missing description keeps the rule out of the rulebook listing; unless it is always-apply or an accepted TTSR rule, it is also not addressable via `rule://`.
 
 ### `globs`
 
 - Carried through on `Rule`.
-- Rendered inline in the default prompt's rulebook listing (`- <name> (<glob>, ...): <description>`); the custom-prompt template renders them as `<glob>...</glob>` entries.
+- Rendered inline in the prompt's rulebook listing (`- <name> (<glob>, ...): <description>`).
 - Exposed in rules UI state (`extensions` mode list).
 - Used by TTSR as a global path gate: if a TTSR rule has globs, the match context must include at least one matching file path.
 - Not used to automatically select rulebook rules for `rule://`; rulebook matching remains advisory prompt behavior.
@@ -305,9 +305,9 @@ After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` appl
 
 `buildSystemPromptInternal` receives both `rules` (rulebook) and `alwaysApplyRules`.
 
-Always-apply rules are deduped against the effective system/custom/append prompt sources and loaded context-file bodies. A rule whose normalized content already appears in one of those sources is omitted from automatic injection. Remaining raw bodies render before the rulebook listing: inside `<generic-rules>` in the default template and directly in the bundled custom-prompt template.
+Always-apply rules are deduplicated against the effective custom/append prompt sources and loaded context-file bodies. Remaining raw bodies render inside `<generic-rules>` before the rulebook listing.
 
-Rulebook rules are rendered in a `<domain-rules>` block as `- <name> (<globs>): <description>` lines; the URL list in the prompt documents `rule://<name>` and the workflow section tells the model to read relevant rules first. The custom-prompt template (`custom-system-prompt.md`) instead renders `<rule name="...">` entries with `<glob>` children under an explicit "You MUST read `rule://<name>`" instruction.
+Rulebook rules are rendered in a `<domain-rules>` block as `- <name> (<globs>): <description>` lines; the URL list in the prompt documents `rule://<name>` and the workflow section tells the model to read relevant rules first.
 
 This is advisory/contextual: prompt text asks the model to read applicable rules, but code does not enforce glob applicability.
 
