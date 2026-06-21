@@ -28,7 +28,6 @@ import { loadSkills, type Skill } from "./extensibility/skills";
 import { hasObsidian } from "./internal-urls/vault-protocol";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
 import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
-import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
@@ -138,13 +137,6 @@ function dedupeAlwaysApplyRules(
 	return alwaysApplyRules.filter(
 		rule => !promptSources.some(source => promptSourceContainsRule(source, rule.content)),
 	);
-}
-
-function dedupePromptSource(source: string | null | undefined, otherSources: Array<string | null | undefined>): string {
-	const resolvedSource = firstNonEmpty(source);
-	if (!resolvedSource) return "";
-
-	return otherSources.some(otherSource => promptSourceContainsRule(otherSource, resolvedSource)) ? "" : resolvedSource;
 }
 
 function firstNonEmpty(...values: (string | undefined | null)[]): string | null {
@@ -576,9 +568,9 @@ export function projectSystemPromptToolMetadata(
 }
 
 export interface BuildSystemPromptOptions {
-	/** Custom system prompt (replaces default). */
+	/** Custom System-zone text. Replaces bundled role/personality/workflow/delivery. */
 	customPrompt?: string;
-	/** Already-loaded custom system prompt text; bypasses path resolution. */
+	/** Already-loaded custom System-zone text; bypasses path resolution. */
 	resolvedCustomPrompt?: string;
 	/** Tools to include in prompt. */
 	tools?: Map<string, SystemPromptToolMetadata>;
@@ -591,9 +583,9 @@ export interface BuildSystemPromptOptions {
 	 * bridge-reachable tool in `toolNames`.
 	 */
 	directToolNames?: readonly string[];
-	/** Text to append to system prompt. */
+	/** Append-zone text rendered after the selected System zone. */
 	appendSystemPrompt?: string;
-	/** Already-loaded append prompt text; bypasses path resolution. */
+	/** Already-loaded Append-zone text; bypasses path resolution. */
 	resolvedAppendSystemPrompt?: string;
 	/** Inline full tool descriptors in the system prompt. Default: false */
 	inlineToolDescriptors?: boolean;
@@ -677,10 +669,9 @@ export interface BuildSystemPromptResult {
 	systemPrompt: string[];
 	/**
 	 * Names of `xd://` devices whose catalog/protocol section this prompt renders.
-	 * Empty/undefined when no catalog was emitted (no mounted devices, or a custom
-	 * prompt template that omits the section). Lets the session fold these devices
-	 * into its announced-mount baseline so a same-turn mount notice does not re-list
-	 * a catalog the prompt already carries (issue #7139).
+	 * Empty/undefined when no catalog was emitted (no mounted devices). Lets the
+	 * session fold these devices into its announced-mount baseline so a same-turn
+	 * mount notice does not re-list a catalog the prompt already carries (issue #7139).
 	 */
 	xdevCatalogNames?: readonly string[];
 }
@@ -740,7 +731,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const prepDefaults = {
 		resolvedCustomPrompt: undefined as string | undefined,
 		resolvedAppendPrompt: undefined as string | undefined,
-		systemPromptCustomization: null as string | null,
 		contextFiles: dedupeContainedContextFiles(providedContextFiles ?? []),
 		skills: providedSkills ?? ([] as Skill[]),
 		workspaceTree: {
@@ -786,15 +776,16 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		return result.value;
 	}
 
-	// Caller-supplied `customPrompt` / `resolvedCustomPrompt` owns block 0; the
-	// secondary capability-path `SYSTEM.md` walk-up MUST NOT silently augment it,
-	// because that would defeat CLI precedence over project/user `SYSTEM.md`.
-	const callerControlsCustomPrompt =
-		(typeof providedResolvedCustomPrompt === "string" && providedResolvedCustomPrompt.length > 0) ||
-		(typeof customPrompt === "string" && customPrompt.length > 0);
-	const systemPromptCustomizationPromise: Promise<string | null> = callerControlsCustomPrompt
-		? Promise.resolve(null)
-		: logger.time("loadSystemPromptFiles", loadSystemPromptFiles, { cwd: resolvedCwd });
+	// CLI startup owns SYSTEM.md discovery and passes the selected text as
+	// resolvedCustomPrompt. buildSystemPrompt MUST NOT walk SYSTEM.md itself:
+	// that would let an ancestor file override the default System zone when
+	// cwd-scoped discovery intentionally found none.
+	const customPromptPromise =
+		providedResolvedCustomPrompt !== undefined
+			? Promise.resolve(providedResolvedCustomPrompt)
+			: customPrompt !== undefined
+				? resolvePromptInput(customPrompt, "system prompt")
+				: Promise.resolve(undefined);
 	const contextFilesPromise = (async () => {
 		const primary = providedContextFiles
 			? providedContextFiles
@@ -855,7 +846,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const [
 		resolvedCustomPrompt,
 		resolvedAppendPrompt,
-		systemPromptCustomization,
 		contextFiles,
 		skills,
 		workspaceTree,
@@ -864,13 +854,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		gpu,
 		personalityBlock,
 	] = await Promise.all([
-		withDeadline(
-			"customPrompt",
-			providedResolvedCustomPrompt !== undefined
-				? Promise.resolve(providedResolvedCustomPrompt)
-				: resolvePromptInput(customPrompt, "system prompt"),
-			prepDefaults.resolvedCustomPrompt,
-		),
+		withDeadline("customPrompt", customPromptPromise, prepDefaults.resolvedCustomPrompt),
 		withDeadline(
 			"appendSystemPrompt",
 			providedResolvedAppendPrompt !== undefined
@@ -878,7 +862,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 				: resolvePromptInput(appendSystemPrompt, "append system prompt"),
 			prepDefaults.resolvedAppendPrompt,
 		),
-		withDeadline("loadSystemPromptFiles", systemPromptCustomizationPromise, prepDefaults.systemPromptCustomization),
 		withDeadline("loadProjectContextFiles", contextFilesPromise, prepDefaults.contextFiles).then(
 			dedupeContainedContextFiles,
 		),
@@ -971,24 +954,15 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const hasRead = toolNames.includes("read");
 	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
 
-	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
-		resolvedCustomPrompt,
-		resolvedAppendPrompt,
-	]);
 	const contextPromptSources = contextFiles.map(file => file.content);
-	const promptSources = [
-		effectiveSystemPromptCustomization,
-		resolvedCustomPrompt,
-		resolvedAppendPrompt,
-		...contextPromptSources,
-	];
+	const promptSources = [resolvedCustomPrompt, resolvedAppendPrompt, ...contextPromptSources];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
 	const environment = getEnvironmentInfo(cpuModel, gpu);
 	const data = {
-		systemPromptCustomization: effectiveSystemPromptCustomization,
 		customPrompt: resolvedCustomPrompt,
 		appendPrompt: resolvedAppendPrompt ?? "",
+		computerSafetyPrompt: toolNames.includes("computer") ? computerSafetyPrompt.trim() : "",
 		tools: [...new Set([...toolNames, ...xdevTools.map(mounted => mounted.name)])],
 		toolInfo,
 		toolInventory,
@@ -1030,16 +1004,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		autoQaEnabled,
 		writeTransportOnly,
 	};
-	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
+	const rendered = prompt.render(systemPromptTemplate, data);
 	const systemPrompt = [rendered];
-	if (computerEnabled) {
-		systemPrompt.push(computerSafetyPrompt.trim());
-	}
-	// Custom prompt templates already render context files and append text; the
-	// project footer still carries environment, cwd, workspace, and dir-context.
-	const projectPrompt = prompt
-		.render(projectPromptTemplate, resolvedCustomPrompt ? { ...data, contextFiles: [], appendPrompt: "" } : data)
-		.trim();
+	const projectPrompt = prompt.render(projectPromptTemplate, data).trim();
 	if (projectPrompt) {
 		systemPrompt.push(projectPrompt);
 	}
@@ -1047,9 +1014,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		systemPrompt.push(activeRepoContextPrompt);
 	}
 
-	// The xd:// protocol section (with its device catalog) is only rendered by the
-	// default template; a resolved custom prompt uses a template that omits it.
-	const xdevCatalogNames =
-		!resolvedCustomPrompt && xdevTools.length > 0 ? xdevTools.map(mounted => mounted.name) : undefined;
+	const xdevCatalogNames = xdevTools.length > 0 ? xdevTools.map(mounted => mounted.name) : undefined;
 	return { systemPrompt, xdevCatalogNames };
 }

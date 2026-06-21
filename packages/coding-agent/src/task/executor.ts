@@ -3415,7 +3415,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
-			// Root resolved by the latest roster ensure; the prompt callback renders
+			// Root resolved by the latest roster ensure; the prompt renders
 			// live peer rows scoped to it, so a session switch hides stale parked trees.
 			let ircRootSessionFile: string | undefined;
 
@@ -3432,7 +3432,27 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// while the replacement builds) and the revived prompt resurrects
 				// the launch-time pooled instructions against an ordinary runtime.
 				forRevive = false,
-			): CreateAgentSessionOptions => ({
+			): CreateAgentSessionOptions => {
+				const ircRoster = ircEnabled
+					? collectIrcPeerRoster(AgentRegistry.global(), id, ircRootSessionFile)
+					: undefined;
+				const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
+					agent: agent.systemPrompt,
+					context: options.context?.trim() ?? "",
+					planReference: options.planReference?.content ?? "",
+					planReferencePath: options.planReference?.path ?? "",
+					worktree: worktree ?? "",
+					outputSchema: normalizedOutputSchema,
+					outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
+					workPoolYieldItems:
+						AgentRegistry.global().get(id)?.session?.getWorkPoolYieldItems?.() ??
+						(forRevive ? [] : (options.workPoolYieldItems ?? [])),
+					ircPeers: ircRoster?.peers ?? [],
+					ircParkedCount: ircRoster?.parkedCount ?? 0,
+					ircOmittedCount: ircRoster?.omittedCount ?? 0,
+					ircSelfId: ircEnabled ? id : "",
+				});
+				return {
 				cwd: worktree ?? cwd,
 				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
 				authStorage,
@@ -3463,36 +3483,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 				preloadedPreparedExtensions: restrictToolNames ? [] : options.preloadedPreparedExtensions,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
-				systemPrompt: defaultPrompt => {
-					const ircRoster = ircEnabled
-						? collectIrcPeerRoster(AgentRegistry.global(), id, ircRootSessionFile)
-						: undefined;
-					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
-						agent: agent.systemPrompt,
-						context: options.context?.trim() ?? "",
-						planReference: options.planReference?.content ?? "",
-						planReferencePath: options.planReference?.path ?? "",
-						worktree: worktree ?? "",
-						outputSchema: normalizedOutputSchema,
-						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-						// Read the live item set through the registry instead of capturing
-						// the session: this callback outlives the turn via the lifecycle
-						// reviver, and a captured session would pin its whole graph past
-						// TTL park disposal. Parked revivals build while the registry
-						// session is null, so render the cleared set rather than
-						// resurrecting the launch-time pooled instructions.
-						workPoolYieldItems:
-							AgentRegistry.global().get(id)?.session?.getWorkPoolYieldItems?.() ??
-							(forRevive ? [] : (options.workPoolYieldItems ?? [])),
-						ircPeers: ircRoster?.peers ?? [],
-						ircParkedCount: ircRoster?.parkedCount ?? 0,
-						ircOmittedCount: ircRoster?.omittedCount ?? 0,
-						ircSelfId: ircEnabled ? id : "",
-					});
-					return defaultPrompt.length === 0
-						? [subagentPrompt]
-						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
-				},
+				customSystemPrompt: subagentPrompt,
 				sessionManager: sessionManagerForRun,
 				hasUI: false,
 				prewalk,
@@ -3522,7 +3513,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				onFirstChatDispatch: () => {
 					firstChatDispatchAt ??= performance.now();
 				},
-			});
+			};
+			};
 
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
 			if (options.parentArtifactManager) {

@@ -429,9 +429,9 @@ export interface CreateAgentSessionOptions {
 
 	/** Provider-facing system prompt override. Replaces the fully rendered default blocks. */
 	systemPrompt?: string | string[] | ((defaultPrompt: string[]) => string | string[]);
-	/** Already-loaded custom prompt text rendered through the bundled custom system prompt template. */
+	/** Already-loaded custom System-zone text rendered by the unified system prompt template. */
 	customSystemPrompt?: string;
-	/** Already-loaded text appended through the bundled system prompt templates. */
+	/** Already-loaded Append-zone text rendered after the selected default/custom System zone. */
 	appendSystemPrompt?: string;
 	/**
 	 * Already-loaded title-generation system prompt override (typically

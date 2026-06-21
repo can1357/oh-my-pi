@@ -203,7 +203,7 @@ describe("runSubprocess yield reminders", () => {
 		expect(createAgentSessionSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("splices the subagent role prompt before the trailing system section", async () => {
+	it("passes the rendered subagent role as the custom System zone", async () => {
 		let userPrompt = "";
 		const session = createMockSession(({ text, emit }) => {
 			userPrompt = text;
@@ -226,19 +226,12 @@ describe("runSubprocess yield reminders", () => {
 			task: "Your assignment is below.\nBe thorough and complete fully before yielding.\n\nDo the task.",
 		});
 
-		const systemPromptBuilder = createAgentSessionSpy.mock.calls[0]?.[0]?.systemPrompt;
-		expect(systemPromptBuilder).toBeFunction();
-		if (typeof systemPromptBuilder !== "function") throw new Error("Expected system prompt builder");
-		const systemPrompt = systemPromptBuilder(["system", "project", "now"]);
-
-		expect(systemPrompt).toHaveLength(4);
-		expect(systemPrompt?.[0]).toBe("system");
-		expect(systemPrompt?.[1]).toBe("project");
-		expect(systemPrompt?.[2]).toContain(baseAgent.systemPrompt);
+		const sessionOptions = createAgentSessionSpy.mock.calls[0]?.[0];
+		expect(sessionOptions?.systemPrompt).toBeUndefined();
+		expect(sessionOptions?.customSystemPrompt).toContain(baseAgent.systemPrompt);
 		// The parent-conversation CONTEXT section is gone: subagents get their
 		// background inside the assignment (or a local:// file), never a dump.
-		expect(systemPrompt?.[2]).not.toMatch(/CONTEXT\n=+/);
-		expect(systemPrompt?.[3]).toBe("now");
+		expect(sessionOptions?.customSystemPrompt).not.toMatch(/CONTEXT\n=+/);
 		expect(userPrompt).not.toMatch(/CONTEXT\n=+/);
 	});
 	it("does not let an intervening wake yield satisfy the batch after a lost prompt race", async () => {
