@@ -16,6 +16,7 @@ import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from
 import * as oauthUtils from "@pk-nerdsaver-ai/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@pk-nerdsaver-ai/pi-ai/registry/oauth/types";
 import type { UsageLimit, UsageProvider, UsageReport } from "@pk-nerdsaver-ai/pi-ai/usage";
+import { removeWithRetries } from "../../utils/src/temp";
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -119,7 +120,7 @@ describe("AuthStorage google-antigravity oauth ranking", () => {
 		store = null;
 		authStorage = null;
 		if (tempDir) {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
 	});

@@ -92,8 +92,11 @@ const systemMessageItemSchema = type({
 
 const assistantMessageItemSchema = type({
 	"type?": "'message'",
+	"id?": "string",
 	role: "'assistant'",
 	"content?": type("string").or(outputContentBlockSchema.array()),
+	"status?": "'in_progress' | 'completed' | 'incomplete'",
+	"phase?": "'commentary' | 'final_answer' | null",
 });
 
 const reasoningItemSchema = type({

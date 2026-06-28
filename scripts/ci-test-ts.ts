@@ -27,6 +27,12 @@ const repoRoot = path.join(import.meta.dir, "..");
 const args = process.argv.slice(2);
 const isDryRun = args.includes("--dry-run");
 const requestedMode = args.find(arg => !arg.startsWith("--")) ?? "all";
+// `--only-failures` is the default (CI and the root `test:ts` aggregate rely on
+// Bun's previous-failure cache). The package-level `test` script passes `--full`
+// so a direct `bun run test` is always a complete run; an explicit
+// `--only-failures` (appended by the aggregate) still wins over `--full`.
+const onlyFailures = args.includes("--only-failures") || !args.includes("--full");
+const onlyFailuresArgs = onlyFailures ? ["--only-failures"] : [];
 
 const validModes = new Set<Mode>([
 	"all",
@@ -283,7 +289,7 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestC
 		commands.push({
 			label: `packages/coding-agent (${plan.label}; ${testFiles.length} files; parallel=${plan.parallel}${chunkLabel}; ${chunk.length} files)`,
 			cwd: "packages/coding-agent",
-			command: ["bun", "--smol", "test", `--parallel=${plan.parallel}`, "--only-failures", ...chunk],
+			command: ["bun", "--smol", "test", `--parallel=${plan.parallel}`, ...onlyFailuresArgs, ...chunk],
 		});
 	}
 	return commands;
@@ -297,7 +303,7 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 				{
 					label: "scripts",
 					cwd: ".",
-					command: ["bun", "test", "--parallel=4", "--only-failures", "scripts/ci-concurrency.test.ts"],
+					command: ["bun", "test", "--parallel=4", ...onlyFailuresArgs, "scripts/ci-concurrency.test.ts"],
 				},
 			];
 		case "native":

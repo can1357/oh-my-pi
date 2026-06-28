@@ -1,6 +1,5 @@
 import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import type { FetchImpl } from "../types";
 
 const REQUEST_DEBUG_ENV = "PI_REQ_DEBUG";
@@ -9,7 +8,6 @@ const textEncoder = new TextEncoder();
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 let nextSessionId = 1;
-let nextRequestDebugPath: string | undefined;
 
 type DebugFetch = FetchImpl & { [DEBUG_FETCH_MARKER]?: true };
 type RequestBodyInit = NonNullable<RequestInit["body"]>;
@@ -55,25 +53,7 @@ function isRequestDebugEnvEnabled(): boolean {
 }
 
 export function isRequestDebugEnabled(): boolean {
-	return isRequestDebugEnvEnabled() || nextRequestDebugPath !== undefined;
-}
-
-export function setNextRequestDebugPath(requestPath: string): void {
-	nextRequestDebugPath = requestPath;
-}
-
-export function clearNextRequestDebugPath(): void {
-	nextRequestDebugPath = undefined;
-}
-
-export function getNextRequestDebugPath(): string | undefined {
-	return nextRequestDebugPath;
-}
-
-function consumeNextRequestDebugPath(): string | undefined {
-	const requestPath = nextRequestDebugPath;
-	nextRequestDebugPath = undefined;
-	return requestPath;
+	return isRequestDebugEnvEnabled();
 }
 
 export function wrapFetchForRequestDebug(fetchImpl: FetchImpl): FetchImpl {
@@ -249,19 +229,6 @@ function copyResponseMetadata(target: Response, source: Response): void {
 }
 
 async function reserveRequestDebugFile(): Promise<ReservedRequestDebugFile> {
-	const explicitPath = consumeNextRequestDebugPath();
-	if (explicitPath) {
-		await fs.mkdir(path.dirname(explicitPath), { recursive: true });
-		const handle = await fs.open(explicitPath, "w");
-		return {
-			id: nextSessionId++,
-			requestPath: explicitPath,
-			responsePath: `${explicitPath}.res.log`,
-			handle,
-			overwrite: true,
-		};
-	}
-
 	for (;;) {
 		const id = nextSessionId++;
 		const requestPath = `rr-session-${id}.json`;

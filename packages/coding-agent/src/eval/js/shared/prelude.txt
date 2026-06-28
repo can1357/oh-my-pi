@@ -63,23 +63,6 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		return callHelper("read", path, options);
 	};
 	const write = async (path, data) => callHelper("writeFile", path, data);
-	const append = (path, content) => callHelper("append", path, content);
-	const sort = (text, opts, ...rest) =>
-		callHelper("sortText", text, optionsArg("sort", opts, rest, ["reverse", "unique"], "{ reverse, unique }"));
-	const uniq = (text, opts, ...rest) => callHelper("uniqText", text, optionsArg("uniq", opts, rest, ["count"], "{ count }"));
-	const counter = (items, opts, ...rest) =>
-		callHelper("counter", items, optionsArg("counter", opts, rest, ["limit", "reverse"], "{ limit, reverse }"));
-	const diff = (a, b) => callHelper("diff", a, b);
-	const tree = (path = ".", opts, ...rest) => {
-		if (isPlainObject(path) && opts === undefined && rest.length === 0) {
-			return callHelper("tree", ".", path);
-		}
-		return callHelper(
-			"tree",
-			isNil(path) ? "." : path,
-			optionsArg("tree", opts, rest, ["maxDepth", "showHidden"], "{ maxDepth, showHidden }"),
-		);
-	};
 	const env = (key, value) => callHelper("env", key, value);
 
 	const tool = new Proxy(
@@ -117,18 +100,27 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	};
 
 	const agent = async (prompt, opts, ...rest) => {
-		const o = optionsArg("agent", opts, rest, ["agentType", "model", "label", "schema"], "{ agentType, model, label, schema, returnHandle }");
-		const { returnHandle, ...callArgs } = o;
-		const res = await globalThis.__omp_call_tool__("__agent__", { prompt, ...callArgs });
+		const o = optionsArg(
+			"agent",
+			opts,
+			rest,
+			["agent", "model", "label", "schema", "isolated", "apply", "merge"],
+			"{ agent, model, label, schema, isolated, apply, merge, handle }",
+		);
+		const { handle, ...callArgs } = o;
+		const res = await globalThis.__omp_call_tool__("__agent__", { prompt, ...callArgs, handle: Boolean(handle) });
 		const text = res && typeof res === "object" ? res.text : res;
 		const parsed = hasOwn(callArgs, "schema") ? JSON.parse(text) : text;
-		if (!returnHandle) return parsed;
+		if (!handle) return parsed;
 		const details = res && typeof res === "object" ? res.details : undefined;
 		if (!details || typeof details !== "object" || details.id == null) {
 			return { text, output: text, handle: null, id: null, agent: null };
 		}
 		const node = { text, output: text, handle: `agent://${details.id}`, id: details.id, agent: details.agent ?? null };
 		if (hasOwn(callArgs, "schema")) node.data = parsed;
+		for (const key of ["isolated", "patchPath", "branchName", "nestedPatches", "changesApplied", "isolationSummary"]) {
+			if (details[key] !== undefined) node[key] = details[key];
+		}
 		return node;
 	};
 
@@ -297,11 +289,5 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	globalThis.__pool = __pool;
 	globalThis.read = read;
 	globalThis.write = write;
-	globalThis.append = append;
-	globalThis.sort = sort;
-	globalThis.uniq = uniq;
-	globalThis.counter = counter;
-	globalThis.diff = diff;
-	globalThis.tree = tree;
 	globalThis.env = env;
 }

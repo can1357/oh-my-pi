@@ -51,6 +51,7 @@ function createCodexGptStats(entryId: string): MessageStats {
 			totalTokens: 1700,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
+		agentType: "main",
 	};
 }
 

@@ -21,12 +21,12 @@ Run from `packages/coding-agent/` (or add `--cwd=packages/coding-agent`):
 | Tests | `bun run test` |
 | Autofix: lint + format prompts + docs index | `bun run fix` |
 | Reformat prompt `.md` assets | `bun run format-prompts` |
-| Regenerate the `docs://` index | `bun run generate-docs-index` |
+| Regenerate the `docs://` index | `bun run gen:docs` |
 | Build the `dist/omp` binary | `bun run build` |
 
 Never invoke `tsc`/`npx tsc` directly — `bun run check` is the typecheck gate. After
 changing the React tool renderers under `collab-web/src/tool-render/`, rebuild them
-with `bun --cwd=packages/collab-web run build:tool-views`.
+with `bun run gen:tool-views`.
 
 ## Boot flow
 

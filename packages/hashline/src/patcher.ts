@@ -22,18 +22,24 @@
  * The patcher itself is stateless across calls; reuse one instance per
  * filesystem configuration.
  */
+import * as path from "node:path";
 import { applyEdits } from "./apply";
 import { hasBlockEdit, resolveBlockEdits } from "./block";
 import { computeFileHash, formatHashlineHeader } from "./format";
 import type { Filesystem, WriteResult } from "./fs";
 import { isNotFound } from "./fs";
 import type { Patch, PatchSection } from "./input";
-import { HEADTAIL_DRIFT_WARNING, missingSnapshotTagMessage, unseenLinesMessage } from "./messages";
+import {
+	HEADTAIL_DRIFT_WARNING,
+	missingSnapshotTagMessage,
+	pathRecoveredFromTagMessage,
+	unseenLinesMessage,
+} from "./messages";
 import { MismatchError } from "./mismatch";
 import { detectLineEnding, type LineEnding, normalizeToLF, restoreLineEndings, stripBom } from "./normalize";
 import { Recovery, type RecoveryResult } from "./recovery";
 import type { SnapshotStore } from "./snapshots";
-import type { ApplyResult, BlockResolution, BlockResolver, Edit } from "./types";
+import type { ApplyResult, BlockResolution, BlockResolver, Edit, FileOp } from "./types";
 
 export interface PatcherOptions {
 	/** Storage backend used for all reads and writes. */
@@ -54,8 +60,8 @@ export interface PatchSectionResult {
 	path: string;
 	/** Filesystem-canonical key for this section (e.g. absolute path). */
 	canonicalPath: string;
-	/** `"noop"` when the apply produced no change; otherwise `"create"` / `"update"`. */
-	op: "create" | "update" | "noop";
+	/** `"noop"` when the apply produced no change; `"delete"` removes the file; otherwise `"create"` / `"update"`. */
+	op: "create" | "update" | "delete" | "noop";
 	/** Pre-edit text (LF-normalized, BOM-stripped). */
 	before: string;
 	/** Post-edit text (LF-normalized, BOM-stripped). For `"noop"` equals `before`. */
@@ -72,6 +78,8 @@ export interface PatchSectionResult {
 	firstChangedLine?: number;
 	/** Warnings collected by the parser, applier, and (optionally) recovery. */
 	warnings: string[];
+	/** Destination path when this section includes `MV DEST`. */
+	moveDest?: string;
 	/**
 	 * Resolved spans for any `replace_block`/`delete_block` ops, present when the
 	 * apply matched the tagged content. Undefined for patches with no block ops
@@ -101,11 +109,12 @@ export class PreparedSection {
 		readonly normalized: string,
 		readonly applyResult: ApplyResult,
 		readonly parseWarnings: readonly string[],
+		readonly fileOp: FileOp | undefined,
 	) {}
 
-	/** Convenience: returns true when the apply produced no change. */
+	/** Convenience: returns true when the apply produced no change and no file op. */
 	get isNoop(): boolean {
-		return this.applyResult.text === this.normalized;
+		return this.fileOp === undefined && this.applyResult.text === this.normalized;
 	}
 }
 
@@ -245,39 +254,112 @@ export class Patcher {
 	 * tag mismatch ({@link MismatchError}).
 	 */
 	async prepare(section: PatchSection): Promise<PreparedSection> {
-		const { edits, warnings: parseWarnings } = section.parse();
+		const parsed = section.parse();
+		const parseWarnings = [...parsed.warnings];
+		const fileOp = parsed.fileOp;
 		assertSectionHashPresent(section.path, section.fileHash);
 
-		const canonicalPath = this.fs.canonicalPath(section.path);
-		await this.fs.preflightWrite(section.path);
-		const { exists, rawContent } = await this.#tryRead(section.path);
-		if (!exists) {
-			throw new Error(`File not found: ${section.path}. Use the write tool to create new files.`);
+		let target = section;
+		let canonicalPath = this.fs.canonicalPath(target.path);
+		let read = await this.#tryRead(target.path);
+
+		// Path recovery: the authored path doesn't exist on disk, but its
+		// filename + snapshot tag may name a file the model read this session
+		// (it supplied a bare filename, or the wrong directory). Rebind to that
+		// file so the edit lands where the tag points, and warn. This runs
+		// before the write gate so a recoverable bare/mis-typed path is rebound
+		// to its real (writable) location instead of being rejected against the
+		// literal — possibly read-only — path it was authored as.
+		if (!read.exists) {
+			const recovered = this.#recoverSectionPathFromTag(target, canonicalPath);
+			if (recovered && this.fs.allowTagPathRecovery(target.path, recovered.section.path)) {
+				parseWarnings.push(
+					pathRecoveredFromTagMessage(target.path, recovered.section.path, target.fileHash as string),
+				);
+				target = recovered.section;
+				canonicalPath = recovered.canonicalPath;
+				read = await this.#tryRead(target.path);
+			}
 		}
 
-		const { bom, text } = stripBom(rawContent);
+		// Gate the final (possibly recovered) target before any write work, so
+		// an unrecoverable read-only target (e.g. a plan-mode working-tree path)
+		// fails with the write guard rather than a misleading "file not found".
+		await this.fs.preflightWrite(target.path, { fileOp });
+
+		if (!read.exists) {
+			throw new Error(`File not found: ${target.path}. Use the write tool to create new files.`);
+		}
+
+		if (fileOp?.kind === "move" && this.fs.canonicalPath(fileOp.dest) === canonicalPath) {
+			throw new Error(`MV destination is the same as ${target.path}.`);
+		}
+
+		const { bom, text } = stripBom(read.rawContent);
 		const lineEnding = detectLineEnding(text);
 		const normalized = normalizeToLF(text);
 
-		const applyResult = this.#applyWithRecovery({
-			section,
-			canonicalPath,
-			exists,
-			normalized,
-			edits,
-		});
+		const applyResult =
+			fileOp?.kind === "rem"
+				? this.#applyWithRecovery({
+						section: target,
+						canonicalPath,
+						exists: read.exists,
+						normalized,
+						edits: [],
+					})
+				: this.#applyWithRecovery({
+						section: target,
+						canonicalPath,
+						exists: read.exists,
+						normalized,
+						edits: parsed.edits,
+					});
 
 		return new PreparedSection(
-			section,
+			target,
 			canonicalPath,
-			exists,
-			rawContent,
+			read.exists,
+			read.rawContent,
 			bom,
 			lineEnding,
 			normalized,
 			applyResult,
 			parseWarnings,
+			fileOp,
 		);
+	}
+
+	/**
+	 * Resolve a missing authored path to a file read this session by matching
+	 * its filename and snapshot tag. Returns the section rebound to that file's
+	 * canonical path, or `null` when no unique filename+tag match exists.
+	 *
+	 * Resolution requires BOTH the bare filename (basename) and the section tag
+	 * to match a single retained file: a whole-file content hash plus an exact
+	 * filename is a strong identity signal, so the model almost certainly meant
+	 * that file but gave the wrong directory (or only the filename). A tie — two
+	 * retained files sharing the filename and tag — declines recovery. The
+	 * recorded path of the authored file itself is excluded so a deleted file
+	 * does not "recover" onto its own stale snapshot.
+	 */
+	#recoverSectionPathFromTag(
+		section: PatchSection,
+		originalCanonicalPath: string,
+	): { section: PatchSection; canonicalPath: string } | null {
+		if (section.fileHash === undefined) return null;
+		const authoredName = path.basename(section.path);
+		const candidates = [
+			...new Set(
+				this.snapshots
+					.findByHash(section.fileHash)
+					.filter(snapshot => path.basename(snapshot.path) === authoredName)
+					.map(snapshot => snapshot.path),
+			),
+		].filter(candidate => this.fs.canonicalPath(candidate) !== originalCanonicalPath);
+		if (candidates.length !== 1) return null;
+		const resolved = candidates[0];
+		return { section: section.withPath(resolved), canonicalPath: this.fs.canonicalPath(resolved) };
 	}
 
 	/**
@@ -287,11 +369,31 @@ export class Patcher {
 	 * filesystem-canonical path.
 	 */
 	async commit(prepared: PreparedSection): Promise<PatchSectionResult> {
-		const { section, normalized, bom, lineEnding, parseWarnings, exists, applyResult, canonicalPath } = prepared;
+		const { section, normalized, bom, lineEnding, parseWarnings, exists, applyResult, canonicalPath, fileOp } =
+			prepared;
 		const after = applyResult.text;
 		const warnings = mergeWarnings(parseWarnings, applyResult.warnings);
+		const moveDest = fileOp?.kind === "move" ? fileOp.dest : undefined;
+		const resultPath = moveDest ?? section.path;
 
-		if (after === normalized) {
+		if (fileOp?.kind === "rem") {
+			await this.fs.delete(section.path);
+			this.snapshots.invalidate(canonicalPath);
+			return {
+				path: section.path,
+				canonicalPath,
+				op: "delete",
+				before: normalized,
+				after: normalized,
+				persisted: prepared.rawContent,
+				written: prepared.rawContent,
+				fileHash: computeFileHash(normalized),
+				header: formatHashlineHeader(section.path, computeFileHash(normalized)),
+				warnings,
+			};
+		}
+
+		if (after === normalized && moveDest === undefined) {
 			const hash = this.#recordFullSnapshot(canonicalPath, normalized);
 			return {
 				path: section.path,
@@ -308,6 +410,29 @@ export class Patcher {
 		}
 
 		const persisted = bom + restoreLineEndings(after, lineEnding);
+
+		if (moveDest !== undefined) {
+			const destCanonical = this.fs.canonicalPath(moveDest);
+			this.snapshots.relocate(canonicalPath, destCanonical);
+			await this.fs.move(section.path, moveDest, persisted);
+			const fileHash = this.#recordFullSnapshot(destCanonical, after);
+			return {
+				path: resultPath,
+				canonicalPath: destCanonical,
+				op: "update",
+				before: normalized,
+				after,
+				persisted,
+				written: persisted,
+				fileHash,
+				header: formatHashlineHeader(moveDest, fileHash),
+				firstChangedLine: applyResult.firstChangedLine,
+				blockResolutions: applyResult.blockResolutions,
+				moveDest,
+				warnings,
+			};
+		}
+
 		const write: WriteResult = await this.fs.writeText(section.path, persisted);
 		const fileHash = this.#recordFullSnapshot(canonicalPath, after);
 		const op = exists ? "update" : "create";

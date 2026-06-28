@@ -187,4 +187,47 @@ describe("task spawn routing", () => {
 		expect(firstJob.status).toBe("completed");
 		expect(secondJob.status).toBe("completed");
 	});
+
+	for (const maxConcurrency of [0, 0.5]) {
+		it(`runs spawn job bodies unbounded when task.maxConcurrency is ${maxConcurrency}`, async () => {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+				agents: [taskAgent],
+				projectAgentsDir: null,
+			});
+			const started: string[] = [];
+			const gates = new Map<string, Deferred>();
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				const id = options.id ?? "?";
+				started.push(id);
+				const gate = deferred();
+				gates.set(id, gate);
+				await gate.promise;
+				return makeResult(id);
+			});
+
+			const manager = createManager();
+			const tool = await TaskTool.create(
+				createSession({ manager, settings: { "task.maxConcurrency": maxConcurrency } }),
+			);
+
+			const first = await tool.execute("tc-1", { agent: "task", id: "First", assignment: "Work A." } as TaskParams);
+			const second = await tool.execute("tc-2", {
+				agent: "task",
+				id: "Second",
+				assignment: "Work B.",
+			} as TaskParams);
+			const third = await tool.execute("tc-3", { agent: "task", id: "Third", assignment: "Work C." } as TaskParams);
+
+			// All three job bodies clear the spawn semaphore in parallel — none stays queued.
+			await pollUntil(() => started.length === 3);
+			expect(started.sort()).toEqual(["First", "Second", "Third"]);
+
+			for (const id of ["First", "Second", "Third"]) gates.get(id)!.resolve();
+			await Promise.all([
+				manager.getJob(first.details!.async!.jobId)!.promise,
+				manager.getJob(second.details!.async!.jobId)!.promise,
+				manager.getJob(third.details!.async!.jobId)!.promise,
+			]);
+		});
+	}
 });

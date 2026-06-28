@@ -4,7 +4,7 @@
  * Branch: `fix/brush-detach-when-embedded`
  * Target commit: b0950f7ed
  *
- * The fix lives in `crates/brush-core-vendored/src/commands.rs` and is
+ * The fix lives in `crates/vendor/brush-core/src/commands.rs` and is
  * verified at the unit level by `pi-natives::shell::tests::child_session_action`
  * (truth-table) and `embedded_external_command_runs_in_its_own_session` (real
  * brush spawn). This test pulls the fix end-to-end through the OMP coding
@@ -51,7 +51,7 @@ import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-stora
 import { convertToLlm } from "@pk-nerdsaver-ai/pi-coding-agent/session/messages";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
 import { BashTool, type ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 /** Scripted assistant turn that issues a single `bash` tool call. */
 function bashCall(command: string, callId: string): MockResponse {
@@ -198,7 +198,7 @@ describe("BashTool through AgentSession runs children in their own session (e2e)
 		authStorage?.close();
 		authStorage = undefined;
 		if (fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		}
 	});
 

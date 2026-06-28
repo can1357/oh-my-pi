@@ -1,4 +1,5 @@
 import { sanitizeText as currentSanitizeText } from "@pk-nerdsaver-ai/pi-utils/sanitize-text";
+import { makeBench } from "./_harness";
 
 const STRIP_RE = new RegExp(
 	[
@@ -297,16 +298,7 @@ const samples = {
 
 const wrapWidth = 40;
 
-function bench(name: string, fn: () => void): number {
-	const start = Bun.nanoseconds();
-	for (let i = 0; i < ITERATIONS; i++) {
-		fn();
-	}
-	const elapsed = (Bun.nanoseconds() - start) / 1e6;
-	const perOp = (elapsed / ITERATIONS).toFixed(6);
-	console.log(`${name}: ${elapsed.toFixed(2)}ms total (${perOp}ms/op)`);
-	return elapsed;
-}
+const bench = makeBench(ITERATIONS);
 
 console.log(`Text layout benchmark (${ITERATIONS} iterations)\n`);
 

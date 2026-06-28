@@ -83,7 +83,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 			// Check for error/aborted — skip silent-abort (plan-mode compaction transition)
 			if (
 				(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
-				!isSilentAbort(assistantMsg.errorMessage)
+				!isSilentAbort(assistantMsg)
 			) {
 				const errorLine = sanitizeText(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
 				// Flush before this hard exit — it bypasses the awaited postmortem.quit()

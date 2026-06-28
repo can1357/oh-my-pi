@@ -76,6 +76,9 @@ describe("emergencyTerminalRestore alt-screen gating", () => {
 
 		const restored = writes.join("");
 		expect(restored).not.toContain("\x1b[?1049l");
+		expect(restored).toContain("\x1b[?1006l");
+		expect(restored).toContain("\x1b[?1003l");
+		expect(restored).toContain("\x1b[?1000l");
 		// Still performs the blind restore itself (cursor visibility proves the branch ran).
 		expect(restored).toContain("\x1b[?25h");
 	});
@@ -87,7 +90,11 @@ describe("emergencyTerminalRestore alt-screen gating", () => {
 
 		writes.length = 0;
 		emergencyTerminalRestore();
-		expect(writes.join("")).toContain("\x1b[?1049l");
+		const firstRestore = writes.join("");
+		expect(firstRestore).toContain("\x1b[?1049l");
+		expect(firstRestore).toContain("\x1b[?1006l");
+		expect(firstRestore).toContain("\x1b[?1003l");
+		expect(firstRestore).toContain("\x1b[?1000l");
 
 		// State was consumed: a second restore must not leave the (now main) buffer again.
 		writes.length = 0;
@@ -99,12 +106,20 @@ describe("emergencyTerminalRestore alt-screen gating", () => {
 		const inactive = startCapturedTerminal();
 		inactive.writes.length = 0;
 		emergencyTerminalRestore(); // activeTerminal set, alt screen never entered
-		expect(inactive.writes.join("")).not.toContain("\x1b[?1049l");
+		const inactiveRestore = inactive.writes.join("");
+		expect(inactiveRestore).not.toContain("\x1b[?1049l");
+		expect(inactiveRestore).toContain("\x1b[?1006l");
+		expect(inactiveRestore).toContain("\x1b[?1003l");
+		expect(inactiveRestore).toContain("\x1b[?1000l");
 
 		const active = startCapturedTerminal();
 		setAltScreenActive(true);
 		active.writes.length = 0;
 		emergencyTerminalRestore();
-		expect(active.writes.join("")).toContain("\x1b[?1049l");
+		const activeRestore = active.writes.join("");
+		expect(activeRestore).toContain("\x1b[?1049l");
+		expect(activeRestore).toContain("\x1b[?1006l");
+		expect(activeRestore).toContain("\x1b[?1003l");
+		expect(activeRestore).toContain("\x1b[?1000l");
 	});
 });

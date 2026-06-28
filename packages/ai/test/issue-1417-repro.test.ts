@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { ModelSpec } from "@pk-nerdsaver-ai/pi-ai/types";
 import { readModelCache } from "@pk-nerdsaver-ai/pi-catalog/model-cache";
 import { resolveProviderModels } from "@pk-nerdsaver-ai/pi-catalog/model-manager";
+import { removeWithRetries } from "../../utils/src/temp";
 
 const TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -34,7 +35,7 @@ describe("issue #1417 synthetic model deprecation", () => {
 
 	afterEach(async () => {
 		if (tempDir) {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 			tempDir = "";
 			dbPath = "";
 		}

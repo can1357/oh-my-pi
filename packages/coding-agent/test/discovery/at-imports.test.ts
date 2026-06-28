@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { clearCache as clearFsCache } from "@pk-nerdsaver-ai/pi-coding-agent/capability/fs";
 import { expandAtImports, MAX_AT_IMPORT_DEPTH } from "@pk-nerdsaver-ai/pi-coding-agent/discovery/at-imports";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 /**
  * Behavior contract for the @-import expander used by every AGENTS.md /
@@ -19,7 +20,7 @@ describe("expandAtImports", () => {
 
 	afterEach(async () => {
 		clearFsCache();
-		await fs.rm(tmp, { recursive: true, force: true });
+		await removeWithRetries(tmp);
 	});
 
 	const writeFile = async (relPath: string, content: string): Promise<string> => {
@@ -62,7 +63,7 @@ describe("expandAtImports", () => {
 			});
 			expect(expanded).toContain("See use 2 spaces");
 		} finally {
-			await fs.rm(fakeHome, { recursive: true, force: true });
+			await removeWithRetries(fakeHome);
 		}
 	});
 

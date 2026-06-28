@@ -6,9 +6,9 @@ import { compileSecretRegex } from "./regex";
 
 export {
 	deobfuscateSessionContext,
+	deobfuscateToolArguments,
 	obfuscateMessages,
 	obfuscateProviderContext,
-	obfuscateProviderTools,
 	type SecretEntry,
 	SecretObfuscator,
 } from "./obfuscator";

@@ -228,6 +228,64 @@ export const fixtureEntries: SessionEntry[] = [
 		},
 	},
 	{
+		id: "e09-legacy-call",
+		parentId: "e09",
+		timestamp: iso(NOW - 19 * MIN),
+		type: "message",
+		message: {
+			role: "assistant",
+			content: [
+				{ type: "text", text: "Legacy transcript aliases should still render for old saved sessions." },
+				{
+					type: "toolCall",
+					id: "legacy-search-01",
+					name: "search",
+					arguments: { pattern: "relay", paths: ["docs/collab.md"] },
+					intent: "Legacy search alias sample",
+				},
+				{
+					type: "toolCall",
+					id: "legacy-find-01",
+					name: "find",
+					arguments: { paths: ["docs/**/*.md"] },
+					intent: "Legacy find alias sample",
+				},
+			],
+			model: fixtureModel.id,
+			usage: mkUsage(4_020, 54, 23_500, 0.014),
+			stopReason: "toolUse",
+			timestamp: NOW - 19 * MIN,
+		},
+	},
+	{
+		id: "e09-legacy-search-result",
+		parentId: "e09-legacy-call",
+		timestamp: iso(NOW - 19 * MIN + 1_000),
+		type: "message",
+		message: {
+			role: "toolResult",
+			toolCallId: "legacy-search-01",
+			toolName: "search",
+			content: [{ type: "text", text: "docs/collab.md:12:relay reconnect notes" }],
+			isError: false,
+			timestamp: NOW - 19 * MIN + 1_000,
+		},
+	},
+	{
+		id: "e09-legacy-find-result",
+		parentId: "e09-legacy-call",
+		timestamp: iso(NOW - 19 * MIN + 1_500),
+		type: "message",
+		message: {
+			role: "toolResult",
+			toolCallId: "legacy-find-01",
+			toolName: "find",
+			content: [{ type: "text", text: "docs/collab.md\ndocs/collab-protocol.md" }],
+			isError: false,
+			timestamp: NOW - 19 * MIN + 1_500,
+		},
+	},
+	{
 		id: "e10",
 		parentId: "e09",
 		timestamp: iso(NOW - 14 * MIN),
@@ -318,11 +376,11 @@ export const fixtureAgents: AgentSnapshot[] = [
 	},
 ];
 
-const PROBE_TOOLS = ["bash", "read", "search", "edit"] as const;
+const PROBE_TOOLS = ["bash", "read", "grep", "edit"] as const;
 const PROBE_TOOL_ARGS: Record<(typeof PROBE_TOOLS)[number], string> = {
 	bash: "bun test packages/coding-agent/test/collab --filter reconnect",
 	read: "packages/coding-agent/src/collab/relay-client.ts:168-197",
-	search: "scheduleRetry|failFatal",
+	grep: "scheduleRetry|failFatal",
 	edit: "packages/coding-agent/test/collab/reconnect.test.ts",
 };
 
@@ -396,8 +454,8 @@ const subagentTranscriptLines: unknown[] = [
 				{
 					type: "toolCall",
 					id: "sub-call-01",
-					name: "search",
-					arguments: { pattern: "40\\d\\d", path: "docs/collab.md" },
+					name: "grep",
+					arguments: { pattern: "40\\d\\d", paths: ["docs/collab.md"] },
 					intent: "Finding close codes",
 				},
 			],
@@ -415,7 +473,7 @@ const subagentTranscriptLines: unknown[] = [
 		message: {
 			role: "toolResult",
 			toolCallId: "sub-call-01",
-			toolName: "search",
+			toolName: "grep",
 			content: [
 				{
 					type: "text",

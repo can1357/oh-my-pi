@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { loadCapability } from "@pk-nerdsaver-ai/pi-coding-agent/capability";
 import { clearCache as clearFsCache } from "@pk-nerdsaver-ai/pi-coding-agent/capability/fs";
 import { clearClaudePluginRootsCache } from "@pk-nerdsaver-ai/pi-coding-agent/discovery/helpers";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import "@pk-nerdsaver-ai/pi-coding-agent/discovery/claude-plugins";
 import type { MCPServer } from "@pk-nerdsaver-ai/pi-coding-agent/capability/mcp";
 
@@ -27,7 +28,7 @@ describe("issue-851: claude-plugins loads flat .mcp.json shape", () => {
 		vi.restoreAllMocks();
 		if (originalHome === undefined) delete process.env.HOME;
 		else process.env.HOME = originalHome;
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await removeWithRetries(tempDir);
 	});
 
 	async function setupPlugin(pluginId: string, mcpJson: unknown): Promise<void> {

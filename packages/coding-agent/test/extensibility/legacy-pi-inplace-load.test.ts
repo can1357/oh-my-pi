@@ -3,7 +3,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
-import { loadLegacyPiModule } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
+import {
+	__rewriteLegacyExtensionSourceForTests,
+	loadLegacyPiModule,
+} from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 // Issue #1674: legacy Pi extensions load browser-UI assets (HTML/CSS) at module
 // init via `readFileSync(join(__dirname, "ui.html"))`. The compat layer must run
@@ -16,7 +20,7 @@ const tempRoots: string[] = [];
 
 afterAll(async () => {
 	for (const dir of tempRoots) {
-		await fs.rm(dir, { recursive: true, force: true });
+		await removeWithRetries(dir);
 	}
 });
 
@@ -101,6 +105,49 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 		// bundled Zod-backed shim.
 		expect(mod.depValue).toBe("cjs-native");
 		expect(mod.hasZod).toBe(true);
+	});
+
+	it("rewrites extension bare deps to file URLs for compiled-binary loading", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "compiled-dep-ext", version: "1.0.0" }),
+			"node_modules/esmdep/package.json": JSON.stringify({
+				name: "esmdep",
+				version: "1.0.0",
+				type: "module",
+				exports: { "./value": "./value.js" },
+			}),
+			"node_modules/rootdep/package.json": JSON.stringify({
+				name: "rootdep",
+				version: "1.0.0",
+				type: "module",
+				exports: "./dist/index.js",
+			}),
+			"node_modules/rootdep/dist/index.js": "export const rootValue = 2;",
+			"node_modules/esmdep/value.js": "export const value = 1;",
+			"index.ts": "",
+		});
+		const importer = path.join(dir, "index.ts");
+		const rewritten = await __rewriteLegacyExtensionSourceForTests(
+			[
+				'import * as path from "node:path";',
+				'import { value } from "esmdep/value";',
+				'import { rootValue } from "rootdep";',
+				"export const loaded = value + rootValue;",
+			].join("\n"),
+			importer,
+		);
+
+		const expectedEsmDepUrls = [
+			path.join(dir, "node_modules/esmdep/value.js"),
+			await fs.realpath(path.join(dir, "node_modules/esmdep/value.js")),
+		].map(p => url.pathToFileURL(p).href);
+		const expectedRootDepUrls = [
+			path.join(dir, "node_modules/rootdep/dist/index.js"),
+			await fs.realpath(path.join(dir, "node_modules/rootdep/dist/index.js")),
+		].map(p => url.pathToFileURL(p).href);
+		expect(expectedEsmDepUrls.some(expected => rewritten.includes(expected))).toBe(true);
+		expect(expectedRootDepUrls.some(expected => rewritten.includes(expected))).toBe(true);
+		expect(rewritten).toContain('from "node:path"');
 	});
 
 	it("remaps legacy pi-ai utils/oauth subpaths to registry OAuth exports", async () => {

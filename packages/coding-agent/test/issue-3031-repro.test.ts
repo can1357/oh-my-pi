@@ -19,7 +19,6 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import {
 	createMnemopiEmbedSubprocess,
-	MNEMOPI_EMBED_WORKER_ARG,
 	MnemopiEmbedClient,
 	type MnemopiEmbedWorkerHandle,
 } from "@pk-nerdsaver-ai/pi-coding-agent/mnemopi/embed-client";
@@ -50,16 +49,6 @@ describe("issue #3031 — mnemopi embeddings live in an isolated subprocess", ()
 		expect(`${stdout}${stderr}`).toBe("");
 		expect(exitCode).toBe(0);
 	}, 30_000);
-
-	it("CLI dispatches the flag that `embed-client.ts` passes to the spawned child", async () => {
-		// `mnemopiEmbedWorkerSpawnCmd()` and the cli switch must agree on the
-		// exact flag, character-for-character — the spawned `bun`/binary sees
-		// only `argv` and there is no fallback path that "re-routes" the
-		// worker on misnamed flags. Pin the spelling on both ends.
-		const cliSource = await Bun.file(new URL("../src/cli.ts", import.meta.url)).text();
-		expect(cliSource).toContain(`"${MNEMOPI_EMBED_WORKER_ARG}"`);
-		expect(cliSource).toContain("startMnemopiEmbedWorker");
-	});
 
 	it("surfaces unexpected signal exits so in-flight callers don't await forever", async () => {
 		// If the child dies from a signal we did NOT request — SIGSEGV from
@@ -106,27 +95,6 @@ describe("issue #3031 — mnemopi embeddings live in an isolated subprocess", ()
 		expect(errored).toBe(false);
 	}, 10_000);
 
-	it("does not import fastembed-runtime from the main agent module graph", async () => {
-		// Issue #3031 caused: `mnemopi/state.ts` (or anything it transitively
-		// loaded) statically importing `core/fastembed-runtime`, which loads
-		// `onnxruntime-node` natively. Only the dedicated worker module is
-		// allowed to reach into that runtime. Scan the agent's mnemopi shim
-		// surface and the session entrypoint to lock the rule in.
-		const candidates = [
-			"../src/mnemopi/state.ts",
-			"../src/mnemopi/backend.ts",
-			"../src/mnemopi/embed-client.ts",
-			"../src/mnemopi/embed-protocol.ts",
-			"../src/session/agent-session.ts",
-			"../src/cli.ts",
-		];
-		for (const rel of candidates) {
-			const source = await Bun.file(new URL(rel, import.meta.url)).text();
-			expect(source).not.toContain("fastembed-runtime");
-			expect(source).not.toContain('"fastembed"');
-			expect(source).not.toContain('"onnxruntime-node"');
-		}
-	});
 	it("carries (model, cacheDir) on every embed so a respawned worker can self-init", async () => {
 		// Without this contract: after `shutdownMnemopiEmbedClient()` runs on
 		// session dispose, mnemopi still holds the cached `LocalEmbeddingModel`

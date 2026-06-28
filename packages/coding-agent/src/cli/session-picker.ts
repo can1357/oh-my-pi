@@ -8,12 +8,14 @@ import { FileSessionStorage } from "../session/session-storage";
 
 /**
  * Show the TUI session selector and return the selected session, or null if
- * cancelled. Tab toggles between current-folder and all-projects scope; the
- * all-projects list is loaded lazily via `SessionManager.listAll`.
+ * cancelled. Rendered as a fullscreen overlay on the terminal's alternate
+ * screen, so the list scrolls and rows are clickable with the mouse. Tab
+ * toggles between current-folder and all-projects scope; the all-projects list
+ * is loaded lazily via `SessionManager.listAll`.
  */
 export async function selectSession(
 	sessions: SessionInfo[],
-	options?: { allSessions?: SessionInfo[]; startInAllScope?: boolean },
+	options?: { allSessions?: SessionInfo[] },
 ): Promise<SessionInfo | null> {
 	const { promise, resolve } = Promise.withResolvers<SessionInfo | null>();
 	const ui = new TUI(new ProcessTerminal());
@@ -64,8 +66,8 @@ export async function selectSession(
 				historyMatcher,
 				loadAllSessions: () => SessionManager.listAll(storage),
 				allSessions: options?.allSessions,
-				startInAllScope: options?.startInAllScope,
 				getTerminalRows: () => ui.terminal.rows,
+				fillHeight: true,
 			},
 		);
 		return selector;
@@ -73,7 +75,18 @@ export async function selectSession(
 
 	const selector = showSelector();
 	selector.setOnRequestRender(() => ui.requestRender());
-	ui.addChild(selector);
+	// Present as a fullscreen overlay so the picker borrows the terminal's
+	// alternate screen buffer (vim/less idiom): the list scrolls and rows are
+	// clickable via the mouse tracking the overlay enables for its lifetime.
+	// Anchored top-left at full size so a mouse row maps directly to a rendered
+	// line (the overlay paints from screen row 0).
+	ui.showOverlay(selector, {
+		anchor: "top-left",
+		width: "100%",
+		maxHeight: "100%",
+		margin: 0,
+		fullscreen: true,
+	});
 	ui.setFocus(selector);
 	ui.start();
 	return promise;

@@ -1,0 +1,30 @@
+# Vendored from uutils/coreutils tag 0.8.0 (src/uu/wc), patched to route I/O
+# (stdin/stdout/stderr) and path resolution through pi-uutils-ctx so it can run
+# in-process as a shell builtin. See src/wc.rs for the patch markers
+# (`pi-uutils:` comments).
+[package]
+name = "uu_wc"
+version = "0.8.0"
+edition = "2024"
+license = "MIT"
+description = "wc ~ (uutils) display newline, word, and byte counts for input (vendored + patched for in-process embedding)"
+
+[lib]
+path = "src/wc.rs"
+
+[dependencies]
+bytecount = { version = "0.6.8", features = ["runtime-dispatch-simd"] }
+clap = { version = "4.5", features = ["wrap_help", "cargo", "color"] }
+thiserror = "2.0.3"
+uucore = { version = "0.8.0", features = [
+  "hardware",
+  "parser",
+  "pipes",
+  "quoting-style",
+] }
+unicode-width = "0.2.0"
+pi-uutils-ctx = { path = "../../pi-uutils-ctx" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.172"
+rustix = { version = "1.1.4", features = ["fs"] }

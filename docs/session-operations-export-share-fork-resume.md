@@ -43,7 +43,7 @@ Behavior details:
 - `--copy`, `clipboard`, and `copy` arguments are explicitly rejected with a warning to use `/dump`.
 - Export embeds session header/entries/leaf plus current `systemPrompt` and tool descriptions from agent state.
 - Subagent transcripts stored next to the session file (`<session>/<AgentId>.jsonl`, recursively for nested spawns) are embedded as `subSessions` (`collectSubSessions` in `src/export/html/index.ts`; disable with `includeSubSessions: false` in `ExportOptions`). In the page, agent ids in task tool cards open a breadcrumbed sub-session overlay.
-- Tool calls render through the `<omp-tool-view>` web component — the React per-tool renderers shared with collab-web (`packages/collab-web/src/tool-render/`), prebuilt into `src/export/html/tool-views.generated.js` by `bun --cwd=packages/collab-web run build:tool-views`.
+- Tool calls render through the `<omp-tool-view>` web component — the React per-tool renderers shared with collab-web (`packages/collab-web/src/tool-render/`), prebuilt into `src/export/html/tool-views.generated.js` by `bun run gen:tool-views`.
 - No session entries are appended during export.
 
 Caveat:
@@ -128,14 +128,16 @@ Only when no custom share handler is found (`shareSession()`):
    snapshot, replacing configured/discovered secrets with placeholders.
 3. The JSON is gzipped and sealed with a fresh AES-256-GCM key
    (`[12B IV][ciphertext+tag]`).
-4. Upload, first match wins:
-   - **Secret gist** — when `gh` is installed and authenticated, the sealed
-     blob is pushed base64-encoded as `session.ompshare.txt` (budget 5 MB
-     sealed; gist raw fetches cap at 10 MB).
-   - **Share server** — `POST <share.serverUrl>` (default
-     `https://my.omp.sh/s`) with the raw blob, capped at 1 MB. Oversized
-     snapshots are trimmed until they fit: inline images first, then long
-     strings (32 KB → 8 KB → 2 KB → 512 B caps), then oldest entries.
+4. Upload target is chosen by `share.store`:
+   - **Share server** (default, `store: "blob"`) — `POST <share.serverUrl>`
+     (default `https://my.omp.sh/s`) with the raw blob, capped at 1 MB.
+     Oversized snapshots are trimmed until they fit: inline images first,
+     then long strings (32 KB → 8 KB → 2 KB → 512 B caps), then oldest
+     entries.
+   - **Secret gist** (`store: "gist"`) — when `gh` is installed and
+     authenticated, the sealed blob is pushed base64-encoded as
+     `session.ompshare.txt` (budget 5 MB sealed; gist raw fetches cap at
+     10 MB), falling back to the share server when `gh` is unusable.
 5. The link is `<share.serverUrl>/<id>#<base64url key>` in both cases. The
    viewer page served there fetches the blob (hex ids via the GitHub gist
    API, anything else from the server's blob store) and decrypts it

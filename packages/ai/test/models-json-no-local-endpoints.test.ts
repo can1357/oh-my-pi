@@ -14,7 +14,7 @@ import MODELS_JSON from "@pk-nerdsaver-ai/pi-catalog/models.json" with { type: "
 // DISCOVERY_ONLY_PROVIDERS in scripts/generate-models.ts.
 //
 // Failure here means: a local provider slipped into models.json — add it to
-// DISCOVERY_ONLY_PROVIDERS, then `bun run generate-models` and commit the diff.
+// DISCOVERY_ONLY_PROVIDERS, then `bun run gen:models` and commit the diff.
 describe("models.json local-endpoint leak guard (regression)", () => {
 	const catalog = MODELS_JSON as unknown as Record<string, Record<string, Model>>;
 

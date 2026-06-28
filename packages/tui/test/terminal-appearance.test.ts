@@ -190,72 +190,31 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.stop();
 	});
 
-	it("poll timer self-disables when Mode 2031 fires outside WSL", () => {
+	it("does not periodically re-query OSC 11 once startup probes complete (#3297)", () => {
 		vi.useFakeTimers();
 		const { terminal, queryCount } = setupTerminal();
 
-		// Complete initial OSC 11 + DA1 cycle. Two DA1 sentinels are in flight at
-		// startup (keyboard probe + OSC 11), so emit two DA1 replies.
+		// Drain the startup OSC 11 + DA1 (keyboard probe + OSC 11 sentinels).
 		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
 		process.stdin.emit("data", "\x1b[?1;2c");
 		process.stdin.emit("data", "\x1b[?1;2c");
 
 		const afterInitial = queryCount();
 
-		// Advance one poll interval — poll should fire and send another query
-		vi.advanceTimersByTime(30_000);
-		expect(queryCount()).toBe(afterInitial + 1);
+		// Advance well past the previous 30 s poll interval. Earlier builds
+		// fired an OSC 11 + DA1 probe every 30 s here, which wiped the user's
+		// active text selection on several terminals (Terminal.app, Warp, VS
+		// Code, older Alacritty/WezTerm) — the report in #3297. No periodic
+		// query may fire now; mid-session theme tracking is delegated entirely
+		// to Mode 2031 push notifications.
+		vi.advanceTimersByTime(10 * 60_000);
 
-		// Complete poll's OSC 11 + DA1 (only one DA1 sentinel — keyboard probe is one-shot)
-		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-		process.stdin.emit("data", "\x1b[?1;2c");
-		// Send Mode 2031 notification — this activates push mode and stops polling
-		process.stdin.emit("data", "\x1b[?997;1n");
-		vi.advanceTimersByTime(100);
-
-		// Complete Mode 2031's re-query
-		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
-		process.stdin.emit("data", "\x1b[?1;2c");
-
-		const afterMode2031 = queryCount();
-
-		// Advance two more poll intervals — no additional poll queries should fire
-		vi.advanceTimersByTime(60_000);
-		expect(queryCount()).toBe(afterMode2031);
+		expect(queryCount()).toBe(afterInitial);
 
 		terminal.stop();
 	});
 
-	it("poll timer stops once DECRQM confirms Mode 2031 support", () => {
-		vi.useFakeTimers();
-		const { terminal, queryCount } = setupTerminal();
-
-		// Complete initial OSC 11 + DA1 cycle (keyboard + OSC 11 sentinels).
-		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-		process.stdin.emit("data", "\x1b[?1;2c");
-		process.stdin.emit("data", "\x1b[?1;2c");
-
-		// Poll fires at the first interval while Mode 2031 support is still unknown.
-		const afterInitial = queryCount();
-		vi.advanceTimersByTime(30_000);
-		expect(queryCount()).toBe(afterInitial + 1);
-		// Drain the poll's OSC 11 reply so it is no longer pending.
-		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-
-		// DECRQM confirms Mode 2031 support — push notifications supersede polling,
-		// so the poll must stop (its repeated OSC 11/DA1 writes otherwise clobber
-		// the user's active text selection on every poll).
-		process.stdin.emit("data", "\x1b[?2031;3$y");
-		const afterConfirm = queryCount();
-
-		// Advance well past several poll intervals — no further OSC 11 queries fire.
-		vi.advanceTimersByTime(90_000);
-		expect(queryCount()).toBe(afterConfirm);
-
-		terminal.stop();
-	});
-
-	it("does not start the OSC 11 poll timer under WSL", () => {
+	it("does not periodically re-query OSC 11 under WSL either (#3297)", () => {
 		vi.useFakeTimers();
 		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
 		Bun.env.WSL_INTEROP = "/run/WSL/1_interop";
@@ -266,7 +225,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		process.stdin.emit("data", "\x1b[?1;2c");
 		const afterInitial = queryCount();
 
-		vi.advanceTimersByTime(90_000);
+		vi.advanceTimersByTime(10 * 60_000);
 
 		expect(queryCount()).toBe(afterInitial);
 

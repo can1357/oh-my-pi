@@ -8,6 +8,7 @@
  * login opens plan management so users copy the regional `tp-...` key.
  */
 
+import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import type { OAuthController } from "./types";
 
@@ -103,10 +104,11 @@ async function validateXiaomiApiKey(
 				} catch {
 					// ignore body parse errors, status is enough
 				}
-				lastError = new Error(
+				lastError = new AIError.OAuthError(
 					details
 						? `${PROVIDER_NAME} API key validation failed (${response.status}): ${details}`
 						: `${PROVIDER_NAME} API key validation failed (${response.status})`,
+					{ kind: "validation", provider: PROVIDER_ID, status: response.status },
 				);
 				continue;
 			}
@@ -121,7 +123,11 @@ async function validateXiaomiApiKey(
 			const message = details
 				? `${PROVIDER_NAME} API key validation failed (${response.status}): ${details}`
 				: `${PROVIDER_NAME} API key validation failed (${response.status})`;
-			throw new Error(message);
+			throw new AIError.OAuthError(message, {
+				kind: "validation",
+				provider: PROVIDER_ID,
+				status: response.status,
+			});
 		} catch (e) {
 			// Only re-throw AbortError when the caller explicitly cancelled.
 			// Timeout aborts (from AbortSignal.timeout) should fall through to
@@ -132,7 +138,13 @@ async function validateXiaomiApiKey(
 			lastError = e instanceof Error ? e : new Error(String(e));
 		}
 	}
-	throw lastError ?? new Error(`${PROVIDER_NAME} API key validation failed`);
+	throw (
+		lastError ??
+		new AIError.OAuthError(`${PROVIDER_NAME} API key validation failed`, {
+			kind: "validation",
+			provider: PROVIDER_ID,
+		})
+	);
 }
 
 /**
@@ -144,7 +156,7 @@ async function validateXiaomiApiKey(
 export async function loginXiaomi(options: OAuthController): Promise<string> {
 	const fetchImpl = options.fetch ?? fetch;
 	if (!options.onPrompt) {
-		throw new Error(`${PROVIDER_NAME} login requires onPrompt callback`);
+		throw new AIError.OnPromptRequiredError(PROVIDER_NAME);
 	}
 	options.onAuth?.({
 		url: STANDARD_AUTH_URL,
@@ -155,11 +167,11 @@ export async function loginXiaomi(options: OAuthController): Promise<string> {
 		placeholder: "sk-... or tp-...",
 	});
 	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		throw new AIError.LoginCancelledError();
 	}
 	const trimmed = apiKey.trim();
 	if (!trimmed) {
-		throw new Error("API key is required");
+		throw new AIError.ApiKeyRequiredError();
 	}
 
 	options.onProgress?.(`Validating ${PROVIDER_ID} API key...`);
@@ -175,7 +187,7 @@ export async function loginXiaomi(options: OAuthController): Promise<string> {
 export async function loginXiaomiTokenPlan(options: OAuthController, region: XiaomiTokenPlanRegion): Promise<string> {
 	const fetchImpl = options.fetch ?? fetch;
 	if (!options.onPrompt) {
-		throw new Error(`Xiaomi Token Plan (${TOKEN_PLAN_REGION_NAMES[region]}) login requires onPrompt callback`);
+		throw new AIError.OnPromptRequiredError(`Xiaomi Token Plan (${TOKEN_PLAN_REGION_NAMES[region]})`);
 	}
 	options.onAuth?.({
 		url: TOKEN_PLAN_AUTH_URL,
@@ -186,11 +198,11 @@ export async function loginXiaomiTokenPlan(options: OAuthController, region: Xia
 		placeholder: "tp-...",
 	});
 	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		throw new AIError.LoginCancelledError();
 	}
 	const trimmed = apiKey.trim();
 	if (!trimmed) {
-		throw new Error("API key is required");
+		throw new AIError.ApiKeyRequiredError();
 	}
 
 	options.onProgress?.(`Validating Xiaomi Token Plan (${TOKEN_PLAN_REGION_NAMES[region]}) API key...`);

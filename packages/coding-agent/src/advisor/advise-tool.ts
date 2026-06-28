@@ -137,7 +137,19 @@ export function deriveAdvisorTelemetry(
  * inspect the workspace before weighing in. Names match the primary session's
  * tool instances, which the advisor reuses.
  */
-export const ADVISOR_READONLY_TOOL_NAMES: ReadonlySet<string> = new Set(["read", "search", "find"]);
+export const ADVISOR_READONLY_TOOL_NAMES: ReadonlySet<string> = new Set(["read", "grep", "glob"]);
+
+function advisorNoteDedupeKey(note: string): string {
+	return note.trim().replace(/\s+/g, " ");
+}
+
+/** Rank advisor severities so the dedupe state can detect a real escalation
+ *  (nit → concern → blocker) versus a verbatim repeat. `undefined` defers to
+ *  `nit` because the schema treats an omitted severity as a plain nit. */
+const ADVISOR_SEVERITY_RANK: Record<AdvisorSeverity, number> = { nit: 1, concern: 2, blocker: 3 };
+function advisorSeverityRank(severity: AdvisorSeverity | undefined): number {
+	return ADVISOR_SEVERITY_RANK[severity ?? "nit"];
+}
 
 export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails> {
 	readonly name = "advise";
@@ -145,8 +157,18 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	readonly description = adviseDescription;
 	readonly parameters = adviseSchema;
 	readonly intent = "omit" as const;
+	/** Highest delivered severity rank per normalized note. A new call passes
+	 *  through only when its rank strictly exceeds the recorded one (a real
+	 *  escalation: nit → concern → blocker), so an advisor cannot bypass dedupe
+	 *  by retagging the same text at a lower or equal severity. */
+	#deliveredNoteSeverities = new Map<string, number>();
 
 	constructor(private readonly onAdvice: (note: string, severity?: AdviseDetails["severity"]) => void) {}
+
+	/** Clear delivered-note memory when the advisor starts a fresh conversation. */
+	resetDeliveredNotes(): void {
+		this.#deliveredNoteSeverities.clear();
+	}
 
 	async execute(
 		_toolCallId: string,
@@ -155,6 +177,17 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		_onUpdate?: AgentToolUpdateCallback<AdviseDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<AdviseDetails>> {
+		const key = advisorNoteDedupeKey(args.note);
+		const rank = advisorSeverityRank(args.severity);
+		const previousRank = this.#deliveredNoteSeverities.get(key) ?? 0;
+		if (rank <= previousRank) {
+			return {
+				content: [{ type: "text", text: "Duplicate advice ignored." }],
+				details: { note: args.note, severity: args.severity },
+				useless: true,
+			};
+		}
+		this.#deliveredNoteSeverities.set(key, rank);
 		this.onAdvice(args.note, args.severity);
 		return {
 			content: [{ type: "text", text: "Recorded." }],

@@ -94,7 +94,7 @@ describe("BashTool argument validation", () => {
 			arguments: { command: "echo should-not-run", async: true },
 		});
 
-		await expect(tool.execute("tool-call", args as BashToolInput)).rejects.toThrow(
+		await expect(tool.execute("tool-call", args as unknown as BashToolInput)).rejects.toThrow(
 			"Async bash execution is disabled",
 		);
 	});

@@ -4,6 +4,8 @@
  * gateway used to silently allow empty hostnames; this fixes it).
  */
 
+import * as AIError from "../error";
+
 export interface ParsedBind {
 	hostname: string;
 	port: number;
@@ -11,11 +13,11 @@ export interface ParsedBind {
 
 function parsePort(raw: string, bind: string): number {
 	if (!/^\d+$/.test(raw)) {
-		throw new Error(`Invalid bind '${bind}'; port must be an integer.`);
+		throw new AIError.ConfigurationError(`Invalid bind '${bind}'; port must be an integer.`);
 	}
 	const port = Number.parseInt(raw, 10);
 	if (!Number.isFinite(port) || port < 0 || port > 65535) {
-		throw new Error(`Invalid bind '${bind}'; port out of range.`);
+		throw new AIError.ConfigurationError(`Invalid bind '${bind}'; port out of range.`);
 	}
 	return port;
 }
@@ -36,19 +38,19 @@ function parsePort(raw: string, bind: string): number {
 export function parseBind(raw: string): ParsedBind {
 	const trimmed = raw.trim();
 	if (trimmed.length === 0) {
-		throw new Error("Invalid bind; expected 'host:port' or 'port'.");
+		throw new AIError.ConfigurationError("Invalid bind; expected 'host:port' or 'port'.");
 	}
 	if (/^\d+$/.test(trimmed)) {
 		return { hostname: "127.0.0.1", port: parsePort(trimmed, raw) };
 	}
 	const lastColon = trimmed.lastIndexOf(":");
 	if (lastColon < 0) {
-		throw new Error(`Invalid bind '${raw}'; expected 'host:port' or 'port'.`);
+		throw new AIError.ConfigurationError(`Invalid bind '${raw}'; expected 'host:port' or 'port'.`);
 	}
 	const hostPart = trimmed.slice(0, lastColon);
 	const portPart = trimmed.slice(lastColon + 1);
 	if (hostPart.length === 0) {
-		throw new Error(`Invalid bind '${raw}'; host must not be empty.`);
+		throw new AIError.ConfigurationError(`Invalid bind '${raw}'; host must not be empty.`);
 	}
 	return { hostname: hostPart, port: parsePort(portPart, raw) };
 }

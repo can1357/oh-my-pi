@@ -111,6 +111,55 @@ function thinkingPair(baseId: string, name: string): EffortVariantFamily {
 	};
 }
 
+type DevinTierRoutes = Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh", string>>;
+
+function devinTierFamily(
+	id: string,
+	name: string,
+	routes: DevinTierRoutes,
+	efforts: readonly Effort[],
+): EffortVariantFamily {
+	const routing: Partial<Record<Effort | "off", string>> = {};
+	if (routes.off) routing.off = routes.off;
+	for (const effort of efforts) {
+		switch (effort) {
+			case Effort.Minimal:
+				if (routes.minimal) {
+					routing[effort] = routes.minimal;
+				} else if (routes.low) {
+					routing[effort] = routes.low;
+				}
+				break;
+			case Effort.Low:
+				if (routes.low) routing[effort] = routes.low;
+				break;
+			case Effort.Medium:
+				if (routes.medium) routing[effort] = routes.medium;
+				break;
+			case Effort.High:
+				if (routes.high) routing[effort] = routes.high;
+				break;
+			case Effort.XHigh:
+				if (routes.xhigh) routing[effort] = routes.xhigh;
+				break;
+		}
+	}
+	const members = [routes.off, routes.minimal, routes.low, routes.medium, routes.high, routes.xhigh].filter(
+		(member, index, items): member is string => typeof member === "string" && items.indexOf(member) === index,
+	);
+	return {
+		id,
+		name,
+		members,
+		routing,
+		thinking: {
+			mode: "effort",
+			efforts,
+			...(routes.off ? undefined : { requiresEffort: true }),
+		},
+	};
+}
+
 const GEMINI_3_FLASH_FAMILY_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High];
 const GEMINI_3_PRO_FAMILY_EFFORTS: readonly Effort[] = [Effort.Low, Effort.High];
 
@@ -237,6 +286,7 @@ const SHARED_CCA_FAMILIES: readonly EffortVariantFamily[] = [
 		routing: {},
 		thinking: { mode: "budget", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
 	},
+
 	{
 		id: "claude-opus-4-6",
 		name: "Claude Opus 4.6",
@@ -259,11 +309,232 @@ export const ANTIGRAVITY_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 export const GEMINI_CLI_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 	families: [geminiFlashFamily("google-level"), geminiProFamily("google-level"), ...SHARED_CCA_FAMILIES],
 };
+export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
+	families: [
+		{
+			id: "claude-opus-4-7",
+			name: "Claude Opus 4.7",
+			members: [
+				"claude-opus-4-7-low",
+				"claude-opus-4-7-medium",
+				"claude-opus-4-7-high",
+				"claude-opus-4-7-xhigh",
+				"claude-opus-4-7-max",
+			],
+			routing: {
+				[Effort.Minimal]: "claude-opus-4-7-low",
+				[Effort.Low]: "claude-opus-4-7-medium",
+				[Effort.Medium]: "claude-opus-4-7-high",
+				[Effort.High]: "claude-opus-4-7-xhigh",
+				[Effort.XHigh]: "claude-opus-4-7-max",
+			},
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				requiresEffort: true,
+			},
+		},
+		{
+			id: "claude-opus-4-7-fast",
+			name: "Claude Opus 4.7 Fast",
+			members: [
+				"claude-opus-4-7-low-fast",
+				"claude-opus-4-7-medium-fast",
+				"claude-opus-4-7-high-fast",
+				"claude-opus-4-7-xhigh-fast",
+				"claude-opus-4-7-max-fast",
+			],
+			routing: {
+				[Effort.Minimal]: "claude-opus-4-7-low-fast",
+				[Effort.Low]: "claude-opus-4-7-medium-fast",
+				[Effort.Medium]: "claude-opus-4-7-high-fast",
+				[Effort.High]: "claude-opus-4-7-xhigh-fast",
+				[Effort.XHigh]: "claude-opus-4-7-max-fast",
+			},
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				requiresEffort: true,
+			},
+		},
+		{
+			id: "claude-opus-4-8",
+			name: "Claude Opus 4.8",
+			members: [
+				"claude-opus-4-8-low",
+				"claude-opus-4-8-medium",
+				"claude-opus-4-8-high",
+				"claude-opus-4-8-xhigh",
+				"claude-opus-4-8-max",
+			],
+			routing: {
+				[Effort.Minimal]: "claude-opus-4-8-low",
+				[Effort.Low]: "claude-opus-4-8-medium",
+				[Effort.Medium]: "claude-opus-4-8-high",
+				[Effort.High]: "claude-opus-4-8-xhigh",
+				[Effort.XHigh]: "claude-opus-4-8-max",
+			},
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				requiresEffort: true,
+			},
+		},
+		{
+			id: "claude-opus-4-8-fast",
+			name: "Claude Opus 4.8 Fast",
+			members: [
+				"claude-opus-4-8-low-fast",
+				"claude-opus-4-8-medium-fast",
+				"claude-opus-4-8-high-fast",
+				"claude-opus-4-8-xhigh-fast",
+				"claude-opus-4-8-max-fast",
+			],
+			routing: {
+				[Effort.Minimal]: "claude-opus-4-8-low-fast",
+				[Effort.Low]: "claude-opus-4-8-medium-fast",
+				[Effort.Medium]: "claude-opus-4-8-high-fast",
+				[Effort.High]: "claude-opus-4-8-xhigh-fast",
+				[Effort.XHigh]: "claude-opus-4-8-max-fast",
+			},
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				requiresEffort: true,
+			},
+		},
+		devinTierFamily(
+			"gpt-5-2",
+			"GPT-5.2",
+			{
+				off: "MODEL_GPT_5_2_NONE",
+				low: "MODEL_GPT_5_2_LOW",
+				medium: "MODEL_GPT_5_2_MEDIUM",
+				high: "MODEL_GPT_5_2_HIGH",
+				xhigh: "MODEL_GPT_5_2_XHIGH",
+			},
+			[Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		),
+		devinTierFamily(
+			"gpt-5-3-codex",
+			"GPT-5.3 Codex",
+			{
+				low: "gpt-5-3-codex-low",
+				medium: "gpt-5-3-codex-medium",
+				high: "gpt-5-3-codex-high",
+				xhigh: "gpt-5-3-codex-xhigh",
+			},
+			[Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		),
+		devinTierFamily(
+			"gpt-5-3-codex-fast",
+			"GPT-5.3 Codex Fast",
+			{
+				low: "gpt-5-3-codex-low-priority",
+				medium: "gpt-5-3-codex-medium-priority",
+				high: "gpt-5-3-codex-high-priority",
+				xhigh: "gpt-5-3-codex-xhigh-priority",
+			},
+			[Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		),
+		devinTierFamily(
+			"gpt-5-4",
+			"GPT-5.4",
+			{
+				off: "gpt-5-4-none",
+				low: "gpt-5-4-low",
+				medium: "gpt-5-4-medium",
+				high: "gpt-5-4-high",
+				xhigh: "gpt-5-4-xhigh",
+			},
+			[Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		),
+		devinTierFamily(
+			"gpt-5-4-fast",
+			"GPT-5.4 Fast",
+			{
+				off: "gpt-5-4-none-priority",
+				low: "gpt-5-4-low-priority",
+				medium: "gpt-5-4-medium-priority",
+				high: "gpt-5-4-high-priority",
+				xhigh: "gpt-5-4-xhigh-priority",
+			},
+			[Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		),
+		devinTierFamily(
+			"gpt-5-4-mini",
+			"GPT-5.4 Mini",
+			{
+				low: "gpt-5-4-mini-low",
+				medium: "gpt-5-4-mini-medium",
+				high: "gpt-5-4-mini-high",
+				xhigh: "gpt-5-4-mini-xhigh",
+			},
+			[Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		),
+		devinTierFamily(
+			"gpt-5-5",
+			"GPT-5.5",
+			{
+				off: "gpt-5-5-none",
+				low: "gpt-5-5-low",
+				medium: "gpt-5-5-medium",
+				high: "gpt-5-5-high",
+				xhigh: "gpt-5-5-xhigh",
+			},
+			[Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		),
+		devinTierFamily(
+			"gpt-5-5-fast",
+			"GPT-5.5 Fast",
+			{
+				off: "gpt-5-5-none-priority",
+				low: "gpt-5-5-low-priority",
+				medium: "gpt-5-5-medium-priority",
+				high: "gpt-5-5-high-priority",
+				xhigh: "gpt-5-5-xhigh-priority",
+			},
+			[Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		),
+		devinTierFamily(
+			"gemini-3-1-pro",
+			"Gemini 3.1 Pro",
+			{
+				low: "gemini-3-1-pro-low",
+				high: "gemini-3-1-pro-high",
+			},
+			[Effort.Low, Effort.High],
+		),
+		devinTierFamily(
+			"gemini-3-5-flash",
+			"Gemini 3.5 Flash",
+			{
+				minimal: "gemini-3-5-flash-minimal",
+				low: "gemini-3-5-flash-low",
+				medium: "gemini-3-5-flash-medium",
+				high: "gemini-3-5-flash-high",
+			},
+			[Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+		),
+		devinTierFamily(
+			"gemini-3-flash",
+			"Gemini 3 Flash",
+			{
+				minimal: "MODEL_GOOGLE_GEMINI_3_0_FLASH_MINIMAL",
+				low: "MODEL_GOOGLE_GEMINI_3_0_FLASH_LOW",
+				medium: "MODEL_GOOGLE_GEMINI_3_0_FLASH_MEDIUM",
+				high: "MODEL_GOOGLE_GEMINI_3_0_FLASH_HIGH",
+			},
+			[Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+		),
+	],
+};
 
 /** Provider id → hand collapse table. The CCA providers diverge on thinking transport. */
 export const VARIANT_COLLAPSE_TABLES: Readonly<Record<string, VariantCollapseTable>> = {
 	"google-antigravity": ANTIGRAVITY_VARIANT_COLLAPSE_TABLE,
 	"google-gemini-cli": GEMINI_CLI_VARIANT_COLLAPSE_TABLE,
+	devin: DEVIN_VARIANT_COLLAPSE_TABLE,
 };
 
 /**

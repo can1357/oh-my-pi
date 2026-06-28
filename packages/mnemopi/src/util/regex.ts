@@ -67,6 +67,12 @@ export const RECALL_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
 	imposter: ["self-doubt", "doubt", "insecure"],
 };
 
+export function isCjkChar(ch: string): boolean {
+	return (
+		(ch >= "\u4e00" && ch <= "\u9fff") || (ch >= "\u3040" && ch <= "\u30ff") || (ch >= "\uac00" && ch <= "\ud7af")
+	);
+}
+
 export function hasCjk(text: string): boolean {
 	return CJK_RE.test(text);
 }
@@ -119,7 +125,7 @@ export function cjkFtsTerms(text: string): string[] {
 	const chars: string[] = [];
 	for (let i = 0; i < text.length; i++) {
 		const ch = text.charAt(i);
-		if (isCjkCodeUnit(ch.charCodeAt(0))) chars.push(ch);
+		if (isCjkChar(ch)) chars.push(ch);
 	}
 	if (chars.length === 0) return [];
 	const terms: string[] = [];
@@ -156,10 +162,4 @@ function isAsciiDigits(value: string): boolean {
 		if (code < 48 || code > 57) return false;
 	}
 	return value.length > 0;
-}
-
-function isCjkCodeUnit(code: number): boolean {
-	return (
-		(code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3040 && code <= 0x30ff) || (code >= 0xac00 && code <= 0xd7af)
-	);
 }

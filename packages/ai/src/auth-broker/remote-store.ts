@@ -17,6 +17,7 @@ import {
 	REMOTE_REFRESH_SENTINEL,
 	type StoredAuthCredential,
 } from "../auth-storage";
+import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { UsageReport } from "../usage";
@@ -313,26 +314,26 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	async markCredentialSuspect(credentialId: number, opts: { signal?: AbortSignal } = {}): Promise<void> {
 		const { entry } = await this.#client.refreshCredential(credentialId, opts.signal);
 		if (entry.credential.type !== "oauth") {
-			throw new Error(`Broker returned non-OAuth credential for id=${credentialId}`);
+			throw new AIError.AuthBrokerError(`Broker returned non-OAuth credential for id=${credentialId}`);
 		}
 		this.#applyCredentialEntry(entry);
 		this.#maybeRefreshSnapshot("suspect credential refresh");
 	}
 
 	replaceAuthCredentialsForProvider(_provider: string, _credentials: AuthCredential[]): StoredAuthCredential[] {
-		throw new Error(
+		throw new AIError.AuthBrokerError(
 			"RemoteAuthCredentialStore is read-only on the client. Use `omp auth-broker login <provider>` to mutate credentials.",
 		);
 	}
 
 	upsertAuthCredentialForProvider(_provider: string, _credential: AuthCredential): StoredAuthCredential[] {
-		throw new Error(
+		throw new AIError.AuthBrokerError(
 			"RemoteAuthCredentialStore is read-only on the client. Use `omp auth-broker login <provider>` to mutate credentials.",
 		);
 	}
 
 	deleteAuthCredentialsForProvider(_provider: string, _disabledCause: string): void {
-		throw new Error(
+		throw new AIError.AuthBrokerError(
 			"RemoteAuthCredentialStore is read-only on the client. Use `omp auth-broker logout <provider>` to mutate credentials.",
 		);
 	}
@@ -487,7 +488,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			});
 		}
 		if (entry.credential.type !== "oauth") {
-			throw new Error(`Broker returned non-OAuth credential for id=${credentialId}`);
+			throw new AIError.AuthBrokerError(`Broker returned non-OAuth credential for id=${credentialId}`);
 		}
 		const refreshed = entry.credential;
 		return {
@@ -538,11 +539,11 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 */
 	#raceWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
 		if (!signal) return promise;
-		if (signal.aborted) return Promise.reject(new Error("auth-broker request aborted"));
+		if (signal.aborted) return Promise.reject(new AIError.AbortError("auth-broker request aborted"));
 		return new Promise<T>((resolve, reject) => {
 			const onAbort = (): void => {
 				signal.removeEventListener("abort", onAbort);
-				reject(new Error("auth-broker request aborted"));
+				reject(new AIError.AbortError("auth-broker request aborted"));
 			};
 			signal.addEventListener("abort", onAbort, { once: true });
 			promise.then(

@@ -1,9 +1,14 @@
 import { describe, expect, it, vi } from "bun:test";
+import type { ImageContent } from "@pk-nerdsaver-ai/pi-ai";
 import { InputController } from "@pk-nerdsaver-ai/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@pk-nerdsaver-ai/pi-coding-agent/modes/types";
 import { USER_INTERRUPT_LABEL } from "@pk-nerdsaver-ai/pi-coding-agent/session/messages";
 
-function createContext() {
+function createContext(options?: {
+	queuedMessageCount?: number;
+	pendingImages?: ImageContent[];
+	pendingImageLinks?: (string | undefined)[];
+}) {
 	let editorText = "";
 	const abort = vi.fn(async () => {});
 	const prompt = vi.fn(async () => {});
@@ -12,6 +17,7 @@ function createContext() {
 	const showError = vi.fn();
 	const ctx = {
 		editor: {
+			imageLinks: undefined as (string | undefined)[] | undefined,
 			setText(text: string) {
 				editorText = text;
 			},
@@ -19,6 +25,11 @@ function createContext() {
 				return editorText;
 			},
 			addToHistory: vi.fn(),
+			pendingImages: options?.pendingImages ? [...options.pendingImages] : ([] as ImageContent[]),
+			pendingImageLinks:
+				options?.pendingImageLinks ??
+				options?.pendingImages?.map(() => undefined) ??
+				([] as (string | undefined)[]),
 		},
 		ui: { requestRender },
 		session: {
@@ -26,7 +37,7 @@ function createContext() {
 			isCompacting: false,
 			isBashRunning: false,
 			isEvalRunning: false,
-			queuedMessageCount: 1,
+			queuedMessageCount: options?.queuedMessageCount ?? 1,
 			extensionRunner: undefined,
 			abort,
 			prompt,
@@ -34,8 +45,6 @@ function createContext() {
 		get viewSession() {
 			return (this as typeof ctx).session;
 		},
-		pendingImages: [],
-		pendingImageLinks: [],
 		compactionQueuedMessages: [],
 		locallySubmittedUserSignatures: new Set<string>(),
 		isBashMode: false,
@@ -44,6 +53,7 @@ function createContext() {
 		updatePendingMessagesDisplay,
 		showError,
 		hasActiveBtw: () => false,
+		withLocalSubmission: async (_text: string, fn: () => Promise<unknown>) => fn(),
 		hasActiveOmfg: () => false,
 	} as unknown as InteractiveModeContext;
 	return { ctx, abort, prompt, updatePendingMessagesDisplay, requestRender, showError };
@@ -62,5 +72,61 @@ describe("empty submit with queued messages", () => {
 		expect(showError).not.toHaveBeenCalled();
 		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("queues an image-only steer while streaming", async () => {
+		const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
+		const { ctx, abort, prompt, updatePendingMessagesDisplay, requestRender } = createContext({
+			queuedMessageCount: 0,
+			pendingImages: [image],
+		});
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		await ctx.editor.onSubmit?.("");
+
+		expect(abort).not.toHaveBeenCalled();
+		expect(prompt).toHaveBeenCalledWith("", { streamingBehavior: "steer", images: [image] });
+		expect(ctx.editor.pendingImages).toEqual([]);
+		expect(ctx.editor.pendingImageLinks).toEqual([]);
+		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
+		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("restores an image-only steer when streaming dispatch rejects", async () => {
+		const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
+		const { ctx, abort, prompt, showError, updatePendingMessagesDisplay, requestRender } = createContext({
+			queuedMessageCount: 0,
+			pendingImages: [image],
+			pendingImageLinks: ["local://draft.png"],
+		});
+		prompt.mockImplementationOnce(async () => {
+			throw new Error("queue rejected");
+		});
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		await ctx.editor.onSubmit?.("");
+
+		expect(abort).not.toHaveBeenCalled();
+		expect(showError).toHaveBeenCalledWith("queue rejected");
+		expect(ctx.editor.getText()).toBe("");
+		expect(ctx.editor.pendingImages).toEqual([image]);
+		expect(ctx.editor.pendingImageLinks).toEqual(["local://draft.png"]);
+		expect(ctx.editor.imageLinks).toEqual(["local://draft.png"]);
+		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
+		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("queues an image-only steer instead of aborting when messages are already queued", async () => {
+		const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
+		const { ctx, abort, prompt } = createContext({ queuedMessageCount: 1, pendingImages: [image] });
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		await ctx.editor.onSubmit?.("");
+
+		expect(abort).not.toHaveBeenCalled();
+		expect(prompt).toHaveBeenCalledWith("", { streamingBehavior: "steer", images: [image] });
 	});
 });

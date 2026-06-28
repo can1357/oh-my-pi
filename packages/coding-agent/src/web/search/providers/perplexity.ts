@@ -833,16 +833,28 @@ export class PerplexityProvider extends SearchProvider {
 	readonly id = "perplexity";
 	readonly label = "Perplexity";
 
+	/**
+	 * Auto-chain admission. Requires a direct Perplexity credential
+	 * (`PERPLEXITY_COOKIES`, OAuth session, or `PERPLEXITY_API_KEY`).
+	 *
+	 * OpenRouter auth is intentionally NOT accepted here: silently using
+	 * OpenRouter's `perplexity/sonar-pro` whenever any OpenRouter key is
+	 * configured surprises users (and bills them) for a path they never
+	 * asked for. The auto chain skips Perplexity in that case and falls
+	 * through to the next configured provider. Users who DO want the
+	 * OpenRouter-backed Perplexity path can still opt in by setting
+	 * `webSearch: perplexity` explicitly — see {@link isExplicitlyAvailable}.
+	 */
 	isAvailable(authStorage: AuthStorage): boolean {
-		return (
-			!!$env.PERPLEXITY_COOKIES?.trim() || authStorage.hasAuth("perplexity") || authStorage.hasAuth("openrouter")
-		);
+		return !!$env.PERPLEXITY_COOKIES?.trim() || authStorage.hasAuth("perplexity");
 	}
 
 	/**
-	 * Perplexity accepts anonymous browser-style ask requests, but keep auto
-	 * provider selection credential-gated so a configured provider keeps priority
-	 * over the anonymous fallback.
+	 * Perplexity accepts anonymous browser-style ask requests, and the
+	 * OpenRouter-backed `perplexity/sonar-pro` path is opt-in through
+	 * explicit selection. Keep auto-chain admission credential-gated so a
+	 * configured provider keeps priority over the anonymous/OpenRouter
+	 * fallbacks.
 	 */
 	isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
 		return true;

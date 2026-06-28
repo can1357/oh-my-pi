@@ -2,6 +2,7 @@ import {
 	Ellipsis,
 	type ExtractSegmentsResult,
 	extractSegments as nativeExtractSegments,
+	setHangulCompatJamoWidthOverride as nativeSetHangulCompatJamoWidthOverride,
 	sliceWithWidth as nativeSliceWithWidth,
 	truncateToWidth as nativeTruncateToWidth,
 	wrapTextWithAnsi as nativeWrapTextWithAnsi,
@@ -12,6 +13,34 @@ import { DEFAULT_TAB_WIDTH } from "@pk-nerdsaver-ai/pi-utils";
 export { Ellipsis } from "@pk-nerdsaver-ai/pi-natives";
 
 export { DEFAULT_TAB_WIDTH } from "@pk-nerdsaver-ai/pi-utils";
+
+export type HangulCompatibilityJamoWidth = "platform" | "unicode" | 1 | 2;
+
+let hangulCompatibilityJamoWidth: HangulCompatibilityJamoWidth = "platform";
+
+// Wire encoding for the native override (see crates/pi-natives text.rs):
+// 0 = platform default, 1 = narrow, 2 = wide, 3 = unicode (no correction).
+function nativeHangulCompatibilityJamoOverride(width: HangulCompatibilityJamoWidth): number {
+	if (width === "unicode") return 3;
+	if (typeof width === "number") return width;
+	return 0;
+}
+
+export function getHangulCompatibilityJamoWidth(): HangulCompatibilityJamoWidth {
+	return hangulCompatibilityJamoWidth;
+}
+
+export function setHangulCompatibilityJamoWidth(width: HangulCompatibilityJamoWidth): boolean {
+	const changed = hangulCompatibilityJamoWidth !== width;
+	hangulCompatibilityJamoWidth = width;
+	nativeSetHangulCompatJamoWidthOverride(nativeHangulCompatibilityJamoOverride(width));
+	return changed;
+}
+
+export function resetHangulCompatibilityJamoWidthForTests(): void {
+	hangulCompatibilityJamoWidth = "platform";
+	nativeSetHangulCompatJamoWidthOverride(0);
+}
 
 export type TextSizingScale = 1 | 2 | 3;
 export type TextSizingVerticalAlign = "top" | "bottom" | "center";
@@ -92,7 +121,7 @@ export function truncateToWidth(
 	return nativeTruncateToWidth(
 		text,
 		maxWidth,
-		(ellipsisKind === "" ? Ellipsis.Omit : ellipsisKind) ?? Ellipsis.Unicode,
+		(typeof ellipsisKind === "string" ? Ellipsis.Omit : ellipsisKind) ?? Ellipsis.Unicode,
 		pad ?? false,
 		DEFAULT_TAB_WIDTH,
 	);
@@ -157,6 +186,58 @@ const LONG_WIDTH_FAST_PATH_MIN = 128;
 // non-CJK tables that back truncate/slice/wrap. Hoisted so no per-call alloc.
 const STRING_WIDTH_OPTS = { countAnsiEscapeCodes: false, ambiguousIsNarrow: true } as const;
 
+// Hangul Compatibility Jamo (U+3131..=U+318E). `Bun.stringWidth` follows UAX#11
+// and reports these at 2 cells (the U+3164 HANGUL FILLER at 0), but the actual
+// rendered width is decided by the *client* terminal (1 cell on Terminal.app /
+// iTerm2, 2 on Ghostty and most Linux terminals). The width is resolved from
+// the terminal identity and pushed into the native engine through
+// `setHangulCompatibilityJamoWidth`; mirror the same correction here so the TS
+// width stays in parity with the native truncate/slice/wrap model — and so the
+// hardware cursor column lands on the actual glyph during Korean IME input.
+const HANGUL_COMPAT_JAMO_REGEX = /[\u3131-\u318e]/;
+const HANGUL_COMPAT_JAMO_GLOBAL_REGEX = /[\u3131-\u318e]/g;
+const HANGUL_FILLER_CODE_POINT = 0x3164;
+// `Bun.stringWidth` counts every code point in the Compatibility Jamo block as
+// 2 cells (even the U+3164 filler that `unicode-width` treats as zero-width).
+const HANGUL_COMPAT_JAMO_BUN_WIDTH = 2;
+
+// Effective target cell width for Compatibility Jamo, or `null` to follow the
+// Unicode width (no correction). Mirrors `hangul_compat_jamo_target_width` in
+// crates/pi-natives/src/text.rs.
+function hangulCompatibilityJamoTargetWidth(): 1 | 2 | null {
+	switch (hangulCompatibilityJamoWidth) {
+		case 1:
+			return 1;
+		case 2:
+			return 2;
+		case "unicode":
+			return null;
+		default:
+			// "platform": macOS terminals historically render these narrow.
+			return process.platform === "darwin" ? 1 : null;
+	}
+}
+
+// Reconcile the `Bun.stringWidth` count for Compatibility Jamo to the native
+// width engine: subtract Bun's per-jamo cell count and add back the effective
+// width — the runtime target when one is active, otherwise the `unicode-width`
+// value. Mirrors `char_width_corrected` / `apply_hangul_compat_jamo_delta` in
+// crates/pi-natives/src/text.rs, including the rule that the zero-width filler
+// (U+3164) is never widened past the narrow correction (a wide terminal still
+// renders it at its Unicode width of 0).
+function correctHangulCompatibilityJamoWidth(width: number, str: string): number {
+	if (!HANGUL_COMPAT_JAMO_REGEX.test(str)) return width;
+	const target = hangulCompatibilityJamoTargetWidth();
+	let corrected = width;
+	HANGUL_COMPAT_JAMO_GLOBAL_REGEX.lastIndex = 0;
+	for (let m = HANGUL_COMPAT_JAMO_GLOBAL_REGEX.exec(str); m !== null; m = HANGUL_COMPAT_JAMO_GLOBAL_REGEX.exec(str)) {
+		const unicodeWidth = m[0].codePointAt(0) === HANGUL_FILLER_CODE_POINT ? 0 : 2;
+		const finalWidth = target === null || (unicodeWidth === 0 && target > 1) ? unicodeWidth : target;
+		corrected += finalWidth - HANGUL_COMPAT_JAMO_BUN_WIDTH;
+	}
+	return corrected;
+}
+
 /**
  * Visible width of a string in terminal columns, excluding ANSI/OSC escapes.
  *
@@ -177,7 +258,7 @@ export function visibleWidth(str: string): number {
 			tabCount++;
 		}
 		if (tabCount > 0) width += tabCount * DEFAULT_TAB_WIDTH;
-		return width;
+		return correctHangulCompatibilityJamoWidth(width, str);
 	}
 
 	let tabCount = 0;
@@ -238,7 +319,7 @@ export function visibleWidth(str: string): number {
 		}
 	}
 
-	return width;
+	return correctHangulCompatibilityJamoWidth(width, str);
 }
 
 const THAI_LAO_AM_GLOBAL_REGEX = /[\u0e33\u0eb3]/g;

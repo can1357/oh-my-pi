@@ -12,7 +12,7 @@ import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import titleMarkerSystemPrompt from "../prompts/system/title-system-marker.md" with { type: "text" };
-import { ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
+import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
 import { formatTitleUserMessage, isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
 
@@ -23,7 +23,6 @@ const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
 const DEFAULT_TERMINAL_TITLE = "π";
 const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 
-export const TITLE_LOCAL_FALLBACK_DELAY_MS = 10_000;
 const TITLE_MAX_TOKENS = 30;
 const REASONING_SAFE_MAX_TOKENS = 1024;
 const SET_TITLE_TOOL_NAME = "set_title";
@@ -73,84 +72,12 @@ function getTitleModel(registry: ModelRegistry, settings: Settings, currentModel
 	const availableModels = registry.getAvailable();
 	if (availableModels.length === 0) return undefined;
 
-	const titleModel = resolveRoleSelection(["title", "commit", "smol"], settings, availableModels, registry)?.model;
+	const titleModel = resolveRoleSelection(["tiny", "commit", "smol"], settings, availableModels, registry)?.model;
 	if (titleModel) return titleModel;
 
 	if (currentModel) return currentModel;
 
 	return undefined;
-}
-
-export async function raceFirstNonNull<T>(
-	primary: Promise<T | null>,
-	startFallback: () => Promise<T | null>,
-	delayMs: number = TITLE_LOCAL_FALLBACK_DELAY_MS,
-	onPrimaryWinAfterFallback?: () => void,
-): Promise<T | null> {
-	const { promise, resolve } = Promise.withResolvers<T | null>();
-	let resolved = false;
-	let primarySettled = false;
-	let fallbackStarted = false;
-	let fallbackSettled = false;
-
-	const resolveOnce = (value: T | null): void => {
-		if (resolved) return;
-		resolved = true;
-		resolve(value);
-	};
-	const maybeResolveNull = (): void => {
-		if (primarySettled && fallbackStarted && fallbackSettled) resolveOnce(null);
-	};
-	const startFallbackOnce = (): void => {
-		if (fallbackStarted || resolved) return;
-		fallbackStarted = true;
-		let fallback: Promise<T | null>;
-		try {
-			fallback = startFallback();
-		} catch {
-			fallbackSettled = true;
-			maybeResolveNull();
-			return;
-		}
-		void fallback.then(
-			value => {
-				fallbackSettled = true;
-				if (value !== null) resolveOnce(value);
-				else maybeResolveNull();
-			},
-			() => {
-				fallbackSettled = true;
-				maybeResolveNull();
-			},
-		);
-	};
-
-	const timer = setTimeout(startFallbackOnce, delayMs);
-	void primary.then(
-		value => {
-			primarySettled = true;
-			clearTimeout(timer);
-			if (value !== null) {
-				if (fallbackStarted) onPrimaryWinAfterFallback?.();
-				resolveOnce(value);
-				return;
-			}
-			startFallbackOnce();
-			maybeResolveNull();
-		},
-		() => {
-			primarySettled = true;
-			clearTimeout(timer);
-			startFallbackOnce();
-			maybeResolveNull();
-		},
-	);
-
-	try {
-		return await promise;
-	} finally {
-		clearTimeout(timer);
-	}
 }
 
 /**
@@ -200,36 +127,41 @@ export async function generateSessionTitle(
 		);
 	}
 
-	const onlineAbortController = new AbortController();
-	const localTitlePromise = titleSystemPrompt
-		? tinyTitleClient.generate(tinyModel, firstMessage, { systemPrompt: titleSystemPrompt })
-		: tinyTitleClient.generate(tinyModel, firstMessage);
-	const localTitle = localTitlePromise.then(
-		title => title || null,
-		err => {
-			logger.warn("title-generator: local model error", {
+	// User explicitly picked a local tiny model. NEVER fall back to the online
+	// smol path (issue #3187): the smol role resolves through priority.json and
+	// silently bills whatever provider holds the resolved API key — OpenRouter
+	// in the reporter's case, leaking real credits without consent. If the
+	// local worker fails (unknown key, download missing, transformers.js
+	// crash, abort), leave the session untitled; the next user turn retries.
+	if (!isTinyTitleLocalModelKey(tinyModel)) {
+		logger.warn("title-generator: unknown local tiny model; skipping title (will not fall back to online)", {
+			sessionId,
+			model: tinyModel,
+			reason: "unknown-local-model",
+		});
+		return null;
+	}
+	try {
+		const localTitle = titleSystemPrompt
+			? await tinyTitleClient.generate(tinyModel, firstMessage, { systemPrompt: titleSystemPrompt })
+			: await tinyTitleClient.generate(tinyModel, firstMessage);
+		if (!localTitle) {
+			logger.warn("title-generator: local tiny model produced no title; skipping (no online fallback)", {
 				sessionId,
 				model: tinyModel,
-				error: err instanceof Error ? err.message : String(err),
+				reason: "local-no-output",
 			});
 			return null;
-		},
-	);
-	const startOnline = (): Promise<string | null> =>
-		generateTitleOnline(
-			firstMessage,
-			registry,
-			settings,
+		}
+		return localTitle;
+	} catch (err) {
+		logger.warn("title-generator: local tiny model errored; skipping (no online fallback)", {
 			sessionId,
-			currentModel,
-			metadataResolver,
-			onlineAbortController.signal,
-			titleSystemPrompt,
-		);
-
-	return raceFirstNonNull(localTitle, startOnline, TITLE_LOCAL_FALLBACK_DELAY_MS, () => {
-		onlineAbortController.abort();
-	});
+			model: tinyModel,
+			error: err instanceof Error ? err.message : String(err),
+		});
+		return null;
+	}
 }
 
 export async function generateTitleOnline(
@@ -314,7 +246,7 @@ export async function generateTitleOnline(
 			return null;
 		}
 
-		const title = normalizeGeneratedTitle(extractGeneratedTitle(response.content));
+		const title = normalizeGeneratedTitle(extractGeneratedTitle(response.content), firstMessage);
 
 		if (!title) {
 			logger.debug("title-generator: no title returned", {

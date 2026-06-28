@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { renderDemotedThinking } from "@pk-nerdsaver-ai/pi-ai/dialect";
 import { convertAnthropicMessages } from "@pk-nerdsaver-ai/pi-ai/providers/anthropic";
 import type {
 	AssistantMessage,
@@ -259,7 +260,7 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 		const assistants = params.filter(p => p.role === "assistant");
 		const priorBlocks = assistants[0].content as WireBlock[];
 		const text = priorBlocks.find(b => b.type === "text") as WireTextBlock | undefined;
-		expect(text?.text).toBe("visible reasoning");
+		expect(text?.text).toBe(renderDemotedThinking(target.id, "visible reasoning"));
 		expect(priorBlocks.find(b => b.type === "thinking")).toBeUndefined();
 		expect(priorBlocks.find(b => b.type === "redacted_thinking")).toBeUndefined();
 	});
@@ -300,11 +301,9 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 		expect(thinking?.signature).toBe("");
 	});
 
-	it("does not promote prior unsigned thinking from non-anthropic sources to thinking blocks", () => {
-		// Cross-API replay: prior turn came from OpenAI-responses with no
-		// Anthropic signature. The all-or-none rule scope is per-API; we must
-		// not invent thinking blocks for a turn whose source can't sign them —
-		// the existing cross-API text demotion is the right behavior.
+	it("preserves prior unsigned thinking from non-anthropic sources on unsigned-replay targets", () => {
+		// Anthropic-compatible targets that advertise `replayUnsignedThinking`
+		// accept unsigned native thinking as their semantic-carry analogue.
 		const target = makeAnthropicModel();
 		const messages: Message[] = [
 			makeUser("Summarize README"),
@@ -333,10 +332,8 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 		const params = convertAnthropicMessages(messages, target, false);
 		const assistants = params.filter(p => p.role === "assistant");
 		const priorBlocks = assistants[0].content as WireBlock[];
-		expect(priorBlocks.find(b => b.type === "thinking")).toBeUndefined();
-		// Reasoning text still survives on the wire (as text, via the existing
-		// cross-API demotion path).
-		const text = priorBlocks.find(b => b.type === "text") as WireTextBlock | undefined;
-		expect(text?.text).toBe("openai chain-of-thought");
+		const thinking = priorBlocks.find(b => b.type === "thinking") as WireThinkingBlock | undefined;
+		expect(thinking?.thinking).toBe("openai chain-of-thought");
+		expect(thinking?.signature).toBe("");
 	});
 });

@@ -1,4 +1,4 @@
-import { type SelectItem, SelectList, type SgrMouseEvent } from "@pk-nerdsaver-ai/pi-tui";
+import { routeSelectListMouse, type SelectItem, SelectList, type SgrMouseEvent } from "@pk-nerdsaver-ai/pi-tui";
 import { getSelectListTheme, type SymbolPreset, setSymbolPreset, theme } from "../../theme/theme";
 import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 
@@ -65,18 +65,7 @@ class GlyphSceneController implements SetupSceneController {
 	/** Wheel moves the highlight (live preview); hover lights the row under the pointer; click confirms it. */
 	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
 		if (this.#committing) return;
-		if (event.wheel !== null) {
-			this.#selectList.handleWheel(event.wheel);
-			return;
-		}
-		const index = this.#selectList.hitTest(line - this.#listRowStart);
-		if (event.motion) {
-			this.#selectList.setHoverIndex(index ?? null);
-			return;
-		}
-		if (event.leftClick && index !== undefined) {
-			this.#selectList.clickItem(index);
-		}
+		routeSelectListMouse(this.#selectList, event, line - this.#listRowStart);
 	}
 
 	render(width: number): readonly string[] {

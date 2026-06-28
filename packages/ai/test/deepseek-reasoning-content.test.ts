@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { renderDemotedThinking } from "@pk-nerdsaver-ai/pi-ai/dialect";
 import { convertMessages } from "@pk-nerdsaver-ai/pi-ai/providers/openai-completions";
 import type { AssistantMessage, Model, ModelSpec, ThinkingContent, ToolCall } from "@pk-nerdsaver-ai/pi-ai/types";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
@@ -326,6 +327,36 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 			expect(assistant?.rs_6f3a1b2c4d5e6f7a8b9c0d1e2f3a4b5c).toBeUndefined();
 			// Should have set reasoning_content from the thinking text via the openai path.
 			expect(assistant?.reasoning_content).toBe("some reasoning");
+		});
+		it("demotes cross-api foreign thinking while satisfying tool-call reasoning_content schema", () => {
+			const model = deepseekModel({
+				provider: "opencode-go",
+				baseUrl: "https://opencode.ai/zen/go/v1",
+				id: "deepseek-v4-flash",
+			});
+			const compat = model.compat;
+			const msg = assistantToolCall(model, [
+				{
+					type: "thinking",
+					thinking: "Need to preserve cross-api reasoning.",
+					thinkingSignature: "sig_from_anthropic",
+				},
+				{
+					type: "toolCall",
+					id: "toolu_cross_api",
+					name: "read",
+					arguments: { path: "README.md" },
+				},
+			]);
+			msg.api = "anthropic-messages";
+			msg.provider = "zai";
+			msg.model = "claude-compatible";
+
+			const messages = convertMessages(model, { messages: [msg] }, compat);
+			const assistant = findOpenAICompletionAssistantWireMessage(messages);
+			expect(assistant).toBeDefined();
+			expect(assistant?.reasoning_content).toBe("");
+			expect(assistant?.content).toBe(renderDemotedThinking(model.id, "Need to preserve cross-api reasoning."));
 		});
 		it("falls through to empty-string when thinking block has opaque signature and empty text", () => {
 			const model = deepseekModel({

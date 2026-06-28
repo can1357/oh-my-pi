@@ -1,5 +1,19 @@
 Runs bash in a shell session — terminal ops: git, bun, cargo, python.
 
+# When to use bash — and when not to
+
+Bash invokes **real binaries** with simple args. It is NOT a scripting surface.
+
+Use bash ONLY for: a single binary call, or one short pipeline that COMPUTES a fact (`wc -l`, `sort | uniq -c`, `comm`, `diff`, a checksum, `git status`).
+
+Anything below → `eval` cell, not bash:
+- Inline interpreter scripts (`-e`/`-c`/`--eval`) when an eval runtime exists for that language
+- Heredocs (`<<EOF`), `while`/`for`/`if`/`case` shell control flow
+- `$(…)` command substitution nested inside another command
+- Pipelines with more than two stages, or stages that need control flow or quote/JSON escaping
+- Multiline commands, `&&`-chains mixing control flow
+- Quote/JSON escaping that fights the shell
+
 <instruction>
 - `cwd` sets the working dir, not `cd dir && …`
 - `env: { NAME: "…" }` for multiline / quote-heavy / untrusted values; reference `$NAME`
@@ -14,9 +28,10 @@ Runs bash in a shell session — terminal ops: git, bun, cargo, python.
 </instruction>
 
 <critical>
-- NEVER shell out to fetch, display, list, page, or search what a dedicated tool serves: `cat`/`head`/`tail`/`less`/`more`/`ls` → `read`; `grep`/`rg`/`ag`/`ack` → `search`; `find`/`fd` → `find`; `sed -i`/`perl -i`/`awk -i` → `edit`; `echo >`/heredoc → `write`. Tools keep gitignore semantics, line anchors, structured output shell loses.
-- NEVER trim or silence output: no `| head -n N`, `| tail -n N`, `| less`, `2>&1`, `2>/dev/null`. stderr already merged; long output auto-truncated, FULL capture kept at `artifact://<id>`.
-- Pipelines that COMPUTE a new fact are correct bash: `wc -l`, `sort | uniq -c`, `comm`, `cut`, `diff a b`, `shasum`. Litmus: produces a count, frequency table, set difference, or checksum no tool returns → bash. Merely moves or trims bytes a tool can fetch → use the tool.
+- Bash invokes real binaries with simple args; it is NOT a scripting surface. Loops, conditionals, heredocs, inline interpreter scripts (`-e`/`-c`/`--eval`) when an eval runtime exists, several piped stages, or quote/JSON escaping mean you're writing a program → use `eval` cells: restartable, stateful, and free of shell-quoting traps.
+- NEVER shell out to search content or files: `grep/rg` → `grep`.
+- NEVER use `ls` or `find` to list or locate files — `ls` → `read` (a directory path lists entries), `find` → the `glob` tool (globbing). This is non-negotiable, even for a single quick listing.
+- Avoid head/tail/redirections: stderr already merged; long output auto-truncated, FULL capture kept at `artifact://<id>`.
 </critical>
 
 <output>

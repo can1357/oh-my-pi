@@ -121,6 +121,7 @@ describe("SYSTEM.md prompt assembly", () => {
 			rules: [],
 			toolNames: ["read"],
 			tools: READ_TOOL,
+			includeWorkspaceTree: true,
 			workspaceTree: {
 				rootPath: projectDir,
 				rendered: ".\n  - nested/",
@@ -131,14 +132,45 @@ describe("SYSTEM.md prompt assembly", () => {
 		});
 
 		const promptText = systemPrompt.join("\n\n");
+		const normalizedProjectDir = projectDir.replace(/\\/g, "/");
 		const appendMatches = promptText.match(new RegExp(escapeRegExp(appendPrompt), "g")) ?? [];
 		expect(systemPrompt).toHaveLength(2);
 		expect(promptText).toContain("CLI custom prompt");
 		expect(promptText).toContain("<workspace-tree>");
 		expect(promptText).toContain("<dir-context>");
-		expect(promptText).toContain(`current working directory is '${projectDir}'`);
+		expect(promptText).toMatch(
+			new RegExp(
+				`^Today is [^,\\n]+, and the current working directory is '${escapeRegExp(normalizedProjectDir)}'\\.$`,
+				"m",
+			),
+		);
 		expect(appendMatches).toHaveLength(1);
 		expect(promptText).not.toContain("Discovered project SYSTEM prompt");
+	});
+
+	it("renders active child repo context in the main system prompt", async () => {
+		const parentDir = path.join(tempDir, "parent-cwd");
+		fs.mkdirSync(path.join(parentDir, "active-project", ".git"), { recursive: true });
+
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: parentDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: [],
+			workspaceTree: {
+				rootPath: parentDir,
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+		});
+
+		const promptText = systemPrompt.join("\n\n");
+		expect(promptText).toContain("<active-repo-context>");
+		expect(promptText).toContain("Exactly one direct child git repository was detected at `active-project`.");
+		expect(promptText).toContain("Paths under `active-project/` are the active project");
 	});
 
 	it("prefers project SYSTEM.md over user SYSTEM.md", async () => {

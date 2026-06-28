@@ -15,9 +15,11 @@ import type { Settings } from "../config/settings";
 import autolearnGuidance from "../prompts/system/autolearn-guidance.md" with { type: "text" };
 import autolearnGuidanceLearn from "../prompts/system/autolearn-guidance-learn.md" with { type: "text" };
 import autolearnNudge from "../prompts/system/autolearn-nudge.md" with { type: "text" };
+import autolearnNudgeAutoContinue from "../prompts/system/autolearn-nudge-autocontinue.md" with { type: "text" };
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 
-const AUTOLEARN_NUDGE = autolearnNudge.trim();
+const AUTOLEARN_NUDGE_PASSIVE = autolearnNudge.trim();
+const AUTOLEARN_NUDGE_AUTOCONTINUE = autolearnNudgeAutoContinue.trim();
 const DEFAULT_MIN_TOOL_CALLS = 5;
 
 /**
@@ -110,7 +112,20 @@ export class AutoLearnController {
 
 		// Auto-run a capture turn only when explicitly enabled; otherwise the
 		// hidden reminder rides the next real turn passively.
+		//
+		// The two paths get DIFFERENT nudge text:
+		// - Auto-continue spawns a synthetic turn with the nudge as its only
+		//   user-role payload, so the prompt must be terminal — it tells the
+		//   agent to capture and STOP, and must not be read as the user's
+		//   reply to any pending question. Without that contract, the agent
+		//   conflates the synthetic prompt with user approval and resumes
+		//   prior work (e.g. commits/pushes an unanswered "want me to push?"
+		//   question — #3504).
+		// - Passive mode appends the nudge to the user's real next message,
+		//   so the agent must answer the user normally and treat the capture
+		//   as additive — not as the whole turn's job.
 		const autoContinue = this.#settings.get("autolearn.autoContinue") === true;
+		const content = autoContinue ? AUTOLEARN_NUDGE_AUTOCONTINUE : AUTOLEARN_NUDGE_PASSIVE;
 		// Arm suppression synchronously: the synthetic capture turn's agent_end
 		// fires inside sendCustomMessage (before it resolves), so the flag must be
 		// set before then. Disarm when no turn actually started — a deferred/queued
@@ -122,7 +137,7 @@ export class AutoLearnController {
 			.sendCustomMessage(
 				{
 					customType: "autolearn-nudge",
-					content: AUTOLEARN_NUDGE,
+					content,
 					display: false,
 					attribution: "user",
 				},

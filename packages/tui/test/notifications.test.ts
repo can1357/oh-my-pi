@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { ProcessTerminal } from "@pk-nerdsaver-ai/pi-tui/terminal";
 import {
 	getTerminalInfo,
+	isInsideTmux,
 	isOsc99Supported,
 	NotifyProtocol,
 	setOsc99Supported,
 	TERMINAL,
+	wrapTmuxPassthrough,
 } from "@pk-nerdsaver-ai/pi-tui/terminal-capabilities";
 import { setTerminalHeadless } from "@pk-nerdsaver-ai/pi-utils";
 
@@ -13,6 +15,8 @@ const stdinIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isT
 const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 const stdinSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
 const originalOsc99Probe = Bun.env.PI_TUI_OSC99_PROBE;
+const originalTmux = Bun.env.TMUX;
+const originalPiNotifications = Bun.env.PI_NOTIFICATIONS;
 const mutableTerminal = TERMINAL as unknown as { notifyProtocol: NotifyProtocol };
 const originalNotifyProtocol = mutableTerminal.notifyProtocol;
 
@@ -63,6 +67,13 @@ describe("terminal notifications", () => {
 	beforeEach(() => {
 		setOsc99Supported(false);
 		previousHeadless = setTerminalHeadless(false);
+		// Default the suite to the "outside tmux" baseline so probe/format
+		// assertions never see a stray inherited TMUX leaking the DCS wrap in.
+		delete Bun.env.TMUX;
+		// `PI_NOTIFICATIONS=off` is set in this workspace's CI env, which would
+		// short-circuit `sendNotification` before it writes anything. Clear it
+		// so the delivery-path assertions actually observe stdout writes.
+		delete Bun.env.PI_NOTIFICATIONS;
 	});
 
 	afterEach(() => {
@@ -71,6 +82,8 @@ describe("terminal notifications", () => {
 		setOsc99Supported(false);
 		mutableTerminal.notifyProtocol = originalNotifyProtocol;
 		restoreEnv("PI_TUI_OSC99_PROBE", originalOsc99Probe);
+		restoreEnv("TMUX", originalTmux);
+		restoreEnv("PI_NOTIFICATIONS", originalPiNotifications);
 		restoreProperty(process.stdin, "isTTY", stdinIsTtyDescriptor);
 		restoreProperty(process.stdout, "isTTY", stdoutIsTtyDescriptor);
 		restoreProperty(process.stdin, "setRawMode", stdinSetRawModeDescriptor);
@@ -146,6 +159,77 @@ describe("terminal notifications", () => {
 
 			expect(isOsc99Supported()).toBe(false);
 			expect(received).toEqual([]);
+		} finally {
+			terminal.stop();
+		}
+	});
+
+	it("isInsideTmux reads the TMUX env fresh on each call", () => {
+		expect(isInsideTmux()).toBe(false);
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+		expect(isInsideTmux()).toBe(true);
+		delete Bun.env.TMUX;
+		expect(isInsideTmux()).toBe(false);
+	});
+
+	it("wraps an OSC payload in tmux's DCS passthrough envelope with doubled ESCs", () => {
+		const payload = "\x1b]99;;Hello\x1b\\";
+		expect(wrapTmuxPassthrough(payload)).toBe("\x1bPtmux;\x1b\x1b]99;;Hello\x1b\x1b\\\x1b\\");
+	});
+
+	it("under tmux, OSC-protocol sendNotification wraps for passthrough and appends BEL", () => {
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.sendNotification("ping");
+
+		// Single write — both pieces must reach tmux as one contiguous chunk so a
+		// concurrent renderer cannot interleave between the OSC and the BEL.
+		expect(writes).toEqual(["\x1bPtmux;\x1b\x1b]99;;ping\x1b\x1b\\\x1b\\\x07"]);
+	});
+
+	it("under tmux, Bell-protocol sendNotification stays a plain BEL (no DCS wrap)", () => {
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+		mutableTerminal.notifyProtocol = NotifyProtocol.Bell;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.sendNotification("ping");
+
+		expect(writes).toEqual(["\x07"]);
+	});
+
+	it("outside tmux, OSC-protocol sendNotification writes the raw OSC unchanged", () => {
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.sendNotification("ping");
+
+		expect(writes).toEqual(["\x1b]99;;ping\x1b\\"]);
+	});
+
+	it("under tmux, the OSC 99 capability probe is wrapped in DCS passthrough", () => {
+		Bun.env.PI_TUI_OSC99_PROBE = "1";
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const { terminal, writes } = setupProcessTerminal();
+		try {
+			const probe = writes.find(
+				w => w.startsWith("\x1bPtmux;\x1b\x1b]99;i=omp-probe-") && w.endsWith("\x1b\x1b\\\x1b\\\x1b[c"),
+			);
+			expect(probe).toBeDefined();
 		} finally {
 			terminal.stop();
 		}

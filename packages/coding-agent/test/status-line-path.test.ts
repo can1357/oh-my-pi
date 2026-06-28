@@ -1,11 +1,11 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { SegmentContext } from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/status-line/segments";
 import { renderSegment } from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/status-line/segments";
 import { initTheme, theme } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
-import { getProjectDir, setProjectDir } from "@pk-nerdsaver-ai/pi-utils";
+import { getProjectDir, removeSyncWithRetries, setProjectDir } from "@pk-nerdsaver-ai/pi-utils";
 
 const originalProjectDir = getProjectDir();
 beforeAll(async () => {
@@ -42,10 +42,12 @@ function createPathContext(): SegmentContext {
 			tokensPerSecond: null,
 		},
 		contextPercent: 0,
+		contextTokens: 0,
 		contextWindow: 0,
 		autoCompactEnabled: false,
 		subagentCount: 0,
 		sessionStartTime: Date.now(),
+		activeRepo: null,
 		git: {
 			branch: null,
 			status: null,
@@ -56,15 +58,33 @@ function createPathContext(): SegmentContext {
 }
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	setProjectDir(originalProjectDir);
 });
+
+function expectContentToContainPath(content: string, expected: string): void {
+	if (process.platform === "win32") {
+		expect(content.toLowerCase()).toContain(expected.toLowerCase());
+		return;
+	}
+	expect(content).toContain(expected);
+}
+
+function createFakeHome(): { home: string; projectsRoot: string } {
+	const homeRoot = path.join(originalProjectDir, ".wt");
+	fs.mkdirSync(homeRoot, { recursive: true });
+	const home = fs.mkdtempSync(path.join(homeRoot, "omp-status-line-home-"));
+	const projectsRoot = path.join(home, "Projects");
+	fs.mkdirSync(projectsRoot, { recursive: true });
+	vi.spyOn(os, "homedir").mockReturnValue(home);
+	return { home, projectsRoot };
+}
 
 describe("status line path segment", () => {
 	it("strips the Projects root for symlink-equivalent aliases", () => {
 		if (process.platform === "win32") return;
 
-		const projectsRoot = path.join(os.homedir(), "Projects");
-		fs.mkdirSync(projectsRoot, { recursive: true });
+		const { home, projectsRoot } = createFakeHome();
 
 		const realProjectDir = fs.mkdtempSync(path.join(projectsRoot, "omp-status-line-"));
 		const nestedDir = path.join(realProjectDir, "nested");
@@ -73,7 +93,7 @@ describe("status line path segment", () => {
 
 		try {
 			fs.mkdirSync(nestedDir, { recursive: true });
-			fs.symlinkSync(os.homedir(), homeAlias, "dir");
+			fs.symlinkSync(home, homeAlias, "dir");
 
 			const aliasedDir = path.join(homeAlias, "Projects", path.basename(realProjectDir), "nested");
 			setProjectDir(aliasedDir);
@@ -86,8 +106,10 @@ describe("status line path segment", () => {
 			expect(rendered.content).not.toContain("home-link");
 			expect(rendered.content).not.toContain(`${path.sep}Projects${path.sep}`);
 		} finally {
-			fs.rmSync(aliasRoot, { recursive: true, force: true });
-			fs.rmSync(realProjectDir, { recursive: true, force: true });
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(aliasRoot);
+			removeSyncWithRetries(realProjectDir);
+			removeSyncWithRetries(home);
 		}
 	});
 
@@ -101,10 +123,11 @@ describe("status line path segment", () => {
 			expect(rendered.content).toContain(theme.icon.scratchFolder);
 			expect(rendered.content).not.toContain(theme.icon.folder);
 			// Display is just the scratch-relative tail — no leading tmpdir, no ancestor segments.
-			expect(rendered.content).toContain(path.basename(scratchDir));
+			expectContentToContainPath(rendered.content, path.basename(getProjectDir()));
 			expect(rendered.content).not.toContain(os.tmpdir());
 		} finally {
-			fs.rmSync(scratchDir, { recursive: true, force: true });
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(scratchDir);
 		}
 	});
 
@@ -116,12 +139,13 @@ describe("status line path segment", () => {
 			setProjectDir(nested);
 
 			const rendered = renderSegment("path", createPathContext());
-			const tail = `${path.basename(scratchDir)}${path.sep}sub${path.sep}deep`;
+			const tail = `${path.basename(path.dirname(path.dirname(getProjectDir())))}${path.sep}sub${path.sep}deep`;
 			expect(rendered.content).toContain(theme.icon.scratchFolder);
-			expect(rendered.content).toContain(tail);
+			expectContentToContainPath(rendered.content, tail);
 			expect(rendered.content).not.toContain(os.tmpdir());
 		} finally {
-			fs.rmSync(scratchDir, { recursive: true, force: true });
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(scratchDir);
 		}
 	});
 
@@ -137,13 +161,13 @@ describe("status line path segment", () => {
 			expect(rendered.content).toContain(theme.icon.folder);
 			expect(rendered.content).not.toContain(theme.icon.scratchFolder);
 		} finally {
-			fs.rmSync(scratchDir, { recursive: true, force: true });
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(scratchDir);
 		}
 	});
 
 	it("keeps the folder icon for paths outside any scratch root", () => {
-		const projectsRoot = path.join(os.homedir(), "Projects");
-		fs.mkdirSync(projectsRoot, { recursive: true });
+		const { home, projectsRoot } = createFakeHome();
 		const realProjectDir = fs.mkdtempSync(path.join(projectsRoot, "omp-status-line-real-"));
 		try {
 			setProjectDir(realProjectDir);
@@ -153,7 +177,58 @@ describe("status line path segment", () => {
 			expect(rendered.content).toContain(theme.icon.folder);
 			expect(rendered.content).not.toContain(theme.icon.scratchFolder);
 		} finally {
-			fs.rmSync(realProjectDir, { recursive: true, force: true });
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(realProjectDir);
+			removeSyncWithRetries(home);
+		}
+	});
+
+	it("renders the active nested repo suffix after the parent cwd", () => {
+		const parentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-parent-"));
+		const repoDir = path.join(parentDir, "pr-workspace");
+		fs.mkdirSync(repoDir);
+		try {
+			setProjectDir(parentDir);
+			const ctx = createPathContext();
+			ctx.activeRepo = {
+				cwd: parentDir,
+				repoRoot: repoDir,
+				relativeRepoRoot: "pr-workspace",
+				source: "single-direct-child-repo",
+			};
+
+			const rendered = renderSegment("path", ctx);
+			const expected = `${path.basename(getProjectDir())} ↳ pr-workspace`;
+			expect(rendered.visible).toBe(true);
+			expectContentToContainPath(rendered.content, expected);
+			expect(rendered.content).not.toContain(os.tmpdir());
+		} finally {
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(parentDir);
+		}
+	});
+
+	it("keeps the active nested repo suffix visible when the parent path is truncated", () => {
+		const parentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-parent-"));
+		const repoDir = path.join(parentDir, "pr-workspace");
+		fs.mkdirSync(repoDir);
+		try {
+			setProjectDir(parentDir);
+			const ctx = createPathContext();
+			ctx.options.path = { abbreviate: false, maxLength: 4, stripWorkPrefix: true };
+			ctx.activeRepo = {
+				cwd: parentDir,
+				repoRoot: repoDir,
+				relativeRepoRoot: "pr-workspace",
+				source: "single-direct-child-repo",
+			};
+
+			const rendered = renderSegment("path", ctx);
+			expect(rendered.visible).toBe(true);
+			expect(rendered.content).toContain("↳ pr-workspace");
+		} finally {
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(parentDir);
 		}
 	});
 });

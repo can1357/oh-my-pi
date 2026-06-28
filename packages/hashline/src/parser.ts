@@ -11,10 +11,12 @@ import {
 	EMPTY_BLOCK,
 	EMPTY_INSERT,
 	MINUS_ROW_REJECTED,
+	MOVE_TAKES_NO_BODY,
+	REM_TAKES_NO_BODY,
 } from "./messages";
 import { stripOneLeadingHashlinePrefix } from "./prefixes";
 import { type BlockTarget, cloneCursor, type ParsedRange, type Token, Tokenizer } from "./tokenizer";
-import type { Anchor, Cursor, Edit } from "./types";
+import type { Anchor, Cursor, Edit, FileOp } from "./types";
 
 function validateRangeOrder(range: ParsedRange, lineNum: number): void {
 	if (range.end.line < range.start.line) {
@@ -110,6 +112,7 @@ export class Executor {
 	#warnings: string[] = [];
 	#editIndex = 0;
 	#pending: Pending | undefined;
+	#fileOp: FileOp | undefined;
 	#terminated = false;
 	#skippableComments: PendingComment[] = [];
 
@@ -161,27 +164,47 @@ export class Executor {
 				if (token.target.kind === "replace" || token.target.kind === "delete") {
 					validateRangeOrder(token.target.range, token.lineNum);
 				}
+				if (token.target.kind === "rem") {
+					this.#flushPending();
+					this.#setFileOp({ kind: "rem" }, token.lineNum);
+					return;
+				}
+				if (token.target.kind === "move") {
+					this.#flushPending();
+					this.#setFileOp({ kind: "move", dest: token.target.dest }, token.lineNum);
+					return;
+				}
 				this.#flushPending();
 				this.#pending = { target: token.target, lineNum: token.lineNum, payloads: [], deferredBlanks: [] };
 				return;
 		}
 	}
 
-	end(): { edits: Edit[]; warnings: string[] } {
+	end(): { edits: Edit[]; fileOp?: FileOp; warnings: string[] } {
 		this.#consumePendingSkippableComments();
 		this.#flushPending();
+		this.#validateFileOp();
 		this.#validateNoOverlappingDeletes();
-		return { edits: this.#edits, warnings: this.#warnings };
+		return {
+			edits: this.#edits,
+			...(this.#fileOp === undefined ? {} : { fileOp: this.#fileOp }),
+			warnings: this.#warnings,
+		};
 	}
 
-	endStreaming(): { edits: Edit[]; warnings: string[] } {
+	endStreaming(): { edits: Edit[]; fileOp?: FileOp; warnings: string[] } {
 		this.#consumePendingSkippableComments();
 		if (this.#pending && this.#pending.payloads.length > 0) this.#flushPending();
 		else if (this.#pending?.target.kind === "delete" || this.#pending?.target.kind === "delete_block")
 			this.#flushPending();
 		else this.#pending = undefined;
+		this.#validateFileOp();
 		this.#validateNoOverlappingDeletes();
-		return { edits: this.#edits, warnings: this.#warnings };
+		return {
+			edits: this.#edits,
+			...(this.#fileOp === undefined ? {} : { fileOp: this.#fileOp }),
+			warnings: this.#warnings,
+		};
 	}
 
 	reset(): void {
@@ -189,8 +212,28 @@ export class Executor {
 		this.#warnings = [];
 		this.#editIndex = 0;
 		this.#pending = undefined;
+		this.#fileOp = undefined;
 		this.#skippableComments = [];
 		this.#terminated = false;
+	}
+
+	#setFileOp(fileOp: FileOp, lineNum: number): void {
+		if (this.#fileOp !== undefined) {
+			throw new Error(
+				`line ${lineNum}: only one file-level op (\`REM\` or \`MV\`) per section. Merge them under one header.`,
+			);
+		}
+		if (fileOp.kind === "rem" && this.#edits.length > 0) {
+			throw new Error(`line ${lineNum}: ${REM_TAKES_NO_BODY}`);
+		}
+		this.#fileOp = fileOp;
+	}
+
+	#validateFileOp(): void {
+		if (this.#fileOp?.kind !== "rem") return;
+		if (this.#edits.length > 0) {
+			throw new Error("`REM` deletes the whole file and cannot be combined with line ops.");
+		}
 	}
 
 	#validateNoOverlappingDeletes(): void {
@@ -217,6 +260,7 @@ export class Executor {
 	#handleLiteralPayload(text: string, lineNum: number): void {
 		const pending = this.#pending;
 		if (!pending) {
+			if (this.#fileOp !== undefined) throw new Error(`line ${lineNum}: ${MOVE_TAKES_NO_BODY}`);
 			throw new Error(
 				`line ${lineNum}: payload line has no preceding hunk header. ` +
 					`Got ${JSON.stringify(`${HL_PAYLOAD_REPLACE}${text}`)}.`,
@@ -231,6 +275,7 @@ export class Executor {
 	#handleRaw(text: string, lineNum: number): void {
 		const contamination = detectApplyPatchContamination(text, this.#pending !== undefined);
 		if (contamination !== null) throw new Error(`line ${lineNum}: ${contamination}`);
+		if (this.#fileOp !== undefined) throw new Error(`line ${lineNum}: ${MOVE_TAKES_NO_BODY}`);
 		if (this.#pending) {
 			if (text.trim().length === 0) {
 				this.#handleBlank(text, lineNum);
@@ -390,19 +435,19 @@ export class Executor {
 	}
 }
 
-function drain(executor: Executor, tokenizer: Tokenizer): { edits: Edit[]; warnings: string[] } {
+function drain(executor: Executor, tokenizer: Tokenizer): { edits: Edit[]; fileOp?: FileOp; warnings: string[] } {
 	for (const token of tokenizer.end()) executor.feed(token);
 	return executor.end();
 }
 
-export function parsePatch(diff: string): { edits: Edit[]; warnings: string[] } {
+export function parsePatch(diff: string): { edits: Edit[]; fileOp?: FileOp; warnings: string[] } {
 	const tokenizer = new Tokenizer();
 	const executor = new Executor();
 	for (const token of tokenizer.feed(diff)) executor.feed(token);
 	return drain(executor, tokenizer);
 }
 
-export function parsePatchStreaming(diff: string): { edits: Edit[]; warnings: string[] } {
+export function parsePatchStreaming(diff: string): { edits: Edit[]; fileOp?: FileOp; warnings: string[] } {
 	const tokenizer = new Tokenizer();
 	const executor = new Executor();
 	for (const token of tokenizer.feed(diff)) executor.feed(token);

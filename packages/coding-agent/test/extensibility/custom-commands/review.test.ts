@@ -10,6 +10,7 @@ import type { PrDiffPayload, ViewLookupResult } from "@pk-nerdsaver-ai/pi-coding
 import * as gh from "@pk-nerdsaver-ai/pi-coding-agent/tools/gh";
 import * as git from "@pk-nerdsaver-ai/pi-coding-agent/utils/git";
 import * as jj from "@pk-nerdsaver-ai/pi-coding-agent/utils/jj";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 const SAMPLE_JJ_DIFF = `diff --git a/src/workspace.ts b/src/workspace.ts
 --- a/src/workspace.ts
@@ -86,7 +87,7 @@ describe("ReviewCommand", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		if (tmpDir) {
-			await fs.rm(tmpDir, { recursive: true, force: true });
+			await removeWithRetries(tmpDir);
 			tmpDir = undefined;
 		}
 	});
@@ -183,7 +184,7 @@ describe("ReviewCommand", () => {
 			const result = await command.execute([], ctx);
 
 			expect(result).toBeUndefined();
-			await fs.rm(dir, { recursive: true, force: true });
+			await removeWithRetries(dir);
 			tmpDir = undefined;
 		}
 	});

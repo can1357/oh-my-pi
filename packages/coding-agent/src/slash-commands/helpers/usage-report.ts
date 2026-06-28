@@ -1,4 +1,5 @@
 import type { UsageLimit, UsageReport } from "@pk-nerdsaver-ai/pi-ai";
+import { sanitizeText } from "@pk-nerdsaver-ai/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
 import type { SlashCommandRuntime } from "../types";
 import { reportMatchesActiveAccount } from "./active-oauth-account";
@@ -26,9 +27,14 @@ function formatUsageAmount(limit: UsageLimit): string {
 function formatUsageReportAccount(report: UsageReport, limit: UsageLimit, index: number): string {
 	const email = report.metadata?.email;
 	if (typeof email === "string" && email) return email;
-	const accountId = report.metadata?.accountId ?? limit.scope.accountId;
+	// Guard metadata values for truthiness before using, then fall back to scope.
+	// ?? won't help here: empty string is not null/undefined, so it would suppress
+	// a valid scoped fallback (e.g. metadata.accountId="" hides limit.scope.accountId).
+	const metaAccountId = report.metadata?.accountId;
+	const accountId = typeof metaAccountId === "string" && metaAccountId ? metaAccountId : limit.scope.accountId;
 	if (typeof accountId === "string" && accountId) return accountId;
-	const projectId = report.metadata?.projectId ?? limit.scope.projectId;
+	const metaProjectId = report.metadata?.projectId;
+	const projectId = typeof metaProjectId === "string" && metaProjectId ? metaProjectId : limit.scope.projectId;
 	if (typeof projectId === "string" && projectId) return projectId;
 	return `account ${index + 1}`;
 }
@@ -52,6 +58,10 @@ function renderUsageReports(
 	)) {
 		lines.push("", formatProviderName(provider));
 		const activeAccount = resolveActiveAccount?.(provider);
+		// Provider-wide disclaimers render once per provider, not per limit.
+		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
+		for (const note of providerNotes)
+			lines.push(`  ${sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))}`);
 		for (const report of providerReports) {
 			const inUse = reportMatchesActiveAccount(report, activeAccount);
 			const savedResets = report.resetCredits?.availableCount ?? 0;
@@ -65,6 +75,22 @@ function renderUsageReports(
 				lines.push(
 					`- ${resetLabel}: ${savedResets} saved rate-limit reset${savedResets === 1 ? "" : "s"} available — /usage reset to spend`,
 				);
+				const credits = report.resetCredits?.credits;
+				if (credits) {
+					for (const credit of credits) {
+						if (credit.expiresAt) {
+							const expiryMs = Date.parse(credit.expiresAt);
+							if (!Number.isNaN(expiryMs)) {
+								const remaining = expiryMs - nowMs;
+								if (remaining > 0) {
+									lines.push(`  expires in ${formatDuration(remaining)} (${credit.expiresAt.slice(0, 10)})`);
+								} else {
+									lines.push(`  expired (${credit.expiresAt.slice(0, 10)})`);
+								}
+							}
+						}
+					}
+				}
 			}
 			if (report.limits.length === 0) {
 				const email = typeof report.metadata?.email === "string" ? report.metadata.email : "account";
@@ -83,7 +109,10 @@ function renderUsageReports(
 				if (limit.window?.resetsAt && limit.window.resetsAt > nowMs) {
 					lines.push(`  resets in ${formatDuration(limit.window.resetsAt - nowMs)}`);
 				}
-				if (limit.notes && limit.notes.length > 0) lines.push(`  ${limit.notes.join(" • ")}`);
+				if (limit.notes && limit.notes.length > 0)
+					lines.push(
+						`  ${limit.notes.map(n => sanitizeText(n.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))).join(" • ")}`,
+					);
 			}
 		}
 	}

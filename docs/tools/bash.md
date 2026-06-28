@@ -96,7 +96,7 @@ Stdout and stderr are merged before the model sees them. Definite non-zero exit 
    - Starts like a foreground managed job, then backgrounds it when it outlives the wait window.
 6. Intercepted command
    - No subprocess created.
-   - Returns a `ToolError` pointing the model at `read`, `search`, `find`, `edit`, or `write`.
+   - Returns a `ToolError` pointing the model at `read`, `grep`, `glob`, `edit`, or `write`.
 
 ## Side Effects
 - Filesystem
@@ -153,8 +153,8 @@ Stdout and stderr are merged before the model sees them. Definite non-zero exit 
 - `checkBashInterception()` blocks only when the matching rule's `tool` name is present in `ctx.toolNames`; missing tools disable their corresponding rule.
 - Default interceptor rules come from `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/config/settings-schema.ts`:
   - `cat|head|tail|less|more` -> `read`
-  - `grep|rg|ripgrep|ag|ack` -> `search`
-  - `find|fd|locate` with name/type/glob flags -> `find`
+  - `grep|rg|ripgrep|ag|ack` -> `grep`
+  - `find|fd|locate` with name/type/glob flags -> `glob`
   - `sed -i`, `perl -i`, `awk -i inplace` -> `edit`
   - `echo|printf|cat <<` with redirection -> `write`
 - PTY mode is ignored in non-UI contexts and when `PI_NO_PTY=1` (gated by `canUseInteractiveBashPty()`); the tool falls back to non-PTY execution and appends a `pty requested but unavailable in this environment; ran without a terminal` notice.

@@ -1,15 +1,3 @@
-const makeNativeString = (name) => "function " + (name || "") + "() { [native code] }";
-const patchToString = (fn, name) => {
-	if (typeof fn !== "function") return;
-	Object_defineProperty(fn, "toString", {
-		value: function toString() {
-			return makeNativeString(name);
-		},
-		writable: false,
-		configurable: true,
-		enumerable: false,
-	});
-};
 
 // Ensure navigator.webdriver behaves like real Chrome
 if (navigator.webdriver !== false && navigator.webdriver !== undefined) {
@@ -356,13 +344,19 @@ if (window.chrome && !("runtime" in window.chrome) && isSecureOrigin) {
 // Suppress Permission.query for automation-controlled
 if (navigator.permissions?.query) {
 	if (isSecureOrigin && "Notification" in window) {
+		const notificationPermissionGetter = Object_getOwnPropertyDescriptor({
+			get permission() {
+				return "default";
+			},
+		}, "permission").get;
+		patchToString(notificationPermissionGetter, "get permission");
 		Object_defineProperty(Notification, "permission", {
-			get: () => "default",
+			get: notificationPermissionGetter,
 			configurable: true,
 		});
 	} else if (!isSecureOrigin) {
 		const originalQuery = navigator.permissions.query;
-		navigator.permissions.query = function (parameters) {
+		const patchedPermissionsQuery = function query(parameters) {
 			if (parameters?.name === "notifications") {
 			const status = { state: "denied", onchange: null };
 			if (typeof PermissionStatus !== "undefined") {
@@ -372,6 +366,8 @@ if (navigator.permissions?.query) {
 			}
 			return originalQuery.call(this, parameters);
 		};
+		patchToString(patchedPermissionsQuery, "query");
+		navigator.permissions.query = patchedPermissionsQuery;
 	}
 }
 

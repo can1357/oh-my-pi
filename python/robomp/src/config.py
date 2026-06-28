@@ -129,7 +129,7 @@ class Settings(BaseSettings):
     rate_limit_default: int = Field(3, alias="ROBOMP_RATE_LIMIT_DEFAULT")
     rate_limit_contributor: int = Field(10, alias="ROBOMP_RATE_LIMIT_CONTRIBUTOR")
     rate_limit_unlimited_raw: str = Field("", alias="ROBOMP_RATE_LIMIT_UNLIMITED")
-    # Logins (comma-separated, `@` prefix optional) whose `@bot_login`
+    # Logins (comma-separated, `@` prefix optional, case-insensitive) whose `@bot_login`
     # mentions are treated as authoritative directives. These accounts also
     # bypass rate limiting regardless of `author_association`.
     maintainer_logins_raw: str = Field("", alias="ROBOMP_MAINTAINER_LOGINS")
@@ -163,7 +163,9 @@ class Settings(BaseSettings):
     @field_validator("bot_login", mode="after")
     @classmethod
     def _require_bot_login(cls, value: str) -> str:
-        cleaned = value.strip()
+        cleaned = value.strip().removeprefix("@").lower()
+        if cleaned.endswith("[bot]"):
+            cleaned = cleaned[:-5]
         if not cleaned:
             raise ValueError("ROBOMP_BOT_LOGIN must be a non-empty GitHub login")
         return cleaned
@@ -303,7 +305,10 @@ class Settings(BaseSettings):
 
     @property
     def maintainer_logins(self) -> frozenset[str]:
-        items = [piece.strip().lstrip("@").lower() for piece in self.maintainer_logins_raw.split(",")]
+        items = [
+            piece.strip().lstrip("@").lower().removesuffix("[bot]")
+            for piece in self.maintainer_logins_raw.split(",")
+        ]
         return frozenset(item for item in items if item)
 
     def allows(self, full_name: str) -> bool:

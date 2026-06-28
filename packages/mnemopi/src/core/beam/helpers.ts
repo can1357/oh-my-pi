@@ -1,6 +1,17 @@
 import type { Database } from "bun:sqlite";
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
 import { generateId as generateTimedId, sha256Hex16, stableMemoryId } from "../../util/ids";
+import {
+	cjkFtsTerms,
+	containsSpacelessCjk,
+	FACT_MATCH_STOPWORDS,
+	factMatchTokens,
+	ftsQueryTerms,
+	hasCjk,
+	isCjkChar,
+	RECALL_SYNONYMS,
+	recallTokens,
+} from "../../util/regex";
 import { currentEmbeddingModel, embed } from "../embeddings";
 import { getMnemopiRuntimeOptions, mnemopiDebugEnabled, withMnemopiRuntimeOptions } from "../runtime-options";
 import { buildExactVectorIndex, searchExactVectorIndex } from "../vector-index";
@@ -35,76 +46,8 @@ const DEFAULT_WEIGHTS: HybridWeights = [0.5, 0.3, 0.2];
 const TS_CACHE_MAX = 2000;
 const moduleTimestampCache = new Map<string, Date>();
 
-const FACT_MATCH_STOPWORDS = new Set([
-	"a",
-	"an",
-	"and",
-	"are",
-	"as",
-	"at",
-	"be",
-	"by",
-	"can",
-	"could",
-	"did",
-	"do",
-	"does",
-	"for",
-	"from",
-	"had",
-	"has",
-	"have",
-	"how",
-	"i",
-	"in",
-	"is",
-	"it",
-	"its",
-	"me",
-	"my",
-	"of",
-	"on",
-	"or",
-	"our",
-	"related",
-	"should",
-	"that",
-	"the",
-	"their",
-	"there",
-	"this",
-	"to",
-	"totally",
-	"unrelated",
-	"use",
-	"uses",
-	"was",
-	"we",
-	"what",
-	"when",
-	"where",
-	"which",
-	"who",
-	"why",
-	"with",
-	"you",
-	"your",
-]);
-
-const RECALL_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
-	branding: ["brand", "positioning", "identity", "wording"],
-	preference: ["prefer", "prefers", "want", "wants", "reject", "rejects", "avoid", "grounded"],
-	professional: ["software", "builder"],
-	url: ["link", "profile"],
-	current: ["now", "live", "latest"],
-	feeling: ["feel", "feels"],
-	imposter: ["self-doubt", "doubt", "insecure"],
-};
-
-const RECALL_TOKEN_RE = /[a-z0-9][a-z0-9_.:/+-]*/g;
 const SPLIT_TOKEN_RE = /[_:/.-]+/g;
 const WORD_RE = /[\p{L}\p{N}_]+/gu;
-
 function envNumber(name: string, fallback: number): number {
 	const raw = process.env[name];
 	if (raw === undefined || raw.trim() === "") return fallback;
@@ -121,12 +64,6 @@ function clamp01(value: number): number {
 
 function asFiniteNonNegative(value: number): number {
 	return Number.isFinite(value) && value > 0 ? value : 0;
-}
-
-function isCjkChar(ch: string): boolean {
-	return (
-		(ch >= "\u4e00" && ch <= "\u9fff") || (ch >= "\u3040" && ch <= "\u30ff") || (ch >= "\uac00" && ch <= "\ud7af")
-	);
 }
 
 function tableExists(db: Database, table: string): boolean {
@@ -250,73 +187,6 @@ export function temporalBoost(
 	return Math.exp(-hoursDelta / halflife);
 }
 
-export function recallTokens(text: string): string[] {
-	const out: string[] = [];
-	for (const match of text.toLowerCase().matchAll(RECALL_TOKEN_RE)) {
-		const token = match[0] ?? "";
-		if (token.length >= 3 && !FACT_MATCH_STOPWORDS.has(token) && !/^\d+$/.test(token)) out.push(token);
-	}
-	return out;
-}
-
-export function expandedQueryTokens(tokens: readonly string[]): string[] {
-	const expanded: string[] = [];
-	const seen = new Set<string>();
-	for (const token of tokens) {
-		const synonyms = RECALL_SYNONYMS[token] ?? [];
-		for (const candidate of [token, ...synonyms]) {
-			if (!seen.has(candidate)) {
-				seen.add(candidate);
-				expanded.push(candidate);
-			}
-		}
-	}
-	return expanded;
-}
-
-export function minimumRecallRelevance(queryTokens: readonly string[]): number {
-	if (queryTokens.length >= 4) return 0.3;
-	if (queryTokens.length === 3) return 0.5;
-	return 0.15;
-}
-
-export function factMatchTokens(text: string): Set<string> {
-	return new Set(recallTokens(text));
-}
-
-export function containsSpacelessCjk(text: string): boolean {
-	return hasCjk(text);
-}
-
-export function hasCjk(text: string): boolean {
-	for (const ch of text) if (isCjkChar(ch)) return true;
-	return false;
-}
-
-export function cjkFtsTerms(text: string): string[] {
-	const chars = Array.from(text).filter(isCjkChar);
-	if (chars.length === 0) return [];
-	const terms: string[] = [];
-	const seen = new Set<string>();
-	for (const ch of chars) {
-		if (!seen.has(ch)) {
-			seen.add(ch);
-			terms.push(ch);
-		}
-	}
-	for (let i = 0; i < chars.length - 1; i += 1) {
-		const left = chars[i];
-		const right = chars[i + 1];
-		if (left === undefined || right === undefined) continue;
-		const bigram = left + right;
-		if (!seen.has(bigram)) {
-			seen.add(bigram);
-			terms.push(`"${bigram}"`);
-		}
-	}
-	return terms;
-}
-
 export function lexicalRelevance(queryTokens: readonly string[], content: string, queryLower = ""): number {
 	const contentLower = content.toLowerCase();
 	const queryCjk = new Set(Array.from(queryLower).filter(isCjkChar));
@@ -377,15 +247,6 @@ export function strictFactMatches(query: string, factText: string): boolean {
 	if (token === undefined) return false;
 	if (token.length >= 8 && /[./:_-]/.test(token)) return true;
 	return token.length >= 5;
-}
-
-export function ftsQueryTerms(query: string): string[] {
-	const terms: string[] = [];
-	for (const term of expandedQueryTokens(recallTokens(query))) {
-		const escaped = term.replaceAll('"', '""').trim();
-		if (escaped) terms.push(`"${escaped}"`);
-	}
-	return terms;
 }
 
 export function buildFtsQuery(query: string): string {
@@ -908,7 +769,7 @@ export {
 	maximallyInformativeBinarization,
 	quantizeInt8,
 } from "../binary-vectors";
-export { sha256Hex16 };
+export { cjkFtsTerms, containsSpacelessCjk, ftsQueryTerms, recallTokens, sha256Hex16 };
 
 /** Identifies one freshly stored memory whose embedding still needs to be derived. */
 export interface EmbedItem {

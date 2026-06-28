@@ -8,6 +8,7 @@ import type { LoadedCustomTool } from "../extensibility/custom-tools/types";
 import { AgentStorage } from "../session/agent-storage";
 import type { AuthStorage } from "../session/auth-storage";
 import { type MCPLoadResult, MCPManager } from "./manager";
+import type { McpConnectionStatusEvent } from "./startup-events";
 import { MCPToolCache } from "./tool-cache";
 
 /** Result from loading MCP tools */
@@ -26,8 +27,8 @@ export interface MCPToolsLoadResult {
 
 /** Options for loading MCP tools */
 export interface MCPToolsLoadOptions {
-	/** Called when starting to connect to servers */
-	onConnecting?: (serverNames: string[]) => void;
+	/** Called when MCP server connection state changes. */
+	onStatus?: (event: McpConnectionStatusEvent) => void;
 	/** Whether to load project-level config (default: true) */
 	enableProjectConfig?: boolean;
 	/** Whether to filter out Exa MCP servers (default: true) */
@@ -68,7 +69,7 @@ export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoa
 	let result: MCPLoadResult;
 	try {
 		result = await manager.discoverAndConnect({
-			onConnecting: options?.onConnecting,
+			onStatus: options?.onStatus,
 			enableProjectConfig: options?.enableProjectConfig,
 			filterExa: options?.filterExa,
 			filterBrowser: options?.filterBrowser,

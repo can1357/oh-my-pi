@@ -12,6 +12,7 @@ import { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-ses
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
 import { AUTO_THINKING } from "@pk-nerdsaver-ai/pi-coding-agent/thinking";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 async function createMagicKeywordSession(root: string): Promise<{
 	session: AgentSession;
@@ -55,7 +56,7 @@ describe("AgentSession magic keyword settings", () => {
 		vi.restoreAllMocks();
 		if (session) await session.dispose();
 		authStorage?.close();
-		await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => undefined);
+		await removeWithRetries(root).catch(() => undefined);
 		session = undefined;
 		authStorage = undefined;
 	});

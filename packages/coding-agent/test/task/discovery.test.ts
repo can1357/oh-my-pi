@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { discoverAgents } from "@pk-nerdsaver-ai/pi-coding-agent/task/discovery";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 const OMP_AGENT_MD = [
 	"---",
@@ -34,7 +35,7 @@ describe("discoverAgents", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tempHome, { recursive: true, force: true });
+		await removeWithRetries(tempHome);
 	});
 
 	test("loads OMP agents but skips Claude Code custom agents", async () => {

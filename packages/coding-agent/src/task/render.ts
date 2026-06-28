@@ -18,6 +18,7 @@ import {
 	formatExpandHint,
 	formatMoreItems,
 	formatStatusIcon,
+	previewLine,
 	replaceTabs,
 	type ToolUIStatus,
 	truncateToWidth,
@@ -541,7 +542,7 @@ function renderTaskCallLines(args: Partial<TaskParams> | undefined, theme: Theme
 	if (idLabel || desc) {
 		let line = `${bullet} ${theme.fg("accent", theme.bold(idLabel || "agent"))}`;
 		if (desc) {
-			line += `: ${theme.fg("muted", truncateToWidth(replaceTabs(desc), 64))}`;
+			line += `: ${theme.fg("muted", previewLine(desc, 64))}`;
 		}
 		lines.push(line);
 	}
@@ -574,7 +575,7 @@ function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): strin
 		let line = `${bullet} ${theme.fg("accent", theme.bold(idLabel))}`;
 		const desc = typeof task?.description === "string" ? task.description.trim() : "";
 		if (desc) {
-			line += `: ${theme.fg("muted", truncateToWidth(replaceTabs(desc), 64))}`;
+			line += `: ${theme.fg("muted", previewLine(desc, 64))}`;
 		}
 		if (task?.isolated === true) {
 			line += theme.fg("dim", " [isolated]");
@@ -707,7 +708,8 @@ function renderAgentProgress(
 				: "accent";
 
 	// Main status line: id: description [status] · stats · ⟨agent⟩
-	const description = progress.description?.trim();
+	const trimmedDescription = progress.description?.trim();
+	const description = trimmedDescription ? previewLine(trimmedDescription, 64) : undefined;
 	const displayId = formatTaskId(progress.id);
 	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
 	const indent = prefix ? `${prefix} ` : "";
@@ -748,7 +750,7 @@ function renderAgentProgress(
 	const showBadge = settings.get("task.showResolvedModelBadge");
 	if (progress.status === "running") {
 		if (!description) {
-			const taskPreview = truncateToWidth(progress.assignment ?? progress.task, 40);
+			const taskPreview = previewLine(progress.assignment ?? progress.task, 40);
 			statusLine += ` ${theme.fg("muted", taskPreview)}`;
 		}
 		statusLine = appendAgentStats(statusLine, { ...progress, showResolvedModelBadge: showBadge }, theme);
@@ -766,7 +768,7 @@ function renderAgentProgress(
 			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("muted", progress.currentTool)}`;
 			const toolDetail = progress.lastIntent ?? progress.currentToolArgs;
 			if (toolDetail) {
-				toolLine += `: ${theme.fg("dim", truncateToWidth(replaceTabs(toolDetail), 40))}`;
+				toolLine += `: ${theme.fg("dim", previewLine(toolDetail, 40))}`;
 			}
 			if (progress.currentToolStartMs) {
 				const elapsed = Date.now() - progress.currentToolStartMs;
@@ -781,7 +783,7 @@ function renderAgentProgress(
 			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("dim", recent.tool)}`;
 			const toolDetail = progress.lastIntent ?? recent.args;
 			if (toolDetail) {
-				toolLine += `: ${theme.fg("dim", truncateToWidth(replaceTabs(toolDetail), 40))}`;
+				toolLine += `: ${theme.fg("dim", previewLine(toolDetail, 40))}`;
 			}
 			lines.push(toolLine);
 		}
@@ -795,12 +797,12 @@ function renderAgentProgress(
 		const waitLabel = remainingMs > 0 ? `in ${formatDuration(remainingMs)}` : "now";
 		const summary =
 			`retrying ${progress.retryState.attempt}/${progress.retryState.maxAttempts} ${waitLabel}: ` +
-			truncateToWidth(replaceTabs(progress.retryState.errorMessage), 60);
+			previewLine(progress.retryState.errorMessage, 60);
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("warning", summary)}`);
 	} else if (progress.retryFailure && progress.status !== "running") {
 		const summary = `auto-retry gave up after ${progress.retryFailure.attempt} attempt${
 			progress.retryFailure.attempt === 1 ? "" : "s"
-		}: ${truncateToWidth(replaceTabs(progress.retryFailure.errorMessage), 80)}`;
+		}: ${previewLine(progress.retryFailure.errorMessage, 80)}`;
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("error", summary)}`);
 	}
 
@@ -1029,7 +1031,8 @@ function renderAgentResult(
 					: "failed";
 
 	// Main status line: id: description [status] · stats · ⟨agent⟩
-	const description = result.description?.trim();
+	const trimmedDescription = result.description?.trim();
+	const description = trimmedDescription ? previewLine(trimmedDescription, 64) : undefined;
 	const displayId = formatTaskId(result.id);
 	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
 	let statusLine = `${prefix ? `${prefix} ` : ""}${theme.fg(iconColor, icon)} ${theme.fg(
@@ -1062,7 +1065,7 @@ function renderAgentResult(
 
 	if (aborted && result.abortReason) {
 		lines.push(
-			`${continuePrefix}${theme.fg("error", theme.status.aborted)} ${theme.fg("dim", truncateToWidth(replaceTabs(result.abortReason), 80))}`,
+			`${continuePrefix}${theme.fg("error", theme.status.aborted)} ${theme.fg("dim", previewLine(result.abortReason, 80))}`,
 		);
 	}
 	// Check for review result (yield with review schema + report_finding)
@@ -1174,9 +1177,7 @@ function renderAgentResult(
 
 	// Error message
 	if (result.error && (!success || mergeFailed) && (!aborted || result.error !== result.abortReason)) {
-		lines.push(
-			`${continuePrefix}${theme.fg(mergeFailed ? "warning" : "error", truncateToWidth(replaceTabs(result.error), 70))}`,
-		);
+		lines.push(`${continuePrefix}${theme.fg(mergeFailed ? "warning" : "error", previewLine(result.error, 70))}`);
 	}
 
 	return lines;

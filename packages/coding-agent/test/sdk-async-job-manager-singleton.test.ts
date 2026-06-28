@@ -7,7 +7,7 @@ import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-reg
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { createAgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("AsyncJobManager singleton across concurrent top-level sessions", () => {
 	const tempDirs: string[] = [];
@@ -28,12 +28,12 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 
 	afterAll(() => {
 		sharedAuthStorage.close();
-		fs.rmSync(sharedTempDir, { recursive: true, force: true });
+		removeSyncWithRetries(sharedTempDir);
 	});
 
 	afterEach(async () => {
 		for (const tempDir of tempDirs.splice(0)) {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		}
 		AsyncJobManager.resetForTests();
 	});

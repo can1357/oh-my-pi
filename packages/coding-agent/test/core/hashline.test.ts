@@ -13,9 +13,12 @@ import {
 	type ExecuteHashlineSingleOptions,
 	executeHashlineSingle,
 	getFileSnapshotStore as getFileReadCache,
+	HashlineFilesystem,
 	hashlineEditParamsSchema,
 } from "@pk-nerdsaver-ai/pi-coding-agent/edit";
+import { resolveLocalUrlToPath } from "@pk-nerdsaver-ai/pi-coding-agent/internal-urls";
 import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import { type Type, type } from "arktype";
 
 beforeAll(async () => {
@@ -53,7 +56,7 @@ async function withTempDir(fn: (tempDir: string) => Promise<void>): Promise<void
 	try {
 		await fn(tempDir);
 	} finally {
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await removeWithRetries(tempDir);
 	}
 }
 
@@ -420,6 +423,126 @@ describe("hashline — anchor-stale recovery via read snapshot cache", () => {
 				executeHashlineSingle(hashlineExecuteOptions(tempDir, secondInput, undefined, session)),
 			).rejects.toThrow(HashlineMismatchError);
 			expect(await Bun.file(filePath).text()).toBe(`${v1Lines.join("\n")}\n`);
+		});
+	});
+});
+
+describe("hashline — filename+tag path recovery", () => {
+	it("redirects a bare filename to the full path of the file its tag names", async () => {
+		await withTempDir(async tempDir => {
+			const nestedDir = path.join(tempDir, "pkg", "test");
+			await fs.mkdir(nestedDir, { recursive: true });
+			const filePath = path.join(nestedDir, "autoresearch-tools.test.ts");
+			const source = "alpha\nbeta\ngamma\n";
+			await Bun.write(filePath, source);
+			const session = makeHashlineSession(tempDir);
+			const sourceTag = recordFullSnapshot(getFileReadCache(session), filePath, source);
+
+			// The model issues the edit with only the basename — the wrong path.
+			const input = `${header("autoresearch-tools.test.ts", sourceTag)}\n${sameLineRange(tag(2, "beta"))}\n${repl("BETA")}\n`;
+			const result = await executeHashlineSingle(hashlineExecuteOptions(tempDir, input, undefined, session));
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+			// The real nested file was edited despite the bare-filename header.
+			expect(await Bun.file(filePath).text()).toBe("alpha\nBETA\ngamma\n");
+			// The resolved full path is surfaced so the next turn anchors on it.
+			expect(text).toContain("does not exist");
+			expect(text).toContain(path.join("pkg", "test", "autoresearch-tools.test.ts"));
+			// The stray cwd-relative file was never created.
+			expect(await Bun.file(path.join(tempDir, "autoresearch-tools.test.ts")).exists()).toBe(false);
+		});
+	});
+
+	it("refuses redirects that escalate privilege or leave the working tree", async () => {
+		await withTempDir(async tempDir => {
+			const guardFs = new HashlineFilesystem({
+				session: makeHashlineSession(tempDir),
+				writethrough: async () => undefined,
+				beginDeferredDiagnosticsForPath: () => ({
+					onDeferredDiagnostics: () => {},
+					signal: new AbortController().signal,
+					finalize: () => {},
+				}),
+			});
+			const root = canonicalSnapshotKey(tempDir);
+			const inside = path.join(root, "pkg", "test", "file.ts");
+			// A sibling of the working tree stands in for the artifact sandbox / vault.
+			const outside = path.join(canonicalSnapshotKey(os.tmpdir()), "omp-artifacts", "file.ts");
+
+			// Internal-URL authored targets are approved at "read"; never redirect to a "write".
+			expect(guardFs.allowTagPathRecovery("local://file.ts", inside)).toBe(false);
+			expect(guardFs.allowTagPathRecovery("vault://store/file.ts", inside)).toBe(false);
+			// Plain authored path → a working-tree target is recoverable.
+			expect(guardFs.allowTagPathRecovery("file.ts", inside)).toBe(true);
+			// …but a target outside the working tree (sandbox/vault/out-of-tree) is refused.
+			expect(guardFs.allowTagPathRecovery("file.ts", outside)).toBe(false);
+		});
+	});
+
+	it("recovers a bare plan-file name onto the local:// sandbox in plan mode", async () => {
+		await withTempDir(async tempDir => {
+			const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "hashline-plan-art-"));
+			try {
+				const localOptions = { getArtifactsDir: () => artifactsDir, getSessionId: () => "plan-sess" };
+				const session = {
+					cwd: tempDir,
+					settings: Settings.isolated(),
+					getArtifactsDir: localOptions.getArtifactsDir,
+					getSessionId: localOptions.getSessionId,
+					getPlanModeState: () => ({ enabled: true, planFilePath: "local://cfg-module-hygiene-plan.md" }),
+				} as unknown as ToolSession;
+
+				// Simulate `write local://cfg-module-hygiene-plan.md`: the artifact
+				// lives in the session sandbox and its snapshot tag is recorded there.
+				const sandboxAbs = resolveLocalUrlToPath("local://cfg-module-hygiene-plan.md", localOptions);
+				const source = "# Plan\n\n## Context\n- old\n";
+				await Bun.write(sandboxAbs, source);
+				const sourceTag = recordFullSnapshot(getFileReadCache(session), sandboxAbs, source);
+
+				// The model edits by BARE filename. Plan mode would reject that as a
+				// working-tree write, but the snapshot tag rebinds it onto the artifact.
+				const input = `${header("cfg-module-hygiene-plan.md", sourceTag)}\n${sameLineRange(tag(4, "- old"))}\n${repl("- new")}\n`;
+				const result = await executeHashlineSingle(hashlineExecuteOptions(tempDir, input, undefined, session));
+				const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+				expect(await Bun.file(sandboxAbs).text()).toBe("# Plan\n\n## Context\n- new\n");
+				// No stray working-tree file was created at the bare cwd path.
+				expect(await Bun.file(path.join(tempDir, "cfg-module-hygiene-plan.md")).exists()).toBe(false);
+				// The resolved sandbox path is surfaced so the next turn anchors on it.
+				expect(text).toContain("does not exist");
+			} finally {
+				await fs.rm(artifactsDir, { recursive: true, force: true });
+			}
+		});
+	});
+
+	it("still rejects an existing working-tree edit in plan mode after the recovery reorder", async () => {
+		await withTempDir(async tempDir => {
+			const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "hashline-plan-art-"));
+			try {
+				const session = {
+					cwd: tempDir,
+					settings: Settings.isolated(),
+					getArtifactsDir: () => artifactsDir,
+					getSessionId: () => "plan-sess",
+					getPlanModeState: () => ({ enabled: true, planFilePath: "local://x-plan.md" }),
+				} as unknown as ToolSession;
+
+				// An existing working-tree file with a recorded tag: no recovery is
+				// needed, so the (reordered) write gate must still reject it.
+				const wtFile = path.join(tempDir, "real.ts");
+				const source = "a\nb\nc\n";
+				await Bun.write(wtFile, source);
+				const wtTag = recordFullSnapshot(getFileReadCache(session), wtFile, source);
+				const input = `${header("real.ts", wtTag)}\n${sameLineRange(tag(2, "b"))}\n${repl("B")}\n`;
+
+				await expect(
+					executeHashlineSingle(hashlineExecuteOptions(tempDir, input, undefined, session)),
+				).rejects.toThrow(/working tree is read-only/);
+				expect(await Bun.file(wtFile).text()).toBe(source);
+			} finally {
+				await fs.rm(artifactsDir, { recursive: true, force: true });
+			}
 		});
 	});
 });

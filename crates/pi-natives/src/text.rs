@@ -8,7 +8,10 @@
 //! - Ellipsis decoded lazily
 //! - truncateToWidth returns the original `JsString` when possible
 
-use std::cell::RefCell;
+use std::{
+	cell::RefCell,
+	sync::atomic::{AtomicU8, Ordering},
+};
 
 use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
@@ -529,34 +532,91 @@ const fn ascii_cell_width_u16(u: u16, tab_width: usize) -> usize {
 	}
 }
 
-const MACOS_HANGUL_COMPAT_JAMO_WIDTH: usize = 1;
+const HANGUL_COMPAT_JAMO_NARROW_WIDTH: usize = 1;
 
-#[inline]
-const fn is_macos_hangul_compat_jamo(c: char) -> bool {
-	let cp = c as u32;
-	cfg!(target_os = "macos") && cp >= 0x3131 && cp <= 0x318e
+/// Runtime override for Hangul Compatibility Jamo (U+3131..=U+318E) cell width.
+///   0 = unset → platform default (macOS: narrow 1 cell; otherwise UAX#11)
+///   1 = force narrow (1 cell)
+///   2 = force wide (2 cells)
+///   3 = force Unicode width (no correction)
+/// The actual width is decided by the *client* terminal, not the host OS, so it
+/// is resolved at runtime from the terminal identity (see packages/tui
+/// terminal.ts) and pushed here through
+/// `set_hangul_compat_jamo_width_override`.
+static HANGUL_COMPAT_JAMO_WIDTH_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+
+#[napi]
+pub fn set_hangul_compat_jamo_width_override(value: u8) {
+	HANGUL_COMPAT_JAMO_WIDTH_OVERRIDE.store(value, Ordering::Relaxed);
 }
 
 #[inline]
-fn apply_macos_hangul_compat_jamo_delta(width: usize, c: char) -> usize {
-	if !is_macos_hangul_compat_jamo(c) {
+const fn is_hangul_compat_jamo(c: char) -> bool {
+	let cp = c as u32;
+	cp >= 0x3131 && cp <= 0x318e
+}
+
+/// Effective target cell width for Compatibility Jamo, or `None` to follow the
+/// Unicode width (no correction). Reads the runtime override, falling back to
+/// the compile-time platform default when unset.
+#[inline]
+fn hangul_compat_jamo_target_width() -> Option<usize> {
+	match HANGUL_COMPAT_JAMO_WIDTH_OVERRIDE.load(Ordering::Relaxed) {
+		1 => Some(1),
+		2 => Some(2),
+		3 => None,
+		_ => {
+			if cfg!(target_os = "macos") {
+				Some(HANGUL_COMPAT_JAMO_NARROW_WIDTH)
+			} else {
+				None
+			}
+		},
+	}
+}
+
+#[inline]
+fn apply_hangul_compat_jamo_delta(width: usize, c: char) -> usize {
+	if !is_hangul_compat_jamo(c) {
 		return width;
 	}
+	let Some(target) = hangul_compat_jamo_target_width() else {
+		return width;
+	};
 	let unicode_width = UnicodeWidthChar::width(c).unwrap_or(0);
-	if unicode_width > MACOS_HANGUL_COMPAT_JAMO_WIDTH {
-		width.saturating_sub(unicode_width - MACOS_HANGUL_COMPAT_JAMO_WIDTH)
+	// The zero-width filler (U+3164 HANGUL FILLER) is an invisible placeholder.
+	// The target is set for *visible* jamo, so only the narrow correction
+	// (target 1) applies to the filler; a wide terminal renders it at its
+	// Unicode width (0), not the wide target. Never widen a
+	// zero-width jamo past the narrow correction.
+	if unicode_width == 0 && target > 1 {
+		return width;
+	}
+	if unicode_width > target {
+		width.saturating_sub(unicode_width - target)
 	} else {
-		width.saturating_add(MACOS_HANGUL_COMPAT_JAMO_WIDTH - unicode_width)
+		width.saturating_add(target - unicode_width)
 	}
 }
 
 #[inline]
 fn char_width_corrected(c: char) -> Option<usize> {
-	// Hangul Compatibility Jamo U+3131..=U+318E render as 1 cell on macOS
-	// terminals (Ghostty, Terminal.app, iTerm2), but follow UAX#11 at 2
-	// cells on WezTerm and most Linux terminals. Only force 1 on macOS.
-	if is_macos_hangul_compat_jamo(c) {
-		return Some(MACOS_HANGUL_COMPAT_JAMO_WIDTH);
+	// Hangul Compatibility Jamo U+3131..=U+318E render as 1 cell on some
+	// terminals (Terminal.app, iTerm2) but follow UAX#11 at 2 cells on others
+	// (Ghostty, most Linux terminals). The width is resolved at runtime from the
+	// terminal identity and applied through the override; absent an override we
+	// fall back to the compile-time platform default.
+	if is_hangul_compat_jamo(c)
+		&& let Some(target) = hangul_compat_jamo_target_width()
+	{
+		// Zero-width filler (U+3164): only the narrow correction applies — a
+		// wide terminal renders it at its Unicode width (0), not the effective
+		// wide target set for visible jamo. See apply_hangul_compat_jamo_delta.
+		let unicode_width = UnicodeWidthChar::width(c).unwrap_or(0);
+		if unicode_width == 0 && target > 1 {
+			return Some(unicode_width);
+		}
+		return Some(target);
 	}
 	UnicodeWidthChar::width(c)
 }
@@ -575,14 +635,12 @@ fn grapheme_width_str(g: &str, tab_width: usize) -> usize {
 	}
 	// Multi-char grapheme: keep UnicodeWidthStr as the source of truth for
 	// sequence-level width rules (VS16 emoji presentation, keycaps, ZWJ emoji,
-	// CRLF, script ligatures). A per-char sum is not equivalent. On macOS,
-	// apply only the same local Compatibility Jamo delta that
-	// char_width_corrected applies to standalone code points.
+	// CRLF, script ligatures). A per-char sum is not equivalent. Apply only the
+	// same local Compatibility Jamo delta that char_width_corrected applies to
+	// standalone code points; the delta is a no-op when no correction is active.
 	let mut width = UnicodeWidthStr::width(g);
-	if cfg!(target_os = "macos") {
-		for c in g.chars() {
-			width = apply_macos_hangul_compat_jamo_delta(width, c);
-		}
+	for c in g.chars() {
+		width = apply_hangul_compat_jamo_delta(width, c);
 	}
 	width
 }

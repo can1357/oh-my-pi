@@ -197,8 +197,20 @@ interface TestGuest {
 	nextFrame(): Promise<CollabFrame>;
 }
 
-/** Frames the host broadcasts on its own schedule (debounced state/agents, entry/event/bus taps). */
-const BROADCAST_FRAME_TYPES: Record<string, true> = { state: true, agents: true, entry: true, event: true, bus: true };
+/**
+ * Frames the test harness skips: the host's debounced broadcasts (state,
+ * agents, entry, event, bus) and the per-peer snapshot-chunk train that
+ * follows every welcome. They interleave nondeterministically with the
+ * directed welcome/error frames these tests actually assert on.
+ */
+const FILTERED_FRAME_TYPES: Record<string, true> = {
+	state: true,
+	agents: true,
+	entry: true,
+	event: true,
+	bus: true,
+	"snapshot-chunk": true,
+};
 
 /**
  * Raw guest speaking the wire protocol directly. `writeToken` overrides the link's token (e.g. forged).
@@ -216,7 +228,7 @@ async function joinAsGuest(link: string, name: string, writeTokenOverride?: stri
 	const queue: CollabFrame[] = [];
 	const waiters: ((frame: CollabFrame) => void)[] = [];
 	socket.onFrame = frame => {
-		if (BROADCAST_FRAME_TYPES[frame.t]) return;
+		if (FILTERED_FRAME_TYPES[frame.t]) return;
 		const waiter = waiters.shift();
 		if (waiter) waiter(frame);
 		else queue.push(frame);

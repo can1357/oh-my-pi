@@ -1,3 +1,4 @@
+import * as AIError from "@pk-nerdsaver-ai/pi-ai/error";
 import { getMCPConfigPath, logger } from "@pk-nerdsaver-ai/pi-utils";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
 import {
@@ -350,7 +351,7 @@ async function handleSmitherySearchCommand(rest: string, runtime: SlashCommandRu
 		return commandConsumed();
 	} catch (err) {
 		const message = errorMessage(err);
-		if (/401|403|unauthorized|forbidden/i.test(message)) {
+		if (AIError.is(AIError.classify(err), AIError.Flag.AuthFailed)) {
 			return usage(
 				"Smithery authentication required. Run /mcp smithery-login in the TUI client or add an API key to ~/.omp/agent/smithery.json.",
 				runtime,

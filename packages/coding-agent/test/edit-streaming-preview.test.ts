@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { computeFileHash, formatHashlineHeader, InMemorySnapshotStore } from "@pk-nerdsaver-ai/hashline";
 import { dropIncompleteLastEdit, EDIT_MODE_STRATEGIES } from "@pk-nerdsaver-ai/pi-coding-agent/edit";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("dropIncompleteLastEdit", () => {
 	test("keeps all entries when partialJson is undefined", () => {
@@ -60,7 +61,7 @@ describe("hashline streaming preview (multi-section)", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	const ctx = (cwd: string) => ({ cwd, signal: new AbortController().signal, snapshots });
@@ -114,7 +115,7 @@ describe("hashline streaming preview (single-op trailing payload)", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	const ctx = (cwd: string, isStreaming = true) => ({
@@ -211,7 +212,7 @@ describe("hashline streaming preview (monotonic growth)", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	const ctx = (cwd: string) => ({ cwd, signal: new AbortController().signal, snapshots, isStreaming: true });
@@ -257,7 +258,7 @@ describe("apply_patch streaming preview (trailing partial line)", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	const ctx = (cwd: string, isStreaming: boolean) => ({

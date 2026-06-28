@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { type AssistantMessageEventStream, clearCustomApis, getCustomApi } from "@pk-nerdsaver-ai/pi-ai";
 import { ModelRegistry, type ProviderConfigInput } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("ModelRegistry runtime source cleanup", () => {
 	let tempDir: string;
@@ -37,7 +37,7 @@ describe("ModelRegistry runtime source cleanup", () => {
 		clearCustomApis();
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		}
 	});
 

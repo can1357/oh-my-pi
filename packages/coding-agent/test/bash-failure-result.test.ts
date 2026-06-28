@@ -17,8 +17,8 @@ function makeSession(): ToolSession {
 				if (key === "bash.stripTrailingHeadTail") return false;
 				if (key === "astGrep.enabled") return false;
 				if (key === "astEdit.enabled") return false;
-				if (key === "search.enabled") return false;
-				if (key === "find.enabled") return false;
+				if (key === "grep.enabled") return false;
+				if (key === "glob.enabled") return false;
 				return undefined;
 			},
 			getBashInterceptorRules() {

@@ -25,8 +25,8 @@ verbatim tool result
 
 - The name after `<tool_call>` must match a listed function and sit on the same line.
 - Emit one `<arg_key>name</arg_key>` + `<arg_value>value</arg_value>` pair per argument; omit unset optional args.
-- String values are raw text (no quotes, no escaping); non-string values are valid JSON.
+- `<arg_value>` bodies are read by regex (delimiter matching), NOT a real XML parser: write string values as raw literal text and never HTML-escape them (emit `a & b`, not `a &amp; b`; `<`/`>` stay literal); only the body's own `</arg_value>` closing tag is reserved. Non-string values are valid JSON.
 - Multiple calls are consecutive `<tool_call>…</tool_call>` blocks.
 - Private reasoning goes in `<think>…</think>`; NEVER put tool calls inside `<think>`.
 - Read each `<tool_response>` in call order. NEVER emit `<tool_response>` yourself.
-- After emitting your tool calls, YOU MUST EMIT THE STOP SEQUENCE AND HALT.
+- Emit the stop sequence ONLY after the call is fully written — NEVER announce a tool then stop (e.g. halting at "Let's run `cargo clippy`" with no `<tool_call>` emitted). Write the complete call, THEN the stop sequence, THEN halt.

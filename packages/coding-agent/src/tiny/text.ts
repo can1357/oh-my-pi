@@ -153,7 +153,7 @@ export function isLowSignalTitleInput(message: string): boolean {
  */
 export const NO_TITLE_SENTINEL = "none";
 
-export function normalizeGeneratedTitle(value: string | null | undefined): string | null {
+export function normalizeGeneratedTitle(value: string | null | undefined, sourceText?: string): string | null {
 	const firstLine = value?.trim().split(/\r?\n/, 1)[0]?.trim();
 	if (!firstLine) return null;
 	const title = firstLine
@@ -161,9 +161,61 @@ export function normalizeGeneratedTitle(value: string | null | undefined): strin
 		.replace(/[.!?]$/, "")
 		.trim();
 	if (!title || title.toLowerCase() === NO_TITLE_SENTINEL) return null;
-	return titleCase(title);
+	return sourceText === undefined ? title : reconcileTitleCasing(title, sourceText);
 }
 
-function titleCase(value: string): string {
-	return value.replace(/\b\p{Ll}/gu, c => c.toUpperCase());
+/**
+ * Reconcile a generated title's casing against the user's own message.
+ *
+ * The title prompt asks for sentence case, but small title models still mangle
+ * casing two ways: they sprout stray interior capitals on ordinary words
+ * (`daemon` → `dAemon`) and they flatten proper nouns the user cares about
+ * (`TinyVMM` → `tinyvmm`). The user's message is the source of truth, so per
+ * title token:
+ *  1. typed verbatim in the message → keep it (the user established the casing);
+ *  2. else the message has the same word with *distinctive* mixed casing
+ *     (`TinyVMM`, `iOS`, `IDs`) → adopt the user's casing (restoration);
+ *  3. else it's a camelCase artifact (lowercase word + stray interior capital,
+ *     `dAemon`) the user never wrote → lowercase it;
+ *  4. else leave it — preserves model-cased proper nouns like `GitHub`, `OAuth`.
+ *
+ * Restoration is limited to distinctively *mixed*-cased source tokens: a sentence
+ * that merely *starts* with `For` can't force a mid-title `for` to `For`, and
+ * emphatic all-caps (`ALL ERROR HANDLING`) is never re-shouted over sentence case.
+ */
+function reconcileTitleCasing(title: string, sourceText: string): string {
+	const verbatim = new Set<string>();
+	const distinctive = new Map<string, string>();
+	for (const [token] of sourceText.matchAll(TITLE_WORD)) {
+		verbatim.add(token);
+		if (isDistinctiveCasing(token)) {
+			const lower = token.toLowerCase();
+			if (!distinctive.has(lower)) distinctive.set(lower, token);
+		}
+	}
+	return title.replace(TITLE_WORD, token => {
+		if (verbatim.has(token)) return token;
+		const restored = distinctive.get(token.toLowerCase());
+		if (restored) return restored;
+		return isCamelArtifact(token) ? token.toLowerCase() : token;
+	});
+}
+
+/** Mixed-case identifier the user cased deliberately (`TinyVMM`, `iOS`, `IDs`):
+ *  an interior/repeated capital plus at least one lowercase letter. Only these
+ *  are restored when the model flattens them.
+ *
+ *  Pure all-caps is intentionally excluded. The model preserves its own acronyms
+ *  verbatim regardless, so restoring all-caps from the source would only ever
+ *  re-shout emphatic input (`ALL ERROR HANDLING`, `FIX THE BUG`) over the
+ *  sentence case the prompt asks for. */
+function isDistinctiveCasing(token: string): boolean {
+	return /\p{Ll}/u.test(token) && /\p{L}\p{Lu}/u.test(token);
+}
+
+/** A lowercase word carrying a stray interior capital (`dAemon`, `cReate`): the
+ *  model-mangled shape we flatten when the user never wrote it. PascalCase proper
+ *  nouns (`GitHub`, `OAuth`) start uppercase and are left untouched. */
+function isCamelArtifact(token: string): boolean {
+	return /^\p{Ll}/u.test(token) && /\p{Lu}/u.test(token);
 }

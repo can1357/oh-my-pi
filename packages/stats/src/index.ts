@@ -15,7 +15,14 @@ export {
 	syncAllSessions,
 } from "./aggregator";
 export { closeDb } from "./db";
+export { getGainDashboardStats } from "./gain-aggregator";
 export { startServer } from "./server";
+export type {
+	GainDashboardStats,
+	GainSource,
+	GainSourceTotals,
+	GainTimeSeriesPoint,
+} from "./shared-types";
 export type {
 	AggregatedStats,
 	DashboardStats,

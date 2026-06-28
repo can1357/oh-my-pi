@@ -70,6 +70,10 @@ export const OpenAICompatSchema = type({
 	"whenThinking?": OpenAICompatFieldsSchema,
 });
 
+const ApiSchema = type(
+	'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "google-generative-ai" | "google-gemini-cli" | "google-vertex"',
+);
+
 const EffortSchema = type('"minimal" | "low" | "medium" | "high" | "xhigh"');
 
 const ThinkingControlModeSchema = type(
@@ -118,11 +122,25 @@ const ModelThinkingSchema = type({
 		};
 	});
 
+const RemoteCompactionSchema = type({
+	"enabled?": "boolean",
+	"api?": ApiSchema,
+	"endpoint?": "string",
+	"model?": "string",
+}).narrow((value, ctx) => {
+	if (value.endpoint !== undefined && typeof value.endpoint === "string" && value.endpoint.length === 0) {
+		return ctx.mustBe("remoteCompaction.endpoint a non-empty string");
+	}
+	if (value.model !== undefined && typeof value.model === "string" && value.model.length === 0) {
+		return ctx.mustBe("remoteCompaction.model a non-empty string");
+	}
+	return true;
+});
+
 const ModelDefinitionSchema = type({
 	id: "string",
 	"name?": "string",
-	"api?":
-		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "google-generative-ai" | "google-gemini-cli" | "google-vertex"',
+	"api?": ApiSchema,
 	"baseUrl?": "string",
 	"reasoning?": "boolean",
 	"thinking?": ModelThinkingSchema,
@@ -141,6 +159,8 @@ const ModelDefinitionSchema = type({
 	"headers?": { "[string]": "string" },
 	"compat?": OpenAICompatSchema,
 	"contextPromotionTarget?": "string",
+	"compactionModel?": "string",
+	"remoteCompaction?": RemoteCompactionSchema,
 }).narrow((value, ctx) => {
 	// Enforce id non-empty
 	if (typeof value.id === "string" && value.id.length === 0) {
@@ -158,6 +178,13 @@ const ModelDefinitionSchema = type({
 		value.contextPromotionTarget.length === 0
 	) {
 		return ctx.mustBe("contextPromotionTarget a non-empty string");
+	}
+	if (
+		value.compactionModel !== undefined &&
+		typeof value.compactionModel === "string" &&
+		value.compactionModel.length === 0
+	) {
+		return ctx.mustBe("compactionModel a non-empty string");
 	}
 	return true;
 });
@@ -181,6 +208,8 @@ export const ModelOverrideSchema = type({
 	"headers?": { "[string]": "string" },
 	"compat?": OpenAICompatSchema,
 	"contextPromotionTarget?": "string",
+	"compactionModel?": "string",
+	"remoteCompaction?": RemoteCompactionSchema,
 }).narrow((value, ctx) => {
 	if (value.name !== undefined && typeof value.name === "string" && value.name.length === 0) {
 		return ctx.mustBe("name a non-empty string");
@@ -192,13 +221,20 @@ export const ModelOverrideSchema = type({
 	) {
 		return ctx.mustBe("contextPromotionTarget a non-empty string");
 	}
+	if (
+		value.compactionModel !== undefined &&
+		typeof value.compactionModel === "string" &&
+		value.compactionModel.length === 0
+	) {
+		return ctx.mustBe("compactionModel a non-empty string");
+	}
 	return true;
 });
 
 export type ModelOverride = typeof ModelOverrideSchema.infer;
 
 export const ProviderDiscoverySchema = type({
-	type: '"ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy"',
+	type: '"ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm"',
 });
 
 export const ProviderAuthSchema = type('"apiKey" | "none" | "oauth"');
@@ -209,10 +245,10 @@ export type ProviderDiscovery = typeof ProviderDiscoverySchema.infer;
 const ProviderConfigSchema = type({
 	"baseUrl?": "string",
 	"apiKey?": "string",
-	"api?":
-		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "google-generative-ai" | "google-gemini-cli" | "google-vertex"',
+	"api?": ApiSchema,
 	"headers?": { "[string]": "string" },
 	"compat?": OpenAICompatSchema,
+	"remoteCompaction?": RemoteCompactionSchema,
 	"authHeader?": "boolean",
 	"auth?": ProviderAuthSchema,
 	"discovery?": ProviderDiscoverySchema,

@@ -20,6 +20,62 @@ describe("advisor watchdog prompt discovery", () => {
 		}
 	});
 
+	async function withAdvisorHistory(
+		tempDir: TempDir,
+		cwd: string,
+		run: (dump: string) => void | Promise<void>,
+	): Promise<void> {
+		const authStorage = await AuthStorage.create(tempDir.join("testauth.db"));
+		let session: AgentSession | undefined;
+		try {
+			authStorage.setRuntimeApiKey("openai", "test-key");
+			const modelRegistry = new ModelRegistry(authStorage);
+			const sessionManager = SessionManager.create(cwd, tempDir.join("sessions"));
+			const result = await createAgentSession({
+				cwd,
+				agentDir: tempDir.path(),
+				sessionManager,
+				authStorage,
+				modelRegistry,
+				settings: (() => {
+					const s = Settings.isolated({
+						"async.enabled": false,
+						"advisor.enabled": true,
+					});
+					s.setModelRole("advisor", "openai/gpt-4o-mini");
+					return s;
+				})(),
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				workspaceTree: {
+					rootPath: cwd,
+					rendered: "",
+					truncated: false,
+					totalLines: 0,
+					agentsMdFiles: [],
+				},
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			session = result.session;
+
+			expect(session.isAdvisorActive()).toBe(true);
+			const dump = session.formatAdvisorHistoryAsText();
+			if (dump === null) throw new Error("Advisor history was not available.");
+			await run(dump);
+		} finally {
+			try {
+				await session?.dispose();
+			} finally {
+				authStorage.close();
+			}
+		}
+	}
+
 	it("discovers and appends WATCHDOG.md to the advisor prompt", async () => {
 		const tempDir = TempDir.createSync("@pi-advisor-watchdog-");
 		tempDirs.push(tempDir);
@@ -75,6 +131,39 @@ describe("advisor watchdog prompt discovery", () => {
 				authStorage.close();
 			}
 		}
+	});
+
+	it("adds built-in active child repo context to the advisor prompt", async () => {
+		const tempDir = TempDir.createSync("@pi-advisor-watchdog-");
+		tempDirs.push(tempDir);
+		const cwd = tempDir.join("parent-cwd");
+		fs.mkdirSync(path.join(cwd, "active-project", ".git"), { recursive: true });
+		const watchdogContent = "Parent watchdog remains before built-in active repo context.";
+		fs.writeFileSync(path.join(cwd, "WATCHDOG.md"), watchdogContent, "utf8");
+
+		await withAdvisorHistory(tempDir, cwd, dump => {
+			expect(dump).toContain("Especially pay attention to:");
+			expect(dump).toContain("exactly one direct child git repository");
+			expect(dump).toContain("`active-project`");
+			expect(dump).toContain("Do not claim work is missing, destroyed, or absent at the parent cwd");
+			expect(dump).toContain(watchdogContent);
+			expect(dump.indexOf(watchdogContent)).toBeLessThan(
+				dump.indexOf("Do not claim work is missing, destroyed, or absent at the parent cwd"),
+			);
+		});
+	});
+
+	it("omits built-in active child repo context when multiple direct child repos exist", async () => {
+		const tempDir = TempDir.createSync("@pi-advisor-watchdog-");
+		tempDirs.push(tempDir);
+		const cwd = tempDir.join("parent-cwd");
+		fs.mkdirSync(path.join(cwd, "active-project", ".git"), { recursive: true });
+		fs.mkdirSync(path.join(cwd, "second-project", ".git"), { recursive: true });
+
+		await withAdvisorHistory(tempDir, cwd, dump => {
+			expect(dump).not.toContain("exactly one direct child git repository");
+			expect(dump).not.toContain("Do not claim work is missing, destroyed, or absent at the parent cwd");
+		});
 	});
 
 	it("resolves nested folders and sorts by depth", async () => {

@@ -44,6 +44,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+use crate::task;
+
 /// Upper bound on the frame edge: a hard stop against absurd allocations
 /// (`size * size` pixel buffer), far above the 2576px production frame.
 const MAX_FRAME_SIZE: u32 = 16384;
@@ -673,8 +675,8 @@ pub struct SnapcompactRenderOptions {
 	pub columns:     Option<u32>,
 }
 
-/// Render one snapcompact frame: print pre-normalized text onto a
-/// `size`-wide bitmap and encode it as PNG.
+/// Render one snapcompact frame on a libuv worker: print pre-normalized text
+/// onto a `size`-wide bitmap and encode it as PNG.
 ///
 /// The bitmap height hugs the rows the text actually occupies
 /// (`usedRows * lineRepeat * cellHeight`), so a partially filled frame never
@@ -686,11 +688,18 @@ pub struct SnapcompactRenderOptions {
 /// requested cell box; `columns: 2` flows pre-wrapped newline-separated lines
 /// down two newspaper columns. `U+000E`/`U+000F` in `text` toggle dim-gray ink
 /// spans without occupying a cell.
-/// Returns the PNG encoded as base64, created as a one-byte (Latin-1) JS
-/// string straight from native code — no `Uint8Array` hop or JS-side
-/// re-encode.
+/// Returns a promise for the PNG encoded as base64, created as a one-byte
+/// (Latin-1) JS string straight from native code — no `Uint8Array` hop or
+/// JS-side re-encode.
 #[napi]
 pub fn render_snapcompact_png(
+	text: String,
+	options: SnapcompactRenderOptions,
+) -> task::Promise<Latin1String> {
+	task::blocking("render_snapcompact_png", (), move |_| render_snapcompact_png_sync(text, options))
+}
+
+fn render_snapcompact_png_sync(
 	text: String,
 	options: SnapcompactRenderOptions,
 ) -> Result<Latin1String> {
@@ -907,7 +916,7 @@ mod tests {
 	#[test]
 	fn render_native_is_indexed_and_stretch_is_rgb() {
 		let native = png_bytes(
-			render_snapcompact_png("Hello world. Again.".into(), SnapcompactRenderOptions {
+			render_snapcompact_png_sync("Hello world. Again.".into(), SnapcompactRenderOptions {
 				size: 128,
 				font: Some("8x8".into()),
 				variant: Some("bw".into()),
@@ -920,7 +929,7 @@ mod tests {
 		assert_eq!(native[25], 3);
 
 		let stretched = png_bytes(
-			render_snapcompact_png("Hello world. Again.".into(), SnapcompactRenderOptions {
+			render_snapcompact_png_sync("Hello world. Again.".into(), SnapcompactRenderOptions {
 				size: 128,
 				font: Some("8x8".into()),
 				cell_width: Some(6),
@@ -931,7 +940,7 @@ mod tests {
 		);
 		// 2 = truecolor RGB.
 		assert_eq!(stretched[25], 2);
-		let legacy = png_bytes(render_snapcompact_png("Hi. Ok.".into(), opts(40)).unwrap());
+		let legacy = png_bytes(render_snapcompact_png_sync("Hi. Ok.".into(), opts(40)).unwrap());
 		assert_eq!(legacy[25], 3, "default shape stays the legacy 5x8 indexed path");
 	}
 
@@ -950,7 +959,7 @@ mod tests {
 
 		// Plain bw, no dim/band/repeat: background + black ink = 1-bit.
 		let bw = png_bytes(
-			render_snapcompact_png("Hello world. Again.".into(), SnapcompactRenderOptions {
+			render_snapcompact_png_sync("Hello world. Again.".into(), SnapcompactRenderOptions {
 				size: 128,
 				font: Some("8x8".into()),
 				variant: Some("bw".into()),
@@ -962,7 +971,7 @@ mod tests {
 
 		// bw with a dim span and repeat bands: 4 colors = 2-bit.
 		let dim = png_bytes(
-			render_snapcompact_png(
+			render_snapcompact_png_sync(
 				"Read \u{e}the dim part\u{f} now.".into(),
 				SnapcompactRenderOptions {
 					size: 128,
@@ -979,7 +988,7 @@ mod tests {
 		// Sentence hues exceed 4 colors: stays 4-bit, palette still narrowed
 		// to the inks actually printed (bg + 2 hues here).
 		let sent = png_bytes(
-			render_snapcompact_png("Hi. Ok.".into(), SnapcompactRenderOptions {
+			render_snapcompact_png_sync("Hi. Ok.".into(), SnapcompactRenderOptions {
 				size: 128,
 				font: Some("8x8".into()),
 				variant: Some("sent".into()),
@@ -994,9 +1003,9 @@ mod tests {
 
 	#[test]
 	fn rejects_bad_shapes() {
-		assert!(render_snapcompact_png("x".into(), opts(0)).is_err());
+		assert!(render_snapcompact_png_sync("x".into(), opts(0)).is_err());
 		assert!(
-			render_snapcompact_png("x".into(), SnapcompactRenderOptions {
+			render_snapcompact_png_sync("x".into(), SnapcompactRenderOptions {
 				size: 64,
 				font: Some("9x9".into()),
 				..Default::default()
@@ -1004,7 +1013,7 @@ mod tests {
 			.is_err()
 		);
 		assert!(
-			render_snapcompact_png("x".into(), SnapcompactRenderOptions {
+			render_snapcompact_png_sync("x".into(), SnapcompactRenderOptions {
 				size: 64,
 				variant: Some("zebra".into()),
 				..Default::default()
@@ -1023,7 +1032,7 @@ mod tests {
 		}
 		for (name, size) in [("6x12", 60u32), ("8x13", 104u32)] {
 			let png = png_bytes(
-				render_snapcompact_png("Hello world. Again!".into(), SnapcompactRenderOptions {
+				render_snapcompact_png_sync("Hello world. Again!".into(), SnapcompactRenderOptions {
 					size,
 					font: Some(name.into()),
 					..Default::default()
@@ -1044,15 +1053,18 @@ mod tests {
 	#[test]
 	fn stretch_false_renders_natural_glyphs_on_padded_pitch() {
 		let png = png_bytes(
-			render_snapcompact_png("Hello there. General Kenobi!".into(), SnapcompactRenderOptions {
-				size: 128,
-				font: Some("8x13".into()),
-				cell_width: Some(8),
-				cell_height: Some(16),
-				stretch: Some(false),
-				variant: Some("bw".into()),
-				..Default::default()
-			})
+			render_snapcompact_png_sync(
+				"Hello there. General Kenobi!".into(),
+				SnapcompactRenderOptions {
+					size: 128,
+					font: Some("8x13".into()),
+					cell_width: Some(8),
+					cell_height: Some(16),
+					stretch: Some(false),
+					variant: Some("bw".into()),
+					..Default::default()
+				},
+			)
 			.unwrap(),
 		);
 		assert_eq!(png[25], 3, "8on16 must stay indexed");
@@ -1117,7 +1129,7 @@ mod tests {
 			(dim(16), dim(20))
 		};
 		let render = |text: &str, opts: SnapcompactRenderOptions| {
-			png_bytes(render_snapcompact_png(text.into(), opts).unwrap())
+			png_bytes(render_snapcompact_png_sync(text.into(), opts).unwrap())
 		};
 		let opts_8x8 =
 			|| SnapcompactRenderOptions { size: 64, font: Some("8x8".into()), ..Default::default() };
@@ -1156,7 +1168,7 @@ mod tests {
 	#[test]
 	fn columns_validates_and_renders_doc_frames() {
 		assert!(
-			render_snapcompact_png("x".into(), SnapcompactRenderOptions {
+			render_snapcompact_png_sync("x".into(), SnapcompactRenderOptions {
 				size: 64,
 				columns: Some(3),
 				..Default::default()
@@ -1165,28 +1177,34 @@ mod tests {
 		);
 		// Indexed doc frame (stretch: false on a padded pitch).
 		let doc = png_bytes(
-			render_snapcompact_png("Hello there.\nSecond line".into(), SnapcompactRenderOptions {
-				size: 256,
-				font: Some("8x13".into()),
-				cell_width: Some(8),
-				cell_height: Some(16),
-				stretch: Some(false),
-				columns: Some(2),
-				..Default::default()
-			})
+			render_snapcompact_png_sync(
+				"Hello there.\nSecond line".into(),
+				SnapcompactRenderOptions {
+					size: 256,
+					font: Some("8x13".into()),
+					cell_width: Some(8),
+					cell_height: Some(16),
+					stretch: Some(false),
+					columns: Some(2),
+					..Default::default()
+				},
+			)
 			.unwrap(),
 		);
 		assert_eq!(doc[25], 3, "8on16 doc frame must encode indexed");
 		// Doc layout also applies on the stretch path (RGB output).
 		let stretched = png_bytes(
-			render_snapcompact_png("Hello there.\nSecond line".into(), SnapcompactRenderOptions {
-				size: 256,
-				font: Some("8x13".into()),
-				cell_width: Some(6),
-				cell_height: Some(12),
-				columns: Some(2),
-				..Default::default()
-			})
+			render_snapcompact_png_sync(
+				"Hello there.\nSecond line".into(),
+				SnapcompactRenderOptions {
+					size: 256,
+					font: Some("8x13".into()),
+					cell_width: Some(6),
+					cell_height: Some(12),
+					columns: Some(2),
+					..Default::default()
+				},
+			)
 			.unwrap(),
 		);
 		assert_eq!(stretched[25], 2, "stretched doc frame must encode RGB");

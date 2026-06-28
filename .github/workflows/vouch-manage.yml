@@ -1,0 +1,44 @@
+name: Vouch (manage)
+
+# Let maintainers vouch/denounce/unvouch by commenting on a Discussion:
+#   !vouch                 vouch the discussion author
+#   !vouch @user [reason]  vouch a specific user
+#   !denounce [@user] [reason]
+#   !unvouch [@user]
+# Only collaborators with admin/maintain/write are honored (triage EXCLUDED;
+# upstream's default `roles` includes triage, which we override below).
+#
+# Commits the VOUCHED.td change back to the default branch using the stock
+# GITHUB_TOKEN (no GitHub App needed). NOTE: this works only while the default
+# branch is UNPROTECTED — GITHUB_TOKEN cannot bypass branch protection. If you
+# protect the branch later, switch back to a GitHub App token on a bypass list.
+
+on:
+  discussion_comment:
+    types: [created]
+
+# Serialize writes to VOUCHED.td so concurrent vouches don't clobber.
+concurrency:
+  group: vouch-manage
+  cancel-in-progress: false
+
+permissions:
+  contents: write # commit VOUCHED.td
+  discussions: write # read the comment / acknowledge
+
+jobs:
+  manage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mitchellh/vouch/action/manage-by-discussion@v1
+        with:
+          discussion-number: ${{ github.event.discussion.number }}
+          comment-node-id: ${{ github.event.comment.node_id }}
+          vouch-keyword: "!vouch"
+          denounce-keyword: "!denounce"
+          unvouch-keyword: "!unvouch"
+          roles: admin,maintain,write
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

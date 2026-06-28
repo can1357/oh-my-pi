@@ -15,7 +15,7 @@ import {
 	type UsageReport,
 	type UsageUnit,
 } from "@pk-nerdsaver-ai/pi-ai";
-import { formatDuration, formatNumber } from "@pk-nerdsaver-ai/pi-utils";
+import { formatDuration, formatNumber, sanitizeText } from "@pk-nerdsaver-ai/pi-utils";
 import chalk from "chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { discoverAuthStorage } from "../sdk";
@@ -326,7 +326,26 @@ function formatAccountHeader(
 	const planType = report.metadata?.planType;
 	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${planType}`);
 	const savedResets = report.resetCredits?.availableCount ?? 0;
-	if (savedResets > 0) header += chalk.cyan(` · ✦ ${savedResets} saved reset${savedResets === 1 ? "" : "s"}`);
+	if (savedResets > 0) {
+		header += chalk.cyan(` · ✦ ${savedResets} saved reset${savedResets === 1 ? "" : "s"}`);
+		const credits = report.resetCredits?.credits;
+		if (credits) {
+			const expiries = credits
+				.filter(c => c.expiresAt)
+				.map(c => ({ date: c.expiresAt!, ms: Date.parse(c.expiresAt!) }))
+				.filter(c => !Number.isNaN(c.ms))
+				.sort((a, b) => a.ms - b.ms);
+			const upcoming = expiries.find(c => c.ms > nowMs);
+			if (upcoming) {
+				header += chalk.dim(
+					` · soonest expires in ${formatDuration(upcoming.ms - nowMs)} (${upcoming.date.slice(0, 10)})`,
+				);
+			} else {
+				const lastExpired = expiries.at(-1);
+				if (lastExpired) header += chalk.dim(` · expired (${lastExpired.date.slice(0, 10)})`);
+			}
+		}
+	}
 	if (report.fetchedAt && nowMs - report.fetchedAt > 90_000) {
 		header += chalk.dim(` · fetched ${formatDuration(nowMs - report.fetchedAt)} ago`);
 	}
@@ -450,6 +469,10 @@ export function formatUsageBreakdown(
 		lines.push(
 			`${chalk.bold.cyan(formatProviderName(provider))} ${chalk.dim(`— ${accountCount} ${accountCount === 1 ? "account" : "accounts"}`)}`,
 		);
+		// Provider-wide disclaimers render once per provider, not per limit.
+		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
+		for (const note of providerNotes)
+			lines.push(`  ${chalk.dim(sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  ")))}`);
 
 		const labelWidth = providerReports
 			.flatMap(report => report.limits)
@@ -646,6 +669,28 @@ function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[]
 	return accounts;
 }
 
+/**
+ * Keep only accounts worth a usage row: those whose provider has a usage
+ * provider, so a missing report is a real gap rather than the absence of any
+ * usage concept. Providers with no usage endpoint (web-search keys, local /
+ * keyless servers, inference providers without a usage API) would only ever
+ * render as noise, so they are dropped.
+ *
+ * `hasUsageProvider` is injected (in practice {@link AuthStorage.usageProviderFor})
+ * so custom/broker resolvers stay authoritative — no provider list is duplicated
+ * here. An explicit `--provider` request bypasses the cull, so
+ * `omp usage --provider xai` can still confirm the stored credential has no
+ * usage endpoint.
+ */
+export function selectReportableAccounts(
+	accounts: UsageAccountIdentity[],
+	hasUsageProvider: (provider: string) => boolean,
+	explicitProvider?: string,
+): UsageAccountIdentity[] {
+	if (explicitProvider) return accounts;
+	return accounts.filter(account => hasUsageProvider(account.provider));
+}
+
 /** Apply a redaction mask to an optional identity field. */
 function maskIdentity(redaction: Map<string, string>, value: string | undefined): string | undefined {
 	return value === undefined ? undefined : (redaction.get(value) ?? value);
@@ -717,7 +762,12 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			(await authStorage.fetchUsageReports({
 				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
 			})) ?? [];
-		let accounts = collectStoredAccounts(authStorage);
+		const storedAccounts = collectStoredAccounts(authStorage);
+		let accounts = selectReportableAccounts(
+			storedAccounts,
+			provider => authStorage.usageProviderFor(provider) !== undefined,
+			cmd.provider,
+		);
 		let filteredReports = reports;
 		if (cmd.provider) {
 			const wanted = cmd.provider.toLowerCase();
@@ -760,9 +810,13 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 
 		if (filteredReports.length === 0 && accounts.length === 0) {
 			const scope = cmd.provider ? ` for provider "${cmd.provider}"` : "";
-			process.stderr.write(
-				chalk.yellow(`No credentials found${scope}. Run \`omp\` and use /login to add accounts.\n`),
-			);
+			// Credentials exist but every one is for a provider without a usage
+			// endpoint — say so rather than implying nothing is logged in.
+			const message =
+				storedAccounts.length > 0
+					? `No usage data${scope}. Stored credentials are for providers without a usage endpoint.\n`
+					: `No credentials found${scope}. Run \`omp\` and use /login to add accounts.\n`;
+			process.stderr.write(chalk.yellow(message));
 			process.exitCode = 1;
 			return;
 		}

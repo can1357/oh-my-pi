@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package grpc.binarylog.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+message GrpcLogEntry {
+  enum EventType {
+    EVENT_TYPE_UNKNOWN = 0;
+    EVENT_TYPE_CLIENT_HEADER = 1;
+    EVENT_TYPE_SERVER_HEADER = 2;
+    EVENT_TYPE_CLIENT_MESSAGE = 3;
+    EVENT_TYPE_SERVER_MESSAGE = 4;
+    EVENT_TYPE_CLIENT_HALF_CLOSE = 5;
+    EVENT_TYPE_SERVER_TRAILER = 6;
+    EVENT_TYPE_CANCEL = 7;
+  }
+
+  enum Logger {
+    LOGGER_UNKNOWN = 0;
+    LOGGER_CLIENT = 1;
+    LOGGER_SERVER = 2;
+  }
+
+  .google.protobuf.Timestamp timestamp = 1;
+  uint64 call_id = 2;
+  uint64 sequence_id_within_call = 3;
+  .grpc.binarylog.v1.GrpcLogEntry.EventType type = 4;
+  .grpc.binarylog.v1.GrpcLogEntry.Logger logger = 5;
+  oneof payload {
+    .grpc.binarylog.v1.ClientHeader client_header = 6;
+    .grpc.binarylog.v1.ServerHeader server_header = 7;
+    .grpc.binarylog.v1.Message message = 8;
+    .grpc.binarylog.v1.Trailer trailer = 9;
+  }
+  bool payload_truncated = 10;
+  .grpc.binarylog.v1.Address peer = 11;
+}
+
+message ClientHeader {
+  .grpc.binarylog.v1.Metadata metadata = 1;
+  string method_name = 2;
+  string authority = 3;
+  .google.protobuf.Duration timeout = 4;
+}
+
+message ServerHeader {
+  .grpc.binarylog.v1.Metadata metadata = 1;
+}
+
+message Trailer {
+  .grpc.binarylog.v1.Metadata metadata = 1;
+  uint32 status_code = 2;
+  string status_message = 3;
+  bytes status_details = 4;
+}
+
+message Message {
+  uint32 length = 1;
+  bytes data = 2;
+}
+
+message Metadata {
+  repeated .grpc.binarylog.v1.MetadataEntry entry = 1;
+}
+
+message MetadataEntry {
+  string key = 1;
+  bytes value = 2;
+}
+
+message Address {
+  enum Type {
+    TYPE_UNKNOWN = 0;
+    TYPE_IPV4 = 1;
+    TYPE_IPV6 = 2;
+    TYPE_UNIX = 3;
+  }
+
+  .grpc.binarylog.v1.Address.Type type = 1;
+  string address = 2;
+  uint32 ip_port = 3;
+}

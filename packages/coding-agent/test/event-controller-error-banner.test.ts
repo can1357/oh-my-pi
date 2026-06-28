@@ -9,7 +9,7 @@
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@pk-nerdsaver-ai/pi-ai";
-import { THINKING_LOOP_ERROR_MARKER } from "@pk-nerdsaver-ai/pi-ai/utils/thinking-loop";
+import * as AIError from "@pk-nerdsaver-ai/pi-ai/error";
 import { resetSettingsForTest, Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/assistant-message";
 import { ErrorBannerComponent } from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/error-banner";
@@ -66,26 +66,33 @@ function createFixture(streamingMessage?: AssistantMessage) {
 		addChild: vi.fn(),
 	};
 
-	const session = { isTtsrAbortPending: false, retryAttempt: 0 };
+	const session = { isStreaming: false };
+	const viewSession = { isStreaming: false, isTtsrAbortPending: false, retryAttempt: 0 };
 	const ctx = {
 		isInitialized: true,
 		init: vi.fn(async () => {}),
 		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
 		statusLine: { invalidate: vi.fn() },
 		updateEditorTopBorder: vi.fn(),
+		updatePendingMessagesDisplay: vi.fn(),
 		ensureLoadingAnimation: vi.fn(),
 		statusContainer,
 		loadingAnimation: undefined,
+		autoCompactionLoader: undefined,
 		retryLoader: undefined,
 		editor: {},
 		streamingComponent: streamingMessage ? streamingComponent : undefined,
 		streamingMessage,
 		pendingTools: new Map(),
+		flushCompactionQueue: vi.fn(async () => {}),
 		showPinnedError,
 		clearPinnedError,
+		showError: vi.fn(),
+		showStatus: vi.fn(),
+		showWarning: vi.fn(),
 		session,
 		get viewSession() {
-			return session;
+			return viewSession;
 		},
 		clearTransientSessionUi: () => {},
 	} as unknown as InteractiveModeContext;
@@ -130,8 +137,12 @@ describe("EventController error banner", () => {
 	});
 
 	it("clears retryable thinking-loop banners without restoring the dropped inline error", async () => {
-		const errorMessage = `${THINKING_LOOP_ERROR_MARKER}: the model repeated near-identical content. Treating as a stream stall and retrying.`;
-		const message = makeAssistantMessage({ stopReason: "error", errorMessage });
+		const errorMessage = "loop guard stopped repeated reasoning";
+		const message = makeAssistantMessage({
+			stopReason: "error",
+			errorMessage,
+			errorId: AIError.create(AIError.Flag.ThinkingLoop),
+		});
 		const { controller, clearPinnedError, streamingComponent } = createFixture(message);
 
 		await controller.handleEvent({ type: "message_end", message } as Extract<
@@ -147,6 +158,7 @@ describe("EventController error banner", () => {
 			maxAttempts: 2,
 			delayMs: 0,
 			errorMessage,
+			errorId: AIError.create(AIError.Flag.ThinkingLoop),
 		} as Extract<AgentSessionEvent, { type: "auto_retry_start" }>);
 
 		expect(clearPinnedError).toHaveBeenCalledTimes(1);
@@ -188,6 +200,56 @@ describe("EventController error banner", () => {
 		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
 
 		expect(clearPinnedError).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("EventController working loader reconciliation", () => {
+	it("restores the working loader after compaction clears status while the focused session streams", async () => {
+		const { controller, ctx } = createFixture();
+		const loader = { stop: vi.fn() } as unknown as InteractiveModeContext["autoCompactionLoader"];
+		ctx.autoCompactionLoader = loader;
+		(ctx.viewSession as unknown as { isStreaming: boolean }).isStreaming = true;
+
+		await controller.handleEvent({
+			type: "auto_compaction_end",
+			action: "context-full",
+			result: undefined,
+			aborted: false,
+			willRetry: false,
+			skipped: true,
+		} as Extract<AgentSessionEvent, { type: "auto_compaction_end" }>);
+
+		expect(loader?.stop).toHaveBeenCalledTimes(1);
+		expect(ctx.statusContainer.clear).toHaveBeenCalledTimes(1);
+		expect(ctx.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
+		expect(ctx.ensureLoadingAnimation).toHaveBeenCalledTimes(1);
+	});
+
+	it("self-heals missing working loader on live tool updates", async () => {
+		const { controller, ctx } = createFixture();
+		(ctx.viewSession as unknown as { isStreaming: boolean }).isStreaming = true;
+
+		await controller.handleEvent({
+			type: "tool_execution_update",
+			toolCallId: "missing",
+			partialResult: {},
+		} as Extract<AgentSessionEvent, { type: "tool_execution_update" }>);
+
+		expect(ctx.ensureLoadingAnimation).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps transient retry status exclusive while a retry loader is visible", async () => {
+		const { controller, ctx } = createFixture();
+		ctx.retryLoader = { stop: vi.fn() } as unknown as InteractiveModeContext["retryLoader"];
+		(ctx.viewSession as unknown as { isStreaming: boolean }).isStreaming = true;
+
+		await controller.handleEvent({
+			type: "tool_execution_update",
+			toolCallId: "missing",
+			partialResult: {},
+		} as Extract<AgentSessionEvent, { type: "tool_execution_update" }>);
+
+		expect(ctx.ensureLoadingAnimation).not.toHaveBeenCalled();
 	});
 });
 

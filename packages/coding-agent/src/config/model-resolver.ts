@@ -877,6 +877,27 @@ function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
 	return role === "smol" || role === "slow" || role === "designer";
 }
 
+/**
+ * Roles that have no priority.json chain of their own reuse another role's
+ * list. The advisor — a second-opinion reviewer — defaults to the `slow`
+ * reasoning chain, but (unlike the `slow` role, see
+ * {@link shouldInheritDefaultBeforePriority}) never inherits the primary's
+ * model, so it stays a distinct strong model out of the box. The `tiny` role —
+ * the override for online title/memory/classifier tasks — reuses the `smol`
+ * fast chain so an unset tiny role auto-resolves to the same fast model smol
+ * would pick.
+ */
+const ROLE_PRIORITY_ALIAS: Partial<Record<ModelRole, keyof typeof MODEL_PRIO>> = {
+	advisor: "slow",
+	tiny: "smol",
+};
+
+/** Built-in priority patterns for a role, following {@link ROLE_PRIORITY_ALIAS}. */
+function rolePriorityDefaults(role: ModelRole): string[] {
+	const key = ROLE_PRIORITY_ALIAS[role] ?? (role as keyof typeof MODEL_PRIO);
+	return normalizeModelPatternList(MODEL_PRIO[key]);
+}
+
 function resolveDefaultInheritedPatterns(
 	role: ModelRole,
 	configuredDefault: string | undefined,
@@ -939,7 +960,7 @@ function resolveConfiguredRolePattern(
 
 	const configured = settings?.getModelRole(role)?.trim();
 	const configuredDefault = settings?.getModelRole(DEFAULT_MODEL_ROLE)?.trim();
-	const roleDefaults = normalizeModelPatternList(MODEL_PRIO[role as keyof typeof MODEL_PRIO]);
+	const roleDefaults = rolePriorityDefaults(role);
 	const resolved = configured
 		? normalizeModelPatternList(configured)
 		: resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited);
@@ -1243,6 +1264,27 @@ export function resolveRoleSelection(
 		}
 	}
 	return undefined;
+}
+
+/**
+ * Resolve the model for the `advisor` role. A configured `modelRoles.advisor`
+ * wins outright (a bad override surfaces as no model rather than silently
+ * running something else); when unset it falls back to the `slow` priority
+ * chain via {@link ROLE_PRIORITY_ALIAS} — a strong reasoning model that, unlike
+ * the `slow` role itself, never inherits the primary's model. Returns undefined
+ * only when no candidate in the resolved chain is available.
+ */
+export function resolveAdvisorRoleSelection(
+	settings: Settings,
+	availableModels: Model<Api>[],
+	modelRegistry?: CanonicalModelRegistry,
+): { model: Model<Api>; thinkingLevel?: ThinkingLevel } | undefined {
+	const resolved = resolveModelRoleValue(`${PREFIX_MODEL_ROLE}advisor`, availableModels, {
+		settings,
+		matchPreferences: getModelMatchPreferences(settings),
+		modelRegistry,
+	});
+	return resolved.model ? { model: resolved.model, thinkingLevel: resolved.thinkingLevel } : undefined;
 }
 
 function resolveExactCanonicalScopePattern(

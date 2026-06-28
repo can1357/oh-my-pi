@@ -22,7 +22,7 @@ export type MessageBlock = ({ kind: "code" } & CodeBlock) | ({ kind: "quote" } &
 export interface LastCommand {
 	kind: "bash" | "eval";
 	code: string;
-	/** Highlight language: "bash" for bash, "python"/"javascript" for eval. */
+	/** Highlight language: "bash" for bash, or the resolved eval language ("python"/"javascript"/"ruby"/"julia"). */
 	language: string;
 }
 
@@ -127,8 +127,13 @@ export function extractQuoteBlocks(text: string): QuoteBlock[] {
 
 function extractEvalCode(args: unknown): { code: string; language: string } | undefined {
 	if (!args || typeof args !== "object") return undefined;
-	const cells = (args as { cells?: unknown }).cells;
-	if (!Array.isArray(cells)) return undefined;
+	const argsObj = args as { cells?: unknown; code?: unknown };
+	const cells = Array.isArray(argsObj.cells)
+		? argsObj.cells
+		: typeof argsObj.code === "string"
+			? [argsObj]
+			: undefined;
+	if (!cells) return undefined;
 
 	const codeBlocks: string[] = [];
 	let language = "python";
@@ -139,7 +144,8 @@ function extractEvalCode(args: unknown): { code: string; language: string } | un
 		if (typeof code !== "string" || code.length === 0) continue;
 		codeBlocks.push(code);
 		if (!languageResolved) {
-			language = (cell as { language?: unknown }).language === "js" ? "javascript" : "python";
+			const lang = (cell as { language?: unknown }).language;
+			language = lang === "js" ? "javascript" : lang === "rb" ? "ruby" : lang === "jl" ? "julia" : "python";
 			languageResolved = true;
 		}
 	}

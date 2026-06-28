@@ -69,4 +69,21 @@ export interface ExtractEmbeddedAddonArchiveInput {
 }
 
 export function extractEmbeddedAddonArchive(input: ExtractEmbeddedAddonArchiveInput): string[];
+
+export interface SelectCpuVariantInput {
+	arch: string;
+	override: "modern" | "baseline" | null | undefined;
+	env: Record<string, string | undefined>;
+	detectAvx2: () => boolean;
+}
+
+export interface SelectCpuVariantResult {
+	variant: "modern" | "baseline" | null;
+	source: "non-x64" | "override" | "cache" | "detect";
+	cacheEnvKey?: string;
+	cacheEnvValue?: string;
+}
+
+export function selectCpuVariant(input: SelectCpuVariantInput): SelectCpuVariantResult;
+
 export function loadNative(): Record<string, unknown>;

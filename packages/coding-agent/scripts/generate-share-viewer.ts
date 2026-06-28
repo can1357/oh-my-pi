@@ -19,8 +19,10 @@ if (!outPath) {
 }
 
 const loaderJs = await Bun.file(new URL("../src/export/html/share-loader.js", import.meta.url).pathname).text();
-// Pin a built-in theme: the viewer is a public artifact, not a per-user export.
-const themeVars = await generateThemeVars("dark");
+// Pin the omp brand palette (collab-web pink/purple identity) — the viewer is
+// a public artifact matching the live my.omp.sh client, not a per-user export
+// that should mirror the host's terminal theme.
+const themeVars = await generateThemeVars("web");
 
 const html = getTemplate()
 	.replace("<theme-vars/>", () => `<style>:root { ${themeVars} }</style>`)

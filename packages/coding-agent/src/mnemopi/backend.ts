@@ -511,10 +511,10 @@ async function resolveMnemopiProviderOptions(
 	}
 
 	try {
-		const resolved = resolveRoleSelection(["smol"], settings, modelRegistry.getAvailable(), modelRegistry);
+		const resolved = resolveRoleSelection(["tiny", "smol"], settings, modelRegistry.getAvailable(), modelRegistry);
 		const model = resolved?.model;
 		if (!model) {
-			logger.warn("Mnemopi: llmMode=smol but no smol model resolved; continuing without LLM.");
+			logger.warn("Mnemopi: llmMode=smol but no tiny/smol model resolved; continuing without LLM.");
 			return base;
 		}
 		return {

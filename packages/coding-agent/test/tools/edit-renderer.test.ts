@@ -4,11 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { InMemorySnapshotStore } from "@pk-nerdsaver-ai/hashline";
 import type { AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
+import { renderGalleryState, resolveFixture } from "@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-cli";
 import { resetSettingsForTest, Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { editToolRenderer } from "@pk-nerdsaver-ai/pi-coding-agent/edit/renderer";
 import { ToolExecutionComponent } from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/tool-execution";
 import * as themeModule from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
 import { Text, type TUI, visibleWidth } from "@pk-nerdsaver-ai/pi-tui";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -288,7 +290,7 @@ describe("editToolRenderer", () => {
 			expect(rendered).toContain("export const b = 22;");
 			expect(rendered).not.toContain("No changes would be made");
 		} finally {
-			await fs.rm(tmpDir, { recursive: true, force: true });
+			await removeWithRetries(tmpDir);
 		}
 	});
 
@@ -319,7 +321,7 @@ describe("editToolRenderer", () => {
 			expect(rendered).toContain("export const b = 22;");
 			expect(rendered).not.toContain(" …");
 		} finally {
-			await fs.rm(tmpDir, { recursive: true, force: true });
+			await removeWithRetries(tmpDir);
 		}
 	});
 
@@ -412,5 +414,108 @@ describe("editToolRenderer", () => {
 		expect(lines.every(line => visibleWidth(line) === 48)).toBe(true);
 		expect(lines[1]).toStartWith("│+1│");
 		expect(lines[1]).not.toStartWith("│ +1│");
+	});
+
+	it("does not leak the first file's no-change preview into a multi-file delete result", async () => {
+		const uiTheme = await getUiTheme();
+		const paths = ["scripts/a.ts", "scripts/a.user.md", "scripts/a.system.md"];
+		const component = editToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: paths.map(p => `Deleted ${p}`).join("\n") }],
+				details: {
+					diff: "",
+					perFileResults: paths.map(path => ({ path, diff: "", op: "delete" as const, oldText: "x\n" })),
+				},
+			},
+			{
+				expanded: false,
+				isPartial: false,
+				renderContext: {
+					editMode: "hashline",
+					// The streaming preview only ever holds the first file's result; a
+					// delete card must not fall back to it (issue: every card showed
+					// "No changes would be made to <first file>").
+					editDiffPreview: { error: "No changes would be made to scripts/a.ts." },
+				},
+			},
+			uiTheme,
+		);
+
+		const rendered = Bun.stripANSI(component.render(160).join("\n"));
+		expect(rendered).not.toContain("No changes would be made");
+		for (const path of paths) expect(rendered).toContain(path);
+	});
+
+	it("renders a move-only result as source → destination with no diff body", async () => {
+		const uiTheme = await getUiTheme();
+		const component = editToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "Moved a.ts to b.ts" }],
+				details: { diff: "", op: "update", path: "b.ts", move: "b.ts", sourcePath: "a.ts" },
+			},
+			{
+				expanded: false,
+				isPartial: false,
+				renderContext: {
+					editMode: "hashline",
+					editDiffPreview: { error: "No changes would be made to other.ts." },
+				},
+			},
+			uiTheme,
+			{ input: "[a.ts#1a2b]\nMV b.ts" },
+		);
+
+		const header = Bun.stripANSI(component.render(160)[0]);
+		// Header shows the move as source → destination, not the buggy dest → dest.
+		expect(header).toContain("a.ts");
+		expect(header).toContain("b.ts");
+		expect(header).toContain("→");
+		expect(Bun.stripANSI(component.render(160).join("\n"))).not.toContain("No changes");
+	});
+
+	it("uses the result's own path for a genuine no-op, not the shared preview", async () => {
+		const uiTheme = await getUiTheme();
+		const component = editToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "no change" }],
+				details: { diff: "", op: "update", path: "scripts/real.ts" },
+			},
+			{
+				expanded: false,
+				isPartial: false,
+				renderContext: {
+					editMode: "hashline",
+					editDiffPreview: { error: "No changes would be made to scripts/WRONG.ts." },
+				},
+			},
+			uiTheme,
+			{ file_path: "scripts/real.ts" },
+		);
+
+		const rendered = Bun.stripANSI(component.render(160).join("\n"));
+		expect(rendered).toContain("No changes were made");
+		expect(rendered).toContain("scripts/real.ts");
+		expect(rendered).not.toContain("WRONG");
+	});
+
+	it("renders the delete gallery fixture as a Delete card without a no-change body", async () => {
+		await getUiTheme();
+		const text = (await renderGalleryState("edit_delete", resolveFixture("edit_delete"), "success", 160))
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(text).toContain("Delete");
+		expect(text).toContain("scripts/prune-changelogs.ts");
+		expect(text).not.toContain("No changes");
+	});
+
+	it("renders the move gallery fixture as source → destination", async () => {
+		await getUiTheme();
+		const text = (await renderGalleryState("edit_move", resolveFixture("edit_move"), "success", 160))
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(text).toContain("scripts/prune-changelogs.ts");
+		expect(text).toContain("scripts/archived/prune-changelogs.ts");
+		expect(text).toContain("→");
+		expect(text).not.toContain("No changes");
 	});
 });

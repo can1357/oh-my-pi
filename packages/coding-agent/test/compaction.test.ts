@@ -5,7 +5,9 @@ import {
 	type CompactionSettings,
 	calculateContextTokens,
 	compact,
+	compactionContextTokens,
 	DEFAULT_COMPACTION_SETTINGS,
+	estimateTokens,
 	findCutPoint,
 	getLastAssistantUsage,
 	prepareCompaction,
@@ -284,6 +286,74 @@ describe("shouldCompact", () => {
 		};
 
 		expect(shouldCompact(95000, 100000, settings)).toBe(false);
+	});
+});
+
+describe("compactionContextTokens", () => {
+	it("floors deflated provider usage by the stored-conversation estimate", () => {
+		// A before_provider_request compression extension (e.g. Headroom) shrinks the
+		// request, so the provider reports far fewer prompt tokens than the real
+		// stored conversation. The compaction decision must use the larger value.
+		expect(compactionContextTokens(20_000, 90_000)).toBe(90_000);
+	});
+
+	it("keeps provider usage when it already exceeds the local estimate", () => {
+		// Without compression the provider count is ground truth and typically >= the
+		// cl100k local estimate; the floor must never lower it.
+		expect(compactionContextTokens(85_000, 80_000)).toBe(85_000);
+	});
+
+	it("clamps negative inputs to zero", () => {
+		expect(compactionContextTokens(-5, -10)).toBe(0);
+		expect(compactionContextTokens(-5, 100)).toBe(100);
+	});
+
+	it("lets a deflated provider count still trigger compaction via the floor", () => {
+		const settings: CompactionSettings = { enabled: true, reserveTokens: 10000, keepRecentTokens: 20000 };
+		// Post-compression provider count is under threshold — raw, it would NOT compact.
+		expect(shouldCompact(20_000, 100_000, settings)).toBe(false);
+		// Floored by the real stored-conversation estimate (95k) it correctly compacts.
+		expect(shouldCompact(compactionContextTokens(20_000, 95_000), 100_000, settings)).toBe(true);
+	});
+});
+
+describe("estimateTokens excludeEncryptedReasoning (compaction floor)", () => {
+	it("drops encrypted reasoning from the floor estimate but counts it by default", () => {
+		const blob = "blob ".repeat(8_000); // large opaque encrypted-reasoning payload
+		const msg: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "short", thinkingSignature: blob },
+				{ type: "text", text: "done" },
+			],
+			usage: createMockUsage(0, 0),
+			stopReason: "stop",
+			timestamp: Date.now(),
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5.5",
+		};
+		const withBlob = estimateTokens(msg);
+		const flooredEstimate = estimateTokens(msg, { excludeEncryptedReasoning: true });
+		// Default counts the blob (providers bill it on replay); the floor excludes it,
+		// so a thinking-heavy turn can't falsely trip compaction on local byte size.
+		expect(withBlob).toBeGreaterThan(flooredEstimate + 1_000);
+		expect(flooredEstimate).toBeLessThan(50); // just "short" + "done"
+	});
+
+	it("still counts tool-result text (the content on-wire compression shrinks)", () => {
+		const big = "alpha beta gamma ".repeat(2_000);
+		const toolMsg = {
+			role: "toolResult",
+			toolCallId: "t1",
+			toolName: "read",
+			content: [{ type: "text", text: big }],
+			timestamp: Date.now(),
+		} as unknown as AgentMessage;
+		// Even with the floor option, tool-result content is fully counted — that is
+		// exactly what a before_provider_request compressor (e.g. Headroom) shrinks,
+		// so the floor must still see its real size.
+		expect(estimateTokens(toolMsg, { excludeEncryptedReasoning: true })).toBeGreaterThan(1_000);
 	});
 });
 
@@ -716,6 +786,230 @@ describe("remote compaction setting", () => {
 
 		expect(result.preserveData).toEqual({ otherState: "keep-me" });
 	});
+
+	it("summarizes snapcompact archive text locally and stops carrying frames", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected anthropic/claude-sonnet-4-5 model to exist");
+
+		const oldUser = createMessageEntry(createUserMessage("Archived turn"));
+		const oldAssistant = createMessageEntry(createAssistantMessage("Archived answer"));
+		const previousCompaction = createCompactionEntry("Snapcompact frame summary", oldAssistant.id);
+		previousCompaction.preserveData = {
+			otherState: "keep-me",
+			snapcompact: {
+				frames: [{ data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 4 }],
+				totalChars: 31,
+				truncatedChars: 0,
+				text: "Archived snapcompact source",
+			},
+		};
+
+		const entries: SessionEntry[] = [
+			oldUser,
+			oldAssistant,
+			previousCompaction,
+			createMessageEntry(createUserMessage("Turn 1")),
+			createMessageEntry(createAssistantMessage("Answer 1", createMockUsage(0, 100, 4000, 0))),
+			createMessageEntry(createUserMessage("Turn 2")),
+			createMessageEntry(createAssistantMessage("Answer 2", createMockUsage(0, 100, 9000, 0))),
+		];
+
+		const preparation = prepareCompaction(entries, {
+			...DEFAULT_COMPACTION_SETTINGS,
+			keepRecentTokens: 1000,
+			remoteEnabled: true,
+		});
+		if (!preparation) throw new Error("Expected compaction preparation");
+
+		const completeSimpleSpy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(createAssistantMessage("History summary"));
+
+		const result = await compact(preparation, model, "test-api-key");
+		const promptText = completeSimpleSpy.mock.calls
+			.map(call => {
+				const context = call[1] as { messages?: Array<{ content?: Array<{ text?: string }> }> };
+				return context.messages?.[0]?.content?.[0]?.text ?? "";
+			})
+			.join("\n");
+
+		expect(promptText).toContain("Previous snapcompact archive source text:");
+		expect(promptText).toContain("Archived snapcompact source");
+		expect(result.preserveData).toEqual({ otherState: "keep-me" });
+	});
+
+	it("keeps snapcompact archive text when only split-turn prefix is summarized", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected anthropic/claude-sonnet-4-5 model to exist");
+
+		const oldUser = createMessageEntry(createUserMessage("Archived turn"));
+		const oldAssistant = createMessageEntry(createAssistantMessage("Archived answer"));
+		const previousCompaction = createCompactionEntry("Split snapcompact frame summary", oldAssistant.id);
+		previousCompaction.preserveData = {
+			otherState: "keep-me",
+			snapcompact: {
+				frames: [{ data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 4 }],
+				totalChars: 34,
+				truncatedChars: 0,
+				text: "Archived split snapcompact source",
+			},
+		};
+
+		const entries: SessionEntry[] = [
+			oldUser,
+			oldAssistant,
+			previousCompaction,
+			createMessageEntry(createUserMessage("Turn after archive")),
+			createMessageEntry(createAssistantMessage("Prefix answer")),
+			createMessageEntry(createAssistantMessage("Kept answer")),
+		];
+
+		const preparation = prepareCompaction(entries, {
+			...DEFAULT_COMPACTION_SETTINGS,
+			keepRecentTokens: 1,
+			remoteEnabled: true,
+		});
+		if (!preparation) throw new Error("Expected compaction preparation");
+		expect(preparation.isSplitTurn).toBe(true);
+		expect(preparation.messagesToSummarize).toHaveLength(0);
+		expect(preparation.turnPrefixMessages.length).toBeGreaterThan(0);
+
+		const completeSimpleSpy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(createAssistantMessage("Archived history summary"))
+			.mockResolvedValueOnce(createAssistantMessage("Turn prefix summary"))
+			.mockResolvedValueOnce(createAssistantMessage("Short summary"));
+
+		const result = await compact(preparation, model, "test-api-key");
+		const promptText = completeSimpleSpy.mock.calls
+			.map(call => {
+				const context = call[1] as { messages?: Array<{ content?: Array<{ text?: string }> }> };
+				return context.messages?.[0]?.content?.[0]?.text ?? "";
+			})
+			.join("\n");
+
+		expect(promptText).toContain("Archived split snapcompact source");
+		expect(result.summary).toContain("Archived history summary");
+		expect(result.summary).toContain("Turn prefix summary");
+		expect(result.summary).not.toContain("Archived split snapcompact source");
+		expect(result.summary).not.toContain("No prior history.");
+		expect(result.preserveData).toEqual({ otherState: "keep-me" });
+	});
+
+	it("strips legacy frame-only snapcompact archives during local compaction", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected anthropic/claude-sonnet-4-5 model to exist");
+
+		const oldUser = createMessageEntry(createUserMessage("Archived turn"));
+		const oldAssistant = createMessageEntry(createAssistantMessage("Archived answer"));
+		const previousCompaction = createCompactionEntry("Legacy snapcompact frame summary", oldAssistant.id);
+		previousCompaction.preserveData = {
+			otherState: "keep-me",
+			snapcompact: {
+				frames: [{ data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 4 }],
+				totalChars: 4,
+				truncatedChars: 0,
+			},
+		};
+
+		const entries: SessionEntry[] = [
+			oldUser,
+			oldAssistant,
+			previousCompaction,
+			createMessageEntry(createUserMessage("Turn 1")),
+			createMessageEntry(createAssistantMessage("Answer 1", createMockUsage(0, 100, 4000, 0))),
+			createMessageEntry(createUserMessage("Turn 2")),
+			createMessageEntry(createAssistantMessage("Answer 2", createMockUsage(0, 100, 9000, 0))),
+		];
+
+		const preparation = prepareCompaction(entries, {
+			...DEFAULT_COMPACTION_SETTINGS,
+			keepRecentTokens: 1000,
+			remoteEnabled: true,
+		});
+		if (!preparation) throw new Error("Expected compaction preparation");
+
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("History summary"));
+
+		const result = await compact(preparation, model, "test-api-key");
+
+		expect(result.preserveData).toEqual({ otherState: "keep-me" });
+	});
+
+	it("sends snapcompact archive text to OpenAI remote compaction and strips frames", async () => {
+		const model = getBundledModel("openai", "gpt-5.1");
+		if (!model) throw new Error("Expected openai/gpt-5.1 model to exist");
+
+		const oldUser = createMessageEntry(createUserMessage("Archived turn"));
+		const oldAssistant = createMessageEntry(createAssistantMessage("Archived answer"));
+		const previousCompaction = createCompactionEntry("Snapcompact frame summary", oldAssistant.id);
+		previousCompaction.preserveData = {
+			otherState: "keep-me",
+			snapcompact: {
+				frames: [{ data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 4 }],
+				totalChars: 38,
+				truncatedChars: 0,
+				text: "Archived remote snapcompact source",
+			},
+		};
+
+		const entries: SessionEntry[] = [
+			oldUser,
+			oldAssistant,
+			previousCompaction,
+			createMessageEntry(createUserMessage("Turn 1")),
+			createMessageEntry(createOpenAiAssistantMessage("Answer 1", model, createMockUsage(0, 100, 4000, 0))),
+			createMessageEntry(createUserMessage("Turn 2")),
+			createMessageEntry(createOpenAiAssistantMessage("Answer 2", model, createMockUsage(0, 100, 9000, 0))),
+		];
+
+		const preparation = prepareCompaction(entries, {
+			...DEFAULT_COMPACTION_SETTINGS,
+			keepRecentTokens: 1000,
+			remoteEnabled: true,
+		});
+		if (!preparation) throw new Error("Expected compaction preparation");
+
+		const remoteOutput = [
+			{ type: "message", role: "user", content: [{ type: "input_text", text: "Compacted retained user" }] },
+			{ type: "compaction", encrypted_content: "new_encrypted" },
+		];
+		const fetchHandler = vi.fn(
+			async (_input, _init) =>
+				new Response(JSON.stringify({ output: remoteOutput }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+		);
+		const fetchSpy = mockFetch(fetchHandler);
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("History summary"));
+
+		const result = await compact(preparation, model, "test-api-key", undefined, undefined, { fetch: fetchSpy });
+		const requestBody = JSON.parse(String(fetchHandler.mock.calls[0]?.[1]?.body)) as {
+			input: Array<{ type?: string; role?: string; content?: Array<{ type?: string; text?: string }> }>;
+		};
+		const archiveMessage = requestBody.input.find(
+			item =>
+				item.type === "message" &&
+				item.role === "user" &&
+				item.content?.some(
+					block =>
+						block.type === "input_text" &&
+						typeof block.text === "string" &&
+						block.text.includes("Archived remote snapcompact source"),
+				),
+		);
+
+		expect(archiveMessage).toBeDefined();
+		expect(result.preserveData).toEqual({
+			otherState: "keep-me",
+			openaiRemoteCompaction: {
+				provider: "openai",
+				replacementHistory: remoteOutput,
+				compactionItem: { type: "compaction", encrypted_content: "new_encrypted" },
+			},
+		});
+	});
 });
 
 describe("findCutPoint", () => {
@@ -864,6 +1158,58 @@ describe("buildSessionContext", () => {
 		// LLM context is untouched by the option: latest compaction replaces history.
 		const llm = buildSessionContext(entries);
 		expect(llm.messages.map(m => m.role)).toEqual(["compactionSummary", "user", "user"]);
+	});
+
+	it("transcript collapse option elides compacted display history", () => {
+		const u1 = createMessageEntry(createUserMessage("1"));
+		const a1 = createMessageEntry(createAssistantMessage("a"));
+		const compact1 = createCompactionEntry("First summary", u1.id);
+		const u2 = createMessageEntry(createUserMessage("2"));
+		const compact2 = createCompactionEntry("Second summary", u2.id);
+		const u3 = createMessageEntry(createUserMessage("3"));
+		const entries: SessionEntry[] = [u1, a1, compact1, u2, compact2, u3];
+
+		const transcript = buildSessionContext(entries, undefined, undefined, {
+			transcript: true,
+			collapseCompactedHistory: true,
+		});
+
+		expect(transcript.messages.map(m => m.role)).toEqual(["compactionSummary", "user", "user"]);
+		expect((transcript.messages[0] as { summary: string }).summary).toContain("Second summary");
+		expect(transcript.cacheMissExplainedAt).toEqual([false, false, false]);
+	});
+
+	it("keeps kept turns visible when collapsing a remote (OpenAI) compaction", () => {
+		const uOld = createMessageEntry(createUserMessage("old-before-keep"));
+		const uKept = createMessageEntry(createUserMessage("kept-user"));
+		const aKept = createMessageEntry(createAssistantMessage("kept-assistant"));
+		const compaction = createCompactionEntry("Remote summary", uKept.id);
+		compaction.preserveData = {
+			openaiRemoteCompaction: {
+				provider: "openai",
+				replacementHistory: [
+					{ type: "message", role: "user", content: [{ type: "input_text", text: "preserved" }] },
+					{ type: "compaction", encrypted_content: "enc" },
+				],
+				compactionItem: { type: "compaction", encrypted_content: "enc" },
+			},
+		};
+		const uAfter = createMessageEntry(createUserMessage("after-compact"));
+		const entries: SessionEntry[] = [uOld, uKept, aKept, compaction, uAfter];
+
+		const transcript = buildSessionContext(entries, undefined, undefined, {
+			transcript: true,
+			collapseCompactedHistory: true,
+		});
+
+		// The provider payload is attached to the summary for LLM replay only; the
+		// collapsed display must still emit the kept SessionEntry rows so a
+		// remotely-compacted session keeps its recent turns visible.
+		expect(transcript.messages.map(m => m.role)).toEqual(["compactionSummary", "user", "assistant", "user"]);
+		const dump = JSON.stringify(transcript.messages);
+		expect(dump).toContain("kept-user");
+		expect(dump).toContain("kept-assistant");
+		expect(dump).toContain("after-compact");
 	});
 
 	it("should handle multiple compactions (only latest matters)", () => {

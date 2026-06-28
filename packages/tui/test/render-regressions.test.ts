@@ -122,9 +122,12 @@ function rows(prefix: string, count: number): string[] {
 }
 
 async function settle(term: VirtualTerminal): Promise<void> {
-	const nextTick = Promise.withResolvers<void>();
-	process.nextTick(nextTick.resolve);
-	await nextTick.promise;
+	// The render scheduler defers its immediate hop with setImmediate (so queued
+	// stdin such as Esc is read before an ordinary render). Drain that hop so the
+	// throttled setTimeout(0) render is scheduled, let it fire, then flush.
+	const immediate = Promise.withResolvers<void>();
+	setImmediate(immediate.resolve);
+	await immediate.promise;
 	await Bun.sleep(1);
 	await term.flush();
 }

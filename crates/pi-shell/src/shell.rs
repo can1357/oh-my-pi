@@ -174,6 +174,35 @@ impl Shell {
 	pub async fn abort(&self) {
 		self.abort_state.abort().await;
 	}
+
+	/// Number of live background jobs (running `&`/`nohup` children) tracked by
+	/// the persistent session. Completed jobs are reaped first via a silent
+	/// `JobManager::poll()` (no job-control notifications), so the count
+	/// reflects only processes still alive. Returns 0 when no session core is
+	/// materialized. The host uses this to decide whether to retain a per-call
+	/// shell whose background children are still running instead of dropping it
+	/// (which would SIGKILL them on kill-on-drop).
+	pub async fn live_background_job_count(&self) -> u32 {
+		let mut guard = self.session.lock().await;
+		let Some(core) = guard.as_mut() else {
+			return 0;
+		};
+		let jobs = core.shell.jobs_mut();
+		// Fail closed: a poll error leaves the job table in an unknown state, so
+		// report 0 (drop the shell) rather than pin a retained session forever on
+		// stale `representative_pid()` entries.
+		if jobs.poll().is_err() {
+			return 0;
+		}
+		u32::try_from(
+			jobs
+				.jobs
+				.iter()
+				.filter(|job| job.representative_pid().is_some())
+				.count(),
+		)
+		.unwrap_or(u32::MAX)
+	}
 }
 
 pub async fn execute_shell(
@@ -490,10 +519,33 @@ async fn create_session(config: &ShellConfig) -> Result<ShellSessionCore> {
 	}
 	shell.register_builtin("sleep", builtins::builtin::<SleepCommand, _>());
 	shell.register_builtin("timeout", builtins::builtin::<TimeoutCommand, _>());
-	shell.register_builtin(
-		"nohup",
-		builtins::builtin::<NohupCommand, _>().transparent_background_wrapper(),
-	);
+	// In-process uutils-backed builtins (vendored + patched): consistent,
+	// cross-platform implementations that run without spawning a process and
+	// resolve paths against the shell working directory. The whole set can be
+	// disabled (falling back to system binaries) via PI_DISABLE_UUTILS_BUILTINS;
+	// the destructive pair additionally honors PI_DISABLE_UUTILS_DESTRUCTIVE.
+	if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_BUILTINS") {
+		shell.register_builtin("mkdir", crate::coreutils::mkdir_builtin());
+		shell.register_builtin("head", crate::coreutils::head_builtin());
+		shell.register_builtin("tail", crate::coreutils::tail_builtin());
+		shell.register_builtin("wc", crate::coreutils::wc_builtin());
+		shell.register_builtin("sort", crate::coreutils::sort_builtin());
+		shell.register_builtin("ls", crate::coreutils::ls_builtin());
+		shell.register_builtin("find", crate::coreutils::find_builtin());
+		shell.register_builtin("grep", crate::coreutils::grep_builtin());
+		shell.register_builtin("rg", crate::coreutils::rg_builtin());
+		shell.register_builtin("fd", crate::fd::fd_builtin());
+		shell.register_builtin("cat", crate::coreutils::cat_builtin());
+		shell.register_builtin("uniq", crate::coreutils::uniq_builtin());
+		if !uutils_env_disabled(config, "PI_DISABLE_UUTILS_DESTRUCTIVE") {
+			if !uutils_env_disabled(config, "PI_DISABLE_RM_BUILTIN") {
+				shell.register_builtin("rm", crate::coreutils::rm_builtin());
+			}
+			if !uutils_env_disabled(config, "PI_DISABLE_MV_BUILTIN") {
+				shell.register_builtin("mv", crate::coreutils::mv_builtin());
+			}
+		}
+	}
 
 	let mut merged_path: Option<String> = None;
 	for (key, value) in std::env::vars() {
@@ -523,8 +575,8 @@ async fn create_session(config: &ShellConfig) -> Result<ShellSessionCore> {
 		merged_path = Some(value.to_string_lossy().into_owned());
 	}
 
-	if let Some(path_value) = merged_path {
-		let mut var = ShellVariable::new(ShellValue::String(path_value));
+	if let Some(path_value) = &merged_path {
+		let mut var = ShellVariable::new(ShellValue::String(path_value.clone()));
 		var.export();
 		shell
 			.env_mut()
@@ -547,6 +599,27 @@ async fn create_session(config: &ShellConfig) -> Result<ShellSessionCore> {
 		}
 	}
 	apply_env_fallback(&mut shell)?;
+	// The nohup builtin detaches its operand into a new session (see
+	// NohupCommand) so a backgrounded server survives this embedded shell's
+	// kill-on-drop teardown. It therefore shadows any system `nohup` (which does
+	// NOT escape the process-group kill) — unless explicitly opted out via
+	// PI_DISABLE_NOHUP_BUILTIN (session env or process env), in which case bare
+	// `nohup` resolves to the real coreutils binary.
+	let nohup_builtin_disabled = {
+		let raw = config
+			.session_env
+			.as_ref()
+			.and_then(|env| env.get("PI_DISABLE_NOHUP_BUILTIN").cloned())
+			.or_else(|| std::env::var("PI_DISABLE_NOHUP_BUILTIN").ok());
+		matches!(raw.as_deref(), Some(v) if !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+	};
+	let should_register_nohup = !nohup_builtin_disabled;
+	if should_register_nohup {
+		shell.register_builtin(
+			"nohup",
+			builtins::builtin::<NohupCommand, _>().transparent_background_wrapper(),
+		);
+	}
 
 	#[cfg(windows)]
 	configure_windows_path(&mut shell)?;
@@ -1887,18 +1960,16 @@ impl builtins::Command for NohupCommand {
 				return Ok(ExecutionResult::new(125));
 			}
 
-			// Deliberately *not* nohup: we neither ignore SIGHUP nor detach the
-			// child into a new session. The command runs as an ordinary brush
-			// descendant so it is reaped together with the host instead of
-			// lingering as an orphan once the host process goes away. Agents
-			// reach for `nohup` assuming the shell is one-shot; in this
-			// persistent embedded shell that assumption is wrong and the only
-			// effect of real `nohup` would be to leak background processes.
-			//
-			// coreutils `nohup` additionally redirects stdin from /dev/null and
-			// stdout/stderr to `nohup.out`, but *only* when those streams are
-			// terminals. The embedded host always hands commands a pipe with a
-			// /dev/null stdin, so none of that redirection ever applies here.
+			// `nohup <cmd>` (foreground) runs the operand directly and surfaces its
+			// exit status — the contract pinned by
+			// `nohup_builtin_propagates_command_exit_code`. Persistence across the
+			// host's teardown is a *background* concern that never reaches this
+			// builtin: the agent writes `nohup <server> &`, and brush's
+			// `transparent_background_wrapper` unwraps that to spawn the operand
+			// directly with `detach_reparent`, double-forking it out of the shell's
+			// descendant tree (see `execute_external_command` / `detach_session_reparent`).
+			// Like coreutils, we run the operand here; we only differ by not masking
+			// SIGHUP (see `nohup_builtin_does_not_mask_sighup`).
 			let mut command_line = String::new();
 			for (idx, arg) in command.iter().enumerate() {
 				if idx > 0 {
@@ -1907,7 +1978,8 @@ impl builtins::Command for NohupCommand {
 				command_line.push_str(&quote_arg(arg));
 			}
 
-			let params = context.params.clone();
+			let mut params = context.params.clone();
+			params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
 			let source_info = SourceInfo::from("pi-natives:nohup");
 			context
 				.shell
@@ -1954,9 +2026,830 @@ fn quote_arg(arg: &str) -> String {
 	format!("'{escaped}'")
 }
 
+/// Reads a boolean "disable" flag for the uutils builtins from the session
+/// environment (preferred) then the process environment, mirroring the nohup
+/// builtin gate. Truthy = present and not "", "0", or "false".
+fn uutils_env_disabled(config: &ShellConfig, key: &str) -> bool {
+	let raw = config
+		.session_env
+		.as_ref()
+		.and_then(|env| env.get(key).cloned())
+		.or_else(|| std::env::var(key).ok());
+	matches!(raw.as_deref(), Some(value) if !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false"))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The uutils-backed `mkdir` builtin must (1) create directories under the
+	/// shell's working directory rather than the host process cwd, (2) route
+	/// `-v` output through the command's (here redirected) stdout, and (3)
+	/// display the original operand, not the resolved absolute path.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_mkdir_resolves_cwd_and_displays_operand() {
+		let tmp = std::env::temp_dir().join(format!("pi-mkdir-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+		let tmp_str = tmp.to_str().expect("utf8 temp path");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("set cwd");
+
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+
+		let source_info = SourceInfo::from("pi-natives:test");
+		let exec = session
+			.shell
+			.run_string("mkdir -v -p a/b/c rel > out.txt", &source_info, &params)
+			.await
+			.expect("run_string");
+		assert!(matches!(exec.exit_code, ExecutionExitCode::Success), "exit {}", exit_code(&exec));
+
+		// (1) created under the shell working dir, and (2) not leaked into the
+		// host process cwd.
+		assert!(tmp.join("a/b/c").is_dir(), "nested dirs not created under shell cwd");
+		assert!(tmp.join("rel").is_dir(), "rel not created under shell cwd");
+		assert!(!std::path::Path::new("a/b/c").exists(), "mkdir leaked into process cwd");
+
+		// (2)+(3): -v output reached the redirected file, names the operand, and
+		// does not leak the absolute resolved path.
+		let out = std::fs::read_to_string(tmp.join("out.txt")).expect("out.txt");
+		assert!(out.contains("'rel'"), "verbose output missing operand `rel`: {out:?}");
+		assert!(!out.contains(tmp_str), "verbose output leaked absolute path: {out:?}");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// `mkdir --help` and an invalid flag must be handled in-process: rendered
+	/// to the command streams and returned as an exit code. The upstream
+	/// `uumain` parser calls `std::process::exit`, which would terminate the
+	/// whole host (and this test binary); reaching the asserts proves the
+	/// vendored `run` entry point bypasses that path.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_mkdir_help_and_bad_flag_do_not_exit_process() {
+		let tmp = std::env::temp_dir().join(format!("pi-mkdir-help-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+		let tmp_str = tmp.to_str().expect("utf8 temp path");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("set cwd");
+
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		let help = session
+			.shell
+			.run_string("mkdir --help > help.txt", &source_info, &params)
+			.await
+			.expect("run_string help");
+		assert_eq!(exit_code(&help), 0, "mkdir --help should succeed");
+		let help_text = std::fs::read_to_string(tmp.join("help.txt")).expect("help.txt");
+		assert!(help_text.contains("mkdir"), "help text missing util name: {help_text:?}");
+
+		let bad = session
+			.shell
+			.run_string("mkdir --no-such-flag 2> err.txt", &source_info, &params)
+			.await
+			.expect("run_string bad flag");
+		assert_ne!(exit_code(&bad), 0, "invalid flag should be a usage error");
+		let err_text = std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt");
+		assert!(!err_text.is_empty(), "usage error should be reported to stderr");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// The uutils-backed `head` builtin must read piped stdin through the
+	/// context, read file operands resolved against the shell working directory,
+	/// honor the obsolete `-NUM` syntax, and write to the command's (here
+	/// redirected) stdout.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_head_streams_stdin_and_reads_files() {
+		let tmp = std::env::temp_dir().join(format!("pi-head-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+		std::fs::write(tmp.join("data.txt"), "l1\nl2\nl3\nl4\nl5\n").expect("write data");
+		let tmp_str = tmp.to_str().expect("utf8 temp path");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("set cwd");
+
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		// File operand, resolved against the shell working directory.
+		let f = session
+			.shell
+			.run_string("head -2 data.txt > out_file.txt", &source_info, &params)
+			.await
+			.expect("run_string file");
+		assert_eq!(exit_code(&f), 0, "head file read should succeed");
+		assert_eq!(std::fs::read_to_string(tmp.join("out_file.txt")).unwrap(), "l1\nl2\n");
+
+		// Piped stdin (head is the final stage; reads the pipe through the ctx).
+		let p = session
+			.shell
+			.run_string("printf 'a\\nb\\nc\\nd\\n' | head -2 > out_pipe.txt", &source_info, &params)
+			.await
+			.expect("run_string pipe");
+		assert_eq!(exit_code(&p), 0, "head stdin read should succeed");
+		assert_eq!(std::fs::read_to_string(tmp.join("out_pipe.txt")).unwrap(), "a\nb\n");
+
+		// Obsolete `-NUM` syntax, normalized by arg_iterate.
+		let o = session
+			.shell
+			.run_string("printf '1\\n2\\n3\\n' | head -1 > out_obs.txt", &source_info, &params)
+			.await
+			.expect("run_string obsolete");
+		assert_eq!(exit_code(&o), 0, "head -1 should succeed");
+		assert_eq!(std::fs::read_to_string(tmp.join("out_obs.txt")).unwrap(), "1\n");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// `head --help` / invalid flag must be handled in-process (rendered to the
+	/// command streams, returned as an exit code) — head has its own `run`
+	/// entry point bypassing uutils' process-exiting parser, and literalized
+	/// help strings.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_head_help_and_bad_flag_do_not_exit_process() {
+		let tmp = std::env::temp_dir().join(format!("pi-head-help-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+		let tmp_str = tmp.to_str().expect("utf8 temp path");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("set cwd");
+
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		let help = session
+			.shell
+			.run_string("head --help > help.txt", &source_info, &params)
+			.await
+			.expect("run_string head help");
+		assert_eq!(exit_code(&help), 0, "head --help should succeed");
+		let help_text = std::fs::read_to_string(tmp.join("help.txt")).expect("help.txt");
+		assert!(help_text.contains("first"), "help text not localized: {help_text:?}");
+
+		let bad = session
+			.shell
+			.run_string("head --no-such-flag 2> err.txt", &source_info, &params)
+			.await
+			.expect("run_string head bad flag");
+		assert_ne!(exit_code(&bad), 0, "invalid flag should be a usage error");
+		assert!(
+			!std::fs::read_to_string(tmp.join("err.txt"))
+				.expect("err.txt")
+				.is_empty()
+		);
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// Smoke-test the read-only uutils filter/listing builtins end-to-end
+	/// through the shell: piped stdin (sort/wc/tail), file reads + cwd
+	/// resolution (grep/ls/find), and redirected stdout capture.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_filters_listing_find_grep() {
+		let tmp = std::env::temp_dir().join(format!("pi-utils-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(tmp.join("sub")).expect("temp dirs");
+		std::fs::write(tmp.join("data.txt"), "foo\nbar\nbaz\n").expect("data");
+		std::fs::write(tmp.join("sub/nested.txt"), "deep\n").expect("nested");
+		let tmp_str = tmp.to_str().expect("utf8");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+		let si = SourceInfo::from("pi-natives:test");
+		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
+
+		// sort: reads piped stdin, parallel sort, writes sorted output.
+		session
+			.shell
+			.run_string("printf 'c\\na\\nb\\n' | sort > sort.txt", &si, &params)
+			.await
+			.expect("sort");
+		assert_eq!(read("sort.txt"), "a\nb\nc\n");
+		// wc -l: line count from stdin.
+		session
+			.shell
+			.run_string("printf 'x\\ny\\nz\\n' | wc -l > wc.txt", &si, &params)
+			.await
+			.expect("wc");
+		assert_eq!(read("wc.txt").trim(), "3");
+		// tail: last N lines from stdin.
+		session
+			.shell
+			.run_string("printf '1\\n2\\n3\\n4\\n' | tail -2 > tail.txt", &si, &params)
+			.await
+			.expect("tail");
+		assert_eq!(read("tail.txt"), "3\n4\n");
+		// grep: matching lines from a cwd-resolved file (single file => no prefix).
+		session
+			.shell
+			.run_string("grep ba data.txt > grep.txt", &si, &params)
+			.await
+			.expect("grep");
+		assert_eq!(read("grep.txt"), "bar\nbaz\n");
+		// ls: non-tty listing of the cwd.
+		session
+			.shell
+			.run_string("ls > ls.txt", &si, &params)
+			.await
+			.expect("ls");
+		let ls = read("ls.txt");
+		assert!(ls.contains("data.txt") && ls.contains("sub"), "ls output: {ls:?}");
+		// find: recursive name match. Paths must keep the `.` operand prefix
+		// (GNU/BSD contract) instead of leaking the working-dir-resolved absolute
+		// root the walk is physically rooted at.
+		session
+			.shell
+			.run_string("find . -name '*.txt' > find.txt", &si, &params)
+			.await
+			.expect("find");
+		let found = read("find.txt");
+		assert!(!found.trim().is_empty(), "find produced no output");
+		for line in found.lines() {
+			assert!(
+				line.starts_with("./"),
+				"find path is not operand-relative: {line:?} (full: {found:?})"
+			);
+		}
+		assert!(
+			found.contains("./data.txt") && found.contains("./sub/nested.txt"),
+			"find output: {found:?}"
+		);
+		// cat: concatenate a cwd-resolved file with -n line numbering.
+		session
+			.shell
+			.run_string("cat -n data.txt > cat.txt", &si, &params)
+			.await
+			.expect("cat");
+		assert_eq!(read("cat.txt"), "     1\tfoo\n     2\tbar\n     3\tbaz\n");
+		// uniq: collapse adjacent duplicate lines from piped stdin.
+		session
+			.shell
+			.run_string("printf 'a\\na\\nb\\nb\\nb\\nc\\n' | uniq > uniq.txt", &si, &params)
+			.await
+			.expect("uniq");
+		assert_eq!(read("uniq.txt"), "a\nb\nc\n");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// `rg` is not an alias for `grep`: it recurses by default, respects
+	/// ripgrep's ignore/hidden/binary filters, and keeps `-h` as help.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn rg_builtin_uses_ripgrep_defaults() {
+		let tmp = std::env::temp_dir().join(format!("pi-rg-defaults-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(tmp.join("sub")).expect("sub dir");
+		std::fs::create_dir_all(tmp.join(".git")).expect("git dir");
+		std::fs::write(tmp.join("data.txt"), "alpha\nneedle\n").expect("data");
+		std::fs::write(tmp.join("sub/nested.txt"), "needle\n").expect("nested");
+		std::fs::write(tmp.join(".hidden.txt"), "needle\n").expect("hidden");
+		std::fs::write(tmp.join("ignored.log"), "needle\n").expect("ignored");
+		std::fs::write(tmp.join(".gitignore"), "ignored.log\n").expect("gitignore");
+		std::fs::write(tmp.join("binary.bin"), b"needle\0hidden\n").expect("binary");
+		let tmp_str = tmp.to_str().expect("utf8");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+		let si = SourceInfo::from("pi-natives:test");
+		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
+
+		let exec = session
+			.shell
+			.run_string("rg needle > rg.txt", &si, &params)
+			.await
+			.expect("rg");
+		assert_eq!(exit_code(&exec), 0, "rg recursive search should match");
+		let out = read("rg.txt");
+		assert!(out.contains("data.txt:needle"), "rg missed visible file: {out:?}");
+		assert!(out.contains("sub/nested.txt:needle"), "rg missed nested file: {out:?}");
+		assert!(!out.contains(".hidden.txt"), "rg searched hidden file by default: {out:?}");
+		assert!(!out.contains("ignored.log"), "rg ignored .gitignore by default: {out:?}");
+		assert!(!out.contains("binary.bin"), "rg printed binary file by default: {out:?}");
+
+		let single = session
+			.shell
+			.run_string("rg -nH needle data.txt > single.txt", &si, &params)
+			.await
+			.expect("rg single");
+		assert_eq!(exit_code(&single), 0, "rg explicit file should match");
+		assert_eq!(read("single.txt"), "data.txt:2:needle\n");
+
+		let explicit_binary = session
+			.shell
+			.run_string("rg needle binary.bin > explicit-binary.txt", &si, &params)
+			.await
+			.expect("rg explicit binary");
+		assert_eq!(exit_code(&explicit_binary), 0, "explicit binary file should be searched");
+		assert_eq!(read("explicit-binary.txt"), "needle\n");
+
+		let help = session
+			.shell
+			.run_string("rg -h > help.txt", &si, &params)
+			.await
+			.expect("rg help");
+		assert_eq!(exit_code(&help), 0, "rg -h should be help, not no-filename");
+		assert!(
+			read("help.txt").contains("ripgrep recursively searches"),
+			"help text should describe ripgrep"
+		);
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// `fd` recurses from the shell working directory, respects hidden and
+	/// ignore filters (including `.fdignore`), preserves explicit search-path
+	/// prefixes, and renders help to stdout with a success status.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn fd_builtin_uses_fd_defaults() {
+		let tmp = std::env::temp_dir().join(format!("pi-fd-defaults-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(tmp.join("sub")).expect("sub dir");
+		std::fs::create_dir_all(tmp.join(".git/info")).expect("git info dir");
+		std::fs::write(tmp.join("needle.txt"), "visible\n").expect("visible");
+		std::fs::write(tmp.join("sub/needle.rs"), "nested\n").expect("nested");
+		std::fs::write(tmp.join(".hidden-needle.txt"), "hidden\n").expect("hidden");
+		std::fs::write(tmp.join("ignored-needle.log"), "ignored\n").expect("ignored");
+		std::fs::write(tmp.join("excluded-needle.vcs"), "excluded\n").expect("excluded");
+		std::fs::write(tmp.join("fdignored-needle.tmp"), "fdignored\n").expect("fdignored");
+		std::fs::write(tmp.join(".gitignore"), "ignored-needle.log\n").expect("gitignore");
+		std::fs::write(tmp.join(".git/info/exclude"), "excluded-needle.vcs\n").expect("exclude");
+		std::fs::write(tmp.join(".fdignore"), "fdignored-needle.tmp\n").expect("fdignore");
+		let tmp_str = tmp.to_str().expect("utf8");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+		let si = SourceInfo::from("pi-natives:test");
+		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
+
+		let exec = session
+			.shell
+			.run_string("fd needle > fd.txt", &si, &params)
+			.await
+			.expect("fd");
+		assert_eq!(exit_code(&exec), 0, "fd should match visible files");
+		let out = read("fd.txt");
+		assert!(out.contains("needle.txt"), "fd missed visible file: {out:?}");
+		assert!(out.contains("sub/needle.rs"), "fd missed nested file: {out:?}");
+		assert!(!out.contains(".hidden-needle.txt"), "fd searched hidden file: {out:?}");
+		assert!(!out.contains("ignored-needle.log"), "fd ignored .gitignore: {out:?}");
+		assert!(!out.contains("fdignored-needle.tmp"), "fd ignored .fdignore: {out:?}");
+		assert!(!out.contains("excluded-needle.vcs"), "fd ignored .git/info/exclude: {out:?}");
+
+		session
+			.shell
+			.run_string("fd -u needle > unrestricted.txt", &si, &params)
+			.await
+			.expect("fd -u");
+		let unrestricted = read("unrestricted.txt");
+		assert!(unrestricted.contains(".hidden-needle.txt"), "-u should include hidden files");
+		assert!(unrestricted.contains("ignored-needle.log"), "-u should include gitignored files");
+		assert!(unrestricted.contains("fdignored-needle.tmp"), "-u should include fdignored files");
+
+		session
+			.shell
+			.run_string("fd --no-ignore-vcs needle > no-ignore-vcs.txt", &si, &params)
+			.await
+			.expect("fd --no-ignore-vcs");
+		let no_ignore_vcs = read("no-ignore-vcs.txt");
+		assert!(
+			no_ignore_vcs.contains("ignored-needle.log"),
+			"--no-ignore-vcs should include .gitignore matches"
+		);
+		assert!(
+			no_ignore_vcs.contains("excluded-needle.vcs"),
+			"--no-ignore-vcs should include .git/info/exclude matches"
+		);
+		assert!(
+			!no_ignore_vcs.contains("fdignored-needle.tmp"),
+			"--no-ignore-vcs must still respect .fdignore"
+		);
+
+		session
+			.shell
+			.run_string("fd --glob '*.rs' sub > glob.txt", &si, &params)
+			.await
+			.expect("fd glob");
+		assert_eq!(read("glob.txt"), "sub/needle.rs\n");
+
+		let no_match = session
+			.shell
+			.run_string("fd definitely-absent > no-match.txt", &si, &params)
+			.await
+			.expect("fd no match");
+		assert_eq!(exit_code(&no_match), 0, "ordinary fd no-match should still succeed");
+		assert_eq!(read("no-match.txt"), "");
+
+		let quiet_miss = session
+			.shell
+			.run_string("fd -q definitely-absent > quiet-miss.txt", &si, &params)
+			.await
+			.expect("fd quiet miss");
+		assert_eq!(exit_code(&quiet_miss), 1, "quiet fd no-match should fail");
+		assert_eq!(read("quiet-miss.txt"), "");
+
+		let quiet_hit = session
+			.shell
+			.run_string("fd -q needle > quiet-hit.txt", &si, &params)
+			.await
+			.expect("fd quiet hit");
+		assert_eq!(exit_code(&quiet_hit), 0, "quiet fd match should succeed");
+		assert_eq!(read("quiet-hit.txt"), "");
+
+		let help = session
+			.shell
+			.run_string("fd --help > help.txt 2> help.err", &si, &params)
+			.await
+			.expect("fd help");
+		assert_eq!(exit_code(&help), 0, "fd help should succeed");
+		assert!(read("help.txt").contains("A program to find entries in your filesystem"));
+		assert_eq!(read("help.err"), "");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// Plain `rg PATTERN` uses the shell working directory when the host wired
+	/// stdin to null, but a real pipeline remains stdin input. Pattern stdin
+	/// (`-f -`) must not consume the implicit search path decision.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn rg_builtin_defaults_to_cwd_unless_stdin_is_pipeline() {
+		let tmp = std::env::temp_dir().join(format!("pi-rg-stdin-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+		std::fs::write(tmp.join("data.txt"), "from-cwd\nfrom-pattern\n").expect("data");
+		let tmp_str = tmp.to_str().expect("utf8");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+		let si = SourceInfo::from("pi-natives:test");
+		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
+
+		session
+			.shell
+			.run_string("rg from-cwd > cwd.txt", &si, &params)
+			.await
+			.expect("rg cwd");
+		assert_eq!(read("cwd.txt"), "data.txt:from-cwd\n");
+
+		session
+			.shell
+			.run_string("printf 'from-pipe\\n' | rg from-pipe > pipe.txt", &si, &params)
+			.await
+			.expect("rg pipe");
+		assert_eq!(read("pipe.txt"), "from-pipe\n");
+
+		session
+			.shell
+			.run_string("printf 'from-pattern\\n' | rg -f - > pattern.txt", &si, &params)
+			.await
+			.expect("rg pattern stdin");
+		assert_eq!(read("pattern.txt"), "data.txt:from-pattern\n");
+
+		session
+			.shell
+			.run_string("printf 'not-a-path\\n' | rg --files > files.txt", &si, &params)
+			.await
+			.expect("rg files");
+		let files = read("files.txt");
+		assert!(files.contains("data.txt"), "--files should list cwd files: {files:?}");
+		assert!(!files.contains("not-a-path"), "--files must not read piped stdin: {files:?}");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// `grep -q` must suppress all stdout and drive the exit status (0 on match,
+	/// 1 otherwise) so shell conditionals work; `-x` must anchor whole lines.
+	/// Mirrors busybox applet probing: `grep -qx "$applet" <(strings bin)`.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn grep_quiet_and_line_regexp() {
+		let tmp = std::env::temp_dir().join(format!("pi-grepq-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+		std::fs::write(tmp.join("data.txt"), "foo\nbar\nbaz\n").expect("data");
+		let tmp_str = tmp.to_str().expect("utf8");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+		let si = SourceInfo::from("pi-natives:test");
+		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
+
+		// -q: no stdout even on a match.
+		session
+			.shell
+			.run_string("grep -q ba data.txt > qout.txt", &si, &params)
+			.await
+			.expect("grep -q");
+		assert_eq!(read("qout.txt"), "", "-q must not print matches");
+		// -q exit code drives `&&` (match) and `||` (no match).
+		session
+			.shell
+			.run_string("grep -q ba data.txt && echo HIT > hit.txt", &si, &params)
+			.await
+			.expect("grep -q hit");
+		assert_eq!(read("hit.txt"), "HIT\n", "-q match must exit 0");
+		session
+			.shell
+			.run_string("grep -q zzz data.txt || echo MISS > miss.txt", &si, &params)
+			.await
+			.expect("grep -q miss");
+		assert_eq!(read("miss.txt"), "MISS\n", "-q no-match must exit 1");
+		// -qx: whole-line match succeeds on an exact line ...
+		session
+			.shell
+			.run_string("grep -qx bar data.txt && echo XHIT > xhit.txt", &si, &params)
+			.await
+			.expect("grep -qx hit");
+		assert_eq!(read("xhit.txt"), "XHIT\n", "-x must match a whole line");
+		// ... and fails on a substring that is not a whole line.
+		session
+			.shell
+			.run_string("grep -qx ba data.txt || echo XMISS > xmiss.txt", &si, &params)
+			.await
+			.expect("grep -qx miss");
+		assert_eq!(read("xmiss.txt"), "XMISS\n", "-x must reject a partial-line match");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// The destructive uutils builtins (`rm`, `mv`) must operate on paths
+	/// resolved against the shell working directory, not the host process cwd.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_rm_and_mv_operate_on_shell_cwd() {
+		let tmp = std::env::temp_dir().join(format!("pi-rmmv-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(tmp.join("tree/inner")).expect("tree");
+		std::fs::write(tmp.join("a.txt"), "hello").expect("a");
+		std::fs::write(tmp.join("tree/inner/leaf.txt"), "x").expect("leaf");
+		let tmp_str = tmp.to_str().expect("utf8");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+		let si = SourceInfo::from("pi-natives:test");
+
+		// mv: rename within the shell cwd.
+		let mv = session
+			.shell
+			.run_string("mv a.txt b.txt", &si, &params)
+			.await
+			.expect("mv");
+		assert_eq!(exit_code(&mv), 0, "mv should succeed");
+		assert!(!tmp.join("a.txt").exists(), "source should be gone");
+		assert_eq!(std::fs::read_to_string(tmp.join("b.txt")).unwrap(), "hello");
+
+		// rm -rf: recursive removal resolved against the shell cwd.
+		let rm = session
+			.shell
+			.run_string("rm -rf tree", &si, &params)
+			.await
+			.expect("rm");
+		assert_eq!(exit_code(&rm), 0, "rm -rf should succeed");
+		assert!(!tmp.join("tree").exists(), "tree should be removed");
+		// and the host process cwd must be untouched.
+		assert!(tmp.join("b.txt").exists());
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// Removing a nonexistent file must print exactly one diagnostic (like GNU
+	/// rm) and exit non-zero — not a second, message-less `rm:` line. Regression
+	/// guard: the in-process entry point used to re-print the status-only
+	/// `Err(1)` returned after `remove()` had already reported each failure.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_rm_missing_file_prints_single_diagnostic() {
+		let tmp = std::env::temp_dir().join(format!("pi-rm-missing-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+		let tmp_str = tmp.to_str().expect("utf8");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+		let si = SourceInfo::from("pi-natives:test");
+
+		let rm = session
+			.shell
+			.run_string("rm nonexistent.txt 2> err.txt", &si, &params)
+			.await
+			.expect("rm");
+		assert_ne!(exit_code(&rm), 0, "rm of a missing file must report failure");
+		let err = std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt");
+		let lines: Vec<&str> = err.lines().collect();
+		assert_eq!(lines.len(), 1, "rm should emit exactly one diagnostic line, got: {err:?}");
+		assert!(lines[0].contains("nonexistent.txt"), "diagnostic should name the file: {err:?}");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// The find display/match surface must use the operand-relative path while
+	/// filesystem actions still target the real (resolved) path: `-path` and
+	/// `-printf %p` see `./...`, while `-delete` removes the correct file.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_find_display_and_actions_split_paths() {
+		let tmp = std::env::temp_dir().join(format!("pi-find-split-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(tmp.join("sub")).expect("dirs");
+		std::fs::write(tmp.join("keep.log"), "k").expect("keep");
+		std::fs::write(tmp.join("sub/drop.tmp"), "d").expect("drop");
+		let tmp_str = tmp.to_str().expect("utf8");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("cwd");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+		let si = SourceInfo::from("pi-natives:test");
+		let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
+
+		// -path matches against the operand-relative path.
+		session
+			.shell
+			.run_string("find . -path './sub/*' > p.txt", &si, &params)
+			.await
+			.expect("path");
+		assert_eq!(read("p.txt"), "./sub/drop.tmp\n", "-path should match the operand-relative path");
+
+		// -printf %p emits the operand-relative path.
+		session
+			.shell
+			.run_string("find . -name keep.log -printf '%p\\n' > pf.txt", &si, &params)
+			.await
+			.expect("printf");
+		assert_eq!(read("pf.txt"), "./keep.log\n", "-printf %p should be operand-relative");
+
+		// -delete operates on the real (resolved) path, removing the right file.
+		let del = session
+			.shell
+			.run_string("find . -name '*.tmp' -delete", &si, &params)
+			.await
+			.expect("delete");
+		assert_eq!(exit_code(&del), 0, "find -delete should succeed");
+		assert!(!tmp.join("sub/drop.tmp").exists(), "-delete should remove the matched file");
+		assert!(tmp.join("keep.log").exists(), "-delete must not touch unmatched files");
+
+		// -exec substitutes the operand-relative path and runs in the shell cwd,
+		// so the relative `{}` resolves and the child's redirect lands in the cwd.
+		session
+			.shell
+			.run_string(
+				"find . -name keep.log -exec sh -c 'printf %s \"$1\" > ex.txt' sh {} ';'",
+				&si,
+				&params,
+			)
+			.await
+			.expect("exec");
+		assert_eq!(
+			read("ex.txt"),
+			"./keep.log",
+			"-exec {{}} should be operand-relative and run in the shell cwd"
+		);
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// A stdin-reading builtin blocked on an open pipe must honor abort/timeout:
+	/// the context's cancel flag makes the read return EOF so the utility
+	/// unwinds promptly and the command reports interrupted (130) — it must not
+	/// hang or leak a detached thread that keeps the fds alive.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_head_stdin_read_is_cancellable() {
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+
+		// Hold the pipe's write end open with no data so `head` blocks reading.
+		let (reader, _writer) = pipe_to_files("cancel").expect("pipe");
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, OpenFile::from(reader));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+		let token = CancellationToken::new();
+		params.set_cancel_token(token.clone());
+		let si = SourceInfo::from("pi-natives:test");
+
+		let canceller = tokio::spawn(async move {
+			time::sleep(Duration::from_millis(150)).await;
+			token.cancel();
+		});
+		let result = time::timeout(
+			Duration::from_secs(5),
+			session.shell.run_string("head -n 1000000", &si, &params),
+		)
+		.await;
+		let _ = canceller.await;
+
+		let exec = result
+			.expect("head must return promptly after cancel, not hang on the open pipe")
+			.expect("run_string");
+		// Core contract: prompt return (the 5s timeout did NOT fire) proves the
+		// read unblocked and the blocking task unwound cleanly — no hang, no
+		// detached thread. The interrupted command reports a non-zero status;
+		// `run_uutil` yields 130 but brush's run_string maps the cancelled
+		// program to its own non-zero code, so we assert the stable contract.
+		assert_ne!(
+			exit_code(&exec),
+			0,
+			"cancelled stdin read should report a non-zero (interrupted) status"
+		);
+	}
+
+	/// The disable env vars must actually gate registration: the global switch
+	/// drops the whole set, and the per-utility destructive switches drop only
+	/// the risky shadows.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn uutils_builtins_respect_disable_env() {
+		let session_with = |pairs: &[(&str, &str)]| {
+			let map: std::collections::HashMap<String, String> = pairs
+				.iter()
+				.map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+				.collect();
+			ShellConfig { session_env: Some(map), snapshot_path: None, minimizer: None }
+		};
+
+		let mut default = create_session(&ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+		})
+		.await
+		.expect("create_session");
+		assert!(default.shell.builtin_mut("head").is_some(), "head registered by default");
+		assert!(default.shell.builtin_mut("rg").is_some(), "rg registered by default");
+		assert!(default.shell.builtin_mut("rm").is_some(), "rm registered by default");
+		assert!(default.shell.builtin_mut("mv").is_some(), "mv registered by default");
+
+		let mut all_off = create_session(&session_with(&[("PI_DISABLE_UUTILS_BUILTINS", "1")]))
+			.await
+			.expect("create_session");
+		assert!(all_off.shell.builtin_mut("head").is_none(), "kill-switch drops head");
+		assert!(all_off.shell.builtin_mut("rg").is_none(), "kill-switch drops rg");
+		assert!(all_off.shell.builtin_mut("rm").is_none(), "kill-switch drops rm");
+
+		let mut rm_off = create_session(&session_with(&[("PI_DISABLE_RM_BUILTIN", "1")]))
+			.await
+			.expect("create_session");
+		assert!(rm_off.shell.builtin_mut("rm").is_none(), "rm disabled individually");
+		assert!(rm_off.shell.builtin_mut("mv").is_some(), "mv stays enabled");
+		assert!(rm_off.shell.builtin_mut("head").is_some(), "head stays enabled");
+	}
 
 	/// Truth-table coverage for `brush_core::commands::child_session_action`.
 	///
@@ -2088,6 +2981,48 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 			max_capture_bytes,
 			..Default::default()
 		}
+	}
+
+	/// `live_background_job_count` reports 0 when the session has no live
+	/// external background jobs and 1 while one is running. The host relies on
+	/// this to retain a per-call shell whose `&`/`nohup` child is still alive
+	/// instead of dropping it (which would SIGKILL the child via kill-on-drop).
+	/// Path-qualified `/bin/sleep` is used so it spawns a real external process
+	/// (the bare `sleep` builtin runs in-process and is intentionally not
+	/// counted).
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn live_background_job_count_tracks_external_background_jobs() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Shell::new(None);
+
+		// No session core materialized yet.
+		assert_eq!(shell.live_background_job_count().await, 0);
+
+		// A foreground-only command leaves nothing in the background.
+		shell
+			.run(
+				ShellRunOptions { command: "true".into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run true");
+		assert_eq!(shell.live_background_job_count().await, 0);
+
+		// An external background process is tracked while it runs.
+		shell
+			.run(
+				ShellRunOptions { command: "/bin/sleep 30 &".into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run sleep");
+		assert_eq!(shell.live_background_job_count().await, 1);
+
+		// Dropping the shell at scope end reaps the child via kill-on-drop.
+		shell.abort().await;
 	}
 
 	#[cfg(unix)]

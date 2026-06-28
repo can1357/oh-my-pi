@@ -59,6 +59,42 @@ const shellSessionQuarantines = new Map<string, Promise<unknown>>();
 /** Session keys with a command currently in flight on the persistent Shell. */
 const shellSessionsInUse = new Set<string>();
 
+/**
+ * Shells retained past their turn because a background (`nohup`/`&`) job is
+ * still running. A per-call `:async:` Shell is normally dropped at teardown,
+ * which SIGKILLs its children via kill-on-drop. Keeping the reference alive lets
+ * the process survive across turns; the Shell is dropped once its last
+ * background job exits (reaped by the poll loop below). Children stay
+ * kill-on-drop, so they still die when the harness tears the Shell down on exit.
+ */
+const retainedShells = new Set<Shell>();
+const RETAIN_REAP_INTERVAL_MS = 5_000;
+
+async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
+	let live: number;
+	try {
+		live = await shell.liveBackgroundJobCount();
+	} catch {
+		return;
+	}
+	if (live <= 0) return;
+	retainedShells.add(shell);
+	const interval = setInterval(() => {
+		void shell
+			.liveBackgroundJobCount()
+			.then(remaining => {
+				if (remaining > 0) return;
+				clearInterval(interval);
+				retainedShells.delete(shell);
+			})
+			.catch(() => {
+				clearInterval(interval);
+				retainedShells.delete(shell);
+			});
+	}, RETAIN_REAP_INTERVAL_MS);
+	interval.unref?.();
+}
+
 function quarantineShellSession(
 	sessionKey: string,
 	runPromise: Promise<ShellRunResult>,
@@ -411,6 +447,14 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				// `:async:` keys are per-job (jobId is unique), so the Shell would
 				// otherwise stay in the process-global map forever after completion.
 				shellSessions.delete(sessionKey);
+				// Dropping the only reference to a per-call `:async:` Shell SIGKILLs
+				// any `nohup`/`&` children (kill-on-drop). If the command left a live
+				// background job, retain the Shell so the process survives across
+				// turns; it is reaped once its last job exits and still dies with the
+				// harness. Skip on resetSession (cancel/error) — those tear down.
+				if (!resetSession && shellSession) {
+					await retainShellWithLiveBackgroundJobs(shellSession);
+				}
 			}
 		}
 	}

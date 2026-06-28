@@ -1,9 +1,10 @@
 /**
  * `eval` (aliases: js, python, notebook) — code cells executed in the
- * persistent kernel. Args arrive either as the modern `cells` array or as a
- * legacy framed `input` string (`*** Cell`, `*** Begin LANG`, `===== info =====`);
- * both render as discrete highlighted cells. When the result carries typed
- * per-cell details, each cell's output is interleaved beneath its code.
+ * persistent kernel (py/js/rb/jl). Args arrive either as the modern single-cell
+ * flat shape (`language`/`code`/`title`/`timeout`/`reset`), a legacy `cells`
+ * array, or a legacy framed `input` string (`*** Cell`, `*** Begin LANG`,
+ * `===== info =====`); all render as discrete highlighted cells. When the result
+ * carries typed per-cell details, each cell's output is interleaved beneath its code.
  */
 import type { ReactNode } from "react";
 import { Badges, CodeBlock, InvalidArg, Note, Output, ResultImages, ResultText } from "../parts";
@@ -18,13 +19,22 @@ interface EvalCell {
 	code: string;
 }
 
-const HLJS_LANG: Record<string, string> = { py: "python", js: "javascript", ts: "typescript" };
+const HLJS_LANG: Record<string, string> = {
+	py: "python",
+	js: "javascript",
+	ts: "typescript",
+	rb: "ruby",
+	jl: "julia",
+};
 
+/** Map an eval language token to its canonical short id, or null when unknown. */
 function evalLangAlias(token: string | undefined): string | null {
 	const t = (token ?? "").toUpperCase();
 	if (t === "PY" || t === "PYTHON" || t === "IPY" || t === "IPYTHON") return "py";
 	if (t === "JS" || t === "JAVASCRIPT") return "js";
 	if (t === "TS" || t === "TYPESCRIPT") return "ts";
+	if (t === "RB" || t === "RUBY") return "rb";
+	if (t === "JL" || t === "JULIA") return "jl";
 	return null;
 }
 
@@ -215,7 +225,7 @@ function parseEvalCellsLegacy(input: string): EvalCell[] {
 			const info = m[1] ?? "";
 			let lang = inheritedLang;
 			let title = "";
-			const langMatch = info.match(/^(py|js|ts)(?::"([^"]*)")?/);
+			const langMatch = info.match(/^(py|js|ts|rb|jl)(?::"([^"]*)")?/);
 			if (langMatch) {
 				lang = langMatch[1];
 				if (langMatch[2]) title = langMatch[2];
@@ -257,7 +267,7 @@ function cellsFromArgs(args: Record<string, unknown>, name: string): EvalCell[] 
 			if (timeout !== null) attrs.push(`t=${timeout}s`);
 			if (item.reset === true) attrs.push("rst");
 			out.push({
-				lang: str(item.language) === "js" ? "js" : "py",
+				lang: evalLangAlias(str(item.language) ?? undefined) ?? "py",
 				title: str(item.title) ?? "",
 				attrs,
 				code: str(item.code) ?? "",
@@ -268,7 +278,14 @@ function cellsFromArgs(args: Record<string, unknown>, name: string): EvalCell[] 
 	const input = str(args.input);
 	if (input !== null) return parseEvalCells(input).filter(c => c.code !== "" || c.title !== "");
 	const code = str(args.code);
-	if (code !== null) return [{ lang: name === "js" ? "js" : "py", title: "", attrs: [], code }];
+	if (code !== null) {
+		const attrs: string[] = [];
+		const timeout = num(args.timeout);
+		if (timeout !== null) attrs.push(`t=${timeout}s`);
+		if (args.reset === true) attrs.push("rst");
+		const lang = evalLangAlias(str(args.language) ?? undefined) ?? (name === "js" ? "js" : "py");
+		return [{ lang, title: str(args.title) ?? "", attrs, code }];
+	}
 	return [];
 }
 
@@ -296,7 +313,7 @@ function detailCellsOf(details: Record<string, unknown> | null): DetailCell[] {
 			index: num(item.index) ?? i,
 			title: str(item.title) ?? "",
 			code: str(item.code) ?? "",
-			lang: language === "js" ? "js" : language !== null ? "py" : null,
+			lang: language !== null ? (evalLangAlias(language) ?? "py") : null,
 			output: str(item.output) ?? "",
 			status: str(item.status) ?? "",
 			durationMs: num(item.durationMs),

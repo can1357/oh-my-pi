@@ -1,10 +1,11 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, Usage } from "@pk-nerdsaver-ai/pi-ai";
 import { BtwPanelComponent } from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/btw-panel";
 import { BtwController } from "@pk-nerdsaver-ai/pi-coding-agent/modes/controllers/btw-controller";
 import { initTheme } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@pk-nerdsaver-ai/pi-coding-agent/modes/types";
-import { Container, type TUI } from "@pk-nerdsaver-ai/pi-tui";
+import * as clipboard from "@pk-nerdsaver-ai/pi-coding-agent/utils/clipboard";
+import { Container, replaceTabs, type TUI } from "@pk-nerdsaver-ai/pi-tui";
 
 const usage: Usage = {
 	input: 0,
@@ -63,6 +64,9 @@ function makeCtx(session: InteractiveModeContext["session"], btwContainer = new 
 		},
 	} as unknown as InteractiveModeContext & { setTestLeafId(nextLeafId: string | null): void };
 }
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 beforeAll(async () => {
 	await initTheme();
@@ -83,6 +87,19 @@ describe("BtwPanelComponent", () => {
 		expect(panel.isBranchable()).toBe(false);
 		panel.setAnswer("Answer");
 		expect(panel.isBranchable()).toBe(true);
+	});
+
+	it("advertises copy and branch actions after a complete non-empty answer", () => {
+		const ui = { requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI;
+		const panel = new BtwPanelComponent({ question: "Question?", tui: ui });
+
+		panel.setAnswer("Answer");
+		panel.markComplete();
+
+		const rendered = Bun.stripANSI(panel.render(120).join("\n"));
+		expect(rendered).toContain("c copy");
+		expect(rendered).toContain("b branch to chat");
+		expect(rendered).toContain("Esc dismiss");
 	});
 });
 
@@ -108,6 +125,25 @@ describe("BtwController", () => {
 		expect(callArg?.signal).toBeInstanceOf(AbortSignal);
 		expect(typeof callArg?.onTextDelta).toBe("function");
 		expect(controller.hasActiveRequest()).toBe(true);
+	});
+
+	it("renders completed /btw answers with copy and branch affordances", async () => {
+		const runEphemeralTurn = vi.fn(async () => ({
+			replyText: "Answer",
+			assistantMessage: createAssistantMessage("Answer"),
+		}));
+		const btwContainer = new Container();
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), btwContainer);
+		const controller = new BtwController(ctx);
+
+		await controller.start("What changed?");
+		await drainBtwRequest();
+
+		const panel = btwContainer.children[0] as BtwPanelComponent | undefined;
+		expect(panel).toBeDefined();
+		const rendered = Bun.stripANSI(panel?.render(120).join("\n") ?? "");
+		expect(rendered).toContain("c copy");
+		expect(rendered).toContain("b branch to chat");
 	});
 
 	it("replaces a previous request by aborting it before issuing the next runEphemeralTurn", async () => {
@@ -304,6 +340,56 @@ describe("BtwController", () => {
 				{ type: "text", text: "sanitized" },
 			],
 		});
+	});
+
+	it("copies the sanitized visible reply text after a complete non-empty reply", async () => {
+		const copySpy = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const runEphemeralTurn = vi.fn(async (args: RunEphemeralTurnArgs) => {
+			args.onTextDelta?.("duplicate streaming draft");
+			return {
+				replyText: "  Visible\tanswer\n\nfrom /btw  ",
+				assistantMessage: createAssistantMessage("raw assistant payload"),
+			};
+		});
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
+		const controller = new BtwController(ctx);
+
+		await controller.start("Question?");
+		await drainBtwRequest();
+
+		expect(controller.canCopy()).toBe(true);
+		expect(await controller.handleCopy()).toBe(true);
+		expect(copySpy).toHaveBeenCalledWith(replaceTabs("Visible\tanswer\n\nfrom /btw"));
+		expect(ctx.showStatus).toHaveBeenCalledWith("Copied /btw answer to clipboard");
+	});
+
+	it("does not copy running, empty, or errored /btw answers", async () => {
+		const copySpy = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+
+		const runningRun = vi.fn(async () => Promise.withResolvers<RunEphemeralTurnResult>().promise);
+		const runningController = new BtwController(makeCtx(makeFakeSession(runningRun)));
+		await runningController.start("Question?");
+		expect(runningController.canCopy()).toBe(false);
+		expect(await runningController.handleCopy()).toBe(false);
+		runningController.dispose();
+
+		const emptyRun = vi.fn(async () => ({ replyText: "   ", assistantMessage: createAssistantMessage("   ") }));
+		const emptyController = new BtwController(makeCtx(makeFakeSession(emptyRun)));
+		await emptyController.start("Question?");
+		await drainBtwRequest();
+		expect(emptyController.canCopy()).toBe(false);
+		expect(await emptyController.handleCopy()).toBe(false);
+
+		const erroredRun = vi.fn(async () => {
+			throw new Error("boom");
+		});
+		const erroredController = new BtwController(makeCtx(makeFakeSession(erroredRun)));
+		await erroredController.start("Question?");
+		await drainBtwRequest();
+		expect(erroredController.canCopy()).toBe(false);
+		expect(await erroredController.handleCopy()).toBe(false);
+
+		expect(copySpy).not.toHaveBeenCalled();
 	});
 
 	it("branches the sanitized reply text without native replay payload metadata", async () => {

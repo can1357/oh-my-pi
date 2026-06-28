@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as natives from "@pk-nerdsaver-ai/pi-natives";
 import { getWorktreeDir, hashPath, logger, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 import * as git from "../utils/git";
+import * as jj from "../utils/jj";
 import { mapWithConcurrencyLimit } from "./parallel";
 
 const { IsoBackendKind } = natives;
@@ -28,12 +29,19 @@ export interface WorktreeBaseline {
 }
 
 export async function getRepoRoot(cwd: string): Promise<string> {
-	const repoRoot = await git.repo.root(cwd);
-	if (!repoRoot) {
-		throw new Error("Git repository not found for isolated task execution.");
+	// Pure-jj check runs first so a jj workspace nested under an unrelated
+	// outer Git checkout is rejected at its own root rather than silently
+	// mutating the surrounding Git tree behind jj's back.
+	if (await jj.isPureJjRepo(cwd)) {
+		throw new Error(
+			"Isolated task execution requires a Git checkout, but this workspace is pure Jujutsu (`.jj/` without a colocated `.git/`). Run `jj git init --colocate` to add a Git checkout, or set `task.isolation.mode: none` to disable task isolation.",
+		);
 	}
 
-	return repoRoot;
+	const repoRoot = await git.repo.root(cwd);
+	if (repoRoot) return repoRoot;
+
+	throw new Error("Git repository not found for isolated task execution.");
 }
 
 const GIT_NO_INDEX_NULL_PATH = process.platform === "win32" ? "NUL" : "/dev/null";
@@ -161,6 +169,39 @@ export interface NestedRepoPatch {
 	patch: string;
 }
 
+function unquoteGitDiffPath(rawPath: string): string {
+	let value = rawPath;
+	if (value.startsWith('"') && value.endsWith('"')) {
+		try {
+			value = JSON.parse(value) as string;
+		} catch {
+			value = value.slice(1, -1);
+		}
+	}
+	return value.replace(/^[ab]\//, "");
+}
+
+function parseDiffGitLinePaths(line: string): string[] {
+	if (!line.startsWith("diff --git ")) return [];
+	const rest = line.slice("diff --git ".length);
+	const quoted = rest.match(/^("(?:\\.|[^"])+"|\/dev\/null) ("(?:\\.|[^"])+"|\/dev\/null)$/);
+	const parts = quoted ? [quoted[1], quoted[2]] : rest.split(" ");
+	if (parts.length < 2) return [];
+	const paths = parts
+		.slice(0, 2)
+		.map(unquoteGitDiffPath)
+		.filter(file => file && file !== "/dev/null");
+	return [...new Set(paths)];
+}
+
+function patchTouchedFiles(patch: string): string[] {
+	const files = new Set<string>();
+	for (const line of patch.split("\n")) {
+		for (const file of parseDiffGitLinePaths(line)) files.add(file);
+	}
+	return [...files];
+}
+
 export interface DeltaPatchResult {
 	rootPatch: string;
 	nestedPatches: NestedRepoPatch[];
@@ -186,6 +227,19 @@ export async function captureDeltaPatch(isolationDir: string, baseline: Worktree
 
 /**
  * Apply nested repo patches directly to their working directories after parent merge.
+ *
+ * Pre-existing dirty state in a nested repo is stashed before the patch is
+ * applied and popped back (with `--index` so staged WIP stays staged) after
+ * the commit, so unrelated user edits never get folded into the agent's
+ * commit. A failing `git stash pop` (e.g. user edits collide with the patched
+ * lines) leaves the stash entry intact, emits a `logger.warn`, and is
+ * returned to the caller as a human-readable warning string — the agent
+ * commit already landed, so this is a partial success the workflow needs to
+ * see, not a thrown failure.
+ *
+ * Returns the collected stash-restore warnings (empty when every nested repo
+ * was restored cleanly). Throws when the patch apply itself fails.
+ *
  * @param commitMessage Optional async function to generate a commit message from the combined diff.
  *                      If omitted or returns null, falls back to a generic message.
  */
@@ -193,7 +247,8 @@ export async function applyNestedPatches(
 	repoRoot: string,
 	patches: NestedRepoPatch[],
 	commitMessage?: (diff: string) => Promise<string | null>,
-): Promise<void> {
+): Promise<string[]> {
+	const warnings: string[] = [];
 	// Group patches by target repo to apply all at once and commit
 	const byRepo = new Map<string, NestedRepoPatch[]>();
 	for (const p of patches) {
@@ -212,17 +267,44 @@ export async function applyNestedPatches(
 		}
 
 		const combinedDiff = repoPatches.map(p => p.patch).join("\n");
-		for (const { patch } of repoPatches) {
-			await git.patch.applyText(nestedDir, patch);
-		}
+		const touchedFiles = [...new Set(repoPatches.flatMap(p => patchTouchedFiles(p.patch)))];
 
-		// Commit so nested repo history reflects the task changes
-		if ((await git.status(nestedDir)).trim().length > 0) {
-			const msg = (await commitMessage?.(combinedDiff)) ?? "changes from isolated task(s)";
-			await git.stage.files(nestedDir);
-			await git.commit(nestedDir, msg);
+		// Preserve any pre-existing dirty state (tracked + untracked) so we
+		// commit only the agent delta, not the user's in-flight work.
+		const stashed =
+			(await git.status(nestedDir)).trim().length > 0
+				? await git.stash.push(nestedDir, `omp-isolation-${Snowflake.next()}`)
+				: false;
+		try {
+			for (const { patch } of repoPatches) {
+				await git.patch.applyText(nestedDir, patch);
+			}
+			if ((await git.status(nestedDir)).trim().length > 0) {
+				if (touchedFiles.length === 0) {
+					throw new Error(`Nested repo patch for ${relativePath} did not include stageable file paths.`);
+				}
+				const msg = (await commitMessage?.(combinedDiff)) ?? "changes from isolated task(s)";
+				await git.stage.files(nestedDir, touchedFiles);
+				await git.commit(nestedDir, msg);
+			}
+		} finally {
+			if (stashed) {
+				try {
+					await git.stash.pop(nestedDir, { index: true });
+				} catch (popErr) {
+					const message = popErr instanceof Error ? popErr.message : String(popErr);
+					logger.warn("Pre-existing nested-repo dirty state could not be auto-restored", {
+						nestedDir,
+						error: message,
+					});
+					warnings.push(
+						`Pre-existing dirty state in nested repo \`${relativePath}\` could not be auto-restored after the agent commit; stash entry preserved (${message}).`,
+					);
+				}
+			}
 		}
 	}
+	return warnings;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

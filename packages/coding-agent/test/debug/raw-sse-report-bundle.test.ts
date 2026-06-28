@@ -6,7 +6,7 @@ import type { Model } from "@pk-nerdsaver-ai/pi-ai";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
 import { RawSseDebugBuffer } from "@pk-nerdsaver-ai/pi-coding-agent/debug/raw-sse-buffer";
 import { createReportBundle } from "@pk-nerdsaver-ai/pi-coding-agent/debug/report-bundle";
-import { getConfigRootDir, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
+import { getConfigRootDir, removeWithRetries, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
 
 const model: Model<"anthropic-messages"> = buildModel({
 	id: "claude-test",
@@ -39,7 +39,7 @@ afterEach(async () => {
 		delete process.env.PI_CODING_AGENT_DIR;
 	}
 	if (cleanupRoot) {
-		await fs.rm(cleanupRoot, { recursive: true, force: true });
+		await removeWithRetries(cleanupRoot);
 		cleanupRoot = undefined;
 	}
 });

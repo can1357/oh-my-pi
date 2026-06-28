@@ -1,3 +1,4 @@
+import * as AIError from "../../error";
 import { generatePKCE } from "./pkce";
 import type { OAuthCredentials } from "./types";
 
@@ -63,16 +64,26 @@ export async function pollCursorAuth(
 				};
 			}
 
-			throw new Error(`Poll failed: ${response.status}`);
+			throw new AIError.OAuthError(`Poll failed: ${response.status}`, {
+				kind: "polling",
+				provider: "cursor",
+				status: response.status,
+			});
 		} catch {
 			consecutiveErrors++;
 			if (consecutiveErrors >= 3) {
-				throw new Error("Too many consecutive errors during Cursor auth polling");
+				throw new AIError.OAuthError("Too many consecutive errors during Cursor auth polling", {
+					kind: "polling",
+					provider: "cursor",
+				});
 			}
 		}
 	}
 
-	throw new Error("Cursor authentication polling timeout");
+	throw new AIError.OAuthError("Cursor authentication polling timeout", {
+		kind: "timeout",
+		provider: "cursor",
+	});
 }
 
 export async function loginCursor(
@@ -107,7 +118,10 @@ export async function refreshCursorToken(apiKeyOrRefreshToken: string): Promise<
 
 	if (!response.ok) {
 		const error = await response.text();
-		throw new Error(`Cursor token refresh failed: ${error}`);
+		throw new AIError.OAuthError(`Cursor token refresh failed: ${error}`, {
+			kind: "token-refresh",
+			provider: "cursor",
+		});
 	}
 
 	const data = (await response.json()) as {

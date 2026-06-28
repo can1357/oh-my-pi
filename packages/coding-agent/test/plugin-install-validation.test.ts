@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { PluginManager } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/manager";
 import * as piUtils from "@pk-nerdsaver-ai/pi-utils";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import type { Subprocess } from "bun";
 
 function emptyStream(): ReadableStream<Uint8Array> {
@@ -64,7 +65,7 @@ describe("PluginManager.install load validation", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
-		await fs.rm(tmpRoot, { recursive: true, force: true });
+		await removeWithRetries(tmpRoot);
 	});
 
 	test("rejects an install whose extension entry cannot resolve its dependencies", async () => {

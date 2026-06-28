@@ -9,7 +9,7 @@
 
 import type { AssistantMessage } from "@pk-nerdsaver-ai/pi-ai";
 import type { SessionEntry } from "../session/session-entries";
-import type { HindsightMessage } from "./content";
+import { type HindsightMessage, hasSubstantiveContent } from "./content";
 
 export interface ReadonlySessionManagerLike {
 	getEntries(): SessionEntry[];
@@ -39,7 +39,7 @@ export function extractMessages(sessionManager: ReadonlySessionManagerLike): Hin
 		if (role !== "user" && role !== "assistant") continue;
 
 		const text = role === "user" ? extractUserText(msg) : extractAssistantText(msg as AssistantMessage);
-		if (text.length === 0) continue;
+		if (!hasSubstantiveContent(text)) continue;
 		messages.push({ role, content: text });
 	}
 

@@ -248,4 +248,23 @@ describe("StatusLineComponent context breakdown", () => {
 		const plain = comp.getTopBorder(80).content.replaceAll(/\x1b\[[0-9;]*m/g, "");
 		expect(plain).toContain("0.5%/272K");
 	});
+
+	it("renders token usage with an unknown marker when the model window is unavailable", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi")],
+			contextWindow: 0,
+			usage: { tokens: 5000, contextWindow: 0, percent: 0 },
+		});
+		const comp = new StatusLineComponent(session);
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["context_pct"],
+			rightSegments: [],
+			separator: "powerline-thin",
+		});
+
+		const plain = comp.getTopBorder(80).content.replaceAll(/\x1b\[[0-9;]*m/g, "");
+		expect(plain).toContain("5K/?");
+		expect(plain).not.toContain("0.0%/0");
+	});
 });

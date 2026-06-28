@@ -62,6 +62,7 @@ describe("MCPManager OAuth refresh failure", () => {
 	});
 
 	afterEach(() => {
+		authStorage.close();
 		vi.restoreAllMocks();
 	});
 
@@ -83,6 +84,7 @@ describe("MCPManager OAuth refresh failure", () => {
 			undefined,
 			undefined,
 			"https://logfire.example.com/mcp",
+			{ authorizationUrl: undefined, stripSameOriginResource: true },
 		);
 		// The poisoned Bearer must not be re-injected — that is the loop the user
 		// reported (#1908).

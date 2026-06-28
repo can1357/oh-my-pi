@@ -74,7 +74,8 @@ class ProvidersSceneController implements SetupSceneController {
 			return;
 		}
 		if (event.motion) this.#tabBar.setHoverTab(null);
-		const bodyLine = line - this.#tabRowCount - 1;
+		const spacerRowsAfterTabs = 1;
+		const bodyLine = line - this.#tabRowCount - spacerRowsAfterTabs;
 		if (tab.routeMouse) {
 			tab.routeMouse(event, bodyLine, col);
 			return;

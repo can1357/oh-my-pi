@@ -164,29 +164,6 @@ describe("kimi think tags (<think>…</think>)", () => {
 	});
 });
 
-describe("pi native thinking channel (¤…¤)", () => {
-	it("routes ¤ to thinking, keeping it out of the reply and calls", () => {
-		const events = scan("pi", "¤reasoning¤§foo x=1\n");
-		expect(thinkingText(events)).toBe("reasoning");
-		expect(callNames(events)).toEqual([{ name: "foo", arguments: { x: 1 } }]);
-		expect(visibleText(events)).not.toContain("¤");
-	});
-
-	it("round-trips renderThinking through the scanner", () => {
-		const rendered = getDialectDefinition("pi").renderThinking("reasoning");
-		expect(rendered).toBe("¤\nreasoning\n¤");
-		const events = scan("pi", `${rendered}visible`);
-		expect(thinkingText(events).trim()).toBe("reasoning");
-		expect(visibleText(events)).toBe("visible");
-	});
-
-	it("treats ¤ as plain text when parseThinking is disabled", () => {
-		const events = scan("pi", "¤x¤answer", { options: { parseThinking: false } });
-		expect(thinkingBoundaries(events)).toBe(0);
-		expect(visibleText(events)).toContain("¤x¤");
-	});
-});
-
 describe("every dialect round-trips thinking (no missing thinking element)", () => {
 	const dialects: Dialect[] = [
 		"anthropic",
@@ -197,7 +174,6 @@ describe("every dialect round-trips thinking (no missing thinking element)", () 
 		"harmony",
 		"hermes",
 		"kimi",
-		"pi",
 		"qwen3",
 		"xml",
 	];
@@ -223,7 +199,6 @@ describe("unterminated thinking at stream end", () => {
 		{ dialect: "gemma", input: "<|channel>thought\npartial" },
 		{ dialect: "glm", input: "<think>partial" },
 		{ dialect: "kimi", input: "<think>partial" },
-		{ dialect: "pi", input: "¤partial" },
 		{ dialect: "qwen3", input: "<think>partial" },
 	];
 

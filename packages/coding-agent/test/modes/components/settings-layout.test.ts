@@ -60,6 +60,16 @@ describe("settings layout", () => {
 		}
 	});
 
+	it("exposes native terminal progress in the appearance settings menu", () => {
+		const def = getSettingsForTab("appearance").find(def => def.path === "terminal.showProgress");
+
+		expect(def).toMatchObject({
+			type: "boolean",
+			label: "Native Terminal Progress",
+			group: "Display",
+		});
+	});
+
 	it("hides advisor dependent settings when advisor is disabled", () => {
 		const advisorDependentPaths: SettingPath[] = ["advisor.subagents", "advisor.syncBacklog", "advisor.immuneTurns"];
 		const advisorDependentPathSet = new Set(advisorDependentPaths);
@@ -75,5 +85,16 @@ describe("settings layout", () => {
 		for (const def of defs) {
 			expect(def.condition?.()).toBe(true);
 		}
+	});
+
+	it("shows provider request limits as a providers services submenu setting", () => {
+		const [def] = getSettingsForTab("providers").filter(item => item.path === "providers.maxInFlightRequests");
+
+		expect(def).toMatchObject({
+			path: "providers.maxInFlightRequests",
+			type: "providerLimits",
+			tab: "providers",
+			group: "Services",
+		});
 	});
 });

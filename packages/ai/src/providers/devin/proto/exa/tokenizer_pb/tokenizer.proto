@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package exa.tokenizer_pb;
+
+enum PreTokenizer {
+  PRE_TOKENIZER_UNSPECIFIED = 0;
+  PRE_TOKENIZER_GPT2 = 1;
+  PRE_TOKENIZER_CL100K = 2;
+  PRE_TOKENIZER_QWEN2 = 3;
+}
+
+message Tokenizer {
+  repeated .exa.tokenizer_pb.SpecialToken special_tokens = 1;
+  .exa.tokenizer_pb.PreTokenizer pre_tokenizer = 2;
+  oneof word_tokenizer {
+    .exa.tokenizer_pb.BPETokenizer bpe = 3;
+  }
+}
+
+message BPETokenizer {
+  repeated .exa.tokenizer_pb.BaseToken base_vocab = 1;
+  repeated .exa.tokenizer_pb.MergeToken merges = 2;
+}
+
+message SpecialToken {
+  string token = 1;
+  int32 id = 2;
+}
+
+message BaseToken {
+  bytes token = 1;
+}
+
+message MergeToken {
+  int32 first = 1;
+  int32 second = 2;
+}

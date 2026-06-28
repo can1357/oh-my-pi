@@ -7,7 +7,8 @@ import { type ExecuteHashlineSingleOptions, executeHashlineSingle } from "@pk-ne
 import { canonicalSnapshotKey, getFileSnapshotStore } from "@pk-nerdsaver-ai/pi-coding-agent/edit/file-snapshot-store";
 import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import { ReadTool } from "@pk-nerdsaver-ai/pi-coding-agent/tools/read";
-import { SearchTool } from "@pk-nerdsaver-ai/pi-coding-agent/tools/search";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
+import { GrepTool } from "../../src/tools/grep";
 
 function createSession(cwd: string): ToolSession {
 	return {
@@ -78,7 +79,7 @@ describe("read → edit seen-line guard", () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "seen-line-guard-"));
 	});
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	it("records the displayed range as seen and excludes far lines", async () => {
@@ -180,7 +181,7 @@ describe("search → edit seen-line guard", () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "seen-line-search-"));
 	});
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	function searchSession(cwd: string): ToolSession {
@@ -193,7 +194,7 @@ describe("search → edit seen-line guard", () => {
 			getArtifactsDir: () => path.join(cwd, "artifacts"),
 			allocateOutputArtifact: async () => ({ id: "artifact-1", path: path.join(cwd, "artifact-1.log") }),
 			// Zero context so the seen set is exactly the matched lines.
-			settings: Settings.isolated({ "search.contextBefore": 0, "search.contextAfter": 0 }),
+			settings: Settings.isolated({ "grep.contextBefore": 0, "grep.contextAfter": 0 }),
 			enableLsp: false,
 		} as ToolSession;
 	}
@@ -204,7 +205,7 @@ describe("search → edit seen-line guard", () => {
 		await Bun.write(file, `${lines.join("\n")}\n`);
 		const session = searchSession(tmpDir);
 
-		const search = await new SearchTool(session).execute("s1", { pattern: "NEEDLE", paths: [file] });
+		const search = await new GrepTool(session).execute("s1", { pattern: "NEEDLE", paths: [file] });
 		const tag = tagFromOutput(resultText(search));
 
 		const seen = getFileSnapshotStore(session).byHash(canonicalSnapshotKey(file), tag)?.seenLines;
@@ -222,7 +223,7 @@ describe("search → edit seen-line guard", () => {
 		await Bun.write(file, `${lines.join("\n")}\n`);
 		const session = searchSession(tmpDir);
 
-		const search = await new SearchTool(session).execute("s1", { pattern: "NEEDLE", paths: [file] });
+		const search = await new GrepTool(session).execute("s1", { pattern: "NEEDLE", paths: [file] });
 		const tag = tagFromOutput(resultText(search));
 
 		await expect(executeHashlineSingle(execOptions(`[code.txt#${tag}]\nSWAP 8.=8:\n+X`, session))).rejects.toThrow(

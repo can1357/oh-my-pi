@@ -19,7 +19,7 @@ import type { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agen
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
 import type { SessionEntry, SessionMessageEntry } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 function createUsage(): Usage {
 	return {
@@ -272,7 +272,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 	afterAll(() => {
 		sharedModelRegistry?.authStorage.close();
 		if (sharedRegistryDir && fs.existsSync(sharedRegistryDir)) {
-			fs.rmSync(sharedRegistryDir, { recursive: true, force: true });
+			removeSyncWithRetries(sharedRegistryDir);
 		}
 	});
 
@@ -283,7 +283,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		while (tempDirs.length > 0) {
 			const tempDir = tempDirs.pop();
 			if (tempDir && fs.existsSync(tempDir)) {
-				fs.rmSync(tempDir, { recursive: true, force: true });
+				removeSyncWithRetries(tempDir);
 			}
 		}
 	});

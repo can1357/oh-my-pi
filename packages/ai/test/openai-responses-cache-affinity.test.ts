@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@pk-nerdsaver-ai/pi-ai/providers/openai-responses";
-import { stream as streamModel } from "@pk-nerdsaver-ai/pi-ai/stream";
-import type { Context, FetchImpl, Model, ProviderSessionState } from "@pk-nerdsaver-ai/pi-ai/types";
+import { stream as streamModel, streamSimple } from "@pk-nerdsaver-ai/pi-ai/stream";
+import type { Context, FetchImpl, Model, ProviderSessionState, SimpleStreamOptions } from "@pk-nerdsaver-ai/pi-ai/types";
 import { buildOpenAIResponsesCompat } from "@pk-nerdsaver-ai/pi-catalog/compat/openai";
 import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
 
@@ -15,6 +15,19 @@ const openRouterResponsesModel: Model<"openai-responses"> = {
 	compat: buildOpenAIResponsesCompat({
 		id: "openai/gpt-5.5",
 		name: "OpenRouter GPT 5.5",
+		provider: "openrouter",
+		baseUrl: "https://openrouter.ai/api/v1",
+	}),
+};
+const openRouterAnthropicResponsesModel: Model<"openai-responses"> = {
+	...model,
+	id: "anthropic/claude-sonnet-4.5",
+	name: "OpenRouter Claude Sonnet 4.5",
+	provider: "openrouter",
+	baseUrl: "https://openrouter.ai/api/v1",
+	compat: buildOpenAIResponsesCompat({
+		id: "anthropic/claude-sonnet-4.5",
+		name: "OpenRouter Claude Sonnet 4.5",
 		provider: "openrouter",
 		baseUrl: "https://openrouter.ai/api/v1",
 	}),
@@ -176,6 +189,58 @@ async function captureDispatchedOpenAIResponseHeaders(
 	return captured;
 }
 
+async function captureSimpleOpenAIResponseBody(
+	options: SimpleStreamOptions,
+	requestModel: Model<"openai-responses"> = model,
+): Promise<Record<string, unknown> | null> {
+	let body: Record<string, unknown> | null = null;
+	const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+		body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+		return createSseResponse([
+			{
+				type: "response.output_item.added",
+				item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+			},
+			{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+			{ type: "response.output_text.delta", delta: "Hello" },
+			{
+				type: "response.output_item.done",
+				item: {
+					type: "message",
+					id: "msg_1",
+					role: "assistant",
+					status: "completed",
+					content: [{ type: "output_text", text: "Hello" }],
+				},
+			},
+			{
+				type: "response.completed",
+				response: {
+					status: "completed",
+					usage: {
+						input_tokens: 5,
+						output_tokens: 3,
+						total_tokens: 8,
+						input_tokens_details: { cached_tokens: 0 },
+					},
+				},
+			},
+		]);
+	});
+
+	const context: Context = {
+		systemPrompt: ["stable system", "stable durable context"],
+		messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+	};
+	const stream = streamSimple(requestModel, context, { apiKey: "test-key", ...options, fetch: fetchMock });
+
+	for await (const event of stream) {
+		if (event.type === "done" || event.type === "error") break;
+	}
+
+	return body;
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 });
@@ -187,6 +252,12 @@ describe("openai-responses cache affinity", () => {
 		expect(captured.sessionId).toBe("session-123");
 		expect(captured.clientRequestId).toBe("session-123");
 		expect(captured.body?.prompt_cache_key).toBe("session-123");
+	});
+
+	it("forwards textVerbosity through streamSimple to official OpenAI Responses text config", async () => {
+		const body = await captureSimpleOpenAIResponseBody({ textVerbosity: "low" });
+
+		expect(body?.text).toEqual({ verbosity: "low" });
 	});
 	it("keeps prompt cache key separate from OpenAI routing headers when both are provided", async () => {
 		const captured = await captureOpenAIResponseHeaders({
@@ -246,6 +317,23 @@ describe("openai-responses cache affinity", () => {
 		expect(captured.clientRequestId).toBeNull();
 		expect(captured.body?.session_id).toBe("workflow-123");
 		expect(captured.body?.prompt_cache_key).toBe("cache-key-123");
+	});
+	it("sets Anthropic cache control for OpenRouter Anthropic Responses requests", async () => {
+		const captured = await captureOpenAIResponseHeaders(
+			{ sessionId: "workflow-123" },
+			openRouterAnthropicResponsesModel,
+		);
+
+		expect(captured.body?.cache_control).toEqual({ type: "ephemeral" });
+	});
+
+	it("upgrades to 1h ttl when cacheRetention is long for OpenRouter Anthropic Responses requests", async () => {
+		const captured = await captureOpenAIResponseHeaders(
+			{ sessionId: "workflow-123", cacheRetention: "long" },
+			openRouterAnthropicResponsesModel,
+		);
+
+		expect(captured.body?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 	});
 
 	it("lets explicit headers override OpenRouter Responses defaults", async () => {
@@ -437,10 +525,11 @@ describe("openai-responses cache affinity", () => {
 	it("omits OpenRouter Responses session_id when cache retention is disabled", async () => {
 		const captured = await captureOpenAIResponseHeaders(
 			{ cacheRetention: "none", sessionId: "workflow-123" },
-			openRouterResponsesModel,
+			openRouterAnthropicResponsesModel,
 		);
 
 		expect(captured.body?.session_id).toBeUndefined();
 		expect(captured.body?.prompt_cache_key).toBeUndefined();
+		expect(captured.body?.cache_control).toBeUndefined();
 	});
 });

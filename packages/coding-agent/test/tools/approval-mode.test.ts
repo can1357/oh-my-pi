@@ -8,7 +8,7 @@ import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { createAgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import type { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 const BASE_SETTINGS = {
 	"async.enabled": false,
@@ -66,7 +66,7 @@ describe("tools.approvalMode setting", () => {
 		// Windows can briefly hold tempdir handles after session.dispose(); retry a few times.
 		for (let attempt = 0; attempt < 5; attempt++) {
 			try {
-				fs.rmSync(tempDir, { recursive: true, force: true });
+				removeSyncWithRetries(tempDir);
 				break;
 			} catch (err) {
 				const code = (err as NodeJS.ErrnoException).code;

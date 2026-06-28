@@ -17,6 +17,7 @@ import {
 	type WritethroughDeferredHandle,
 } from "../../lsp";
 import type { ToolSession } from "../../tools";
+import { routeWriteThroughBridge } from "../../tools/acp-bridge";
 import { assertEditableFile } from "../../tools/auto-generated-guard";
 import {
 	invalidateFsScanAfterDelete,
@@ -1663,6 +1664,8 @@ class LspFileSystem implements FileSystem {
 	#fileCache: Record<string, Bun.BunFile> = {};
 
 	constructor(
+		private readonly session: ToolSession,
+		private readonly requestedPath: string,
 		private readonly writethrough: WritethroughCallback,
 		private readonly signal?: AbortSignal,
 		private readonly batchRequest?: LspBatchRequest,
@@ -1692,8 +1695,14 @@ class LspFileSystem implements FileSystem {
 	}
 
 	async write(path: string, content: string): Promise<void> {
-		const file = this.#getFile(path);
 		const finalContent = await serializeEditFileText(path, path, content);
+
+		// Route through ACP bridge when available; skips internal artifacts and local:// paths.
+		if (await routeWriteThroughBridge(this.session, this.requestedPath, path, finalContent)) {
+			return;
+		}
+
+		const file = this.#getFile(path);
 		const deferredForPath = this.deferredForPath;
 		const result = await this.writethrough(
 			path,
@@ -1785,7 +1794,14 @@ export async function executePatchSingle(
 	}
 
 	const input: PatchInput = { path: resolvedPath, op, rename: resolvedRename, diff };
-	const patchFileSystem = new LspFileSystem(writethrough, signal, batchRequest, beginDeferredDiagnosticsForPath);
+	const patchFileSystem = new LspFileSystem(
+		session,
+		path, // original user-provided path for bridge guard (may be local://, vault://, etc.)
+		writethrough,
+		signal,
+		batchRequest,
+		beginDeferredDiagnosticsForPath,
+	);
 	const result = await applyPatch(input, {
 		cwd: session.cwd,
 		fs: patchFileSystem,
@@ -1833,12 +1849,21 @@ export async function executePatchSingle(
 		diff: "",
 		firstChangedLine: undefined,
 	};
-	if (result.change.type === "update" && result.change.oldContent && result.change.newContent) {
+	if (
+		result.change.type === "update" &&
+		result.change.oldContent !== undefined &&
+		result.change.newContent !== undefined
+	) {
 		const normalizedOld = normalizeToLF(stripBom(result.change.oldContent).text);
 		const normalizedNew = normalizeToLF(stripBom(result.change.newContent).text);
 		diffResult = generateUnifiedDiffString(normalizedOld, normalizedNew, undefined, {
 			path: result.change.newPath ?? result.change.path,
 		});
+	} else if (result.change.type === "create" && result.change.newContent !== undefined) {
+		// The result is authoritative for rendering, so emit the added-content
+		// diff here rather than relying on the call-phase streaming preview.
+		const normalizedNew = normalizeToLF(stripBom(result.change.newContent).text);
+		diffResult = generateUnifiedDiffString("", normalizedNew, undefined, { path: result.change.path });
 	}
 
 	let resultText: string;
@@ -1880,6 +1905,7 @@ export async function executePatchSingle(
 			diagnostics: mergedDiagnostics,
 			op,
 			move: effectiveRename,
+			sourcePath: result.change.newPath ? resolvedPath : undefined,
 			meta,
 			oldText,
 			newText,

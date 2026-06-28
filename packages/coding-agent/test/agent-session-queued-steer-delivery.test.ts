@@ -24,7 +24,7 @@ import { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-ses
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@pk-nerdsaver-ai/pi-coding-agent/session/messages";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 const COLLAB_PROMPT_TYPE = "collab-prompt";
 
@@ -49,7 +49,7 @@ describe("AgentSession queued steer delivery", () => {
 		for (const authStorage of authStorages.splice(0)) {
 			authStorage.close();
 		}
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	async function createSession(responses: MockResponse[]): Promise<SteerHarness> {

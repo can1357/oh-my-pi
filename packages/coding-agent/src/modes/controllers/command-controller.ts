@@ -6,11 +6,12 @@ import {
 	getEnvApiKey,
 	getProviderDetails,
 	type ProviderDetails,
+	resolveUsedFraction,
 	type UsageLimit,
 	type UsageReport,
 } from "@pk-nerdsaver-ai/pi-ai";
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@pk-nerdsaver-ai/pi-tui";
-import { formatDuration, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { formatDuration, Snowflake, sanitizeText } from "@pk-nerdsaver-ai/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
 import { shareSession } from "../../export/share";
@@ -30,6 +31,7 @@ import { BashExecutionComponent } from "../../modes/components/bash-execution";
 import { BorderedLoader } from "../../modes/components/bordered-loader";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
+import { MoveOverlay, type MoveOverlayResult } from "../../modes/components/move-overlay";
 import { TranscriptBlock } from "../../modes/components/transcript-container";
 import { getMarkdownTheme, getSymbolTheme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
@@ -40,11 +42,12 @@ import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
+import { SessionManager } from "../../session/session-manager";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import { limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
-import { replaceTabs } from "../../tools/render-utils";
+import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
@@ -85,15 +88,30 @@ export class CommandController {
 		}
 	}
 
-	handleDumpCommand() {
+	async handleDumpCommand(): Promise<void> {
 		try {
 			const formatted = this.ctx.session.formatSessionAsText();
 			if (!formatted) {
 				this.ctx.showError("No messages to dump yet.");
 				return;
 			}
-			copyToClipboard(formatted);
-			this.ctx.showStatus("Session copied to clipboard");
+			// Build the LLM request JSON sidecar first so its path (and a
+			// raw-context warning) can be appended to the copied transcript.
+			let sidecarPath: string | undefined;
+			let sidecarError: string | undefined;
+			try {
+				sidecarPath = await this.ctx.session.dumpLlmRequestToTmpDir();
+			} catch (error: unknown) {
+				sidecarError = error instanceof Error ? error.message : "Unknown error";
+			}
+			const doc = sidecarPath
+				? `${formatted}\n\n---\nLLM request JSON: ${sidecarPath}\nThis file persists on disk and may contain raw context/secrets — treat accordingly.`
+				: formatted;
+			await copyToClipboard(doc);
+			const statusParts = ["Session copied to clipboard"];
+			if (sidecarPath) statusParts.push(`LLM request JSON: ${sidecarPath}`);
+			if (sidecarError) statusParts.push(`LLM request JSON unavailable: ${sidecarError}`);
+			this.ctx.showStatus(statusParts.join("\n"));
 		} catch (error: unknown) {
 			this.ctx.showError(`Failed to copy session: ${error instanceof Error ? error.message : "Unknown error"}`);
 		}
@@ -202,6 +220,7 @@ export class CommandController {
 		try {
 			const result = await shareSession(this.ctx.session.sessionManager, {
 				serverUrl: this.ctx.settings.get("share.serverUrl"),
+				store: this.ctx.settings.get("share.store"),
 				state: this.ctx.session.state,
 				obfuscator: this.ctx.settings.get("share.redactSecrets") ? this.ctx.session.obfuscator : undefined,
 			});
@@ -894,13 +913,34 @@ export class CommandController {
 		]);
 	}
 
-	async handleMoveCommand(targetPath: string): Promise<void> {
+	/**
+	 * `/move` — switch to a fresh empty session in a different directory.
+	 *
+	 * With no `targetPath` (TUI only), opens an autocomplete overlay so the user
+	 * can pick or type a directory. With a `targetPath`, resolves it directly.
+	 * If the target directory does not exist, the user is asked whether to create
+	 * it. A brand-new empty session is then started in the target directory and
+	 * the current session is left behind (resumable via `/resume`).
+	 */
+	async handleMoveCommand(targetPath?: string): Promise<void> {
 		if (this.ctx.session.isStreaming) {
 			this.ctx.showWarning("Wait for the current response to finish or abort it before moving.");
 			return;
 		}
 
-		const unquoted = stripOuterDoubleQuotes(targetPath);
+		let input: string | undefined = targetPath?.trim() || undefined;
+
+		// No argument in TUI mode: open the path autocomplete overlay.
+		if (!input) {
+			const result = await this.ctx.showHookCustom<MoveOverlayResult | undefined>(
+				(_tui, _theme, _keybindings, done) => new MoveOverlay(this.ctx.sessionManager.getCwd(), done),
+				{ overlay: true },
+			);
+			if (!result) return; // cancelled
+			input = result.directory;
+		}
+
+		const unquoted = stripOuterDoubleQuotes(input);
 		if (!unquoted) {
 			this.ctx.showError("Usage: /move <path>");
 			return;
@@ -909,29 +949,85 @@ export class CommandController {
 		const cwd = this.ctx.sessionManager.getCwd();
 		const resolvedPath = resolveToCwd(unquoted, cwd);
 
+		// If the directory doesn't exist, offer to create it.
+		let isDirectory: boolean;
 		try {
-			const stat = await fs.stat(resolvedPath);
-			if (!stat.isDirectory()) {
-				this.ctx.showError(`Not a directory: ${resolvedPath}`);
+			isDirectory = (await fs.stat(resolvedPath)).isDirectory();
+		} catch {
+			isDirectory = false;
+		}
+
+		if (!isDirectory) {
+			const parentDir = path.dirname(resolvedPath);
+			let parentExists = false;
+			try {
+				parentExists = (await fs.stat(parentDir)).isDirectory();
+			} catch {
+				parentExists = false;
+			}
+			if (!parentExists) {
+				this.ctx.showError(`Cannot create "${path.basename(resolvedPath)}": parent directory does not exist`);
 				return;
 			}
-		} catch {
-			this.ctx.showError(`Directory does not exist: ${resolvedPath}`);
+			const confirmed = await this.ctx.showHookConfirm(
+				"Create directory?",
+				`"${path.basename(resolvedPath)}" does not exist. Create it?`,
+			);
+			if (!confirmed) return;
+			try {
+				await fs.mkdir(resolvedPath, { recursive: true });
+			} catch (err) {
+				this.ctx.showError(`Failed to create directory: ${err instanceof Error ? err.message : String(err)}`);
+				return;
+			}
+		}
+
+		let newSessionFile: string | undefined;
+		try {
+			// Create a fresh empty session file in the target directory's session
+			// folder, then switch to it. The current session is left behind and
+			// remains resumable via /resume.
+			newSessionFile = SessionManager.createEmptySessionFile(resolvedPath);
+			const switched = await this.ctx.session.switchSession(newSessionFile);
+			if (!switched) {
+				await this.ctx.sessionManager.dropSession(newSessionFile);
+				return;
+			}
+		} catch (err) {
+			if (newSessionFile) {
+				try {
+					await this.ctx.sessionManager.dropSession(newSessionFile);
+				} catch (dropErr) {
+					this.ctx.showError(
+						`Move failed: ${err instanceof Error ? err.message : String(err)}; failed to remove empty session: ${dropErr instanceof Error ? dropErr.message : String(dropErr)}`,
+					);
+					return;
+				}
+			}
+			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
 			return;
 		}
 
-		try {
-			await this.ctx.sessionManager.flush();
-			await this.ctx.sessionManager.moveTo(resolvedPath);
-			await this.ctx.applyCwdChange(resolvedPath);
+		this.ctx.session.markMovedFromEmptySessionFile(newSessionFile!);
+		await this.ctx.applyCwdChange(resolvedPath);
 
-			this.ctx.present([
-				new Spacer(1),
-				new Text(`${theme.fg("accent", `${theme.status.success} Session moved to ${resolvedPath}`)}`, 1, 1),
-			]);
-		} catch (err) {
-			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
-		}
+		this.ctx.chatContainer.clear();
+		this.ctx.pendingMessagesContainer.clear();
+		this.ctx.compactionQueuedMessages = [];
+		this.ctx.streamingComponent = undefined;
+		this.ctx.streamingMessage = undefined;
+		this.ctx.pendingTools.clear();
+		this.ctx.statusLine.invalidate();
+		this.ctx.statusLine.setSessionStartTime(Date.now());
+		this.ctx.updateEditorTopBorder();
+		this.ctx.updateEditorBorderColor();
+		await this.ctx.reloadTodos();
+		this.ctx.ui.requestRender(true, { clearScrollback: true });
+
+		this.ctx.present([
+			new Spacer(1),
+			new Text(`${theme.fg("accent", `${theme.status.success} Moved to ${resolvedPath}`)}`, 1, 1),
+		]);
 	}
 
 	async handleRenameCommand(title: string): Promise<void> {
@@ -1156,6 +1252,11 @@ export class CommandController {
 	}
 
 	async handleHandoffCommand(customInstructions?: string): Promise<void> {
+		if (this.ctx.session.isStreaming) {
+			this.ctx.showWarning("Wait for the current response to finish or abort it before handing off.");
+			return;
+		}
+
 		const entries = this.ctx.sessionManager.getEntries();
 		const messageCount = entries.filter(e => e.type === "message").length;
 
@@ -1285,22 +1386,10 @@ export function renderProviderSection(details: ProviderDetails, uiTheme: Pick<ty
 	return `${lines.join("\n")}\n`;
 }
 
-function resolveFraction(limit: UsageLimit): number | undefined {
-	const amount = limit.amount;
-	if (amount.usedFraction !== undefined) return amount.usedFraction;
-	if (amount.used !== undefined && amount.limit !== undefined && amount.limit > 0) {
-		return amount.used / amount.limit;
-	}
-	if (amount.unit === "percent" && amount.used !== undefined) {
-		return amount.used / 100;
-	}
-	return undefined;
-}
-
 function resolveProviderUsageTotal(reports: UsageReport[]): number {
 	return reports
 		.flatMap(report => report.limits)
-		.map(limit => resolveFraction(limit) ?? 0)
+		.map(limit => resolveUsedFraction(limit) ?? 0)
 		.reduce((sum, value) => sum + value, 0);
 }
 
@@ -1321,22 +1410,28 @@ function formatWindowSuffix(label: string, windowLabel: string, uiTheme: typeof 
 }
 
 function formatAccountLabel(limit: UsageLimit, report: UsageReport, index: number): string {
-	const email = (report.metadata?.email as string | undefined) ?? limit.scope.accountId;
-	if (email) return email;
-	const accountId = (report.metadata?.accountId as string | undefined) ?? limit.scope.accountId;
+	const email = report.metadata?.email;
+	if (typeof email === "string" && email) return email;
+	const accountId =
+		typeof report.metadata?.accountId === "string" && report.metadata.accountId
+			? report.metadata.accountId
+			: limit.scope.accountId || undefined;
 	if (accountId) return accountId;
-	const projectId = (report.metadata?.projectId as string | undefined) ?? limit.scope.projectId;
+	const projectId =
+		typeof report.metadata?.projectId === "string" && report.metadata.projectId
+			? report.metadata.projectId
+			: limit.scope.projectId || undefined;
 	if (projectId) return projectId;
 	return `account ${index + 1}`;
 }
 
 function formatUnlimitedReportLabel(report: UsageReport, index: number): string {
-	const email = report.metadata?.email as string | undefined;
-	if (email) return email;
-	const accountId = report.metadata?.accountId as string | undefined;
-	if (accountId) return accountId;
-	const projectId = report.metadata?.projectId as string | undefined;
-	if (projectId) return projectId;
+	const email = report.metadata?.email;
+	if (typeof email === "string" && email) return email;
+	const accountId = report.metadata?.accountId;
+	if (typeof accountId === "string" && accountId) return accountId;
+	const projectId = report.metadata?.projectId;
+	if (typeof projectId === "string" && projectId) return projectId;
 	return `account ${index + 1}`;
 }
 
@@ -1411,7 +1506,7 @@ function resolveAggregateStatus(limits: UsageLimit[]): UsageLimit["status"] {
 
 function formatAggregateAmount(limits: UsageLimit[]): string {
 	const fractions = limits
-		.map(limit => resolveFraction(limit))
+		.map(limit => resolveUsedFraction(limit))
 		.filter((value): value is number => value !== undefined);
 	if (fractions.length === limits.length && fractions.length > 0) {
 		const sum = fractions.reduce((total, value) => total + value, 0);
@@ -1468,7 +1563,7 @@ function resolveStatusColor(status: UsageLimit["status"]): "success" | "warning"
 }
 
 function renderUsageBar(limit: UsageLimit, uiTheme: typeof theme, barWidth: number): string {
-	const fraction = resolveFraction(limit);
+	const fraction = resolveUsedFraction(limit);
 	if (fraction === undefined) {
 		return uiTheme.fg("dim", "·".repeat(barWidth));
 	}
@@ -1502,7 +1597,7 @@ function resolveColumnWidth(count: number, available: number, trailing: number):
 	return ideal;
 }
 
-function renderUsageReports(
+export function renderUsageReports(
 	reports: UsageReport[],
 	uiTheme: typeof theme,
 	nowMs: number,
@@ -1562,14 +1657,25 @@ function renderUsageReports(
 			lines.push(`  ${uiTheme.fg("accent", "in use by this session:")} ${activeAccountLabel}`);
 		}
 
+		// Provider-wide disclaimers (e.g. "OMP-observed spend only") render once
+		// above the per-account sections instead of duplicating onto every limit.
+		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
+		if (providerNotes.length > 0) {
+			lines.push(
+				`  ${uiTheme.fg("dim", replaceTabs(truncateToWidth(sanitizeText(providerNotes.map(n => n.replace(/[\r\n]+/g, " ")).join(" • ")), 110)))}`.trimEnd(),
+			);
+		}
+
 		const resetAccountLines: string[] = [];
 		for (const report of providerReports) {
 			const count = report.resetCredits?.availableCount ?? 0;
 			if (count <= 0) continue;
 			const label =
-				(report.metadata?.email as string | undefined) ??
-				(report.metadata?.accountId as string | undefined) ??
-				"account";
+				typeof report.metadata?.email === "string" && report.metadata.email
+					? report.metadata.email
+					: typeof report.metadata?.accountId === "string" && report.metadata.accountId
+						? report.metadata.accountId
+						: "account";
 			const isActive =
 				!!activeAccount &&
 				((!!activeAccount.accountId && activeAccount.accountId === report.metadata?.accountId) ||
@@ -1577,6 +1683,23 @@ function renderUsageReports(
 			resetAccountLines.push(
 				`    • ${label}: ${count} saved reset${count === 1 ? "" : "s"}${isActive ? " (active)" : ""}`,
 			);
+			const credits = report.resetCredits?.credits;
+			if (credits) {
+				for (const credit of credits) {
+					if (credit.expiresAt) {
+						const expiryMs = Date.parse(credit.expiresAt);
+						if (!Number.isNaN(expiryMs)) {
+							const remaining = expiryMs - nowMs;
+							const expiryDate = credit.expiresAt.slice(0, 10);
+							if (remaining > 0) {
+								resetAccountLines.push(`        expires in ${formatDuration(remaining)} (${expiryDate})`);
+							} else {
+								resetAccountLines.push(`        expired (${expiryDate})`);
+							}
+						}
+					}
+				}
+			}
 		}
 		if (resetAccountLines.length > 0) {
 			lines.push(
@@ -1589,7 +1712,7 @@ function renderUsageReports(
 			const entries = group.limits.map((limit, index) => ({
 				limit,
 				report: group.reports[index],
-				fraction: resolveFraction(limit),
+				fraction: resolveUsedFraction(limit),
 				index,
 			}));
 			entries.sort((a, b) => {
@@ -1630,9 +1753,11 @@ function renderUsageReports(
 			if (resetText) {
 				lines.push(`  ${uiTheme.fg("dim", resetText)}`.trimEnd());
 			}
-			const notes = sortedLimits.flatMap(limit => limit.notes ?? []);
+			const notes = [...new Set(sortedLimits.flatMap(limit => limit.notes ?? []))];
 			if (notes.length > 0) {
-				lines.push(`  ${uiTheme.fg("dim", notes.join(" • "))}`.trimEnd());
+				lines.push(
+					`  ${uiTheme.fg("dim", replaceTabs(truncateToWidth(sanitizeText(notes.map(n => n.replace(/[\r\n]+/g, " ")).join(" • ")), 110)))}`.trimEnd(),
+				);
 			}
 		}
 
@@ -1640,8 +1765,8 @@ function renderUsageReports(
 		const unlimitedReports = providerReports.filter(report => report.limits.length === 0);
 		for (const report of unlimitedReports) {
 			const label = formatUnlimitedReportLabel(report, 0);
-			const tier = report.metadata?.planType as string | undefined;
-			const tierSuffix = tier ? ` ${uiTheme.fg("dim", `(${tier})`)}` : "";
+			const tier = report.metadata?.planType;
+			const tierSuffix = typeof tier === "string" && tier ? ` ${uiTheme.fg("dim", `(${tier})`)}` : "";
 			lines.push(
 				`${uiTheme.fg("success", uiTheme.status.success)} ${label}${tierSuffix} ${uiTheme.fg("dim", "-- no limits")}`,
 			);

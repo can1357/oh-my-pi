@@ -47,7 +47,7 @@ describe("markit MuPDF warnings", () => {
 		const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 		const debug = vi.spyOn(logger, "debug").mockImplementation(() => undefined);
 
-		const result = await convertBufferWithMarkit(warningPdf(), ".pdf");
+		const result = await convertBufferWithMarkit(warningPdf(), ".pdf", undefined, { useCache: false });
 
 		expect(result.ok).toBe(true);
 		expect(result.content).toContain("Tagged PDF repro text");

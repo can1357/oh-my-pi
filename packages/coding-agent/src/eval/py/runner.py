@@ -557,12 +557,6 @@ def _magic_run(args: str) -> None:
 def _magic_cell_bash(args: str, body: str) -> int:
     return _run_shell_body(body, shell_arg="/bin/bash")
 
-
-@cell_magic("sh")
-def _magic_cell_sh(args: str, body: str) -> int:
-    return _run_shell_body(body, shell_arg="/bin/sh")
-
-
 @cell_magic("capture")
 def _magic_cell_capture(args: str, body: str) -> str:
     """Capture stdout/stderr of body; bind to ``args`` (a name) if provided."""

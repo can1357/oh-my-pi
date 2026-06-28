@@ -129,6 +129,7 @@ function makeMnemopiConfig(
 		autoRetain: true,
 		polyphonicRecall: false,
 		enhancedRecall: false,
+		proactiveLinking: false,
 		retainEveryNTurns: 3,
 		recallLimit: 10,
 		recallContextTurns: 1,
@@ -470,6 +471,31 @@ describe("Mnemopi backend lifecycle", () => {
 			{ role: "user", content: "turn 4" },
 		]);
 		expect(state.lastRetainedTurn).toBe(4);
+	});
+
+	it("retains the full transcript but extracts facts from user-authored turns only", async () => {
+		const state = registerMnemopiState(makeMnemopiConfig(), { cwd: "/work/project-alpha" });
+		const rememberSpy = vi.spyOn(state, "rememberInScope").mockReturnValue("memory-id");
+
+		await state.retainMessages(
+			[
+				{ role: "user", content: "I always prefer tabs" },
+				{ role: "assistant", content: "the parser never initializes and reorder never activates" },
+				{ role: "user", content: "I never use semicolons" },
+			],
+			"source-1",
+		);
+
+		expect(rememberSpy).toHaveBeenCalledTimes(1);
+		const [storedTranscript, options] = rememberSpy.mock.calls[0];
+		if (options === undefined) throw new Error("retainMessages did not pass remember options");
+		expect(storedTranscript).toContain("[role: assistant]");
+		expect(storedTranscript).toContain("reorder never activates");
+		expect(options.extract).toBe(true);
+		expect(options.extractEntities).toBe(true);
+		expect(options.extractText).toContain("I always prefer tabs");
+		expect(options.extractText).toContain("I never use semicolons");
+		expect(options.extractText).not.toContain("parser never initializes");
 	});
 
 	it("registers subagent aliases from parent Mnemopi state without Hindsight", async () => {

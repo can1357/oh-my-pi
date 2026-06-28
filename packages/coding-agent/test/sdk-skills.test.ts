@@ -8,6 +8,7 @@ import type { Skill } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import { createAgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 function createIsolatedSkillsSettings(): Settings {
@@ -43,7 +44,7 @@ describe("createAgentSession skills option", () => {
 
 	afterAll(() => {
 		sharedAuthStorage.close();
-		fs.rmSync(sharedDir, { recursive: true, force: true });
+		removeSyncWithRetries(sharedDir);
 	});
 
 	beforeEach(() => {
@@ -118,7 +119,7 @@ Loaded via symbolic link.
 
 	it("should still discover project skills when user skills directory is missing", async () => {
 		const userAgentDir = path.join(tempHomeDir, ".omp", "agent");
-		fs.rmSync(path.join(userAgentDir, "skills"), { recursive: true, force: true });
+		removeSyncWithRetries(path.join(userAgentDir, "skills"));
 		fs.writeFileSync(path.join(userAgentDir, "placeholder.txt"), "placeholder");
 
 		const { session } = await createAgentSession({

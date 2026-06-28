@@ -3,8 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
-
 import * as git from "@pk-nerdsaver-ai/pi-coding-agent/utils/git";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 // Regression coverage for #1589: `git.clone({ sha })` used to hardcode
 // `--depth 1`, producing a shallow clone whose object store never contained
@@ -56,7 +56,7 @@ describe("git.clone with options.sha", () => {
 	});
 
 	afterAll(async () => {
-		await fs.rm(tmpRoot, { recursive: true, force: true });
+		await removeWithRetries(tmpRoot);
 	});
 
 	test("checks out a non-tip SHA (regression for #1589)", async () => {

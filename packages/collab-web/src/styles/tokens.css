@@ -1,5 +1,6 @@
-/* Design tokens — dark-only devtool aesthetic on the omp brand palette:
- * deep-purple surfaces, pink accent, cyan focus ring.
+/* Design tokens — omp brand palette: deep-purple surfaces, pink accent, cyan
+ * focus ring. Dark is the default; `[data-theme="light"]` and the
+ * prefers-color-scheme light fallback flip to light surfaces.
  * The ONLY file allowed to contain raw color values. */
 :root {
 	color-scheme: dark;
@@ -8,7 +9,7 @@
 	--bg: oklch(0.16 0.02 307);
 	--bg-raised: oklch(0.19 0.022 307);
 	--bg-inset: oklch(0.13 0.016 307);
-	--bg-overlay: oklch(0.22 0.026 307);
+	--bg-overlay: oklch(0.235 0.026 307);
 
 	/* text */
 	--fg: oklch(0.92 0.01 307);
@@ -19,6 +20,9 @@
 	--accent: oklch(0.674 0.23 341);
 	--accent-fg: oklch(0.2 0.07 341);
 	--accent-muted: oklch(0.674 0.23 341 / 18%);
+
+	/* brand lockup */
+	--brand-mark-gradient: linear-gradient(135deg, #ed4abf 0%, #9b4dff 50%, #5ad8e6 100%);
 
 	/* status — used sparingly */
 	--ok: oklch(0.76 0.14 150);
@@ -36,11 +40,74 @@
 	--font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
 
 	/* radii */
-	--radius-sm: 2px;
-	--radius: 4px;
+	--radius-sm: 3px;
+	--radius: 6px;
 	--radius-lg: 8px;
 
 	/* non-pinned helpers (kept here so no raw colors leak outside this file) */
 	--shadow-overlay: 0 12px 32px oklch(0 0 0 / 45%), 0 2px 8px oklch(0 0 0 / 30%);
+	--rail-mobile-shadow: -4px 0 16px oklch(0 0 0 / 30%);
 	--backdrop: oklch(0.1 0.014 307 / 62%);
+}
+
+/* Light theme — explicit override (toggle writes data-theme="light"). */
+[data-theme="light"] {
+	color-scheme: light;
+
+	--bg: oklch(0.985 0.004 307);
+	--bg-raised: oklch(1 0 0);
+	--bg-inset: oklch(0.95 0.006 307);
+	--bg-overlay: oklch(0.965 0.006 307);
+
+	--fg: oklch(0.26 0.03 307);
+	--fg-muted: oklch(0.46 0.03 307);
+	--fg-faint: oklch(0.58 0.025 307);
+
+	--accent: oklch(0.62 0.23 341);
+	--accent-fg: oklch(0.99 0.01 341);
+	--accent-muted: oklch(0.62 0.23 341 / 14%);
+
+	--ok: oklch(0.55 0.13 150);
+	--warn: oklch(0.6 0.13 85);
+	--err: oklch(0.55 0.19 25);
+
+	--border: oklch(0 0 0 / 10%);
+	--border-strong: oklch(0 0 0 / 15%);
+	--ring: oklch(0.58 0.13 230 / 70%);
+
+	--shadow-overlay: 0 12px 32px oklch(0 0 0 / 14%), 0 2px 8px oklch(0 0 0 / 10%);
+	--rail-mobile-shadow: -4px 0 16px oklch(0 0 0 / 14%);
+	--backdrop: oklch(0.55 0.02 307 / 28%);
+}
+
+/* Light theme — system fallback when no explicit preference is stored. */
+@media (prefers-color-scheme: light) {
+	:root:not([data-theme]) {
+		color-scheme: light;
+
+		--bg: oklch(0.985 0.004 307);
+		--bg-raised: oklch(1 0 0);
+		--bg-inset: oklch(0.95 0.006 307);
+		--bg-overlay: oklch(0.965 0.006 307);
+
+		--fg: oklch(0.26 0.03 307);
+		--fg-muted: oklch(0.46 0.03 307);
+		--fg-faint: oklch(0.58 0.025 307);
+
+		--accent: oklch(0.62 0.23 341);
+		--accent-fg: oklch(0.99 0.01 341);
+		--accent-muted: oklch(0.62 0.23 341 / 14%);
+
+		--ok: oklch(0.55 0.13 150);
+		--warn: oklch(0.6 0.13 85);
+		--err: oklch(0.55 0.19 25);
+
+		--border: oklch(0 0 0 / 10%);
+		--border-strong: oklch(0 0 0 / 15%);
+		--ring: oklch(0.58 0.13 230 / 70%);
+
+		--shadow-overlay: 0 12px 32px oklch(0 0 0 / 14%), 0 2px 8px oklch(0 0 0 / 10%);
+		--backdrop: oklch(0.55 0.02 307 / 28%);
+		--rail-mobile-shadow: -4px 0 16px oklch(0 0 0 / 14%);
+	}
 }

@@ -3,7 +3,7 @@
  *
  * `embedded-client.generated.txt` holds the base64 of a gzipped tar of the
  * built dashboard (`dist/client`). It is populated by
- * `scripts/generate-client-bundle.ts --generate` for compiled binaries and the
+ * `gen:stats` for compiled binaries and the
  * prepacked npm bundle, and reset to an empty file afterwards so the dev tree
  * keeps building the dashboard from source.
  */

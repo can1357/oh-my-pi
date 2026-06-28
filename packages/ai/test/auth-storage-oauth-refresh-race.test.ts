@@ -9,6 +9,7 @@ import {
 	SqliteAuthCredentialStore,
 } from "@pk-nerdsaver-ai/pi-ai/auth-storage";
 import * as oauthUtils from "@pk-nerdsaver-ai/pi-ai/registry/oauth";
+import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
 
 const SUPPRESS_ANTHROPIC_ENV = {
@@ -40,7 +41,7 @@ describe("AuthStorage OAuth refresh race", () => {
 		store = null;
 		authStorage = null;
 		if (tempDir) {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
 	});
@@ -383,5 +384,52 @@ describe("AuthStorage OAuth refresh race", () => {
 
 		const retryKey = await authStorage.getApiKey("unit-oauth-rotation", sessionId);
 		expect(retryKey).toBe("access-b");
+	});
+
+	test("persists a refreshed token by id when a concurrent disable shifts indices", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const now = Date.now();
+		// Three distinct expired accounts → index order A, B, C by id ascending.
+		await authStorage.set("anthropic", [
+			{ type: "oauth", access: "a-acc", refresh: "a-ref", expires: now - 60_000, accountId: "acc-a", email: "a@x" },
+			{ type: "oauth", access: "b-acc", refresh: "b-ref", expires: now - 60_000, accountId: "acc-b", email: "b@x" },
+			{ type: "oauth", access: "c-acc", refresh: "c-ref", expires: now - 60_000, accountId: "acc-c", email: "c@x" },
+		]);
+		const seeded = store.listAuthCredentials("anthropic");
+		expect(seeded).toHaveLength(3);
+		const idA = seeded[0]!.id;
+		const idB = seeded[1]!.id;
+		const idC = seeded[2]!.id;
+
+		// While B refreshes, a definitive failure disables A — removing index 0 and
+		// shifting B from index 1 to index 0. A pre-await positional write would
+		// land B's rotated token on C; the id-addressed write must hit B and leave
+		// C untouched.
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async (_provider, credential) => {
+			if (credential.refresh === "b-ref") {
+				authStorage!.disableCredentialById(idA, "test: concurrent disable");
+				return {
+					access: "b-fresh",
+					refresh: "b-fresh-ref",
+					expires: now + 60 * 60_000,
+					accountId: "acc-b",
+					email: "b@x",
+				};
+			}
+			return { ...credential, expires: now + 60 * 60_000 };
+		});
+
+		await withEnv(SUPPRESS_ANTHROPIC_ENV, async () => {
+			const refreshed = await authStorage!.forceRefreshCredentialById(idB);
+			expect(refreshed.id).toBe(idB);
+		});
+
+		const after = store.listAuthCredentials("anthropic");
+		const bRow = after.find(row => row.id === idB);
+		const cRow = after.find(row => row.id === idC);
+		expect(bRow?.credential.type).toBe("oauth");
+		if (bRow?.credential.type === "oauth") expect(bRow.credential.refresh).toBe("b-fresh-ref");
+		expect(cRow?.credential.type).toBe("oauth");
+		if (cRow?.credential.type === "oauth") expect(cRow.credential.refresh).toBe("c-ref");
 	});
 });

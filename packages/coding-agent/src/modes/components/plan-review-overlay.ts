@@ -23,7 +23,7 @@ import {
 	Markdown,
 	type MarkdownTheme,
 	matchesKey,
-	parseSgrMouse,
+	routeSgrMouseInput,
 	ScrollView,
 	truncateToWidth,
 	visibleWidth,
@@ -333,42 +333,42 @@ export class PlanReviewOverlay implements Component {
 	 * the body.
 	 */
 	#handleMouse(data: string): boolean {
-		const event = parseSgrMouse(data);
-		if (!event) return false;
-		if (event.wheel !== null) {
-			// Scroll wheel: three rows per notch.
-			this.#scrollView.scroll(event.wheel * 3);
-			return true;
-		}
-		if (event.release) return true;
-		if (event.motion) {
-			// Motion (hover or drag): light up the option row under the pointer so a
-			// mouse user gets the same affordance the keyboard cursor gives. Any
-			// non-option row clears the highlight.
-			this.#setHoveredOption(this.#optionClickRows.get(event.row));
-			return true;
-		}
-		if (!event.leftClick) return true;
-		const optionIndex = this.#optionClickRows.get(event.row);
-		if (optionIndex !== undefined) {
-			if (!this.#disabled.has(optionIndex)) {
-				this.#focus = "actions";
-				this.#selectedIndex = optionIndex;
-				this.#confirmSelection();
+		return routeSgrMouseInput(data, event => {
+			if (event.wheel !== null) {
+				// Scroll wheel: three rows per notch.
+				this.#scrollView.scroll(event.wheel * 3);
+				return true;
+			}
+			if (event.release) return true;
+			if (event.motion) {
+				// Motion (hover or drag): light up the option row under the pointer so a
+				// mouse user gets the same affordance the keyboard cursor gives. Any
+				// non-option row clears the highlight.
+				this.#setHoveredOption(this.#optionClickRows.get(event.row));
+				return true;
+			}
+			if (!event.leftClick) return true;
+			const optionIndex = this.#optionClickRows.get(event.row);
+			if (optionIndex !== undefined) {
+				if (!this.#disabled.has(optionIndex)) {
+					this.#focus = "actions";
+					this.#selectedIndex = optionIndex;
+					this.#confirmSelection();
+				}
+				return true;
+			}
+			const tocPos = this.#tocClickRows.get(event.row);
+			if (tocPos !== undefined && event.col < this.#sidebarClickMaxCol) {
+				this.#focus = "toc";
+				this.#tocCursor = tocPos;
+				this.#scrubBodyToToc();
+				return true;
+			}
+			if (this.#bodyClickRows.has(event.row)) {
+				this.#setFocus("body");
 			}
 			return true;
-		}
-		const tocPos = this.#tocClickRows.get(event.row);
-		if (tocPos !== undefined && event.col < this.#sidebarClickMaxCol) {
-			this.#focus = "toc";
-			this.#tocCursor = tocPos;
-			this.#scrubBodyToToc();
-			return true;
-		}
-		if (this.#bodyClickRows.has(event.row)) {
-			this.#setFocus("body");
-		}
-		return true;
+		});
 	}
 
 	/** Set the hovered option from a hit-tested row, ignoring disabled rows and

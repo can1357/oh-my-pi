@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
-import { getProjectAgentDir, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { getProjectAgentDir, removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 describe("Settings.reloadForCwd", () => {
@@ -76,7 +76,7 @@ describe("Settings.reloadForCwd", () => {
 			expect(settings.get("compaction.enabled")).toBe(true);
 		} finally {
 			resetSettingsForTest();
-			if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+			if (fs.existsSync(testDir)) removeSyncWithRetries(testDir);
 		}
 	});
 
@@ -92,7 +92,7 @@ describe("Settings.reloadForCwd", () => {
 			);
 		} finally {
 			resetSettingsForTest();
-			if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+			if (fs.existsSync(testDir)) removeSyncWithRetries(testDir);
 		}
 	});
 
@@ -109,7 +109,7 @@ describe("Settings.reloadForCwd", () => {
 			);
 		} finally {
 			resetSettingsForTest();
-			if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+			if (fs.existsSync(testDir)) removeSyncWithRetries(testDir);
 		}
 	});
 
@@ -141,7 +141,7 @@ describe("Settings.reloadForCwd", () => {
 		afterEach(() => {
 			resetSettingsForTest();
 			if (fs.existsSync(testDir)) {
-				fs.rmSync(testDir, { recursive: true, force: true });
+				removeSyncWithRetries(testDir);
 			}
 		});
 

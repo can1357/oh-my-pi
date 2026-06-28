@@ -13,6 +13,7 @@ import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@pk-nerdsaver-ai/pi-coding-agent/internal-urls";
 import { resetForTests as resetCacheForTests } from "@pk-nerdsaver-ai/pi-coding-agent/tools/github-cache";
 import * as git from "@pk-nerdsaver-ai/pi-coding-agent/utils/git";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 let tempDir: string;
 let originalEnv: string | undefined;
@@ -42,7 +43,7 @@ afterEach(async () => {
 		process.env.GH_TOKEN = originalGhToken;
 	}
 	vi.restoreAllMocks();
-	await fs.rm(tempDir, { recursive: true, force: true });
+	await removeWithRetries(tempDir);
 });
 
 function issuePayload(number: number, body: string, commentBodies: string[] = []) {

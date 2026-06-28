@@ -178,7 +178,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	async grep(args: Parameters<NonNullable<ICursorExecHandlers["grep"]>>[0]) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const searchPath = args.glob ? `${args.path || "."}/${args.glob}` : args.path || ".";
-		const toolResultMessage = await executeTool(this.options, "search", toolCallId, {
+		const toolResultMessage = await executeTool(this.options, "grep", toolCallId, {
 			pattern: args.pattern,
 			paths: [searchPath],
 			case: args.caseInsensitive === true ? false : undefined,

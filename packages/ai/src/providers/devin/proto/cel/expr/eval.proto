@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package cel.expr;
+
+import "google/protobuf/any.proto";
+import "cel/expr/value.proto";
+
+message EvalState {
+  message Result {
+    int64 expr = 1;
+    int64 value = 2;
+  }
+
+  repeated .cel.expr.ExprValue values = 1;
+  repeated .cel.expr.EvalState.Result results = 3;
+}
+
+message ExprValue {
+  oneof kind {
+    .cel.expr.Value value = 1;
+    .cel.expr.ErrorSet error = 2;
+    .cel.expr.UnknownSet unknown = 3;
+  }
+}
+
+message ErrorSet {
+  repeated .cel.expr.Status errors = 1;
+}
+
+message Status {
+  int32 code = 1;
+  string message = 2;
+  repeated .google.protobuf.Any details = 3;
+}
+
+message UnknownSet {
+  repeated int64 exprs = 1;
+}

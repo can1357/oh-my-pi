@@ -1,6 +1,6 @@
 **Tasks referenced by verbatim content string, NEVER an auto-generated ID — no "task-1"/"task-N" exists. Pass the content text in the `task` field.**
 
-Manages a phased task list. Pass `ops`: flat array of operations. Next pending task auto-promotes to `in_progress` on each completion. `pending` is a status, not an `op` — leave not-yet-started tasks implicit in `init`/`append`.
+On each completion the earliest still-open task (in phase order) auto-promotes to `in_progress`. Completing tasks out of phase order can move this pointer **back** to an earlier phase — that is expected; completed tasks are never reverted.
 
 ## Operations
 

@@ -13,7 +13,7 @@ import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import { InspectImageTool } from "@pk-nerdsaver-ai/pi-coding-agent/tools/inspect-image";
 import { inspectImageToolRenderer } from "@pk-nerdsaver-ai/pi-coding-agent/tools/inspect-image-renderer";
 import { toolRenderers } from "@pk-nerdsaver-ai/pi-coding-agent/tools/renderers";
-import { sanitizeText } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, sanitizeText } from "@pk-nerdsaver-ai/pi-utils";
 import { type } from "arktype";
 
 const TINY_PNG_BASE64 =
@@ -129,7 +129,7 @@ describe("InspectImageTool", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(testDir, { recursive: true, force: true });
+		removeSyncWithRetries(testDir);
 	});
 
 	it("sends image and question to completeSimple and returns text-only result", async () => {
@@ -161,7 +161,7 @@ describe("InspectImageTool", () => {
 		const stub = createCompleteSimpleSuccessStub("Attached image inspected");
 		const missingCwd = path.join(testDir, "missing-cwd");
 		const tool = new InspectImageTool(
-			createSession(missingCwd, visionModel, "test-key", Settings.isolated(), {
+			createSession(missingCwd, visionModel, "test-key", Settings.isolated({ "images.autoResize": false }), {
 				imageAttachments: [{ label: "Image #1", uri: "attachment://1", image }],
 			}),
 			stub.fn,

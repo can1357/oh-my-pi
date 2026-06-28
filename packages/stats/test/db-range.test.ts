@@ -56,6 +56,7 @@ function makeMessage(timestamp: number, entryId: string): MessageStats {
 				total: 0,
 			},
 		},
+		agentType: "main",
 	};
 }
 

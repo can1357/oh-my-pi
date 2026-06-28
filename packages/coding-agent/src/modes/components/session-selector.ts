@@ -6,6 +6,7 @@ import {
 	matchesKey,
 	padding,
 	replaceTabs,
+	routeSgrMouseInput,
 	ScrollView,
 	Spacer,
 	Text,
@@ -161,6 +162,12 @@ export function mergeSessionRanking(
 class SessionList implements Component {
 	#filteredSessions: SessionInfo[] = [];
 	#selectedIndex: number = 0;
+	// Maps a 0-based line within this list's own render to a filtered-session
+	// index, or undefined for chrome rows (search line, blanks, scrollbar gap).
+	// Rebuilt every render so the picker's mouse hit-testing tracks the live
+	// scroll window. Only consulted while the picker holds the alternate screen
+	// (where the overlay enables mouse tracking and paints from screen row 0).
+	#hitRows: (number | undefined)[] = [];
 	readonly #searchInput: Input;
 	onSelect?: (session: SessionInfo) => void;
 	onCancel?: () => void;
@@ -257,12 +264,32 @@ class SessionList implements Component {
 		}
 	}
 
+	/** Resolve a list-local rendered-line index to a filtered-session index. */
+	hitTestSession(line: number): number | undefined {
+		return this.#hitRows[line];
+	}
+
+	/** Wheel notch: move the selection one step (clamped, no wrap). */
+	handleWheel(delta: -1 | 1): void {
+		if (this.#filteredSessions.length === 0) return;
+		this.#selectedIndex = Math.max(0, Math.min(this.#filteredSessions.length - 1, this.#selectedIndex + delta));
+	}
+
+	/** Mouse click: select the session under the pointer and resume it. */
+	selectAndConfirm(index: number): void {
+		const session = this.#filteredSessions[index];
+		if (!session) return;
+		this.#selectedIndex = index;
+		this.onSelect?.(session);
+	}
+
 	invalidate(): void {
 		// No cached state to invalidate currently
 	}
 
 	render(width: number): readonly string[] {
 		const lines: string[] = [];
+		this.#hitRows = [];
 
 		// Render search input
 		lines.push(...this.#searchInput.render(width));
@@ -311,9 +338,11 @@ class SessionList implements Component {
 		// Each session block is built into sessionLines, then wrapped by ScrollView
 		// so the right-edge scrollbar is proportional at the physical-line level.
 		const sessionLines: string[] = [];
+		const sessionRowIndex: number[] = [];
 		const overflow = this.#filteredSessions.length > maxVisible;
 		const rowWidth = Math.max(0, width - (overflow ? 1 : 0));
 		for (let i = startIndex; i < endIndex; i++) {
+			const blockStart = sessionLines.length;
 			const session = this.#filteredSessions[i];
 			const isSelected = i === this.#selectedIndex;
 
@@ -353,6 +382,9 @@ class SessionList implements Component {
 			if (status) {
 				metadata += ` ${dot} ${status}`;
 			}
+			if (session.parentSessionPath) {
+				metadata += ` ${dot} ${dim(`${theme.icon.branch} fork`)}`;
+			}
 			if (this.#showCwd && session.cwd) {
 				metadata += ` ${dot} ${dim(shortenPath(session.cwd))}`;
 			}
@@ -360,6 +392,7 @@ class SessionList implements Component {
 
 			sessionLines.push(metadataLine);
 			sessionLines.push(""); // Blank line between sessions
+			for (let k = blockStart; k < sessionLines.length; k++) sessionRowIndex[k] = i;
 		}
 
 		// Wrap the rendered window in a ScrollView for a proportional right-edge bar.
@@ -372,16 +405,10 @@ class SessionList implements Component {
 			theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
 		});
 		sv.setScrollOffset(Math.round(startIndex * linesPerItem));
-		lines.push(...sv.render(width));
-
-		// Add keybinding hint
-		lines.push("");
-		lines.push(
-			theme.fg(
-				"muted",
-				`  [Del delete · Enter select · Tab ${this.#showCwd ? "current folder" : "all projects"} · Esc cancel]`,
-			),
-		);
+		const sessionRegionStart = lines.length;
+		const svLines = sv.render(width);
+		for (let k = 0; k < svLines.length; k++) this.#hitRows[sessionRegionStart + k] = sessionRowIndex[k];
+		lines.push(...svLines);
 
 		return lines;
 	}
@@ -454,13 +481,18 @@ export interface SessionSelectorOptions {
 	loadAllSessions?: () => Promise<SessionInfo[]>;
 	/** Preloaded all-projects list; cached so the first Tab toggle is instant. */
 	allSessions?: SessionInfo[];
-	/** Open directly in all-projects scope (e.g. the current folder has no sessions). */
-	startInAllScope?: boolean;
 	/**
 	 * Reads the live terminal height so the visible window fits the viewport.
 	 * Omitted only in tests; defaults to a conservative 24 rows.
 	 */
 	getTerminalRows?: () => number;
+	/**
+	 * Fill the whole viewport and pin the footer (hint + bottom border) to the
+	 * last rows, so the footer stops drifting as the list window changes height.
+	 * Set by the standalone `--resume` picker (fullscreen alternate screen); the
+	 * in-editor selector leaves it off and renders compactly.
+	 */
+	fillHeight?: boolean;
 }
 
 /**
@@ -469,6 +501,13 @@ export interface SessionSelectorOptions {
 export class SessionSelectorComponent extends Container {
 	#sessionList: SessionList;
 	#confirmationDialog: HookSelectorComponent | null = null;
+	// Hosts whichever of `#sessionList` / `#confirmationDialog` is live this
+	// frame. The delete dialog REPLACES the list in this slot rather than being
+	// appended below the picker chrome, so the picker is always
+	// `chrome + max(list, dialog) + chrome` and never overflows the viewport
+	// (issue #3283: an overflowing dialog frame committed the header into
+	// scrollback, stranding it above the viewport once the dialog closed).
+	#contentSlot: Container;
 	#messageContainer: Container;
 	#headerText: Text;
 	#onDelete?: (session: SessionInfo) => Promise<boolean>;
@@ -478,6 +517,18 @@ export class SessionSelectorComponent extends Container {
 	#globalSessions: SessionInfo[] | null = null;
 	#scope: "folder" | "all" = "folder";
 	#toggling = false;
+	// 0-based line where the session list begins within this component's own
+	// render, captured each frame. The fullscreen picker overlay paints from
+	// screen row 0, so a mouse row maps to `row - #listLineOffset` inside the
+	// list. Only meaningful while the picker holds the alternate screen.
+	#listLineOffset = 0;
+	// 0-based line where the pinned footer begins; clicks at or below it never
+	// hit-test the list, so a footer click on a cramped (trimmed) frame can't
+	// resume a session scrolled off-screen.
+	#footerStart = 0;
+	readonly #getTerminalRows: () => number;
+	readonly #fillHeight: boolean;
+	readonly #bottomBorder = new DynamicBorder();
 
 	constructor(
 		sessions: SessionInfo[],
@@ -493,11 +544,8 @@ export class SessionSelectorComponent extends Container {
 		this.#loadAllSessions = options.loadAllSessions;
 		this.#folderSessions = sessions;
 		this.#globalSessions = options.allSessions ?? null;
-		// Open in all-projects scope when asked and we already have that list
-		// (e.g. the current folder has no sessions to show).
-		const startAll = options.startInAllScope === true && this.#globalSessions !== null;
-		this.#scope = startAll ? "all" : "folder";
-		const initialSessions = startAll ? this.#globalSessions! : sessions;
+		this.#getTerminalRows = options.getTerminalRows ?? (() => 24);
+		this.#fillHeight = options.fillHeight ?? false;
 		// Add header
 		this.addChild(new Spacer(1));
 		this.#headerText = new Text(this.#headerLabel(), 1, 0);
@@ -506,8 +554,10 @@ export class SessionSelectorComponent extends Container {
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
 		this.addChild(this.#messageContainer);
-		// Create session list
-		this.#sessionList = new SessionList(initialSessions, startAll, options.historyMatcher, options.getTerminalRows);
+		// Create session list in folder scope; the empty-state hint invites the
+		// user to Tab into all-projects rather than silently surfacing other
+		// projects' history (issue #3099).
+		this.#sessionList = new SessionList(sessions, false, options.historyMatcher, options.getTerminalRows);
 		this.#sessionList.onSelect = onSelect;
 		this.#sessionList.onCancel = onCancel;
 		this.#sessionList.onExit = onExit;
@@ -519,11 +569,9 @@ export class SessionSelectorComponent extends Container {
 				void this.#toggleScope();
 			};
 		}
-		this.addChild(this.#sessionList);
-
-		// Add bottom border
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
+		this.#contentSlot = new Container();
+		this.#contentSlot.addChild(this.#sessionList);
+		this.addChild(this.#contentSlot);
 	}
 
 	#headerLabel(): string {
@@ -584,6 +632,15 @@ export class SessionSelectorComponent extends Container {
 
 	#showDeleteConfirmation(session: SessionInfo): void {
 		const displayName = session.title || session.firstMessage.slice(0, 40) || session.id;
+		const closeDialog = () => {
+			this.#confirmationDialog = null;
+			// Restore the SessionList into the content slot so the picker is back
+			// to its normal layout on the very next render — the same frame the
+			// dialog disappears.
+			this.#contentSlot.clear();
+			this.#contentSlot.addChild(this.#sessionList);
+			this.#onRequestRender?.();
+		};
 		this.#confirmationDialog = new HookSelectorComponent(
 			`Delete session?\n${displayName}`,
 			["Yes", "No"],
@@ -599,30 +656,86 @@ export class SessionSelectorComponent extends Container {
 						this.#showError(err instanceof Error ? err.message : String(err));
 					}
 				}
-				// Close confirmation dialog
-				this.removeChild(this.#confirmationDialog!);
-				this.#confirmationDialog = null;
-				// Request rerender
-				this.#onRequestRender?.();
+				closeDialog();
 			},
-			() => {
-				// Cancel - close confirmation dialog
-				this.removeChild(this.#confirmationDialog!);
-				this.#confirmationDialog = null;
-				// Request rerender
-				this.#onRequestRender?.();
-			},
+			closeDialog,
 		);
-		// Show confirmation dialog
-		this.addChild(this.#confirmationDialog);
+		// Swap the SessionList out of the content slot and mount the dialog in its
+		// place: the dialog competes only with the SessionList's rendered budget,
+		// never the SessionList AND the picker chrome, so the picker frame stays
+		// inside the terminal viewport and the TUI never commits the header into
+		// scrollback (issue #3283).
+		this.#contentSlot.clear();
+		this.#contentSlot.addChild(this.#confirmationDialog);
+		this.#onRequestRender?.();
+	}
+
+	/**
+	 * Concatenate the children's renders (like {@link Container}) while recording
+	 * the line where the session list begins, so the fullscreen picker can hit-
+	 * test mouse rows against the live list window. SessionList rebuilds its lines
+	 * every frame, so Container's reference-memoization never applied here.
+	 *
+	 * In fill-height mode the body is padded (or, on a cramped terminal, trimmed)
+	 * to leave exactly enough room for the footer at the screen bottom, so the
+	 * footer is always visible and never drifts as the list window resizes. The
+	 * in-editor selector just appends the footer directly.
+	 */
+	render(width: number): readonly string[] {
+		const lines: string[] = [];
+		for (const child of this.children) {
+			const childLines = child.render(width);
+			if (child === this.#contentSlot) this.#listLineOffset = lines.length;
+			for (const line of childLines) lines.push(line);
+		}
+		const footer = this.#footerLines(width);
+		if (this.#fillHeight) {
+			const target = Math.max(0, this.#getTerminalRows() - footer.length);
+			if (lines.length > target) lines.length = target;
+			else for (let i = lines.length; i < target; i++) lines.push("");
+		}
+		this.#footerStart = lines.length;
+		for (const line of footer) lines.push(line);
+		return lines;
+	}
+
+	/** Blank · keybinding hint · bottom border. Rendered by {@link render}. */
+	#footerLines(width: number): string[] {
+		const scopeHint = this.#scope === "all" ? "current folder" : "all projects";
+		const hint = theme.fg("muted", `  [Del delete · Enter select · Tab ${scopeHint} · Esc cancel]`);
+		return ["", hint, "", ...this.#bottomBorder.render(width)];
 	}
 
 	handleInput(keyData: string): void {
+		if (keyData.startsWith("\x1b[<")) {
+			this.#handleMouse(keyData);
+			return;
+		}
 		if (this.#confirmationDialog) {
 			this.#confirmationDialog.handleInput(keyData);
 		} else {
 			this.#sessionList.handleInput(keyData);
 		}
+	}
+
+	/**
+	 * SGR mouse reports, delivered only while the picker holds the alternate
+	 * screen (the fullscreen overlay enables tracking and paints from screen row
+	 * 0). Wheel scrolls the list; a left click resumes the session under the
+	 * pointer. Mouse is inert while the delete-confirmation dialog is open.
+	 */
+	#handleMouse(data: string): void {
+		if (this.#confirmationDialog) return;
+		routeSgrMouseInput(data, event => {
+			if (event.wheel !== null) {
+				this.#sessionList.handleWheel(event.wheel);
+				return true;
+			}
+			if (!event.leftClick || event.row >= this.#footerStart) return true;
+			const index = this.#sessionList.hitTestSession(event.row - this.#listLineOffset);
+			if (index !== undefined) this.#sessionList.selectAndConfirm(index);
+			return true;
+		});
 	}
 
 	getSessionList(): SessionList {

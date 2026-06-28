@@ -21,6 +21,7 @@ import {
 	loadCustomTools,
 	type ToolPathWithSource,
 } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/custom-tools";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("loadCustomTools per-session binding (#2190 review fix)", () => {
 	let tmp: string;
@@ -47,7 +48,7 @@ describe("loadCustomTools per-session binding (#2190 review fix)", () => {
 	});
 
 	afterAll(async () => {
-		await fs.rm(tmp, { recursive: true, force: true });
+		await removeWithRetries(tmp);
 	});
 
 	it("binds each load to the cwd passed to loadCustomTools", async () => {

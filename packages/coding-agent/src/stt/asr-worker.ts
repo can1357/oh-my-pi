@@ -10,14 +10,23 @@ import type {
 import {
 	ensureRuntimeInstalled,
 	getTinyModelsCacheDir,
-	installRuntimeModuleResolver,
 	isCompiledBinary,
 	resolveRuntimeModule,
 } from "@pk-nerdsaver-ai/pi-utils";
 import packageJson from "../../package.json" with { type: "json" };
+import {
+	errorMessage,
+	errorText,
+	getTransformersVersionSpec,
+	loadTransformersRuntime,
+	MemoizedRuntime,
+	replayCachedReady,
+	sendLog,
+	sendProgress,
+} from "../subprocess/worker-runtime";
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "../tiny/device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "../tiny/dtype";
-import type { SttProgressEvent, SttTransport, SttWorkerInbound } from "./asr-protocol";
+import type { SttTransport, SttWorkerInbound } from "./asr-protocol";
 import { type EndpointerEvent, StreamEndpointer } from "./endpointer";
 import {
 	getSttModelSpec,
@@ -28,9 +37,7 @@ import {
 } from "./models";
 
 const ASR_TASK = "automatic-speech-recognition";
-const TRANSFORMERS_PACKAGE = "@huggingface/transformers";
 const SHERPA_PACKAGE = "sherpa-onnx-node";
-const COMPILED_TRANSFORMERS_VERSION = process.env.PI_TINY_TRANSFORMERS_VERSION;
 // Whisper long-form decoding: split into 30s windows with 5s overlap so audio of
 // any length transcribes without exceeding the 30s receptive field.
 const CHUNK_LENGTH_S = 30;
@@ -136,34 +143,8 @@ function runOnModel<T>(work: () => Promise<T>): Promise<T> {
 	);
 	return run;
 }
-let transformersRuntime: Promise<TransformersRuntime> | null = null;
-let sherpaRuntime: Promise<SherpaRuntime> | null = null;
-
-let cachedTransformersVersionSpec: string | undefined;
-function resolveTransformersVersionSpec(): string {
-	const manifest = packageJson as {
-		optionalDependencies?: Record<string, string>;
-		dependencies?: Record<string, string>;
-	};
-	const versionSpec =
-		manifest.optionalDependencies?.[TRANSFORMERS_PACKAGE] ?? manifest.dependencies?.[TRANSFORMERS_PACKAGE];
-	if (!versionSpec) throw new Error(`${TRANSFORMERS_PACKAGE} is missing from package.json optionalDependencies`);
-	if (!versionSpec.startsWith("catalog:")) return versionSpec;
-	if (COMPILED_TRANSFORMERS_VERSION) return COMPILED_TRANSFORMERS_VERSION;
-	const installed = sourceRequire(`${TRANSFORMERS_PACKAGE}/package.json`) as { version: string };
-	return installed.version;
-}
-
-/**
- * Lazily resolve (and memoize) the transformers version spec. In the `catalog:`
- * case this `require`s the installed package manifest, so defer it to the
- * compiled-binary runtime-install path (only reached on a real transcribe /
- * download) — loading this worker for a smoke ping never triggers the resolve.
- */
-function getTransformersVersionSpec(): string {
-	cachedTransformersVersionSpec ??= resolveTransformersVersionSpec();
-	return cachedTransformersVersionSpec;
-}
+const transformersRuntime = new MemoizedRuntime<TransformersRuntime>();
+const sherpaRuntime = new MemoizedRuntime<SherpaRuntime>();
 
 let cachedSherpaVersionSpec: string | undefined;
 function resolveSherpaVersionSpec(): string {
@@ -181,23 +162,6 @@ function getSherpaVersionSpec(): string {
 	return cachedSherpaVersionSpec;
 }
 
-function errorText(error: unknown): string {
-	return error instanceof Error ? (error.stack ?? error.message) : String(error);
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
-function sendLog(
-	transport: SttTransport,
-	level: "debug" | "warn" | "error",
-	msg: string,
-	meta?: Record<string, unknown>,
-): void {
-	transport.send({ type: "log", level, msg, meta });
-}
-
 function getSttRuntimeDir(): string {
 	const key = getTransformersVersionSpec().replace(/[^A-Za-z0-9._-]/g, "_");
 	return path.join(path.dirname(getTinyModelsCacheDir()), "stt-runtime", `transformers-${key}`);
@@ -208,73 +172,6 @@ function getSherpaRuntimeDir(): string {
 	return path.join(path.dirname(getTinyModelsCacheDir()), "stt-runtime", `sherpa-${key}`);
 }
 
-function sendRuntimeInstallProgress(
-	transport: SttTransport,
-	requestId: string,
-	modelKey: SttModelKey,
-	status: "initiate" | "download" | "done",
-	name: string,
-): void {
-	transport.send({ type: "progress", id: requestId, event: { modelKey, status, name } });
-}
-
-/**
- * Prepare the freshly-installed compiled runtime for loading: stub `sharp` (the
- * speech pipeline is audio-only, so the native image codec is dead weight) and
- * patch the module resolver so Transformers.js's bare requires resolve against
- * the cache. Returns the absolute Transformers.js entrypoint to `require`.
- */
-async function prepareCompiledRuntime(runtimeDir: string): Promise<string> {
-	const nodeModules = path.join(runtimeDir, "node_modules");
-	const sharpStub = path.join(runtimeDir, "omp-sharp-stub.cjs");
-	await Bun.write(sharpStub, "module.exports = {};\n");
-	installRuntimeModuleResolver({ runtimeNodeModules: nodeModules, stubs: { sharp: sharpStub } });
-	const entry = resolveRuntimeModule(nodeModules, TRANSFORMERS_PACKAGE);
-	if (!entry) throw new Error(`Unable to resolve ${TRANSFORMERS_PACKAGE} in compiled runtime at ${nodeModules}`);
-	return entry;
-}
-
-function configureTransformers(transformers: TransformersRuntime): TransformersRuntime {
-	transformers.env.cacheDir = getTinyModelsCacheDir();
-	transformers.env.allowLocalModels = false;
-	transformers.env.logLevel = transformers.LogLevel.ERROR;
-	return transformers;
-}
-
-async function loadTransformers(
-	transport: SttTransport,
-	requestId: string,
-	modelKey: SttModelKey,
-): Promise<TransformersRuntime> {
-	if (transformersRuntime) return transformersRuntime;
-	transformersRuntime = (async () => {
-		if (!isCompiledBinary()) return configureTransformers(sourceRequire(TRANSFORMERS_PACKAGE) as TransformersRuntime);
-		const runtimeDir = await ensureRuntimeInstalled({
-			runtimeDir: getSttRuntimeDir(),
-			install: {
-				dependencies: { [TRANSFORMERS_PACKAGE]: getTransformersVersionSpec() },
-				trustedDependencies: ["onnxruntime-node"],
-			},
-			probePackage: TRANSFORMERS_PACKAGE,
-			onPhase: phase =>
-				sendRuntimeInstallProgress(
-					transport,
-					requestId,
-					modelKey,
-					phase,
-					`${TRANSFORMERS_PACKAGE}@${getTransformersVersionSpec()}`,
-				),
-		});
-		const entry = await prepareCompiledRuntime(runtimeDir);
-		const require_ = createRequire(entry);
-		return configureTransformers(require_(entry) as TransformersRuntime);
-	})().catch(error => {
-		transformersRuntime = null;
-		throw error;
-	});
-	return transformersRuntime;
-}
-
 /**
  * Resolve the native `sherpa-onnx-node` module. In a compiled binary the addon
  * (plus its per-platform prebuilt `sherpa-onnx.node` + bundled onnxruntime
@@ -283,69 +180,25 @@ async function loadTransformers(
  * is enough — no module-resolver patch or bare-require stubbing is needed.
  * Memoized so the runtime loads once per process.
  */
-async function loadSherpaRuntime(
-	transport: SttTransport,
-	requestId: string,
-	modelKey: SttModelKey,
-): Promise<SherpaRuntime> {
-	if (sherpaRuntime) return sherpaRuntime;
-	sherpaRuntime = (async () => {
+function loadSherpaRuntime(transport: SttTransport, requestId: string, modelKey: SttModelKey): Promise<SherpaRuntime> {
+	return sherpaRuntime.load(async () => {
 		if (!isCompiledBinary()) return sourceRequire(SHERPA_PACKAGE) as SherpaRuntime;
 		const runtimeDir = await ensureRuntimeInstalled({
 			runtimeDir: getSherpaRuntimeDir(),
 			install: { dependencies: { [SHERPA_PACKAGE]: getSherpaVersionSpec() } },
 			probePackage: SHERPA_PACKAGE,
 			onPhase: phase =>
-				sendRuntimeInstallProgress(
-					transport,
-					requestId,
-					modelKey,
-					phase,
-					`${SHERPA_PACKAGE}@${getSherpaVersionSpec()}`,
-				),
+				transport.send({
+					type: "progress",
+					id: requestId,
+					event: { modelKey, status: phase, name: `${SHERPA_PACKAGE}@${getSherpaVersionSpec()}` },
+				}),
 		});
 		const nodeModules = path.join(runtimeDir, "node_modules");
 		const entry = resolveRuntimeModule(nodeModules, SHERPA_PACKAGE);
 		if (!entry) throw new Error(`Unable to resolve ${SHERPA_PACKAGE} in compiled runtime at ${nodeModules}`);
 		return createRequire(entry)(entry) as SherpaRuntime;
-	})().catch(error => {
-		sherpaRuntime = null;
-		throw error;
 	});
-	return sherpaRuntime;
-}
-
-function toProgressEvent(modelKey: SttModelKey, info: ProgressInfo): SttProgressEvent {
-	if (info.status === "ready") {
-		return { modelKey, status: info.status, task: info.task, model: info.model };
-	}
-	if (info.status === "progress_total") {
-		return {
-			modelKey,
-			status: info.status,
-			name: info.name,
-			progress: info.progress,
-			loaded: info.loaded,
-			total: info.total,
-			files: info.files,
-		};
-	}
-	if (info.status === "progress") {
-		return {
-			modelKey,
-			status: info.status,
-			name: info.name,
-			file: info.file,
-			progress: info.progress,
-			loaded: info.loaded,
-			total: info.total,
-		};
-	}
-	return { modelKey, status: info.status, name: info.name, file: info.file };
-}
-
-function sendProgress(transport: SttTransport, id: string, modelKey: SttModelKey, info: ProgressInfo): void {
-	transport.send({ type: "progress", id, event: toProgressEvent(modelKey, info) });
 }
 
 async function loadPipelineOnDevice(
@@ -407,7 +260,13 @@ async function loadTransformersModel(
 	transport: SttTransport,
 	requestId: string,
 ): Promise<LoadedModel> {
-	const transformers = await loadTransformers(transport, requestId, modelKey);
+	const transformers = await loadTransformersRuntime(
+		transformersRuntime,
+		transport,
+		requestId,
+		modelKey,
+		getSttRuntimeDir,
+	);
 	const startedAt = performance.now();
 	const { pipeline, device } = await loadPipelineWithDeviceFallback(
 		transformers,
@@ -548,19 +407,8 @@ async function loadSherpaModel(
 async function loadModel(modelKey: SttModelKey, transport: SttTransport, requestId: string): Promise<LoadedModel> {
 	const spec = getSttModelSpec(modelKey);
 	if (!spec) throw new Error(`Unknown stt model: ${modelKey}`);
-	const cached = models.get(modelKey);
-	if (cached) {
-		void cached
-			.then(() => {
-				transport.send({
-					type: "progress",
-					id: requestId,
-					event: { modelKey, status: "ready", task: ASR_TASK, model: spec.repo },
-				});
-			})
-			.catch(() => undefined);
-		return cached;
-	}
+	const cached = replayCachedReady(models, modelKey, transport, requestId, ASR_TASK, spec.repo);
+	if (cached) return cached;
 
 	const loading =
 		spec.engine === "sherpa"

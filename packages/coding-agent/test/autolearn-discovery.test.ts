@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { getManagedSkillsDir } from "@pk-nerdsaver-ai/pi-coding-agent/autolearn/managed-skills";
 import "@pk-nerdsaver-ai/pi-coding-agent/discovery";
 import { loadSkills } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/skills";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import { getAgentDir, setAgentDir } from "@pk-nerdsaver-ai/pi-utils/dirs";
 
 async function writeSkill(dir: string, name: string, description: string): Promise<void> {
@@ -37,7 +38,7 @@ describe("managed-skills discovery", () => {
 	afterEach(async () => {
 		spyOn(os, "homedir").mockRestore();
 		setAgentDir(originalAgentDir);
-		await fs.rm(tempHome, { recursive: true, force: true });
+		await removeWithRetries(tempHome);
 	});
 
 	it("surfaces a managed skill tagged with the omp-managed provider", async () => {

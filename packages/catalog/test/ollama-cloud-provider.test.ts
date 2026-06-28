@@ -267,6 +267,25 @@ describe("ollama-cloud provider support", () => {
 		]);
 	});
 
+	test("surfaces empty length completions as context-window errors", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			createNdjsonResponse([
+				{ model: "gpt-oss:120b", done: true, done_reason: "length", prompt_eval_count: 1000, eval_count: 0 },
+			]),
+		);
+
+		const result = await stream(
+			cloudModel,
+			{
+				messages: [{ role: "user", content: "Large task prompt", timestamp: Date.now() }],
+			},
+			{ apiKey: "cloud-test-key", fetch: fetchMock },
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("prompt filled the context window");
+	});
+
 	test("sends max for GLM-5.2 xhigh reasoning on Ollama Cloud", async () => {
 		let requestBody: Record<string, unknown> | undefined;
 		const fetchMock: FetchImpl = vi.fn(async (_input, init) => {

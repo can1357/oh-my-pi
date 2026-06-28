@@ -69,7 +69,12 @@ describe("openai-responses parseRequest", () => {
 				{
 					type: "message",
 					role: "assistant",
-					content: [{ type: "output_text", text: "Let me think." }],
+					id: "msg_commentary",
+					phase: "commentary",
+					content: [
+						{ type: "output_text", text: "Let me " },
+						{ type: "output_text", text: "think." },
+					],
 				},
 				reasoningItem,
 				{
@@ -121,6 +126,9 @@ describe("openai-responses parseRequest", () => {
 		expect(a.model).toBe("gpt-5.3-codex-spark");
 		expect(a.content).toHaveLength(3);
 		expect(a.content[0]).toMatchObject({ type: "text", text: "Let me think." });
+		const commentary = a.content[0];
+		if (commentary?.type !== "text") throw new Error("expected commentary text");
+		expect(commentary.textSignature).toBe(JSON.stringify({ v: 1, id: "msg_commentary", phase: "commentary" }));
 		expect(a.content[1]).toMatchObject({
 			type: "thinking",
 			thinking: "The user wants arithmetic.",
@@ -303,6 +311,51 @@ describe("openai-responses encodeResponse", () => {
 			output_tokens: 20,
 			output_tokens_details: { reasoning_tokens: 5 },
 			total_tokens: 40,
+		});
+	});
+
+	it("encodes assistant message phase from text signatures", () => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5",
+			content: [
+				{
+					type: "text",
+					text: "Intermediate update",
+					textSignature: JSON.stringify({ v: 1, id: "msg_commentary", phase: "commentary" }),
+				},
+				{
+					type: "text",
+					text: "Final answer",
+					textSignature: JSON.stringify({ v: 1, id: "msg_final", phase: "final_answer" }),
+				},
+			],
+			usage: zeroUsage(),
+			stopReason: "stop",
+			timestamp: 1_700_000_000_000,
+		};
+
+		const body = encodeResponse(message, "gpt-5-requested");
+		const output = body.output as Array<Record<string, unknown>>;
+
+		expect(output).toHaveLength(2);
+		expect(output[0]).toMatchObject({
+			type: "message",
+			id: "msg_commentary",
+			role: "assistant",
+			status: "completed",
+			phase: "commentary",
+			content: [{ type: "output_text", text: "Intermediate update", annotations: [] }],
+		});
+		expect(output[1]).toMatchObject({
+			type: "message",
+			id: "msg_final",
+			role: "assistant",
+			status: "completed",
+			phase: "final_answer",
+			content: [{ type: "output_text", text: "Final answer", annotations: [] }],
 		});
 	});
 
@@ -493,6 +546,44 @@ describe("openai-responses encodeStream", () => {
 		});
 		// Critical gotcha: id and call_id are distinct.
 		expect(output[2]!.id).not.toBe(output[2]!.call_id);
+	});
+
+	it("streams assistant message phase from text signatures", async () => {
+		const stream = new AssistantMessageEventStream();
+		const textSignature = JSON.stringify({ v: 1, id: "msg_commentary", phase: "commentary" });
+		const message: AssistantMessage = {
+			role: "assistant",
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5",
+			content: [{ type: "text", text: "Working", textSignature }],
+			usage: { ...zeroUsage(), input: 1, output: 1 },
+			stopReason: "stop",
+			timestamp: 1_700_000_000_000,
+		};
+
+		queueMicrotask(() => {
+			stream.push({ type: "start", partial: { ...message, content: [] } });
+			stream.push({ type: "text_start", contentIndex: 0, partial: message });
+			stream.push({ type: "text_delta", contentIndex: 0, delta: "Working", partial: message });
+			stream.push({ type: "text_end", contentIndex: 0, content: "Working", partial: message });
+			stream.push({ type: "done", reason: "stop", message });
+		});
+
+		const raw = await collectStream(encodeStream(stream, "gpt-5-requested"));
+		const frames = parseSse(raw);
+		const messageItems = frames
+			.filter(f => f.event === "response.output_item.added" || f.event === "response.output_item.done")
+			.map(f => (f.data as Record<string, unknown>).item as Record<string, unknown>)
+			.filter(item => item.type === "message");
+		const completed = frames.find(f => f.event === "response.completed")?.data as Record<string, unknown> | undefined;
+		const response = completed?.response as Record<string, unknown> | undefined;
+		const output = response?.output as Array<Record<string, unknown>> | undefined;
+
+		expect(messageItems).toHaveLength(2);
+		expect(messageItems[0]).toMatchObject({ id: "msg_commentary", phase: "commentary" });
+		expect(messageItems[1]).toMatchObject({ id: "msg_commentary", phase: "commentary" });
+		expect(output?.[0]).toMatchObject({ id: "msg_commentary", phase: "commentary" });
 	});
 
 	it("routes late tool-call deltas by contentIndex after later parallel starts", async () => {

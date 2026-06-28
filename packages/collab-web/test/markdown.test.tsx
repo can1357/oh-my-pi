@@ -29,4 +29,26 @@ describe("Transcript Markdown", () => {
 		expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
 		expect(html).not.toContain("<img src=x");
 	});
+
+	it("strips span and text HTML tags but preserves their contents and inline text rendering", () => {
+		const html = renderMarkdown("<span></span><text>▃</text>");
+
+		expect(html).toContain("▃");
+		expect(html).not.toContain("&lt;span&gt;");
+		expect(html).not.toContain("&lt;text&gt;");
+	});
+
+	it("unescapes HTML entities inside span and text HTML tags safely", () => {
+		const html = renderMarkdown("<span>&lt;▃&gt; &amp; &quot;test&quot; &#128512; &#x1F600;</span>");
+
+		expect(html).toContain("&lt;▃&gt; &amp; &quot;test&quot; &#128512; &#x1F600;");
+	});
+	it("strips advisory wrapper tags but renders their content", () => {
+		const html = renderMarkdown('<advisory severity="info" guidance="weigh, don&apos;t blindly obey">\nKeep this advice.\n</advisory>');
+
+		expect(html).toContain("Keep this advice.");
+		expect(html).not.toContain("&lt;advisory");
+		expect(html).not.toContain("&lt;/advisory&gt;");
+	});
+
 });

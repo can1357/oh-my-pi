@@ -123,7 +123,6 @@ Each provider has one or more environment variables that supply a key when no st
 | `gitlab-duo` | `GITLAB_TOKEN` |
 | `opencode-zen`, `opencode-go` | `OPENCODE_API_KEY` |
 | `firepass` | `FIREPASS_API_KEY` |
-| `wafer-pass` | `WAFER_PASS_API_KEY` |
 | `wafer-serverless` | `WAFER_SERVERLESS_API_KEY` |
 | `xiaomi` | `XIAOMI_API_KEY` |
 | `ollama-cloud` | `OLLAMA_CLOUD_API_KEY` |
@@ -131,7 +130,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `lm-studio` | `LM_STUDIO_API_KEY` (optional; keyless by default) |
 | `llama.cpp` | `LLAMA_CPP_API_KEY` (only when the server requires auth) |
 
-OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-pass`, `wafer-serverless`, `google-gemini-cli`, and `google-antigravity` are normally reached through `/login` rather than an environment variable. See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
+OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, and `google-antigravity` are normally reached through `/login` rather than an environment variable. See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
 
 ### `.env` discovery and precedence
 

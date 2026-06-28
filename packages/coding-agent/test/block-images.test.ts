@@ -6,6 +6,7 @@ import { processFileArguments } from "@pk-nerdsaver-ai/pi-coding-agent/cli/file-
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import { ReadTool } from "@pk-nerdsaver-ai/pi-coding-agent/tools/read";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 // 1x1 red PNG image as base64 (smallest valid PNG)
 const TINY_PNG_BASE64 =
@@ -31,7 +32,7 @@ describe("blockImages setting", () => {
 		});
 
 		afterEach(() => {
-			fs.rmSync(testDir, { recursive: true, force: true });
+			removeSyncWithRetries(testDir);
 		});
 
 		it("should include image blocks when inspect_image is disabled", async () => {
@@ -74,7 +75,7 @@ describe("blockImages setting", () => {
 		});
 
 		afterEach(() => {
-			fs.rmSync(testDir, { recursive: true, force: true });
+			removeSyncWithRetries(testDir);
 		});
 
 		it("should always process images (filtering happens at convertToLlm layer)", async () => {

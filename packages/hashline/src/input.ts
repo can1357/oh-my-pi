@@ -13,7 +13,7 @@ import { resolveBlockEdits } from "./block";
 import { HL_FILE_HASH_EXAMPLES, HL_FILE_HASH_LENGTH, HL_FILE_HASH_SEP, HL_FILE_PREFIX, HL_FILE_SUFFIX } from "./format";
 import { parsePatch, parsePatchStreaming } from "./parser";
 import { Tokenizer } from "./tokenizer";
-import type { ApplyResult, BlockResolver, Edit, SplitOptions } from "./types";
+import type { ApplyResult, BlockResolver, Edit, FileOp, SplitOptions } from "./types";
 
 // Pure classification — single shared tokenizer is safe.
 const TOKENIZER = new Tokenizer();
@@ -237,7 +237,7 @@ export class PatchSection {
 	readonly path: string;
 	readonly fileHash: string | undefined;
 	readonly diff: string;
-	#parsed: { edits: Edit[]; warnings: string[] } | undefined;
+	#parsed: { edits: Edit[]; fileOp?: FileOp; warnings: string[] } | undefined;
 
 	constructor(raw: RawSection) {
 		this.path = raw.path;
@@ -247,17 +247,31 @@ export class PatchSection {
 
 	/**
 	 * Parse this section's diff body. Cached: subsequent calls return the
-	 * same `{ edits, warnings }` object so callers can safely call this from
+	 * same `{ edits, fileOp?, warnings }` object so callers can safely call this from
 	 * multiple paths (preflight, apply, diff-preview).
 	 */
-	parse(): { edits: Edit[]; warnings: readonly string[] } {
+	parse(): { edits: Edit[]; fileOp?: FileOp; warnings: readonly string[] } {
 		this.#parsed ??= parsePatch(this.diff);
-		return this.#parsed;
+		const parsed = this.#parsed;
+		const fileOp =
+			parsed.fileOp === undefined
+				? undefined
+				: parsed.fileOp.kind === "move"
+					? { kind: "move" as const, dest: normalizeHashlinePath(parsed.fileOp.dest) }
+					: parsed.fileOp;
+		return fileOp === parsed.fileOp
+			? parsed
+			: { edits: parsed.edits, ...(fileOp === undefined ? {} : { fileOp }), warnings: parsed.warnings };
 	}
 
 	/** Parsed edits for this section. */
 	get edits(): readonly Edit[] {
 		return this.parse().edits;
+	}
+
+	/** Optional whole-file operation (`REM` / `MV`). */
+	get fileOp(): FileOp | undefined {
+		return this.parse().fileOp;
 	}
 
 	/** Warnings emitted during parsing of this section. */
@@ -347,6 +361,22 @@ export class PatchSection {
 		return merged.length > 0
 			? { ...result, warnings: merged }
 			: { text: result.text, firstChangedLine: result.firstChangedLine };
+	}
+
+	/**
+	 * A copy of this section rebound to a different target `path`, preserving
+	 * the snapshot tag, diff body, and any cached parse result. Used by the
+	 * patcher's tag-based path recovery to redirect an edit whose authored
+	 * path does not exist onto the file its snapshot tag actually names.
+	 */
+	withPath(path: string): PatchSection {
+		const next = new PatchSection({
+			path,
+			...(this.fileHash !== undefined ? { fileHash: this.fileHash } : {}),
+			diff: this.diff,
+		});
+		next.#parsed = this.#parsed;
+		return next;
 	}
 }
 

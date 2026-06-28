@@ -66,7 +66,7 @@ describe("agentLoop with owned in-band tool calls", () => {
 		const promptSection = sys0.join("\n");
 		expect(promptSection).toContain("<tools>");
 		expect(promptSection).toContain('"name":"echo"');
-		expect(promptSection).toContain("YOU MUST EMIT THE STOP SEQUENCE AND HALT");
+		expect(promptSection).toContain("<arg_key>name</arg_key>");
 
 		// Second request: the wire carries NO native tool blocks — prior call/result
 		// are plain <tool_call> / <tool_response> text, and tools are still stripped.

@@ -113,22 +113,4 @@ describe("extension loader host runtime binding", () => {
 		expect(hookResult.hooks).toHaveLength(1);
 		expect(hookResult.hooks[0].handlers.has("identity:event")).toBe(true);
 	});
-
-	it("keeps runtime loaders free of bare package self-imports", async () => {
-		// Normal workspace resolution can make a bare self-import resolve to the same module,
-		// so keep a narrow static tripwire for the global-install mixed-version layout.
-		const loaderPaths = [
-			path.join(import.meta.dir, "..", "src", "extensibility", "extensions", "loader.ts"),
-			path.join(import.meta.dir, "..", "src", "extensibility", "custom-tools", "loader.ts"),
-			path.join(import.meta.dir, "..", "src", "extensibility", "custom-commands", "loader.ts"),
-			path.join(import.meta.dir, "..", "src", "extensibility", "hooks", "loader.ts"),
-		];
-
-		for (const loaderPath of loaderPaths) {
-			const source = await Bun.file(loaderPath).text();
-
-			expect(source).not.toMatch(/from\s+["']@pk-nerdsaver-ai\/pi-coding-agent["']/);
-			expect(source).not.toMatch(/import\(\s*["']@pk-nerdsaver-ai\/pi-coding-agent["']\s*\)/);
-		}
-	});
 });

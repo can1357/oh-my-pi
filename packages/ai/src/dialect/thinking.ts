@@ -1,17 +1,29 @@
 import { partialSuffixOverlapAny } from "./coercion";
 import type { InbandScanEvent, InbandScanner } from "./types";
 
-const THINK_OPEN = "<think>";
-const THINK_CLOSE = "</think>";
-const THINKING_OPEN = "<thinking>";
-const THINKING_CLOSE = "</thinking>";
-const TAGS = [
-	{ open: THINK_OPEN, close: THINK_CLOSE },
-	{ open: THINKING_OPEN, close: THINKING_CLOSE },
-] as const;
-const OPENS = [THINK_OPEN, THINKING_OPEN] as const;
-
 type Tag = { readonly open: string; readonly close: string };
+
+/**
+ * Every dialect's in-band thinking section in its canonical `renderThinking`
+ * form (see the sibling `./*.ts` scanners). {@link ThinkingInbandScanner} heals
+ * reasoning a model leaked into its visible text channel back into thinking
+ * events, whichever dialect idiom the leak used.
+ *
+ * Plain (attribute-free) delimiters only — matching what `renderThinking`
+ * emits and what models leak in practice. Attributed or namespaced XML thinking
+ * tags (`<thinking signature="…">`, `antml:thinking`) are recovered by the owned
+ * anthropic-dialect parser, not this text-channel healing fallback.
+ */
+const TAGS: readonly Tag[] = [
+	{ open: "<think>", close: "</think>" }, // deepseek, glm, hermes, kimi, qwen3 (and anthropic/minimax/xml)
+	{ open: "<thinking>", close: "</thinking>" }, // anthropic, minimax, xml
+	{ open: "<scratchpad>", close: "</scratchpad>" }, // anthropic
+	{ open: "```thinking\n", close: "```" }, // gemini fenced thinking
+	{ open: "<|channel>thought\n", close: "<channel|>" }, // gemma reasoning channel
+	{ open: "<|start|>assistant<|channel|>analysis<|message|>", close: "<|end|>" }, // harmony analysis (rendered)
+	{ open: "<|channel|>analysis<|message|>", close: "<|end|>" }, // harmony analysis (bare leak)
+];
+const OPENS = TAGS.map(tag => tag.open);
 
 export class ThinkingInbandScanner implements InbandScanner {
 	#buffer = "";

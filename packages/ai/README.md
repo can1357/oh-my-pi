@@ -62,7 +62,6 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **Hugging Face Inference**
 - **xAI**
 - **Venice** (requires `VENICE_API_KEY`)
-- **Wafer Pass** (requires `WAFER_PASS_API_KEY`; flat-rate subscription, includes GLM-5.1 and Qwen3.5-397B-A17B)
 - **Wafer Serverless** (requires `WAFER_SERVERLESS_API_KEY`; pay-as-you-go)
 - **OpenRouter**
 - **Kilo Gateway** (supports OAuth `/login kilo` or `KILO_API_KEY`)

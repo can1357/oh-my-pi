@@ -1,0 +1,99 @@
+%YAML 1.2
+---
+# Derived from wmertens/sublime-nix (MIT, copyright (c) 2016 Wout Mertens).
+
+name: Nix
+file_extensions:
+  - nix
+scope: source.nix
+
+contexts:
+  main:
+    - include: comments
+    - include: strings
+    - include: keywords
+    - include: constants
+    - include: numbers
+    - include: builtins
+    - include: operators
+    - include: punctuation
+    - include: identifiers
+
+  comments:
+    - match: '#.*$'
+      scope: comment.line.number-sign.nix
+    - match: /\*
+      scope: punctuation.definition.comment.begin.nix
+      push:
+        - meta_scope: comment.block.nix
+        - match: \*/
+          scope: punctuation.definition.comment.end.nix
+          pop: true
+
+  strings:
+    - match: '"'
+      scope: punctuation.definition.string.begin.nix
+      push:
+        - meta_scope: string.quoted.double.nix
+        - match: '\\\\.'
+          scope: constant.character.escape.nix
+        - match: '\$\{'
+          scope: punctuation.section.interpolation.begin.nix
+          push:
+            - meta_scope: meta.interpolation.nix
+            - match: '\}'
+              scope: punctuation.section.interpolation.end.nix
+              pop: true
+            - include: main
+        - match: '"'
+          scope: punctuation.definition.string.end.nix
+          pop: true
+    - match: "''"
+      scope: punctuation.definition.string.begin.nix
+      push:
+        - meta_scope: string.quoted.other.indented.nix
+        - match: "'''[\\$]"
+          scope: constant.character.escape.nix
+        - match: "\\$\\{"
+          scope: punctuation.section.interpolation.begin.nix
+          push:
+            - meta_scope: meta.interpolation.nix
+            - match: '\}'
+              scope: punctuation.section.interpolation.end.nix
+              pop: true
+            - include: main
+        - match: "''"
+          scope: punctuation.definition.string.end.nix
+          pop: true
+
+  keywords:
+    - match: '\b(assert|else|if|in|inherit|let|rec|then|with)\b'
+      scope: keyword.control.nix
+
+  constants:
+    - match: '\b(true|false|null)\b'
+      scope: constant.language.nix
+
+  numbers:
+    - match: '\b[0-9]+(?:\.[0-9]+)?\b'
+      scope: constant.numeric.nix
+
+  builtins:
+    - match: '\bbuiltins\.[A-Za-z_][A-Za-z0-9_''-]*\b'
+      scope: support.function.builtin.nix
+    - match: '\b(import|abort|baseNameOf|derivation|derivationStrict|dirOf|fetchTarball|fetchurl|isNull|map|placeholder|removeAttrs|scopedImport|throw|toString)\b'
+      scope: support.function.builtin.nix
+
+  operators:
+    - match: '(\+\+|//|==|!=|<=|>=|&&|\|\||->|[!+\-*/<>?@])'
+      scope: keyword.operator.nix
+
+  punctuation:
+    - match: '[{}()\[\].,;:]'
+      scope: punctuation.nix
+
+  identifiers:
+    - match: '\b[A-Za-z_][A-Za-z0-9_''-]*\b(?=\s*=)'
+      scope: variable.other.member.nix
+    - match: '\b[A-Za-z_][A-Za-z0-9_''-]*\b'
+      scope: variable.other.nix

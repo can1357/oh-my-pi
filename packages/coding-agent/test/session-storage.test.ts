@@ -3,14 +3,14 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { FileSessionStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-storage";
 
 describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 	let tempDir: string;
-	let storage: { deleteSessionWithArtifacts(sessionPath: string): Promise<void> };
+	let storage: FileSessionStorage;
 
 	beforeEach(async () => {
 		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-storage-"));
-		const { FileSessionStorage } = await import("@pk-nerdsaver-ai/pi-coding-agent/session/session-storage");
 		storage = new FileSessionStorage();
 	});
 
@@ -55,5 +55,30 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		expect(rmSpy).toHaveBeenCalledWith(artifactsDir, { recursive: true, force: true });
 		expect(fs.existsSync(sessionPath)).toBe(false);
 		expect(fs.existsSync(artifactsDir)).toBe(true);
+	});
+});
+
+describe("FileSessionStorage.writeTextSync", () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-storage-"));
+	});
+
+	afterEach(async () => {
+		await fsp.rm(tempDir, { recursive: true, force: true });
+	});
+
+	it("replaces the file identity so transcript tailers detect rewrites", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+
+		storage.writeTextSync(sessionPath, "first\n");
+		const first = fs.statSync(sessionPath);
+		storage.writeTextSync(sessionPath, "second\n");
+		const second = fs.statSync(sessionPath);
+
+		expect(second.ino).not.toBe(first.ino);
+		expect(await Bun.file(sessionPath).text()).toBe("second\n");
 	});
 });

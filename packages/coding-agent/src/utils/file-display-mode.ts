@@ -14,7 +14,7 @@ export interface FileDisplayModeSession {
 	/** Whether the edit tool is available. Hashlines are suppressed without it. */
 	hasEditTool?: boolean;
 	settings: {
-		get(key: "readLineNumbers" | "readHashLines" | "edit.mode"): unknown;
+		get(key: "readLineNumbers" | "edit.mode"): unknown;
 	};
 }
 
@@ -36,8 +36,7 @@ export function resolveFileDisplayMode(
 	const usesHashLineAnchors = editMode === "hashline";
 	const raw = options?.raw === true;
 	const immutable = options?.immutable === true;
-	const hashLines =
-		!raw && !immutable && hasEditTool && usesHashLineAnchors && settings.get("readHashLines") !== false;
+	const hashLines = !raw && !immutable && hasEditTool && usesHashLineAnchors;
 	return {
 		hashLines,
 		lineNumbers: !raw && (hashLines || settings.get("readLineNumbers") === true),

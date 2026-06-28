@@ -10,7 +10,9 @@ import {
 	type ImageBudget,
 	Input,
 	matchesKey,
-	parseSgrMouse,
+	replaceTabs,
+	routeSelectListMouse,
+	routeSgrMouseInput,
 	type SelectItem,
 	SelectList,
 	type SettingItem,
@@ -24,7 +26,14 @@ import {
 	visibleWidth,
 } from "@pk-nerdsaver-ai/pi-tui";
 import type { ShapeTarget } from "@pk-nerdsaver-ai/snapcompact";
-import { getDefault, type SettingPath, settings } from "../../config/settings";
+import {
+	getDefault,
+	getType,
+	normalizeProviderMaxInFlightRequests,
+	type SettingPath,
+	settings,
+	validateProviderMaxInFlightRequests,
+} from "../../config/settings";
 import type {
 	SettingTab,
 	StatusLinePreset,
@@ -50,6 +59,7 @@ import { getPreset } from "./status-line/presets";
  */
 class TextInputSubmenu extends Container {
 	#input: Input;
+	#error: Text;
 
 	constructor(
 		label: string,
@@ -71,11 +81,18 @@ class TextInputSubmenu extends Container {
 		if (currentValue) {
 			this.#input.setValue(currentValue);
 		}
+		this.#error = new Text("", 0, 0);
 		this.#input.onSubmit = value => {
-			this.onSubmit(value); // empty string clears the setting
+			try {
+				this.onSubmit(value); // empty string clears the setting
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.#error.setText(theme.fg("error", truncateToWidth(replaceTabs(message).replace(/[\r\n]+/g, " "), 100)));
+			}
 		};
 		this.addChild(this.#input);
 		this.addChild(new Spacer(1));
+		this.addChild(this.#error);
 		this.addChild(new Text(theme.fg("dim", "  Enter to save · Esc to cancel · Clear field to unset"), 0, 0));
 	}
 
@@ -89,7 +106,6 @@ class SelectSubmenu extends Container {
 	#previewText: Text | null = null;
 	#previewUpdateRequestId: number = 0;
 	#selectListLineOffset = 0;
-	#selectListLineCount = 0;
 
 	constructor(
 		title: string,
@@ -187,7 +203,6 @@ class SelectSubmenu extends Container {
 			const childLines = child.render(Math.max(1, width));
 			if (child === this.#selectList) {
 				this.#selectListLineOffset = lines.length;
-				this.#selectListLineCount = childLines.length;
 			}
 			lines.push(...childLines);
 		}
@@ -196,24 +211,118 @@ class SelectSubmenu extends Container {
 
 	/** Mouse routed from the host: wheel steps, hover lights, click confirms. */
 	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
-		if (event.wheel !== null) {
-			this.#selectList.handleWheel(event.wheel);
-			return;
-		}
-		const listLine = line - this.#selectListLineOffset;
-		const within = listLine >= 0 && listLine < this.#selectListLineCount;
-		const index = within ? this.#selectList.hitTest(listLine) : undefined;
-		if (event.motion) {
-			this.#selectList.setHoverIndex(index ?? null);
-			return;
-		}
-		if (event.leftClick && index !== undefined) {
-			this.#selectList.clickItem(index);
-		}
+		routeSelectListMouse(this.#selectList, event, line - this.#selectListLineOffset);
 	}
 
 	handleInput(data: string): void {
 		this.#selectList.handleInput(data);
+	}
+}
+
+class ProviderLimitsSubmenu extends Container {
+	#selectList: SelectList | undefined;
+
+	constructor(
+		private readonly providers: readonly string[],
+		private readonly onChange: (value: Record<string, number>) => void,
+		private readonly onCancel: () => void,
+		private readonly requestRender?: () => void,
+	) {
+		super();
+		this.#showProviderList();
+	}
+
+	#providerIds(): string[] {
+		const limits = normalizeProviderMaxInFlightRequests(settings.get("providers.maxInFlightRequests"));
+		return [...new Set([...this.providers, ...Object.keys(limits)])].sort((a, b) => a.localeCompare(b));
+	}
+
+	#showProviderList(): void {
+		this.clear();
+		this.addChild(new Text(theme.bold(theme.fg("accent", "Max In-Flight Requests")), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(
+			new Text(
+				theme.fg(
+					"muted",
+					"Select a provider, enter a positive number to cap concurrent LLM requests, or clear it for unlimited.",
+				),
+				0,
+				0,
+			),
+		);
+		this.addChild(new Spacer(1));
+
+		const limits = normalizeProviderMaxInFlightRequests(settings.get("providers.maxInFlightRequests"));
+		const providerItems = this.#providerIds().map((provider): SelectItem => {
+			const limit = limits[provider];
+			return {
+				value: provider,
+				label: provider,
+				description: limit === undefined ? "Unlimited" : `Limit: ${limit}`,
+			};
+		});
+		const clearItem: SelectItem[] =
+			Object.keys(limits).length === 0
+				? []
+				: [{ value: "__clear_all", label: "Clear all limits", description: "Make every provider unlimited" }];
+		const items = [...providerItems, ...clearItem];
+		this.#selectList = new SelectList(items, Math.min(Math.max(items.length, 1), 12), getSelectListTheme());
+		this.#selectList.onSelect = item => {
+			if (item.value === "__clear_all") {
+				settings.set("providers.maxInFlightRequests", {});
+				this.onChange({});
+				this.#showProviderList();
+				this.requestRender?.();
+				return;
+			}
+			this.#showProviderEditor(item.value);
+		};
+		this.#selectList.onCancel = this.onCancel;
+		this.addChild(this.#selectList);
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("dim", "  Enter to edit provider · Esc to go back"), 0, 0));
+	}
+
+	#showProviderEditor(provider: string): void {
+		const limits = normalizeProviderMaxInFlightRequests(settings.get("providers.maxInFlightRequests"));
+		this.clear();
+		this.#selectList = undefined;
+		this.addChild(
+			new TextInputSubmenu(
+				`Max In-Flight Requests: ${provider}`,
+				"Enter a positive number. Decimals round down. Clear the field to make this provider unlimited.",
+				limits[provider]?.toString() ?? "",
+				value => {
+					const next = { ...limits };
+					const trimmed = value.trim();
+					if (trimmed === "") {
+						delete next[provider];
+					} else {
+						const limit = Number(trimmed);
+						if (!Number.isFinite(limit) || limit <= 0) throw new Error("Limit must be a positive number.");
+						next[provider] = Math.max(1, Math.floor(limit));
+					}
+					const normalized = validateProviderMaxInFlightRequests(next);
+					settings.set("providers.maxInFlightRequests", normalized);
+					this.onChange(normalized);
+					this.#showProviderList();
+					this.requestRender?.();
+				},
+				() => {
+					this.#showProviderList();
+					this.requestRender?.();
+				},
+			),
+		);
+	}
+
+	handleInput(data: string): void {
+		if (this.#selectList) {
+			this.#selectList.handleInput(data);
+			return;
+		}
+		this.children[0]?.handleInput?.(data);
 	}
 }
 
@@ -258,6 +367,8 @@ export interface SettingsRuntimeContext {
 	thinkingLevel: ThinkingLevel | undefined;
 	/** Available themes */
 	availableThemes: string[];
+	/** Provider/source ids shown in /model. */
+	providers: string[];
 	/** Working directory for plugins tab */
 	cwd: string;
 	/** Active model (api + id); resolves what the snapcompact `auto` shape maps to. */
@@ -458,12 +569,14 @@ export class SettingsSelectorComponent implements Component {
 	 * activates it (toggle / open submenu).
 	 */
 	#handleMouse(data: string): boolean {
-		const event = parseSgrMouse(data);
-		if (!event) return false;
+		return routeSgrMouseInput(data, event => this.#routeMouseEvent(event));
+	}
 
+	#routeMouseEvent(event: SgrMouseEvent): boolean {
 		const list = this.#searchList ?? this.#currentList;
-		// row() insets content by two columns (border + space).
-		const innerCol = event.col - 2;
+		// row() insets content by the border column plus a space.
+		const contentColInset = 2;
+		const innerCol = event.col - contentColInset;
 		const contentLine = event.row - this.#contentRowStart;
 
 		// An open submenu owns the pointer: wheel, hover, and clicks route into
@@ -473,14 +586,16 @@ export class SettingsSelectorComponent implements Component {
 			return true;
 		}
 
-		if (event.wheel !== null) {
-			list?.handleWheel(event.wheel);
-			return true;
-		}
-
 		const tabLine = event.row - this.#tabRowStart;
 		const overTabs = tabLine >= 0 && tabLine < this.#tabRowCount;
 		const overContent = contentLine >= 0 && contentLine < this.#contentRowCount;
+
+		if (event.wheel !== null) {
+			if (overContent) {
+				list?.handleWheelAt(event.wheel, contentLine, innerCol);
+			}
+			return true;
+		}
 
 		if (event.motion) {
 			const hovered = overTabs ? this.#tabBar.tabAt(tabLine, innerCol) : undefined;
@@ -701,7 +816,7 @@ export class SettingsSelectorComponent implements Component {
 					id: def.path,
 					label: def.label,
 					description: def.description,
-					currentValue: currentValue as string,
+					currentValue: String(currentValue ?? ""),
 					values: [...def.values],
 					changed,
 				};
@@ -721,8 +836,18 @@ export class SettingsSelectorComponent implements Component {
 					id: def.path,
 					label: def.label,
 					description: def.description,
-					currentValue: (currentValue as string) ?? "",
+					currentValue: this.#formatTextInputValue(def.path, currentValue),
 					submenu: (cv, done) => this.#createTextInput(def, cv, done),
+					changed,
+				};
+
+			case "providerLimits":
+				return {
+					id: def.path,
+					label: def.label,
+					description: def.description,
+					currentValue: this.#formatProviderLimitsValue(currentValue),
+					submenu: (_cv, done) => this.#createProviderLimitsInput(done),
 					changed,
 				};
 		}
@@ -854,7 +979,7 @@ export class SettingsSelectorComponent implements Component {
 	 */
 	#createTextInput(
 		def: SettingDef & { type: "text" },
-		currentValue: string,
+		_currentValue: string,
 		done: (value?: string) => void,
 	): Container {
 		this.#textInputActive = true;
@@ -865,28 +990,72 @@ export class SettingsSelectorComponent implements Component {
 		return new TextInputSubmenu(
 			def.label,
 			def.description,
-			currentValue,
+			this.#formatTextInputEditValue(def.path, settings.get(def.path)),
 			value => {
 				// Empty string clears the setting; undefined-typed string settings
 				// store "" which the browser.ts expandPath ignores (no-op fallback).
 				this.#setSettingValue(def.path, value);
-				this.callbacks.onChange(def.path, value);
-				wrappedDone(value);
+				this.callbacks.onChange(def.path, settings.get(def.path));
+				wrappedDone(this.#formatTextInputValue(def.path, settings.get(def.path)));
 			},
 			() => wrappedDone(),
 		);
+	}
+
+	#createProviderLimitsInput(done: (value?: string) => void): Container {
+		return new ProviderLimitsSubmenu(
+			this.context.providers,
+			value => {
+				this.callbacks.onChange("providers.maxInFlightRequests", value);
+				done(this.#formatProviderLimitsValue(value));
+			},
+			() => done(),
+			this.context.requestRender,
+		);
+	}
+
+	#formatProviderLimitsValue(value: unknown): string {
+		const limits = normalizeProviderMaxInFlightRequests(value);
+		const entries = Object.entries(limits).sort(([a], [b]) => a.localeCompare(b));
+		if (entries.length === 0) return "Unlimited";
+		return entries.map(([provider, limit]) => `${provider}: ${limit}`).join(", ");
+	}
+
+	#formatTextInputValue(path: SettingPath, value: unknown): string {
+		if (path === "providers.maxInFlightRequests") return this.#formatProviderLimitsValue(value);
+		return this.#formatTextInputEditValue(path, value);
+	}
+
+	#formatTextInputEditValue(_path: SettingPath, value: unknown): string {
+		if (value === undefined || value === null) return "";
+		if (typeof value === "object") return JSON.stringify(value);
+		return String(value);
 	}
 
 	/**
 	 * Set a setting value, handling type conversion.
 	 */
 	#setSettingValue(path: SettingPath, value: string): void {
-		// Handle number conversions
 		const currentValue = settings.get(path);
+		const schemaType = getType(path);
 		if (path === "compaction.thresholdPercent" && value === "default") {
 			settings.set(path, -1 as never);
 		} else if (path === "compaction.thresholdTokens" && value === "default") {
 			settings.set(path, -1 as never);
+		} else if (schemaType === "record") {
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(value || "{}");
+			} catch {
+				throw new Error(`Invalid record JSON for ${path}`);
+			}
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+				throw new Error(`Invalid record JSON for ${path}`);
+			}
+			if (path === "providers.maxInFlightRequests") {
+				parsed = validateProviderMaxInFlightRequests(parsed);
+			}
+			settings.set(path, parsed as never);
 		} else if (typeof currentValue === "number") {
 			settings.set(path, Number(value) as never);
 		} else if (typeof currentValue === "boolean") {

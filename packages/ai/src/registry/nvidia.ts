@@ -1,3 +1,4 @@
+import * as AIError from "../error";
 import { validateOpenAICompatibleApiKey } from "./api-key-validation";
 import type { OAuthController, OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
@@ -9,7 +10,7 @@ const PROVIDER_ID = "nvidia";
 
 export async function loginNvidia(options: OAuthController): Promise<string> {
 	if (!options.onPrompt) {
-		throw new Error("NVIDIA login requires onPrompt callback");
+		throw new AIError.OnPromptRequiredError("NVIDIA");
 	}
 
 	options.onAuth?.({
@@ -23,12 +24,12 @@ export async function loginNvidia(options: OAuthController): Promise<string> {
 	});
 
 	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		throw new AIError.LoginCancelledError();
 	}
 
 	const trimmed = apiKey.trim();
 	if (!trimmed) {
-		throw new Error("API key is required");
+		throw new AIError.ApiKeyRequiredError();
 	}
 
 	options.onProgress?.("Validating API key (optional)...");
@@ -39,12 +40,12 @@ export async function loginNvidia(options: OAuthController): Promise<string> {
 			baseUrl: API_BASE_URL,
 			model: VALIDATION_MODEL,
 			signal: options.signal,
+			fetch: options.fetch,
 		});
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		const statusMatch = message.match(/\((\d{3})\)/);
-		const statusCode = statusMatch?.[1];
-		if (statusCode === "401" || statusCode === "403") {
+		// A real auth rejection (401/403) is fatal; any other validation-endpoint
+		// failure is non-fatal — skip validation and trust the supplied key.
+		if (AIError.is(AIError.classify(error), AIError.Flag.AuthFailed)) {
 			throw error;
 		}
 		options.onProgress?.("Skipping NVIDIA validation endpoint; continuing with provided API key.");

@@ -101,6 +101,30 @@ describe("remember(extract) wires the LLM fact extractor", () => {
 		}
 	});
 
+	it("uses extractText instead of stored content for background extraction", async () => {
+		let prompt = "";
+		const memory = makeMemory({
+			complete: capturedPrompt => {
+				prompt = capturedPrompt;
+				return "The user prefers tabs";
+			},
+		});
+
+		const stored =
+			"[role: user]\nI prefer tabs.\n[user:end]\n\n[role: assistant]\nThe parser never initializes when reorder never activates.\n[assistant:end]";
+		memory.remember(stored, {
+			source: "test",
+			extract: true,
+			extractText: "[role: user]\nI prefer tabs.\n[user:end]",
+		});
+		await memory.flushExtractions();
+
+		expect(prompt).toContain("I prefer tabs");
+		expect(prompt).not.toContain("parser never initializes");
+		expect(memory.beam.factRecall("tabs", 5).some(fact => fact.content === "The user prefers tabs")).toBe(true);
+		expect(memory.beam.factRecall("initializes", 5)).toHaveLength(0);
+	});
+
 	it("does not invoke the extractor when extract is not requested", async () => {
 		let calls = 0;
 		const memory = makeMemory({

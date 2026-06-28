@@ -431,6 +431,70 @@ describe("Perplexity anonymous fallback", () => {
 	});
 });
 
+describe("Perplexity OpenRouter auto-chain admission (issue #3251)", () => {
+	const savedKey = process.env.PERPLEXITY_API_KEY;
+	const savedPplxKey = process.env.PPLX_API_KEY;
+	const savedCookies = process.env.PERPLEXITY_COOKIES;
+
+	beforeEach(() => {
+		delete process.env.PERPLEXITY_API_KEY;
+		delete process.env.PPLX_API_KEY;
+		delete process.env.PERPLEXITY_COOKIES;
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		if (savedKey === undefined) delete process.env.PERPLEXITY_API_KEY;
+		else process.env.PERPLEXITY_API_KEY = savedKey;
+		if (savedPplxKey === undefined) delete process.env.PPLX_API_KEY;
+		else process.env.PPLX_API_KEY = savedPplxKey;
+		if (savedCookies === undefined) delete process.env.PERPLEXITY_COOKIES;
+		else process.env.PERPLEXITY_COOKIES = savedCookies;
+	});
+
+	it("keeps Perplexity out of the auto chain when only OpenRouter auth is configured", () => {
+		const openrouterOnly = {
+			async getOAuthAccess() {
+				return undefined;
+			},
+			async getApiKey() {
+				return undefined;
+			},
+			hasAuth(provider: string) {
+				return provider === "openrouter";
+			},
+		} as unknown as AuthStorage;
+
+		const provider = new PerplexityProvider();
+
+		// Auto chain MUST skip Perplexity so downstream providers (Gemini, ...)
+		// get a chance instead of silently routing through OpenRouter's
+		// `perplexity/sonar-pro` and billing the user for an unrequested path.
+		expect(provider.isAvailable(openrouterOnly)).toBe(false);
+		// Explicit selection still admits the provider so `webSearch: perplexity`
+		// can opt into the OpenRouter-backed path on purpose.
+		expect(provider.isExplicitlyAvailable(openrouterOnly)).toBe(true);
+	});
+
+	it("admits Perplexity to the auto chain when a direct Perplexity credential exists", () => {
+		const perplexityOnly = {
+			async getOAuthAccess() {
+				return undefined;
+			},
+			async getApiKey() {
+				return undefined;
+			},
+			hasAuth(provider: string) {
+				return provider === "perplexity";
+			},
+		} as unknown as AuthStorage;
+
+		const provider = new PerplexityProvider();
+
+		expect(provider.isAvailable(perplexityOnly)).toBe(true);
+	});
+});
+
 describe("Perplexity Authentication order", () => {
 	const savedCookies = Bun.env.PERPLEXITY_COOKIES || process.env.PERPLEXITY_COOKIES;
 

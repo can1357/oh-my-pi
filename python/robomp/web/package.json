@@ -3,13 +3,14 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Glassmorphic SolidJS dashboard bundled by Vite and served by robomp's FastAPI app.",
+  "description": "Flat SolidJS operations console bundled by Vite and served by robomp's FastAPI app.",
   "homepage": "https://omp.sh",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
     "solid-js": "catalog:"

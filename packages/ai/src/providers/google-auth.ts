@@ -16,6 +16,7 @@ import { Buffer } from "node:buffer";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $envpos, isEnoent, logger } from "@pk-nerdsaver-ai/pi-utils";
+import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
 
@@ -83,7 +84,7 @@ async function loadAdcCredentials(): Promise<{ source: string; creds: AdcFileCre
 	if (gacPath) {
 		const creds = await readJsonFile<AdcFileCredentials>(gacPath);
 		if (!creds) {
-			throw new Error(`GOOGLE_APPLICATION_CREDENTIALS points to a missing file: ${gacPath}`);
+			throw new AIError.ConfigurationError(`GOOGLE_APPLICATION_CREDENTIALS points to a missing file: ${gacPath}`);
 		}
 		return { source: `gac:${gacPath}`, creds };
 	}
@@ -103,7 +104,7 @@ function pemToPkcs8(pem: string): Uint8Array<ArrayBuffer> {
 		.replace(/-----BEGIN [^-]+-----/g, "")
 		.replace(/-----END [^-]+-----/g, "")
 		.replace(/\s+/g, "");
-	if (!body) throw new Error("Invalid PEM: empty body");
+	if (!body) throw new AIError.ConfigurationError("Invalid PEM: empty body");
 	return Uint8Array.fromBase64(body);
 }
 
@@ -193,7 +194,11 @@ async function postForToken(
 	});
 	if (!response.ok) {
 		const detail = await response.text().catch(() => "");
-		throw new Error(`Google OAuth token exchange failed (${response.status}): ${detail}`);
+		throw new AIError.OAuthError(`Google OAuth token exchange failed (${response.status}): ${detail}`, {
+			kind: "token-exchange",
+			provider: "google-vertex",
+			status: response.status,
+		});
 	}
 	return (await response.json()) as TokenResponse;
 }
@@ -239,7 +244,11 @@ async function resolveAccessTokenUncached(
 			);
 			if (!response.ok) {
 				const detail = await response.text().catch(() => "");
-				throw new Error(`Google Impersonation token exchange failed (${response.status}): ${detail}`);
+				throw new AIError.OAuthError(`Google Impersonation token exchange failed (${response.status}): ${detail}`, {
+					kind: "token-exchange",
+					provider: "google-vertex",
+					status: response.status,
+				});
 			}
 			const data = (await response.json()) as { accessToken: string; expireTime: string };
 			const expiresIn = Math.max(0, Math.floor((new Date(data.expireTime).getTime() - Date.now()) / 1000));
@@ -254,7 +263,8 @@ async function resolveAccessTokenUncached(
 	}
 	const metadata = await fetchMetadataToken(signal, fetchImpl);
 	if (metadata) return { source: "metadata", token: metadata };
-	throw new Error(
+	throw new AIError.MissingApiKeyError(
+		undefined,
 		"Vertex AI requires Application Default Credentials. Set GOOGLE_APPLICATION_CREDENTIALS, run `gcloud auth application-default login`, or run on a GCE/Cloud Run instance with a service account.",
 	);
 }

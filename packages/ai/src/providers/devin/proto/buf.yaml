@@ -1,0 +1,17 @@
+version: v2
+modules:
+   - path: .
+lint:
+   use:
+      - STANDARD
+   except:
+      - COMMENT_FIELD
+      - COMMENT_MESSAGE
+      - COMMENT_ENUM
+      - COMMENT_ENUM_VALUE
+      - COMMENT_RPC
+      - COMMENT_SERVICE
+      - COMMENT_ONEOF
+breaking:
+   use:
+      - FILE

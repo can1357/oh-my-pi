@@ -8,6 +8,7 @@ import type { ClientBridge } from "@pk-nerdsaver-ai/pi-coding-agent/session/clie
 import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import type { ReadToolDetails } from "@pk-nerdsaver-ai/pi-coding-agent/tools/read";
 import { ReadTool } from "@pk-nerdsaver-ai/pi-coding-agent/tools/read";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 const BRIDGE_CONTENT = "// content from editor buffer\nexport function greet() { return 'bridge'; }\n";
 
@@ -39,7 +40,7 @@ describe("read tool ACP fs routing", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	it("routes plain text reads through the bridge and does not call Bun.file().text()", async () => {

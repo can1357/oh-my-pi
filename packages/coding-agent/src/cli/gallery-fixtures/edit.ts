@@ -62,6 +62,66 @@ export const editFixtures: Record<string, GalleryFixture> = {
 		},
 	},
 
+	edit_delete: {
+		label: "Delete",
+		// The registry has no `edit_delete` key, so `renderer: "edit"` routes this
+		// fixture through the real built-in edit renderer (see the harness in
+		// `gallery-cli`), keeping the sample identical to a production delete.
+		renderer: "edit",
+		streamingArgs: { file_path: "scripts/prune-changelogs.ts", op: "delete" },
+		args: { file_path: "scripts/prune-changelogs.ts", op: "delete" },
+		result: {
+			content: [{ type: "text", text: "Deleted scripts/prune-changelogs.ts" }],
+			details: {
+				op: "delete",
+				path: "scripts/prune-changelogs.ts",
+				diff: "",
+				oldText: "#!/usr/bin/env bun\n// obsolete changelog pruning helper\n",
+			},
+		},
+		errorResult: {
+			content: [{ type: "text", text: "Edit failed: scripts/prune-changelogs.ts not found" }],
+			isError: true,
+			details: {
+				op: "delete",
+				path: "scripts/prune-changelogs.ts",
+				diff: "",
+				errorText: "Cannot delete scripts/prune-changelogs.ts: the file does not exist.",
+			},
+		},
+	},
+
+	edit_move: {
+		label: "Move",
+		renderer: "edit",
+		streamingArgs: { file_path: "scripts/prune-changelogs.ts", rename: "scripts/archived/prune-changelogs.ts" },
+		args: { file_path: "scripts/prune-changelogs.ts", rename: "scripts/archived/prune-changelogs.ts" },
+		result: {
+			content: [{ type: "text", text: "Moved scripts/prune-changelogs.ts to scripts/archived/prune-changelogs.ts" }],
+			details: {
+				op: "update",
+				path: "scripts/archived/prune-changelogs.ts",
+				move: "scripts/archived/prune-changelogs.ts",
+				sourcePath: "scripts/prune-changelogs.ts",
+				diff: "",
+			},
+		},
+		errorResult: {
+			content: [
+				{ type: "text", text: "Edit failed: destination scripts/archived/prune-changelogs.ts already exists" },
+			],
+			isError: true,
+			details: {
+				op: "update",
+				path: "scripts/archived/prune-changelogs.ts",
+				move: "scripts/archived/prune-changelogs.ts",
+				sourcePath: "scripts/prune-changelogs.ts",
+				diff: "",
+				errorText: "MV destination scripts/archived/prune-changelogs.ts already exists.",
+			},
+		},
+	},
+
 	apply_patch: {
 		label: "Apply Patch",
 		editMode: "apply_patch",

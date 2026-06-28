@@ -1,7 +1,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { HL_FILE_HASH_LENGTH, HL_FILE_HASH_SEP, HL_FILE_PREFIX, HL_FILE_SUFFIX } from "@pk-nerdsaver-ai/hashline";
-import { resolveLocalRoot, resolveLocalUrlToPath, resolveVaultUrlToPath } from "../internal-urls";
+import {
+	type LocalProtocolOptions,
+	resolveLocalRoot,
+	resolveLocalUrlToPath,
+	resolveVaultUrlToPath,
+} from "../internal-urls";
 import type { ToolSession } from ".";
 import { normalizeLocalScheme, resolveToCwd } from "./path-utils";
 import { ToolError } from "./tool-errors";
@@ -10,16 +15,27 @@ const VAULT_SCHEME_PREFIX = "vault:";
 const LOCAL_SCHEME_PREFIX = "local:";
 const HL_TRAILING_TAG_RE = new RegExp(`${HL_FILE_HASH_SEP}[0-9A-Fa-f]{${HL_FILE_HASH_LENGTH}}$`);
 
+/** Resolve the `local://` options the session uses, preferring its own
+ *  {@link LocalProtocolOptions} (the mapping `read`/`write`/`eval` resolve
+ *  through) over the bare `getArtifactsDir`/`getSessionId` pair. Subagents and
+ *  multi-session hosts (cmux/ACP, embedded SDK) pin `local://` to a parent/foreign
+ *  root via `localProtocolOptions`; the sandbox root the plan-mode guard derives
+ *  must match where the artifact actually lives, or it rejects a legitimate plan
+ *  edit (and tag-based path recovery onto the sandbox would miss it). */
+function planLocalProtocolOptions(session: ToolSession): LocalProtocolOptions {
+	return (
+		session.localProtocolOptions ?? {
+			getArtifactsDir: () => session.getArtifactsDir?.() ?? null,
+			getSessionId: () => session.getSessionId?.() ?? null,
+		}
+	);
+}
+
 /** Resolve the absolute path of the session's `local://` artifact sandbox.
  *  Returns `null` when the session has no artifact wiring (e.g. tests). */
 function localSandboxRoot(session: ToolSession): string | null {
 	try {
-		return path.resolve(
-			resolveLocalRoot({
-				getArtifactsDir: session.getArtifactsDir,
-				getSessionId: session.getSessionId,
-			}),
-		);
+		return path.resolve(resolveLocalRoot(planLocalProtocolOptions(session)));
 	} catch {
 		return null;
 	}
@@ -62,8 +78,8 @@ export function unwrapHashlineHeaderPath(targetPath: string): string {
  *  always agree on the absolute target (including bracketed hashline headers,
  *  `local://` URLs, and bare absolute paths). Files inside the sandbox are not
  *  part of the working tree, so plan mode treats them as freely writable
- *  scratch/plan space. */
-function targetsLocalSandbox(session: ToolSession, targetPath: string): boolean {
+ *  scratch/plan space — and tag-based path recovery may rebind onto them. */
+export function targetsLocalSandbox(session: ToolSession, targetPath: string): boolean {
 	const root = localSandboxRoot(session);
 	if (!root) return false;
 	let resolved: string;
@@ -99,10 +115,7 @@ export function resolvePlanPath(session: ToolSession, targetPath: string): strin
 	const unwrapped = unwrapHashlineHeaderPath(targetPath);
 	const normalized = normalizeLocalScheme(unwrapped);
 	if (normalized.startsWith(LOCAL_SCHEME_PREFIX)) {
-		return resolveLocalUrlToPath(normalized, {
-			getArtifactsDir: session.getArtifactsDir,
-			getSessionId: session.getSessionId,
-		});
+		return resolveLocalUrlToPath(normalized, planLocalProtocolOptions(session));
 	}
 
 	if (normalized.startsWith(VAULT_SCHEME_PREFIX)) {

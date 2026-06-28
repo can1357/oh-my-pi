@@ -19,6 +19,7 @@
  * `types.ts` via the `export *` below — pi-ai still exports both as types,
  * only the runtime `Type` builder and `StringEnum()` helper were removed.
  */
+import { getBundledModel, getBundledModels } from "@pk-nerdsaver-ai/pi-catalog/models";
 import { type TSchema, Type } from "./typebox";
 
 export interface StringEnumOptions<T extends string> {
@@ -28,10 +29,14 @@ export interface StringEnumOptions<T extends string> {
 	[key: string]: unknown;
 }
 
-function stringEnumWireSchema<T extends string>(values: readonly T[], options: StringEnumOptions<T> | undefined) {
+function stringEnumWireSchema<T extends string | number>(
+	values: readonly T[] | Record<string, T>,
+	options: StringEnumOptions<any> | undefined,
+) {
+	const enumValues = Array.isArray(values) ? [...values] : Object.values(values);
 	const schema: Record<string, unknown> = {
 		type: "string",
-		enum: [...values],
+		enum: enumValues,
 	};
 	if (!options) return schema;
 	for (const key in options) {
@@ -42,12 +47,15 @@ function stringEnumWireSchema<T extends string>(values: readonly T[], options: S
 	return schema;
 }
 
-export function StringEnum<T extends string>(values: readonly T[], options?: StringEnumOptions<T>): TSchema {
+export function StringEnum<T extends string | number>(
+	values: readonly T[] | Record<string, T>,
+	options?: StringEnumOptions<any>,
+): TSchema {
 	const opts = {
 		description: options?.description ?? "Legacy string enum compatibility schema",
 		...options,
 	};
-	const schema: TSchema = values.length === 0 ? Type.Never(opts) : Type.Enum(values, opts);
+	const schema: TSchema = Array.isArray(values) && values.length === 0 ? Type.Never(opts) : Type.Enum(values, opts);
 	Object.defineProperty(schema, "toJSON", {
 		value: () => stringEnumWireSchema(values, options),
 		enumerable: false,
@@ -59,3 +67,7 @@ export function StringEnum<T extends string>(values: readonly T[], options?: Str
 
 export * from "@pk-nerdsaver-ai/pi-ai";
 export { Type };
+
+/** Compatibility aliases for renamed catalog functions */
+export const getModel = getBundledModel;
+export const getModels = getBundledModels;

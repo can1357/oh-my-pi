@@ -13,9 +13,14 @@ import {
 	type StopReason,
 	type ToolCall,
 } from "@pk-nerdsaver-ai/pi-ai";
-import { parseStreamingJson } from "@pk-nerdsaver-ai/pi-ai/utils/json-parse";
+import {
+	clearStreamingPartialJson,
+	kStreamingPartialJson,
+	type StreamingPartialJsonCarrier,
+	setStreamingPartialJson,
+} from "@pk-nerdsaver-ai/pi-ai/utils/block-symbols";
 import { calculateCost } from "@pk-nerdsaver-ai/pi-catalog/models";
-import { readSseJson } from "@pk-nerdsaver-ai/pi-utils";
+import { parseStreamingJson, readSseJson } from "@pk-nerdsaver-ai/pi-utils";
 
 // Event stream adapter for proxy SSE events
 export class ProxyMessageEventStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -157,11 +162,12 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 			}
 
 			let sawTerminalEvent = false;
+			const partialJsonByIndex = new Map<number, string>();
 			for await (const event of readSseJson<ProxyAssistantMessageEvent>(
 				response.body as ReadableStream<Uint8Array>,
 				options.signal,
 			)) {
-				const parsedEvent = processProxyEvent(model, event, partial);
+				const parsedEvent = processProxyEvent(model, event, partial, partialJsonByIndex);
 				if (parsedEvent) {
 					if (parsedEvent.type === "done" || parsedEvent.type === "error") {
 						sawTerminalEvent = true;
@@ -184,6 +190,7 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 			const reason = options.signal?.aborted ? "aborted" : "error";
 			partial.stopReason = reason;
 			partial.errorMessage = errorMessage;
+			scrubPartialJson(partial);
 			stream.push({
 				type: "error",
 				reason,
@@ -201,12 +208,31 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 }
 
 /**
+ * Clear the `partialJson` streaming symbol from any tool-call content blocks
+ * that still carry it (e.g. when the stream ended without a `toolcall_end`), so
+ * the finalized `AssistantMessage` no longer reads as still-streaming.
+ */
+function scrubPartialJson(partial: AssistantMessage): void {
+	for (const block of partial.content) {
+		if (block?.type === "toolCall") clearStreamingPartialJson(block);
+	}
+}
+
+/**
  * Process a proxy event and update the partial message.
+ *
+ * Streaming `partialJson` for in-progress tool calls is accumulated in a
+ * side-channel map keyed by `contentIndex` and also written onto the content
+ * object as a symbol-keyed field so downstream renderers can read it
+ * during streaming. The field is cleared at `toolcall_end` and scrubbed from any
+ * remaining blocks at `done`/`error` so the finalized `AssistantMessage` never
+ * reads as still-streaming.
  */
 function processProxyEvent(
 	model: Model,
 	proxyEvent: ProxyAssistantMessageEvent,
 	partial: AssistantMessage,
+	partialJsonByIndex: Map<number, string>,
 ): AssistantMessageEvent | undefined {
 	switch (proxyEvent.type) {
 		case "start":
@@ -219,9 +245,10 @@ function processProxyEvent(
 				totalTokens: 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			};
-			delete (partial as { stopReason?: string }).stopReason;
-			delete (partial as { errorMessage?: string }).errorMessage;
-			delete (partial as { duration?: number }).duration;
+			partial.errorMessage = undefined;
+			partial.errorId = undefined;
+			partial.duration = undefined;
+			(partial as { stopReason?: string }).stopReason = undefined;
 			return { type: "start", partial };
 
 		case "text_start":
@@ -294,15 +321,17 @@ function processProxyEvent(
 				id: proxyEvent.id,
 				name: proxyEvent.toolName,
 				arguments: {},
-				partialJson: "",
-			} satisfies ToolCall & { partialJson: string } as ToolCall;
+				[kStreamingPartialJson]: "",
+			} as ToolCall & StreamingPartialJsonCarrier;
+			partialJsonByIndex.set(proxyEvent.contentIndex, "");
 			return { type: "toolcall_start", contentIndex: proxyEvent.contentIndex, partial };
-
 		case "toolcall_delta": {
 			const content = partial.content[proxyEvent.contentIndex];
 			if (content?.type === "toolCall") {
-				(content as any).partialJson += proxyEvent.delta;
-				content.arguments = parseStreamingJson((content as any).partialJson) || {};
+				const acc = (partialJsonByIndex.get(proxyEvent.contentIndex) ?? "") + proxyEvent.delta;
+				partialJsonByIndex.set(proxyEvent.contentIndex, acc);
+				content.arguments = parseStreamingJson(acc) || {};
+				setStreamingPartialJson(content, acc);
 				partial.content[proxyEvent.contentIndex] = { ...content }; // Trigger reactivity
 				return {
 					type: "toolcall_delta",
@@ -317,7 +346,8 @@ function processProxyEvent(
 		case "toolcall_end": {
 			const content = partial.content[proxyEvent.contentIndex];
 			if (content?.type === "toolCall") {
-				delete (content as any).partialJson;
+				partialJsonByIndex.delete(proxyEvent.contentIndex);
+				clearStreamingPartialJson(content);
 				return {
 					type: "toolcall_end",
 					contentIndex: proxyEvent.contentIndex,
@@ -332,6 +362,7 @@ function processProxyEvent(
 			partial.stopReason = proxyEvent.reason;
 			partial.usage = proxyEvent.usage;
 			calculateCost(model, partial.usage);
+			scrubPartialJson(partial);
 			return { type: "done", reason: proxyEvent.reason, message: partial };
 
 		case "error":
@@ -339,6 +370,7 @@ function processProxyEvent(
 			partial.errorMessage = proxyEvent.errorMessage;
 			partial.usage = proxyEvent.usage;
 			calculateCost(model, partial.usage);
+			scrubPartialJson(partial);
 			return { type: "error", reason: proxyEvent.reason, error: partial };
 	}
 }

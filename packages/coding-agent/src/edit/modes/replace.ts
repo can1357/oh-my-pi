@@ -6,8 +6,9 @@
  */
 import type { AgentToolResult } from "@pk-nerdsaver-ai/pi-agent-core";
 import { type } from "arktype";
-import type { WritethroughCallback, WritethroughDeferredHandle } from "../../lsp";
+import type { FileDiagnosticsResult, WritethroughCallback, WritethroughDeferredHandle } from "../../lsp";
 import type { ToolSession } from "../../tools";
+import { routeWriteThroughBridge } from "../../tools/acp-bridge";
 import { invalidateFsScanAfterWrite } from "../../tools/fs-cache-invalidation";
 import { outputMeta } from "../../tools/output-meta";
 import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
@@ -1098,15 +1099,17 @@ export async function executeReplaceSingle(
 		path,
 		bom + restoreLineEndings(result.content, originalEnding),
 	);
-	const diagnostics = await writethrough(
-		absolutePath,
-		finalContent,
-		signal,
-		Bun.file(absolutePath),
-		batchRequest,
-		dst => (dst === absolutePath ? beginDeferredDiagnosticsForPath(absolutePath) : undefined),
-	);
-	invalidateFsScanAfterWrite(absolutePath);
+
+	// Route through ACP bridge when available; skips internal artifacts.
+	let diagnostics: FileDiagnosticsResult | undefined;
+	if (await routeWriteThroughBridge(session, path, absolutePath, finalContent)) {
+		// bridge handled the write; diagnostics not available via writethrough
+	} else {
+		diagnostics = await writethrough(absolutePath, finalContent, signal, Bun.file(absolutePath), batchRequest, dst =>
+			dst === absolutePath ? beginDeferredDiagnosticsForPath(absolutePath) : undefined,
+		);
+		invalidateFsScanAfterWrite(absolutePath);
+	}
 
 	const diffResult = generateDiffString(normalizedContent, result.content, undefined, { path });
 	const resultText =

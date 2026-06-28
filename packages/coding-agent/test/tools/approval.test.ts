@@ -29,8 +29,8 @@ function createBashTool(): BashTool {
 				case "bash.autoBackground.enabled":
 				case "astGrep.enabled":
 				case "astEdit.enabled":
-				case "search.enabled":
-				case "find.enabled":
+				case "grep.enabled":
+				case "glob.enabled":
 					return false;
 				case "bash.autoBackground.thresholdMs":
 					return 60_000;

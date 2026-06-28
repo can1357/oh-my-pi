@@ -1,6 +1,7 @@
 import type { AssistantMessage } from "@pk-nerdsaver-ai/pi-ai";
 import { prompt } from "@pk-nerdsaver-ai/pi-utils";
 import btwUserPrompt from "../../prompts/system/btw-user.md" with { type: "text" };
+import { copyToClipboard } from "../../utils/clipboard";
 import { BtwPanelComponent } from "../components/btw-panel";
 import type { InteractiveModeContext } from "../types";
 
@@ -39,6 +40,8 @@ export class BtwController {
 	#lastAssistantMessage: AssistantMessage | undefined;
 	#lastLeafId: string | null | undefined;
 	#branchInFlight = false;
+	#lastCopyText: string | undefined;
+	#copyInFlight = false;
 
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
@@ -56,6 +59,27 @@ export class BtwController {
 			this.#lastLeafId !== null &&
 			this.#lastLeafId === this.ctx.sessionManager.getLeafId()
 		);
+	}
+
+	canCopy(): boolean {
+		return (
+			!this.#copyInFlight && this.#activeRequest?.component.isCopyable() === true && this.#lastCopyText !== undefined
+		);
+	}
+
+	async handleCopy(): Promise<boolean> {
+		if (!this.canCopy() || this.#lastCopyText === undefined) return false;
+		this.#copyInFlight = true;
+		try {
+			await copyToClipboard(this.#lastCopyText);
+			this.ctx.showStatus("Copied /btw answer to clipboard");
+			return true;
+		} catch (error) {
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			return true;
+		} finally {
+			this.#copyInFlight = false;
+		}
 	}
 
 	async handleBranch(): Promise<boolean> {
@@ -123,17 +147,17 @@ export class BtwController {
 			if (!this.#isActiveRequest(request)) {
 				return;
 			}
-			if (replyText) {
-				request.component.setAnswer(replyText);
-			}
+			request.component.setAnswer(replyText);
 			request.component.markComplete();
-			if (request.component.isBranchable()) {
+			const copyText = request.component.getCopyText();
+			if (copyText !== undefined) {
 				this.#lastQuestion = request.question;
 				this.#lastReplyText = replyText;
+				this.#lastCopyText = copyText;
 				this.#lastAssistantMessage = assistantMessageWithReplyText(assistantMessage, replyText);
 				this.#lastLeafId = request.leafId;
 			} else {
-				this.#clearBranchState();
+				this.#clearCompletedState();
 			}
 		} catch (error) {
 			if (!this.#isActiveRequest(request)) {
@@ -151,7 +175,7 @@ export class BtwController {
 		const request = this.#activeRequest;
 		if (!request) return;
 		this.#activeRequest = undefined;
-		this.#clearBranchState();
+		this.#clearCompletedState();
 		if (options.abort) {
 			request.abortController.abort();
 		}
@@ -160,10 +184,11 @@ export class BtwController {
 		this.ctx.ui.requestRender();
 	}
 
-	#clearBranchState(): void {
+	#clearCompletedState(): void {
 		this.#lastQuestion = undefined;
 		this.#lastReplyText = undefined;
 		this.#lastAssistantMessage = undefined;
+		this.#lastCopyText = undefined;
 		this.#lastLeafId = undefined;
 	}
 

@@ -6,11 +6,12 @@ import { applyResolvedSystemPromptInputs, submitInteractiveInput } from "@pk-ner
 import type { SubmittedUserInput } from "@pk-nerdsaver-ai/pi-coding-agent/modes/types";
 import type { CreateAgentSessionOptions } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import { discoverTitleSystemPromptFile } from "@pk-nerdsaver-ai/pi-coding-agent/system-prompt";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 const cleanupDirs: string[] = [];
 
 afterEach(async () => {
-	await Promise.all(cleanupDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
+	await Promise.all(cleanupDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 
 function createInput(overrides: Partial<SubmittedUserInput> = {}): SubmittedUserInput {

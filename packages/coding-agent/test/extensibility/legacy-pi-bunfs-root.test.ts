@@ -1,66 +1,36 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import {
-	__computeBundledSelfPackageRoot,
-	__computeBunfsPackageRoot,
-} from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
+import { __computeBundledSelfPackageRoot } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 
-// Regression for issue #1514: legacy pi compat shim paths were built from a
-// hardcoded POSIX literal `/$bunfs/root/packages`. On Windows the bunfs root
-// mounts at `<drive>:\~BUN\root\…` (oven-sh/bun#15766) and the POSIX literal
-// normalises to `\$bunfs\root\…`, which is unresolvable. The fix derives the
-// package root from the compiled binary's `import.meta.dir`, so the host OS's
-// separators are preserved end-to-end.
-describe("legacy pi compat bunfs root computation (issue #1514)", () => {
-	it("appends packages to the Windows-native compiled bunfs root", () => {
-		const winMetaDir = "B:\\~BUN\\root";
-		const root = __computeBunfsPackageRoot(winMetaDir, path.win32);
-		expect(root).toBe("B:\\~BUN\\root\\packages");
-		// The shim path joined from this root must still live under the bunfs
-		// mount, never collapse onto the working drive (which is what
-		// `path.win32.resolve("/$bunfs/root/packages/...")` would produce).
-		expect(path.win32.join(root, "coding-agent", "src", "extensibility", "legacy-pi-ai-shim.js")).toBe(
-			"B:\\~BUN\\root\\packages\\coding-agent\\src\\extensibility\\legacy-pi-ai-shim.js",
-		);
-	});
-
-	it("appends packages to the POSIX compiled bunfs root on Linux and macOS", () => {
-		expect(__computeBunfsPackageRoot("/$bunfs/root", path.posix)).toBe("/$bunfs/root/packages");
-	});
-
-	it("also supports module-specific import.meta.dir values if Bun changes compiled semantics", () => {
-		const winMetaDir = "B:\\~BUN\\root\\packages\\coding-agent\\src\\extensibility\\plugins";
-		expect(__computeBunfsPackageRoot(winMetaDir, path.win32)).toBe("B:\\~BUN\\root\\packages");
-		const posixMetaDir = "/$bunfs/root/packages/coding-agent/src/extensibility/plugins";
-		expect(__computeBunfsPackageRoot(posixMetaDir, path.posix)).toBe("/$bunfs/root/packages");
-	});
-
-	it("uses the current host path implementation for production calls", () => {
-		const metaDir = path.join("/", "anywhere", "root");
-		expect(__computeBunfsPackageRoot(metaDir)).toBe(path.join("/", "anywhere", "root", "packages"));
-	});
-
+// Issue #3423 removed the runtime bunfs-path computation (`__computeBunfsPackageRoot`,
+// `__joinBunfsPath`, `bunfsPath`): Bun 1.3.14 stopped exposing `--compile`
+// extras through any filesystem API, so the compat layer now routes the
+// bundled host packages and shims through the `omp-legacy-pi-bundled:`
+// virtual namespace (see `legacy-pi-bundled-virtual.test.ts`). The bunfs
+// path computation is dead and its regression tests (issues #1514, #3329)
+// retired alongside the code.
+//
+// The npm-prebuilt `dist/cli.js` self-package-root computation is still in
+// use by `sourceShimPath` in installed-package mode, so its contract stays
+// pinned below.
+describe("legacy pi compat bundled-self package root computation", () => {
 	it("derives the npm prebuilt bundle package root from dist import.meta.dir", () => {
-		const computeBundledSelfPackageRoot = __computeBundledSelfPackageRoot;
-
 		const winMetaDir = "C:\\Users\\me\\.bun\\install\\global\\node_modules\\@pk-nerdsaver-ai\\pi-coding-agent\\dist";
-		expect(computeBundledSelfPackageRoot(winMetaDir, path.win32)).toBe(
+		expect(__computeBundledSelfPackageRoot(winMetaDir, path.win32)).toBe(
 			"C:\\Users\\me\\.bun\\install\\global\\node_modules\\@pk-nerdsaver-ai\\pi-coding-agent",
 		);
 
 		const posixMetaDir = "/home/me/.bun/install/global/node_modules/@pk-nerdsaver-ai/pi-coding-agent/dist";
-		expect(computeBundledSelfPackageRoot(posixMetaDir, path.posix)).toBe(
+		expect(__computeBundledSelfPackageRoot(posixMetaDir, path.posix)).toBe(
 			"/home/me/.bun/install/global/node_modules/@pk-nerdsaver-ai/pi-coding-agent",
 		);
 	});
 
 	it("derives the source package root when PI_BUNDLED is used outside dist", () => {
-		const computeBundledSelfPackageRoot = __computeBundledSelfPackageRoot;
-
 		const winMetaDir = "C:\\repo\\packages\\coding-agent\\src\\extensibility\\plugins";
-		expect(computeBundledSelfPackageRoot(winMetaDir, path.win32)).toBe("C:\\repo\\packages\\coding-agent");
+		expect(__computeBundledSelfPackageRoot(winMetaDir, path.win32)).toBe("C:\\repo\\packages\\coding-agent");
 
 		const posixMetaDir = "/repo/packages/coding-agent/src/extensibility/plugins";
-		expect(computeBundledSelfPackageRoot(posixMetaDir, path.posix)).toBe("/repo/packages/coding-agent");
+		expect(__computeBundledSelfPackageRoot(posixMetaDir, path.posix)).toBe("/repo/packages/coding-agent");
 	});
 });

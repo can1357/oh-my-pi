@@ -66,6 +66,46 @@ describe("config CLI schema coverage", () => {
 		expect(parsed.value).toEqual({ default: "claude-opus-4-6" });
 	});
 
+	it("normalizes valid provider in-flight request limits from JSON objects", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await runConfigCommand({
+			action: "set",
+			key: "providers.maxInFlightRequests",
+			value: '{"openai":2.8,"anthropic":1}',
+			flags: { json: true },
+		});
+		await runConfigCommand({ action: "get", key: "providers.maxInFlightRequests", flags: { json: true } });
+
+		const payload = logSpy.mock.calls.at(-1)?.[0];
+		expect(typeof payload).toBe("string");
+		const parsed = JSON.parse(String(payload)) as { key: string; value: unknown; type: string };
+		expect(parsed.key).toBe("providers.maxInFlightRequests");
+		expect(parsed.type).toBe("record");
+		expect(parsed.value).toEqual({ openai: 2, anthropic: 1 });
+	});
+
+	it("rejects invalid provider in-flight request limit entries", async () => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
+			throw new Error("process.exit");
+		}) as typeof process.exit);
+
+		await expect(
+			runConfigCommand({
+				action: "set",
+				key: "providers.maxInFlightRequests",
+				value: '{"openai":"2","anthropic":0}',
+				flags: { json: true },
+			}),
+		).rejects.toThrow("process.exit");
+		expect(exitSpy).toHaveBeenCalledWith(1);
+		expect(console.error).toHaveBeenCalledWith(
+			expect.stringContaining("Provider request limits must be positive numbers: openai, anthropic"),
+		);
+	});
+
 	it("sets and gets array settings as JSON arrays", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const arrayValue = '["claude-opus-4-6","gpt-5.3-codex"]';

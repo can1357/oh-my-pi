@@ -420,6 +420,7 @@ export const PROVIDER_IMAGE_BUDGETS: Record<string, number> = {
 	"google-vertex": 200,
 	"google-gemini-cli": 200,
 	openrouter: 90,
+	umans: 10,
 };
 
 /** Safe floor for unknown providers (strictest mainstream measured: Groq ~5). */
@@ -1151,15 +1152,8 @@ export function geometry(shape: Shape, size: number = shape.frameSize): Geometry
 
 const NEWLINES = /\n/g;
 
-/** Render one snapcompact frame from already-normalized text. Doc shapes
- *  (`columns === 2`) expect one page of `\n`-joined pre-wrapped lines. */
-export function render(text: string, shape: Shape, size: number = shape.frameSize): RenderedFrame {
-	const { cols, rows, capacity } = geometry(shape, size);
-	let visible = text.length - (text.match(DIM_MARKERS)?.length ?? 0);
-	// Doc line separators consume no cell; in the grid they print as a blank.
-	if (shape.columns === 2) visible -= text.match(NEWLINES)?.length ?? 0;
-	const chars = Math.min(visible, capacity);
-	const data = renderSnapcompactPng(text, {
+function nativeRenderOptions(shape: Shape, size: number) {
+	return {
 		size,
 		font: shape.font,
 		cellWidth: shape.cellWidth,
@@ -1168,7 +1162,22 @@ export function render(text: string, shape: Shape, size: number = shape.frameSiz
 		variant: shape.variant,
 		lineRepeat: shape.lineRepeat,
 		columns: shape.columns,
-	});
+	};
+}
+
+function renderedChars(text: string, shape: Shape, capacity: number): number {
+	let visible = text.length - (text.match(DIM_MARKERS)?.length ?? 0);
+	// Doc line separators consume no cell; in the grid they print as a blank.
+	if (shape.columns === 2) visible -= text.match(NEWLINES)?.length ?? 0;
+	return Math.min(visible, capacity);
+}
+
+/** Render one snapcompact frame from already-normalized text. Doc shapes
+ *  (`columns === 2`) expect one page of `\n`-joined pre-wrapped lines. */
+export async function render(text: string, shape: Shape, size: number = shape.frameSize): Promise<RenderedFrame> {
+	const { cols, rows, capacity } = geometry(shape, size);
+	const chars = renderedChars(text, shape, capacity);
+	const data = await renderSnapcompactPng(text, nativeRenderOptions(shape, size));
 	return { data, cols, rows, chars };
 }
 
@@ -1198,38 +1207,39 @@ export interface RenderManyOptions {
 
 /**
  * Render arbitrary text into snapcompact PNG frames as LLM image blocks
- * (first page first). Synchronous: safe to call from per-request transforms.
- * Empty/whitespace-only input yields no frames.
+ * (first page first). Empty/whitespace-only input yields no frames.
  */
-export function renderMany(text: string, options?: RenderManyOptions): ImageContent[] {
+export async function renderMany(text: string, options?: RenderManyOptions): Promise<ImageContent[]> {
 	const shape = options?.shape ?? resolveShape(options?.model);
 	const frameSize = options?.frameSize ?? shape.frameSize;
 	const geo = geometry(shape, frameSize);
 	const normalized = normalize(text);
-	const frames: ImageContent[] = [];
-	const push = (rendered: RenderedFrame): void => {
-		frames.push({
-			type: "image",
-			data: rendered.data,
-			mimeType: "image/png",
-			...(shape.imageDetail ? { detail: shape.imageDetail } : {}),
-		});
-	};
+	const cap = options?.maxFrames;
+	// Build the per-frame texts in order first (cheap, synchronous), then fan
+	// the native PNG renders out concurrently — render() is async/off-thread,
+	// so awaiting each before starting the next leaves throughput on the table.
+	const pageTexts: string[] = [];
 	if (shape.columns === 2) {
 		const finish = pageFinisher(shape);
 		for (const page of docPages(normalized, geo)) {
-			if (options?.maxFrames !== undefined && frames.length >= options.maxFrames) break;
-			push(render(finish(page), shape, frameSize));
+			if (cap !== undefined && pageTexts.length >= cap) break;
+			pageTexts.push(finish(page));
 		}
-		return frames;
+	} else {
+		for (let offset = 0; offset < normalized.length; offset += geo.capacity) {
+			if (cap !== undefined && pageTexts.length >= cap) break;
+			let chunk = normalized.slice(offset, offset + geo.capacity);
+			if (shape.stopwordDim) chunk = dimStopwords(chunk);
+			pageTexts.push(chunk);
+		}
 	}
-	for (let offset = 0; offset < normalized.length; offset += geo.capacity) {
-		if (options?.maxFrames !== undefined && frames.length >= options.maxFrames) break;
-		let chunk = normalized.slice(offset, offset + geo.capacity);
-		if (shape.stopwordDim) chunk = dimStopwords(chunk);
-		push(render(chunk, shape, frameSize));
-	}
-	return frames;
+	const rendered = await Promise.all(pageTexts.map(page => render(page, shape, frameSize)));
+	return rendered.map(frame => ({
+		type: "image",
+		data: frame.data,
+		mimeType: "image/png",
+		...(shape.imageDetail ? { detail: shape.imageDetail } : {}),
+	}));
 }
 
 /** Frames needed to hold `text` at the given shape/size, without rendering.
@@ -1278,6 +1288,29 @@ export function getPreservedArchive(preserveData: Record<string, unknown> | unde
 		...(textHead !== undefined ? { textHead } : {}),
 		...(textTail !== undefined ? { textTail } : {}),
 	};
+}
+
+/** Drop the persisted frame archive ({@link PRESERVE_KEY}) from `preserveData`,
+ *  returning the remaining state — or `undefined` when nothing else remains, so
+ *  an empty `{}` is never persisted. Callers strip the archive once its frames
+ *  have been migrated into a new compaction's text, preventing the stale frames
+ *  from leaking back into the rebuilt context. */
+export function stripPreservedArchive(
+	preserveData: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+	if (!preserveData || !(PRESERVE_KEY in preserveData)) return preserveData;
+	const { [PRESERVE_KEY]: _removed, ...rest } = preserveData;
+	return Object.keys(rest).length > 0 ? rest : undefined;
+}
+
+/** Extract persisted archive source text as plain text for LLM summarization. */
+export function archiveSourceText(archive: Archive): string | undefined {
+	const text =
+		archive.text ??
+		[archive.textHead, archive.textTail]
+			.filter((part): part is string => typeof part === "string" && part.length > 0)
+			.join(NEWLINE_GLYPH);
+	return text.length > 0 ? toPlainText(text) : undefined;
 }
 
 /** Convert archive frames into LLM image blocks (oldest first). */
@@ -1482,7 +1515,13 @@ export async function compact<TMessage = Message>(
 	let archiveText = normalize(serializeConversation(llmMessages, options));
 
 	const previousArchive = getPreservedArchive(previousPreserveData);
-	const includedPreviousSummary = !previousArchive && !!previousSummary;
+	const previousText =
+		previousArchive?.text ??
+		[previousArchive?.textHead, previousArchive?.textTail]
+			.filter((part): part is string => typeof part === "string" && part.length > 0)
+			.join(NEWLINE_GLYPH);
+	const hasPreviousText = previousText.length > 0;
+	const includedPreviousSummary = !hasPreviousText && !!previousSummary;
 	if (includedPreviousSummary && previousSummary) {
 		const head = `[Summary of earlier history] ${normalize(previousSummary)}`;
 		archiveText = archiveText.length > 0 ? `${head} [Recent conversation] ${archiveText}` : head;
@@ -1493,8 +1532,7 @@ export async function compact<TMessage = Message>(
 	// Re-compacting a snapcompacted history unfolds the prior archive's source
 	// text and treats it as one coherent transcript: the previous kept source
 	// ages in ahead of the new history, then the whole thing is re-rendered.
-	const previousText = previousArchive?.text;
-	if (previousText) {
+	if (hasPreviousText) {
 		archiveText = archiveText.length > 0 ? `${previousText}${NEWLINE_GLYPH}${archiveText}` : previousText;
 	}
 
@@ -1504,34 +1542,33 @@ export async function compact<TMessage = Message>(
 	// Re-render the planned frames, carrying any open dim span across every
 	// boundary: textHead → frames → textTail.
 	let dimOpen = layout.textHead.lastIndexOf(DIM_ON) > layout.textHead.lastIndexOf(DIM_OFF);
-	const newFrames: Frame[] = [];
+	const newFrames: Promise<Frame>[] = [];
 	for (const planned of layout.frames) {
 		let pageText: string = dimOpen ? DIM_ON + planned.text : planned.text;
 		dimOpen = pageText.lastIndexOf(DIM_ON) > pageText.lastIndexOf(DIM_OFF);
 		if (planned.shape.stopwordDim) pageText = dimStopwords(pageText);
-		const rendered = render(pageText, planned.shape);
-		newFrames.push({
-			data: rendered.data,
-			mimeType: "image/png",
-			cols: rendered.cols,
-			rows: rendered.rows,
-			chars: rendered.chars,
-			font: planned.shape.font,
-			variant: planned.shape.variant,
-			lineRepeat: planned.shape.lineRepeat,
-			...(planned.shape.columns === 2 ? { columns: 2 } : {}),
-			...(planned.shape.stopwordDim ? { stopwordDim: true } : {}),
-			...(planned.shape.imageDetail ? { detail: planned.shape.imageDetail } : {}),
-		});
-		// Keep the event loop responsive between native render passes.
-		await Bun.sleep(0);
+		newFrames.push(
+			render(pageText, planned.shape).then(rendered => ({
+				data: rendered.data,
+				mimeType: "image/png",
+				cols: rendered.cols,
+				rows: rendered.rows,
+				chars: rendered.chars,
+				font: planned.shape.font,
+				variant: planned.shape.variant,
+				lineRepeat: planned.shape.lineRepeat,
+				...(planned.shape.columns === 2 ? { columns: 2 } : {}),
+				...(planned.shape.stopwordDim ? { stopwordDim: true } : {}),
+				...(planned.shape.imageDetail ? { detail: planned.shape.imageDetail } : {}),
+			})),
+		);
 	}
 
 	const textHead = layout.textHead;
 	const textTail = layout.textTail.length > 0 ? (dimOpen ? DIM_ON : "") + layout.textTail : "";
 	const textChars = textHead.length + textTail.length;
 
-	const frames = newFrames;
+	const frames = await Promise.all(newFrames);
 	const totalChars = frames.reduce((sum, frame) => sum + frame.chars, 0) + textChars;
 	const mixedShapes = frames.some(
 		frame =>

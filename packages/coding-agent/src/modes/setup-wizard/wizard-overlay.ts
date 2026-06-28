@@ -3,7 +3,8 @@ import {
 	matchesKey,
 	type OverlayFocusOwner,
 	padding,
-	parseSgrMouse,
+	routeSgrMouseInput,
+	type SgrMouseEvent,
 	truncateToWidth,
 	visibleWidth,
 } from "@pk-nerdsaver-ai/pi-tui";
@@ -104,7 +105,9 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 	handleInput(data: string): void {
 		if (this.#phase === "done") return;
 		if (data.startsWith("\x1b[<")) {
-			this.#handleMouse(data);
+			routeSgrMouseInput(data, event => {
+				this.#routeMouseEvent(event);
+			});
 			return;
 		}
 		if (matchesKey(data, "ctrl+c")) {
@@ -146,9 +149,7 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 	 * advances the splash/outro like Enter. Raw reports never reach scene
 	 * keyboard input.
 	 */
-	#handleMouse(data: string): void {
-		const event = parseSgrMouse(data);
-		if (!event) return;
+	#routeMouseEvent(event: SgrMouseEvent): void {
 		if (this.#phase === "splash" || this.#phase === "outro") {
 			if (!event.leftClick) return;
 			if (this.#phase === "splash") this.#beginScene();

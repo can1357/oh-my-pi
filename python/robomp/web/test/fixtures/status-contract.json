@@ -1,0 +1,223 @@
+{
+  "runtime": {
+    "bot_login": "robomp-bot",
+    "repo_allowlist": [
+      "octo/widget"
+    ],
+    "max_concurrency": 8,
+    "model": "anthropic/claude-sonnet-4-5",
+    "thinking_level": "high",
+    "uptime_seconds": 0.0
+  },
+  "inflight": [],
+  "event_counts": {
+    "queued": 1,
+    "running": 1,
+    "done": 2,
+    "failed": 3,
+    "skipped": 0
+  },
+  "issue_event_counts": {
+    "queued": 1,
+    "running": 1,
+    "done": 2,
+    "failed": 1,
+    "skipped": 0
+  },
+  "running_events": [
+    {
+      "delivery_id": "run-x",
+      "event_type": "issue_comment",
+      "repo": "octo/widget",
+      "issue_key": "octo/widget#1",
+      "received_at": "2024-01-01T00:00:00+00:00",
+      "started_at": "2024-01-01T00:00:00+00:00",
+      "attempts": 1,
+      "model": "anthropic/claude-3-5-sonnet",
+      "last_tool": "edit",
+      "last_tool_ts": "2024-01-01T00:00:00+00:00"
+    }
+  ],
+  "issues": [
+    {
+      "key": "octo/widget#6",
+      "repo": "octo/widget",
+      "number": 6,
+      "branch": null,
+      "pr_number": null,
+      "state": "new",
+      "classification": null,
+      "updated_at": "2024-01-01T00:00:00+00:00",
+      "latest_event": null
+    },
+    {
+      "key": "octo/widget#5",
+      "repo": "octo/widget",
+      "number": 5,
+      "branch": null,
+      "pr_number": null,
+      "state": "new",
+      "classification": null,
+      "updated_at": "2024-01-01T00:00:00+00:00",
+      "latest_event": {
+        "delivery_id": "queued-x",
+        "event_type": "issues",
+        "state": "queued",
+        "attempts": 0,
+        "received_at": "2024-01-01T00:00:00+00:00",
+        "last_error": null
+      }
+    },
+    {
+      "key": "octo/widget#4",
+      "repo": "octo/widget",
+      "number": 4,
+      "branch": null,
+      "pr_number": null,
+      "state": "merged",
+      "classification": null,
+      "updated_at": "2024-01-01T00:00:00+00:00",
+      "latest_event": {
+        "delivery_id": "terminal-done",
+        "event_type": "issues",
+        "state": "done",
+        "attempts": 0,
+        "received_at": "2024-01-01T00:00:00+00:00",
+        "last_error": null
+      }
+    },
+    {
+      "key": "octo/widget#3",
+      "repo": "octo/widget",
+      "number": 3,
+      "branch": null,
+      "pr_number": null,
+      "state": "fixing",
+      "classification": null,
+      "updated_at": "2024-01-01T00:00:00+00:00",
+      "latest_event": {
+        "delivery_id": "new-done",
+        "event_type": "issues",
+        "state": "done",
+        "attempts": 0,
+        "received_at": "2024-01-01T00:00:00+00:00",
+        "last_error": null
+      }
+    },
+    {
+      "key": "octo/widget#2",
+      "repo": "octo/widget",
+      "number": 2,
+      "branch": null,
+      "pr_number": null,
+      "state": "fixing",
+      "classification": null,
+      "updated_at": "2024-01-01T00:00:00+00:00",
+      "latest_event": {
+        "delivery_id": "failed-x",
+        "event_type": "issues",
+        "state": "failed",
+        "attempts": 0,
+        "received_at": "2024-01-01T00:00:00+00:00",
+        "last_error": "repro diverged"
+      }
+    },
+    {
+      "key": "octo/widget#1",
+      "repo": "octo/widget",
+      "number": 1,
+      "branch": "farm/abc12345/fix",
+      "pr_number": 77,
+      "state": "reproducing",
+      "classification": null,
+      "updated_at": "2024-01-01T00:00:00+00:00",
+      "latest_event": {
+        "delivery_id": "run-x",
+        "event_type": "issue_comment",
+        "state": "running",
+        "attempts": 1,
+        "received_at": "2024-01-01T00:00:00+00:00",
+        "last_error": null
+      }
+    }
+  ],
+  "recent_events": [
+    {
+      "delivery_id": "queued-x",
+      "event_type": "issues",
+      "repo": "octo/widget",
+      "issue_key": "octo/widget#5",
+      "state": "queued",
+      "attempts": 0,
+      "received_at": "2024-01-01T00:00:00+00:00",
+      "last_error": null,
+      "issue_state": "new"
+    },
+    {
+      "delivery_id": "terminal-done",
+      "event_type": "issues",
+      "repo": "octo/widget",
+      "issue_key": "octo/widget#4",
+      "state": "done",
+      "attempts": 0,
+      "received_at": "2024-01-01T00:00:00+00:00",
+      "last_error": null,
+      "issue_state": "merged"
+    },
+    {
+      "delivery_id": "orphan-failed-x",
+      "event_type": "issues",
+      "repo": "octo/widget",
+      "issue_key": null,
+      "state": "failed",
+      "attempts": 0,
+      "received_at": "2024-01-01T00:00:00+00:00",
+      "last_error": "orphan failed error",
+      "issue_state": null
+    },
+    {
+      "delivery_id": "new-done",
+      "event_type": "issues",
+      "repo": "octo/widget",
+      "issue_key": "octo/widget#3",
+      "state": "done",
+      "attempts": 0,
+      "received_at": "2024-01-01T00:00:00+00:00",
+      "last_error": null,
+      "issue_state": "fixing"
+    },
+    {
+      "delivery_id": "superseded-failed",
+      "event_type": "issues",
+      "repo": "octo/widget",
+      "issue_key": "octo/widget#3",
+      "state": "failed",
+      "attempts": 0,
+      "received_at": "2024-01-01T00:00:00+00:00",
+      "last_error": "old error",
+      "issue_state": "fixing"
+    },
+    {
+      "delivery_id": "failed-x",
+      "event_type": "issues",
+      "repo": "octo/widget",
+      "issue_key": "octo/widget#2",
+      "state": "failed",
+      "attempts": 0,
+      "received_at": "2024-01-01T00:00:00+00:00",
+      "last_error": "repro diverged",
+      "issue_state": "fixing"
+    },
+    {
+      "delivery_id": "run-x",
+      "event_type": "issue_comment",
+      "repo": "octo/widget",
+      "issue_key": "octo/widget#1",
+      "state": "running",
+      "attempts": 1,
+      "received_at": "2024-01-01T00:00:00+00:00",
+      "last_error": null,
+      "issue_state": "reproducing"
+    }
+  ]
+}

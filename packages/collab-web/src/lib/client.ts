@@ -67,6 +67,8 @@ const MAX_NOTICES = 50;
 const TRANSCRIPT_TIMEOUT_MS = 10_000;
 /** Mirrors the TUI guest's WELCOME_TIMEOUT_MS: a host that never answers hello ends the join. */
 const WELCOME_TIMEOUT_MS = 30_000;
+/** Mirrors the TUI guest's SNAPSHOT_PROGRESS_TIMEOUT_MS: every snapshot chunk must make progress. */
+const SNAPSHOT_PROGRESS_TIMEOUT_MS = 30_000;
 
 interface PendingTranscript {
 	resolve: (result: { text: string; newSize: number } | null) => void;
@@ -85,6 +87,7 @@ export class GuestClient {
 	#everConnected = false;
 	#welcomed = false;
 	#welcomeTimer: Timer | null = null;
+	#snapshotProgressTimer: Timer | null = null;
 
 	#phase: ConnectionPhase = "connecting";
 	#endedReason: string | null = null;
@@ -135,6 +138,7 @@ export class GuestClient {
 
 	close(): void {
 		this.#clearWelcomeTimer();
+		this.#clearSnapshotProgressTimer();
 		this.#socket.close();
 	}
 
@@ -188,6 +192,7 @@ export class GuestClient {
 	}
 
 	#handleClose(reason: string, willReconnect: boolean): void {
+		this.#clearSnapshotProgressTimer();
 		if (this.#phase === "ended") return;
 		if (willReconnect) {
 			this.#phase = "reconnecting";
@@ -200,6 +205,7 @@ export class GuestClient {
 	#end(reason: string): void {
 		if (this.#phase === "ended") return;
 		this.#clearWelcomeTimer();
+		this.#clearSnapshotProgressTimer();
 		this.#phase = "ended";
 		this.#endedReason = reason;
 		for (const [, pending] of this.#pendingTranscripts) {
@@ -215,6 +221,21 @@ export class GuestClient {
 		if (this.#welcomeTimer !== null) {
 			clearTimeout(this.#welcomeTimer);
 			this.#welcomeTimer = null;
+		}
+	}
+
+	#armSnapshotProgressTimer(): void {
+		this.#clearSnapshotProgressTimer();
+		this.#snapshotProgressTimer = setTimeout(() => {
+			this.#snapshotProgressTimer = null;
+			this.#end("timed out waiting for the host's session snapshot");
+		}, SNAPSHOT_PROGRESS_TIMEOUT_MS);
+	}
+
+	#clearSnapshotProgressTimer(): void {
+		if (this.#snapshotProgressTimer !== null) {
+			clearTimeout(this.#snapshotProgressTimer);
+			this.#snapshotProgressTimer = null;
 		}
 	}
 
@@ -236,8 +257,10 @@ export class GuestClient {
 	#applyFrame(frame: HostFrame): void {
 		switch (frame.t) {
 			case "welcome":
+				// Reset accumulator: a fresh welcome arriving mid-load (reconnect)
+				// supersedes any partially-streamed snapshot from the prior session.
 				this.#header = frame.header;
-				this.#entries = [...frame.entries];
+				this.#entries = [];
 				this.#state = frame.state;
 				this.#agents = [...frame.agents];
 				this.#stream = null;
@@ -246,12 +269,30 @@ export class GuestClient {
 				this.#progress = new Map();
 				this.#lifecycle = new Map();
 				this.#working = frame.state.isStreaming;
-				this.#phase = "live";
-				this.#endedReason = null;
 				this.#readOnly = frame.readOnly === true;
 				this.#welcomed = true;
 				this.#clearWelcomeTimer();
+				if (frame.entryCount === 0) {
+					this.#clearSnapshotProgressTimer();
+					this.#phase = "live";
+				} else {
+					this.#armSnapshotProgressTimer();
+				}
+				this.#endedReason = null;
 				break;
+			case "snapshot-chunk": {
+				// Stream transcript fragments into the live snapshot. The host
+				// always closes the train with `final: true`; that flip is what
+				// moves the guest from "waiting" to "live".
+				this.#entries = [...this.#entries, ...frame.entries];
+				if (frame.final) {
+					this.#clearSnapshotProgressTimer();
+					this.#phase = "live";
+				} else {
+					this.#armSnapshotProgressTimer();
+				}
+				break;
+			}
 			case "entry":
 				this.#entries = [...this.#entries, frame.entry];
 				if (this.#streamDone && frame.entry.type === "message" && frame.entry.message.role === "assistant") {

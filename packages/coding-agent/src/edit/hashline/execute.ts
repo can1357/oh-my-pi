@@ -106,7 +106,28 @@ function formatBlockResolution(resolution: BlockResolution): string {
 	return `${op} ${resolution.anchorLine} → resolved ${span} (${lines} line${lines === 1 ? "" : "s"})${suffix}`;
 }
 
-function renderSection(result: PatchSectionResult, diagnostics: FileDiagnosticsResult | undefined): RenderedSection {
+function renderSection(
+	result: PatchSectionResult,
+	diagnostics: FileDiagnosticsResult | undefined,
+	sourcePath: string,
+): RenderedSection {
+	if (result.op === "delete") {
+		const toolResult: AgentToolResult<EditToolDetails, typeof hashlineEditParamsSchema> = {
+			content: [{ type: "text", text: `Deleted ${result.path}` }],
+			details: {
+				diff: "",
+				op: "delete",
+				path: result.path,
+				oldText: result.before,
+				meta: outputMeta().get(),
+			},
+		};
+		return {
+			toolResult,
+			perFileResult: { path: result.path, diff: "", op: "delete", oldText: result.before },
+		};
+	}
+
 	if (result.op === "noop") {
 		const toolResult: AgentToolResult<EditToolDetails, typeof hashlineEditParamsSchema> = {
 			content: [{ type: "text", text: noChangeDiagnostic(result.path) }],
@@ -130,24 +151,39 @@ function renderSection(result: PatchSectionResult, diagnostics: FileDiagnosticsR
 		result.blockResolutions && result.blockResolutions.length > 0
 			? `\n${result.blockResolutions.map(formatBlockResolution).join("\n")}`
 			: "";
+	const moveBlock = result.moveDest ? `\nMoved to ${result.moveDest}` : "";
 	const firstChangedLine = result.firstChangedLine ?? diff.firstChangedLine;
 	return {
 		toolResult: {
-			content: [{ type: "text", text: `${result.header}${blockBlock}${previewBlock}${warningsBlock}` }],
+			content: [
+				{
+					type: "text",
+					text: `${result.header}${blockBlock}${moveBlock}${previewBlock}${warningsBlock}`,
+				},
+			],
 			details: {
 				diff: diff.diff,
 				firstChangedLine,
 				diagnostics,
 				op: result.op,
+				move: result.moveDest,
+				path: result.moveDest ?? result.path,
+				sourcePath: result.moveDest ? sourcePath : undefined,
+				oldText: result.before,
+				newText: result.after,
 				meta,
 			},
 		},
 		perFileResult: {
-			path: result.path,
+			path: result.moveDest ?? result.path,
 			diff: diff.diff,
 			firstChangedLine,
 			diagnostics,
 			op: result.op,
+			move: result.moveDest,
+			sourcePath: result.moveDest ? sourcePath : undefined,
+			oldText: result.before,
+			newText: result.after,
 		},
 	};
 }
@@ -181,10 +217,10 @@ export async function executeHashlineSingle(
 			if (escalate) {
 				throw new ToolError(noChangeLoopDiagnostic(sectionResult.path, count));
 			}
-			return renderSection(sectionResult, undefined).toolResult;
+			return renderSection(sectionResult, undefined, prepared.section.path).toolResult;
 		}
 		resetNoopEdit(options.session, sectionResult.canonicalPath);
-		return renderSection(sectionResult, fs.consumeDiagnostics(sectionResult.path)).toolResult;
+		return renderSection(sectionResult, fs.consumeDiagnostics(sectionResult.path), prepared.section.path).toolResult;
 	}
 
 	// Multi-section: prepare every section up front so we fail fast before
@@ -215,7 +251,7 @@ export async function executeHashlineSingle(
 				: new ToolError(noChangeDiagnostic(sectionResult.path));
 		}
 		resetNoopEdit(options.session, sectionResult.canonicalPath);
-		rendered.push(renderSection(sectionResult, fs.consumeDiagnostics(sectionResult.path)));
+		rendered.push(renderSection(sectionResult, fs.consumeDiagnostics(sectionResult.path), prepared[i].section.path));
 	}
 
 	return {

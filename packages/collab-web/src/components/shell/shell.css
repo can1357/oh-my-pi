@@ -119,6 +119,33 @@
 	border-color: var(--border-strong);
 }
 
+/* ---- theme toggle (system / light / dark) ---- */
+.sh-theme-toggle {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 32px;
+	height: 32px;
+	flex-shrink: 0;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--bg-raised);
+	color: var(--fg-muted);
+	cursor: pointer;
+	transition: color 0.14s ease, background 0.14s ease, border-color 0.14s ease;
+}
+
+.sh-theme-toggle:hover {
+	color: var(--fg);
+	border-color: var(--border-strong);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.sh-theme-toggle {
+		transition: none;
+	}
+}
+
 .sh-badge {
 	position: absolute;
 	top: -5px;
@@ -469,8 +496,9 @@
 
 .sh-connect-card {
 	width: 100%;
-	max-width: 360px;
+	max-width: 380px;
 	padding: 28px;
+	position: relative;
 	display: flex;
 	flex-direction: column;
 	gap: 12px;
@@ -479,14 +507,43 @@
 	border-radius: var(--radius-lg);
 }
 
+.sh-connect-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+}
+
 .sh-lockup {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
 	font: 500 15px / 1.5 var(--font-mono);
 	letter-spacing: 0.02em;
-	margin-bottom: 6px;
+	margin: 0;
+}
+
+.sh-lockup-mark {
+	width: 16px;
+	height: 16px;
+	flex: none;
+	background: var(--brand-mark-gradient);
+	border-radius: 4px;
 }
 
 .sh-lockup-pi {
 	color: var(--accent);
+}
+
+.sh-connect-sub {
+	font-size: 12px;
+	color: var(--fg-muted);
+	margin-top: -4px;
+}
+
+.sh-field-hint {
+	font-size: 11px;
+	color: var(--fg-faint);
 }
 
 .sh-field {
@@ -555,7 +612,7 @@
 		width: 280px;
 		max-width: 85vw;
 		border-left: 1px solid var(--border-strong);
-		box-shadow: -4px 0 16px oklch(0 0 0 / 30%);
+		box-shadow: var(--rail-mobile-shadow);
 	}
 	.sh-rail-backdrop {
 		display: block;

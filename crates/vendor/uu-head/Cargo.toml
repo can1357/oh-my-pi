@@ -1,0 +1,19 @@
+# Vendored from uutils/coreutils tag 0.8.0 (src/uu/head), patched to route I/O
+# and path resolution through pi-uutils-ctx so it can run in-process as a shell
+# builtin. See src/head.rs for the patch markers (`pi-uutils:` comments).
+[package]
+name = "uu_head"
+version = "0.8.0"
+edition = "2024"
+license = "MIT"
+description = "head ~ (uutils) display the first lines of input (vendored + patched for in-process embedding)"
+
+[lib]
+path = "src/head.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["wrap_help", "cargo", "color"] }
+memchr = "2.7.2"
+thiserror = "2.0.3"
+uucore = { version = "0.8.0", features = ["parser-size", "ringbuffer", "lines", "fs"] }
+pi-uutils-ctx = { path = "../../pi-uutils-ctx" }

@@ -102,7 +102,7 @@ describe("flushGrievances", () => {
 	});
 
 	it("skips network when consent is missing and leaves rows intact", async () => {
-		insertGrievance(db, "find", "weird ordering");
+		insertGrievance(db, "glob", "weird ordering");
 		const fetchSpy = vi.fn(async () => new Response("unexpected", { status: 200 }));
 
 		// `denied` is the user-facing kill switch for push.
@@ -116,7 +116,7 @@ describe("flushGrievances", () => {
 	});
 
 	it("skips network when endpoint is missing", async () => {
-		insertGrievance(db, "find", "weird ordering");
+		insertGrievance(db, "glob", "weird ordering");
 		const fetchSpy = vi.fn(async () => new Response("unexpected", { status: 200 }));
 
 		const result = await flushGrievances(db, pushSettings({ "dev.autoqaPush.endpoint": "" }), {
@@ -138,7 +138,7 @@ describe("flushGrievances", () => {
 	});
 
 	it("posts pending rows with bearer header and marks them pushed=1 on 200", async () => {
-		insertGrievance(db, "find", "weird ordering");
+		insertGrievance(db, "glob", "weird ordering");
 		insertGrievance(db, "read", "selector ignored");
 
 		let capturedInput: string | URL | Request | undefined;
@@ -170,7 +170,7 @@ describe("flushGrievances", () => {
 		expect(typeof body.arch).toBe("string");
 		expect(body.installId).toBe("11111111-2222-3333-4444-555555555555");
 		expect(body.entries).toEqual([
-			{ id: 1, model: "test-model", version: "test-version", tool: "find", report: "weird ordering" },
+			{ id: 1, model: "test-model", version: "test-version", tool: "glob", report: "weird ordering" },
 			{ id: 2, model: "test-model", version: "test-version", tool: "read", report: "selector ignored" },
 		]);
 
@@ -182,7 +182,7 @@ describe("flushGrievances", () => {
 	});
 
 	it("omits the Authorization header when no token is configured", async () => {
-		insertGrievance(db, "find", "no token here");
+		insertGrievance(db, "glob", "no token here");
 		let capturedInit: RequestInit | undefined;
 		const fetchSpy = vi.fn(async (_input: string | URL | Request, init: RequestInit | undefined) => {
 			capturedInit = init;
@@ -199,7 +199,7 @@ describe("flushGrievances", () => {
 	});
 
 	it("leaves rows unpushed on 5xx and reports failure", async () => {
-		insertGrievance(db, "find", "boom");
+		insertGrievance(db, "glob", "boom");
 		const fetchSpy = vi.fn(async () => new Response("nope", { status: 500 }));
 
 		const result = await flushGrievances(db, pushSettings(), { fetch: mockFetch(fetchSpy) });
@@ -211,7 +211,7 @@ describe("flushGrievances", () => {
 	});
 
 	it("drains mid-flight inserts in a follow-up batch within the same loop", async () => {
-		insertGrievance(db, "find", "first");
+		insertGrievance(db, "glob", "first");
 
 		const fetchEntered = Promise.withResolvers<void>();
 		const releaseFirstFetch = Promise.withResolvers<Response>();
@@ -245,7 +245,7 @@ describe("flushGrievances", () => {
 	});
 
 	it("collapses concurrent callers onto a single in-flight push", async () => {
-		insertGrievance(db, "find", "single-flight");
+		insertGrievance(db, "glob", "single-flight");
 
 		const releaseFetch = Promise.withResolvers<Response>();
 		const fetchSpy = vi.fn(() => releaseFetch.promise);
@@ -265,7 +265,7 @@ describe("flushGrievances", () => {
 	});
 
 	it("skips the next push within the failure cooldown window", async () => {
-		insertGrievance(db, "find", "first");
+		insertGrievance(db, "glob", "first");
 		const fetchSpy = vi.fn(async () => new Response("nope", { status: 500 }));
 
 		const settings = pushSettings();
@@ -284,7 +284,7 @@ describe("flushGrievances", () => {
 		// partial final one), exercising both the LIMIT semantics and the
 		// "remainder smaller than batch" tail.
 		const total = 127;
-		for (let i = 0; i < total; i++) insertGrievance(db, "find", `report-${i}`);
+		for (let i = 0; i < total; i++) insertGrievance(db, "glob", `report-${i}`);
 
 		const seenBatchSizes: number[] = [];
 		const fetchSpy = vi.fn(async (_input: string | URL | Request, init: RequestInit | undefined) => {
@@ -309,7 +309,7 @@ describe("flushGrievances", () => {
 		// rows stay flagged unpushed.
 		const firstBatch = 50;
 		const secondBatch = 10;
-		for (let i = 0; i < firstBatch + secondBatch; i++) insertGrievance(db, "find", `r-${i}`);
+		for (let i = 0; i < firstBatch + secondBatch; i++) insertGrievance(db, "glob", `r-${i}`);
 
 		let call = 0;
 		const fetchSpy = vi.fn(() => {

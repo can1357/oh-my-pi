@@ -1,12 +1,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { AssistantMessage } from "@pk-nerdsaver-ai/pi-ai";
+import type { AssistantMessage, UsageLimit, UsageReport } from "@pk-nerdsaver-ai/pi-ai";
 import { type Component, truncateToWidth, visibleWidth } from "@pk-nerdsaver-ai/pi-tui";
 import { getProjectDir } from "@pk-nerdsaver-ai/pi-utils";
 import { $ } from "bun";
 import { settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
+import type { OAuthAccountIdentity } from "../../../session/auth-storage";
+import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
+import { type ActiveRepoContext, resolveActiveRepoContextSync } from "../../../utils/active-repo-context";
 import * as git from "../../../utils/git";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
 import { sanitizeStatusText } from "../../shared";
@@ -153,6 +156,12 @@ interface ContextUsageMemo {
 	skillsRef: readonly any[] | undefined;
 }
 
+interface ActiveRepoCache {
+	projectDir: string;
+	activeRepo: ActiveRepoContext | null;
+	effectiveGitCwd: string;
+}
+
 const EMPTY_MESSAGES: readonly AgentMessage[] = [];
 const STATUS_USAGE_START_DELAY_MS = 0;
 const STATUS_USAGE_REFRESH_TIMEOUT_MS = 2_000;
@@ -167,6 +176,10 @@ function hasGitSegment(segments: readonly StatusLineSegmentId[]): boolean {
 function hasPrSegment(segments: readonly StatusLineSegmentId[]): boolean {
 	return segments.includes("pr");
 }
+function hasPathSegment(segments: readonly StatusLineSegmentId[]): boolean {
+	return segments.includes("path");
+}
+
 function hasGitBackedSegment(segments: readonly StatusLineSegmentId[]): boolean {
 	return hasGitSegment(segments) || hasPrSegment(segments);
 }
@@ -193,25 +206,30 @@ export class StatusLineComponent implements Component {
 	#goalModeStatus: { enabled: boolean; paused: boolean } | null = null;
 	#collabStatus: CollabStatus | null = null;
 	#focusedAgentId: string | undefined;
+	#activeRepoCache: ActiveRepoCache | undefined;
 
 	// Git status caching (1s TTL)
 	#cachedGitStatus: { staged: number; unstaged: number; untracked: number } | null = null;
+	#cachedGitStatusCwd: string | undefined = undefined;
 	#gitStatusLastFetch = 0;
-	#gitStatusInFlight = false;
+	#gitStatusInFlightCwd: string | undefined = undefined;
 
 	// PR lookup caching (invalidated on branch/repo context changes)
 	#cachedPr: { number: number; url: string } | null | undefined = undefined;
 	#cachedPrContext: PrCacheContext | undefined = undefined;
 	#prLookupInFlight = false;
 	#defaultBranch?: string;
+	#defaultBranchCwd: string | undefined = undefined;
 	#lastTokensPerSecond: number | null = null;
 	#lastTokensPerSecondTimestamp: number | null = null;
 
-	// Anthropic usage caching (5-min TTL, OAuth/sub only)
+	// Provider usage caching (5-min TTL, OAuth/sub only)
 	#cachedUsage: {
+		tier?: string;
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 	} | null = null;
+	#cachedUsageContextKey: string | null = null;
 	#usageFetchedAt = 0;
 	#usageInFlight = false;
 	#usageStartTimer: Timer | null = null;
@@ -242,6 +260,18 @@ export class StatusLineComponent implements Component {
 		return (
 			hasGitBackedSegment(effectiveSettings.leftSegments) || hasGitBackedSegment(effectiveSettings.rightSegments)
 		);
+	}
+
+	#resolveActiveRepoCache(): ActiveRepoCache {
+		const projectDir = getProjectDir();
+		if (this.#activeRepoCache?.projectDir === projectDir) {
+			return this.#activeRepoCache;
+		}
+
+		const activeRepo = resolveActiveRepoContextSync(projectDir);
+		const effectiveGitCwd = activeRepo?.repoRoot ?? projectDir;
+		this.#activeRepoCache = { projectDir, activeRepo, effectiveGitCwd };
+		return this.#activeRepoCache;
 	}
 
 	/**
@@ -324,7 +354,8 @@ export class StatusLineComponent implements Component {
 			return;
 		}
 
-		const repository = git.repo.resolveSync(getProjectDir());
+		const { effectiveGitCwd } = this.#resolveActiveRepoCache();
+		const repository = git.repo.resolveSync(effectiveGitCwd);
 		if (!repository) return;
 
 		const watchPath = git.repo.isReftableSync(repository)
@@ -379,17 +410,17 @@ export class StatusLineComponent implements Component {
 		this.#cachedBranchCwd = undefined;
 		this.#cachedPrContext = undefined;
 	}
-	#getCurrentBranch(): string | null {
+	#getCurrentBranch(effectiveGitCwd?: string): string | null {
 		if (!this.#gitEnabled()) return null;
 
-		const cwd = getProjectDir();
-		if (this.#cachedBranch !== undefined && this.#cachedBranchCwd === cwd) {
+		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
+		if (this.#cachedBranch !== undefined && this.#cachedBranchCwd === gitCwd) {
 			return this.#cachedBranch;
 		}
 
-		const head = git.head.resolveSync(cwd);
+		const head = git.head.resolveSync(gitCwd);
 		const gitHeadPath = head?.headPath ?? null;
-		this.#cachedBranchCwd = cwd;
+		this.#cachedBranchCwd = gitCwd;
 		this.#cachedBranchRepoId = gitHeadPath;
 		if (!head) {
 			this.#cachedBranch = null;
@@ -401,12 +432,18 @@ export class StatusLineComponent implements Component {
 		return this.#cachedBranch ?? null;
 	}
 
-	#isDefaultBranch(branch: string): boolean {
+	#isDefaultBranch(branch: string, effectiveGitCwd: string): boolean {
+		if (this.#defaultBranchCwd !== effectiveGitCwd) {
+			this.#defaultBranch = undefined;
+			this.#defaultBranchCwd = effectiveGitCwd;
+		}
+
 		if (this.#defaultBranch === undefined) {
 			this.#defaultBranch = "main";
+			const lookupCwd = effectiveGitCwd;
 			(async () => {
-				const resolved = await git.branch.default(getProjectDir());
-				if (this.#disposed) return;
+				const resolved = await git.branch.default(lookupCwd);
+				if (this.#disposed || this.#defaultBranchCwd !== lookupCwd) return;
 				if (resolved) {
 					this.#defaultBranch = resolved;
 					if (this.#onBranchChange) {
@@ -418,32 +455,43 @@ export class StatusLineComponent implements Component {
 		return branch === this.#defaultBranch;
 	}
 
-	#getGitStatus(): { staged: number; unstaged: number; untracked: number } | null {
+	#getGitStatus(effectiveGitCwd?: string): { staged: number; unstaged: number; untracked: number } | null {
 		if (!this.#gitEnabled()) return null;
-		if (this.#gitStatusInFlight || Date.now() - this.#gitStatusLastFetch < 1000) {
+
+		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
+		if (this.#gitStatusInFlightCwd !== undefined) {
+			return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
+		}
+		if (this.#cachedGitStatusCwd === gitCwd && Date.now() - this.#gitStatusLastFetch < 1000) {
 			return this.#cachedGitStatus;
 		}
 
-		this.#gitStatusInFlight = true;
+		this.#gitStatusInFlightCwd = gitCwd;
 
 		(async () => {
+			let nextStatus: { staged: number; unstaged: number; untracked: number } | null = null;
 			try {
-				this.#cachedGitStatus = await git.status.summary(getProjectDir());
+				nextStatus = await git.status.summary(gitCwd);
 			} catch {
-				this.#cachedGitStatus = null;
+				nextStatus = null;
 			} finally {
-				this.#gitStatusLastFetch = Date.now();
-				this.#gitStatusInFlight = false;
+				if (this.#gitStatusInFlightCwd === gitCwd) {
+					this.#cachedGitStatus = nextStatus;
+					this.#cachedGitStatusCwd = gitCwd;
+					this.#gitStatusLastFetch = Date.now();
+					this.#gitStatusInFlightCwd = undefined;
+				}
 			}
 		})();
 
-		return this.#cachedGitStatus;
+		return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 	}
 
-	#lookupPr(): { number: number; url: string } | null {
+	#lookupPr(effectiveGitCwd?: string): { number: number; url: string } | null {
 		if (!this.#gitEnabled()) return null;
 
-		const branch = this.#getCurrentBranch();
+		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
+		const branch = this.#getCurrentBranch(gitCwd);
 		const currentContext = branch ? createPrCacheContext(branch, this.#cachedBranchRepoId ?? null) : null;
 
 		if (canReuseCachedPr(this.#cachedPr, this.#cachedPrContext, currentContext)) {
@@ -452,19 +500,26 @@ export class StatusLineComponent implements Component {
 
 		const stalePr = this.#cachedPr;
 
-		// Don't look up if no branch, detached HEAD, default branch, or already in flight
-		if (!branch || branch === "detached" || this.#isDefaultBranch(branch) || this.#prLookupInFlight) {
+		if (!branch) {
+			this.#cachedPr = null;
+			this.#cachedPrContext = undefined;
+			return null;
+		}
+
+		// Don't look up if detached, default branch, or already in flight.
+		if (branch === "detached" || this.#isDefaultBranch(branch, gitCwd) || this.#prLookupInFlight) {
 			return stalePr ?? null;
 		}
 
 		this.#prLookupInFlight = true;
 		const lookupContext = currentContext;
+		const lookupCwd = gitCwd;
 
 		// Fire async lookup, keep stale value visible until resolved
 		(async () => {
 			// Helper: only write cache if branch/repo context hasn't changed since launch
 			const setCachedPr = (value: { number: number; url: string } | null) => {
-				const latestBranch = this.#getCurrentBranch();
+				const latestBranch = this.#getCurrentBranch(lookupCwd);
 				const latestContext = latestBranch
 					? createPrCacheContext(latestBranch, this.#cachedBranchRepoId ?? null)
 					: undefined;
@@ -475,7 +530,7 @@ export class StatusLineComponent implements Component {
 			};
 			try {
 				// Requires `gh repo set-default` to be configured; fails gracefully if not
-				const result = await $`gh pr view --json number,url`.quiet().nothrow();
+				const result = await $`gh pr view --json number,url`.cwd(lookupCwd).quiet().nothrow();
 				if (this.#disposed) return;
 				if (result.exitCode !== 0) {
 					setCachedPr(null);
@@ -531,15 +586,28 @@ export class StatusLineComponent implements Component {
 		return null;
 	}
 
+	#getUsageContextKey(session: AgentSession): string {
+		const activeProvider = session.state.model?.provider ?? session.model?.provider ?? "";
+		if (!activeProvider) return "";
+		const identity = session.modelRegistry?.authStorage?.getOAuthAccountIdentity(activeProvider, session.sessionId);
+		return [activeProvider, identity?.accountId ?? "", identity?.email ?? "", identity?.projectId ?? ""].join("\0");
+	}
+
 	/**
 	 * Startup redraws only arm a short-delayed task; timeout releases the render
 	 * cadence while a late successful fetch can still refresh the cached segment.
 	 */
 	refreshUsageInBackground(): void {
 		const now = Date.now();
+		const session = this.session;
+		const usageContextKey = this.#getUsageContextKey(session);
+		if (this.#cachedUsageContextKey !== usageContextKey) {
+			this.#cachedUsage = null;
+			this.#usageFetchedAt = 0;
+			this.#cachedUsageContextKey = usageContextKey;
+		}
 		if (this.#usageInFlight || this.#usageStartTimer) return;
 		if (this.#usageFetchedAt > 0 && now - this.#usageFetchedAt < 5 * 60_000) return;
-		const session = this.session;
 		const fetcher = (session as { fetchUsageReports?: (signal?: AbortSignal) => Promise<unknown> }).fetchUsageReports;
 		if (typeof fetcher !== "function") return;
 		this.#usageInFlight = true;
@@ -572,7 +640,12 @@ export class StatusLineComponent implements Component {
 
 	#applyUsageRefreshReports(session: AgentSession, reports: unknown): void {
 		if (this.#disposed || this.session !== session) return;
-		this.#cachedUsage = this.#normalizeUsageReports(reports);
+		const activeProvider = session.state.model?.provider ?? session.model?.provider;
+		const activeIdentity =
+			activeProvider && session.modelRegistry?.authStorage
+				? session.modelRegistry.authStorage.getOAuthAccountIdentity(activeProvider, session.sessionId)
+				: undefined;
+		this.#cachedUsage = this.#normalizeUsageReports(reports, activeProvider, activeIdentity);
 		this.#usageFetchedAt = Date.now();
 	}
 
@@ -599,20 +672,35 @@ export class StatusLineComponent implements Component {
 		}
 	}
 
-	#normalizeUsageReports(reports: unknown): {
+	#normalizeUsageReports(
+		reports: unknown,
+		activeProvider?: string,
+		activeIdentity?: OAuthAccountIdentity,
+	): {
+		tier?: string;
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 	} | null {
 		if (!Array.isArray(reports)) return null;
 		let fiveHour: { percent: number; resetMinutes?: number } | undefined;
 		let sevenDay: { percent: number; resetHours?: number } | undefined;
+		let fiveHourTier: string | undefined;
+		let sevenDayTier: string | undefined;
 		const now = Date.now();
 		for (const report of reports) {
 			if (!report || typeof report !== "object") continue;
+			const provider = (report as { provider?: unknown }).provider;
+			if (activeProvider && provider !== activeProvider) continue;
 			const limits = (report as { limits?: unknown }).limits;
 			if (!Array.isArray(limits)) continue;
 			for (const limit of limits) {
 				if (!limit || typeof limit !== "object") continue;
+				if (
+					activeIdentity &&
+					!limitMatchesActiveAccount(report as UsageReport, limit as UsageLimit, activeIdentity)
+				) {
+					continue;
+				}
 				const l = limit as {
 					scope?: { windowId?: string; tier?: string };
 					window?: { resetsAt?: number };
@@ -623,23 +711,30 @@ export class StatusLineComponent implements Component {
 				const windowId = l.scope?.windowId;
 				const tier = l.scope?.tier;
 				const resetsAt = l.window?.resetsAt;
-				if (windowId === "5h" && !tier && !fiveHour) {
+				// Accept tiered limits, but prefer untiered (backward compat with Anthropic).
+				// An untiered limit always replaces a tiered one; among same-tieredness, first wins.
+				if (windowId === "5h" && (!fiveHour || (fiveHourTier !== undefined && !tier))) {
 					fiveHour = {
 						percent: fraction * 100,
 						resetMinutes:
 							typeof resetsAt === "number" ? Math.max(0, Math.round((resetsAt - now) / 60_000)) : undefined,
 					};
-				} else if (windowId === "7d" && !tier && !sevenDay) {
+					fiveHourTier = tier || undefined;
+				}
+				if (windowId === "7d" && (!sevenDay || (sevenDayTier !== undefined && !tier))) {
 					sevenDay = {
 						percent: fraction * 100,
 						resetHours:
 							typeof resetsAt === "number" ? Math.max(0, Math.round((resetsAt - now) / 3_600_000)) : undefined,
 					};
+					sevenDayTier = tier || undefined;
 				}
 			}
 		}
 		if (!fiveHour && !sevenDay) return null;
-		return { fiveHour, sevenDay };
+		// Single compact label; prefer the five-hour tier if displayed windows ever disagree.
+		const effectiveTier = fiveHourTier ?? sevenDayTier;
+		return { tier: effectiveTier, fiveHour, sevenDay };
 	}
 
 	/**
@@ -702,6 +797,7 @@ export class StatusLineComponent implements Component {
 	#buildSegmentContext(
 		width: number,
 		segmentOptions: StatusLineSettings["segmentOptions"],
+		includePath: boolean,
 		includeContext: boolean,
 		includeGit: boolean,
 		includePr: boolean,
@@ -727,10 +823,12 @@ export class StatusLineComponent implements Component {
 
 		let contextWindow = state.model?.contextWindow ?? this.session.model?.contextWindow ?? 0;
 		let contextPercent: number | null = 0;
+		let contextTokens = 0;
 		if (includeContext) {
 			const breakdown = this.getCachedContextBreakdown();
+			contextTokens = breakdown.usedTokens;
 			contextWindow = breakdown.contextWindow || contextWindow;
-			contextPercent = contextWindow > 0 ? (breakdown.usedTokens / contextWindow) * 100 : 0;
+			contextPercent = contextWindow > 0 ? (breakdown.usedTokens / contextWindow) * 100 : null;
 		}
 
 		// Collab guest: context comes from the host's state frames — the local
@@ -738,16 +836,22 @@ export class StatusLineComponent implements Component {
 		const collabState = this.#collabStatus?.stateOverride;
 		if (collabState?.contextUsage) {
 			contextWindow = collabState.contextUsage.contextWindow || contextWindow;
+			contextTokens = collabState.contextUsage.tokens ?? contextTokens;
 			contextPercent = collabState.contextUsage.percent ?? contextPercent;
 		}
 
-		const gitBranch = includeGit || includePr ? this.#getCurrentBranch() : null;
-		const gitStatus = includeGit ? this.#getGitStatus() : null;
-		const gitPr = includePr ? this.#lookupPr() : null;
-
+		const shouldResolveActiveRepo = this.#gitEnabled() && (includePath || includeGit || includePr);
+		const projectDir = getProjectDir();
+		const activeRepoCache = shouldResolveActiveRepo
+			? this.#resolveActiveRepoCache()
+			: { projectDir, activeRepo: null, effectiveGitCwd: projectDir };
+		const gitBranch = includeGit || includePr ? this.#getCurrentBranch(activeRepoCache.effectiveGitCwd) : null;
+		const gitStatus = includeGit ? this.#getGitStatus(activeRepoCache.effectiveGitCwd) : null;
+		const gitPr = includePr ? this.#lookupPr(activeRepoCache.effectiveGitCwd) : null;
 		return {
 			session: this.session,
 			focusedAgentId: this.#focusedAgentId,
+			activeRepo: activeRepoCache.activeRepo,
 			width,
 			options: segmentOptions ?? {},
 			planMode: this.#planModeStatus,
@@ -756,6 +860,7 @@ export class StatusLineComponent implements Component {
 			collab: this.#collabStatus,
 			usageStats,
 			contextPercent,
+			contextTokens,
 			contextWindow,
 			autoCompactEnabled: this.#autoCompactEnabled,
 			subagentCount: this.#subagentCount,
@@ -810,8 +915,16 @@ export class StatusLineComponent implements Component {
 		};
 	}
 
+	#subagentBadgeText(): string | undefined {
+		if (this.#subagentCount === 0) return undefined;
+		const noun = this.#subagentCount === 1 ? "agent" : "agents";
+		return theme.fg("statusLineSubagents", `${theme.icon.agents} ${this.#subagentCount} ${noun}`);
+	}
+
 	#buildStatusLine(width: number): string {
 		const effectiveSettings = this.#resolveSettings();
+		const includePath =
+			hasPathSegment(effectiveSettings.leftSegments) || hasPathSegment(effectiveSettings.rightSegments);
 		const includeContext =
 			hasContextSegment(effectiveSettings.leftSegments) || hasContextSegment(effectiveSettings.rightSegments);
 		const gitEnabled = this.#gitEnabled();
@@ -823,6 +936,7 @@ export class StatusLineComponent implements Component {
 		const ctx = this.#buildSegmentContext(
 			width,
 			effectiveSettings.segmentOptions,
+			includePath,
 			includeContext,
 			includeGit,
 			includePr,
@@ -840,11 +954,13 @@ export class StatusLineComponent implements Component {
 		const transparentBg = bgAnsi === TRANSPARENT_BG_ANSI;
 		const fgAnsi = theme.getFgAnsi("text");
 		const sepAnsi = theme.getFgAnsi("statusLineSep");
+		const subagentBadge = this.#subagentBadgeText();
 
 		// Collect visible segment contents
 		const leftParts: string[] = [];
 		const leftSegIds: StatusLineSegmentId[] = [];
 		for (const segId of effectiveSettings.leftSegments) {
+			if (subagentBadge && segId === "subagents") continue;
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
 				leftParts.push(rendered.content);
@@ -854,6 +970,7 @@ export class StatusLineComponent implements Component {
 
 		const rightParts: string[] = [];
 		for (const segId of effectiveSettings.rightSegments) {
+			if (subagentBadge && segId === "subagents") continue;
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
 				rightParts.push(rendered.content);
@@ -863,6 +980,9 @@ export class StatusLineComponent implements Component {
 		const runningBackgroundJobs = this.session.getAsyncJobSnapshot()?.running.length ?? 0;
 		if (runningBackgroundJobs > 0) {
 			rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
+		}
+		if (subagentBadge) {
+			rightParts.unshift(subagentBadge);
 		}
 		const topFillWidth = Math.max(0, width);
 		const left = [...leftParts];

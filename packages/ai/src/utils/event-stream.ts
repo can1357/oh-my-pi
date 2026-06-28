@@ -1,3 +1,4 @@
+import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent } from "../types";
 
 // Generic event stream class for async iteration
@@ -63,7 +64,9 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 			// end() without a terminal value must still settle result() —
 			// otherwise complete()/result() awaits hang forever.
 			this.resultSettled = true;
-			this.rejectFinalResult(new Error("Stream ended without a final result"));
+			this.rejectFinalResult(
+				new AIError.ProviderResponseError("Stream ended without a final result", { kind: "envelope" }),
+			);
 		}
 		// Notify all waiting consumers that we're done
 		while (this.waiting.length > 0) {
@@ -125,13 +128,17 @@ export class AssistantMessageEventStream extends EventStream<AssistantMessageEve
 				} else if (event.type === "error") {
 					return event.error;
 				}
-				throw new Error("Unexpected event type for final result");
+				throw new AIError.ProviderResponseError("Unexpected event type for final result", { kind: "envelope" });
 			},
 		);
 	}
 
 	override push(event: AssistantMessageEvent): void {
 		if (this.done) return;
+
+		if (event.type === "error" && event.error.stopReason === "error") {
+			AIError.classifyMessage(event.error);
+		}
 
 		// Completion resolves the final result and still emits the terminal event.
 		if (this.isComplete(event)) {
@@ -146,13 +153,18 @@ export class AssistantMessageEventStream extends EventStream<AssistantMessageEve
 	override end(result?: AssistantMessage): void {
 		this.done = true;
 		if (result !== undefined) {
+			if (result.stopReason === "error") {
+				AIError.classifyMessage(result);
+			}
 			this.resultSettled = true;
 			this.resolveFinalResult(result);
 		} else if (!this.resultSettled) {
 			// Mirror the base class: a result-less end() must not leave
 			// result() pending forever.
 			this.resultSettled = true;
-			this.rejectFinalResult(new Error("Stream ended without a final result"));
+			this.rejectFinalResult(
+				new AIError.ProviderResponseError("Stream ended without a final result", { kind: "envelope" }),
+			);
 		}
 		this.endWaiting();
 	}

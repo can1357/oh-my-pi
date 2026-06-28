@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import * as AIError from "@pk-nerdsaver-ai/pi-ai/error";
 import type { AssistantMessage } from "@pk-nerdsaver-ai/pi-ai/types";
 import { AssistantMessageEventStream } from "@pk-nerdsaver-ai/pi-ai/utils/event-stream";
 
@@ -46,5 +47,43 @@ describe("AssistantMessageEventStream", () => {
 		stream.push({ type: "done", reason: "stop", message });
 		stream.end();
 		await expect(stream.result()).resolves.toBe(message);
+	});
+
+	it("stamps terminal error events with a classified errorId", async () => {
+		const stream = new AssistantMessageEventStream();
+		const message = createPartial();
+		message.stopReason = "error";
+		message.errorMessage = "usage limit reached";
+
+		stream.push({ type: "error", reason: "error", error: message });
+
+		const result = await stream.result();
+		expect(AIError.is(result.errorId, AIError.Flag.UsageLimit)).toBe(true);
+	});
+
+	it("leaves successful terminal messages without errorId", async () => {
+		const stream = new AssistantMessageEventStream();
+		const message = createPartial("ok");
+
+		stream.push({ type: "done", reason: "stop", message });
+
+		const result = await stream.result();
+		expect(result.errorId).toBeUndefined();
+	});
+
+	it("upgrades raw status fallback ids after final terminal text is available", async () => {
+		const stream = new AssistantMessageEventStream();
+		const message = createPartial();
+		message.stopReason = "error";
+		message.errorId = 503;
+		message.errorStatus = 503;
+		message.errorMessage = "stream stall";
+
+		stream.push({ type: "error", reason: "error", error: message });
+
+		const result = await stream.result();
+		expect(AIError.is(result.errorId, AIError.Flag.Class)).toBe(true);
+		expect(AIError.is(result.errorId, AIError.Flag.Timeout)).toBe(true);
+		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBe(true);
 	});
 });

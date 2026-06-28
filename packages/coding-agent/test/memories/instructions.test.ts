@@ -4,13 +4,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { buildMemoryToolDeveloperInstructions, getMemoryRoot } from "@pk-nerdsaver-ai/pi-coding-agent/memories";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "memory-instructions-"));
 	try {
 		return await fn(dir);
 	} finally {
-		await fs.rm(dir, { recursive: true, force: true });
+		await removeWithRetries(dir);
 	}
 }
 

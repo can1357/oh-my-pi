@@ -88,9 +88,9 @@ function summarizeToolResult(
 				path: record.path,
 				count: details.matchCount ?? undefined,
 			});
-		case "find":
+		case "glob":
 			return withError({
-				op: "find",
+				op: "glob",
 				pattern: record.pattern,
 				count: details.fileCount ?? undefined,
 				matches: Array.isArray(details.files) ? details.files.slice(0, 20) : undefined,

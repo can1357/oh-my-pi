@@ -1,0 +1,468 @@
+package buf.validate;
+
+import "google/protobuf/descriptor.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+enum Ignore {
+  IGNORE_UNSPECIFIED = 0;
+  IGNORE_IF_UNPOPULATED = 1;
+  IGNORE_IF_DEFAULT_VALUE = 2;
+  IGNORE_ALWAYS = 3;
+  reserved "IGNORE_EMPTYIGNORE_DEFAULT";
+}
+
+enum KnownRegex {
+  KNOWN_REGEX_UNSPECIFIED = 0;
+  KNOWN_REGEX_HTTP_HEADER_NAME = 1;
+  KNOWN_REGEX_HTTP_HEADER_VALUE = 2;
+}
+
+message Rule {
+  optional string id = 1;
+  optional string message = 2;
+  optional string expression = 3;
+}
+
+message MessageRules {
+  optional bool disabled = 1;
+  repeated .buf.validate.Rule cel = 3;
+}
+
+message OneofRules {
+  optional bool required = 1;
+}
+
+message FieldRules {
+  reserved 24;
+  reserved 26;
+  reserved "skipped", "ignore_empty";
+
+  repeated .buf.validate.Rule cel = 23;
+  optional bool required = 25;
+  optional .buf.validate.Ignore ignore = 27;
+  oneof type {
+    .buf.validate.FloatRules float = 1;
+    .buf.validate.DoubleRules double = 2;
+    .buf.validate.Int32Rules int32 = 3;
+    .buf.validate.Int64Rules int64 = 4;
+    .buf.validate.UInt32Rules uint32 = 5;
+    .buf.validate.UInt64Rules uint64 = 6;
+    .buf.validate.SInt32Rules sint32 = 7;
+    .buf.validate.SInt64Rules sint64 = 8;
+    .buf.validate.Fixed32Rules fixed32 = 9;
+    .buf.validate.Fixed64Rules fixed64 = 10;
+    .buf.validate.SFixed32Rules sfixed32 = 11;
+    .buf.validate.SFixed64Rules sfixed64 = 12;
+    .buf.validate.BoolRules bool = 13;
+    .buf.validate.StringRules string = 14;
+    .buf.validate.BytesRules bytes = 15;
+    .buf.validate.EnumRules enum = 16;
+    .buf.validate.RepeatedRules repeated = 18;
+    .buf.validate.MapRules map = 19;
+    .buf.validate.AnyRules any = 20;
+    .buf.validate.DurationRules duration = 21;
+    .buf.validate.TimestampRules timestamp = 22;
+  }
+}
+
+message PredefinedRules {
+  reserved 24;
+  reserved 26;
+  reserved "skippedignore_empty";
+
+  repeated .buf.validate.Rule cel = 1;
+}
+
+message FloatRules {
+  extensions 1000 to max;
+
+  optional float const = 1;
+  oneof less_than {
+    float lt = 2;
+    float lte = 3;
+  }
+  oneof greater_than {
+    float gt = 4;
+    float gte = 5;
+  }
+  repeated float in = 6;
+  repeated float not_in = 7;
+  optional bool finite = 8;
+  repeated float example = 9;
+}
+
+message DoubleRules {
+  extensions 1000 to max;
+
+  optional double const = 1;
+  oneof less_than {
+    double lt = 2;
+    double lte = 3;
+  }
+  oneof greater_than {
+    double gt = 4;
+    double gte = 5;
+  }
+  repeated double in = 6;
+  repeated double not_in = 7;
+  optional bool finite = 8;
+  repeated double example = 9;
+}
+
+message Int32Rules {
+  extensions 1000 to max;
+
+  optional int32 const = 1;
+  oneof less_than {
+    int32 lt = 2;
+    int32 lte = 3;
+  }
+  oneof greater_than {
+    int32 gt = 4;
+    int32 gte = 5;
+  }
+  repeated int32 in = 6;
+  repeated int32 not_in = 7;
+  repeated int32 example = 8;
+}
+
+message Int64Rules {
+  extensions 1000 to max;
+
+  optional int64 const = 1;
+  oneof less_than {
+    int64 lt = 2;
+    int64 lte = 3;
+  }
+  oneof greater_than {
+    int64 gt = 4;
+    int64 gte = 5;
+  }
+  repeated int64 in = 6;
+  repeated int64 not_in = 7;
+  repeated int64 example = 9;
+}
+
+message UInt32Rules {
+  extensions 1000 to max;
+
+  optional uint32 const = 1;
+  oneof less_than {
+    uint32 lt = 2;
+    uint32 lte = 3;
+  }
+  oneof greater_than {
+    uint32 gt = 4;
+    uint32 gte = 5;
+  }
+  repeated uint32 in = 6;
+  repeated uint32 not_in = 7;
+  repeated uint32 example = 8;
+}
+
+message UInt64Rules {
+  extensions 1000 to max;
+
+  optional uint64 const = 1;
+  oneof less_than {
+    uint64 lt = 2;
+    uint64 lte = 3;
+  }
+  oneof greater_than {
+    uint64 gt = 4;
+    uint64 gte = 5;
+  }
+  repeated uint64 in = 6;
+  repeated uint64 not_in = 7;
+  repeated uint64 example = 8;
+}
+
+message SInt32Rules {
+  extensions 1000 to max;
+
+  optional sint32 const = 1;
+  oneof less_than {
+    sint32 lt = 2;
+    sint32 lte = 3;
+  }
+  oneof greater_than {
+    sint32 gt = 4;
+    sint32 gte = 5;
+  }
+  repeated sint32 in = 6;
+  repeated sint32 not_in = 7;
+  repeated sint32 example = 8;
+}
+
+message SInt64Rules {
+  extensions 1000 to max;
+
+  optional sint64 const = 1;
+  oneof less_than {
+    sint64 lt = 2;
+    sint64 lte = 3;
+  }
+  oneof greater_than {
+    sint64 gt = 4;
+    sint64 gte = 5;
+  }
+  repeated sint64 in = 6;
+  repeated sint64 not_in = 7;
+  repeated sint64 example = 8;
+}
+
+message Fixed32Rules {
+  extensions 1000 to max;
+
+  optional fixed32 const = 1;
+  oneof less_than {
+    fixed32 lt = 2;
+    fixed32 lte = 3;
+  }
+  oneof greater_than {
+    fixed32 gt = 4;
+    fixed32 gte = 5;
+  }
+  repeated fixed32 in = 6;
+  repeated fixed32 not_in = 7;
+  repeated fixed32 example = 8;
+}
+
+message Fixed64Rules {
+  extensions 1000 to max;
+
+  optional fixed64 const = 1;
+  oneof less_than {
+    fixed64 lt = 2;
+    fixed64 lte = 3;
+  }
+  oneof greater_than {
+    fixed64 gt = 4;
+    fixed64 gte = 5;
+  }
+  repeated fixed64 in = 6;
+  repeated fixed64 not_in = 7;
+  repeated fixed64 example = 8;
+}
+
+message SFixed32Rules {
+  extensions 1000 to max;
+
+  optional sfixed32 const = 1;
+  oneof less_than {
+    sfixed32 lt = 2;
+    sfixed32 lte = 3;
+  }
+  oneof greater_than {
+    sfixed32 gt = 4;
+    sfixed32 gte = 5;
+  }
+  repeated sfixed32 in = 6;
+  repeated sfixed32 not_in = 7;
+  repeated sfixed32 example = 8;
+}
+
+message SFixed64Rules {
+  extensions 1000 to max;
+
+  optional sfixed64 const = 1;
+  oneof less_than {
+    sfixed64 lt = 2;
+    sfixed64 lte = 3;
+  }
+  oneof greater_than {
+    sfixed64 gt = 4;
+    sfixed64 gte = 5;
+  }
+  repeated sfixed64 in = 6;
+  repeated sfixed64 not_in = 7;
+  repeated sfixed64 example = 8;
+}
+
+message BoolRules {
+  extensions 1000 to max;
+
+  optional bool const = 1;
+  repeated bool example = 2;
+}
+
+message StringRules {
+  extensions 1000 to max;
+
+  optional string const = 1;
+  optional uint64 len = 19;
+  optional uint64 min_len = 2;
+  optional uint64 max_len = 3;
+  optional uint64 len_bytes = 20;
+  optional uint64 min_bytes = 4;
+  optional uint64 max_bytes = 5;
+  optional string pattern = 6;
+  optional string prefix = 7;
+  optional string suffix = 8;
+  optional string contains = 9;
+  optional string not_contains = 23;
+  repeated string in = 10;
+  repeated string not_in = 11;
+  oneof well_known {
+    bool email = 12;
+    bool hostname = 13;
+    bool ip = 14;
+    bool ipv4 = 15;
+    bool ipv6 = 16;
+    bool uri = 17;
+    bool uri_ref = 18;
+    bool address = 21;
+    bool uuid = 22;
+    bool tuuid = 33;
+    bool ip_with_prefixlen = 26;
+    bool ipv4_with_prefixlen = 27;
+    bool ipv6_with_prefixlen = 28;
+    bool ip_prefix = 29;
+    bool ipv4_prefix = 30;
+    bool ipv6_prefix = 31;
+    bool host_and_port = 32;
+    .buf.validate.KnownRegex well_known_regex = 24;
+  }
+  optional bool strict = 25;
+  repeated string example = 34;
+}
+
+message BytesRules {
+  extensions 1000 to max;
+
+  optional bytes const = 1;
+  optional uint64 len = 13;
+  optional uint64 min_len = 2;
+  optional uint64 max_len = 3;
+  optional string pattern = 4;
+  optional bytes prefix = 5;
+  optional bytes suffix = 6;
+  optional bytes contains = 7;
+  repeated bytes in = 8;
+  repeated bytes not_in = 9;
+  oneof well_known {
+    bool ip = 10;
+    bool ipv4 = 11;
+    bool ipv6 = 12;
+  }
+  repeated bytes example = 14;
+}
+
+message EnumRules {
+  extensions 1000 to max;
+
+  optional int32 const = 1;
+  optional bool defined_only = 2;
+  repeated int32 in = 3;
+  repeated int32 not_in = 4;
+  repeated int32 example = 5;
+}
+
+message RepeatedRules {
+  extensions 1000 to max;
+
+  optional uint64 min_items = 1;
+  optional uint64 max_items = 2;
+  optional bool unique = 3;
+  optional .buf.validate.FieldRules items = 4;
+}
+
+message MapRules {
+  extensions 1000 to max;
+
+  optional uint64 min_pairs = 1;
+  optional uint64 max_pairs = 2;
+  optional .buf.validate.FieldRules keys = 4;
+  optional .buf.validate.FieldRules values = 5;
+}
+
+message AnyRules {
+  repeated string in = 2;
+  repeated string not_in = 3;
+}
+
+message DurationRules {
+  extensions 1000 to max;
+
+  optional .google.protobuf.Duration const = 2;
+  oneof less_than {
+    .google.protobuf.Duration lt = 3;
+    .google.protobuf.Duration lte = 4;
+  }
+  oneof greater_than {
+    .google.protobuf.Duration gt = 5;
+    .google.protobuf.Duration gte = 6;
+  }
+  repeated .google.protobuf.Duration in = 7;
+  repeated .google.protobuf.Duration not_in = 8;
+  repeated .google.protobuf.Duration example = 9;
+}
+
+message TimestampRules {
+  extensions 1000 to max;
+
+  optional .google.protobuf.Timestamp const = 2;
+  oneof less_than {
+    .google.protobuf.Timestamp lt = 3;
+    .google.protobuf.Timestamp lte = 4;
+    bool lt_now = 7;
+  }
+  oneof greater_than {
+    .google.protobuf.Timestamp gt = 5;
+    .google.protobuf.Timestamp gte = 6;
+    bool gt_now = 8;
+  }
+  optional .google.protobuf.Duration within = 9;
+  repeated .google.protobuf.Timestamp example = 10;
+}
+
+message Violations {
+  repeated .buf.validate.Violation violations = 1;
+}
+
+message Violation {
+  reserved 1;
+  reserved "field_path";
+
+  optional .buf.validate.FieldPath field = 5;
+  optional .buf.validate.FieldPath rule = 6;
+  optional string rule_id = 2;
+  optional string message = 3;
+  optional bool for_key = 4;
+}
+
+message FieldPath {
+  repeated .buf.validate.FieldPathElement elements = 1;
+}
+
+message FieldPathElement {
+  optional int32 field_number = 1;
+  optional string field_name = 2;
+  optional .google.protobuf.FieldDescriptorProto.Type field_type = 3;
+  optional .google.protobuf.FieldDescriptorProto.Type key_type = 4;
+  optional .google.protobuf.FieldDescriptorProto.Type value_type = 5;
+  oneof subscript {
+    uint64 index = 6;
+    bool bool_key = 7;
+    int64 int_key = 8;
+    uint64 uint_key = 9;
+    string string_key = 10;
+  }
+}
+
+extend .google.protobuf.MessageOptions {
+  optional .buf.validate.MessageRules message = 1159;
+}
+
+extend .google.protobuf.OneofOptions {
+  optional .buf.validate.OneofRules oneof = 1159;
+}
+
+extend .google.protobuf.FieldOptions {
+  optional .buf.validate.FieldRules field = 1159;
+}
+
+extend .google.protobuf.FieldOptions {
+  optional .buf.validate.PredefinedRules predefined = 1160;
+}

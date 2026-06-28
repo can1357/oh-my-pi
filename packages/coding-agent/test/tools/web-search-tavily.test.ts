@@ -99,6 +99,68 @@ describe("Tavily web search provider", () => {
 		expect(response.sources[0]?.ageSeconds).toBeTypeOf("number");
 	});
 
+	it("retries recency-filtered empty responses without time_range", async () => {
+		const requestBodies: Record<string, unknown>[] = [];
+		const responses = [
+			new Response(JSON.stringify({ answer: "", request_id: "empty-month", results: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			}),
+			new Response(
+				JSON.stringify({
+					answer: "Fallback Tavily answer",
+					request_id: "fallback-without-time-range",
+					results: [
+						{
+							title: "Latest release notes",
+							url: "https://example.com/release-notes",
+							content: "Release note snippet",
+						},
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			),
+		];
+
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			requestBodies.push(JSON.parse(String(init?.body ?? "null")) as Record<string, unknown>);
+			const response = responses.shift();
+			if (!response) throw new Error("unexpected extra Tavily request");
+			return response;
+		};
+
+		const response = await searchTavily({
+			...makeParams("Oh My Pi omp latest release notes advisor"),
+			numSearchResults: 5,
+			recency: "month",
+			fetch: fetchMock,
+		});
+
+		expect(requestBodies).toHaveLength(2);
+		expect(requestBodies[0]).toMatchObject({
+			query: "Oh My Pi omp latest release notes advisor",
+			max_results: 5,
+			time_range: "month",
+		});
+		expect(requestBodies[1]).toMatchObject({
+			query: "Oh My Pi omp latest release notes advisor",
+			max_results: 5,
+		});
+		expect(requestBodies[1]).not.toHaveProperty("time_range");
+		expect(response).toMatchObject({
+			provider: "tavily",
+			answer: "Fallback Tavily answer",
+			requestId: "fallback-without-time-range",
+			sources: [
+				{
+					title: "Latest release notes",
+					url: "https://example.com/release-notes",
+					snippet: "Release note snippet",
+				},
+			],
+		});
+	});
+
 	it("surfaces structured API errors", async () => {
 		const fetchMock = (): Promise<Response> =>
 			Promise.resolve(

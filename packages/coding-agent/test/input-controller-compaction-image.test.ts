@@ -62,16 +62,22 @@ function makeCtx(initialQueue: CompactionQueuedMessage[] = []) {
 	const ctx = {
 		session,
 		compactionQueuedMessages: [...initialQueue],
-		pendingImages: [] as ImageContent[],
-		pendingImageLinks: [] as (string | undefined)[],
 		pendingMessagesContainer: { clear: () => {}, addChild: () => {}, removeChild: () => {} },
 		editor: {
 			addToHistory: () => {},
+			clearDraft: (_historyText?: string) => {
+				editorText = "";
+				ctx.editor.pendingImages = [];
+				ctx.editor.pendingImageLinks = [];
+				ctx.editor.imageLinks = undefined;
+			},
 			setText: (text: string) => {
 				editorText = text;
 			},
 			getText: () => editorText,
 			imageLinks: undefined as (string | undefined)[] | undefined,
+			pendingImages: [] as ImageContent[],
+			pendingImageLinks: [] as (string | undefined)[],
 		},
 		keybindings: { getDisplayString: () => "Alt+Up" },
 		fileSlashCommands: new Set<string>(),
@@ -95,8 +101,8 @@ describe("compaction queue image forwarding", () => {
 	test("queueCompactionMessage stores images and consumes pending-image state", () => {
 		const image = img("aGVsbG8=");
 		const { ctx } = makeCtx();
-		ctx.pendingImages = [image];
-		ctx.pendingImageLinks = ["clipboard"];
+		ctx.editor.pendingImages = [image];
+		ctx.editor.pendingImageLinks = ["clipboard"];
 		ctx.editor.imageLinks = ["clipboard"];
 
 		new UiHelpers(ctx).queueCompactionMessage("look at this screenshot", "steer", [image]);
@@ -105,8 +111,8 @@ describe("compaction queue image forwarding", () => {
 			{ text: "look at this screenshot", mode: "steer", images: [image] },
 		]);
 		// Pending state is consumed so the next message does not resend the image.
-		expect(ctx.pendingImages).toEqual([]);
-		expect(ctx.pendingImageLinks).toEqual([]);
+		expect(ctx.editor.pendingImages).toEqual([]);
+		expect(ctx.editor.pendingImageLinks).toEqual([]);
 		expect(ctx.editor.imageLinks).toBeUndefined();
 	});
 
@@ -153,7 +159,7 @@ describe("compaction queue Alt+Up restore", () => {
 		const { ctx } = makeCtx([{ text: "look", mode: "steer", images: [image] }]);
 		const restored = new InputController(ctx).restoreQueuedMessagesToEditor();
 		expect(restored).toBe(1);
-		expect(ctx.pendingImages).toEqual([image]);
+		expect(ctx.editor.pendingImages).toEqual([image]);
 	});
 
 	test("session and compaction queues restore in pending-bar order", () => {
@@ -192,7 +198,15 @@ describe("restoreQueuedMessagesToEditor image marker alignment", () => {
 			},
 			getText: () => editorText,
 			addToHistory: () => {},
+			clearDraft: (_historyText?: string) => {
+				editorText = "";
+				editor.pendingImages = [];
+				editor.pendingImageLinks = [];
+				editor.imageLinks = undefined;
+			},
 			imageLinks: undefined as (string | undefined)[] | undefined,
+			pendingImages: opts.draftImages ? [...opts.draftImages] : ([] as ImageContent[]),
+			pendingImageLinks: opts.draftImages ? opts.draftImages.map(() => undefined) : ([] as (string | undefined)[]),
 		};
 		const session = {
 			clearQueue: mock(() => ({ steering: opts.queued ?? [], followUp: [] })),
@@ -201,8 +215,6 @@ describe("restoreQueuedMessagesToEditor image marker alignment", () => {
 		const ctx = {
 			session,
 			editor,
-			pendingImages: opts.draftImages ? [...opts.draftImages] : ([] as ImageContent[]),
-			pendingImageLinks: opts.draftImages ? opts.draftImages.map(() => undefined) : ([] as (string | undefined)[]),
 			compactionQueuedMessages: [],
 			locallySubmittedUserSignatures: new Set<string>(),
 			updatePendingMessagesDisplay: () => {},
@@ -225,10 +237,10 @@ describe("restoreQueuedMessagesToEditor image marker alignment", () => {
 		// marker is bumped to #2 because the queued image is appended at slot 1.
 		expect(restored).toBe(1);
 		expect(editor.getText()).toBe("[Image #2] queued text\n\n[Image #1] draft text");
-		expect(ctx.pendingImages).toEqual([draftImg, queuedImg]);
+		expect(ctx.editor.pendingImages).toEqual([draftImg, queuedImg]);
 		// Marker → image positional mapping after restore.
-		expect(ctx.pendingImages[0]).toBe(draftImg); // matches [Image #1]
-		expect(ctx.pendingImages[1]).toBe(queuedImg); // matches [Image #2]
+		expect(ctx.editor.pendingImages[0]).toBe(draftImg); // matches [Image #1]
+		expect(ctx.editor.pendingImages[1]).toBe(queuedImg); // matches [Image #2]
 	});
 
 	test("preserves the WxH metadata tail when renumbering", () => {
@@ -263,7 +275,7 @@ describe("restoreQueuedMessagesToEditor image marker alignment", () => {
 
 		// msg1 markers shift by 1 (draft images), msg2 markers shift by 1+1=2.
 		expect(editor.getText()).toBe("first [Image #2]\n\nsecond [Image #3] and [Image #4]\n\nsee [Image #1]");
-		expect(ctx.pendingImages).toEqual([draftImg, queued1, queued2a, queued2b]);
+		expect(ctx.editor.pendingImages).toEqual([draftImg, queued1, queued2a, queued2b]);
 	});
 
 	test("leaves the queued text untouched when the draft has no pending images", () => {
@@ -275,6 +287,6 @@ describe("restoreQueuedMessagesToEditor image marker alignment", () => {
 		new InputController(ctx).restoreQueuedMessagesToEditor();
 
 		expect(editor.getText()).toBe("[Image #1] queued");
-		expect(ctx.pendingImages).toEqual([queuedImg]);
+		expect(ctx.editor.pendingImages).toEqual([queuedImg]);
 	});
 });

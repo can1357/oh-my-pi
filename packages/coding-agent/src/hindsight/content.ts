@@ -43,6 +43,22 @@ export function stripMemoryTags(content: string): string {
 		.replace(LEGACY_RELEVANT_MEMORIES_REGEX, "");
 }
 
+// At least one letter or digit means the message carries a token a retriever
+// can actually match on. Punctuation/whitespace-only strings (e.g. the lone
+// `.` some providers emit for tool-call-only or thinking-only assistant turns)
+// are dropped before retain/recall touches them — see issue #1806.
+const SUBSTANTIVE_CHAR_RE = /[\p{L}\p{N}]/u;
+
+/**
+ * True when `content` carries at least one letter or digit. Used by retain
+ * and recall paths to drop placeholder assistant turns ("." / "..." / pure
+ * whitespace) that would otherwise pollute the bank and waste tokens on
+ * embeddings with no semantic content.
+ */
+export function hasSubstantiveContent(content: string): boolean {
+	return SUBSTANTIVE_CHAR_RE.test(content);
+}
+
 /** Format recall results into a bullet list for context injection. */
 export function formatMemories(results: RecallResultLike[]): string {
 	if (results.length === 0) return "";
@@ -173,6 +189,22 @@ export interface RetentionTranscript {
  * Messages are tag-stripped before framing to break the recall→retain loop.
  * Returns `{ transcript: null }` when nothing meaningful survives.
  */
+function formatRetentionMessages(messages: HindsightMessage[]): RetentionTranscript {
+	const parts: string[] = [];
+	for (const msg of messages) {
+		const content = stripMemoryTags(msg.content).trim();
+		if (!hasSubstantiveContent(content)) continue;
+		parts.push(`[role: ${msg.role}]\n${content}\n[${msg.role}:end]`);
+	}
+
+	if (parts.length === 0) return { transcript: null, messageCount: 0 };
+
+	const transcript = parts.join("\n\n");
+	if (transcript.trim().length < 10) return { transcript: null, messageCount: 0 };
+
+	return { transcript, messageCount: parts.length };
+}
+
 export function prepareRetentionTranscript(
 	messages: HindsightMessage[],
 	retainFullWindow = false,
@@ -194,17 +226,10 @@ export function prepareRetentionTranscript(
 		targetMessages = messages.slice(lastUserIdx);
 	}
 
-	const parts: string[] = [];
-	for (const msg of targetMessages) {
-		const content = stripMemoryTags(msg.content).trim();
-		if (!content) continue;
-		parts.push(`[role: ${msg.role}]\n${content}\n[${msg.role}:end]`);
-	}
+	return formatRetentionMessages(targetMessages);
+}
 
-	if (parts.length === 0) return { transcript: null, messageCount: 0 };
-
-	const transcript = parts.join("\n\n");
-	if (transcript.trim().length < 10) return { transcript: null, messageCount: 0 };
-
-	return { transcript, messageCount: parts.length };
+/** Format only user-authored messages for memory fact/entity extraction. */
+export function prepareUserRetentionTranscript(messages: HindsightMessage[]): RetentionTranscript {
+	return formatRetentionMessages(messages.filter(message => message.role === "user"));
 }

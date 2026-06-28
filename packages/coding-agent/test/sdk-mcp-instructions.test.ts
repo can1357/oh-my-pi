@@ -8,7 +8,7 @@ import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-reg
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { createAgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 import { SERVER_INSTRUCTIONS } from "./fixtures/instructions-mcp";
 
 // Contract: a deferred interactive (`hasUI`) session runs MCP discovery off the
@@ -43,7 +43,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		authStorage.close();
 		for (const dir of [registryDir, isolatedHome]) {
 			if (dir && fs.existsSync(dir)) {
-				fs.rmSync(dir, { recursive: true, force: true });
+				removeSyncWithRetries(dir);
 			}
 		}
 	});
@@ -64,7 +64,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 
 	afterEach(() => {
 		if (tempDir && fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		}
 		mock.restore();
 	});

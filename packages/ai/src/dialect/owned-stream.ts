@@ -19,7 +19,6 @@ const RESPONSE_OPEN_TOKENS: Record<Dialect, readonly string[]> = {
 	minimax: ["<function_results>", "<tool_response>"],
 	deepseek: ["<｜tool▁outputs▁begin｜>", "<｜tool▁output▁begin｜>"],
 	harmony: ["<|start|>functions."],
-	pi: ["‡‡"],
 	qwen3: ["<tool_response>"],
 	gemini: ["```tool_outputs"],
 	gemma: ["<|tool_response>"],

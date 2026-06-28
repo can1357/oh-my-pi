@@ -1,31 +1,32 @@
-import * as path from "node:path";
-import { $env, isBunTestRuntime, isCompiledBinary, logger, workerHostEntry } from "@pk-nerdsaver-ai/pi-utils";
-import type { Subprocess } from "bun";
+import { logger } from "@pk-nerdsaver-ai/pi-utils";
+import {
+	createUnavailableWorker,
+	createWorkerHandle,
+	createWorkerSubprocess,
+	logWorkerMessage,
+	resolveWorkerSpawnCmd,
+	SMOKE_TEST_TIMEOUT_MS,
+	type SpawnedSubprocess,
+	smokeTestWorker,
+	spawnWorkerOrUnavailable,
+	type WorkerHandle,
+	workerEnvFromParent,
+} from "../subprocess/worker-client";
 import type { MnemopiEmbedModelId, MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound } from "./embed-protocol";
 
 /**
- * Abstraction over the mnemopi embeddings subprocess. The runtime
+ * Parent-side handle for the mnemopi embeddings subprocess. The runtime
  * implementation is a Bun child process so `onnxruntime-node`'s NAPI
  * constructor + finalizer never run inside the main agent address space —
  * those destructors segfault Bun on Windows when mnemopi's local embedding
  * provider loads fastembed in the main process (issue #3031; the mnemopi
  * sibling of the tiny-model fix from #1606 / #1607).
  */
-export interface MnemopiEmbedWorkerHandle {
-	send(message: MnemopiEmbedWorkerInbound): void;
-	onMessage(handler: (message: MnemopiEmbedWorkerOutbound) => void): () => void;
-	onError(handler: (error: Error) => void): () => void;
-	terminate(): Promise<void>;
-}
+export type MnemopiEmbedWorkerHandle = WorkerHandle<MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound>;
 
 type PendingRequest =
 	| { kind: "init"; model: MnemopiEmbedModelId; resolve: (ok: boolean) => void }
 	| { kind: "embed"; model: MnemopiEmbedModelId; resolve: (vectors: number[][] | Error) => void };
-
-// Cold-starting the worker from a compiled binary (decompress + module graph load)
-// is slow on contended CI runners; the probe only proves the worker spawns and
-// ponges, so a generous bound removes flakes without weakening the check.
-const SMOKE_TEST_TIMEOUT_MS = 30_000;
 
 /**
  * Hidden subcommand on the main CLI that boots the mnemopi embeddings worker
@@ -34,175 +35,42 @@ const SMOKE_TEST_TIMEOUT_MS = 30_000;
 export const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
 
 /**
- * Env handed to the embeddings subprocess. The child inherits the parent's
- * environment verbatim — fastembed honours `HF_HUB_*`, `HTTPS_PROXY`, etc.,
- * and our `loadFastembed()` reads the same `OMP_*` runtime-install knobs the
- * parent uses. `process.env` carries `undefined` slots that Bun.spawn rejects;
- * filter them out.
- */
-function mnemopiEmbedWorkerEnv(): Record<string, string> {
-	const base = $env as Record<string, string | undefined>;
-	const merged: Record<string, string> = {};
-	for (const key in base) {
-		const value = base[key];
-		if (typeof value === "string") merged[key] = value;
-	}
-	return merged;
-}
-
-interface MnemopiEmbedWorkerSpawnCommand {
-	cmd: string[];
-	cwd?: string;
-}
-
-/**
- * Resolve the command used to relaunch the agent CLI into mnemopi-embed-worker
- * mode. In a compiled binary the entry point is the binary itself; otherwise
- * re-enter the declared worker-host entry (cwd-relative for reliable Bun IPC),
- * falling back to this package's own `src/cli.ts` when no host entry is
- * declared (bun test, SDK embedding).
- */
-function mnemopiEmbedWorkerSpawnCmd(): MnemopiEmbedWorkerSpawnCommand {
-	if (isCompiledBinary()) return { cmd: [process.execPath, MNEMOPI_EMBED_WORKER_ARG] };
-	const hostEntry = workerHostEntry();
-	if (hostEntry) {
-		return {
-			cmd: [process.execPath, path.basename(hostEntry), MNEMOPI_EMBED_WORKER_ARG],
-			cwd: path.dirname(hostEntry),
-		};
-	}
-	const packageRoot = path.resolve(import.meta.dir, "..", "..");
-	return { cmd: [process.execPath, "src/cli.ts", MNEMOPI_EMBED_WORKER_ARG], cwd: packageRoot };
-}
-
-interface SpawnedSubprocess {
-	proc: Subprocess<"ignore", "ignore", "ignore">;
-	inbound: Set<(message: MnemopiEmbedWorkerOutbound) => void>;
-	errors: Set<(error: Error) => void>;
-	/**
-	 * Flipped to `true` right before the deliberate SIGKILL so `onExit` can
-	 * distinguish the expected hard-kill from a crash (SIGSEGV from a native
-	 * fault, OOM SIGKILL, operator `kill -9`). Only the latter surfaces as a
-	 * worker error so callers don't await forever.
-	 */
-	intentionalExit: { value: boolean };
-}
-
-/**
  * Spawn the mnemopi embeddings worker as a subprocess. Exported for tests and
  * the smoke probe; production callers go through {@link spawnMnemopiEmbedWorker}.
+ * The child inherits the parent env verbatim — fastembed honours `HF_HUB_*`,
+ * `HTTPS_PROXY`, etc., and our `loadFastembed()` reads the same `OMP_*`
+ * runtime-install knobs the parent uses.
  */
-export function createMnemopiEmbedSubprocess(): SpawnedSubprocess {
-	const inbound = new Set<(message: MnemopiEmbedWorkerOutbound) => void>();
-	const errors = new Set<(error: Error) => void>();
-	const intentionalExit = { value: false };
-	const spawnCommand = mnemopiEmbedWorkerSpawnCmd();
-	const proc = Bun.spawn({
-		cmd: spawnCommand.cmd,
-		cwd: spawnCommand.cwd,
-		env: mnemopiEmbedWorkerEnv(),
-		stdin: "ignore",
-		stdout: "ignore",
-		stderr: "ignore",
-		serialization: "advanced",
-		windowsHide: true,
-		ipc(message) {
-			for (const handler of inbound) handler(message as MnemopiEmbedWorkerOutbound);
-		},
-		onExit(_proc, exitCode, signalCode) {
-			if (exitCode === 0) return;
-			if (exitCode === null && intentionalExit.value) return;
-			const reason = exitCode !== null ? `code ${exitCode}` : `signal ${signalCode ?? "unknown"}`;
-			const err = new Error(`mnemopi embed subprocess exited with ${reason}`);
-			for (const handler of errors) handler(err);
-		},
+export function createMnemopiEmbedSubprocess(): SpawnedSubprocess<MnemopiEmbedWorkerOutbound> {
+	return createWorkerSubprocess<MnemopiEmbedWorkerOutbound>({
+		spawnCommand: resolveWorkerSpawnCmd(MNEMOPI_EMBED_WORKER_ARG),
+		env: workerEnvFromParent(),
+		exitLabel: "mnemopi embed subprocess",
 	});
-	// Don't keep the parent event loop alive on an idle worker; the agent
-	// dispose path calls `terminate()` explicitly. Bun's test runner starves
-	// IPC for unref'd subprocesses, so keep it referenced only under tests.
-	if (!isBunTestRuntime()) proc.unref();
-	return { proc, inbound, errors, intentionalExit };
 }
 
-function wrapSubprocess({ proc, inbound, errors, intentionalExit }: SpawnedSubprocess): MnemopiEmbedWorkerHandle {
-	return {
-		send(message) {
-			try {
-				proc.send(message);
-			} catch (error) {
-				logger.debug("mnemopi-embed: send to subprocess failed", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-			}
-		},
-		onMessage(handler) {
-			inbound.add(handler);
-			return () => inbound.delete(handler);
-		},
-		onError(handler) {
-			errors.add(handler);
-			return () => errors.delete(handler);
-		},
-		async terminate() {
-			// SIGKILL: the point of subprocess isolation is that the parent
-			// never runs `onnxruntime-node`'s NAPI finalizer (it crashes Bun
-			// on Windows). Hard-kill instead; the OS reclaims the model
-			// memory. Flip the intentional-exit flag *before* killing so
-			// `onExit` can tell this apart from a native crash.
-			intentionalExit.value = true;
-			try {
-				proc.kill("SIGKILL");
-			} catch {
-				// Already gone.
-			}
-		},
-	};
-}
-
-function spawnInlineUnavailableWorker(error: unknown): MnemopiEmbedWorkerHandle {
-	const listeners = new Set<(message: MnemopiEmbedWorkerOutbound) => void>();
-	const errorMessage = error instanceof Error ? error.message : String(error);
-	const emit = (message: MnemopiEmbedWorkerOutbound): void => {
-		for (const listener of listeners) listener(message);
-	};
-	return {
-		send(message) {
-			queueMicrotask(() => {
-				if (message.type === "ping") {
-					emit({ type: "pong", id: message.id });
-					return;
-				}
-				emit({ type: "error", id: message.id, error: errorMessage });
+function wrapSubprocess(spawned: SpawnedSubprocess<MnemopiEmbedWorkerOutbound>): MnemopiEmbedWorkerHandle {
+	const { proc } = spawned;
+	// Embed keeps its own guarded `proc.send` (neutralizes only the synchronous
+	// throw, not the async EPIPE rejection) rather than the shared `safeSend`
+	// the other workers use — behaviour preserved verbatim.
+	return createWorkerHandle<MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound>(spawned, message => {
+		try {
+			proc.send(message);
+		} catch (error) {
+			logger.debug("mnemopi-embed: send to subprocess failed", {
+				error: error instanceof Error ? error.message : String(error),
 			});
-		},
-		onMessage(handler) {
-			listeners.add(handler);
-			return () => listeners.delete(handler);
-		},
-		onError() {
-			return () => {};
-		},
-		async terminate() {
-			listeners.clear();
-		},
-	};
+		}
+	});
 }
 
 function spawnMnemopiEmbedWorker(): MnemopiEmbedWorkerHandle {
-	try {
-		return wrapSubprocess(createMnemopiEmbedSubprocess());
-	} catch (error) {
-		logger.warn("mnemopi embed worker spawn failed; local embeddings disabled", {
-			error: error instanceof Error ? error.message : String(error),
-		});
-		return spawnInlineUnavailableWorker(error);
-	}
-}
-
-function logWorkerMessage(message: Extract<MnemopiEmbedWorkerOutbound, { type: "log" }>): void {
-	if (message.level === "debug") logger.debug(message.msg, message.meta);
-	else if (message.level === "warn") logger.warn(message.msg, message.meta);
-	else logger.error(message.msg, message.meta);
+	return spawnWorkerOrUnavailable(
+		() => wrapSubprocess(createMnemopiEmbedSubprocess()),
+		createUnavailableWorker<MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound>,
+		"mnemopi embed worker spawn failed; local embeddings disabled",
+	);
 }
 
 /**
@@ -374,28 +242,5 @@ export async function smokeTestMnemopiEmbedWorker({
 }: {
 	timeoutMs?: number;
 } = {}): Promise<void> {
-	const handle = wrapSubprocess(createMnemopiEmbedSubprocess());
-	const { promise, resolve, reject } = Promise.withResolvers<void>();
-	const timer = setTimeout(
-		() => reject(new Error(`mnemopi embed worker did not pong within ${timeoutMs}ms`)),
-		timeoutMs,
-	);
-	const unsubscribeMessage = handle.onMessage(message => {
-		if (message.type === "pong") {
-			resolve();
-			return;
-		}
-		if (message.type === "log") return;
-		reject(new Error(`mnemopi embed worker: expected pong, got ${JSON.stringify(message)}`));
-	});
-	const unsubscribeError = handle.onError(reject);
-	try {
-		handle.send({ type: "ping", id: "smoke" } satisfies MnemopiEmbedWorkerInbound);
-		await promise;
-	} finally {
-		clearTimeout(timer);
-		unsubscribeMessage();
-		unsubscribeError();
-		await handle.terminate();
-	}
+	await smokeTestWorker(wrapSubprocess(createMnemopiEmbedSubprocess()), "mnemopi embed worker", timeoutMs);
 }

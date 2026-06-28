@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import * as path from "node:path";
 import { EnhancedPasteController } from "@pk-nerdsaver-ai/pi-coding-agent/utils/enhanced-paste";
 
 /**
@@ -101,25 +100,5 @@ describe("issue #2127 — enhanced-paste text must follow focus", () => {
 		deliverApiKey(controller, "fallback body");
 
 		expect(editor.pasted).toEqual(["fallback body"]);
-	});
-});
-
-describe("issue #2127 — InputController wires enhanced-paste through focus", () => {
-	const packageDir = path.resolve(import.meta.dir, "..");
-	const controllerPath = path.join(packageDir, "src/modes/controllers/input-controller.ts");
-
-	it("input-controller routes the enhanced-paste text callback through ui.getFocused", async () => {
-		const source = await Bun.file(controllerPath).text();
-		// Anchor the assertion on the EnhancedPasteController construction block:
-		// the `pasteText` callback must consult the focused component, not stash
-		// every payload into `this.ctx.editor` unconditionally. A future refactor
-		// that drops `getFocused()` from this callback re-introduces the bug.
-		const constructionStart = source.indexOf("new EnhancedPasteController(");
-		expect(constructionStart, "InputController must still construct EnhancedPasteController").toBeGreaterThan(-1);
-		const constructionSlice = source.slice(constructionStart, constructionStart + 2_000);
-		expect(
-			constructionSlice.includes("getFocused()"),
-			"The enhanced-paste callback must consult ui.getFocused() so modal Input prompts (OAuth API-key entry, OTPs, redirect URLs) receive the pasted text instead of the detached main editor (#2127).",
-		).toBe(true);
 	});
 });

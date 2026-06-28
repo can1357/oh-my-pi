@@ -133,10 +133,40 @@ export interface DashboardStats {
 	overall: AggregatedStats;
 	byModel: ModelStats[];
 	byFolder: FolderStats[];
+	byAgentType: AgentTypeStats[];
 	timeSeries: TimeSeriesPoint[];
 	modelSeries: ModelTimeSeriesPoint[];
 	modelPerformanceSeries: ModelPerformancePoint[];
 	costSeries: CostTimeSeriesPoint[];
+}
+
+/**
+ * Which agent produced a message, derived from its transcript file location
+ * inside the session directory: the top-level `<project>/<file>.jsonl` is the
+ * `main` agent, an `__advisor.jsonl` is the passive `advisor`, and any other
+ * nested transcript is a task `subagent`.
+ */
+export type AgentType = "main" | "subagent" | "advisor";
+
+/**
+ * Token usage aggregated by {@link AgentType} over the active range. Token
+ * columns are explicit so the dashboard's share denominator matches the
+ * counts it renders (input + output + cache read + cache write).
+ */
+export interface AgentTypeStats {
+	agentType: AgentType;
+	/** Total number of requests */
+	totalRequests: number;
+	/** Total input tokens */
+	totalInputTokens: number;
+	/** Total output tokens */
+	totalOutputTokens: number;
+	/** Total cache read tokens */
+	totalCacheReadTokens: number;
+	/** Total cache write tokens */
+	totalCacheWriteTokens: number;
+	/** Total cost */
+	totalCost: number;
 }
 
 /**
@@ -201,4 +231,41 @@ export interface BehaviorDashboardStats {
 	overall: BehaviorOverallStats;
 	byModel: BehaviorModelStats[];
 	behaviorSeries: BehaviorTimeSeriesPoint[];
+}
+
+/** Token savings from a single source type. */
+export interface GainSourceTotals {
+	savedTokens: number;
+	savedBytes: number;
+	hits: number;
+	/** originalBytes - savedBytes, when original is known */
+	outputBytes: number;
+	/** Total original bytes before compression, when known */
+	originalBytes: number;
+	/** savedBytes / originalBytes when both are known, else null */
+	reductionPercent: number | null;
+}
+
+/** Per-source breakdown. */
+export type GainSource = "snapcompact";
+
+/** Time-series point for gain (daily bucket). */
+export interface GainTimeSeriesPoint {
+	date: string;
+	snapcompact: number;
+	total: number;
+}
+
+/** Complete gain dashboard payload. */
+export interface GainDashboardStats {
+	/** Aggregate across all sources for the active range. */
+	overall: GainSourceTotals;
+	/** Per-source breakdown. */
+	bySource: Record<GainSource, GainSourceTotals>;
+	/** Daily time series. */
+	timeSeries: GainTimeSeriesPoint[];
+	/** Active project filter (cwd prefix), or null for all projects. */
+	project: string | null;
+	/** All distinct projects seen in the data, for the selector. */
+	projects: string[];
 }

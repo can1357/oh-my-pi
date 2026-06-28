@@ -4,7 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@pk-nerdsaver-ai/pi-coding-agent/cursor";
-import { SearchTool, type ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
+import { GrepTool, type ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -19,21 +20,21 @@ function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): T
 
 describe("CursorExecHandlers.grep bridge", () => {
 	let cwd: string;
-	let searchTool: SearchTool;
+	let searchTool: GrepTool;
 	let handlers: CursorExecHandlers;
 
 	beforeEach(async () => {
 		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-exec-test-"));
 		await Bun.write(path.join(cwd, "sample.txt"), "Hello World\nhello world\n");
-		searchTool = new SearchTool(createTestSession(cwd));
+		searchTool = new GrepTool(createTestSession(cwd));
 		handlers = new CursorExecHandlers({
 			cwd,
-			tools: new Map([["search", searchTool as any]]),
+			tools: new Map([["grep", searchTool as any]]),
 		});
 	});
 
 	afterEach(async () => {
-		await fs.rm(cwd, { recursive: true, force: true });
+		await removeWithRetries(cwd);
 	});
 
 	it("maps caseInsensitive parameter correctly through the grep bridge", async () => {
@@ -43,7 +44,7 @@ describe("CursorExecHandlers.grep bridge", () => {
 			path: cwd,
 			pattern: "hello",
 		} as any);
-		expect(defaultResult.details?.matchCount).toBe(1);
+		expect((defaultResult.details as { matchCount?: number } | undefined)?.matchCount).toBe(1);
 
 		// 2. If caseInsensitive: true, should be case-insensitive (match count 2 for "hello")
 		const insensitiveResult = await handlers.grep({
@@ -52,7 +53,7 @@ describe("CursorExecHandlers.grep bridge", () => {
 			pattern: "hello",
 			caseInsensitive: true,
 		} as any);
-		expect(insensitiveResult.details?.matchCount).toBe(2);
+		expect((insensitiveResult.details as { matchCount?: number } | undefined)?.matchCount).toBe(2);
 
 		// 3. If caseInsensitive: false, should be case-sensitive (match count 1 for "hello")
 		const sensitiveResult = await handlers.grep({
@@ -61,6 +62,6 @@ describe("CursorExecHandlers.grep bridge", () => {
 			pattern: "hello",
 			caseInsensitive: false,
 		} as any);
-		expect(sensitiveResult.details?.matchCount).toBe(1);
+		expect((sensitiveResult.details as { matchCount?: number } | undefined)?.matchCount).toBe(1);
 	});
 });

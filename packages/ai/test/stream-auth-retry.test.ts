@@ -350,6 +350,113 @@ describe("streamSimple resolver auth retry", () => {
 		expect(keys).toEqual(["old-key", "new-key"]);
 	});
 
+	it("rotates before emitting content for Codex quota payloads", async () => {
+		const payloads: Array<{ message: string; status?: number }> = [
+			{ message: "429", status: 429 },
+			{ message: '{"error":{"code":"insufficient_quota","message":"quota exhausted"}}' },
+			{ message: '{"error":{"code":"usage_limit_exceeded","message":"usage limit exceeded"}}' },
+			{ message: '{"error":{"code":"usage_limit_reached","message":"usage limit reached"}}' },
+		];
+		let activePayload = payloads[0]!;
+		let keys: unknown[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (options?.apiKey === "credential-B") {
+						ok(stream);
+						return;
+					}
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: assistantError(activePayload.message, activePayload.status),
+					});
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		for (const payload of payloads) {
+			activePayload = payload;
+			keys = [];
+			const eventTypes: string[] = [];
+			const retryContexts: ApiKeyResolveContext[] = [];
+			const stream = streamSimple(model(), context, {
+				apiKey: async ctx => {
+					if (ctx.error !== undefined) retryContexts.push(ctx);
+					return ctx.error === undefined ? "credential-A" : ctx.lastChance ? "credential-B" : "credential-A";
+				},
+			});
+			for await (const event of stream) {
+				eventTypes.push(event.type);
+			}
+
+			expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
+			expect(keys).toEqual(["credential-A", "credential-B"]);
+			expect(eventTypes).toEqual(["start", "done"]);
+			expect(retryContexts.map(ctx => ctx.lastChance)).toEqual([false, true]);
+		}
+	});
+
+	it("does not rotate or refresh on informative transient 429 bodies", async () => {
+		const transient429Bodies = [
+			"Cloud Code Assist API error (429): Too many requests",
+			"Please retry in 5s",
+			"Service overloaded 529",
+		];
+		let active = transient429Bodies[0]!;
+		const keys: unknown[] = [];
+		const retryResolves: ApiKeyResolveContext[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: assistant() });
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: assistantError(active, 429),
+					});
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+
+		for (const body of transient429Bodies) {
+			active = body;
+			keys.length = 0;
+			retryResolves.length = 0;
+			const eventTypes: string[] = [];
+			const stream = streamSimple(model(), context, {
+				apiKey: async ctx => {
+					if (ctx.error !== undefined) retryResolves.push(ctx);
+					return ctx.error === undefined ? "credential-A" : "credential-B";
+				},
+			});
+
+			for await (const event of stream) {
+				eventTypes.push(event.type);
+			}
+			const result = await stream.result();
+
+			// The provider's own retry/backoff layer owns these — the auth
+			// retry loop must NOT capture, refresh, or burn a sibling.
+			expect(retryResolves).toEqual([]);
+			expect(keys).toEqual(["credential-A"]);
+			expect(eventTypes).toEqual(["start", "error"]);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain(body);
+		}
+	});
+
 	it("rotates on the exact Google Resource exhausted 429 error before content", async () => {
 		const keys: unknown[] = [];
 		const retryContexts: ApiKeyResolveContext[] = [];

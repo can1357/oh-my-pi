@@ -6,7 +6,7 @@ import type { UsageProvider } from "@pk-nerdsaver-ai/pi-ai";
 import * as oauth from "@pk-nerdsaver-ai/pi-ai/oauth";
 import type { OAuthCredentials } from "@pk-nerdsaver-ai/pi-ai/oauth/types";
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("AuthStorage account rotation", () => {
 	let tempDir: string;
@@ -62,7 +62,7 @@ describe("AuthStorage account rotation", () => {
 		vi.restoreAllMocks();
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true });
+			removeSyncWithRetries(tempDir);
 		}
 	});
 

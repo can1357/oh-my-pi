@@ -1,63 +1,63 @@
 {
-	"type": "module",
-	"private": true,
-	"name": "@pk-nerdsaver-ai/typescript-edit-benchmark",
-	"version": "0.0.1",
-	"description": "Edit benchmark suite using TypeScript source code mutations",
-	"homepage": "https://omp.sh",
-	"author": "Can Boluk",
-	"license": "MIT",
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/can1357/oh-my-pi.git",
-		"directory": "packages/typescript-edit-benchmark"
-	},
-	"main": "./src/index.ts",
-	"exports": {
-		".": {
-			"types": "./src/index.ts",
-			"import": "./src/index.ts"
-		},
-		"./*": {
-			"types": "./src/*.ts",
-			"import": "./src/*.ts"
-		},
-		"./*.js": "./src/*.ts"
-	},
-	"bin": {
-		"typescript-edit-benchmark": "src/index.ts"
-	},
-	"scripts": {
-		"check": "biome check . && bun run check:types",
-		"check:types": "tsgo -p tsconfig.json --noEmit",
-		"lint": "biome lint .",
-		"test": "bun test --parallel",
-		"fix": "biome check --write --unsafe .",
-		"fmt": "biome format --write .",
-		"generate": "bun run src/generate.ts --typescript-dir /tmp/pi-mono-source --count-per-type 4",
-		"start": "bun run src/index.ts"
-	},
-	"dependencies": {
-		"@babel/generator": "catalog:",
-		"@babel/parser": "catalog:",
-		"@babel/traverse": "catalog:",
-		"@babel/types": "catalog:",
-		"@pk-nerdsaver-ai/hashline": "catalog:",
-		"@pk-nerdsaver-ai/pi-agent-core": "catalog:",
-		"@pk-nerdsaver-ai/pi-coding-agent": "catalog:",
-		"@pk-nerdsaver-ai/pi-utils": "catalog:",
-		"diff": "catalog:",
-		"prettier": "catalog:",
-		"regexp-tree": "catalog:",
-		"@pk-nerdsaver-ai/pi-ai": "catalog:",
-		"@pk-nerdsaver-ai/pi-tui": "catalog:"
-	},
-	"devDependencies": {
-		"@types/babel__generator": "catalog:",
-		"@types/babel__traverse": "catalog:",
-		"@types/bun": "catalog:"
-	},
-	"engines": {
-		"bun": ">=1.3.14"
-	}
+  "type": "module",
+  "private": true,
+  "name": "@pk-nerdsaver-ai/typescript-edit-benchmark",
+  "version": "0.0.1",
+  "description": "Edit benchmark suite using TypeScript source code mutations",
+  "homepage": "https://omp.sh",
+  "author": "Can Boluk",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/can1357/oh-my-pi.git",
+    "directory": "packages/typescript-edit-benchmark"
+  },
+  "main": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./*": {
+      "types": "./src/*.ts",
+      "import": "./src/*.ts"
+    },
+    "./*.js": "./src/*.ts"
+  },
+  "bin": {
+    "typescript-edit-benchmark": "src/index.ts"
+  },
+  "scripts": {
+    "check": "biome check . && bun run check:types",
+    "check:types": "tsgo -p tsconfig.json --noEmit",
+    "lint": "biome lint .",
+    "test": "bun test --parallel",
+    "fix": "biome check --write --unsafe .",
+    "fmt": "biome format --write .",
+    "generate": "bun run src/generate.ts --typescript-dir /tmp/pi-mono-source --count-per-type 4",
+    "start": "bun run src/index.ts"
+  },
+  "dependencies": {
+    "@babel/generator": "catalog:",
+    "@babel/parser": "catalog:",
+    "@babel/traverse": "catalog:",
+    "@babel/types": "catalog:",
+    "@pk-nerdsaver-ai/hashline": "catalog:",
+    "@pk-nerdsaver-ai/pi-agent-core": "catalog:",
+    "@pk-nerdsaver-ai/pi-coding-agent": "catalog:",
+    "@pk-nerdsaver-ai/pi-utils": "catalog:",
+    "diff": "catalog:",
+    "prettier": "catalog:",
+    "regexp-tree": "catalog:",
+    "@pk-nerdsaver-ai/pi-ai": "catalog:",
+    "@pk-nerdsaver-ai/pi-tui": "catalog:"
+  },
+  "devDependencies": {
+    "@types/babel__generator": "catalog:",
+    "@types/babel__traverse": "catalog:",
+    "@types/bun": "catalog:"
+  },
+  "engines": {
+    "bun": ">=1.3.14"
+  }
 }

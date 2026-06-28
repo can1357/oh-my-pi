@@ -170,7 +170,7 @@ mkdir -p "$TARBALL_APP_DIR"
       exit 1
    }
    wire_proto="$(bun -e 'import { COLLAB_PROTO } from "@pk-nerdsaver-ai/pi-wire"; process.stdout.write(String(COLLAB_PROTO));')"
-   [ "$wire_proto" = "1" ] || {
+   [ "$wire_proto" = "2" ] || {
       echo "Unexpected @pk-nerdsaver-ai/pi-wire COLLAB_PROTO: $wire_proto"
       exit 1
    }

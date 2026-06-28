@@ -54,8 +54,8 @@ const defineProp = (obj, prop, value) =>
 		configurable: true,
 	});
 
-const generateFunctionMocks = (proto, itemMainProp, dataArray) => ({
-	item: new Window_Proxy(proto.item, {
+const generateFunctionMocks = (proto, itemMainProp, dataArray) => {
+	const item = new Window_Proxy(proto.item, {
 		apply(target, ctx, args) {
 			if (!args.length) {
 				throw new TypeError(
@@ -65,8 +65,8 @@ const generateFunctionMocks = (proto, itemMainProp, dataArray) => ({
 			const isInteger = args[0] && Number.isInteger(Number(args[0]));
 			return (isInteger ? dataArray[Number(args[0])] : dataArray[0]) || null;
 		},
-	}),
-	namedItem: new Window_Proxy(proto.namedItem, {
+	});
+	const namedItem = new Window_Proxy(proto.namedItem, {
 		apply(target, ctx, args) {
 			if (!args.length) {
 				throw new TypeError(
@@ -75,15 +75,19 @@ const generateFunctionMocks = (proto, itemMainProp, dataArray) => ({
 			}
 			return dataArray.find(item => item[itemMainProp] === args[0]) || null;
 		},
-	}),
-	refresh: proto.refresh
+	});
+	patchToString(item, "item");
+	patchToString(namedItem, "namedItem");
+	const refresh = proto.refresh
 		? new Window_Proxy(proto.refresh, {
 				apply() {
 					return undefined;
 				},
 			})
-		: undefined,
-});
+		: undefined;
+	patchToString(refresh, "refresh");
+	return { item, namedItem, refresh };
+};
 
 const generateMagicArray = (dataArray, proto, itemProto, itemMainProp) => {
 	const makeItem = (data) => {

@@ -1,5 +1,5 @@
+import { parseJsonWithRepair, parseStreamingJson } from "@pk-nerdsaver-ai/pi-utils";
 import type { Message, ToolCall } from "../types";
-import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse";
 import { asRecord, mintToolCallId, partialSuffixOverlapAny } from "./coercion";
 import dialectPrompt from "./hermes.md" with { type: "text" };
 import { renderChatMlTranscript, renderDelimitedThinking, renderToolResponseResults, stringifyJson } from "./rendering";

@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { CURRENT_SESSION_VERSION, type SessionHeader } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
 import { getTerminalId } from "@pk-nerdsaver-ai/pi-tui";
-import { getAgentDir, getTerminalSessionsDir, setAgentDir, TempDir } from "@pk-nerdsaver-ai/pi-utils";
+import { getAgentDir, getTerminalSessionsDir, removeWithRetries, setAgentDir, TempDir } from "@pk-nerdsaver-ai/pi-utils";
 
 interface JsonlMessageEntry {
 	type: "message";
@@ -51,7 +51,7 @@ describe("SessionManager.forkFrom", () => {
 			const terminalId = getTerminalId();
 			expect(terminalId).toBeString();
 			const breadcrumbFile = path.join(getTerminalSessionsDir(), terminalId ?? "missing");
-			await fs.rm(breadcrumbFile, { force: true });
+			await removeWithRetries(breadcrumbFile);
 
 			const forked = await SessionManager.forkFrom(sourceFile, cwd, sessionDir, undefined, {
 				suppressBreadcrumb: true,

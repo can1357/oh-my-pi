@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { classifyGatewayError } from "@pk-nerdsaver-ai/pi-ai/auth-gateway/server";
+import { classifyGatewayError } from "@pk-nerdsaver-ai/pi-ai/error";
 
 describe("auth-gateway classifyGatewayError", () => {
 	it("honours an explicit numeric `status` property on the error", () => {
@@ -50,6 +50,12 @@ describe("auth-gateway classifyGatewayError", () => {
 
 	it("still recognizes rate-limit wording when no status is embedded", () => {
 		const c = classifyGatewayError(new Error("too many requests — back off"));
+		expect(c.status).toBe(429);
+		expect(c.type).toBe("rate_limit_error");
+	});
+
+	it("prefers rate-limit wording over auth wording", () => {
+		const c = classifyGatewayError(new Error("Rate limit exceeded - unauthorized due to throttling"));
 		expect(c.status).toBe(429);
 		expect(c.type).toBe("rate_limit_error");
 	});

@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { detectIndentFromContent, resolveFormatOptions } from "@pk-nerdsaver-ai/pi-coding-agent/lsp/format-options";
-import { getProjectDir, Snowflake, setProjectDir } from "@pk-nerdsaver-ai/pi-utils";
+import { getProjectDir, removeWithRetries, Snowflake, setProjectDir } from "@pk-nerdsaver-ai/pi-utils";
 
 /**
  * Regression coverage for issue #2329 — the LSP format-on-write path used to
@@ -68,7 +68,7 @@ describe("resolveFormatOptions", () => {
 
 	afterEach(async () => {
 		setProjectDir(previousProjectDir);
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await removeWithRetries(tempDir);
 	});
 
 	it("falls back to 2-space indent when no .editorconfig and no content signal exist", () => {

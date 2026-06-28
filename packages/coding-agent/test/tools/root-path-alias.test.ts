@@ -6,6 +6,7 @@ import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { ToolChoiceQueue } from "@pk-nerdsaver-ai/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import { resolveToCwd } from "@pk-nerdsaver-ai/pi-coding-agent/tools/path-utils";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -38,7 +39,7 @@ describe("tool path root alias", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await removeWithRetries(tempDir);
 	});
 
 	it("resolves a bare slash to the session cwd", () => {
@@ -64,7 +65,7 @@ describe("tool path root alias", () => {
 
 	it("searches from cwd when path is slash", async () => {
 		const tools = await createTools(createTestSession(tempDir));
-		const tool = tools.find(entry => entry.name === "search");
+		const tool = tools.find(entry => entry.name === "grep");
 		expect(tool).toBeDefined();
 		if (!tool) throw new Error("Missing search tool");
 
@@ -94,7 +95,7 @@ describe("tool path root alias", () => {
 
 	it("finds from cwd when pattern is slash", async () => {
 		const tools = await createTools(createTestSession(tempDir));
-		const tool = tools.find(entry => entry.name === "find");
+		const tool = tools.find(entry => entry.name === "glob");
 		expect(tool).toBeDefined();
 		if (!tool) throw new Error("Missing find tool");
 

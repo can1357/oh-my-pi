@@ -220,12 +220,8 @@ describe("AgentSession eager todo enforcement", () => {
 	it("initializes todos once, then continues within the same user turn", async () => {
 		scriptedResponses = [
 			createToolCallAssistantMessage("todo", {
-				ops: [
-					{
-						op: "init",
-						list: [{ phase: "List worktrees", items: ["List all git worktrees in the current repository"] }],
-					},
-				],
+				op: "init",
+				list: [{ phase: "List worktrees", items: ["List all git worktrees in the current repository"] }],
 			}),
 			createAssistantMessage("real user turn handled"),
 		];

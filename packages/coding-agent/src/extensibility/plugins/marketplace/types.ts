@@ -92,6 +92,7 @@ export interface MarketplacePluginEntry {
 	hooks?: string | Record<string, unknown>;
 	mcpServers?: string | Record<string, unknown>;
 	lspServers?: string | Record<string, unknown>;
+	dapAdapters?: string | Record<string, unknown>;
 }
 
 // ── Plugin source variants ───────────────────────────────────────────

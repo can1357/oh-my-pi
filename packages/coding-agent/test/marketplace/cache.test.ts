@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-
 import {
 	cachePlugin,
 	cleanOrphanedCache,
@@ -12,6 +11,7 @@ import {
 	isValidVersionForCache,
 	removeCachedPlugin,
 } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/marketplace";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -107,7 +107,7 @@ describe("cachePlugin, isCached, removeCachedPlugin", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		removeSyncWithRetries(tmpDir);
 	});
 
 	it("isCached returns false before caching", async () => {
@@ -174,7 +174,7 @@ describe("cleanOrphanedCache", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		removeSyncWithRetries(tmpDir);
 	});
 
 	it("returns { removed: 0 } when cacheDir does not exist", async () => {

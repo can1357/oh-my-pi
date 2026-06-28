@@ -219,3 +219,113 @@ describe("Patcher seen-line provenance", () => {
 		expect(result.sections[0]?.op).toBe("update");
 	});
 });
+
+describe("Patcher tag-based path recovery", () => {
+	const NESTED = "pkg/test/file.ts";
+	const CONTENT = "one\ntwo\nthree\n";
+
+	it("redirects a bare filename to the full path of the file its tag names", async () => {
+		const fs = new InMemoryFilesystem([[NESTED, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(NESTED, CONTENT);
+		const patcher = new Patcher({ fs, snapshots });
+
+		// The header carries only the basename — the model dropped the directory.
+		const result = await patcher.apply(Patch.parse(`[file.ts#${tag}]\nSWAP 2.=2:\n+TWO`));
+
+		const section = result.sections[0];
+		expect(section?.op).toBe("update");
+		// The edit landed on the real nested file; the result reports its full path.
+		expect(section?.path).toBe(NESTED);
+		expect(fs.get(NESTED)).toBe("one\nTWO\nthree\n");
+		expect(section?.warnings.some(warning => warning.includes("does not exist") && warning.includes(NESTED))).toBe(
+			true,
+		);
+	});
+
+	it("declines recovery when the filename does not match the recorded file", async () => {
+		const fs = new InMemoryFilesystem([[NESTED, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(NESTED, CONTENT);
+		const patcher = new Patcher({ fs, snapshots });
+
+		await expect(patcher.apply(Patch.parse(`[other.ts#${tag}]\nSWAP 2.=2:\n+TWO`))).rejects.toThrow(/File not found/);
+		expect(fs.get(NESTED)).toBe(CONTENT);
+	});
+
+	it("declines recovery when the tag matches no retained snapshot", async () => {
+		const fs = new InMemoryFilesystem([[NESTED, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(NESTED, CONTENT);
+		const bogus = tag === "FFFF" ? "0000" : "FFFF";
+		const patcher = new Patcher({ fs, snapshots });
+
+		await expect(patcher.apply(Patch.parse(`[file.ts#${bogus}]\nSWAP 2.=2:\n+TWO`))).rejects.toThrow(
+			/File not found/,
+		);
+	});
+
+	it("declines recovery when two retained files share the filename and tag", async () => {
+		const fs = new InMemoryFilesystem([
+			["a/file.ts", CONTENT],
+			["b/file.ts", CONTENT],
+		]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record("a/file.ts", CONTENT);
+		snapshots.record("b/file.ts", CONTENT);
+		const patcher = new Patcher({ fs, snapshots });
+
+		await expect(patcher.apply(Patch.parse(`[file.ts#${tag}]\nSWAP 2.=2:\n+TWO`))).rejects.toThrow(/File not found/);
+		expect(fs.get("a/file.ts")).toBe(CONTENT);
+		expect(fs.get("b/file.ts")).toBe(CONTENT);
+	});
+
+	it("respects a filesystem that refuses path recovery", async () => {
+		class NoRecoveryFs extends InMemoryFilesystem {
+			override allowTagPathRecovery(): boolean {
+				return false;
+			}
+		}
+		const fs = new NoRecoveryFs([[NESTED, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(NESTED, CONTENT);
+		const patcher = new Patcher({ fs, snapshots });
+
+		await expect(patcher.apply(Patch.parse(`[file.ts#${tag}]\nSWAP 2.=2:\n+TWO`))).rejects.toThrow(/File not found/);
+		expect(fs.get(NESTED)).toBe(CONTENT);
+	});
+
+	it("runs the write gate on the recovered path, not the authored bare path", async () => {
+		// A gate that refuses the bare authored path but allows the recovered full
+		// path. Mirrors plan mode rejecting a bare cwd path before tag recovery
+		// rebinds it to its real (writable) location; recovery must precede the gate.
+		class GatedFs extends InMemoryFilesystem {
+			override async preflightWrite(p: string): Promise<void> {
+				if (p === "file.ts") throw new Error("write gate: read-only");
+			}
+		}
+		const fs = new GatedFs([[NESTED, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(NESTED, CONTENT);
+		const patcher = new Patcher({ fs, snapshots });
+
+		const result = await patcher.apply(Patch.parse(`[file.ts#${tag}]\nSWAP 2.=2:\n+TWO`));
+		expect(result.sections[0]?.path).toBe(NESTED);
+		expect(fs.get(NESTED)).toBe("one\nTWO\nthree\n");
+	});
+
+	it("runs the write gate on an unrecoverable authored path (gate wins over not-found)", async () => {
+		// No snapshot for the bare name → no recovery; the gate still runs on the
+		// authored path and its rejection wins over the file-not-found error.
+		class GatedFs extends InMemoryFilesystem {
+			override async preflightWrite(): Promise<void> {
+				throw new Error("write gate: read-only");
+			}
+		}
+		const fs = new GatedFs([[NESTED, CONTENT]]);
+		const snapshots = new InMemorySnapshotStore();
+		const patcher = new Patcher({ fs, snapshots });
+
+		await expect(patcher.apply(Patch.parse(`[file.ts#ABCD]\nSWAP 1.=1:\n+X`))).rejects.toThrow(/write gate/);
+	});
+});

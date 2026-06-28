@@ -136,6 +136,7 @@ function runGoldenTests(dir: string, useAscii: boolean): void {
 				useAscii,
 				paddingX: tc.paddingX,
 				paddingY: tc.paddingY,
+				colorMode: "none",
 			});
 
 			const normalizedExpected = normalizeWhitespace(tc.expected);
@@ -172,20 +173,20 @@ describe("Config behavior", () => {
 	const mermaidInput = "graph LR\nA --> B";
 
 	it("ASCII and Unicode outputs should differ", () => {
-		const asciiOutput = renderMermaidAscii(mermaidInput, { useAscii: true });
-		const unicodeOutput = renderMermaidAscii(mermaidInput, { useAscii: false });
+		const asciiOutput = renderMermaidAscii(mermaidInput, { useAscii: true, colorMode: "none" });
+		const unicodeOutput = renderMermaidAscii(mermaidInput, { useAscii: false, colorMode: "none" });
 		expect(asciiOutput).not.toBe(unicodeOutput);
 	});
 
 	it("ASCII output should not contain Unicode box-drawing characters", () => {
-		const output = renderMermaidAscii(mermaidInput, { useAscii: true });
+		const output = renderMermaidAscii(mermaidInput, { useAscii: true, colorMode: "none" });
 		expect(output).not.toContain("┌");
 		expect(output).not.toContain("─");
 		expect(output).not.toContain("│");
 	});
 
 	it("Unicode output should contain Unicode box-drawing characters", () => {
-		const output = renderMermaidAscii(mermaidInput, { useAscii: false });
+		const output = renderMermaidAscii(mermaidInput, { useAscii: false, colorMode: "none" });
 		const hasUnicode = output.includes("┌") || output.includes("─") || output.includes("│");
 		expect(hasUnicode).toBe(true);
 	});
@@ -209,6 +210,7 @@ describe("Diagonal validation", () => {
 				useAscii: true,
 				boxBorderPadding: paddingX,
 				paddingY: paddingY,
+				colorMode: "none",
 			});
 
 			// Check for diagonal characters
@@ -228,6 +230,7 @@ describe("Diagonal validation", () => {
 				useAscii: false,
 				boxBorderPadding: paddingX,
 				paddingY: paddingY,
+				colorMode: "none",
 			});
 
 			// Check for diagonal characters

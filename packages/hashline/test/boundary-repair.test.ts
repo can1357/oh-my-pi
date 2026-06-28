@@ -342,6 +342,206 @@ describe("boundary-balance repair", () => {
 		expect(text).toBe(["setup();", "a();", "B();", "C();"].join("\n"));
 		expect(warnings.some(warning => /boundary echo/.test(warning))).toBe(true);
 	});
+	// #3142: the range's deleted `}` is matched by an opener another hunk deletes
+	// (`DEL 1`). The patch nets to balanced, so the closer must stay deleted —
+	// the per-group repair wrongly kept it, leaving a stray `}`.
+	it("does not keep a deleted closer when another hunk removes its opener (#3142)", () => {
+		const file = ["if enabled {", '\tText("Old")', "}", '\tText("Tail")'].join("\n");
+		const diff = ["DEL 1", "SWAP 2.=3:", '+Text("New")'].join("\n");
+		const { text, warnings } = apply(file, diff);
+		expect(text).toBe(['Text("New")', '\tText("Tail")'].join("\n"));
+		expect(warnings.filter(warning => /structural closing line/.test(warning))).toHaveLength(0);
+	});
+
+	// A wrapper removal and a genuine missing closer in the same patch: the
+	// residual must be spent on the genuine hunk, not the wrapper-removed one.
+	it("spends the missing-closer residual on the genuine hunk, not an earlier wrapper removal", () => {
+		const file = ["if enabled {", '\tText("Old")', "}", "const config = {", "\ta: 1,", "};"].join("\n");
+		const diff = ["DEL 1", "SWAP 2.=3:", '+Text("New")', "SWAP 6.=6:", "+\tb: 2,"].join("\n");
+		const { text, warnings } = apply(file, diff);
+		expect(text).toBe(['Text("New")', "const config = {", "\ta: 1,", "\tb: 2,", "};"].join("\n"));
+		expect(warnings.filter(warning => /structural closing line/.test(warning))).toHaveLength(1);
+	});
+
+	// A replaced opener (not removed) leaves a genuine missing closer downstream:
+	// the net deleted-prefix balance is zero, so the closer is correctly kept.
+	it("keeps the closer when the matching opener is replaced rather than removed", () => {
+		const file = ["if (a) {", "\told();", "}"].join("\n");
+		const diff = ["SWAP 1.=1:", "+if (b) {", "SWAP 2.=3:", "+\tnew();"].join("\n");
+		const { text, warnings } = apply(file, diff);
+		expect(text).toBe(["if (b) {", "\tnew();", "}"].join("\n"));
+		expect(warnings.filter(warning => /structural closing line/.test(warning))).toHaveLength(1);
+	});
+
+	it("does not keep deleted closer suffixes whose tail the payload already restates", () => {
+		const file = [
+			"const REASONING_LABEL_PATTERN = /think/i;",
+			"const NO_REASONING_LABEL_PATTERN = /no/i;",
+			"",
+			"\treturn config.supportsThinking === true;",
+			"}",
+			"}",
+		].join("\n");
+		const diff = [
+			"SWAP 3.=6:",
+			"+function supportsDevinThinking(config: ClientModelConfig): boolean {",
+			"+\tif (NO_REASONING_LABEL_PATTERN.test(config.label)) return false;",
+			"+\treturn config.supportsThinking === true;",
+			"+}",
+		].join("\n");
+		const { text, warnings } = apply(file, diff);
+		expect(text).toBe(
+			[
+				"const REASONING_LABEL_PATTERN = /think/i;",
+				"const NO_REASONING_LABEL_PATTERN = /no/i;",
+				"function supportsDevinThinking(config: ClientModelConfig): boolean {",
+				"\tif (NO_REASONING_LABEL_PATTERN.test(config.label)) return false;",
+				"\treturn config.supportsThinking === true;",
+				"}",
+			].join("\n"),
+		);
+		expect(warnings.filter(warning => /structural closing line/.test(warning))).toHaveLength(0);
+	});
+
+	it("keeps only the non-restated outer closer for a nested deleted suffix", () => {
+		const file = ["class C {", "\told();", "\t}", "}"].join("\n");
+		const diff = ["SWAP 2.=4:", "+\tnewMethod() {", "+\t\treturn 1;", "+\t}"].join("\n");
+		const { text, warnings } = apply(file, diff);
+		expect(text).toBe(["class C {", "\tnewMethod() {", "\t\treturn 1;", "\t}", "}"].join("\n"));
+		expect(warnings.filter(warning => /structural closing line/.test(warning))).toHaveLength(1);
+	});
+
+	it("ignores non-contiguously deleted openers when choosing which closer to keep", () => {
+		const file = ["if (a) {", "\told();", "\tmore();", "}", "const obj = {", "\ta: 1,", "};"].join("\n");
+		const diff = ["DEL 1", "SWAP 3.=4:", "+\tnew();", "SWAP 7.=7:", "+\tb: 2,"].join("\n");
+		const { text, warnings } = apply(file, diff);
+		expect(text).toBe(["\told();", "\tnew();", "const obj = {", "\ta: 1,", "\tb: 2,", "};"].join("\n"));
+		expect(warnings.filter(warning => /structural closing line/.test(warning))).toHaveLength(1);
+	});
+
+	it("counts earlier kept closers in later projected prefixes", () => {
+		const file = [
+			"if (a) {",
+			"\told();",
+			"}",
+			"const NO_REASONING_LABEL_PATTERN = /no/i;",
+			"\treturn config.supportsThinking === true;",
+			"\t}",
+		].join("\n");
+		const diff = [
+			"SWAP 2.=3:",
+			"+\tnew();",
+			"SWAP 4.=6:",
+			"+function supportsDevinThinking(config: ClientModelConfig): boolean {",
+			"+\treturn config.supportsThinking === true;",
+			"+}",
+		].join("\n");
+		const { text, warnings } = apply(file, diff);
+		expect(text).toBe(
+			[
+				"if (a) {",
+				"\tnew();",
+				"}",
+				"function supportsDevinThinking(config: ClientModelConfig): boolean {",
+				"\treturn config.supportsThinking === true;",
+				"}",
+			].join("\n"),
+		);
+		expect(warnings.filter(warning => /structural closing line/.test(warning))).toHaveLength(1);
+	});
+
+	it("does not let an earlier kept closer cover a later orphan closer", () => {
+		const file = ["if (a) {", "\told();", "}", "}"].join("\n");
+		const diff = ["SWAP 2.=3:", "+\tnew();", "SWAP 4.=4:", "+after();"].join("\n");
+		const { text, warnings } = apply(file, diff);
+		expect(text).toBe(["if (a) {", "\tnew();", "}", "after();"].join("\n"));
+		expect(warnings.filter(warning => /structural closing line/.test(warning))).toHaveLength(1);
+	});
+
+	it("does not keep a deleted outer closer when one survives below the range", () => {
+		const file = ["class C {", "\tmethod() {", "\t\told();", "\t}", "}", "}"].join("\n");
+		const diff = ["SWAP 2.=5:", "+\tmethod() {", "+\t\tnew();", "+\t}"].join("\n");
+		const { text, warnings } = apply(file, diff);
+		expect(text).toBe(["class C {", "\tmethod() {", "\t\tnew();", "\t}", "}"].join("\n"));
+		expect(warnings.filter(warning => /structural closing line/.test(warning))).toHaveLength(0);
+	});
+
+	it("keeps an omitted inner closer when the outer closer survives below", () => {
+		const file = ["class C {", "\tmethod() {", "\t\told();", "\t}", "}", "}"].join("\n");
+		const diff = ["SWAP 2.=5:", "+\tmethod() {", "+\t\tnew();"].join("\n");
+		const { text, warnings } = apply(file, diff);
+		expect(text).toBe(["class C {", "\tmethod() {", "\t\tnew();", "\t}", "}"].join("\n"));
+		expect(warnings.filter(warning => /structural closing line/.test(warning))).toHaveLength(1);
+	});
+
+	it("counts same-line inserted prefixes before replacement payload", () => {
+		const file = ["\told();", "}"].join("\n");
+		const diff = ["INS.PRE 1:", "+if (a) {", "SWAP 1.=2:", "+\tnew();"].join("\n");
+		const { text, warnings } = apply(file, diff);
+		expect(text).toBe(["if (a) {", "\tnew();", "}"].join("\n"));
+		expect(warnings.filter(warning => /structural closing line/.test(warning))).toHaveLength(1);
+	});
+
+	it("counts a separately inserted closer immediately below the range", () => {
+		const file = ["class C {", "\told();", "}", "after();", "const obj = {", "\ta: 1,", "};"].join("\n");
+		const diff = ["SWAP 2.=3:", "+\tnew();", "INS.PRE 4:", "+}", "SWAP 7.=7:", "+\tb: 2,"].join("\n");
+		const { text, warnings } = apply(file, diff);
+		expect(text).toBe(
+			["class C {", "\tnew();", "}", "after();", "const obj = {", "\ta: 1,", "\tb: 2,", "};"].join("\n"),
+		);
+		expect(warnings.filter(warning => /structural closing line/.test(warning))).toHaveLength(1);
+	});
+
+	it("keeps an omitted outer closer even when the payload restates an inner closer", () => {
+		const file = ["if (a) {", "\tif (b) {", "\t\told();", "\t}", "}", "after();"].join("\n");
+		const diff = ["SWAP 1.=5:", "+if (a) {", "+\tif (c) {", "+\t\tnew();", "+\t}"].join("\n");
+		const { text, warnings } = apply(file, diff);
+		expect(text).toBe(["if (a) {", "\tif (c) {", "\t\tnew();", "\t}", "}", "after();"].join("\n"));
+		expect(warnings.filter(warning => /structural closing line/.test(warning))).toHaveLength(1);
+	});
+
+	// A dupSuffix repair in hunk A zeroes its contribution; the residual must be
+	// recomputed post-repair so hunk B's genuine missing closer still fires.
+	it("still keeps a missing closer when another hunk's dupSuffix repair masks the raw delta", () => {
+		const file = [
+			'addEventListener("click", () => {',
+			"\tfoo();",
+			"\tbar();",
+			"});",
+			"",
+			"const config = {",
+			"\ta: 1,",
+			"};",
+		].join("\n");
+		const diff = ["SWAP 2.=3:", "+\tsetup();", "+\tfoo();", "+\tbar();", "+});", "SWAP 8.=8:", "+\tb: 2,"].join("\n");
+		const { text, warnings } = apply(file, diff);
+		expect(text).toBe(
+			[
+				'addEventListener("click", () => {',
+				"\tsetup();",
+				"\tfoo();",
+				"\tbar();",
+				"});",
+				"",
+				"const config = {",
+				"\ta: 1,",
+				"\tb: 2,",
+				"};",
+			].join("\n"),
+		);
+		expect(warnings.some(warning => /trailing payload line/.test(warning))).toBe(true);
+		expect(warnings.some(warning => /structural closing line/.test(warning))).toBe(true);
+	});
+
+	// Per-slot residual: an unterminated backtick template in one hunk must not
+	// bleed across into another hunk's delimiter count and mask its missing closer.
+	it("does not let an unterminated template in one hunk mask a missing closer in another", () => {
+		const file = ["const log = makeLog(`", "prefix", "`);", "const obj = {", "\ta: 1", "};"].join("\n");
+		const diff = ["SWAP 1.=1:", "+const log = createLog(`", "SWAP 5.=6:", "+\ta: 2"].join("\n");
+		const { text, warnings } = apply(file, diff);
+		expect(text).toBe(["const log = createLog(`", "prefix", "`);", "const obj = {", "\ta: 2", "};"].join("\n"));
+		expect(warnings.filter(warning => /structural closing line/.test(warning))).toHaveLength(1);
+	});
 });
 
 describe("boundary-balance repair through stale-snapshot recovery", () => {

@@ -22,9 +22,10 @@ Tool results arrive as messages authored by the function, addressed back to the 
 
 - Recipient is `functions.` + a listed function name.
 - Body is one JSON object matching the schema; omit optional arguments you are not setting.
+- Argument string values use only normal JSON string escaping (`\"`, `\\`, `\n`); never HTML-escape their contents — write `a & b`, not `a &amp; b`.
 - Multiple calls = consecutive call messages.
 - An optional visible preamble is a `commentary` message ending `<|end|>`.
 - NEVER put tool calls in `analysis`.
 - NEVER wrap calls in Markdown/code fences.
 - Read each tool-result message in call order. NEVER emit tool-result messages yourself.
-- After emitting your tool calls, YOU MUST EMIT THE STOP SEQUENCE AND HALT.
+- Emit the stop sequence ONLY after the call is fully written — NEVER announce a tool then stop (e.g. halting at "Let's run `cargo clippy`" with no `<|call|>` message emitted). Write the complete call, THEN the stop sequence, THEN halt.

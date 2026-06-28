@@ -9,7 +9,7 @@ import {
 
 describe("collab wire constants", () => {
 	it("exports the protocol constants consumed by host, guest, and relay links", () => {
-		expect(COLLAB_PROTO).toBe(1);
+		expect(COLLAB_PROTO).toBe(2);
 		expect(COLLAB_PROMPT_MESSAGE_TYPE).toBe("collab-prompt");
 		expect(ENVELOPE_HEADER_LENGTH).toBe(4);
 		expect(ROOM_ID_BYTES).toBe(16);

@@ -70,6 +70,95 @@ describe("Ollama chat thinking controls", () => {
 
 		expect(payload?.think).toBe(false);
 	});
+	it("sends mid-conversation developer messages as user turns for llama.cpp cache reuse", async () => {
+		let payload: OllamaChatRequestPayload | undefined;
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const parsed: unknown = JSON.parse(String(init?.body));
+			if (!isOllamaChatRequestPayload(parsed)) {
+				throw new Error("Expected Ollama payload object");
+			}
+			payload = parsed;
+			return new Response('{"message":{"content":"captured"},"done":true,"prompt_eval_count":1,"eval_count":1}\n', {
+				status: 200,
+			});
+		};
+		const now = Date.now();
+		const context: Context = {
+			systemPrompt: ["static system"],
+			messages: [
+				{ role: "user", content: "Do work", timestamp: now - 2 },
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "Done" }],
+					api: "ollama-chat",
+					provider: "ollama",
+					model: "llama",
+					usage: emptyUsage,
+					stopReason: "stop",
+					timestamp: now - 1,
+				},
+				{
+					role: "developer",
+					content: [{ type: "text", text: "Capture reusable lessons." }],
+					attribution: "user",
+					timestamp: now,
+				},
+			],
+		};
+
+		await streamOllama(createReasoningOllamaModel(), context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(payload?.messages?.map(message => message.role)).toEqual(["system", "user", "assistant", "user"]);
+		expect(payload?.messages?.at(-1)?.content).toBe("Capture reusable lessons.");
+	});
+
+	it("keeps agent-attributed developer reminders on the system role", async () => {
+		let payload: OllamaChatRequestPayload | undefined;
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const parsed: unknown = JSON.parse(String(init?.body));
+			if (!isOllamaChatRequestPayload(parsed)) {
+				throw new Error("Expected Ollama payload object");
+			}
+			payload = parsed;
+			return new Response('{"message":{"content":"resumed"},"done":true,"prompt_eval_count":1,"eval_count":1}\n', {
+				status: 200,
+			});
+		};
+		const now = Date.now();
+		const context: Context = {
+			systemPrompt: ["static system"],
+			messages: [
+				{ role: "user", content: "Do work", timestamp: now - 2 },
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "Done" }],
+					api: "ollama-chat",
+					provider: "ollama",
+					model: "llama",
+					usage: emptyUsage,
+					stopReason: "stop",
+					timestamp: now - 1,
+				},
+				{
+					role: "developer",
+					content: [{ type: "text", text: "<system-warning>complete the checkpoint</system-warning>" }],
+					attribution: "agent",
+					timestamp: now,
+				},
+			],
+		};
+
+		await streamOllama(createReasoningOllamaModel(), context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(payload?.messages?.map(message => message.role)).toEqual(["system", "user", "assistant", "system"]);
+		expect(payload?.messages?.at(-1)?.content).toContain("complete the checkpoint");
+	});
 
 	it("omits tool-result images for text-only Ollama chat models", async () => {
 		let payload: OllamaChatRequestPayload | undefined;

@@ -1,8 +1,13 @@
-import { describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
 import { renderWelcomeTip } from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/welcome";
+import { initTheme, setTheme, theme } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
 import { visibleWidth } from "@pk-nerdsaver-ai/pi-tui";
 
 describe("renderWelcomeTip", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
 	it("wraps long tips under the label instead of truncating", () => {
 		const tip = "Next time you see spaghetti try creating a TTSR rule that prevents this pattern before it spreads";
 		const width = 44;
@@ -56,5 +61,34 @@ describe("renderWelcomeTip", () => {
 		const plain = lines.map(line => Bun.stripANSI(line)).join("\n");
 		expect(plain).not.toContain("NEW!");
 		expect(plain).toContain("Tip: Plain old tip");
+	});
+
+	it("derives label and body colors from the active theme, with no manual dim layer", async () => {
+		// Regression for #3337: hardcoded #b48cff/#9ccfff plus a manual `\x1b[2m`
+		// dropped the body to ~1.5:1 contrast on any light-theme background.
+		await setTheme("dark");
+		const darkLabelAnsi = theme.getFgAnsi("customMessageLabel");
+		const darkMutedAnsi = theme.getFgAnsi("muted");
+		const dark = renderWelcomeTip("Welcome aboard friend", 60).join("\n");
+
+		await setTheme("light");
+		const lightLabelAnsi = theme.getFgAnsi("customMessageLabel");
+		const lightMutedAnsi = theme.getFgAnsi("muted");
+		const light = renderWelcomeTip("Welcome aboard friend", 60).join("\n");
+
+		// Each theme paints with its own tokens.
+		expect(dark).toContain(darkLabelAnsi);
+		expect(dark).toContain(darkMutedAnsi);
+		expect(light).toContain(lightLabelAnsi);
+		expect(light).toContain(lightMutedAnsi);
+
+		// Switching themes must change the emitted bytes — the previous bug
+		// produced byte-identical output for both.
+		expect(dark).not.toBe(light);
+
+		// The manual `\x1b[2m` dim is gone; muted/label tokens carry their own
+		// theme-tuned luminance.
+		expect(dark).not.toContain("\x1b[2m");
+		expect(light).not.toContain("\x1b[2m");
 	});
 });

@@ -1,3 +1,4 @@
+import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
 import type { Context, Model, StreamFunction } from "../types";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
@@ -24,7 +25,10 @@ export const streamGoogle: StreamFunction<"google-generative-ai"> = (
 		prepare: (): GoogleGenAIRequestPlan => {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider);
 			if (!apiKey) {
-				throw new Error("Google Generative AI requires an API key (GEMINI_API_KEY or options.apiKey).");
+				throw new AIError.MissingApiKeyError(
+					undefined,
+					"Google Generative AI requires an API key (GEMINI_API_KEY or options.apiKey).",
+				);
 			}
 			const params = buildGoogleGenerateContentParams(model, context, options ?? {});
 			// `model.baseUrl` already includes the API version segment when set (mirrors the

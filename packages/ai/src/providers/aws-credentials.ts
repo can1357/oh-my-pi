@@ -23,6 +23,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $env, isEnoent, logger } from "@pk-nerdsaver-ai/pi-utils";
+import * as AIError from "../error";
+import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
 import type { AwsCredentials } from "./aws-sigv4";
 
@@ -37,6 +39,7 @@ export interface CredentialResolveOptions {
 	/** Falls back to env (`AWS_REGION` / `AWS_DEFAULT_REGION`) and finally `us-east-1`. */
 	region?: string;
 	signal?: AbortSignal;
+	fetch?: FetchImpl;
 }
 
 const REFRESH_SKEW_MS = 60_000;
@@ -75,9 +78,10 @@ export async function resolveAwsCredentials(opts: CredentialResolveOptions = {})
 	const existing = inflight.get(cacheKey);
 	if (existing) return raceWithSignal(existing, opts.signal);
 
+	const fetchImpl = opts.fetch ?? (globalThis.fetch as FetchImpl);
 	const promise = (async () => {
 		try {
-			const creds = await resolveFresh(profile, region, AbortSignal.timeout(SHARED_RESOLVE_TIMEOUT_MS));
+			const creds = await resolveFresh(profile, region, AbortSignal.timeout(SHARED_RESOLVE_TIMEOUT_MS), fetchImpl);
 			cache.set(cacheKey, { creds, expiresAt: creds.expiresAt ?? Number.POSITIVE_INFINITY });
 			return creds;
 		} finally {
@@ -88,24 +92,30 @@ export async function resolveAwsCredentials(opts: CredentialResolveOptions = {})
 	return raceWithSignal(promise, opts.signal);
 }
 
-async function resolveFresh(profile: string, region: string, signal?: AbortSignal): Promise<ResolvedCredentials> {
+async function resolveFresh(
+	profile: string,
+	region: string,
+	signal?: AbortSignal,
+	fetchImpl: FetchImpl = globalThis.fetch as FetchImpl,
+): Promise<ResolvedCredentials> {
 	// 1. Environment first — matches the AWS SDK chain order.
 	const envCreds = readEnvCredentials();
 	if (envCreds) return envCreds;
 
 	// 2. Profile (static or SSO).
-	const profileCreds = await readProfileCredentials(profile, region, signal);
+	const profileCreds = await readProfileCredentials(profile, region, signal, fetchImpl);
 	if (profileCreds) return profileCreds;
 
 	// 3. EC2 IMDSv2.
 	if ($env.AWS_EC2_METADATA_DISABLED?.toLowerCase() !== "true") {
-		const imdsCreds = await readImdsCredentials(signal);
+		const imdsCreds = await readImdsCredentials(signal, fetchImpl);
 		if (imdsCreds) return imdsCreds;
 	}
 
-	throw new Error(
+	throw new AIError.AwsCredentialsError(
 		`Unable to resolve AWS credentials. Set AWS_ACCESS_KEY_ID+AWS_SECRET_ACCESS_KEY, ` +
 			`or configure profile '${profile}' in ~/.aws/credentials (or ~/.aws/config for SSO).`,
+		"resolution",
 	);
 }
 
@@ -167,6 +177,7 @@ async function readProfileCredentials(
 	profile: string,
 	region: string,
 	signal: AbortSignal | undefined,
+	fetchImpl: FetchImpl,
 ): Promise<ResolvedCredentials | undefined> {
 	const home = os.homedir();
 	const credentialsPath = $env.AWS_SHARED_CREDENTIALS_FILE || path.join(home, ".aws", "credentials");
@@ -195,7 +206,7 @@ async function readProfileCredentials(
 	}
 
 	if (merged.sso_account_id && merged.sso_role_name) {
-		return readSsoCredentials(merged, configIni, region, signal);
+		return readSsoCredentials(merged, configIni, region, signal, fetchImpl);
 	}
 
 	if (merged.credential_process) {
@@ -217,6 +228,7 @@ async function readSsoCredentials(
 	configIni: IniFile | undefined,
 	defaultRegion: string,
 	signal: AbortSignal | undefined,
+	fetchImpl: FetchImpl,
 ): Promise<ResolvedCredentials | undefined> {
 	// Two SSO profile shapes:
 	//   - legacy: `sso_start_url` + `sso_region` directly on the profile
@@ -235,31 +247,44 @@ async function readSsoCredentials(
 
 	const token = await loadSsoCachedToken(startUrl, sessionName);
 	if (!token?.accessToken) {
-		throw new Error(`AWS SSO token for ${startUrl} not found in ~/.aws/sso/cache. Run 'aws sso login' first.`);
+		throw new AIError.AwsCredentialsError(
+			`AWS SSO token for ${startUrl} not found in ~/.aws/sso/cache. Run 'aws sso login' first.`,
+			"sso-token-missing",
+		);
 	}
 	const expiresAt = token.expiresAt ? Date.parse(token.expiresAt) : Number.POSITIVE_INFINITY;
 	if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) {
-		throw new Error(`AWS SSO token for ${startUrl} has expired. Run 'aws sso login' to refresh.`);
+		throw new AIError.AwsCredentialsError(
+			`AWS SSO token for ${startUrl} has expired. Run 'aws sso login' to refresh.`,
+			"sso-token-expired",
+		);
 	}
 
 	const url =
 		`https://portal.sso.${ssoRegion}.amazonaws.com/federation/credentials` +
 		`?account_id=${encodeURIComponent(profileCfg.sso_account_id)}` +
 		`&role_name=${encodeURIComponent(profileCfg.sso_role_name)}`;
-	const response = await fetch(url, {
+	const response = await fetchImpl(url, {
 		method: "GET",
 		headers: { "x-amz-sso_bearer_token": token.accessToken },
 		signal,
 	});
 	if (!response.ok) {
 		const body = await response.text().catch(() => "");
-		throw new Error(`AWS SSO GetRoleCredentials failed: ${response.status} ${body.slice(0, 200)}`);
+		throw new AIError.AwsCredentialsError(
+			`AWS SSO GetRoleCredentials failed: ${response.status} ${body.slice(0, 200)}`,
+			"sso-role",
+		);
 	}
 	const json = (await response.json()) as {
 		roleCredentials?: { accessKeyId: string; secretAccessKey: string; sessionToken: string; expiration: number };
 	};
 	const role = json.roleCredentials;
-	if (!role) throw new Error("AWS SSO GetRoleCredentials: missing roleCredentials in response");
+	if (!role)
+		throw new AIError.AwsCredentialsError(
+			"AWS SSO GetRoleCredentials: missing roleCredentials in response",
+			"sso-role",
+		);
 
 	// region is honored at the caller; we only consume defaultRegion to keep the
 	// param wired for symmetry with other resolution paths.
@@ -349,23 +374,32 @@ async function readCredentialProcess(
 	]);
 	if (exitCode !== 0) {
 		const tail = stderr.trim().slice(-512) || stdout.trim().slice(-512) || "(no output)";
-		throw new Error(`AWS credential_process for profile '${profile}' exited ${exitCode}: ${tail}`);
+		throw new AIError.AwsCredentialsError(
+			`AWS credential_process for profile '${profile}' exited ${exitCode}: ${tail}`,
+			"credential-process",
+		);
 	}
 
 	let parsed: CredentialProcessEnvelope;
 	try {
 		parsed = JSON.parse(stdout) as CredentialProcessEnvelope;
 	} catch (err) {
-		throw new Error(`AWS credential_process for profile '${profile}' did not emit valid JSON: ${String(err)}`);
+		throw new AIError.AwsCredentialsError(
+			`AWS credential_process for profile '${profile}' did not emit valid JSON: ${String(err)}`,
+			"credential-process",
+			{ cause: err },
+		);
 	}
 	if (parsed.Version !== 1) {
-		throw new Error(
+		throw new AIError.AwsCredentialsError(
 			`AWS credential_process for profile '${profile}' returned unsupported Version ${parsed.Version ?? "<missing>"}; expected 1.`,
+			"credential-process",
 		);
 	}
 	if (!parsed.AccessKeyId || !parsed.SecretAccessKey) {
-		throw new Error(
+		throw new AIError.AwsCredentialsError(
 			`AWS credential_process for profile '${profile}' returned envelope without AccessKeyId/SecretAccessKey.`,
+			"credential-process",
 		);
 	}
 
@@ -387,7 +421,10 @@ async function readCredentialProcess(
 function buildCredentialProcessArgv(profile: string, command: string): string[] {
 	const tokens = tokenizeCredentialProcessCommand(command);
 	if (tokens.length === 0) {
-		throw new Error(`AWS credential_process for profile '${profile}' is empty.`);
+		throw new AIError.AwsCredentialsError(
+			`AWS credential_process for profile '${profile}' is empty.`,
+			"credential-process",
+		);
 	}
 	if (process.platform === "win32" && isBatchScript(tokens[0])) {
 		return ["cmd.exe", "/d", "/s", "/c", command];
@@ -469,7 +506,10 @@ export function tokenizeCredentialProcessCommand(cmd: string): string[] {
 		current += ch;
 	}
 	if (mode !== "normal") {
-		throw new Error("AWS credential_process command has an unterminated quote.");
+		throw new AIError.AwsCredentialsError(
+			"AWS credential_process command has an unterminated quote.",
+			"credential-process",
+		);
 	}
 	if (hasToken) tokens.push(current);
 	return tokens;
@@ -480,11 +520,14 @@ export function tokenizeCredentialProcessCommand(cmd: string): string[] {
 const IMDS_HOST = "169.254.169.254";
 const IMDS_TIMEOUT_MS = 1000;
 
-async function readImdsCredentials(parentSignal: AbortSignal | undefined): Promise<ResolvedCredentials | undefined> {
+async function readImdsCredentials(
+	parentSignal: AbortSignal | undefined,
+	fetchImpl: FetchImpl,
+): Promise<ResolvedCredentials | undefined> {
 	const timeout = AbortSignal.timeout(IMDS_TIMEOUT_MS);
 	const signal = parentSignal ? AbortSignal.any([parentSignal, timeout]) : timeout;
 	try {
-		const tokenRes = await fetch(`http://${IMDS_HOST}/latest/api/token`, {
+		const tokenRes = await fetchImpl(`http://${IMDS_HOST}/latest/api/token`, {
 			method: "PUT",
 			headers: { "x-aws-ec2-metadata-token-ttl-seconds": "21600" },
 			signal,
@@ -492,7 +535,7 @@ async function readImdsCredentials(parentSignal: AbortSignal | undefined): Promi
 		if (!tokenRes.ok) return undefined;
 		const token = await tokenRes.text();
 
-		const roleRes = await fetch(`http://${IMDS_HOST}/latest/meta-data/iam/security-credentials/`, {
+		const roleRes = await fetchImpl(`http://${IMDS_HOST}/latest/meta-data/iam/security-credentials/`, {
 			headers: { "x-aws-ec2-metadata-token": token },
 			signal,
 		});
@@ -500,7 +543,7 @@ async function readImdsCredentials(parentSignal: AbortSignal | undefined): Promi
 		const role = (await roleRes.text()).trim();
 		if (!role) return undefined;
 
-		const credsRes = await fetch(
+		const credsRes = await fetchImpl(
 			`http://${IMDS_HOST}/latest/meta-data/iam/security-credentials/${encodeURIComponent(role)}`,
 			{
 				headers: { "x-aws-ec2-metadata-token": token },

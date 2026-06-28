@@ -585,6 +585,7 @@ mod tests {
 		time::{Duration, SystemTime, UNIX_EPOCH},
 	};
 
+	#[cfg(unix)]
 	use super::classify_file_type;
 
 	static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);

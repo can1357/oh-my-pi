@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [16.2.0] - 2026-06-27
+
+### Added
+
+- Added a Gain tab to the `omp stats` dashboard (`/#/gain`) to display snapcompact token-savings with project scoping from synced session folders.
+
+## [16.1.17] - 2026-06-24
+
+### Fixed
+
+- Stats sync counted the same provider request multiple times when a forked or branched session file copied the parent's entries verbatim. Inserts now skip rows whose `(entry_id, timestamp)` already exists under a different `session_file`, and a one-shot migration on the next `omp stats` run collapses any pre-existing duplicates ([#3370](https://github.com/can1357/oh-my-pi/issues/3370)).
+
+## [16.1.15] - 2026-06-22
+
+### Added
+
+- Added token usage breakdown by agent type (Main, Subagents, Advisor) to the overview dashboard
+
 ## [16.0.10] - 2026-06-18
 
 ### Changed

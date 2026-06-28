@@ -822,7 +822,7 @@ export class VaultProtocolHandler implements ProtocolHandler {
 	}
 
 	async #listDir(
-		parsed: Extract<ParsedVaultUrl, { kind: "fs-dir" }>,
+		parsed: Extract<ParsedVaultUrl, { kind: "fs-dir" | "fs-file" }>,
 		context?: ResolveContext,
 	): Promise<InternalResource> {
 		const { root, targetPath } = await this.#resolveFsTarget(parsed, context);
@@ -878,8 +878,11 @@ export class VaultProtocolHandler implements ProtocolHandler {
 		}
 		ensureWithinRoot(realTargetPath, root);
 		const stat = await fs.promises.stat(realTargetPath);
+		if (stat.isDirectory()) {
+			return this.#listDir(parsed, context);
+		}
 		if (!stat.isFile()) {
-			throw new Error(`vault:// URL must resolve to a file: ${parsed.url}`);
+			throw new Error(`vault:// URL must resolve to a file or directory: ${parsed.url}`);
 		}
 
 		const content = await Bun.file(realTargetPath).text();

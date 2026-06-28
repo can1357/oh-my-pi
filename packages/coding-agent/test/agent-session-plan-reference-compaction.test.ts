@@ -87,7 +87,7 @@ function stubCompaction(): void {
 	}));
 }
 
-/** Emit a high-usage assistant turn to drive threshold (context-full) auto-compaction. */
+/** Emit a high-usage assistant turn to drive threshold auto-compaction. */
 function emitHighUsageTurn(session: AgentSession): void {
 	const assistantMsg = {
 		role: "assistant" as const,
@@ -126,7 +126,7 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 		vi.restoreAllMocks();
 	});
 
-	async function createHarness(): Promise<Harness> {
+	async function createHarness(strategy: "context-full" | "snapcompact" = "context-full"): Promise<Harness> {
 		const observedCalls: ObservedPromptCall[] = [];
 		const waiters: Array<{
 			predicate: (call: ObservedPromptCall) => boolean;
@@ -142,7 +142,7 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
 			"compaction.autoContinue": true,
-			"compaction.strategy": "context-full",
+			"compaction.strategy": strategy,
 			"task.eager": "default",
 			"todo.enabled": false,
 			"todo.eager": "default",
@@ -229,6 +229,28 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 		const continuation = await waitForCall(call => call.messageTexts.some(text => text.includes(CONTINUE_MARKER)));
 
 		// The post-compaction continuation MUST carry the plan reference again.
+		expect(continuation.messageTexts.some(text => text.includes(planMarker))).toBe(true);
+		expect(continuation.messageTexts.some(text => text.includes(`<plan path="${planUrl}">`))).toBe(true);
+	});
+
+	it("re-injects the approved plan reference after snapcompact auto-compaction", async () => {
+		const { session, sessionManager, observedCalls, waitForCall } = await createHarness("snapcompact");
+
+		const planUrl = "local://approved-snapcompact-plan.md";
+		const planMarker = "SNAPCOMPACT-PLAN-REINJECTION-MARKER";
+		writePlanFile(sessionManager, planUrl, `# Approved Snapcompact Plan\n\n${planMarker}\n`);
+
+		session.setPlanReferencePath(planUrl);
+		session.markPlanReferenceSent();
+
+		await session.prompt("continue executing the approved snapcompact plan");
+		const firstCall = observedCalls[0];
+		expect(firstCall).toBeDefined();
+		expect(firstCall.messageTexts.some(text => text.includes(planMarker))).toBe(false);
+
+		emitHighUsageTurn(session);
+		const continuation = await waitForCall(call => call.messageTexts.some(text => text.includes(CONTINUE_MARKER)));
+
 		expect(continuation.messageTexts.some(text => text.includes(planMarker))).toBe(true);
 		expect(continuation.messageTexts.some(text => text.includes(`<plan path="${planUrl}">`))).toBe(true);
 	});

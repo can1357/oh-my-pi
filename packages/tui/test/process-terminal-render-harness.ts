@@ -132,7 +132,12 @@ export function createProcessTerminalRenderHarness(
 			setTerminalHeadless(previousHeadless);
 			for (const spy of spies) spy.mockRestore();
 			for (const [target, key, descriptor] of PRISTINE) {
+				// A piped test run has no own `isTTY`/`columns`/`rows` descriptor, so
+				// the captured pristine value is `undefined`. Deleting the forced
+				// property restores that absent state — skipping it would leak
+				// `isTTY = true` and poison TTY-gated code (e.g. mermaid color auto-detect).
 				if (descriptor) Object.defineProperty(target, key, descriptor);
+				else Reflect.deleteProperty(target, key);
 			}
 		},
 	};

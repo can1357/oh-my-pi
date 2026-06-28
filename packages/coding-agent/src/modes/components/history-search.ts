@@ -5,7 +5,6 @@ import {
 	Input,
 	matchesKey,
 	padding,
-	ScrollView,
 	Spacer,
 	Text,
 	truncateToWidth,
@@ -22,6 +21,7 @@ import {
 import type { HistoryEntry, HistoryStorage } from "../../session/history-storage";
 import { DynamicBorder } from "./dynamic-border";
 import { rawKeyHint } from "./keybinding-hints";
+import { centeredWindow, contentRowWidth, renderScrollableList } from "./selector-helpers";
 
 /** Visible result rows; also the jump distance for PageUp/PageDown. */
 const MAX_VISIBLE = 10;
@@ -110,14 +110,9 @@ class HistoryResultsList implements Component {
 		const cursorSymbol = `${theme.nav.cursor} `;
 		const gutterWidth = visibleWidth(cursorSymbol);
 
-		const startIndex = Math.max(
-			0,
-			Math.min(this.#selectedIndex - Math.floor(this.#maxVisible / 2), this.#results.length - this.#maxVisible),
-		);
-		const endIndex = Math.min(startIndex + this.#maxVisible, this.#results.length);
+		const { startIndex, endIndex } = centeredWindow(this.#selectedIndex, this.#results.length, this.#maxVisible);
 
-		const overflow = this.#results.length > this.#maxVisible;
-		const rowWidth = Math.max(0, width - (overflow ? 1 : 0));
+		const rowWidth = contentRowWidth(width, this.#results.length, this.#maxVisible);
 		const rows: string[] = [];
 
 		for (let i = startIndex; i < endIndex; i++) {
@@ -148,14 +143,7 @@ class HistoryResultsList implements Component {
 			);
 		}
 
-		const sv = new ScrollView(rows, {
-			height: rows.length,
-			scrollbar: "auto",
-			totalRows: this.#results.length,
-			theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
-		});
-		sv.setScrollOffset(startIndex);
-		lines.push(...sv.render(width));
+		lines.push(...renderScrollableList(rows, { width, totalRows: this.#results.length, scrollOffset: startIndex }));
 		return lines;
 	}
 }

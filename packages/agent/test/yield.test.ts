@@ -1,51 +1,66 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { scheduler } from "node:timers/promises";
-import { ExponentialYield, yieldIfDue } from "@pk-nerdsaver-ai/pi-agent-core/utils/yield";
+import { ExponentialYield, YieldGate } from "@pk-nerdsaver-ai/pi-agent-core/utils/yield";
 
 const YIELD_INTERVAL_MS = 50;
-const YIELD_CLOCK_STEP_MS = 60_000;
-let fakeClockNow = Date.now();
 
 afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-function installYieldClock(): { advanceBy: (ms: number) => void } {
-	fakeClockNow += YIELD_CLOCK_STEP_MS;
-	let now = fakeClockNow;
-	vi.spyOn(Date, "now").mockImplementation(() => now);
+/**
+ * Build a gate over an injected clock and a counting sleep so the test drives
+ * the gate logic without spying on process-global `Date.now`/`scheduler.wait`.
+ * Those globals are shared across files, so under concurrent `bun test` a
+ * sibling file's `vi.restoreAllMocks()` could wipe the spies mid-run — the
+ * exact race that made the previous singleton-based test flake.
+ */
+function makeGate(): { gate: YieldGate; advanceBy: (ms: number) => void; sleeps: () => number } {
+	let now = 1_000_000;
+	const sleep = vi.fn(async () => {});
+	const gate = new YieldGate({ now: () => now, sleep });
 	return {
-		advanceBy(ms: number) {
+		gate,
+		advanceBy: (ms: number) => {
 			now += ms;
-			fakeClockNow = now;
 		},
+		sleeps: () => sleep.mock.calls.length,
 	};
 }
 
-describe("yieldIfDue", () => {
+describe("YieldGate.yieldIfDue", () => {
 	it("sleeps on the first call and gates immediate callers", async () => {
-		const clock = installYieldClock();
-		const waitSpy = vi.spyOn(scheduler, "wait");
+		const { gate, advanceBy, sleeps } = makeGate();
 
-		await yieldIfDue();
-		expect(waitSpy.mock.calls.length).toBeGreaterThan(0);
-		const callsAfterFirstYield = waitSpy.mock.calls.length;
+		await gate.yieldIfDue();
+		expect(sleeps()).toBe(1);
 
-		clock.advanceBy(YIELD_INTERVAL_MS - 1);
-		await yieldIfDue();
-		expect(waitSpy.mock.calls.length).toBe(callsAfterFirstYield);
+		advanceBy(YIELD_INTERVAL_MS - 1);
+		await gate.yieldIfDue();
+		expect(sleeps()).toBe(1);
 	});
 
 	it("sleeps again once the gate window elapses", async () => {
-		const clock = installYieldClock();
-		const waitSpy = vi.spyOn(scheduler, "wait");
+		const { gate, advanceBy, sleeps } = makeGate();
 
-		await yieldIfDue();
-		const callsAfterFirstYield = waitSpy.mock.calls.length;
+		await gate.yieldIfDue();
+		expect(sleeps()).toBe(1);
 
-		clock.advanceBy(YIELD_INTERVAL_MS);
-		await yieldIfDue();
-		expect(waitSpy.mock.calls.length).toBeGreaterThan(callsAfterFirstYield);
+		advanceBy(YIELD_INTERVAL_MS);
+		await gate.yieldIfDue();
+		expect(sleeps()).toBe(2);
+	});
+
+	it("treats a backward clock jump as due instead of gating forever", async () => {
+		const { gate, advanceBy, sleeps } = makeGate();
+
+		await gate.yieldIfDue();
+		expect(sleeps()).toBe(1);
+
+		// NTP correction / fake timers can move the wall clock backward; the next
+		// call must still yield rather than wait for an interval that never comes.
+		advanceBy(-YIELD_INTERVAL_MS * 4);
+		await gate.yieldIfDue();
+		expect(sleeps()).toBe(2);
 	});
 });
 

@@ -1292,10 +1292,54 @@ def test_run_git_injects_safe_directory_and_subprocess_identity(
     assert env["GIT_CONFIG_COUNT"] == "1"
     assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
     assert env["GIT_CONFIG_VALUE_0"] == "/x"
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert "protocol.ext.allow=never" in cmd
     assert captured["user"] == 2001
     assert captured["group"] == 2001
     assert captured["extra_groups"] == [2000]
     assert captured["umask"] == 0o002
+
+
+def test_run_git_scopes_token_and_scrubs_parent_auth_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from robomp.git_ops import AUTH_ENV_VAR, _run_git
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["cmd"] = cmd
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setenv("GITHUB_TOKEN", "parent-token")
+    monkeypatch.setenv(AUTH_ENV_VAR, "parent-auth")
+    monkeypatch.setattr("robomp.git_ops.subprocess.run", fake_run)
+    auth_url = "https://github.com/octo/widget.git"
+
+    _run_git(["ls-remote", auth_url], cwd=tmp_path, token="scoped-token", auth_url=auth_url)
+
+    env = captured["env"]
+    cmd = captured["cmd"]
+    assert isinstance(env, dict)
+    assert isinstance(cmd, list)
+    assert env[AUTH_ENV_VAR].startswith("Authorization: Basic ")
+    assert env[AUTH_ENV_VAR] != "parent-auth"
+    assert "GITHUB_TOKEN" not in env
+    assert env["GIT_ALLOW_PROTOCOL"] == "https"
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert "--config-env" in cmd
+    assert f"http.{auth_url}.extraHeader={AUTH_ENV_VAR}" in cmd
+    assert "protocol.allow=never" in cmd
+    assert "protocol.https.allow=always" in cmd
+    assert "protocol.ext.allow=never" in cmd
+    assert "core.hooksPath=/dev/null" in cmd
+    assert "http.proxy=" in cmd
+    assert "http.sslVerify=true" in cmd
+    assert f"http.{auth_url}.proxy=" in cmd
+    assert f"http.{auth_url}.sslVerify=true" in cmd
+    assert f"http.{auth_url}.extraHeader=" in cmd
 
 
 def test_run_git_kills_hung_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

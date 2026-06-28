@@ -25,6 +25,7 @@ import {
 	renderToolExamples,
 	wrapInbandToolStream,
 } from "@pk-nerdsaver-ai/pi-ai/dialect";
+import * as AIError from "@pk-nerdsaver-ai/pi-ai/error";
 import {
 	createHarmonyAuditEvent,
 	detectHarmonyLeakInAssistantMessage,
@@ -62,6 +63,7 @@ import type {
 	AgentMessage,
 	AgentTool,
 	AgentToolResult,
+	AgentTurnEndContext,
 	AsideMessage,
 	StreamFn,
 } from "./types";
@@ -121,7 +123,7 @@ class HarmonyLeakInterruption extends Error {
 		this.name = "HarmonyLeakInterruption";
 	}
 }
-function resolveOwnedDialectFromEnv(value: string | undefined): Dialect | undefined {
+export function resolveOwnedDialectFromEnv(value: string | undefined): Dialect | undefined {
 	switch (value) {
 		case "1":
 		case "true":
@@ -133,7 +135,6 @@ function resolveOwnedDialectFromEnv(value: string | undefined): Dialect | undefi
 		case "anthropic":
 		case "deepseek":
 		case "harmony":
-		case "pi":
 		case "qwen3":
 		case "gemini":
 		case "gemma":
@@ -406,12 +407,13 @@ async function emitTurnEnd(
 	toolResults: ToolResultMessage[],
 	config: AgentLoopConfig,
 	signal?: AbortSignal,
+	context?: Omit<AgentTurnEndContext, "message" | "toolResults">,
 ): Promise<void> {
 	stream.push({ type: "turn_end", message, toolResults });
 	const isAbortedOrError =
 		message.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error");
 	if (signal?.aborted || isAbortedOrError) return;
-	await config.onTurnEnd?.(currentContext.messages, signal);
+	await config.onTurnEnd?.(currentContext.messages, signal, { message, toolResults, willContinue: false, ...context });
 }
 
 /**
@@ -502,7 +504,7 @@ function createDetailedCapture(config: AgentLoopConfig): {
 	};
 }
 
-function normalizeMessagesForProvider(
+export function normalizeMessagesForProvider(
 	messages: Context["messages"],
 	model: AgentLoopConfig["model"],
 ): Context["messages"] {
@@ -903,7 +905,7 @@ async function runLoopBody(
 							status: message.stopReason === "aborted" ? "aborted" : "error",
 						});
 					}
-					await emitTurnEnd(stream, currentContext, message, toolResults, config, signal);
+					await emitTurnEnd(stream, currentContext, message, toolResults, config, signal, { willContinue: false });
 
 					stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count));
 					stream.end(newMessages);
@@ -1032,7 +1034,9 @@ async function runLoopBody(
 					hasMoreToolCalls = true;
 				}
 
-				await emitTurnEnd(stream, currentContext, message, toolResults, config, signal);
+				await emitTurnEnd(stream, currentContext, message, toolResults, config, signal, {
+					willContinue: hasMoreToolCalls && !isDeadlineExceeded(config.deadline),
+				});
 
 				if (isDeadlineExceeded(config.deadline)) {
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
@@ -1161,7 +1165,7 @@ async function streamAssistantResponse(
 		};
 	}
 	if (config.transformProviderContext) {
-		llmContext = config.transformProviderContext(llmContext, config.model);
+		llmContext = await config.transformProviderContext(llmContext, config.model);
 	}
 
 	// Owned tool calling: take tool calls away from the provider and run them
@@ -1182,6 +1186,10 @@ async function streamAssistantResponse(
 
 	const dynamicReasoning = config.getReasoning?.();
 	const dynamicDisableReasoning = config.getDisableReasoning?.();
+	// `getServiceTier` is authoritative when present (replaces the static tier
+	// for both the wire request and telemetry), so callers can scope priority
+	// per model without touching the shared session `serviceTier`.
+	const effectiveServiceTier = config.getServiceTier ? config.getServiceTier(config.model) : config.serviceTier;
 	const harmonyMitigationEnabled = isHarmonyLeakMitigationTarget(config.model);
 	const harmonyAbortController = harmonyMitigationEnabled ? new AbortController() : undefined;
 	const requestSignal = harmonyAbortController
@@ -1217,6 +1225,9 @@ async function streamAssistantResponse(
 	const effectiveToolChoice = ownedDialect ? undefined : (hostToolChoice ?? forcedToolChoice ?? config.toolChoice);
 	const effectiveReasoning = dynamicReasoning ?? config.reasoning;
 	const effectiveDisableReasoning = dynamicDisableReasoning ?? config.disableReasoning;
+	// `getCwd` is read once per LLM call so a mid-run session move (`/move`) reaches
+	// workspace-scoped provider discovery; falls back to the static `cwd` when unset.
+	const effectiveCwd = config.getCwd?.() ?? config.cwd;
 
 	const chatStepNumber = stepCounter.count;
 	stepCounter.count += 1;
@@ -1229,7 +1240,7 @@ async function streamAssistantResponse(
 			topP: config.topP,
 			topK: config.topK,
 			presencePenalty: config.presencePenalty,
-			serviceTier: config.serviceTier,
+			serviceTier: effectiveServiceTier,
 			reasoningEffort: typeof effectiveReasoning === "string" ? effectiveReasoning : undefined,
 			toolChoice: effectiveToolChoice,
 			tools: llmContext.tools,
@@ -1251,7 +1262,7 @@ async function streamAssistantResponse(
 	const finishChat = async (message: AssistantMessage): Promise<void> => {
 		await finishChatSpan(telemetry, chatSpan, message, {
 			stepNumber: chatStepNumber,
-			serviceTier: config.serviceTier,
+			serviceTier: effectiveServiceTier,
 			responseHeaders: capturedHeaders,
 			baseUrl: config.model.baseUrl,
 		});
@@ -1267,6 +1278,8 @@ async function streamAssistantResponse(
 				reasoning: effectiveReasoning,
 				disableReasoning: effectiveDisableReasoning,
 				temperature: effectiveTemperature,
+				serviceTier: effectiveServiceTier,
+				cwd: effectiveCwd,
 				signal: finalRequestSignal,
 				onResponse: captureOnResponse,
 			});
@@ -1534,20 +1547,6 @@ export function abortReasonText(signal: AbortSignal | undefined): string {
 	return "Request was aborted";
 }
 
-/** True when an abort carried a *deliberate*, human-meaningful reason — a string
- *  reason or a non-`AbortError` `Error` (TTSR rule match, user-interrupt label).
- *  A bare `abort()` (default `AbortError` `DOMException`) is anonymous and returns
- *  false. Used to decide whether a mid-stream tool call survives the abort: a
- *  deliberate interruption is a conscious decision made after the (partial) call
- *  was observed, so the block is retained and paired with a labeled placeholder;
- *  an anonymous abort drops incomplete calls whose args may be unsafe to replay. */
-function isExplicitAbortReason(signal: AbortSignal | undefined): boolean {
-	const reason = signal?.reason;
-	if (typeof reason === "string") return reason.trim().length > 0;
-	if (reason instanceof Error) return reason.name !== "AbortError" && reason.message.trim().length > 0;
-	return false;
-}
-
 function emitAbortedAssistantMessage(
 	partialMessage: AssistantMessage | null,
 	addedPartial: boolean,
@@ -1558,8 +1557,12 @@ function emitAbortedAssistantMessage(
 	requestSignal: AbortSignal | undefined,
 ): AssistantMessage {
 	const errorMessage = abortReasonText(requestSignal);
+	const errorId =
+		errorMessage === "Request was aborted"
+			? AIError.create(AIError.Flag.Abort)
+			: AIError.classify(requestSignal?.reason) || undefined;
 	const base: AssistantMessage = partialMessage
-		? { ...partialMessage, stopReason: "aborted", errorMessage }
+		? { ...partialMessage, stopReason: "aborted", errorMessage, errorId }
 		: {
 				role: "assistant",
 				content: [],
@@ -1576,13 +1579,13 @@ function emitAbortedAssistantMessage(
 				},
 				stopReason: "aborted",
 				errorMessage,
+				errorId,
 				timestamp: Date.now(),
 			};
-	// A deliberate, labeled abort (TTSR rule match, user interrupt) keeps every
-	// committed tool-call block so the loop pairs it with a placeholder labeled by
-	// `errorMessage`; an anonymous abort still drops calls that never completed
-	// (no `toolcall_end`), whose partial args are unsafe to replay.
-	const retained = isExplicitAbortReason(requestSignal) ? base : retainCompletedToolCalls(base, completedToolCallIds);
+	// Only tool calls that reached `toolcall_end` survive abort/error replay. A
+	// labeled user interrupt still surfaces through `errorMessage`, but partial
+	// tool arguments are unsafe to keep and can carry incomplete provider IDs.
+	const retained = retainCompletedToolCalls(base, completedToolCallIds);
 	const abortedMessage = snapshotAssistantMessage(retained);
 	if (addedPartial) {
 		context.messages[context.messages.length - 1] = abortedMessage;

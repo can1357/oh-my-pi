@@ -39,6 +39,8 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	cacheTtlMs?: number;
 	/** When true, a successful dynamic fetch is the complete provider catalog and prunes static-only models. */
 	dynamicModelsAuthoritative?: boolean;
+	/** Cached model ids to ignore when the cache was written against a different static catalog fingerprint. */
+	dropCachedModelIdsOnStaticMismatch?: readonly string[];
 	/** Optional dynamic endpoint fetcher. */
 	fetchDynamicModels?: () => Promise<readonly ModelSpec<TApi>[] | null>;
 	/** Optional models.dev fallback hook. */
@@ -148,7 +150,13 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const shouldUseFreshCacheAsAuthoritative =
 		strategy === "online-if-uncached" && hasUsableFreshCache && hasAuthoritativeCache;
 	const dynamicFetchSucceeded = fetchedDynamicModels !== null;
-	const cacheModels = dynamicFetchSucceeded ? [] : normalizeModelList<TApi>(cache?.models ?? []);
+	const cacheModels = dynamicFetchSucceeded
+		? []
+		: dropCachedModelIdsOnStaticMismatch(
+				normalizeModelList<TApi>(cache?.models ?? []),
+				cacheFingerprintMatches,
+				options.dropCachedModelIdsOnStaticMismatch,
+			);
 	const dynamicModels = fetchedDynamicModels ?? [];
 	const mergedWithCache = mergeDynamicModels(mergeModelSources(staticModels, modelsDevModels), cacheModels);
 	const mergedModels = mergeDynamicModels(mergedWithCache, dynamicModels);
@@ -180,7 +188,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				collapseBuiltModelVariants(
 					mergeDynamicModels(
 						mergeModelSources(staticModels, modelsDevModels),
-						normalizeModelList<TApi>(latestCache?.models ?? cache?.models ?? []),
+						dropCachedModelIdsOnStaticMismatch(
+							normalizeModelList<TApi>(latestCache?.models ?? cache?.models ?? []),
+							cacheFingerprintMatches,
+							options.dropCachedModelIdsOnStaticMismatch,
+						),
 					),
 				),
 				false,
@@ -246,6 +258,18 @@ function shouldFetchRemoteSources(
 		return cacheAgeMs >= NON_AUTHORITATIVE_RETRY_MS;
 	}
 	return false;
+}
+
+function dropCachedModelIdsOnStaticMismatch<TApi extends Api>(
+	models: readonly Model<TApi>[],
+	cacheFingerprintMatches: boolean,
+	ids: readonly string[] | undefined,
+): Model<TApi>[] {
+	if (cacheFingerprintMatches || ids === undefined || ids.length === 0 || models.length === 0) {
+		return models.length === 0 ? [] : [...models];
+	}
+	const droppedIds = new Set(ids);
+	return models.filter(model => !droppedIds.has(model.id));
 }
 
 function mergeModelSources<TApi extends Api>(...sources: readonly (readonly Model<TApi>[])[]): Model<TApi>[] {
@@ -325,7 +349,15 @@ function fingerprintStatic<TApi extends Api>(
 }
 
 function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamicModel: Model<TApi>): Model<TApi> {
-	const supportsImage = existingModel.input.includes("image") || dynamicModel.input.includes("image");
+	// When discovery resolves the same model id to a different endpoint (e.g.
+	// a GitHub Copilot business/enterprise host), the bundled reference's
+	// capabilities are pinned to the canonical host and no longer apply —
+	// honour the dynamic value alone. Same-endpoint merges still OR-upgrade so
+	// a discovery that omits the capability flag doesn't drop bundled vision.
+	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
+	const supportsImage = endpointChanged
+		? dynamicModel.input.includes("image")
+		: existingModel.input.includes("image") || dynamicModel.input.includes("image");
 	// Re-build from spec stage: sparse compat comes from `compatConfig` (the
 	// verbatim override vocabulary), never the resolved `compat` record.
 	return buildModel({

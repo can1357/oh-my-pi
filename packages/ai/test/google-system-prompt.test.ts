@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { renderDemotedThinking } from "@pk-nerdsaver-ai/pi-ai/dialect";
 import { streamGoogle } from "@pk-nerdsaver-ai/pi-ai/providers/google";
 import type { Context, FetchImpl, Model } from "@pk-nerdsaver-ai/pi-ai/types";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
@@ -77,5 +78,34 @@ describe("Google provider system prompts", () => {
 			parts: [{ thought: true, text: "prior thought", thoughtSignature: "QUJDRA==" }],
 		});
 		expect(payload.contents).toHaveLength(1);
+	});
+
+	it("demotes same-model unsigned thinking instead of emitting an unsigned thought part", async () => {
+		const payload = await captureGooglePayload({
+			messages: [
+				{
+					role: "assistant",
+					api: "google-generative-ai",
+					provider: "google",
+					model: model.id,
+					content: [{ type: "thinking", thinking: "unsigned prior thought" }],
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: 1,
+				},
+			],
+		});
+
+		expect(payload.contents[0]).toEqual({
+			role: "model",
+			parts: [{ text: renderDemotedThinking(model.id, "unsigned prior thought") }],
+		});
 	});
 });

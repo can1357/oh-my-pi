@@ -1,3 +1,4 @@
+import * as AIError from "../error";
 import type { OAuthController, OAuthLoginCallbacks, OAuthProvider } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
 
@@ -8,7 +9,7 @@ const DEFAULT_LOCAL_TOKEN = "vllm-local";
 
 export async function loginVllm(options: OAuthController): Promise<string> {
 	if (!options.onPrompt) {
-		throw new Error(`${PROVIDER_ID} login requires onPrompt callback`);
+		throw new AIError.OnPromptRequiredError(PROVIDER_ID);
 	}
 	options.onAuth?.({
 		url: AUTH_URL,
@@ -20,7 +21,7 @@ export async function loginVllm(options: OAuthController): Promise<string> {
 		allowEmpty: true,
 	});
 	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		throw new AIError.LoginCancelledError();
 	}
 	const trimmed = apiKey.trim();
 	return trimmed || DEFAULT_LOCAL_TOKEN;

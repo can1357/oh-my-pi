@@ -11,6 +11,7 @@ import {
 	parseDiffHunks,
 	seekSequence,
 } from "@pk-nerdsaver-ai/pi-coding-agent/edit";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Test-local adapters over the production Codex envelope API.
@@ -215,7 +216,7 @@ describe("apply-patch scenarios", () => {
 
 	afterEach(() => {
 		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		} catch {
 			// Ignore cleanup errors
 		}
@@ -303,7 +304,7 @@ describe("applyPatch", () => {
 
 	afterEach(() => {
 		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		} catch {
 			// Ignore cleanup errors
 		}
@@ -458,7 +459,7 @@ describe("simple replace mode", () => {
 
 	afterEach(() => {
 		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		} catch {
 			// Ignore cleanup errors
 		}
@@ -634,7 +635,7 @@ describe("applyCodexPatch (production)", () => {
 
 	afterEach(() => {
 		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		} catch {
 			// ignore
 		}

@@ -17,6 +17,7 @@ import { getGitLabDuoModels } from "@pk-nerdsaver-ai/pi-ai/providers/gitlab-duo"
 import { $env } from "@pk-nerdsaver-ai/pi-utils";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
 import { fetchCodexModels } from "../src/discovery/codex";
+import { buildGitLabDuoWorkflowFallbackModel } from "../src/discovery/gitlab-duo-workflow";
 import { createModelManager } from "../src/model-manager";
 import prevModelsJson from "../src/models.json" with { type: "json" };
 import { toModelSpec } from "../src/provider-models/bundled-references";
@@ -29,6 +30,7 @@ import {
 import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import {
 	ANTHROPIC_CURATED_FALLBACK_MODELS,
+	buildFireworksFastSeed,
 	buildXaiOAuthStaticSeed,
 	clampFireworksKimiMaxTokens,
 	clampKimiK27CodeMaxTokens,
@@ -36,6 +38,7 @@ import {
 	isKimiK27CodeModelId,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
+	SAKANA_FUGU_STATIC_MODELS,
 	stripFireworksDeepSeekThinkingToggle,
 } from "../src/provider-models/openai-compat";
 import type { ModelSpec } from "../src/types";
@@ -60,6 +63,7 @@ const packageRoot = path.join(import.meta.dir, "..");
  * and never written to models.json.
  */
 const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm"]);
+const RETIRED_PROVIDERS = new Set(["wafer-pass", "wandb"]);
 
 async function resolveProviderApiKey(providerId: string, catalog: CatalogDiscoveryConfig): Promise<string | undefined> {
 	for (const envVar of catalog.envVars ?? []) {
@@ -109,7 +113,8 @@ async function fetchProviderModelsFromCatalog(descriptor: CatalogProviderDescrip
 
 	try {
 		console.log(`Fetching models from ${descriptor.catalogDiscovery.label} model manager...`);
-		const manager = createModelManager(descriptor.createModelManagerOptions({ apiKey }));
+		const managerOptions = descriptor.createModelManagerOptions({ apiKey });
+		const manager = createModelManager(managerOptions);
 		const result = await manager.refresh("online");
 		// `stale: true` means the dynamic fetch failed and the manager fell back
 		// to merging the local agent.db model cache over the static catalog —
@@ -182,7 +187,7 @@ function applyGlobalModelsDevFallback(
 	const providerScopedKeys = new Set(modelsDevModels.map(model => `${model.provider}/${model.id}`));
 	const globalReferences = createGlobalModelsDevReferenceMap(modelsDevModels);
 	return models.map(model => {
-		if (providerScopedKeys.has(`${model.provider}/${model.id}`)) {
+		if (providerScopedKeys.has(`${model.provider}/${model.id}`) || model.provider === "devin") {
 			return model;
 		}
 		const reference = globalReferences.get(model.id);
@@ -487,6 +492,31 @@ async function generateModels() {
 	// Mythos 5). Deduped behind upstream entries; metadata is pinned in
 	// applyAnthropicCatalogPolicy.
 	allModels.push(...ANTHROPIC_CURATED_FALLBACK_MODELS);
+	// Seed Sakana's documented Fugu models so the provider is usable when
+	// catalog generation has no live API key. If live `/v1/models` succeeds,
+	// Sakana is authoritative and stale seed IDs must stay out.
+	if (!authoritativeCatalogProviders.has("sakana")) {
+		allModels.push(...SAKANA_FUGU_STATIC_MODELS);
+	}
+	// Seed the GitLab Duo Agent fallback model so a fresh install (no credentialed
+	// dynamic discovery/cache yet) still surfaces the provider's default model in the
+	// built-in catalog. The descriptor deliberately has NO `catalogDiscovery`, so it is
+	// excluded from the generator's discovery loop (`isCatalogDescriptor` filter above):
+	// generation never fetches `aiChatAvailableModels` for it. That is intentional —
+	// Duo discovery is credential- and namespace-scoped, so running it during generation
+	// would bundle one private account's pinned/selectable models (and its
+	// `gitlabDuoWorkflowRootNamespaceId`) as authoritative for every fresh install.
+	// The generic fallback is the only thing bundled; live namespace-scoped models are
+	// discovered at runtime per credential/workspace. The `authoritativeCatalogProviders`
+	// guard therefore always passes for this id, kept only to mirror the Sakana seed shape.
+	if (!authoritativeCatalogProviders.has("gitlab-duo-agent")) {
+		allModels.push(buildGitLabDuoWorkflowFallbackModel());
+	}
+	// Seed Fireworks "Fast" serving-path variants (`<id>-fast`). Fast routers are
+	// not enumerated by the serverless control-plane list, so discovery never
+	// surfaces them; the seed projects each base entry into a fast variant.
+	// Deduped behind any identical previous-snapshot entry.
+	allModels.push(...buildFireworksFastSeed());
 
 	const specialDiscoverySources = [
 		{ label: "Antigravity", fetch: fetchAntigravityModels },
@@ -526,6 +556,7 @@ async function generateModels() {
 			if (
 				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
 				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
+				!RETIRED_PROVIDERS.has(model.provider) &&
 				!authoritativeCatalogProviders.has(model.provider) &&
 				!modelsDevSnapshotExcludedProviders.has(model.provider)
 			) {
@@ -563,7 +594,7 @@ async function generateModels() {
 	// Group by provider and sort each provider's models
 	const providers: Record<string, Record<string, ModelSpec>> = {};
 	for (const model of allModels) {
-		if (DISCOVERY_ONLY_PROVIDERS.has(model.provider)) continue;
+		if (DISCOVERY_ONLY_PROVIDERS.has(model.provider) || RETIRED_PROVIDERS.has(model.provider)) continue;
 		if (!providers[model.provider]) {
 			providers[model.provider] = {};
 		}

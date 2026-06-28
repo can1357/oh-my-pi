@@ -68,7 +68,16 @@ export interface TextInputSettingDef extends BaseSettingDef {
 	type: "text";
 }
 
-export type SettingDef = BooleanSettingDef | EnumSettingDef | SubmenuSettingDef | TextInputSettingDef;
+export interface ProviderLimitsSettingDef extends BaseSettingDef {
+	type: "providerLimits";
+}
+
+export type SettingDef =
+	| BooleanSettingDef
+	| EnumSettingDef
+	| SubmenuSettingDef
+	| TextInputSettingDef
+	| ProviderLimitsSettingDef;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Condition Functions
@@ -168,6 +177,10 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 			return { ...base, type: "submenu", options };
 		}
 		return { ...base, type: "text" };
+	}
+
+	if (schemaType === "record") {
+		return path === "providers.maxInFlightRequests" ? { ...base, type: "providerLimits" } : null;
 	}
 
 	return null;

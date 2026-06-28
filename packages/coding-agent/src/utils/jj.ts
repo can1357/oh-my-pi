@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $which } from "@pk-nerdsaver-ai/pi-utils";
 import { LRUCache } from "lru-cache/raw";
+import * as git from "./git";
 
 // ════════════════════════════════════════════════════════════════════════════
 // Types
@@ -246,3 +247,49 @@ export const repo = {
 		return (await repo.root(cwd)) !== null;
 	},
 };
+
+/**
+ * Detect a "pure" Jujutsu workspace — one where Git-mutating automation has
+ * no safe Git target. Invoking `git checkout -b`, `git worktree add`, or
+ * `git apply` against a pure jj workspace either fails outright (no `.git/`
+ * present) or mutates state that jj itself cannot reconcile.
+ *
+ * `cwd` is "pure jj" iff its nearest jj workspace ancestor is **closer than**
+ * its nearest Git checkout ancestor (or no Git checkout is present at all).
+ * Both lookups walk upward from `cwd`, so the deeper ancestor is the one the
+ * user is actually working inside.
+ *
+ * Returns:
+ * - `false` for plain Git checkouts (no jj metadata anywhere up the tree).
+ * - `false` for colocated jj-git workspaces — `jj git init --colocate` keeps
+ *   `.jj/` and `.git/` at the same root.
+ * - `false` when a nested Git checkout (e.g. a vendored repo or fixture)
+ *   lives **under** an outer jj workspace; Git automation targets the inner
+ *   repo and never touches the surrounding jj tree.
+ * - `true` when jj is the deeper ancestor — either a standalone pure jj
+ *   workspace, or a jj workspace nested under an unrelated outer Git
+ *   checkout, where Git automation against the outer root would silently
+ *   bypass jj.
+ * - `false` for directories backed by neither tool.
+ */
+export async function isPureJjRepo(cwd: string): Promise<boolean> {
+	const jjRoot = await repo.root(cwd);
+	if (jjRoot === null) return false;
+	const gitRoot = await git.repo.root(cwd);
+	if (gitRoot === null) return true;
+	return isStrictDescendant(path.resolve(jjRoot), path.resolve(gitRoot));
+}
+
+/**
+ * Return `true` when `child` is a strict descendant of `ancestor` (same path
+ * counts as `false`). Both arguments must already be resolved absolute paths.
+ */
+function isStrictDescendant(child: string, ancestor: string): boolean {
+	const rel = path.relative(ancestor, child);
+	if (rel === "" || rel === ".") return false;
+	if (rel.startsWith("..")) return false;
+	// `path.relative` returns an absolute path only when the two arguments
+	// live on different filesystem roots (Windows drives, UNC shares); not a
+	// real ancestor relationship.
+	return !path.isAbsolute(rel);
+}

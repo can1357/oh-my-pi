@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { renderDemotedThinking } from "@pk-nerdsaver-ai/pi-ai/dialect";
 import { convertAnthropicMessages, streamAnthropic } from "@pk-nerdsaver-ai/pi-ai/providers/anthropic";
 import type {
 	AssistantMessage,
@@ -99,6 +100,29 @@ describe("Anthropic-compatible unsigned thinking replay (#2005)", () => {
 			signature: "",
 		});
 		expect(blocks[1]).toEqual({ type: "text", text: "Sure." });
+	});
+
+	it("sends context_management for API-key Anthropic-compatible thinking requests", async () => {
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamAnthropic(
+			makeModel(),
+			{ systemPrompt: [], messages: [makeUser("continue")] },
+			{
+				apiKey: "sk-ant-api-test",
+				signal: AbortSignal.abort(),
+				thinkingEnabled: true,
+				onPayload: payload => resolve(payload),
+			},
+		);
+
+		const payload = (await promise) as {
+			thinking?: { type?: string };
+			context_management?: { edits?: Array<{ type?: string; keep?: string }> };
+		};
+		expect(payload.thinking?.type).toBe("enabled");
+		expect(payload.context_management).toEqual({
+			edits: [{ type: "clear_thinking_20251015", keep: "all" }],
+		});
 	});
 
 	it("sanitizes lone surrogates in tool arguments regardless of origin API", () => {
@@ -211,7 +235,7 @@ describe("Anthropic-compatible unsigned thinking replay (#2005)", () => {
 		const model = makeModel({ provider: "anthropic", baseUrl: "https://api.anthropic.com" });
 		const blocks = assistantWireBlocks([makeUser(), makeAssistantThinking("internal scratch")], model);
 		expect(blocks[0]?.type).toBe("text");
-		expect((blocks[0] as WireTextBlock).text).toBe("internal scratch");
+		expect((blocks[0] as WireTextBlock).text).toBe(renderDemotedThinking(model.id, "internal scratch"));
 	});
 
 	it("treats a missing baseUrl as official Anthropic (resolveAnthropicBaseUrl default)", () => {
@@ -222,14 +246,14 @@ describe("Anthropic-compatible unsigned thinking replay (#2005)", () => {
 		const model = makeModel({ provider: "anthropic", baseUrl: "" });
 		const blocks = assistantWireBlocks([makeUser(), makeAssistantThinking("internal scratch")], model);
 		expect(blocks[0]?.type).toBe("text");
-		expect((blocks[0] as WireTextBlock).text).toBe("internal scratch");
+		expect((blocks[0] as WireTextBlock).text).toBe(renderDemotedThinking(model.id, "internal scratch"));
 	});
 
 	it("still degrades unsigned thinking to text for non-reasoning unknown endpoints", () => {
 		const model = makeModel({ reasoning: false, baseUrl: "https://plain.example.com/anthropic" });
 		const blocks = assistantWireBlocks([makeUser(), makeAssistantThinking("scratch")], model);
 		expect(blocks[0]?.type).toBe("text");
-		expect((blocks[0] as WireTextBlock).text).toBe("scratch");
+		expect((blocks[0] as WireTextBlock).text).toBe(renderDemotedThinking(model.id, "scratch"));
 	});
 
 	it("keeps thinking → tool_use pairing intact across continuation conversion", () => {

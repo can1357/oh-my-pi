@@ -105,13 +105,20 @@ function buildTransports(opts: { console?: boolean; file?: boolean | string }): 
 }
 
 function getWinstonLogger(): winston.Logger {
-	winstonLogger ??= winston.createLogger({
-		level: "debug",
-		format: getLogFormat(),
-		transports: buildTransports(transportOpts),
-		// Don't exit on error - logging failures shouldn't crash the app
-		exitOnError: false,
-	});
+	if (!winstonLogger) {
+		const transports = buildTransports(transportOpts);
+		winstonLogger = winston.createLogger({
+			level: "debug",
+			format: getLogFormat(),
+			transports,
+			// A transport-less winston logger console.warns "Attempt to write logs
+			// with no transports" on every emit; mark it silent instead so disabling
+			// all transports is a clean no-op.
+			silent: transports.length === 0,
+			// Don't exit on error - logging failures shouldn't crash the app
+			exitOnError: false,
+		});
+	}
 	return winstonLogger;
 }
 
@@ -124,7 +131,10 @@ export function setTransports(opts: { console?: boolean; file?: boolean | string
 	transportOpts = opts;
 	if (!winstonLogger) return; // applied lazily when the logger is first built
 	winstonLogger.clear();
-	for (const transport of buildTransports(opts)) winstonLogger.add(transport);
+	const transports = buildTransports(opts);
+	for (const transport of transports) winstonLogger.add(transport);
+	// Keep the logger silent when nothing is attached so winston doesn't warn on emit.
+	winstonLogger.silent = transports.length === 0;
 }
 
 /**

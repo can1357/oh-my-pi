@@ -1,0 +1,144 @@
+syntax = "proto3";
+
+package exa.knowledge_base_pb;
+
+import "buf/validate/validate.proto";
+import "exa/auto_cascade_common_pb/auto_cascade_common.proto";
+import "exa/codeium_common_pb/codeium_common.proto";
+import "exa/opensearch_clients_pb/opensearch_clients.proto";
+import "google/protobuf/timestamp.proto";
+
+message KnowledgeBaseItem {
+  string identifier = 1;
+  .exa.opensearch_clients_pb.ConnectorType connector_type = 2;
+  string url = 3;
+  string title = 4;
+  string description = 5;
+  string content = 6;
+  .google.protobuf.Timestamp last_crawled_at = 7;
+  string user_name = 8;
+}
+
+message CreateKnowledgeBaseItemRequest {
+  reserved 3;
+  reserved 4;
+  reserved 5;
+  reserved "title", "url", "description";
+
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  .exa.opensearch_clients_pb.ConnectorType connector_type = 2;
+  repeated string urls = 6;
+}
+
+message CreateKnowledgeBaseItemResponse {
+  string identifier = 1;
+  string title = 2;
+  string url = 3;
+}
+
+message EditKnowledgeBaseItemRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  string identifier = 2;
+  string description = 3;
+}
+
+message EditKnowledgeBaseItemResponse {
+}
+
+message DeleteKnowledgeBaseItemRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  string identifier = 2;
+}
+
+message DeleteKnowledgeBaseItemResponse {
+}
+
+message ReadKnowledgeBaseItemRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  string identifier = 2;
+}
+
+message ReadKnowledgeBaseItemResponse {
+  .exa.knowledge_base_pb.KnowledgeBaseItem item = 1;
+}
+
+message GetKnowledgeBaseItemsRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+}
+
+message GetKnowledgeBaseItemsResponse {
+  repeated .exa.knowledge_base_pb.KnowledgeBaseItem items = 1;
+}
+
+message GetKnowledgeBaseItemsForTeamRequest {
+  reserved 2;
+
+  .exa.codeium_common_pb.Metadata metadata = 1;
+}
+
+message GetKnowledgeBaseItemsForTeamResponse {
+  repeated .exa.knowledge_base_pb.KnowledgeBaseItem items = 1;
+}
+
+message CreateConnectionRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  .exa.opensearch_clients_pb.ConnectorType connector_type = 2;
+  string access_token = 3;
+  .google.protobuf.Timestamp access_token_expires_at = 4;
+  string refresh_token = 5;
+  .google.protobuf.Timestamp refresh_token_expires_at = 6;
+}
+
+message CreateConnectionResponse {
+}
+
+message RemoveConnectionRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  .exa.opensearch_clients_pb.ConnectorType connector_type = 2;
+}
+
+message RemoveConnectionResponse {
+}
+
+message GetConnectionRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  .exa.opensearch_clients_pb.ConnectorType connector_type = 2;
+}
+
+message GetConnectionResponse {
+  bool enabled = 1;
+  string access_token = 2;
+}
+
+message GetGithubPullRequestSearchInfoRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  string query = 2;
+  int32 limit = 3;
+}
+
+message GetGithubPullRequestSearchInfoResponse {
+  repeated .exa.auto_cascade_common_pb.GithubPullRequestInfo pull_request_infos = 1;
+}
+
+message GetGithubIntegrationStatusRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+}
+
+message GetGithubIntegrationStatusResponse {
+  string username = 1;
+  repeated .exa.auto_cascade_common_pb.GithubInstallationInfo installations = 2;
+}
+
+service KnowledgeBaseService {
+  rpc CreateKnowledgeBaseItem (.exa.knowledge_base_pb.CreateKnowledgeBaseItemRequest) returns (.exa.knowledge_base_pb.CreateKnowledgeBaseItemResponse);
+  rpc EditKnowledgeBaseItem (.exa.knowledge_base_pb.EditKnowledgeBaseItemRequest) returns (.exa.knowledge_base_pb.EditKnowledgeBaseItemResponse);
+  rpc DeleteKnowledgeBaseItem (.exa.knowledge_base_pb.DeleteKnowledgeBaseItemRequest) returns (.exa.knowledge_base_pb.DeleteKnowledgeBaseItemResponse);
+  rpc ReadKnowledgeBaseItem (.exa.knowledge_base_pb.ReadKnowledgeBaseItemRequest) returns (.exa.knowledge_base_pb.ReadKnowledgeBaseItemResponse);
+  rpc GetKnowledgeBaseItems (.exa.knowledge_base_pb.GetKnowledgeBaseItemsRequest) returns (.exa.knowledge_base_pb.GetKnowledgeBaseItemsResponse);
+  rpc GetKnowledgeBaseItemsForTeam (.exa.knowledge_base_pb.GetKnowledgeBaseItemsForTeamRequest) returns (.exa.knowledge_base_pb.GetKnowledgeBaseItemsForTeamResponse);
+  rpc GetGithubPullRequestSearchInfo (.exa.knowledge_base_pb.GetGithubPullRequestSearchInfoRequest) returns (.exa.knowledge_base_pb.GetGithubPullRequestSearchInfoResponse);
+  rpc CreateConnection (.exa.knowledge_base_pb.CreateConnectionRequest) returns (.exa.knowledge_base_pb.CreateConnectionResponse);
+  rpc RemoveConnection (.exa.knowledge_base_pb.RemoveConnectionRequest) returns (.exa.knowledge_base_pb.RemoveConnectionResponse);
+  rpc GetConnection (.exa.knowledge_base_pb.GetConnectionRequest) returns (.exa.knowledge_base_pb.GetConnectionResponse);
+  rpc GetGithubIntegrationStatus (.exa.knowledge_base_pb.GetGithubIntegrationStatusRequest) returns (.exa.knowledge_base_pb.GetGithubIntegrationStatusResponse);
+}

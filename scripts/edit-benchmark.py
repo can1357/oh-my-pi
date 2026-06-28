@@ -58,7 +58,7 @@ def build_spec(variant: str) -> BenchmarkSpec:
 		description=f"Benchmark edit tool in {variant} mode across models with simple edit tasks.",
 		workspace_prefix=f"{variant}-benchmark",
 		tools=("edit", "read"),
-		env={"PI_EDIT_VARIANT": variant},
+		env={"PI_EDIT_VARIANT": variant, "PI_STRICT_EDIT_MODE": "1"},
 		initial_prompt=prompt,
 		retry_instruction=retry,
 	)

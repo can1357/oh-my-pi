@@ -110,7 +110,7 @@ export interface TUIStartOptions {
 const DEFAULT_RENDER_SCHEDULER: RenderScheduler = {
 	now: () => performance.now(),
 	scheduleImmediate: callback => {
-		process.nextTick(callback);
+		setImmediate(callback);
 	},
 	scheduleRender: (callback, delayMs) => {
 		const timer = setTimeout(callback, delayMs);
@@ -812,52 +812,94 @@ const RESYNC_TAIL_SAMPLES = 8;
  * re-anchor the commit index when it does not. Returns the resync row index,
  * or -1 when no resync is needed.
  *
- * The detector exploits the asymmetry between the two mutation classes: an
- * in-place edit or restyle of committed rows disturbs only the touched rows
- * (alignment below them is intact — the stale copy in history is the
- * long-accepted artifact), while any insertion or deletion shifts EVERY row
- * below it, including the rows just above the commit boundary. So the prefix
- * *tail* is sampled (up to 8 non-blank rows within the last 24, compared
- * SGR-stripped so theme changes stay quiet, tolerating one mismatch for a
- * legitimate single-row edit): aligned ⇒ no resync; misaligned ⇒ resync at
- * the first non-equivalent row, recommitting from there — duplication, never
- * loss. Highly repetitive tails (identical filler rows) can mask a shift, in
- * which case the skipped rows are content-identical to the committed ones —
- * observationally harmless. Exported for the render-stress harness, whose
+ * Audits the committed prefix [0, auditTo) EXCEPT the exempt window
+ * [exemptFrom, exemptTo): rows in the window are durable snapshots (a streaming
+ * table re-aligning its columns) that may drift legitimately, so their drift
+ * never triggers a re-anchor. Rows below the window — including forced-overflow
+ * rows committed only because they scrolled above the viewport under a
+ * commit-unstable barrier — ARE audited.
+ *
+ * Two detectors run over the audited rows:
+ *
+ * 1. Hard scan of the now-permanent forced suffix [exemptTo, permanentEnd):
+ *    forced-overflow rows that THIS frame asserts are durable/permanent (index <
+ *    permanentEnd — the barrier above them finalized or cleared, so durableBoundary
+ *    rose past them). A content change there is real finalized content, so ANY
+ *    mismatch re-anchors. Scanned in FULL, not sampled, so a single edit far above
+ *    the commit boundary with an unchanged tail still re-anchors (duplication,
+ *    never loss) instead of being committed nowhere and painted nowhere.
+ * 2. Tail sample (only when the hard scan is clean): exploits the asymmetry
+ *    between the two mutation classes — an in-place edit/restyle of a committed
+ *    row disturbs only the touched rows (alignment below intact; the stale copy
+ *    in history is the long-accepted artifact), while an insertion/deletion
+ *    shifts EVERY row below it. So up to 8 non-blank rows within the last 24
+ *    audited rows are compared SGR-stripped (theme changes stay quiet),
+ *    tolerating a SINGLE non-hard mismatch (a legitimate one-row edit): aligned ⇒
+ *    no resync; misaligned ⇒ resync at the first non-equivalent audited row. The
+ *    tolerance keeps both an offscreen still-live barrier (a ticking spinner) and
+ *    a no-seam in-place row edit from spraying duplicate snapshots every frame;
+ *    the hard scan above is what forbids it from swallowing a finalized row.
+ *
+ * Highly repetitive tails (identical filler rows) can mask a shift in the tail
+ * sample, in which case the skipped rows are content-identical to the committed
+ * ones — observationally harmless. Exported for the render-stress harness, whose
  * shadow commit ledger must mirror the engine's law exactly.
  */
 export function findCommittedPrefixResync(
 	frame: readonly string[],
 	prefix: readonly string[],
-	auditLimit: number = prefix.length,
+	auditTo: number = prefix.length,
+	exemptFrom: number = auditTo,
+	exemptTo: number = exemptFrom,
+	permanentEnd = 0,
 ): number {
-	// Audit only the byte-stable leading prefix [0, auditLimit); rows committed
-	// under a durable snapshot end (beyond auditLimit) may drift legitimately and
-	// are exempt, so their drift never triggers a re-anchor.
-	const committed = Math.min(prefix.length, Math.max(0, Math.trunc(auditLimit)));
+	const committed = Math.min(prefix.length, Math.max(0, Math.trunc(auditTo)));
 	if (committed === 0) return -1;
+	// Exempt window [exFrom, exTo) clamped into the committed prefix. Rows there
+	// are durable-snapshot drift and skipped by both detectors and the scan.
+	const exFrom = Math.max(0, Math.min(committed, Math.trunc(exemptFrom)));
+	const exTo = Math.max(exFrom, Math.min(committed, Math.trunc(exemptTo)));
+	const audited = (i: number): boolean => i < exFrom || i >= exTo;
 	if (frame.length >= committed) {
-		let samples = 0;
-		let mismatches = 0;
-		const lookback = Math.min(RESYNC_TAIL_LOOKBACK, committed);
-		for (let j = 1; j <= lookback && samples < RESYNC_TAIL_SAMPLES; j++) {
-			const row = frame[committed - j]!;
-			const old = prefix[committed - j]!;
-			if (row === old) {
-				if (!isBlankRow(row)) samples++;
-				continue;
+		// 1. Hard scan: forced-overflow rows now asserted permanent. Full scan, no
+		// tolerance — a finalized row that changed must re-anchor.
+		const hardEnd = Math.min(committed, Math.max(0, Math.trunc(permanentEnd)));
+		let hardMismatch = false;
+		for (let i = exTo; i < hardEnd; i++) {
+			if (!rowsEquivalent(frame[i]!, prefix[i]!)) {
+				hardMismatch = true;
+				break;
 			}
-			if (isBlankRow(row) && isBlankRow(old)) continue;
-			samples++;
-			if (!rowsEquivalent(row, old)) mismatches++;
 		}
-		// No signal (all-blank tail) or at most one edited row: aligned.
-		if (samples === 0 || mismatches <= 1) return -1;
+		if (!hardMismatch) {
+			// 2. Tail sample. Walk up from the commit boundary, skipping exempt
+			// rows, until LOOKBACK audited rows or SAMPLES non-blank comparisons.
+			let samples = 0;
+			let mismatches = 0;
+			let scanned = 0;
+			for (let j = 1; j <= committed && scanned < RESYNC_TAIL_LOOKBACK && samples < RESYNC_TAIL_SAMPLES; j++) {
+				const idx = committed - j;
+				if (!audited(idx)) continue;
+				scanned++;
+				const row = frame[idx]!;
+				const old = prefix[idx]!;
+				if (row === old) {
+					if (!isBlankRow(row)) samples++;
+					continue;
+				}
+				if (isBlankRow(row) && isBlankRow(old)) continue;
+				samples++;
+				if (!rowsEquivalent(row, old)) mismatches++;
+			}
+			// No signal (all-blank/all-exempt tail) or at most one edited row: aligned.
+			if (samples === 0 || mismatches <= 1) return -1;
+		}
 	}
-	// Misaligned (or the frame no longer covers the prefix): re-anchor at the
-	// first row whose content actually changed.
+	// Misaligned (hard mismatch, tail-sample shift, or the frame no longer covers
+	// the prefix): re-anchor at the first audited row whose content changed.
 	const limit = Math.min(committed, frame.length);
 	for (let i = 0; i < limit; i++) {
+		if (!audited(i)) continue;
 		if (!rowsEquivalent(frame[i]!, prefix[i]!)) return i;
 	}
 	return limit < committed ? limit : -1;
@@ -882,6 +924,8 @@ export class TUI extends Container {
 	#renderScheduler: RenderScheduler;
 	#lastRenderAt = 0;
 	static readonly #MIN_RENDER_INTERVAL_MS = 1000 / 30;
+	static readonly #INPUT_RENDER_GRACE_MS = TUI.#MIN_RENDER_INTERVAL_MS;
+	#inputRenderGraceUntilMs = 0;
 	// Pane-reflow settle window for tmux/screen/zellij. The host process gets
 	// SIGWINCH (and `process.stdout` already reports the new geometry) before
 	// the multiplexer finishes repainting the pane at the new size, and
@@ -957,15 +1001,23 @@ export class TUI extends Container {
 	// #auditCommittedPrefix). Holds references to component-cached strings, so
 	// the audit is a pointer walk in the common case.
 	#committedPrefix: string[] = [];
-	// Length of the leading committed prefix [0, #committedPrefixAuditRows) that
-	// is BYTE-STABLE and therefore audited. Rows [auditRows, committedRows) were
-	// committed under a component's snapshot-safe (durable, non-byte-stable) end:
-	// their scroll-off snapshot is permanent so dropping them is forbidden, but
-	// they may drift afterward (a streaming table widening), so re-auditing them
-	// would re-anchor on every drift and spray duplicate snapshots. Once a
-	// snapshot row commits (auditRows < committedRows) the cap is permanent until
-	// a wholesale re-slice (full paint / shrink / geometry) re-bases it.
+	// The committed prefix [0, committedRows) splits into three audit zones by
+	// two monotone marks auditRows ≤ durableRows ≤ committedRows:
+	//   [0, auditRows)              BYTE-STABLE — audited (re-anchor on any shift).
+	//   [auditRows, durableRows)    DURABLE snapshot — exempt: rows may drift in
+	//       place (a streaming table widening) without re-anchoring, so their
+	//       expected drift never sprays duplicate snapshots.
+	//   [durableRows, committedRows) FORCED-overflow — audited: rows committed
+	//       only because they scrolled above the window under a commit-unstable
+	//       barrier; auditing them re-anchors (duplication, never loss) when the
+	//       barrier later shifts/finalizes/removes, instead of stranding a stale
+	//       prefix that silently drops the rows beneath it.
+	// Both marks re-base on a wholesale re-slice (full paint / shrink / geometry)
+	// and otherwise advance per the persistence rules in #updateCommittedAuditRows.
+	// #auditCommittedPrefix audits [0, committedRows) skipping the exempt window
+	// [auditRows, durableRows).
 	#committedPrefixAuditRows = 0;
+	#committedPrefixDurableRows = 0;
 	// Frame row currently mapped to screen row 0. Monotonic between full
 	// paints: a shrink never re-exposes scrolled-off rows (they cannot be
 	// un-scrolled without rewriting history); live rows repaint at fixed
@@ -2059,8 +2111,11 @@ export class TUI extends Container {
 		if (this.#multiplexerResizeTimer) {
 			return;
 		}
-		const elapsed = this.#renderScheduler.now() - this.#lastRenderAt;
-		const delay = Math.max(0, TUI.#MIN_RENDER_INTERVAL_MS - elapsed);
+		const now = this.#renderScheduler.now();
+		const elapsed = now - this.#lastRenderAt;
+		const cadenceDelay = Math.max(0, TUI.#MIN_RENDER_INTERVAL_MS - elapsed);
+		const inputGraceDelay = Math.max(0, this.#inputRenderGraceUntilMs - now);
+		const delay = Math.max(cadenceDelay, inputGraceDelay);
 		this.#renderTimer = this.#renderScheduler.scheduleRender(() => {
 			this.#renderTimer = undefined;
 			if (this.#stopped || !this.#renderRequested) {
@@ -2076,6 +2131,12 @@ export class TUI extends Container {
 	}
 
 	#handleInput(data: string): void {
+		// Raw-mode Ctrl+C/Esc arrive as stdin data, not process signals. If the
+		// first key in a double-key gesture schedules an immediate slow repaint,
+		// the queued second key can sit behind that repaint long enough for the
+		// app-level double-press window to expire. Give the input queue one frame
+		// before ordinary paints; forced repaints still bypass this path.
+		this.#inputRenderGraceUntilMs = this.#renderScheduler.now() + TUI.#INPUT_RENDER_GRACE_MS;
 		if (this.#inputListeners.size > 0) {
 			let current = data;
 			for (const listener of this.#inputListeners) {
@@ -2530,6 +2591,29 @@ export class TUI extends Container {
 		const commitSafeEnd = this.#nativeScrollbackCommitSafeEnd;
 		const snapshotSafeEnd = this.#nativeScrollbackSnapshotSafeEnd;
 
+		// Commit boundaries (also used by the window/commit math in section 3),
+		// hoisted above the audit gate because the resync needs byteStableBoundary
+		// to tell a now-permanent forced row (must re-anchor) from a still-live one.
+		// The commit floor is windowTop in every non-frozen path (see chunkTo), so
+		// whatever scrolls above the window is committed — never committed nowhere
+		// AND painted nowhere (the loss bug). The boundaries no longer gate the
+		// commit; they define the audit-exempt span. byteStableBoundary: rows below
+		// it are byte-stable (never re-layout), audited. durableBoundary: rows in
+		// [byteStableBoundary, durableBoundary) are durable — permanent on scroll-off
+		// but may drift in place (a streaming table re-aligning), committed
+		// audit-EXEMPT. Rows at/beyond durableBoundary committed only because they
+		// scrolled above the window (a commit-unstable barrier over a long tail) are
+		// forced-overflow rows: audited, so a later shift/finalize/removal re-anchors
+		// (duplication, never loss) instead of stranding a stale prefix. Built on the
+		// finalized prefix (live-region start); the whole frame when the root reports
+		// no seam (shell semantics: whatever scrolls is final).
+		const frameLength = rawFrame.length;
+		const byteStableBoundary = Math.max(0, Math.min(frameLength, commitSafeEnd ?? liveRegionStart ?? frameLength));
+		const durableBoundary = Math.max(
+			byteStableBoundary,
+			Math.min(frameLength, snapshotSafeEnd ?? byteStableBoundary),
+		);
+
 		// 2. Transition state captured before any emitter runs.
 		const prevWindowTop = this.#windowTopRow;
 		const prevHardwareCursorRow = this.#hardwareCursorRow;
@@ -2559,23 +2643,37 @@ export class TUI extends Container {
 		// that provably did not change since the last (aligned) frame cannot
 		// have diverged.
 		let committedRowsResynced = false;
-		if (
+		// Audit covers [0, auditRows) and the forced suffix [durableRows,
+		// committedRows); the durable middle [auditRows, durableRows) is exempt
+		// (in-place drift). Two reasons to run the audit this frame:
+		//  - the stable prefix does not cover every audited row (auditUpper); or
+		//  - a forced-overflow row this frame became durable/permanent
+		//    (committedPrefixDurableRows < hardAuditEnd): the barrier above it
+		//    finalized, so its committed bytes must be re-checked even though the
+		//    stable prefix says nothing moved — a stale committed copy there would
+		//    silently drop the row. The hard scan in findCommittedPrefixResync
+		//    covers [durableRows, hardAuditEnd) in full (no tail-sample miss).
+		const auditUpper =
+			this.#committedPrefixDurableRows < this.#committedRows ? this.#committedRows : this.#committedPrefixAuditRows;
+		const hardAuditEnd = Math.min(this.#committedRows, durableBoundary);
+		const needHardAudit = this.#committedPrefixDurableRows < hardAuditEnd;
+		const auditRan =
 			this.#hasEverRendered &&
 			!geometryChanged &&
 			!this.#clearScrollbackOnNextRender &&
-			this.#renderStablePrefixRows < this.#committedPrefixAuditRows
-		) {
+			(this.#renderStablePrefixRows < auditUpper || needHardAudit);
+		if (auditRan) {
 			const committedRowsBeforeAudit = this.#committedRows;
-			this.#auditCommittedPrefix(rawFrame);
+			this.#auditCommittedPrefix(rawFrame, durableBoundary);
 			committedRowsResynced = this.#committedRows !== committedRowsBeforeAudit;
 		}
 		// Committed-prefix state this frame's commit math extends from (post-audit).
-		// Drives the byte-stable audit-rows cap recomputed after the emit.
+		// Drives the audit-rows / durable-rows caps recomputed after the emit.
 		const preCommitRows = this.#committedRows;
 		const preCommitAuditRows = this.#committedPrefixAuditRows;
+		const preCommitDurableRows = this.#committedPrefixDurableRows;
 
 		// 3. Window and commit math (lengths only; content prepared below).
-		const frameLength = rawFrame.length;
 		let hasVisibleOverlay = false;
 		for (const entry of this.overlayStack) {
 			if (this.#isOverlayVisible(entry)) {
@@ -2583,18 +2681,6 @@ export class TUI extends Container {
 				break;
 			}
 		}
-		// Two commit boundaries. byteStableBoundary: rows below it are byte-stable
-		// (asserted never to re-layout) and stay under the committed-prefix audit.
-		// durableBoundary: rows below it are durable — their scroll-off snapshot is
-		// permanent (dropping them is forbidden) but may still drift afterward, so
-		// they commit audit-EXEMPT. Both build on the finalized prefix (live-region
-		// start); the whole frame when the root reports no seam (shell semantics:
-		// whatever scrolls is final).
-		const byteStableBoundary = Math.max(0, Math.min(frameLength, commitSafeEnd ?? liveRegionStart ?? frameLength));
-		const durableBoundary = Math.max(
-			byteStableBoundary,
-			Math.min(frameLength, snapshotSafeEnd ?? byteStableBoundary),
-		);
 
 		// 4. Classify. A resize is an explicit user gesture: normally the engine
 		// erases and replays so history rewraps at the new geometry (the reader
@@ -2612,7 +2698,7 @@ export class TUI extends Container {
 		if (fullPaint) {
 			committedPrefixResliced = true;
 			windowTop = Math.max(0, frameLength - height);
-			chunkTo = Math.min(durableBoundary, windowTop);
+			chunkTo = windowTop;
 		} else if (
 			frameLength <= this.#committedRows ||
 			(committedRowsResynced &&
@@ -2630,7 +2716,7 @@ export class TUI extends Container {
 			// is preferable to a live editor gap and matches the existing
 			// "duplication, never loss" resync contract.
 			windowTop = Math.max(0, frameLength - height);
-			chunkTo = Math.min(durableBoundary, windowTop);
+			chunkTo = windowTop;
 			committedPrefixResliced = true;
 			this.#committedRows = chunkTo;
 			this.#committedPrefix = rawFrame.slice(0, chunkTo);
@@ -2648,10 +2734,7 @@ export class TUI extends Container {
 			// pane keeps its own (old-wrap) history — and re-bases the audit
 			// prefix at the new width so the accepted wrap drift does not read
 			// as a violation on the next ordinary frame.
-			chunkTo =
-				hasVisibleOverlay || geometryChanged
-					? this.#committedRows
-					: Math.max(this.#committedRows, Math.min(durableBoundary, windowTop));
+			chunkTo = hasVisibleOverlay || geometryChanged ? this.#committedRows : windowTop;
 			if (geometryChanged) {
 				committedPrefixResliced = true;
 				this.#committedPrefix = rawFrame.slice(0, this.#committedRows);
@@ -2711,7 +2794,15 @@ export class TUI extends Container {
 				windowTop,
 			});
 			this.#committedPrefix = rawFrame.slice(0, chunkTo);
-			this.#updateCommittedAuditRows(true, preCommitRows, preCommitAuditRows, byteStableBoundary);
+			this.#updateCommittedAuditRows(
+				true,
+				preCommitRows,
+				preCommitAuditRows,
+				preCommitDurableRows,
+				byteStableBoundary,
+				durableBoundary,
+				false,
+			);
 			this.#clearScrollbackOnNextRender = false;
 			this.#hasEverRendered = true;
 			if (!firstPaint && frameLength > height) this.#armPostFullPaintSettle();
@@ -2730,7 +2821,15 @@ export class TUI extends Container {
 		for (let i = this.#committedPrefix.length; i < chunkTo; i++) {
 			this.#committedPrefix.push(rawFrame[i] ?? "");
 		}
-		this.#updateCommittedAuditRows(committedPrefixResliced, preCommitRows, preCommitAuditRows, byteStableBoundary);
+		this.#updateCommittedAuditRows(
+			committedPrefixResliced,
+			preCommitRows,
+			preCommitAuditRows,
+			preCommitDurableRows,
+			byteStableBoundary,
+			durableBoundary,
+			auditRan,
+		);
 	}
 
 	/**
@@ -2740,13 +2839,21 @@ export class TUI extends Container {
 	 * restyles keep their alignment and are left alone (stale styling in
 	 * history was always the accepted artifact).
 	 */
-	#auditCommittedPrefix(rawFrame: readonly string[]): void {
+	#auditCommittedPrefix(rawFrame: readonly string[], permanentEnd: number): void {
 		const prefix = this.#committedPrefix;
 		if (prefix.length === 0) return;
-		const resyncTo = findCommittedPrefixResync(rawFrame, prefix, this.#committedPrefixAuditRows);
+		const resyncTo = findCommittedPrefixResync(
+			rawFrame,
+			prefix,
+			prefix.length,
+			this.#committedPrefixAuditRows,
+			this.#committedPrefixDurableRows,
+			permanentEnd,
+		);
 		if (resyncTo < 0) return;
 		this.#committedRows = resyncTo;
 		this.#committedPrefixAuditRows = Math.min(this.#committedPrefixAuditRows, resyncTo);
+		this.#committedPrefixDurableRows = Math.min(this.#committedPrefixDurableRows, resyncTo);
 		prefix.length = resyncTo;
 		if ($flag("PI_DEBUG_REDRAW")) {
 			const msg = `[${new Date().toISOString()}] commit resync: committed prefix diverged at row ${resyncTo}; recommitting\n`;
@@ -2755,27 +2862,43 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Recompute the byte-stable audit-rows cap after a commit. The audited prefix
-	 * [0, auditRows) holds rows committed while byte-stable; rows committed under a
-	 * durable snapshot end (beyond byteStableBoundary) are excluded so the audit
-	 * never re-anchors on their expected drift (a streaming table widening). A
-	 * wholesale re-slice (full paint / shrink / geometry) re-bases the prefix from
-	 * the current frame, so the cap is just min(committed, byteStableBoundary). An
-	 * incremental extend keeps the cap once any snapshot row has committed
-	 * (auditRows < committedRows): a later rise in byteStableBoundary (a table
-	 * finalizing) must not pull already-committed stale snapshots back under audit.
+	 * Recompute the audit-rows / durable-rows marks after a commit (see the
+	 * #committedPrefixAuditRows field doc for the three audit zones).
+	 *
+	 * auditRows tracks the byte-stable boundary; durableRows the durable snapshot
+	 * boundary. A wholesale re-slice (full paint / shrink / geometry) re-bases
+	 * each mark from the current frame (min(committed, boundary)). An incremental
+	 * extend keeps a mark once a row past it has committed (mark < committed): a
+	 * later RISE in a boundary (a table finalizing) must neither pull
+	 * already-committed stale snapshots back under the byte-stable cap nor
+	 * retroactively exempt forced-overflow rows already audited. durableRows is
+	 * floored at auditRows so the exempt window can never invert.
 	 */
 	#updateCommittedAuditRows(
 		resliced: boolean,
 		preCommittedRows: number,
 		preAuditRows: number,
+		preDurableRows: number,
 		byteStableBoundary: number,
+		durableBoundary: number,
+		hardAudited: boolean,
 	): void {
 		const committed = this.#committedRows;
-		this.#committedPrefixAuditRows =
+		const auditRows =
 			resliced || preAuditRows >= preCommittedRows
 				? Math.min(committed, byteStableBoundary)
 				: Math.min(preAuditRows, committed);
+		// durableRows also advances when a hard audit ran this frame: the resync's
+		// full hard scan verified the forced suffix [durableRows, min(committed,
+		// durableBoundary)) (re-anchoring on any divergence), so those rows are now
+		// proven durable and may leave the audited set — otherwise the durable-rise
+		// gate would re-fire the full scan every frame (and spray on later drift).
+		const durableRows =
+			resliced || preDurableRows >= preCommittedRows || hardAudited
+				? Math.min(committed, durableBoundary)
+				: Math.min(preDurableRows, committed);
+		this.#committedPrefixAuditRows = auditRows;
+		this.#committedPrefixDurableRows = Math.max(auditRows, durableRows);
 	}
 
 	/**

@@ -19,7 +19,7 @@ import * as path from "node:path";
 import { clearCache as clearFsCache } from "@pk-nerdsaver-ai/pi-coding-agent/capability/fs";
 import { type MCPServer, mcpCapability } from "@pk-nerdsaver-ai/pi-coding-agent/capability/mcp";
 import { loadCapability } from "@pk-nerdsaver-ai/pi-coding-agent/discovery";
-import { getConfigRootDir, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
+import { getConfigRootDir, removeWithRetries, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
 
 const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
@@ -60,8 +60,8 @@ describe("native user-level MCP discovery follows the active profile", () => {
 		}
 		if (originalHome === undefined) delete process.env.HOME;
 		else process.env.HOME = originalHome;
-		await fs.rm(tempHome, { recursive: true, force: true });
-		await fs.rm(projectDir, { recursive: true, force: true });
+		await removeWithRetries(tempHome);
+		await removeWithRetries(projectDir);
 	});
 
 	test("active profile loads its own user server, not the default profile's", async () => {
@@ -89,7 +89,7 @@ describe("native user-level MCP discovery follows the active profile", () => {
 		expect(profileServer?._source.level).toBe("user");
 		expect(profileServer?._source.path).toBe(path.join(profileAgentDir, "mcp.json"));
 
-		await fs.rm(profileAgentDir, { recursive: true, force: true });
+		await removeWithRetries(profileAgentDir);
 	});
 
 	test("default profile loads the user server from ~/.omp/agent", async () => {

@@ -4,13 +4,19 @@ import {
 	type OpenAICompatibleModelRecord,
 } from "../discovery/openai-compatible";
 import { Effort } from "../effort";
-import { toFireworksPublicModelId } from "../fireworks-model-id";
+import { FIREWORKS_FAST_SUFFIX, toFireworksPublicModelId } from "../fireworks-model-id";
 import { isGlmVisionModelId, isGrokReasoningEffortCapable, isReasoningGlmModelId } from "../identity/family";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModels } from "../models";
-import type { Api, FetchImpl, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
+import type { Api, FetchImpl, Model, ModelSpec, OpenAICompat, Provider, ThinkingConfig } from "../types";
 import { isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
-import { COPILOT_API_HEADERS, getGitHubCopilotBaseUrl, parseGitHubCopilotApiKey } from "../wire/github-copilot";
+import { coreWeaveProjectHeaders } from "../wire/coreweave";
+import {
+	COPILOT_API_HEADERS,
+	getGitHubCopilotBaseUrl,
+	isPersonalGitHubCopilotBaseUrl,
+	parseGitHubCopilotApiKey,
+} from "../wire/github-copilot";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
 
 const MODELS_DEV_URL = "https://models.dev/api.json";
@@ -197,6 +203,8 @@ function mapWithBundledReference<TApi extends Api>(
 		...reference,
 		id: defaults.id,
 		name,
+		api: defaults.api,
+		provider: defaults.provider,
 		baseUrl: defaults.baseUrl,
 		contextWindow: toPositiveNumber(entry.context_length, reference.contextWindow),
 		maxTokens: toPositiveNumber(entry.max_completion_tokens, reference.maxTokens),
@@ -463,7 +471,19 @@ function isLikelyNanoGptTextModelId(id: string): boolean {
 	return !NANO_GPT_NON_TEXT_MODEL_TOKENS.some(token => normalized.includes(token));
 }
 
-type SimpleProviderConfig = { apiKey?: string; baseUrl?: string; fetch?: FetchImpl };
+type SimpleProviderDiscoveryHeaders = Record<string, string> | (() => Record<string, string> | undefined);
+type SimpleProviderConfig = {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+	headers?: SimpleProviderDiscoveryHeaders;
+};
+
+function resolveSimpleProviderHeaders(
+	headers: SimpleProviderDiscoveryHeaders | undefined,
+): Record<string, string> | undefined {
+	return typeof headers === "function" ? headers() : headers;
+}
 
 export function createSimpleOpenAICompletionsOptions(
 	providerId: Parameters<typeof getBundledModels>[0],
@@ -482,6 +502,7 @@ export function createSimpleOpenAICompletionsOptions(
 					provider: providerId,
 					baseUrl,
 					apiKey,
+					headers: resolveSimpleProviderHeaders(config?.headers),
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
 						return mapWithBundledReference(entry, defaults, reference);
@@ -509,6 +530,7 @@ function createSimpleOpenAIResponsesOptions(
 					provider: providerId,
 					baseUrl,
 					apiKey,
+					headers: resolveSimpleProviderHeaders(config?.headers),
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
 						return mapWithBundledReference(entry, defaults, reference);
@@ -564,8 +586,11 @@ const UMANS_REASONING_EFFORT_BY_LEVEL: Record<string, Effort> = {
 	medium: Effort.Medium,
 	high: Effort.High,
 	xhigh: Effort.XHigh,
+	max: Effort.XHigh,
 };
+const UMANS_MAX_REASONING_EFFORT_MAP = { [Effort.XHigh]: "max" } as const;
 const UMANS_DEFAULT_REASONING_EFFORTS = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] as const;
+const UMANS_VIA_HANDOFF_MODEL_IDS = ["umans-glm-5.1", "umans-glm-5.2"] as const;
 
 export interface UmansModelManagerConfig {
 	apiKey?: string;
@@ -584,8 +609,18 @@ function normalizeUmansBaseUrl(baseUrl: string | undefined): string {
 	return normalized.endsWith("/v1") ? normalized.slice(0, -3) : normalized;
 }
 
+/**
+ * Umans `models/info` reports `supports_vision: true` for natively
+ * vision-capable models and a non-empty string sentinel (e.g.
+ * `"via-handoff"`) for models that route image inputs through a vision
+ * handoff pre-analysis step instead of accepting raw image blocks. Only
+ * `true` means the model accepts image content directly; sentinel values
+ * MUST map to text-only so the agent's vision-handoff path runs instead
+ * of triggering an upstream HTTP 400 (`This model does not support image
+ * inputs`).
+ */
 function umansSupportsVision(value: unknown): boolean {
-	return value === true || (typeof value === "string" && value.length > 0);
+	return value === true;
 }
 
 function umansReasoningSupported(value: unknown): boolean {
@@ -607,10 +642,20 @@ function mapUmansReasoningEfforts(value: unknown): readonly Effort[] {
 	return efforts.length > 0 ? efforts : UMANS_DEFAULT_REASONING_EFFORTS;
 }
 
+function umansHasMaxReasoningLevel(value: unknown): boolean {
+	return isRecord(value) && Array.isArray(value.levels) && value.levels.includes("max");
+}
+
 function mapUmansThinkingConfig(value: unknown): ThinkingConfig | undefined {
 	if (!umansReasoningSupported(value)) return undefined;
 	const efforts = mapUmansReasoningEfforts(value);
-	const thinking: ThinkingConfig = { mode: "budget", efforts };
+	const thinking: ThinkingConfig = {
+		mode: umansHasMaxReasoningLevel(value) ? "anthropic-budget-effort" : "budget",
+		efforts,
+	};
+	if (thinking.mode === "anthropic-budget-effort") {
+		thinking.effortMap = UMANS_MAX_REASONING_EFFORT_MAP;
+	}
 	if (isRecord(value)) {
 		if (value.can_disable === false) {
 			thinking.requiresEffort = true;
@@ -702,6 +747,7 @@ export function umansModelManagerOptions(config?: UmansModelManagerConfig): Mode
 	return {
 		providerId: "umans",
 		dynamicModelsAuthoritative: true,
+		dropCachedModelIdsOnStaticMismatch: UMANS_VIA_HANDOFF_MODEL_IDS,
 		fetchDynamicModels: () => fetchUmansModelsInfo({ baseUrl, apiKey, fetch: config?.fetch, references }),
 	};
 }
@@ -1020,7 +1066,7 @@ function applyXAIOAuthCuration(dynamic: readonly ModelSpec<"openai-responses">[]
  * Single source of truth for the curated to Model fan-in, consumed by both
  * - {@link xaiOAuthModelManagerOptions} (runtime static seed handed to the model
  *   manager so the picker is populated on a fresh login), and
- * - `packages/ai/scripts/generate-models.ts` (bundles the same entries into
+ * - \`packages/catalog/scripts/generate-models.ts\` (bundles the same entries into
  *   `models.json`, so the synchronous `ModelRegistry.#loadModels()` boot path
  *   sees `xai-oauth` without waiting for a refresh — fixes the boot-time
  *   default-model reset when `modelRoles.default = "xai-oauth/<id>"`).
@@ -1069,7 +1115,7 @@ export function xaiOAuthModelManagerOptions(
 	// Static seed handed to the runtime model manager so the picker populates on
 	// a fresh login even before `fetchDynamicModels` fires (it is gated on
 	// `config.apiKey` at construction time, and OAuth tokens resolve later via
-	// AuthStorage). `generate-models.ts` calls the same builder so `models.json`
+	// AuthStorage). \`generate-models.ts\` calls the same builder so \`models.json\`
 	// carries these entries too — making the synchronous `#loadModels()` boot
 	// path honor `modelRoles.default = "xai-oauth/<id>"` without `await refresh()`.
 	const staticModels = buildXaiOAuthStaticSeed(resolvedBaseUrl);
@@ -1256,6 +1302,51 @@ export function clampKimiK27CodeMaxTokens(modelId: string, candidate: number | n
 export function clampKimiK27CodeMaxTokens(modelId: string, candidate: number | null): number | null {
 	if (candidate === null) return null;
 	return isKimiK27CodeModelId(modelId) ? Math.min(candidate, KIMI_K27_CODE_RECOMMENDED_MAX_TOKENS) : candidate;
+}
+
+/**
+ * Fireworks Fast variants we surface. Each inherits the base model's
+ * limits/modalities/thinking and overrides only the cost with the Standard-column
+ * Fast prices from the Serverless pricing table; `cacheWrite` stays 0 (Fireworks
+ * bills no cache-write). Derived from the bundled base entries so metadata stays
+ * in lockstep, and the runtime auto-falls back to the base id on a failed fast
+ * request. See https://docs.fireworks.ai/serverless/pricing.
+ */
+const FIREWORKS_FAST_VARIANT_SPECS: ReadonlyArray<{
+	base: string;
+	name: string;
+	cost: { input: number; output: number; cacheRead: number };
+}> = [
+	{ base: "kimi-k2.7-code", name: "Kimi K2.7 Code Fast", cost: { input: 1.9, output: 8, cacheRead: 0.38 } },
+	{ base: "kimi-k2.6", name: "Kimi K2.6 Fast", cost: { input: 2, output: 8, cacheRead: 0.3 } },
+	{ base: "glm-5.1", name: "GLM-5.1 Fast", cost: { input: 2.8, output: 8.8, cacheRead: 0.52 } },
+];
+
+/**
+ * Build the Fireworks Fast seed by projecting each base bundled spec into a
+ * `<id>-fast` variant. Pushed into the generated catalog (Fast routers never
+ * appear in the serverless control-plane list, so discovery cannot surface
+ * them) and deduped behind any identical previous-snapshot entry.
+ */
+export function buildFireworksFastSeed(): ModelSpec<"openai-completions">[] {
+	const bundled = createBundledReferenceMap<"openai-completions">("fireworks");
+	const seeds: ModelSpec<"openai-completions">[] = [];
+	for (const variant of FIREWORKS_FAST_VARIANT_SPECS) {
+		const base = bundled.get(variant.base);
+		if (!base) continue;
+		seeds.push({
+			...base,
+			id: `${variant.base}${FIREWORKS_FAST_SUFFIX}`,
+			name: variant.name,
+			cost: {
+				input: variant.cost.input,
+				output: variant.cost.output,
+				cacheRead: variant.cost.cacheRead,
+				cacheWrite: 0,
+			},
+		});
+	}
+	return seeds;
 }
 
 /**
@@ -1523,7 +1614,7 @@ export function firepassModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
-// 7.7 Wafer (Pass + Serverless)
+// 7.7 Wafer Serverless
 // ---------------------------------------------------------------------------
 
 export interface WaferModelManagerConfig {
@@ -1536,13 +1627,14 @@ const WAFER_DEFAULT_BASE_URL = "https://pass.wafer.ai/v1";
 const WAFER_MAX_TOKENS_CAP = 65536;
 
 /**
- * Shared mapper for Wafer's `/v1/models` records.
+ * Mapper for Wafer Serverless `/v1/models` records.
  *
- * Wafer wraps each entry with a `wafer` envelope describing tier, capabilities,
- * and cents-per-million pricing. The mapper folds that metadata into the
- * canonical `ModelSpec<"openai-completions">` shape and applies zai-family thinking
- * compat when the entry advertises reasoning support (GLM-family on the Pass
- * SKU). Cents-per-million → dollars-per-million via /100.
+ * Wafer wraps each entry with a `wafer` envelope describing capabilities and
+ * pricing. The mapper folds that metadata into the canonical
+ * `ModelSpec<"openai-completions">` shape and applies upstream-specific thinking
+ * compat when the entry advertises reasoning support. Wafer pricing is exposed
+ * through internal wholesale units; the public Serverless rate equals
+ * `cents × 125 / 10000`.
  */
 interface WaferRecord {
 	context_length?: unknown;
@@ -1563,7 +1655,7 @@ function readWaferRecord(entry: OpenAICompatibleModelRecord): WaferRecord | unde
 }
 
 function mapWaferModel(
-	providerId: "wafer-pass" | "wafer-serverless",
+	providerId: "wafer-serverless",
 	baseUrl: string,
 	entry: OpenAICompatibleModelRecord,
 	defaults: ModelSpec<"openai-completions">,
@@ -1579,25 +1671,12 @@ function mapWaferModel(
 	);
 	const maxTokens = contextWindow !== null ? Math.min(contextWindow, WAFER_MAX_TOKENS_CAP) : null;
 	const pricing = wafer?.pricing ?? {};
-	// Wafer's `/v1/models` exposes pricing through `*_cents_per_million` fields,
-	// but the values are an internal wholesale unit, not literal cents — across
-	// every published Serverless model on wafer.ai the user-facing rate equals
-	// `cents × 125 / 10000` (i.e. wholesale × 1.25 / 100; GLM-5.1's `120` →
-	// $1.50/M, Kimi-K2.6's `88` → $1.10/M, etc.). The multiply-first form keeps
-	// the result a finite dyadic for every observed value.
-	// For the Pass SKU the per-token rate is bundled in the flat-rate
-	// subscription, so we follow the convention shared with
-	// `kimi-code`/`firepass`/`alibaba-coding-plan` and seed every Pass model with
-	// `cost: 0` regardless of what the upstream envelope says.
-	const isPassSku = providerId === "wafer-pass";
-	const cost = isPassSku
-		? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
-		: {
-				input: (toPositiveNumber(pricing.input_cents_per_million, 0) * 125) / 10000,
-				output: (toPositiveNumber(pricing.output_cents_per_million, 0) * 125) / 10000,
-				cacheRead: (toPositiveNumber(pricing.cache_read_cents_per_million, 0) * 125) / 10000,
-				cacheWrite: 0,
-			};
+	const cost = {
+		input: (toPositiveNumber(pricing.input_cents_per_million, 0) * 125) / 10000,
+		output: (toPositiveNumber(pricing.output_cents_per_million, 0) * 125) / 10000,
+		cacheRead: (toPositiveNumber(pricing.cache_read_cents_per_million, 0) * 125) / 10000,
+		cacheWrite: 0,
+	};
 	const name = toModelName(wafer?.display_name, defaults.name);
 	const base: ModelSpec<"openai-completions"> = {
 		...defaults,
@@ -1643,13 +1722,12 @@ function mapWaferModel(
 	};
 }
 
-function createWaferOptions(
-	providerId: "wafer-pass" | "wafer-serverless",
-	config: WaferModelManagerConfig | undefined,
+export function waferServerlessModelManagerOptions(
+	config?: WaferModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
 	const baseUrl = config?.baseUrl ?? WAFER_DEFAULT_BASE_URL;
-	const passOnly = providerId === "wafer-pass";
+	const providerId = "wafer-serverless" as const;
 	return {
 		providerId,
 		...(apiKey && {
@@ -1659,28 +1737,11 @@ function createWaferOptions(
 					provider: providerId,
 					baseUrl,
 					apiKey,
-					filterModel: entry => {
-						if (!passOnly) return true;
-						const wafer = readWaferRecord(entry);
-						return wafer?.tier === "pass_included";
-					},
 					mapModel: (entry, defaults) => mapWaferModel(providerId, baseUrl, entry, defaults),
 					fetch: config?.fetch,
 				}),
 		}),
 	};
-}
-
-export function waferPassModelManagerOptions(
-	config?: WaferModelManagerConfig,
-): ModelManagerOptions<"openai-completions"> {
-	return createWaferOptions("wafer-pass", config);
-}
-
-export function waferServerlessModelManagerOptions(
-	config?: WaferModelManagerConfig,
-): ModelManagerOptions<"openai-completions"> {
-	return createWaferOptions("wafer-serverless", config);
 }
 
 // ---------------------------------------------------------------------------
@@ -2435,6 +2496,25 @@ export function togetherModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 15.5 CoreWeave Serverless Inference
+// ---------------------------------------------------------------------------
+
+export interface CoreWeaveModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function coreWeaveModelManagerOptions(
+	config?: CoreWeaveModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createSimpleOpenAICompletionsOptions("coreweave", "https://api.inference.wandb.ai/v1", {
+		...config,
+		headers: () => coreWeaveProjectHeaders(Bun.env),
+	});
+}
+
+// ---------------------------------------------------------------------------
 // 16. Moonshot
 // ---------------------------------------------------------------------------
 
@@ -2448,7 +2528,10 @@ export function moonshotModelManagerOptions(
 	config?: MoonshotModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? "https://api.moonshot.ai/v1";
+	// `MOONSHOT_BASE_URL` redirects discovery (and the streaming request that
+	// inherits this baseUrl) at the Kimi China platform `api.moonshot.cn`; an
+	// explicit `config.baseUrl` still wins. Mirrors LITELLM_BASE_URL/LM_STUDIO_BASE_URL. (#2883)
+	const baseUrl = config?.baseUrl ?? Bun.env.MOONSHOT_BASE_URL ?? "https://api.moonshot.ai/v1";
 	const references = createBundledReferenceMap<"openai-completions">("moonshot");
 	return {
 		providerId: "moonshot",
@@ -2481,6 +2564,110 @@ export function moonshotModelManagerOptions(
 									? { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] }
 									: undefined),
 						};
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// 16.5 Sakana AI
+// ---------------------------------------------------------------------------
+
+const SAKANA_DEFAULT_BASE_URL = "https://api.sakana.ai/v1";
+const SAKANA_FREE_ROUTER_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+const SAKANA_FUGU_ULTRA_COST = { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 } as const;
+const SAKANA_FUGU_ULTRA_CONTEXT_WINDOW = 1_000_000;
+const SAKANA_FUGU_THINKING: ThinkingConfig = {
+	mode: "effort",
+	efforts: [Effort.High, Effort.XHigh],
+	effortMap: { [Effort.XHigh]: "max" },
+};
+const SAKANA_RESPONSES_COMPAT: ModelSpec<"openai-responses">["compat"] = {
+	includeEncryptedReasoning: false,
+	streamIdleTimeoutMs: 0,
+};
+
+function normalizeSakanaBaseUrl(baseUrl: string | undefined): string {
+	const value = baseUrl?.trim() || SAKANA_DEFAULT_BASE_URL;
+	const normalized = value.replace(/\/+$/, "");
+	return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
+}
+
+function isSakanaFuguModelId(modelId: string): boolean {
+	return /^fugu(?:$|-)/i.test(modelId);
+}
+
+function createSakanaFuguStaticModel(
+	id: string,
+	name: string,
+	cost: ModelSpec<"openai-responses">["cost"],
+	contextWindow: number | null,
+): ModelSpec<"openai-responses"> {
+	return {
+		id,
+		name,
+		api: "openai-responses",
+		provider: "sakana",
+		baseUrl: SAKANA_DEFAULT_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { ...cost },
+		contextWindow,
+		maxTokens: null,
+		thinking: { ...SAKANA_FUGU_THINKING },
+		compat: { ...SAKANA_RESPONSES_COMPAT },
+	};
+}
+
+export const SAKANA_FUGU_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] = [
+	createSakanaFuguStaticModel("fugu", "Fugu", SAKANA_FREE_ROUTER_COST, SAKANA_FUGU_ULTRA_CONTEXT_WINDOW),
+	createSakanaFuguStaticModel("fugu-ultra", "Fugu Ultra", SAKANA_FUGU_ULTRA_COST, SAKANA_FUGU_ULTRA_CONTEXT_WINDOW),
+	createSakanaFuguStaticModel(
+		"fugu-ultra-20260615",
+		"Fugu Ultra 20260615",
+		SAKANA_FUGU_ULTRA_COST,
+		SAKANA_FUGU_ULTRA_CONTEXT_WINDOW,
+	),
+];
+
+const SAKANA_FUGU_STATIC_MODEL_BY_ID = new Map(SAKANA_FUGU_STATIC_MODELS.map(model => [model.id, model] as const));
+const SAKANA_FUGU_STATIC_MODEL_IDS = SAKANA_FUGU_STATIC_MODELS.map(model => model.id);
+
+export interface SakanaModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function sakanaModelManagerOptions(config?: SakanaModelManagerConfig): ModelManagerOptions<"openai-responses"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = normalizeSakanaBaseUrl(config?.baseUrl ?? Bun.env.SAKANA_BASE_URL ?? Bun.env.FUGU_BASE_URL);
+	const references = createBundledReferenceMap<"openai-responses">("sakana");
+	return {
+		providerId: "sakana",
+		dynamicModelsAuthoritative: true,
+		dropCachedModelIdsOnStaticMismatch: SAKANA_FUGU_STATIC_MODEL_IDS,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-responses",
+					provider: "sakana",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => {
+						const reference = references.get(defaults.id) ?? SAKANA_FUGU_STATIC_MODEL_BY_ID.get(defaults.id);
+						const model = mapWithBundledReference(entry, defaults, reference);
+						if (!reference && isSakanaFuguModelId(model.id)) {
+							return {
+								...model,
+								reasoning: true,
+								thinking: { ...SAKANA_FUGU_THINKING },
+								compat: { ...SAKANA_RESPONSES_COMPAT },
+							};
+						}
+						return model;
 					},
 					fetch: config?.fetch,
 				}),
@@ -2630,6 +2817,231 @@ export interface LiteLLMModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+export interface FetchLiteLLMRichModelsOptions<TApi extends Api> {
+	api: TApi;
+	provider: Provider;
+	baseUrl: string;
+	apiKey?: string;
+	headers?: Record<string, string>;
+	fetch?: FetchImpl;
+	signal?: AbortSignal;
+	referenceResolver?: (modelId: string) => ModelSpec<TApi> | undefined;
+}
+
+type LiteLLMRichModelEntry = Record<string, unknown>;
+
+const LITELLM_RICH_ENDPOINTS = ["/model_group/info", "/v2/model/info", "/model/info", "/v1/model/info"] as const;
+export const OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW = 128_000;
+export const OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS = 32_768;
+const UNKNOWN_PROXY_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+
+export function normalizeLiteLLMManagementBaseUrl(baseUrl: string): string {
+	const trimmed = baseUrl.trim().replace(/\/+$/g, "");
+	if (!trimmed) {
+		return "";
+	}
+	try {
+		const parsed = new URL(trimmed);
+		const path = parsed.pathname.replace(/\/+$/g, "");
+		parsed.pathname = path.endsWith("/v1") ? path.slice(0, -3) || "/" : path || "/";
+		const normalized = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+		return normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
+	} catch {
+		return trimmed.replace(/\/v1$/, "");
+	}
+}
+
+function normalizeLiteLLMRuntimeBaseUrl(baseUrl: string): string {
+	const trimmed = baseUrl.trim();
+	return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+}
+
+function toNonEmptyString(value: unknown): string | undefined {
+	if (typeof value !== "string") {
+		return undefined;
+	}
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function extractLiteLLMRichEntries(payload: unknown): LiteLLMRichModelEntry[] | null {
+	if (Array.isArray(payload)) {
+		return payload.flatMap(entry => (isRecord(entry) ? [entry] : []));
+	}
+	if (!isRecord(payload)) {
+		return null;
+	}
+	for (const candidate of [payload.data, payload.models, payload.result, payload.items]) {
+		if (candidate === undefined) {
+			continue;
+		}
+		const entries = extractLiteLLMRichEntries(candidate);
+		if (entries !== null) {
+			return entries;
+		}
+	}
+	return null;
+}
+
+function getLiteLLMModelInfo(entry: LiteLLMRichModelEntry): LiteLLMRichModelEntry | undefined {
+	return isRecord(entry.model_info) ? entry.model_info : undefined;
+}
+
+function getLiteLLMParams(entry: LiteLLMRichModelEntry): LiteLLMRichModelEntry | undefined {
+	return isRecord(entry.litellm_params) ? entry.litellm_params : undefined;
+}
+
+function getLiteLLMMetadataValue(entry: LiteLLMRichModelEntry, key: string): unknown {
+	return entry[key] ?? getLiteLLMModelInfo(entry)?.[key];
+}
+
+function getLiteLLMRichModelId(entry: LiteLLMRichModelEntry): string | undefined {
+	return (
+		toNonEmptyString(entry.model_group) ??
+		toNonEmptyString(entry.model_name) ??
+		toNonEmptyString(entry.id) ??
+		toNonEmptyString(getLiteLLMParams(entry)?.model)
+	);
+}
+
+function getSupportedOpenAIParams(entry: LiteLLMRichModelEntry): string[] | undefined {
+	const value = getLiteLLMMetadataValue(entry, "supported_openai_params");
+	if (!Array.isArray(value)) {
+		return undefined;
+	}
+	return value.flatMap(item => (typeof item === "string" ? [item] : []));
+}
+
+function mapLiteLLMRichEntry<TApi extends Api>(
+	entry: LiteLLMRichModelEntry,
+	options: FetchLiteLLMRichModelsOptions<TApi>,
+	runtimeBaseUrl: string,
+): ModelSpec<TApi> | null {
+	const id = getLiteLLMRichModelId(entry);
+	if (!id) {
+		return null;
+	}
+	const reference = options.referenceResolver?.(id);
+	const modelName = toNonEmptyString(entry.model_name);
+	const contextWindow = toPositiveNumber(
+		getLiteLLMMetadataValue(entry, "max_input_tokens"),
+		reference?.contextWindow ?? OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW,
+	);
+	const maxTokens = toPositiveNumber(
+		getLiteLLMMetadataValue(entry, "max_output_tokens"),
+		reference?.maxTokens ?? Math.min(contextWindow, OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS),
+	);
+	const supportsVision = getLiteLLMMetadataValue(entry, "supports_vision");
+	const supportsReasoning = getLiteLLMMetadataValue(entry, "supports_reasoning");
+	const supportedOpenAIParams = getSupportedOpenAIParams(entry);
+	const supportsFunctionCalling = getLiteLLMMetadataValue(entry, "supports_function_calling");
+	const supportsTools =
+		supportsFunctionCalling === true
+			? true
+			: supportsFunctionCalling === false
+				? false
+				: supportedOpenAIParams !== undefined
+					? supportedOpenAIParams.some(param =>
+							["tools", "tool_choice", "functions", "function_call"].includes(param),
+						)
+					: reference?.supportsTools;
+	const compat: OpenAICompat = {
+		...(reference?.compat ?? {}),
+		supportsStore: false,
+		supportsDeveloperRole: false,
+		...(supportedOpenAIParams !== undefined
+			? { supportsReasoningEffort: supportedOpenAIParams.includes("reasoning_effort") }
+			: {}),
+	};
+	return {
+		id,
+		name: modelName && modelName !== id ? modelName : (reference?.name ?? id),
+		api: options.api,
+		provider: options.provider,
+		baseUrl: runtimeBaseUrl,
+		contextWindow,
+		maxTokens,
+		input:
+			supportsVision === true
+				? ["text", "image"]
+				: supportsVision === false
+					? ["text"]
+					: (reference?.input ?? ["text"]),
+		reasoning: typeof supportsReasoning === "boolean" ? supportsReasoning : (reference?.reasoning ?? false),
+		thinking: reference?.thinking,
+		cost: reference?.cost ?? UNKNOWN_PROXY_COST,
+		...(supportsTools !== undefined ? { supportsTools } : {}),
+		compat: compat as ModelSpec<TApi>["compat"],
+	};
+}
+
+async function fetchLiteLLMRichEndpoint<TApi extends Api>(
+	endpoint: string,
+	options: FetchLiteLLMRichModelsOptions<TApi>,
+	managementBaseUrl: string,
+	runtimeBaseUrl: string,
+): Promise<ModelSpec<TApi>[] | null> {
+	const fetchImpl = options.fetch ?? globalThis.fetch;
+	const requestHeaders: Record<string, string> = {
+		Accept: "application/json",
+		...options.headers,
+	};
+	if (options.apiKey) {
+		requestHeaders.Authorization = `Bearer ${options.apiKey}`;
+	}
+	let response: Response;
+	try {
+		response = await fetchImpl(`${managementBaseUrl}${endpoint}`, {
+			method: "GET",
+			headers: requestHeaders,
+			signal: options.signal,
+		});
+	} catch {
+		return null;
+	}
+	if (!response.ok) {
+		return null;
+	}
+	let payload: unknown;
+	try {
+		payload = await response.json();
+	} catch {
+		return null;
+	}
+	const entries = extractLiteLLMRichEntries(payload);
+	if (!entries || entries.length === 0) {
+		return null;
+	}
+	const deduped = new Map<string, ModelSpec<TApi>>();
+	for (const entry of entries) {
+		const model = mapLiteLLMRichEntry(entry, options, runtimeBaseUrl);
+		if (model) {
+			deduped.set(model.id, model);
+		}
+	}
+	if (deduped.size === 0) {
+		return null;
+	}
+	return Array.from(deduped.values()).sort((left, right) => left.id.localeCompare(right.id));
+}
+
+export async function fetchLiteLLMRichModels<TApi extends Api>(
+	options: FetchLiteLLMRichModelsOptions<TApi>,
+): Promise<ModelSpec<TApi>[] | null> {
+	const managementBaseUrl = normalizeLiteLLMManagementBaseUrl(options.baseUrl);
+	const runtimeBaseUrl = normalizeLiteLLMRuntimeBaseUrl(options.baseUrl);
+	if (!managementBaseUrl || !runtimeBaseUrl) {
+		return null;
+	}
+	for (const endpoint of LITELLM_RICH_ENDPOINTS) {
+		const models = await fetchLiteLLMRichEndpoint(endpoint, options, managementBaseUrl, runtimeBaseUrl);
+		if (models) {
+			return models;
+		}
+	}
+	return null;
+}
+
 export function litellmModelManagerOptions(
 	config?: LiteLLMModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
@@ -2637,21 +3049,32 @@ export function litellmModelManagerOptions(
 	const baseUrl = config?.baseUrl ?? Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
 	return {
 		providerId: "litellm",
-		cacheProviderId: `litellm:${Bun.hash(baseUrl).toString(36)}`,
-		// litellm is a local-only proxy whose /v1/models returns bare ids with no
-		// metadata, and it is never bundled in models.json (that would leak the
-		// machine's localhost catalog). It proxies known upstream models, so we
-		// enrich discovered ids against models.dev — the same reference source the
-		// gateway providers (fireworks et al.) use — instead of a bundled map.
+		cacheProviderId: `litellm:rich-v1:${Bun.hash(baseUrl).toString(36)}`,
+		// litellm is a local-only proxy and is never bundled in models.json (that
+		// would leak the machine's localhost catalog). Prefer the proxy's richer
+		// management metadata, then fall back to /v1/models and enrich bare ids
+		// against models.dev like the gateway providers (fireworks et al.) do.
 		fetchDynamicModels: async () => {
 			const modelsDevReferences = await loadModelsDevReferences<"openai-completions">(config?.fetch);
+			const resolveReference = (id: string) => modelsDevReferences.get(id);
+			const richModels = await fetchLiteLLMRichModels({
+				api: "openai-completions",
+				provider: "litellm",
+				baseUrl,
+				apiKey,
+				fetch: config?.fetch,
+				referenceResolver: resolveReference,
+				signal: AbortSignal.timeout(10_000),
+			});
+			if (richModels && richModels.length > 0) {
+				return richModels;
+			}
 			return fetchOpenAICompatibleModels({
 				api: "openai-completions",
 				provider: "litellm",
 				baseUrl,
 				apiKey,
-				mapModel: (entry, defaults) =>
-					mapWithBundledReference(entry, defaults, modelsDevReferences.get(defaults.id)),
+				mapModel: (entry, defaults) => mapWithBundledReference(entry, defaults, resolveReference(defaults.id)),
 				fetch: config?.fetch,
 			});
 		},
@@ -2977,10 +3400,16 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 								? entry.name
 								: (reference?.name ?? defaults.name);
 						const api = inferCopilotApi(defaults.id);
+						// `supports.vision` reports the model's intrinsic capability, but
+						// the business/enterprise endpoints respond `400 vision is not
+						// supported` on image inputs. Only honour the flag for the
+						// canonical personal-Copilot host.
 						const supportsVision = extractCopilotSupportsVision(entry);
-						const input: ModelSpec<Api>["input"] = supportsVision
-							? ["text", "image"]
-							: (reference?.input ?? defaults.input);
+						const input: ModelSpec<Api>["input"] = isPersonalGitHubCopilotBaseUrl(baseUrl)
+							? supportsVision
+								? ["text", "image"]
+								: (reference?.input ?? defaults.input)
+							: ["text"];
 						// With COPILOT_API_HEADERS the served window is the long-context
 						// ceiling; the default tier ends at token_prices.default.context_max
 						// prompt tokens. Cap the base entry to the default tier — the long
@@ -3494,6 +3923,19 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor
 	openAiCompletionsDescriptor("cerebras", "cerebras", "https://api.cerebras.ai/v1"),
 	// --- Together ---
 	openAiCompletionsDescriptor("togetherai", "together", "https://api.together.xyz/v1"),
+	// --- CoreWeave Serverless Inference ---
+	openAiCompletionsDescriptor("wandb", "coreweave", "https://api.inference.wandb.ai/v1", {
+		transformModel: model => {
+			if (!model.id.startsWith("openai/gpt-oss-")) {
+				return model;
+			}
+			return {
+				...model,
+				reasoning: true,
+				thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
+			};
+		},
+	}),
 	// --- NVIDIA ---
 	openAiCompletionsDescriptor("nvidia", "nvidia", "https://integrate.api.nvidia.com/v1", {
 		defaultContextWindow: 131072,

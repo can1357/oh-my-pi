@@ -2054,7 +2054,14 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		}
 
 		if (action === "reload" && (isWorkspace || !resolvedFile)) {
-			const servers = getLspServers(config);
+			// `reload *` is the user's explicit request to re-read config from
+			// disk. Drop the per-cwd cache entry so `.omp/lsp.json`, root markers,
+			// and plugin configs added after the first LSP call become visible —
+			// otherwise `getConfig` returns the first observation for the rest of
+			// the process lifetime (#3546).
+			configCache.delete(this.session.cwd);
+			const refreshedConfig = getConfig(this.session.cwd);
+			const servers = getLspServers(refreshedConfig);
 			if (servers.length === 0) {
 				return {
 					content: [{ type: "text", text: "No language server found for this action" }],

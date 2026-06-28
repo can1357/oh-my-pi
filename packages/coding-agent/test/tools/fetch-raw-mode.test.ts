@@ -6,7 +6,7 @@ import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import { ReadTool } from "@pk-nerdsaver-ai/pi-coding-agent/tools/read";
 import * as scrapers from "@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/types";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 const ATOM = `<?xml version="1.0"?>\n<feed xmlns="http://www.w3.org/2005/Atom"><title>Sample</title><entry><title>One</title><id>1</id><updated>2024-01-01T00:00:00Z</updated><content>body</content></entry></feed>`;
 const JSON_BODY = `{"alpha":1,"beta":[2,3]}`;
@@ -47,7 +47,7 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 	});
 	afterEach(() => {
 		vi.restoreAllMocks();
-		fs.rmSync(testDir, { recursive: true, force: true });
+		removeSyncWithRetries(testDir);
 	});
 
 	it("returns the raw atom feed body when :raw is set", async () => {
@@ -130,7 +130,7 @@ describe("read URL with multi-range selector (regression: was stuck on URL → 4
 	});
 	afterEach(() => {
 		vi.restoreAllMocks();
-		fs.rmSync(testDir, { recursive: true, force: true });
+		removeSyncWithRetries(testDir);
 	});
 
 	it("routes :A-B,C-D to the multi-range builder against the cached body", async () => {

@@ -55,10 +55,15 @@ export interface ClassifyDifficultyDeps {
 }
 
 /**
- * Classify `promptText` and return a concrete effort clamped to `deps.model`.
+ * Classify `promptText` and return a concrete effort clamped to `deps.model`,
+ * or `undefined` when the model has no controllable effort surface (auto has
+ * nothing to pick — the caller leaves the prior reasoning level in place).
  * @throws when the backend cannot produce a usable classification.
  */
-export async function classifyDifficulty(promptText: string, deps: ClassifyDifficultyDeps): Promise<Effort> {
+export async function classifyDifficulty(
+	promptText: string,
+	deps: ClassifyDifficultyDeps,
+): Promise<Effort | undefined> {
 	const backend = deps.settings.get("providers.autoThinkingModel");
 	const input = prepareClassifierInput(promptText);
 	const effort =
@@ -69,10 +74,10 @@ export async function classifyDifficulty(promptText: string, deps: ClassifyDiffi
 }
 
 async function classifyOnline(input: string, deps: ClassifyDifficultyDeps): Promise<Effort> {
-	const resolved = resolveRoleSelection(["smol"], deps.settings, deps.registry.getAvailable(), deps.registry);
+	const resolved = resolveRoleSelection(["tiny", "smol"], deps.settings, deps.registry.getAvailable(), deps.registry);
 	const model = resolved?.model;
 	if (!model) {
-		throw new Error("auto-thinking: no smol model available for classification");
+		throw new Error("auto-thinking: no tiny/smol model available for classification");
 	}
 	const apiKey = await deps.registry.getApiKey(model, deps.sessionId);
 	if (!apiKey) {

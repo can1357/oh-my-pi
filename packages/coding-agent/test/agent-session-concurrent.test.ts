@@ -22,7 +22,7 @@ import { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-ses
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@pk-nerdsaver-ai/pi-coding-agent/session/messages";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 import { type } from "arktype";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -62,7 +62,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			authStorage.close();
 		}
 		if (tempDir && fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true });
+			removeSyncWithRetries(tempDir);
 		}
 		vi.restoreAllMocks();
 		AsyncJobManager.resetForTests();
@@ -982,7 +982,7 @@ describe("AgentSession TTSR resume gate", () => {
 			authStorage.close();
 		}
 		if (tempDir && fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true });
+			removeSyncWithRetries(tempDir);
 		}
 		vi.restoreAllMocks();
 	});
@@ -1194,6 +1194,11 @@ describe("AgentSession TTSR resume gate", () => {
 							delta: 'let val = result.unwrap("oops")',
 							partial,
 						});
+						// The TTSR abort placeholder is only minted for tool calls that reached
+						// `toolcall_end`: the agent loop drops incomplete tool calls from an
+						// aborted turn (partial args are unsafe to replay). Complete the call
+						// before the rule-driven abort fires so the labeled placeholder survives.
+						stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: toolCallContent, partial });
 					});
 				} else {
 					pushContinuationStream(stream, () => {});

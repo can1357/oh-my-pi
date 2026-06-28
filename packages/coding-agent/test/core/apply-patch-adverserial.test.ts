@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ApplyPatchError, applyPatch } from "@pk-nerdsaver-ai/pi-coding-agent/edit";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("applyPatch adversarial inputs", () => {
 	let tempDir: string;
@@ -14,7 +15,7 @@ describe("applyPatch adversarial inputs", () => {
 
 	afterEach(() => {
 		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		} catch {
 			// Ignore cleanup errors
 		}

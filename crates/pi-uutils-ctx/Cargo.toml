@@ -1,0 +1,16 @@
+[package]
+name = "pi-uutils-ctx"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Thread-local stdio + cwd context for embedding uutils utilities as in-process shell builtins."
+
+[lib]
+path = "src/lib.rs"
+
+# Deliberately does NOT inherit workspace lints: this crate exists to host the
+# I/O shim consumed by vendored uutils code, which is held to upstream's lint
+# policy, not ours.
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

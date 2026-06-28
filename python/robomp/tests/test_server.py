@@ -485,6 +485,17 @@ def test_trigger_triage_replaces_inactive_manual_delivery(env, monkeypatch: pyte
     with TestClient(app) as client:
         db = get_database(cfg.sqlite_path)
         db.record_event(
+            delivery_id="running-octo__widget-7",
+            event_type="issue_comment",
+            repo="octo/widget",
+            issue_key=issue_key("octo/widget", 7),
+            payload={"action": "created"},
+        )
+        claimed = db.claim_next_event()
+        assert claimed is not None
+        assert claimed.delivery_id == "running-octo__widget-7"
+
+        db.record_event(
             delivery_id=delivery,
             event_type="issues",
             repo="octo/widget",
@@ -633,6 +644,17 @@ def test_trigger_retry_by_delivery_id_requeues(env, monkeypatch: pytest.MonkeyPa
     with TestClient(app) as client:
         db = get_database(cfg.sqlite_path)
         db.record_event(
+            delivery_id="running-widget-4",
+            event_type="issue_comment",
+            repo="octo/widget",
+            issue_key=issue_key("octo/widget", 4),
+            payload={"action": "created"},
+        )
+        claimed = db.claim_next_event()
+        assert claimed is not None
+        assert claimed.delivery_id == "running-widget-4"
+
+        db.record_event(
             delivery_id="d-old",
             event_type="issues",
             repo="octo/widget",
@@ -658,6 +680,17 @@ def test_trigger_retry_by_issue_finds_latest_non_skipped_event(env, monkeypatch:
     with TestClient(app) as client:
         db = get_database(cfg.sqlite_path)
         key = issue_key("octo/widget", 9)
+        db.record_event(
+            delivery_id="running-widget-9",
+            event_type="issue_comment",
+            repo="octo/widget",
+            issue_key=key,
+            payload={"action": "created"},
+        )
+        claimed = db.claim_next_event()
+        assert claimed is not None
+        assert claimed.delivery_id == "running-widget-9"
+
         db.record_event(
             delivery_id="d-old-1",
             event_type="issues",
@@ -1503,6 +1536,43 @@ def test_webhook_directive_on_unknown_issue_is_queued_with_metadata(env) -> None
     assert directive == {"body": "please refactor X", "author": "can1357", "pragmas": [], "authorizes_impl": True}
 
 
+def test_webhook_directive_authorizes_deployed_app_login_without_author_association(
+    monkeypatch: pytest.MonkeyPatch, env
+) -> None:
+    monkeypatch.setenv("ROBOMP_BOT_LOGIN", "@roboomp[bot]")
+    monkeypatch.setenv("ROBOMP_REPO_ALLOWLIST", "can1357/widget")
+    reset_settings_cache()
+    cfg = Settings()  # type: ignore[call-arg]
+    cfg.ensure_paths()
+    app = create_app(cfg)
+    payload = {
+        "action": "created",
+        "comment": {
+            "user": {"login": "can1357"},
+            "body": "@roboomp go ahead",
+        },
+        "issue": {"number": 3196},
+        "repository": {
+            "full_name": "can1357/widget",
+            "owner": {"login": "can1357", "type": "User"},
+        },
+    }
+    raw = json.dumps(payload).encode()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/webhook/github",
+            content=raw,
+            headers=_signed_headers("test-webhook-secret", raw, event="issue_comment", delivery="dir-app-login"),
+        )
+        assert resp.status_code == 202
+        assert resp.json()["state"] == "queued"
+        row = get_database(cfg.sqlite_path).get_event("dir-app-login")
+    close_database()
+    assert row is not None
+    directive = row.payload.get("_robomp_directive")
+    assert directive == {"body": "go ahead", "author": "can1357", "pragmas": [], "authorizes_impl": True}
+
+
 def test_webhook_maintainer_bypasses_rate_limit(
     rate_limited_settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
@@ -1528,8 +1598,16 @@ def test_webhook_maintainer_bypasses_rate_limit(
             )
             assert resp.status_code == 202
             states.append(resp.json()["state"])
+        directive_event = get_database(cfg.sqlite_path).get_event("m-3")
     close_database()
     assert states == ["queued"] * 4, states
+    assert directive_event is not None
+    assert directive_event.payload.get("_robomp_directive") == {
+        "body": "do X",
+        "author": "can1357",
+        "pragmas": [],
+        "authorizes_impl": True,
+    }
 
 
 # -------- handler-level: bootstrap + reopen ----------------------------

@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
 import type { Model } from "@pk-nerdsaver-ai/pi-ai";
 import type { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
 import type { CustomToolContext } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/custom-tools";
@@ -10,12 +9,13 @@ import {
 	imageGenTool,
 	setPreferredImageProvider,
 } from "@pk-nerdsaver-ai/pi-coding-agent/tools/image-gen";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 const originalOpenRouterKey = Bun.env.OPENROUTER_API_KEY;
 const generatedImagePaths: string[] = [];
 
 afterEach(async () => {
-	await Promise.all(generatedImagePaths.splice(0).map(imagePath => fs.rm(imagePath, { force: true })));
+	await Promise.all(generatedImagePaths.splice(0).map(imagePath => removeWithRetries(imagePath)));
 	if (originalOpenRouterKey === undefined) {
 		delete Bun.env.OPENROUTER_API_KEY;
 	} else {

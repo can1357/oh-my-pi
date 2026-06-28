@@ -8,6 +8,7 @@
  */
 import type { AgentMessage } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } from "@pk-nerdsaver-ai/pi-ai";
+import { escapeXmlText } from "@pk-nerdsaver-ai/pi-utils";
 import { INTENT_FIELD } from "@pk-nerdsaver-ai/pi-wire";
 import type {
 	BashExecutionMessage,
@@ -28,6 +29,17 @@ export interface HistoryFormatOptions {
 	includeToolIntent?: boolean;
 	/** Render watched-session roles as inline `**agent**:` / `**user**:` labels (collapsing consecutive same-role messages) instead of `## ` headings, so a primary transcript embedded inside an advisor turn stays visually distinct. */
 	watchedRoles?: boolean;
+	/**
+	 * Expand the primary agent's injected constraint context — plan mode's rules
+	 * (`plan-mode-context`) and the approved plan it implements
+	 * (`plan-mode-reference`) — verbatim instead of as a truncated one-liner,
+	 * wrapped in a `<primary-context>` tag so a reviewer reads it as the primary's
+	 * instructions, not its own. The advisor sets this: a truncated rule (plan
+	 * mode's "NEVER create files … except the plan file") makes it raise false
+	 * blockers. See {@link PRIMARY_CONTEXT_CUSTOM_TYPES}. Other custom messages
+	 * still collapse to a one-liner.
+	 */
+	expandPrimaryContext?: boolean;
 }
 
 /** Max length of the primary-arg summary inside `→ tool(...)` lines. */
@@ -74,6 +86,14 @@ function lineCount(text: string): number {
 	return text.split("\n").length;
 }
 
+function primaryArgValue(value: unknown): string {
+	if (typeof value === "string" && value.length > 0) return value;
+	if (Array.isArray(value) && value.length > 0 && value.every(v => typeof v === "string")) {
+		return value.join(", ");
+	}
+	return "";
+}
+
 /** Pick the most informative scalar argument of a tool call. */
 function primaryArg(name: string, args: Record<string, unknown> | undefined): string {
 	if (!args || typeof args !== "object") return "";
@@ -85,12 +105,21 @@ function primaryArg(name: string, args: Record<string, unknown> | undefined): st
 		if (note) return oneLine(note);
 		if (severity) return oneLine(severity);
 	}
+	if (name === "grep") {
+		const pattern = primaryArgValue(args.pattern);
+		const paths = primaryArgValue(args.paths);
+		if (pattern && paths) return oneLine(`${pattern} @ ${paths}`);
+		if (pattern) return oneLine(pattern);
+		if (paths) return oneLine(paths);
+	}
+	if (name === "glob") {
+		const paths = primaryArgValue(args.paths);
+		if (paths) return oneLine(paths);
+	}
 	for (const key of PRIMARY_ARG_KEYS) {
 		const value = args[key];
-		if (typeof value === "string" && value.length > 0) return oneLine(value);
-		if (Array.isArray(value) && value.length > 0 && value.every(v => typeof v === "string")) {
-			return oneLine(value.join(", "));
-		}
+		const summary = primaryArgValue(value);
+		if (summary) return oneLine(summary);
 	}
 	// Fallback: first non-intent string arg, then a compact JSON of the args.
 	const rest: Record<string, unknown> = {};
@@ -155,6 +184,21 @@ function executionLine(
 	const lines = lineCount(msg.output);
 	return `→ ${kind}! ${oneLine(source)} ⇒ ${status} · ${lines} ${lines === 1 ? "line" : "lines"}`;
 }
+
+/**
+ * Hidden custom messages that inject the primary agent's operative *constraints*
+ * — plan mode's rules and the approved plan it implements. A reviewer (the
+ * advisor) must read these verbatim; truncating them hides load-bearing
+ * exceptions (e.g. plan mode permits exactly one plan file). Every other custom
+ * type stays a one-liner.
+ *
+ * Deliberately excludes `goal-mode-context`: its body carries live budget
+ * counters (tokens/seconds used) that change every turn, so it can neither be
+ * deduped against a prior copy nor expanded each turn without flooding the
+ * reviewer — and its constraints don't drive the file-write misreads this
+ * targets.
+ */
+export const PRIMARY_CONTEXT_CUSTOM_TYPES: ReadonlySet<string> = new Set(["plan-mode-context", "plan-mode-reference"]);
 
 /** One-liner for custom/hook messages: `[irc] A → B: body…`. */
 function customOneLiner(msg: CustomMessage | HookMessage): string {
@@ -279,7 +323,20 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 			}
 			case "custom":
 			case "hookMessage": {
-				lines.push(customOneLiner(msg as CustomMessage | HookMessage), "");
+				const custom = msg as CustomMessage | HookMessage;
+				if (opts?.expandPrimaryContext && PRIMARY_CONTEXT_CUSTOM_TYPES.has(custom.customType)) {
+					const text = contentToText(custom.content).trim();
+					if (text) {
+						lines.push(
+							`<primary-context kind="${custom.customType}">`,
+							escapeXmlText(text),
+							"</primary-context>",
+							"",
+						);
+					}
+				} else {
+					lines.push(customOneLiner(custom), "");
+				}
 				lastWatchedLabel = undefined;
 				break;
 			}

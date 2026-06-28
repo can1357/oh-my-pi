@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+package cockroach.errorspb;
+
+import "errorspb/errors.proto";
+
+message MarkPayload {
+  string msg = 1;
+  repeated .cockroach.errorspb.ErrorTypeMark types = 2;
+}

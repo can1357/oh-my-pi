@@ -2,6 +2,7 @@ import { format } from "date-fns";
 import { useMemo } from "react";
 import { Line } from "react-chartjs-2";
 import { getOverviewStats, getRecentRequests } from "../api";
+import { AgentTokenShare } from "../components/AgentTokenShare";
 import { CHART_THEMES } from "../components/chart-shared";
 import { formatCost, formatDurationMs, formatInteger, formatRelativeTime } from "../data/formatters";
 import { useResource } from "../data/useResource";
@@ -223,6 +224,15 @@ export function OverviewRoute({ active, range, refreshTrigger, onRequestClick }:
 			<AsyncBoundary loading={overviewLoading} error={overviewError} data={overview}>
 				{overview && <MetricCluster stats={overview.overall} />}
 			</AsyncBoundary>
+
+			<Panel
+				title="Token Usage by Agent"
+				subtitle="Share of tokens across the main agent, task subagents, and the advisor"
+			>
+				<AsyncBoundary loading={overviewLoading} error={overviewError} data={overview}>
+					{overview && <AgentTokenShare stats={overview.byAgentType} />}
+				</AsyncBoundary>
+			</Panel>
 
 			<div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 				<div className="lg:col-span-2">

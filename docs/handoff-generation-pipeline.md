@@ -45,49 +45,39 @@ The same minimum-content guard exists again inside `AgentSession.handoff()` and 
 
 - Reads current branch entries (`sessionManager.getBranch()`).
 - Validates minimum message count (`>= 2`).
+- Refuses if a response is still streaming (the TUI `/handoff` and RPC `handoff` command guard on `isStreaming` before calling this; the auto-handoff path runs only after the turn settles). Resetting the agent mid-stream would let the live turn keep emitting into the torn-down session.
 - Creates `#handoffAbortController` and links any caller-provided abort signal to it.
 - Resolves the current model API key through `ModelRegistry`.
-- Calls `generateHandoff(...)` with:
-  - live agent messages (`agent.state.messages`),
-  - the current model and API key,
-  - the base system prompt (`#baseSystemPrompt`),
-  - the live tool array (`agent.state.tools`),
-  - optional focus instructions,
-  - coding-agent message conversion (`convertToLlm`),
-  - provider metadata, current thinking level, and `initiatorOverride: "agent"`.
-
-`generateHandoff(...)` lives in `packages/agent/src/compaction/compaction.ts` next to summarization. It renders `packages/agent/src/compaction/prompts/handoff-document.md` via `renderHandoffPrompt(...)` with optional `additionalFocus`.
+- Builds the handoff request through the **same pipeline a live turn uses** — the cache-preserving side-request path shared with `runEphemeralTurn` (`/btw`, `/omfg`):
+  1. Renders the handoff prompt (`renderHandoffPrompt(...)` with optional `additionalFocus`, after obfuscating any focus instructions) and appends it as a trailing agent-attributed `user` message to a snapshot of `agent.state.messages`.
+  2. Converts the snapshot with `convertMessagesToLlm(...)` (applies the session `transformContext` — extension context + steering wrap — then `convertToLlm` + obfuscation), exactly as the loop does.
+  3. Builds the provider `Context` with `agent.buildSideRequestContext(llmMessages, #baseSystemPrompt)` — normalized tools and `transformProviderContext` (obfuscation + inline snapcompact) matching the loop. The **base** system prompt is pinned here, not a per-turn `before_agent_start` hook override, so the new session does not inherit prompt-specific hook state.
+  4. Builds stream options with `prepareSimpleStreamOptions(...)`: a stable `promptCacheKey` (= the live session id) so the oneshot reads the cache the turn populated, a unique side `sessionId` (`<sid>:side:<snowflake>`) so OpenAI/Codex append-only state never mixes with the live turn, `serviceTier`/payload hooks mirrored from the session, and `preferWebsockets: false`.
+- Calls `generateHandoffFromContext(context, model, { streamOptions, telemetry, thinkingLevel })`.
 
 ### 2) Generate and capture output
 
-`generateHandoff(...)` converts the existing `AgentMessage[]` history to real LLM `Message[]` history, then appends one trailing agent-attributed `user` message containing the rendered handoff prompt.
-
-The request uses `instrumentedCompleteSimple(...)` (the OTEL-instrumented `completeSimple` oneshot wrapper) directly:
+`generateHandoffFromContext(...)` lives in `packages/agent/src/compaction/compaction.ts` next to summarization. It is the handoff request contract: it issues one `instrumentedCompleteSimple(...)` (the OTEL-instrumented `completeSimple` oneshot wrapper) against the caller-built `Context`, forcing `toolChoice: "none"` and `reasoning: resolveCompactionEffort(model, thinkingLevel)` over whatever the caller's `streamOptions` carried:
 
 ```ts
 await instrumentedCompleteSimple(
   model,
+  context, // system prompt + normalized tools + transformed history + trailing handoff prompt
   {
-    systemPrompt,
-    messages: requestMessages,
-    tools,
-  },
-  {
-    apiKey,
-    signal,
+    ...streamOptions, // apiKey, signal, sessionId, promptCacheKey, serviceTier, hooks
     reasoning: resolveCompactionEffort(model, options.thinkingLevel),
     toolChoice: "none",
-    initiatorOverride,
-    metadata,
   },
   { telemetry, oneshotKind: "handoff" },
 );
 ```
 
+(`generateHandoff(messages, …)` remains exported for downstream callers and now builds a basic `Context` from `systemPrompt`/`tools`/`convertToLlm` and delegates to `generateHandoffFromContext`. `AgentSession` no longer uses it because it cannot apply the host's transform pipeline or cache routing.)
+
 Important generation properties:
 
-- The request preserves the live provider cache prefix by reusing the same system prompt, tool definitions, and real message history shape as the active agent.
-- The handoff instruction is a trailing `user` message, not a developer message, so the cached prefix remains aligned with the prior turn.
+- The request shares the live provider cache prefix because the `Context` is built by the identical transform + normalization pipeline the loop uses, and routed with the same `promptCacheKey` the turn used.
+- The handoff instruction is a trailing `user` message, not a developer message, so the cached prefix remains aligned with the prior turn (the trailing message is the only divergence point).
 - `toolChoice: "none"` prevents intentional tool dispatch.
 - The returned assistant content is filtered to text blocks and joined with `\n`; stray tool-call blocks are ignored if a provider does not honor `toolChoice: "none"`.
 - `stopReason === "error"` throws a generation error.
@@ -180,6 +170,7 @@ Auto-triggered handoffs can additionally write a timestamped `handoff-*.md` arti
 
 `CommandController.handleHandoffCommand` behavior:
 
+- Refuses with a warning when `session.isStreaming` (matches `/fork` and `/move`) — the user must finish or abort the response before handing off.
 - Shows a status loader: `Generating handoff… (esc to cancel)`.
 - Calls `await session.handoff(customInstructions)`.
 - If result is `undefined`: `showError("Handoff cancelled")`.

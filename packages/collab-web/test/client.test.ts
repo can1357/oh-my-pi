@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import type {
 	AgentSnapshot,
 	AssistantMessage,
@@ -50,13 +50,18 @@ function messageEntry(id: string, message: WireMessage): SessionEntry {
 	return { type: "message", id, parentId: null, timestamp: "2026-06-12T00:00:01Z", message };
 }
 
-function welcomeFrame(entries: SessionEntry[] = [], readOnly?: boolean): HostFrame {
-	return { t: "welcome", proto: 1, header: HEADER, entries, state: STATE, agents: AGENTS, readOnly };
+function welcomeFrame(entryCount = 0, readOnly?: boolean): HostFrame {
+	return { t: "welcome", proto: 2, header: HEADER, state: STATE, agents: AGENTS, entryCount, readOnly };
+}
+
+function snapshotChunk(entries: SessionEntry[], final = true): HostFrame {
+	return { t: "snapshot-chunk", entries, final };
 }
 
 function liveClient(entries: SessionEntry[] = []): GuestClient {
 	const client = new GuestClient(LINK, "tester");
-	client.applyFrameForTest(welcomeFrame(entries));
+	client.applyFrameForTest(welcomeFrame(entries.length));
+	if (entries.length > 0) client.applyFrameForTest(snapshotChunk(entries));
 	return client;
 }
 
@@ -82,8 +87,39 @@ describe("GuestClient frame apply", () => {
 	it("welcome readOnly flag lands in the snapshot", () => {
 		const client = new GuestClient(LINK, "tester");
 		expect(client.getSnapshot().readOnly).toBe(false);
-		client.applyFrameForTest(welcomeFrame([], true));
+		client.applyFrameForTest(welcomeFrame(0, true));
 		expect(client.getSnapshot().readOnly).toBe(true);
+	});
+
+	it("times out stalled snapshot chunks and resets the clock on progress", () => {
+		vi.useFakeTimers();
+		try {
+			const firstEntry = messageEntry("e1", { role: "user", content: "hi", timestamp: 1 });
+			const client = new GuestClient(LINK, "tester");
+			client.applyFrameForTest(welcomeFrame(2));
+			expect(client.getSnapshot().phase).toBe("connecting");
+
+			vi.advanceTimersByTime(29_999);
+			expect(client.getSnapshot().phase).toBe("connecting");
+			client.applyFrameForTest(snapshotChunk([firstEntry], false));
+			expect(client.getSnapshot().entries).toEqual([firstEntry]);
+			expect(client.getSnapshot().phase).toBe("connecting");
+
+			vi.advanceTimersByTime(29_999);
+			expect(client.getSnapshot().phase).toBe("connecting");
+			vi.advanceTimersByTime(1);
+			const snap = client.getSnapshot();
+			expect(snap.phase).toBe("ended");
+			expect(snap.endedReason).toBe("timed out waiting for the host's session snapshot");
+
+			const completeClient = new GuestClient(LINK, "tester");
+			completeClient.applyFrameForTest(welcomeFrame(1));
+			completeClient.applyFrameForTest(snapshotChunk([firstEntry]));
+			vi.advanceTimersByTime(30_000);
+			expect(completeClient.getSnapshot().phase).toBe("live");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("message_update sets the stream ghost (synthesizing a missed start)", () => {

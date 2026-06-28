@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@pk-nerdsaver-ai/pi-ai";
+import * as AIError from "@pk-nerdsaver-ai/pi-ai/error";
 import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
 import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
@@ -115,6 +116,7 @@ describe("AgentSession silent-abort marker stamping", () => {
 		await Promise.resolve();
 
 		expect(message.errorMessage).toBe(SILENT_ABORT_MARKER);
+		expect(AIError.is(message.errorId, AIError.Flag.SilentAbort)).toBe(true);
 		expect(session.isPlanInternalAbortPending).toBe(false);
 	});
 
@@ -157,7 +159,7 @@ describe("AgentSession silent-abort marker stamping", () => {
 	});
 
 	it("A4: marker is stamped on event.message BEFORE the obfuscator's displayEvent copy", async () => {
-		// Build a real obfuscator with a `plain` secret so `deobfuscateObject(content)`
+		// Build a real obfuscator with a `plain` secret so `deobfuscateAssistantContent(content)`
 		// returns a NEW content array — that's the only path that triggers the
 		// `displayEvent = { ...event, message: { ...message, content } }` spread copy
 		// in `#handleAgentEvent`. The marker must be stamped BEFORE that spread so
@@ -200,6 +202,7 @@ describe("AgentSession silent-abort marker stamping", () => {
 		// `event.message` (the persistence-side reference) carries the marker via the
 		// in-place stamp.
 		expect(message.errorMessage).toBe(SILENT_ABORT_MARKER);
+		expect(AIError.is(message.errorId, AIError.Flag.SilentAbort)).toBe(true);
 
 		// The emitted display event ALSO carries the marker because the spread copy
 		// happened AFTER the stamp.
@@ -218,6 +221,7 @@ describe("AgentSession silent-abort marker stamping", () => {
 			throw new Error("expected emitted message_end to be an assistant message");
 		}
 		expect(emittedMessage.errorMessage).toBe(SILENT_ABORT_MARKER);
+		expect(AIError.is(emittedMessage.errorId, AIError.Flag.SilentAbort)).toBe(true);
 
 		// Prove the obfuscator branch actually ran by asserting the emitted message
 		// is a distinct object (post-spread) AND its content was deobfuscated back to

@@ -25,7 +25,7 @@ It follows the architecture terms from `docs/natives-architecture.md`:
 `packages/natives/package.json` scripts:
 
 - `bun scripts/build-native.ts` (`build`) → N-API build, addon install, generated declarations install, explicit ESM export and enum runtime patch.
-- `bun scripts/embed-native.ts` (`embed:native`) → generate `native/embedded-addon.js` plus `native/embedded-addons.<tag>.tar.gz` from built files.
+- `bun scripts/embed-native.ts` (`gen:native`) → generate `native/embedded-addon.js` plus `native/embedded-addons.<tag>.tar.gz` from built files.
 - `bun scripts/gen-npm-packages.ts` (`gen:npm`) → generate per-platform npm leaf packages (`@pk-nerdsaver-ai/pi-natives-<platform>-<arch>`, installed as optional dependencies of the core package) under `npm/` from built addon files.
 
 Root scripts include `build:native` as `bun --cwd=packages/natives run build`.
@@ -201,7 +201,7 @@ Generated declarations currently include exports from these Rust modules:
 | x64 machine loads baseline when modern expected                        | `PI_NATIVE_VARIANT=baseline`, no AVX2 detected, or modern file unavailable                  | Check env and filenames in `native/`                              | Build modern variant (`TARGET_VARIANT=modern ... build`) and ship it                                  |
 | Cross-build produces wrong-labeled binary                              | Mismatch between `CROSS_TARGET` and `TARGET_PLATFORM`/`TARGET_ARCH`, or missing x64 variant | Confirm env tuple and output filename                             | Re-run with consistent env values and explicit x64 `TARGET_VARIANT`                                   |
 | Compiled binary fails after upgrade                                    | Stale extracted cache, embedded archive mismatch, or embedded manifest version mismatch     | Inspect `<getNativesDir()>/<version>` and loader error list       | Delete versioned cache for the package version; regenerate embedded archive/manifest during packaging |
-| `embed:native` fails with `No native addons found`                     | Required platform artifact was not built before embedding                                   | Check expected list in error text                                 | Build at least one expected artifact for the target, then rerun `embed:native`                        |
+| `gen:native` fails with `No native addons found`                       | Required platform artifact was not built before embedding                                   | Check expected list in error text                                 | Build at least one expected artifact for the target, then rerun `gen:native`                          |
 
 ## Operational commands
 
@@ -214,11 +214,11 @@ TARGET_VARIANT=modern bun --cwd=packages/natives run build
 TARGET_VARIANT=baseline bun --cwd=packages/natives run build
 
 # Generate embedded addon manifest from built native files
-bun --cwd=packages/natives run embed:native
+bun run gen:native
 # Output archive: packages/natives/native/embedded-addons.<platform>-<arch>.tar.gz
 
 # Reset embedded manifest to null stub
-bun --cwd=packages/natives run embed:native -- --reset
+bun run gen:native:reset
 ```
 
 ## Orchestrator-side content-addressed build cache (robomp)

@@ -3,6 +3,10 @@ import { $ } from "bun";
 import { getEditorTheme, initTheme } from "../theme/theme";
 import {
 	CustomEditor,
+	extractBracketedImagePastePaths,
+	extractBracketedPastePaths,
+	extractImagePathFromText,
+	extractPastePathsFromText,
 	SPACE_HOLD_MECHANICAL_RUN,
 	SPACE_HOLD_RELEASE_MS,
 	SPACE_REPEAT_MAX_GAP_MS,
@@ -21,6 +25,12 @@ function makeEditor() {
 const REPEAT_GAP_MS = 30;
 /** A gap above the threshold — looks like a deliberate keypress. */
 const TAP_GAP_MS = SPACE_REPEAT_MAX_GAP_MS + 80;
+const BRACKETED_PASTE_START = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
+
+function bracketedPaste(text: string): string {
+	return `${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`;
+}
 
 /** Feed `count` spaces `gapMs` apart on the fake clock. The first space of a run has no prior
  *  space, so its gap is effectively infinite and it always reads as a deliberate tap. */
@@ -63,6 +73,117 @@ describe("CustomEditor placeholder decoration", () => {
 	it("renders linked image placeholders before theme and settings initialization", async () => {
 		const output = await decorateInFreshProcess("[Image #1]", ["/tmp/example.png"]);
 		expect(output).toBe("[Image #1]");
+	});
+});
+
+describe("CustomEditor bracketed path paste", () => {
+	it("leaves a pasted bare .png filename on the normal text path", () => {
+		expect(extractBracketedImagePastePaths(bracketedPaste("icon-photo-default.png"))).toBeUndefined();
+	});
+
+	it("extracts explicit local image paths for attachment", () => {
+		expect(extractBracketedImagePastePaths(bracketedPaste("/tmp/icon-photo-default.png"))).toEqual([
+			"/tmp/icon-photo-default.png",
+		]);
+		expect(extractBracketedImagePastePaths(bracketedPaste("C:\\Users\\me\\icon-photo-default.png"))).toEqual([
+			"C:\\Users\\me\\icon-photo-default.png",
+		]);
+	});
+
+	it("strips `file://` URLs to the local filesystem path before loading the image", () => {
+		// macOS / Ghostty / iTerm2 sometimes forward the pasteboard's
+		// `public.file-url` representation when the user does Finder→Copy
+		// then Cmd+V. Without decoding, `loadImageInput` would try to read a
+		// literal `file:///…` path and fail.
+		expect(extractBracketedImagePastePaths(bracketedPaste("file:///Users/me/Pictures/photo.png"))).toEqual([
+			"/Users/me/Pictures/photo.png",
+		]);
+	});
+
+	it("percent-decodes spaces inside `file://` URLs", () => {
+		expect(extractBracketedImagePastePaths(bracketedPaste("file:///Users/me/My%20Pictures/photo.png"))).toEqual([
+			"/Users/me/My Pictures/photo.png",
+		]);
+	});
+
+	it("extracts explicit non-image paths without classifying them as image paths", () => {
+		expect(extractBracketedPastePaths(bracketedPaste("/tmp/report.csv"))).toEqual(["/tmp/report.csv"]);
+		expect(extractBracketedImagePastePaths(bracketedPaste("/tmp/report.csv"))).toBeUndefined();
+	});
+
+	it("inserts non-image path pastes as literal text instead of attaching them", () => {
+		const { editor } = makeEditor();
+		let imagePathCalls = 0;
+		editor.onPasteImagePath = () => {
+			imagePathCalls++;
+		};
+
+		editor.handleInput(bracketedPaste("/tmp/report.csv"));
+
+		expect(editor.getText()).toBe("/tmp/report.csv");
+		expect(imagePathCalls).toBe(0);
+	});
+});
+
+describe("extractImagePathFromText (issue #3506)", () => {
+	it("returns the path when the text is a single image file path", () => {
+		expect(extractImagePathFromText("/tmp/screenshot.png")).toBe("/tmp/screenshot.png");
+		expect(extractImagePathFromText("/Users/me/Pictures/photo.jpeg")).toBe("/Users/me/Pictures/photo.jpeg");
+		expect(extractImagePathFromText("C:\\Users\\me\\img.gif")).toBe("C:\\Users\\me\\img.gif");
+	});
+
+	it("ignores surrounding whitespace from a clipboard read", () => {
+		expect(extractImagePathFromText("  /tmp/photo.webp\n")).toBe("/tmp/photo.webp");
+	});
+
+	it("returns undefined for a bare filename (no explicit directory)", () => {
+		// Mirrors the bracketed-paste contract: a bare `.png` filename is
+		// almost always a project-relative reference the user wants as text,
+		// not a clipboard-anchored attachment.
+		expect(extractImagePathFromText("icon.png")).toBeUndefined();
+	});
+
+	it("returns undefined for non-image extensions", () => {
+		expect(extractImagePathFromText("/tmp/report.csv")).toBeUndefined();
+		expect(extractImagePathFromText("/tmp/notes.txt")).toBeUndefined();
+	});
+
+	it("returns undefined when the text contains anything beyond a single path", () => {
+		expect(extractImagePathFromText("see /tmp/screenshot.png")).toBeUndefined();
+		expect(extractImagePathFromText("/tmp/a.png /tmp/b.png")).toBeUndefined();
+	});
+
+	it("returns undefined for empty/whitespace-only input", () => {
+		expect(extractImagePathFromText("")).toBeUndefined();
+		expect(extractImagePathFromText("   ")).toBeUndefined();
+	});
+
+	it("decodes a `file://` URL to its filesystem path", () => {
+		expect(extractImagePathFromText("file:///Users/me/Pictures/photo.png")).toBe("/Users/me/Pictures/photo.png");
+	});
+
+	it("recovers a single anchored image path containing unescaped spaces (macOS screenshot name)", () => {
+		const macScreenshot = "/Users/me/Desktop/Screenshot 2026-06-25 at 1.23.45 PM.png";
+		expect(extractImagePathFromText(macScreenshot)).toBe(macScreenshot);
+		expect(extractImagePathFromText("~/Pictures/Cleanshot 2026-06-25 at 12.00.png")).toBe(
+			"~/Pictures/Cleanshot 2026-06-25 at 12.00.png",
+		);
+		expect(extractImagePathFromText("C:\\Users\\me\\My Pictures\\img with space.jpg")).toBe(
+			"C:\\Users\\me\\My Pictures\\img with space.jpg",
+		);
+	});
+
+	it("does not hijack prose that happens to contain a path-shaped fragment", () => {
+		// The whole-text branch is gated on ABSOLUTE_PATH_PREFIX_REGEX, so a
+		// non-anchored prefix ("see ...") never triggers it.
+		expect(extractImagePathFromText("see /Users/me/Desktop/Screenshot 1.png")).toBeUndefined();
+	});
+});
+
+describe("extractPastePathsFromText", () => {
+	it("delegates to the same logic the bracketed variant uses for path detection", () => {
+		expect(extractPastePathsFromText("/tmp/a.png /tmp/b.png")).toEqual(["/tmp/a.png", "/tmp/b.png"]);
+		expect(extractPastePathsFromText("just text")).toBeUndefined();
 	});
 });
 

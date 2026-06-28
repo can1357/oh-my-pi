@@ -54,6 +54,7 @@ function makeModel(
 		provider?: string;
 		input?: ("text" | "image")[];
 		api?: "anthropic-messages" | "google-generative-ai";
+		baseUrl?: string;
 	} = {},
 ) {
 	return buildModel({
@@ -61,7 +62,7 @@ function makeModel(
 		name: "Test Model",
 		api: overrides.api ?? "anthropic-messages",
 		provider: overrides.provider ?? "anthropic",
-		baseUrl: "https://example.invalid",
+		baseUrl: overrides.baseUrl ?? "https://example.invalid",
 		reasoning: false,
 		input: overrides.input ?? ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -92,20 +93,57 @@ function imageCount(context: Context): number {
 }
 
 describe("SnapcompactInlineTransformer", () => {
-	it("is a no-op for text-only models", () => {
+	it("is a no-op for text-only models", async () => {
 		const transformer = new SnapcompactInlineTransformer(
 			withTestShape({ renderSystemPrompt: "all", renderToolResults: true }),
 		);
 		const context = makeContext();
-		expect(transformer.transform(context, makeModel({ input: ["text"] }))).toBe(context);
+		expect(await transformer.transform(context, makeModel({ input: ["text"] }))).toBe(context);
 	});
 
-	it("images large historical tool results, keeping small and most-recent ones as text", () => {
+	it("is a no-op for Copilot business/enterprise endpoints even when the model claims vision (#3387)", async () => {
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "all", renderToolResults: true }),
+		);
+		const context = makeContext();
+		const business = makeModel({
+			provider: "github-copilot",
+			baseUrl: "https://api.business.githubcopilot.com",
+			input: ["text", "image"],
+		});
+		expect(await transformer.transform(context, business)).toBe(context);
+		expect(
+			estimateInlineSavings({
+				options: withTestShape({ renderSystemPrompt: "all", renderToolResults: true }),
+				model: business,
+				systemPrompt: context.systemPrompt ?? [],
+				messages: context.messages,
+			}),
+		).toEqual({ visionCapable: false, savedTokens: 0 });
+
+		const enterprise = makeModel({
+			provider: "github-copilot",
+			baseUrl: "https://copilot-api.ghe.example.com",
+			input: ["text", "image"],
+		});
+		expect(await transformer.transform(context, enterprise)).toBe(context);
+
+		const personal = makeModel({
+			provider: "github-copilot",
+			baseUrl: "https://api.githubcopilot.com",
+			input: ["text", "image"],
+		});
+		const result = await transformer.transform(context, personal);
+		expect(result).not.toBe(context);
+		expect(imageCount(result)).toBeGreaterThan(0);
+	});
+
+	it("images large historical tool results, keeping small and most-recent ones as text", async () => {
 		const transformer = new SnapcompactInlineTransformer(
 			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
 		);
 		const context = makeContext();
-		const result = transformer.transform(context, makeModel());
+		const result = await transformer.transform(context, makeModel());
 
 		// Large historical result → leading text note + image frames.
 		const imaged = result.messages[1] as ToolResultMessage;
@@ -126,7 +164,7 @@ describe("SnapcompactInlineTransformer", () => {
 		expect(result.systemPrompt).toBe(context.systemPrompt);
 	});
 
-	it("reports per-tool-result savings to the sink for each imaged result only", () => {
+	it("reports per-tool-result savings to the sink for each imaged result only", async () => {
 		const received: Array<{ toolCallId: string; savedTokens: number }>[] = [];
 		let model = "";
 		const transformer = new SnapcompactInlineTransformer(
@@ -136,7 +174,7 @@ describe("SnapcompactInlineTransformer", () => {
 				model = m.id;
 			},
 		);
-		transformer.transform(makeContext(), makeModel());
+		await transformer.transform(makeContext(), makeModel());
 
 		// Only the large historical result (call_1) is imaged; call_2 is small,
 		// call_3 is the most-recent (kept crisp).
@@ -147,7 +185,7 @@ describe("SnapcompactInlineTransformer", () => {
 		expect(model).toBe("test-model");
 	});
 
-	it("never calls the savings sink when nothing is imaged", () => {
+	it("never calls the savings sink when nothing is imaged", async () => {
 		let calls = 0;
 		const transformer = new SnapcompactInlineTransformer(
 			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
@@ -156,11 +194,11 @@ describe("SnapcompactInlineTransformer", () => {
 			},
 		);
 		// Text-only model → vision gate short-circuits before any swap.
-		transformer.transform(makeContext(), makeModel({ input: ["text"] }));
+		await transformer.transform(makeContext(), makeModel({ input: ["text"] }));
 		expect(calls).toBe(0);
 	});
 
-	it("never mutates the input context (persisted history shares these references)", () => {
+	it("never mutates the input context (persisted history shares these references)", async () => {
 		const transformer = new SnapcompactInlineTransformer(
 			withTestShape({ renderSystemPrompt: "all", renderToolResults: true }),
 		);
@@ -170,7 +208,7 @@ describe("SnapcompactInlineTransformer", () => {
 		const original = context.messages[1] as ToolResultMessage;
 		const originalContent = original.content;
 
-		const result = transformer.transform(context, makeModel());
+		const result = await transformer.transform(context, makeModel());
 		expect(result).not.toBe(context);
 
 		expect(context.messages).toBe(originalMessages);
@@ -181,7 +219,7 @@ describe("SnapcompactInlineTransformer", () => {
 		expect((context.messages[0] as { content: string }).content).toBe("first user prompt");
 	});
 
-	it("leaves tool results that already carry images untouched", () => {
+	it("leaves tool results that already carry images untouched", async () => {
 		const transformer = new SnapcompactInlineTransformer(
 			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
 		);
@@ -195,10 +233,10 @@ describe("SnapcompactInlineTransformer", () => {
 		const context: Context = {
 			messages: [userMessage("hi"), withImage, toolResult("call_tail", LARGE)],
 		};
-		const result = transformer.transform(context, makeModel());
+		const result = await transformer.transform(context, makeModel());
 		expect(result.messages[1]).toBe(withImage);
 	});
-	it("leaves error tool results text-only even when they are large", () => {
+	it("leaves error tool results text-only even when they are large", async () => {
 		const transformer = new SnapcompactInlineTransformer(
 			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
 		);
@@ -206,14 +244,14 @@ describe("SnapcompactInlineTransformer", () => {
 		const context: Context = {
 			messages: [userMessage("hi"), errorResult, toolResult("call_tail", LARGE)],
 		};
-		const result = transformer.transform(context, makeModel());
+		const result = await transformer.transform(context, makeModel());
 		expect(result).toBe(context);
 		expect(result.messages[1]).toBe(errorResult);
 		expect(errorResult.content.every(block => block.type === "text")).toBe(true);
 		expect(imageCount(result)).toBe(0);
 	});
 
-	it("replaces a large system prompt with a stub and rides frames on the first user message", () => {
+	it("replaces a large system prompt with a stub and rides frames on the first user message", async () => {
 		const transformer = new SnapcompactInlineTransformer(
 			withTestShape({ renderSystemPrompt: "all", renderToolResults: false }),
 		);
@@ -222,7 +260,7 @@ describe("SnapcompactInlineTransformer", () => {
 			systemPrompt: [longPrompt],
 			messages: [userMessage("do the thing"), toolResult("call_1", SMALL)],
 		};
-		const result = transformer.transform(context, makeModel());
+		const result = await transformer.transform(context, makeModel());
 
 		expect(result.systemPrompt).toHaveLength(1);
 		expect(result.systemPrompt![0]).not.toBe(longPrompt);
@@ -236,7 +274,7 @@ describe("SnapcompactInlineTransformer", () => {
 		expect(carrier.content[carrier.content.length - 1]).toEqual({ type: "text", text: "do the thing" });
 	});
 
-	it("moves only loaded context-file instructions when AGENTS.md mode is selected", () => {
+	it("moves only loaded context-file instructions when AGENTS.md mode is selected", async () => {
 		const transformer = new SnapcompactInlineTransformer(
 			withTestShape({
 				renderSystemPrompt: "agents-md",
@@ -251,7 +289,7 @@ describe("SnapcompactInlineTransformer", () => {
 			],
 			messages: [userMessage("do the thing")],
 		};
-		const result = transformer.transform(context, makeModel());
+		const result = await transformer.transform(context, makeModel());
 
 		expect(result.systemPrompt).toHaveLength(2);
 		expect(result.systemPrompt![0]).toContain("Core instructions.");
@@ -266,18 +304,18 @@ describe("SnapcompactInlineTransformer", () => {
 		expect(carrier.content[carrier.content.length - 1]).toEqual({ type: "text", text: "do the thing" });
 	});
 
-	it("keeps a small system prompt as text and skips when no user message exists", () => {
+	it("keeps a small system prompt as text and skips when no user message exists", async () => {
 		const transformer = new SnapcompactInlineTransformer(
 			withTestShape({ renderSystemPrompt: "all", renderToolResults: false }),
 		);
 		const small: Context = { systemPrompt: ["Be terse."], messages: [userMessage("hi")] };
-		expect(transformer.transform(small, makeModel())).toBe(small);
+		expect(await transformer.transform(small, makeModel())).toBe(small);
 
 		const noUser: Context = { systemPrompt: [denseText(3000)], messages: [toolResult("call_1", SMALL)] };
-		expect(transformer.transform(noUser, makeModel())).toBe(noUser);
+		expect(await transformer.transform(noUser, makeModel())).toBe(noUser);
 	});
 
-	it("never rasterizes tool results under the 3k-token floor, even when frames are cheaper", () => {
+	it("never rasterizes tool results under the 3k-token floor, even when frames are cheaper", async () => {
 		const transformer = new SnapcompactInlineTransformer({ renderSystemPrompt: "none", renderToolResults: true });
 		// ~1.7k soft tokens: the google shape estimates 1 frame ≈ 1120 tokens, so the
 		// savings gate alone would rasterize this — the floor must keep it text.
@@ -285,11 +323,14 @@ describe("SnapcompactInlineTransformer", () => {
 		const context: Context = {
 			messages: [userMessage("go"), toolResult("call_1", midsize), toolResult("call_2", LARGE)],
 		};
-		const result = transformer.transform(context, makeModel({ api: "google-generative-ai", provider: "google" }));
+		const result = await transformer.transform(
+			context,
+			makeModel({ api: "google-generative-ai", provider: "google" }),
+		);
 		expect(result).toBe(context);
 	});
 
-	it("respects the per-provider image budget for unknown providers", () => {
+	it("respects the per-provider image budget for unknown providers", async () => {
 		const transformer = new SnapcompactInlineTransformer(
 			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
 		);
@@ -304,13 +345,13 @@ describe("SnapcompactInlineTransformer", () => {
 		};
 		// Unknown provider → default budget 5. Each LARGE needs 2 frames:
 		// call_1 (2) + call_2 (2) fit, call_3 needs 2 > 1 remaining → text.
-		const result = transformer.transform(context, makeModel({ provider: "groq" }));
+		const result = await transformer.transform(context, makeModel({ provider: "groq" }));
 		expect(imageCount(result)).toBeLessThanOrEqual(5);
 		expect(result.messages[3]).toBe(context.messages[3]);
 		expect(result.messages[4]).toBe(context.messages[4]);
 	});
 
-	it("caches renders across turns: identical input does not re-rasterize", () => {
+	it("caches renders across turns: identical input does not re-rasterize", async () => {
 		const spy = spyOn(snapcompact, "renderMany");
 		try {
 			const transformer = new SnapcompactInlineTransformer(
@@ -319,11 +360,11 @@ describe("SnapcompactInlineTransformer", () => {
 			const context = makeContext();
 			const model = makeModel();
 
-			const first = transformer.transform(context, model);
+			const first = await transformer.transform(context, model);
 			const callsAfterFirst = spy.mock.calls.length;
 			expect(callsAfterFirst).toBeGreaterThan(0);
 
-			const second = transformer.transform(context, model);
+			const second = await transformer.transform(context, model);
 			expect(spy.mock.calls.length).toBe(callsAfterFirst);
 
 			const firstFrames = (first.messages[1] as ToolResultMessage).content.slice(1);
@@ -487,7 +528,7 @@ describe("estimateInlineSavings", () => {
 		expect(estimate.savedTokens).toBe(0);
 	});
 
-	it("matches what the transform actually swaps on the same context", () => {
+	it("matches what the transform actually swaps on the same context", async () => {
 		const options: SnapcompactInlineOptions = {
 			renderSystemPrompt: "all",
 			renderToolResults: true,
@@ -502,7 +543,7 @@ describe("estimateInlineSavings", () => {
 			systemPrompt: context.systemPrompt!,
 			messages: context.messages,
 		});
-		const result = new SnapcompactInlineTransformer(withTestShape(options)).transform(context, model);
+		const result = await new SnapcompactInlineTransformer(withTestShape(options)).transform(context, model);
 
 		let imaged = 0;
 		for (const message of result.messages) {

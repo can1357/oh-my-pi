@@ -155,7 +155,13 @@ async def _attach_thread(
     if directive is None:
         return None
     thread = await _fetch_thread(github, repo, number, is_pr=is_pr)
-    return DirectiveInfo(body=directive.body, author=directive.author, thread=thread, pragmas=directive.pragmas)
+    return DirectiveInfo(
+        body=directive.body,
+        author=directive.author,
+        thread=thread,
+        pragmas=directive.pragmas,
+        authorizes_impl=directive.authorizes_impl,
+    )
 
 
 async def _resolve_repo_and_issue(

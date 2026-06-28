@@ -14,9 +14,11 @@ import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-stora
 import {
 	AUTO_THINKING,
 	clampAutoThinkingEffort,
+	parseCliThinkingLevel,
 	parseConfiguredThinkingLevel,
 	parseEffort,
 	parseThinkingLevel,
+	resolveProvisionalAutoLevel,
 } from "@pk-nerdsaver-ai/pi-coding-agent/thinking";
 import type { TinyMemoryLocalModelKey } from "@pk-nerdsaver-ai/pi-coding-agent/tiny/models";
 import { tinyModelClient } from "@pk-nerdsaver-ai/pi-coding-agent/tiny/title-client";
@@ -63,6 +65,14 @@ describe("auto thinking classifier helpers", () => {
 		expect(parseConfiguredThinkingLevel("bogus")).toBeUndefined();
 		expect(parseThinkingLevel(AUTO_THINKING)).toBeUndefined();
 		expect(parseThinkingLevel(ThinkingLevel.Off)).toBe(ThinkingLevel.Off);
+	});
+
+	it("parses CLI --thinking selectors while rejecting inherit", () => {
+		expect(parseCliThinkingLevel(ThinkingLevel.Off)).toBe(ThinkingLevel.Off);
+		expect(parseCliThinkingLevel(AUTO_THINKING)).toBe(AUTO_THINKING);
+		expect(parseCliThinkingLevel("max")).toBe(ThinkingLevel.XHigh);
+		expect(parseCliThinkingLevel(ThinkingLevel.Inherit)).toBeUndefined();
+		expect(parseCliThinkingLevel("bogus")).toBeUndefined();
 	});
 
 	it("maps online 4-way classifier labels to effort levels", () => {
@@ -130,6 +140,29 @@ describe("auto thinking classifier helpers", () => {
 
 		expect(clampAutoThinkingEffort(model, Effort.XHigh)).toBe(Effort.High);
 		expect(clampAutoThinkingEffort(model, Effort.Minimal)).toBe(Effort.Low);
+	});
+
+	it("returns undefined for reasoning models without controllable efforts (devin-agent shape)", () => {
+		// Repro for https://github.com/can1357/oh-my-pi/issues/3356 — Devin
+		// models report `reasoning: true` but expose no `thinking.efforts` (Cascade
+		// selects effort by routing to sibling model ids). `auto` must not invent
+		// a concrete effort here, or `requireSupportedEffort` throws in stream.ts.
+		const devinModel = {
+			id: "glm-5-2",
+			name: "GLM-5.2",
+			api: "devin-agent",
+			provider: "devin",
+			baseUrl: "https://server.codeium.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 4096,
+		} as Model;
+
+		expect(clampAutoThinkingEffort(devinModel, Effort.Low)).toBeUndefined();
+		expect(clampAutoThinkingEffort(devinModel, Effort.XHigh)).toBeUndefined();
+		expect(resolveProvisionalAutoLevel(devinModel)).toBeUndefined();
 	});
 
 	it("accepts max as the top configured thinking alias", () => {

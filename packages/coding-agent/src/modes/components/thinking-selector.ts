@@ -1,8 +1,9 @@
 import type { Effort } from "@pk-nerdsaver-ai/pi-ai";
-import { Container, type SelectItem, SelectList } from "@pk-nerdsaver-ai/pi-tui";
+import { Container, type SelectItem, SelectList, type SgrMouseEvent } from "@pk-nerdsaver-ai/pi-tui";
 import { getSelectListTheme } from "../../modes/theme/theme";
 import { getThinkingLevelMetadata } from "../../thinking";
 import { DynamicBorder } from "./dynamic-border";
+import { routeSelectListMouseWithTopBorder } from "./select-list-mouse-routing";
 
 /**
  * Component that renders a thinking level selector with borders
@@ -48,5 +49,9 @@ export class ThinkingSelectorComponent extends Container {
 
 	getSelectList(): SelectList {
 		return this.#selectList;
+	}
+
+	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
+		routeSelectListMouseWithTopBorder(this.#selectList, event, line, col);
 	}
 }

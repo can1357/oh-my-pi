@@ -1,9 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import {
-	clearAnthropicFastModeFallback,
-	isAnthropicFastModeUnsupportedError,
-	streamAnthropic,
-} from "@pk-nerdsaver-ai/pi-ai/providers/anthropic";
+import { isFastModeUnsupported } from "@pk-nerdsaver-ai/pi-ai/error";
+import { clearAnthropicFastModeFallback, streamAnthropic } from "@pk-nerdsaver-ai/pi-ai/providers/anthropic";
 import type { Context, Model, ProviderSessionState, ServiceTier } from "@pk-nerdsaver-ai/pi-ai/types";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
 
@@ -137,7 +134,7 @@ describe("clearAnthropicFastModeFallback", () => {
 	});
 });
 
-describe("isAnthropicFastModeUnsupportedError", () => {
+describe("isFastModeUnsupported", () => {
 	function makeStatusError(status: number, message: string): Error {
 		const err = new Error(message) as Error & { status: number };
 		err.status = status;
@@ -149,7 +146,7 @@ describe("isAnthropicFastModeUnsupportedError", () => {
 			400,
 			'400 {"type":"error","error":{"type":"invalid_request_error","message":"\'claude-opus-4-5-20251101\' does not support the `speed` parameter."}}',
 		);
-		expect(isAnthropicFastModeUnsupportedError(err)).toBe(true);
+		expect(isFastModeUnsupported(err)).toBe(true);
 	});
 
 	it("detects 429 rate_limit_error when fast mode requires extra usage", () => {
@@ -159,7 +156,7 @@ describe("isAnthropicFastModeUnsupportedError", () => {
 			429,
 			'429 {"type":"error","error":{"type":"rate_limit_error","message":"Extra usage is required for fast mode."}}',
 		);
-		expect(isAnthropicFastModeUnsupportedError(err)).toBe(true);
+		expect(isFastModeUnsupported(err)).toBe(true);
 	});
 
 	it("ignores unrelated 429 rate limits", () => {
@@ -167,7 +164,7 @@ describe("isAnthropicFastModeUnsupportedError", () => {
 			429,
 			'429 {"type":"error","error":{"type":"rate_limit_error","message":"Number of requests has exceeded your account\'s rate limit."}}',
 		);
-		expect(isAnthropicFastModeUnsupportedError(err)).toBe(false);
+		expect(isFastModeUnsupported(err)).toBe(false);
 	});
 
 	it("ignores unrelated 400 invalid_request errors", () => {
@@ -175,6 +172,6 @@ describe("isAnthropicFastModeUnsupportedError", () => {
 			400,
 			'400 {"type":"error","error":{"type":"invalid_request_error","message":"messages: at least one message is required"}}',
 		);
-		expect(isAnthropicFastModeUnsupportedError(err)).toBe(false);
+		expect(isFastModeUnsupported(err)).toBe(false);
 	});
 });

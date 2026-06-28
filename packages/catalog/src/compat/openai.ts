@@ -7,6 +7,7 @@
  * complete alternate views. Request handlers read `model.compat` fields and
  * never detect, resolve, or allocate.
  */
+import { isFireworksFastModelId } from "../fireworks-model-id";
 import { hostMatchesUrl, modelMatchesHost } from "../hosts";
 import {
 	isAnthropicNamespacedModelId,
@@ -38,6 +39,10 @@ const GLM_CODING_PLAN_STREAM_IDLE_TIMEOUT_MS = 600_000;
 const DEEPSEEK_REASONING_STREAM_IDLE_TIMEOUT_MS = 300_000;
 /** Kimi K2.6 can spend several minutes reasoning before the first visible token. */
 const KIMI_K26_REASONING_STREAM_IDLE_TIMEOUT_MS = 300_000;
+/** Xiaomi MiMo Pro on api.xiaomimimo.com can stall ~2min before the first event (issue #1770). */
+const XIAOMI_MIMO_STREAM_IDLE_TIMEOUT_MS = 300_000;
+/** Alibaba Coding Plan (coding-intl.dashscope) qwen models idle before the first event (issue #1770). */
+const ALIBABA_CODING_PLAN_STREAM_IDLE_TIMEOUT_MS = 600_000;
 const MINIMAX_PROVIDER_OR_ID_PATTERN = /minimax/i;
 const DSML_HEALING_PROVIDERS = new Set([
 	"ollama",
@@ -130,6 +135,16 @@ const OPENCODE_WHEN_THINKING: NonNullable<OpenAICompat["whenThinking"]> = {
 	reasoningContentField: "reasoning_content",
 };
 
+const MIMO_REASONING_EFFORT_MAP: NonNullable<OpenAICompat["reasoningEffortMap"]> = {
+	minimal: "low",
+	xhigh: "high",
+};
+
+function mergeMimoReasoningEffortMap(compat: ResolvedOpenAISharedCompat, enabled: boolean): void {
+	if (!enabled) return;
+	compat.reasoningEffortMap = { ...MIMO_REASONING_EFFORT_MAP, ...compat.reasoningEffortMap };
+}
+
 function detectStrictModeSupport(provider: string, baseUrl: string): boolean {
 	if (
 		provider === "openai" ||
@@ -149,6 +164,53 @@ function detectStrictModeSupport(provider: string, baseUrl: string): boolean {
 		hostMatchesUrl(baseUrl, "openrouter") ||
 		hostMatchesUrl(baseUrl, "deepseekFamily")
 	);
+}
+
+/**
+ * Local OpenAI-compatible inference servers whose chat templates re-tokenize
+ * the entire prompt every request — llama.cpp prefix-KV-cache reuse only
+ * survives when the rendered tokens stay byte-identical across turns. The
+ * runtime auto-enables {@link OpenAICompat.replayReasoningContent} for these
+ * providers (and for any provider pointed at a loopback / RFC1918 baseUrl) so
+ * Qwen3 / DeepSeek-R1 / GLM templates can reconstruct the prior assistant
+ * turn's `<think>` block from `reasoning_content` (#3528).
+ */
+const LOCAL_OPENAI_COMPAT_PROVIDERS = new Set(["llama.cpp", "lm-studio", "vllm", "ollama"]);
+
+/**
+ * Local proxy providers that share the loopback-default baseUrl but forward
+ * to an unrelated upstream (OpenAI, Anthropic, …) rather than running a
+ * chat-template renderer themselves — `replayReasoningContent` would push
+ * `reasoning_content` to the upstream, which gains no KV-cache benefit and
+ * may 400 on the extra field. Excluded from BOTH the provider check above
+ * and the loopback heuristic below; users who want the replay on a custom
+ * proxy setup can opt in via the sparse `compat.replayReasoningContent`
+ * override.
+ */
+const PROXY_OPENAI_COMPAT_PROVIDERS = new Set(["litellm"]);
+
+function hasLocalLoopbackBaseUrl(baseUrl: string | undefined): boolean {
+	if (!baseUrl) return false;
+	let hostname: string;
+	try {
+		hostname = new URL(baseUrl).hostname.toLowerCase();
+	} catch {
+		return false;
+	}
+	if (
+		hostname === "localhost" ||
+		hostname === "127.0.0.1" ||
+		hostname === "0.0.0.0" ||
+		hostname === "::1" ||
+		hostname === "[::1]"
+	) {
+		return true;
+	}
+	if (/^10\./.test(hostname)) return true;
+	if (/^192\.168\./.test(hostname)) return true;
+	if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(hostname)) return true;
+	if (hostname.endsWith(".local")) return true;
+	return false;
 }
 
 /**
@@ -184,6 +246,8 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	const lowerName = (spec.name ?? "").toLowerCase();
 	const isXiaomiHost = modelMatchesHost(hostModel, "xiaomi");
 	const isXiaomiMimo = isXiaomiHost && (isMimoModelIdOrName(spec.id) || isMimoModelIdOrName(spec.name ?? ""));
+	const isMimoReasoningEffortModel =
+		!isXiaomiHost && (isMimoModelIdOrName(spec.id) || isMimoModelIdOrName(spec.name ?? ""));
 	// OpenCode Zen's `big-pickle` is a DeepSeek reasoning alias; the upstream
 	// 400s come from DeepSeek and require exact reasoning_content replay.
 	const isOpenCodeDeepseekAlias =
@@ -238,17 +302,21 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	const isGroqHost = modelMatchesHost(hostModel, "groq");
 	const isCopilotHost = provider === "github-copilot";
 	const isZenmuxHost = provider === "zenmux";
-	// Endpoints that MUST receive a single system block. MiniMax's OpenAI
-	// endpoint returns error 2013 on multiple system messages; Alibaba's
-	// Dashscope and Qwen Portal serve Qwen models whose chat template
-	// raises "System message must be at the beginning" if any system
-	// message appears past index 0.
+	// Endpoints/models that MUST receive a single system block. MiniMax's OpenAI
+	// endpoint returns error 2013 on multiple system messages; the Qwen 3.5+ chat
+	// template raises "System message must be at the beginning" / 500s with an
+	// internal_server_error when any system block appears past index 0. That
+	// template ships with the weights, so every Qwen-serving vLLM/SGLang host
+	// hits it — confirmed on Alibaba Dashscope, Qwen Portal, and Fireworks
+	// (`fireworks/qwen3.7-plus` 500'd on two leading system blocks). Gate on the
+	// Qwen family itself, not per-host: coalescing only trades away KV-cache reuse.
 	const isMiniMaxHost = modelMatchesHost(hostModel, "minimax");
 	const isQwenPortal = modelMatchesHost(hostModel, "qwenPortal");
 	const supportsMultipleSystemMessagesDefault =
 		!isMiniMaxHost &&
 		!isAlibaba &&
 		!isQwenPortal &&
+		!isQwen &&
 		(isOpenAIHost ||
 			isAzureHost ||
 			isOpenRouter ||
@@ -270,14 +338,22 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	const streamIdleTimeoutMs =
 		GLM_CODING_PLAN_MODEL_PATTERN.test(spec.id) && (isZai || isZhipu)
 			? GLM_CODING_PLAN_STREAM_IDLE_TIMEOUT_MS
-			: spec.reasoning && isKimiK26ModelId(spec.id)
-				? KIMI_K26_REASONING_STREAM_IDLE_TIMEOUT_MS
-				: spec.reasoning && isDirectDeepseekApi
-					? DEEPSEEK_REASONING_STREAM_IDLE_TIMEOUT_MS
-					: undefined;
+			: provider === "alibaba-coding-plan"
+				? ALIBABA_CODING_PLAN_STREAM_IDLE_TIMEOUT_MS
+				: isXiaomiMimo
+					? XIAOMI_MIMO_STREAM_IDLE_TIMEOUT_MS
+					: spec.reasoning && isKimiK26ModelId(spec.id)
+						? KIMI_K26_REASONING_STREAM_IDLE_TIMEOUT_MS
+						: spec.reasoning && isDirectDeepseekApi
+							? DEEPSEEK_REASONING_STREAM_IDLE_TIMEOUT_MS
+							: undefined;
 
+	// Fireworks "Fast" variants (`<id>-fast`) are served from the router
+	// namespace (`accounts/fireworks/routers/<id>-fast`), like Fire Pass, rather
+	// than the `models/` namespace the rest of the `fireworks` provider uses.
+	const isFireworksFastRouter = provider === "fireworks" && isFireworksFastModelId(spec.id);
 	const wireModelIdMode: ResolvedOpenAISharedCompat["wireModelIdMode"] =
-		provider === "firepass"
+		provider === "firepass" || isFireworksFastRouter
 			? "firepass"
 			: provider === "fireworks"
 				? "fireworks"
@@ -291,9 +367,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 				? "openrouter"
 				: isQwen && isNvidiaNim
 					? "qwen-chat-template"
-					: isAlibaba || isQwen
-						? "qwen"
-						: "openai";
+					: isQwen && isFireworks
+						? "openai"
+						: isAlibaba || isQwen
+							? "qwen"
+							: "openai";
 
 	const compat: ResolvedOpenAICompat = {
 		supportsStore: !isNonStandard,
@@ -308,7 +386,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		supportsReasoningEffort: !isGrok && !isXiaomiMimo && (!(isZai || isZhipu) || supportsZaiReasoningEffort),
 		// GitHub Copilot's chat-completions endpoint rejects reasoning params wholesale.
 		supportsReasoningParams: provider !== "github-copilot",
-		reasoningEffortMap: {},
+		reasoningEffortMap: isMimoReasoningEffortModel ? MIMO_REASONING_EFFORT_MAP : {},
 		supportsUsageInStreaming: !isCerebras,
 		// pi-ai's thinking-loop guard is gemini-only; default the flag from the
 		// family classifier so OpenAI-compat proxies serving Gemini are covered.
@@ -325,6 +403,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		disableReasoningOnToolChoice: isDeepseekFamily && Boolean(spec.reasoning) && !isOpenRouter,
 		supportsToolChoice: !isDirectDeepseekReasoning,
 		supportsForcedToolChoice: true,
+		supportsNamedToolChoice: provider !== "llama.cpp",
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: isMistral,
 		requiresAssistantAfterToolResult: isMistral,
@@ -343,7 +422,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		reasoningDisableMode: resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
 		includeEncryptedReasoning: true,
-		filterReasoningHistory: false,
+		filterReasoningHistory: isOpenRouter && isAnthropicModel,
 		thinkingKeep: usesMoonshotKimiPreservedThinking ? "all" : undefined,
 		reasoningContentField: "reasoning_content",
 		// Backends that 400 follow-up requests when prior assistant tool-call turns lack `reasoning_content`:
@@ -369,6 +448,41 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// DeepSeek V4 and Xiaomi MiMo reject synthetic reasoning_content placeholders (".") on tool-call turns.
 		// Kimi and OpenRouter accept them when actual reasoning is unavailable.
 		allowsSyntheticReasoningContentForToolCalls: (!isDeepseekFamily || !spec.reasoning) && !isXiaomiMimo,
+		// Local llama.cpp-style servers re-tokenize the entire chat-template
+		// prompt each request; Qwen3 / DeepSeek-R1 / GLM templates reconstruct
+		// the prior assistant turn's `<think>` block from `reasoning_content`,
+		// so dropping the field re-renders the assistant turn without thinking
+		// content and forces full prompt re-processing (#3528). The
+		// `requires*ReasoningContent*` flags above stay off for these hosts —
+		// they accept but don't validate the field — so the encoder needs a
+		// distinct opt-in to replay on every reasoning turn. NOT gated on
+		// `spec.reasoning`: the runtime discovery paths for `llama.cpp` /
+		// `lm-studio` / `openai-models-list` hardcode `reasoning: false`
+		// because the upstream `/models` endpoints don't advertise the
+		// capability, but the OpenAI stream parser still records incoming
+		// `reasoning_content` deltas as thinking blocks. Gating on the spec
+		// flag would leave every discovered local Qwen / DeepSeek model
+		// re-triggering #3528. The encoder only writes `reasoning_content`
+		// when a thinking block actually exists on the turn
+		// (`nonEmptyThinkingBlocks.length > 0`), so the flag is a no-op on
+		// pure-text histories.
+		replayReasoningContent:
+			!PROXY_OPENAI_COMPAT_PROVIDERS.has(provider) &&
+			(LOCAL_OPENAI_COMPAT_PROVIDERS.has(provider) || hasLocalLoopbackBaseUrl(baseUrl)),
+		// `preserve_thinking: true` makes the Qwen3.6+ chat template render
+		// `<think>...</think>` for older assistant turns too, instead of
+		// stripping it the moment a new user message moves them past
+		// `last_query_index`. Without it, the slot's KV cache (which holds the
+		// raw `<think>X</think>` tokens emitted during generation) diverges
+		// from the next-turn render and llama.cpp falls back to full prompt
+		// re-processing — the exact symptom reported in #3541. Auto-enabled
+		// for Qwen thinking dialects on local llama.cpp-style backends (paired
+		// with `replayReasoningContent` above). Non-Qwen templates ignore the
+		// parameter, so the flag stays a no-op outside the Qwen path.
+		qwenPreserveThinking:
+			(thinkingFormat === "qwen" || thinkingFormat === "qwen-chat-template") &&
+			!PROXY_OPENAI_COMPAT_PROVIDERS.has(provider) &&
+			(LOCAL_OPENAI_COMPAT_PROVIDERS.has(provider) || hasLocalLoopbackBaseUrl(baseUrl)),
 		requiresAssistantContentForToolCalls: isKimiModel || isDirectDeepseekReasoning,
 		cacheControlFormat: isOpenRouter && spec.id.startsWith("anthropic/") ? "anthropic" : undefined,
 		openRouterRouting: undefined,
@@ -400,6 +514,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		compat.omitReasoningEffort = true;
 	}
 	mergeOllamaReasoningEffortMap(compat, provider, spec.reasoning);
+	mergeMimoReasoningEffortMap(compat, isMimoReasoningEffortModel);
 
 	const whenThinkingPolicy =
 		spec.compat?.whenThinking ?? (isOpenCodeProvider && spec.reasoning ? OPENCODE_WHEN_THINKING : undefined);
@@ -413,6 +528,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 			variant.omitReasoningEffort = true;
 		}
 		mergeOllamaReasoningEffortMap(variant, provider, spec.reasoning);
+		mergeMimoReasoningEffortMap(variant, isMimoReasoningEffortModel);
 		compat.whenThinking = variant;
 	}
 
@@ -447,6 +563,7 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 	const id = spec.id ?? "";
 	const thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"] = isOpenRouter ? "openrouter" : "openai";
 	const isKimiModel = id ? isKimiModelId(id) : false;
+	const isAnthropicModel = id ? isClaudeModelId(id) || isAnthropicNamespacedModelId(id) : false;
 	const isDeepseekFamily = id ? isDeepseekModelIdOrName(id) || isDeepseekModelIdOrName(spec.name) : false;
 	const reasoningCapable = Boolean(spec.reasoning);
 
@@ -472,17 +589,25 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		reasoningDisableMode: resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
 		includeEncryptedReasoning: spec.provider !== "xai-oauth",
-		filterReasoningHistory: spec.provider === "xai-oauth",
+		filterReasoningHistory: spec.provider === "xai-oauth" || (isOpenRouter && isAnthropicModel),
 		disableReasoningOnForcedToolChoice: isKimiModel,
 		disableReasoningOnToolChoice: isDeepseekFamily && reasoningCapable && !isOpenRouter,
 		supportsToolChoice: true,
 		supportsForcedToolChoice: true,
+		supportsNamedToolChoice: true,
 		reasoningContentField: "reasoning_content",
 		requiresReasoningContentForToolCalls:
 			(isKimiModel || (isDeepseekFamily && reasoningCapable) || (isOpenRouter && reasoningCapable)) &&
 			reasoningCapable,
 		requiresReasoningContentForAllAssistantTurns: isDeepseekFamily && reasoningCapable && !isOpenRouter,
 		allowsSyntheticReasoningContentForToolCalls: !isDeepseekFamily || !reasoningCapable,
+		// The Responses API replays reasoning through encrypted `summary` items,
+		// not via a top-level `reasoning_content` field — this flag is
+		// chat-completions-only.
+		replayReasoningContent: false,
+		// Responses-only; the Qwen `preserve_thinking` template knob lives on
+		// the chat-completions wire shape, never on Responses.
+		qwenPreserveThinking: false,
 		requiresThinkingAsText: false,
 		requiresMistralToolIds: false,
 		requiresToolResultName: false,
@@ -502,6 +627,7 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		emptyLengthFinishIsContextError: spec.provider === "ollama",
 		usesOpenAIToolCallIdLimit: spec.provider === "openai",
 		promptCacheSessionHeader: spec.provider === "xai-oauth" ? "x-grok-conv-id" : undefined,
+		streamIdleTimeoutMs: spec.compat?.streamIdleTimeoutMs,
 	};
 	applyCompatOverrides(compat, spec.compat);
 	if (spec.compat?.reasoningDisableMode === undefined) {

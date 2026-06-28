@@ -1,0 +1,1119 @@
+%YAML 1.2
+---
+
+# https://www.sublimetext.com/docs/3/syntax.html
+# https://www.sublimetext.com/docs/3/scope_naming.html
+
+
+# This syntax strives to support the latest release of Julia.
+# Last update: Julia v1.0.0
+
+name: Julia
+file_extensions: [jl]
+first_line_match: ^#!.*\bjulia\s*$
+scope: source.julia
+
+variables:
+  symb_op_ascii: '[-+*/\\=^:<>~?&$%|!]'
+
+  # The list of unicode symbols allowed as operators is fetched from the Julia parser https://github.com/JuliaLang/julia/blob/master/src/julia-parser.scm
+  symb_op_unicode: '[≤≥¬←→↔↚↛↠↣↦↮⇎⇏⇒⇔⇴⇶⇷⇸⇹⇺⇻⇼⇽⇾⇿⟵⟶⟷⟷⟹⟺⟻⟼⟽⟾⟿⤀⤁⤂⤃⤄⤅⤆⤇⤌⤍⤎⤏⤐⤑⤔⤕⤖⤗⤘⤝⤞⤟⤠⥄⥅⥆⥇⥈⥊⥋⥎⥐⥒⥓⥖⥗⥚⥛⥞⥟⥢⥤⥦⥧⥨⥩⥪⥫⥬⥭⥰⧴⬱⬰⬲⬳⬴⬵⬶⬷⬸⬹⬺⬻⬼⬽⬾⬿⭀⭁⭂⭃⥷⭄⥺⭇⭈⭉⭊⭋⭌￩￫⇜⇝↜↝↩↪↫↬↼↽⇀⇁⇄⇆⇇⇉⇋⇌⇚⇛⇠⇢↷↶↺↻≡≠≢∈∉∋∌⊆⊈⊂⊄⊊∝∊∍∥∦∷∺∻∽∾≁≃≄≅≆≇≈≉≊≋≌≍≎≐≑≒≓≔≕≖≗≘≙≚≛≜≝≞≟≣≦≧≨≩≪≫≬≭≮≯≰≱≲≳≴≵≶≷≸≹≺≻≼≽≾≿⊀⊁⊃⊅⊇⊉⊋⊏⊐⊑⊒⊜⊩⊬⊮⊰⊱⊲⊳⊴⊵⊶⊷⋍⋐⋑⋕⋖⋗⋘⋙⋚⋛⋜⋝⋞⋟⋠⋡⋢⋣⋤⋥⋦⋧⋨⋩⋪⋫⋬⋭⋲⋳⋴⋵⋶⋷⋸⋹⋺⋻⋼⋽⋾⋿⟈⟉⟒⦷⧀⧁⧡⧣⧤⧥⩦⩧⩪⩫⩬⩭⩮⩯⩰⩱⩲⩳⩴⩵⩶⩷⩸⩹⩺⩻⩼⩽⩾⩿⪀⪁⪂⪃⪄⪅⪆⪇⪈⪉⪊⪋⪌⪍⪎⪏⪐⪑⪒⪓⪔⪕⪖⪗⪘⪙⪚⪛⪜⪝⪞⪟⪠⪡⪢⪣⪤⪥⪦⪧⪨⪩⪪⪫⪬⪭⪮⪯⪰⪱⪲⪳⪴⪵⪶⪷⪸⪹⪺⪻⪼⪽⪾⪿⫀⫁⫂⫃⫄⫅⫆⫇⫈⫉⫊⫋⫌⫍⫎⫏⫐⫑⫒⫓⫔⫕⫖⫗⫘⫙⫷⫸⫹⫺⊢⊣⟂⫪⫫¦⊕⊖⊞⊟∪∨⊔±∓∔∸≂≏⊎⊻⊽⋎⋓⧺⧻⨈⨢⨣⨤⨥⨦⨧⨨⨩⨪⨫⨬⨭⨮⨹⨺⩁⩂⩅⩊⩌⩏⩐⩒⩔⩖⩗⩛⩝⩡⩢⩣⌿÷⋅∘×∩∧⊗⊘⊙⊚⊛⊠⊡⊓∗∙∤⅋≀⊼⋄⋆⋇⋉⋊⋋⋌⋏⋒⟑⦸⦼⦾⦿⧶⧷⨇⨰⨱⨲⨳⨴⨵⨶⨷⨸⨻⨼⨽⩀⩃⩄⩋⩍⩎⩑⩓⩕⩘⩚⩜⩞⩟⩠⫛⊍▷⨝⟕⟖⟗⨟↑↓⇵⟰⟱⤈⤉⤊⤋⤒⤓⥉⥌⥍⥏⥑⥔⥕⥘⥙⥜⥝⥠⥡⥣⥥⥮⥯￪￬]'
+  symb_op: '(?:{{symb_op_ascii}}|{{symb_op_unicode}})'
+
+  # Multi-character operators
+  long_op: (?:\+=|-=|\*=|/=|//=|\\\\=|^=|÷=|%=|<<=|>>=|>>>=|\|=|&=|:=|=>|$=|\|\||&&|<:|>:|\|>|<\||//|\+\+|<=|>=|->|===|==|!==|!=|<--|<-->)
+
+  # julia> join(sort(unique((filter(x -> isletter(x[1]), string.(filter!(x -> isa(eval(x), DataType) || isa(eval(x), UnionAll), filter!(x -> !Base.isdeprecated(Base, x), [names(Base); names(Core)]))))))), "|") |> println
+  # Compare with https://github.com/JuliaLang/julia/blob/master/base/exports.jl
+  base_types: \b(?:AbstractArray|AbstractChannel|AbstractChar|AbstractDict|AbstractDisplay|AbstractFloat|AbstractIrrational|AbstractMatch|AbstractMatrix|AbstractPattern|AbstractRange|AbstractSet|AbstractString|AbstractUnitRange|AbstractVecOrMat|AbstractVector|Any|ArgumentError|Array|AssertionError|BigFloat|BigInt|BitArray|BitMatrix|BitSet|BitVector|Bool|BoundsError|CanonicalIndexError|CapturedException|CartesianIndex|CartesianIndices|Cchar|Cdouble|Cfloat|Channel|Char|Cint|Cintmax_t|Clong|Clonglong|Cmd|Colon|Complex|ComplexF16|ComplexF32|ComplexF64|ComposedFunction|CompositeException|ConcurrencyViolationError|Condition|Cptrdiff_t|Cshort|Csize_t|Cssize_t|Cstring|Cuchar|Cuint|Cuintmax_t|Culong|Culonglong|Cushort|Cvoid|Cwchar_t|Cwstring|DataType|DenseArray|DenseMatrix|DenseVecOrMat|DenseVector|Dict|DimensionMismatch|Dims|DivideError|DomainError|EOFError|Enum|ErrorException|Exception|ExponentialBackOff|Expr|Float16|Float32|Float64|Function|GlobalRef|HTML|IO|IOBuffer|IOContext|IOStream|IdDict|IndexCartesian|IndexLinear|IndexStyle|InexactError|InitError|Int|Int128|Int16|Int32|Int64|Int8|Integer|InterruptException|InvalidStateException|Irrational|KeyError|LazyString|LinRange|LineNumberNode|LinearIndices|LoadError|MIME|Matrix|Method|MethodError|Missing|MissingException|Module|NTuple|NamedTuple|Nothing|Number|OrdinalRange|OutOfMemoryError|OverflowError|Pair|PartialQuickSort|PermutedDimsArray|Pipe|ProcessFailedException|Ptr|QuoteNode|Rational|RawFD|ReadOnlyMemoryError|Real|ReentrantLock|Ref|Regex|RegexMatch|Returns|RoundingMode|SegmentationFault|Set|Signed|Some|StackOverflowError|StepRange|StepRangeLen|StridedArray|StridedMatrix|StridedVecOrMat|StridedVector|String|StringIndexError|SubArray|SubString|SubstitutionString|Symbol|SystemError|Task|TaskFailedException|Text|TextDisplay|Timer|Tuple|Type|TypeError|TypeVar|UInt|UInt128|UInt16|UInt32|UInt64|UInt8|UndefInitializer|UndefKeywordError|UndefRefError|UndefVarError|Union|UnionAll|UnitRange|Unsigned|Val|Vararg|VecElement|VecOrMat|Vector|VersionNumber|WeakKeyDict|WeakRef)\b
+
+  # julia> join(filter!(x -> isascii(x[1]) && isletter(x[1]) && islowercase(x[1]), map(string, filter!(x -> !Base.isdeprecated(Base, x), [names(Base); names(Core); :include]))), '|') |> println
+  base_funcs: \b(?:abs|abs2|abspath|accumulate|accumulate!|acos|acosd|acosh|acot|acotd|acoth|acsc|acscd|acsch|addenv|adjoint|all|all!|allequal|allunique|angle|any|any!|append!|argmax|argmin|ascii|asec|asecd|asech|asin|asind|asinh|asyncmap|asyncmap!|atan|atand|atanh|atexit|atreplinit|axes|backtrace|basename|big|bind|binomial|bitreverse|bitrotate|bitstring|broadcast|broadcast!|bswap|bytes2hex|bytesavailable|cat|catch_backtrace|cbrt|cd|ceil|cglobal|checkbounds|checkindex|chmod|chomp|chop|chopprefix|chopsuffix|chown|circcopy!|circshift|circshift!|cis|cispi|clamp|clamp!|cld|close|closewrite|cmp|coalesce|code_lowered|code_typed|codepoint|codeunit|codeunits|collect|complex|conj|conj!|contains|contractuser|convert|copy|copy!|copysign|copyto!|cos|cosc|cosd|cosh|cospi|cot|cotd|coth|count|count!|count_ones|count_zeros|countlines|cp|csc|cscd|csch|ctime|cumprod|cumprod!|cumsum|cumsum!|current_exceptions|current_task|deepcopy|deg2rad|delete!|deleteat!|denominator|detach|devnull|diff|digits|digits!|dirname|disable_sigint|diskstat|display|displayable|displaysize|div|divrem|download|dropdims|dump|eachcol|eachindex|eachline|eachmatch|eachrow|eachslice|eachsplit|eltype|empty|empty!|endswith|enumerate|eof|eps|error|errormonitor|esc|escape_string|evalfile|evalpoly|exit|exp|exp10|exp2|expanduser|expm1|exponent|extrema|extrema!|factorial|falses|fd|fdio|fetch|fieldcount|fieldname|fieldnames|fieldoffset|fieldtypes|filemode|filesize|fill|fill!|filter|filter!|finalize|finalizer|findall|findfirst|findlast|findmax|findmax!|findmin|findmin!|findnext|findprev|first|firstindex|fld|fld1|fldmod|fldmod1|flipsign|float|floatmax|floatmin|floor|flush|fma|foldl|foldr|foreach|fourthroot|frexp|fullname|functionloc|gcd|gcdx|gensym|get|get!|get_zero_subnormals|gethostname|getindex|getkey|getpid|getproperty|gperm|hardlink|hasfield|hash|haskey|hasmethod|hasproperty|hcat|hex2bytes|hex2bytes!|homedir|htol|hton|hvcat|hvncat|hypot|identity|ifelse|ignorestatus|im|imag|in|include_dependency|include_string|indexin|insert!|insorted|instances|intersect|intersect!|inv|invmod|invokelatest|invperm|invpermute!|isabspath|isabstracttype|isapprox|isascii|isassigned|isbits|isbitstype|isblockdev|ischardev|iscntrl|isconcretetype|isconst|isdigit|isdir|isdirpath|isdisjoint|isdispatchtuple|isempty|isequal|iseven|isfifo|isfile|isfinite|isimmutable|isinf|isinteger|isinteractive|isless|isletter|islink|islocked|islowercase|ismarked|ismissing|ismount|ismutable|ismutabletype|isnan|isnothing|isnumeric|isodd|isone|isopen|ispath|isperm|ispow2|isprimitivetype|isprint|ispunct|isqrt|isreadable|isreadonly|isready|isreal|issetequal|issetgid|issetuid|issocket|issorted|isspace|issticky|isstructtype|issubnormal|issubset|istaskdone|istaskfailed|istaskstarted|istextmime|isunordered|isuppercase|isvalid|iswritable|isxdigit|iszero|iterate|join|joinpath|keepat!|keys|keytype|kill|kron|kron!|last|lastindex|lcm|ldexp|leading_ones|leading_zeros|length|lock|log|log10|log1p|log2|lowercase|lowercasefirst|lpad|lstat|lstrip|ltoh|macroexpand|map|map!|mapfoldl|mapfoldr|mapreduce|mapslices|mark|match|max|maximum|maximum!|maxintfloat|merge|merge!|mergewith|mergewith!|methods|min|minimum|minimum!|minmax|missing|mkdir|mkpath|mktemp|mktempdir|mod|mod1|mod2pi|modf|modifyproperty!|mtime|muladd|mv|nameof|names|nand|ncodeunits|ndigits|ndims|nextfloat|nextind|nextpow|nextprod|nonmissingtype|nor|normpath|notify|ntoh|ntuple|numerator|objectid|occursin|oftype|one|ones|oneunit|only|open|operm|pairs|parent|parentindices|parentmodule|parse|partialsort|partialsort!|partialsortperm|partialsortperm!|pathof|peek|permute!|permutedims|permutedims!|pi|pipeline|pkgdir|pkgversion|pointer|pointer_from_objref|pop!|popat!|popdisplay|popfirst!|position|powermod|precision|precompile|prepend!|prevfloat|prevind|prevpow|print|println|printstyled|process_exited|process_running|prod|prod!|promote|promote_rule|promote_shape|promote_type|propertynames|push!|pushdisplay|pushfirst!|put!|pwd|rad2deg|rand|randn|range|rationalize|read|read!|readavailable|readbytes!|readchomp|readdir|readeach|readline|readlines|readlink|readuntil|real|realpath|redirect_stderr|redirect_stdin|redirect_stdio|redirect_stdout|redisplay|reduce|reenable_sigint|reim|reinterpret|relpath|rem|rem2pi|repeat|replace|replace!|replaceproperty!|repr|reset|reshape|resize!|rethrow|retry|reverse|reverse!|reverseind|rm|rot180|rotl90|rotr90|round|rounding|rpad|rsplit|rstrip|run|samefile|schedule|searchsorted|searchsortedfirst|searchsortedlast|sec|secd|sech|seek|seekend|seekstart|selectdim|set_zero_subnormals|setcpuaffinity|setdiff|setdiff!|setenv|setindex!|setprecision|setproperty!|setrounding|show|showable|showerror|sign|signbit|signed|significand|similar|sin|sinc|sincos|sincosd|sincospi|sind|sinh|sinpi|size|sizehint!|sizeof|skip|skipchars|skipmissing|sleep|something|sort|sort!|sortperm|sortperm!|sortslices|splat|splice!|split|splitdir|splitdrive|splitext|splitpath|sprint|sqrt|stack|stacktrace|startswith|stat|stderr|stdin|stdout|step|stride|strides|string|strip|success|sum|sum!|summary|supertype|swapproperty!|symdiff|symdiff!|symlink|systemerror|take!|tan|tand|tanh|tanpi|task_local_storage|tempdir|tempname|textwidth|thisind|time|time_ns|timedwait|titlecase|to_indices|touch|trailing_ones|trailing_zeros|transcode|transpose|trues|trunc|truncate|trylock|tryparse|typeintersect|typejoin|typemax|typemin|unescape_string|union|union!|unique|unique!|unlock|unmark|unsafe_copyto!|unsafe_load|unsafe_modify!|unsafe_pointer_to_objref|unsafe_read|unsafe_replace!|unsafe_store!|unsafe_string|unsafe_swap!|unsafe_trunc|unsafe_wrap|unsafe_write|unsigned|uperm|uppercase|uppercasefirst|valtype|values|vcat|vec|view|wait|walkdir|which|widemul|widen|withenv|write|xor|yield|yieldto|zero|zeros|zip|applicable|eval|fieldtype|getfield|getglobal|invoke|isa|isdefined|modifyfield!|nfields|nothing|replacefield!|setfield!|setglobal!|swapfield!|throw|tuple|typeassert|typeof|undef|include)(?!{{symb_id}})
+
+  # julia> join(map(x -> x[2:end], filter!(x -> startswith(x, "@") && !occursin(r"_str$", x), map(string, filter!(x -> !Base.isdeprecated(Base, x), [names(Base); names(Core); :include])))), "|") |> println
+  base_macros: \b(?:Kwargs|NamedTuple|__DIR__|__FILE__|__LINE__|__MODULE__|__dot__|allocated|allocations|assert|async|atomic|atomicreplace|atomicswap|boundscheck|ccall|cfunction|cmd|coalesce|debug|deprecate|doc|elapsed|enum|error|eval|evalpoly|fastmath|generated|gensym|goto|inbounds|info|inline|invoke|invokelatest|isdefined|kwdef|label|lock|macroexpand|macroexpand1|noinline|nospecialize|polly|show|showtime|simd|something|specialize|static|sync|task|threadcall|time|timed|timev|view|views|warn)
+
+  # julia> join(string.(filter!(x -> isa(eval(x), Module) && !Base.isdeprecated(Base, x), [names(Base); names(Core)])), "|") |> println
+  base_modules: \b(?:Base|Broadcast|Docs|GC|Iterators|Libc|MathConstants|Meta|StackTraces|Sys|Threads|Core|Main)\b
+
+  # # Highlight exported functions from base modules
+  # # julia> base_modules = filter!(x -> isa(eval(x), Module) && x != :Main && !Base.isdeprecated(Base, x), [names(Base); names(Core)])
+  # # julia> modulefunctions(m) = join(filter!(x -> isascii(x[1]) && isletter(x[1]) && islowercase(x[1]), string.(names(eval(m)))), "|")
+  # # julia> regexify(m) = "$(string(m))\\.(?:$(modulefunctions(m)))"
+  # # julia> rows = join(regexify.(base_modules), "|")
+  # # julia> println("\\b(?:$rows)(?!{{symb_id}})")
+  base_module_funcs: \b(?:Base\.(?:abs|abs2|abspath|accumulate|accumulate!|acos|acosd|acosh|acot|acotd|acoth|acsc|acscd|acsch|addenv|adjoint|all|all!|allequal|allunique|angle|any|any!|append!|argmax|argmin|ascii|asec|asecd|asech|asin|asind|asinh|asyncmap|asyncmap!|atan|atand|atanh|atexit|atreplinit|axes|backtrace|basename|big|bind|binomial|bitreverse|bitrotate|bitstring|broadcast|broadcast!|bswap|bytes2hex|bytesavailable|cat|catch_backtrace|cbrt|cd|ceil|cglobal|checkbounds|checkindex|chmod|chomp|chop|chopprefix|chopsuffix|chown|circcopy!|circshift|circshift!|cis|cispi|clamp|clamp!|cld|close|closewrite|cmp|coalesce|code_lowered|code_typed|codepoint|codeunit|codeunits|collect|complex|conj|conj!|contains|contractuser|convert|copy|copy!|copysign|copyto!|cos|cosc|cosd|cosh|cospi|cot|cotd|coth|count|count!|count_ones|count_zeros|countlines|cp|csc|cscd|csch|ctime|cumprod|cumprod!|cumsum|cumsum!|current_exceptions|current_task|deepcopy|deg2rad|delete!|deleteat!|denominator|detach|devnull|diff|digits|digits!|dirname|disable_sigint|diskstat|display|displayable|displaysize|div|divrem|download|dropdims|dump|eachcol|eachindex|eachline|eachmatch|eachrow|eachslice|eachsplit|eltype|empty|empty!|endswith|enumerate|eof|eps|error|errormonitor|esc|escape_string|evalfile|evalpoly|exit|exp|exp10|exp2|expanduser|expm1|exponent|extrema|extrema!|factorial|falses|fd|fdio|fetch|fieldcount|fieldname|fieldnames|fieldoffset|fieldtypes|filemode|filesize|fill|fill!|filter|filter!|finalize|finalizer|findall|findfirst|findlast|findmax|findmax!|findmin|findmin!|findnext|findprev|first|firstindex|fld|fld1|fldmod|fldmod1|flipsign|float|floatmax|floatmin|floor|flush|fma|foldl|foldr|foreach|fourthroot|frexp|fullname|functionloc|gcd|gcdx|gensym|get|get!|get_zero_subnormals|gethostname|getindex|getkey|getpid|getproperty|gperm|hardlink|hasfield|hash|haskey|hasmethod|hasproperty|hcat|hex2bytes|hex2bytes!|homedir|htol|hton|hvcat|hvncat|hypot|identity|ifelse|ignorestatus|im|imag|in|include_dependency|include_string|indexin|insert!|insorted|instances|intersect|intersect!|inv|invmod|invokelatest|invperm|invpermute!|isabspath|isabstracttype|isapprox|isascii|isassigned|isbits|isbitstype|isblockdev|ischardev|iscntrl|isconcretetype|isconst|isdigit|isdir|isdirpath|isdisjoint|isdispatchtuple|isempty|isequal|iseven|isfifo|isfile|isfinite|isimmutable|isinf|isinteger|isinteractive|isless|isletter|islink|islocked|islowercase|ismarked|ismissing|ismount|ismutable|ismutabletype|isnan|isnothing|isnumeric|isodd|isone|isopen|ispath|isperm|ispow2|isprimitivetype|isprint|ispunct|isqrt|isreadable|isreadonly|isready|isreal|issetequal|issetgid|issetuid|issocket|issorted|isspace|issticky|isstructtype|issubnormal|issubset|istaskdone|istaskfailed|istaskstarted|istextmime|isunordered|isuppercase|isvalid|iswritable|isxdigit|iszero|iterate|join|joinpath|keepat!|keys|keytype|kill|kron|kron!|last|lastindex|lcm|ldexp|leading_ones|leading_zeros|length|lock|log|log10|log1p|log2|lowercase|lowercasefirst|lpad|lstat|lstrip|ltoh|macroexpand|map|map!|mapfoldl|mapfoldr|mapreduce|mapslices|mark|match|max|maximum|maximum!|maxintfloat|merge|merge!|mergewith|mergewith!|methods|min|minimum|minimum!|minmax|missing|mkdir|mkpath|mktemp|mktempdir|mod|mod1|mod2pi|modf|modifyproperty!|mtime|muladd|mv|nameof|names|nand|ncodeunits|ndigits|ndims|nextfloat|nextind|nextpow|nextprod|nonmissingtype|nor|normpath|notify|ntoh|ntuple|numerator|objectid|occursin|oftype|one|ones|oneunit|only|open|operm|pairs|parent|parentindices|parentmodule|parse|partialsort|partialsort!|partialsortperm|partialsortperm!|pathof|peek|permute!|permutedims|permutedims!|pi|pipeline|pkgdir|pkgversion|pointer|pointer_from_objref|pop!|popat!|popdisplay|popfirst!|position|powermod|precision|precompile|prepend!|prevfloat|prevind|prevpow|print|println|printstyled|process_exited|process_running|prod|prod!|promote|promote_rule|promote_shape|promote_type|propertynames|push!|pushdisplay|pushfirst!|put!|pwd|rad2deg|rand|randn|range|rationalize|read|read!|readavailable|readbytes!|readchomp|readdir|readeach|readline|readlines|readlink|readuntil|real|realpath|redirect_stderr|redirect_stdin|redirect_stdio|redirect_stdout|redisplay|reduce|reenable_sigint|reim|reinterpret|relpath|rem|rem2pi|repeat|replace|replace!|replaceproperty!|repr|reset|reshape|resize!|rethrow|retry|reverse|reverse!|reverseind|rm|rot180|rotl90|rotr90|round|rounding|rpad|rsplit|rstrip|run|samefile|schedule|searchsorted|searchsortedfirst|searchsortedlast|sec|secd|sech|seek|seekend|seekstart|selectdim|set_zero_subnormals|setcpuaffinity|setdiff|setdiff!|setenv|setindex!|setprecision|setproperty!|setrounding|show|showable|showerror|sign|signbit|signed|significand|similar|sin|sinc|sincos|sincosd|sincospi|sind|sinh|sinpi|size|sizehint!|sizeof|skip|skipchars|skipmissing|sleep|something|sort|sort!|sortperm|sortperm!|sortslices|splat|splice!|split|splitdir|splitdrive|splitext|splitpath|sprint|sqrt|stack|stacktrace|startswith|stat|stderr|stdin|stdout|step|stride|strides|string|strip|success|sum|sum!|summary|supertype|swapproperty!|symdiff|symdiff!|symlink|systemerror|take!|tan|tand|tanh|tanpi|task_local_storage|tempdir|tempname|textwidth|thisind|time|time_ns|timedwait|titlecase|to_indices|touch|trailing_ones|trailing_zeros|transcode|transpose|trues|trunc|truncate|trylock|tryparse|typeintersect|typejoin|typemax|typemin|unescape_string|union|union!|unique|unique!|unlock|unmark|unsafe_copyto!|unsafe_load|unsafe_modify!|unsafe_pointer_to_objref|unsafe_read|unsafe_replace!|unsafe_store!|unsafe_string|unsafe_swap!|unsafe_trunc|unsafe_wrap|unsafe_write|unsigned|uperm|uppercase|uppercasefirst|valtype|values|vcat|vec|view|wait|walkdir|which|widemul|widen|withenv|write|xor|yield|yieldto|zero|zeros|zip)|Broadcast\.(?:broadcast|broadcast!|broadcast_axes|broadcastable|dotview)|Docs\.(?:doc)|GC\.(?:)|Iterators\.(?:countfrom|cycle|drop|dropwhile|enumerate|flatmap|flatten|partition|product|repeated|rest|take|takewhile|zip)|Libc\.(?:calloc|errno|flush_cstdio|free|gethostname|getpid|malloc|memcpy|memmove|memset|realloc|strerror|strftime|strptime|systemsleep|time|transcode)|MathConstants\.(?:catalan|e|eulergamma|golden|pi)|Meta\.(?:isbinaryoperator|isexpr|isidentifier|isoperator|ispostfixoperator|isunaryoperator|quot|replace_sourceloc!|show_sexpr)|StackTraces\.(?:stacktrace)|Sys\.(?:cpu_info|cpu_summary|free_memory|free_physical_memory|isapple|isbsd|isdragonfly|isexecutable|isfreebsd|isjsvm|islinux|isnetbsd|isopenbsd|isunix|iswindows|loadavg|total_memory|total_physical_memory|uptime|which)|Threads\.(?:atomic_add!|atomic_and!|atomic_cas!|atomic_fence|atomic_max!|atomic_min!|atomic_nand!|atomic_or!|atomic_sub!|atomic_xchg!|atomic_xor!|nthreadpools|nthreads|threadid|threadpool)|Core\.(?:applicable|eval|fieldtype|getfield|getglobal|invoke|isa|isdefined|modifyfield!|nfields|nothing|replacefield!|setfield!|setglobal!|swapfield!|throw|tuple|typeassert|typeof|undef))(?!{{symb_id}})
+
+  # Symbols part of the language syntax
+  symb_lang: (?:[(){}\[\],.;:'"`@#])
+
+  # General identifier symbol
+  symb_id: (?:[^\s{{symb_lang}}{{symb_op}}0-9](?:[^\s{{symb_lang}}{{symb_op}}]|!)*)
+
+contexts:
+  main:
+      # a helper to support emoji completion
+    - match: '\\:'
+      scope: keyword.operator.julia meta.disable-completion.julia
+    - include: codesection
+    - include: comments
+    - include: docstrings
+    - include: strings
+    - include: constants
+    - include: symbols
+    - include: macros
+    - include: operators
+    - include: quotes
+    - include: macro-declarations
+    - include: function-declarations
+    - include: struct-declarations
+    - include: blocks
+    - include: keywords
+    - include: not-lambda-function
+    - include: brackets
+
+  # maybe-identifiers:
+    # - match: (?={{symb_id}})
+    #   branch_point: lambda-function-single-branch-point
+    #   branch:
+    #     - lambda-function-single-branch
+    #     - not-lambda-function
+
+    # - match: (?=\()
+    #   branch_point: lambda-function-branch-point
+    #   branch:
+    #     - lambda-function-branch
+    #     - not-lambda-function
+
+  not-lambda-function:
+    - include: function-call-or-inline-declaration
+    - include: supported-modules
+    - include: supported-types
+    - include: parametric-types
+    - include: identifiers
+    - include: brackets
+    # - match: ''
+    #   pop: true
+
+  codesection:
+    - match: ^\s*((\#+(?!==))\s*(.+?)\s*(?:-{4,}|={4,}|#{4,})[ \t]*$\n?)
+      captures:
+        1: comment.line.number-sign.julia
+        2: punctuation.definition.comment.julia
+        3: entity.name.section.julia
+
+  comments:
+    - match: \#=
+      scope: punctuation.definition.comment.number-equal-sign.julia
+      push:
+        - meta_scope: comment.block.number-equal-sign.julia
+        - match: =\#
+          scope: punctuation.definition.comment.number-equal-sign.julia
+          pop: true
+    - match: \#+
+      scope: punctuation.definition.comment.julia
+      push:
+        - meta_scope: comment.line.number-sign.julia
+        - match: (?=\n)
+          pop: true
+
+  docstrings:
+    - match: ^\s*(?=(@doc\s+raw"""|^(raw)?"""|^"(?:.*"$)))
+      push:
+      - match: '@doc'
+        scope: variable.macro.julia support.function.julia
+      - match: (raw)?("""|")
+        captures:
+          1: storage.type.string.julia
+          2: punctuation.definition.comment.begin.julia
+        set:
+          - meta_scope: comment.block.documentation.julia
+          - match: '\\"'
+            scope: constant.character.escape.julia
+          - match: '\2'
+            scope: punctuation.definition.comment.end.julia
+            pop: true
+
+  escaped-char:
+    - match: '(\\x\h{2})|(\\[\\"''abfnrtv])'
+      captures:
+        1: constant.character.escape.hex.julia
+        2: constant.character.escape.julia
+
+  escaped-unicode-char:
+    - match: '(\\U\h{1,8})|(\\u\h{1,4})'
+      captures:
+        1: constant.character.escape.unicode.16-bit-hex.julia
+        2: constant.character.escape.unicode.32-bit-hex.julia
+
+  interpolated-julia:
+    - match: '(\$)(?={{symb_id}})'
+      captures:
+        1: keyword.operator.interpolation.julia
+      push:
+        - clear_scopes: 1
+        - meta_scope: meta.interpolation.julia
+        - match: '{{symb_id}}'
+          scope: meta.generic-name.julia
+          pop: true
+    - match: '(\$)(\()'
+      captures:
+        1: keyword.operator.interpolation.julia
+        2: punctuation.section.interpolation.begin.julia
+      push:
+        - clear_scopes: 1
+        - meta_scope: meta.interpolation.julia
+        - match: \)
+          scope: punctuation.section.interpolation.begin.julia
+          pop: true
+        - include: main
+
+  strings:
+    - include: string-quoted-single
+    - include: string-quoted-double-block
+    - include: string-quoted-double
+    - include: string-backtick
+
+  string-quoted-single:
+    - match: "'"
+      scope: meta.string.julia string.quoted.single.julia punctuation.definition.string.begin.julia
+      push:
+        - meta_content_scope: meta.string.julia string.quoted.single.julia
+        - match: "'"
+          scope: punctuation.definition.string.end.julia
+          set: after-expression
+        - include: escaped-unicode-char
+        - include: escaped-char
+        - match: "[^']{2,}"
+          scope: invalid.string.julia
+
+  string-quoted-double-block:
+    - match: '"""'
+      scope: meta.string.julia string.quoted.double.block.julia punctuation.definition.string.begin.julia
+      push:
+        - meta_content_scope: meta.string.julia string.quoted.double.block.julia
+        - match: '"""'
+          scope: punctuation.definition.string.end.julia
+          set: after-expression
+        - include: escaped-unicode-char
+        - include: escaped-char
+        - include: interpolated-julia
+
+    - match: '(b)(""")'
+      captures:
+        1: storage.type.string.julia
+        2: meta.string.julia string.quoted.double.block.julia punctuation.definition.string.begin.julia
+      push:
+        - meta_content_scope: meta.string.julia string.quoted.double.block.julia
+        - match: '"""'
+          scope: punctuation.definition.string.end.julia
+          set: after-expression
+        - include: escaped-unicode-char
+        - include: escaped-char
+
+    - match: '(r)(""")'
+      captures:
+        1: storage.type.string.julia
+        2: meta.string.julia string.quoted.double.block.julia punctuation.definition.string.begin.julia
+      push:
+        - meta_content_scope: meta.string.julia string.quoted.double.block.julia
+        - match: '"""'
+          scope: punctuation.definition.string.end.julia
+          set: after-expression
+        - match: ''
+          # we borrow the python regular expressions
+          push: scope:source.regexp.python
+          with_prototype:
+            - match: '(?=""")'
+              pop: true
+
+    - match: '(v|raw|{{symb_id}})(""")'
+      captures:
+        1: storage.type.string.julia
+        2: meta.string.julia string.quoted.double.block.julia punctuation.definition.string.begin.julia
+      push:
+        - meta_content_scope: meta.string.julia string.quoted.double.block.julia
+        - match: '"""'
+          scope: punctuation.definition.string.end.julia
+          set: after-expression
+        - match: '\\"'
+          scope: constant.character.escape.julia
+
+  string-quoted-double:
+    - match: '"'
+      scope: meta.string.julia string.quoted.double.julia punctuation.definition.string.begin.julia
+      push:
+        - meta_content_scope: meta.string.julia string.quoted.double.julia
+        - match: '"'
+          scope: punctuation.definition.string.end.julia
+          set: after-expression
+        - include: escaped-unicode-char
+        - include: escaped-char
+        - include: interpolated-julia
+
+    - match: '(b)(")'
+      captures:
+        1: storage.type.string.julia
+        2: meta.string.julia string.quoted.double.julia punctuation.definition.string.begin.julia
+      push:
+        - meta_content_scope: meta.string.julia string.quoted.double.julia
+        - match: '"'
+          scope: punctuation.definition.string.end.julia
+          set: after-expression
+        - include: escaped-unicode-char
+        - include: escaped-char
+
+    - match: '(r)(")'
+      captures:
+        1: storage.type.string.julia
+        2: meta.string.julia string.quoted.double.julia punctuation.definition.string.begin.julia
+      push:
+        - meta_content_scope: meta.string.julia string.quoted.double.julia
+        - match: '"'
+          scope: punctuation.definition.string.end.julia
+          set: after-expression
+        - match: ''
+          # we borrow the python regular expressions
+          push: scope:source.regexp.python
+          with_prototype:
+            - match: '(?=")'
+              pop: true
+
+    - match: '(v|raw|{{symb_id}})(")'
+      captures:
+        1: storage.type.string.julia
+        2: meta.string.julia string.quoted.double.julia punctuation.definition.string.begin.julia
+      push:
+        - meta_content_scope: meta.string.julia string.quoted.double.julia
+        - match: '"'
+          scope: punctuation.definition.string.end.julia
+          set: after-expression
+        - match: '\\"'
+          scope: constant.character.escape.julia
+
+  string-backtick:
+    - match: "`"
+      scope: punctuation.definition.string.begin.julia
+      push:
+        - meta_scope: meta.string.julia string.interpolated.julia
+        - match: "`"
+          scope: punctuation.definition.string.end.julia
+          pop: true
+        - include: interpolated-julia
+        - include: escaped-char
+    - match: "```"
+      scope: punctuation.definition.string.begin.julia
+      push:
+        - meta_scope: meta.string.julia string.interpolated.julia
+        - match: "```"
+          scope: punctuation.definition.string.end.julia
+          pop: true
+        - include: interpolated-julia
+        - include: escaped-char
+
+  constants:
+    - match: |-
+        (?x)
+        (\b|(?=.))
+        (?: # Dashes betwen numeric symbols (11 = 1_1) are allowed everywhere.
+          0b[0-1](?:_?[0-1])*|             # binary
+          0o[0-7](?:_?[0-7])*|             # octal
+          0x[\da-fA-F](?:_?[\da-fA-F])*|   # hex
+          (?:
+            \.\d(?:_?\d)*|                      # .11, .11
+            \d(?:_?\d)*(?:\.(?:\d(?:_?\d)*)?)?  # 11.11, 11., 11
+          )
+          (?:e[-+]?\d(?:_?\d)*)?                # Any of the above followed by e+123 or similar, for scientific notation.
+        )
+      scope: constant.numeric.julia
+      push: after-expression
+    - match: \b(true|false|nothing|missing|ℯ|pi|π|im|undef|NaN|NaN16|NaN32|NaN64|Inf|Inf16|Inf32|Inf64|ARGS|C_NULL|ENDIAN_BOM|ENV|LOAD_PATH|PROGRAM_FILE|STDERR|STDIN|STDOUT|VERSION)\b
+      scope: constant.language.julia
+      push: after-expression
+
+  symbols:
+    - match: '(:)(?!:)({{symb_id}}|\.?{{long_op}}|\.?{{symb_op}}|\.)'
+      captures:
+        1: keyword.operator.colon.julia constant.other.symbol.julia
+        2: constant.other.symbol.julia
+    - match: '(:)(\()'
+      captures:
+        1: keyword.operator.colon.julia constant.other.expression.julia
+        2: punctuation.section.expression.begin.julia
+      push:
+        - meta_scope: meta.expression.julia
+        - match: \)
+          scope: punctuation.section.expression.end.julia
+          set: after-expression
+        - include: interpolated-julia
+        - include: main
+
+  macros:
+    - match: '(@)({{base_macros}}\b|\.)'
+      scope: meta.function-call.macro.julia
+      captures:
+        1: punctuation.definition.macro.julia
+        2: variable.macro.julia support.function.macro.julia
+    - match: '(@)({{symb_id}})\b'
+      scope: meta.function-call.macro.julia
+      captures:
+        1: punctuation.definition.macro.julia
+        2: variable.macro.julia meta.generic-name.julia
+
+  keywords:
+    - match: \b(abstract type|mutable struct|primitive type)\b
+      scope: keyword.other.julia
+    - match: \b(baremodule|begin|const|end|export|function|global|import|let|local|macro|module|quote|return|struct|using)\b
+      scope: keyword.other.julia
+    - match: \b(break|catch|continue|do|else|elseif|finally|for|if|try|while)\b
+      scope: keyword.control.julia
+    # these are technical not reserved words, but they are most nevered used as variables.
+    - match: \b(where|in|isa)\b
+      scope: keyword.control.julia
+
+  operators:
+    # we handle transpose operator seperately in after-expression
+    - match: (::)
+      scope: keyword.operator.colons.julia
+    - match: '(?:(<:)|(>:))'
+      captures:
+        1: keyword.operator.subset.julia
+        2: keyword.operator.superset.julia
+    - match: '=>'
+      scope: keyword.operator.pair.julia
+    # broadcast operators
+    - match: (\.?)({{long_op}})
+      captures:
+        1: keyword.operator.broadcast.julia
+        2: keyword.operator.julia
+    - match: (\.?)(=)
+      captures:
+        1: keyword.operator.broadcast.julia
+        2: keyword.operator.assignment.julia
+    - match: (\.)({{symb_op}})
+      captures:
+        1: keyword.operator.broadcast.julia
+        2: keyword.operator.julia
+    # regular operators
+    - match: ({{long_op}}|{{symb_op}})
+      captures:
+        1: keyword.operator.julia
+
+  quote-include:
+    - include: comments
+    - include: interpolated-julia
+    - include: strings
+    - include: constants
+    - include: symbols
+    - include: macros
+    - include: operators
+    - include: quotes
+    - include: quote-blocks
+    - include: keywords
+    - include: supported-modules
+    - include: supported-types
+    - include: parametric-types
+    - match: '{{symb_id}}'
+      scope: meta.generic-name.julia
+    - match: \(
+      scope: punctuation.section.group.begin.julia
+      push:
+        - meta_scope: meta.group.julia
+        - match: \)
+          scope: punctuation.section.group.end.julia
+          set: after-expression
+        - include: quote-include
+    - match: \[
+      scope: punctuation.section.sequence.begin.julia
+      push:
+        - meta_scope: meta.sequence.julia
+        - match: \]
+          scope: punctuation.section.sequence.end.julia
+          set: after-expression
+        - include: quote-include
+
+  quotes:
+    - match: \b(quote)\b
+      scope: keyword.other.julia
+      push: quote-body
+
+  quote-body:
+    - meta_scope: meta.quote.julia
+    - match: \bend\b
+      scope: keyword.other.julia
+      pop: true
+    - include: quote-include
+
+  quote-blocks:
+    - match: \b(abstract type|mutable struct|primitive type)\b
+      scope: keyword.other.julia
+      push: quote-block-body
+    - match: \b(begin|function|let|macro|module|quote|struct)\b
+      scope: keyword.other.julia
+      push: quote-block-body
+    - match: \b(do|for|if|try|while)\b
+      scope: keyword.control.julia
+      push: quote-block-body
+
+  quote-block-body:
+    - match: \b(end)\b|(?=[\)\]])
+      captures:
+        1: keyword.other.julia
+      pop: true
+    - include: quote-include
+
+  blocks:
+    - match: \b(abstract type|mutable struct|primitive type)\b
+      scope: keyword.other.julia
+      push: block-body
+    - match: \b(begin|function|let|macro|module|quote|struct)\b
+      scope: keyword.other.julia
+      push: block-body
+    - match: \b(do|for|if|try|while)\b
+      scope: keyword.control.julia
+      push: block-body
+
+  block-body:
+    - match: \b(end)\b|(?=[\)\]])
+      captures:
+        1: keyword.other.julia
+      pop: true
+    - include: main
+
+  macro-declarations:
+    - match: \b(macro)\s+
+      captures:
+        1: meta.macro.julia keyword.declaration.macro.julia
+      push: [macro-body, macro-propotype]
+
+  macro-body:
+    - meta_scope: meta.macro.julia
+    - match: \bend\b
+      scope: keyword.other.julia
+      pop: true
+    - include: main
+
+  macro-propotype:
+    - match: '{{symb_id}}'
+      scope:  entity.name.macro.julia meta.generic-name.julia
+    - match: '(\()\s*({{symb_id}})\s*(\))(?=\()'
+      captures:
+        1: punctuation.section.group.begin.julia
+        2: entity.name.macro.julia meta.generic-name.julia
+        3: punctuation.section.group.end.julia
+    - match: '\('
+      scope: punctuation.section.parameters.end.julia
+      set:
+        - meta_content_scope: meta.macro.parameters.julia
+        - match: \)
+          scope: punctuation.section.parameters.end.julia
+          pop: true
+        - match: '{{symb_id}}'
+          scope: variable.parameter.julia
+          push: after-expression
+        - match: '[,;]'
+          scope: punctuation.separator.arguments.julia
+
+  struct-body:
+    - meta_scope: meta.struct.julia
+    - match: \bend\b
+      scope: keyword.other.julia
+      pop: true
+    - include: main
+
+  struct-declarations:
+    - match: \b(struct)\s+({{symb_id}})
+      scope: meta.struct.julia
+      captures:
+        1: storage.type.struct.julia keyword.declaration.struct.julia
+        2: entity.name.struct.julia
+      push: struct-body
+
+    - match: \b(mutable struct)\s+({{symb_id}})
+      scope: meta.struct.mutable.julia
+      captures:
+        1: storage.type.struct.mutable.julia keyword.declaration.struct.mutable.julia
+        2: entity.name.struct.mutable.julia
+      push: struct-body
+
+    - match: \b(abstract type)\s+({{symb_id}})
+      scope: meta.type.abstract.julia
+      captures:
+        1: storage.type.type.abstract.julia keyword.declaration.type.abstract.julia
+        2: entity.name.type.abstract.julia
+      push: struct-body
+
+    - match: \b(primitive type)\s+({{symb_id}})
+      scope: meta.type.primitive.julia
+      captures:
+        1: storage.type.type.primitive.julia keyword.declaration.type.primitive.julia
+        2: entity.name.type.primitive.julia
+      push: struct-body
+
+  supported-modules:
+    - match: '{{base_modules}}'
+      scope: support.module.julia
+      push: after-expression
+
+  identifiers:
+    - match: '{{symb_id}}'
+      scope: meta.generic-name.julia
+      push: after-expression
+
+  parametric-types:
+    - match: '{{symb_id}}(?=\{)'
+      scope: meta.type.julia meta.parametric-type.julia meta.generic-name.julia
+      push: parametric-type-parameters-group
+
+  supported-types:
+    - match: '{{base_types}}(?=\{)'
+      scope: meta.parametric-type.julia support.type.julia
+      push: parametric-type-parameters-group
+    - match: '{{base_types}}'
+      scope: meta.type.julia support.type.julia
+
+  possible-types:
+    - match: \(
+      scope: punctuation.section.group.begin.julia
+      push:
+        - meta_scope: meta.group.julia
+        - match: \)
+          scope: punctuation.section.group.end.julia
+          set: after-expression
+        - include: possible-types
+    - include: supported-types
+    - include: parametric-types
+    - match: '{{symb_id}}'
+      scope: meta.type.julia meta.generic-name.julia
+
+  where-clause:
+    - match: \s*(where)\b
+      captures:
+        1 : meta.where-clause.julia keyword.control.julia
+      push:
+        - meta_content_scope: meta.where-clause.julia
+        - match: \s*(\{)
+          captures:
+            1 : punctuation.section.parameter.begin.julia
+          push:
+            - meta_scope: meta.parametric-type.julia
+            - meta_content_scope: meta.parametric-type.parameters.julia
+            - match: \}
+              pop: 2
+            - match: ','
+              scope: punctuation.separator.parameter.julia
+            - include: main
+        - match: \s*(?={{symb_id}})
+          branch_point: where-clause-branch-point
+          branch:
+            - where-clause-three-terms
+            - where-clause-two-terms
+        - match: ''
+          pop: true
+    - match: ''
+      pop: true
+
+  where-clause-three-terms:
+    - match: '(?={{symb_id}})'
+      push:
+        - match: '(?={{symb_id}})'
+          push:
+            - include: possible-types
+            - match: ''
+              pop: true
+        - match: '\s*(<:)'
+          scope: keyword.operator.subset.julia
+          push:
+            - match: '\s*(?={{symb_id}})'
+              push:
+                - include: possible-types
+                - match: ''
+                  pop: true
+            - match: '\s*(<:)'
+              scope: keyword.operator.subset.julia
+              push:
+                - match: '\s*(?={{symb_id}})'
+                  push:
+                    - include: possible-types
+                    - match: ''
+                      pop: 6
+                - match: ''
+                  fail: where-clause-branch-point
+            - match: ''
+              fail: where-clause-branch-point
+        - match: ''
+          fail: where-clause-branch-point
+    - match: ''
+      fail: where-clause-branch-point
+
+  where-clause-two-terms:
+    - match: '({{symb_id}})\s*(?:(<:)|(>:))\s*'
+      captures:
+        1: meta.generic-name.julia
+        2: keyword.operator.subset.julia
+        3: keyword.operator.superset.julia
+      push:
+        - include: possible-types
+        - match: ''
+          pop: 3
+    - match: '({{symb_id}})'
+      scope: meta.generic-name.julia
+      pop: 2
+    - match: ''
+      pop: 2
+
+  lambda-function-single-branch:
+    - meta_scope: meta.function.lambda.julia
+    - match: (?={{symb_id}})
+      push:
+        - match: '\s*(->)'
+          captures:
+            1: keyword.operator.arrow.julia
+          pop: 2
+        - match: ({{symb_id}})
+          scope: variable.parameter.julia
+          push:
+            - meta_scope: meta.function.julia meta.function.parameters.julia
+            - match: '(?=::)'
+              push: after-expression
+            - match: ''
+              pop: true
+        - match: ''
+          fail: lambda-function-single-branch-point
+
+  lambda-function-branch:
+    - meta_scope: meta.function.lambda.julia
+    - match: (?=\()
+      push: [lambda-function-body, lambda-function-arguments]
+
+  lambda-function-body:
+    - match: '\s*(->)'
+      captures:
+        1: keyword.operator.arrow.julia
+      pop: 2
+    - match: ''
+      fail: lambda-function-branch-point
+
+  lambda-function-arguments:
+    - match: (?=\(\s*(?:{{symb_id}}|::|\)))
+      set: function-propotype-parameters-group
+    - match: \(
+      scope: punctuation.section.group.begin.julia
+      push:
+        - meta_scope: meta.group.julia
+        - match: \)
+          scope: punctuation.section.group.end.julia
+          pop: true
+        - match: (?=\(\s*(?:{{symb_id}}|::|\)))
+          push: lambda-function-arguments
+        - match: ''
+          fail: lambda-function-branch-point
+    - match: ''
+      fail: lambda-function-branch-point
+
+  function-body:
+    - meta_scope: meta.function.julia
+    - match: \bend\b
+      scope: keyword.other.julia
+      pop: true
+    - include: main
+
+  function-declarations:
+    - match: (function)\s+
+      captures:
+        1: keyword.declaration.function.julia
+      push: [function-body, function-propotype-explict]
+
+  function-call-or-inline-declaration:
+    - match: (?x)
+          (?=\({{symb_id}}(?:\.{{symb_id}})*\)\.?\()
+            |
+          (?={{symb_id}}(?:\.{{symb_id}})*\.?\()
+            |
+          (?=\({{symb_id}}::[^\)]+\)\()
+      branch_point: function-branch-point
+      branch:
+        - function-call
+        - function-inline-declaration
+
+  function-inline-body:
+    - meta_scope: meta.function.inline.julia
+    - match: ''
+      pop: 2
+
+  function-inline-declaration:
+    - match: (?x)
+          (?=\({{symb_id}}(?:\.{{symb_id}})*\)\()
+            |
+          (?={{symb_id}}(?:\.{{symb_id}})*\()
+            |
+          (?=\({{symb_id}}::[^\)]+\)\()
+      push: [function-inline-body, function-propotype-inline]
+    - match: ''
+      pop: true
+
+  function-parameters:
+    - match: (?={{symb_id}}|::)
+      scope: variable.parameter.julia
+      branch_point: function-parameter-branch-point
+      branch:
+        - function-parameters-branch
+        - function-parameters-with-default-branch
+    - match: '\('
+      scope: punctuation.section.parameters.begin.julia
+      push:
+        - match: \)
+          pop: true
+        - include: function-parameters
+
+  # f(x::T) = 1
+  function-parameters-branch:
+    - match: '{{symb_id}}'
+      scope: variable.parameter.julia
+      push:
+        - match: \s*=(?![=>])
+          fail: function-parameter-branch-point
+        - match: (?=::)
+          push: after-expression
+        - match: ''
+          pop: true
+    - match: '(?=::)'
+      push:
+        - match: \s*=(?![=>])
+          fail: function-parameter-branch-point
+        - match: (?=::)
+          push: after-expression
+        - match: ''
+          pop: true
+    - match: ''
+      pop: true
+
+  # f(x::T = 1) = 1
+  function-parameters-with-default-branch:
+    - match: '{{symb_id}}'
+      scope: variable.parameter.julia
+      set:
+        - match: (?=::)
+          push: after-expression
+        - match: =(?![=>])
+          scope: keyword.operator.assignment.julia
+          set:
+          - match: (?:([,;])|(?=\)))
+            captures:
+              1: punctuation.separator.arguments.julia
+            pop: true
+          - include: main
+    - match: '(?=::)'
+      set:
+        - match: (?=::)
+          push: after-expression
+        - match: =(?![=>])
+          scope: keyword.operator.assignment.julia
+          set:
+          - match: (?:([,;])|(?=\)))
+            captures:
+              1: punctuation.separator.arguments.julia
+            pop: true
+          - include: main
+
+  function-propotype-common:
+    # (foo)(x, y)
+    - match: '(?=\({{symb_id}}(\.{{symb_id}})*\)\()'
+      set:
+        - include: function-propotype-entity
+        - match: (?=\()
+          set: function-propotype-parameters-group
+    # foo(x, y)
+    - match: '(?={{symb_id}}(\.{{symb_id}})*\()'
+      set:
+        - include: function-propotype-entity
+        - match: (?=\()
+          set: function-propotype-parameters-group
+
+  function-propotype-inline:
+    - include: function-propotype-common
+    - match: '(?=\()'
+      branch_point: function-propotype-inline-branch-point
+      branch:
+        - function-like-object-method-inline
+        - brackets
+
+  function-like-object-method-inline:
+    - match: \(
+      scope: punctuation.section.group.begin.julia
+      push:
+        - match: \)
+          scope: punctuation.section.group.end.julia
+          set:
+            - meta_scope: meta.function.julia
+            - match: (?=\()
+              set: function-propotype-parameters-group
+            - match: ''
+              fail: function-propotype-inline-branch-point
+        - include: main
+    - match: ''
+      pop: 2
+
+  function-propotype-explict:
+    - include: function-propotype-common
+    - match: '(?={{symb_id}}(\.{{symb_id}})*)'
+      set:
+        - include: function-propotype-entity
+        - match: ''
+          pop: 2
+    - match: '(?=\()'
+      branch_point: function-propotype-explict-branch-point
+      branch:
+        - function-like-object-method-explict
+        - function-propotype-parameters-group
+    - match: ''
+      pop: true
+
+  function-like-object-method-explict:
+    - match: \(
+      scope: punctuation.section.group.begin.julia
+      push:
+        - match: \)
+          scope: punctuation.section.group.end.julia
+          set:
+            - meta_scope: meta.function.julia
+            - match: (?=\()
+              set: function-propotype-parameters-group
+            - match: ''
+              fail: function-propotype-explict-branch-point
+        - include: main
+    - match: ''
+      pop: true
+
+  function-propotype-entity:
+    # (foo)(x, y)
+    - match: \((?={{symb_id}}(\.{{symb_id}})*\)\()
+      scope: punctuation.section.group.begin.julia
+      push:
+        - meta_scope: meta.group.julia
+        - match: \)
+          scope: punctuation.section.group.end.julia
+          pop: true
+        - match: (?={{symb_id}}(\.{{symb_id}})*\)\()
+          push:
+            - include: function-propotype-entity
+            - match: ''
+              pop: true
+    # do not highlight support functions in entity.name.function
+    # - match: '(?={{base_module_funcs}}\()'
+    #   push:
+    #     - match: '{{base_modules}}'
+    #       scope: meta.function.julia entity.name.function.julia support.module.julia
+    #     - match: '(\.)({{symb_id}})'
+    #       captures:
+    #         1: meta.function.julia entity.name.function.julia punctuation.accessor.dot.julia
+    #         2: meta.function.julia entity.name.function.julia support.function.julia
+    #     - match: ''
+    #       pop: true
+    # - match: '{{base_funcs}}(?=\()'
+    #   scope: meta.function.julia entity.name.function.julia support.function.julia
+    # - match: '{{base_modules}}'
+    #   scope: meta.function.julia entity.name.function.julia support.module.julia
+    # foo(x, y)
+    - match: '{{symb_id}}'
+      scope: entity.name.function.julia meta.generic-name.julia
+    - match: '(\.)({{symb_id}})'
+      captures:
+        1: entity.name.function.julia punctuation.accessor.dot.julia
+        2: entity.name.function.julia meta.generic-name.julia
+
+  function-propotype-parameters-group:
+    - match: '\('
+      scope: punctuation.section.parameters.begin.julia
+      set:
+        - meta_content_scope: meta.function.parameters.julia
+        - match: \)
+          scope: punctuation.section.parameters.end.julia
+          set: after-expression
+        - include: function-parameters
+        - match: '[,;]'
+          scope: punctuation.separator.parameters.julia
+        - include: main
+
+  function-call:
+    # (foo)(x, y)
+    - match: '(?=\({{symb_id}}(\.{{symb_id}})*\)\.?\()'
+      push:
+        - include: function-call-name
+        - match: '(\.)?(?=\()'
+          captures:
+            1: keyword.operator.broadcast.julia
+          set: function-call-arguments-group
+    # foo(x, y)
+    - match: '(?={{symb_id}}(\.{{symb_id}})*\.?\()'
+      push:
+        - include: function-call-name
+        - match: '(\.)?(?=\()'
+          captures:
+            1: keyword.operator.broadcast.julia
+          set: function-call-arguments-group
+    # (foo::Mytype)(x, y)
+    - match: '(?=\({{symb_id}}::[^\)]+\)\()'
+      push:
+        - match: \(
+          scope: punctuation.section.group.begin.julia
+          set:
+            - meta_scope: meta.function-call.julia
+            - match: \)
+              scope: punctuation.section.group.end.julia
+              set:
+                - meta_scope: meta.function-call.julia
+                - match: (?=\()
+                  set: function-call-arguments-group
+                - match: ''
+                  fail: function-branch-point
+            - include: main
+    - match: (?=\s*=[^=>])
+      fail: function-branch-point
+    - match: ''
+      pop: true
+
+  function-call-name:
+    # (foo)(x, y)
+    - match: \((?={{symb_id}}(\.{{symb_id}})*\)\.?\()
+      scope: punctuation.section.group.begin.julia
+      push:
+        - meta_scope: meta.group.julia
+        - match: \)
+          scope: punctuation.section.group.end.julia
+          pop: true
+        - match: (?={{symb_id}}(\.{{symb_id}})*\)\.?\()
+          push:
+            - include: function-call-name
+            - match: ''
+              pop: true
+    - match: '(?={{base_module_funcs}}\()'
+      push:
+        - match: '{{base_modules}}'
+          scope: meta.function-call.julia variable.function.julia support.module.julia
+        - match: '(\.)({{symb_id}})'
+          captures:
+            1: meta.function-call.julia punctuation.accessor.dot.julia
+            2: meta.function-call.julia variable.function.julia support.function.julia
+        - match: ''
+          pop: true
+    - match: '{{base_funcs}}(?=\()'
+      scope: meta.function-call.julia variable.function.julia support.function.julia
+    - match: '{{base_modules}}'
+      scope: meta.function-call.julia variable.function.julia support.module.julia
+    - match: '{{symb_id}}'
+      scope: meta.function-call.julia variable.function.julia meta.generic-name.julia
+    - match: '(\.)({{symb_id}})'
+      captures:
+        1: meta.function-call.julia punctuation.accessor.dot.julia
+        2: meta.function-call.julia variable.function.julia meta.generic-name.julia
+
+  function-call-keyword-arguments:
+    - match: '({{symb_id}})(?=\s*=[^=>])'
+      scope: variable.parameter.julia
+      push:
+        - match: =(?![=>])
+          scope: keyword.operator.assignment.julia
+          set:
+          - match: (?:([,;])|(?=\)))
+            captures:
+              1: punctuation.separator.arguments.julia
+            pop: true
+          - include: main
+    - match: '(:)({{symb_id}}|\.?{{long_op}}|\.?{{symb_op}}|\.)(?=\s*=>)'
+      captures:
+        1: keyword.operator.colon.julia constant.other.symbol.julia
+        2: constant.other.symbol.julia
+      push:
+        - match: '=>'
+          scope: keyword.operator.pair.julia
+          set:
+          - match: (?:([,;])|(?=\)))
+            captures:
+              1: punctuation.separator.arguments.julia
+            pop: true
+          - include: main
+
+  function-call-arguments-group:
+    - match: \(
+      scope: punctuation.section.arguments.begin.julia
+      set:
+        - meta_scope: meta.function-call.julia
+        - meta_content_scope: meta.function-call.arguments.julia
+        - match: \)
+          scope: punctuation.section.arguments.end.julia
+          set: after-expression
+        - include: function-call-keyword-arguments
+        - include: main
+
+  parametric-type-parameters-group:
+    - match: \{
+      scope: punctuation.section.parameter.begin.julia
+      set:
+        - meta_scope: meta.type.julia meta.parametric-type.julia
+        - meta_content_scope: meta.parametric-type.parameters.julia
+        - match: \}
+          scope: punctuation.section.parameter.end.julia
+          set: after-expression
+        - match: ','
+          scope: punctuation.separator.parameter.julia
+        - include: main
+
+  after-expression:
+    - match: (\.)(?=@?{{symb_id}})
+      scope: punctuation.accessor.dot.julia
+      push:
+        - include: macros
+        - include: function-call-or-inline-declaration
+        - include: identifiers
+        - match: ''
+          pop: true
+    - match: (::)
+      scope: keyword.operator.colons.julia
+      push:
+        - include: possible-types
+        - include: brackets
+        - match: ''
+          pop: true
+    - match: \s*(:)
+      captures:
+        1 : keyword.operator.colon.julia
+    - match: (\.)?(?=\()
+      captures:
+        1: keyword.operator.broadcast.julia
+      push: function-call-arguments-group
+    - match: (\.)?(')
+      captures:
+        1: keyword.operator.broadcast.julia
+        2: keyword.operator.transpose.julia
+    - match: \.\.\.
+      scope: keyword.operator.splat.julia
+    - match: \?
+      scope: invalid.operator.julia
+    - match: \s*(\?)(?={{symb_id}})
+      captures:
+        1: invalid.operator.julia
+    - match: (?=\{)
+      push: parametric-type-parameters-group
+    - match: (?=\s*where)
+      push: where-clause
+    - match: ''
+      pop: true
+
+  brackets:
+    - match: \(
+      scope: punctuation.section.group.begin.julia
+      push:
+        - meta_scope: meta.group.julia
+        - match: \)
+          scope: punctuation.section.group.end.julia
+          set: after-expression
+        - include: main
+    - match: \[
+      scope: punctuation.section.sequence.begin.julia
+      push:
+        - meta_scope: meta.sequence.julia
+        - match: \]
+          scope: punctuation.section.sequence.end.julia
+          set: after-expression
+        - include: main

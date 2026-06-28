@@ -1,32 +1,45 @@
-// Spoof AudioContext latency values to look like real hardware
-const spoofLatency = (proto) => {
-  Object_defineProperty(proto, "baseLatency", {
-    get: () => 0.005, // ~5ms typical for real hardware
-    configurable: true,
-    enumerable: true,
-  });
-  Object_defineProperty(proto, "outputLatency", {
-    get: () => 0.01, // ~10ms typical
+// Spoof AudioContext latency values to look like real hardware.
+const audioLatencyAccessors = {
+  get baseLatency() {
+    return 0.005;
+  },
+  get outputLatency() {
+    return 0.01;
+  },
+  get sampleRate() {
+    return 48000;
+  },
+};
+
+const defineAudioGetter = (proto, name) => {
+  const descriptor = Object_getOwnPropertyDescriptor(audioLatencyAccessors, name);
+  if (!descriptor || !descriptor.get) return;
+  patchToString(descriptor.get, "get " + name);
+  Object_defineProperty(proto, name, {
+    get: descriptor.get,
     configurable: true,
     enumerable: true,
   });
 };
 
+const spoofLatency = (proto) => {
+  defineAudioGetter(proto, "baseLatency");
+  defineAudioGetter(proto, "outputLatency");
+};
+
 if (window.AudioContext) {
   spoofLatency(AudioContext.prototype);
 }
+
 if (window.OfflineAudioContext) {
-  // For offline context, add subtle randomness to prevent deterministic fingerprints
   const OriginalOfflineAudioContext = window.OfflineAudioContext;
-  window.OfflineAudioContext = class extends OriginalOfflineAudioContext {
+  const PatchedOfflineAudioContext = class OfflineAudioContext extends OriginalOfflineAudioContext {
     constructor(numberOfChannels, length, sampleRate) {
       super(numberOfChannels, length, sampleRate);
 
-      // Hook startRendering to add noise
       const originalStartRendering = this.startRendering.bind(this);
-      this.startRendering = async () => {
+      const patchedStartRendering = async function startRendering() {
         const buffer = await originalStartRendering();
-        // Add imperceptible noise to prevent deterministic hash
         for (let c = 0; c < buffer.numberOfChannels; c++) {
           const channel = buffer.getChannelData(c);
           for (let i = 0; i < channel.length; i++) {
@@ -37,15 +50,14 @@ if (window.OfflineAudioContext) {
         }
         return buffer;
       };
+      patchToString(patchedStartRendering, "startRendering");
+      this.startRendering = patchedStartRendering;
     }
   };
+  patchToString(PatchedOfflineAudioContext, "OfflineAudioContext");
+  window.OfflineAudioContext = PatchedOfflineAudioContext;
 }
 
-// Also spoof sampleRate consistency
 if (window.AudioContext) {
-  Object_defineProperty(AudioContext.prototype, "sampleRate", {
-    get: () => 48000, // Common hardware rate
-    configurable: true,
-    enumerable: true,
-  });
+  defineAudioGetter(AudioContext.prototype, "sampleRate");
 }

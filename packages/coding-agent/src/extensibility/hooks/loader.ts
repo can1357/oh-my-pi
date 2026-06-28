@@ -11,7 +11,6 @@ import { loadCapability } from "../../discovery";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
 import type { HookMessage } from "../../session/messages";
-import type { SessionManager } from "../../session/session-manager";
 import * as typebox from "../typebox";
 import { resolvePath } from "../utils";
 import { execCommand } from "./runner";
@@ -35,26 +34,9 @@ export type SendMessageHandler = <T = unknown>(
  */
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
-/**
- * New session handler type for ctx.newSession() in HookCommandContext.
- */
-export type NewSessionHandler = (options?: {
-	parentSession?: string;
-	setup?: (sessionManager: SessionManager) => Promise<void>;
-}) => Promise<{ cancelled: boolean }>;
-
-/**
- * Branch handler type for ctx.branch() in HookCommandContext.
- */
-export type BranchHandler = (entryId: string) => Promise<{ cancelled: boolean }>;
-
-/**
- * Navigate tree handler type for ctx.navigateTree() in HookCommandContext.
- */
-export type NavigateTreeHandler = (
-	targetId: string,
-	options?: { summarize?: boolean },
-) => Promise<{ cancelled: boolean }>;
+// Session-lifecycle handler types live once in session-handler-types; re-exported
+// here because hooks/runner.ts imports them from this module.
+export type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 
 /**
  * Registered handlers for a loaded hook.

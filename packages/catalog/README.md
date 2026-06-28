@@ -24,7 +24,7 @@ Import from subpaths (`@pk-nerdsaver-ai/pi-catalog/<module>`) or the root barrel
 Never edit `src/models.json` by hand — it is produced from upstream sources (models.dev, provider catalog discovery, OpenCode docs) by `scripts/generate-models.ts` and the resolvers in `src/provider-models/`. Regenerate with:
 
 ```sh
-bun --cwd=packages/catalog run generate-models
+bun run gen:models
 ```
 
 To change an entry, fix the source: resolver overrides in `provider-models/openai-compat.ts`, provider entries in `provider-models/descriptors.ts`, generator fixups in `scripts/generate-models.ts`, or thinking policies in `model-thinking.ts`.

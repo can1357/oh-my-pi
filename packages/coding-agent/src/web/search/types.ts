@@ -30,16 +30,20 @@ export const SEARCH_PROVIDER_OPTIONS = [
 		label: "OpenAI",
 		description: "OpenAI's native web_search (uses ChatGPT OAuth via /login openai-codex)",
 	},
+	{ value: "xai", label: "xAI", description: "Grok web search via xAI Responses API (requires XAI_API_KEY)" },
 	{ value: "zai", label: "Z.AI", description: "Calls Z.AI webSearchPrime MCP" },
 	{ value: "exa", label: "Exa", description: "Uses Exa API when EXA_API_KEY is set; falls back to Exa MCP" },
+	{ value: "tinyfish", label: "TinyFish", description: "Requires TINYFISH_API_KEY" },
 	{ value: "jina", label: "Jina", description: "Requires JINA_API_KEY" },
 	{ value: "kagi", label: "Kagi", description: "Requires KAGI_API_KEY and Kagi Search API beta access" },
 	{ value: "tavily", label: "Tavily", description: "Requires TAVILY_API_KEY" },
+	{ value: "firecrawl", label: "Firecrawl", description: "Requires FIRECRAWL_API_KEY" },
 	{ value: "brave", label: "Brave", description: "Requires BRAVE_API_KEY" },
 	{ value: "kimi", label: "Kimi", description: "Requires MOONSHOT_SEARCH_API_KEY or MOONSHOT_API_KEY" },
 	{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
 	{ value: "synthetic", label: "Synthetic", description: "Requires SYNTHETIC_API_KEY" },
 	{ value: "searxng", label: "SearXNG", description: "Requires SEARXNG_ENDPOINT or searxng.endpoint" },
+	{ value: "duckduckgo", label: "DuckDuckGo", description: "Uses DuckDuckGo Instant Answer API (no API key)" },
 ] as const;
 
 /** Supported web search providers (every option except `auto`). */
@@ -81,7 +85,7 @@ export interface SearchSource {
 	author?: string;
 }
 
-/** Citation with text reference (anthropic, perplexity) */
+/** Citation with text reference (LLM-mediated providers) */
 export interface SearchCitation {
 	url: string;
 	title: string;
@@ -101,7 +105,7 @@ export interface SearchUsage {
 /** Unified response across providers */
 export interface SearchResponse {
 	provider: SearchProviderId | "none";
-	/** Synthesized answer text (anthropic, perplexity) */
+	/** Synthesized answer text (LLM-mediated providers) */
 	answer?: string;
 	/** Search result sources */
 	sources: SearchSource[];

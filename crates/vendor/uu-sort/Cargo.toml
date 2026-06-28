@@ -1,0 +1,42 @@
+# Vendored from uutils/coreutils tag 0.8.0 (src/uu/sort), patched to route I/O
+# and path resolution through pi-uutils-ctx so it can run in-process as a shell
+# builtin. See src/sort.rs for the patch markers (`pi-uutils:` comments).
+[package]
+name = "uu_sort"
+version = "0.8.0"
+edition = "2024"
+license = "MIT"
+description = "sort ~ (uutils) sort input lines (vendored + patched for in-process embedding)"
+
+[lib]
+path = "src/sort.rs"
+
+[features]
+default = ["i18n-collator"]
+i18n-collator = ["uucore/i18n-collator"]
+
+[dependencies]
+bigdecimal = "0.4"
+binary-heap-plus = "0.5.0"
+clap = { version = "4.5", features = ["wrap_help", "cargo", "color"] }
+compare = "0.1.0"
+itertools = "0.14.0"
+memchr = "2.7.2"
+rand = { version = "0.10.0", features = ["std_rng"] }
+rayon = "1.10"
+self_cell = "1.0.4"
+tempfile = "3.15.0"
+thiserror = "2.0.3"
+foldhash = "0.2.0"
+uucore = { version = "0.8.0", features = [
+  "fs",
+  "parser-size",
+  "version-cmp",
+  "i18n-decimal",
+  "i18n-collator",
+  "i18n-datetime",
+] }
+pi-uutils-ctx = { path = "../../pi-uutils-ctx" }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31.2", default-features = false, features = ["resource"] }

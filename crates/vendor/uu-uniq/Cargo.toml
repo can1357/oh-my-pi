@@ -1,0 +1,18 @@
+# Vendored from uutils/coreutils tag 0.8.0 (src/uu/uniq), patched to route I/O
+# (stdin/stdout/stderr) and path resolution through pi-uutils-ctx so it can run
+# in-process as a shell builtin. See src/uniq.rs for the patch markers
+# (`pi-uutils:` comments).
+[package]
+name = "uu_uniq"
+version = "0.8.0"
+edition = "2024"
+license = "MIT"
+description = "uniq ~ (uutils) filter identical adjacent lines from input (vendored + patched for in-process embedding)"
+
+[lib]
+path = "src/uniq.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["wrap_help", "cargo", "color"] }
+uucore = { version = "0.8.0", features = ["parser"] }
+pi-uutils-ctx = { path = "../../pi-uutils-ctx" }

@@ -2,22 +2,29 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { getProjectDir, logger } from "@pk-nerdsaver-ai/pi-utils";
-import { Settings } from "../../config/settings";
-import { OutputSink } from "../../session/streaming-output";
 import type { ToolSession } from "../../tools";
-import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../../tools/output-meta";
-import { isEvalTimeoutControlEvent } from "../bridge-timeout";
+import {
+	attachSessionOwner,
+	buildManagedKernelEnv,
+	buildManagedKernelEnvPatch,
+	createCancelledKernelResult,
+	executeWithKernelBase,
+	getExecutionDeadlineMs,
+	getRemainingTimeoutMs,
+	isCancellationError,
+	isTimedOutCancellation,
+	waitForPromiseWithCancellation,
+} from "../executor-base";
 import type { JsStatusEvent } from "../js/shared/types";
 import {
 	checkPythonKernelAvailability,
 	type KernelDisplayOutput,
 	type KernelExecuteOptions,
 	type KernelExecuteResult,
-	type KernelRuntimeEnv,
 	PythonKernel,
 } from "./kernel";
 import { resolveExplicitPythonRuntime } from "./runtime";
-import { ensurePyToolBridge, registerPyToolBridge } from "./tool-bridge";
+import { ensurePyToolBridge } from "./tool-bridge";
 
 export type PythonKernelMode = "session" | "per-call";
 
@@ -64,7 +71,7 @@ export interface PythonExecutorOptions {
 	artifactPath?: string;
 	artifactId?: string;
 	/**
-	 * On-disk roots the prelude helpers (`read`/`write`/`append`) substitute for
+	 * On-disk roots the prelude helpers (`read`/`write`) substitute for
 	 * internal-URL schemes (e.g. `{ local: "/…/artifacts/local" }`). Exported to
 	 * the kernel as `PI_EVAL_LOCAL_ROOTS` (JSON) so `write("local://x")` lands
 	 * where `read local://x` resolves instead of a literal `local:/` directory.
@@ -170,20 +177,9 @@ class PythonExecutionCancelledError extends Error {
 
 	constructor(timedOut: boolean) {
 		super(timedOut ? "Command timed out" : "Command aborted");
-		this.name = timedOut ? "TimeoutError" : "AbortError";
+		this.name = "PythonExecutionCancelledError";
 		this.timedOut = timedOut;
 	}
-}
-
-function getExecutionDeadlineMs(options?: Pick<PythonExecutorOptions, "deadlineMs" | "timeoutMs">): number | undefined {
-	if (options?.deadlineMs !== undefined) return options.deadlineMs;
-	if (options?.timeoutMs === undefined) return undefined;
-	return Date.now() + options.timeoutMs;
-}
-
-function getRemainingTimeoutMs(deadlineMs?: number): number | undefined {
-	if (deadlineMs === undefined) return undefined;
-	return deadlineMs - Date.now();
 }
 
 function requireRemainingTimeoutMs(deadlineMs?: number): number | undefined {
@@ -193,64 +189,6 @@ function requireRemainingTimeoutMs(deadlineMs?: number): number | undefined {
 		throw new PythonExecutionCancelledError(true);
 	}
 	return remainingMs;
-}
-
-function isCancellationError(error: unknown): boolean {
-	return (
-		error instanceof PythonExecutionCancelledError ||
-		(error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError")) ||
-		(error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
-	);
-}
-
-function isTimedOutCancellation(error: unknown, signal?: AbortSignal): boolean {
-	if (error instanceof PythonExecutionCancelledError) return error.timedOut;
-	if (error instanceof DOMException) return error.name === "TimeoutError";
-	if (error instanceof Error && error.name === "TimeoutError") return true;
-	const reason = signal?.reason;
-	if (reason instanceof DOMException) return reason.name === "TimeoutError";
-	return reason instanceof Error ? reason.name === "TimeoutError" : false;
-}
-
-async function waitForPromiseWithCancellation<T>(
-	promise: Promise<T>,
-	options: Pick<PythonExecutorOptions, "signal" | "deadlineMs">,
-): Promise<T> {
-	if (options.signal?.aborted) {
-		throw new PythonExecutionCancelledError(isTimedOutCancellation(options.signal.reason, options.signal));
-	}
-	const remainingMs = getRemainingTimeoutMs(options.deadlineMs);
-	if (remainingMs !== undefined && remainingMs <= 0) {
-		throw new PythonExecutionCancelledError(true);
-	}
-	if (!options.signal && remainingMs === undefined) {
-		return await promise;
-	}
-
-	const { promise: resultPromise, resolve, reject } = Promise.withResolvers<T>();
-	const cleanups: Array<() => void> = [];
-	const finish = (cb: () => void): void => {
-		while (cleanups.length > 0) cleanups.pop()?.();
-		cb();
-	};
-	if (options.signal) {
-		const onAbort = (): void =>
-			finish(() =>
-				reject(new PythonExecutionCancelledError(isTimedOutCancellation(options.signal?.reason, options.signal))),
-			);
-		options.signal.addEventListener("abort", onAbort, { once: true });
-		cleanups.push(() => options.signal?.removeEventListener("abort", onAbort));
-	}
-	if (remainingMs !== undefined) {
-		const timer = setTimeout(() => finish(() => reject(new PythonExecutionCancelledError(true))), remainingMs);
-		timer.unref();
-		cleanups.push(() => clearTimeout(timer));
-	}
-	promise.then(
-		value => finish(() => resolve(value)),
-		err => finish(() => reject(err)),
-	);
-	return await resultPromise;
 }
 
 // ---------------------------------------------------------------------------
@@ -274,93 +212,22 @@ function formatKernelTimeoutAnnotation(timeoutMs: number | undefined, kernelKill
 
 function createCancelledPythonResult(timedOut: boolean, timeoutMs?: number): PythonResult {
 	const output = timedOut ? (formatTimeoutAnnotation(timeoutMs) ?? "Command timed out") : "";
-	const outputBytes = Buffer.byteLength(output, "utf-8");
-	const outputLines = output.length > 0 ? 1 : 0;
-	return {
-		output,
-		exitCode: undefined,
-		cancelled: true,
-		truncated: false,
-		totalLines: outputLines,
-		totalBytes: outputBytes,
-		outputLines,
-		outputBytes,
-		displayOutputs: [],
-		stdinRequested: false,
-	};
+	return createCancelledKernelResult(output);
 }
 
 // ---------------------------------------------------------------------------
 // Kernel start helpers
 // ---------------------------------------------------------------------------
 
-const MANAGED_KERNEL_ENV_KEYS = [
-	"PI_SESSION_FILE",
-	"PI_ARTIFACTS_DIR",
-	"PI_TOOL_BRIDGE_URL",
-	"PI_TOOL_BRIDGE_TOKEN",
-	"PI_TOOL_BRIDGE_SESSION",
-	"PI_EVAL_LOCAL_ROOTS",
-] as const;
-
-function buildKernelEnvPatch(options: {
-	sessionFile?: string;
-	artifactsDir?: string;
-	bridgeSessionId?: string;
-	bridge?: { url: string; token: string };
-	localRoots?: Record<string, string>;
-}): KernelRuntimeEnv {
-	const localRoots = options.localRoots;
-	return {
-		PI_SESSION_FILE: options.sessionFile ?? null,
-		PI_ARTIFACTS_DIR: options.artifactsDir ?? null,
-		PI_TOOL_BRIDGE_URL: options.bridge?.url ?? null,
-		PI_TOOL_BRIDGE_TOKEN: options.bridge?.token ?? null,
-		PI_TOOL_BRIDGE_SESSION: options.bridge && options.bridgeSessionId ? options.bridgeSessionId : null,
-		PI_EVAL_LOCAL_ROOTS: localRoots && Object.keys(localRoots).length > 0 ? JSON.stringify(localRoots) : null,
-	};
-}
-
-function buildKernelEnv(options: {
-	sessionFile?: string;
-	artifactsDir?: string;
-	bridgeSessionId?: string;
-	bridge?: { url: string; token: string };
-	localRoots?: Record<string, string>;
-}): Record<string, string> | undefined {
-	const patch = buildKernelEnvPatch(options);
-	const env: Record<string, string> = {};
-	for (const key of MANAGED_KERNEL_ENV_KEYS) {
-		const value = patch[key];
-		if (value !== null) env[key] = value;
-	}
-	return Object.keys(env).length > 0 ? env : undefined;
-}
-
 async function startKernel(cwd: string, options: PythonExecutorOptions): Promise<PythonKernel> {
 	requireRemainingTimeoutMs(options.deadlineMs);
 	return await PythonKernel.start({
 		cwd,
-		env: buildKernelEnv(options),
+		env: buildManagedKernelEnv(options),
 		signal: options.signal,
 		deadlineMs: options.deadlineMs,
 		interpreter: options.interpreter,
 	});
-}
-
-function attachOwner(session: PythonSession, sessionId: string, ownerId: string | undefined): void {
-	if (ownerId !== undefined) {
-		if (session.hasFallbackOwner) {
-			session.ownerIds.delete(sessionId);
-			session.hasFallbackOwner = false;
-		}
-		session.ownerIds.add(ownerId);
-		return;
-	}
-	if (session.hasFallbackOwner || session.ownerIds.size === 0) {
-		session.ownerIds.add(sessionId);
-		session.hasFallbackOwner = true;
-	}
 }
 
 async function acquireSession(
@@ -371,13 +238,13 @@ async function acquireSession(
 ): Promise<PythonSession> {
 	const existing = sessions.get(sessionKey);
 	if (existing) {
-		attachOwner(existing, sessionId, options.kernelOwnerId);
+		attachSessionOwner(existing, sessionId, options.kernelOwnerId);
 		return existing;
 	}
 	const starting = startingSessions.get(sessionKey);
 	if (starting) {
 		const session = await starting;
-		attachOwner(session, sessionId, options.kernelOwnerId);
+		attachSessionOwner(session, sessionId, options.kernelOwnerId);
 		return session;
 	}
 	const startup = (async () => {
@@ -396,7 +263,7 @@ async function acquireSession(
 	startingSessions.set(sessionKey, startup);
 	try {
 		const session = await startup;
-		attachOwner(session, sessionId, options.kernelOwnerId);
+		attachSessionOwner(session, sessionId, options.kernelOwnerId);
 		return session;
 	} finally {
 		if (startingSessions.get(sessionKey) === startup) startingSessions.delete(sessionKey);
@@ -507,108 +374,24 @@ async function executeWithKernel(
 	code: string,
 	options: PythonExecutorOptions | undefined,
 ): Promise<PythonResult> {
-	const settings = await Settings.init();
-	const sink = new OutputSink({
-		onChunk: options?.onChunk,
-		artifactPath: options?.artifactPath,
-		artifactId: options?.artifactId,
-		headBytes: resolveOutputSinkHeadBytes(settings),
-		maxColumns: resolveOutputMaxColumns(settings),
+	return executeWithKernelBase<PythonExecutorOptions>({
+		kernel,
+		code,
+		options,
+		runIdPrefix: "py",
+		errorLogLabel: "Python",
+		cancelledErrorClass: PythonExecutionCancelledError,
+		buildKernelEnvPatch: buildManagedKernelEnvPatch,
+		formatKernelTimeoutAnnotation,
+		formatTimeoutAnnotation,
 	});
-	const displayOutputs: KernelDisplayOutput[] = [];
-	const deadlineMs = getExecutionDeadlineMs(options);
-	let executionTimeoutMs: number | undefined;
-
-	// Collect every display output and, for status events, stream them live so
-	// long-running bridge helpers (e.g. `agent()`) surface progress mid-cell.
-	const collectDisplay = (output: KernelDisplayOutput) => {
-		if (output.type === "status") {
-			// Timeout-control events drive the eval watchdog only; never store or
-			// render them as cell output.
-			options?.onStatus?.(output.event);
-			if (isEvalTimeoutControlEvent(output.event)) return;
-		}
-		displayOutputs.push(output);
-	};
-	const emitStatus = options?.emitStatus ?? ((event: JsStatusEvent) => collectDisplay({ type: "status", event }));
-	const runId = `py-${crypto.randomUUID()}`;
-	const unregisterBridge =
-		options?.toolSession && options?.bridgeSessionId
-			? registerPyToolBridge(options.bridgeSessionId, runId, {
-					toolSession: options.toolSession,
-					signal: options.signal,
-					emitStatus,
-				})
-			: null;
-
-	try {
-		executionTimeoutMs = requireRemainingTimeoutMs(deadlineMs);
-		const result = await kernel.execute(code, {
-			cwd: options?.cwd,
-			env: buildKernelEnvPatch(options ?? {}),
-			id: runId,
-			signal: options?.signal,
-			timeoutMs: executionTimeoutMs,
-			onChunk: text => sink.push(text),
-			onDisplay: output => collectDisplay(output),
-		});
-
-		if (result.cancelled) {
-			const annotation = result.timedOut
-				? formatKernelTimeoutAnnotation(executionTimeoutMs ?? options?.idleTimeoutMs, result.kernelKilled ?? false)
-				: undefined;
-			return {
-				exitCode: undefined,
-				cancelled: true,
-				displayOutputs,
-				stdinRequested: result.stdinRequested,
-				...(await sink.dump(annotation)),
-			};
-		}
-
-		if (result.stdinRequested) {
-			return {
-				exitCode: 1,
-				cancelled: false,
-				displayOutputs,
-				stdinRequested: true,
-				...(await sink.dump("Kernel requested stdin; interactive input is not supported.")),
-			};
-		}
-
-		const exitCode = result.status === "ok" ? 0 : 1;
-		return {
-			exitCode,
-			cancelled: false,
-			displayOutputs,
-			stdinRequested: false,
-			...(await sink.dump()),
-		};
-	} catch (err) {
-		if (isCancellationError(err) || options?.signal?.aborted) {
-			const timedOut = isTimedOutCancellation(err, options?.signal);
-			return {
-				exitCode: undefined,
-				cancelled: true,
-				displayOutputs,
-				stdinRequested: false,
-				...(await sink.dump(
-					timedOut ? formatTimeoutAnnotation(executionTimeoutMs ?? options?.idleTimeoutMs) : undefined,
-				)),
-			};
-		}
-		const error = err instanceof Error ? err : new Error(String(err));
-		logger.error("Python execution failed", { error: error.message });
-		throw error;
-	} finally {
-		unregisterBridge?.();
-	}
 }
 
 async function ensureKernelAvailable(cwd: string, options: PythonExecutorOptions): Promise<void> {
 	const availability = await waitForPromiseWithCancellation(
 		checkPythonKernelAvailability(cwd, options.interpreter),
 		options,
+		PythonExecutionCancelledError,
 	);
 	if (!availability.ok) {
 		throw new Error(availability.reason ?? "Python kernel unavailable");
@@ -671,7 +454,9 @@ async function executeOnSession(code: string, cwd: string, options: PythonExecut
 	}
 	const session = await acquireSession(sessionKey, sessionId, cwd, options);
 	if (options.signal?.aborted) {
-		throw new PythonExecutionCancelledError(isTimedOutCancellation(options.signal.reason, options.signal));
+		throw new PythonExecutionCancelledError(
+			isTimedOutCancellation(options.signal.reason, PythonExecutionCancelledError, options.signal),
+		);
 	}
 	if (sessions.get(session.sessionKey) !== session) {
 		throw new PythonExecutionCancelledError(false);
@@ -686,7 +471,7 @@ async function executeOnSession(code: string, cwd: string, options: PythonExecut
 	try {
 		return await executeWithKernel(session.kernel, code, runOptions);
 	} catch (err) {
-		if (isCancellationError(err) || options.signal?.aborted) throw err;
+		if (isCancellationError(err, PythonExecutionCancelledError) || options.signal?.aborted) throw err;
 		if (session.kernel.isAlive()) throw err;
 		if (sessions.get(session.sessionKey) !== session) {
 			throw new PythonExecutionCancelledError(false);
@@ -722,7 +507,11 @@ export async function executePython(code: string, options?: PythonExecutorOption
 		requireRemainingTimeoutMs(deadlineMs);
 		if (executionOptions.signal?.aborted) {
 			throw new PythonExecutionCancelledError(
-				isTimedOutCancellation(executionOptions.signal.reason, executionOptions.signal),
+				isTimedOutCancellation(
+					executionOptions.signal.reason,
+					PythonExecutionCancelledError,
+					executionOptions.signal,
+				),
 			);
 		}
 		await ensureKernelAvailable(cwd, executionOptions);
@@ -734,8 +523,10 @@ export async function executePython(code: string, options?: PythonExecutorOption
 		}
 		return await executeOnSession(code, cwd, executionOptions);
 	} catch (err) {
-		if (isCancellationError(err) || executionOptions.signal?.aborted) {
-			return createCancelledPythonResult(isTimedOutCancellation(err, executionOptions.signal));
+		if (isCancellationError(err, PythonExecutionCancelledError) || executionOptions.signal?.aborted) {
+			return createCancelledPythonResult(
+				isTimedOutCancellation(err, PythonExecutionCancelledError, executionOptions.signal),
+			);
 		}
 		throw err;
 	}

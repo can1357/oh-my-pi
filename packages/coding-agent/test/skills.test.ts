@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { type Skill as CapabilitySkill, skillCapability } from "@pk-nerdsaver-ai/pi-coding-agent/capability/skill";
 import { getCapability } from "@pk-nerdsaver-ai/pi-coding-agent/discovery";
 import { loadSkills, loadSkillsFromDir, type Skill } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/skills";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");
@@ -190,8 +191,8 @@ describe("skills", () => {
 				const result = await claudeProvider!.load({ cwd: tempProjectDir, home: tempHomeDir, repoRoot: null });
 				expect(result.items.some(skill => skill.name === "user-only-skill" && skill.level === "user")).toBe(true);
 			} finally {
-				await fs.rm(tempProjectDir, { recursive: true, force: true });
-				await fs.rm(tempHomeDir, { recursive: true, force: true });
+				await removeWithRetries(tempProjectDir);
+				await removeWithRetries(tempHomeDir);
 			}
 		});
 
@@ -223,8 +224,8 @@ describe("skills", () => {
 				expect(skills.some(s => s.name === "user-agents-skill" && s.source === "agents:user")).toBe(true);
 			} finally {
 				homedirSpy.mockRestore();
-				await fs.rm(tempHome, { recursive: true, force: true });
-				await fs.rm(tempCwd, { recursive: true, force: true });
+				await removeWithRetries(tempHome);
+				await removeWithRetries(tempCwd);
 			}
 		});
 
@@ -247,8 +248,8 @@ describe("skills", () => {
 				expect(skills.some(s => s.name === "opted-out")).toBe(false);
 			} finally {
 				homedirSpy.mockRestore();
-				await fs.rm(tempHome, { recursive: true, force: true });
-				await fs.rm(tempCwd, { recursive: true, force: true });
+				await removeWithRetries(tempHome);
+				await removeWithRetries(tempCwd);
 			}
 		});
 
@@ -281,8 +282,8 @@ describe("skills", () => {
 				expect(skills.some(s => s.name === "leaked-opencode")).toBe(false);
 			} finally {
 				homedirSpy.mockRestore();
-				await fs.rm(tempHome, { recursive: true, force: true });
-				await fs.rm(tempCwd, { recursive: true, force: true });
+				await removeWithRetries(tempHome);
+				await removeWithRetries(tempCwd);
 			}
 		});
 
@@ -324,7 +325,7 @@ enabled: false
 				const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS, customDirectories: [tempDir] });
 				expect(skills.some(s => s.name === "disabled-skill")).toBe(false);
 			} finally {
-				await fs.rm(tempDir, { recursive: true, force: true });
+				await removeWithRetries(tempDir);
 			}
 		});
 
@@ -343,7 +344,7 @@ enabled: false
 				expect(skill).toBeDefined();
 				expect(skill!.hide).toBe(true);
 			} finally {
-				await fs.rm(tempDir, { recursive: true, force: true });
+				await removeWithRetries(tempDir);
 			}
 		});
 
@@ -359,8 +360,10 @@ enabled: false
 	});
 
 	it("should expand ~ in customDirectories", async () => {
-		const tempHomeSkillsDir = await fs.mkdtemp(path.join(os.homedir(), ".pi-skills-test-"));
-		const relativeToHome = path.relative(os.homedir(), tempHomeSkillsDir);
+		const fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-home-"));
+		const homedirSpy = spyOn(os, "homedir").mockReturnValue(fakeHome);
+		const tempHomeSkillsDir = await fs.mkdtemp(path.join(fakeHome, ".pi-skills-test-"));
+		const relativeToHome = path.relative(fakeHome, tempHomeSkillsDir);
 		const tildeDir = `~/${relativeToHome.split(path.sep).join("/")}`;
 		const skillDir = path.join(tempHomeSkillsDir, "tilde-skill");
 		const skillPath = path.join(skillDir, "SKILL.md");
@@ -388,7 +391,8 @@ description: Skill loaded from a tilde-expanded custom directory.
 			expect(withTilde.length).toBe(withoutTilde.length);
 			expect(withTilde.some(skill => skill.name === "tilde-skill")).toBe(true);
 		} finally {
-			await fs.rm(tempHomeSkillsDir, { recursive: true, force: true });
+			homedirSpy.mockRestore();
+			await removeWithRetries(fakeHome);
 		}
 	});
 

@@ -655,6 +655,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         event = db.get_event(delivery_id)
         if event is None:
             raise HTTPException(404, f"unknown delivery {delivery_id}")
+        if event.state != "running":
+            raise HTTPException(409, f"delivery {delivery_id} is {event.state}; only running deliveries can be cancelled")
 
         pool: WorkerPool = bag["pool"]
         fired = await pool.cancel_event(delivery_id)
@@ -742,6 +744,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 }
 
             events_rows = db.list_events(limit=25)
+
+            # Recent events can reference issues outside the capped 200-issue
+            # `issues` window above. Surface each event's current DB issue state
+            # so the dashboard can suppress failures for issues that have since
+            # gone terminal (merged/closed/abandoned) without a row to consult.
+            # Reuse the already-loaded issue states; fall back to a per-key
+            # lookup (bounded by the 25-event cap) for keys outside the window.
+            issue_state_by_key: dict[str, str | None] = {r.key: r.state for r in issues_rows}
+
+            def _recent_issue_state(issue_key: str | None) -> str | None:
+                if not issue_key:
+                    return None
+                if issue_key not in issue_state_by_key:
+                    row = db.get_issue(issue_key)
+                    issue_state_by_key[issue_key] = row.state if row is not None else None
+                return issue_state_by_key[issue_key]
+
             return {
                 "event_counts": db.event_state_counts(),
                 "issue_event_counts": db.latest_issue_event_state_counts(),
@@ -770,6 +789,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "attempts": r.attempts,
                         "received_at": r.received_at,
                         "last_error": r.last_error,
+                        "issue_state": _recent_issue_state(r.issue_key),
                     }
                     for r in events_rows
                 ],

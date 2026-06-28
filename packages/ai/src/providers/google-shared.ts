@@ -4,8 +4,9 @@
 
 import { scheduler } from "node:timers/promises";
 import { calculateCost } from "@pk-nerdsaver-ai/pi-catalog/models";
-import { extractHttpStatusFromError, readSseJson } from "@pk-nerdsaver-ai/pi-utils";
-import { ProviderHttpError } from "../errors";
+import { readSseJson } from "@pk-nerdsaver-ai/pi-utils";
+import { renderDemotedThinking } from "../dialect/demotion";
+import * as AIError from "../error";
 import type {
 	Api,
 	AssistantMessage,
@@ -22,7 +23,7 @@ import type {
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
+import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import type {
 	Content,
@@ -46,11 +47,6 @@ export type {
 	ThinkingConfig,
 } from "./google-types";
 export { normalizeSchemaForGoogle };
-
-/** Non-2xx response (or in-stream error chunk) from the Google Generative Language / Vertex API. */
-export class GoogleApiError extends ProviderHttpError {
-	override readonly name = "GoogleApiError";
-}
 
 type GoogleApiType = "google-generative-ai" | "google-gemini-cli" | "google-vertex";
 
@@ -234,18 +230,16 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				} else if (block.type === "thinking") {
 					// Skip empty thinking blocks
 					if (!block.thinking || block.thinking.trim() === "") continue;
-					// Only keep as thinking block if same provider AND same model
-					// Otherwise convert to plain text (no tags to avoid model mimicking them)
-					if (isSameProviderAndModel) {
-						const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
+					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
+					if (thoughtSignature) {
 						parts.push({
 							thought: true,
 							text: block.thinking.toWellFormed(),
-							...(thoughtSignature && { thoughtSignature }),
+							thoughtSignature,
 						});
 					} else {
 						parts.push({
-							text: block.thinking.toWellFormed(),
+							text: renderDemotedThinking(model.id, block.thinking),
 						});
 					}
 				} else if (block.type === "toolCall") {
@@ -420,7 +414,7 @@ export function mapStopReason(reason: FinishReason): StopReason {
 		case "NO_IMAGE":
 			return "error";
 		default: {
-			throw new Error(`Unhandled stop reason: ${reason satisfies never}`);
+			throw new AIError.ConfigurationError(`Unhandled stop reason: ${reason satisfies never}`);
 		}
 	}
 }
@@ -597,13 +591,14 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 			const detail = chunk.error.message || chunk.error.status || "unknown error";
 			const message = `Google API stream error: ${detail}`;
 			throw typeof chunk.error.code === "number" && chunk.error.code >= 400
-				? new GoogleApiError(message, chunk.error.code)
-				: new Error(message);
+				? new AIError.GoogleApiError(message, chunk.error.code)
+				: new AIError.ProviderResponseError(message, { provider: model.provider, kind: "output" });
 		}
 		if (!chunk.candidates?.length && chunk.promptFeedback?.blockReason) {
 			const detail = chunk.promptFeedback.blockReasonMessage;
-			throw new Error(
+			throw new AIError.ProviderResponseError(
 				`Request blocked by Google (${chunk.promptFeedback.blockReason})${detail ? `: ${detail}` : ""}`,
+				{ provider: model.provider, kind: "content-blocked" },
 			);
 		}
 		const candidate = chunk.candidates?.[0];
@@ -734,15 +729,21 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 	flushCurrent();
 
 	if (options?.signal?.aborted) {
-		throw new Error("Request was aborted");
+		throw new AIError.AbortError();
 	}
 
 	if (!sawFinishReason) {
-		throw new Error("Google API stream ended without a finish reason (connection dropped or response truncated)");
+		throw new AIError.ProviderResponseError(
+			"Google API stream ended without a finish reason (connection dropped or response truncated)",
+			{ provider: model.provider, kind: "incomplete-stream" },
+		);
 	}
 
 	if (output.stopReason === "aborted" || output.stopReason === "error") {
-		throw new Error(output.errorMessage ?? "An unknown error occurred");
+		throw new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
+			provider: model.provider,
+			kind: "output",
+		});
 	}
 }
 
@@ -826,7 +827,7 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 
 	if (options.signal) {
 		if (options.signal.aborted) {
-			throw new Error("Request aborted");
+			throw new AIError.AbortError("Request aborted");
 		}
 		config.abortSignal = options.signal;
 	}
@@ -864,7 +865,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
-		const startTime = Date.now();
+		const startTime = performance.now();
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -914,14 +915,17 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				});
 				if (!response.ok) {
 					const errorText = await response.text().catch(() => "");
-					throw new GoogleApiError(
+					throw new AIError.GoogleApiError(
 						`Google API error (${response.status}): ${extractGoogleErrorMessage(errorText)}`,
 						response.status,
 						{ headers: response.headers },
 					);
 				}
 				if (!response.body) {
-					throw new Error("Google API returned an empty response body");
+					throw new AIError.ProviderResponseError("Google API returned an empty response body", {
+						provider: model.provider,
+						kind: "empty-body",
+					});
 				}
 				return response.body as ReadableStream<Uint8Array>;
 			};
@@ -944,39 +948,37 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 					options,
 					retainTextSignature,
 					onFirstToken: () => {
-						firstTokenTime = Date.now();
+						firstTokenTime = performance.now();
 					},
 				});
 
 				if (output.stopReason !== "stop" || hasMeaningfulGoogleContent(output)) break;
 				if (emptyAttempt >= MAX_EMPTY_STREAM_RETRIES) {
-					throw new Error(
+					throw new AIError.ProviderResponseError(
 						`Google API returned an empty response (finishReason STOP with no content) after ${MAX_EMPTY_STREAM_RETRIES + 1} attempts`,
+						{ provider: model.provider, kind: "empty-body" },
 					);
 				}
 				try {
 					await scheduler.wait(EMPTY_STREAM_BASE_DELAY_MS * 2 ** emptyAttempt, { signal: options?.signal });
 				} catch {
-					throw new Error("Request was aborted");
+					throw new AIError.AbortError();
 				}
 				resetGoogleStreamOutputForRetry(output);
 				body = await openStream();
 			}
 
-			output.duration = Date.now() - startTime;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "done", reason: output.stopReason as "length" | "stop" | "toolUse", message: output });
 			stream.end();
 		} catch (error) {
-			for (const block of output.content) {
-				if ("index" in block) {
-					delete (block as { index?: number }).index;
-				}
-			}
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorStatus = extractHttpStatusFromError(error);
-			output.errorMessage = await finalizeErrorMessage(error, rawRequestDump);
-			output.duration = Date.now() - startTime;
+			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
+			output.stopReason = result.stopReason;
+			output.errorStatus = result.status;
+			output.errorId = result.id;
+			output.errorMessage = result.message;
+			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();

@@ -1,17 +1,17 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: sample source-code strings (read fixtures) intentionally contain literal ${...}.
-// Gallery fixtures for the filesystem tools (read, write, find).
+// Gallery fixtures for the filesystem tools (read, write, glob).
 import { ReadToolGroupComponent } from "../../modes/components/read-tool-group";
 import type { GalleryFixture, GalleryFixtureState, GalleryResult } from "./types";
 
 const readSnippet = [
-	"export const findToolRenderer = {",
+	"export const globToolRenderer = {",
 	"\tinline: true,",
-	"\trenderCall(args: FindRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {",
+	"\trenderCall(args: GlobRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {",
 	"\t\tconst meta: string[] = [];",
 	"\t\tif (args.limit !== undefined) meta.push(`limit:${args.limit}`);",
 	"",
 	"\t\tconst text = renderStatusLine(",
-	'\t\t\t{ icon: "pending", title: "Find", description: formatFindRenderPaths(args.paths) || "*", meta },',
+	'\t\t\t{ icon: "pending", title: "Glob", description: formatGlobRenderPaths(args.paths) || "*", meta },',
 	"\t\t\tuiTheme,",
 	"\t\t);",
 	"\t\treturn new Text(text, 0, 0);",
@@ -99,22 +99,22 @@ export const fsFixtures: Record<string, GalleryFixture> = {
 	read: {
 		label: "Read",
 		// Streaming: path still being typed, selector not yet appended.
-		streamingArgs: { path: "packages/coding-agent/src/tools/find" },
-		args: { path: "packages/coding-agent/src/tools/find.ts:437-448" },
+		streamingArgs: { path: "packages/coding-agent/src/tools/glob" },
+		args: { path: "packages/coding-agent/src/tools/glob.ts:437-448" },
 		result: {
 			content: [
 				{
 					type: "text",
 					text: [
-						"[packages/coding-agent/src/tools/find.ts#E48E]",
-						"437:export const findToolRenderer = {",
+						"[packages/coding-agent/src/tools/glob.ts#E48E]",
+						"437:export const globToolRenderer = {",
 						"438:\tinline: true,",
-						"439:\trenderCall(args: FindRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {",
+						"439:\trenderCall(args: GlobRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {",
 						"440:\t\tconst meta: string[] = [];",
 						"441:\t\tif (args.limit !== undefined) meta.push(`limit:${args.limit}`);",
 						"442:",
 						"443:\t\tconst text = renderStatusLine(",
-						'444:\t\t\t{ icon: "pending", title: "Find", description: formatFindRenderPaths(args.paths) || "*", meta },',
+						'444:\t\t\t{ icon: "pending", title: "Glob", description: formatGlobRenderPaths(args.paths) || "*", meta },',
 						"445:\t\t\tuiTheme,",
 						"446:\t\t);",
 						"447:\t\treturn new Text(text, 0, 0);",
@@ -124,7 +124,7 @@ export const fsFixtures: Record<string, GalleryFixture> = {
 			],
 			details: {
 				kind: "file",
-				resolvedPath: "/Users/dev/Projects/pi/packages/coding-agent/src/tools/find.ts",
+				resolvedPath: "/Users/dev/Projects/pi/packages/coding-agent/src/tools/glob.ts",
 				contentType: "text/typescript",
 				displayContent: { text: readSnippet, startLine: 437 },
 			},
@@ -134,7 +134,7 @@ export const fsFixtures: Record<string, GalleryFixture> = {
 			content: [
 				{
 					type: "text",
-					text: "Error: ENOENT: no such file or directory, open 'packages/coding-agent/src/tools/find.ts'",
+					text: "Error: ENOENT: no such file or directory, open 'packages/coding-agent/src/tools/glob.ts'",
 				},
 			],
 		},
@@ -179,8 +179,8 @@ export const fsFixtures: Record<string, GalleryFixture> = {
 		},
 	},
 
-	find: {
-		label: "Find",
+	glob: {
+		label: "Glob",
 		// Streaming: glob half-typed, no limit yet.
 		streamingArgs: { paths: ["packages/coding-agent/src/tools/*-render"] },
 		args: { paths: ["packages/coding-agent/src/**/*.test.ts"], limit: 50 },
@@ -191,7 +191,7 @@ export const fsFixtures: Record<string, GalleryFixture> = {
 					text: [
 						"packages/coding-agent/src/tools/read.test.ts",
 						"packages/coding-agent/src/tools/write.test.ts",
-						"packages/coding-agent/src/tools/find.test.ts",
+						"packages/coding-agent/src/tools/glob.test.ts",
 						"packages/coding-agent/src/cli/gallery-cli.test.ts",
 						"packages/coding-agent/src/edit/edit.test.ts",
 					].join("\n"),
@@ -205,7 +205,7 @@ export const fsFixtures: Record<string, GalleryFixture> = {
 				files: [
 					"packages/coding-agent/src/cli/gallery-cli.test.ts",
 					"packages/coding-agent/src/edit/edit.test.ts",
-					"packages/coding-agent/src/tools/find.test.ts",
+					"packages/coding-agent/src/tools/glob.test.ts",
 					"packages/coding-agent/src/tools/read.test.ts",
 					"packages/coding-agent/src/tools/write.test.ts",
 				],
@@ -213,7 +213,7 @@ export const fsFixtures: Record<string, GalleryFixture> = {
 		},
 		errorResult: {
 			isError: true,
-			content: [{ type: "text", text: "Find failed: invalid glob pattern '[unclosed'." }],
+			content: [{ type: "text", text: "Glob failed: invalid glob pattern '[unclosed'." }],
 			details: { error: "invalid glob pattern '[unclosed'" },
 		},
 	},

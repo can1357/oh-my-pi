@@ -12,7 +12,7 @@ import {
 } from "@pk-nerdsaver-ai/pi-coding-agent";
 import { RpcClient } from "@pk-nerdsaver-ai/pi-coding-agent/modes/rpc/rpc-client";
 import type { BashExecutionMessage } from "@pk-nerdsaver-ai/pi-coding-agent/session/messages";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 import { e2eApiKey } from "./utilities";
 
 type MessageEndEvent = Extract<AgentEvent, { type: "message_end" }>;
@@ -46,7 +46,7 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("RPC mode", () => {
 	afterEach(async () => {
 		client.stop();
 		if (sessionDir && fs.existsSync(sessionDir)) {
-			fs.rmSync(sessionDir, { recursive: true });
+			removeSyncWithRetries(sessionDir);
 		}
 	});
 

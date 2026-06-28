@@ -7,11 +7,22 @@ import { GlassCard } from "./GlassCard";
 const STATUS_TONE = {
   idle: "text-ink-400",
   pending: "text-ink-200",
-  ok: "text-[#7fe5a3]",
-  err: "text-[#ff8e85]",
+  ok: "text-ok",
+  err: "text-err",
 } as const;
 
-export function Trigger(): JSX.Element {
+export interface TriggerProps {
+  /**
+   * `bar`  — slim one-line command row for the Operations landing view.
+   * `panel` — fuller form (current look) for the Triage view.
+   * Both gate on CONFIG.replayEnabled; read-only degrades to a slim inline
+   * chip (bar) or the first-run explainer panel (panel, handled by Triage).
+   */
+  variant?: "bar" | "panel";
+}
+
+export function Trigger(props: TriggerProps): JSX.Element {
+  const variant = (): "bar" | "panel" => props.variant ?? "panel";
   const [issue, setIssue] = createSignal<string>("");
 
   const validate = (): string | null => {
@@ -32,8 +43,63 @@ export function Trigger(): JSX.Element {
     void runTrigger({ mode: "retry", issue: value });
   };
 
+  // ── bar variant: slim command row (Operations). Read-only → inline chip. ──
   return (
-    <GlassCard heading="trigger" accessory={<span class="text-ink-400">owner/repo#NN or issue url</span>}>
+    <Show when={variant() === "bar"} fallback={<PanelBody issue={issue} setIssue={setIssue} handleTriage={handleTriage} handleRetry={handleRetry} validate={validate} />}>
+      <Show
+        when={CONFIG.replayEnabled}
+        fallback={
+          <div class="rmp-trigger-bar">
+            <span class="rmp-readonly-chip">trigger disabled · read-only</span>
+            <span class="rmp-trigger-bar-status">set ROBOMP_REPLAY_TOKEN to enable</span>
+          </div>
+        }
+      >
+        <div class="rmp-trigger-bar">
+          <input
+            type="text"
+            spellcheck={false}
+            placeholder="owner/repo#NN or issue url"
+            autocomplete="off"
+            value={issue()}
+            onInput={(ev) => setIssue(ev.currentTarget.value)}
+            onKeyDown={(ev) => {
+              if (ev.key === "Enter") handleTriage();
+            }}
+            class="flex-1 min-w-[200px] font-mono"
+          />
+          <button class="primary tiny" onClick={handleTriage}>
+            triage
+          </button>
+          <button class="tiny" onClick={handleRetry}>
+            retry latest
+          </button>
+          <Show when={triggerStatus().text}>
+            <span class={`rmp-trigger-bar-status ${STATUS_TONE[triggerStatus().kind]}`}>
+              {triggerStatus().text}
+            </span>
+          </Show>
+        </div>
+      </Show>
+    </Show>
+  );
+}
+
+interface PanelBodyProps {
+  issue: () => string;
+  setIssue: (v: string) => void;
+  handleTriage: () => void;
+  handleRetry: () => void;
+  validate: () => string | null;
+}
+
+// ── panel variant: fuller form (Triage). Read-only handled by the Triage
+//    view's first-run panel; if replay is on, this is the active form. ──
+function PanelBody(p: PanelBodyProps): JSX.Element {
+  return (
+    <GlassCard
+      heading="trigger"
+    >
       <Show
         when={CONFIG.replayEnabled}
         fallback={
@@ -50,22 +116,22 @@ export function Trigger(): JSX.Element {
               spellcheck={false}
               placeholder="octo/widget#42 or https://github.com/owner/repo/issues/42"
               autocomplete="off"
-              value={issue()}
-              onInput={(ev) => setIssue(ev.currentTarget.value)}
+              value={p.issue()}
+              onInput={(ev) => p.setIssue(ev.currentTarget.value)}
               onKeyDown={(ev) => {
-                if (ev.key === "Enter") handleTriage();
+                if (ev.key === "Enter") p.handleTriage();
               }}
               class="flex-1 min-w-[220px] font-mono"
             />
-            <button class="primary" onClick={handleTriage}>
+            <button class="primary" onClick={p.handleTriage}>
               fetch &amp; triage
             </button>
-            <button onClick={handleRetry}>retry latest run</button>
+            <button onClick={p.handleRetry}>retry latest run</button>
           </div>
           <Show
             when={triggerStatus().text}
             fallback={
-              <span class={`text-[12px] ${STATUS_TONE.idle}`}>{validate() ?? "ready"}</span>
+              <span class={`text-[12px] ${STATUS_TONE.idle}`}>{p.validate() ?? "ready"}</span>
             }
           >
             <span class={`text-[12px] ${STATUS_TONE[triggerStatus().kind]}`}>

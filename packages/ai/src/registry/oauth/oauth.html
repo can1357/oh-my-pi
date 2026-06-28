@@ -3,71 +3,150 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>Authentication</title>
+		<title>oh my pi · authentication</title>
 		<style>
 			:root {
-				--bg: #09090b;
-				--card-bg: #18181b;
-				--text-main: #fafafa;
-				--text-muted: #a1a1aa;
-				--success: #22c55e;
-				--error: #ef4444;
-				--border: #27272a;
+				/* dark, slightly purple-tinted neutrals — never #000 */
+				--ink-0: oklch(0.135 0.018 295);
+				--ink-1: oklch(0.172 0.022 295);
+				--ink-2: oklch(0.21 0.024 295);
+				--ink-4: oklch(0.36 0.024 295);
+				--ink-5: oklch(0.5 0.022 290);
+				--ink-6: oklch(0.66 0.018 290);
+				--ink-7: oklch(0.82 0.014 285);
+				--ink-9: oklch(0.97 0.008 90);
+
+				/* brand: magenta lead, cyan reply */
+				--magenta: oklch(0.7 0.24 340);
+				--iris: oklch(0.62 0.21 295);
+				--cyan: oklch(0.81 0.14 200);
+
+				/* signal */
+				--success: oklch(0.78 0.16 150);
+				--error: oklch(0.66 0.22 25);
+
+				--bg: var(--ink-0);
+				--fg: var(--ink-9);
+				--fg-dim: var(--ink-7);
+				--fg-faint: var(--ink-5);
+				--rule: oklch(1 0 0 / 0.07);
+				--rule-strong: oklch(1 0 0 / 0.14);
+				--accent: var(--magenta);
+				--accent-2: var(--cyan);
+
+				color-scheme: dark;
 			}
+
+			* {
+				box-sizing: border-box;
+			}
+
 			body {
-				font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-				background-color: var(--bg);
-				color: var(--text-main);
+				font-family: "Geist", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+				background:
+					radial-gradient(ellipse 80vw 60vh at 18% -10%, oklch(0.7 0.24 340 / 0.13), transparent 60%),
+					radial-gradient(ellipse 70vw 70vh at 110% 30%, oklch(0.81 0.14 200 / 0.09), transparent 60%),
+					var(--bg);
+				color: var(--fg);
 				display: flex;
 				align-items: center;
 				justify-content: center;
-				height: 100vh;
+				min-height: 100vh;
 				margin: 0;
-				overflow: hidden;
+				padding: 1.5rem;
+				-webkit-font-smoothing: antialiased;
+				text-rendering: optimizeLegibility;
+				overflow-x: clip;
 			}
+
+			/* ascii grid backdrop */
+			.grid-bg {
+				position: fixed;
+				inset: 0;
+				background-image:
+					linear-gradient(to right, oklch(1 0 0 / 0.025) 1px, transparent 1px),
+					linear-gradient(to bottom, oklch(1 0 0 / 0.025) 1px, transparent 1px);
+				background-size: 56px 56px;
+				background-position: -1px -1px;
+				mask-image: radial-gradient(ellipse at 50% 30%, #000 30%, transparent 75%);
+				pointer-events: none;
+				z-index: 0;
+			}
+
 			.container {
-				background: var(--card-bg);
-				border: 1px solid var(--border);
-				border-radius: 12px;
-				padding: 2.5rem;
+				position: relative;
+				z-index: 1;
+				background: oklch(0.172 0.022 295 / 0.72);
+				backdrop-filter: blur(16px);
+				-webkit-backdrop-filter: blur(16px);
+				border: 1px solid var(--rule);
+				border-radius: 16px;
+				padding: 2.5rem 2.5rem 2rem;
 				width: 100%;
-				max-width: 400px;
+				max-width: 420px;
 				text-align: center;
 				box-shadow:
-					0 20px 25px -5px rgba(0, 0, 0, 0.1),
-					0 10px 10px -5px rgba(0, 0, 0, 0.04);
+					0 24px 48px -12px oklch(0 0 0 / 0.55),
+					0 0 0 1px oklch(1 0 0 / 0.03) inset;
 				opacity: 0;
 				transform: translateY(10px);
-				animation: fadeIn 0.4s ease-out forwards;
+				animation: rise 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 			}
-			@keyframes fadeIn {
+			@keyframes rise {
 				to {
 					opacity: 1;
-					transform: translateY(0);
+					transform: none;
 				}
 			}
-			.icon-circle {
-				position: relative;
-				width: 64px;
-				height: 64px;
-				border-radius: 50%;
+
+			/* brand header */
+			.brand {
 				display: flex;
 				align-items: center;
 				justify-content: center;
-				margin: 0 auto 1.5rem;
-				background: rgba(255, 255, 255, 0.05);
+				gap: 0.5rem;
+				margin-bottom: 2rem;
 			}
-			.icon {
-				width: 32px;
-				height: 32px;
+			.brand svg {
+				width: 22px;
+				height: 22px;
+			}
+			.brand .wordmark {
+				font-size: 13px;
+				font-weight: 500;
+				letter-spacing: -0.01em;
+				color: var(--fg);
+			}
+
+			/* status mark */
+			.mark-wrap {
+				position: relative;
+				width: 72px;
+				height: 72px;
+				margin: 0 auto 1.5rem;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+			}
+			.mark-wrap::before {
+				content: "";
+				position: absolute;
+				inset: 0;
+				border-radius: 50%;
+				background: oklch(1 0 0 / 0.05);
+				z-index: 0;
+			}
+			.mark {
+				width: 40px;
+				height: 40px;
 				z-index: 2;
 			}
 			.timer-svg {
 				position: absolute;
 				top: -2px;
 				left: -2px;
-				width: 68px;
-				height: 68px;
+				width: 76px;
+				height: 76px;
 				transform: rotate(-90deg);
 				z-index: 1;
 				pointer-events: none;
@@ -76,7 +155,7 @@
 				fill: none;
 				stroke-width: 2;
 				stroke-linecap: round;
-				stroke-dasharray: 201;
+				stroke-dasharray: 226;
 				stroke-dashoffset: 0;
 			}
 			.countdown .timer-circle {
@@ -84,43 +163,55 @@
 			}
 			@keyframes countdown {
 				to {
-					stroke-dashoffset: 201;
+					stroke-dashoffset: 226;
 				}
 			}
+
 			h1 {
-				font-size: 1.5rem;
-				font-weight: 600;
+				font-family: "Fraunces", "Iowan Old Style", Georgia, serif;
+				font-size: 1.6rem;
+				font-weight: 500;
+				letter-spacing: -0.022em;
+				line-height: 1.15;
 				margin: 0 0 0.75rem;
-				letter-spacing: -0.025em;
+				text-wrap: balance;
 			}
 			p {
-				color: var(--text-muted);
-				line-height: 1.5;
-				margin: 0 0 1.5rem;
+				color: var(--fg-dim);
+				line-height: 1.6;
+				margin: 0 0 1.75rem;
 				font-size: 0.95rem;
 			}
+
 			.btn {
-				display: inline-block;
-				background: var(--text-main);
+				display: inline-flex;
+				align-items: center;
+				gap: 0.5rem;
+				background: var(--fg);
 				color: var(--bg);
+				font-family: inherit;
 				font-weight: 500;
-				padding: 0.6rem 1.2rem;
-				border-radius: 6px;
+				padding: 0.65rem 1.4rem;
+				border-radius: 8px;
 				text-decoration: none;
 				font-size: 0.9rem;
-				transition: opacity 0.2s;
+				transition: opacity 0.2s, transform 0.2s;
 				cursor: pointer;
 				border: none;
 			}
 			.btn:hover {
-				opacity: 0.9;
+				opacity: 0.88;
+				transform: translateY(-1px);
+			}
+			.btn:active {
+				transform: translateY(0);
 			}
 
 			/* State: success */
-			.success .icon-circle {
-				background: rgba(34, 197, 94, 0.1);
+			.success .mark-wrap::before {
+				background: oklch(0.78 0.16 150 / 0.12);
 			}
-			.success .icon {
+			.success .mark {
 				color: var(--success);
 			}
 			.success .timer-circle {
@@ -131,10 +222,10 @@
 			}
 
 			/* State: error */
-			.error .icon-circle {
-				background: rgba(239, 68, 68, 0.1);
+			.error .mark-wrap::before {
+				background: oklch(0.66 0.22 25 / 0.12);
 			}
-			.error .icon {
+			.error .mark {
 				color: var(--error);
 			}
 			.error .timer-circle {
@@ -144,21 +235,48 @@
 			.error .timer-svg {
 				display: none;
 			}
+
+			@media (prefers-reduced-motion: reduce) {
+				.container,
+				.countdown .timer-circle {
+					animation: none;
+				}
+				.container {
+					opacity: 1;
+					transform: none;
+				}
+			}
 		</style>
 	</head>
 	<body>
+		<span aria-hidden="true" class="grid-bg"></span>
 		<div id="app" class="container">
-			<div class="icon-circle">
-				<svg class="timer-svg" viewBox="0 0 68 68">
-					<circle class="timer-circle" cx="34" cy="34" r="32"></circle>
+			<div class="brand">
+				<svg viewBox="0 0 64 64" aria-hidden="true">
+					<defs>
+						<linearGradient id="pi-grad" x1="0" y1="0" x2="1" y2="1">
+							<stop offset="0" stop-color="oklch(0.7 0.24 340)" />
+							<stop offset=".5" stop-color="oklch(0.62 0.21 295)" />
+							<stop offset="1" stop-color="oklch(0.81 0.14 200)" />
+						</linearGradient>
+					</defs>
+					<path fill="url(#pi-grad)" d="M10 14h44v9H43v33h-9V23h-9v22h-9V23H10z" />
 				</svg>
-				<svg class="icon icon-success" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+				<span class="wordmark">oh my pi</span>
+			</div>
+
+			<div class="mark-wrap">
+				<svg class="timer-svg" viewBox="0 0 76 76">
+					<circle class="timer-circle" cx="38" cy="38" r="36"></circle>
+				</svg>
+				<svg class="mark icon-success" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
 					<path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
 				</svg>
-				<svg class="icon icon-error" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+				<svg class="mark icon-error" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
 					<path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
 				</svg>
 			</div>
+
 			<h1 id="title">Authentication</h1>
 			<p id="message"></p>
 			<button onclick="window.close()" class="btn">Close Window</button>

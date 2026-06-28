@@ -4,7 +4,10 @@ import type { Usage } from "@pk-nerdsaver-ai/pi-ai";
 import type { GeneratedProvider } from "@pk-nerdsaver-ai/pi-catalog/models";
 import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
 import { getConfigRootDir, getStatsDbPath } from "@pk-nerdsaver-ai/pi-utils";
+import { classifyAgentType } from "./parser";
 import type {
+	AgentType,
+	AgentTypeStats,
 	AggregatedStats,
 	BehaviorModelStats,
 	BehaviorOverallStats,
@@ -41,6 +44,8 @@ const BACKFILL_PENDING = "pending";
 const USER_MESSAGES_BACKFILL_KEY = "user_messages_v6";
 const USER_MESSAGE_LINKS_REPAIR_KEY = "user_message_links_v1";
 const PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY = "premium_requests_priority_v1";
+const AGENT_TYPE_BACKFILL_KEY = "agent_type_v1";
+const FORK_DEDUPE_KEY = "fork_dedupe_v1";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -58,6 +63,11 @@ export async function initDb(): Promise<Database> {
 	// https://github.com/can1357/oh-my-pi/issues/2421.
 	db.run("PRAGMA busy_timeout = 5000");
 	db.run("PRAGMA journal_mode = WAL");
+
+	// Whether `messages` predates this init — drives the one-time agent_type
+	// backfill below, so it must be sampled before CREATE TABLE adds the table.
+	const messagesTableExisted =
+		db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'").get() !== undefined;
 
 	// Create tables
 	db.run(`
@@ -85,6 +95,7 @@ export async function initDb(): Promise<Database> {
 			cost_cache_read REAL NOT NULL,
 			cost_cache_write REAL NOT NULL,
 			cost_total REAL NOT NULL,
+			agent_type TEXT NOT NULL DEFAULT 'main',
 			UNIQUE(session_file, entry_id)
 		);
 
@@ -135,6 +146,26 @@ export async function initDb(): Promise<Database> {
 		db.run("ALTER TABLE messages ADD COLUMN premium_requests REAL NOT NULL DEFAULT 0");
 	}
 	db.run("UPDATE messages SET premium_requests = 0 WHERE premium_requests IS NULL");
+	// Token-usage-by-agent: each message is classified main / subagent / advisor
+	// from its transcript path. A brand-new table gets the column from CREATE
+	// TABLE and the parser labels rows at insert time; a pre-existing table gets
+	// the column here (defaulting every prior row to 'main') and enrolls the
+	// one-time path-based reclassification, gated by a meta sentinel.
+	const hasAgentTypeColumn = messageColumns.some(column => column.name === "agent_type");
+	if (!hasAgentTypeColumn) {
+		db.run("ALTER TABLE messages ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'main'");
+	}
+	// For any pre-existing table, enroll the backfill PENDING unless a prior run
+	// already settled the sentinel — `OR IGNORE` leaves an existing
+	// COMPLETE/PENDING value intact, so an ALTER that committed before its
+	// sentinel write (process killed in between) still reclassifies on the next
+	// init instead of silently leaving every row as the 'main' default. A
+	// brand-new empty table has nothing to reclassify, so it settles COMPLETE.
+	db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)").run(
+		AGENT_TYPE_BACKFILL_KEY,
+		messagesTableExisted ? BACKFILL_PENDING : BACKFILL_COMPLETE,
+	);
+	db.run("CREATE INDEX IF NOT EXISTS idx_messages_timestamp_agent_type ON messages(timestamp, agent_type)");
 	// Each behavior-metric bump invalidates previously-ingested rows. We detect
 	// the stale schema by column name and drop the table; `IF NOT EXISTS` above
 	// already produced the new schema, but we want a clean wipe + re-ingest.
@@ -186,7 +217,9 @@ export async function initDb(): Promise<Database> {
 	backfillUserMessages(db);
 	repairUserMessageLinks(db);
 	backfillPriorityPremiumRequests(db);
+	backfillAgentType(db);
 	backfillMissingCatalogCosts(db);
+	backfillForkDuplicates(db);
 	return db;
 }
 
@@ -303,22 +336,34 @@ export function setFileOffset(sessionFile: string, offset: number, lastModified:
 
 /**
  * Insert message stats into the database.
+ *
+ * Forked / branched sessions (see `SessionManager.fork()` and
+ * `createBranchedSession()` in `@pk-nerdsaver-ai/pi-coding-agent`) deep-copy a parent
+ * session's entries into a new JSONL — same `entry_id`, `timestamp`, `model`,
+ * `provider`, token counts, and `responseId`. The `UNIQUE(session_file,
+ * entry_id)` constraint alone keys each row by file, so without the guard
+ * below the same provider request would land twice and inflate every
+ * aggregate. The `WHERE NOT EXISTS` clause skips inserts whose
+ * `(entry_id, timestamp)` already exists under a different `session_file` —
+ * first-write-wins across the lineage. Same-file re-syncs still hit the
+ * `ON CONFLICT(session_file, entry_id)` upsert below so historical
+ * `premium_requests` fix-ups continue to work.
  */
 export function insertMessageStats(stats: MessageStats[]): number {
 	if (!db || stats.length === 0) return 0;
 
-	// Use UPSERT so a re-sync can fix up `premium_requests` for rows persisted
-	// before priority service-tier traffic was counted as premium. The guard
-	// `WHERE messages.premium_requests < excluded.premium_requests` keeps every
-	// other column immutable and never demotes an existing count (e.g. when a
-	// later parse drops back to 0 for the same row).
 	const stmt = db.prepare(`
 		INSERT INTO messages (
 			session_file, entry_id, folder, model, provider, api, timestamp,
 			duration, ttft, stop_reason, error_message,
 			input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
-			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total, agent_type
+		)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM messages
+			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
+		)
 		ON CONFLICT(session_file, entry_id) DO UPDATE SET
 			premium_requests = excluded.premium_requests
 		WHERE messages.premium_requests < excluded.premium_requests
@@ -351,6 +396,12 @@ export function insertMessageStats(stats: MessageStats[]): number {
 				cost.cacheRead,
 				cost.cacheWrite,
 				cost.total,
+				s.agentType,
+				// `WHERE NOT EXISTS` binds: skip when a different session_file
+				// already holds this (entry_id, timestamp).
+				s.entryId,
+				s.timestamp,
+				s.sessionFile,
 			);
 			if (result.changes > 0) inserted++;
 		}
@@ -516,6 +567,41 @@ export function getStatsByFolder(cutoff?: number): FolderStats[] {
 	return rows.map(row => ({
 		folder: row.folder,
 		...buildAggregatedStats([row]),
+	}));
+}
+
+/**
+ * Get token usage grouped by agent type (main agent, task subagents, advisor).
+ * Token columns are explicit so the dashboard's share denominator matches the
+ * counts it renders. Rows missing `agent_type` (defensive) fall back to "main".
+ */
+export function getStatsByAgentType(cutoff?: number): AgentTypeStats[] {
+	if (!db) return [];
+
+	const hasCutoff = cutoff !== undefined && cutoff > 0;
+	const stmt = db.prepare(`
+		SELECT
+			agent_type,
+			COUNT(*) as total_requests,
+			SUM(input_tokens) as total_input_tokens,
+			SUM(output_tokens) as total_output_tokens,
+			SUM(cache_read_tokens) as total_cache_read_tokens,
+			SUM(cache_write_tokens) as total_cache_write_tokens,
+			SUM(cost_total) as total_cost
+		FROM messages
+		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		GROUP BY agent_type
+	`);
+
+	const rows = (hasCutoff ? stmt.all(cutoff) : stmt.all()) as any[];
+	return rows.map(row => ({
+		agentType: (row.agent_type as AgentType) ?? "main",
+		totalRequests: row.total_requests || 0,
+		totalInputTokens: row.total_input_tokens || 0,
+		totalOutputTokens: row.total_output_tokens || 0,
+		totalCacheReadTokens: row.total_cache_read_tokens || 0,
+		totalCacheWriteTokens: row.total_cache_write_tokens || 0,
+		totalCost: row.total_cost || 0,
 	}));
 }
 
@@ -686,6 +772,7 @@ function rowToMessageStats(row: any): MessageStats {
 				total: row.cost_total,
 			},
 		},
+		agentType: (row.agent_type as AgentType) ?? "main",
 	};
 }
 
@@ -795,6 +882,77 @@ function backfillUserMessages(database: Database): void {
 }
 
 /**
+ * Reclassify pre-existing `messages` rows by agent type once, after the
+ * `agent_type` column is added to an older database (every prior row defaulted
+ * to 'main' on the ALTER). Classification is purely path-based — derived from
+ * the stored `session_file` — so no session re-parse is needed. Idempotent and
+ * crash-safe: enrolled (PENDING) only at migration time in {@link initDb} and
+ * marked COMPLETE inside the same transaction that applies the updates, so an
+ * interrupted run rolls back and retries on the next init.
+ */
+function backfillAgentType(database: Database): void {
+	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(AGENT_TYPE_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	if (row?.value !== BACKFILL_PENDING) return;
+
+	const sessionFiles = database.prepare("SELECT DISTINCT session_file FROM messages").all() as {
+		session_file: string;
+	}[];
+	const update = database.prepare("UPDATE messages SET agent_type = ? WHERE session_file = ?");
+	const markComplete = database.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+	const apply = database.transaction(() => {
+		for (const { session_file } of sessionFiles) {
+			const agentType = classifyAgentType(session_file);
+			// Rows already default to 'main'; only the nested transcripts move.
+			if (agentType !== "main") update.run(agentType, session_file);
+		}
+		markComplete.run(AGENT_TYPE_BACKFILL_KEY, BACKFILL_COMPLETE);
+	});
+	apply();
+}
+
+/**
+ * One-shot collapse of forked-session duplicates that landed under the old
+ * `UNIQUE(session_file, entry_id)`-only invariant. `SessionManager.fork()`
+ * and `createBranchedSession()` deep-copy a parent's entries into the new
+ * JSONL — same `entry_id`, `timestamp`, `model`, `responseId`, token counts,
+ * cost — and the previous insert path counted both files toward request /
+ * token / cost totals. The migration keeps the lowest-`id` row per
+ * `(entry_id, timestamp)` group (almost always the parent — sessions are
+ * filename-timestamped and sync processes them in name order, so the
+ * originating file lands first) and drops every other copy. Same fix on
+ * `user_messages` since forks copy user entries too. Idempotent and
+ * crash-safe: enrolled at module-load via the `meta` sentinel, marked
+ * COMPLETE inside the same transaction so an aborted run rolls back and
+ * retries on the next init.
+ */
+function backfillForkDuplicates(database: Database): void {
+	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(FORK_DEDUPE_KEY) as
+		| { value: string }
+		| undefined;
+	if (row?.value === BACKFILL_COMPLETE) return;
+
+	const markComplete = database.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+	const apply = database.transaction(() => {
+		database.run(`
+			DELETE FROM messages
+			WHERE id NOT IN (
+				SELECT MIN(id) FROM messages GROUP BY entry_id, timestamp
+			)
+		`);
+		database.run(`
+			DELETE FROM user_messages
+			WHERE id NOT IN (
+				SELECT MIN(id) FROM user_messages GROUP BY entry_id, timestamp
+			)
+		`);
+		markComplete.run(FORK_DEDUPE_KEY, BACKFILL_COMPLETE);
+	});
+	apply();
+}
+
+/**
  * One-shot wipe of `file_offsets` to force `parseSessionFile` to re-parse
  * every session from byte zero. We don't touch `user_messages`; the parser
  * now emits a `UserMessageLink` for every assistant->parent pair, and the
@@ -862,6 +1020,9 @@ export function markUserMessageLinksRepairComplete(): void {
 
 /**
  * Insert user-message stats. Idempotent via UNIQUE(session_file, entry_id).
+ * The `WHERE NOT EXISTS` clause matches {@link insertMessageStats}: forks
+ * copy user entries verbatim into the child JSONL, so the same
+ * `(entry_id, timestamp)` must not land twice across different session files.
  */
 export function insertUserMessageStats(stats: UserMessageStats[]): number {
 	if (!db || stats.length === 0) return 0;
@@ -871,7 +1032,12 @@ export function insertUserMessageStats(stats: UserMessageStats[]): number {
 			session_file, entry_id, folder, timestamp, model, provider,
 			chars, words, yelling, profanity, anguish,
 			negation, repetition, blame
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM user_messages
+			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
+		)
 	`);
 
 	let inserted = 0;
@@ -892,6 +1058,11 @@ export function insertUserMessageStats(stats: UserMessageStats[]): number {
 				s.negation,
 				s.repetition,
 				s.blame,
+				// `WHERE NOT EXISTS` binds: skip when a different session_file
+				// already holds this (entry_id, timestamp).
+				s.entryId,
+				s.timestamp,
+				s.sessionFile,
 			);
 			if (result.changes > 0) inserted++;
 		}

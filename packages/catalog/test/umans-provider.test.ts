@@ -1,10 +1,15 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Effort } from "@pk-nerdsaver-ai/pi-catalog/effort";
+import { resolveProviderModels } from "@pk-nerdsaver-ai/pi-catalog/model-manager";
 import {
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
 	umansModelManagerOptions,
 } from "@pk-nerdsaver-ai/pi-catalog/provider-models/openai-compat";
-import type { FetchImpl } from "@pk-nerdsaver-ai/pi-catalog/types";
+import type { FetchImpl, ModelSpec } from "@pk-nerdsaver-ai/pi-catalog/types";
 import modelsJson from "../src/models.json";
 
 interface BundledModel {
@@ -18,6 +23,8 @@ interface BundledModel {
 	thinking?: {
 		defaultLevel?: string;
 		requiresEffort?: boolean;
+		efforts?: string[];
+		effortMap?: Record<string, string>;
 	};
 	compat?: {
 		escapeBuiltinToolNames?: boolean;
@@ -51,6 +58,22 @@ describe("umans provider catalog", () => {
 							supports_vision: true,
 							supports_tools: true,
 							reasoning: { supported: true, can_disable: false, default_level: "medium" },
+						},
+					},
+					"umans-glm-5.2": {
+						display_name: "Umans GLM 5.2",
+						capabilities: {
+							context_window: 405_504,
+							max_completion_tokens: 131_072,
+							recommended_max_tokens: 131_071,
+							supports_vision: "via-handoff",
+							supports_tools: true,
+							reasoning: {
+								supported: true,
+								can_disable: true,
+								levels: ["none", "high", "max"],
+								default_level: "high",
+							},
 						},
 					},
 				}),
@@ -88,6 +111,20 @@ describe("umans provider catalog", () => {
 			thinking: { defaultLevel: "medium", requiresEffort: true },
 			compat: { escapeBuiltinToolNames: true },
 		});
+		const glm52 = models?.find(item => item.id === "umans-glm-5.2");
+		expect(glm52).toMatchObject({
+			id: "umans-glm-5.2",
+			reasoning: true,
+			thinking: {
+				mode: "anthropic-budget-effort",
+				defaultLevel: "high",
+				efforts: ["high", "xhigh"],
+				effortMap: { xhigh: "max" },
+			},
+		});
+		if (!glm52) throw new Error("Umans GLM 5.2 was not discovered");
+		expect(glm52.thinking?.effortMap).toEqual({ [Effort.XHigh]: "max" });
+		expect(glm52.thinking?.defaultLevel).toBe(Effort.High);
 	});
 
 	it("surfaces Umans discovery fetch failures", async () => {
@@ -99,6 +136,114 @@ describe("umans provider catalog", () => {
 		if (!fetchDynamicModels) throw new Error("Umans dynamic discovery is not configured");
 
 		await expect(fetchDynamicModels()).rejects.toThrow("Failed to fetch Umans models info");
+	});
+
+	it('maps supports_vision sentinel values like "via-handoff" to text-only input', async () => {
+		const fetchImpl: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					"umans-glm-5.2": {
+						display_name: "Umans GLM 5.2",
+						capabilities: {
+							context_window: 405_504,
+							max_completion_tokens: 131_071,
+							recommended_max_tokens: 131_071,
+							supports_vision: "via-handoff",
+							supports_tools: true,
+							reasoning: { supported: true, can_disable: true, default_level: "medium" },
+						},
+					},
+					"umans-coder": {
+						display_name: "Umans Coder",
+						capabilities: {
+							context_window: 262_144,
+							max_completion_tokens: 262_144,
+							recommended_max_tokens: 32_768,
+							supports_vision: true,
+							supports_tools: true,
+							reasoning: { supported: true, can_disable: true, default_level: "medium" },
+						},
+					},
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+
+		const fetchDynamicModels = umansModelManagerOptions({ fetch: fetchImpl }).fetchDynamicModels;
+		if (!fetchDynamicModels) throw new Error("Umans dynamic discovery is not configured");
+
+		const models = await fetchDynamicModels();
+		const glm = models?.find(item => item.id === "umans-glm-5.2");
+		const coder = models?.find(item => item.id === "umans-coder");
+
+		expect(glm?.input).toEqual(["text"]);
+		expect(coder?.input).toEqual(["text", "image"]);
+	});
+
+	it("bundles Umans GLM via-handoff models as text-only", () => {
+		const providers = modelsJson as Record<string, Record<string, BundledModel>>;
+		const model = providers.umans?.["umans-glm-5.2"];
+		expect(model, "umans-glm-5.2 should be bundled").toBeDefined();
+		expect(model.input, "umans-glm-5.2 input should be text-only").toEqual(["text"]);
+	});
+
+	it("drops stale cached GLM rows that predate the via-handoff static correction", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-umans-stale-cache-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const staleGlm: ModelSpec<"anthropic-messages"> = {
+			id: "umans-glm-5.2",
+			name: "Umans GLM 5.2",
+			api: "anthropic-messages",
+			provider: "umans",
+			baseUrl: "https://api.code.umans.ai",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 405_504,
+			maxTokens: 131_071,
+		};
+		const correctedGlm: ModelSpec<"anthropic-messages"> = { ...staleGlm, input: ["text"] };
+
+		try {
+			await resolveProviderModels(
+				{
+					...umansModelManagerOptions({
+						fetch: async () =>
+							new Response(
+								JSON.stringify({
+									"umans-glm-5.2": {
+										display_name: "Umans GLM 5.2",
+										capabilities: {
+											context_window: 405_504,
+											recommended_max_tokens: 131_071,
+											supports_vision: true,
+											supports_tools: true,
+											reasoning: { supported: true },
+										},
+									},
+								}),
+								{ status: 200, headers: { "Content-Type": "application/json" } },
+							),
+					}),
+					staticModels: [staleGlm],
+					cacheDbPath: dbPath,
+				},
+				"online",
+			);
+
+			const offline = await resolveProviderModels(
+				{
+					...umansModelManagerOptions({ fetch: async () => new Response(null, { status: 503 }) }),
+					staticModels: [correctedGlm],
+					cacheDbPath: dbPath,
+				},
+				"offline",
+			);
+
+			const model = offline.models.find(item => item.id === "umans-glm-5.2");
+			expect(model?.input).toEqual(["text"]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("maps the models.dev Umans provider to the Anthropic endpoint", () => {
@@ -159,6 +304,18 @@ describe("umans provider catalog", () => {
 		expect(model.compat?.escapeBuiltinToolNames).toBe(true);
 		expect(model.thinking).toMatchObject({
 			requiresEffort: true,
+		});
+	});
+
+	it("bundles Umans GLM 5.2 high/max reasoning metadata with the max wire effort", () => {
+		const providers = modelsJson as Record<string, Record<string, BundledModel>>;
+		const model = providers.umans?.["umans-glm-5.2"];
+
+		expect(model).toBeDefined();
+		expect(model.thinking).toMatchObject({
+			mode: "anthropic-budget-effort",
+			efforts: ["high", "xhigh"],
+			effortMap: { xhigh: "max" },
 		});
 	});
 });

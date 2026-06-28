@@ -16,6 +16,7 @@ import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile
 import { expandAtImports } from "./discovery/at-imports";
 import { loadSkills, type Skill } from "./extensibility/skills";
 import { hasObsidian } from "./internal-urls/vault-protocol";
+import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
@@ -23,6 +24,8 @@ import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" w
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import { shortenPath } from "./tools/render-utils";
+import { type ActiveRepoContext, resolveActiveRepoContext } from "./utils/active-repo-context";
+import { normalizePromptPath } from "./utils/prompt-path";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 
 /** Bundled personality specs, keyed by the `personality` setting value. */
@@ -88,6 +91,15 @@ function firstNonEmpty(...values: (string | undefined | null)[]): string | null 
 		if (trimmed) return trimmed;
 	}
 	return null;
+}
+
+function renderActiveRepoContextPrompt(activeRepoContext: ActiveRepoContext | null): string {
+	if (!activeRepoContext) return "";
+	return prompt
+		.render(activeRepoContextTemplate, {
+			relativeRepoRoot: normalizePromptPath(activeRepoContext.relativeRepoRoot),
+		})
+		.trim();
 }
 
 function parseWmicTable(output: string, header: string): string | null {
@@ -327,6 +339,8 @@ export async function loadSystemPromptFiles(options: LoadContextFilesOptions = {
 	return userLevel?.content ?? null;
 }
 
+export const DEFAULT_SYSTEM_PROMPT_TOOL_NAMES = ["read", "bash", "eval", "edit", "write"] as const;
+
 export interface SystemPromptToolMetadata {
 	label: string;
 	description: string;
@@ -419,6 +433,12 @@ export interface BuildSystemPromptOptions {
 	model?: string;
 	/** Personality preset rendered into the default system prompt. "none" omits the block. Default: "default" */
 	personality?: Personality;
+	/** Whether to include the workspace directory tree in the system prompt. Default: false */
+	includeWorkspaceTree?: boolean;
+	/** Whether Mermaid fenced blocks render as terminal ASCII diagrams. Default: true */
+	renderMermaid?: boolean;
+	/** Pre-resolved nested active repo context. Undefined resolves from cwd. */
+	activeRepoContext?: ActiveRepoContext | null;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -459,6 +479,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		memoryRootEnabled = false,
 		model,
 		personality = "default",
+		includeWorkspaceTree = false,
+		renderMermaid = true,
+		activeRepoContext: providedActiveRepoContext,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
 	const resolvedCwd = cwd ?? getProjectDir();
@@ -476,6 +499,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			totalLines: 0,
 			agentsMdFiles: [],
 		} satisfies WorkspaceTree,
+		activeRepoContext: null as ActiveRepoContext | null,
 	};
 
 	const deadline = Bun.sleep(SYSTEM_PROMPT_PREP_TIMEOUT_MS).then(() => "__timeout__" as const);
@@ -521,43 +545,59 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const workspaceTreePromise =
 		providedWorkspaceTree !== undefined
 			? Promise.resolve(providedWorkspaceTree)
-			: logger.time("buildWorkspaceTree", () =>
-					buildWorkspaceTree(resolvedCwd, { timeoutMs: SYSTEM_PROMPT_PREP_TIMEOUT_MS }),
-				);
+			: includeWorkspaceTree
+				? logger.time("buildWorkspaceTree", () =>
+						buildWorkspaceTree(resolvedCwd, { timeoutMs: SYSTEM_PROMPT_PREP_TIMEOUT_MS }),
+					)
+				: Promise.resolve({
+						rootPath: resolvedCwd,
+						rendered: "",
+						truncated: false,
+						totalLines: 0,
+						agentsMdFiles: [],
+					});
 	const skillsPromise: Promise<Skill[]> =
 		providedSkills !== undefined
 			? Promise.resolve(providedSkills)
 			: skillsSettings?.enabled !== false
 				? loadSkills({ ...skillsSettings, cwd: resolvedCwd }).then(result => result.skills)
 				: Promise.resolve([]);
+	const activeRepoContextPromise =
+		providedActiveRepoContext !== undefined
+			? Promise.resolve(providedActiveRepoContext)
+			: logger.time("resolveActiveRepoContext", () => resolveActiveRepoContext(resolvedCwd));
 
-	const [resolvedCustomPrompt, resolvedAppendPrompt, systemPromptCustomization, contextFiles, skills, workspaceTree] =
-		await Promise.all([
-			withDeadline(
-				"customPrompt",
-				providedResolvedCustomPrompt !== undefined
-					? Promise.resolve(providedResolvedCustomPrompt)
-					: resolvePromptInput(customPrompt, "system prompt"),
-				prepDefaults.resolvedCustomPrompt,
-			),
-			withDeadline(
-				"appendSystemPrompt",
-				providedResolvedAppendPrompt !== undefined
-					? Promise.resolve(providedResolvedAppendPrompt)
-					: resolvePromptInput(appendSystemPrompt, "append system prompt"),
-				prepDefaults.resolvedAppendPrompt,
-			),
-			withDeadline(
-				"loadSystemPromptFiles",
-				systemPromptCustomizationPromise,
-				prepDefaults.systemPromptCustomization,
-			),
-			withDeadline("loadProjectContextFiles", contextFilesPromise, prepDefaults.contextFiles).then(
-				dedupeExactContextFiles,
-			),
-			withDeadline("loadSkills", skillsPromise, prepDefaults.skills),
-			withDeadline("buildWorkspaceTree", workspaceTreePromise, prepDefaults.workspaceTree),
-		]);
+	const [
+		resolvedCustomPrompt,
+		resolvedAppendPrompt,
+		systemPromptCustomization,
+		contextFiles,
+		skills,
+		workspaceTree,
+		activeRepoContext,
+	] = await Promise.all([
+		withDeadline(
+			"customPrompt",
+			providedResolvedCustomPrompt !== undefined
+				? Promise.resolve(providedResolvedCustomPrompt)
+				: resolvePromptInput(customPrompt, "system prompt"),
+			prepDefaults.resolvedCustomPrompt,
+		),
+		withDeadline(
+			"appendSystemPrompt",
+			providedResolvedAppendPrompt !== undefined
+				? Promise.resolve(providedResolvedAppendPrompt)
+				: resolvePromptInput(appendSystemPrompt, "append system prompt"),
+			prepDefaults.resolvedAppendPrompt,
+		),
+		withDeadline("loadSystemPromptFiles", systemPromptCustomizationPromise, prepDefaults.systemPromptCustomization),
+		withDeadline("loadProjectContextFiles", contextFilesPromise, prepDefaults.contextFiles).then(
+			dedupeExactContextFiles,
+		),
+		withDeadline("loadSkills", skillsPromise, prepDefaults.skills),
+		withDeadline("buildWorkspaceTree", workspaceTreePromise, prepDefaults.workspaceTree),
+		withDeadline("resolveActiveRepoContext", activeRepoContextPromise, prepDefaults.activeRepoContext),
+	]);
 	const agentsMdFiles = Array.from(new Set(workspaceTree.agentsMdFiles)).sort().slice(0, AGENTS_MD_LIMIT);
 
 	if (timedOut.length > 0) {
@@ -582,20 +622,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 
 	const date = new Date().toISOString().slice(0, 10);
 	const dateTime = date;
-	const promptCwd = shortenPath(resolvedCwd.replace(/\\/g, "/"));
+	const promptCwd = shortenPath(normalizePromptPath(resolvedCwd));
+	const activeRepoContextPrompt = renderActiveRepoContextPrompt(activeRepoContext);
 
-	// Build tool metadata for system prompt rendering
-	// Priority: explicit list > tools map > defaults
-	// Default includes both bash and python; actual availability determined by settings in createTools
+	// Build tool metadata for system prompt rendering.
+	// Priority: explicit list > tools map > conservative SDK fallback.
 	let toolNames = providedToolNames;
 	if (!toolNames) {
-		if (tools) {
-			// Tools map provided
-			toolNames = Array.from(tools.keys());
-		} else {
-			// Use defaults
-			toolNames = ["read", "bash", "eval", "edit", "write"]; // TODO: Why?
-		}
+		toolNames = tools ? Array.from(tools.keys()) : [...DEFAULT_SYSTEM_PROMPT_TOOL_NAMES];
 	}
 
 	// Build tool descriptions for system prompt rendering.
@@ -625,7 +659,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// Filter skills for the rendered system prompt:
 	// - require the `read` tool so the model can actually fetch skill content;
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
-	const hasRead = tools?.has("read");
+	const hasRead = toolNames.includes("read");
 	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
@@ -675,6 +709,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		secretsEnabled,
 		hasMemoryRoot: memoryRootEnabled,
 		hasObsidian: hasObsidian(),
+		includeWorkspaceTree,
+		renderMermaid,
 	};
 	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
 	const systemPrompt = [rendered];
@@ -685,6 +721,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		.trim();
 	if (projectPrompt) {
 		systemPrompt.push(projectPrompt);
+	}
+	if (activeRepoContextPrompt) {
+		systemPrompt.push(activeRepoContextPrompt);
 	}
 
 	return { systemPrompt };

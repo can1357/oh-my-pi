@@ -18,6 +18,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@pk-nerdsaver-ai/pi-ai";
+import * as AIError from "@pk-nerdsaver-ai/pi-ai/error";
 import { resetSettingsForTest, Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { EventController } from "@pk-nerdsaver-ai/pi-coding-agent/modes/controllers/event-controller";
 import type { InteractiveModeContext } from "@pk-nerdsaver-ai/pi-coding-agent/modes/types";
@@ -116,6 +117,23 @@ describe("EventController #handleMessageEnd abort labeling", () => {
 		// And the streamingMessage on ctx was cleared after the handler ran (lifecycle
 		// guard — kept for completeness).
 		expect(ctx.streamingMessage).toBeUndefined();
+	});
+
+	it("C1b: silent-abort errorId without marker suppresses the abort line", async () => {
+		const message = makeAssistantMessage({
+			stopReason: "aborted",
+			errorMessage: undefined,
+			errorId: AIError.create(AIError.Flag.SilentAbort),
+		});
+		const { controller, streamingComponent } = createFixture({ streamingMessage: message });
+
+		await controller.handleEvent({ type: "message_end", message });
+
+		expect(message.errorMessage).toBeUndefined();
+		expect(streamingComponent.updateContent).toHaveBeenCalledTimes(1);
+		const arg = streamingComponent.updateContent.mock.calls[0]![0] as AssistantMessage;
+		expect(arg.stopReason).toBe("stop");
+		expect(arg.errorMessage).toBeUndefined();
 	});
 
 	it("C2: errorMessage undefined (no threaded reason) + aborted + no TTSR -> errorMessage='Operation aborted', updateContent receives original ref", async () => {

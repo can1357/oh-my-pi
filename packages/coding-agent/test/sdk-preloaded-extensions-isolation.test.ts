@@ -21,6 +21,7 @@ import type { LoadExtensionsResult } from "@pk-nerdsaver-ai/pi-coding-agent/exte
 import { createAgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("createAgentSession preloadedExtensions isolation (issue #2190)", () => {
 	let sharedDir: string;
@@ -35,7 +36,7 @@ describe("createAgentSession preloadedExtensions isolation (issue #2190)", () =>
 
 	afterAll(() => {
 		authStorage.close();
-		fs.rmSync(sharedDir, { recursive: true, force: true });
+		removeSyncWithRetries(sharedDir);
 	});
 
 	it("does not mutate the caller's extensions array when preloadedExtensions is provided", async () => {

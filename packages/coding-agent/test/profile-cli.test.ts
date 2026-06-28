@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import {
 	__resetProfileSnapshotForTests,
 	APP_NAME,
@@ -89,7 +90,7 @@ describe("global --profile flag", () => {
 		}
 		__resetProfileSnapshotForTests();
 		process.exitCode = 0;
-		await fs.rm(path.join(os.homedir(), configDir), { recursive: true, force: true });
+		await removeWithRetries(path.join(os.homedir(), configDir));
 	});
 
 	it("activates a profile before dispatching root flags", async () => {
@@ -267,7 +268,7 @@ describe("global --profile flag", () => {
 			expect(stdout).toContain("SENTINEL=work");
 			expect(stdout).not.toContain("SENTINEL=default");
 		} finally {
-			await fs.rm(root, { recursive: true, force: true });
+			await removeWithRetries(root);
 		}
 	});
 
@@ -316,7 +317,7 @@ describe("global --profile flag", () => {
 			expect(stderr).toContain("Invalid OMP profile");
 			expect(exitCode).toBe(1);
 		} finally {
-			await fs.rm(root, { recursive: true, force: true });
+			await removeWithRetries(root);
 		}
 	});
 });

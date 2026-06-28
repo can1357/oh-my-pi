@@ -8,29 +8,29 @@ const ORDERED_SECTION_TITLES = ["Breaking Changes", "Added", "Changed", "Fixed",
 const CHANGELOG_BASELINE_REF = "refs/clog";
 const CHANGELOG_BASELINE_NAME = "clog";
 
-interface NumberedLine {
+export interface NumberedLine {
 	text: string;
 	lineNumber: number;
 }
 
-interface Subsection {
+export interface Subsection {
 	title: string;
 	lines: NumberedLine[];
 }
 
-interface ReleaseSection {
+export interface ReleaseSection {
 	heading: string;
 	title: string;
 	leadingLines: NumberedLine[];
 	subsections: Subsection[];
 }
 
-interface ChangelogDocument {
+export interface ChangelogDocument {
 	prefixLines: NumberedLine[];
 	sections: ReleaseSection[];
 }
 
-interface ParsedItem {
+export interface ParsedItem {
 	startLine: number;
 	endLine: number;
 	lines: string[];
@@ -135,7 +135,7 @@ function createNumberedLine(text: string, lineNumber: number): NumberedLine {
 	return { text, lineNumber };
 }
 
-function parseChangelog(content: string): ChangelogDocument {
+export function parseChangelog(content: string): ChangelogDocument {
 	const lines = splitContentLines(content);
 	const numberedLines = lines.map((text, index) => createNumberedLine(text, index + 1));
 	const prefixLines: NumberedLine[] = [];
@@ -232,7 +232,7 @@ function appendSubsectionLines(target: Subsection, sourceLines: readonly string[
 	target.lines = syntheticLines([...existing, ...separator, ...trimmedSource]);
 }
 
-function parseItems(lines: readonly NumberedLine[]): ParsedItem[] {
+export function parseItems(lines: readonly NumberedLine[]): ParsedItem[] {
 	const items: ParsedItem[] = [];
 	let index = 0;
 
@@ -264,7 +264,7 @@ function parseItems(lines: readonly NumberedLine[]): ParsedItem[] {
 	return items;
 }
 
-function lineRangeSet(items: readonly ParsedItem[]): Set<number> {
+export function lineRangeSet(items: readonly ParsedItem[]): Set<number> {
 	const lines = new Set<number>();
 	for (const item of items) {
 		for (let line = item.startLine; line <= item.endLine; line++) {
@@ -503,7 +503,7 @@ function rebuildReleasedSectionsFromHistory(
 }
 
 
-function renderChangelog(document: ChangelogDocument): string {
+export function renderChangelog(document: ChangelogDocument): string {
 	const output: string[] = [];
 	const prefix = trimBlankLines(numberedText(document.prefixLines));
 	if (prefix.length > 0) {
@@ -720,7 +720,7 @@ async function git(args: readonly string[], cwd: string): Promise<string> {
 	return result.text();
 }
 
-async function resolveRepoRoot(repoRoot: string | undefined): Promise<string> {
+export async function resolveRepoRoot(repoRoot: string | undefined): Promise<string> {
 	if (repoRoot) return path.resolve(repoRoot);
 	return (await git(["rev-parse", "--show-toplevel"], process.cwd())).trim();
 }
@@ -827,7 +827,7 @@ async function collectHistoricalReleaseRecovery(
 }
  
 
-async function changelogPaths(repoRoot: string): Promise<string[]> {
+export async function changelogPaths(repoRoot: string): Promise<string[]> {
 	const glob = new Glob(CHANGELOG_GLOB);
 	const paths: string[] = [];
 	for await (const changelogPath of glob.scan(repoRoot)) {

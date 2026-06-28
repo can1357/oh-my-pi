@@ -1,4 +1,10 @@
-import { type SelectItem, SelectList, type SgrMouseEvent, truncateToWidth } from "@pk-nerdsaver-ai/pi-tui";
+import {
+	routeSelectListMouse,
+	type SelectItem,
+	SelectList,
+	type SgrMouseEvent,
+	truncateToWidth,
+} from "@pk-nerdsaver-ai/pi-tui";
 import { SETTINGS_SCHEMA } from "../../../config/settings-schema";
 import { getSearchProvider, setPreferredSearchProvider } from "../../../web/search/provider";
 import { isSearchProviderPreference, type SearchProviderId } from "../../../web/search/types";
@@ -59,18 +65,7 @@ export class WebSearchTab implements SetupTab {
 
 	/** Wheel moves the highlight; hover lights the row under the pointer; click confirms it. */
 	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
-		if (event.wheel !== null) {
-			this.#list.handleWheel(event.wheel);
-			return;
-		}
-		const index = this.#list.hitTest(line - this.#listRowStart);
-		if (event.motion) {
-			this.#list.setHoverIndex(index ?? null);
-			return;
-		}
-		if (event.leftClick && index !== undefined) {
-			this.#list.clickItem(index);
-		}
+		routeSelectListMouse(this.#list, event, line - this.#listRowStart);
 	}
 
 	invalidate(): void {

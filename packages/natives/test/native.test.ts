@@ -12,8 +12,10 @@ import {
 	fuzzyFind,
 	type GlobMatch,
 	GrepOutputMode,
+	getSupportedLanguages,
 	glob,
 	grep,
+	highlightCode,
 	htmlToMarkdown,
 	invalidateFsScanCache,
 	listWorkspace,
@@ -196,6 +198,33 @@ describe("pi-natives", () => {
 		it("recognizes Emacs Lisp aliases", () => {
 			expect(supportsLanguage("emacs-lisp")).toBe(true);
 			expect(supportsLanguage("elisp")).toBe(true);
+		});
+
+		it("highlights Julia via the vendored syntax", () => {
+			// Julia is not in syntect's defaults; its syntax is vendored and folded
+			// into the set. Assert it is actually present, not merely aliased — an
+			// alias alone would let supportsLanguage report true while highlightCode
+			// returns the source unchanged.
+			expect(getSupportedLanguages()).toContain("Julia");
+			expect(supportsLanguage("julia")).toBe(true);
+			expect(supportsLanguage("jl")).toBe(true);
+
+			const colors = {
+				comment: "<c>",
+				keyword: "<k>",
+				function: "<f>",
+				variable: "<v>",
+				string: "<s>",
+				number: "<n>",
+				type: "<t>",
+				operator: "<o>",
+				punctuation: "<p>",
+			};
+			const out = highlightCode("function f(x)\n  return x + 1  # add\nend\n", "julia", colors);
+			// Real highlighting wraps tokens in the supplied color sentinels.
+			expect(out).toContain("<k>function");
+			expect(out).toContain("<n>1");
+			expect(out).toContain("<c> add");
 		});
 	});
 
