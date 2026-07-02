@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `--project-skills` to launch sessions with only project-level skills loaded.
+- Added `/prune` for manually pruning stale/useless tool results from the active session context.
+
+### Changed
+
+- Changed skill prompt discovery to lazy by default and made bare `skill://` return a compact name index, with `skill://?q=<keywords>` for focused description lookup.
+
 ## [16.2.4] - 2026-07-02
 
 ### Added

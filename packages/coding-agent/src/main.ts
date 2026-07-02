@@ -924,6 +924,11 @@ async function buildSessionOptions(
 	// Skills
 	if (parsed.noSkills) {
 		options.skills = [];
+	} else if (parsed.projectSkills) {
+		activeSettings.override("skills.projectOnly", true);
+		if (parsed.skills && parsed.skills.length > 0) {
+			activeSettings.override("skills.includeSkills", parsed.skills as string[]);
+		}
 	} else if (parsed.skills && parsed.skills.length > 0) {
 		// Override includeSkills for this session
 		activeSettings.override("skills.includeSkills", parsed.skills as string[]);

@@ -122,6 +122,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	const {
 		cwd = getProjectDir(),
 		enabled = true,
+		projectOnly = false,
 		enableCodexUser = true,
 		enableClaudeUser = true,
 		enableClaudeProject = true,
@@ -152,6 +153,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 
 	function isSourceEnabled(source: SourceMeta): boolean {
 		const { provider, level } = source;
+		if (projectOnly && level !== "project") return false;
 		// Managed skills (auto-learn) are OMP-native and discovered unconditionally
 		// — third-party CLI toggles must never silently hide them (cf. #2401). The
 		// master `enabled` flag above still gates them.
@@ -241,21 +243,23 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		}
 	}
 
-	const customDirectoryResults = await Promise.all(
-		customDirectories.map(async dir => {
-			const expandedDir = expandTilde(dir);
-			const scanResult = await scanSkillsFromDir(
-				{ cwd, home: os.homedir(), repoRoot: null },
-				{
-					dir: expandedDir,
-					providerId: "custom",
-					level: "user",
-					requireDescription: true,
-				},
+	const customDirectoryResults = projectOnly
+		? []
+		: await Promise.all(
+				customDirectories.map(async dir => {
+					const expandedDir = expandTilde(dir);
+					const scanResult = await scanSkillsFromDir(
+						{ cwd, home: os.homedir(), repoRoot: null },
+						{
+							dir: expandedDir,
+							providerId: "custom",
+							level: "user",
+							requireDescription: true,
+						},
+					);
+					return { expandedDir, scanResult };
+				}),
 			);
-			return { expandedDir, scanResult };
-		}),
-	);
 
 	const allCustomSkills: Array<{ skill: Skill; path: string }> = [];
 	for (const { expandedDir, scanResult } of customDirectoryResults) {
@@ -318,6 +322,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		capSkill =>
 			capSkill._source.provider === MANAGED_SKILLS_PROVIDER_ID &&
 			isValidManagedSkillName(capSkill.name) &&
+			(!projectOnly || capSkill.level === "project") &&
 			!disabledSkillNames.has(capSkill.name) &&
 			!matchesIgnorePatterns(capSkill.name) &&
 			matchesIncludePatterns(capSkill.name),

@@ -61,6 +61,7 @@ export interface Args {
 	printThoughts?: boolean;
 	export?: string;
 	noSkills?: boolean;
+	projectSkills?: boolean;
 	skills?: string[];
 	noRules?: boolean;
 	noTitle?: boolean;
@@ -220,6 +221,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noExtensions = true;
 		} else if (arg === "--no-skills") {
 			result.noSkills = true;
+		} else if (arg === "--project-skills") {
+			result.projectSkills = true;
 		} else if (arg === "--no-rules") {
 			result.noRules = true;
 		} else if (arg === "--no-title") {

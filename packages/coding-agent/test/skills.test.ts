@@ -37,6 +37,15 @@ const DISABLE_ALL_BUILTIN_SKILLS = {
 	enableAgentsProject: false,
 } as const;
 
+async function writeSkill(root: string, name: string, description: string): Promise<void> {
+	const skillDir = path.join(root, name);
+	await fs.mkdir(skillDir, { recursive: true });
+	await fs.writeFile(
+		path.join(skillDir, "SKILL.md"),
+		["---", `description: ${description}`, "---", "", `# ${name}`].join("\n"),
+	);
+}
+
 describe("skills", () => {
 	describe("loadSkillsFromDir", () => {
 		const loadFixtureRoot = () => loadSkillsFromDir({ dir: fixturesDir, source: "test" });
@@ -221,6 +230,34 @@ describe("skills", () => {
 					cwd: tempCwd,
 				});
 				expect(skills.some(s => s.name === "user-agents-skill" && s.source === "agents:user")).toBe(true);
+			} finally {
+				homedirSpy.mockRestore();
+				await fs.rm(tempHome, { recursive: true, force: true });
+				await fs.rm(tempCwd, { recursive: true, force: true });
+			}
+		});
+
+		it("loads only project-level skills when projectOnly is set", async () => {
+			const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-project-skills-home-"));
+			const tempCwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-project-skills-cwd-"));
+			const customDir = path.join(tempHome, "custom-skills");
+			await writeSkill(path.join(tempHome, ".agents", "skills"), "user-skill", "User skill");
+			await writeSkill(path.join(tempCwd, ".agents", "skills"), "project-skill", "Project skill");
+			await writeSkill(customDir, "custom-skill", "Custom skill");
+			const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempHome);
+			try {
+				const { skills } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					cwd: tempCwd,
+					customDirectories: [customDir],
+					enableAgentsProject: true,
+					projectOnly: true,
+				});
+				const names = skills.map(skill => skill.name);
+				expect(names).toContain("project-skill");
+				expect(names).not.toContain("user-skill");
+				expect(names).not.toContain("custom-skill");
+				expect(skills.every(skill => skill._source?.level === "project")).toBe(true);
 			} finally {
 				homedirSpy.mockRestore();
 				await fs.rm(tempHome, { recursive: true, force: true });

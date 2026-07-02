@@ -85,6 +85,7 @@ packages/coding-agent/bench/boot-baseline.json
 # Local bun standalone-build artifacts and OMC orchestration state
 *.bun-build
 .omc/
+.release-binaries/
 # Local mnemopi + omp-config runtime state (agent subprocess writes these at runtime)
 packages/coding-agent/memories-runtime-*/
 packages/coding-agent/omp-config-cli-*/

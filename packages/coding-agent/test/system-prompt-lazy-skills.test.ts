@@ -60,15 +60,19 @@ describe("system prompt lazy skill discovery", () => {
 		expect(rendered).not.toContain("not listed here");
 	});
 
-	it("replaces the listing with an on-demand notice in lazy mode", async () => {
+	it("replaces the listing with an on-demand search notice in lazy mode", async () => {
 		const rendered = await render(makeSkills(3), "lazy");
 		expect(rendered).not.toContain("<skills>");
 		expect(rendered).not.toContain("- skill-0:");
 		expect(rendered).toContain("3 specialized skills are available but not listed");
-		expect(rendered).toContain("skill://");
+		expect(rendered).toContain("skill://?q=<keywords>");
 	});
 
-	it("auto mode lists small catalogs and goes lazy past the threshold", async () => {
+	it("defaults to lazy mode and keeps auto as the small-catalog compatibility mode", async () => {
+		const defaultRendered = await render(makeSkills(3));
+		expect(defaultRendered).not.toContain("<skills>");
+		expect(defaultRendered).toContain("skill://?q=<keywords>");
+
 		const small = await render(makeSkills(SKILLS_LAZY_AUTO_THRESHOLD), "auto");
 		expect(small).toContain("<skills>");
 		expect(small).not.toContain("not listed here");

@@ -644,8 +644,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const visibleSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
 	// Lazy skill discovery: with `skills.discoveryMode` "lazy" (or "auto" past the
 	// threshold), keep the listing out of the prompt to preserve context — the model
-	// lists skills on demand via `read skill://` instead.
-	const skillDiscoveryMode = skillsSettings?.discoveryMode ?? "auto";
+	// searches descriptions on demand via `read skill://?q=<keywords>`.
+	const skillDiscoveryMode = skillsSettings?.discoveryMode ?? "lazy";
 	const skillsLazy =
 		visibleSkills.length > 0 &&
 		(skillDiscoveryMode === "lazy" ||

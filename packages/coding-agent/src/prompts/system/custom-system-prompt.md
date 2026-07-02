@@ -40,7 +40,7 @@ If a skill applies, you MUST read `skill://<name>` before proceeding.
 </skills>
 {{/if}}
 {{#if skillsLazy}}
-{{lazySkillCount}} specialized skills are available but not listed (loaded on demand to preserve context). `read` `skill://` to list them; if one applies, you MUST read `skill://<name>` before proceeding.
+{{lazySkillCount}} specialized skills are available but not listed (loaded on demand to preserve context). Search with `read` path `skill://?q=<keywords>`; if one applies, you MUST read `skill://<name>` before proceeding.
 {{/if}}
 {{#if alwaysApplyRules.length}}
 {{#each alwaysApplyRules}}

@@ -4216,6 +4216,7 @@ export const SETTINGS_SCHEMA = {
 
 	// Skills
 	"skills.enabled": { type: "boolean", default: true },
+	"skills.projectOnly": { type: "boolean", default: false },
 
 	"skills.enableSkillCommands": {
 		type: "boolean",
@@ -4251,13 +4252,13 @@ export const SETTINGS_SCHEMA = {
 	"skills.discoveryMode": {
 		type: "enum",
 		values: ["eager", "auto", "lazy"] as const,
-		default: "auto",
+		default: "lazy",
 		ui: {
 			tab: "tasks",
 			group: "Commands & Skills",
 			label: "Skill Prompt Injection",
 			description:
-				"How skill listings enter the system prompt. Eager always lists every skill; lazy never lists them (the agent discovers them on demand via skill://); auto lists them only while the catalog stays small.",
+				"How skill listings enter the system prompt. Lazy never lists them (the agent discovers matches on demand via skill://?q=...); auto lists them only while the catalog stays small; eager always lists every skill.",
 			options: [
 				{
 					value: "eager",
@@ -4272,7 +4273,8 @@ export const SETTINGS_SCHEMA = {
 				{
 					value: "lazy",
 					label: "Lazy",
-					description: "Never inject the list; the agent lists skills on demand with `read skill://`.",
+					description:
+						"Never inject the list; the agent searches skill descriptions on demand with `skill://?q=<keywords>`.",
 				},
 			],
 		},
@@ -5026,6 +5028,7 @@ export interface BranchSummarySettings {
 
 export interface SkillsSettings {
 	enabled?: boolean;
+	projectOnly?: boolean;
 	enableSkillCommands?: boolean;
 	enableCodexUser?: boolean;
 	enableClaudeUser?: boolean;

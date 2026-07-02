@@ -24,7 +24,7 @@ If a listed skill matches the task, read `skill://<name>` before proceeding.
 </skills>
 {{/if}}
 {{#if skillsLazy}}
-{{lazySkillCount}} specialized skills are available but not listed here. Before specialized work, `read` `skill://`; read any matching `skill://<name>`.
+{{lazySkillCount}} specialized skills are available but not listed here. Before specialized work, search with `read` path `skill://?q=<keywords>`; read any matching `skill://<name>`.
 {{/if}}
 
 {{#if alwaysApplyRules.length}}

@@ -124,6 +124,9 @@ export default class Index extends Command {
 		"no-skills": Flags.boolean({
 			description: "Disable skills discovery and loading",
 		}),
+		"project-skills": Flags.boolean({
+			description: "Load only project-level skills for this session",
+		}),
 		skills: Flags.string({
 			description: "Comma-separated glob patterns to filter skills (e.g., git-*,docker)",
 		}),

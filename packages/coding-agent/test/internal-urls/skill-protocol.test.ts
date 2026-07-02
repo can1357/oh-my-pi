@@ -7,7 +7,7 @@ describe("SkillProtocolHandler bare listing", () => {
 		resetActiveSkillsForTests();
 	});
 
-	it("lists visible skills (name + description) for bare skill://", async () => {
+	it("lists visible skill names without descriptions for bare skill://", async () => {
 		setActiveSkills([
 			{
 				name: "alpha",
@@ -28,8 +28,10 @@ describe("SkillProtocolHandler bare listing", () => {
 
 		const resource = await InternalUrlRouter.instance().resolve("skill://");
 		expect(resource.content).toContain("# Skills (1)");
-		expect(resource.content).toContain("- alpha: First skill");
+		expect(resource.content).toContain("- alpha");
+		expect(resource.content).not.toContain("First skill");
 		expect(resource.content).not.toContain("hidden-one");
+		expect(resource.content).toContain("skill://?q=<keywords>");
 		expect(resource.content).toContain("skill://<name>");
 	});
 
@@ -37,5 +39,29 @@ describe("SkillProtocolHandler bare listing", () => {
 		setActiveSkills([]);
 		const resource = await InternalUrlRouter.instance().resolve("skill://");
 		expect(resource.content).toContain("(no skills available)");
+	});
+
+	it("searches skill descriptions with a focused query", async () => {
+		setActiveSkills([
+			{
+				name: "docker-repair",
+				description: "Repair Docker Compose networking failures",
+				filePath: "/skills/docker-repair/SKILL.md",
+				baseDir: "/skills/docker-repair",
+				source: "test",
+			},
+			{
+				name: "calendar-audit",
+				description: "Audit field calendar entries",
+				filePath: "/skills/calendar-audit/SKILL.md",
+				baseDir: "/skills/calendar-audit",
+				source: "test",
+			},
+		]);
+
+		const resource = await InternalUrlRouter.instance().resolve("skill://?q=compose");
+		expect(resource.content).toContain("# Skill Search: compose");
+		expect(resource.content).toContain("- docker-repair: Repair Docker Compose networking failures");
+		expect(resource.content).not.toContain("calendar-audit");
 	});
 });
