@@ -17,6 +17,7 @@ import { AgentRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-r
 
 const LANE_NAME = "api-worker";
 
+const RENAMED_LANE_NAME = "renamed-worker";
 async function seedBackgroundSession(dir: string): Promise<string> {
 	const sessionFile = path.join(dir, "bgsess.jsonl");
 	const headerObj = {
@@ -105,15 +106,24 @@ describe("Agent hub background lanes", () => {
 				const expanded = Bun.stripANSI(hub.render(120).join("\n"));
 				expect(expanded).toContain("Sub-1");
 
+				// Lowercase r starts inline rename for the selected background session.
+				hub.handleInput("r");
+				for (const _char of LANE_NAME) hub.handleInput("\x7f");
+				for (const char of RENAMED_LANE_NAME) hub.handleInput(char);
+				hub.handleInput("\r");
+				const renamed = await renderUntil(hub, RENAMED_LANE_NAME, 1000);
+				expect(renamed).toContain(RENAMED_LANE_NAME);
+				expect(renamed).not.toContain(LANE_NAME);
+
 				// Press x once to warn
 				hub.handleInput("x");
 				const warned = Bun.stripANSI(hub.render(120).join("\n"));
-				expect(warned).toContain('Press x again (or Ctrl+X) to remove background session "api-worker"');
+				expect(warned).toContain(`Press x again (or Ctrl+X) to remove background session "${RENAMED_LANE_NAME}"`);
 
 				// Press x again to confirm removal (archives on disk and deletes from UI)
 				hub.handleInput("x");
 				const postRemove = await renderUntil(hub, "Removed background session", 1000);
-				expect(postRemove).toContain('Removed background session "api-worker"');
+				expect(postRemove).toContain(`Removed background session "${RENAMED_LANE_NAME}"`);
 
 				// Clear the notice (e.g. by moving the cursor) and verify the lane is gone
 				hub.handleInput("k");
@@ -122,6 +132,7 @@ describe("Agent hub background lanes", () => {
 
 				// Verify session file on disk contains the archived status entry
 				const fileContent = await fs.readFile(sessionFile, "utf-8");
+				expect(fileContent).toContain(`"name":"${RENAMED_LANE_NAME}"`);
 				expect(fileContent).toContain('"status":"archived"');
 			} finally {
 				hub.dispose();

@@ -1193,7 +1193,10 @@ export class AgentHubOverlayComponent extends Container {
 			this.#requestRender();
 			return;
 		}
-		if (ref.kind === "background") {
+		if (ref.kind === "background" && !isBackgroundLane(ref)) {
+			this.#notice = `"${ref.id}" is a read-only background subagent — cannot be renamed.`;
+			this.#requestRender();
+			return;
 		}
 		this.#renameInput = { id: ref.id, buffer: ref.displayName };
 		this.#notice = undefined;
@@ -1211,11 +1214,12 @@ export class AgentHubOverlayComponent extends Container {
 
 		if (matchesKey(keyData, "enter")) {
 			const newName = this.#renameInput.buffer.trim();
-			if (newName) {
-				this.#registry.setDisplayName(this.#renameInput.id, newName);
+			if (!newName) {
+				this.#notice = "Rename cannot be empty.";
+				this.#requestRender();
+				return;
 			}
-			this.#renameInput = undefined;
-			this.#requestRender();
+			this.#commitRename(this.#renameInput.id, newName);
 			return;
 		}
 
@@ -1232,6 +1236,60 @@ export class AgentHubOverlayComponent extends Container {
 			this.#renameInput.buffer += keyData;
 			this.#requestRender();
 		}
+	}
+
+	#commitRename(id: string, newName: string): void {
+		const ref = this.#rows.find(row => row.ref.id === id)?.ref;
+		if (!ref) {
+			this.#renameInput = undefined;
+			this.#requestRender();
+			return;
+		}
+		if (ref.kind === "background") {
+			this.#renameBackgroundSession(ref, newName);
+			return;
+		}
+		this.#registry.setDisplayName(id, newName);
+		this.#renameInput = undefined;
+		this.#notice = undefined;
+		this.#requestRender();
+	}
+
+	#renameBackgroundSession(ref: HubAgentRef, newName: string): void {
+		if (!isBackgroundLane(ref)) {
+			this.#notice = `"${ref.id}" is a read-only background subagent — cannot be renamed.`;
+			this.#requestRender();
+			return;
+		}
+		const sessionPath = this.#backgroundSessionPaths.get(ref.id) ?? ref.sessionFile;
+		if (!sessionPath) {
+			this.#notice = `Could not resolve path for background session "${ref.displayName}".`;
+			this.#requestRender();
+			return;
+		}
+		void (async () => {
+			try {
+				const sm = await SessionManager.open(sessionPath, this.#sessionDir ?? "");
+				const current = sm.getBackgroundInstance();
+				if (!current) {
+					this.#notice = `Background session "${ref.displayName}" is no longer active.`;
+				} else {
+					sm.appendBackgroundInstance({ ...current, name: newName });
+					await sm.flush();
+					this.#backgroundRefs = this.#backgroundRefs.map(backgroundRef =>
+						backgroundRef.id === ref.id
+							? { ...backgroundRef, displayName: newName, lastActivity: Date.now() }
+							: backgroundRef,
+					);
+					this.#notice = undefined;
+				}
+			} catch (error) {
+				this.#notice = `Failed to rename session: ${error instanceof Error ? error.message : String(error)}`;
+			}
+			this.#renameInput = undefined;
+			this.#refreshRows();
+			this.#requestRender();
+		})();
 	}
 
 	#handleFilterInput(keyData: string): void {
