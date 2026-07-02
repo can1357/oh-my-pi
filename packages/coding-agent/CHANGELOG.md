@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.2.4] - 2026-07-02
+
 ### Added
 
 - Added a mode-agnostic Fusion sidekick lifecycle helper reused by interactive, print, and ACP modes, plus focused sidekick lifecycle tests and AgentSession Fusion integration tests.
