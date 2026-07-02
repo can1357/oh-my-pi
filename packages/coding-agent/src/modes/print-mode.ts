@@ -8,6 +8,7 @@
 import type { AssistantMessage, ImageContent } from "@pk-nerdsaver-ai/pi-ai";
 import { logger, sanitizeText } from "@pk-nerdsaver-ai/pi-utils";
 import type { AgentSession } from "../session/agent-session";
+import { ensureFusionSidekick } from "../session/fusion-sidekick";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
 import { initializeExtensions } from "./runtime-init";
@@ -61,6 +62,9 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 			process.stdout.write(`${JSON.stringify(event)}\n`);
 		}
 	});
+	// Fusion sidekick: spawn before the first prompt when fusion is enabled so the
+	// system prompt never advertises a phantom Sidekick.
+	await ensureFusionSidekick({ session, settings: session.settings, sessionManager: session.sessionManager }, {});
 
 	// Send initial message with attachments
 	if (initialMessage !== undefined) {

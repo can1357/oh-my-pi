@@ -2183,6 +2183,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					? `${appendPrompt}\n\n${options.appendSystemPrompt}`
 					: options.appendSystemPrompt;
 			}
+			// Only advertise the warm Sidekick when a mode has actually spawned one.
+			// Raw SDK callers that do not host the sidekick lifecycle still get Fusion's
+			// compaction routing, but no phantom IRC target in the prompt.
+			const sidekickId =
+				agentKind === "main" ? (session as AgentSession | undefined)?.getFusionSidekickId() : undefined;
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd,
 				resolvedCustomPrompt: options.customSystemPrompt,
@@ -2203,15 +2208,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				eagerTasksAlways,
 				taskBatch: settings.get("task.batch"),
 				fusionSidekick:
-					agentKind === "main" && settings.get("fusion.enabled") === true && settings.get("fusion.mode") !== "off",
+					agentKind === "main" &&
+					settings.get("fusion.enabled") === true &&
+					settings.get("fusion.mode") !== "off" &&
+					sidekickId !== undefined,
 				fusionEscalate:
 					agentKind === "main" &&
 					settings.get("fusion.enabled") === true &&
-					settings.get("fusion.mode") === "escalate",
+					settings.get("fusion.mode") === "escalate" &&
+					sidekickId !== undefined,
 				sidekickModel: settings.get("fusion.sidekickModel") || "pi/smol",
-				// `session` is assigned late (let session!: AgentSession), and this prompt
-				// closure can run during construction before that — guard the access.
-				sidekickId: agentKind === "main" ? (session as AgentSession | undefined)?.getFusionSidekickId() : undefined,
+				sidekickId,
 				secretsEnabled,
 				workspaceTree: workspaceTreePromise,
 				memoryRootEnabled: memoryBackend.id === "local",

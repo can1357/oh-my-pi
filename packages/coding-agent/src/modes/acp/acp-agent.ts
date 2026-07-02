@@ -62,6 +62,7 @@ import { loadAllExtensions } from "../../modes/components/extensions/state-manag
 import { theme } from "../../modes/theme/theme";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
+import * as fusionSidekick from "../../session/fusion-sidekick";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import type { UsageStatistics } from "../../session/session-entries";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
@@ -1021,7 +1022,18 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, mcpServers);
+		const record = await this.#registerPreparedSession(session, mcpServers);
+		await fusionSidekick.ensureFusionSidekick(
+			{
+				session: record.session,
+				settings: record.session.settings,
+				sessionManager: record.session.sessionManager,
+				mcpManager: record.mcpManager,
+				eventBus: undefined,
+			},
+			{},
+		);
+		return record;
 	}
 
 	async #loadManagedSession(sessionId: string, cwd: string, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
@@ -1036,7 +1048,18 @@ export class AcpAgent implements Agent {
 		if (!storedSession) {
 			throw new Error(`ACP session not found: ${sessionId}`);
 		}
-		return await this.#openStoredSession(storedSession.path, cwd, mcpServers, sessionId);
+		const record = await this.#openStoredSession(storedSession.path, cwd, mcpServers, sessionId);
+		await fusionSidekick.ensureFusionSidekick(
+			{
+				session: record.session,
+				settings: record.session.settings,
+				sessionManager: record.session.sessionManager,
+				mcpManager: record.mcpManager,
+				eventBus: undefined,
+			},
+			{},
+		);
+		return record;
 	}
 
 	async #resumeManagedSession(sessionId: string, cwd: string, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
@@ -1051,9 +1074,19 @@ export class AcpAgent implements Agent {
 		if (!storedSession) {
 			throw new Error(`ACP session not found: ${sessionId}`);
 		}
-		return await this.#openStoredSession(storedSession.path, cwd, mcpServers, sessionId);
+		const record = await this.#openStoredSession(storedSession.path, cwd, mcpServers, sessionId);
+		await fusionSidekick.ensureFusionSidekick(
+			{
+				session: record.session,
+				settings: record.session.settings,
+				sessionManager: record.session.sessionManager,
+				mcpManager: record.mcpManager,
+				eventBus: undefined,
+			},
+			{},
+		);
+		return record;
 	}
-
 	async #forkManagedSession(params: ForkSessionRequest): Promise<ManagedSessionRecord> {
 		const sourcePath = await this.#resolveForkSourceSessionPath(params.sessionId);
 		const session = await this.#createSession(path.resolve(params.cwd));
@@ -1070,7 +1103,18 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, params.mcpServers ?? []);
+		const record = await this.#registerPreparedSession(session, params.mcpServers ?? []);
+		await fusionSidekick.ensureFusionSidekick(
+			{
+				session: record.session,
+				settings: record.session.settings,
+				sessionManager: record.session.sessionManager,
+				mcpManager: record.mcpManager,
+				eventBus: undefined,
+			},
+			{},
+		);
+		return record;
 	}
 
 	async #openStoredSession(

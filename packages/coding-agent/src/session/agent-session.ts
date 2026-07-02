@@ -1786,6 +1786,32 @@ export class AgentSession {
 			this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(m => !isAdvisorCard(m));
 		}
 	}
+	/**
+	 * Reset all per-session Fusion state so a new session starts with a clean slate.
+	 * Called when switching to a different session; prevents fusion routing latch,
+	 * compaction-switch state, failure streak, and sidekick id from leaking across
+	 * sessions. If the old session had a tracked sidekick, release it before
+	 * clearing the id so Agent Hub does not accumulate stale Sidekick refs.
+	 */
+	async #resetFusionState(): Promise<void> {
+		const staleId = this.#fusionSidekickId;
+		if (staleId && AgentRegistry.global().get(staleId)) {
+			try {
+				await AgentLifecycleManager.global().release(staleId);
+			} catch (error) {
+				logger.warn("Fusion sidekick release failed during session switch", {
+					id: staleId,
+					error: String(error),
+				});
+			}
+		}
+		this.#fusionSidekickId = undefined;
+		this.#fusionBaseModel = undefined;
+		this.#fusionCompactionSwitched = false;
+		this.#fusionRoutingDisabled = false;
+		this.#fusionLastAutoModel = undefined;
+		this.#fusionToolFailureStreak = 0;
+	}
 
 	#buildAdvisorRuntime(seedToCurrent = false): boolean {
 		if (this.#isDisposed) return false;
@@ -11709,6 +11735,7 @@ export class AgentSession {
 					: configuredServiceTier;
 
 			if (switchingToDifferentSession) {
+				await this.#resetFusionState();
 				this.#resetHindsightConversationTrackingIfHindsight();
 				this.#resetMnemopiConversationTrackingIfMnemopi();
 			}

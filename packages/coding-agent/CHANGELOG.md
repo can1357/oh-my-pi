@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a mode-agnostic Fusion sidekick lifecycle helper reused by interactive, print, and ACP modes, plus focused sidekick lifecycle tests and AgentSession Fusion integration tests.
+
+### Fixed
+
+- Fixed Fusion prompt/sidekick parity outside the interactive TUI: print mode and ACP now await sidekick spawn before prompting, while raw SDK sessions omit the sidekick policy unless a live sidekick id exists.
+- Fixed Fusion state leaking across session switches: `switchSession` now clears all per-session `#fusion*` fields, releases the stale sidekick ref before clearing its id, and the TUI's session-switch reconciler spawns a fresh sidekick for the new session when Fusion is enabled.
+
 ## [16.2.3] - 2026-07-02
 
 ### Added
