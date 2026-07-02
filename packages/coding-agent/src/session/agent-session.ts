@@ -7517,6 +7517,31 @@ export class AgentSession {
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
 
+	async prune(): Promise<{ prunedCount: number; tokensSaved: number }> {
+		const branchEntries = this.sessionManager.getBranch();
+		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
+		const result = pruneSupersededToolResults(
+			branchEntries,
+			this.#withPlanProtection({
+				supersedeKey: readToolSupersedeKey,
+				pruneUseless: true,
+				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
+				keepBoundaryId,
+				idleFlushMs: 0,
+				suffixTokenLimit: Number.POSITIVE_INFINITY,
+			}),
+		);
+		if (result.prunedCount === 0) return result;
+
+		await this.sessionManager.rewriteEntries();
+		const sessionContext = this.buildDisplaySessionContext();
+		this.agent.replaceMessages(sessionContext.messages);
+		this.#advisorRuntime?.reset();
+		this.#syncTodoPhasesFromBranch();
+		this.#closeCodexProviderSessionsForHistoryRewrite();
+		return result;
+	}
+
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const branchEntries = this.sessionManager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;

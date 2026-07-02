@@ -1522,6 +1522,38 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "prune",
+		description: "Prune stale tool results from context",
+		acpDescription: "Prune stale tool results",
+		handle: async (_command, runtime) => {
+			const result = await runtime.session.prune();
+			if (result.prunedCount === 0) {
+				await runtime.output("Prune complete. No stale tool results found.");
+				return commandConsumed();
+			}
+			const noun = result.prunedCount === 1 ? "tool result" : "tool results";
+			await runtime.output(
+				`Prune complete. Pruned ${result.prunedCount} ${noun}, saved ${result.tokensSaved} tokens.`,
+			);
+			return commandConsumed();
+		},
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const result = await runtime.ctx.session.prune();
+			if (result.prunedCount > 0) {
+				runtime.ctx.rebuildChatFromMessages();
+			}
+			const message =
+				result.prunedCount === 0
+					? "Prune complete. No stale tool results found."
+					: `Prune complete. Pruned ${result.prunedCount} ${
+							result.prunedCount === 1 ? "tool result" : "tool results"
+						}, saved ${result.tokensSaved} tokens.`;
+			runtime.ctx.showStatus(message);
+			refreshStatusLine(runtime.ctx);
+		},
+	},
+	{
 		name: "shake",
 		description: "Drop heavy content from context (tool results, large blocks)",
 		acpDescription: "Shake heavy content out of the conversation context",
