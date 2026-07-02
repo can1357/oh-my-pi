@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.2.5] - 2026-07-02
+
 ### Added
 
 - Added `--project-skills` to launch sessions with only project-level skills loaded.
