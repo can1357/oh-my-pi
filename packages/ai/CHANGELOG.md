@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.2.3] - 2026-07-02
+
 ### Added
 
 - Added Cline account login (`/login cline`): a WorkOS device-authorization flow whose tokens are registered with `api.cline.bot`, persisting the Cline access/refresh credentials and refreshing them automatically via `https://api.cline.bot/api/v1/auth/refresh`.

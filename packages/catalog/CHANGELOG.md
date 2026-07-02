@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.2.3] - 2026-07-02
+
 ### Added
 
 - Added the Cline gateway (`cline`) as an OpenAI-compatible model provider at `https://api.cline.bot/api/v1` with OpenRouter-style author-prefixed model ids and `CLINE_API_KEY` support. Cline is absent from models.dev and its `/v1/models` listing is auth-gated, so the bundle ships a small curated seed (default `anthropic/claude-sonnet-4-6`) that live discovery overlays after `/login cline`.
