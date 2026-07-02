@@ -37,7 +37,9 @@ variables:
 
 classify_changes:
   stage: prepare
-  image: alpine/git:latest
+  image:
+    name: alpine/git:latest
+    entrypoint: [""]
   script:
     - |
       set -eu
@@ -137,4 +139,3 @@ npm_publish:
       fi
       npm install -g npm@latest
       bun run ci:release:publish
-
