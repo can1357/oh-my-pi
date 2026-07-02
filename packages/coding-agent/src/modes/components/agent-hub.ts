@@ -905,7 +905,14 @@ export class AgentHubOverlayComponent extends Container {
 
 		parts.push(theme.fg("dim", formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)))));
 		const rawLine = ` ${cursor} ${theme.fg("dim", row.prefix)}${parts.join(theme.sep.dot)}`;
-		return truncateToWidth(rawLine.replace(/[\r\n]+/g, " "), Math.max(1, width - 1));
+		const sanitized = rawLine.replace(/[\r\n]+/g, " ");
+		const maxWidth = Math.max(1, width - 1);
+		// Selected row: wash the whole padded line with the selection background so
+		// the highlight is visible while navigating, not just the tiny cursor glyph.
+		if (selected) {
+			return theme.bg("selectedBg", truncateToWidth(sanitized, maxWidth, Ellipsis.Omit, true));
+		}
+		return truncateToWidth(sanitized, maxWidth);
 	}
 
 	#handleKanbanSyncInput(keyData: string): void {
