@@ -34,6 +34,8 @@ export interface SessionInfo {
 		status: "active" | "archived";
 		model?: string;
 		role?: string;
+		pinned?: boolean;
+		expiresAt?: string;
 	};
 	created: Date;
 	modified: Date;
@@ -62,6 +64,7 @@ export interface RecentSessionInfo {
 }
 
 const SESSION_LIST_PREFIX_BYTES = 4096;
+export const BACKGROUND_INSTANCE_DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000;
 /**
  * Tail window read to derive {@link SessionStatus}. Large enough to capture a
  * typical final assistant turn (thinking + text); when the final message exceeds
@@ -160,7 +163,14 @@ function extractBackgroundInstanceFromContent(content: string): SessionInfo["bac
 
 function normalizeBackgroundInstance(value: unknown): SessionInfo["backgroundInstance"] | undefined {
 	if (!value || typeof value !== "object") return undefined;
-	const candidate = value as { name?: unknown; status?: unknown; model?: unknown; role?: unknown };
+	const candidate = value as {
+		name?: unknown;
+		status?: unknown;
+		model?: unknown;
+		role?: unknown;
+		pinned?: unknown;
+		expiresAt?: unknown;
+	};
 	if (candidate.status === "archived") return undefined;
 	if (candidate.status !== "active" || typeof candidate.name !== "string") return undefined;
 	return {
@@ -168,6 +178,8 @@ function normalizeBackgroundInstance(value: unknown): SessionInfo["backgroundIns
 		status: candidate.status,
 		model: typeof candidate.model === "string" ? candidate.model : undefined,
 		role: typeof candidate.role === "string" ? candidate.role : undefined,
+		pinned: candidate.pinned === true ? true : undefined,
+		expiresAt: typeof candidate.expiresAt === "string" ? candidate.expiresAt : undefined,
 	};
 }
 
@@ -577,7 +589,15 @@ export async function getRecentSessions(
 }
 
 export function isBackgroundInstanceSession(session: SessionInfo): boolean {
-	return session.backgroundInstance?.status === "active";
+	const instance = session.backgroundInstance;
+	if (instance?.status !== "active") return false;
+	if (instance.pinned === true) return true;
+	if (instance.expiresAt) {
+		const expiresAt = Date.parse(instance.expiresAt);
+		if (Number.isFinite(expiresAt)) return expiresAt > Date.now();
+	}
+	const modified = session.modified.getTime();
+	return Number.isFinite(modified) && Date.now() - modified <= BACKGROUND_INSTANCE_DEFAULT_RETENTION_MS;
 }
 
 export function backgroundInstanceDisplayName(session: SessionInfo): string {

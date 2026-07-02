@@ -319,6 +319,8 @@ export interface BackgroundInstanceState {
 	status: "active" | "archived";
 	model?: string;
 	role?: string;
+	pinned?: boolean;
+	expiresAt?: string;
 }
 
 interface DiskQueueOptions {
@@ -1206,6 +1208,8 @@ export class SessionManager {
 				status: entry.status,
 				model: entry.model,
 				role: entry.role,
+				pinned: entry.pinned,
+				expiresAt: entry.expiresAt,
 			};
 		}
 		const headerVal = this.#header.backgroundInstance;
@@ -1215,6 +1219,8 @@ export class SessionManager {
 				status: headerVal.status,
 				model: headerVal.model,
 				role: headerVal.role,
+				pinned: headerVal.pinned,
+				expiresAt: headerVal.expiresAt,
 			};
 		}
 		return undefined;
@@ -1238,6 +1244,7 @@ export class SessionManager {
 			status: "active",
 			model: input.model,
 			role: input.role,
+			pinned: true,
 		});
 		return true;
 	}

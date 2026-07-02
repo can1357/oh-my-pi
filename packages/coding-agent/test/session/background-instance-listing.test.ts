@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import {
+	BACKGROUND_INSTANCE_DEFAULT_RETENTION_MS,
 	backgroundInstanceDisplayName,
 	isBackgroundInstanceSession,
 	type SessionInfo,
@@ -35,6 +36,21 @@ function header(id: string, backgroundInstance?: unknown): string {
 		timestamp: new Date().toISOString(),
 		...(backgroundInstance !== undefined ? { backgroundInstance } : {}),
 	});
+}
+
+function sessionInfoWithBackground(backgroundInstance: SessionInfo["backgroundInstance"], modified: Date): SessionInfo {
+	return {
+		path: `${SESSION_DIR}/synthetic.jsonl`,
+		id: "synthetic",
+		cwd: "/proj",
+		created: modified,
+		modified,
+		messageCount: 0,
+		size: 0,
+		firstMessage: "(no messages)",
+		allMessagesText: "",
+		backgroundInstance,
+	};
 }
 
 async function listById(storage: MemorySessionStorage): Promise<Map<string, SessionInfo>> {
@@ -81,6 +97,27 @@ describe("background-instance session listing", () => {
 		expect(isBackgroundInstanceSession(info!)).toBe(false);
 	});
 
+	it("expires unpinned active background lanes after the default 24-hour retention window", () => {
+		const oldModified = new Date(Date.now() - BACKGROUND_INSTANCE_DEFAULT_RETENTION_MS - 1);
+		const info = sessionInfoWithBackground({ name: "expired", status: "active" }, oldModified);
+		expect(isBackgroundInstanceSession(info)).toBe(false);
+	});
+
+	it("keeps pinned manual background lanes active until archived", () => {
+		const oldModified = new Date(Date.now() - BACKGROUND_INSTANCE_DEFAULT_RETENTION_MS - 1);
+		const expiredPinned = sessionInfoWithBackground(
+			{ name: "manual", status: "active", pinned: true, expiresAt: new Date(Date.now() - 1000).toISOString() },
+			oldModified,
+		);
+		expect(isBackgroundInstanceSession(expiredPinned)).toBe(true);
+
+		const archivedPinned = sessionInfoWithBackground(
+			{ name: "manual", status: "archived", pinned: true },
+			oldModified,
+		);
+		expect(isBackgroundInstanceSession(archivedPinned)).toBe(false);
+	});
+
 	it("does not flag a plain session as a background instance", async () => {
 		const storage = new MemorySessionStorage();
 		storage.writeTextSync(`${SESSION_DIR}/plain.jsonl`, header("plain"));
@@ -102,6 +139,7 @@ describe("SessionManager background-instance round trip", () => {
 		expect(active?.name).toBe("worker");
 		expect(active?.status).toBe("active");
 		expect(active?.model).toBe("anthropic/claude");
+		expect(active?.pinned).toBe(true);
 
 		// Archiving drops it out of the background roster while leaving the session intact.
 		expect(sm.archiveBackgroundInstance()).toBeDefined();

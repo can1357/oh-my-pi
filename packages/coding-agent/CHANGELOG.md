@@ -9,6 +9,7 @@
 
 ### Changed
 
+- Changed Agent Hub background-session lane retention so unpinned lanes stay visible for 24 hours by default, while manually saved `/background` lanes are pinned until removed from the hub.
 - Changed skill prompt discovery to lazy by default and made bare `skill://` return a compact name index, with `skill://?q=<keywords>` for focused description lookup.
 
 ## [16.2.4] - 2026-07-02

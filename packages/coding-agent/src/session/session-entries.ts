@@ -19,6 +19,8 @@ export interface SessionHeader {
 		status: "active" | "archived";
 		model?: string;
 		role?: string;
+		pinned?: boolean;
+		expiresAt?: string;
 	};
 }
 
@@ -105,6 +107,8 @@ export interface BackgroundInstanceEntry extends SessionEntryBase {
 	status: "active" | "archived";
 	model?: string;
 	role?: string;
+	pinned?: boolean;
+	expiresAt?: string;
 }
 
 /** Label entry for user-defined bookmarks/markers on entries. */
