@@ -47,6 +47,9 @@ classify_changes:
       if [ -z "$base" ] || echo "$base" | grep -Eq '^0+$'; then
         base="$(git rev-parse "${CI_COMMIT_SHA}^" 2>/dev/null || true)"
       fi
+      if [ -n "$base" ] && ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+        base=""
+      fi
 
       coding_agent_only=false
       if [ -n "$base" ]; then
@@ -64,7 +67,7 @@ classify_changes:
           done < changed-paths.txt
         fi
       else
-        : > changed-paths.txt
+        git ls-tree -r --name-only "$CI_COMMIT_SHA" > changed-paths.txt
       fi
 
       printf 'CODING_AGENT_ONLY=%s\n' "$coding_agent_only" > change.env
