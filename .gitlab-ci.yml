@@ -1,0 +1,140 @@
+stages:
+  - prepare
+  - check
+  - test
+  - publish
+
+workflow:
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+variables:
+  BUN_VERSION: "1.3.14"
+  BUN_INSTALL: "$CI_PROJECT_DIR/.bun"
+  BUN_CACHE_DIR: "$CI_PROJECT_DIR/.bun-cache"
+  GIT_DEPTH: "50"
+
+.bun_job:
+  image: node:24-bookworm
+  cache:
+    key:
+      files:
+        - bun.lock
+    paths:
+      - .bun/
+      - .bun-cache/
+      - node_modules/
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends bash ca-certificates curl git unzip
+    - curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}"
+    - export PATH="$BUN_INSTALL/bin:$PATH"
+    - bun --version
+    - npm --version
+    - bun install --frozen-lockfile
+
+classify_changes:
+  stage: prepare
+  image: alpine/git:latest
+  script:
+    - |
+      set -eu
+      base="${CI_MERGE_REQUEST_DIFF_BASE_SHA:-${CI_COMMIT_BEFORE_SHA:-}}"
+      if [ -z "$base" ] || echo "$base" | grep -Eq '^0+$'; then
+        base="$(git rev-parse "${CI_COMMIT_SHA}^" 2>/dev/null || true)"
+      fi
+
+      coding_agent_only=false
+      if [ -n "$base" ]; then
+        git diff --name-only "$base" "$CI_COMMIT_SHA" > changed-paths.txt
+        if [ -s changed-paths.txt ]; then
+          coding_agent_only=true
+          while IFS= read -r changed_path; do
+            case "$changed_path" in
+              packages/coding-agent/*) ;;
+              *)
+                coding_agent_only=false
+                break
+                ;;
+            esac
+          done < changed-paths.txt
+        fi
+      else
+        : > changed-paths.txt
+      fi
+
+      printf 'CODING_AGENT_ONLY=%s\n' "$coding_agent_only" > change.env
+      cat changed-paths.txt
+      cat change.env
+  artifacts:
+    reports:
+      dotenv: change.env
+    paths:
+      - changed-paths.txt
+
+check_coding_agent:
+  extends: .bun_job
+  stage: check
+  needs:
+    - job: classify_changes
+      artifacts: true
+  script:
+    - bun --cwd=packages/coding-agent run check
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - changes:
+        - packages/coding-agent/**/*
+
+check_workspace:
+  extends: .bun_job
+  stage: check
+  needs:
+    - job: classify_changes
+      artifacts: true
+  script:
+    - |
+      if [ "${CODING_AGENT_ONLY:-false}" = "true" ] && [ -z "${CI_COMMIT_TAG:-}" ]; then
+        echo "Only packages/coding-agent changed; skipping full workspace check."
+        exit 0
+      fi
+      bun run ci:check:full
+      bun run collab:web:build
+
+test_scripts:
+  extends: .bun_job
+  stage: test
+  needs:
+    - job: classify_changes
+      artifacts: true
+  script:
+    - |
+      if [ "${CODING_AGENT_ONLY:-false}" = "true" ] && [ -z "${CI_COMMIT_TAG:-}" ]; then
+        echo "Only packages/coding-agent changed; skipping repo script tests."
+        exit 0
+      fi
+      bun run test:scripts
+
+npm_publish:
+  extends: .bun_job
+  stage: publish
+  needs:
+    - job: check_workspace
+    - job: check_coding_agent
+      optional: true
+    - job: test_scripts
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+/'
+      when: manual
+    - when: never
+  script:
+    - |
+      if [ "${NPM_RELEASE_READY:-}" != "true" ]; then
+        echo "Refusing to publish until NPM_RELEASE_READY=true is set."
+        echo "This repository publishes native leaf packages too; build/upload every platform artifact first or decouple native publishing."
+        exit 1
+      fi
+      npm install -g npm@latest
+      bun run ci:release:publish
+

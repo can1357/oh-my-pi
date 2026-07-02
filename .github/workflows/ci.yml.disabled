@@ -94,6 +94,70 @@ jobs:
                 echo "release-tag=$release_tag"
               } >> "$GITHUB_OUTPUT"
 
+   change_metadata:
+      name: Classify changed paths
+      runs-on: ubuntu-22.04
+      needs: [release_metadata]
+      outputs:
+         coding-agent-only: ${{ steps.classify.outputs.coding-agent-only }}
+      steps:
+         - uses: actions/checkout@v4
+           with:
+              fetch-depth: 0
+         - name: Classify changed paths
+           id: classify
+           shell: bash
+           run: |
+              set -euo pipefail
+
+              if [ "${{ needs.release_metadata.outputs.is-release }}" = "true" ]; then
+                echo "coding-agent-only=false" >> "$GITHUB_OUTPUT"
+                echo "Release run: keep the full validation and deploy graph."
+                exit 0
+              fi
+
+              case "${{ github.event_name }}" in
+                pull_request)
+                  base="${{ github.event.pull_request.base.sha }}"
+                  head="${{ github.event.pull_request.head.sha }}"
+                  ;;
+                push)
+                  base="${{ github.event.before }}"
+                  head="${{ github.sha }}"
+                  if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]]; then
+                    base="$(git rev-parse "${head}^" 2>/dev/null || true)"
+                  fi
+                  ;;
+                *)
+                  base=""
+                  head="${{ github.sha }}"
+                  ;;
+              esac
+
+              coding_agent_only=false
+              if [ -n "$base" ]; then
+                mapfile -t changed_paths < <(git diff --name-only "$base" "$head")
+                if [ "${#changed_paths[@]}" -gt 0 ]; then
+                  coding_agent_only=true
+                  for path in "${changed_paths[@]}"; do
+                    case "$path" in
+                      packages/coding-agent/*) ;;
+                      *)
+                        coding_agent_only=false
+                        break
+                        ;;
+                    esac
+                  done
+                fi
+              fi
+
+              echo "coding-agent-only=$coding_agent_only" >> "$GITHUB_OUTPUT"
+              if [ "$coding_agent_only" = "true" ]; then
+                echo "Only packages/coding-agent changed; using focused oh-my-pk validation."
+              else
+                echo "Non-coding-agent paths changed; using full validation."
+              fi
+
    # Compute a stable hash of every input that affects the native cdylib output,
    # then look for any prior successful main run that already uploaded the
    # native artifacts for this hash. Two independent outputs:
@@ -200,12 +264,18 @@ jobs:
    check:
       name: Lint, type check & web build
       runs-on: ubuntu-22.04
+      needs: [release_metadata, change_metadata]
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/bun-install
          - name: Type check workspace
+           if: ${{ needs.release_metadata.outputs.is-release == 'true' || needs.change_metadata.outputs.coding-agent-only != 'true' }}
            run: bun run ci:check:full
+         - name: Type check coding-agent
+           if: ${{ needs.release_metadata.outputs.is-release != 'true' && needs.change_metadata.outputs.coding-agent-only == 'true' }}
+           run: bun --cwd=packages/coding-agent run check
          - name: Build collab web
+           if: ${{ needs.release_metadata.outputs.is-release == 'true' || needs.change_metadata.outputs.coding-agent-only != 'true' }}
            run: bun run collab:web:build
 
    # Linux x64 baseline + modern: required by `test`, so it runs on every PR
@@ -239,8 +309,8 @@ jobs:
    # native_artifact_lookup already found a recent run with all artifacts intact.
    native_cross_platform_kata:
       name: "Native: ${{ matrix.platform }} ${{ matrix.arch }}"
-      needs: [release_metadata, native_artifact_lookup]
-      if: ${{ needs.release_metadata.outputs.is-release == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.native_artifact_lookup.outputs.cross-platform-run-id == '') }}
+      needs: [release_metadata, change_metadata, native_artifact_lookup]
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.change_metadata.outputs.coding-agent-only != 'true' && needs.native_artifact_lookup.outputs.cross-platform-run-id == '') }}
       strategy:
          fail-fast: false
          matrix:
@@ -262,8 +332,8 @@ jobs:
 
    native_cross_platform_macos:
       name: "Native: ${{ matrix.platform }} ${{ matrix.arch }}"
-      needs: [release_metadata, native_artifact_lookup]
-      if: ${{ needs.release_metadata.outputs.is-release == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.native_artifact_lookup.outputs.cross-platform-run-id == '') }}
+      needs: [release_metadata, change_metadata, native_artifact_lookup]
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.change_metadata.outputs.coding-agent-only != 'true' && needs.native_artifact_lookup.outputs.cross-platform-run-id == '') }}
       strategy:
          fail-fast: false
          matrix:
@@ -284,8 +354,8 @@ jobs:
    test_workspace:
       name: Test TS workspace fast
       runs-on: ubuntu-22.04
-      needs: [native_linux_x64, native_artifact_lookup]
-      if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
+      needs: [release_metadata, change_metadata, native_linux_x64, native_artifact_lookup]
+      if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' && (needs.release_metadata.outputs.is-release == 'true' || needs.change_metadata.outputs.coding-agent-only != 'true') }}
       timeout-minutes: 20
       steps:
          - uses: actions/checkout@v4
@@ -346,8 +416,8 @@ jobs:
    test_ts_native:
       name: Test TS native/integration packages
       runs-on: ubuntu-22.04
-      needs: [native_linux_x64, native_artifact_lookup]
-      if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
+      needs: [release_metadata, change_metadata, native_linux_x64, native_artifact_lookup]
+      if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' && (needs.release_metadata.outputs.is-release == 'true' || needs.change_metadata.outputs.coding-agent-only != 'true') }}
       timeout-minutes: 25
       steps:
          - uses: actions/checkout@v4
@@ -502,6 +572,8 @@ jobs:
    install_methods:
       name: Install method smoke tests
       runs-on: ubuntu-22.04
+      needs: [release_metadata, change_metadata]
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' || needs.change_metadata.outputs.coding-agent-only != 'true' }}
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/ensure-rust-toolchain
