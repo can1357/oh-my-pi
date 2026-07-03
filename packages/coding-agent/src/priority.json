@@ -45,5 +45,41 @@
 	"fast-context": [
 		"openrouter/cohere/north-mini-code:free",
 		"openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+	],
+	"max-intelligence": [
+		"9router/cx/gpt-5.5",
+		"9router/cc/claude-opus-4-8",
+		"codex-appserver/gpt-5.5-pro",
+		"codex-appserver/gpt-5.5",
+		"gpt-5.5",
+		"opus-4.8",
+		"opus-4-8",
+		"gemini-3.1-pro",
+		"pro"
+	],
+	"balanced": [
+		"9router/kimi/kimi-k2.6",
+		"9router/minimax/MiniMax-M3",
+		"9router/gemini-3-5-flash-medium-round-robin",
+		"kimi/kimi-for-coding",
+		"siliconflow/deepseek-ai/DeepSeek-V4-Flash",
+		"sonnet",
+		"gemini-3-flash"
+	],
+	"budget": [
+		"9router/qwen-team/deepseek-v4-flash",
+		"9router/openrouter-free-fallback",
+		"openrouter/deepseek/deepseek-v4-flash:free",
+		"cerebras/zai-glm-4.7",
+		"haiku",
+		"flash",
+		"mini"
+	],
+	"free": [
+		"9router/openrouter-free-fallback",
+		"openrouter/deepseek/deepseek-v4-flash:free",
+		"openrouter/inclusionai/ring-2.6-1t:free",
+		"openrouter/baidu/cobuddy:free",
+		"openrouter/openrouter/owl-alpha"
 	]
 }

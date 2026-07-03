@@ -16,7 +16,11 @@ export type ModelRole =
 	| "title"
 	| "task"
 	| "advisor"
-	| "fast-context";
+	| "fast-context"
+	| "budget"
+	| "balanced"
+	| "max-intelligence"
+	| "free";
 
 export interface ModelRoleInfo {
 	tag?: string;
@@ -38,6 +42,10 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 	task: { tag: "TASK", name: "Subtask", color: "muted" },
 	advisor: { tag: "ADVISOR", name: "Advisor", color: "accent" },
 	"fast-context": { tag: "FASTCTX", name: "Fast Context", color: "warning" },
+	budget: { tag: "BUDGET", name: "Budget", color: "warning" },
+	balanced: { tag: "BALANCED", name: "Balanced", color: "accent" },
+	"max-intelligence": { tag: "MAXINT", name: "Max Intelligence", color: "success" },
+	free: { tag: "FREE", name: "Free", color: "dim" },
 };
 
 export const MODEL_ROLE_IDS: ModelRole[] = [
@@ -52,6 +60,10 @@ export const MODEL_ROLE_IDS: ModelRole[] = [
 	"task",
 	"advisor",
 	"fast-context",
+	"budget",
+	"balanced",
+	"max-intelligence",
+	"free",
 ];
 
 export type RoleInfo = ModelRoleInfo;

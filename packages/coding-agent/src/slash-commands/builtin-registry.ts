@@ -8,6 +8,7 @@ import { $which, APP_NAME, setProjectDir } from "@pk-nerdsaver-ai/pi-utils";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
 import { writeCollabLinkFile } from "../collab/link-file";
+import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import {
@@ -417,9 +418,18 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			if (command.args) {
 				const modelId = command.args.trim();
 				const availableModels = runtime.session.getAvailableModels?.() ?? [];
-				const match = availableModels.find(
+				let match = availableModels.find(
 					model => model.id === modelId || `${model.provider}/${model.id}` === modelId,
 				);
+				if (!match) {
+					// Role aliases (pi/budget, pi/max-intelligence, …) and fuzzy
+					// patterns resolve through the shared role-value pipeline.
+					match = resolveModelRoleValue(modelId, availableModels, {
+						settings: runtime.settings,
+						matchPreferences: getModelMatchPreferences(runtime.settings),
+						modelRegistry: runtime.session.modelRegistry,
+					}).model;
+				}
 				if (!match) {
 					return usage(
 						`Unknown model: ${modelId}. Use ACP \`session/setModel\` for picker-driven selection or list available models with /model.`,
