@@ -3,7 +3,8 @@ import type { Settings } from "../../src/config/settings";
 import type { InteractiveModeContext } from "../../src/modes/types";
 import type { AgentSession } from "../../src/session/agent-session";
 import { emptyFusionUsage } from "../../src/session/fusion-usage";
-import { handleFusionCommand, handleFusionPoolArgs, showFusionMenu } from "../../src/slash-commands/helpers/fusion";
+import { handleFusionCommand, handleFusionPoolArgs } from "../../src/slash-commands/helpers/fusion";
+import { handleFusionCommandTui, showFusionMenu } from "../../src/slash-commands/helpers/fusion-tui";
 import type { SlashCommandRuntime } from "../../src/slash-commands/types";
 
 /**
@@ -50,6 +51,41 @@ function runFusion(args: string, initial?: Record<string, unknown>) {
 	return { ...harness, result };
 }
 
+function makeTuiContext(initial: Record<string, unknown> = {}) {
+	const { runtime, store, outputs } = makeRuntime(initial);
+	const repaint = {
+		invalidations: 0,
+		topBorderUpdates: 0,
+		renderRequests: 0,
+	};
+	const ctx = {
+		session: runtime.session,
+		sessionManager: { getCwd: () => "." },
+		settings: runtime.settings,
+		statusLine: {
+			invalidate: () => {
+				repaint.invalidations++;
+			},
+		},
+		updateEditorTopBorder: () => {
+			repaint.topBorderUpdates++;
+		},
+		ui: {
+			requestRender: () => {
+				repaint.renderRequests++;
+			},
+		},
+		editor: { setText: () => {} },
+		showStatus: (text: string) => {
+			outputs.push(text);
+		},
+		refreshSlashCommandState: () => Promise.resolve(),
+		ensureFusionSidekick: () => Promise.resolve(),
+		reconcileFusionSidekickModel: () => Promise.resolve(""),
+	} as unknown as InteractiveModeContext;
+	return { ctx, store, outputs, repaint };
+}
+
 describe("/fusion verbs", () => {
 	test("on enables fusion and bumps mode off -> escalate", async () => {
 		const { store, outputs, result } = runFusion("on", { "fusion.mode": "off" });
@@ -87,6 +123,19 @@ describe("/fusion verbs", () => {
 		await invalid.result;
 		expect(invalid.store.get("fusion.mode")).toBe("escalate");
 		expect(invalid.outputs.join(" ")).toContain("Usage: /fusion mode");
+	});
+
+	test("TUI mode changes repaint the live status-line footer", async () => {
+		const { ctx, store, outputs, repaint } = makeTuiContext({
+			"fusion.enabled": true,
+			"fusion.mode": "escalate",
+		});
+
+		await handleFusionCommandTui({ name: "fusion", args: "mode delegate", text: "/fusion mode delegate" }, ctx);
+
+		expect(store.get("fusion.mode")).toBe("delegate");
+		expect(outputs.join(" ")).toContain('fusion.mode set to "delegate"');
+		expect(repaint).toEqual({ invalidations: 1, topBorderUpdates: 1, renderRequests: 1 });
 	});
 
 	test("sidekick assigns the selector and warns when unresolvable", async () => {
@@ -149,7 +198,8 @@ describe("/fusion menu", () => {
 		let ensureCalls = 0;
 		// Selector script: pick the toggle once, then cancel the menu.
 		const selections: (string | undefined)[] = ["Fusion: OFF", undefined];
-		const ctx = {
+		const { ctx } = makeTuiContext();
+		Object.assign(ctx, {
 			session: runtime.session,
 			sessionManager: { getCwd: () => "." },
 			settings: runtime.settings,
@@ -166,7 +216,7 @@ describe("/fusion menu", () => {
 				return Promise.resolve();
 			},
 			reconcileFusionSidekickModel: () => Promise.resolve(""),
-		} as unknown as InteractiveModeContext;
+		});
 
 		await showFusionMenu(ctx);
 		expect(store.get("fusion.enabled")).toBe(true);
