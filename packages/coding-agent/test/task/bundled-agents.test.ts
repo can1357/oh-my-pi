@@ -70,4 +70,16 @@ describe("bundled agents contract", () => {
 		expect(tools.map(t => t.toLowerCase())).not.toContain("write");
 		expect(tools.map(t => t.toLowerCase())).not.toContain("bash");
 	});
+
+	it("mr-reducer tools include lsp for conflict spot-checks but stay read-only", () => {
+		const agents = loadBundledAgents();
+		const reducer = agentByName(agents, "mr-reducer");
+		expect(reducer.tools, "mr-reducer should have tools").toBeDefined();
+		const tools = reducer.tools!.map(t => t.toLowerCase());
+
+		expect(tools).toContain("lsp");
+		expect(tools).not.toContain("edit");
+		expect(tools).not.toContain("write");
+		expect(tools).not.toContain("bash");
+	});
 });
