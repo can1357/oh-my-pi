@@ -471,7 +471,7 @@ export class AcpAgent implements Agent {
 			authMethods.push({
 				type: "terminal",
 				id: "terminal",
-				name: "Set up Oh My Pi in terminal",
+				name: "Set up oh-my-pk in terminal",
 				description: "Launch the omp TUI to add provider keys and select models.",
 				args: [ACP_TERMINAL_AUTH_FLAG],
 			});
@@ -479,8 +479,8 @@ export class AcpAgent implements Agent {
 		return {
 			protocolVersion: PROTOCOL_VERSION,
 			agentInfo: {
-				name: "oh-my-pi",
-				title: "Oh My Pi",
+				name: "oh-my-pk",
+				title: "oh-my-pk",
 				version: VERSION,
 			},
 			authMethods,

@@ -245,8 +245,8 @@ Location: `packages/*/CHANGELOG.md` (per package).
 - Don't flag changelog section order or formatting in reviews or PRs — `bun run release` runs `fix-changelogs` which normalizes everything automatically.
 
 **Attribution:**
-- Internal (from issues): `Fixed foo bar ([#123](https://github.com/can1357/oh-my-pi/issues/123))`.
-- External contributions: `Added feature X ([#456](https://github.com/can1357/oh-my-pi/pull/456) by [@username](https://github.com/username))`.
+- Internal (from issues): `Fixed foo bar ([#123](https://github.com/kingkillery/oh-my-pk/issues/123))`.
+- External contributions: `Added feature X ([#456](https://github.com/kingkillery/oh-my-pk/pull/456) by [@username](https://github.com/username))`.
 
 ## Releasing
 

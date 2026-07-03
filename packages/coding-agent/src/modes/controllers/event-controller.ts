@@ -1144,7 +1144,7 @@ export class EventController {
 
 		const sessionName = this.ctx.sessionManager.getSessionName();
 		TERMINAL.sendNotification({
-			title: sessionName || "Oh My Pi",
+			title: sessionName || "oh-my-pk",
 			body: "Complete",
 			type: "completion",
 			actions: "focus",

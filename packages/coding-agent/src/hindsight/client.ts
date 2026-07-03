@@ -10,7 +10,7 @@
 
 import type { HindsightConfig } from "./config";
 
-const USER_AGENT = "oh-my-pi-coding-agent";
+const USER_AGENT = "oh-my-pk-coding-agent";
 const DEFAULT_USER_AGENT = USER_AGENT;
 
 export type Budget = "low" | "mid" | "high" | string;

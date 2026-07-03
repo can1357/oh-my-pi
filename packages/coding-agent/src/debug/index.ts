@@ -435,7 +435,7 @@ export class DebugSelectorComponent extends Container {
 		if (!suppressed) {
 			const sessionName = this.ctx.sessionManager.getSessionName();
 			const notification: TerminalNotification = {
-				title: sessionName || "Oh My Pi",
+				title: sessionName || "oh-my-pk",
 				body: "Terminal protocol test",
 				type: "test",
 				actions: "focus",

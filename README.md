@@ -24,6 +24,8 @@
 
 The most capable agent surface that ships. Continuously tuned by real-world use — complete out of the box, open all the way down.
 
+Canonical product name: `oh-my-pk`. Some repository URLs and legacy infrastructure endpoints may still contain `oh-my-pi` until those external routes are migrated.
+
 **40+** providers · **32** built-in tools · **14** lsp ops · **28** dap ops · **~55k** lines of Rust core.
 
 ## Install
