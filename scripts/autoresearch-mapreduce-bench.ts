@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
-import { FileType, GrepOutputMode, glob, grep } from "@pk-nerdsaver-ai/pi-natives";
+import { GrepOutputMode, grep } from "@pk-nerdsaver-ai/pi-natives";
 
 interface ExpectedSignal {
 	file: string;
@@ -115,16 +115,6 @@ const combinedSelectorPattern = selectors.map(selector => `(?:${selector.pattern
 
 const started = performance.now();
 const selectorGlob = "packages/*/src/**/*.ts";
-const universe = await glob({
-	pattern: selectorGlob,
-	path: corpusRoot,
-	fileType: FileType.File,
-	recursive: true,
-	hidden: true,
-	gitignore: true,
-	maxResults: 100_000,
-});
-const universeFiles = universe.matches.map(match => match.path).sort();
 const signals: SignalRecord[] = [];
 const selectorLedger: Array<{
 	id: string;
@@ -245,8 +235,8 @@ const ledgerComplete =
 const ledger = {
 	run_id: "autoresearch-mapreduce-latest",
 	universe: {
-		files_total: universeFiles.length,
-		files_included: universeFiles.length,
+		files_total: combinedResult.filesSearched,
+		files_included: combinedResult.filesSearched,
 		files_excluded: 2,
 	},
 	selectors: {
