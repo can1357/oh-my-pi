@@ -67,6 +67,8 @@
 		"gemini-3-flash"
 	],
 	"budget": [
+		"9router/deepseek-v4-flash",
+		"9router/deepseek-v4-fallback",
 		"9router/qwen-team/deepseek-v4-flash",
 		"9router/openrouter-free-fallback",
 		"openrouter/deepseek/deepseek-v4-flash:free",
