@@ -182,7 +182,7 @@ async function cmdWatch(): Promise<void> {
 function parseVersion(v: string): [number, number, number] {
 	const match = v.replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)/);
 	if (!match) throw new Error(`Invalid version: ${v}`);
-	return [parseInt(match[1]), parseInt(match[2]), parseInt(match[3])];
+	return [parseInt(match[1], 10), parseInt(match[2], 10), parseInt(match[3], 10)];
 }
 
 function compareVersions(a: string, b: string): number {

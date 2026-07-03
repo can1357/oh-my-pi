@@ -58,7 +58,7 @@ const targets: BinaryTarget[] = [
 ];
 
 function parseRequestedTargets(): Set<string> | null {
-	const flagIndex = process.argv.findIndex(arg => arg === "--targets");
+	const flagIndex = process.argv.indexOf("--targets");
 	const flagValue =
 		flagIndex >= 0
 			? process.argv[flagIndex + 1]

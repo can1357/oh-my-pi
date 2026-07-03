@@ -239,7 +239,7 @@ async function init(): Promise<void> {
 		hetzner: { kind: "ssh", host: "100.64.216.11", user: "root" },
 		colab: { kind: "colab" },
 	};
-	await Bun.write(NODES_PATH, JSON.stringify(seed, null, 2) + "\n");
+	await Bun.write(NODES_PATH, `${JSON.stringify(seed, null, 2)}\n`);
 	console.log(`wrote ${NODES_PATH}`);
 }
 

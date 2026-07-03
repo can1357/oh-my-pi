@@ -128,12 +128,6 @@ function parseRatePair(value: string | null): { numerator: number; denominator: 
 	};
 }
 
-function parseFraction(value: string | null): { num: number; denom: number } {
-	if (!value) return { num: 0, denom: 0 };
-	const m = value.match(/([0-9,]+)\s*\/\s*([0-9,]+)/);
-	return m ? { num: parseNumber(m[1]), denom: parseNumber(m[2]) } : { num: 0, denom: 0 };
-}
-
 async function parseReport(file: string): Promise<ReportRow> {
 	const text = await Bun.file(file).text();
 

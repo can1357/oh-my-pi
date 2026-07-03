@@ -902,7 +902,7 @@ function buildReplacement(
 function applyReplacement(stmt: Statement, repl: Replacement): void {
 	const parent = stmt.getParent();
 	if (parent && Node.isStatemented(parent)) {
-		const idx = parent.getStatements().findIndex(s => s === stmt);
+		const idx = parent.getStatements().indexOf(stmt);
 		if (repl.condition === null) {
 			const inserted = parent.insertStatements(idx, [...repl.prefix, ...repl.tail]);
 			stmt.remove();

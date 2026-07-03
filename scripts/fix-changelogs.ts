@@ -595,7 +595,6 @@ export function collectPromotableAddedItemLines(diffText: string): Map<string, S
 	const removals: RemovedItemOccurrence[] = [];
 	const addedReleaseHeadingHunks = new Set<string>();
 	let currentPath = "";
-	let oldLine = 0;
 	let newLine = 0;
 	let hunkIndex = -1;
 	for (const rawLine of diffText.replace(/\r\n/g, "\n").split("\n")) {
@@ -612,7 +611,6 @@ export function collectPromotableAddedItemLines(diffText: string): Map<string, S
 
 		const hunkMatch = rawLine.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
 		if (hunkMatch) {
-			oldLine = Number(hunkMatch[1]);
 			newLine = Number(hunkMatch[2]);
 			hunkIndex++;
 			continue;
@@ -650,12 +648,10 @@ export function collectPromotableAddedItemLines(diffText: string): Map<string, S
 					pairedWithAddition: false,
 				});
 			}
-			oldLine++;
 			continue;
 		}
 
 		if (marker === " ") {
-			oldLine++;
 			newLine++;
 		}
 	}

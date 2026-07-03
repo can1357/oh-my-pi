@@ -380,7 +380,7 @@ async function pull(opts: SyncOptions, plan: PlanResult): Promise<void> {
 async function main(): Promise<void> {
 	const opts = parseArgs(process.argv);
 	const plan = await makePlan(opts);
-	console.log("── plan ──\n" + formatPlan(plan) + "\n───────────");
+	console.log(`── plan ──\n${formatPlan(plan)}\n───────────`);
 	if (opts.direction === "status") {
 		console.log("(status only — no transfer)");
 		return;

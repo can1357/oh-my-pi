@@ -67,11 +67,12 @@
 		"gemini-3-flash"
 	],
 	"budget": [
+		"9router/qwen3.5plus",
 		"9router/deepseek-v4-flash",
 		"9router/deepseek-v4-fallback",
 		"9router/qwen-team/deepseek-v4-flash",
 		"9router/openrouter-free-fallback",
-		"openrouter/deepseek/deepseek-v4-flash:free",
+		"openrouter/qwen/qwen3-coder:free",
 		"cerebras/zai-glm-4.7",
 		"haiku",
 		"flash",
@@ -79,9 +80,9 @@
 	],
 	"free": [
 		"9router/openrouter-free-fallback",
-		"openrouter/deepseek/deepseek-v4-flash:free",
-		"openrouter/inclusionai/ring-2.6-1t:free",
-		"openrouter/baidu/cobuddy:free",
-		"openrouter/openrouter/owl-alpha"
+		"openrouter/qwen/qwen3-coder:free",
+		"openrouter/openai/gpt-oss-120b:free",
+		"openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+		"openrouter/meta-llama/llama-3.3-70b-instruct:free"
 	]
 }

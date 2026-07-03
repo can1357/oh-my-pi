@@ -61,7 +61,7 @@ console.log("\n✅ All packages at same version (lockstep)");
 
 // Update all inter-package dependencies
 let totalUpdates = 0;
-for (const [dir, pkg] of Object.entries(packages)) {
+for (const pkg of Object.values(packages)) {
 	let updated = false;
 
 	// Check dependencies
@@ -98,7 +98,7 @@ for (const [dir, pkg] of Object.entries(packages)) {
 
 	// Write if updated
 	if (updated) {
-		await Bun.write(pkg.path, JSON.stringify(pkg.data, null, "\t") + "\n");
+		await Bun.write(pkg.path, `${JSON.stringify(pkg.data, null, "\t")}\n`);
 	}
 }
 

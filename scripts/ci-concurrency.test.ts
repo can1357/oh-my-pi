@@ -7,7 +7,6 @@
 // flag for every event shape we care about.
 
 import { describe, expect, it } from "bun:test";
-import * as fs from "node:fs";
 import * as path from "node:path";
 
 // This fork keeps GitHub workflows parked as `*.yml.disabled` (see
@@ -15,8 +14,9 @@ import * as path from "node:path";
 // file that would be re-enabled, so fall back to the disabled copy when the
 // live workflow is absent.
 const WORKFLOW_DIR = path.resolve(import.meta.dir, "..", ".github", "workflows");
-const WORKFLOW_CANDIDATES = ["ci.yml", "ci.yml.disabled"].map(name => path.join(WORKFLOW_DIR, name));
-const WORKFLOW_PATH = WORKFLOW_CANDIDATES.find(p => fs.existsSync(p)) ?? WORKFLOW_CANDIDATES[0]!;
+const LIVE_WORKFLOW_PATH = path.join(WORKFLOW_DIR, "ci.yml");
+const DISABLED_WORKFLOW_PATH = path.join(WORKFLOW_DIR, "ci.yml.disabled");
+const WORKFLOW_PATH = (await Bun.file(LIVE_WORKFLOW_PATH).exists()) ? LIVE_WORKFLOW_PATH : DISABLED_WORKFLOW_PATH;
 
 type Value = string | boolean | null;
 
@@ -237,18 +237,17 @@ class GhaEval {
 
 const workflowYaml = await Bun.file(WORKFLOW_PATH).text();
 // The block sits at indent 0 immediately under the top-level `concurrency:`
-// key and uses single-line values, so a flat-line extract is unambiguous.
-// Values are double-quoted in YAML (the GitHub expression contains `: ` from
-// the `'chore: bump version to '` literal which would otherwise trip plain
-// scalar parsing), so we unwrap the wrapping `"…"` here.
-const concurrencySection = workflowYaml.slice(workflowYaml.indexOf("\nconcurrency:") + 1);
-const groupRaw = /^\s*group:\s*(\S.*?)\s*$/m.exec(concurrencySection)?.[1];
-const cancelRaw = /^\s*cancel-in-progress:\s*(\S.*?)\s*$/m.exec(concurrencySection)?.[1];
-const groupTemplate = groupRaw && groupRaw.startsWith('"') && groupRaw.endsWith('"') ? groupRaw.slice(1, -1) : groupRaw;
-const cancelTemplate =
-	cancelRaw && cancelRaw.startsWith('"') && cancelRaw.endsWith('"') ? cancelRaw.slice(1, -1) : cancelRaw;
+// key and uses single-line values, so the indented section extract is
+// unambiguous. Values are double-quoted in YAML (the GitHub expression contains
+// `: ` from the `'chore: bump version to '` literal which would otherwise trip
+// plain scalar parsing), so we unwrap the wrapping `"…"` here.
+const concurrencySection = /^concurrency:\r?\n((?:[ \t]+[^\r\n]*(?:\r?\n|$))+)/m.exec(workflowYaml)?.[1];
+const groupRaw = /^\s*group:\s*(\S.*?)\s*$/m.exec(concurrencySection ?? "")?.[1];
+const cancelRaw = /^\s*cancel-in-progress:\s*(\S.*?)\s*$/m.exec(concurrencySection ?? "")?.[1];
+const groupTemplate = groupRaw?.startsWith('"') && groupRaw.endsWith('"') ? groupRaw.slice(1, -1) : groupRaw;
+const cancelTemplate = cancelRaw?.startsWith('"') && cancelRaw.endsWith('"') ? cancelRaw.slice(1, -1) : cancelRaw;
 if (!groupTemplate || !cancelTemplate) {
-	throw new Error("could not locate concurrency.group / cancel-in-progress in ci.yml");
+	throw new Error(`could not locate concurrency.group / cancel-in-progress in ${path.basename(WORKFLOW_PATH)}`);
 }
 
 const RELEASE_SUBJECT = "chore: bump version to 15.12.6";
