@@ -222,7 +222,10 @@ const coverageAccountingOk = workerOutputs.every(
 	output => output.coverage.signals_assigned === output.coverage.signals_cleared + output.coverage.signals_confirmed,
 );
 const selectorAccountingOk = selectorLedger.every(
-	selector => selector.returnedMatches === selector.totalMatches && selector.limitReached === false,
+	selector =>
+		selector.returnedMatches === selector.totalMatches &&
+		selector.limitReached === false &&
+		selector.skippedOversized === 0,
 );
 const latencyMs = Math.round(performance.now() - started);
 const ledgerComplete =
