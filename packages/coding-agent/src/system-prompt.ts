@@ -642,15 +642,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
 	const hasRead = tools?.has("read");
 	const visibleSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
-	// Lazy skill discovery: with `skills.discoveryMode` "lazy" (or "auto" past the
-	// threshold), keep the listing out of the prompt to preserve context — the model
-	// searches descriptions on demand via `read skill://?q=<keywords>`.
-	const skillDiscoveryMode = skillsSettings?.discoveryMode ?? "lazy";
-	const skillsLazy =
-		visibleSkills.length > 0 &&
-		(skillDiscoveryMode === "lazy" ||
-			(skillDiscoveryMode === "auto" && visibleSkills.length > SKILLS_LAZY_AUTO_THRESHOLD));
-	const filteredSkills = skillsLazy ? [] : visibleSkills;
+	// Request-only skill discovery: never inject skill descriptions into the system
+	// prompt. Keep context space for the active task; the model searches descriptions
+	// on demand via `read skill://?q=<keywords>` and then reads the chosen skill.
+	const skillsLazy = visibleSkills.length > 0;
+	const filteredSkills: typeof visibleSkills = [];
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,
