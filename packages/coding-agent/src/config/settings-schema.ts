@@ -4243,6 +4243,8 @@ export const SETTINGS_SCHEMA = {
 
 	"skills.enableAgentsProject": { type: "boolean", default: true },
 
+	"skills.enableBuiltinSkills": { type: "boolean", default: true },
+
 	"skills.customDirectories": { type: "array", default: [] as string[] },
 
 	"skills.ignoredSkills": { type: "array", default: [] as string[] },
