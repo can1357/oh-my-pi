@@ -15,6 +15,9 @@ import librarianMd from "../prompts/agents/librarian.md" with { type: "text" };
 import oracleMd from "../prompts/agents/oracle.md" with { type: "text" };
 import planMd from "../prompts/agents/plan.md" with { type: "text" };
 import reviewerMd from "../prompts/agents/reviewer.md" with { type: "text" };
+import mrReducerMd from "../prompts/agents/mr-reducer.md" with { type: "text" };
+import mrWorkerMd from "../prompts/agents/mr-worker.md" with { type: "text" };
+import totReasonerMd from "../prompts/agents/tot-reasoner.md" with { type: "text" };
 import taskMd from "../prompts/agents/task.md" with { type: "text" };
 
 import type { AgentDefinition, AgentSource } from "./types";
@@ -72,6 +75,9 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 		fileName: "ix-browser-fast.md",
 		template: ixBrowserFastMd,
 	},
+	{ fileName: "mr-reducer.md", template: mrReducerMd },
+	{ fileName: "mr-worker.md", template: mrWorkerMd },
+	{ fileName: "tot-reasoner.md", template: totReasonerMd },
 ];
 
 // Computed lazily on first loadBundledAgents() call to avoid eager prompt.render at module load.
