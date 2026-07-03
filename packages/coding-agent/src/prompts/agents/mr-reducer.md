@@ -1,7 +1,7 @@
 ---
 name: mr-reducer
 description: Reduce-phase aggregator for Agentic MapReduce — dedupes, triages, and composes cross-shard relationships from worker findings
-tools: read, search, find
+tools: read, search, find, lsp
 model: pi/task
 thinking-level: high
 read-summarize: false
