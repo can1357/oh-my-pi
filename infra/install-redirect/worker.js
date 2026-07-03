@@ -1,4 +1,4 @@
-// Cloudflare Worker for oh-my-pi distribution — no GitHub Actions, no GitHub
+// Cloudflare Worker for oh-my-pk distribution — no GitHub Actions, no GitHub
 // Releases, no billing.
 //
 // Routes:
@@ -10,7 +10,7 @@
 // Binaries live in a PRIVATE Hugging Face repo (free storage, free egress). The
 // repo stays private: this Worker holds the HF token as a secret and proxies
 // downloads, so the installer never sees a token. Config via wrangler:
-//   vars:    HF_REPO     e.g. "kingkillery/oh-my-pi-binaries"
+//   vars:    HF_REPO     e.g. "pkkidking/oh-my-pi-binaries"
 //   secret:  HF_TOKEN    a read-scoped HF access token (wrangler secret put HF_TOKEN)
 //   var (optional): HF_REPO_TYPE "models" (default) | "datasets"
 
@@ -23,15 +23,18 @@ function hfResolveUrl(env, repoPath) {
 	return `https://huggingface.co/${repoType}${env.HF_REPO}/resolve/${revision}/${repoPath}`;
 }
 
-async function proxyInstallScript(target) {
-	const upstream = await fetch(target, { headers: { "User-Agent": "oh-my-pi-install-redirect" } });
+async function proxyInstallScript(target, request) {
+	const upstream = await fetch(target, { headers: { "User-Agent": "oh-my-pk-install-redirect" } });
 	if (!upstream.ok) {
 		return new Response(`Failed to fetch installer: ${upstream.status}`, { status: 502 });
 	}
+	const publicBase = new URL(request.url).origin;
+	const text = (await upstream.text()).replaceAll("https://oh-my-pi.pkking.computer", publicBase);
 	const headers = new Headers(upstream.headers);
 	headers.set("Cache-Control", "public, max-age=60");
 	headers.set("Access-Control-Allow-Origin", "*");
-	return new Response(upstream.body, { status: upstream.status, headers });
+	headers.set("Content-Type", "text/plain; charset=utf-8");
+	return new Response(text, { status: upstream.status, headers });
 }
 
 async function proxyHf(env, repoPath, { cacheSeconds, ctx, request }) {
@@ -49,7 +52,7 @@ async function proxyHf(env, repoPath, { cacheSeconds, ctx, request }) {
 	// no auth, so following the redirect (default) is safe — the token only unlocks
 	// the initial resolve and is never forwarded to the public install client.
 	const upstream = await fetch(hfResolveUrl(env, repoPath), {
-		headers: { Authorization: `Bearer ${env.HF_TOKEN}`, "User-Agent": "oh-my-pi-install-redirect" },
+		headers: { Authorization: `Bearer ${env.HF_TOKEN}`, "User-Agent": "oh-my-pk-install-redirect" },
 	});
 	if (!upstream.ok) {
 		return new Response(`Asset not found: ${repoPath} (${upstream.status})`, { status: upstream.status === 404 ? 404 : 502 });
@@ -80,9 +83,9 @@ export default {
 			case "/":
 			case "/install":
 			case "/install.sh":
-				return proxyInstallScript(`${GITHUB_RAW_BASE}/install.sh`);
+				return proxyInstallScript(`${GITHUB_RAW_BASE}/install.sh`, request);
 			case "/install.ps1":
-				return proxyInstallScript(`${GITHUB_RAW_BASE}/install.ps1`);
+				return proxyInstallScript(`${GITHUB_RAW_BASE}/install.ps1`, request);
 			case "/version":
 				// Short cache: the version pointer changes every release.
 				return proxyHf(env, "VERSION", { cacheSeconds: 60, ctx, request });

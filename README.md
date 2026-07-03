@@ -24,6 +24,8 @@
 
 The most capable agent surface that ships. Continuously tuned by real-world use — complete out of the box, open all the way down.
 
+Canonical product name: `oh-my-pk`. Canonical install/update endpoint: `https://oh-my-pk.pkking.computer`. Legacy repository URLs and the old `oh-my-pi.pkking.computer` route may remain during migration.
+
 **40+** providers · **32** built-in tools · **14** lsp ops · **28** dap ops · **~55k** lines of Rust core.
 
 ## Install
@@ -31,7 +33,7 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 **macOS · Linux**
 
 ```sh
-curl -fsSL https://oh-my-pi.pkking.computer/install.sh | sh
+curl -fsSL https://oh-my-pk.pkking.computer/install.sh | sh
 ```
 
 **Homebrew**
@@ -49,7 +51,7 @@ bun install -g @pk-nerdsaver-ai/pi-coding-agent
 **Windows (PowerShell)**
 
 ```powershell
-irm https://oh-my-pi.pkking.computer/install.ps1 | iex
+irm https://oh-my-pk.pkking.computer/install.ps1 | iex
 ```
 
 **Pinned versions (mise)**

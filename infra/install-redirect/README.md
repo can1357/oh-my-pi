@@ -2,13 +2,13 @@
 
 The fork distributes its CLI with **no GitHub Actions, no GitHub Releases, and no
 GitHub billing**. Binaries live in a **private Hugging Face repo** (free storage +
-egress); a **Cloudflare Worker** at `oh-my-pi.pkking.computer` holds the HF token as
+egress); a **Cloudflare Worker** at `oh-my-pk.pkking.computer` holds the HF token as
 a secret and proxies downloads, so the repo stays private and the installer never
 sees a token.
 
 ```
 build host(s) ── publish-binaries-hf.ts ──▶ private HF repo ──▶ CF Worker ──▶ install.sh / install.ps1 ──▶ user
-   (host-bound)                              (free storage)     (token secret)   (oh-my-pi.pkking.computer)
+   (host-bound)                              (free storage)     (token secret)   (oh-my-pk.pkking.computer)
 ```
 
 ## One-time setup
@@ -61,7 +61,7 @@ build host(s) ── publish-binaries-hf.ts ──▶ private HF repo ──▶ 
 
 ## How installs resolve
 
-`curl -fsSL https://oh-my-pi.pkking.computer/install.sh | sh` →
+`curl -fsSL https://oh-my-pk.pkking.computer/install.sh | sh` →
 - the Worker serves `scripts/install.sh` (from GitHub raw);
 - the script reads `…/version` (Worker → HF `VERSION`) for the latest tag (or `--ref`);
 - downloads `…/bin/<tag>/omp-<platform>-<arch>` (Worker → HF, token applied server-side);

@@ -1,12 +1,12 @@
 # oh-my-pk installer for Windows
-# Usage: irm https://oh-my-pi.pkking.computer/install.ps1 | iex
+# Usage: irm https://oh-my-pk.pkking.computer/install.ps1 | iex
 #
 # Or with options:
-#   & ([scriptblock]::Create((irm https://oh-my-pi.pkking.computer/install.ps1))) -Source
-#   & ([scriptblock]::Create((irm https://oh-my-pi.pkking.computer/install.ps1))) -Binary
-#   & ([scriptblock]::Create((irm https://oh-my-pi.pkking.computer/install.ps1))) -Source -Ref v3.20.1
-#   & ([scriptblock]::Create((irm https://oh-my-pi.pkking.computer/install.ps1))) -Source -Ref main
-#   & ([scriptblock]::Create((irm https://oh-my-pi.pkking.computer/install.ps1))) -Binary -Ref v3.20.1
+#   & ([scriptblock]::Create((irm https://oh-my-pk.pkking.computer/install.ps1))) -Source
+#   & ([scriptblock]::Create((irm https://oh-my-pk.pkking.computer/install.ps1))) -Binary
+#   & ([scriptblock]::Create((irm https://oh-my-pk.pkking.computer/install.ps1))) -Source -Ref v3.20.1
+#   & ([scriptblock]::Create((irm https://oh-my-pk.pkking.computer/install.ps1))) -Source -Ref main
+#   & ([scriptblock]::Create((irm https://oh-my-pk.pkking.computer/install.ps1))) -Binary -Ref v3.20.1
 
 param(
     [switch]$Source,
@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Repo = "kingkillery/oh-my-pi"
-$DistBase = if ($env:OMP_DIST_BASE) { $env:OMP_DIST_BASE } else { "https://oh-my-pi.pkking.computer" }
+$DistBase = if ($env:OMP_DIST_BASE) { $env:OMP_DIST_BASE } else { "https://oh-my-pk.pkking.computer" }
 $Package = "@pk-nerdsaver-ai/pi-coding-agent"
 $InstallDir = if ($env:PI_INSTALL_DIR) { $env:PI_INSTALL_DIR } else { "$env:LOCALAPPDATA\omp" }
 $BinaryName = "omp-windows-x64.exe"

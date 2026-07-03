@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Skill } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/skills";
-import { buildSystemPrompt, SKILLS_LAZY_AUTO_THRESHOLD } from "@pk-nerdsaver-ai/pi-coding-agent/system-prompt";
+import { buildSystemPrompt } from "@pk-nerdsaver-ai/pi-coding-agent/system-prompt";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 const EMPTY_TREE = {
@@ -40,7 +40,7 @@ describe("system prompt lazy skill discovery", () => {
 
 	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
 
-	async function render(skills: Skill[], discoveryMode?: "eager" | "auto" | "lazy"): Promise<string> {
+	async function render(skills: Skill[], discoveryMode?: "lazy"): Promise<string> {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
 			contextFiles: [],
@@ -53,13 +53,6 @@ describe("system prompt lazy skill discovery", () => {
 		return systemPrompt.join("\n\n");
 	}
 
-	it("lists every skill in eager mode regardless of catalog size", async () => {
-		const rendered = await render(makeSkills(SKILLS_LAZY_AUTO_THRESHOLD + 5), "eager");
-		expect(rendered).toContain("<skills>");
-		expect(rendered).toContain(`- skill-${SKILLS_LAZY_AUTO_THRESHOLD + 4}:`);
-		expect(rendered).not.toContain("not listed here");
-	});
-
 	it("replaces the listing with an on-demand search notice in lazy mode", async () => {
 		const rendered = await render(makeSkills(3), "lazy");
 		expect(rendered).not.toContain("<skills>");
@@ -68,18 +61,14 @@ describe("system prompt lazy skill discovery", () => {
 		expect(rendered).toContain("skill://?q=<keywords>");
 	});
 
-	it("defaults to lazy mode and keeps auto as the small-catalog compatibility mode", async () => {
+	it("defaults to request-only discovery and ignores prompt listing for every catalog size", async () => {
 		const defaultRendered = await render(makeSkills(3));
 		expect(defaultRendered).not.toContain("<skills>");
 		expect(defaultRendered).toContain("skill://?q=<keywords>");
 
-		const small = await render(makeSkills(SKILLS_LAZY_AUTO_THRESHOLD), "auto");
-		expect(small).toContain("<skills>");
-		expect(small).not.toContain("not listed here");
-
-		const large = await render(makeSkills(SKILLS_LAZY_AUTO_THRESHOLD + 1), "auto");
-		expect(large).not.toContain("<skills>");
-		expect(large).toContain(`${SKILLS_LAZY_AUTO_THRESHOLD + 1} specialized skills are available but not listed`);
+		const many = await render(makeSkills(100), "lazy");
+		expect(many).not.toContain("<skills>");
+		expect(many).toContain("100 specialized skills are available but not listed");
 	});
 
 	it("omits both listing and notice when no skills exist", async () => {

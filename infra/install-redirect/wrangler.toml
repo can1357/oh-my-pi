@@ -2,9 +2,10 @@ name = "oh-my-pi-install-redirect"
 main = "worker.js"
 compatibility_date = "2026-06-19"
 
-# Custom-domain route attaches the Worker to the whole hostname, so it serves every
+# Custom-domain routes attach the Worker to the whole hostnames, so it serves every
 # path: /install.sh, /install.ps1, /version, and /bin/<tag>/<binary>.
 routes = [
+	{ pattern = "oh-my-pk.pkking.computer", custom_domain = true },
 	{ pattern = "oh-my-pi.pkking.computer", custom_domain = true },
 ]
 

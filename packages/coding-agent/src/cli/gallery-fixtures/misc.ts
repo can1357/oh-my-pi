@@ -119,7 +119,7 @@ export const miscFixtures: Record<string, GalleryFixture> = {
 				{
 					type: "text",
 					text: [
-						"● omp-api.service - Oh My Pi API",
+						"● omp-api.service - oh-my-pk API",
 						"     Loaded: loaded (/etc/systemd/system/omp-api.service; enabled)",
 						"     Active: active (running) since Sat 2026-06-06 09:14:02 UTC; 3h 21min ago",
 						"   Main PID: 4812 (bun)",
@@ -152,7 +152,7 @@ export const miscFixtures: Record<string, GalleryFixture> = {
 		args: {
 			op: "search_prs",
 			query: "is:open review-requested:@me sort:updated",
-			repo: "oh-my-pi/pi",
+			repo: "oh-my-pk/oh-my-pk",
 		},
 		result: {
 			content: [
@@ -173,7 +173,7 @@ export const miscFixtures: Record<string, GalleryFixture> = {
 			content: [
 				{
 					type: "text",
-					text: "gh: Could not resolve to a Repository with the name 'oh-my-pi/pi'. (HTTP 404)",
+					text: "gh: Could not resolve to a Repository with the name 'oh-my-pk/oh-my-pk'. (HTTP 404)",
 				},
 			],
 			isError: true,

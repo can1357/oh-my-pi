@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { getLatestRelease } from "@pk-nerdsaver-ai/pi-coding-agent/cli/update-release-source";
 
 const RELEASE_SOURCE = {
-	distBase: "https://oh-my-pi.pkking.computer",
+	distBase: "https://oh-my-pk.pkking.computer",
 	packageName: "@pk-nerdsaver-ai/pi-coding-agent",
 	npmRegistry: "https://registry.npmjs.org/",
 } as const;
@@ -32,19 +32,19 @@ function stubFetch(handler: (url: string) => Response): readonly string[] {
 describe("update release source", () => {
 	it("checks the fork distribution endpoint before npm so pushed binary updates are visible immediately", async () => {
 		const calls = stubFetch(url => {
-			if (url === "https://oh-my-pi.pkking.computer/version") return new Response("v999.0.0\n");
+			if (url === "https://oh-my-pk.pkking.computer/version") return new Response("v999.0.0\n");
 			return new Response("unexpected", { status: 500, statusText: "unexpected" });
 		});
 
 		const release = await getLatestRelease(RELEASE_SOURCE);
 
 		expect(release).toEqual({ tag: "v999.0.0", version: "999.0.0" });
-		expect(calls).toEqual(["https://oh-my-pi.pkking.computer/version"]);
+		expect(calls).toEqual(["https://oh-my-pk.pkking.computer/version"]);
 	});
 
 	it("falls back to the fork npm package when the distribution endpoint is unavailable", async () => {
 		const calls = stubFetch(url => {
-			if (url === "https://oh-my-pi.pkking.computer/version") {
+			if (url === "https://oh-my-pk.pkking.computer/version") {
 				return new Response("missing", { status: 404, statusText: "Not Found" });
 			}
 			if (url === "https://registry.npmjs.org/@pk-nerdsaver-ai/pi-coding-agent/latest") {
@@ -57,7 +57,7 @@ describe("update release source", () => {
 
 		expect(release).toEqual({ tag: "v999.0.1", version: "999.0.1" });
 		expect(calls).toEqual([
-			"https://oh-my-pi.pkking.computer/version",
+			"https://oh-my-pk.pkking.computer/version",
 			"https://registry.npmjs.org/@pk-nerdsaver-ai/pi-coding-agent/latest",
 		]);
 	});

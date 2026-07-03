@@ -4253,30 +4253,19 @@ export const SETTINGS_SCHEMA = {
 
 	"skills.discoveryMode": {
 		type: "enum",
-		values: ["eager", "auto", "lazy"] as const,
+		values: ["lazy"] as const,
 		default: "lazy",
 		ui: {
 			tab: "tasks",
 			group: "Commands & Skills",
 			label: "Skill Prompt Injection",
 			description:
-				"How skill listings enter the system prompt. Lazy never lists them (the agent discovers matches on demand via skill://?q=...); auto lists them only while the catalog stays small; eager always lists every skill.",
+				"Skill descriptions are request-only to preserve context. The agent searches descriptions on demand with skill://?q=... and reads the selected skill explicitly.",
 			options: [
-				{
-					value: "eager",
-					label: "Eager",
-					description: "Always inject the full skill list into the system prompt.",
-				},
-				{
-					value: "auto",
-					label: "Auto",
-					description: "Inject the list only when few skills exist; large catalogs switch to on-demand discovery.",
-				},
 				{
 					value: "lazy",
 					label: "Lazy",
-					description:
-						"Never inject the list; the agent searches skill descriptions on demand with `skill://?q=<keywords>`.",
+					description: "Never inject skill descriptions; search on demand with `skill://?q=<keywords>`.",
 				},
 			],
 		},
@@ -5044,7 +5033,7 @@ export interface SkillsSettings {
 	ignoredSkills?: string[];
 	includeSkills?: string[];
 	disabledExtensions?: string[];
-	discoveryMode?: "eager" | "auto" | "lazy";
+	discoveryMode?: "lazy";
 }
 
 export interface CommitSettings {
