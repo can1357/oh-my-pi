@@ -1,5 +1,8 @@
 # Bundle Update Log
 
+## 2026-07-03
+* **Creation**: Added [Recent prompt markdown files](/concepts/recent-prompt-markdown-files.md) capturing the prompt markdown inventory observed in-session, including the absence of `type: prompt(s)` frontmatter matches.
+
 ## 2026-07-01
 * **Creation**: Added [Fork update channel](/concepts/fork-update-channel.md) documenting how updates and installers are routed to our fork.
 * **Creation**: Added [Launch agent slash command](/concepts/launch-agent-slash-command.md) documenting the new `/agent` slash command.
