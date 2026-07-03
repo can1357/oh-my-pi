@@ -110,6 +110,8 @@ const selectors: SelectorSpec[] = [
 		reason: "runtime token selecting legacy auth implementation",
 	},
 ];
+const selectorMatchers = selectors.map(selector => ({ ...selector, matcher: new RegExp(selector.pattern) }));
+const combinedSelectorPattern = selectors.map(selector => `(?:${selector.pattern})`).join("|");
 
 const started = performance.now();
 const selectorGlob = "packages/*/src/**/*.ts";
@@ -135,19 +137,28 @@ const selectorLedger: Array<{
 	skippedOversized: number;
 }> = [];
 
+const combinedResult = await grep({
+	pattern: combinedSelectorPattern,
+	path: corpusRoot,
+	glob: selectorGlob,
+	gitignore: true,
+	hidden: true,
+	maxCount: 100_000,
+	maxCountPerFile: 100,
+	mode: GrepOutputMode.Content,
+	maxColumns: 500,
+});
+const selectorStats = new Map<string, { filesWithMatches: Set<string>; totalMatches: number }>();
 for (const selector of selectors) {
-	const result = await grep({
-		pattern: selector.pattern,
-		path: corpusRoot,
-		glob: selectorGlob,
-		gitignore: true,
-		hidden: true,
-		maxCount: 100_000,
-		maxCountPerFile: 100,
-		mode: GrepOutputMode.Content,
-		maxColumns: 500,
-	});
-	for (const match of result.matches) {
+	selectorStats.set(selector.id, { filesWithMatches: new Set<string>(), totalMatches: 0 });
+}
+for (const match of combinedResult.matches) {
+	for (const selector of selectorMatchers) {
+		if (!selector.matcher.test(match.line)) continue;
+		const stats = selectorStats.get(selector.id);
+		if (!stats) continue;
+		stats.filesWithMatches.add(match.path);
+		stats.totalMatches += 1;
 		signals.push({
 			id: `sig_${signals.length.toString().padStart(5, "0")}`,
 			selectorId: selector.id,
@@ -158,15 +169,18 @@ for (const selector of selectors) {
 			reason: selector.reason,
 		});
 	}
+}
+for (const selector of selectors) {
+	const stats = selectorStats.get(selector.id);
 	selectorLedger.push({
 		id: selector.id,
 		type: selector.type,
-		filesSearched: result.filesSearched,
-		filesWithMatches: result.filesWithMatches,
-		totalMatches: result.totalMatches,
-		returnedMatches: result.matches.length,
-		limitReached: result.limitReached === true,
-		skippedOversized: result.skippedOversized ?? 0,
+		filesSearched: combinedResult.filesSearched,
+		filesWithMatches: stats?.filesWithMatches.size ?? 0,
+		totalMatches: stats?.totalMatches ?? 0,
+		returnedMatches: stats?.totalMatches ?? 0,
+		limitReached: combinedResult.limitReached === true,
+		skippedOversized: combinedResult.skippedOversized ?? 0,
 	});
 }
 
