@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { type Skill as CapabilitySkill, skillCapability } from "@pk-nerdsaver-ai/pi-coding-agent/capability/skill";
 import { getCapability } from "@pk-nerdsaver-ai/pi-coding-agent/discovery";
 import { loadSkills, loadSkillsFromDir, type Skill } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/skills";
+import { getAgentDir, setAgentDir } from "@pk-nerdsaver-ai/pi-utils/dirs";
 
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");
@@ -45,6 +46,29 @@ async function writeSkill(root: string, name: string, description: string): Prom
 		path.join(skillDir, "SKILL.md"),
 		["---", `description: ${description}`, "---", "", `# ${name}`].join("\n"),
 	);
+}
+
+/**
+ * Run `fn` with home and the agent dir redirected to a fresh temp location so
+ * the developer's real `~/.omp` (including unconditional managed skills) can
+ * never leak into assertions. Restores both seams in a finally, per-test scoped
+ * (full-suite safe). Mirrors the pattern in autolearn-discovery.test.ts.
+ */
+async function withIsolatedHome<T>(fn: (tempCwd: string) => Promise<T>): Promise<T> {
+	const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-hermetic-home-"));
+	// cwd lives under the fake home so the project ancestor walk stays bounded.
+	const tempCwd = path.join(tempHome, "work");
+	await fs.mkdir(tempCwd, { recursive: true });
+	const originalAgentDir = getAgentDir();
+	const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempHome);
+	setAgentDir(path.join(tempHome, ".omp", "agent"));
+	try {
+		return await fn(tempCwd);
+	} finally {
+		homedirSpy.mockRestore();
+		setAgentDir(originalAgentDir);
+		await fs.rm(tempHome, { recursive: true, force: true });
+	}
 }
 
 describe("skills", () => {
@@ -161,16 +185,27 @@ describe("skills", () => {
 
 	describe("loadSkills with options", () => {
 		it("should load from customDirectories only when built-ins disabled", async () => {
-			const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS, customDirectories: [fixturesDir] });
-			expect(skills.length).toBeGreaterThan(0);
-			// Custom directory skills have source "custom:user"
-			expect(skills.every(s => s.source.startsWith("custom"))).toBe(true);
+			await withIsolatedHome(async tempCwd => {
+				const { skills } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					cwd: tempCwd,
+					customDirectories: [fixturesDir],
+				});
+				expect(skills.length).toBeGreaterThan(0);
+				// Custom directory skills have source "custom:user"
+				expect(skills.every(s => s.source.startsWith("custom"))).toBe(true);
+			});
 		});
 
 		it("should return customDirectory skills sorted by name (case-insensitive)", async () => {
-			const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS, customDirectories: [fixturesDir] });
-
-			expect(skills.map(s => s.name)).toEqual(expectedFixtureSkillOrder);
+			await withIsolatedHome(async tempCwd => {
+				const { skills } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					cwd: tempCwd,
+					customDirectories: [fixturesDir],
+				});
+				expect(skills.map(s => s.name)).toEqual(expectedFixtureSkillOrder);
+			});
 		});
 
 		it("should keep user Claude skills when project .claude/skills is missing", async () => {
@@ -431,8 +466,10 @@ description: Skill loaded from a tilde-expanded custom directory.
 	});
 
 	it("should return empty when all sources disabled and no custom dirs", async () => {
-		const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS });
-		expect(skills).toHaveLength(0);
+		await withIsolatedHome(async tempCwd => {
+			const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS, cwd: tempCwd });
+			expect(skills).toHaveLength(0);
+		});
 	});
 
 	it("should filter skills with includeSkills glob patterns", async () => {
