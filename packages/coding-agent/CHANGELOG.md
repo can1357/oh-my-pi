@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added bundled `mr-worker`, `mr-reducer`, and `tot-reasoner` agents implementing Agentic MapReduce map/reduce phases and Tree-of-Thoughts reasoning as builtin task-agent types.
+- Added an embedded builtin-skills provider shipping `agentic-mapreduce`, `tree-of-thoughts`, and `promptbtw-handoff` skills compiled into the binary, served in-memory via `skill://` and `/skill:` with lowest-priority name override semantics and a `skills.enableBuiltinSkills` toggle.
+- Added prompt-btw subagent handoff mode to `/btw`: invoking "use promptbtw for subagent handoff: <raw task>" returns a structured SUBAGENT HANDOFF PROMPT instead of an answer.
+
 ## [16.2.5] - 2026-07-02
 
 ### Added
