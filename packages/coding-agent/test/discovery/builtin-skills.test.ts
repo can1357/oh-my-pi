@@ -32,6 +32,22 @@ import "@pk-nerdsaver-ai/pi-coding-agent/discovery";
 
 const BUILTIN_NAMES = ["agentic-mapreduce", "promptbtw-handoff", "tree-of-thoughts"] as const;
 
+/**
+ * Hermetic loadSkills options: disable every filesystem-backed source so real
+ * user/home skills on the machine cannot leak into assertions. Builtin
+ * (embedded) skills stay enabled — they are what these tests defend.
+ */
+const ONLY_BUILTIN_SKILLS = {
+	enableBuiltinSkills: true,
+	enableCodexUser: false,
+	enableClaudeUser: false,
+	enableClaudeProject: false,
+	enablePiUser: false,
+	enablePiProject: false,
+	enableAgentsUser: false,
+	enableAgentsProject: false,
+} as const;
+
 function builtinProvider() {
 	const cap = getCapability(skillCapability.id);
 	if (!cap) throw new Error("skills capability missing");
@@ -107,7 +123,7 @@ describe("loadSkills with builtin skills", () => {
 	it("includes all three builtin skills with embeddedContent set and hide falsy", async () => {
 		const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-test-"));
 		try {
-			const { skills } = await loadSkills({ cwd: tmpDir });
+			const { skills } = await loadSkills({ cwd: tmpDir, ...ONLY_BUILTIN_SKILLS });
 			for (const name of BUILTIN_NAMES) {
 				const skill = skills.find(s => s.name === name);
 				expect(skill, `missing skill: ${name}`).toBeDefined();
@@ -136,6 +152,7 @@ describe("loadSkills with builtin skills", () => {
 		try {
 			const { skills } = await loadSkills({
 				cwd: tmpDir,
+				...ONLY_BUILTIN_SKILLS,
 				disabledExtensions: ["skill:agentic-mapreduce"],
 			});
 			expect(skills.find(s => s.name === "agentic-mapreduce")).toBeUndefined();
@@ -158,7 +175,7 @@ describe("skill:// protocol for embedded skills", () => {
 	it("resolves skill://tree-of-thoughts to embedded markdown without disk read", async () => {
 		const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-protocol-"));
 		try {
-			const { skills } = await loadSkills({ cwd: tmpDir });
+			const { skills } = await loadSkills({ cwd: tmpDir, ...ONLY_BUILTIN_SKILLS });
 			setActiveSkills(skills);
 
 			const tot = skills.find(s => s.name === "tree-of-thoughts");
@@ -178,7 +195,7 @@ describe("skill:// protocol for embedded skills", () => {
 	it("resolves skill://agentic-mapreduce embedded content", async () => {
 		const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-protocol2-"));
 		try {
-			const { skills } = await loadSkills({ cwd: tmpDir });
+			const { skills } = await loadSkills({ cwd: tmpDir, ...ONLY_BUILTIN_SKILLS });
 			setActiveSkills(skills);
 
 			const skill = skills.find(s => s.name === "agentic-mapreduce");
@@ -193,7 +210,7 @@ describe("skill:// protocol for embedded skills", () => {
 	it("resolves skill://promptbtw-handoff embedded content", async () => {
 		const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-protocol3-"));
 		try {
-			const { skills } = await loadSkills({ cwd: tmpDir });
+			const { skills } = await loadSkills({ cwd: tmpDir, ...ONLY_BUILTIN_SKILLS });
 			setActiveSkills(skills);
 
 			const skill = skills.find(s => s.name === "promptbtw-handoff");
@@ -208,7 +225,7 @@ describe("skill:// protocol for embedded skills", () => {
 	it("skill://tree-of-thoughts/anything.md throws 'no auxiliary files' error", async () => {
 		const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-protocol4-"));
 		try {
-			const { skills } = await loadSkills({ cwd: tmpDir });
+			const { skills } = await loadSkills({ cwd: tmpDir, ...ONLY_BUILTIN_SKILLS });
 			setActiveSkills(skills);
 
 			await expect(InternalUrlRouter.instance().resolve("skill://tree-of-thoughts/anything.md")).rejects.toThrow(
@@ -230,7 +247,7 @@ describe("resolveSkillUrlToPath for embedded skills", () => {
 	it("throws ToolError for embedded skill with a suggestion to use read tool", async () => {
 		const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-bash-"));
 		try {
-			const { skills } = await loadSkills({ cwd: tmpDir });
+			const { skills } = await loadSkills({ cwd: tmpDir, ...ONLY_BUILTIN_SKILLS });
 			setActiveSkills(skills);
 
 			const tot = skills.find(s => s.name === "tree-of-thoughts");
