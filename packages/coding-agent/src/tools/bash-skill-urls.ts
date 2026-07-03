@@ -60,6 +60,12 @@ export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): st
 		const availableStr = available.length > 0 ? available.join(", ") : "none";
 		throw new ToolError(`Unknown skill: ${rawSkillSegment}. Available: ${availableStr}`);
 	}
+	if (skill.embeddedContent !== undefined) {
+		throw new ToolError(
+			`skill:// URLs cannot be used in bash commands for embedded builtin skills ` +
+				`(no filesystem path). Use the read tool with skill://${skill.name} instead.`,
+		);
+	}
 
 	// Combine any colon suffix (line range like ":1-5") with the path segment
 	const rawPath = (parsed[2] ?? "") + (suffix ? `/${suffix}` : "");

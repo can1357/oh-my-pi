@@ -6,7 +6,7 @@ import {
 	MANAGED_SKILLS_PROVIDER_ID,
 	sanitizeManagedDescription,
 } from "../autolearn/managed-skills";
-import { skillCapability } from "../capability/skill";
+import { BUILTIN_SKILLS_PROVIDER_ID, skillCapability } from "../capability/skill";
 import type { SourceMeta } from "../capability/types";
 import type { SkillsSettings } from "../config/settings";
 import { type Skill as CapabilitySkill, loadCapability } from "../discovery";
@@ -27,6 +27,11 @@ export interface Skill {
 	hide?: boolean;
 	/** Source metadata for display */
 	_source?: SourceMeta;
+	/**
+	 * Raw markdown content for embedded builtin skills (those without a file on disk).
+	 * When present, supersedes reading `filePath` from disk.
+	 */
+	embeddedContent?: string;
 }
 
 export interface SkillWarning {
@@ -123,6 +128,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		cwd = getProjectDir(),
 		enabled = true,
 		projectOnly = false,
+		enableBuiltinSkills = true,
 		enableCodexUser = true,
 		enableClaudeUser = true,
 		enableClaudeProject = true,
@@ -158,6 +164,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		// — third-party CLI toggles must never silently hide them (cf. #2401). The
 		// master `enabled` flag above still gates them.
 		if (provider === MANAGED_SKILLS_PROVIDER_ID) return true;
+		// Bundled builtin skills are OMP-native too; gated only by their own toggle.
+		if (provider === BUILTIN_SKILLS_PROVIDER_ID) return enableBuiltinSkills;
 		if (provider === "codex" && level === "user") return enableCodexUser;
 		if (provider === "claude" && level === "user") return enableClaudeUser;
 		if (provider === "claude" && level === "project") return enableClaudeProject;
@@ -230,6 +238,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 				message: `name collision: "${capSkill.name}" already loaded from ${existing.filePath}, skipping this one`,
 			});
 		} else {
+			const isBuiltin = capSkill._source.provider === BUILTIN_SKILLS_PROVIDER_ID;
 			skillMap.set(capSkill.name, {
 				name: capSkill.name,
 				description: typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
@@ -238,6 +247,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 				source: `${capSkill._source.provider}:${capSkill.level}`,
 				hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
 				_source: capSkill._source,
+				...(isBuiltin && { embeddedContent: capSkill.content }),
 			});
 			realPathSet.add(resolvedPath);
 		}
@@ -390,11 +400,11 @@ export function getSkillSlashCommandName(skill: Pick<Skill, "name">): string {
 }
 
 export async function buildSkillPromptMessage(
-	skill: Pick<Skill, "name" | "filePath">,
+	skill: Pick<Skill, "name" | "filePath" | "embeddedContent">,
 	args: string,
 ): Promise<BuiltSkillPromptMessage> {
-	const content = await Bun.file(skill.filePath).text();
-	const body = content.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
+	const rawContent = skill.embeddedContent ?? (await Bun.file(skill.filePath).text());
+	const body = rawContent.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
 	const metaLines = [`Skill: ${skill.filePath}`];
 	const trimmedArgs = args.trim();
 	if (trimmedArgs) {

@@ -59,7 +59,7 @@ Workers run independently; each starts from a fresh, focused context.
 
 ## Stage 4 — Reduce (agentic)
 
-Spawn ONE `mr-reducer` with only the outputs of workers that produced findings (zero-finding workers are ignored — but verify their coverage accounting first). The reducer dedupes, triages P0/P1/P2, and composes **cross-shard chains** no worker could see. Pass worker outputs via `local://` file, never re-inlined transcripts.
+Spawn ONE `mr-reducer` with only the outputs of workers that produced findings (zero-finding workers are ignored — but verify their coverage accounting first). The reducer dedupes, triages P0/P1/P2, and composes **cross-shard chains** no worker could see. Pass worker outputs as compressed structured results (a scratch file when writes are allowed, otherwise inlined) — never re-inlined transcripts.
 
 ## Optional Stage 5 — Verify
 
@@ -67,7 +67,7 @@ For serious findings, fan out once more: one sandboxed session per finding attem
 
 ## Incremental re-runs
 
-Persisted selectors + `git diff --name-only <last-scanned-commit>` → re-shard only changed files. You pay for the diff, not the repo.
+When selectors were persisted, `git diff --name-only <last-scanned-commit>` → re-shard only changed files. You pay for the diff, not the repo. (Without persisted selectors, a re-run repeats the Plan stage first.)
 
 ## When NOT to use this
 

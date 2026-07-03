@@ -5030,6 +5030,7 @@ export interface SkillsSettings {
 	enabled?: boolean;
 	projectOnly?: boolean;
 	enableSkillCommands?: boolean;
+	enableBuiltinSkills?: boolean;
 	enableCodexUser?: boolean;
 	enableClaudeUser?: boolean;
 	enableClaudeProject?: boolean;

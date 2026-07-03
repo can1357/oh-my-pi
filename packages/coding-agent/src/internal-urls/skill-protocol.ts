@@ -186,6 +186,11 @@ export class SkillProtocolHandler implements ProtocolHandler {
 		const urlPath = url.pathname;
 		const hasRelativePath = urlPath && urlPath !== "/" && urlPath !== "";
 
+		// Embedded skills have no auxiliary files — reject any sub-path immediately.
+		if (hasRelativePath && skill.embeddedContent !== undefined) {
+			throw new Error("embedded builtin skill has no auxiliary files");
+		}
+
 		if (hasRelativePath) {
 			const relativePath = decodeURIComponent(urlPath.slice(1));
 			validateRelativePath(relativePath);
@@ -198,6 +203,18 @@ export class SkillProtocolHandler implements ProtocolHandler {
 			}
 		} else {
 			targetPath = skill.filePath;
+		}
+
+		// Serve embedded content directly when no disk path is available.
+		if (skill.embeddedContent !== undefined) {
+			return {
+				url: url.href,
+				content: skill.embeddedContent,
+				contentType: "text/markdown",
+				size: Buffer.byteLength(skill.embeddedContent, "utf-8"),
+				sourcePath: skill.filePath,
+				notes: [],
+			};
 		}
 
 		const file = Bun.file(targetPath);

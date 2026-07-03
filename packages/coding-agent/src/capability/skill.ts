@@ -61,3 +61,6 @@ export const skillCapability = defineCapability<Skill>({
 		return undefined;
 	},
 });
+
+/** Provider ID for the bundled builtin-skills provider. */
+export const BUILTIN_SKILLS_PROVIDER_ID = "builtin-skills" as const;

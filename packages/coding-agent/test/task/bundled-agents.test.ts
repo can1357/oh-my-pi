@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { loadBundledAgents, clearBundledAgentsCache } from "@pk-nerdsaver-ai/pi-coding-agent/task/agents";
+import { clearBundledAgentsCache, loadBundledAgents } from "@pk-nerdsaver-ai/pi-coding-agent/task/agents";
 import type { AgentDefinition } from "@pk-nerdsaver-ai/pi-coding-agent/task/types";
 
 describe("bundled agents contract", () => {
@@ -18,7 +18,10 @@ describe("bundled agents contract", () => {
 	it("loadBundledAgents includes the three new bundled agents", () => {
 		const agents = loadBundledAgents();
 		for (const name of NEW_AGENTS) {
-			expect(agents.some(a => a.name === name), `expected "${name}" to be in bundled agents`).toBe(true);
+			expect(
+				agents.some(a => a.name === name),
+				`expected "${name}" to be in bundled agents`,
+			).toBe(true);
 		}
 	});
 
