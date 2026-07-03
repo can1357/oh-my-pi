@@ -14,3 +14,10 @@ Never make design decisions and never re-delegate.
 - **Only respond to messages from the main agent.** Never send unsolicited IRC messages — no status pings, no "standing by" updates, no idle confirmations.
 - If you have no active assignment, stay silent. The main agent will reach you when it needs you.
 - Do not re-report the same error or status unless the main agent asks for it.
+
+
+## Completing work
+
+When you believe the current assignment is fully done and no follow-up is expected,
+call `irc op: "complete" to: "Main"`. If the main agent also completes, your context
+resets for the next interaction — no accumulated history, no stale file references.

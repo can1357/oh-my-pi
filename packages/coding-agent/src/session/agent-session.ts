@@ -5187,6 +5187,21 @@ export class AgentSession {
 		return deobfuscateSessionContext(this.sessionManager.buildSessionContext(), this.#obfuscator);
 	}
 
+	async resetToWarmPrefix(): Promise<void> {
+		const sessionContext = this.buildDisplaySessionContext();
+		const firstUserIndex = sessionContext.messages.findIndex(message => message.role === "user");
+		const filteredMessages =
+			firstUserIndex === -1 ? sessionContext.messages : sessionContext.messages.slice(0, firstUserIndex + 1);
+		this.agent.replaceMessages(filteredMessages);
+		this.#pendingNextTurnMessages = [];
+		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.#pendingIrcAsides = [];
+		this.#fusionToolFailureStreak = 0;
+		this.#todoReminderCount = 0;
+		this.#todoReminderAwaitingProgress = false;
+		this.#retryAttempt = 0;
+		logger.debug("Sidekick context reset to warm prefix");
+	}
 	/**
 	 * Full-history transcript for TUI display: every path entry in
 	 * chronological order with compactions rendered inline at the point they

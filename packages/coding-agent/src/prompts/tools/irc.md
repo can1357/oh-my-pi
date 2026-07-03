@@ -7,6 +7,7 @@ Send/receive short text messages between agents in this process.
 - Messaging an `idle`/`parked` peer wakes it — no separate revive call.
 - `op: "wait"` — block for a message (optionally only `from` one peer); consumes + returns it. Timeout = clean "no message", not an error.
 - `op: "inbox"` — drain pending messages without blocking.
+- `op: "complete"` — signal that work with `to` is done. When both peers complete each other, a Fusion sidekick peer resets its context for the next interaction.
 - Replies arrive only when the recipient sends one. For peer background, `read` `history://<id>`, don't interrogate.
 </instruction>
 
@@ -30,4 +31,5 @@ Applies to sending + replying.
 - **Stay terse.** One question per send; share files via `local://`/`memory://`/`artifact://` URLs, never pasted blobs.
 - **Address peers by exact id** from `op: "list"` (e.g. `AuthLoader`, `Main`). NEVER invent friendly names.
 - **NEVER IRC what a tool answers.** A `read`, grep, or build resolves it? Do that first.
+- Use `complete` only when the current interaction is fully done and no follow-up is expected; it requires `to` and never broadcasts.
 </etiquette>

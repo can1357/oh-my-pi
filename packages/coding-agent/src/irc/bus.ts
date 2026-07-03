@@ -65,6 +65,7 @@ export class IrcBus {
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
+	readonly #completionFlags = new Map<string, Set<string>>();
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
@@ -235,6 +236,28 @@ export class IrcBus {
 		return this.#mailboxes.get(agentId)?.length ?? 0;
 	}
 
+	tryComplete(agentId: string, targetId: string): boolean {
+		const pairId = this.#completionPairId(agentId, targetId);
+		let completed = this.#completionFlags.get(pairId);
+		if (!completed) {
+			completed = new Set<string>();
+			this.#completionFlags.set(pairId, completed);
+		}
+		completed.add(agentId);
+		if (completed.has(agentId) && completed.has(targetId)) {
+			this.#completionFlags.delete(pairId);
+			return true;
+		}
+		return false;
+	}
+
+	clearCompletion(agentId: string, targetId: string): void {
+		this.#completionFlags.delete(this.#completionPairId(agentId, targetId));
+	}
+
+	#completionPairId(agentId: string, targetId: string): string {
+		return [agentId, targetId].sort().join(":");
+	}
 	#enqueue(message: IrcMessage): void {
 		let mailbox = this.#mailboxes.get(message.to);
 		if (!mailbox) {

@@ -55,8 +55,8 @@ export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
 }
 
 const ircSchema = type({
-	op: type("'send' | 'wait' | 'inbox' | 'list'").describe("irc operation"),
-	"to?": type("string").describe('send: recipient agent id or "all"'),
+	op: type("'send' | 'wait' | 'inbox' | 'list' | 'complete'").describe("irc operation"),
+	"to?": type("string").describe('send/complete: recipient agent id or "all"'),
 	"message?": type("string").describe("send: message body"),
 	"replyTo?": type("string").describe("send: message id being answered"),
 	"await?": type("boolean").describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
@@ -84,7 +84,7 @@ function rosterColor(color: string | undefined): ThemeColor | undefined {
 }
 
 export interface IrcDetails {
-	op: "send" | "wait" | "inbox" | "list";
+	op: "send" | "wait" | "inbox" | "list" | "complete";
 	from?: string;
 	to?: string;
 	receipts?: IrcDeliveryReceipt[];
@@ -146,6 +146,10 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 				message: "About to refactor src/server/middleware/*. Anyone already in there?",
 			},
 		},
+		{
+			caption: "Mark an interaction complete",
+			call: { op: "complete", to: "Main" },
+		},
 	];
 	readonly loadMode = "discoverable";
 	constructor(private readonly session: ToolSession) {
@@ -183,6 +187,8 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 				return this.#executeWait(senderId, params, signal);
 			case "inbox":
 				return this.#executeInbox(senderId, params);
+			case "complete":
+				return this.#executeComplete(registry, senderId, params);
 			default:
 				return errorResult("Unknown irc op.", { op: params.op });
 		}
@@ -362,6 +368,64 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 		}
 	}
 
+	async #executeComplete(
+		registry: AgentRegistry,
+		senderId: string,
+		params: IrcParams,
+	): Promise<AgentToolResult<IrcDetails>> {
+		const to = params.to?.trim();
+		if (!to) {
+			return errorResult('`to` is required for op="complete".', { op: "complete", from: senderId });
+		}
+		if (to === "all") {
+			return errorResult('`to:"all"` is invalid for op="complete".', { op: "complete", from: senderId, to });
+		}
+		if (to === senderId) {
+			return errorResult("Cannot complete an IRC interaction with yourself.", {
+				op: "complete",
+				from: senderId,
+				to,
+			});
+		}
+
+		const targetRef = registry.get(to);
+		if (!targetRef || targetRef.status === "aborted" || targetRef.kind === "advisor") {
+			return errorResult(`Unknown or unmessageable peer "${to}".`, { op: "complete", from: senderId, to });
+		}
+
+		const bothComplete = IrcBus.global().tryComplete(senderId, to);
+		if (!bothComplete) {
+			return {
+				content: [{ type: "text", text: `Completion signaled. Waiting for ${to} to also complete.` }],
+				details: { op: "complete", from: senderId, to },
+			};
+		}
+
+		const senderRef = registry.get(senderId);
+		const targetIsSidekick =
+			targetRef.session?.sessionManager.getEntries().some(entry => {
+				return entry.type === "session_init" && entry.fusionSidekick === true;
+			}) === true;
+		const senderIsSidekick =
+			senderRef?.session?.sessionManager.getEntries().some(entry => {
+				return entry.type === "session_init" && entry.fusionSidekick === true;
+			}) === true;
+		if (targetIsSidekick) {
+			await targetRef.session?.resetToWarmPrefix();
+		} else if (senderIsSidekick) {
+			const sidekickSession = senderRef?.session;
+			if (sidekickSession) {
+				setImmediate(() => {
+					void sidekickSession.resetToWarmPrefix();
+				});
+			}
+		}
+
+		return {
+			content: [{ type: "text", text: "Both sides agreed — sidekick context reset for next interaction." }],
+			details: { op: "complete", from: senderId, to },
+		};
+	}
 	async #executeWait(senderId: string, params: IrcParams, signal?: AbortSignal): Promise<AgentToolResult<IrcDetails>> {
 		const from = params.from?.trim() || undefined;
 		const timeoutMs = this.#resolveTimeoutMs(params);
