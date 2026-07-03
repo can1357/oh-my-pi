@@ -2,7 +2,7 @@
 import * as path from "node:path";
 /**
  * Build release binaries and publish them to the PRIVATE Hugging Face repo that
- * backs the install endpoint (oh-my-pi.pkking.computer) — no GitHub Actions, no
+ * backs the install endpoint (oh-my-pk.pkking.computer) — no GitHub Actions, no
  * GitHub Releases, no billing.
  *
  * Layout written to the HF repo:
@@ -255,7 +255,7 @@ async function main(): Promise<void> {
 		await $`hf upload ${hfRepo} ${versionFile} VERSION --repo-type ${hfRepoType}`.cwd(repoRoot);
 		const note = missing.length > 0 ? ` (forced; still missing ${missing.join(", ")})` : "";
 		console.log(`\n✓ Published ${tag} → ${hfRepo} and flipped VERSION${note}.`);
-		console.log(`  Installs via oh-my-pi.pkking.computer now resolve ${tag}.`);
+		console.log(`  Installs via oh-my-pk.pkking.computer now resolve ${tag}.`);
 	} else {
 		const current = await currentPublishedVersion();
 		console.log(`\n✓ Uploaded ${built.length} binary/binaries under ${tag}/ on ${hfRepo}.`);

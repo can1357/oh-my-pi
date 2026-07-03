@@ -13,14 +13,14 @@ To ensure the fork receives its updates directly as they are pushed, the CLI upd
 ## Distribution endpoint
 
 The canonical distribution endpoint is:
-- **Base URL (`DIST_BASE`)**: `https://oh-my-pi.pkking.computer` (Overridable via `OMP_DIST_BASE` environment variable)
+- **Base URL (`DIST_BASE`)**: `https://oh-my-pk.pkking.computer` (Overridable via `OMP_DIST_BASE` environment variable)
 - **Version Endpoint**: `GET /version` -> returns the latest tag (e.g., `v16.1.11`)
 - **Binary Endpoint**: `GET /bin/vX.Y.Z/<binary-name>` -> downloads the platform-specific compiled binary
 
 ## Update resolution policy
 
 When `omp update` is run:
-1. **Endpoint check (Primary)**: The CLI queries `https://oh-my-pi.pkking.computer/version` to get the latest tag.
+1. **Endpoint check (Primary)**: The CLI queries `https://oh-my-pk.pkking.computer/version` to get the latest tag.
 2. **Registry check (Fallback)**: If the distribution endpoint is unreachable, the CLI falls back to querying npm registry metadata at `https://registry.npmjs.org/@pk-nerdsaver-ai/pi-coding-agent/latest`.
    
 This dual-source strategy ensures pushed binary builds are visible immediately once the distribution `VERSION` pointer flips, while package-manager installs remain resilient to distribution outages by falling back to npm.

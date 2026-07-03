@@ -20,7 +20,7 @@ import { getDistVersion, getLatestRelease, type ReleaseInfo } from "./update-rel
  * `${DIST_BASE}/bin/<tag>/<name>` and the current tag at `${DIST_BASE}/version`.
  * Override with `OMP_DIST_BASE`. This fork publishes no GitHub Releases.
  */
-const DIST_BASE = Bun.env.OMP_DIST_BASE ?? "https://oh-my-pi.pkking.computer";
+const DIST_BASE = Bun.env.OMP_DIST_BASE ?? "https://oh-my-pk.pkking.computer";
 const PACKAGE = "@pk-nerdsaver-ai/pi-coding-agent";
 const HOMEBREW_FORMULA = "kingkillery/tap/omp";
 const MISE_TOOL = "github:kingkillery/oh-my-pi";

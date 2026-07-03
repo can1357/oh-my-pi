@@ -2,7 +2,7 @@
 set -e
 
 # oh-my-pk installer
-# Usage: curl -fsSL https://oh-my-pi.pkking.computer/install.sh | sh
+# Usage: curl -fsSL https://oh-my-pk.pkking.computer/install.sh | sh
 #
 # Options:
 #   --source       Install via bun (installs bun if needed)
@@ -11,7 +11,7 @@ set -e
 #   -r <ref>       Shorthand for --ref
 
 REPO="kingkillery/oh-my-pi"
-DIST_BASE="${OMP_DIST_BASE:-https://oh-my-pi.pkking.computer}"
+DIST_BASE="${OMP_DIST_BASE:-https://oh-my-pk.pkking.computer}"
 PACKAGE="@pk-nerdsaver-ai/pi-coding-agent"
 INSTALL_DIR="${PI_INSTALL_DIR:-$HOME/.local/bin}"
 MIN_BUN_VERSION="1.3.14"

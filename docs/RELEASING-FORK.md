@@ -17,7 +17,7 @@ pushed; here that never runs, so releasing is a **local** procedure.
 ## Distribution model
 
 - Installers (`scripts/install.ps1`, `scripts/install.sh`) download the compiled
-  `omp` binary from a Cloudflare Worker (`oh-my-pi.pkking.computer`) that serves a
+  `omp` binary from a Cloudflare Worker (`oh-my-pk.pkking.computer`) that serves a
   **private Hugging Face repo** (`pkkidking/oh-my-pi-binaries`, override with
   `HF_REPO`).
 - The repo layout is `VERSION` (a single line, e.g. `v16.1.10`) plus
