@@ -216,6 +216,13 @@ async function spawnFusionSidekick(host: FusionSidekickHost, sidekickModel: stri
 			detached: true,
 			fusionSidekick: true,
 			modelOverride: sidekickModel,
+			outputSchema: {
+				type: "object",
+				properties: {
+					ready: { type: "boolean", const: true },
+				},
+				required: ["ready"],
+			},
 			parentActiveModelPattern: session.model ? formatModelString(session.model as Model<Api>) : undefined,
 			thinkingLevel: ThinkingLevel.Inherit,
 			taskDepth: 0,
