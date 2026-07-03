@@ -1,0 +1,104 @@
+{
+  "profile": "data-package",
+  "name": "agentic-llm-scaling-knowledge-pack",
+  "title": "Agentic LLM Scaling Knowledge Pack",
+  "description": "A curated knowledge pack covering two research areas in scaling LLM-based systems: (1) MapReduce-style agentic workflows, including Cognition's Devin Security Swarm and related arXiv literature (A-MapReduce, LLM x MapReduce V1-V3, ToM, Agentics 2.0, Scepsy), and (2) Tree-of-Thoughts reasoning scaling, including the original ToT framework, Graph of Thoughts, and Path-of-Thoughts, with a comparative analysis and hybrid design recommendation.",
+  "version": "1.0.0",
+  "created": "2026-07-03T06:51:51.805544+00:00",
+  "licenses": [
+    {
+      "name": "CC-BY-4.0",
+      "title": "Creative Commons Attribution 4.0",
+      "path": "https://creativecommons.org/licenses/by/4.0/"
+    }
+  ],
+  "contributors": [
+    {
+      "title": "Perplexity AI",
+      "role": "author"
+    }
+  ],
+  "keywords": [
+    "agentic AI",
+    "MapReduce",
+    "Tree-of-Thoughts",
+    "LLM workflows",
+    "Cognition Devin",
+    "arXiv research",
+    "multi-agent systems"
+  ],
+  "sources": [
+    {
+      "title": "Devin: Agentic MapReduce",
+      "path": "https://devin.ai/blog/agentic-map-reduce"
+    },
+    {
+      "title": "Cognition: Introducing Devin Security Swarm",
+      "path": "https://cognition.com/blog/introducing-devin-security-swarm"
+    },
+    {
+      "title": "A-MapReduce (arXiv:2602.01331)",
+      "path": "https://arxiv.org/abs/2602.01331"
+    },
+    {
+      "title": "LLM x MapReduce-V3 (arXiv:2510.10890)",
+      "path": "https://arxiv.org/abs/2510.10890"
+    },
+    {
+      "title": "LLM x MapReduce-V2 (arXiv:2504.05732)",
+      "path": "https://arxiv.org/html/2504.05732v2"
+    },
+    {
+      "title": "LLM x MapReduce V1 (arXiv:2410.09342)",
+      "path": "https://arxiv.org/html/2410.09342v1"
+    },
+    {
+      "title": "ToM: Tree-oriented MapReduce (arXiv:2511.00489)",
+      "path": "https://arxiv.org/abs/2511.00489"
+    },
+    {
+      "title": "Agentics 2.0 (arXiv:2603.04241)",
+      "path": "https://arxiv.org/abs/2603.04241"
+    },
+    {
+      "title": "Scepsy (arXiv:2604.15186)",
+      "path": "https://arxiv.org/abs/2604.15186"
+    },
+    {
+      "title": "Tree of Thoughts (arXiv:2305.10601)",
+      "path": "https://arxiv.org/abs/2305.10601"
+    },
+    {
+      "title": "Graph of Thoughts (arXiv:2308.09687)",
+      "path": "https://huggingface.co/papers/2308.09687"
+    },
+    {
+      "title": "Path-of-Thoughts (arXiv:2412.17963)",
+      "path": "https://arxiv.org/html/2412.17963v1"
+    }
+  ],
+  "resources": [
+    {
+      "name": "agentic-mapreduce-spec",
+      "path": "agentic_mapreduce_spec.md",
+      "title": "Full technical spec on Cognition's Agentic MapReduce (Devin Security Swarm) and related arXiv research on MapReduce-style LLM workflows (A-MapReduce, LLM\u00d7MapReduce V1-V3, ToM, Agentics 2",
+      "description": "Full technical spec on Cognition's Agentic MapReduce (Devin Security Swarm) and related arXiv research on MapReduce-style LLM workflows (A-MapReduce, LLM\u00d7MapReduce V1-V3, ToM, Agentics 2.0, Scepsy).",
+      "format": "md",
+      "mediatype": "text/markdown",
+      "encoding": "utf-8",
+      "bytes": 25686,
+      "hash": "sha256:78a7ba09b30a342c7c67263824aa58e519c249a5f76c19bce4142f41de006cc3"
+    },
+    {
+      "name": "scaling-llm-reasoning-spec",
+      "path": "scaling_llm_reasoning_spec.md",
+      "title": "Dual technical spec comparing MapReduce-style LLM workflows against Tree-of-Thoughts scaling (ToT, Graph of Thoughts, Path-of-Thoughts), including architecture, cost models, failure modes, and hybrid design recommendations",
+      "description": "Dual technical spec comparing MapReduce-style LLM workflows against Tree-of-Thoughts scaling (ToT, Graph of Thoughts, Path-of-Thoughts), including architecture, cost models, failure modes, and hybrid design recommendations.",
+      "format": "md",
+      "mediatype": "text/markdown",
+      "encoding": "utf-8",
+      "bytes": 28111,
+      "hash": "sha256:e3904975424d77c03ed3b4528452efeeb0011700085ac7c82d18b760e00a50c7"
+    }
+  ]
+}
