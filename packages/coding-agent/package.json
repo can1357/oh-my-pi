@@ -384,6 +384,14 @@
 			"types": "./src/lsp/clients/*.ts",
 			"import": "./src/lsp/clients/*.ts"
 		},
+		"./mapreduce": {
+			"types": "./src/mapreduce/index.ts",
+			"import": "./src/mapreduce/index.ts"
+		},
+		"./mapreduce/*": {
+			"types": "./src/mapreduce/*.ts",
+			"import": "./src/mapreduce/*.ts"
+		},
 		"./mcp": {
 			"types": "./src/mcp/index.ts",
 			"import": "./src/mcp/index.ts"

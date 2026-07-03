@@ -92,7 +92,12 @@ export class Semaphore {
 	#queue: Array<() => void> = [];
 
 	constructor(max: number) {
-		this.#max = Math.max(1, max);
+		this.#max =
+			max <= 0 || max === Number.POSITIVE_INFINITY
+				? Number.POSITIVE_INFINITY
+				: Number.isFinite(max)
+					? Math.max(1, Math.floor(max))
+					: 1;
 	}
 
 	async acquire(): Promise<void> {

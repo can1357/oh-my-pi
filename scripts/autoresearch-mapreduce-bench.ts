@@ -2,29 +2,17 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
-import { GrepOutputMode, grep } from "@pk-nerdsaver-ai/pi-natives";
+import {
+	type LexicalSelectorSpec,
+	runLexicalSelectors,
+	type SelectorSignal,
+	selectorLedgerComplete,
+} from "@pk-nerdsaver-ai/pi-coding-agent/mapreduce";
 
 interface ExpectedSignal {
 	file: string;
 	selectorId: string;
 	evidence: string;
-}
-
-interface SelectorSpec {
-	id: string;
-	type: "lexical";
-	pattern: string;
-	reason: string;
-}
-
-interface SignalRecord {
-	id: string;
-	selectorId: string;
-	type: "lexical";
-	file: string;
-	line: number;
-	evidence: string;
-	reason: string;
 }
 
 const runRoot = process.argv[2]
@@ -78,7 +66,7 @@ await writeCorpusFile(
 );
 await writeCorpusFile(path.join("node_modules", "legacy", "index.ts"), "new OldAuthClient();\n");
 
-const selectors: SelectorSpec[] = [
+const selectors: LexicalSelectorSpec[] = [
 	{
 		id: "legacy-auth-import",
 		type: "lexical",
@@ -110,71 +98,20 @@ const selectors: SelectorSpec[] = [
 		reason: "runtime token selecting legacy auth implementation",
 	},
 ];
-const selectorMatchers = selectors.map(selector => ({ ...selector, matcher: new RegExp(selector.pattern) }));
-const combinedSelectorPattern = selectors.map(selector => `(?:${selector.pattern})`).join("|");
 
 const started = performance.now();
 const selectorGlob = "packages/*/src/**/*.ts";
-const signals: SignalRecord[] = [];
-const selectorLedger: Array<{
-	id: string;
-	type: "lexical";
-	filesSearched: number;
-	filesWithMatches: number;
-	totalMatches: number;
-	returnedMatches: number;
-	limitReached: boolean;
-	skippedOversized: number;
-}> = [];
-
-const combinedResult = await grep({
-	pattern: combinedSelectorPattern,
-	path: corpusRoot,
-	glob: selectorGlob,
+const selectorRun = await runLexicalSelectors({
+	cwd: corpusRoot,
+	includeGlob: selectorGlob,
+	selectors,
 	gitignore: true,
 	hidden: true,
-	maxCount: 100_000,
-	maxCountPerFile: 100,
-	mode: GrepOutputMode.Content,
+	maxMatches: 100_000,
 	maxColumns: 500,
 });
-const selectorStats = new Map<string, { filesWithMatches: Set<string>; totalMatches: number }>();
-for (const selector of selectors) {
-	selectorStats.set(selector.id, { filesWithMatches: new Set<string>(), totalMatches: 0 });
-}
-for (const match of combinedResult.matches) {
-	for (const selector of selectorMatchers) {
-		if (!selector.matcher.test(match.line)) continue;
-		const stats = selectorStats.get(selector.id);
-		if (!stats) continue;
-		stats.filesWithMatches.add(match.path);
-		stats.totalMatches += 1;
-		signals.push({
-			id: `sig_${signals.length.toString().padStart(5, "0")}`,
-			selectorId: selector.id,
-			type: selector.type,
-			file: match.path,
-			line: match.lineNumber,
-			evidence: match.line,
-			reason: selector.reason,
-		});
-	}
-}
-for (const selector of selectors) {
-	const stats = selectorStats.get(selector.id);
-	selectorLedger.push({
-		id: selector.id,
-		type: selector.type,
-		filesSearched: combinedResult.filesSearched,
-		filesWithMatches: stats?.filesWithMatches.size ?? 0,
-		totalMatches: stats?.totalMatches ?? 0,
-		returnedMatches: stats?.totalMatches ?? 0,
-		limitReached: combinedResult.limitReached === true,
-		skippedOversized: combinedResult.skippedOversized ?? 0,
-	});
-}
-
-const signalsByFile = new Map<string, SignalRecord[]>();
+const { signals, selectorLedger } = selectorRun;
+const signalsByFile = new Map<string, SelectorSignal[]>();
 for (const signal of signals) {
 	const current = signalsByFile.get(signal.file) ?? [];
 	current.push(signal);
@@ -186,8 +123,8 @@ const selectedFiles = new Set(signals.map(signal => signal.file));
 const falsePositiveFiles = [...selectedFiles].filter(file => !positiveFiles.has(file));
 const recall = positiveFiles.size === 0 ? 1 : selectedPositiveFiles.length / positiveFiles.size;
 const precision = selectedFiles.size === 0 ? 1 : selectedPositiveFiles.length / selectedFiles.size;
-const shards: SignalRecord[][] = [];
-let currentShard: SignalRecord[] = [];
+const shards: SelectorSignal[][] = [];
+let currentShard: SelectorSignal[] = [];
 
 for (const fileSignals of signalsByFile.values()) {
 	if (currentShard.length > 0 && currentShard.length + fileSignals.length > 12) {
@@ -221,12 +158,7 @@ const processedSignals = workerOutputs.reduce((sum, output) => sum + output.cove
 const coverageAccountingOk = workerOutputs.every(
 	output => output.coverage.signals_assigned === output.coverage.signals_cleared + output.coverage.signals_confirmed,
 );
-const selectorAccountingOk = selectorLedger.every(
-	selector =>
-		selector.returnedMatches === selector.totalMatches &&
-		selector.limitReached === false &&
-		selector.skippedOversized === 0,
-);
+const selectorAccountingOk = selectorLedgerComplete(selectorLedger);
 const latencyMs = Math.round(performance.now() - started);
 const ledgerComplete =
 	coverageAccountingOk &&
@@ -238,8 +170,8 @@ const ledgerComplete =
 const ledger = {
 	run_id: "autoresearch-mapreduce-latest",
 	universe: {
-		files_total: combinedResult.filesSearched,
-		files_included: combinedResult.filesSearched,
+		files_total: selectorRun.filesSearched,
+		files_included: selectorRun.filesSearched,
 		files_excluded: 2,
 	},
 	selectors: {
