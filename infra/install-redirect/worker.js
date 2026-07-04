@@ -73,16 +73,26 @@ async function proxyHf(env, repoPath, { cacheSeconds, ctx, request }) {
 }
 
 function landingPage(request) {
-	const origin = new URL(request.url).origin;
-	const installSh = `curl -fsSL ${origin}/install.sh | sh`;
-	const installPs = `irm ${origin}/install.ps1 | iex`;
+	const url = new URL(request.url);
+	const isApex = url.hostname === "pkking.computer";
+	const cliOrigin = isApex ? "https://oh-my-pk.pkking.computer" : url.origin;
+	const installSh = `curl -fsSL ${cliOrigin}/install.sh | sh`;
+	const installPs = `irm ${cliOrigin}/install.ps1 | iex`;
+	const title = isApex ? "pkking.computer" : "oh-my-pk";
+	const eyebrow = isApex ? "private project domain" : "canonical CLI · install endpoint live";
+	const heading = isApex ? "pkking.computer" : "oh-my-pk";
+	const lead = isApex
+		? "A small personal project domain for tools, experiments, and private infrastructure. The public thing here today is oh-my-pk."
+		: "A coding-agent CLI with a terminal TUI, one-shot prompts, RPC/ACP surfaces, built-in tools, skills-on-request, and fast local workflows.";
+	const primaryHref = isApex ? "https://oh-my-pk.pkking.computer" : "/install.sh";
+	const primaryLabel = isApex ? "Open oh-my-pk" : "Install for macOS/Linux";
 	const html = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>oh-my-pk</title>
-<meta name="description" content="oh-my-pk is a fast coding-agent CLI with install, update, RPC, ACP, and TUI surfaces.">
+<title>${escapeHtml(title)}</title>
+<meta name="description" content="${escapeHtml(lead)}">
 <style>
 :root { color-scheme: dark; --bg: #080a0f; --panel: #101521; --text: #eef4ff; --muted: #9da8ba; --line: #233044; --accent: #79ffe1; --pink: #ff7ad9; }
 * { box-sizing: border-box; }
@@ -110,12 +120,12 @@ a.ghost { color: var(--text); background: transparent; border-color: var(--line)
 <main>
 <section class="hero">
 <div>
-<div class="eyebrow">canonical CLI · install endpoint live</div>
-<h1>oh-my-pk</h1>
-<p class="lead">A coding-agent CLI with a terminal TUI, one-shot prompts, RPC/ACP surfaces, built-in tools, skills-on-request, and fast local workflows.</p>
+<div class="eyebrow">${escapeHtml(eyebrow)}</div>
+<h1>${escapeHtml(heading)}</h1>
+<p class="lead">${escapeHtml(lead)}</p>
 <div class="actions">
-<a class="button" href="/install.sh">Install for macOS/Linux</a>
-<a class="button ghost" href="/install.ps1">Install for Windows</a>
+<a class="button" href="${escapeHtml(primaryHref)}">${escapeHtml(primaryLabel)}</a>
+<a class="button ghost" href="${escapeHtml(cliOrigin)}/install.ps1">Install for Windows</a>
 <a class="button ghost" href="https://github.com/kingkillery/oh-my-pi">GitHub</a>
 </div>
 </div>
@@ -128,7 +138,7 @@ a.ghost { color: var(--text); background: transparent; border-color: var(--line)
 <div class="card feature"><h2>Multiple surfaces</h2><p>Use the TUI, one-shot mode, RPC, or ACP from editors and automation.</p></div>
 <div class="card feature"><h2>Private binary distribution</h2><p>This Worker serves installers, versions, and binaries without exposing storage tokens.</p></div>
 </section>
-<p class="links">Endpoints: <a href="/version">/version</a> · <a href="/install.sh">/install.sh</a> · <a href="/install.ps1">/install.ps1</a>. Legacy alias: <code>oh-my-pi.pkking.computer</code>.</p>
+<p class="links">Endpoints: <a href="${escapeHtml(cliOrigin)}/version">/version</a> · <a href="${escapeHtml(cliOrigin)}/install.sh">/install.sh</a> · <a href="${escapeHtml(cliOrigin)}/install.ps1">/install.ps1</a>. Canonical CLI host: <code>oh-my-pk.pkking.computer</code>.</p>
 </main>
 </body>
 </html>`;

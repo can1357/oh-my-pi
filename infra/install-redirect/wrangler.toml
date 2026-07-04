@@ -2,9 +2,12 @@ name = "oh-my-pi-install-redirect"
 main = "worker.js"
 compatibility_date = "2026-06-19"
 
-# Custom-domain routes attach the Worker to the whole hostnames, so it serves every
-# path: /install.sh, /install.ps1, /version, and /bin/<tag>/<binary>.
+# The apex already has externally managed DNS, so use a zone route there. The
+# subdomains use custom-domain routes. The apex serves a small private-domain
+# homepage; oh-my-pk serves the CLI landing page plus /install.sh, /install.ps1,
+# /version, and /bin/<tag>/<binary>.
 routes = [
+	{ pattern = "pkking.computer/*", zone_name = "pkking.computer" },
 	{ pattern = "oh-my-pk.pkking.computer", custom_domain = true },
 	{ pattern = "oh-my-pi.pkking.computer", custom_domain = true },
 ]
