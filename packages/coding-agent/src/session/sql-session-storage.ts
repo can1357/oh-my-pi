@@ -190,6 +190,11 @@ function decodeSqlBytes(value: unknown): string {
 }
 
 /**
+ * Alternative session storage backend.
+ * Not used internally by the coding-agent — available for SDK consumers
+ * and external integrations that need SQL-backed session persistence.
+ */
+/**
  * SQL-backed implementation of {@link SessionStorage} using `bun:sql`. Each
  * session JSONL file maps to a row keyed by `path`; one table stores the file
  * contents while this process keeps only a metadata index (`size`, `mtimeMs`) in

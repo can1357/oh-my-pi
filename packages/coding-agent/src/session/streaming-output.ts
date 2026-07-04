@@ -490,10 +490,8 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 // Middle elision (keep head + tail, drop middle)
 // =============================================================================
 
-/**
- * Format the inline marker substituted for the elided middle region.
- * Returned without surrounding newlines so callers can position it freely.
- */
+/** @internal exported for tests only */
+
 export function formatMiddleElisionMarker(elidedLines: number, elidedBytes: number): string {
 	// A 0/1-line elision (e.g. one giant single line) would read as
 	// "[…0ln elided…]"; fall back to a byte count there.
@@ -1256,11 +1254,7 @@ export class OutputSink {
 // =============================================================================
 // Truncation notice formatting
 // =============================================================================
-
-/**
- * Format a truncation notice for tail-truncated output (bash, python, ssh).
- * Returns empty string if not truncated.
- */
+/** @internal exported for tests only */
 export function formatTailTruncationNotice(
 	truncation: TruncationResult,
 	options: TailTruncationNoticeOptions = {},

@@ -91,6 +91,49 @@ export function buildBudgetNotice(requests: number): string {
 	return `[budget notice] You have used ${requests} requests in this run. Wrap up now: finish the current step and yield your final report.`;
 }
 
+/**
+ * Build the `checkAbort` / `awaitAbortable` pair used by both the setup-phase
+ * and the prompt-loop call sites. `onAbort` runs exactly once per `checkAbort`
+ * invocation that observes an aborted signal — BEFORE the helper throws
+ * `ToolAbortError` — so callers can update local bookkeeping (e.g. resolve
+ * the monitor-specific abort reason into a local `abortReasonText`) at the
+ * same point they always did. Callers that prefer to defer classification to
+ * their own `finally` block should pass a no-op `onAbort`; the helper still
+ * throws so control flow is identical.
+ */
+export function createAbortHelpers(
+	signal: AbortSignal,
+	onAbort: () => void,
+): {
+	checkAbort: () => void;
+	awaitAbortable: <T>(promise: Promise<T>) => Promise<T>;
+} {
+	const checkAbort = (): void => {
+		if (signal.aborted) {
+			onAbort();
+			throw new ToolAbortError();
+		}
+	};
+	const awaitAbortable = async <T>(promise: Promise<T>): Promise<T> => {
+		checkAbort();
+		const { promise: abortPromise, reject } = Promise.withResolvers<never>();
+		const onAbortEvent = (): void => {
+			try {
+				checkAbort();
+			} catch (err) {
+				reject(err);
+			}
+		};
+		signal.addEventListener("abort", onAbortEvent, { once: true });
+		try {
+			return await Promise.race([promise, abortPromise]);
+		} finally {
+			signal.removeEventListener("abort", onAbortEvent);
+		}
+	};
+	return { checkAbort, awaitAbortable };
+}
+
 /** Flatten whitespace and clip salvage text for the cancelled-child summary line. */
 function formatSalvageSnippet(text: string, maxLength = 500): string {
 	const flattened = text.replace(/\s+/g, " ").trim();
@@ -1416,33 +1459,17 @@ async function driveSessionToYield(
 	let error: string | undefined;
 	let aborted = false;
 	let abortReasonText: string | undefined;
-	const checkAbort = () => {
-		if (abortSignal.aborted) {
-			aborted = monitor.isAbortedRun();
-			if (aborted) {
-				abortReasonText ??= monitor.resolveAbortReasonText();
-			}
-			exitCode = 1;
-			throw new ToolAbortError();
+	// driveSessionToYield only ever waits via `awaitAbortable`; the helper's
+	// own internal `checkAbort` (called before each race) preserves the prior
+	// behavior. Standalone `checkAbort` calls were not present before the
+	// consolidation either, so we don't re-bind it here.
+	const { awaitAbortable } = createAbortHelpers(abortSignal, () => {
+		aborted = monitor.isAbortedRun();
+		if (aborted) {
+			abortReasonText ??= monitor.resolveAbortReasonText();
 		}
-	};
-	const awaitAbortable = async <T>(promise: Promise<T>): Promise<T> => {
-		checkAbort();
-		const { promise: abortPromise, reject } = Promise.withResolvers<never>();
-		const onAbort = () => {
-			try {
-				checkAbort();
-			} catch (err) {
-				reject(err);
-			}
-		};
-		abortSignal.addEventListener("abort", onAbort, { once: true });
-		try {
-			return await Promise.race([promise, abortPromise]);
-		} finally {
-			abortSignal.removeEventListener("abort", onAbort);
-		}
-	};
+		exitCode = 1;
+	});
 
 	try {
 		await awaitAbortable(session.prompt(task, { attribution: "agent" }));
@@ -1876,28 +1903,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		let error: string | undefined;
 		let aborted = false;
 		let abortReasonText: string | undefined;
-		const checkAbort = () => {
-			if (abortSignal.aborted) {
-				throw new ToolAbortError();
-			}
-		};
-		const awaitAbortable = async <T>(promise: Promise<T>): Promise<T> => {
-			checkAbort();
-			const { promise: abortPromise, reject } = Promise.withResolvers<never>();
-			const onAbort = () => {
-				try {
-					checkAbort();
-				} catch (err) {
-					reject(err);
-				}
-			};
-			abortSignal.addEventListener("abort", onAbort, { once: true });
-			try {
-				return await Promise.race([promise, abortPromise]);
-			} finally {
-				abortSignal.removeEventListener("abort", onAbort);
-			}
-		};
+		// runSubagent defers abort classification to the finally block below; the
+		// helper still throws so control flow mirrors the prior inline implementation.
+		const { checkAbort, awaitAbortable } = createAbortHelpers(abortSignal, () => {});
 		// Launch-latency phase marks (performance.now()); read by the debug log
 		// emitted before this closure returns. Left undefined when setup throws
 		// before reaching the phase, which itself localizes the cost.

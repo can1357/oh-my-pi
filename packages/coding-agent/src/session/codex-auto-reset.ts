@@ -42,14 +42,14 @@ import type { CodexAutoRedeemMode } from "../config/settings-schema";
 import { reportMatchesActiveAccount } from "../slash-commands/helpers/active-oauth-account";
 
 /** Weekly window counts as exhausted at `usedFraction >= 0.999` (used_percent >= 99.9). */
-export const WEEKLY_EXHAUSTED_MIN_FRACTION = 0.999;
+const WEEKLY_EXHAUSTED_MIN_FRACTION = 0.999;
 /** A weekly reset can never be more than one window length (7d) away; +1h slack for skew. */
-export const MAX_PLAUSIBLE_REMAINING_MS = 7 * 24 * 3_600_000 + 60 * 60_000;
+const MAX_PLAUSIBLE_REMAINING_MS = 7 * 24 * 3_600_000 + 60 * 60_000;
 
 /** Report must be no older than the 5-min usage cache TTL plus slack. */
-export const REPORT_FRESHNESS_MS = 10 * 60_000;
+const REPORT_FRESHNESS_MS = 10 * 60_000;
 /** Per-account cooldown that catches blockKey drift across a minute boundary. */
-export const ATTEMPT_COOLDOWN_MS = 60_000;
+const ATTEMPT_COOLDOWN_MS = 60_000;
 /** Minute bucket for blockKey, absorbing `reset_after_seconds`-derived jitter. */
 export const DEBOUNCE_BUCKET_MS = 60_000;
 

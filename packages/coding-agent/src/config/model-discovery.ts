@@ -32,6 +32,24 @@ export const DISCOVERY_DEFAULT_MAX_TOKENS = 32_768;
 const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const OLLAMA_HOST_DEFAULT_PORT = "11434";
 
+// `normalizeOllamaHostEnv` and `normalizeOllamaBaseUrl` (below) intentionally stay
+// separate: they handle inputs from different sources with different expectations.
+//
+//   * `normalizeOllamaHostEnv` parses the `OLLAMA_HOST` env var, which the Ollama
+//     CLI docs document in scheme-less forms (`host`, `:port`, `//host[:port]`).
+//     It also stamps in the default `:11434` port when an http URL omits one and
+//     returns `undefined` on invalid input so the caller can fall back to the
+//     implicit default. It does NOT touch `OLLAMA_BASE_URL`, which is expected
+//     to already be a full URL.
+//
+//   * `normalizeOllamaBaseUrl` parses the `providerConfig.baseUrl` for an Ollama
+//     `openai-responses` provider, which is always a full URL (already from a
+//     config file or `OLLAMA_BASE_URL` processed by `getImplicitOllamaBaseUrl`).
+//     It strips the path but preserves the user-supplied port verbatim, and
+//     falls back to `DEFAULT_OLLAMA_BASE_URL` on parse failure so the caller
+//     always gets a usable endpoint for `/api/tags`. Adding the default port
+//     here would mask legitimate non-default ports users set in their config.
+
 function normalizeOllamaHostEnv(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	if (!trimmed) return undefined;
