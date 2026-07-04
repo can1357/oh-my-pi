@@ -17,7 +17,7 @@ import type {
 } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { ToolExample } from "@pk-nerdsaver-ai/pi-ai";
 import { type Component, Text } from "@pk-nerdsaver-ai/pi-tui";
-import { formatAge, formatDuration, prompt } from "@pk-nerdsaver-ai/pi-utils";
+import { formatAge, formatDuration, logger, prompt } from "@pk-nerdsaver-ai/pi-utils";
 import { type } from "arktype";
 import type { Settings } from "../config/settings";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -416,7 +416,9 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 			const sidekickSession = senderRef?.session;
 			if (sidekickSession) {
 				setImmediate(() => {
-					void sidekickSession.resetToWarmPrefix();
+					void sidekickSession.resetToWarmPrefix().catch(error => {
+						logger.debug("Sidekick context reset failed", { error: String(error) });
+					});
 				});
 			}
 		}
