@@ -50,6 +50,19 @@ const OLLAMA_HOST_DEFAULT_PORT = "11434";
 //     always gets a usable endpoint for `/api/tags`. Adding the default port
 //     here would mask legitimate non-default ports users set in their config.
 
+/** Shared core: parse a URL and extract `protocol://host`, or return undefined on failure. */
+function extractOllamaOrigin(url: string): string | undefined {
+	try {
+		const parsed = new URL(url);
+		if (!parsed.hostname || (parsed.protocol !== "http:" && parsed.protocol !== "https:")) {
+			return undefined;
+		}
+		return `${parsed.protocol}//${parsed.host}`;
+	} catch {
+		return undefined;
+	}
+}
+
 function normalizeOllamaHostEnv(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	if (!trimmed) return undefined;
@@ -60,19 +73,16 @@ function normalizeOllamaHostEnv(value: string | undefined): string | undefined {
 			: trimmed.startsWith(":")
 				? `http://127.0.0.1${trimmed}`
 				: `http://${trimmed}`;
-	try {
-		const parsed = new URL(candidate);
-		if (!parsed.hostname || (parsed.protocol !== "http:" && parsed.protocol !== "https:")) {
-			return undefined;
-		}
-		if (!parsed.port && parsed.protocol === "http:") {
-			parsed.port = OLLAMA_HOST_DEFAULT_PORT;
-		}
-		return `${parsed.protocol}//${parsed.host}`;
-	} catch {
-		return undefined;
+	const origin = extractOllamaOrigin(candidate);
+	if (!origin) return undefined;
+	// Stamp default port for http URLs without one
+	const afterScheme = origin.indexOf("//") + 2;
+	if (origin.startsWith("http://") && !origin.includes(":", afterScheme)) {
+		return `${origin}:${OLLAMA_HOST_DEFAULT_PORT}`;
 	}
+	return origin;
 }
+
 
 export function getImplicitOllamaBaseUrl(): string {
 	const baseUrl = Bun.env.OLLAMA_BASE_URL?.trim();
@@ -596,12 +606,9 @@ function normalizeOpenAIModelsListBaseUrl(baseUrl?: string): string {
 	}
 }
 
+/** @internal — delegates to extractOllamaOrigin, preserving the user-supplied port verbatim. */
 function normalizeOllamaBaseUrl(baseUrl?: string): string {
 	const raw = baseUrl || DEFAULT_OLLAMA_BASE_URL;
-	try {
-		const parsed = new URL(raw);
-		return `${parsed.protocol}//${parsed.host}`;
-	} catch {
-		return DEFAULT_OLLAMA_BASE_URL;
-	}
+	return extractOllamaOrigin(raw) || DEFAULT_OLLAMA_BASE_URL;
 }
+
