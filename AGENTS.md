@@ -22,10 +22,7 @@ This repo contains multiple packages, but **`packages/coding-agent/`** is the pr
 
 **Catalog import convention**: code in this repo imports catalog *values* (bundled models, model-thinking helpers, identity, descriptors, model manager/cache) from `@pk-nerdsaver-ai/pi-catalog/<module>` — never via `@pk-nerdsaver-ai/pi-ai`. The pi-ai barrel re-exports only the model/effort *types* its own signatures use (`Model`, `Api`, `ThinkingConfig`, `Effort`, …); type-only imports of those from `@pk-nerdsaver-ai/pi-ai` are fine.
 
-## Research
-When researching or learning something new and the project is a software development task. Always update the wiki obsidian vault here (see your quote below):
-" I should store my learnings in the Obsidian vault at C:\dev\Desktop-Projects\Helpful-Docs-Prompts\VAULTS-OBSIDIAN\designandbuilding-vault as research progresses, using Obsidian-flavored markdown. RoutingCascades is complete, and I have
- three researchers still running their processes."
+- **Commit hygiene**: when the working tree carries mixed uncommitted WIP from multiple streams (feature branch, scratch edits, dropped `.backup` files), review clusters by logical feature before staging. Bundling unrelated work into one commit on `main` is worse than leaving it local. Always `git diff --stat` for large destructive doc deletions (e.g. AGENTS.md itself accidentally gutted) before committing.
 
 ## Code Quality
 
@@ -37,17 +34,7 @@ When researching or learning something new and the project is a software develop
 - **Class privacy**: use ES `#private` fields; leave externally accessible members bare. **No `private`/`protected`/`public` keyword on fields or methods**, except on **constructor parameter properties** where TypeScript requires it (e.g. `constructor(private readonly session: ToolSession)`).
 - **Promises**: use `Promise.withResolvers()` instead of `new Promise((resolve, reject) => ...)`.
 - **Prompts**: never build prompts in code (no inline strings, template literals, or concatenation). Prompts live in static `.md` files; use Handlebars for dynamic content. Import them via `import content from "./prompt.md" with { type: "text" }` — not `readFile`.
-- **Worker scripts**: workers re-enter the CLI entrypoint; never spawn separate worker entry modules. `cli.ts` declares itself as the worker host at startup (`declareWorkerHostEntry()` from `@pk-nerdsaver-ai/pi-utils/env`) and dispatches hidden argv selectors (`__omp_worker_stats_sync`, `__omp_worker_tab`, `__omp_worker_js_eval`, `__omp_worker_tiny_inference`) before loading the command registry. Spawn sites use:
-  ```ts
-  import { workerHostEntry } from "@pk-nerdsaver-ai/pi-utils";
-  const hostEntry = workerHostEntry();
-  const worker = hostEntry
-  	? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_<name>"] })
-  	: new Worker(new URL("./<worker>.ts", import.meta.url).href, { type: "module" });
-  ```
-  When the process was started from the omp CLI — source `cli.ts`, npm-bundle `dist/cli.js`, or compiled binary — `workerHostEntry()` is `Bun.main` and the worker re-enters the single entry module, so no per-worker `--compile` entrypoints or bundle entries exist. Outside a CLI host (`bun test`, SDK embedding, standalone `omp-stats`) it returns `null` and the direct-module fallback loads the worker source. New worker kinds MUST add their selector to the dispatch table in `cli.ts` and keep the fallback branch.
-  History: `with { type: "file" }` only copied the entry as a raw asset (workers crashed silently in compiled binaries — issues #1011, #1027), and the later literal-path + extra-entrypoint pattern required keeping spawn literals and two build scripts in sync (issue #1150). The repro tests for those issues now pin the worker-host contract instead.
-  Validate any new worker with the dedicated smoke probe: `omp --smoke-test` spawns the stats sync worker and the tiny-model subprocess, pings them, and exits — it's wired into `ci:test:smoke` and `scripts/install-tests/run-ci.sh` so binary, source-link, and tarball installs all exercise it. Add a sibling smoke if the new worker is on a different module graph.
+- **Worker scripts** (verify against `cli.ts` before relying on details): the omp CLI is also the worker host; new worker kinds must register a hidden argv selector in the `cli.ts` dispatch table and keep a direct-module fallback for non-CLI hosts (`bun test`, SDK embedding). When started from the omp CLI, `Bun.main` is reused so no per-worker `--compile` entrypoints or bundle entries exist. Outside a CLI host the direct-module fallback loads the worker source. Validate new workers with a smoke probe (existing one: `omp --smoke-test` is wired into `ci:test:smoke` and `scripts/install-tests/run-ci.sh`). The specific argv names, issue numbers, and exact dispatch table layout below are a snapshot — confirm against `cli.ts` before editing.
 
 ## Bun Over Node
 
