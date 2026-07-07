@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getOAuthProviders } from "@pk-nerdsaver-ai/pi-ai/oauth";
 import { setNextRequestDebugPath } from "@pk-nerdsaver-ai/pi-ai/utils/request-debug";
-import { type AutocompleteItem, Spacer } from "@pk-nerdsaver-ai/pi-tui";
+import { type AutocompleteItem, Markdown, Spacer } from "@pk-nerdsaver-ai/pi-tui";
 import { $which, APP_NAME, setProjectDir } from "@pk-nerdsaver-ai/pi-utils";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
@@ -26,7 +26,7 @@ import {
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
 import { resolveMemoryBackend } from "../memory-backend";
-import { theme } from "../modes/theme/theme";
+import { getMarkdownTheme, theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession, FreshSessionResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
@@ -2422,6 +2422,54 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "catgpt-fast",
+		description: "Query CatGPT with fast intensity, or switch picker to fast when empty",
+		inlineHint: "[prompt]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const prompt = command.args.trim();
+			await handleCatGptCommand(prompt, "fast", runtime, false);
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			const prompt = command.args.trim();
+			runtime.ctx.editor.setText("");
+			await handleCatGptCommand(prompt, "fast", runtime, true);
+		},
+	},
+	{
+		name: "catgpt-pro",
+		description: "Query CatGPT with pro/thinking intensity, or switch picker to pro when empty",
+		inlineHint: "[prompt]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const prompt = command.args.trim();
+			await handleCatGptCommand(prompt, "pro", runtime, false);
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			const prompt = command.args.trim();
+			runtime.ctx.editor.setText("");
+			await handleCatGptCommand(prompt, "pro", runtime, true);
+		},
+	},
+	{
+		name: "catgpt-normal",
+		description: "Query CatGPT with balanced/normal intensity, or switch picker to normal when empty",
+		inlineHint: "[prompt]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const prompt = command.args.trim();
+			await handleCatGptCommand(prompt, "normal", runtime, false);
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			const prompt = command.args.trim();
+			runtime.ctx.editor.setText("");
+			await handleCatGptCommand(prompt, "normal", runtime, true);
+		},
+	},
+	{
 		name: "quit",
 		description: "Quit the application",
 		handleTui: shutdownHandlerTui,
@@ -2615,3 +2663,88 @@ export function lookupBuiltinSlashCommand(name: string): SlashCommandSpec | unde
 }
 
 export type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime, SlashCommandSpec, TuiSlashCommandRuntime };
+
+async function handleCatGptCommand(
+	promptText: string,
+	intensity: string,
+	runtime: SlashCommandRuntime | BuiltinSlashCommandRuntime,
+	isTui: boolean,
+): Promise<void> {
+	const gatewayUrl = "http://127.0.0.1:8000";
+	const token = "dummy123";
+
+	if (isTui && "ctx" in runtime) {
+		runtime.ctx.showStatus(`CatGPT (${intensity}): communicating...`);
+	} else if ("output" in runtime) {
+		await runtime.output(`CatGPT (${intensity}): communicating...`);
+	}
+
+	try {
+		if (!promptText) {
+			// No prompt, just switch the browser model picker
+			const response = await fetch(`${gatewayUrl}/model/select`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${token}`,
+				},
+				body: JSON.stringify({
+					model: "catgpt-browser",
+					intensity,
+				}),
+			});
+			if (!response.ok) {
+				const errText = await response.text();
+				throw new Error(`Gateway returned HTTP ${response.status}: ${errText}`);
+			}
+			const data = await response.json();
+			const selected = data.selected || "default";
+			const msg = `CatGPT intensity switched to: ${intensity} (${selected})`;
+			if (isTui && "ctx" in runtime) {
+				runtime.ctx.showStatus(msg);
+			} else if ("output" in runtime) {
+				await runtime.output(msg);
+			}
+			return;
+		}
+
+		// Prompt is present, request completion
+		const response = await fetch(`${gatewayUrl}/v1/chat/completions`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token}`,
+			},
+			body: JSON.stringify({
+				model: "catgpt-browser",
+				messages: [{ role: "user", content: promptText }],
+				intensity,
+			}),
+		});
+
+		if (!response.ok) {
+			const errText = await response.text();
+			throw new Error(`Gateway returned HTTP ${response.status}: ${errText}`);
+		}
+
+		const data = await response.json();
+		const reply = data.choices?.[0]?.message?.content;
+		if (!reply) {
+			throw new Error("No response content received from CatGPT.");
+		}
+
+		if (isTui && "ctx" in runtime) {
+			runtime.ctx.showStatus(`CatGPT (${intensity}) complete.`);
+			runtime.ctx.present([new Spacer(1), new Markdown(reply, 1, 0, getMarkdownTheme()), new Spacer(1)]);
+		} else if ("output" in runtime) {
+			await runtime.output(reply);
+		}
+	} catch (err: unknown) {
+		const errMsg = `CatGPT Error: ${errorMessage(err)}`;
+		if (isTui && "ctx" in runtime) {
+			runtime.ctx.showError(errMsg);
+		} else if ("output" in runtime) {
+			await runtime.output(errMsg);
+		}
+	}
+}

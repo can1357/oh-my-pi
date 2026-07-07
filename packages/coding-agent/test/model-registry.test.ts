@@ -1251,10 +1251,23 @@ describe("ModelRegistry", () => {
 				requestedUrls.push(url);
 				if (url === "http://127.0.0.1:20128/v1/models") {
 					return Promise.resolve(
-						new Response(JSON.stringify({ data: [{ id: "fast" }, { id: "oh-my-pi-fork" }, { id: "gemini-3-5-flash-medium-round-robin" }, { id: "cline-pass/kimi-k2.6" }, { id: "minimax-m3-fallback" }, { id: "deepseek-v4-pro-rr" }, { id: "gpt-oss-120b-fallback" }] }), {
-							status: 200,
-							headers: { "Content-Type": "application/json" },
-						}),
+						new Response(
+							JSON.stringify({
+								data: [
+									{ id: "fast" },
+									{ id: "oh-my-pi-fork" },
+									{ id: "gemini-3-5-flash-medium-round-robin" },
+									{ id: "cline-pass/kimi-k2.6" },
+									{ id: "minimax-m3-fallback" },
+									{ id: "deepseek-v4-pro-rr" },
+									{ id: "gpt-oss-120b-fallback" },
+								],
+							}),
+							{
+								status: 200,
+								headers: { "Content-Type": "application/json" },
+							},
+						),
 					);
 				}
 				throw new Error(`Unexpected URL: ${url}`);
