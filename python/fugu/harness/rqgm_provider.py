@@ -145,7 +145,7 @@ class FmhWorkspaceProvider:
         task_suite: str = "rqgm",
         source_root: str | Path | None = None,
         max_tasks: int = 4,
-        model: str = "route-9",
+        model: str = "omp",
     ) -> None:
         self.backend = backend
         self.source_root = Path(source_root) if source_root else _FUGU_ROOT
@@ -248,7 +248,7 @@ class FmhEvaluatorSlotProvider:
         anchor_suite: str = "verifier/labeled",
         source_root: str | Path | None = None,
         max_anchors: int = 8,
-        model: str = "route-9",
+        model: str = "omp",
     ) -> None:
         self.slot = slot
         self.backend = backend

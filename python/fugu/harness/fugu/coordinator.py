@@ -17,7 +17,7 @@ from harness.fugu.health import WorkerHealth, GLOBAL_WORKER_HEALTH
 
 Latency = Literal["fast", "balanced", "quality"]
 
-_DEFAULT_COORDINATOR_MODEL = "qwen-team/deepseek-v4-flash"
+_DEFAULT_COORDINATOR_MODEL = "9router/cline-deepseek-v4-flash"
 _PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "fugu_coordinator.md"
 
 
@@ -241,11 +241,11 @@ def default_plan(
                 ranked.append(w)
     elif "coding" in tags:
         preferred_ids = [
-            "qwen-team/kimi-k2.7-code",
-            "qwen-team/MiniMax-M2.5",
+            "9router/cline-kimi-k2.7-code",
+            "9router/cline-minimax-m3",
             "minimax/MiniMax-M3",
             "cx/gpt-5.5",
-            "qwen-team/deepseek-v4-flash",
+            "9router/cline-deepseek-v4-flash",
             "GPT-OSS",
             "ag/gemini-3.5-flash-medium",
         ]

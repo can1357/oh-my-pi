@@ -467,7 +467,7 @@ def rqgm_search(
     provider: str = "fmh",
     budget: int = 64,
     backend: str = "9router",
-    model: str = "route-9",
+    model: str = "omp",
     task_suite: str = "rqgm",
     anchor_suite: str = "verifier/labeled",
     epsilon: float = 0.05,
@@ -475,7 +475,7 @@ def rqgm_search(
 ) -> str:
     """Run the Red Queen Godel Machine co-evolutionary search.
 
-    provider: "fmh" by default (real local 9router via model "route-9") or
+    provider: "fmh" by default (real local 9router via model "omp") or
     "mock" for deterministic offline test mode.
     Returns a JSON summary: best node, best-belief, archive size, balanced
     utility, evaluator replacements, and retained record count. Requires the

@@ -27,15 +27,14 @@ Decision table (first match wins):
 |---|---|---|
 | `signal=subjective` | **caution** — single strong model | `cx/gpt-5.5` |
 | `diversity=low` | **don't fuse** (no headroom) | best single |
-| `regime=agentic` | **FUSE — outcome-aware *selection*** | 6-family pool `kimi-k2.6 / minimax-M3 / glm-5.1 / deepseek-v4-pro / claude-sonnet-4-6 / gemini-3.1-pro-low` (+failover), verifier `cx/gpt-5.5`, `--strategy diff_primary --gate` |
-| `regime=code` | **FUSE — best-of-N, select by tests** | `kimi-for-coding / kimi-k2.6 / minimax-M3` |
+| `regime=agentic` | **FUSE — outcome-aware *selection*** | 6-family pool `kimi-k2.6 / minimax-M3 / cline-qwen3.7-plus / cline-deepseek-v4-pro / claude-sonnet-4-6 / gemini-3.1-pro-low` (+failover), verifier `cx/gpt-5.5`, `--strategy diff_primary --gate` |
+| `regime=code` | **FUSE — best-of-N, select by tests** | `kimi-for-coding / cline-qwen3.7-plus / cline-deepseek-v4-pro` |
 | `regime=open` | **FUSE — synthesize** (only if lanes are *partial*) | `explore` lanes + synthesizer `cx/gpt-5.5` |
 | `regime=mc` | **route / select best lane** (fusion only ties) | `cx/gpt-5.5` |
 
 Model notes: `cx/gpt-5.5` is strong but **breaks multi-turn tool loops** → synthesizer/verifier only, never a
-lane. The agentic pool spans six families: GLM + DeepSeek via **OpenRouter** (`openrouter/` prefix, needs
-`OPENROUTER_API_KEY`); Claude (`cc/`) + Gemini-3.1-Pro (`ag/`) via 9router. The 9router qwen-team / siliconflow
-plans are auth-expired — use the OpenRouter ids.
+lane. The agentic pool spans six families: Qwen + DeepSeek via local 9router Cline aliases (`cline-*`),
+Claude (`cc/`) + Gemini-3.1-Pro (`ag/`) via 9router. Use the `cline-*` ids for Cline-backed routes.
 
 ## Cost & pool-size knobs
 

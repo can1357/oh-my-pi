@@ -3,7 +3,7 @@
 The RQGM algorithm lives in the standalone ``red-queen-godel-machine`` package
 (an optional dependency). This command exposes it through FMH:
 
-* default: ``--provider fmh --backend 9router --model route-9`` for a real local 9router run.
+* default: ``--provider fmh --backend 9router --model omp`` for a real local 9router run.
 * ``--provider mock`` -- deterministic/offline test mode (no model, no creds).
 * ``--provider llm``  -- the package's generic OpenAI-compatible provider
   (requires ``--dataset`` and ``--anchor`` JSONL files).
@@ -45,7 +45,7 @@ def search(
     seed: int = typer.Option(0, "--seed"),
     out: str = typer.Option("runs/rqgm", "--out", help="directory to persist run artifacts"),
     as_json: bool = typer.Option(False, "--json", help="emit JSON summary"),
-    model: str = typer.Option("route-9", "--model", help="model id for --provider fmh or llm"),
+    model: str = typer.Option("omp", "--model", help="model id for --provider fmh or llm"),
     base_url: str | None = typer.Option(None, "--base-url", help="OpenAI-compatible base url"),
     dataset: str | None = typer.Option(None, "--dataset", help="coder tasks JSONL for --provider llm"),
     anchor: str | None = typer.Option(None, "--anchor", help="labeled anchor JSONL for --provider llm"),
@@ -122,7 +122,7 @@ def search(
 def benchmark(
     budget: int = typer.Option(4, "--budget"),
     backend: str = typer.Option("9router", "--backend"),
-    model: str = typer.Option("route-9", "--model"),
+    model: str = typer.Option("omp", "--model"),
     task_suite: str = typer.Option("rqgm", "--task-suite"),
     anchor_suite: str = typer.Option("verifier/labeled", "--anchor-suite"),
     max_tasks: int = typer.Option(1, "--max-tasks"),
@@ -247,7 +247,7 @@ def evolve(
     suite: str = typer.Option("rqgm_code", "--suite", help="executable search suite under evals/"),
     holdout: str = typer.Option("holdout/rqgm_code", "--holdout", help="frozen executable holdout anchor"),
     backend: str = typer.Option("auto", "--backend", help="agentic backend for real workspace edits: auto | codex_cli | claude_code | subprocess_cli"),
-    model: str = typer.Option("route-9", "--model", help="strong model id (Stage 3)"),
+    model: str = typer.Option("omp", "--model", help="strong model id (Stage 3)"),
     canary_backend: str = typer.Option("", "--canary-backend", help="cheap canary backend (default: --backend)"),
     canary_model: str = typer.Option("", "--canary-model", help="cheap canary model (default: --model)"),
     seed: int = typer.Option(0, "--seed"),

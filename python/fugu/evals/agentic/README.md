@@ -107,15 +107,12 @@ integrated + tested):
   `kimi/kimi-for-coding`, `kimi/kimi-k2.5`. **Not usable as lanes:** `cx/gpt-5.5` (breaks the multi-turn
   tool loop via litellm — usable only as the single-shot verifier), `ag/gemini-3.5-flash-medium` (litellm
   NotFound). Each rollout records `ran_model` / `failed_over`.
-- **OpenRouter lanes → a genuinely diverse pool** (`_provider_for`): the headroom limiter was lane
-  *correlation* (kimi/minimax/gemini are close families). GLM (Zhipu) and DeepSeek — distinct families —
-  are reachable via **OpenRouter** even though the 9router `qwen-team/*` and `siliconflow/*` plans that
-  also serve them are **auth-expired** (re-verified: every `qwen-team/glm-5.1|glm-5.2|deepseek-v4-pro|
-  qwen3.7-max|MiniMax-M2.5` rollout returns `AuthenticationError`). The trick is the litellm form: pass the
-  bare `openrouter/<vendor>/<model>` id with **`custom_llm_provider=None`** (auto-detect) — `provider=
-  "openrouter"` double-prefixes and 400s. `_run_lane` picks the provider per lane (`None` for `openrouter/`,
-  `"openai"` for 9router). Verified as full tool-loop lanes: `openrouter/z-ai/glm-5.1` and
-  `openrouter/deepseek/deepseek-v4-pro` (the latter solved airline task 0). Needs `OPENROUTER_API_KEY`.
+- **Cline aliases → a genuinely diverse pool** (`_provider_for`): the headroom limiter was lane
+  *correlation* (kimi/minimax/gemini are close families). Qwen and DeepSeek are distinct families and now
+  route through local 9router Cline aliases (`cline-qwen3.7-plus`, `cline-deepseek-v4-pro`) instead of
+  paid OpenRouter or stale plan IDs. `_run_lane` uses the 9router OpenAI-compatible provider for these
+  aliases. Verified full tool-loop lane coverage should be re-run when Cline plan credentials change.
+  `openrouter/*:free` remains acceptable where explicitly configured as a free fallback.
 - **Claude + Gemini-Pro via cheap 9router-native routes** complete a **six-family** default pool:
   `cc/claude-sonnet-4-6` (Anthropic via OAuth — solved task 0) and `ag/gemini-3.1-pro-low` (Google Gemini
   3.1 Pro via antigravity — ran clean). Preferred over the OpenRouter equivalents (`anthropic/
@@ -132,8 +129,7 @@ to **0.52** (pool stayed healthy at full N). Result: best-lane 0.62, oracle 0.70
 fusion-vs-best Δ-CI is **[−0.04, 0.12] (includes 0; McNemar p=0.625) — NOT yet significant**. The verifier
 is excellent (0.923 discrimination) and the win is robust *directionally*; the blocker is now the **small
 oracle headroom** — the 3 reachable families (kimi/minimax/gemini) are correlated (oracle only 0.70 over a
-0.62 best). **The path to a significant aggregate win is more *diverse* lanes (GLM/DeepSeek/Qwen) to widen
-the headroom — gated on refreshing the expired qwen-team/siliconflow keys**, not on the verifier or N.
+0.62 best). **The path to a significant aggregate win is more diverse Cline-backed Qwen/DeepSeek lanes**, not on the verifier or N.
 
 > `evals/agentic/*.json` are gitignored run outputs. Needs `pip install git+https://github.com/sierra-research/tau-bench.git`
 > and `9ROUTER_API_KEY` / `NINEROUTER_API_KEY`.

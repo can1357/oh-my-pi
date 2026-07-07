@@ -278,14 +278,15 @@ NINEROUTER_DEFAULT_BASE_URL = "http://localhost:20128/v1"
 # 9router prefix-routed providers. Bare combo IDs (no slash) that the local router
 # serves are listed explicitly so they don't fall through to the Gemini branch.
 _NINEROUTER_PREFIXES = (
-    "cx/", "ag/", "vx/", "cc/", "kimi/", "minimax/", "qwen-team/", "nvidia/",
+    "cx/", "ag/", "vx/", "cc/", "kimi/", "minimax/", "nvidia/",
     "openrouter/", "groq/", "sf/", "siliconflow/", "colab/", "gc/", "9router/",
     "or/", "opencode-go/",
 )
 _NINEROUTER_BARE_IDS = {
     "gemini-3-5-flash-medium-round-robin", "gemini-3-5-flash-medium-fallback",
-    "deepseek-v4-fallback", "deepseek-v4-flash", "openrouter-free-fallback",
-    "nvidia_super", "gpt-oss", "qwen3.5plus", "qwen3.7-plus", "medium",
+    "openrouter-free-fallback", "cline-qwen3.7-plus", "cline-qwen3.7-max",
+    "cline-deepseek-v4-pro", "cline-deepseek-v4-flash", "cline-minimax-m3",
+    "cline-kimi-k2.6", "cline-kimi-k2.7-code", "nvidia_super", "gpt-oss",
 }
 
 

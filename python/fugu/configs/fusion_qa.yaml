@@ -40,14 +40,14 @@ questions:
 
 # Models verified in the tau-bench tool loop (2026-06). cx/gpt-5.5 is strong but BREAKS multi-turn tool
 # loops via litellm -> use it as synthesizer / verifier, NEVER as an agentic lane. The default agentic pool
-# spans SIX distinct families to widen oracle headroom: Moonshot (kimi), MiniMax, Zhipu GLM + DeepSeek (via
-# OpenRouter — needs OPENROUTER_API_KEY), Anthropic (cc/) and Google Gemini-Pro (ag/) via 9router-native
-# routes. The 9router qwen-team / siliconflow plans (their GLM/DeepSeek/Qwen) are auth-expired — use the
-# OpenRouter ids instead.
+# spans SIX distinct families to widen oracle headroom: Moonshot (kimi), MiniMax, Qwen + DeepSeek (via
+# Cline Pass / 9router), Anthropic (cc/) and Google Gemini-Pro (ag/) via 9router-native
+# routes. Use the 9router/cline-* ids for Cline-backed Qwen + DeepSeek lanes.
+
 models:
-  agent_lanes: ["kimi/kimi-k2.6", "minimax/MiniMax-M3", "openrouter/z-ai/glm-5.1", "openrouter/deepseek/deepseek-v4-pro", "cc/claude-sonnet-4-6", "ag/gemini-3.1-pro-low"]
-  code_lanes:  ["kimi/kimi-for-coding", "openrouter/deepseek/deepseek-v4-pro", "openrouter/z-ai/glm-4.7", "cc/claude-sonnet-4-6"]
-  text_lanes:  ["cx/gpt-5.5", "kimi/kimi-k2.6", "openrouter/z-ai/glm-5.1", "openrouter/deepseek/deepseek-v4-pro", "cc/claude-sonnet-4-6"]
+  agent_lanes: ["kimi/kimi-k2.6", "minimax/MiniMax-M3", "9router/cline-qwen3.7-plus", "9router/cline-deepseek-v4-pro", "cc/claude-sonnet-4-6", "ag/gemini-3.1-pro-low"]
+  code_lanes:  ["kimi/kimi-for-coding", "9router/cline-deepseek-v4-pro", "9router/cline-qwen3.7-plus", "cc/claude-sonnet-4-6"]
+  text_lanes:  ["cx/gpt-5.5", "kimi/kimi-k2.6", "9router/cline-qwen3.7-plus", "9router/cline-deepseek-v4-pro", "cc/claude-sonnet-4-6"]
   synthesizer: "cx/gpt-5.5"     # strong; pair with a different-family verifier
   verifier:    "cx/gpt-5.5"     # independent family from the synthesizer/lanes; also the agentic selector
   best_single: "cx/gpt-5.5"

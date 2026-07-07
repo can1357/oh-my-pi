@@ -293,7 +293,7 @@ class RqgmEvolver:
         suite: str = "rqgm_code",
         holdout: str = "holdout/rqgm_code",
         backend: str = _AUTO_BACKEND,
-        model: str = "route-9",
+        model: str = "omp",
         canary_backend: str | None = None,
         canary_model: str | None = None,
         budget: int = 24,

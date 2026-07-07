@@ -130,19 +130,19 @@ def test_coordinator_accepts_valid_model_plan(monkeypatch) -> None:
 def test_default_plan_prefers_kimi_and_minimax_code_for_coding() -> None:
     pool = [
         Worker(
-            "qwen-team/kimi-k2.7-code",
+            "9router/cline-kimi-k2.7-code",
             ("coding",),
             "budget",
             "balanced",
-            provider="qwen-team",
+            provider="cline-pass",
             family="kimi",
         ),
         Worker(
-            "qwen-team/MiniMax-M2.5",
+            "9router/cline-minimax-m3",
             ("coding", "planning", "synthesis"),
             "budget",
             "balanced",
-            provider="qwen-team",
+            provider="cline-pass",
             family="minimax",
         ),
         Worker(
@@ -165,7 +165,7 @@ def test_default_plan_prefers_kimi_and_minimax_code_for_coding() -> None:
 
     plan = default_plan("write python", None, "fast", pool)
 
-    assert plan.nodes[0].model == "qwen-team/kimi-k2.7-code"
+    assert plan.nodes[0].model == "9router/cline-kimi-k2.7-code"
 
 
 
@@ -175,19 +175,19 @@ def test_default_plan_model_only_kimi_failure_uses_minimax_code() -> None:
 
     health = WorkerHealth()
     qwen = Worker(
-        id="qwen-team/kimi-k2.7-code",
+        id="9router/cline-kimi-k2.7-code",
         tags=("coding",),
         cost_tier="budget",
         latency_tier="balanced",
-        provider="qwen-team",
+        provider="cline-pass",
         family="kimi",
     )
     minimax_code = Worker(
-        id="qwen-team/MiniMax-M2.5",
+        id="9router/cline-minimax-m3",
         tags=("coding", "planning", "synthesis"),
         cost_tier="budget",
         latency_tier="balanced",
-        provider="qwen-team",
+        provider="cline-pass",
         family="minimax",
     )
     minimax = Worker(
@@ -203,7 +203,7 @@ def test_default_plan_model_only_kimi_failure_uses_minimax_code() -> None:
     health.mark_failure(qwen, ClassifiedError("context", False, 60, "context too long"))
 
     plan = default_plan("write python", None, "fast", pool, health)
-    assert plan.nodes[0].model == "qwen-team/MiniMax-M2.5"
+    assert plan.nodes[0].model == "9router/cline-minimax-m3"
 
 
 
@@ -213,19 +213,19 @@ def test_default_plan_skips_unhealthy_qwen_and_uses_minimax_for_coding() -> None
 
     health = WorkerHealth()
     qwen = Worker(
-        id="qwen-team/kimi-k2.7-code",
+        id="9router/cline-kimi-k2.7-code",
         tags=("coding",),
         cost_tier="budget",
         latency_tier="balanced",
-        provider="qwen-team",
+        provider="cline-pass",
         family="kimi",
     )
     minimax_code = Worker(
-        id="qwen-team/MiniMax-M2.5",
+        id="9router/cline-minimax-m3",
         tags=("coding", "planning", "synthesis"),
         cost_tier="budget",
         latency_tier="balanced",
-        provider="qwen-team",
+        provider="cline-pass",
         family="minimax",
     )
     minimax = Worker(

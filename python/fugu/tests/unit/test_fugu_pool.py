@@ -63,7 +63,7 @@ workers:
 def test_default_pool_contains_user_requested_9router_models() -> None:
     ids = {worker.id for worker in load_pool()}
 
-    assert "qwen-team/deepseek-v4-flash" in ids
+    assert "9router/cline-deepseek-v4-flash" in ids
     assert "minimax/MiniMax-M3" in ids
     assert "openrouter-free-fallback" in ids
 
@@ -75,11 +75,11 @@ def test_workers_for_skips_unhealthy_worker() -> None:
 
     health = WorkerHealth()
     qwen = Worker(
-        id="qwen-team/deepseek-v4-flash",
+        id="9router/cline-deepseek-v4-flash",
         tags=("coding",),
         cost_tier="free",
         latency_tier="fast",
-        provider="qwen-team",
+        provider="cline-pass",
         family="deepseek",
         reliability_tier="variable",
         context_tier="normal",

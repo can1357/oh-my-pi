@@ -1,16 +1,16 @@
 workers:
-  - id: qwen-team/kimi-k2.7-code
+  - id: 9router/cline-kimi-k2.7-code
     tags: [coding, planning]
     cost_tier: budget
     latency_tier: balanced
-    provider: qwen-team
+    provider: cline-pass
     family: kimi
     reliability_tier: stable
-  - id: qwen-team/MiniMax-M2.5
+  - id: 9router/cline-minimax-m3
     tags: [coding, planning, synthesis]
     cost_tier: budget
     latency_tier: balanced
-    provider: qwen-team
+    provider: cline-pass
     family: minimax
     reliability_tier: stable
   - id: cx/gpt-5.5
@@ -20,19 +20,12 @@ workers:
     provider: cx
     family: gpt
     reliability_tier: stable
-  - id: qwen-team/kimi-k2.6
+  - id: 9router/cline-kimi-k2.6
     tags: [reasoning, math, planning]
     cost_tier: budget
     latency_tier: balanced
-    provider: qwen-team
+    provider: cline-pass
     family: kimi
-    reliability_tier: stable
-  - id: qwen-team/glm-5.1
-    tags: [reasoning, math]
-    cost_tier: budget
-    latency_tier: balanced
-    provider: qwen-team
-    family: glm
     reliability_tier: stable
   - id: ag/gemini-3.5-flash-medium
     tags: [science, factual, verifier]
@@ -56,11 +49,11 @@ workers:
     family: minimax
     context_tier: long
     reliability_tier: stable
-  - id: qwen-team/deepseek-v4-flash
+  - id: 9router/cline-deepseek-v4-flash
     tags: [cheap, fast, coding, reasoning]
     cost_tier: free
     latency_tier: fast
-    provider: qwen-team
+    provider: cline-pass
     family: deepseek
     reliability_tier: variable
   - id: ag/gemini-3.5-flash-low

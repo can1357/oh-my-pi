@@ -29,7 +29,7 @@ os.environ.setdefault("OPENAI_API_BASE", "http://localhost:20128/v1")
 os.environ.setdefault("OPENAI_BASE_URL", "http://localhost:20128/v1")
 
 import litellm  # noqa: E402
-litellm.suppress_debug_info = True  # silence litellm's per-call "Provider List" banner on openrouter/ lanes
+litellm.suppress_debug_info = True  # silence litellm's per-call "Provider List" banner on routed lanes
 
 from openai import OpenAI  # noqa: E402
 from tau_bench.agents.tool_calling_agent import ToolCallingAgent  # noqa: E402
@@ -43,26 +43,26 @@ from verifier_accuracy import discrimination_accuracy  # noqa: E402
 from verifier_strategies import rank_candidates  # noqa: E402
 
 # Diverse, reliable lane pool — SIX distinct model families to widen oracle headroom (the limiter on a
-# significant fusion win): Moonshot, MiniMax, Zhipu GLM, DeepSeek, Anthropic, Google. GLM + DeepSeek route
-# via OpenRouter (provider auto-detected from the `openrouter/` prefix) since the 9router qwen-team plan is
-# expired; Claude + Gemini-Pro use the cheaper 9router-native cc/ + ag/ routes. Override with --lanes.
+# significant fusion win): Moonshot, MiniMax, Qwen, DeepSeek, Anthropic, Google. Qwen + DeepSeek route
+# via local 9router Cline aliases; Claude + Gemini-Pro use the cheaper 9router-native cc/ + ag/ routes.
+# Override with --lanes.
 LANES = ["kimi/kimi-k2.6", "minimax/MiniMax-M3",
-         "openrouter/z-ai/glm-5.1", "openrouter/deepseek/deepseek-v4-pro",
+         "cline-qwen3.7-plus", "cline-deepseek-v4-pro",
          "cc/claude-sonnet-4-6", "ag/gemini-3.1-pro-low"]
 # Extra lanes the adaptive controller may escalate to on HARD tasks (env-aware fan-out). All tool-loop-safe
 # (cx/gpt-5.5 is excluded — it breaks the multi-turn loop via litellm; it stays the verifier).
-RESERVE_POOL = ["ag/gemini-3.5-flash-low", "openrouter/z-ai/glm-4.7",
-                "openrouter/deepseek/deepseek-v3.2", "kimi/kimi-for-coding"]
+RESERVE_POOL = ["ag/gemini-3.5-flash-low", "cline-qwen3.7-plus",
+                "cline-deepseek-v4-flash", "kimi/kimi-for-coding"]
 # Per-lane FAILOVER chains: if a lane's backend crashes the rollout (retries exhausted), substitute the
-# next healthy model so the slot stays filled and the pool stays diverse + at full N. Each backup is
-# verified-working in the tool loop (via 9router or OpenRouter). Override with --lane-backups "lane=b1|b2".
+# verified-working in the tool loop (via 9router or free-provider routes). Override with --lane-backups
+# "lane=b1|b2".
 LANE_BACKUPS = {
     "kimi/kimi-k2.6": ["kimi/kimi-for-coding", "kimi/kimi-k2.5"],
     "minimax/MiniMax-M3": ["minimax/MiniMax-M2.5", "kimi/kimi-for-coding"],
-    "openrouter/z-ai/glm-5.1": ["openrouter/z-ai/glm-4.7", "minimax/MiniMax-M2.5"],
-    "openrouter/deepseek/deepseek-v4-pro": ["openrouter/deepseek/deepseek-v3.2", "kimi/kimi-for-coding"],
-    "cc/claude-sonnet-4-6": ["openrouter/anthropic/claude-sonnet-4.6", "kimi/kimi-for-coding"],
-    "ag/gemini-3.1-pro-low": ["openrouter/google/gemini-3.1-pro-preview", "minimax/MiniMax-M2.5"],
+    "cline-qwen3.7-plus": ["cline-qwen3.7-max", "minimax/MiniMax-M2.5"],
+    "cline-deepseek-v4-pro": ["cline-deepseek-v4-flash", "kimi/kimi-for-coding"],
+    "cc/claude-sonnet-4-6": ["cx/gpt-5.5", "kimi/kimi-for-coding"],
+    "ag/gemini-3.1-pro-low": ["ag/gemini-3.5-flash-low", "minimax/MiniMax-M2.5"],
     "ag/gemini-3.5-flash-low": ["minimax/MiniMax-M2.5", "kimi/kimi-for-coding"],
 }
 _client = OpenAI(base_url="http://localhost:20128/v1", api_key=_KEY, timeout=90)
@@ -103,11 +103,9 @@ def _db_diff(initial: dict, final: dict, cap: int = 320, max_lines: int = 30) ->
 
 
 def _provider_for(model: str) -> str | None:
-    """litellm provider for a lane. 9router models (kimi/, minimax/, ag/, cx/) go through the openai-
-    compatible provider at OPENAI_API_BASE. OpenRouter lanes use the bare `openrouter/<vendor>/<model>`
-    id with provider=None so litellm auto-detects the prefix (custom_llm_provider='openrouter' double-
-    prefixes and 400s). This is how GLM/DeepSeek/Qwen route around the expired 9router qwen-team plan."""
-    return None if model.startswith("openrouter/") else "openai"
+    """litellm provider for a lane. All default lanes now route through the local 9router
+    OpenAI-compatible endpoint, including bare combo aliases such as cline-qwen3.7-plus."""
+    return "openai"
 
 
 def select_lanes(lanes: list[str], n_lanes: int) -> list[str]:

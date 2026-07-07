@@ -69,7 +69,7 @@ def test_executor_auth_failure_falls_back_to_minimax(
         name = "mock"
 
         def run(self, request: AgentRunRequest) -> CandidateResult:
-            if request.model == "qwen-team/deepseek-v4-flash":
+            if request.model == "stub-auth-failure/deepseek-v4-flash":
                 raise BackendError("401 Invalid API-key")
             elif request.model == "minimax/MiniMax-M3":
                 return CandidateResult(
@@ -94,11 +94,11 @@ def test_executor_auth_failure_falls_back_to_minimax(
     from harness.fugu.health import WorkerHealth
 
     qwen = Worker(
-        id="qwen-team/deepseek-v4-flash",
+        id="stub-auth-failure/deepseek-v4-flash",
         tags=("coding",),
         cost_tier="free",
         latency_tier="fast",
-        provider="qwen-team",
+        provider="stub",
         family="deepseek",
         reliability_tier="variable",
         context_tier="normal",
@@ -122,7 +122,7 @@ def test_executor_auth_failure_falls_back_to_minimax(
         topology="single",
         nodes=[
             ScaffoldNode(
-                model="qwen-team/deepseek-v4-flash",
+                model="stub-auth-failure/deepseek-v4-flash",
                 role="worker",
                 instruction="coding task",
             )
@@ -151,7 +151,7 @@ def test_executor_auth_failure_falls_back_to_minimax(
         )
     )
     assert len(fallbacks["attempts"]) == 2
-    assert fallbacks["attempts"][0]["model"] == "qwen-team/deepseek-v4-flash"
+    assert fallbacks["attempts"][0]["model"] == "stub-auth-failure/deepseek-v4-flash"
     assert fallbacks["attempts"][0]["fallback_reason"] == "auth"
     assert fallbacks["attempts"][1]["model"] == "minimax/MiniMax-M3"
     assert fallbacks["attempts"][1]["fallback_reason"] is None
@@ -162,7 +162,7 @@ def test_executor_auth_failure_falls_back_to_minimax(
     assert metrics["fallbacks_by_reason"]["auth"] == 1
 
     assert any(
-        "fell back from qwen-team/deepseek-v4-flash to minimax/MiniMax-M3 after auth"
+        "fell back from stub-auth-failure/deepseek-v4-flash to minimax/MiniMax-M3 after auth"
         in w
         for w in state.warnings
     )
@@ -188,11 +188,11 @@ def test_executor_all_compatible_workers_fail_degrades_not_crashes(
     from harness.fugu.pool import Worker
 
     qwen = Worker(
-        id="qwen-team/deepseek-v4-flash",
+        id="stub-failure/deepseek-v4-flash",
         tags=("coding",),
         cost_tier="free",
         latency_tier="fast",
-        provider="qwen-team",
+        provider="stub",
         family="deepseek",
     )
     minimax = Worker(
@@ -214,7 +214,7 @@ def test_executor_all_compatible_workers_fail_degrades_not_crashes(
         topology="single",
         nodes=[
             ScaffoldNode(
-                model="qwen-team/deepseek-v4-flash",
+                model="stub-failure/deepseek-v4-flash",
                 role="worker",
                 instruction="coding task",
             )
@@ -239,7 +239,7 @@ def test_executor_all_compatible_workers_fail_degrades_not_crashes(
     )
     assert cand_result["status"] == "failed"
     assert (
-        "primary qwen-team/deepseek-v4-flash failed with unknown; fallback minimax/MiniMax-M3 failed with unknown"
+        "primary stub-failure/deepseek-v4-flash failed with unknown; fallback minimax/MiniMax-M3 failed with unknown"
         in cand_result["answer"]
     )
 

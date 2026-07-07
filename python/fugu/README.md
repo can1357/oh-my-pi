@@ -31,7 +31,7 @@ fugu serve --port 8088
 
 Omp provider config is available at `configs/omp_provider.yml`; merge its `providers.fugu` block into `~/.omp/agent/models.yml`, then use `fugu/fugu` or `fugu/fugu-ultra` while `fugu serve` is running.
 
-Runtime knobs: `FUGU_COORDINATOR_MODEL` (default `qwen-team/deepseek-v4-flash`), `FUGU_9ROUTER_RPM` (default `80`, `0` disables the local limiter), `FUGU_API_KEY` (optional bearer auth for `fugu serve`), `NINEROUTER_API_KEY` / `9ROUTER_API_KEY`, and `9ROUTER_BASE_URL`.
+Runtime knobs: `FUGU_COORDINATOR_MODEL` (default `9router/cline-deepseek-v4-flash`), `FUGU_9ROUTER_RPM` (default `80`, `0` disables the local limiter), `FUGU_API_KEY` (optional bearer auth for `fugu serve`), `NINEROUTER_API_KEY` / `9ROUTER_API_KEY`, and `9ROUTER_BASE_URL`.
 
 `fmh optimize` grades each candidate against its **own edited code**: the persisted
 candidate dir holds only the editable surface, but evaluation builds an ephemeral
@@ -171,13 +171,13 @@ pip install -e '.[rqgm]'
 Run a search:
 
 ```bash
-fmh rqgm search --provider fmh --backend 9router --model route-9 --budget 64  # real local 9router run
-fmh rqgm benchmark --backend 9router --model route-9 --budget 4               # seed-vs-RQGM self-improvement check
+fmh rqgm search --provider fmh --backend 9router --model omp --budget 64  # real local 9router run
+fmh rqgm benchmark --backend 9router --model omp --budget 4               # seed-vs-RQGM self-improvement check
 fmh rqgm search --provider mock --budget 64 --seed 0                          # deterministic offline test mode
 fmh rqgm inspect <run_id>                                                     # print a persisted run summary
 ```
 
-- Default search is real: `--provider fmh --backend 9router --model route-9`.
+- Default search is real: `--provider fmh --backend 9router --model omp`.
 - `--provider mock` uses the package's deterministic providers; keep it for tests/offline CI, not for self-improvement claims.
 - `--provider fmh` evolves coder/judge prompts through
   `harness.core.lifecycle.BACKENDS`; `--backend` selects the model backend

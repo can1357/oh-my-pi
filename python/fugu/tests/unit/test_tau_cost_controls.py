@@ -31,9 +31,9 @@ def test_select_lanes_zero_or_oversize_means_all(tf):
     assert tf.select_lanes(lanes, 0) is not lanes  # returns a copy, not the original list
 
 
-def test_provider_routing_openrouter_vs_9router(tf):
-    assert tf._provider_for("openrouter/z-ai/glm-5.1") is None          # litellm auto-detects the prefix
-    assert tf._provider_for("openrouter/deepseek/deepseek-v4-pro") is None
-    assert tf._provider_for("kimi/kimi-k2.6") == "openai"               # 9router openai-compatible
+def test_provider_routing_uses_9router_openai_provider(tf):
+    assert tf._provider_for("cline-qwen3.7-plus") == "openai"
+    assert tf._provider_for("cline-deepseek-v4-pro") == "openai"
+    assert tf._provider_for("kimi/kimi-k2.6") == "openai"
     assert tf._provider_for("cc/claude-sonnet-4-6") == "openai"
     assert tf._provider_for("ag/gemini-3.1-pro-low") == "openai"

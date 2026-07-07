@@ -10,9 +10,9 @@ Run the Red Queen Gödel Machine (RQGM) co-evolutionary search through the Fusio
 - Run from the `python/fugu` directory:
   `python -m harness.cli.main rqgm search $@ --json`
   (equivalently, the installed entry point: `fmh rqgm search $@ --json`)
-- If no arguments were provided, default to a real local 9router run: `--provider fmh --backend 9router --model route-9 --budget 64 --seed 0`.
+- If no arguments were provided, default to a real local 9router run: `--provider fmh --backend 9router --model omp --budget 64 --seed 0`.
 - Provider options:
-  - `--provider fmh --backend 9router --model route-9` — real prompt evolution over the local 9router gateway.
+  - `--provider fmh --backend 9router --model omp` — real prompt evolution over the local 9router gateway.
   - `--provider mock` — deterministic offline test mode only; do not use it to assess self-improvement.
   - `--provider llm --dataset <tasks.jsonl> --anchor <anchor.jsonl> --model <id>` — the package's generic OpenAI-compatible provider.
 - This requires the standalone `red-queen-godel-machine` package. If the command reports it is not installed, run (from `python/fugu`): `pip install -e ../../../red-queen-godel-machine`, then `pip install -e '.[rqgm]'`.

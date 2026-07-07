@@ -40,7 +40,7 @@ EXPLORE_DEFAULT_MODELS = [
     "kimi/kimi-k2.6",
     "minimax/MiniMax-M3",
     "ag/gemini-3.5-flash-low",
-    "qwen3.7-plus",
+    "cline-qwen3.7-plus",
     "cx/gpt-5.5",
 ]
 
