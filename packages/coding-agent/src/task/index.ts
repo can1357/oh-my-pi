@@ -230,6 +230,23 @@ export function formatResultOutputFallback(result: Pick<SingleResult, "output" |
 }
 
 /**
+ * Collapse an agent description to a single short paragraph for the task tool
+ * schema. The `<agents>` roster is re-sent in the tool description every turn,
+ * so with 50+ discovered agents the full front-matter body adds ~6–8KB of
+ * context bloat per turn. Keep only the first paragraph and cap it near 300
+ * chars so each entry stays small while remaining informative.
+ */
+export function truncateAgentDescription(description: string): string {
+	const firstParagraph = description.split(/\n\s*\n/, 1)[0] ?? "";
+	const collapsed = firstParagraph.replace(/\s*\n\s*/g, " ").trim();
+	if (collapsed.length <= 300) return collapsed;
+	const window = collapsed.slice(0, 300);
+	const lastSentence = window.lastIndexOf(". ");
+	if (lastSentence >= 80) return window.slice(0, lastSentence + 1);
+	return `${window}…`;
+}
+
+/**
  * Render the tool description from a cached agent list and current settings.
  */
 function renderDescription(
@@ -257,7 +274,7 @@ function renderDescription(
 	}
 	const renderedAgents = filteredAgents.map(agent => ({
 		name: agent.name,
-		description: agent.description,
+		description: truncateAgentDescription(agent.description),
 		readOnly: isReadOnlyAgent(agent),
 	}));
 	return prompt.render(taskDescriptionTemplate, {

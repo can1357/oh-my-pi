@@ -9,6 +9,10 @@
 - Added an embedded builtin-skills provider shipping `agentic-mapreduce`, `tree-of-thoughts`, and `promptbtw-handoff` skills compiled into the binary, served in-memory via `skill://` and `/skill:` with lowest-priority name override semantics and a `skills.enableBuiltinSkills` toggle.
 - Added prompt-btw subagent handoff mode to `/btw`: invoking "use promptbtw for subagent handoff: <raw task>" returns a structured SUBAGENT HANDOFF PROMPT instead of an answer.
 
+### Changed
+
+- Reduced per-turn context bloat: trimmed tool-prompt prose across `task`/`eval`/`browser`/`irc`/`lsp` (~−5.4k bytes / ~−1.3k tokens) by dropping schema-inferable and duplicate content while preserving RFC-2119 keywords and Handlebars structure; lowered the default `mnemopi.injectionTokenLimit` from 5000 to 2000 and added a per-item recall content cap (`MAX_RECALL_ITEM_CONTENT_CHARS = 600`); truncated agent-roster descriptions to the first paragraph (≤300 chars).
+
 ## [16.2.5] - 2026-07-02
 
 ### Added

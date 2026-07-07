@@ -2554,7 +2554,7 @@ export const SETTINGS_SCHEMA = {
 	"mnemopi.recallLimit": { type: "number", default: 8 },
 	"mnemopi.recallContextTurns": { type: "number", default: 3 },
 	"mnemopi.recallMaxQueryChars": { type: "number", default: 4000 },
-	"mnemopi.injectionTokenLimit": { type: "number", default: 5000 },
+	"mnemopi.injectionTokenLimit": { type: "number", default: 2000 },
 	"mnemopi.debug": { type: "boolean", default: false },
 
 	// Hindsight (https://hindsight.vectorize.io)
