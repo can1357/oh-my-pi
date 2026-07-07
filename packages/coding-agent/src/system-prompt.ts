@@ -104,6 +104,12 @@ const SYSTEM_PROMPT_PREP_TIMEOUT_MS = 5000;
 /** `skills.discoveryMode: "auto"` stops injecting the skill listing past this many skills. */
 export const SKILLS_LAZY_AUTO_THRESHOLD = 20;
 
+/** Per-file budget for injected context files (AGENTS.md, CLAUDE.md, …).
+ *  ~2k tokens. Files over this are still injected in full, but the session
+ *  warns so bloated context files get trimmed instead of silently taxing
+ *  every turn's prompt-cache prefix. */
+export const CONTEXT_FILE_BLOAT_WARNING_CHARS = 8_000;
+
 async function getGpuModel(): Promise<string | null> {
 	switch (process.platform) {
 		case "win32": {
@@ -593,6 +599,20 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 				error: String(error),
 			});
 		}
+	}
+	const bloatedContextFiles = contextFiles.filter(file => file.content.length > CONTEXT_FILE_BLOAT_WARNING_CHARS);
+	if (bloatedContextFiles.length > 0) {
+		const summary = bloatedContextFiles
+			.map(file => `${shortenPath(file.path)} (${Math.round(file.content.length / 1000)}KB)`)
+			.join(", ");
+		logger.warn("Context files exceed the injection budget; consider trimming them", {
+			cwd: resolvedCwd,
+			budgetChars: CONTEXT_FILE_BLOAT_WARNING_CHARS,
+			files: bloatedContextFiles.map(file => ({ path: file.path, chars: file.content.length })),
+		});
+		process.stderr.write(
+			`Warning: context file(s) over ${CONTEXT_FILE_BLOAT_WARNING_CHARS / 1000}KB injected into every request: ${summary}. Trim them to cut per-turn tokens.\n`,
+		);
 	}
 
 	const date = new Date().toISOString().slice(0, 10);

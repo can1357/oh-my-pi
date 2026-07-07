@@ -35,14 +35,19 @@ describe("effective discovery mode resolution", () => {
 		expect(resolveEffectiveMode(s)).toBe("off");
 	});
 
-	it("default auto settings stay off at the threshold", () => {
+	it("default settings resolve to all (lean prompt, everything discoverable)", () => {
 		const s = Settings.isolated({});
-		expect(s.get("tools.discoveryMode")).toBe("auto");
+		expect(s.get("tools.discoveryMode")).toBe("all");
+		expect(resolveEffectiveMode(s)).toBe("all");
+	});
+
+	it("explicit auto stays off at the threshold", () => {
+		const s = Settings.isolated({ "tools.discoveryMode": "auto" });
 		expect(resolveEffectiveMode(s, TOOL_DISCOVERY_AUTO_THRESHOLD)).toBe("off");
 	});
 
-	it("default auto settings enable mcp-only above the threshold", () => {
-		const s = Settings.isolated({});
+	it("explicit auto enables mcp-only above the threshold", () => {
+		const s = Settings.isolated({ "tools.discoveryMode": "auto" });
 		expect(resolveEffectiveMode(s, TOOL_DISCOVERY_AUTO_THRESHOLD + 1)).toBe("mcp-only");
 	});
 });

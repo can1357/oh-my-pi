@@ -521,18 +521,34 @@ export class Settings {
 	}
 
 	/**
-	 * Get a model role (helper for modelRoles record).
+	 * Role map from the active `agent.profile`, or empty when none is set.
+	 * Profiles seed defaults UNDER explicit `modelRoles` (per-role explicit wins).
 	 */
-	getModelRole(role: ModelRole | string): string | undefined {
-		const roles = this.get("modelRoles");
-		return roles[role];
+	#getActiveProfileRoles(): ReadOnlyDict<string> {
+		const profileName = this.get("agent.profile");
+		if (!profileName) return {};
+		const profiles = this.get("agent.profiles") as Record<string, ReadOnlyDict<string>>;
+		const profile = profiles[profileName];
+		return profile && typeof profile === "object" ? profile : {};
 	}
 
 	/**
-	 * Get all model roles (helper for modelRoles record).
+	 * Get a model role (helper for modelRoles record). Explicit `modelRoles`
+	 * wins; the active `agent.profile` is the fallback so a named profile can
+	 * retarget every role-resolving agent slot at once.
+	 */
+	getModelRole(role: ModelRole | string): string | undefined {
+		const explicit = this.get("modelRoles")[role];
+		if (explicit) return explicit;
+		return this.#getActiveProfileRoles()[role];
+	}
+
+	/**
+	 * Get all model roles (helper for modelRoles record). Explicit `modelRoles`
+	 * entries override the active profile per-role.
 	 */
 	getModelRoles(): ReadOnlyDict<string> {
-		return { ...this.get("modelRoles") };
+		return { ...this.#getActiveProfileRoles(), ...this.get("modelRoles") };
 	}
 
 	/*

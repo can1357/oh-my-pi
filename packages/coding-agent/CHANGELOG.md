@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added `agent.profile` and `agent.profiles` settings for named, swappable role-based model bundles that retarget every role-resolving agent slot at once (explicit `modelRoles` still wins per-role).
+
 - Added an Agentic MapReduce backbone for deterministic selector execution, evidence-graph sharding, bounded scheduling, reducer-tree aggregation, and concurrency/cost modeling.
 - Added bundled `mr-worker`, `mr-reducer`, and `tot-reasoner` agents implementing Agentic MapReduce map/reduce phases and Tree-of-Thoughts reasoning as builtin task-agent types.
 - Added an embedded builtin-skills provider shipping `agentic-mapreduce`, `tree-of-thoughts`, and `promptbtw-handoff` skills compiled into the binary, served in-memory via `skill://` and `/skill:` with lowest-priority name override semantics and a `skills.enableBuiltinSkills` toggle.
@@ -11,6 +13,9 @@
 
 ### Changed
 
+- Changed default `tools.discoveryMode` from `auto` to `all`, keeping only essential built-in tools (`read`, `bash`, `edit`, `find`, `search`, `write`, `todo`) active on session start; non-essential tools remain accessible via `search_tool_bm25`.
+- Added a context-file injection warning when an injected project context file (e.g., `AGENTS.md`, `CLAUDE.md`) exceeds 8KB.
+- Pruned `AGENTS.md` to ~7.2KB and added a maintenance rule to keep it under the 8KB injection budget.
 - Reduced per-turn context bloat: trimmed tool-prompt prose across `task`/`eval`/`browser`/`irc`/`lsp` (~−5.4k bytes / ~−1.3k tokens) by dropping schema-inferable and duplicate content while preserving RFC-2119 keywords and Handlebars structure; lowered the default `mnemopi.injectionTokenLimit` from 5000 to 2000 and added a per-item recall content cap (`MAX_RECALL_ITEM_CONTENT_CHARS = 600`); truncated agent-roster descriptions to the first paragraph (≤300 chars).
 - Changed the `fusion.sidekickRequestBudget` default from `0` (unlimited) to `40`, bounding the warm Fusion sidekick's model requests per delegated turn by default as a runaway-loop guardrail; ordinary subagents are unaffected and `0` still means unlimited.
 - Trimmed a second pass of tool-prompt prose across `read`/`bash`/`apply-patch`/`patch`/`todo`/`ast-grep`/`github`, dropping schema-inferable and duplicate content while preserving RFC-2119 keywords and Handlebars structure.

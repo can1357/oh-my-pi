@@ -374,8 +374,18 @@ export type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool |
 
 export type BuiltinToolLoadMode = "essential" | "discoverable";
 
-/** Default essential tool names when tools.essentialOverride is empty. */
-export const DEFAULT_ESSENTIAL_TOOL_NAMES: readonly string[] = ["read", "bash", "edit"] as const;
+/** Default essential tool names when tools.essentialOverride is empty.
+ *  Kept active under `tools.discoveryMode: "all"`: the cheap, high-frequency
+ *  core set. Everything else stays accessible via `search_tool_bm25`. */
+export const DEFAULT_ESSENTIAL_TOOL_NAMES: readonly string[] = [
+	"read",
+	"bash",
+	"edit",
+	"find",
+	"search",
+	"write",
+	"todo",
+] as const;
 
 /**
  * Resolve the active essential built-in tool names from settings.

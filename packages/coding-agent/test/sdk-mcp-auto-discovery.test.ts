@@ -82,7 +82,7 @@ describe("createAgentSession deferred MCP auto discovery", () => {
 		agentDir: tempDir,
 		modelRegistry,
 		sessionManager: SessionManager.inMemory(),
-		settings: Settings.isolated({}),
+		settings: Settings.isolated({ "tools.discoveryMode": "auto" }),
 		model: getBundledModel("openai", "gpt-4o-mini"),
 		disableExtensionDiscovery: true,
 		skills: [],

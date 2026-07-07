@@ -461,6 +461,36 @@ export const SETTINGS_SCHEMA = {
 
 	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
 
+	// Named, swappable bundles of model roles — "optimal model per agent slot"
+	// presets. Each profile is a role->model-selector map (same keys as
+	// `modelRoles`). When `agent.profile` names an entry here, its role map is
+	// applied UNDER explicit `modelRoles` (per-role explicit always wins), so
+	// every agent that resolves through a role (`pi/smol`, `pi/task`, …)
+	// retargets at once. Per-slot exceptions still use `task.agentModelOverrides`.
+	"agent.profile": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "model",
+			group: "Agent Model Profiles",
+			label: "Active Agent Profile",
+			description:
+				"Name of a profile under `agent.profiles` to activate. Empty disables profiles. Explicit `model.*` role settings still override the profile.",
+		},
+	},
+
+	"agent.profiles": {
+		type: "record",
+		default: {} as Record<string, Record<string, string>>,
+		ui: {
+			tab: "model",
+			group: "Agent Model Profiles",
+			label: "Agent Model Profiles",
+			description:
+				"Named role->model maps, e.g. `frugal: { smol: nvidia/…, task: …, slow: … }`. Activate one via `agent.profile`.",
+		},
+	},
+
 	modelProviderOrder: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	cycleOrder: { type: "array", default: DEFAULT_CYCLE_ORDER },
@@ -3672,13 +3702,13 @@ export const SETTINGS_SCHEMA = {
 	"tools.discoveryMode": {
 		type: "enum",
 		values: ["auto", "off", "mcp-only", "all"] as const,
-		default: "auto",
+		default: "all",
 		ui: {
 			tab: "tools",
 			group: "Discovery & MCP",
 			label: "Tool Discovery",
 			description:
-				"Hide tools behind a search tool to save tokens. 'auto' hides MCP tools once the tool set has more than 40 tools; 'mcp-only' always hides MCP tools; 'all' hides all non-essential built-ins too.",
+				"Hide tools behind a search tool to save tokens. 'all' (default) hides all non-essential built-ins and MCP tools; 'auto' hides MCP tools once the tool set has more than 40 tools; 'mcp-only' always hides MCP tools; 'off' sends everything.",
 		},
 	},
 
@@ -3690,7 +3720,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "Essential Tools Override",
 			description:
-				"Override the always-loaded built-in tools (default: read, bash, edit). Leave empty to use defaults.",
+				"Override the always-loaded built-in tools (default: read, bash, edit, find, search, write, todo). Leave empty to use defaults.",
 		},
 	},
 
