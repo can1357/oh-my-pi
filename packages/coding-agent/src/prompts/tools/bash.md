@@ -1,45 +1,30 @@
 Runs bash in a shell session — terminal ops: git, bun, cargo, python.
 
 <instruction>
-- `cwd` sets the working dir, not `cd dir && …`
-- `env: { NAME: "…" }` for multiline / quote-heavy / untrusted values; reference `$NAME`
-- Quote expansions (`"$NAME"`) to preserve exact content
-- `pty: true` only when the command needs a real terminal (`sudo`, `ssh` needing input); default `false`
-- `;` only when later commands should run despite earlier failures
-- Multiple bash calls per message run concurrently. NEVER split order-dependent commands across parallel calls — chain with `&&` in one call.
-- Internal URIs (`skill://`, `agent://`, …) auto-resolve to FS paths
+- `cwd` sets the working dir; `env: { NAME: "…" }` for multiline/quote-heavy values (reference `$NAME`, quote `"$NAME"` to preserve content). `pty: true` only when a real terminal is needed (`sudo`, interactive `ssh`).
+- `;` only when later commands must run despite earlier failures — chain order-dependent commands in ONE call with `&&`; NEVER split across parallel calls. Internal URIs (`skill://`, `agent://`, …) auto-resolve to FS paths.
 {{#if asyncEnabled}}
-- `async: true` for long-running commands when you don't need immediate output: returns a background job ID; result delivered as a follow-up.
+- `async: true` runs in background; result delivered as a follow-up tool call.
 {{/if}}
 </instruction>
 
 <critical>
 - NEVER shell out to fetch, display, list, page, or search what a dedicated tool serves: `cat`/`head`/`tail`/`less`/`more`/`ls` → `read`; `grep`/`rg`/`ag`/`ack` → `search`; `find`/`fd` → `find`; `sed -i`/`perl -i`/`awk -i` → `edit`; `echo >`/heredoc → `write`. Tools keep gitignore semantics, line anchors, structured output shell loses.
-- NEVER trim or silence output: no `| head -n N`, `| tail -n N`, `| less`, `2>&1`, `2>/dev/null`. stderr already merged; long output auto-truncated, FULL capture kept at `artifact://<id>`.
-- Pipelines that COMPUTE a new fact are correct bash: `wc -l`, `sort | uniq -c`, `comm`, `cut`, `diff a b`, `shasum`. Litmus: produces a count, frequency table, set difference, or checksum no tool returns → bash. Merely moves or trims bytes a tool can fetch → use the tool.
+- NEVER trim or silence output: no `| head -n N`, `| tail -n N`, `| less`, `2>&1`, `2>/dev/null`. stderr already merged; long output auto-truncated, FULL capture kept at `artifact://<id>`. Test/lint output filtered to failures; a `[raw output: artifact://<id>]` footer links the full capture when visible text changed. No footer = output is unchanged; read the artifact if a run looks suspicious or you need exact bytes.
 </critical>
 
-<output>
-- Returns output; exit code shown on non-zero exit.
-- Truncated output → `artifact://<id>` (linked in metadata).
-</output>
 
 {{#if asyncEnabled}}
 # Timeout and async
 
-- `timeout` (seconds) caps wall-clock duration; the process is killed on elapse.
-- `async: true` defers only reporting — it does NOT extend the timeout; a daemon run with `async: true` is still killed when `timeout` elapses.
-- Long-running daemons (dev servers, watchers): pass a large explicit `timeout`. The shell session persists across calls, so `cmd &` keeps running between bash calls.
+- `timeout` (seconds) caps wall-clock; process killed on elapse.
+- `async: true` defers reporting only — does NOT extend `timeout`; daemons are still killed when `timeout` elapses.
+- Long-running daemons (dev servers, watchers): pass a large explicit `timeout`. The session persists, so `cmd &` keeps running across calls.
 {{/if}}
 {{#if autoBackgroundEnabled}}
 
 ## Auto-background
 
-- A long-running foreground call may convert to a background job; the final result arrives as a follow-up tool call. NOT a failure — don't retry or wait synchronously.
+- A foreground call may convert to a background job; the result arrives as a follow-up tool call — NOT a failure, do NOT retry or wait synchronously.
 - Need the result inline (e.g. piping into another command)? Raise `timeout` above expected duration{{#if asyncEnabled}}, or set `async: true` up front{{/if}}.
 {{/if}}
-
-# Output minimizer
-
-- Long output truncated; test/lint runner output filtered to failures. When visible text changed, a `[raw output: artifact://<id>]` footer links the full capture — read it if a run looks suspicious or you need exact bytes.
-- No footer = what you see is exactly what the command emitted.

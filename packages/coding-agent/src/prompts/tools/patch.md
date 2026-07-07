@@ -12,34 +12,12 @@ Patches files given diff hunks. Primary tool for existing-file edits.
    - config key with uncommon name
 2. On "Found multiple matches": add context lines, use multiple hunks with separate anchors, or use longer anchor substring
 **Context Lines:**
-Use enough ` `-prefixed lines to make match unique (usually 2–8)
-When editing structured blocks (nested braces, tags, indented regions), include opening and closing lines so edit stays inside block
+Use enough ` `-prefixed lines to make match unique (usually 2–8). For nested braces/tags/indented regions, include opening and closing lines so the edit stays inside the block.
 </instruction>
 
 <parameters>
-```ts
-// Input is { path: string, edits: Entry[] }. `path` is required and applies to every entry.
-type Entry =
-   // Diff is one or more hunks for the top-level path.
-   // - Each hunk begins with "@@" (anchor optional).
-   // - Each hunk body only has lines starting with ' ' | '+' | '-'.
-   // - Each hunk includes at least one change (+ or -).
-   | { op: "update", diff: string }
-   // Diff is full file content, no prefixes.
-   | { op: "create", diff: string }
-   // No diff for delete.
-   | { op: "delete" }
-   // New path for update+move from the top-level path.
-   | { op: "update", rename: string, diff: string }
-```
+Per entry: `{ op, [rename,] diff }` where `op` is `"create" | "delete" | "update"`, `rename` is the new path (update only), and `diff` is the hunk body (only `' '|'+'|'-'` prefixed lines, each hunk containing at least one `+` or `-`).
 </parameters>
-
-<output>
-Returns success/failure; on failure, error message indicates:
-- "Found multiple matches" — anchor/context not unique enough
-- "No match found" — context lines don't exist in file (wrong content or stale read)
-- Syntax errors in diff format
-</output>
 
 <critical>
 - You MUST read the target file before editing

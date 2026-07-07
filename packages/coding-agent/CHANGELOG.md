@@ -12,6 +12,8 @@
 ### Changed
 
 - Reduced per-turn context bloat: trimmed tool-prompt prose across `task`/`eval`/`browser`/`irc`/`lsp` (~−5.4k bytes / ~−1.3k tokens) by dropping schema-inferable and duplicate content while preserving RFC-2119 keywords and Handlebars structure; lowered the default `mnemopi.injectionTokenLimit` from 5000 to 2000 and added a per-item recall content cap (`MAX_RECALL_ITEM_CONTENT_CHARS = 600`); truncated agent-roster descriptions to the first paragraph (≤300 chars).
+- Changed the `fusion.sidekickRequestBudget` default from `0` (unlimited) to `40`, bounding the warm Fusion sidekick's model requests per delegated turn by default as a runaway-loop guardrail; ordinary subagents are unaffected and `0` still means unlimited.
+- Trimmed a second pass of tool-prompt prose across `read`/`bash`/`apply-patch`/`patch`/`todo`/`ast-grep`/`github`, dropping schema-inferable and duplicate content while preserving RFC-2119 keywords and Handlebars structure.
 
 ### Fixed
 

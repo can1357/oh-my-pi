@@ -1,39 +1,30 @@
-**Tasks referenced by verbatim content string, NEVER an auto-generated ID — no "task-1"/"task-N" exists. Pass the content text in the `task` field.**
+**Reference tasks by verbatim content string, NEVER an auto-generated ID; pass content in `task`.**
 
-Manages a phased task list. Pass `ops`: flat array of operations. Next pending task auto-promotes to `in_progress` on each completion. `pending` is a status, not an `op` — leave not-yet-started tasks implicit in `init`/`append`.
+Next pending task auto-promotes to `in_progress` on completion; `pending` is a status (not an `op`) — leave not-yet-started tasks implicit in `init`/`append`.
 
 ## Operations
 
 |`op`|Required fields|Effect|
-|---|---|---|
-|`init`|`list: [{phase, items: string[]}]`|Initialize full list (replaces existing)|
-|`init`|`items: string[]`|Flattened single-phase init|
-|`start`|`task`|Mark in progress|
-|`done`|`task` or `phase`|Mark completed|
-|`drop`|`task` or `phase`|Mark abandoned|
-|`rm`|`task` or `phase` (optional)|Remove task or phase's tasks; omit both to clear the list|
-|`append`|`phase`, `items: string[]`|Append tasks to `phase`; lazily creates phase|
+|`init`|`list: [{phase, items}]`|Initialize full list (replaces existing)|
+|`start`|`task`|Set `in_progress`|
+|`done`|`task` or `phase`|Set `completed`|
+|`drop`|`task` or `phase`|Set `abandoned`|
+|`rm`|`task`/`phase` (omit both → clear)|Remove|
+|`append`|`phase`, `items`|Append tasks; lazily creates phase|
 |`view`|—|Read-only: echo the list, no modify|
 
 ## Anatomy
-- **Task content**: 5–10 words; what, not how. Unique identifier.
-- **Phase name**: short noun phrase (e.g. `Foundation`, `Auth`, `Verification`). Unique identifier. NEVER prefix `1.`, `A)`, `Phase 1:`.
+- **Task content**: 5–10 words; what, not how; unique identifier.
+- **Phase name**: short noun phrase (e.g. `Foundation`, `Auth`); unique identifier. NEVER prefix with `1.`, `A)`, or `Phase 1:`.
 
 ## Rules
-- Mark tasks done immediately after finishing.
-- Complete phases in order.
-- Blocked? `append` a task to the active phase to unblock, or `drop`.
-- Keep `task`/`phase` strings stable once introduced.
-- Lost the exact task text? `view` echoes the list — NEVER guess from memory; a mismatched `task` string is an error.
-
-## When to create a list
-- Task requires 3+ distinct steps
-- User explicitly requests one
-- User provides a set of tasks
-- New instructions arrive mid-task — capture before proceeding
+- Create a list for 3+ step tasks, user-provided sets, or mid-task new instructions.
+- Complete phases in order; keep `task`/`phase` strings stable.
+- Blocked? `append` to active phase, or `drop`.
+- Lost exact text? `view` echoes — NEVER guess; mismatched `task` is an error.
 
 <critical>
-User hands you a multi-step plan — phased todo, numbered/bulleted checklist, or "N bugs/items/tasks":
-- You MUST `init` the list with EVERY item as its own task before working.
-- Enumerate all; NEVER summarize into fewer tasks, sample "the important ones", drop items, or track the rest from memory.
+Multi-step plan (phased todo, numbered/bulleted checklist, or "N bugs/items/tasks"):
+- You MUST `init` with EVERY item as its own task before working.
+- Enumerate all; NEVER summarize, sample "the important ones", drop items, or track the rest from memory.
 </critical>

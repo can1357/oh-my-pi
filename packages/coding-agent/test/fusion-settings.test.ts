@@ -8,7 +8,7 @@ describe("fusion settings schema", () => {
 		expect(SETTINGS_SCHEMA["fusion.mode"].default).toBe("escalate");
 		// Phase 3 main-model downgrade is opt-in: empty selector disables it.
 		expect(SETTINGS_SCHEMA["fusion.compactModel"].default).toBe("");
-		expect(SETTINGS_SCHEMA["fusion.sidekickRequestBudget"].default).toBe(0);
+		expect(SETTINGS_SCHEMA["fusion.sidekickRequestBudget"].default).toBe(40);
 		expect(SETTINGS_SCHEMA["fusion.showSavings"].default).toBe(true);
 		// Dynamic routing and the tier pool are opt-in.
 		expect(SETTINGS_SCHEMA["fusion.dynamicRouting"].default).toBe(false);

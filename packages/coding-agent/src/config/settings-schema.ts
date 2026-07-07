@@ -889,7 +889,7 @@ export const SETTINGS_SCHEMA = {
 
 	"fusion.sidekickRequestBudget": {
 		type: "number",
-		default: 0,
+		default: 40,
 		ui: {
 			tab: "interaction",
 			group: "Fusion",
