@@ -32,6 +32,8 @@ import type { AgentSession, FreshSessionResult } from "../session/agent-session"
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { urlHyperlinkAlways } from "../tui";
+import { applyNineRouterRouting, type NineRouterRoutingResult } from "../config/nine-router-controller";
+
 import { getChangelogPath, parseChangelog } from "../utils/changelog";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
 import { buildContextReportText } from "./helpers/context-report";
@@ -2663,6 +2665,29 @@ export function lookupBuiltinSlashCommand(name: string): SlashCommandSpec | unde
 }
 
 export type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime, SlashCommandSpec, TuiSlashCommandRuntime };
+
+function renderNineRouterRoutes(result: NineRouterRoutingResult): string {
+	const lines = result.routes.map(
+		route =>
+			`${route.role}: ${route.selected ?? "unrouted"} (${route.available.length}/${route.candidates.length} available, ${route.probed.length} probed)`,
+	);
+	if (result.errors.length > 0) {
+		lines.push(...result.errors.map(error => `error: ${error}`));
+	}
+	if (result.routes.some(r => r.selected === null)) {
+		lines.push("Some roles could not be routed. Check that 9router is running and the combo names are configured.");
+	}
+	return lines.join("\n");
+}
+
+async function runNineRouterSlashCommand(
+	settings: Settings,
+	mode: "list" | "probe",
+	output: (text: string) => void | Promise<void>,
+): Promise<void> {
+	const result = await applyNineRouterRouting(settings, { mode });
+	await output(renderNineRouterRoutes(result));
+}
 
 async function handleCatGptCommand(
 	promptText: string,
