@@ -1,4 +1,6 @@
 // Core Agent
+
+export * from "./acceleration";
 export * from "./agent";
 // Loop functions
 export * from "./agent-loop";
@@ -20,6 +22,5 @@ export * from "./thinking";
 export * from "./tokenizer";
 // Types
 export * from "./types";
-export * from "./acceleration";
 // Yield utilities for Bun event-loop busy-wait prevention
 export * from "./utils/yield";

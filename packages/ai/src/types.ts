@@ -557,6 +557,12 @@ export interface ToolResultMessage<TDetails = any> {
 	 * Never set together with isError.
 	 */
 	useless?: boolean;
+	/**
+	 * Compaction-declared: this result has been acted upon by a later assistant
+	 * turn and may be replaced with a placeholder while preserving the action
+	 * history. Set only by pruning passes; never set by tools.
+	 */
+	consumed?: boolean;
 	timestamp: number; // Unix timestamp in milliseconds
 }
 

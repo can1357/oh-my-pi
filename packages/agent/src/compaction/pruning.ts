@@ -422,3 +422,95 @@ export function readToolSupersedeKey(toolName: string, args: Record<string, unkn
 	const { path: base, sel } = splitReadSelector(path);
 	return sel === undefined ? base : `${base}\u0000${sel}`;
 }
+/** Placeholder written over a tool result that has been consumed by a later assistant turn. */
+export function createConsumedNotice(toolName: string): string {
+	return `[${toolName} result consumed]`;
+}
+
+interface ConsumedCandidate {
+	entry: SessionMessageEntry;
+	message: ToolResultMessage;
+	index: number;
+	tokens: number;
+	notice: string;
+}
+
+/**
+ * Collect tool results that have been consumed by a later assistant turn:
+ * unpruned, non-error, non-useless, unprotected, and large enough that blanking
+ * to a consumed notice actually saves tokens. A result is consumed only when
+ * there is at least one assistant message after it, meaning the model has had
+ * a chance to act on it.
+ */
+function collectConsumedResults(
+	entries: readonly SessionEntry[],
+	toolCallsById: ReadonlyMap<string, AgentToolCall>,
+	protectedTools: readonly ProtectedToolMatcher[],
+): ConsumedCandidate[] {
+	const candidates: ConsumedCandidate[] = [];
+	const assistantIndices: number[] = [];
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i];
+		if (entry.type !== "message") continue;
+		const message = entry.message as AgentMessage;
+		if (message.role === "assistant") assistantIndices.push(i);
+	}
+	if (assistantIndices.length === 0) return candidates;
+
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i];
+		const message = getToolResultMessage(entry);
+		if (!message || message.prunedAt !== undefined || message.isError === true || message.useless === true) continue;
+		if (isProtectedToolResult(message, toolCallsById.get(message.toolCallId), protectedTools)) continue;
+		const hasLaterAssistant = assistantIndices.some(idx => idx > i);
+		if (!hasLaterAssistant) continue;
+		const notice = createConsumedNotice(message.toolName);
+		const tokens = estimateTokens(message as AgentMessage);
+		if (estimatePrunedSavings(tokens, notice) <= 0) continue;
+		candidates.push({ entry: entry as SessionMessageEntry, message, index: i, tokens, notice });
+	}
+	return candidates;
+}
+
+/**
+ * Mask tool results that have already been consumed by a later assistant turn
+ * with short, deterministic placeholders. Preserves reasoning traces and action
+ * history; only the verbose observation content is replaced. Respects the same
+ * compaction boundary and prompt-cache guards as the other prune passes.
+ */
+export function maskConsumedObservations(
+	entries: SessionEntry[],
+	protectedTools: readonly ProtectedToolMatcher[],
+	keepBoundaryId?: string,
+	cacheWarmSuffixTokens?: number,
+): PruneResult {
+	const toolCallsById = collectToolCallsById(entries);
+	const candidates = collectConsumedResults(entries, toolCallsById, protectedTools);
+	if (candidates.length === 0) return { prunedCount: 0, tokensSaved: 0 };
+
+	const boundaryIndex = resolveBoundaryIndex(entries, keepBoundaryId);
+	const messageSuffix = cacheWarmSuffixTokens === undefined ? undefined : computeMessageSuffixTokens(entries);
+
+	const toPrune = candidates.filter(candidate => {
+		if (candidate.index < boundaryIndex) return false;
+		if (
+			messageSuffix !== undefined &&
+			cacheWarmSuffixTokens !== undefined &&
+			messageSuffix[candidate.index] > cacheWarmSuffixTokens
+		) {
+			return false;
+		}
+		return true;
+	});
+	if (toPrune.length === 0) return { prunedCount: 0, tokensSaved: 0 };
+
+	const prunedAt = Date.now();
+	let tokensSaved = 0;
+	for (const candidate of toPrune) {
+		candidate.message.content = [{ type: "text", text: candidate.notice }];
+		candidate.message.prunedAt = prunedAt;
+		candidate.message.consumed = true;
+		tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
+	}
+	return { prunedCount: toPrune.length, tokensSaved };
+}

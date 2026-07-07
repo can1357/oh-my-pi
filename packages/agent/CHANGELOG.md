@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `maskConsumedObservations()` pruning pass that deterministically replaces tool results the model has already acted on with `[<toolName> result consumed]` placeholders, preserving reasoning traces and action history. Marks masked entries via `ToolResultMessage.consumed` so downstream consumers (compaction boundary tracking, transcript rebuilds, telemetry) can tell the observation was elided rather than dropped.
+
+### Changed
+
+- Sorted barrel exports in `src/index.ts` alphabetically (Biome `assist/source/organizeImports`).
+
 ## [16.2.3] - 2026-07-02
 
 ### Added

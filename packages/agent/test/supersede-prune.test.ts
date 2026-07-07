@@ -3,6 +3,7 @@ import type { AgentMessage } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { SessionEntry, SessionMessageEntry } from "@pk-nerdsaver-ai/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
+	maskConsumedObservations,
 	pruneSupersededToolResults,
 	pruneToolOutputs,
 	readToolSupersedeKey,
@@ -10,6 +11,7 @@ import {
 	type SupersedePruneConfig,
 	USELESS_NOTICE,
 } from "@pk-nerdsaver-ai/pi-agent-core/compaction";
+
 import type { ProtectedToolContext } from "@pk-nerdsaver-ai/pi-agent-core/compaction/tool-protection";
 import type { AssistantMessage, TextContent, ToolResultMessage } from "@pk-nerdsaver-ai/pi-ai";
 
@@ -39,6 +41,38 @@ function assistantMessage(content: AssistantMessage["content"], timestamp: numbe
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 		stopReason: "stop",
+	};
+}
+function userMessage(text: string, timestamp: number): AgentMessage {
+	return {
+		role: "user",
+		content: [{ type: "text", text }],
+		timestamp,
+	};
+}
+
+function toolCallMessage(
+	toolName: string,
+	toolCallId: string,
+	arguments_: Record<string, unknown>,
+	timestamp: number,
+): AgentMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "toolCall", id: toolCallId, name: toolName, arguments: arguments_ }],
+		timestamp,
+		provider: "mock",
+		model: "mock",
+		api: "mock",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "toolUse",
 	};
 }
 
@@ -653,5 +687,87 @@ describe("cache-stable boundary — warm prefix protection", () => {
 		expect(resultText(result1)).toBe(FILE_CONTENT); // before boundary -> untouched
 		expect(resultMessage(result1).prunedAt).toBeUndefined();
 		expect(resultMessage(result2).prunedAt).toBeDefined(); // at/after boundary, in tail -> pruned
+	});
+});
+
+describe("maskConsumedObservations", () => {
+	test("masks a tool result once a later assistant turn has consumed it", () => {
+		const entries: SessionEntry[] = [
+			messageEntry(userMessage("do something", T0), T0),
+			messageEntry(toolCallMessage("bash", "bash-1", { command: "echo done" }, T0 + 1), T0 + 1),
+			messageEntry(toolResultMessage("bash", "bash-1", BIG_TEXT, T0 + 2), T0 + 2),
+			textEntry("Done.", T0 + 3),
+		];
+
+		const result = maskConsumedObservations(entries, []);
+
+		expect(result.prunedCount).toBe(1);
+		expect(result.tokensSaved).toBeGreaterThan(0);
+		expect(resultText(entries[2])).toBe("[bash result consumed]");
+		expect(resultMessage(entries[2]).prunedAt).toBeTypeOf("number");
+		expect(resultMessage(entries[2]).consumed).toBe(true);
+	});
+
+	test("does not mask a tool result that is still the latest turn", () => {
+		const entries: SessionEntry[] = [
+			messageEntry(userMessage("do something", T0), T0),
+			messageEntry(toolCallMessage("bash", "bash-1", { command: "echo done" }, T0 + 1), T0 + 1),
+			messageEntry(toolResultMessage("bash", "bash-1", BIG_TEXT, T0 + 2), T0 + 2),
+		];
+
+		const result = maskConsumedObservations(entries, []);
+
+		expect(result.prunedCount).toBe(0);
+		expect(resultText(entries[2])).toBe(BIG_TEXT);
+	});
+
+	test("does not mask errors or useless results", () => {
+		const entries: SessionEntry[] = [
+			messageEntry(userMessage("do something", T0), T0),
+			messageEntry(toolCallMessage("bash", "bash-1", { command: "echo done" }, T0 + 1), T0 + 1),
+			messageEntry({ ...toolResultMessage("bash", "bash-1", BIG_TEXT, T0 + 2), isError: true }, T0 + 2),
+			messageEntry(toolCallMessage("bash", "bash-2", { command: "echo done" }, T0 + 3), T0 + 3),
+			messageEntry({ ...toolResultMessage("bash", "bash-2", BIG_TEXT, T0 + 4), useless: true }, T0 + 4),
+			textEntry("Done.", T0 + 5),
+		];
+
+		const result = maskConsumedObservations(entries, []);
+
+		expect(result.prunedCount).toBe(0);
+		expect(resultText(entries[2])).toBe(BIG_TEXT);
+		expect(resultText(entries[4])).toBe(BIG_TEXT);
+	});
+
+	test("respects protected tool matchers", () => {
+		const entries: SessionEntry[] = [
+			messageEntry(userMessage("do something", T0), T0),
+			messageEntry(toolCallMessage("bash", "bash-1", { command: "echo done" }, T0 + 1), T0 + 1),
+			messageEntry(toolResultMessage("bash", "bash-1", BIG_TEXT, T0 + 2), T0 + 2),
+			textEntry("Done.", T0 + 3),
+		];
+
+		const result = maskConsumedObservations(entries, ["bash"]);
+
+		expect(result.prunedCount).toBe(0);
+		expect(resultText(entries[2])).toBe(BIG_TEXT);
+	});
+
+	test("respects the compaction boundary", () => {
+		const before = readPair("src/foo.ts", BIG_TEXT, T0 + 1);
+		const afterId = nextId();
+		const after: SessionEntry[] = [
+			messageEntry(userMessage("next", T0 + 2), T0 + 2),
+			messageEntry(toolCallMessage("bash", "bash-1", { command: "echo done" }, T0 + 3), T0 + 3),
+			messageEntry(toolResultMessage("bash", "bash-1", BIG_TEXT, T0 + 4), T0 + 4),
+			textEntry("Done.", T0 + 5),
+		];
+		after[0].id = afterId;
+		const entries: SessionEntry[] = [...before, ...after];
+
+		const result = maskConsumedObservations(entries, [], afterId);
+
+		expect(result.prunedCount).toBe(1);
+		expect(resultText(entries[entries.length - 2])).toBe("[bash result consumed]");
+		expect(resultMessage(before[1]).prunedAt).toBeUndefined();
 	});
 });
