@@ -13,6 +13,10 @@
 
 - Reduced per-turn context bloat: trimmed tool-prompt prose across `task`/`eval`/`browser`/`irc`/`lsp` (~−5.4k bytes / ~−1.3k tokens) by dropping schema-inferable and duplicate content while preserving RFC-2119 keywords and Handlebars structure; lowered the default `mnemopi.injectionTokenLimit` from 5000 to 2000 and added a per-item recall content cap (`MAX_RECALL_ITEM_CONTENT_CHARS = 600`); truncated agent-roster descriptions to the first paragraph (≤300 chars).
 
+### Fixed
+
+- Serialized editor submit handling so a fast double-Enter can't race concurrent submit handlers: a second empty Enter previously read `queuedMessageCount` before a steer finished registering it and no-op'd instead of flushing.
+
 ## [16.2.5] - 2026-07-02
 
 ### Added

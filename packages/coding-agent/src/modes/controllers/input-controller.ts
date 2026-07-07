@@ -131,6 +131,13 @@ export class InputController {
 	// Sequential index for `local://attachment-N` references created by the large-paste local-file
 	// action. Seeded from 0 and bumped past any existing attachment files in #attachPasteAsFile.
 	#attachmentCounter = 0;
+	// Serializes editor submit handling. editor.onSubmit is dispatched
+	// fire-and-forget (tui editor.ts), so without this a fast second (empty)
+	// Enter runs a concurrent handler and races shared submit state — e.g. a
+	// steer still registering into the agent queue when the empty Enter reads
+	// queuedMessageCount (still 0) and no-ops instead of flushing. Chaining each
+	// submit onto the previous makes successive Enters strictly sequential.
+	#submitChain: Promise<void> = Promise.resolve();
 
 	#showTinyTitleDownloadProgress(modelKey: string): void {
 		if (!isTinyTitleLocalModelKey(modelKey)) return;
@@ -502,7 +509,7 @@ export class InputController {
 	}
 
 	setupEditorSubmitHandler(): void {
-		this.ctx.editor.onSubmit = async (text: string) => {
+		const handle = async (text: string): Promise<void> => {
 			text = text.trim();
 			if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
 
@@ -805,6 +812,17 @@ export class InputController {
 				this.ctx.ui.requestRender();
 			}
 			this.ctx.editor.addToHistory(text);
+		};
+		this.ctx.editor.onSubmit = (text: string) => {
+			// Serialize: run each submit only after the previous one settles, so a
+			// fast double-Enter (fire-and-forget onSubmit) can't race a steer that is
+			// still registering. Both arms run `handle` — a rejected prior submit must
+			// not swallow the next one.
+			this.#submitChain = this.#submitChain.then(
+				() => handle(text),
+				() => handle(text),
+			);
+			return this.#submitChain;
 		};
 	}
 
