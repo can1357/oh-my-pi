@@ -18,6 +18,8 @@ describe("ModelRegistry", () => {
 	let originalOllamaBaseUrl: string | undefined;
 	let originalOllamaHost: string | undefined;
 	let originalOllamaContextLength: string | undefined;
+	let original9RouterBaseUrl: string | undefined;
+	let originalNinerouterBaseUrl: string | undefined;
 
 	// Shared, read-only fixtures: each registry's heavy bundled-catalog
 	// construction runs once in a `beforeAll` hook (hooks are excluded from a
@@ -30,15 +32,21 @@ describe("ModelRegistry", () => {
 	let bootOllamaBaseUrl: string | undefined;
 	let bootOllamaHost: string | undefined;
 	let bootOllamaContextLength: string | undefined;
+	let boot9RouterBaseUrl: string | undefined;
+	let bootNinerouterBaseUrl: string | undefined;
 
 	beforeEach(async () => {
 		resetSettingsForTest();
 		originalOllamaBaseUrl = Bun.env.OLLAMA_BASE_URL;
 		originalOllamaHost = Bun.env.OLLAMA_HOST;
 		originalOllamaContextLength = Bun.env.OLLAMA_CONTEXT_LENGTH;
+		original9RouterBaseUrl = Bun.env["9ROUTER_BASE_URL"];
+		originalNinerouterBaseUrl = Bun.env.NINEROUTER_BASE_URL;
 		delete Bun.env.OLLAMA_BASE_URL;
 		delete Bun.env.OLLAMA_HOST;
 		delete Bun.env.OLLAMA_CONTEXT_LENGTH;
+		delete Bun.env["9ROUTER_BASE_URL"];
+		delete Bun.env.NINEROUTER_BASE_URL;
 		tempDir = path.join(os.tmpdir(), `pi-test-model-registry-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = path.join(tempDir, "models.json");
@@ -65,6 +73,16 @@ describe("ModelRegistry", () => {
 		} else {
 			Bun.env.OLLAMA_CONTEXT_LENGTH = originalOllamaContextLength;
 		}
+		if (original9RouterBaseUrl === undefined) {
+			delete Bun.env["9ROUTER_BASE_URL"];
+		} else {
+			Bun.env["9ROUTER_BASE_URL"] = original9RouterBaseUrl;
+		}
+		if (originalNinerouterBaseUrl === undefined) {
+			delete Bun.env.NINEROUTER_BASE_URL;
+		} else {
+			Bun.env.NINEROUTER_BASE_URL = originalNinerouterBaseUrl;
+		}
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
 			fs.rmSync(tempDir, { recursive: true });
@@ -78,9 +96,13 @@ describe("ModelRegistry", () => {
 		bootOllamaBaseUrl = Bun.env.OLLAMA_BASE_URL;
 		bootOllamaHost = Bun.env.OLLAMA_HOST;
 		bootOllamaContextLength = Bun.env.OLLAMA_CONTEXT_LENGTH;
+		boot9RouterBaseUrl = Bun.env["9ROUTER_BASE_URL"];
+		bootNinerouterBaseUrl = Bun.env.NINEROUTER_BASE_URL;
 		delete Bun.env.OLLAMA_BASE_URL;
 		delete Bun.env.OLLAMA_HOST;
 		delete Bun.env.OLLAMA_CONTEXT_LENGTH;
+		delete Bun.env["9ROUTER_BASE_URL"];
+		delete Bun.env.NINEROUTER_BASE_URL;
 		sharedAuth = await AuthStorage.create(":memory:");
 		sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-test-mr-shared-"));
 		// Unmodified bundled catalog (no custom config); reused by built-in-only
@@ -102,6 +124,10 @@ describe("ModelRegistry", () => {
 		else Bun.env.OLLAMA_HOST = bootOllamaHost;
 		if (bootOllamaContextLength === undefined) delete Bun.env.OLLAMA_CONTEXT_LENGTH;
 		else Bun.env.OLLAMA_CONTEXT_LENGTH = bootOllamaContextLength;
+		if (boot9RouterBaseUrl === undefined) delete Bun.env["9ROUTER_BASE_URL"];
+		else Bun.env["9ROUTER_BASE_URL"] = boot9RouterBaseUrl;
+		if (bootNinerouterBaseUrl === undefined) delete Bun.env.NINEROUTER_BASE_URL;
+		else Bun.env.NINEROUTER_BASE_URL = bootNinerouterBaseUrl;
 		resetSettingsForTest();
 	});
 
@@ -1218,6 +1244,41 @@ describe("ModelRegistry", () => {
 			expect(discovered?.headers?.["X-Model"]).toBeUndefined();
 		});
 
+		test("discovers local 9router combos without explicit provider config", async () => {
+			const requestedUrls: string[] = [];
+			const fetchMock: FetchImpl = input => {
+				const url = String(input);
+				requestedUrls.push(url);
+				if (url === "http://127.0.0.1:20128/v1/models") {
+					return Promise.resolve(
+						new Response(JSON.stringify({ data: [{ id: "fast" }, { id: "oh-my-pi-fork" }, { id: "gemini-3-5-flash-medium-round-robin" }, { id: "cline-pass/kimi-k2.6" }, { id: "minimax-m3-fallback" }, { id: "deepseek-v4-pro-rr" }, { id: "gpt-oss-120b-fallback" }] }), {
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						}),
+					);
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			await registry.refreshProvider("9router", "online");
+
+			expect(requestedUrls).toContain("http://127.0.0.1:20128/v1/models");
+			expect(registry.find("9router", "fast")?.baseUrl).toBe("http://127.0.0.1:20128/v1");
+			expect(
+				registry.getAvailable().some(model => model.provider === "9router" && model.id === "oh-my-pi-fork"),
+			).toBe(true);
+			// Context windows map to the underlying model family (9router serves no context_length)
+			expect(registry.find("9router", "gemini-3-5-flash-medium-round-robin")?.contextWindow).toBe(1_048_576);
+			expect(registry.find("9router", "cline-pass/kimi-k2.6")?.contextWindow).toBe(262_144);
+			expect(registry.find("9router", "minimax-m3-fallback")?.contextWindow).toBe(1_000_000);
+			expect(registry.find("9router", "deepseek-v4-pro-rr")?.contextWindow).toBe(163_840);
+			expect(registry.find("9router", "gpt-oss-120b-fallback")?.contextWindow).toBe(131_072);
+			// Mixed/unmatched combos keep the discovery default
+			expect(registry.find("9router", "fast")?.contextWindow).toBe(128000);
+			expect(registry.find("9router", "oh-my-pi-fork")?.contextWindow).toBe(128000);
+		});
+
 		test("same-id replacement uses configured compat without bundled compat leak", () => {
 			const model = minimaxReplace.find("minimax-code", "MiniMax-M2.5");
 			const compat = getOpenAICompat(model);
@@ -1664,7 +1725,7 @@ describe("ModelRegistry", () => {
 			await Settings.init({
 				inMemory: true,
 				overrides: {
-					disabledProviders: ["llama.cpp", "lm-studio", "ollama"],
+					disabledProviders: ["9router", "llama.cpp", "lm-studio", "ollama"],
 				},
 			});
 			const requestedUrls: string[] = [];
@@ -1677,7 +1738,11 @@ describe("ModelRegistry", () => {
 			await registry.refresh("online");
 
 			const disabledProbeUrls = requestedUrls.filter(
-				url => url.includes("127.0.0.1:11434") || url.includes("127.0.0.1:8080") || url.includes("127.0.0.1:1234"),
+				url =>
+					url.includes("127.0.0.1:11434") ||
+					url.includes("127.0.0.1:8080") ||
+					url.includes("127.0.0.1:1234") ||
+					url.includes("127.0.0.1:20128"),
 			);
 			expect(disabledProbeUrls).toEqual([]);
 		});

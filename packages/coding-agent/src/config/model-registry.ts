@@ -69,6 +69,7 @@ import {
 	type DiscoveryContext,
 	type DiscoveryProviderConfig,
 	discoverModelsByProviderType,
+	getImplicit9RouterBaseUrl,
 	getImplicitOllamaBaseUrl,
 	getOllamaContextLengthOverride,
 } from "./model-discovery";
@@ -615,6 +616,15 @@ function getDisabledProviderIdsFromSettings(): Set<string> {
 	}
 }
 
+function isLocalHttpBaseUrl(baseUrl: string): boolean {
+	try {
+		const hostname = new URL(baseUrl).hostname.toLowerCase();
+		return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
+	} catch {
+		return false;
+	}
+}
+
 function getConfiguredProviderOrderFromSettings(): string[] {
 	try {
 		return settings.get("modelProviderOrder");
@@ -1093,6 +1103,19 @@ export class ModelRegistry {
 			});
 			this.#keylessProviders.add("lm-studio");
 		}
+		if (!configuredProviders.has("9router") && !disabledProviders.has("9router")) {
+			const baseUrl = getImplicit9RouterBaseUrl();
+			this.#discoverableProviders.push({
+				provider: "9router",
+				api: "openai-completions",
+				baseUrl,
+				discovery: { type: "openai-models-list" },
+				optional: true,
+			});
+			if (isLocalHttpBaseUrl(baseUrl) && !this.authStorage.hasAuth("9router")) {
+				this.#keylessProviders.add("9router");
+			}
+		}
 	}
 
 	#loadCustomModels(): CustomModelsResult {
@@ -1255,7 +1278,7 @@ export class ModelRegistry {
 
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
 		if (providerConfig.discovery.type === "openai-models-list") {
-			return `${providerConfig.provider}:openai-models-list-context-v2`;
+			return `${providerConfig.provider}:openai-models-list-context-v3`;
 		}
 		return providerConfig.provider;
 	}

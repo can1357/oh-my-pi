@@ -31,6 +31,7 @@ export const DISCOVERY_DEFAULT_MAX_TOKENS = 32_768;
 
 const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const OLLAMA_HOST_DEFAULT_PORT = "11434";
+const DEFAULT_9ROUTER_BASE_URL = "http://127.0.0.1:20128/v1";
 
 // `normalizeOllamaHostEnv` and `normalizeOllamaBaseUrl` (below) intentionally stay
 // separate: they handle inputs from different sources with different expectations.
@@ -83,10 +84,13 @@ function normalizeOllamaHostEnv(value: string | undefined): string | undefined {
 	return origin;
 }
 
-
 export function getImplicitOllamaBaseUrl(): string {
 	const baseUrl = Bun.env.OLLAMA_BASE_URL?.trim();
 	return baseUrl || normalizeOllamaHostEnv(Bun.env.OLLAMA_HOST) || DEFAULT_OLLAMA_BASE_URL;
+}
+
+export function getImplicit9RouterBaseUrl(): string {
+	return Bun.env["9ROUTER_BASE_URL"]?.trim() || Bun.env.NINEROUTER_BASE_URL?.trim() || DEFAULT_9ROUTER_BASE_URL;
 }
 
 export function getOllamaContextLengthOverride(): number | undefined {
@@ -400,6 +404,30 @@ export async function discoverLlamaCppModels(
 	return discovered;
 }
 
+/**
+ * 9router serves ~300 models/combos through a single OpenAI-compatible
+ * `/v1/models` list that carries no `context_length`, so discovery would
+ * otherwise flatten every model to the 128k fallback. Map the model/combo id
+ * (which encodes the underlying model family) to the real context window.
+ * First substring match wins; unmatched ids keep the caller's default.
+ */
+export function nineRouterContextWindow(id: string): number | undefined {
+	const s = id.toLowerCase();
+	if (s.includes("gemini")) return 1_048_576;
+	if (s.includes("claude")) return 200_000;
+	if (s.includes("gpt-5")) return 400_000;
+	if (s.includes("minimax")) return 1_000_000;
+	if (s.includes("kimi")) return 262_144;
+	if (s.includes("glm")) return 200_000;
+	if (s.includes("qwen")) return 262_144;
+	if (s.includes("deepseek")) return 163_840;
+	if (s.includes("gpt-oss")) return 131_072;
+	if (s.includes("nemotron")) return 131_072;
+	if (s.includes("gemma")) return 131_072;
+	if (s.includes("mimo")) return 131_072;
+	return undefined;
+}
+
 export async function discoverOpenAIModelsList(
 	providerConfig: DiscoveryProviderConfig,
 	ctx: DiscoveryContext,
@@ -444,6 +472,7 @@ export async function discoverOpenAIModelsList(
 			toPositiveNumberOrUndefined(item.max_model_len) ??
 			toPositiveNumberOrUndefined(item.context_length) ??
 			nativeMetadataForModel?.contextWindow ??
+			(providerConfig.provider === "9router" ? nineRouterContextWindow(id) : undefined) ??
 			128000;
 		discovered.push(
 			buildModel({
@@ -611,4 +640,3 @@ function normalizeOllamaBaseUrl(baseUrl?: string): string {
 	const raw = baseUrl || DEFAULT_OLLAMA_BASE_URL;
 	return extractOllamaOrigin(raw) || DEFAULT_OLLAMA_BASE_URL;
 }
-

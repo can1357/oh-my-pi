@@ -45,3 +45,27 @@ describe("fast-context model role", () => {
 		expect(resolved.model?.id).toBe("nvidia/nemotron-3-super-120b-a12b:free");
 	});
 });
+
+describe("9router combo model roles", () => {
+	test("prioritizes app-level fallback combos for max-intelligence", () => {
+		const settings = Settings.isolated();
+
+		expect(resolveAgentModelPatterns({ agentModel: "pi/max-intelligence", settings }).slice(0, 5)).toEqual([
+			"9router/omp",
+			"9router/ompk",
+			"9router/oh-my-pk",
+			"9router/oh-my-pi-fork",
+			"9router/omp-default",
+		]);
+	});
+
+	test("surfaces fast and free 9router combos before public free fallbacks", () => {
+		const settings = Settings.isolated();
+
+		expect(resolveAgentModelPatterns({ agentModel: "pi/free", settings }).slice(0, 3)).toEqual([
+			"9router/fast",
+			"9router/fast-fallback",
+			"9router/gpt-oss-120b-fast-tier-rr",
+		]);
+	});
+});
