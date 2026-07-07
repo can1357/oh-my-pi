@@ -67,10 +67,12 @@ import {
 } from "@pk-nerdsaver-ai/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
+	maskConsumedObservations,
 	pruneSupersededToolResults,
 	pruneToolOutputs,
 	readToolSupersedeKey,
 } from "@pk-nerdsaver-ai/pi-agent-core/compaction/pruning";
+
 import type { ProtectedToolMatcher } from "@pk-nerdsaver-ai/pi-agent-core/compaction/tool-protection";
 import type {
 	AssistantMessage,
@@ -7546,6 +7548,15 @@ export class AgentSession {
 				suffixTokenLimit: Number.POSITIVE_INFINITY,
 			}),
 		);
+		if (this.settings.get("compaction.maskConsumedObservations")) {
+			const maskResult = maskConsumedObservations(
+				branchEntries,
+				this.#withPlanProtection({ protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools] }).protectedTools,
+				keepBoundaryId,
+			);
+			result.prunedCount += maskResult.prunedCount;
+			result.tokensSaved += maskResult.tokensSaved;
+		}
 		if (result.prunedCount === 0) return result;
 
 		await this.sessionManager.rewriteEntries();
@@ -7556,7 +7567,6 @@ export class AgentSession {
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		return result;
 	}
-
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const branchEntries = this.sessionManager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
@@ -7571,9 +7581,24 @@ export class AgentSession {
 				cacheWarmSuffixTokens: PRUNE_CACHE_WARM_SUFFIX_TOKENS,
 			}),
 		);
-		if (result.prunedCount === 0) {
+
+		let maskResult: { prunedCount: number; tokensSaved: number } | undefined;
+		if (this.settings.get("compaction.maskConsumedObservations")) {
+			maskResult = maskConsumedObservations(
+				branchEntries,
+				this.#withPlanProtection({ protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools] }).protectedTools,
+				keepBoundaryId,
+				PRUNE_CACHE_WARM_SUFFIX_TOKENS,
+			);
+		}
+
+		if (result.prunedCount === 0 && (!maskResult || maskResult.prunedCount === 0)) {
 			return undefined;
 		}
+		const combined = {
+			prunedCount: result.prunedCount + (maskResult?.prunedCount ?? 0),
+			tokensSaved: result.tokensSaved + (maskResult?.tokensSaved ?? 0),
+		};
 
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
@@ -7581,7 +7606,7 @@ export class AgentSession {
 		this.#advisorRuntime?.reset();
 		this.#syncTodoPhasesFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
-		return result;
+		return combined;
 	}
 
 	/**
@@ -7593,8 +7618,12 @@ export class AgentSession {
 	 * on the `compaction.supersedeReads` and `compaction.dropUseless` settings.
 	 */
 	async #pruneStaleToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
-		const { supersedeReads, dropUseless } = this.settings.getGroup("compaction");
-		if (!supersedeReads && !dropUseless) return undefined;
+		const {
+			supersedeReads,
+			dropUseless,
+			maskConsumedObservations: maskEnabled,
+		} = this.settings.getGroup("compaction");
+		if (!supersedeReads && !dropUseless && !maskEnabled) return undefined;
 		const branchEntries = this.sessionManager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneSupersededToolResults(
@@ -7609,16 +7638,31 @@ export class AgentSession {
 				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
 			}),
 		);
-		if (result.prunedCount === 0) {
-			return undefined;
+
+		let maskResult: { prunedCount: number; tokensSaved: number } | undefined;
+		if (maskEnabled) {
+			maskResult = maskConsumedObservations(
+				branchEntries,
+				this.#withPlanProtection({ protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools] }).protectedTools,
+				keepBoundaryId,
+			);
 		}
 
+		if (result.prunedCount === 0 && (!maskResult || maskResult.prunedCount === 0)) {
+			return undefined;
+		}
+		const combined = {
+			prunedCount: result.prunedCount + (maskResult?.prunedCount ?? 0),
+			tokensSaved: result.tokensSaved + (maskResult?.tokensSaved ?? 0),
+		};
+
+		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#advisorRuntime?.reset();
 		this.#syncTodoPhasesFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
-		return result;
+		return combined;
 	}
 
 	/**

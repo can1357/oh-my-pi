@@ -2066,6 +2066,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"compaction.maskConsumedObservations": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Mask Consumed Observations",
+			description:
+				"Replace tool results the model has already acted on with short placeholders (e.g. '[bash result consumed]'). Deterministic and cache-aware; preserves reasoning traces.",
+		},
+	},
+
 	// Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 	"snapcompact.systemPrompt": {
 		type: "enum",
@@ -5006,6 +5018,7 @@ export interface CompactionSettings {
 	idleTimeoutSeconds: number;
 	supersedeReads: boolean;
 	dropUseless: boolean;
+	maskConsumedObservations: boolean;
 }
 
 export interface ContextPromotionSettings {

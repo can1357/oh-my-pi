@@ -6,6 +6,8 @@
 
 - Added `agent.profile` and `agent.profiles` settings for named, swappable role-based model bundles that retarget every role-resolving agent slot at once (explicit `modelRoles` still wins per-role).
 
+- Added `compaction.maskConsumedObservations` (default `true`) and a new `maskConsumedObservations` pruning pass that replaces tool results the model has already acted on with deterministic placeholders (e.g. `[bash result consumed]`). This preserves reasoning traces and action history while cutting the verbatim observation tokens that the JetBrains study identified as cheaper to mask than to summarize.
+
 - Added an Agentic MapReduce backbone for deterministic selector execution, evidence-graph sharding, bounded scheduling, reducer-tree aggregation, and concurrency/cost modeling.
 - Added bundled `mr-worker`, `mr-reducer`, and `tot-reasoner` agents implementing Agentic MapReduce map/reduce phases and Tree-of-Thoughts reasoning as builtin task-agent types.
 - Added an embedded builtin-skills provider shipping `agentic-mapreduce`, `tree-of-thoughts`, and `promptbtw-handoff` skills compiled into the binary, served in-memory via `skill://` and `/skill:` with lowest-priority name override semantics and a `skills.enableBuiltinSkills` toggle.
