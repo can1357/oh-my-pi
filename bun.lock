@@ -163,6 +163,16 @@
         "@types/bun": "catalog:",
       },
     },
+    "packages/llm-router-agent": {
+      "name": "@pk/llm-router-agent",
+      "version": "0.2.0",
+      "bin": {
+        "llm-router-agent": "./dist/cli.js",
+      },
+      "devDependencies": {
+        "typescript": ">=5.5.0",
+      },
+    },
     "packages/mnemopi": {
       "name": "@pk-nerdsaver-ai/pi-mnemopi",
       "version": "16.2.6",
@@ -812,6 +822,8 @@
     "@pk-nerdsaver-ai/typescript-edit-benchmark": ["@pk-nerdsaver-ai/typescript-edit-benchmark@workspace:packages/typescript-edit-benchmark"],
 
     "@pk-nerdsaver-ai/verifier-extension": ["@pk-nerdsaver-ai/verifier-extension@workspace:packages/verifier-extension"],
+
+    "@pk/llm-router-agent": ["@pk/llm-router-agent@workspace:packages/llm-router-agent"],
 
     "@protobufjs/aspromise": ["@protobufjs/aspromise@1.1.2", "", {}, "sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ=="],
 

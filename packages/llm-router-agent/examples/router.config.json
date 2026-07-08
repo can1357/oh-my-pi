@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "objectives": {
+    "quality": 0.45,
+    "latency": 0.2,
+    "cost": 0.2,
+    "safety": 0.15
+  },
+  "models": {
+    "fast": {
+      "selector": "pi/smol",
+      "fallbackSelectors": [
+        "smol",
+        "default"
+      ],
+      "quality": 0.58,
+      "latencyMsP95": 1200,
+      "costPerMillionTokens": 0.2,
+      "safety": 0.72,
+      "contextWindow": 64000,
+      "capabilities": [
+        "text",
+        "json",
+        "fast",
+        "cheap"
+      ]
+    },
+    "balanced": {
+      "selector": "default",
+      "fallbackSelectors": [
+        "pi/default",
+        "pi/slow"
+      ],
+      "quality": 0.76,
+      "latencyMsP95": 2600,
+      "costPerMillionTokens": 1.0,
+      "safety": 0.82,
+      "contextWindow": 128000,
+      "capabilities": [
+        "text",
+        "json",
+        "code",
+        "tools",
+        "reasoning"
+      ]
+    },
+    "quality": {
+      "selector": "pi/slow",
+      "fallbackSelectors": [
+        "slow",
+        "default"
+      ],
+      "quality": 0.92,
+      "latencyMsP95": 6200,
+      "costPerMillionTokens": 4.0,
+      "safety": 0.9,
+      "contextWindow": 200000,
+      "capabilities": [
+        "text",
+        "json",
+        "code",
+        "tools",
+        "reasoning",
+        "safe",
+        "long-context"
+      ]
+    }
+  },
+  "telemetry": {
+    "enabled": true,
+    "path": ".llm-router/telemetry.jsonl",
+    "sampleRate": 1
+  },
+  "extension": {
+    "mode": "recommend",
+    "routeOnInput": true,
+    "notifyOnInput": false,
+    "exposeTools": true,
+    "exposeCommand": true
+  },
+  "toolCapture": {
+    "enabled": true,
+    "path": ".llm-router/tool-use.jsonl",
+    "sampleRate": 1,
+    "captureArgs": "redacted",
+    "captureResults": "summary",
+    "maxPayloadChars": 2000,
+    "maxSummaryChars": 900,
+    "contextBudgetTokens": 400,
+    "emitToTelemetry": false,
+    "includeTrainingHints": true,
+    "ignoredToolNames": [
+      "router_capture_tool_use",
+      "router_export_tool_training"
+    ],
+    "redactKeys": [
+      "api_key",
+      "authorization",
+      "cookie",
+      "password",
+      "secret",
+      "token",
+      "access_token",
+      "refresh_token",
+      "private_key",
+      "client_secret"
+    ],
+    "redactPatterns": [
+      "Bearer\\s+[A-Za-z0-9._~+/=-]+",
+      "sk-[A-Za-z0-9]{16,}",
+      "(api[_-]?key|token|secret|password)\\s*[:=]\\s*[^\\s,}]+"
+    ]
+  }
+}

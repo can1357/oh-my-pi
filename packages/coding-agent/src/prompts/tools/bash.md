@@ -12,8 +12,6 @@ Runs bash in a shell session — terminal ops: git, bun, cargo, python.
 - NEVER shell out to fetch, display, list, page, or search what a dedicated tool serves: `cat`/`head`/`tail`/`less`/`more`/`ls` → `read`; `grep`/`rg`/`ag`/`ack` → `search`; `find`/`fd` → `find`; `sed -i`/`perl -i`/`awk -i` → `edit`; `echo >`/heredoc → `write`. Tools keep gitignore semantics, line anchors, structured output shell loses.
 - NEVER trim or silence output: no `| head -n N`, `| tail -n N`, `| less`, `2>&1`, `2>/dev/null`. stderr already merged; long output auto-truncated, FULL capture kept at `artifact://<id>`. Test/lint output filtered to failures; a `[raw output: artifact://<id>]` footer links the full capture when visible text changed. No footer = output is unchanged; read the artifact if a run looks suspicious or you need exact bytes.
 </critical>
-
-
 {{#if asyncEnabled}}
 # Timeout and async
 

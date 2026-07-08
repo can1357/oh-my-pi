@@ -1,0 +1,11 @@
+# Add one of these to .omp/config.yml or ~/.omp/agent/config.yml.
+
+# Direct file mode:
+extensions:
+  - /absolute/path/to/llm-router-agent-tooluse/dist/extension.js
+
+# Directory mode also works because package.json contains:
+#   "omp": { "extensions": ["./dist/extension.js"] }
+#   "pi":  { "extensions": ["./dist/extension.js"] }
+# extensions:
+#   - /absolute/path/to/llm-router-agent-tooluse

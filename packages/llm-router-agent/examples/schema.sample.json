@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "required": ["summary", "confidence"],
+  "properties": {
+    "summary": { "type": "string" },
+    "confidence": { "type": "number" }
+  }
+}

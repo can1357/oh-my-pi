@@ -29,7 +29,7 @@ Ask only for preferences or tradeoffs that code cannot answer. Use `{{askToolNam
 
 1. Read the existing plan.
 2. Compare the new request with it.
-3. Different task -> start fresh; same task -> update and delete outdated parts.
+3. Different task → start fresh; same task → update and delete outdated parts.
 4. Call `resolve` when the plan is decision-complete.
 {{/if}}
 

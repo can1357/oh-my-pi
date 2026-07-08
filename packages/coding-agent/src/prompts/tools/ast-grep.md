@@ -4,7 +4,7 @@
 - `pat` is ONE AST pattern; separate calls for unrelated patterns
 - `$NAME`/`$$$NAME` capture one / zero-or-more nodes (bound); `$_`/`$$$` do the same without binding. Use `$$$NAME` (NOT `$$NAME` — invalid).
 - Metavariable names are UPPERCASE and MUST be the whole AST node (partial text like `prefix$VAR` does NOT work).
-- Same metavariable twice → both occurrences MUST match identical code (`$A == $A`, not `$A != $B`).
+- Same metavariable twice → both occurrences MUST match identical code (`$A == $A`, not `$A ≠ $B`).
 - Patterns MUST parse as a single valid AST node. Non-standalone snippets → wrap in context, e.g. `class $_ { … }`
 - C++ expression-statement calls need trailing `;`: `ns::doThing($ARG);`, `$CALLEE($ARG);`
 - TS declarations/methods — tolerate unknown annotations: `async function $NAME($$$ARGS): $_ { $$$BODY }` or `class $_ { method($ARG: $_): $_ { $$$BODY } }`

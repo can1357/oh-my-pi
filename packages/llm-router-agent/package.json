@@ -1,0 +1,60 @@
+{
+  "name": "@pk/llm-router-agent",
+  "version": "0.2.0",
+  "description": "Configurable LLM and tool-use routing extension with context-saving capture and training export, compatible with Oh My Pi extension loading.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "llm-router-agent": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./extension": {
+      "types": "./dist/extension.d.ts",
+      "default": "./dist/extension.js"
+    },
+    "./tool-capture": {
+      "types": "./dist/tool-capture.d.ts",
+      "default": "./dist/tool-capture.js"
+    }
+  },
+  "omp": {
+    "extensions": [
+      "./dist/extension.js"
+    ]
+  },
+  "pi": {
+    "extensions": [
+      "./dist/extension.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "decide": "npm run build && node dist/cli.js decide"
+  },
+  "engines": {
+    "node": ">=20.10"
+  },
+  "devDependencies": {
+    "typescript": ">=5.5.0"
+  },
+  "keywords": [
+    "llm-router",
+    "oh-my-pi",
+    "omp",
+    "ai-agent",
+    "model-routing",
+    "tool-routing",
+    "tool-capture",
+    "context-compression",
+    "training-data"
+  ]
+}

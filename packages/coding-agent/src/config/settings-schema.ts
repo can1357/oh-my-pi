@@ -2593,10 +2593,10 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 	"mnemopi.retainEveryNTurns": { type: "number", default: 4 },
-	"mnemopi.recallLimit": { type: "number", default: 8 },
-	"mnemopi.recallContextTurns": { type: "number", default: 3 },
-	"mnemopi.recallMaxQueryChars": { type: "number", default: 4000 },
-	"mnemopi.injectionTokenLimit": { type: "number", default: 2000 },
+	"mnemopi.recallLimit": { type: "number", default: 4 },
+	"mnemopi.recallContextTurns": { type: "number", default: 1 },
+	"mnemopi.recallMaxQueryChars": { type: "number", default: 1200 },
+	"mnemopi.injectionTokenLimit": { type: "number", default: 1000 },
 	"mnemopi.debug": { type: "boolean", default: false },
 
 	// Hindsight (https://hindsight.vectorize.io)

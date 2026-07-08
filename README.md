@@ -541,6 +541,7 @@ For architecture and contribution guidelines, see [packages/coding-agent/DEVELOP
 | **[@pk-nerdsaver-ai/hashline](packages/hashline)**               | Line-anchored patch language and applier behind the `edit` tool            |
 | **[@pk-nerdsaver-ai/pi-mnemopi](packages/mnemopi)**              | Local SQLite memory engine for Oh My Pi agents                             |
 | **[@pk-nerdsaver-ai/snapcompact](packages/snapcompact)**         | Bitmap-frame context compression package and SQuAD eval suite              |
+| **[@pk/llm-router-agent](packages/llm-router-agent)**             | Configurable LLM routing extension and standalone router                   |
 | **[@pk-nerdsaver-ai/swarm-extension](packages/swarm-extension)** | Swarm orchestration extension package                                      |
 | **[@pk-nerdsaver-ai/verifier-extension](packages/verifier-extension)** | LLM-as-verifier candidate comparison and audit extension package           |
 

@@ -24,18 +24,12 @@
 {{/if}}
 {{/if}}
 - PDF, Word, PowerPoint, Excel, RTF, EPUB → extracted text. Notebooks (`.ipynb`) → editable `# %% [type] cell:N` (`:raw` bypasses converter).
-
-
 {{#if INSPECT_IMAGE_ENABLED}}
 Image → metadata. Visual analysis: call `inspect_image` with the path and a question.
 {{else}}
 Image → decoded inline (PNG, JPEG, GIF, WEBP) for direct visual analysis.
 {{/if}}
-
-
 `.tar`, `.tar.gz`, `.tgz`, `.zip`. `archive.ext:path/inside/archive` reads a member; members take selectors (e.g. `archive.zip:dir/file.ts:50-60`).
-
-
 For `.sqlite`, `.sqlite3`, `.db`, `.db3`:
 - `file.db` — tables with row counts
 - `file.db:table` — schema + sample rows
@@ -43,12 +37,8 @@ For `.sqlite`, `.sqlite3`, `.db`, `.db3`:
 - `file.db:table?limit=50&offset=100` — pagination
 - `file.db:table?where=status='active'&order=created:desc` — filter/order
 - `file.db?q=SELECT …` — read-only SELECT
-
-
 - Reader-mode default: HTML, GitHub, Stack Overflow, Wikipedia, Reddit, NPM, arXiv, RSS/Atom, JSON, PDFs → clean text/markdown. `:raw` → untouched HTML; line selectors paginate the fetch.
 - Bare `host:port` collides with selector grammar — add a trailing slash: `https://example.com/:80`.
-
-
 All URI schemes take the same line selectors. `artifact://<id>` recovers spilled/truncated tool output. `history://<agentId>` = agent transcript (bare `history://` lists agents).
 
 <critical>
