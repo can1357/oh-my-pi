@@ -1,4 +1,4 @@
-import { countTokens } from "@pk-nerdsaver-ai/pi-agent-core";
+import { type CacheStats, countTokens } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { CompactionSettings } from "@pk-nerdsaver-ai/pi-agent-core/compaction";
 import {
 	effectiveReserveTokens,
@@ -10,6 +10,7 @@ import { toolWireSchema } from "@pk-nerdsaver-ai/pi-ai/utils/schema";
 import { formatNumber } from "@pk-nerdsaver-ai/pi-utils";
 import type { Skill } from "../../extensibility/skills";
 import type { AgentSession } from "../../session/agent-session";
+import { estimateInlineSavings, type SnapcompactSavingsEstimate } from "../../session/snapcompact-inline";
 import type { Tool } from "../../tools";
 import type { theme as Theme } from "../theme/theme";
 
@@ -40,6 +41,35 @@ export interface ContextBreakdown {
 	usedTokens: number;
 	autoCompactBufferTokens: number;
 	freeTokens: number;
+	/** Estimated snapcompact wire savings; set when requested and a snapcompact.* setting is enabled. */
+	snapcompact?: SnapcompactSavingsEstimate;
+	/** Tool-result waste audit; set when requested. */
+	waste?: ContextWaste;
+	/** Prompt-cache stats with attributed break causes; set when requested. */
+	cache?: CacheStats;
+}
+
+/** Per-tool token spend for one tool's results still live in context. */
+export interface ToolResultSpend {
+	toolName: string;
+	tokens: number;
+	count: number;
+}
+
+/**
+ * PICHAY-style structural-waste audit of the live message history: where
+ * tool-result tokens sit (by tool), and how much the per-turn masking passes
+ * have already reclaimed (results carrying `prunedAt`).
+ */
+export interface ContextWaste {
+	/** Tool-result token spend by tool, largest first. */
+	toolResults: ToolResultSpend[];
+	/** Total tokens across all live (unmasked) tool results. */
+	totalToolResultTokens: number;
+	/** Count of results already replaced by masking placeholders. */
+	maskedCount: number;
+	/** Tokens the masked placeholders still occupy (the residue, not the savings). */
+	maskedResidueTokens: number;
 }
 
 const EMPTY_STRING_PARTS: readonly string[] = [];
@@ -114,10 +144,49 @@ export function computeNonMessageBreakdown(session: AgentSession): {
 }
 
 /**
+ * Audit tool-result token spend in the live message history: per-tool totals
+ * for results still occupying context, plus how many results the masking
+ * passes have already replaced with placeholders.
+ */
+export function computeContextWaste(session: AgentSession): ContextWaste {
+	const perTool = new Map<string, ToolResultSpend>();
+	let totalToolResultTokens = 0;
+	let maskedCount = 0;
+	let maskedResidueTokens = 0;
+	for (const message of session.messages ?? []) {
+		if (message.role !== "toolResult") continue;
+		const tokens = estimateTokens(message);
+		if (message.prunedAt !== undefined) {
+			maskedCount += 1;
+			maskedResidueTokens += tokens;
+			continue;
+		}
+		totalToolResultTokens += tokens;
+		const name = message.toolName || "(unknown)";
+		const spend = perTool.get(name);
+		if (spend) {
+			spend.tokens += tokens;
+			spend.count += 1;
+		} else {
+			perTool.set(name, { toolName: name, tokens, count: 1 });
+		}
+	}
+	return {
+		toolResults: [...perTool.values()].sort((a, b) => b.tokens - a.tokens),
+		totalToolResultTokens,
+		maskedCount,
+		maskedResidueTokens,
+	};
+}
+
+/**
  * Compute a breakdown of estimated context usage by category for the active
  * session and model.
  */
-export function computeContextBreakdown(session: AgentSession): ContextBreakdown {
+export function computeContextBreakdown(
+	session: AgentSession,
+	options?: { snapcompactSavings?: boolean; waste?: boolean },
+): ContextBreakdown {
 	const model = session.model;
 	const contextWindow = model?.contextWindow ?? 0;
 
@@ -190,6 +259,22 @@ export function computeContextBreakdown(session: AgentSession): ContextBreakdown
 
 	const freeTokens = Math.max(0, contextWindow - usedTokens - autoCompactBufferTokens);
 
+	// Estimated wire savings from snapcompact inline imaging. Opt-in: only the
+	// /context surfaces need it; other callers skip the extra token counting.
+	let snapcompactSavings: SnapcompactSavingsEstimate | undefined;
+	if (options?.snapcompactSavings) {
+		const renderSystemPrompt = session.settings.get("snapcompact.systemPrompt");
+		const renderToolResults = session.settings.get("snapcompact.toolResults");
+		if (renderSystemPrompt !== "none" || renderToolResults) {
+			snapcompactSavings = estimateInlineSavings({
+				options: { renderSystemPrompt, renderToolResults, shape: session.settings.get("snapcompact.shape") },
+				model,
+				systemPrompt: session.systemPrompt ?? [],
+				messages: session.messages ?? [],
+			});
+		}
+	}
+
 	return {
 		model,
 		contextWindow,
@@ -197,6 +282,9 @@ export function computeContextBreakdown(session: AgentSession): ContextBreakdown
 		usedTokens,
 		autoCompactBufferTokens,
 		freeTokens,
+		snapcompact: snapcompactSavings,
+		waste: options?.waste ? computeContextWaste(session) : undefined,
+		cache: options?.waste && typeof session.getCacheStats === "function" ? session.getCacheStats() : undefined,
 	};
 }
 
@@ -317,6 +405,102 @@ function buildLegendLines(breakdown: ContextBreakdown, theme: typeof Theme): str
 				`tokens (${percentString(autoCompactBufferTokens, contextWindow)})`,
 			)}`,
 		);
+	}
+
+	const waste = breakdown.waste;
+	if (waste && (waste.toolResults.length > 0 || waste.maskedCount > 0)) {
+		lines.push("");
+		lines.push(theme.fg("muted", "Tool results in context"));
+		for (const spend of waste.toolResults.slice(0, 5)) {
+			lines.push(
+				`  ${spend.toolName}: ${theme.bold(formatNumber(spend.tokens))} ${theme.fg(
+					"dim",
+					`tokens (${spend.count} result${spend.count === 1 ? "" : "s"})`,
+				)}`,
+			);
+		}
+		if (waste.toolResults.length > 5) {
+			const restTokens = waste.toolResults.slice(5).reduce((sum, spend) => sum + spend.tokens, 0);
+			lines.push(
+				theme.fg("dim", `  +${waste.toolResults.length - 5} more tools (${formatNumber(restTokens)} tokens)`),
+			);
+		}
+		if (waste.maskedCount > 0) {
+			lines.push(
+				theme.fg(
+					"dim",
+					`  ${waste.maskedCount} result${waste.maskedCount === 1 ? "" : "s"} already masked (${formatNumber(waste.maskedResidueTokens)} tokens residue)`,
+				),
+			);
+		}
+	}
+
+	const cache = breakdown.cache;
+	if (cache?.cachingObserved && cache.requests > 0) {
+		lines.push("");
+		lines.push(
+			theme.fg("muted", "Prompt cache: ") +
+				theme.bold(percentString(cache.cacheReadTokens, cache.promptTokens, 0)) +
+				theme.fg("dim", ` hit rate over ${cache.requests} request${cache.requests === 1 ? "" : "s"}`),
+		);
+		if (cache.breaks > 0) {
+			const causes = Object.entries(cache.breaksByCause)
+				.filter(([, count]) => count > 0)
+				.map(([cause, count]) => `${count} ${cause}`)
+				.join(", ");
+			lines.push(theme.fg("dim", `  ${cache.breaks} cache break${cache.breaks === 1 ? "" : "s"}: ${causes}`));
+		}
+	}
+
+	const snap = breakdown.snapcompact;
+	if (snap) {
+		lines.push("");
+		if (!snap.visionCapable) {
+			lines.push(theme.fg("muted", "Snapcompact: inactive (model has no image input)"));
+		} else {
+			lines.push(theme.fg("muted", "Snapcompact (estimated wire savings)"));
+			if (snap.systemPrompt) {
+				const sp = snap.systemPrompt;
+				if (sp.applied) {
+					lines.push(
+						`  System prompt (${sp.scope === "agents-md" ? "AGENTS.md" : "all"}): saves ${theme.bold(`~${formatNumber(sp.savedTokens)}`)} ` +
+							theme.fg(
+								"dim",
+								`(${formatNumber(sp.textTokens)} text → ${sp.frames} frame${sp.frames === 1 ? "" : "s"} ≈ ${formatNumber(sp.imageTokens)})`,
+							),
+					);
+				} else {
+					const reason =
+						sp.reason === "budget"
+							? "image budget exhausted"
+							: sp.reason === "empty"
+								? "nothing to image"
+								: "frames would not save tokens";
+					lines.push(
+						`  System prompt (${sp.scope === "agents-md" ? "AGENTS.md" : "all"}): ${theme.fg("dim", `stays text (${reason})`)}`,
+					);
+				}
+			}
+			if (snap.toolResults) {
+				const tr = snap.toolResults;
+				if (tr.swapped > 0) {
+					lines.push(
+						`  Tool results: saves ${theme.bold(`~${formatNumber(tr.savedTokens)}`)} ` +
+							theme.fg(
+								"dim",
+								`(${tr.swapped}/${tr.total} imaged, ${formatNumber(tr.textTokens)} text → ${tr.frames} frames ≈ ${formatNumber(tr.imageTokens)})`,
+							),
+					);
+				} else {
+					lines.push(`  Tool results: ${theme.fg("dim", `none imaged (${tr.total} in history)`)}`);
+				}
+			}
+			if (snap.savedTokens > 0) {
+				lines.push(
+					`  Next request: ${theme.bold(`~${formatNumber(Math.max(0, usedTokens - snap.savedTokens))}`)} ${theme.fg("dim", "tokens on the wire")}`,
+				);
+			}
+		}
 	}
 
 	return lines;
