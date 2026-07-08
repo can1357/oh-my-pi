@@ -91,6 +91,8 @@ packages/coding-agent/memories-runtime-*/
 packages/coding-agent/omp-config-cli-*/
 # Local research/scratch (ultraresearch passes, diff snapshots)
 .omo/
+.llm-router/
+scratch/
 
 # Local CodeGraph index (per-machine, not source)
 .codegraph/
