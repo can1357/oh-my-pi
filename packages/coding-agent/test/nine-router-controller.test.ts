@@ -91,6 +91,20 @@ describe("NineRouterController", () => {
 		expect(settings.getModelRole("task")).toBe("9router/openai/gpt-oss-120b:nitro");
 	});
 
+	test("routes Qwen 3.6 nitro from 9router", async () => {
+		const settings = makeSettings();
+		const controller = new NineRouterController({
+			settings,
+			baseUrl: "http://127.0.0.1:20128/v1",
+			fetch: makeFetch(["openrouter/qwen/qwen3.6-35b-a3b:nitro"]),
+		});
+
+		await controller.apply();
+
+		expect(settings.getModelRole("balanced")).toBe("9router/openrouter/qwen/qwen3.6-35b-a3b:nitro");
+		expect(settings.getModelRole("task")).toBe("9router/openrouter/qwen/qwen3.6-35b-a3b:nitro");
+	});
+
 	test("probe mode skips candidates that fail the chat probe", async () => {
 		const settings = makeSettings();
 		const fetchImpl: FetchImpl = async (input, init) => {
