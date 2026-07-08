@@ -34,6 +34,7 @@ import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { urlHyperlinkAlways } from "../tui";
 import { getChangelogPath, parseChangelog } from "../utils/changelog";
+import { handleWikigraphCommand, handleWikigraphCommandTui } from "./builtin/wikigraph";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
 import { buildContextReportText } from "./helpers/context-report";
 import { handleDelegateSlashCommand } from "./helpers/delegate";
@@ -324,6 +325,19 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			runtime.ctx.showSettingsSelector();
 			runtime.ctx.editor.setText("");
 		},
+	},
+	{
+		name: "wikigraph",
+		description: "Build and query WikiGraph index",
+		aliases: ["wiki"],
+		allowArgs: true,
+		subcommands: [
+			{ name: "build", description: "Refresh WikiGraph index" },
+			{ name: "extract", description: "Extract facts from a section node" },
+			{ name: "repair", description: "Drop and rebuild WikiGraph index" },
+		],
+		handle: (command, runtime) => handleWikigraphCommand(command.args, runtime),
+		handleTui: (command, runtime) => handleWikigraphCommandTui(command.args, runtime),
 	},
 	{
 		name: "setup",

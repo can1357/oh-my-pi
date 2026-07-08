@@ -72,7 +72,6 @@ import {
 	pruneToolOutputs,
 	readToolSupersedeKey,
 } from "@pk-nerdsaver-ai/pi-agent-core/compaction/pruning";
-
 import type { ProtectedToolMatcher } from "@pk-nerdsaver-ai/pi-agent-core/compaction/tool-protection";
 import type {
 	AssistantMessage,
@@ -311,6 +310,7 @@ import {
 	stripImagesFromMessage,
 	USER_INTERRUPT_LABEL,
 } from "./messages";
+import { buildOffloadTraceCanvas, type OffloadTraceSettings, renderOffloadTraceCanvasMarkdown } from "./offload-trace";
 import type { SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
@@ -1104,6 +1104,11 @@ function queueChipText(message: AgentMessage): string {
 
 function toRestoredQueuedMessage(message: AgentMessage): RestoredQueuedMessage {
 	return { text: queueChipText(message), images: queuedImageContent(message) };
+}
+
+function appendTraceSection(summary: string, traceMarkdown: string): string {
+	if (summary.includes("## Trace")) return summary;
+	return `${summary.trimEnd()}\n\n${traceMarkdown}`;
 }
 
 export class AgentSession {
@@ -8007,6 +8012,15 @@ export class AgentSession {
 				throw new CompactionCancelledError();
 			}
 
+			const tracedCompaction = await this.#attachOffloadTraceToCompaction({
+				summary,
+				shortSummary,
+				preserveData,
+				preparation,
+			});
+			summary = tracedCompaction.summary;
+			preserveData = tracedCompaction.preserveData;
+
 			this.sessionManager.appendCompaction(
 				summary,
 				shortSummary,
@@ -8061,6 +8075,46 @@ export class AgentSession {
 				this.#compactionAbortController = undefined;
 			}
 			this.#reconnectToAgent();
+		}
+	}
+
+	async #attachOffloadTraceToCompaction(input: {
+		summary: string;
+		shortSummary?: string;
+		preserveData?: Record<string, unknown>;
+		preparation: {
+			messagesToSummarize: AgentMessage[];
+			turnPrefixMessages: AgentMessage[];
+		};
+	}): Promise<{ summary: string; preserveData?: Record<string, unknown> }> {
+		const settings: OffloadTraceSettings = {
+			enabled: this.settings.get("offloadTrace.enabled"),
+			maxCanvasChars: this.settings.get("offloadTrace.maxCanvasChars"),
+			maxNodes: this.settings.get("offloadTrace.maxNodes"),
+			rawArtifactMinChars: this.settings.get("offloadTrace.rawArtifactMinChars"),
+		};
+		if (!settings.enabled) return { summary: input.summary, preserveData: input.preserveData };
+
+		try {
+			const canvas = await buildOffloadTraceCanvas({
+				sessionId: this.sessionId,
+				messagesToSummarize: input.preparation.messagesToSummarize,
+				turnPrefixMessages: input.preparation.turnPrefixMessages,
+				summary: input.summary,
+				shortSummary: input.shortSummary,
+				settings,
+				artifactManager: this.sessionManager.getArtifactManager(),
+			});
+			if (!canvas) return { summary: input.summary, preserveData: input.preserveData };
+			const traceMarkdown = renderOffloadTraceCanvasMarkdown(canvas, settings);
+			const preserveData = { ...(input.preserveData ?? {}), offloadTrace: canvas };
+			return {
+				summary: appendTraceSection(input.summary, traceMarkdown),
+				preserveData,
+			};
+		} catch (err) {
+			logger.debug("Offload trace build failed", { error: String(err) });
+			return { summary: input.summary, preserveData: input.preserveData };
 		}
 	}
 
@@ -10111,6 +10165,15 @@ export class AgentSession {
 				});
 				return COMPACTION_CHECK_NONE;
 			}
+
+			const tracedCompaction = await this.#attachOffloadTraceToCompaction({
+				summary,
+				shortSummary,
+				preserveData,
+				preparation,
+			});
+			summary = tracedCompaction.summary;
+			preserveData = tracedCompaction.preserveData;
 
 			this.sessionManager.appendCompaction(
 				summary,

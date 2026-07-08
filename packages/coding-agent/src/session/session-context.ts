@@ -2,6 +2,7 @@ import type { AgentMessage } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { ProviderPayload, ServiceTier } from "@pk-nerdsaver-ai/pi-ai";
 import * as snapcompact from "@pk-nerdsaver-ai/snapcompact";
 import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "./messages";
+import { renderPreservedOffloadTraceMarkdown } from "./offload-trace";
 import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 
 export interface SessionContext {
@@ -56,6 +57,15 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 		}
 	}
 	return null;
+}
+
+export function summaryWithPreservedOffloadTrace(
+	summary: string,
+	preserveData: Record<string, unknown> | undefined,
+): string {
+	if (summary.includes("## Trace")) return summary;
+	const trace = renderPreservedOffloadTraceMarkdown(preserveData, { maxCanvasChars: 2000, maxNodes: 24 });
+	return trace ? `${summary.trimEnd()}\n\n${trace}` : summary;
 }
 
 export interface BuildSessionContextOptions {
@@ -262,7 +272,7 @@ export function buildSessionContext(
 				const snapcompactArchive = snapcompact.getPreservedArchive(entry.preserveData);
 				pushMessage(
 					createCompactionSummaryMessage(
-						entry.summary,
+						summaryWithPreservedOffloadTrace(entry.summary, entry.preserveData),
 						entry.tokensBefore,
 						entry.timestamp,
 						entry.shortSummary,
@@ -295,7 +305,7 @@ export function buildSessionContext(
 		const snapcompactArchive = snapcompact.getPreservedArchive(compaction.preserveData);
 		pushMessage(
 			createCompactionSummaryMessage(
-				compaction.summary,
+				summaryWithPreservedOffloadTrace(compaction.summary, compaction.preserveData),
 				compaction.tokensBefore,
 				compaction.timestamp,
 				compaction.shortSummary,

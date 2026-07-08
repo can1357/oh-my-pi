@@ -1,7 +1,7 @@
 /**
  * The bundled `builtin-skills` provider ships embedded markdown skills that have
  * no on-disk representation. These tests defend:
- *  - The three skills load via loadSkills() with embeddedContent set and hide falsy.
+ *  - The bundled skills load via loadSkills() with embeddedContent set and hide falsy.
  *  - `disabledExtensions: ["skill:<name>"]` removes only that skill.
  *  - skill:// serves embedded content without touching disk.
  *  - skill://<name>/anything.md throws for embedded skills.
@@ -30,7 +30,7 @@ import "@pk-nerdsaver-ai/pi-coding-agent/discovery";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-const BUILTIN_NAMES = ["agentic-mapreduce", "promptbtw-handoff", "tree-of-thoughts"] as const;
+const BUILTIN_NAMES = ["agentic-mapreduce", "ompk-swarm-core", "promptbtw-handoff", "tree-of-thoughts"] as const;
 
 /**
  * Hermetic loadSkills options: disable every filesystem-backed source so real
@@ -83,13 +83,13 @@ describe("builtin-skills provider registration", () => {
 // ── Provider-level loading ─────────────────────────────────────────────────────
 
 describe("builtin-skills provider load", () => {
-	it("loads exactly three items with the builtin-skills provider id", async () => {
+	it("loads exactly four items with the builtin-skills provider id", async () => {
 		const result = await loadBuiltinSkills();
-		expect(result.items.length).toBe(3);
+		expect(result.items.length).toBe(4);
 		expect(result.items.every(s => s._source.provider === BUILTIN_SKILLS_PROVIDER_ID)).toBe(true);
 	});
 
-	it("parses frontmatter name and description correctly for all three skills", async () => {
+	it("parses frontmatter name and description correctly for all four skills", async () => {
 		const result = await loadBuiltinSkills();
 		for (const name of BUILTIN_NAMES) {
 			const skill = result.items.find(s => s.name === name);
@@ -120,7 +120,7 @@ describe("loadSkills with builtin skills", () => {
 		resetActiveSkillsForTests();
 	});
 
-	it("includes all three builtin skills with embeddedContent set and hide falsy", async () => {
+	it("includes all four builtin skills with embeddedContent set and hide falsy", async () => {
 		const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-test-"));
 		try {
 			const { skills } = await loadSkills({ cwd: tmpDir, ...ONLY_BUILTIN_SKILLS });

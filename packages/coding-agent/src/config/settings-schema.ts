@@ -2599,6 +2599,21 @@ export const SETTINGS_SCHEMA = {
 	"mnemopi.injectionTokenLimit": { type: "number", default: 1000 },
 	"mnemopi.debug": { type: "boolean", default: false },
 
+	// WikiGraph Lite sidecar wiki index.
+	"wikigraph.enabled": { type: "boolean", default: true },
+	"wikigraph.roots": { type: "array", of: "string", default: ["~/.omp/agent/wiki", "<cwd>/.omp/wiki"] },
+	"wikigraph.maxNodesPerResolve": { type: "number", default: 8 },
+	"wikigraph.maxCharsPerResolve": { type: "number", default: 1200 },
+	"wikigraph.factModel": { type: "string", default: "auto" },
+	"wikigraph.factsPerSection": { type: "number", default: 5 },
+	"wikigraph.factMinConfidence": { type: "number", default: 0.6 },
+
+	// Opt-in progressive-disclosure trace/offload for compaction summaries.
+	"offloadTrace.enabled": { type: "boolean", default: false },
+	"offloadTrace.maxCanvasChars": { type: "number", default: 2000 },
+	"offloadTrace.maxNodes": { type: "number", default: 24 },
+	"offloadTrace.rawArtifactMinChars": { type: "number", default: 4000 },
+
 	// Hindsight (https://hindsight.vectorize.io)
 	"hindsight.apiUrl": {
 		type: "string",
