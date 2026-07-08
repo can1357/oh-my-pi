@@ -32,6 +32,8 @@ import {
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
 	type AsideMessage,
+	CacheAttributionTracker,
+	type CacheStats,
 	type CompactionSummaryMessage,
 	countTokens,
 	resolveTelemetry,
@@ -1277,6 +1279,23 @@ export class AgentSession {
 	/** Consecutive failed tool results on this session; fuels the Fusion failure-streak escalation. */
 	#fusionToolFailureStreak = 0;
 	#advisorRuntime?: AdvisorRuntime;
+	#cacheAttribution = new CacheAttributionTracker({
+		onTrace: trace => {
+			if (trace.broke) {
+				logger.debug("Prompt cache break", {
+					model: trace.model,
+					causes: trace.causes,
+					rewriteReason: trace.rewriteReason,
+					firstDivergence: trace.firstDivergence,
+					hitRatio: trace.hitRatio === undefined ? undefined : Number(trace.hitRatio.toFixed(3)),
+					previousPromptTokens: trace.previousPromptTokens,
+					cacheReadTokens: trace.cacheReadTokens,
+					cacheWriteTokens: trace.cacheWriteTokens,
+					promptTokens: trace.promptTokens,
+				});
+			}
+		},
+	});
 	#advisorEnabled = false;
 	/** Screenpipe activity-bridge manager; built when `screenpipe.enabled` is on, re-bound on
 	 *  every session transition, torn down in dispose. Undefined when the feature is off. */
@@ -1699,6 +1718,7 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		this.agent.setCacheAttribution(this.#cacheAttribution);
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#autoApprove = config.autoApprove === true;
@@ -8314,6 +8334,7 @@ export class AgentSession {
 		}
 		if (result.prunedCount === 0) return result;
 
+		this.#cacheAttribution.noteHistoryRewrite("prune");
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
@@ -8357,6 +8378,7 @@ export class AgentSession {
 			tokensSaved: result.tokensSaved + (maskResult?.tokensSaved ?? 0),
 		};
 
+		this.#cacheAttribution.noteHistoryRewrite("prune");
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
@@ -8417,6 +8439,7 @@ export class AgentSession {
 			tokensSaved: result.tokensSaved + (maskResult?.tokensSaved ?? 0),
 		};
 
+		this.#cacheAttribution.noteHistoryRewrite("prune");
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
@@ -8468,6 +8491,7 @@ export class AgentSession {
 		if (removed === 0) {
 			return { removed: 0 };
 		}
+		this.#cacheAttribution.noteHistoryRewrite("prune");
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
@@ -8524,6 +8548,7 @@ export class AgentSession {
 		});
 
 		applyShakeRegions(items);
+		this.#cacheAttribution.noteHistoryRewrite("compaction");
 
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
@@ -8736,6 +8761,7 @@ export class AgentSession {
 				preserveData,
 			);
 			const newEntries = this.sessionManager.getEntries();
+			this.#cacheAttribution.noteHistoryRewrite("compaction");
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
 			// Compaction discarded the conversation history that carried the approved
@@ -9128,6 +9154,7 @@ export class AgentSession {
 			}
 
 			// Rebuild agent messages from session
+			this.#cacheAttribution.noteHistoryRewrite("compaction");
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#advisorRuntime?.reset();
@@ -13719,6 +13746,15 @@ export class AgentSession {
 			skillsTokens,
 			messagesTokens,
 		};
+	}
+
+	/**
+	 * Aggregate prompt-cache statistics for this session: lifetime hit rate and
+	 * cache-break counts attributed by cause (system-prompt change, tool-list
+	 * change, history rewrite, model change, provider-side).
+	 */
+	getCacheStats(): CacheStats {
+		return this.#cacheAttribution.stats();
 	}
 
 	getContextUsage(options?: { contextWindow?: number }): ContextUsage | undefined {

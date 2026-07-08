@@ -36,6 +36,7 @@ import {
 	resolveOwnedDialectFromEnv,
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
+import type { CacheAttributionTracker } from "./cache-attribution";
 import { createMoaStreamFn, type MoaConfig } from "./moa";
 import { isProviderRefusalMessage } from "./replay-policy";
 import type {
@@ -319,6 +320,11 @@ export interface AgentOptions {
 	 * across turns so DeepSeek/Anthropic prefix caches hit at maximum rate.
 	 */
 	appendOnlyContext?: AppendOnlyContextManager;
+	/**
+	 * Prompt-cache observability — attributes cache breaks to the harness-side
+	 * change (or provider) that caused them. See {@link CacheAttributionTracker}.
+	 */
+	cacheAttribution?: CacheAttributionTracker;
 }
 
 export interface AgentPromptOptions {
@@ -400,6 +406,7 @@ export class Agent {
 	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
+	#cacheAttribution?: CacheAttributionTracker;
 
 	/** Buffered Cursor tool results with text length at time of call (for correct ordering) */
 	#cursorToolResultBuffer: CursorToolResultEntry[] = [];
@@ -475,6 +482,7 @@ export class Agent {
 		this.transformAssistantMessage = opts.transformAssistantMessage;
 		this.#telemetry = opts.telemetry;
 		this.#appendOnlyContext = opts.appendOnlyContext;
+		this.#cacheAttribution = opts.cacheAttribution;
 		this.#transformProviderContext = opts.transformProviderContext;
 	}
 
@@ -742,6 +750,14 @@ export class Agent {
 		let context: Context = { systemPrompt, messages, tools };
 		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
 		return context;
+	}
+
+	get cacheAttribution(): CacheAttributionTracker | undefined {
+		return this.#cacheAttribution;
+	}
+
+	setCacheAttribution(tracker?: CacheAttributionTracker): void {
+		this.#cacheAttribution = tracker;
 	}
 
 	subscribe(fn: (e: AgentEvent) => void): () => void {
@@ -1186,6 +1202,7 @@ export class Agent {
 			dialect: this.#dialect,
 			abortOnFabricatedToolResult: this.#abortOnFabricatedToolResult,
 			appendOnlyContext: this.#appendOnlyContext,
+			cacheAttribution: this.#cacheAttribution,
 			beforeToolCall: this.beforeToolCall ? (ctx, signal) => this.beforeToolCall?.(ctx, signal) : undefined,
 			afterToolCall: this.afterToolCall ? (ctx, signal) => this.afterToolCall?.(ctx, signal) : undefined,
 			transformAssistantMessage: this.transformAssistantMessage
