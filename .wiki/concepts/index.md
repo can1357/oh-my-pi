@@ -5,3 +5,4 @@
 * [Fork update channel](fork-update-channel.md) - how oh-my-pk/omp installers and updates are routed to the fork's distribution endpoint.
 * [Launch agent slash command](launch-agent-slash-command.md) - how the new /agent slash command launches the agent on a specified task.
 * [Recent prompt markdown files](recent-prompt-markdown-files.md) - session-observed inventory of recent `packages/coding-agent/src/prompts/**/*.md` files and the `type: prompt(s)` frontmatter caveat.
+ * [Context and token optimization](context-optimization.md) - how the system prompt, tool schemas, and context files contribute to the LLM context window, and tunables to keep the baseline small.
