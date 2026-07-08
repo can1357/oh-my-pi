@@ -5,7 +5,7 @@
  */
 import * as path from "node:path";
 import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
-import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
+import { getMCPConfigPath, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import { clearCache as clearFsCache } from "../../capability/fs";
 import type { SourceMeta } from "../../capability/types";
 import { expandEnvVarsDeep } from "../../discovery/helpers";
@@ -56,7 +56,7 @@ import type {
 	MCPServerConfig,
 	MCPServerConnection,
 } from "../../mcp/types";
-import { shortenPath } from "../../tools/render-utils";
+import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { urlHyperlinkAlways } from "../../tui";
 import { copyToClipboard } from "../../utils/clipboard";
 import { isTimeoutError } from "../../utils/fetch-timeout";
@@ -455,6 +455,9 @@ export class MCPCommandController {
 			case "reload":
 				await this.#handleReload();
 				break;
+			case "refresh":
+				await this.#handleRefresh();
+				break;
 			default:
 				this.ctx.showError(`Unknown subcommand: ${subcommand}. Type /mcp help for usage.`);
 		}
@@ -486,6 +489,7 @@ export class MCPCommandController {
 			"  /mcp smithery-logout  Remove cached Smithery API key",
 			"  /mcp reconnect <name> Reconnect to a specific MCP server",
 			"  /mcp reload           Force reload and rediscover MCP runtime tools",
+			"  /mcp refresh          Re-fetch tools from connected servers (no reconnect)",
 			"  /mcp resources        List available resources from connected servers",
 			"  /mcp prompts          List available prompts from connected servers",
 			"  /mcp notifications    Show notification capabilities and subscription state",
@@ -2110,6 +2114,92 @@ export class MCPCommandController {
 		} catch (error) {
 			this.ctx.showError(`Failed to reload MCP: ${error instanceof Error ? error.message : String(error)}`);
 		}
+	}
+
+	/**
+	 * Handle /mcp refresh — re-run `tools/list` on every already-connected
+	 * server and rebind the results, without tearing down connections.
+	 *
+	 * This is the recovery for a server that connected while its toolset was
+	 * still empty (e.g. an aggregating gateway answering `tools/list` with `[]`
+	 * during its cold-start warmup). Unlike `/mcp reload`, it keeps live sessions
+	 * and only refetches tools — the fast path when the connection is healthy but
+	 * came up toolless.
+	 */
+	async #handleRefresh(): Promise<void> {
+		if (!this.ctx.mcpManager) {
+			this.ctx.showError("MCP manager not available.");
+			return;
+		}
+		const connected = this.ctx.mcpManager.getConnectedServers();
+		if (connected.length === 0) {
+			this.#showMessage(
+				["", theme.fg("muted", "No connected MCP servers to refresh. Try /mcp reload."), ""].join("\n"),
+			);
+			return;
+		}
+		try {
+			this.#showMessage(["", theme.fg("muted", "Refreshing MCP tools from connected servers..."), ""].join("\n"));
+			const outcomes = await this.ctx.mcpManager.refreshAllTools();
+			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
+			const failed = outcomes.filter(
+				(outcome): outcome is { name: string; ok: false; error: string } => !outcome.ok,
+			);
+			if (failed.length === outcomes.length && outcomes.length > 0) {
+				// Every server rejected — nothing was refreshed. Report the failure
+				// rather than a misleading success (the whole point of /mcp refresh
+				// is recovery, so a silent all-failure strands the user).
+				this.ctx.showError(
+					`Failed to refresh MCP tools from all ${outcomes.length} connected servers:\n${failed
+						.map(outcome => `  ${this.#formatRefreshFailureRow(outcome)}`)
+						.join("\n")}`,
+				);
+				return;
+			}
+			const toolCount = this.ctx.mcpManager.getTools().length;
+			const lines = [
+				"",
+				theme.fg("success", `${theme.icon.loop} MCP tools refreshed`),
+				`  Connected servers: ${connected.length}`,
+				`  Tools available: ${toolCount}`,
+			];
+			if (failed.length > 0) {
+				lines.push(theme.fg("warning", `  ${failed.length} server(s) failed to refresh:`));
+				for (const outcome of failed) {
+					lines.push(theme.fg("warning", `    ${this.#formatRefreshFailureRow(outcome)}`));
+				}
+			}
+			lines.push("");
+			this.#showMessage(lines.join("\n"));
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			// Sanitize and cap the COMPLETE rendered row, prefix included: bounding
+			// only the payload and then prepending a label leaves the row wider
+			// than the cap by the label's own width.
+			this.ctx.showError(this.#sanitizeRefreshErrorText(`Failed to refresh MCP tools: ${message}`));
+		}
+	}
+
+	/**
+	 * Render one `/mcp refresh` failure as a single bounded TUI row. Both the
+	 * server name and the error can carry tabs, newlines, or control chars (a
+	 * name is server-controlled), so sanitize the COMPLETE `name: error` row and
+	 * cap its width — an overlong or control-laden name would otherwise corrupt
+	 * or overflow the row just as an unsanitized error did. Matches the sibling
+	 * render pipeline in command-controller.ts.
+	 */
+	#formatRefreshFailureRow(outcome: { name: string; error: string }): string {
+		return this.#sanitizeRefreshErrorText(`${outcome.name}: ${outcome.error}`);
+	}
+
+	/**
+	 * Normalize a transport-controlled error string for a single bounded TUI
+	 * row: collapse newlines to spaces, strip control chars, replace tabs, and
+	 * cap width. Shared by the per-server failure rows and the final rebind
+	 * catch so both apply identical normalization.
+	 */
+	#sanitizeRefreshErrorText(text: string): string {
+		return replaceTabs(truncateToWidth(sanitizeText(text.replace(/[\r\n]+/g, " ")), TRUNCATE_LENGTHS.LINE));
 	}
 
 	/**

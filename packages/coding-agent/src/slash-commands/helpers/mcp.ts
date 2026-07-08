@@ -501,6 +501,12 @@ export async function handleMcpAcp(
 			runtime,
 		);
 	}
+	if (verb === "refresh") {
+		return usage(
+			"MCP refresh requires the TUI client (live MCPManager). Use /mcp reload to re-run discovery.",
+			runtime,
+		);
+	}
 	if (TUI_ONLY_MCP_VERBS.has(verb)) {
 		return usage(`/mcp ${verb} requires OAuth or browser flows only available in the TUI client.`, runtime);
 	}

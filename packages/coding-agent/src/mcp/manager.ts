@@ -50,6 +50,7 @@ import type {
 	MCPAuthChallenge,
 	MCPGetPromptResult,
 	MCPPrompt,
+	MCPRefreshOutcome,
 	MCPRequestOptions,
 	MCPResource,
 	MCPResourceReadResult,
@@ -119,6 +120,41 @@ const RECONNECT_BURST_LIMIT = 5;
  * cleared; subsequent frames deliver directly to attached listeners.
  */
 const NOTIFICATION_BUFFER_CAP = 100;
+
+/**
+ * In-session recovery for a *successful-but-empty* `tools/list`.
+ *
+ * An aggregating MCP gateway (e.g. LiteLLM fronting several upstream servers)
+ * answers `tools/list` with a valid `{"tools":[]}` for a ~15-20s cold-start
+ * window after (re)start — the server registry survives, but its live upstream
+ * sessions are not yet established. That is a connect *success*, so nothing on
+ * the reconnect/failure paths ever refetched: the session held zero tools for
+ * its whole lifetime. When a connected server yields an empty toolset we
+ * re-list on this bounded backoff (epoch- and connection-guarded) until tools
+ * appear or the schedule is exhausted. A per-manager override (see
+ * {@link MCPManager.setEmptyToolsetRetryScheduleForTests}) or the
+ * `OMP_MCP_EMPTY_RETRY_MS` env var overrides the base delay (tests set it
+ * small); `0` disables auto-retry entirely. The per-manager seam is preferred
+ * in tests: mutating the env is process-global and leaks into any sibling
+ * suite that constructs an MCPManager during the async window.
+ */
+const EMPTY_TOOLSET_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
+const EMPTY_RETRY_ENV = "OMP_MCP_EMPTY_RETRY_MS";
+
+function resolveEmptyToolsetRetryDelays(override?: string): number[] {
+	const raw = (override ?? Bun.env[EMPTY_RETRY_ENV])?.trim();
+	if (raw === undefined || raw === "") return EMPTY_TOOLSET_RETRY_DELAYS_MS;
+	const base = Number(raw);
+	if (!Number.isFinite(base) || base < 0) {
+		logger.warn("Ignoring invalid OMP_MCP_EMPTY_RETRY_MS env value; expected a non-negative number", {
+			value: raw,
+		});
+		return EMPTY_TOOLSET_RETRY_DELAYS_MS;
+	}
+	if (base === 0) return [];
+	// Preserve the exponential shape but anchor it on the override.
+	return EMPTY_TOOLSET_RETRY_DELAYS_MS.map((_, i) => base * 2 ** i);
+}
 
 function trackPromise<T>(promise: Promise<T>): TrackedPromise<T> {
 	const tracked: TrackedPromise<T> = { promise, status: "pending" };
@@ -215,6 +251,17 @@ export class MCPManager {
 		MCPManager.#instance = undefined;
 	}
 
+	/**
+	 * Override this manager's empty-toolset retry schedule. Test-only seam that
+	 * replaces mutating the process-global `OMP_MCP_EMPTY_RETRY_MS` env var: the
+	 * value uses the same string form (`"20"` to anchor the backoff at 20ms,
+	 * `"0"` to disable auto-retry). Scoped to this instance, so it cannot leak
+	 * into a sibling suite that constructs a manager during the async window.
+	 */
+	setEmptyToolsetRetryScheduleForTests(override: string | undefined): void {
+		this.#emptyRetryScheduleOverride = override;
+	}
+
 	#connections = new Map<string, MCPServerConnection>();
 	#tools: CustomTool<TSchema, MCPToolDetails>[] = [];
 	#pendingConnections = new Map<string, Promise<MCPServerConnection>>();
@@ -250,6 +297,37 @@ export class MCPManager {
 	#reconnectHistory = new Map<string, number[]>();
 	/** Monotonic epoch incremented on disconnectAll to invalidate stale reconnections. */
 	#epoch = 0;
+	/**
+	 * Servers with an in-flight empty-toolset re-list loop, mapped to the
+	 * connection that owns the loop. Keyed by name to avoid stacking duplicates;
+	 * valued by connection so a loop scheduled under a name that was
+	 * disconnected+reconnected can detect it now targets a replacement and stop.
+	 */
+	#pendingEmptyRetries = new Map<string, MCPServerConnection>();
+	/**
+	 * Cancellers for the in-flight backoff wait of each empty-toolset re-list
+	 * loop, keyed by server name and guarded by the owning connection. The
+	 * timer behind each wait is `unref()`'d so a pending backoff never holds the
+	 * event loop alive; cancelling it (from either disconnect path) settles the
+	 * wait early so a one-shot/SDK consumer shutting down via `disconnectAll()`
+	 * does not block for up to the full backoff schedule.
+	 */
+	#emptyRetryWaits = new Map<string, { connection: MCPServerConnection; cancel: () => void }>();
+	/**
+	 * In-flight per-server `refreshServerTools` calls, so a manual `/mcp refresh`
+	 * and an automatic empty-toolset re-list serialize onto one `tools/list`
+	 * instead of racing — an older empty response must never overwrite tools a
+	 * concurrent refresh already recovered.
+	 */
+	#pendingToolRefresh = new Map<string, { connection: MCPServerConnection; promise: Promise<void>; dirty: boolean }>();
+	/**
+	 * Per-manager override for the empty-toolset retry schedule, in the same
+	 * `OMP_MCP_EMPTY_RETRY_MS` string form. When set it takes precedence over
+	 * the process-global env var, so a test can shrink or disable the backoff
+	 * for one manager without mutating `Bun.env` (which would leak into any
+	 * sibling suite that constructs a manager during the async window).
+	 */
+	#emptyRetryScheduleOverride?: string;
 
 	constructor(
 		private cwd: string,
@@ -702,6 +780,15 @@ export class MCPManager {
 					this.#replaceServerTools(name, customTools);
 					void this.#onToolsChanged?.(this.#tools);
 					void this.toolCache?.set(name, config, serverTools);
+					// Connected but the server advertised no tools. A tools-capable
+					// server listing `[]` is likely a gateway still warming up —
+					// re-list on a backoff so the session self-heals. A server
+					// WITHOUT the tools capability (resource-only/prompt-only) lists
+					// `[]` permanently by design; scheduling would run the full retry
+					// and session-wide rebind forever, so gate on the capability too.
+					if (connection.capabilities.tools && serverTools.length === 0) {
+						this.#scheduleEmptyToolsetRetry(name);
+					}
 
 					notify({ type: "connected", serverName: name });
 					await this.#loadServerResourcesAndPrompts(name, connection);
@@ -822,7 +909,7 @@ export class MCPManager {
 		const refresh = (() => {
 			switch (kind) {
 				case "tools":
-					return this.refreshServerTools(serverName);
+					return this.refreshServerTools(serverName, { notification: true });
 				case "resources":
 					return this.refreshServerResources(serverName);
 				case "prompts":
@@ -934,6 +1021,16 @@ export class MCPManager {
 	 */
 	getConnection(name: string): MCPServerConnection | undefined {
 		return this.#connections.get(name);
+	}
+
+	/**
+	 * Whether an empty-toolset recovery loop is currently armed for `name`.
+	 * Exposes the synchronously-set `#pendingEmptyRetries` marker so the
+	 * scheduling decision can be asserted deterministically without waiting out
+	 * the backoff.
+	 */
+	hasPendingEmptyToolsetRetry(name: string): boolean {
+		return this.#pendingEmptyRetries.has(name);
 	}
 
 	/**
@@ -1049,8 +1146,15 @@ export class MCPManager {
 		this.#serverConfigs.delete(name);
 		this.#pendingResourceRefresh.delete(name);
 		this.#reconnectHistory.delete(name);
+		this.#pendingEmptyRetries.delete(name);
+		this.#pendingToolRefresh.delete(name);
 
 		const connection = this.#connections.get(name);
+
+		// Cancel any in-flight empty-toolset backoff for this connection so its
+		// loop exits now instead of after the current delay, and its unref'd
+		// timer is cleared.
+		if (connection) this.#cancelEmptyRetryWait(name, connection);
 
 		const subscribedUris = this.#subscribedResources.get(name);
 		if (subscribedUris && subscribedUris.size > 0 && connection) {
@@ -1080,6 +1184,7 @@ export class MCPManager {
 		this.#epoch++;
 		const promises = Array.from(this.#connections, ([name, connection]) => this.#discardConnection(name, connection));
 		await Promise.allSettled(promises);
+		for (const [name, wait] of this.#emptyRetryWaits) this.#cancelEmptyRetryWait(name, wait.connection);
 
 		this.#pendingConnections.clear();
 		this.#pendingToolLoads.clear();
@@ -1090,6 +1195,8 @@ export class MCPManager {
 		this.#tools = [];
 		this.#subscribedResources.clear();
 		this.#reconnectHistory.clear();
+		this.#pendingEmptyRetries.clear();
+		this.#pendingToolRefresh.clear();
 	}
 
 	/**
@@ -1311,6 +1418,13 @@ export class MCPManager {
 			this.#replaceServerTools(name, customTools);
 			void this.#onToolsChanged?.(this.#tools);
 			void this.#loadServerResourcesAndPrompts(name, connection);
+			// A reconnect that lands mid-warmup can also see an empty toolset;
+			// re-list on a backoff so tools appear once the server populates. Only
+			// tools-capable servers can ever advertise tools — a resource-only
+			// server always lists `[]`, so gate scheduling on the capability.
+			if (connection.capabilities.tools && serverTools.length === 0) {
+				this.#scheduleEmptyToolsetRetry(name);
+			}
 			return connection;
 		} catch (error) {
 			// Detach synchronously and close in the background so a slow close
@@ -1346,30 +1460,240 @@ export class MCPManager {
 	/**
 	 * Refresh tools from a specific server.
 	 */
-	async refreshServerTools(name: string): Promise<void> {
+	async refreshServerTools(name: string, options?: { notification?: boolean }): Promise<void> {
 		const connection = this.#connections.get(name);
 		if (!connection) return;
 
-		// Clear cached tools
-		connection.tools = undefined;
+		// Coalesce concurrent refreshes for the same connection onto one
+		// `tools/list`. A manual `/mcp refresh` overlapping an automatic
+		// empty-toolset re-list would otherwise each clear `connection.tools` and
+		// apply their own response unconditionally — an older empty response could
+		// land after the other recovered populated tools and overwrite them with
+		// `[]`. Sharing the in-flight promise makes both callers observe the same
+		// single result.
+		//
+		// A `notifications/tools/list_changed` that arrives mid-flight is the one
+		// exception: its whole point is that the toolset changed AGAIN, so the
+		// in-flight `tools/list` (which predates it) may already be stale. Rather
+		// than fire a second concurrent list (reintroducing the overwrite race the
+		// single-flight fixed), it marks the pending entry dirty so exactly ONE
+		// follow-up refresh runs after the current one settles. A plain concurrent
+		// `/mcp refresh` never sets dirty, so manual refreshes still coalesce to
+		// one.
+		const existing = this.#pendingToolRefresh.get(name);
+		if (existing && existing.connection === connection) {
+			if (options?.notification) existing.dirty = true;
+			return existing.promise;
+		}
 
-		// Reload tools
-		const serverTools = await listTools(connection);
-		const reconnect = () => this.reconnectServer(name);
-		const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
-		void this.toolCache?.set(name, connection.config, serverTools);
+		const doRefresh = async (): Promise<void> => {
+			// Clear cached tools
+			connection.tools = undefined;
 
-		// Replace tools from this server
-		this.#replaceServerTools(name, customTools);
-		await this.#onToolsChanged?.(this.#tools);
+			// Reload tools
+			const serverTools = await listTools(connection);
+
+			// The connection may have been replaced (disconnect+reconnect under the
+			// same name) while `tools/list` was in flight. Applying a stale
+			// response would clobber the replacement's tools; drop it.
+			if (this.#connections.get(name) !== connection) return;
+
+			const reconnect = () => this.reconnectServer(name);
+			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
+			void this.toolCache?.set(name, connection.config, serverTools);
+
+			// Replace tools from this server
+			this.#replaceServerTools(name, customTools);
+			await this.#onToolsChanged?.(this.#tools);
+
+			// A refresh (notification- or user-driven) that lands mid-warmup — or
+			// while the server's upstream sessions restart — can list `[]` on a
+			// still-connected server, just like the initial connect and reconnect
+			// paths. Without re-arming the recovery loop here, a populated server
+			// that momentarily lists empty would stay toolless until the next
+			// notification or manual refresh. The scheduler dedups against a loop
+			// already running for this connection, so overlapping refreshes cannot
+			// stack loops. A resource-only server (no tools capability) always
+			// lists `[]`, so gate scheduling on the capability to avoid an endless
+			// no-op retry loop and session-wide rebind.
+			if (connection.capabilities.tools && serverTools.length === 0) {
+				this.#scheduleEmptyToolsetRetry(name);
+			}
+		};
+
+		const settle = async (error: unknown): Promise<void> => {
+			const pending = this.#pendingToolRefresh.get(name);
+			if (pending?.promise === promise) {
+				this.#pendingToolRefresh.delete(name);
+				// A `list_changed` landed mid-flight: run exactly one follow-up so
+				// the newer toolset is not lost until the next notification. Only
+				// re-list if the connection is still the current one. Awaiting the
+				// follow-up preserves `#handleServerNotification`'s post-refresh
+				// ordering contract for the second notification and lets its outcome
+				// replace a failed original refresh when recovery succeeds.
+				if (pending.dirty && this.#connections.get(name) === connection) {
+					await this.refreshServerTools(name, { notification: true });
+					return;
+				}
+			}
+			if (error !== undefined) throw error;
+		};
+
+		const promise = doRefresh().then(
+			() => settle(undefined),
+			(error: unknown) => settle(error),
+		);
+		this.#pendingToolRefresh.set(name, { connection, promise, dirty: false });
+		return promise;
 	}
 
 	/**
-	 * Refresh tools from all servers.
+	 * Refresh tools from all connected servers. Returns each server's outcome so
+	 * a caller can surface partial failure — `Promise.allSettled` alone hides a
+	 * server that rejected `tools/list`, which would let `/mcp refresh` report
+	 * success while a stale or empty toolset stood.
 	 */
-	async refreshAllTools(): Promise<void> {
-		const promises = Array.from(this.#connections.keys()).map(name => this.refreshServerTools(name));
-		await Promise.allSettled(promises);
+	async refreshAllTools(): Promise<MCPRefreshOutcome[]> {
+		const names = Array.from(this.#connections.keys());
+		const settled = await Promise.allSettled(names.map(name => this.refreshServerTools(name)));
+		return settled.map((result, index) => {
+			const name = names[index] as string;
+			if (result.status === "fulfilled") return { name, ok: true };
+			const error = result.reason;
+			return { name, ok: false, error: error instanceof Error ? error.message : String(error) };
+		});
+	}
+
+	/**
+	 * Count of registered tools currently attributed to `name`. Ownership is
+	 * matched via `mcpServerName`, never a `mcp__${name}_` name prefix — tool
+	 * names are lossy-sanitized (see {@link #replaceServerTools}), so a prefix
+	 * match misses any server whose raw name mutates under sanitization and can
+	 * false-match a sibling.
+	 */
+	#serverToolCount(name: string): number {
+		let count = 0;
+		for (const tool of this.#tools) {
+			if (tool.mcpServerName === name) count++;
+		}
+		return count;
+	}
+
+	/**
+	 * Recover from a successful-but-empty `tools/list` on a *connected* server.
+	 *
+	 * A gateway mid-warmup (or any server still populating) can answer the
+	 * initial `tools/list` with `[]`. That is a connect success, so no reconnect
+	 * or failure path ever refetches — the session would hold zero tools for its
+	 * whole lifetime. Re-list on a bounded backoff until tools appear, the
+	 * server disconnects, another path registers tools, or the schedule is
+	 * abandons a stale loop, and on the originating connection so a
+	 * disconnect+reconnect under the same name (which does not bump `#epoch`)
+	 * abandons the old loop rather than letting it re-list against the
+	 * replacement. No-op when auto-retry is disabled (`OMP_MCP_EMPTY_RETRY_MS=0`)
+	 * or a loop for this server is already running.
+	 */
+	#scheduleEmptyToolsetRetry(name: string): void {
+		const delays = resolveEmptyToolsetRetryDelays(this.#emptyRetryScheduleOverride);
+		if (delays.length === 0) return;
+		const connection = this.#connections.get(name);
+		if (!connection) return;
+		// Dedup only against a loop already running for THIS connection. A stale
+		// loop still holding the marker for a since-replaced connection must not
+		// suppress the replacement's own loop.
+		if (this.#pendingEmptyRetries.get(name) === connection) return;
+		this.#pendingEmptyRetries.set(name, connection);
+		const startEpoch = this.#epoch;
+		void (async () => {
+			try {
+				for (const wait of delays) {
+					// Cancellable so a disconnect during this backoff settles the
+					// wait immediately instead of pinning the event loop (and any
+					// one-shot/SDK consumer awaiting `disconnectAll()`) for up to
+					// the full remaining schedule. A cancelled wait means the loop
+					// must exit without re-listing a torn-down connection.
+					if (!(await this.#waitEmptyRetryBackoff(name, connection, wait))) return;
+					if (this.#epoch !== startEpoch) return;
+					// Stop if this name now maps to a different (or no) connection:
+					// a disconnect+reconnect replaced our target, and a fresh loop
+					// owns the replacement. Continuing would re-list the wrong
+					// connection and let this loop's cleanup clear the new marker.
+					if (this.#connections.get(name) !== connection) return;
+					if (this.#serverToolCount(name) > 0) return;
+					try {
+						await this.refreshServerTools(name);
+					} catch (error) {
+						logger.debug("MCP empty-toolset retry re-list failed", {
+							path: `mcp:${name}`,
+							error: error instanceof Error ? error.message : String(error),
+						});
+						continue;
+					}
+					if (this.#serverToolCount(name) > 0) {
+						logger.debug("MCP empty-toolset retry recovered tools", {
+							path: `mcp:${name}`,
+							tools: this.#serverToolCount(name),
+						});
+						return;
+					}
+				}
+				logger.debug("MCP empty-toolset retry exhausted; server still advertises no tools", {
+					path: `mcp:${name}`,
+				});
+			} finally {
+				// Clear only the marker this loop owns — a replacement connection's
+				// loop may have taken the slot while we were running.
+				if (this.#pendingEmptyRetries.get(name) === connection) {
+					this.#pendingEmptyRetries.delete(name);
+				}
+				if (this.#emptyRetryWaits.get(name)?.connection === connection) {
+					this.#emptyRetryWaits.delete(name);
+				}
+			}
+		})();
+	}
+
+	/**
+	 * Sleep `ms` for the empty-toolset retry loop, cancellable per server.
+	 *
+	 * Resolves `true` when the full delay elapsed (loop should continue) or
+	 * `false` when the wait was cancelled by a disconnect (loop should exit
+	 * without re-listing). The backing timer is `unref()`'d so a pending backoff
+	 * never keeps the event loop alive on its own — a one-shot/SDK consumer that
+	 * shuts down via `disconnectAll()` returns promptly instead of blocking on
+	 * the timer, and the disconnect path also cancels early to settle the wait.
+	 */
+	#waitEmptyRetryBackoff(name: string, connection: MCPServerConnection, ms: number): Promise<boolean> {
+		const gate = Promise.withResolvers<boolean>();
+		const timer = setTimeout(() => {
+			if (this.#emptyRetryWaits.get(name)?.connection === connection) {
+				this.#emptyRetryWaits.delete(name);
+			}
+			gate.resolve(true);
+		}, ms);
+		timer.unref();
+		this.#emptyRetryWaits.set(name, {
+			connection,
+			cancel: () => {
+				clearTimeout(timer);
+				gate.resolve(false);
+			},
+		});
+		return gate.promise;
+	}
+
+	/**
+	 * Cancel the in-flight empty-toolset backoff wait for `name` when its owning
+	 * connection matches. The loop's own `finally` clears the map entry, so this
+	 * only fires the canceller and drops the reference the disconnect is
+	 * invalidating.
+	 */
+	#cancelEmptyRetryWait(name: string, connection: MCPServerConnection): void {
+		const wait = this.#emptyRetryWaits.get(name);
+		if (wait?.connection === connection) {
+			this.#emptyRetryWaits.delete(name);
+			wait.cancel();
+		}
 	}
 
 	/**
