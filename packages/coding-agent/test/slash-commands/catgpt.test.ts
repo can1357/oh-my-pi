@@ -40,7 +40,7 @@ describe("catgpt slash commands", () => {
 					choices: [{ message: { content: "Fast answer response" } }],
 				}),
 			} as Response;
-		});
+		}) as unknown as typeof fetch;
 
 		try {
 			const handled = await executeBuiltinSlashCommand("/catgpt-fast Tell me about fast mode", harness.runtime);
@@ -62,7 +62,7 @@ describe("catgpt slash commands", () => {
 					choices: [{ message: { content: "Pro answer response" } }],
 				}),
 			} as Response;
-		});
+		}) as unknown as typeof fetch;
 
 		try {
 			const handled = await executeBuiltinSlashCommand("/catgpt-pro Do deep thinking", harness.runtime);

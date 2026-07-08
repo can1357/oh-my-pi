@@ -9,7 +9,8 @@ import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest"
 import { CollabHost } from "../collab/host";
 import { writeCollabLinkFile } from "../collab/link-file";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
-import type { SettingPath, SettingValue } from "../config/settings";
+import { applyNineRouterRouting, type NineRouterRoutingResult } from "../config/nine-router-controller";
+import type { SettingPath, Settings, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import {
 	clearPluginRootsAndCaches,
@@ -32,8 +33,6 @@ import type { AgentSession, FreshSessionResult } from "../session/agent-session"
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { urlHyperlinkAlways } from "../tui";
-import { applyNineRouterRouting, type NineRouterRoutingResult } from "../config/nine-router-controller";
-
 import { getChangelogPath, parseChangelog } from "../utils/changelog";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
 import { buildContextReportText } from "./helpers/context-report";
@@ -1169,6 +1168,38 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				return;
 			}
 			runtime.ctx.showStatus("Usage: /usage [show|reset [account|active]]");
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "9router",
+		description: "Route model roles through the local 9router gateway",
+		subcommands: [
+			{ name: "route", description: "Route all roles using the 9router model list" },
+			{ name: "probe", description: "Route all roles using a small chat probe" },
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const { verb } = parseSubcommand(command.args);
+			if (verb === "route" || !verb) {
+				await runNineRouterSlashCommand(runtime.settings, "list", runtime.output);
+				return commandConsumed();
+			}
+			if (verb === "probe") {
+				await runNineRouterSlashCommand(runtime.settings, "probe", runtime.output);
+				return commandConsumed();
+			}
+			return usage("Usage: /9router [route|probe]", runtime);
+		},
+		handleTui: async (command, runtime) => {
+			const { verb } = parseSubcommand(command.args);
+			if (verb === "route" || !verb) {
+				await runNineRouterSlashCommand(runtime.ctx.settings, "list", text => runtime.ctx.showStatus(text));
+			} else if (verb === "probe") {
+				await runNineRouterSlashCommand(runtime.ctx.settings, "probe", text => runtime.ctx.showStatus(text));
+			} else {
+				runtime.ctx.showStatus("Usage: /9router [route|probe]");
+			}
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -2722,7 +2753,7 @@ async function handleCatGptCommand(
 				const errText = await response.text();
 				throw new Error(`Gateway returned HTTP ${response.status}: ${errText}`);
 			}
-			const data = await response.json();
+			const data = (await response.json()) as { selected?: string };
 			const selected = data.selected || "default";
 			const msg = `CatGPT intensity switched to: ${intensity} (${selected})`;
 			if (isTui && "ctx" in runtime) {
@@ -2752,7 +2783,7 @@ async function handleCatGptCommand(
 			throw new Error(`Gateway returned HTTP ${response.status}: ${errText}`);
 		}
 
-		const data = await response.json();
+		const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
 		const reply = data.choices?.[0]?.message?.content;
 		if (!reply) {
 			throw new Error("No response content received from CatGPT.");

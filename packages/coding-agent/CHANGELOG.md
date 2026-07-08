@@ -5,7 +5,7 @@
 ### Added
 
 - Added `agent.profile` and `agent.profiles` settings for named, swappable role-based model bundles that retarget every role-resolving agent slot at once (explicit `modelRoles` still wins per-role).
-- Added `omp 9router route` and a `NineRouterController` that probes the local 9router gateway, selects the first working combo per model role (subscription first, then cheap, then free), and writes the chosen selectors into `settings.modelRoles`. Supports `list` mode (presence in `/v1/models`) and `probe` mode (tiny chat completion), with `--api-key` / `9ROUTER_API_KEY` / `NINEROUTER_API_KEY` auth for probes.
+- Added `omp 9router route` and a `NineRouterController` (also accessible as the `/9router [route|probe]` slash command) that probes the local 9router gateway, selects the first working combo per model role (subscription first, then cheap, then free), and writes the chosen selectors into `settings.modelRoles`. Supports `list` mode (presence in `/v1/models`) and `probe` mode (tiny chat completion), with `--api-key` / `9ROUTER_API_KEY` / `NINEROUTER_API_KEY` auth for probes.
 
 - Added `compaction.maskConsumedObservations` (default `true`) and a new `maskConsumedObservations` pruning pass that replaces tool results the model has already acted on with deterministic placeholders (e.g. `[bash result consumed]`). This preserves reasoning traces and action history while cutting the verbatim observation tokens that the JetBrains study identified as cheaper to mask than to summarize.
 

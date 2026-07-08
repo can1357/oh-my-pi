@@ -4,15 +4,9 @@ import {
 	DEFAULT_ACCELERATION_CONFIG,
 	normalizeAccelerationConfig,
 } from "@pk-nerdsaver-ai/pi-agent-core/acceleration";
-import type {
-	AssistantMessage,
-	AssistantMessageEvent,
-	Context,
-	Model,
-	SimpleStreamOptions,
-} from "@pk-nerdsaver-ai/pi-ai";
-import { AssistantMessageEventStream } from "@pk-nerdsaver-ai/pi-ai/utils/event-stream";
 import type { StreamFn } from "@pk-nerdsaver-ai/pi-agent-core/types";
+import type { AssistantMessage, Context, Model, SimpleStreamOptions } from "@pk-nerdsaver-ai/pi-ai";
+import { AssistantMessageEventStream } from "@pk-nerdsaver-ai/pi-ai/utils/event-stream";
 
 const SCRIPT_FINAL = "final response body used for the regression check";
 
@@ -118,7 +112,7 @@ function buildDeps(): MockDeps {
 	};
 }
 
-function makeStreamFn(deps: MockDeps): StreamFn {
+function makeStreamFn(_deps: MockDeps): StreamFn {
 	const targetDelay = 80;
 	const draftDelay = 30;
 	const verifierDelay = 25;
@@ -126,17 +120,28 @@ function makeStreamFn(deps: MockDeps): StreamFn {
 		createTextStream(model, options.text, { delayMs: options.delayMs });
 	return (model: Model, context: Context, _options?: SimpleStreamOptions) => {
 		if (model.id === "draft") {
-			const sys = Array.isArray(context.systemPrompt) ? context.systemPrompt.join("\n") : (context.systemPrompt ?? "");
 			const steps = {
 				steps: [
-					{ step_id: 1, intent: "outline the requested task", expected_state_change: "draft outline", dependencies: [] },
-					{ step_id: 2, intent: "verify the response against the task", expected_state_change: "verifiable answer", dependencies: [1] },
+					{
+						step_id: 1,
+						intent: "outline the requested task",
+						expected_state_change: "draft outline",
+						dependencies: [],
+					},
+					{
+						step_id: 2,
+						intent: "verify the response against the task",
+						expected_state_change: "verifiable answer",
+						dependencies: [1],
+					},
 				],
 			};
 			return finalize(model, { text: JSON.stringify(steps), delayMs: draftDelay });
 		}
 		if (model.id === "verifier") {
-			const sys = Array.isArray(context.systemPrompt) ? context.systemPrompt.join("\n") : (context.systemPrompt ?? "");
+			const sys = Array.isArray(context.systemPrompt)
+				? context.systemPrompt.join("\n")
+				: (context.systemPrompt ?? "");
 			const acceptAll = sys.includes("Candidate steps JSON");
 			const text = acceptAll
 				? JSON.stringify({ accepted_step_ids: [1, 2], rejected_step_ids: [] })
@@ -161,7 +166,11 @@ const CATEGORIES: CategoryCase[] = [
 		prompt: "Refactor this module to use a dependency-injected clock so it can be tested deterministically.",
 	},
 	{ id: "math", category: "math", prompt: "Prove the sum of the first n integers is n(n+1)/2 step by step." },
-	{ id: "multi-step", category: "multi-step", prompt: "Plan, design, implement, and verify a feature flag rollout in 5 steps." },
+	{
+		id: "multi-step",
+		category: "multi-step",
+		prompt: "Plan, design, implement, and verify a feature flag rollout in 5 steps.",
+	},
 ];
 
 const LOOKAHEAD_TOKENS = ["plan", "design", "implement", "verify", "prove", "step"];
@@ -294,7 +303,9 @@ function summarize(results: RunResult[]): void {
 								.map(entry => entry.speculativeAcceptanceRate)
 								.filter((value): value is number => value !== null);
 							return speculativeValues.length > 0
-								? (speculativeValues.reduce((sum, value) => sum + value, 0) / speculativeValues.length).toFixed(3)
+								? (speculativeValues.reduce((sum, value) => sum + value, 0) / speculativeValues.length).toFixed(
+										3,
+									)
 								: "n/a";
 						})();
 			const equivalenceRate = entries.filter(entry => entry.passed).length / entries.length;
