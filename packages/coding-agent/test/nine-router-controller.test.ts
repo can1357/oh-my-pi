@@ -56,6 +56,41 @@ describe("NineRouterController", () => {
 		expect(settings.getModelRole("free")).toBe("9router/openrouter-free-fallback");
 	});
 
+	test("routes 9router Antigravity and Gemini CLI models", async () => {
+		const settings = makeSettings();
+		const controller = new NineRouterController({
+			settings,
+			baseUrl: "http://127.0.0.1:20128/v1",
+			fetch: makeFetch([
+				"ag/claude-sonnet-4-6",
+				"openrouter/qwen3-32b:nitro",
+				"gemini-3.1-flash-lite",
+			]),
+		});
+
+		await controller.apply();
+
+		expect(settings.getModelRole("default")).toBe("9router/ag/claude-sonnet-4-6");
+		expect(settings.getModelRole("balanced")).toBe("9router/openrouter/qwen3-32b:nitro");
+		expect(settings.getModelRole("smol")).toBe("9router/gemini-3.1-flash-lite");
+		expect(settings.getModelRole("vision")).toBeUndefined();
+		expect(settings.getModelRole("task")).toBe("9router/openrouter/qwen3-32b:nitro");
+	});
+
+	test("routes OpenRouter nitro fallbacks from 9router", async () => {
+		const settings = makeSettings();
+		const controller = new NineRouterController({
+			settings,
+			baseUrl: "http://127.0.0.1:20128/v1",
+			fetch: makeFetch(["openai/gpt-oss-120b:nitro"]),
+		});
+
+		await controller.apply();
+
+		expect(settings.getModelRole("balanced")).toBe("9router/openai/gpt-oss-120b:nitro");
+		expect(settings.getModelRole("task")).toBe("9router/openai/gpt-oss-120b:nitro");
+	});
+
 	test("probe mode skips candidates that fail the chat probe", async () => {
 		const settings = makeSettings();
 		const fetchImpl: FetchImpl = async (input, init) => {

@@ -75,7 +75,7 @@ function normalizeBaseUrl(url: string): string {
 }
 
 function asSelector(id: string): string {
-	return id.includes("/") ? id : `9router/${id}`;
+	return id.startsWith("9router/") ? id : `9router/${id}`;
 }
 
 function asComboId(id: string): string {
@@ -93,6 +93,9 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 				"omp-default",
 				"cx/gpt-5.5",
 				"cc/claude-opus-4-8",
+				"ag/claude-sonnet-4-6",
+				"ag/gemini-pro-agent",
+				"gc/gemini-3.1-pro-preview",
 				"fast-fallback",
 				"deepseek-v4-flash-fallback",
 				"openrouter-free-fallback",
@@ -100,7 +103,7 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 		},
 		{
 			role: "max-intelligence",
-			candidates: ["ompk", "oh-my-pi-fork", "omp-default", "cx/gpt-5.5", "cc/claude-opus-4-8"],
+			candidates: ["ompk", "oh-my-pi-fork", "omp-default", "cx/gpt-5.5", "cc/claude-opus-4-8", "ag/claude-opus-4-6-thinking", "ag/claude-sonnet-4-6", "gc/gemini-3.1-pro-preview"],
 		},
 		{
 			role: "slow",
@@ -121,6 +124,13 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 				"deepseek-v4-flash-fallback",
 				"gemini-3-5-flash-medium-round-robin",
 				"claude-sonnet-4-6-fallback",
+				"gemini-3.5-flash-fallback",
+				"ag/gemini-3.5-flash-low",
+				"ag/gpt-oss-120b-medium",
+				"openrouter/qwen3-32b:nitro",
+				"openai/gpt-oss-120b:nitro",
+				"openrouter/qwen/qwen3.6-35b-a3b:nitro",
+				"gc/gemini-3-flash-preview",
 			],
 		},
 		{
@@ -133,6 +143,10 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 				"gpt-oss-120b-fast-tier-rr",
 				"groq-gpt-oss-20b",
 				"gemini-3-5-flash-low",
+				"gemini-3.1-flash-lite",
+				"ag/gemini-3.5-flash-extra-low",
+				"ag/gemini-3-flash-agent",
+				"gc/gemini-3.1-flash-lite-preview",
 			],
 		},
 		{
@@ -141,13 +155,14 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 				"openrouter-free-fallback",
 				"free-fast-rr",
 				"gemini-vx-only-rr",
+				"gemini-3.1-flash-lite",
 				"gpt-oss-120b-rr",
 				"gpt-oss-20b-rr",
 			],
 		},
 		{
 			role: "vision",
-			candidates: ["gemini-3-5-flash-medium-round-robin", "gemini-vx-only-rr", "gemini-3-5-flash-low"],
+			candidates: ["gemini-3-5-flash-medium-round-robin", "gemini-3.5-flash-fallback", "ag/gemini-3.5-flash-low", "ag/gemini-3-flash", "gc/gemini-3-flash-preview", "gemini-vx-only-rr", "gemini-3-5-flash-low"],
 		},
 		{
 			role: "plan",
@@ -155,7 +170,7 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 		},
 		{
 			role: "designer",
-			candidates: ["gemini-3-5-flash-medium-round-robin", "gemini-vx-only-rr", "gemini-3-5-flash-low", "glm-5.2"],
+			candidates: ["gemini-3-5-flash-medium-round-robin", "gemini-3.5-flash-fallback", "gemini-3.1-flash-lite", "ag/gemini-3.5-flash-low", "ag/gemini-3-flash", "gc/gemini-3-flash-preview", "gemini-vx-only-rr", "gemini-3-5-flash-low", "glm-5.2"],
 		},
 		{
 			role: "commit",
@@ -173,6 +188,9 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 				"deepseek-v4-flash-fallback",
 				"balanced",
 				"gemini-3-5-flash-medium-round-robin",
+				"openrouter/qwen3-32b:nitro",
+				"openai/gpt-oss-120b:nitro",
+				"openrouter/qwen/qwen3.6-35b-a3b:nitro",
 			],
 		},
 		{
