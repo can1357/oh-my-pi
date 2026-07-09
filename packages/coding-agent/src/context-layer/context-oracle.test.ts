@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "../config/settings";
+import type { TypedLspQueryRequest } from "../lsp";
 import type { ToolSession } from "../tools";
 import { ContextOracle, createContextOracleCache } from "./context-oracle";
 
@@ -55,6 +56,57 @@ describe("ContextOracle", () => {
 			range: { startLine: 5, endLine: 7 },
 			symbol: "typedSymbol",
 		});
+	});
+
+	test("symbol lookup cache is shared across oracle instances through the session", async () => {
+		const { dir, session } = await makeSession();
+		session.contextOracleCache = createContextOracleCache();
+		session.enableLsp = true;
+		await fs.writeFile(path.join(dir, "symbol-cache.ts"), "export function cachedSymbol() { return 1; }\n");
+		let calls = 0;
+		const dependencies = {
+			queryLsp: async (_cwd: string, request: TypedLspQueryRequest) => {
+				calls += 1;
+				return {
+					action: request.action,
+					success: true,
+					serverName: "test-lsp",
+					locations: [
+						{
+							uri: `file://${path.join(dir, "symbol-cache.ts").replaceAll("\\", "/")}`,
+							range: {
+								start: { line: 0, character: 0 },
+								end: { line: 0, character: 21 },
+							},
+						},
+					],
+				};
+			},
+		};
+		const first = await new ContextOracle(session, dependencies).getSymbolContext("cachedSymbol", {
+			file: "symbol-cache.ts",
+			line: 1,
+		});
+		const second = await new ContextOracle(session, dependencies).getSymbolContext("cachedSymbol", {
+			file: "symbol-cache.ts",
+			line: 1,
+		});
+		expect(calls).toBe(3);
+		expect(first.evidence[0]?.type).toBe("lsp");
+		expect(second.evidence[0]?.type).toBe("cache");
+	});
+
+	test("workspace symbol cache invalidates after file change", async () => {
+		const { dir, session } = await makeSession();
+		session.contextOracleCache = createContextOracleCache();
+		const file = path.join(dir, "symbol-invalidate.ts");
+		await fs.writeFile(file, "export const staleSymbol = 1;\n");
+		await new ContextOracle(session).getSymbolContext("staleSymbol");
+		await Bun.sleep(5);
+		await fs.writeFile(file, "export const freshSymbol = 22;\n");
+		const result = await new ContextOracle(session).getSymbolContext("freshSymbol");
+		expect(result.evidence[0]?.type).not.toBe("cache");
+		expect(result.evidence[0]?.detail).toContain("freshSymbol");
 	});
 
 	test("configured compressor can shorten answer without changing evidence", async () => {

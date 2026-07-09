@@ -5,6 +5,7 @@
 * **Creation**: Added [Light context layer](/concepts/light-context-layer.md) documenting the implemented `context_oracle` tool, typed LSP query seam, evidence shape, config, tests, and next compression slice.
 * **Update**: Documented `contextLayer.model` as implemented evidence-only answer compression and moved the next slice to session-persistent context cache.
 * **Update**: Moved light context layer cache onto `ToolSession.contextOracleCache`, added same-session cache reuse/invalidation coverage, and documented the next diagnostics/symbol cache slice.
+* **Update**: Added explicit symbol lookup cache coverage for the light context layer, including same-session reuse and workspace-change invalidation tests.
 
 ## 2026-07-08
 * **Creation**: Added [Offload trace](/concepts/offload-trace.md) documenting the implemented opt-in progressive-disclosure compaction memory layer (`offloadTrace.*` settings, preserveData seam, artifact:// drill-down).

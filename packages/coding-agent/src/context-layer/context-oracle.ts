@@ -50,12 +50,14 @@ export interface ContextOracleCacheEntry<T> {
 export interface ContextOracleCache {
 	fileSummaries: Map<string, ContextOracleCacheEntry<ContextOracleResult>>;
 	queries: Map<string, ContextOracleCacheEntry<ContextOracleResult>>;
+	symbols: Map<string, ContextOracleCacheEntry<ContextOracleResult>>;
 }
 
 export function createContextOracleCache(): ContextOracleCache {
 	return {
 		fileSummaries: new Map<string, ContextOracleCacheEntry<ContextOracleResult>>(),
 		queries: new Map<string, ContextOracleCacheEntry<ContextOracleResult>>(),
+		symbols: new Map<string, ContextOracleCacheEntry<ContextOracleResult>>(),
 	};
 }
 
@@ -114,18 +116,37 @@ export class ContextOracle {
 		options: ContextOracleOptions = {},
 		signal?: AbortSignal,
 	): Promise<ContextOracleResult> {
+		const normalizedSymbol = symbol.trim();
+		if (!normalizedSymbol) return this.#lowConfidence("Empty symbol.");
+		const cacheKey = JSON.stringify({ symbol: normalizedSymbol, options });
+		const stamp = await this.#symbolStamp(options);
+		const cached = this.#cacheEnabled() ? this.#cache.symbols.get(cacheKey) : undefined;
+		if (cached?.stamp === stamp) return this.#fromCache(cached.value);
+
 		const evidence: ContextEvidence[] = [];
 		if (options.file && options.line !== undefined) {
-			evidence.push(...(await this.#lspEvidence("definition", { ...options, symbol }, signal)));
-			evidence.push(...(await this.#lspEvidence("references", { ...options, symbol }, signal)));
-			evidence.push(...(await this.#lspEvidence("hover", { ...options, symbol }, signal)));
+			evidence.push(...(await this.#lspEvidence("definition", { ...options, symbol: normalizedSymbol }, signal)));
+			evidence.push(...(await this.#lspEvidence("references", { ...options, symbol: normalizedSymbol }, signal)));
+			evidence.push(...(await this.#lspEvidence("hover", { ...options, symbol: normalizedSymbol }, signal)));
 		} else {
 			evidence.push(
-				...(await this.#lspEvidence("symbols", { ...options, file: "*", symbol, scope: symbol }, signal)),
+				...(await this.#lspEvidence(
+					"symbols",
+					{ ...options, file: "*", symbol: normalizedSymbol, scope: normalizedSymbol },
+					signal,
+				)),
 			);
-			evidence.push(...(await this.#searchEvidence(symbol, options)));
+			evidence.push(...(await this.#searchEvidence(normalizedSymbol, options)));
 		}
-		return await this.#resultFromEvidence(`Context for symbol "${symbol}".`, evidence, options, undefined, signal);
+		const result = await this.#resultFromEvidence(
+			`Context for symbol "${normalizedSymbol}".`,
+			evidence,
+			options,
+			undefined,
+			signal,
+		);
+		if (this.#cacheEnabled()) this.#cache.symbols.set(cacheKey, { stamp, value: result });
+		return result;
 	}
 
 	async getFileContext(
@@ -490,6 +511,25 @@ export class ContextOracle {
 	async #scopeStamp(scope?: string): Promise<string> {
 		if (!scope || scope === "*") return `cwd:${this.session.cwd}`;
 		return this.#fileStamp(this.#resolve(scope)).catch(() => `scope:${scope}`);
+	}
+
+	async #symbolStamp(options: ContextOracleOptions): Promise<string> {
+		if (options.file) return this.#fileStamp(this.#resolve(options.file)).catch(() => `file:${options.file}`);
+		return await this.#workspaceStamp();
+	}
+
+	async #workspaceStamp(): Promise<string> {
+		let count = 0;
+		let newest = 0;
+		let totalSize = 0;
+		await this.#walk(this.session.cwd, async file => {
+			const stat = await fs.stat(file).catch(() => undefined);
+			if (!stat) return;
+			count += 1;
+			newest = Math.max(newest, stat.mtimeMs);
+			totalSize += stat.size;
+		});
+		return `workspace:${this.session.cwd}:${count}:${newest}:${totalSize}`;
 	}
 
 	async #fileStamp(absolute: string): Promise<string> {

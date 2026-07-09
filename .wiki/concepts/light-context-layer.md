@@ -61,7 +61,7 @@ Settings live under `contextLayer.*`:
 
 `contextLayer.model` enables optional cheap-model compression after deterministic evidence retrieval. The compression model receives bounded evidence JSON and may replace only the `answer` field when it returns valid JSON; deterministic evidence, confidence, and suggested reads remain authoritative.
 
-The cache now lives on `ToolSession.contextOracleCache`, so separate `context_oracle` tool calls in the same agent session share file summaries and prior query results. Cache hits are disabled when `contextLayer.cache` is `false`; file-summary entries invalidate on mtime/size changes.
+The cache now lives on `ToolSession.contextOracleCache`, so separate `context_oracle` tool calls in the same agent session share file summaries, symbol lookups, and prior query results. Cache hits are disabled when `contextLayer.cache` is `false`; file-summary and file-scoped symbol entries invalidate on mtime/size changes, while workspace symbol entries invalidate from a bounded workspace freshness stamp.
 
 ## Tests and evidence
 
@@ -81,4 +81,4 @@ ULW evidence for this implementation lives under `.omo/ulw-loop/evidence/G001-*`
 
 ## Known next slice
 
-Expand cache coverage beyond file summaries and generic query responses: add explicit symbol and diagnostics snapshot caches with LSP document-version freshness, then surface cache stats in tool details for observability.
+Expand cache coverage to diagnostics snapshots with LSP document-version freshness, then surface cache stats in tool details for observability.

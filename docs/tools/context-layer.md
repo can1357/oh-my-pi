@@ -9,7 +9,7 @@ It is exposed as the `context_oracle` tool.
 - LSP evidence: definitions, references, document/workspace symbols, hover, diagnostics.
 - File evidence: bounded file summaries and declaration scans.
 - Search evidence: deterministic text fallback when LSP has no result.
-- Cache evidence: session-shared file summaries and prior context queries keyed by file mtime/size or scope.
+- Cache evidence: session-shared file summaries, symbol lookups, and prior context queries keyed by file/workspace freshness.
 
 ## What it is not
 
