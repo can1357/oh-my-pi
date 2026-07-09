@@ -49,6 +49,13 @@
 		"minimax-code/MiniMax-M3",
 		"minimax/MiniMax-M3"
 	],
+	"route-predictor": [
+		"9router/local-fast",
+		"9router/free-fast",
+		"9router/cheap-fast",
+		"9router/minimax-m3-rr",
+		"pi/smol"
+	],
 	"browser-operation": [
 		"9router/minimax/MiniMax-M3",
 		"9router/minimax-m3-rr",

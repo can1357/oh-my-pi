@@ -81,7 +81,30 @@ describe("browser-control model role", () => {
 	});
 });
 
-describe("9router combo model roles", () => {
+	describe("route-predictor model role", () => {
+		test("defaults to local-fast chain via pi/route-predictor", () => {
+			const settings = Settings.isolated();
+
+			expect(resolveAgentModelPatterns({ agentModel: "pi/route-predictor", settings })).toEqual([
+				"9router/local-fast",
+				"9router/free-fast",
+				"9router/cheap-fast",
+				"9router/minimax-m3-rr",
+				"pi/smol",
+			]);
+		});
+
+		test("respects modelRoles.route-predictor override", () => {
+			const settings = Settings.isolated();
+			settings.setModelRole("route-predictor", "google/gemini-2.5-flash-lite");
+
+			expect(resolveAgentModelPatterns({ agentModel: "pi/route-predictor", settings })).toEqual([
+				"google/gemini-2.5-flash-lite",
+			]);
+		});
+	});
+
+	describe("9router combo model roles", () => {
 	test("prioritizes app-level fallback combos for max-intelligence", () => {
 		const settings = Settings.isolated();
 

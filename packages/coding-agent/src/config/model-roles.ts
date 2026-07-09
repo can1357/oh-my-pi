@@ -18,6 +18,7 @@ export type ModelRole =
 	| "advisor"
 	| "browser-operation"
 	| "browser-control"
+	| "route-predictor"
 	| "fast-context"
 	| "budget"
 	| "balanced"
@@ -45,6 +46,7 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 	advisor: { tag: "ADVISOR", name: "Advisor", color: "accent" },
 	"browser-operation": { tag: "BROWSER", name: "Browser Operation", color: "warning" },
 	"browser-control": { tag: "BROWSER", name: "Browser Control", color: "warning" },
+	"route-predictor": { tag: "ROUTEPRED", name: "Route Predictor", color: "warning" },
 	"fast-context": { tag: "FASTCTX", name: "Fast Context", color: "warning" },
 	budget: { tag: "BUDGET", name: "Budget", color: "warning" },
 	balanced: { tag: "BALANCED", name: "Balanced", color: "accent" },
@@ -65,6 +67,7 @@ export const MODEL_ROLE_IDS: ModelRole[] = [
 	"advisor",
 	"browser-operation",
 	"browser-control",
+	"route-predictor",
 	"fast-context",
 	"budget",
 	"balanced",
