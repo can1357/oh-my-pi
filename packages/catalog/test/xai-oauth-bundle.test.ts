@@ -63,6 +63,16 @@ describe("xai-oauth bundled catalog (regression)", () => {
 		expect(bundled["grok-composer-2.5-fast"]?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 	});
 
+	it("exposes grok-4.5 as a reasoning 1M vision model", () => {
+		const grok45 = seed.find(model => model.id === "grok-4.5");
+		expect(grok45, "grok-4.5 must be in the SuperGrok curated seed").toBeDefined();
+		expect(grok45!.reasoning).toBe(true);
+		expect(grok45!.contextWindow).toBe(1_000_000);
+		expect(grok45!.input).toEqual(["text", "image"]);
+		expect(grok45!.compat?.omitReasoningEffort).toBe(false);
+		expect(bundled["grok-4.5"]?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+	});
+
 	// The OAuth surface's /v1/models reports no per-request output limit, so the
 	// curated catalog owns maxTokens — set to mirror each model's contextWindow
 	// (the openai-responses wire still clamps the actual request to
