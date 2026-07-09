@@ -58,7 +58,7 @@ contextLayer:
   cache: true
 ```
 
-`contextLayer.model` is reserved for cheap-model evidence compression. Deterministic LSP/file/search retrieval remains the authority and still works without a model.
+`contextLayer.model` enables optional cheap-model compression after deterministic evidence retrieval. The model receives only bounded evidence JSON and may replace `answer` only when it returns valid JSON `{ "answer": "..." }`; evidence, confidence, and suggested reads remain deterministic. Empty model config keeps deterministic mode.
 
 ## Limitations
 

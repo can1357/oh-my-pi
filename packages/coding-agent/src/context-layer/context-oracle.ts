@@ -1,7 +1,11 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { type AssistantMessage, completeSimple } from "@pk-nerdsaver-ai/pi-ai";
+import { prompt } from "@pk-nerdsaver-ai/pi-utils";
+import { resolveModelRoleValue } from "../config/model-resolver";
 import { queryTypedLspContext, type TypedLspQueryAction, type TypedLspQueryResult } from "../lsp";
 import type { DocumentSymbol } from "../lsp/types";
+import contextLayerCompressPrompt from "../prompts/system/context-layer-compress.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 
 export type ContextEvidenceType = "lsp" | "file" | "diagnostic" | "summary" | "search" | "cache";
@@ -43,8 +47,20 @@ interface CacheEntry<T> {
 	value: T;
 }
 
+export interface ContextCompressionInput {
+	prefix: string;
+	answer: string;
+	confidence: ContextConfidence;
+	evidence: ContextEvidence[];
+	maxOutputChars: number;
+	signal?: AbortSignal;
+}
+
+export type ContextEvidenceCompressor = (input: ContextCompressionInput) => Promise<string | undefined>;
+
 export interface ContextOracleDependencies {
 	queryLsp?: typeof queryTypedLspContext;
+	compressEvidence?: ContextEvidenceCompressor;
 }
 
 export class ContextOracle {
@@ -96,7 +112,7 @@ export class ContextOracle {
 			);
 			evidence.push(...(await this.#searchEvidence(symbol, options)));
 		}
-		return this.#resultFromEvidence(`Context for symbol "${symbol}".`, evidence, options);
+		return await this.#resultFromEvidence(`Context for symbol "${symbol}".`, evidence, options, undefined, signal);
 	}
 
 	async getFileContext(
@@ -113,7 +129,13 @@ export class ContextOracle {
 		evidence.push(await this.#fileSummaryEvidence(absolute));
 		evidence.push(...(await this.#lspEvidence("symbols", { ...options, file: filePath }, signal)));
 		evidence.push(...(await this.#lspEvidence("diagnostics", { ...options, file: filePath }, signal)));
-		const result = this.#resultFromEvidence(`Compact context for ${this.#relative(absolute)}.`, evidence, options);
+		const result = await this.#resultFromEvidence(
+			`Compact context for ${this.#relative(absolute)}.`,
+			evidence,
+			options,
+			undefined,
+			signal,
+		);
 		this.#fileSummaryCache.set(absolute, { stamp, value: result });
 		return result;
 	}
@@ -124,7 +146,7 @@ export class ContextOracle {
 		signal?: AbortSignal,
 	): Promise<ContextOracleResult> {
 		const evidence = await this.#lspEvidence("diagnostics", { ...options, file: scope }, signal);
-		return this.#resultFromEvidence(`Diagnostics for ${scope}.`, evidence, options, "diagnostic");
+		return await this.#resultFromEvidence(`Diagnostics for ${scope}.`, evidence, options, "diagnostic", signal);
 	}
 
 	async getEditImpact(
@@ -135,7 +157,13 @@ export class ContextOracle {
 		const evidence: ContextEvidence[] = [];
 		evidence.push(...(await this.getSymbolContext(target, options, signal)).evidence);
 		if (options.file) evidence.push(...(await this.getFileContext(options.file, options, signal)).evidence);
-		const result = this.#resultFromEvidence(`Likely edit impact for ${target}.`, evidence, options);
+		const result = await this.#resultFromEvidence(
+			`Likely edit impact for ${target}.`,
+			evidence,
+			options,
+			undefined,
+			signal,
+		);
 		return {
 			...result,
 			suggestedNextReads: [
@@ -151,7 +179,7 @@ export class ContextOracle {
 	): Promise<ContextOracleResult> {
 		const evidence = await this.#lspEvidence("symbols", { ...options, file: "*", scope: query }, signal);
 		if (evidence.length === 0) evidence.push(...(await this.#searchEvidence(query, options)));
-		return this.#resultFromEvidence(`Workspace context for "${query}".`, evidence, options);
+		return await this.#resultFromEvidence(`Workspace context for "${query}".`, evidence, options, undefined, signal);
 	}
 
 	async #lspEvidence(
@@ -271,19 +299,20 @@ export class ContextOracle {
 		};
 	}
 
-	#resultFromEvidence(
+	async #resultFromEvidence(
 		prefix: string,
 		evidence: ContextEvidence[],
 		options: ContextOracleOptions,
 		preferredType?: ContextEvidenceType,
-	): ContextOracleResult {
+		signal?: AbortSignal,
+	): Promise<ContextOracleResult> {
 		const max = options.maxEvidence ?? 12;
 		const filtered = evidence
 			.filter(item => !preferredType || item.type === preferredType || evidence.length <= max)
 			.slice(0, max);
 		if (filtered.length === 0) return this.#lowConfidence(`${prefix} No deterministic evidence found.`);
 		const files = [...new Set(filtered.map(item => item.file).filter((item): item is string => Boolean(item)))];
-		return this.#bound(
+		const deterministic = this.#bound(
 			{
 				answer: `${prefix} Found ${filtered.length} evidence item(s).${files.length ? ` Files: ${files.join(", ")}.` : ""}`,
 				confidence: filtered.some(item => item.type === "lsp" || item.type === "diagnostic") ? "high" : "medium",
@@ -293,6 +322,7 @@ export class ContextOracle {
 			},
 			options,
 		);
+		return await this.#compressResult(prefix, deterministic, options, signal);
 	}
 
 	#bound(result: ContextOracleResult, options: ContextOracleOptions): ContextOracleResult {
@@ -303,6 +333,104 @@ export class ContextOracle {
 				result.answer.length > maxAnswerChars ? `${result.answer.slice(0, maxAnswerChars - 1)}…` : result.answer,
 			evidence: result.evidence.slice(0, options.maxEvidence ?? 12),
 		};
+	}
+
+	async #compressResult(
+		prefix: string,
+		result: ContextOracleResult,
+		options: ContextOracleOptions,
+		signal?: AbortSignal,
+	): Promise<ContextOracleResult> {
+		const compressor = this.dependencies.compressEvidence ?? this.#compressEvidenceWithModel.bind(this);
+		const compressed = await compressor({
+			prefix,
+			answer: result.answer,
+			confidence: result.confidence,
+			evidence: result.evidence,
+			maxOutputChars: options.maxAnswerChars ?? 1200,
+			signal,
+		}).catch(() => undefined);
+		if (!compressed) return result;
+		const boundedAnswer =
+			compressed.length > (options.maxAnswerChars ?? 1200)
+				? `${compressed.slice(0, (options.maxAnswerChars ?? 1200) - 1)}…`
+				: compressed;
+		return {
+			...result,
+			answer: boundedAnswer,
+			tokenEstimate: this.#estimateTokens(boundedAnswer, result.evidence),
+		};
+	}
+
+	async #compressEvidenceWithModel(input: ContextCompressionInput): Promise<string | undefined> {
+		const modelSelector = this.session.settings.get("contextLayer.model")?.trim();
+		const modelRegistry = this.session.modelRegistry;
+		if (!modelSelector || !modelRegistry) return undefined;
+		const resolved = resolveModelRoleValue(modelSelector, modelRegistry.getAvailable(), {
+			settings: this.session.settings,
+			modelRegistry,
+		});
+		const model = resolved.model;
+		if (!model) return undefined;
+		const apiKey = await modelRegistry.getApiKey(model, this.session.getSessionId?.() ?? undefined);
+		if (!apiKey) return undefined;
+		const maxInputChars = Math.max(1000, this.session.settings.get("contextLayer.maxInputTokens") * 4);
+		const maxOutputChars = Math.min(
+			input.maxOutputChars,
+			this.session.settings.get("contextLayer.maxOutputTokens") * 4,
+		);
+		const userPrompt = this.#buildCompressionPrompt(input, maxInputChars);
+		const response = await completeSimple(
+			model,
+			{
+				systemPrompt: [prompt.render(contextLayerCompressPrompt, { maxOutputChars })],
+				messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }],
+			},
+			{
+				apiKey: modelRegistry.resolver(model, this.session.getSessionId?.() ?? undefined),
+				maxTokens: this.session.settings.get("contextLayer.maxOutputTokens"),
+				disableReasoning: true,
+				signal: input.signal,
+			},
+		);
+		if (response.stopReason === "error") return undefined;
+		const text = this.#extractAssistantText(response.content);
+		const answer = this.#parseCompressedAnswer(text);
+		return answer && answer.length > 0 ? answer : undefined;
+	}
+
+	#buildCompressionPrompt(input: ContextCompressionInput, maxInputChars: number): string {
+		const payload = JSON.stringify({
+			answer: input.answer,
+			confidence: input.confidence,
+			evidence: input.evidence,
+		});
+		const boundedPayload =
+			payload.length > maxInputChars ? `${payload.slice(0, Math.max(0, maxInputChars - 1))}…` : payload;
+		return `Question context: ${input.prefix}\nEvidence JSON:\n${boundedPayload}`;
+	}
+
+	#extractAssistantText(content: AssistantMessage["content"]): string {
+		return content
+			.filter(
+				(block): block is Extract<AssistantMessage["content"][number], { type: "text" }> => block.type === "text",
+			)
+			.map(block => block.text)
+			.join(" ")
+			.trim();
+	}
+
+	#parseCompressedAnswer(text: string): string | undefined {
+		const trimmed = text.trim();
+		const start = trimmed.indexOf("{");
+		const end = trimmed.lastIndexOf("}");
+		if (start < 0 || end <= start) return undefined;
+		try {
+			const parsed = JSON.parse(trimmed.slice(start, end + 1)) as { answer?: unknown };
+			return typeof parsed.answer === "string" ? parsed.answer.trim() : undefined;
+		} catch {
+			return undefined;
+		}
 	}
 
 	#lowConfidence(answer: string): ContextOracleResult {

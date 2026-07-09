@@ -59,7 +59,7 @@ Settings live under `contextLayer.*`:
 - `contextLayer.maxOutputTokens`
 - `contextLayer.cache`
 
-`contextLayer.model` is currently configuration for the next compression slice; deterministic evidence retrieval remains authoritative.
+`contextLayer.model` enables optional cheap-model compression after deterministic evidence retrieval. The compression model receives bounded evidence JSON and may replace only the `answer` field when it returns valid JSON; deterministic evidence, confidence, and suggested reads remain authoritative.
 
 ## Tests and evidence
 
@@ -79,4 +79,4 @@ ULW evidence for this implementation lives under `.omo/ulw-loop/evidence/G001-*`
 
 ## Known next slice
 
-Add the optional cheap-model compression path for retrieved evidence only. The model must summarize/cite existing evidence and must not create new evidence or override low-confidence deterministic results.
+Persist `ContextOracle` cache on `ToolSession` so file summaries, symbol lookups, diagnostics snapshots, and prior context queries survive across separate `context_oracle` tool calls in the same agent session.

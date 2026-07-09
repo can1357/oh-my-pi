@@ -57,6 +57,31 @@ describe("ContextOracle", () => {
 		});
 	});
 
+	test("configured compressor can shorten answer without changing evidence", async () => {
+		const { dir, session } = await makeSession();
+		await fs.writeFile(path.join(dir, "compress.ts"), "export function compressMe() { return 1; }\n");
+		const oracle = new ContextOracle(session, {
+			compressEvidence: async input =>
+				`Compressed: ${input.evidence[0]?.file}:${input.evidence[0]?.range?.startLine}`,
+		});
+		const result = await oracle.getSymbolContext("compressMe");
+		expect(result.answer).toBe("Compressed: compress.ts:1");
+		expect(result.evidence.some(item => item.type === "search" && item.file === "compress.ts")).toBe(true);
+	});
+
+	test("compressor failure falls back to deterministic answer", async () => {
+		const { dir, session } = await makeSession();
+		await fs.writeFile(path.join(dir, "fallback.ts"), "export const fallbackSymbol = 1;\n");
+		const oracle = new ContextOracle(session, {
+			compressEvidence: async () => {
+				throw new Error("compressor unavailable");
+			},
+		});
+		const result = await oracle.getSymbolContext("fallbackSymbol");
+		expect(result.answer).toContain("Context for symbol");
+		expect(result.confidence).toBe("medium");
+	});
+
 	test("file summary cache invalidates after file change", async () => {
 		const { dir, session } = await makeSession();
 		const file = path.join(dir, "cache.ts");
