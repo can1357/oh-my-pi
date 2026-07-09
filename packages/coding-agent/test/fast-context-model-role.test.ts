@@ -46,11 +46,11 @@ describe("fast-context model role", () => {
 	});
 });
 
-describe("browser-operation model role", () => {
-	test("defaults to MiniMax M3 chain via pi/browser-operation", () => {
+describe("browser-control model role", () => {
+	test("defaults to MiniMax M3 chain via pi/browser-control", () => {
 		const settings = Settings.isolated();
 
-		expect(resolveAgentModelPatterns({ agentModel: "pi/browser-operation", settings })).toEqual([
+		expect(resolveAgentModelPatterns({ agentModel: "pi/browser-control", settings })).toEqual([
 			"9router/minimax/MiniMax-M3",
 			"9router/minimax-m3-rr",
 			"9router/minimax-m3-fallback",
@@ -59,12 +59,24 @@ describe("browser-operation model role", () => {
 		]);
 	});
 
-	test("respects modelRoles.browser-operation override", () => {
+	test("respects modelRoles.browser-control override", () => {
 		const settings = Settings.isolated();
-		settings.setModelRole("browser-operation", "google/gemini-2.5-flash-lite");
+		settings.setModelRole("browser-control", "google/gemini-2.5-flash-lite");
+
+		expect(resolveAgentModelPatterns({ agentModel: "pi/browser-control", settings })).toEqual([
+			"google/gemini-2.5-flash-lite",
+		]);
+	});
+
+	test("keeps pi/browser-operation as a compatibility role", () => {
+		const settings = Settings.isolated();
 
 		expect(resolveAgentModelPatterns({ agentModel: "pi/browser-operation", settings })).toEqual([
-			"google/gemini-2.5-flash-lite",
+			"9router/minimax/MiniMax-M3",
+			"9router/minimax-m3-rr",
+			"9router/minimax-m3-fallback",
+			"minimax-code/MiniMax-M3",
+			"minimax/MiniMax-M3",
 		]);
 	});
 });

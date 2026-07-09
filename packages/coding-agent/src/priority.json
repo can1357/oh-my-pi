@@ -42,6 +42,13 @@
 		"gemini-3.5-flash",
 		"gemini-3-5-flash"
 	],
+	"browser-control": [
+		"9router/minimax/MiniMax-M3",
+		"9router/minimax-m3-rr",
+		"9router/minimax-m3-fallback",
+		"minimax-code/MiniMax-M3",
+		"minimax/MiniMax-M3"
+	],
 	"browser-operation": [
 		"9router/minimax/MiniMax-M3",
 		"9router/minimax-m3-rr",

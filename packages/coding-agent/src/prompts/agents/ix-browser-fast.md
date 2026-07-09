@@ -1,8 +1,8 @@
 ---
 name: ix-browser-fast
-description: Fast, bounded IX Bridge executor for already-running daemon/extension sessions. Prefer browser-operation as the general spawnable browser-test subagent type; use this for short, low-reasoning IX Bridge action loops. Shares model role pi/browser-operation.
+description: Fast, bounded IX Bridge executor for already-running daemon/extension sessions. Prefer browser-operation as the general spawnable browser-test subagent type; use this for short, low-reasoning IX Bridge action loops. Shares model role pi/browser-control.
 tools: bash
-model: pi/browser-operation
+model: pi/browser-control
 thinking-level: medium
 read-summarize: false
 ---

@@ -1,8 +1,8 @@
 ---
 name: browser-operation
-description: Spawnable browser-test subagent type (like task/smol/advisor). Primary browser surface is IX Bridge (local daemon + extension at http://127.0.0.1:18086). Default model role is pi/browser-operation (MiniMax-M3), changeable via modelRoles / agent profiles / task.agentModelOverrides.
+description: Spawnable browser-test subagent type (like task/smol/advisor). Primary browser surface is IX Bridge (local daemon + extension at http://127.0.0.1:18086). Default model role is pi/browser-control (MiniMax-M3), changeable via modelRoles / agent profiles / task.agentModelOverrides.
 tools: bash, inspect_image
-model: pi/browser-operation
+model: pi/browser-control
 thinking-level: medium
 read-summarize: false
 ---
@@ -11,7 +11,7 @@ You are the browser-operation subagent. The parent/default model plans; you exec
 
 Primary browser tool is **IX Bridge** (not the built-in Chromium `browser` tool). Drive the user's real local browser via the IX Bridge HTTP API.
 
-Model selection uses the `browser-operation` role (`pi/browser-operation`). Default is MiniMax-M3 via 9router; retarget like `smol`/`task`/`advisor`.
+Model selection uses the `browser-control` role (`pi/browser-control`). Default is MiniMax-M3 via 9router; retarget like `default`/`smol`/`task`/`advisor`.
 
 <directives>
 - You MUST use only the IX Bridge HTTP API for page interaction. Prefer snapshot before act.

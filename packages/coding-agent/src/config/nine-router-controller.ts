@@ -230,6 +230,10 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 			],
 		},
 		{
+			role: "browser-control",
+			candidates: ["minimax/MiniMax-M3", "minimax-m3-rr", "minimax-m3-fallback", "minimax-code/MiniMax-M3"],
+		},
+		{
 			role: "browser-operation",
 			candidates: ["minimax/MiniMax-M3", "minimax-m3-rr", "minimax-m3-fallback", "minimax-code/MiniMax-M3"],
 		},

@@ -17,6 +17,7 @@ export type ModelRole =
 	| "task"
 	| "advisor"
 	| "browser-operation"
+	| "browser-control"
 	| "fast-context"
 	| "budget"
 	| "balanced"
@@ -43,6 +44,7 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 	task: { tag: "TASK", name: "Subtask", color: "muted" },
 	advisor: { tag: "ADVISOR", name: "Advisor", color: "accent" },
 	"browser-operation": { tag: "BROWSER", name: "Browser Operation", color: "warning" },
+	"browser-control": { tag: "BROWSER", name: "Browser Control", color: "warning" },
 	"fast-context": { tag: "FASTCTX", name: "Fast Context", color: "warning" },
 	budget: { tag: "BUDGET", name: "Budget", color: "warning" },
 	balanced: { tag: "BALANCED", name: "Balanced", color: "accent" },
@@ -62,6 +64,7 @@ export const MODEL_ROLE_IDS: ModelRole[] = [
 	"task",
 	"advisor",
 	"browser-operation",
+	"browser-control",
 	"fast-context",
 	"budget",
 	"balanced",
