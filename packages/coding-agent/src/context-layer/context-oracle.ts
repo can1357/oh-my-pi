@@ -42,9 +42,21 @@ export interface ContextOracleOptions {
 	timeout?: number;
 }
 
-interface CacheEntry<T> {
+export interface ContextOracleCacheEntry<T> {
 	stamp: string;
 	value: T;
+}
+
+export interface ContextOracleCache {
+	fileSummaries: Map<string, ContextOracleCacheEntry<ContextOracleResult>>;
+	queries: Map<string, ContextOracleCacheEntry<ContextOracleResult>>;
+}
+
+export function createContextOracleCache(): ContextOracleCache {
+	return {
+		fileSummaries: new Map<string, ContextOracleCacheEntry<ContextOracleResult>>(),
+		queries: new Map<string, ContextOracleCacheEntry<ContextOracleResult>>(),
+	};
 }
 
 export interface ContextCompressionInput {
@@ -64,20 +76,21 @@ export interface ContextOracleDependencies {
 }
 
 export class ContextOracle {
-	readonly #fileSummaryCache = new Map<string, CacheEntry<ContextOracleResult>>();
-	readonly #queryCache = new Map<string, CacheEntry<ContextOracleResult>>();
+	readonly #cache: ContextOracleCache;
 
 	constructor(
 		private readonly session: ToolSession,
 		private readonly dependencies: ContextOracleDependencies = {},
-	) {}
+	) {
+		this.#cache = session.contextOracleCache ?? createContextOracleCache();
+	}
 
 	async ask(query: string, options: ContextOracleOptions = {}, signal?: AbortSignal): Promise<ContextOracleResult> {
 		const normalizedQuery = query.trim();
 		if (!normalizedQuery) return this.#lowConfidence("Empty query.");
 		const cacheKey = JSON.stringify({ query: normalizedQuery, options });
 		const stamp = await this.#scopeStamp(options.file ?? options.scope);
-		const cached = this.#queryCache.get(cacheKey);
+		const cached = this.#cacheEnabled() ? this.#cache.queries.get(cacheKey) : undefined;
 		if (cached?.stamp === stamp) return this.#fromCache(cached.value);
 
 		const lower = normalizedQuery.toLowerCase();
@@ -92,7 +105,7 @@ export class ContextOracle {
 			result = await this.#workspaceSymbolSearch(normalizedQuery, options, signal);
 		}
 		const bounded = this.#bound(result, options);
-		this.#queryCache.set(cacheKey, { stamp, value: bounded });
+		if (this.#cacheEnabled()) this.#cache.queries.set(cacheKey, { stamp, value: bounded });
 		return bounded;
 	}
 
@@ -122,7 +135,7 @@ export class ContextOracle {
 	): Promise<ContextOracleResult> {
 		const absolute = this.#resolve(filePath);
 		const stamp = await this.#fileStamp(absolute);
-		const cached = this.#fileSummaryCache.get(absolute);
+		const cached = this.#cacheEnabled() ? this.#cache.fileSummaries.get(absolute) : undefined;
 		if (cached?.stamp === stamp) return this.#fromCache(cached.value);
 
 		const evidence: ContextEvidence[] = [];
@@ -136,7 +149,7 @@ export class ContextOracle {
 			undefined,
 			signal,
 		);
-		this.#fileSummaryCache.set(absolute, { stamp, value: result });
+		if (this.#cacheEnabled()) this.#cache.fileSummaries.set(absolute, { stamp, value: result });
 		return result;
 	}
 
@@ -431,6 +444,10 @@ export class ContextOracle {
 		} catch {
 			return undefined;
 		}
+	}
+
+	#cacheEnabled(): boolean {
+		return this.session.settings.get("contextLayer.cache") !== false;
 	}
 
 	#lowConfidence(answer: string): ContextOracleResult {

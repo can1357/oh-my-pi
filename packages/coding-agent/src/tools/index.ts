@@ -347,6 +347,9 @@ export interface ToolSession {
 	 *  model for each file. Lazily initialized by `getDiagnosticsLedger`. */
 	diagnosticsLedger?: import("../lsp/diagnostics-ledger").DiagnosticsLedger;
 
+	/** Per-session light context-layer cache shared across `context_oracle` calls. */
+	contextOracleCache?: import("../context-layer/context-oracle").ContextOracleCache;
+
 	/** Per-session ledger of consecutive byte-identical no-op edits, keyed by
 	 *  canonical file path. The hashline executor escalates a soft no-op hint
 	 *  to a thrown error once the same payload no-ops `NOOP_HARD_LIMIT` times,

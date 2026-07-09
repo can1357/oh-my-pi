@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "../config/settings";
 import type { ToolSession } from "../tools";
-import { ContextOracle } from "./context-oracle";
+import { ContextOracle, createContextOracleCache } from "./context-oracle";
 
 async function makeSession(): Promise<{ dir: string; session: ToolSession }> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "context-oracle-"));
@@ -93,6 +93,39 @@ describe("ContextOracle", () => {
 		const second = await oracle.getFileContext("cache.ts");
 		expect(second.evidence[0]?.type).not.toBe("cache");
 		expect(second.evidence[0]?.detail).toContain("second");
+	});
+
+	test("file summary cache is shared across oracle instances through the session", async () => {
+		const { dir, session } = await makeSession();
+		session.contextOracleCache = createContextOracleCache();
+		await fs.writeFile(path.join(dir, "shared-cache.ts"), "export const shared = 1;\n");
+		const first = await new ContextOracle(session).getFileContext("shared-cache.ts");
+		const second = await new ContextOracle(session).getFileContext("shared-cache.ts");
+		expect(first.evidence[0]?.type).toBe("summary");
+		expect(second.evidence[0]?.type).toBe("cache");
+		expect(second.evidence[1]?.detail).toContain("shared");
+	});
+
+	test("shared file summary cache invalidates after file change", async () => {
+		const { dir, session } = await makeSession();
+		session.contextOracleCache = createContextOracleCache();
+		const file = path.join(dir, "shared-invalidate.ts");
+		await fs.writeFile(file, "export const oldValue = 1;\n");
+		await new ContextOracle(session).getFileContext("shared-invalidate.ts");
+		await fs.writeFile(file, "export const newValue = 2;\n");
+		const result = await new ContextOracle(session).getFileContext("shared-invalidate.ts");
+		expect(result.evidence[0]?.type).not.toBe("cache");
+		expect(result.evidence[0]?.detail).toContain("newValue");
+	});
+
+	test("cache setting can disable shared cache hits", async () => {
+		const { dir, session } = await makeSession();
+		session.contextOracleCache = createContextOracleCache();
+		session.settings = Settings.isolated({ "contextLayer.enabled": true, "contextLayer.cache": false });
+		await fs.writeFile(path.join(dir, "no-cache.ts"), "export const uncached = 1;\n");
+		await new ContextOracle(session).getFileContext("no-cache.ts");
+		const result = await new ContextOracle(session).getFileContext("no-cache.ts");
+		expect(result.evidence[0]?.type).toBe("summary");
 	});
 
 	test("diagnostics context returns low confidence when LSP is disabled", async () => {

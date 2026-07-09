@@ -9,7 +9,7 @@ It is exposed as the `context_oracle` tool.
 - LSP evidence: definitions, references, document/workspace symbols, hover, diagnostics.
 - File evidence: bounded file summaries and declaration scans.
 - Search evidence: deterministic text fallback when LSP has no result.
-- Cache evidence: file summaries and prior context queries keyed by file mtime/size or scope.
+- Cache evidence: session-shared file summaries and prior context queries keyed by file mtime/size or scope.
 
 ## What it is not
 
@@ -59,6 +59,8 @@ contextLayer:
 ```
 
 `contextLayer.model` enables optional cheap-model compression after deterministic evidence retrieval. The model receives only bounded evidence JSON and may replace `answer` only when it returns valid JSON `{ "answer": "..." }`; evidence, confidence, and suggested reads remain deterministic. Empty model config keeps deterministic mode.
+
+The cache is shared through the active `ToolSession`, so repeated `context_oracle` calls in one agent session can reuse unchanged file summaries and query responses. Set `contextLayer.cache: false` to force fresh deterministic retrieval.
 
 ## Limitations
 

@@ -1,7 +1,7 @@
 import type { AgentTool, AgentToolResult } from "@pk-nerdsaver-ai/pi-agent-core";
 import { prompt } from "@pk-nerdsaver-ai/pi-utils";
 import { type } from "arktype";
-import { ContextOracle, type ContextOracleResult } from "../context-layer/context-oracle";
+import { ContextOracle, type ContextOracleResult, createContextOracleCache } from "../context-layer/context-oracle";
 import type { Theme } from "../modes/theme/theme";
 import contextOracleDescription from "../prompts/tools/context-oracle.md" with { type: "text" };
 import type { ToolSession } from ".";
@@ -65,6 +65,7 @@ export class ContextOracleTool implements AgentTool<typeof contextOracleSchema, 
 		params: ContextOracleParams,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ContextOracleDetails>> {
+		this.session.contextOracleCache ??= createContextOracleCache();
 		const oracle = new ContextOracle(this.session);
 		const options = {
 			file: params.file,
