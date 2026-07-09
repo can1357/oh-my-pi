@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, setAgentDir } from "@pk-nerdsaver-ai/pi-utils/dirs";
+import { Settings } from "../../src/config/settings";
 import { InternalUrlRouter } from "../../src/internal-urls/router";
 import { WikigraphProtocolHandler } from "../../src/internal-urls/wikigraph-protocol";
 import { closeWikigraphDb } from "../../src/wikigraph/db";
@@ -69,5 +70,42 @@ describe("wikigraph:// protocol", () => {
 		const expanded = await InternalUrlRouter.instance().resolve(`wikigraph://node/${fullId}?expand=1`);
 		expect(expanded.content).toContain("```markdown");
 		expect(expanded.notes?.some(note => note.startsWith("expanded:"))).toBe(true);
+	});
+
+	it("allows wikigraph path reads only from cwd and configured wiki roots", async () => {
+		const project = path.join(cleanupRoot, "project");
+		const wikiRoot = path.join(project, ".omp", "wiki");
+		const configuredRoot = path.join(cleanupRoot, "configured-wiki");
+		await fs.mkdir(wikiRoot, { recursive: true });
+		await fs.mkdir(configuredRoot, { recursive: true });
+		await fs.writeFile(path.join(wikiRoot, "allowed.md"), "# Allowed\n\nAllowed wiki body.");
+		await fs.writeFile(path.join(configuredRoot, "configured.md"), "# Configured\n\nConfigured wiki body.");
+		await fs.writeFile(path.join(project, "session.md"), "# Session\n\nSession body.");
+		await fs.writeFile(path.join(cleanupRoot, "secret.md"), "secret body");
+		const settings = Settings.isolated({ "wikigraph.roots": [configuredRoot, "<cwd>/.omp/wiki"] });
+
+		const router = InternalUrlRouter.instance();
+		const allowedWiki = await router.resolve("wikigraph://path/.omp/wiki/allowed.md#L1-L2", {
+			cwd: project,
+			settings,
+		});
+		expect(allowedWiki.content).toContain("# Allowed");
+		const allowedConfigured = await router.resolve(
+			`wikigraph://path/${encodeURIComponent(path.join(configuredRoot, "configured.md"))}#L1-L1`,
+			{ cwd: project, settings },
+		);
+		expect(allowedConfigured.content).toBe("# Configured");
+		const allowedCwd = await router.resolve("wikigraph://path/session.md#L1-L1", { cwd: project, settings });
+		expect(allowedCwd.content).toBe("# Session");
+
+		await expect(router.resolve("wikigraph://path/../secret.md#L1-L1", { cwd: project, settings })).rejects.toThrow(
+			/outside allowed roots/,
+		);
+		await expect(
+			router.resolve(`wikigraph://path/${encodeURIComponent(path.join(cleanupRoot, "secret.md"))}#L1-L1`, {
+				cwd: project,
+				settings,
+			}),
+		).rejects.toThrow(/outside allowed roots/);
 	});
 });

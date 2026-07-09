@@ -3,6 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@pk-nerdsaver-ai/pi-agent-core";
+import { ArtifactProtocolHandler } from "../../src/internal-urls/artifact-protocol";
+import { parseInternalUrl } from "../../src/internal-urls/parse";
 import { ArtifactManager } from "../../src/session/artifacts";
 import {
 	buildOffloadTraceCanvas,
@@ -97,6 +99,38 @@ describe("offload trace renderer", () => {
 
 			expect(canvas?.nodes[1]?.artifactId).toBe("0");
 			expect(await Bun.file(join(dir, "0.offload.log")).text()).toBe(longText);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("resolves rendered artifact refs to exact offloaded evidence", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "omp-offload-trace-roundtrip-"));
+		try {
+			const manager = new ArtifactManager(dir);
+			const rawEvidence = `raw evidence start\n${"exact payload ".repeat(64)}\nraw evidence end`;
+			const message: AgentMessage = {
+				role: "user",
+				content: rawEvidence,
+				timestamp: Date.now(),
+			};
+			const canvas = await buildOffloadTraceCanvas({
+				messagesToSummarize: [message],
+				summary: "summary",
+				settings: { enabled: true, maxCanvasChars: 2000, maxNodes: 24, rawArtifactMinChars: 10 },
+				artifactManager: manager,
+				createdAt: "2026-01-01T00:00:00.000Z",
+			});
+			expect(canvas).toBeTruthy();
+
+			const markdown = renderOffloadTraceCanvasMarkdown(canvas!, { maxCanvasChars: 2000, maxNodes: 24 });
+			const artifactUrl = markdown.match(/artifact:\/\/\d+/)?.[0];
+			expect(artifactUrl).toBe("artifact://0");
+
+			const resolved = await new ArtifactProtocolHandler().resolve(parseInternalUrl(artifactUrl!), {
+				localProtocolOptions: { getArtifactsDir: () => dir },
+			});
+			expect(resolved.content).toBe(rawEvidence);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}

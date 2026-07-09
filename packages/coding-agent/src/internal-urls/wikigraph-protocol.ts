@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { isSettingsInitialized, settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
@@ -11,6 +12,14 @@ const DEFAULT_LIMIT = 8;
 
 interface NodeSearchRow extends WikiNodeRow {
 	rank?: number;
+}
+
+interface SettingsReader {
+	get(key: string): unknown;
+}
+
+function isSettingsReader(value: unknown): value is SettingsReader {
+	return typeof value === "object" && value !== null && typeof (value as { get?: unknown }).get === "function";
 }
 
 function getSetting<T>(key: string, fallback: T): T {
@@ -32,6 +41,56 @@ function maxChars(): number {
 
 function maxNodes(): number {
 	return getSetting("wikigraph.maxNodesPerResolve", DEFAULT_LIMIT);
+}
+
+function configuredRoots(contextSettings?: unknown): string[] {
+	let configured: unknown;
+	if (isSettingsReader(contextSettings)) {
+		try {
+			configured = contextSettings.get("wikigraph.roots");
+		} catch {
+			configured = undefined;
+		}
+	}
+	configured ??= getSetting("wikigraph.roots", getDefault("wikigraph.roots" as never) as unknown);
+	return Array.isArray(configured) ? configured.filter((root): root is string => typeof root === "string") : [];
+}
+
+function expandRoot(root: string, cwd: string): string {
+	const withCwd = root.replaceAll("<cwd>", cwd);
+	if (withCwd === "~") return os.homedir();
+	if (withCwd.startsWith("~/") || withCwd.startsWith("~\\")) return path.join(os.homedir(), withCwd.slice(2));
+	return withCwd;
+}
+
+function comparablePath(value: string): string {
+	const resolved = path.resolve(value);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function isWithinRoot(target: string, root: string): boolean {
+	const comparableTarget = comparablePath(target);
+	const comparableRoot = comparablePath(root);
+	return comparableTarget === comparableRoot || comparableTarget.startsWith(`${comparableRoot}${path.sep}`);
+}
+
+async function safeRealPath(value: string): Promise<string> {
+	try {
+		return await fs.realpath(value);
+	} catch {
+		return path.resolve(value);
+	}
+}
+
+async function assertAllowedWikigraphPath(targetPath: string, cwd: string, contextSettings?: unknown): Promise<string> {
+	const absolute = path.isAbsolute(targetPath) ? targetPath : path.resolve(cwd, targetPath);
+	const targetRealPath = await safeRealPath(absolute);
+	const allowedRoots = [cwd, ...configuredRoots(contextSettings).map(root => expandRoot(root, cwd))];
+	for (const root of allowedRoots) {
+		const rootRealPath = await safeRealPath(root);
+		if (isWithinRoot(targetRealPath, rootRealPath)) return targetRealPath;
+	}
+	throw new Error("wikigraph: path is outside allowed roots");
 }
 
 function capContent(content: string, notes: string[]): string {
@@ -217,9 +276,8 @@ ORDER BY updated_at DESC LIMIT ?
 		const raw = decodeURIComponent(`${url.rawPathname ?? url.pathname}${url.hash}`.replace(/^\//, ""));
 		const match = raw.match(/^(.*)#L(\d+)(?:-L?(\d+))?$/);
 		const targetPath = match ? match[1] : raw;
-		const absolute = path.isAbsolute(targetPath)
-			? targetPath
-			: path.resolve(context?.cwd ?? process.cwd(), targetPath);
+		const cwd = context?.cwd ?? process.cwd();
+		const absolute = await assertAllowedWikigraphPath(targetPath, cwd, context?.settings);
 		const lines = (await Bun.file(absolute).text()).split(/\r?\n/);
 		const start = match ? Math.max(1, Number.parseInt(match[2], 10)) : 1;
 		const end = match?.[3]
