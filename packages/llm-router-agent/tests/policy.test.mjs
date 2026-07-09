@@ -22,3 +22,47 @@ test('routes high-complexity coding toward coding or quality profile', () => {
   assert.ok(['coding', 'quality'].includes(decision.selectedModel));
   assert.ok(decision.validationPlan.requirements.some(r => r.type === 'non_empty'));
 });
+
+test('routes simple route-predictor work to local_fast through 9router', () => {
+  const router = new LLMRouter(cloneDefaultConfig());
+  const decision = router.decide({ message: 'Classify this prompt as speed or quality.', user: { preference: 'speed' } });
+  assert.equal(decision.selectedModel, 'local_fast');
+  assert.equal(decision.selector, '9router/local-fast');
+  assert.ok(decision.fallbackSelectors.every(selector => selector.startsWith('9router/') || selector === 'pi/smol'));
+});
+
+test('routes high-risk StepContext to quality profile', () => {
+  const router = new LLMRouter(cloneDefaultConfig());
+  const decision = router.decide({
+    message: 'Classify this prompt as speed or quality.',
+    user: { preference: 'speed' },
+    metadata: { stepContext: { stepRisk: 'high', stepKind: 'tool_call' } },
+  });
+
+  assert.equal(decision.selectedModel, 'quality');
+  assert.ok(decision.ruleMatches.includes('high-risk-agent-step'));
+});
+
+test('routes failed verifier StepContext away from local_fast', () => {
+  const router = new LLMRouter(cloneDefaultConfig());
+  const decision = router.decide({
+    message: 'Classify this prompt as speed or quality.',
+    user: { preference: 'speed' },
+    metadata: { stepContext: { lastVerifier: 'fail', recentFailures: 1 } },
+  });
+
+  assert.equal(decision.selectedModel, 'quality');
+  assert.ok(decision.ruleMatches.includes('failed-agent-step-retry'));
+  assert.ok(decision.ruleMatches.includes('recent-agent-failure-retry'));
+});
+
+test('routes irreversible StepContext to safe profile', () => {
+  const router = new LLMRouter(cloneDefaultConfig());
+  const decision = router.decide({
+    message: 'Prepare the terminal operation.',
+    metadata: { stepContext: { irreversible: true, stepKind: 'tool_call' } },
+  });
+
+  assert.equal(decision.selectedModel, 'safe');
+  assert.ok(decision.ruleMatches.includes('irreversible-agent-step'));
+});

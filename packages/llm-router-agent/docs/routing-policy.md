@@ -47,6 +47,28 @@ Example:
 }
 ```
 
+Step-aware rules can match metadata passed as `request.metadata.stepContext`.
+These fields are normalized once and shared by feature extraction and telemetry:
+
+```json
+{
+  "name": "high-risk-agent-step",
+  "priority": 92,
+  "when": { "stepRisk": "high" },
+  "route": {
+    "model": "quality",
+    "fallback": ["coding", "balanced"],
+    "force": true,
+    "reason": "high-risk agent step"
+  }
+}
+```
+
+Supported step predicates include `stepKind`, `stepRisk`, `irreversible`,
+`minRecentFailures`, `lastVerifier`, `minEscalationCount`, and
+`estimatedCacheHit`. Use these for trajectory-aware escalation; keep broad task
+classification and safety policy on the existing task/safety predicates.
+
 ## Learned overlay
 
 The learned policy is intentionally simple: a linear score delta by model.

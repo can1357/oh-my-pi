@@ -1,7 +1,7 @@
 import { type LoadedConfig, loadRouterConfig } from "./config.js";
 import { extractFeatures } from "./features.js";
 import { decideRoute } from "./policy.js";
-import { decisionTelemetry, validationTelemetry, writeTelemetry } from "./telemetry.js";
+import { decisionTelemetry, validationTelemetry, writeTelemetry, writeTrace } from "./telemetry.js";
 import { captureToolUse, ToolUseCaptureLayer } from "./tool-capture.js";
 import type {
 	RequestInput,
@@ -40,7 +40,12 @@ export class LLMRouter {
 
 	async decideAndLog(input: RequestInput, metadata: Record<string, unknown> = {}): Promise<RouteDecision> {
 		const decision = this.decide(input);
-		await writeTelemetry(this.config, decisionTelemetry(decision, metadata));
+		const record = decisionTelemetry(decision, metadata, input, {
+			includePromptPreview: this.config.traces?.includePromptPreview,
+			maxPromptPreviewChars: this.config.traces?.maxPromptPreviewChars,
+		});
+		await writeTelemetry(this.config, record);
+		await writeTrace(this.config, record);
 		return decision;
 	}
 

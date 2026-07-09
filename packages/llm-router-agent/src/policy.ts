@@ -57,11 +57,20 @@ export function decideRoute(input: RequestInput, features: RouterFeatureVector, 
 	if (!selectedProfile) throw new Error(`Selected profile ${selected.modelId} not found.`);
 
 	const fallbackChain = buildFallbackChain(selectedProfile, candidateScores, config, ruleMatches);
-	const fallbackSelectors = fallbackChain
+	let fallbackSelectors = fallbackChain
 		.map(id => config.models[id])
 		.filter((model): model is ModelProfile => Boolean(model))
 		.flatMap(model => [model.selector, ...(model.fallbackSelectors ?? [])])
 		.filter(uniqueString);
+	// Keep 9router as the execution router: when the primary route runs through a
+	// 9router lane (e.g. the route-predictor / local-fast role), restrict the
+	// emitted fallbacks to 9router lanes plus the terminal `pi/smol` safety net so
+	// execution never silently escapes the 9router gateway.
+	if (selectedProfile.selector.startsWith("9router/")) {
+		fallbackSelectors = fallbackSelectors.filter(
+			selector => selector.startsWith("9router/") || selector === "pi/smol",
+		);
+	}
 
 	const sortedScores = candidateScores.sort((a, b) => {
 		if (a.rejected && !b.rejected) return 1;
@@ -209,6 +218,8 @@ function matchesRule(rule: PolicyRule, features: RouterFeatureVector): boolean {
 	if (when.hasMultimodalInput !== undefined && features.hasMultimodalInput !== when.hasMultimodalInput) return false;
 	if (when.minReasoningComplexity !== undefined && features.reasoningComplexity < when.minReasoningComplexity)
 		return false;
+	if (when.maxReasoningComplexity !== undefined && features.reasoningComplexity > when.maxReasoningComplexity)
+		return false;
 	if (when.minSafetySensitivity !== undefined && features.safetySensitivity < when.minSafetySensitivity) return false;
 	if (when.userTier !== undefined && !matchesOneOrMany(when.userTier, features.userTier)) return false;
 	if (when.preference !== undefined && !matchesOneOrMany(when.preference, features.userPreference)) return false;
@@ -216,6 +227,19 @@ function matchesRule(rule: PolicyRule, features: RouterFeatureVector): boolean {
 		const wanted = Array.isArray(when.tag) ? when.tag : [when.tag];
 		if (!wanted.some(tag => features.tags.includes(tag))) return false;
 	}
+	if (when.stepKind !== undefined) {
+		if (features.stepKind === undefined || !matchesOneOrMany(when.stepKind, features.stepKind)) return false;
+	}
+	if (when.stepRisk !== undefined) {
+		if (features.stepRisk === undefined || !matchesOneOrMany(when.stepRisk, features.stepRisk)) return false;
+	}
+	if (when.irreversible !== undefined && features.irreversible !== when.irreversible) return false;
+	if (when.minRecentFailures !== undefined && (features.recentFailures ?? 0) < when.minRecentFailures) return false;
+	if (when.lastVerifier !== undefined) {
+		if (features.lastVerifier === undefined || !matchesOneOrMany(when.lastVerifier, features.lastVerifier)) return false;
+	}
+	if (when.minEscalationCount !== undefined && (features.escalationCount ?? 0) < when.minEscalationCount) return false;
+	if (when.estimatedCacheHit !== undefined && features.estimatedCacheHit !== when.estimatedCacheHit) return false;
 	return true;
 }
 

@@ -53,6 +53,62 @@ export interface RequestInput {
 	metadata?: Record<string, unknown>;
 }
 
+export type StepKind = "plan" | "tool_call" | "tool_result" | "code_edit" | "browser" | "final" | "other";
+
+export type StepRisk = "low" | "medium" | "high";
+
+export type VerifierSignal = "pass" | "fail" | "uncertain";
+
+export interface StepContextMetadata {
+	stepId?: string;
+	stepIndex?: number;
+	stepKind?: StepKind;
+	agentRole?: string;
+	stepRisk?: StepRisk;
+	irreversible?: boolean;
+	conversationTurns?: number;
+	recentToolCalls?: ToolUseContextSummary[];
+	recentFailures?: number;
+	lastVerifier?: VerifierSignal;
+	escalationCount?: number;
+	priorModelSelector?: string;
+	stablePrefixHash?: string;
+	estimatedCacheHit?: boolean;
+	providerAffinity?: string;
+	remainingTokens?: number;
+}
+
+export interface StepContext {
+	request: RequestInput;
+	step: {
+		id?: string;
+		index?: number;
+		kind?: StepKind;
+		agentRole?: string;
+		risk?: StepRisk;
+		irreversible?: boolean;
+	};
+	trajectory?: {
+		conversationTurns?: number;
+		recentToolCalls?: ToolUseContextSummary[];
+		recentFailures?: number;
+		lastVerifier?: VerifierSignal;
+		escalationCount?: number;
+		priorModelSelector?: string;
+	};
+	cache?: {
+		stablePrefixHash?: string;
+		estimatedCacheHit?: boolean;
+		providerAffinity?: string;
+	};
+	budgets?: {
+		latencyMs?: number;
+		costUsd?: number;
+		remainingTokens?: number;
+	};
+}
+
+
 export interface RouterFeatureVector {
 	taskType: TaskType;
 	taskScores: Record<TaskType, number>;
@@ -76,6 +132,18 @@ export interface RouterFeatureVector {
 	latencyBudgetMs?: number;
 	costBudgetUsd?: number;
 	runtimePressure: number;
+	stepKind?: StepKind;
+	stepRisk?: StepRisk;
+	stepIndex?: number;
+	agentRole?: string;
+	irreversible?: boolean;
+	recentFailures?: number;
+	lastVerifier?: VerifierSignal;
+	lastVerifierFailed?: boolean;
+	escalationCount?: number;
+	estimatedCacheHit?: boolean;
+	providerAffinity?: string;
+	remainingTokens?: number;
 	tags: string[];
 	signals: string[];
 }
@@ -132,10 +200,18 @@ export interface PolicyRule {
 		hasRetrievalNeed?: boolean;
 		hasMultimodalInput?: boolean;
 		minReasoningComplexity?: number;
+		maxReasoningComplexity?: number;
 		minSafetySensitivity?: number;
 		userTier?: string | string[];
 		preference?: Preference | Preference[];
 		tag?: string | string[];
+		stepKind?: StepKind | StepKind[];
+		stepRisk?: StepRisk | StepRisk[];
+		irreversible?: boolean;
+		minRecentFailures?: number;
+		lastVerifier?: VerifierSignal | VerifierSignal[];
+		minEscalationCount?: number;
+		estimatedCacheHit?: boolean;
 	};
 	route: {
 		model: string;
@@ -159,6 +235,13 @@ export interface TelemetryConfig {
 	sampleRate?: number;
 }
 
+export interface TraceCaptureConfig {
+	enabled: boolean;
+	path?: string;
+	includePromptPreview?: boolean;
+	maxPromptPreviewChars?: number;
+}
+
 export interface ExtensionConfig {
 	mode: "recommend" | "try-set-model";
 	routeOnInput: boolean;
@@ -174,6 +257,7 @@ export interface RouterConfig {
 	rules: PolicyRule[];
 	learned?: LearnedPolicyConfig;
 	telemetry?: TelemetryConfig;
+	traces?: TraceCaptureConfig;
 	toolCapture?: ToolCaptureConfig;
 	extension?: ExtensionConfig;
 	validation?: {
@@ -389,6 +473,34 @@ export interface ToolRoutingTrainingExample {
 	label: ToolRoutingTrainingHint;
 	metadata?: Record<string, unknown>;
 }
+export interface ModelTrace {
+	provider?: string;
+	modelId?: string;
+	selector: string;
+	fallbackSelectors: string[];
+	candidateScores: CandidateScore[];
+}
+
+export interface ContextTrace {
+	promptPreview?: string;
+	approxInputTokens?: number;
+	approxOutputTokens?: number;
+	totalTokenEstimate?: number;
+	attachmentCount?: number;
+	conversationTurns?: number;
+	stepKind?: StepKind;
+	stepRisk?: StepRisk;
+	stepIndex?: number;
+	agentRole?: string;
+	irreversible?: boolean;
+	recentFailures?: number;
+	lastVerifier?: VerifierSignal;
+	escalationCount?: number;
+	recentToolCallCount?: number;
+	estimatedCacheHit?: boolean;
+	stablePrefixHash?: string;
+	providerAffinity?: string;
+}
 
 export interface TelemetryRecord {
 	requestId: string;
@@ -399,6 +511,8 @@ export interface TelemetryRecord {
 	validation?: ValidationResult;
 	toolUse?: ToolUseCaptureRecord;
 	toolTrainingExample?: ToolRoutingTrainingExample;
+	modelTrace?: ModelTrace;
+	contextTrace?: ContextTrace;
 	metrics?: {
 		latencyMs?: number;
 		inputTokens?: number;

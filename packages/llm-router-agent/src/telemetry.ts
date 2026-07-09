@@ -1,6 +1,23 @@
-import type { RouteDecision, RouterConfig, TelemetryRecord, ValidationResult } from "./types.js";
+import * as fs from "node:fs/promises";
+import * as nodePath from "node:path";
+import { stepContextToContextTrace } from "./step-context.js";
+import type {
+	RequestInput,
+	RouteDecision,
+	RouterConfig,
+	TelemetryRecord,
+	TraceCaptureConfig,
+	ValidationResult,
+} from "./types.js";
 
-export function decisionTelemetry(decision: RouteDecision, metadata: Record<string, unknown> = {}): TelemetryRecord {
+type PromptPreviewOptions = Pick<TraceCaptureConfig, "includePromptPreview" | "maxPromptPreviewChars">;
+
+export function decisionTelemetry(
+	decision: RouteDecision,
+	metadata: Record<string, unknown> = {},
+	input?: RequestInput,
+	preview?: PromptPreviewOptions,
+): TelemetryRecord {
 	return {
 		requestId: decision.requestId,
 		timestamp: new Date().toISOString(),
@@ -14,6 +31,14 @@ export function decisionTelemetry(decision: RouteDecision, metadata: Record<stri
 			fallbackChain: decision.fallbackChain,
 		},
 		features: summarizeFeatures(decision),
+		modelTrace: {
+			provider: decision.provider,
+			modelId: decision.modelId,
+			selector: decision.selector,
+			fallbackSelectors: decision.fallbackSelectors,
+			candidateScores: decision.scores,
+		},
+		contextTrace: summarizeContext(decision, input, preview),
 		metadata,
 	};
 }
@@ -37,8 +62,13 @@ export async function writeTelemetry(config: RouterConfig, record: TelemetryReco
 	const sampleRate = config.telemetry.sampleRate ?? 1;
 	if (sampleRate < 1 && Math.random() > sampleRate) return;
 	const path = config.telemetry.path ?? ".llm-router/telemetry.jsonl";
-	const fs = await import("node:fs/promises");
-	const nodePath = await import("node:path");
+	await fs.mkdir(nodePath.dirname(path), { recursive: true });
+	await fs.appendFile(path, `${JSON.stringify(record)}\n`, "utf8");
+}
+
+export async function writeTrace(config: RouterConfig, record: TelemetryRecord): Promise<void> {
+	if (!config.traces?.enabled) return;
+	const path = config.traces.path ?? ".llm-router/traces.jsonl";
 	await fs.mkdir(nodePath.dirname(path), { recursive: true });
 	await fs.appendFile(path, `${JSON.stringify(record)}\n`, "utf8");
 }
@@ -46,7 +76,6 @@ export async function writeTelemetry(config: RouterConfig, record: TelemetryReco
 export async function summarizeTelemetry(
 	path: string,
 ): Promise<{ total: number; byModel: Record<string, number>; byTask: Record<string, number>; failures: number }> {
-	const fs = await import("node:fs/promises");
 	const text = await fs.readFile(path, "utf8");
 	const summary = {
 		total: 0,
@@ -79,13 +108,56 @@ function summarizeFeatures(decision: RouteDecision): TelemetryRecord["features"]
 		approxOutputTokens: decision.features.approxOutputTokens,
 		totalTokenEstimate: decision.features.totalTokenEstimate,
 		hasCode: decision.features.hasCode,
+		hasUrl: decision.features.hasUrl,
 		hasJsonRequirement: decision.features.hasJsonRequirement,
+		hasStructuredData: decision.features.hasStructuredData,
+		hasToolNeed: decision.features.hasToolNeed,
 		hasRetrievalNeed: decision.features.hasRetrievalNeed,
 		hasMultimodalInput: decision.features.hasMultimodalInput,
+		hasLongContextNeed: decision.features.hasLongContextNeed,
 		reasoningComplexity: decision.features.reasoningComplexity,
+		ambiguity: decision.features.ambiguity,
 		safetySensitivity: decision.features.safetySensitivity,
+		runtimePressure: decision.features.runtimePressure,
 		userTier: decision.features.userTier,
 		userPreference: decision.features.userPreference,
+		tags: decision.features.tags,
+		stepKind: decision.features.stepKind,
+		stepRisk: decision.features.stepRisk,
+		stepIndex: decision.features.stepIndex,
+		agentRole: decision.features.agentRole,
+		irreversible: decision.features.irreversible,
+		recentFailures: decision.features.recentFailures,
+		lastVerifier: decision.features.lastVerifier,
+		lastVerifierFailed: decision.features.lastVerifierFailed,
+		escalationCount: decision.features.escalationCount,
+		estimatedCacheHit: decision.features.estimatedCacheHit,
+		providerAffinity: decision.features.providerAffinity,
+		remainingTokens: decision.features.remainingTokens,
 		signals: decision.features.signals,
 	};
 }
+
+function summarizeContext(
+	decision: RouteDecision,
+	input: RequestInput | undefined,
+	preview?: PromptPreviewOptions,
+): TelemetryRecord["contextTrace"] {
+	const stepTrace = stepContextToContextTrace(input?.metadata);
+	return {
+		promptPreview: previewPrompt(input, preview),
+		approxInputTokens: decision.features.approxInputTokens,
+		approxOutputTokens: decision.features.approxOutputTokens,
+		totalTokenEstimate: decision.features.totalTokenEstimate,
+		attachmentCount: input?.attachments?.length ?? 0,
+		conversationTurns: stepTrace.conversationTurns ?? 0,
+		...stepTrace,
+	};
+}
+
+
+function previewPrompt(input: RequestInput | undefined, preview?: PromptPreviewOptions): string | undefined {
+	if (!preview?.includePromptPreview || !input?.message) return undefined;
+	return input.message.slice(0, preview.maxPromptPreviewChars ?? 1_000);
+}
+

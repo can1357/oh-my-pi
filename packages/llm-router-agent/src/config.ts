@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import { cloneDefaultConfig } from "./defaults.js";
 import type { ModelProfile, RouterConfig } from "./types.js";
 
@@ -137,7 +138,6 @@ function clamp01(value: number): number {
 
 async function fileExists(path: string): Promise<boolean> {
 	try {
-		const fs = await import("node:fs/promises");
 		await fs.access(path);
 		return true;
 	} catch {
@@ -146,7 +146,6 @@ async function fileExists(path: string): Promise<boolean> {
 }
 
 async function readText(path: string): Promise<string> {
-	const fs = await import("node:fs/promises");
 	return fs.readFile(path, "utf8");
 }
 

@@ -1,4 +1,5 @@
-import type { Preference, RequestInput, RouterFeatureVector, TaskType } from "./types.js";
+import { readStepContextMetadata } from "./step-context.js";
+import type { Preference, RequestInput, RouterFeatureVector, StepContextMetadata, TaskType } from "./types.js";
 
 const TASK_TYPES: TaskType[] = [
 	"chat",
@@ -14,6 +15,7 @@ const TASK_TYPES: TaskType[] = [
 	"safety",
 	"unknown",
 ];
+
 
 const URL_RE = /https?:\/\/|www\.|\b[a-z0-9-]+\.(?:com|org|net|io|ai|dev|gov|edu)\b/i;
 const CODE_FENCE_RE = /```|~~~|<code>|<\/code>/i;
@@ -104,6 +106,7 @@ export function extractFeatures(input: RequestInput): RouterFeatureVector {
 	});
 	const taskType = selectTaskType(taskScores);
 	const runtimePressure = estimateRuntimePressure(input.runtime);
+	const stepContext = readStepContextMetadata(input.metadata);
 	const signals = collectSignals({
 		taskType,
 		approxInputTokens,
@@ -118,6 +121,7 @@ export function extractFeatures(input: RequestInput): RouterFeatureVector {
 		ambiguity,
 		safetySensitivity,
 		runtimePressure,
+		stepContext,
 	});
 
 	const result: RouterFeatureVector = {
@@ -150,6 +154,20 @@ export function extractFeatures(input: RequestInput): RouterFeatureVector {
 	if (input.runtime?.costBudgetUsd !== undefined || input.expectedOutput?.maxCostUsd !== undefined) {
 		result.costBudgetUsd = input.expectedOutput?.maxCostUsd ?? input.runtime?.costBudgetUsd;
 	}
+	if (stepContext.stepKind !== undefined) result.stepKind = stepContext.stepKind;
+	if (stepContext.stepRisk !== undefined) result.stepRisk = stepContext.stepRisk;
+	if (stepContext.stepIndex !== undefined) result.stepIndex = stepContext.stepIndex;
+	if (stepContext.agentRole !== undefined) result.agentRole = stepContext.agentRole;
+	if (stepContext.irreversible !== undefined) result.irreversible = stepContext.irreversible;
+	if (stepContext.recentFailures !== undefined) result.recentFailures = stepContext.recentFailures;
+	if (stepContext.lastVerifier !== undefined) {
+		result.lastVerifier = stepContext.lastVerifier;
+		result.lastVerifierFailed = stepContext.lastVerifier === "fail";
+	}
+	if (stepContext.escalationCount !== undefined) result.escalationCount = stepContext.escalationCount;
+	if (stepContext.estimatedCacheHit !== undefined) result.estimatedCacheHit = stepContext.estimatedCacheHit;
+	if (stepContext.providerAffinity !== undefined) result.providerAffinity = stepContext.providerAffinity;
+	if (stepContext.remainingTokens !== undefined) result.remainingTokens = stepContext.remainingTokens;
 	return result;
 }
 
@@ -272,6 +290,7 @@ function collectSignals(input: {
 	ambiguity: number;
 	safetySensitivity: number;
 	runtimePressure: number;
+	stepContext: Partial<StepContextMetadata>;
 }): string[] {
 	const signals: string[] = [`task:${input.taskType}`];
 	if (input.approxInputTokens > 12_000) signals.push("large-input");
@@ -286,6 +305,14 @@ function collectSignals(input: {
 	if (input.ambiguity > 0.25) signals.push("ambiguous");
 	if (input.safetySensitivity > 0.35) signals.push("safety-sensitive");
 	if (input.runtimePressure > 0.25) signals.push("runtime-pressure");
+	if (input.stepContext.stepKind !== undefined) signals.push(`step:${input.stepContext.stepKind}`);
+	if (input.stepContext.stepRisk !== undefined) signals.push(`risk:${input.stepContext.stepRisk}`);
+	if (input.stepContext.irreversible === true) signals.push("irreversible-step");
+	if ((input.stepContext.recentFailures ?? 0) > 0) signals.push("recent-failures");
+	if (input.stepContext.lastVerifier === "fail") signals.push("verifier-failed");
+	if ((input.stepContext.escalationCount ?? 0) > 0) signals.push("escalated");
+	if (input.stepContext.estimatedCacheHit === true) signals.push("cache-hit");
+	if (input.stepContext.estimatedCacheHit === false) signals.push("cache-miss");
 	return signals;
 }
 
@@ -296,6 +323,7 @@ function countMatches(text: string, needles: string[]): number {
 function countQuestionMarks(text: string): number {
 	return (text.match(/\?/g) ?? []).length;
 }
+
 
 function clamp01(value: number): number {
 	if (Number.isNaN(value)) return 0;

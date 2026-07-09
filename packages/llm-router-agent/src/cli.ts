@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import * as nodePath from "node:path";
 import { LLMRouter } from "./agent.js";
 import { extractFeatures } from "./features.js";
 import { summarizeTelemetry } from "./telemetry.js";
@@ -9,6 +10,7 @@ import {
 	normalizeToolCaptureConfig,
 	summarizeToolUseTelemetry,
 } from "./tool-capture.js";
+import { parseTelemetryJsonl, trainRoutePredictorFromTelemetry } from "./training.js";
 import type { JsonSchemaLike, RequestInput, ToolUseCaptureInput, ToolUsePhase, ValidationPlan } from "./types.js";
 import { validateOutput } from "./validation.js";
 
@@ -82,6 +84,24 @@ async function main(): Promise<void> {
 			minSavedContextTokens,
 		});
 		printJson({ read: summary.read, exported: summary.exported, outputPath });
+		return;
+	}
+	if (command === "train-route-predictor") {
+		const inputPath =
+			typeof args.input === "string"
+				? args.input
+				: typeof args.path === "string"
+					? args.path
+					: ".llm-router/telemetry.jsonl";
+		const outputPath = typeof args.output === "string" ? args.output : ".llm-router/learned-policy.json";
+		const records = parseTelemetryJsonl(await readFile(inputPath, "utf8"));
+		const result = trainRoutePredictorFromTelemetry(records, {
+			epochs: args.epochs !== undefined ? Number(args.epochs) : undefined,
+			learningRate: args.learningRate !== undefined ? Number(args.learningRate) : undefined,
+		});
+		await mkdir(nodePath.dirname(outputPath), { recursive: true });
+		await writeFile(outputPath, `${JSON.stringify(result.policy, null, 2)}\n`, "utf8");
+		printJson({ examples: result.examples, models: result.models, outputPath });
 		return;
 	}
 	throw new Error(`Unknown command: ${command}`);
@@ -218,6 +238,7 @@ Commands:
   tool-capture Capture a tool call/result/error for tool-routing training
   tool-summary Summarize tool-use telemetry JSONL
   tool-export  Export tool-use telemetry to supervised training JSONL
+  train-route-predictor Train learned route-predictor weights from decision/outcome telemetry
 
 Examples:
   llm-router-agent decide --message "Debug this stack trace" --preference quality
@@ -226,6 +247,7 @@ Examples:
   llm-router-agent telemetry --path .llm-router/telemetry.jsonl
   llm-router-agent tool-capture --tool file_search.msearch --phase completed --args '{"queries":["lease"]}' --result '{"hits":3}'
   llm-router-agent tool-export --output .llm-router/tool-routing-training.jsonl
+  llm-router-agent train-route-predictor --input .llm-router/telemetry.jsonl --output .llm-router/learned-policy.json
 
 Options:
   --config <path>       JSON config path

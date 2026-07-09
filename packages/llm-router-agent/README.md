@@ -30,6 +30,7 @@ src/
   learned.ts            Optional linear learned policy layer
   policy.ts             Rule + scorer routing policy
   telemetry.ts          JSONL router telemetry helpers
+  step-context.ts       StepContext adapter and compact trace projection
   tool-capture.ts       Tool-use capture, summaries, wrappers, training export
   validation.ts         Output validators and escalation decisioning
   types.ts              Public types
@@ -68,6 +69,29 @@ node dist/cli.js tool-capture \
 node dist/cli.js tool-summary --path .llm-router/tool-use.jsonl
 node dist/cli.js tool-export --output .llm-router/tool-routing-training.jsonl
 ```
+
+Pass agent-step metadata through the same request JSON when routing a specific
+trajectory step:
+
+```bash
+node dist/cli.js features --json --message '{
+  "message": "Operate this page and verify the form state.",
+  "metadata": {
+    "stepContext": {
+      "stepKind": "browser",
+      "stepRisk": "high",
+      "lastVerifier": "fail",
+      "recentFailures": 1,
+      "estimatedCacheHit": false
+    }
+  }
+}'
+```
+
+`StepContext` metadata is normalized into routing features, policy rules, and
+compact telemetry traces. Raw `recentToolCalls` are not persisted in decision
+telemetry; traces retain only counts and scalar fields such as risk, verifier
+state, cache hints, and remaining-token budgets.
 
 ## Tool-use capture layer
 
