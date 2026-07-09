@@ -33,7 +33,7 @@ export const BUILTIN_SUBAGENT_MODEL_ALIASES: Record<string, string> = {
 	"minimax-code": "minimax-code/MiniMax-M3",
 	"kimi-code": "kimi-code/kimi-for-coding",
 	"minimax m3": "minimax/MiniMax-M3",
-	// Concrete default for browser subagent spawns; role path is pi/browser-operation.
+	// Concrete default for browser subagent spawns; role path is pi/browser-control (MiniMax-M3).
 	"browser-fast": "9router/minimax/MiniMax-M3",
 };
 
