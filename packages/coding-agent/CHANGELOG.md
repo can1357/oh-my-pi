@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Added
-- Added spawnable `browser-operation` subagent type for browser tests. Primary browser surface is IX Bridge (`http://127.0.0.1:18086`); model role `pi/browser-control` defaults to MiniMax-M3 via 9router and is changeable like `default`/`smol`/`task`/`advisor`. `ix-browser-fast` remains a short-loop IX Bridge specialist sharing that role; `pi/browser-operation` remains available as a compatibility role.
+- Added spawnable `browser-control` subagent type for browser tasks and the `browser-operation` compatibility agent. Primary browser surface is IX Bridge (`http://127.0.0.1:18086`); model role `pi/browser-control` defaults to MiniMax-M3 via 9router and is changeable like `default`/`smol`/`task`/`advisor`. `ix-browser-fast` remains a short-loop IX Bridge specialist sharing that role; `pi/browser-operation` remains available as a compatibility role.
 
 
 - Added `agent.profile` and `agent.profiles` settings for named, swappable role-based model bundles that retarget every role-resolving agent slot at once (explicit `modelRoles` still wins per-role).

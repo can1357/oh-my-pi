@@ -142,7 +142,7 @@ export async function handleDelegateSlashCommand(args: string, ctx: InteractiveM
 		}
 
 		const promptText = [
-			"You are the browser-operation subagent. Do not edit files. Primary browser tool is IX Bridge. Use only the local IX Bridge HTTP API at http://127.0.0.1:18086. Do not use the built-in browser tool. Execute the bounded browser subgoal below and yield a concise report with actions taken, observed URL/title, success/failure, and escalation reason if blocked.",
+			"You are the browser-control subagent. Do not edit files. Primary browser tool is IX Bridge. Use only the local IX Bridge HTTP API at http://127.0.0.1:18086. Do not use the built-in browser tool. Execute the bounded browser subgoal below and yield a concise report with actions taken, observed URL/title, success/failure, and escalation reason if blocked.",
 			"",
 			`Subgoal: ${task}`,
 			"",
@@ -151,19 +151,19 @@ export async function handleDelegateSlashCommand(args: string, ctx: InteractiveM
 			"POST /ix-bridge/status - Payload: { action: 'status' }",
 		].join("\n");
 
-		// Spawn the browser-operation subagent type (IX Bridge surface)
+		// Spawn the browser-control subagent type (IX Bridge surface)
 		const id = await spawnSubagent(
 			ctx,
 			{
 				modelOverride: resolvedModel.selector,
 				thinkingLevel: ThinkingLevel.Inherit,
-				name: "browser-operation",
+				name: "browser-control",
 				task: promptText,
 			},
-			"browser-operation",
+			"browser-control",
 		);
 		if (id) {
-			ctx.showStatus(`Spawned delegate lane ${id} (browser-operation) on ${resolvedModel.selector}.`);
+			ctx.showStatus(`Spawned delegate lane ${id} (browser-control) on ${resolvedModel.selector}.`);
 		}
 		return;
 	}

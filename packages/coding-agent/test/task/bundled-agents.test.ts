@@ -83,6 +83,16 @@ describe("bundled agents contract", () => {
 		expect(tools).not.toContain("bash");
 	});
 
+	it("browser-control is a spawnable IX Bridge browser-control agent on pi/browser-control", () => {
+		const agents = loadBundledAgents();
+		const agent = agentByName(agents, "browser-control");
+		expect(agent.tools?.map(t => t.toLowerCase())).toContain("bash");
+		expect(agent.tools?.map(t => t.toLowerCase())).toContain("inspect_image");
+		expect(agent.tools?.map(t => t.toLowerCase())).not.toContain("browser");
+		expect(agent.model).toEqual(["pi/browser-control"]);
+		expect(agent.systemPrompt.toLowerCase()).toContain("ix bridge");
+	});
+
 	it("browser-operation is a spawnable IX Bridge browser-test agent on pi/browser-control", () => {
 		const agents = loadBundledAgents();
 		const agent = agentByName(agents, "browser-operation");

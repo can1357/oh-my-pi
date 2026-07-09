@@ -6,6 +6,7 @@
 import { Effort } from "@pk-nerdsaver-ai/pi-ai";
 import { parseFrontmatter, prompt } from "@pk-nerdsaver-ai/pi-utils";
 import { parseAgentFields } from "../discovery/helpers";
+import browserControlMd from "../prompts/agents/browser-control.md" with { type: "text" };
 import browserOperationMd from "../prompts/agents/browser-operation.md" with { type: "text" };
 import designerMd from "../prompts/agents/designer.md" with { type: "text" };
 import exploreMd from "../prompts/agents/explore.md" with { type: "text" };
@@ -72,13 +73,19 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 		},
 		template: taskMd,
 	},
-	// browser-operation: spawnable browser-test subagent type; primary surface is IX Bridge
-	// (model role pi/browser-operation)
+	// browser-control: spawnable browser-control subagent type; primary surface is IX Bridge
+	// (model role pi/browser-control)
+	{
+		fileName: "browser-control.md",
+		template: browserControlMd,
+	},
+	// browser-operation: compatibility browser-test subagent type; primary surface is IX Bridge
+	// (model role pi/browser-control)
 	{
 		fileName: "browser-operation.md",
 		template: browserOperationMd,
 	},
-	// ix-browser-fast: short-loop IX Bridge specialist (shares pi/browser-operation)
+	// ix-browser-fast: short-loop IX Bridge specialist (shares pi/browser-control)
 	{
 		fileName: "ix-browser-fast.md",
 		template: ixBrowserFastMd,

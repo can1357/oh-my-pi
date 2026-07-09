@@ -78,7 +78,7 @@ describe("/delegate command routing", () => {
 		} as unknown as InteractiveModeContext;
 	}
 
-	test("/delegate using browser-fast click the login button resolves alias and spawns browser-operation", async () => {
+	test("/delegate using browser-fast click the login button resolves alias and spawns browser-control", async () => {
 		const ctx = makeContext({
 			"subagent.modelAliases": { "browser-fast": "google/gemini-2.5-flash-lite" },
 			"delegate.mode": "subagents",
@@ -89,15 +89,15 @@ describe("/delegate command routing", () => {
 		expect(resolveModelSpy).toHaveBeenCalledWith(ctx, "browser-fast");
 		expect(spawnSpy).toHaveBeenCalled();
 		const spawnArgs = spawnSpy.mock.calls[0];
-		expect(spawnArgs[2]).toBe("browser-operation");
+		expect(spawnArgs[2]).toBe("browser-control");
 		expect(spawnArgs[1].modelOverride).toBe("browser-fast");
 		expect(spawnArgs[1].task).toContain("Primary browser tool is IX Bridge");
 		expect(mockShowStatus).toHaveBeenCalledWith(
-			"Spawned delegate lane spawned-id (browser-operation) on browser-fast.",
+			"Spawned delegate lane spawned-id (browser-control) on browser-fast.",
 		);
 	});
 
-	test("/delegate open the web dashboard and click Settings routes to browser-operation with browser-fast model", async () => {
+	test("/delegate open the web dashboard and click Settings routes to browser-control with browser-fast model", async () => {
 		const ctx = makeContext({
 			"delegate.mode": "subagents",
 			"delegate.lanes": {},
@@ -108,14 +108,14 @@ describe("/delegate command routing", () => {
 		expect(resolveModelSpy).toHaveBeenCalledWith(ctx, "browser-fast");
 		expect(spawnSpy).toHaveBeenCalled();
 		const spawnArgs = spawnSpy.mock.calls[0];
-		expect(spawnArgs[2]).toBe("browser-operation");
+		expect(spawnArgs[2]).toBe("browser-control");
 		expect(spawnArgs[1].modelOverride).toBe("browser-fast");
 		expect(mockShowStatus).toHaveBeenCalledWith(
-			"Spawned delegate lane spawned-id (browser-operation) on browser-fast.",
+			"Spawned delegate lane spawned-id (browser-control) on browser-fast.",
 		);
 	});
 
-	test("/delegate refactor the parser uses configured delegate.lanes and does not route to browser-operation", async () => {
+	test("/delegate refactor the parser uses configured delegate.lanes and does not route to browser-control", async () => {
 		const ctx = makeContext({
 			"delegate.mode": "subagents",
 			"delegate.lanes": {
