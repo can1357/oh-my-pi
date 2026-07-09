@@ -12,6 +12,7 @@ export const BUILTIN_TOOL_NAMES = [
 	"find",
 	"search",
 	"lsp",
+	"context_oracle",
 	"inspect_image",
 	"browser",
 	"checkpoint",

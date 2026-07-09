@@ -121,7 +121,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Mixture of Agents",
 		"Fusion",
 	],
-	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
+	context: ["General", "Light Context", "Compaction", "Rules (TTSR)", "Experimental"],
 	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Python"],
@@ -1865,6 +1865,37 @@ export const SETTINGS_SCHEMA = {
 			description: "Promote to a larger-context model on context overflow instead of compacting",
 		},
 	},
+
+	// Light context layer
+	"contextLayer.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Light Context",
+			label: "Light Context Layer",
+			description:
+				"Expose a compact deterministic context-oracle tool backed by LSP, file summaries, diagnostics, and cache.",
+		},
+	},
+
+	"contextLayer.model": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "context",
+			group: "Light Context",
+			label: "Context Layer Model",
+			description:
+				"Optional cheap model selector for future evidence summarization. Empty keeps deterministic mode.",
+		},
+	},
+
+	"contextLayer.maxInputTokens": { type: "number", default: 12000 },
+
+	"contextLayer.maxOutputTokens": { type: "number", default: 1200 },
+
+	"contextLayer.cache": { type: "boolean", default: true },
 
 	// Compaction
 	"compaction.enabled": {
@@ -5039,6 +5070,14 @@ export interface CompactionSettings {
 export interface ContextPromotionSettings {
 	enabled: boolean;
 }
+
+export interface ContextLayerSettings {
+	enabled: boolean;
+	model: string | undefined;
+	maxInputTokens: number;
+	maxOutputTokens: number;
+	cache: boolean;
+}
 export interface RetrySettings {
 	enabled: boolean;
 	maxRetries: number;
@@ -5213,6 +5252,7 @@ export type FusionMode = SettingValue<"fusion.mode">;
 export interface GroupTypeMap {
 	compaction: CompactionSettings;
 	contextPromotion: ContextPromotionSettings;
+	contextLayer: ContextLayerSettings;
 	retry: RetrySettings;
 	memories: MemoriesSettings;
 	branchSummary: BranchSummarySettings;

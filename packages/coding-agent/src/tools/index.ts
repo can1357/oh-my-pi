@@ -39,6 +39,7 @@ import { BashTool } from "./bash";
 import { BrowserTool } from "./browser";
 import type { BuiltinToolName } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, RewindTool } from "./checkpoint";
+import { ContextOracleTool } from "./context-oracle";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
@@ -77,6 +78,7 @@ export * from "./ast-grep";
 export * from "./bash";
 export * from "./browser";
 export * from "./checkpoint";
+export * from "./context-oracle";
 export * from "./debug";
 export * from "./eval";
 export * from "./eval-backends";
@@ -451,6 +453,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	find: s => new FindTool(s),
 	search: s => new SearchTool(s),
 	lsp: LspTool.createIf,
+	context_oracle: ContextOracleTool.createIf,
 	inspect_image: s => new InspectImageTool(s),
 	browser: s => new BrowserTool(s),
 	checkpoint: CheckpointTool.createIf,

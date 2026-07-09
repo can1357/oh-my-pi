@@ -2,6 +2,7 @@
 
 ## 2026-07-09
 * **Creation**: Added [Coding-agent reliability hardening](/concepts/coding-agent-reliability-hardening.md) documenting implemented WikiGraph path sandboxing, 9router ID normalization, offload artifact protocol round-trip tests, and bundled-agent check fixes.
+* **Creation**: Added [Light context layer](/concepts/light-context-layer.md) documenting the implemented `context_oracle` tool, typed LSP query seam, evidence shape, config, tests, and next compression slice.
 
 ## 2026-07-08
 * **Creation**: Added [Offload trace](/concepts/offload-trace.md) documenting the implemented opt-in progressive-disclosure compaction memory layer (`offloadTrace.*` settings, preserveData seam, artifact:// drill-down).

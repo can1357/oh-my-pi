@@ -617,6 +617,8 @@ export interface FileDiagnosticsResult {
 	server?: string;
 	/** Formatted diagnostic messages */
 	messages: string[];
+	/** Raw diagnostics for typed consumers */
+	diagnostics?: Diagnostic[];
 	/** Summary string (e.g., "2 error(s), 1 warning(s)") */
 	summary: string;
 	/** Whether there are any errors (severity 1) */
@@ -746,6 +748,7 @@ async function getDiagnosticsForFile(
 			server: serverNames.join(", "),
 			messages: [],
 			summary: "OK",
+			diagnostics: [],
 			errored: false,
 		};
 	}
@@ -771,8 +774,221 @@ async function getDiagnosticsForFile(
 		server: serverNames.join(", "),
 		messages: limited,
 		summary,
+		diagnostics: uniqueDiagnostics,
 		errored: hasErrors,
 	};
+}
+
+export type TypedLspQueryAction = "definition" | "references" | "hover" | "symbols" | "diagnostics";
+
+export interface TypedLspQueryRequest {
+	action: TypedLspQueryAction;
+	file?: string;
+	line?: number;
+	symbol?: string;
+	query?: string;
+	timeout?: number;
+}
+
+export interface TypedLspQueryResult {
+	action: TypedLspQueryAction;
+	serverName?: string;
+	success: boolean;
+	error?: string;
+	locations?: Location[];
+	hover?: string;
+	documentSymbols?: DocumentSymbol[];
+	workspaceSymbols?: SymbolInformation[];
+	diagnostics?: Array<{ file: string; diagnostic: Diagnostic }>;
+}
+
+async function prepareTypedFileRequest(
+	cwd: string,
+	config: LspConfig,
+	request: TypedLspQueryRequest,
+	signal?: AbortSignal,
+): Promise<
+	| {
+			targetFile: string;
+			uri: string;
+			position: Position;
+			serverName: string;
+			serverConfig: ServerConfig;
+			client: LspClient;
+	  }
+	| { error: string }
+> {
+	if (!request.file || request.file === "*") return { error: "file parameter required" };
+	const targetFile = resolveToCwd(request.file, cwd);
+	const serverInfo = getLspServerForFile(config, targetFile);
+	if (!serverInfo) return { error: "No language server found for this action" };
+	const [serverName, serverConfig] = serverInfo;
+	const client = await getOrCreateClient(serverConfig, cwd);
+	await ensureFileOpen(client, targetFile, signal);
+	if (isProjectAwareLspServer(serverConfig)) await waitForProjectLoaded(client, signal);
+	const resolvedLine = request.line ?? 1;
+	const character = await resolveSymbolColumn(targetFile, resolvedLine, request.symbol);
+	return {
+		targetFile,
+		uri: fileToUri(targetFile),
+		position: { line: resolvedLine - 1, character },
+		serverName,
+		serverConfig,
+		client,
+	};
+}
+
+export async function queryTypedLspContext(
+	cwd: string,
+	request: TypedLspQueryRequest,
+	signal?: AbortSignal,
+): Promise<TypedLspQueryResult> {
+	const timeoutSec = clampTimeout("lsp", request.timeout ?? 5);
+	const timeoutSignal = AbortSignal.timeout(timeoutSec * 1000);
+	const effectiveSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+	throwIfAborted(effectiveSignal);
+	const config = getConfig(cwd);
+	try {
+		switch (request.action) {
+			case "diagnostics": {
+				if (!request.file) return { action: request.action, success: false, error: "file parameter required" };
+				const targets = (await resolveDiagnosticTargets(request.file, cwd, MAX_GLOB_DIAGNOSTIC_TARGETS)).matches;
+				const diagnostics: Array<{ file: string; diagnostic: Diagnostic }> = [];
+				const servers = new Set<string>();
+				for (const target of targets) {
+					const resolved = resolveToCwd(target, cwd);
+					const targetServers = getServersForFile(config, resolved);
+					const minVersions = await captureDiagnosticVersions(cwd, targetServers);
+					await Promise.allSettled(
+						targetServers.map(async ([, serverConfig]) => {
+							if (serverConfig.createClient) return;
+							const client = await getOrCreateClient(serverConfig, cwd);
+							await refreshFile(client, resolved, effectiveSignal);
+						}),
+					);
+					const expectedDocumentVersions = await captureOpenFileVersions(resolved, cwd, targetServers);
+					const result = await getDiagnosticsForFile(resolved, cwd, targetServers, {
+						signal: effectiveSignal,
+						minVersions,
+						expectedDocumentVersions,
+						timeoutMs: Math.min(SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS, timeoutSec * 1000),
+					});
+					if (!result) continue;
+					if (result.server) servers.add(result.server);
+					for (const diagnostic of result.diagnostics ?? []) {
+						diagnostics.push({ file: formatPathRelativeToCwd(resolved, cwd), diagnostic });
+					}
+				}
+				return {
+					action: request.action,
+					serverName: [...servers].join(", "),
+					success: true,
+					diagnostics,
+				};
+			}
+			case "symbols": {
+				if (request.file === "*" || !request.file) {
+					const normalizedQuery = request.query?.trim() ?? request.symbol?.trim() ?? "";
+					if (!normalizedQuery)
+						return { action: request.action, success: false, error: "query parameter required" };
+					const symbols: SymbolInformation[] = [];
+					const respondingServers = new Set<string>();
+					for (const [serverName, serverConfig] of getLspServers(config)) {
+						const client = await getOrCreateClient(serverConfig, cwd);
+						const result = (await sendRequest(
+							client,
+							"workspace/symbol",
+							{ query: normalizedQuery },
+							effectiveSignal,
+						)) as SymbolInformation[] | null;
+						if (!result || result.length === 0) continue;
+						respondingServers.add(serverName);
+						symbols.push(...filterWorkspaceSymbols(result, normalizedQuery));
+					}
+					return {
+						action: request.action,
+						serverName: [...respondingServers].join(", "),
+						success: true,
+						workspaceSymbols: dedupeWorkspaceSymbols(symbols).slice(0, WORKSPACE_SYMBOL_LIMIT),
+					};
+				}
+				const prepared = await prepareTypedFileRequest(cwd, config, request, effectiveSignal);
+				if ("error" in prepared) return { action: request.action, success: false, error: prepared.error };
+				const result = (await sendRequest(
+					prepared.client,
+					"textDocument/documentSymbol",
+					{ textDocument: { uri: prepared.uri } },
+					effectiveSignal,
+				)) as (DocumentSymbol | SymbolInformation)[] | null;
+				if (!result || result.length === 0) {
+					return { action: request.action, serverName: prepared.serverName, success: true, documentSymbols: [] };
+				}
+				if ("selectionRange" in result[0]) {
+					return {
+						action: request.action,
+						serverName: prepared.serverName,
+						success: true,
+						documentSymbols: result as DocumentSymbol[],
+					};
+				}
+				return {
+					action: request.action,
+					serverName: prepared.serverName,
+					success: true,
+					workspaceSymbols: result as SymbolInformation[],
+				};
+			}
+			case "definition":
+			case "references": {
+				const prepared = await prepareTypedFileRequest(cwd, config, request, effectiveSignal);
+				if ("error" in prepared) return { action: request.action, success: false, error: prepared.error };
+				const method = request.action === "definition" ? "textDocument/definition" : "textDocument/references";
+				const params =
+					request.action === "definition"
+						? { textDocument: { uri: prepared.uri }, position: prepared.position }
+						: {
+								textDocument: { uri: prepared.uri },
+								position: prepared.position,
+								context: { includeDeclaration: true },
+							};
+				const result = (await sendRequest(prepared.client, method, params, effectiveSignal)) as
+					| Location
+					| Location[]
+					| LocationLink
+					| LocationLink[]
+					| null;
+				return {
+					action: request.action,
+					serverName: prepared.serverName,
+					success: true,
+					locations: normalizeLocationResult(result),
+				};
+			}
+			case "hover": {
+				const prepared = await prepareTypedFileRequest(cwd, config, request, effectiveSignal);
+				if ("error" in prepared) return { action: request.action, success: false, error: prepared.error };
+				const result = (await sendRequest(
+					prepared.client,
+					"textDocument/hover",
+					{ textDocument: { uri: prepared.uri }, position: prepared.position },
+					effectiveSignal,
+				)) as Hover | null;
+				return {
+					action: request.action,
+					serverName: prepared.serverName,
+					success: true,
+					hover: result?.contents ? extractHoverText(result.contents) : undefined,
+				};
+			}
+		}
+	} catch (error) {
+		if (error instanceof ToolAbortError || effectiveSignal.aborted) throw error;
+		return {
+			action: request.action,
+			success: false,
+			error: error instanceof Error ? error.message : String(error),
+		};
+	}
 }
 
 export enum FileFormatResult {

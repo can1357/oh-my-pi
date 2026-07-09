@@ -8,3 +8,4 @@
  * [Context and token optimization](context-optimization.md) - how the system prompt, tool schemas, and context files contribute to the LLM context window, and tunables to keep the baseline small.
 * [Offload trace](offload-trace.md) - opt-in progressive-disclosure compaction memory: raw evidence offloaded to artifact:// with a bounded Mermaid trace canvas preserved across context rebuilds.
 * [Coding-agent reliability hardening](coding-agent-reliability-hardening.md) - implemented safety and verification fixes for WikiGraph path reads, 9router ID normalization, offload artifact drill-down, and bundled-agent checks.
+* [Light context layer](light-context-layer.md) - implemented `context_oracle` tool and typed LSP evidence seam for compact cited repository answers.
