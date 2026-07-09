@@ -7,3 +7,4 @@
 * [Recent prompt markdown files](recent-prompt-markdown-files.md) - session-observed inventory of recent `packages/coding-agent/src/prompts/**/*.md` files and the `type: prompt(s)` frontmatter caveat.
  * [Context and token optimization](context-optimization.md) - how the system prompt, tool schemas, and context files contribute to the LLM context window, and tunables to keep the baseline small.
 * [Offload trace](offload-trace.md) - opt-in progressive-disclosure compaction memory: raw evidence offloaded to artifact:// with a bounded Mermaid trace canvas preserved across context rebuilds.
+* [Coding-agent reliability hardening](coding-agent-reliability-hardening.md) - implemented safety and verification fixes for WikiGraph path reads, 9router ID normalization, offload artifact drill-down, and bundled-agent checks.
