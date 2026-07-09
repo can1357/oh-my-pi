@@ -142,13 +142,14 @@ export async function handleDelegateSlashCommand(args: string, ctx: InteractiveM
 		}
 
 		const promptText = [
-			"You are the browser-control subagent. Do not edit files. Primary browser tool is IX Bridge. Use only the local IX Bridge HTTP API at http://127.0.0.1:18086. Do not use the built-in browser tool. Execute the bounded browser subgoal below and yield a concise report with actions taken, observed URL/title, success/failure, and escalation reason if blocked.",
+			"You are the browser-control subagent. Do not edit files. Primary browser tool is the `ix_bridge` tool (local IX Bridge daemon + extension at http://127.0.0.1:18086). Do not use the built-in browser tool. Execute the bounded browser subgoal below and yield a concise report with actions taken, observed URL/title, success/failure, and escalation reason if blocked.",
 			"",
 			`Subgoal: ${task}`,
 			"",
-			"Command shapes:",
-			"POST /ix-bridge/command - Payload: { lane, session, action, args } where action can be navigate, click, fill, type, press, wait, get_url, get_title, screenshot, browser_execute, snapshot, status, list_tabs",
-			"POST /ix-bridge/status - Payload: { action: 'status' }",
+			"Tool usage:",
+			"- ix_bridge { action: 'status' } — check daemon/extension health first",
+			"- ix_bridge { action: 'command', command: 'snapshot' } — inspect the page for @e refs",
+			"- ix_bridge { action: 'command', command: 'navigate'|'click'|'fill'|'type'|'press'|'get_url'|'get_title'|'screenshot', lane?, session?, args? }",
 		].join("\n");
 
 		// Spawn the browser-control subagent type (IX Bridge surface)

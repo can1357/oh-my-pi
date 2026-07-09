@@ -91,7 +91,7 @@ describe("/delegate command routing", () => {
 		const spawnArgs = spawnSpy.mock.calls[0];
 		expect(spawnArgs[2]).toBe("browser-control");
 		expect(spawnArgs[1].modelOverride).toBe("browser-fast");
-		expect(spawnArgs[1].task).toContain("Primary browser tool is IX Bridge");
+		expect(spawnArgs[1].task).toContain("Primary browser tool is the `ix_bridge` tool");
 		expect(mockShowStatus).toHaveBeenCalledWith(
 			"Spawned delegate lane spawned-id (browser-control) on browser-fast.",
 		);

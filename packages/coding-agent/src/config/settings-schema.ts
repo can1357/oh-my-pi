@@ -3619,6 +3619,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"ix_bridge.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "IX Bridge",
+			description:
+				"Enable the ix_bridge tool for local IX Bridge browser automation (daemon + extension at http://127.0.0.1:18086)",
+		},
+	},
+
 	"browser.headless": {
 		type: "boolean",
 		default: true,

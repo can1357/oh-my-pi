@@ -15,6 +15,7 @@ export const BUILTIN_TOOL_NAMES = [
 	"context_oracle",
 	"inspect_image",
 	"browser",
+	"ix_bridge",
 	"checkpoint",
 	"rewind",
 	"task",

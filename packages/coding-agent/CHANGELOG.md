@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Added a native `ix_bridge` built-in tool that wraps the local IX Bridge daemon (`status`, `guide`, and `command` actions against `http://127.0.0.1:18086`) with lane/session defaults, timeout handling, and daemon-down error hints. Gated by `ix_bridge.enabled` (default on). The `browser-control` agent and `/delegate` browser tasks now drive IX Bridge through this tool instead of hand-written `bash` HTTP calls.
 - Added spawnable `browser-control` subagent type for browser tasks and the `browser-operation` compatibility agent. Primary browser surface is IX Bridge (`http://127.0.0.1:18086`); model role `pi/browser-control` defaults to MiniMax-M3 via 9router and is changeable like `default`/`smol`/`task`/`advisor`. `ix-browser-fast` remains a short-loop IX Bridge specialist sharing that role; `pi/browser-operation` remains available as a compatibility role.
 
 

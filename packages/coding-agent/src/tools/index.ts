@@ -47,6 +47,7 @@ import { FindTool } from "./find";
 import { GithubTool } from "./gh";
 import { InspectImageTool } from "./inspect-image";
 import { IrcTool, isIrcEnabled } from "./irc";
+import { createIxBridgeTool } from "./ix-bridge";
 import { JobTool } from "./job";
 import { LearnTool } from "./learn";
 import { ManageSkillTool } from "./manage-skill";
@@ -87,6 +88,7 @@ export * from "./gh";
 export * from "./image-gen";
 export * from "./inspect-image";
 export * from "./irc";
+export * from "./ix-bridge";
 export * from "./job";
 export * from "./learn";
 export * from "./manage-skill";
@@ -459,6 +461,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	context_oracle: ContextOracleTool.createIf,
 	inspect_image: s => new InspectImageTool(s),
 	browser: s => new BrowserTool(s),
+	ix_bridge: s => createIxBridgeTool(s),
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,
 	task: s => TaskTool.create(s),
@@ -596,6 +599,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		// search_tool_bm25 is allowed when either legacy mcp.discoveryMode or new tools.discoveryMode is active.
 		if (name === "search_tool_bm25") return discoveryActive;
 		if (name === "browser") return session.settings.get("browser.enabled");
+		if (name === "ix_bridge") return session.settings.get("ix_bridge.enabled");
 		if (name === "checkpoint" || name === "rewind") return session.settings.get("checkpoint.enabled");
 		if (name === "irc") return isIrcEnabled(session.settings, session.taskDepth ?? 0);
 		if (name === "retain" || name === "recall" || name === "reflect") {
