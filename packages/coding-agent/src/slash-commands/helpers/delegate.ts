@@ -142,28 +142,28 @@ export async function handleDelegateSlashCommand(args: string, ctx: InteractiveM
 		}
 
 		const promptText = [
-			"You are the fast IX Bridge browser executor. Do not edit files. Do not browse by the browser tool. Use only the local IX Bridge HTTP API at http://127.0.0.1:18086. Execute the bounded browser subgoal below and yield a concise report with actions taken, observed URL/title, success/failure, and escalation reason if blocked.",
+			"You are the browser-operation subagent. Do not edit files. Primary browser tool is IX Bridge. Use only the local IX Bridge HTTP API at http://127.0.0.1:18086. Do not use the built-in browser tool. Execute the bounded browser subgoal below and yield a concise report with actions taken, observed URL/title, success/failure, and escalation reason if blocked.",
 			"",
 			`Subgoal: ${task}`,
 			"",
 			"Command shapes:",
-			"POST /ix-bridge/command - Payload: { action, args } where action can be click, fill, type, press, wait, get_url, get_title, screenshot, browser_execute, snapshot, status",
+			"POST /ix-bridge/command - Payload: { lane, session, action, args } where action can be navigate, click, fill, type, press, wait, get_url, get_title, screenshot, browser_execute, snapshot, status, list_tabs",
 			"POST /ix-bridge/status - Payload: { action: 'status' }",
 		].join("\n");
 
-		// Spawn single browser subagent
+		// Spawn the browser-operation subagent type (IX Bridge surface)
 		const id = await spawnSubagent(
 			ctx,
 			{
 				modelOverride: resolvedModel.selector,
 				thinkingLevel: ThinkingLevel.Inherit,
-				name: "ix-browser-fast",
+				name: "browser-operation",
 				task: promptText,
 			},
-			"ix-browser-fast",
+			"browser-operation",
 		);
 		if (id) {
-			ctx.showStatus(`Spawned delegate lane ${id} (ix-browser-fast) on ${resolvedModel.selector}.`);
+			ctx.showStatus(`Spawned delegate lane ${id} (browser-operation) on ${resolvedModel.selector}.`);
 		}
 		return;
 	}

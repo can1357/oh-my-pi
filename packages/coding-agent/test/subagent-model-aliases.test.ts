@@ -78,10 +78,13 @@ describe("resolveSubagentModelAlias", () => {
 		expect(resolved).toBeNull();
 	});
 
-	test("resolves browser-fast from built-in aliases when gemini-2.5-flash-lite is available", () => {
-		const customRegistry = makeRegistry([makeModel("google", "gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite")]);
+	test("resolves browser-fast from built-in aliases when 9router MiniMax M3 is available", () => {
+		const customRegistry = makeRegistry([
+			makeModel("9router", "minimax/MiniMax-M3", "9Router MiniMax M3 Direct"),
+			makeModel("9router", "minimax-m3-rr", "9Router MiniMax M3 RR"),
+		]);
 		const aliases = mergeSubagentModelAliases({});
 		const resolved = resolveSubagentModelAlias("browser-fast", aliases, customRegistry);
-		expect(resolved).toBe("google/gemini-2.5-flash-lite");
+		expect(resolved).toBe("9router/minimax/MiniMax-M3");
 	});
 });

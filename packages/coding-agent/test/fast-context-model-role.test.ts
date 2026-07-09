@@ -46,6 +46,29 @@ describe("fast-context model role", () => {
 	});
 });
 
+describe("browser-operation model role", () => {
+	test("defaults to MiniMax M3 chain via pi/browser-operation", () => {
+		const settings = Settings.isolated();
+
+		expect(resolveAgentModelPatterns({ agentModel: "pi/browser-operation", settings })).toEqual([
+			"9router/minimax/MiniMax-M3",
+			"9router/minimax-m3-rr",
+			"9router/minimax-m3-fallback",
+			"minimax-code/MiniMax-M3",
+			"minimax/MiniMax-M3",
+		]);
+	});
+
+	test("respects modelRoles.browser-operation override", () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("browser-operation", "google/gemini-2.5-flash-lite");
+
+		expect(resolveAgentModelPatterns({ agentModel: "pi/browser-operation", settings })).toEqual([
+			"google/gemini-2.5-flash-lite",
+		]);
+	});
+});
+
 describe("9router combo model roles", () => {
 	test("prioritizes app-level fallback combos for max-intelligence", () => {
 		const settings = Settings.isolated();

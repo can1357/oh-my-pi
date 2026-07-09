@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- Added spawnable `browser-operation` subagent type for browser tests. Primary browser surface is IX Bridge (`http://127.0.0.1:18086`); model role `pi/browser-operation` defaults to MiniMax-M3 via 9router and is changeable like `smol`/`task`/`advisor`. `ix-browser-fast` remains a short-loop IX Bridge specialist sharing that role.
+
 
 - Added `agent.profile` and `agent.profiles` settings for named, swappable role-based model bundles that retarget every role-resolving agent slot at once (explicit `modelRoles` still wins per-role).
 - Added `omp 9router route` and a `NineRouterController` (also accessible as the `/9router [route|probe]` slash command) that probes the local 9router gateway, selects the first working combo per model role (subscription first, then cheap, then free), and writes the chosen selectors into `settings.modelRoles`. Supports `list` mode (presence in `/v1/models`) and `probe` mode (tiny chat completion), with `--api-key` / `9ROUTER_API_KEY` / `NINEROUTER_API_KEY` auth for probes.
@@ -15,6 +17,7 @@
 - Added prompt-btw subagent handoff mode to `/btw`: invoking "use promptbtw for subagent handoff: <raw task>" returns a structured SUBAGENT HANDOFF PROMPT instead of an answer.
 
 ### Changed
+
 
 - Changed default `tools.discoveryMode` from `auto` to `all`, keeping only essential built-in tools (`read`, `bash`, `edit`, `find`, `search`, `write`, `todo`) active on session start; non-essential tools remain accessible via `search_tool_bm25`.
 - Added a context-file injection warning when an injected project context file (e.g., `AGENTS.md`, `CLAUDE.md`) exceeds 8KB.

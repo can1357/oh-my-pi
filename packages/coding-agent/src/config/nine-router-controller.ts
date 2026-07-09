@@ -74,12 +74,21 @@ function normalizeBaseUrl(url: string): string {
 	return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
 }
 
-function asSelector(id: string): string {
-	return id.startsWith("9router/") ? id : `9router/${id}`;
+/**
+ * Convert a 9router combo id into the model selector stored in settings.
+ *
+ * Bare provider-looking ids such as `openrouter/qwen3-32b:nitro`, `ag/foo`,
+ * and `gc/foo` are still 9router combo ids in this controller. Direct provider
+ * selectors must bypass NineRouterController and be written as normal model
+ * roles elsewhere.
+ */
+function toNineRouterSelector(comboId: string): string {
+	return comboId.startsWith("9router/") ? comboId : `9router/${comboId}`;
 }
 
-function asComboId(id: string): string {
-	return id.startsWith("9router/") ? id.slice("9router/".length) : id;
+/** Strip the selector prefix before matching ids returned by 9router /models. */
+function toNineRouterComboId(candidate: string): string {
+	return candidate.startsWith("9router/") ? candidate.slice("9router/".length) : candidate;
 }
 
 /** Default slot mapping: subscription first, then cheap, then free. */
@@ -103,7 +112,16 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 		},
 		{
 			role: "max-intelligence",
-			candidates: ["ompk", "oh-my-pi-fork", "omp-default", "cx/gpt-5.5", "cc/claude-opus-4-8", "ag/claude-opus-4-6-thinking", "ag/claude-sonnet-4-6", "gc/gemini-3.1-pro-preview"],
+			candidates: [
+				"ompk",
+				"oh-my-pi-fork",
+				"omp-default",
+				"cx/gpt-5.5",
+				"cc/claude-opus-4-8",
+				"ag/claude-opus-4-6-thinking",
+				"ag/claude-sonnet-4-6",
+				"gc/gemini-3.1-pro-preview",
+			],
 		},
 		{
 			role: "slow",
@@ -127,9 +145,9 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 				"gemini-3.5-flash-fallback",
 				"ag/gemini-3.5-flash-low",
 				"ag/gpt-oss-120b-medium",
-				"openrouter/qwen3-32b:nitro",
-				"openai/gpt-oss-120b:nitro",
-				"openrouter/qwen/qwen3.6-35b-a3b:nitro",
+				"9router/openrouter/qwen3-32b:nitro",
+				"9router/openai/gpt-oss-120b:nitro",
+				"9router/openrouter/qwen/qwen3.6-35b-a3b:nitro",
 				"gc/gemini-3-flash-preview",
 			],
 		},
@@ -162,7 +180,15 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 		},
 		{
 			role: "vision",
-			candidates: ["gemini-3-5-flash-medium-round-robin", "gemini-3.5-flash-fallback", "ag/gemini-3.5-flash-low", "ag/gemini-3-flash", "gc/gemini-3-flash-preview", "gemini-vx-only-rr", "gemini-3-5-flash-low"],
+			candidates: [
+				"gemini-3-5-flash-medium-round-robin",
+				"gemini-3.5-flash-fallback",
+				"ag/gemini-3.5-flash-low",
+				"ag/gemini-3-flash",
+				"gc/gemini-3-flash-preview",
+				"gemini-vx-only-rr",
+				"gemini-3-5-flash-low",
+			],
 		},
 		{
 			role: "plan",
@@ -170,7 +196,17 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 		},
 		{
 			role: "designer",
-			candidates: ["gemini-3-5-flash-medium-round-robin", "gemini-3.5-flash-fallback", "gemini-3.1-flash-lite", "ag/gemini-3.5-flash-low", "ag/gemini-3-flash", "gc/gemini-3-flash-preview", "gemini-vx-only-rr", "gemini-3-5-flash-low", "glm-5.2"],
+			candidates: [
+				"gemini-3-5-flash-medium-round-robin",
+				"gemini-3.5-flash-fallback",
+				"gemini-3.1-flash-lite",
+				"ag/gemini-3.5-flash-low",
+				"ag/gemini-3-flash",
+				"gc/gemini-3-flash-preview",
+				"gemini-vx-only-rr",
+				"gemini-3-5-flash-low",
+				"glm-5.2",
+			],
 		},
 		{
 			role: "commit",
@@ -188,10 +224,14 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 				"deepseek-v4-flash-fallback",
 				"balanced",
 				"gemini-3-5-flash-medium-round-robin",
-				"openrouter/qwen3-32b:nitro",
-				"openai/gpt-oss-120b:nitro",
-				"openrouter/qwen/qwen3.6-35b-a3b:nitro",
+				"9router/openrouter/qwen3-32b:nitro",
+				"9router/openai/gpt-oss-120b:nitro",
+				"9router/openrouter/qwen/qwen3.6-35b-a3b:nitro",
 			],
+		},
+		{
+			role: "browser-operation",
+			candidates: ["minimax/MiniMax-M3", "minimax-m3-rr", "minimax-m3-fallback", "minimax-code/MiniMax-M3"],
 		},
 		{
 			role: "advisor",
@@ -229,7 +269,7 @@ export class NineRouterController {
 		this.#fetch = options.fetch ?? (fetch as FetchImpl);
 		this.#slots = new Map();
 		for (const slot of options.slots ?? defaultNineRouterSlots()) {
-			this.#slots.set(slot.role, slot.candidates.map(asComboId));
+			this.#slots.set(slot.role, slot.candidates.map(toNineRouterComboId));
 		}
 	}
 
@@ -281,7 +321,7 @@ export class NineRouterController {
 			}
 
 			if (selected) {
-				this.#settings.setModelRole(role, asSelector(selected));
+				this.#settings.setModelRole(role, toNineRouterSelector(selected));
 				logger.debug("9router controller: routed role", { role, selected });
 			} else {
 				logger.warn("9router controller: no working candidate for role", { role, mode });

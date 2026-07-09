@@ -78,7 +78,7 @@ describe("/delegate command routing", () => {
 		} as unknown as InteractiveModeContext;
 	}
 
-	test("/delegate using browser-fast click the login button resolves alias and spawns browser executor", async () => {
+	test("/delegate using browser-fast click the login button resolves alias and spawns browser-operation", async () => {
 		const ctx = makeContext({
 			"subagent.modelAliases": { "browser-fast": "google/gemini-2.5-flash-lite" },
 			"delegate.mode": "subagents",
@@ -89,15 +89,15 @@ describe("/delegate command routing", () => {
 		expect(resolveModelSpy).toHaveBeenCalledWith(ctx, "browser-fast");
 		expect(spawnSpy).toHaveBeenCalled();
 		const spawnArgs = spawnSpy.mock.calls[0];
-		expect(spawnArgs[2]).toBe("ix-browser-fast");
+		expect(spawnArgs[2]).toBe("browser-operation");
 		expect(spawnArgs[1].modelOverride).toBe("browser-fast");
-		expect(spawnArgs[1].task).toContain("You are the fast IX Bridge browser executor.");
+		expect(spawnArgs[1].task).toContain("Primary browser tool is IX Bridge");
 		expect(mockShowStatus).toHaveBeenCalledWith(
-			"Spawned delegate lane spawned-id (ix-browser-fast) on browser-fast.",
+			"Spawned delegate lane spawned-id (browser-operation) on browser-fast.",
 		);
 	});
 
-	test("/delegate open the web dashboard and click Settings routes to ix-browser-fast with browser-fast model", async () => {
+	test("/delegate open the web dashboard and click Settings routes to browser-operation with browser-fast model", async () => {
 		const ctx = makeContext({
 			"delegate.mode": "subagents",
 			"delegate.lanes": {},
@@ -108,14 +108,14 @@ describe("/delegate command routing", () => {
 		expect(resolveModelSpy).toHaveBeenCalledWith(ctx, "browser-fast");
 		expect(spawnSpy).toHaveBeenCalled();
 		const spawnArgs = spawnSpy.mock.calls[0];
-		expect(spawnArgs[2]).toBe("ix-browser-fast");
+		expect(spawnArgs[2]).toBe("browser-operation");
 		expect(spawnArgs[1].modelOverride).toBe("browser-fast");
 		expect(mockShowStatus).toHaveBeenCalledWith(
-			"Spawned delegate lane spawned-id (ix-browser-fast) on browser-fast.",
+			"Spawned delegate lane spawned-id (browser-operation) on browser-fast.",
 		);
 	});
 
-	test("/delegate refactor the parser uses configured delegate.lanes and does not route to ix-browser-fast", async () => {
+	test("/delegate refactor the parser uses configured delegate.lanes and does not route to browser-operation", async () => {
 		const ctx = makeContext({
 			"delegate.mode": "subagents",
 			"delegate.lanes": {

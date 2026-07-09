@@ -61,11 +61,7 @@ describe("NineRouterController", () => {
 		const controller = new NineRouterController({
 			settings,
 			baseUrl: "http://127.0.0.1:20128/v1",
-			fetch: makeFetch([
-				"ag/claude-sonnet-4-6",
-				"openrouter/qwen3-32b:nitro",
-				"gemini-3.1-flash-lite",
-			]),
+			fetch: makeFetch(["ag/claude-sonnet-4-6", "openrouter/qwen3-32b:nitro", "gemini-3.1-flash-lite"]),
 		});
 
 		await controller.apply();
@@ -135,6 +131,36 @@ describe("NineRouterController", () => {
 		expect(defaultRoute?.probed).toContain("ompk");
 		expect(defaultRoute?.probed).toContain("fast-fallback");
 		expect(settings.getModelRole("default")).toBe("9router/fast-fallback");
+	});
+
+	test("normalizes provider-looking combo ids through 9router", async () => {
+		const settings = makeSettings();
+		const controller = new NineRouterController({
+			settings,
+			baseUrl: "http://127.0.0.1:20128/v1",
+			fetch: makeFetch([
+				"openrouter/qwen3-32b:nitro",
+				"ag/gemini-3-flash",
+				"gc/gemini-3-flash-preview",
+				"openai/gpt-oss-120b:nitro",
+			]),
+			slots: [
+				{ role: "balanced", candidates: ["9router/openrouter/qwen3-32b:nitro"] },
+				{ role: "smol", candidates: ["ag/gemini-3-flash"] },
+				{ role: "vision", candidates: ["gc/gemini-3-flash-preview"] },
+				{ role: "task", candidates: ["9router/openai/gpt-oss-120b:nitro"] },
+			],
+		});
+
+		expect(controller.getCandidates("balanced")).toEqual(["openrouter/qwen3-32b:nitro"]);
+		expect(controller.getCandidates("task")).toEqual(["openai/gpt-oss-120b:nitro"]);
+
+		await controller.apply({ roles: ["balanced", "smol", "vision", "task"] });
+
+		expect(settings.getModelRole("balanced")).toBe("9router/openrouter/qwen3-32b:nitro");
+		expect(settings.getModelRole("smol")).toBe("9router/ag/gemini-3-flash");
+		expect(settings.getModelRole("vision")).toBe("9router/gc/gemini-3-flash-preview");
+		expect(settings.getModelRole("task")).toBe("9router/openai/gpt-oss-120b:nitro");
 	});
 
 	test("leaves role unset when no candidates are available", async () => {
