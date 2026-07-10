@@ -152,6 +152,23 @@
         "@types/react-dom": "catalog:",
       },
     },
+    "packages/desktop-tag": {
+      "name": "@pk-nerdsaver-ai/pi-desktop-tag",
+      "version": "16.2.6",
+      "bin": {
+        "ompk-tag": "src/cli.ts",
+      },
+      "dependencies": {
+        "@pk-nerdsaver-ai/pi-ai": "workspace:*",
+        "@pk-nerdsaver-ai/pi-coding-agent": "workspace:*",
+        "@pk-nerdsaver-ai/pi-tui": "workspace:*",
+        "@pk-nerdsaver-ai/pi-utils": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+        "typescript": "catalog:",
+      },
+    },
     "packages/hashline": {
       "name": "@pk-nerdsaver-ai/hashline",
       "version": "16.2.6",
@@ -804,6 +821,8 @@
     "@pk-nerdsaver-ai/pi-catalog": ["@pk-nerdsaver-ai/pi-catalog@workspace:packages/catalog"],
 
     "@pk-nerdsaver-ai/pi-coding-agent": ["@pk-nerdsaver-ai/pi-coding-agent@workspace:packages/coding-agent"],
+
+    "@pk-nerdsaver-ai/pi-desktop-tag": ["@pk-nerdsaver-ai/pi-desktop-tag@workspace:packages/desktop-tag"],
 
     "@pk-nerdsaver-ai/pi-mnemopi": ["@pk-nerdsaver-ai/pi-mnemopi@workspace:packages/mnemopi"],
 

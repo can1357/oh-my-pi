@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tag Anything — pi desktop</title>
+  <style>
+    :root { --bg: #0b0c0f; --panel: #141619; --accent: #7c5cff; --text: #e6e6e6; --muted: #8b92a8; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { display: grid; place-items: center; padding: 24px; }
+    .card { width: min(720px, 100%); background: var(--panel); border: 1px solid #22262d; border-radius: 16px; padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,.4); }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    p.muted { margin: 0 0 20px; color: var(--muted); font-size: 14px; }
+    .row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+    button { background: #22262d; color: var(--text); border: 1px solid #2f353d; border-radius: 10px; padding: 10px 16px; cursor: pointer; font-weight: 500; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+    button.active { outline: 2px solid var(--accent); }
+    textarea { width: 100%; min-height: 80px; background: #0b0c0f; color: var(--text); border: 1px solid #2f353d; border-radius: 10px; padding: 14px; font-size: 15px; resize: vertical; }
+    label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; margin: 12px 0; }
+    input[type="number"] { width: 100%; background: #0b0c0f; color: var(--text); border: 1px solid #2f353d; border-radius: 8px; padding: 9px 10px; font-size: 14px; }
+    .region-inputs { margin: 0 0 16px; padding: 14px; border: 1px solid #2f353d; border-radius: 10px; }
+    .region-inputs legend { padding: 0 6px; color: var(--text); font-size: 13px; font-weight: 600; }
+    .region-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 12px; }
+    .region-grid label { display: block; margin: 0; }
+    .region-grid input { display: block; margin-top: 6px; }
+    #status { margin-top: 16px; font-size: 13px; color: var(--muted); min-height: 1.2em; }
+    #log { margin-top: 16px; max-height: 260px; overflow: auto; font-size: 13px; line-height: 1.45; color: var(--muted); white-space: pre-wrap; }
+    .approval { margin-top: 12px; padding: 12px; border: 1px solid #2f353d; border-radius: 10px; background: #0b0c0f; }
+    .approval .tool { color: var(--text); font-weight: 600; }
+    .approval pre { background: #141619; padding: 8px; border-radius: 6px; overflow: auto; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Tag Anything</h1>
+    <p class="muted">Capture your screen and tell pi what to do.</p>
+
+    <div class="row">
+      <button id="mode-screen" class="mode active">Screen</button>
+      <button id="mode-window" class="mode">Window</button>
+      <button id="mode-region" class="mode">Region</button>
+      <button id="mode-browser" class="mode">Browser</button>
+    </div>
+
+    <textarea id="request" placeholder="What would you like to do with this? (e.g. Explain this error, file a bug, update Salesforce...)"></textarea>
+
+    <fieldset id="region-inputs" class="region-inputs hidden" disabled>
+      <legend>Region coordinates</legend>
+      <div class="region-grid">
+        <label for="region-x">X <input type="number" id="region-x" value="0" step="any" required></label>
+        <label for="region-y">Y <input type="number" id="region-y" value="0" step="any" required></label>
+        <label for="region-width">Width <input type="number" id="region-width" value="640" step="any" required></label>
+        <label for="region-height">Height <input type="number" id="region-height" value="480" step="any" required></label>
+      </div>
+    </fieldset>
+
+    <label><input type="checkbox" id="clipboard" checked> Include clipboard / selected text</label>
+
+    <div class="row">
+      <button id="submit" class="primary">Tag it</button>
+      <button id="cancel">Cancel</button>
+    </div>
+
+    <div id="status">Ready</div>
+    <div id="log"></div>
+    <div id="approvals"></div>
+  </div>
+
+  <script>
+    const modeButtons = [...document.querySelectorAll('.mode')];
+    const regionInputsEl = document.getElementById('region-inputs');
+    let mode = 'screen';
+    modeButtons.forEach(btn => btn.addEventListener('click', () => {
+      modeButtons.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      mode = btn.id.replace('mode-', '');
+      const regionMode = mode === 'region';
+      regionInputsEl.classList.toggle('hidden', !regionMode);
+      regionInputsEl.disabled = !regionMode;
+    }));
+
+    const requestEl = document.getElementById('request');
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const approvalsEl = document.getElementById('approvals');
+    let ws;
+
+    function log(text) { logEl.textContent += text + '\n'; logEl.scrollTop = logEl.scrollHeight; }
+    function setStatus(text) { statusEl.textContent = text; }
+
+    function readRegion() {
+      const fields = ['x', 'y', 'width', 'height'];
+      const region = Object.fromEntries(fields.map(name => [name, document.getElementById(`region-${name}`).valueAsNumber]));
+      if (!Number.isFinite(region.x) || !Number.isFinite(region.y)) {
+        setStatus('Region X and Y must be finite numbers.');
+        return;
+      }
+      if (!Number.isFinite(region.width) || region.width <= 0 || !Number.isFinite(region.height) || region.height <= 0) {
+        setStatus('Region width and height must be positive finite numbers.');
+        return;
+      }
+      return region;
+    }
+
+    function connect() {
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${protocol}//${location.host}/ws`);
+      ws.onopen = () => setStatus('Connected');
+      ws.onclose = () => setStatus('Disconnected');
+      ws.onerror = () => setStatus('WebSocket error');
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'agent.message.delta') log(msg.text);
+        if (msg.type === 'tool.started') log(`[tool] ${msg.toolName}`);
+        if (msg.type === 'tool.completed') log(`[tool done] ${msg.isError ? 'error' : 'ok'}`);
+        if (msg.type === 'approval.requested') showApproval(msg.request);
+        if (msg.type === 'task.completed') setStatus('Done');
+        if (msg.type === 'task.failed') setStatus('Failed: ' + msg.error);
+      };
+    }
+    connect();
+
+    document.getElementById('submit').addEventListener('click', () => {
+      const payload = {
+        type: 'capture',
+        mode,
+        request: requestEl.value.trim(),
+        includeClipboard: document.getElementById('clipboard').checked,
+      };
+      if (mode === 'region') {
+        const region = readRegion();
+        if (!region) return;
+        payload.region = region;
+      }
+      ws.send(JSON.stringify(payload));
+      logEl.textContent = '';
+      setStatus('Capturing...');
+      approvalsEl.replaceChildren();
+    });
+
+    document.getElementById('cancel').addEventListener('click', () => {
+      ws.send(JSON.stringify({ type: 'cancel' }));
+    });
+
+    function showApproval(req) {
+      const div = document.createElement('div');
+      div.className = 'approval';
+
+      const tool = document.createElement('div');
+      tool.className = 'tool';
+      tool.textContent = String(req.toolName ?? 'Unknown tool');
+
+      const effects = document.createElement('p');
+      effects.textContent = String(req.effects ?? '');
+
+      const argumentsEl = document.createElement('pre');
+      argumentsEl.textContent = JSON.stringify(req.arguments, null, 2);
+
+      const actions = document.createElement('div');
+      actions.className = 'row';
+      const allow = document.createElement('button');
+      allow.className = 'primary';
+      allow.type = 'button';
+      allow.textContent = 'Allow';
+      const deny = document.createElement('button');
+      deny.type = 'button';
+      deny.textContent = 'Deny';
+      actions.append(allow, deny);
+
+      div.append(tool, effects, argumentsEl, actions);
+      approvalsEl.appendChild(div);
+      allow.addEventListener('click', () => {
+        ws.send(JSON.stringify({ type: 'approve', actionId: req.actionId, allowed: true, scope: req.scope || 'once' }));
+        div.remove();
+      });
+      deny.addEventListener('click', () => {
+        ws.send(JSON.stringify({ type: 'approve', actionId: req.actionId, allowed: false }));
+        div.remove();
+      });
+    }
+  </script>
+</body>
+</html>
