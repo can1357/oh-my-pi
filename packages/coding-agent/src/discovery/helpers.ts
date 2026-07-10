@@ -226,7 +226,13 @@ export type AgentPrefetch = "repo-evidence";
 export interface ParsedAgentFields {
 	name: string;
 	description: string;
+	/**
+	 * `undefined` = tools key omitted (unrestricted seed).
+	 * `[]` / non-empty = explicit list (deny-all when empty before control-tool injection).
+	 */
 	tools?: string[];
+	/** True when frontmatter included an explicit `tools` key (including `[]`). */
+	toolsSpecified?: boolean;
 	spawns?: string[] | "*";
 	model?: string[];
 	output?: unknown;
@@ -249,7 +255,22 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		return null;
 	}
 
-	let tools = parseArrayOrCSV(frontmatter.tools)?.map(tool => tool.toLowerCase());
+	const toolsSpecified = Object.prototype.hasOwnProperty.call(frontmatter, "tools");
+	let tools: string[] | undefined;
+	if (toolsSpecified) {
+		// Preserve explicit empty arrays — do not collapse `tools: []` to omission.
+		if (Array.isArray(frontmatter.tools)) {
+			tools = frontmatter.tools
+				.filter((item): item is string => typeof item === "string")
+				.map(tool => tool.toLowerCase());
+		} else if (typeof frontmatter.tools === "string") {
+			tools = parseCSV(frontmatter.tools).map(tool => tool.toLowerCase());
+		} else if (frontmatter.tools == null) {
+			tools = [];
+		} else {
+			tools = parseArrayOrCSV(frontmatter.tools)?.map(tool => tool.toLowerCase()) ?? [];
+		}
+	}
 
 	// Subagents with explicit tool lists always need yield
 	if (tools && !tools.includes("yield")) {
@@ -271,8 +292,22 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		spawns = parseArrayOrCSV(frontmatter.spawns);
 	}
 
-	// Backward compat: infer spawns: "*" when tools includes "task"
-	if (spawns === undefined && tools?.includes("task")) {
+	const hasExplicitExecutionPolicy = [
+		"tier",
+		"autonomy",
+		"collaboration",
+		"workClass",
+		"editMode",
+		"maxRequests",
+		"maxRuntimeMs",
+		"modelPool",
+		"agentPolicies",
+		"executionProfile",
+	].some(key => frontmatter[key] !== undefined);
+
+	// LEGACY: infer unrestricted spawns only when task is present and no explicit
+	// execution policy exists. Profiled agents must declare spawns explicitly.
+	if (spawns === undefined && tools?.includes("task") && !hasExplicitExecutionPolicy) {
 		spawns = "*";
 	}
 
@@ -296,6 +331,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		name,
 		description,
 		tools,
+		toolsSpecified: toolsSpecified || undefined,
 		spawns,
 		model,
 		output,

@@ -20,6 +20,7 @@
  * thin sync wrapper plus user-facing notice formatting.
  */
 import { applyBashFixups as nativeApplyBashFixups } from "@pk-nerdsaver-ai/pi-natives";
+import type { ResolvedToolProfile } from "./tool-profiles";
 
 export interface BashFixupResult {
 	/** Possibly-rewritten command. */
@@ -34,4 +35,42 @@ export interface BashFixupResult {
  */
 export function applyBashFixups(command: string): BashFixupResult {
 	return nativeApplyBashFixups(command);
+}
+
+export interface BashHeredocAdmissionResult {
+	readonly allow: boolean;
+	readonly reasonCode: "allow" | "windows-heredoc-rejected" | "soft-spot-unenforced";
+	readonly recoveryHint?: string;
+}
+
+/**
+ * Bound/procedural Windows profiles should reject confirmed heredocs before
+ * execution with recovery guidance `write script file -> execute file`.
+ */
+export function shouldEnforceWindowsHeredocDiscipline(
+	profile: ResolvedToolProfile | undefined | null,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
+	if (platform !== "win32") return false;
+	if (!profile) return false;
+	return profile.autonomy === "bound" || profile.tier === "light" || profile.tier === "mid";
+}
+
+// SOFT-SPOT(WIN-HEREDOC-PARSER): native shell parser exposes fixup but no safe heredoc predicate; prompt guidance remains until the native API is extended.
+export function admitWindowsHeredocCommand(
+	_command: string,
+	profile?: ResolvedToolProfile | null,
+	platform: NodeJS.Platform = process.platform,
+): BashHeredocAdmissionResult {
+	if (!shouldEnforceWindowsHeredocDiscipline(profile, platform)) {
+		return { allow: true, reasonCode: "allow" };
+	}
+
+	// Parser-backed rejection is unavailable on the owned native surface.
+	// Unrestricted profiles and safe multiline commands remain unblocked.
+	return {
+		allow: true,
+		reasonCode: "soft-spot-unenforced",
+		recoveryHint: "write script file -> execute file",
+	};
 }

@@ -1,4 +1,4 @@
-Performs string replacements in files with fuzzy whitespace matching.
+Performs guarded string replacements in files with fuzzy whitespace matching (mid-tier edit grammar).
 
 <instruction>
 - You MUST use the smallest `old_text` that uniquely identifies the change

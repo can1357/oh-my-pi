@@ -25,6 +25,8 @@ import { framedBlock, renderStatusLine, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
 import { formatCount, formatExpandHint, formatMoreItems, replaceTabs, TRUNCATE_LENGTHS } from "./render-utils";
 import { ToolError } from "./tool-errors";
+import type { ResolvedToolProfile, ToolCapability, ToolSource } from "./tool-profiles";
+import { isToolCapabilityAllowed } from "./tool-profiles";
 
 const DEFAULT_LIMIT = 8;
 const TOOL_DISCOVERY_TITLE = "Tool Discovery";
@@ -113,6 +115,36 @@ async function activateTools(session: ToolSession, toolNames: string[]): Promise
 		return session.activateDiscoveredMCPTools(toolNames);
 	}
 	return [];
+}
+
+export type ToolCapabilityPredicate = (capability: ToolCapability) => boolean;
+
+export interface SearchToolBm25Options {
+	/** Frozen tool ceiling; when set, search/activation cannot exceed it. */
+	toolProfile?: ResolvedToolProfile;
+	/** Injected capability predicate; defaults to profile check when profile is set. */
+	capabilityPredicate?: ToolCapabilityPredicate;
+}
+
+function discoverableSource(tool: DiscoverableTool): ToolSource {
+	return tool.source;
+}
+
+function isDiscoverableAllowed(
+	tool: DiscoverableTool,
+	options: SearchToolBm25Options | undefined,
+): boolean {
+	const capability: ToolCapability = {
+		source: discoverableSource(tool),
+		name: tool.name,
+	};
+	if (options?.capabilityPredicate) {
+		return options.capabilityPredicate(capability);
+	}
+	if (options?.toolProfile) {
+		return isToolCapabilityAllowed(options.toolProfile, capability);
+	}
+	return true;
 }
 
 type DiscoveryExecutionSession = ToolSession & {
@@ -220,13 +252,17 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 	readonly parameters = searchToolBm25Schema;
 	readonly strict = true;
 
-	constructor(private readonly session: ToolSession) {}
+	constructor(
+		private readonly session: ToolSession,
+		private readonly options: SearchToolBm25Options = {},
+	) {}
 
-	static createIf(session: ToolSession): SearchToolBm25Tool | null {
+	static createIf(session: ToolSession, options?: SearchToolBm25Options): SearchToolBm25Tool | null {
 		// Direct createTools() calls do not know the final MCP/extension catalog yet, so
 		// auto mode is activated later by createAgentSession after the full registry exists.
 		if (resolveEffectiveToolDiscoveryMode(session.settings, 0) === "off") return null;
-		return supportsToolDiscoveryExecution(session) ? new SearchToolBm25Tool(session) : null;
+		if (options?.toolProfile && !options.toolProfile.allowDiscovery) return null;
+		return supportsToolDiscoveryExecution(session) ? new SearchToolBm25Tool(session, options) : null;
 	}
 
 	async execute(
@@ -260,6 +296,7 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 		try {
 			ranked = searchDiscoverableTools(searchIndex, query, searchIndex.documents.length)
 				.filter(result => !selectedToolNames.has(result.tool.name))
+				.filter(result => isDiscoverableAllowed(result.tool, this.options))
 				.slice(0, limit);
 		} catch (error) {
 			if (error instanceof Error) {
@@ -267,11 +304,21 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 			}
 			throw error;
 		}
+
+		// Activation must re-check the same (source,name) capability before callbacks.
+		const eligibleForActivation = ranked.filter(result => isDiscoverableAllowed(result.tool, this.options));
+		const forbidden = ranked
+			.filter(result => !isDiscoverableAllowed(result.tool, this.options))
+			.map(result => result.tool.name);
+		if (forbidden.length > 0) {
+			throw new ToolError(`Tool activation denied by capability profile: ${forbidden.join(", ")}`);
+		}
+
 		const activated =
-			ranked.length > 0
+			eligibleForActivation.length > 0
 				? await activateTools(
 						this.session,
-						ranked.map(result => result.tool.name),
+						eligibleForActivation.map(result => result.tool.name),
 					)
 				: [];
 
@@ -281,7 +328,7 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 			total_tools: searchIndex.documents.length,
 			activated_tools: activated,
 			active_selected_tools: getSelectedToolNames(this.session),
-			tools: ranked.map(result => formatMatch(result.tool, result.score)),
+			tools: eligibleForActivation.map(result => formatMatch(result.tool, result.score)),
 		};
 
 		return {

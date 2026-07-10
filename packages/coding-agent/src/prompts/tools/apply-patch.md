@@ -1,4 +1,4 @@
-File-oriented diff format. Every patch is wrapped in an envelope:
+File-oriented diff format for frontier edit grammar. Every patch is wrapped in an envelope:
 
 *** Begin Patch
 [ one or more file sections ]

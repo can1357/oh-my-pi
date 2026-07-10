@@ -5,6 +5,7 @@ import { loadBundledAgents } from "@pk-nerdsaver-ai/pi-coding-agent/task/agents"
 import * as discoveryModule from "@pk-nerdsaver-ai/pi-coding-agent/task/discovery";
 import type { AgentDefinition } from "@pk-nerdsaver-ai/pi-coding-agent/task/types";
 import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
+import { parseAgentFields } from "@pk-nerdsaver-ai/pi-coding-agent/discovery/helpers";
 
 function createSession(overrides: Partial<Record<string, unknown>> = {}): ToolSession {
 	return {
@@ -80,5 +81,37 @@ describe("task agent capability descriptions", () => {
 		expect(description).toContain("# read_scout — READ-ONLY (no edit/write/exec tools)\nRead-only scout");
 		expect(description).toContain("# full_agent\nFull agent");
 		expect(description).not.toContain("# full_agent — READ-ONLY");
+	});
+});
+
+
+
+describe("parseAgentFields tool/spawn policy", () => {
+	it("omitted tools and explicit empty tools remain distinguishable", () => {
+		const omitted = parseAgentFields({ name: "a", description: "d" });
+		expect(omitted?.tools).toBeUndefined();
+		expect(omitted?.toolsSpecified).toBeUndefined();
+
+		const empty = parseAgentFields({ name: "a", description: "d", tools: [] });
+		expect(empty?.toolsSpecified).toBe(true);
+		expect(empty?.tools).toEqual(["yield"]);
+	});
+
+	it("legacy spawns inference only when task present and no execution policy", () => {
+		const legacy = parseAgentFields({
+			name: "a",
+			description: "d",
+			tools: ["read", "task"],
+		});
+		expect(legacy?.spawns).toBe("*");
+
+		const profiled = parseAgentFields({
+			name: "a",
+			description: "d",
+			tools: ["read", "task"],
+			tier: "light",
+			autonomy: "bound",
+		});
+		expect(profiled?.spawns).toBeUndefined();
 	});
 });
