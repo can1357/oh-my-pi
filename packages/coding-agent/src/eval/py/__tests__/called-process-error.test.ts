@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { executePythonWithKernel, type PythonKernelExecutor } from "../executor";
 import {
+	formatKernelProcessErrorEvidence,
 	type KernelExecuteOptions,
 	type KernelExecuteResult,
-	formatKernelProcessErrorEvidence,
 	mapKernelErrorFrame,
 } from "../kernel";
 
@@ -116,5 +116,4 @@ describe("CalledProcessError evidence", () => {
 		expect(formatKernelProcessErrorEvidence(error)).toContain("command: python slow.py");
 		expect(formatKernelProcessErrorEvidence(error)).not.toContain("return code:");
 	});
-
 });

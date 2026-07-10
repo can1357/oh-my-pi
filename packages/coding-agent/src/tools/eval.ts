@@ -151,10 +151,7 @@ function timeoutSecondsFromMs(timeoutMs: number): number {
 }
 
 /** Format the terminal cancellation fact surfaced in tool text and typed details. */
-export function formatEvalCancellationMessage(
-	cause: EvalCancellationCause,
-	effectiveTimeoutSeconds: number,
-): string {
+export function formatEvalCancellationMessage(cause: EvalCancellationCause, effectiveTimeoutSeconds: number): string {
 	const unit = effectiveTimeoutSeconds === 1 ? "second" : "seconds";
 	if (cause === "idle_watchdog_timeout") {
 		return `Eval cell cancelled by idle watchdog timeout after ${effectiveTimeoutSeconds} ${unit}.`;
@@ -509,10 +506,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							result.cancellationCause ??
 							(result.timedOut === true || idle.signal.aborted ? "idle_watchdog_timeout" : "abort");
 						const timedOut = result.timedOut ?? cancellationCause === "idle_watchdog_timeout";
-						const cancellationMessage = formatEvalCancellationMessage(
-							cancellationCause,
-							effectiveTimeoutSeconds,
-						);
+						const cancellationMessage = formatEvalCancellationMessage(cancellationCause, effectiveTimeoutSeconds);
 						cellResult.status = "error";
 						cellResult.output = cellOutput ? `${cellOutput}\n\n${cancellationMessage}` : cancellationMessage;
 						cellResult.cancellationCause = cancellationCause;

@@ -71,6 +71,30 @@ import {
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 
+function freezeExecutionProfile(profile: SessionInitEntry["executionProfile"]): SessionInitEntry["executionProfile"] {
+	if (!profile) return undefined;
+	return Object.freeze({
+		...profile,
+		modelPool: Object.freeze([...profile.modelPool]),
+	});
+}
+
+function freezeCollaborationPolicy(
+	policy: SessionInitEntry["collaborationPolicy"],
+): SessionInitEntry["collaborationPolicy"] {
+	if (!policy) return undefined;
+	return Object.freeze({
+		...policy,
+		allowedPeers: Object.freeze([...policy.allowedPeers]),
+		familyIds: Object.freeze([...policy.familyIds]),
+	});
+}
+
+function freezeToolCeiling(ceiling: SessionInitEntry["toolCeiling"]): SessionInitEntry["toolCeiling"] {
+	if (!ceiling) return undefined;
+	return Object.freeze(ceiling.map(capability => Object.freeze({ source: capability.source, name: capability.name })));
+}
+
 function mintSessionId(): string {
 	return Bun.randomUUIDv7();
 }
@@ -1276,8 +1300,19 @@ export class SessionManager {
 		readSummarize?: boolean;
 		fusionSidekick?: boolean;
 		maxModelRequestsPerRun?: number;
+		executionProfile?: SessionInitEntry["executionProfile"];
+		collaborationPolicy?: SessionInitEntry["collaborationPolicy"];
+		toolCeiling?: SessionInitEntry["toolCeiling"];
 	}): string {
-		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
+		const entry: SessionInitEntry = {
+			type: "session_init",
+			...this.#freshEntryFields(),
+			...init,
+			tools: [...init.tools],
+			executionProfile: freezeExecutionProfile(init.executionProfile),
+			collaborationPolicy: freezeCollaborationPolicy(init.collaborationPolicy),
+			toolCeiling: freezeToolCeiling(init.toolCeiling),
+		};
 		this.#recordEntry(entry);
 		return entry.id;
 	}
@@ -1692,6 +1727,9 @@ export class SessionManager {
 			readSummarize?: boolean;
 			fusionSidekick?: boolean;
 			maxModelRequestsPerRun?: number;
+			executionProfile?: SessionInitEntry["executionProfile"];
+			collaborationPolicy?: SessionInitEntry["collaborationPolicy"];
+			toolCeiling?: SessionInitEntry["toolCeiling"];
 		} | null;
 	} | null> {
 		let loaded: FileEntry[];
@@ -1712,6 +1750,9 @@ export class SessionManager {
 			readSummarize?: boolean;
 			fusionSidekick?: boolean;
 			maxModelRequestsPerRun?: number;
+			executionProfile?: SessionInitEntry["executionProfile"];
+			collaborationPolicy?: SessionInitEntry["collaborationPolicy"];
+			toolCeiling?: SessionInitEntry["toolCeiling"];
 		} | null = null;
 		for (let index = loaded.length - 1; index >= 0; index--) {
 			const entry = loaded[index];
@@ -1719,12 +1760,15 @@ export class SessionManager {
 				init = {
 					systemPrompt: entry.systemPrompt,
 					task: entry.task,
-					tools: entry.tools,
+					tools: [...entry.tools],
 					outputSchema: entry.outputSchema,
 					readSummarize: entry.readSummarize,
 					spawns: entry.spawns,
 					fusionSidekick: entry.fusionSidekick,
 					maxModelRequestsPerRun: entry.maxModelRequestsPerRun,
+					executionProfile: freezeExecutionProfile(entry.executionProfile),
+					collaborationPolicy: freezeCollaborationPolicy(entry.collaborationPolicy),
+					toolCeiling: freezeToolCeiling(entry.toolCeiling),
 				};
 				break;
 			}

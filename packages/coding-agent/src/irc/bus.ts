@@ -15,8 +15,13 @@
  */
 
 import { logger, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import {
+	authorizeIrcDelivery,
+	type CollaborationPolicy,
+	type IrcAuthorizationInput,
+} from "../orchestration/collaboration-policy";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
 
 export interface IrcMessage {
@@ -43,6 +48,17 @@ interface IrcWaiter {
 	cancel: () => void;
 }
 
+export interface IrcSendOptions {
+	expectsReply?: boolean;
+	/** Marks fan-out deliveries so report-only and narrowed peer policies can reject broadcasts. */
+	isBroadcast?: boolean;
+}
+
+interface WakeReservation {
+	agentId: string;
+	policy: CollaborationPolicy;
+}
+
 /** Mailbox cap per agent; oldest messages are dropped beyond it. */
 const MAILBOX_CAP = 100;
 
@@ -66,6 +82,7 @@ export class IrcBus {
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
 	readonly #completionFlags = new Map<string, Set<string>>();
+	readonly #remainingWakeBudgets = new Map<string, number>();
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
@@ -93,7 +110,7 @@ export class IrcBus {
 	 * sender's own batch) can generate an ephemeral side-channel auto-reply
 	 * instead of stranding the sender until timeout.
 	 */
-	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: { expectsReply?: boolean }): Promise<IrcDeliveryReceipt> {
+	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: IrcSendOptions): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		const ref = this.#registry.get(message.to);
 		if (!ref || ref.status === "aborted") {
@@ -108,18 +125,83 @@ export class IrcBus {
 			};
 		}
 
+		const hasWaiter = this.#hasMatchingWaiter(message.to, message.from);
+		const liveSessionKnownIdle = typeof ref.session?.isStreaming === "boolean" && !ref.session.isStreaming;
+		const requiresWake = ref.status === "parked" || (!hasWaiter && (ref.status === "idle" || liveSessionKnownIdle));
+		const reservations: WakeReservation[] = [];
+		const senderPolicy = this.#policyFor(this.#registry.get(message.from));
+		const senderError = this.#authorizationError(senderPolicy, message.from, {
+			fromId: message.from,
+			toId: message.to,
+			requiresWake,
+			isBroadcast: opts?.isBroadcast,
+		});
+		if (senderError) {
+			return { to: message.to, outcome: "failed", error: senderError };
+		}
+		const senderReservation = requiresWake ? this.#reserveWake(message.from, senderPolicy) : undefined;
+		if (senderReservation) reservations.push(senderReservation);
+
 		let revived = false;
 		if (ref.status === "parked") {
+			let recipientAuthorizedBeforeRevive = false;
 			try {
-				await this.#lifecycle().ensureLive(message.to);
+				await this.#lifecycle().ensureLive(message.to, {
+					beforeRevive: hydratedRef => {
+						const recipientPolicy = this.#policyFor(hydratedRef);
+						const recipientError = this.#authorizationError(recipientPolicy, message.to, {
+							fromId: message.to,
+							toId: message.from,
+							requiresWake: true,
+							isBroadcast: opts?.isBroadcast,
+						});
+						if (recipientError) throw new Error(recipientError);
+						const reservation = this.#reserveWake(message.to, recipientPolicy);
+						if (reservation) reservations.push(reservation);
+						recipientAuthorizedBeforeRevive = true;
+					},
+				});
 				revived = true;
 			} catch (error) {
+				this.#restoreWakeReservations(reservations);
 				return {
 					to: message.to,
 					outcome: "failed",
 					error: error instanceof Error ? error.message : String(error),
 				};
 			}
+			// A concurrent non-IRC revival may have supplied the shared in-flight
+			// promise without running our hook. Recheck before handing off delivery.
+			if (!recipientAuthorizedBeforeRevive) {
+				const liveRef = this.#registry.get(message.to);
+				const recipientPolicy = this.#policyFor(liveRef);
+				const recipientError = this.#authorizationError(recipientPolicy, message.to, {
+					fromId: message.to,
+					toId: message.from,
+					requiresWake: true,
+					isBroadcast: opts?.isBroadcast,
+				});
+				if (recipientError) {
+					this.#restoreWakeReservations(reservations);
+					return { to: message.to, outcome: "failed", error: recipientError };
+				}
+				const reservation = this.#reserveWake(message.to, recipientPolicy);
+				if (reservation) reservations.push(reservation);
+			}
+		} else {
+			const recipientPolicy = this.#policyFor(ref);
+			const recipientError = this.#authorizationError(recipientPolicy, message.to, {
+				fromId: message.to,
+				toId: message.from,
+				requiresWake,
+				isBroadcast: opts?.isBroadcast,
+			});
+			if (recipientError) {
+				this.#restoreWakeReservations(reservations);
+				return { to: message.to, outcome: "failed", error: recipientError };
+			}
+			const recipientReservation = requiresWake ? this.#reserveWake(message.to, recipientPolicy) : undefined;
+			if (recipientReservation) reservations.push(recipientReservation);
 		}
 
 		// A pending `wait` from the recipient consumes the message directly —
@@ -134,6 +216,7 @@ export class IrcBus {
 
 		const session = this.#registry.get(message.to)?.session;
 		if (!session) {
+			if (!revived) this.#restoreWakeReservations(reservations);
 			return { to: message.to, outcome: "failed", error: `Agent "${message.to}" has no live session.` };
 		}
 
@@ -147,6 +230,7 @@ export class IrcBus {
 			// pick it up. The receipt stays "failed" — the recipient has not
 			// seen it.
 			this.#enqueue(message);
+			if (!revived) this.#restoreWakeReservations(reservations);
 			return {
 				to: message.to,
 				outcome: "failed",
@@ -258,6 +342,51 @@ export class IrcBus {
 	#completionPairId(agentId: string, targetId: string): string {
 		return [agentId, targetId].sort().join(":");
 	}
+	#policyFor(ref: AgentRef | undefined): CollaborationPolicy | undefined {
+		const session = ref?.session;
+		return (
+			ref?.collaborationPolicy ??
+			(typeof session?.getCollaborationPolicy === "function" ? session.getCollaborationPolicy() : undefined)
+		);
+	}
+
+	#remainingWakeBudget(agentId: string, policy: CollaborationPolicy | undefined): number | undefined {
+		if (!policy || policy.wakeBudget <= 0) return undefined;
+		return this.#remainingWakeBudgets.get(agentId) ?? policy.wakeBudget;
+	}
+
+	#authorizationError(
+		policy: CollaborationPolicy | undefined,
+		ownerId: string,
+		input: IrcAuthorizationInput,
+	): string | undefined {
+		const decision = authorizeIrcDelivery(policy, {
+			...input,
+			remainingWakeBudget: this.#remainingWakeBudget(ownerId, policy),
+		});
+		return decision.allow
+			? undefined
+			: `IRC delivery denied by collaboration policy for "${ownerId}" (${decision.reasonCode}).`;
+	}
+
+	#reserveWake(agentId: string, policy: CollaborationPolicy | undefined): WakeReservation | undefined {
+		if (!policy || policy.wakeBudget <= 0) return undefined;
+		const remaining = this.#remainingWakeBudget(agentId, policy) ?? policy.wakeBudget;
+		this.#remainingWakeBudgets.set(agentId, Math.max(0, remaining - 1));
+		return { agentId, policy };
+	}
+
+	#restoreWakeReservations(reservations: readonly WakeReservation[]): void {
+		for (const reservation of reservations) {
+			const remaining = this.#remainingWakeBudgets.get(reservation.agentId) ?? 0;
+			this.#remainingWakeBudgets.set(reservation.agentId, Math.min(reservation.policy.wakeBudget, remaining + 1));
+		}
+	}
+
+	#hasMatchingWaiter(agentId: string, from: string): boolean {
+		return this.#waiters.get(agentId)?.some(waiter => !waiter.from || waiter.from === from) === true;
+	}
+
 	#enqueue(message: IrcMessage): void {
 		let mailbox = this.#mailboxes.get(message.to);
 		if (!mailbox) {

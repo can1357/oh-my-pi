@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
+import { parseAgentFields } from "@pk-nerdsaver-ai/pi-coding-agent/discovery/helpers";
 import { isReadOnlyAgent, TaskTool } from "@pk-nerdsaver-ai/pi-coding-agent/task";
 import { loadBundledAgents } from "@pk-nerdsaver-ai/pi-coding-agent/task/agents";
 import * as discoveryModule from "@pk-nerdsaver-ai/pi-coding-agent/task/discovery";
 import type { AgentDefinition } from "@pk-nerdsaver-ai/pi-coding-agent/task/types";
 import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
-import { parseAgentFields } from "@pk-nerdsaver-ai/pi-coding-agent/discovery/helpers";
 
 function createSession(overrides: Partial<Record<string, unknown>> = {}): ToolSession {
 	return {
@@ -83,8 +83,6 @@ describe("task agent capability descriptions", () => {
 		expect(description).not.toContain("# full_agent — READ-ONLY");
 	});
 });
-
-
 
 describe("parseAgentFields tool/spawn policy", () => {
 	it("omitted tools and explicit empty tools remain distinguishable", () => {

@@ -16,6 +16,7 @@ import type { CustomTool } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/
 import { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
 import type { OutputMeta } from "@pk-nerdsaver-ai/pi-coding-agent/tools/output-meta";
+import { resolveToolProfile } from "@pk-nerdsaver-ai/pi-coding-agent/tools/tool-profiles";
 import { type } from "arktype";
 
 function createModel(): Model<"openai-responses"> {
@@ -193,6 +194,52 @@ describe("AgentSession MCP discovery", () => {
 		const refreshedIndex = session.getDiscoverableToolSearchIndex();
 		expect(refreshedIndex).not.toBe(firstIndex);
 		expect(refreshedIndex.documents.map(document => document.tool.name)).toEqual(["mcp__pager_list"]);
+	});
+
+	it("rejects MCP refresh and activation outside the source-qualified tool ceiling", async () => {
+		const readTool = createBasicTool("read", "Read");
+		const agent = new Agent({
+			initialState: {
+				model: createModel(),
+				systemPrompt: ["initial"],
+				tools: [readTool],
+				messages: [],
+			},
+		});
+		const toolProfile = resolveToolProfile({
+			declaredCapabilities: [
+				{ source: "builtin", name: "read" },
+				{ source: "mcp", name: "mcp__docs_search" },
+			],
+			requireYield: false,
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.discoveryMode": false }),
+			modelRegistry: {} as never,
+			toolRegistry: new Map([[readTool.name, readTool]]),
+			mcpDiscoveryEnabled: false,
+			toolProfile,
+			toolSourceOf: name => (name.startsWith("mcp__") ? "mcp" : "builtin"),
+			rebuildSystemPrompt: async toolNames => ({
+				systemPrompt: [`tools:${toolNames.join(",")}`],
+			}),
+		});
+		sessions.push(session);
+
+		await session.refreshMCPTools(
+			[
+				createMcpCustomTool("mcp__docs_search", "docs", "search", "Search internal docs", ["query"]),
+				createMcpCustomTool("mcp__slack_send_message", "slack", "send_message", "Send Slack", ["text"]),
+			],
+			{ activateAll: true },
+		);
+
+		expect(session.getActiveToolNames()).toEqual(["read", "mcp__docs_search"]);
+		expect(session.getToolByName("mcp__slack_send_message")).toBeUndefined();
+		await session.setActiveToolsByName(["read", "mcp__slack_send_message"]);
+		expect(session.getActiveToolNames()).toEqual(["read"]);
 	});
 
 	it("reports only currently active MCP tools in non-discovery sessions", async () => {

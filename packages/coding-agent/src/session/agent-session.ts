@@ -215,6 +215,7 @@ import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageBreakdown, computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, WORKFLOW_NOTICE } from "../modes/workflow";
+import { authorizeIrcDelivery, type CollaborationPolicy } from "../orchestration/collaboration-policy";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
@@ -264,12 +265,14 @@ import {
 } from "../tool-discovery/tool-index";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import type { CheckpointState } from "../tools/checkpoint";
+import { BUILTIN_TOOLS, HIDDEN_TOOLS, isAllowedByToolProfile } from "../tools/index";
 import { outputMeta, wrapToolWithMetaNotice } from "../tools/output-meta";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
 import { buildResolveReminderMessage } from "../tools/resolve";
 import { getLatestTodoPhasesFromEntries, type TodoItem, type TodoPhase } from "../tools/todo";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
+import type { ResolvedToolProfile, ToolSource } from "../tools/tool-profiles";
 import { clampTimeout } from "../tools/tool-timeouts";
 import { parseCommandArgs } from "../utils/command-args";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
@@ -533,6 +536,12 @@ export interface AgentSessionConfig {
 	asyncJobManager?: AsyncJobManager;
 	/** Agent identity (registry id like "Main" or "Alice") used for IRC routing. */
 	agentId?: string;
+	/** Collaboration authorization for roster, IRC delivery, and busy-side replies. */
+	collaborationPolicy?: CollaborationPolicy;
+	/** Immutable source-qualified tool ceiling enforced on activation/refresh. */
+	toolProfile?: ResolvedToolProfile;
+	/** Source resolver captured when the registry is built; unknown sources fail closed under a profile. */
+	toolSourceOf?: (name: string) => ToolSource | undefined;
 	/** Whether this session is the top-level agent or a subagent. Drives eager-task
 	 *  prelude gating so a top-level session created with a custom `agentId` still
 	 *  receives the always-mode reminder. Defaults to "main". */
@@ -1247,6 +1256,9 @@ export class AgentSession {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
+	#collaborationPolicy: CollaborationPolicy | undefined;
+	#toolProfile: ResolvedToolProfile | undefined;
+	#toolSourceOf: ((name: string) => ToolSource | undefined) | undefined;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
 	#isDisposed = false;
@@ -1452,8 +1464,17 @@ export class AgentSession {
 		if (this.#pendingIrcAsides.length === 0) return;
 		if (this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages()) return;
 		const records = this.#pendingIrcAsides;
-		this.#pendingIrcAsides = [];
-		this.#wakeForIrc(records);
+		const wakeable = records.filter(record => {
+			const details = record.details;
+			const from =
+				typeof details === "object" && details !== null && "from" in details && typeof details.from === "string"
+					? details.from
+					: undefined;
+			return from ? this.#allowsIrcWake(from) : this.#collaborationPolicy === undefined;
+		});
+		if (wakeable.length === 0) return;
+		this.#pendingIrcAsides = records.filter(record => !wakeable.includes(record));
+		this.#wakeForIrc(wakeable);
 	}
 
 	/** Fire-and-forget wake turn for incoming IRC — idle delivery and stranded-aside resume both
@@ -1674,6 +1695,9 @@ export class AgentSession {
 		this.#obfuscator = config.obfuscator;
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
+		this.#collaborationPolicy = config.collaborationPolicy;
+		this.#toolProfile = config.toolProfile;
+		this.#toolSourceOf = config.toolSourceOf;
 		this.#providerSessionId = config.providerSessionId;
 		this.agent.setAssistantMessageEventInterceptor((message, assistantMessageEvent) => {
 			const event: AgentEvent = {
@@ -2197,6 +2221,14 @@ export class AgentSession {
 
 	getAgentId(): string | undefined {
 		return this.#agentId;
+	}
+
+	getCollaborationPolicy(): CollaborationPolicy | undefined {
+		return this.#collaborationPolicy;
+	}
+
+	setCollaborationPolicy(policy: CollaborationPolicy | undefined): void {
+		this.#collaborationPolicy = policy;
 	}
 
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
@@ -4431,7 +4463,12 @@ export class AgentSession {
 	}
 
 	#filterSelectableMCPToolNames(toolNames: Iterable<string>): string[] {
-		return Array.from(toolNames).filter(name => this.#discoverableMCPTools.has(name) && this.#toolRegistry.has(name));
+		return Array.from(toolNames).filter(
+			name =>
+				this.#discoverableMCPTools.has(name) &&
+				this.#toolRegistry.has(name) &&
+				this.#isToolNameAllowedByProfile(name),
+		);
 	}
 
 	#getConfiguredDefaultSelectedMCPToolNames(): string[] {
@@ -4564,7 +4601,12 @@ export class AgentSession {
 		const nextSelectedMCPToolNames = new Set(this.#selectedMCPToolNames);
 		const activated: string[] = [];
 		for (const name of toolNames) {
-			if (!isMCPToolName(name) || !this.#discoverableMCPTools.has(name) || !this.#toolRegistry.has(name)) {
+			if (
+				!isMCPToolName(name) ||
+				!this.#discoverableMCPTools.has(name) ||
+				!this.#toolRegistry.has(name) ||
+				!this.#isToolNameAllowedByProfile(name)
+			) {
 				continue;
 			}
 			nextSelectedMCPToolNames.add(name);
@@ -4608,17 +4650,22 @@ export class AgentSession {
 		return filter?.source ? allTools.filter(t => t.source === filter.source) : allTools;
 	}
 
-	/** Collect built-in tools the model can discover via search_tool_bm25. Restricted to tool
-	 *  definitions whose `loadMode === "discoverable"`. This keeps hidden/internal tools
-	 *  (resolve, yield, report_finding, report_tool_issue) out of the index
-	 *  and avoids mislabeling extension/custom default-inactive tools as built-ins. */
+	/** Collect non-MCP discoverable tools for search_tool_bm25. Restricted to tool
+	 *  definitions whose `loadMode === "discoverable"`. Labels by registration source
+	 *  (via `#toolSourceOf`) so extension/custom tools are not mislabeled as built-ins. */
 	#collectDiscoverableBuiltinTools(): DiscoverableTool[] {
 		const activeNames = new Set(this.getActiveToolNames());
 		const result: DiscoverableTool[] = [];
 		for (const tool of this.#toolRegistry.values()) {
 			if (tool.loadMode !== "discoverable") continue;
 			if (activeNames.has(tool.name)) continue;
-			const collected = collectDiscoverableTools([tool], { source: "builtin" });
+			if (isMCPToolName(tool.name)) continue;
+			const source =
+				this.#toolSourceOf?.(tool.name) ??
+				(tool.name in BUILTIN_TOOLS ? "builtin" : tool.name in HIDDEN_TOOLS ? "hidden" : undefined);
+			// Hidden/internal tools stay out of the discovery index; unknown sources fail closed.
+			if (!source || source === "hidden") continue;
+			const collected = collectDiscoverableTools([tool], { source });
 			result.push(...collected);
 		}
 		return result;
@@ -4664,7 +4711,11 @@ export class AgentSession {
 			const currentActiveNames = new Set(this.getActiveToolNames());
 			const newlyAdded: string[] = [];
 			for (const name of nonMcpNames) {
-				if (this.#toolRegistry.has(name) && !currentActiveNames.has(name)) {
+				if (
+					this.#toolRegistry.has(name) &&
+					!currentActiveNames.has(name) &&
+					this.#isToolNameAllowedByProfile(name)
+				) {
 					newlyAdded.push(name);
 					this.#selectedDiscoveredToolNames.add(name);
 					activated.push(name);
@@ -4798,6 +4849,22 @@ export class AgentSession {
 		);
 	}
 
+	/** Source-aware ceiling check for activation/refresh. Prefers registration source
+	 *  (`#toolSourceOf`) over name-catalog inference; exact source only (no OR). */
+	#isToolNameAllowedByProfile(name: string): boolean {
+		if (!this.#toolProfile) return true;
+		const source =
+			this.#toolSourceOf?.(name) ??
+			(isMCPToolName(name)
+				? "mcp"
+				: name in BUILTIN_TOOLS
+					? "builtin"
+					: name in HIDDEN_TOOLS
+						? "hidden"
+						: undefined);
+		return source !== undefined && isAllowedByToolProfile(this.#toolProfile, source, name);
+	}
+
 	async #applyActiveToolsByName(
 		toolNames: string[],
 		options?: { persistMCPSelection?: boolean; previousSelectedMCPToolNames?: string[] },
@@ -4807,6 +4874,7 @@ export class AgentSession {
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
 		for (const name of toolNames) {
+			if (!this.#isToolNameAllowedByProfile(name)) continue;
 			const tool = this.#toolRegistry.get(name);
 			if (tool) {
 				tools.push(this.#wrapToolForAcpPermission(tool));
@@ -4814,7 +4882,11 @@ export class AgentSession {
 			}
 		}
 		// Auto-QA tool must survive any runtime tool-set mutation.
-		if (isAutoQaEnabled(this.settings) && !validToolNames.includes("report_tool_issue")) {
+		if (
+			isAutoQaEnabled(this.settings) &&
+			!validToolNames.includes("report_tool_issue") &&
+			this.#isToolNameAllowedByProfile("report_tool_issue")
+		) {
 			const qaTool = this.#toolRegistry.get("report_tool_issue");
 			if (qaTool) {
 				tools.push(this.#wrapToolForAcpPermission(qaTool));
@@ -5045,6 +5117,7 @@ export class AgentSession {
 	 *   for a session where MCP discovery is disabled.
 	 */
 	async refreshMCPTools(mcpTools: CustomTool[], options?: { activateAll?: boolean }): Promise<void> {
+		mcpTools = mcpTools.filter(tool => this.#isToolNameAllowedByProfile(tool.name));
 		const previousSelectedMCPToolNames = this.getSelectedMCPToolNames();
 		const existingNames = Array.from(this.#toolRegistry.keys());
 		for (const name of existingNames) {
@@ -5091,7 +5164,7 @@ export class AgentSession {
 			// discovery is disabled — without it, getSelectedMCPToolNames()
 			// returns only already-active tools (circular deadlock: tools can
 			// only become active if they're already active).
-			const newMcpNames = mcpTools.map(t => t.name);
+			const newMcpNames = mcpTools.map(t => t.name).filter(name => this.#isToolNameAllowedByProfile(name));
 			const nextActive = [...new Set([...this.#getActiveNonMCPToolNames(), ...newMcpNames])];
 			await this.#applyActiveToolsByName(nextActive, { previousSelectedMCPToolNames });
 			return;
@@ -11443,6 +11516,14 @@ export class AgentSession {
 	// IRC Delivery
 	// =========================================================================
 
+	#allowsIrcWake(fromId: string): boolean {
+		return authorizeIrcDelivery(this.#collaborationPolicy, {
+			fromId: this.#agentId ?? "",
+			toId: fromId,
+			requiresWake: true,
+		}).allow;
+	}
+
 	/**
 	 * Deliver an IRC message into this session (recipient side; called by the
 	 * IrcBus). Emits the `irc_message` session event for UI cards and injects
@@ -11468,7 +11549,14 @@ export class AgentSession {
 		if (this.#isDisposed) {
 			throw new Error("Recipient session is disposed.");
 		}
-		const autoReply = (opts?.expectsReply ?? false) && this.isStreaming && !this.settings.get("async.enabled");
+		const autoReply =
+			(opts?.expectsReply ?? false) &&
+			this.isStreaming &&
+			!this.settings.get("async.enabled") &&
+			this.#allowsIrcBusyModelReply(msg);
+		if (!this.isStreaming && !this.#allowsIrcWake(msg.from)) {
+			throw new Error("IRC wake denied by recipient collaboration policy.");
+		}
 		const record: CustomMessage = {
 			role: "custom",
 			customType: "irc:incoming",
@@ -11503,7 +11591,18 @@ export class AgentSession {
 	 * `wait`/`await:true` resolves. Failures only log — the sender then hits
 	 * its normal wait timeout.
 	 */
+	#allowsIrcBusyModelReply(msg: IrcMessage): boolean {
+		const policy = this.#collaborationPolicy;
+		if (policy && !policy.allowBusyModelReply) return false;
+		return authorizeIrcDelivery(policy, {
+			fromId: msg.to,
+			toId: msg.from,
+			busyModelReply: true,
+		}).allow;
+	}
+
 	async #runIrcAutoReply(msg: IrcMessage): Promise<void> {
+		if (!this.#allowsIrcBusyModelReply(msg)) return;
 		try {
 			const { replyText } = await this.runEphemeralTurn({
 				promptText: prompt.render(ircAutoReplyTemplate, {

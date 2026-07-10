@@ -263,9 +263,7 @@ export function validateSpawnSelectorsStructural(
  * Semantic validation after providers/agents are known. Returns one aggregated
  * list of unresolved or unauthenticated selector diagnostics.
  */
-export function validateSpawnSelectorsSemantic(
-	input: SemanticSpawnSelectorValidationInput,
-): SpawnSelectorDiagnostic[] {
+export function validateSpawnSelectorsSemantic(input: SemanticSpawnSelectorValidationInput): SpawnSelectorDiagnostic[] {
 	const diagnostics: SpawnSelectorDiagnostic[] = [];
 
 	for (const raw of input.selectors) {

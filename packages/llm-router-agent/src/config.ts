@@ -135,7 +135,6 @@ function candidatePaths(cwd: string, explicit?: string, home?: string): string[]
 	return paths;
 }
 
-
 const DEFAULT_TASK_SPAWN_LABEL_MAPPINGS: TaskSpawnLabelMappings = {
 	light: "light",
 	mid: "mid",

@@ -4,6 +4,7 @@
  * Runs each subagent on the main thread and forwards AgentEvents for progress tracking.
  */
 
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentTelemetryConfig, ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@pk-nerdsaver-ai/pi-agent-core";
@@ -24,12 +25,20 @@ import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
+import type { ExtensionRunner } from "../extensibility/extensions/runner";
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { callTool } from "../mcp/client";
 import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import type { AgentExecutionProfile } from "../orchestration/agent-execution-profile";
+import {
+	type CollaborationPolicy,
+	resolveCollaborationPolicy,
+	serializeCollaborationPolicy,
+} from "../orchestration/collaboration-policy";
+import assignmentContractPromptTemplate from "../prompts/system/assignment-contract.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
@@ -49,12 +58,27 @@ import {
 	type OutputValidator,
 	summarizeValidationFailure,
 } from "../tools/output-schema-validator";
-
 import { type ReportFindingDetails, toReviewFinding } from "../tools/review";
 import { ToolAbortError } from "../tools/tool-errors";
+import { filterAutoToolNames, type ResolvedToolProfile, resolveToolProfile } from "../tools/tool-profiles";
 import type { EventBus } from "../utils/event-bus";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
+import { type AssignmentContractV1, type AssignmentResultV1, parseAssignmentResult } from "./assignment-contract";
+import {
+	type AssignmentVerificationResult,
+	type AssignmentVerifierRunners,
+	verifyAssignment,
+} from "./assignment-verifier";
+import {
+	type AssignmentFailureClass,
+	classifyRecoveryFailure,
+	nextRecoveryAttempt,
+	type RecoveryAttempt,
+	type RecoveryCapsule,
+	type RecoveryFailureFacts,
+} from "./recovery-policy";
+import type { SpawnPlan, SpawnRouteCandidate } from "./spawn-plan";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import {
 	type AgentDefinition,
@@ -336,6 +360,30 @@ export interface ExecutorOptions {
 	thinkingLevel?: ThinkingLevel;
 	color?: string;
 	outputSchema?: unknown;
+	/** Frozen allocation-free plan composed before this child id existed. */
+	spawnPlan?: SpawnPlan;
+	/** Frozen execution envelope from the spawn plan. */
+	executionProfile?: AgentExecutionProfile;
+	/** Source-aware tool capability ceiling. */
+	toolProfile?: ResolvedToolProfile;
+	/** Runtime collaboration authorization for registry/IRC behavior. */
+	collaborationPolicy?: CollaborationPolicy;
+	/** Parent-authored immutable acceptance contract. */
+	assignmentContract?: AssignmentContractV1;
+	/** Failure-only context for a fresh recovery child; never includes transcript text. */
+	recoveryCapsule?: RecoveryCapsule;
+	/** Parent extension runner that evaluated pre-allocation spawn policy. */
+	extensionRunner?: ExtensionRunner;
+	/** Parent-owned verification runners; child evidence never supplies commands or paths. */
+	assignmentVerifierRunners?: AssignmentVerifierRunners;
+	/** Authoritative parent-observed changed paths when available. */
+	actualChangedFiles?: readonly string[];
+	/** Recovery attempts already allocated for this assignment. */
+	recoveryAttempts?: readonly RecoveryAttempt[];
+	/** Providers suppressed by prior terminal recovery decisions. */
+	recoverySuppressedProviders?: readonly string[];
+	/** Allocate a new child identity only after recovery policy returns retry. */
+	allocateRecoveryId?: (attempt: RecoveryAttempt) => Promise<string>;
 	/** Parent task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
 	/**
@@ -1569,6 +1617,132 @@ async function driveSessionToYield(
 	return { exitCode, error, aborted, abortReasonText };
 }
 
+interface AssignmentVerificationOutcome {
+	readonly assignmentResult?: AssignmentResultV1;
+	readonly verification: AssignmentVerificationResult;
+	readonly failureClass?: AssignmentFailureClass;
+	readonly isError: boolean;
+}
+
+function rejectedAssignmentVerification(
+	reasons: readonly string[],
+	failureClass: AssignmentFailureClass,
+): AssignmentVerificationOutcome {
+	return {
+		verification: {
+			verified: false,
+			failureClass,
+			reasons: Object.freeze([...reasons]),
+			criteria: Object.freeze([]),
+		},
+		failureClass,
+		isError: true,
+	};
+}
+
+async function verifyAssignmentYield(args: {
+	contract: AssignmentContractV1;
+	lastYield: YieldItem | undefined;
+	monitor: SubagentRunMonitor;
+	runners?: AssignmentVerifierRunners;
+	actualChangedFiles?: readonly string[];
+}): Promise<AssignmentVerificationOutcome> {
+	const { monitor } = args;
+	monitor.progress.assignmentVerificationStatus = "submitted";
+	monitor.scheduleProgress(true);
+	monitor.progress.assignmentVerificationStatus = "verifying";
+	monitor.scheduleProgress(true);
+
+	if (args.lastYield?.status !== "success") {
+		return rejectedAssignmentVerification(
+			["Assignment contract cannot be verified without a successful yield result."],
+			"liveness",
+		);
+	}
+	const parsed = parseAssignmentResult(parseStringifiedJson(args.lastYield.data));
+	if (!parsed.ok) {
+		return rejectedAssignmentVerification(
+			parsed.diagnostics.map(diagnostic => `Invalid assignment result: ${diagnostic.message}`),
+			"acceptance",
+		);
+	}
+
+	const verification = await verifyAssignment(args.contract, parsed.result, args.runners, args.actualChangedFiles);
+	return {
+		assignmentResult: parsed.result,
+		verification,
+		failureClass: verification.verified ? undefined : verification.failureClass,
+		isError: !verification.verified || parsed.result.status === "failed" || parsed.result.status === "blocked",
+	};
+}
+
+function recoveryFailureFacts(result: SingleResult): RecoveryFailureFacts {
+	const abortReason = result.abortReason ?? "";
+	const timedOut = result.failureClass === "timeout" || /runtime limit|timed? out|timeout/i.test(abortReason);
+	const inferredClass: AssignmentFailureClass =
+		result.failureClass ??
+		(result.retryFailure
+			? "spawn_transport"
+			: timedOut
+				? "timeout"
+				: result.aborted
+					? "liveness"
+					: result.assignmentVerificationStatus === "verification_failed"
+						? "acceptance"
+						: "liveness");
+	const failedProvider = result.resolvedModel?.split("/", 1)[0];
+	const facts: RecoveryFailureFacts = {
+		class: inferredClass,
+		message: result.error || result.stderr || abortReason || "Terminal child failure",
+		validatorReasons:
+			result.assignmentVerificationStatus === "verification_failed" && result.stderr ? [result.stderr] : undefined,
+		timedOut,
+		failedProvider,
+	};
+	return { ...facts, class: classifyRecoveryFailure(facts) };
+}
+
+function failedRecoveryCandidate(options: ExecutorOptions, result: SingleResult): SpawnRouteCandidate | undefined {
+	const eligible = options.spawnPlan?.eligible ?? [];
+	if (eligible.length === 0) return undefined;
+	const resolvedModel = result.resolvedModel;
+	if (resolvedModel) {
+		const matched = eligible.find(candidate => {
+			if (candidate.selector === resolvedModel) return true;
+			if (!candidate.provider || !candidate.modelId) return false;
+			const identity = `${candidate.provider}/${candidate.modelId}`;
+			return resolvedModel === identity || resolvedModel.startsWith(`${identity}:`);
+		});
+		if (matched) return matched;
+	}
+	const overrides = Array.isArray(result.modelOverride)
+		? result.modelOverride
+		: result.modelOverride
+			? [result.modelOverride]
+			: [];
+	return eligible.find(candidate => overrides.includes(candidate.selector)) ?? eligible[0];
+}
+
+function seedFailedRecoveryAttempt(options: ExecutorOptions, result: SingleResult): RecoveryAttempt | undefined {
+	const candidate = failedRecoveryCandidate(options, result);
+	if (!candidate) return undefined;
+	const attempt = (options.recoveryAttempts?.length ?? 0) + 1;
+	return Object.freeze({
+		attempt,
+		selector: candidate.selector,
+		tier: candidate.tier,
+		provider: candidate.provider,
+		modelId: candidate.modelId,
+		budgets: Object.freeze({
+			maxRequests: candidate.maxRequests,
+			maxRuntimeMs: candidate.maxRuntimeMs,
+		}),
+		maxRequests: candidate.maxRequests,
+		maxRuntimeMs: candidate.maxRuntimeMs,
+		freshChild: true,
+	});
+}
+
 interface FinalizeRunArgs {
 	monitor: SubagentRunMonitor;
 	done: { exitCode: number; error?: string; aborted?: boolean; abortReason?: string; durationMs: number };
@@ -1587,6 +1761,13 @@ interface FinalizeRunArgs {
 	detached?: boolean;
 	sessionFile?: string;
 	startTime: number;
+	executionProfile?: AgentExecutionProfile;
+	toolProfile?: ResolvedToolProfile;
+	collaborationPolicy?: CollaborationPolicy;
+	assignmentContract?: AssignmentContractV1;
+	assignmentVerifierRunners?: AssignmentVerifierRunners;
+	actualChangedFiles?: readonly string[];
+	recoveryAttempt?: RecoveryAttempt;
 }
 
 /**
@@ -1641,6 +1822,28 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	const lastYield = yieldItems?.[yieldItems.length - 1];
 	const yieldAbortReason = lastYield?.status === "aborted" ? lastYield.error || "Subagent aborted task" : undefined;
 	const { abortedViaYield, hasYield } = finalized;
+	let assignmentVerification: AssignmentVerificationOutcome | undefined;
+	if (args.assignmentContract) {
+		assignmentVerification = await verifyAssignmentYield({
+			contract: args.assignmentContract,
+			lastYield,
+			monitor,
+			runners: args.assignmentVerifierRunners,
+			actualChangedFiles: args.actualChangedFiles,
+		});
+		progress.assignmentVerificationStatus = assignmentVerification.verification.verified
+			? "verified"
+			: "verification_failed";
+		progress.failureClass = assignmentVerification.failureClass;
+		progress.isError = assignmentVerification.isError;
+		if (assignmentVerification.isError) {
+			exitCode = 1;
+			const reasons = assignmentVerification.verification.reasons.join("; ");
+			stderr = [stderr, reasons ? `assignment verification failed: ${reasons}` : "assignment verification failed"]
+				.filter(Boolean)
+				.join("\n");
+		}
+	}
 	const { content: truncatedOutput, truncated } = truncateTail(rawOutput, {
 		maxBytes: MAX_OUTPUT_BYTES,
 		maxLines: MAX_OUTPUT_LINES,
@@ -1671,6 +1874,16 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	const runtimeLimitExceeded = monitor.runtimeLimitExceeded();
 	if (runtimeLimitExceeded && exitCode === 0) {
 		exitCode = 1;
+	}
+	if (runtimeLimitExceeded && args.assignmentContract) {
+		progress.assignmentVerificationStatus = "verification_failed";
+		progress.failureClass = "timeout";
+		progress.isError = true;
+	}
+	if (args.assignmentContract && exitCode !== 0) {
+		progress.assignmentVerificationStatus = "verification_failed";
+		progress.failureClass ??= "liveness";
+		progress.isError = true;
 	}
 	const wasAborted =
 		runtimeLimitExceeded || abortedViaYield || (!hasYield && (done.aborted || signal?.aborted || false));
@@ -1708,6 +1921,19 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		task,
 		assignment,
 		description: args.description,
+		executionProfile: args.executionProfile,
+		toolProfile: args.toolProfile,
+		collaborationPolicy: args.collaborationPolicy,
+		assignmentContract: args.assignmentContract,
+		assignmentVerificationStatus: progress.assignmentVerificationStatus,
+		contractDigest: args.assignmentContract?.digest,
+		contractRevision: args.assignmentContract?.revision,
+		failureClass: progress.failureClass,
+		recoveryAttempt: args.recoveryAttempt?.attempt,
+		recoveryTier: args.recoveryAttempt?.tier,
+		recoveryProvider: args.recoveryAttempt?.provider,
+		nextRecoveryAction: progress.nextRecoveryAction,
+		isError: args.assignmentContract ? progress.isError === true || wasAborted || exitCode !== 0 : undefined,
 		lastIntent: progress.lastIntent,
 		exitCode,
 		output: truncatedOutput,
@@ -1791,6 +2017,21 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		settings,
 		agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
 	);
+	const executionProfile = options.executionProfile ?? options.spawnPlan?.profile;
+	const toolPolicyActive =
+		options.executionProfile !== undefined ||
+		options.spawnPlan !== undefined ||
+		options.assignmentContract !== undefined;
+	const toolProfile =
+		options.toolProfile ??
+		(toolPolicyActive
+			? resolveToolProfile({ execution: executionProfile, agentTools: agent.tools, requireYield: true })
+			: undefined);
+	const collaborationPolicy =
+		options.collaborationPolicy ??
+		(executionProfile
+			? resolveCollaborationPolicy({ mode: executionProfile.collaboration, parentId: options.parentAgentId })
+			: undefined);
 	const maxRecursionDepth = settings.get("task.maxRecursionDepth") ?? 2;
 	// Tailored specialist identity for this spawn. `subagentRole` is the full
 	// (trimmed) role text fed to the system-prompt preamble; `subagentDisplayName`
@@ -1809,8 +2050,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		0,
 		Math.trunc(Number(settings.get("task.softRequestBudget") ?? SOFT_REQUEST_BUDGET.default) || 0),
 	);
-	const softRequestBudget =
+	const agentDefaultBudget =
 		configuredDefaultBudget === 0 ? 0 : (SOFT_REQUEST_BUDGET[agent.name] ?? configuredDefaultBudget);
+	const plannedRequestBudget = options.spawnPlan?.maxRequests ?? executionProfile?.maxRequests ?? 0;
+	const softRequestBudget =
+		agentDefaultBudget <= 0
+			? plannedRequestBudget
+			: plannedRequestBudget <= 0
+				? agentDefaultBudget
+				: Math.min(agentDefaultBudget, plannedRequestBudget);
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
@@ -1841,6 +2089,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		expanded.push("bash");
 		toolNames = Array.from(new Set(expanded));
 	}
+	if (toolNames && toolProfile) {
+		toolNames = filterAutoToolNames(toolProfile, toolNames);
+	}
 
 	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
 	const sessionFile = subtaskSessionFile ?? null;
@@ -1853,7 +2104,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				: agent.spawns.join(",");
 
 	const lspEnabled = enableLsp ?? true;
-	const ircEnabled = isIrcEnabled(subagentSettings, childDepth);
+	const ircEnabled =
+		isIrcEnabled(subagentSettings, childDepth) &&
+		(!toolProfile || filterAutoToolNames(toolProfile, ["irc"]).length > 0);
 	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
 
 	const monitor = createSubagentRunMonitor({
@@ -1874,6 +2127,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		maxRuntimeMs,
 	});
 	const progress = monitor.progress;
+	progress.executionProfile = executionProfile;
+	progress.toolProfile = toolProfile;
+	progress.collaborationPolicy = collaborationPolicy;
+	progress.assignmentContract = options.assignmentContract;
+	progress.recoveryAttempt = options.recoveryAttempts?.at(-1)?.attempt;
+	progress.recoveryTier = options.recoveryAttempts?.at(-1)?.tier;
+	progress.recoveryProvider = options.recoveryAttempts?.at(-1)?.provider;
 	let unsubscribe: (() => void) | null = null;
 	let reviveSession: (() => Promise<AgentSession>) | null = null;
 	// Adopted (kept-alive) subagents flip registry status from session events on
@@ -1997,7 +2257,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			sessionOpenedAt = performance.now();
 
-			const mcpProxyTools = options.mcpManager ? createMCPProxyTools(options.mcpManager) : [];
+			const mcpProxyTools = options.mcpManager
+				? createMCPProxyTools(options.mcpManager).filter(
+						tool => !toolProfile || filterAutoToolNames(toolProfile, [tool.name], "mcp").length > 0,
+					)
+				: [];
 			const enableMCP = !options.mcpManager;
 
 			// Derive subagent-scoped telemetry from the parent's config so the
@@ -2078,9 +2342,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
 						ircSelfId: ircEnabled ? id : "",
 					});
-					return defaultPrompt.length === 0
-						? [subagentPrompt]
-						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
+					const contractPrompt = options.assignmentContract
+						? `${prompt.render(assignmentContractPromptTemplate, {})}\n\n\`\`\`json\n${JSON.stringify(options.assignmentContract, null, 2)}\n\`\`\``
+						: undefined;
+					const recoveryPrompt = options.recoveryCapsule
+						? `# Recovery Capsule\n\nThis is a fresh child. Use only this compact failure capsule; do not request or reconstruct the failed transcript.\n\n\`\`\`json\n${JSON.stringify(options.recoveryCapsule, null, 2)}\n\`\`\``
+						: undefined;
+					const prompts =
+						defaultPrompt.length === 0
+							? [subagentPrompt]
+							: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
+					return [...prompts, contractPrompt, recoveryPrompt].filter(
+						(value): value is string => value !== undefined,
+					);
 				},
 				sessionManager: sessionManagerForRun,
 				hasUI: false,
@@ -2102,6 +2376,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,
 				parentEvalSessionId: options.parentEvalSessionId,
+				executionProfile,
+				toolProfile,
+				collaborationPolicy,
+				assignmentContractActive: options.assignmentContract !== undefined,
 				onFirstChatDispatch: () => {
 					firstChatDispatchAt ??= performance.now();
 				},
@@ -2171,6 +2449,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				fusionSidekick,
 				maxModelRequestsPerRun,
 				outputSchema,
+				executionProfile,
+				collaborationPolicy: collaborationPolicy ? serializeCollaborationPolicy(collaborationPolicy) : undefined,
+				toolCeiling: toolProfile?.maximum,
 			});
 
 			abortSignal.addEventListener(
@@ -2372,7 +2653,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const done = await runSubagent();
 	monitor.finish();
 
-	return finalizeRunResult({
+	const settled = await finalizeRunResult({
 		monitor,
 		done,
 		index,
@@ -2390,5 +2671,90 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		detached: options.detached,
 		sessionFile: subtaskSessionFile,
 		startTime,
+		executionProfile,
+		toolProfile,
+		collaborationPolicy,
+		assignmentContract: options.assignmentContract,
+		assignmentVerifierRunners: options.assignmentVerifierRunners,
+		actualChangedFiles: options.actualChangedFiles,
+		recoveryAttempt: options.recoveryAttempts?.at(-1),
+	});
+
+	const terminalFailure = settled.exitCode !== 0 || settled.isError === true || settled.aborted === true;
+	if (!terminalFailure || !options.assignmentContract || !options.spawnPlan || signal?.aborted) {
+		return settled;
+	}
+
+	const failure = recoveryFailureFacts(settled);
+	const requestFallbackExhausted = failure.class !== "spawn_transport" || settled.retryFailure !== undefined;
+	if (!requestFallbackExhausted) return settled;
+	// A terminal auto-retry failure is emitted only after AgentSession scans the
+	// ordered runtime fallback chain and finds no usable candidate. Non-transport
+	// assignment failures have no pending request-level fallback by definition.
+	const previousAttempts = options.recoveryAttempts?.length
+		? [...options.recoveryAttempts]
+		: [seedFailedRecoveryAttempt(options, settled)].filter(
+				(attempt): attempt is RecoveryAttempt => attempt !== undefined,
+			);
+	const decision = nextRecoveryAttempt({
+		workClass: options.spawnPlan.profile.workClass,
+		eligible: options.spawnPlan.eligible,
+		previousAttempts,
+		suppressedProviders: options.recoverySuppressedProviders,
+		outcome: {
+			terminal: true,
+			failedChildId: settled.id,
+			failure,
+		},
+		requestFallbackRemaining: false,
+		contract: options.assignmentContract,
+		profileSnapshotRefs: [`spawn-plan:${options.spawnPlan.correlationId}`],
+		verifiedArtifactRefs:
+			settled.assignmentVerificationStatus === "verified" && settled.outputPath ? [settled.outputPath] : undefined,
+		verifiedPatchRefs: settled.patchPath ? [settled.patchPath] : undefined,
+	});
+	settled.failureClass = failure.class;
+	settled.nextRecoveryAction = decision.action;
+	progress.failureClass = failure.class;
+	progress.nextRecoveryAction = decision.action;
+	progress.isError = true;
+	if (decision.action === "retry") {
+		progress.recoveryAttempt = decision.attempt.attempt;
+		progress.recoveryTier = decision.attempt.tier;
+		progress.recoveryProvider = decision.attempt.provider;
+	}
+	options.onProgress?.({ ...progress, recentTools: progress.recentTools.slice() });
+
+	if (decision.action === "stop") {
+		settled.isError = true;
+		return settled;
+	}
+
+	let recoveryId: string;
+	try {
+		recoveryId = options.allocateRecoveryId
+			? await options.allocateRecoveryId(decision.attempt)
+			: `task-recovery-${randomUUID()}`;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		settled.stderr = [settled.stderr, `fresh-child recovery allocation failed: ${message}`]
+			.filter(Boolean)
+			.join("\n");
+		settled.error = settled.stderr;
+		settled.isError = true;
+		return settled;
+	}
+
+	const invokedAt = Date.now();
+	return runSubprocess({
+		...options,
+		id: recoveryId,
+		modelOverride: [decision.attempt.selector],
+		maxRuntimeMs: decision.attempt.maxRuntimeMs,
+		recoveryCapsule: decision.capsule,
+		recoveryAttempts: [...previousAttempts, decision.attempt],
+		recoverySuppressedProviders: decision.suppressedProviders,
+		invokedAt,
+		acquiredAt: invokedAt,
 	});
 }

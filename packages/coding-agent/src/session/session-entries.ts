@@ -1,5 +1,8 @@
 import type { AgentMessage } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { ImageContent, MessageAttribution, ServiceTier, TextContent } from "@pk-nerdsaver-ai/pi-ai";
+import type { AgentExecutionProfile } from "../orchestration/agent-execution-profile";
+import type { PersistedCollaborationPolicy } from "../orchestration/collaboration-policy";
+import type { ToolCapability } from "../tools/tool-profiles";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -132,6 +135,9 @@ export interface MCPToolSelectionEntry extends SessionEntryBase {
 	selectedToolNames: string[];
 }
 
+/** JSON-safe source-aware tool ceiling persisted for subagent revival. */
+export type SessionToolCeiling = readonly ToolCapability[];
+
 /** Session init entry - captures initial context for subagent sessions (debugging/replay). */
 export interface SessionInitEntry extends SessionEntryBase {
 	type: "session_init";
@@ -151,6 +157,12 @@ export interface SessionInitEntry extends SessionEntryBase {
 	fusionSidekick?: boolean;
 	/** Persisted per-run model-request cap for revived Fusion sidekick sessions. */
 	maxModelRequestsPerRun?: number;
+	/** Frozen execution envelope restored before a revived agent becomes visible. */
+	executionProfile?: AgentExecutionProfile;
+	/** Persisted collaboration authorization restored before roster/IRC registration. */
+	collaborationPolicy?: PersistedCollaborationPolicy;
+	/** Source-aware tool ceiling restored before tool construction or activation. */
+	toolCeiling?: SessionToolCeiling;
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */

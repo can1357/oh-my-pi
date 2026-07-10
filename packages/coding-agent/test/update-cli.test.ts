@@ -89,11 +89,11 @@ describe("update-cli package manager commands", () => {
 	});
 
 	it("targets the mise GitHub backend tool and force-reinstalls the checked version when requested", () => {
-		expect(buildMiseUpgradeArgs()).toEqual(["upgrade", "github:kingkillery/oh-my-pi", "--bump"]);
+		expect(buildMiseUpgradeArgs()).toEqual(["upgrade", "github:kingkillery/oh-my-pk", "--bump"]);
 		expect(buildMiseForceInstallArgs("15.10.5")).toEqual([
 			"install",
 			"--force",
-			"github:kingkillery/oh-my-pi@15.10.5",
+			"github:kingkillery/oh-my-pk@15.10.5",
 		]);
 	});
 

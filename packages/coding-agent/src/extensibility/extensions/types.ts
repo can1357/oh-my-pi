@@ -47,6 +47,7 @@ import type { Theme } from "../../modes/theme/theme";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessage } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
+import type { TaskSpawnPolicyInput, TaskSpawnPolicyResult } from "../../task/spawn-plan";
 import type {
 	BashToolDetails,
 	BashToolInput,
@@ -608,6 +609,15 @@ export interface CredentialDisabledEvent {
 	disabledCause: string;
 }
 
+/** Pre-allocation task-spawn policy hook. Handlers run sequentially in registration order. */
+export type TaskSpawnPolicyEvent = Readonly<TaskSpawnPolicyInput> & {
+	readonly type: "task_spawn_policy";
+	readonly signal?: AbortSignal;
+};
+
+/** Task-spawn policy transform returned by an extension handler. */
+export type TaskSpawnPolicyEventResult = TaskSpawnPolicyResult;
+
 // ============================================================================
 // User Bash Events
 // ============================================================================
@@ -817,6 +827,7 @@ export type ExtensionEvent =
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
+	| TaskSpawnPolicyEvent
 	| AgentStartEvent
 	| AgentEndEvent
 	| SessionStopEvent
@@ -996,6 +1007,7 @@ export interface ExtensionAPI {
 	): void;
 	on(event: "after_provider_response", handler: ExtensionHandler<AfterProviderResponseEvent>): void;
 	on(event: "before_agent_start", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
+	on(event: "task_spawn_policy", handler: ExtensionHandler<TaskSpawnPolicyEvent, TaskSpawnPolicyEventResult>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
 	on(event: "session_stop", handler: ExtensionHandler<SessionStopEvent, SessionStopEventResult>): void;

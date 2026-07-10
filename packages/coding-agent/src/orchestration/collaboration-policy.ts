@@ -80,7 +80,9 @@ function freezeStringList(values: readonly string[] | undefined): readonly strin
 	return Object.freeze([...(values ?? [])].map(value => value.trim()).filter(Boolean));
 }
 
-function defaultsForMode(mode: CollaborationMode): Omit<CollaborationPolicy, "mode" | "parentId" | "familyIds" | "allowedPeers"> {
+function defaultsForMode(
+	mode: CollaborationMode,
+): Omit<CollaborationPolicy, "mode" | "parentId" | "familyIds" | "allowedPeers"> {
 	switch (mode) {
 		case "report-only":
 			return {
@@ -106,9 +108,7 @@ function defaultsForMode(mode: CollaborationMode): Omit<CollaborationPolicy, "mo
 	}
 }
 
-export function resolveCollaborationPolicy(
-	input: CollaborationPolicyInput | undefined | null,
-): CollaborationPolicy {
+export function resolveCollaborationPolicy(input: CollaborationPolicyInput | undefined | null): CollaborationPolicy {
 	if (!input || input.mode === undefined) {
 		// Explicit no-policy path preserves independent swarm defaults.
 		if (!input) {
@@ -193,11 +193,7 @@ export interface IrcAuthorizationInput {
 	isBroadcast?: boolean;
 }
 
-function decidePeerReach(
-	policy: CollaborationPolicy,
-	fromId: string,
-	toId: string,
-): CollaborationDecision | null {
+function decidePeerReach(policy: CollaborationPolicy, fromId: string, toId: string): CollaborationDecision | null {
 	if (canDiscoverPeer(policy, fromId, toId)) return null;
 	return {
 		allow: false,
@@ -273,9 +269,7 @@ export function authorizeIrcDelivery(
 	return { allow: true, reasonCode: "allow", wouldWake: false };
 }
 
-export function serializeCollaborationPolicy(
-	policy: CollaborationPolicy,
-): PersistedCollaborationPolicy {
+export function serializeCollaborationPolicy(policy: CollaborationPolicy): PersistedCollaborationPolicy {
 	return Object.freeze({
 		version: 1 as const,
 		mode: policy.mode,

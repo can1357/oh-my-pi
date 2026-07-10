@@ -32,6 +32,11 @@ export interface AdoptOptions {
 	revive?: AgentReviver;
 }
 
+export interface EnsureLiveOptions {
+	/** Runs after persisted policy hydration but before the reviver creates or exposes a live session. */
+	beforeRevive?: (ref: AgentRef) => void;
+}
+
 interface AdoptedAgent {
 	idleTtlMs: number;
 	revive?: AgentReviver;
@@ -151,7 +156,7 @@ export class AgentLifecycleManager {
 	 * Throws a plain Error if the id is unknown or parked without a reviver.
 	 * Concurrent calls share one in-flight revive.
 	 */
-	async ensureLive(id: string): Promise<AgentSession> {
+	async ensureLive(id: string, options?: EnsureLiveOptions): Promise<AgentSession> {
 		const ref = this.#registry.get(id);
 		if (!ref) {
 			throw new Error(
@@ -161,7 +166,7 @@ export class AgentLifecycleManager {
 		if (ref.session) return ref.session;
 		const inflight = this.#revivals.get(id);
 		if (inflight) return inflight;
-		const revival = this.#resolveAndRevive(id, ref);
+		const revival = this.#resolveAndRevive(id, ref, options);
 		this.#revivals.set(id, revival);
 		try {
 			return await revival;
@@ -177,7 +182,7 @@ export class AgentLifecycleManager {
 	 * adopt it so the agent rejoins the normal idle↔parked lifecycle. Throws
 	 * when the agent is not revivable or no reviver can be produced.
 	 */
-	async #resolveAndRevive(id: string, ref: AgentRef): Promise<AgentSession> {
+	async #resolveAndRevive(id: string, ref: AgentRef, options?: EnsureLiveOptions): Promise<AgentSession> {
 		let revive = this.#adopted.get(id)?.revive;
 		let coldAdopted = false;
 		if (!revive && ref.status === "parked" && ref.sessionFile && this.#persistedReviverFactory) {
@@ -192,6 +197,10 @@ export class AgentLifecycleManager {
 				`Agent "${id}" is ${ref.status} and cannot be revived${revive ? "" : " (no reviver registered)"}. Its transcript remains readable at history://${id}.`,
 			);
 		}
+		// A persisted factory hydrates ref.collaborationPolicy before returning its
+		// reviver. Run delivery authorization now, before session construction can
+		// re-register the ref as running or the lifecycle marks it idle.
+		options?.beforeRevive?.(ref);
 		try {
 			return await this.#revive(id, revive, ref.sessionFile);
 		} catch (error) {
@@ -232,6 +241,8 @@ export class AgentLifecycleManager {
 
 	async #revive(id: string, revive: AgentReviver, sessionFile: string | null): Promise<AgentSession> {
 		const session = await revive();
+		// attachSession copies the hydrated session policy onto the ref before the
+		// following idle transition makes it visible to live-peer roster APIs.
 		this.#registry.attachSession(id, session, sessionFile);
 		// Emits status_changed → "idle", which re-arms the TTL timer below.
 		this.#registry.setStatus(id, "idle");

@@ -23,7 +23,7 @@ import { getDistVersion, getLatestRelease, type ReleaseInfo } from "./update-rel
 const DIST_BASE = Bun.env.OMP_DIST_BASE ?? "https://oh-my-pk.pkking.computer";
 const PACKAGE = "@pk-nerdsaver-ai/pi-coding-agent";
 const HOMEBREW_FORMULA = "kingkillery/tap/omp";
-const MISE_TOOL = "github:kingkillery/oh-my-pi";
+const MISE_TOOL = "github:kingkillery/oh-my-pk";
 /**
  * Official npm registry origin.
  *

@@ -10,6 +10,13 @@ import {
 	requestFromToolParams,
 	tryApplyModel,
 } from "./omp-compat.js";
+import {
+	createTaskSpawnPolicy,
+	isTaskSpawnEnabled,
+	type RouterSpawnPolicyInput,
+	type RouterSpawnPolicyResult,
+	type RouterSpawnRouteCandidate,
+} from "./task-spawn-policy.js";
 import { summarizeTelemetry } from "./telemetry.js";
 import {
 	exportToolRoutingExamplesFromTelemetry,
@@ -19,11 +26,11 @@ import {
 } from "./tool-capture.js";
 import type { RequestInput, RouteDecision, ToolUseCaptureInput, ToolUseCaptureRecord, ToolUsePhase } from "./types.js";
 
-let routerPromise: Promise<LLMRouter> | undefined;
 let lastDecision: RouteDecision | undefined;
 let lastToolUse: ToolUseCaptureRecord | undefined;
 
-export default function llmRouterExtension(pi: OmpLikeExtensionApi): void {
+export default async function llmRouterExtension(pi: OmpLikeExtensionApi): Promise<void> {
+	let routerPromise: Promise<LLMRouter> | undefined;
 	pi.setLabel?.("LLM Router");
 	const z = getZod(pi);
 
@@ -253,6 +260,10 @@ export default function llmRouterExtension(pi: OmpLikeExtensionApi): void {
 		});
 	}
 
+	// Spawn-only Qwen policy: register only when taskSpawn.enabled is true.
+	// Missing/default/false means zero handler, zero fetch, no assignment telemetry.
+	await registerTaskSpawnPolicyHandler(pi, getRouter);
+
 	if (pi.on) {
 		pi.on("input", async (event: unknown, ctx: any) => {
 			const router = await getRouter();
@@ -293,6 +304,86 @@ export default function llmRouterExtension(pi: OmpLikeExtensionApi): void {
 		routerPromise = LLMRouter.load();
 		return routerPromise;
 	}
+}
+
+async function registerTaskSpawnPolicyHandler(
+	pi: OmpLikeExtensionApi,
+	getRouter: () => Promise<LLMRouter>,
+): Promise<void> {
+	if (!pi.on) return;
+	let router: LLMRouter;
+	try {
+		router = await getRouter();
+	} catch (error) {
+		pi.logger?.warn?.("LLM Router task-spawn policy registration skipped", error);
+		return;
+	}
+	if (!isTaskSpawnEnabled(router.config)) return;
+
+	const policy = createTaskSpawnPolicy(router.config);
+	pi.on("task_spawn_policy", async (event: unknown) => {
+		const input = toRouterSpawnPolicyInput(event);
+		const signal = extractAbortSignal(event);
+		const result = await policy(input, signal);
+		return toCoreSpawnPolicyResult(result);
+	});
+}
+
+function toRouterSpawnPolicyInput(event: unknown): RouterSpawnPolicyInput {
+	const record = isRecord(event) ? event : {};
+	const eligibleRaw = Array.isArray(record.eligible) ? record.eligible : [];
+	const eligible: RouterSpawnRouteCandidate[] = eligibleRaw.map(candidate => {
+		const item = isRecord(candidate) ? candidate : {};
+		return {
+			selector: stringFrom(item.selector) ?? "",
+			tier: toRouterTier(item.tier),
+			provider: stringFrom(item.provider),
+			modelId: stringFrom(item.modelId),
+			maxRequests: numberFrom(item.maxRequests) ?? 0,
+			maxRuntimeMs: numberFrom(item.maxRuntimeMs) ?? 0,
+		};
+	});
+
+	return {
+		correlationId: stringFrom(record.correlationId) ?? "",
+		agentName: stringFrom(record.agentName) ?? "",
+		assignment: stringFrom(record.assignment) ?? "",
+		workClass: record.workClass === "judgment" ? "judgment" : "mechanical",
+		autonomy:
+			record.autonomy === "bound" || record.autonomy === "supervised" || record.autonomy === "independent"
+				? record.autonomy
+				: "independent",
+		eligible,
+		requestedModel: stringFrom(record.requestedModel),
+		fusionSidekick: record.fusionSidekick === true,
+		manualModelSelection: record.manualModelSelection === true,
+	};
+}
+
+function toCoreSpawnPolicyResult(result: RouterSpawnPolicyResult): Record<string, unknown> {
+	return {
+		allow: result.allow === true,
+		reasonCode: result.reasonCode,
+		candidateSelectors: result.candidateSelectors,
+		maxRequests: result.maxRequests,
+		maxRuntimeMs: result.maxRuntimeMs,
+		routeLabel: result.routeLabel,
+	};
+}
+
+function toRouterTier(value: unknown): RouterSpawnRouteCandidate["tier"] {
+	if (value === "light" || value === "mid" || value === "frontier") return value;
+	return "mid";
+}
+
+function extractAbortSignal(event: unknown): AbortSignal | undefined {
+	if (!isRecord(event)) return undefined;
+	const signal = event.signal;
+	return signal instanceof AbortSignal ? signal : undefined;
+}
+
+function numberFrom(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function makeToolCaptureSchema(z: any): any {

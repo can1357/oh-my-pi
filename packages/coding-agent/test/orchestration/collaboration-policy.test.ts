@@ -13,9 +13,7 @@ describe("collaboration-policy", () => {
 		const policy = resolveCollaborationPolicy(null);
 		expect(policy).toEqual(DEFAULT_COLLABORATION_POLICY);
 		expect(canDiscoverPeer(undefined, "Main", "LaneB")).toBe(true);
-		expect(authorizeIrcDelivery(undefined, { fromId: "Main", toId: "LaneB", requiresWake: true }).allow).toBe(
-			true,
-		);
+		expect(authorizeIrcDelivery(undefined, { fromId: "Main", toId: "LaneB", requiresWake: true }).allow).toBe(true);
 	});
 
 	test("report-only cannot discover/message/broadcast/wake outside parent", () => {
@@ -27,18 +25,18 @@ describe("collaboration-policy", () => {
 		expect(canDiscoverPeer(policy, "Child", "Main")).toBe(true);
 		expect(canDiscoverPeer(policy, "Child", "Peer")).toBe(false);
 
-		expect(
-			authorizeIrcDelivery(policy, { fromId: "Child", toId: "*", isBroadcast: true }).reasonCode,
-		).toBe("report-only-no-broadcast");
-		expect(
-			authorizeIrcDelivery(policy, { fromId: "Child", toId: "Peer" }).reasonCode,
-		).toBe("report-only-parent-only");
-		expect(
-			authorizeIrcDelivery(policy, { fromId: "Child", toId: "Main", requiresWake: true }).reasonCode,
-		).toBe("report-only-no-wake");
-		expect(
-			authorizeIrcDelivery(policy, { fromId: "Child", toId: "Main", busyModelReply: true }).reasonCode,
-		).toBe("report-only-no-busy-reply");
+		expect(authorizeIrcDelivery(policy, { fromId: "Child", toId: "*", isBroadcast: true }).reasonCode).toBe(
+			"report-only-no-broadcast",
+		);
+		expect(authorizeIrcDelivery(policy, { fromId: "Child", toId: "Peer" }).reasonCode).toBe(
+			"report-only-parent-only",
+		);
+		expect(authorizeIrcDelivery(policy, { fromId: "Child", toId: "Main", requiresWake: true }).reasonCode).toBe(
+			"report-only-no-wake",
+		);
+		expect(authorizeIrcDelivery(policy, { fromId: "Child", toId: "Main", busyModelReply: true }).reasonCode).toBe(
+			"report-only-no-busy-reply",
+		);
 		expect(authorizeIrcDelivery(policy, { fromId: "Child", toId: "Main" }).allow).toBe(true);
 	});
 

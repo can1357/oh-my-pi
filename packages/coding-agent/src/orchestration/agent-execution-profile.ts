@@ -169,10 +169,7 @@ function mergePolicy(base: AgentPolicyFields, layer: AgentPolicyFields | undefin
 			: (layer.workClass ?? base.workClass);
 
 	return {
-		tier:
-			base.tier && layer.tier
-				? minByRank(base.tier, layer.tier, TIER_RANK)
-				: (layer.tier ?? base.tier),
+		tier: base.tier && layer.tier ? minByRank(base.tier, layer.tier, TIER_RANK) : (layer.tier ?? base.tier),
 		autonomy:
 			base.autonomy && layer.autonomy
 				? minByRank(base.autonomy, layer.autonomy, AUTONOMY_RANK)
@@ -202,10 +199,7 @@ function mergePolicy(base: AgentPolicyFields, layer: AgentPolicyFields | undefin
 	};
 }
 
-function applyJudgmentFloor(
-	fields: AgentPolicyFields,
-	policy: JudgmentFloorPolicy,
-): AgentPolicyFields {
+function applyJudgmentFloor(fields: AgentPolicyFields, policy: JudgmentFloorPolicy): AgentPolicyFields {
 	if (fields.workClass !== "judgment") return fields;
 	const tier = fields.tier ?? DEFAULT_AGENT_EXECUTION_PROFILE.tier;
 	if (TIER_RANK[tier] >= TIER_RANK.mid) return fields;
@@ -234,10 +228,7 @@ function freezeProfile(profile: AgentExecutionProfile): AgentExecutionProfile {
  * Precedence is restrictive merge across workflow → type → id → override.
  */
 export function composeAgentPolicyFields(
-	input: Pick<
-		AgentExecutionProfileInput,
-		"workflowPolicy" | "agentTypePolicy" | "agentIdPolicy" | "override"
-	>,
+	input: Pick<AgentExecutionProfileInput, "workflowPolicy" | "agentTypePolicy" | "agentIdPolicy" | "override">,
 ): AgentPolicyFields {
 	let merged: AgentPolicyFields = {};
 	merged = mergePolicy(merged, input.workflowPolicy);

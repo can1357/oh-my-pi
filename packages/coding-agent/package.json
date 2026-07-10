@@ -3,7 +3,7 @@
 	"name": "@pk-nerdsaver-ai/pi-coding-agent",
 	"version": "16.2.6",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
-	"homepage": "https://github.com/kingkillery/oh-my-pi",
+	"homepage": "https://github.com/kingkillery/oh-my-pk",
 	"author": "Can Boluk",
 	"contributors": [
 		"Mario Zechner"
@@ -11,11 +11,11 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/kingkillery/oh-my-pi.git",
+		"url": "git+https://github.com/kingkillery/oh-my-pk.git",
 		"directory": "packages/coding-agent"
 	},
 	"bugs": {
-		"url": "https://github.com/kingkillery/oh-my-pi/issues"
+		"url": "https://github.com/kingkillery/oh-my-pk/issues"
 	},
 	"keywords": [
 		"coding-agent",

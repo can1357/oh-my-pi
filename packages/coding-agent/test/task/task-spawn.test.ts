@@ -36,6 +36,7 @@ function createSession(options: { manager?: AsyncJobManager; settings?: Record<s
 		settings: Settings.isolated(options.settings ?? {}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
+		getModelString: () => "anthropic/claude-sonnet-4-5",
 		asyncJobManager: options.manager,
 	} as unknown as ToolSession;
 }

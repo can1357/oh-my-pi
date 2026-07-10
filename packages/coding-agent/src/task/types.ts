@@ -3,11 +3,18 @@ import type { Usage } from "@pk-nerdsaver-ai/pi-ai";
 import { $env } from "@pk-nerdsaver-ai/pi-utils";
 import { type } from "arktype";
 import type { AgentPrefetch } from "../discovery/helpers";
+import type { AgentExecutionProfile, AgentTier, CollaborationMode } from "../orchestration/agent-execution-profile";
+import type { CollaborationPolicy } from "../orchestration/collaboration-policy";
 import type { AgentSessionEvent } from "../session/agent-session";
+import type { ResolvedToolProfile } from "../tools/tool-profiles";
+import type { AssignmentContractV1 } from "./assignment-contract";
+import type { AssignmentFailureClass, RecoveryAttempt, RecoveryCapsule, RecoveryDecision } from "./recovery-policy";
 import type { NestedRepoPatch } from "./worktree";
 
 /** Source of an agent definition */
 export type AgentSource = "bundled" | "user" | "project";
+
+export type AssignmentVerificationStatus = "submitted" | "verifying" | "verified" | "verification_failed";
 
 const parseNumber = (value: string | undefined, defaultValue: number): number => {
 	if (value) {
@@ -117,6 +124,18 @@ export interface TaskItem {
 	isolated?: boolean;
 	/** Working directory for this spawn; defaults to parent session cwd. */
 	cwd?: string;
+	/** Frozen execution envelope resolved before spawn allocation. */
+	executionProfile?: AgentExecutionProfile;
+	/** Resolved source-aware tool ceiling for the child. */
+	toolProfile?: ResolvedToolProfile;
+	/** Runtime collaboration authorization applied to the child. */
+	collaborationPolicy?: CollaborationPolicy;
+	/** Explicit assignment contract used for verified execution. */
+	assignmentContract?: AssignmentContractV1;
+	/** Fresh-child recovery capsule; absent for initial and legacy spawns. */
+	recoveryCapsule?: RecoveryCapsule;
+	/** Planned fresh-child recovery attempt. */
+	recoveryAttempt?: RecoveryAttempt;
 }
 
 export const taskSchema = type({
@@ -286,6 +305,19 @@ export interface AgentProgress {
 	task: string;
 	assignment?: string;
 	description?: string;
+	executionProfile?: AgentExecutionProfile;
+	toolProfile?: ResolvedToolProfile;
+	collaborationPolicy?: CollaborationPolicy;
+	assignmentContract?: AssignmentContractV1;
+	assignmentVerificationStatus?: AssignmentVerificationStatus;
+	profileTier?: AgentTier;
+	collaborationMode?: CollaborationMode;
+	failureClass?: AssignmentFailureClass;
+	recoveryAttempt?: number;
+	recoveryTier?: AgentTier;
+	recoveryProvider?: string;
+	nextRecoveryAction?: RecoveryDecision["action"];
+	isError?: boolean;
 	lastIntent?: string;
 	currentTool?: string;
 	currentToolArgs?: string;
@@ -357,6 +389,19 @@ export interface SingleResult {
 	task: string;
 	assignment?: string;
 	description?: string;
+	executionProfile?: AgentExecutionProfile;
+	toolProfile?: ResolvedToolProfile;
+	collaborationPolicy?: CollaborationPolicy;
+	assignmentContract?: AssignmentContractV1;
+	assignmentVerificationStatus?: AssignmentVerificationStatus;
+	contractDigest?: string;
+	contractRevision?: number;
+	failureClass?: AssignmentFailureClass;
+	recoveryAttempt?: number;
+	recoveryTier?: AgentTier;
+	recoveryProvider?: string;
+	nextRecoveryAction?: RecoveryDecision["action"];
+	isError?: boolean;
 	lastIntent?: string;
 	exitCode: number;
 	output: string;

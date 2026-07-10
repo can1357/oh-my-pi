@@ -210,9 +210,7 @@ export function withAssignmentContractDigest(
 		deliverables: Object.freeze([...input.deliverables]),
 		scope: Object.freeze({
 			allowedPaths: Object.freeze([...input.scope.allowedPaths]),
-			deniedPaths: input.scope.deniedPaths
-				? Object.freeze([...input.scope.deniedPaths])
-				: undefined,
+			deniedPaths: input.scope.deniedPaths ? Object.freeze([...input.scope.deniedPaths]) : undefined,
 		}),
 		procedures: input.procedures
 			? Object.freeze(input.procedures.map(procedure => Object.freeze({ ...procedure })))
@@ -238,11 +236,7 @@ function push(
 	diagnostics.push(path ? { code, message, path } : { code, message });
 }
 
-function requireNonEmptyString(
-	diagnostics: AssignmentDiagnostic[],
-	value: unknown,
-	path: string,
-): string | undefined {
+function requireNonEmptyString(diagnostics: AssignmentDiagnostic[], value: unknown, path: string): string | undefined {
 	if (typeof value !== "string") {
 		push(diagnostics, "invalid_field", `Expected string at ${path}`, path);
 		return undefined;
@@ -383,12 +377,7 @@ export function parseAssignmentContract(input: unknown): ParseAssignmentContract
 		};
 	}
 	if (input.version !== ASSIGNMENT_CONTRACT_VERSION) {
-		push(
-			diagnostics,
-			"invalid_version",
-			`Expected version ${ASSIGNMENT_CONTRACT_VERSION}`,
-			"version",
-		);
+		push(diagnostics, "invalid_version", `Expected version ${ASSIGNMENT_CONTRACT_VERSION}`, "version");
 	}
 	const id = requireNonEmptyString(diagnostics, input.id, "id");
 	if (typeof input.revision !== "number" || !Number.isInteger(input.revision) || input.revision < 0) {
@@ -400,12 +389,7 @@ export function parseAssignmentContract(input: unknown): ParseAssignmentContract
 		push(diagnostics, "invalid_field", 'workClass must be "mechanical" or "judgment"', "workClass");
 	}
 	if (typeof input.autonomy !== "string" || !AUTONOMIES.has(input.autonomy as AgentAutonomy)) {
-		push(
-			diagnostics,
-			"invalid_field",
-			'autonomy must be "bound", "supervised", or "independent"',
-			"autonomy",
-		);
+		push(diagnostics, "invalid_field", 'autonomy must be "bound", "supervised", or "independent"', "autonomy");
 	}
 	const objective = requireNonEmptyString(diagnostics, input.objective, "objective");
 	if (!isStringArray(input.deliverables)) {
@@ -415,12 +399,7 @@ export function parseAssignmentContract(input: unknown): ParseAssignmentContract
 	const procedures = parseProcedures(input.procedures, diagnostics);
 	const acceptance = parseAcceptance(input.acceptance, diagnostics);
 	if (input.reporting !== ASSIGNMENT_RESULT_VERSION) {
-		push(
-			diagnostics,
-			"invalid_version",
-			`Expected reporting ${ASSIGNMENT_RESULT_VERSION}`,
-			"reporting",
-		);
+		push(diagnostics, "invalid_version", `Expected reporting ${ASSIGNMENT_RESULT_VERSION}`, "reporting");
 	}
 
 	if (

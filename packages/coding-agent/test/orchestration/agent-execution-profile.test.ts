@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
-	JudgmentTierViolationError,
 	composeAgentPolicyFields,
+	JudgmentTierViolationError,
 	resolveAgentExecutionProfile,
 } from "../../src/orchestration/agent-execution-profile";
 
@@ -139,5 +139,4 @@ describe("resolveAgentExecutionProfile", () => {
 			}),
 		).toThrow(/Invalid maxRuntimeMs/);
 	});
-
 });

@@ -839,6 +839,11 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "kanban", description: "Open this repository in pk-kanban" },
 		],
 		allowArgs: true,
+		handle: async (_command, runtime) => {
+			await runtime.output(
+				"Remote control requires the interactive TUI. Start `omp` in a terminal, then run `/remote`.",
+			);
+		},
 		handleTui: async (command, runtime) => {
 			const ctx = runtime.ctx;
 			ctx.editor.setText("");

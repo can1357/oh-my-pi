@@ -3,6 +3,10 @@ import { Agent } from "@pk-nerdsaver-ai/pi-agent-core";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import type { SettingPath } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings-schema";
 import { IrcBus, type IrcMessage } from "@pk-nerdsaver-ai/pi-coding-agent/irc/bus";
+import {
+	type CollaborationPolicy,
+	resolveCollaborationPolicy,
+} from "@pk-nerdsaver-ai/pi-coding-agent/orchestration/collaboration-policy";
 import { AgentLifecycleManager } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
@@ -74,7 +78,10 @@ function makeToolSession(registry: AgentRegistry, agentId: string): ToolSession 
 	};
 }
 
-function createRealSession(overrides: Partial<Record<SettingPath, unknown>> = {}): {
+function createRealSession(
+	overrides: Partial<Record<SettingPath, unknown>> = {},
+	collaborationPolicy?: CollaborationPolicy,
+): {
 	session: AgentSession;
 	sessionManager: SessionManager;
 } {
@@ -90,6 +97,7 @@ function createRealSession(overrides: Partial<Record<SettingPath, unknown>> = {}
 		sessionManager,
 		settings: Settings.isolated({ "compaction.enabled": false, ...overrides }),
 		modelRegistry: {} as never,
+		collaborationPolicy,
 	});
 	return { session, sessionManager };
 }
@@ -181,6 +189,56 @@ describe("IRC", () => {
 			expect(receipt.outcome).toBe("revived");
 			expect(sub.delivered.map(msg => msg.body)).toEqual(["wake up"]);
 			expect(registry.get("0-Parked")?.status).toBe("idle");
+		});
+
+		it("authorizeIrcDelivery prevents report-only agents from waking parked parents", async () => {
+			const reportOnly = resolveCollaborationPolicy({ mode: "report-only", parentId: "Main" });
+			const sender = makeFakeSession();
+			registry.register({
+				id: "Child",
+				displayName: "child",
+				kind: "sub",
+				parentId: "Main",
+				session: sender.session,
+				collaborationPolicy: reportOnly,
+			});
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: null, status: "parked" });
+			let reviveCalls = 0;
+			AgentLifecycleManager.global().adopt("Main", {
+				idleTtlMs: 0,
+				revive: async () => {
+					reviveCalls++;
+					return makeFakeSession().session;
+				},
+			});
+
+			const receipt = await bus.send({ from: "Child", to: "Main", body: "wake up" });
+			expect(receipt).toMatchObject({ to: "Main", outcome: "failed" });
+			expect(receipt.error).toContain("report-only-no-wake");
+			expect(reviveCalls).toBe(0);
+		});
+
+		it("authorizeIrcDelivery prevents report-only broadcasts before delivery", async () => {
+			const reportOnly = resolveCollaborationPolicy({ mode: "report-only", parentId: "Main" });
+			const sender = makeFakeSession();
+			const parent = makeFakeSession();
+			registry.register({
+				id: "Child",
+				displayName: "child",
+				kind: "sub",
+				parentId: "Main",
+				session: sender.session,
+				collaborationPolicy: reportOnly,
+			});
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: parent.session });
+
+			const receipt = await bus.send(
+				{ from: "Child", to: "Main", body: "broadcast payload" },
+				{ isBroadcast: true },
+			);
+			expect(receipt).toMatchObject({ to: "Main", outcome: "failed" });
+			expect(receipt.error).toContain("report-only-no-broadcast");
+			expect(parent.delivered).toEqual([]);
 		});
 
 		it("send fails cleanly when a parked recipient has no reviver", async () => {
@@ -464,6 +522,68 @@ describe("IRC", () => {
 			expect(sub.delivered.map(msg => msg.body)).toEqual(["ping"]);
 		});
 
+		it("tool-path to=all passes isBroadcast so report-only policies reject before wake", async () => {
+			const reportOnly = resolveCollaborationPolicy({ mode: "report-only", parentId: "Main" });
+			const child = makeFakeSession();
+			const parent = makeFakeSession();
+			registry.register({
+				id: "Child",
+				displayName: "child",
+				kind: "sub",
+				parentId: "Main",
+				session: child.session,
+				collaborationPolicy: reportOnly,
+			});
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: parent.session });
+
+			const sendSpy = vi.spyOn(bus, "send");
+			const tool = new IrcTool(makeToolSession(registry, "Child"));
+			const result = await tool.execute("call-1", { op: "send", to: "all", message: "fan-out" });
+			expect(sendSpy).toHaveBeenCalled();
+			for (const call of sendSpy.mock.calls) {
+				expect(call[1]).toMatchObject({ isBroadcast: true });
+			}
+			const receipts = result.details?.receipts ?? [];
+			expect(receipts.length).toBeGreaterThan(0);
+			expect(receipts.every(r => r.outcome === "failed")).toBe(true);
+			expect(receipts.some(r => String(r.error ?? "").includes("report-only-no-broadcast"))).toBe(true);
+			expect(parent.delivered).toEqual([]);
+			sendSpy.mockRestore();
+		});
+
+		it("op=list uses viewer-filtered roster and excludes the sender", async () => {
+			const narrowed = resolveCollaborationPolicy({
+				mode: "self-coordinate",
+				parentId: "Main",
+				peerScope: "allowed",
+				allowedPeers: [],
+			});
+			const viewer = makeFakeSession();
+			const peer = makeFakeSession();
+			registry.register({
+				id: "Viewer",
+				displayName: "viewer",
+				kind: "sub",
+				parentId: "Main",
+				session: viewer.session,
+				collaborationPolicy: narrowed,
+			});
+			registry.register({
+				id: "HiddenPeer",
+				displayName: "hidden",
+				kind: "sub",
+				parentId: "Main",
+				session: peer.session,
+			});
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: makeFakeSession().session });
+
+			const tool = new IrcTool(makeToolSession(registry, "Viewer"));
+			const result = await tool.execute("call-1", { op: "list" });
+			const peerIds = result.details?.peers?.map(p => p.id) ?? [];
+			expect(peerIds).not.toContain("Viewer");
+			expect(peerIds).not.toContain("HiddenPeer");
+		});
+
 		it("op=send to=all fans out to live peers and reports per-recipient receipts", async () => {
 			const a = makeFakeSession();
 			registry.register({ id: "0-A", displayName: "task", kind: "sub", session: a.session });
@@ -665,6 +785,35 @@ describe("IRC", () => {
 			// The recipient records what was said on its behalf.
 			const record = await autoReplyEvent;
 			expect(record.details).toMatchObject({ to: "0-Sub", body: "auto answer" });
+		});
+
+		it("report-only policy blocks busy model replies while preserving incoming delivery", async () => {
+			const reportOnly = resolveCollaborationPolicy({ mode: "report-only", parentId: "0-Sub" });
+			const { session } = createRealSession({ "async.enabled": false }, reportOnly);
+			sessions.push(session);
+			registry.register({
+				id: "Main",
+				displayName: "main",
+				kind: "main",
+				session,
+				collaborationPolicy: reportOnly,
+			});
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+			const ephemeralSpy = vi
+				.spyOn(session, "runEphemeralTurn")
+				.mockResolvedValue({ replyText: "must not send", assistantMessage: {} as never });
+
+			const receipt = await bus.send(
+				{ from: "0-Sub", to: "Main", body: "question requiring a reply" },
+				{ expectsReply: true },
+			);
+			await Promise.resolve();
+
+			expect(receipt).toEqual({ to: "Main", outcome: "injected" });
+			expect(ephemeralSpy).not.toHaveBeenCalled();
+			expect(bus.unreadCount("0-Sub")).toBe(0);
 		});
 
 		it("does not auto-reply when async execution is enabled or the sender does not await", async () => {

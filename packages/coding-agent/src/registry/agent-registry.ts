@@ -9,10 +9,15 @@
  * revival) and are only removed on explicit release/teardown.
  */
 
+import { type CollaborationPolicy, canDiscoverPeer } from "../orchestration/collaboration-policy";
 import type { AgentSession } from "../session/agent-session";
 import { oneLineLabel } from "../task/types";
 
 export const MAIN_AGENT_ID = "Main";
+
+function sessionCollaborationPolicy(session: AgentSession | null | undefined): CollaborationPolicy | undefined {
+	return typeof session?.getCollaborationPolicy === "function" ? session.getCollaborationPolicy() : undefined;
+}
 
 /**
  * - `running`: a turn is in flight.
@@ -40,6 +45,8 @@ export interface AgentRef {
 	/** Null exactly when parked/aborted. */
 	session: AgentSession | null;
 	sessionFile: string | null;
+	/** Collaboration authorization used for agent-facing roster and IRC filtering. */
+	collaborationPolicy?: CollaborationPolicy;
 	createdAt: number;
 	lastActivity: number;
 	/** Short gist of what the agent is currently doing (latest intent or tool), for the work-aware roster. Display-only. */
@@ -70,6 +77,7 @@ export interface RegisterInput {
 	status?: AgentStatus;
 	color?: string;
 	cwd?: string;
+	collaborationPolicy?: CollaborationPolicy;
 }
 
 export class AgentRegistry {
@@ -101,6 +109,7 @@ export class AgentRegistry {
 			color: input.color,
 			session: input.session,
 			sessionFile: input.sessionFile ?? null,
+			collaborationPolicy: input.collaborationPolicy ?? sessionCollaborationPolicy(input.session),
 			createdAt: now,
 			lastActivity: now,
 			cwd: input.cwd,
@@ -168,6 +177,7 @@ export class AgentRegistry {
 		if (!ref) return;
 		ref.session = session;
 		if (sessionFile !== undefined) ref.sessionFile = sessionFile;
+		ref.collaborationPolicy = sessionCollaborationPolicy(session) ?? ref.collaborationPolicy;
 		ref.lastActivity = Date.now();
 	}
 
@@ -175,6 +185,12 @@ export class AgentRegistry {
 		const ref = this.#refs.get(id);
 		if (!ref) return;
 		ref.session = null;
+	}
+
+	setCollaborationPolicy(id: string, policy: CollaborationPolicy | undefined): void {
+		const ref = this.#refs.get(id);
+		if (!ref) return;
+		ref.collaborationPolicy = policy;
 	}
 
 	setDisplayName(id: string, displayName: string): void {
@@ -196,19 +212,23 @@ export class AgentRegistry {
 		return this.#refs.get(id);
 	}
 
-	list(): AgentRef[] {
-		return [...this.#refs.values()];
+	/** List raw refs for process-internal observability, or policy-filtered peers for a viewer. */
+	list(viewerId?: string): AgentRef[] {
+		const refs = [...this.#refs.values()];
+		if (!viewerId) return refs;
+		const viewer = this.#refs.get(viewerId);
+		const policy = viewer?.collaborationPolicy ?? sessionCollaborationPolicy(viewer?.session);
+		return refs.filter(
+			ref => ref.id !== viewerId && ref.kind !== "advisor" && canDiscoverPeer(policy, viewerId, ref.id),
+		);
 	}
 
 	/**
-	 * Returns every alive agent (running | idle) except the caller. Advisor refs
-	 * are observability-only transcripts, never peers, so they are excluded.
-	 * Flat namespace: every other agent is visible.
+	 * Returns every live peer (running | idle) discoverable by the caller.
+	 * Advisor refs remain observability-only and are never exposed as peers.
 	 */
 	listVisibleTo(id: string): AgentRef[] {
-		return this.list().filter(
-			ref => ref.id !== id && ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle"),
-		);
+		return this.list(id).filter(ref => ref.status === "running" || ref.status === "idle");
 	}
 
 	onChange(listener: RegistryListener): () => void {

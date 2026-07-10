@@ -236,7 +236,8 @@ function matchesRule(rule: PolicyRule, features: RouterFeatureVector): boolean {
 	if (when.irreversible !== undefined && features.irreversible !== when.irreversible) return false;
 	if (when.minRecentFailures !== undefined && (features.recentFailures ?? 0) < when.minRecentFailures) return false;
 	if (when.lastVerifier !== undefined) {
-		if (features.lastVerifier === undefined || !matchesOneOrMany(when.lastVerifier, features.lastVerifier)) return false;
+		if (features.lastVerifier === undefined || !matchesOneOrMany(when.lastVerifier, features.lastVerifier))
+			return false;
 	}
 	if (when.minEscalationCount !== undefined && (features.escalationCount ?? 0) < when.minEscalationCount) return false;
 	if (when.estimatedCacheHit !== undefined && features.estimatedCacheHit !== when.estimatedCacheHit) return false;

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -18,9 +19,18 @@ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import * as taskDiscovery from "../task/discovery";
 import * as taskExecutor from "../task/executor";
 import { AgentOutputManager } from "../task/output-manager";
+import {
+	nextRecoveryAttempt,
+	type RecoveryAttempt,
+	type RecoveryFailureFacts,
+	toFusionRecoveryRetryInput,
+} from "../task/recovery-policy";
+import { createSpawnPlan } from "../task/spawn-plan";
+import type { SingleResult } from "../task/types";
 import type { EventBus } from "../utils/event-bus";
 import type { AgentSession } from "./agent-session";
 import type { ArtifactManager } from "./artifacts";
+import { parseFusionPoolEntries } from "./fusion-router";
 import type { SessionManager } from "./session-manager";
 
 /** Minimal interface a host must satisfy to own a Fusion sidekick lifecycle. */
@@ -173,6 +183,12 @@ export async function reconcileFusionSidekickModel(host: FusionSidekickHost): Pr
 // Internal spawn machinery
 // ---------------------------------------------------------------------------
 
+interface SidekickRegistrationResult {
+	registered: boolean;
+	terminal: boolean;
+	failureMessage?: string;
+}
+
 async function spawnFusionSidekick(host: FusionSidekickHost, sidekickModel: string): Promise<string> {
 	const { session, settings, sessionManager, mcpManager, eventBus } = host;
 
@@ -182,6 +198,46 @@ async function spawnFusionSidekick(host: FusionSidekickHost, sidekickModel: stri
 		logger.warn("Fusion sidekick: task agent unavailable");
 		return "";
 	}
+
+	const assignment = fusionSidekickBootstrapPrompt.trim();
+	const correlationId = `fusion-sidekick-${Snowflake.next()}`;
+	const configuredPolicy =
+		typeof settings.resolveAgentPolicy === "function"
+			? settings.resolveAgentPolicy("Sidekick", agent.name, "default")
+			: undefined;
+	const sidekickRequestBudget = Math.max(0, Number(settings.get("fusion.sidekickRequestBudget") ?? 0) || 0);
+	const fusionPool = parseFusionPoolEntries(settings.get("fusion.modelPool") ?? []).map(entry => entry.selector);
+	const sidekickModelPool = fusionPool.length > 0 ? fusionPool : [sidekickModel];
+	const planResult = createSpawnPlan({
+		correlationId,
+		agentName: agent.name,
+		assignment,
+		description: assignment,
+		profileInput: {
+			workflowPolicy: configuredPolicy,
+			// Fusion's configured tier pool defines launch and recovery candidates;
+			// the explicit sidekick selector is the fallback only when no pool exists.
+			override: {
+				modelPool: sidekickModelPool,
+				maxRequests: sidekickRequestBudget,
+			},
+		},
+		modelPatterns: sidekickModelPool,
+		requestedModel: sidekickModel,
+		manualModelSelection: true,
+		fusionSidekick: true,
+		softRequestBudget: sidekickRequestBudget,
+	});
+	if (!planResult.ok) {
+		logger.warn("Fusion sidekick spawn plan rejected before allocation", {
+			correlationId,
+			diagnostics: planResult.diagnostics.map(diagnostic => `${diagnostic.code}: ${diagnostic.message}`),
+		});
+		return "";
+	}
+	const plan = planResult.plan;
+	// Warm-sidekick plans deliberately skip task_spawn_policy so the optional
+	// Qwen classifier performs no fetch and installs no suppression bridge.
 
 	await sessionManager.ensureOnDisk();
 	const cwd = sessionManager.getCwd();
@@ -196,99 +252,211 @@ async function spawnFusionSidekick(host: FusionSidekickHost, sidekickModel: stri
 	await fs.mkdir(artifactsDir, { recursive: true });
 
 	const outputManager = new AgentOutputManager(() => artifactsDir);
-	const id = await outputManager.allocate("Sidekick");
-
 	const localProtocolOptions: LocalProtocolOptions = {
 		getArtifactsDir: () => sessionManager.getArtifactsDir() ?? artifactsDir,
 		getSessionId: () => sessionManager.getSessionId(),
 	};
-
 	const planModeState = session.getPlanModeState();
 	const planReference = planModeState?.enabled
 		? undefined
 		: await loadOverallPlanReference(session.getPlanReferencePath(), localProtocolOptions);
-
 	const parentAgentId = session.getAgentId() ?? MAIN_AGENT_ID;
 
-	const runPromise = taskExecutor.runSubprocess({
-		cwd,
-		agent,
-		task: prompt.render(subagentUserPromptTemplate, { assignment: fusionSidekickBootstrapPrompt.trim() }),
-		assignment: fusionSidekickBootstrapPrompt.trim(),
-		description: fusionSidekickBootstrapPrompt.trim(),
-		role: "Sidekick",
-		index: 0,
-		id,
-		detached: true,
-		fusionSidekick: true,
-		modelOverride: sidekickModel,
-		outputSchema: {
-			type: "object",
-			properties: {
-				ready: { type: "boolean", const: true },
+	const launchAttempt = async (
+		selector: string,
+		maxRuntimeMs: number,
+		index: number,
+	): Promise<{ id: string; runPromise: Promise<SingleResult> }> => {
+		const id = await outputManager.allocate("Sidekick");
+		const runPromise = taskExecutor.runSubprocess({
+			cwd,
+			agent,
+			task: prompt.render(subagentUserPromptTemplate, { assignment }),
+			assignment,
+			description: assignment,
+			role: "Sidekick",
+			index,
+			id,
+			detached: true,
+			fusionSidekick: true,
+			spawnPlan: plan,
+			executionProfile: plan.profile,
+			modelOverride: selector,
+			maxRuntimeMs,
+			outputSchema: {
+				type: "object",
+				properties: {
+					ready: { type: "boolean", const: true },
+				},
+				required: ["ready"],
 			},
-			required: ["ready"],
-		},
-		parentActiveModelPattern: session.model ? formatModelString(session.model as Model<Api>) : undefined,
-		thinkingLevel: ThinkingLevel.Inherit,
-		taskDepth: 0,
-		sessionFile: parentSessionFile,
-		persistArtifacts: !!persistedArtifactsDir,
-		artifactsDir,
-		enableLsp: settings.get("task.enableLsp"),
-		eventBus,
-		authStorage: session.modelRegistry.authStorage,
-		modelRegistry: session.modelRegistry,
-		settings,
-		mcpManager,
-		skills: [...session.skills],
-		promptTemplates: [...session.promptTemplates],
-		localProtocolOptions,
-		parentArtifactManager: (sessionManager.getArtifactManager() ?? undefined) as ArtifactManager | undefined,
-		parentAgentId,
-		color: undefined,
-		planReference,
-	});
-
-	// Detached runs keep going after bootstrap, but we must not retain an id
-	// until createAgentSession has registered the sidekick. Otherwise a failed
-	// spawn latches a phantom Sidekick and blocks retries.
-	const registered = await waitForSidekickRegistration(id, runPromise);
-	if (!registered) {
-		logger.warn("Fusion sidekick failed before registry registration", { id, sidekickModel });
-		void runPromise.catch(err => {
-			logger.error("Fusion sidekick run failed", { id, error: String(err) });
+			parentActiveModelPattern: session.model ? formatModelString(session.model as Model<Api>) : undefined,
+			thinkingLevel: ThinkingLevel.Inherit,
+			taskDepth: 0,
+			sessionFile: parentSessionFile,
+			persistArtifacts: !!persistedArtifactsDir,
+			artifactsDir,
+			enableLsp: settings.get("task.enableLsp"),
+			eventBus,
+			authStorage: session.modelRegistry.authStorage,
+			modelRegistry: session.modelRegistry,
+			settings,
+			mcpManager,
+			skills: [...session.skills],
+			promptTemplates: [...session.promptTemplates],
+			localProtocolOptions,
+			parentArtifactManager: (sessionManager.getArtifactManager() ?? undefined) as ArtifactManager | undefined,
+			parentAgentId,
+			color: undefined,
+			planReference,
 		});
-		return "";
+		return { id, runPromise };
+	};
+
+	const firstCandidate = plan.eligible[0];
+	const initialAttempt: RecoveryAttempt = Object.freeze({
+		attempt: 1,
+		selector: firstCandidate.selector,
+		tier: firstCandidate.tier,
+		provider: firstCandidate.provider,
+		modelId: firstCandidate.modelId,
+		budgets: Object.freeze({
+			maxRequests: firstCandidate.maxRequests,
+			maxRuntimeMs: firstCandidate.maxRuntimeMs,
+		}),
+		maxRequests: firstCandidate.maxRequests,
+		maxRuntimeMs: firstCandidate.maxRuntimeMs,
+		freshChild: true,
+	});
+	let launched = await launchAttempt(firstCandidate.selector, firstCandidate.maxRuntimeMs, 0);
+	let registration = await waitForSidekickRegistration(launched.id, launched.runPromise);
+	if (registration.registered) {
+		logSidekickRunFailure(launched.id, launched.runPromise);
+		return launched.id;
+	}
+	logger.warn("Fusion sidekick failed before registry registration", {
+		id: launched.id,
+		sidekickModel,
+		terminal: registration.terminal,
+		error: registration.failureMessage,
+	});
+	logSidekickRunFailure(launched.id, launched.runPromise);
+	if (!registration.terminal) return "";
+
+	const previousAttempts: RecoveryAttempt[] = [initialAttempt];
+	const maxTotalAttempts = Math.min(plan.eligible.length, plan.profile.workClass === "judgment" ? 2 : 4);
+	let failedChildId = launched.id;
+	let failure: RecoveryFailureFacts = {
+		class: "liveness",
+		message: registration.failureMessage ?? "Fusion sidekick terminated before registry registration.",
+	};
+	const contract = {
+		id: "fusion-warm-sidekick-bootstrap",
+		revision: 1,
+		digest: createHash("sha256").update(assignment).digest("hex"),
+	};
+
+	while (previousAttempts.length < maxTotalAttempts) {
+		const decision = nextRecoveryAttempt({
+			workClass: plan.profile.workClass,
+			eligible: plan.eligible,
+			previousAttempts,
+			outcome: { terminal: true, failedChildId, failure },
+			requestFallbackRemaining: false,
+			contract,
+		});
+		if (decision.action === "stop") {
+			logger.warn("Fusion sidekick recovery stopped", {
+				attempt: previousAttempts.length,
+				next: decision.action,
+				reasonCode: decision.reasonCode,
+			});
+			break;
+		}
+
+		const retry = toFusionRecoveryRetryInput(decision);
+		logger.warn("Fusion sidekick recovery attempt", {
+			attempt: retry.attempt.attempt,
+			tier: retry.attempt.tier,
+			selector: retry.attempt.selector,
+			next: "spawn",
+		});
+		launched = await launchAttempt(retry.attempt.selector, retry.attempt.budgets.maxRuntimeMs, retry.attempt.attempt);
+		registration = await waitForSidekickRegistration(launched.id, launched.runPromise);
+		if (registration.registered) {
+			logger.info("Fusion sidekick recovery registered", {
+				attempt: retry.attempt.attempt,
+				tier: retry.attempt.tier,
+				next: "retain",
+				id: launched.id,
+			});
+			logSidekickRunFailure(launched.id, launched.runPromise);
+			return launched.id;
+		}
+
+		previousAttempts.push(retry.attempt);
+		failedChildId = launched.id;
+		failure = {
+			class: "liveness",
+			message: registration.failureMessage ?? "Fusion sidekick recovery terminated before registration.",
+		};
+		logSidekickRunFailure(launched.id, launched.runPromise);
+		logger.warn("Fusion sidekick recovery attempt failed", {
+			attempt: retry.attempt.attempt,
+			tier: retry.attempt.tier,
+			next: registration.terminal ? "evaluate-recovery" : "stop-nonterminal",
+		});
+		if (!registration.terminal) break;
 	}
 
-	void runPromise.catch(err => {
-		logger.error("Fusion sidekick run failed", { id, error: String(err) });
-	});
-	return id;
+	return "";
 }
 
-/** Poll until the sidekick appears in AgentRegistry, or the spawn promise rejects first. */
+function logSidekickRunFailure(id: string, runPromise: Promise<SingleResult>): void {
+	void runPromise.then(
+		result => {
+			if (!result) return;
+			if (result.exitCode !== 0 || result.error) {
+				logger.error("Fusion sidekick run failed", { id, error: result.error ?? result.stderr });
+			}
+		},
+		error => {
+			logger.error("Fusion sidekick run failed", { id, error: String(error) });
+		},
+	);
+}
+
+/** Poll until the sidekick appears in AgentRegistry, or the spawn becomes terminal. */
 async function waitForSidekickRegistration(
 	id: string,
-	runPromise: Promise<unknown>,
+	runPromise: Promise<SingleResult>,
 	timeoutMs = 30_000,
-): Promise<boolean> {
+): Promise<SidekickRegistrationResult> {
 	const deadline = Date.now() + timeoutMs;
-	let settled: { ok: boolean } | undefined;
+	let settled: { ok: true; result: SingleResult } | { ok: false; error: unknown } | undefined;
 	void runPromise.then(
-		() => {
-			settled = { ok: true };
+		result => {
+			settled = { ok: true, result };
 		},
-		() => {
-			settled = { ok: false };
+		error => {
+			settled = { ok: false, error };
 		},
 	);
 
 	while (Date.now() < deadline) {
-		if (AgentRegistry.global().get(id)) return true;
-		if (settled) return settled.ok ? AgentRegistry.global().get(id) !== undefined : false;
+		if (AgentRegistry.global().get(id)) return { registered: true, terminal: false };
+		if (settled) {
+			return settled.ok
+				? {
+						registered: false,
+						terminal: true,
+						failureMessage: settled.result.error ?? (settled.result.stderr || "Run ended before registration."),
+					}
+				: { registered: false, terminal: true, failureMessage: String(settled.error) };
+		}
 		await new Promise(resolve => setTimeout(resolve, 25));
 	}
-	return AgentRegistry.global().get(id) !== undefined;
+	return AgentRegistry.global().get(id)
+		? { registered: true, terminal: false }
+		: { registered: false, terminal: false, failureMessage: "Timed out waiting for sidekick registration." };
 }

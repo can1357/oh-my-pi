@@ -24,11 +24,11 @@ import {
 	procmgr,
 } from "@pk-nerdsaver-ai/pi-utils";
 import { JSONC, YAML } from "bun";
-import { composeAgentPolicyFields } from "../orchestration/agent-execution-profile";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
 import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
+import { composeAgentPolicyFields } from "../orchestration/agent-execution-profile";
 import { AgentStorage } from "../session/agent-storage";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { withFileLock } from "./file-lock";

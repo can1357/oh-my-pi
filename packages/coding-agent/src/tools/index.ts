@@ -418,14 +418,19 @@ export function computeEssentialBuiltinNames(settings: Settings): string[] {
 	return [...DEFAULT_ESSENTIAL_TOOL_NAMES];
 }
 
-function inferToolSource(name: string): ToolSource | undefined {
+/** Infer a tool's source identity from its name when no registry classification is available. */
+export function inferToolSource(name: string): ToolSource | undefined {
 	if (name in BUILTIN_TOOLS) return "builtin";
 	if (name in HIDDEN_TOOLS) return "hidden";
 	if (name.startsWith("mcp__")) return "mcp";
 	return undefined;
 }
 
-function isAllowedByToolProfile(profile: ResolvedToolProfile | undefined, source: ToolSource, name: string): boolean {
+export function isAllowedByToolProfile(
+	profile: ResolvedToolProfile | undefined,
+	source: ToolSource,
+	name: string,
+): boolean {
 	if (!profile) return true;
 	const normalizedName = name.toLowerCase();
 	// Canonical control tools remain callable under an explicit deny-all ceiling.

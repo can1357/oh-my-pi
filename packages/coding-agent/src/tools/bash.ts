@@ -25,7 +25,6 @@ import { getSixelLineMask } from "../utils/sixel";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { admitWindowsHeredocCommand, applyBashFixups } from "./bash-command-fixup";
-import type { ResolvedToolProfile } from "./tool-profiles";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import { checkBashInterception } from "./bash-interceptor";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
@@ -35,6 +34,7 @@ import { formatStyledTruncationWarning, type OutputMeta, stripOutputNotice } fro
 import { resolveToCwd } from "./path-utils";
 import { capPreviewLines, formatToolWorkingDirectory, previewWindowRows, replaceTabs } from "./render-utils";
 import { ToolAbortError, ToolError } from "./tool-errors";
+import type { ResolvedToolProfile } from "./tool-profiles";
 import { toolResult } from "./tool-result";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 

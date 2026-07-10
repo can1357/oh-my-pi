@@ -12,10 +12,10 @@ import {
 	type AgentExecutionProfile,
 	type AgentExecutionProfileInput,
 	type AgentTier,
-	type WorkClass,
 	JudgmentTierViolationError,
 	minBudget,
 	resolveAgentExecutionProfile,
+	type WorkClass,
 } from "../orchestration/agent-execution-profile";
 
 export type SpawnRouteLabel = "light" | "mid" | "heavy";
@@ -112,9 +112,7 @@ export interface SpawnPlan {
 	readonly requestedModel?: string;
 }
 
-export type SpawnPlanResult =
-	| { ok: true; plan: SpawnPlan }
-	| { ok: false; diagnostics: SpawnPlanDiagnostic[] };
+export type SpawnPlanResult = { ok: true; plan: SpawnPlan } | { ok: false; diagnostics: SpawnPlanDiagnostic[] };
 
 const TIER_TO_ROUTE: Record<AgentTier, SpawnRouteLabel> = {
 	light: "light",
@@ -203,10 +201,7 @@ function narrowCandidates(
  * selectors intersect current eligibility; budgets take the minimum; unknown
  * selectors reject the composition.
  */
-export function composeTaskSpawnPolicyResult(
-	plan: SpawnPlan,
-	result: TaskSpawnPolicyResult,
-): SpawnPlanResult {
+export function composeTaskSpawnPolicyResult(plan: SpawnPlan, result: TaskSpawnPolicyResult): SpawnPlanResult {
 	if (!result.allow) {
 		return {
 			ok: false,
@@ -352,16 +347,17 @@ export function createSpawnPlan(input: SpawnPlanInput): SpawnPlanResult {
 			? input.eligible
 			: candidatesFromPatterns(seedSelectors, profile, maxRequests, maxRuntimeMs);
 
-	const narrowed = narrowCandidates(
-		seedCandidates,
-		profile,
-		maxRequests,
-		maxRuntimeMs,
-		input.isSelectorAvailable,
-	);
+	const narrowed = narrowCandidates(seedCandidates, profile, maxRequests, maxRuntimeMs, input.isSelectorAvailable);
 	diagnostics.push(...narrowed.diagnostics);
 
-	if (diagnostics.some(diagnostic => diagnostic.code === "missing-correlation-id" || diagnostic.code === "missing-agent-name" || diagnostic.code === "missing-assignment")) {
+	if (
+		diagnostics.some(
+			diagnostic =>
+				diagnostic.code === "missing-correlation-id" ||
+				diagnostic.code === "missing-agent-name" ||
+				diagnostic.code === "missing-assignment",
+		)
+	) {
 		return { ok: false, diagnostics };
 	}
 

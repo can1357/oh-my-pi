@@ -9,7 +9,9 @@ import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
+import { minBudget } from "../../orchestration/agent-execution-profile";
 import type { SessionManager } from "../../session/session-manager";
+import type { TaskSpawnPolicyInput } from "../../task/spawn-plan";
 import { createExtensionModelQuery } from "./model-api";
 import type {
 	AfterProviderResponseEvent,
@@ -48,6 +50,8 @@ import type {
 	SessionCompactingResult,
 	SessionStopEvent,
 	SessionStopEventResult,
+	TaskSpawnPolicyEvent,
+	TaskSpawnPolicyEventResult,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolResultEvent,
@@ -112,6 +116,7 @@ type RunnerEmitEvent = Exclude<
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
+	| TaskSpawnPolicyEvent
 	| ResourcesDiscoverEvent
 	| InputEvent
 >;
@@ -560,12 +565,31 @@ export class ExtensionRunner {
 		ctx: ExtensionContext,
 		ext: Extension,
 		timeoutMs: number,
+		signal?: AbortSignal,
 	): Promise<TResult | undefined> {
+		signal?.throwIfAborted();
+		let detachAbortListener: (() => void) | undefined;
+		const abortPromise = signal
+			? new Promise<never>((_resolve, reject) => {
+					const onAbort = (): void => {
+						try {
+							signal.throwIfAborted();
+						} catch (error) {
+							reject(error);
+						}
+					};
+					signal.addEventListener("abort", onAbort, { once: true });
+					detachAbortListener = () => signal.removeEventListener("abort", onAbort);
+				})
+			: undefined;
+
 		try {
-			const handlerResult = await Promise.race([
+			const handlerPromise = Promise.race([
 				Promise.resolve(handler(event, ctx)),
 				Bun.sleep(timeoutMs).then(() => EXTENSION_HANDLER_TIMEOUT),
 			]);
+			const handlerResult = await (abortPromise ? Promise.race([handlerPromise, abortPromise]) : handlerPromise);
+			signal?.throwIfAborted();
 			if (handlerResult === EXTENSION_HANDLER_TIMEOUT) {
 				const error = `handler timed out after ${timeoutMs}ms`;
 				logger.warn("Extension handler timed out", {
@@ -582,6 +606,7 @@ export class ExtensionRunner {
 			}
 			return handlerResult as TResult | undefined;
 		} catch (err) {
+			signal?.throwIfAborted();
 			const message = err instanceof Error ? err.message : String(err);
 			const stack = err instanceof Error ? err.stack : undefined;
 			this.emitError({
@@ -591,6 +616,8 @@ export class ExtensionRunner {
 				stack,
 			});
 			return undefined;
+		} finally {
+			detachAbortListener?.();
 		}
 	}
 
@@ -655,6 +682,80 @@ export class ExtensionRunner {
 		}
 
 		return result as RunnerEmitResult<TEvent>;
+	}
+
+	/**
+	 * Emit task_spawn_policy and return ONE composed TaskSpawnPolicyResult.
+	 * Sticky deny short-circuits later handlers; selector intersection and budget
+	 * minima are composed in the runner before the caller applies the result.
+	 */
+	async emitTaskSpawnPolicy(
+		input: Readonly<TaskSpawnPolicyInput>,
+		signal?: AbortSignal,
+	): Promise<TaskSpawnPolicyEventResult> {
+		signal?.throwIfAborted();
+		const event: TaskSpawnPolicyEvent = signal
+			? { ...input, type: "task_spawn_policy", signal }
+			: { ...input, type: "task_spawn_policy" };
+		const knownSelectors = new Set(input.eligible.map(candidate => candidate.selector));
+		let candidateSelectors: string[] | undefined;
+		let maxRequests: number | undefined;
+		let maxRuntimeMs: number | undefined;
+		let routeLabel: TaskSpawnPolicyEventResult["routeLabel"];
+		let ctx: ExtensionContext | undefined;
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("task_spawn_policy");
+			if (!handlers || handlers.length === 0) continue;
+			ctx ??= this.createContext();
+
+			for (const handler of handlers) {
+				signal?.throwIfAborted();
+				const handlerResult = (await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					extensionHandlerTimeoutMs,
+					signal,
+				)) as TaskSpawnPolicyEventResult | undefined;
+				signal?.throwIfAborted();
+				if (!handlerResult) continue;
+				if (!handlerResult.allow) return handlerResult;
+
+				if (handlerResult.candidateSelectors !== undefined) {
+					for (const selector of handlerResult.candidateSelectors) {
+						if (!knownSelectors.has(selector)) {
+							return { allow: false, reasonCode: "unknown-selector" };
+						}
+					}
+					const allowed = new Set(handlerResult.candidateSelectors);
+					const current = candidateSelectors ?? input.eligible.map(candidate => candidate.selector);
+					candidateSelectors = current.filter(selector => allowed.has(selector));
+				}
+				if (handlerResult.maxRequests !== undefined) {
+					maxRequests =
+						maxRequests === undefined
+							? handlerResult.maxRequests
+							: minBudget(maxRequests, handlerResult.maxRequests);
+				}
+				if (handlerResult.maxRuntimeMs !== undefined) {
+					maxRuntimeMs =
+						maxRuntimeMs === undefined
+							? handlerResult.maxRuntimeMs
+							: minBudget(maxRuntimeMs, handlerResult.maxRuntimeMs);
+				}
+				if (handlerResult.routeLabel !== undefined) routeLabel = handlerResult.routeLabel;
+			}
+		}
+
+		return {
+			allow: true,
+			...(candidateSelectors === undefined ? {} : { candidateSelectors }),
+			...(maxRequests === undefined ? {} : { maxRequests }),
+			...(maxRuntimeMs === undefined ? {} : { maxRuntimeMs }),
+			...(routeLabel === undefined ? {} : { routeLabel }),
+		};
 	}
 
 	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {

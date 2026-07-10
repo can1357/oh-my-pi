@@ -1,18 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import type { SpawnRouteCandidate } from "../../src/task/spawn-plan";
 import {
 	classifyRecoveryFailure,
 	nextRecoveryAttempt,
-	toFusionRecoveryRetryInput,
 	type RecoveryAttempt,
 	type RecoveryPolicyInput,
+	toFusionRecoveryRetryInput,
 } from "../../src/task/recovery-policy";
+import type { SpawnRouteCandidate } from "../../src/task/spawn-plan";
 
-function candidate(
-	selector: string,
-	tier: SpawnRouteCandidate["tier"],
-	provider?: string,
-): SpawnRouteCandidate {
+function candidate(selector: string, tier: SpawnRouteCandidate["tier"], provider?: string): SpawnRouteCandidate {
 	return {
 		selector,
 		tier,
@@ -55,9 +51,7 @@ function baseInput(overrides: Partial<RecoveryPolicyInput> = {}): RecoveryPolicy
 
 describe("nextRecoveryAttempt", () => {
 	test("does not start while existing request fallback remains available", () => {
-		const decision = nextRecoveryAttempt(
-			baseInput({ requestFallbackRemaining: true }),
-		);
+		const decision = nextRecoveryAttempt(baseInput({ requestFallbackRemaining: true }));
 		expect(decision.action).toBe("stop");
 		if (decision.action === "stop") {
 			expect(decision.reasonCode).toBe("request_fallback_remaining");
@@ -83,9 +77,7 @@ describe("nextRecoveryAttempt", () => {
 		const attempts: RecoveryAttempt[] = [];
 		let suppressed: readonly string[] = [];
 
-		const first = nextRecoveryAttempt(
-			baseInput({ previousAttempts: attempts, suppressedProviders: suppressed }),
-		);
+		const first = nextRecoveryAttempt(baseInput({ previousAttempts: attempts, suppressedProviders: suppressed }));
 		expect(first.action).toBe("retry");
 		if (first.action !== "retry") throw new Error("expected retry");
 		expect(first.attempt.tier).toBe("light");
@@ -95,33 +87,25 @@ describe("nextRecoveryAttempt", () => {
 		attempts.push(first.attempt);
 		suppressed = first.suppressedProviders;
 
-		const second = nextRecoveryAttempt(
-			baseInput({ previousAttempts: attempts, suppressedProviders: suppressed }),
-		);
+		const second = nextRecoveryAttempt(baseInput({ previousAttempts: attempts, suppressedProviders: suppressed }));
 		expect(second.action).toBe("retry");
 		if (second.action !== "retry") throw new Error("expected retry");
 		expect(second.attempt.tier).toBe("light");
 		expect(second.attempt.provider).not.toBe(first.attempt.provider);
 		attempts.push(second.attempt);
 
-		const third = nextRecoveryAttempt(
-			baseInput({ previousAttempts: attempts, suppressedProviders: suppressed }),
-		);
+		const third = nextRecoveryAttempt(baseInput({ previousAttempts: attempts, suppressedProviders: suppressed }));
 		expect(third.action).toBe("retry");
 		if (third.action !== "retry") throw new Error("expected retry");
 		expect(third.attempt.tier).toBe("mid");
 		attempts.push(third.attempt);
 
-		const fourth = nextRecoveryAttempt(
-			baseInput({ previousAttempts: attempts, suppressedProviders: suppressed }),
-		);
+		const fourth = nextRecoveryAttempt(baseInput({ previousAttempts: attempts, suppressedProviders: suppressed }));
 		expect(fourth.action).toBe("retry");
 		if (fourth.action !== "retry") throw new Error("expected retry");
 		expect(fourth.attempt.tier).toBe("frontier");
 		attempts.push(fourth.attempt);
-		const exhausted = nextRecoveryAttempt(
-			baseInput({ previousAttempts: attempts, suppressedProviders: suppressed }),
-		);
+		const exhausted = nextRecoveryAttempt(baseInput({ previousAttempts: attempts, suppressedProviders: suppressed }));
 		expect(exhausted.action).toBe("stop");
 		if (exhausted.action === "stop") {
 			expect(exhausted.reasonCode).toBe("recovery_exhausted");

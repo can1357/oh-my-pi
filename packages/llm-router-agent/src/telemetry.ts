@@ -212,9 +212,7 @@ function summarizeContext(
 	};
 }
 
-
 function previewPrompt(input: RequestInput | undefined, preview?: PromptPreviewOptions): string | undefined {
 	if (!preview?.includePromptPreview || !input?.message) return undefined;
 	return input.message.slice(0, preview.maxPromptPreviewChars ?? 1_000);
 }
-

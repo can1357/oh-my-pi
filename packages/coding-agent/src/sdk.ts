@@ -53,7 +53,11 @@ import {
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { Settings, type SkillsSettings } from "./config/settings";
+import { validateSpawnSelectorsSemantic, validateSpawnSelectorsStructural } from "./config/spawn-selector-validation";
 import { CursorExecHandlers } from "./cursor";
+import type { AgentExecutionProfile } from "./orchestration/agent-execution-profile";
+import type { CollaborationPolicy } from "./orchestration/collaboration-policy";
+import type { ResolvedToolProfile, ToolSource } from "./tools/tool-profiles";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
@@ -115,6 +119,7 @@ import {
 import { AgentSession } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
+import { parseFusionPoolEntries } from "./session/fusion-router";
 import {
 	type CustomMessage,
 	convertToLlm,
@@ -168,6 +173,7 @@ import {
 	filterInitialToolsForDiscoveryAll,
 	getSearchTools,
 	HIDDEN_TOOLS,
+	isAllowedByToolProfile,
 	isImageProviderPreference,
 	isSearchProviderId,
 	isSearchProviderPreference,
@@ -556,6 +562,15 @@ export interface CreateAgentSessionOptions {
 	 * requests, follows it), which is the right granularity for launch timing.
 	 */
 	onFirstChatDispatch?: () => void;
+
+	/** Frozen execution envelope for subagent sessions. */
+	executionProfile?: AgentExecutionProfile;
+	/** Source-aware tool capability ceiling applied during tool construction/activation. */
+	toolProfile?: ResolvedToolProfile;
+	/** Collaboration authorization restored/applied for roster and IRC. */
+	collaborationPolicy?: CollaborationPolicy;
+	/** When true, Yield schema retries fail closed for assignment-contract mode. */
+	assignmentContractActive?: boolean;
 
 	/** Whether to auto-approve all tool calls (--auto-approve CLI flag). Default: false */
 	autoApprove?: boolean;
@@ -1122,6 +1137,24 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const settings = await (options.settings ??
 		options.settingsManager ??
 		logger.time("settings", Settings.init, { cwd, agentDir }));
+	const fusionPoolEntries = settings.get("fusion.modelPool") ?? [];
+	const fusionPoolSelectors = fusionPoolEntries.map(entry => parseFusionPoolEntries([entry])[0]?.selector ?? "");
+	const structuralSpawnDiagnostics = validateSpawnSelectorsStructural({
+		aliases: settings.get("subagent.modelAliases"),
+		agentPolicies: settings.getAgentPolicies(),
+		modelPools: {
+			"fusion.modelPool": fusionPoolSelectors,
+		},
+	});
+	if (structuralSpawnDiagnostics.length > 0) {
+		const message = structuralSpawnDiagnostics
+			.map(
+				diagnostic =>
+					`- [${diagnostic.code}] ${diagnostic.path ? `${diagnostic.path}: ` : ""}${diagnostic.message}`,
+			)
+			.join("\n");
+		throw new Error(`Spawn selector structural validation failed:\n${message}`);
+	}
 	logger.time("initializeWithSettings", initializeWithSettings, settings);
 	if (!options.modelRegistry) {
 		modelRegistry.refreshInBackground();
@@ -1500,6 +1533,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			eventBus,
 			outputSchema: options.outputSchema,
 			requireYieldTool: options.requireYieldTool,
+			assignmentContractActive: options.assignmentContractActive,
+			toolProfile: options.toolProfile,
 			taskDepth: options.taskDepth ?? 0,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
@@ -1690,11 +1725,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 									activateAll = false;
 									liveSession.enableMCPDiscovery();
 									if (!toolRegistry.has("search_tool_bm25")) {
-										const searchTool: Tool = new SearchToolBm25Tool(toolSession);
-										toolRegistry.set(
-											searchTool.name,
-											new ExtensionToolWrapper(wrapToolWithMetaNotice(searchTool), extensionRunner) as Tool,
-										);
+										const searchTool: Tool | null = SearchToolBm25Tool.createIf(toolSession, {
+											toolProfile: options.toolProfile ?? toolSession.toolProfile,
+										});
+										if (searchTool) {
+											toolRegistry.set(
+												searchTool.name,
+												new ExtensionToolWrapper(
+													wrapToolWithMetaNotice(searchTool),
+													extensionRunner,
+												) as Tool,
+											);
+										}
 									}
 									await liveSession.setActiveToolsByName([
 										...liveSession.getActiveToolNames(),
@@ -1876,11 +1918,60 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// loaded, so dynamic extension providers are only discovered here. Runs in
 		// the background (cache-aware) so startup is never blocked on the fetch; the
 		// model list re-renders when the catalog arrives, like other dynamic providers.
-		void modelRegistry.refreshRuntimeProviders().catch(error => {
+		try {
+			await modelRegistry.refreshRuntimeProviders();
+		} catch (error) {
 			logger.warn("runtime provider discovery failed", {
 				error: error instanceof Error ? error.message : String(error),
 			});
-		});
+		}
+
+		{
+			const requiredSelectors = new Set<string>();
+			const addRequiredSelector = (selector: unknown): void => {
+				if (typeof selector === "string" && selector.trim()) requiredSelectors.add(selector.trim());
+			};
+			for (const policy of Object.values(settings.getAgentPolicies())) {
+				for (const selector of policy.modelPool ?? []) addRequiredSelector(selector);
+			}
+			for (const selector of Object.values(settings.get("subagent.modelAliases"))) addRequiredSelector(selector);
+			for (const selector of Object.values(settings.get("task.agentModelOverrides"))) addRequiredSelector(selector);
+			for (const selector of Object.values(settings.get("modelRoles"))) addRequiredSelector(selector);
+			if (settings.get("fusion.enabled")) {
+				for (const selector of fusionPoolSelectors) addRequiredSelector(selector);
+				addRequiredSelector(settings.get("fusion.sidekickModel"));
+				addRequiredSelector(settings.get("fusion.sidekickStrongModel"));
+				addRequiredSelector(settings.get("fusion.compactModel"));
+			}
+			if (requiredSelectors.size > 0) {
+				const semanticSpawnDiagnostics = validateSpawnSelectorsSemantic({
+					selectors: [...requiredSelectors],
+					resolveStatus: selector => {
+						const resolved = resolveModelRoleValue(selector, modelRegistry.getAvailable() as Model[], {
+							settings,
+							matchPreferences: getModelMatchPreferences(settings),
+							modelRegistry,
+						}).model;
+						if (!resolved) {
+							return { selector, resolved: false, authenticated: false };
+						}
+						return {
+							selector,
+							resolved: true,
+							authenticated: modelRegistry.hasConfiguredAuth(resolved),
+							provider: resolved.provider,
+							modelId: resolved.id,
+						};
+					},
+				});
+				if (semanticSpawnDiagnostics.length > 0) {
+					const message = semanticSpawnDiagnostics
+						.map(diagnostic => `- [${diagnostic.code}] ${diagnostic.selector ?? ""} ${diagnostic.message}`.trim())
+						.join("\n");
+					throw new Error(`Spawn selector semantic validation failed:\n${message}`);
+				}
+			}
+		}
 
 		// Retry session-model candidates now that extension providers are
 		// registered. The initial restore runs before extensions load, so a role
@@ -2080,11 +2171,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			countToolsForAutoDiscovery(toolRegistry.keys()),
 		);
 		if (effectiveDiscoveryMode !== "off" && !toolRegistry.has("search_tool_bm25")) {
-			const searchTool: Tool = new SearchToolBm25Tool(toolSession);
-			toolRegistry.set(
-				searchTool.name,
-				new ExtensionToolWrapper(wrapToolWithMetaNotice(searchTool), extensionRunner) as Tool,
-			);
+			const searchTool: Tool | null = SearchToolBm25Tool.createIf(toolSession, {
+				toolProfile: options.toolProfile ?? toolSession.toolProfile,
+			});
+			if (searchTool) {
+				toolRegistry.set(
+					searchTool.name,
+					new ExtensionToolWrapper(wrapToolWithMetaNotice(searchTool), extensionRunner) as Tool,
+				);
+			}
 		}
 		let mcpDiscoveryEnabled = effectiveDiscoveryMode !== "off"; // back-compat: true when any discovery active
 
@@ -2312,13 +2407,31 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			];
 		}
 
-		// Custom tools and extension-registered tools are always included regardless of toolNames filter
-		const alwaysInclude: string[] = [
-			...sdkCustomTools.map(t => (isCustomTool(t) ? t.name : t.name)),
-			...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
-		];
+		// Custom tools and extension-registered tools are always included regardless of toolNames filter,
+		// but still cannot exceed an explicit source-qualified toolProfile ceiling (revive/MCP/custom).
+		const customToolNames = new Set(sdkCustomTools.map(t => (isCustomTool(t) ? t.name : t.name)));
+		const extensionToolNames = new Set(
+			registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
+		);
+		const resolveToolSource = (name: string): ToolSource | undefined => {
+			// Prefer registration identity over name-catalog so an extension/custom
+			// tool that overwrites a builtin name does not inherit the builtin ceiling.
+			if (name.startsWith("mcp__")) return "mcp";
+			if (customToolNames.has(name)) return "custom";
+			if (extensionToolNames.has(name) || registeredTools.some(t => t.definition.name === name)) {
+				return "extension";
+			}
+			if (name in BUILTIN_TOOLS) return "builtin";
+			if (name in HIDDEN_TOOLS) return "hidden";
+			return undefined;
+		};
+		const alwaysInclude: string[] = [...customToolNames, ...extensionToolNames];
 		for (const name of alwaysInclude) {
 			if (mcpDiscoveryEnabled && name.startsWith("mcp__")) {
+				continue;
+			}
+			const source = resolveToolSource(name);
+			if (options.toolProfile && (!source || !isAllowedByToolProfile(options.toolProfile, source, name))) {
 				continue;
 			}
 			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
@@ -2351,6 +2464,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				// activation persistence is a follow-up). MCP names won't collide with built-in names.
 				restored: new Set(existingSession.selectedMCPToolNames),
 				forceActive,
+				toolProfile: options.toolProfile,
+				sourceOf: resolveToolSource,
+			});
+		} else if (options.toolProfile) {
+			// Non-discovery-all paths (including cold revive) must still clamp restored MCP/custom
+			// activations to the source-qualified ceiling before the session becomes visible.
+			initialToolNames = initialToolNames.filter(name => {
+				const source = resolveToolSource(name);
+				return !!source && isAllowedByToolProfile(options.toolProfile, source, name);
 			});
 		}
 
@@ -2368,6 +2490,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			status: "running",
 			color: options.agentColor,
 			cwd,
+			collaborationPolicy: options.collaborationPolicy,
 		});
 		hasRegistered = true;
 
@@ -2697,6 +2820,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			ttsrManager,
 			obfuscator,
 			agentId: resolvedAgentId,
+			collaborationPolicy: options.collaborationPolicy,
+			toolProfile: options.toolProfile,
+			toolSourceOf: resolveToolSource,
 			agentKind,
 			providerSessionId: options.providerSessionId,
 			parentEvalSessionId: options.parentEvalSessionId,

@@ -112,9 +112,9 @@ import {
 	resolveTableRowLookup,
 } from "./sqlite-reader";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
-import { toolResult } from "./tool-result";
 import type { ResolvedToolProfile } from "./tool-profiles";
-import { selectReadGrammar, type ReadGrammarSelection } from "./tool-profiles";
+import { type ReadGrammarSelection, selectReadGrammar } from "./tool-profiles";
+import { toolResult } from "./tool-result";
 
 // Per-session memo for tree-sitter summaries. `summarizeCode` is a pure function
 // of (code, path, fold settings) but costs ~12-18ms for a ~1500-line file, and a
@@ -863,12 +863,10 @@ export class ReadTool implements AgentTool<typeof readSchema | typeof lightReadS
 	readonly #autoResizeImages: boolean;
 	readonly #defaultLimit: number;
 	readonly #inspectImageEnabled: boolean;
-	readonly #toolProfile?: ResolvedToolProfile;
 	readonly #grammar: ReadGrammarSelection;
 
 	constructor(session: ToolSession, toolProfile?: ResolvedToolProfile) {
 		this.session = session;
-		this.#toolProfile = toolProfile;
 		const surface = resolveReadToolSurface(toolProfile);
 		this.#grammar = surface.grammar;
 		this.parameters = surface.parameters;

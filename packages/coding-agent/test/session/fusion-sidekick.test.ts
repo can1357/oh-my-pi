@@ -9,7 +9,9 @@ import {
 	reconcileFusionSidekickModel,
 } from "../../src/session/fusion-sidekick";
 import * as taskDiscovery from "../../src/task/discovery";
+import type { ExecutorOptions } from "../../src/task/executor";
 import * as taskExecutor from "../../src/task/executor";
+import type { SingleResult } from "../../src/task/types";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -239,6 +241,50 @@ describe("fusion-sidekick", () => {
 			expect(runSubprocessSpy).toHaveBeenCalled();
 			expect(recordedId).toBeTruthy();
 			expect(recordedId).not.toBe("stale-missing-id");
+		});
+
+		it("counts the initial failure and exhausts the configured Fusion pool once", async () => {
+			const registryMock = { get: () => undefined };
+			agentRegistrySpy.mockImplementation(() => registryMock as unknown as AgentRegistry);
+			lifecycleSpy.mockImplementation(() => ({ release: async () => {} }) as unknown as AgentLifecycleManager);
+			discoverAgentsSpy.mockImplementation(async () => ({
+				agents: [{ id: "task", name: "task", kind: "task", path: "/test" }],
+				projectAgentsDir: null,
+			}));
+			const attemptedSelectors: string[] = [];
+			runSubprocessSpy.mockImplementation(async (options: ExecutorOptions) => {
+				const override = options.modelOverride;
+				attemptedSelectors.push(Array.isArray(override) ? (override[0] ?? "") : (override ?? ""));
+				return {
+					index: options.index,
+					id: options.id,
+					agent: options.agent.name,
+					agentSource: options.agent.source,
+					task: options.task,
+					exitCode: 1,
+					output: "",
+					stderr: "terminated before registration",
+					truncated: false,
+					durationMs: 1,
+					tokens: 0,
+					requests: 1,
+					error: "terminated before registration",
+				} satisfies SingleResult;
+			});
+
+			const host = makeHost({
+				settings: makeSettings({
+					"fusion.enabled": true,
+					"fusion.mode": "print",
+					"fusion.sidekickModel": "fallback/sidekick",
+					"fusion.modelPool": ["1=pool/first", "2=pool/second", "3=pool/third"],
+				}),
+			});
+
+			await ensureFusionSidekick(host);
+
+			expect(attemptedSelectors).toEqual(["pool/first", "pool/second", "pool/third"]);
+			expect(runSubprocessSpy).toHaveBeenCalledTimes(3);
 		});
 
 		it("force:true releases stale ref and respawns", async () => {

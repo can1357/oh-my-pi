@@ -2,15 +2,15 @@ import { describe, expect, test } from "bun:test";
 import {
 	ASSIGNMENT_CONTRACT_VERSION,
 	ASSIGNMENT_RESULT_VERSION,
-	withAssignmentContractDigest,
 	type AssignmentContractV1,
 	type AssignmentResultV1,
+	withAssignmentContractDigest,
 } from "../../src/task/assignment-contract";
 import {
+	type AssignmentVerifierRunners,
 	isPlaceholderNarrative,
 	verifyAssignment,
 	verifyAssignmentResult,
-	type AssignmentVerifierRunners,
 } from "../../src/task/assignment-verifier";
 
 function makeContract(
@@ -50,10 +50,7 @@ function makeContract(
 	});
 }
 
-function makeResult(
-	contract: AssignmentContractV1,
-	overrides: Partial<AssignmentResultV1> = {},
-): AssignmentResultV1 {
+function makeResult(contract: AssignmentContractV1, overrides: Partial<AssignmentResultV1> = {}): AssignmentResultV1 {
 	return {
 		version: ASSIGNMENT_RESULT_VERSION,
 		contractId: contract.id,
@@ -77,7 +74,6 @@ function makeResult(
 	};
 }
 
-
 function defaultActual(result: AssignmentResultV1): readonly string[] {
 	return result.changedFiles;
 }
@@ -97,7 +93,7 @@ describe("isPlaceholderNarrative", () => {
 });
 
 describe("verifyAssignmentResult", () => {
-	test("literal \"test\" review result fails as placeholder narrative", async () => {
+	test('literal "test" review result fails as placeholder narrative', async () => {
 		const contract = makeContract();
 		const result = makeResult(contract, {
 			evidence: [
@@ -217,23 +213,13 @@ describe("verifyAssignmentResult", () => {
 		const deniedResult = makeResult(contract, {
 			changedFiles: ["packages/coding-agent/src/task/executor.ts"],
 		});
-		const denied = await verifyAssignment(
-			contract,
-			deniedResult,
-			undefined,
-			defaultActual(deniedResult),
-		);
+		const denied = await verifyAssignment(contract, deniedResult, undefined, defaultActual(deniedResult));
 		expect(denied.verified).toBe(false);
 
 		const siblingResult = makeResult(contract, {
 			changedFiles: ["packages/coding-agent/src/task-extra/file.ts"],
 		});
-		const sibling = await verifyAssignment(
-			contract,
-			siblingResult,
-			undefined,
-			defaultActual(siblingResult),
-		);
+		const sibling = await verifyAssignment(contract, siblingResult, undefined, defaultActual(siblingResult));
 		expect(sibling.verified).toBe(false);
 	});
 
@@ -304,9 +290,7 @@ describe("verifyAssignmentResult", () => {
 
 		const verified = await verifyAssignmentResult({ contract, result, runners });
 		expect(verified.verified).toBe(true);
-		expect(commands).toEqual([
-			"python -m py_compile packages/coding-agent/src/eval/py/runner.py",
-		]);
+		expect(commands).toEqual(["python -m py_compile packages/coding-agent/src/eval/py/runner.py"]);
 	});
 
 	test("child-invented shell text is never executed", async () => {
@@ -515,24 +499,29 @@ describe("verifyAssignmentResult", () => {
 			})),
 		});
 		const commands: string[] = [];
-		const verified = await verifyAssignment(contract, result, {
-			runCommand: async command => {
-				commands.push(command);
-				if (command === "times-out") {
-					return { exitCode: undefined, timedOut: true, stdout: "", stderr: "" };
-				}
-				if (command === "streams") {
-					return { exitCode: 0, timedOut: false, stdout: "out", stderr: "err" };
-				}
-				return { exitCode: 0, timedOut: false, stdout: "", stderr: "" };
+		const verified = await verifyAssignment(
+			contract,
+			result,
+			{
+				runCommand: async command => {
+					commands.push(command);
+					if (command === "times-out") {
+						return { exitCode: undefined, timedOut: true, stdout: "", stderr: "" };
+					}
+					if (command === "streams") {
+						return { exitCode: 0, timedOut: false, stdout: "out", stderr: "err" };
+					}
+					return { exitCode: 0, timedOut: false, stdout: "", stderr: "" };
+				},
+				statArtifact: async path => ({
+					exists: true,
+					sizeBytes: path === "local://size" ? 5 : 6,
+					hashHex: path === "local://hash" ? "abc123" : undefined,
+				}),
+				readText: async path => (path === "local://json" ? '{"ok":true}' : "contains needle"),
 			},
-			statArtifact: async path => ({
-				exists: true,
-				sizeBytes: path === "local://size" ? 5 : 6,
-				hashHex: path === "local://hash" ? "abc123" : undefined,
-			}),
-			readText: async path => (path === "local://json" ? '{"ok":true}' : "contains needle"),
-		}, defaultActual(result));
+			defaultActual(result),
+		);
 
 		expect(verified.verified).toBe(true);
 		expect(commands).toEqual(["exit-ok", "times-out", "streams"]);
@@ -603,12 +592,9 @@ describe("verifyAssignmentResult", () => {
 			...makeResult(contract),
 			changedFiles: "not-an-array",
 		} as unknown as AssignmentResultV1;
-		const verified = await verifyAssignment(
-			contract,
-			malformed,
-			undefined,
-			["packages/coding-agent/src/task/assignment-verifier.ts"],
-		);
+		const verified = await verifyAssignment(contract, malformed, undefined, [
+			"packages/coding-agent/src/task/assignment-verifier.ts",
+		]);
 		expect(verified.verified).toBe(false);
 		expect(verified.failureClass).toBe("acceptance");
 		expect(verified.reasons[0]).toContain("Invalid result");
@@ -799,5 +785,4 @@ describe("verifyAssignmentResult", () => {
 		expect(verified.verified).toBe(false);
 		expect(verified.reasons.join(" ")).toContain("JSON schema requires a supported type");
 	});
-
 });

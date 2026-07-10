@@ -28,5 +28,5 @@ Runs bash in a shell session — terminal ops: git, bun, cargo, python.
 {{/if}}
 
 <windows-heredoc>
-On Windows, prefer `write` a script file then execute that file instead of bash heredocs (`<<`). Bound/procedural profiles reject confirmed heredocs before execution with recovery: write script file -> execute file.
+On Windows, prefer `write` a script file then execute that file instead of bash heredocs (`<<`). Bound/procedural profiles reject confirmed heredocs before execution with recovery: write script file → execute file.
 </windows-heredoc>

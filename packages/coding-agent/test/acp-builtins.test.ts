@@ -180,6 +180,17 @@ describe("ACP builtin slash commands", () => {
 		expect(output).toEqual(["Fast mode is off."]);
 	});
 
+	it("consumes remote control commands with an interactive-TUI requirement", async () => {
+		const { output, runtime } = createRuntime();
+
+		const result = await executeAcpBuiltinSlashCommand("/remote status", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output).toEqual([
+			"Remote control requires the interactive TUI. Start `omp` in a terminal, then run `/remote`.",
+		]);
+	});
+
 	it("forces a tool and returns remaining prompt text", async () => {
 		const { output, runtime } = createRuntime();
 

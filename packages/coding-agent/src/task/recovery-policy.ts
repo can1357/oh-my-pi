@@ -98,10 +98,7 @@ export interface RecoveryPolicyInput {
 	readonly verifiedPatchRefs?: readonly string[];
 }
 
-export type RecoveryStopReasonCode =
-	| "request_fallback_remaining"
-	| "terminal_outcome_required"
-	| "recovery_exhausted";
+export type RecoveryStopReasonCode = "request_fallback_remaining" | "terminal_outcome_required" | "recovery_exhausted";
 
 export type RecoveryDecision =
 	| {
@@ -122,8 +119,7 @@ const MAX_ATTEMPTS: Record<WorkClass, number> = {
 	judgment: 2,
 };
 
-const TLS_LIKE_FAILURE =
-	/\b(?:tls|ssl|certificate|cert|handshake|econnreset|econnrefused|socket|transport)\b/i;
+const TLS_LIKE_FAILURE = /\b(?:tls|ssl|certificate|cert|handshake|econnreset|econnrefused|socket|transport)\b/i;
 
 function cleanProvider(value: string | undefined): string | undefined {
 	const cleaned = value?.trim().toLowerCase();
@@ -168,10 +164,7 @@ function fallbackFailure(outcome: RecoveryOutcome): RecoveryFailureFacts {
 	);
 }
 
-function buildCapsule(
-	input: RecoveryPolicyInput,
-	failure: RecoveryFailureFacts,
-): RecoveryCapsule {
+function buildCapsule(input: RecoveryPolicyInput, failure: RecoveryFailureFacts): RecoveryCapsule {
 	const childId = input.outcome.failedChildId?.trim() || "unavailable";
 	return Object.freeze({
 		contractId: input.contract.id,
@@ -191,10 +184,7 @@ function shouldSuppressProvider(failure: RecoveryFailureFacts): boolean {
 	return failure.class === "spawn_transport" || TLS_LIKE_FAILURE.test(failure.message);
 }
 
-function nextSuppressedProviders(
-	input: RecoveryPolicyInput,
-	failure: RecoveryFailureFacts,
-): readonly string[] {
+function nextSuppressedProviders(input: RecoveryPolicyInput, failure: RecoveryFailureFacts): readonly string[] {
 	const suppressed = new Set<string>();
 	for (const provider of input.suppressedProviders ?? []) {
 		const key = cleanProvider(provider);
@@ -204,8 +194,7 @@ function nextSuppressedProviders(
 		const priorAttempts = input.previousAttempts ?? [];
 		const lastAttempt = priorAttempts[priorAttempts.length - 1];
 		let failedProvider =
-			cleanProvider(failure.failedProvider) ??
-			(lastAttempt ? attemptProviderKey(lastAttempt) : undefined);
+			cleanProvider(failure.failedProvider) ?? (lastAttempt ? attemptProviderKey(lastAttempt) : undefined);
 		if (!failedProvider) {
 			// Parent omitted failedProvider and has not recorded attempts yet.
 			// Presume the first otherwise-eligible route is the failed endpoint so
@@ -236,10 +225,7 @@ function selectNextCandidate(
 		const provider = providerKey(candidate);
 		return provider === undefined || !suppressedProviders.has(provider);
 	};
-	const pick = (
-		tier: AgentTier,
-		options?: { distinctLightProvider?: boolean },
-	): SpawnRouteCandidate | undefined =>
+	const pick = (tier: AgentTier, options?: { distinctLightProvider?: boolean }): SpawnRouteCandidate | undefined =>
 		input.eligible.find(candidate => {
 			if (candidate.tier !== tier || !canUse(candidate)) return false;
 			if (!options?.distinctLightProvider) return true;

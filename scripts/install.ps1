@@ -16,7 +16,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "kingkillery/oh-my-pi"
+$Repo = "kingkillery/oh-my-pk"
 $DistBase = if ($env:OMP_DIST_BASE) { $env:OMP_DIST_BASE } else { "https://oh-my-pk.pkking.computer" }
 $Package = "@pk-nerdsaver-ai/pi-coding-agent"
 $InstallDir = if ($env:PI_INSTALL_DIR) { $env:PI_INSTALL_DIR } else { "$env:LOCALAPPDATA\omp" }

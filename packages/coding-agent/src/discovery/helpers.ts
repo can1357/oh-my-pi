@@ -255,7 +255,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		return null;
 	}
 
-	const toolsSpecified = Object.prototype.hasOwnProperty.call(frontmatter, "tools");
+	const toolsSpecified = Object.hasOwn(frontmatter, "tools");
 	let tools: string[] | undefined;
 	if (toolsSpecified) {
 		// Preserve explicit empty arrays — do not collapse `tools: []` to omission.

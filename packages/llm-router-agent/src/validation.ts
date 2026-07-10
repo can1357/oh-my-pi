@@ -56,12 +56,10 @@ export function validateTaskSpawnConfig(config: TaskSpawnConfig | undefined): st
 	if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs)) {
 		errors.push("taskSpawn.timeoutMs must be a finite number when taskSpawn.enabled is true");
 	} else if (timeoutMs < MIN_TASK_SPAWN_TIMEOUT_MS || timeoutMs > MAX_TASK_SPAWN_TIMEOUT_MS) {
-		errors.push(
-			`taskSpawn.timeoutMs must be between ${MIN_TASK_SPAWN_TIMEOUT_MS} and ${MAX_TASK_SPAWN_TIMEOUT_MS}`,
-		);
+		errors.push(`taskSpawn.timeoutMs must be between ${MIN_TASK_SPAWN_TIMEOUT_MS} and ${MAX_TASK_SPAWN_TIMEOUT_MS}`);
 	}
 
-	if (!(config.systemPrompt?.trim())) {
+	if (!config.systemPrompt?.trim()) {
 		errors.push("taskSpawn.systemPrompt is required when taskSpawn.enabled is true");
 	}
 
@@ -95,7 +93,6 @@ function isValidHttpUrl(value: string): boolean {
 		return false;
 	}
 }
-
 
 export function validateOutput(output: string, plan: ValidationPlan, unsafeHints: string[] = []): ValidationResult {
 	const issues: ValidationIssue[] = [];

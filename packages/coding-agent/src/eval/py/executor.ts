@@ -11,13 +11,13 @@ import type { JsStatusEvent } from "../js/shared/types";
 import type { EvalCancellationCause, EvalProcessErrorEvidence } from "../types";
 import {
 	checkPythonKernelAvailability,
+	formatKernelProcessErrorEvidence,
 	type KernelDisplayOutput,
 	type KernelExecuteOptions,
 	type KernelExecuteResult,
 	type KernelExecutionError,
 	type KernelRuntimeEnv,
 	PythonKernel,
-	formatKernelProcessErrorEvidence,
 } from "./kernel";
 import { resolveExplicitPythonRuntime } from "./runtime";
 import { ensurePyToolBridge, registerPyToolBridge } from "./tool-bridge";
@@ -294,7 +294,6 @@ function formatKernelTimeoutAnnotation(
 	}
 	return `${timeoutFact}; kernel interrupted but remains running. Reset the kernel via { reset: true } if state appears corrupted.`;
 }
-
 
 function toProcessErrorEvidence(error: KernelExecutionError): EvalProcessErrorEvidence | undefined {
 	const evidence: EvalProcessErrorEvidence = {
@@ -635,12 +634,9 @@ async function executeWithKernel(
 		}
 
 		const exitCode = result.status === "ok" ? 0 : 1;
-		const processError =
-			result.error && result.status === "error" ? toProcessErrorEvidence(result.error) : undefined;
+		const processError = result.error && result.status === "error" ? toProcessErrorEvidence(result.error) : undefined;
 		const processEvidence =
-			result.error && result.status === "error"
-				? formatKernelProcessErrorEvidence(result.error)
-				: undefined;
+			result.error && result.status === "error" ? formatKernelProcessErrorEvidence(result.error) : undefined;
 		if (processEvidence) sink.push(`${processEvidence}\n`);
 		return {
 			exitCode,
@@ -661,9 +657,7 @@ async function executeWithKernel(
 				...cancellationFields(timedOut, effectiveTimeoutMs),
 				displayOutputs,
 				stdinRequested: false,
-				...(await sink.dump(
-					timedOut ? formatTimeoutAnnotation(effectiveTimeoutMs, timeoutCause) : undefined,
-				)),
+				...(await sink.dump(timedOut ? formatTimeoutAnnotation(effectiveTimeoutMs, timeoutCause) : undefined)),
 			};
 		}
 		const error = err instanceof Error ? err : new Error(String(err));

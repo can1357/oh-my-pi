@@ -130,10 +130,7 @@ function discoverableSource(tool: DiscoverableTool): ToolSource {
 	return tool.source;
 }
 
-function isDiscoverableAllowed(
-	tool: DiscoverableTool,
-	options: SearchToolBm25Options | undefined,
-): boolean {
+function isDiscoverableAllowed(tool: DiscoverableTool, options: SearchToolBm25Options | undefined): boolean {
 	const capability: ToolCapability = {
 		source: discoverableSource(tool),
 		name: tool.name,

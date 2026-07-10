@@ -25,6 +25,8 @@ You may ONLY edit these files:
 - `packages/coding-agent/src/task/persisted-revive.ts` (existing)
 - `packages/coding-agent/src/tools/yield.ts` (existing)
 - `packages/coding-agent/src/tools/index.ts` (existing)
+- `packages/coding-agent/src/tools/irc.ts` (existing)
+- `packages/coding-agent/src/prompts/system/context-layer-compress.md` (existing, prompt-format acceptance cleanup)
 - `packages/coding-agent/src/session/agent-session.ts` (existing)
 - `packages/coding-agent/src/session/session-entries.ts` (existing)
 - `packages/coding-agent/src/session/session-manager.ts` (existing)
@@ -35,12 +37,18 @@ You may ONLY edit these files:
 - `packages/coding-agent/src/extensibility/extensions/types.ts` (existing)
 - `packages/coding-agent/src/extensibility/extensions/runner.ts` (existing)
 - `packages/llm-router-agent/src/extension.ts` (existing)
+- `packages/llm-router-agent/src/defaults.ts` (existing, acceptance formatting only)
+- `packages/llm-router-agent/src/features.ts` (existing, acceptance formatting only)
+- `packages/llm-router-agent/src/policy.ts` (existing, acceptance formatting only)
+- `packages/llm-router-agent/src/step-context.ts` (existing, acceptance formatting only)
 - `packages/coding-agent/src/sdk.ts` (existing)
 - `packages/coding-agent/test/task/task-spawn.test.ts` (existing)
 - `packages/coding-agent/test/tools/task-async-fallback.test.ts` (existing)
 - `packages/coding-agent/test/tools/yield.test.ts` (existing)
 - `packages/coding-agent/test/tools/irc.test.ts` (existing)
 - `packages/coding-agent/test/session/fusion-sidekick.test.ts` (existing)
+- `packages/coding-agent/test/agent-session-mcp-discovery.test.ts` (existing, runtime ceiling regression)
+- `packages/coding-agent/test/fast-context-model-role.test.ts` (existing, acceptance formatting only)
 - `packages/coding-agent/test/task/task-render.test.ts` (new)
 - `packages/coding-agent/test/sdk-startup-validation.test.ts` (new)
 - `packages/coding-agent/test/extensibility/task-spawn-policy.test.ts` (new)
@@ -54,6 +62,8 @@ You may ONLY edit these files:
 - `packages/coding-agent/test/findings-*.md` (temporary fragments, delete only)
 
 You may NOT edit Lane A–D owned modules. Any defect in those modules returns to its owner before acceptance. Do not edit remote collaboration host/Agent Hub, package manifests, model catalog generated files, or unrelated code.
+
+Main acceptance amendment: post-merge adversarial review required tool-level IRC and MCP runtime-ceiling fixes in central integration seams. The global `check:tools` gate also required formatter-only cleanup in the listed router/context files; no behavior was changed in those cleanup-only paths.
 
 ## 3. Gap (verbatim from the table)
 

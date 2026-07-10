@@ -727,9 +727,7 @@ export class PythonKernel {
 				pending.error = mapKernelErrorFrame(frame);
 				const traceback = pending.error.traceback;
 				const message =
-					traceback.length > 0
-						? `${traceback.join("\n")}\n`
-						: `${pending.error.name}: ${pending.error.value}\n`;
+					traceback.length > 0 ? `${traceback.join("\n")}\n` : `${pending.error.name}: ${pending.error.value}\n`;
 				if (pending.options?.onChunk) {
 					await pending.options.onChunk(message);
 				}

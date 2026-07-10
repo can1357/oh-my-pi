@@ -105,5 +105,4 @@ describe("resolveSubagentModelAlias", () => {
 		);
 		expect(resolved).toBe("minimax-code/MiniMax-M3:medium");
 	});
-
 });

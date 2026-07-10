@@ -197,8 +197,8 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 	#executeList(registry: AgentRegistry, senderId: string): AgentToolResult<IrcDetails> {
 		const bus = IrcBus.global();
 		const peers = registry
-			.list()
-			.filter(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")
+			.list(senderId)
+			.filter(ref => ref.status !== "aborted")
 			.map(ref => ({
 				id: ref.id,
 				displayName: ref.displayName,
@@ -307,7 +307,14 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 						// Awaited sends mark the sender as blocked on an answer so a
 						// busy recipient that cannot reach a step boundary (async
 						// disabled) auto-replies instead of stranding the sender.
-						params.await ? { expectsReply: true } : undefined,
+						// Broadcasts must carry isBroadcast so report-only / narrowed
+						// collaboration policies can reject fan-out before wake/revive.
+						params.await || isBroadcast
+							? {
+									...(params.await ? { expectsReply: true } : {}),
+									...(isBroadcast ? { isBroadcast: true } : {}),
+								}
+							: undefined,
 					),
 				),
 			);

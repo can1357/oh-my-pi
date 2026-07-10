@@ -4,6 +4,7 @@
   "parallelLanes": ["B", "C", "D"],
   "planAmendments": [
     ".prd/small-model-orchestration-B-contracts-recovery.md",
+    ".prd/small-model-orchestration-D-router-adapter.md",
     ".prd/small-model-orchestration-E-acceptance.md",
     ".prd/small-model-orchestration-ownership.json"
   ],
@@ -39,7 +40,8 @@
     "packages/coding-agent/test/task/task-recovery-integration.test.ts",
     "packages/coding-agent/test/tools/tool-profile-integration.test.ts",
     "packages/coding-agent/test/task/persisted-profile-revive.test.ts",
-    "packages/coding-agent/test/orchestration/small-model-orchestration-report.md"
+    "packages/coding-agent/test/orchestration/small-model-orchestration-report.md",
+    "packages/coding-agent/test/agent-session-mcp-discovery.test.ts"
   ],
   "lanes": {
     "A": {
@@ -127,6 +129,8 @@
         "packages/coding-agent/src/task/persisted-revive.ts",
         "packages/coding-agent/src/tools/yield.ts",
         "packages/coding-agent/src/tools/index.ts",
+        "packages/coding-agent/src/tools/irc.ts",
+        "packages/coding-agent/src/prompts/system/context-layer-compress.md",
         "packages/coding-agent/src/session/agent-session.ts",
         "packages/coding-agent/src/session/session-entries.ts",
         "packages/coding-agent/src/session/session-manager.ts",
@@ -137,12 +141,18 @@
         "packages/coding-agent/src/extensibility/extensions/types.ts",
         "packages/coding-agent/src/extensibility/extensions/runner.ts",
         "packages/llm-router-agent/src/extension.ts",
+        "packages/llm-router-agent/src/defaults.ts",
+        "packages/llm-router-agent/src/features.ts",
+        "packages/llm-router-agent/src/policy.ts",
+        "packages/llm-router-agent/src/step-context.ts",
         "packages/coding-agent/src/sdk.ts",
         "packages/coding-agent/test/task/task-spawn.test.ts",
         "packages/coding-agent/test/tools/task-async-fallback.test.ts",
         "packages/coding-agent/test/tools/yield.test.ts",
         "packages/coding-agent/test/tools/irc.test.ts",
         "packages/coding-agent/test/session/fusion-sidekick.test.ts",
+        "packages/coding-agent/test/agent-session-mcp-discovery.test.ts",
+        "packages/coding-agent/test/fast-context-model-role.test.ts",
         "packages/coding-agent/test/task/task-render.test.ts",
         "packages/coding-agent/test/sdk-startup-validation.test.ts",
         "packages/coding-agent/test/extensibility/task-spawn-policy.test.ts",

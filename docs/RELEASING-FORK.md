@@ -82,7 +82,7 @@ bun scripts/release-local.ts 16.1.10
 # --- Apple-Silicon Mac, reached over Tailscale SSH (e.g. ssh k@mac2) ---
 # One-time: bun + repo on MAIN (not the tag, see PITFALL) + deps
 curl -fsSL https://bun.sh/install | bash
-git clone --branch main https://github.com/kingkillery/oh-my-pi.git ompbuild && cd ompbuild && bun install
+git clone --branch main https://github.com/kingkillery/oh-my-pk.git ompbuild && cd ompbuild && bun install
 # Cross toolchain — rust targets MUST be added from INSIDE the repo so they land
 # on the pinned rust-toolchain.toml channel, not the default:
 rustup target add x86_64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu

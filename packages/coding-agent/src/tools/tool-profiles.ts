@@ -74,11 +74,7 @@ export interface EditGrammarSelection {
 	readonly descriptionKind: "none" | "replace" | "hashline" | "apply-patch";
 }
 
-export const CONTROL_BUILTIN_NAMES: ReadonlySet<string> = new Set([
-	"yield",
-	"resolve",
-	"report_tool_issue",
-]);
+export const CONTROL_BUILTIN_NAMES: ReadonlySet<string> = new Set(["yield", "resolve", "report_tool_issue"]);
 
 export const LIGHT_BUILTIN_NAMES: ReadonlySet<string> = new Set([
 	"read",
@@ -173,11 +169,7 @@ function isFrontierAllowed(capability: ToolCapability, autonomy: AgentAutonomy):
 	return true;
 }
 
-function tierAllowsCapability(
-	tier: AgentTier,
-	autonomy: AgentAutonomy,
-	capability: ToolCapability,
-): boolean {
+function tierAllowsCapability(tier: AgentTier, autonomy: AgentAutonomy, capability: ToolCapability): boolean {
 	switch (tier) {
 		case "light":
 			return isLightAllowed(capability);
@@ -223,10 +215,7 @@ export function resolveToolProfile(input: ToolProfileInput = {}): ResolvedToolPr
 	const tier = input.tier ?? execution.tier;
 	const autonomy = input.autonomy ?? execution.autonomy;
 	const requestedEditMode = input.editMode ?? execution.editMode;
-	const editMode = minEditMode(
-		minEditMode(requestedEditMode, tierEditCap(tier)),
-		autonomyEditCap(autonomy),
-	);
+	const editMode = minEditMode(minEditMode(requestedEditMode, tierEditCap(tier)), autonomyEditCap(autonomy));
 
 	const agentTools = normalizeNameList(input.agentTools);
 	const workflowTools = normalizeNameList(input.workflowTools);
@@ -303,7 +292,9 @@ export function resolveToolProfile(input: ToolProfileInput = {}): ResolvedToolPr
 
 	const allowDiscovery =
 		autonomyAllowsDiscovery(tier, autonomy) &&
-		maximum.some(cap => cap.name === "search_tool_bm25" || (cap.source === "builtin" && cap.name === "*") || cap.name === "*");
+		maximum.some(
+			cap => cap.name === "search_tool_bm25" || (cap.source === "builtin" && cap.name === "*") || cap.name === "*",
+		);
 
 	return Object.freeze({
 		maximum,
@@ -315,10 +306,7 @@ export function resolveToolProfile(input: ToolProfileInput = {}): ResolvedToolPr
 	});
 }
 
-export function isToolCapabilityAllowed(
-	profile: ResolvedToolProfile,
-	capability: ToolCapability,
-): boolean {
+export function isToolCapabilityAllowed(profile: ResolvedToolProfile, capability: ToolCapability): boolean {
 	for (const allowed of profile.maximum) {
 		if (allowed.source !== capability.source) continue;
 		if (allowed.name === "*" || allowed.name === capability.name) return true;
@@ -339,9 +327,7 @@ export function filterAutoToolNames(
 	names: readonly string[],
 	source: ToolSource = "builtin",
 ): string[] {
-	return names.filter(name =>
-		isToolCapabilityAllowed(profile, { source, name: name.toLowerCase() }),
-	);
+	return names.filter(name => isToolCapabilityAllowed(profile, { source, name: name.toLowerCase() }));
 }
 
 export function selectReadGrammar(profile?: ResolvedToolProfile | null): ReadGrammarSelection {
@@ -426,15 +412,11 @@ export function selectEditGrammar(profile?: ResolvedToolProfile | null): EditGra
  * Map a profile onto the edit tool's runtime mode. When `profile` is absent,
  * returns `undefined` so callers keep legacy session/settings resolution.
  */
-export function resolveProfileEditRuntimeMode(
-	profile?: ResolvedToolProfile | null,
-): EditMode | undefined {
+export function resolveProfileEditRuntimeMode(profile?: ResolvedToolProfile | null): EditMode | undefined {
 	if (!profile) return undefined;
 	return selectEditGrammar(profile).runtimeMode ?? undefined;
 }
 
-export function createCapabilityPredicate(
-	profile: ResolvedToolProfile,
-): (capability: ToolCapability) => boolean {
+export function createCapabilityPredicate(profile: ResolvedToolProfile): (capability: ToolCapability) => boolean {
 	return capability => isToolCapabilityAllowed(profile, capability);
 }

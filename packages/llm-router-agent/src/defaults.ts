@@ -148,7 +148,12 @@ export const DEFAULT_CONFIG: RouterConfig = {
 			priority: 87,
 			description: "Escalate after repeated failed agent steps even without a verifier result.",
 			when: { minRecentFailures: 1 },
-			route: { model: "quality", fallback: ["coding", "balanced"], force: true, reason: "recent agent failure recovery" },
+			route: {
+				model: "quality",
+				fallback: ["coding", "balanced"],
+				force: true,
+				reason: "recent agent failure recovery",
+			},
 		},
 		{
 			name: "escalated-agent-step",

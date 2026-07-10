@@ -7,13 +7,13 @@
 
 import { createHash } from "node:crypto";
 import {
-	computeAssignmentContractDigest,
-	parseAssignmentContract,
-	parseAssignmentResult,
 	type AcceptanceCriterion,
 	type AcceptanceEvidence,
 	type AssignmentContractV1,
 	type AssignmentResultV1,
+	computeAssignmentContractDigest,
+	parseAssignmentContract,
+	parseAssignmentResult,
 } from "./assignment-contract";
 import type { AssignmentFailureClass } from "./recovery-policy";
 
@@ -46,10 +46,7 @@ export interface ArtifactStat {
  * contract are executed — never child-invented shell text.
  */
 export interface AssignmentVerifierRunners {
-	runCommand?: (
-		command: string,
-		params: Readonly<Record<string, unknown>>,
-	) => Promise<CommandCheckResult>;
+	runCommand?: (command: string, params: Readonly<Record<string, unknown>>) => Promise<CommandCheckResult>;
 	statArtifact?: (path: string, algorithm?: string) => Promise<ArtifactStat>;
 	readText?: (path: string) => Promise<string>;
 	parseJson?: (text: string) => unknown;
@@ -151,12 +148,7 @@ function normalizeRepoPath(value: string, allowRoot: boolean): string | undefine
 	if (normalized.endsWith("/**")) normalized = normalized.slice(0, -3);
 	else if (normalized.endsWith("/*")) normalized = normalized.slice(0, -2);
 	normalized = normalized.replace(/\/+$/, "");
-	if (
-		!normalized ||
-		normalized.startsWith("/") ||
-		/^[a-z]:\//i.test(normalized) ||
-		normalized.includes("\0")
-	) {
+	if (!normalized || normalized.startsWith("/") || /^[a-z]:\//i.test(normalized) || normalized.includes("\0")) {
 		return undefined;
 	}
 
@@ -181,10 +173,7 @@ function pathMatches(prefixValue: string, filePath: string): boolean {
 	return prefix === "" || normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`);
 }
 
-export function isPathInScope(
-	filePath: string,
-	scope: AssignmentContractV1["scope"],
-): boolean {
+export function isPathInScope(filePath: string, scope: AssignmentContractV1["scope"]): boolean {
 	const denied = scope.deniedPaths ?? [];
 	if (denied.some(prefix => pathMatches(prefix, filePath))) return false;
 	return scope.allowedPaths.some(prefix => pathMatches(prefix, filePath));
@@ -200,15 +189,11 @@ function isInternalArtifactRef(path: string): boolean {
 	return INTERNAL_ARTIFACT_SCHEMES.has(match[1].toLowerCase());
 }
 
-function firstFailure(
-	criteria: readonly CriterionVerification[],
-): CriterionVerification | undefined {
+function firstFailure(criteria: readonly CriterionVerification[]): CriterionVerification | undefined {
 	return criteria.find(item => !item.passed);
 }
 
-function evidenceByCriterion(
-	evidence: readonly AcceptanceEvidence[],
-): Map<string, AcceptanceEvidence[]> {
+function evidenceByCriterion(evidence: readonly AcceptanceEvidence[]): Map<string, AcceptanceEvidence[]> {
 	const map = new Map<string, AcceptanceEvidence[]>();
 	for (const item of evidence) {
 		const list = map.get(item.criterionId) ?? [];
@@ -244,10 +229,8 @@ async function runParentCommand(
 	| { ok: true; result: CommandCheckResult; command: string }
 	| { ok: false; reason: string; failureClass: VerificationFailureClass }
 > {
-	const command =
-		asString(criterion.params?.command) ??
-		asString(criterion.params?.cmd);
-	if (!command || !command.trim()) {
+	const command = asString(criterion.params?.command) ?? asString(criterion.params?.cmd);
+	if (!command?.trim()) {
 		return {
 			ok: false,
 			failureClass: "check_error",
@@ -275,19 +258,9 @@ async function runParentCommand(
 	}
 }
 
-const SUPPORTED_JSON_SCHEMA_TYPES = new Set([
-	"object",
-	"array",
-	"string",
-	"number",
-	"boolean",
-	"null",
-]);
+const SUPPORTED_JSON_SCHEMA_TYPES = new Set(["object", "array", "string", "number", "boolean", "null"]);
 
-function validateJsonAgainstSchema(
-	value: unknown,
-	schema: Readonly<Record<string, unknown>>,
-): string | undefined {
+function validateJsonAgainstSchema(value: unknown, schema: Readonly<Record<string, unknown>>): string | undefined {
 	const type = asString(schema.type);
 	if (!type || !SUPPORTED_JSON_SCHEMA_TYPES.has(type)) {
 		return "JSON schema requires a supported type";
@@ -365,9 +338,7 @@ async function verifyCriterion(
 	switch (criterion.check) {
 		case "changed_file_scope": {
 			const changedFiles = actualChangedFiles ?? result.changedFiles;
-			const outOfScope = changedFiles.filter(
-				filePath => !isPathInScope(filePath, contract.scope),
-			);
+			const outOfScope = changedFiles.filter(filePath => !isPathInScope(filePath, contract.scope));
 			if (outOfScope.length > 0) {
 				return {
 					criterionId: criterion.id,
@@ -818,15 +789,10 @@ async function verifyCriterion(
 					criterionId: criterion.id,
 					passed: false,
 					failureClass: "check_failed",
-					reason: `Invalid JSON in ${artifactPath}: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
+					reason: `Invalid JSON in ${artifactPath}: ${error instanceof Error ? error.message : String(error)}`,
 				};
 			}
-			const schemaError = validateJsonAgainstSchema(
-				parsed,
-				schema as Readonly<Record<string, unknown>>,
-			);
+			const schemaError = validateJsonAgainstSchema(parsed, schema as Readonly<Record<string, unknown>>);
 			if (schemaError) {
 				return {
 					criterionId: criterion.id,
@@ -895,13 +861,9 @@ async function verifyParsedAssignment(
 		return rejectedVerification([`Result blocker is placeholder-only: ${placeholderBlocker}`]);
 	}
 
-	const scopeVerificationApplies = contract.acceptance.some(
-		criterion => criterion.check === "changed_file_scope",
-	);
+	const scopeVerificationApplies = contract.acceptance.some(criterion => criterion.check === "changed_file_scope");
 	if (scopeVerificationApplies && actualChangedFiles === undefined) {
-		return rejectedVerification([
-			"Missing authoritative actualChangedFiles for scope verification",
-		]);
+		return rejectedVerification(["Missing authoritative actualChangedFiles for scope verification"]);
 	}
 
 	const authoritativeChangedFiles = actualChangedFiles ?? result.changedFiles;
@@ -915,9 +877,7 @@ async function verifyParsedAssignment(
 		const actual = new Set(actualChangedFiles);
 		const omitted = actualChangedFiles.filter(filePath => !reported.has(filePath));
 		if (omitted.length > 0) {
-			return rejectedVerification([
-				`Child omitted parent-authored changed path(s): ${omitted.join(", ")}`,
-			]);
+			return rejectedVerification([`Child omitted parent-authored changed path(s): ${omitted.join(", ")}`]);
 		}
 		const unexpected = result.changedFiles.filter(filePath => !actual.has(filePath));
 		if (unexpected.length > 0) {
@@ -941,14 +901,7 @@ async function verifyParsedAssignment(
 		const items = byId.get(criterion.id) ?? [];
 		let verified: CriterionVerification;
 		try {
-			verified = await verifyCriterion(
-			criterion,
-			contract,
-			result,
-			items,
-			runners,
-			actualChangedFiles,
-		);
+			verified = await verifyCriterion(criterion, contract, result, items, runners, actualChangedFiles);
 		} catch (error) {
 			verified = {
 				criterionId: criterion.id,
@@ -1014,12 +967,7 @@ export async function verifyAssignment(
 				parsedResult.diagnostics.map(diagnostic => `Invalid result: ${diagnostic.message}`),
 			);
 		}
-		return await verifyParsedAssignment(
-			parsedContract.contract,
-			parsedResult.result,
-			runners,
-			actualChangedFiles,
-		);
+		return await verifyParsedAssignment(parsedContract.contract, parsedResult.result, runners, actualChangedFiles);
 	} catch (error) {
 		return rejectedVerification([
 			`Assignment verification rejected malformed data: ${error instanceof Error ? error.message : String(error)}`,
@@ -1028,15 +976,8 @@ export async function verifyAssignment(
 }
 
 /** Object-input compatibility wrapper for integration callers. */
-export async function verifyAssignmentResult(
-	input: VerifyAssignmentInput,
-): Promise<VerificationResult> {
-	return await verifyAssignment(
-		input.contract,
-		input.result,
-		input.runners,
-		input.actualChangedFiles,
-	);
+export async function verifyAssignmentResult(input: VerifyAssignmentInput): Promise<VerificationResult> {
+	return await verifyAssignment(input.contract, input.result, input.runners, input.actualChangedFiles);
 }
 
 /** Helper for tests/callers that hash artifact bytes with a known algorithm. */

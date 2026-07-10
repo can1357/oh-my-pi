@@ -401,6 +401,26 @@ describe("YieldTool", () => {
 		]);
 	});
 
+	it("fails closed after repeated schema failures while an assignment contract is active", async () => {
+		const outputSchema = {
+			type: "object",
+			properties: {
+				token: {
+					type: "string",
+					minLength: 3,
+				},
+			},
+			required: ["token"],
+		};
+		const tool = new YieldTool(createSession({ outputSchema, assignmentContractActive: true }));
+
+		for (let attempt = 1; attempt <= 5; attempt++) {
+			await expect(
+				tool.execute(`contract-invalid-${attempt}`, { result: { data: { token: "ab" } } } as never),
+			).rejects.toThrow("assignment contract remains enforced");
+		}
+	});
+
 	it("keeps schema degradation counter at zero when submissions are valid", async () => {
 		const outputSchema = {
 			type: "object",

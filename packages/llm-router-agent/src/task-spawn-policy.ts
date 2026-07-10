@@ -1,11 +1,6 @@
 import { classifySpawnDifficulty, type RouteLabel } from "./qwen-client.js";
 import { taskSpawnTelemetry, writeTelemetry } from "./telemetry.js";
-import type {
-	RouterConfig,
-	TaskSpawnConfig,
-	TaskSpawnLabelMappings,
-	TelemetryRecord,
-} from "./types.js";
+import type { RouterConfig, TaskSpawnConfig, TaskSpawnLabelMappings, TelemetryRecord } from "./types.js";
 
 export type RouterWorkClass = "mechanical" | "judgment";
 export type RouterAutonomy = "bound" | "supervised" | "independent";
@@ -103,7 +98,7 @@ export function createTaskSpawnPolicy(config: RouterConfig): RouterTaskSpawnPoli
 		// Judgment minimum happens before classifier; never select light for judgment work.
 		let workingEligible = input.eligible;
 		if (input.workClass === "judgment") {
-			workingEligible = input.eligible.filter((candidate) => candidate.tier !== "light");
+			workingEligible = input.eligible.filter(candidate => candidate.tier !== "light");
 			if (workingEligible.length === 0) {
 				const denied: RouterSpawnPolicyResult = {
 					allow: false,
@@ -141,23 +136,23 @@ export function createTaskSpawnPolicy(config: RouterConfig): RouterTaskSpawnPoli
 			reasonCode = "judgment_floor";
 		}
 
-		const narrowed = workingEligible.filter((candidate) => candidate.tier === targetTier);
+		const narrowed = workingEligible.filter(candidate => candidate.tier === targetTier);
 		const preserved = narrowed.length === 0;
 		// Fallback mid with no prevalidated mid candidate preserves the deterministic eligible set.
 		const selected = preserved ? workingEligible : narrowed;
 		if (preserved) {
 			reasonCode =
 				classification.source === "fallback" || routeLabel === "mid"
-					? classification.reason ?? "fallback_preserve_eligible"
+					? (classification.reason ?? "fallback_preserve_eligible")
 					: "preserve_eligible_no_tier_match";
 		}
 
 		const result: RouterSpawnPolicyResult = {
 			allow: true,
 			routeLabel,
-			candidateSelectors: selected.map((candidate) => candidate.selector),
-			maxRequests: minPositive(selected.map((candidate) => candidate.maxRequests)),
-			maxRuntimeMs: minPositive(selected.map((candidate) => candidate.maxRuntimeMs)),
+			candidateSelectors: selected.map(candidate => candidate.selector),
+			maxRequests: minPositive(selected.map(candidate => candidate.maxRequests)),
+			maxRuntimeMs: minPositive(selected.map(candidate => candidate.maxRuntimeMs)),
 			reasonCode,
 		};
 
@@ -173,10 +168,7 @@ export function createTaskSpawnPolicy(config: RouterConfig): RouterTaskSpawnPoli
 	};
 }
 
-function unchangedAllow(
-	_input: Readonly<RouterSpawnPolicyInput>,
-	reasonCode: string,
-): RouterSpawnPolicyResult {
+function unchangedAllow(_input: Readonly<RouterSpawnPolicyInput>, reasonCode: string): RouterSpawnPolicyResult {
 	// Omit selectors/budgets so Lane E composition leaves ordering and budgets unchanged.
 	return {
 		allow: true,
@@ -230,7 +222,7 @@ function uniqueTiers(eligible: readonly RouterSpawnRouteCandidate[]): string[] {
 }
 
 function minPositive(values: readonly number[]): number | undefined {
-	const finite = values.filter((value) => Number.isFinite(value));
+	const finite = values.filter(value => Number.isFinite(value));
 	if (finite.length === 0) return undefined;
 	return Math.min(...finite);
 }

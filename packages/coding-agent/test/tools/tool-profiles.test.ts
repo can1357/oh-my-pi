@@ -91,7 +91,6 @@ describe("resolveToolProfile", () => {
 	});
 });
 
-
 describe("BM25 capability double-check helpers", () => {
 	test("forbidden (source,name) pairs stay denied after ranking filter", () => {
 		const profile = resolveToolProfile({

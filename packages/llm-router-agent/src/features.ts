@@ -16,7 +16,6 @@ const TASK_TYPES: TaskType[] = [
 	"unknown",
 ];
 
-
 const URL_RE = /https?:\/\/|www\.|\b[a-z0-9-]+\.(?:com|org|net|io|ai|dev|gov|edu)\b/i;
 const CODE_FENCE_RE = /```|~~~|<code>|<\/code>/i;
 const JSON_HINT_RE = /\b(json|schema|structured output|valid object|strict format|parseable|pydantic|zod)\b/i;
@@ -323,7 +322,6 @@ function countMatches(text: string, needles: string[]): number {
 function countQuestionMarks(text: string): number {
 	return (text.match(/\?/g) ?? []).length;
 }
-
 
 function clamp01(value: number): number {
 	if (Number.isNaN(value)) return 0;

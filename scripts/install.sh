@@ -10,7 +10,7 @@ set -e
 #   --ref <ref>    Install specific tag/commit/branch
 #   -r <ref>       Shorthand for --ref
 
-REPO="kingkillery/oh-my-pi"
+REPO="kingkillery/oh-my-pk"
 DIST_BASE="${OMP_DIST_BASE:-https://oh-my-pk.pkking.computer}"
 PACKAGE="@pk-nerdsaver-ai/pi-coding-agent"
 INSTALL_DIR="${PI_INSTALL_DIR:-$HOME/.local/bin}"

@@ -3,12 +3,15 @@ import * as fs from "node:fs/promises";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
+import { hydrateCollaborationPolicy } from "../orchestration/collaboration-policy";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
+import { inferToolSource, isAllowedByToolProfile } from "../tools/index";
+import { isToolCapabilityAllowed, resolveToolProfile } from "../tools/tool-profiles";
 import { createMCPProxyTools, createSubagentSettings } from "./executor";
 
 /**
@@ -60,6 +63,46 @@ export function createPersistedSubagentReviverFactory(
 			return undefined;
 		}
 		const init = peek.init;
+		const collaborationPolicy = hydrateCollaborationPolicy(init.collaborationPolicy);
+		// Only materialize a ceiling when a source-qualified toolCeiling was persisted.
+		// An executionProfile alone must not expand into a full-tier catalog ceiling —
+		// that would silently widen cold-revived agents beyond their stored contract.
+		const toolProfile =
+			init.toolCeiling === undefined
+				? undefined
+				: resolveToolProfile({
+						execution: init.executionProfile,
+						declaredCapabilities: init.toolCeiling,
+					});
+		const activeToolNames = toolProfile
+			? init.tools.filter(name => {
+					const normalized = name.toLowerCase();
+					// Prefer ceiling-declared (source,name) identity over catalog-first
+					// inference so a bare-name extension/custom overwrite of a builtin
+					// (tools:["read"] + ceiling extension:read only) is not false-denied.
+					const declaredForName = toolProfile.maximum.filter(c => c.name.toLowerCase() === normalized);
+					if (declaredForName.length > 0) {
+						return declaredForName.some(c => isAllowedByToolProfile(toolProfile, c.source, name));
+					}
+					if (name.startsWith("mcp__")) {
+						return isAllowedByToolProfile(toolProfile, "mcp", name);
+					}
+					const inferred = inferToolSource(name);
+					if (inferred) {
+						// No declared capability for this name: catalog identity only.
+						// Builtin `read` must not admit an undeclared MCP/extension twin.
+						return isAllowedByToolProfile(toolProfile, inferred, name);
+					}
+					// Ambiguous non-prefixed names: allow only when an explicit
+					// mcp/extension/custom capability admits this exact name.
+					return (["mcp", "extension", "custom"] as const).some(source =>
+						isToolCapabilityAllowed(toolProfile, { source, name: normalized }),
+					);
+				})
+			: init.tools;
+		// The parked ref must carry the hydrated policy before a reviver can make
+		// it live or eligible for policy-gated IRC delivery.
+		registry.setCollaborationPolicy(ref.id, collaborationPolicy);
 		// taskDepth drives real capability gating (task-spawn allowance, memory
 		// startup, …); derive it from the persisted parent chain rather than
 		// assuming a fixed level.
@@ -97,7 +140,10 @@ export function createPersistedSubagentReviverFactory(
 				parentTaskPrefix: ref.id,
 				parentAgentId: ref.parentId,
 				taskDepth,
-				toolNames: init.tools,
+				executionProfile: init.executionProfile,
+				toolProfile,
+				collaborationPolicy,
+				toolNames: activeToolNames,
 				outputSchema: init.outputSchema,
 				requireYieldTool: true,
 				maxModelRequestsPerRun: init.fusionSidekick ? init.maxModelRequestsPerRun : undefined,
@@ -111,10 +157,11 @@ export function createPersistedSubagentReviverFactory(
 				mcpManager,
 				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 			});
-			// Clamp the active set to the persisted list: createAgentSession's
-			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
-			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName(init.tools);
+			// Clamp the active set to the persisted names intersected with the
+			// reconstructed source-aware ceiling. Unknown names are ignored.
+			session.setCollaborationPolicy(collaborationPolicy);
+			registry.setCollaborationPolicy(ref.id, collaborationPolicy);
+			await session.setActiveToolsByName(activeToolNames);
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
 			// Without it the idle-TTL timer never clears on a turn and the lifecycle

@@ -23,13 +23,9 @@ import replaceDescription from "../prompts/tools/replace.md" with { type: "text"
 import type { DeferredDiagnosticsEntry, ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
 import { isInternalUrlPath } from "../tools/path-utils";
-import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
 import type { ResolvedToolProfile } from "../tools/tool-profiles";
-import {
-	resolveProfileEditRuntimeMode,
-	selectEditGrammar,
-	type EditGrammarSelection,
-} from "../tools/tool-profiles";
+import { type EditGrammarSelection, resolveProfileEditRuntimeMode, selectEditGrammar } from "../tools/tool-profiles";
+import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
 import { executeHashlineSingle, hashlineEditParamsSchema } from "./hashline";
 import { type ApplyPatchParams, applyPatchSchema, expandApplyPatchToEntries } from "./modes/apply-patch";
 import applyPatchGrammar from "./modes/apply-patch.lark" with { type: "text" };
@@ -403,7 +399,7 @@ export class EditTool implements AgentTool<TInput> {
 
 	get description(): string {
 		if (this.#toolProfile && this.#editGrammar.descriptionKind === "none") {
-			return prompt.render(replaceDescription) + "\n\nExisting-file mutation is disabled for this agent profile.";
+			return `${prompt.render(replaceDescription)}\n\nExisting-file mutation is disabled for this agent profile.`;
 		}
 		return this.#getModeDefinition().description(this.session);
 	}

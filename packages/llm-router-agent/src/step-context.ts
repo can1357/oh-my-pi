@@ -1,4 +1,12 @@
-import type { ContextTrace, RequestInput, StepContext, StepContextMetadata, StepKind, StepRisk, VerifierSignal } from "./types.js";
+import type {
+	ContextTrace,
+	RequestInput,
+	StepContext,
+	StepContextMetadata,
+	StepKind,
+	StepRisk,
+	VerifierSignal,
+} from "./types.js";
 
 const STEP_KINDS: StepKind[] = ["plan", "tool_call", "tool_result", "code_edit", "browser", "final", "other"];
 const STEP_RISKS: StepRisk[] = ["low", "medium", "high"];
@@ -69,7 +77,8 @@ export function readStepContextMetadata(metadata: RequestInput["metadata"]): Par
 	assignNumber(result, "remainingTokens", source.remainingTokens);
 	assignBoolean(result, "irreversible", source.irreversible);
 	assignBoolean(result, "estimatedCacheHit", source.estimatedCacheHit);
-	if (Array.isArray(source.recentToolCalls)) result.recentToolCalls = source.recentToolCalls as StepContextMetadata["recentToolCalls"];
+	if (Array.isArray(source.recentToolCalls))
+		result.recentToolCalls = source.recentToolCalls as StepContextMetadata["recentToolCalls"];
 	return result;
 }
 
@@ -98,7 +107,9 @@ function stepContextSource(metadata: RequestInput["metadata"]): Record<string, u
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
-	return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+	return value !== null && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
 }
 
 function enumValue<const Value extends string>(value: unknown, allowed: readonly Value[]): Value | undefined {
@@ -118,7 +129,8 @@ function assignNumber<Key extends keyof StepContextMetadata>(
 	key: Key,
 	value: unknown,
 ): void {
-	if (typeof value === "number" && Number.isFinite(value)) result[key] = Math.max(0, value) as StepContextMetadata[Key];
+	if (typeof value === "number" && Number.isFinite(value))
+		result[key] = Math.max(0, value) as StepContextMetadata[Key];
 }
 
 function assignBoolean<Key extends keyof StepContextMetadata>(
