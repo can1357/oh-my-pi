@@ -98,7 +98,7 @@ export function taskSpawnTelemetry(input: TaskSpawnTelemetryInput): TelemetryRec
 			workClass: input.workClass,
 			autonomy: input.autonomy,
 			eligibleTier: [...input.eligibleTier],
-			eligibleTierCount: input.eligibleTiers.length,
+			eligibleTierCount: input.eligibleTier.length,
 			eligibleCount: input.eligibleCount,
 			routeLabel: input.routeLabel,
 			allow: input.allow,
