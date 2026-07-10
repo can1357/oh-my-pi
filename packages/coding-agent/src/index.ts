@@ -28,6 +28,7 @@ export * from "./extensibility/extensions";
 export * from "./extensibility/skills";
 // Slash commands
 export { type FileSlashCommand, loadSlashCommands as discoverSlashCommands } from "./extensibility/slash-commands";
+export * from "./gateway";
 export type * from "./lsp";
 // Main entry point
 export * from "./main";
@@ -36,6 +37,7 @@ export * from "./modes";
 export * from "./modes/components";
 // Theme utilities for custom tools
 export * from "./modes/theme/theme";
+export * from "./operational";
 // SDK for programmatic usage
 export * from "./sdk";
 export * from "./session/agent-session";

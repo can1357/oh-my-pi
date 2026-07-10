@@ -368,6 +368,14 @@
 			"types": "./src/eval/py/*.ts",
 			"import": "./src/eval/py/*.ts"
 		},
+		"./gateway": {
+			"types": "./src/gateway/index.ts",
+			"import": "./src/gateway/index.ts"
+		},
+		"./gateway/*": {
+			"types": "./src/gateway/*.ts",
+			"import": "./src/gateway/*.ts"
+		},
 		"./lsp": {
 			"types": "./src/lsp/index.ts",
 			"import": "./src/lsp/index.ts"
@@ -499,6 +507,14 @@
 		"./modes/utils/*": {
 			"types": "./src/modes/utils/*.ts",
 			"import": "./src/modes/utils/*.ts"
+		},
+		"./operational": {
+			"types": "./src/operational/index.ts",
+			"import": "./src/operational/index.ts"
+		},
+		"./operational/*": {
+			"types": "./src/operational/*.ts",
+			"import": "./src/operational/*.ts"
 		},
 		"./plan-mode/*": {
 			"types": "./src/plan-mode/*.ts",

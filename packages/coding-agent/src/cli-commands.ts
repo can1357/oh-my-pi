@@ -43,6 +43,7 @@ export const commands: CommandEntry[] = [
 	{ name: "setup", load: () => import("./commands/setup").then(m => m.default) },
 	{ name: "shell", load: () => import("./commands/shell").then(m => m.default) },
 	{ name: "read", load: () => import("./commands/read").then(m => m.default) },
+	{ name: "runtime", load: () => import("./commands/runtime").then(m => m.default) },
 	{ name: "ssh", load: () => import("./commands/ssh").then(m => m.default) },
 	{ name: "stats", load: () => import("./commands/stats").then(m => m.default) },
 	{ name: "update", load: () => import("./commands/update").then(m => m.default) },

@@ -8,6 +8,7 @@ import {
 	MAX_MANAGED_SKILL_BYTES,
 	sanitizeSkillName,
 	toSkillFrontmatter,
+	validateManagedSkillPayload,
 	writeManagedSkill,
 } from "@pk-nerdsaver-ai/pi-coding-agent/autolearn/managed-skills";
 import { parseFrontmatter } from "@pk-nerdsaver-ai/pi-utils";
@@ -51,6 +52,96 @@ describe("managed-skills primitives", () => {
 			const { frontmatter } = parseFrontmatter(content, { source: "test" });
 			expect(frontmatter.name).toBe("demo");
 			expect(frontmatter.description).toBe('has a "quote" and newline');
+		});
+	});
+
+	describe("validateManagedSkillPayload", () => {
+		it("accepts a valid payload without writing (dry-run)", async () => {
+			const result = validateManagedSkillPayload({
+				name: "demo-skill",
+				description: "When to run the demo workflow.",
+				body: "# Demo\n1. Run the verified command\n2. Confirm the output",
+			});
+			expect(result.ok).toBe(true);
+			expect(result.issues).toEqual([]);
+			expect(result.normalized?.name).toBe("demo-skill");
+			expect(result.normalized?.content).toContain("name: demo-skill");
+			expect(await Bun.file(skillFile("demo-skill")).exists()).toBe(false);
+		});
+
+		it("rejects frontmatter embedded in the body", () => {
+			const result = validateManagedSkillPayload({
+				name: "demo",
+				description: "When to demo.",
+				body: "---\nname: sneaky\ndescription: no\n---\n# Body",
+			});
+			expect(result.ok).toBe(false);
+			expect(result.issues.some(issue => issue.code === "body_has_frontmatter")).toBe(true);
+		});
+
+		it("rejects placeholder-only description or body while allowing TODO inside real steps", () => {
+			const placeholderBody = validateManagedSkillPayload({
+				name: "demo",
+				description: "When to demo.",
+				body: "TODO",
+			});
+			expect(placeholderBody.ok).toBe(false);
+			expect(placeholderBody.issues.some(issue => issue.code === "placeholder_content")).toBe(true);
+
+			const placeholderDesc = validateManagedSkillPayload({
+				name: "demo",
+				description: "TBD",
+				body: "# Real steps\n1. Do the thing",
+			});
+			expect(placeholderDesc.ok).toBe(false);
+			expect(placeholderDesc.issues.some(issue => issue.code === "placeholder_content")).toBe(true);
+
+			const legitimate = validateManagedSkillPayload({
+				name: "demo",
+				description: "When to demo.",
+				body: "# Setup\n1. Install deps\n// TODO: optional polish later\n2. Run the verified command",
+			});
+			expect(legitimate.ok).toBe(true);
+		});
+
+		it("rejects ellipsis placeholders but accepts substantive TODO-prefixed procedures", () => {
+			for (const body of ["...", "…"]) {
+				const placeholder = validateManagedSkillPayload({
+					name: "demo",
+					description: "When to demo.",
+					body,
+				});
+				expect(placeholder.ok).toBe(false);
+				expect(placeholder.issues.some(issue => issue.code === "placeholder_content")).toBe(true);
+			}
+
+			const substantive = validateManagedSkillPayload({
+				name: "demo",
+				description: "When to demo.",
+				body: "TODO triage workflow\n1. Inspect the failed run\n2. Record the verified fix",
+			});
+			expect(substantive.ok).toBe(true);
+		});
+
+		it("allows a leading Markdown thematic break without a closing frontmatter delimiter", () => {
+			const result = validateManagedSkillPayload({
+				name: "demo",
+				description: "When to demo.",
+				body: "---\n\n# Verified procedure\n1. Run the command",
+			});
+			expect(result.ok).toBe(true);
+		});
+
+		it("writeManagedSkill refuses invalid payloads before creating files", async () => {
+			await expect(
+				writeManagedSkill({
+					action: "create",
+					name: "bad",
+					description: "When to bad.",
+					body: "---\nname: x\n---\nbody",
+				}),
+			).rejects.toThrow(/frontmatter/);
+			expect(await Bun.file(skillFile("bad")).exists()).toBe(false);
 		});
 	});
 

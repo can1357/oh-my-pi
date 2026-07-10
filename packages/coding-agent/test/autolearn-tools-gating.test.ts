@@ -152,6 +152,50 @@ describe("manage_skill execute", () => {
 		expect(schema({ action: "delete", name: "x" }) instanceof type.errors).toBe(false);
 	});
 
+	it("reports actionable validation errors without writing", async () => {
+		const result = await tool().execute("v1", {
+			action: "create",
+			name: "demo",
+			description: "When to demo.",
+			body: "TODO",
+		});
+		expect(result.isError).toBe(true);
+		const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("");
+		expect(text).toMatch(/placeholder/i);
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "demo", "SKILL.md")).exists()).toBe(false);
+
+		const frontmatterBody = await tool().execute("v2", {
+			action: "create",
+			name: "demo2",
+			description: "When to demo.",
+			body: "---\nname: x\n---\n# Body",
+		});
+		expect(frontmatterBody.isError).toBe(true);
+		const frontmatterText = frontmatterBody.content.map(part => (part.type === "text" ? part.text : "")).join("");
+		expect(frontmatterText).toMatch(/frontmatter/i);
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "demo2", "SKILL.md")).exists()).toBe(false);
+	});
+
+	it("returns structured validation issues for empty description and body", async () => {
+		const emptyDescription = await tool().execute("empty-description", {
+			action: "create",
+			name: "empty-description",
+			description: "",
+			body: "# Verified steps",
+		});
+		expect(emptyDescription.isError).toBe(true);
+		expect(emptyDescription.details).toMatchObject({ issues: [{ code: "empty_description" }] });
+
+		const emptyBody = await tool().execute("empty-body", {
+			action: "create",
+			name: "empty-body",
+			description: "When to use this skill.",
+			body: "",
+		});
+		expect(emptyBody.isError).toBe(true);
+		expect(emptyBody.details).toMatchObject({ issues: [{ code: "empty_body" }] });
+	});
+
 	it("refuses to create a managed skill an authored skill of the same name would shadow", async () => {
 		const authored: Skill = {
 			name: "demo",
@@ -236,14 +280,30 @@ describe("learn execute", () => {
 	});
 
 	it("surfaces a partial-outcome error when the skill name is invalid", async () => {
-		await expect(
-			new LearnTool(learnSession()).execute("3", {
-				memory: "lesson",
-				skill: { action: "create", name: "../evil", description: "d", body: "b" },
-			}),
-		).rejects.toThrow(/Lesson stored, but the managed skill could not be written/);
+		const result = await new LearnTool(learnSession()).execute("3", {
+			memory: "lesson",
+			skill: { action: "create", name: "../evil", description: "d", body: "b" },
+		});
+		expect(result.isError).toBe(true);
+		const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("");
+		expect(text).toMatch(/Lesson stored/);
+		expect(text).toMatch(/Invalid skill name|Did not create/i);
 		// The memory half still ran.
 		expect(remembered).toHaveLength(1);
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "evil", "SKILL.md")).exists()).toBe(false);
+	});
+
+	it("surfaces a partial-outcome error when the skill body is placeholder-only", async () => {
+		const result = await new LearnTool(learnSession()).execute("3b", {
+			memory: "lesson",
+			skill: { action: "create", name: "good-name", description: "When to use.", body: "TODO" },
+		});
+		expect(result.isError).toBe(true);
+		const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("");
+		expect(text).toMatch(/Lesson stored/);
+		expect(text).toMatch(/placeholder/i);
+		expect(remembered).toHaveLength(1);
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "good-name", "SKILL.md")).exists()).toBe(false);
 	});
 
 	it("reports Hindsight lessons as queued rather than stored", async () => {
@@ -283,12 +343,14 @@ describe("learn execute", () => {
 			},
 		);
 
-		await expect(
-			new LearnTool(session).execute("hindsight-2", {
-				memory: "queued lesson",
-				skill: { action: "create", name: "../evil", description: "d", body: "b" },
-			}),
-		).rejects.toThrow(/Lesson queued for retention, but the managed skill could not be written/);
+		const result = await new LearnTool(session).execute("hindsight-2", {
+			memory: "queued lesson",
+			skill: { action: "create", name: "../evil", description: "d", body: "b" },
+		});
+		expect(result.isError).toBe(true);
+		const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("");
+		expect(text).toMatch(/Lesson queued for retention/);
+		expect(text).toMatch(/Invalid skill name|Did not create/i);
 		expect(queued).toEqual(["queued lesson"]);
 	});
 

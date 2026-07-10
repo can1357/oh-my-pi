@@ -42,9 +42,15 @@ class FakeSession {
 		for (const listener of [...this.listeners]) listener(event);
 	}
 
-	toolCalls(n: number): void {
+	toolCalls(n: number, options: { isError?: boolean } = {}): void {
 		for (let i = 0; i < n; i++) {
-			this.emit({ type: "tool_execution_end", toolCallId: `t${i}`, toolName: "read", result: null });
+			this.emit({
+				type: "tool_execution_end",
+				toolCallId: `t${i}`,
+				toolName: "read",
+				result: null,
+				isError: options.isError === true,
+			});
 		}
 	}
 
@@ -83,6 +89,28 @@ describe("AutoLearnController", () => {
 		session.toolCalls(4);
 		session.agentEnd();
 		expect(session.sent).toHaveLength(0);
+	});
+
+	it("does not count failed tool calls toward the threshold", () => {
+		const session = new FakeSession();
+		install(session, { "autolearn.minToolCalls": 3 });
+		session.toolCalls(5, { isError: true });
+		session.agentEnd();
+		expect(session.sent).toHaveLength(0);
+	});
+
+	it("requires successful completions even when failures pad the total", () => {
+		const session = new FakeSession();
+		install(session, { "autolearn.minToolCalls": 3 });
+		session.toolCalls(2); // success
+		session.toolCalls(3, { isError: true }); // failures must not satisfy the threshold
+		session.agentEnd();
+		expect(session.sent).toHaveLength(0);
+
+		session.toolCalls(3);
+		session.toolCalls(2, { isError: true });
+		session.agentEnd();
+		expect(session.sent).toHaveLength(1);
 	});
 
 	it("does not nudge during plan mode", () => {

@@ -46,7 +46,8 @@ export interface AutoLearnControllerOptions {
 export class AutoLearnController {
 	readonly #session: AgentSession;
 	readonly #settings: Settings;
-	#toolCalls = 0;
+	/** Successful tool completions in the current turn. Failures are counted separately by omission (isError tools never increment this). */
+	#successfulToolCalls = 0;
 	/**
 	 * Whether the in-flight turn BEGAN while goal mode was active. Captured at
 	 * agent_start because a `goal` tool can complete or drop the goal mid-turn,
@@ -72,7 +73,11 @@ export class AutoLearnController {
 			return;
 		}
 		if (event.type === "tool_execution_end") {
-			this.#toolCalls++;
+			// Count successful completions separately from failures: only !isError
+			// increments the threshold counter. Failed tools never satisfy minToolCalls.
+			if (event.isError !== true) {
+				this.#successfulToolCalls++;
+			}
 			return;
 		}
 		if (event.type === "agent_end") {
@@ -81,11 +86,11 @@ export class AutoLearnController {
 	}
 
 	#onAgentEnd(): void {
-		// Snapshot and reset every turn: the counter describes only the
+		// Snapshot and reset every turn: the counters describe only the
 		// just-finished turn, so below-threshold, disabled, and plan-mode stops
 		// must not let tool calls accumulate into a later turn.
-		const toolCalls = this.#toolCalls;
-		this.#toolCalls = 0;
+		const successfulToolCalls = this.#successfulToolCalls;
+		this.#successfulToolCalls = 0;
 		// Snapshot the turn-start goal flag alongside the counter so a turn that
 		// observed no agent_start can never inherit a stale value.
 		const startedInGoalMode = this.#turnStartedInGoalMode;
@@ -99,7 +104,7 @@ export class AutoLearnController {
 		// the current flag rather than trusting install-time state.
 		if (!this.#settings.get("autolearn.enabled")) return;
 		const minToolCalls = this.#settings.get("autolearn.minToolCalls") ?? DEFAULT_MIN_TOOL_CALLS;
-		if (toolCalls < minToolCalls) return;
+		if (successfulToolCalls < minToolCalls) return;
 		// Never interrupt plan-mode review.
 		if (this.#session.getPlanModeState()?.enabled) return;
 		// Never divert a goal loop. Skip when the turn STARTED in goal mode — a

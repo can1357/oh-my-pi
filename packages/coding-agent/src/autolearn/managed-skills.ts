@@ -7,10 +7,10 @@
  * surfaced like normal skills, but every write here is confined to
  * `getManagedSkillsDir()` — auto-management can never touch authored skills.
  */
-import { constants as fsConstants, type Stats } from "node:fs";
+import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDir, isEnoent } from "@pk-nerdsaver-ai/pi-utils";
+import { getAgentDir, isEnoent, parseFrontmatter } from "@pk-nerdsaver-ai/pi-utils";
 import { YAML } from "bun";
 
 /** Provider id stamped on discovered managed skills (distinguishes them from authored). */
@@ -88,6 +88,197 @@ export interface WriteManagedSkillInput {
 	body: string;
 }
 
+export type ManagedSkillValidationCode =
+	| "invalid_name"
+	| "empty_description"
+	| "empty_body"
+	| "body_has_frontmatter"
+	| "frontmatter_roundtrip"
+	| "placeholder_content"
+	| "oversized";
+
+export interface ManagedSkillValidationIssue {
+	code: ManagedSkillValidationCode;
+	message: string;
+	field?: "name" | "description" | "body";
+}
+
+export interface ManagedSkillValidationInput {
+	name: string;
+	description: string;
+	body: string;
+}
+
+export interface ManagedSkillNormalizedPayload {
+	name: string;
+	description: string;
+	body: string;
+	content: string;
+}
+
+export interface ManagedSkillValidationResult {
+	ok: boolean;
+	issues: ManagedSkillValidationIssue[];
+	/** Present when validation succeeds — ready to persist without re-serializing. */
+	normalized?: ManagedSkillNormalizedPayload;
+}
+
+const PLACEHOLDER_EXACT = new Set([
+	"todo",
+	"tbd",
+	"n/a",
+	"na",
+	"none",
+	"placeholder",
+	"lorem ipsum",
+	"fix me",
+	"xxx",
+	"...",
+	"…",
+]);
+
+/**
+ * True when text is placeholder-only (TODO/TBD/placeholder), not when those
+ * tokens appear inside otherwise substantive markdown/code.
+ */
+function isPlaceholderOnly(text: string): boolean {
+	const normalized = text.trim().replace(/\s+/g, " ").toLowerCase();
+	if (!normalized) return true;
+	if (PLACEHOLDER_EXACT.has(normalized)) return true;
+	const literal = normalized.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, "");
+	if (PLACEHOLDER_EXACT.has(literal)) return true;
+	if (/^(todo|tbd|placeholder)\s*[:.!?-]?\s*$/.test(normalized)) return true;
+	if (/^#+\s*(todo|tbd|placeholder)\s*[:.!?-]?\s*$/.test(normalized)) return true;
+	return false;
+}
+
+function bodyLooksLikeFrontmatter(body: string): boolean {
+	const normalized = body.trimStart().replace(/\r\n?/g, "\n");
+	return /^---[ \t]*\n[\s\S]*?\n---[ \t]*(?:\n|$)/.test(normalized);
+}
+
+/** Join validation issues into one actionable tool/error message. */
+export function formatManagedSkillValidationIssues(issues: ManagedSkillValidationIssue[]): string {
+	return issues.map(issue => issue.message).join(" ");
+}
+
+/**
+ * Pure structural validation for a managed-skill create/update payload.
+ * Does not touch the filesystem — safe for dry-run checks from tools and tests.
+ * Proves generated frontmatter round-trips, name/description/body meet discovery
+ * requirements, body has no frontmatter, and rejects placeholder-only content
+ * while allowing legitimate markdown/code that merely mentions TODO.
+ */
+export function validateManagedSkillPayload(input: ManagedSkillValidationInput): ManagedSkillValidationResult {
+	const issues: ManagedSkillValidationIssue[] = [];
+
+	let name: string | undefined;
+	try {
+		name = sanitizeSkillName(input.name);
+	} catch (err) {
+		issues.push({
+			code: "invalid_name",
+			field: "name",
+			message: err instanceof Error ? err.message : String(err),
+		});
+	}
+
+	const description = sanitizeManagedDescription(input.description);
+	if (!description) {
+		issues.push({
+			code: "empty_description",
+			field: "description",
+			message: `Managed skill${name ? ` "${name}"` : ""} needs a non-empty description.`,
+		});
+	} else if (isPlaceholderOnly(description)) {
+		issues.push({
+			code: "placeholder_content",
+			field: "description",
+			message: `Managed skill${name ? ` "${name}"` : ""} description looks like a placeholder (TODO/TBD/placeholder). Provide a concrete discovery description.`,
+		});
+	}
+
+	const body = input.body.trim();
+	if (!body) {
+		issues.push({
+			code: "empty_body",
+			field: "body",
+			message: `Managed skill${name ? ` "${name}"` : ""} needs a non-empty body.`,
+		});
+	} else {
+		if (bodyLooksLikeFrontmatter(body)) {
+			issues.push({
+				code: "body_has_frontmatter",
+				field: "body",
+				message: `Managed skill${name ? ` "${name}"` : ""} body must not include frontmatter; pass markdown body only (frontmatter is generated from name and description).`,
+			});
+		}
+		if (isPlaceholderOnly(body)) {
+			issues.push({
+				code: "placeholder_content",
+				field: "body",
+				message: `Managed skill${name ? ` "${name}"` : ""} body looks like a placeholder (TODO/TBD/placeholder-only). Include tested, reproducible steps.`,
+			});
+		}
+	}
+
+	if (issues.length > 0 || name === undefined || !description || !body) {
+		return { ok: false, issues };
+	}
+
+	const content = `${toSkillFrontmatter(name, description)}\n${body}\n`;
+	const bytes = Buffer.byteLength(content, "utf8");
+	if (bytes > MAX_MANAGED_SKILL_BYTES) {
+		return {
+			ok: false,
+			issues: [
+				{
+					code: "oversized",
+					message: `Managed skill is ${bytes} bytes; the limit is ${MAX_MANAGED_SKILL_BYTES}. Trim the body or description.`,
+				},
+			],
+		};
+	}
+
+	const { frontmatter, body: parsedBody } = parseFrontmatter(content, {
+		source: `managed-skill:${name}`,
+		level: "off",
+	});
+	if (frontmatter.name !== name) {
+		issues.push({
+			code: "frontmatter_roundtrip",
+			field: "name",
+			message: `Managed skill "${name}" frontmatter name did not round-trip through the skill parser.`,
+		});
+	}
+	const parsedDescription =
+		typeof frontmatter.description === "string" ? sanitizeManagedDescription(frontmatter.description) : "";
+	if (parsedDescription !== description) {
+		issues.push({
+			code: "frontmatter_roundtrip",
+			field: "description",
+			message: `Managed skill "${name}" frontmatter description did not round-trip through the skill parser.`,
+		});
+	}
+	if (parsedBody.trim() !== body) {
+		issues.push({
+			code: "frontmatter_roundtrip",
+			field: "body",
+			message: `Managed skill "${name}" body did not round-trip through the skill parser.`,
+		});
+	}
+
+	if (issues.length > 0) {
+		return { ok: false, issues };
+	}
+
+	return {
+		ok: true,
+		issues: [],
+		normalized: { name, description, body, content },
+	};
+}
+
 /**
  * Serialize create/update/delete on the same skill name. Both tools are
  * non-exclusive, so a parallel tool batch in one turn can run two mutations on
@@ -124,8 +315,6 @@ async function assertManagedRootSafe(): Promise<void> {
 	}
 }
 
-const UPDATE_FILE_OPEN_FLAGS = fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW;
-
 function assertManagedSkillFileSafeForUpdate(name: string, fileStat: Stats): void {
 	if (!fileStat.isFile()) {
 		throw new Error(`Managed skill "${name}" SKILL.md is not a regular file; refusing to overwrite it.`);
@@ -137,40 +326,14 @@ function assertManagedSkillFileSafeForUpdate(name: string, fileStat: Stats): voi
 	}
 }
 
-async function openManagedSkillFileForUpdate(name: string, file: string) {
-	try {
-		return await fs.open(file, UPDATE_FILE_OPEN_FLAGS);
-	} catch (err) {
-		if ((err as { code?: string }).code === "ELOOP") {
-			throw new Error(`Managed skill "${name}" SKILL.md is a symlink; refusing to overwrite it.`);
-		}
-		throw err;
-	}
-}
-
 /** Create or update a managed `SKILL.md`. Returns the resolved file path. */
 export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<{ path: string }> {
-	const name = sanitizeSkillName(input.name);
-	const description = sanitizeManagedDescription(input.description);
-	const body = input.body.trim();
-	// Reject empty content: an all-whitespace/control description sanitizes to ""
-	// and the `requireDescription` discovery scan then silently drops the skill,
-	// so the tool would report success for a skill that never appears.
-	if (!description) {
-		throw new Error(`Managed skill "${name}" needs a non-empty description.`);
+	// Structural validation runs before any disk mutation (and is reusable dry-run).
+	const validation = validateManagedSkillPayload(input);
+	if (!validation.ok || !validation.normalized) {
+		throw new Error(formatManagedSkillValidationIssues(validation.issues));
 	}
-	if (!body) {
-		throw new Error(`Managed skill "${name}" needs a non-empty body.`);
-	}
-	const content = `${toSkillFrontmatter(name, description)}\n${body}\n`;
-	// Cap the UTF-8 byte size of the FINAL file (body + description + frontmatter),
-	// not the UTF-16 code-unit length of the body alone.
-	const bytes = Buffer.byteLength(content, "utf8");
-	if (bytes > MAX_MANAGED_SKILL_BYTES) {
-		throw new Error(
-			`Managed skill is ${bytes} bytes; the limit is ${MAX_MANAGED_SKILL_BYTES}. Trim the body or description.`,
-		);
-	}
+	const { name, content } = validation.normalized;
 	return serializeSkillMutation(name, async () => {
 		await assertManagedRootSafe();
 		const dir = path.join(getManagedSkillsDir(), name);
@@ -201,29 +364,40 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 			}
 			return { path: file };
 		}
-		// update: the file must already exist, be a plain managed file, and must
-		// not share an inode with a user-authored file via hard link. Open the
-		// checked file handle before truncating so a path swap after lstat cannot
-		// redirect the write into a symlink or newly hard-linked target.
+		// update: validate the existing managed file, then replace it atomically
+		// with a fully written temporary file in the same directory. A failed or
+		// interrupted write leaves the previous SKILL.md intact.
 		const fileStat = await fs.lstat(file).catch(err => {
 			if (isEnoent(err)) return null;
 			throw err;
 		});
 		if (fileStat === null) {
-			throw new Error(`Managed skill "${name}" does not exist. Use action "create" to add it.`);
+			throw new Error(`Managed skill "${name}" does not exist. Use action "update" only for existing skills.`);
 		}
 		if (fileStat.isSymbolicLink()) {
 			throw new Error(`Managed skill "${name}" SKILL.md is a symlink; refusing to overwrite it.`);
 		}
 		assertManagedSkillFileSafeForUpdate(name, fileStat);
-		const handle = await openManagedSkillFileForUpdate(name, file);
+		const tempFile = path.join(dir, `.SKILL.md.${Bun.randomUUIDv7()}.tmp`);
+		let tempCreated = false;
 		try {
-			const openStat = await handle.stat();
-			assertManagedSkillFileSafeForUpdate(name, openStat);
-			await handle.truncate(0);
-			await handle.writeFile(content);
+			const handle = await fs.open(tempFile, "wx", 0o600);
+			tempCreated = true;
+			try {
+				await handle.writeFile(content);
+				await handle.sync();
+			} finally {
+				await handle.close();
+			}
+			const currentStat = await fs.lstat(file);
+			if (currentStat.isSymbolicLink()) {
+				throw new Error(`Managed skill "${name}" SKILL.md became a symlink; refusing to replace it.`);
+			}
+			assertManagedSkillFileSafeForUpdate(name, currentStat);
+			await fs.rename(tempFile, file);
+			tempCreated = false;
 		} finally {
-			await handle.close();
+			if (tempCreated) await fs.rm(tempFile, { force: true });
 		}
 		return { path: file };
 	});

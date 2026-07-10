@@ -1,6 +1,11 @@
 import type { AgentTool, AgentToolResult } from "@pk-nerdsaver-ai/pi-agent-core";
 import { type } from "arktype";
-import { sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skills";
+import {
+	formatManagedSkillValidationIssues,
+	sanitizeSkillName,
+	validateManagedSkillPayload,
+	writeManagedSkill,
+} from "../autolearn/managed-skills";
 import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
 import { localBackend } from "../memory-backend/local-backend";
 import learnDescription from "../prompts/tools/learn.md" with { type: "text" };
@@ -118,6 +123,19 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 					],
 					isError: true,
 					details: { skill: null, shadowed: true },
+				};
+			}
+			const validation = validateManagedSkillPayload(params.skill);
+			if (!validation.ok) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `${memoryMessage}. Did not ${params.skill.action} managed skill "${params.skill.name}": ${formatManagedSkillValidationIssues(validation.issues)}`,
+						},
+					],
+					isError: true,
+					details: { skill: null, issues: validation.issues },
 				};
 			}
 			try {

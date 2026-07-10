@@ -7,3 +7,5 @@ Managed skills are for repeatable procedures worth codifying: a setup sequence, 
 - `action: "delete"` — fails if the skill does not exist.
 
 `name` is kebab-case (lowercase letters, digits, hyphens). The `description` drives discovery, so make it specific. Do not include frontmatter in `body`; it is generated from `name` and `description`.
+
+Before calling, verify the procedure and include only tested, reproducible steps in `body`. Reject stubs and TODO/TBD/placeholder-only content.

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Added a transport-neutral agent gateway and durable `omp runtime` shell with unified SQLite state, searchable task episodes, crash-recoverable leases/checkpoints, UTC cron scheduling, headless OMP execution, file/webhook notifications, privacy-bounded trajectory and correction events, and safer validated auto-learned skills.
 - Integrated deterministic small-model orchestration profiles through task/Fusion/tool/IRC/extension/SDK seams: allocation-free `SpawnPlan` preallocation, typed `task_spawn_policy` extension hook with default-off llm-router registration, source-aware tool ceilings, assignment-contract verification with fail-closed Yield, request-fallback-then-fresh-child recovery, persisted collaboration/tool-policy revive, and startup structural/semantic selector validation.
 - Added a `route-predictor` model role (`pi/route-predictor`) that defaults to local-fast 9router lanes (`9router/local-fast` → `free-fast` → `cheap-fast` → `minimax-m3-rr` → `pi/smol`) and is retargetable via `modelRoles.route-predictor`. The `NineRouterController` gained a matching `route-predictor` slot so 9router stays the execution router while the predictor only selects the lane. Pairs with the `llm-router-agent` package's trace capture (tool/model/context JSONL) and `train-route-predictor` learned-policy trainer.
 - Added a native `ix_bridge` built-in tool that wraps the local IX Bridge daemon (`status`, `guide`, and `command` actions against `http://127.0.0.1:18086`) with lane/session defaults, timeout handling, and daemon-down error hints. Gated by `ix_bridge.enabled` (default on). The `browser-control` agent and `/delegate` browser tasks now drive IX Bridge through this tool instead of hand-written `bash` HTTP calls.
@@ -30,9 +31,9 @@
 - Trimmed a second pass of tool-prompt prose across `read`/`bash`/`apply-patch`/`patch`/`todo`/`ast-grep`/`github`, dropping schema-inferable and duplicate content while preserving RFC-2119 keywords and Handlebars structure.
 
 ### Fixed
+- Fixed Fusion sidekick observability: `/fusion status` now reports live Sidekick registry state (idle/running/parked/unavailable) and marks Fusion as degraded when the sidekick is missing; spawn now waits for AgentRegistry registration before retaining a sidekick id so failed starts no longer latch a phantom Sidekick.
 - Fixed `/remote` in ACP/text mode: it is now consumed with an explicit interactive-TUI requirement instead of being forwarded to the model as ordinary prompt text.
 - Fixed source installers, mise updates, package metadata, and release instructions to use the `kingkillery/oh-my-pk` fork instead of the upstream `oh-my-pi` repository.
-- Fixed Fusion sidekick observability: `/fusion status` now reports live Sidekick registry state (idle/running/parked/unavailable) and marks Fusion as degraded when the sidekick is missing; spawn now waits for AgentRegistry registration before retaining a sidekick id so failed starts no longer latch a phantom Sidekick.
 
 - Serialized editor submit handling so a fast double-Enter can't race concurrent submit handlers: a second empty Enter previously read `queuedMessageCount` before a steer finished registering it and no-op'd instead of flushing.
 

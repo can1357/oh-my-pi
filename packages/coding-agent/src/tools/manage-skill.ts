@@ -3,8 +3,9 @@ import type { AgentTool, AgentToolResult } from "@pk-nerdsaver-ai/pi-agent-core"
 import { type } from "arktype";
 import {
 	deleteManagedSkill,
+	formatManagedSkillValidationIssues,
 	getManagedSkillsDir,
-	sanitizeSkillName,
+	validateManagedSkillPayload,
 	writeManagedSkill,
 } from "../autolearn/managed-skills";
 import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
@@ -61,18 +62,34 @@ export class ManageSkillTool implements AgentTool<typeof manageSkillSchema> {
 			};
 		}
 
-		// Defensive narrowing: the schema refine already rejects create/update
-		// without both fields, so this is unreachable for valid input — it only
-		// proves the strings are present to `writeManagedSkill`'s typed contract.
-		if (!params.description || !params.body) {
+		// Defensive narrowing: the schema refine rejects missing fields, while
+		// empty strings remain valid inputs for structured payload validation.
+		if (params.description === undefined || params.body === undefined) {
 			throw new Error(`"${params.action}" requires both "description" and "body".`);
+		}
+		const validation = validateManagedSkillPayload({
+			name: params.name,
+			description: params.description,
+			body: params.body,
+		});
+		if (!validation.ok || !validation.normalized) {
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Cannot ${params.action} managed skill "${params.name}": ${formatManagedSkillValidationIssues(validation.issues)}`,
+					},
+				],
+				isError: true,
+				details: { action: params.action, name: params.name, issues: validation.issues },
+			};
 		}
 		// A managed skill resolves below any authored skill of the same name
 		// (authored always wins in discovery), so creating one under a name an
 		// authored skill already claims writes a file that never surfaces. Refuse
-		// up front rather than report a false "Created". `sanitizeSkillName`
-		// normalizes to the on-disk name the discovery scan compares against.
-		if (params.action === "create" && isNameClaimedByAuthoredSkill(sanitizeSkillName(params.name))) {
+		// up front rather than report a false "Created". Use the validated name
+		// the discovery scan compares against.
+		if (params.action === "create" && isNameClaimedByAuthoredSkill(validation.normalized.name)) {
 			return {
 				content: [
 					{
