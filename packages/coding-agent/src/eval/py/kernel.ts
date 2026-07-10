@@ -91,22 +91,34 @@ export interface KernelExecutionError {
 	name: string;
 	value: string;
 	traceback: string[];
-	command?: string;
+	command?: string | readonly string[];
 	returncode?: number;
 	stdout?: string;
 	stderr?: string;
 }
 
 function asOptionalString(value: unknown): string | undefined {
+	return typeof value === "string" ? value : undefined;
+}
+
+function asOptionalCommand(value: unknown): string | readonly string[] | undefined {
 	if (typeof value === "string") return value;
-	if (Array.isArray(value) && value.every(item => typeof item === "string" || typeof item === "number")) {
-		return value.map(String).join(" ");
+	if (
+		Array.isArray(value) &&
+		value.length > 0 &&
+		value.every(item => typeof item === "string" || typeof item === "number")
+	) {
+		return Object.freeze(value.map(String));
 	}
 	return undefined;
 }
 
 function asOptionalNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function formatCommandEvidence(command: string | readonly string[]): string {
+	return Array.isArray(command) ? command.join(" ") : command;
 }
 
 /**
@@ -120,7 +132,7 @@ export function mapKernelErrorFrame(frame: KernelErrorFrame): KernelExecutionErr
 		value: String(frame.evalue ?? ""),
 		traceback,
 	};
-	const command = asOptionalString(frame.command);
+	const command = asOptionalCommand(frame.command);
 	const returncode = asOptionalNumber(frame.returncode);
 	const stdout = asOptionalString(frame.stdout);
 	const stderr = asOptionalString(frame.stderr);
@@ -134,7 +146,7 @@ export function mapKernelErrorFrame(frame: KernelErrorFrame): KernelExecutionErr
 /** Model-visible evidence block for CalledProcessError / TimeoutExpired fields. */
 export function formatKernelProcessErrorEvidence(error: KernelExecutionError): string {
 	const lines: string[] = [];
-	if (error.command !== undefined) lines.push(`command: ${error.command}`);
+	if (error.command !== undefined) lines.push(`command: ${formatCommandEvidence(error.command)}`);
 	if (error.returncode !== undefined) lines.push(`return code: ${error.returncode}`);
 	if (error.stdout !== undefined) lines.push(`stdout:\n${error.stdout}`);
 	if (error.stderr !== undefined) lines.push(`stderr:\n${error.stderr}`);

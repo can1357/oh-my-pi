@@ -571,4 +571,125 @@ describe("verifyAssignmentResult", () => {
 		expect(verified.failureClass).toBe("acceptance");
 		expect(verified.reasons[0]).toContain("Invalid result");
 	});
+
+	test("parent-observed changedFiles are authoritative and reject child omission", async () => {
+		const contract = makeContract({
+			acceptance: [
+				{
+					id: "scope",
+					description: "Changed files stay in scope",
+					check: "changed_file_scope",
+					params: {},
+				},
+			],
+		});
+		const childOmits = makeResult(contract, {
+			changedFiles: ["packages/coding-agent/src/task/assignment-contract.ts"],
+			evidence: [
+				{
+					criterionId: "scope",
+					passed: true,
+					summary: "Changed files stayed in scope",
+				},
+			],
+		});
+		const omitted = await verifyAssignment(contract, childOmits, undefined, [
+			"packages/coding-agent/src/task/assignment-contract.ts",
+			"packages/coding-agent/src/task/assignment-verifier.ts",
+		]);
+		expect(omitted.verified).toBe(false);
+		expect(omitted.reasons.join(" ")).toContain("Child omitted parent-observed changed path");
+
+		const complete = makeResult(contract, {
+			changedFiles: [
+				"packages/coding-agent/src/task/assignment-contract.ts",
+				"packages/coding-agent/src/task/assignment-verifier.ts",
+			],
+			evidence: [
+				{
+					criterionId: "scope",
+					passed: true,
+					summary: "Changed files stayed in scope",
+				},
+			],
+		});
+		const verified = await verifyAssignmentResult({
+			contract,
+			result: complete,
+			observedChangedFiles: [
+				"packages/coding-agent/src/task/assignment-contract.ts",
+				"packages/coding-agent/src/task/assignment-verifier.ts",
+			],
+		});
+		expect(verified.verified).toBe(true);
+	});
+
+	test("non-allowlisted URL schemes are scope-gated before artifact I/O", async () => {
+		const contract = makeContract({
+			acceptance: [
+				{
+					id: "artifact",
+					description: "Artifact exists",
+					check: "artifact_exists",
+					params: { path: "file://etc/passwd" },
+				},
+			],
+		});
+		let called = false;
+		const verified = await verifyAssignment(
+			contract,
+			makeResult(contract, {
+				evidence: [
+					{
+						criterionId: "artifact",
+						passed: true,
+						summary: "Artifact exists",
+					},
+				],
+			}),
+			{
+				statArtifact: async () => {
+					called = true;
+					return { exists: true };
+				},
+			},
+		);
+		expect(called).toBe(false);
+		expect(verified.verified).toBe(false);
+		expect(verified.reasons.join(" ")).toContain("outside declared scope");
+	});
+
+	test("typeless JSON schema fails closed", async () => {
+		const contract = makeContract({
+			acceptance: [
+				{
+					id: "schema",
+					description: "Result JSON matches schema",
+					check: "json_schema",
+					params: {
+						path: "packages/coding-agent/src/task/result.json",
+						schema: { required: ["ok"] },
+					},
+				},
+			],
+		});
+		const verified = await verifyAssignment(
+			contract,
+			makeResult(contract, {
+				evidence: [
+					{
+						criterionId: "schema",
+						passed: true,
+						summary: "Schema matched",
+					},
+				],
+			}),
+			{
+				readText: async () => "null",
+			},
+		);
+		expect(verified.verified).toBe(false);
+		expect(verified.reasons.join(" ")).toContain("JSON schema requires a supported type");
+	});
+
 });

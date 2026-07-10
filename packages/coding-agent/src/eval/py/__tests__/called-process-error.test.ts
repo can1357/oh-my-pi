@@ -3,6 +3,7 @@ import { executePythonWithKernel, type PythonKernelExecutor } from "../executor"
 import {
 	type KernelExecuteOptions,
 	type KernelExecuteResult,
+	formatKernelProcessErrorEvidence,
 	mapKernelErrorFrame,
 } from "../kernel";
 
@@ -85,4 +86,35 @@ describe("CalledProcessError evidence", () => {
 		expect(result.cancellationCause).toBe("idle_watchdog_timeout");
 		expect(result.effectiveTimeoutMs).toBe(30_000);
 	});
+
+	it("preserves argv list command and space-joins model-visible text", () => {
+		const error = mapKernelErrorFrame({
+			ename: "CalledProcessError",
+			evalue: "Command failed",
+			traceback: [],
+			command: ["python", "train.py", "--flag"],
+			returncode: 9,
+			stdout: "",
+			stderr: "boom",
+		});
+		expect(error.command).toEqual(["python", "train.py", "--flag"]);
+		expect(formatKernelProcessErrorEvidence(error)).toContain("command: python train.py --flag");
+		expect(formatKernelProcessErrorEvidence(error)).not.toContain("[");
+	});
+
+	it("omits returncode for TimeoutExpired frames", () => {
+		const error = mapKernelErrorFrame({
+			ename: "TimeoutExpired",
+			evalue: "timed out",
+			traceback: [],
+			command: ["python", "slow.py"],
+			stdout: "partial",
+			stderr: "",
+		});
+		expect(error.command).toEqual(["python", "slow.py"]);
+		expect(error.returncode).toBeUndefined();
+		expect(formatKernelProcessErrorEvidence(error)).toContain("command: python slow.py");
+		expect(formatKernelProcessErrorEvidence(error)).not.toContain("return code:");
+	});
+
 });
