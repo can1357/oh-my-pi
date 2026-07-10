@@ -8,11 +8,13 @@ import type { ToolSession } from "../../tools";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../../tools/output-meta";
 import { isEvalTimeoutControlEvent } from "../bridge-timeout";
 import type { JsStatusEvent } from "../js/shared/types";
+import type { EvalCancellationCause, EvalProcessErrorEvidence } from "../types";
 import {
 	checkPythonKernelAvailability,
 	type KernelDisplayOutput,
 	type KernelExecuteOptions,
 	type KernelExecuteResult,
+	type KernelExecutionError,
 	type KernelRuntimeEnv,
 	PythonKernel,
 	formatKernelProcessErrorEvidence,
@@ -103,6 +105,14 @@ export interface PythonResult {
 	exitCode: number | undefined;
 	/** Whether the execution was cancelled via signal */
 	cancelled: boolean;
+	/** True when cancellation came from the idle/runtime timeout path. */
+	timedOut?: boolean;
+	/** Typed cancellation cause forwarded to ExecutorBackendResult. */
+	cancellationCause?: EvalCancellationCause;
+	/** Effective timeout budget used for annotations / tool details. */
+	effectiveTimeoutMs?: number;
+	/** Structured CalledProcessError / TimeoutExpired fields from the runner. */
+	processError?: EvalProcessErrorEvidence;
 	/** Whether the output was truncated */
 	truncated: boolean;
 	/** Artifact ID if full output was saved to artifact storage */
@@ -285,6 +295,33 @@ function formatKernelTimeoutAnnotation(
 	return `${timeoutFact}; kernel interrupted but remains running. Reset the kernel via { reset: true } if state appears corrupted.`;
 }
 
+
+function toProcessErrorEvidence(error: KernelExecutionError): EvalProcessErrorEvidence | undefined {
+	const evidence: EvalProcessErrorEvidence = {
+		...(error.command !== undefined ? { command: error.command } : {}),
+		...(error.returncode !== undefined ? { returncode: error.returncode } : {}),
+		...(error.stdout !== undefined ? { stdout: error.stdout } : {}),
+		...(error.stderr !== undefined ? { stderr: error.stderr } : {}),
+	};
+	return error.command !== undefined ||
+		error.returncode !== undefined ||
+		error.stdout !== undefined ||
+		error.stderr !== undefined
+		? evidence
+		: undefined;
+}
+
+function cancellationFields(
+	timedOut: boolean,
+	effectiveTimeoutMs: number | undefined,
+): Pick<PythonResult, "timedOut" | "cancellationCause" | "effectiveTimeoutMs"> {
+	return {
+		timedOut,
+		cancellationCause: timedOut ? "idle_watchdog_timeout" : "abort",
+		effectiveTimeoutMs,
+	};
+}
+
 function createCancelledPythonResult(
 	timedOut: boolean,
 	timeoutMs: number | undefined,
@@ -297,6 +334,7 @@ function createCancelledPythonResult(
 		output,
 		exitCode: undefined,
 		cancelled: true,
+		...cancellationFields(timedOut, timeoutMs),
 		truncated: false,
 		totalLines: outputLines,
 		totalBytes: outputBytes,
@@ -579,6 +617,7 @@ async function executeWithKernel(
 			return {
 				exitCode: undefined,
 				cancelled: true,
+				...cancellationFields(result.timedOut, effectiveTimeoutMs),
 				displayOutputs,
 				stdinRequested: result.stdinRequested,
 				...(await sink.dump(annotation)),
@@ -596,6 +635,8 @@ async function executeWithKernel(
 		}
 
 		const exitCode = result.status === "ok" ? 0 : 1;
+		const processError =
+			result.error && result.status === "error" ? toProcessErrorEvidence(result.error) : undefined;
 		const processEvidence =
 			result.error && result.status === "error"
 				? formatKernelProcessErrorEvidence(result.error)
@@ -604,6 +645,7 @@ async function executeWithKernel(
 		return {
 			exitCode,
 			cancelled: false,
+			...(processError ? { processError } : {}),
 			displayOutputs,
 			stdinRequested: false,
 			...(await sink.dump()),
@@ -616,6 +658,7 @@ async function executeWithKernel(
 			return {
 				exitCode: undefined,
 				cancelled: true,
+				...cancellationFields(timedOut, effectiveTimeoutMs),
 				displayOutputs,
 				stdinRequested: false,
 				...(await sink.dump(

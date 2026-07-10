@@ -203,8 +203,16 @@ function nextSuppressedProviders(
 	if (shouldSuppressProvider(failure)) {
 		const priorAttempts = input.previousAttempts ?? [];
 		const lastAttempt = priorAttempts[priorAttempts.length - 1];
-		const failedProvider = cleanProvider(failure.failedProvider) ??
+		let failedProvider =
+			cleanProvider(failure.failedProvider) ??
 			(lastAttempt ? attemptProviderKey(lastAttempt) : undefined);
+		if (!failedProvider) {
+			// Parent omitted failedProvider and has not recorded attempts yet.
+			// Presume the first otherwise-eligible route is the failed endpoint so
+			// TLS/transport failures do not immediately retry the same provider.
+			const presumed = selectNextCandidate(input, suppressed);
+			failedProvider = presumed ? providerKey(presumed) : undefined;
+		}
 		if (failedProvider) suppressed.add(failedProvider);
 	}
 	return Object.freeze([...suppressed].sort());

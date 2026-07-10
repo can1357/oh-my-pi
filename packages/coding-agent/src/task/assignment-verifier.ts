@@ -188,6 +188,11 @@ export function isPathInScope(
 	return scope.allowedPaths.some(prefix => pathMatches(prefix, filePath));
 }
 
+/** Parent-authored internal URL refs are not repo-scope filesystem paths. */
+function isInternalArtifactRef(path: string): boolean {
+	return /^[a-z][a-z0-9+.-]*:\/\//i.test(path.trim());
+}
+
 function firstFailure(
 	criteria: readonly CriterionVerification[],
 ): CriterionVerification | undefined {
@@ -519,6 +524,14 @@ async function verifyCriterion(
 					reason: `Criterion "${criterion.id}" is missing parent-authored path`,
 				};
 			}
+			if (!isInternalArtifactRef(artifactPath) && !isPathInScope(artifactPath, contract.scope)) {
+				return {
+					criterionId: criterion.id,
+					passed: false,
+					failureClass: "scope_violation",
+					reason: `Artifact path outside declared scope: ${artifactPath}`,
+				};
+			}
 			if (!runners?.statArtifact) {
 				return {
 					criterionId: criterion.id,
@@ -665,6 +678,14 @@ async function verifyCriterion(
 					reason: `Criterion "${criterion.id}" is missing parent-authored path`,
 				};
 			}
+			if (!isInternalArtifactRef(artifactPath) && !isPathInScope(artifactPath, contract.scope)) {
+				return {
+					criterionId: criterion.id,
+					passed: false,
+					failureClass: "scope_violation",
+					reason: `Artifact path outside declared scope: ${artifactPath}`,
+				};
+			}
 			if (!runners?.readText) {
 				return {
 					criterionId: criterion.id,
@@ -722,6 +743,14 @@ async function verifyCriterion(
 					passed: false,
 					failureClass: "check_error",
 					reason: `Criterion "${criterion.id}" is missing parent-authored path`,
+				};
+			}
+			if (!isInternalArtifactRef(artifactPath) && !isPathInScope(artifactPath, contract.scope)) {
+				return {
+					criterionId: criterion.id,
+					passed: false,
+					failureClass: "scope_violation",
+					reason: `Artifact path outside declared scope: ${artifactPath}`,
 				};
 			}
 			if (!schema || typeof schema !== "object" || Array.isArray(schema)) {

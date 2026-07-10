@@ -371,6 +371,40 @@ describe("verifyAssignmentResult", () => {
 		expect(verified.verified).toBe(true);
 	});
 
+	test("rejects escaped artifact paths before calling statArtifact", async () => {
+		const contract = makeContract({
+			acceptance: [
+				{
+					id: "secret",
+					description: "must not escape scope",
+					check: "artifact_exists",
+					params: { path: "../secrets.txt" },
+				},
+			],
+		});
+		const result = makeResult(contract, {
+			changedFiles: ["packages/coding-agent/src/task/assignment-verifier.ts"],
+			evidence: [
+				{
+					criterionId: "secret",
+					passed: true,
+					summary: "Claimed secret artifact exists with concrete bytes",
+				},
+			],
+		});
+		let statCalls = 0;
+		const verified = await verifyAssignment(contract, result, {
+			statArtifact: async () => {
+				statCalls += 1;
+				return { exists: true, sizeBytes: 12, hashHex: "abc" };
+			},
+		});
+		expect(statCalls).toBe(0);
+		expect(verified.verified).toBe(false);
+		if (verified.verified) throw new Error("expected rejection");
+		expect(verified.criteria[0]?.failureClass).toBe("scope_violation");
+	});
+
 	test("supports every parent-authored acceptance check", async () => {
 		const acceptance: AssignmentContractV1["acceptance"] = [
 			{

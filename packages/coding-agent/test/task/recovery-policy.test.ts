@@ -181,6 +181,27 @@ describe("nextRecoveryAttempt", () => {
 		expect(decision.attempt.selector).toBe("anthropic/light-b");
 	});
 
+	test("TLS failure without failedProvider still suppresses the presumed first endpoint", () => {
+		const decision = nextRecoveryAttempt(
+			baseInput({
+				outcome: {
+					terminal: true,
+					failedChildId: "child-tls-unknown",
+					failure: {
+						class: "spawn_transport",
+						message: "TLS handshake failed talking to upstream",
+					},
+				},
+				previousAttempts: [],
+			}),
+		);
+		expect(decision.action).toBe("retry");
+		if (decision.action !== "retry") throw new Error("expected retry");
+		expect(decision.suppressedProviders).toEqual(["openai"]);
+		expect(decision.attempt.selector).toBe("anthropic/light-b");
+		expect(decision.attempt.provider?.toLowerCase()).not.toBe("openai");
+	});
+
 	test("TLS-like failure text suppresses provider even when the initial class is different", () => {
 		const decision = nextRecoveryAttempt(
 			baseInput({

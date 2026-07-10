@@ -61,5 +61,28 @@ describe("CalledProcessError evidence", () => {
 		expect(result.output).toContain("return code: 17");
 		expect(result.output).toContain("stdout:\ntraining progress");
 		expect(result.output).toContain("stderr:\nCUDA unavailable");
+		expect(result.processError).toEqual({
+			command: "python train.py",
+			returncode: 17,
+			stdout: "training progress\n",
+			stderr: "CUDA unavailable\n",
+		});
+	});
+
+	it("forwards timeout cancellation fields on PythonResult", async () => {
+		const kernel = new CalledProcessErrorKernel({
+			status: "ok",
+			cancelled: true,
+			timedOut: true,
+			stdinRequested: false,
+		});
+		const result = await executePythonWithKernel(kernel, "pass", {
+			cwd: process.cwd(),
+			idleTimeoutMs: 30_000,
+		});
+		expect(result.cancelled).toBe(true);
+		expect(result.timedOut).toBe(true);
+		expect(result.cancellationCause).toBe("idle_watchdog_timeout");
+		expect(result.effectiveTimeoutMs).toBe(30_000);
 	});
 });

@@ -3,6 +3,7 @@ import type { ToolSession } from "../../tools";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../../tools/output-meta";
 import { isEvalTimeoutControlEvent } from "../bridge-timeout";
 import { executeInVmContext, type JsDisplayOutput } from "./context-manager";
+import type { EvalCancellationCause } from "../types";
 import type { JsStatusEvent } from "./shared/types";
 
 export interface JsExecutorOptions {
@@ -32,6 +33,9 @@ export interface JsResult {
 	output: string;
 	exitCode: number | undefined;
 	cancelled: boolean;
+	timedOut?: boolean;
+	cancellationCause?: EvalCancellationCause;
+	effectiveTimeoutMs?: number;
 	truncated: boolean;
 	artifactId?: string;
 	totalLines: number;
@@ -145,6 +149,9 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				output: summary.output,
 				exitCode: undefined,
 				cancelled: true,
+				timedOut,
+				cancellationCause: timedOut ? "idle_watchdog_timeout" : "abort",
+				effectiveTimeoutMs: legacyTimeoutMs ?? options.idleTimeoutMs,
 				truncated: summary.truncated,
 				artifactId: summary.artifactId,
 				totalLines: summary.totalLines,
