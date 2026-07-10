@@ -3,7 +3,12 @@
 - SHOULD use `read` (not a browser tool) for web content; browser only when `read` can't deliver.
 </instruction>
 
-- `path` — internal URI schemes: `skill://`, `agent://`, `artifact://`, `history://`, `memory://`, `rule://`, `local://`, `vault://`, `mcp://`, `omp://`, `issue://`, `pr://` (also local FS paths, URLs). Append `:<sel>` for ranges/modes (e.g. `src/foo.ts:50-200`, `:raw`, `db.sqlite:users:42`).
+- `path` — {{READ_SELECTOR_GUIDANCE}}
+{{#if LIGHT_READ_GRAMMAR}}
+- Light grammar only: local workspace paths and a single `:N` / `:N-M` / `:N+L` selector. NEVER use URLs, internal URIs, `:raw`, multi-range, or `:conflicts`.
+{{else}}
+- Full grammar: internal URI schemes `skill://`, `agent://`, `artifact://`, `history://`, `memory://`, `rule://`, `local://`, `vault://`, `mcp://`, `omp://`, `issue://`, `pr://` (also local FS paths, URLs). Append `:<sel>` for ranges/modes (e.g. `src/foo.ts:50-200`, `:raw`, `db.sqlite:users:42`).
+{{/if}}
 
 - _(none)_ — parseable code → **structural summary** (declarations kept, body elided with `…`); other files → from start (≤{{DEFAULT_LIMIT}} lines).
 - `:50` / `:50-` — from line 50 onward.

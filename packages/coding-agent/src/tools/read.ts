@@ -113,6 +113,8 @@ import {
 } from "./sqlite-reader";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
+import type { ResolvedToolProfile } from "./tool-profiles";
+import { selectReadGrammar, type ReadGrammarSelection } from "./tool-profiles";
 
 // Per-session memo for tree-sitter summaries. `summarizeCode` is a pure function
 // of (code, path, fold settings) but costs ~12-18ms for a ~1500-line file, and a
@@ -693,13 +695,45 @@ function splitPdfImageMemberReadPath(readPath: string): { pdfPath: string; membe
 	return { pdfPath, member };
 }
 
-const readSchema = type({
-	path: type("string").describe(
-		'Local path, internal URI (e.g. "omp://", "issue://123", "pr://123"), or URL; append :<sel> for line ranges or raw mode (e.g. "src/foo.ts:50-100")',
-	),
-});
+const LEGACY_READ_PATH_DESCRIPTION =
+	'Local path, internal URI (e.g. "omp://", "issue://123", "pr://123"), or URL; append :<sel> for line ranges or raw mode (e.g. "src/foo.ts:50-100")';
+
+const LIGHT_READ_PATH_DESCRIPTION =
+	'Local workspace path only; append :<sel> for a single line range (e.g. "src/foo.ts:50-100"). No URLs, internal URIs, :raw, multi-range, or :conflicts.';
+
+function buildReadSchema(pathDescription: string) {
+	return type({
+		path: type("string").describe(pathDescription),
+	});
+}
+
+const readSchema = buildReadSchema(LEGACY_READ_PATH_DESCRIPTION);
+const lightReadSchema = buildReadSchema(LIGHT_READ_PATH_DESCRIPTION);
 
 export type ReadToolInput = typeof readSchema.infer;
+
+export interface ReadToolSurface {
+	readonly grammar: ReadGrammarSelection;
+	readonly parameters: typeof readSchema | typeof lightReadSchema;
+	readonly pathDescription: string;
+}
+
+/** Profile-aware read schema/description selection (legacy when profile absent). */
+export function resolveReadToolSurface(profile?: ResolvedToolProfile | null): ReadToolSurface {
+	const grammar = selectReadGrammar(profile);
+	if (grammar.tier === "light") {
+		return Object.freeze({
+			grammar,
+			parameters: lightReadSchema,
+			pathDescription: LIGHT_READ_PATH_DESCRIPTION,
+		});
+	}
+	return Object.freeze({
+		grammar,
+		parameters: readSchema,
+		pathDescription: LEGACY_READ_PATH_DESCRIPTION,
+	});
+}
 
 export interface ReadToolDetails {
 	kind?: "file" | "url";
@@ -817,20 +851,27 @@ type SuffixMatchCache = Map<string, { absolutePath: string; displayPath: string 
  * Reads files with support for images, converted documents (via markit), and text.
  * Directories return a formatted listing with modification times.
  */
-export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
+export class ReadTool implements AgentTool<typeof readSchema | typeof lightReadSchema, ReadToolDetails> {
 	readonly name = "read";
 	readonly approval = "read" as const;
 	readonly label = "Read";
 	readonly loadMode = "essential";
 	readonly description: string;
-	readonly parameters = readSchema;
+	readonly parameters: typeof readSchema | typeof lightReadSchema;
 	readonly strict = true;
 
 	readonly #autoResizeImages: boolean;
 	readonly #defaultLimit: number;
 	readonly #inspectImageEnabled: boolean;
+	readonly #toolProfile?: ResolvedToolProfile;
+	readonly #grammar: ReadGrammarSelection;
 
-	constructor(private readonly session: ToolSession) {
+	constructor(session: ToolSession, toolProfile?: ResolvedToolProfile) {
+		this.session = session;
+		this.#toolProfile = toolProfile;
+		const surface = resolveReadToolSurface(toolProfile);
+		this.#grammar = surface.grammar;
+		this.parameters = surface.parameters;
 		const displayMode = resolveFileDisplayMode(session);
 		this.#autoResizeImages = session.settings.get("images.autoResize");
 		this.#defaultLimit = Math.max(
@@ -844,7 +885,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			IS_HL_MODE: displayMode.hashLines,
 			IS_LINE_NUMBER_MODE: !displayMode.hashLines && displayMode.lineNumbers,
 			INSPECT_IMAGE_ENABLED: this.#inspectImageEnabled,
+			READ_GRAMMAR_TIER: surface.grammar.tier,
+			READ_SELECTOR_GUIDANCE: surface.grammar.selectorGuidance,
+			LIGHT_READ_GRAMMAR: surface.grammar.tier === "light",
 		});
+	}
+
+	private readonly session: ToolSession;
+
+	/** Test/Lane-E accessor for the enforced grammar selection. */
+	get grammar(): ReadGrammarSelection {
+		return this.#grammar;
 	}
 
 	async #tryReadDelimitedPaths(

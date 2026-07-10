@@ -24,6 +24,12 @@ import type { DeferredDiagnosticsEntry, ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
 import { isInternalUrlPath } from "../tools/path-utils";
 import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
+import type { ResolvedToolProfile } from "../tools/tool-profiles";
+import {
+	resolveProfileEditRuntimeMode,
+	selectEditGrammar,
+	type EditGrammarSelection,
+} from "../tools/tool-profiles";
 import { executeHashlineSingle, hashlineEditParamsSchema } from "./hashline";
 import { type ApplyPatchParams, applyPatchSchema, expandApplyPatchToEntries } from "./modes/apply-patch";
 import applyPatchGrammar from "./modes/apply-patch.lark" with { type: "text" };
@@ -310,6 +316,23 @@ function extractApprovalPath(args: unknown): string {
 	return typeof targetPath === "string" && targetPath.length > 0 ? targetPath : "(unknown)";
 }
 
+export interface EditToolSurface {
+	readonly grammar: EditGrammarSelection;
+	/** When set, overrides session/settings edit mode resolution. */
+	readonly runtimeMode: EditMode | undefined;
+	readonly descriptionKind: EditGrammarSelection["descriptionKind"];
+}
+
+/** Profile-aware edit mode/schema selection (legacy when profile absent). */
+export function resolveEditToolSurface(profile?: ResolvedToolProfile | null): EditToolSurface {
+	const grammar = selectEditGrammar(profile);
+	return Object.freeze({
+		grammar,
+		runtimeMode: resolveProfileEditRuntimeMode(profile),
+		descriptionKind: grammar.descriptionKind,
+	});
+}
+
 export class EditTool implements AgentTool<TInput> {
 	readonly approval = (args: unknown) => {
 		const targetPath = extractApprovalPath(args);
@@ -328,6 +351,9 @@ export class EditTool implements AgentTool<TInput> {
 	readonly #fuzzyThreshold: number;
 	readonly #writethrough: WritethroughCallback;
 	readonly #editMode?: EditMode;
+	readonly #profileEditMode?: EditMode;
+	readonly #toolProfile?: ResolvedToolProfile;
+	readonly #editGrammar: EditGrammarSelection;
 	readonly #dedupDiagnostics: boolean;
 	readonly #pendingDeferredFetches = new Map<string, AbortController>();
 	/** Fallback per-path mutation counter used only when the session does not expose
@@ -335,7 +361,13 @@ export class EditTool implements AgentTool<TInput> {
 	 *  tool) mutating the same file also invalidates pending late-diagnostics. */
 	readonly #editVersionByPath = new Map<string, number>();
 
-	constructor(private readonly session: ToolSession) {
+	constructor(session: ToolSession, toolProfile?: ResolvedToolProfile) {
+		this.session = session;
+		this.#toolProfile = toolProfile;
+		const surface = resolveEditToolSurface(toolProfile);
+		this.#editGrammar = surface.grammar;
+		this.#profileEditMode = surface.runtimeMode;
+
 		const {
 			PI_EDIT_FUZZY: editFuzzy = "auto",
 			PI_EDIT_FUZZY_THRESHOLD: editFuzzyThreshold = "auto",
@@ -352,12 +384,27 @@ export class EditTool implements AgentTool<TInput> {
 		this.#writethrough = createEditWritethrough(session);
 	}
 
+	readonly session: ToolSession;
+
+	get grammar(): EditGrammarSelection {
+		return this.#editGrammar;
+	}
+
 	get mode(): EditMode {
 		if (this.#editMode) return this.#editMode;
+		if (this.#profileEditMode) return this.#profileEditMode;
+		if (this.#toolProfile && this.#editGrammar.descriptionKind === "none") {
+			// Profile forbids mutation; fall back to replace schema only so the
+			// tool remains constructible — callers should omit edit from the ceiling.
+			return "replace";
+		}
 		return resolveEditMode(this.session);
 	}
 
 	get description(): string {
+		if (this.#toolProfile && this.#editGrammar.descriptionKind === "none") {
+			return prompt.render(replaceDescription) + "\n\nExisting-file mutation is disabled for this agent profile.";
+		}
 		return this.#getModeDefinition().description(this.session);
 	}
 

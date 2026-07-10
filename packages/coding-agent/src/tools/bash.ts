@@ -24,7 +24,8 @@ import { CachedOutputBlock, markFramedBlockComponent } from "../tui/output-block
 import { getSixelLineMask } from "../utils/sixel";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
-import { applyBashFixups } from "./bash-command-fixup";
+import { admitWindowsHeredocCommand, applyBashFixups } from "./bash-command-fixup";
+import type { ResolvedToolProfile } from "./tool-profiles";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import { checkBashInterception } from "./bash-interceptor";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
@@ -404,7 +405,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 	readonly #autoBackgroundEnabled: boolean;
 	readonly #autoBackgroundThresholdMs: number;
 
-	constructor(private readonly session: ToolSession) {
+	constructor(
+		private readonly session: ToolSession,
+		private readonly toolProfile?: ResolvedToolProfile,
+	) {
 		this.#asyncEnabled = this.session.settings.get("async.enabled");
 		this.#autoBackgroundEnabled = this.session.settings.get("bash.autoBackground.enabled");
 		this.#autoBackgroundThresholdMs = Math.max(
@@ -713,6 +717,13 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			if (fixup.stripped.length > 0) {
 				command = fixup.command;
 			}
+		}
+
+		const heredocAdmission = admitWindowsHeredocCommand(command, this.toolProfile);
+		if (!heredocAdmission.allow) {
+			throw new ToolError(
+				`Windows heredoc rejected for this profile. ${heredocAdmission.recoveryHint ?? "write script file -> execute file"}`,
+			);
 		}
 
 		// Extract leading `cd <path> && ...` into cwd when the model ignores the cwd parameter.

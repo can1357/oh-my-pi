@@ -26,3 +26,7 @@ Runs bash in a shell session — terminal ops: git, bun, cargo, python.
 - A foreground call may convert to a background job; the result arrives as a follow-up tool call — NOT a failure, do NOT retry or wait synchronously.
 - Need the result inline (e.g. piping into another command)? Raise `timeout` above expected duration{{#if asyncEnabled}}, or set `async: true` up front{{/if}}.
 {{/if}}
+
+<windows-heredoc>
+On Windows, prefer `write` a script file then execute that file instead of bash heredocs (`<<`). Bound/procedural profiles reject confirmed heredocs before execution with recovery: write script file -> execute file.
+</windows-heredoc>
