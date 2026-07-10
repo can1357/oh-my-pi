@@ -111,6 +111,7 @@
         "packages/llm-router-agent/src/config.ts",
         "packages/llm-router-agent/src/validation.ts",
         "packages/llm-router-agent/src/telemetry.ts",
+        "packages/llm-router-agent/tsconfig.json",
         "packages/llm-router-agent/tests/qwen-client.test.mjs",
         "packages/llm-router-agent/tests/task-spawn-policy.test.mjs"
       ]

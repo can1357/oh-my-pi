@@ -21,10 +21,11 @@ You may ONLY edit these files:
 - `packages/llm-router-agent/src/config.ts` (existing)
 - `packages/llm-router-agent/src/validation.ts` (existing)
 - `packages/llm-router-agent/src/telemetry.ts` (existing)
+- `packages/llm-router-agent/tsconfig.json` (existing)
 - `packages/llm-router-agent/tests/qwen-client.test.mjs` (new)
 - `packages/llm-router-agent/tests/task-spawn-policy.test.mjs` (new)
 
-You may NOT edit coding-agent extension/task/settings code, global `modelRoles`, existing serving docs/model artifacts, package manifests, policy/training/features modules, changelogs, or Lane B/C/E files.
+You may NOT edit coding-agent extension/task/settings code, global `modelRoles`, existing serving docs/model artifacts, package manifests other than the owned `tsconfig.json`, policy/training/features modules, changelogs, or Lane B/C/E files.
 
 ## 3. Gap (verbatim from the table)
 
@@ -118,7 +119,7 @@ git status --short
 
 Expected:
 - `git diff --check` exits 0.
-- `git diff --name-only` may omit new files; the union of `git diff --name-only` and `git status --short` lists ONLY the eight owned files.
+- `git diff --name-only` may omit new files; the union of `git diff --name-only` and `git status --short` lists ONLY the nine owned files.
 - No `@ts-expect-error` suppressor is permitted; Lane E owns event registration.
 - Main later runs both router tests, package checks, and Lane E's core hook integration test.
 
