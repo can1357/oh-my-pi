@@ -1,10 +1,19 @@
 import type {
 	JsonSchemaLike,
+	TaskSpawnConfig,
+	TaskSpawnLabelMappings,
 	ValidationIssue,
 	ValidationPlan,
 	ValidationRequirement,
 	ValidationResult,
 } from "./types.js";
+
+export type RouteLabel = "light" | "mid" | "heavy";
+
+const ROUTE_LABELS = new Set<RouteLabel>(["light", "mid", "heavy"]);
+const CANDIDATE_TIERS = new Set(["light", "mid", "frontier"]);
+const MIN_TASK_SPAWN_TIMEOUT_MS = 1;
+const MAX_TASK_SPAWN_TIMEOUT_MS = 60_000;
 
 const DEFAULT_UNSAFE_HINTS = [
 	"steal credentials",
@@ -15,6 +24,78 @@ const DEFAULT_UNSAFE_HINTS = [
 	"phishing kit",
 	"self-harm instructions",
 ];
+
+/** Normalize classifier output to an exact route label, or undefined if invalid. */
+export function normalizeRouteLabel(raw: string): RouteLabel | undefined {
+	const normalized = raw.trim().toLowerCase();
+	if (ROUTE_LABELS.has(normalized as RouteLabel)) return normalized as RouteLabel;
+	return undefined;
+}
+
+/**
+ * Validate optional task-spawn classifier config.
+ * When disabled/missing, only structural label-mapping issues are reported if mappings are present.
+ * When enabled, endpoint URL, positive bounded timeout, system prompt, and label mappings are required.
+ */
+export function validateTaskSpawnConfig(config: TaskSpawnConfig | undefined): string[] {
+	if (!config) return [];
+	const errors: string[] = [];
+	if (config.labelMappings) {
+		errors.push(...validateLabelMappings(config.labelMappings));
+	}
+	if (config.enabled !== true) return errors;
+
+	const endpoint = config.endpoint?.trim() ?? "";
+	if (!endpoint) {
+		errors.push("taskSpawn.endpoint is required when taskSpawn.enabled is true");
+	} else if (!isValidHttpUrl(endpoint)) {
+		errors.push("taskSpawn.endpoint must be an absolute http(s) URL");
+	}
+
+	const timeoutMs = config.timeoutMs;
+	if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs)) {
+		errors.push("taskSpawn.timeoutMs must be a finite number when taskSpawn.enabled is true");
+	} else if (timeoutMs < MIN_TASK_SPAWN_TIMEOUT_MS || timeoutMs > MAX_TASK_SPAWN_TIMEOUT_MS) {
+		errors.push(
+			`taskSpawn.timeoutMs must be between ${MIN_TASK_SPAWN_TIMEOUT_MS} and ${MAX_TASK_SPAWN_TIMEOUT_MS}`,
+		);
+	}
+
+	if (!(config.systemPrompt?.trim())) {
+		errors.push("taskSpawn.systemPrompt is required when taskSpawn.enabled is true");
+	}
+
+	if (!config.labelMappings) {
+		errors.push("taskSpawn.labelMappings is required when taskSpawn.enabled is true");
+	}
+
+	return errors;
+}
+
+function validateLabelMappings(mappings: TaskSpawnLabelMappings): string[] {
+	const errors: string[] = [];
+	for (const label of ["light", "mid", "heavy"] as const) {
+		const tier = mappings[label];
+		if (tier === undefined) {
+			errors.push(`taskSpawn.labelMappings.${label} is required`);
+			continue;
+		}
+		if (!CANDIDATE_TIERS.has(tier)) {
+			errors.push(`taskSpawn.labelMappings.${label} must be light|mid|frontier`);
+		}
+	}
+	return errors;
+}
+
+function isValidHttpUrl(value: string): boolean {
+	try {
+		const url = new URL(value);
+		return url.protocol === "http:" || url.protocol === "https:";
+	} catch {
+		return false;
+	}
+}
+
 
 export function validateOutput(output: string, plan: ValidationPlan, unsafeHints: string[] = []): ValidationResult {
 	const issues: ValidationIssue[] = [];
