@@ -583,9 +583,11 @@ export class Settings {
 			agentTypePolicy,
 			agentIdPolicy,
 		});
+		// Compose returns `modelPool?: readonly string[]`; settings boundary stays mutable.
+		const { modelPool, ...rest } = composed;
 		return {
-			...composed,
-			...(composed.modelPool !== undefined ? { modelPool: [...composed.modelPool] } : {}),
+			...rest,
+			...(modelPool !== undefined ? { modelPool: [...modelPool] } : {}),
 		};
 	}
 
