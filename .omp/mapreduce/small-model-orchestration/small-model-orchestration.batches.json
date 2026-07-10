@@ -1,0 +1,128 @@
+{
+  "task": "small-model-orchestration",
+  "commit": "1555ecd899ebf0e0742cd90e0389023b10b82691",
+  "coverageInvariant": "Every listed signal file is assigned to exactly one shard; each worker must account for every signal as cleared or confirmed.",
+  "batches": [
+    {
+      "id": "spawn-model-config",
+      "selectors": ["S1", "S2"],
+      "files": [
+        "packages/coding-agent/src/task/index.ts",
+        "packages/coding-agent/src/session/fusion-sidekick.ts",
+        "packages/coding-agent/src/config/subagent-model-aliases.ts",
+        "packages/coding-agent/src/config/model-resolver.ts",
+        "packages/coding-agent/src/config/settings-schema.ts",
+        "packages/coding-agent/src/config/settings.ts",
+        "packages/coding-agent/src/sdk.ts",
+        "packages/coding-agent/test/subagent-model-aliases.test.ts"
+      ],
+      "signals": [
+        "TaskTool #runSpawn and preallocation paths",
+        "Fusion spawn and registry-confirmed liveness",
+        "alias/role/override resolution and settings schema",
+        "startup session construction and semantic validation opportunity"
+      ]
+    },
+    {
+      "id": "tool-capability-grammar",
+      "selectors": ["S3", "S7"],
+      "files": [
+        "packages/coding-agent/src/tools/index.ts",
+        "packages/coding-agent/src/discovery/helpers.ts",
+        "packages/coding-agent/src/tools/search-tool-bm25.ts",
+        "packages/coding-agent/src/extensibility/extensions/loader.ts",
+        "packages/coding-agent/src/extensibility/extensions/runner.ts",
+        "packages/coding-agent/src/prompts/tools/read.md",
+        "packages/coding-agent/src/prompts/tools/replace.md",
+        "packages/coding-agent/src/prompts/tools/apply-patch.md"
+      ],
+      "signals": [
+        "base tool construction and automatic tool additions",
+        "agent frontmatter tool parsing",
+        "discoverable/activated tool escape path",
+        "extension-registered tools",
+        "read/edit grammar exposed to models"
+      ]
+    },
+    {
+      "id": "assignment-result-recovery",
+      "selectors": ["S4", "S8"],
+      "files": [
+        "packages/coding-agent/src/task/executor.ts",
+        "packages/coding-agent/src/task/types.ts",
+        "packages/coding-agent/src/task/render.ts",
+        "packages/coding-agent/src/task/subprocess-tool-registry.ts",
+        "packages/coding-agent/src/tools/yield.ts",
+        "packages/coding-agent/test/tools/yield.test.ts",
+        "packages/coding-agent/test/task/task-spawn.test.ts",
+        "packages/coding-agent/test/tools/task-async-fallback.test.ts"
+      ],
+      "signals": [
+        "provider fallback-chain implementation",
+        "soft request/runtime budgets and terminal retry state",
+        "yield schema override and fallback completion",
+        "task result rendering and isError propagation",
+        "existing acceptance test homes"
+      ]
+    },
+    {
+      "id": "collaboration-lifecycle",
+      "selectors": ["S5", "S8"],
+      "files": [
+        "packages/coding-agent/src/irc/bus.ts",
+        "packages/coding-agent/src/registry/agent-registry.ts",
+        "packages/coding-agent/src/registry/agent-lifecycle.ts",
+        "packages/coding-agent/src/session/agent-session.ts",
+        "packages/coding-agent/src/task/persisted-revive.ts",
+        "packages/coding-agent/src/collab/host.ts",
+        "packages/coding-agent/src/modes/components/agent-hub.ts",
+        "packages/coding-agent/test/tools/irc.test.ts"
+      ],
+      "signals": [
+        "registry visibility/topology and persisted refs",
+        "wake/revive and concurrent lifecycle semantics",
+        "IRC delivery, side-channel reply, mailbox behavior",
+        "remote collaboration and Agent Hub control paths"
+      ]
+    },
+    {
+      "id": "execution-observability",
+      "selectors": ["S6", "S7"],
+      "files": [
+        "packages/coding-agent/src/tools/bash.ts",
+        "packages/coding-agent/src/tools/bash-command-fixup.ts",
+        "packages/coding-agent/src/tools/eval.ts",
+        "packages/coding-agent/src/tools/tool-timeouts.ts",
+        "packages/coding-agent/src/prompts/tools/bash.md",
+        "packages/coding-agent/src/prompts/tools/eval.md",
+        "packages/coding-agent/test/tools/task-agent-capabilities.test.ts"
+      ],
+      "signals": [
+        "timeout defaults and clamp source",
+        "stdout/stderr/exit-status failure representation",
+        "heredoc parser/fixup and Windows-sensitive grammar",
+        "tool-capability test precedent"
+      ]
+    },
+    {
+      "id": "extension-router-policy",
+      "selectors": ["S1", "S2", "S3", "S4"],
+      "files": [
+        "packages/llm-router-agent/src/extension.ts",
+        "packages/llm-router-agent/src/policy.ts",
+        "packages/llm-router-agent/src/types.ts",
+        "packages/llm-router-agent/src/config.ts",
+        "packages/llm-router-agent/src/validation.ts",
+        "packages/llm-router-agent/src/telemetry.ts",
+        "packages/coding-agent/src/extensibility/extensions/types.ts",
+        "scratch/router-ft/SERVING.md"
+      ],
+      "signals": [
+        "current input-hook routing granularity",
+        "reusable policy/config/validation and telemetry",
+        "extension API gap for transforming task-spawn hooks",
+        "local Qwen classifier serving contract"
+      ]
+    }
+  ]
+}
