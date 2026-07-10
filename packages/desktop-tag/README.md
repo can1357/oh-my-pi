@@ -15,6 +15,8 @@ omp --extension packages/desktop-tag/src/extension.ts
 
 `/tag [screen|window|browser] [request]` immediately captures context and sends it to the current agent; `/tag` defaults to a screen description. Region syntax is `/tag region <x> <y> <width> <height> [request]`. The standalone command prints the loopback overlay URL. Region coordinates use physical pixels: `x` and `y` are finite signed values; `width` and `height` are finite positive values.
 
+Inside OMP, press `Ctrl+Alt+T` to capture the screen and prompt for a task.
+
 ## Security and lifecycle
 
 The gateway binds only to loopback (`127.0.0.1`, `localhost`, or `::1`) and rejects non-loopback `Host` values. Browser HTTP and WebSocket requests must use the gateway's exact loopback origin and port. An absent `Origin` remains supported for local native clients; it does not permit a non-loopback host.

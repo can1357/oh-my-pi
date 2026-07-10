@@ -26,7 +26,7 @@ describe("desktopTagExtension", () => {
 
 		expect(api.setLabel).toHaveBeenCalledWith("Desktop Tag");
 		expect(api.registerCommand).toHaveBeenCalled();
-		expect(api.registerShortcut).toHaveBeenCalled();
+		expect(api.registerShortcut).toHaveBeenCalledWith("ctrl+alt+t", expect.any(Object));
 	});
 });
 

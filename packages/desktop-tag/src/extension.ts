@@ -32,7 +32,7 @@ export default function desktopTagExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerShortcut("ctrl+shift+space" as KeyId, {
+	pi.registerShortcut("ctrl+alt+t" as KeyId, {
 		description: "Capture the screen and tag the agent",
 		async handler(ctx) {
 			const request = ctx.hasUI ? await ctx.ui.input("What should pi do with this screen?") : "";
