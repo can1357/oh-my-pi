@@ -179,6 +179,36 @@ export function formatTaskId(id: string): string {
 	return segments.length < 2 ? id : segments.join(">");
 }
 
+type AssignmentExecutionDisplayData = {
+	recoveryAttempt?: unknown;
+	recoveryTier?: unknown;
+	recoveryProvider?: unknown;
+	failureClass?: unknown;
+	nextRecoveryAction?: unknown;
+	assignmentVerificationStatus?: unknown;
+};
+
+function renderAssignmentExecutionMetadata(value: object, continuePrefix: string, theme: Theme): string[] {
+	const metadata = value as AssignmentExecutionDisplayData;
+	const parts: string[] = [];
+	if (typeof metadata.recoveryAttempt === "number" && Number.isFinite(metadata.recoveryAttempt)) {
+		parts.push(`attempt ${metadata.recoveryAttempt}`);
+	}
+	for (const [label, raw] of [
+		["tier", metadata.recoveryTier],
+		["provider", metadata.recoveryProvider],
+		["failure", metadata.failureClass],
+		["next", metadata.nextRecoveryAction],
+		["verification", metadata.assignmentVerificationStatus],
+	] as const) {
+		if (typeof raw === "string" && raw.trim()) {
+			parts.push(`${label} ${truncateToWidth(replaceTabs(raw.trim()), 40)}`);
+		}
+	}
+	if (parts.length === 0) return [];
+	return [`${continuePrefix}${theme.tree.hook} ${theme.fg("dim", parts.join(theme.sep.dot))}`];
+}
+
 const MISSING_YIELD_WARNING_PREFIX = "SYSTEM WARNING: Subagent exited without calling yield tool";
 
 function extractMissingYieldWarning(output: string): { warning?: string; rest: string } {
@@ -804,6 +834,8 @@ function renderAgentProgress(
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("error", summary)}`);
 	}
 
+	lines.push(...renderAssignmentExecutionMetadata(progress, continuePrefix, theme));
+
 	// Render extracted tool data inline (e.g., review findings)
 	if (progress.extractedToolData) {
 		// For completed tasks, check for review verdict from yield tool
@@ -1065,6 +1097,7 @@ function renderAgentResult(
 			`${continuePrefix}${theme.fg("error", theme.status.aborted)} ${theme.fg("dim", truncateToWidth(replaceTabs(result.abortReason), 80))}`,
 		);
 	}
+	lines.push(...renderAssignmentExecutionMetadata(result, continuePrefix, theme));
 	// Check for review result (yield with review schema + report_finding)
 	// Check for review result (yield with review schema + report_finding).
 	// `normalizeYieldData` guards against a stray non-array `yield` slot —

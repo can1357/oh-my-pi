@@ -25,7 +25,8 @@ export interface SubprocessToolEvent {
 export interface SubprocessToolHandler<TData = unknown> {
 	/**
 	 * Extract structured data from tool result.
-	 * Extracted data is accumulated in progress.extractedToolData[toolName][].
+	 * Extracted data is accumulated as `unknown[]` under the event tool name,
+	 * including assignment-verification or recovery tool names registered later.
 	 */
 	extractData?: (event: SubprocessToolEvent) => TData | undefined;
 
@@ -84,5 +85,9 @@ class SubprocessToolRegistryImpl {
 /** Singleton registry instance */
 export const subprocessToolRegistry = new SubprocessToolRegistryImpl();
 
-/** Type helper for extracted tool data in progress/result */
-export type ExtractedToolData = Record<string, unknown[]>;
+/**
+ * Extracted subprocess payloads keyed by tool/data-channel name. Assignment
+ * verification and recovery handlers intentionally remain `unknown[]` here;
+ * consumers validate their payloads at the boundary that understands them.
+ */
+export type ExtractedToolData<TKey extends string = string> = Record<TKey, unknown[]>;

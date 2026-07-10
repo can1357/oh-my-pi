@@ -64,6 +64,12 @@ import { SearchTool } from "./search";
 import { SearchToolBm25Tool } from "./search-tool-bm25";
 import { loadSshTool } from "./ssh";
 import { type TodoPhase, TodoTool } from "./todo";
+import {
+	CONTROL_BUILTIN_NAMES,
+	isToolCapabilityAllowed,
+	type ResolvedToolProfile,
+	type ToolSource,
+} from "./tool-profiles";
 import { WriteTool } from "./write";
 import { YieldTool } from "./yield";
 
@@ -202,6 +208,10 @@ export interface ToolSession {
 	eventBus?: EventBus;
 	/** Output schema for structured completion (subagents) */
 	outputSchema?: unknown;
+	/** Whether the active output schema is bound to an assignment contract and must fail closed. */
+	assignmentContractActive?: boolean;
+	/** Frozen source-aware capability ceiling for this session. Undefined preserves legacy unrestricted behavior. */
+	toolProfile?: ResolvedToolProfile;
 	/** Whether to include the yield tool by default */
 	requireYieldTool?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
@@ -408,6 +418,22 @@ export function computeEssentialBuiltinNames(settings: Settings): string[] {
 	return [...DEFAULT_ESSENTIAL_TOOL_NAMES];
 }
 
+function inferToolSource(name: string): ToolSource | undefined {
+	if (name in BUILTIN_TOOLS) return "builtin";
+	if (name in HIDDEN_TOOLS) return "hidden";
+	if (name.startsWith("mcp__")) return "mcp";
+	return undefined;
+}
+
+function isAllowedByToolProfile(profile: ResolvedToolProfile | undefined, source: ToolSource, name: string): boolean {
+	if (!profile) return true;
+	const normalizedName = name.toLowerCase();
+	// Canonical control tools remain callable under an explicit deny-all ceiling.
+	// A same-named MCP/extension/custom tool must not inherit this exception.
+	if ((source === "builtin" || source === "hidden") && CONTROL_BUILTIN_NAMES.has(normalizedName)) return true;
+	return isToolCapabilityAllowed(profile, { source, name: normalizedName });
+}
+
 /**
  * Filter the initial active tool set when `tools.discoveryMode === "all"`.
  *
@@ -426,9 +452,17 @@ export function filterInitialToolsForDiscoveryAll(
 		explicitlyRequested: ReadonlySet<string>;
 		restored: ReadonlySet<string>;
 		forceActive: ReadonlySet<string>;
+		/** Capability ceiling applied before essential/restored/forced exceptions. */
+		toolProfile?: ResolvedToolProfile;
+		/** Source resolver for non-builtins; unknown sources fail closed under a profile. */
+		sourceOf?: (name: string) => ToolSource | undefined;
 	},
 ): string[] {
 	return initialToolNames.filter(name => {
+		if (opts.toolProfile) {
+			const source = opts.sourceOf?.(name) ?? inferToolSource(name);
+			if (!source || !isAllowedByToolProfile(opts.toolProfile, source, name)) return false;
+		}
 		const loadMode = opts.loadModeOf(name);
 		if (!loadMode) return true; // not a built-in — leave MCP/custom/extension to existing logic
 		if (loadMode === "essential") return true;
@@ -445,9 +479,9 @@ export function filterInitialToolsForDiscoveryAll(
  * `BUILTIN_TOOLS[name](session)` to construct a tool directly.
  */
 export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
-	read: s => new ReadTool(s),
-	bash: s => new BashTool(s),
-	edit: s => new EditTool(s),
+	read: s => new ReadTool(s, s.toolProfile),
+	bash: s => new BashTool(s, s.toolProfile),
+	edit: s => new EditTool(s, s.toolProfile),
 	ast_grep: s => new AstGrepTool(s),
 	ast_edit: s => new AstEditTool(s),
 	ask: AskTool.createIf,
@@ -469,7 +503,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	irc: IrcTool.createIf,
 	todo: s => new TodoTool(s),
 	web_search: s => new WebSearchTool(s),
-	search_tool_bm25: SearchToolBm25Tool.createIf,
+	search_tool_bm25: s => SearchToolBm25Tool.createIf(s, { toolProfile: s.toolProfile }),
 	write: s => new WriteTool(s),
 	memory_edit: MemoryEditTool.createIf,
 	retain: MemoryRetainTool.createIf,
@@ -493,6 +527,7 @@ export type ToolName = BuiltinToolName;
  * Create tools from BUILTIN_TOOLS registry.
  */
 export async function createTools(session: ToolSession, toolNames?: string[]): Promise<Tool[]> {
+	const toolProfile = session.toolProfile;
 	const includeYield = session.requireYieldTool === true;
 	const enableLsp = session.enableLsp ?? true;
 	let requestedTools =
@@ -515,7 +550,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		!skipPythonPreflight &&
 		allowPython &&
 		!allowJs &&
-		(requestedTools === undefined || requestedTools.includes("eval"))
+		(requestedTools === undefined || requestedTools.includes("eval")) &&
+		isAllowedByToolProfile(toolProfile, "builtin", "eval")
 	) {
 		const availability = await logger.time(
 			"createTools:pythonCheck",
@@ -582,7 +618,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const discoveryActive = effectiveDiscoveryMode !== "off";
 
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
-	const isToolAllowed = (name: string) => {
+	const isToolAllowed = (name: string, source: ToolSource) => {
+		if (!isAllowedByToolProfile(toolProfile, source, name)) return false;
 		if (name === "goal") return goalEnabled && goalModeActive;
 		if (name === "lsp") return enableLsp && session.settings.get("lsp.enabled");
 		if (name === "bash") return session.settings.get("bash.enabled");
@@ -622,28 +659,37 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		requestedTools.push("yield");
 	}
 
-	const filteredRequestedTools = requestedTools?.filter(name => name in allTools && isToolAllowed(name));
-	const baseEntries =
+	const filteredRequestedTools = requestedTools?.filter(name => {
+		const source = inferToolSource(name);
+		return source !== undefined && name in allTools && isToolAllowed(name, source);
+	});
+	const baseEntries: Array<readonly [string, ToolFactory, ToolSource]> =
 		filteredRequestedTools !== undefined
-			? filteredRequestedTools.filter(name => name !== "resolve").map(name => [name, allTools[name]] as const)
+			? filteredRequestedTools
+					.filter(name => name !== "resolve")
+					.map(name => [name, allTools[name]!, inferToolSource(name)!] as const)
 			: [
 					...Object.entries(BUILTIN_TOOLS)
-						.filter(([name]) => isToolAllowed(name))
-						.map(([name, factory]) => [name, factory] as const),
-					...(includeYield ? ([["yield", HIDDEN_TOOLS.yield]] as const) : []),
-					...(goalModeActive ? ([["goal", HIDDEN_TOOLS.goal]] as const) : []),
+						.filter(([name]) => isToolAllowed(name, "builtin"))
+						.map(([name, factory]) => [name, factory, "builtin"] as const),
+					...(includeYield && isToolAllowed("yield", "hidden")
+						? ([["yield", HIDDEN_TOOLS.yield, "hidden"]] as const)
+						: []),
+					...(goalModeActive && isToolAllowed("goal", "hidden")
+						? ([["goal", HIDDEN_TOOLS.goal, "hidden"]] as const)
+						: []),
 				];
 
 	const baseResults = await Promise.all(
-		baseEntries.map(async ([name, factory]) => {
+		baseEntries.map(async ([name, factory, source]) => {
 			const tool = await logger.time(`createTools:${name}`, factory as ToolFactory, session);
-			return tool ? wrapToolWithMetaNotice(tool) : null;
+			return tool && isAllowedByToolProfile(toolProfile, source, tool.name) ? wrapToolWithMetaNotice(tool) : null;
 		}),
 	);
 	const tools = baseResults.filter((r): r is Tool => r !== null);
-	if (!tools.some(tool => tool.name === "resolve")) {
+	if (!tools.some(tool => tool.name === "resolve") && isToolAllowed("resolve", "hidden")) {
 		const resolveTool = await logger.time("createTools:resolve", HIDDEN_TOOLS.resolve, session);
-		if (resolveTool) {
+		if (resolveTool && isAllowedByToolProfile(toolProfile, "hidden", resolveTool.name)) {
 			tools.push(wrapToolWithMetaNotice(resolveTool));
 		}
 	}
@@ -651,7 +697,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// Auto-inject report_tool_issue when autoqa is enabled (env or setting).
 	// Injected unconditionally into every agent, regardless of requested tool list.
 	const autoQA = isAutoQaEnabled(session.settings);
-	if (autoQA && !tools.some(t => t.name === "report_tool_issue")) {
+	if (autoQA && isToolAllowed("report_tool_issue", "hidden") && !tools.some(t => t.name === "report_tool_issue")) {
 		// Build the enum from tools we just constructed via BUILTIN_TOOLS / HIDDEN_TOOLS.
 		// Extension overrides (e.g. a user's custom `bash`) get added later by
 		// other code paths, so they're absent here — exactly what we want; MCP /
@@ -660,7 +706,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			.map(t => t.name)
 			.filter(name => (name in BUILTIN_TOOLS || name in HIDDEN_TOOLS) && name !== "report_tool_issue");
 		const qaTool = createReportToolIssueTool(session, activeBuiltinNames);
-		if (qaTool) {
+		if (qaTool && isAllowedByToolProfile(toolProfile, "hidden", qaTool.name)) {
 			tools.push(wrapToolWithMetaNotice(qaTool));
 		}
 	}

@@ -124,9 +124,11 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	lenientArgValidation = true;
 
 	readonly #validate?: (value: unknown) => JsonSchemaValidationResult;
+	readonly #assignmentContractActive: boolean;
 	#schemaValidationFailures = 0;
 
 	constructor(session: ToolSession) {
+		this.#assignmentContractActive = session.assignmentContractActive === true;
 		let validate: ((value: unknown) => JsonSchemaValidationResult) | undefined;
 		let parameters: TSchema;
 
@@ -227,6 +229,11 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				const parsed = this.#validate(data);
 				if (!parsed.success) {
 					this.#schemaValidationFailures++;
+					if (this.#assignmentContractActive) {
+						throw new Error(
+							`Output does not match schema: ${formatAllValidationIssues(parsed.issues)}. Call yield again with the corrected shape — the assignment contract remains enforced.`,
+						);
+					}
 					if (this.#schemaValidationFailures <= MAX_SCHEMA_RETRIES) {
 						const remaining = MAX_SCHEMA_RETRIES - this.#schemaValidationFailures;
 						const retryHint =
