@@ -77,6 +77,11 @@ function makeResult(
 	};
 }
 
+
+function defaultActual(result: AssignmentResultV1): readonly string[] {
+	return result.changedFiles;
+}
+
 describe("isPlaceholderNarrative", () => {
 	test("rejects literals, template markers, and repeated filler only", () => {
 		expect(isPlaceholderNarrative("test")).toBe(true);
@@ -111,6 +116,7 @@ describe("verifyAssignmentResult", () => {
 		const verified = await verifyAssignmentResult({
 			contract,
 			result,
+			actualChangedFiles: defaultActual(result),
 			runners: {
 				readText: async () => "finding: digest mismatch handling looks correct",
 			},
@@ -122,17 +128,25 @@ describe("verifyAssignmentResult", () => {
 	test("wrong digest/revision cannot verify", async () => {
 		const contract = makeContract();
 		const wrongDigest = makeResult(contract, { digest: "0".repeat(64) });
-		const digestResult = await verifyAssignmentResult({ contract, result: wrongDigest });
+		const digestResult = await verifyAssignmentResult({
+			contract,
+			result: wrongDigest,
+			actualChangedFiles: defaultActual(wrongDigest),
+		});
 		expect(digestResult.verified).toBe(false);
 		expect(digestResult.failureClass).toBe("acceptance");
 
 		const wrongRevision = makeResult(contract, { revision: 99 });
-		const revisionResult = await verifyAssignmentResult({ contract, result: wrongRevision });
+		const revisionResult = await verifyAssignmentResult({
+			contract,
+			result: wrongRevision,
+			actualChangedFiles: defaultActual(wrongRevision),
+		});
 		expect(revisionResult.verified).toBe(false);
 		expect(revisionResult.failureClass).toBe("acceptance");
 
 		const wrongId = makeResult(contract, { contractId: "assign-other" });
-		const idResult = await verifyAssignment(contract, wrongId);
+		const idResult = await verifyAssignment(contract, wrongId, undefined, defaultActual(wrongId));
 		expect(idResult.verified).toBe(false);
 		expect(idResult.failureClass).toBe("acceptance");
 	});
@@ -148,7 +162,11 @@ describe("verifyAssignmentResult", () => {
 				},
 			],
 		});
-		const missingResult = await verifyAssignmentResult({ contract, result: missing });
+		const missingResult = await verifyAssignmentResult({
+			contract,
+			result: missing,
+			actualChangedFiles: defaultActual(missing),
+		});
 		expect(missingResult.verified).toBe(false);
 		expect(missingResult.failureClass).toBe("acceptance");
 
@@ -171,7 +189,11 @@ describe("verifyAssignmentResult", () => {
 				},
 			],
 		});
-		const duplicateResult = await verifyAssignmentResult({ contract, result: duplicate });
+		const duplicateResult = await verifyAssignmentResult({
+			contract,
+			result: duplicate,
+			actualChangedFiles: defaultActual(duplicate),
+		});
 		expect(duplicateResult.verified).toBe(false);
 		expect(duplicateResult.failureClass).toBe("acceptance");
 	});
@@ -181,22 +203,36 @@ describe("verifyAssignmentResult", () => {
 		const result = makeResult(contract, {
 			changedFiles: ["packages/coding-agent/src/tools/eval.ts"],
 		});
-		const verified = await verifyAssignmentResult({ contract, result });
+		const verified = await verifyAssignmentResult({
+			contract,
+			result,
+			actualChangedFiles: defaultActual(result),
+		});
 		expect(verified.verified).toBe(false);
 		expect(verified.failureClass).toBe("acceptance");
 	});
 
 	test("denied prefixes win and sibling prefixes do not match", async () => {
 		const contract = makeContract();
+		const deniedResult = makeResult(contract, {
+			changedFiles: ["packages/coding-agent/src/task/executor.ts"],
+		});
 		const denied = await verifyAssignment(
 			contract,
-			makeResult(contract, { changedFiles: ["packages/coding-agent/src/task/executor.ts"] }),
+			deniedResult,
+			undefined,
+			defaultActual(deniedResult),
 		);
 		expect(denied.verified).toBe(false);
 
+		const siblingResult = makeResult(contract, {
+			changedFiles: ["packages/coding-agent/src/task-extra/file.ts"],
+		});
 		const sibling = await verifyAssignment(
 			contract,
-			makeResult(contract, { changedFiles: ["packages/coding-agent/src/task-extra/file.ts"] }),
+			siblingResult,
+			undefined,
+			defaultActual(siblingResult),
 		);
 		expect(sibling.verified).toBe(false);
 	});
@@ -227,6 +263,7 @@ describe("verifyAssignmentResult", () => {
 			const verified = await verifyAssignmentResult({
 				contract,
 				result,
+				actualChangedFiles: defaultActual(result),
 				runners: {
 					readText: async () => "finding: still invalid without matching evidence",
 				},
@@ -495,7 +532,7 @@ describe("verifyAssignmentResult", () => {
 				hashHex: path === "local://hash" ? "abc123" : undefined,
 			}),
 			readText: async path => (path === "local://json" ? '{"ok":true}' : "contains needle"),
-		});
+		}, defaultActual(result));
 
 		expect(verified.verified).toBe(true);
 		expect(commands).toEqual(["exit-ok", "times-out", "streams"]);
@@ -566,13 +603,18 @@ describe("verifyAssignmentResult", () => {
 			...makeResult(contract),
 			changedFiles: "not-an-array",
 		} as unknown as AssignmentResultV1;
-		const verified = await verifyAssignment(contract, malformed);
+		const verified = await verifyAssignment(
+			contract,
+			malformed,
+			undefined,
+			["packages/coding-agent/src/task/assignment-verifier.ts"],
+		);
 		expect(verified.verified).toBe(false);
 		expect(verified.failureClass).toBe("acceptance");
 		expect(verified.reasons[0]).toContain("Invalid result");
 	});
 
-	test("parent-observed changedFiles are authoritative and reject child omission", async () => {
+	test("actualChangedFiles are authoritative and reject child omission/mismatch", async () => {
 		const contract = makeContract({
 			acceptance: [
 				{
@@ -598,7 +640,7 @@ describe("verifyAssignmentResult", () => {
 			"packages/coding-agent/src/task/assignment-verifier.ts",
 		]);
 		expect(omitted.verified).toBe(false);
-		expect(omitted.reasons.join(" ")).toContain("Child omitted parent-observed changed path");
+		expect(omitted.reasons.join(" ")).toContain("Child omitted parent-authored changed path");
 
 		const complete = makeResult(contract, {
 			changedFiles: [
@@ -616,7 +658,7 @@ describe("verifyAssignmentResult", () => {
 		const verified = await verifyAssignmentResult({
 			contract,
 			result: complete,
-			observedChangedFiles: [
+			actualChangedFiles: [
 				"packages/coding-agent/src/task/assignment-contract.ts",
 				"packages/coding-agent/src/task/assignment-verifier.ts",
 			],
@@ -625,41 +667,102 @@ describe("verifyAssignmentResult", () => {
 	});
 
 	test("non-allowlisted URL schemes are scope-gated before artifact I/O", async () => {
+		for (const schemePath of [
+			"file://etc/passwd",
+			"c://secrets.txt",
+			"http://example.com/a",
+			"https://example.com/a",
+		]) {
+			const contract = makeContract({
+				acceptance: [
+					{
+						id: "artifact",
+						description: "Artifact exists",
+						check: "artifact_exists",
+						params: { path: schemePath },
+					},
+				],
+			});
+			let called = false;
+			const verified = await verifyAssignment(
+				contract,
+				makeResult(contract, {
+					evidence: [
+						{
+							criterionId: "artifact",
+							passed: true,
+							summary: "Artifact exists",
+						},
+					],
+				}),
+				{
+					statArtifact: async () => {
+						called = true;
+						return { exists: true };
+					},
+				},
+			);
+			expect(called).toBe(false);
+			expect(verified.verified).toBe(false);
+			expect(verified.reasons.join(" ")).toContain("outside declared scope");
+		}
+	});
+
+	test("absence of actualChangedFiles fails closed when scope verification applies", async () => {
 		const contract = makeContract({
 			acceptance: [
 				{
-					id: "artifact",
-					description: "Artifact exists",
-					check: "artifact_exists",
-					params: { path: "file://etc/passwd" },
+					id: "scope",
+					description: "Changed files stay in scope",
+					check: "changed_file_scope",
 				},
 			],
 		});
-		let called = false;
-		const verified = await verifyAssignment(
-			contract,
-			makeResult(contract, {
-				evidence: [
-					{
-						criterionId: "artifact",
-						passed: true,
-						summary: "Artifact exists",
-					},
-				],
-			}),
-			{
-				statArtifact: async () => {
-					called = true;
-					return { exists: true };
+		const result = makeResult(contract, {
+			evidence: [
+				{
+					criterionId: "scope",
+					passed: true,
+					summary: "Changed files stayed in scope",
 				},
-			},
-		);
-		expect(called).toBe(false);
+			],
+		});
+		const verified = await verifyAssignment(contract, result);
 		expect(verified.verified).toBe(false);
-		expect(verified.reasons.join(" ")).toContain("outside declared scope");
+		expect(verified.reasons.join(" ")).toContain("Missing authoritative actualChangedFiles");
 	});
 
-	test("typeless JSON schema fails closed", async () => {
+	test("child mismatch against actualChangedFiles fails closed", async () => {
+		const contract = makeContract({
+			acceptance: [
+				{
+					id: "scope",
+					description: "Changed files stay in scope",
+					check: "changed_file_scope",
+				},
+			],
+		});
+		const result = makeResult(contract, {
+			changedFiles: [
+				"packages/coding-agent/src/task/assignment-contract.ts",
+				"packages/coding-agent/src/task/assignment-verifier.ts",
+			],
+			evidence: [
+				{
+					criterionId: "scope",
+					passed: true,
+					summary: "Changed files stayed in scope",
+				},
+			],
+		});
+		const verified = await verifyAssignment(contract, result, undefined, [
+			"packages/coding-agent/src/task/assignment-contract.ts",
+		]);
+		expect(verified.verified).toBe(false);
+		expect(verified.reasons.join(" ")).toContain("absent from actualChangedFiles");
+	});
+
+	test("typeless JSON schema fails closed before I/O", async () => {
 		const contract = makeContract({
 			acceptance: [
 				{
@@ -673,6 +776,7 @@ describe("verifyAssignmentResult", () => {
 				},
 			],
 		});
+		let readCalls = 0;
 		const verified = await verifyAssignment(
 			contract,
 			makeResult(contract, {
@@ -685,9 +789,13 @@ describe("verifyAssignmentResult", () => {
 				],
 			}),
 			{
-				readText: async () => "null",
+				readText: async () => {
+					readCalls += 1;
+					return "null";
+				},
 			},
 		);
+		expect(readCalls).toBe(0);
 		expect(verified.verified).toBe(false);
 		expect(verified.reasons.join(" ")).toContain("JSON schema requires a supported type");
 	});
