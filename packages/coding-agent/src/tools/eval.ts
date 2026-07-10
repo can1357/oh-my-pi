@@ -12,7 +12,14 @@ import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
 import { IdleTimeout } from "../eval/idle-timeout";
 import { defaultEvalSessionId } from "../eval/session-id";
-import type { EvalCellResult, EvalDisplayOutput, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "../eval/types";
+import type {
+	EvalCancellationCause,
+	EvalCellResult,
+	EvalDisplayOutput,
+	EvalLanguage,
+	EvalStatusEvent,
+	EvalToolDetails,
+} from "../eval/types";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import { DEFAULT_MAX_BYTES, OutputSink, type OutputSummary, TailBuffer } from "../session/streaming-output";
 import { webpExclusionForModel } from "../utils/image-loading";
@@ -24,7 +31,7 @@ import { upsertStatusEvent } from "./eval-render";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
-import { clampTimeout } from "./tool-timeouts";
+import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 
 export { EVAL_DEFAULT_PREVIEW_LINES, evalToolRenderer } from "./eval-render";
 
@@ -143,6 +150,18 @@ function timeoutSecondsFromMs(timeoutMs: number): number {
 	return clampTimeout("eval", timeoutMs / 1000);
 }
 
+/** Format the terminal cancellation fact surfaced in tool text and typed details. */
+export function formatEvalCancellationMessage(
+	cause: EvalCancellationCause,
+	effectiveTimeoutSeconds: number,
+): string {
+	const unit = effectiveTimeoutSeconds === 1 ? "second" : "seconds";
+	if (cause === "idle_watchdog_timeout") {
+		return `Eval cell cancelled by idle watchdog timeout after ${effectiveTimeoutSeconds} ${unit}.`;
+	}
+	return `Eval cell cancelled by abort (effective timeout: ${effectiveTimeoutSeconds} ${unit}).`;
+}
+
 async function resolveBackend(session: ToolSession, language: EvalLanguage): Promise<ResolvedBackend> {
 	const backends = resolveEvalBackends(session);
 	const allowPy = backends.python;
@@ -254,7 +273,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				index: i,
 				title: cell.title,
 				code: cell.code,
-				timeoutMs: (cell.timeout ?? 30) * 1000,
+				timeoutMs: (cell.timeout ?? TOOL_TIMEOUTS.eval.default) * 1000,
 				reset: cell.reset ?? false,
 				resolved,
 			});
@@ -484,16 +503,31 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					}
 
 					if (result.cancelled) {
+						const effectiveTimeoutMs = result.effectiveTimeoutMs ?? idleTimeoutMs;
+						const effectiveTimeoutSeconds = timeoutSecondsFromMs(effectiveTimeoutMs);
+						const cancellationCause: EvalCancellationCause =
+							result.cancellationCause ??
+							(result.timedOut === true || idle.signal.aborted ? "idle_watchdog_timeout" : "abort");
+						const timedOut = result.timedOut ?? cancellationCause === "idle_watchdog_timeout";
+						const cancellationMessage = formatEvalCancellationMessage(
+							cancellationCause,
+							effectiveTimeoutSeconds,
+						);
 						cellResult.status = "error";
+						cellResult.output = cellOutput ? `${cellOutput}\n\n${cancellationMessage}` : cancellationMessage;
+						cellResult.cancellationCause = cancellationCause;
+						cellResult.effectiveTimeoutSeconds = effectiveTimeoutSeconds;
+						cellResult.timedOut = timedOut;
 						pushUpdate();
-						const errorMsg = result.output || "Command aborted";
 						const combinedOutput = cellOutputs.join("\n\n");
 						const outputText =
 							cells.length > 1
-								? `${combinedOutput}\n\nCell ${i + 1} aborted: ${errorMsg}`
-								: combinedOutput || errorMsg;
+								? `${combinedOutput}\n\nCell ${i + 1} cancelled: ${cancellationMessage}`
+								: combinedOutput
+									? `${combinedOutput}\n\n${cancellationMessage}`
+									: cancellationMessage;
 
-						const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
+						const summaryForMeta = await summarizeFinal(outputText, finalizeOutput);
 						const details: EvalToolDetails = {
 							language: languages[0],
 							languages,
@@ -501,6 +535,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							jsonOutputs: jsonOutputs.length > 0 ? jsonOutputs : undefined,
 							statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
 							isError: true,
+							cancellationCause,
+							effectiveTimeoutSeconds,
+							timedOut,
 						};
 						if (notice) details.notice = notice;
 
@@ -512,6 +549,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 					if (result.exitCode !== 0 && result.exitCode !== undefined) {
 						cellResult.status = "error";
+						if (result.processError) {
+							cellResult.processError = result.processError;
+						}
 						pushUpdate();
 						const combinedOutput = cellOutputs.join("\n\n");
 						const outputText =
@@ -530,6 +570,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
 							isError: true,
 						};
+						if (result.processError) details.processError = result.processError;
 						if (notice) details.notice = notice;
 
 						return toolResult(details)

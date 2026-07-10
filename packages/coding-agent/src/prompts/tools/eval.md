@@ -8,7 +8,7 @@ Cell fields:
 - `language` — required
 - `code` — cell body, verbatim; newlines/quotes JSON-encoded; no fences/headers
 - `title?` — short transcript label
-- `timeout?` — per-cell wall-clock seconds; raise only for heavy compute or long non-agent calls
+- `timeout?` — per-cell wall-clock seconds; omit to use the shared 30s default. Raise explicitly for heavy compute, long non-agent calls, or remote/Colab work (e.g. `120` seconds). Timeout/cancellation results name the cause and effective duration; Python `CalledProcessError` / subprocess timeout failures expose command, return code, stdout, and stderr inline or via artifact refs.
 - `reset?` — wipe this cell's kernel first{{#ifAll py js}} (other languages untouched){{/ifAll}}
 
 Work incrementally — one logical step per cell (imports, define, test, use), many small cells per call. Workflow notes belong in the assistant message or `title`, never in cell code.
