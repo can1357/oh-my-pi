@@ -106,6 +106,14 @@ function resolveCatalogSelector(input: string, registry: SubagentAliasRegistry):
  * silently falling back to the session default (the spawn path already
  * surfaces a clear error in that case).
  */
+function appendThinkingSuffix(selector: string, thinkingSuffix: string | undefined): string {
+	if (!thinkingSuffix) return selector;
+	// Catalog resolution may already re-attach a thinking level; prefer the
+	// caller-authored suffix from the alias input when present.
+	const base = splitThinkingSuffixFromAliasKey(selector);
+	return `${base}${thinkingSuffix}`;
+}
+
 export function resolveSubagentModelAlias(
 	input: string,
 	aliases: Record<string, string>,
@@ -114,19 +122,28 @@ export function resolveSubagentModelAlias(
 	const trimmed = input.trim();
 	if (!trimmed) return null;
 
-	// 1. Exact alias match (case-sensitive — preserves the user-authored key).
-	const exact = aliases[trimmed];
+	// Preserve `:thinkingLevel` through alias lookup. Matching uses the base key;
+	// the suffix is reattached to the resolved catalog selector.
+	const aliasBase = splitThinkingSuffixFromAliasKey(trimmed);
+	const thinkingSuffix = aliasBase === trimmed ? undefined : trimmed.slice(aliasBase.length);
+
+	// 1. Exact alias match on the base key (case-sensitive — preserves the user-authored key).
+	const exact = aliases[aliasBase] ?? (thinkingSuffix ? undefined : aliases[trimmed]);
 	if (exact && exact.trim().length > 0) {
-		return resolveCatalogSelector(exact.trim(), registry);
+		const resolved = resolveCatalogSelector(exact.trim(), registry);
+		return resolved ? appendThinkingSuffix(resolved, thinkingSuffix) : null;
 	}
 
 	// 2. Loose alias match: normalize keys and input to a single shape.
-	const normalizedInput = normalizeAliasKey(trimmed);
+	const normalizedInput = normalizeAliasKey(aliasBase);
 	if (normalizedInput.length > 0) {
 		for (const [key, value] of Object.entries(aliases)) {
-			if (normalizeAliasKey(key) === normalizedInput) {
+			if (normalizeAliasKey(splitThinkingSuffixFromAliasKey(key)) === normalizedInput) {
 				const trimmedValue = value.trim();
-				if (trimmedValue.length > 0) return resolveCatalogSelector(trimmedValue, registry);
+				if (trimmedValue.length > 0) {
+					const resolved = resolveCatalogSelector(trimmedValue, registry);
+					return resolved ? appendThinkingSuffix(resolved, thinkingSuffix) : null;
+				}
 			}
 		}
 	}
@@ -139,7 +156,8 @@ export function resolveSubagentModelAlias(
 
 	const viaFromString = resolveModelFromString(trimmed, available, undefined, registry);
 	if (viaFromString) {
-		return `${viaFromString.provider}/${viaFromString.id}`;
+		const selector = `${viaFromString.provider}/${viaFromString.id}`;
+		return appendThinkingSuffix(selector, thinkingSuffix);
 	}
 
 	// `parseModelPattern` is the lenient matcher that also accepts bare ids and
@@ -150,7 +168,11 @@ export function resolveSubagentModelAlias(
 		modelRegistry: registry,
 	});
 	if (parsed.model) {
-		return `${parsed.model.provider}/${parsed.model.id}`;
+		const selector = `${parsed.model.provider}/${parsed.model.id}`;
+		if (parsed.thinkingLevel) {
+			return `${selector}:${parsed.thinkingLevel}`;
+		}
+		return appendThinkingSuffix(selector, thinkingSuffix);
 	}
 
 	// 4. Unresolved — let the caller surface the failure.

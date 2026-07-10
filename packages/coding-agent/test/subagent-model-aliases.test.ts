@@ -87,4 +87,23 @@ describe("resolveSubagentModelAlias", () => {
 		const resolved = resolveSubagentModelAlias("browser-fast", aliases, customRegistry);
 		expect(resolved).toBe("9router/minimax/MiniMax-M3");
 	});
+
+	test("preserves thinking suffixes through alias resolution", () => {
+		const resolved = resolveSubagentModelAlias(
+			"minimax-code:high",
+			{ "minimax-code": "minimax-code/MiniMax-M3" },
+			registry,
+		);
+		expect(resolved).toBe("minimax-code/MiniMax-M3:high");
+	});
+
+	test("preserves thinking suffixes for case-insensitive alias matches", () => {
+		const resolved = resolveSubagentModelAlias(
+			"MINIMAX-CODE:medium",
+			{ "minimax-code": "minimax-code/MiniMax-M3" },
+			registry,
+		);
+		expect(resolved).toBe("minimax-code/MiniMax-M3:medium");
+	});
+
 });

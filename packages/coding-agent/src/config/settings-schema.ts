@@ -277,6 +277,23 @@ export interface ModelTagsSettings {
 // under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
+
+/**
+ * Per-agent execution policy overrides under `task.agentPolicies`.
+ * Lookup precedence at resolve time: stable agent id → agent type → workflow/default.
+ */
+export interface AgentPolicySettings {
+	tier?: "light" | "mid" | "frontier";
+	autonomy?: "bound" | "supervised" | "independent";
+	collaboration?: "report-only" | "message-peers" | "self-coordinate";
+	workClass?: "mechanical" | "judgment";
+	editMode?: "none" | "replace" | "hashline" | "apply-patch";
+	maxRequests?: number;
+	maxRuntimeMs?: number;
+	modelPool?: string[];
+}
+
+const EMPTY_AGENT_POLICIES: Record<string, AgentPolicySettings> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
@@ -4230,6 +4247,18 @@ export const SETTINGS_SCHEMA = {
 	"task.agentModelOverrides": {
 		type: "record",
 		default: {} as Record<string, string>,
+	},
+
+	/**
+	 * Named execution policies for spawned agents. Keys are stable agent ids,
+	 * agent types, or workflow/default sentinels. Resolve with agent-id →
+	 * agent-type → workflow/default precedence; absent policies preserve
+	 * unrestricted legacy behavior. The optional router enable flag lives only
+	 * in llm-router extension config (Lane D).
+	 */
+	"task.agentPolicies": {
+		type: "record",
+		default: EMPTY_AGENT_POLICIES,
 	},
 
 	"tasks.todoClearDelay": {

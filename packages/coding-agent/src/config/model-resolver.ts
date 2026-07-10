@@ -852,15 +852,68 @@ export function parseModelPattern(
 const PREFIX_MODEL_ROLE = "pi/";
 const DEFAULT_MODEL_ROLE = "default";
 
-function getModelRoleAlias(value: string): ModelRole | undefined {
+/**
+ * Resolve a known model role from either `pi/<role>` or a bare `<role>` selector.
+ * Concrete `provider/id` selectors are never treated as roles.
+ */
+export function resolveKnownModelRole(value: string): ModelRole | undefined {
 	const normalized = value.trim();
-	if (!normalized.startsWith(PREFIX_MODEL_ROLE)) return undefined;
+	if (!normalized) return undefined;
 
-	const candidate = normalized.slice(PREFIX_MODEL_ROLE.length);
+	// Strip known thinking suffixes so `smol:high` / `pi/smol:high` still resolve
+	// as the underlying role for shadow detection and canonicalization.
+	const strict = splitThinkingSuffix(normalized, -1);
+	const withMax =
+		strict.level === undefined ? splitThinkingSuffix(normalized, -1, MAX_THINKING_SUFFIX_OPTIONS) : strict;
+	const base = withMax.base;
+
+	if (base.startsWith(PREFIX_MODEL_ROLE)) {
+		const candidate = base.slice(PREFIX_MODEL_ROLE.length);
+		for (const role of MODEL_ROLE_IDS) {
+			if (candidate === role) return role;
+		}
+		return undefined;
+	}
+
+	// Bare known roles (`smol`) converge with `pi/smol` without claiming arbitrary
+	// concrete model ids that merely contain a slash-free token.
 	for (const role of MODEL_ROLE_IDS) {
-		if (candidate === role) return role;
+		if (base === role) return role;
 	}
 	return undefined;
+}
+
+function getModelRoleAlias(value: string): ModelRole | undefined {
+	return resolveKnownModelRole(value);
+}
+
+/**
+ * Strip a known thinking suffix from a selector while leaving unrecognized
+ * `:token` suffixes intact.
+ */
+export function stripKnownThinkingSuffix(value: string): string {
+	const normalized = value.trim();
+	if (!normalized) return normalized;
+	const strict = splitThinkingSuffix(normalized, -1);
+	const withMax =
+		strict.level === undefined ? splitThinkingSuffix(normalized, -1, MAX_THINKING_SUFFIX_OPTIONS) : strict;
+	return withMax.base;
+}
+
+/**
+ * Unify bare known roles such as `smol` with `pi/smol` while preserving thinking
+ * suffixes and leaving concrete selectors untouched.
+ */
+export function canonicalizeRoleSelector(value: string): string {
+	const normalized = value.trim();
+	if (!normalized) return normalized;
+
+	const strict = splitThinkingSuffix(normalized, -1);
+	const withMax =
+		strict.level === undefined ? splitThinkingSuffix(normalized, -1, MAX_THINKING_SUFFIX_OPTIONS) : strict;
+	const role = resolveKnownModelRole(withMax.base);
+	if (!role) return normalized;
+	return formatModelSelectorValue(`${PREFIX_MODEL_ROLE}${role}`, withMax.level);
 }
 
 function normalizeModelPatternList(value: string | string[] | undefined): string[] {

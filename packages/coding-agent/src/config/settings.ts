@@ -24,6 +24,7 @@ import {
 	procmgr,
 } from "@pk-nerdsaver-ai/pi-utils";
 import { JSONC, YAML } from "bun";
+import { composeAgentPolicyFields } from "../orchestration/agent-execution-profile";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
@@ -32,6 +33,7 @@ import { AgentStorage } from "../session/agent-storage";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { withFileLock } from "./file-lock";
 import {
+	type AgentPolicySettings,
 	type BashInterceptorRule,
 	type GroupPrefix,
 	type GroupTypeMap,
@@ -549,6 +551,42 @@ export class Settings {
 	 */
 	getModelRoles(): ReadOnlyDict<string> {
 		return { ...this.#getActiveProfileRoles(), ...this.get("modelRoles") };
+	}
+
+	/**
+	 * Typed accessor for `task.agentPolicies`. Empty by default — unrestricted
+	 * legacy spawn behavior until an explicit policy is configured.
+	 */
+	getAgentPolicies(): Record<string, AgentPolicySettings> {
+		return this.get("task.agentPolicies");
+	}
+
+	/**
+	 * Resolve a policy by composing matching agent-id → agent-type →
+	 * workflow/default layers. Returns `undefined` when no layer matches
+	 * (caller applies unrestricted defaults).
+	 */
+	resolveAgentPolicy(
+		agentId: string,
+		agentType?: string,
+		workflowDefaultKey = "default",
+	): AgentPolicySettings | undefined {
+		const policies = this.getAgentPolicies();
+		const agentIdPolicy = agentId ? policies[agentId] : undefined;
+		const agentTypePolicy = agentType ? policies[agentType] : undefined;
+		const workflowPolicy = workflowDefaultKey ? policies[workflowDefaultKey] : undefined;
+		if (!agentIdPolicy && !agentTypePolicy && !workflowPolicy) {
+			return undefined;
+		}
+		const composed = composeAgentPolicyFields({
+			workflowPolicy,
+			agentTypePolicy,
+			agentIdPolicy,
+		});
+		return {
+			...composed,
+			...(composed.modelPool !== undefined ? { modelPool: [...composed.modelPool] } : {}),
+		};
 	}
 
 	/*
