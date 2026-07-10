@@ -17,7 +17,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
 import { Container, Ellipsis, matchesKey, type OverlayHandle, type TUI } from "@pk-nerdsaver-ai/pi-tui";
-import { formatAge, getProjectDir, logger } from "@pk-nerdsaver-ai/pi-utils";
+import { formatAge, getProjectDir, logger, normalizePathForComparison } from "@pk-nerdsaver-ai/pi-utils";
 import { ADVISOR_TRANSCRIPT_FILENAME } from "../../advisor";
 import type { KeyId } from "../../config/keybindings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
@@ -466,14 +466,22 @@ export class AgentHubOverlayComponent extends Container {
 			const refs: HubAgentRef[] = [];
 			const sessionPaths = new Map<string, string>();
 			const subagentsByLane = new Map<string, HubAgentRef[]>();
-			const currentFile = this.#currentSessionFile;
+			const currentFile = this.#currentSessionFile
+				? normalizePathForComparison(this.#currentSessionFile)
+				: undefined;
 			const registrySessionPaths = new Set(
-				this.#registry.list().flatMap(ref => (ref.sessionFile ? [path.resolve(ref.sessionFile)] : [])),
+				this.#registry
+					.list()
+					.flatMap(ref =>
+						ref.status !== "aborted" && ref.sessionFile !== null
+							? [normalizePathForComparison(ref.sessionFile)]
+							: [],
+					),
 			);
 			for (const session of sessions) {
 				if (
-					(currentFile && path.resolve(session.path) === path.resolve(currentFile)) ||
-					registrySessionPaths.has(path.resolve(session.path))
+					(currentFile && normalizePathForComparison(session.path) === currentFile) ||
+					registrySessionPaths.has(normalizePathForComparison(session.path))
 				)
 					continue;
 				const id = `background:${session.id}`;

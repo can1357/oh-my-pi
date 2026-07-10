@@ -10,6 +10,8 @@ import type {
 	GatewayEvent,
 	GatewayEventListener,
 } from "@pk-nerdsaver-ai/pi-coding-agent/gateway/types";
+import { AgentLifecycleManager } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry, MAIN_AGENT_ID } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-registry";
 import type {
 	ClientBridge,
 	ClientBridgePermissionOption,
@@ -32,7 +34,10 @@ import type {
 } from "./types";
 
 interface WorkerSession {
-	setClientBridge(bridge: ClientBridge): void;
+	setClientBridge(bridge: ClientBridge | undefined): void;
+	backgroundCurrentSession(name: string): Promise<boolean>;
+	sessionManager: { flush(): Promise<void> };
+	settings?: { get(path: "task.agentIdleTtlMs"): number | undefined };
 	dispose(): Promise<void>;
 }
 
@@ -52,6 +57,8 @@ interface ActiveSession extends WorkerRuntime {
 	bridge: DesktopTagClientBridge;
 	controller: AbortController;
 	taskId: string;
+	displayName: string;
+	agentId: string;
 	settled: boolean;
 	cancelling: boolean;
 	cancellation?: Promise<void>;
@@ -134,9 +141,17 @@ class DesktopTagClientBridge implements ClientBridge {
 export class PiWorker implements AgentWorker {
 	readonly #sessions = new Map<string, ActiveSession>();
 	readonly #factory: WorkerFactory;
+	readonly #registry: AgentRegistry;
+	readonly #lifecycle: AgentLifecycleManager;
 
-	constructor(factory: WorkerFactory = createAgentSession) {
+	constructor(
+		factory: WorkerFactory = createAgentSession,
+		registry: AgentRegistry = AgentRegistry.global(),
+		lifecycle: AgentLifecycleManager = AgentLifecycleManager.global(),
+	) {
 		this.#factory = factory;
+		this.#registry = registry;
+		this.#lifecycle = lifecycle;
 	}
 
 	async createSession(taskId: string, input: TaskInput): Promise<SessionHandle> {
@@ -152,17 +167,24 @@ export class PiWorker implements AgentWorker {
 			promptLines.push(`Preferred executor for this task: ${preferredExecutor}.`);
 		}
 
+		const { agentId, displayName } = createAgentIdentity(taskId, contextPacket.userRequest);
 		const options: CreateAgentSessionOptions = {
 			cwd: getProjectDir(),
 			hasUI: true,
 			toolNames: routing.tools,
 			appendSystemPrompt: promptLines.join("\n"),
+			agentId,
+			agentDisplayName: displayName,
+			taskDepth: 1,
+			parentAgentId: MAIN_AGENT_ID,
+			agentRegistry: this.#registry,
 		};
 
 		const message = buildInitialMessage(contextPacket, routing);
 		const images = contextPacket.visual.screenshotPath ? [await loadImage(contextPacket.visual.screenshotPath)] : [];
 
-		const { session, gateway } = await this.#createRuntime(options);
+		const runtime = await this.#createRuntime(options);
+		const { session, gateway } = runtime;
 
 		const channel = new AgentEventChannel();
 		const controller = new AbortController();
@@ -175,6 +197,8 @@ export class PiWorker implements AgentWorker {
 			bridge,
 			controller,
 			taskId,
+			displayName,
+			agentId,
 			settled: false,
 			cancelling: false,
 		};
@@ -245,7 +269,6 @@ export class PiWorker implements AgentWorker {
 		if (!active || active.settled) return Promise.resolve();
 		if (active.cancellation) return active.cancellation;
 		active.cancelling = true;
-		active.controller.abort();
 		active.cancellation = this.#abortAndSettle(active, sessionId);
 		return active.cancellation;
 	}
@@ -297,10 +320,39 @@ export class PiWorker implements AgentWorker {
 	async #settle(active: ActiveSession, terminal: AgentEvent): Promise<void> {
 		if (active.settled) return;
 		active.settled = true;
+		active.session.setClientBridge(undefined);
+		active.controller.abort();
 		this.#sessions.delete(active.taskId);
+
+		let persistenceError: string | undefined;
+		try {
+			const persisted = await active.session.backgroundCurrentSession(active.displayName);
+			if (!persisted) throw new Error("the session name was rejected");
+			await active.session.sessionManager.flush();
+		} catch (error) {
+			persistenceError = error instanceof Error ? error.message : String(error);
+			terminal = {
+				type: "task.failed",
+				taskId: active.taskId,
+				error: `Failed to persist background session: ${persistenceError}`,
+			};
+		}
+
 		active.channel.push(terminal);
 		active.channel.close();
 		active.gateway.dispose();
+		if (this.#registry.get(active.agentId)) {
+			if (persistenceError !== undefined) {
+				await this.#lifecycle.release(active.agentId);
+				return;
+			}
+			this.#registry.setStatus(active.agentId, "idle");
+			const configuredIdleTtlMs = Math.trunc(
+				Number(active.session.settings?.get("task.agentIdleTtlMs") ?? 420_000) || 0,
+			);
+			this.#lifecycle.adopt(active.agentId, { idleTtlMs: configuredIdleTtlMs });
+			return;
+		}
 		try {
 			await active.session.dispose();
 		} catch (error) {
@@ -310,6 +362,23 @@ export class PiWorker implements AgentWorker {
 			});
 		}
 	}
+}
+
+function createAgentIdentity(taskId: string, userRequest: string): { agentId: string; displayName: string } {
+	const safeTaskId =
+		taskId
+			.replace(/[^A-Za-z0-9_-]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			.slice(0, 48) || "task";
+	const safeRequest = userRequest
+		.replace(/[\u0000-\u001f\u007f]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, 64);
+	return {
+		agentId: `DesktopTag-${safeTaskId}-${crypto.randomUUID()}`,
+		displayName: `Desktop Tag: ${safeRequest || safeTaskId}`,
+	};
 }
 
 async function loadImage(path: string): Promise<ImageContent> {

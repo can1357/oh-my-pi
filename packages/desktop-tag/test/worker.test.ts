@@ -1,11 +1,15 @@
 import { describe, expect, it, mock } from "bun:test";
 
+import type { CreateAgentSessionOptions } from "@pk-nerdsaver-ai/pi-coding-agent";
 import type {
 	GatewayCommand,
 	GatewayEvent,
 	GatewayEventListener,
 	GatewaySessionEvent,
 } from "@pk-nerdsaver-ai/pi-coding-agent/gateway/types";
+import { type AdoptOptions, AgentLifecycleManager } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry, MAIN_AGENT_ID } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
 import type { ClientBridge } from "@pk-nerdsaver-ai/pi-coding-agent/session/client-bridge";
 
 import type { TaskInput } from "../src/types";
@@ -14,9 +18,31 @@ import { PiWorker } from "../src/worker";
 class FakeAgentSession {
 	readonly abort = mock(async () => {});
 	readonly dispose = mock(async () => {});
+	readonly flush = mock(async () => {
+		if (this.flushBlock) await this.flushBlock;
+		if (this.flushError) throw this.flushError;
+	});
+	readonly sessionManager = { flush: this.flush };
+	readonly backgroundCurrentSession = mock(async (name: string) => {
+		this.bridgeAtPersistence = this.bridge;
+		this.backgroundName = name;
+		return this.backgroundPersistenceEnabled;
+	});
 	bridge: ClientBridge | undefined;
+	bridgeAtPersistence: ClientBridge | undefined;
+	backgroundName: string | undefined;
+	readonly settings: { get(path: "task.agentIdleTtlMs"): number | undefined } | undefined;
 
-	setClientBridge(bridge: ClientBridge): void {
+	constructor(
+		readonly backgroundPersistenceEnabled = true,
+		idleTtlMs?: number,
+		readonly flushError?: Error,
+		readonly flushBlock?: Promise<void>,
+	) {
+		this.settings = idleTtlMs === undefined ? undefined : { get: () => idleTtlMs };
+	}
+
+	setClientBridge(bridge: ClientBridge | undefined): void {
 		this.bridge = bridge;
 	}
 }
@@ -87,7 +113,7 @@ function createWorker(dispatchError?: Error): { worker: PiWorker; session: FakeA
 
 describe("PiWorker lifecycle", () => {
 	it("waits for agent_end instead of completing on an assistant message", async () => {
-		const { worker, gateway } = createWorker();
+		const { worker, session, gateway } = createWorker();
 		const handle = await worker.createSession("task-final", taskInput);
 		const events = worker.subscribe(handle.sessionId)[Symbol.asyncIterator]();
 
@@ -107,13 +133,257 @@ describe("PiWorker lifecycle", () => {
 			value: { type: "tool.completed", callId: "call-1", result: null, isError: false },
 		});
 
+		expect(session.backgroundCurrentSession).not.toHaveBeenCalled();
+		expect(session.flush).not.toHaveBeenCalled();
+		expect(session.bridge).toBeDefined();
 		gateway.emitSession({ type: "agent_end" });
 		expect(await events.next()).toEqual({
 			done: false,
 			value: { type: "task.completed", taskId: "task-final", summary: "" },
 		});
+		expect(session.backgroundCurrentSession).toHaveBeenCalledWith("Desktop Tag: Inspect the screen");
+		expect(session.flush).toHaveBeenCalledTimes(1);
+		expect(session.bridgeAtPersistence).toBeUndefined();
 		expect(await events.next()).toEqual({ done: true, value: undefined });
 		expect(() => worker.subscribe(handle.sessionId)).toThrow("Session task-final not found");
+	});
+
+	it("does not publish the terminal event or dispose the gateway until persistence is flushed", async () => {
+		const flush = Promise.withResolvers<void>();
+		const session = new FakeAgentSession(true, undefined, undefined, flush.promise);
+		const gateway = new FakeGateway(session);
+		const worker = new PiWorker(async () => ({ session, gateway }));
+		const handle = await worker.createSession("task-durable", taskInput);
+		const events = worker.subscribe(handle.sessionId)[Symbol.asyncIterator]();
+		const terminal = events.next();
+		let terminalDelivered = false;
+		void terminal.then(() => {
+			terminalDelivered = true;
+		});
+
+		gateway.emitSession({ type: "agent_end" });
+		await Bun.sleep(0);
+		expect(session.backgroundCurrentSession).toHaveBeenCalledWith("Desktop Tag: Inspect the screen");
+		expect(session.flush).toHaveBeenCalledTimes(1);
+		expect(session.bridgeAtPersistence).toBeUndefined();
+		expect(terminalDelivered).toBe(false);
+		expect(gateway.dispose).not.toHaveBeenCalled();
+		expect(session.dispose).not.toHaveBeenCalled();
+
+		flush.resolve();
+		expect(await terminal).toEqual({
+			done: false,
+			value: { type: "task.completed", taskId: "task-durable", summary: "" },
+		});
+		expect(gateway.dispose).toHaveBeenCalledTimes(1);
+		expect(session.dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("creates uniquely identified subagent sessions and persists them at settlement", async () => {
+		const capturedOptions: CreateAgentSessionOptions[] = [];
+		const firstSession = new FakeAgentSession();
+		const firstGateway = new FakeGateway(firstSession);
+		const firstWorker = new PiWorker(async options => {
+			capturedOptions.push(options);
+			return { session: firstSession, gateway: firstGateway };
+		});
+		const secondSession = new FakeAgentSession();
+		const secondGateway = new FakeGateway(secondSession);
+		const secondWorker = new PiWorker(async options => {
+			capturedOptions.push(options);
+			return { session: secondSession, gateway: secondGateway };
+		});
+
+		await firstWorker.createSession("unsafe task/one", taskInput);
+		await secondWorker.createSession("unsafe task/one", taskInput);
+
+		expect(capturedOptions).toHaveLength(2);
+		for (const options of capturedOptions) {
+			expect(options.agentId).toMatch(/^DesktopTag-unsafe-task-one-[0-9a-f-]{36}$/);
+			expect(options.agentDisplayName).toBe("Desktop Tag: Inspect the screen");
+			expect(options.taskDepth).toBe(1);
+			expect(options.parentAgentId).toBe(MAIN_AGENT_ID);
+			expect(options.agentRegistry).toBe(AgentRegistry.global());
+		}
+		expect(capturedOptions[0]?.agentId).not.toBe(capturedOptions[1]?.agentId);
+		expect(firstSession.backgroundCurrentSession).not.toHaveBeenCalled();
+		expect(secondSession.backgroundCurrentSession).not.toHaveBeenCalled();
+
+		await firstWorker.cancel("unsafe task/one");
+		await secondWorker.cancel("unsafe task/one");
+		expect(firstSession.backgroundCurrentSession).toHaveBeenCalledWith("Desktop Tag: Inspect the screen");
+		expect(secondSession.backgroundCurrentSession).toHaveBeenCalledWith("Desktop Tag: Inspect the screen");
+		expect(firstSession.flush).toHaveBeenCalledTimes(1);
+		expect(secondSession.flush).toHaveBeenCalledTimes(1);
+	});
+
+	it("surfaces persistence rejection at settlement and disposes an unregistered runtime once", async () => {
+		const session = new FakeAgentSession(false);
+		const gateway = new FakeGateway(session);
+		const worker = new PiWorker(async () => ({ session, gateway }));
+		const handle = await worker.createSession("task-no-persistence", taskInput);
+		const events = worker.subscribe(handle.sessionId)[Symbol.asyncIterator]();
+
+		expect(session.backgroundCurrentSession).not.toHaveBeenCalled();
+		gateway.emitSession({ type: "agent_end" });
+		expect(await events.next()).toEqual({
+			done: false,
+			value: {
+				type: "task.failed",
+				taskId: "task-no-persistence",
+				error: "Failed to persist background session: the session name was rejected",
+			},
+		});
+		expect(session.flush).not.toHaveBeenCalled();
+		expect(session.bridgeAtPersistence).toBeUndefined();
+		expect(session.dispose).toHaveBeenCalledTimes(1);
+		expect(gateway.dispose).toHaveBeenCalledTimes(1);
+
+		gateway.emitSession({ type: "agent_end" });
+		await worker.cancel(handle.sessionId);
+		expect(session.dispose).toHaveBeenCalledTimes(1);
+		expect(gateway.dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps registered sessions idle and adopted after terminal settlement", async () => {
+		const registry = new AgentRegistry();
+		const lifecycle = new AgentLifecycleManager(registry);
+		const session = new FakeAgentSession(true, 123_000);
+		const gateway = new FakeGateway(session);
+		let agentId = "";
+		const worker = new PiWorker(
+			async options => {
+				agentId = options.agentId ?? "";
+				registry.register({
+					id: agentId,
+					displayName: options.agentDisplayName ?? "",
+					kind: "sub",
+					parentId: options.parentAgentId,
+					session: session as unknown as AgentSession,
+					sessionFile: "C:/sessions/desktop-tag.jsonl",
+				});
+				return { session, gateway };
+			},
+			registry,
+			lifecycle,
+		);
+		const originalAdopt = lifecycle.adopt.bind(lifecycle);
+		const adopt = mock((id: string, options: AdoptOptions) => originalAdopt(id, options));
+		lifecycle.adopt = adopt;
+		const handle = await worker.createSession("task-inspectable", taskInput);
+		const events = worker.subscribe(handle.sessionId)[Symbol.asyncIterator]();
+
+		expect(session.backgroundCurrentSession).not.toHaveBeenCalled();
+		expect(session.flush).not.toHaveBeenCalled();
+		gateway.emitSession({ type: "agent_end" });
+		expect(await events.next()).toMatchObject({ value: { type: "task.completed" } });
+		expect(registry.get(agentId)).toMatchObject({
+			id: agentId,
+			parentId: MAIN_AGENT_ID,
+			status: "idle",
+			sessionFile: "C:/sessions/desktop-tag.jsonl",
+		});
+		expect(adopt).toHaveBeenCalledWith(agentId, { idleTtlMs: 123_000 });
+		expect(lifecycle.has(agentId)).toBe(true);
+		expect(gateway.dispose).toHaveBeenCalledTimes(1);
+		expect(session.dispose).not.toHaveBeenCalled();
+		expect(session.bridge).toBeUndefined();
+		expect(session.backgroundCurrentSession).toHaveBeenCalledWith("Desktop Tag: Inspect the screen");
+		expect(session.flush).toHaveBeenCalledTimes(1);
+		expect(session.bridgeAtPersistence).toBeUndefined();
+
+		await lifecycle.dispose();
+	});
+
+	it("surfaces flush failure and releases the unresumable registered session", async () => {
+		const registry = new AgentRegistry();
+		const lifecycle = new AgentLifecycleManager(registry);
+		const session = new FakeAgentSession(true, 123_000, new Error("disk full"));
+		const gateway = new FakeGateway(session);
+		let agentId = "";
+		const worker = new PiWorker(
+			async options => {
+				agentId = options.agentId ?? "";
+				registry.register({
+					id: agentId,
+					displayName: options.agentDisplayName ?? "",
+					kind: "sub",
+					parentId: options.parentAgentId,
+					session: session as unknown as AgentSession,
+					sessionFile: "C:/sessions/desktop-tag-flush-failed.jsonl",
+				});
+				return { session, gateway };
+			},
+			registry,
+			lifecycle,
+		);
+		const originalAdopt = lifecycle.adopt.bind(lifecycle);
+		const adopt = mock((id: string, options: AdoptOptions) => originalAdopt(id, options));
+		lifecycle.adopt = adopt;
+		const handle = await worker.createSession("task-flush-failed", taskInput);
+		const events = worker.subscribe(handle.sessionId)[Symbol.asyncIterator]();
+
+		gateway.emitSession({ type: "agent_end" });
+		expect(await events.next()).toEqual({
+			done: false,
+			value: {
+				type: "task.failed",
+				taskId: "task-flush-failed",
+				error: "Failed to persist background session: disk full",
+			},
+		});
+		expect(session.backgroundCurrentSession).toHaveBeenCalledWith("Desktop Tag: Inspect the screen");
+		expect(session.flush).toHaveBeenCalledTimes(1);
+		expect(session.bridgeAtPersistence).toBeUndefined();
+		expect(registry.get(agentId)).toBeUndefined();
+		expect(adopt).not.toHaveBeenCalled();
+		expect(lifecycle.has(agentId)).toBe(false);
+		expect(gateway.dispose).toHaveBeenCalledTimes(1);
+		expect(session.dispose).toHaveBeenCalledTimes(1);
+
+		await lifecycle.dispose();
+	});
+
+	it("keeps registered cancelled sessions inspectable while disposing the Desktop Tag surface", async () => {
+		const registry = new AgentRegistry();
+		const lifecycle = new AgentLifecycleManager(registry);
+		const session = new FakeAgentSession();
+		const gateway = new FakeGateway(session);
+		let agentId = "";
+		const worker = new PiWorker(
+			async options => {
+				agentId = options.agentId ?? "";
+				registry.register({
+					id: agentId,
+					displayName: options.agentDisplayName ?? "",
+					kind: "sub",
+					parentId: options.parentAgentId,
+					session: session as unknown as AgentSession,
+					sessionFile: "C:/sessions/cancelled-desktop-tag.jsonl",
+				});
+				return { session, gateway };
+			},
+			registry,
+			lifecycle,
+		);
+		const handle = await worker.createSession("task-cancelled-inspectable", taskInput);
+		const events = worker.subscribe(handle.sessionId)[Symbol.asyncIterator]();
+
+		expect(session.backgroundCurrentSession).not.toHaveBeenCalled();
+		expect(session.flush).not.toHaveBeenCalled();
+		await worker.cancel(handle.sessionId);
+		expect(await events.next()).toMatchObject({ value: { type: "task.failed", error: "Task cancelled." } });
+		expect(registry.get(agentId)).toMatchObject({ status: "idle", session: session as unknown as AgentSession });
+		expect(lifecycle.has(agentId)).toBe(true);
+		expect(session.abort).toHaveBeenCalledTimes(1);
+		expect(gateway.dispose).toHaveBeenCalledTimes(1);
+		expect(session.dispose).not.toHaveBeenCalled();
+		expect(session.bridge).toBeUndefined();
+		expect(session.backgroundCurrentSession).toHaveBeenCalledWith("Desktop Tag: Inspect the screen");
+		expect(session.flush).toHaveBeenCalledTimes(1);
+		expect(session.bridgeAtPersistence).toBeUndefined();
+
+		await lifecycle.dispose();
 	});
 
 	it("settles and disposes once when initial dispatch rejects", async () => {

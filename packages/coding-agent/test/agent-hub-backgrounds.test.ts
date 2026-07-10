@@ -102,6 +102,8 @@ describe("Agent hub background lanes", () => {
 				// Rows: folder (0) → current session (1) → background lane (2). Select the lane.
 				hub.handleInput("j");
 				hub.handleInput("j");
+				hub.handleInput("\r");
+				expect(await resumed.promise).toBe(sessionFile);
 				// Space expands the selected lane to reveal its subagent.
 				hub.handleInput(" ");
 				const expanded = Bun.stripANSI(hub.render(120).join("\n"));
@@ -143,10 +145,48 @@ describe("Agent hub background lanes", () => {
 		}
 	});
 
+	it("does not render the current session again when Windows path casing differs", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bg-hub-current-"));
+		try {
+			const sessionFile = await seedBackgroundSession(tmp);
+			const currentSessionFile =
+				process.platform === "win32" ? path.resolve(sessionFile).toUpperCase() : sessionFile;
+			const backgroundLoaded = Promise.withResolvers<void>();
+			const registry = new AgentRegistry();
+			const hub = new AgentHubOverlayComponent({
+				observers: new SessionObserverRegistry(),
+				hubKeys: [],
+				onDone: () => {},
+				requestRender: () => backgroundLoaded.resolve(),
+				registry,
+				irc: new IrcBus(registry),
+				focusAgent: async () => {},
+				cwd: tmp,
+				sessionDir: tmp,
+				sessionFile: currentSessionFile,
+				resumeSession: async () => {},
+				kanbanSync: null,
+			});
+			try {
+				await backgroundLoaded.promise;
+				const rendered = Bun.stripANSI(hub.render(120).join("\n"));
+				expect(rendered).not.toContain(LANE_NAME);
+			} finally {
+				hub.dispose();
+			}
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("does not duplicate a persisted lane already owned by a live or parked registry subagent", async () => {
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bg-hub-dedupe-"));
 		try {
 			const sessionFile = await seedBackgroundSession(tmp);
+			const registrySessionFile =
+				process.platform === "win32"
+					? path.resolve(sessionFile).toUpperCase()
+					: path.relative(process.cwd(), sessionFile);
 			for (const status of ["running", "parked"] as const) {
 				const registry = new AgentRegistry();
 				registry.register({
@@ -155,7 +195,7 @@ describe("Agent hub background lanes", () => {
 					kind: "sub",
 					parentId: "Main",
 					session: status === "running" ? ({} as AgentSession) : null,
-					sessionFile: path.relative(process.cwd(), sessionFile),
+					sessionFile: registrySessionFile,
 					status,
 					cwd: tmp,
 				});
