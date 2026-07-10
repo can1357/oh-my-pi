@@ -114,7 +114,7 @@ export function createIxBridgeTool(session: ToolSession): AgentTool<typeof ixBri
 				}
 
 				// action === "command"
-				if (!params.command || !params.command.trim()) {
+				if (!params.command?.trim()) {
 					return {
 						content: [
 							{
