@@ -1,6 +1,6 @@
 import { buildEvalUrlRoots, type LocalProtocolOptions } from "../internal-urls";
 import type { ToolSession } from "../tools";
-import type { EvalDisplayOutput, EvalLanguage, EvalStatusEvent } from "./types";
+import type { EvalCancellationCause, EvalDisplayOutput, EvalLanguage, EvalStatusEvent } from "./types";
 
 /** Per-cell execute() options. */
 export interface ExecutorBackendExecOptions {
@@ -35,6 +35,10 @@ export interface ExecutorBackendResult {
 	output: string;
 	exitCode: number | undefined;
 	cancelled: boolean;
+	/** Optional typed evidence for backends that can classify cancellation directly. */
+	timedOut?: boolean;
+	cancellationCause?: EvalCancellationCause;
+	effectiveTimeoutMs?: number;
 	truncated: boolean;
 	artifactId: string | undefined;
 	totalLines: number;
@@ -42,6 +46,18 @@ export interface ExecutorBackendResult {
 	outputLines: number;
 	outputBytes: number;
 	displayOutputs: EvalDisplayOutput[];
+	/**
+	 * Structured subprocess failure evidence. Populated only from explicit
+	 * runtime fields — never by parsing traceback text in TypeScript.
+	 */
+	processError?: {
+		command?: string | readonly string[];
+		returncode?: number;
+		stdout?: string;
+		stderr?: string;
+		stdoutArtifactRef?: string;
+		stderrArtifactRef?: string;
+	};
 }
 
 /** Pluggable language backend for the eval tool. */

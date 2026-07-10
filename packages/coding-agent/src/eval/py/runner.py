@@ -14,7 +14,8 @@ Wrapper -> host:
   {"type": "stderr",      "id": ..., "data": str}
   {"type": "display",     "id": ..., "bundle": {<mime>: <value>}}
   {"type": "result",      "id": ..., "bundle": {<mime>: <value>}}
-  {"type": "error",       "id": ..., "ename": str, "evalue": str, "traceback": [str]}
+  {"type": "error",       "id": ..., "ename": str, "evalue": str, "traceback": [str],
+                              "command": str|list[str]?, "returncode": int?, "stdout": str?, "stderr": str?}
   {"type": "done",        "id": ..., "status": "ok"|"error",
                               "executionCount": int, "cancelled": bool}
 
@@ -1092,15 +1093,60 @@ async def _handle_request_async(req: dict) -> None:
         _CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.reset(displayed_matplotlib_token)
 
 
+def _subprocess_evidence_text(value: Any) -> str:
+    """Normalize subprocess stream evidence to UTF-8 text for the NDJSON frame."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _subprocess_evidence_command(value: Any) -> str | list[str]:
+    """Preserve argv lists as JSON string arrays; never str(list) Python repr."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, bytes):
+                parts.append(item.decode("utf-8", errors="replace"))
+            else:
+                parts.append(str(item))
+        return parts
+    return str(value)
+
+
 def _emit_error(rid: str, exc: BaseException) -> None:
     tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
-    _emit({
+    frame = {
         "type": "error",
         "id": rid,
         "ename": type(exc).__name__,
         "evalue": str(exc),
         "traceback": [line.rstrip("\n") for line in tb_lines],
-    })
+    }
+    if isinstance(exc, subprocess.CalledProcessError):
+        frame.update({
+            "command": _subprocess_evidence_command(exc.cmd),
+            "returncode": exc.returncode,
+            "stdout": _subprocess_evidence_text(exc.stdout),
+            "stderr": _subprocess_evidence_text(exc.stderr),
+        })
+    elif isinstance(exc, subprocess.TimeoutExpired):
+        # TimeoutExpired has no returncode in CPython — omit rather than invent.
+        frame.update({
+            "command": _subprocess_evidence_command(exc.cmd),
+            "stdout": _subprocess_evidence_text(exc.stdout),
+            "stderr": _subprocess_evidence_text(exc.stderr),
+        })
+    _emit(frame)
 
 
 # ---------------------------------------------------------------------------

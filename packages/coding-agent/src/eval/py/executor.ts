@@ -8,13 +8,16 @@ import type { ToolSession } from "../../tools";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../../tools/output-meta";
 import { isEvalTimeoutControlEvent } from "../bridge-timeout";
 import type { JsStatusEvent } from "../js/shared/types";
+import type { EvalCancellationCause, EvalProcessErrorEvidence } from "../types";
 import {
 	checkPythonKernelAvailability,
 	type KernelDisplayOutput,
 	type KernelExecuteOptions,
 	type KernelExecuteResult,
+	type KernelExecutionError,
 	type KernelRuntimeEnv,
 	PythonKernel,
+	formatKernelProcessErrorEvidence,
 } from "./kernel";
 import { resolveExplicitPythonRuntime } from "./runtime";
 import { ensurePyToolBridge, registerPyToolBridge } from "./tool-bridge";
@@ -102,6 +105,14 @@ export interface PythonResult {
 	exitCode: number | undefined;
 	/** Whether the execution was cancelled via signal */
 	cancelled: boolean;
+	/** True when cancellation came from the idle/runtime timeout path. */
+	timedOut?: boolean;
+	/** Typed cancellation cause forwarded to ExecutorBackendResult. */
+	cancellationCause?: EvalCancellationCause;
+	/** Effective timeout budget used for annotations / tool details. */
+	effectiveTimeoutMs?: number;
+	/** Structured CalledProcessError / TimeoutExpired fields from the runner. */
+	processError?: EvalProcessErrorEvidence;
 	/** Whether the output was truncated */
 	truncated: boolean;
 	/** Artifact ID if full output was saved to artifact storage */
@@ -257,29 +268,73 @@ async function waitForPromiseWithCancellation<T>(
 // Result formatting
 // ---------------------------------------------------------------------------
 
-function formatTimeoutAnnotation(timeoutMs?: number): string | undefined {
-	if (timeoutMs === undefined) return "Command timed out";
+type PythonTimeoutCause = "idle watchdog timeout" | "execution timeout";
+
+function resolveTimeoutCause(timeoutMs: number | undefined, idleTimeoutMs: number | undefined): PythonTimeoutCause {
+	return timeoutMs === undefined && idleTimeoutMs !== undefined ? "idle watchdog timeout" : "execution timeout";
+}
+
+function formatTimeoutAnnotation(timeoutMs: number | undefined, cause: PythonTimeoutCause): string {
+	if (timeoutMs === undefined) return `Command timed out (${cause}; effective duration unavailable)`;
 	const secs = Math.max(1, Math.round(timeoutMs / 1000));
-	return `Command timed out after ${secs} seconds`;
+	return `Command timed out after ${secs} seconds (${cause}; effective duration ${secs} seconds)`;
 }
 
-function formatKernelTimeoutAnnotation(timeoutMs: number | undefined, kernelKilled: boolean): string {
+function formatKernelTimeoutAnnotation(
+	timeoutMs: number | undefined,
+	kernelKilled: boolean,
+	cause: PythonTimeoutCause,
+): string {
 	const secs = timeoutMs === undefined ? undefined : Math.max(1, Math.round(timeoutMs / 1000));
+	const elapsed = secs === undefined ? "at the configured limit" : `after ${secs}s`;
+	const effectiveDuration = secs === undefined ? "unavailable" : `${secs} seconds`;
+	const timeoutFact = `eval cell timed out ${elapsed} (${cause}; effective duration ${effectiveDuration})`;
 	if (kernelKilled) {
-		return "eval cell timed out and the kernel was unresponsive to interrupt; the kernel has been killed and will be recreated on the next call.";
+		return `${timeoutFact}; the kernel was unresponsive to interrupt, was killed, and will be recreated on the next call.`;
 	}
-	const duration = secs === undefined ? "the configured timeout" : `${secs}s`;
-	return `eval cell timed out after ${duration}; kernel interrupted but remains running. Reset the kernel via { reset: true } if state appears corrupted.`;
+	return `${timeoutFact}; kernel interrupted but remains running. Reset the kernel via { reset: true } if state appears corrupted.`;
 }
 
-function createCancelledPythonResult(timedOut: boolean, timeoutMs?: number): PythonResult {
-	const output = timedOut ? (formatTimeoutAnnotation(timeoutMs) ?? "Command timed out") : "";
+
+function toProcessErrorEvidence(error: KernelExecutionError): EvalProcessErrorEvidence | undefined {
+	const evidence: EvalProcessErrorEvidence = {
+		...(error.command !== undefined ? { command: error.command } : {}),
+		...(error.returncode !== undefined ? { returncode: error.returncode } : {}),
+		...(error.stdout !== undefined ? { stdout: error.stdout } : {}),
+		...(error.stderr !== undefined ? { stderr: error.stderr } : {}),
+	};
+	return error.command !== undefined ||
+		error.returncode !== undefined ||
+		error.stdout !== undefined ||
+		error.stderr !== undefined
+		? evidence
+		: undefined;
+}
+
+function cancellationFields(
+	timedOut: boolean,
+	effectiveTimeoutMs: number | undefined,
+): Pick<PythonResult, "timedOut" | "cancellationCause" | "effectiveTimeoutMs"> {
+	return {
+		timedOut,
+		cancellationCause: timedOut ? "idle_watchdog_timeout" : "abort",
+		effectiveTimeoutMs,
+	};
+}
+
+function createCancelledPythonResult(
+	timedOut: boolean,
+	timeoutMs: number | undefined,
+	cause: PythonTimeoutCause,
+): PythonResult {
+	const output = timedOut ? formatTimeoutAnnotation(timeoutMs, cause) : "";
 	const outputBytes = Buffer.byteLength(output, "utf-8");
 	const outputLines = output.length > 0 ? 1 : 0;
 	return {
 		output,
 		exitCode: undefined,
 		cancelled: true,
+		...cancellationFields(timedOut, timeoutMs),
 		truncated: false,
 		totalLines: outputLines,
 		totalBytes: outputBytes,
@@ -554,12 +609,15 @@ async function executeWithKernel(
 		});
 
 		if (result.cancelled) {
+			const effectiveTimeoutMs = executionTimeoutMs ?? options?.idleTimeoutMs;
+			const timeoutCause = resolveTimeoutCause(executionTimeoutMs, options?.idleTimeoutMs);
 			const annotation = result.timedOut
-				? formatKernelTimeoutAnnotation(executionTimeoutMs ?? options?.idleTimeoutMs, result.kernelKilled ?? false)
+				? formatKernelTimeoutAnnotation(effectiveTimeoutMs, result.kernelKilled ?? false, timeoutCause)
 				: undefined;
 			return {
 				exitCode: undefined,
 				cancelled: true,
+				...cancellationFields(result.timedOut, effectiveTimeoutMs),
 				displayOutputs,
 				stdinRequested: result.stdinRequested,
 				...(await sink.dump(annotation)),
@@ -577,9 +635,17 @@ async function executeWithKernel(
 		}
 
 		const exitCode = result.status === "ok" ? 0 : 1;
+		const processError =
+			result.error && result.status === "error" ? toProcessErrorEvidence(result.error) : undefined;
+		const processEvidence =
+			result.error && result.status === "error"
+				? formatKernelProcessErrorEvidence(result.error)
+				: undefined;
+		if (processEvidence) sink.push(`${processEvidence}\n`);
 		return {
 			exitCode,
 			cancelled: false,
+			...(processError ? { processError } : {}),
 			displayOutputs,
 			stdinRequested: false,
 			...(await sink.dump()),
@@ -587,13 +653,16 @@ async function executeWithKernel(
 	} catch (err) {
 		if (isCancellationError(err) || options?.signal?.aborted) {
 			const timedOut = isTimedOutCancellation(err, options?.signal);
+			const effectiveTimeoutMs = executionTimeoutMs ?? options?.idleTimeoutMs;
+			const timeoutCause = resolveTimeoutCause(executionTimeoutMs, options?.idleTimeoutMs);
 			return {
 				exitCode: undefined,
 				cancelled: true,
+				...cancellationFields(timedOut, effectiveTimeoutMs),
 				displayOutputs,
 				stdinRequested: false,
 				...(await sink.dump(
-					timedOut ? formatTimeoutAnnotation(executionTimeoutMs ?? options?.idleTimeoutMs) : undefined,
+					timedOut ? formatTimeoutAnnotation(effectiveTimeoutMs, timeoutCause) : undefined,
 				)),
 			};
 		}
@@ -735,7 +804,13 @@ export async function executePython(code: string, options?: PythonExecutorOption
 		return await executeOnSession(code, cwd, executionOptions);
 	} catch (err) {
 		if (isCancellationError(err) || executionOptions.signal?.aborted) {
-			return createCancelledPythonResult(isTimedOutCancellation(err, executionOptions.signal));
+			const effectiveTimeoutMs = executionOptions.timeoutMs ?? executionOptions.idleTimeoutMs;
+			const timeoutCause = resolveTimeoutCause(executionOptions.timeoutMs, executionOptions.idleTimeoutMs);
+			return createCancelledPythonResult(
+				isTimedOutCancellation(err, executionOptions.signal),
+				effectiveTimeoutMs,
+				timeoutCause,
+			);
 		}
 		throw err;
 	}
