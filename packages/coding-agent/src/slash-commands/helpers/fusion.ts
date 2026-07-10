@@ -1,3 +1,4 @@
+import { AgentRegistry } from "../../registry/agent-registry";
 import {
 	FUSION_POOL_MAX_TIER,
 	FUSION_POOL_MIN_TIER,
@@ -16,6 +17,18 @@ type FusionModeValue = (typeof FUSION_MODES)[number];
 
 function isFusionMode(value: string): value is FusionModeValue {
 	return (FUSION_MODES as readonly string[]).includes(value);
+}
+
+/** Resolve the tracked sidekick's live registry state for `/fusion status`. */
+function describeSidekickState(runtime: SlashCommandRuntime): { label: string; degraded: boolean } {
+	const id = runtime.session.getFusionSidekickId();
+	if (!id) return { label: "unavailable (not spawned)", degraded: true };
+	const ref = AgentRegistry.global().get(id);
+	if (!ref) return { label: `unavailable (stale id ${id})`, degraded: true };
+	if (ref.status === "aborted") return { label: `aborted (${id})`, degraded: true };
+	if (ref.status === "parked") return { label: `parked (${id})`, degraded: false };
+	if (ref.status === "running") return { label: `running (${id})`, degraded: false };
+	return { label: `idle (${id})`, degraded: false };
 }
 
 /** One-line tier listing used by `/fusion status` and the pool verbs. */
@@ -40,11 +53,15 @@ export function buildFusionStatusText(runtime: SlashCommandRuntime): string {
 	const pool = parseFusionPoolEntries(runtime.settings.get("fusion.modelPool") ?? []);
 
 	const active = enabled && mode !== "off";
-	const header = `Fusion is ${active ? "ON" : "OFF"}${enabled && mode === "off" ? ' (enabled, but fusion.mode is "off")' : ""}`;
+	const sidekickState = describeSidekickState(runtime);
+	const header = `Fusion is ${active ? "ON" : "OFF"}${enabled && mode === "off" ? ' (enabled, but fusion.mode is "off")' : ""}${
+		active && sidekickState.degraded ? " (degraded: sidekick unavailable)" : ""
+	}`;
 	const lines = [
 		header,
 		`  Mode:            ${mode}`,
 		`  Sidekick model:  ${sidekick}`,
+		`  Sidekick state:  ${sidekickState.label}`,
 		`  Strong sidekick: ${strong || "(unset)"}`,
 		`  Compact model:   ${compact || "(unset)"}`,
 		`  Dynamic routing: ${dynamicRouting ? "on" : "off"}`,

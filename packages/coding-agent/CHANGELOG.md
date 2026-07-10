@@ -29,6 +29,7 @@
 - Trimmed a second pass of tool-prompt prose across `read`/`bash`/`apply-patch`/`patch`/`todo`/`ast-grep`/`github`, dropping schema-inferable and duplicate content while preserving RFC-2119 keywords and Handlebars structure.
 
 ### Fixed
+- Fixed Fusion sidekick observability: `/fusion status` now reports live Sidekick registry state (idle/running/parked/unavailable) and marks Fusion as degraded when the sidekick is missing; spawn now waits for AgentRegistry registration before retaining a sidekick id so failed starts no longer latch a phantom Sidekick.
 
 - Serialized editor submit handling so a fast double-Enter can't race concurrent submit handlers: a second empty Enter previously read `queuedMessageCount` before a steer finished registering it and no-op'd instead of flushing.
 

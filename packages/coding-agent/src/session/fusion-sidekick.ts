@@ -61,8 +61,15 @@ export async function ensureFusionSidekick(host: FusionSidekickHost, options: { 
 			return;
 		}
 		if (!options.force) {
-			// Idempotent: a previously recorded id means a spawn already succeeded.
-			if (session.getFusionSidekickId()) return;
+			// Idempotent only while the recorded id still resolves in the registry.
+			// A stale id (spawn failed after allocate, or the sidekick aborted) must
+			// not latch forever — clear it and fall through to respawn.
+			const existingId = session.getFusionSidekickId();
+			if (existingId) {
+				const ref = AgentRegistry.global().get(existingId);
+				if (ref && ref.status !== "aborted") return;
+				session.setFusionSidekickId(undefined);
+			}
 		} else {
 			// Session switch: release the stale ref so Agent Hub doesn't accumulate
 			// Sidekick-2, -3, … on every switch.
@@ -203,49 +210,85 @@ async function spawnFusionSidekick(host: FusionSidekickHost, sidekickModel: stri
 
 	const parentAgentId = session.getAgentId() ?? MAIN_AGENT_ID;
 
-	await taskExecutor
-		.runSubprocess({
-			cwd,
-			agent,
-			task: prompt.render(subagentUserPromptTemplate, { assignment: fusionSidekickBootstrapPrompt.trim() }),
-			assignment: fusionSidekickBootstrapPrompt.trim(),
-			description: fusionSidekickBootstrapPrompt.trim(),
-			role: "Sidekick",
-			index: 0,
-			id,
-			detached: true,
-			fusionSidekick: true,
-			modelOverride: sidekickModel,
-			outputSchema: {
-				type: "object",
-				properties: {
-					ready: { type: "boolean", const: true },
-				},
-				required: ["ready"],
+	const runPromise = taskExecutor.runSubprocess({
+		cwd,
+		agent,
+		task: prompt.render(subagentUserPromptTemplate, { assignment: fusionSidekickBootstrapPrompt.trim() }),
+		assignment: fusionSidekickBootstrapPrompt.trim(),
+		description: fusionSidekickBootstrapPrompt.trim(),
+		role: "Sidekick",
+		index: 0,
+		id,
+		detached: true,
+		fusionSidekick: true,
+		modelOverride: sidekickModel,
+		outputSchema: {
+			type: "object",
+			properties: {
+				ready: { type: "boolean", const: true },
 			},
-			parentActiveModelPattern: session.model ? formatModelString(session.model as Model<Api>) : undefined,
-			thinkingLevel: ThinkingLevel.Inherit,
-			taskDepth: 0,
-			sessionFile: parentSessionFile,
-			persistArtifacts: !!persistedArtifactsDir,
-			artifactsDir,
-			enableLsp: settings.get("task.enableLsp"),
-			eventBus,
-			authStorage: session.modelRegistry.authStorage,
-			modelRegistry: session.modelRegistry,
-			settings,
-			mcpManager,
-			skills: [...session.skills],
-			promptTemplates: [...session.promptTemplates],
-			localProtocolOptions,
-			parentArtifactManager: (sessionManager.getArtifactManager() ?? undefined) as ArtifactManager | undefined,
-			parentAgentId,
-			color: undefined,
-			planReference,
-		})
-		.catch(err => {
+			required: ["ready"],
+		},
+		parentActiveModelPattern: session.model ? formatModelString(session.model as Model<Api>) : undefined,
+		thinkingLevel: ThinkingLevel.Inherit,
+		taskDepth: 0,
+		sessionFile: parentSessionFile,
+		persistArtifacts: !!persistedArtifactsDir,
+		artifactsDir,
+		enableLsp: settings.get("task.enableLsp"),
+		eventBus,
+		authStorage: session.modelRegistry.authStorage,
+		modelRegistry: session.modelRegistry,
+		settings,
+		mcpManager,
+		skills: [...session.skills],
+		promptTemplates: [...session.promptTemplates],
+		localProtocolOptions,
+		parentArtifactManager: (sessionManager.getArtifactManager() ?? undefined) as ArtifactManager | undefined,
+		parentAgentId,
+		color: undefined,
+		planReference,
+	});
+
+	// Detached runs keep going after bootstrap, but we must not retain an id
+	// until createAgentSession has registered the sidekick. Otherwise a failed
+	// spawn latches a phantom Sidekick and blocks retries.
+	const registered = await waitForSidekickRegistration(id, runPromise);
+	if (!registered) {
+		logger.warn("Fusion sidekick failed before registry registration", { id, sidekickModel });
+		void runPromise.catch(err => {
 			logger.error("Fusion sidekick run failed", { id, error: String(err) });
 		});
+		return "";
+	}
 
+	void runPromise.catch(err => {
+		logger.error("Fusion sidekick run failed", { id, error: String(err) });
+	});
 	return id;
+}
+
+/** Poll until the sidekick appears in AgentRegistry, or the spawn promise rejects first. */
+async function waitForSidekickRegistration(
+	id: string,
+	runPromise: Promise<unknown>,
+	timeoutMs = 30_000,
+): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	let settled: { ok: boolean } | undefined;
+	void runPromise.then(
+		() => {
+			settled = { ok: true };
+		},
+		() => {
+			settled = { ok: false };
+		},
+	);
+
+	while (Date.now() < deadline) {
+		if (AgentRegistry.global().get(id)) return true;
+		if (settled) return settled.ok ? AgentRegistry.global().get(id) !== undefined : false;
+		await new Promise(resolve => setTimeout(resolve, 25));
+	}
+	return AgentRegistry.global().get(id) !== undefined;
 }

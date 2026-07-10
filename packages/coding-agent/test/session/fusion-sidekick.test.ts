@@ -28,6 +28,7 @@ function makeModelRegistry(): ModelRegistryLike {
 	return {
 		getAvailable: () => [],
 		hasConfiguredAuth: () => true,
+		authStorage: {},
 	};
 }
 
@@ -38,6 +39,12 @@ function makeMockAgentSession(overrides?: Partial<AgentSessionLike>): AgentSessi
 		sessionManager: makeMockSessionManager(),
 		getFusionSidekickId: () => undefined,
 		setFusionSidekickId: () => {},
+		getPlanModeState: () => ({ enabled: true }),
+		getPlanReferencePath: () => undefined,
+		getAgentId: () => undefined,
+		skills: [],
+		promptTemplates: [],
+		model: undefined,
 		...overrides,
 	};
 }
@@ -90,6 +97,7 @@ interface SettingsLike {
 interface ModelRegistryLike {
 	getAvailable(): Array<Model<Api>>;
 	hasConfiguredAuth(model: Model<Api>): boolean;
+	authStorage?: unknown;
 }
 
 interface AgentRefLike {
@@ -104,6 +112,11 @@ interface AgentSessionLike {
 	sessionManager: SessionManagerLike;
 	getFusionSidekickId(): string | undefined;
 	setFusionSidekickId(id: string | undefined): void;
+	getPlanModeState?: () => unknown;
+	getPlanReferencePath?: () => unknown;
+	getAgentId?: () => string | undefined;
+	skills?: unknown[];
+	promptTemplates?: unknown[];
 	isStreaming?: boolean;
 	model?: Model<Api>;
 	setModelTemporary?(model: Model<Api>, thinkingLevel?: unknown, options?: unknown): Promise<void>;
@@ -177,6 +190,10 @@ describe("fusion-sidekick", () => {
 		});
 
 		it("no-ops when a sidekick id is already recorded", async () => {
+			const existingRef: AgentRefLike = { id: "existing-id", session: {}, status: "idle" };
+			const registryMock = { get: (_id: string) => existingRef };
+			agentRegistrySpy.mockImplementation(() => registryMock as unknown as AgentRegistry);
+
 			const host = makeHost({
 				session: makeMockAgentSession({
 					getFusionSidekickId: () => "existing-id",
@@ -189,18 +206,52 @@ describe("fusion-sidekick", () => {
 			expect(discoverAgentsSpy).not.toHaveBeenCalled();
 		});
 
+		it("clears a stale recorded id and respawns", async () => {
+			const refs = new Map<string, AgentRefLike>();
+			const registryMock = {
+				get: (id: string) => refs.get(id),
+			};
+			agentRegistrySpy.mockImplementation(() => registryMock as unknown as AgentRegistry);
+			lifecycleSpy.mockImplementation(() => ({ release: async () => {} }) as unknown as AgentLifecycleManager);
+			discoverAgentsSpy.mockImplementation(async () => ({
+				agents: [{ id: "task", name: "task", kind: "task", path: "/test" }],
+				projectAgentsDir: null,
+			}));
+			runSubprocessSpy.mockImplementation(async (options: { id: string }) => {
+				refs.set(options.id, { id: options.id, session: {}, status: "running" });
+				return undefined as never;
+			});
+
+			let recordedId: string | undefined = "stale-missing-id";
+			const host = makeHost({
+				session: makeMockAgentSession({
+					getFusionSidekickId: () => recordedId,
+					setFusionSidekickId: id => {
+						recordedId = id;
+					},
+				}),
+				settings: makeSettings({ "fusion.enabled": true, "fusion.mode": "print" }),
+			});
+
+			await ensureFusionSidekick(host);
+
+			expect(discoverAgentsSpy).toHaveBeenCalled();
+			expect(runSubprocessSpy).toHaveBeenCalled();
+			expect(recordedId).toBeTruthy();
+			expect(recordedId).not.toBe("stale-missing-id");
+		});
+
 		it("force:true releases stale ref and respawns", async () => {
 			const releaseMock = { release: async (_id: string) => {} };
 			const releaseSpy = spyOn(releaseMock, "release");
 
-			const staleRef: AgentRefLike = { id: "stale-id", session: {}, status: "idle" };
-			let currentRef: AgentRefLike | undefined = staleRef;
+			const refs = new Map<string, AgentRefLike>([["stale-id", { id: "stale-id", session: {}, status: "idle" }]]);
 			const registryMock = {
-				get: (_id: string) => currentRef,
+				get: (id: string) => refs.get(id),
 			};
 			const lifecycleMock = {
-				release: releaseSpy.mockImplementation(async (_staleId: string) => {
-					currentRef = undefined;
+				release: releaseSpy.mockImplementation(async (staleId: string) => {
+					refs.delete(staleId);
 				}),
 			};
 
@@ -209,9 +260,13 @@ describe("fusion-sidekick", () => {
 
 			// discoverAgents returns a task agent so spawn proceeds
 			discoverAgentsSpy.mockImplementation(async () => ({
-				agents: [{ id: "task", name: "Task", kind: "task", path: "/test" }],
+				agents: [{ id: "task", name: "task", kind: "task", path: "/test" }],
 				projectAgentsDir: null,
 			}));
+			runSubprocessSpy.mockImplementation(async (options: { id: string }) => {
+				refs.set(options.id, { id: options.id, session: {}, status: "running" });
+				return undefined as never;
+			});
 
 			const host = makeHost({
 				session: makeMockAgentSession({
@@ -341,14 +396,15 @@ describe("fusion-sidekick", () => {
 			const releaseMock = { release: async (_id: string) => {} };
 			const releaseSpy = spyOn(releaseMock, "release");
 
-			const parkedRef: AgentRefLike = { id: "parked-id", session: null, status: "parked" };
-			let currentRef: AgentRefLike | undefined = parkedRef;
+			const refs = new Map<string, AgentRefLike>([
+				["parked-id", { id: "parked-id", session: null, status: "parked" }],
+			]);
 			const registryMock = {
-				get: (_id: string) => currentRef,
+				get: (id: string) => refs.get(id),
 			};
 			const lifecycleMock = {
-				release: releaseSpy.mockImplementation(async (_parkedId: string) => {
-					currentRef = undefined;
+				release: releaseSpy.mockImplementation(async (parkedId: string) => {
+					refs.delete(parkedId);
 				}),
 			};
 
@@ -356,14 +412,21 @@ describe("fusion-sidekick", () => {
 			lifecycleSpy.mockImplementation(() => lifecycleMock as unknown as AgentLifecycleManager);
 
 			discoverAgentsSpy.mockImplementation(async () => ({
-				agents: [{ id: "task", name: "Task", kind: "task", path: "/test" }],
+				agents: [{ id: "task", name: "task", kind: "task", path: "/test" }],
 				projectAgentsDir: null,
 			}));
+			runSubprocessSpy.mockImplementation(async (options: { id: string }) => {
+				refs.set(options.id, { id: options.id, session: {}, status: "running" });
+				return undefined as never;
+			});
 
+			let recordedId: string | undefined = "parked-id";
 			const host = makeHost({
 				session: makeMockAgentSession({
-					getFusionSidekickId: () => "parked-id",
-					setFusionSidekickId: () => {},
+					getFusionSidekickId: () => recordedId,
+					setFusionSidekickId: id => {
+						recordedId = id;
+					},
 				}),
 				settings: makeSettings({
 					"fusion.enabled": true,
@@ -376,6 +439,8 @@ describe("fusion-sidekick", () => {
 			expect(releaseSpy).toHaveBeenCalledWith("parked-id");
 			expect(result.note).not.toBe("");
 			expect(result.sidekickLive).toBe(true);
+			expect(recordedId).toBeTruthy();
+			expect(recordedId).not.toBe("parked-id");
 		});
 	});
 });

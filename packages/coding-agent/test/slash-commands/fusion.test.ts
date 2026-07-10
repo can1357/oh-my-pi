@@ -161,8 +161,10 @@ describe("/fusion verbs", () => {
 		await result;
 		const text = outputs.join("\n");
 		expect(text).toContain("Fusion is ON");
+		expect(text).toContain("(degraded: sidekick unavailable)");
 		expect(text).toContain("Mode:            escalate");
 		expect(text).toContain("Sidekick model:  pi/smol");
+		expect(text).toContain("Sidekick state:  unavailable (not spawned)");
 	});
 });
 
