@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import { cloneDefaultConfig } from "./defaults.js";
-import type { ModelProfile, RouterConfig } from "./types.js";
+import type { ModelProfile, RouterConfig, TaskSpawnConfig, TaskSpawnLabelMappings } from "./types.js";
+import { validateTaskSpawnConfig } from "./validation.js";
 
 export interface LoadedConfig {
 	config: RouterConfig;
@@ -58,6 +59,7 @@ export function mergeConfig(base: RouterConfig, override: Partial<RouterConfig>)
 			...(override.extension ?? {}),
 		},
 		validation: { ...(base.validation ?? {}), ...(override.validation ?? {}) },
+		taskSpawn: mergeTaskSpawnConfig(base.taskSpawn, override.taskSpawn),
 	};
 	return merged;
 }
@@ -89,6 +91,7 @@ export function normalizeConfig(config: RouterConfig, warnings: string[] = []): 
 		model.contextWindow = Math.max(1_000, model.contextWindow);
 	}
 	config.rules = [...config.rules].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+	config.taskSpawn = normalizeTaskSpawnConfig(config.taskSpawn);
 	return config;
 }
 
@@ -108,6 +111,7 @@ export function validateRouterConfig(config: RouterConfig): string[] {
 			if (!config.models[fallback]) errors.push(`rule ${rule.name} has unknown fallback ${fallback}`);
 		}
 	}
+	errors.push(...validateTaskSpawnConfig(config.taskSpawn));
 	return errors;
 }
 
@@ -129,6 +133,57 @@ function candidatePaths(cwd: string, explicit?: string, home?: string): string[]
 	paths.push(resolvePath(".llm-router.json", cwd));
 	if (home) paths.push(resolvePath(".omp/agent/llm-router.json", home));
 	return paths;
+}
+
+
+const DEFAULT_TASK_SPAWN_LABEL_MAPPINGS: TaskSpawnLabelMappings = {
+	light: "light",
+	mid: "mid",
+	heavy: "frontier",
+};
+
+const DEFAULT_TASK_SPAWN_TIMEOUT_MS = 3_000;
+const DEFAULT_TASK_SPAWN_ENDPOINT = "http://127.0.0.1:8901/v1/chat/completions";
+const DEFAULT_TASK_SPAWN_SYSTEM_PROMPT =
+	"You are a routing classifier. Read the user request and output ONLY one word — the minimum model tier needed to answer it well:\n" +
+	"light = trivial/one-step/factual/simple rewrite (an 8B model suffices)\n" +
+	"mid = standard work: single-file code, moderate reasoning, summaries, normal Q&A\n" +
+	"heavy = hard multi-step reasoning, multi-file/architectural code, deep debugging, proofs, long-context synthesis, open-ended design\n" +
+	"Answer with exactly one of: light, mid, heavy.";
+
+function mergeTaskSpawnConfig(
+	base: TaskSpawnConfig | undefined,
+	override: TaskSpawnConfig | undefined,
+): TaskSpawnConfig {
+	const merged: TaskSpawnConfig = {
+		enabled: false,
+		...(base ?? {}),
+		...(override ?? {}),
+		labelMappings: {
+			...DEFAULT_TASK_SPAWN_LABEL_MAPPINGS,
+			...(base?.labelMappings ?? {}),
+			...(override?.labelMappings ?? {}),
+		},
+	};
+	return merged;
+}
+
+function normalizeTaskSpawnConfig(config: TaskSpawnConfig | undefined): TaskSpawnConfig {
+	const labelMappings: TaskSpawnLabelMappings = {
+		...DEFAULT_TASK_SPAWN_LABEL_MAPPINGS,
+		...(config?.labelMappings ?? {}),
+	};
+	return {
+		enabled: config?.enabled === true,
+		endpoint: config?.endpoint?.trim() || DEFAULT_TASK_SPAWN_ENDPOINT,
+		timeoutMs:
+			typeof config?.timeoutMs === "number" && Number.isFinite(config.timeoutMs)
+				? config.timeoutMs
+				: DEFAULT_TASK_SPAWN_TIMEOUT_MS,
+		systemPrompt: config?.systemPrompt?.trim() || DEFAULT_TASK_SPAWN_SYSTEM_PROMPT,
+		model: config?.model?.trim() || "qwen3-router-q8_0",
+		labelMappings,
+	};
 }
 
 function clamp01(value: number): number {

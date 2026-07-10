@@ -9,6 +9,7 @@ import type {
 	TraceCaptureConfig,
 	ValidationResult,
 } from "./types.js";
+import type { RouteLabel } from "./validation.js";
 
 type PromptPreviewOptions = Pick<TraceCaptureConfig, "includePromptPreview" | "maxPromptPreviewChars">;
 
@@ -54,6 +55,62 @@ export function validationTelemetry(
 		kind: "validation",
 		validation,
 		metadata,
+	};
+}
+
+export interface TaskSpawnTelemetryInput {
+	correlationId: string;
+	agentName: string;
+	workClass: string;
+	autonomy: string;
+	eligibleTier: readonly string[];
+	eligibleCount: number;
+	routeLabel?: RouteLabel;
+	allow: boolean;
+	reasonCode?: string;
+	candidateSelectors?: readonly string[];
+	maxRequests?: number;
+	maxRuntimeMs?: number;
+	classifierSource?: "classifier" | "fallback";
+	classifierReason?: string;
+	latencyMs?: number;
+	appliedNarrowing: boolean;
+	selectedTier?: readonly string[];
+}
+
+/**
+ * Pre-allocation spawn-policy telemetry. Never includes assignment text or secrets.
+ * Distinguished from input-hook decision telemetry by `kind` and `metadata.surface`.
+ */
+export function taskSpawnTelemetry(input: TaskSpawnTelemetryInput): TelemetryRecord {
+	return {
+		requestId: input.correlationId,
+		timestamp: new Date().toISOString(),
+		kind: "task_spawn",
+		metrics: {
+			latencyMs: input.latencyMs,
+			success: input.allow,
+		},
+		metadata: {
+			surface: "task_spawn",
+			correlationId: input.correlationId,
+			agentName: input.agentName,
+			workClass: input.workClass,
+			autonomy: input.autonomy,
+			eligibleTier: [...input.eligibleTier],
+			eligibleTierCount: input.eligibleTier.length,
+			eligibleCount: input.eligibleCount,
+			routeLabel: input.routeLabel,
+			allow: input.allow,
+			reasonCode: input.reasonCode,
+			candidateSelectors: input.candidateSelectors ? [...input.candidateSelectors] : undefined,
+			maxRequests: input.maxRequests,
+			maxRuntimeMs: input.maxRuntimeMs,
+			classifierSource: input.classifierSource,
+			classifierReason: input.classifierReason,
+			appliedNarrowing: input.appliedNarrowing,
+			selectedTier: input.selectedTier ? [...input.selectedTier] : undefined,
+		},
 	};
 }
 

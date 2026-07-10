@@ -250,6 +250,26 @@ export interface ExtensionConfig {
 	exposeCommand: boolean;
 }
 
+/** Maps classifier labels to eligible candidate tiers. */
+export interface TaskSpawnLabelMappings {
+	light: "light" | "mid" | "frontier";
+	mid: "light" | "mid" | "frontier";
+	heavy: "light" | "mid" | "frontier";
+}
+
+/**
+ * Optional spawn-only Qwen classifier settings.
+ * `enabled` defaults to false; task-spawn enablement never turns on per-input routing.
+ */
+export interface TaskSpawnConfig {
+	enabled: boolean;
+	endpoint?: string;
+	timeoutMs?: number;
+	systemPrompt?: string;
+	model?: string;
+	labelMappings?: TaskSpawnLabelMappings;
+}
+
 export interface RouterConfig {
 	version: number;
 	objectives: ObjectiveWeights;
@@ -260,6 +280,7 @@ export interface RouterConfig {
 	traces?: TraceCaptureConfig;
 	toolCapture?: ToolCaptureConfig;
 	extension?: ExtensionConfig;
+	taskSpawn?: TaskSpawnConfig;
 	validation?: {
 		unsafePatternHints?: string[];
 		maxRepairAttempts?: number;
@@ -505,7 +526,7 @@ export interface ContextTrace {
 export interface TelemetryRecord {
 	requestId: string;
 	timestamp: string;
-	kind: "decision" | "validation" | "fallback" | "outcome" | "tool_use" | "tool_training_example";
+	kind: "decision" | "validation" | "fallback" | "outcome" | "tool_use" | "tool_training_example" | "task_spawn";
 	route?: Pick<RouteDecision, "selectedModel" | "selector" | "confidence" | "taskType" | "reasons" | "fallbackChain">;
 	features?: Partial<RouterFeatureVector>;
 	validation?: ValidationResult;
