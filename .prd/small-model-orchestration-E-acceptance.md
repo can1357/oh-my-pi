@@ -200,7 +200,7 @@ Expected:
 - all focused tests pass with zero skipped acceptance invariants (except explicit heredoc soft spot if parser support is absent);
 - typecheck, prompt formatting, Biome, smoke test, and diff check exit 0;
 - no `@ts-expect-error` bridge remains;
-- final changed paths are a subset of the union of each lane's `files` array, every manifest `requiredDeliverables` path exists, no outside path appears, and every `cleanupGlobs` expansion is empty.
+- final changed paths are a subset of the union of each lane's `files` array plus the manifest's explicit `planAmendments`; every manifest `requiredDeliverables` path exists, no other path appears, and every `cleanupGlobs` expansion is empty.
 - evidence report records exact outputs and links every claim to a test;
 - no `findings-*.md` remains.
 

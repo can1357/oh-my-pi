@@ -27,13 +27,14 @@ You may ONLY edit these files:
 - `packages/coding-agent/src/eval/py/runner.py` (existing)
 - `packages/coding-agent/src/eval/py/kernel.ts` (existing)
 - `packages/coding-agent/src/eval/py/executor.ts` (existing)
+- `packages/coding-agent/src/eval/py/index.ts` (existing)
 - `packages/coding-agent/src/prompts/tools/eval.md` (existing)
 - `packages/coding-agent/test/task/assignment-verifier.test.ts` (new)
 - `packages/coding-agent/test/task/recovery-policy.test.ts` (new)
 - `packages/coding-agent/test/tools/eval-observability.test.ts` (new)
 - `packages/coding-agent/src/eval/py/__tests__/called-process-error.test.ts` (new)
 
-You may NOT edit task index/executor/types/render, Yield, tools factory, settings/config, Fusion, registry/IRC, extensions, package manifests, changelogs, or Lane C/D/E files.
+You may NOT edit task index/executor/types/render, Yield, tools factory, settings/config, Fusion, registry/IRC, extensions, package manifests, changelogs, or Lane C/D/E files. Python eval adapter `src/eval/py/index.ts` is explicitly Lane B-owned.
 
 ## 3. Gap (verbatim from the table)
 
@@ -147,7 +148,7 @@ git status --short
 Expected:
 - Python syntax check exits 0.
 - `git diff --check` exits 0.
-- `git diff --name-only` may omit new files; the union of `git diff --name-only` and `git status --short` lists ONLY the sixteen owned files.
+- `git diff --name-only` may omit new files; the union of `git diff --name-only` and `git status --short` lists ONLY the seventeen owned files.
 - Main later runs the four focused tests, prompt formatting, Biome, and coding-agent typecheck.
 
 ## 7. Commit message

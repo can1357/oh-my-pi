@@ -2,6 +2,11 @@
   "version": 1,
   "baselineRef": "refs/omp/orchestration/small-model-baseline",
   "parallelLanes": ["B", "C", "D"],
+  "planAmendments": [
+    ".prd/small-model-orchestration-B-contracts-recovery.md",
+    ".prd/small-model-orchestration-E-acceptance.md",
+    ".prd/small-model-orchestration-ownership.json"
+  ],
   "requiredDeliverables": [
     "packages/coding-agent/src/orchestration/agent-execution-profile.ts",
     "packages/coding-agent/src/task/spawn-plan.ts",
@@ -67,6 +72,7 @@
         "packages/coding-agent/src/eval/py/runner.py",
         "packages/coding-agent/src/eval/py/kernel.ts",
         "packages/coding-agent/src/eval/py/executor.ts",
+        "packages/coding-agent/src/eval/py/index.ts",
         "packages/coding-agent/src/prompts/tools/eval.md",
         "packages/coding-agent/test/task/assignment-verifier.test.ts",
         "packages/coding-agent/test/task/recovery-policy.test.ts",
