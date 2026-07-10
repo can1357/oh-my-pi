@@ -467,8 +467,15 @@ export class AgentHubOverlayComponent extends Container {
 			const sessionPaths = new Map<string, string>();
 			const subagentsByLane = new Map<string, HubAgentRef[]>();
 			const currentFile = this.#currentSessionFile;
+			const registrySessionPaths = new Set(
+				this.#registry.list().flatMap(ref => (ref.sessionFile ? [path.resolve(ref.sessionFile)] : [])),
+			);
 			for (const session of sessions) {
-				if (currentFile && path.resolve(session.path) === path.resolve(currentFile)) continue;
+				if (
+					(currentFile && path.resolve(session.path) === path.resolve(currentFile)) ||
+					registrySessionPaths.has(path.resolve(session.path))
+				)
+					continue;
 				const id = `background:${session.id}`;
 				const name = backgroundInstanceDisplayName(session);
 				const createdAt = session.created.getTime();

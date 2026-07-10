@@ -14,6 +14,7 @@ import { AgentHubOverlayComponent } from "@pk-nerdsaver-ai/pi-coding-agent/modes
 import { SessionObserverRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/modes/session-observer-registry";
 import { initTheme } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
 import { AgentRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
 
 const LANE_NAME = "api-worker";
 
@@ -136,6 +137,51 @@ describe("Agent hub background lanes", () => {
 				expect(fileContent).toContain('"status":"archived"');
 			} finally {
 				hub.dispose();
+			}
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("does not duplicate a persisted lane already owned by a live or parked registry subagent", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bg-hub-dedupe-"));
+		try {
+			const sessionFile = await seedBackgroundSession(tmp);
+			for (const status of ["running", "parked"] as const) {
+				const registry = new AgentRegistry();
+				registry.register({
+					id: "DesktopTag-1",
+					displayName: LANE_NAME,
+					kind: "sub",
+					parentId: "Main",
+					session: status === "running" ? ({} as AgentSession) : null,
+					sessionFile: path.relative(process.cwd(), sessionFile),
+					status,
+					cwd: tmp,
+				});
+				const backgroundLoaded = Promise.withResolvers<void>();
+				const hub = new AgentHubOverlayComponent({
+					observers: new SessionObserverRegistry(),
+					hubKeys: [],
+					onDone: () => {},
+					requestRender: () => backgroundLoaded.resolve(),
+					registry,
+					irc: new IrcBus(registry),
+					focusAgent: async () => {},
+					cwd: tmp,
+					sessionDir: tmp,
+					resumeSession: async () => {},
+					kanbanSync: null,
+				});
+				try {
+					await backgroundLoaded.promise;
+					const rendered = Bun.stripANSI(hub.render(120).join("\n"));
+					expect(rendered.match(new RegExp(LANE_NAME, "g"))).toHaveLength(1);
+					expect(rendered).toContain("DesktopTag-1");
+					expect(rendered).not.toContain("model anthropic/claude");
+				} finally {
+					hub.dispose();
+				}
 			}
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });
