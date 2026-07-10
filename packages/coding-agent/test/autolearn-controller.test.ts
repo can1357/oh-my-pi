@@ -272,6 +272,8 @@ describe("buildAutoLearnInstructions", () => {
 		const text = buildAutoLearnInstructions({ manageSkill: true, learn: true });
 		expect(text).toContain("manage_skill");
 		expect(text).toContain("long-term memory");
+		expect(text).toContain("tested, reproducible steps");
+		expect(text).toContain("TODO/TBD placeholders");
 	});
 
 	it("omits the learn addendum when only manage_skill is present", () => {

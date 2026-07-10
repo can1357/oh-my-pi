@@ -79,6 +79,16 @@ describe("managed-skills primitives", () => {
 			expect(result.issues.some(issue => issue.code === "body_has_frontmatter")).toBe(true);
 		});
 
+		it("rejects an unterminated YAML-looking frontmatter header", () => {
+			const result = validateManagedSkillPayload({
+				name: "demo",
+				description: "When to demo.",
+				body: "---\nname: sneaky\ndescription: no\n# Body",
+			});
+			expect(result.ok).toBe(false);
+			expect(result.issues.some(issue => issue.code === "body_has_frontmatter")).toBe(true);
+		});
+
 		it("rejects placeholder-only description or body while allowing TODO inside real steps", () => {
 			const placeholderBody = validateManagedSkillPayload({
 				name: "demo",
@@ -168,7 +178,24 @@ describe("managed-skills primitives", () => {
 
 			await expect(
 				writeManagedSkill({ action: "update", name: "missing", description: "d", body: "b" }),
-			).rejects.toThrow(/does not exist/);
+			).rejects.toThrow(/Use action "create"/);
+		});
+
+		it("preserves the existing skill and removes the temp file when replacement fails", async () => {
+			await writeManagedSkill({ action: "create", name: "replace", description: "d", body: "original" });
+			const rename = spyOn(fs, "rename").mockRejectedValueOnce(new Error("replacement blocked"));
+			try {
+				await expect(
+					writeManagedSkill({ action: "update", name: "replace", description: "d", body: "replacement" }),
+				).rejects.toThrow(/replacement blocked/);
+			} finally {
+				rename.mockRestore();
+			}
+
+			const { body } = parseFrontmatter(await Bun.file(skillFile("replace")).text(), { source: "test" });
+			expect(body).toContain("original");
+			expect(body).not.toContain("replacement");
+			expect(await fs.readdir(path.dirname(skillFile("replace")))).toEqual(["SKILL.md"]);
 		});
 
 		it("rejects an oversized body and writes nothing", async () => {

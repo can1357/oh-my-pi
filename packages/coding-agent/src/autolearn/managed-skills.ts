@@ -154,7 +154,11 @@ function isPlaceholderOnly(text: string): boolean {
 
 function bodyLooksLikeFrontmatter(body: string): boolean {
 	const normalized = body.trimStart().replace(/\r\n?/g, "\n");
-	return /^---[ \t]*\n[\s\S]*?\n---[ \t]*(?:\n|$)/.test(normalized);
+	if (!normalized.startsWith("---")) return false;
+	if (/^---[ \t]*\n[\s\S]*?\n---[ \t]*(?:\n|$)/.test(normalized)) return true;
+	// Preserve a Markdown thematic break (`---` followed by blank prose), but
+	// reject an unterminated YAML-looking header before it can be persisted.
+	return /^---[ \t]*\n(?:[ \t]*\n|[ \t]*#[^\n]*\n)*(?:name|description)\s*:/m.test(normalized);
 }
 
 /** Join validation issues into one actionable tool/error message. */
@@ -372,7 +376,7 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 			throw err;
 		});
 		if (fileStat === null) {
-			throw new Error(`Managed skill "${name}" does not exist. Use action "update" only for existing skills.`);
+			throw new Error(`Managed skill "${name}" does not exist. Use action "create" to add it.`);
 		}
 		if (fileStat.isSymbolicLink()) {
 			throw new Error(`Managed skill "${name}" SKILL.md is a symlink; refusing to overwrite it.`);

@@ -34,6 +34,7 @@
 - Fixed Fusion sidekick observability: `/fusion status` now reports live Sidekick registry state (idle/running/parked/unavailable) and marks Fusion as degraded when the sidekick is missing; spawn now waits for AgentRegistry registration before retaining a sidekick id so failed starts no longer latch a phantom Sidekick.
 - Fixed `/remote` in ACP/text mode: it is now consumed with an explicit interactive-TUI requirement instead of being forwarded to the model as ordinary prompt text.
 - Fixed source installers, mise updates, package metadata, and release instructions to use the `kingkillery/oh-my-pk` fork instead of the upstream `oh-my-pi` repository.
+- Fixed auto-learn thresholding so only successful tool calls count toward `autolearn.minToolCalls`; failed calls no longer trigger a capture nudge.
 
 - Serialized editor submit handling so a fast double-Enter can't race concurrent submit handlers: a second empty Enter previously read `queuedMessageCount` before a steer finished registering it and no-op'd instead of flushing.
 
