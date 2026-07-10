@@ -93,15 +93,14 @@ const modelSegment: StatusLineSegment = {
 			modelName = modelName.slice(7);
 		}
 
-		// Fast-mode icon and thinking-level suffix trail the model name and are
-		// colored together with it as `statusLineModel`. The advisor "++" badge
-		// sits between the name and that tail in `accent`, so it reads as a
-		// distinct marker. theme.fg resets only the fg, so the spans are
-		// concatenated (not nested) to keep each color intact.
+		// Keep the fast-mode indicator immediately beside the model name. A bright
+		// bolt is on; the muted bolt preserves the indicator's position when off.
+		const fastModeIndicator = theme.icon.fast ? ` ${theme.icon.fast}` : "";
+
+		// Thinking-level suffix trails the model/advisor indicators.
+		// theme.fg resets only the fg, so spans are concatenated (not nested) to
+		// keep each color intact.
 		let tail = "";
-		if (ctx.session.isFastModeActive() && theme.icon.fast) {
-			tail += ` ${theme.icon.fast}`;
-		}
 
 		if (opts.showThinkingLevel !== false && state.model?.thinking) {
 			if (ctx.session.isAutoThinking) {
@@ -121,9 +120,12 @@ const modelSegment: StatusLineSegment = {
 			}
 		}
 
-		// `statusLineModel` is aliased to `accent` in many themes, so the badge
-		// uses `success` to stay visibly distinct from the model name color.
+		// `statusLineModel` is aliased to `accent` in many themes, so indicators
+		// use distinct colors that remain legible beside the model name.
 		let content = theme.fg("statusLineModel", withIcon(theme.icon.model, modelName));
+		if (fastModeIndicator) {
+			content += theme.fg(ctx.session.isFastModeEnabled() ? "warning" : "muted", fastModeIndicator);
+		}
 		if (ctx.session.isAdvisorActive()) {
 			content += theme.fg("success", "++");
 		}

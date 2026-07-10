@@ -7,11 +7,12 @@ beforeAll(async () => {
 	await initTheme();
 });
 
-function createModelContext(advisorActive: boolean): SegmentContext {
+function createModelContext(advisorActive: boolean, fastModeEnabled = false): SegmentContext {
 	return {
 		session: {
 			state: { model: { id: "test-model", name: "Test Model" } },
 			isFastModeActive: () => false,
+			isFastModeEnabled: () => fastModeEnabled,
 			isAutoThinking: false,
 			autoResolvedThinkingLevel: () => undefined,
 			isAdvisorActive: () => advisorActive,
@@ -54,5 +55,21 @@ describe("status line model segment advisor badge", () => {
 		const rendered = renderSegment("model", createModelContext(false));
 		expect(rendered.content).toContain("Test Model");
 		expect(rendered.content).not.toContain("++");
+	});
+});
+
+describe("status line model segment fast-mode indicator", () => {
+	it("shows a bright bolt immediately after the model name when fast mode is on", () => {
+		const rendered = renderSegment("model", createModelContext(false, true));
+		expect(rendered.content).toContain(
+			theme.fg("statusLineModel", `${theme.icon.model} Test Model`) + theme.fg("warning", ` ${theme.icon.fast}`),
+		);
+	});
+
+	it("shows a muted bolt immediately after the model name when fast mode is off", () => {
+		const rendered = renderSegment("model", createModelContext(false));
+		expect(rendered.content).toContain(
+			theme.fg("statusLineModel", `${theme.icon.model} Test Model`) + theme.fg("muted", ` ${theme.icon.fast}`),
+		);
 	});
 });
