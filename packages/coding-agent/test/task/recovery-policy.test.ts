@@ -258,9 +258,9 @@ describe("nextRecoveryAttempt", () => {
 		expect(Object.keys(decision.capsule).sort()).toEqual(
 			[
 				"artifactRefs",
-				"contractDigest",
 				"contractId",
-				"contractRevision",
+				"digest",
+				"revision",
 				"failureClass",
 				"failureMessage",
 				"historyRef",

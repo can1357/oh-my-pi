@@ -39,8 +39,8 @@ export interface RecoveryAttempt {
 
 export interface RecoveryCapsule {
 	readonly contractId: string;
-	readonly contractRevision: number;
-	readonly contractDigest: string;
+	readonly revision: number;
+	readonly digest: string;
 	readonly failureClass: AssignmentFailureClass;
 	readonly failureMessage: string;
 	readonly validatorReasons: readonly string[];
@@ -135,14 +135,14 @@ function providerKey(candidate: SpawnRouteCandidate): string | undefined {
 	if (explicit) return explicit;
 	const selector = candidate.selector.trim();
 	const slash = selector.indexOf("/");
-	return slash > 0 ? cleanProvider(selector.slice(0, slash)) : undefined;
+	return cleanProvider(slash > 0 ? selector.slice(0, slash) : selector);
 }
 
 function attemptProviderKey(attempt: RecoveryAttempt): string | undefined {
 	const explicit = cleanProvider(attempt.provider);
 	if (explicit) return explicit;
 	const slash = attempt.selector.indexOf("/");
-	return slash > 0 ? cleanProvider(attempt.selector.slice(0, slash)) : undefined;
+	return cleanProvider(slash > 0 ? attempt.selector.slice(0, slash) : attempt.selector);
 }
 
 function uniqueFrozen(values: readonly string[] | undefined): readonly string[] {
@@ -175,8 +175,8 @@ function buildCapsule(
 	const childId = input.outcome.failedChildId?.trim() || "unavailable";
 	return Object.freeze({
 		contractId: input.contract.id,
-		contractRevision: input.contract.revision,
-		contractDigest: input.contract.digest,
+		revision: input.contract.revision,
+		digest: input.contract.digest,
 		failureClass: classifyRecoveryFailure(failure),
 		failureMessage: failure.message,
 		validatorReasons: uniqueFrozen(failure.validatorReasons),
@@ -201,7 +201,10 @@ function nextSuppressedProviders(
 		if (key) suppressed.add(key);
 	}
 	if (shouldSuppressProvider(failure)) {
-		const failedProvider = cleanProvider(failure.failedProvider);
+		const priorAttempts = input.previousAttempts ?? [];
+		const lastAttempt = priorAttempts[priorAttempts.length - 1];
+		const failedProvider = cleanProvider(failure.failedProvider) ??
+			(lastAttempt ? attemptProviderKey(lastAttempt) : undefined);
 		if (failedProvider) suppressed.add(failedProvider);
 	}
 	return Object.freeze([...suppressed].sort());

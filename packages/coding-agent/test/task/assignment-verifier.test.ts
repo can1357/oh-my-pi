@@ -370,9 +370,15 @@ describe("verifyAssignmentResult", () => {
 		});
 		expect(verified.verified).toBe(true);
 	});
+
 	test("supports every parent-authored acceptance check", async () => {
 		const acceptance: AssignmentContractV1["acceptance"] = [
-			{ id: "exit", description: "command exits", check: "command_exit", params: { command: "exit-ok" } },
+			{
+				id: "exit",
+				description: "command exits",
+				check: "command_exit",
+				params: { command: "exit-ok" },
+			},
 			{
 				id: "timeout",
 				description: "command timeout is observed",
@@ -383,7 +389,11 @@ describe("verifyAssignmentResult", () => {
 				id: "streams",
 				description: "streams are captured",
 				check: "command_streams",
-				params: { command: "streams", stdoutIncludes: "out", stderrIncludes: "err" },
+				params: {
+					command: "streams",
+					stdoutIncludes: "out",
+					stderrIncludes: "err",
+				},
 			},
 			{
 				id: "exists",
@@ -418,7 +428,11 @@ describe("verifyAssignmentResult", () => {
 					schema: { type: "object", required: ["ok"] },
 				},
 			},
-			{ id: "scope", description: "changed paths are scoped", check: "changed_file_scope" },
+			{
+				id: "scope",
+				description: "changed paths are scoped",
+				check: "changed_file_scope",
+			},
 		];
 		const contract = makeContract({ acceptance });
 		const result = makeResult(contract, {
@@ -468,7 +482,11 @@ describe("verifyAssignmentResult", () => {
 		const base = makeResult(contract, {
 			changedFiles: [],
 			evidence: [
-				{ criterionId: "unit", passed: true, summary: "Parent command was checked concretely" },
+				{
+					criterionId: "unit",
+					passed: true,
+					summary: "Parent command was checked concretely",
+				},
 			],
 		});
 
@@ -481,11 +499,20 @@ describe("verifyAssignmentResult", () => {
 			makeResult(contract, {
 				changedFiles: [],
 				evidence: [
-					{ criterionId: "unit", passed: false, summary: "Parent command exited with status one" },
+					{
+						criterionId: "unit",
+						passed: false,
+						summary: "Parent command exited with status one",
+					},
 				],
 			}),
 			{
-				runCommand: async () => ({ exitCode: 0, timedOut: false, stdout: "", stderr: "" }),
+				runCommand: async () => ({
+					exitCode: 0,
+					timedOut: false,
+					stdout: "",
+					stderr: "",
+				}),
 			},
 		);
 		expect(reportedFailure.verified).toBe(false);

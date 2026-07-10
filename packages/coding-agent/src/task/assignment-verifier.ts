@@ -69,13 +69,22 @@ export interface CriterionVerification {
 	readonly details?: Readonly<Record<string, unknown>>;
 }
 
-export interface AssignmentVerificationResult {
-	readonly verified: boolean;
-	readonly failureClass?: AssignmentFailureClass;
+interface AssignmentVerificationResultBase {
 	readonly reasons: readonly string[];
 	readonly criteria: readonly CriterionVerification[];
 }
 
+export interface VerifiedAssignmentResult extends AssignmentVerificationResultBase {
+	readonly verified: true;
+	readonly failureClass?: never;
+}
+
+export interface RejectedAssignmentResult extends AssignmentVerificationResultBase {
+	readonly verified: false;
+	readonly failureClass: AssignmentFailureClass;
+}
+
+export type AssignmentVerificationResult = VerifiedAssignmentResult | RejectedAssignmentResult;
 export type VerificationResult = AssignmentVerificationResult;
 
 const PLACEHOLDER_EXACT = new Set([
@@ -129,7 +138,7 @@ export function isPlaceholderNarrative(text: string): boolean {
 	const normalized = normalizeNarrative(text);
 	if (!normalized) return true;
 	if (PLACEHOLDER_MARKERS.some(pattern => pattern.test(text))) return true;
-	const literal = normalized.replace(/^[\s.,;:!?`'"()[\]{}-]+|[\s.,;:!?`'"()[\]{}-]+$/g, "");
+	const literal = normalized.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, "");
 	return PLACEHOLDER_EXACT.has(literal) || isRepeatedFiller(normalized);
 }
 
