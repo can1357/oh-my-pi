@@ -118,7 +118,9 @@ function asOptionalNumber(value: unknown): number | undefined {
 }
 
 function formatCommandEvidence(command: string | readonly string[]): string {
-	return Array.isArray(command) ? command.join(" ") : command;
+	// Prefer typeof narrowing: Array.isArray does not eliminate readonly string[] from the false branch.
+	if (typeof command === "string") return command;
+	return command.join(" ");
 }
 
 /**

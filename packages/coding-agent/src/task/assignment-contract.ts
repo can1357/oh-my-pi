@@ -562,7 +562,7 @@ export function parseAssignmentResult(input: unknown): ParseAssignmentResultResu
 			status: input.status as AssignmentResultStatus,
 			changedFiles: Object.freeze([...input.changedFiles]),
 			evidence: Object.freeze(evidence.map(item => Object.freeze({ ...item }))),
-			blockers: input.blockers ? Object.freeze([...input.blockers]) : undefined,
+			blockers: isStringArray(input.blockers) ? Object.freeze([...input.blockers]) : undefined,
 			summary: typeof input.summary === "string" ? input.summary : undefined,
 		}),
 	};
