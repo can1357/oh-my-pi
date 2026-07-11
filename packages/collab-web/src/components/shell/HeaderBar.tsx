@@ -1,4 +1,4 @@
-import { LogOut, PanelRight } from "lucide-react";
+import { LogOut, PanelLeft } from "lucide-react";
 import type { ReactNode } from "react";
 import type { GuestSnapshot } from "../../lib/client";
 import { fmtPercent, shortenPath } from "../../lib/format";
@@ -28,14 +28,28 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 	return (
 		<header className="sh-header">
 			<div className="sh-header-left">
-				<span className="sh-title" title={title}>
-					{title}
-				</span>
-				{state?.cwd && (
-					<span className="sh-cwd" title={state.cwd}>
-						{shortenPath(state.cwd)}
+				<button
+					type="button"
+					className={
+						railOpen ? "sh-btn sh-btn-icon sh-btn-on sh-sidebar-toggle" : "sh-btn sh-btn-icon sh-sidebar-toggle"
+					}
+					onClick={onToggleRail}
+					title={railOpen ? "hide session agents" : "show session agents"}
+					aria-label={railOpen ? "Hide session agents" : "Show session agents"}
+				>
+					<PanelLeft size={14} />
+					{subCount > 0 && !railOpen && <span className="sh-badge">{subCount}</span>}
+				</button>
+				<div className="sh-title-group">
+					<span className="sh-title" title={title}>
+						{title}
 					</span>
-				)}
+					{state?.cwd && (
+						<span className="sh-cwd" title={state.cwd}>
+							{shortenPath(state.cwd)}
+						</span>
+					)}
+				</div>
 			</div>
 			<div className="sh-header-right">
 				{readOnly && (
@@ -73,14 +87,11 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 				<ThemeToggle />
 				<button
 					type="button"
-					className={railOpen ? "sh-btn sh-btn-icon sh-btn-on" : "sh-btn sh-btn-icon"}
-					onClick={onToggleRail}
-					title={railOpen ? "hide agents" : "show agents"}
+					className="sh-btn sh-btn-icon"
+					onClick={onLeave}
+					title="leave session"
+					aria-label="Leave session"
 				>
-					<PanelRight size={14} />
-					{subCount > 0 && <span className="sh-badge">{subCount}</span>}
-				</button>
-				<button type="button" className="sh-btn sh-btn-icon" onClick={onLeave} title="leave session">
 					<LogOut size={14} />
 				</button>
 			</div>

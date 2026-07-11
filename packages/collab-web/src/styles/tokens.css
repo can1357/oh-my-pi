@@ -46,6 +46,7 @@
 
 	/* non-pinned helpers (kept here so no raw colors leak outside this file) */
 	--shadow-overlay: 0 12px 32px oklch(0 0 0 / 45%), 0 2px 8px oklch(0 0 0 / 30%);
+	--shadow-composer: 0 18px 48px oklch(0 0 0 / 34%), 0 4px 14px oklch(0 0 0 / 24%);
 	--rail-mobile-shadow: -4px 0 16px oklch(0 0 0 / 30%);
 	--backdrop: oklch(0.1 0.014 307 / 62%);
 }
@@ -76,6 +77,7 @@
 	--ring: oklch(0.58 0.13 230 / 70%);
 
 	--shadow-overlay: 0 12px 32px oklch(0 0 0 / 14%), 0 2px 8px oklch(0 0 0 / 10%);
+	--shadow-composer: 0 18px 48px oklch(0 0 0 / 12%), 0 4px 14px oklch(0 0 0 / 8%);
 	--rail-mobile-shadow: -4px 0 16px oklch(0 0 0 / 14%);
 	--backdrop: oklch(0.55 0.02 307 / 28%);
 }
@@ -107,6 +109,7 @@
 		--ring: oklch(0.58 0.13 230 / 70%);
 
 		--shadow-overlay: 0 12px 32px oklch(0 0 0 / 14%), 0 2px 8px oklch(0 0 0 / 10%);
+		--shadow-composer: 0 18px 48px oklch(0 0 0 / 12%), 0 4px 14px oklch(0 0 0 / 8%);
 		--backdrop: oklch(0.55 0.02 307 / 28%);
 		--rail-mobile-shadow: -4px 0 16px oklch(0 0 0 / 14%);
 	}

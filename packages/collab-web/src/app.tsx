@@ -121,7 +121,7 @@ interface SessionProps {
 
 function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 	const snap = useGuestSnapshot(client);
-	const [railOpen, setRailOpen] = useState(false);
+	const [railOpen, setRailOpen] = useState(() => window.matchMedia("(min-width: 769px)").matches);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 	const autoOpenedRef = useRef(false);
 
@@ -139,9 +139,9 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 		[agentIds],
 	);
 
-	// Auto-open the rail the first time a subagent appears.
+	// Auto-open when a subagent first appears on desktop; mobile keeps the transcript visible.
 	useEffect(() => {
-		if (subCount > 0 && !autoOpenedRef.current) {
+		if (subCount > 0 && !autoOpenedRef.current && window.matchMedia("(min-width: 769px)").matches) {
 			autoOpenedRef.current = true;
 			setRailOpen(true);
 		}
@@ -155,43 +155,58 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 	const drawerAgent = selectedId != null ? snap.agents.find(a => a.id === selectedId) : undefined;
 
 	return (
-		<div className="sh-app">
-			<HeaderBar
-				snapshot={snap}
-				subCount={subCount}
-				railOpen={railOpen}
-				onToggleRail={() => setRailOpen(open => !open)}
-				onLeave={onLeave}
-			/>
-			<main className="sh-main">
-				<section className="sh-content" data-rail={railOpen ? "true" : "false"}>
-					<div className="sh-transcript">
-						<Transcript
-							entries={snap.entries}
-							stream={snap.stream}
-							streamDone={snap.streamDone}
-							activeTools={snap.activeTools}
-							working={snap.working}
-							host={toolHost}
+		<div className="sh-app" data-sidebar={railOpen ? "open" : "closed"}>
+			{railOpen && (
+				<>
+					<div className="sh-rail-backdrop" onClick={() => setRailOpen(false)} />
+					<aside className="sh-rail" aria-label="Session agents">
+						<div className="sh-sidebar-brand">
+							<span className="sh-lockup-mark" aria-hidden="true" />
+							<span className="sh-sidebar-wordmark">oh-my-pk</span>
+							<span className={`sh-dot sh-dot-${snap.phase}`} title={snap.phase} />
+						</div>
+						<div className="sh-sidebar-section">
+							<span>Session agents</span>
+							{subCount > 0 && <span className="sh-sidebar-count">{subCount}</span>}
+						</div>
+						<AgentsPanel
+							agents={snap.agents}
+							progress={snap.progress}
+							lifecycle={snap.lifecycle}
+							selectedId={selectedId}
+							onSelect={setSelectedId}
 						/>
-					</div>
-				</section>
-				{railOpen && (
-					<>
-						<div className="sh-rail-backdrop" onClick={() => setRailOpen(false)} />
-						<aside className="sh-rail">
-							<AgentsPanel
-								agents={snap.agents}
-								progress={snap.progress}
-								lifecycle={snap.lifecycle}
-								selectedId={selectedId}
-								onSelect={setSelectedId}
+						<div className="sh-sidebar-foot">
+							<span className="sh-sidebar-foot-dot" aria-hidden="true" />
+							End-to-end encrypted collaboration
+						</div>
+					</aside>
+				</>
+			)}
+			<div className="sh-workspace">
+				<HeaderBar
+					snapshot={snap}
+					subCount={subCount}
+					railOpen={railOpen}
+					onToggleRail={() => setRailOpen(open => !open)}
+					onLeave={onLeave}
+				/>
+				<main className="sh-main">
+					<section className="sh-content">
+						<div className="sh-transcript">
+							<Transcript
+								entries={snap.entries}
+								stream={snap.stream}
+								streamDone={snap.streamDone}
+								activeTools={snap.activeTools}
+								working={snap.working}
+								host={toolHost}
 							/>
-						</aside>
-					</>
-				)}
-			</main>
-			<Composer client={client} snapshot={snap} />
+						</div>
+					</section>
+				</main>
+				<Composer client={client} snapshot={snap} />
+			</div>
 			{drawerAgent && (
 				<>
 					<div className="ag-drawer-backdrop" onClick={() => setSelectedId(null)} />

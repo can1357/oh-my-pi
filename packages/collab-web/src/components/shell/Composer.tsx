@@ -8,9 +8,9 @@ export interface ComposerProps {
 	snapshot: GuestSnapshot;
 }
 
-/** Textarea metrics: line-height 20px + 8px vertical padding × 2 (kept in sync with shell.css). */
+/** Textarea metrics: line-height 20px + 18px total vertical padding (kept in sync with shell.css). */
 const LINE_PX = 20;
-const PAD_Y = 16;
+const PAD_Y = 18;
 const MAX_ROWS = 8;
 
 export function Composer({ client, snapshot }: ComposerProps): ReactNode {
@@ -53,46 +53,52 @@ export function Composer({ client, snapshot }: ComposerProps): ReactNode {
 				<textarea
 					ref={taRef}
 					className="sh-composer-input"
+					aria-label="Message the host agent"
 					value={text}
 					onChange={e => setText(e.target.value)}
 					onKeyDown={onKeyDown}
 					placeholder={
 						readOnly
-							? "read-only session — watching only"
+							? "Read-only session"
 							: live
-								? "prompt the host agent…"
-								: "waiting for session…"
+								? "Ask the host agent to change or inspect something…"
+								: "Waiting for session…"
 					}
 					disabled={!canPrompt}
 					rows={1}
 					spellCheck={false}
 				/>
-				<div className="sh-composer-actions">
-					{busy && queued > 0 && (
-						<span className="sh-queued">
-							<span className="sh-queued-label">queued </span>×{queued}
-						</span>
-					)}
-					{busy && !readOnly && (
+				<div className="sh-composer-footer">
+					<span className="sh-composer-hint">
+						Enter to send <span aria-hidden="true">·</span> Shift+Enter for newline
+					</span>
+					<div className="sh-composer-actions">
+						{busy && queued > 0 && (
+							<span className="sh-queued">
+								<span className="sh-queued-label">queued </span>×{queued}
+							</span>
+						)}
+						{busy && !readOnly && (
+							<button
+								type="button"
+								className="sh-btn sh-btn-stop"
+								onClick={() => client.sendAbort()}
+								disabled={!live}
+								title="stop the current turn"
+							>
+								<Square size={11} /> <span className="sh-btn-label">Stop</span>
+							</button>
+						)}
 						<button
 							type="button"
-							className="sh-btn sh-btn-stop"
-							onClick={() => client.sendAbort()}
-							disabled={!live}
-							title="stop the current turn"
+							className="sh-btn sh-btn-primary"
+							onClick={send}
+							disabled={!canSend}
+							title="send (Enter)"
 						>
-							<Square size={11} /> <span className="sh-btn-label">Stop</span>
+							<SendHorizontal size={12} /> <span className="sh-btn-label">Send</span>
 						</button>
-					)}
-					<button
-						type="button"
-						className="sh-btn sh-btn-primary"
-						onClick={send}
-						disabled={!canSend}
-						title="send (Enter)"
-					>
-						<SendHorizontal size={12} /> <span className="sh-btn-label">Send</span>
-					</button>
+					</div>
 				</div>
 			</div>
 		</div>

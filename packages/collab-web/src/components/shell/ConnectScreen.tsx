@@ -1,3 +1,4 @@
+import { Radio, ShieldCheck, TerminalSquare } from "lucide-react";
 import type { FormEvent, ReactNode } from "react";
 import { useState } from "react";
 import { ThemeToggle } from "./ThemeToggle";
@@ -28,17 +29,42 @@ export function ConnectScreen({ defaultName, error, onConnect }: ConnectScreenPr
 
 	return (
 		<div className="sh-connect">
+			<section className="sh-connect-intro" aria-label="oh-my-pk collaboration">
+				<div className="sh-connect-brand">
+					<span className="sh-lockup-mark" aria-hidden="true" />
+					<span>oh-my-pk</span>
+				</div>
+				<div className="sh-connect-copy">
+					<span className="sh-connect-kicker">Live workspace</span>
+					<h1>Stay with the work, wherever the agent runs.</h1>
+					<p>
+						Follow the transcript, inspect tool calls and guide the host session from a focused browser workspace.
+					</p>
+				</div>
+				<div className="sh-connect-features">
+					<span>
+						<Radio size={15} /> Streaming transcript
+					</span>
+					<span>
+						<TerminalSquare size={15} /> Tool and subagent detail
+					</span>
+					<span>
+						<ShieldCheck size={15} /> End-to-end encrypted
+					</span>
+				</div>
+			</section>
 			<form className="sh-connect-card" onSubmit={submit}>
 				<div className="sh-connect-head">
-					<div className="sh-lockup">
-						<span className="sh-lockup-mark" aria-hidden="true" />
-						<span className="sh-lockup-pi">π</span> omp collab
+					<div>
+						<h2>Join a session</h2>
+						<p>
+							Use the link printed by <code>/collab</code>.
+						</p>
 					</div>
 					<ThemeToggle />
 				</div>
-				<div className="sh-connect-sub">live agent session, in your browser</div>
 				<label className="sh-field">
-					<span className="sh-field-label">join link</span>
+					<span className="sh-field-label">Join link</span>
 					<input
 						className="sh-input sh-input-mono"
 						type="text"
@@ -49,10 +75,10 @@ export function ConnectScreen({ defaultName, error, onConnect }: ConnectScreenPr
 						autoComplete="off"
 						autoFocus
 					/>
-					<span className="sh-field-hint">paste a /collab link from any omp session</span>
+					<span className="sh-field-hint">The room key stays in your browser.</span>
 				</label>
 				<label className="sh-field">
-					<span className="sh-field-label">display name</span>
+					<span className="sh-field-label">Display name</span>
 					<input
 						className="sh-input"
 						type="text"
@@ -64,9 +90,13 @@ export function ConnectScreen({ defaultName, error, onConnect }: ConnectScreenPr
 						maxLength={32}
 					/>
 				</label>
-				{shown && <div className="sh-connect-error">{shown}</div>}
+				{shown && (
+					<div className="sh-connect-error" role="alert">
+						{shown}
+					</div>
+				)}
 				<button className="sh-btn sh-btn-primary sh-connect-submit" type="submit">
-					Connect
+					Connect to workspace
 				</button>
 			</form>
 		</div>

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Redesigned the browser collaboration client as a focused coding workspace with a persistent desktop agent sidebar, responsive mobile navigation, a floating composer, and a clearer session join experience inspired by T3 Code.
+
 ## [16.2.0] - 2026-06-27
 
 ### Added

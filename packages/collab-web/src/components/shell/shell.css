@@ -2,15 +2,21 @@
 
 /* ---- app frame ---- */
 .sh-app {
-	display: grid;
-	grid-template-rows: auto 1fr auto;
-	/* Single column pinned to the container width: an `auto` track sizes to its
-	 * items' min-content, so a long session title (or the fixed header controls)
-	 * would force every row — header, transcript, composer — wider than a narrow
-	 * viewport and clip the right edge. `minmax(0, 1fr)` caps the track so rows
-	 * shrink and ellipsize instead of overflowing. */
-	grid-template-columns: minmax(0, 1fr);
+	display: flex;
+	width: 100%;
 	height: var(--viewport-height, 100%);
+	min-height: 0;
+	background: var(--bg);
+}
+
+.sh-workspace {
+	display: grid;
+	grid-template-rows: auto minmax(0, 1fr) auto;
+	grid-template-columns: minmax(0, 1fr);
+	flex: 1;
+	min-width: 0;
+	min-height: 0;
+	overflow: hidden;
 }
 
 .sh-main {
@@ -20,24 +26,20 @@
 }
 
 .sh-content {
+	display: flex;
+	justify-content: center;
 	flex: 1;
 	min-width: 0;
 	min-height: 0;
-	display: flex;
-	justify-content: center;
 	overflow: hidden;
 }
 
 .sh-transcript {
-	width: 100%;
-	max-width: 880px;
-	min-height: 0;
 	display: flex;
 	flex-direction: column;
-}
-
-.sh-content[data-rail="true"] .sh-transcript {
-	max-width: none;
+	width: 100%;
+	max-width: 900px;
+	min-height: 0;
 }
 
 .sh-transcript > * {
@@ -46,16 +48,72 @@
 }
 
 .sh-rail {
-	width: 300px;
-	flex: none;
+	display: flex;
+	flex-direction: column;
+	width: 264px;
 	min-height: 0;
-	overflow-y: auto;
-	border-left: 1px solid var(--border);
-	background: var(--bg);
+	flex: none;
+	overflow: hidden;
+	border-right: 1px solid var(--border);
+	background: var(--bg-raised);
+}
+
+.sh-rail .ag-panel {
+	flex: 1;
 }
 
 .sh-rail-backdrop {
 	display: none;
+}
+
+.sh-sidebar-brand {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	height: 48px;
+	padding: 0 12px;
+	border-bottom: 1px solid var(--border);
+}
+
+.sh-sidebar-wordmark {
+	flex: 1;
+	font-family: var(--font-mono);
+	font-size: 12px;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+}
+
+.sh-sidebar-section {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 14px 16px 4px;
+	color: var(--fg-faint);
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.sh-sidebar-count {
+	font-family: var(--font-mono);
+}
+
+.sh-sidebar-foot {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 12px 16px;
+	border-top: 1px solid var(--border);
+	color: var(--fg-faint);
+	font-size: 10px;
+}
+
+.sh-sidebar-foot-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--ok);
 }
 
 /* ---- shared controls ---- */
@@ -176,15 +234,17 @@
 	align-items: center;
 	justify-content: space-between;
 	gap: 12px;
-	padding: 8px 12px;
-	padding-top: calc(8px + env(safe-area-inset-top, 0px));
+	min-height: 48px;
+	padding: 6px 12px;
+	padding-top: calc(6px + env(safe-area-inset-top, 0px));
 	border-bottom: 1px solid var(--border);
-	background: var(--bg);
+	background: color-mix(in srgb, var(--bg) 92%, transparent);
+	backdrop-filter: blur(12px);
 }
 
 .sh-header-left {
 	display: flex;
-	align-items: baseline;
+	align-items: center;
 	gap: 10px;
 	min-width: 0;
 }
@@ -196,22 +256,30 @@
 	flex: none;
 }
 
-.sh-title {
-	font-size: 13px;
-	font-weight: 600;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
+.sh-title-group {
+	display: flex;
+	flex-direction: column;
 	min-width: 0;
 }
 
-.sh-cwd {
-	font: 400 11px / 1.5 var(--font-mono);
-	color: var(--fg-faint);
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
+.sh-title {
 	min-width: 0;
+	overflow: hidden;
+	color: var(--fg);
+	font-size: 13px;
+	font-weight: 600;
+	line-height: 1.3;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sh-cwd {
+	min-width: 0;
+	overflow: hidden;
+	color: var(--fg-faint);
+	font: 400 10px / 1.3 var(--font-mono);
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .sh-gauge {
@@ -296,30 +364,33 @@
 
 /* ---- composer ---- */
 .sh-composer {
-	padding: 10px 12px;
-	padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
-	border-top: 1px solid var(--border);
-	background: var(--bg);
+	padding: 8px 16px 16px;
+	padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+	background: linear-gradient(to bottom, transparent, var(--bg) 28%);
 }
 
 .sh-composer-inner {
 	display: flex;
-	align-items: flex-end;
-	gap: 8px;
-	max-width: 880px;
+	flex-direction: column;
+	max-width: 820px;
 	margin: 0 auto;
+	overflow: hidden;
+	background: color-mix(in srgb, var(--bg-raised) 90%, transparent);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-lg);
+	box-shadow: var(--shadow-composer);
+	backdrop-filter: blur(16px);
 }
 
 .sh-composer-input {
-	flex: 1;
+	width: 100%;
 	min-width: 0;
-	padding: 8px 10px;
+	padding: 12px 14px 6px;
 	font-size: 13px;
 	line-height: 20px;
 	color: var(--fg);
-	background: var(--bg-inset);
-	border: 1px solid var(--border);
-	border-radius: var(--radius);
+	background: transparent;
+	border: 0;
 	resize: none;
 }
 
@@ -331,13 +402,30 @@
 	opacity: 0.55;
 }
 
+.sh-composer-input:focus,
 .sh-composer-input:focus-visible {
-	outline: 2px solid transparent;
-	outline-offset: 0;
+	outline: 0;
 }
 
-.sh-composer-input:focus {
+.sh-composer-inner:focus-within {
 	border-color: var(--ring);
+}
+
+.sh-composer-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 4px 6px 6px 14px;
+}
+
+.sh-composer-hint {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--fg-faint);
+	font-size: 10px;
 }
 
 .sh-composer-actions {
@@ -345,15 +433,14 @@
 	align-items: center;
 	gap: 6px;
 	flex: none;
-	padding-bottom: 1px;
 }
 
 .sh-queued {
 	padding: 1px 6px;
-	font: 400 11px / 1.5 var(--font-mono);
 	color: var(--accent);
 	background: var(--accent-muted);
 	border-radius: var(--radius-sm);
+	font: 400 11px / 1.5 var(--font-mono);
 	white-space: nowrap;
 }
 
@@ -485,42 +572,112 @@
 
 /* ---- connect screen ---- */
 .sh-connect {
-	height: 100%;
 	display: grid;
-	place-items: center;
+	grid-template-columns: minmax(0, 1.2fr) minmax(360px, 0.8fr);
+	width: 100%;
+	height: 100%;
+	min-height: 0;
 	background: var(--bg);
-	padding: 16px;
-	padding-top: calc(16px + env(safe-area-inset-top, 0px));
-	padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+}
+
+.sh-connect-intro {
+	display: flex;
+	flex-direction: column;
+	justify-content: space-between;
+	padding: 40px clamp(32px, 7vw, 96px);
+	background: var(--bg-raised);
+	border-right: 1px solid var(--border);
+}
+
+.sh-connect-brand {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	font: 600 13px / 1.5 var(--font-mono);
+	letter-spacing: 0.02em;
+}
+
+.sh-connect-copy {
+	max-width: 620px;
+}
+
+.sh-connect-kicker {
+	display: block;
+	margin-bottom: 16px;
+	color: var(--accent);
+	font: 600 11px / 1.4 var(--font-mono);
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+}
+
+.sh-connect-copy h1 {
+	max-width: 16ch;
+	font-size: clamp(32px, 4.2vw, 58px);
+	font-weight: 600;
+	line-height: 1.02;
+	letter-spacing: -0.045em;
+}
+
+.sh-connect-copy p {
+	max-width: 52ch;
+	margin-top: 20px;
+	color: var(--fg-muted);
+	font-size: 15px;
+	line-height: 1.65;
+}
+
+.sh-connect-features {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 12px 20px;
+	color: var(--fg-faint);
+	font-size: 11px;
+}
+
+.sh-connect-features span {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+}
+
+.sh-connect-features svg {
+	color: var(--accent);
 }
 
 .sh-connect-card {
-	width: 100%;
-	max-width: 380px;
+	align-self: center;
+	width: min(100% - 48px, 420px);
+	margin: auto;
 	padding: 28px;
-	position: relative;
 	display: flex;
 	flex-direction: column;
-	gap: 12px;
+	gap: 18px;
 	background: var(--bg-raised);
-	border: 1px solid var(--border);
+	border: 1px solid var(--border-strong);
 	border-radius: var(--radius-lg);
+	box-shadow: var(--shadow-overlay);
 }
 
 .sh-connect-head {
 	display: flex;
-	align-items: center;
+	align-items: flex-start;
 	justify-content: space-between;
 	gap: 12px;
 }
 
-.sh-lockup {
-	display: inline-flex;
-	align-items: center;
-	gap: 8px;
-	font: 500 15px / 1.5 var(--font-mono);
-	letter-spacing: 0.02em;
-	margin: 0;
+.sh-connect-head h2 {
+	font-size: 18px;
+	font-weight: 600;
+}
+
+.sh-connect-head p {
+	margin-top: 3px;
+	color: var(--fg-muted);
+	font-size: 12px;
+}
+
+.sh-connect-head code {
+	color: var(--accent);
 }
 
 .sh-lockup-mark {
@@ -531,37 +688,25 @@
 	border-radius: 4px;
 }
 
-.sh-lockup-pi {
-	color: var(--accent);
-}
-
-.sh-connect-sub {
-	font-size: 12px;
-	color: var(--fg-muted);
-	margin-top: -4px;
-}
-
 .sh-field-hint {
-	font-size: 11px;
 	color: var(--fg-faint);
+	font-size: 11px;
 }
 
 .sh-field {
 	display: flex;
 	flex-direction: column;
-	gap: 4px;
+	gap: 6px;
 }
 
 .sh-field-label {
+	color: var(--fg-muted);
 	font-size: 11px;
-	font-weight: 500;
-	letter-spacing: 0.06em;
-	text-transform: uppercase;
-	color: var(--fg-faint);
+	font-weight: 600;
 }
 
 .sh-input {
-	padding: 6px 9px;
+	padding: 9px 10px;
 	font-size: 13px;
 	color: var(--fg);
 	background: var(--bg-inset);
@@ -570,12 +715,11 @@
 }
 
 .sh-input::placeholder {
-	color: var(--fg-faint);
+	color: var(--fg-muted);
 }
 
 .sh-input:focus-visible {
 	outline: 2px solid transparent;
-	outline-offset: 0;
 }
 
 .sh-input:focus {
@@ -588,32 +732,33 @@
 }
 
 .sh-connect-error {
-	font-size: 12px;
 	color: var(--err);
+	font-size: 12px;
 }
 
 .sh-connect-submit {
 	justify-content: center;
-	padding: 7px 10px;
-	margin-top: 8px;
+	padding: 9px 12px;
 }
 
 /* ---- responsive mobile styles ---- */
 @media (max-width: 768px) {
-	.sh-main {
+	.sh-app {
 		position: relative;
 	}
+
 	.sh-rail {
 		position: absolute;
-		right: 0;
+		left: 0;
 		top: 0;
 		bottom: 0;
 		z-index: 30;
 		width: 280px;
 		max-width: 85vw;
-		border-left: 1px solid var(--border-strong);
+		border-right: 1px solid var(--border-strong);
 		box-shadow: var(--rail-mobile-shadow);
 	}
+
 	.sh-rail-backdrop {
 		display: block;
 		position: absolute;
@@ -622,8 +767,40 @@
 		background: var(--backdrop);
 		animation: sh-fade-in 150ms ease-out;
 	}
+
 }
 
+@media (max-width: 680px) {
+	.sh-connect {
+		grid-template-columns: 1fr;
+		overflow-y: auto;
+	}
+
+	.sh-connect-intro {
+		min-height: 420px;
+		padding: 28px 24px;
+		border-right: 0;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.sh-connect-copy h1 {
+		font-size: clamp(30px, 9vw, 44px);
+	}
+
+	.sh-connect-features {
+		flex-direction: column;
+		gap: 14px;
+	}
+
+	.sh-connect-card {
+		margin: 40px auto;
+	}
+
+	.sh-connect-head .sh-theme-toggle {
+		width: 44px;
+		height: 44px;
+	}
+}
 @keyframes sh-fade-in {
 	from {
 		opacity: 0;
