@@ -8344,7 +8344,53 @@ export class AgentSession {
 		}
 		if (result.prunedCount === 0) return result;
 
-		this.#cacheAttribution.noteHistoryRewrite("prune");
+		await this.#commitHistoryRewrite("prune");
+		return result;
+	}
+
+	/**
+	 * Compaction-to-memory bridge (U13): LLM compaction summaries are lossy and
+	 * die with the session, yet they are the last carrier of the discarded
+	 * span's durable facts (file paths, decisions, invariants, error
+	 * signatures). Retaining the summary into mnemopi with compaction
+	 * provenance makes those facts recallable from any future session via the
+	 * backend's own extraction pipeline. Deterministic rungs (mask, shake,
+	 * snapcompact) lose no information, so only the LLM-summary path retains.
+	 */
+	#retainCompactionSummaryToMemory(summary: string, shortSummary: string | undefined, lossless: boolean): void {
+		if (lossless) return;
+		if (this.settings.get("memory.backend") !== "mnemopi") return;
+		const state = this.getMnemopiSessionState();
+		if (!state || !summary.trim()) return;
+		try {
+			state.rememberScoped(summary, {
+				source: "compaction",
+				importance: 0.6,
+				metadata: {
+					session_id: state.sessionId,
+					cwd: this.sessionManager.getCwd(),
+					short_summary: shortSummary ?? null,
+				},
+				scope: "bank",
+				extract: true,
+				extractEntities: true,
+				memoryType: "fact",
+			});
+		} catch (error) {
+			logger.warn("Compaction-to-memory retain failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	/**
+	 * Commit an in-place history rewrite: persist entries, rebuild the agent's
+	 * message view, and reset every runtime that caches message identity. Every
+	 * rewrite path MUST go through this (or replicate all of it) — skipping the
+	 * Codex teardown corrupts provider sessions after a rewrite.
+	 */
+	async #commitHistoryRewrite(reason: "prune" | "compaction"): Promise<void> {
+		this.#cacheAttribution.noteHistoryRewrite(reason);
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
@@ -8770,6 +8816,7 @@ export class AgentSession {
 				fromExtension,
 				preserveData,
 			);
+			this.#retainCompactionSummaryToMemory(summary, shortSummary, snapcompactResult !== undefined);
 			const newEntries = this.sessionManager.getEntries();
 			this.#cacheAttribution.noteHistoryRewrite("compaction");
 			const sessionContext = this.buildDisplaySessionContext();
@@ -11232,6 +11279,7 @@ export class AgentSession {
 				fromExtension,
 				preserveData,
 			);
+			this.#retainCompactionSummaryToMemory(summary, shortSummary, snapcompactResult !== undefined);
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
