@@ -96,6 +96,7 @@ export const taskItemSchema = type({
 	"role?": ROLE_INPUT_SCHEMA,
 	"model?": "string",
 	assignment: "string",
+	"fork?": "boolean",
 	"cwd?": "string",
 	"+": "delete",
 });
@@ -106,6 +107,7 @@ const taskItemSchemaIsolated = type({
 	assignment: "string",
 	"model?": "string",
 	"isolated?": "boolean",
+	"fork?": "boolean",
 	"cwd?": "string",
 	"+": "delete",
 });

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `fork` parameter being silently dropped in batch task submissions: `taskItemSchema` and `taskItemSchemaIsolated` both had `"+": "delete"` but omitted `"fork?": "boolean"`, so a batch item with `fork: true` was stripped before `spawnParamsFor` could see it, falling back to a fresh context with no error.
+
 ### Added
 - Added an opt-in, local-only screenpipe activity bridge (`screenpipe.enabled`, default off, with `screenpipe.baseUrl`, `screenpipe.pollIntervalMs`, and `screenpipe.mediaRoot` settings under the memory tab). When enabled, each session starts a background poller that reads already-redacted frame metadata from a locally running screenpipe daemon and records privacy-preserving activity clips in a local SQLite ledger under the agent dir; password-manager windows are always denied, nothing leaves the machine, and a broken or absent daemon never affects the session (backoff + single warning per outage). Capture ownership follows the active session across every transition (`newSession`, `switchSession`, `fork`, `branch`, `freshSession`, handoff): a `ScreenpipeSessionManager` disposes the prior session's bridge before binding the new one, so no post-transition activity, cursor progress, or manifest is ever attributed to the previous session and exactly one poller is ever live. The poller is torn down in session dispose.
 - Added a Consurg Guard hook example that evaluates every scoped file or command tool call, including multi-path and workspace-root searches, and can fail closed when its guard is unavailable.
