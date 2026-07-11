@@ -52,7 +52,7 @@ import type { ClientBridge } from "../session/client-bridge";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
-import type { ContextFileEntry } from "../tools";
+import type { ContextFileEntry, ForkContextSnapshot } from "../tools";
 import { isIrcEnabled } from "../tools/irc";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import {
@@ -397,6 +397,14 @@ export interface ExecutorOptions {
 	/** Internal marker for the persistent Fusion warm sidekick spawn. */
 	fusionSidekick?: boolean;
 	modelOverride?: string | string[];
+	/**
+	 * "fork" inherits the parent's exact prefix (system prompt, tools, model)
+	 * plus a read-only history snapshot via {@link forkContext} so the child's
+	 * first request re-reads the parent's warm provider cache. Default "fresh".
+	 */
+	contextMode?: "fresh" | "fork";
+	/** Parent snapshot backing fork mode; required when contextMode is "fork". */
+	forkContext?: ForkContextSnapshot;
 	/**
 	 * Active model selector of the parent session, used as an auth-aware fallback
 	 * if the resolved subagent model has no working credentials. See #985.
@@ -2492,16 +2500,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// the same JSONL file re-invokes createAgentSession with the exact options
 			// of the original run (same agent id, tools, model, system prompt,
 			// artifacts dir) — only the SessionManager differs.
+			// Fork mode (U11): byte-identical prefix with the parent — same system
+			// prompt (no subagent preamble), same tool set (including no yield
+			// tool), same model unless explicitly overridden — so the provider
+			// re-reads the parent's warm cache. Output falls back to the final
+			// assistant text (finalizeSubprocessOutput's schemaless raw-output
+			// path); output schemas are unsupported in fork mode.
+			const fork = options.contextMode === "fork" && options.forkContext !== undefined ? options.forkContext : null;
 			const buildSubagentSessionOptions = (sessionManagerForRun: SessionManager): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
 				authStorage,
 				modelRegistry,
 				settings: subagentSettings,
-				model,
+				model: fork && !options.modelOverride ? (fork.model ?? model) : model,
 				thinkingLevel: effectiveThinkingLevel,
-				toolNames,
-				outputSchema,
-				requireYieldTool: true,
+				toolNames: fork ? fork.toolNames : toolNames,
+				outputSchema: fork ? undefined : outputSchema,
+				requireYieldTool: !fork,
 				contextFiles: options.contextFiles,
 				skills: options.skills,
 				promptTemplates: options.promptTemplates,
@@ -2510,6 +2525,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				preloadedExtensionPaths: options.preloadedExtensionPaths,
 				preloadedCustomToolPaths: options.preloadedCustomToolPaths,
 				systemPrompt: defaultPrompt => {
+					if (fork) return fork.systemPrompt;
 					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
 						agent: agent.systemPrompt,
 						role: subagentRole ? oneLineLabel(subagentRole) : "",
@@ -2568,7 +2584,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				},
 			});
 
-			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager));
+			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager)).then(created => {
+				// Fork mode: seed the read-only parent-history snapshot so the wire
+				// context is parent prefix + this task's user message. Agent-state
+				// only (not persisted as branch entries): the fork is ephemeral and
+				// its own prompts/results persist normally after the snapshot.
+				if (fork) created.session.agent.replaceMessages([...fork.messages]);
+				return created;
+			});
 			let session: AgentSession;
 			try {
 				({ session } = await awaitAbortable(sessionPromise));

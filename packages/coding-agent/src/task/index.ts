@@ -501,6 +501,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 			revealSiblingFindings: internal.revealSiblingFindings,
 			siblingFindings: internal.siblingFindings,
 			writeScope: internal.writeScope,
+			fork: params.fork,
 		},
 	];
 }
@@ -519,6 +520,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem): OrchestratedTaskPar
 	if (item.role !== undefined) spawn.role = item.role;
 	if (item.model !== undefined) spawn.model = item.model;
 	if (item.assignment !== undefined) spawn.assignment = item.assignment;
+	if (item.fork !== undefined) spawn.fork = item.fork;
 	if (params.context !== undefined) spawn.context = params.context;
 	if (item.executionProfile !== undefined) spawn.executionProfile = item.executionProfile;
 	if (item.toolProfile !== undefined) spawn.toolProfile = item.toolProfile;
@@ -1834,6 +1836,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				allocateRecoveryId: (recovery: RecoveryAttempt) =>
 					outputManager.allocate(`${agentId}-recovery-${recovery.attempt}`),
 				modelOverride,
+				contextMode: params.fork === true ? ("fork" as const) : undefined,
+				forkContext: params.fork === true ? this.session.getForkContext?.() : undefined,
 				parentActiveModelPattern,
 				thinkingLevel: thinkingLevelOverride,
 				outputSchema: effectiveOutputSchema,

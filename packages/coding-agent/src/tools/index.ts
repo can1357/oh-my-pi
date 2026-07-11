@@ -1,6 +1,11 @@
 import type { InMemorySnapshotStore } from "@pk-nerdsaver-ai/hashline";
+<<<<<<< HEAD
 import type { AgentTelemetryConfig, AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { FetchImpl, ImageContent, Model, ServiceTier, ToolChoice } from "@pk-nerdsaver-ai/pi-ai";
+=======
+import type { AgentMessage, AgentTelemetryConfig, AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
+import type { FetchImpl, ImageContent, Model, ToolChoice } from "@pk-nerdsaver-ai/pi-ai";
+>>>>>>> 055e9e880 (feat(coding-agent): fork-mode subagents (U11))
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
@@ -169,6 +174,19 @@ export interface DeferredDiagnosticsEntry {
 }
 
 /** Session context for tool factories */
+/**
+ * Parent-context snapshot handed to a fork-mode subagent (U11): the exact
+ * prefix inputs — system prompt, tool names, model — plus a read-only copy of
+ * the message history, so the child's first request re-reads the parent's
+ * warm provider prompt cache instead of building a cold context.
+ */
+export interface ForkContextSnapshot {
+	systemPrompt: string[];
+	toolNames: string[];
+	model: Model | undefined;
+	messages: AgentMessage[];
+}
+
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
@@ -242,6 +260,8 @@ export interface ToolSession {
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
+	/** Snapshot of this session's prefix + history for fork-mode subagents. */
+	getForkContext?: () => ForkContextSnapshot | undefined;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
 	getToolByName?: (name: string) => AgentTool | undefined;
 	/** Agent registry for IRC routing across live sessions. */

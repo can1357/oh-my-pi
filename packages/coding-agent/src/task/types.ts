@@ -124,6 +124,14 @@ export interface TaskItem {
 	assignment?: string;
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
+	/**
+	 * Fork mode: instead of a fresh context, inherit the parent's exact prefix
+	 * — system prompt, tool set, model, and a read-only snapshot of parent
+	 * history — so the provider prompt cache is re-read instead of rebuilt.
+	 * For quick in-context lookups; ignores output schemas and agent-specific
+	 * prompts/tools.
+	 */
+	fork?: boolean;
 	/** Working directory for this spawn; defaults to parent session cwd. */
 	cwd?: string;
 	/** Frozen execution envelope resolved before spawn allocation. */
@@ -158,6 +166,7 @@ export const taskSchema = type({
 	"model?": "string",
 	assignment: "string",
 	"isolated?": "boolean",
+	"fork?": "boolean",
 	"cwd?": "string",
 	"+": "delete",
 });
@@ -168,6 +177,7 @@ const taskSchemaNoIsolation = type({
 	"role?": ROLE_INPUT_SCHEMA,
 	"model?": "string",
 	assignment: "string",
+	"fork?": "boolean",
 	"cwd?": "string",
 	"+": "delete",
 });
@@ -222,6 +232,8 @@ export interface TaskParams {
 	context?: string;
 	/** Run in an isolated worktree (flat form; per-item in batch form). */
 	isolated?: boolean;
+	/** Fork mode (flat form): inherit the parent's exact prefix + history snapshot. See {@link TaskItem.fork}. */
+	fork?: boolean;
 	/** Working directory override for this spawn (flat form); defaults to parent session cwd. */
 	cwd?: string;
 }

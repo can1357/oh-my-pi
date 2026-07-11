@@ -1571,6 +1571,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,
+			getForkContext: () =>
+				session
+					? {
+							systemPrompt: [...(session.systemPrompt ?? [])],
+							toolNames: (session.agent?.state.tools ?? []).map(tool => tool.name),
+							model: session.model,
+							messages: [...session.messages],
+						}
+					: undefined,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
 			ircIpc,
