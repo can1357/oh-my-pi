@@ -392,6 +392,12 @@ export interface ExecutorOptions {
 	/** Parent task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
 	/**
+	 * Decision-surface guidance from the orchestration harness, injected into the
+	 * subagent system prompt as a compact constraint block. Absent for full harness
+	 * agents where no ceiling is applied.
+	 */
+	harnessGuidance?: string;
+	/**
 	 * Override the `task.maxRuntimeMs` wall-clock cap for this run. When provided
 	 * it wins over the settings value; `0` disables the per-subagent wall-clock
 	 * limit entirely. Used by the eval `agent()` bridge, whose parent cell
@@ -2352,16 +2358,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					const contractPrompt = options.assignmentContract
 						? `${prompt.render(assignmentContractPromptTemplate, {})}\n\n\`\`\`json\n${JSON.stringify(options.assignmentContract, null, 2)}\n\`\`\``
 						: undefined;
-					const recoveryPrompt = options.recoveryCapsule
-						? `# Recovery Capsule\n\nThis is a fresh child. Use only this compact failure capsule; do not request or reconstruct the failed transcript.\n\n\`\`\`json\n${JSON.stringify(options.recoveryCapsule, null, 2)}\n\`\`\``
-						: undefined;
-					const prompts =
-						defaultPrompt.length === 0
-							? [subagentPrompt]
-							: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
-					return [...prompts, contractPrompt, recoveryPrompt].filter(
-						(value): value is string => value !== undefined,
-					);
+				const recoveryPrompt = options.recoveryCapsule
+					? `# Recovery Capsule\n\nThis is a fresh child. Use only this compact failure capsule; do not request or reconstruct the failed transcript.\n\n\`\`\`json\n${JSON.stringify(options.recoveryCapsule, null, 2)}\n\`\`\``
+					: undefined;
+				const harnessGuidancePrompt = options.harnessGuidance
+					? `<harness-guidance>\n${options.harnessGuidance}\n</harness-guidance>`
+					: undefined;
+				const prompts =
+					defaultPrompt.length === 0
+						? [subagentPrompt]
+						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
+				return [...prompts, harnessGuidancePrompt, contractPrompt, recoveryPrompt].filter(
+					(value): value is string => value !== undefined,
+				);
 				},
 				sessionManager: sessionManagerForRun,
 				hasUI: false,

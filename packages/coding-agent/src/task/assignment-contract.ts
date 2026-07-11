@@ -726,6 +726,48 @@ export function parseAssignmentResult(input: unknown): ParseAssignmentResultResu
 		push(diagnostics, "invalid_field", "summary must be a string", "summary");
 	}
 
+	// V2-only: claims, counterevidence, unresolvedGaps
+	const claims: Claim[] = [];
+	const counterevidence: CounterEvidence[] = [];
+	const unresolvedGaps: UnresolvedGap[] = [];
+	if (isV2) {
+		if (Array.isArray(input.claims)) {
+			for (let i = 0; i < input.claims.length; i++) {
+				const item = input.claims[i];
+				const p = `claims[${i}]`;
+				if (!isPlainObject(item)) { push(diagnostics, "invalid_field", "claim must be an object", p); continue; }
+				const id = requireNonEmptyString(diagnostics, item.id, `${p}.id`);
+				const statement = requireNonEmptyString(diagnostics, item.statement, `${p}.statement`);
+				if (typeof item.supported !== "boolean") { push(diagnostics, "invalid_field", "claim.supported must be boolean", `${p}.supported`); continue; }
+				if (id && statement) claims.push({ id, statement, supported: item.supported as boolean });
+			}
+		}
+		if (Array.isArray(input.counterevidence)) {
+			for (let i = 0; i < input.counterevidence.length; i++) {
+				const item = input.counterevidence[i];
+				const p = `counterevidence[${i}]`;
+				if (!isPlainObject(item)) { push(diagnostics, "invalid_field", "counterevidence must be an object", p); continue; }
+				const summary = requireNonEmptyString(diagnostics, item.summary, `${p}.summary`);
+				if (summary) {
+					counterevidence.push({
+						summary,
+						artifactRefs: isStringArray(item.artifactRefs) ? [...item.artifactRefs] : undefined,
+					});
+				}
+			}
+		}
+		if (Array.isArray(input.unresolvedGaps)) {
+			for (let i = 0; i < input.unresolvedGaps.length; i++) {
+				const item = input.unresolvedGaps[i];
+				const p = `unresolvedGaps[${i}]`;
+				if (!isPlainObject(item)) { push(diagnostics, "invalid_field", "unresolvedGap must be an object", p); continue; }
+				const id = requireNonEmptyString(diagnostics, item.id, `${p}.id`);
+				const description = requireNonEmptyString(diagnostics, item.description, `${p}.description`);
+				if (id && description) unresolvedGaps.push({ id, description });
+			}
+		}
+	}
+
 	if (
 		diagnostics.length > 0 ||
 		!contractId ||
@@ -751,6 +793,9 @@ export function parseAssignmentResult(input: unknown): ParseAssignmentResultResu
 						evidence: Object.freeze(evidence.map(item => Object.freeze({ ...item }))),
 						blockers: isStringArray(input.blockers) ? Object.freeze([...input.blockers]) : undefined,
 						summary: typeof input.summary === "string" ? input.summary : undefined,
+						claims: claims.length > 0 ? Object.freeze(claims.map(c => Object.freeze({ ...c }))) : undefined,
+						counterevidence: counterevidence.length > 0 ? Object.freeze(counterevidence.map(c => Object.freeze({ ...c }))) : undefined,
+						unresolvedGaps: unresolvedGaps.length > 0 ? Object.freeze(unresolvedGaps.map(g => Object.freeze({ ...g }))) : undefined,
 						recommendedNextAction:
 							typeof input.recommendedNextAction === "string" ? input.recommendedNextAction : undefined,
 					}

@@ -26,6 +26,38 @@ export function applyContextPolicy(
 	return BLIND_CONTEXT_HEADER;
 }
 
+export interface StagedContextOptions {
+	/** Findings from sibling (first-pass) workers to share in synthesis phase. */
+	readonly siblingFindings?: string;
+	/** Batch correlation ID used to group staged workers. */
+	readonly batchId?: string;
+}
+
+/**
+ * Extended apply that supports staged synthesis: when `contextPolicy === "staged"` and
+ * `siblingFindings` are provided, the synthesis-phase spawn receives a combined context
+ * block instead of the blind header.
+ */
+export function applyContextPolicyWithSiblingFindings(
+	policy: ContextPolicy | undefined,
+	sharedContext: string | undefined,
+	options?: StagedContextOptions,
+): string | undefined {
+	const effective = policy ?? "shared";
+	if (effective === "shared") {
+		return sharedContext;
+	}
+	if (effective === "staged" && options?.siblingFindings?.trim()) {
+		return [
+			BLIND_CONTEXT_HEADER,
+			"",
+			"# Sibling Findings (synthesis phase)",
+			options.siblingFindings.trim(),
+		].join("\n");
+	}
+	return BLIND_CONTEXT_HEADER;
+}
+
 export function resolveWorkerMode(agentName: string): "explore" | "implement" | "falsify" | "audit" | "synthesize" | undefined {
 	switch (agentName.trim()) {
 		case "explore":

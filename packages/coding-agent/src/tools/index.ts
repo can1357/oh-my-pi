@@ -394,6 +394,14 @@ export interface ToolSession {
 	setActiveTaskContract?: (
 		snapshot: import("../orchestration/task-contract").ActiveTaskContractSnapshot | undefined,
 	) => void;
+	/** Get the active task contract snapshot (root or assignment). */
+	getActiveTaskContract?: () => import("../orchestration/task-contract").ActiveTaskContractSnapshot | undefined;
+	/** Evaluate the root completion gate against best-available evidence. */
+	evaluateRootCompletionGate?: (
+		input: import("../orchestration/completion-gate").CompletionGateInput,
+	) => import("../orchestration/completion-gate").CompletionGateEvaluation;
+	/** Get the approach registry for spawn portfolio tracking. */
+	getApproachRegistry?: () => import("../orchestration/approach-registry").ApproachRegistry;
 	/** Orchestration routing/learning telemetry sink for this session. */
 	getOrchestrationTelemetry?: () => import("../orchestration/orchestration-telemetry").OrchestrationTelemetrySink;
 }

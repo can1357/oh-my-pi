@@ -230,7 +230,13 @@ import {
 	recordAdvisorInterventionTelemetry,
 	type OrchestrationTelemetrySink,
 } from "../orchestration/orchestration-telemetry";
-import type { ActiveTaskContractSnapshot } from "../orchestration/task-contract";
+import {
+	compileTaskContractFromRequest,
+	formatRootTaskContractXml,
+	isSubstantialRequest,
+	toActiveTaskContractSnapshot,
+	type ActiveTaskContractSnapshot,
+} from "../orchestration/task-contract";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
@@ -5832,6 +5838,36 @@ export class AgentSession {
 		return this.settings.get("magicKeywords.enabled") && this.settings.get(`magicKeywords.${keyword}`);
 	}
 
+	/**
+	 * Compile and inject a root `<task-contract>` block for substantial user requests.
+	 *
+	 * Rules:
+	 * - Only on the root session (taskDepth === 0) — subagents have assignment contracts instead.
+	 * - Only for user-initiated (non-synthetic) prompts.
+	 * - Only when no contract is already active (avoids clobbering a mid-task contract).
+	 * - Only when the request is heuristically "substantial" (multi-step, action keyword, etc.).
+	 */
+	#maybeCreateTaskContractNotice(text: string, synthetic?: boolean): CustomMessage | undefined {
+		if (synthetic) return undefined;
+		// Only root session
+		if ((this.taskDepth ?? 0) > 0) return undefined;
+		// Don't overwrite an already-active contract
+		if (this.#activeTaskContract) return undefined;
+		if (!isSubstantialRequest(text)) return undefined;
+
+		const contract = compileTaskContractFromRequest(text);
+		this.setActiveTaskContract(toActiveTaskContractSnapshot(contract));
+		const xml = formatRootTaskContractXml(contract);
+		return {
+			role: "custom",
+			customType: "task-contract-notice",
+			content: xml,
+			display: false,
+			attribution: "user",
+			timestamp: Date.now(),
+		} satisfies CustomMessage;
+	}
+
 	#createMagicKeywordNotices(text: string): CustomMessage[] {
 		const timestamp = Date.now();
 		const turnBudget = parseTurnBudget(text);
@@ -5920,6 +5956,11 @@ export class AgentSession {
 		// agent-initiated turns never trigger them.
 		const keywordNotices = options?.synthetic ? [] : this.#createMagicKeywordNotices(expandedText);
 
+		// Root task contract: compile and inject ephemeral <task-contract> block for substantial
+		// user requests on the root session. Skipped for synthetic turns, streaming steers,
+		// subagent sessions, and when a contract is already active from an earlier turn.
+		const taskContractNotice = this.#maybeCreateTaskContractNotice(expandedText, options?.synthetic);
+
 		// A user-initiated prompt (typed message or the `.`/`c` continue shortcut)
 		// re-enables advisor auto-resume that a prior user interrupt suppressed.
 		// Agent-initiated synthetic prompts (auto-continue, plan, reminders) do not.
@@ -5986,8 +6027,16 @@ export class AgentSession {
 				...options,
 				images: normalizedImages,
 				prependMessages:
-					preludeMessages.length > 0 || keywordNotices.length > 0 || imageDescriptionNotice
-						? [...preludeMessages, ...keywordNotices, ...(imageDescriptionNotice ? [imageDescriptionNotice] : [])]
+					preludeMessages.length > 0 ||
+					keywordNotices.length > 0 ||
+					imageDescriptionNotice ||
+					taskContractNotice
+						? [
+								...preludeMessages,
+								...(taskContractNotice ? [taskContractNotice] : []),
+								...keywordNotices,
+								...(imageDescriptionNotice ? [imageDescriptionNotice] : []),
+							]
 						: undefined,
 			});
 		} finally {

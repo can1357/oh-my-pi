@@ -33,9 +33,17 @@ export interface VerificationPolicy {
 	readonly allowNarrativeOnly: boolean;
 }
 
+export interface SearchBudget {
+	readonly maxInitialFamilies: number;
+	readonly maxRounds: number;
+	readonly maxSameBlockerRetries: number;
+	readonly minEvidenceGainToContinue: number;
+}
+
 export interface OrchestrationPolicy {
 	readonly maxInitialFamilies?: number;
 	readonly preferIndependence?: boolean;
+	readonly searchBudget?: SearchBudget;
 }
 
 export interface TaskContractV1 {
@@ -115,11 +123,21 @@ function parseVerificationPolicy(value: unknown): VerificationPolicy {
 	};
 }
 
+function parseSearchBudget(value: unknown): SearchBudget | undefined {
+	if (!isPlainObject(value)) return undefined;
+	const maxInitialFamilies = typeof value.maxInitialFamilies === "number" ? value.maxInitialFamilies : 5;
+	const maxRounds = typeof value.maxRounds === "number" ? value.maxRounds : 3;
+	const maxSameBlockerRetries = typeof value.maxSameBlockerRetries === "number" ? value.maxSameBlockerRetries : 1;
+	const minEvidenceGainToContinue = typeof value.minEvidenceGainToContinue === "number" ? value.minEvidenceGainToContinue : 0.1;
+	return Object.freeze({ maxInitialFamilies, maxRounds, maxSameBlockerRetries, minEvidenceGainToContinue });
+}
+
 function parseOrchestrationPolicy(value: unknown): OrchestrationPolicy {
 	if (!isPlainObject(value)) return { preferIndependence: true };
 	return {
 		maxInitialFamilies: typeof value.maxInitialFamilies === "number" ? value.maxInitialFamilies : undefined,
 		preferIndependence: value.preferIndependence !== false,
+		searchBudget: parseSearchBudget(value.searchBudget),
 	};
 }
 
@@ -254,4 +272,166 @@ function escapeXml(text: string): string {
 		.replace(/</g, "&lt;")
 		.replace(/>/g, "&gt;")
 		.replace(/"/g, "&quot;");
+}
+
+/** Generic OMPK defaults applied when the compiler cannot derive specific criteria. */
+const OMPK_DEFAULT_CRITERIA: readonly TaskCriterion[] = Object.freeze([
+	Object.freeze({
+		id: "targeted_verification",
+		description:
+			"All material claims are verified with targeted checks (tests, commands, reads), not narrative assertion alone",
+	}),
+	Object.freeze({
+		id: "deliverables_present",
+		description: "All promised deliverables exist and are functional in the workspace",
+	}),
+]);
+
+const OMPK_DEFAULT_NON_SOLUTIONS: readonly string[] = Object.freeze([
+	"Claiming completion without concrete verification",
+	"Producing output that does not address the stated objective",
+]);
+
+const OMPK_DEFAULT_FAILURE_MODES: readonly TaskFailureMode[] = Object.freeze([
+	Object.freeze({ id: "narrative_only", description: "Reporting done without any concrete checks or evidence" }),
+	Object.freeze({ id: "scope_drift", description: "Addressing a different problem than the one requested" }),
+]);
+
+const OMPK_DEFAULT_EVIDENCE_REQUIREMENTS: readonly TaskEvidenceRequirement[] = Object.freeze([
+	Object.freeze({
+		id: "concrete_checks",
+		description: "At least one concrete check (test run, command output, file read) supporting the primary deliverable",
+	}),
+]);
+
+/**
+ * Keywords that mark a user message as substantial enough to warrant a root task contract.
+ * Trivial one-liners or conversational turns are skipped.
+ */
+const SUBSTANTIAL_KEYWORDS: readonly string[] = Object.freeze([
+	"implement",
+	"build",
+	"create",
+	"add",
+	"refactor",
+	"fix",
+	"debug",
+	"investigate",
+	"analyze",
+	"analyse",
+	"design",
+	"security",
+	"research",
+	"optimize",
+	"optimise",
+	"migrate",
+	"integrate",
+	"test",
+	"deploy",
+	"configure",
+	"setup",
+	"rewrite",
+	"extend",
+	"update",
+	"wire",
+	"enforce",
+	"audit",
+	"review",
+	"diagnose",
+]);
+
+/**
+ * Classify whether a user request is substantial enough to warrant a root TaskContractV1.
+ *
+ * Heuristic: multi-line, long, or action-keyword-bearing requests qualify. Conversational
+ * one-liners (questions, greetings, simple lookups) do not.
+ */
+export function isSubstantialRequest(userText: string): boolean {
+	const trimmed = userText.trim();
+	if (!trimmed) return false;
+	// Multi-line requests always qualify
+	if (trimmed.split("\n").filter(l => l.trim()).length > 2) return true;
+	// Long requests qualify
+	if (trimmed.length > 200) return true;
+	const lower = trimmed.toLowerCase();
+	return SUBSTANTIAL_KEYWORDS.some(kw => lower.includes(kw));
+}
+
+function extractObjective(userText: string): string {
+	const lines = userText
+		.split("\n")
+		.map(l => l.trim())
+		.filter(Boolean);
+	// Use first 2 non-empty lines as the objective summary
+	const head = lines.slice(0, 2).join(" ");
+	if (head.length <= 300) return head;
+	return head.slice(0, 297) + "…";
+}
+
+export interface CompileTaskContractOptions {
+	readonly constraints?: readonly string[];
+	readonly nonSolutions?: readonly string[];
+	readonly maxInitialFamilies?: number;
+}
+
+/**
+ * Compile a TaskContractV1 from a user request using OMPK generic defaults.
+ *
+ * Fills objective from the request text; uses built-in defaults for criteria and
+ * failure modes that apply to any substantial coding task. Callers can supply
+ * additional constraints and non-solutions.
+ */
+export function compileTaskContractFromRequest(
+	userText: string,
+	options?: CompileTaskContractOptions,
+): TaskContractV1 {
+	const objective = extractObjective(userText);
+	const nonSolutions = options?.nonSolutions?.length
+		? [...OMPK_DEFAULT_NON_SOLUTIONS, ...options.nonSolutions]
+		: [...OMPK_DEFAULT_NON_SOLUTIONS];
+
+	return Object.freeze({
+		version: TASK_CONTRACT_VERSION,
+		objective,
+		deliverables: Object.freeze([] as string[]),
+		completionCriteria: OMPK_DEFAULT_CRITERIA,
+		nonSolutions: Object.freeze(nonSolutions),
+		knownFailureModes: OMPK_DEFAULT_FAILURE_MODES,
+		evidenceRequirements: OMPK_DEFAULT_EVIDENCE_REQUIREMENTS,
+		constraints: Object.freeze([...(options?.constraints ?? [])]),
+		assumptions: Object.freeze([] as TaskAssumption[]),
+		verificationPolicy: Object.freeze({ requireTargetedChecks: true, allowNarrativeOnly: false }),
+		orchestrationPolicy: Object.freeze({
+			preferIndependence: true,
+			maxInitialFamilies: options?.maxInitialFamilies,
+		}),
+	});
+}
+
+/**
+ * Format a TaskContractV1 as a root-level `<task-contract>` XML block for ephemeral
+ * injection into the primary agent system prompt.
+ *
+ * Distinct from `formatTaskContractXmlBlock` (which uses `<active-task-contract>` for
+ * advisor injection).
+ */
+export function formatRootTaskContractXml(contract: TaskContractV1): string {
+	const criteria = contract.completionCriteria
+		.map(c => `  <criterion id="${escapeXml(c.id)}">${escapeXml(c.description)}</criterion>`)
+		.join("\n");
+	const nonSolutions = contract.nonSolutions.map(n => `  <item>${escapeXml(n)}</item>`).join("\n");
+	const failureModes = contract.knownFailureModes
+		.map(f => `  <failure-mode id="${escapeXml(f.id)}">${escapeXml(f.description)}</failure-mode>`)
+		.join("\n");
+
+	return [
+		`<task-contract version="${TASK_CONTRACT_VERSION}">`,
+		`  <objective>${escapeXml(contract.objective)}</objective>`,
+		criteria ? `  <completion-criteria>\n${criteria}\n  </completion-criteria>` : "",
+		nonSolutions ? `  <non-solutions>\n${nonSolutions}\n  </non-solutions>` : "",
+		failureModes ? `  <known-failure-modes>\n${failureModes}\n  </known-failure-modes>` : "",
+		`</task-contract>`,
+	]
+		.filter(Boolean)
+		.join("\n");
 }

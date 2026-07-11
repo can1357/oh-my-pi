@@ -37,7 +37,13 @@ import {
 	resolveAgentHarness,
 } from "../orchestration/agent-harness";
 import { applyContextPolicy, resolveWorkerMode } from "../orchestration/context-policy";
-import { recordSpawnTelemetry } from "../orchestration/orchestration-telemetry";
+import {
+	recordApproachUpdateTelemetry,
+	recordBlockerTelemetry,
+	recordSpawnResultTelemetry,
+	recordSpawnTelemetry,
+} from "../orchestration/orchestration-telemetry";
+import { shouldRejectDuplicateBlockedSpawn } from "../orchestration/approach-registry";
 import { snapshotFromAssignmentFields } from "../orchestration/task-contract";
 import type { CollaborationPolicy } from "../orchestration/collaboration-policy";
 import {
@@ -901,6 +907,32 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		});
 		const toolProfile = params.toolProfile ?? harness.toolProfile;
 		const collaborationPolicy = params.collaborationPolicy ?? harness.collaborationPolicy;
+		// Reject duplicate blocked spawns: if the strategy family is already blocked with
+		// the same fingerprint in the parent's approach registry, fail the spawn early.
+		if (params.strategyFamily) {
+			const registry = this.session.getApproachRegistry?.();
+			if (registry) {
+				const contract = params.assignmentContract;
+				const priorBlockedRoutes =
+					contract && "priorBlockedRoutes" in contract ? contract.priorBlockedRoutes : undefined;
+				// Register any prior blocked routes from the assignment contract into the registry
+				if (priorBlockedRoutes) {
+					for (const route of priorBlockedRoutes) {
+						if (route.blockerFingerprint) {
+							registry.markBlocked(route.family, route.mechanism, route.blocker);
+						}
+					}
+				}
+				// Find the fingerprint for this strategy family from prior blocked routes
+				const priorFingerprint = priorBlockedRoutes?.find(r => r.family === params.strategyFamily)?.blockerFingerprint;
+				if (shouldRejectDuplicateBlockedSpawn(registry, params.strategyFamily, priorFingerprint)) {
+					return fail(
+						`Spawn rejected: strategy family "${params.strategyFamily}" was already blocked with the same blocker fingerprint. Use a materially different approach or mechanism.`,
+					);
+				}
+			}
+		}
+
 		recordSpawnTelemetry(this.session.getOrchestrationTelemetry?.() ?? { emit: () => {}, events: [] }, {
 			sessionId: this.session.getSessionId?.() ?? undefined,
 			correlationId: planned.plan.correlationId,
@@ -1718,6 +1750,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				executionProfile: spawnPlan.profile,
 				toolProfile,
 				collaborationPolicy,
+				harnessGuidance: harness.kind !== "full" ? harness.decisionSurface.guidance : undefined,
 				assignmentContract: params.assignmentContract,
 				recoveryCapsule: params.recoveryCapsule,
 				recoveryAttempts: params.recoveryAttempt ? [params.recoveryAttempt] : undefined,
@@ -1856,6 +1889,54 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			};
 
 			const result = await runTask();
+			// Emit spawn_result telemetry
+			{
+				const telemetrySink = this.session.getOrchestrationTelemetry?.() ?? { emit: () => {}, events: [] };
+				const yieldEntries = result.extractedToolData?.yield;
+				const yieldData =
+					Array.isArray(yieldEntries) && yieldEntries.length > 0
+						? (yieldEntries[0] as Record<string, unknown>)
+						: undefined;
+				const resultStatus =
+					yieldData?.status != null
+						? String(yieldData.status)
+						: result.aborted
+							? "aborted"
+							: result.exitCode === 0
+								? "success"
+								: "failed";
+				recordSpawnResultTelemetry(telemetrySink, {
+					sessionId: this.session.getSessionId?.() ?? undefined,
+					correlationId: spawnPlan.correlationId,
+					agentName,
+					strategyFamily: params.strategyFamily,
+					workerMode: resolveWorkerMode(agentName),
+					verificationOutcome: resultStatus,
+					metadata: { exitCode: result.exitCode },
+				});
+				// Update approach registry and emit blocker/approach_update when the child
+				// reported a blocked or falsified outcome.
+				if ((resultStatus === "blocked" || resultStatus === "falsified") && params.strategyFamily) {
+					const registry = this.session.getApproachRegistry?.();
+					if (registry) {
+						const blockerText = Array.isArray(yieldData?.blockers) && (yieldData.blockers as unknown[]).length > 0
+							? String((yieldData.blockers as unknown[])[0])
+							: resultStatus;
+						const record = registry.markBlocked(params.strategyFamily, agentName, blockerText);
+						recordBlockerTelemetry(telemetrySink, {
+							sessionId: this.session.getSessionId?.() ?? undefined,
+							strategyFamily: params.strategyFamily,
+							blockerFingerprint: record.blockerFingerprint ?? "",
+							metadata: { agentName, blockerText },
+						});
+						recordApproachUpdateTelemetry(telemetrySink, {
+							sessionId: this.session.getSessionId?.() ?? undefined,
+							strategyFamily: params.strategyFamily,
+							metadata: { status: resultStatus, blockerText },
+						});
+					}
+				}
+			}
 
 			let mergeSummary = "";
 			let changesApplied: boolean | null = null;

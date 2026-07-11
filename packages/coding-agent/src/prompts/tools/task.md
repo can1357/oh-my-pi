@@ -52,6 +52,14 @@
 - NEVER slow down or serialize because tasks might overlap on some files — agents resolve collisions in real time.
 </rules>
 
+<adaptive-portfolio>
+For uncertain or investigative work, structure exploration as adaptive rounds rather than a single large batch:
+- **Round 1** — Begin with a small diverse portfolio (3–5 strategy families maximum). Assign each family a distinct `strategyFamily` identifier and use `contextPolicy: blind` to preserve independence.
+- **Between rounds** — Review which families returned `blocked` or `falsified`. Do not respawn a family with the same blocker; only continue families that produced novel evidence or passed falsification.
+- **Stop when** two or more consecutive rounds produce no new unblocked families, or all remaining families share the same blocker fingerprint. Synthesize from the surviving evidence using a `synthesize` agent with `contextPolicy: staged`.
+- **Soft cap**: do not exceed 5 initial families unless the problem scope explicitly requires broader coverage.
+</adaptive-portfolio>
+
 <parallelization>
 {{#if ircEnabled}}Can task B run without seeing A's output? If no, sequence A → B — unless B can ask A over `irc` for the missing piece (cheap DM beats a serial waterfall).{{else}}Can task B run without seeing A's output? If no, sequence A → B.{{/if}}
 - Sequence when one task produces a contract (types, API, schema, core module) the other consumes wholesale.

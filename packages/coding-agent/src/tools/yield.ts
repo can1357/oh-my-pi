@@ -17,6 +17,8 @@ import {
 	sanitizeSchemaForStrictMode,
 	tryEnforceStrictSchema,
 } from "@pk-nerdsaver-ai/pi-ai/utils/schema";
+import type { CompletionGateInput } from "../orchestration/completion-gate";
+import type { ActiveTaskContractSnapshot } from "../orchestration/task-contract";
 import { subprocessToolRegistry } from "../task/subprocess-tool-registry";
 import type { ToolSession } from ".";
 import { buildOutputValidator, formatAllValidationIssues } from "./output-schema-validator";
@@ -110,6 +112,61 @@ function wrapYieldParameters(dataSchema: Record<string, unknown>): Record<string
  */
 const MAX_SCHEMA_RETRIES = 3;
 
+/**
+ * Build a CompletionGateInput from yield data and the active contract snapshot.
+ *
+ * Attempts to extract structured evidence from data that looks like an AssignmentResult
+ * (has `evidence` array, `blockers` array, `status` field). Fields absent from the data
+ * receive conservative defaults that do not trigger false positives.
+ */
+function buildCompletionGateInputFromYield(
+	contract: ActiveTaskContractSnapshot,
+	data: unknown,
+): CompletionGateInput {
+	const record = data !== null && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
+
+	// Extract criteria evidence from evidence[] items if present
+	const criteriaEvidence: Record<string, boolean> = {};
+	const rawEvidence = record.evidence;
+	if (Array.isArray(rawEvidence)) {
+		for (const item of rawEvidence) {
+			if (item !== null && typeof item === "object" && !Array.isArray(item)) {
+				const ev = item as Record<string, unknown>;
+				const criterionId = typeof ev.criterionId === "string" ? ev.criterionId : undefined;
+				const passed = typeof ev.passed === "boolean" ? ev.passed : undefined;
+				if (criterionId && passed !== undefined) {
+					criteriaEvidence[criterionId] = passed;
+				}
+			}
+		}
+	}
+
+	// Blockers from blockers[] field
+	const rawBlockers = record.blockers;
+	const unresolvedBlockers = Array.isArray(rawBlockers) ? rawBlockers.filter((b): b is string => typeof b === "string") : [];
+
+	// Non-solutions triggered when status is "falsified"
+	const status = typeof record.status === "string" ? record.status : undefined;
+	const triggeredNonSolutions = status === "falsified" ? ["falsified"] : [];
+
+	// Scope validity: blocked/falsified means scope issue
+	const scopeValid = status !== "blocked" || unresolvedBlockers.length === 0;
+
+	// Deliverables: infer from changedFiles presence (permissive)
+	const changedFiles = Array.isArray(record.changedFiles) ? record.changedFiles.filter((f): f is string => typeof f === "string") : [];
+	const deliverablesPresent = changedFiles.length > 0 ? changedFiles : contract.deliverables.slice();
+
+	return {
+		contract,
+		deliverablesPresent,
+		criteriaEvidence,
+		triggeredNonSolutions,
+		requiredEvidencePresent: Object.keys(criteriaEvidence).length > 0 || contract.completionCriteria.length === 0,
+		unresolvedBlockers,
+		scopeValid,
+	};
+}
+
 export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	readonly name = "yield";
 	readonly approval = "read" as const;
@@ -125,10 +182,14 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 
 	readonly #validate?: (value: unknown) => JsonSchemaValidationResult;
 	readonly #assignmentContractActive: boolean;
+	readonly #evaluateGate?: ToolSession["evaluateRootCompletionGate"];
+	readonly #getContract?: ToolSession["getActiveTaskContract"];
 	#schemaValidationFailures = 0;
 
 	constructor(session: ToolSession) {
 		this.#assignmentContractActive = session.assignmentContractActive === true;
+		this.#evaluateGate = session.evaluateRootCompletionGate;
+		this.#getContract = session.getActiveTaskContract;
 		let validate: ((value: unknown) => JsonSchemaValidationResult) | undefined;
 		let parameters: TSchema;
 
@@ -245,6 +306,22 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 						);
 					}
 					schemaValidationOverridden = true;
+				}
+			}
+		}
+
+		// Completion gate enforcement: when an assignment contract is active and we have
+		// a gate evaluator, check structured criteria evidence from the yield data before
+		// accepting a success yield. Recoverable → inject a reminder and reject the yield.
+		if (status === "success" && this.#evaluateGate && this.#getContract) {
+			const contract = this.#getContract();
+			if (contract) {
+				const gateInput = buildCompletionGateInputFromYield(contract, data);
+				const evaluation = this.#evaluateGate(gateInput);
+				if (evaluation.outcome === "recoverable" && evaluation.reminder) {
+					throw new Error(
+						`Completion gate: ${evaluation.reminder} — address these before calling yield again.`,
+					);
 				}
 			}
 		}

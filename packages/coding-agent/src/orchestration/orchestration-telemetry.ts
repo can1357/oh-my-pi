@@ -125,3 +125,41 @@ export function recordBlockerTelemetry(
 		}),
 	);
 }
+
+export function recordSpawnResultTelemetry(
+	sink: OrchestrationTelemetrySink,
+	fields: {
+		readonly sessionId?: string;
+		readonly correlationId?: string;
+		readonly agentName: string;
+		readonly strategyFamily?: string;
+		readonly workerMode?: string;
+		readonly verificationOutcome?: string;
+		readonly metadata?: Readonly<Record<string, unknown>>;
+	},
+): void {
+	sink.emit(
+		Object.freeze({
+			kind: "spawn_result",
+			timestamp: Date.now(),
+			...fields,
+		}),
+	);
+}
+
+export function recordApproachUpdateTelemetry(
+	sink: OrchestrationTelemetrySink,
+	fields: {
+		readonly sessionId?: string;
+		readonly strategyFamily: string;
+		readonly metadata?: Readonly<Record<string, unknown>>;
+	},
+): void {
+	sink.emit(
+		Object.freeze({
+			kind: "approach_update",
+			timestamp: Date.now(),
+			...fields,
+		}),
+	);
+}
