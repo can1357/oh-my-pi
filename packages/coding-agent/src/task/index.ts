@@ -30,7 +30,13 @@ import { mergeSubagentModelAliases, resolveSubagentModelAlias } from "../config/
 import type { ExtensionRunner } from "../extensibility/extensions/runner";
 import { MCPManager } from "../mcp/manager";
 import type { Theme } from "../modes/theme/theme";
-import { type CollaborationPolicy, resolveCollaborationPolicy } from "../orchestration/collaboration-policy";
+import {
+	type AgentHarness,
+	defaultAgentTypeHarnessPolicy,
+	filterSkillsForHarness,
+	resolveAgentHarness,
+} from "../orchestration/agent-harness";
+import type { CollaborationPolicy } from "../orchestration/collaboration-policy";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentPrefetchEvidenceTemplate from "../prompts/system/subagent-prefetch-evidence.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
@@ -39,7 +45,7 @@ import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: 
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/irc";
 import { formatBytes, formatDuration } from "../tools/render-utils";
-import { type ResolvedToolProfile, resolveToolProfile } from "../tools/tool-profiles";
+import type { ResolvedToolProfile } from "../tools/tool-profiles";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -134,6 +140,7 @@ interface PreparedSpawn {
 	readonly plan: SpawnPlan;
 	readonly modelOverride: string | string[] | undefined;
 	readonly parentActiveModelPattern: string | undefined;
+	readonly harness: AgentHarness;
 	readonly toolProfile: ResolvedToolProfile;
 	readonly collaborationPolicy: CollaborationPolicy;
 	readonly extensionRunner: ExtensionRunner | undefined;
@@ -799,7 +806,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				});
 
 		const assignment = (params.assignment ?? "").trim();
-		const settingsPolicy = this.session.settings.resolveAgentPolicy(params.id?.trim() ?? "", agentName);
+		const agentId = params.id?.trim() ?? "";
+		const agentPolicies = this.session.settings.getAgentPolicies();
+		const hasExplicitTypePolicy = Boolean(agentName && agentPolicies[agentName]);
+		const settingsPolicy = this.session.settings.resolveAgentPolicy(agentId, agentName);
+		// Orchestration seed for known light types — only when settings did not
+		// name that type explicitly (explicit policies may raise or further narrow).
+		const typeHarnessSeed = hasExplicitTypePolicy ? undefined : defaultAgentTypeHarnessPolicy(agentName);
 		const correlationId = `task-spawn-${Snowflake.next()}`;
 		let planned = createSpawnPlan({
 			correlationId,
@@ -810,6 +823,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			profileInput: params.executionProfile
 				? undefined
 				: {
+						agentTypePolicy: typeHarnessSeed,
 						agentIdPolicy: settingsPolicy,
 						override: params.assignmentContract
 							? {
@@ -863,21 +877,30 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 		const toolPolicyActive =
 			settingsPolicy !== undefined ||
+			typeHarnessSeed !== undefined ||
 			params.executionProfile !== undefined ||
 			params.assignmentContract !== undefined;
-		const toolProfile =
-			params.toolProfile ??
-			resolveToolProfile({
-				execution: planned.plan.profile,
-				agentTools: toolPolicyActive ? effectiveAgent.tools : undefined,
-				requireYield: true,
-			});
-		const collaborationPolicy =
-			params.collaborationPolicy ??
-			resolveCollaborationPolicy({
-				mode: planned.plan.profile.collaboration,
-				parentId: this.session.getAgentId?.() ?? MAIN_AGENT_ID,
-			});
+		const harness = resolveAgentHarness({
+			execution: planned.plan.profile,
+			agentName,
+			role: params.role,
+			agentTools: toolPolicyActive ? effectiveAgent.tools : undefined,
+			autoloadSkills: effectiveAgent.autoloadSkills,
+			parentId: this.session.getAgentId?.() ?? MAIN_AGENT_ID,
+			requireYield: true,
+		});
+		const toolProfile = params.toolProfile ?? harness.toolProfile;
+		const collaborationPolicy = params.collaborationPolicy ?? harness.collaborationPolicy;
+		// Callers may inject tool/collaboration ceilings; skill/decision surface
+		// still comes from the orchestration-selected harness for the plan profile.
+		const effectiveHarness: AgentHarness =
+			params.toolProfile || params.collaborationPolicy
+				? Object.freeze({
+						...harness,
+						toolProfile,
+						collaborationPolicy,
+					})
+				: harness;
 
 		return {
 			ok: true,
@@ -888,6 +911,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				plan: planned.plan,
 				modelOverride: planned.plan.eligible.map(candidate => candidate.selector),
 				parentActiveModelPattern,
+				harness: effectiveHarness,
 				toolProfile,
 				collaborationPolicy,
 				extensionRunner,
@@ -1470,6 +1494,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			plan: spawnPlan,
 			modelOverride,
 			parentActiveModelPattern,
+			harness,
 			toolProfile,
 			collaborationPolicy,
 			extensionRunner,
@@ -1551,8 +1576,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				this.session.agentOutputManager ?? new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
 			const agentId = preAllocatedId ?? (await outputManager.allocate(params.id?.trim() || generateTaskName()));
 
-			const availableSkills = [...(this.session.skills ?? [])];
-			// Resolve autoload skills from agent definition against available skills
+			const availableSkills = filterSkillsForHarness(harness, this.session.skills ?? [], agent.autoloadSkills);
+			// Resolve autoload skills from agent definition against the harness-filtered set
 			const resolvedAutoloadSkills =
 				agent.autoloadSkills?.length && availableSkills.length > 0
 					? agent.autoloadSkills
@@ -1700,6 +1725,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				preloadedCustomToolPaths: this.session.customToolPaths,
 				localProtocolOptions,
 				parentArtifactManager,
+				clientBridge: this.session.getClientBridge?.(),
 				parentHindsightSessionState: this.session.getHindsightSessionState?.(),
 				parentMnemopiSessionState: this.session.getMnemopiSessionState?.(),
 				parentTelemetry: this.session.getTelemetry?.(),

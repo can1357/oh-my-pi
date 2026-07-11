@@ -44,6 +44,7 @@
 - **Shared background** lives in ONE `local://` file referenced by every assignment. Pass large payloads via `local://<path>` URIs, never inline.
 - **Read-only agents** (e.g. `explore`) have no edit/write/exec tools. NEVER assign them work that needs changes; do the edits yourself or delegate to a writing agent (`task`, `oracle`, `designer`).
 - **No reasoning offload**: NEVER delegate judgment, analysis, design, or decisions to `quick_task` or `explore` — they handle mechanical lookups only. Use `task`, `plan`, or `oracle` for hard thinking.
+- **Harness is parent-chosen.** Orchestration assigns each child a simple / standard / full harness from tier, work class, and agent type (`explore` → simple; `quick_task` → standard/bound). Children do not widen tools, skills, or decision scope.
 - NEVER slow down or serialize because tasks might overlap on some files — agents resolve collisions in real time.
 </rules>
 

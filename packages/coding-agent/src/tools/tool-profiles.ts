@@ -17,7 +17,9 @@ import {
 } from "../orchestration/agent-execution-profile";
 import type { EditMode } from "../utils/edit-mode";
 
-export type ToolSource = "builtin" | "mcp" | "extension" | "custom" | "hidden";
+export const TOOL_SOURCES = ["builtin", "mcp", "extension", "custom", "hidden"] as const;
+
+export type ToolSource = (typeof TOOL_SOURCES)[number];
 
 export interface ToolCapability {
 	source: ToolSource;
@@ -80,6 +82,7 @@ export const LIGHT_BUILTIN_NAMES: ReadonlySet<string> = new Set([
 	"read",
 	"find",
 	"search",
+	"web_search",
 	"yield",
 	"resolve",
 	"report_tool_issue",
@@ -303,6 +306,13 @@ export function resolveToolProfile(input: ToolProfileInput = {}): ResolvedToolPr
 		tier,
 		autonomy,
 		toolsConstrained,
+	});
+}
+
+/** Resolve the normal independent profile with wildcard access to every supported tool source. */
+export function resolveUnrestrictedToolProfile(): ResolvedToolProfile {
+	return resolveToolProfile({
+		declaredCapabilities: TOOL_SOURCES.map(source => ({ source, name: "*" })),
 	});
 }
 
