@@ -93,6 +93,9 @@ packages/coding-agent/omp-config-cli-*/
 .omo/
 .llm-router/
 scratch/
+# Side-agent/browser bridge runtime artifacts
+docs/improvements/
+/UsersprestAppDataLocalTemplin_snap*.json
 
 # Local CodeGraph index (per-machine, not source)
 .codegraph/
