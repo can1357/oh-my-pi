@@ -1,5 +1,5 @@
-// Cloudflare Worker for oh-my-pk distribution — no GitHub Actions, no GitHub
-// Releases, no billing.
+// Cloudflare Worker for the Hugging Face-backed oh-my-pk installer channel.
+// This route is independent of the GitHub Actions/GitHub Releases channel.
 //
 // Routes:
 //   /                                      -> landing page

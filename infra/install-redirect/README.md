@@ -1,9 +1,9 @@
-# Distribution without GitHub Actions
+# Hugging Face installer distribution
 
-The fork distributes its CLI with **no GitHub Actions, no GitHub Releases, and no
-GitHub billing**. Binaries live in a **private Hugging Face repo** (free storage +
-egress); a **Cloudflare Worker** at `oh-my-pk.pkking.computer` holds the HF token as
-a secret and proxies downloads, so the repo stays private and the installer never
+The install scripts use binaries from a **private Hugging Face repo** (free
+storage + egress), independently of the GitHub Release assets built by Actions.
+A **Cloudflare Worker** at `oh-my-pk.pkking.computer` holds the HF token as a
+secret and proxies downloads, so the repo stays private and the installer never
 sees a token.
 
 ```
@@ -28,8 +28,8 @@ build host(s) ── publish-binaries-hf.ts ──▶ private HF repo ──▶ 
 
 ## Each release
 
-1. **Bump + changelog + tag** (no Actions needed; the script's CI-watch step is
-   informational and can be ignored):
+1. **Bump + changelog + tag**. The standard release command triggers the GitHub
+   Actions build and waits for it to finish:
    ```sh
    bun scripts/release.ts <version>
    ```

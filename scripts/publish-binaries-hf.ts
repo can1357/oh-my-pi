@@ -2,8 +2,8 @@
 import * as path from "node:path";
 /**
  * Build release binaries and publish them to the PRIVATE Hugging Face repo that
- * backs the install endpoint (oh-my-pk.pkking.computer) — no GitHub Actions, no
- * GitHub Releases, no billing.
+ * backs the install endpoint (oh-my-pk.pkking.computer). This installer channel
+ * is independent of the binaries published in GitHub Releases by Actions.
  *
  * Layout written to the HF repo:
  *   VERSION                         -> the latest tag (e.g. "v16.1.8")

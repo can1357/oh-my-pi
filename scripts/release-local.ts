@@ -1,17 +1,15 @@
 #!/usr/bin/env bun
 import * as path from "node:path";
 /**
- * One-command local release for this fork.
- *
- * GitHub Actions are disabled here (commit f9a213a93, "no Actions billing"), so
- * the documented `bun run release` flow tags + pushes but cannot publish — there
- * is no CI to build binaries or push npm. This orchestrates the publish locally.
+ * One-command publisher for the fork's local Hugging Face installer channel.
+ * GitHub Actions separately builds all platforms and publishes GitHub Release
+ * assets. This script remains useful for populating the private Hugging Face repo
+ * consumed by the install endpoint, or as a local fallback after tagging.
  *
  * Pipeline:
- *   1. Bump + changelog + commit + tag + push  — delegates to `release.ts`
- *      (which now skips its CI watch when Actions are disabled). Skipped when
- *      package.json is already at <version> and the tag exists (e.g. release.ts
- *      handed off, or you re-run with --skip-tag).
+ *   1. Bump + changelog + commit + tag + push — delegates to `release.ts`, which
+ *      waits for enabled Actions. Skipped when package.json is already at
+ *      <version> and the tag exists, or when `--skip-tag` is passed.
  *   2. Build the HOST platform's binary and upload it to the private Hugging Face
  *      repo behind the install endpoint — delegates to `publish-binaries-hf.ts`.
  *      The global VERSION pointer flips ONLY when every platform's binary exists

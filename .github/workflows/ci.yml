@@ -13,8 +13,8 @@ on:
       branches: [main]
    workflow_dispatch:
       inputs:
-         skip_npm:
-            description: "Skip npm publish"
+         publish_npm:
+            description: "Publish to npm (opt-in)"
             type: boolean
             default: false
 
@@ -32,11 +32,11 @@ concurrency:
 
 env:
    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-   # glibc floor for shipped linux native addons. The omp-kata runner image is
-   # Ubuntu 24.04 (glibc 2.39); a plain native build links 2.39 symbol versions
-   # and fails to dlopen on older distros. Building the linux-gnu addons through
-   # cargo-zigbuild against this floor keeps them portable. Bump to raise the
-   # minimum supported glibc.
+   # glibc floor for shipped linux native addons. The linux build runners are
+   # GitHub-hosted ubuntu-22.04 (glibc 2.35); a plain native build links 2.35
+   # symbol versions and fails to dlopen on older distros. Building the linux-gnu
+   # addons through cargo-zigbuild against this floor keeps them portable. Bump
+   # to raise the minimum supported glibc.
    GLIBC_FLOOR: "2.17"
 
 permissions:
@@ -56,7 +56,7 @@ jobs:
    # ref (or from a tagged main HEAD) is also treated as a release.
    release_metadata:
       name: Resolve release metadata
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       outputs:
          is-release: ${{ steps.detect.outputs.is-release }}
          release-tag: ${{ steps.detect.outputs.release-tag }}
@@ -108,7 +108,7 @@ jobs:
    # retention window (see build-native action) is the effective TTL.
    native_artifact_lookup:
       name: Look up cached native artifacts
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       outputs:
          source-hash: ${{ steps.compute.outputs.source-hash }}
          linux-x64-run-id: ${{ steps.find.outputs.linux-x64-run-id }}
@@ -199,7 +199,7 @@ jobs:
    # Fast lint, type check, and browser bundle build (no Rust, no native build needed)
    check:
       name: Lint, type check & web build
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/bun-install
@@ -215,7 +215,7 @@ jobs:
       name: "Native: Linux x64 (${{ matrix.variant }})"
       needs: [release_metadata, native_artifact_lookup]
       if: ${{ needs.release_metadata.outputs.is-release == 'true' || needs.native_artifact_lookup.outputs.linux-x64-run-id == '' }}
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       strategy:
          fail-fast: false
          matrix:
@@ -245,8 +245,8 @@ jobs:
          fail-fast: false
          matrix:
             include:
-               - { os: omp-kata, platform: linux, arch: arm64, target: aarch64-unknown-linux-gnu }
-               - { os: omp-kata, platform: win32, arch: x64, target: x86_64-pc-windows-msvc, variant: baseline }
+               - { os: ubuntu-22.04, platform: linux, arch: arm64, target: aarch64-unknown-linux-gnu }
+               - { os: ubuntu-22.04, platform: win32, arch: x64, target: x86_64-pc-windows-msvc, variant: baseline }
       runs-on: ${{ matrix.os }}
       steps:
          - uses: actions/checkout@v4
@@ -269,7 +269,7 @@ jobs:
          matrix:
             include:
                - { os: macos-15-intel, platform: darwin, arch: x64, variant: baseline }
-               - { os: macos-14, platform: darwin, arch: arm64 }
+               - { os: macos-15, platform: darwin, arch: arm64 }
       runs-on: ${{ matrix.os }}
       steps:
          - uses: actions/checkout@v4
@@ -279,11 +279,10 @@ jobs:
               platform: ${{ matrix.platform }}
               arch: ${{ matrix.arch }}
               variant: ${{ matrix.variant }}
-              target: ${{ matrix.target }}
               save_cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
    test_workspace:
       name: Test TS workspace fast
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       needs: [native_linux_x64, native_artifact_lookup]
       if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
       timeout-minutes: 20
@@ -313,7 +312,7 @@ jobs:
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       needs: [native_linux_x64, native_artifact_lookup]
       if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
       timeout-minutes: 20
@@ -345,7 +344,7 @@ jobs:
 
    test_ts_native:
       name: Test TS native/integration packages
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       needs: [native_linux_x64, native_artifact_lookup]
       if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
       timeout-minutes: 25
@@ -376,7 +375,7 @@ jobs:
 
    test_coding_agent_ui:
       name: Test coding-agent UI/TUI (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       needs: [native_linux_x64, native_artifact_lookup]
       if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
       timeout-minutes: 25
@@ -407,7 +406,7 @@ jobs:
 
    test_coding_agent_runtime:
       name: Test coding-agent runtime/session (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       needs: [native_linux_x64, native_artifact_lookup]
       if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
       timeout-minutes: 25
@@ -439,7 +438,7 @@ jobs:
 
    test_coding_agent_native:
       name: Test coding-agent native/unit (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       needs: [native_linux_x64, native_artifact_lookup]
       if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
       timeout-minutes: 25
@@ -470,7 +469,7 @@ jobs:
 
    test_smoke:
       name: Test CLI smoke (TS)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       needs: [native_linux_x64, native_artifact_lookup]
       if: ${{ !cancelled() && needs.native_linux_x64.result != 'failure' }}
       timeout-minutes: 15
@@ -501,7 +500,7 @@ jobs:
 
    install_methods:
       name: Install method smoke tests
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ubuntu-22.04
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/ensure-rust-toolchain
@@ -511,11 +510,12 @@ jobs:
            id: detect
            shell: bash
            run: |
-              # $SCCACHE_BUCKET is injected only on self-hosted omp-kata pods; its
-              # presence selects baked sccache + shared S3. GitHub-hosted runners
-              # (PRs) need sccache-action to export the GHA cache URL/token into the
-              # step env — a bare binary install leaves SCCACHE_GHA_ENABLED set with
-              # no cache URL, so sccache server startup fails ("cache url for ghac
+              # $SCCACHE_BUCKET is injected only on self-hosted omp-kata pods — a
+              # dormant optimization path, since every job here now runs on
+              # GitHub-hosted runners. With it absent (always, in this fork),
+              # sccache-action must export the GHA cache URL/token into the step
+              # env; a bare binary install leaves SCCACHE_GHA_ENABLED set with no
+              # cache URL, so sccache server startup fails ("cache url for ghac
               # not found"). Mirrors the build-native action's sccache wiring.
               if [ -n "${SCCACHE_BUCKET:-}" ]; then
                 echo "on_infra=true" >> "$GITHUB_OUTPUT"
@@ -591,7 +591,7 @@ jobs:
                     binary_path: packages/coding-agent/binaries/omp-darwin-x64,
                  }
                - {
-                    os: macos-14,
+                    os: macos-15,
                     platform: darwin,
                     arch: arm64,
                     target_id: darwin-arm64,
@@ -619,12 +619,13 @@ jobs:
               SCCACHE_BUCKET: ""
               AWS_ACCESS_KEY_ID: ""
          - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+           if: ${{ inputs.publish_npm }}
            with:
               node-version: "24"
               registry-url: "https://registry.npmjs.org"
          # Keep npm aligned with trusted publishing setup (>= 11.16.0).
          - name: Ensure npm supports trusted publishing
-           if: ${{ !inputs.skip_npm }}
+           if: ${{ inputs.publish_npm }}
            run: npm install -g npm@latest
          - name: Cache bun dependencies
            uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -666,7 +667,7 @@ jobs:
               HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --version
               HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --smoke-test
          - name: Publish native addon package
-           if: ${{ !inputs.skip_npm }}
+           if: ${{ inputs.publish_npm }}
            env:
               # Fallback auth: setup-node wrote an .npmrc referencing
               # NODE_AUTH_TOKEN; npm uses it only when OIDC has no trusted
@@ -722,7 +723,7 @@ jobs:
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.release_github.result == 'success' }}
       needs: [release_metadata, release_github]
-      runs-on: macos-14
+      runs-on: macos-15
       permissions:
          contents: read
       env:
@@ -756,7 +757,7 @@ jobs:
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.release_binary.result == 'success' &&
          needs.release_github_verify.result == 'success' &&
-         !inputs.skip_npm }}
+         inputs.publish_npm }}
       needs: [release_metadata, release_binary, release_github_verify, native_artifact_lookup]
       runs-on: ubuntu-22.04
       # `id-token: write` lets npm mint the GitHub OIDC token it exchanges for a

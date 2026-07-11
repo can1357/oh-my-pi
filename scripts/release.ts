@@ -21,10 +21,11 @@ function git(args: readonly string[]) {
 }
 
 /**
- * Whether GitHub Actions will run on the pushed tag. This fork disables every
- * workflow (renamed to `*.disabled`, commit f9a213a93 "no Actions billing"), so
- * the release tag triggers no CI and publishing is local. Detect that to skip
- * the CI watch instead of hanging forever on a run that never starts.
+ * Whether GitHub Actions will run on the pushed commit/tag. This fork runs CI on
+ * standard GitHub-hosted runners (free for public repos), so a release push
+ * triggers the workflow that builds the binaries and publishes a GitHub Release.
+ * `ci.yml` existing means Actions is enabled; watch it to completion. If the
+ * file is absent, skip the watch instead of hanging on a run that never starts.
  */
 async function actionsEnabled(): Promise<boolean> {
 	return await Bun.file(".github/workflows/ci.yml").exists();
@@ -364,9 +365,9 @@ async function cmdRelease(version: string): Promise<void> {
 	await git(["push", "--atomic", "origin", "refs/heads/main:refs/heads/main", `${sha}:refs/tags/${tagRef}`]);
 	console.log();
 
-	// 9. Publish. With Actions enabled, CI builds binaries + publishes npm on the
-	// pushed tag, so we watch it. With Actions disabled (this fork) nothing runs;
-	// publishing is local — hand off to release-local.ts instead of hanging.
+	// 9. Publish. With Actions enabled, CI builds all platform binaries and creates
+	// the GitHub Release; npm remains an explicit manual-dispatch option. With
+	// Actions disabled, hand off to release-local.ts instead of waiting forever.
 	if (!(await actionsEnabled())) {
 		console.log("GitHub Actions are disabled (.github/workflows/ci.yml.disabled) — skipping CI watch.\n");
 		console.log("Tagged and pushed. Finish the release locally with:");

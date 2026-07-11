@@ -1,20 +1,26 @@
-# Releasing this fork (no GitHub Actions)
+# Releasing this fork
 
-This fork **disables every GitHub Actions workflow** (commit `f9a213a93`, "no
-Actions dependency, no billing" — the files are renamed `*.yml.disabled`).
-Upstream relies on CI to build binaries and publish npm when a `v*` tag is
-pushed; here that never runs, so releasing is a **local** procedure.
+The **primary** release path is automatic: `bun scripts/release.ts <version>`
+pushes the release commit and its `v*` tag, and GitHub Actions — running on free,
+unlimited, public-repository GitHub-hosted runners — builds the five platform
+binaries and publishes a GitHub Release. npm is **opt-in** (manual dispatch with
+`publish_npm`); see [`.github/workflows/README.md`](../.github/workflows/README.md).
 
-## What changes vs. the upstream flow
+This document covers the **installer distribution channel** and the local
+fallback used when Actions is unavailable. It builds binaries on local hosts and
+serves them from a **private Hugging Face repo** behind the install endpoint.
+The current install scripts use this channel; it is independent of GitHub Releases.
 
-| Step | Upstream (CI) | This fork (local) |
-|---|---|---|
-| Version bump + changelog + commit + tag + push | `bun run release <v>` | same (it now detects disabled Actions and **skips the CI watch** instead of hanging) |
-| Build per-platform binaries | CI matrix (linux/mac/win runners) | local host build — **one platform per host** |
-| Distribute binaries | GitHub Release | private Hugging Face repo behind the install endpoint |
-| Publish npm | CI | local `npm publish` (opt-in) |
+## Primary vs. fallback
 
-## Distribution model
+| Path | Trigger | Binaries | npm |
+|---|---|---|---|
+| **Primary — GitHub Actions** | `bun scripts/release.ts <v>` pushes commit + `v*` tag; Actions detects the tag at HEAD and builds all five targets on GitHub-hosted runners | GitHub Release (automatic) | opt-in via manual `publish_npm` dispatch |
+| **Fallback — local (below)** | `bun scripts/release-local.ts <v>` on one or two hosts | private Hugging Face repo behind the install endpoint | local `npm publish` (`--npm`, opt-in) |
+
+The two paths are independent; either can ship a release.
+
+## Installer distribution model (Hugging Face)
 
 - Installers (`scripts/install.ps1`, `scripts/install.sh`) download the compiled
   `omp` binary from a Cloudflare Worker (`oh-my-pk.pkking.computer`) that serves a
@@ -114,10 +120,10 @@ even if platforms are missing (only when you intend a partial release);
 `--no-version` uploads binaries without ever touching `VERSION`; `--force-build`
 rebuilds/re-uploads requested targets even when they already exist under the tag.
 
-## Manual fallback (what each step is)
+## Manual installer-channel steps
 
 ```sh
-# 1. Bump/tag/push (skips CI watch when Actions are disabled):
+# 1. Bump/tag/push (release.ts watches CI to completion now that Actions runs):
 bun scripts/release.ts 16.1.10
 
 # 2. Build + upload the host binary; VERSION flips only when all platforms exist:
@@ -131,6 +137,6 @@ bun run publish        # = bun run check && npm publish -ws --access public
 
 `bun run publish` publishes every public `@pk-nerdsaver-ai/*` workspace. The
 native package ships per-platform addons; a single host only produces its own,
-so a cross-platform-correct npm release needs each platform built (the
-binary-via-Hugging-Face path is the primary distribution and does not depend on
-npm). Treat `--npm` from one host as host-platform-complete only.
+so a cross-platform-correct npm release needs each platform built. Both the
+GitHub Release built by Actions and the Hugging Face installer channel are
+independent of npm. Treat `--npm` from one host as host-platform-complete only.
