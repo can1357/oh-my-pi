@@ -8,6 +8,8 @@
 - Added a `route-predictor` model role (`pi/route-predictor`) that defaults to local-fast 9router lanes (`9router/local-fast` → `free-fast` → `cheap-fast` → `minimax-m3-rr` → `pi/smol`) and is retargetable via `modelRoles.route-predictor`. The `NineRouterController` gained a matching `route-predictor` slot so 9router stays the execution router while the predictor only selects the lane. Pairs with the `llm-router-agent` package's trace capture (tool/model/context JSONL) and `train-route-predictor` learned-policy trainer.
 - Added a native `ix_bridge` built-in tool that wraps the local IX Bridge daemon (`status`, `guide`, and `command` actions against `http://127.0.0.1:18086`) with lane/session defaults, timeout handling, and daemon-down error hints. Gated by `ix_bridge.enabled` (default on). The `browser-control` agent and `/delegate` browser tasks now drive IX Bridge through this tool instead of hand-written `bash` HTTP calls.
 - Added spawnable `browser-control` subagent type for browser tasks and the `browser-operation` compatibility agent. Primary browser surface is IX Bridge (`http://127.0.0.1:18086`); model role `pi/browser-control` defaults to MiniMax-M3 via 9router and is changeable like `default`/`smol`/`task`/`advisor`. `ix-browser-fast` remains a short-loop IX Bridge specialist sharing that role; `pi/browser-operation` remains available as a compatibility role.
+- Added a write-scope spawn contract for exclusive, isolated-patch, and proposal-only lanes with mergeOwner validation.
+- Added a criterion-level adjudication module with pass/fail/blocked/unproven judgments consumed by the root completion gate.
 
 
 - Added `agent.profile` and `agent.profiles` settings for named, swappable role-based model bundles that retarget every role-resolving agent slot at once (explicit `modelRoles` still wins per-role).
@@ -22,6 +24,9 @@
 
 ### Changed
 
+- Changed blind/staged-independent context to mechanically clamp child collaboration to report-only, denying discovery, messaging, wake, and busy replies.
+- Changed the completion gate to distinguish failed from unproven criteria and require full criterion evidence coverage.
+- Changed yield to stop inferring deliverables from changedFiles or accepting bare self-reported passes as evidence.
 
 - Changed default `tools.discoveryMode` from `auto` to `all`, keeping only essential built-in tools (`read`, `bash`, `edit`, `find`, `search`, `write`, `todo`) active on session start; non-essential tools remain accessible via `search_tool_bm25`.
 - Added a context-file injection warning when an injected project context file (e.g., `AGENTS.md`, `CLAUDE.md`) exceeds 8KB.
@@ -31,6 +36,7 @@
 - Trimmed a second pass of tool-prompt prose across `read`/`bash`/`apply-patch`/`patch`/`todo`/`ast-grep`/`github`, dropping schema-inferable and duplicate content while preserving RFC-2119 keywords and Handlebars structure.
 
 ### Fixed
+- Fixed AssignmentContractV2 evidencePolicy, priorBlockedRoutes, and resultRequirements to survive digest, parse, and transport after they were silently dropped with an unchanged digest.
 - Fixed Fusion sidekick observability: `/fusion status` now reports live Sidekick registry state (idle/running/parked/unavailable) and marks Fusion as degraded when the sidekick is missing; spawn now waits for AgentRegistry registration before retaining a sidekick id so failed starts no longer latch a phantom Sidekick.
 - Fixed `/remote` in ACP/text mode: it is now consumed with an explicit interactive-TUI requirement instead of being forwarded to the model as ordinary prompt text.
 - Fixed source installers, mise updates, package metadata, and release instructions to use the `kingkillery/oh-my-pk` fork instead of the upstream `oh-my-pi` repository.

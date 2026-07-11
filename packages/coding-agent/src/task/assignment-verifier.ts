@@ -6,6 +6,8 @@
  */
 
 import { createHash } from "node:crypto";
+import type { CriterionJudgment, CriterionStatus } from "../orchestration/criterion-adjudication";
+import { adjudicateCriteria } from "../orchestration/criterion-adjudication";
 import {
 	type AcceptanceCriterion,
 	type AcceptanceEvidence,
@@ -63,6 +65,16 @@ export interface VerifyAssignmentInput {
 export interface CriterionVerification {
 	readonly criterionId: string;
 	readonly passed: boolean;
+	readonly status: "pass" | "fail" | "unproven";
+	readonly failureClass?: VerificationFailureClass;
+	readonly reason: string;
+	readonly details?: Readonly<Record<string, unknown>>;
+}
+
+interface CriterionCheckOutcome {
+	readonly criterionId: string;
+	readonly passed: boolean;
+	readonly status?: CriterionStatus;
 	readonly failureClass?: VerificationFailureClass;
 	readonly reason: string;
 	readonly details?: Readonly<Record<string, unknown>>;
@@ -71,6 +83,7 @@ export interface CriterionVerification {
 interface AssignmentVerificationResultBase {
 	readonly reasons: readonly string[];
 	readonly criteria: readonly CriterionVerification[];
+	readonly judgments?: readonly CriterionJudgment[];
 }
 
 export interface VerifiedAssignmentResult extends AssignmentVerificationResultBase {
@@ -291,14 +304,14 @@ function validateJsonAgainstSchema(value: unknown, schema: Readonly<Record<strin
 	return value === null ? undefined : "expected null";
 }
 
-async function verifyCriterion(
+async function verifyCriterionOutcome(
 	criterion: AcceptanceCriterion,
 	contract: AssignmentContract,
 	result: AssignmentResult,
 	evidenceItems: readonly AcceptanceEvidence[],
 	runners: AssignmentVerifierRunners | undefined,
 	actualChangedFiles: readonly string[] | undefined,
-): Promise<CriterionVerification> {
+): Promise<CriterionCheckOutcome> {
 	if (evidenceItems.length === 0) {
 		return {
 			criterionId: criterion.id,
@@ -819,12 +832,97 @@ async function verifyCriterion(
 	}
 }
 
-function rejectedVerification(reasons: readonly string[]): AssignmentVerificationResult {
+function outcomeStatus(outcome: CriterionCheckOutcome): CriterionStatus {
+	if (outcome.status) return outcome.status;
+	if (outcome.passed) return "pass";
+	switch (outcome.failureClass) {
+		case "missing_evidence":
+		case "duplicate_evidence":
+		case "placeholder_narrative":
+		case "check_error":
+			return "unproven";
+		default:
+			return "fail";
+	}
+}
+
+async function verifyCriterion(
+	criterion: AcceptanceCriterion,
+	contract: AssignmentContract,
+	result: AssignmentResult,
+	evidenceItems: readonly AcceptanceEvidence[],
+	runners: AssignmentVerifierRunners | undefined,
+	actualChangedFiles: readonly string[] | undefined,
+): Promise<CriterionVerification> {
+	let parentExecuted = criterion.check === "changed_file_scope" && actualChangedFiles !== undefined;
+	const commandRunner = runners?.runCommand;
+	const artifactRunner = runners?.statArtifact;
+	const textRunner = runners?.readText;
+	const instrumentedRunners: AssignmentVerifierRunners | undefined = runners
+		? {
+				...runners,
+				...(commandRunner
+					? {
+							runCommand: async (command, params) => {
+								const commandResult = await commandRunner(command, params);
+								parentExecuted = true;
+								return commandResult;
+							},
+						}
+					: {}),
+				...(artifactRunner
+					? {
+							statArtifact: async (path, algorithm) => {
+								const artifact = await artifactRunner(path, algorithm);
+								parentExecuted = true;
+								return artifact;
+							},
+						}
+					: {}),
+				...(textRunner
+					? {
+							readText: async path => {
+								const text = await textRunner(path);
+								parentExecuted = true;
+								return text;
+							},
+						}
+					: {}),
+			}
+		: undefined;
+	const outcome = await verifyCriterionOutcome(
+		criterion,
+		contract,
+		result,
+		evidenceItems,
+		instrumentedRunners,
+		actualChangedFiles,
+	);
+	const status = outcomeStatus(outcome);
+	const details = parentExecuted ? { ...outcome.details, parentExecuted: true } : outcome.details;
+	return {
+		criterionId: outcome.criterionId,
+		passed: status === "pass",
+		status,
+		reason: outcome.reason,
+		...(outcome.failureClass ? { failureClass: outcome.failureClass } : {}),
+		...(details ? { details } : {}),
+	};
+}
+
+function rejectedVerification(
+	reasons: readonly string[],
+	contract?: AssignmentContract,
+	result?: AssignmentResult,
+): AssignmentVerificationResult {
+	const judgments =
+		contract && result ? adjudicateCriteria(contract.acceptance, [{ laneId: "lane", result }]) : undefined;
 	return {
 		verified: false,
 		failureClass: "acceptance",
 		reasons: Object.freeze([...reasons]),
 		criteria: Object.freeze([] as CriterionVerification[]),
+		...(judgments ? { judgments } : {}),
 	};
 }
 
@@ -838,38 +936,46 @@ async function verifyParsedAssignment(
 	const criteria: CriterionVerification[] = [];
 
 	if (result.contractId !== contract.id) {
-		return rejectedVerification([
-			`Result contractId "${result.contractId}" does not match contract id "${contract.id}"`,
-		]);
+		return rejectedVerification(
+			[`Result contractId "${result.contractId}" does not match contract id "${contract.id}"`],
+			contract,
+			result,
+		);
 	}
 	if (result.revision !== contract.revision) {
-		return rejectedVerification([
-			`Result revision ${result.revision} does not match contract revision ${contract.revision}`,
-		]);
+		return rejectedVerification(
+			[`Result revision ${result.revision} does not match contract revision ${contract.revision}`],
+			contract,
+			result,
+		);
 	}
 
 	const expectedDigest = computeAssignmentContractDigest(contract);
 	if (result.digest !== contract.digest || result.digest !== expectedDigest) {
-		return rejectedVerification(["Result digest does not match parent contract digest"]);
+		return rejectedVerification(["Result digest does not match parent contract digest"], contract, result);
 	}
 
 	if (result.summary !== undefined && isPlaceholderNarrative(result.summary)) {
-		return rejectedVerification(["Result summary is placeholder-only"]);
+		return rejectedVerification(["Result summary is placeholder-only"], contract, result);
 	}
 	const placeholderBlocker = result.blockers?.find(isPlaceholderNarrative);
 	if (placeholderBlocker !== undefined) {
-		return rejectedVerification([`Result blocker is placeholder-only: ${placeholderBlocker}`]);
+		return rejectedVerification([`Result blocker is placeholder-only: ${placeholderBlocker}`], contract, result);
 	}
 
 	const scopeVerificationApplies = contract.acceptance.some(criterion => criterion.check === "changed_file_scope");
 	if (scopeVerificationApplies && actualChangedFiles === undefined) {
-		return rejectedVerification(["Missing authoritative actualChangedFiles for scope verification"]);
+		return rejectedVerification(
+			["Missing authoritative actualChangedFiles for scope verification"],
+			contract,
+			result,
+		);
 	}
 
 	const authoritativeChangedFiles = actualChangedFiles ?? result.changedFiles;
 	const outOfScope = authoritativeChangedFiles.filter(filePath => !isPathInScope(filePath, contract.scope));
 	if (outOfScope.length > 0) {
-		return rejectedVerification([`Changed paths outside declared scope: ${outOfScope.join(", ")}`]);
+		return rejectedVerification([`Changed paths outside declared scope: ${outOfScope.join(", ")}`], contract, result);
 	}
 
 	if (actualChangedFiles) {
@@ -877,23 +983,29 @@ async function verifyParsedAssignment(
 		const actual = new Set(actualChangedFiles);
 		const omitted = actualChangedFiles.filter(filePath => !reported.has(filePath));
 		if (omitted.length > 0) {
-			return rejectedVerification([`Child omitted parent-authored changed path(s): ${omitted.join(", ")}`]);
+			return rejectedVerification(
+				[`Child omitted parent-authored changed path(s): ${omitted.join(", ")}`],
+				contract,
+				result,
+			);
 		}
 		const unexpected = result.changedFiles.filter(filePath => !actual.has(filePath));
 		if (unexpected.length > 0) {
-			return rejectedVerification([
-				`Child reported changed path(s) absent from actualChangedFiles: ${unexpected.join(", ")}`,
-			]);
+			return rejectedVerification(
+				[`Child reported changed path(s) absent from actualChangedFiles: ${unexpected.join(", ")}`],
+				contract,
+				result,
+			);
 		}
 	}
 
 	const byId = evidenceByCriterion(result.evidence);
 	for (const [criterionId, items] of byId) {
 		if (!contract.acceptance.some(criterion => criterion.id === criterionId)) {
-			return rejectedVerification([`Evidence references unknown criterion "${criterionId}"`]);
+			return rejectedVerification([`Evidence references unknown criterion "${criterionId}"`], contract, result);
 		}
 		if (items.length > 1) {
-			return rejectedVerification([`Duplicate evidence for criterion "${criterionId}"`]);
+			return rejectedVerification([`Duplicate evidence for criterion "${criterionId}"`], contract, result);
 		}
 	}
 
@@ -906,6 +1018,7 @@ async function verifyParsedAssignment(
 			verified = {
 				criterionId: criterion.id,
 				passed: false,
+				status: "unproven",
 				failureClass: "check_error",
 				reason: `Acceptance check "${criterion.id}" failed safely: ${
 					error instanceof Error ? error.message : String(error)
@@ -916,6 +1029,19 @@ async function verifyParsedAssignment(
 		if (!verified.passed) reasons.push(verified.reason);
 	}
 
+	const judgments = adjudicateCriteria(contract.acceptance, [
+		{
+			laneId: "lane",
+			verification: criteria.map(item => ({
+				criterionId: item.criterionId,
+				passed: item.passed,
+				status: item.status,
+				failureClass: item.failureClass,
+				parentExecuted: item.details?.parentExecuted === true,
+			})),
+			result,
+		},
+	]);
 	const failed = firstFailure(criteria);
 	if (failed) {
 		return {
@@ -923,6 +1049,7 @@ async function verifyParsedAssignment(
 			failureClass: "acceptance",
 			reasons: Object.freeze(reasons),
 			criteria: Object.freeze(criteria),
+			judgments,
 		};
 	}
 
@@ -932,6 +1059,7 @@ async function verifyParsedAssignment(
 			failureClass: "acceptance",
 			reasons: Object.freeze([`Result status "${result.status}" is not verified success`]),
 			criteria: Object.freeze(criteria),
+			judgments,
 		};
 	}
 
@@ -939,6 +1067,7 @@ async function verifyParsedAssignment(
 		verified: true,
 		reasons: Object.freeze([] as string[]),
 		criteria: Object.freeze(criteria),
+		judgments,
 	};
 }
 

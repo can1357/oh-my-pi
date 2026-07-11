@@ -119,23 +119,29 @@ const MAX_SCHEMA_RETRIES = 3;
  * (has `evidence` array, `blockers` array, `status` field). Fields absent from the data
  * receive conservative defaults that do not trigger false positives.
  */
-function buildCompletionGateInputFromYield(
+export function buildCompletionGateInputFromYield(
 	contract: ActiveTaskContractSnapshot,
 	data: unknown,
 ): CompletionGateInput {
-	const record = data !== null && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
+	const record =
+		data !== null && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
 
 	// Extract criteria evidence from evidence[] items if present
-	const criteriaEvidence: Record<string, boolean> = {};
+	const criteriaEvidence: Record<string, boolean | "pass" | "fail" | "unproven"> = {};
 	const rawEvidence = record.evidence;
 	if (Array.isArray(rawEvidence)) {
 		for (const item of rawEvidence) {
 			if (item !== null && typeof item === "object" && !Array.isArray(item)) {
 				const ev = item as Record<string, unknown>;
 				const criterionId = typeof ev.criterionId === "string" ? ev.criterionId : undefined;
-				const passed = typeof ev.passed === "boolean" ? ev.passed : undefined;
-				if (criterionId && passed !== undefined) {
-					criteriaEvidence[criterionId] = passed;
+				const passed = ev.passed;
+				const artifactRefs = ev.artifactRefs;
+				const hasArtifactRefs = Array.isArray(artifactRefs) && artifactRefs.length > 0;
+				const details = ev.details;
+				const hasDetails = details !== null && typeof details === "object" && !Array.isArray(details);
+				if (criterionId && typeof passed === "boolean") {
+					criteriaEvidence[criterionId] =
+						passed === false ? "fail" : hasArtifactRefs || hasDetails ? "pass" : "unproven";
 				}
 			}
 		}
@@ -143,7 +149,9 @@ function buildCompletionGateInputFromYield(
 
 	// Blockers from blockers[] field
 	const rawBlockers = record.blockers;
-	const unresolvedBlockers = Array.isArray(rawBlockers) ? rawBlockers.filter((b): b is string => typeof b === "string") : [];
+	const unresolvedBlockers = Array.isArray(rawBlockers)
+		? rawBlockers.filter((b): b is string => typeof b === "string")
+		: [];
 
 	// Non-solutions triggered when status is "falsified"
 	const status = typeof record.status === "string" ? record.status : undefined;
@@ -152,16 +160,21 @@ function buildCompletionGateInputFromYield(
 	// Scope validity: blocked/falsified means scope issue
 	const scopeValid = status !== "blocked" || unresolvedBlockers.length === 0;
 
-	// Deliverables: infer from changedFiles presence (permissive)
-	const changedFiles = Array.isArray(record.changedFiles) ? record.changedFiles.filter((f): f is string => typeof f === "string") : [];
-	const deliverablesPresent = changedFiles.length > 0 ? changedFiles : contract.deliverables.slice();
+	const rawDeliverables = record.deliverables;
+	const deliverablesPresent =
+		Array.isArray(rawDeliverables) &&
+		rawDeliverables.every((deliverable): deliverable is string => typeof deliverable === "string")
+			? rawDeliverables
+			: [];
 
 	return {
 		contract,
 		deliverablesPresent,
 		criteriaEvidence,
 		triggeredNonSolutions,
-		requiredEvidencePresent: Object.keys(criteriaEvidence).length > 0 || contract.completionCriteria.length === 0,
+		requiredEvidencePresent:
+			contract.completionCriteria.length === 0 ||
+			contract.completionCriteria.every(criterion => Object.hasOwn(criteriaEvidence, criterion.id)),
 		unresolvedBlockers,
 		scopeValid,
 	};
@@ -319,9 +332,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				const gateInput = buildCompletionGateInputFromYield(contract, data);
 				const evaluation = this.#evaluateGate(gateInput);
 				if (evaluation.outcome === "recoverable" && evaluation.reminder) {
-					throw new Error(
-						`Completion gate: ${evaluation.reminder} — address these before calling yield again.`,
-					);
+					throw new Error(`Completion gate: ${evaluation.reminder} — address these before calling yield again.`);
 				}
 			}
 		}

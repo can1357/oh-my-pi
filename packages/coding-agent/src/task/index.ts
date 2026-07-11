@@ -36,24 +36,16 @@ import {
 	filterSkillsForHarness,
 	resolveAgentHarness,
 } from "../orchestration/agent-harness";
-import { applyContextPolicy, resolveWorkerMode } from "../orchestration/context-policy";
+import { shouldRejectDuplicateBlockedSpawn } from "../orchestration/approach-registry";
+import { type CollaborationPolicy, clampCollaborationPolicyForContext } from "../orchestration/collaboration-policy";
+import { compileLanePolicy, resolveWorkerMode } from "../orchestration/context-policy";
 import {
 	recordApproachUpdateTelemetry,
 	recordBlockerTelemetry,
 	recordSpawnResultTelemetry,
 	recordSpawnTelemetry,
 } from "../orchestration/orchestration-telemetry";
-import { shouldRejectDuplicateBlockedSpawn } from "../orchestration/approach-registry";
 import { snapshotFromAssignmentFields } from "../orchestration/task-contract";
-import type { CollaborationPolicy } from "../orchestration/collaboration-policy";
-import {
-	composeTaskSpawnPolicyResult,
-	createSpawnPlan,
-	type SpawnPlan,
-	type SpawnPlanDiagnostic,
-	type TaskSpawnPolicyInput,
-	tierToRouteLabel,
-} from "./spawn-plan";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentPrefetchEvidenceTemplate from "../prompts/system/subagent-prefetch-evidence.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
@@ -63,6 +55,14 @@ import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/irc";
 import { formatBytes, formatDuration } from "../tools/render-utils";
 import type { ResolvedToolProfile } from "../tools/tool-profiles";
+import {
+	composeTaskSpawnPolicyResult,
+	createSpawnPlan,
+	type SpawnPlan,
+	type SpawnPlanDiagnostic,
+	type TaskSpawnPolicyInput,
+	tierToRouteLabel,
+} from "./spawn-plan";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -74,6 +74,7 @@ import {
 	type TaskToolDetails,
 	type TaskToolSchemaInstance,
 } from "./types";
+import { validateWriteScopes } from "./write-scope";
 // Import review tools for side effects (registers subagent tool handlers)
 import "../tools/review";
 import type { AsyncJobManager } from "../async";
@@ -137,6 +138,9 @@ type OrchestratedTaskParams = TaskParams &
 			| "recoveryAttempt"
 			| "strategyFamily"
 			| "contextPolicy"
+			| "revealSiblingFindings"
+			| "siblingFindings"
+			| "writeScope"
 		>
 	>;
 
@@ -435,6 +439,8 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 		if (typeof params.context !== "string" || params.context.trim() === "") {
 			return "Missing `context`. Provide the shared background for this batch — goal, constraints, and any contract the tasks share.";
 		}
+		const batchWriteScopeIssue = writeScopeProblem(params);
+		if (batchWriteScopeIssue) return batchWriteScopeIssue;
 		return undefined;
 	}
 	if (!hasAssignment) {
@@ -442,7 +448,28 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			? "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`."
 			: "Missing `assignment`. Provide complete, self-contained instructions for the agent.";
 	}
+	const flatWriteScopeIssue = writeScopeProblem(params);
+	if (flatWriteScopeIssue) return flatWriteScopeIssue;
 	return undefined;
+}
+
+/**
+ * Cross-lane write-ownership validation before any allocation. Per-lane edit
+ * capability is enforced later at the harness seam where the resolved profile
+ * is known; here `editCapable: false` checks overlap/isolation/shape only.
+ */
+function writeScopeProblem(params: TaskParams): string | undefined {
+	const items = resolveSpawnItems(params);
+	const diagnostics = validateWriteScopes(
+		items.map((item, index) => ({
+			laneId: item.id?.trim() || `task-${index + 1}`,
+			writeScope: item.writeScope,
+			isolated: item.isolated ?? ("isolated" in params ? params.isolated : undefined),
+			editCapable: false,
+		})),
+	);
+	if (diagnostics.length === 0) return undefined;
+	return `Write-scope conflict:\n${diagnostics.map(d => `- [${d.code}] ${d.message}`).join("\n")}`;
 }
 
 /**
@@ -469,6 +496,9 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 			recoveryAttempt: internal.recoveryAttempt,
 			strategyFamily: internal.strategyFamily,
 			contextPolicy: internal.contextPolicy,
+			revealSiblingFindings: internal.revealSiblingFindings,
+			siblingFindings: internal.siblingFindings,
+			writeScope: internal.writeScope,
 		},
 	];
 }
@@ -494,6 +524,9 @@ function spawnParamsFor(params: TaskParams, item: TaskItem): OrchestratedTaskPar
 	if (item.assignmentContract !== undefined) spawn.assignmentContract = item.assignmentContract;
 	if (item.strategyFamily !== undefined) spawn.strategyFamily = item.strategyFamily;
 	if (item.contextPolicy !== undefined) spawn.contextPolicy = item.contextPolicy;
+	if (item.revealSiblingFindings !== undefined) spawn.revealSiblingFindings = item.revealSiblingFindings;
+	if (item.siblingFindings !== undefined) spawn.siblingFindings = item.siblingFindings;
+	if (item.writeScope !== undefined) spawn.writeScope = item.writeScope;
 	if (item.recoveryCapsule !== undefined) spawn.recoveryCapsule = item.recoveryCapsule;
 	if (item.recoveryAttempt !== undefined) spawn.recoveryAttempt = item.recoveryAttempt;
 	if (item.isolated !== undefined) {
@@ -896,6 +929,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			typeHarnessSeed !== undefined ||
 			params.executionProfile !== undefined ||
 			params.assignmentContract !== undefined;
+		const stagedFindingsRevealed =
+			params.contextPolicy === "staged" &&
+			params.revealSiblingFindings === true &&
+			Boolean(params.siblingFindings?.trim());
 		const harness = resolveAgentHarness({
 			execution: planned.plan.profile,
 			agentName,
@@ -904,9 +941,30 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			autoloadSkills: effectiveAgent.autoloadSkills,
 			parentId: this.session.getAgentId?.() ?? MAIN_AGENT_ID,
 			requireYield: true,
+			contextPolicy: params.contextPolicy,
+			siblingFindingsRevealed: stagedFindingsRevealed,
 		});
 		const toolProfile = params.toolProfile ?? harness.toolProfile;
-		const collaborationPolicy = params.collaborationPolicy ?? harness.collaborationPolicy;
+		const collaborationPolicy = clampCollaborationPolicyForContext(
+			params.collaborationPolicy ?? harness.collaborationPolicy,
+			params.contextPolicy,
+			{ siblingFindingsRevealed: stagedFindingsRevealed },
+		);
+		if (params.writeScope) {
+			const writeScopeDiagnostics = validateWriteScopes([
+				{
+					laneId: params.id?.trim() || agentName,
+					writeScope: params.writeScope,
+					isolated: params.isolated === true,
+					editCapable: toolProfile.editMode !== "none",
+				},
+			]);
+			if (writeScopeDiagnostics.length > 0) {
+				return fail(
+					`Task spawn rejected by write-scope validation:\n${writeScopeDiagnostics.map(d => `- [${d.code}] ${d.message}`).join("\n")}`,
+				);
+			}
+		}
 		// Reject duplicate blocked spawns: if the strategy family is already blocked with
 		// the same fingerprint in the parent's approach registry, fail the spawn early.
 		if (params.strategyFamily) {
@@ -919,12 +977,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				if (priorBlockedRoutes) {
 					for (const route of priorBlockedRoutes) {
 						if (route.blockerFingerprint) {
-							registry.markBlocked(route.family, route.mechanism, route.blocker);
+							registry.markBlocked(
+								route.family,
+								route.mechanism,
+								route.blocker,
+								undefined,
+								route.blockerFingerprint,
+							);
 						}
 					}
 				}
 				// Find the fingerprint for this strategy family from prior blocked routes
-				const priorFingerprint = priorBlockedRoutes?.find(r => r.family === params.strategyFamily)?.blockerFingerprint;
+				const priorFingerprint = priorBlockedRoutes?.find(
+					r => r.family === params.strategyFamily,
+				)?.blockerFingerprint;
 				if (shouldRejectDuplicateBlockedSpawn(registry, params.strategyFamily, priorFingerprint)) {
 					return fail(
 						`Spawn rejected: strategy family "${params.strategyFamily}" was already blocked with the same blocker fingerprint. Use a materially different approach or mechanism.`,
@@ -1565,7 +1631,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		} = prepared;
 		const agentName = agent.name;
 		const rawSharedContext = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
-		const sharedContext = applyContextPolicy(params.contextPolicy, rawSharedContext);
+		const { context: sharedContext } = compileLanePolicy({
+			contextPolicy: params.contextPolicy,
+			sharedContext: rawSharedContext,
+			requestedCollaboration: collaborationPolicy,
+			siblingFindings:
+				params.contextPolicy === "staged" && params.revealSiblingFindings ? params.siblingFindings : undefined,
+		});
 		const assignment = (params.assignment ?? "").trim();
 		const isolationMode = this.session.settings.get("task.isolation.mode");
 		const isolationRequested = "isolated" in params ? params.isolated === true : false;
@@ -1919,9 +1991,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				if ((resultStatus === "blocked" || resultStatus === "falsified") && params.strategyFamily) {
 					const registry = this.session.getApproachRegistry?.();
 					if (registry) {
-						const blockerText = Array.isArray(yieldData?.blockers) && (yieldData.blockers as unknown[]).length > 0
-							? String((yieldData.blockers as unknown[])[0])
-							: resultStatus;
+						const blockerText =
+							Array.isArray(yieldData?.blockers) && (yieldData.blockers as unknown[]).length > 0
+								? String((yieldData.blockers as unknown[])[0])
+								: resultStatus;
 						const record = registry.markBlocked(params.strategyFamily, agentName, blockerText);
 						recordBlockerTelemetry(telemetrySink, {
 							sessionId: this.session.getSessionId?.() ?? undefined,

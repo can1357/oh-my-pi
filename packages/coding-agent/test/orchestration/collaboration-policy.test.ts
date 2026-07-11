@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	authorizeIrcDelivery,
 	canDiscoverPeer,
+	clampCollaborationPolicyForContext,
 	DEFAULT_COLLABORATION_POLICY,
 	hydrateCollaborationPolicy,
 	resolveCollaborationPolicy,
@@ -94,5 +95,92 @@ describe("collaboration-policy", () => {
 		const restored = hydrateCollaborationPolicy(persisted);
 		expect(restored).toEqual(policy);
 		expect(persisted.version).toBe(1);
+	});
+
+	test("clamps blind and unrevealed staged lanes to report-only", () => {
+		const requested = resolveCollaborationPolicy({
+			mode: "self-coordinate",
+			peerScope: "all",
+			wakePolicy: "allow",
+			wakeBudget: 9,
+			allowBusyModelReply: true,
+			allowedPeers: ["Sibling"],
+			parentId: "Main",
+			familyIds: ["Sibling"],
+		});
+
+		const blind = clampCollaborationPolicyForContext(requested, "blind");
+		expect(blind).toMatchObject({
+			mode: "report-only",
+			peerScope: "parent",
+			wakePolicy: "deny",
+			wakeBudget: 0,
+			allowBusyModelReply: false,
+			parentId: "Main",
+			familyIds: ["Sibling"],
+			allowedPeers: [],
+		});
+		expect(Object.isFrozen(blind)).toBe(true);
+		expect(Object.isFrozen(blind.allowedPeers)).toBe(true);
+
+		const staged = clampCollaborationPolicyForContext(requested, "staged");
+		expect(staged.mode).toBe("report-only");
+	});
+
+	test("keeps revealed staged, shared, and unspecified policies by reference", () => {
+		const requested = resolveCollaborationPolicy({ mode: "self-coordinate", parentId: "Main" });
+
+		expect(clampCollaborationPolicyForContext(requested, "staged", { siblingFindingsRevealed: true })).toBe(
+			requested,
+		);
+		expect(clampCollaborationPolicyForContext(requested, "shared")).toBe(requested);
+		expect(clampCollaborationPolicyForContext(requested, undefined)).toBe(requested);
+	});
+
+	test("enforces report-only authorization after a blind clamp", () => {
+		const policy = clampCollaborationPolicyForContext(
+			resolveCollaborationPolicy({ mode: "self-coordinate", parentId: "Main", familyIds: ["Sibling"] }),
+			"blind",
+		);
+
+		expect(canDiscoverPeer(policy, "Child", "Sibling")).toBe(false);
+		expect(canDiscoverPeer(policy, "Child", "Main")).toBe(true);
+		expect(authorizeIrcDelivery(policy, { fromId: "Child", toId: "Sibling" }).reasonCode).toBe(
+			"report-only-parent-only",
+		);
+		expect(authorizeIrcDelivery(policy, { fromId: "Child", toId: "*", isBroadcast: true }).reasonCode).toBe(
+			"report-only-no-broadcast",
+		);
+		expect(authorizeIrcDelivery(policy, { fromId: "Child", toId: "Main", requiresWake: true }).reasonCode).toBe(
+			"report-only-no-wake",
+		);
+		expect(authorizeIrcDelivery(policy, { fromId: "Child", toId: "Main", busyModelReply: true }).reasonCode).toBe(
+			"report-only-no-busy-reply",
+		);
+	});
+
+	test("preserves a clamped policy through cold revival", () => {
+		const clamped = clampCollaborationPolicyForContext(
+			resolveCollaborationPolicy({
+				mode: "self-coordinate",
+				parentId: "Main",
+				familyIds: ["Sibling"],
+				allowedPeers: ["Sibling"],
+				wakeBudget: 4,
+			}),
+			"blind",
+		);
+
+		const restored = hydrateCollaborationPolicy(serializeCollaborationPolicy(clamped));
+		expect(restored).toMatchObject({
+			mode: "report-only",
+			peerScope: "parent",
+			wakePolicy: "deny",
+			wakeBudget: 0,
+			allowBusyModelReply: false,
+			allowedPeers: [],
+			parentId: "Main",
+			familyIds: ["Sibling"],
+		});
 	});
 });

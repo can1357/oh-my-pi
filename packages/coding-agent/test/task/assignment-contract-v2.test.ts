@@ -5,6 +5,7 @@ import {
 	computeAssignmentContractDigest,
 	parseAssignmentContract,
 	parseAssignmentResult,
+	withAssignmentContractV2Digest,
 } from "../../src/task/assignment-contract";
 
 describe("assignment-contract v2", () => {
@@ -19,7 +20,9 @@ describe("assignment-contract v2", () => {
 			objective: "Find root cause",
 			deliverables: ["Report"],
 			scope: { allowedPaths: [] },
-			acceptance: [{ id: "evidence", description: "Repro captured", check: "artifact_exists", params: { path: "repro.txt" } }],
+			acceptance: [
+				{ id: "evidence", description: "Repro captured", check: "artifact_exists", params: { path: "repro.txt" } },
+			],
 			reporting: ASSIGNMENT_RESULT_V2_VERSION,
 			nonSolutions: ["Guess without reading logs"],
 			strategyFamily: "persistence",
@@ -36,7 +39,9 @@ describe("assignment-contract v2", () => {
 			objective: "Find root cause",
 			deliverables: ["Report"],
 			scope: { allowedPaths: [] },
-			acceptance: [{ id: "evidence", description: "Repro captured", check: "artifact_exists", params: { path: "repro.txt" } }],
+			acceptance: [
+				{ id: "evidence", description: "Repro captured", check: "artifact_exists", params: { path: "repro.txt" } },
+			],
 			reporting: ASSIGNMENT_RESULT_V2_VERSION,
 			nonSolutions: ["Guess without reading logs"],
 			strategyFamily: "persistence",
@@ -64,5 +69,59 @@ describe("assignment-contract v2", () => {
 		expect(parsed.ok).toBe(true);
 		if (!parsed.ok) return;
 		expect(parsed.result.status).toBe("falsified");
+	});
+
+	it("reports malformed V2 extensions instead of dropping them", () => {
+		const contract = withAssignmentContractV2Digest({
+			version: ASSIGNMENT_CONTRACT_V2_VERSION,
+			id: "a2",
+			revision: 0,
+			role: "Investigator",
+			workClass: "judgment",
+			autonomy: "bound",
+			objective: "Find root cause",
+			deliverables: ["Report"],
+			scope: { allowedPaths: [] },
+			acceptance: [{ id: "evidence", description: "Repro captured", check: "artifact_exists" }],
+			reporting: ASSIGNMENT_RESULT_V2_VERSION,
+		});
+
+		for (const malformed of [
+			{ ...contract, evidencePolicy: { requireArtifactRefs: "always" } },
+			{ ...contract, priorBlockedRoutes: [{ family: "", mechanism: "probe", blocker: "403" }] },
+			{
+				...contract,
+				resultRequirements: {
+					claimsRequired: "yes",
+					counterevidenceRequired: true,
+					unresolvedGapsRequired: false,
+				},
+			},
+		]) {
+			const parsed = parseAssignmentContract(malformed);
+			expect(parsed.ok).toBe(false);
+			if (!parsed.ok) {
+				expect(
+					parsed.diagnostics.some(
+						diagnostic => diagnostic.code === "invalid_field" || diagnostic.code === "empty_value",
+					),
+				).toBe(true);
+			}
+		}
+
+		const result = parseAssignmentResult({
+			version: ASSIGNMENT_RESULT_V2_VERSION,
+			contractId: "a2",
+			revision: 0,
+			digest: contract.digest,
+			status: "success",
+			changedFiles: [],
+			evidence: [],
+			evidenceRefs: [
+				{ id: "e1", type: "invalid", locator: "test", producedBy: "worker", sourceAuthority: "direct" },
+			],
+		});
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.diagnostics.some(diagnostic => diagnostic.code === "invalid_field")).toBe(true);
 	});
 });

@@ -17,7 +17,12 @@ import {
 	resolveAgentExecutionProfile,
 	type WorkClass,
 } from "./agent-execution-profile";
-import { type CollaborationPolicy, resolveCollaborationPolicy } from "./collaboration-policy";
+import {
+	type CollaborationPolicy,
+	clampCollaborationPolicyForContext,
+	resolveCollaborationPolicy,
+} from "./collaboration-policy";
+import type { ContextPolicy } from "./context-policy";
 
 /** How wide the child's operable surface is. */
 export type AgentHarnessKind = "simple" | "standard" | "full";
@@ -74,6 +79,10 @@ export interface AgentHarnessInput {
 	/** Parent id for collaboration policy. */
 	parentId?: string;
 	requireYield?: boolean;
+	/** Context visibility policy that may mechanically narrow collaboration. */
+	contextPolicy?: ContextPolicy;
+	/** Staged synthesis only: sibling findings are revealed, so no blind clamp. */
+	siblingFindingsRevealed?: boolean;
 }
 
 /**
@@ -236,9 +245,12 @@ export function resolveAgentHarness(input: AgentHarnessInput = {}): AgentHarness
 	});
 	const skillPolicy = selectSkillPolicy(kind, input.autoloadSkills);
 	const decisionSurface = selectDecisionSurface(kind, profile, toolProfile);
-	const collaborationPolicy = resolveCollaborationPolicy({
+	const resolvedCollaborationPolicy = resolveCollaborationPolicy({
 		mode: profile.collaboration,
 		parentId: input.parentId,
+	});
+	const collaborationPolicy = clampCollaborationPolicyForContext(resolvedCollaborationPolicy, input.contextPolicy, {
+		siblingFindingsRevealed: input.siblingFindingsRevealed,
 	});
 
 	return Object.freeze({

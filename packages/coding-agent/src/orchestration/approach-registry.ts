@@ -4,13 +4,7 @@
 
 import { createHash } from "node:crypto";
 
-export type ApproachStatus =
-	| "unexplored"
-	| "active"
-	| "promising"
-	| "blocked"
-	| "falsified"
-	| "completed";
+export type ApproachStatus = "unexplored" | "active" | "promising" | "blocked" | "falsified" | "completed";
 
 export interface ApproachRecord {
 	readonly family: string;
@@ -60,11 +54,20 @@ export class ApproachRegistry {
 		return record;
 	}
 
-	markBlocked(family: string, mechanism: string, blocker: string, reopenCondition?: string): ApproachRecord {
+	markBlocked(
+		family: string,
+		mechanism: string,
+		blocker: string,
+		reopenCondition?: string,
+		fingerprint?: string,
+	): ApproachRecord {
 		const record = this.register({ family, mechanism });
 		record.status = "blocked";
 		record.blocker = blocker.trim();
-		record.blockerFingerprint = computeBlockerFingerprint(family, blocker);
+		// Prefer the parent-carried fingerprint verbatim: a supplied value must
+		// survive registration so later duplicate-spawn checks compare like with
+		// like across sessions and fingerprint algorithm revisions.
+		record.blockerFingerprint = fingerprint?.trim() || computeBlockerFingerprint(family, blocker);
 		if (reopenCondition) record.reopenCondition = reopenCondition.trim();
 		return record;
 	}

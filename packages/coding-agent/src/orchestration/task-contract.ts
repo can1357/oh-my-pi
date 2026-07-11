@@ -100,7 +100,11 @@ function parseCriteria(value: unknown, path: string, diagnostics: TaskContractDi
 		const id = typeof item.id === "string" ? item.id.trim() : "";
 		const description = typeof item.description === "string" ? item.description.trim() : "";
 		if (!id || !description) {
-			diagnostics.push({ code: "missing_field", message: `${itemPath} requires id and description`, path: itemPath });
+			diagnostics.push({
+				code: "missing_field",
+				message: `${itemPath} requires id and description`,
+				path: itemPath,
+			});
 			continue;
 		}
 		out.push({ id, description });
@@ -128,7 +132,8 @@ function parseSearchBudget(value: unknown): SearchBudget | undefined {
 	const maxInitialFamilies = typeof value.maxInitialFamilies === "number" ? value.maxInitialFamilies : 5;
 	const maxRounds = typeof value.maxRounds === "number" ? value.maxRounds : 3;
 	const maxSameBlockerRetries = typeof value.maxSameBlockerRetries === "number" ? value.maxSameBlockerRetries : 1;
-	const minEvidenceGainToContinue = typeof value.minEvidenceGainToContinue === "number" ? value.minEvidenceGainToContinue : 0.1;
+	const minEvidenceGainToContinue =
+		typeof value.minEvidenceGainToContinue === "number" ? value.minEvidenceGainToContinue : 0.1;
 	return Object.freeze({ maxInitialFamilies, maxRounds, maxSameBlockerRetries, minEvidenceGainToContinue });
 }
 
@@ -170,9 +175,13 @@ export function parseTaskContract(input: unknown): ParseTaskContractResult {
 	}
 	const nonSolutions = isStringArray(input.nonSolutions) ? input.nonSolutions : [];
 	const knownFailureModes = parseFailureModes(input.knownFailureModes, "knownFailureModes", diagnostics);
-	const evidenceRequirements = parseCriteria(input.evidenceRequirements, "evidenceRequirements", diagnostics).map(
-		item => ({ id: item.id, description: item.description }),
-	);
+	const evidenceRequirements =
+		input.evidenceRequirements === undefined
+			? []
+			: parseCriteria(input.evidenceRequirements, "evidenceRequirements", diagnostics).map(item => ({
+					id: item.id,
+					description: item.description,
+				}));
 	const constraints = isStringArray(input.constraints) ? input.constraints : [];
 	const assumptions: TaskAssumption[] = [];
 	if (Array.isArray(input.assumptions)) {
@@ -267,11 +276,7 @@ export function formatTaskContractXmlBlock(contract: ActiveTaskContractSnapshot)
 }
 
 function escapeXml(text: string): string {
-	return text
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;");
+	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 /** Generic OMPK defaults applied when the compiler cannot derive specific criteria. */
@@ -300,7 +305,8 @@ const OMPK_DEFAULT_FAILURE_MODES: readonly TaskFailureMode[] = Object.freeze([
 const OMPK_DEFAULT_EVIDENCE_REQUIREMENTS: readonly TaskEvidenceRequirement[] = Object.freeze([
 	Object.freeze({
 		id: "concrete_checks",
-		description: "At least one concrete check (test run, command output, file read) supporting the primary deliverable",
+		description:
+			"At least one concrete check (test run, command output, file read) supporting the primary deliverable",
 	}),
 ]);
 
@@ -365,7 +371,7 @@ function extractObjective(userText: string): string {
 	// Use first 2 non-empty lines as the objective summary
 	const head = lines.slice(0, 2).join(" ");
 	if (head.length <= 300) return head;
-	return head.slice(0, 297) + "…";
+	return `${head.slice(0, 297)}…`;
 }
 
 export interface CompileTaskContractOptions {
@@ -381,10 +387,7 @@ export interface CompileTaskContractOptions {
  * failure modes that apply to any substantial coding task. Callers can supply
  * additional constraints and non-solutions.
  */
-export function compileTaskContractFromRequest(
-	userText: string,
-	options?: CompileTaskContractOptions,
-): TaskContractV1 {
+export function compileTaskContractFromRequest(userText: string, options?: CompileTaskContractOptions): TaskContractV1 {
 	const objective = extractObjective(userText);
 	const nonSolutions = options?.nonSolutions?.length
 		? [...OMPK_DEFAULT_NON_SOLUTIONS, ...options.nonSolutions]

@@ -29,6 +29,8 @@ export interface OrchestrationTelemetryEvent {
 	readonly blockerFingerprint?: string;
 	readonly verificationOutcome?: string;
 	readonly completionGateOutcome?: string;
+	readonly failedCriteriaCount?: number;
+	readonly unprovenCriteriaCount?: number;
 	readonly advisorSeverity?: string;
 	readonly metadata?: Readonly<Record<string, unknown>>;
 }
@@ -79,6 +81,8 @@ export function recordCompletionGateTelemetry(
 	fields: {
 		readonly sessionId?: string;
 		readonly completionGateOutcome: string;
+		readonly failedCriteriaCount?: number;
+		readonly unprovenCriteriaCount?: number;
 		readonly metadata?: Readonly<Record<string, unknown>>;
 	},
 ): void {

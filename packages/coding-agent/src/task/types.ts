@@ -5,12 +5,13 @@ import { type } from "arktype";
 import type { AgentPrefetch } from "../discovery/helpers";
 import type { AgentExecutionProfile, AgentTier, CollaborationMode } from "../orchestration/agent-execution-profile";
 import type { CollaborationPolicy } from "../orchestration/collaboration-policy";
+import type { ContextPolicy } from "../orchestration/context-policy";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ResolvedToolProfile } from "../tools/tool-profiles";
-import type { ContextPolicy } from "../orchestration/context-policy";
 import type { AssignmentContract } from "./assignment-contract";
 import type { AssignmentFailureClass, RecoveryAttempt, RecoveryCapsule, RecoveryDecision } from "./recovery-policy";
 import type { NestedRepoPatch } from "./worktree";
+import type { WriteScope } from "./write-scope";
 
 /** Source of an agent definition */
 export type AgentSource = "bundled" | "user" | "project";
@@ -137,6 +138,12 @@ export interface TaskItem {
 	strategyFamily?: string;
 	/** How much shared batch context this spawn receives. */
 	contextPolicy?: ContextPolicy;
+	/** Declared concurrent write ownership; internal-only and not wire parsed. */
+	writeScope?: WriteScope;
+	/** Staged synthesis: reveal first-pass sibling findings instead of blind header. */
+	revealSiblingFindings?: boolean;
+	/** Findings from sibling workers for staged synthesis phase. */
+	siblingFindings?: string;
 	/** Fresh-child recovery capsule; absent for initial and legacy spawns. */
 	recoveryCapsule?: RecoveryCapsule;
 	/** Planned fresh-child recovery attempt. */
@@ -314,6 +321,8 @@ export interface AgentProgress {
 	toolProfile?: ResolvedToolProfile;
 	collaborationPolicy?: CollaborationPolicy;
 	assignmentContract?: AssignmentContract;
+	/** Declared concurrent write ownership for spawn observability. */
+	writeScope?: WriteScope;
 	assignmentVerificationStatus?: AssignmentVerificationStatus;
 	profileTier?: AgentTier;
 	collaborationMode?: CollaborationMode;

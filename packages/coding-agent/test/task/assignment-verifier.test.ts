@@ -785,4 +785,39 @@ describe("verifyAssignmentResult", () => {
 		expect(verified.verified).toBe(false);
 		expect(verified.reasons.join(" ")).toContain("JSON schema requires a supported type");
 	});
+	test("reports unproven, pass, and fail statuses with criterion judgments", async () => {
+		const contract = makeContract({
+			acceptance: [
+				{
+					id: "unit",
+					description: "Parent command must exit zero",
+					check: "command_exit",
+					params: { command: "parent-command" },
+				},
+			],
+		});
+		const result = makeResult(contract, {
+			changedFiles: [],
+			evidence: [{ criterionId: "unit", passed: true, summary: "Parent command ran successfully" }],
+		});
+
+		const absentRunner = await verifyAssignment(contract, result);
+		expect(absentRunner.verified).toBe(false);
+		expect(absentRunner.criteria[0]?.status).toBe("unproven");
+		expect(absentRunner.judgments?.[0]?.status).toBe("unproven");
+
+		const parentPass = await verifyAssignment(contract, result, {
+			runCommand: async () => ({ exitCode: 0, timedOut: false, stdout: "", stderr: "" }),
+		});
+		expect(parentPass.verified).toBe(true);
+		expect(parentPass.criteria[0]?.status).toBe("pass");
+		expect(parentPass.judgments?.[0]?.status).toBe("pass");
+
+		const parentFail = await verifyAssignment(contract, result, {
+			runCommand: async () => ({ exitCode: 1, timedOut: false, stdout: "", stderr: "failure" }),
+		});
+		expect(parentFail.verified).toBe(false);
+		expect(parentFail.criteria[0]?.status).toBe("fail");
+		expect(parentFail.judgments?.[0]?.status).toBe("fail");
+	});
 });

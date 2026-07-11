@@ -6,6 +6,7 @@
  */
 
 import type { CollaborationMode } from "./agent-execution-profile";
+import type { ContextPolicy } from "./context-policy";
 
 export type PeerScope = "parent" | "family" | "allowed" | "all";
 export type WakePolicy = "deny" | "queue" | "allow";
@@ -128,6 +129,31 @@ export function resolveCollaborationPolicy(input: CollaborationPolicyInput | und
 		allowBusyModelReply: input.allowBusyModelReply ?? modeDefaults.allowBusyModelReply,
 		parentId: input.parentId?.trim() || undefined,
 		familyIds: freezeStringList(input.familyIds),
+	});
+}
+
+/**
+ * Mechanically narrow collaboration for lanes whose context withholds sibling
+ * findings, regardless of a caller's requested collaboration breadth.
+ */
+export function clampCollaborationPolicyForContext(
+	policy: CollaborationPolicy,
+	contextPolicy: ContextPolicy | undefined,
+	options?: { siblingFindingsRevealed?: boolean },
+): CollaborationPolicy {
+	const blindEffective =
+		contextPolicy === "blind" || (contextPolicy === "staged" && !options?.siblingFindingsRevealed);
+	if (!blindEffective) return policy;
+
+	return Object.freeze({
+		mode: "report-only",
+		peerScope: "parent",
+		allowedPeers: Object.freeze([] as string[]),
+		wakePolicy: "deny",
+		wakeBudget: 0,
+		allowBusyModelReply: false,
+		parentId: policy.parentId,
+		familyIds: policy.familyIds,
 	});
 }
 

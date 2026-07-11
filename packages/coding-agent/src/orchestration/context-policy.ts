@@ -2,7 +2,16 @@
  * Context policy for batch task spawns — blind-first exploration.
  */
 
+import { type CollaborationPolicy, clampCollaborationPolicyForContext } from "./collaboration-policy";
+
 export type ContextPolicy = "shared" | "blind" | "staged";
+export type LanePhase = "independent" | "evidence-reveal" | "targeted-rebuttal" | "adjudication" | "closed";
+
+export interface CompiledLanePolicy {
+	readonly context: string | undefined;
+	readonly collaboration: CollaborationPolicy;
+	readonly phase: LanePhase;
+}
 
 const BLIND_CONTEXT_HEADER = [
 	"# Context (blind policy)",
@@ -48,17 +57,39 @@ export function applyContextPolicyWithSiblingFindings(
 		return sharedContext;
 	}
 	if (effective === "staged" && options?.siblingFindings?.trim()) {
-		return [
-			BLIND_CONTEXT_HEADER,
-			"",
-			"# Sibling Findings (synthesis phase)",
-			options.siblingFindings.trim(),
-		].join("\n");
+		return [BLIND_CONTEXT_HEADER, "", "# Sibling Findings (synthesis phase)", options.siblingFindings.trim()].join(
+			"\n",
+		);
 	}
 	return BLIND_CONTEXT_HEADER;
 }
 
-export function resolveWorkerMode(agentName: string): "explore" | "implement" | "falsify" | "audit" | "synthesize" | undefined {
+/** Compile the context and collaboration ceilings for one execution lane. */
+export function compileLanePolicy(input: {
+	readonly contextPolicy: ContextPolicy | undefined;
+	readonly sharedContext: string | undefined;
+	readonly requestedCollaboration: CollaborationPolicy;
+	readonly siblingFindings?: string;
+	readonly phase?: LanePhase;
+}): CompiledLanePolicy {
+	const phase = input.phase ?? "independent";
+	const siblingFindings = input.siblingFindings?.trim();
+	const siblingFindingsRevealed = siblingFindings && phase !== "independent" ? true : Boolean(siblingFindings);
+	const context = applyContextPolicyWithSiblingFindings(
+		input.contextPolicy,
+		input.sharedContext,
+		siblingFindings ? { siblingFindings } : undefined,
+	);
+	const collaboration = clampCollaborationPolicyForContext(input.requestedCollaboration, input.contextPolicy, {
+		siblingFindingsRevealed,
+	});
+
+	return Object.freeze({ context, collaboration, phase });
+}
+
+export function resolveWorkerMode(
+	agentName: string,
+): "explore" | "implement" | "falsify" | "audit" | "synthesize" | undefined {
 	switch (agentName.trim()) {
 		case "explore":
 			return "explore";

@@ -150,6 +150,23 @@ describe("resolveAgentHarness", () => {
 		expect(isToolCapabilityAllowed(harness.toolProfile, { source: "builtin", name: "bash" })).toBe(false);
 		expect(isToolCapabilityAllowed(harness.toolProfile, { source: "builtin", name: "task" })).toBe(false);
 	});
+
+	test("clamps a blind frontier self-coordinate harness without changing its shared baseline", () => {
+		const profileInput = {
+			override: {
+				tier: "frontier",
+				autonomy: "independent",
+				collaboration: "self-coordinate",
+				workClass: "mechanical",
+			},
+		} as const;
+
+		const blind = resolveAgentHarness({ profileInput, contextPolicy: "blind", requireYield: true });
+		const shared = resolveAgentHarness({ profileInput, requireYield: true });
+
+		expect(blind.collaborationPolicy.mode).toBe("report-only");
+		expect(shared.collaborationPolicy.mode).toBe("self-coordinate");
+	});
 });
 
 describe("filterSkillsForHarness", () => {

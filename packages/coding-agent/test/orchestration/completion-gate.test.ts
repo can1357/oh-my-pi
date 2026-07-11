@@ -52,5 +52,66 @@ describe("completion gate", () => {
 		});
 		expect(result.outcome).toBe("recoverable");
 		expect(result.missingCriteria).toContain("c1");
+		expect(result.failedCriteria).toEqual(["c1"]);
+		expect(result.unprovenCriteria).toEqual([]);
+	});
+
+	it("distinguishes unproven criteria from failed criteria", () => {
+		const result = evaluateCompletionGate({
+			contract,
+			deliverablesPresent: ["test", "fix"],
+			criteriaEvidence: { c1: "pass" },
+			triggeredNonSolutions: [],
+			requiredEvidencePresent: true,
+			unresolvedBlockers: [],
+			scopeValid: true,
+		});
+		expect(result.outcome).toBe("recoverable");
+		expect(result.failedCriteria).toEqual([]);
+		expect(result.unprovenCriteria).toEqual(["c2"]);
+		expect(result.missingCriteria).toEqual(["c2"]);
+		expect(result.reminder).toContain("Unproven criteria (no independent evidence): c2");
+	});
+
+	it("reports explicitly failed criteria", () => {
+		const result = evaluateCompletionGate({
+			contract,
+			deliverablesPresent: ["test", "fix"],
+			criteriaEvidence: { c1: "fail", c2: "pass" },
+			triggeredNonSolutions: [],
+			requiredEvidencePresent: true,
+			unresolvedBlockers: [],
+			scopeValid: true,
+		});
+		expect(result.outcome).toBe("recoverable");
+		expect(result.failedCriteria).toEqual(["c1"]);
+		expect(result.unprovenCriteria).toEqual([]);
+		expect(result.missingCriteria).toEqual(["c1"]);
+	});
+
+	it("passes when every criterion has pass status", () => {
+		const result = evaluateCompletionGate({
+			contract,
+			deliverablesPresent: ["test", "fix"],
+			criteriaEvidence: { c1: "pass", c2: "pass" },
+			triggeredNonSolutions: [],
+			requiredEvidencePresent: true,
+			unresolvedBlockers: [],
+			scopeValid: true,
+		});
+		expect(result.outcome).toBe("pass");
+	});
+
+	it("normalizes mixed boolean and status evidence", () => {
+		const result = evaluateCompletionGate({
+			contract,
+			deliverablesPresent: ["test", "fix"],
+			criteriaEvidence: { c1: true, c2: "pass" },
+			triggeredNonSolutions: [],
+			requiredEvidencePresent: true,
+			unresolvedBlockers: [],
+			scopeValid: true,
+		});
+		expect(result.outcome).toBe("pass");
 	});
 });

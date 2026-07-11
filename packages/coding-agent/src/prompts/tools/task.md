@@ -20,6 +20,8 @@
   - `role?`: specialist identity (e.g. "Parser edge-case tester") — sets system-prompt persona + display name
   - `strategyFamily?`: stable identifier for the causal/implementation family (e.g. `persistence`, `concurrency`) — parent tracks portfolio coverage
   - `contextPolicy?`: `shared` (default), `blind` (no favored hypothesis or sibling findings), or `staged` (blind first pass; synthesis reveals later)
+  - `revealSiblingFindings?`: with `contextPolicy: staged`, pass `true` on synthesis spawns to include first-pass sibling findings
+  - `siblingFindings?`: text summary of sibling worker findings for staged synthesis (required when `revealSiblingFindings` is true)
   - `model?`: explicit model selector; aliases and concrete catalog names resolve before agent defaults
   - `cwd?`: working directory; defaults to parent session cwd
 {{#if isolationEnabled}}
@@ -32,6 +34,8 @@
 - `role?`: specialist identity (e.g. "Parser edge-case tester") — sets system-prompt persona + display name
 - `strategyFamily?`: stable identifier for the causal/implementation family (e.g. `persistence`, `concurrency`) — parent tracks portfolio coverage
 - `contextPolicy?`: `shared` (default), `blind` (no favored hypothesis or sibling findings), or `staged` (blind first pass; synthesis reveals later)
+- `revealSiblingFindings?`: with `contextPolicy: staged`, pass `true` on synthesis spawns to include first-pass sibling findings
+- `siblingFindings?`: text summary of sibling worker findings for staged synthesis (required when `revealSiblingFindings` is true)
 - `model?`: explicit model selector; aliases and concrete catalog names resolve before agent defaults
 - `cwd?`: working directory; defaults to parent session cwd
 {{#if isolationEnabled}}
@@ -49,7 +53,7 @@
 - **Read-only agents** (e.g. `explore`) have no edit/write/exec tools. NEVER assign them work that needs changes; do the edits yourself or delegate to a writing agent (`task`, `oracle`, `designer`).
 - **No reasoning offload**: NEVER delegate judgment, analysis, design, or decisions to `quick_task` or `explore` — they handle mechanical lookups only. Use `task`, `plan`, or `oracle` for hard thinking.
 - **Harness is parent-chosen.** Orchestration assigns each child a simple / standard / full harness from tier, work class, and agent type (`explore` → simple; `quick_task` → standard/bound). Children do not widen tools, skills, or decision scope.
-- NEVER slow down or serialize because tasks might overlap on some files — agents resolve collisions in real time.
+- Overlap: isolated patches, exclusive owner/path, or named integration owner; else split; disjoint work parallel.
 </rules>
 
 <adaptive-portfolio>

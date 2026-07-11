@@ -137,6 +137,7 @@ import {
 	isInterruptingSeverity,
 	resolveAdvisorDeliveryChannel,
 } from "../advisor";
+import { composeAdvisorSystemPrompt } from "../advisor/task-contract-block";
 import { type AsyncJob, type AsyncJobDeliveryState, AsyncJobManager } from "../async";
 import { classifyDifficulty } from "../auto-thinking/classifier";
 import { reset as resetCapabilities } from "../capability";
@@ -215,28 +216,28 @@ import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageBreakdown, computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, WORKFLOW_NOTICE } from "../modes/workflow";
-import { authorizeIrcDelivery, type CollaborationPolicy } from "../orchestration/collaboration-policy";
-import { createPlanReadMatcher } from "../plan-mode/plan-protection";
-import type { PlanModeState } from "../plan-mode/state";
-import { composeAdvisorSystemPrompt } from "../advisor/task-contract-block";
 import { ApproachRegistry } from "../orchestration/approach-registry";
+import { authorizeIrcDelivery, type CollaborationPolicy } from "../orchestration/collaboration-policy";
 import {
-	evaluateCompletionGate,
 	type CompletionGateEvaluation,
 	type CompletionGateInput,
+	evaluateCompletionGate,
 } from "../orchestration/completion-gate";
 import {
 	createOrchestrationTelemetrySink,
-	recordAdvisorInterventionTelemetry,
 	type OrchestrationTelemetrySink,
+	recordAdvisorInterventionTelemetry,
 } from "../orchestration/orchestration-telemetry";
+import { buildCompletionGateInputFromTranscript } from "../orchestration/root-completion-gate";
 import {
+	type ActiveTaskContractSnapshot,
 	compileTaskContractFromRequest,
 	formatRootTaskContractXml,
 	isSubstantialRequest,
 	toActiveTaskContractSnapshot,
-	type ActiveTaskContractSnapshot,
 } from "../orchestration/task-contract";
+import { createPlanReadMatcher } from "../plan-mode/plan-protection";
+import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
@@ -282,10 +283,10 @@ import {
 	isMCPToolName,
 	selectDiscoverableToolNamesByServer,
 } from "../tool-discovery/tool-index";
+import { formatApprovalPrompt, resolveApproval, truncateForPrompt } from "../tools/approval";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import type { CheckpointState } from "../tools/checkpoint";
 import { BUILTIN_TOOLS, HIDDEN_TOOLS, isAllowedByToolProfile } from "../tools/index";
-import { formatApprovalPrompt, resolveApproval, truncateForPrompt } from "../tools/approval";
 import { outputMeta, wrapToolWithMetaNotice } from "../tools/output-meta";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
@@ -1206,6 +1207,9 @@ export class AgentSession {
 	#advisorReadOnlyTools?: AgentTool[];
 	#advisorWatchdogPrompt?: string;
 	#activeTaskContract?: ActiveTaskContractSnapshot;
+	#taskContractActivatedAt?: number;
+	#completionGateReminderCount = 0;
+	#completionGateAwaitingProgress = false;
 	#approachRegistry = new ApproachRegistry();
 	#orchestrationTelemetry: OrchestrationTelemetrySink = createOrchestrationTelemetrySink();
 	#advisorYieldQueueUnsubscribe?: () => void;
@@ -2788,6 +2792,7 @@ export class AgentSession {
 				// productive work in response to the prior nudge, so the next text-only stop
 				// is allowed to escalate to the next reminder if todos remain incomplete.
 				this.#todoReminderAwaitingProgress = false;
+				this.#completionGateAwaitingProgress = false;
 				// Fusion failure-streak escalation: consecutive failed tool calls on a
 				// downgraded main model force an early tier-up back to the frontier
 				// baseline without waiting for the next compaction boundary.
@@ -2945,6 +2950,11 @@ export class AgentSession {
 			}
 			if (msg.stopReason !== "error") {
 				if (this.#enforceRewindBeforeYield()) {
+					await emitAgentEndNotification();
+					return;
+				}
+				const completionGateScheduled = await this.#checkRootCompletionGate();
+				if (completionGateScheduled) {
 					await emitAgentEndNotification();
 					return;
 				}
@@ -5842,15 +5852,16 @@ export class AgentSession {
 	 * Compile and inject a root `<task-contract>` block for substantial user requests.
 	 *
 	 * Rules:
-	 * - Only on the root session (taskDepth === 0) — subagents have assignment contracts instead.
-	 * - Only for user-initiated (non-synthetic) prompts.
+	 * - Only for user-initiated prompts (attribution "user", not synthetic, not agent-attributed).
 	 * - Only when no contract is already active (avoids clobbering a mid-task contract).
 	 * - Only when the request is heuristically "substantial" (multi-step, action keyword, etc.).
+	 *
+	 * Subagent sessions receive prompts with `attribution: "agent"` from the executor, which
+	 * ensures the gate is only active on root user-facing sessions.
 	 */
 	#maybeCreateTaskContractNotice(text: string, synthetic?: boolean): CustomMessage | undefined {
+		// Skip synthetic turns and agent-attributed turns (subagent executor prompts)
 		if (synthetic) return undefined;
-		// Only root session
-		if ((this.taskDepth ?? 0) > 0) return undefined;
 		// Don't overwrite an already-active contract
 		if (this.#activeTaskContract) return undefined;
 		if (!isSubstantialRequest(text)) return undefined;
@@ -5957,9 +5968,12 @@ export class AgentSession {
 		const keywordNotices = options?.synthetic ? [] : this.#createMagicKeywordNotices(expandedText);
 
 		// Root task contract: compile and inject ephemeral <task-contract> block for substantial
-		// user requests on the root session. Skipped for synthetic turns, streaming steers,
-		// subagent sessions, and when a contract is already active from an earlier turn.
-		const taskContractNotice = this.#maybeCreateTaskContractNotice(expandedText, options?.synthetic);
+		// user requests. Skipped for synthetic turns, agent-attributed turns (subagent executor
+		// prompts), and when a contract is already active from an earlier turn.
+		const taskContractNotice = this.#maybeCreateTaskContractNotice(
+			expandedText,
+			options?.synthetic || options?.attribution === "agent",
+		);
 
 		// A user-initiated prompt (typed message or the `.`/`c` continue shortcut)
 		// re-enables advisor auto-resume that a prior user interrupt suppressed.
@@ -6027,10 +6041,7 @@ export class AgentSession {
 				...options,
 				images: normalizedImages,
 				prependMessages:
-					preludeMessages.length > 0 ||
-					keywordNotices.length > 0 ||
-					imageDescriptionNotice ||
-					taskContractNotice
+					preludeMessages.length > 0 || keywordNotices.length > 0 || imageDescriptionNotice || taskContractNotice
 						? [
 								...preludeMessages,
 								...(taskContractNotice ? [taskContractNotice] : []),
@@ -6121,6 +6132,8 @@ export class AgentSession {
 			// Reset todo reminder count on new user prompt
 			this.#todoReminderCount = 0;
 			this.#todoReminderAwaitingProgress = false;
+			this.#completionGateReminderCount = 0;
+			this.#completionGateAwaitingProgress = false;
 			this.#emptyStopRetryCount = 0;
 			this.#unexpectedStopRetryCount = 0;
 
@@ -9083,6 +9096,70 @@ export class AgentSession {
 		if (task) nudges.push(task);
 		return nudges;
 	}
+	/**
+	 * Check whether the root agent stopped without satisfying the active task contract.
+	 * Injects a recoverable reminder and schedules continuation when criteria are unmet.
+	 */
+	async #checkRootCompletionGate(): Promise<boolean> {
+		if (this.#agentKind !== "main") return false;
+		const contract = this.#activeTaskContract;
+		if (!contract) return false;
+
+		if (this.#completionGateAwaitingProgress) {
+			logger.debug("Completion gate: prior reminder still awaiting agent action; staying silent", {
+				attempt: this.#completionGateReminderCount,
+			});
+			return false;
+		}
+
+		const remindersMax = 2;
+		if (this.#completionGateReminderCount >= remindersMax) {
+			logger.debug("Completion gate: max reminders reached", { count: this.#completionGateReminderCount });
+			return false;
+		}
+
+		const gateInput = buildCompletionGateInputFromTranscript(contract, this.messages, this.#taskContractActivatedAt);
+		const evaluation = this.evaluateRootCompletionGate(gateInput);
+		if (evaluation.outcome === "pass") {
+			this.#completionGateReminderCount = 0;
+			this.#completionGateAwaitingProgress = false;
+			return false;
+		}
+
+		const reminderBody =
+			evaluation.outcome === "blocked"
+				? (evaluation.reminder ??
+					"The current route violates the active task contract (non-solution or unresolved blocker). Do not claim success — revise the approach or report blocked with evidence.")
+				: (evaluation.reminder ??
+					"Completion criteria are not yet satisfied. Address the missing items before finishing.");
+
+		this.#completionGateReminderCount++;
+		const reminder =
+			`<system-reminder>\n` +
+			`Active task contract not satisfied:\n${reminderBody}\n\n` +
+			`Verify with concrete checks (tests, commands, reads) — narrative alone is insufficient.\n` +
+			`(Completion gate reminder ${this.#completionGateReminderCount}/${remindersMax})\n` +
+			`</system-reminder>`;
+
+		logger.debug("Completion gate: sending reminder", {
+			outcome: evaluation.outcome,
+			attempt: this.#completionGateReminderCount,
+		});
+
+		const reminderMessage: Message = {
+			role: "developer",
+			content: [{ type: "text", text: reminder }],
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+
+		this.#completionGateAwaitingProgress = true;
+		this.agent.appendMessage(reminderMessage);
+		this.sessionManager.appendMessage(reminderMessage);
+		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
+		return true;
+	}
+
 	/**
 	 * Check if agent stopped with incomplete todos and prompt to continue.
 	 */
@@ -13093,6 +13170,11 @@ export class AgentSession {
 	 */
 	setActiveTaskContract(snapshot: ActiveTaskContractSnapshot | undefined): void {
 		this.#activeTaskContract = snapshot;
+		this.#taskContractActivatedAt = snapshot ? Date.now() : undefined;
+		if (!snapshot) {
+			this.#completionGateReminderCount = 0;
+			this.#completionGateAwaitingProgress = false;
+		}
 		this.#syncAdvisorSystemPrompt();
 	}
 

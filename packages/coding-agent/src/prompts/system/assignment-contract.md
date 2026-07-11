@@ -39,7 +39,7 @@ Yield one `assignment-result/v1` (or `/v2` when the contract specifies it) objec
 - `changedFiles` containing every path changed by this worker
 - one `evidence` item per acceptance criterion with `criterionId`, `passed`, and a concrete `summary`
 - optional `details` and `artifactRefs` that report observations but never redefine a check
-- v2: optional `claims`, `counterevidence`, and `unresolvedGaps` when `resultRequirements` demands them
+- v2: `claims`→`evidenceRefs`; `counterevidence`/`unresolvedGaps` when required; unverified=unproven
 - `blockers` and an overall `summary` when the work is not successful
 
 ## Independent Workers
