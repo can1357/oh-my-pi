@@ -857,6 +857,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "desktop-tag-host"
+version = "16.2.6"
+dependencies = [
+ "anyhow",
+ "image",
+ "serde",
+ "serde_json",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

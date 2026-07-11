@@ -22,6 +22,7 @@ import type { PlanApprovalDetails } from "../../plan-mode/approved-plan";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { isSilentAbort, readQueueChipText, resolveAbortLabel } from "../../session/messages";
 import type { ResolveToolDetails } from "../../tools/resolve";
+import { isSpeechHardStopped } from "../../tts/speech-hard-stop";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { interruptHint } from "../shared";
@@ -446,7 +447,7 @@ export class EventController {
 	 * live (the final message is spoken at turn end).
 	 */
 	#vocalizeDelta(event: Extract<AgentSessionEvent, { type: "message_update" }>): void {
-		if (!settings.get("speech.enabled")) return;
+		if (!settings.get("speech.enabled") || isSpeechHardStopped()) return;
 		const mode = settings.get("speech.mode");
 		const delta = event.assistantMessageEvent;
 		if (delta.type === "text_delta" && (mode === "assistant" || mode === "all")) {
@@ -462,7 +463,7 @@ export class EventController {
 	 * sure the live buffer's trailing partial gets flushed.
 	 */
 	#handleTurnEnd(event: Extract<AgentSessionEvent, { type: "turn_end" }>): void {
-		if (!settings.get("speech.enabled")) return;
+		if (!settings.get("speech.enabled") || isSpeechHardStopped()) return;
 		if (settings.get("speech.mode") !== "yield") {
 			vocalizer.flush();
 			return;
@@ -603,7 +604,7 @@ export class EventController {
 
 	async #handleMessageEnd(event: Extract<AgentSessionEvent, { type: "message_end" }>): Promise<void> {
 		if (event.message.role === "user") return;
-		if (event.message.role === "assistant" && settings.get("speech.enabled")) {
+		if (event.message.role === "assistant" && settings.get("speech.enabled") && !isSpeechHardStopped()) {
 			if (event.message.stopReason === "aborted") {
 				// Esc / Ctrl+C / interrupt: stop speaking now and drop the trailing partial.
 				vocalizer.clear();

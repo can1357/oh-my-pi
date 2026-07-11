@@ -68,6 +68,10 @@ import {
 	type SessionStorage,
 	type SessionStorageWriter,
 } from "./session-storage";
+import {
+	SessionWriterGuard,
+	type SessionWriterGuardHandle,
+} from "./session-writer-guard";
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 
@@ -407,6 +411,8 @@ export class SessionManager {
 	#diskFailureLogged = false;
 	/** Bumped on every sync rewrite / chain reset so stale queued tasks become no-ops. */
 	#diskEpoch = 0;
+	/** OS-backed ownership proof spanning the entire writable file-session lifetime. */
+	#writerGuard: SessionWriterGuardHandle | undefined;
 
 	#artifactManager: ArtifactManager | null = null;
 	#artifactManagerSessionFile: string | null = null;
@@ -427,6 +433,32 @@ export class SessionManager {
 		if (persist && sessionDir) this.#storage.ensureDirSync(sessionDir);
 	}
 
+	#requiresWriterGuard(): boolean {
+		return this.#persist && this.#storage instanceof FileSessionStorage;
+	}
+
+	#acquireWriterGuard(): void {
+		if (!this.#requiresWriterGuard() || !this.#sessionFile || !this.#sessionId) return;
+		if (this.#writerGuard && !this.#writerGuard.released && this.#writerGuard.sessionId === this.#sessionId) return;
+		if (this.#writerGuard && !this.#writerGuard.released) {
+			throw new Error("Cannot change writable sessions before releasing the prior writer guard");
+		}
+		this.#writerGuard = SessionWriterGuard.acquire({
+			sessionId: this.#sessionId,
+			transcriptPath: this.#sessionFile,
+		});
+	}
+
+	#releaseWriterGuardSync(): void {
+		this.#writerGuard?.releaseSync();
+		this.#writerGuard = undefined;
+	}
+
+	async #releaseWriterGuard(): Promise<void> {
+		const guard = this.#writerGuard;
+		this.#writerGuard = undefined;
+		await guard?.release();
+	}
 	#rememberBreadcrumb(cwd: string, sessionFile: string): void {
 		if (!this.#suppressBreadcrumb) writeTerminalBreadcrumb(cwd, sessionFile);
 	}
@@ -639,6 +671,7 @@ export class SessionManager {
 				forcedSessionFile ??
 				path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
 			this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
+			this.#acquireWriterGuard();
 		} else {
 			this.#sessionFile = undefined;
 		}
@@ -746,6 +779,7 @@ export class SessionManager {
 
 	restoreState(snapshot: SessionManagerStateSnapshot): void {
 		this.#closeWriterEventually();
+		this.#releaseWriterGuardSync();
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 
@@ -756,6 +790,7 @@ export class SessionManager {
 		this.#rewriteRequired = snapshot.needsRewrite;
 		this.#forceFileCreation = snapshot.onDisk;
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
+		this.#acquireWriterGuard();
 		this.#sessionName = snapshot.sessionName;
 		this.#titleSource = snapshot.titleSource;
 		this.#artifactManager = null;
@@ -768,6 +803,7 @@ export class SessionManager {
 	/** Switch to a different session file (resume / branch). */
 	async setSessionFile(sessionFile: string): Promise<void> {
 		await this.#drainAndCloseWriter();
+		await this.#releaseWriterGuard();
 		this.#clearDiskError();
 
 		const resolvedSessionFile = path.resolve(sessionFile);
@@ -804,6 +840,7 @@ export class SessionManager {
 		}
 
 		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
+		this.#acquireWriterGuard();
 		this.#fileIsCurrent = true;
 		this.#rewriteRequired = migrated;
 		this.#forceFileCreation = true;
@@ -816,6 +853,7 @@ export class SessionManager {
 	/** Start a new session. Drains and closes any existing writer first. */
 	async newSession(options?: NewSessionOptions): Promise<string | undefined> {
 		await this.#drainAndCloseWriter();
+		await this.#releaseWriterGuard();
 		return this.#resetToNewSession(options);
 	}
 
@@ -839,11 +877,13 @@ export class SessionManager {
 		const oldSessionFile = this.#sessionFile;
 		const parentSessionId = this.#sessionId;
 		await this.#drainAndCloseWriter();
+		await this.#releaseWriterGuard();
 		this.#clearDiskError();
 
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
 		this.#sessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
+		this.#acquireWriterGuard();
 		this.#header = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
@@ -1006,6 +1046,7 @@ export class SessionManager {
 		await this.#scheduleDiskWork(async () => {
 			const hadWriter = this.#writer !== undefined;
 			await this.#closeWriterHandle();
+			await this.#releaseWriterGuard();
 			if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
 				this.#fileIsCurrent = true;
 		});
@@ -1590,6 +1631,8 @@ export class SessionManager {
 			parentId = labelEntry.id;
 		}
 
+		this.#closeWriterEventually();
+		this.#releaseWriterGuardSync();
 		this.#header = header;
 		this.#entries = [...entriesToKeep, ...labels];
 		this.#sessionId = newSessionId;
@@ -1608,6 +1651,7 @@ export class SessionManager {
 		}
 
 		this.#sessionFile = newSessionFile;
+		this.#acquireWriterGuard();
 		this.#rewriteSynchronously();
 		this.#rememberBreadcrumb(this.#cwd, newSessionFile);
 		return newSessionFile;

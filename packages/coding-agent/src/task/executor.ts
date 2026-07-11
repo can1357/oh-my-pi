@@ -47,6 +47,7 @@ import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
 import type { AuthStorage } from "../session/auth-storage";
+import type { ClientBridge } from "../session/client-bridge";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
@@ -64,7 +65,11 @@ import { filterAutoToolNames, type ResolvedToolProfile, resolveToolProfile } fro
 import type { EventBus } from "../utils/event-bus";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
-import { type AssignmentContractV1, type AssignmentResultV1, parseAssignmentResult } from "./assignment-contract";
+import {
+	type AssignmentContract,
+	type AssignmentResult,
+	parseAssignmentResult,
+} from "./assignment-contract";
 import {
 	type AssignmentVerificationResult,
 	type AssignmentVerifierRunners,
@@ -369,7 +374,7 @@ export interface ExecutorOptions {
 	/** Runtime collaboration authorization for registry/IRC behavior. */
 	collaborationPolicy?: CollaborationPolicy;
 	/** Parent-authored immutable acceptance contract. */
-	assignmentContract?: AssignmentContractV1;
+	assignmentContract?: AssignmentContract;
 	/** Failure-only context for a fresh recovery child; never includes transcript text. */
 	recoveryCapsule?: RecoveryCapsule;
 	/** Parent extension runner that evaluated pre-allocation spawn policy. */
@@ -428,6 +433,8 @@ export interface ExecutorOptions {
 	 * tool against its own `CustomToolAPI` (cwd, exec, pushPendingAction, UI).
 	 */
 	preloadedCustomToolPaths?: ToolPathWithSource[];
+	/** Parent client bridge inherited by live and revived child sessions. */
+	clientBridge?: ClientBridge;
 	mcpManager?: MCPManager;
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
@@ -1618,7 +1625,7 @@ async function driveSessionToYield(
 }
 
 interface AssignmentVerificationOutcome {
-	readonly assignmentResult?: AssignmentResultV1;
+	readonly assignmentResult?: AssignmentResult;
 	readonly verification: AssignmentVerificationResult;
 	readonly failureClass?: AssignmentFailureClass;
 	readonly isError: boolean;
@@ -1641,7 +1648,7 @@ function rejectedAssignmentVerification(
 }
 
 async function verifyAssignmentYield(args: {
-	contract: AssignmentContractV1;
+	contract: AssignmentContract;
 	lastYield: YieldItem | undefined;
 	monitor: SubagentRunMonitor;
 	runners?: AssignmentVerifierRunners;
@@ -1764,7 +1771,7 @@ interface FinalizeRunArgs {
 	executionProfile?: AgentExecutionProfile;
 	toolProfile?: ResolvedToolProfile;
 	collaborationPolicy?: CollaborationPolicy;
-	assignmentContract?: AssignmentContractV1;
+	assignmentContract?: AssignmentContract;
 	assignmentVerifierRunners?: AssignmentVerifierRunners;
 	actualChangedFiles?: readonly string[];
 	recoveryAttempt?: RecoveryAttempt;
@@ -2373,6 +2380,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				enableMCP,
 				mcpManager: options.mcpManager,
 				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+				clientBridge: options.clientBridge,
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,
 				parentEvalSessionId: options.parentEvalSessionId,

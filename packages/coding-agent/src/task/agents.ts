@@ -6,6 +6,8 @@
 import { Effort } from "@pk-nerdsaver-ai/pi-ai";
 import { parseFrontmatter, prompt } from "@pk-nerdsaver-ai/pi-utils";
 import { parseAgentFields } from "../discovery/helpers";
+import falsifyMd from "../prompts/agents/falsify.md" with { type: "text" };
+import auditMd from "../prompts/agents/audit.md" with { type: "text" };
 import browserControlMd from "../prompts/agents/browser-control.md" with { type: "text" };
 import browserOperationMd from "../prompts/agents/browser-operation.md" with { type: "text" };
 import designerMd from "../prompts/agents/designer.md" with { type: "text" };
@@ -51,6 +53,8 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 	{ fileName: "plan.md", template: planMd },
 	{ fileName: "designer.md", template: designerMd },
 	{ fileName: "reviewer.md", template: reviewerMd },
+	{ fileName: "falsify.md", template: falsifyMd },
+	{ fileName: "audit.md", template: auditMd },
 	{ fileName: "librarian.md", template: librarianMd },
 	{ fileName: "oracle.md", template: oracleMd },
 	{

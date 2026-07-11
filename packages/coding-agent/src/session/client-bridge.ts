@@ -18,6 +18,8 @@ export interface ClientBridgeCapabilities {
 	terminal?: boolean;
 	/** Client implements `session/request_permission`. */
 	requestPermission?: boolean;
+	/** Force bridge-mediated approval using normal per-tool tier/policy resolution. */
+	toolApprovalMode?: "always-ask";
 }
 
 export interface ClientBridgePermissionToolCall {

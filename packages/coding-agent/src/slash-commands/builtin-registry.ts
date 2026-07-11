@@ -50,6 +50,8 @@ import { handleSshAcp } from "./helpers/ssh";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleSubagentSlashCommand } from "./helpers/subagent";
 import { handleTodoAcp } from "./helpers/todo";
+import { vocalizer } from "../tts/vocalizer";
+import { clearSpeechHardStop, enableSpeechHardStop, isSpeechHardStopped } from "../tts/speech-hard-stop";
 import { buildUsageReportText } from "./helpers/usage-report";
 import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
 import type {
@@ -318,6 +320,75 @@ function parseShakeMode(args: string): ShakeMode | { error: string } {
 }
 
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
+	{
+		name: "pk-speak",
+		aliases: ["speech"],
+		description: "Hard-stop or control assistant speech vocalization",
+		acpDescription: "Hard-stop or control assistant speech vocalization",
+		acpInputHint: "[stop|off|quiet|silence|shush|on|status]",
+		subcommands: [
+			{ name: "stop", description: "Hard silence: disable speech and stop playback" },
+			{ name: "off", description: "Hard silence: disable speech and stop playback" },
+			{ name: "quiet", description: "Hard silence: disable speech and stop playback" },
+			{ name: "silence", description: "Hard silence: disable speech and stop playback" },
+			{ name: "shush", description: "Hard silence: disable speech and stop playback" },
+			{ name: "on", description: "Enable speech vocalization" },
+			{ name: "status", description: "Show speech vocalization status" },
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (!arg || arg === "stop" || arg === "off" || arg === "quiet" || arg === "silence" || arg === "shush") {
+				runtime.settings.set("speech.enabled", false);
+				enableSpeechHardStop();
+				vocalizer.clear();
+				await runtime.output("pk-speak stopped: speech disabled and playback cleared.");
+				return commandConsumed();
+			}
+			if (arg === "on" || arg === "enable" || arg === "start") {
+				clearSpeechHardStop();
+				runtime.settings.set("speech.enabled", true);
+				await runtime.output("pk-speak enabled: speech vocalization on.");
+				return commandConsumed();
+			}
+			if (arg === "status") {
+				const enabled = runtime.settings.get("speech.enabled");
+				const hard = isSpeechHardStopped();
+				await runtime.output(
+					`pk-speak: speech ${enabled ? "on" : "off"}${hard ? " (hard-stopped)" : ""}.`,
+				);
+				return commandConsumed();
+			}
+			return usage("Usage: /pk-speak [stop|off|on|status]", runtime);
+		},
+		handleTui: (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (!arg || arg === "stop" || arg === "off" || arg === "quiet" || arg === "silence" || arg === "shush") {
+				runtime.ctx.settings.set("speech.enabled", false);
+				enableSpeechHardStop();
+				vocalizer.clear();
+				runtime.ctx.showStatus("pk-speak stopped: speech disabled and playback cleared.");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (arg === "on" || arg === "enable" || arg === "start") {
+				clearSpeechHardStop();
+				runtime.ctx.settings.set("speech.enabled", true);
+				runtime.ctx.showStatus("pk-speak enabled: speech vocalization on.");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (arg === "status") {
+				const enabled = runtime.ctx.settings.get("speech.enabled");
+				const hard = isSpeechHardStopped();
+				runtime.ctx.showStatus(`pk-speak: speech ${enabled ? "on" : "off"}${hard ? " (hard-stopped)" : ""}.`);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			runtime.ctx.showStatus("Usage: /pk-speak [stop|off|on|status]");
+			runtime.ctx.editor.setText("");
+		},
+	},
 	{
 		name: "settings",
 		description: "Open settings menu",

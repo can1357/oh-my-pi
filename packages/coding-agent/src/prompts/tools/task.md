@@ -18,6 +18,8 @@
   - `id?`: stable agent id, CamelCase, ≤32 chars; auto-generated if omitted
   - `description?`: UI label only — subagent never sees it
   - `role?`: specialist identity (e.g. "Parser edge-case tester") — sets system-prompt persona + display name
+  - `strategyFamily?`: stable identifier for the causal/implementation family (e.g. `persistence`, `concurrency`) — parent tracks portfolio coverage
+  - `contextPolicy?`: `shared` (default), `blind` (no favored hypothesis or sibling findings), or `staged` (blind first pass; synthesis reveals later)
   - `model?`: explicit model selector; aliases and concrete catalog names resolve before agent defaults
   - `cwd?`: working directory; defaults to parent session cwd
 {{#if isolationEnabled}}
@@ -28,6 +30,8 @@
 - `id?`: stable agent id, CamelCase, ≤32 chars; auto-generated if omitted
 - `description?`: UI label only — subagent never sees it
 - `role?`: specialist identity (e.g. "Parser edge-case tester") — sets system-prompt persona + display name
+- `strategyFamily?`: stable identifier for the causal/implementation family (e.g. `persistence`, `concurrency`) — parent tracks portfolio coverage
+- `contextPolicy?`: `shared` (default), `blind` (no favored hypothesis or sibling findings), or `staged` (blind first pass; synthesis reveals later)
 - `model?`: explicit model selector; aliases and concrete catalog names resolve before agent defaults
 - `cwd?`: working directory; defaults to parent session cwd
 {{#if isolationEnabled}}
@@ -37,8 +41,8 @@
 </parameters>
 
 <rules>
-- **Maximize fan-out.** Issue the widest {{#if batchEnabled}}`tasks[]` batch{{else}}set of parallel `task` calls{{/if}}; NEVER serialize work that could run concurrently.
-- **Subagents do not verify, lint, or format.** Assignments MUST skip gates, formatters, and project-wide build/test/lint; you run them once at the end across the union of changed files.
+- **Maximize useful independence, not raw agent count.** For mechanical work, fan out across independent implementation slices. For uncertain or investigative work, assign materially different hypotheses, representations, or attack surfaces; give each strategy family a stable identifier (`strategyFamily`); avoid spawning multiple agents in the same family unless they use a distinct mechanism or one is explicitly adversarial (`falsify`, `audit`).
+- **Verification by work class.** Mechanical implementation workers: do not run project-wide gates; MAY run the smallest targeted check required to validate a local assumption; you run shared integration gates once at the end. Exploration and falsification workers: MUST verify every material claim with a concrete read, search, diagnostic, command, reproduction, or counterexample where available. Acceptance auditors: MUST execute or inspect contract-defined checks; MUST NOT accept the implementer's narrative as verification.
 - **Tailor every spawn with a `role`.** A role-less generic `task`/`quick_task` is the exception; decompose into named specialists.
 - Subagents have no conversation history. Every fact, file path, and direction MUST be explicit in {{#if batchEnabled}}`context` or each `assignment`{{else}}the `assignment`{{/if}}.
 - **Shared background** lives in ONE `local://` file referenced by every assignment. Pass large payloads via `local://<path>` URIs, never inline.
@@ -67,6 +71,8 @@
 # Target       ← exact files and symbols; explicit non-goals
 # Change       ← step-by-step add/remove/rename; APIs and patterns
 # Acceptance   ← observable result; no project-wide commands
+# NonSolutions ← what looks productive but does NOT satisfy the user (optional but recommended for investigative work)
+# FailureModes ← concrete classes of false success to reject (optional; e.g. empty input, Windows paths, race)
 </assignment-fmt>
 
 <agents>

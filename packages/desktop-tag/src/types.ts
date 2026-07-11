@@ -1,5 +1,12 @@
 import type { ImageContent } from "@pk-nerdsaver-ai/pi-ai";
 
+import type {
+	BrowserAccessibilityNode,
+	BrowserChatMessage,
+	BrowserEvidenceRedactions,
+	BrowserProvider,
+	BrowserTabIdentity,
+} from "./browser-context";
 /** What surface to capture when the overlay is invoked. */
 export type CaptureMode = "screen" | "window" | "region" | "browser";
 
@@ -48,13 +55,31 @@ export interface ForegroundAppContext {
 	executablePath?: string;
 }
 
-/** Browser context, when IX Bridge or a Chrome/Edge extension is available. */
+/** Browser context, when IX Bridge or a browser/chat extension is available. */
 export interface BrowserContext {
+	/** Compatibility fields retained for routing and existing consumers. */
 	url?: string;
 	title?: string;
 	tabId?: string;
 	domSnapshotRef?: string;
 	accessibilityTreeRef?: string;
+	/** Whether bounded rendered-page evidence was captured or an attempted capture failed. */
+	evidenceStatus?: "captured" | "unavailable";
+	provider?: BrowserProvider;
+	identity?: BrowserTabIdentity;
+	routing?: { resolvedLane: string; source: string; tabGroup: string | null };
+	accessibility?: {
+		text: string;
+		tree: BrowserAccessibilityNode[];
+		truncated: boolean;
+	};
+	chat?: {
+		messages: BrowserChatMessage[];
+		loadedHistoryOnly: true;
+		truncated: boolean;
+	};
+	redactions?: BrowserEvidenceRedactions;
+	warnings?: string[];
 }
 
 /** Selection / clipboard text, if available. */
@@ -179,7 +204,7 @@ export interface ApprovalDecision {
 /** Routing decision returned by the router. */
 export interface RoutingDecision {
 	executorId: string;
-	tools: string[];
+	suggestedTools: string[];
 	message: string;
 	level: ActionLevel;
 }

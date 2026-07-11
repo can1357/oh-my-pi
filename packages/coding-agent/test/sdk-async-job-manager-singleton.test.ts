@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,6 +7,7 @@ import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-reg
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { createAgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
+import { AgentRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-registry";
 import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("AsyncJobManager singleton across concurrent top-level sessions", () => {
@@ -38,7 +39,7 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		AsyncJobManager.resetForTests();
 	});
 
-	async function spawnTopLevelSession(extraSettings?: Record<string, unknown>) {
+	async function spawnTopLevelSession(agentId: string, extraSettings?: Record<string, unknown>) {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-async-singleton-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
 		const cwd = path.join(tempDir, `project-${Snowflake.next()}`);
@@ -56,17 +57,18 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			enableMCP: false,
 			enableLsp: false,
 			modelRegistry: sharedModelRegistry,
+			agentId,
 		});
 		return session;
 	}
 
 	it("keeps the primary session's manager installed after a secondary session disposes", async () => {
-		const primary = await spawnTopLevelSession();
+		const primary = await spawnTopLevelSession("root-a");
 		try {
 			const primaryManager = AsyncJobManager.instance();
 			expect(primaryManager).toBeDefined();
 
-			const secondary = await spawnTopLevelSession();
+			const secondary = await spawnTopLevelSession("root-b");
 			try {
 				// While the secondary is alive the global instance MUST still point at
 				// the primary's manager so background tools keep delivering completions
@@ -90,15 +92,13 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 	}, 60000);
 
 	it("does not cancel the primary session's running jobs when a secondary session disposes", async () => {
-		const primary = await spawnTopLevelSession();
+		const primary = await spawnTopLevelSession("root-a");
 		try {
 			const primaryManager = AsyncJobManager.instance();
 			expect(primaryManager).toBeDefined();
 
-			// Register a long-running job on the primary's manager under the
-			// MAIN_AGENT_ID owner — the same owner the secondary would inherit by
-			// default. The secondary's dispose-time `cancelOwnAsyncJobs` must NOT
-			// cancel this job (issue #1923).
+			// Register a long-running job for the primary. Disposing the secondary
+			// must only cancel jobs owned by the secondary's distinct root id.
 			const release = Promise.withResolvers<string>();
 			const jobId = primaryManager!.register(
 				"bash",
@@ -109,16 +109,28 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 					await Promise.race([release.promise, aborted.promise]);
 					return signal.aborted ? "aborted" : "completed";
 				},
-				{ ownerId: "Main" },
+				{ ownerId: "root-a" },
 			);
 			expect(primary.getAsyncJobSnapshot()?.running.some(job => job.id === jobId)).toBe(true);
 
-			const secondary = await spawnTopLevelSession();
-			try {
-				expect(secondary.getAsyncJobSnapshot()).toBeNull();
-			} finally {
-				await secondary.dispose();
-			}
+			const secondary = await spawnTopLevelSession("root-b");
+			const secondaryRelease = Promise.withResolvers<string>();
+			const secondaryJobId = primaryManager!.register(
+				"bash",
+				"root B sleep",
+				async ({ signal }) => {
+					const aborted = Promise.withResolvers<void>();
+					signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+					await Promise.race([secondaryRelease.promise, aborted.promise]);
+					return signal.aborted ? "aborted" : "completed";
+				},
+				{ ownerId: "root-b" },
+			);
+			expect(secondary.getAsyncJobSnapshot()?.running.map(job => job.id)).toEqual([secondaryJobId]);
+			await secondary.dispose();
+			expect(primaryManager!.getJob(secondaryJobId)?.status).toBe("cancelled");
+			expect(primary.getAsyncJobSnapshot()?.running.map(job => job.id)).toEqual([jobId]);
+			secondaryRelease.resolve("done");
 
 			const job = primaryManager!.getJob(jobId);
 			expect(job?.status).toBe("running");
@@ -130,29 +142,86 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		}
 	}, 60000);
 
-	it("refuses async bash from a secondary session instead of routing it to the primary's manager", async () => {
-		const primary = await spawnTopLevelSession({ "async.enabled": true });
+	it("shares async execution while filtering and routing two unique roots", async () => {
+		const primary = await spawnTopLevelSession("root-a", { "async.enabled": true });
 		try {
-			const primaryManager = AsyncJobManager.instance();
-			expect(primaryManager).toBeDefined();
-			const primaryJobCountBefore = primaryManager!.getAllJobs().length;
+			const manager = AsyncJobManager.instance();
+			expect(manager).toBeDefined();
 
-			const secondary = await spawnTopLevelSession({ "async.enabled": true });
+			const secondary = await spawnTopLevelSession("root-b", { "async.enabled": true });
 			try {
-				const bashTool = secondary.getToolByName("bash");
-				expect(bashTool).toBeDefined();
-				await expect(bashTool!.execute("call-1", { command: "echo hi", async: true })).rejects.toThrow(
-					/Async job manager unavailable/,
-				);
+				expect(secondary.asyncJobManager).toBe(manager);
+				const primaryEnqueue = primary.yieldQueue.enqueue.bind(primary.yieldQueue);
+				const secondaryEnqueue = secondary.yieldQueue.enqueue.bind(secondary.yieldQueue);
+				const primaryDeliveries: string[] = [];
+				const secondaryDeliveries: string[] = [];
+				primary.yieldQueue.enqueue = ((kind: string, entry: { jobId?: string }) => {
+					if (kind === "async-result" && entry.jobId) primaryDeliveries.push(entry.jobId);
+					primaryEnqueue(kind, entry);
+				}) as typeof primary.yieldQueue.enqueue;
+				secondary.yieldQueue.enqueue = ((kind: string, entry: { jobId?: string }) => {
+					if (kind === "async-result" && entry.jobId) secondaryDeliveries.push(entry.jobId);
+					secondaryEnqueue(kind, entry);
+				}) as typeof secondary.yieldQueue.enqueue;
+				const primaryArtifact = vi.spyOn(primary.sessionManager, "allocateArtifactPath");
+				const secondaryArtifact = vi.spyOn(secondary.sessionManager, "allocateArtifactPath");
+
+				const taskId = manager!.register("task", "root A task", async () => "task complete", {
+					id: "root-a-task",
+					ownerId: "root-a",
+				});
+				const bashId = manager!.register("bash", "root B bash", async () => "b".repeat(12_001), {
+					id: "root-b-bash",
+					ownerId: "root-b",
+				});
+
+				expect(primary.getAsyncJobSnapshot()?.running.map(job => job.id)).toEqual([taskId]);
+				expect(secondary.getAsyncJobSnapshot()?.running.map(job => job.id)).toEqual([bashId]);
+				const primaryList = await primary.getToolByName("job")!.execute("list-a", { list: true });
+				const secondaryList = await secondary.getToolByName("job")!.execute("list-b", { list: true });
+				expect((primaryList.details as { jobs: Array<{ id: string }> }).jobs.map(job => job.id)).toEqual([taskId]);
+				expect((secondaryList.details as { jobs: Array<{ id: string }> }).jobs.map(job => job.id)).toEqual([bashId]);
+				await manager!.waitForAll();
+				await manager!.drainDeliveries({ timeoutMs: 1_000 });
+				expect(primaryDeliveries).toEqual([taskId]);
+				expect(secondaryDeliveries).toEqual([bashId]);
+				expect(primaryArtifact).not.toHaveBeenCalled();
+				expect(secondaryArtifact).toHaveBeenCalledWith("async");
 			} finally {
 				await secondary.dispose();
 			}
 
-			// The secondary's failed async attempt must not have leaked a job into
-			// the primary's manager.
-			expect(primaryManager!.getAllJobs().length).toBe(primaryJobCountBefore);
+			expect(AsyncJobManager.instance()).toBe(manager);
 		} finally {
 			await primary.dispose();
+		}
+	}, 60000);
+
+	it("drops completion when the registered owner has vanished", async () => {
+		const owner = await spawnTopLevelSession("vanishing-root");
+		const manager = AsyncJobManager.instance();
+		expect(manager).toBeDefined();
+		const gate = Promise.withResolvers<string>();
+		const warn = vi.spyOn(await import("@pk-nerdsaver-ai/pi-utils").then(module => module.logger), "warn").mockImplementation(
+			() => {},
+		);
+		try {
+			manager!.register("task", "vanishing task", async () => gate.promise, {
+				id: "vanished-owner-job",
+				ownerId: "vanishing-root",
+			});
+			AgentRegistry.global().unregister("vanishing-root");
+			gate.resolve("must not be delivered");
+			await manager!.waitForAll();
+			await manager!.drainDeliveries({ timeoutMs: 1_000 });
+			expect(owner.yieldQueue.has("async-result")).toBe(false);
+			expect(warn).toHaveBeenCalledWith(
+				"Dropping async completion because its owner session is unavailable",
+				expect.objectContaining({ jobId: "vanished-owner-job", ownerId: "vanishing-root" }),
+			);
+		} finally {
+			warn.mockRestore();
+			await owner.dispose();
 		}
 	}, 60000);
 
@@ -184,7 +253,7 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 
 		expect(AsyncJobManager.instance()).toBeUndefined();
 
-		const replacement = await spawnTopLevelSession();
+		const replacement = await spawnTopLevelSession("replacement");
 		try {
 			expect(AsyncJobManager.instance()).toBeDefined();
 			expect(replacement.getAsyncJobSnapshot()).not.toBeNull();

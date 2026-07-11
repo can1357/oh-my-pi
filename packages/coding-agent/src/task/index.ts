@@ -36,7 +36,18 @@ import {
 	filterSkillsForHarness,
 	resolveAgentHarness,
 } from "../orchestration/agent-harness";
+import { applyContextPolicy, resolveWorkerMode } from "../orchestration/context-policy";
+import { recordSpawnTelemetry } from "../orchestration/orchestration-telemetry";
+import { snapshotFromAssignmentFields } from "../orchestration/task-contract";
 import type { CollaborationPolicy } from "../orchestration/collaboration-policy";
+import {
+	composeTaskSpawnPolicyResult,
+	createSpawnPlan,
+	type SpawnPlan,
+	type SpawnPlanDiagnostic,
+	type TaskSpawnPolicyInput,
+	tierToRouteLabel,
+} from "./spawn-plan";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentPrefetchEvidenceTemplate from "../prompts/system/subagent-prefetch-evidence.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
@@ -75,13 +86,6 @@ import type { RecoveryAttempt } from "./recovery-policy";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { buildRepoEvidence, formatRepoEvidence } from "./repo-evidence";
-import {
-	composeTaskSpawnPolicyResult,
-	createSpawnPlan,
-	type SpawnPlan,
-	type SpawnPlanDiagnostic,
-	type TaskSpawnPolicyInput,
-} from "./spawn-plan";
 import {
 	applyNestedPatches,
 	captureBaseline,
@@ -125,6 +129,8 @@ type OrchestratedTaskParams = TaskParams &
 			| "assignmentContract"
 			| "recoveryCapsule"
 			| "recoveryAttempt"
+			| "strategyFamily"
+			| "contextPolicy"
 		>
 	>;
 
@@ -455,6 +461,8 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 			assignmentContract: internal.assignmentContract,
 			recoveryCapsule: internal.recoveryCapsule,
 			recoveryAttempt: internal.recoveryAttempt,
+			strategyFamily: internal.strategyFamily,
+			contextPolicy: internal.contextPolicy,
 		},
 	];
 }
@@ -478,6 +486,8 @@ function spawnParamsFor(params: TaskParams, item: TaskItem): OrchestratedTaskPar
 	if (item.toolProfile !== undefined) spawn.toolProfile = item.toolProfile;
 	if (item.collaborationPolicy !== undefined) spawn.collaborationPolicy = item.collaborationPolicy;
 	if (item.assignmentContract !== undefined) spawn.assignmentContract = item.assignmentContract;
+	if (item.strategyFamily !== undefined) spawn.strategyFamily = item.strategyFamily;
+	if (item.contextPolicy !== undefined) spawn.contextPolicy = item.contextPolicy;
 	if (item.recoveryCapsule !== undefined) spawn.recoveryCapsule = item.recoveryCapsule;
 	if (item.recoveryAttempt !== undefined) spawn.recoveryAttempt = item.recoveryAttempt;
 	if (item.isolated !== undefined) {
@@ -891,6 +901,28 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		});
 		const toolProfile = params.toolProfile ?? harness.toolProfile;
 		const collaborationPolicy = params.collaborationPolicy ?? harness.collaborationPolicy;
+		recordSpawnTelemetry(this.session.getOrchestrationTelemetry?.() ?? { emit: () => {}, events: [] }, {
+			sessionId: this.session.getSessionId?.() ?? undefined,
+			correlationId: planned.plan.correlationId,
+			agentName,
+			strategyFamily: params.strategyFamily,
+			workerMode: resolveWorkerMode(agentName),
+			contextPolicy: params.contextPolicy ?? "shared",
+			routeLabel: tierToRouteLabel(planned.plan.profile.tier),
+			taskContractClass: params.assignmentContract ? "assignment-contract" : undefined,
+		});
+		if (params.assignmentContract && this.session.setActiveTaskContract) {
+			const contract = params.assignmentContract;
+			this.session.setActiveTaskContract(
+				snapshotFromAssignmentFields({
+					objective: contract.objective,
+					deliverables: contract.deliverables,
+					acceptance: contract.acceptance,
+					nonSolutions: "nonSolutions" in contract ? contract.nonSolutions : undefined,
+					failureModes: "failureModes" in contract ? contract.failureModes : undefined,
+				}),
+			);
+		}
 		// Callers may inject tool/collaboration ceilings; skill/decision surface
 		// still comes from the orchestration-selected harness for the plan profile.
 		const effectiveHarness: AgentHarness =
@@ -1500,7 +1532,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			extensionRunner,
 		} = prepared;
 		const agentName = agent.name;
-		const sharedContext = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
+		const rawSharedContext = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
+		const sharedContext = applyContextPolicy(params.contextPolicy, rawSharedContext);
 		const assignment = (params.assignment ?? "").trim();
 		const isolationMode = this.session.settings.get("task.isolation.mode");
 		const isolationRequested = "isolated" in params ? params.isolated === true : false;

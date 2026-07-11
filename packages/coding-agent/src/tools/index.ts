@@ -110,6 +110,7 @@ export * from "./search";
 export * from "./search-tool-bm25";
 export * from "./ssh";
 export * from "./todo";
+export * from "./tool-profiles";
 export * from "./tts";
 export * from "./write";
 export * from "./yield";
@@ -385,6 +386,12 @@ export interface ToolSession {
 	getTelemetry?: () => AgentTelemetryConfig | undefined;
 	/** Return image attachments visible to tools for resolving labels such as `Image #1`. */
 	getImageAttachments?: () => ImageAttachmentEntry[];
+	/** Active root/assignment contract snapshot for advisor watchdog review. */
+	setActiveTaskContract?: (
+		snapshot: import("../orchestration/task-contract").ActiveTaskContractSnapshot | undefined,
+	) => void;
+	/** Orchestration routing/learning telemetry sink for this session. */
+	getOrchestrationTelemetry?: () => import("../orchestration/orchestration-telemetry").OrchestrationTelemetrySink;
 }
 
 export type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;

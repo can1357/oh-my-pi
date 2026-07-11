@@ -16,6 +16,7 @@ import type {
 	AgentSessionEvent,
 	PromptOptions,
 } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
+import type { ClientBridge } from "@pk-nerdsaver-ai/pi-coding-agent/session/client-bridge";
 import { runSubprocess } from "@pk-nerdsaver-ai/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@pk-nerdsaver-ai/pi-coding-agent/task/types";
 import { EventBus } from "@pk-nerdsaver-ai/pi-coding-agent/utils/event-bus";
@@ -127,6 +128,20 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.rules).toBe(rules);
 		expect(forwarded?.preloadedExtensionPaths).toBe(preloadedExtensionPaths);
 		expect(forwarded?.preloadedCustomToolPaths).toBe(preloadedCustomToolPaths);
+	});
+
+	it("forwards the parent client bridge to child session creation", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const clientBridge: ClientBridge = {
+			capabilities: { requestPermission: true, toolApprovalMode: "always-ask" },
+			requestPermission: async () => ({ outcome: "cancelled" }),
+		};
+
+		const result = await runSubprocess({ ...baseOptions, clientBridge });
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.clientBridge).toBe(clientBridge);
 	});
 
 	it("forwards undefined when the parent has not pre-discovered state", async () => {

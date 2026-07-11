@@ -218,6 +218,19 @@ import { containsWorkflow, WORKFLOW_NOTICE } from "../modes/workflow";
 import { authorizeIrcDelivery, type CollaborationPolicy } from "../orchestration/collaboration-policy";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { PlanModeState } from "../plan-mode/state";
+import { composeAdvisorSystemPrompt } from "../advisor/task-contract-block";
+import { ApproachRegistry } from "../orchestration/approach-registry";
+import {
+	evaluateCompletionGate,
+	type CompletionGateEvaluation,
+	type CompletionGateInput,
+} from "../orchestration/completion-gate";
+import {
+	createOrchestrationTelemetrySink,
+	recordAdvisorInterventionTelemetry,
+	type OrchestrationTelemetrySink,
+} from "../orchestration/orchestration-telemetry";
+import type { ActiveTaskContractSnapshot } from "../orchestration/task-contract";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
@@ -266,6 +279,7 @@ import {
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import type { CheckpointState } from "../tools/checkpoint";
 import { BUILTIN_TOOLS, HIDDEN_TOOLS, isAllowedByToolProfile } from "../tools/index";
+import { formatApprovalPrompt, resolveApproval, truncateForPrompt } from "../tools/approval";
 import { outputMeta, wrapToolWithMetaNotice } from "../tools/output-meta";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
@@ -455,6 +469,8 @@ export interface AgentSessionConfig {
 	settings: Settings;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
 	autoApprove?: boolean;
+	/** External client capabilities installed before this session can execute tools. */
+	clientBridge?: ClientBridge;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Initial session thinking selector. */
@@ -520,18 +536,14 @@ export interface AgentSessionConfig {
 	evalKernelOwnerId?: string;
 	/**
 	 * AsyncJobManager that this session installed as the process-global instance.
-	 * Only set for top-level sessions; subagents inherit the parent's manager and
-	 * **MUST NOT** dispose it on their own teardown.
+	 * Only the creating root receives ownership; every other root and subagent
+	 * shares it without gaining disposal authority.
 	 */
 	ownedAsyncJobManager?: AsyncJobManager;
 	moa?: { laneLabels: readonly string[] };
 	/**
-	 * AsyncJobManager reachable by this session for scoped job actions.
-	 *
-	 * Top-level owners receive their own manager, subagents receive the inherited
-	 * parent manager, and secondary in-process top-level sessions receive
-	 * `undefined` so job snapshots and ACP drains cannot observe the primary's
-	 * state.
+	 * Shared AsyncJobManager reachable by this session for owner-scoped actions.
+	 * Queries, cancellation, and completion delivery are filtered by `agentId`.
 	 */
 	asyncJobManager?: AsyncJobManager;
 	/** Agent identity (registry id like "Main" or "Alice") used for IRC routing. */
@@ -892,6 +904,14 @@ const PERMISSION_OPTIONS: ClientBridgePermissionOption[] = [
 
 const PERMISSION_OPTIONS_BY_ID = new Map(PERMISSION_OPTIONS.map(option => [option.optionId, option]));
 
+function formatClientBridgeApprovalDetails(tool: AgentTool, args: unknown, reason?: string): string {
+	try {
+		return truncateForPrompt(formatApprovalPrompt(tool, args, reason));
+	} catch {
+		return `Allow tool: ${tool.name}`;
+	}
+}
+
 function getStringProperty(value: Record<string, unknown>, key: string): string | undefined {
 	const candidate = value[key];
 	return typeof candidate === "string" ? candidate : undefined;
@@ -1179,6 +1199,9 @@ export class AgentSession {
 	#advisorAgent?: Agent;
 	#advisorReadOnlyTools?: AgentTool[];
 	#advisorWatchdogPrompt?: string;
+	#activeTaskContract?: ActiveTaskContractSnapshot;
+	#approachRegistry = new ApproachRegistry();
+	#orchestrationTelemetry: OrchestrationTelemetrySink = createOrchestrationTelemetrySink();
 	#advisorYieldQueueUnsubscribe?: () => void;
 	/** Persists the advisor agent's turns to `<session>/__advisor.jsonl` for stats
 	 *  attribution and Agent Hub observability. Undefined when no advisor is active. */
@@ -1234,17 +1257,11 @@ export class AgentSession {
 	#evalKernelOwnerId: string;
 	#parentEvalSessionId: string | undefined;
 	/**
-	 * AsyncJobManager owned by this session (top-level only). Subagents leave
-	 * this undefined and **MUST NOT** dispose the global instance on teardown.
+	 * Process AsyncJobManager owned only by the root that created the singleton.
+	 * Sharing roots and subagents leave this undefined and cannot dispose it.
 	 */
 	readonly #ownedAsyncJobManager: AsyncJobManager | undefined;
-	/**
-	 * AsyncJobManager scoped to this session for introspection/cancellation.
-	 *
-	 * This differs from `#ownedAsyncJobManager`: subagents can inherit a parent
-	 * manager for their own owner id, while secondary top-level sessions are left
-	 * undefined to avoid reading the primary's jobs.
-	 */
+	/** Shared manager used with this session's agent id as the owner scope. */
 	readonly #asyncJobManager: AsyncJobManager | undefined;
 	#pendingPythonMessages: PythonExecutionMessage[] = [];
 	#activeEvalExecutions = new Set<Promise<unknown>>();
@@ -1760,6 +1777,7 @@ export class AgentSession {
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		this.#unsubscribeAppendOnly = onAppendOnlyModeChanged(_value => this.#syncAppendOnlyContext(this.model));
+		if (config.clientBridge) this.setClientBridge(config.clientBridge);
 	}
 	// -------------------------------------------------------------------------
 	// Advisor runtime lifecycle
@@ -1873,6 +1891,12 @@ export class AgentSession {
 		// strand the advice and dump the backlog as one burst at the next prompt. A
 		// plain nit always rides the non-interrupting YieldQueue aside.
 		const enqueueAdvice = (note: string, severity?: AdvisorSeverity) => {
+			if (severity) {
+				recordAdvisorInterventionTelemetry(this.#orchestrationTelemetry, {
+					sessionId: this.sessionId ?? undefined,
+					advisorSeverity: severity,
+				});
+			}
 			const interrupting = isInterruptingSeverity(severity);
 			const channel = resolveAdvisorDeliveryChannel({
 				severity,
@@ -1917,10 +1941,11 @@ export class AgentSession {
 
 		const appendOnlyContext = new AppendOnlyContextManager();
 		const advisorThinkingLevel = advisorSel.thinkingLevel ?? ThinkingLevel.Medium;
-		const systemPrompt = [advisorSystemPrompt];
-		if (this.#advisorWatchdogPrompt) {
-			systemPrompt.push(this.#advisorWatchdogPrompt);
-		}
+		const systemPrompt = composeAdvisorSystemPrompt({
+			basePrompt: advisorSystemPrompt,
+			watchdogPrompt: this.#advisorWatchdogPrompt,
+			activeTaskContract: this.#activeTaskContract,
+		});
 		const advisorSessionId = this.sessionId ? `${this.sessionId}-advisor` : undefined;
 
 		// Thread the primary's telemetry into the advisor loop so the advisor
@@ -2408,12 +2433,8 @@ export class AgentSession {
 	 * transitions (newSession, switchSession, handoff, dispose) so a subagent
 	 * cleans up its own background work without touching its parent's jobs.
 	 *
-	 * Cancellation runs against this session's scoped manager. Subagents have
-	 * unique agent ids and inherit the parent's manager to clean up their own
-	 * jobs. A secondary in-process top-level session gets no scoped manager,
-	 * because it defaults to `MAIN_AGENT_ID`; reaching through the global
-	 * singleton would tear down the owning primary session's bash/task jobs at
-	 * dispose time (issue #1923).
+	 * Cancellation runs against the shared manager with this session's unique
+	 * agent id, so roots and subagents clean up only their own jobs.
 	 *
 	 * No-op when no manager is reachable or this session has no agent id.
 	 */
@@ -4732,25 +4753,22 @@ export class AgentSession {
 	}
 
 	/**
-	 * Wrap a tool with a permission-gate proxy when an ACP client is connected.
-	 * Only wraps tools whose name is in PERMISSION_REQUIRED_TOOLS and only when
-	 * the bridge exposes `requestPermission`. No-ops for all other cases.
-	 *
-	 * When the user has explicitly opted into `yolo` / auto-approve behavior (via
-	 * the SDK/CLI `autoApprove` flag or a configured `tools.approvalMode: yolo`),
-	 * skips the gate unless the per-tool policy explicitly requires a prompt or
-	 * deny. The schema default is also `yolo`, so an explicit configuration or
-	 * explicit session flag is required: default-config ACP sessions keep the
-	 * client-side permission gate.
+	 * Wrap a tool with a permission-gate proxy when an external client exposes
+	 * `requestPermission`. Legacy ACP bridges retain the historical hard-coded
+	 * bash/destructive-edit behavior. Bridges opting into `toolApprovalMode`
+	 * instead gate every write/exec tier through normal approval metadata while
+	 * read-tier calls pass through and explicit denies fail closed, independent
+	 * of the session's global yolo setting.
 	 */
 	#wrapToolForAcpPermission<T extends AgentTool>(tool: T): T {
 		const bridge = this.#clientBridge;
 		// Match the capability+method gating pattern used by read/write/bash.
 		if (!bridge?.capabilities.requestPermission || !bridge.requestPermission) return tool;
-		if (!PERMISSION_REQUIRED_TOOLS.has(tool.name)) return tool;
-		// Skip the gate only on explicit yolo opt-in; honour per-tool policies
-		// that require a prompt or deny (matching the normal approval wrapper).
-		if (this.#isExplicitAutoApproveMode()) {
+		const bridgeApprovalMode = bridge.capabilities.toolApprovalMode;
+		if (!bridgeApprovalMode && !PERMISSION_REQUIRED_TOOLS.has(tool.name)) return tool;
+		// Preserve legacy ACP behavior when the bridge does not opt into generic
+		// metadata-based gating. Explicit yolo still honours per-tool prompt/deny.
+		if (!bridgeApprovalMode && this.#isExplicitAutoApproveMode()) {
 			const userPolicies = (this.settings.get("tools.approval") ?? {}) as Record<string, unknown>;
 			const toolPolicy = userPolicies[tool.name];
 			if (!toolPolicy || toolPolicy === "allow") return tool;
@@ -4765,7 +4783,23 @@ export class AgentSession {
 					onUpdate: never,
 					ctx: never,
 				) => {
-					const permissionIntent = getPermissionIntent(target.name, args);
+					const userPolicies = (this.settings.get("tools.approval") ?? {}) as Record<string, unknown>;
+					const resolvedApproval = bridgeApprovalMode
+						? resolveApproval(target, args, bridgeApprovalMode, userPolicies)
+						: undefined;
+					if (resolvedApproval?.policy === "deny") {
+						throw new ToolError(`Tool "${target.name}" is blocked by user policy`);
+					}
+					if (resolvedApproval?.tier === "read") {
+						return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
+					}
+
+					const permissionIntent = bridgeApprovalMode
+						? {
+								title: truncateForPrompt(`Allow ${target.name}`, 200),
+								cacheKey: `${target.name}:${resolvedApproval?.tier ?? "exec"}`,
+							}
+						: getPermissionIntent(target.name, args);
 					if (!permissionIntent) {
 						return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
 					}
@@ -4773,10 +4807,16 @@ export class AgentSession {
 						target.name === "bash" && args && typeof args === "object" && !Array.isArray(args)
 							? getStringProperty(args as Record<string, unknown>, "command")
 							: undefined;
-					const commandContent = command
-						? [{ type: "content" as const, content: { type: "text" as const, text: `$ ${command}` } }]
+					const genericDetails = bridgeApprovalMode
+						? formatClientBridgeApprovalDetails(target, args, resolvedApproval?.reason)
 						: undefined;
-					// Short-circuit on persisted decisions.
+					const callContent = genericDetails
+						? [{ type: "content" as const, content: { type: "text" as const, text: genericDetails } }]
+						: command
+							? [{ type: "content" as const, content: { type: "text" as const, text: `$ ${command}` } }]
+							: undefined;
+					// Short-circuit on persisted decisions only after resolving the current
+					// policy, so a newly configured explicit deny always remains authoritative.
 					const persisted = this.#acpPermissionDecisions.get(permissionIntent.cacheKey);
 					if (persisted === "allow_always") {
 						return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
@@ -4800,14 +4840,16 @@ export class AgentSession {
 								toolCallId,
 								toolName: target.name,
 								title: permissionIntent.title,
-								...(target.name === "bash" ? { kind: "execute" } : {}),
+								...(resolvedApproval?.tier === "exec" || (!bridgeApprovalMode && target.name === "bash")
+									? { kind: "execute" }
+									: {}),
 								status: "pending",
 								rawInput: args,
-								...(commandContent ? { content: commandContent } : {}),
+								...(callContent ? { content: callContent } : {}),
 								locations: extractPermissionLocations(
 									args,
 									this.sessionManager.getCwd(),
-									permissionIntent.paths,
+									"paths" in permissionIntent ? permissionIntent.paths : undefined,
 								),
 							},
 							PERMISSION_OPTIONS,
@@ -12994,6 +13036,48 @@ export class AgentSession {
 	 */
 	isAdvisorActive(): boolean {
 		return this.#advisorAgent !== undefined;
+	}
+
+	/**
+	 * Set the active root/assignment contract snapshot for advisor watchdog review.
+	 * Rebuilds the advisor system prompt when the runtime is already active.
+	 */
+	setActiveTaskContract(snapshot: ActiveTaskContractSnapshot | undefined): void {
+		this.#activeTaskContract = snapshot;
+		this.#syncAdvisorSystemPrompt();
+	}
+
+	getActiveTaskContract(): ActiveTaskContractSnapshot | undefined {
+		return this.#activeTaskContract;
+	}
+
+	getOrchestrationTelemetry(): OrchestrationTelemetrySink {
+		return this.#orchestrationTelemetry;
+	}
+
+	getApproachRegistry(): ApproachRegistry {
+		return this.#approachRegistry;
+	}
+
+	evaluateRootCompletionGate(input: CompletionGateInput): CompletionGateEvaluation {
+		const evaluation = evaluateCompletionGate(input);
+		this.#orchestrationTelemetry.emit({
+			kind: "completion_gate",
+			timestamp: Date.now(),
+			sessionId: this.sessionId ?? undefined,
+			completionGateOutcome: evaluation.outcome,
+		});
+		return evaluation;
+	}
+
+	#syncAdvisorSystemPrompt(): void {
+		if (!this.#advisorAgent) return;
+		const systemPrompt = composeAdvisorSystemPrompt({
+			basePrompt: advisorSystemPrompt,
+			watchdogPrompt: this.#advisorWatchdogPrompt,
+			activeTaskContract: this.#activeTaskContract,
+		});
+		this.#advisorAgent.setSystemPrompt(systemPrompt);
 	}
 
 	isMoaActive(): boolean {

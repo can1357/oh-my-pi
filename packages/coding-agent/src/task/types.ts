@@ -7,7 +7,8 @@ import type { AgentExecutionProfile, AgentTier, CollaborationMode } from "../orc
 import type { CollaborationPolicy } from "../orchestration/collaboration-policy";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ResolvedToolProfile } from "../tools/tool-profiles";
-import type { AssignmentContractV1 } from "./assignment-contract";
+import type { ContextPolicy } from "../orchestration/context-policy";
+import type { AssignmentContract } from "./assignment-contract";
 import type { AssignmentFailureClass, RecoveryAttempt, RecoveryCapsule, RecoveryDecision } from "./recovery-policy";
 import type { NestedRepoPatch } from "./worktree";
 
@@ -131,7 +132,11 @@ export interface TaskItem {
 	/** Runtime collaboration authorization applied to the child. */
 	collaborationPolicy?: CollaborationPolicy;
 	/** Explicit assignment contract used for verified execution. */
-	assignmentContract?: AssignmentContractV1;
+	assignmentContract?: AssignmentContract;
+	/** Stable identifier for the causal/implementation family in orchestration portfolios. */
+	strategyFamily?: string;
+	/** How much shared batch context this spawn receives. */
+	contextPolicy?: ContextPolicy;
 	/** Fresh-child recovery capsule; absent for initial and legacy spawns. */
 	recoveryCapsule?: RecoveryCapsule;
 	/** Planned fresh-child recovery attempt. */
@@ -308,7 +313,7 @@ export interface AgentProgress {
 	executionProfile?: AgentExecutionProfile;
 	toolProfile?: ResolvedToolProfile;
 	collaborationPolicy?: CollaborationPolicy;
-	assignmentContract?: AssignmentContractV1;
+	assignmentContract?: AssignmentContract;
 	assignmentVerificationStatus?: AssignmentVerificationStatus;
 	profileTier?: AgentTier;
 	collaborationMode?: CollaborationMode;
@@ -392,7 +397,7 @@ export interface SingleResult {
 	executionProfile?: AgentExecutionProfile;
 	toolProfile?: ResolvedToolProfile;
 	collaborationPolicy?: CollaborationPolicy;
-	assignmentContract?: AssignmentContractV1;
+	assignmentContract?: AssignmentContract;
 	assignmentVerificationStatus?: AssignmentVerificationStatus;
 	contractDigest?: string;
 	contractRevision?: number;

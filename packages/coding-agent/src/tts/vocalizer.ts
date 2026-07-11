@@ -24,6 +24,7 @@
  */
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
 import { settings } from "../config/settings";
+import { isSpeechHardStopped } from "./speech-hard-stop";
 import { DEFAULT_TTS_VOICE } from "./models";
 import { createStreamingPlayer, DUCK_GAIN } from "./streaming-player";
 import { type TtsStreamHandle, ttsClient } from "./tts-client";
@@ -59,7 +60,7 @@ export class Vocalizer {
 	 * complete sentence; the trailing partial is flushed by {@link flush}.
 	 */
 	pushDelta(text: string): void {
-		if (!settings.get("speech.enabled")) return;
+		if (!settings.get("speech.enabled") || isSpeechHardStopped()) return;
 		if (!text) return;
 		this.#ensureSession().push(text);
 	}
@@ -79,7 +80,7 @@ export class Vocalizer {
 	 * message): stream it in and immediately close the input. No-op when disabled.
 	 */
 	speak(text: string): void {
-		if (!settings.get("speech.enabled")) return;
+		if (!settings.get("speech.enabled") || isSpeechHardStopped()) return;
 		if (!text) return;
 		this.#ensureSession().push(text);
 		this.flush();
@@ -138,7 +139,7 @@ export class Vocalizer {
 		let started = false;
 		try {
 			for await (const chunk of handle.chunks) {
-				if (signal.aborted) break;
+				if (signal.aborted || isSpeechHardStopped()) break;
 				if (!started) {
 					player.start(chunk.sampleRate);
 					started = true;

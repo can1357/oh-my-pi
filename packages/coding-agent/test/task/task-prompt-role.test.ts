@@ -21,13 +21,13 @@ function render(batchEnabled: boolean): string {
 describe("task tool description: role parameter", () => {
 	it("documents `role` in the batch parameter list", () => {
 		const out = render(true);
-		expect(out).toContain("`role`:");
+		expect(out).toContain("`role?`:");
 		expect(out).toMatch(/specialist identity/i);
 	});
 
 	it("documents `role` in the flat (single-spawn) parameter list", () => {
 		const out = render(false);
-		expect(out).toContain("`role`:");
+		expect(out).toContain("`role?`:");
 	});
 
 	it("makes tailored specialists the default, not the exception, in the rules", () => {

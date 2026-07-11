@@ -4,6 +4,7 @@ import {
 	filterToolCapabilities,
 	isToolCapabilityAllowed,
 	resolveToolProfile,
+	resolveUnrestrictedToolProfile,
 	type ToolCapability,
 } from "../../src/tools/tool-profiles";
 
@@ -88,6 +89,29 @@ describe("resolveToolProfile", () => {
 		expect(profile.toolsConstrained).toBe(false);
 		expect(isToolCapabilityAllowed(profile, { source: "builtin", name: "edit" })).toBe(true);
 		expect(profile.editMode).toBe("replace");
+	});
+});
+
+describe("resolveUnrestrictedToolProfile", () => {
+	test("allows every current source without naming individual tools", () => {
+		const profile = resolveUnrestrictedToolProfile();
+		const sources = ["builtin", "mcp", "extension", "custom", "hidden"] as const;
+
+		expect(profile.maximum).toEqual(sources.map(source => ({ source, name: "*" })));
+		for (const source of sources) {
+			expect(isToolCapabilityAllowed(profile, { source, name: `future-${source}-tool` })).toBe(true);
+		}
+		expect(profile.editMode).toBe("hashline");
+		expect(profile.allowDiscovery).toBe(true);
+		expect(profile.toolsConstrained).toBe(false);
+	});
+
+	test("returns an immutable profile", () => {
+		const profile = resolveUnrestrictedToolProfile();
+
+		expect(Object.isFrozen(profile)).toBe(true);
+		expect(Object.isFrozen(profile.maximum)).toBe(true);
+		expect(profile.maximum.every(Object.isFrozen)).toBe(true);
 	});
 });
 

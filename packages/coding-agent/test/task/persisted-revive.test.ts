@@ -6,6 +6,7 @@ import { AgentRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-r
 import * as sdkModule from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import type { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
+import type { ClientBridge } from "@pk-nerdsaver-ai/pi-coding-agent/session/client-bridge";
 import { createPersistedSubagentReviverFactory } from "@pk-nerdsaver-ai/pi-coding-agent/task/persisted-revive";
 import { EventBus } from "@pk-nerdsaver-ai/pi-coding-agent/utils/event-bus";
 import type { ModelRegistry } from "../../src/config/model-registry";
@@ -15,6 +16,7 @@ function mockSession(): AgentSession {
 	return {
 		sessionManager: { getArtifactManager: () => undefined },
 		setActiveToolsByName: async () => {},
+		setCollaborationPolicy: () => {},
 		subscribe: () => () => {},
 	} as unknown as AgentSession;
 }
@@ -53,11 +55,16 @@ describe("persisted Fusion sidekick revive", () => {
 				setToolUIContext: () => {},
 				eventBus: new EventBus(),
 			});
+			const clientBridge: ClientBridge = {
+				capabilities: { requestPermission: true, toolApprovalMode: "always-ask" },
+				requestPermission: async () => ({ outcome: "cancelled" }),
+			};
 			const topSession = {
 				sessionManager: {
 					getCwd: () => dir,
 					getArtifactManager: () => undefined,
 				},
+				clientBridge,
 			} as unknown as AgentSession;
 			const reviveFactory = createPersistedSubagentReviverFactory({
 				session: topSession,
@@ -80,6 +87,7 @@ describe("persisted Fusion sidekick revive", () => {
 			const options = spy.mock.calls[0]?.[0];
 			expect(options).toBeDefined();
 			expect(options?.maxModelRequestsPerRun).toBe(4);
+			expect(options?.clientBridge).toBe(clientBridge);
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}

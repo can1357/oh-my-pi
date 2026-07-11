@@ -7,6 +7,7 @@ import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-registry";
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
+import type { ClientBridge } from "@pk-nerdsaver-ai/pi-coding-agent/session/client-bridge";
 import { TaskTool } from "@pk-nerdsaver-ai/pi-coding-agent/task";
 import * as discoveryModule from "@pk-nerdsaver-ai/pi-coding-agent/task/discovery";
 import * as executorModule from "@pk-nerdsaver-ai/pi-coding-agent/task/executor";
@@ -87,7 +88,11 @@ describe("TaskTool spawn profile integration", () => {
 		tempDir.removeSync();
 	});
 
-	function createSession(settings: Record<string, unknown>, manager?: AsyncJobManager): SessionFixture {
+	function createSession(
+		settings: Record<string, unknown>,
+		manager?: AsyncJobManager,
+		clientBridge?: ClientBridge,
+	): SessionFixture {
 		const outputManager = new AgentOutputManager(() => null);
 		return {
 			outputManager,
@@ -99,6 +104,7 @@ describe("TaskTool spawn profile integration", () => {
 				agentOutputManager: outputManager,
 				getSessionFile: () => null,
 				getSessionSpawns: () => "*",
+				getClientBridge: () => clientBridge,
 				asyncJobManager: manager,
 			} as unknown as ToolSession,
 		};
@@ -187,26 +193,36 @@ describe("TaskTool spawn profile integration", () => {
 		expect(executorSpy).not.toHaveBeenCalled();
 	});
 
-	it("passes the valid frozen plan and resolved profile fields to the executor", async () => {
-		const fixture = createSession({
-			"async.enabled": false,
-			"task.prefetch.enabled": false,
-			"task.agentPolicies": {
-				task: {
-					tier: "mid",
-					autonomy: "supervised",
-					collaboration: "report-only",
-					workClass: "mechanical",
-					editMode: "hashline",
-					maxRequests: 7,
-					maxRuntimeMs: 1234,
-					modelPool: [selector],
+	it("passes the valid frozen plan, resolved profile, and client bridge to the executor", async () => {
+		const clientBridge: ClientBridge = {
+			capabilities: { requestPermission: true, toolApprovalMode: "always-ask" },
+			requestPermission: async () => ({ outcome: "cancelled" }),
+		};
+		const fixture = createSession(
+			{
+				"async.enabled": false,
+				"task.prefetch.enabled": false,
+				"task.agentPolicies": {
+					task: {
+						tier: "mid",
+						autonomy: "supervised",
+						collaboration: "report-only",
+						workClass: "mechanical",
+						editMode: "hashline",
+						maxRequests: 7,
+						maxRuntimeMs: 1234,
+						modelPool: [selector],
+					},
 				},
 			},
-		});
+			undefined,
+			clientBridge,
+		);
 		let capturedPlan: SpawnPlan | undefined;
+		let capturedBridge: ClientBridge | undefined;
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
 			capturedPlan = options.spawnPlan;
+			capturedBridge = options.clientBridge;
 			return successfulResult(options);
 		});
 		const tool = await TaskTool.create(fixture.session);
@@ -233,6 +249,7 @@ describe("TaskTool spawn profile integration", () => {
 			maxRuntimeMs: 1234,
 		});
 		expect(capturedPlan?.maxRequests).toBe(7);
+		expect(capturedBridge).toBe(clientBridge);
 		expect(capturedPlan?.maxRuntimeMs).toBe(1234);
 	});
 });

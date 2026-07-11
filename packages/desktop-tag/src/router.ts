@@ -4,7 +4,7 @@ import { isCaptureMode } from "./types";
 
 interface RouteSpec {
 	executorId: string;
-	tools: string[];
+	suggestedTools: string[];
 	level: ActionLevel;
 }
 
@@ -130,7 +130,7 @@ export function createDefaultRegistry(): CapabilityRegistry {
 	return registry;
 }
 
-/** Route a captured context packet to an executor and a constrained tool set. */
+/** Route captured context to an executor with advisory tool suggestions. */
 export function routeContext(registry: CapabilityRegistry, packet: ContextPacket): RoutingDecision {
 	assertContextPacket(packet);
 	const availableExecutors = registry.listExecutors().filter(executor => executor.available);
@@ -144,29 +144,37 @@ export function routeContext(registry: CapabilityRegistry, packet: ContextPacket
 	let preferred: RouteSpec;
 
 	if (request.match(/\bemail\b|\bmail\b|\bgmail\b/)) {
-		preferred = { executorId: "gmail-mcp", tools: ["email.search", "email.read", "email.draft"], level: 2 };
+		preferred = {
+			executorId: "gmail-mcp",
+			suggestedTools: ["email.search", "email.read", "email.draft"],
+			level: 2,
+		};
 	} else if (request.match(/\bserver\b|\bremote\b|\bssh\b|\brun on the server\b/)) {
-		preferred = { executorId: "remote-hub", tools: ["remote.execute", "ssh"], level: 2 };
+		preferred = { executorId: "remote-hub", suggestedTools: ["remote.execute", "ssh"], level: 2 };
 	} else if (request.match(/\bclick\b|\bpress\b|\btype in\b|\bscreen\b/)) {
-		preferred = { executorId: "computer-use", tools: ["screen.click", "screen.type", "screen.keypress"], level: 3 };
+		preferred = {
+			executorId: "computer-use",
+			suggestedTools: ["screen.click", "screen.type", "screen.keypress"],
+			level: 3,
+		};
 	} else if (request.match(/\bsalesforce\b/) || url.includes("salesforce.com") || title.includes("salesforce")) {
-		preferred = { executorId: "ix-bridge", tools: ["ix_bridge", "browser", "web_search"], level: 2 };
+		preferred = { executorId: "ix-bridge", suggestedTools: ["ix_bridge", "browser", "web_search"], level: 2 };
 	} else if (request.match(/\bportal\b|\bpowerclerk\b|\bxcel\b/)) {
-		preferred = { executorId: "ix-bridge", tools: ["ix_bridge", "browser"], level: 2 };
+		preferred = { executorId: "ix-bridge", suggestedTools: ["ix_bridge", "browser"], level: 2 };
 	} else if (request.match(/\bfix\b|\bcode\b|\bedit\b|\brefactor\b|\btest\b|\bbuild\b/)) {
 		preferred = {
 			executorId: "local-pi",
-			tools: ["bash", "read", "edit", "write", "search", "find", "lsp"],
+			suggestedTools: ["bash", "read", "edit", "write", "search", "find", "lsp"],
 			level: 2,
 		};
 	} else if (request.match(/\bupdate\b|\bchange\b|\bsave\b|\bcreate\b|\bdelete\b/)) {
-		preferred = { executorId: "local-pi", tools: ["bash", "read", "write", "edit"], level: 2 };
+		preferred = { executorId: "local-pi", suggestedTools: ["bash", "read", "write", "edit"], level: 2 };
 	} else {
-		preferred = { executorId: "answer-only", tools: ["inspect_image", "web_search", "ask"], level: 0 };
+		preferred = { executorId: "answer-only", suggestedTools: ["inspect_image", "web_search", "ask"], level: 0 };
 	}
 
 	const selected = availableExecutors.find(executor => executor.id === preferred.executorId);
-	if (selected) return decision(preferred.executorId, preferred.tools, preferred.level);
+	if (selected) return decision(preferred.executorId, preferred.suggestedTools, preferred.level);
 
 	const fallback = availableExecutors.find(executor => executor.id === "answer-only") ?? availableExecutors[0];
 	if (!fallback) throw new Error("No available executors are registered");
@@ -233,11 +241,11 @@ function assertNonblankString(value: unknown, name: string): asserts value is st
 	if (typeof value !== "string" || value.trim().length === 0) throw new TypeError(`${name} must be a nonblank string`);
 }
 
-function decision(executorId: string, tools: string[], level: ActionLevel): RoutingDecision {
+function decision(executorId: string, suggestedTools: string[], level: ActionLevel): RoutingDecision {
 	return {
 		executorId,
-		tools,
-		message: `Routing to ${executorId} with tools [${tools.join(", ")}]`,
+		suggestedTools,
+		message: `Routing to ${executorId}; suggested tools [${suggestedTools.join(", ")}]`,
 		level,
 	};
 }

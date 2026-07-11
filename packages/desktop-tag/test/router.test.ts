@@ -73,7 +73,7 @@ describe("routeContext", () => {
 		const decision = routeContext(registry, makePacket({ userRequest: "what does this error mean?" }));
 
 		expect(decision.executorId).toBe("answer-only");
-		expect(decision.tools).toContain("inspect_image");
+		expect(decision.suggestedTools).toContain("inspect_image");
 		expect(decision.level).toBe(0);
 	});
 
@@ -82,8 +82,8 @@ describe("routeContext", () => {
 		const decision = routeContext(registry, makePacket({ userRequest: "fix this test" }));
 
 		expect(decision.executorId).toBe("local-pi");
-		expect(decision.tools).toContain("bash");
-		expect(decision.tools).toContain("edit");
+		expect(decision.suggestedTools).toContain("bash");
+		expect(decision.suggestedTools).toContain("edit");
 	});
 
 	it("falls back rather than routing email to an unavailable executor", () => {
@@ -113,7 +113,7 @@ describe("routeContext", () => {
 		);
 
 		expect(decision.executorId).toBe("ix-bridge");
-		expect(decision.tools).toContain("ix_bridge");
+		expect(decision.suggestedTools).toContain("ix_bridge");
 	});
 
 	it("throws clearly when no executors are available", () => {

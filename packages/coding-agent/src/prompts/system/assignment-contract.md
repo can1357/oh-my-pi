@@ -26,15 +26,20 @@ Address every criterion id exactly once. Report substantive evidence for the par
 
 Evidence is invalid when an id is missing or duplicated, the contract id, revision, or digest differs, a changed path is out of scope, or narrative consists only of `test`, `todo`, `tbd`, `n/a`, a template marker, or repeated filler. Repeated invalid submissions never become verified success.
 
+### Non-Solutions and Failure Modes
+
+When the parent supplies `nonSolutions` or `failureModes`, treat them as immutable rejection rules. Do not pursue paths that satisfy a non-solution. Report when a failure mode applies even if partial progress was made.
+
 ### Reporting
 
-Yield one `assignment-result/v1` object with:
+Yield one `assignment-result/v1` (or `/v2` when the contract specifies it) object with:
 
 - matching `contractId`, `revision`, and `digest`
-- `status` set to `success`, `failed`, `blocked`, or `partial`
+- `status` set to `success`, `failed`, `blocked`, `partial`, or `falsified` (v2 — valuable when an approach was disproved without implementation)
 - `changedFiles` containing every path changed by this worker
 - one `evidence` item per acceptance criterion with `criterionId`, `passed`, and a concrete `summary`
 - optional `details` and `artifactRefs` that report observations but never redefine a check
+- v2: optional `claims`, `counterevidence`, and `unresolvedGaps` when `resultRequirements` demands them
 - `blockers` and an overall `summary` when the work is not successful
 
 ## Independent Workers

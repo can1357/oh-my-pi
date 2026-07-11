@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import {
 	type AcceptanceCriterion,
 	type AcceptanceEvidence,
+	type AssignmentContract,
 	type AssignmentContractV1,
 	type AssignmentResultV1,
 	computeAssignmentContractDigest,
@@ -53,7 +54,7 @@ export interface AssignmentVerifierRunners {
 }
 
 export interface VerifyAssignmentInput {
-	readonly contract: AssignmentContractV1;
+	readonly contract: AssignmentContract;
 	readonly result: AssignmentResultV1;
 	readonly runners?: AssignmentVerifierRunners;
 	/** Parent-authored paths; authoritative for scope/omission. Required when scope verification applies. */
@@ -173,7 +174,7 @@ function pathMatches(prefixValue: string, filePath: string): boolean {
 	return prefix === "" || normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`);
 }
 
-export function isPathInScope(filePath: string, scope: AssignmentContractV1["scope"]): boolean {
+export function isPathInScope(filePath: string, scope: AssignmentContract["scope"]): boolean {
 	const denied = scope.deniedPaths ?? [];
 	if (denied.some(prefix => pathMatches(prefix, filePath))) return false;
 	return scope.allowedPaths.some(prefix => pathMatches(prefix, filePath));
@@ -293,7 +294,7 @@ function validateJsonAgainstSchema(value: unknown, schema: Readonly<Record<strin
 
 async function verifyCriterion(
 	criterion: AcceptanceCriterion,
-	contract: AssignmentContractV1,
+	contract: AssignmentContract,
 	result: AssignmentResultV1,
 	evidenceItems: readonly AcceptanceEvidence[],
 	runners: AssignmentVerifierRunners | undefined,
@@ -829,7 +830,7 @@ function rejectedVerification(reasons: readonly string[]): AssignmentVerificatio
 }
 
 async function verifyParsedAssignment(
-	contract: AssignmentContractV1,
+	contract: AssignmentContract,
 	result: AssignmentResultV1,
 	runners?: AssignmentVerifierRunners,
 	actualChangedFiles?: readonly string[],
@@ -948,7 +949,7 @@ async function verifyParsedAssignment(
  * flow.
  */
 export async function verifyAssignment(
-	contractInput: AssignmentContractV1,
+	contractInput: AssignmentContract,
 	resultInput: AssignmentResultV1,
 	runners?: AssignmentVerifierRunners,
 	actualChangedFiles?: readonly string[],

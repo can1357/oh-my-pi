@@ -3,6 +3,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
+import {
+	BrowserContextError,
+	IxBrowserContextClient,
+	type BrowserContextCaptureOptions,
+	type CapturedBrowserContext,
+} from "./browser-context";
 import type {
 	Annotation,
 	BrowserContext,
@@ -94,12 +100,34 @@ function assertNever(value: never): never {
 	throw new TypeError(`Unsupported capture mode: ${String(value)}`);
 }
 
+export interface BrowserContextCaptureClient {
+	capture(options: BrowserContextCaptureOptions): Promise<CapturedBrowserContext>;
+}
+
+type ForegroundAppCapture = () => Promise<ForegroundAppContext>;
+
+const browserForegroundProcesses = new Set(["chrome", "msedge", "firefox", "slack", "teams", "ms-teams", "discord"]);
+
+/** Whether foreground-app capture should also collect bounded IX browser/chat evidence. */
+export function isBrowserForegroundProcess(processName: string | undefined): boolean {
+	if (!processName) return false;
+	return browserForegroundProcesses.has(processName.toLowerCase().replace(/\.exe$/, ""));
+}
+
 /** Service that captures the desktop context for a tag request. */
 export class CaptureService {
 	readonly #tempDir: string;
+	readonly #browserContextClient: BrowserContextCaptureClient;
+	readonly #foregroundAppCapture: ForegroundAppCapture;
 
-	constructor(tempDir?: string) {
+	constructor(
+		tempDir?: string,
+		browserContextClient: BrowserContextCaptureClient = new IxBrowserContextClient(),
+		foregroundAppCapture?: ForegroundAppCapture,
+	) {
 		this.#tempDir = tempDir ?? path.join(os.tmpdir(), "pi-desktop-tag");
+		this.#browserContextClient = browserContextClient;
+		this.#foregroundAppCapture = foregroundAppCapture ?? (() => this.#captureForegroundApp());
 	}
 
 	async init(): Promise<void> {
@@ -113,12 +141,16 @@ export class CaptureService {
 		const captureId = crypto.randomUUID();
 		const timestamp = new Date().toISOString();
 		const screenshotPath = path.join(this.#tempDir, `${captureId}.png`);
+		const foregroundAppPromise = options.includeActiveAppState ? this.#foregroundAppCapture() : Promise.resolve({});
+		const browserPromise = foregroundAppPromise.then(foregroundApp =>
+			this.#captureBrowserContext(options, captureId, foregroundApp),
+		);
 
 		const [visual, foregroundApp, selection, browser, availableCapabilities] = await Promise.all([
 			this.#captureVisual(options, screenshotPath),
-			options.includeActiveAppState ? this.#captureForegroundApp() : Promise.resolve({}),
+			foregroundAppPromise,
 			options.includeClipboard ? this.#captureSelection() : Promise.resolve({}),
-			this.#captureBrowserContext(),
+			browserPromise,
 			this.#resolveAvailableCapabilities(),
 		]);
 
@@ -228,27 +260,43 @@ if ($text) { @{ text = $text } | ConvertTo-Json -Compress } else { "{}" }
 		}
 	}
 
-	async #captureBrowserContext(): Promise<BrowserContext> {
+	async #captureBrowserContext(
+		options: CaptureOptions,
+		captureId: string,
+		foregroundApp: ForegroundAppContext,
+	): Promise<BrowserContext> {
+		const shouldCapture =
+			options.mode === "browser" ||
+			(options.includeActiveAppState === true && isBrowserForegroundProcess(foregroundApp.processName));
+		if (!shouldCapture) return {};
+
 		try {
-			const response = await fetchWithTimeout("http://127.0.0.1:18086/ix-bridge/status", {}, 1_500);
-			if (!response.ok) return {};
-
-			const body = (await response.json().catch(() => ({}))) as {
-				running?: boolean;
-				extension_connected?: boolean;
+			const evidence = await this.#browserContextClient.capture({
+				lane: "agent-a",
+				session: `desktop-tag:${captureId}`,
+				includeChat: true,
+			});
+			return {
+				url: evidence.identity.url,
+				title: evidence.identity.title,
+				tabId: String(evidence.identity.tabId),
+				evidenceStatus: "captured",
+				provider: evidence.provider,
+				identity: evidence.identity,
+				routing: evidence.routing,
+				accessibility: evidence.accessibility,
+				...(evidence.chat ? { chat: evidence.chat } : {}),
+				redactions: evidence.redactions,
+				warnings: [],
 			};
-			if (!body.extension_connected) return {};
-
-			const [urlRes, titleRes] = await Promise.all([
-				requestIxBridgeCommand("get_url").catch(() => undefined),
-				requestIxBridgeCommand("get_title").catch(() => undefined),
-			]);
-
-			const url = await extractJsonText(urlRes, "url");
-			const title = await extractJsonText(titleRes, "title");
-			return { url, title };
-		} catch {
-			return {};
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			const code = error instanceof BrowserContextError ? error.code : "unknown";
+			logger.debug("Browser evidence capture failed", { code, error: reason });
+			return {
+				evidenceStatus: "unavailable",
+				warnings: [`IX browser evidence unavailable (${code}): ${reason}`],
+			};
 		}
 	}
 

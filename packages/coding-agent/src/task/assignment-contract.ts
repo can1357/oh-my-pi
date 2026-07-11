@@ -10,10 +10,12 @@ import { createHash } from "node:crypto";
 import type { AgentAutonomy, WorkClass } from "../orchestration/agent-execution-profile";
 
 export const ASSIGNMENT_CONTRACT_VERSION = "assignment-contract/v1" as const;
+export const ASSIGNMENT_CONTRACT_V2_VERSION = "assignment-contract/v2" as const;
 export const ASSIGNMENT_RESULT_VERSION = "assignment-result/v1" as const;
+export const ASSIGNMENT_RESULT_V2_VERSION = "assignment-result/v2" as const;
 
-export type AssignmentContractVersion = typeof ASSIGNMENT_CONTRACT_VERSION;
-export type AssignmentResultVersion = typeof ASSIGNMENT_RESULT_VERSION;
+export type AssignmentContractVersion = typeof ASSIGNMENT_CONTRACT_VERSION | typeof ASSIGNMENT_CONTRACT_V2_VERSION;
+export type AssignmentResultVersion = typeof ASSIGNMENT_RESULT_VERSION | typeof ASSIGNMENT_RESULT_V2_VERSION;
 
 export type AssignmentDiagnosticCode =
 	| "invalid_type"
@@ -67,7 +69,7 @@ export interface AcceptanceCriterion {
 }
 
 export interface AssignmentContractV1 {
-	readonly version: AssignmentContractVersion;
+	readonly version: typeof ASSIGNMENT_CONTRACT_VERSION;
 	readonly id: string;
 	readonly revision: number;
 	readonly digest: string;
@@ -82,7 +84,60 @@ export interface AssignmentContractV1 {
 	readonly reporting: AssignmentResultVersion;
 }
 
-export type AssignmentResultStatus = "success" | "failed" | "blocked" | "partial";
+export interface FailureMode {
+	readonly id: string;
+	readonly description: string;
+}
+
+export interface BlockedRoute {
+	readonly family: string;
+	readonly mechanism: string;
+	readonly blocker: string;
+	readonly blockerFingerprint?: string;
+}
+
+export interface EvidencePolicy {
+	readonly requireArtifactRefs?: boolean;
+	readonly requireCommandOutput?: boolean;
+}
+
+export interface ResultRequirements {
+	readonly claimsRequired: boolean;
+	readonly counterevidenceRequired: boolean;
+	readonly unresolvedGapsRequired: boolean;
+}
+
+export interface AssignmentContractV2 extends Omit<AssignmentContractV1, "version" | "reporting"> {
+	readonly version: typeof ASSIGNMENT_CONTRACT_V2_VERSION;
+	readonly nonSolutions?: readonly string[];
+	readonly failureModes?: readonly FailureMode[];
+	readonly evidencePolicy?: EvidencePolicy;
+	readonly strategyFamily?: string;
+	readonly independenceGroup?: string;
+	readonly priorBlockedRoutes?: readonly BlockedRoute[];
+	readonly resultRequirements?: ResultRequirements;
+	readonly reporting: typeof ASSIGNMENT_RESULT_V2_VERSION;
+}
+
+export type AssignmentContract = AssignmentContractV1 | AssignmentContractV2;
+
+export type AssignmentResultStatus = "success" | "failed" | "blocked" | "partial" | "falsified";
+
+export interface Claim {
+	readonly id: string;
+	readonly statement: string;
+	readonly supported: boolean;
+}
+
+export interface CounterEvidence {
+	readonly summary: string;
+	readonly artifactRefs?: readonly string[];
+}
+
+export interface UnresolvedGap {
+	readonly id: string;
+	readonly description: string;
+}
 
 export interface AcceptanceEvidence {
 	readonly criterionId: string;
@@ -93,16 +148,27 @@ export interface AcceptanceEvidence {
 }
 
 export interface AssignmentResultV1 {
-	readonly version: AssignmentResultVersion;
+	readonly version: typeof ASSIGNMENT_RESULT_VERSION;
 	readonly contractId: string;
 	readonly revision: number;
 	readonly digest: string;
-	readonly status: AssignmentResultStatus;
+	readonly status: Exclude<AssignmentResultStatus, "falsified">;
 	readonly changedFiles: readonly string[];
 	readonly evidence: readonly AcceptanceEvidence[];
 	readonly blockers?: readonly string[];
 	readonly summary?: string;
 }
+
+export interface AssignmentResultV2 extends Omit<AssignmentResultV1, "version" | "status"> {
+	readonly version: typeof ASSIGNMENT_RESULT_V2_VERSION;
+	readonly status: AssignmentResultStatus;
+	readonly claims?: readonly Claim[];
+	readonly counterevidence?: readonly CounterEvidence[];
+	readonly unresolvedGaps?: readonly UnresolvedGap[];
+	readonly recommendedNextAction?: string;
+}
+
+export type AssignmentResult = AssignmentResultV1 | AssignmentResultV2;
 
 /** Canonical fields hashed into `digest`. Excludes `digest` itself. */
 export interface AssignmentContractDigestInput {
@@ -118,14 +184,18 @@ export interface AssignmentContractDigestInput {
 	readonly procedures?: readonly AssignmentProcedure[];
 	readonly acceptance: readonly AcceptanceCriterion[];
 	readonly reporting: AssignmentResultVersion;
+	readonly nonSolutions?: readonly string[];
+	readonly failureModes?: readonly FailureMode[];
+	readonly strategyFamily?: string;
+	readonly independenceGroup?: string;
 }
 
 export type ParseAssignmentContractResult =
-	| { ok: true; contract: AssignmentContractV1 }
+	| { ok: true; contract: AssignmentContract }
 	| { ok: false; diagnostics: AssignmentDiagnostic[] };
 
 export type ParseAssignmentResultResult =
-	| { ok: true; result: AssignmentResultV1 }
+	| { ok: true; result: AssignmentResult }
 	| { ok: false; diagnostics: AssignmentDiagnostic[] };
 
 const WORK_CLASSES = new Set<WorkClass>(["mechanical", "judgment"]);
@@ -141,7 +211,19 @@ const ACCEPTANCE_CHECKS = new Set<AcceptanceCheckKind>([
 	"json_schema",
 	"changed_file_scope",
 ]);
-const RESULT_STATUSES = new Set<AssignmentResultStatus>(["success", "failed", "blocked", "partial"]);
+const RESULT_STATUSES_V1 = new Set<Exclude<AssignmentResultStatus, "falsified">>([
+	"success",
+	"failed",
+	"blocked",
+	"partial",
+]);
+const RESULT_STATUSES_V2 = new Set<AssignmentResultStatus>([
+	"success",
+	"failed",
+	"blocked",
+	"partial",
+	"falsified",
+]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -171,7 +253,7 @@ function sortValue(value: unknown): unknown {
 }
 
 export function computeAssignmentContractDigest(input: AssignmentContractDigestInput): string {
-	const payload = {
+	const payload: Record<string, unknown> = {
 		version: input.version,
 		id: input.id,
 		revision: input.revision,
@@ -185,6 +267,12 @@ export function computeAssignmentContractDigest(input: AssignmentContractDigestI
 		acceptance: input.acceptance,
 		reporting: input.reporting,
 	};
+	if (input.version === ASSIGNMENT_CONTRACT_V2_VERSION) {
+		payload.nonSolutions = input.nonSolutions ?? [];
+		payload.failureModes = input.failureModes ?? [];
+		payload.strategyFamily = input.strategyFamily ?? "";
+		payload.independenceGroup = input.independenceGroup ?? "";
+	}
 	return createHash("sha256").update(canonicalJson(payload)).digest("hex");
 }
 
@@ -364,6 +452,34 @@ function parseAcceptance(
 	return criteria;
 }
 
+function parseFailureModes(
+	value: unknown,
+	diagnostics: AssignmentDiagnostic[],
+): readonly FailureMode[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) {
+		push(diagnostics, "invalid_field", "failureModes must be an array", "failureModes");
+		return undefined;
+	}
+	const modes: FailureMode[] = [];
+	const seen = new Set<string>();
+	for (let i = 0; i < value.length; i++) {
+		const item = value[i];
+		const path = `failureModes[${i}]`;
+		if (!isPlainObject(item)) continue;
+		const id = requireNonEmptyString(diagnostics, item.id, `${path}.id`);
+		const description = requireNonEmptyString(diagnostics, item.description, `${path}.description`);
+		if (!id || !description) continue;
+		if (seen.has(id)) {
+			push(diagnostics, "duplicate_criterion", `Duplicate failure mode id "${id}"`, `${path}.id`);
+			continue;
+		}
+		seen.add(id);
+		modes.push({ id, description });
+	}
+	return modes;
+}
+
 /**
  * Parse and structurally validate an assignment contract. Digest mismatch is a
  * diagnostic here; semantic verification lives in assignment-verifier.ts.
@@ -376,8 +492,14 @@ export function parseAssignmentContract(input: unknown): ParseAssignmentContract
 			diagnostics: [{ code: "invalid_type", message: "Assignment contract must be an object" }],
 		};
 	}
-	if (input.version !== ASSIGNMENT_CONTRACT_VERSION) {
-		push(diagnostics, "invalid_version", `Expected version ${ASSIGNMENT_CONTRACT_VERSION}`, "version");
+	const isV2 = input.version === ASSIGNMENT_CONTRACT_V2_VERSION;
+	if (input.version !== ASSIGNMENT_CONTRACT_VERSION && !isV2) {
+		push(
+			diagnostics,
+			"invalid_version",
+			`Expected version ${ASSIGNMENT_CONTRACT_VERSION} or ${ASSIGNMENT_CONTRACT_V2_VERSION}`,
+			"version",
+		);
 	}
 	const id = requireNonEmptyString(diagnostics, input.id, "id");
 	if (typeof input.revision !== "number" || !Number.isInteger(input.revision) || input.revision < 0) {
@@ -398,8 +520,30 @@ export function parseAssignmentContract(input: unknown): ParseAssignmentContract
 	const scope = parseScope(input.scope, diagnostics);
 	const procedures = parseProcedures(input.procedures, diagnostics);
 	const acceptance = parseAcceptance(input.acceptance, diagnostics);
-	if (input.reporting !== ASSIGNMENT_RESULT_VERSION) {
-		push(diagnostics, "invalid_version", `Expected reporting ${ASSIGNMENT_RESULT_VERSION}`, "reporting");
+	const expectedReporting = isV2 ? ASSIGNMENT_RESULT_V2_VERSION : ASSIGNMENT_RESULT_VERSION;
+	if (input.reporting !== expectedReporting) {
+		push(diagnostics, "invalid_version", `Expected reporting ${expectedReporting}`, "reporting");
+	}
+
+	let nonSolutions: readonly string[] | undefined;
+	let failureModes: readonly FailureMode[] | undefined;
+	let strategyFamily: string | undefined;
+	let independenceGroup: string | undefined;
+	if (isV2) {
+		if (input.nonSolutions !== undefined) {
+			if (!isStringArray(input.nonSolutions)) {
+				push(diagnostics, "invalid_field", "nonSolutions must be a string array", "nonSolutions");
+			} else {
+				nonSolutions = input.nonSolutions;
+			}
+		}
+		failureModes = parseFailureModes(input.failureModes, diagnostics);
+		if (typeof input.strategyFamily === "string" && input.strategyFamily.trim()) {
+			strategyFamily = input.strategyFamily.trim();
+		}
+		if (typeof input.independenceGroup === "string" && input.independenceGroup.trim()) {
+			independenceGroup = input.independenceGroup.trim();
+		}
 	}
 
 	if (
@@ -418,6 +562,74 @@ export function parseAssignmentContract(input: unknown): ParseAssignmentContract
 		return { ok: false, diagnostics };
 	}
 
+	const digestInput: AssignmentContractDigestInput = {
+		version: isV2 ? ASSIGNMENT_CONTRACT_V2_VERSION : ASSIGNMENT_CONTRACT_VERSION,
+		id,
+		revision: input.revision,
+		role,
+		workClass: input.workClass as WorkClass,
+		autonomy: input.autonomy as AgentAutonomy,
+		objective,
+		deliverables: input.deliverables,
+		scope,
+		procedures,
+		acceptance,
+		reporting: expectedReporting,
+		nonSolutions,
+		failureModes,
+		strategyFamily,
+		independenceGroup,
+	};
+	const computedDigest = computeAssignmentContractDigest(digestInput);
+
+	if (computedDigest !== digest) {
+		return {
+			ok: false,
+			diagnostics: [
+				{
+					code: "digest_mismatch",
+					message: "Contract digest does not match canonical immutable fields",
+					path: "digest",
+				},
+			],
+		};
+	}
+
+	if (isV2) {
+		const contractV2: AssignmentContractV2 = Object.freeze({
+			version: ASSIGNMENT_CONTRACT_V2_VERSION,
+			id,
+			revision: input.revision,
+			digest: computedDigest,
+			role,
+			workClass: input.workClass as WorkClass,
+			autonomy: input.autonomy as AgentAutonomy,
+			objective,
+			deliverables: Object.freeze([...input.deliverables]),
+			scope: Object.freeze({
+				allowedPaths: Object.freeze([...scope.allowedPaths]),
+				deniedPaths: scope.deniedPaths ? Object.freeze([...scope.deniedPaths]) : undefined,
+			}),
+			procedures: procedures
+				? Object.freeze(procedures.map(procedure => Object.freeze({ ...procedure })))
+				: undefined,
+			acceptance: Object.freeze(
+				acceptance.map(criterion =>
+					Object.freeze({
+						...criterion,
+						params: criterion.params ? Object.freeze({ ...criterion.params }) : undefined,
+					}),
+				),
+			),
+			reporting: ASSIGNMENT_RESULT_V2_VERSION,
+			nonSolutions: nonSolutions ? Object.freeze([...nonSolutions]) : undefined,
+			failureModes: failureModes ? Object.freeze(failureModes.map(f => Object.freeze({ ...f }))) : undefined,
+			strategyFamily,
+			independenceGroup,
+		});
+		return { ok: true, contract: contractV2 };
+	}
+
 	const contract = withAssignmentContractDigest({
 		version: ASSIGNMENT_CONTRACT_VERSION,
 		id,
@@ -433,19 +645,6 @@ export function parseAssignmentContract(input: unknown): ParseAssignmentContract
 		reporting: ASSIGNMENT_RESULT_VERSION,
 	});
 
-	if (contract.digest !== digest) {
-		return {
-			ok: false,
-			diagnostics: [
-				{
-					code: "digest_mismatch",
-					message: "Contract digest does not match canonical immutable fields",
-					path: "digest",
-				},
-			],
-		};
-	}
-
 	return { ok: true, contract };
 }
 
@@ -457,15 +656,22 @@ export function parseAssignmentResult(input: unknown): ParseAssignmentResultResu
 			diagnostics: [{ code: "invalid_type", message: "Assignment result must be an object" }],
 		};
 	}
-	if (input.version !== ASSIGNMENT_RESULT_VERSION) {
-		push(diagnostics, "invalid_version", `Expected version ${ASSIGNMENT_RESULT_VERSION}`, "version");
+	const isV2 = input.version === ASSIGNMENT_RESULT_V2_VERSION;
+	if (input.version !== ASSIGNMENT_RESULT_VERSION && !isV2) {
+		push(
+			diagnostics,
+			"invalid_version",
+			`Expected version ${ASSIGNMENT_RESULT_VERSION} or ${ASSIGNMENT_RESULT_V2_VERSION}`,
+			"version",
+		);
 	}
 	const contractId = requireNonEmptyString(diagnostics, input.contractId, "contractId");
 	if (typeof input.revision !== "number" || !Number.isInteger(input.revision) || input.revision < 0) {
 		push(diagnostics, "invalid_field", "revision must be a non-negative integer", "revision");
 	}
 	const digest = requireNonEmptyString(diagnostics, input.digest, "digest");
-	if (typeof input.status !== "string" || !RESULT_STATUSES.has(input.status as AssignmentResultStatus)) {
+	const statusSet = isV2 ? RESULT_STATUSES_V2 : RESULT_STATUSES_V1;
+	if (typeof input.status !== "string" || !statusSet.has(input.status as AssignmentResultStatus)) {
 		push(diagnostics, "invalid_field", "status must be a known AssignmentResultStatus", "status");
 	}
 	if (!isStringArray(input.changedFiles)) {
@@ -533,21 +739,37 @@ export function parseAssignmentResult(input: unknown): ParseAssignmentResultResu
 
 	return {
 		ok: true,
-		result: Object.freeze({
-			version: ASSIGNMENT_RESULT_VERSION,
-			contractId,
-			revision: input.revision,
-			digest,
-			status: input.status as AssignmentResultStatus,
-			changedFiles: Object.freeze([...input.changedFiles]),
-			evidence: Object.freeze(evidence.map(item => Object.freeze({ ...item }))),
-			blockers: isStringArray(input.blockers) ? Object.freeze([...input.blockers]) : undefined,
-			summary: typeof input.summary === "string" ? input.summary : undefined,
-		}),
+		result: Object.freeze(
+			isV2
+				? {
+						version: ASSIGNMENT_RESULT_V2_VERSION,
+						contractId,
+						revision: input.revision,
+						digest,
+						status: input.status as AssignmentResultStatus,
+						changedFiles: Object.freeze([...input.changedFiles]),
+						evidence: Object.freeze(evidence.map(item => Object.freeze({ ...item }))),
+						blockers: isStringArray(input.blockers) ? Object.freeze([...input.blockers]) : undefined,
+						summary: typeof input.summary === "string" ? input.summary : undefined,
+						recommendedNextAction:
+							typeof input.recommendedNextAction === "string" ? input.recommendedNextAction : undefined,
+					}
+				: {
+						version: ASSIGNMENT_RESULT_VERSION,
+						contractId,
+						revision: input.revision,
+						digest,
+						status: input.status as Exclude<AssignmentResultStatus, "falsified">,
+						changedFiles: Object.freeze([...input.changedFiles]),
+						evidence: Object.freeze(evidence.map(item => Object.freeze({ ...item }))),
+						blockers: isStringArray(input.blockers) ? Object.freeze([...input.blockers]) : undefined,
+						summary: typeof input.summary === "string" ? input.summary : undefined,
+					},
+		) as AssignmentResult,
 	};
 }
 
-export function validateAssignmentContract(contract: AssignmentContractV1): AssignmentDiagnostic[] {
+export function validateAssignmentContract(contract: AssignmentContract): AssignmentDiagnostic[] {
 	const parsed = parseAssignmentContract(contract);
 	return parsed.ok ? [] : parsed.diagnostics;
 }

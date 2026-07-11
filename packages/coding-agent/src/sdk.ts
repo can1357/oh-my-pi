@@ -118,6 +118,7 @@ import {
 } from "./secrets";
 import { AgentSession } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
+import type { ClientBridge } from "./session/client-bridge";
 import type { AuthStorage } from "./session/auth-storage";
 import { parseFusionPoolEntries } from "./session/fusion-router";
 import {
@@ -389,6 +390,8 @@ export interface CreateAgentSessionOptions {
 	agentDir?: string;
 	/** Spawns to allow. Default: "*" */
 	spawns?: string;
+	/** External client bridge installed before this session can execute tools. */
+	clientBridge?: ClientBridge;
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
@@ -1433,47 +1436,58 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let hasRegistered = false;
 	const enableLsp = options.enableLsp ?? true;
 	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
+	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
+	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
+	const resolvedAgentDisplayName =
+		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
+	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);
 	const ASYNC_INLINE_RESULT_MAX_CHARS = 12_000;
 	const ASYNC_PREVIEW_MAX_CHARS = 4_000;
-	const formatAsyncResultForFollowUp = async (result: string): Promise<string> => {
+	const formatAsyncResultForFollowUp = async (result: string, ownerSession: AgentSession): Promise<string> => {
 		if (result.length <= ASYNC_INLINE_RESULT_MAX_CHARS) {
 			return result;
 		}
 
 		const preview = `${result.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
 		try {
-			const { path: artifactPath, id: artifactId } = await sessionManager.allocateArtifactPath("async");
+			const { path: artifactPath, id: artifactId } = await ownerSession.sessionManager.allocateArtifactPath("async");
 			if (artifactPath && artifactId) {
 				await Bun.write(artifactPath, result);
 				return `${preview}\nFull output: artifact://${artifactId}`;
 			}
 		} catch (error) {
 			logger.warn("Failed to persist async follow-up artifact", {
+				ownerId: ownerSession.getAgentId(),
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
 
 		return preview;
 	};
-	// Only the first top-level session in a process owns an AsyncJobManager.
-	// Subagents inherit the parent's manager via `AsyncJobManager.instance()`
-	// (set below), and any additional top-level session spun up in-process
-	// (e.g. the agent-creation architect in `agent-dashboard.ts`) must share
-	// the live singleton — otherwise its dispose path would clobber the
-	// owning session's manager and break the `task`/`bash` async paths
-	// (issue #1923). The `instance()` guard means later sessions also skip
-	// constructing an orphaned manager that nothing would ever route to.
+	// A single process manager schedules jobs for every live root and subagent.
+	// Its completion callback resolves the job owner through this shared registry
+	// instead of closing over the first session that happened to create it.
 	const asyncJobManager =
 		!options.parentTaskPrefix && !AsyncJobManager.instance()
 			? new AsyncJobManager({
 					maxRunningJobs: asyncMaxJobs,
 					onJobComplete: async (jobId, result, job) => {
-						if (!session || asyncJobManager!.isDeliverySuppressed(jobId)) return;
-						const formattedResult = await formatAsyncResultForFollowUp(result);
+						if (asyncJobManager!.isDeliverySuppressed(jobId)) return;
+						const ownerId = job?.ownerId;
+						const ownerSession = ownerId ? agentRegistry.get(ownerId)?.session : undefined;
+						if (!ownerId || !ownerSession) {
+							logger.warn("Dropping async completion because its owner session is unavailable", {
+								jobId,
+								ownerId,
+							});
+							return;
+						}
+
+						const formattedResult = await formatAsyncResultForFollowUp(result, ownerSession);
 						if (asyncJobManager!.isDeliverySuppressed(jobId)) return;
 
 						const durationMs = job ? Math.max(0, Date.now() - job.startTime) : undefined;
-						session.yieldQueue.enqueue<AsyncResultEntry>("async-result", {
+						ownerSession.yieldQueue.enqueue<AsyncResultEntry>("async-result", {
 							jobId,
 							result: formattedResult,
 							job,
@@ -1483,13 +1497,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				})
 			: undefined;
 
-	const scopedAsyncJobManager = asyncJobManager ?? (options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
-
-	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
-	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
-	const resolvedAgentDisplayName =
-		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
-	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);
+	const scopedAsyncJobManager = asyncJobManager ?? AsyncJobManager.instance();
 	/**
 	 * Forget the agent ref on teardown — unless the agent is being parked (or is
 	 * already parked). Parking disposes the session but keeps the ref addressable
@@ -2766,6 +2774,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			sessionManager,
 			settings,
 			autoApprove: options.autoApprove,
+			clientBridge: options.clientBridge,
 			evalKernelOwnerId,
 			// Defined only for top-level sessions (creation is gated above).
 			// AgentSession uses this to decide whether it may dispose the global
@@ -2829,9 +2838,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			advisorReadOnlyTools,
 		});
 		hasSession = true;
-		if (asyncJobManager) {
+		if (scopedAsyncJobManager) {
 			session.yieldQueue.register<AsyncResultEntry>("async-result", {
-				isStale: entry => asyncJobManager.isDeliverySuppressed(entry.jobId),
+				isStale: entry => scopedAsyncJobManager.isDeliverySuppressed(entry.jobId),
 				build: buildAsyncResultBatchMessage,
 			});
 		}

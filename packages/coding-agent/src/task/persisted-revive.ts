@@ -156,6 +156,7 @@ export function createPersistedSubagentReviverFactory(
 				enableMCP: !mcpManager,
 				mcpManager,
 				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+				clientBridge: ctx.session.clientBridge,
 			});
 			// Clamp the active set to the persisted names intersected with the
 			// reconstructed source-aware ceiling. Unknown names are ignored.

@@ -32,12 +32,20 @@ let tempDir: TempDir;
 let session: AgentSession | undefined;
 
 /** Fake tool that records execute calls. */
-function makeFakeTool(name: string): AgentTool & { executeCalls: number } {
+function makeFakeTool(
+	name: string,
+	approval: "read" | "write" | "exec" = "exec",
+): AgentTool & { executeCalls: number } {
 	const tool = {
 		name,
 		label: name,
 		description: `Fake ${name}`,
 		parameters: type({ "command?": "string" }),
+		approval,
+		formatApprovalDetails: (args: unknown) => {
+			const command = (args as { command?: unknown } | undefined)?.command;
+			return typeof command === "string" ? [`Call: ${command}`] : [];
+		},
 		executeCalls: 0,
 		async execute() {
 			tool.executeCalls++;
@@ -72,6 +80,15 @@ function makeBridge(outcome: ClientBridgePermissionOutcome): ClientBridge {
 	};
 }
 
+function makeAlwaysAskBridge(outcome: ClientBridgePermissionOutcome): ClientBridge {
+	return {
+		capabilities: { requestPermission: true, toolApprovalMode: "always-ask" },
+		async requestPermission() {
+			return outcome;
+		},
+	};
+}
+
 async function createSession(
 	tools: AgentTool[],
 	bridge?: ClientBridge,
@@ -101,9 +118,9 @@ async function createSession(
 		settings,
 		modelRegistry: {} as never,
 		toolRegistry: new Map(tools.map(t => [t.name, t])),
+		clientBridge: bridge,
 	});
 
-	if (bridge) sess.setClientBridge(bridge);
 	return sess;
 }
 
@@ -133,8 +150,8 @@ async function createSessionWithMockModel(
 		settings,
 		modelRegistry: { getApiKey: () => "test-key" } as never,
 		toolRegistry: new Map(tools.map(t => [t.name, t])),
+		clientBridge: bridge,
 	});
-	sess.setClientBridge(bridge);
 	return sess;
 }
 
@@ -784,4 +801,78 @@ it("read tool: requestPermission is never called for non-gated tools", async () 
 
 	expect(permissionSpy).toHaveBeenCalledTimes(0);
 	expect(readTool.executeCalls).toBe(1);
+});
+
+it("always-ask gates write and exec tools from every source despite yolo and allow policies", async () => {
+	const tools = [
+		makeFakeTool("bash", "exec"),
+		makeFakeTool("edit", "write"),
+		makeFakeTool("task", "exec"),
+		makeFakeTool("browser", "exec"),
+		makeFakeTool("ix_bridge", "write"),
+		makeFakeTool("mcp__fake__write", "write"),
+	];
+	const bridge = makeAlwaysAskBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	session = await createSession(tools, bridge, {
+		"tools.approvalMode": "yolo",
+		"tools.approval": Object.fromEntries(tools.map(tool => [tool.name, "allow"])),
+	});
+
+	await session.setActiveToolsByName(tools.map(tool => tool.name));
+	for (const tool of session.agent.state.tools) {
+		await tool.execute(
+			`call-${tool.name}`,
+			{ command: `run ${tool.name}` },
+			undefined,
+			undefined as never,
+			undefined as never,
+		);
+	}
+
+	expect(permissionSpy).toHaveBeenCalledTimes(tools.length);
+	for (const tool of tools) expect(tool.executeCalls).toBe(1);
+	const calls = permissionSpy.mock.calls.map(call => call[0]);
+	expect(calls.map(call => call.toolName)).toEqual(tools.map(tool => tool.name));
+	expect(calls.every(call => call.status === "pending" && call.content?.[0] !== undefined)).toBe(true);
+});
+
+it("always-ask passes read-tier calls through without prompting", async () => {
+	const readTool = makeFakeTool("read", "read");
+	const bridge = makeAlwaysAskBridge({ outcome: "selected", optionId: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	session = await createSession([readTool], bridge);
+
+	await session.setActiveToolsByName([readTool.name]);
+	await session.agent.state.tools[0]!.execute("read-1", {}, undefined, undefined as never, undefined as never);
+
+	expect(permissionSpy).not.toHaveBeenCalled();
+	expect(readTool.executeCalls).toBe(1);
+});
+
+it("always-ask explicit deny fails closed before consulting the bridge", async () => {
+	const tool = makeFakeTool("mcp__fake__write", "write");
+	const bridge = makeAlwaysAskBridge({ outcome: "selected", optionId: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	session = await createSession([tool], bridge, { "tools.approval": { [tool.name]: "deny" } });
+
+	await session.setActiveToolsByName([tool.name]);
+	await expect(
+		session.agent.state.tools[0]!.execute("denied-1", {}, undefined, undefined as never, undefined as never),
+	).rejects.toThrow("blocked by user policy");
+
+	expect(permissionSpy).not.toHaveBeenCalled();
+	expect(tool.executeCalls).toBe(0);
+});
+
+it("always-ask cancellation fails closed for generic dangerous tools", async () => {
+	const tool = makeFakeTool("browser", "exec");
+	const bridge = makeAlwaysAskBridge({ outcome: "cancelled" });
+	session = await createSession([tool], bridge);
+
+	await session.setActiveToolsByName([tool.name]);
+	await expect(
+		session.agent.state.tools[0]!.execute("cancelled-1", {}, undefined, undefined as never, undefined as never),
+	).rejects.toThrow("Permission request cancelled");
+	expect(tool.executeCalls).toBe(0);
 });
