@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readMemoryAudit } from "../src/core/audit-log";
 import { Mnemopi } from "../src/core/memory";
 
@@ -48,14 +48,15 @@ describe("memory governance (U14)", () => {
 		db.prepare(
 			"INSERT INTO facts (fact_id, session_id, subject, predicate, object, source_msg_id) VALUES (?, ?, ?, ?, ?, ?)",
 		).run("fact-1", "audit-test", "deployment key", "rotates", "Tuesdays", id);
-		db.prepare(
-			"INSERT INTO episodic_memory (id, content, summary_of) VALUES (?, ?, ?)",
-		).run("epi-1", "summary mentioning the secret rotation", JSON.stringify([id]));
+		db.prepare("INSERT INTO episodic_memory (id, content, summary_of) VALUES (?, ?, ?)").run(
+			"epi-1",
+			"summary mentioning the secret rotation",
+			JSON.stringify([id]),
+		);
 
 		expect(memory.forget(id)).toBe(true);
 
-		const count = (sql: string, param: string): number =>
-			(db.prepare(sql).get(param) as { n: number }).n;
+		const count = (sql: string, param: string): number => (db.prepare(sql).get(param) as { n: number }).n;
 		expect(count("SELECT COUNT(*) n FROM working_memory WHERE id = ?", id)).toBe(0);
 		expect(count("SELECT COUNT(*) n FROM memory_embeddings WHERE memory_id = ?", id)).toBe(0);
 		expect(count("SELECT COUNT(*) n FROM facts WHERE source_msg_id = ?", id)).toBe(0);
