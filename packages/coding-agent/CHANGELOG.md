@@ -26,6 +26,11 @@
 
 - Added `compaction.maskConsumedObservations` (default `true`) and a new `maskConsumedObservations` pruning pass that replaces tool results the model has already acted on with deterministic placeholders (e.g. `[bash result consumed]`). This preserves reasoning traces and action history while cutting the verbatim observation tokens that the JetBrains study identified as cheaper to mask than to summarize.
 
+- Append-only context (StablePrefix + append-only message log) now auto-enables for every provider, not just known prefix-cache backends — byte-stable prefixes raise cache hit rates on Anthropic cache_control and OpenAI automatic caching too. Opt out with `provider.appendOnlyContext: off`.
+- Added a graduated compaction escalation ladder (`compaction.strategy: "ladder"`, now the default): mask aged tool results, then shake, then snapcompact (vision models), and only fall back to an LLM summary when the cheaper rungs cannot get under the threshold. Re-enabling auto-compaction from "off" restores the ladder default.
+- Added `compaction.maskToolResults` (default on): tool results older than the keep-recent window are continuously replaced with outcome-preserving placeholders, with the batch gate lowered from 20K to 4K tokens.
+- Added prompt-cache observability: per-session cache hit rate and cache breaks attributed by cause, exposed via `AgentSession.getCacheStats()` and shown in `/context` alongside a new tool-result waste audit (per-tool token spend + masked residue).
+- Added per-turn context-composition persistence: assistant `contextSnapshot` now records tool-schema, skills, system-prompt, and system-context token estimates for post-hoc analysis.
 - Added an Agentic MapReduce backbone for deterministic selector execution, evidence-graph sharding, bounded scheduling, reducer-tree aggregation, and concurrency/cost modeling.
 - Added bundled `mr-worker`, `mr-reducer`, and `tot-reasoner` agents implementing Agentic MapReduce map/reduce phases and Tree-of-Thoughts reasoning as builtin task-agent types.
 - Added an embedded builtin-skills provider shipping `agentic-mapreduce`, `tree-of-thoughts`, and `promptbtw-handoff` skills compiled into the binary, served in-memory via `skill://` and `/skill:` with lowest-priority name override semantics and a `skills.enableBuiltinSkills` toggle.

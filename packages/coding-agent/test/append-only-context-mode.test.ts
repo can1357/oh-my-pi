@@ -38,8 +38,8 @@ describe("shouldEnableAppendOnlyContext", () => {
 		).toBe(true);
 	});
 
-	test("auto remains off for unknown providers without prefix-cache signals", () => {
-		expect(shouldEnableAppendOnlyContext("auto", GENERIC_PROXY)).toBe(false);
+	test("auto now enables for every provider (U7: prefix stability benefits all)", () => {
+		expect(shouldEnableAppendOnlyContext("auto", GENERIC_PROXY)).toBe(true);
 	});
 
 	test("auto enables for local inference providers", () => {
@@ -80,15 +80,15 @@ describe("shouldEnableAppendOnlyContext", () => {
 		}
 	});
 
-	test("auto stays off for public hosts that merely share an IP prefix", () => {
-		// 172.15.x.x sits just outside the RFC1918 16-31 band.
-		expect(shouldEnableAppendOnlyContext("auto", { provider: "x", baseUrl: "http://172.15.0.1/v1" })).toBe(false);
-		// 172.32.x.x sits just outside the RFC1918 16-31 band on the other side.
-		expect(shouldEnableAppendOnlyContext("auto", { provider: "x", baseUrl: "http://172.32.0.1/v1" })).toBe(false);
-		expect(shouldEnableAppendOnlyContext("auto", { provider: "x", baseUrl: "https://example.com/v1" })).toBe(false);
+	test("auto enables regardless of host shape (public, private, malformed)", () => {
+		expect(shouldEnableAppendOnlyContext("auto", { provider: "x", baseUrl: "http://172.15.0.1/v1" })).toBe(true);
+		expect(shouldEnableAppendOnlyContext("auto", { provider: "x", baseUrl: "https://example.com/v1" })).toBe(true);
+		// Malformed baseUrl never crashes the resolver.
+		expect(shouldEnableAppendOnlyContext("auto", { provider: "x", baseUrl: "not a url" })).toBe(true);
 	});
 
-	test("malformed baseUrl never crashes the resolver", () => {
-		expect(shouldEnableAppendOnlyContext("auto", { provider: "x", baseUrl: "not a url" })).toBe(false);
+	test("auto stays off with no model selected", () => {
+		expect(shouldEnableAppendOnlyContext("auto", null)).toBe(false);
+		expect(shouldEnableAppendOnlyContext("auto", undefined)).toBe(false);
 	});
 });
