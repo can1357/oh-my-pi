@@ -3875,7 +3875,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "Tool Discovery",
 			description:
-				"Hide tools behind a search tool to save tokens. 'all' (default) hides all non-essential built-ins and MCP tools; 'auto' hides MCP tools once the tool set has more than 40 tools; 'mcp-only' always hides MCP tools; 'off' sends everything.",
+				"Hide tools behind a search tool to save tokens. 'all' (default) hides all non-essential built-ins and MCP tools; 'auto' hides MCP tools once the tool set has more than 40 tools or the estimated tool-schema spend exceeds ~16K tokens; 'mcp-only' always hides MCP tools; 'off' sends everything.",
 		},
 	},
 

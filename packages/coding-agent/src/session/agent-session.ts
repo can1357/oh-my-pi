@@ -229,7 +229,11 @@ import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
 import { getCurrentThemeName, theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
-import { computeNonMessageBreakdown, computeNonMessageTokens } from "../modes/utils/context-usage";
+import {
+	computeNonMessageBreakdown,
+	computeNonMessageTokens,
+	estimateToolSchemaTokens,
+} from "../modes/utils/context-usage";
 import { containsWorkflow, WORKFLOW_NOTICE } from "../modes/workflow";
 import { ApproachRegistry } from "../orchestration/approach-registry";
 import { authorizeIrcDelivery, type CollaborationPolicy } from "../orchestration/collaboration-policy";
@@ -5019,11 +5023,12 @@ export class AgentSession {
 
 	// ── Generic tool discovery (covers built-in + MCP + extension) ────────────
 
-	/** Resolve effective discovery mode from the current registry size. */
+	/** Resolve effective discovery mode from the current registry size and schema spend. */
 	#resolveEffectiveDiscoveryMode(): "off" | "mcp-only" | "all" {
 		const mode = resolveEffectiveToolDiscoveryMode(
 			this.settings,
 			countToolsForAutoDiscovery(this.#toolRegistry.keys()),
+			estimateToolSchemaTokens([...this.#toolRegistry.values()]),
 		);
 		if (mode !== "off") return mode;
 		return this.#mcpDiscoveryEnabled ? "mcp-only" : "off";
