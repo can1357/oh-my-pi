@@ -8,6 +8,7 @@ import {
 	ASSIGNMENT_RESULT_V2_VERSION,
 	type AssignmentResultV2,
 	type Claim,
+	type ClaimVerificationStatus,
 	type EvidenceRef,
 } from "../../src/task/assignment-contract";
 
@@ -39,7 +40,7 @@ function makeClaim(
 	id: string,
 	criterionId: string,
 	evidenceRefs: readonly string[],
-	verificationStatus: Claim["verificationStatus"] = "locally-verified",
+	verificationStatus: ClaimVerificationStatus = "locally-verified",
 ): Claim {
 	return {
 		id,
