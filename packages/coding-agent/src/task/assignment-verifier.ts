@@ -10,8 +10,7 @@ import {
 	type AcceptanceCriterion,
 	type AcceptanceEvidence,
 	type AssignmentContract,
-	type AssignmentContractV1,
-	type AssignmentResultV1,
+	type AssignmentResult,
 	computeAssignmentContractDigest,
 	parseAssignmentContract,
 	parseAssignmentResult,
@@ -55,7 +54,7 @@ export interface AssignmentVerifierRunners {
 
 export interface VerifyAssignmentInput {
 	readonly contract: AssignmentContract;
-	readonly result: AssignmentResultV1;
+	readonly result: AssignmentResult;
 	readonly runners?: AssignmentVerifierRunners;
 	/** Parent-authored paths; authoritative for scope/omission. Required when scope verification applies. */
 	readonly actualChangedFiles?: readonly string[];
@@ -295,7 +294,7 @@ function validateJsonAgainstSchema(value: unknown, schema: Readonly<Record<strin
 async function verifyCriterion(
 	criterion: AcceptanceCriterion,
 	contract: AssignmentContract,
-	result: AssignmentResultV1,
+	result: AssignmentResult,
 	evidenceItems: readonly AcceptanceEvidence[],
 	runners: AssignmentVerifierRunners | undefined,
 	actualChangedFiles: readonly string[] | undefined,
@@ -831,7 +830,7 @@ function rejectedVerification(reasons: readonly string[]): AssignmentVerificatio
 
 async function verifyParsedAssignment(
 	contract: AssignmentContract,
-	result: AssignmentResultV1,
+	result: AssignmentResult,
 	runners?: AssignmentVerifierRunners,
 	actualChangedFiles?: readonly string[],
 ): Promise<AssignmentVerificationResult> {
@@ -950,7 +949,7 @@ async function verifyParsedAssignment(
  */
 export async function verifyAssignment(
 	contractInput: AssignmentContract,
-	resultInput: AssignmentResultV1,
+	resultInput: AssignmentResult,
 	runners?: AssignmentVerifierRunners,
 	actualChangedFiles?: readonly string[],
 ): Promise<VerificationResult> {
