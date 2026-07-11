@@ -19,6 +19,7 @@ function createBtwAssistant(): AssistantMessage {
 		role: "assistant",
 		content: [
 			{ type: "thinking", thinking: "Check the failure mode first.", thinkingSignature: "sig" },
+			{ type: "redactedThinking", data: "encrypted-side-channel-thinking" },
 			{ type: "text", text: "The fix is to branch the side answer." },
 		],
 		api: "anthropic-messages",
@@ -34,7 +35,16 @@ function createBtwAssistant(): AssistantMessage {
 		},
 		stopReason: "stop",
 		timestamp: Date.now(),
+		providerPayload: { type: "openaiResponsesHistory", items: [{ id: "side-channel" }] },
 	};
+}
+
+function expectSanitizedBtwAssistant(message: AssistantMessage): void {
+	expect(message.providerPayload).toBeUndefined();
+	expect(message.content).toEqual([
+		{ type: "thinking", thinking: "Check the failure mode first." },
+		{ type: "text", text: "The fix is to branch the side answer." },
+	]);
 }
 
 describe("AgentSession.branchFromBtw", () => {
@@ -120,7 +130,10 @@ describe("AgentSession.branchFromBtw", () => {
 		expect(fs.readFileSync(originalFile!, "utf8")).toBe(originalRaw);
 		const messages = activeSession.messages;
 		expect(messages.at(-2)).toMatchObject({ role: "user", content: [{ type: "text", text: "why did this fail?" }] });
-		expect(messages.at(-1)).toEqual(assistantMessage);
+		const promoted = messages.at(-1);
+		expect(promoted?.role).toBe("assistant");
+		if (promoted?.role !== "assistant") throw new Error("Expected promoted assistant message");
+		expectSanitizedBtwAssistant(promoted);
 	});
 
 	it("honors session_before_branch cancellation without creating a branch", async () => {
@@ -160,7 +173,10 @@ describe("AgentSession.branchFromBtw", () => {
 		expect(result.cancelled).toBe(false);
 		const messages = activeSession.messages;
 		expect(messages.at(-2)).toMatchObject({ role: "user", content: [{ type: "text", text: "question" }] });
-		expect(messages.at(-1)).toEqual(assistantMessage);
+		const promoted = messages.at(-1);
+		expect(promoted?.role).toBe("assistant");
+		if (promoted?.role !== "assistant") throw new Error("Expected promoted assistant message");
+		expectSanitizedBtwAssistant(promoted);
 	});
 
 	it("aborts an in-flight main stream before switching to the /btw branch", async () => {
@@ -187,7 +203,10 @@ describe("AgentSession.branchFromBtw", () => {
 		expect(result.cancelled).toBe(false);
 		const messages = activeSession.messages;
 		expect(messages.at(-2)).toMatchObject({ role: "user", content: [{ type: "text", text: "question" }] });
-		expect(messages.at(-1)).toEqual(assistantMessage);
+		const promoted = messages.at(-1);
+		expect(promoted?.role).toBe("assistant");
+		if (promoted?.role !== "assistant") throw new Error("Expected promoted assistant message");
+		expectSanitizedBtwAssistant(promoted);
 		expect(messages).not.toContainEqual(
 			expect.objectContaining({
 				role: "assistant",

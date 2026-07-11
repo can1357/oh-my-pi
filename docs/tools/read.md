@@ -103,7 +103,7 @@ URL selectors are parsed separately in `packages/coding-agent/src/tools/fetch.ts
   - Default open-ended limit is `min(session setting read.defaultLimit, DEFAULT_MAX_LINES)`.
   - Explicit ranges expand by `RANGE_LEADING_CONTEXT_LINES = 1` / `RANGE_TRAILING_CONTEXT_LINES = 3` on the constrained sides only.
   - Non-raw output uses `resolveFileDisplayMode()`:
-    - hashline numbered output when edit mode is hashline, read is not raw, source is mutable, edit tool exists, and `readHashLines !== false`
+    - hashline numbered output when edit mode is hashline, read is not raw, source is mutable, and the edit tool exists
     - otherwise optional line numbers when `readLineNumbers === true`
     - raw mode suppresses both
 - Prefix format in hashline mode is a `[PATH#TAG]` header followed by `LINE:TEXT`, e.g. `[src/foo.ts#0A1B]` and `41:def alpha():`, from the session snapshot store plus `formatNumberedLine()` / `formatHashlineHeader()`.

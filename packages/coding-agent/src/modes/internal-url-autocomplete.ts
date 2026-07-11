@@ -60,6 +60,16 @@ function fuzzyScore(query: string, target: string): number {
 	return Math.max(1, 40 - gaps * 5);
 }
 
+/** Decode a completion `value` for fuzzy matching (the inserted value may be
+ * percent-encoded, e.g. an ssh host `alice%40prod`); identity for plain values. */
+function decodeUrlCompletionValue(value: string): string {
+	try {
+		return decodeURIComponent(value);
+	} catch {
+		return value;
+	}
+}
+
 /**
  * Detect a completable internal-url token immediately before the cursor.
  * Returns `null` when the text is not a `scheme://` token whose scheme is
@@ -82,17 +92,22 @@ export function extractInternalUrlContext(textBeforeCursor: string): InternalUrl
  */
 export async function getInternalUrlSuggestions(
 	textBeforeCursor: string,
+	cwd?: string,
 ): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
 	const ctx = extractInternalUrlContext(textBeforeCursor);
 	if (!ctx) return null;
 
-	const candidates = await InternalUrlRouter.instance().complete(ctx.scheme, ctx.query);
+	const candidates = await InternalUrlRouter.instance().complete(
+		ctx.scheme,
+		ctx.query,
+		cwd === undefined ? undefined : { cwd },
+	);
 	if (!candidates || candidates.length === 0) return null;
 
 	const query = ctx.query.toLowerCase();
 	const scored: Array<{ item: AutocompleteItem; score: number }> = [];
 	for (const candidate of candidates) {
-		const target = candidate.value.toLowerCase();
+		const target = decodeUrlCompletionValue(candidate.value).toLowerCase();
 		if (!fuzzyMatch(query, target)) continue;
 		scored.push({
 			item: {

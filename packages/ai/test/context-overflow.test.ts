@@ -14,9 +14,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { ChildProcess } from "node:child_process";
 import { execSync, spawn } from "node:child_process";
+import { isContextOverflow as originalIsContextOverflow } from "@pk-nerdsaver-ai/pi-ai/error";
 import { complete } from "@pk-nerdsaver-ai/pi-ai/stream";
 import type { AssistantMessage, Context, Model, Usage } from "@pk-nerdsaver-ai/pi-ai/types";
-import { isContextOverflow as originalIsContextOverflow } from "@pk-nerdsaver-ai/pi-ai/utils/overflow";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
 import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
 import { $which } from "@pk-nerdsaver-ai/pi-utils";

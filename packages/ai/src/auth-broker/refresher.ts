@@ -5,9 +5,10 @@
  * any whose `expires - Date.now() < refreshSkewMs`. Refresh single-flight
  * lives in {@link AuthStorage} so manual and background refreshes share the
  * same upstream attempt.
- * Definitively-failed credentials (invalid_grant / 401 not from network blip)
- * are disabled via {@link AuthStorage.disableCredentialById} so the next
- * snapshot pull surfaces a clean delete on the client.
+ * Definitively-failed credentials (invalid_grant / bare 401, not a network
+ * blip) are torn down inside {@link AuthStorage.refreshCredentialById} via a
+ * compare-and-set disable — only when no peer/login rotated the row first — so
+ * the next snapshot pull surfaces a clean delete on the client.
  */
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
 import { type AuthStorage, isDefinitiveOAuthFailure } from "../auth-storage";
@@ -104,11 +105,10 @@ export class AuthBrokerRefresher {
 		} catch (error) {
 			const errorMsg = String(error);
 			if (isDefinitiveOAuthFailure(errorMsg)) {
-				logger.warn("auth-broker refresh failed definitively; disabling credential", {
-					id,
-					error: errorMsg,
-				});
-				this.#storage.disableCredentialById(id, `auth-broker refresh failed: ${errorMsg}`);
+				// AuthStorage.refreshCredentialById already CAS-disabled the row
+				// (unless a peer/login rotated it first, in which case the live
+				// credential is intentionally kept). Nothing to do here but record it.
+				logger.warn("auth-broker refresh failed definitively", { id, error: errorMsg });
 			} else {
 				logger.debug("auth-broker refresh failed (transient)", { id, error: errorMsg });
 			}

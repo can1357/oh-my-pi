@@ -4,7 +4,7 @@ import { TempDir } from "@pk-nerdsaver-ai/pi-utils/temp";
 import { createHelpers, type HelperContext } from "../js/shared/helpers";
 
 /**
- * The eval helpers (`read`/`write`/`append`) must substitute injected on-disk
+ * The eval helpers (`read`/`write`) must substitute injected on-disk
  * roots for internal-URL schemes. Without it, `write("local://x.md")` hits a
  * stdlib `path.resolve` that collapses `local://` to `local:/`, creating a junk
  * `local:` directory under the cwd instead of landing where `read local://x.md`
@@ -20,7 +20,7 @@ function makeCtx(cwd: string, roots: Record<string, string>): HelperContext {
 }
 
 describe("eval js helpers internal-url resolution", () => {
-	it("writes, reads, and appends local:// under the injected root", async () => {
+	it("writes and reads local:// under the injected root", async () => {
 		using tmp = TempDir.createSync("@eval-helpers-local-");
 		const root = path.join(tmp.path(), "local");
 		const helpers = createHelpers(makeCtx(tmp.path(), { local: root }));
@@ -29,9 +29,6 @@ describe("eval js helpers internal-url resolution", () => {
 		expect(written).toBe(path.join(root, "notes", "merge-map.md"));
 		expect(await Bun.file(written).text()).toBe("hello");
 		expect(await helpers.read("local://notes/merge-map.md")).toBe("hello");
-
-		await helpers.append("local://notes/merge-map.md", " world");
-		expect(await helpers.read("local://notes/merge-map.md")).toBe("hello world");
 
 		// Regression: no literal `local:` directory created under the cwd.
 		expect(await Bun.file(path.join(tmp.path(), "local:")).exists()).toBe(false);

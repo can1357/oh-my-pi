@@ -34,9 +34,14 @@ function writeLine(text = ""): void {
 	process.stdout.write(`${text}\n`);
 }
 
-function resolveModels(model: string | undefined): TinyLocalModelKey[] {
+export function resolveModels(model: string | undefined): TinyLocalModelKey[] {
 	if (!model) return [DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY];
-	if (model === "all") return TINY_LOCAL_MODELS.map(spec => spec.key);
+	// `all` is a prefetch convenience: skip models that fail before load (unsupported
+	// runtime), so the bulk download stays green when every *usable* model succeeds.
+	if (model === "all")
+		return TINY_LOCAL_MODELS.filter(spec => !("unsupportedReason" in spec) || !spec.unsupportedReason).map(
+			spec => spec.key,
+		);
 	if (!isTinyLocalModelKey(model)) {
 		const values = TINY_LOCAL_MODELS.map(spec => spec.key).join(", ");
 		throw new Error(`Unknown tiny local model: ${model}. Expected one of: ${values}, all`);

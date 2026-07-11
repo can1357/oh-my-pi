@@ -29,10 +29,23 @@ export const DEFAULT_VIEWPORT = { width: 1365, height: 768, deviceScaleFactor: 1
  * connection dropped, etc.).
  */
 export const BROWSER_PROTOCOL_TIMEOUT_MS = 60_000;
+// Automation-tell launch flags that puppeteer-core adds by default. We suppress
+// them via `ignoreDefaultArgs` (the supported escape hatch) to mirror xxxx's
+// chromiumSwitches patch. `--enable-automation` is the loudest: it sets
+// navigator.webdriver=true and shows the "controlled by automated software" infobar.
+// `ignoreDefaultArgs` does exact-string matching, so each entry must be a flag that
+// puppeteer emits verbatim. The default `--disable-features=...` string can't be
+// matched this way; it is neutralized in the puppeteer-core patch (ChromeLauncher).
 const STEALTH_IGNORE_DEFAULT_ARGS = [
+	"--enable-automation",
 	"--disable-extensions",
 	"--disable-default-apps",
 	"--disable-component-extensions-with-background-pages",
+	"--disable-popup-blocking",
+	"--disable-client-side-phishing-detection",
+	"--allow-pre-commit-input",
+	"--disable-ipc-flooding-protection",
+	"--metrics-recording-only",
 ];
 const STEALTH_ACCEPT_LANGUAGE = "en-US,en";
 
@@ -309,9 +322,11 @@ export interface UserAgentOverride {
 	userAgentMetadata: {
 		brands: Array<{ brand: string; version: string }>;
 		fullVersion: string;
+		fullVersionList: Array<{ brand: string; version: string }>;
 		platform: string;
 		platformVersion: string;
 		architecture: string;
+		bitness: string;
 		model: string;
 		mobile: boolean;
 	};
@@ -371,6 +386,26 @@ function patchSourceUrl(page: Page): void {
 	};
 }
 
+async function resolveMacOsProductVersion(): Promise<string> {
+	if (os.platform() !== "darwin") return "";
+	try {
+		const plist = await Bun.file("/System/Library/CoreServices/SystemVersion.plist").text();
+		return plist.match(/<key>ProductVersion<\/key>\s*<string>([^<]+)<\/string>/)?.[1] ?? "";
+	} catch {
+		return "";
+	}
+}
+
+function resolveHostArchitecture(): string {
+	if (os.arch() === "arm64") return "arm";
+	if (os.arch().includes("64")) return "x86";
+	return "";
+}
+
+function resolveHostBitness(): string {
+	return os.arch().includes("64") ? "64" : "";
+}
+
 async function resolveUserAgentOverride(page: Page): Promise<UserAgentOverride> {
 	const rawUserAgent = await page.browser().userAgent();
 	let userAgent = rawUserAgent.replace("HeadlessChrome/", "Chrome/");
@@ -379,32 +414,24 @@ async function resolveUserAgentOverride(page: Page): Promise<UserAgentOverride> 
 	}
 
 	const uaVersionMatch = userAgent.match(/Chrome\/([\d|.]+)/);
-	const fallbackVersionMatch = uaVersionMatch ?? (await page.browser().version()).match(/\/([\d|.]+)/);
-	const uaVersion = fallbackVersionMatch?.[1] ?? "0";
-	const majorVersion = Number.parseInt(uaVersion.split(".")[0] ?? "0", 10) || 0;
+	const browserVersionMatch = (await page.browser().version()).match(/\/([\d|.]+)/);
+	const legacyVersion = uaVersionMatch?.[1] ?? browserVersionMatch?.[1] ?? "0";
+	const fullVersion = browserVersionMatch?.[1] ?? legacyVersion;
+	const majorVersion = Number.parseInt(legacyVersion.split(".")[0] ?? "0", 10) || 0;
 	const isAndroid = userAgent.includes("Android");
-	const platform = userAgent.includes("Mac OS X")
-		? "MacIntel"
-		: isAndroid
-			? "Android"
-			: userAgent.includes("Linux")
-				? "Linux"
-				: "Win32";
-	const platformFull = userAgent.includes("Mac OS X")
-		? "Mac OS X"
-		: isAndroid
-			? "Android"
-			: userAgent.includes("Linux")
-				? "Linux"
-				: "Windows";
-	const platformVersion = userAgent.includes("Mac OS X ")
-		? (userAgent.match(/Mac OS X ([^)]+)/)?.[1] ?? "")
+	const isMac = userAgent.includes("Mac OS X");
+	const isWindows = userAgent.includes("Windows");
+	const platform = isMac ? "MacIntel" : isAndroid ? "Android" : userAgent.includes("Linux") ? "Linux" : "Win32";
+	const platformFull = isMac ? "macOS" : isAndroid ? "Android" : userAgent.includes("Linux") ? "Linux" : "Windows";
+	const platformVersion = isMac
+		? await resolveMacOsProductVersion()
 		: userAgent.includes("Android ")
 			? (userAgent.match(/Android ([^;]+)/)?.[1] ?? "")
-			: userAgent.includes("Windows ")
-				? (userAgent.match(/Windows .*?([\d|.]+);?/)?.[1] ?? "")
+			: isWindows
+				? (userAgent.match(/Windows NT ([\d.]+)/)?.[1] ?? "")
 				: "";
-	const architecture = isAndroid ? "" : "x86";
+	const architecture = isAndroid ? "" : resolveHostArchitecture();
+	const bitness = isAndroid ? "" : resolveHostBitness();
 	const model = isAndroid ? (userAgent.match(/Android.*?;\s([^)]+)/)?.[1] ?? "") : "";
 
 	const brandOrders = [
@@ -422,6 +449,10 @@ async function resolveUserAgentOverride(page: Page): Promise<UserAgentOverride> 
 	brands[order[0]!] = { brand: greaseyBrand, version: "99" };
 	brands[order[1]!] = { brand: "Chromium", version: String(majorVersion) };
 	brands[order[2]!] = { brand: "Google Chrome", version: String(majorVersion) };
+	const fullVersionList = brands.map(({ brand }) => ({
+		brand,
+		version: brand === greaseyBrand ? "99.0.0.0" : fullVersion,
+	}));
 
 	return {
 		userAgent,
@@ -429,10 +460,12 @@ async function resolveUserAgentOverride(page: Page): Promise<UserAgentOverride> 
 		acceptLanguage: STEALTH_ACCEPT_LANGUAGE,
 		userAgentMetadata: {
 			brands,
-			fullVersion: uaVersion,
+			fullVersion,
+			fullVersionList,
 			platform: platformFull,
 			platformVersion,
 			architecture,
+			bitness,
 			model,
 			mobile: isAndroid,
 		},
@@ -578,15 +611,29 @@ function buildStealthInjectionScript(scripts: readonly string[] = STEALTH_PATCH_
 		.join(";\n");
 
 	return `(() => {
-				// Native function cache - captured before any tampering
-				const iframe = document.createElement("iframe");
-				iframe.style.display = "none";
+				const Page_Function_toString = Function.prototype.toString;
+				const Page_FunctionToStringDescriptor = Object.getOwnPropertyDescriptor(Function.prototype, "toString");
+				const Page_Proxy = Proxy;
+				const Page_WeakMap = WeakMap;
+				const Page_WeakMap_get = Page_WeakMap.prototype.get;
+				const Page_WeakMap_set = Page_WeakMap.prototype.set;
+				// Native function cache - captured before any tampering.
+				// A same-origin iframe yields natives uncontaminated by page-level
+				// tampering, but at document-start (when this preload runs) there is
+				// no documentElement to attach it to. In that case the page itself
+				// hasn't executed yet, so window's own natives are still pristine —
+				// fall back to window instead of bailing, otherwise none of the
+				// fingerprint patches below would ever run.
+				let iframe = null;
 				const container = document.head ?? document.documentElement;
-				if (!container) return;
-				container.appendChild(iframe);
+				if (container) {
+					iframe = document.createElement("iframe");
+					iframe.style.display = "none";
+					container.appendChild(iframe);
+					if (!iframe.contentWindow) iframe = null;
+				}
 				try {
-					const nativeWindow = iframe.contentWindow;
-					if (!nativeWindow) return;
+					const nativeWindow = iframe ? iframe.contentWindow : window;
 
 					// Cache pristine native functions
 					const Function_toString = nativeWindow.Function.prototype.toString;
@@ -626,9 +673,38 @@ function buildStealthInjectionScript(scripts: readonly string[] = STEALTH_PATCH_
 					const Intl_DateTimeFormat = nativeWindow.Intl.DateTimeFormat;
 					const Date_constructor = nativeWindow.Date;
 
+					const nativeFunctionSources = new Page_WeakMap();
+					const makeNativeString = (name) => "function " + (name || "") + "() { [native code] }";
+					const registerNativeSource = (fn, source) => {
+						if (typeof fn === "function") Reflect_apply(Page_WeakMap_set, nativeFunctionSources, [fn, source]);
+						return fn;
+					};
+					const patchToString = (fn, name) => registerNativeSource(fn, makeNativeString(name));
+					if (${scripts.length > 0 ? "true" : "false"}) {
+						const functionToStringProxy = new Page_Proxy(Page_Function_toString, {
+							apply(target, thisArg, args) {
+								const source = Reflect_apply(Page_WeakMap_get, nativeFunctionSources, [thisArg]);
+								if (source) return source;
+								return Reflect_apply(target, thisArg, args || []);
+							},
+							get(target, key, receiver) {
+								return Reflect_get(target, key, receiver);
+							},
+						});
+						registerNativeSource(functionToStringProxy, makeNativeString("toString"));
+						Object_defineProperty(Function.prototype, "toString", {
+							...(Page_FunctionToStringDescriptor || {
+								writable: true,
+								configurable: true,
+								enumerable: false,
+							}),
+							value: functionToStringProxy,
+						});
+					}
+
 					${joint}
 				} finally {
-					if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+					if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe);
 				}})();`;
 }
 

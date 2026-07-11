@@ -42,7 +42,7 @@ import {
 } from "@agentclientprotocol/sdk";
 import type { AgentToolResult } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { AssistantMessage, Model } from "@pk-nerdsaver-ai/pi-ai";
-import { isEnoent, logger, VERSION } from "@pk-nerdsaver-ai/pi-utils";
+import { getBlobsDir, isEnoent, logger, VERSION } from "@pk-nerdsaver-ai/pi-utils";
 import { disableProvider, enableProvider, reset as resetCapabilities } from "../../capability";
 import { Settings } from "../../config/settings";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
@@ -62,6 +62,7 @@ import { loadAllExtensions } from "../../modes/components/extensions/state-manag
 import { theme } from "../../modes/theme/theme";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
+import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import * as fusionSidekick from "../../session/fusion-sidekick";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import type { UsageStatistics } from "../../session/session-entries";
@@ -446,6 +447,7 @@ export class AcpAgent implements Agent {
 	#cleanupRegistered = false;
 	#clientCapabilities: ClientCapabilities | undefined;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
+	#blobs = new BlobStore(getBlobsDir());
 
 	constructor(connection: AgentSideConnection, createSession: CreateAcpSession, initialSession?: AgentSession) {
 		this.#connection = connection;
@@ -1231,11 +1233,21 @@ export class AcpAgent implements Agent {
 		}
 
 		this.#prepareLiveAssistantMessage(record, event);
+		const imageDataCache = new Map<string, string>();
+		const resolveImageDataForAcp = (data: string, mimeType: string | undefined): string => {
+			const key = `${mimeType ?? ""}\u0000${data}`;
+			const cached = imageDataCache.get(key);
+			if (cached !== undefined) return cached;
+			const resolved = resolveImageDataSync(this.#blobs, data);
+			imageDataCache.set(key, resolved);
+			return resolved;
+		};
 		for (const notification of mapAgentSessionEventToAcpSessionUpdates(event, record.session.sessionId, {
 			getMessageId: message => this.#getLiveMessageId(record, message),
 			getMessageProgress: message => this.#getLiveMessageProgress(record, message),
 			getToolArgs: toolCallId => record.toolArgsById.get(toolCallId),
 			cwd: record.session.sessionManager.getCwd(),
+			resolveImageData: resolveImageDataForAcp,
 		})) {
 			await this.#connection.sessionUpdate(notification);
 		}
@@ -2046,7 +2058,7 @@ export class AcpAgent implements Agent {
 				}
 			}
 		}
-		if (notifications.length === 0 && message.errorMessage && !isSilentAbort(message.errorMessage)) {
+		if (notifications.length === 0 && message.errorMessage && !isSilentAbort(message)) {
 			notifications.push({
 				sessionId,
 				update: {
@@ -2096,6 +2108,7 @@ export class AcpAgent implements Agent {
 		const notifications = mapAgentSessionEventToAcpSessionUpdates(endEvent, sessionId, {
 			cwd,
 			getToolArgs: toolCallId => (toolCallId === message.toolCallId ? options.toolArgs : undefined),
+			resolveImageData: (data, _mimeType) => resolveImageDataSync(this.#blobs, data),
 		});
 		if (options.includeStart === false) {
 			return notifications;

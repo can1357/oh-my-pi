@@ -1,0 +1,27 @@
+# Vendored from uutils/coreutils tag 0.8.0 (src/uu/mkdir), patched to resolve
+# path arguments against the shell working directory and route I/O through
+# pi-uutils-ctx so it can run in-process as a shell builtin. See src/mkdir.rs
+# for the patch markers (`pi-uutils:` comments).
+[package]
+name = "uu_mkdir"
+version = "0.8.0"
+edition = "2024"
+license = "MIT"
+description = "mkdir ~ (uutils) create DIRECTORY (vendored + patched for in-process embedding)"
+
+[lib]
+path = "src/mkdir.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["wrap_help", "cargo", "color"] }
+uucore = { version = "0.8.0", features = ["fs", "mode", "fsxattr"] }
+pi-uutils-ctx = { path = "../../pi-uutils-ctx" }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["process", "fs"] }
+
+# Declared (but never enabled) so the upstream `#[cfg(feature = "...")]`
+# blocks pass check-cfg without pulling SELinux/SMACK support.
+[features]
+selinux = []
+smack = []

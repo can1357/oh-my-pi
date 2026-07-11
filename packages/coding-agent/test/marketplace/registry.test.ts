@@ -23,6 +23,7 @@ import {
 	writeInstalledPluginsRegistry,
 	writeMarketplacesRegistry,
 } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/marketplace";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 // Inline the parseClaudePluginsRegistry validation logic to avoid pulling
 // in discovery/helpers.ts which transitively imports @pk-nerdsaver-ai/pi-natives.
@@ -207,7 +208,7 @@ describe("registry file I/O", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		removeSyncWithRetries(tmpDir);
 	});
 
 	// ── Marketplaces registry ────────────────────────────────────────

@@ -8,6 +8,7 @@ import type { ClientBridge } from "@pk-nerdsaver-ai/pi-coding-agent/session/clie
 import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import type { ReadToolDetails } from "@pk-nerdsaver-ai/pi-coding-agent/tools/read";
 import { ReadTool } from "@pk-nerdsaver-ai/pi-coding-agent/tools/read";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 function textOutput(result: AgentToolResult<ReadToolDetails>): string {
 	return result.content
@@ -45,16 +46,32 @@ describe("read tool multi-range selector", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
+	});
+
+	it("uses only the filename in hashline headers for nested files", async () => {
+		const filePath = path.join(tmpDir, "src", "nested", "numbered.txt");
+		await fs.mkdir(path.dirname(filePath), { recursive: true });
+		await fs.writeFile(filePath, "alpha\nbeta\n");
+
+		const tool = new ReadTool(createSession(tmpDir));
+		const text = textOutput(await tool.execute("call-filename-header", { path: filePath }));
+		const firstLine = text.split("\n")[0];
+
+		expect(firstLine).toMatch(/^\[numbered\.txt#[0-9A-F]{4}\]$/);
+		expect(firstLine).not.toContain("src");
 	});
 
 	it("returns both ranges separated by an elision marker", async () => {
-		const filePath = path.join(tmpDir, "numbered.txt");
+		const filePath = path.join(tmpDir, "src", "numbered.txt");
+		await fs.mkdir(path.dirname(filePath), { recursive: true });
 		await fs.writeFile(filePath, makeNumberedContent(50));
 
 		const tool = new ReadTool(createSession(tmpDir));
 		const result = await tool.execute("call-multi", { path: `${filePath}:3-5,20-22` });
 		const text = textOutput(result);
+		const firstLine = text.split("\n")[0];
+		expect(firstLine).toMatch(/^\[numbered\.txt#[0-9A-F]{4}\]$/);
 
 		expect(text).toContain("line 3");
 		expect(text).toContain("line 4");

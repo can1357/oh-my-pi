@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+## [16.2.0] - 2026-06-27
+
+### Added
+
+- Added dedicated renderers for glob, grep, and legacy find and search tools to improve the readability of search and file discovery results.
+
+## [16.1.23] - 2026-06-26
+
+### Fixed
+
+- Hid advisory wrapper tags in collab transcript Markdown while preserving their content. ([#3559](https://github.com/can1357/oh-my-pi/issues/3559))
+
+## [16.1.16] - 2026-06-23
+
+### Added
+
+- Added support for Ruby and Julia code cells in the eval tool
+
+### Changed
+
+- Updated the eval tool view to render the new single-cell eval args (flat `language`/`code`/`title`/`timeout`/`reset`) and to highlight Ruby (`rb`) and Julia (`jl`) cells with their own syntax instead of collapsing them to Python, while still parsing legacy multi-cell `cells` arrays and framed `input` strings from older transcripts.
+
+### Fixed
+
+- Improved compatibility with legacy todo task transcripts
+
+## [16.1.8] - 2026-06-20
+
+### Breaking Changes
+
+- Bumped `COLLAB_PROTO` to `2`: the `welcome` frame now carries metadata only (header/state/agents/`entryCount`) and the transcript follows in a train of targeted `snapshot-chunk` frames terminated by `final: true`. Old guests speaking proto v1 are rejected with the existing protocol-mismatch error.
+
+### Changed
+
+- Restyled the collab shell with the stats dashboard theme tokens and added the persisted system/light/dark theme toggle.
+
+### Fixed
+
+- Fixed the guest hanging in the "waiting" phase on large host sessions: the client now accumulates `snapshot-chunk` frames into the transcript snapshot and only transitions to `live` after the final chunk lands (or immediately when the host's snapshot is empty). ([#3144](https://github.com/can1357/oh-my-pi/issues/3144))
+
 ## [16.0.10] - 2026-06-18
 
 ### Added

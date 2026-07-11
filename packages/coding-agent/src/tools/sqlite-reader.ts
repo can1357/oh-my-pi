@@ -21,7 +21,19 @@ const MAX_QUERY_LIMIT = 500;
 export const MAX_RAW_QUERY_ROWS = 1000;
 const MAX_RENDER_WIDTH = 120;
 const MAX_COLUMN_WIDTH = 40;
-const MIN_COLUMN_WIDTH = 1;
+/**
+ * Floor for each ASCII-table column. At width 2 (or 1) every multi-char cell
+ * collapses to a lone ellipsis, so the renderer keeps each column wide enough
+ * to show at least one real glyph alongside the ellipsis (e.g. `Fo…`). When a
+ * row has too many columns to honor this floor inside `MAX_RENDER_WIDTH`,
+ * `buildAsciiTable` falls back to per-row vertical blocks via
+ * {@link buildVerticalBlocks} — issue #3107.
+ */
+const MIN_COLUMN_WIDTH = 3;
+/** Separator overhead per column in the ASCII table (`" | "`). */
+const COLUMN_SEPARATOR_WIDTH = 3;
+/** Constant frame overhead added once to every row (leading `"|"` + trailing `" |"` after the per-column accounting). */
+const TABLE_FRAME_WIDTH = 1;
 /**
  * Upper bound on rows scanned when counting a table for the listing. SQLite has
  * no stored row count, so `COUNT(*)` is a full b-tree scan — multi-second on a
@@ -142,9 +154,52 @@ function padCell(value: string, width: number): string {
 	return `${truncated}${" ".repeat(width - visibleWidth)}`;
 }
 
+/**
+ * Width budget the ASCII layout needs at the floor (each column at
+ * `MIN_COLUMN_WIDTH`). When this exceeds `MAX_RENDER_WIDTH`, no choice of
+ * per-column widths can fit the header inside the budget — every cell is then
+ * forced down to width 1 by the shrink loop, rendering as a lone ellipsis, and
+ * the right edge is still chopped by the final per-line truncation (#3107).
+ */
+function tableFitsAtMinimum(columnCount: number): boolean {
+	return MIN_COLUMN_WIDTH * columnCount + COLUMN_SEPARATOR_WIDTH * columnCount + TABLE_FRAME_WIDTH <= MAX_RENDER_WIDTH;
+}
+
+/**
+ * Vertical fallback used when a table has too many columns to fit horizontally
+ * (>19 at the default 120-cell budget). Each row becomes a labelled block of
+ * `column: value` lines, mirroring `psql`'s expanded display mode. Column
+ * names are right-padded so colons align; the value is left raw and the whole
+ * line is truncated at `MAX_RENDER_WIDTH`.
+ */
+function buildVerticalBlocks(columns: string[], rows: SqliteRow[]): string {
+	if (rows.length === 0) {
+		return "(no rows)";
+	}
+	let nameWidth = MIN_COLUMN_WIDTH;
+	for (const column of columns) {
+		nameWidth = Math.max(nameWidth, Bun.stringWidth(sanitizeCell(column)));
+	}
+	nameWidth = Math.min(MAX_COLUMN_WIDTH, nameWidth);
+	return rows
+		.map((row, index) => {
+			const block = [`── Row ${index + 1} ──`];
+			for (const column of columns) {
+				const name = padCell(column, nameWidth);
+				const value = sanitizeCell(stringifySqliteValue(row[column]));
+				block.push(truncateToWidth(`${name}: ${value}`, MAX_RENDER_WIDTH));
+			}
+			return block.join("\n");
+		})
+		.join("\n\n");
+}
+
 function buildAsciiTable(columns: string[], rows: SqliteRow[]): string {
 	if (columns.length === 0) {
 		return rows.length === 0 ? "(no rows)" : "(rows returned without named columns)";
+	}
+	if (!tableFitsAtMinimum(columns.length)) {
+		return buildVerticalBlocks(columns, rows);
 	}
 
 	const widths = columns.map(column =>
@@ -157,7 +212,8 @@ function buildAsciiTable(columns: string[], rows: SqliteRow[]): string {
 		}
 	}
 
-	let totalWidth = widths.reduce((sum, width) => sum + width, 0) + columns.length * 3 + 1;
+	const overhead = columns.length * COLUMN_SEPARATOR_WIDTH + TABLE_FRAME_WIDTH;
+	let totalWidth = widths.reduce((sum, width) => sum + width, 0) + overhead;
 	while (totalWidth > MAX_RENDER_WIDTH) {
 		let widestIndex = -1;
 		let widestWidth = MIN_COLUMN_WIDTH;
@@ -169,7 +225,7 @@ function buildAsciiTable(columns: string[], rows: SqliteRow[]): string {
 		}
 		if (widestIndex === -1) break;
 		widths[widestIndex] = Math.max(MIN_COLUMN_WIDTH, (widths[widestIndex] ?? MIN_COLUMN_WIDTH) - 1);
-		totalWidth = widths.reduce((sum, width) => sum + width, 0) + columns.length * 3 + 1;
+		totalWidth = widths.reduce((sum, width) => sum + width, 0) + overhead;
 	}
 
 	const header = `| ${columns.map((column, index) => padCell(column, widths[index] ?? MIN_COLUMN_WIDTH)).join(" | ")} |`;

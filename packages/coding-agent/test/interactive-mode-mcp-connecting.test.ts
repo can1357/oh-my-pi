@@ -4,9 +4,9 @@ import { Agent } from "@pk-nerdsaver-ai/pi-agent-core";
 import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import {
-	formatMCPConnectingMessage,
-	MCP_CONNECTING_EVENT_CHANNEL,
-	type McpConnectingEvent,
+	formatMCPConnectionStatusMessage,
+	MCP_CONNECTION_STATUS_EVENT_CHANNEL,
+	type McpConnectionStatusEvent,
 } from "@pk-nerdsaver-ai/pi-coding-agent/mcp/startup-events";
 import { InteractiveMode } from "@pk-nerdsaver-ai/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
@@ -17,16 +17,13 @@ import { EventBus } from "@pk-nerdsaver-ai/pi-coding-agent/utils/event-bus";
 import { logger, TempDir } from "@pk-nerdsaver-ai/pi-utils";
 
 /**
- * Behavioral wiring guard for the MCP connecting banner (mirrors
- * interactive-mode-lsp-startup.test.ts). The fix routes the banner through the
- * render tree instead of `process.stderr.write`: sdk emits on
- * `MCP_CONNECTING_EVENT_CHANNEL` and InteractiveMode's constructor subscribes,
- * rendering via `showStatus`. The shared-module contract test pins the channel
- * string and formatter; this pins the live subscriber — dropping the
- * `eventBus.on(...)` registration or diverging the channel would silently kill
- * the banner with no type error, and this case would fail.
+ * Behavioral wiring guard for MCP startup status (mirrors
+ * interactive-mode-lsp-startup.test.ts). The SDK emits connection lifecycle
+ * events, and InteractiveMode aggregates them into one live status line. This
+ * pins the constructor-time subscription and the update path that replaces the
+ * stale "Connecting…" banner when servers connect or fail.
  */
-describe("InteractiveMode MCP connecting banner", () => {
+describe("InteractiveMode MCP connection status", () => {
 	let authStorage: AuthStorage;
 	let eventBus: EventBus;
 	let mode: InteractiveMode;
@@ -87,46 +84,72 @@ describe("InteractiveMode MCP connecting banner", () => {
 		resetSettingsForTest();
 	});
 
-	it("routes a mcp:connecting event through the constructor-registered subscriber, before init()", () => {
-		// The subscription is registered in the InteractiveMode constructor, so the
-		// banner routes BEFORE init()/any async startup. Emitting here — with no
-		// init() — pins that race-sensitive invariant: the real sdk emit is gated
-		// behind async MCP config loading (loadAllMCPConfigs), so a constructor-time
-		// subscriber always wins. Stub showStatus so no initialized UI is needed.
+	it("routes a mcp:connection-status event through the constructor-registered subscriber, before init()", () => {
 		const showStatusSpy = vi.spyOn(mode, "showStatus").mockImplementation(() => {});
 
 		const serverNames = ["sequential", "critic", "shannon"];
-		eventBus.emit(MCP_CONNECTING_EVENT_CHANNEL, { serverNames } satisfies McpConnectingEvent);
+		const event = { type: "connecting", serverNames } satisfies McpConnectionStatusEvent;
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event);
 
-		// A dropped subscription or a channel divergence would leave showStatus
-		// uncalled; a revert to raw stderr.write would never reach showStatus either.
-		expect(showStatusSpy).toHaveBeenCalledWith(formatMCPConnectingMessage(serverNames));
+		expect(showStatusSpy).toHaveBeenCalledWith(
+			formatMCPConnectionStatusMessage({
+				pendingServers: serverNames,
+				connectedServers: [],
+				failedServers: [],
+			}),
+		);
 	});
 
-	it("does not render the mcp:connecting status when startup.quiet is enabled", () => {
+	it("does not render the mcp:connection-status status when startup.quiet is enabled", () => {
 		session.settings.set("startup.quiet", true);
 		const showStatusSpy = vi.spyOn(mode, "showStatus").mockImplementation(() => {});
 
-		eventBus.emit(MCP_CONNECTING_EVENT_CHANNEL, {
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connecting",
 			serverNames: ["sequential", "critic"],
-		} satisfies McpConnectingEvent);
+		} satisfies McpConnectionStatusEvent);
 
 		expect(showStatusSpy).not.toHaveBeenCalled();
 	});
 
-	it("rejects a malformed mcp:connecting payload via the guard instead of letting it throw", () => {
+	it("updates the live MCP status as servers connect and fail", () => {
+		const showStatusSpy = vi.spyOn(mode, "showStatus").mockImplementation(() => {});
+
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connecting",
+			serverNames: ["alpha", "broken", "slow"],
+		} satisfies McpConnectionStatusEvent);
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connected",
+			serverName: "alpha",
+		} satisfies McpConnectionStatusEvent);
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "failed",
+			serverName: "broken",
+			error: "missing command",
+		} satisfies McpConnectionStatusEvent);
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connected",
+			serverName: "slow",
+		} satisfies McpConnectionStatusEvent);
+
+		expect(showStatusSpy.mock.calls.map(call => call[0])).toEqual([
+			"Connecting to MCP servers: alpha, broken, slow…",
+			"Connected: alpha. Still connecting: broken, slow…",
+			"Connected: alpha. Failed: broken: missing command. Still connecting: slow…",
+			"MCP finished with failures. Connected: alpha, slow. Failed: broken: missing command",
+		]);
+	});
+
+	it("rejects a malformed mcp:connection-status payload via the guard instead of letting it throw", () => {
 		const showStatusSpy = vi.spyOn(mode, "showStatus").mockImplementation(() => {});
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		// The EventBus swallows handler throws into logger.error, so the discriminator
-		// is: with the guard the handler returns early (logger.warn, no error); without
-		// it the cast reaches formatMCPConnectingMessage(undefined) and throws a
-		// TypeError the bus catches as logger.error.
 		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
 
-		eventBus.emit(MCP_CONNECTING_EVENT_CHANNEL, { wrong: "shape" });
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, { wrong: "shape" });
 
 		expect(showStatusSpy).not.toHaveBeenCalled();
-		expect(warnSpy).toHaveBeenCalled(); // guard took the reject branch
-		expect(errorSpy).not.toHaveBeenCalled(); // no swallowed TypeError from a bad cast
+		expect(warnSpy).toHaveBeenCalled();
+		expect(errorSpy).not.toHaveBeenCalled();
 	});
 });

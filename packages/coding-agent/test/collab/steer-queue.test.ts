@@ -151,6 +151,10 @@ async function joinAsGuest(link: string, name: string): Promise<TestGuest> {
 	const queue: CollabFrame[] = [];
 	const waiters: ((frame: CollabFrame) => void)[] = [];
 	socket.onFrame = frame => {
+		// The host follows every welcome with a `snapshot-chunk` train carrying
+		// the transcript. This harness ships zero entries, so the chunks are
+		// pure noise around the welcome/prompt-reply assertions.
+		if (frame.t === "snapshot-chunk") return;
 		const waiter = waiters.shift();
 		if (waiter) waiter(frame);
 		else queue.push(frame);

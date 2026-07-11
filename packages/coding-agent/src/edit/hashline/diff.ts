@@ -199,9 +199,15 @@ function buildStreamingSectionDiff(
 	section: PatchSection,
 	normalized: string,
 ): { diff: string; firstChangedLine: number | undefined } | { error: string } {
-	const { edits } = parsePatchStreaming(section.diff);
+	const { edits, fileOp } = parsePatchStreaming(section.diff);
 	const resolved = resolveBlockEdits(edits, normalized, section.path, nativeBlockResolver, { onUnresolved: "drop" });
-	if (resolved.length === 0) return { error: `No changes would be made to ${section.path}.` };
+	if (resolved.length === 0) {
+		// A whole-file op (REM / MV) carries no line edits: the change is the
+		// delete/move itself, conveyed by the result header, so emit an empty
+		// diff rather than a misleading "No changes" error.
+		if (fileOp) return { diff: "", firstChangedLine: undefined };
+		return { error: `No changes would be made to ${section.path}.` };
+	}
 
 	const fileLines = normalized.split("\n");
 	const rows: string[] = [];
@@ -264,7 +270,12 @@ export async function computeHashlineSectionDiff(
 		// (`streaming` unset) falls through to the real Myers diff below.
 		if (options.streaming) return buildStreamingSectionDiff(section, normalized);
 		const result = applyPreviewEdits({ section, absolutePath, normalized, snapshots, options });
-		if (normalized === result.text) return { error: `No changes would be made to ${section.path}.` };
+		if (normalized === result.text) {
+			// REM/MV-only sections change no text; the header conveys the
+			// delete/move, so don't surface a "No changes" error.
+			if (section.fileOp) return { diff: "", firstChangedLine: undefined };
+			return { error: `No changes would be made to ${section.path}.` };
+		}
 		return generateDiffString(normalized, result.text, undefined, { path: section.path });
 	} catch (err) {
 		return { error: err instanceof Error ? err.message : String(err) };

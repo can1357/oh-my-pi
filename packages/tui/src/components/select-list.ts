@@ -2,6 +2,7 @@ import { popLoopPhase, pushLoopPhase } from "@pk-nerdsaver-ai/pi-utils";
 import { fuzzyFilter } from "../fuzzy";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText } from "../keys";
+import { type MouseRoutable, routeSelectListMouse, type SgrMouseEvent } from "../mouse";
 import type { SymbolTheme } from "../symbols";
 import type { Component } from "../tui";
 import { Ellipsis, padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
@@ -80,7 +81,7 @@ type SelectItemLayout =
 			spacing: "";
 	  };
 
-export class SelectList implements Component {
+export class SelectList implements Component, MouseRoutable {
 	#filteredItems: ReadonlyArray<SelectItem>;
 	#filterQuery = "";
 	#selectedIndex: number = 0;
@@ -137,6 +138,10 @@ export class SelectList implements Component {
 			this.#notifySelectionChange();
 		}
 		this.onSelect?.(item);
+	}
+
+	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
+		routeSelectListMouse(this, event, line);
 	}
 
 	invalidate(): void {

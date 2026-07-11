@@ -7,7 +7,7 @@ import {
 	sharedSpinnerFrame,
 } from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/tool-execution";
 import { getThemeByName } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
-import { getConfigRootDir, getCustomThemesDir, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
+import { getConfigRootDir, getCustomThemesDir, removeWithRetries, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
 
 // Path of the built-in dark theme JSON, used as a known-valid base we can
 // extend with custom `symbols.spinnerFrames` shapes.
@@ -44,7 +44,7 @@ describe("theme symbols.spinnerFrames", () => {
 			setAgentDir(fallbackAgentDir);
 			delete process.env.PI_CODING_AGENT_DIR;
 		}
-		await fs.rm(tmpAgentDir, { recursive: true, force: true });
+		await removeWithRetries(tmpAgentDir);
 	});
 
 	it("flat-array override applies to both status and activity spinners", async () => {

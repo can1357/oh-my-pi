@@ -124,7 +124,7 @@ export function Browse(): JSX.Element {
         </div>
 
         <Show when={errorMessage()}>
-          <div class="px-5 py-2.5 text-[12px] text-err border-b border-stroke-soft bg-[rgba(255,69,58,0.05)]">
+          <div class="px-5 py-2.5 text-[12px] text-err border-b border-stroke-soft tint-err">
             {errorMessage()}
           </div>
         </Show>
@@ -132,7 +132,7 @@ export function Browse(): JSX.Element {
         <Show when={data().errors.length}>
           <For each={data().errors}>
             {(err) => (
-              <div class="px-5 py-2 text-[12px] text-err border-b border-stroke-soft bg-[rgba(255,69,58,0.04)]">
+              <div class="px-5 py-2 text-[12px] text-err border-b border-stroke-soft tint-err">
                 <code>{err.repo}</code> <span class="text-ink-300">{err.error}</span>
               </div>
             )}
@@ -155,7 +155,7 @@ export function Browse(): JSX.Element {
             <For each={filtered()}>
               {(issue) => (
                 <div
-                  class="grid items-start gap-4 px-5 py-3.5 border-b border-stroke-soft hover:bg-white/[0.025] transition-colors"
+                  class="grid items-start gap-4 px-5 py-3.5 border-b border-stroke-soft hover:bg-surface-2 transition-colors"
                   style={{
                     "grid-template-columns": "1fr auto",
                     opacity: issue.processed ? 0.55 : 1,
@@ -178,16 +178,7 @@ export function Browse(): JSX.Element {
                     <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-ink-400">
                       <Pill state={issue.state}>{issue.state}</Pill>
                       <Show when={issue.processed}>
-                        <span
-                          class="pill"
-                          style={{
-                            color: "#9ec9ff",
-                            "border-color": "rgba(100,175,255,0.32)",
-                            "background-color": "rgba(10,132,255,0.10)",
-                          }}
-                        >
-                          processed
-                        </span>
+                        <Pill state="processed">processed</Pill>
                       </Show>
                       <span>by {issue.author || "—"}</span>
                       <span>updated {fmtAge(issue.updated_at)}</span>

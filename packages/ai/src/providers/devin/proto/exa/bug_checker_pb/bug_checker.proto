@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package exa.bug_checker_pb;
+
+message Fix {
+  string old_str = 1;
+  string new_str = 2;
+}
+
+message Bug {
+  string id = 1;
+  string file = 2;
+  int32 start = 3;
+  int32 end = 4;
+  string title = 5;
+  string description = 6;
+  string severity = 7;
+  string resolution = 8;
+  double confidence = 9;
+  repeated string categories = 10;
+  .exa.bug_checker_pb.Fix fix = 11;
+}

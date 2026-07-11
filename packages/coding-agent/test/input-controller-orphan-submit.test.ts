@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@pk-nerdsaver-ai/pi-agent-core";
+import type { ImageContent } from "@pk-nerdsaver-ai/pi-ai";
 import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
 import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
@@ -27,6 +28,8 @@ import { TempDir } from "@pk-nerdsaver-ai/pi-utils";
 type FakeEditor = {
 	onSubmit?: (text: string) => Promise<void>;
 	imageLinks?: readonly (string | undefined)[];
+	pendingImages: ImageContent[];
+	pendingImageLinks: (string | undefined)[];
 	setText(text: string): void;
 	getText(): string;
 	addToHistory(text: string): void;
@@ -46,6 +49,8 @@ function createContext(sessionOverride?: InteractiveModeContext["session"]) {
 	const flushPendingBashComponents = vi.fn();
 
 	const editor: FakeEditor = {
+		pendingImages: [] as ImageContent[],
+		pendingImageLinks: [] as (string | undefined)[],
 		setText(text: string) {
 			editorText = text;
 		},
@@ -77,8 +82,6 @@ function createContext(sessionOverride?: InteractiveModeContext["session"]) {
 		ui: { requestRender } as unknown as InteractiveModeContext["ui"],
 		session,
 		sessionManager: { getSessionName: () => "named-session" } as InteractiveModeContext["sessionManager"],
-		pendingImages: [] as InteractiveModeContext["pendingImages"],
-		pendingImageLinks: [] as InteractiveModeContext["pendingImageLinks"],
 		compactionQueuedMessages: [] as InteractiveModeContext["compactionQueuedMessages"],
 		fileSlashCommands: new Set<string>(),
 		locallySubmittedUserSignatures: new Set<string>(),
@@ -184,7 +187,7 @@ describe("InputController orphaned submit", () => {
 	it("forwards pending images and counts them in the local-submission signature", async () => {
 		const { ctx, editor, spies } = createContext();
 		const image = { type: "image", data: "abc", mimeType: "image/png" };
-		(ctx.pendingImages as unknown[]).push(image);
+		(ctx.editor.pendingImages as unknown[]).push(image);
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
@@ -192,13 +195,13 @@ describe("InputController orphaned submit", () => {
 
 		expect(spies.prompt).toHaveBeenCalledWith("look at this", { streamingBehavior: "steer", images: [image] });
 		expect(ctx.locallySubmittedUserSignatures.has("look at this\u00001")).toBe(true);
-		expect(ctx.pendingImages.length).toBe(0);
+		expect(ctx.editor.pendingImages.length).toBe(0);
 	});
 
 	it("restores text and images to the editor when prompt dispatch rejects", async () => {
 		const { ctx, editor, spies } = createContext();
 		const image = { type: "image" as const, data: "abc", mimeType: "image/png" };
-		(ctx.pendingImages as unknown[]).push(image);
+		(ctx.editor.pendingImages as unknown[]).push(image);
 		spies.prompt.mockImplementationOnce(async () => {
 			throw new Error("queue exploded");
 		});
@@ -210,7 +213,7 @@ describe("InputController orphaned submit", () => {
 		expect(spies.showError).toHaveBeenCalledWith("queue exploded");
 		// The message survives the failure: text and images return to the editor.
 		expect(editor.getText()).toBe("doomed message");
-		expect(ctx.pendingImages).toEqual([image]);
+		expect(ctx.editor.pendingImages).toEqual([image]);
 		// The signature must not leak for a message that never started.
 		expect(ctx.locallySubmittedUserSignatures.has("doomed message\u00001")).toBe(false);
 	});
@@ -229,7 +232,7 @@ describe("InputController orphaned submit", () => {
 
 		expect(restored).toBe(1);
 		expect(editor.getText()).toBe("queued with image");
-		expect(ctx.pendingImages).toEqual([image]);
-		expect(ctx.pendingImageLinks).toEqual([undefined]);
+		expect(ctx.editor.pendingImages).toEqual([image]);
+		expect(ctx.editor.pendingImageLinks).toEqual([undefined]);
 	});
 });

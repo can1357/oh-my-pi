@@ -83,7 +83,7 @@ function createCodexFetchMock(sse: string, onRequest: (captured: CapturedCodexRe
 }
 
 describe("openai-codex reasoning.context", () => {
-	it("forwards an explicit reasoning.context and omits it by default", async () => {
+	it("forwards an explicit reasoning.context and defaults to all_turns", async () => {
 		const model = createCodexModel("gpt-5.1-codex");
 
 		const explicit = await transformRequestBody({ model: model.id }, model, {
@@ -92,8 +92,8 @@ describe("openai-codex reasoning.context", () => {
 		});
 		expect(explicit.reasoning?.context).toBe("current_turn");
 
-		const omitted = await transformRequestBody({ model: model.id }, model, { reasoningEffort: "medium" });
-		expect(omitted.reasoning?.context).toBeUndefined();
+		const defaulted = await transformRequestBody({ model: model.id }, model, { reasoningEffort: "medium" });
+		expect(defaulted.reasoning?.context).toBe("all_turns");
 	});
 
 	it("defaults reasoning.context to all_turns under Responses Lite unless overridden", async () => {
@@ -115,7 +115,7 @@ describe("openai-codex reasoning.context", () => {
 });
 
 describe("openai-codex Responses Lite input shaping", () => {
-	it("strips image detail from message content and tool outputs only under lite", async () => {
+	it("keeps full Responses image details when a requested lite body contains images", async () => {
 		const model = createCodexModel("gpt-5.1-codex");
 		const makeInput = (): InputItem[] => [
 			{
@@ -137,8 +137,8 @@ describe("openai-codex Responses Lite input shaping", () => {
 		const lite = await transformRequestBody({ model: model.id, input: makeInput() }, model, { responsesLite: true });
 		const liteMessage = lite.input?.[0]?.content as Array<Record<string, unknown>>;
 		const liteOutput = lite.input?.[2]?.output as Array<Record<string, unknown>>;
-		expect(liteMessage[1]).toEqual({ type: "input_image", image_url: "data:image/png;base64,AAAA" });
-		expect(liteOutput[0]).toEqual({ type: "input_image", image_url: "data:image/png;base64,BBBB" });
+		expect(liteMessage[1]).toEqual({ type: "input_image", detail: "auto", image_url: "data:image/png;base64,AAAA" });
+		expect(liteOutput[0]).toEqual({ type: "input_image", detail: "high", image_url: "data:image/png;base64,BBBB" });
 
 		const plain = await transformRequestBody({ model: model.id, input: makeInput() }, model, {});
 		const plainMessage = plain.input?.[0]?.content as Array<Record<string, unknown>>;
@@ -213,6 +213,57 @@ describe("openai-codex Responses Lite and client metadata wire format", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(captured?.headers.get("x-openai-internal-codex-responses-lite")).toBe("true");
 		expect(captured?.body.client_metadata).toEqual(clientMetadata);
+	});
+	it("falls back to full Responses when a lite request contains images", async () => {
+		const model = buildModel({
+			id: "gpt-5.5",
+			name: "GPT-5.5",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 272_000,
+			maxTokens: 128_000,
+		});
+		let captured: CapturedCodexRequest | undefined;
+		const fetchMock = createCodexFetchMock(createCodexSse(COMPLETED_CODEX_EVENTS), request => {
+			captured = request;
+		});
+
+		const result = await streamOpenAICodexResponses(
+			model,
+			{
+				messages: [
+					{
+						role: "user",
+						timestamp: Date.now(),
+						content: [
+							{ type: "text", text: "read this image" },
+							{ type: "image", mimeType: "image/png", data: "AAAA" },
+						],
+					},
+				],
+			},
+			{
+				apiKey: createCodexTestToken(),
+				fetch: fetchMock,
+				responsesLite: true,
+			},
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(captured?.headers.get("x-openai-internal-codex-responses-lite")).toBeNull();
+		expect(captured?.body.input).toEqual([
+			{
+				role: "user",
+				content: [
+					{ type: "input_text", text: "read this image" },
+					{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,AAAA" },
+				],
+			},
+		]);
 	});
 
 	it("omits the lite header and client_metadata when not requested", async () => {

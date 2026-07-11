@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { streamOpenAICodexResponses } from "@pk-nerdsaver-ai/pi-ai/providers/openai-codex-responses";
+import {
+	convertCodexResponsesMessages,
+	streamOpenAICodexResponses,
+} from "@pk-nerdsaver-ai/pi-ai/providers/openai-codex-responses";
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@pk-nerdsaver-ai/pi-ai/providers/openai-responses";
+import { buildResponsesInput } from "@pk-nerdsaver-ai/pi-ai/providers/openai-shared";
 import type { Context, Model, ModelSpec, ProviderSessionState } from "@pk-nerdsaver-ai/pi-ai/types";
 import { createOpenAIResponsesHistoryPayload, truncateResponseItemId } from "@pk-nerdsaver-ai/pi-ai/utils";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
@@ -218,6 +222,7 @@ const incrementalItems1 = [
 		content: [{ type: "output_text", text: "First response" }],
 		status: "completed",
 		id: "msg_1",
+		phase: "commentary",
 	},
 ];
 
@@ -228,6 +233,7 @@ const incrementalItems2 = [
 		content: [{ type: "output_text", text: "Second response" }],
 		status: "completed",
 		id: "msg_2",
+		phase: "final_answer",
 	},
 ];
 
@@ -310,6 +316,65 @@ function containsUserInputText(input: unknown[] | undefined, text: string): bool
 }
 
 describe("OpenAI responses history payload", () => {
+	it("appends user-message replacement history without wiping prefix or tail", () => {
+		const middleItems = [
+			{ type: "function_call", call_id: "call_middle", name: "middle_tool", arguments: "{}" },
+			{ type: "function_call_output", call_id: "call_middle", output: "middle result" },
+		];
+		const makeContext = (provider: "openai" | "openai-codex"): Context => ({
+			messages: [
+				{ role: "user", content: "prefix user", timestamp: Date.now() },
+				{
+					role: "user",
+					content: "range archive summary",
+					providerPayload: createOpenAIResponsesHistoryPayload(provider, middleItems),
+					timestamp: Date.now(),
+				},
+				{ role: "user", content: "tail user", timestamp: Date.now() },
+				{ role: "user", content: "post user", timestamp: Date.now() },
+			],
+		});
+		const assertWireOrder = (items: unknown[]) => {
+			const wire = JSON.stringify(items);
+			const prefixIndex = wire.indexOf("prefix user");
+			const middleIndex = wire.indexOf("middle_tool");
+			const tailIndex = wire.indexOf("tail user");
+			const postIndex = wire.indexOf("post user");
+			expect(prefixIndex).toBeGreaterThanOrEqual(0);
+			expect(middleIndex).toBeGreaterThan(prefixIndex);
+			expect(tailIndex).toBeGreaterThan(middleIndex);
+			expect(postIndex).toBeGreaterThan(tailIndex);
+
+			const callIds = new Set<string>();
+			const outputIds = new Set<string>();
+			for (const item of items) {
+				if (typeof item !== "object" || item === null) continue;
+				const record = item as Record<string, unknown>;
+				if (record.type === "function_call" && typeof record.call_id === "string") {
+					callIds.add(record.call_id);
+				}
+				if (record.type === "function_call_output" && typeof record.call_id === "string") {
+					outputIds.add(record.call_id);
+				}
+			}
+			expect(callIds).toEqual(new Set(["call_middle"]));
+			expect(outputIds).toEqual(new Set(["call_middle"]));
+		};
+
+		const openaiItems = buildResponsesInput({
+			model: getOpenAIReasoningModel("openai", "gpt-5-mini"),
+			context: makeContext("openai"),
+			strictResponsesPairing: true,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+		});
+		assertWireOrder(openaiItems);
+
+		const codexModel = getBundledModel("openai-codex", "gpt-5.2-codex") as Model<"openai-codex-responses">;
+		const codexItems = convertCodexResponsesMessages(codexModel, makeContext("openai-codex"));
+		assertWireOrder(codexItems);
+	});
+
 	it("prepends multiple OpenAI developer instructions in order without changing prompt cache key routing", async () => {
 		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
 		const payload = (await captureResponsesPayload(
@@ -373,6 +438,56 @@ describe("OpenAI responses history payload", () => {
 		expect(payload.input).toEqual([
 			...snapshotHistoryItems,
 			{ role: "user", content: [{ type: "input_text", text: "follow-up user" }] },
+		]);
+	});
+
+	it("drops unfinished image generation calls from replayed native history", async () => {
+		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "first user", timestamp: Date.now() },
+				makeAssistantMessage(
+					[
+						{
+							id: "ig_failed",
+							type: "image_generation_call",
+							status: "failed",
+						},
+						{
+							id: "ig_generating",
+							type: "image_generation_call",
+							status: "generating",
+							action: "generate",
+						},
+						{
+							id: "ig_completed",
+							type: "image_generation_call",
+							status: "completed",
+							result: "base64-image",
+							action: "generate",
+							background: "opaque",
+							output_format: "png",
+							quality: "medium",
+						},
+					],
+					true,
+				),
+				{ role: "user", content: "follow-up user", timestamp: Date.now() },
+			],
+		};
+		const payload = (await captureResponsesPayload(model, context)) as { input?: unknown[] };
+		const imageGenerationItems = payload.input?.filter(item => {
+			if (!item || typeof item !== "object") return false;
+			return (item as { type?: unknown }).type === "image_generation_call";
+		});
+
+		expect(imageGenerationItems).toEqual([
+			{
+				id: "ig_completed",
+				type: "image_generation_call",
+				status: "completed",
+				result: "base64-image",
+			},
 		]);
 	});
 

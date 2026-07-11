@@ -33,6 +33,8 @@ export interface MnemopiEmbeddingRuntimeOptions {
 	apiUrl?: string;
 	apiKey?: ApiKey;
 	provider?: MnemopiEmbeddingProvider | ((texts: readonly string[]) => EmbeddingOutput | Promise<EmbeddingOutput>);
+	/** Override `MNEMOPI_EMBEDDING_MAX_INPUT_CHARS`. `0` disables the cap. See `config.embeddingMaxInputChars`. */
+	maxInputChars?: number;
 }
 
 export interface MnemopiLlmRuntimeOptions {
@@ -61,6 +63,7 @@ export interface ResolvedMnemopiEmbeddingRuntimeOptions {
 	apiUrl?: string;
 	apiKey?: ApiKey;
 	provider?: MnemopiEmbeddingProvider;
+	maxInputChars?: number;
 }
 
 export interface ResolvedMnemopiLlmRuntimeOptions {

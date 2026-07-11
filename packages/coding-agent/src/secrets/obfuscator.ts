@@ -1,5 +1,5 @@
-import type { Context, Message, Tool } from "@pk-nerdsaver-ai/pi-ai";
-import { toolWireSchema } from "@pk-nerdsaver-ai/pi-ai/utils/schema";
+import type { AgentMessage } from "@pk-nerdsaver-ai/pi-agent-core";
+import type { AssistantMessage, Context, ImageContent, Message, TextContent } from "@pk-nerdsaver-ai/pi-ai";
 import type { SessionContext } from "../session/session-context";
 import { compileSecretRegex } from "./regex";
 
@@ -14,6 +14,9 @@ export interface SecretEntry {
 	replacement?: string;
 	flags?: string;
 }
+
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue | undefined };
+export type JsonRecord = { [key: string]: JsonValue | undefined };
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Deterministic replacement generation
@@ -85,26 +88,34 @@ export class SecretObfuscator {
 
 	constructor(entries: SecretEntry[]) {
 		let index = 0;
+		let hasRealSec = false;
 		for (const entry of entries) {
 			const mode = entry.mode ?? "obfuscate";
 
 			if (entry.type === "plain") {
 				if (mode === "obfuscate") {
+					if (entry.content.length < 8) {
+						// Tone down short plain secret obfuscation to avoid false matches on small words like "esp"
+						continue;
+					}
 					const placeholder = buildPlaceholder(index);
 					this.#plainMappings.set(entry.content, index);
 					this.#obfuscateMappings.set(index, { secret: entry.content, placeholder });
 					this.#deobfuscateMap.set(placeholder, entry.content);
 					index++;
+					hasRealSec = true;
 				} else {
 					// replace mode
 					const replacement = entry.replacement ?? generateDeterministicReplacement(entry.content);
 					this.#replaceMappings.set(entry.content, replacement);
+					hasRealSec = true;
 				}
 			} else {
 				// regex type — compiled here, matches discovered during obfuscate()
 				try {
 					const regex = compileSecretRegex(entry.content, entry.flags);
 					this.#regexEntries.push({ regex, mode, replacement: entry.replacement });
+					hasRealSec = true;
 				} catch {
 					// Invalid regex — skip silently (validation happens at load time)
 				}
@@ -112,7 +123,7 @@ export class SecretObfuscator {
 		}
 
 		this.#nextIndex = index;
-		this.#hasAny = entries.length > 0;
+		this.#hasAny = hasRealSec;
 	}
 
 	hasSecrets(): boolean {
@@ -154,6 +165,10 @@ export class SecretObfuscator {
 					const replacement = entry.replacement ?? generateDeterministicReplacement(matchValue);
 					result = replaceAll(result, matchValue, replacement);
 				} else {
+					if (matchValue.length < 8) {
+						// Tone down short regex match obfuscation to avoid false matches on small words/fragments
+						continue;
+					}
 					// obfuscate mode — get or create stable index
 					let index = this.#findObfuscateIndex(matchValue);
 					if (index === undefined) {
@@ -174,30 +189,13 @@ export class SecretObfuscator {
 	/** Deobfuscate obfuscate-mode placeholders back to original secrets. Replace-mode is NOT reversed. */
 	deobfuscate(text: string): string {
 		if (!this.#hasAny || !text.includes("#")) return text;
-		return text.replace(PLACEHOLDER_RE, match => {
-			return this.#deobfuscateMap.get(match) ?? match;
-		});
+		return text.replace(PLACEHOLDER_RE, match => this.#deobfuscateMap.get(match) ?? match);
 	}
-
-	/** Deep-walk an object, deobfuscating all string values. */
-	deobfuscateObject<T>(obj: T): T {
-		if (!this.#hasAny) return obj;
-		return deepWalkStrings(obj, s => this.deobfuscate(s));
-	}
-
-	/** Deep-walk an object, obfuscating all string values. */
-	obfuscateObject<T>(obj: T): T {
-		if (!this.#hasAny) return obj;
-		return deepWalkStrings(obj, s => this.obfuscate(s));
-	}
-
 	/** Find the obfuscate index for a known secret value. */
 	#findObfuscateIndex(secret: string): number | undefined {
-		// Check plain mappings first
 		const plainIndex = this.#plainMappings.get(secret);
 		if (plainIndex !== undefined) return plainIndex;
 
-		// Check regex-discovered mappings
 		for (const [index, mapping] of this.#obfuscateMappings) {
 			if (mapping.secret === secret) return index;
 		}
@@ -205,47 +203,194 @@ export class SecretObfuscator {
 	}
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Display restore (inbound, persisted/provider → local display)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Restore secret placeholders for local display. Only message kinds the model
+ * itself authored from obfuscated context carry placeholders — assistant
+ * content and the LLM-written branch/compaction summaries. User, developer, and
+ * tool-result messages are persisted with their literal text, so a literal
+ * `#ABCD#` the operator typed must survive untouched; those roles are never
+ * walked.
+ */
 export function deobfuscateSessionContext(
 	sessionContext: SessionContext,
 	obfuscator: SecretObfuscator | undefined,
 ): SessionContext {
 	if (!obfuscator?.hasSecrets()) return sessionContext;
-	const messages = obfuscator.deobfuscateObject(sessionContext.messages);
+	const messages = deobfuscateAgentMessages(obfuscator, sessionContext.messages);
 	return messages === sessionContext.messages ? sessionContext : { ...sessionContext, messages };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Message obfuscation (outbound to LLM)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/** Obfuscate all string content in LLM messages (for outbound interception). */
-export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
-	return obfuscator.obfuscateObject(messages);
+export function deobfuscateAgentMessages(obfuscator: SecretObfuscator, messages: AgentMessage[]): AgentMessage[] {
+	let changed = false;
+	const result = messages.map((message): AgentMessage => {
+		switch (message.role) {
+			case "assistant": {
+				const content = deobfuscateAssistantContent(obfuscator, message.content);
+				if (content === message.content) return message;
+				changed = true;
+				return { ...message, content };
+			}
+			case "branchSummary": {
+				const summary = obfuscator.deobfuscate(message.summary);
+				if (summary === message.summary) return message;
+				changed = true;
+				return { ...message, summary };
+			}
+			case "compactionSummary": {
+				const summary = obfuscator.deobfuscate(message.summary);
+				const shortSummary =
+					message.shortSummary === undefined ? undefined : obfuscator.deobfuscate(message.shortSummary);
+				const blocks = message.blocks === undefined ? undefined : deobfuscateTextBlocks(obfuscator, message.blocks);
+				if (summary === message.summary && shortSummary === message.shortSummary && blocks === message.blocks) {
+					return message;
+				}
+				changed = true;
+				return { ...message, summary, shortSummary, blocks };
+			}
+			default:
+				return message;
+		}
+	});
+	return changed ? result : messages;
 }
 
-/** Obfuscate provider request context without walking live tool schema instances. */
+/**
+ * Restore placeholders in assistant content: visible text and tool-call
+ * arguments/intent/rawBlock. Thinking and signatures are opaque
+ * provider-replay/hidden-reasoning data and pass through byte-identical.
+ */
+export function deobfuscateAssistantContent(
+	obfuscator: SecretObfuscator,
+	content: AssistantMessage["content"],
+): AssistantMessage["content"] {
+	if (!obfuscator.hasSecrets()) return content;
+	let changed = false;
+	const result = content.map((block): AssistantMessage["content"][number] => {
+		if (block.type === "text") {
+			const text = obfuscator.deobfuscate(block.text);
+			if (text === block.text) return block;
+			changed = true;
+			return { ...block, text };
+		}
+		if (block.type === "toolCall") {
+			const args = deobfuscateToolArguments(obfuscator, block.arguments);
+			const intent = block.intent === undefined ? undefined : obfuscator.deobfuscate(block.intent);
+			const rawBlock = block.rawBlock === undefined ? undefined : obfuscator.deobfuscate(block.rawBlock);
+			if (args === block.arguments && intent === block.intent && rawBlock === block.rawBlock) return block;
+			changed = true;
+			return { ...block, arguments: args, intent, rawBlock };
+		}
+		return block;
+	});
+	return changed ? result : content;
+}
+
+/**
+ * Restore placeholders inside a tool call's arguments. Arguments are arbitrary
+ * model-authored JSON, so tool-call arguments are the ONLY place a recursive
+ * JSON walk runs.
+ */
+export function deobfuscateToolArguments(
+	obfuscator: SecretObfuscator,
+	args: Record<string, unknown>,
+): Record<string, unknown> {
+	if (!obfuscator.hasSecrets()) return args;
+	return mapJsonStrings(args as JsonValue, s => obfuscator.deobfuscate(s)) as Record<string, unknown>;
+}
+
+/** Redact secrets inside a tool call's arguments (same JSON-walk exception as {@link deobfuscateToolArguments}). */
+export function obfuscateToolArguments(
+	obfuscator: SecretObfuscator,
+	args: Record<string, unknown>,
+): Record<string, unknown> {
+	if (!obfuscator.hasSecrets()) return args;
+	return mapJsonStrings(args as JsonValue, s => obfuscator.obfuscate(s)) as Record<string, unknown>;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Outbound obfuscation (local → provider)
+// ═══════════════════════════════════════════════════════════════════════════
+
+type UserFacingMessage = Extract<Message, { role: "user" | "developer" | "toolResult" }>;
+
+/** Obfuscate `text` blocks of a content array; image and other blocks pass through. */
+function obfuscateTextBlocks(
+	obfuscator: SecretObfuscator,
+	content: (TextContent | ImageContent)[],
+): (TextContent | ImageContent)[] {
+	let changed = false;
+	const result = content.map((block): TextContent | ImageContent => {
+		if (block.type !== "text") return block;
+		const text = obfuscator.obfuscate(block.text);
+		if (text === block.text) return block;
+		changed = true;
+		return { ...block, text };
+	});
+	return changed ? result : content;
+}
+
+/** Restore placeholders in `text` blocks of a content array; image and other blocks pass through. */
+function deobfuscateTextBlocks(
+	obfuscator: SecretObfuscator,
+	content: (TextContent | ImageContent)[],
+): (TextContent | ImageContent)[] {
+	let changed = false;
+	const result = content.map((block): TextContent | ImageContent => {
+		if (block.type !== "text") return block;
+		const text = obfuscator.deobfuscate(block.text);
+		if (text === block.text) return block;
+		changed = true;
+		return { ...block, text };
+	});
+	return changed ? result : content;
+}
+
+/**
+ * Redact secrets from outbound messages. Opt-in by origin: only user messages,
+ * tool results, and user-authored developer messages (e.g. `@file` mentions)
+ * can carry operator secrets. System prompts, tool schemas, and assistant
+ * output are author-controlled or model-generated and pass through untouched.
+ * Within a targeted message only `text` blocks are rewritten — inline image
+ * bytes are never walked.
+ */
+export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
+	if (!obfuscator.hasSecrets()) return messages;
+	let changed = false;
+	const result = messages.map((message): Message => {
+		if (
+			message.role !== "user" &&
+			message.role !== "toolResult" &&
+			!(message.role === "developer" && message.attribution === "user")
+		) {
+			return message;
+		}
+		const target = message as UserFacingMessage;
+		if (typeof target.content === "string") {
+			const content = obfuscator.obfuscate(target.content);
+			if (content === target.content) return message;
+			changed = true;
+			return { ...target, content } as Message;
+		}
+		const content = obfuscateTextBlocks(obfuscator, target.content);
+		if (content === target.content) return message;
+		changed = true;
+		return { ...target, content } as Message;
+	});
+	return changed ? result : messages;
+}
+
+/**
+ * Redact outbound provider context. Only conversation messages are rewritten;
+ * the static system prompt and tool schemas pass through unchanged.
+ */
 export function obfuscateProviderContext(obfuscator: SecretObfuscator | undefined, context: Context): Context {
 	if (!obfuscator?.hasSecrets()) return context;
-	return {
-		...context,
-		systemPrompt: obfuscator.obfuscateObject(context.systemPrompt),
-		messages: obfuscator.obfuscateObject(context.messages),
-		tools: obfuscateProviderTools(obfuscator, context.tools),
-	};
-}
-
-/** Convert tool schemas to wire JSON Schema before obfuscating provider-visible strings. */
-export function obfuscateProviderTools(
-	obfuscator: SecretObfuscator | undefined,
-	tools: Tool[] | undefined,
-): Tool[] | undefined {
-	if (!tools || !obfuscator?.hasSecrets()) return tools;
-	return tools.map(tool => ({
-		...tool,
-		description: obfuscator.obfuscate(tool.description),
-		parameters: obfuscator.obfuscateObject(toolWireSchema(tool)),
-		customFormat: tool.customFormat ? obfuscator.obfuscateObject(tool.customFormat) : undefined,
-	}));
+	const messages = obfuscateMessages(obfuscator, context.messages);
+	return messages === context.messages ? context : { ...context, messages };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -264,35 +409,33 @@ function replaceAll(text: string, search: string, replacement: string): string {
 	return result;
 }
 
-/** Deep-walk an object, transforming all string values. */
-function deepWalkStrings<T>(obj: T, transform: (s: string) => string): T {
-	if (typeof obj === "string") {
-		return transform(obj) as unknown as T;
-	}
-	if (Array.isArray(obj)) {
+/**
+ * Map every string in arbitrary JSON. Used ONLY for tool-call arguments, whose
+ * shape is model-authored and not known ahead of time. No other caller may walk
+ * untyped data: every message/content path is handled by a typed transformer.
+ */
+function mapJsonStrings(value: JsonValue, fn: (s: string) => string): JsonValue {
+	if (typeof value === "string") return fn(value);
+	if (Array.isArray(value)) {
 		let changed = false;
-		const result = obj.map(item => {
-			const transformed = deepWalkStrings(item, transform);
-			if (transformed !== item) changed = true;
-			return transformed;
+		const out = value.map(item => {
+			const next = mapJsonStrings(item, fn);
+			if (next !== item) changed = true;
+			return next;
 		});
-		return (changed ? result : obj) as unknown as T;
+		return changed ? out : value;
 	}
-	if (obj !== null && typeof obj === "object" && isPlainRecord(obj)) {
+	if (value !== null && typeof value === "object") {
 		let changed = false;
-		const result: Record<string, unknown> = {};
-		for (const key of Object.keys(obj)) {
-			const value = (obj as Record<string, unknown>)[key];
-			const transformed = deepWalkStrings(value, transform);
-			if (transformed !== value) changed = true;
-			result[key] = transformed;
+		const out: JsonRecord = {};
+		for (const key of Object.keys(value)) {
+			const item = value[key];
+			if (item === undefined) continue;
+			const next = mapJsonStrings(item, fn);
+			if (next !== item) changed = true;
+			out[key] = next;
 		}
-		return (changed ? result : obj) as T;
+		return changed ? out : value;
 	}
-	return obj;
-}
-
-function isPlainRecord(obj: object): obj is Record<string, unknown> {
-	const prototype = Object.getPrototypeOf(obj);
-	return prototype === Object.prototype || prototype === null;
+	return value;
 }

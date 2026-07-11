@@ -1008,6 +1008,12 @@ export async function runRpcMode(
 			}
 
 			case "handoff": {
+				// Resetting the agent mid-stream lets the live turn keep emitting into a
+				// session that handoff has already torn down. Refuse while a prompt is in
+				// flight (mirrors the TUI /handoff guard).
+				if (session.isStreaming) {
+					return error(id, "handoff", "Cannot hand off while a response is in progress");
+				}
 				const result = await session.handoff(command.customInstructions);
 				return success(id, "handoff", result ? { savedPath: result.savedPath } : null);
 			}

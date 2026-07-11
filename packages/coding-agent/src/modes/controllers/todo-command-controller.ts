@@ -1,10 +1,10 @@
 import * as fs from "node:fs/promises";
-import { resolveToCwd } from "../../tools/path-utils";
 import {
 	applyOpsToPhases,
 	getLatestTodoPhasesFromEntries,
 	markdownToPhases,
 	phasesToMarkdown,
+	resolveTodoMarkdownPath,
 	type TodoItem,
 	type TodoPhase,
 	USER_TODO_EDIT_CUSTOM_TYPE,
@@ -18,8 +18,8 @@ const USAGE = [
 	"  /todo                              Show current todos",
 	"  /todo edit                         Open todos in $EDITOR",
 	"  /todo copy                         Copy todos as Markdown to clipboard",
-	"  /todo export <path>                Write todos as Markdown to <path>",
-	"  /todo import <path>                Replace todos from Markdown at <path>",
+	"  /todo export [<path>]              Write todos to file (default: TODO.md)",
+	"  /todo import [<path>]              Replace todos from file (default: TODO.md)",
 	"  /todo append [<phase>] <task...>   Append a task; phase fuzzy-matched or auto-created",
 	"  /todo start  <task>                Mark task in_progress (fuzzy content match)",
 	"  /todo done   [<task|phase>]        Mark task/phase/all completed",
@@ -214,9 +214,7 @@ export class TodoCommandController {
 	}
 
 	#resolveTodoPath(rest: string): string {
-		const trimmed = rest.trim();
-		const raw = trimmed || "TODO.md";
-		return resolveToCwd(raw, this.ctx.sessionManager.getCwd());
+		return resolveTodoMarkdownPath(rest, this.ctx.sessionManager.getCwd());
 	}
 
 	async #exportToFile(rest: string): Promise<void> {
@@ -225,22 +223,23 @@ export class TodoCommandController {
 			this.ctx.showWarning("No todos to export.");
 			return;
 		}
-		const target = this.#resolveTodoPath(rest);
 		try {
+			const target = this.#resolveTodoPath(rest);
 			await fs.writeFile(target, phasesToMarkdown(phases), "utf8");
 			this.ctx.showStatus(`Wrote todos to ${target}`);
 		} catch (error) {
-			this.ctx.showError(`Failed to write ${target}: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`Failed to write todos: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 
 	async #importFromFile(rest: string): Promise<void> {
-		const source = this.#resolveTodoPath(rest);
+		let source = "";
 		let content: string;
 		try {
+			source = this.#resolveTodoPath(rest);
 			content = await fs.readFile(source, "utf8");
 		} catch (error) {
-			this.ctx.showError(`Failed to read ${source}: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`Failed to read todos: ${error instanceof Error ? error.message : String(error)}`);
 			return;
 		}
 		const { phases, errors } = markdownToPhases(content);

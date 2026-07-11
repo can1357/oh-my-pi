@@ -56,10 +56,18 @@ export function getContextUsageLevel(contextPercent: number, contextWindow: numb
 }
 
 /**
- * Format context usage as `<percent>%/<window>` (e.g. `5.1%/1M`), matching the
- * status line's context gauge so subagent and footer renderers stay in sync.
+ * Format context usage as `<percent>%/<window>` when the model window is known.
+ * Unknown windows render as `<tokens>/?`, because `0.0%/0` suggests a real
+ * empty context instead of missing provider metadata.
  */
-export function formatContextUsage(contextPercent: number | null | undefined, contextWindow: number): string {
+export function formatContextUsage(
+	contextPercent: number | null | undefined,
+	contextWindow: number,
+	usedTokens?: number,
+): string {
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+		return `${formatNumber(usedTokens ?? 0)}/?`;
+	}
 	const pct = contextPercent === null || contextPercent === undefined ? "?" : `${contextPercent.toFixed(1)}%`;
 	return `${pct}/${formatNumber(contextWindow)}`;
 }

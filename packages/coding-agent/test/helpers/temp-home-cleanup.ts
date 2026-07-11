@@ -1,4 +1,4 @@
-import * as fs from "node:fs";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 export interface TempHomeState {
 	tempDir: string;
@@ -10,10 +10,10 @@ export function cleanupTempHome(getState: () => TempHomeState): () => void {
 	return () => {
 		const { tempDir, tempHomeDir, originalHome } = getState();
 		if (tempDir) {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		}
 		if (tempHomeDir) {
-			fs.rmSync(tempHomeDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempHomeDir);
 		}
 		if (originalHome === undefined) {
 			delete process.env.HOME;

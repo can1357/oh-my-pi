@@ -33,6 +33,10 @@ export const HL_REPLACE_BLOCK_KEYWORD = "SWAP.BLK";
 export const HL_DELETE_BLOCK_KEYWORD = "DEL.BLK";
 /** Hunk-header keyword: `INS.BLK.POST N:` inserts after the last line of the tree-sitter block at N. */
 export const HL_INSERT_AFTER_BLOCK_KEYWORD = "INS.BLK.POST";
+/** File-level keyword: `REM` deletes the whole file named by the section header. */
+export const HL_REM_KEYWORD = "REM";
+/** File-level keyword: `MV DEST` renames/moves the section file to `DEST`. */
+export const HL_MOVE_KEYWORD = "MV";
 export const HL_HEADER_COLON = ":";
 
 /** Separator between a hashline file path and its opaque snapshot tag. */

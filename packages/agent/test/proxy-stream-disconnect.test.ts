@@ -9,7 +9,8 @@
 import { describe, expect, it } from "bun:test";
 import type { ProxyAssistantMessageEvent } from "@pk-nerdsaver-ai/pi-agent-core/proxy";
 import { type ProxyMessageEventStream, streamProxy } from "@pk-nerdsaver-ai/pi-agent-core/proxy";
-import type { AssistantMessageEvent, Context, FetchImpl, Model } from "@pk-nerdsaver-ai/pi-ai";
+import type { AssistantMessageEvent, Context, FetchImpl, Model, ToolCall } from "@pk-nerdsaver-ai/pi-ai";
+import { getStreamingPartialJson } from "@pk-nerdsaver-ai/pi-ai/utils/block-symbols";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
 
 const mockModel: Model = buildModel({
@@ -223,5 +224,35 @@ describe("streamProxy — server disconnect without terminal event", () => {
 		const result = await stream.result();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe("rate_limit_exceeded");
+	});
+
+	it("does not leak partialJson when server disconnects mid-tool-call", async () => {
+		// Stream sends toolcall_start + partial toolcall_delta, then disconnects
+		// without toolcall_end, done, or error. The catch-block error path must
+		// scrub partialJson from the content before pushing the error event.
+		const events: ProxyAssistantMessageEvent[] = [
+			{ type: "start" },
+			{ type: "toolcall_start", contentIndex: 0, id: "call_1", toolName: "bash" },
+			{ type: "toolcall_delta", contentIndex: 0, delta: '{"comm' },
+		];
+		const body = buildSseBody(events);
+		const fetchMock: FetchImpl = () => Promise.resolve(new Response(body, { status: 200 }));
+
+		const stream = streamProxy(mockModel, mockContext, {
+			proxyUrl: "http://localhost:0",
+			authToken: "test",
+			fetch: fetchMock,
+		});
+
+		const collected = await collectEvents(stream);
+		expect(collected.some(e => e.type === "error")).toBe(true);
+
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		const toolCall = result.content.find((c): c is ToolCall => c.type === "toolCall");
+		expect(toolCall).toBeDefined();
+		if (toolCall) {
+			expect(getStreamingPartialJson(toolCall)).toBeUndefined();
+		}
 	});
 });

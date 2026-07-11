@@ -22,6 +22,7 @@ import { readDirEntries, readFile } from "../capability/fs";
 import type { LoadContext } from "../capability/types";
 import { getEnabledPlugins } from "../extensibility/plugins/loader";
 import { expandTilde } from "../tools/path-utils";
+import { listClaudePluginRoots } from "./helpers";
 
 /** A resolved extension package directory wired into the discovery surfaces. */
 export interface OmpExtensionRoot {
@@ -123,9 +124,9 @@ async function isDirectory(p: string): Promise<boolean> {
  * 1. CLI roots injected via {@link injectOmpExtensionCliRoots}
  * 2. Project `<cwd>/.omp/settings.json#extensions`
  * 3. User `~/.omp/agent/settings.json#extensions`
- * 4. Enabled plugins installed under `<plugins>/node_modules/` (e.g. via
- *    `omp install <pkg>` / `omp plugin install` / `omp plugin link`)
- *
+ * 4. Enabled npm/link plugins installed under `<plugins>/node_modules/` (for
+ *    `omp install <pkg>` / `omp plugin install` / `omp plugin link`). Marketplace
+ *    installs are loaded by the `claude-plugins` provider and are excluded here.
  * Only entries that resolve to a directory on disk are returned; file
  * entrypoints contribute zero sub-discovery surface and are filtered out.
  * Installed-plugin enumeration failures (missing lockfile, unreadable
@@ -167,22 +168,44 @@ export async function listOmpExtensionRoots(ctx: LoadContext): Promise<OmpExtens
 }
 
 /**
- * Enumerate every enabled installed plugin's package directory so its
- * conventional `skills/`, `hooks/`, `tools/`, `commands/`, `rules/`,
- * `prompts/`, and `.mcp.json` are wired into discovery — mirrors how
- * `getAllPluginExtensionPaths` already feeds the extension factory loader.
+ * Enumerate every enabled npm/link plugin's package directory so its conventional
+ * `skills/`, `hooks/`, `tools/`, `commands/`, `rules/`, `prompts/`, and
+ * `.mcp.json` are wired into discovery — mirrors how `getAllPluginExtensionPaths`
+ * already feeds the extension factory loader.
  *
- * Marketplace and `omp plugin link` installs write to the plugin manager's
- * `node_modules` (or symlink into it) rather than to `extensions:` in
- * settings; without this branch the sub-discovery provider would still miss
- * everything those install paths produce.
+ * Marketplace installs also create runtime symlinks for enable-state persistence,
+ * but their resources are discovered through the `claude-plugins` provider.
+ * Filtering them here prevents `/status` from showing the same plugin under both
+ * "Claude Code Marketplace" and "OMP Extension Packages".
  */
+async function realpathOrResolved(p: string): Promise<string> {
+	try {
+		return await fs.realpath(p);
+	} catch (err) {
+		if (isEnoent(err)) return path.resolve(p);
+		throw err;
+	}
+}
+
 async function listInstalledPluginRoots(ctx: LoadContext): Promise<InjectedRoot[]> {
 	try {
-		const plugins = await getEnabledPlugins(ctx.cwd, { home: ctx.home });
-		// Installed plugins are always user-scope; project disablement is already
-		// honored by `getEnabledPlugins` via `loadProjectOverrides`.
-		return plugins.map(({ path: p }) => ({ path: p, level: "user" }));
+		const [plugins, marketplaceRoots] = await Promise.all([
+			getEnabledPlugins(ctx.cwd, { home: ctx.home }),
+			listClaudePluginRoots(ctx.home, ctx.cwd),
+		]);
+		const marketplaceRealpaths = new Set(
+			await Promise.all(marketplaceRoots.roots.map(root => realpathOrResolved(root.path))),
+		);
+		const installedRoots = await Promise.all(
+			plugins.map(async plugin => ({
+				path: plugin.path,
+				scope: plugin.scope,
+				realpath: await realpathOrResolved(plugin.path),
+			})),
+		);
+		return installedRoots
+			.filter(root => !marketplaceRealpaths.has(root.realpath))
+			.map(({ path: p, scope }) => ({ path: p, level: scope }));
 	} catch (err) {
 		logger.debug("listInstalledPluginRoots: enumeration failed", { error: String(err) });
 		return [];

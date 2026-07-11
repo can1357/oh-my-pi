@@ -2,12 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
 import {
 	classifySource,
 	fetchMarketplace,
 	parseMarketplaceCatalog,
 } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/marketplace";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 // Fixture lives at test/marketplace/fixtures/valid-marketplace/
 const FIXTURE_DIR = path.join(import.meta.dir, "fixtures", "valid-marketplace");
@@ -156,7 +156,7 @@ describe("fetchMarketplace", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		removeSyncWithRetries(tmpDir);
 	});
 
 	it("resolves catalog from fixture directory", async () => {

@@ -2,8 +2,7 @@
  * Harness documentation index for the `omp://` protocol.
  *
  * Compiled binaries and the prepacked npm bundle inline a compressed index from
- * `docs-index.generated.txt` (populated by `scripts/generate-docs-index.ts
- * --generate` at build time). The format is two lines:
+ * `docs-index.generated.txt` (populated by `gen:docs` at build time). The format is two lines:
  *   1. a plain JSON array of the sorted doc file names, and
  *   2. a base64 gzip blob of the index-aligned doc bodies (`string[]`).
  * Listing/completion (`getDocFilenames`) parses only the small first line and
@@ -84,7 +83,7 @@ function getIndex(): DocsIndex {
 	if (decoded === null) {
 		throw new Error(
 			"Malformed embedded docs index (docs-index.generated.txt): non-empty payload without a newline separator. " +
-				"Rebuild with `bun --cwd=packages/coding-agent scripts/generate-docs-index.ts --generate`.",
+				"Rebuild with `bun run gen:docs`.",
 		);
 	}
 	index = decoded;

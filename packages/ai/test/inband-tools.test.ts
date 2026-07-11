@@ -41,7 +41,6 @@ const DIALECTS: readonly Dialect[] = [
 	"minimax",
 	"deepseek",
 	"harmony",
-	"pi",
 	"qwen3",
 	"gemini",
 	"gemma",
@@ -154,7 +153,6 @@ describe("in-band tool dialects", () => {
 			'<|start|>assistant<|channel|>commentary to=functions.read<|message|>{"path":"src/a.ts"}<|call|>',
 			'<|start|>assistant<|channel|>commentary to=functions.read<|message|>{"path":"src/a.ts"}<|call|>',
 		);
-		expectRawBlock("pi", "§write path=out.ts«\nhello\n»", "§write path=out.ts«\nhello\n»");
 	});
 
 	it("projects raw tool blocks onto parsed ToolCall content", () => {
@@ -240,7 +238,6 @@ describe("in-band tool dialects", () => {
 		expect(getDialectDefinition("qwen3").renderToolResults([resultBlock])).toBe(
 			"<tool_response>\nFILE\n</tool_response>",
 		);
-		expect(getDialectDefinition("pi").renderToolResults([resultBlock])).toBe("‡‡\nFILE\n‡‡");
 		expect(getDialectDefinition("gemini").renderToolResults([resultBlock])).toBe("```tool_outputs\nFILE\n```");
 		expect(getDialectDefinition("gemma").renderToolResults([resultBlock])).toBe(
 			'<|tool_response>response:read{output:<|"|>FILE<|"|>}<tool_response|>',
@@ -289,61 +286,5 @@ describe("in-band tool dialects", () => {
 			.map(event => event.delta)
 			.join("");
 		expect(deltas).toBe("line1\nconst x = `a`;");
-	});
-
-	it("streams the verbatim body incrementally for pi", () => {
-		const text = getDialectDefinition("pi").renderAssistantToolCalls(
-			[
-				{
-					type: "toolCall",
-					id: "c1",
-					name: "write",
-					arguments: { path: "out.ts", content: "line1\nconst x = `a`;" },
-				},
-			],
-			{ tools: TOOLS },
-		);
-		const deltas = feedText("pi", text)
-			.filter(
-				(event): event is Extract<InbandScanEvent, { type: "toolArgDelta" }> =>
-					event.type === "toolArgDelta" && event.key === "content",
-			)
-			.map(event => event.delta)
-			.join("");
-		expect(deltas).toBe("line1\nconst x = `a`;");
-	});
-
-	it("escalates the pi body fence so payloads containing » round-trip", () => {
-		const content = "before »close« and »» double\nsecond line";
-		const text = getDialectDefinition("pi").renderToolCall(
-			{ type: "toolCall", id: "c1", name: "write", arguments: { path: "a.md", content } },
-			{ tools: TOOLS },
-		);
-		expect(text).toContain("«««"); // fence widened past the »» run in the body
-		const calls = toolEnds(feedText("pi", text));
-		expect(calls).toHaveLength(1);
-		expect(calls[0]!.arguments).toEqual({ path: "a.md", content });
-	});
-
-	it("ends a scalar-only pi call at the newline and keeps following prose", () => {
-		const events = feedText("pi", "§read path=a.ts count=5\ndone");
-		const calls = toolEnds(events);
-		expect(calls).toHaveLength(1);
-		expect(calls[0]!.arguments).toEqual({ path: "a.ts", count: 5 });
-		const visible = events
-			.filter((event): event is Extract<InbandScanEvent, { type: "text" }> => event.type === "text")
-			.map(event => event.text)
-			.join("");
-		expect(visible).toBe("done");
-	});
-
-	it("treats a § not naming a known tool as literal text", () => {
-		const events = feedText("pi", "ref §section 3 and §frobnicate end");
-		expect(toolEnds(events)).toHaveLength(0);
-		const visible = events
-			.filter((event): event is Extract<InbandScanEvent, { type: "text" }> => event.type === "text")
-			.map(event => event.text)
-			.join("");
-		expect(visible).toBe("ref §section 3 and §frobnicate end");
 	});
 });

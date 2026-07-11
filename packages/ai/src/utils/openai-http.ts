@@ -15,7 +15,11 @@
  *   chain-state detectors, which regex over `error.message`.
  */
 import { fetchWithRetry, readSseJson, type SseEventObserver } from "@pk-nerdsaver-ai/pi-utils";
-import { ProviderHttpError } from "../errors";
+import * as AIError from "../error";
+import { OpenAIHttpError } from "../error";
+
+export { OpenAIHttpError };
+
 import type { FetchImpl } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
 
@@ -27,17 +31,6 @@ const DEFAULT_MAX_ATTEMPTS = 6;
 
 /** Bound the `Error.message` allocation for proxy HTML error pages and the like. */
 const MAX_DETAIL_CHARS = 4096;
-
-/** Non-2xx response from an OpenAI-wire endpoint, with the decoded body attached. */
-export class OpenAIHttpError extends ProviderHttpError {
-	readonly captured: CapturedHttpErrorResponse;
-
-	constructor(message: string, captured: CapturedHttpErrorResponse, code: string | undefined) {
-		super(message, captured.status, { headers: captured.headers, code });
-		this.name = "OpenAIHttpError";
-		this.captured = captured;
-	}
-}
 
 export interface OpenAIStreamRequestInit {
 	url: string;
@@ -88,7 +81,9 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		throw await captureOpenAIHttpError(response);
 	}
 	if (!response.body) {
-		throw new Error(`OpenAI stream response has no body (status ${response.status})`);
+		throw new AIError.ProviderResponseError(`OpenAI stream response has no body (status ${response.status})`, {
+			kind: "envelope",
+		});
 	}
 	return {
 		events: readSseJson<TEvent>(response.body, init.signal, init.onSseEvent),
@@ -98,7 +93,7 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 }
 
 /** Decode a non-2xx response into an {@link OpenAIHttpError} without consuming it twice. */
-export async function captureOpenAIHttpError(response: Response): Promise<OpenAIHttpError> {
+export async function captureOpenAIHttpError(response: Response): Promise<AIError.OpenAIHttpError> {
 	let bodyText: string | undefined;
 	let bodyJson: unknown;
 	try {
@@ -117,41 +112,11 @@ export async function captureOpenAIHttpError(response: Response): Promise<OpenAI
 		bodyText,
 		bodyJson,
 	};
-	const { detail, code } = extractErrorDetail(bodyJson, bodyText);
+	const { detail, code } = OpenAIHttpError.parseEnvelope(bodyJson, bodyText);
 	// "status code (no body)" matches the SDK's former APIError phrasing;
 	// `finalizeErrorMessage` keys a repair path on that exact wording.
 	const message = detail
 		? `${response.status} ${detail.length > MAX_DETAIL_CHARS ? detail.slice(0, MAX_DETAIL_CHARS) : detail}`
 		: `${response.status} status code (no body)`;
-	return new OpenAIHttpError(message, captured, code);
-}
-
-/**
- * Pull a human-readable message and machine code out of an OpenAI-style error
- * envelope (`{ error: { message, code, type } }`), tolerating the flat shapes
- * compat hosts return (`{ error: "..." }`, `{ message: "..." }`) and falling
- * back to the raw body text.
- */
-function extractErrorDetail(
-	bodyJson: unknown,
-	bodyText: string | undefined,
-): { detail: string | undefined; code: string | undefined } {
-	if (typeof bodyJson === "object" && bodyJson !== null) {
-		const envelope = bodyJson as { error?: unknown; message?: unknown };
-		const error = envelope.error;
-		if (typeof error === "object" && error !== null) {
-			const { message, code, type } = error as { message?: unknown; code?: unknown; type?: unknown };
-			return {
-				detail: typeof message === "string" && message.length > 0 ? message : bodyText,
-				code: typeof code === "string" ? code : typeof type === "string" ? type : undefined,
-			};
-		}
-		if (typeof error === "string" && error.length > 0) {
-			return { detail: error, code: undefined };
-		}
-		if (typeof envelope.message === "string" && envelope.message.length > 0) {
-			return { detail: envelope.message, code: undefined };
-		}
-	}
-	return { detail: bodyText, code: undefined };
+	return new AIError.OpenAIHttpError(message, captured, code);
 }

@@ -29,12 +29,23 @@ export default class Token extends Command {
 			description: "Force refresh the OAuth token even if it has not expired",
 			default: false,
 		}),
+		account: Flags.integer({
+			char: "a",
+			description: "Select the Nth OAuth account (1-based) in stored order instead of the round-robin default",
+		}),
+		list: Flags.boolean({
+			char: "l",
+			description: "List the provider's OAuth accounts (index + identity) and exit",
+			default: false,
+		}),
 	};
 
 	static examples = [
 		`# Get API key for Anthropic\n  ${APP_NAME} token anthropic`,
 		`# Get raw Copilot credential JSON\n  ${APP_NAME} token github-copilot --raw`,
 		`# Force refresh and get Gemini CLI token\n  ${APP_NAME} token google-gemini-cli --force-refresh`,
+		`# List Anthropic OAuth accounts\n  ${APP_NAME} token anthropic --list`,
+		`# Get the 2nd Anthropic OAuth account's token\n  ${APP_NAME} token anthropic --account 2`,
 	];
 
 	async run(): Promise<void> {
@@ -44,6 +55,49 @@ export default class Token extends Command {
 
 		const authStorage = await discoverAuthStorage();
 		try {
+			if (flags.list || flags.account !== undefined) {
+				const accounts = authStorage.listOAuthAccounts(provider);
+				if (accounts.length === 0) {
+					process.stderr.write(`${chalk.red(`No OAuth accounts found for provider "${providerName}".`)}\n`);
+					process.stderr.write("--account/--list select among OAuth accounts; this provider has none stored.\n");
+					process.exitCode = 1;
+					return;
+				}
+				if (flags.list) {
+					for (const acct of accounts) {
+						const label =
+							acct.email ??
+							acct.accountId ??
+							acct.projectId ??
+							acct.enterpriseUrl ??
+							`credential #${acct.credentialId}`;
+						process.stdout.write(`${acct.position + 1}. ${label}\n`);
+					}
+					return;
+				}
+				const n = flags.account;
+				if (n === undefined || n < 1 || n > accounts.length) {
+					process.stderr.write(
+						`${chalk.red(`Invalid --account ${n ?? "(missing)"}.`)} Provider "${providerName}" has ${accounts.length} OAuth account(s) (1-${accounts.length}).\n`,
+					);
+					process.exitCode = 1;
+					return;
+				}
+				const resolution = await authStorage.getOAuthAccessAt(provider, n - 1, {
+					forceRefresh: flags["force-refresh"],
+				});
+				if (!resolution?.ok) {
+					const reason = resolution && !resolution.ok ? resolution.error : "no OAuth credential available";
+					process.stderr.write(
+						`${chalk.red(`Could not get token for account ${n} of "${providerName}": ${reason}`)}\n`,
+					);
+					process.exitCode = 1;
+					return;
+				}
+				process.stdout.write(`${resolution.accessToken}\n`);
+				return;
+			}
+
 			const modelRegistry = new ModelRegistry(authStorage);
 
 			// Resolve the API key / token

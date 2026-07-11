@@ -55,7 +55,8 @@ describe("EvalTool display() text surfacing", () => {
 
 		const tool = new EvalTool(makeSession());
 		const result = await tool.execute("call-display-json", {
-			cells: [{ language: "js", code: "```js\ndisplay({ stdout: 'hi', exit_code: 0 });\n```\n" }],
+			language: "js",
+			code: "```js\ndisplay({ stdout: 'hi', exit_code: 0 });\n```\n",
 		});
 
 		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
@@ -76,7 +77,8 @@ describe("EvalTool display() text surfacing", () => {
 
 		const tool = new EvalTool(makeSession());
 		const result = await tool.execute("call-mixed", {
-			cells: [{ language: "js", code: "```js\nprint('before'); display([1,2,3]);\n```\n" }],
+			language: "js",
+			code: "```js\nprint('before'); display([1,2,3]);\n```\n",
 		});
 
 		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
@@ -96,9 +98,8 @@ describe("EvalTool display() text surfacing", () => {
 
 		const tool = new EvalTool(makeSession());
 		const result = await tool.execute("call-image", {
-			cells: [
-				{ language: "js", code: "```js\ndisplay({ type: 'image', data: '...', mimeType: 'image/png' });\n```\n" },
-			],
+			language: "js",
+			code: "```js\ndisplay({ type: 'image', data: '...', mimeType: 'image/png' });\n```\n",
 		});
 
 		const imageBlocks = result.content.filter(c => c.type === "image");
@@ -125,12 +126,8 @@ describe("EvalTool display() text surfacing", () => {
 
 		const tool = new EvalTool(makeSession());
 		const result = await tool.execute("call-large-image", {
-			cells: [
-				{
-					language: "js",
-					code: "```js\ndisplay({ type: 'image', data: largePng, mimeType: 'image/png' });\n```\n",
-				},
-			],
+			language: "js",
+			code: "```js\ndisplay({ type: 'image', data: largePng, mimeType: 'image/png' });\n```\n",
 		});
 
 		const image = result.content.find(c => c.type === "image");
@@ -154,7 +151,8 @@ describe("EvalTool display() text surfacing", () => {
 
 		const tool = new EvalTool(makeSession());
 		const result = await tool.execute("call-empty", {
-			cells: [{ language: "js", code: "```js\nconst x = 1;\n```\n" }],
+			language: "js",
+			code: "```js\nconst x = 1;\n```\n",
 		});
 
 		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
@@ -172,7 +170,8 @@ describe("EvalTool display() text surfacing", () => {
 
 		const tool = new EvalTool(makeSession());
 		const result = await tool.execute("call-huge", {
-			cells: [{ language: "js", code: "```js\ndisplay({ payload: 'x'.repeat(20000) });\n```\n" }],
+			language: "js",
+			code: "```js\ndisplay({ payload: 'x'.repeat(20000) });\n```\n",
 		});
 
 		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");

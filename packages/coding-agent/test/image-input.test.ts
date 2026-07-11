@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { readImageMetadata } from "@pk-nerdsaver-ai/pi-utils";
+import { readImageMetadata, removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("readImageMetadata", () => {
 	let testDir: string;
@@ -12,7 +12,7 @@ describe("readImageMetadata", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(testDir, { recursive: true, force: true });
+		removeSyncWithRetries(testDir);
 	});
 
 	it("reads PNG metadata from header", async () => {

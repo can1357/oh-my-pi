@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { readImageFromClipboard } from "@pk-nerdsaver-ai/pi-coding-agent/utils/clipboard";
+import { readImageFromClipboard, readMacFileUrlsFromClipboard } from "@pk-nerdsaver-ai/pi-coding-agent/utils/clipboard";
 import * as native from "@pk-nerdsaver-ai/pi-natives";
 import type { Subprocess } from "bun";
 
@@ -183,5 +183,42 @@ describe("readImageFromClipboard dispatch", () => {
 		expect(await readImageFromClipboard()).toBeNull();
 		expect(spawnSpy).not.toHaveBeenCalled();
 		expect(nativeSpy).not.toHaveBeenCalled();
+	});
+});
+
+describe("readMacFileUrlsFromClipboard", () => {
+	it("returns an empty list on non-darwin platforms without spawning osascript", async () => {
+		setPlatform("linux");
+		const cp = await import("node:child_process");
+		const execSpy = vi.spyOn(cp, "execSync");
+
+		expect(await readMacFileUrlsFromClipboard()).toEqual([]);
+		expect(execSpy).not.toHaveBeenCalled();
+	});
+
+	it("splits osascript output into one path per non-empty line on darwin", async () => {
+		setPlatform("darwin");
+		const cp = await import("node:child_process");
+		const execSpy = vi
+			.spyOn(cp, "execSync")
+			.mockReturnValue("/Users/me/Pictures/photo.png\n/Users/me/Pictures/clip.jpg\n\n");
+
+		const paths = await readMacFileUrlsFromClipboard();
+
+		expect(paths).toEqual(["/Users/me/Pictures/photo.png", "/Users/me/Pictures/clip.jpg"]);
+		expect(execSpy).toHaveBeenCalledTimes(1);
+		const [cmd, options] = execSpy.mock.calls[0] ?? [];
+		expect(cmd).toBe("osascript -");
+		expect((options as { input?: string } | undefined)?.input).toContain("«class furl»");
+	});
+
+	it("returns an empty list when osascript throws (e.g. binary missing)", async () => {
+		setPlatform("darwin");
+		const cp = await import("node:child_process");
+		vi.spyOn(cp, "execSync").mockImplementation(() => {
+			throw new Error("osascript: command not found");
+		});
+
+		expect(await readMacFileUrlsFromClipboard()).toEqual([]);
 	});
 });

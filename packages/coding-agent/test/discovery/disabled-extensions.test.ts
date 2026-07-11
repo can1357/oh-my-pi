@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { type ContextFile, contextFileCapability } from "@pk-nerdsaver-ai/pi-coding-agent/capability/context-file";
 import { resetSettingsForTest, Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { initializeWithSettings, loadCapability } from "@pk-nerdsaver-ai/pi-coding-agent/discovery";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("disabledExtensions runtime filtering", () => {
 	let tempDir = "";
@@ -39,8 +40,8 @@ describe("disabledExtensions runtime filtering", () => {
 		} else {
 			process.env.HOME = originalHome;
 		}
-		await fs.rm(tempHomeDir, { recursive: true, force: true });
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await removeWithRetries(tempHomeDir);
+		await removeWithRetries(tempDir);
 	});
 
 	test("hides disabled context files from runtime loads by default", async () => {

@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package cel.expr;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/struct.proto";
+
+message Value {
+  oneof kind {
+    .google.protobuf.NullValue null_value = 1;
+    bool bool_value = 2;
+    int64 int64_value = 3;
+    uint64 uint64_value = 4;
+    double double_value = 5;
+    string string_value = 6;
+    bytes bytes_value = 7;
+    .cel.expr.EnumValue enum_value = 9;
+    .google.protobuf.Any object_value = 10;
+    .cel.expr.MapValue map_value = 11;
+    .cel.expr.ListValue list_value = 12;
+    string type_value = 15;
+  }
+}
+
+message EnumValue {
+  string type = 1;
+  int32 value = 2;
+}
+
+message ListValue {
+  repeated .cel.expr.Value values = 1;
+}
+
+message MapValue {
+  message Entry {
+    .cel.expr.Value key = 1;
+    .cel.expr.Value value = 2;
+  }
+
+  repeated .cel.expr.MapValue.Entry entries = 1;
+}

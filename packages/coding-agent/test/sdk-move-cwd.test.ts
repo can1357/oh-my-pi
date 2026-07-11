@@ -6,7 +6,7 @@ import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { createAgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 function textContent(result: { content?: Array<{ type: string; text?: string }> }): string {
 	return (
@@ -24,7 +24,7 @@ describe("createAgentSession cwd after /move", () => {
 
 	afterEach(() => {
 		for (const tempDir of tempDirs.splice(0)) {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		}
 	});
 

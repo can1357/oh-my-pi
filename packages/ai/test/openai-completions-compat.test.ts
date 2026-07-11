@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { renderDemotedThinking } from "@pk-nerdsaver-ai/pi-ai/dialect";
 import {
 	applyOpenRouterRoutingVariant,
 	convertMessages,
@@ -15,6 +16,7 @@ import type {
 	ToolResultMessage,
 } from "@pk-nerdsaver-ai/pi-ai/types";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
+import { Effort } from "@pk-nerdsaver-ai/pi-catalog/effort";
 import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@pk-nerdsaver-ai/pi-catalog/types";
 
@@ -167,6 +169,7 @@ describe("openai-completions compatibility", () => {
 			supportsUsageInStreaming: true,
 			supportsToolChoice: true,
 			supportsForcedToolChoice: true,
+			supportsNamedToolChoice: true,
 			disableReasoningOnForcedToolChoice: false,
 			disableReasoningOnToolChoice: false,
 			maxTokensField: "max_completion_tokens",
@@ -183,6 +186,8 @@ describe("openai-completions compatibility", () => {
 			requiresReasoningContentForToolCalls: false,
 			requiresReasoningContentForAllAssistantTurns: false,
 			allowsSyntheticReasoningContentForToolCalls: true,
+			replayReasoningContent: false,
+			qwenPreserveThinking: false,
 			requiresAssistantContentForToolCalls: false,
 			openRouterRouting: {},
 			vercelGatewayRouting: {},
@@ -269,7 +274,7 @@ describe("openai-completions compatibility", () => {
 		// Regression: thinking+text replay used to call `.unshift` on the string
 		// content set above (TypeError). Both blocks must survive as one string.
 		expect(typeof assistant.content).toBe("string");
-		expect(assistant.content).toBe("chain of thought\n\nfinal answer");
+		expect(assistant.content).toBe(`${renderDemotedThinking(model.id, "chain of thought")}final answer`);
 	});
 
 	it("emits thinking-only assistant content as a plain string when requiresThinkingAsText is set", () => {
@@ -305,7 +310,7 @@ describe("openai-completions compatibility", () => {
 		const assistant = messages.find(message => message.role === "assistant");
 		expect(assistant).toBeDefined();
 		if (assistant?.role !== "assistant") throw new Error("assistant message missing");
-		expect(assistant.content).toBe("only thoughts");
+		expect(assistant.content).toBe(renderDemotedThinking(model.id, "only thoughts"));
 	});
 
 	it("preserves multiple system prompts as leading system messages for chat completions", () => {
@@ -536,6 +541,29 @@ describe("openai-completions compatibility", () => {
 			model.compat,
 		);
 
+		expect(messages.slice(0, 2)).toEqual([
+			{ role: "system", content: "stable instructions\n\ncacheable policy" },
+			{ role: "user", content: "hello" },
+		]);
+	});
+	it("coalesces system blocks for the bundled Fireworks Qwen model (Qwen template rejects multiple)", () => {
+		// Repro of the live `fireworks/qwen3.7-plus` 500: the Qwen 3.5+ chat
+		// template `internal_server_error`s when more than one leading system
+		// block is present, and Fireworks was previously on the multi-system
+		// allowlist. The bundled entry must auto-detect single-system.
+		const model = getBundledModel<"openai-completions">("fireworks", "qwen3.7-plus");
+		expect(model.compat.supportsMultipleSystemMessages).toBe(false);
+
+		const messages = convertMessages(
+			model,
+			{
+				systemPrompt: ["stable instructions", "cacheable policy"],
+				messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
+			},
+			model.compat,
+		);
+
+		expect(messages.filter(m => m.role === "system")).toHaveLength(1);
 		expect(messages.slice(0, 2)).toEqual([
 			{ role: "system", content: "stable instructions\n\ncacheable policy" },
 			{ role: "user", content: "hello" },
@@ -879,6 +907,71 @@ describe("openai-completions compatibility", () => {
 		expect(assistantObject?.reasoning_text).toBe("inspect tool output");
 		expect(assistantObject?.reasoning_content).toBeUndefined();
 	});
+
+	it("maps MiMo unsupported reasoning efforts to opencode-go accepted wire values", async () => {
+		const model: Model<"openai-completions"> = buildModel({
+			id: "mimo-v2.5-pro",
+			name: "MiMo V2.5 Pro",
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 32000,
+		});
+
+		const minimalPayload = toObject(
+			await captureOpenAICompletionsPayload(model, baseContext(), { reasoning: "minimal" }),
+		);
+		const xhighPayload = toObject(
+			await captureOpenAICompletionsPayload(model, baseContext(), { reasoning: "xhigh" }),
+		);
+
+		expect(minimalPayload ? Reflect.get(minimalPayload, "reasoning_effort") : undefined).toBe("low");
+		expect(xhighPayload ? Reflect.get(xhighPayload, "reasoning_effort") : undefined).toBe("high");
+		const collapsedModel: Model<"openai-completions"> = buildModel({
+			id: "mimo-v2.5-pro",
+			name: "MiMo V2.5 Pro",
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			requestModelId: "mimo-v2.5-pro",
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+				effortRouting: {
+					off: "mimo-v2.5-pro",
+					[Effort.Low]: "mimo-v2.5-pro-thinking",
+					[Effort.Medium]: "mimo-v2.5-pro-thinking",
+					[Effort.High]: "mimo-v2.5-pro-thinking",
+				},
+			},
+			compat: { reasoningEffortMap: { minimal: "low", xhigh: "high" } },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 32000,
+		});
+		const collapsedMinimalPayload = toObject(
+			await captureOpenAICompletionsPayload(collapsedModel, baseContext(), { reasoning: "minimal" }),
+		);
+		const collapsedXhighPayload = toObject(
+			await captureOpenAICompletionsPayload(collapsedModel, baseContext(), { reasoning: "xhigh" }),
+		);
+		expect(collapsedMinimalPayload ? Reflect.get(collapsedMinimalPayload, "model") : undefined).toBe(
+			"mimo-v2.5-pro-thinking",
+		);
+		expect(collapsedMinimalPayload ? Reflect.get(collapsedMinimalPayload, "reasoning_effort") : undefined).toBe(
+			"low",
+		);
+		expect(collapsedXhighPayload ? Reflect.get(collapsedXhighPayload, "model") : undefined).toBe(
+			"mimo-v2.5-pro-thinking",
+		);
+		expect(collapsedXhighPayload ? Reflect.get(collapsedXhighPayload, "reasoning_effort") : undefined).toBe("high");
+	});
 });
 
 describe("kimi model detection via detectCompat", () => {
@@ -1133,6 +1226,75 @@ describe("kimi model detection via detectCompat", () => {
 		// The streamed `reasoning` key must NOT land in the wire body alongside
 		// `reasoning_content`; opencode's strict schema rejects unknown fields.
 		expect(assistant?.reasoning).toBeUndefined();
+	});
+
+	it("demotes cross-api reasoning while keeping thinking-enabled tool-call schema on kimi opencode-go", async () => {
+		const model = kimiOpenCodeModel("kimi-k2.6");
+		expect(model.compat.requiresReasoningContentForToolCalls).toBe(false);
+		const priorAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: "Need to preserve cross-api reasoning.",
+					thinkingSignature: "sig_from_anthropic",
+				},
+				{
+					type: "toolCall",
+					id: "toolu_cross_api",
+					name: "read",
+					arguments: { path: "README.md" },
+				},
+			],
+			api: "anthropic-messages",
+			provider: "zai",
+			model: "claude-compatible",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		const fetchMock = createMockFetch(["[DONE]"]);
+		streamOpenAICompletions(
+			model,
+			{
+				messages: [
+					{ role: "user", content: "Summarize the README", timestamp: Date.now() },
+					priorAssistant,
+					{
+						role: "toolResult",
+						toolCallId: "toolu_cross_api",
+						toolName: "read",
+						content: [{ type: "text", text: "# Hello\n" }],
+						isError: false,
+						timestamp: Date.now(),
+					},
+				],
+			},
+			{
+				apiKey: "test-key",
+				fetch: fetchMock,
+				reasoning: "high",
+				signal: createAbortedSignal(),
+				onPayload: payload => resolve(payload),
+			},
+		);
+
+		const payload = (await promise) as { messages: Array<Record<string, unknown>> };
+		const assistant = payload.messages.find(m => m.role === "assistant");
+		expect(assistant).toBeDefined();
+		expect(assistant?.content).toBe(renderDemotedThinking(model.id, "Need to preserve cross-api reasoning."));
+		expect(assistant?.reasoning_content).toBe("");
+		expect(assistant?.reasoning).toBeUndefined();
+		expect(assistant?.reasoning_text).toBeUndefined();
 	});
 
 	// #1071 regression guard alongside the #1484 fix: with thinking disabled the
@@ -2098,8 +2260,10 @@ describe("Moonshot Flavored JSON Schema tool normalization", () => {
 		const model = genericNonStrictModel();
 		expect(model.compat.toolSchemaFlavor).toBeUndefined();
 		const payload = await captureOpenAICompletionsPayload(model, { ...baseContext(), tools: mfjsProbeTools });
+		// The const-union → enum collapse is a universal wire optimization, not MFJS,
+		// so `op` collapses identically here; MFJS gating is proven by `paths.minItems` below.
 		const op = probeProperty(payload, "github", "op");
-		expect(Array.isArray(op.anyOf)).toBe(true);
+		expect(op).toEqual({ type: "string", enum: ["pr_checkout", "pr_create"], description: "github operation" });
 		const paths = probeProperty(payload, "find", "paths");
 		expect(paths.minItems).toBe(1);
 	});

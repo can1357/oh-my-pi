@@ -11,7 +11,9 @@ import {
 } from "@pk-nerdsaver-ai/pi-coding-agent/discovery/helpers";
 import { loadSlashCommands } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/slash-commands";
 import { discoverAgents } from "@pk-nerdsaver-ai/pi-coding-agent/task/discovery";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import "@pk-nerdsaver-ai/pi-coding-agent/discovery/claude-plugins";
+import { type MCPServer, mcpCapability } from "@pk-nerdsaver-ai/pi-coding-agent/capability/mcp";
 import type { Skill } from "@pk-nerdsaver-ai/pi-coding-agent/capability/skill";
 import type { SlashCommand } from "@pk-nerdsaver-ai/pi-coding-agent/capability/slash-command";
 
@@ -80,7 +82,7 @@ describe("listClaudePluginRoots", () => {
 		} else {
 			process.env.HOME = originalHome;
 		}
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await removeWithRetries(tempDir);
 	});
 
 	test("returns empty roots when no registry file exists", async () => {
@@ -392,6 +394,65 @@ describe("listClaudePluginRoots", () => {
 		);
 	});
 
+	test("expands env placeholders in marketplace plugin MCP url and headers", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "context7");
+		const originalApiKey = process.env.OMP_PLUGIN_MCP_API_KEY;
+		const originalUrl = process.env.OMP_PLUGIN_MCP_URL;
+		const envPlaceholder = (name: string): string => ["$", "{", name, ":-}"].join("");
+		process.env.OMP_PLUGIN_MCP_API_KEY = "ctx7sk-test-key";
+		process.env.OMP_PLUGIN_MCP_URL = "https://mcp.context7.example";
+
+		try {
+			await fs.mkdir(pluginsDir, { recursive: true });
+			await fs.mkdir(pluginPath, { recursive: true });
+			await fs.writeFile(
+				path.join(pluginsDir, "installed_plugins.json"),
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"context7@claude-plugins-official": [
+							{
+								scope: "user",
+								installPath: pluginPath,
+								version: "1.0.0",
+								installedAt: "2026-06-01T00:00:00Z",
+								lastUpdated: "2026-06-01T00:00:00Z",
+							},
+						],
+					},
+				}),
+			);
+			await fs.writeFile(
+				path.join(pluginPath, ".mcp.json"),
+				JSON.stringify({
+					context7: {
+						type: "http",
+						url: `${envPlaceholder("OMP_PLUGIN_MCP_URL")}/mcp`,
+						headers: {
+							CONTEXT7_API_KEY: envPlaceholder("OMP_PLUGIN_MCP_API_KEY"),
+						},
+					},
+				}),
+			);
+
+			const result = await loadCapability<MCPServer>(mcpCapability.id, {
+				cwd: tempDir,
+				providers: ["claude-plugins"],
+			});
+			const server = result.all.find(item => item.name === "context7:context7");
+
+			expect(server).toBeDefined();
+			expect(server?.url).toBe("https://mcp.context7.example/mcp");
+			expect(server?.headers).toEqual({ CONTEXT7_API_KEY: "ctx7sk-test-key" });
+		} finally {
+			if (originalApiKey === undefined) delete process.env.OMP_PLUGIN_MCP_API_KEY;
+			else process.env.OMP_PLUGIN_MCP_API_KEY = originalApiKey;
+			if (originalUrl === undefined) delete process.env.OMP_PLUGIN_MCP_URL;
+			else process.env.OMP_PLUGIN_MCP_URL = originalUrl;
+		}
+	});
+
 	test("reads slash commands directory from plugin manifest slash-commands field", async () => {
 		const pluginsDir = path.join(tempDir, ".claude", "plugins");
 		const pluginPath = path.join(tempDir, "plugins", "manifest-commands");
@@ -597,7 +658,7 @@ describe("discoverAgents plugin precedence", () => {
 
 	afterEach(async () => {
 		clearClaudePluginRootsCache();
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await removeWithRetries(tempDir);
 	});
 
 	test("prefers project-scoped plugin agent over user-scoped plugin agent", async () => {

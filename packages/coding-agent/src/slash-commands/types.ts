@@ -20,6 +20,8 @@ export interface BuiltinSlashCommand {
 	subcommands?: SubcommandDef[];
 	/** Static inline hint when command takes a simple argument (no subcommands). */
 	inlineHint?: string;
+	/** TUI-only dynamic status text for command-name autocomplete. Static `description` remains canonical for ACP/help. */
+	getTuiAutocompleteDescription?: (runtime: TuiSlashCommandRuntime) => string | undefined;
 }
 
 /** Parsed slash-command text after stripping the leading "/". */

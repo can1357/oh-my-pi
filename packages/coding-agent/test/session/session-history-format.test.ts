@@ -106,13 +106,128 @@ describe("formatSessionHistoryMarkdown", () => {
 			{
 				role: "toolResult",
 				toolCallId: "tc-orphan",
-				toolName: "search",
+				toolName: "grep",
 				content: [{ type: "text", text: "one match" }],
 				isError: false,
 				timestamp: 1,
 			},
 		]);
-		expect(output).toContain("→ search() ⇒ ok · 1 line");
+		expect(output).toContain("→ grep() ⇒ ok · 1 line");
+	});
+
+	it("renders find paths without falling back to JSON arguments", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-glob",
+						name: "glob",
+						arguments: { paths: ["packages/coding-agent/src/**/*.ts"] },
+					},
+				],
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tc-glob",
+				toolName: "glob",
+				content: [{ type: "text", text: "session-history-format.ts" }],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+
+		expect(output).toContain("→ glob(packages/coding-agent/src/**/*.ts) ⇒ ok · 1 line");
+		expect(output).not.toContain('{"paths"');
+	});
+
+	it("renders search path scope alongside the pattern", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-grep",
+						name: "grep",
+						arguments: { pattern: "PRIMARY_ARG_KEYS", paths: ["packages/coding-agent/src/session"] },
+					},
+				],
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tc-grep",
+				toolName: "grep",
+				content: [{ type: "text", text: "timed out" }],
+				isError: true,
+				timestamp: 2,
+			},
+		]);
+
+		expect(output).toContain(
+			"→ grep(PRIMARY_ARG_KEYS @ packages/coding-agent/src/session) ⇒ error · 1 line — timed out",
+		);
+	});
+
+	it("keeps the ast_grep pattern visible instead of only its paths scope", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-astgrep",
+						name: "ast_grep",
+						arguments: { pat: "console.log($$$)", paths: ["packages/coding-agent/src/**/*.ts"] },
+					},
+				],
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tc-astgrep",
+				toolName: "ast_grep",
+				content: [{ type: "text", text: "match" }],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+
+		expect(output).toContain("→ ast_grep(console.log($$$)) ⇒ ok · 1 line");
+	});
+
+	it("keeps the ast_edit op pattern visible instead of only its paths scope", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tc-astedit",
+						name: "ast_edit",
+						arguments: {
+							ops: [{ pat: "oldApi($$$A)", out: "newApi($$$A)" }],
+							paths: ["packages/coding-agent/src/**/*.ts"],
+						},
+					},
+				],
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tc-astedit",
+				toolName: "ast_edit",
+				content: [{ type: "text", text: "1 change" }],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+
+		expect(output).toContain("oldApi($$$A)");
+		expect(output).not.toContain("→ ast_edit(packages/coding-agent/src/**/*.ts)");
 	});
 
 	it("renders tool intent comments immediately before tool call lines when includeToolIntent is true", () => {

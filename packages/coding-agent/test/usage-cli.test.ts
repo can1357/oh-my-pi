@@ -21,6 +21,7 @@ function makeLimit(opts: {
 	windowId?: string;
 	tier?: string;
 	accountId?: string;
+	notes?: string[];
 }): UsageReport["limits"][number] {
 	return {
 		id: opts.id,
@@ -36,11 +37,12 @@ function makeLimit(opts: {
 				? { id: opts.windowId ?? opts.id, label: opts.windowId ?? opts.id, durationMs: opts.durationMs }
 				: undefined,
 		amount: { unit: "percent", usedFraction: opts.usedFraction },
+		...(opts.notes ? { notes: opts.notes } : {}),
 	};
 }
 
-function makeReport(provider: string, email: string, limits: UsageReport["limits"]): UsageReport {
-	return { provider, fetchedAt: Date.now(), limits, metadata: { email } };
+function makeReport(provider: string, email: string, limits: UsageReport["limits"], notes?: string[]): UsageReport {
+	return { provider, fetchedAt: Date.now(), limits, ...(notes ? { notes } : {}), metadata: { email } };
 }
 
 describe("buildRedactionMap", () => {
@@ -183,6 +185,83 @@ describe("formatUsageBreakdown", () => {
 		expect(text).not.toContain("dummy.primary@example.test");
 		expect(text).not.toContain("dummy.secondary@example.test");
 		for (const mask of redaction.values()) expect(text).toContain(mask);
+	});
+
+	it("renders provider-level notes once per provider, not duplicated per account or limit", () => {
+		const disclaimer = "OMP-observed spend only; OpenCode usage outside OMP is not included.";
+		const multiAccount = [
+			makeReport(
+				"opencode-go",
+				"acct-a@example.test",
+				[makeLimit({ id: "5 Hour", usedFraction: 0.3, durationMs: FIVE_HOURS, windowId: "5h" })],
+				[disclaimer],
+			),
+			makeReport(
+				"opencode-go",
+				"acct-b@example.test",
+				[makeLimit({ id: "5 Hour", usedFraction: 0.6, durationMs: FIVE_HOURS, windowId: "5h" })],
+				[disclaimer],
+			),
+		];
+		const text = stripVTControlCharacters(formatUsageBreakdown(multiAccount, [], Date.now()));
+		// The disclaimer appears exactly once, not once per account or limit.
+		const occurrences = text.split(disclaimer).length - 1;
+		expect(occurrences).toBe(1);
+		// It appears above the per-account rows, not inline with a limit line.
+		const disclaimerIdx = text.indexOf(disclaimer);
+		const firstLimitIdx = text.indexOf("5 Hour");
+		expect(disclaimerIdx).toBeLessThan(firstLimitIdx);
+	});
+
+	it("renders saved reset expiry state for future and expired credits", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const reports: UsageReport[] = [
+			{
+				provider: "openai-codex",
+				fetchedAt: now,
+				limits: [],
+				metadata: { email: "future@example.test" },
+				resetCredits: {
+					availableCount: 1,
+					credits: [{ expiresAt: "2026-01-03T00:00:00.000Z" }],
+				},
+			},
+			{
+				provider: "openai-codex",
+				fetchedAt: now,
+				limits: [],
+				metadata: { email: "expired@example.test" },
+				resetCredits: {
+					availableCount: 1,
+					credits: [{ expiresAt: "2025-12-30T00:00:00.000Z" }],
+				},
+			},
+		];
+
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now));
+		expect(text).toContain("future@example.test");
+		expect(text).toContain("soonest expires in 2d (2026-01-03)");
+		expect(text).toContain("expired@example.test");
+		expect(text).toContain("expired (2025-12-30)");
+	});
+
+	it("deduplicates identical per-limit notes across accounts sharing a window", () => {
+		const note = "Overage requests: 5";
+		const reports = [
+			makeReport("github-copilot", "acct-a@example.test", [
+				makeLimit({ id: "Copilot", usedFraction: 0.8, windowId: "monthly", notes: [note] }),
+			]),
+			makeReport("github-copilot", "acct-b@example.test", [
+				makeLimit({ id: "Copilot", usedFraction: 0.9, windowId: "monthly", notes: [note] }),
+			]),
+		];
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], Date.now()));
+		// CLI renders per-limit, so each account shows its own note — that's
+		// correct for the CLI path (one limit at a time). The dedup contract
+		// lives in the TUI aggregate path (command-controller), tested separately.
+		// Here we assert the CLI doesn't add spurious duplicates beyond one-per-limit.
+		const occurrences = text.split(note).length - 1;
+		expect(occurrences).toBe(2);
 	});
 });
 

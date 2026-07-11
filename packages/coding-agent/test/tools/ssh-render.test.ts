@@ -57,6 +57,24 @@ describe("sshToolRenderer", () => {
 		expect(body).toContain("do-something");
 	});
 
+	it("keeps partial results pending until the final SSH result", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		expect(uiTheme).toBeDefined();
+		const renderHeader = (isPartial: boolean) =>
+			sanitizeText(
+				sshToolRenderer
+					.renderResult(
+						{ content: [{ type: "text", text: isPartial ? "streaming" : "done" }] },
+						{ expanded: false, isPartial },
+						uiTheme,
+						{ host: "sccpu", command: "uptime" },
+					)
+					.render(120)[0]!,
+			);
+
+		expect(renderHeader(true)).toContain("⏳ SSH: [sccpu]");
+		expect(renderHeader(false)).toContain("⇄ SSH: [sccpu]");
+	});
 	it("renders the collapsed command as a viewport tail window in every state — no stream→final expansion", async () => {
 		const uiTheme = (await getThemeByName("dark"))!;
 		expect(uiTheme).toBeDefined();

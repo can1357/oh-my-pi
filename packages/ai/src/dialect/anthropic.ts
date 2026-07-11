@@ -1,5 +1,5 @@
+import { parseJsonWithRepair } from "@pk-nerdsaver-ai/pi-utils";
 import type { Message, ToolCall } from "../types";
-import { parseJsonWithRepair } from "../utils/json-parse";
 import dialectPrompt from "./anthropic.md" with { type: "text" };
 import { buildArgShapes, buildStringArgsResolver, mintToolCallId, type ToolArgShape } from "./coercion";
 import {

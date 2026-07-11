@@ -8,13 +8,14 @@ import {
 	resolveLocalRoot,
 	resolveLocalUrlToPath,
 } from "@pk-nerdsaver-ai/pi-coding-agent/internal-urls";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "local-protocol-"));
 	try {
 		return await fn(dir);
 	} finally {
-		await fs.rm(dir, { recursive: true, force: true });
+		await removeWithRetries(dir);
 	}
 }
 

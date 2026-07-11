@@ -5,18 +5,11 @@
  * that toggles the entire provider. All items below are dimmed when the
  * master switch is off.
  */
-import {
-	type Component,
-	extractPrintableText,
-	matchesKey,
-	padding,
-	ScrollView,
-	truncateToWidth,
-	visibleWidth,
-} from "@pk-nerdsaver-ai/pi-tui";
+import { type Component, matchesKey, padding, truncateToWidth, visibleWidth } from "@pk-nerdsaver-ai/pi-tui";
 import { isProviderEnabled } from "../../../discovery";
 import { theme } from "../../../modes/theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../../utils/keybinding-matchers";
+import { clampSelection, contentRowWidth, renderScrollableList, searchableChar } from "../selector-helpers";
 import { applyFilter } from "./state-manager";
 import type { Extension, ExtensionKind, ExtensionState } from "./types";
 
@@ -47,6 +40,9 @@ export class ExtensionList implements Component {
 	#focused = false;
 	#masterSwitchProvider: string | null = null;
 	#maxVisible: number;
+	#hoveredIndex: number | null = null;
+	/** Item rows rendered in the last frame, for mouse hit-testing. */
+	#visibleCount = 0;
 
 	constructor(
 		private extensions: Extension[],
@@ -115,6 +111,7 @@ export class ExtensionList implements Component {
 
 	render(width: number): readonly string[] {
 		const lines: string[] = [];
+		this.#visibleCount = 0;
 
 		// Search bar
 		const searchPrefix = theme.fg("muted", "Search: ");
@@ -136,32 +133,35 @@ export class ExtensionList implements Component {
 		const endIdx = Math.min(startIdx + this.#maxVisible, this.#listItems.length);
 
 		// Reserve the rightmost column for the scrollbar when overflowing
-		const overflow = this.#listItems.length > this.#maxVisible;
-		const rowWidth = Math.max(0, width - (overflow ? 1 : 0));
+		const rowWidth = contentRowWidth(width, this.#listItems.length, this.#maxVisible);
 
 		// Render visible items
 		const rows: string[] = [];
 		for (let i = startIdx; i < endIdx; i++) {
 			const listItem = this.#listItems[i];
 			const isSelected = this.#focused && i === this.#selectedIndex;
+			const isHovered = this.#focused && i === this.#hoveredIndex && !isSelected;
 
+			let rowStr: string;
 			if (listItem.type === "master") {
-				rows.push(this.#renderMasterSwitch(listItem, isSelected, rowWidth));
+				rowStr = this.#renderMasterSwitch(listItem, isSelected, rowWidth);
 			} else if (listItem.type === "kind-header") {
-				rows.push(this.#renderKindHeader(listItem, isSelected, rowWidth));
+				rowStr = this.#renderKindHeader(listItem, isSelected, rowWidth);
 			} else {
-				rows.push(this.#renderExtensionRow(listItem.item, isSelected, rowWidth, masterDisabled));
+				rowStr = this.#renderExtensionRow(listItem.item, isSelected, rowWidth, masterDisabled);
 			}
+			if (isHovered) rowStr = theme.bg("selectedBg", rowStr);
+			rows.push(rowStr);
 		}
+		this.#visibleCount = rows.length;
 
-		const sv = new ScrollView(rows, {
-			height: rows.length,
-			scrollbar: "auto",
-			totalRows: this.#listItems.length,
-			theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
-		});
-		sv.setScrollOffset(this.#scrollOffset);
-		lines.push(...sv.render(width));
+		lines.push(
+			...renderScrollableList(rows, {
+				width,
+				totalRows: this.#listItems.length,
+				scrollOffset: this.#scrollOffset,
+			}),
+		);
 
 		return lines;
 	}
@@ -391,21 +391,60 @@ export class ExtensionList implements Component {
 	}
 
 	#clampSelection(): void {
-		if (this.#listItems.length === 0) {
-			this.#selectedIndex = 0;
-			this.#scrollOffset = 0;
+		const next = clampSelection(this.#selectedIndex, this.#scrollOffset, this.#listItems.length, this.#maxVisible);
+		this.#selectedIndex = next.selectedIndex;
+		this.#scrollOffset = next.scrollOffset;
+	}
+
+	/** Toggle the selected item, or flip the provider master switch when on it. */
+	#activateSelected(): void {
+		const item = this.#listItems[this.#selectedIndex];
+		if (item?.type === "master") {
+			this.callbacks.onMasterToggle?.(item.providerId);
+		} else if (item?.type === "extension") {
+			// Only allow toggling if the provider master switch is enabled.
+			const masterDisabled = this.#masterSwitchProvider !== null && !isProviderEnabled(this.#masterSwitchProvider);
+			if (!masterDisabled) {
+				const newEnabled = item.item.state === "disabled";
+				this.callbacks.onToggle?.(item.item.id, newEnabled);
+			}
+		}
+	}
+
+	/** Highlight the row under the pointer (null clears). */
+	setHoverIndex(index: number | null): void {
+		this.#hoveredIndex = index;
+	}
+
+	/**
+	 * Map a 0-based line within this component's render to the absolute list-item
+	 * index, or null when the line is the search banner, a padding row, or outside
+	 * the visible window. The first two lines are the search banner and a blank
+	 * separator; item rows follow, windowed at the current scroll offset.
+	 */
+	hitTest(line: number): number | null {
+		const rowLine = line - 2;
+		if (rowLine < 0 || rowLine >= this.#visibleCount) return null;
+		const index = this.#scrollOffset + rowLine;
+		return index < this.#listItems.length ? index : null;
+	}
+
+	/** Wheel notch: move the selection (and the inspector) one row. */
+	handleWheel(delta: -1 | 1): void {
+		if (delta < 0) this.#moveSelectionUp();
+		else this.#moveSelectionDown();
+	}
+
+	/** Click: select the row under the pointer, or activate it when already selected. */
+	handleClick(line: number): void {
+		const index = this.hitTest(line);
+		if (index === null) return;
+		if (index === this.#selectedIndex) {
+			this.#activateSelected();
 			return;
 		}
-
-		this.#selectedIndex = Math.min(this.#selectedIndex, this.#listItems.length - 1);
-		this.#selectedIndex = Math.max(0, this.#selectedIndex);
-
-		// Adjust scroll offset
-		if (this.#selectedIndex < this.#scrollOffset) {
-			this.#scrollOffset = this.#selectedIndex;
-		} else if (this.#selectedIndex >= this.#scrollOffset + this.#maxVisible) {
-			this.#scrollOffset = this.#selectedIndex - this.#maxVisible + 1;
-		}
+		this.#selectedIndex = index;
+		this.#notifySelectionChange();
 	}
 
 	handleInput(data: string): void {
@@ -420,36 +459,9 @@ export class ExtensionList implements Component {
 			return;
 		}
 
-		// Space: Toggle selected item
-		if (data === " ") {
-			const item = this.#listItems[this.#selectedIndex];
-			if (item?.type === "master") {
-				this.callbacks.onMasterToggle?.(item.providerId);
-			} else if (item?.type === "extension") {
-				// Only allow toggling if master is enabled
-				const masterDisabled =
-					this.#masterSwitchProvider !== null && !isProviderEnabled(this.#masterSwitchProvider);
-				if (!masterDisabled) {
-					const newEnabled = item.item.state === "disabled";
-					this.callbacks.onToggle?.(item.item.id, newEnabled);
-				}
-			}
-			return;
-		}
-
-		// Enter: Same as space - toggle selected item
-		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-			const item = this.#listItems[this.#selectedIndex];
-			if (item?.type === "master") {
-				this.callbacks.onMasterToggle?.(item.providerId);
-			} else if (item?.type === "extension") {
-				const masterDisabled =
-					this.#masterSwitchProvider !== null && !isProviderEnabled(this.#masterSwitchProvider);
-				if (!masterDisabled) {
-					const newEnabled = item.item.state === "disabled";
-					this.callbacks.onToggle?.(item.item.id, newEnabled);
-				}
-			}
+		// Space or Enter: activate the selected row (toggle item / master switch)
+		if (data === " " || matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+			this.#activateSelected();
 			return;
 		}
 
@@ -462,16 +474,9 @@ export class ExtensionList implements Component {
 		}
 
 		// Printable characters -> search
-		const printableText = extractPrintableText(data);
-		if (printableText && printableText.length === 1) {
-			const printableCharCode = printableText.charCodeAt(0);
-			if (printableCharCode > 32 && printableCharCode < 127) {
-				if (printableText === "j" || printableText === "k") {
-					return;
-				}
-				this.setSearchQuery(this.#searchQuery + printableText);
-				return;
-			}
+		const char = searchableChar(data);
+		if (char !== null) {
+			this.setSearchQuery(this.#searchQuery + char);
 		}
 	}
 

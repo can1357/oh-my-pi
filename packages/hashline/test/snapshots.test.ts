@@ -85,4 +85,28 @@ describe("InMemorySnapshotStore", () => {
 		store.clear();
 		expect(store.byHash(OTHER, tagB)).toBeNull();
 	});
+
+	it("relocate moves version history and read provenance to a new path", () => {
+		const store = new InMemorySnapshotStore();
+		const dest = "/tmp/__hashline-dest__.ts";
+		const tag = store.record(PATH, "A\n", [1]);
+		store.relocate(PATH, dest);
+		expect(store.byHash(PATH, tag)).toBeNull();
+		expect(store.byHash(dest, tag)?.text).toBe("A\n");
+		expect(store.byHash(dest, tag)?.seenLines).toEqual(new Set([1]));
+		expect(store.head(dest)?.hash).toBe(tag);
+	});
+
+	it("findByHash returns every retained version with that tag across paths", () => {
+		const store = new InMemorySnapshotStore();
+		const text = "shared\n";
+		const tag = store.record(PATH, text);
+		store.record(OTHER, text);
+
+		const matches = store.findByHash(tag);
+		expect(matches.map(snapshot => snapshot.path).sort()).toEqual([OTHER, PATH].sort());
+		expect(matches.every(snapshot => snapshot.hash === tag)).toBe(true);
+		// A tag no retained version carries yields no matches.
+		expect(store.findByHash(tag === "0000" ? "FFFF" : "0000")).toEqual([]);
+	});
 });

@@ -91,13 +91,53 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 /** OpenCode MCP server config (from opencode.json "mcp" key) */
 interface OpenCodeMCPConfig {
 	type?: "local" | "remote";
-	command?: string;
+	command?: string | string[];
 	args?: string[];
 	env?: Record<string, string>;
+	environment?: Record<string, string>;
 	url?: string;
 	headers?: Record<string, string>;
 	enabled?: boolean;
 	timeout?: number;
+}
+
+function stringArray(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	for (const item of value) {
+		if (typeof item !== "string") return undefined;
+	}
+	return value;
+}
+
+function stringRecord(value: unknown): Record<string, string> | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+
+	const record: Record<string, string> = {};
+	for (const [key, item] of Object.entries(value)) {
+		if (typeof item !== "string") return undefined;
+		record[key] = item;
+	}
+	return record;
+}
+
+function normalizeCommand(
+	commandValue: string | string[] | undefined,
+	argsValue: unknown,
+): { command: string | undefined; args: string[] | undefined } {
+	const configuredArgs = stringArray(argsValue);
+	if (Array.isArray(commandValue)) {
+		const [command, ...commandArgs] = commandValue;
+		const args = configuredArgs ? [...commandArgs, ...configuredArgs] : commandArgs;
+		return {
+			command: typeof command === "string" ? command : undefined,
+			args: args.length > 0 ? args : undefined,
+		};
+	}
+
+	return {
+		command: typeof commandValue === "string" ? commandValue : undefined,
+		args: configuredArgs && configuredArgs.length > 0 ? configuredArgs : undefined,
+	};
 }
 
 async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
@@ -161,11 +201,14 @@ function extractMCPServers(
 			transport = "stdio";
 		}
 
+		const command = normalizeCommand(serverConfig.command, serverConfig.args);
+		const env = stringRecord(serverConfig.environment) ?? stringRecord(serverConfig.env);
+
 		items.push({
 			name,
-			command: serverConfig.command,
-			args: Array.isArray(serverConfig.args) ? (serverConfig.args as string[]) : undefined,
-			env: serverConfig.env && typeof serverConfig.env === "object" ? serverConfig.env : undefined,
+			command: command.command,
+			args: command.args,
+			env,
 			url: typeof serverConfig.url === "string" ? serverConfig.url : undefined,
 			headers: serverConfig.headers && typeof serverConfig.headers === "object" ? serverConfig.headers : undefined,
 			enabled: serverConfig.enabled,

@@ -16,7 +16,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { createTinyTitleSubprocess, TINY_WORKER_ARG } from "@pk-nerdsaver-ai/pi-coding-agent/tiny/title-client";
+import { createTinyTitleSubprocess } from "@pk-nerdsaver-ai/pi-coding-agent/tiny/title-client";
 
 describe("issue #1606 — tiny model lives in an isolated subprocess", () => {
 	it("ping/pongs through the spawned worker subprocess and tears it down cleanly", async () => {
@@ -40,16 +40,6 @@ describe("issue #1606 — tiny model lives in an isolated subprocess", () => {
 		expect(`${stdout}${stderr}`).toBe("");
 		expect(exitCode).toBe(0);
 	}, 30_000);
-
-	it("CLI dispatches the flag that `title-client.ts` passes to the spawned child", async () => {
-		// `tinyWorkerSpawnCmd()` and the cli switch must agree on the exact
-		// flag, character-for-character — the spawned `bun`/binary sees only
-		// `argv` and there is no fallback path that "re-routes" the worker
-		// on misnamed flags. Pin the spelling on both ends.
-		const cliSource = await Bun.file(new URL("../src/cli.ts", import.meta.url)).text();
-		expect(cliSource).toContain(`"${TINY_WORKER_ARG}"`);
-		expect(cliSource).toContain("runTinyWorker");
-	});
 
 	it("surfaces unexpected signal exits so in-flight callers don't await forever", async () => {
 		// If the child dies from a signal we did NOT request — SIGSEGV from a

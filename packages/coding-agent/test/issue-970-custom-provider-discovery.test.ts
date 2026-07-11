@@ -12,7 +12,7 @@ import { ModelSelectorComponent } from "@pk-nerdsaver-ai/pi-coding-agent/modes/c
 import { getThemeByName, setThemeInstance } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
 import type { TUI } from "@pk-nerdsaver-ai/pi-tui";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 function normalizeRenderedText(text: string): string {
 	return stripVTControlCharacters(text).replace(/\s+/g, " ").trim();
@@ -78,7 +78,7 @@ describe("issue #970 custom provider discovery", () => {
 	afterEach(() => {
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true });
+			removeSyncWithRetries(tempDir);
 		}
 	});
 
@@ -469,5 +469,51 @@ describe("issue #970 custom provider discovery", () => {
 		await registry.refreshProvider("vllm");
 
 		expect(registry.getProviderDiscoveryState("vllm")?.status).toBe("ok");
+	});
+
+	test("does not send llama.cpp-local placeholder as discovery bearer", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			[
+				"providers:",
+				"  llama.cpp:",
+				"    baseUrl: http://127.0.0.1:8080",
+				"    apiKey: llama-cpp-local",
+				"    api: openai-responses",
+				"    discovery:",
+				"      type: llama.cpp",
+			].join("\n"),
+		);
+
+		const fetchMock: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = async (
+			input,
+			init,
+		) => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:8080/props") {
+				const headers = init?.headers as Headers | Record<string, string> | undefined;
+				const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
+				expect(authHeader).toBeUndefined();
+				return new Response(JSON.stringify({ default_generation_settings: { n_ctx: 8192 } }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url !== "http://127.0.0.1:8080/models") {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			const headers = init?.headers as Headers | Record<string, string> | undefined;
+			const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
+			expect(authHeader).toBeUndefined();
+			return new Response(JSON.stringify({ data: [{ id: "local-llama" }] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+
+		const registry = new ModelRegistryImpl(authStorage, modelsPath, { fetch: fetchMock });
+		await registry.refreshProvider("llama.cpp");
+
+		expect(registry.getProviderDiscoveryState("llama.cpp")?.status).toBe("ok");
 	});
 });

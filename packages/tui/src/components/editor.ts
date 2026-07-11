@@ -837,7 +837,7 @@ export class Editor implements Component, Focusable {
 			const layoutLine = visibleLayoutLines[visibleIndex]!;
 			let displayText = layoutLine.text;
 			let displayWidth = visibleWidth(layoutLine.text);
-			let cursorInPadding = false;
+			let cursorPaddingOverflow = 0;
 			let decorated = false;
 			const showPromptGutter = promptGutter !== undefined && visibleIndex === 0;
 			const gutterText =
@@ -963,7 +963,7 @@ export class Editor implements Component, Focusable {
 						displayWidth += cursorWidth;
 					}
 					if (displayWidth > lineContentWidth && paddingX > 0) {
-						cursorInPadding = true;
+						cursorPaddingOverflow = displayWidth - lineContentWidth;
 					}
 				}
 			}
@@ -982,18 +982,22 @@ export class Editor implements Component, Focusable {
 				continue;
 			}
 
-			// All lines have consistent borders based on padding
+			// All lines have consistent borders based on padding. When the end-of-line cursor
+			// glyph (or a wide trailing grapheme) extends past `lineContentWidth`, shrink the
+			// right chrome by the exact overflow count: drop padding spaces first, then the
+			// trailing `─`, but never the corner/vertical bar itself.
 			const isLastLine = visibleIndex === visibleLayoutLines.length - 1;
-			const rightPaddingWidth = Math.max(0, paddingX - (cursorInPadding ? 1 : 0));
+			const rightChromeCells = Math.max(1, paddingX + 1 - cursorPaddingOverflow);
 			if (isLastLine) {
-				const bottomRightPadding = Math.max(0, paddingX - 1 - (cursorInPadding ? 1 : 0));
+				const rightPad = Math.max(0, rightChromeCells - 2);
+				const includeHorizontal = rightChromeCells >= 2;
 				const bottomRightAdjusted = this.borderColor(
-					`${padding(bottomRightPadding)}${box.horizontal}${box.bottomRight}`,
+					`${padding(rightPad)}${includeHorizontal ? box.horizontal : ""}${box.bottomRight}`,
 				);
 				result.push(`${bottomLeft}${displayText}${linePad}${bottomRightAdjusted}`);
 			} else {
 				const leftBorder = this.borderColor(`${box.vertical}${padding(paddingX)}`);
-				const rightBorder = this.borderColor(`${padding(rightPaddingWidth)}${box.vertical}`);
+				const rightBorder = this.borderColor(`${padding(Math.max(0, rightChromeCells - 1))}${box.vertical}`);
 				result.push(leftBorder + displayText + linePad + rightBorder);
 			}
 		}

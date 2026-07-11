@@ -176,6 +176,30 @@ describe("resolveOpenAICompat stream idle timeout", () => {
 	it("keeps ordinary OpenAI-compatible models on the global timeout", () => {
 		expect(openAICompletionsModel.compat.streamIdleTimeoutMs).toBeUndefined();
 	});
+
+	it("widens Xiaomi MiMo Pro stream watchdog (issue #1770)", () => {
+		const model = buildModel({
+			...openAICompletionsModel,
+			id: "mimo-v2.5-pro",
+			name: "MiMo v2.5 Pro",
+			provider: "xiaomi",
+			baseUrl: "https://api.xiaomimimo.com/v1",
+		} as ModelSpec<"openai-completions">);
+
+		expect(model.compat.streamIdleTimeoutMs).toBe(300_000);
+	});
+
+	it("widens Alibaba Coding Plan stream watchdog (issue #1770)", () => {
+		const model = buildModel({
+			...openAICompletionsModel,
+			id: "qwen3.7-plus",
+			name: "Qwen3.7 Plus",
+			provider: "alibaba-coding-plan",
+			baseUrl: "https://coding-intl.dashscope.aliyuncs.com/v1",
+		} as ModelSpec<"openai-completions">);
+
+		expect(model.compat.streamIdleTimeoutMs).toBe(600_000);
+	});
 });
 
 /**

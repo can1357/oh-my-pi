@@ -117,7 +117,7 @@ export class OmfgPanelComponent extends Container {
 			case "saved":
 				return theme.fg(
 					"success",
-					`${theme.status.success} Registered live · ${replaceTabs(this.#savedPath ?? "saved")}`,
+					`${theme.status.success} Registered live · ${replaceTabs(this.#savedPath ?? "saved")} · Esc dismiss`,
 				);
 			case "rejected":
 				return theme.fg("warning", `${theme.status.warning} Not saved · Esc dismiss`);

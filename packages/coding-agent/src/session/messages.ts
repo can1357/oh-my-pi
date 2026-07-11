@@ -18,6 +18,7 @@ import type {
 	TextContent,
 	UserMessage,
 } from "@pk-nerdsaver-ai/pi-ai";
+import * as AIError from "@pk-nerdsaver-ai/pi-ai/error";
 import { prompt } from "@pk-nerdsaver-ai/pi-utils";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 
@@ -70,11 +71,10 @@ export interface SkillPromptDetails {
  *  (fallback error emission) read it via `isSilentAbort`. */
 export const SILENT_ABORT_MARKER = "__omp.silent_abort__";
 
-/** Type-guard for `SILENT_ABORT_MARKER`. Renderers MUST branch on this rather
- *  than string-comparing inline so refactors to the marker constant (e.g.,
- *  namespacing changes) propagate through every consumer in lockstep. */
-export function isSilentAbort(errorMessage: string | undefined): boolean {
-	return errorMessage === SILENT_ABORT_MARKER;
+/** Type-guard for silent aborts. Renderers MUST call this helper so structured
+ *  `errorId` and legacy persisted marker messages stay in lockstep. */
+export function isSilentAbort(message: Pick<AssistantMessage, "errorId" | "errorMessage">): boolean {
+	return AIError.is(message.errorId, AIError.Flag.SilentAbort) || message.errorMessage === SILENT_ABORT_MARKER;
 }
 
 /** Reason threaded through `AbortController.abort(reason)` when the user aborts
@@ -84,12 +84,12 @@ export function isSilentAbort(errorMessage: string | undefined): boolean {
  *  abort, but interactive renderers suppress this redundant transcript line. */
 export const USER_INTERRUPT_LABEL = "Interrupted by user";
 
-export function isUserInterruptAbort(errorMessage: string | undefined): boolean {
-	return errorMessage === USER_INTERRUPT_LABEL;
+export function isUserInterruptAbort(message: Pick<AssistantMessage, "errorId" | "errorMessage">): boolean {
+	return AIError.is(message.errorId, AIError.Flag.UserInterrupt) || message.errorMessage === USER_INTERRUPT_LABEL;
 }
 
-export function shouldRenderAbortReason(errorMessage: string | undefined): boolean {
-	return !isSilentAbort(errorMessage) && !isUserInterruptAbort(errorMessage);
+export function shouldRenderAbortReason(message: Pick<AssistantMessage, "errorId" | "errorMessage">): boolean {
+	return !isSilentAbort(message) && !isUserInterruptAbort(message);
 }
 
 /** Sentinel `errorMessage` the agent stamps on any abort that carried no custom
@@ -101,9 +101,17 @@ export const GENERIC_ABORT_SENTINEL = "Request was aborted";
  *  no threaded reason fall back to the retry-aware generic label. Call
  *  `shouldRenderAbortReason` before rendering when user interrupts should stay
  *  visually quiet. */
-export function resolveAbortLabel(errorMessage: string | undefined, retryAttempt = 0): string {
-	if (errorMessage && errorMessage !== GENERIC_ABORT_SENTINEL && !isSilentAbort(errorMessage)) {
-		return errorMessage;
+export function resolveAbortLabel(
+	message: Pick<AssistantMessage, "errorId" | "errorMessage">,
+	retryAttempt = 0,
+): string {
+	const genericAbort =
+		AIError.is(message.errorId, AIError.Flag.Abort) ||
+		!message.errorMessage ||
+		message.errorMessage === GENERIC_ABORT_SENTINEL ||
+		isSilentAbort(message);
+	if (!genericAbort) {
+		return message.errorMessage!;
 	}
 	if (retryAttempt > 0) {
 		return `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`;
@@ -482,65 +490,88 @@ export function sanitizeRehydratedOpenAIResponsesAssistantMessage(message: Assis
  * - Custom extensions and tools
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
-	return messages
-		.map((m): Message | undefined => {
-			switch (m.role) {
-				case "bashExecution":
-					if (m.excludeFromContext) {
-						return undefined;
-					}
-					return {
+	return messages.flatMap((m): Message[] => {
+		switch (m.role) {
+			case "bashExecution":
+				if (m.excludeFromContext) {
+					return [];
+				}
+				return [
+					{
 						role: "user",
 						content: [{ type: "text", text: bashExecutionToText(m) }],
 						attribution: "user",
 						timestamp: m.timestamp,
-					};
-				case "pythonExecution":
-					if (m.excludeFromContext) {
-						return undefined;
-					}
-					return {
+					},
+				];
+			case "pythonExecution":
+				if (m.excludeFromContext) {
+					return [];
+				}
+				return [
+					{
 						role: "user",
 						content: [{ type: "text", text: pythonExecutionToText(m) }],
 						attribution: "user",
 						timestamp: m.timestamp,
-					};
-				case "fileMention": {
-					const fileContents = m.files
-						.map(file => {
-							const inner = file.content ? `\n${file.content}\n` : "\n";
-							return `<file path="${file.path}">${inner}</file>`;
-						})
-						.join("\n");
-					const content: (TextContent | ImageContent)[] = [{ type: "text" as const, text: fileContents }];
-					for (const file of m.files) {
-						if (file.image) {
-							content.push(file.image);
-						}
-					}
-					return {
+					},
+				];
+			case "fileMention": {
+				// One `fileMention` can mix `@notes.md` (text) and `@screenshot.png` (image)
+				// in the same turn (`generateFileMentionMessages` packs every `@…` into a
+				// single message). Splitting by image presence keeps text-only mentions on
+				// the higher-priority `developer` slot while routing image attachments
+				// through `user`, the only Responses content slot that legitimately accepts
+				// `input_image` (Codex chatgpt.com /codex/responses rejects everything else
+				// with `Invalid value: 'input_image'`, #3443).
+				const wrap = (file: FileMentionMessage["files"][number]): string => {
+					const inner = file.content ? `\n${file.content}\n` : "\n";
+					return `<file path="${file.path}">${inner}</file>`;
+				};
+				const textFiles = m.files.filter(file => !file.image);
+				const imageFiles = m.files.filter(file => file.image);
+				const out: Message[] = [];
+				if (textFiles.length > 0) {
+					out.push({
 						role: "developer",
+						content: [{ type: "text" as const, text: textFiles.map(wrap).join("\n") }],
+						attribution: "user",
+						timestamp: m.timestamp,
+					});
+				}
+				if (imageFiles.length > 0) {
+					const content: (TextContent | ImageContent)[] = [
+						{ type: "text" as const, text: imageFiles.map(wrap).join("\n") },
+					];
+					for (const file of imageFiles) {
+						if (file.image) content.push(file.image);
+					}
+					out.push({
+						role: "user",
 						content,
 						attribution: "user",
 						timestamp: m.timestamp,
-					};
+					});
 				}
-				case "custom":
-				case "hookMessage":
-				case "branchSummary":
-				case "compactionSummary":
-				case "user":
-				case "developer":
-				case "assistant":
-				case "toolResult":
-					// Core roles share one transformer with agent-core —
-					// duplicating them here is how snapcompact frames once
-					// silently fell off the provider request.
-					return convertMessageToLlm(m);
-				default:
-					m satisfies never;
-					return undefined;
+				return out;
 			}
-		})
-		.filter(m => m !== undefined);
+			case "custom":
+			case "hookMessage":
+			case "branchSummary":
+			case "compactionSummary":
+			case "user":
+			case "developer":
+			case "assistant":
+			case "toolResult": {
+				// Core roles share one transformer with agent-core —
+				// duplicating them here is how snapcompact frames once
+				// silently fell off the provider request.
+				const converted = convertMessageToLlm(m);
+				return converted ? [converted] : [];
+			}
+			default:
+				m satisfies never;
+				return [];
+		}
+	});
 }

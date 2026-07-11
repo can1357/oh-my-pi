@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { tryRunRpcSkillCommand } from "@pk-nerdsaver-ai/pi-coding-agent/modes/rpc/rpc-mode";
 import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE } from "@pk-nerdsaver-ai/pi-coding-agent/session/messages";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("tryRunRpcSkillCommand", () => {
 	test("dispatches registered /skill commands as skill prompt messages", async () => {
@@ -37,7 +37,7 @@ describe("tryRunRpcSkillCommand", () => {
 		expect(message?.display).toBe(true);
 		expect(message?.attribution).toBe("user");
 
-		await fs.rm(dir, { recursive: true, force: true });
+		await removeWithRetries(dir);
 	});
 
 	test("ignores unknown skill commands so normal prompt handling can continue", async () => {

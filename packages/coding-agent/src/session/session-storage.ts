@@ -137,8 +137,30 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	writeTextSync(fpath: string, content: string): void {
-		this.ensureDirSync(path.dirname(fpath));
-		fs.writeFileSync(fpath, content);
+		const dir = path.dirname(fpath);
+		this.ensureDirSync(dir);
+		const tempPath = path.join(dir, `.${path.basename(fpath)}.${Snowflake.next()}.tmp`);
+		try {
+			fs.writeFileSync(tempPath, content);
+			fs.renameSync(tempPath, fpath);
+		} catch (err) {
+			try {
+				if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+			} catch (cleanupErr) {
+				if (!isEnoent(cleanupErr)) {
+					logger.warn("Failed to remove session rewrite temp file", {
+						sessionFile: fpath,
+						tempPath,
+						error: toError(cleanupErr).message,
+					});
+				}
+			}
+			if (hasFsCode(err, "EPERM")) {
+				fs.writeFileSync(fpath, content);
+				return;
+			}
+			throw toError(err);
+		}
 	}
 
 	statSync(path: string): SessionStorageStat {

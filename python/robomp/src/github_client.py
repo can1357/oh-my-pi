@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Mapping
@@ -200,19 +201,48 @@ class GitHubClient:
             return None
         return resp.json()
 
+    _TRANSIENT_RETRY_DELAYS = (1.0, 3.0, 10.0)
+    """Backoff schedule for transient connection/timeout errors."""
+
     def request_sync(
         self, method: str, path: str, *, json: Mapping[str, Any] | None = None, params: Mapping[str, Any] | None = None
     ) -> Any:
-        with self._client() as client:
-            resp = client.request(method, path, json=json, params=params)
-            return self._check(resp)
+        last_exc: Exception | None = None
+        for attempt, delay in enumerate((*self._TRANSIENT_RETRY_DELAYS, None)):
+            try:
+                with self._client() as client:
+                    resp = client.request(method, path, json=json, params=params)
+                    return self._check(resp)
+            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                last_exc = exc
+                if delay is None:
+                    break
+                log.warning(
+                    "transient error, retrying",
+                    extra={"method": method, "path": path, "attempt": attempt + 1, "delay": delay, "error": str(exc)},
+                )
+                time.sleep(delay)
+        raise last_exc  # type: ignore[misc]
 
     async def request(
         self, method: str, path: str, *, json: Mapping[str, Any] | None = None, params: Mapping[str, Any] | None = None
     ) -> Any:
-        async with self._async_client() as client:
-            resp = await client.request(method, path, json=json, params=params)
-            return self._check(resp)
+        last_exc: Exception | None = None
+        for attempt, delay in enumerate((*self._TRANSIENT_RETRY_DELAYS, None)):
+            try:
+                async with self._async_client() as client:
+                    resp = await client.request(method, path, json=json, params=params)
+                    return self._check(resp)
+            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                last_exc = exc
+                if delay is None:
+                    break
+                log.warning(
+                    "transient error, retrying",
+                    extra={"method": method, "path": path, "attempt": attempt + 1, "delay": delay, "error": str(exc)},
+                )
+                await asyncio.sleep(delay)
+        raise last_exc  # type: ignore[misc]
 
     # ---- repos / issues / comments / PRs ----
     async def get_repo(self, repo: str) -> RepoInfo:

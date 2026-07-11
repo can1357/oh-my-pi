@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { SelectList } from "@pk-nerdsaver-ai/pi-tui/components/select-list";
 import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@pk-nerdsaver-ai/pi-tui/keybindings";
+import type { SgrMouseEvent } from "@pk-nerdsaver-ai/pi-tui/mouse";
 import { visibleWidth } from "@pk-nerdsaver-ai/pi-tui/utils";
 
 const testTheme = {
@@ -371,5 +372,69 @@ describe("SelectList", () => {
 			// The first wrapped line (with the primary label) is still visible.
 			expect(rendered.some(row => row.includes("huge"))).toBe(true);
 		});
+	});
+});
+
+describe("SelectList.routeMouse", () => {
+	const hoverTheme = {
+		...testTheme,
+		hovered: (text: string) => `<hover>${text}</hover>`,
+		selectedText: (text: string) => `<selected>${text}</selected>`,
+	};
+
+	const baseEvent: SgrMouseEvent = {
+		button: 0,
+		col: 0,
+		row: 0,
+		release: false,
+		wheel: null,
+		motion: false,
+		leftClick: false,
+	};
+
+	function makeList() {
+		const items = [
+			{ value: "a", label: "a" },
+			{ value: "b", label: "b" },
+			{ value: "c", label: "c" },
+		];
+		return new SelectList(items, 5, hoverTheme);
+	}
+
+	it("advances selection on a wheel notch", () => {
+		const list = makeList();
+		let changed: string | undefined;
+		list.onSelectionChange = item => {
+			changed = item.value;
+		};
+		list.render(80);
+
+		list.routeMouse({ ...baseEvent, wheel: 1 }, 0, 0);
+
+		expect(changed).toBe("b");
+	});
+
+	it("hovers the row under the pointer on motion", () => {
+		const list = makeList();
+		list.render(80);
+
+		list.routeMouse({ ...baseEvent, motion: true }, 1, 0);
+		const rendered = list.render(80).join("\n");
+
+		expect(rendered).toContain("<hover>");
+		expect(rendered).not.toContain("<hover><selected>");
+	});
+
+	it("confirms the clicked row", () => {
+		const list = makeList();
+		let selected: string | undefined;
+		list.onSelect = item => {
+			selected = item.value;
+		};
+		list.render(80);
+
+		list.routeMouse({ ...baseEvent, leftClick: true }, 2, 0);
+
+		expect(selected).toBe("c");
 	});
 });

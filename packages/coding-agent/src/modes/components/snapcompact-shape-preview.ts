@@ -148,7 +148,7 @@ export class SnapcompactShapePreview implements Component {
 			while (normalize(text).length < capacity) {
 				text += ` ${PREVIEW_TEXT}`;
 			}
-			const frame = renderMany(text, { shape, frameSize: SRC_FRAME_PX, maxFrames: 1 })[0];
+			const frame = (await renderMany(text, { shape, frameSize: SRC_FRAME_PX, maxFrames: 1 }))[0];
 			if (!frame) throw new Error("empty sample frame");
 			const edgePx = SRC_FRAME_PX * ZOOM_SCALE;
 			const zoomed = await new Bun.Image(Buffer.from(frame.data, "base64"))

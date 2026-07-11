@@ -4,7 +4,8 @@
 // the `providers.tts` switch.
 
 import type { AgentToolResult } from "@pk-nerdsaver-ai/pi-agent-core";
-import { type ApiKey, ProviderHttpError, withAuth } from "@pk-nerdsaver-ai/pi-ai";
+import { type ApiKey, withAuth } from "@pk-nerdsaver-ai/pi-ai";
+import { ProviderHttpError } from "@pk-nerdsaver-ai/pi-ai/error";
 import { type } from "arktype";
 import { settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";

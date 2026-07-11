@@ -1,0 +1,98 @@
+package io.prometheus.client;
+
+import "google/protobuf/timestamp.proto";
+
+enum MetricType {
+  COUNTER = 0;
+  GAUGE = 1;
+  SUMMARY = 2;
+  UNTYPED = 3;
+  HISTOGRAM = 4;
+  GAUGE_HISTOGRAM = 5;
+}
+
+message LabelPair {
+  optional string name = 1;
+  optional string value = 2;
+}
+
+message Gauge {
+  optional double value = 1;
+}
+
+message Counter {
+  optional double value = 1;
+  optional .io.prometheus.client.Exemplar exemplar = 2;
+  optional .google.protobuf.Timestamp created_timestamp = 3;
+}
+
+message Quantile {
+  optional double quantile = 1;
+  optional double value = 2;
+}
+
+message Summary {
+  optional uint64 sample_count = 1;
+  optional double sample_sum = 2;
+  repeated .io.prometheus.client.Quantile quantile = 3;
+  optional .google.protobuf.Timestamp created_timestamp = 4;
+}
+
+message Untyped {
+  optional double value = 1;
+}
+
+message Histogram {
+  optional uint64 sample_count = 1;
+  optional double sample_count_float = 4;
+  optional double sample_sum = 2;
+  repeated .io.prometheus.client.Bucket bucket = 3;
+  optional .google.protobuf.Timestamp created_timestamp = 15;
+  optional sint32 schema = 5;
+  optional double zero_threshold = 6;
+  optional uint64 zero_count = 7;
+  optional double zero_count_float = 8;
+  repeated .io.prometheus.client.BucketSpan negative_span = 9;
+  repeated sint64 negative_delta = 10;
+  repeated double negative_count = 11;
+  repeated .io.prometheus.client.BucketSpan positive_span = 12;
+  repeated sint64 positive_delta = 13;
+  repeated double positive_count = 14;
+  repeated .io.prometheus.client.Exemplar exemplars = 16;
+}
+
+message Bucket {
+  optional uint64 cumulative_count = 1;
+  optional double cumulative_count_float = 4;
+  optional double upper_bound = 2;
+  optional .io.prometheus.client.Exemplar exemplar = 3;
+}
+
+message BucketSpan {
+  optional sint32 offset = 1;
+  optional uint32 length = 2;
+}
+
+message Exemplar {
+  repeated .io.prometheus.client.LabelPair label = 1;
+  optional double value = 2;
+  optional .google.protobuf.Timestamp timestamp = 3;
+}
+
+message Metric {
+  repeated .io.prometheus.client.LabelPair label = 1;
+  optional .io.prometheus.client.Gauge gauge = 2;
+  optional .io.prometheus.client.Counter counter = 3;
+  optional .io.prometheus.client.Summary summary = 4;
+  optional .io.prometheus.client.Untyped untyped = 5;
+  optional .io.prometheus.client.Histogram histogram = 7;
+  optional int64 timestamp_ms = 6;
+}
+
+message MetricFamily {
+  optional string name = 1;
+  optional string help = 2;
+  optional .io.prometheus.client.MetricType type = 3;
+  repeated .io.prometheus.client.Metric metric = 4;
+  optional string unit = 5;
+}

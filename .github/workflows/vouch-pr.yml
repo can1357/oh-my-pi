@@ -1,0 +1,51 @@
+name: Vouch (PR gate)
+
+# Auto-close PRs from unvouched or denounced users. Issues are left alone
+# (robomp triages those). Runs under `pull_request_target` so the token can
+# act on fork PRs; this job does NO checkout and runs NO PR code — it only
+# reads .github/VOUCHED.td from the base repo and calls the GitHub API.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  contents: read # read VOUCHED.td from the base branch
+  pull-requests: write # close + comment
+  issues: write # add the `vouched` label (labels use the Issues API)
+
+concurrency:
+  group: vouch-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - id: vouch
+        uses: mitchellh/vouch/action/check-pr@v1
+        with:
+          pr-number: ${{ github.event.pull_request.number }}
+          auto-close: true
+          require-vouch: true # block unvouched, not only denounced
+          # vouched-file: .github/VOUCHED.td (default)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Survivors of the gate (vouched, or auto-allowed collaborators/bots) get
+      # a FRESH `vouched` label on every (re)open / ready-for-review. robomp
+      # reviews ONLY on that label event (ROBOMP_PR_REVIEW_TRIGGER=vouched_label),
+      # so review is always triggered by a just-validated PR, never a stale label.
+      - name: Label vouched PRs for robomp review
+        if: ${{ steps.vouch.outputs.status == 'vouched' || steps.vouch.outputs.status == 'allowed' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh label create vouched --repo "$REPO" --color 2da44e --description "Passed the vouch gate" --force
+          # remove+add so a fresh `labeled` event fires even when the label
+          # persisted across close/reopen (re-adding an existing label emits no
+          # event). The check above just re-validated, so trust is never stale.
+          gh pr edit "$PR" --repo "$REPO" --remove-label vouched || true
+          gh pr edit "$PR" --repo "$REPO" --add-label vouched

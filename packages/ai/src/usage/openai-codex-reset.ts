@@ -20,7 +20,7 @@
  */
 import type { FetchImpl } from "../types";
 import { isRecord } from "../utils";
-import { normalizeCodexBaseUrl } from "./openai-codex";
+import { normalizeCodexBaseUrl } from "./openai-codex-base-url";
 import { toNumber } from "./shared";
 
 const RESET_CREDITS_PATH = "wham/rate-limit-reset-credits";

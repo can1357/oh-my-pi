@@ -1,5 +1,6 @@
 import type { FormEvent, ReactNode } from "react";
 import { useState } from "react";
+import { ThemeToggle } from "./ThemeToggle";
 
 export interface ConnectScreenProps {
 	defaultName: string;
@@ -28,9 +29,14 @@ export function ConnectScreen({ defaultName, error, onConnect }: ConnectScreenPr
 	return (
 		<div className="sh-connect">
 			<form className="sh-connect-card" onSubmit={submit}>
-				<div className="sh-lockup">
-					<span className="sh-lockup-pi">π</span> omp collab
+				<div className="sh-connect-head">
+					<div className="sh-lockup">
+						<span className="sh-lockup-mark" aria-hidden="true" />
+						<span className="sh-lockup-pi">π</span> omp collab
+					</div>
+					<ThemeToggle />
 				</div>
+				<div className="sh-connect-sub">live agent session, in your browser</div>
 				<label className="sh-field">
 					<span className="sh-field-label">join link</span>
 					<input
@@ -43,6 +49,7 @@ export function ConnectScreen({ defaultName, error, onConnect }: ConnectScreenPr
 						autoComplete="off"
 						autoFocus
 					/>
+					<span className="sh-field-hint">paste a /collab link from any omp session</span>
 				</label>
 				<label className="sh-field">
 					<span className="sh-field-label">display name</span>

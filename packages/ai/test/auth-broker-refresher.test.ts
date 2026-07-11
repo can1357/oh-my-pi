@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@pk-nerdsaver-ai/pi-ai";
 import { AuthBrokerRefresher } from "@pk-nerdsaver-ai/pi-ai/auth-broker";
 import * as oauthUtils from "@pk-nerdsaver-ai/pi-ai/registry/oauth";
+import { removeWithRetries } from "../../utils/src/temp";
 
 const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
 const savedEnv: Partial<Record<(typeof ANTHROPIC_ENV)[number], string | undefined>> = {};
@@ -27,7 +28,7 @@ describe("AuthBrokerRefresher", () => {
 		vi.restoreAllMocks();
 		storage?.close();
 		store?.close();
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await removeWithRetries(tempDir);
 		for (const key of ANTHROPIC_ENV) {
 			if (savedEnv[key] === undefined) delete process.env[key];
 			else process.env[key] = savedEnv[key];
@@ -147,5 +148,52 @@ describe("AuthBrokerRefresher", () => {
 
 		expect(disableEvents).toHaveLength(0);
 		expect(storage.exportSnapshot().credentials).toHaveLength(1);
+	});
+
+	test("does not disable a credential a peer rotated during the refresh (CAS)", async () => {
+		const now = 1_700_000_000_000;
+		store!.saveOAuth("anthropic", {
+			access: "stale",
+			refresh: "stale-refresh",
+			expires: now + 60_000,
+			accountId: "a",
+		});
+		storage = new AuthStorage(store!);
+		const disableEvents: string[] = [];
+		storage.onCredentialDisabled(event => {
+			disableEvents.push(event.disabledCause);
+		});
+		await storage.reload();
+		const id = store!.listAuthCredentials("anthropic")[0]!.id;
+
+		// Our refresh fails with a dead-grant error, but a peer (another process /
+		// a fresh login) rotates the persisted row to a new token first. The
+		// CAS disable must see the row no longer holds the token we attempted and
+		// leave the freshly-rotated credential intact instead of clobbering it.
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async () => {
+			store!.updateAuthCredential(id, {
+				type: "oauth",
+				access: "fresh-from-peer",
+				refresh: "fresh-refresh-from-peer",
+				expires: now + 60 * 60_000,
+				accountId: "a",
+			});
+			throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+		});
+
+		const refresher = new AuthBrokerRefresher({
+			storage,
+			refreshSkewMs: 5 * 60_000,
+			now: () => now,
+		});
+		await refresher.tick();
+
+		expect(disableEvents).toHaveLength(0);
+		const rows = store!.listAuthCredentials("anthropic");
+		expect(rows).toHaveLength(1);
+		expect(rows[0]?.credential.type).toBe("oauth");
+		if (rows[0]?.credential.type === "oauth") {
+			expect(rows[0].credential.refresh).toBe("fresh-refresh-from-peer");
+		}
 	});
 });

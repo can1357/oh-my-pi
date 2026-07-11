@@ -8,6 +8,62 @@ const TOOLS_DIR = getToolsDir();
 const TOOL_DOWNLOAD_TIMEOUT_MS = 120_000;
 const TOOL_METADATA_TIMEOUT_MS = 5000;
 
+type BodyReadResult = Bun.ReadableStreamDefaultReadResult<Uint8Array>;
+type BodyReader = {
+	read(): Promise<BodyReadResult>;
+	cancel(reason?: unknown): Promise<void>;
+};
+
+function isAbortLikeError(error: unknown): boolean {
+	return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
+function abortReason(signal: AbortSignal): unknown {
+	return signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+}
+
+async function readBodyChunk(reader: BodyReader, signal: AbortSignal | undefined): Promise<BodyReadResult> {
+	if (!signal) return await reader.read();
+	if (signal.aborted) throw abortReason(signal);
+
+	const abort = Promise.withResolvers<BodyReadResult>();
+	const onAbort = () => abort.reject(abortReason(signal));
+	signal.addEventListener("abort", onAbort, { once: true });
+	try {
+		return await Promise.race([reader.read(), abort.promise]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
+}
+
+async function writeResponseBody(
+	dest: string,
+	body: NonNullable<Response["body"]>,
+	signal?: AbortSignal,
+): Promise<void> {
+	const reader = body.getReader();
+	const sink = Bun.file(dest).writer();
+	let completed = false;
+
+	try {
+		while (true) {
+			const { done, value } = await readBodyChunk(reader, signal);
+			if (done) break;
+			if (value) {
+				await sink.write(value);
+			}
+		}
+		await sink.end();
+		completed = true;
+	} finally {
+		if (!completed) {
+			await reader.cancel().catch(() => {});
+			await Promise.resolve(sink.end()).catch(() => {});
+			await fs.promises.rm(dest, { force: true }).catch(() => {});
+		}
+	}
+}
+
 interface ToolConfig {
 	name: string;
 	repo: string; // GitHub repo (e.g., "sharkdp/fd")
@@ -154,25 +210,26 @@ async function getLatestVersion(repo: string, signal?: AbortSignal): Promise<str
 	return data.tag_name.replace(/^v/, "");
 }
 
-// Download a file from URL
-async function downloadFile(url: string, dest: string, signal?: AbortSignal): Promise<void> {
+/** Download a tool asset without handing the streaming Response to Bun.write. */
+export async function downloadFile(url: string, dest: string, signal?: AbortSignal): Promise<void> {
+	const downloadSignal = ptree.combineSignals(signal, TOOL_DOWNLOAD_TIMEOUT_MS);
 	let response: Response;
 	try {
 		response = await fetch(url, {
-			signal: ptree.combineSignals(signal, TOOL_DOWNLOAD_TIMEOUT_MS),
+			signal: downloadSignal,
 		});
+		if (!response.ok) {
+			throw new Error(`Failed to download: ${response.status}`);
+		} else if (!response.body) {
+			throw new Error("No response body");
+		}
+		await writeResponseBody(dest, response.body, downloadSignal);
 	} catch (err) {
-		if (err instanceof Error && err.name === "AbortError") {
+		if (isAbortLikeError(err)) {
 			throw new Error(`Download timed out: ${url}`);
 		}
 		throw err;
 	}
-	if (!response.ok) {
-		throw new Error(`Failed to download: ${response.status}`);
-	} else if (!response.body) {
-		throw new Error("No response body");
-	}
-	await Bun.write(dest, response);
 }
 
 // Download and install a tool

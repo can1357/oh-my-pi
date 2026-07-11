@@ -137,6 +137,24 @@ describe("ModelSelector role badge thinking display", () => {
 		expect(menuRendered).toContain("Set as SMOL (Quick)");
 	});
 
+	test("renders xhigh effort for OpenAI GPT-5.5 thinking options", async () => {
+		installTestTheme();
+		const model = getBundledModel("openai", "gpt-5.5");
+		if (!model) throw new Error("Expected bundled model openai/gpt-5.5");
+
+		const selector = createSelector(model, Settings.isolated({}));
+		await Bun.sleep(0);
+		installTestTheme();
+
+		selector.handleInput("\n");
+		selector.handleInput("\n");
+
+		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(rendered).toContain("Thinking for: Default (gpt-5.5)");
+		expect(rendered).toContain("low medium high xhigh");
+		expect(rendered).not.toContain("low medium high max");
+	});
+
 	test("shows compact auto badges for unconfigured role defaults", async () => {
 		installTestTheme();
 		const settings = Settings.isolated({});
@@ -154,7 +172,7 @@ describe("ModelSelector role badge thinking display", () => {
 		expect(rendered).toContain("[SLOW auto]");
 	});
 
-	test("dims and disables models below the current context size", async () => {
+	test("dims and disables models below the current context size in temporary mode", async () => {
 		installTestTheme();
 		const settings = Settings.isolated({});
 		const small = createContextTestModel("a-small", 4096);
@@ -175,7 +193,21 @@ describe("ModelSelector role badge thinking display", () => {
 		expect(selected).toEqual(["b-large"]);
 	});
 
-	test("does not open the model menu when every candidate is disabled", async () => {
+	test("labels temporary picker as session-only and points to role assignment", async () => {
+		installTestTheme();
+		const settings = Settings.isolated({});
+		const model = createContextTestModel("session-model", 128_000);
+		const selector = createScopedSelector([model], settings, () => {}, { temporaryOnly: true });
+		await Bun.sleep(0);
+		installTestTheme();
+
+		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(rendered).toContain("Temporary model selection is session-only");
+		expect(rendered).toContain("Alt+M or /model");
+		expect(rendered).toContain("default/smol/plan/task/slow/custom roles");
+	});
+
+	test("opens the role assignment menu but guards over-context default switches", async () => {
 		installTestTheme();
 		const settings = Settings.isolated({});
 		const small = createContextTestModel("only-small", 4096);
@@ -188,11 +220,16 @@ describe("ModelSelector role badge thinking display", () => {
 
 		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
 		expect(rendered).toContain("only-small");
-		expect(rendered).toContain("current context 6k > 4.1k limit");
+		expect(rendered).not.toContain("current context 6k > 4.1k limit");
 
 		selector.handleInput("\n");
-		const afterEnter = normalizeRenderedText(selector.render(220).join("\n"));
-		expect(afterEnter).not.toContain("Action for");
+		const afterOpen = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(afterOpen).toContain("Action for: only-small");
+		expect(afterOpen).toContain("Set as DEFAULT (Default) ⦸ context>4.1k");
+
+		selector.handleInput("\n");
+		const afterRoleEnter = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(afterRoleEnter).toContain("Thinking for: Fast (only-small)");
 		expect(onSelect).not.toHaveBeenCalled();
 	});
 

@@ -46,6 +46,17 @@ function normalizeContentPaddingLeft(value: number | undefined): number {
 	return Math.max(0, Math.floor(value));
 }
 
+/**
+ * Inner content width that {@link renderOutputBlock} wraps its body to, for a
+ * given outer `width`: both vertical borders (1 cell each) plus the left
+ * content padding. Renderers that size a tail window MUST budget visual rows
+ * against this, not the outer width — otherwise the block re-wraps their lines
+ * into more rows than they counted and the box overflows its intended height.
+ */
+export function outputBlockContentWidth(width: number, contentPaddingLeft?: number): number {
+	return Math.max(1, width - 2 - normalizeContentPaddingLeft(contentPaddingLeft));
+}
+
 export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): string[] {
 	const { header, headerMeta, state, sections = [], width, applyBg = true } = options;
 	const h = theme.boxRound.horizontal;

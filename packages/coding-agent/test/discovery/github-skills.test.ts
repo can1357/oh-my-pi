@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { loadCapability } from "@pk-nerdsaver-ai/pi-coding-agent/capability";
 import { clearCache } from "@pk-nerdsaver-ai/pi-coding-agent/capability/fs";
 import type { Skill } from "@pk-nerdsaver-ai/pi-coding-agent/capability/skill";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import "@pk-nerdsaver-ai/pi-coding-agent/capability/skill";
 import "@pk-nerdsaver-ai/pi-coding-agent/discovery/github";
 
@@ -37,7 +38,7 @@ describe("github discovery — skills", () => {
 
 	afterEach(() => {
 		clearCache();
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("discovers .github/skills/<name>/SKILL.md via the github provider", async () => {

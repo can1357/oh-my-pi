@@ -263,6 +263,11 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 				],
 			} satisfies IrcDetails,
 		},
+		errorResult: {
+			isError: true,
+			content: [{ type: "text", text: "IRC inbox failed: message store unavailable." }],
+			details: { op: "inbox" } satisfies IrcDetails,
+		},
 	},
 
 	irc_list: {
@@ -308,6 +313,11 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 					},
 				],
 			} satisfies IrcDetails,
+		},
+		errorResult: {
+			isError: true,
+			content: [{ type: "text", text: "IRC list failed: agent hub is unavailable." }],
+			details: { op: "list" } satisfies IrcDetails,
 		},
 	},
 
@@ -388,19 +398,18 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 		},
 		errorResult: {
 			isError: true,
-			content: [{ type: "text", text: "Job cancelled by user." }],
+			content: [{ type: "text", text: "1 job failed." }],
 			details: {
 				jobs: [
 					{
 						id: "job_d4",
 						type: "task",
-						status: "cancelled",
+						status: "failed",
 						label: "Refactor the session store to Redis",
 						durationMs: 52_300,
-						errorText: "Aborted: superseded by goal re-scope.",
+						errorText: "Subagent exited 1: Redis connection string is missing.",
 					},
 				],
-				cancelled: [{ id: "job_d4", status: "cancelled" }],
 			},
 		},
 	},

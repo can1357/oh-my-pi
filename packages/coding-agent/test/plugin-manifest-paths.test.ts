@@ -7,6 +7,7 @@ import {
 	resolvePluginToolPaths,
 } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/loader";
 import type { InstalledPlugin, PluginManifest } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/types";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 function makePlugin(pluginPath: string, manifest: PluginManifest): InstalledPlugin {
 	return {
@@ -43,7 +44,7 @@ describe("plugin manifest path resolution", () => {
 			expect(resolvePluginToolPaths(plugin)).toEqual([path.join(dir, "index.ts")]);
 			expect(resolvePluginExtensionPaths(plugin)).toEqual([path.join(dir, "ext.ts")]);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			removeSyncWithRetries(dir);
 		}
 	});
 });

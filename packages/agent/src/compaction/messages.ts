@@ -1,5 +1,4 @@
 import type {
-	AssistantMessage,
 	ImageContent,
 	Message,
 	MessageAttribution,
@@ -214,7 +213,7 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 		case "developer":
 			return { ...message, attribution: message.attribution ?? "agent" };
 		case "assistant":
-			return message as AssistantMessage;
+			return message;
 		case "toolResult":
 			return {
 				...message,

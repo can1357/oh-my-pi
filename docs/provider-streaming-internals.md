@@ -104,7 +104,7 @@ Tool-call argument streaming:
 Shared behavior for Anthropic/OpenAI Responses uses `parseStreamingJson()` / `parseStreamingJsonThrottled()` (`packages/ai/src/utils/json-parse.ts`):
 
 1. try `JSON.parse`
-2. fallback to `repairJson()` + the `partial-json` parser for incomplete fragments
+2. fallback to the in-house `RelaxedJson` parser (relaxed/repairing) for incomplete fragments
 3. if both fail, return `{}`
 
 Implications:

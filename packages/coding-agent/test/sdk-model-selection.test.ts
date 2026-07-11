@@ -9,7 +9,7 @@ import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("createAgentSession deferred model pattern resolution", () => {
 	let tempDir: string;
@@ -26,7 +26,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 		authStoragesToClose.length = 0;
 		if (tempDir && fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		}
 	});
 
@@ -269,7 +269,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		// No `default` model role configured: forces the step-4 startup fallback.
-		const settings = Settings.isolated();
+		const settings = Settings.isolated({ enabledModels: ["anthropic/*"] });
 
 		const { session } = await createAgentSession({
 			cwd: tempDir,

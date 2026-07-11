@@ -7,9 +7,9 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-
 import { getProjectDir, readJsonl, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 import { type Subprocess, spawn } from "bun";
+import { hostHasInheritableConsole } from "../../eval/py/spawn-options";
 import type {
 	JsonRpcError,
 	JsonRpcMessage,
@@ -22,16 +22,40 @@ import type {
 import { toJsonRpcError } from "../../mcp/types";
 import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
 
-/** Subprocess argv for launching an MCP stdio server. */
+/** Subprocess argv and platform-derived spawn flags for an MCP stdio server. */
 export interface StdioSpawnCommand {
 	cmd: string[];
+	/**
+	 * Hide the Windows console window for the direct child.
+	 *
+	 * Windows uses this only when the OMP host has no console to share. When
+	 * the host is running inside a terminal, `windowsHide: true` maps to
+	 * `CREATE_NO_WINDOW`, which strips that inheritable console from hidden
+	 * `cmd.exe` / PowerShell wrapper chains. Their console grandchildren then
+	 * allocate fresh visible conhost windows during startup or reconnects
+	 * (#3567).
+	 */
 	windowsHide?: boolean;
+	/**
+	 * Run the subprocess in its own session.
+	 *
+	 * POSIX: `true`. Detach → `setsid`, so the MCP process tree has no
+	 * controlling terminal and terminal job-control signals (Ctrl+Z SIGTSTP,
+	 * background-read SIGTTIN) cannot stop stdio servers such as
+	 * `chrome-devtools-mcp` and leave our read loop blocked on silent pipes.
+	 *
+	 * Windows: `false`. There is no SIGTSTP/SIGTTIN to escape, and Windows
+	 * wrapper chains must stay in the OMP console session so nested console
+	 * grandchildren keep stdout routed through our pipe (#3544).
+	 */
+	detached: boolean;
 }
 
 /** Inputs used to resolve platform-specific stdio spawn behavior. */
 export interface ResolveStdioSpawnOptions {
 	cwd: string;
 	env: Record<string, string | undefined>;
+	hostHasInheritableConsole?: boolean;
 	platform?: NodeJS.Platform;
 }
 
@@ -142,6 +166,7 @@ async function resolveWindowsNpmShimCommand(
 	command: string,
 	args: readonly string[],
 	cwd: string,
+	windowsHide: boolean,
 ): Promise<StdioSpawnCommand | null> {
 	if (!isWindowsBatchCommand(command)) return null;
 	if (!hasPathSegment(command)) return null;
@@ -176,7 +201,8 @@ async function resolveWindowsNpmShimCommand(
 	const nodeCommand = (await fileExists(siblingNode)) ? siblingNode : "node";
 	return {
 		cmd: [nodeCommand, target, ...args],
-		windowsHide: true,
+		windowsHide,
+		detached: false,
 	};
 }
 
@@ -212,23 +238,45 @@ function buildCmdExeCommand(command: string, args: readonly string[]): string {
 	return `"${quotedCommand}"`;
 }
 
-/** Resolve the subprocess argv used to launch an MCP stdio server. */
+/**
+ * Resolve the subprocess argv used to launch an MCP stdio server.
+ *
+ * On Windows, our PATH/PATHEXT walk may return `null` for a bare command
+ * (e.g. `npx`) — `Bun.env.PATH` empty under a restricted parent process,
+ * UNC/network mounts that reject `fs.access`, locked-down shells. The
+ * legacy fallback handed `Bun.spawn` the bare name, but `CreateProcess`
+ * only appends `.exe` for extensionless names — `.cmd`/`.bat` are never
+ * tried, so `npx` (which exists only as `npx.cmd` on Windows) crashes the
+ * subprocess immediately. When the resolver can't pin the command down,
+ * route through `cmd.exe /d /s /c` so Windows's own PATHEXT lookup runs.
+ */
 export async function resolveStdioSpawnCommand(
 	config: MCPStdioServerConfig,
 	options: ResolveStdioSpawnOptions,
 ): Promise<StdioSpawnCommand> {
 	const args = config.args ?? [];
-	if (options.platform !== "win32") return { cmd: [config.command, ...args] };
+	if (options.platform !== "win32") return { cmd: [config.command, ...args], detached: true };
 
-	const resolvedCommand =
-		(await resolveWindowsCommandPath(config.command, options.cwd, options.env)) ?? config.command;
-	const npmShimCommand = await resolveWindowsNpmShimCommand(resolvedCommand, args, options.cwd);
+	const windowsHide = options.hostHasInheritableConsole === undefined ? true : !options.hostHasInheritableConsole;
+	const resolved = await resolveWindowsCommandPath(config.command, options.cwd, options.env);
+	const resolvedCommand = resolved ?? config.command;
+	const npmShimCommand = await resolveWindowsNpmShimCommand(resolvedCommand, args, options.cwd, windowsHide);
 	if (npmShimCommand) return npmShimCommand;
-	if (!isWindowsBatchCommand(resolvedCommand)) return { cmd: [resolvedCommand, ...args] };
+
+	// Direct-spawn only when we resolved to a concrete file AND its extension
+	// is not a batch script. Everything else (resolved .cmd/.bat, or an
+	// unresolved extensionless command) goes through cmd.exe so PATHEXT runs.
+	// Windows stdio servers stay attached so wrapper grandchildren inherit the
+	// same console session. Only hide the child when OMP itself has no console
+	// to share; CREATE_NO_WINDOW breaks console inheritance for nested wrappers.
+	const detached = false;
+	const needsCmdExe = resolved === null || isWindowsBatchCommand(resolvedCommand);
+	if (!needsCmdExe) return { cmd: [resolvedCommand, ...args], windowsHide, detached };
 
 	return {
 		cmd: [resolveComSpec(options.env), "/d", "/s", "/c", buildCmdExeCommand(resolvedCommand, args)],
-		windowsHide: true,
+		windowsHide,
+		detached,
 	};
 }
 
@@ -322,8 +370,14 @@ export class StdioTransport implements MCPTransport {
 			cwd,
 			env,
 			platform: process.platform,
+			hostHasInheritableConsole: hostHasInheritableConsole(),
 		});
 
+		// Platform-derived session and console-window handling come from
+		// `resolveStdioSpawnCommand`: POSIX detaches into its own session to
+		// escape terminal job-control signals (SIGTSTP, SIGTTIN); Windows stays
+		// attached, and only hides the child when the host has no console to
+		// share. See `StdioSpawnCommand`.
 		this.#process = spawn({
 			cmd: spawnCommand.cmd,
 			cwd,
@@ -332,6 +386,7 @@ export class StdioTransport implements MCPTransport {
 			stdout: "pipe",
 			stderr: "pipe",
 			windowsHide: spawnCommand.windowsHide,
+			detached: spawnCommand.detached,
 		});
 
 		this.#connected = true;

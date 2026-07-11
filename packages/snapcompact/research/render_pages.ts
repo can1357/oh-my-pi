@@ -22,7 +22,7 @@ if (!snapcompact.isShape(shape)) {
 }
 
 await fs.mkdir(outDir, { recursive: true });
-const frames = snapcompact.renderMany(text, { shape });
+const frames = await snapcompact.renderMany(text, { shape });
 for (let i = 0; i < frames.length; i++) {
 	await Bun.write(path.join(outDir, `page-${String(i).padStart(3, "0")}.png`), Buffer.from(frames[i].data, "base64"));
 }

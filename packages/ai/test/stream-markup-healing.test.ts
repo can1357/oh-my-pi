@@ -1,4 +1,10 @@
 import { describe, expect, it } from "bun:test";
+import {
+	type Dialect,
+	getDialectDefinition,
+	type InbandScanEvent,
+	ThinkingInbandScanner,
+} from "@pk-nerdsaver-ai/pi-ai/dialect";
 import { streamOpenAICompletions } from "@pk-nerdsaver-ai/pi-ai/providers/openai-completions";
 import { stream } from "@pk-nerdsaver-ai/pi-ai/stream";
 import type { Context, FetchImpl, Model, ThinkingContent, Tool, ToolCall } from "@pk-nerdsaver-ai/pi-ai/types";
@@ -248,6 +254,80 @@ describe("StreamMarkupHealing thinking pattern", () => {
 		expect(healing.feedEvents("visible <thin")).toEqual([{ type: "text", text: "visible " }]);
 		expect(healing.feedEvents("king>hidden</think")).toEqual([{ type: "thinking", thinking: "hidden" }]);
 		expect(healing.feedEvents("ing> answer")).toEqual([{ type: "text", text: " answer" }]);
+	});
+
+	// Heal input (one or more chunks) through the public entry point, returning the
+	// visible text and the recovered thinking. Spread a string to stream per char.
+	const heal = (...chunks: string[]): { text: string; thinking: string } => {
+		const healing = new StreamMarkupHealing({ pattern: "thinking" });
+		const events = [...chunks.flatMap(chunk => healing.feedEvents(chunk)), ...healing.flushEvents()];
+		let text = "";
+		let thinking = "";
+		for (const event of events) {
+			if (event.type === "text") text += event.text;
+			else if (event.type === "thinking") thinking += event.thinking;
+		}
+		return { text, thinking };
+	};
+
+	// Exhaustive over the dialect union: a missing case is a compile error, so the
+	// healer is proven to recover every dialect's canonical `renderThinking` form.
+	const DIALECT_CASES: { [K in Dialect]: K } = {
+		anthropic: "anthropic",
+		deepseek: "deepseek",
+		gemini: "gemini",
+		gemma: "gemma",
+		glm: "glm",
+		harmony: "harmony",
+		hermes: "hermes",
+		kimi: "kimi",
+		minimax: "minimax",
+		qwen3: "qwen3",
+		xml: "xml",
+	};
+
+	for (const dialect of Object.values(DIALECT_CASES)) {
+		it(`heals leaked ${dialect} reasoning back into thinking`, () => {
+			const rendered = getDialectDefinition(dialect).renderThinking("REASONING_SENTINEL");
+			const { text, thinking } = heal(`prefix ${rendered} suffix`);
+			expect(thinking).toContain("REASONING_SENTINEL");
+			expect(text).toBe("prefix  suffix");
+		});
+	}
+
+	it("heals a gemini ```thinking fence streamed character by character", () => {
+		const { text, thinking } = heal(..."Sure.```thinking\nweigh options\n```Done.");
+		expect(thinking).toBe("weigh options\n");
+		expect(text).toBe("Sure.Done.");
+	});
+
+	it("heals a bare harmony analysis channel leak", () => {
+		const { text, thinking } = heal("<|channel|>analysis<|message|>planning the edit<|end|>Final answer.");
+		expect(thinking).toBe("planning the edit");
+		expect(text).toBe("Final answer.");
+	});
+
+	it("heals a leaked <scratchpad> section", () => {
+		const { text, thinking } = heal("<scratchpad>jot</scratchpad>visible");
+		expect(thinking).toBe("jot");
+		expect(text).toBe("visible");
+	});
+
+	it("passes a bare '<' in idle prose through without holding it back", () => {
+		expect(heal("if a < b:\n    return a")).toEqual({ text: "if a < b:\n    return a", thinking: "" });
+	});
+
+	it("leaves unrelated markup as visible text", () => {
+		expect(heal("see <div>content</div> end")).toEqual({ text: "see <div>content</div> end", thinking: "" });
+	});
+
+	it("emits one balanced thinking boundary for a healed fence", () => {
+		const scanner = new ThinkingInbandScanner();
+		const events: InbandScanEvent[] = [...scanner.feed("a```thinking\nx\n```b"), ...scanner.flush()];
+		expect(events.filter(e => e.type === "thinkingStart")).toHaveLength(1);
+		expect(events.filter(e => e.type === "thinkingEnd")).toHaveLength(1);
+		const thinking = events.map(e => (e.type === "thinkingDelta" ? e.delta : "")).join("");
+		expect(thinking).toBe("x\n");
 	});
 });
 describe("Kimi K2 leaked markup healing", () => {

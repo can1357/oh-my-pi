@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, hasFsCode, isEnoent, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { $which, hasFsCode, isEisdir, isEnoent, isEnotdir, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 import {
 	parseDiffHunks as parseCommitDiffHunks,
 	parseFileDiffs,
@@ -376,7 +376,8 @@ async function writeTempPatch(content: string): Promise<string> {
 type EntryType = "directory" | "file";
 
 function shouldRetry(err: unknown, n: number) {
-	if (isEnoent(err) || hasFsCode(err, "ENFILE") || hasFsCode(err, "EMFILE")) return false;
+	if (isEnoent(err) || isEisdir(err) || isEnotdir(err) || hasFsCode(err, "ENFILE") || hasFsCode(err, "EMFILE"))
+		return false;
 	if (hasFsCode(err, "EINTR")) return n < EINTR_MAX_RETRIES;
 	if (n > EINTR_MAX_RETRIES) throw err;
 	throw err;

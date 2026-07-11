@@ -44,7 +44,7 @@ afterEach(() => {
 });
 
 describe("InputController.handleCtrlZ", () => {
-	it("no-ops on Windows so the unsupported SIGTSTP signal can't crash the process (#2036)", () => {
+	it("no-ops on Windows so the unsupported SIGSTOP signal can't crash the process (#2036)", () => {
 		setPlatform("win32");
 		const killSpy = vi.spyOn(process, "kill").mockImplementation(() => {
 			throw new Error("process.kill must not be called on win32");
@@ -64,7 +64,7 @@ describe("InputController.handleCtrlZ", () => {
 		expect(showError).not.toHaveBeenCalled();
 	});
 
-	it("sends SIGTSTP to the process group and registers a SIGCONT resume hook on POSIX", () => {
+	it("SIGSTOPs the foreground process group and registers a SIGCONT resume hook on POSIX (#3461)", () => {
 		setPlatform("linux");
 		const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 		const onceSpy = vi.spyOn(process, "once");
@@ -83,7 +83,7 @@ describe("InputController.handleCtrlZ", () => {
 		expect(stopOrder).toBeLessThan(killOrder);
 
 		expect(killSpy).toHaveBeenCalledTimes(1);
-		expect(killSpy).toHaveBeenCalledWith(0, "SIGTSTP");
+		expect(killSpy).toHaveBeenCalledWith(0, "SIGSTOP");
 		expect(ui.start).not.toHaveBeenCalled();
 		expect(showError).not.toHaveBeenCalled();
 
@@ -98,7 +98,7 @@ describe("InputController.handleCtrlZ", () => {
 	it("restores the TUI and drops the SIGCONT listener when process.kill rejects the signal", () => {
 		setPlatform("linux");
 		const killSpy = vi.spyOn(process, "kill").mockImplementation(() => {
-			throw new Error("Unknown signal: SIGTSTP");
+			throw new Error("Unknown signal: SIGSTOP");
 		});
 		const onceSpy = vi.spyOn(process, "once");
 		const removeSpy = vi.spyOn(process, "removeListener");

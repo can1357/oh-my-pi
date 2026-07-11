@@ -16,6 +16,7 @@ import {
 	Settings,
 	type SettingValue,
 	settings,
+	validateProviderMaxInFlightRequests,
 } from "../config/settings";
 import { SETTINGS_SCHEMA } from "../config/settings-schema";
 import { theme } from "../modes/theme/theme";
@@ -217,6 +218,9 @@ function parseAndSetValue(path: SettingPath, rawValue: string): void {
 			}
 			if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
 				throw new Error(`Invalid record JSON: ${rawValue}`);
+			}
+			if (path === "providers.maxInFlightRequests") {
+				parsed = validateProviderMaxInFlightRequests(parsed);
 			}
 			parsedValue = parsed;
 			break;

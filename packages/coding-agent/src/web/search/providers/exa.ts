@@ -7,7 +7,7 @@
  * them into a combined `answer` string on the SearchResponse.
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@pk-nerdsaver-ai/pi-ai";
-import { settings } from "../../../config/settings";
+import { getDefault, settings } from "../../../config/settings";
 import { findApiKey, isSearchResponse } from "../../../exa/mcp-client";
 import { parseSSE } from "../../../mcp/json-rpc";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
@@ -18,6 +18,88 @@ import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
 const EXA_API_URL = "https://api.exa.ai/search";
+const DEFAULT_EXA_SEARCH_DELAY_MS = getDefault("exa.searchDelayMs");
+
+let nextExaSearchRequestAt = 0;
+let exaSearchThrottle = Promise.resolve();
+
+function configuredExaSearchDelayMs(): number {
+	try {
+		const delayMs = settings.get("exa.searchDelayMs");
+		return Number.isFinite(delayMs) && delayMs > 0 ? Math.floor(delayMs) : 0;
+	} catch {
+		return DEFAULT_EXA_SEARCH_DELAY_MS;
+	}
+}
+
+function rejectWithAbortReason(reject: (reason?: unknown) => void, signal: AbortSignal): void {
+	try {
+		signal.throwIfAborted();
+		reject(new DOMException("The operation was aborted.", "AbortError"));
+	} catch (error) {
+		reject(error);
+	}
+}
+
+function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+	if (ms <= 0) return Promise.resolve();
+	signal?.throwIfAborted();
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	let timer: NodeJS.Timeout | undefined;
+	const cleanup = (): void => {
+		if (timer) {
+			clearTimeout(timer);
+			timer = undefined;
+		}
+		signal?.removeEventListener("abort", onAbort);
+	};
+	const onAbort = (): void => {
+		cleanup();
+		if (signal) rejectWithAbortReason(reject, signal);
+	};
+	timer = setTimeout(() => {
+		cleanup();
+		resolve();
+	}, ms);
+	signal?.addEventListener("abort", onAbort, { once: true });
+	if (signal?.aborted) onAbort();
+	return promise;
+}
+
+function waitUntilDoneOrAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+	if (!signal) return promise;
+	signal.throwIfAborted();
+	const { promise: aborted, reject } = Promise.withResolvers<never>();
+	const onAbort = (): void => rejectWithAbortReason(reject, signal);
+	signal.addEventListener("abort", onAbort, { once: true });
+	return Promise.race([promise, aborted]).finally(() => {
+		signal.removeEventListener("abort", onAbort);
+	});
+}
+
+async function waitForExaSearchSlot(signal: AbortSignal | undefined): Promise<void> {
+	const delayMs = configuredExaSearchDelayMs();
+	if (delayMs <= 0) return;
+
+	const prior = exaSearchThrottle.catch(() => {});
+	const queued = prior.then(async () => {
+		signal?.throwIfAborted();
+		const waitMs = Math.max(0, nextExaSearchRequestAt - Date.now());
+		if (waitMs > 0) {
+			await abortableSleep(waitMs, signal);
+		}
+		signal?.throwIfAborted();
+		nextExaSearchRequestAt = Date.now() + delayMs;
+	});
+	exaSearchThrottle = queued.catch(() => {});
+	await waitUntilDoneOrAborted(queued, signal);
+}
+
+/** Reset Exa request pacing state for isolated provider tests. */
+export function resetExaSearchThrottleForTest(): void {
+	nextExaSearchRequestAt = 0;
+	exaSearchThrottle = Promise.resolve();
+}
 
 type ExaSearchType = "neural" | "fast" | "auto" | "deep";
 
@@ -224,6 +306,7 @@ async function callExaSearch(apiKey: string, params: ExaSearchParams): Promise<E
 	const body = buildExaRequestBody(params);
 
 	const fetchImpl = params.fetch ?? fetch;
+	await waitForExaSearchSlot(params.signal);
 	const response = await fetchImpl(EXA_API_URL, {
 		method: "POST",
 		headers: {
@@ -260,6 +343,7 @@ async function callExaMcpSearch(params: ExaSearchParams): Promise<ExaSearchRespo
 	if (apiKey) query.set("exaApiKey", apiKey);
 	query.set("tools", "web_search_exa");
 	const fetchImpl = params.fetch ?? fetch;
+	await waitForExaSearchSlot(params.signal);
 	const response = await fetchImpl(`https://mcp.exa.ai/mcp?${query.toString()}`, {
 		method: "POST",
 		headers: {

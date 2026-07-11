@@ -142,7 +142,8 @@ export class FooterComponent implements Component {
 		// After compaction, tokens are unknown until the next LLM response.
 		const contextUsage = this.session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
-		const contextPercentValue = contextUsage?.percent ?? 0;
+		const contextTokens = contextUsage?.tokens ?? 0;
+		const contextPercentValue = contextWindow > 0 ? (contextUsage?.percent ?? 0) : null;
 
 		// Replace home directory with ~
 		let pwd = shortenPath(getProjectDir());
@@ -186,8 +187,8 @@ export class FooterComponent implements Component {
 		// Colorize context percentage based on usage
 		let contextPercentStr: string;
 		const autoIndicator = this.#autoCompactEnabled ? " (auto)" : "";
-		const contextPercentDisplay = `${formatContextUsage(contextPercentValue, contextWindow)}${autoIndicator}`;
-		if (contextUsage) {
+		const contextPercentDisplay = `${formatContextUsage(contextPercentValue, contextWindow, contextTokens)}${autoIndicator}`;
+		if (contextUsage && contextPercentValue !== null) {
 			const color = getContextUsageThemeColor(getContextUsageLevel(contextPercentValue, contextWindow));
 			contextPercentStr =
 				color === "statusLineContext" ? contextPercentDisplay : theme.fg(color, contextPercentDisplay);

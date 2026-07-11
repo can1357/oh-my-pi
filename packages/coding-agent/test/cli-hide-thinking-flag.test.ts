@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
 import { Effort } from "@pk-nerdsaver-ai/pi-ai";
 import { parseArgs } from "@pk-nerdsaver-ai/pi-coding-agent/cli/args";
+import { AUTO_THINKING } from "@pk-nerdsaver-ai/pi-coding-agent/thinking";
 
 describe("parseArgs — --hide-thinking flag", () => {
 	it("parses --hide-thinking as a boolean flag", () => {
@@ -41,5 +43,23 @@ describe("parseArgs — --hide-thinking flag", () => {
 		expect(result.hideThinking).toBe(true);
 		expect(result.model).toBe("opus");
 		expect(result.messages).toEqual([]);
+	});
+});
+
+describe("parseArgs — --thinking flag", () => {
+	it("accepts off so reasoning can be disabled from the CLI", () => {
+		expect(parseArgs(["--thinking", "off"]).thinking).toBe(ThinkingLevel.Off);
+		expect(parseArgs(["--thinking=off"]).thinking).toBe(ThinkingLevel.Off);
+	});
+
+	it("accepts auto, concrete efforts, and the max alias", () => {
+		expect(parseArgs(["--thinking", "auto"]).thinking).toBe(AUTO_THINKING);
+		expect(parseArgs(["--thinking", "medium"]).thinking).toBe(Effort.Medium);
+		expect(parseArgs(["--thinking", "max"]).thinking).toBe(ThinkingLevel.XHigh);
+	});
+
+	it("ignores invalid levels and the internal inherit selector", () => {
+		expect(parseArgs(["--thinking", "bogus"]).thinking).toBeUndefined();
+		expect(parseArgs(["--thinking", "inherit"]).thinking).toBeUndefined();
 	});
 });

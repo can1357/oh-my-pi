@@ -9,6 +9,7 @@ import { OmfgController } from "@pk-nerdsaver-ai/pi-coding-agent/modes/controlle
 import { initTheme } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@pk-nerdsaver-ai/pi-coding-agent/modes/types";
 import { Container, type TUI } from "@pk-nerdsaver-ai/pi-tui";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 const PROJECT_OPTION = "This project (.omp/rules)";
 const GLOBAL_OPTION = "Global — all projects (~/.omp/agent/rules)";
@@ -165,7 +166,7 @@ afterEach(async () => {
 	while (tempRoots.length > 0) {
 		const root = tempRoots.pop();
 		if (root) {
-			await fs.rm(root, { recursive: true, force: true });
+			await removeWithRetries(root);
 		}
 	}
 });
@@ -193,6 +194,14 @@ describe("OmfgController", () => {
 			[PROJECT_OPTION, GLOBAL_OPTION, AMEND_OPTION],
 		]);
 		expect(harness.ttsrAddRule.mock.calls[0]?.[0].path).toBe(savedPath);
+		const rendered = Bun.stripANSI(harness.container.render(120).join("\n"));
+		expect(rendered).toContain("Registered live");
+		expect(rendered).toContain(path.join(".omp", "rules", "ts-no-any.md"));
+		expect(rendered).toContain("Esc dismiss");
+		expect(controller.hasActiveRequest()).toBe(true);
+		expect(controller.handleEscape()).toBe(true);
+		expect(harness.container.children).toHaveLength(0);
+		expect(controller.hasActiveRequest()).toBe(false);
 	});
 
 	it("reiterates when the first valid rule does not match history", async () => {

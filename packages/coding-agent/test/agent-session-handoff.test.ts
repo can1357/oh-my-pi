@@ -13,6 +13,7 @@ import { AgentSession, type AgentSessionEvent } from "@pk-nerdsaver-ai/pi-coding
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
 import { TempDir } from "@pk-nerdsaver-ai/pi-utils";
+import * as snapcompact from "@pk-nerdsaver-ai/snapcompact";
 
 const HANDOFF_SECRET = "HANDOFF_SECRET_TOKEN_12345";
 
@@ -140,7 +141,9 @@ describe("AgentSession handoff", () => {
 
 	it("does not run auto-compaction after handoff turn completes", async () => {
 		const handoffText = "## Goal\nContinue from here";
-		const generateHandoffSpy = vi.spyOn(compactionModule, "generateHandoff").mockResolvedValue(handoffText);
+		const generateHandoffSpy = vi
+			.spyOn(compactionModule, "generateHandoffFromContext")
+			.mockResolvedValue(handoffText);
 
 		const result = await session.handoff();
 		await drainMaintenance();
@@ -158,7 +161,7 @@ describe("AgentSession handoff", () => {
 		// queues. Steers/follow-ups already queued (the mis-routed first compaction message,
 		// or RPC/SDK steer()/followUp() issued during the handoff) must survive into the new
 		// session instead of being silently dropped.
-		vi.spyOn(compactionModule, "generateHandoff").mockResolvedValue("## Goal\nContinue");
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nContinue");
 
 		const textOf = (message: AgentMessage): string => {
 			if (!("content" in message)) return "";
@@ -209,7 +212,7 @@ describe("AgentSession handoff", () => {
 		// reset — proving capture happens late rather than at the start of handoff().
 		const { promise: handoffDoc, resolve: releaseHandoff } = Promise.withResolvers<string>();
 		let generateHandoffCalled = false;
-		vi.spyOn(compactionModule, "generateHandoff").mockImplementation(async () => {
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(async () => {
 			generateHandoffCalled = true;
 			return handoffDoc;
 		});
@@ -251,20 +254,29 @@ describe("AgentSession handoff", () => {
 	it("obfuscates custom instructions before generating a handoff", async () => {
 		const placeholder = obfuscator.obfuscate(HANDOFF_SECRET);
 		const generateHandoffSpy = vi
-			.spyOn(compactionModule, "generateHandoff")
+			.spyOn(compactionModule, "generateHandoffFromContext")
 			.mockResolvedValue(`## Goal\nKeep ${placeholder}`);
 
 		const result = await session.handoff(`preserve ${HANDOFF_SECRET}`);
 
 		const handoffCall = generateHandoffSpy.mock.calls[0];
-		if (!handoffCall) throw new Error("Expected generateHandoff call");
-		expect(handoffCall[3].customInstructions).toBe(`preserve ${placeholder}`);
-		expect(handoffCall[3].customInstructions).not.toContain(HANDOFF_SECRET);
+		if (!handoffCall) throw new Error("Expected generateHandoffFromContext call");
+		// Custom instructions are obfuscated, rendered into the handoff prompt, and
+		// appended as the trailing context message — the raw secret never reaches
+		// the provider.
+		const trailing = handoffCall[0].messages.at(-1);
+		const trailingText =
+			typeof trailing?.content === "string"
+				? trailing.content
+				: (trailing?.content ?? []).map(block => (block.type === "text" ? block.text : "")).join("");
+		expect(trailingText).toContain(`preserve ${placeholder}`);
+		expect(trailingText).not.toContain(HANDOFF_SECRET);
 		expect(result?.document).toContain(HANDOFF_SECRET);
 		expect(result?.document).not.toContain(placeholder);
 	});
 
-	it("obfuscates previous compaction summary and preserve data before forwarding to compact()", async () => {
+	it("obfuscates the previous compaction summary but preserves opaque replay data", async () => {
+		session.settings.set("compaction.strategy", "context-full");
 		const placeholder = obfuscator.obfuscate(HANDOFF_SECRET);
 		const entries = sessionManager.getBranch();
 		const lastEntryId = entries[entries.length - 1]?.id;
@@ -301,12 +313,270 @@ describe("AgentSession handoff", () => {
 		if (!call) throw new Error("Expected compact call");
 		expect(call[0].previousSummary).toBe(`summary ${placeholder}`);
 		expect(call[0].previousSummary).not.toContain(HANDOFF_SECRET);
-		const preserveData = JSON.stringify(call[0].previousPreserveData);
-		expect(preserveData).toContain(placeholder);
-		expect(preserveData).not.toContain(HANDOFF_SECRET);
+		// Opaque provider-replay state (encrypted_content / replacementHistory) must pass through
+		// byte-identical — rewriting it would corrupt OpenAI remote-compaction replay.
+		expect(call[0].previousPreserveData).toBe(fixedPreparation.previousPreserveData);
+	});
+
+	it("obfuscates migrated snapcompact archive text but preserves opaque replay data", async () => {
+		session.settings.set("compaction.strategy", "context-full");
+		const placeholder = obfuscator.obfuscate(HANDOFF_SECRET);
+		const entries = sessionManager.getBranch();
+		const lastEntryId = entries[entries.length - 1]?.id;
+		if (!lastEntryId) throw new Error("Expected a seeded entry id");
+		const replaySlot = {
+			replacementHistory: [{ role: "user", content: `history ${HANDOFF_SECRET}` }],
+		};
+		const fixedPreparation: compactionModule.CompactionPreparation = {
+			firstKeptEntryId: lastEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			previousPreserveData: {
+				openaiRemoteCompaction: replaySlot,
+				[snapcompact.PRESERVE_KEY]: {
+					frames: [],
+					totalChars: 32,
+					truncatedChars: 0,
+					text: `archived ${HANDOFF_SECRET}`,
+					textHead: `head ${HANDOFF_SECRET}`,
+				},
+			},
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: compactionModule.DEFAULT_COMPACTION_SETTINGS,
+		};
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockResolvedValue({
+			summary: "new summary",
+			shortSummary: undefined,
+			firstKeptEntryId: lastEntryId,
+			tokensBefore: 100,
+			details: {},
+		});
+
+		await session.compact();
+
+		const call = compactSpy.mock.calls[0];
+		if (!call) throw new Error("Expected compact call");
+		const preserve = call[0].previousPreserveData;
+		if (!preserve) throw new Error("Expected previousPreserveData");
+		// The archive plaintext that compact() migrates into the summary prompt is
+		// redacted, so the raw secret never reaches the provider.
+		const archive = preserve[snapcompact.PRESERVE_KEY] as { text: string; textHead: string };
+		expect(archive.text).toBe(`archived ${placeholder}`);
+		expect(archive.textHead).toBe(`head ${placeholder}`);
+		expect(JSON.stringify(archive)).not.toContain(HANDOFF_SECRET);
+		// Opaque provider-replay state stays byte-identical (same reference) — only the
+		// snapcompact slot's text is rewritten.
+		expect(preserve.openaiRemoteCompaction).toBe(replaySlot);
+	});
+
+	it("does not call the LLM summarizer when manual snapcompact preflight fails", async () => {
+		const entries = sessionManager.getBranch();
+		const lastEntryId = entries[entries.length - 1]?.id;
+		if (!lastEntryId) throw new Error("Expected a seeded entry id");
+		const fixedPreparation: compactionModule.CompactionPreparation = {
+			firstKeptEntryId: lastEntryId,
+			messagesToSummarize: [
+				{ role: "user", content: [{ type: "text", text: "中文内容".repeat(100) }], timestamp: 1 },
+			],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "snapcompact" },
+		};
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("429 quota exhausted"));
+
+		await expect(session.compact(undefined, { mode: "snapcompact" })).rejects.toThrow(
+			"snapcompact cannot render this conversation locally",
+		);
+
+		expect(compactSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not call the LLM summarizer when auto snapcompact preflight fails", async () => {
+		session.settings.set("compaction.strategy", "snapcompact");
+		const entries = sessionManager.getBranch();
+		const lastEntryId = entries[entries.length - 1]?.id;
+		if (!lastEntryId) throw new Error("Expected a seeded entry id");
+		const fixedPreparation: compactionModule.CompactionPreparation = {
+			firstKeptEntryId: lastEntryId,
+			messagesToSummarize: [
+				{ role: "user", content: [{ type: "text", text: "中文内容".repeat(100) }], timestamp: 1 },
+			],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "snapcompact" },
+		};
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("429 quota exhausted"));
+
+		await session.runIdleCompaction();
+
+		const endEvent = events.find(
+			(event): event is Extract<AgentSessionEvent, { type: "auto_compaction_end" }> =>
+				event.type === "auto_compaction_end",
+		);
+		expect(compactSpy).not.toHaveBeenCalled();
+		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "idle", action: "snapcompact" });
+		expect(endEvent).toMatchObject({
+			type: "auto_compaction_end",
+			action: "snapcompact",
+			errorMessage: expect.stringContaining("snapcompact cannot render this conversation locally"),
+		});
+	});
+
+	it("strips hook-supplied snapcompact data when persisting context-full compaction", async () => {
+		const localTempDir = TempDir.createSync("@pi-context-full-preserve-data-");
+		const localSessionManager = SessionManager.inMemory(localTempDir.path());
+		const firstKeptEntryId = localSessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "kept" }],
+			timestamp: Date.now(),
+		});
+		const fixedPreparation: compactionModule.CompactionPreparation = {
+			firstKeptEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		};
+		const extensionRunner = {
+			hasHandlers: vi.fn((eventType: string) => eventType === "session.compacting"),
+			emit: vi.fn(async (event: { type: string }) =>
+				event.type === "session.compacting"
+					? {
+							preserveData: {
+								otherState: "keep-me",
+								[snapcompact.PRESERVE_KEY]: { frames: [], totalChars: 0, truncatedChars: 0 },
+							},
+						}
+					: undefined,
+			),
+		} as unknown as ExtensionRunner;
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
+		vi.spyOn(compactionModule, "compact").mockResolvedValue({
+			summary: "context-full summary",
+			shortSummary: undefined,
+			firstKeptEntryId,
+			tokensBefore: 100,
+			details: {},
+			preserveData: { resultState: "keep-result" },
+		});
+		const localAgent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const localSession = new AgentSession({
+			agent: localAgent,
+			sessionManager: localSessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
+			}),
+			modelRegistry,
+			extensionRunner,
+		});
+
+		try {
+			await localSession.compact();
+			const compactionEntry = localSessionManager.getEntries().find(entry => entry.type === "compaction");
+			if (compactionEntry?.type !== "compaction") throw new Error("Expected persisted compaction entry");
+			expect(compactionEntry.preserveData).toEqual({
+				otherState: "keep-me",
+				resultState: "keep-result",
+			});
+			expect(compactionEntry.preserveData).not.toHaveProperty(snapcompact.PRESERVE_KEY);
+		} finally {
+			await localSession.dispose();
+			await localTempDir.remove();
+		}
+	});
+
+	it("strips hook-supplied snapcompact data when persisting auto context-full compaction", async () => {
+		const localTempDir = TempDir.createSync("@pi-auto-context-full-preserve-data-");
+		const localSessionManager = SessionManager.inMemory(localTempDir.path());
+		const firstKeptEntryId = localSessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "kept" }],
+			timestamp: Date.now(),
+		});
+		const fixedPreparation: compactionModule.CompactionPreparation = {
+			firstKeptEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		};
+		const extensionRunner = {
+			hasHandlers: vi.fn((eventType: string) => eventType === "session.compacting"),
+			emit: vi.fn(async (event: { type: string }) =>
+				event.type === "session.compacting"
+					? {
+							preserveData: {
+								otherState: "keep-me",
+								[snapcompact.PRESERVE_KEY]: { frames: [], totalChars: 0, truncatedChars: 0 },
+							},
+						}
+					: undefined,
+			),
+		} as unknown as ExtensionRunner;
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockResolvedValue({
+			summary: "auto context-full summary",
+			shortSummary: undefined,
+			firstKeptEntryId,
+			tokensBefore: 100,
+			details: {},
+			preserveData: { resultState: "keep-result" },
+		});
+		const localAgent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const localSession = new AgentSession({
+			agent: localAgent,
+			sessionManager: localSessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
+			}),
+			modelRegistry,
+			extensionRunner,
+		});
+
+		try {
+			await localSession.runIdleCompaction();
+			expect(compactSpy).toHaveBeenCalledTimes(1);
+			const compactionEntry = localSessionManager.getEntries().find(entry => entry.type === "compaction");
+			if (compactionEntry?.type !== "compaction") throw new Error("Expected persisted compaction entry");
+			expect(compactionEntry.preserveData).toEqual({
+				otherState: "keep-me",
+				resultState: "keep-result",
+			});
+			expect(compactionEntry.preserveData).not.toHaveProperty(snapcompact.PRESERVE_KEY);
+		} finally {
+			await localSession.dispose();
+			await localTempDir.remove();
+		}
 	});
 
 	it("runs context maintenance before sending an oversized pending prompt", async () => {
+		session.settings.set("compaction.strategy", "context-full");
 		session.settings.set("compaction.thresholdTokens", 50);
 		session.settings.set("compaction.keepRecentTokens", 1);
 		session.settings.set("contextPromotion.enabled", false);
@@ -336,6 +606,7 @@ describe("AgentSession handoff", () => {
 	});
 
 	it("falls back after one auto-compaction timeout instead of retrying the same model", async () => {
+		session.settings.set("compaction.strategy", "context-full");
 		session.settings.set("compaction.thresholdTokens", 50);
 		session.settings.set("compaction.keepRecentTokens", 1);
 		session.settings.set("contextPromotion.enabled", false);
@@ -482,6 +753,89 @@ describe("AgentSession handoff", () => {
 		expect(compactSpy).not.toHaveBeenCalled();
 		expect(events.filter(event => event.type === "auto_compaction_start")).toHaveLength(0);
 		expect(mock.calls).toHaveLength(1);
+	});
+	it("floors pre-prompt context-full checks by the stored conversation when provider usage is deflated", async () => {
+		// Mirror of the provider-anchored test, but the large payload is real, on-wire-
+		// compressible text (what a before_provider_request hook like Headroom shrinks),
+		// NOT encrypted reasoning. The provider reports a deflated 1k prompt tokens, yet
+		// the stored conversation is ~20k tokens — compaction MUST still fire.
+		await session.dispose();
+		authStorage.setRuntimeApiKey("openai", "test-key");
+		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		events = [];
+
+		const mock = createMockModel({
+			id: "gpt-5.5",
+			provider: "openai",
+			contextWindow: 10_000,
+			responses: [{ content: ["ok"], stopReason: "stop" }],
+		});
+		const seedUser: AgentMessage = {
+			role: "user",
+			content: [{ type: "text", text: "seed" }],
+			timestamp: Date.now() - 2,
+		};
+		// ~20k tokens of plain text in a normal text block — counted by the floor.
+		const bulkText = "alpha beta gamma delta epsilon ".repeat(3_000);
+		const seedAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: bulkText }],
+			api: mock.api,
+			provider: "openai",
+			model: mock.id,
+			stopReason: "stop",
+			// Deflated: a before_provider_request compressor shrank the request, so the
+			// provider only billed ~1k prompt tokens for a ~20k-token conversation.
+			usage: {
+				input: 1_000,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_010,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now() - 1,
+		};
+		sessionManager.appendMessage(seedUser);
+		sessionManager.appendMessage(seedAssistant);
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: mock, systemPrompt: ["Test"], tools: [], messages: [seedUser, seedAssistant] },
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
+				"compaction.thresholdTokens": 8_000,
+				"contextPromotion.enabled": false,
+			}),
+			modelRegistry,
+		});
+		session.subscribe(event => {
+			events.push(event);
+		});
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "pre-prompt compacted",
+			shortSummary: undefined,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+
+		// Display still shows the provider-anchored (deflated) usage — only the
+		// compaction decision takes the local floor.
+		expect(session.getContextUsage({ contextWindow: 10_000 })?.tokens).toBe(1_000);
+
+		await session.prompt("small pending prompt");
+
+		// The floor (~20k from the stored text) exceeds the 8k threshold, so the
+		// deflated 1k provider count no longer suppresses compaction.
+		expect(compactSpy).toHaveBeenCalled();
 	});
 	it("counts current non-message token growth in provider-anchored pre-prompt checks", async () => {
 		await session.dispose();
@@ -713,7 +1067,7 @@ describe("AgentSession handoff", () => {
 		}
 
 		const handoffText = "## Goal\nContinue from here";
-		vi.spyOn(compactionModule, "generateHandoff").mockResolvedValue(handoffText);
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(handoffText);
 
 		const result = await session.handoff();
 		const handoffSessionFile = session.sessionFile;
@@ -788,13 +1142,13 @@ describe("AgentSession handoff", () => {
 		expect(events.filter(event => event.type === "auto_compaction_end")).toHaveLength(0);
 	});
 
-	it("restores context-full strategy when enabling auto-compaction from off strategy", () => {
+	it("restores default strategy when enabling auto-compaction from off strategy", () => {
 		session.settings.set("compaction.enabled", true);
 		session.settings.set("compaction.strategy", "off");
 
 		expect(session.autoCompactionEnabled).toBe(false);
 		session.setAutoCompactionEnabled(true);
-		expect(session.settings.get("compaction.strategy")).toBe("context-full");
+		expect(session.settings.get("compaction.strategy")).toBe("snapcompact");
 		expect(session.autoCompactionEnabled).toBe(true);
 	});
 
@@ -969,7 +1323,7 @@ describe("AgentSession handoff", () => {
 		});
 
 		const generateHandoffSpy = vi
-			.spyOn(compactionModule, "generateHandoff")
+			.spyOn(compactionModule, "generateHandoffFromContext")
 			.mockResolvedValue("## Goal\nContinue from here");
 		await session.prompt("Trigger threshold handoff");
 
@@ -1051,9 +1405,11 @@ describe("AgentSession handoff", () => {
 		const { promise: handoffPending, resolve: resolveHandoff } = Promise.withResolvers<string>();
 
 		const generateHandoffSpy = vi
-			.spyOn(compactionModule, "generateHandoff")
-			.mockImplementation(async (_msgs, _model, _key, _opts, signal) => {
-				// Mirror the real generateHandoff contract: reject when the caller aborts.
+			.spyOn(compactionModule, "generateHandoffFromContext")
+			.mockImplementation(async (_context, _model, options) => {
+				// Mirror the real generateHandoffFromContext contract: reject when the
+				// caller aborts via the stream-options signal.
+				const signal = options.streamOptions.signal;
 				return await new Promise<string>((resolve, reject) => {
 					signal?.addEventListener("abort", () => reject(new Error("Handoff cancelled")), { once: true });
 					handoffPending.then(resolve, reject);
@@ -1211,22 +1567,78 @@ describe("AgentSession handoff", () => {
 
 		await session.prompt("hello from user");
 		const generateHandoffSpy = vi
-			.spyOn(compactionModule, "generateHandoff")
+			.spyOn(compactionModule, "generateHandoffFromContext")
 			.mockResolvedValue("## Goal\nContinue from here");
 		await session.handoff();
 
 		expect(emitBeforeAgentStart).toHaveBeenCalledTimes(1);
 		expect(mock.calls.map(c => c.context.systemPrompt?.join("\n\n") ?? "")).toEqual(["Hook override"]);
 		const handoffCall = generateHandoffSpy.mock.calls[0];
-		if (!handoffCall) throw new Error("Expected generateHandoff call");
-		expect(handoffCall[3].systemPrompt).toEqual(["Test"]);
+		if (!handoffCall) throw new Error("Expected generateHandoffFromContext call");
+		expect(handoffCall[0].systemPrompt).toEqual(["Test"]);
+	});
+
+	it("forwards the agent's provider prompt-cache key to the handoff request", async () => {
+		// Cache parity: the live loop routes on the agent's promptCacheKey
+		// (providerPromptCacheKey), so handoff must reuse it rather than this.sessionId
+		// — otherwise sessions built with a distinct key still cold-miss the cache.
+		await session.dispose();
+		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			promptCacheKey: "shared-cache-key",
+			sessionId: "provider-session-id",
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "seed" }],
+			timestamp: Date.now() - 2,
+		});
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "seed response" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 16,
+				output: 8,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 24,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now() - 1,
+		});
+
+		const generateHandoffSpy = vi
+			.spyOn(compactionModule, "generateHandoffFromContext")
+			.mockResolvedValue("## Goal\nContinue");
+
+		await session.handoff();
+
+		const call = generateHandoffSpy.mock.calls[0];
+		if (!call) throw new Error("Expected generateHandoffFromContext call");
+		const streamOptions = call[2].streamOptions;
+		expect(streamOptions.promptCacheKey).toBe("shared-cache-key");
+		// Side-request lineage stays unique so append-only provider state never mixes.
+		expect(streamOptions.sessionId).toContain(":side:");
+		expect(streamOptions.sessionId).not.toBe("shared-cache-key");
 	});
 
 	it("saves auto-handoff document to disk when enabled", async () => {
 		session.settings.set("compaction.handoffSaveToDisk", true);
 
 		const handoffText = "## Goal\nContinue from here";
-		vi.spyOn(compactionModule, "generateHandoff").mockResolvedValue(handoffText);
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(handoffText);
 
 		const result = await session.handoff(undefined, { autoTriggered: true });
 		expect(result?.savedPath).toBeDefined();
@@ -1239,7 +1651,7 @@ describe("AgentSession handoff", () => {
 	it("does not save manual handoff document when save setting is enabled", async () => {
 		session.settings.set("compaction.handoffSaveToDisk", true);
 
-		vi.spyOn(compactionModule, "generateHandoff").mockResolvedValue("## Goal\nManual handoff");
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nManual handoff");
 
 		const result = await session.handoff();
 		expect(result?.savedPath).toBeUndefined();
@@ -1249,7 +1661,7 @@ describe("AgentSession handoff", () => {
 		const controller = new AbortController();
 		controller.abort();
 
-		const generateHandoffSpy = vi.spyOn(compactionModule, "generateHandoff");
+		const generateHandoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext");
 
 		await expect(session.handoff(undefined, { signal: controller.signal })).rejects.toThrow("Handoff cancelled");
 		expect(generateHandoffSpy).not.toHaveBeenCalled();
@@ -1260,9 +1672,10 @@ describe("AgentSession handoff", () => {
 		const started = Promise.withResolvers<void>();
 		const cancelled = Promise.withResolvers<string>();
 		const generateHandoffSpy = vi
-			.spyOn(compactionModule, "generateHandoff")
-			.mockImplementation((_messages, _model, _apiKey, _options, signal) => {
+			.spyOn(compactionModule, "generateHandoffFromContext")
+			.mockImplementation((_context, _model, options) => {
 				started.resolve();
+				const signal = options.streamOptions.signal;
 				const onAbort = () => {
 					const error = new Error("aborted");
 					error.name = "AbortError";
@@ -1282,6 +1695,6 @@ describe("AgentSession handoff", () => {
 
 		await expect(handoffPromise).rejects.toThrow("Handoff cancelled");
 		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
-		expect(generateHandoffSpy.mock.calls[0]?.[4]?.aborted).toBe(true);
+		expect(generateHandoffSpy.mock.calls[0]?.[2]?.streamOptions?.signal?.aborted).toBe(true);
 	});
 });

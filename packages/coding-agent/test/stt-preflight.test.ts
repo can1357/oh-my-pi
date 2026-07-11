@@ -6,7 +6,7 @@ import { Settings, settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/sett
 import * as downloader from "@pk-nerdsaver-ai/pi-coding-agent/stt/downloader";
 import * as recorder from "@pk-nerdsaver-ai/pi-coding-agent/stt/recorder";
 import { STTController } from "@pk-nerdsaver-ai/pi-coding-agent/stt/stt-controller";
-import { getTinyModelsCacheDir, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
+import { getTinyModelsCacheDir, removeWithRetries, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 const WHISPER_BASE_REPO = "onnx-community/whisper-base";
@@ -31,7 +31,7 @@ describe("isSttModelCached completeness", () => {
 
 	afterEach(async () => {
 		restoreSettingsTestState(state);
-		await fs.rm(tmp, { recursive: true, force: true });
+		await removeWithRetries(tmp);
 	});
 
 	it("treats a transformers model as cached only when both encoder and decoder onnx are present", async () => {

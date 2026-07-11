@@ -3,9 +3,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { KeybindingsManager } from "@pk-nerdsaver-ai/pi-coding-agent/config/keybindings";
+import { matchesAppFollowUp } from "@pk-nerdsaver-ai/pi-coding-agent/modes/utils/keybinding-matchers";
 import { setKeybindings } from "@pk-nerdsaver-ai/pi-tui";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import { YAML } from "bun";
 
+function ctrl(key: string): string {
+	return String.fromCharCode(key.toLowerCase().charCodeAt(0) & 31);
+}
 describe("KeybindingsManager.create", () => {
 	beforeEach(() => {
 		setKeybindings(KeybindingsManager.inMemory());
@@ -51,7 +56,7 @@ describe("KeybindingsManager.create", () => {
 			expect(writtenConfig).not.toHaveProperty("selectModelTemporary");
 			expect(await Bun.file(jsonPath).exists()).toBe(true);
 		} finally {
-			await fs.rm(agentDir, { recursive: true, force: true });
+			await removeWithRetries(agentDir);
 		}
 	});
 
@@ -88,7 +93,7 @@ describe("KeybindingsManager.create", () => {
 			});
 			expect(await Bun.file(jsonPath).exists()).toBe(true);
 		} finally {
-			await fs.rm(agentDir, { recursive: true, force: true });
+			await removeWithRetries(agentDir);
 		}
 	});
 
@@ -114,7 +119,7 @@ describe("KeybindingsManager.create", () => {
 			expect(manager.getKeys("app.session.fork")).toEqual(["ctrl+f"]);
 			expect(manager.getKeys("app.clipboard.copyPrompt")).toEqual(["alt+c", "ctrl+shift+c"]);
 		} finally {
-			await fs.rm(agentDir, { recursive: true, force: true });
+			await removeWithRetries(agentDir);
 		}
 	});
 
@@ -140,7 +145,7 @@ describe("KeybindingsManager.create", () => {
 			expect(manager.getKeys("app.plan.toggle")).toEqual(["alt+shift+p"]);
 			expect(await Bun.file(canonicalPath).exists()).toBe(false);
 		} finally {
-			await fs.rm(agentDir, { recursive: true, force: true });
+			await removeWithRetries(agentDir);
 		}
 	});
 
@@ -180,7 +185,7 @@ describe("KeybindingsManager.create", () => {
 			// of the box, without breaking users on Kitty/iTerm2/WezTerm/Ghostty.
 			expect(manager.getKeys("app.message.followUp")).toEqual(["ctrl+q", "ctrl+enter"]);
 		} finally {
-			await fs.rm(agentDir, { recursive: true, force: true });
+			await removeWithRetries(agentDir);
 		}
 	});
 
@@ -188,11 +193,14 @@ describe("KeybindingsManager.create", () => {
 		const manager = KeybindingsManager.inMemory({
 			"app.plan.toggle": "ctrl+q",
 		});
+		setKeybindings(manager);
 
 		expect(manager.getKeys("app.plan.toggle")).toEqual(["ctrl+q"]);
 		expect(manager.getKeys("app.message.followUp")).toEqual(["ctrl+enter"]);
 		expect(manager.getDisplayString("app.message.followUp")).toBe("Ctrl+Enter");
 		expect(manager.getEffectiveConfig()["app.message.followUp"]).toBe("ctrl+enter");
+		expect(matchesAppFollowUp(ctrl("q"))).toBe(false);
+		expect(matchesAppFollowUp("\x1b[13;5u")).toBe(true);
 	});
 
 	it("keeps the Ctrl+Q follow-up default when only an unknown config key claims it (#1903)", () => {

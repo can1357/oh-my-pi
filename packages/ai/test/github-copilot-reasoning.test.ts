@@ -56,9 +56,15 @@ describe("GitHub Copilot reasoning request construction", () => {
 		const payload = (await captureAnthropicPayload(model)) as {
 			thinking?: { type?: string };
 			output_config?: { effort?: string };
+			context_management?: unknown;
 		};
 
 		expect(payload.thinking).toEqual({ type: "adaptive" });
 		expect(payload.output_config).toEqual({ effort: "high" });
+		// The Copilot Anthropic proxy strips Anthropic betas and demotes
+		// thinking blocks to text upstream — the `context_management` field
+		// would have no replayed thinking to keep and risks proxy rejection
+		// of an unrecognized field. The field MUST NOT be sent (#3288).
+		expect(payload.context_management).toBeUndefined();
 	});
 });

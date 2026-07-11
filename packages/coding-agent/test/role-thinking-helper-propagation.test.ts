@@ -83,7 +83,7 @@ describe("role thinking helper propagation", () => {
 		} as never);
 
 		const title = await generateSessionTitle("Investigate resolver", registry as never, settings);
-		expect(title).toBe("Investigate Resolver");
+		expect(title).toBe("Investigate resolver");
 		expect(completeSimpleMock.mock.calls[0]?.[2]).toMatchObject({ disableReasoning: true });
 	});
 });

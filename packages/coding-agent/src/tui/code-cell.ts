@@ -32,6 +32,13 @@ export interface CodeCellOptions {
 	 */
 	codeTail?: boolean;
 	expanded?: boolean;
+	/**
+	 * Prefix the header with the cell's language icon (resolved through the
+	 * active symbol preset: nerd-font devicon, unicode emoji, or ascii
+	 * shorthand). Opt-in so only the eval kernel renderer labels each cell;
+	 * read/write/browser code cells stay icon-free.
+	 */
+	showLanguage?: boolean;
 	width: number;
 	codeStartLine?: number;
 	codeLineNumbers?: Array<number | null>;
@@ -47,8 +54,12 @@ function getState(status?: CodeCellOptions["status"]): State | undefined {
 }
 
 function formatHeader(options: CodeCellOptions, theme: Theme): { title: string; meta?: string } {
-	const { index, total, title, status, spinnerFrame, duration } = options;
+	const { index, total, title, status, spinnerFrame, duration, language, showLanguage } = options;
 	const parts: string[] = [];
+	if (showLanguage && language) {
+		const langIcon = theme.getLangIconStyled(language);
+		if (langIcon) parts.push(langIcon);
+	}
 	if (status) {
 		const icon = formatStatusIcon(
 			status === "complete"
@@ -69,7 +80,7 @@ function formatHeader(options: CodeCellOptions, theme: Theme): { title: string; 
 			parts.push(icon);
 		}
 	}
-	if (index !== undefined && total !== undefined) {
+	if (index !== undefined && total !== undefined && total > 1) {
 		parts.push(theme.fg("accent", `[${index + 1}/${total}]`));
 	}
 	if (title) {

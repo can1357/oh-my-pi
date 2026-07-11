@@ -12,6 +12,8 @@ export * from "./compaction";
 export * from "./moa";
 // Proxy utilities
 export * from "./proxy";
+// Replay policy
+export * from "./replay-policy";
 // Run-level telemetry collector + aggregators
 export * from "./run-collector";
 // Telemetry

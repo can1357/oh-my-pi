@@ -60,6 +60,19 @@ export abstract class SnapshotStore {
 	abstract byHash(path: string, hash: string): Snapshot | null;
 
 	/**
+	 * Every retained version whose tag equals `hash`, across all tracked
+	 * paths. The patcher uses this to recover the intended file when a section
+	 * names a path that does not exist on disk but carries a tag the store
+	 * minted — the model mistyped the path of a file it read this session.
+	 *
+	 * The base returns no matches (recovery disabled); stores that can
+	 * enumerate their contents override it to enable tag-based path recovery.
+	 */
+	findByHash(_hash: string): Snapshot[] {
+		return [];
+	}
+
+	/**
 	 * Record the full normalized text of `path` and return its content tag.
 	 * `seenLines` (optional) are the 1-indexed lines the producer displayed;
 	 * they merge into {@link Snapshot.seenLines} across reads of identical text.
@@ -76,6 +89,13 @@ export abstract class SnapshotStore {
 
 	/** Drop the version history for a single path. */
 	abstract invalidate(path: string): void;
+
+	/**
+	 * Move retained version history (and read provenance) from `from` to `to`.
+	 * No-op when `from` has no history. Used by file moves so tags minted from
+	 * reads of the source path stay valid at the destination.
+	 */
+	abstract relocate(from: string, to: string): void;
 
 	/** Drop every version history. */
 	abstract clear(): void;
@@ -142,6 +162,16 @@ export class InMemorySnapshotStore extends SnapshotStore {
 		return history?.find(version => version.hash === hash) ?? null;
 	}
 
+	findByHash(hash: string): Snapshot[] {
+		const matches: Snapshot[] = [];
+		for (const history of this.#versions.values()) {
+			for (const version of history) {
+				if (version.hash === hash) matches.push(version);
+			}
+		}
+		return matches;
+	}
+
 	record(path: string, fullText: string, seenLines?: Iterable<number>): string {
 		const hash = computeFileHash(fullText);
 		// `get` refreshes LRU recency for `path`.
@@ -172,6 +202,26 @@ export class InMemorySnapshotStore extends SnapshotStore {
 
 	invalidate(path: string): void {
 		this.#versions.delete(path);
+	}
+
+	relocate(from: string, to: string): void {
+		const sourceHistory = this.#versions.get(from);
+		if (sourceHistory === undefined || sourceHistory.length === 0) return;
+		const relocated = sourceHistory.map(version => ({ ...version, path: to }));
+		const destHistory = this.#versions.get(to);
+		if (destHistory === undefined) {
+			this.#versions.set(to, relocated);
+		} else {
+			const seen = new Set<string>();
+			const merged: Snapshot[] = [];
+			for (const version of [...relocated, ...destHistory]) {
+				if (seen.has(version.hash)) continue;
+				seen.add(version.hash);
+				merged.push(version);
+			}
+			this.#versions.set(to, merged.slice(0, this.#maxVersionsPerPath));
+		}
+		this.#versions.delete(from);
 	}
 
 	clear(): void {

@@ -43,8 +43,18 @@ function roman(n: number): string {
 	return out;
 }
 
+/**
+ * Normalize call args to a flat op list. The current `todo` contract sends a
+ * single top-level op `{op,...}`; legacy transcripts still carry the batched
+ * `{ops:[...]}` shape. Non-record entries (streaming deltas) are dropped.
+ */
+function toOps(args: ToolRenderProps["args"]): unknown[] {
+	if (Array.isArray(args.ops)) return args.ops;
+	return typeof args.op === "string" ? [args] : [];
+}
+
 function Summary({ args }: ToolRenderProps): ReactNode {
-	const ops = Array.isArray(args.ops) ? args.ops : [];
+	const ops = toOps(args);
 	const counts: Record<string, number> = {};
 	const order: string[] = [];
 	let firstTask: string | null = null;
@@ -128,7 +138,7 @@ function Board({ phases }: { phases: unknown[] }): ReactNode {
 }
 
 function Body({ args, result }: ToolRenderProps): ReactNode {
-	const ops = Array.isArray(args.ops) ? args.ops : [];
+	const ops = toOps(args);
 	const rec = detailsRecord(result);
 	const phases = rec && Array.isArray(rec.phases) && !result?.isError ? rec.phases : null;
 	return (

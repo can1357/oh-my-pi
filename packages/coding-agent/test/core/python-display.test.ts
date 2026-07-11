@@ -4,10 +4,10 @@ import { renderKernelDisplay } from "@pk-nerdsaver-ai/pi-coding-agent/eval/py/di
 describe("renderKernelDisplay (raw bundle shape)", () => {
 	it("renders status events without text output", async () => {
 		const { text, outputs } = await renderKernelDisplay({
-			"application/x-omp-status": { op: "find", count: 12, pattern: "foo" },
+			"application/x-omp-status": { op: "glob", count: 12, pattern: "foo" },
 		});
 		expect(text).toBe("");
-		expect(outputs).toEqual([{ type: "status", event: { op: "find", count: 12, pattern: "foo" } }]);
+		expect(outputs).toEqual([{ type: "status", event: { op: "glob", count: 12, pattern: "foo" } }]);
 	});
 
 	it("prefers text/markdown over text/plain", async () => {

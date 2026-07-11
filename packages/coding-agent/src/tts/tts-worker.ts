@@ -1,12 +1,16 @@
 import { createRequire } from "node:module";
-import * as path from "node:path";
 import type { ProgressInfo, RawAudio } from "@huggingface/transformers";
+import { ensureRuntimeInstalled, getTinyModelsCacheDir, resolveRuntimeModule } from "@pk-nerdsaver-ai/pi-utils";
 import {
-	ensureRuntimeInstalled,
-	getTinyModelsCacheDir,
-	installRuntimeModuleResolver,
-	resolveRuntimeModule,
-} from "@pk-nerdsaver-ai/pi-utils";
+	errorMessage,
+	errorText,
+	installSharpStubResolver,
+	MemoizedRuntime,
+	replayCachedReady,
+	sendLog,
+	sendProgress,
+	TRANSFORMERS_PACKAGE,
+} from "../subprocess/worker-runtime";
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "../tiny/device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "../tiny/dtype";
 import { getTtsLocalModelSpec, resolveTtsVoice, type TtsLocalModelKey, type TtsLocalModelSpec } from "./models";
@@ -17,10 +21,9 @@ import {
 	ONNXRUNTIME_NODE_PACKAGE,
 	ONNXRUNTIME_NODE_VERSION,
 } from "./runtime";
-import type { TtsProgressEvent, TtsTransport, TtsWorkerInbound } from "./tts-protocol";
+import type { TtsTransport, TtsWorkerInbound } from "./tts-protocol";
 
 const TTS_TASK = "text-to-speech";
-const TRANSFORMERS_PACKAGE = "@huggingface/transformers";
 // kokoro-js is NEVER a dependency of the main tree: its transformers@3.8.1 +
 // onnxruntime-node@1.21 graph must not pollute it (1.21 segfaults Bun on session
 // creation). It is lazily `bun install`ed into a side runtime dir on first use,
@@ -89,7 +92,7 @@ interface TransformersEnv {
 
 const models = new Map<TtsLocalModelKey, Promise<KokoroTtsInstance>>();
 let synthesizeQueue = Promise.resolve();
-let kokoroRuntime: Promise<KokoroRuntime> | null = null;
+const kokoroRuntime = new MemoizedRuntime<KokoroRuntime>();
 
 /**
  * In-flight streaming sessions keyed by request id. A session is created on
@@ -106,36 +109,6 @@ interface StreamSession {
 	cancelled: boolean;
 }
 const streamSessions = new Map<string, StreamSession>();
-
-function errorText(error: unknown): string {
-	return error instanceof Error ? (error.stack ?? error.message) : String(error);
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
-function sendLog(
-	transport: TtsTransport,
-	level: "debug" | "warn" | "error",
-	msg: string,
-	meta?: Record<string, unknown>,
-): void {
-	transport.send({ type: "log", level, msg, meta });
-}
-
-function sendRuntimeInstallProgress(
-	transport: TtsTransport,
-	requestId: string,
-	modelKey: TtsLocalModelKey,
-	status: "initiate" | "download" | "done",
-): void {
-	transport.send({
-		type: "progress",
-		id: requestId,
-		event: { modelKey, status, name: `${KOKORO_PACKAGE}@${KOKORO_VERSION}` },
-	});
-}
 
 /**
  * Map a tiny-model device onto the narrow set `kokoro-js` accepts. The worker
@@ -165,13 +138,12 @@ function configureTransformers(transformers: TransformersEnv): void {
  * the TTS pipeline is audio-only, so the native image codec transformers eagerly
  * requires is dead weight. Memoized so the runtime loads once per process.
  */
-async function loadKokoroRuntime(
+function loadKokoroRuntime(
 	transport: TtsTransport,
 	requestId: string,
 	modelKey: TtsLocalModelKey,
 ): Promise<KokoroRuntime> {
-	if (kokoroRuntime) return kokoroRuntime;
-	kokoroRuntime = (async () => {
+	return kokoroRuntime.load(async () => {
 		const runtimeDir = await ensureRuntimeInstalled({
 			runtimeDir: getTtsRuntimeDir(),
 			install: {
@@ -180,12 +152,14 @@ async function loadKokoroRuntime(
 				trustedDependencies: [ONNXRUNTIME_NODE_PACKAGE],
 			},
 			probePackage: KOKORO_PACKAGE,
-			onPhase: phase => sendRuntimeInstallProgress(transport, requestId, modelKey, phase),
+			onPhase: phase =>
+				transport.send({
+					type: "progress",
+					id: requestId,
+					event: { modelKey, status: phase, name: `${KOKORO_PACKAGE}@${KOKORO_VERSION}` },
+				}),
 		});
-		const nodeModules = path.join(runtimeDir, "node_modules");
-		const sharpStub = path.join(runtimeDir, "omp-sharp-stub.cjs");
-		await Bun.write(sharpStub, "module.exports = {};\n");
-		installRuntimeModuleResolver({ runtimeNodeModules: nodeModules, stubs: { sharp: sharpStub } });
+		const nodeModules = await installSharpStubResolver(runtimeDir);
 		const kokoroEntry = resolveRuntimeModule(nodeModules, KOKORO_PACKAGE);
 		if (!kokoroEntry) throw new Error(`Unable to resolve ${KOKORO_PACKAGE} in runtime at ${nodeModules}`);
 		const transformersEntry = resolveRuntimeModule(nodeModules, TRANSFORMERS_PACKAGE);
@@ -193,44 +167,7 @@ async function loadKokoroRuntime(
 		const runtimeRequire = createRequire(kokoroEntry);
 		configureTransformers(runtimeRequire(transformersEntry) as TransformersEnv);
 		return runtimeRequire(kokoroEntry) as KokoroRuntime;
-	})().catch(error => {
-		kokoroRuntime = null;
-		throw error;
 	});
-	return kokoroRuntime;
-}
-
-function toProgressEvent(modelKey: TtsLocalModelKey, info: ProgressInfo): TtsProgressEvent {
-	if (info.status === "ready") {
-		return { modelKey, status: info.status, task: info.task, model: info.model };
-	}
-	if (info.status === "progress_total") {
-		return {
-			modelKey,
-			status: info.status,
-			name: info.name,
-			progress: info.progress,
-			loaded: info.loaded,
-			total: info.total,
-			files: info.files,
-		};
-	}
-	if (info.status === "progress") {
-		return {
-			modelKey,
-			status: info.status,
-			name: info.name,
-			file: info.file,
-			progress: info.progress,
-			loaded: info.loaded,
-			total: info.total,
-		};
-	}
-	return { modelKey, status: info.status, name: info.name, file: info.file };
-}
-
-function sendProgress(transport: TtsTransport, id: string, modelKey: TtsLocalModelKey, info: ProgressInfo): void {
-	transport.send({ type: "progress", id, event: toProgressEvent(modelKey, info) });
 }
 
 async function loadModelOnDevice(
@@ -295,19 +232,8 @@ async function loadModel(
 ): Promise<KokoroTtsInstance> {
 	const spec = getTtsLocalModelSpec(modelKey);
 	if (!spec) throw new Error(`Unknown local TTS model: ${modelKey}`);
-	const cached = models.get(modelKey);
-	if (cached) {
-		void cached
-			.then(() => {
-				transport.send({
-					type: "progress",
-					id: requestId,
-					event: { modelKey, status: "ready", task: TTS_TASK, model: spec.repo },
-				});
-			})
-			.catch(() => undefined);
-		return cached;
-	}
+	const cached = replayCachedReady(models, modelKey, transport, requestId, TTS_TASK, spec.repo);
+	if (cached) return cached;
 
 	const runtime = await loadKokoroRuntime(transport, requestId, modelKey);
 	const startedAt = performance.now();

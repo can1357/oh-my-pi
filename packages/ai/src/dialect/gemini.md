@@ -37,7 +37,8 @@ brief reasoning
 ## Rules
 
 - The function name MUST match a listed function; arguments are keyword form (`name=value`).
+- Argument string values use only normal Python string escaping; never HTML-escape their contents — write `"a & b"`, not `"a &amp; b"`.
 - Multiple calls = a single `[...]` list (or one `default_api...` call per line) inside one ` ```tool_code ` block.
 - Put private reasoning in a ` ```thinking ` block before the ` ```tool_code ` block, never inside ` ```tool_code `.
 - Read each ` ```tool_outputs ` block in call order. NEVER write a ` ```tool_outputs ` block yourself.
-- After emitting the ` ```tool_code ` block, YOU MUST STOP AND HALT.
+- Emit the ` ```tool_code ` block in full, THEN stop and halt — NEVER announce a tool then stop (e.g. halting at "Let's run `cargo clippy`" with no ` ```tool_code ` block emitted).

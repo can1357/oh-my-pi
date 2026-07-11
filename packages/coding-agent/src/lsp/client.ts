@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { isEnoent, logger, ptree, untilAborted } from "@pk-nerdsaver-ai/pi-utils";
+import { MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { applyWorkspaceEdit } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
@@ -179,69 +180,6 @@ const CLIENT_CAPABILITIES = {
 // LSP Message Protocol
 // =============================================================================
 
-// Reused for all full (non-streaming) decodes; each decode() resets state, so a
-// single instance is safe and avoids per-message TextDecoder allocation.
-const MESSAGE_DECODER = new TextDecoder("utf-8");
-
-/**
- * Locate the `\r\n\r\n` header terminator across the pending chunk list.
- * Returns the absolute byte index of the first `\r`, or -1 when not present.
- * Equivalent to scanning the contiguous concatenation of the chunks.
- */
-function findHeaderEndInChunks(chunks: Buffer[]): number {
-	let global = 0;
-	let b0 = -1;
-	let b1 = -1;
-	let b2 = -1;
-	for (const chunk of chunks) {
-		for (let i = 0; i < chunk.length; i++) {
-			const b3 = chunk[i];
-			if (b0 === 13 && b1 === 10 && b2 === 13 && b3 === 10) {
-				return global - 3;
-			}
-			b0 = b1;
-			b1 = b2;
-			b2 = b3;
-			global++;
-		}
-	}
-	return -1;
-}
-
-/** Copy the byte range [from, to) out of the pending chunk list into one Buffer. */
-function copyChunkRange(chunks: Buffer[], from: number, to: number): Buffer {
-	const out = Buffer.allocUnsafe(to - from);
-	let global = 0;
-	let written = 0;
-	for (const chunk of chunks) {
-		const chunkEnd = global + chunk.length;
-		if (chunkEnd > from && global < to) {
-			const start = Math.max(from, global) - global;
-			const end = Math.min(to, chunkEnd) - global;
-			chunk.copy(out, written, start, end);
-			written += end - start;
-		}
-		global = chunkEnd;
-		if (global >= to) break;
-	}
-	return out;
-}
-
-/** Drop the first `count` bytes from the pending chunk list in place. */
-function dropChunkFront(chunks: Buffer[], count: number): void {
-	let removed = 0;
-	while (chunks.length > 0) {
-		const head = chunks[0];
-		if (removed + head.length <= count) {
-			removed += head.length;
-			chunks.shift();
-		} else {
-			chunks[0] = head.subarray(count - removed);
-			break;
-		}
-	}
-}
-
 async function writeMessage(
 	sink: Bun.FileSink,
 	message: LspJsonRpcRequest | LspJsonRpcNotification | LspJsonRpcResponse,
@@ -274,62 +212,69 @@ async function startMessageReader(client: LspClient): Promise<void> {
 
 	const reader = (client.proc.stdout as ReadableStream<Uint8Array>).getReader();
 
-	// Incoming bytes are buffered as a list of chunks and only joined when a full
-	// message is framed. Concatenating the accumulator on every read was O(n^2)
-	// for messages that span many reads (e.g. a large initial diagnostics burst).
-	const pendingChunks: Buffer[] = [];
-	let pendingLen = 0;
-	if (client.messageBuffer.length > 0) {
-		const seed = Buffer.from(client.messageBuffer);
-		pendingChunks.push(seed);
-		pendingLen = seed.length;
-	}
+	const framer = new MessageFramer(Buffer.from(client.messageBuffer));
 
 	try {
 		while (true) {
 			const { done, value } = await reader.read();
 			if (done) break;
 
-			pendingChunks.push(Buffer.from(value));
-			pendingLen += value.length;
+			framer.push(Buffer.from(value));
 
 			// Drain every complete message currently buffered.
-			while (true) {
-				const headerEnd = findHeaderEndInChunks(pendingChunks);
-				if (headerEnd === -1) break;
-
-				const headerText = MESSAGE_DECODER.decode(copyChunkRange(pendingChunks, 0, headerEnd));
-				const contentLengthMatch = headerText.match(/Content-Length: (\d+)/i);
-				if (!contentLengthMatch) {
-					// Non-protocol bytes on stdout (e.g. a wrapper script printing).
-					// Drop past the bogus terminator and resync instead of stalling
-					// on the same junk header forever.
-					logger.warn("LSP framing resync: header block without Content-Length", {
-						server: client.name,
-						header: headerText.slice(0, 200),
-					});
-					dropChunkFront(pendingChunks, headerEnd + 4);
-					pendingLen -= headerEnd + 4;
-					continue;
-				}
-
-				const contentLength = Number.parseInt(contentLengthMatch[1], 10);
-				const messageStart = headerEnd + 4; // Skip \r\n\r\n
-				const messageEnd = messageStart + contentLength;
-				if (pendingLen < messageEnd) break;
-
-				const messageText = MESSAGE_DECODER.decode(copyChunkRange(pendingChunks, messageStart, messageEnd));
-				dropChunkFront(pendingChunks, messageEnd);
-				pendingLen -= messageEnd;
-
+			for (const messageText of framer.drain(headerText => {
+				// Non-protocol bytes on stdout (e.g. a wrapper script printing).
+				// Drop past the bogus terminator and resync instead of stalling
+				// on the same junk header forever.
+				logger.warn("LSP framing resync: header block without Content-Length", {
+					server: client.name,
+					header: headerText.slice(0, 200),
+				});
+			})) {
 				// A malformed message or a throwing server-request handler must not
 				// kill the reader — later messages are still well-framed.
 				try {
 					const message: LspJsonRpcResponse | LspJsonRpcNotification = JSON.parse(messageText);
 
-					// Route message
-					if ("id" in message && message.id !== undefined) {
-						// Response to a request
+					// Route message. A JSON-RPC message carrying a `method` is always
+					// server-originated: a request when it also has an `id`, a
+					// notification otherwise. A message with only an `id` is a response
+					// to one of our requests. Disambiguate on `method` FIRST: a
+					// server's request ids live in its own id space and routinely
+					// collide with our in-flight client request ids (e.g. a
+					// basedpyright `workspace/configuration` pull arriving while a
+					// `documentSymbol` request with the same id is pending). Matching
+					// pending requests first would swallow that pull as a bogus
+					// response -- dropping the config answer the server blocks on and
+					// resolving our request with `undefined`, wedging the lazy
+					// cold-start handshake (#3001).
+					if ("method" in message) {
+						if ("id" in message && message.id !== undefined) {
+							// Server-initiated request: must be answered.
+							await handleServerRequest(client, message as LspJsonRpcRequest);
+						} else {
+							// Server notification
+							if (message.method === "textDocument/publishDiagnostics" && message.params) {
+								const params = message.params as PublishDiagnosticsParams;
+								client.diagnostics.set(params.uri, {
+									diagnostics: params.diagnostics,
+									version: params.version ?? null,
+								});
+								client.diagnosticsVersion += 1;
+							} else if (message.method === "$/progress" && message.params) {
+								const params = message.params as { token: string | number; value?: { kind?: string } };
+								if (params.value?.kind === "begin") {
+									client.activeProgressTokens.add(params.token);
+								} else if (params.value?.kind === "end") {
+									client.activeProgressTokens.delete(params.token);
+									if (client.activeProgressTokens.size === 0) {
+										client.resolveProjectLoaded();
+									}
+								}
+							}
+						}
+					} else if ("id" in message && message.id !== undefined) {
+						// Response to one of our requests.
 						const pending = client.pendingRequests.get(message.id);
 						if (pending) {
 							client.pendingRequests.delete(message.id);
@@ -337,28 +282,6 @@ async function startMessageReader(client: LspClient): Promise<void> {
 								pending.reject(new Error(`LSP error: ${message.error.message}`));
 							} else {
 								pending.resolve(message.result);
-							}
-						} else if ("method" in message) {
-							await handleServerRequest(client, message as LspJsonRpcRequest);
-						}
-					} else if ("method" in message) {
-						// Server notification
-						if (message.method === "textDocument/publishDiagnostics" && message.params) {
-							const params = message.params as PublishDiagnosticsParams;
-							client.diagnostics.set(params.uri, {
-								diagnostics: params.diagnostics,
-								version: params.version ?? null,
-							});
-							client.diagnosticsVersion += 1;
-						} else if (message.method === "$/progress" && message.params) {
-							const params = message.params as { token: string | number; value?: { kind?: string } };
-							if (params.value?.kind === "begin") {
-								client.activeProgressTokens.add(params.token);
-							} else if (params.value?.kind === "end") {
-								client.activeProgressTokens.delete(params.token);
-								if (client.activeProgressTokens.size === 0) {
-									client.resolveProjectLoaded();
-								}
 							}
 						}
 					}
@@ -378,12 +301,7 @@ async function startMessageReader(client: LspClient): Promise<void> {
 		client.pendingRequests.clear();
 	} finally {
 		// Persist any unparsed remainder so a restarted reader resumes mid-message.
-		client.messageBuffer =
-			pendingChunks.length === 0
-				? new Uint8Array(0)
-				: pendingChunks.length === 1
-					? pendingChunks[0]
-					: Buffer.concat(pendingChunks, pendingLen);
+		client.messageBuffer = framer.remainder();
 		reader.releaseLock();
 		client.isReading = false;
 		// Reader exited while the server process is still alive (unrecoverable

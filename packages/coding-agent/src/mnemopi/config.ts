@@ -26,6 +26,7 @@ export interface MnemopiBackendConfig {
 	autoRetain: boolean;
 	polyphonicRecall: boolean;
 	enhancedRecall: boolean;
+	proactiveLinking: boolean;
 	retainEveryNTurns: number;
 	recallLimit: number;
 	recallContextTurns: number;
@@ -71,6 +72,7 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 		autoRetain: settings.get("mnemopi.autoRetain"),
 		polyphonicRecall: settings.get("mnemopi.polyphonicRecall"),
 		enhancedRecall: settings.get("mnemopi.enhancedRecall"),
+		proactiveLinking: settings.get("mnemopi.proactiveLinking"),
 		retainEveryNTurns: Math.max(1, Math.floor(settings.get("mnemopi.retainEveryNTurns"))),
 		recallLimit: Math.max(1, Math.floor(settings.get("mnemopi.recallLimit"))),
 		recallContextTurns: Math.max(1, Math.floor(settings.get("mnemopi.recallContextTurns"))),

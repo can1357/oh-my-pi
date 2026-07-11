@@ -388,6 +388,73 @@ function inferBareEnumScalarType(obj: Record<string, unknown>): void {
 	if (inferred !== undefined) obj.type = inferred;
 }
 
+/**
+ * ArkType serializes a *described* literal union — `type.enumerated(...).describe(d)`
+ * or a `"a" | "b"` union carrying a description — as an `anyOf` of
+ * `{ const, description }` branches that repeat the description on every branch
+ * *and* the union root. The meta is distributed across the union's constituents
+ * at the type level (each `unit` node inherits it), so the duplication is baked
+ * in before serialization rather than added by this pipeline.
+ *
+ * Collapse such a homogeneous all-`const` union into one typed
+ * `{ type, enum, description }` node: a shorter wire and a single description in
+ * the place providers expect it. The collapse is conservative — applied only
+ * when it is lossless:
+ *   - every branch is a bare `{ const }` (optionally `{ const, description }`),
+ *   - all branch values share one scalar JSON type (so `enum` gets a `type`,
+ *     which Gemini/Vertex require),
+ *   - branch descriptions are either all absent or all identical,
+ * so a union whose branches carry *distinct* per-variant descriptions is left
+ * untouched (a flat `enum` has nowhere to keep them). The union root's own
+ * description wins when present; otherwise the shared branch description is kept.
+ */
+function collapseConstUnionAnyOf(obj: Record<string, unknown>): void {
+	// `hasSchemaDefiningSibling` already rejects a sibling `enum`/`const`/etc.; it
+	// does not list `type`, so guard it here — collapsing would overwrite a
+	// wrapper `type` constraint paired with the `anyOf`.
+	if (hasSchemaDefiningSibling(obj) || "type" in obj) return;
+	const variants = obj.anyOf;
+	if (!Array.isArray(variants) || variants.length < 2) return;
+
+	const values: unknown[] = [];
+	let branchDescription: string | undefined;
+	let describedCount = 0;
+	for (const variant of variants) {
+		if (!isSchemaRecord(variant) || !Object.hasOwn(variant, "const")) return;
+		for (const key in variant) {
+			if (key !== "const" && key !== "description") return; // extra constraints — not a bare const
+		}
+		const desc = variant.description;
+		if (typeof desc === "string") {
+			if (describedCount === 0) branchDescription = desc;
+			else if (desc !== branchDescription) return; // distinct per-variant descriptions — preserve them
+			describedCount++;
+		}
+		values.push(variant.const);
+	}
+	if (describedCount !== 0 && describedCount !== variants.length) return; // mixed described/undescribed
+	// A shared branch description that disagrees with the union root's own
+	// description would be silently dropped by the collapse — keep the anyOf so
+	// neither annotation is lost. (Equal descriptions, the ArkType case, collapse.)
+	if (
+		describedCount === variants.length &&
+		typeof obj.description === "string" &&
+		obj.description !== branchDescription
+	) {
+		return;
+	}
+
+	const scalarType = homogeneousEnumScalarType(values);
+	if (scalarType === undefined) return; // mixed / non-scalar (incl. null) — leave as anyOf
+
+	delete obj.anyOf;
+	obj.type = scalarType;
+	obj.enum = values;
+	if (typeof obj.description !== "string" && branchDescription !== undefined) {
+		obj.description = branchDescription;
+	}
+}
+
 function walk(node: unknown, zodCleanup: boolean): void {
 	if (Array.isArray(node)) {
 		for (const child of node) walk(child, zodCleanup);
@@ -397,6 +464,7 @@ function walk(node: unknown, zodCleanup: boolean): void {
 	const obj = node as Record<string, unknown>;
 	rewriteNullableScalarAnyOf(obj);
 	inferBareEnumScalarType(obj);
+	collapseConstUnionAnyOf(obj);
 
 	if (zodCleanup) {
 		// Drop noise injected for `z.number().int()`.

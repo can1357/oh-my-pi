@@ -1,3 +1,4 @@
+import * as AIError from "../error";
 import * as apiKeyValidation from "./api-key-validation";
 import type { OAuthController, OAuthCredentials, OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
@@ -10,7 +11,7 @@ const VALIDATION_MODEL = "qwen3.5-plus";
 
 export async function loginAlibabaCodingPlan(options: OAuthController): Promise<OAuthCredentials> {
 	if (!options.onPrompt) {
-		throw new Error("Alibaba Coding Plan login requires onPrompt callback");
+		throw new AIError.OnPromptRequiredError("Alibaba Coding Plan");
 	}
 
 	// Ask which endpoint to use
@@ -21,7 +22,7 @@ export async function loginAlibabaCodingPlan(options: OAuthController): Promise<
 
 	// Check for abort after endpoint selection (Escape returns "")
 	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		throw new AIError.LoginCancelledError();
 	}
 
 	const choice = endpointChoice.trim();
@@ -39,7 +40,7 @@ export async function loginAlibabaCodingPlan(options: OAuthController): Promise<
 		});
 		const trimmedUrl = customUrl.trim().replace(/\/+$/, "");
 		if (!trimmedUrl) {
-			throw new Error("Custom URL is required for option 3");
+			throw new AIError.ConfigurationError("Custom URL is required for option 3");
 		}
 		baseUrl = trimmedUrl;
 		authUrl = DEFAULT_AUTH_URL;
@@ -61,12 +62,12 @@ export async function loginAlibabaCodingPlan(options: OAuthController): Promise<
 	});
 
 	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		throw new AIError.LoginCancelledError();
 	}
 
 	const trimmed = apiKey.trim();
 	if (!trimmed) {
-		throw new Error("API key is required");
+		throw new AIError.ApiKeyRequiredError();
 	}
 
 	options.onProgress?.("Validating API key...");

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import { $ } from "bun";
 import * as git from "../src/utils/git";
 
@@ -55,9 +56,9 @@ describe.skipIf(!supportsReftable)("git reftable support", () => {
 
 	afterAll(async () => {
 		await $`git worktree remove ${worktreeDir} -f`.cwd(sharedRepoDir).quiet().nothrow();
-		await fs.rm(worktreeDir, { recursive: true, force: true }).catch(() => {});
-		await fs.rm(sharedRepoDir, { recursive: true, force: true }).catch(() => {});
-		await fs.rm(configRepoDir, { recursive: true, force: true }).catch(() => {});
+		await removeWithRetries(worktreeDir).catch(() => {});
+		await removeWithRetries(sharedRepoDir).catch(() => {});
+		await removeWithRetries(configRepoDir).catch(() => {});
 	});
 
 	test("resolves references in a reftable repository", async () => {

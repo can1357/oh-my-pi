@@ -1,0 +1,19 @@
+# Vendored from uutils/coreutils tag 0.8.0 (src/uu/cat), patched to route I/O
+# and path resolution through pi-uutils-ctx so it can run in-process as a shell
+# builtin. See src/cat.rs for the patch markers (`pi-uutils:` comments).
+[package]
+name = "uu_cat"
+version = "0.8.0"
+edition = "2024"
+license = "MIT"
+description = "cat ~ (uutils) concatenate and display input (vendored + patched for in-process embedding)"
+
+[lib]
+path = "src/cat.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["wrap_help", "cargo", "color"] }
+memchr = "2.7.2"
+thiserror = "2.0.3"
+uucore = { version = "0.8.0", features = ["fast-inc", "fs", "pipes", "signals"] }
+pi-uutils-ctx = { path = "../../pi-uutils-ctx" }

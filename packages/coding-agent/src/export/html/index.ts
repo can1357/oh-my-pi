@@ -9,9 +9,10 @@ import { SessionManager } from "../../session/session-manager";
 import templateCss from "./template.css" with { type: "text" };
 import templateHtml from "./template.html" with { type: "text" };
 import templateJs from "./template.js" with { type: "text" };
-// Pre-built React tool renderers: built by `bun --cwd=packages/collab-web run build:tool-views`,
+// Pre-built React tool renderers: built by `gen:tool-views` (`bun run gen:tool-views`),
 // run automatically by root `prepare` on install and by `prepack` at publish.
 import toolViewsJs from "./tool-views.generated.js" with { type: "text" };
+import { webExportThemeVars } from "./web-palette";
 
 let cachedTemplate: string | undefined;
 
@@ -36,6 +37,19 @@ export function getTemplate(): string {
 
 export interface ExportOptions {
 	outputPath?: string;
+	/**
+	 * Which color palette the export ships with.
+	 * - `"web"` (default) — the omp brand identity (collab-web pink/purple),
+	 *   so public HTML exports and the `/s/<id>` share viewer match the live
+	 *   `my.omp.sh` client. See `web-palette.ts`.
+	 * - `"theme"` — derive from `themeName` (or the active TUI theme), preserving
+	 *   the pre-15.12 behavior where an export mirrored the user's terminal.
+	 */
+	palette?: "web" | "theme";
+	/**
+	 * TUI theme to derive colors from when `palette: "theme"`. Ignored for the
+	 * default `"web"` palette. Resolves to the active TUI theme when omitted.
+	 */
 	themeName?: string;
 	/** Embed subagent session transcripts found next to the session file (default true). */
 	includeSubSessions?: boolean;
@@ -101,12 +115,38 @@ function deriveExportColors(baseColor: string): { pageBg: string; cardBg: string
 	};
 }
 
-/** Generate CSS custom properties for theme. Exported for the share-viewer build script. */
-export async function generateThemeVars(themeName?: string): Promise<string> {
+/**
+ * Generate CSS custom properties for the export `:root`.
+ *
+ * Two call shapes:
+ *   • `generateThemeVars("web" | "theme", themeName?)` — explicit palette.
+ *     `"web"` (the default for public artifacts) returns the fixed omp brand
+ *     palette from `web-palette.ts` — collab-web pink/purple identity, shared
+ *     with the live `my.omp.sh` client, so exports and the share viewer render
+ *     identically to it. `"theme"` derives from the TUI theme via
+ *     `getResolvedThemeColors(themeName)` plus the three
+ *     `export.{pageBg,cardBg,infoBg}` surface overrides.
+ *   • `generateThemeVars(themeName)` — legacy single-arg form: derive from the
+ *     named TUI theme. Kept so existing callers (and the theme-islight test)
+ *     keep working; equivalent to `generateThemeVars("theme", themeName)`.
+ *
+ * Exported for the share-viewer build script.
+ */
+export async function generateThemeVars(
+	palette: "web" | "theme" | (string & {}) = "web",
+	themeName?: string,
+): Promise<string> {
+	// Legacy single-arg form: `generateThemeVars("my-theme")` — the first arg
+	// is a theme name, not a palette. Route it to the themed path.
+	if (palette !== "web" && palette !== "theme") {
+		return generateThemeVars("theme", palette);
+	}
+	if (palette === "web") return webExportThemeVars();
+
 	const colors = await getResolvedThemeColors(themeName);
 	const lines: string[] = [];
-	for (const [key, value] of Object.entries(colors)) {
-		lines.push(`--${key}: ${value};`);
+	for (const key in colors) {
+		lines.push(`--${key}: ${colors[key]};`);
 	}
 
 	const themeExport = await getThemeExportColors(themeName);
@@ -200,8 +240,8 @@ async function collectSubSessionsFromDir(
 }
 
 /** Generate HTML from bundled template with runtime substitutions. */
-async function generateHtml(sessionData: SessionData, themeName?: string): Promise<string> {
-	const themeVars = await generateThemeVars(themeName);
+async function generateHtml(sessionData: SessionData, palette: "web" | "theme", themeName?: string): Promise<string> {
+	const themeVars = await generateThemeVars(palette, themeName);
 	const sessionDataBase64 = Buffer.from(JSON.stringify(sessionData)).toBase64();
 
 	// Use function replacements so `$'`, `$&`, `$$`, `$n`, etc. in the
@@ -229,7 +269,8 @@ export async function exportSessionToHtml(
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}
 
-	const html = await generateHtml(sessionData, opts.themeName);
+	const palette = opts.palette ?? (opts.themeName ? "theme" : "web");
+	const html = await generateHtml(sessionData, palette, opts.themeName);
 	const outputPath = opts.outputPath || `${APP_NAME}-session-${path.basename(sessionFile, ".jsonl")}.html`;
 
 	await Bun.write(outputPath, html);
@@ -258,7 +299,8 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}
 
-	const html = await generateHtml(sessionData, opts.themeName);
+	const palette = opts.palette ?? (opts.themeName ? "theme" : "web");
+	const html = await generateHtml(sessionData, palette, opts.themeName);
 	const outputPath = opts.outputPath || `${APP_NAME}-session-${path.basename(inputPath, ".jsonl")}.html`;
 
 	await Bun.write(outputPath, html);

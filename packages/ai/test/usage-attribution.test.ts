@@ -1,8 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { applyAnthropicUsageExtras } from "@pk-nerdsaver-ai/pi-ai/providers/anthropic";
 import { parseChunkUsage } from "@pk-nerdsaver-ai/pi-ai/providers/openai-completions";
-import { calculateOpenAIUsageAccounting } from "@pk-nerdsaver-ai/pi-ai/providers/openai-shared";
-import type { Model, Usage } from "@pk-nerdsaver-ai/pi-ai/types";
+import {
+	calculateOpenAIUsageAccounting,
+	populateResponsesUsageFromResponse,
+} from "@pk-nerdsaver-ai/pi-ai/providers/openai-shared";
+import type { AssistantMessage, Model, Usage } from "@pk-nerdsaver-ai/pi-ai/types";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
 
 const OPENAI_MODEL: Model<"openai-completions"> = buildModel({
@@ -254,6 +257,40 @@ describe("shared OpenAI usage accounting", () => {
 		expect(usage.cacheRead).toBe(100);
 		expect(usage.cacheWrite).toBe(0);
 		expect(usage.totalTokens).toBe(175);
+	});
+});
+
+describe("openai-responses usage attribution", () => {
+	it("folds Fugu Ultra orchestration token details into billable usage", () => {
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "openai-responses",
+			provider: "sakana",
+			model: "fugu-ultra",
+			usage: blankUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+
+		populateResponsesUsageFromResponse(output, {
+			input_tokens: 120,
+			output_tokens: 80,
+			total_tokens: 270,
+			input_tokens_details: {
+				cached_tokens: 10,
+				orchestration_input_tokens: 30,
+				orchestration_input_cached_tokens: 5,
+			},
+			output_tokens_details: {
+				orchestration_output_tokens: 40,
+			},
+		});
+
+		expect(output.usage.input).toBe(135);
+		expect(output.usage.cacheRead).toBe(15);
+		expect(output.usage.output).toBe(120);
+		expect(output.usage.totalTokens).toBe(270);
 	});
 });
 

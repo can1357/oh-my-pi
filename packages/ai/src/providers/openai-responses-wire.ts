@@ -5849,7 +5849,7 @@ export interface ResponseCreateParamsBase {
 	 * - [Conversation state](https://platform.openai.com/docs/guides/conversation-state)
 	 * - [Function calling](https://platform.openai.com/docs/guides/function-calling)
 	 */
-	input?: string | ResponseInput;
+	input?: ResponseInput;
 	/**
 	 * A system (or developer) message inserted into the model's context.
 	 *

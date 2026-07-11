@@ -11,7 +11,7 @@ import type { ModelSpec } from "@pk-nerdsaver-ai/pi-catalog/types";
 // `refresh()`, but interactive boot resolves the persisted default
 // synchronously from `#loadModels()`, which reads only `models.json`.
 //
-// Failure here means: run `bun run generate-models` and commit the diff.
+// Failure here means: run `bun run gen:models` and commit the diff.
 describe("xai-oauth bundled catalog (regression)", () => {
 	const bundled =
 		(MODELS_JSON as unknown as Record<string, Record<string, ModelSpec<"openai-responses">>>)["xai-oauth"] ?? {};
@@ -52,7 +52,7 @@ describe("xai-oauth bundled catalog (regression)", () => {
 		expect(composer!.contextWindow).toBe(200_000);
 		expect(composer!.input).toEqual(["text"]);
 		// The bundled models.json entry is byte-identical to the generator's
-		// deterministic xai-oauth output: generate-models.ts pushes
+		// deterministic xai-oauth output: gen:models pushes
 		// buildXaiOAuthStaticSeed() (offline — xai-oauth has no upstream catalog
 		// source) and applyGeneratedModelPolicies(), so a regen reproduces these
 		// exact bytes; only unrelated other-provider network churn was excluded

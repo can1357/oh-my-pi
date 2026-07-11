@@ -12,10 +12,10 @@
  *   with `{ summary, shortSummary? }`.
  */
 
-import { ProviderHttpError } from "@pk-nerdsaver-ai/pi-ai/errors";
-import { parseTextSignature } from "@pk-nerdsaver-ai/pi-ai/providers/openai-shared";
+import { ProviderHttpError } from "@pk-nerdsaver-ai/pi-ai/error";
+import { parseAzureDeploymentNameMap, parseTextSignature } from "@pk-nerdsaver-ai/pi-ai/providers/openai-shared";
 import { transformMessages } from "@pk-nerdsaver-ai/pi-ai/providers/transform-messages";
-import type { AssistantMessage, FetchImpl, Message, Model } from "@pk-nerdsaver-ai/pi-ai/types";
+import type { Api, AssistantMessage, FetchImpl, Message, Model } from "@pk-nerdsaver-ai/pi-ai/types";
 import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
@@ -27,7 +27,7 @@ import {
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@pk-nerdsaver-ai/pi-catalog/wire/codex";
-import { logger } from "@pk-nerdsaver-ai/pi-utils";
+import { $env, logger } from "@pk-nerdsaver-ai/pi-utils";
 
 // ============================================================================
 // Public types
@@ -44,6 +44,8 @@ export const OPENAI_REMOTE_COMPACTION_PRESERVE_KEY = "openaiRemoteCompaction";
  * behind it). On timeout the caller falls back to local summarization.
  */
 export const REMOTE_COMPACTION_TIMEOUT_MS = 180_000;
+
+const DEFAULT_AZURE_API_VERSION = "v1";
 
 /** Race the caller's signal against the request timeout; `timeoutMs <= 0` disables the watchdog. */
 function withRequestTimeout(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal | undefined {
@@ -86,12 +88,25 @@ export interface RemoteCompactionResponse {
 // OpenAI provider gating + endpoint resolution
 // ============================================================================
 
+function isOpenAiRemoteCompactionApi(api: Api | undefined): boolean {
+	return api === "openai-responses" || api === "azure-openai-responses" || api === "openai-codex-responses";
+}
+
 export function shouldUseOpenAiRemoteCompaction(model: Model): boolean {
-	return model.provider === "openai" || model.provider === "openai-codex";
+	if (model.remoteCompaction?.enabled === false) return false;
+	if (model.provider === "openai" || model.provider === "openai-codex") return true;
+	if (model.remoteCompaction?.enabled !== true) return false;
+	return isOpenAiRemoteCompactionApi(model.remoteCompaction.api ?? model.api);
 }
 
 function resolveOpenAiCompactEndpoint(model: Model): string {
-	if (model.provider === "openai-codex") {
+	const configuredEndpoint = model.remoteCompaction?.endpoint;
+	const compactionApi = model.remoteCompaction?.api ?? model.api;
+	if (compactionApi === "azure-openai-responses") {
+		return resolveAzureOpenAiCompactEndpoint(model, configuredEndpoint);
+	}
+	if (configuredEndpoint && configuredEndpoint.length > 0) return configuredEndpoint;
+	if (model.provider === "openai-codex" || compactionApi === "openai-codex-responses") {
 		return resolveOpenAiCodexCompactEndpoint(model.baseUrl);
 	}
 
@@ -100,6 +115,41 @@ function resolveOpenAiCompactEndpoint(model: Model): string {
 	const normalizedBase = rawBase.endsWith("/") ? rawBase.slice(0, -1) : rawBase;
 	if (normalizedBase.endsWith("/v1")) return `${normalizedBase}/responses/compact`;
 	return `${normalizedBase}/v1/responses/compact`;
+}
+
+function resolveAzureOpenAiCompactEndpoint(model: Model, configuredEndpoint: string | undefined): string {
+	const endpoint =
+		configuredEndpoint && configuredEndpoint.length > 0
+			? configuredEndpoint
+			: `${resolveAzureOpenAiBaseUrl(model)}/responses/compact`;
+	return appendAzureApiVersion(endpoint);
+}
+
+function resolveAzureOpenAiBaseUrl(model: Model): string {
+	const baseUrl = $env.AZURE_OPENAI_BASE_URL?.trim() || undefined;
+	const resourceName = $env.AZURE_OPENAI_RESOURCE_NAME;
+	const resolvedBaseUrl =
+		baseUrl ?? (resourceName ? `https://${resourceName}.openai.azure.com/openai/v1` : undefined) ?? model.baseUrl;
+	if (!resolvedBaseUrl) {
+		throw new Error(
+			"Azure OpenAI base URL is required. Set AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME, or configure model.baseUrl.",
+		);
+	}
+	return resolvedBaseUrl.replace(/\/+$/, "");
+}
+
+function appendAzureApiVersion(endpoint: string): string {
+	if (/[?&]api-version=/.test(endpoint)) return endpoint;
+	const separator = endpoint.includes("?") ? "&" : "?";
+	return `${endpoint}${separator}api-version=${encodeURIComponent($env.AZURE_OPENAI_API_VERSION || DEFAULT_AZURE_API_VERSION)}`;
+}
+
+function resolveOpenAiCompactModel(model: Model): string {
+	const requestModel = model.remoteCompaction?.model ?? model.requestModelId ?? model.id;
+	const compactionApi = model.remoteCompaction?.api ?? model.api;
+	if (compactionApi !== "azure-openai-responses") return requestModel;
+	const mappedDeployment = parseAzureDeploymentNameMap($env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP).get(requestModel);
+	return mappedDeployment ?? requestModel;
 }
 
 function resolveOpenAiCodexCompactEndpoint(baseUrl: string | undefined): string {
@@ -444,7 +494,6 @@ export function buildOpenAiNativeHistory(
 // ============================================================================
 // Endpoint requests
 // ============================================================================
-
 export async function requestOpenAiRemoteCompaction(
 	model: Model,
 	apiKey: string,
@@ -454,16 +503,24 @@ export async function requestOpenAiRemoteCompaction(
 	opts?: { fetch?: FetchImpl; timeoutMs?: number },
 ): Promise<OpenAiRemoteCompactionResponse> {
 	const endpoint = resolveOpenAiCompactEndpoint(model);
+	const requestModel = resolveOpenAiCompactModel(model);
 	const request: OpenAiRemoteCompactionRequest = {
-		model: model.id,
+		model: requestModel,
 		input: trimOpenAiCompactInput(compactInput, model.contextWindow ?? Number.POSITIVE_INFINITY, instructions),
 		instructions,
 	};
-	const headers: Record<string, string> = {
-		"content-type": "application/json",
-		Authorization: `Bearer ${apiKey}`,
-		...(model.headers ?? {}),
-	};
+	const isAzureOpenAiResponses = (model.remoteCompaction?.api ?? model.api) === "azure-openai-responses";
+	const headers: Record<string, string> = isAzureOpenAiResponses
+		? {
+				"content-type": "application/json",
+				"api-key": apiKey,
+				...(model.headers ?? {}),
+			}
+		: {
+				"content-type": "application/json",
+				Authorization: `Bearer ${apiKey}`,
+				...(model.headers ?? {}),
+			};
 
 	// Codex endpoints require additional auth headers
 	if (model.provider === "openai-codex") {

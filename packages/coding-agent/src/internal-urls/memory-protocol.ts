@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { getAgentDir, isEnoent } from "@pk-nerdsaver-ai/pi-utils";
 import { getMemoryRoot } from "../memories";
 import { AgentRegistry } from "../registry/agent-registry";
+import { buildDirectoryResource } from "./filesystem-resource";
 import { validateRelativePath } from "./skill-protocol";
 import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
 
@@ -102,8 +103,11 @@ async function tryResolveInRoot(url: InternalUrl, memoryRoot: string): Promise<I
 	ensureWithinRoot(realTargetPath, resolvedRoot);
 
 	const stat = await fs.stat(realTargetPath);
+	if (stat.isDirectory()) {
+		return buildDirectoryResource(url.href, realTargetPath);
+	}
 	if (!stat.isFile()) {
-		throw new Error(`memory:// URL must resolve to a file: ${url.href}`);
+		throw new Error(`memory:// URL must resolve to a file or directory: ${url.href}`);
 	}
 
 	const content = await Bun.file(realTargetPath).text();

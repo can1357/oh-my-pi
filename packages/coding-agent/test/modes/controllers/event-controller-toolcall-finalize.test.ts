@@ -57,6 +57,7 @@ function createFixture(streamingMessage: AssistantMessage) {
 		pendingTools: new Map(),
 		chatContainer: { addChild: vi.fn() },
 		toolOutputExpanded: false,
+		settings,
 		session: { getToolByName: () => undefined },
 		viewSession: { getToolByName: () => undefined },
 		clearTransientSessionUi: () => {},

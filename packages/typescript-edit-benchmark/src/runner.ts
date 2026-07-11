@@ -1033,6 +1033,13 @@ async function runSingleTask(
 	let zeroToolRetries = 0;
 	let providerFailureRetries = 0;
 
+	const previousEnv = {
+		PI_EDIT_VARIANT: process.env.PI_EDIT_VARIANT,
+		PI_EDIT_FUZZY: process.env.PI_EDIT_FUZZY,
+		PI_EDIT_FUZZY_THRESHOLD: process.env.PI_EDIT_FUZZY_THRESHOLD,
+		PI_STRICT_EDIT_MODE: process.env.PI_STRICT_EDIT_MODE,
+		PI_NO_TITLE: process.env.PI_NO_TITLE,
+	};
 	try {
 		const sessionSetup = await prepareBenchmarkSessionSetup({
 			config,
@@ -1052,6 +1059,7 @@ async function runSingleTask(
 		if (config.editFuzzyThreshold !== undefined)
 			process.env.PI_EDIT_FUZZY_THRESHOLD =
 				config.editFuzzyThreshold === "auto" ? "auto" : String(config.editFuzzyThreshold);
+		process.env.PI_STRICT_EDIT_MODE = "1";
 		process.env.PI_NO_TITLE = "1";
 
 		const useInProcess = config.inProcess !== false;
@@ -1332,6 +1340,20 @@ async function runSingleTask(
 	} catch (err) {
 		error = err instanceof Error ? err.message : String(err);
 		await logEvent({ type: "error", error });
+	} finally {
+		const restoreEnvKey = (key: keyof typeof previousEnv) => {
+			const value = previousEnv[key];
+			if (value === undefined) {
+				delete process.env[key];
+			} else {
+				process.env[key] = value;
+			}
+		};
+		restoreEnvKey("PI_EDIT_VARIANT");
+		restoreEnvKey("PI_EDIT_FUZZY");
+		restoreEnvKey("PI_EDIT_FUZZY_THRESHOLD");
+		restoreEnvKey("PI_STRICT_EDIT_MODE");
+		restoreEnvKey("PI_NO_TITLE");
 	}
 
 	const duration = Date.now() - startTime;

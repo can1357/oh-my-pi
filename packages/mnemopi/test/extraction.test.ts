@@ -119,4 +119,21 @@ describe("structured extraction", () => {
 			"The user uses TypeScript",
 		]);
 	});
+
+	it("captures `Instruction:` facts only when a subject precedes always/never", () => {
+		// Subject-led imperatives are still captured.
+		expect(heuristicExtractFacts("I never use semicolons and you always wrap lines at 100.")).toEqual([
+			"Instruction: never use semicolons",
+			"Instruction: always wrap lines at 100",
+		]);
+	});
+
+	it("ignores subjectless always/never sentences (issue #3372)", () => {
+		// Pre-fix this would have produced `Instruction: never activates` and
+		// `Instruction: never populates …` from assistant narrative prose.
+		const transcript =
+			"[role: assistant]\nso reorder never activates and the panel never populates (because pointer events fire before the drop handler binds).\n[assistant:end]";
+		const facts = heuristicExtractFacts(transcript);
+		expect(facts.some(f => f.startsWith("Instruction:"))).toBe(false);
+	});
 });

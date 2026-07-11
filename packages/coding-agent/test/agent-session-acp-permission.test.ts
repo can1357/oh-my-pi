@@ -803,6 +803,16 @@ it("read tool: requestPermission is never called for non-gated tools", async () 
 	expect(readTool.executeCalls).toBe(1);
 });
 
+it("setActiveToolsByName normalizes legacy tool names", async () => {
+	const grepTool = makeFakeTool("grep");
+	const globTool = makeFakeTool("glob");
+	session = await createSession([grepTool, globTool]);
+
+	await session.setActiveToolsByName(["Search", "find", "grep"]);
+
+	expect(session.getActiveToolNames()).toEqual(["grep", "glob"]);
+});
+
 it("always-ask gates write and exec tools from every source despite yolo and allow policies", async () => {
 	const tools = [
 		makeFakeTool("bash", "exec"),

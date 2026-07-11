@@ -31,29 +31,6 @@ describe("renderToolExamples", () => {
 		expect(rendered).toContain("</examples>");
 	});
 
-	it("renders call example in pi format", () => {
-		const tool: InbandTool = {
-			name: "find",
-			description: "Find files.",
-			parameters: {
-				type: "object",
-				properties: {
-					paths: { type: "array", items: { type: "string" } },
-				},
-				required: ["paths"],
-			},
-			examples: [
-				{
-					caption: "Find files",
-					call: { paths: ["src/**/*.ts"] },
-				},
-			],
-		};
-
-		const rendered = renderToolExamples(tool, "pi");
-		expect(rendered).toContain('§find paths=["src/**/*.ts"]');
-	});
-
 	it("renders call example in hermes format", () => {
 		const tool: InbandTool = {
 			name: "find",

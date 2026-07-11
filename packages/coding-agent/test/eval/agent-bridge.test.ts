@@ -55,7 +55,7 @@ describe("runEvalAgent", () => {
 			getAgentId: () => "BridgeParent",
 		} as unknown as ToolSession;
 
-		await runEvalAgent({ prompt: "do work", agentType: "task" }, { session });
+		await runEvalAgent({ prompt: "do work", agent: "task" }, { session });
 
 		expect(runSubprocessSpy).toHaveBeenCalledTimes(1);
 		const options = runSubprocessSpy.mock.calls[0]?.[0];

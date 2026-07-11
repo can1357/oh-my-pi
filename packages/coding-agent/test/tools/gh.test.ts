@@ -13,7 +13,7 @@ import {
 	resolveDefaultRepoMemoized,
 } from "@pk-nerdsaver-ai/pi-coding-agent/tools/gh";
 import * as git from "@pk-nerdsaver-ai/pi-coding-agent/utils/git";
-import { getAgentDir, hashPath, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
+import { getAgentDir, hashPath, removeWithRetries, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
 
 // Isolate every `git` invocation in this file from the developer's host
 // configuration. The fixture spawns dozens of git subprocesses against tiny
@@ -188,16 +188,29 @@ interface TempHome {
 async function setupTempHome(): Promise<{ home: string; cleanup: () => Promise<void> }> {
 	const home = await fs.mkdtemp(path.join(os.tmpdir(), "gh-pr-tool-home-"));
 	vi.spyOn(os, "homedir").mockReturnValue(home);
+	// Clear XDG_*_HOME so the rebuilt resolver routes `dirs.rootSubdir("wt", "data")`
+	// through the spied homedir instead of `$XDG_DATA_HOME/omp/wt` (CI sets these).
+	const xdgKeys = ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"] as const;
+	const xdgPrevious: Partial<Record<(typeof xdgKeys)[number], string | undefined>> = {};
+	for (const key of xdgKeys) {
+		xdgPrevious[key] = process.env[key];
+		delete process.env[key];
+	}
 	// `dirs.configRoot` is computed at constructor time from `os.homedir()`, so
-	// we must rebuild the resolver after the spy is in place. `setAgentDir`
-	// recreates it; we point it at the temp home's default agent dir.
+	// we must rebuild the resolver after the spy + env scrub are in place.
+	// `setAgentDir` recreates it; we point it at the temp home's default agent dir.
 	const originalAgentDir = getAgentDir();
 	setAgentDir(path.join(home, ".omp", "agent"));
 	return {
 		home,
 		cleanup: async () => {
 			setAgentDir(originalAgentDir);
-			await fs.rm(home, { recursive: true, force: true });
+			for (const key of xdgKeys) {
+				const previous = xdgPrevious[key];
+				if (previous === undefined) delete process.env[key];
+				else process.env[key] = previous;
+			}
+			await removeWithRetries(home);
 		},
 	};
 }
@@ -267,7 +280,7 @@ describe("github tool", () => {
 
 	afterAll(async () => {
 		if (prFixtureTemplate) {
-			await fs.rm(prFixtureTemplate.baseDir, { recursive: true, force: true });
+			await removeWithRetries(prFixtureTemplate.baseDir);
 			prFixtureTemplate = null;
 		}
 	});
@@ -777,7 +790,7 @@ describe("github tool", () => {
 		});
 		afterAll(async () => {
 			await tempHome.cleanup();
-			await fs.rm(fixture.baseDir, { recursive: true, force: true });
+			await removeWithRetries(fixture.baseDir);
 		});
 
 		it("checks out a pull request into a worktree and configures contributor push metadata", async () => {
@@ -826,7 +839,7 @@ describe("github tool", () => {
 			remoteFixture = await createPrFixture();
 		});
 		afterAll(async () => {
-			await fs.rm(remoteFixture.baseDir, { recursive: true, force: true });
+			await removeWithRetries(remoteFixture.baseDir);
 		});
 
 		it("treats git.remote.add as a no-op when the remote already exists with the same URL", async () => {
@@ -865,7 +878,7 @@ describe("github tool", () => {
 				expect(dump).toContain(`branch.race-test.key${idx} value-${idx}`);
 			}
 		} finally {
-			await fs.rm(repoRoot, { recursive: true, force: true });
+			await removeWithRetries(repoRoot);
 		}
 	});
 
@@ -879,7 +892,7 @@ describe("github tool", () => {
 		});
 		afterAll(async () => {
 			await tempHome.cleanup();
-			await fs.rm(fixture.baseDir, { recursive: true, force: true });
+			await removeWithRetries(fixture.baseDir);
 		});
 
 		it("checks out multiple pull requests in a single call when pr is an array", async () => {
@@ -946,7 +959,7 @@ describe("github tool", () => {
 			runGit(fixture.repoRoot, ["commit", "-m", "manual branch commit"]);
 		});
 		afterAll(async () => {
-			await fs.rm(fixture.baseDir, { recursive: true, force: true });
+			await removeWithRetries(fixture.baseDir);
 		});
 
 		it("rejects PR pushes from branches without checkout metadata", async () => {
@@ -1049,7 +1062,7 @@ describe("github tool", () => {
 			expect(artifactText).toContain("epsilon");
 			expect(artifactText).toContain("zeta");
 		} finally {
-			await fs.rm(artifactsDir, { recursive: true, force: true });
+			await removeWithRetries(artifactsDir);
 		}
 	});
 

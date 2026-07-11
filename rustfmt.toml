@@ -71,4 +71,4 @@ blank_lines_upper_bound = 1
 force_explicit_abi = true
 hex_literal_case = "Lower"
 newline_style = "Unix"
-ignore = ["crates/brush-core-vendored/**", "crates/brush-builtins-vendored/**"]
+ignore = ["crates/vendor/brush-core/**", "crates/vendor/brush-builtins/**"]

@@ -1,0 +1,29 @@
+[package]
+name = "uu_find"
+version = "0.8.0"
+edition = "2024"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+# Vendored upstream unit tests depend on a checked-in `test_data/` fixture tree
+# (and mutate it at runtime). We patch this crate but don't carry those fixtures,
+# so the crate builds as a dependency without running the upstream unit suite.
+test = false
+
+[dependencies]
+chrono = "0.4.40"
+clap = "4.5"
+faccess = "0.2.4"
+walkdir = "2.5"
+regex = "1.11"
+onig = { version = "6.4", default-features = false }
+uucore = { version = "0.0.30", features = ["entries", "fs", "fsext", "mode"] }
+nix = { version = "0.29", features = ["fs", "user"] }
+argmax = "0.3.1"
+pi-uutils-ctx = { path = "../../pi-uutils-ctx" }
+
+[dev-dependencies]
+tempfile = "3"
+filetime = "0.2"
+

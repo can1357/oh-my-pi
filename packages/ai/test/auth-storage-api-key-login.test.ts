@@ -8,6 +8,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@pk-nerdsaver-ai/pi-ai/a
 import * as deepseekModule from "@pk-nerdsaver-ai/pi-ai/registry/deepseek";
 import * as kagiModule from "@pk-nerdsaver-ai/pi-ai/registry/kagi";
 import * as ollamaCloudModule from "@pk-nerdsaver-ai/pi-ai/registry/ollama-cloud";
+import { removeWithRetries } from "../../utils/src/temp";
 
 function countCredentialRows(dbPath: string, provider: string): number {
 	const db = new Database(dbPath, { readonly: true });
@@ -36,7 +37,7 @@ function countCredentialRowsByDisabledState(dbPath: string, provider: string, di
 	}
 }
 
-describe("AuthStorage api-key login replacement", () => {
+describe("AuthStorage api-key login upsert", () => {
 	let tempDir = "";
 	let dbPath = "";
 	let store: SqliteAuthCredentialStore | null = null;
@@ -62,7 +63,7 @@ describe("AuthStorage api-key login replacement", () => {
 		authStorage = null;
 		dbPath = "";
 		if (tempDir) {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
 	});
@@ -91,6 +92,32 @@ describe("AuthStorage api-key login replacement", () => {
 		expect(stored.credential.key).toBe("same-kagi-key");
 		expect(store.getApiKey("kagi")).toBe("same-kagi-key");
 		expect(await authStorage.getApiKey("kagi", "session-kagi-relogin")).toBe("same-kagi-key");
+	});
+
+	it("appends a different api-key row when re-login returns a new key", async () => {
+		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
+
+		loginKagiSpy.mockResolvedValueOnce("first-kagi-key").mockResolvedValueOnce("second-kagi-key");
+
+		const controller = {
+			onAuth: () => {},
+			onPrompt: async () => "",
+		};
+
+		await authStorage.login("kagi", controller);
+		await authStorage.login("kagi", controller);
+
+		expect(countCredentialRows(dbPath, "kagi")).toBe(2);
+		expect(countCredentialRowsByDisabledState(dbPath, "kagi", false)).toBe(2);
+		expect(countCredentialRowsByDisabledState(dbPath, "kagi", true)).toBe(0);
+
+		const credentials = store.listAuthCredentials("kagi");
+		expect(credentials.map(entry => entry.credential)).toEqual([
+			{ type: "api_key", key: "first-kagi-key" },
+			{ type: "api_key", key: "second-kagi-key" },
+		]);
+		const rotatedKeys = [await authStorage.getApiKey("kagi"), await authStorage.getApiKey("kagi")].sort();
+		expect(rotatedKeys).toEqual(["first-kagi-key", "second-kagi-key"]);
 	});
 
 	it("hard-deletes superseded api-key rows when a different key replaces them", () => {

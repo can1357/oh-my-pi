@@ -132,6 +132,15 @@ export class AppendOnlyLog {
 		return this.#entries;
 	}
 
+	/** Drop entries past index `count`, keeping the first `count` byte-stable.
+	 * Used by {@link AppendOnlyContextManager.syncMessages} to preserve the
+	 * already-on-the-wire prefix when a later message diverges. */
+	truncate(count: number): void {
+		if (count < 0) count = 0;
+		if (count >= this.#entries.length) return;
+		this.#entries.length = count;
+	}
+
 	clear(): void {
 		this.#entries = [];
 	}
@@ -162,8 +171,14 @@ export class AppendOnlyContextManager {
 	readonly log = new AppendOnlyLog();
 	/** How many normalized messages were synced into the log as of the last sync. */
 	#lastSyncCount = 0;
-	/** Rolling digest of synced message content — detects in-place rewrites. */
-	#syncedDigest = 0;
+	/**
+	 * Per-message digests of the synced log. Lets a deep or tail rewrite
+	 * (per-turn pruning, image strip, transformContext re-render) preserve
+	 * the byte-stable prefix instead of re-sending the entire conversation
+	 * — keeps the provider's prompt-cache hit rate up to the divergence
+	 * point on every subsequent turn.
+	 */
+	#messageDigests: number[] = [];
 
 	build(context: AgentContext, options: BuildOptions): Context {
 		this.prefix.build(context, options);
@@ -174,33 +189,51 @@ export class AppendOnlyContextManager {
 	/**
 	 * Sync normalized (provider-level) messages into the append-only log.
 	 *
-	 * Detects both compaction (shorter array) and in-place rewrites
-	 * (same length, changed content via a rolling digest).
+	 * Three cases:
+	 *
+	 * 1. **Append**: same prefix, new tail → push the new entries.
+	 * 2. **Compaction**: shorter array → clear the log and replay.
+	 * 3. **In-place rewrite** (per-turn pruning, transformContext re-render,
+	 *    image strip, etc.): find the longest byte-stable prefix between
+	 *    the previously-synced messages and the new ones, drop the log
+	 *    down to that prefix, then append the diverged tail. Earlier
+	 *    revisions cleared the whole log on any digest change, which on
+	 *    llama.cpp / local backends forced a full ~40k-token re-prefill
+	 *    every turn that an extension, prune pass, or steering re-wrap
+	 *    rewrote a single message (#3406). Preserving the stable prefix
+	 *    lets the provider's KV cache stay warm up to the divergence
+	 *    point — the model only re-prefills from the changed message on.
 	 */
 	syncMessages(normalizedMessages: any[]): void {
-		// Detect in-place rewrites of already-synced messages.
-		if (
-			this.#lastSyncCount > 0 &&
-			this.#lastSyncCount <= normalizedMessages.length &&
-			this.#computeDigest(normalizedMessages.slice(0, this.#lastSyncCount)) !== this.#syncedDigest
-		) {
-			this.log.clear();
-			this.#lastSyncCount = 0;
-		}
-
-		// Compaction — array shrunk.
+		// Compaction (array shrunk) — every previously-synced message is gone,
+		// so the log can't carry any byte-stable bytes forward.
 		if (normalizedMessages.length < this.#lastSyncCount) {
 			this.log.clear();
 			this.#lastSyncCount = 0;
+			this.#messageDigests = [];
 		}
 
-		const newMsgs = normalizedMessages.slice(this.#lastSyncCount);
-		for (const msg of newMsgs) {
+		// In-place rewrite: trim the log down to the longest byte-stable prefix
+		// that both the previous sync and the new messages share. Bound it by
+		// the current log length because `log.clear()` is public; direct clears
+		// (advisor reset) can leave the sync cursor ahead of the physical log.
+		// Anything past that point will be re-appended below with the new bytes.
+		if (this.#lastSyncCount > 0) {
+			const stableCount = Math.min(this.#longestStablePrefix(normalizedMessages), this.log.length);
+			if (stableCount < this.#lastSyncCount) {
+				this.log.truncate(stableCount);
+				this.#lastSyncCount = stableCount;
+				this.#messageDigests.length = stableCount;
+			}
+		}
+
+		// Append the diverged tail (or the full delta on a normal turn).
+		for (let i = this.#lastSyncCount; i < normalizedMessages.length; i++) {
+			const msg = normalizedMessages[i];
 			this.log.append(msg);
+			this.#messageDigests.push(this.#messageDigest(msg));
 		}
-
 		this.#lastSyncCount = normalizedMessages.length;
-		this.#syncedDigest = this.#computeDigest(normalizedMessages);
 	}
 
 	/** Reset prefix + log for a model/provider switch while mode stays active. */
@@ -208,14 +241,14 @@ export class AppendOnlyContextManager {
 		this.prefix.invalidate();
 		this.log.clear();
 		this.#lastSyncCount = 0;
-		this.#syncedDigest = 0;
+		this.#messageDigests = [];
 	}
 
 	/** Reset the sync cursor AND clear the log. */
 	resetSyncCursor(): void {
 		this.log.clear();
 		this.#lastSyncCount = 0;
-		this.#syncedDigest = 0;
+		this.#messageDigests = [];
 	}
 
 	appendMessage(message: any): void {
@@ -234,33 +267,44 @@ export class AppendOnlyContextManager {
 		this.prefix.invalidate();
 		this.log.clear();
 		this.#lastSyncCount = 0;
-		this.#syncedDigest = 0;
+		this.#messageDigests = [];
 		this.prefix.build(context, options);
 	}
 
-	/**
-	 * Deterministic digest over every field the provider may serialize — role,
-	 * content, tool calls (both `toolCalls` and OpenAI-wire `tool_calls`),
-	 * `tool_call_id`, `name`, `id`. Hashed with the same FNV-style rolling
-	 * accumulator so in-place rewrites of *any* of these fields are visible.
-	 */
-	#computeDigest(messages: readonly unknown[]): number {
-		let hash = 0;
-		for (let i = 0; i < messages.length; i++) {
-			const msg = messages[i];
-			if (!msg || typeof msg !== "object") continue;
-			const m = msg as Record<string, unknown>;
-			const payload = JSON.stringify({
-				r: m.role ?? null,
-				c: m.content ?? null,
-				tc: m.toolCalls ?? m.tool_calls ?? null,
-				tcid: m.tool_call_id ?? null,
-				n: m.name ?? null,
-				id: m.id ?? null,
-			});
-			for (let j = 0; j < payload.length; j++) {
-				hash = ((hash << 5) - hash + payload.charCodeAt(j)) | 0;
+	/** Index of the first message whose serialized bytes differ from the
+	 * previously-synced log; equals `min(lastSyncCount, normalizedMessages.length)`
+	 * when nothing diverged. */
+	#longestStablePrefix(normalizedMessages: readonly unknown[]): number {
+		const bound = Math.min(this.#lastSyncCount, normalizedMessages.length);
+		for (let i = 0; i < bound; i++) {
+			if (this.#messageDigest(normalizedMessages[i]) !== this.#messageDigests[i]) {
+				return i;
 			}
+		}
+		return bound;
+	}
+
+	/** Deterministic digest over every field the provider may serialize — role,
+	 * content, provider-native replay payloads, tool calls (both `toolCalls` and
+	 * OpenAI-wire `tool_calls`), tool-result ids/names/error flags (both internal
+	 * camelCase and wire snake_case), and assistant `id` — so an in-place rewrite
+	 * of *any* of these fields is visible to {@link #longestStablePrefix}. */
+	#messageDigest(msg: unknown): number {
+		if (!msg || typeof msg !== "object") return 0;
+		const m = msg as Record<string, unknown>;
+		const payload = JSON.stringify({
+			r: m.role ?? null,
+			c: m.content ?? null,
+			pp: m.providerPayload ?? null,
+			tc: m.toolCalls ?? m.tool_calls ?? null,
+			tcid: m.toolCallId ?? m.tool_call_id ?? null,
+			tn: m.toolName ?? m.name ?? null,
+			err: m.isError ?? null,
+			id: m.id ?? null,
+		});
+		let hash = 0;
+		for (let j = 0; j < payload.length; j++) {
+			hash = ((hash << 5) - hash + payload.charCodeAt(j)) | 0;
 		}
 		return hash >>> 0;
 	}

@@ -195,7 +195,17 @@ export class SettingsList implements Component {
 		if (this.#submenuComponent) return;
 		// Wheel is row-level interaction: it returns focus to the rows.
 		this.#sectionFocus = false;
-		this.#moveSelection(delta);
+		this.#moveSelection(delta, false);
+	}
+
+	/** Move the selection one step for a wheel notch if the pointer is within the settings pane. */
+	handleWheelAt(delta: -1 | 1, _line: number, col: number): boolean {
+		if (this.#submenuComponent) return false;
+		if (this.#sidebarHitCol > 0 && col < this.#sidebarHitCol) {
+			return false;
+		}
+		this.handleWheel(delta);
+		return true;
 	}
 
 	/** Highlight the item under the pointer (null clears). */
@@ -308,13 +318,22 @@ export class SettingsList implements Component {
 		return index >= 0 ? index : 0;
 	}
 
-	/** Move selection by one selectable item, wrapping and skipping headings. */
-	#moveSelection(delta: -1 | 1): void {
+	/** Move selection by one selectable item, wrapping or clamping, and skipping headings. */
+	#moveSelection(delta: -1 | 1, wrap = true): void {
 		const len = this.#filteredItems.length;
 		if (len === 0) return;
 		let index = this.#selectedIndex;
-		for (let step = 0; step < len; step++) {
-			index = (index + delta + len) % len;
+		for (let step = 0; step < len * 2; step++) {
+			const next = index + delta;
+			if (next < 0 || next >= len) {
+				if (wrap) {
+					index = (next + len) % len;
+				} else {
+					return;
+				}
+			} else {
+				index = next;
+			}
 			if (!this.#filteredItems[index]?.heading) {
 				this.#selectedIndex = index;
 				this.#notifySelection();
@@ -479,7 +498,7 @@ export class SettingsList implements Component {
 		const labelPadded = item.label + padding(Math.max(0, maxLabelWidth - visibleWidth(item.label)));
 		const separator = "  ";
 		const valueMaxWidth = rowWidth - prefixWidth - maxLabelWidth - visibleWidth(separator) - 2;
-		const valuePlain = truncateToWidth(item.currentValue, valueMaxWidth, Ellipsis.Omit);
+		const valuePlain = truncateToWidth(String(item.currentValue ?? ""), valueMaxWidth, Ellipsis.Omit);
 		const hovered = !isSelected && this.#theme.hovered !== undefined && item.id === this.#hoveredItemId;
 		// De-emphasized rows (outside the active section) render as plain text
 		// under one dim wash so inner label/value colors don't fight it.

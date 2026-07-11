@@ -44,6 +44,56 @@ export function parseSgrMouse(data: string): SgrMouseEvent | null {
 	return { button, col, row, release, wheel, motion, leftClick };
 }
 
+/** Handler invoked with a decoded SGR event; returning `false` reports unhandled. */
+export type SgrMouseHandler = (event: SgrMouseEvent) => boolean | undefined;
+
+/**
+ * Decode an SGR mouse report and forward it to `handler`. Returns `false` when
+ * `data` is not an SGR mouse report (or fails to parse), so callers can fall
+ * through to other input handling. Centralizes the repeated
+ * `data.startsWith("\x1b[<")` + `parseSgrMouse()` pattern.
+ */
+export function routeSgrMouseInput(data: string, handler: SgrMouseHandler): boolean {
+	if (!data.startsWith("\x1b[<")) return false;
+	const event = parseSgrMouse(data);
+	if (!event) return false;
+	return handler(event) !== false;
+}
+
+/**
+ * Structural view of a SelectList-like target for mouse routing. Declared here
+ * (rather than importing the component) to keep this core module free of any
+ * component-to-core import cycle.
+ */
+export interface SelectListMouseTarget {
+	handleWheel(delta: -1 | 1): void;
+	hitTest(line: number): number | undefined;
+	setHoverIndex(index: number | null): void;
+	clickItem(index: number): void;
+}
+
+/**
+ * Route a decoded mouse event against a SelectList-like target at the given
+ * 0-based frame-local `line`. Centralizes the repeated wheel/hit-test/hover/
+ * click pattern. Returns `true` when the event was consumed.
+ */
+export function routeSelectListMouse(target: SelectListMouseTarget, event: SgrMouseEvent, line: number): boolean {
+	if (event.wheel !== null) {
+		target.handleWheel(event.wheel);
+		return true;
+	}
+	const index = target.hitTest(line);
+	if (event.motion) {
+		target.setHoverIndex(index ?? null);
+		return true;
+	}
+	if (event.leftClick && index !== undefined) {
+		target.clickItem(index);
+		return true;
+	}
+	return false;
+}
+
 /**
  * Implemented by components that accept routed mouse events at frame-local
  * coordinates. Hosts translate screen coordinates to the component's own

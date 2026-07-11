@@ -1,5 +1,6 @@
 import { scheduler } from "node:timers/promises";
 import { toNumber } from "@pk-nerdsaver-ai/pi-catalog/utils";
+import * as AIError from "../error";
 import { claudeCodeVersion } from "../providers/anthropic";
 import type {
 	CredentialRankingStrategy,
@@ -148,7 +149,7 @@ function hasUsageData(payload: ClaudeUsageResponse): boolean {
 }
 
 function isRetryableStatus(status: number): boolean {
-	return status === 429 || (status >= 500 && status < 600);
+	return AIError.isTransientStatus(status);
 }
 
 function isAbortError(error: unknown, signal?: AbortSignal): boolean {

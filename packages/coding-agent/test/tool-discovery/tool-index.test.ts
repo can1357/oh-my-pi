@@ -261,8 +261,8 @@ describe("BM25 search", () => {
 			schemaKeys: ["channel", "text"],
 		},
 		{
-			name: "find",
-			label: "find",
+			name: "glob",
+			label: "glob",
 			summary: "Find files and directories matching a glob pattern",
 			source: "builtin",
 			schemaKeys: ["pattern", "path"],
@@ -284,7 +284,7 @@ describe("BM25 search", () => {
 
 	it("finds built-in tools too", () => {
 		const results = searchDiscoverableTools(index, "find files", 5);
-		expect(results.some(r => r.tool.name === "find")).toBe(true);
+		expect(results.some(r => r.tool.name === "glob")).toBe(true);
 	});
 
 	it("respects the limit", () => {

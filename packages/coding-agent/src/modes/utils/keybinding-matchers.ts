@@ -1,4 +1,4 @@
-import { getKeybindings, matchesKey } from "@pk-nerdsaver-ai/pi-tui";
+import { getKeybindings, type KeyId, matchesKey } from "@pk-nerdsaver-ai/pi-tui";
 
 /**
  * Match the coding-agent interrupt key.
@@ -48,4 +48,39 @@ export function matchesAppExternalEditor(data: string): boolean {
 		return keybindings.matches(data, "app.editor.external");
 	}
 	return matchesKey(data, "ctrl+g");
+}
+
+function matchesEffectiveKey(data: string, key: KeyId): boolean {
+	if ((key === "ctrl+enter" || key === "ctrl+return") && data.charCodeAt(0) === 10 && data.length > 1) {
+		return true;
+	}
+	return matchesKey(data, key);
+}
+
+function matchesEffectiveKeys(data: string, keys: readonly KeyId[]): boolean {
+	for (const key of keys) {
+		if (matchesEffectiveKey(data, key)) return true;
+	}
+	return false;
+}
+
+/**
+ * Match the "submit multi-line text input" keybinding (`app.message.followUp`).
+ *
+ * Used by forms where plain Enter inserts a newline and a modified-Enter chord
+ * submits — the main editor's follow-up handler, the agent dashboard's new-agent
+ * description, and the hook editor's hook-style mode. The keybinding defaults to
+ * `["ctrl+q", "ctrl+enter"]` so Windows Terminal (which can't deliver a distinct
+ * Ctrl+Enter event; #1903) still has a working chord without user remapping.
+ *
+ * Also recognizes modifier-tagged LF as Ctrl+Enter only when Ctrl+Enter is an
+ * effective follow-up binding.
+ */
+export function matchesAppFollowUp(data: string): boolean {
+	const keybindings = getKeybindings();
+	const keys = keybindings.getKeys("app.message.followUp");
+	if (keys.length > 0) {
+		return matchesEffectiveKeys(data, keys);
+	}
+	return matchesEffectiveKeys(data, ["ctrl+enter", "ctrl+q"]);
 }

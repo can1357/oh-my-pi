@@ -12,6 +12,8 @@ to short-circuit the network.
 from __future__ import annotations
 
 import json
+import asyncio
+import time
 import logging
 from collections.abc import Mapping
 from pathlib import Path
@@ -118,6 +120,8 @@ class GitHubProxyClient:
             timeout=self._timeout,
         )
 
+    _TRANSIENT_RETRY_DELAYS = (1.0, 3.0, 10.0)
+
     async def _request(
         self,
         method: str,
@@ -127,30 +131,38 @@ class GitHubProxyClient:
         json_body: Mapping[str, Any] | None = None,
     ) -> Any:
         body_bytes = b"" if json_body is None else json.dumps(json_body).encode("utf-8")
-        async with self._async_client() as client:
-            # Build the request first so httpx canonicalizes the URL once;
-            # we then sign against the encoded query string the wire will
-            # carry. Signing before this point would mean re-implementing
-            # httpx's param encoding, with a high risk of byte-level drift
-            # from the server's `request.url.query`.
-            req = client.build_request(
-                method,
-                path,
-                params=params,
-                content=body_bytes if json_body is not None else None,
-            )
-            target = req.url.path
-            if req.url.query:
-                target = f"{target}?{req.url.query.decode('ascii')}"
-            req.headers.update(_signed_headers(method, target, body_bytes, self._key))
-            if json_body is not None:
-                req.headers["Content-Type"] = "application/json"
-            resp = await client.send(req)
-        if resp.status_code >= 400:
-            raise _decode_error(resp)
-        if resp.status_code == 204 or not resp.content:
-            return None
-        return resp.json()
+        last_exc: Exception | None = None
+        for attempt, delay in enumerate((*self._TRANSIENT_RETRY_DELAYS, None)):
+            try:
+                async with self._async_client() as client:
+                    req = client.build_request(
+                        method,
+                        path,
+                        params=params,
+                        content=body_bytes if json_body is not None else None,
+                    )
+                    target = req.url.path
+                    if req.url.query:
+                        target = f"{target}?{req.url.query.decode('ascii')}"
+                    req.headers.update(_signed_headers(method, target, body_bytes, self._key))
+                    if json_body is not None:
+                        req.headers["Content-Type"] = "application/json"
+                    resp = await client.send(req)
+                if resp.status_code >= 400:
+                    raise _decode_error(resp)
+                if resp.status_code == 204 or not resp.content:
+                    return None
+                return resp.json()
+            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                last_exc = exc
+                if delay is None:
+                    break
+                log.warning(
+                    "proxy client transient error, retrying",
+                    extra={"method": method, "path": path, "attempt": attempt + 1, "delay": delay, "error": str(exc)},
+                )
+                await asyncio.sleep(delay)
+        raise last_exc  # type: ignore[misc]
 
     # ---- reads ----
     async def get_repo(self, repo: str) -> RepoInfo:
@@ -372,18 +384,33 @@ class ProxyGitTransport:
             timeout=self._timeout,
         )
 
+    _TRANSIENT_RETRY_DELAYS = (2.0, 5.0, 15.0)
+
     def _post(self, path: str, body: Mapping[str, Any]) -> Mapping[str, Any]:
         body_bytes = json.dumps(body).encode("utf-8")
-        headers = _signed_headers("POST", path, body_bytes, self._key)
-        headers["Content-Type"] = "application/json"
-        with self._client() as client:
-            resp = client.request("POST", path, content=body_bytes, headers=headers)
-        if resp.status_code >= 400:
-            raise _decode_error(resp)
-        if resp.status_code == 204 or not resp.content:
-            return {}
-        data = resp.json()
-        return data if isinstance(data, dict) else {}
+        last_exc: Exception | None = None
+        for attempt, delay in enumerate((*self._TRANSIENT_RETRY_DELAYS, None)):
+            try:
+                headers = _signed_headers("POST", path, body_bytes, self._key)
+                headers["Content-Type"] = "application/json"
+                with self._client() as client:
+                    resp = client.request("POST", path, content=body_bytes, headers=headers)
+                if resp.status_code >= 400:
+                    raise _decode_error(resp)
+                if resp.status_code == 204 or not resp.content:
+                    return {}
+                data = resp.json()
+                return data if isinstance(data, dict) else {}
+            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                last_exc = exc
+                if delay is None:
+                    break
+                log.warning(
+                    "proxy transport transient error, retrying",
+                    extra={"path": path, "attempt": attempt + 1, "delay": delay, "error": str(exc)},
+                )
+                time.sleep(delay)
+        raise last_exc  # type: ignore[misc]
 
     def clone_pool(self, *, repo: str, clone_url: str, default_branch: str, target: Path) -> None:
         del target  # remote-resolved on the proxy side from `repo`

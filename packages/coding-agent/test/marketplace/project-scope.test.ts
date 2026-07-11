@@ -8,7 +8,7 @@
  * This file imports from helpers.ts directly — the native addon IS present in the
  * test environment (verified: `bun run import-helpers.ts` succeeds).
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -24,6 +24,7 @@ import {
 	readInstalledPluginsRegistry,
 	writeInstalledPluginsRegistry,
 } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/marketplace";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -47,7 +48,8 @@ describe("resolveActiveProjectRegistryPath", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		vi.restoreAllMocks();
+		removeSyncWithRetries(tmpDir);
 	});
 
 	it("walk-up finds nearest .omp/ directory", async () => {
@@ -98,23 +100,19 @@ describe("resolveActiveProjectRegistryPath", () => {
 	it("does not treat ~/.git as a project root (pass-2 home-dir guard)", async () => {
 		// Simulate a dotfiles repo managed with a bare-git technique: ~/.git exists.
 		// resolveActiveProjectRegistryPath must NOT return ~/.omp/.../installed_plugins.json.
-		const homeDir = os.homedir();
+		const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-proj-scope-home-"));
+		vi.spyOn(os, "homedir").mockReturnValue(homeDir);
 		const fakeHomeGit = path.join(homeDir, ".git");
-		const hadGit = await fs.promises
-			.stat(fakeHomeGit)
-			.then(() => true)
-			.catch(() => false);
-		if (!hadGit) {
-			await fs.promises.mkdir(fakeHomeGit, { recursive: true });
-		}
+		await fs.promises.mkdir(fakeHomeGit, { recursive: true });
+		const cwd = path.join(homeDir, "work");
+		await fs.promises.mkdir(cwd, { recursive: true });
 		try {
-			// Start from a tmpDir that has no .omp/ or .git/ of its own.
-			const result = await resolveActiveProjectRegistryPath(tmpDir);
-			// Must not resolve to the home-dir OMP registry.
+			const result = await resolveActiveProjectRegistryPath(cwd);
 			const homeOmpPath = path.join(homeDir, ".omp", "plugins", "installed_plugins.json");
 			expect(result).not.toBe(homeOmpPath);
+			expect(result).toBeNull();
 		} finally {
-			if (!hadGit) await fs.promises.rm(fakeHomeGit, { recursive: true, force: true });
+			removeSyncWithRetries(homeDir);
 		}
 	});
 
@@ -158,8 +156,8 @@ describe("listClaudePluginRoots — project shadows user", () => {
 	afterEach(() => {
 		// Cache is keyed by home:projectPath — must clear between tests.
 		clearClaudePluginRootsCache();
-		fs.rmSync(tmpHome, { recursive: true, force: true });
-		fs.rmSync(tmpProject, { recursive: true, force: true });
+		removeSyncWithRetries(tmpHome);
+		removeSyncWithRetries(tmpProject);
 	});
 
 	it("project entry shadows user entry when plugin IDs match", async () => {

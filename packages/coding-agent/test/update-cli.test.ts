@@ -13,6 +13,7 @@ import {
 	resolveUpdateMethodForTest,
 	sweepStaleBackups,
 } from "@pk-nerdsaver-ai/pi-coding-agent/cli/update-cli";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 const tempDirs: string[] = [];
 
@@ -23,7 +24,7 @@ async function makeTempDir(): Promise<string> {
 }
 
 afterEach(async () => {
-	await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
+	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 
 describe("update-cli install target detection", () => {

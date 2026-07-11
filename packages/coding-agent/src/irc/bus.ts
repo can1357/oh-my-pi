@@ -109,6 +109,11 @@ export class IrcBus {
 	 * disabled — e.g. blocked in a synchronous task spawn awaiting the
 	 * sender's own batch) can generate an ephemeral side-channel auto-reply
 	 * instead of stranding the sender until timeout.
+	 *
+	 * `opts.suppressRelay` skips the display-only main-UI relay for this leg.
+	 * Set by broadcast fan-out when the same broadcast also targets the main
+	 * agent directly: the main agent then already sees the body as its own
+	 * incoming card, so relaying the sibling legs would duplicate it.
 	 */
 	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: IrcSendOptions): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
@@ -210,7 +215,7 @@ export class IrcBus {
 		const waiter = this.#takeMatchingWaiter(message.to, message.from);
 		if (waiter) {
 			waiter.resolve(message);
-			this.#relayToMainUi(message);
+			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : "injected" };
 		}
 
@@ -222,7 +227,7 @@ export class IrcBus {
 
 		try {
 			const delivery = await session.deliverIrcMessage(message, opts);
-			this.#relayToMainUi(message);
+			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : delivery };
 		} catch (error) {
 			// Live hand-off failed (e.g. recipient disposed mid-shutdown): buffer

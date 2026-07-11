@@ -6,6 +6,7 @@ import { clearCache as clearFsCache } from "@pk-nerdsaver-ai/pi-coding-agent/cap
 import { type SlashCommand, slashCommandCapability } from "@pk-nerdsaver-ai/pi-coding-agent/capability/slash-command";
 import { resetSettingsForTest } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { loadCapability } from "@pk-nerdsaver-ai/pi-coding-agent/discovery";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 async function writeFile(filePath: string, content: string): Promise<void> {
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -39,7 +40,7 @@ describe("Claude Code slash command discovery", () => {
 		} else {
 			process.env.HOME = originalHome;
 		}
-		await fs.rm(root, { recursive: true, force: true });
+		await removeWithRetries(root);
 	});
 
 	test("loads subdirectory commands under both basename and namespace names", async () => {

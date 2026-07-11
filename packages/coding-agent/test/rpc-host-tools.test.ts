@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentEvent } from "@pk-nerdsaver-ai/pi-agent-core";
@@ -10,6 +9,7 @@ import type {
 	RpcHostToolCancelRequest,
 	RpcHostToolUpdate,
 } from "@pk-nerdsaver-ai/pi-coding-agent/modes/rpc/rpc-types";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 const tempPaths: string[] = [];
 
@@ -17,7 +17,7 @@ afterEach(async () => {
 	await Promise.all(
 		tempPaths.splice(0).map(async filePath => {
 			try {
-				await fs.rm(filePath, { force: true });
+				await removeWithRetries(filePath);
 			} catch {}
 		}),
 	);

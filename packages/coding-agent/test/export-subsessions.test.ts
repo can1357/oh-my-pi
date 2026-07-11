@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import { collectSubSessions } from "../src/export/html";
 
 /**
@@ -41,7 +42,7 @@ describe("collectSubSessions", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(root, { recursive: true, force: true });
+		await removeWithRetries(root);
 	});
 
 	test("collects nested subagent sessions with parent links and leaf ids", async () => {

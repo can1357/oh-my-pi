@@ -408,6 +408,115 @@ describe("arkToWireSchema — authored property order", () => {
 	});
 });
 
+// ---------------------------------------------------------------------------
+// const-union collapse — ArkType's described literal unions / generic anyOf
+// ---------------------------------------------------------------------------
+
+describe("const-union collapse", () => {
+	function tool(parameters: unknown): Tool {
+		return { name: "t", description: "d", parameters } as Tool;
+	}
+
+	it("collapses a described ArkType enumerated union into one typed enum with a single description", () => {
+		const wire = toolWireSchema(tool(type({ size: type.enumerated("a", "b", "c").describe("label") })));
+		const size = (wire.properties as Record<string, unknown>).size as Record<string, unknown>;
+		expect(size.anyOf).toBeUndefined();
+		expect(size.type).toBe("string");
+		expect(size.description).toBe("label");
+		expect(size.enum).toEqual(expect.arrayContaining(["a", "b", "c"]));
+		expect((size.enum as unknown[]).length).toBe(3);
+		// "label" appears exactly once — not duplicated onto every value branch.
+		expect(JSON.stringify(size).match(/"label"/g)?.length).toBe(1);
+	});
+
+	it("emits an exact { type, enum, description } shape, lifting a shared branch description", () => {
+		const param = {
+			type: "object",
+			properties: {
+				x: {
+					anyOf: [
+						{ const: "a", description: "lbl" },
+						{ const: "b", description: "lbl" },
+					],
+				},
+			},
+			required: ["x"],
+			additionalProperties: false,
+		};
+		const wire = toolWireSchema(tool(param));
+		const x = (wire.properties as Record<string, unknown>).x as Record<string, unknown>;
+		expect(x).toEqual({ type: "string", enum: ["a", "b"], description: "lbl" });
+	});
+
+	it("leaves a non-const anyOf with distinct per-branch descriptions untouched", () => {
+		const param = {
+			type: "object",
+			properties: {
+				x: {
+					anyOf: [
+						{ type: "string", description: "a string" },
+						{ type: "number", description: "a number" },
+					],
+				},
+			},
+			required: ["x"],
+			additionalProperties: false,
+		};
+		const wire = toolWireSchema(tool(param));
+		const x = (wire.properties as Record<string, unknown>).x as Record<string, unknown>;
+		expect(x.enum).toBeUndefined();
+		expect(x.anyOf).toEqual([
+			{ type: "string", description: "a string" },
+			{ type: "number", description: "a number" },
+		]);
+	});
+
+	it("preserves a const union whose branches carry distinct per-variant descriptions", () => {
+		const param = {
+			type: "object",
+			properties: {
+				x: {
+					anyOf: [
+						{ const: "a", description: "first" },
+						{ const: "b", description: "second" },
+					],
+				},
+			},
+			required: ["x"],
+			additionalProperties: false,
+		};
+		const wire = toolWireSchema(tool(param));
+		const x = (wire.properties as Record<string, unknown>).x as Record<string, unknown>;
+		expect(x.enum).toBeUndefined();
+		expect(x.anyOf).toEqual([
+			{ const: "a", description: "first" },
+			{ const: "b", description: "second" },
+		]);
+	});
+
+	it("keeps the anyOf when a shared branch description disagrees with the union root's description", () => {
+		const param = {
+			type: "object",
+			properties: {
+				x: {
+					description: "parent",
+					anyOf: [
+						{ const: "a", description: "branch" },
+						{ const: "b", description: "branch" },
+					],
+				},
+			},
+			required: ["x"],
+			additionalProperties: false,
+		};
+		const wire = toolWireSchema(tool(param));
+		const x = (wire.properties as Record<string, unknown>).x as Record<string, unknown>;
+		expect(x.enum).toBeUndefined();
+		expect(x.description).toBe("parent");
+		expect(Array.isArray(x.anyOf)).toBe(true);
+	});
+});
+
 describe("stripSchemaDescriptions", () => {
 	it("removes annotations through nested schema keywords while preserving structure", () => {
 		const schema = {

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@pk-nerdsaver-ai/pi-ai/auth-storage";
 import * as oauthUtils from "@pk-nerdsaver-ai/pi-ai/registry/oauth";
+import { removeWithRetries } from "../../utils/src/temp";
 
 const PROVIDER = "unit-oauth-identity";
 
@@ -24,7 +25,7 @@ describe("AuthStorage.getOAuthAccountIdentity", () => {
 		store = null;
 		authStorage = null;
 		if (tempDir) {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
 	});

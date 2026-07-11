@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type MCPServer, mcpCapability } from "@pk-nerdsaver-ai/pi-coding-agent/capability/mcp";
 import { loadCapability } from "@pk-nerdsaver-ai/pi-coding-agent/discovery";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 async function loadStandaloneMcpConfig(cwd: string): Promise<MCPServer[]> {
 	const result = await loadCapability<MCPServer>(mcpCapability.id, {
@@ -43,7 +44,7 @@ describe("standalone mcp.json oauth env expansion", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await removeWithRetries(tempDir);
 		for (const [key, value] of Object.entries(originalEnv)) {
 			if (value === undefined) {
 				delete process.env[key];

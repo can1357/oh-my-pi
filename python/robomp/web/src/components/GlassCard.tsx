@@ -14,7 +14,7 @@ export interface GlassCardProps {
 // the inset content padding so tables/log lists can reach the edge.
 export function GlassCard(props: GlassCardProps): JSX.Element {
   const cls = (): string => {
-    const base = "glass glass-rise rounded-[22px] overflow-hidden";
+    const base = "glass glass-rise rounded-lg overflow-hidden";
     return props.class ? `${base} ${props.class}` : base;
   };
   return (

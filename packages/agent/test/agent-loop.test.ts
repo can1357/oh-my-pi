@@ -840,6 +840,47 @@ describe("agentLoop with AgentMessage", () => {
 		expect(assistantEnd.message.content.some(block => block.type === "toolCall")).toBe(false);
 	});
 
+	it("drops incomplete tool calls on labeled user interrupts", async () => {
+		const context: AgentContext = {
+			systemPrompt: ["You are helpful."],
+			messages: [],
+			tools: [],
+		};
+		const abortController = new AbortController();
+		const mock = createMockModel();
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const streamFn = () => {
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const partial = createAssistantMessage(
+					[{ type: "toolCall", id: "", name: "browser", arguments: {} }],
+					"toolUse",
+				);
+				stream.push({ type: "start", partial });
+				setTimeout(() => {
+					abortController.abort("Interrupted by user");
+					stream.push({ type: "done", reason: "toolUse", message: partial });
+				}, 0);
+			});
+			return stream;
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config, abortController.signal, streamFn);
+		for await (const event of stream) events.push(event);
+
+		expect(events.some(event => event.type === "message_end" && event.message.role === "toolResult")).toBe(false);
+		const assistantEnd = events.find(
+			(e): e is Extract<AgentEvent, { type: "message_end" }> =>
+				e.type === "message_end" && e.message.role === "assistant",
+		);
+		expect(assistantEnd?.message.role).toBe("assistant");
+		if (assistantEnd?.message.role !== "assistant") return;
+		expect(assistantEnd.message.errorMessage).toBe("Interrupted by user");
+		expect(assistantEnd.message.content.some(block => block.type === "toolCall")).toBe(false);
+	});
+
 	it("should skip remaining tool calls when steering is queued", async () => {
 		const toolSchema = type({ value: "string" });
 		const executed: string[] = [];

@@ -72,12 +72,6 @@ const PRELUDE_GLOBAL_KEYS = [
 	"__pool",
 	"read",
 	"write",
-	"append",
-	"sort",
-	"uniq",
-	"counter",
-	"diff",
-	"tree",
 	"env",
 ];
 

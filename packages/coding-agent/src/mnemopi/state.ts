@@ -5,7 +5,13 @@ import type { Mnemopi, RecallResult } from "@pk-nerdsaver-ai/pi-mnemopi";
 import type * as MnemopiCoreNs from "@pk-nerdsaver-ai/pi-mnemopi/core";
 import type { LocalModelInitializer } from "@pk-nerdsaver-ai/pi-mnemopi/core";
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
-import { composeRecallQuery, prepareRetentionTranscript, truncateRecallQuery } from "../hindsight/content";
+import {
+	composeRecallQuery,
+	formatCurrentTime,
+	prepareRetentionTranscript,
+	prepareUserRetentionTranscript,
+	truncateRecallQuery,
+} from "../hindsight/content";
 import { extractMessages } from "../hindsight/transcript";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import type { MnemopiBackendConfig, MnemopiScoping } from "./config";
@@ -347,6 +353,7 @@ export class MnemopiSessionState {
 	async retainMessages(messages: Array<{ role: string; content: string }>, sourceId: string): Promise<void> {
 		const { transcript, messageCount } = prepareRetentionTranscript(messages, true);
 		if (!transcript) return;
+		const { transcript: extractText } = prepareUserRetentionTranscript(messages);
 		this.rememberInScope(transcript, {
 			source: "coding-agent-transcript",
 			importance: 0.65,
@@ -357,8 +364,9 @@ export class MnemopiSessionState {
 				cwd: this.session.sessionManager.getCwd(),
 			},
 			scope: "bank",
-			extract: true,
-			extractEntities: true,
+			extract: extractText !== null,
+			extractEntities: extractText !== null,
+			extractText,
 			veracity: "unknown",
 			memoryType: "episode",
 		});
@@ -445,7 +453,8 @@ export class MnemopiSessionState {
 // shared bank, then merging recall results while keeping writes project-local.
 function createScopedResources(config: MnemopiBackendConfig): MnemopiScopedResources {
 	// Env vars (MNEMOPI_POLYPHONIC_RECALL / MNEMOPI_ENHANCED_RECALL) still override
-	// these config-driven defaults inside the core gates.
+	// these config-driven defaults inside the core gates. Proactive linking is
+	// per-memory instance below so concurrent sessions cannot clobber each other.
 	requireMnemopi().configureRecallFeatures({
 		polyphonicRecall: config.polyphonicRecall,
 		enhancedRecall: config.enhancedRecall,
@@ -571,6 +580,7 @@ function createMemory(config: MnemopiBackendConfig, bank: string): Mnemopi {
 		authorType: "agent",
 		channelId: bank,
 		...providerOptions,
+		proactiveLinking: config.proactiveLinking,
 	} as ConstructorParameters<typeof Mnemopi>[0]);
 }
 

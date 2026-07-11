@@ -1,0 +1,1315 @@
+syntax = "proto3";
+
+package exa.eval_pb;
+
+import "buf/validate/validate.proto";
+import "exa/api_server_pb/api_server.proto";
+import "exa/chat_pb/chat.proto";
+import "exa/codeium_common_pb/codeium_common.proto";
+import "exa/context_module_pb/context_module.proto";
+import "exa/cortex_pb/cortex.proto";
+import "exa/eval/pr_eval/datasets_pb/datasets.proto";
+import "exa/model_management_pb/model_management.proto";
+import "exa/trainer_pb/config.proto";
+
+enum DeletionType {
+  DELETION_TYPE_UNSPECIFIED = 0;
+  DELETION_TYPE_INLINE_FIM = 1;
+  DELETION_TYPE_RANDOM_MULTILINE = 2;
+  DELETION_TYPE_FUNCTION_PARAMS = 3;
+  DELETION_TYPE_REFERENCE = 4;
+  DELETION_TYPE_REPO_REFERENCE = 5;
+  DELETION_TYPE_FULL_FUNCTION = 6;
+  DELETION_TYPE_COMMENTED_CODEBLOCK = 7;
+}
+
+enum ExternalModelPromptFormat {
+  EXTERNAL_MODEL_PROMPT_FORMAT_UNSPECIFIED = 0;
+  EXTERNAL_MODEL_PROMPT_FORMAT_L3_INSTRUCT = 1;
+  EXTERNAL_MODEL_PROMPT_FORMAT_BASE_MODEL = 2;
+}
+
+enum ContextItemOrder {
+  CONTEXT_ITEM_ORDER_UNSPECIFIED = 0;
+  CONTEXT_ITEM_ORDER_SHUFFLED = 1;
+  CONTEXT_ITEM_ORDER_ASCENDING_RELEVANCE = 2;
+  CONTEXT_ITEM_ORDER_DESCENDING_RELEVANCE = 3;
+  CONTEXT_ITEM_ORDER_SHUFFLED_TOP_K = 4;
+}
+
+enum InferDataTags {
+  INFER_DATA_TAGS_UNSPECIFIED = 0;
+  INFER_DATA_TAGS_SOURCE_FUNCTION_BODY_RANDOM = 1;
+  INFER_DATA_TAGS_SOURCE_DEFINITION_FUNCTION = 2;
+  INFER_DATA_TAGS_SOURCE_REFERENCE_CALL = 3;
+  INFER_DATA_TAGS_SOURCE_REFERENCE_CLASS = 4;
+  INFER_DATA_TAGS_SOURCE_FUNCTION_BODY_FULL = 5;
+  INFER_DATA_TAGS_SOURCE_REPO_REFERENCE = 6;
+  INFER_DATA_TAGS_SOURCE_COMMENTED_CODEBLOCK = 7;
+  INFER_DATA_TAGS_DELETION_SINGLE_LINE = 100;
+  INFER_DATA_TAGS_DELETION_MULTI_LINE = 101;
+  INFER_DATA_TAGS_DELETION_INLINE_FIM = 102;
+  INFER_DATA_TAGS_CHAT_REFACTOR_EFFICIENCY = 200;
+  INFER_DATA_TAGS_INSTRUCTION_INSERT = 300;
+  INFER_DATA_TAGS_INSTRUCTION_EDIT = 301;
+  INFER_DATA_TAGS_SUPERCOMPLETE_NO_EDIT = 400;
+  INFER_DATA_TAGS_CHAT_SINGLE_TURN_NO_CONTEXT = 500;
+  INFER_DATA_TAGS_CHAT_MULTITURN_NO_CONTEXT = 501;
+  INFER_DATA_TAGS_CHAT_SINGLE_TURN_WITH_CONTEXT = 502;
+  INFER_DATA_TAGS_CHAT_MULTITURN_WITH_CONTEXT = 503;
+  INFER_DATA_TAGS_CASCADE_SYSTEM_RESPONSE = 600;
+  INFER_DATA_TAGS_CASCADE_TOOL_CALL = 601;
+  INFER_DATA_TAGS_CASCADE_CODE_WRITING = 602;
+  INFER_DATA_TAGS_INSERTION_COMPLETION = 700;
+  INFER_DATA_TAGS_EDIT_COMPLETION = 701;
+}
+
+enum EvalType {
+  EVAL_TYPE_UNSPECIFIED = 0;
+  EVAL_TYPE_AUTOCOMPLETE = 1;
+  EVAL_TYPE_CHAT = 2;
+  EVAL_TYPE_INSTRUCTION_AUTOCOMPLETE = 3;
+  EVAL_TYPE_INSTRUCTION_CHAT = 4;
+  EVAL_TYPE_HUMAN_EVAL = 5;
+  EVAL_TYPE_LLMJUDGE = 6;
+  EVAL_TYPE_AUTOCOMPLETE_COMMAND = 7;
+  EVAL_TYPE_CODE_REASONING = 8;
+}
+
+enum InstructionType {
+  INSTRUCTION_TYPE_UNSPECIFIED = 0;
+  INSTRUCTION_TYPE_INSERT = 1;
+  INSTRUCTION_TYPE_EDIT = 2;
+}
+
+enum OverallTrajectoryJudgePromptType {
+  OVERALL_TRAJECTORY_JUDGE_PROMPT_TYPE_UNSPECIFIED = 0;
+  OVERALL_TRAJECTORY_JUDGE_PROMPT_TYPE_CONVERSATIONAL = 1;
+  OVERALL_TRAJECTORY_JUDGE_PROMPT_TYPE_IMPLICIT_MATCHER = 2;
+  OVERALL_TRAJECTORY_JUDGE_PROMPT_TYPE_INTENT_BOUNDARY = 3;
+  OVERALL_TRAJECTORY_JUDGE_PROMPT_TYPE_RUBRIC_CREATOR = 4;
+  OVERALL_TRAJECTORY_JUDGE_PROMPT_TYPE_RUBRIC_EVAL = 5;
+  OVERALL_TRAJECTORY_JUDGE_PROMPT_TYPE_INTENT_BOUNDARY_RUN_COMMAND_VERIFIER = 6;
+}
+
+enum ProcessConditioningMode {
+  PROCESS_CONDITIONING_MODE_UNSPECIFIED = 0;
+  PROCESS_CONDITIONING_MODE_PARTIAL_HISTORY = 1;
+  PROCESS_CONDITIONING_MODE_SUBTRAJECTORY_SUMMARY = 2;
+}
+
+enum PRGenerationStage {
+  PR_GENERATION_STAGE_UNSPECIFIED = 0;
+  PR_GENERATION_STAGE_RETRIEVE = 1;
+  PR_GENERATION_STAGE_CODE_CHANGE_PLAN = 2;
+  PR_GENERATION_STAGE_CODE_CHANGES = 3;
+}
+
+enum CortexGenerationType {
+  CORTEX_GENERATION_TYPE_UNSPECIFIED = 0;
+  CORTEX_GENERATION_TYPE_DYNAMIC_TRAJECTORY = 3;
+  CORTEX_GENERATION_TYPE_INFORM = 5;
+  CORTEX_GENERATION_TYPE_FILE_RESEARCH = 4;
+  CORTEX_GENERATION_TYPE_CCI_RESEARCH = 6;
+  CORTEX_GENERATION_TYPE_GROUNDTRUTH = 8;
+  CORTEX_GENERATION_TYPE_REAPPLY_GROUND_TRUTH = 9;
+  CORTEX_GENERATION_TYPE_VERIFY = 10;
+
+  reserved 1;
+  reserved 2;
+  reserved 7;
+  reserved "CORTEX_GENERATION_TYPE_GRAPH", "CORTEX_GENERATION_TYPE_STATIC_TRAJECTORY", "CORTEX_GENERATION_TYPE_MASKED_GROUND_TRUTH_TRAJECTORY";
+}
+
+enum PromptFormat {
+  PROMPT_FORMAT_UNSPECIFIED = 0;
+  PROMPT_FORMAT_INTERNAL = 1;
+  PROMPT_FORMAT_OPENAI = 2;
+  PROMPT_FORMAT_LLAMA = 3;
+  PROMPT_FORMAT_LLAMA3 = 4;
+  PROMPT_FORMAT_HERMES3 = 5;
+  PROMPT_FORMAT_INTERNAL_CUMULATIVE = 6;
+  PROMPT_FORMAT_XML = 7;
+  PROMPT_FORMAT_DEEPSEEK = 8;
+  PROMPT_FORMAT_DEEPSEEKV2 = 9;
+  PROMPT_FORMAT_DEEPSEEKV3 = 10;
+  PROMPT_FORMAT_KIMI = 11;
+  PROMPT_FORMAT_QWEN_CODER = 12;
+}
+
+enum LLMJudgeEvalType {
+  LLM_JUDGE_EVAL_TYPE_UNSPECIFIED = 0;
+  LLM_JUDGE_EVAL_TYPE_SUPERCOMPLETE = 4;
+  LLM_JUDGE_EVAL_TYPE_SUPERCOMPLETE_LABEL = 5;
+  LLM_JUDGE_EVAL_TYPE_CASCADE = 6;
+  LLM_JUDGE_EVAL_TYPE_TAB_JUMP_LABEL = 7;
+
+  reserved 1;
+  reserved 2;
+  reserved 3;
+  reserved "LLM_JUDGE_EVAL_TYPE_CHAT", "LLM_JUDGE_EVAL_TYPE_INSTRUCTION", "LLM_JUDGE_EVAL_TYPE_CONTEXT_RELEVANCE";
+}
+
+enum TrajectoryJudgeElementType {
+  ELEMENT_TYPE_UNSPECIFIED = 0;
+  ELEMENT_TYPE_OVERALL_TRAJECTORY = 1;
+}
+
+enum IntervalType {
+  INTERVAL_TYPE_UNSPECIFIED = 0;
+  INTERVAL_TYPE_EDIT_TO_VIEW = 1;
+  INTERVAL_TYPE_EDIT_TO_EDIT = 2;
+  INTERVAL_TYPE_EDIT_TO_COMMAND = 3;
+  INTERVAL_TYPE_COMMAND_TO_EDIT = 4;
+  INTERVAL_TYPE_COMMAND_TO_COMMAND = 5;
+  INTERVAL_TYPE_CASCADE_TURN = 6;
+  INTERVAL_TYPE_AFTER_PAUSE = 7;
+}
+
+enum TrackerType {
+  TRACKER_TYPE_UNSPECIFIED = 0;
+  TRACKER_TYPE_COMMAND_TO_COMMAND = 1;
+  TRACKER_TYPE_WRITE_TO_WRITE = 2;
+}
+
+message GeneratePromptsConfig {
+  string dataset = 1;
+  .exa.codeium_common_pb.Model new_model = 2;
+}
+
+message GeneratedPrompt {
+  string system_prompt = 1;
+  repeated .exa.chat_pb.ChatMessagePrompt chat_message_prompts = 2;
+}
+
+message SupercompleteLLMJudgeConfig {
+  .exa.codeium_common_pb.Model model = 1;
+  bool is_old_model = 2;
+}
+
+message EvalConfig {
+  reserved 21;
+  reserved 25;
+  reserved 32;
+  reserved "rejection_sampling_config", "code_reasoning_eval_config";
+
+  oneof model_config {
+    string model_path = 1;
+    .exa.eval_pb.CustomModelConfig custom_model_config = 30;
+    string inference_server_url = 31;
+  }
+  .exa.codeium_common_pb.ModelInfo model_info = 27;
+  .exa.trainer_pb.QuantizationMethod ptq_method = 18;
+  .exa.trainer_pb.QuantizationMethod draft_ptq_method = 20;
+  string draft_model_path = 17;
+  .exa.eval_pb.EvalType eval_type = 2;
+  bool use_a100 = 3;
+  bool run_as_ci = 4;
+  uint32 resource_multiplier = 5;
+  uint32 func_level_concurrency = 6;
+  uint32 gpu_concurrency = 7;
+  uint32 repo_level_concurrency = 8;
+  uint32 limit_tests_per_repo = 9;
+  uint32 eval_result_n_threads = 10;
+  uint32 num_completions = 11;
+  uint32 max_context_length = 26;
+  string tokenizer_type = 12;
+  .exa.eval_pb.CompletionsEvalConfig completions_config = 13;
+  .exa.eval_pb.InferInputsEvalConfig infer_inputs_config = 14;
+  .exa.eval_pb.LLMJudgeEvalConfig llm_judge_config = 19;
+  string repo_list = 15;
+  string repo_tar_dir = 16;
+  bool run_captured_code_eval = 22;
+  uint32 context_length = 23;
+  bool filter_infer_data = 24;
+  .exa.codeium_common_pb.ExperimentConfig experiment_config = 28;
+  .exa.eval_pb.GenerateRequestsConfig generate_requests_config = 29;
+}
+
+message PrepareTrainingDataConfig {
+  string dataset = 1;
+  .exa.codeium_common_pb.Model model = 2;
+  bool lead_in_only = 3;
+  float subsample_fraction = 4;
+}
+
+message InferenceServerConfig {
+  string inference_server_url = 1;
+  int32 inference_server_concurrency = 2;
+}
+
+message JudgePromptTemplateConfig {
+  enum JudgeCriteria {
+    JUDGE_CRITERIA_UNSPECIFIED = 0;
+    JUDGE_CRITERIA_DEFAULT = 1;
+    JUDGE_CRITERIA_MULTI_ATTRIBUTE = 2;
+    JUDGE_CRITERIA_MULTITURN = 3;
+  }
+
+  enum GradingMode {
+    GRADING_MODE_UNSPECIFIED = 0;
+    GRADING_MODE_INDIVIDUAL = 1;
+    GRADING_MODE_CONCATENATED = 2;
+  }
+
+  .exa.eval_pb.LLMJudgeEvalType eval_task_type = 1;
+  .exa.eval_pb.JudgePromptTemplateConfig.JudgeCriteria judge_criteria = 2;
+  int32 num_responses = 3;
+  bool withhold_ground_truth = 4;
+  .exa.eval_pb.JudgePromptTemplateConfig.GradingMode grading_mode = 5;
+  .exa.eval_pb.PromptFormat prompt_format = 6;
+}
+
+message CompletionsEvalConfig {
+  reserved 5;
+  reserved 6;
+  reserved "draft_model_memory_fraction", "target_model_memory_fraction";
+
+  bool use_trainer_completions = 1;
+  uint32 max_generation_length = 2;
+  uint32 mp_shards = 3;
+  uint32 gamma = 4;
+  uint32 max_context_length = 7;
+  optional int64 chunked_prefill_length = 8;
+  optional int64 speculative_copy_length = 9;
+  optional int64 max_tokens_per_forward_pass = 10;
+  bool use_sglang = 11;
+}
+
+message PromptExperimentConfig {
+  .exa.eval_pb.ExternalModelPromptFormat format = 1;
+  .exa.eval_pb.ContextItemOrder order = 2;
+}
+
+message InferInputsEvalConfig {
+  repeated string force_enable_experiments = 1;
+  repeated string force_disable_experiments = 2;
+  bool prune_completion_succeeding_text = 3;
+  bool use_embeddings = 4;
+  bool use_oracle_context = 5;
+  bool use_inline_fim_middle_token = 6;
+  bool use_instruction_tokens = 7;
+  string completions_override_string = 8;
+  bool use_context_module = 9;
+  double temperature = 10;
+  double min_log_probability = 16;
+  uint32 max_generation_length = 17;
+  bool use_eom_token = 11;
+  .exa.eval_pb.PromptExperimentConfig prompt_experiment_config = 12;
+  uint32 max_local_context_tokens = 13;
+  repeated .exa.eval_pb.DeletionType deletion_types = 14;
+  uint32 max_inference_tokens = 15;
+  .exa.codeium_common_pb.ModelFeatures model_features = 18;
+}
+
+message InputRepo {
+  string name = 1;
+  string owner = 2;
+  string commit = 3;
+  .exa.codeium_common_pb.Language language = 4;
+  repeated string extra_args = 5;
+}
+
+message InputRepoList {
+  int32 version = 1;
+  string list_name = 2;
+  repeated .exa.eval_pb.InputRepo input_repos = 3;
+  int32 limit_tests_per_repo = 8;
+  int32 repo_level_concurrency = 4;
+  int32 func_level_concurrency = 5;
+  int32 gpu_concurrency = 6;
+  int32 eval_result_n_threads = 7;
+}
+
+message FileReplacement {
+  string path = 1;
+  string replacement_content = 2;
+}
+
+message EvalTask {
+  reserved 5;
+  reserved 6;
+
+  string repo = 1;
+  string repo_version = 2;
+  repeated .exa.eval_pb.FileReplacement file_replacements = 3;
+  repeated string targets = 4;
+  .exa.eval_pb.UniqueFuncDef unique_func_def = 17;
+  string run_id = 7;
+  string gcs_repo_tar_path = 8;
+  string parent_folder = 9;
+  string completion = 10;
+  string deletion = 19;
+  .exa.codeium_common_pb.Completion completion_proto = 16;
+  string completion_error = 15;
+  .exa.codeium_common_pb.Language language = 11;
+  string replaced_func_text = 12;
+  string parse_action_failure = 14;
+  string replacement_neighborhood = 13;
+}
+
+message SourceLocation {
+  string file = 1;
+  int64 line = 2;
+  int64 col = 3;
+}
+
+message LintResult {
+  string linter = 1;
+  .exa.eval_pb.SourceLocation loc = 2;
+  string code = 3;
+  string message = 4;
+}
+
+message LintRun {
+  repeated string linters = 1;
+  map<string, .exa.eval_pb.LintResults> results = 2;
+}
+
+message LintResults {
+  repeated .exa.eval_pb.LintResult results = 1;
+}
+
+message UnitTestResult {
+  enum ResultType {
+    RESULT_TYPE_UNKNOWN = 0;
+    RESULT_TYPE_TEST_PASS = 1;
+    RESULT_TYPE_TEST_FAIL = 2;
+    RESULT_TYPE_COMPILE_ERROR = 3;
+    RESULT_TYPE_RUNTIME_ERROR = 4;
+  }
+
+  string file = 1;
+  string classname = 2;
+  string name = 3;
+  bool success = 4;
+  string failure_message = 5;
+  .exa.eval_pb.UnitTestResult.ResultType result_type = 6;
+}
+
+message EvalResult {
+  .exa.eval_pb.LintRun lint_run = 1;
+  repeated .exa.eval_pb.UnitTestResult unit_test_results = 2;
+  float relative_edit_distance = 7;
+  string tested_func_name = 3;
+  string tested_func_source_file = 4;
+  string run_id = 5;
+  bool deadline_exceeded = 6;
+}
+
+message EnqueueEvalTaskRequest {
+  .exa.eval_pb.EvalTask task = 1;
+}
+
+message EnqueueEvalTaskResponse {
+}
+
+message DequeueEvalTaskRequest {
+}
+
+message DequeueEvalTaskResponse {
+  .exa.eval_pb.EvalTask task = 1;
+}
+
+message EnqueueEvalResultRequest {
+  .exa.eval_pb.EvalResult result = 1;
+}
+
+message EnqueueEvalResultResponse {
+}
+
+message ResetQueuesRequest {
+}
+
+message ResetQueuesResponse {
+}
+
+message DequeueEvalResultRequest {
+  string run_id = 1;
+}
+
+message DequeueEvalResultResponse {
+  .exa.eval_pb.EvalResult result = 1;
+}
+
+message DownloadedGitHubRepo {
+  string folder = 1;
+}
+
+message GitHubRepo {
+  string owner = 1;
+  string repo_name = 2;
+  string commit = 3;
+}
+
+message SourceFile {
+  .exa.eval_pb.GitHubRepo repo = 1;
+  string source_rel_path = 2;
+}
+
+message TestFile {
+  .exa.eval_pb.GitHubRepo repo = 1;
+  string test_rel_path = 2;
+}
+
+message UniqueFuncDef {
+  .exa.eval_pb.SourceFile source_file = 1;
+  string name = 2;
+  int32 def_start_line = 3;
+  int32 def_end_line = 4;
+  .exa.codeium_common_pb.Language language = 5;
+}
+
+message UniqueTest {
+  .exa.eval_pb.TestFile test_file = 1;
+  string name = 2;
+}
+
+message FuncTestCount {
+  .exa.eval_pb.UniqueFuncDef unique_func_def = 1;
+  .exa.eval_pb.UniqueTest unique_test = 2;
+  int64 count = 3;
+}
+
+message FuncTestCounts {
+  repeated .exa.eval_pb.FuncTestCount func_test_counts = 1;
+}
+
+message FuncTest {
+  .exa.eval_pb.UniqueFuncDef unique_func_def = 1;
+  .exa.eval_pb.UniqueTest unique_test = 2;
+}
+
+message FuncTestScore {
+  .exa.eval_pb.FuncTest func_test = 1;
+  double score = 2;
+}
+
+message FuncTestScores {
+  repeated .exa.eval_pb.FuncTestScore func_test_scores = 1;
+}
+
+message PytestInfo {
+  repeated .exa.eval_pb.UnitTestResult initial_results = 1;
+  map<string, int32> initial_results_histogram = 2;
+}
+
+message FuncBodyLine {
+  .exa.eval_pb.UniqueFuncDef unique_func_def = 1;
+  repeated string body_lines = 2;
+}
+
+message FuncBodyLines {
+  repeated .exa.eval_pb.FuncBodyLine func_body_lines = 1;
+}
+
+message SplitDocument {
+  string prefix = 1;
+  repeated string lines = 2;
+  string suffix = 3;
+  string func_def_text = 4;
+}
+
+message JudgePromptData {
+  reserved 3;
+
+  string prompt = 1;
+  string original_completion = 2;
+  repeated .exa.chat_pb.ChatMessagePrompt chat_message_prompts = 4;
+}
+
+message ContextItemEvalData {
+  string snippet = 1;
+  string node_name = 2;
+  string file_path = 3;
+  string unique_key = 10;
+  repeated string node_lineage = 4;
+  .exa.codeium_common_pb.Language language = 5;
+  .exa.context_module_pb.RetrievedCodeContextItemMetadata retrieval_metadata = 6;
+  .exa.codeium_common_pb.PromptElementInclusionMetadata inclusion_metadata = 7;
+  bool node_name_in_deletion = 8;
+  bool node_name_in_source = 9;
+  bool is_matching_context_item = 12;
+  bool is_matching_considered_context_item = 13;
+}
+
+message CompletionsRequestMetadata {
+  .exa.codeium_common_pb.CompletionConfiguration configuration = 1;
+}
+
+message Deletion {
+  int32 deletion_start = 1;
+  int32 deletion_end = 2;
+  int32 deletion_start_char = 3;
+  int32 inline_fim_deletion_end_char = 8;
+  string trailing_whitespace = 13;
+}
+
+message ContextualPromptData {
+  repeated .exa.codeium_common_pb.CodeContextItem oracle_items = 1;
+  .exa.codeium_common_pb.PromptComponents prompt_components = 2;
+  repeated .exa.context_module_pb.RetrievedCodeContextItemMetadata retrieval_metadatas = 3;
+}
+
+message AutocompleteInferPromptComponents {
+  .exa.eval_pb.SplitDocument split_document = 1;
+  repeated .exa.eval_pb.InferDataTags tags = 2;
+  .exa.eval_pb.Deletion deletion = 3;
+  .exa.codeium_common_pb.Document document_position_wrapper = 4;
+  .exa.context_module_pb.ContextModuleResult context_module_result = 5;
+  .exa.eval_pb.CompletionsRequestMetadata completions_request_metadata = 6;
+  repeated .exa.eval_pb.ContextItemEvalData context_data = 7;
+  repeated .exa.eval_pb.ContextItemEvalData oracle_context_data = 8;
+  .exa.eval_pb.ContextualPromptData prompt_data = 9;
+  .exa.eval_pb.ContextualPromptData oracle_prompt_data = 10;
+}
+
+message InstructionInferPromptComponents {
+  .exa.eval_pb.SplitDocument split_document = 1;
+  .exa.eval_pb.InstructionData instruction_data = 2;
+  repeated .exa.eval_pb.InferDataTags tags = 3;
+  .exa.eval_pb.Deletion deletion = 4;
+  .exa.codeium_common_pb.Document document_position_wrapper = 5;
+  .exa.context_module_pb.ContextModuleResult context_module_result = 6;
+}
+
+message InferPromptComponents {
+  .exa.eval_pb.EvalType eval_type = 1;
+  .exa.eval_pb.AutocompleteInferPromptComponents autocomplete_components = 2;
+  .exa.eval_pb.InstructionInferPromptComponents instruction_components = 3;
+}
+
+message InferData {
+  reserved 6;
+
+  .exa.eval_pb.SplitDocument split_document = 1;
+  .exa.codeium_common_pb.CompletionsRequest completions_request = 2;
+  .exa.api_server_pb.GetStreamingModelAPITextCompletionRequest get_streaming_model_api_text_completion_request = 19;
+  repeated .exa.eval_pb.ContextItemEvalData context_data = 14;
+  repeated .exa.eval_pb.ContextItemEvalData oracle_context_data = 15;
+  repeated .exa.eval_pb.InferDataTags tags = 9;
+  repeated string completions = 3;
+  repeated .exa.codeium_common_pb.Completion completion_protos = 12;
+  string completion_error = 11;
+  int32 deletion_start = 4;
+  int32 deletion_end = 5;
+  int32 deletion_start_char = 7;
+  int32 inline_fim_deletion_end_char = 8;
+  string trailing_whitespace = 13;
+  repeated .exa.chat_pb.ChatMessage chat_messages = 10;
+  string system_prompt = 17;
+  .exa.eval_pb.InstructionData instruction_data = 16;
+  repeated double log_probs = 18;
+  repeated .exa.cortex_pb.CortexTrajectory output_trajectories = 20;
+}
+
+message RandomDeletionPolicy {
+  int32 max_lines_to_delete = 1;
+  bool delete_from_def_end = 2;
+  bool single_line_completion = 3;
+  bool inline_fim = 4;
+  bool only_full_lines = 5;
+}
+
+message FullDeletionPolicy {
+}
+
+message DeletionPolicy {
+  oneof policy {
+    .exa.eval_pb.RandomDeletionPolicy random = 1;
+    .exa.eval_pb.FullDeletionPolicy full = 2;
+  }
+}
+
+message InferConfig {
+  .exa.codeium_common_pb.Language language = 1;
+  string override_with_custom_string = 2;
+  bool use_context_module = 3;
+  bool use_oracle_context = 9;
+  bool chat_eval = 4 [deprecated = true];
+  bool use_openai_prompt = 5;
+  .exa.eval_pb.PromptExperimentConfig prompt_experiment_config = 18;
+  .exa.eval_pb.EvalType eval_type = 12;
+  .exa.codeium_common_pb.ExperimentConfig experiment_config = 6;
+  bool prune_completion_succeeding_text = 7;
+  int32 max_inference_tokens = 8;
+  bool split_enc_dec_prompt = 13;
+  int32 max_encoder_tokens = 14;
+  bool use_inline_middle_token = 10;
+  bool use_eom_token = 11;
+  int32 max_local_context_tokens = 16;
+  repeated .exa.eval_pb.DeletionType deletion_types = 17;
+  .exa.codeium_common_pb.ModelFeatures model_features = 19;
+}
+
+message InstructionData {
+  string instruction = 1;
+  .exa.eval_pb.InstructionType instruction_type = 2;
+  string edited_code = 3;
+}
+
+message GroupRolloutsConfig {
+  string group_by_key = 1;
+}
+
+message GenerateSplitsStageConfig {
+  float train_fraction = 1;
+  float test_fraction = 2;
+}
+
+message TrajectoryToFormattedConversationConfig {
+  string prompt_format = 1;
+  repeated .exa.codeium_common_pb.Model allowed_model_ids = 2;
+  string trajectory_field_name = 3;
+  string input_trajectory_field_name = 4;
+  string skip_row_field_name = 5;
+  bool start_from_input_trajectory = 6;
+  int32 world_size = 7;
+  int32 max_token_limit = 8;
+  repeated .exa.cortex_pb.CortexStepType terminal_steps = 9;
+  repeated .exa.cortex_pb.CortexStepSource terminal_step_sources = 14;
+  string group_by_key = 10;
+  bool require_full_planner_response = 11;
+  bool require_full_input_trajectory = 12;
+  bool allow_negative_examples_with_errors = 13;
+  bool trim_loser_last_edit_tool_call_completion = 15;
+}
+
+message RolloutDatasetConfig {
+  reserved 5;
+  reserved 10;
+
+  int32 world_size = 1;
+  int32 kubernetes_parallelism = 2;
+  string fork_stage_name = 3;
+  bool merge_preference_pairs = 8;
+  .exa.eval_pb.GroupRolloutsConfig group_rollouts_config = 4;
+  .exa.eval.pr_eval.datasets_pb.FilterTrajectoryStageConfig filter_trajectory_stage_config = 11;
+  .exa.eval_pb.GenerateSplitsStageConfig generate_splits_stage_config = 6;
+  .exa.eval_pb.TrajectoryToFormattedConversationConfig trajectory_to_formatted_conversation_config = 7;
+  .exa.eval_pb.RewriteTrajectoriesConfig rewrite_trajectories_config = 9;
+  .exa.eval.pr_eval.datasets_pb.MergeFormattedPreferencePairsConfig merge_formatted_preference_pairs_config = 12;
+}
+
+message RewriteTrajectoriesConfig {
+  .exa.eval_pb.EvalApiServerConfig dedicated_api_server_config = 1;
+  int32 world_size = 2;
+  repeated string dataset_splits = 3;
+  bool add_cot = 4;
+  .exa.codeium_common_pb.Model model = 5;
+  string api_server_url = 6;
+  int32 max_kubernetes_concurrency = 7;
+  string trajectory_field_name = 8;
+  string input_trajectory_field_name = 9;
+  bool skip_input_trajectory = 10;
+}
+
+message ContextBudgets {
+  float input_trajectory_proportion = 1;
+  float gt_trajectory_proportion = 2;
+  float output_trajectory_proportion = 3;
+  uint32 max_patch_tokens = 4;
+  bool truncate_patch = 5;
+}
+
+message OverallTrajectoryJudgeConfig {
+  bool enabled = 1;
+  uint32 num_steps_to_judge = 2;
+  bool include_target_patch = 3;
+  bool include_gt_continuation = 4;
+  bool require_full_base_trajectory = 5;
+  bool include_user_feedback_criteria = 6;
+  .exa.eval_pb.ContextBudgets context_budget_config = 7;
+  bool cache_input_trajectory = 8;
+  .exa.eval_pb.OverallTrajectoryJudgePromptType prompt_type = 9;
+  bool include_output_patch = 10;
+  bool judge_ground_truth_continuation = 11;
+  int32 rollout_index = 12;
+}
+
+message ProcessJudgeConfig {
+  reserved 9;
+
+  bool enabled = 1;
+  .exa.cortex_pb.CortexStepType interval_cutting_step_type = 2;
+  bool include_target_patch = 3;
+  bool include_gt_continuation = 4;
+  .exa.eval_pb.ProcessConditioningMode main_conditioning_mode = 5;
+  bool include_future_hindsight = 6;
+  bool include_outcome_reward = 7;
+  bool use_critic_not_reward = 8;
+  bool require_full_base_trajectory = 10;
+}
+
+message SummaryJudgeConfig {
+  optional bool enabled = 1;
+  optional .exa.codeium_common_pb.Model summary_judge_model = 2;
+}
+
+message ReviewJudgeConfig {
+  bool enabled = 1;
+}
+
+message PairwiseJudgeConfig {
+  bool enabled = 1;
+  uint32 num_steps_to_judge = 2;
+  bool include_target_patch = 3;
+  bool include_gt_continuation = 4;
+  bool require_full_base_trajectory = 5;
+  .exa.eval_pb.ContextBudgets context_budget_config = 7;
+  uint32 num_pairs = 6;
+}
+
+message MetricsStageConfig {
+  .exa.codeium_common_pb.Model judge_model = 1;
+  string api_server_url = 2;
+  .exa.eval_pb.OverallTrajectoryJudgeConfig overall_judge_config = 3;
+  .exa.eval_pb.ProcessJudgeConfig process_judge_config = 5;
+  .exa.eval_pb.ReviewJudgeConfig review_judge_config = 4;
+  .exa.eval_pb.PairwiseJudgeConfig pairwise_judge_config = 10;
+  bool skip_output_patch = 6;
+  bool skip_target_patch = 7;
+  bool run_only_judge_metrics = 8;
+  bool run_only_unit_test = 11;
+  optional .exa.eval_pb.SummaryJudgeConfig summary_judge_config = 9;
+}
+
+message PREvalConfig {
+  reserved 13;
+  reserved 19;
+  reserved 21;
+  reserved 23;
+  reserved 24;
+  reserved 26;
+  reserved 32;
+  reserved "repo_concurrency", "command_model_config", "run_evaluate_plans", "run_generate_synthetic_trajectories", "run_ground_truth_command_llm_judge_eval", "run_generate_masked_steps", "trajectory_llm_judge_stage_config";
+
+  string commits_path = 1;
+  string cached_start_stage = 3;
+  string cached_prev_stage_output_path = 4;
+  uint32 max_kubernetes_concurrency = 14;
+  uint32 gpu_concurrency = 10;
+  uint32 pr_level_concurrency = 11;
+  bool use_codeium_github_access_token = 27;
+  optional uint32 backoff_limit = 29;
+  uint32 eval_concurrency = 17;
+  uint32 sub_buckets_per_repo = 16;
+  uint32 max_unique_repos = 12;
+  repeated .exa.eval_pb.PRGenerationStage stages_to_eval = 5;
+  float inform_target_ccis_ratio = 22;
+  repeated string run_specific_instance_ids = 30;
+  bool run_generate_tasks = 18;
+  bool run_generate_golden_plans = 20;
+  .exa.eval_pb.MetricsStageConfig metrics_config = 35;
+  .exa.eval_pb.MetricsStageConfig grouped_metrics_config = 39;
+  .exa.eval_pb.RolloutDatasetConfig rollout_dataset_config = 34;
+  bool skip_unit_test = 37;
+  bool bypass_swebench_eval = 28;
+  bool bypass_filechange_based_eval = 33;
+  bool bypass_upload_stage = 31;
+  bool generate_pr_suppress_error = 15;
+  .exa.eval_pb.PRGenerationStage generate_pr_start_stage = 7;
+  .exa.eval_pb.PRGenerationStage generate_pr_end_stage = 8;
+  oneof generate_config {
+    .exa.eval_pb.GenerateLanguageServerConfig generate_language_server_config = 9;
+  }
+  .exa.eval_pb.LLMJudgeEvalConfig llm_judge_config = 25;
+  .exa.eval_pb.EvalApiServerConfig dedicated_api_server_config = 36;
+  .exa.eval_pb.RemoteLanguageServerConfig remote_language_server_config = 38;
+}
+
+message GuidedSampleConfig {
+  float pct_good_rollouts = 1;
+  .exa.cortex_pb.ParallelRolloutConfig parallel_rollout_config_override = 2;
+}
+
+message InitialWorkspaceState {
+  bytes file_state_override_archive_bytes = 1;
+  optional .exa.codeium_common_pb.GitRepoInfo base_state_repo_info = 2;
+  optional .exa.cortex_pb.WorkspaceInitializationData workspace_initialization_data = 3;
+}
+
+message CascadeConfigRandomizer {
+  reserved 1;
+  reserved "plan_model";
+
+  message ConfigVariant {
+    float randomization_weight = 1;
+    string name = 2;
+    .exa.cortex_pb.CascadeConfig cascade_config = 3;
+  }
+
+  repeated .exa.eval_pb.CascadeConfigRandomizer.ConfigVariant config_variants = 2;
+  .exa.cortex_pb.CascadeConfig override_cascade_config = 3;
+}
+
+message GenerateLanguageServerConfig {
+  string generate_language_server_commit_hash = 1;
+  .exa.eval_pb.LanguageServerConfig language_server_config = 2;
+  .exa.codeium_common_pb.ExperimentConfig experiment_config = 3;
+  .exa.cortex_pb.CortexConfig cortex_config = 4;
+  oneof config_override {
+    .exa.cortex_pb.CascadeConfig cascade_config = 6;
+    .exa.eval_pb.CascadeConfigRandomizer cascade_config_randomizer = 15;
+  }
+  .exa.cortex_pb.InformPlannerConfig inform_planner_config = 7;
+  .exa.eval_pb.CortexGenerationType cortex_generation_type = 5;
+  .exa.eval_pb.GuidedSampleConfig guided_sample_config = 17;
+  .exa.cortex_pb.DiffBasedCommandEvalConfig diff_based_command_eval_config = 8;
+  bool shallow_clone = 9;
+  bool start_from_input_trajectory = 10;
+  bool inherit_tools_from_input_trajectory = 18;
+  bool start_from_initial_workspace_state = 11;
+  bool suppress_repo_errors = 14;
+  int32 rollouts_per_input = 12;
+  bool use_mock_api_key = 13;
+  bool ignore_exit_code_match = 19;
+  bool include_hints_text = 20;
+}
+
+message EvalApiServerConfig {
+  bool build_api_server_image = 1;
+  repeated .exa.eval_pb.CustomModelConfig custom_models = 2;
+}
+
+message RemoteLanguageServerConfig {
+  reserved 2;
+
+  bool enable = 1;
+  string session_manager_url = 3;
+}
+
+message LanguageServerConfig {
+  reserved 8;
+  reserved 26;
+  reserved "verbosity_level", "register_user_url";
+
+  int32 server_port = 1;
+  int32 lsp_port = 2;
+  bool random_port = 3;
+  string random_port_dir = 4;
+  string manager_lock_file = 5;
+  string child_lock_file = 6;
+  string database_dir = 7;
+  string portal_url = 9;
+  string api_server_url = 10;
+  string inference_api_server_url = 32;
+  bool use_mock_api_server_client = 11 [deprecated = true];
+  int32 api_server_http_client_timeout_seconds = 34;
+  bool detect_proxy = 12;
+  bool enable_lsp = 13;
+  bool enable_local_search = 14;
+  int32 search_max_workspace_file_count = 15;
+  int32 file_watch_max_dir_count = 31;
+  bool enable_chat_web_server = 16;
+  bool enable_chat_client = 17;
+  string workspace_id = 18;
+  string index_service_url = 19;
+  bool enable_index_service = 20;
+  string embedding_model_name = 29;
+  bool auto_prepare_actions = 25;
+  bool m_query_for_context_module = 27;
+  bool record_cortex_telemetry = 28;
+  bool dev_mode = 21;
+  bool remote_mode = 22;
+  bool teams_mode = 23;
+  bool enterprise_mode = 24;
+  bool eval_mode = 30;
+  bool auto_cascade_mode = 33;
+}
+
+message LLMJudgeEvalConfig {
+  reserved 2;
+  reserved "judge_prompt_format";
+
+  string judge_model = 1 [deprecated = true];
+  .exa.codeium_common_pb.Model judge_model_enum = 23 [deprecated = true];
+  .exa.codeium_common_pb.ModelInfo judge_model_info = 29;
+  string dataset = 3;
+  .exa.eval_pb.LLMJudgeEvalType llm_judge_eval_type = 4;
+  .exa.eval_pb.PromptFormat prompt_format = 5;
+  double temperature = 6;
+  string force_enable_experiments = 7;
+  string force_disable_experiments = 8;
+  bool use_context_relevance_tags = 9;
+  string base_model_path = 10;
+  string base_tokenizer_type = 11;
+  bool cortex_trajectory_context = 12;
+  bool judge_ignore_trajectory = 13;
+  .exa.eval_pb.JudgePromptTemplateConfig judge_prompt_template_config = 15;
+  bool truncate_inside_user_messages = 14;
+  .exa.eval_pb.InferenceServerConfig inference_server_config = 16;
+  int32 max_samples = 17;
+  uint32 selection_radius = 18;
+  uint32 min_ground_truth_jump_length = 19;
+  uint32 min_inferred_jump_length_filter = 20;
+  float filtered_rows_subsample_fraction = 21 [deprecated = true];
+  bool filter_in_selection = 22;
+  float invalid_rows_subsample_fraction = 24;
+  float small_jump_rows_subsample_fraction = 25;
+  bool remove_generation_prompt = 26;
+  uint32 max_random_extended_selection_radius = 27;
+  uint32 min_cursor_edit_filter_distance = 28;
+}
+
+message GenerateRequestsConfig {
+  bool generate_future_trajectory = 1;
+  bool generate_train_completions = 2;
+  bool require_future_trajectory_min_length = 3;
+  int32 max_future_trajectory_steps = 4;
+  int32 max_ms_between_steps = 5;
+  bool override_train_completion = 6 [deprecated = true];
+  bool override_prompt_components = 7;
+  bool allow_nonterminal_edit_train_completion = 8;
+}
+
+message TrajectoryDownloadConfig {
+  message QueryConfig {
+    reserved 4;
+    reserved "allowed_model_id";
+
+    message IDFilterConfig {
+      bool select_public_repos = 1;
+      bool no_missing_steps = 2;
+    }
+
+    message StepFilterConfig {
+      repeated .exa.cortex_pb.CortexStepType required_step_types = 8;
+      int32 min_required_step_count = 9;
+      string include_pattern = 1;
+      string exclude_pattern = 2;
+      int32 min_length = 3;
+      int32 max_length = 4;
+      repeated .exa.cortex_pb.CortexStepType related_step_types = 5;
+      int32 step_offset = 6;
+      bool related_step_match = 7;
+    }
+
+    enum QueryType {
+      QUERY_TYPE_UNSPECIFIED = 0;
+      QUERY_TYPE_REVERT = 1;
+      QUERY_TYPE_THUMBS_UP = 2;
+      QUERY_TYPE_DATE_RANGE = 3;
+      QUERY_TYPE_DOWNLOAD_BY_PAYLOAD = 4;
+      QUERY_TYPE_METRICS = 5;
+      QUERY_TYPE_PASSTHROUGH = 6;
+    }
+
+    .exa.eval_pb.TrajectoryDownloadConfig.QueryConfig.QueryType query_type = 1;
+    int32 max_trajectories = 2;
+    int32 world_size_query = 3;
+    string start_date = 5;
+    string end_date = 6;
+    repeated .exa.codeium_common_pb.Model allowed_model_ids = 7;
+    optional .exa.eval_pb.TrajectoryDownloadConfig.QueryConfig.IDFilterConfig id_filter_config = 8;
+    repeated .exa.cortex_pb.CortexTrajectoryType allowed_trajectory_types = 9;
+    repeated .exa.cortex_pb.CortexTrajectorySource allowed_trajectory_sources = 15;
+    repeated .exa.cortex_pb.CortexStepType allowed_step_types = 10 [deprecated = true];
+    bool require_public_repo = 11 [deprecated = true];
+    string json_extract_path = 12;
+    bool enforce_uniqueness = 13;
+    optional .exa.eval_pb.TrajectoryDownloadConfig.QueryConfig.StepFilterConfig step_filter_config = 14;
+    repeated .exa.eval.pr_eval.datasets_pb.MetricsRecordFilterRequest metrics_filters = 16;
+    .exa.cortex_pb.CascadeConfig cascade_config_filter = 17;
+  }
+
+  oneof id_selection {
+    bool input = 1;
+    .exa.eval_pb.TrajectoryDownloadConfig.QueryConfig query = 2;
+  }
+  int32 world_size_download = 3;
+  int32 max_trajectory_steps = 4;
+  int32 kubernetes_parallelism = 5;
+  bool require_generator_metadata = 6;
+}
+
+message CondenseUserTaskConfig {
+  .exa.codeium_common_pb.Model condense_model = 1;
+}
+
+message GenerateTaskConfig {
+  int32 world_size = 9;
+  bool use_input_initial_workspace_state = 1;
+  bool use_codeium_github_access_token = 2;
+  bool upload_ground_truth_trajectory = 3;
+  bool clean_trajectory = 4;
+  bool find_beginning_of_turn = 5;
+  bool generate_for_training = 6;
+  bool fail_on_last_step_errors = 7;
+  bool fail_on_intermediate_step_errors = 8;
+  bool require_repo_id = 11;
+  bool filter_out_empty_patch = 10;
+  .exa.eval_pb.CondenseUserTaskConfig condense_user_task_config = 12;
+  string api_server_url = 13;
+  bool filter_out_misformatted_trajectories = 14;
+}
+
+message GeneratePREvalTaskFromTrajectoryPipelineConfig {
+  reserved 3;
+  reserved 4;
+  reserved 5;
+  reserved 7;
+  reserved 8;
+  reserved 9;
+  reserved 10;
+  reserved 11;
+  reserved "use_input_initial_workspace_state", "use_codeium_github_access_token", "clean_trajectory", "upload_ground_truth_trajectory", "allow_all_step_errors", "find_beginning_of_turn", "generate_for_training", "fail_on_last_step_errors", "fail_on_intermediate_step_errors";
+
+  int32 kubernetes_parallelism = 1;
+  string trajectory_field_name_override = 2;
+  string state_field_name_override = 14;
+  .exa.eval_pb.TrajectoryDownloadConfig trajectory_download_config = 12;
+  .exa.eval_pb.FindTrajectoryConfig find_trajectory_config = 6;
+  .exa.eval_pb.GenerateTaskConfig generate_task_config = 13;
+  .exa.eval_pb.MetricsStageConfig gt_metrics_config = 15;
+  int32 gt_metrics_world_size = 16;
+  .exa.eval_pb.EvalApiServerConfig dedicated_api_server_config = 17;
+  bool extract_verification_steps = 18;
+}
+
+message ValueBound {
+  optional int32 min = 1;
+  optional int32 max = 2;
+}
+
+message ValidateTrajectoryEventConfig {
+  optional float max_error_rate = 1;
+  bool allow_last_step_error = 2;
+  .exa.eval_pb.ValueBound length_bound = 3;
+  map<string, .exa.eval_pb.ValueBound> step_type_count_bounds = 4;
+}
+
+message FindTrajectoryConfig {
+  reserved 6;
+  reserved 9;
+  reserved 15;
+  reserved "first_after_start_idx", "longest_turn_before_start_idx", "step_filter_config";
+
+  message SamplingStrategyFirstKAfterStartIdx {
+    int32 k = 1;
+    int32 max_distance_from_start_idx = 2;
+  }
+
+  message SamplingStrategyRandom {
+  }
+
+  message SamplingStrategyLongestTurnBeforeStartIdx {
+    optional int32 min_start_index = 2;
+    optional int32 max_distance_from_start = 3;
+  }
+
+  message SamplingStrategyLongestTurnBetweenStartAndEndIdx {
+    optional int32 min_end_index = 4;
+    optional int32 max_distance_from_end = 5;
+  }
+
+  message SamplingStrategyRandomBoundaryRange {
+    optional int32 min_boundary_start_idx = 2;
+    optional int32 max_boundary_start_idx = 3;
+    optional int32 min_boundary_end_idx = 4;
+    optional int32 max_boundary_end_idx = 5;
+  }
+
+  message SamplingStrategyGuaranteeStartIdx {
+  }
+
+  int32 world_size = 3;
+  .exa.eval_pb.BoundaryEventMetricsConfig boundary_event_metrics_config = 1;
+  bool clean_trajectory = 2;
+  string start_index_field_name = 4;
+  oneof sampling_strategy {
+    .exa.eval_pb.FindTrajectoryConfig.SamplingStrategyRandom random = 5;
+    .exa.eval_pb.FindTrajectoryConfig.SamplingStrategyFirstKAfterStartIdx first_k_after_start_idx = 11;
+    .exa.eval_pb.FindTrajectoryConfig.SamplingStrategyRandomBoundaryRange sampling_strategy_random_boundary_range = 12;
+    .exa.eval_pb.FindTrajectoryConfig.SamplingStrategyLongestTurnBetweenStartAndEndIdx longest_turn_between_start_and_end_idx = 14;
+    .exa.eval_pb.FindTrajectoryConfig.SamplingStrategyGuaranteeStartIdx sampling_strategy_guarantee_start_idx = 16;
+  }
+  bool include_first_step = 7;
+  bool exclude_last_step = 8;
+  optional .exa.eval_pb.ValidateTrajectoryEventConfig validate_trajectory_event_config = 10;
+  .exa.eval_pb.JudgeBoundaryMetricsConfig judge_boundary_metrics_config = 13;
+}
+
+message CustomModelConfig {
+  string cluster_name = 1;
+  bool build_inference_server_image = 2;
+  .exa.model_management_pb.StartInferenceServerRequest start_inference_server_request = 3;
+}
+
+message NodeExecutionSummary {
+  repeated string lineage = 1;
+  string node_name = 2;
+  uint32 duration_seconds = 3;
+  uint64 state_bytes = 4;
+}
+
+message GraphExecutionSummary {
+  repeated .exa.eval_pb.NodeExecutionSummary nodes = 1;
+}
+
+message JudgeEvaluation {
+  string id = 1;
+  string explanation = 2;
+  uint32 score = 3;
+}
+
+message TrajectoryJudgeElementEvaluation {
+  .exa.eval_pb.TrajectoryJudgeElementType element_type = 1;
+  repeated .exa.eval_pb.JudgeEvaluation evaluations = 2;
+  repeated .exa.api_server_pb.GetChatMessageRequest judge_requests = 3;
+  repeated .exa.codeium_common_pb.ModelUsageStats usage_stats = 4;
+}
+
+message TrajectoryJudgeEvaluation {
+  repeated .exa.eval_pb.TrajectoryJudgeElementEvaluation element_evaluations = 5;
+}
+
+message ContextItems {
+  repeated string context_items = 1;
+}
+
+message ImbueEvalTask {
+  string question = 1;
+  repeated string choices = 2;
+  string expected_answer = 3;
+}
+
+message DiffBasedCommandEvalTask {
+  uint32 step_index = 1;
+  string instruction = 2;
+}
+
+message LLMJudgeTask {
+  string system_prompt = 1;
+  string user_prompt = 2;
+  string explanation = 3;
+  int32 rating = 4;
+}
+
+message JumpLines {
+  uint64 ground_truth_jump_line = 1;
+  uint64 inferred_jump_line = 2;
+}
+
+message TrajectoryStep {
+  int64 step_index = 1;
+  int64 step_timestamp = 2;
+  string payload_proto = 3;
+  string step_proto = 4;
+}
+
+message TrajectoryData {
+  repeated .exa.eval_pb.TrajectoryStep trajectory_steps = 1;
+}
+
+message LLMJudgeAttributeRating {
+  string name = 1;
+  float rating = 2;
+}
+
+message LLMJudgeRating {
+  message Metadata {
+    string explanation = 1;
+    string system_prompt = 2;
+    string user_prompt = 3;
+  }
+
+  repeated .exa.eval_pb.LLMJudgeAttributeRating attribute_ratings = 1;
+  .exa.eval_pb.LLMJudgeRating.Metadata metadata = 2;
+}
+
+message LLMJudgeRatings {
+  repeated .exa.eval_pb.LLMJudgeRating ratings = 1;
+}
+
+message MetricsStageOutput {
+  repeated .exa.codeium_common_pb.MetricsRecord records = 1;
+}
+
+message IntervalTrackerConfig {
+  .exa.eval_pb.IntervalType interval_type = 1;
+  int32 max_steps_before_clear = 2;
+  int32 max_seconds_before_clear = 3;
+  oneof type_specific {
+    .exa.eval_pb.TypeToTypeConfig type_to_type = 4;
+    .exa.eval_pb.AfterPauseConfig after_pause = 5;
+  }
+}
+
+message TypeToTypeConfig {
+  map<string, int32> min_steps_between_by_type = 1;
+  bool require_target_change = 2;
+  bool treat_last_step_as_interval_end = 3;
+}
+
+message AfterPauseConfig {
+  int32 min_start_pause_ms = 1;
+  int32 max_start_pause_ms = 2;
+  repeated .exa.cortex_pb.CortexStepType valid_start_types = 3;
+  int32 min_end_pause_ms = 4;
+  int32 max_end_pause_ms = 5;
+  repeated .exa.cortex_pb.CortexStepType possible_end_types = 6;
+  map<string, int32> min_steps_between_by_type = 7;
+  map<string, int32> max_steps_between_by_type = 8;
+  repeated .exa.cortex_pb.CortexStepType filter_step_types = 9;
+  bool end_on_last_step = 10;
+}
+
+message IntervalMutatorConfig {
+  message IndexMetricBound {
+    string metric_record_name = 1;
+    .exa.eval_pb.IntervalMutatorConfig.IndexType index_type = 2;
+    optional bool value_is_relative_to_start = 3;
+  }
+
+  enum IndexType {
+    INDEX_TYPE_UNSPECIFIED = 0;
+    INDEX_TYPE_START = 1;
+    INDEX_TYPE_END = 2;
+  }
+
+  int32 world_size = 1;
+  repeated .exa.eval_pb.IntervalMutatorConfig.IndexMetricBound index_bounds = 2;
+  repeated string required_step_index_field_names = 3;
+}
+
+message JudgeBoundaryMetricsConfig {
+  message FilterConfig {
+    reserved 1;
+
+    repeated .exa.eval.pr_eval.datasets_pb.MetricsRecordFilterRequest metrics_record_filters = 2;
+  }
+
+  int32 world_size = 1;
+  .exa.eval_pb.MetricsStageConfig metrics_config = 2;
+  .exa.eval_pb.JudgeBoundaryMetricsConfig.FilterConfig filter_config = 3;
+  .exa.eval_pb.IntervalMutatorConfig interval_mutator_config = 4;
+  string start_index_field_name = 5;
+  string end_index_field_name = 6;
+  uint32 extra_buffer_after_end_index = 7;
+}
+
+message BoundaryEventMetricsConfig {
+  repeated .exa.eval_pb.IntervalTrackerConfig interval_tracker_configs = 1;
+}
+
+message EvalMetricsMetadata {
+  .exa.eval_pb.JudgeMetricsRubric rubric = 1;
+}
+
+message JudgeMetricsRubric {
+  repeated .exa.eval_pb.JudgeMetricsRubricAxis axes = 1;
+}
+
+message JudgeMetricsRubricAxis {
+  string name = 1;
+  string criteria = 2;
+}
+
+service EvalQueueService {
+  rpc EnqueueEvalTask (.exa.eval_pb.EnqueueEvalTaskRequest) returns (.exa.eval_pb.EnqueueEvalTaskResponse);
+  rpc DequeueEvalTask (.exa.eval_pb.DequeueEvalTaskRequest) returns (.exa.eval_pb.DequeueEvalTaskResponse);
+  rpc EnqueueEvalResult (.exa.eval_pb.EnqueueEvalResultRequest) returns (.exa.eval_pb.EnqueueEvalResultResponse);
+  rpc DequeueEvalResult (.exa.eval_pb.DequeueEvalResultRequest) returns (.exa.eval_pb.DequeueEvalResultResponse);
+  rpc ResetQueues (.exa.eval_pb.ResetQueuesRequest) returns (.exa.eval_pb.ResetQueuesResponse);
+}

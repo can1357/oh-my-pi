@@ -1,5 +1,5 @@
 /** Runtime backend that an eval cell dispatches to. */
-export type EvalLanguage = "python" | "js";
+export type EvalLanguage = "python" | "js" | "ruby" | "julia";
 
 /** Why an eval cell stopped before completion. */
 export type EvalCancellationCause = "idle_watchdog_timeout" | "abort";
@@ -17,13 +17,13 @@ export interface EvalProcessErrorEvidence {
 import type { ImageContent } from "@pk-nerdsaver-ai/pi-ai";
 import type { OutputMeta } from "../tools/output-meta";
 
-/** Status event emitted by prelude helpers (python or js) for TUI rendering. */
+/** Status event emitted by eval prelude helpers for TUI rendering. */
 export interface EvalStatusEvent {
 	op: string;
 	[key: string]: unknown;
 }
 
-/** Display output captured during eval execution. Union of python and js shapes. */
+/** Display output captured during eval execution across supported backends. */
 export type EvalDisplayOutput =
 	| { type: "json"; data: unknown }
 	| { type: "image"; data: string; mimeType: string }

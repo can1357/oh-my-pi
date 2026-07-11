@@ -11,7 +11,7 @@ import {
 	validateManagedSkillPayload,
 	writeManagedSkill,
 } from "@pk-nerdsaver-ai/pi-coding-agent/autolearn/managed-skills";
-import { parseFrontmatter } from "@pk-nerdsaver-ai/pi-utils";
+import { parseFrontmatter, removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import { getAgentDir, setAgentDir } from "@pk-nerdsaver-ai/pi-utils/dirs";
 
 describe("managed-skills primitives", () => {
@@ -28,7 +28,7 @@ describe("managed-skills primitives", () => {
 	afterEach(async () => {
 		spyOn(os, "homedir").mockRestore();
 		setAgentDir(originalAgentDir);
-		await fs.rm(tempHome, { recursive: true, force: true });
+		await removeWithRetries(tempHome);
 	});
 
 	const skillFile = (name: string) => path.join(getManagedSkillsDir(), name, "SKILL.md");
@@ -260,7 +260,7 @@ describe("managed-skills primitives", () => {
 				// Nothing was written through the link.
 				expect(await Bun.file(path.join(outside, "SKILL.md")).exists()).toBe(false);
 			} finally {
-				await fs.rm(outside, { recursive: true, force: true });
+				await removeWithRetries(outside);
 			}
 		});
 
@@ -288,7 +288,7 @@ describe("managed-skills primitives", () => {
 				).rejects.toThrow(/managed-skills root is a symlink/);
 				expect(await Bun.file(path.join(realRoot, "demo", "SKILL.md")).exists()).toBe(false);
 			} finally {
-				await fs.rm(realRoot, { recursive: true, force: true });
+				await removeWithRetries(realRoot);
 			}
 		});
 
@@ -321,14 +321,14 @@ describe("managed-skills primitives", () => {
 			const target = path.join(outside, "target.md");
 			await Bun.write(target, "outside content");
 			try {
-				await fs.rm(skillFile("linky"));
+				await removeWithRetries(skillFile("linky"));
 				await fs.symlink(target, skillFile("linky"));
 				await expect(
 					writeManagedSkill({ action: "update", name: "linky", description: "d", body: "hacked" }),
 				).rejects.toThrow(/symlink/);
 				expect(await Bun.file(target).text()).toBe("outside content");
 			} finally {
-				await fs.rm(outside, { recursive: true, force: true });
+				await removeWithRetries(outside);
 			}
 		});
 
@@ -336,7 +336,7 @@ describe("managed-skills primitives", () => {
 			await writeManagedSkill({ action: "create", name: "hardlink", description: "d", body: "managed content" });
 			const outside = path.join(tempHome, "authored-hardlink.md");
 			await Bun.write(outside, "user-authored content");
-			await fs.rm(skillFile("hardlink"));
+			await removeWithRetries(skillFile("hardlink"));
 			await fs.link(outside, skillFile("hardlink"));
 
 			await expect(
@@ -366,7 +366,7 @@ describe("managed-skills primitives", () => {
 				// The symlink target's contents are untouched.
 				expect(await Bun.file(path.join(outside, "keep.txt")).exists()).toBe(true);
 			} finally {
-				await fs.rm(outside, { recursive: true, force: true });
+				await removeWithRetries(outside);
 			}
 		});
 	});

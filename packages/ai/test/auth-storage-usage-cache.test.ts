@@ -362,8 +362,40 @@ describe("AuthStorage usage cache: header ingestion", () => {
 		const report = requireAnthropicReport(await storage.fetchUsageReports());
 		expect(calls).toBe(0);
 		expect(report.metadata?.source).toBe("ratelimit-headers");
+		expect(report.metadata?.email).toBe("a@example.com");
+		expect(report.metadata?.accountId).toBe("account-1");
 		expect(requireLimit(report, "anthropic:5h").amount.used).toBe(2);
 		expect(requireLimit(report, "anthropic:7d").amount.used).toBe(30);
+	});
+
+	it("merges active credential metadata into existing header cache entries", async () => {
+		const start = Date.now();
+		const now = vi.spyOn(Date, "now").mockReturnValue(start);
+		expect(await storage.getApiKey("anthropic", "legacy-session")).toBe("oat-1");
+		expect(
+			storage.ingestUsageHeaders("anthropic", usageHeaders("0.02", "0.3"), { sessionId: "legacy-session" }),
+		).toBe(true);
+
+		let rewroteLegacyEntry = false;
+		for (const [key, entry] of store.cache) {
+			const payload = JSON.parse(entry.value) as { value?: UsageReport | null };
+			if (payload.value?.metadata?.source !== "ratelimit-headers") continue;
+			payload.value.metadata = { source: "ratelimit-headers" };
+			store.cache.set(key, { value: JSON.stringify(payload), expiresAtSec: entry.expiresAtSec });
+			rewroteLegacyEntry = true;
+		}
+		expect(rewroteLegacyEntry).toBe(true);
+
+		now.mockReturnValue(start + 60_001);
+		expect(
+			storage.ingestUsageHeaders("anthropic", usageHeaders("0.05", "0.6"), { sessionId: "legacy-session" }),
+		).toBe(true);
+
+		const report = requireAnthropicReport(await storage.fetchUsageReports());
+		expect(report.metadata?.source).toBe("ratelimit-headers");
+		expect(report.metadata?.email).toBe("a@example.com");
+		expect(report.metadata?.accountId).toBe("account-1");
+		expect(requireLimit(report, "anthropic:5h").amount.used).toBe(5);
 	});
 
 	it("throttles repeated header ingestion for the same credential cache key", async () => {

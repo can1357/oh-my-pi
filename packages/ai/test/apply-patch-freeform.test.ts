@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+	buildTransformedCodexRequestBody,
 	convertOpenAICodexResponsesTools as convertCodexTools,
 	normalizeCodexToolChoice,
 } from "@pk-nerdsaver-ai/pi-ai/providers/openai-codex-responses";
 import {
+	buildParams,
 	convertTools,
 	mapOpenAIResponsesToolChoiceForTools,
 	supportsFreeformApplyPatch,
@@ -73,6 +75,13 @@ const plainTool: Tool = {
 	description: "read a file",
 	parameters: type({ path: "string" }),
 };
+
+function hasCustomTool(tools: unknown): boolean {
+	return (
+		Array.isArray(tools) &&
+		tools.some(tool => typeof tool === "object" && tool !== null && (tool as { type?: unknown }).type === "custom")
+	);
+}
 
 const unionBranches = [
 	{
@@ -221,6 +230,31 @@ describe("tool choice mapping: freeform emission", () => {
 	});
 });
 
+describe("request params: freeform custom tools", () => {
+	test("openai responses leaves parallel tool calls unset", () => {
+		const { params } = buildParams(
+			makeModel({ applyPatchToolType: "freeform" }),
+			{ messages: [{ role: "user", content: "edit", timestamp: 0 }], tools: [editTool] },
+			undefined,
+			undefined,
+		);
+
+		expect(hasCustomTool(params.tools)).toBe(true);
+		expect(params.parallel_tool_calls).toBeUndefined();
+	});
+
+	test("codex responses leaves parallel tool calls unset for custom tools", async () => {
+		const params = await buildTransformedCodexRequestBody(
+			makeCodexModel({ applyPatchToolType: "freeform" }),
+			{ messages: [{ role: "user", content: "edit", timestamp: 0 }], tools: [editTool] },
+			undefined,
+		);
+
+		expect(hasCustomTool(params.tools)).toBe(true);
+		expect(params.parallel_tool_calls).toBeUndefined();
+	});
+});
+
 describe("custom_tool_call stream receive", () => {
 	async function* makeStream(events: unknown[]): AsyncIterable<ResponseStreamEvent> {
 		for (const e of events) yield e as ResponseStreamEvent;
@@ -273,8 +307,8 @@ describe("custom_tool_call stream receive", () => {
 		expect(block?.type).toBe("toolCall");
 		if (block?.type !== "toolCall") throw new Error("expected toolCall block");
 		expect(block.arguments).toEqual({ command: "x".repeat(300) });
-		expect("partialJson" in block).toBe(false);
-		expect("lastParseLen" in block).toBe(false);
+		expect((block as unknown as Record<string, unknown>).partialJson).toBeUndefined();
+		expect((block as unknown as Record<string, unknown>).lastParseLen).toBeUndefined();
 	});
 
 	test("persists final args on the block when finalized via output_item.done without an args.done event", async () => {
@@ -330,8 +364,8 @@ describe("custom_tool_call stream receive", () => {
 		expect(block?.type).toBe("toolCall");
 		if (block?.type !== "toolCall") throw new Error("expected toolCall block");
 		expect(block.arguments).toEqual({ path: "README.md" });
-		expect("partialJson" in block).toBe(false);
-		expect("lastParseLen" in block).toBe(false);
+		expect((block as unknown as Record<string, unknown>).partialJson).toBeUndefined();
+		expect((block as unknown as Record<string, unknown>).lastParseLen).toBeUndefined();
 	});
 
 	test("aggregates delta events into a ToolCall with input arg", async () => {

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { renderMermaidAscii } from "../../src/vendor/mermaid-ascii/ascii/index";
+import { type AsciiRenderOptions, renderMermaidAscii as renderRaw } from "../../src/vendor/mermaid-ascii/ascii/index";
+
+// Pin colorMode so assertions stay deterministic even if a concurrent or leaked
+// TTY override makes the renderer auto-detect ANSI color.
+function renderMermaidAscii(text: string, opts: AsciiRenderOptions = {}): string {
+	return renderRaw(text, { colorMode: "none", ...opts });
+}
 
 describe("ASCII multi-line labels", () => {
 	describe("flowchart nodes", () => {

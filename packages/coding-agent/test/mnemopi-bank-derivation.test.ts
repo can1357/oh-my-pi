@@ -4,7 +4,7 @@ import { mkdirSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { computeMnemopiBankScope, extendRecallWithLegacyBanks } from "@pk-nerdsaver-ai/pi-coding-agent/mnemopi/config";
-import { TempDir } from "@pk-nerdsaver-ai/pi-utils";
+import { removeWithRetries, TempDir } from "@pk-nerdsaver-ai/pi-utils";
 
 // Set up a fixture filesystem we can reuse across the two regression
 // suites — same shape as `~/.omp/memories/mnemopi/` on a real install.
@@ -72,7 +72,7 @@ describe("computeMnemopiBankScope (#2412)", () => {
 			const withAncestorGit = computeMnemopiBankScope(undefined, project, "per-project").bank;
 			expect(withAncestorGit).toBe(withoutGit);
 
-			await fs.rm(baseDir.join("projects", ".git"));
+			await removeWithRetries(baseDir.join("projects", ".git"));
 			const afterGitRemoved = computeMnemopiBankScope(undefined, project, "per-project").bank;
 			expect(afterGitRemoved).toBe(withoutGit);
 		} finally {

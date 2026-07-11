@@ -7,7 +7,7 @@ import { preloadPluginRoots } from "@pk-nerdsaver-ai/pi-coding-agent/discovery/h
 import { LspTool } from "@pk-nerdsaver-ai/pi-coding-agent/lsp";
 import * as lspClient from "@pk-nerdsaver-ai/pi-coding-agent/lsp/client";
 import * as lspConfig from "@pk-nerdsaver-ai/pi-coding-agent/lsp/config";
-import { getServersForFile, loadConfig } from "@pk-nerdsaver-ai/pi-coding-agent/lsp/config";
+import { getServersForFile, type LspConfig, loadConfig } from "@pk-nerdsaver-ai/pi-coding-agent/lsp/config";
 import { applyTextEditsToString, applyWorkspaceEdit } from "@pk-nerdsaver-ai/pi-coding-agent/lsp/edits";
 import { renderCall, renderResult } from "@pk-nerdsaver-ai/pi-coding-agent/lsp/render";
 import type {
@@ -381,6 +381,110 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("drains every workspace/configuration pull during lazy cold start when a pull id collides with an in-flight request", async () => {
+		// #3001: basedpyright/pyright pull `workspace/configuration` repeatedly
+		// during cold start and gate document analysis on every pull being
+		// answered. Their pull ids live in the server's own id space and routinely
+		// coincide with the client's in-flight request ids. The reader must route a
+		// message by its `method` (a server-initiated request) BEFORE matching it
+		// against pending client requests by id -- otherwise a colliding config
+		// pull is swallowed as a bogus response, never answered, and the server
+		// wedges (the lazy `lsp symbols` call returns nothing and hangs). The
+		// eager warmup/reload path escapes this only because it issues no
+		// concurrent semantic request while the cold-start pulls drain.
+		const tempDir = TempDir.createSync("@omp-lsp-lazy-config-drain-");
+		try {
+			const symbols = [
+				{
+					name: "main",
+					kind: 12,
+					location: {
+						uri: fileToUri(path.join(tempDir.path(), "main.py")),
+						range: { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } },
+					},
+				},
+			];
+
+			// Pulls the server still awaits an answer for. The gated documentSymbol
+			// response is withheld until this set drains, mirroring pyright.
+			const unansweredConfigPulls = new Set<number | string>();
+			let symbolReqId: number | string | undefined;
+			let symbolsSent = false;
+
+			installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { capabilities: { documentSymbolProvider: true } },
+					});
+					return;
+				}
+				if (message.method === "textDocument/documentSymbol") {
+					symbolReqId = message.id;
+					// Cold-start config storm issued while the request is in flight.
+					// One pull uses a fresh server id; the other reuses the request's
+					// own id (server + client id counters collide) and pulls the bare
+					// `<server>` section the report flags as dropped.
+					const pulls: Array<{ id: number | string; items: Array<{ section?: string }> }> = [
+						{ id: 8200, items: [{ section: "basedpyright" }] },
+						{ id: message.id as number, items: [{}] },
+					];
+					for (const pull of pulls) {
+						unansweredConfigPulls.add(pull.id);
+						srv.send({
+							jsonrpc: "2.0",
+							id: pull.id,
+							method: "workspace/configuration",
+							params: { items: pull.items },
+						});
+					}
+					return;
+				}
+				// Client -> server config responses: an id + result, no method.
+				if (message.method === undefined && message.id !== undefined && unansweredConfigPulls.has(message.id)) {
+					unansweredConfigPulls.delete(message.id);
+					if (unansweredConfigPulls.size === 0 && !symbolsSent && symbolReqId !== undefined) {
+						symbolsSent = true;
+						srv.send({ jsonrpc: "2.0", id: symbolReqId, result: symbols });
+					}
+					return;
+				}
+				if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+
+			const config: ServerConfig = {
+				command: "fake-lsp",
+				fileTypes: ["py"],
+				rootMarkers: [],
+			};
+
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			const result = await lspClient.sendRequest(
+				client,
+				"textDocument/documentSymbol",
+				{ textDocument: { uri: fileToUri(path.join(tempDir.path(), "main.py")) } },
+				undefined,
+				2_000,
+			);
+
+			// The gated request resolves with the server's real symbols only once the
+			// client has answered every config pull -- including the one whose id
+			// collided with this request. On baseline the colliding pull is
+			// mis-routed as the documentSymbol response (resolving it with
+			// `undefined`), so the pull is never answered and the server wedges.
+			expect(result).toEqual(symbols);
+			expect(unansweredConfigPulls.size).toBe(0);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("answers defined server→client requests with spec no-op results", async () => {
 		// Same failure class as #3029: a defined server→client request
 		// (window/showMessage{Request}, window/showDocument, workspace/*/refresh)
@@ -676,7 +780,7 @@ describe("lsp regressions", () => {
 			const filePath = path.join(tempDir.path(), "symbol.ts");
 			await Bun.write(filePath, "winston.info('x');\n");
 
-			await expect(resolveSymbolColumn(filePath, 1, "nonexistent_symbol")).rejects.toThrow(
+			expect(resolveSymbolColumn(filePath, 1, "nonexistent_symbol")).rejects.toThrow(
 				'Symbol "nonexistent_symbol" not found on line 1',
 			);
 		} finally {
@@ -690,7 +794,7 @@ describe("lsp regressions", () => {
 			const filePath = path.join(tempDir.path(), "symbol.ts");
 			await Bun.write(filePath, "foo();\n");
 
-			await expect(resolveSymbolColumn(filePath, 1, "foo#2")).rejects.toThrow(
+			expect(resolveSymbolColumn(filePath, 1, "foo#2")).rejects.toThrow(
 				'Symbol "foo" occurrence 2 is out of bounds on line 1 (found 1)',
 			);
 		} finally {
@@ -1671,7 +1775,7 @@ describe("lsp regressions", () => {
 				},
 			};
 
-			await expect(applyWorkspaceEdit(workspaceEdit, tempDir.path())).rejects.toThrow(/overlapping LSP edits/);
+			expect(applyWorkspaceEdit(workspaceEdit, tempDir.path())).rejects.toThrow(/overlapping LSP edits/);
 			// The valid file must be untouched: validation runs before any write.
 			expect(fs.readFileSync(okPath, "utf8")).toBe(okContent);
 		} finally {
@@ -1837,7 +1941,7 @@ describe("lsp regressions", () => {
 			projectLoaded: Promise.resolve(),
 			resolveProjectLoaded: () => {},
 		};
-		await expect(lspClient.sendRequest(client, "test/method", {}, undefined, 25)).rejects.toThrow(/after 25ms/);
+		expect(lspClient.sendRequest(client, "test/method", {}, undefined, 25)).rejects.toThrow(/after 25ms/);
 	});
 
 	it("sendRequest uses the signal as the deadline when no explicit timeout is set", async () => {
@@ -1864,7 +1968,7 @@ describe("lsp regressions", () => {
 			resolveProjectLoaded: () => {},
 		};
 		const signal = AbortSignal.timeout(20);
-		await expect(lspClient.sendRequest(client, "test/method", {}, signal)).rejects.toThrow();
+		expect(lspClient.sendRequest(client, "test/method", {}, signal)).rejects.toThrow();
 		// If the per-request 30s timer had fired, the message would say "after 30000ms".
 		// We assert the negative: the rejection came from the signal, not the timer.
 		try {
@@ -1914,6 +2018,56 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("workspace reload rediscovers LSP servers after an empty config was cached", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-reload-redetect-");
+		try {
+			const server: ServerConfig = {
+				command: "test-lsp",
+				fileTypes: [".ts"],
+				rootMarkers: ["package.json"],
+			};
+			const configs: LspConfig[] = [
+				{ servers: {}, idleTimeoutMs: undefined },
+				{ servers: { "test-lsp": server }, idleTimeoutMs: undefined },
+				{ servers: { "test-lsp": server }, idleTimeoutMs: undefined },
+			];
+			const loadConfigSpy = vi
+				.spyOn(lspConfig, "loadConfig")
+				.mockImplementation(() => configs.shift() ?? configs[0]);
+			const client = { proc: { kill: vi.fn() } } as unknown as LspClient;
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			vi.spyOn(lspClient, "sendRequest").mockResolvedValue(null);
+
+			const tool = new LspTool({ cwd: tempDir.path() } as ToolSession);
+			const initial = await tool.execute("reload-redetect-status", { action: "status" });
+			const initialOutput = initial.content
+				.filter(block => block.type === "text")
+				.map(block => block.text)
+				.join("\n");
+			expect(initialOutput).toContain("No language servers configured for this project");
+
+			const starResult = await tool.execute("reload-redetect-star", { action: "reload", file: "*" });
+			const starOutput = starResult.content
+				.filter(block => block.type === "text")
+				.map(block => block.text)
+				.join("\n");
+
+			const omittedResult = await tool.execute("reload-redetect-omitted", { action: "reload" });
+			const omittedOutput = omittedResult.content
+				.filter(block => block.type === "text")
+				.map(block => block.text)
+				.join("\n");
+
+			expect(loadConfigSpy).toHaveBeenCalledTimes(3);
+			expect(starOutput).toContain("Reloaded test-lsp");
+			expect(omittedOutput).toContain("Reloaded test-lsp");
+			expect(lspClient.getOrCreateClient).toHaveBeenCalledWith(server, tempDir.path());
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
 	it("status distinguishes configured servers from started clients", async () => {
 		// `loadConfig` claims rust-analyzer + tsls are configured, but only
 		// tsls has actually been spawned. Status must reflect that — claiming
@@ -1943,6 +2097,76 @@ describe("lsp regressions", () => {
 
 		expect(output).toContain("rust-analyzer (configured, not started)");
 		expect(output).toContain("typescript-language-server (ready)");
+	});
+
+	it("reload * invalidates the per-cwd config cache so newly written .omp/lsp.json is observed", async () => {
+		// #3546: `getConfig` caches the first `loadConfig` result per cwd
+		// permanently. Creating `.omp/lsp.json` after the first LSP call left
+		// the tool stuck on "No language servers configured" until the process
+		// restarted. `reload *` (the user's explicit refresh) must invalidate
+		// that cache so subsequent calls observe the fresh config from disk.
+		const tempDir = TempDir.createSync("@omp-lsp-config-cache-reload-");
+		try {
+			const cwd = tempDir.path();
+			const empty: LspConfig = { servers: {}, idleTimeoutMs: undefined };
+			const withServer: LspConfig = {
+				servers: {
+					"fake-pylsp": {
+						command: "true",
+						fileTypes: [".py"],
+						rootMarkers: [".python-root"],
+						resolvedCommand: "/bin/true",
+					},
+				},
+				idleTimeoutMs: undefined,
+			};
+			const loadConfigSpy = vi
+				.spyOn(lspConfig, "loadConfig")
+				.mockImplementation(() => (loadConfigSpy.mock.calls.length === 1 ? empty : withServer));
+			// Prevent any real LSP subprocess from spawning when reload iterates
+			// the refreshed server list — the spawn path would race with the
+			// test's teardown.
+			vi.spyOn(lspClient, "getOrCreateClient").mockRejectedValue(new Error("spawn suppressed in test"));
+			vi.spyOn(lspClient, "getActiveClients").mockReturnValue([]);
+
+			const tool = new LspTool({ cwd } as ToolSession);
+
+			const status1 = await tool.execute("cache-1", { action: "status" });
+			const text1 = status1.content
+				.filter(b => b.type === "text")
+				.map(b => b.text)
+				.join("\n");
+			expect(text1).toContain("No language servers configured");
+			expect(loadConfigSpy).toHaveBeenCalledTimes(1);
+
+			// Second status hits the cache — proves caching is the baseline, so
+			// the next assertion measures invalidation, not a missing cache.
+			await tool.execute("cache-2", { action: "status" });
+			expect(loadConfigSpy).toHaveBeenCalledTimes(1);
+
+			// `reload *` MUST drop the cached empty config and re-read from disk.
+			const reload = await tool.execute("cache-3", { action: "reload", file: "*" });
+			expect(loadConfigSpy).toHaveBeenCalledTimes(2);
+			const reloadText = reload.content
+				.filter(b => b.type === "text")
+				.map(b => b.text)
+				.join("\n");
+			// Spawn was suppressed, so the per-server output is the failure line —
+			// the contract under test is that the fresh server was even considered.
+			expect(reloadText).toContain("fake-pylsp");
+
+			// The refreshed config now sits in the cache; status sees the new
+			// server without another disk read.
+			const status3 = await tool.execute("cache-4", { action: "status" });
+			const text3 = status3.content
+				.filter(b => b.type === "text")
+				.map(b => b.text)
+				.join("\n");
+			expect(text3).toContain("fake-pylsp (configured, not started)");
+			expect(loadConfigSpy).toHaveBeenCalledTimes(2);
+		} finally {
+			tempDir.removeSync();
+		}
 	});
 });
 

@@ -80,7 +80,7 @@ describe("issue #1776 - MiniMax object-shaped tool arguments", () => {
 		}).result();
 
 		expect(result.stopReason).toBe("toolUse");
-		expect(result.content).toEqual([
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([
 			{ type: "toolCall", id: "call-minimax-1", name: "bash", arguments: { command: "printf '%s\\n' ok" } },
 		]);
 	});
@@ -100,7 +100,7 @@ describe("issue #1776 - MiniMax object-shaped tool arguments", () => {
 		}).result();
 
 		expect(result.stopReason).toBe("toolUse");
-		expect(result.content).toEqual([
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([
 			{ type: "toolCall", id: "call-minimax-1", name: "bash", arguments: { command: "printf ok" } },
 		]);
 	});

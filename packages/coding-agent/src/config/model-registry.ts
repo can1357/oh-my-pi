@@ -1,7 +1,15 @@
 import { execSync } from "node:child_process";
 import * as path from "node:path";
 import { registerCustomApi, unregisterCustomApis } from "@pk-nerdsaver-ai/pi-ai/api-registry";
-import type { Api, Context, Model, ModelSpec, SimpleStreamOptions, ThinkingConfig } from "@pk-nerdsaver-ai/pi-ai/types";
+import type {
+	Api,
+	Context,
+	Model,
+	ModelSpec,
+	RemoteCompactionConfig,
+	SimpleStreamOptions,
+	ThinkingConfig,
+} from "@pk-nerdsaver-ai/pi-ai/types";
 import type { AssistantMessageEventStream } from "@pk-nerdsaver-ai/pi-ai/utils/event-stream";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@pk-nerdsaver-ai/pi-catalog/hosts";
@@ -24,12 +32,6 @@ import {
 	resolveVariantAlias,
 } from "@pk-nerdsaver-ai/pi-catalog/variant-collapse";
 
-// Sentinels for local-only OAuth tokens — declared inline to avoid loading
-// provider modules at startup. Must match packages/ai/src/registry/lm-studio.ts
-// and packages/ai/src/registry/vllm.ts.
-const DEFAULT_LOCAL_TOKEN = "lm-studio-local";
-const DEFAULT_VLLM_LOCAL_TOKEN = "vllm-local";
-
 const SPECIAL_MODEL_MANAGER_PROVIDER_IDS: readonly string[] = [
 	"google-antigravity",
 	"google-gemini-cli",
@@ -40,6 +42,11 @@ const STARTUP_MODEL_CACHE_PROVIDER_IDS: readonly string[] = [
 	...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId),
 	...SPECIAL_MODEL_MANAGER_PROVIDER_IDS,
 ];
+
+// Sentinels for local-only OAuth tokens — declared inline to avoid loading
+// provider modules at startup. Must match packages/ai/src/registry/llama-cpp.ts,
+// packages/ai/src/registry/lm-studio.ts, and packages/ai/src/registry/vllm.ts.
+const LOCAL_PROVIDER_PLACEHOLDERS = new Set<string>(["llama-cpp-local", "lm-studio-local", "vllm-local"]);
 
 import type { ApiKeyResolver, FetchImpl } from "@pk-nerdsaver-ai/pi-ai";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@pk-nerdsaver-ai/pi-ai/oauth";
@@ -68,10 +75,12 @@ import {
 	DISCOVERY_DEFAULT_MAX_TOKENS,
 	type DiscoveryContext,
 	type DiscoveryProviderConfig,
+	discoverLlamaCppModelContextWindow,
 	discoverModelsByProviderType,
 	getImplicit9RouterBaseUrl,
 	getImplicitOllamaBaseUrl,
 	getOllamaContextLengthOverride,
+	normalizeLiteLLMDiscoveryBaseUrl,
 } from "./model-discovery";
 import { ModelsConfigFile, type ProviderValidationModel, validateProviderConfiguration } from "./models-config";
 import type { ModelOverride, ModelsConfig, ProviderAuthMode } from "./models-config-schema";
@@ -86,7 +95,7 @@ export function isAuthenticated(apiKey: string | undefined | null): apiKey is st
 }
 
 function isDiscoveryBearerApiKey(apiKey: string | undefined | null): apiKey is string {
-	return isAuthenticated(apiKey) && apiKey !== DEFAULT_LOCAL_TOKEN && apiKey !== DEFAULT_VLLM_LOCAL_TOKEN;
+	return isAuthenticated(apiKey) && !LOCAL_PROVIDER_PLACEHOLDERS.has(apiKey);
 }
 
 /** Provider override config (baseUrl, headers, apiKey, compat, transport) without custom models */
@@ -96,6 +105,7 @@ interface ProviderOverride {
 	apiKey?: string;
 	authHeader?: boolean;
 	compat?: ModelSpec<Api>["compat"];
+	remoteCompaction?: RemoteCompactionConfig<Api>;
 	transport?: Model<Api>["transport"];
 }
 
@@ -128,7 +138,7 @@ interface ProviderOverride {
 export function mergeDiscoveredModel<TApi extends Api>(
 	model: Model<TApi>,
 	existing: Model<Api> | undefined,
-	providerOverride?: Pick<ProviderOverride, "baseUrl" | "headers" | "transport">,
+	providerOverride?: Pick<ProviderOverride, "baseUrl" | "headers" | "remoteCompaction" | "transport">,
 ): Model<TApi> {
 	if (existing) {
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
@@ -137,6 +147,10 @@ export function mergeDiscoveredModel<TApi extends Api>(
 			baseUrl: providerOverride?.baseUrl ?? model.baseUrl ?? existing.baseUrl,
 			headers: existing.headers ? { ...existing.headers, ...model.headers } : model.headers,
 			transport: providerOverride?.transport ?? existing.transport ?? model.transport,
+			remoteCompaction: mergeProviderRemoteCompactionConfig(
+				mergeRemoteCompactionConfig(existing.remoteCompaction, model.remoteCompaction),
+				providerOverride?.remoteCompaction,
+			),
 			...(supportsTools !== undefined ? { supportsTools } : {}),
 			compat: model.compatConfig,
 		} as ModelSpec<TApi>);
@@ -147,6 +161,10 @@ export function mergeDiscoveredModel<TApi extends Api>(
 			baseUrl: providerOverride.baseUrl ?? model.baseUrl,
 			headers: providerOverride.headers ? { ...model.headers, ...providerOverride.headers } : model.headers,
 			...(providerOverride.transport !== undefined ? { transport: providerOverride.transport } : {}),
+			remoteCompaction: mergeProviderRemoteCompactionConfig(
+				model.remoteCompaction,
+				providerOverride.remoteCompaction,
+			),
 			compat: model.compatConfig,
 		} as ModelSpec<TApi>);
 	}
@@ -354,6 +372,22 @@ function mergeCompat<TBase extends object, TOverride extends object>(
 	return merged as TBase & TOverride;
 }
 
+function mergeRemoteCompactionConfig(
+	baseConfig: RemoteCompactionConfig<Api> | undefined,
+	overrideConfig: RemoteCompactionConfig<Api> | undefined,
+): RemoteCompactionConfig<Api> | undefined {
+	if (!baseConfig) return overrideConfig;
+	if (!overrideConfig) return baseConfig;
+	return { ...baseConfig, ...overrideConfig };
+}
+
+function mergeProviderRemoteCompactionConfig(
+	modelConfig: RemoteCompactionConfig<Api> | undefined,
+	providerConfig: RemoteCompactionConfig<Api> | undefined,
+): RemoteCompactionConfig<Api> | undefined {
+	return mergeRemoteCompactionConfig(providerConfig, modelConfig);
+}
+
 /**
  * Project a built model back to spec shape for the model-manager/cache
  * boundary: sparse compat comes from `compatConfig`, never from the resolved
@@ -381,6 +415,8 @@ interface ModelPatch {
 	headers?: Record<string, string>;
 	compat?: ModelSpec<Api>["compat"];
 	contextPromotionTarget?: string;
+	compactionModel?: string;
+	remoteCompaction?: RemoteCompactionConfig<Api>;
 	premiumMultiplier?: number;
 }
 
@@ -404,6 +440,10 @@ function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTr
 	if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
 	if (patch.omitMaxOutputTokens !== undefined) result.omitMaxOutputTokens = patch.omitMaxOutputTokens;
 	if (patch.contextPromotionTarget !== undefined) result.contextPromotionTarget = patch.contextPromotionTarget;
+	if (patch.compactionModel !== undefined) result.compactionModel = patch.compactionModel;
+	if (patch.remoteCompaction !== undefined) {
+		result.remoteCompaction = mergeRemoteCompactionConfig(base.remoteCompaction, patch.remoteCompaction);
+	}
 	if (patch.premiumMultiplier !== undefined) result.premiumMultiplier = patch.premiumMultiplier;
 	if (patch.cost) {
 		result.cost = {
@@ -476,8 +516,6 @@ function mergeAuthHeader(
 /**
  * Decide whether a custom-yaml model should force OAuth-style request shaping.
  * - Explicit `auth: oauth` → force on.
- * - Explicit `auth: apiKey` / `auth: none` → leave unset (auto-detect by key prefix).
- * - No `auth` specified and `api: anthropic-messages` → default on. Custom Anthropic
  *   endpoints are typically Claude-Code-style proxies (e.g. CLIProxyAPI) that expect
  *   the cloaked request shape regardless of how the proxy itself is authenticated.
  * - Otherwise → unset.
@@ -498,6 +536,7 @@ function buildCustomModelOverlay(
 	authHeader: boolean | undefined,
 	providerCompat: ModelSpec<Api>["compat"] | undefined,
 	providerAuth: ProviderAuthMode | undefined,
+	providerRemoteCompaction: RemoteCompactionConfig<Api> | undefined,
 	modelDef: CustomModelDefinitionLike,
 ): CustomModelOverlay | undefined {
 	const api = modelDef.api ?? providerApi;
@@ -519,6 +558,8 @@ function buildCustomModelOverlay(
 		headers: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader, providerApiKey),
 		compat: mergeCompat(providerCompat, modelDef.compat),
 		contextPromotionTarget: modelDef.contextPromotionTarget,
+		compactionModel: modelDef.compactionModel,
+		remoteCompaction: mergeRemoteCompactionConfig(providerRemoteCompaction, modelDef.remoteCompaction),
 		premiumMultiplier: modelDef.premiumMultiplier,
 		isOAuth: resolveCustomModelIsOAuth(api, providerAuth),
 	};
@@ -559,6 +600,8 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 		omitMaxOutputTokens: resolvedModel.omitMaxOutputTokens ?? reference?.omitMaxOutputTokens,
 		compat: mergeCompat(reference?.compatConfig, resolvedModel.compat),
 		contextPromotionTarget: resolvedModel.contextPromotionTarget,
+		compactionModel: resolvedModel.compactionModel,
+		remoteCompaction: resolvedModel.remoteCompaction,
 		premiumMultiplier: resolvedModel.premiumMultiplier,
 		isOAuth: resolvedModel.isOAuth,
 	} as ModelSpec<Api>);
@@ -768,6 +811,50 @@ export class ModelRegistry {
 		} finally {
 			this.#resumeRebuild();
 		}
+	}
+
+	/**
+	 * Refresh dynamic metadata that can appear only after a local model loads.
+	 */
+	async refreshSelectedModelMetadata(model: Model<Api>): Promise<Model<Api>> {
+		const isLlamaCppDiscovery = this.#discoverableProviders.some(
+			providerConfig => providerConfig.provider === model.provider && providerConfig.discovery.type === "llama.cpp",
+		);
+		if (!isLlamaCppDiscovery) {
+			return model;
+		}
+		const contextWindow = await discoverLlamaCppModelContextWindow(model, this.#nonResolvingDiscoveryContext());
+		if (contextWindow === undefined) {
+			return this.find(model.provider, model.id) ?? model;
+		}
+		const current = this.find(model.provider, model.id) ?? model;
+		const override = this.#resolveLiveModelOverride(current);
+		const customModel = this.#resolveLiveCustomModelOverlay(current);
+		const patch: ModelPatch = {};
+		if (
+			override?.contextWindow === undefined &&
+			customModel?.contextWindow === undefined &&
+			current.contextWindow !== contextWindow
+		) {
+			patch.contextWindow = contextWindow;
+		}
+		const maxTokens = Math.min(contextWindow, DISCOVERY_DEFAULT_MAX_TOKENS);
+		if (
+			override?.maxTokens === undefined &&
+			customModel?.maxTokens === undefined &&
+			current.maxTokens !== maxTokens
+		) {
+			patch.maxTokens = maxTokens;
+		}
+		if (patch.contextWindow === undefined && patch.maxTokens === undefined) {
+			return current;
+		}
+		const patched = applyModelPatch(current, patch, "merge");
+		this.#models = this.#models.map(candidate =>
+			candidate.provider === current.provider && candidate.id === current.id ? patched : candidate,
+		);
+		this.#rebuildCanonicalIndex();
+		return patched;
 	}
 
 	/**
@@ -1003,6 +1090,7 @@ export class ModelRegistry {
 				});
 				continue;
 			}
+			const configStale = this.#isDiscoveryCacheOlderThanModelsConfig(cache.updatedAt);
 			const models = this.#applyProviderModelOverrides(
 				providerConfig.provider,
 				this.#normalizeDiscoverableModels(
@@ -1018,7 +1106,7 @@ export class ModelRegistry {
 				provider: providerConfig.provider,
 				status: "cached",
 				optional: providerConfig.optional ?? false,
-				stale: !cache.fresh || !cache.authoritative,
+				stale: providerConfig.discovery.type === "llama.cpp" || !cache.fresh || !cache.authoritative || configStale,
 				fetchedAt: cache.updatedAt,
 				models: models.map(model => model.id),
 			});
@@ -1043,12 +1131,25 @@ export class ModelRegistry {
 					)
 				: models;
 
+		const withRemoteCompaction = providerConfig.remoteCompaction
+			? withDecoderMetadata.map(model =>
+					buildModel({
+						...model,
+						remoteCompaction: mergeProviderRemoteCompactionConfig(
+							model.remoteCompaction,
+							providerConfig.remoteCompaction,
+						),
+						compat: model.compatConfig,
+					} as ModelSpec<Api>),
+				)
+			: withDecoderMetadata;
+
 		if (providerConfig.provider !== "ollama" || providerConfig.api !== "openai-responses") {
-			return withDecoderMetadata;
+			return withRemoteCompaction;
 		}
 
 		const contextLengthOverride = getOllamaContextLengthOverride();
-		return withDecoderMetadata.map(model => {
+		return withRemoteCompaction.map(model => {
 			const normalized =
 				model.api === "openai-completions"
 					? buildModel({
@@ -1150,7 +1251,6 @@ export class ModelRegistry {
 		const discoverableProviders: DiscoveryProviderConfig[] = [];
 		const providerEntries = Object.entries(value.providers ?? {});
 		const configuredProviders = new Set(Object.keys(value.providers ?? {}));
-
 		for (const [providerName, providerConfig] of providerEntries) {
 			const resolvedProviderHeaders = resolveConfigHeaders(providerConfig.headers);
 			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/transport are present
@@ -1161,15 +1261,20 @@ export class ModelRegistry {
 				providerConfig.authHeader !== undefined ||
 				providerConfig.compat ||
 				providerConfig.disableStrictTools ||
+				providerConfig.remoteCompaction ||
 				providerConfig.transport
 			) {
 				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
 				overrides.set(providerName, {
-					baseUrl: providerConfig.baseUrl,
+					baseUrl:
+						providerConfig.discovery?.type === "litellm"
+							? normalizeLiteLLMDiscoveryBaseUrl(providerConfig.baseUrl)
+							: providerConfig.baseUrl,
 					headers: resolvedProviderHeaders,
 					apiKey: providerConfig.apiKey,
 					authHeader: providerConfig.authHeader,
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
+					remoteCompaction: providerConfig.remoteCompaction,
 					transport: providerConfig.transport,
 				});
 			}
@@ -1190,6 +1295,7 @@ export class ModelRegistry {
 					baseUrl: providerConfig.baseUrl,
 					headers: resolvedProviderHeaders,
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
+					remoteCompaction: providerConfig.remoteCompaction,
 					discovery: providerConfig.discovery,
 					optional: false,
 				});
@@ -1280,7 +1386,15 @@ export class ModelRegistry {
 		if (providerConfig.discovery.type === "openai-models-list") {
 			return `${providerConfig.provider}:openai-models-list-context-v3`;
 		}
+		if (providerConfig.discovery.type === "litellm") {
+			return `${providerConfig.provider}:litellm-rich-v1`;
+		}
 		return providerConfig.provider;
+	}
+
+	#isDiscoveryCacheOlderThanModelsConfig(cacheUpdatedAt: number): boolean {
+		const configMtime = this.#modelsConfigFile.getMtimeMs();
+		return configMtime !== null && cacheUpdatedAt < Math.floor(configMtime);
 	}
 
 	async #discoverProviderModels(
@@ -1289,6 +1403,10 @@ export class ModelRegistry {
 	): Promise<Model<Api>[]> {
 		const cacheProviderId = this.#configuredDiscoveryCacheProviderId(providerConfig);
 		const cached = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
+		const cacheOlderThanConfig = cached !== null && this.#isDiscoveryCacheOlderThanModelsConfig(cached.updatedAt);
+		const bypassFreshCache = providerConfig.discovery.type === "llama.cpp" && strategy === "online-if-uncached";
+		const effectiveStrategy =
+			strategy === "online-if-uncached" && (cacheOlderThanConfig || bypassFreshCache) ? "online" : strategy;
 		const requiresAuth = !this.#keylessProviders.has(providerConfig.provider);
 		if (requiresAuth) {
 			const apiKey = await this.#peekApiKeyForProvider(providerConfig.provider);
@@ -1335,12 +1453,12 @@ export class ModelRegistry {
 			cacheTtlMs: 24 * 60 * 60 * 1000,
 			fetchDynamicModels,
 		});
-		const result = await manager.refresh(strategy);
+		const result = await manager.refresh(effectiveStrategy);
 		const status = discoveryError
 			? result.models.length > 0
 				? "cached"
 				: "unavailable"
-			: strategy === "offline"
+			: effectiveStrategy === "offline"
 				? cached
 					? "cached"
 					: "idle"
@@ -1351,7 +1469,7 @@ export class ModelRegistry {
 			provider: providerId,
 			status,
 			optional: providerConfig.optional ?? false,
-			stale: result.stale || status === "cached",
+			stale: result.stale || status === "cached" || ((cacheOlderThanConfig || bypassFreshCache) && status !== "ok"),
 			fetchedAt: discoveryError ? cached?.updatedAt : Date.now(),
 			models: result.models.map(model => model.id),
 			error: discoveryError,
@@ -1378,6 +1496,13 @@ export class ModelRegistry {
 				}
 				return this.resolver(provider);
 			},
+		};
+	}
+
+	#nonResolvingDiscoveryContext(): DiscoveryContext {
+		return {
+			fetch: this.#fetch,
+			getBearerApiKeyResolver: async () => undefined,
 		};
 	}
 
@@ -1561,12 +1686,18 @@ export class ModelRegistry {
 			authHeader: override.authHeader ?? baseOverride?.authHeader,
 			headers: override.headers ? { ...(baseOverride?.headers ?? {}), ...override.headers } : baseOverride?.headers,
 			compat: override.compat ? mergeCompat(baseOverride?.compat, override.compat) : baseOverride?.compat,
+			remoteCompaction: mergeRemoteCompactionConfig(baseOverride?.remoteCompaction, override.remoteCompaction),
 			transport: override.transport ?? baseOverride?.transport,
 		};
 	}
-	#applyProviderTransportOverride<T extends { baseUrl?: string; headers?: Record<string, string> }>(
+	#applyProviderTransportOverride<
+		T extends { baseUrl?: string; headers?: Record<string, string>; remoteCompaction?: RemoteCompactionConfig<Api> },
+	>(
 		entry: T,
-		override: Pick<ProviderOverride, "baseUrl" | "headers" | "authHeader" | "apiKey" | "transport">,
+		override: Pick<
+			ProviderOverride,
+			"baseUrl" | "headers" | "authHeader" | "apiKey" | "remoteCompaction" | "transport"
+		>,
 	): T {
 		const headers = mergeAuthHeader(
 			override.headers ? { ...entry.headers, ...override.headers } : entry.headers,
@@ -1580,6 +1711,7 @@ export class ModelRegistry {
 			// Preserve the model's existing transport when the override omits one;
 			// providers without a `transport` field keep the default per-API dispatch.
 			...(override.transport !== undefined ? { transport: override.transport } : {}),
+			remoteCompaction: mergeProviderRemoteCompactionConfig(entry.remoteCompaction, override.remoteCompaction),
 		};
 	}
 	#applyRuntimeProviderOverrides(models: Model<Api>[]): Model<Api>[] {
@@ -1590,6 +1722,23 @@ export class ModelRegistry {
 			return this.#applyProviderTransportOverride(model, override);
 		});
 	}
+	#resolveLiveModelOverride(model: Model<Api>): ModelOverride | undefined {
+		const providerOverrides = this.#modelOverrides.get(model.provider);
+		if (!providerOverrides) return undefined;
+		return resolveModelOverrideWithAliases(
+			providerOverrides,
+			model,
+			(provider, id) => this.find(provider, id) !== undefined,
+		);
+	}
+
+	#resolveLiveCustomModelOverlay(model: Model<Api>): CustomModelOverlay | undefined {
+		return (
+			this.#customModelOverlays.find(overlay => overlay.provider === model.provider && overlay.id === model.id) ??
+			this.#runtimeModelOverlays.find(overlay => overlay.provider === model.provider && overlay.id === model.id)
+		);
+	}
+
 	#applyModelOverrides(models: Model<Api>[], overrides: Map<string, Map<string, ModelOverride>>): Model<Api>[] {
 		if (overrides.size === 0) return models;
 		let liveKeys: Set<string> | null = null;
@@ -1664,7 +1813,6 @@ export class ModelRegistry {
 
 	#parseModels(config: ModelsConfig): CustomModelOverlay[] {
 		const models: CustomModelOverlay[] = [];
-
 		for (const [providerName, providerConfig] of Object.entries(config.providers ?? {})) {
 			const modelDefs = providerConfig.models ?? [];
 			if (modelDefs.length === 0) continue; // Override-only, no custom models
@@ -1685,6 +1833,7 @@ export class ModelRegistry {
 					providerConfig.authHeader,
 					providerCompat,
 					(providerConfig.auth as ProviderAuthMode | undefined) ?? undefined,
+					providerConfig.remoteCompaction,
 					modelDef as CustomModelDefinitionLike,
 				);
 				if (!model) continue;
@@ -2092,6 +2241,7 @@ export class ModelRegistry {
 					config.authHeader,
 					config.compat,
 					undefined,
+					config.remoteCompaction,
 					modelDef as CustomModelDefinitionLike,
 				);
 				if (!overlay) {
@@ -2159,6 +2309,7 @@ export class ModelRegistry {
 							providerAuthHeader,
 							providerCompat,
 							undefined,
+							config.remoteCompaction,
 							modelDef as CustomModelDefinitionLike,
 						);
 						if (overlay) results.push(finalizeCustomModel(overlay, { useDefaults: true }));
@@ -2176,6 +2327,7 @@ export class ModelRegistry {
 			config.headers ||
 			config.apiKey ||
 			config.authHeader !== undefined ||
+			config.remoteCompaction !== undefined ||
 			config.transport !== undefined
 		) {
 			const transportOverride = {
@@ -2183,6 +2335,7 @@ export class ModelRegistry {
 				headers: config.headers,
 				apiKey: config.apiKey,
 				authHeader: config.authHeader,
+				remoteCompaction: config.remoteCompaction,
 				transport: config.transport,
 			};
 			const nextRuntimeOverride = this.#mergeProviderOverride(
@@ -2244,6 +2397,7 @@ export interface ProviderConfigInput {
 	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 	headers?: Record<string, string>;
 	compat?: ModelSpec<Api>["compat"];
+	remoteCompaction?: RemoteCompactionConfig<Api>;
 	authHeader?: boolean;
 	/** Streaming transport override — see {@link Model.transport}. */
 	transport?: Model<Api>["transport"];
@@ -2278,6 +2432,8 @@ export interface ProviderConfigInput {
 		headers?: Record<string, string>;
 		compat?: ModelSpec<Api>["compat"];
 		contextPromotionTarget?: string;
+		compactionModel?: string;
+		remoteCompaction?: RemoteCompactionConfig<Api>;
 		premiumMultiplier?: number;
 	}>;
 }

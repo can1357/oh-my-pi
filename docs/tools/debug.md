@@ -155,6 +155,44 @@ Side-channel artifacts outside the model tool result:
 - **Adapter selection**
   - `launch`: explicit `adapter` wins; otherwise `selectLaunchAdapter()` ranks available adapters by extension match, root-marker match, then native-debugger preference (`gdb`, `lldb-dap`) for extensionless binaries.
   - `attach`: explicit `adapter` wins; otherwise remote `port` prefers `debugpy`, then native debuggers, then first available adapter.
+- **Custom adapter config**
+  - Debug adapters can be added or overridden with `dap.json`, `.dap.json`, `dap.yaml`, `.dap.yaml`, `dap.yml`, or `.dap.yml`.
+  - Search order mirrors LSP config: project root, project config dirs (`.omp/`, `.pi/`, `.claude/`), user config dirs, plugin roots, then home-root fallback. Files are merged from lowest to highest priority.
+  - Config shape may be either `{ "adapters": { ... } }` or a top-level adapter map.
+  - Adapter fields:
+    - `command`: executable name or path. Required.
+    - `args`: adapter argv.
+    - `languages`: display/filter metadata.
+    - `fileTypes`: file extensions or filenames used for launch auto-selection.
+    - `rootMarkers`: files/directories used to rank adapters for a project.
+    - `launchDefaults`: default DAP launch arguments merged before the selected program/cwd/args.
+    - `attachDefaults`: default DAP attach arguments merged before pid/port/host/cwd.
+    - `connectMode`: `"stdio"` (default) or `"socket"`.
+    - `acceptsDirectoryProgram`: set `true` for adapters such as `dlv` that can launch a package/project directory.
+
+Example `.omp/dap.json`:
+
+```json
+{
+  "adapters": {
+    "custom-jvm": {
+      "command": "kotlin-debug-adapter",
+      "args": ["--stdio"],
+      "languages": ["java", "kotlin"],
+      "fileTypes": [".java", ".kt", ".kts"],
+      "rootMarkers": ["pom.xml", "build.gradle", "build.gradle.kts"],
+      "launchDefaults": {
+        "request": "launch",
+        "projectRoot": "."
+      },
+      "attachDefaults": {
+        "request": "attach",
+        "host": "127.0.0.1"
+      }
+    }
+  }
+}
+```
 - **Transport**
   - stdio adapters: direct `stdin`/`stdout` framing.
   - socket adapters: Unix domain socket on Linux; TCP callback on macOS/other.

@@ -31,7 +31,9 @@ describe("EvalTool timeout semantics", () => {
 		// 1s budget; the cell idles for 5s and emits no status, so nothing extends
 		// the budget — it must be cut off at the wall-clock limit.
 		const result = await tool.execute("call-compute-timeout", {
-			cells: [{ language: "js", code: "await Bun.sleep(2000); return 'never';", timeout: 1 }],
+			language: "js",
+			code: "await Bun.sleep(2000); return 'never';",
+			timeout: 1,
 		});
 
 		const text = result.content

@@ -64,7 +64,17 @@ describe("parseAgentFields", () => {
 			tools: ["Read", "Search"],
 		});
 
-		expect(fields?.tools).toEqual(["read", "search", "yield"]);
+		expect(fields?.tools).toEqual(["read", "grep", "yield"]);
+	});
+
+	test("maps legacy search and find tool names", () => {
+		const fields = parseAgentFields({
+			name: "reviewer",
+			description: "desc",
+			tools: ["Find", "Glob", "Search", "Grep"],
+		});
+
+		expect(fields?.tools).toEqual(["glob", "grep", "yield"]);
 	});
 
 	test("parses autoloadSkills from array frontmatter", () => {

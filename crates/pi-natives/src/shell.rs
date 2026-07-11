@@ -245,6 +245,15 @@ impl Shell {
 		self.inner.abort().await;
 		Ok(())
 	}
+
+	/// Count live background jobs (`&`/`nohup` children still running) on this
+	/// session. Completed jobs are reaped first. The host uses this to retain a
+	/// per-call shell whose background processes are still running instead of
+	/// dropping it (which would SIGKILL them via kill-on-drop).
+	#[napi]
+	pub async fn live_background_job_count(&self) -> u32 {
+		self.inner.live_background_job_count().await
+	}
 }
 
 /// Execute a brush shell command.
@@ -352,7 +361,9 @@ mod tests {
 		ShellRunOptions as CoreShellRunOptions,
 		cancel::{AbortReason, CancelToken},
 	};
-	use tokio::{sync::mpsc, time};
+	#[cfg(unix)]
+	use tokio::sync::mpsc;
+	use tokio::time;
 
 	use super::CoreShell;
 

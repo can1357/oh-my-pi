@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@pk-nerdsaver-ai/pi-agent-core";
+import type { ImageContent } from "@pk-nerdsaver-ai/pi-ai";
 import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
 import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
@@ -28,6 +29,8 @@ type StubEditor = {
 	getText: () => string;
 	addToHistory: Mock<(...args: unknown[]) => unknown>;
 	onSubmit?: (text: string) => Promise<void>;
+	pendingImages: ImageContent[];
+	pendingImageLinks: (string | undefined)[];
 };
 
 type PromptCustomMessage = Mock<
@@ -53,6 +56,8 @@ function createStubInputControllerContext(opts: { skillCommands: Map<string, str
 			return editorText;
 		},
 		addToHistory: vi.fn(),
+		pendingImages: [] as ImageContent[],
+		pendingImageLinks: [] as (string | undefined)[],
 	};
 	const promptCustomMessage: PromptCustomMessage = vi.fn(async () => {});
 	const prompt = vi.fn(async (_text: string, _options?: unknown) => {});
@@ -83,8 +88,6 @@ function createStubInputControllerContext(opts: { skillCommands: Map<string, str
 		updatePendingMessagesDisplay,
 		isBashMode: false,
 		isPythonMode: false,
-		pendingImages: [],
-		pendingImageLinks: [],
 		loopModeEnabled: false,
 		compactionQueuedMessages: [],
 		locallySubmittedUserSignatures: new Set<string>(),
@@ -448,6 +451,8 @@ function createStubInteractiveModeContextForUiHelpers(session: AgentSession) {
 			return editorText;
 		},
 		addToHistory: vi.fn(),
+		pendingImages: [] as ImageContent[],
+		pendingImageLinks: [] as (string | undefined)[],
 	};
 	const pendingMessagesContainer = new Container();
 	const requestRender = vi.fn();

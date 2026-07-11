@@ -10,6 +10,7 @@ import { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-ses
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
 import { buildSystemPrompt } from "@pk-nerdsaver-ai/pi-coding-agent/system-prompt";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 const EMPTY_TREE = {
@@ -80,7 +81,7 @@ describe("AgentSession model-change prompt refresh", () => {
 			session = undefined;
 		}
 		authStorage.close();
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	function pickTwoModels(): [Model, Model] {

@@ -3,6 +3,7 @@
  */
 import type { AgentTool, AgentToolContext, AgentToolUpdateCallback } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { Static, TSchema } from "@pk-nerdsaver-ai/pi-ai";
+import { normalizeToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { HookRunner } from "./runner";
 import type { ToolCallEventResult, ToolResultEventResult } from "./types";
@@ -46,7 +47,7 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 					type: "tool_call",
 					toolName: this.tool.name,
 					toolCallId,
-					input: params as Record<string, unknown>,
+					input: normalizeToolEventInput(this.tool.name, params as Record<string, unknown>),
 				})) as ToolCallEventResult | undefined;
 
 				if (callResult?.block) {
@@ -72,7 +73,7 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 					type: "tool_result",
 					toolName: this.tool.name,
 					toolCallId,
-					input: params as Record<string, unknown>,
+					input: normalizeToolEventInput(this.tool.name, params as Record<string, unknown>),
 					content: result.content,
 					details: result.details,
 					isError: false,
@@ -95,7 +96,7 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 					type: "tool_result",
 					toolName: this.tool.name,
 					toolCallId,
-					input: params as Record<string, unknown>,
+					input: normalizeToolEventInput(this.tool.name, params as Record<string, unknown>),
 					content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
 					details: undefined,
 					isError: true,

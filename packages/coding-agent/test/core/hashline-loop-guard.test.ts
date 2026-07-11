@@ -12,6 +12,7 @@ import {
 import { NOOP_HARD_LIMIT } from "@pk-nerdsaver-ai/pi-coding-agent/edit/hashline/noop-loop-guard";
 import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import { ToolError } from "@pk-nerdsaver-ai/pi-coding-agent/tools/tool-errors";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -43,7 +44,7 @@ async function withTempDir(fn: (tempDir: string) => Promise<void>): Promise<void
 	try {
 		await fn(tempDir);
 	} finally {
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await removeWithRetries(tempDir);
 	}
 }
 

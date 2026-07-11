@@ -600,6 +600,10 @@ describe("Markdown component", () => {
 			const component = new MarkdownWithInput(markdown);
 			tui.addChild(component);
 			tui.start();
+			// The first render is scheduled on the setImmediate hop; drain it before flushing.
+			const firstRender = Promise.withResolvers<void>();
+			setImmediate(firstRender.resolve);
+			await firstRender.promise;
 			await terminal.flush();
 
 			expect(component.markdownLineCount > 0).toBeTruthy();
@@ -1216,6 +1220,41 @@ bar`,
 				"Should render HTML in code blocks",
 			).toBeTruthy();
 		});
+
+		it("should strip inline span and text HTML tags but keep their contents", () => {
+			const markdown = new Markdown("<span></span><text>▃</text>", 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(80);
+			const plainLines = lines.map(line => stripVTControlCharacters(line).trim());
+			const joinedPlain = plainLines.join("");
+
+			expect(joinedPlain).toBe("▃");
+		});
+
+		it("should preserve whitespace surrounding stripped inline HTML tags", () => {
+			const markdown = new Markdown("some <span>inner</span> text", 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(80);
+			const plainLines = lines.map(line => stripVTControlCharacters(line).trim());
+			const joinedPlain = plainLines.join("");
+
+			expect(joinedPlain).toBe("some inner text");
+		});
+
+		it("should unescape HTML entities inside and outside HTML tags", () => {
+			const markdown = new Markdown(
+				"<span>&lt;▃&gt;</span> &amp; &quot;test&quot; &#128512; &#x1F600;",
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+
+			const lines = markdown.render(80);
+			const plainLines = lines.map(line => stripVTControlCharacters(line).trim());
+			const joinedPlain = plainLines.join("");
+
+			expect(joinedPlain).toBe('<▃> & "test" 😀 😀');
+		});
 	});
 });
 
@@ -1672,6 +1711,85 @@ describe("Markdown.render reference stability", () => {
 		expect(lines).toContain("• Second");
 		expect(lines.some(line => line.startsWith(" ") && line.includes("•"))).toBe(false);
 		expect(lines.filter(line => line === "").length).toBe(0);
+	});
+});
+
+describe("Inline and block HTML tag rendering", () => {
+	const plainLines = (md: string, w = 80): string[] =>
+		new Markdown(md, 0, 0, defaultMarkdownTheme).render(w).map(line => stripVTControlCharacters(line).trimEnd());
+
+	it("renders inline <code> identically to a backtick codespan", () => {
+		const html = new Markdown("call <code>install()</code> now", 0, 0, defaultMarkdownTheme).render(80);
+		const span = new Markdown("call `install()` now", 0, 0, defaultMarkdownTheme).render(80);
+		expect(html).toEqual(span);
+		expect(html[0]).toContain(defaultMarkdownTheme.code("install()"));
+		expect(stripVTControlCharacters(html[0])).not.toContain("<code>");
+	});
+
+	it("decodes HTML entities inside inline <code>", () => {
+		const text = plainLines("Can <code>Tap::read(&amp;self)</code> be ok?").join("\n");
+		expect(text).toContain("Tap::read(&self)");
+		expect(text).not.toContain("&amp;");
+		expect(text).not.toMatch(/<\/?code>/);
+	});
+
+	it("renders a block <hr> tag as a horizontal rule, not literal text", () => {
+		const lines = plainLines("before\n\n<hr>\n\nafter", 40);
+		expect(
+			lines.some(line => line.length >= 10 && line === defaultMarkdownTheme.symbols.hrChar.repeat(line.length)),
+		).toBe(true);
+		expect(lines.join("\n")).not.toContain("<hr>");
+		expect(lines).toContain("before");
+		expect(lines).toContain("after");
+	});
+
+	it("styles inline <code> inside table cells without leaking tags or breaking the border", () => {
+		const lines = plainLines("| Name | Note |\n| --- | --- |\n| <code>foo()</code> | <code>&amp;self</code> |", 60);
+		expect(lines.some(line => line.includes("foo()"))).toBe(true);
+		expect(lines.some(line => line.includes("&self"))).toBe(true);
+		expect(lines.join("\n")).not.toMatch(/<\/?code>/);
+		expect(lines.some(line => line.startsWith("+"))).toBe(true);
+	});
+
+	it("treats <hr> in a table cell as a line break, never a full-width rule", () => {
+		const lines = plainLines("| A | B |\n| --- | --- |\n| x<hr>y | z |", 50);
+		expect(lines.some(line => /^-{20,}$/.test(line))).toBe(false);
+		expect(lines.join("\n")).not.toContain("<hr>");
+		expect(lines.some(line => line.includes("| x"))).toBe(true);
+		expect(lines.some(line => line.includes("| y"))).toBe(true);
+	});
+
+	it("renders a single-line <blockquote> with the quote border", () => {
+		const lines = plainLines("<blockquote>heads up, this is a warning</blockquote>");
+		const quoteLine = lines.find(line => line.includes("heads up"));
+		expect(quoteLine).toBeDefined();
+		expect(quoteLine?.startsWith(defaultMarkdownTheme.symbols.quoteBorder)).toBe(true);
+		expect(lines.join("\n")).not.toMatch(/<\/?blockquote>/);
+	});
+
+	it("drops a stray unmatched <code> tag and keeps its content", () => {
+		const text = plainLines("text <code>dangling content here").join(" ");
+		expect(text).toContain("dangling content here");
+		expect(text).not.toContain("<code>");
+	});
+
+	it("leaves <code>/<hr> verbatim inside fenced code blocks", () => {
+		const lines = plainLines("```html\n<code>literal</code>\n<hr>\n```");
+		expect(lines.some(line => line.includes("<code>literal</code>"))).toBe(true);
+		expect(lines.some(line => line.includes("<hr>"))).toBe(true);
+	});
+
+	it("renderInlineMarkdown styles <code> and decodes entities", () => {
+		const rendered = renderInlineMarkdown(
+			"Use <code>&amp;self</code> not <code>&amp;mut self</code>",
+			defaultMarkdownTheme,
+		);
+		const plain = stripVTControlCharacters(rendered);
+		expect(plain).toContain("&self");
+		expect(plain).toContain("&mut self");
+		expect(plain).not.toContain("&amp;");
+		expect(plain).not.toMatch(/<\/?code>/);
+		expect(rendered).toContain(defaultMarkdownTheme.code("&self"));
 	});
 });
 

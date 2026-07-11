@@ -21,7 +21,7 @@ import { clearCache as clearFsCache } from "@pk-nerdsaver-ai/pi-coding-agent/cap
 import { type Skill, skillCapability } from "@pk-nerdsaver-ai/pi-coding-agent/capability/skill";
 import { type SlashCommand, slashCommandCapability } from "@pk-nerdsaver-ai/pi-coding-agent/capability/slash-command";
 import { loadCapability } from "@pk-nerdsaver-ai/pi-coding-agent/discovery";
-import { getConfigRootDir, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
+import { getConfigRootDir, removeWithRetries, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
 
 const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
@@ -74,9 +74,9 @@ describe("native user-level config discovery follows the active profile", () => 
 		}
 		if (originalHome === undefined) delete process.env.HOME;
 		else process.env.HOME = originalHome;
-		await fs.rm(tempHome, { recursive: true, force: true });
-		await fs.rm(projectDir, { recursive: true, force: true });
-		await fs.rm(profileAgentDir, { recursive: true, force: true });
+		await removeWithRetries(tempHome);
+		await removeWithRetries(projectDir);
+		await removeWithRetries(profileAgentDir);
 	});
 
 	test("slash commands resolve from the profile, not the default agent dir", async () => {

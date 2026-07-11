@@ -36,25 +36,15 @@
 import { isSubcommand } from "../cli-commands";
 import {
 	EXTENSION_SHADOWABLE_STRING_FLAGS,
+	isUnknownLongValueCandidate,
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
 	PROFILE_BOOTSTRAP_BOUNDARY_ARG,
 	STRING_VALUE_FLAGS,
-	VALUELESS_FLAGS,
 } from "./flag-tables";
 
 function isProfileBootstrapSubcommand(arg: string): boolean {
 	return arg === "launch" || arg === "acp";
-}
-
-function isUnknownLongValueCandidate(arg: string): boolean {
-	return (
-		arg.startsWith("--") &&
-		!arg.includes("=") &&
-		!STRING_VALUE_FLAGS.has(arg) &&
-		!OPTIONAL_VALUE_FLAGS.has(arg) &&
-		!VALUELESS_FLAGS.has(arg)
-	);
 }
 
 function needsBoundaryAfterGlobalStrip(stripped: readonly string[]): boolean {

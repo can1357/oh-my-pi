@@ -6,7 +6,7 @@ import { InternalUrlRouter } from "@pk-nerdsaver-ai/pi-coding-agent/internal-url
 import { getMemoryRoot } from "@pk-nerdsaver-ai/pi-coding-agent/memories";
 import { AgentRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
-import { getAgentDir, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
+import { getAgentDir, removeWithRetries, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
 
 interface MemoryFixture {
 	cwd: string;
@@ -42,7 +42,7 @@ async function withMemoryFixture(fn: (fixture: MemoryFixture) => Promise<void>):
 		await fn({ cwd, memoryRoot, agentDir, cleanupRoot });
 	} finally {
 		setAgentDir(previousAgentDir);
-		await fs.rm(cleanupRoot, { recursive: true, force: true });
+		await removeWithRetries(cleanupRoot);
 	}
 }
 

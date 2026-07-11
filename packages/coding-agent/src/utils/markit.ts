@@ -1,12 +1,20 @@
+import * as path from "node:path";
 import { logger, untilAborted } from "@pk-nerdsaver-ai/pi-utils";
-import type { Markit, StreamInfo } from "../markit";
+import type { ConversionResult, Markit, StreamInfo } from "../markit";
 import { ToolAbortError } from "../tools/tool-errors";
+import {
+	type MarkitConversionCacheStatus,
+	markitConversionCacheKey,
+	readMarkitConversionCache,
+	writeMarkitConversionCache,
+} from "./markit-cache";
 import { loadEmbeddedMupdfWasm } from "./mupdf-wasm-embed";
 
 export interface MarkitConversionResult {
 	content: string;
 	ok: boolean;
 	error?: string;
+	cache?: MarkitConversionCacheStatus;
 }
 
 export interface MarkitFileConversionOptions {
@@ -103,41 +111,101 @@ function finalizeConversion(markdown?: string): MarkitConversionResult {
 	return { content: "", ok: false, error: "Conversion produced no output" };
 }
 
+function toBuffer(bytes: Uint8Array): Buffer {
+	return Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+	if (signal?.aborted) throw new ToolAbortError();
+}
+
+async function runCachedBufferConversion(
+	bytes: Uint8Array,
+	streamInfo: StreamInfo,
+	signal?: AbortSignal,
+	cacheEnabled = true,
+): Promise<MarkitConversionResult> {
+	const cacheKey = cacheEnabled
+		? markitConversionCacheKey(bytes, streamInfo.extension ?? streamInfo.mimetype ?? ".bin")
+		: undefined;
+
+	if (cacheKey) {
+		throwIfAborted(signal);
+		const cached = await readMarkitConversionCache(cacheKey);
+		throwIfAborted(signal);
+		if (cached.status === "hit") {
+			return { content: cached.content, ok: true, cache: "hit" };
+		}
+	}
+
+	throwIfAborted(signal);
+	let result: ConversionResult;
+	try {
+		result = await runMarkitConversion(markit => markit.convert(toBuffer(bytes), streamInfo), signal);
+	} catch (error) {
+		if (error instanceof ToolAbortError) {
+			throw error;
+		}
+		return { content: "", ok: false, error: normalizeError(error), cache: cacheEnabled ? "miss" : "skipped" };
+	}
+
+	const finalized = finalizeConversion(result.markdown);
+	if (finalized.ok && cacheKey) {
+		await writeMarkitConversionCache(cacheKey, finalized.content);
+	}
+	return { ...finalized, cache: cacheEnabled ? "miss" : "skipped" };
+}
+
 export async function convertFileWithMarkit(
 	filePath: string,
 	signal?: AbortSignal,
 	options?: MarkitFileConversionOptions,
 ): Promise<MarkitConversionResult> {
-	const extra = options?.imageDir ? { imageDir: options.imageDir } : undefined;
-	try {
-		const result = await runMarkitConversion(markit => markit.convertFile(filePath, extra), signal);
-		return finalizeConversion(result.markdown);
-	} catch (error) {
-		if (error instanceof ToolAbortError) {
-			throw error;
+	if (options?.imageDir) {
+		// Image extraction writes files into imageDir as a side effect; a
+		// markdown-only cache hit would leave the directory missing members, so
+		// this path stays uncached.
+		try {
+			const result = await runMarkitConversion(
+				markit => markit.convertFile(filePath, { imageDir: options.imageDir }),
+				signal,
+			);
+			return { ...finalizeConversion(result.markdown), cache: "skipped" };
+		} catch (error) {
+			if (error instanceof ToolAbortError) {
+				throw error;
+			}
+			return { content: "", ok: false, error: normalizeError(error), cache: "skipped" };
 		}
-		return { content: "", ok: false, error: normalizeError(error) };
 	}
+
+	throwIfAborted(signal);
+	let bytes: Uint8Array;
+	try {
+		bytes = await untilAborted(signal, () => Bun.file(filePath).bytes());
+	} catch (error) {
+		if (error instanceof ToolAbortError) throw error;
+		if (error instanceof Error && error.name === "AbortError") throw new ToolAbortError();
+		return { content: "", ok: false, error: normalizeError(error), cache: "miss" };
+	}
+	const streamInfo: StreamInfo = {
+		localPath: filePath,
+		extension: path.extname(filePath).toLowerCase(),
+		filename: path.basename(filePath),
+	};
+	return runCachedBufferConversion(bytes, streamInfo, signal, true);
 }
 
 export async function convertBufferWithMarkit(
 	buffer: Uint8Array,
 	extension: string,
 	signal?: AbortSignal,
+	options?: { useCache?: boolean },
 ): Promise<MarkitConversionResult> {
 	const normalizedExtension = normalizeExtension(extension);
 	const streamInfo: StreamInfo = {
 		extension: normalizedExtension,
 		filename: `input${normalizedExtension}`,
 	};
-
-	try {
-		const result = await runMarkitConversion(markit => markit.convert(Buffer.from(buffer), streamInfo), signal);
-		return finalizeConversion(result.markdown);
-	} catch (error) {
-		if (error instanceof ToolAbortError) {
-			throw error;
-		}
-		return { content: "", ok: false, error: normalizeError(error) };
-	}
+	return runCachedBufferConversion(buffer, streamInfo, signal, options?.useCache ?? true);
 }

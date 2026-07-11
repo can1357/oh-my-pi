@@ -6,6 +6,7 @@ import { resolvePromptCacheKey } from "../auth-gateway/http";
  * `stream(model, context, options)`.
  */
 import type { AuthGatewayStreamControl, AuthGatewayParsedRequest as ParsedRequest } from "../auth-gateway/types";
+import * as AIError from "../error";
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
@@ -53,7 +54,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	// vendor-neutral headers when the body doesn't carry one.
 	const parsed = openaiChatRequestSchema(body);
 	if (parsed instanceof type.errors) {
-		throw new Error(`openai-chat: ${parsed.summary}`);
+		throw new AIError.ValidationError(`openai-chat: ${parsed.summary}`);
 	}
 	const data = parsed;
 

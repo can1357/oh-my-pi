@@ -2,6 +2,7 @@ import { LogOut, PanelRight } from "lucide-react";
 import type { ReactNode } from "react";
 import type { GuestSnapshot } from "../../lib/client";
 import { fmtPercent, shortenPath } from "../../lib/format";
+import { ThemeToggle } from "./ThemeToggle";
 
 export interface HeaderBarProps {
 	snapshot: GuestSnapshot;
@@ -69,6 +70,7 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 					</span>
 				)}
 				<span className={`sh-dot sh-dot-${phase}`} title={phase} />
+				<ThemeToggle />
 				<button
 					type="button"
 					className={railOpen ? "sh-btn sh-btn-icon sh-btn-on" : "sh-btn sh-btn-icon"}

@@ -52,6 +52,8 @@ Inside a section:
 - `DEL A.=B` / `DEL.BLK A` — delete concrete lines or a resolved block.
 - `INS.PRE A:` / `INS.POST A:` / `INS.HEAD:` / `INS.TAIL:` — insert following body rows.
 - `INS.BLK.POST A:` — insert following body rows after the resolved block's last line.
+- `REM` — delete the whole file named by the section header.
+- `MV DEST` — move/rename the section file to `DEST` (optionally after line edits).
 - `+TEXT` — literal body row (use `+` alone for a blank line).
 
 ## Abstractions

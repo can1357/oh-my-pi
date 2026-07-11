@@ -176,7 +176,15 @@ export function heuristicExtractFacts(text: string): string[] {
 		if (value !== undefined) addUnique(facts, `The user prefers ${value}`);
 		value = /\bi (?:hate|dislike|do not like|don't like)\s+([^,.!?;]+)/i.exec(c)?.[1];
 		if (value !== undefined) addUnique(facts, `The user dislikes ${value}`);
-		const instruction = /\b(always|never)\s+([^,.!?;]+)/i.exec(c);
+		// Require an explicit `i` or `you` subject before `always|never`. The
+		// other heuristics in this block all need an `i` subject (`i live in …`,
+		// `i use …`) which keeps them from matching narrative prose; the
+		// `Instruction:` pattern used to match any `always|never` token, so
+		// assistant prose like "the panel never populates" became stored as a
+		// user `Instruction:` memory (coding-agent issue #3372). Subject
+		// constraint mirrors how the rest of the heuristics filter for first- /
+		// second-person assertions and keeps narrative third-person prose out.
+		const instruction = /\b(?:i|you)\s+(always|never)\s+([^,.!?;]+)/i.exec(c);
 		if (instruction?.[1] !== undefined && instruction[2] !== undefined) {
 			addUnique(facts, `Instruction: ${instruction[1].toLowerCase()} ${instruction[2]}`);
 		}

@@ -26,6 +26,7 @@ import { structuredCloneJSON } from "@pk-nerdsaver-ai/pi-utils";
 import { type Type, type } from "arktype";
 import type { ZodType } from "zod/v4";
 import type { $ZodIssue as ZodIssue } from "zod/v4/core";
+import * as AIError from "../error";
 import type { Tool, ToolCall } from "../types";
 import { upgradeJsonSchemaTo202012 } from "./schema/draft";
 import {
@@ -835,6 +836,105 @@ function normalizeOptionalNullsForSchema(
 }
 
 // ============================================================================
+// Double-encoded object-key normalization (LLM quirk).
+// ============================================================================
+//
+// LLMs occasionally serialize an object key one time too many, so the property
+// NAME arrives as the JSON encoding of the real name — literal quote characters
+// and all (e.g. `{ "\"op\"": "done" }` decodes to the JS key `"op"`). The
+// schema never matches such a key, so it reads as an unrecognized extra and is
+// dropped by the unrecognized-key repair, later surfacing as a spurious
+// missing-required error. We walk the whole value (arrays + nested objects)
+// and rename any key that is itself the JSON encoding of a plain string back to
+// that string.
+// ============================================================================
+
+/** Max layers of accidental JSON-encoding to peel off a single object key. */
+const MAX_KEY_DECODE_DEPTH = 3;
+
+/**
+ * If `key` is the JSON encoding of a plain string (quote-wrapped and
+ * `JSON.parse`s to a string), return the decoded string; otherwise null. Peels
+ * up to {@link MAX_KEY_DECODE_DEPTH} nested encodings so multiply-encoded keys
+ * collapse in one pass. Conservative: any key that is not a quote-wrapped JSON
+ * string literal is left untouched.
+ */
+function decodeDoubleEncodedKey(key: string): string | null {
+	let current = key;
+	let decoded: string | null = null;
+	for (let depth = 0; depth < MAX_KEY_DECODE_DEPTH; depth += 1) {
+		if (current.length < 2 || current[0] !== '"' || current[current.length - 1] !== '"') break;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(current);
+		} catch {
+			break;
+		}
+		if (typeof parsed !== "string") break;
+		current = parsed;
+		decoded = current;
+	}
+	return decoded;
+}
+
+/**
+ * Recursively unwrap object keys that were accidentally JSON-encoded an extra
+ * time. Schema-agnostic by design: such keys are dropped before any schema pass
+ * can map them, so this runs first. A key is only renamed when the decoded name
+ * differs and does not already exist on the same object — renaming would
+ * otherwise clobber a sibling and silently lose data.
+ */
+function normalizeDoubleEncodedKeys(value: unknown): { value: unknown; changed: boolean } {
+	if (Array.isArray(value)) {
+		let changed = false;
+		let next = value;
+		for (let i = 0; i < value.length; i += 1) {
+			const normalized = normalizeDoubleEncodedKeys(value[i]);
+			if (!normalized.changed) continue;
+			if (!changed) {
+				next = [...value];
+				changed = true;
+			}
+			next[i] = normalized.value;
+		}
+		return { value: changed ? next : value, changed };
+	}
+
+	if (value === null || typeof value !== "object") return { value, changed: false };
+
+	const source = value as Record<string, unknown>;
+	let changed = false;
+	const out: Record<string, unknown> = {};
+	for (const [key, entry] of Object.entries(source)) {
+		const normalizedChild = normalizeDoubleEncodedKeys(entry);
+		const nextChild = normalizedChild.changed ? normalizedChild.value : entry;
+
+		const decodedKey = decodeDoubleEncodedKey(key);
+		// `Object.hasOwn` (not `in`) so a decoded `constructor`/`toString` is not
+		// mistaken for a collision via the prototype chain.
+		const targetKey =
+			decodedKey !== null &&
+			decodedKey !== key &&
+			!Object.hasOwn(source, decodedKey) &&
+			!Object.hasOwn(out, decodedKey)
+				? decodedKey
+				: key;
+
+		if (targetKey !== key || normalizedChild.changed) changed = true;
+		// `defineProperty` so a decoded `__proto__` key becomes an own property
+		// instead of mutating the result object's prototype.
+		Object.defineProperty(out, targetKey, {
+			value: nextChild,
+			writable: true,
+			enumerable: true,
+			configurable: true,
+		});
+	}
+
+	return { value: changed ? out : value, changed };
+}
+
+// ============================================================================
 // String-encoded array coercion for union(string, array) schemas.
 // ============================================================================
 
@@ -922,8 +1022,15 @@ function normalizeStringEncodedArrayUnions(schema: unknown, value: unknown): { v
 		if (!trimmed.startsWith("[")) return { value, changed: false };
 		try {
 			const parsed = JSON.parse(trimmed) as unknown;
-			if (Array.isArray(parsed) && parsedArrayMatchesArrayBranch(schemaObject, parsed)) {
-				return { value: parsed, changed: true };
+			if (Array.isArray(parsed)) {
+				// Unwrap any double-encoded object keys inside the parsed array
+				// before the branch-match check; otherwise an `array<object>`
+				// branch fails to validate and the value silently stays on the
+				// string branch.
+				const candidate = normalizeDoubleEncodedKeys(parsed).value as unknown[];
+				if (parsedArrayMatchesArrayBranch(schemaObject, candidate)) {
+					return { value: candidate, changed: true };
+				}
 			}
 		} catch {
 			// Not valid JSON — leave the string alone for the validator to handle.
@@ -1259,7 +1366,7 @@ const MAX_COERCION_PASSES = 5;
 export function validateToolCall(tools: Tool[], toolCall: ToolCall): ToolCall["arguments"] {
 	const tool = tools.find(t => t.name === toolCall.name);
 	if (!tool) {
-		throw new Error(`Tool "${toolCall.name}" not found`);
+		throw new AIError.ToolNotFoundError(toolCall.name);
 	}
 	return validateToolArguments(tool, toolCall);
 }
@@ -1299,7 +1406,7 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 			rawJson.length <= maxLen
 				? rawJson
 				: `${rawJson.slice(0, maxLen)}… [truncated ${rawJson.length - maxLen} chars]`;
-		throw new Error(
+		throw new AIError.ValidationError(
 			`Validation failed for tool "${toolCall.name}": Tool call arguments are not valid JSON.\nParse Error: ${parseError}\nRaw JSON:\n${truncatedRawJson}`,
 		);
 	}
@@ -1312,6 +1419,18 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 	// placeholders for "no value" even when validation would otherwise pass.
 	let normalizedArgs: unknown = originalArgs;
 	let changed = false;
+
+	// Unwrap accidentally double-JSON-encoded object keys before any schema
+	// pass. LLMs sometimes emit `{ "\"op\"": "done" }`, so the property name
+	// arrives quote-wrapped; left alone it reads as an unrecognized key, gets
+	// dropped by the coercion repair, and re-surfaces as a missing-required
+	// error. Running first means every later pass sees the corrected names.
+	const keyNormalization = normalizeDoubleEncodedKeys(normalizedArgs);
+	if (keyNormalization.changed) {
+		normalizedArgs = keyNormalization.value;
+		changed = true;
+	}
+
 	const initialNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs);
 	if (initialNormalization.changed) {
 		normalizedArgs = initialNormalization.value;
@@ -1337,6 +1456,15 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 
 		normalizedArgs = coercion.value;
 		changed = true;
+
+		// `coerceArgsFromIssues` may have just parsed a JSON-string container at
+		// the root or a nested field, exposing double-encoded keys the initial
+		// pass could not reach. Re-unwrap before the unrecognized-key repair on
+		// the next validation pass would delete them.
+		const keyNormalizationPass = normalizeDoubleEncodedKeys(normalizedArgs);
+		if (keyNormalizationPass.changed) {
+			normalizedArgs = keyNormalizationPass.value;
+		}
 
 		const nullNormalization = normalizeOptionalNullsForSchema(json, normalizedArgs);
 		if (nullNormalization.changed) {
@@ -1374,5 +1502,5 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 		toolCall.name
 	}":\n${errors}\n\nReceived arguments:\n${JSON.stringify(receivedArgs, null, 2)}`;
 
-	throw new Error(errorMessage);
+	throw new AIError.ValidationError(errorMessage);
 }

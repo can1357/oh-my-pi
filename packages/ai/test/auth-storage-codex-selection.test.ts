@@ -6,6 +6,7 @@ import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from
 import * as oauthUtils from "@pk-nerdsaver-ai/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@pk-nerdsaver-ai/pi-ai/registry/oauth/types";
 import type { UsageLimit, UsageProvider, UsageReport } from "@pk-nerdsaver-ai/pi-ai/usage";
+import { removeWithRetries } from "../../utils/src/temp";
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -168,7 +169,7 @@ describe("AuthStorage codex oauth ranking", () => {
 		store = null;
 		authStorage = null;
 		if (tempDir) {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
 	});
@@ -265,6 +266,59 @@ describe("AuthStorage codex oauth ranking", () => {
 
 		const apiKey = await authStorage.getApiKey("openai-codex", "session-exhausted");
 		expect(apiKey).toBe("api-acct-healthy");
+	});
+
+	test("temporarily blocks only the exhausted Codex OAuth credential after a quota 429", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-A", "a@example.com") },
+			{ type: "oauth", ...createCredential("acct-B", "b@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-A",
+			createCodexUsageReport({
+				accountId: "acct-A",
+				primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.1, resetInMs: WEEK_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-B",
+			createCodexUsageReport({
+				accountId: "acct-B",
+				primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.1, resetInMs: WEEK_MS },
+			}),
+		);
+
+		const sessionId = "session-codex-quota-429";
+		const firstKey = await authStorage.getApiKey("openai-codex", sessionId);
+		if (!firstKey) throw new Error("expected initial Codex credential");
+		const exhaustedAccount = firstKey.replace(/^api-/, "");
+		const healthyAccount = exhaustedAccount === "acct-A" ? "acct-B" : "acct-A";
+		usageByAccount.set(
+			exhaustedAccount,
+			createCodexUsageReport({
+				accountId: exhaustedAccount,
+				primary: { usedFraction: 1, resetInMs: 5 * 60 * 1000 },
+				secondary: { usedFraction: 1, resetInMs: 5 * 60 * 1000 },
+			}),
+		);
+
+		const usageLimitSpy = vi.spyOn(authStorage, "markUsageLimitReached");
+		const switched = await authStorage.rotateSessionCredential("openai-codex", sessionId, {
+			error: Object.assign(new Error("insufficient_quota"), { status: 429 }),
+		});
+
+		expect(switched).toBe(true);
+		expect(usageLimitSpy).toHaveBeenCalledTimes(1);
+		expect(await authStorage.getApiKey("openai-codex", sessionId)).toBe(`api-${healthyAccount}`);
+		const activeAccounts = (await authStorage.checkCredentials())
+			.map(result => result.accountId)
+			.filter((accountId): accountId is string => accountId !== undefined)
+			.sort();
+		expect(activeAccounts).toEqual(["acct-A", "acct-B"]);
 	});
 
 	test("falls back to earliest-unblocking account when all exhausted", async () => {
@@ -646,7 +700,7 @@ describe("AuthStorage claude oauth ranking", () => {
 		store = null;
 		authStorage = null;
 		if (tempDir) {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
 	});

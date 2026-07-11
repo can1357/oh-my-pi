@@ -1,19 +1,11 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
 
-import * as Diff from "diff";
 import { ToolError } from "../../../tools/tool-errors";
 import type { JsStatusEvent } from "./types";
 
 export interface HelperOptions {
-	path?: string;
-	hidden?: boolean;
-	maxDepth?: number;
 	limit?: number;
 	offset?: number;
-	reverse?: boolean;
-	unique?: boolean;
-	count?: boolean;
 }
 
 /**
@@ -35,18 +27,12 @@ export interface HelperContext {
 
 /**
  * The set of functions exposed to user code via `globalThis.__omp_helpers__`. The JS
- * prelude reads from this bag and attaches short aliases (`read`, `write`, `tree`, ...)
+ * prelude reads from this bag and attaches short aliases (`read`, `write`, `env`, ...)
  * onto the global scope.
  */
 export interface HelperBundle {
 	read(rawPath: string, options?: HelperOptions): Promise<string>;
 	writeFile(rawPath: string, data: unknown): Promise<string>;
-	append(rawPath: string, content: string): Promise<string>;
-	sortText(text: string, options?: HelperOptions): string;
-	uniqText(text: string, options?: HelperOptions): string | Array<[number, string]>;
-	counter(items: string | string[], options?: HelperOptions): Array<[number, string]>;
-	diff(rawA: string, rawB: string): Promise<string>;
-	tree(searchPath?: string, options?: HelperOptions): Promise<string>;
 	env(key?: string, value?: string): string | Record<string, string> | undefined;
 }
 
@@ -80,105 +66,6 @@ export function createHelpers(ctx: HelperContext): HelperBundle {
 			}
 			ctx.emitStatus({ op: "write", path: filePath, bytes: getDataSize(data) });
 			return filePath;
-		},
-		append: async (rawPath, content) => {
-			const target = resolveHelperPath(ctx, rawPath, "write");
-			// O(1) append; read-all+rewrite both raced concurrent writers and went
-			// quadratic when called in a loop. Bun.write creates parent dirs, so
-			// keep that behavior for the append path too.
-			await fs.promises.mkdir(path.dirname(target), { recursive: true });
-			await fs.promises.appendFile(target, content, "utf-8");
-			ctx.emitStatus({
-				op: "append",
-				path: target,
-				chars: content.length,
-				bytes: utf8Encoder.encode(content).byteLength,
-			});
-			return target;
-		},
-		sortText: (text, options = {}) => {
-			const lines = String(text).split(/\r?\n/);
-			const deduped = options.unique ? Array.from(new Set(lines)) : lines;
-			const sorted = deduped.sort((a, b) => a.localeCompare(b));
-			if (options.reverse) sorted.reverse();
-			const result = sorted.join("\n");
-			ctx.emitStatus({
-				op: "sort",
-				lines: sorted.length,
-				reverse: options.reverse === true,
-				unique: options.unique === true,
-			});
-			return result;
-		},
-		uniqText: (text, options = {}) => {
-			const lines = String(text)
-				.split(/\r?\n/)
-				.filter(line => line.length > 0);
-			const groups: Array<[number, string]> = [];
-			for (const line of lines) {
-				const last = groups.at(-1);
-				if (last && last[1] === line) {
-					last[0] += 1;
-					continue;
-				}
-				groups.push([1, line]);
-			}
-			ctx.emitStatus({ op: "uniq", groups: groups.length, count_mode: options.count === true });
-			if (options.count) return groups;
-			return groups.map(([, line]) => line).join("\n");
-		},
-		counter: (items, options = {}) => {
-			const values = Array.isArray(items) ? items : String(items).split(/\r?\n/).filter(Boolean);
-			const counts = new Map<string, number>();
-			for (const item of values) counts.set(item, (counts.get(item) ?? 0) + 1);
-			const entries = Array.from(counts.entries())
-				.map(([item, count]) => [count, item] as [number, string])
-				.sort((a, b) => (options.reverse === false ? a[0] - b[0] : b[0] - a[0]) || a[1].localeCompare(b[1]));
-			const limited = entries.slice(0, options.limit ?? entries.length);
-			ctx.emitStatus({ op: "counter", unique: counts.size, total: values.length, top: limited.slice(0, 10) });
-			return limited;
-		},
-		diff: async (rawA, rawB) => {
-			const fileA = resolvePath(ctx, rawA);
-			const fileB = resolvePath(ctx, rawB);
-			const [a, b] = await Promise.all([Bun.file(fileA).text(), Bun.file(fileB).text()]);
-			const result = Diff.createTwoFilesPatch(fileA, fileB, a, b, "", "", { context: 3 });
-			ctx.emitStatus({
-				op: "diff",
-				file_a: fileA,
-				file_b: fileB,
-				identical: a === b,
-				preview: result.slice(0, 500),
-			});
-			return result;
-		},
-		tree: async (searchPath = ".", options = {}) => {
-			const root = resolvePath(ctx, searchPath);
-			const maxDepth = options.maxDepth ?? 3;
-			const showHidden = options.hidden ?? false;
-			const lines: string[] = [`${root}/`];
-			let entryCount = 0;
-			const walk = async (dir: string, prefix: string, depth: number): Promise<void> => {
-				if (depth > maxDepth) return;
-				const entries = (await fs.promises.readdir(dir, { withFileTypes: true }))
-					.filter(entry => showHidden || !entry.name.startsWith("."))
-					.sort((a, b) => a.name.localeCompare(b.name));
-				for (let index = 0; index < entries.length; index++) {
-					const entry = entries[index];
-					const isLast = index === entries.length - 1;
-					const connector = isLast ? "└── " : "├── ";
-					const suffix = entry.isDirectory() ? "/" : "";
-					lines.push(`${prefix}${connector}${entry.name}${suffix}`);
-					entryCount += 1;
-					if (entry.isDirectory()) {
-						await walk(path.join(dir, entry.name), `${prefix}${isLast ? "    " : "│   "}`, depth + 1);
-					}
-				}
-			};
-			await walk(root, "", 1);
-			const result = lines.join("\n");
-			ctx.emitStatus({ op: "tree", path: root, entries: entryCount, preview: result.slice(0, 1000) });
-			return result;
 		},
 		env: (key, value) => {
 			if (!key) {

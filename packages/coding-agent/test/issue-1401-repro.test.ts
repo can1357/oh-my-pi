@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { processFileArguments } from "@pk-nerdsaver-ai/pi-coding-agent/cli/file-processor";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 function createPdfWithText(text: string): string {
 	const chunks: string[] = [];
@@ -47,7 +48,7 @@ describe("processFileArguments", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(testDir, { recursive: true, force: true });
+		removeSyncWithRetries(testDir);
 	});
 
 	it("converts PDF file arguments before adding them to the prompt", async () => {

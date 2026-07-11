@@ -13,7 +13,7 @@ import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 function makeEvent(): AgentEvent {
 	return { type: "tool_execution_start", toolCallId: "probe-1", toolName: "probe", args: {} };
@@ -95,7 +95,7 @@ describe("#emit listener isolation", () => {
 			authStorage = undefined;
 			if (fs.existsSync(tempDir)) {
 				try {
-					fs.rmSync(tempDir, { recursive: true, force: true });
+					removeSyncWithRetries(tempDir);
 				} catch {
 					// Windows may hold sqlite handles briefly after close; best-effort cleanup.
 				}

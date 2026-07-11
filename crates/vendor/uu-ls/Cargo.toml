@@ -1,0 +1,46 @@
+# Vendored from uutils/coreutils tag 0.8.0 (src/uu/ls), patched to resolve path
+# arguments against the shell working directory and route I/O + environment
+# through pi-uutils-ctx so it can run in-process as a shell builtin. See
+# src/ls.rs for the patch markers (`pi-uutils:` comments).
+[package]
+name = "uu_ls"
+version = "0.8.0"
+edition = "2024"
+license = "MIT"
+description = "ls ~ (uutils) display directory contents (vendored + patched for in-process embedding)"
+
+[lib]
+path = "src/ls.rs"
+
+[dependencies]
+ansi-width = "0.1.0"
+clap = { version = "4.5", features = ["wrap_help", "cargo", "color", "env"] }
+glob = "0.3.1"
+lscolors = { version = "0.21.0", default-features = false, features = ["gnu_legacy"] }
+rustc-hash = "2.1.1"
+thiserror = "2.0.3"
+uucore = { version = "0.8.0", features = [
+  "colors",
+  "entries",
+  "format",
+  "fs",
+  "fsext",
+  "fsxattr",
+  "parser-size",
+  "parser-glob",
+  "quoting-style",
+  "time",
+  "version-cmp",
+] }
+uutils_term_grid = "0.8"
+pi-uutils-ctx = { path = "../../pi-uutils-ctx" }
+
+# hostname crate does not support WASI (no OS-level hostname API)
+[target.'cfg(not(target_os = "wasi"))'.dependencies]
+hostname = "0.4"
+
+# Declared (but never enabled) so the upstream `#[cfg(feature = "...")]` blocks
+# pass check-cfg without pulling SELinux/SMACK support.
+[features]
+selinux = []
+smack = []

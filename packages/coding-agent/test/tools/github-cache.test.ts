@@ -21,6 +21,7 @@ import {
 } from "@pk-nerdsaver-ai/pi-coding-agent/tools/github-cache";
 import { ToolAbortError, throwIfAborted } from "@pk-nerdsaver-ai/pi-coding-agent/tools/tool-errors";
 import * as git from "@pk-nerdsaver-ai/pi-coding-agent/utils/git";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 const TEST_REPO = "owner/example";
 const TEST_AUTH_KEY = "test-auth";
@@ -43,7 +44,7 @@ afterEach(async () => {
 		process.env.OMP_GITHUB_CACHE_DB = originalEnv;
 	}
 	vi.restoreAllMocks();
-	await fs.rm(tempDir, { recursive: true, force: true });
+	await removeWithRetries(tempDir);
 });
 
 function issuePayload(number: number, body: string) {

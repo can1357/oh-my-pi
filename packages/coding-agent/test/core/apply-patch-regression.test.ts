@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { applyPatch, findContextLine, seekSequence } from "@pk-nerdsaver-ai/pi-coding-agent/edit";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("regression: indentation adjustment for line-based replacements (2B)", () => {
 	let tempDir: string;
@@ -21,7 +22,7 @@ describe("regression: indentation adjustment for line-based replacements (2B)", 
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("line-based patch adjusts indentation when fuzzy matching at different indent level", async () => {
@@ -102,7 +103,7 @@ describe("regression: ambiguity detection for context-less hunks (2C)", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("single-hunk simple diff rejects multiple occurrences", async () => {
@@ -166,7 +167,7 @@ describe("regression: context search uses line hints (2D)", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("unified diff line numbers help locate correct position", async () => {
@@ -251,7 +252,7 @@ describe("regression: insertion uses newStartLine fallback (2E)", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("pure addition with context uses context to find insertion point", async () => {
@@ -418,7 +419,7 @@ describe("plan: partial line matching for @@ context", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("@@ context matches when actual line contains it as substring", async () => {
@@ -482,7 +483,7 @@ describe("plan: unified diff format line numbers", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("@@ -10,6 +10,7 @@ is parsed as line numbers not literal text", async () => {
@@ -556,7 +557,7 @@ describe("plan: Codex-style wrapped patches", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("strips *** Begin Patch / *** End Patch wrapper", async () => {
@@ -697,7 +698,7 @@ describe("plan: strip + prefix from file creation", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("create file strips + prefix when all lines have it", async () => {
@@ -755,7 +756,7 @@ describe("regression: *** End of File marker handling (2A/2G)", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("*** End of File marker is preserved in hunk parsing", async () => {
@@ -814,7 +815,7 @@ describe("regression: model edit attempt - @@ line N syntax (session 2026-01-19)
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("@@ line 125 is parsed as line hint, not literal context search", async () => {
@@ -866,7 +867,7 @@ describe("regression: model edit attempt - nested @@ anchors (session 2026-01-19
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("@@ class X followed by @@   method on next line is parsed as nested anchors", async () => {
@@ -959,7 +960,7 @@ describe("regression: model edit attempt - space-separated anchors (session 2026
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("@@ class PatchTool constructor is parsed as hierarchical anchors", async () => {
@@ -1047,7 +1048,7 @@ describe("regression: model edit attempt - unique substring on long line (sessio
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("@@ class ClassName matches long export line when unique", async () => {
@@ -1127,7 +1128,7 @@ describe("regression: bench edit failures (2026-01-19)", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("@@ @@ is treated as empty context", async () => {
@@ -1559,7 +1560,7 @@ describe("regression: trailing context lines don't delete file content", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("context lines cannot cause collateral deletion via fuzzy match", async () => {
@@ -1806,7 +1807,7 @@ describe("regression: context-only hunks between @@ markers must not change inde
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	test("pure context hunk (no +/- lines) does not alter tab-indented file content", async () => {

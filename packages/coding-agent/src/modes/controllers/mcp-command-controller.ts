@@ -8,7 +8,7 @@ import { type Component, replaceTabs, Spacer, Text } from "@pk-nerdsaver-ai/pi-t
 import { getMCPConfigPath, getProjectDir } from "@pk-nerdsaver-ai/pi-utils";
 import type { SourceMeta } from "../../capability/types";
 import { expandEnvVarsDeep } from "../../discovery/helpers";
-import { analyzeAuthError, discoverOAuthEndpoints, MCPManager } from "../../mcp";
+import { analyzeAuthError, discoverOAuthEndpoints, loadAllMCPConfigs, MCPManager } from "../../mcp";
 import { connectToServer, disconnectServer, listTools } from "../../mcp/client";
 import {
 	addMCPServer,
@@ -496,6 +496,7 @@ export class MCPCommandController {
 
 						try {
 							const oauthResource = oauth.resource ?? finalConfig.url;
+							const oauthResourceIsFallback = !oauth.resource;
 							const oauthResult = await this.#handleOAuthFlow(
 								oauth.authorizationUrl,
 								oauth.tokenUrl,
@@ -509,11 +510,13 @@ export class MCPCommandController {
 									prompt: finalConfig.oauth?.prompt,
 									serverUrl: finalConfig.url,
 									resource: oauthResource,
+									stripSameOriginResource: oauthResourceIsFallback,
 								},
 							);
 							finalConfig = this.#persistOAuthResult(finalConfig, oauthResult, {
 								tokenUrl: oauth.tokenUrl,
 								resource: oauthResource,
+								stripSameOriginResource: oauthResourceIsFallback,
 								clientId: oauth.clientId,
 								userClientSecret: finalConfig.oauth?.clientSecret,
 							});
@@ -583,6 +586,7 @@ export class MCPCommandController {
 			prompt?: string;
 			serverUrl?: string;
 			resource?: string;
+			stripSameOriginResource?: boolean;
 		},
 	): Promise<OAuthFlowResult> {
 		const authStorage = this.ctx.session.modelRegistry.authStorage;
@@ -624,6 +628,7 @@ export class MCPCommandController {
 					callbackPort: opts?.callbackPort,
 					callbackPath: opts?.callbackPath,
 					resource: opts?.resource,
+					stripSameOriginResource: opts?.stripSameOriginResource,
 				},
 				{
 					onAuth: (info: { url: string; instructions?: string }) => {
@@ -711,6 +716,7 @@ export class MCPCommandController {
 				clientId: flow.resolvedClientId ?? resolvedClientId,
 				clientSecret: flow.registeredClientSecret ?? resolvedClientSecret,
 				resource: flow.resource,
+				authorizationUrl: flow.authorizationUrl,
 			};
 
 			await authStorage.set(credentialId, oauthCredential);
@@ -751,10 +757,17 @@ export class MCPCommandController {
 	#persistOAuthResult(
 		config: MCPServerConfig,
 		result: OAuthFlowResult,
-		opts: { tokenUrl: string; resource?: string; clientId?: string; userClientSecret?: string },
+		opts: {
+			tokenUrl: string;
+			resource?: string;
+			stripSameOriginResource?: boolean;
+			clientId?: string;
+			userClientSecret?: string;
+		},
 	): MCPServerConfig {
 		const clientId = result.clientId ?? opts.clientId ?? config.oauth?.clientId;
-		const resource = result.resource ?? opts.resource ?? config.auth?.resource;
+		const resource =
+			result.resource ?? (opts.stripSameOriginResource ? undefined : opts.resource) ?? config.auth?.resource;
 		return {
 			...config,
 			auth: {
@@ -1383,7 +1396,7 @@ export class MCPCommandController {
 				}
 				await setServerDisabled(userConfigPath, name, !enabled);
 				if (enabled) {
-					await this.#reloadMCP();
+					await this.#connectEnabledMCPServer(name);
 					const state = await this.#waitForServerConnectionWithAnimation(name);
 					const status =
 						state === "connected"
@@ -1419,7 +1432,12 @@ export class MCPCommandController {
 
 			const updated: MCPServerConfig = { ...found.config, enabled };
 			await updateMCPServer(found.filePath, name, updated);
-			await this.#reloadMCP();
+			if (enabled) {
+				await this.#connectEnabledMCPServer(name);
+			} else {
+				await this.ctx.mcpManager?.disconnectServer(name);
+				await this.ctx.session.refreshMCPTools(this.ctx.mcpManager?.getTools() ?? []);
+			}
 
 			let status = "";
 			if (enabled) {
@@ -1553,6 +1571,7 @@ export class MCPCommandController {
 			const currentAuthResource = currentAuth?.resource ? expandEnvVarsDeep(currentAuth.resource) : undefined;
 			const oauthResource =
 				oauth.resource ?? currentAuthResource ?? ("url" in runtimeBaseConfig ? runtimeBaseConfig.url : undefined);
+			const oauthResourceIsFallback = !oauth.resource && !currentAuthResource;
 
 			const oauthResult = await this.#handleOAuthFlow(
 				oauth.authorizationUrl,
@@ -1567,6 +1586,7 @@ export class MCPCommandController {
 					prompt: found.config.oauth?.prompt,
 					serverUrl,
 					resource: oauthResource,
+					stripSameOriginResource: oauthResourceIsFallback,
 				},
 			);
 
@@ -1587,6 +1607,7 @@ export class MCPCommandController {
 					clientId: oauth.clientId,
 					userClientSecret,
 					resource: oauthResource,
+					stripSameOriginResource: oauthResourceIsFallback,
 				});
 				await updateMCPServer(found.filePath, name, updated);
 			}
@@ -1671,6 +1692,37 @@ export class MCPCommandController {
 		}
 	}
 
+	async #connectEnabledMCPServer(name: string): Promise<void> {
+		if (!this.ctx.mcpManager) {
+			return;
+		}
+
+		const { configs, sources } = await loadAllMCPConfigs(getProjectDir());
+		const config = configs[name];
+		if (!config) {
+			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
+			return;
+		}
+
+		const source = sources[name];
+		const result = await this.ctx.mcpManager.connectServers({ [name]: config }, source ? { [name]: source } : {});
+		await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
+		this.#showMCPConnectionErrors(result.errors);
+	}
+
+	#showMCPConnectionErrors(errors: Map<string, string>): void {
+		if (errors.size === 0) {
+			return;
+		}
+
+		const errorLines = ["", theme.fg("warning", "Some servers failed to connect:"), ""];
+		for (const [serverName, error] of errors.entries()) {
+			errorLines.push(`  ${serverName}: ${error}`);
+		}
+		errorLines.push("");
+		this.#showMessage(errorLines.join("\n"));
+	}
+
 	/**
 	 * Reload MCP manager with new configs
 	 */
@@ -1686,15 +1738,7 @@ export class MCPCommandController {
 		const result = await this.ctx.mcpManager.discoverAndConnect();
 		await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 
-		// Show any connection errors
-		if (result.errors.size > 0) {
-			const errorLines = ["", theme.fg("warning", "Some servers failed to connect:"), ""];
-			for (const [serverName, error] of result.errors.entries()) {
-				errorLines.push(`  ${serverName}: ${error}`);
-			}
-			errorLines.push("");
-			this.#showMessage(errorLines.join("\n"));
-		}
+		this.#showMCPConnectionErrors(result.errors);
 	}
 
 	/**

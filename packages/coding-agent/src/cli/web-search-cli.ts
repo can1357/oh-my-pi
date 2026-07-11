@@ -120,7 +120,7 @@ ${chalk.bold("Arguments:")}
 
 ${chalk.bold("Options:")}
   --provider <name>   Provider: ${PROVIDERS.join(", ")}
-  --recency <value>   Recency filter (Brave/Perplexity): ${RECENCY_OPTIONS.join(", ")}
+  --recency <value>   Recency filter (when supported): ${RECENCY_OPTIONS.join(", ")}
   -l, --limit <n>     Max results to return
   --compact           Render condensed output
   -h, --help          Show this help

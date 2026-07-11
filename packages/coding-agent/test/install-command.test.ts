@@ -17,7 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { commands, isSubcommand, resolveCliArgv } from "@pk-nerdsaver-ai/pi-coding-agent/cli-commands";
 import { looksLikeLocalPath } from "@pk-nerdsaver-ai/pi-coding-agent/commands/install";
-import { APP_NAME } from "@pk-nerdsaver-ai/pi-utils";
+import { APP_NAME, removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("install command is registered as a top-level subcommand", () => {
 	test("CLI runner sees `install` as a known command", () => {
@@ -67,7 +67,7 @@ describe("looksLikeLocalPath", () => {
 			expect(looksLikeLocalPath("vendored-ext", tempDir)).toBe(true);
 			expect(looksLikeLocalPath("missing-pkg", tempDir)).toBe(false);
 		} finally {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			removeSyncWithRetries(tempDir);
 		}
 	});
 });

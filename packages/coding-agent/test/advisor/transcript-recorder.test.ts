@@ -20,6 +20,7 @@ import {
 	ADVISOR_TRANSCRIPT_FILENAME,
 	AdvisorTranscriptRecorder,
 } from "@pk-nerdsaver-ai/pi-coding-agent/advisor/transcript-recorder";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 interface AdvisorEntry {
 	type?: string;
@@ -38,7 +39,7 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	try {
 		return await fn(dir);
 	} finally {
-		await fs.rm(dir, { recursive: true, force: true });
+		await removeWithRetries(dir);
 	}
 }
 

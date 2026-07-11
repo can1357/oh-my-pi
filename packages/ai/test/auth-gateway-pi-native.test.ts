@@ -126,6 +126,15 @@ describe("pi-native parseRequest", () => {
 		expect("notARealField" in parsed.options).toBe(false);
 	});
 
+	it("preserves loopGuard so the remote cook pass can disable the server-side guard", () => {
+		const parsed = parseRequest({
+			modelId: "x",
+			context: baseContext,
+			options: { loopGuard: { enabled: false } },
+		});
+		expect(parsed.options.loopGuard).toEqual({ enabled: false });
+	});
+
 	it("preserves headers, metadata, sessionId, thinkingBudgets", () => {
 		const parsed = parseRequest({
 			modelId: "x",

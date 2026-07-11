@@ -3,6 +3,7 @@ import { streamOpenAICompletions } from "@pk-nerdsaver-ai/pi-ai/providers/openai
 import type { Context, FetchImpl, Model, ModelSpec } from "@pk-nerdsaver-ai/pi-ai/types";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
 import { Effort } from "@pk-nerdsaver-ai/pi-catalog/effort";
+import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
 
 const testContext: Context = {
 	messages: [{ role: "user", content: "hello", timestamp: 0 }],
@@ -204,6 +205,24 @@ describe("OpenAI completions disableReasoning and thinking dialects", () => {
 		});
 		const payload = (await promise) as Record<string, unknown>;
 		expect(payload.chat_template_kwargs).toEqual({ enable_thinking: true });
+	});
+	it("does not emit enable_thinking or chat_template_kwargs for the bundled Fireworks Qwen model without reasoning", async () => {
+		// Reproduces the raw 400 from `fireworks/qwen3.7-plus`: before the fix the
+		// `qwen/*` id pattern forced `thinkingFormat: "qwen"`, so an effort-less
+		// turn wrote top-level `enable_thinking: false`, which Fireworks' strict
+		// schema rejects. Build from the real bundled entry so the dialect
+		// classification — not a hardcoded compat override — is what's exercised.
+		const model = getBundledModel<"openai-completions">("fireworks", "qwen3.7-plus");
+
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamOpenAICompletions(model, testContext, {
+			apiKey: "test-key",
+			fetch: createMockFetchForQwen(resolve),
+			// no reasoning requested
+		});
+		const payload = (await promise) as Record<string, unknown>;
+		expect(payload.enable_thinking).toBeUndefined();
+		expect(payload.chat_template_kwargs).toBeUndefined();
 	});
 
 	it("sets Z.AI thinking format and toggles type logically based on forced tool choice", async () => {

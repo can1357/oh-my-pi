@@ -1,0 +1,449 @@
+syntax = "proto3";
+
+package exa.chat_pb;
+
+import "buf/validate/validate.proto";
+import "exa/codeium_common_pb/codeium_common.proto";
+import "exa/diff_action_pb/diff_action.proto";
+import "google/protobuf/timestamp.proto";
+
+enum ChatFeedbackType {
+  FEEDBACK_TYPE_UNSPECIFIED = 0;
+  FEEDBACK_TYPE_ACCEPT = 1;
+  FEEDBACK_TYPE_REJECT = 2;
+  FEEDBACK_TYPE_COPIED = 3;
+  FEEDBACK_TYPE_ACCEPT_DIFF = 4;
+  FEEDBACK_TYPE_REJECT_DIFF = 5;
+  FEEDBACK_TYPE_APPLY_DIFF = 6;
+  FEEDBACK_TYPE_INSERT_AT_CURSOR = 7;
+}
+
+enum ChatIntentType {
+  CHAT_INTENT_UNSPECIFIED = 0;
+  CHAT_INTENT_GENERIC = 1;
+  CHAT_INTENT_FUNCTION_EXPLAIN = 2;
+  CHAT_INTENT_FUNCTION_DOCSTRING = 3;
+  CHAT_INTENT_FUNCTION_REFACTOR = 4;
+  CHAT_INTENT_CODE_BLOCK_EXPLAIN = 5;
+  CHAT_INTENT_CODE_BLOCK_REFACTOR = 6;
+  CHAT_INTENT_FUNCTION_UNIT_TESTS = 7;
+  CHAT_INTENT_PROBLEM_EXPLAIN = 8;
+  CHAT_INTENT_GENERATE_CODE = 9;
+  CHAT_INTENT_CLASS_EXPLAIN = 10;
+  CHAT_INTENT_SEARCH = 11;
+  CHAT_INTENT_FAST_APPLY = 12;
+}
+
+enum DeepWikiRequestType {
+  DEEP_WIKI_REQUEST_TYPE_UNSPECIFIED = 0;
+  DEEP_WIKI_REQUEST_TYPE_SUMMARY = 1;
+  DEEP_WIKI_REQUEST_TYPE_ARTICLE = 2;
+}
+
+enum DeepWikiSymbolType {
+  DEEP_WIKI_SYMBOL_TYPE_UNSPECIFIED = 0;
+  DEEP_WIKI_SYMBOL_TYPE_FILE = 1;
+  DEEP_WIKI_SYMBOL_TYPE_MODULE = 2;
+  DEEP_WIKI_SYMBOL_TYPE_NAMESPACE = 3;
+  DEEP_WIKI_SYMBOL_TYPE_PACKAGE = 4;
+  DEEP_WIKI_SYMBOL_TYPE_CLASS = 5;
+  DEEP_WIKI_SYMBOL_TYPE_METHOD = 6;
+  DEEP_WIKI_SYMBOL_TYPE_PROPERTY = 7;
+  DEEP_WIKI_SYMBOL_TYPE_FIELD = 8;
+  DEEP_WIKI_SYMBOL_TYPE_CONSTRUCTOR = 9;
+  DEEP_WIKI_SYMBOL_TYPE_ENUM = 10;
+  DEEP_WIKI_SYMBOL_TYPE_INTERFACE = 11;
+  DEEP_WIKI_SYMBOL_TYPE_FUNCTION = 12;
+  DEEP_WIKI_SYMBOL_TYPE_VARIABLE = 13;
+  DEEP_WIKI_SYMBOL_TYPE_CONSTANT = 14;
+  DEEP_WIKI_SYMBOL_TYPE_STRING = 15;
+  DEEP_WIKI_SYMBOL_TYPE_NUMBER = 16;
+  DEEP_WIKI_SYMBOL_TYPE_BOOLEAN = 17;
+  DEEP_WIKI_SYMBOL_TYPE_ARRAY = 18;
+  DEEP_WIKI_SYMBOL_TYPE_OBJECT = 19;
+  DEEP_WIKI_SYMBOL_TYPE_KEY = 20;
+  DEEP_WIKI_SYMBOL_TYPE_NULL = 21;
+  DEEP_WIKI_SYMBOL_TYPE_ENUM_MEMBER = 22;
+  DEEP_WIKI_SYMBOL_TYPE_STRUCT = 23;
+  DEEP_WIKI_SYMBOL_TYPE_EVENT = 24;
+  DEEP_WIKI_SYMBOL_TYPE_OPERATOR = 25;
+  DEEP_WIKI_SYMBOL_TYPE_TYPE_PARAMETER = 26;
+}
+
+enum CacheControlType {
+  CACHE_CONTROL_TYPE_UNSPECIFIED = 0;
+  CACHE_CONTROL_TYPE_EPHEMERAL = 1;
+}
+
+message CodeBlockInfo {
+  string raw_source = 1;
+  int32 start_line = 2;
+  int32 start_col = 3;
+  int32 end_line = 4;
+  int32 end_col = 5;
+}
+
+message ChatMetrics {
+  uint64 response_stream_latency_ms = 1;
+  uint64 refresh_context_latency_ms = 2;
+  uint64 should_get_local_context_for_chat_latency_ms = 3;
+  bool should_get_local_context_for_chat = 4;
+  uint64 compute_change_events_latency_ms = 5;
+  uint64 context_to_chat_prompt_latency_ms = 6;
+  int32 num_prompt_tokens = 7;
+  int32 num_system_prompt_tokens = 8;
+  uint64 num_input_tokens = 16;
+  .google.protobuf.Timestamp start_timestamp = 9;
+  .google.protobuf.Timestamp end_timestamp = 10;
+  string active_document_absolute_path = 11;
+  .exa.codeium_common_pb.CodeContextItem last_active_code_context_item = 12;
+  uint64 num_indexed_files = 13;
+  uint64 num_indexed_code_context_items = 14;
+  .exa.codeium_common_pb.Model model_deprecated = 15 [deprecated = true];
+  string model_uid = 17;
+}
+
+message IntentGeneric {
+  string text = 1;
+  repeated .exa.codeium_common_pb.TextOrScopeItem items = 2;
+}
+
+message IntentFunctionExplain {
+  .exa.codeium_common_pb.FunctionInfo function_info = 1;
+  .exa.codeium_common_pb.Language language = 2;
+  string file_path_migrate_me_to_uri = 3 [deprecated = true];
+  string uri = 4;
+}
+
+message IntentFunctionRefactor {
+  .exa.codeium_common_pb.FunctionInfo function_info = 1;
+  .exa.codeium_common_pb.Language language = 2;
+  string file_path_migrate_me_to_uri = 3 [deprecated = true];
+  string refactor_description = 4;
+  string uri = 5;
+}
+
+message IntentFunctionUnitTests {
+  .exa.codeium_common_pb.FunctionInfo function_info = 1;
+  .exa.codeium_common_pb.Language language = 2;
+  string file_path_migrate_me_to_uri = 3 [deprecated = true];
+  string uri = 5;
+  string instructions = 4;
+}
+
+message IntentFunctionDocstring {
+  .exa.codeium_common_pb.FunctionInfo function_info = 1;
+  .exa.codeium_common_pb.Language language = 2;
+  string file_path_migrate_me_to_uri = 3 [deprecated = true];
+  string uri = 4;
+}
+
+message IntentClassExplain {
+  .exa.codeium_common_pb.ClassInfo class_info = 1;
+  .exa.codeium_common_pb.Language language = 2;
+  string file_path_migrate_me_to_uri = 3 [deprecated = true];
+  string uri = 4;
+}
+
+message IntentCodeBlockExplain {
+  .exa.chat_pb.CodeBlockInfo code_block_info = 1;
+  .exa.codeium_common_pb.Language language = 2;
+  string file_path_migrate_me_to_uri = 3 [deprecated = true];
+  string uri = 4;
+}
+
+message IntentCodeBlockRefactor {
+  .exa.chat_pb.CodeBlockInfo code_block_info = 1;
+  .exa.codeium_common_pb.Language language = 2;
+  string file_path_migrate_me_to_uri = 3 [deprecated = true];
+  string uri = 5;
+  string refactor_description = 4;
+}
+
+message IntentProblemExplain {
+  string diagnostic_message = 1;
+  .exa.chat_pb.CodeBlockInfo problematic_code = 2;
+  string surrounding_code_snippet = 3;
+  .exa.codeium_common_pb.Language language = 4;
+  string file_path_migrate_me_to_uri = 5 [deprecated = true];
+  string uri = 7;
+  int32 line_number = 6;
+}
+
+message IntentGenerateCode {
+  string instruction = 1;
+  .exa.codeium_common_pb.Language language = 2;
+  string file_path_migrate_me_to_uri = 3 [deprecated = true];
+  string uri = 5;
+  int32 line_number = 4;
+}
+
+message IntentSearch {
+  string query = 1;
+}
+
+message IntentFastApply {
+  string diff_outline = 1;
+  .exa.codeium_common_pb.Language language = 2;
+  .exa.chat_pb.CodeBlockInfo old_code = 3;
+}
+
+message ChatMessageIntent {
+  oneof intent {
+    .exa.chat_pb.IntentGeneric generic = 1;
+    .exa.chat_pb.IntentFunctionExplain explain_function = 2;
+    .exa.chat_pb.IntentFunctionDocstring function_docstring = 3;
+    .exa.chat_pb.IntentFunctionRefactor function_refactor = 4;
+    .exa.chat_pb.IntentCodeBlockExplain explain_code_block = 5;
+    .exa.chat_pb.IntentCodeBlockRefactor code_block_refactor = 6;
+    .exa.chat_pb.IntentFunctionUnitTests function_unit_tests = 7;
+    .exa.chat_pb.IntentProblemExplain problem_explain = 8;
+    .exa.chat_pb.IntentGenerateCode generate_code = 9;
+    .exa.chat_pb.IntentClassExplain explain_class = 10;
+    .exa.chat_pb.IntentSearch search = 11;
+    .exa.chat_pb.IntentFastApply fast_apply = 13;
+  }
+  uint32 num_tokens = 12;
+}
+
+message ChatMessageActionSearch {
+}
+
+message ChatMessageActionEdit {
+  string file_path_migrate_me_to_uri = 1 [deprecated = true];
+  string uri = 6;
+  .exa.diff_action_pb.DiffBlock diff = 2;
+  .exa.codeium_common_pb.Language language = 3;
+  string text_pre = 4;
+  string text_post = 5;
+}
+
+message ChatMessageActionGeneric {
+  string text = 1;
+  string display_text = 2;
+}
+
+message ChatMessageStatusContextRelevancy {
+  bool is_loading = 1;
+  bool is_relevant = 2;
+  repeated string query_suggestions = 3;
+}
+
+message ChatMessageStatus {
+  oneof status {
+    .exa.chat_pb.ChatMessageStatusContextRelevancy context_relevancy = 1;
+  }
+}
+
+message ChatMessageError {
+  string text = 1;
+}
+
+message ChatMessageAction {
+  oneof action {
+    .exa.chat_pb.ChatMessageActionGeneric generic = 1;
+    .exa.chat_pb.ChatMessageActionEdit edit = 3;
+    .exa.chat_pb.ChatMessageActionSearch search = 5;
+  }
+  uint32 num_tokens = 2;
+  repeated .exa.codeium_common_pb.CodeContextItem context_items = 4;
+  .exa.chat_pb.ChatIntentType latest_intent = 6;
+  .exa.chat_pb.ChatMetrics generation_stats = 7;
+  repeated .exa.codeium_common_pb.KnowledgeBaseItemWithMetadata knowledge_base_items = 8;
+}
+
+message ChatMessage {
+  string message_id = 1;
+  .exa.codeium_common_pb.ChatMessageSource source = 2;
+  .google.protobuf.Timestamp timestamp = 3;
+  string conversation_id = 4;
+  oneof content {
+    .exa.chat_pb.ChatMessageIntent intent = 5;
+    .exa.chat_pb.ChatMessageAction action = 6;
+    .exa.chat_pb.ChatMessageError error = 7;
+    .exa.chat_pb.ChatMessageStatus status = 8;
+  }
+  bool in_progress = 9;
+  .exa.chat_pb.GetChatMessageRequest request = 10;
+  bool redact = 11;
+}
+
+message Conversation {
+  repeated .exa.chat_pb.ChatMessage messages = 1;
+}
+
+message RawChatMessage {
+  string message_id = 1;
+  .exa.codeium_common_pb.ChatMessageSource source = 2;
+  .google.protobuf.Timestamp timestamp = 3;
+  string conversation_id = 4;
+  string text = 5;
+  bool in_progress = 6;
+  bool is_error = 7;
+}
+
+message DeepWikiSymbolRange {
+  int64 start_line = 1;
+  int64 start_column = 2;
+  int64 end_line = 3;
+  int64 end_column = 4;
+}
+
+message DeepWikiSymbolContext {
+  string symbol_name = 1;
+  string symbol_uri = 2;
+  .exa.chat_pb.DeepWikiSymbolRange symbol_range = 3;
+  .exa.chat_pb.DeepWikiSymbolType symbol_type = 4;
+  string file_context = 5;
+  string usage_context = 6;
+  string trace_context = 7;
+  string quick_grep_context = 8;
+  .google.protobuf.Timestamp timestamp = 9;
+}
+
+message DeepWikiHoverContext {
+  string symbol_name = 1;
+  string symbol_uri = 2;
+  .exa.chat_pb.DeepWikiSymbolRange symbol_range = 3;
+  .exa.chat_pb.DeepWikiSymbolType symbol_type = 4;
+  string hover_text = 5;
+  .google.protobuf.Timestamp timestamp = 6;
+}
+
+message ParameterInfo {
+  string label = 1;
+  string documentation = 2;
+}
+
+message FunctionCallInfo {
+  string signature_label = 1;
+  int32 active_parameter = 2;
+  int32 parameter_count = 3;
+  repeated .exa.chat_pb.ParameterInfo parameters = 4;
+}
+
+message DeepWikiContext {
+  .exa.chat_pb.DeepWikiHoverContext enclosing_hover_context = 1;
+  .exa.chat_pb.FunctionCallInfo function_call_info = 2;
+}
+
+message GetDeepWikiRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  .exa.chat_pb.DeepWikiRequestType request_type = 2;
+  string symbol_name = 3;
+  string symbol_uri = 4;
+  string context = 5;
+  .exa.chat_pb.DeepWikiSymbolType symbol_type = 6;
+  string language = 7;
+}
+
+message ChatMessagePrompt {
+  string message_id = 1;
+  .exa.codeium_common_pb.ChatMessageSource source = 2;
+  string prompt = 3;
+  uint32 num_tokens = 4;
+  bool safe_for_code_telemetry = 5;
+  repeated .exa.codeium_common_pb.ChatToolCall tool_calls = 6;
+  string tool_call_id = 7;
+  .exa.chat_pb.PromptCacheOptions prompt_cache_options = 8;
+  bool tool_result_is_error = 9;
+  repeated .exa.codeium_common_pb.ImageData images = 10;
+  string thinking = 11;
+  string signature = 12;
+  bool thinking_redacted = 13;
+  repeated .exa.codeium_common_pb.PromptAnnotationRange prompt_annotation_ranges = 14;
+  string output_id = 15;
+  string thinking_id = 16 [deprecated = true];
+  bytes gemini_thought_signature = 17 [deprecated = true];
+  string signature_type = 18;
+  string phase = 19;
+}
+
+message PromptCacheOptions {
+  .exa.chat_pb.CacheControlType type = 1;
+}
+
+message ChatToolDefinition {
+  reserved 4;
+
+  string name = 1;
+  string description = 2;
+  string json_schema_string = 3;
+  repeated string attribution_field_names = 5;
+  string server_name = 6;
+  optional bool read_only_hint = 7;
+  optional .exa.chat_pb.ComputerUseToolConfig computer_use_config = 8;
+  optional bool is_custom_tool = 9;
+  optional string custom_tool_grammar = 10;
+  optional string custom_tool_grammar_syntax = 11;
+  bool strict = 12;
+}
+
+message ComputerUseToolConfig {
+  int32 display_width_px = 1;
+  int32 display_height_px = 2;
+  int32 display_number = 3;
+}
+
+message ChatToolChoice {
+  oneof choice {
+    string option_name = 1;
+    string tool_name = 2;
+  }
+}
+
+message ChatMentionsSearchRequest {
+  string query = 1;
+  repeated .exa.codeium_common_pb.CodeContextType allowed_types = 2;
+  bool include_repo_info = 3;
+}
+
+message ChatMentionsSearchResponse {
+  repeated .exa.codeium_common_pb.CodeContextItem cci_items = 1;
+  repeated .exa.codeium_common_pb.GitRepoInfo repo_infos = 2;
+}
+
+message GetChatMessageRequest {
+  reserved 2;
+  reserved "prompt";
+
+  message EnterpriseExternalModelConfig {
+    int32 max_output_tokens = 2;
+    int32 max_input_tokens = 3;
+  }
+
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  repeated .exa.chat_pb.ChatMessage chat_messages = 3;
+  .exa.codeium_common_pb.Document active_document = 5;
+  repeated string open_document_uris = 12;
+  repeated string workspace_uris = 13;
+  string active_selection = 11;
+  .exa.codeium_common_pb.ContextInclusionType context_inclusion_type = 8;
+  .exa.codeium_common_pb.Model chat_model = 9;
+  string system_prompt_override = 10;
+  string chat_model_name = 14;
+  .exa.chat_pb.GetChatMessageRequest.EnterpriseExternalModelConfig enterprise_chat_model_config = 15;
+  .exa.codeium_common_pb.ExperimentConfig experiment_config = 4 [deprecated = true];
+  repeated string open_document_paths_migrate_me_to_uris = 6 [deprecated = true];
+  repeated string workspace_paths_migrate_me_to_uris = 7 [deprecated = true];
+}
+
+message RawGetChatMessageRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  repeated .exa.chat_pb.ChatMessage chat_messages = 2;
+  string system_prompt_override = 3;
+  .exa.codeium_common_pb.Model chat_model = 4;
+  string chat_model_name = 5;
+}
+
+message ChatExperimentStatus {
+  .exa.codeium_common_pb.ExperimentKey experiment_key = 1;
+  bool enabled = 2;
+}
+
+message FormattedChatMessage {
+  .exa.codeium_common_pb.ChatMessageSource role = 1;
+  string header = 2;
+  string content = 3;
+  string footer = 4;
+}

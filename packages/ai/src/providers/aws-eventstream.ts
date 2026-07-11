@@ -17,6 +17,8 @@
  * practice (`:event-type`, `:message-type`, `:content-type`, `:exception-type`).
  */
 
+import * as AIError from "../error";
+
 const PRELUDE_LEN = 8;
 const PRELUDE_CRC_LEN = 4;
 const MESSAGE_CRC_LEN = 4;
@@ -30,20 +32,8 @@ export interface EventStreamMessage {
 }
 
 /** CRC32 (IEEE / zlib polynomial 0xEDB88320), matches `@aws-crypto/crc32`. */
-const CRC_TABLE = (() => {
-	const t = new Uint32Array(256);
-	for (let i = 0; i < 256; i++) {
-		let c = i;
-		for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-		t[i] = c >>> 0;
-	}
-	return t;
-})();
-
-export function crc32(bytes: Uint8Array, seed = 0): number {
-	let c = (seed ^ 0xffffffff) >>> 0;
-	for (let i = 0; i < bytes.length; i++) c = (CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8)) >>> 0;
-	return (c ^ 0xffffffff) >>> 0;
+export function crc32(bytes: Uint8Array): number {
+	return Bun.hash.crc32(bytes) >>> 0;
 }
 
 /**
@@ -53,17 +43,18 @@ export function crc32(bytes: Uint8Array, seed = 0): number {
  * frames.
  */
 export function decodeMessage(frame: Uint8Array): EventStreamMessage {
-	if (frame.length < MIN_MESSAGE_LEN) throw new Error("eventstream: frame too short");
+	if (frame.length < MIN_MESSAGE_LEN) throw new AIError.EventStreamFrameError("frame too short");
 	const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
 	const total = view.getUint32(0, false);
-	if (total !== frame.length) throw new Error(`eventstream: framed length ${total} != buffer ${frame.length}`);
+	if (total !== frame.length)
+		throw new AIError.EventStreamFrameError(`framed length ${total} != buffer ${frame.length}`);
 	const headersLen = view.getUint32(4, false);
 	const preludeCrc = view.getUint32(8, false);
 	const computedPreludeCrc = crc32(frame.subarray(0, PRELUDE_LEN));
-	if (computedPreludeCrc !== preludeCrc) throw new Error("eventstream: prelude CRC mismatch");
+	if (computedPreludeCrc !== preludeCrc) throw new AIError.EventStreamFrameError("prelude CRC mismatch");
 	const msgCrc = view.getUint32(total - MESSAGE_CRC_LEN, false);
 	const computedMsgCrc = crc32(frame.subarray(0, total - MESSAGE_CRC_LEN));
-	if (computedMsgCrc !== msgCrc) throw new Error("eventstream: message CRC mismatch");
+	if (computedMsgCrc !== msgCrc) throw new AIError.EventStreamFrameError("message CRC mismatch");
 
 	const headersBytes = frame.subarray(HEADER_BLOCK_OFFSET, HEADER_BLOCK_OFFSET + headersLen);
 	const payload = frame.subarray(HEADER_BLOCK_OFFSET + headersLen, total - MESSAGE_CRC_LEN);
@@ -136,7 +127,7 @@ function parseHeaders(buf: Uint8Array): Record<string, string> {
 				break;
 			}
 			default:
-				throw new Error(`eventstream: unknown header value type ${type}`);
+				throw new AIError.EventStreamFrameError(`unknown header value type ${type}`);
 		}
 	}
 	return out;
@@ -170,7 +161,7 @@ export async function* decodeEventStream(source: ReadableStream<Uint8Array>): As
 			while (buf.length - offset >= 4) {
 				const dv = new DataView(buf.buffer, buf.byteOffset + offset, buf.length - offset);
 				const total = dv.getUint32(0, false);
-				if (total < MIN_MESSAGE_LEN) throw new Error(`eventstream: total length ${total} below minimum`);
+				if (total < MIN_MESSAGE_LEN) throw new AIError.EventStreamFrameError(`total length ${total} below minimum`);
 				if (buf.length - offset < total) break;
 				const frame = buf.subarray(offset, offset + total);
 				yield decodeMessage(frame);
@@ -179,7 +170,7 @@ export async function* decodeEventStream(source: ReadableStream<Uint8Array>): As
 			if (offset > 0) buf = buf.slice(offset);
 			if (done) break;
 		}
-		if (buf.length > 0) throw new Error("eventstream: truncated message at end of stream");
+		if (buf.length > 0) throw new AIError.EventStreamFrameError("truncated message at end of stream");
 		completed = true;
 	} finally {
 		// On abnormal exit (consumer threw/broke, decode error) cancel the body so the

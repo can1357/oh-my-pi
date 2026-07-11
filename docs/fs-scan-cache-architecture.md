@@ -116,7 +116,7 @@ Current callers:
 - `@`-mention fuzzy file autocomplete enables cache (`fuzzyFind` with `cache: true`):
   - `packages/tui/src/autocomplete.ts`
 - Mutation flows invalidate through `packages/coding-agent/src/tools/fs-cache-invalidation.ts`.
-- Tool-level search integration (`packages/coding-agent/src/tools/search.ts`) currently calls native `grep` with `cache: false`.
+- Tool-level grep integration (`packages/coding-agent/src/tools/grep.ts`) currently calls native `grep` with `cache: false`.
 
 ## Invalidation contract
 

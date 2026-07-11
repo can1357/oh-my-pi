@@ -1,5 +1,5 @@
+import { parseJsonWithRepair } from "@pk-nerdsaver-ai/pi-utils";
 import type { Message, ToolCall } from "../types";
-import { parseJsonWithRepair } from "../utils/json-parse";
 import { asRecord, mintToolCallId, partialSuffixOverlapAny } from "./coercion";
 import dialectPrompt from "./deepseek.md" with { type: "text" };
 import { assistantTranscriptParts, collectToolResultRun, messageContentText, stringifyJson } from "./rendering";

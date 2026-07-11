@@ -10,7 +10,7 @@ import * as toolsManager from "@pk-nerdsaver-ai/pi-coding-agent/utils/tools-mana
 import * as scrapers from "@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/types";
 import * as scraperUtils from "@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/utils";
 import * as natives from "@pk-nerdsaver-ai/pi-natives";
-import { ptree, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { ptree, removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 import { asGlobalFetch } from "../helpers/fetch-mock";
 
 const withMissingSystemPython = () => {
@@ -32,7 +32,7 @@ describe("read tool URL selector shorthands", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
-		fs.rmSync(testDir, { recursive: true, force: true });
+		removeSyncWithRetries(testDir);
 	});
 
 	const createSession = (settingsOverrides: Partial<Record<SettingPath, unknown>> = {}): ToolSession => {
@@ -125,7 +125,7 @@ describe("read tool URL handling", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 		delete process.env.PARALLEL_API_KEY;
-		fs.rmSync(testDir, { recursive: true, force: true });
+		removeSyncWithRetries(testDir);
 	});
 
 	const createSession = (overrides: Partial<Record<SettingPath, unknown>> = {}): ToolSession => {

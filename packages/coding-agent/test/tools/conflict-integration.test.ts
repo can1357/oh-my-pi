@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { createTools, type ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import { ConflictHistory } from "@pk-nerdsaver-ai/pi-coding-agent/tools/conflict-detect";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -82,7 +83,7 @@ describe("read surfaces conflicts as a warning footer", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await removeWithRetries(tempDir);
 	});
 
 	it("returns file content and appends a conflict warning with id 1", async () => {
@@ -308,7 +309,7 @@ describe("write resolves conflicts via conflict://N", () => {
 	});
 
 	afterEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await removeWithRetries(tempDir);
 	});
 
 	it("splices the registered region with the supplied content", async () => {
@@ -506,9 +507,7 @@ describe("write resolves conflicts via conflict://N", () => {
 	it("strips hashline display prefixes from replacement content when hashline mode is active", async () => {
 		const filePath = path.join(tempDir, "hashed.ts");
 		await Bun.write(filePath, TWO_WAY);
-		const session = createTestSession(tempDir, {
-			settings: Settings.isolated({ readHashLines: true }),
-		});
+		const session = createTestSession(tempDir);
 		const read = await getTool(session, "read");
 		const write = await getTool(session, "write");
 

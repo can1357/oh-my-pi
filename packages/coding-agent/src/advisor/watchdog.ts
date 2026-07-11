@@ -1,8 +1,34 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import { getAgentDir, isEnoent, logger } from "@pk-nerdsaver-ai/pi-utils";
+import { getAgentDir, isEnoent, logger, prompt } from "@pk-nerdsaver-ai/pi-utils";
 import { expandAtImports } from "../discovery/at-imports";
+import activeRepoWatchdogTemplate from "../prompts/advisor/active-repo-watchdog.md" with { type: "text" };
+import contextFilesTemplate from "../prompts/advisor/context-files.md" with { type: "text" };
+import type { ActiveRepoContext } from "../utils/active-repo-context";
 import { repo } from "../utils/git";
+import { normalizePromptPath } from "../utils/prompt-path";
+
+export function formatActiveRepoWatchdogPrompt(activeRepoContext: ActiveRepoContext): string {
+	return prompt
+		.render(activeRepoWatchdogTemplate, {
+			relativeRepoRoot: normalizePromptPath(activeRepoContext.relativeRepoRoot),
+		})
+		.trim();
+}
+
+/**
+ * Render the project context files (AGENTS.md and the like) into a block for the
+ * advisor's system prompt, mirroring how the primary agent receives them. Gives
+ * the read-only reviewer the user's standing project instructions so it can hold
+ * the driving agent to them instead of advising against project conventions it
+ * cannot otherwise see. Returns undefined when there are no context files.
+ */
+export function formatAdvisorContextPrompt(
+	contextFiles: ReadonlyArray<{ path: string; content: string }>,
+): string | undefined {
+	if (contextFiles.length === 0) return undefined;
+	return prompt.render(contextFilesTemplate, { contextFiles }).trim() || undefined;
+}
 
 /**
  * Discover and load WATCHDOG.md files walking up from cwd, project .omp folder, and user agent dir.

@@ -54,6 +54,7 @@ export interface BeamConfig {
 	useCloud: boolean;
 	localLlmEnabled: boolean;
 	maxEpisodeChars: number;
+	proactiveLinking?: boolean;
 }
 
 export interface BeamMemoryOptions {
@@ -63,6 +64,7 @@ export interface BeamMemoryOptions {
 	authorType?: string | null;
 	channelId?: string | null;
 	useCloud?: boolean;
+	proactiveLinking?: boolean;
 	eventEmitter?: (event: BeamEvent) => void;
 	pluginManager?: BeamPluginManager | null;
 	annotations?: AnnotationStoreLike | null;
@@ -118,6 +120,15 @@ export interface RememberOptions {
 	metadata?: Metadata | null;
 	extract?: boolean;
 	extractEntities?: boolean;
+	/**
+	 * Override the text passed to fact and graph extraction. When unset
+	 * (default) extraction runs over the stored `content`. Use this when the
+	 * stored memory is a multi-author transcript but only a subset (e.g. the
+	 * user-authored turns) should drive deterministic fact extraction — see
+	 * coding-agent issue #3372 where assistant prose was being mis-attributed
+	 * as user `Instruction:` memories.
+	 */
+	extractText?: string;
 	veracity?: Veracity;
 	memoryType?: string;
 	scope?: MemoryScope;

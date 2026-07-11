@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { computeBankScope, deriveBankId, ensureBankExists } from "@pk-nerdsaver-ai/pi-coding-agent/hindsight/bank";
 import { HindsightApi } from "@pk-nerdsaver-ai/pi-coding-agent/hindsight/client";
 import type { HindsightConfig } from "@pk-nerdsaver-ai/pi-coding-agent/hindsight/config";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 // Isolate `git` invocations in this file from the host's global config —
 // `~/.gitconfig` commit signing or template hooks would otherwise turn the
@@ -178,7 +179,7 @@ describe("computeBankScope", () => {
 		});
 
 		afterAll(async () => {
-			if (baseDir) await fs.rm(baseDir, { recursive: true, force: true });
+			if (baseDir) await removeWithRetries(baseDir);
 		});
 
 		it("emits the same project tag from the primary checkout and a linked worktree", () => {

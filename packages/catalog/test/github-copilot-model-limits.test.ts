@@ -515,3 +515,123 @@ describe("github copilot tiered context windows", () => {
 		expect(served[0]?.requestModelId).toBeUndefined();
 	});
 });
+
+describe("github copilot vision endpoint policy", () => {
+	const businessApiKey = JSON.stringify({
+		token: "ghu_business_token",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+	});
+	const enterpriseApiKey = JSON.stringify({
+		token: "ghu_enterprise_token",
+		enterpriseUrl: "ghe.example.com",
+	});
+
+	it("strips vision when discovery resolves to the business endpoint, even though upstream reports it", async () => {
+		// `api.business.githubcopilot.com` responds `400 vision is not supported`
+		// on image inputs (issue #3387), so the catalog MUST ignore the upstream's
+		// `supports.vision = true` flag for non-personal hosts.
+		const { models } = await discoverCopilotModels(
+			{
+				data: [
+					tieredCopilotEntry({
+						id: "claude-sonnet-4.6",
+						name: "Claude Sonnet 4.6",
+						window: 200_000,
+						maxOutput: 32_000,
+						vision: true,
+					}),
+				],
+			},
+			businessApiKey,
+			"https://api.business.githubcopilot.com",
+			"ghu_business_token",
+		);
+		const model = models.find(candidate => candidate.id === "claude-sonnet-4.6");
+		expect(model?.baseUrl).toBe("https://api.business.githubcopilot.com");
+		expect(model?.input).toEqual(["text"]);
+	});
+
+	it("strips vision when discovery resolves to an enterprise host", async () => {
+		const { models } = await discoverCopilotModels(
+			{
+				data: [
+					tieredCopilotEntry({
+						id: "claude-sonnet-4.6",
+						name: "Claude Sonnet 4.6",
+						window: 200_000,
+						maxOutput: 32_000,
+						vision: true,
+					}),
+				],
+			},
+			enterpriseApiKey,
+			"https://copilot-api.ghe.example.com",
+			"ghu_enterprise_token",
+		);
+		const model = models.find(candidate => candidate.id === "claude-sonnet-4.6");
+		expect(model?.baseUrl).toBe("https://copilot-api.ghe.example.com");
+		expect(model?.input).toEqual(["text"]);
+	});
+
+	it("keeps vision on the canonical personal Copilot endpoint", async () => {
+		const { models } = await discoverCopilotModels({
+			data: [
+				tieredCopilotEntry({
+					id: "claude-sonnet-4.6",
+					name: "Claude Sonnet 4.6",
+					window: 200_000,
+					maxOutput: 32_000,
+					vision: true,
+				}),
+			],
+		});
+		const model = models.find(candidate => candidate.id === "claude-sonnet-4.6");
+		expect(model?.baseUrl).toBe("https://api.githubcopilot.com");
+		expect(model?.input).toEqual(["text", "image"]);
+	});
+
+	it("downgrades the merged Model to text-only when business discovery overrides a vision-capable bundled reference", async () => {
+		// Bundled `claude-sonnet-4.6` ships with `input=['text','image']` and the
+		// canonical baseUrl. Discovery against the business host hands back a
+		// dynamic entry with the business baseUrl; the merge MUST honour the
+		// dynamic side's text-only capability instead of OR-upgrading.
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-copilot-vision-"));
+		try {
+			const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				expect(url).toBe("https://api.business.githubcopilot.com/models");
+				expect(getHeaderValue(init?.headers, "Authorization")).toBe("Bearer ghu_business_token");
+				return new Response(
+					JSON.stringify({
+						data: [
+							tieredCopilotEntry({
+								id: "claude-sonnet-4.6",
+								name: "Claude Sonnet 4.6",
+								window: 200_000,
+								maxOutput: 32_000,
+								vision: true,
+							}),
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			});
+
+			const bundled = getBundledModel("github-copilot", "claude-sonnet-4.6");
+			expect(bundled?.input).toEqual(["text", "image"]);
+			expect(bundled?.baseUrl).toBe("https://api.githubcopilot.com");
+
+			const options = githubCopilotModelManagerOptions({ apiKey: businessApiKey, fetch: fetchMock });
+			const manager = createModelManager({
+				...options,
+				cacheDbPath: path.join(tempDir, "models.db"),
+			});
+			const { models } = await manager.refresh("online");
+			const model = models.find(candidate => candidate.id === "claude-sonnet-4.6");
+			expect(model?.baseUrl).toBe("https://api.business.githubcopilot.com");
+			expect(model?.input).toEqual(["text"]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+});

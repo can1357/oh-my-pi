@@ -25,5 +25,5 @@ For pattern-addressed bulk changes, bash is more efficient:
 |Bulk replace across files|`sd 'pattern' 'replacement' **/*.ts`|
 
 Use Replace when _content itself_ identifies location; use `ast_edit` for structure-aware codemods.
-NEVER use `sed -i`/`perl -i`/heredoc redirection for edits — those calls are blocked; use this tool or `write`.
+For in-place edits prefer this tool or `write` — you get a diff preview and fuzzy matching.
 </bash-alternatives>

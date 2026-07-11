@@ -197,12 +197,13 @@ function handleHello(name: string, proto: number, fromPeer: number): void {
 			t: "welcome",
 			proto: COLLAB_PROTO,
 			header: fixtureHeader,
-			entries: [...entries],
 			state: buildState(),
 			agents: agents.map(agent => ({ ...agent })),
+			entryCount: entries.length,
 		},
 		fromPeer,
 	);
+	sendFrame({ t: "snapshot-chunk", entries: [...entries], final: true }, fromPeer);
 	console.log(`mock-host: ${cleanName} joined (peer ${fromPeer})`);
 	broadcastState();
 }

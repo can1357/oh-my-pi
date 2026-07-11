@@ -17,7 +17,8 @@ verbatim tool result<|im_end|>
 
 - `NAME` MUST match a listed function exactly.
 - Arguments MUST be one JSON object with double-quoted keys.
+- Argument string values use only normal JSON string escaping (`\"`, `\\`, `\n`); never HTML-escape their contents — write `a & b`, not `a &amp; b`.
 - Multiple calls = consecutive `<|tool_call_begin|>…<|tool_call_end|>` blocks in the same section; `INDEX` increments from `0`.
 - Private reasoning, when supported, goes in `<think>…</think>` before the tool-call section; NEVER put tool calls inside `<think>`.
 - Read each result turn in call order. NEVER emit result turns yourself.
-- After emitting your tool calls, YOU MUST EMIT THE STOP SEQUENCE AND HALT.
+- Emit the stop sequence ONLY after the call is fully written — NEVER announce a tool then stop (e.g. halting at "Let's run `cargo clippy`" with no `<|tool_call_begin|>` emitted). Write the complete call, THEN the stop sequence, THEN halt.

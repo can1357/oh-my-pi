@@ -5,7 +5,7 @@
  * embedding in coding-agent HTML session exports.
  *
  * Output: packages/coding-agent/src/export/html/tool-views.generated.js
- * Run via `bun run build:tool-views` after changing src/tool-render/.
+ * Run via `bun run gen:tool-views` after changing src/tool-render/.
  */
 import * as path from "node:path";
 

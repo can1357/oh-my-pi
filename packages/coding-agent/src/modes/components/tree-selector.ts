@@ -6,7 +6,6 @@ import {
 	fuzzyMatch,
 	Input,
 	matchesKey,
-	ScrollView,
 	Spacer,
 	Text,
 	TruncatedText,
@@ -16,10 +15,11 @@ import type { TreeFilterMode } from "../../config/settings-schema";
 import { theme } from "../../modes/theme/theme";
 import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
 import type { SessionTreeNode } from "../../session/session-entries";
+import { toPathList } from "../../tools/grep";
 import { shortenPath } from "../../tools/render-utils";
-import { toPathList } from "../../tools/search";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { DynamicBorder } from "./dynamic-border";
+import { centeredWindow, contentRowWidth, renderScrollableList } from "./selector-helpers";
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
 interface GutterInfo {
@@ -475,14 +475,11 @@ class TreeList implements Component {
 			return lines;
 		}
 
-		const startIndex = Math.max(
-			0,
-			Math.min(
-				this.#selectedIndex - Math.floor(this.maxVisibleLines / 2),
-				this.#filteredNodes.length - this.maxVisibleLines,
-			),
+		const { startIndex, endIndex } = centeredWindow(
+			this.#selectedIndex,
+			this.#filteredNodes.length,
+			this.maxVisibleLines,
 		);
-		const endIndex = Math.min(startIndex + this.maxVisibleLines, this.#filteredNodes.length);
 
 		// Cap the per-row gutter prefix so a content budget is always preserved.
 		// Each indent level renders as 3 cells; deep branching would otherwise eat the
@@ -494,8 +491,7 @@ class TreeList implements Component {
 		const contentReserve = Math.max(MIN_CONTENT_COLS, Math.floor(width / 2));
 		const maxIndentLevels = Math.max(1, Math.floor((width - contentReserve - OVERHEAD_COLS) / 3));
 
-		const overflow = this.#filteredNodes.length > this.maxVisibleLines;
-		const rowWidth = Math.max(0, width - (overflow ? 1 : 0));
+		const rowWidth = contentRowWidth(width, this.#filteredNodes.length, this.maxVisibleLines);
 		const rows: string[] = [];
 
 		for (let i = startIndex; i < endIndex; i++) {
@@ -584,14 +580,13 @@ class TreeList implements Component {
 			rows.push(truncateToWidth(line, rowWidth));
 		}
 
-		const sv = new ScrollView(rows, {
-			height: rows.length,
-			scrollbar: "auto",
-			totalRows: this.#filteredNodes.length,
-			theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
-		});
-		sv.setScrollOffset(startIndex);
-		lines.push(...sv.render(width));
+		lines.push(
+			...renderScrollableList(rows, {
+				width,
+				totalRows: this.#filteredNodes.length,
+				scrollOffset: startIndex,
+			}),
+		);
 
 		const filterLabel = this.#getFilterLabel();
 		if (filterLabel) {
@@ -745,7 +740,7 @@ class TreeList implements Component {
 					.slice(0, 50);
 				return `[bash: ${cmd}${rawCmd.length > 50 ? "..." : ""}]`;
 			}
-			case "search": {
+			case "grep": {
 				const pattern = String(args.pattern || "");
 				const searchPathsInput =
 					typeof args.paths === "string" || Array.isArray(args.paths)
@@ -755,11 +750,11 @@ class TreeList implements Component {
 							: undefined;
 				const paths = toPathList(searchPathsInput);
 				const scope = paths.length > 0 ? paths.join(", ") : ".";
-				return `[search: /${pattern}/ in ${shortenPath(scope)}]`;
+				return `[grep: /${pattern}/ in ${shortenPath(scope)}]`;
 			}
-			case "find": {
+			case "glob": {
 				const paths = Array.isArray(args.paths) ? args.paths.join(", ") : String(args.pattern || ".");
-				return `[find: ${shortenPath(paths)}]`;
+				return `[glob: ${shortenPath(paths)}]`;
 			}
 			case "ls": {
 				const path = shortenPath(String(args.path || "."));

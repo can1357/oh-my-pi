@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { PlanModeState } from "@pk-nerdsaver-ai/pi-coding-agent/plan-mode/state";
 import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import { enforcePlanModeWrite, resolvePlanPath } from "@pk-nerdsaver-ai/pi-coding-agent/tools/plan-mode-guard";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 const ARTIFACTS_DIR = path.join(os.tmpdir(), "agent-artifacts");
 const REPO_ROOT = path.join(os.tmpdir(), "repo");
@@ -126,7 +127,7 @@ describe("enforcePlanModeWrite accepts absolute local-sandbox paths", () => {
 			const absolute = resolvePlanPath(session, "local://my-plan.md");
 			expect(() => enforcePlanModeWrite(session, absolute, { op: "update" })).not.toThrow();
 		} finally {
-			await fs.rm(artifactsDir, { recursive: true, force: true });
+			await removeWithRetries(artifactsDir);
 		}
 	});
 
@@ -142,7 +143,7 @@ describe("enforcePlanModeWrite accepts absolute local-sandbox paths", () => {
 			expect(() => enforcePlanModeWrite(session, `[${absolute}]`, { op: "update" })).not.toThrow();
 			expect(() => enforcePlanModeWrite(session, `[local://my-plan.md#ABCD]`, { op: "update" })).not.toThrow();
 		} finally {
-			await fs.rm(artifactsDir, { recursive: true, force: true });
+			await removeWithRetries(artifactsDir);
 		}
 	});
 

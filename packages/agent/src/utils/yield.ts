@@ -46,13 +46,6 @@ const YIELD_SLEEP_MS = 20;
 const YIELD_INTERVAL_MS = 50;
 
 /**
- * Wall-clock timestamp of the last completed yield. Module-level so that
- * tight loops sharing this helper collectively respect the gate, not just
- * one caller at a time.
- */
-let lastYieldAt = 0;
-
-/**
  * Sleep for at least `ms` milliseconds of wall-clock time.
  * Retries the wait if it returns prematurely (which can happen when napi
  * callbacks wake the event loop via `uv_async_send`). When `signal` is
@@ -76,15 +69,59 @@ async function sleepAtLeast(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Yield to the Bun event loop, sleeping for at least 20 ms — but at most
- * once every {@link YIELD_INTERVAL_MS}. Callers in hot paths can invoke
- * this freely; only the slow path actually sleeps.
+ * Cooperative yield gate. Sleeps for at least {@link YieldGateOptions.sleepMs}
+ * but at most once every {@link YieldGateOptions.intervalMs}; hot-path callers
+ * invoke it freely and only the slow path actually sleeps.
+ *
+ * The clock and sleep are injectable so tests drive the gate logic without
+ * touching process-global `Date.now`/`scheduler.wait` — globals a concurrent
+ * test file can restore mid-run, which previously made the shared gate flake.
  */
-export async function yieldIfDue(): Promise<void> {
-	const now = Date.now();
-	if (now - lastYieldAt < YIELD_INTERVAL_MS) return;
-	await sleepAtLeast(YIELD_SLEEP_MS);
-	lastYieldAt = Date.now();
+export interface YieldGateOptions {
+	now?: () => number;
+	sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+	intervalMs?: number;
+	sleepMs?: number;
+}
+
+export class YieldGate {
+	#lastYieldAt = 0;
+	readonly #now: () => number;
+	readonly #sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
+	readonly #intervalMs: number;
+	readonly #sleepMs: number;
+
+	constructor(opts: YieldGateOptions = {}) {
+		this.#now = opts.now ?? (() => Date.now());
+		this.#sleep = opts.sleep ?? sleepAtLeast;
+		this.#intervalMs = opts.intervalMs ?? YIELD_INTERVAL_MS;
+		this.#sleepMs = opts.sleepMs ?? YIELD_SLEEP_MS;
+	}
+
+	async yieldIfDue(signal?: AbortSignal): Promise<void> {
+		const now = this.#now();
+		const elapsed = now - this.#lastYieldAt;
+		// `elapsed < 0` means the wall clock moved backward relative to the last
+		// yield (NTP step, fake-timer test, or a stale future timestamp left by
+		// another caller): treat it as due and re-anchor rather than gate forever.
+		if (elapsed >= 0 && elapsed < this.#intervalMs) return;
+		await this.#sleep(this.#sleepMs, signal);
+		this.#lastYieldAt = this.#now();
+	}
+}
+
+/**
+ * Process-wide gate shared by all hot-path callers so tight loops collectively
+ * respect the interval rather than each sleeping independently.
+ */
+const sharedYieldGate = new YieldGate();
+
+/**
+ * Yield to the Bun event loop, sleeping for at least 20 ms — but at most once
+ * every {@link YIELD_INTERVAL_MS} across all callers.
+ */
+export function yieldIfDue(): Promise<void> {
+	return sharedYieldGate.yieldIfDue();
 }
 
 // ---------------------------------------------------------------------------

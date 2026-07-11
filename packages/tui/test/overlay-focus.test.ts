@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { type Component, type Focusable, type OverlayFocusOwner, TUI } from "@pk-nerdsaver-ai/pi-tui";
+import { type Component, Container, type Focusable, type OverlayFocusOwner, TUI } from "@pk-nerdsaver-ai/pi-tui";
 import type { Terminal, TerminalAppearance } from "@pk-nerdsaver-ai/pi-tui/terminal";
 
 class MinimalTerminal implements Terminal {
@@ -147,6 +147,100 @@ describe("TUI overlay focus", () => {
 
 			expect(tui.getFocused()).toBe(authorizationCodeInput);
 			expect(authorizationCodeInput.inputs).toEqual(["code", "still-code"]);
+			expect(approvalPrompt.inputs).toEqual([]);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("hands focus to the live editor-slot owner after a fullscreen overlay closes (issue #3349)", () => {
+		// Repro for issue #3349: opening /settings (a fullscreen overlay)
+		// while a tool approval prompt fires lands the prompt component in
+		// the editor slot. When the overlay closes, `overlayHandle.hide()`
+		// restores focus to the preFocus captured at open time — the
+		// (now-unmounted) editor. Pre-fix, the visible prompt received no
+		// keystrokes and the TUI looked frozen. The SelectorController fix
+		// follows `hide()` with `setFocus(editorContainer.children[0] ?? editor)`;
+		// this test pins that pattern at the TUI level.
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+
+		const editor = new FocusRecorder("editor");
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		tui.addChild(editorContainer);
+		tui.setFocus(editor);
+
+		try {
+			tui.start();
+
+			// /settings opens a fullscreen overlay. preFocus captured = editor.
+			const settingsOverlay = new FocusRecorder("settings");
+			const handle = tui.showOverlay(settingsOverlay, { fullscreen: true });
+			expect(tui.getFocused()).toBe(settingsOverlay);
+
+			// While settings is open, a tool approval prompt swaps the editor
+			// slot to a hook-selector component. Focus snaps back to the
+			// settings overlay because it owns the top of the overlay stack.
+			const approvalPrompt = new FocusRecorder("approval");
+			editorContainer.clear();
+			editorContainer.addChild(approvalPrompt);
+			tui.setFocus(approvalPrompt);
+			expect(tui.getFocused()).toBe(settingsOverlay);
+
+			// User Esc's out of settings. Replicate the post-fix close path:
+			// hide(), then setFocus on whatever owns the slot right now.
+			handle.hide();
+			const slotOwner = editorContainer.children[0] ?? editor;
+			tui.setFocus(slotOwner);
+
+			// The visible approval prompt now receives input. Pre-fix the
+			// hide()-only restore left focus on the stale editor.
+			terminal.sendInput("\x1b[B");
+			terminal.sendInput("\r");
+			expect(tui.getFocused()).toBe(approvalPrompt);
+			expect(approvalPrompt.inputs).toEqual(["\x1b[B", "\r"]);
+			expect(editor.inputs).toEqual([]);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("pre-fix snapshot: hide() alone restores focus to the stale editor, missing the live slot owner (issue #3349)", () => {
+		// Companion to the test above: pin the exact pre-fix behavior so a
+		// future refactor of `overlayHandle.hide()` cannot silently change the
+		// contract that the SelectorController fix compensates for. `hide()`
+		// restores focus to `preFocus` captured at open time — the editor —
+		// regardless of what currently occupies the editor slot. The
+		// SelectorController close handlers MUST call `focusActiveEditorArea()`
+		// after `hide()`; this test demonstrates why.
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+
+		const editor = new FocusRecorder("editor");
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		tui.addChild(editorContainer);
+		tui.setFocus(editor);
+
+		try {
+			tui.start();
+
+			const settingsOverlay = new FocusRecorder("settings");
+			const handle = tui.showOverlay(settingsOverlay, { fullscreen: true });
+
+			const approvalPrompt = new FocusRecorder("approval");
+			editorContainer.clear();
+			editorContainer.addChild(approvalPrompt);
+			tui.setFocus(approvalPrompt);
+
+			// Close the overlay WITHOUT the SelectorController's follow-up
+			// `focusActiveEditorArea()`. hide() restores focus to preFocus.
+			handle.hide();
+
+			terminal.sendInput("\x1b[B");
+			expect(tui.getFocused()).toBe(editor);
+			expect(editor.inputs).toEqual(["\x1b[B"]);
 			expect(approvalPrompt.inputs).toEqual([]);
 		} finally {
 			tui.stop();

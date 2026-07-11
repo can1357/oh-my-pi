@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package cockroach.errorspb;
+
+message TagsPayload {
+  repeated .cockroach.errorspb.TagPayload tags = 1;
+}
+
+message TagPayload {
+  string tag = 1;
+  string value = 2;
+}

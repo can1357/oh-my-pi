@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import { isEnoent, logger, ptree } from "@pk-nerdsaver-ai/pi-utils";
 import { NON_INTERACTIVE_ENV } from "../exec/non-interactive-env";
+import { MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError } from "../tools/tool-errors";
 import type {
 	DapCapabilities,
@@ -28,69 +29,6 @@ type DapEventHandler = (body: unknown, event: DapEventMessage) => void | Promise
 type DapReverseRequestHandler = (args: unknown) => unknown | Promise<unknown>;
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-
-// Reused for all full decodes; each decode() resets state, so a single
-// instance is safe and avoids per-message TextDecoder allocation.
-const MESSAGE_DECODER = new TextDecoder("utf-8");
-
-/**
- * Locate the `\r\n\r\n` header terminator across the pending chunk list.
- * Returns the absolute byte index of the first `\r`, or -1 when not present.
- * Equivalent to scanning the contiguous concatenation of the chunks.
- */
-function findHeaderEndInChunks(chunks: Buffer[]): number {
-	let global = 0;
-	let b0 = -1;
-	let b1 = -1;
-	let b2 = -1;
-	for (const chunk of chunks) {
-		for (let i = 0; i < chunk.length; i++) {
-			const b3 = chunk[i];
-			if (b0 === 13 && b1 === 10 && b2 === 13 && b3 === 10) {
-				return global - 3;
-			}
-			b0 = b1;
-			b1 = b2;
-			b2 = b3;
-			global++;
-		}
-	}
-	return -1;
-}
-
-/** Copy the byte range [from, to) out of the pending chunk list into one Buffer. */
-function copyChunkRange(chunks: Buffer[], from: number, to: number): Buffer {
-	const out = Buffer.allocUnsafe(to - from);
-	let global = 0;
-	let written = 0;
-	for (const chunk of chunks) {
-		const chunkEnd = global + chunk.length;
-		if (chunkEnd > from && global < to) {
-			const start = Math.max(from, global) - global;
-			const end = Math.min(to, chunkEnd) - global;
-			chunk.copy(out, written, start, end);
-			written += end - start;
-		}
-		global = chunkEnd;
-		if (global >= to) break;
-	}
-	return out;
-}
-
-/** Drop the first `count` bytes from the pending chunk list in place. */
-function dropChunkFront(chunks: Buffer[], count: number): void {
-	let removed = 0;
-	while (chunks.length > 0) {
-		const head = chunks[0];
-		if (removed + head.length <= count) {
-			removed += head.length;
-			chunks.shift();
-		} else {
-			chunks[0] = head.subarray(count - removed);
-			break;
-		}
-	}
-}
 
 async function writeMessage(sink: DapWriteSink, message: DapRequestMessage | DapResponseMessage): Promise<void> {
 	const content = JSON.stringify(message);
@@ -452,52 +390,25 @@ export class DapClient {
 		this.#isReading = true;
 		const reader = this.#readable.getReader();
 
-		// Incoming bytes are buffered as a list of chunks and only joined when a
-		// full message is framed (mirrors the LSP reader) — concatenating the
-		// accumulator on every read is O(n^2) for messages spanning many reads.
-		const pendingChunks: Buffer[] = [];
-		let pendingLen = 0;
-		if (this.#messageBuffer.length > 0) {
-			pendingChunks.push(this.#messageBuffer);
-			pendingLen = this.#messageBuffer.length;
-		}
+		const framer = new MessageFramer(this.#messageBuffer);
 
 		try {
 			while (true) {
 				const { done, value } = await reader.read();
 				if (done) break;
 
-				pendingChunks.push(Buffer.from(value));
-				pendingLen += value.length;
+				framer.push(Buffer.from(value));
 
 				// Drain every complete message currently buffered.
-				while (true) {
-					const headerEnd = findHeaderEndInChunks(pendingChunks);
-					if (headerEnd === -1) break;
-
-					const headerText = MESSAGE_DECODER.decode(copyChunkRange(pendingChunks, 0, headerEnd));
-					const contentLengthMatch = headerText.match(/Content-Length: (\d+)/i);
-					if (!contentLengthMatch) {
-						// Non-protocol bytes (e.g. an adapter printing to stdout).
-						// Drop past the bogus terminator and resync instead of
-						// stalling on the same junk header forever.
-						logger.warn("DAP framing resync: header block without Content-Length", {
-							adapter: this.adapter.name,
-							header: headerText.slice(0, 200),
-						});
-						dropChunkFront(pendingChunks, headerEnd + 4);
-						pendingLen -= headerEnd + 4;
-						continue;
-					}
-
-					const contentLength = Number.parseInt(contentLengthMatch[1], 10);
-					const messageStart = headerEnd + 4; // Skip \r\n\r\n
-					const messageEnd = messageStart + contentLength;
-					if (pendingLen < messageEnd) break;
-
-					const messageText = MESSAGE_DECODER.decode(copyChunkRange(pendingChunks, messageStart, messageEnd));
-					dropChunkFront(pendingChunks, messageEnd);
-					pendingLen -= messageEnd;
+				for (const messageText of framer.drain(headerText => {
+					// Non-protocol bytes (e.g. an adapter printing to stdout).
+					// Drop past the bogus terminator and resync instead of
+					// stalling on the same junk header forever.
+					logger.warn("DAP framing resync: header block without Content-Length", {
+						adapter: this.adapter.name,
+						header: headerText.slice(0, 200),
+					});
+				})) {
 					this.#lastActivity = Date.now();
 
 					// A malformed message must not kill the reader — later
@@ -523,12 +434,7 @@ export class DapClient {
 			this.#rejectPendingRequests(new Error(`DAP connection closed: ${toErrorMessage(error)}`));
 		} finally {
 			// Persist any unparsed remainder so a restarted reader resumes mid-message.
-			this.#messageBuffer =
-				pendingChunks.length === 0
-					? Buffer.alloc(0)
-					: pendingChunks.length === 1
-						? pendingChunks[0]
-						: Buffer.concat(pendingChunks, pendingLen);
+			this.#messageBuffer = framer.remainder();
 			reader.releaseLock();
 			this.#isReading = false;
 		}

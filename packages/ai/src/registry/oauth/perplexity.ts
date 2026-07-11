@@ -14,6 +14,7 @@
 import * as os from "node:os";
 import { $env } from "@pk-nerdsaver-ai/pi-utils";
 import { $ } from "bun";
+import * as AIError from "../../error";
 import type { OAuthController, OAuthCredentials } from "./types";
 
 const API_VERSION = "2.18";
@@ -87,15 +88,19 @@ async function extractFromNativeApp(): Promise<string | null> {
  */
 async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> {
 	if (!ctrl.onPrompt) {
-		throw new Error("Perplexity login requires onPrompt callback");
+		throw new AIError.OnPromptRequiredError("Perplexity");
 	}
 	const email = await ctrl.onPrompt({
 		message: "Enter your Perplexity email address",
 		placeholder: "user@example.com",
 	});
 	const trimmedEmail = email.trim();
-	if (!trimmedEmail) throw new Error("Email is required for Perplexity login");
-	if (ctrl.signal?.aborted) throw new Error("Login cancelled");
+	if (!trimmedEmail)
+		throw new AIError.OAuthError("Email is required for Perplexity login", {
+			kind: "validation",
+			provider: "perplexity",
+		});
+	if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
 
 	ctrl.onProgress?.("Fetching Perplexity CSRF token...");
 	const csrfResponse = await fetch("https://www.perplexity.ai/api/auth/csrf", {
@@ -107,12 +112,18 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 	});
 
 	if (!csrfResponse.ok) {
-		throw new Error(`Perplexity CSRF request failed: ${csrfResponse.status}`);
+		throw new AIError.ProviderHttpError(
+			`Perplexity CSRF request failed: ${csrfResponse.status}`,
+			csrfResponse.status,
+		);
 	}
 
 	const csrfData = (await csrfResponse.json()) as { csrfToken?: string };
 	if (!csrfData.csrfToken) {
-		throw new Error("Perplexity CSRF response missing csrfToken");
+		throw new AIError.OAuthError("Perplexity CSRF response missing csrfToken", {
+			kind: "validation",
+			provider: "perplexity",
+		});
 	}
 	ctrl.onProgress?.("Sending login code to your email...");
 	const sendResponse = await fetch("https://www.perplexity.ai/api/auth/signin-email", {
@@ -131,15 +142,19 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 
 	if (!sendResponse.ok) {
 		const body = await sendResponse.text();
-		throw new Error(`Perplexity send login code failed (${sendResponse.status}): ${body}`);
+		throw new AIError.ProviderHttpError(
+			`Perplexity send login code failed (${sendResponse.status}): ${body}`,
+			sendResponse.status,
+		);
 	}
 	const otp = await ctrl.onPrompt({
 		message: "Enter the code sent to your email",
 		placeholder: "123456",
 	});
 	const trimmedOtp = otp.trim();
-	if (!trimmedOtp) throw new Error("OTP code is required");
-	if (ctrl.signal?.aborted) throw new Error("Login cancelled");
+	if (!trimmedOtp)
+		throw new AIError.OAuthError("OTP code is required", { kind: "validation", provider: "perplexity" });
+	if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
 	ctrl.onProgress?.("Verifying login code...");
 	const verifyResponse = await fetch("https://www.perplexity.ai/api/auth/signin-otp", {
 		method: "POST",
@@ -165,11 +180,18 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 
 	if (!verifyResponse.ok) {
 		const reason = verifyData.text ?? verifyData.error_code ?? verifyData.status ?? "OTP verification failed";
-		throw new Error(`Perplexity OTP verification failed: ${reason}`);
+		throw new AIError.OAuthError(`Perplexity OTP verification failed: ${reason}`, {
+			kind: "validation",
+			provider: "perplexity",
+			status: verifyResponse.status,
+		});
 	}
 
 	if (!verifyData.token) {
-		throw new Error("Perplexity OTP verification response missing token");
+		throw new AIError.OAuthError("Perplexity OTP verification response missing token", {
+			kind: "validation",
+			provider: "perplexity",
+		});
 	}
 
 	return jwtToCredentials(verifyData.token, trimmedEmail);
@@ -188,7 +210,7 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
  */
 export async function loginPerplexity(ctrl: OAuthController): Promise<OAuthCredentials> {
 	if (!ctrl.onPrompt) {
-		throw new Error("Perplexity login requires onPrompt callback");
+		throw new AIError.OnPromptRequiredError("Perplexity");
 	}
 
 	// Path 1: Native macOS app JWT (skip if PI_AUTH_NO_BORROW=1)

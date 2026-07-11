@@ -1,46 +1,51 @@
-// Define a consistent locale profile
 const locale = "en-US";
-const languages = ["en-US", "en"];
-const timezone = "America/New_York";
+const languages = [locale, "en"];
 
-// Override navigator language properties
-Object_defineProperty(navigator, "language", {
-  get: () => locale,
-  configurable: true,
-  enumerable: true,
-});
-Object_defineProperty(navigator, "languages", {
-  get: () => [...languages],
-  configurable: true,
-  enumerable: true,
-});
-
-// Override Intl.DateTimeFormat for timezone consistency
-const OriginalDateTimeFormat = Intl_DateTimeFormat;
-Intl.DateTimeFormat = class extends OriginalDateTimeFormat {
-  constructor(locales, options) {
-    const mergedOptions = { ...options, timeZone: timezone };
-    super(locales, mergedOptions);
+const sameLanguages = (value) => {
+  if (!value || value.length !== languages.length) return false;
+  for (let index = 0; index < languages.length; index += 1) {
+    if (value[index] !== languages[index]) return false;
   }
-  resolvedOptions() {
-    const options = super.resolvedOptions();
-    options.timeZone = timezone;
-    return options;
+  return true;
+};
+
+const navigatorProto = Object_getPrototypeOf(navigator);
+const navigatorAccessors = {
+  get language() {
+    return locale;
+  },
+  get languages() {
+    return [locale, "en"];
+  },
+};
+
+const defineNavigatorAccessor = (name) => {
+  const owner = navigatorProto || navigator;
+  const descriptor =
+    (navigatorProto && Object_getOwnPropertyDescriptor(navigatorProto, name)) ||
+    Object_getOwnPropertyDescriptor(navigator, name);
+  if (descriptor && descriptor.configurable === false) return;
+
+  const accessor = Object_getOwnPropertyDescriptor(navigatorAccessors, name);
+  if (!accessor || !accessor.get) return;
+  patchToString(accessor.get, "get " + name);
+
+  Object_defineProperty(owner, name, {
+    get: accessor.get,
+    configurable: descriptor ? descriptor.configurable : true,
+    enumerable: descriptor ? descriptor.enumerable : true,
+  });
+
+  const ownDescriptor = Object_getOwnPropertyDescriptor(navigator, name);
+  if (owner !== navigator && ownDescriptor && ownDescriptor.configurable !== false) {
+    Reflect_deleteProperty(navigator, name);
   }
 };
 
-// Ensure Date timezone is consistent
-const originalDateConstructor = Date_constructor;
-const originalToString = originalDateConstructor.prototype.toString;
-const originalToTimeString = originalDateConstructor.prototype.toTimeString;
+if (navigator.language !== locale) {
+  defineNavigatorAccessor("language");
+}
 
-Date.prototype.toString = function () {
-  return originalToString
-    .call(this)
-    .replace(/\(.*\)$/, "(Eastern Standard Time)");
-};
-Date.prototype.toTimeString = function () {
-  return originalToTimeString
-    .call(this)
-    .replace(/\(.*\)$/, "(Eastern Standard Time)");
-};
+if (!sameLanguages(navigator.languages)) {
+  defineNavigatorAccessor("languages");
+}

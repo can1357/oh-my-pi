@@ -2,6 +2,7 @@ import type {
 	BehaviorDashboardStats,
 	CostDashboardStats,
 	FolderStats,
+	GainDashboardStats,
 	MessageStats,
 	ModelDashboardStats,
 	OverviewStats,
@@ -80,4 +81,14 @@ export async function getBehaviorDashboardStats(
 
 export async function getFolderStats(range: TimeRange = "24h", signal?: AbortSignal): Promise<FolderStats[]> {
 	return fetchJson<FolderStats[]>(`${API_BASE}/stats/folders?range=${encodeURIComponent(range)}`, { signal });
+}
+
+export async function getGainDashboardStats(
+	range: TimeRange = "24h",
+	project?: string | null,
+	signal?: AbortSignal,
+): Promise<GainDashboardStats> {
+	const params = new URLSearchParams({ range });
+	if (project) params.set("project", project);
+	return fetchJson<GainDashboardStats>(`${API_BASE}/stats/gain?${params}`, { signal });
 }

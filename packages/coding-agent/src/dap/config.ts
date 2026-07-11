@@ -1,10 +1,37 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import { isRecord } from "@pk-nerdsaver-ai/pi-utils";
+import { isRecord, logger } from "@pk-nerdsaver-ai/pi-utils";
+import { YAML } from "bun";
+import { getConfigDirPaths } from "../config";
+import { getPreloadedPluginRoots } from "../discovery/helpers";
 import { hasRootMarkers, resolveCommand } from "../lsp/config";
 import DEFAULTS from "./defaults.json" with { type: "json" };
 import type { DapAdapterConfig, DapResolvedAdapter } from "./types";
 
 const EXTENSIONLESS_DEBUGGER_ORDER = ["gdb", "lldb-dap"] as const;
+
+interface NormalizedConfig {
+	adapters: Record<string, unknown>;
+}
+
+interface ConfigSource {
+	read(): NormalizedConfig | null;
+}
+
+function parseConfigContent(content: string, filePath: string): unknown {
+	const extension = path.extname(filePath).toLowerCase();
+	if (extension === ".yaml" || extension === ".yml") {
+		return YAML.parse(content) as unknown;
+	}
+	return JSON.parse(content) as unknown;
+}
+
+function normalizeConfig(value: unknown): NormalizedConfig | null {
+	if (!isRecord(value)) return null;
+	if (isRecord(value.adapters)) return { adapters: value.adapters };
+	return { adapters: value };
+}
 
 function normalizeStringArray(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
@@ -32,6 +59,15 @@ function normalizeAdapterConfig(config: unknown): DapAdapterConfig | null {
 	};
 }
 
+function readConfigFile(filePath: string): NormalizedConfig | null {
+	try {
+		const content = fs.readFileSync(filePath, "utf-8");
+		return normalizeConfig(parseConfigContent(content, filePath));
+	} catch {
+		return null;
+	}
+}
+
 function getDefaults(): Record<string, DapAdapterConfig> {
 	const adapters: Record<string, DapAdapterConfig> = {};
 	for (const [name, config] of Object.entries(DEFAULTS)) {
@@ -45,14 +81,117 @@ function getDefaults(): Record<string, DapAdapterConfig> {
 
 const DEFAULT_ADAPTERS = getDefaults();
 
-export function getAdapterConfigs(): Record<string, DapAdapterConfig> {
-	return { ...DEFAULT_ADAPTERS };
+function mergeAdapters(
+	base: Record<string, DapAdapterConfig>,
+	overrides: Record<string, unknown>,
+): Record<string, DapAdapterConfig> {
+	const merged: Record<string, DapAdapterConfig> = { ...base };
+	for (const [name, config] of Object.entries(overrides)) {
+		const existing = merged[name];
+		const candidate =
+			isRecord(existing) && isRecord(config)
+				? {
+						...existing,
+						...config,
+						launchDefaults:
+							isRecord(existing.launchDefaults) || isRecord(config.launchDefaults)
+								? { ...existing.launchDefaults, ...normalizeObject(config.launchDefaults) }
+								: undefined,
+						attachDefaults:
+							isRecord(existing.attachDefaults) || isRecord(config.attachDefaults)
+								? { ...existing.attachDefaults, ...normalizeObject(config.attachDefaults) }
+								: undefined,
+					}
+				: config;
+		const normalized = normalizeAdapterConfig(candidate);
+		if (normalized) {
+			merged[name] = normalized;
+		} else if (merged[name]) {
+			logger.warn("Ignoring invalid DAP adapter override (keeping previous config).", { name });
+		} else {
+			logger.warn("Ignoring invalid DAP adapter config.", { name });
+		}
+	}
+	return merged;
 }
 
-export function resolveAdapter(adapterName: string, cwd: string): DapResolvedAdapter | null {
-	const config = DEFAULT_ADAPTERS[adapterName];
+function fileConfigSource(filePath: string): ConfigSource {
+	return {
+		read: () => readConfigFile(filePath),
+	};
+}
+
+function getConfigSources(cwd: string): ConfigSource[] {
+	const filenames = ["dap.json", ".dap.json", "dap.yaml", ".dap.yaml", "dap.yml", ".dap.yml"];
+	const sources: ConfigSource[] = [];
+
+	for (const filename of filenames) {
+		sources.push(fileConfigSource(path.join(cwd, filename)));
+	}
+
+	const projectDirs = getConfigDirPaths("", { user: false, project: true, cwd });
+	for (const dir of projectDirs) {
+		for (const filename of filenames) {
+			sources.push(fileConfigSource(path.join(dir, filename)));
+		}
+	}
+
+	const userDirs = getConfigDirPaths("", { user: true, project: false });
+	for (const dir of userDirs) {
+		for (const filename of filenames) {
+			sources.push(fileConfigSource(path.join(dir, filename)));
+		}
+	}
+
+	const pluginRoots = getPreloadedPluginRoots();
+	for (const root of pluginRoots) {
+		for (const filename of filenames) {
+			sources.push(fileConfigSource(path.join(root.path, filename)));
+		}
+	}
+
+	for (const filename of filenames) {
+		sources.push(fileConfigSource(path.join(os.homedir(), filename)));
+	}
+
+	return sources;
+}
+
+function loadAdapterConfigs(cwd: string): Record<string, DapAdapterConfig> {
+	let adapters = { ...DEFAULT_ADAPTERS };
+	for (const source of getConfigSources(cwd).reverse()) {
+		const parsed = source.read();
+		if (!parsed) continue;
+		adapters = mergeAdapters(adapters, parsed.adapters);
+	}
+	return adapters;
+}
+
+export function getAdapterConfigs(cwd?: string): Record<string, DapAdapterConfig> {
+	return cwd ? loadAdapterConfigs(cwd) : { ...DEFAULT_ADAPTERS };
+}
+
+function normalizeCommandForCwd(command: string, cwd: string): string {
+	if (path.isAbsolute(command)) return command;
+	if (
+		command.startsWith("./") ||
+		command.startsWith("../") ||
+		command.startsWith(".\\") ||
+		command.startsWith("..\\")
+	) {
+		return path.resolve(cwd, command);
+	}
+	return command;
+}
+
+function resolveAdapterFromConfig(
+	adapterName: string,
+	configs: Record<string, DapAdapterConfig>,
+	cwd: string,
+): DapResolvedAdapter | null {
+	const config = configs[adapterName];
 	if (!config) return null;
-	const resolvedCommand = resolveCommand(config.command, cwd);
+	const resolvedCommand = resolveCommand(normalizeCommandForCwd(config.command, cwd), cwd);
 	if (!resolvedCommand) return null;
 	return {
 		name: adapterName,
@@ -69,9 +208,14 @@ export function resolveAdapter(adapterName: string, cwd: string): DapResolvedAda
 	};
 }
 
+export function resolveAdapter(adapterName: string, cwd: string): DapResolvedAdapter | null {
+	return resolveAdapterFromConfig(adapterName, getAdapterConfigs(cwd), cwd);
+}
+
 export function getAvailableAdapters(cwd: string): DapResolvedAdapter[] {
-	return Object.keys(DEFAULT_ADAPTERS)
-		.map(name => resolveAdapter(name, cwd))
+	const configs = getAdapterConfigs(cwd);
+	return Object.keys(configs)
+		.map(name => resolveAdapterFromConfig(name, configs, cwd))
 		.filter((adapter): adapter is DapResolvedAdapter => adapter !== null);
 }
 

@@ -1,9 +1,149 @@
 import * as fs from "node:fs";
+import { isBuiltin } from "node:module";
 import * as path from "node:path";
 import * as url from "node:url";
 import { isCompiledBinary } from "@pk-nerdsaver-ai/pi-utils";
+import { BUNDLED_PI_REGISTRY_KEYS } from "./legacy-pi-bundled-keys";
 
 const IS_COMPILED_BINARY = isCompiledBinary();
+
+// === Bundled host-package registry (issue #3423) ===
+//
+// Bun 1.3.14 stopped exposing `--compile` extras through any filesystem-style
+// API: `fs.existsSync`, `Bun.file().exists()`, `Bun.resolveSync`, and even
+// `import("/$bunfs/...")` / `import("file:///$bunfs/...")` all fail for the
+// embedded entries — only the main binary itself answers from
+// `/$bunfs/root/<binary-name>`. The previous strategy of rewriting
+// `@(scope)/pi-*` imports to a `file:///$bunfs/...` URL therefore breaks
+// every legacy extension in compiled mode (issue #3423; see also issues
+// #3329, #2168). Bun.plugin `onResolve` for bare specifiers also no longer
+// fires for transitive imports inside runtime-loaded extensions, so the
+// fallback hook in `installLegacyPiSpecifierShim()` cannot rescue them.
+//
+// Instead we keep a JS-heap reference to every bundled pi-* surface (the
+// canonical host packages and the legacy shims) and re-export them through a
+// Bun.plugin `onLoad` against a custom namespace. Extension source rewrites
+// emit `omp-legacy-pi-bundled:<key>` specifiers that the synthetic loader
+// resolves against the registry — no bunfs path ever leaves this module in
+// compiled mode. Dev / source-link / installed-package modes keep the
+// historical `file://` rewrite (the source files exist on disk and load fine
+// through Bun's standard URL loader).
+//
+// The registry lives in a sibling file (`legacy-pi-bundled-registry.ts`)
+// loaded via a conditional dynamic import: its transitive deps include the
+// coding-agent root which pulls in generated artifacts (e.g.
+// `export/html/tool-views.generated.js`) that only exist after a build, so a
+// static import would crash every dev/test run that touches
+// `legacy-pi-compat.ts`. This is the documented "conditional platform code"
+// exception to the static-import rule.
+const BUNDLED_VIRTUAL_SCHEME = "omp-legacy-pi-bundled:";
+const BUNDLED_VIRTUAL_NAMESPACE = "omp-legacy-pi-bundled";
+const BUNDLED_REGISTRY_GLOBAL = "__ompLegacyPiBundledRegistry";
+const TYPEBOX_BUNDLED_REGISTRY_KEY = "typebox";
+
+type BundledRegistry = Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+
+let bundledRegistryPromise: Promise<BundledRegistry> | null = null;
+
+/**
+ * Lazy-load the bundled host-package registry and stash it on `globalThis`
+ * for the synthetic loader emitted by `synthesizeBundledModuleSource`.
+ *
+ * `globalThis` is the bridge, not laziness: each synthesized
+ * `omp-legacy-pi-bundled:<key>` module is a *separate* ES module Bun compiles
+ * from a source string, so it cannot close over the registry in this file's
+ * lexical scope and the live (non-serializable) function/object exports cannot
+ * be inlined — the only runtime channel back to the host objects is a global.
+ *
+ * The dynamic import is gated by `IS_COMPILED_BINARY` so dev/test runs (where
+ * the registry's transitive deps include build-time-generated artifacts)
+ * never trigger the cascade.
+ */
+function ensureBundledRegistryLoaded(): Promise<BundledRegistry> {
+	if (!IS_COMPILED_BINARY) {
+		return Promise.reject(
+			new Error("omp:legacy-pi-shim: bundled registry is only available in compiled-binary mode"),
+		);
+	}
+	if (!bundledRegistryPromise) {
+		bundledRegistryPromise = import("./legacy-pi-bundled-registry").then(m => {
+			(globalThis as Record<string, unknown>)[BUNDLED_REGISTRY_GLOBAL] = m.BUNDLED_PI_REGISTRY;
+			return m.BUNDLED_PI_REGISTRY;
+		});
+	}
+	return bundledRegistryPromise;
+}
+
+function bundledRegistryVirtualSpecifier(registryKey: string): string {
+	return `${BUNDLED_VIRTUAL_SCHEME}${registryKey}`;
+}
+
+function isBundledVirtualSpecifier(value: string): boolean {
+	return value.startsWith(BUNDLED_VIRTUAL_SCHEME);
+}
+
+/**
+ * Build the synthetic ES module source for a `omp-legacy-pi-bundled:<key>`
+ * import against an explicit registry. Pure: takes the live module namespace
+ * and emits a string of ES exports rooted in `globalThis[BUNDLED_REGISTRY_GLOBAL]`.
+ * `synthesizeBundledModuleSource` wraps this with the lazy registry load —
+ * tests use this sync helper directly to assert export-shape preservation.
+ */
+function synthesizeBundledModuleSourceFromRegistry(registryKey: string, registry: BundledRegistry): string {
+	const mod = registry[registryKey];
+	if (!mod) {
+		throw new Error(`omp:legacy-pi-shim: no bundled module registered for ${registryKey}`);
+	}
+	const lines: string[] = [
+		`const __omp_bundled = globalThis[${JSON.stringify(BUNDLED_REGISTRY_GLOBAL)}][${JSON.stringify(registryKey)}];`,
+	];
+	let hasDefault = false;
+	for (const exportName in mod) {
+		if (exportName === "default") {
+			hasDefault = true;
+			continue;
+		}
+		lines.push(`export const ${exportName} = __omp_bundled[${JSON.stringify(exportName)}];`);
+	}
+	if (hasDefault) {
+		lines.push("export default __omp_bundled.default;");
+	}
+	lines.push("");
+	return lines.join("\n");
+}
+
+/**
+ * Build the synthetic ES module source served for an
+ * `omp-legacy-pi-bundled:<key>` import. Enumerates the live module namespace
+ * so legacy extensions see the same named/default exports they would have
+ * gotten from a real `file://` load — without touching the inaccessible bunfs
+ * filesystem.
+ */
+async function synthesizeBundledModuleSource(registryKey: string): Promise<string> {
+	const registry = await ensureBundledRegistryLoaded();
+	return synthesizeBundledModuleSourceFromRegistry(registryKey, registry);
+}
+
+/**
+ * Test seam: builds the synthetic ES module source for a virtual specifier
+ * against an explicit registry. Pure (no globalThis read); the emitted source
+ * still routes runtime lookups through `globalThis[BUNDLED_REGISTRY_GLOBAL]`.
+ */
+export function __synthesizeLegacyPiBundledSourceWithRegistry(
+	registryKey: string,
+	registry: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
+): string {
+	return synthesizeBundledModuleSourceFromRegistry(registryKey, registry);
+}
+
+/**
+ * Test seam: returns the globalThis key the synthetic loader reads from. Tests
+ * assert that the emitted source addresses the exact stash key the install
+ * function writes to, so a rename can't break extension loads silently.
+ */
+export function __getLegacyPiBundledRegistryGlobal(): string {
+	return BUNDLED_REGISTRY_GLOBAL;
+}
 
 // Canonical scope for in-process pi packages. Plugins published against any of
 // the aliased scopes below (mariozechner's original publish, earendil-works'
@@ -73,45 +213,14 @@ const PACKAGE_IMPORT_EXCLUDED = Symbol("packageImportExcluded");
 // not provide and plugins relying on them must vendor TypeBox directly.
 const TYPEBOX_SPECIFIER_FILTER = /^(?:@sinclair\/typebox|typebox)$/;
 
-// Compat shim and bundled-package paths used in compiled-binary mode. The shim
-// paths must point at files that ship inside the bunfs root; in dev /
-// source-link / installed-package mode the canonical specifier resolves via
-// `Bun.resolveSync` so only the shim files need explicit paths there.
-//
-// `BUNFS_PACKAGE_ROOT` is derived from `import.meta.dir` rather than hardcoded
-// as `/$bunfs/root/packages` so the prefix stays platform-native: on Windows
-// the bunfs mount appears as `<drive>:\~BUN\root\…` (see oven-sh/bun#15766),
-// and a hardcoded POSIX literal would normalize to `\$bunfs\root\…` and fail
-// to resolve. Compiled Bun modules currently report the bunfs root itself from
-// `import.meta.dir`, so appending `packages` lands on the `--root ../..`
-// package directory used by `scripts/build-binary.ts`.
-//
-// Every shim listed below must also be registered as an explicit `--compile`
-// entrypoint in `scripts/build-binary.ts` or release builds fail with
-// missing-module errors. Non-shim bundled packages are resolved via
-// `Bun.resolveSync` (see `resolveCanonicalPiSpecifier`) outside compiled mode,
-// so they keep working when on-disk layout differs from the monorepo tree.
-/**
- * Compute the bunfs package root from the compiled binary's `import.meta.dir`
- * (or any stand-in supplied by tests). Bun 1.3 reports the bunfs mount root
- * (`/$bunfs/root` or `<drive>:\~BUN\root`) for imported modules as well as the
- * entrypoint, so the normal path is `<root>/packages`.
- *
- * The suffix branch preserves correctness if a future Bun release switches to
- * module-specific `import.meta.dir` values inside compiled binaries, matching
- * the source layout:
- * `<bunfs>/packages/coding-agent/src/extensibility/plugins`.
- *
- * Exported for tests; production callers use `BUNFS_PACKAGE_ROOT` below.
- */
-export function __computeBunfsPackageRoot(metaDir: string, pathImpl: typeof path = path): string {
-	const pluginsDirSuffix = pathImpl.join("packages", "coding-agent", "src", "extensibility", "plugins");
-	const normalizedMetaDir = pathImpl.normalize(metaDir);
-	if (normalizedMetaDir.endsWith(pluginsDirSuffix)) {
-		return pathImpl.resolve(metaDir, "..", "..", "..", "..");
-	}
-	return pathImpl.join(metaDir, "packages");
-}
+// Compat-shim path resolution. In compiled-binary mode every bundled surface
+// is served through the `omp-legacy-pi-bundled:` virtual namespace (see the
+// registry block above) — bunfs paths are unreachable on Bun 1.3.14+, so the
+// pre-#3423 helpers that derived `/$bunfs/root/...` paths from
+// `import.meta.dir` are gone. Dev / source-link / installed-package modes
+// still need a real filesystem path for the source shims, which
+// `sourceShimPath` computes either from the npm prebuilt `dist/cli.js`
+// bundle (`PI_BUNDLED=true`) or directly from the monorepo source tree.
 
 /**
  * Compute the package root for the npm prebuilt `dist/cli.js` bundle.
@@ -135,15 +244,6 @@ export function __computeBundledSelfPackageRoot(metaDir: string, pathImpl: typeo
 	return pathImpl.resolve(metaDir);
 }
 
-const BUNFS_PACKAGE_ROOT = IS_COMPILED_BINARY ? __computeBunfsPackageRoot(import.meta.dir) : null;
-
-function bunfsPath(...segments: string[]): string {
-	if (!BUNFS_PACKAGE_ROOT) {
-		throw new Error("bunfsPath is only valid in compiled-binary mode");
-	}
-	return path.join(BUNFS_PACKAGE_ROOT, ...segments);
-}
-
 function resolveBundledSelfPackageRoot(): string | undefined {
 	if (!process.env.PI_BUNDLED) return undefined;
 	return __computeBundledSelfPackageRoot(import.meta.dir);
@@ -157,9 +257,36 @@ function sourceShimPath(file: string): string {
 		: path.resolve(import.meta.dir, "..", file);
 }
 
-const TYPEBOX_SHIM_PATH = BUNFS_PACKAGE_ROOT
-	? bunfsPath("coding-agent", "src", "extensibility", "typebox.js")
-	: sourceShimPath("typebox.ts");
+/**
+ * Resolve the path the TypeBox compatibility shim ships at, then drop it when
+ * the source file is missing.
+ *
+ * In compiled-binary mode the shim is served through the
+ * `omp-legacy-pi-bundled:` virtual namespace (issue #3423) — bunfs paths are
+ * unreachable on Bun 1.3.14+, so the virtual specifier is always available and
+ * needs no filesystem probe. In dev / source-link / installed-package mode the
+ * shim is an on-disk source file; validation mirrors
+ * `__validateLegacyPiPackageRootOverrides` (#2168): if the computed candidate
+ * doesn't exist (e.g. an install that dropped the source — issue #3414),
+ * `resolveTypeBoxSpecifier` returns `undefined` and
+ * `rewriteLegacyExtensionSource` leaves bare `typebox` / `@sinclair/typebox`
+ * specifiers alone, so Bun falls through to native resolution against the
+ * extension's own `node_modules`.
+ *
+ * Exported for tests; production callers use `TYPEBOX_SHIM_PATH`.
+ */
+export function __resolveTypeBoxShimPath(
+	isCompiled: boolean,
+	sourcePath: string,
+	pathExistsSync: (p: string) => boolean = fs.existsSync,
+): string | null {
+	if (isCompiled) {
+		return bundledRegistryVirtualSpecifier(TYPEBOX_BUNDLED_REGISTRY_KEY);
+	}
+	return pathExistsSync(sourcePath) ? sourcePath : null;
+}
+
+const TYPEBOX_SHIM_PATH = __resolveTypeBoxShimPath(IS_COMPILED_BINARY, sourceShimPath("typebox.ts"));
 
 // Legacy extensions historically imported `Type` (and `Static`/`TSchema`) from
 // the package root of `@(scope)/pi-ai`. pi-ai 15.1.0 removed the runtime `Type`
@@ -169,62 +296,84 @@ const TYPEBOX_SHIM_PATH = BUNFS_PACKAGE_ROOT
 // plus the borrowed `Type` runtime from the Zod-backed TypeBox shim. Subpath
 // imports such as `@pk-nerdsaver-ai/pi-ai/oauth` continue to resolve directly
 // against the bundled pi-ai package.
-const LEGACY_PI_AI_SHIM_PATH = BUNFS_PACKAGE_ROOT
-	? bunfsPath("coding-agent", "src", "extensibility", "legacy-pi-ai-shim.js")
+const LEGACY_PI_AI_SHIM_PATH = IS_COMPILED_BINARY
+	? bundledRegistryVirtualSpecifier(`${CANONICAL_PI_SCOPE}/pi-ai`)
 	: sourceShimPath("legacy-pi-ai-shim.ts");
 
 // The coding-agent's own `./src/index.ts` cannot be listed as an extra
 // `bun --compile` entrypoint alongside the CLI entry without breaking binary
-// startup (issue #1474 follow-up). Legacy `@(scope)/pi-coding-agent` root
-// imports therefore resolve through a sibling shim whose distinct file path
-// avoids that collision while re-exporting the canonical package surface.
-const LEGACY_PI_CODING_AGENT_SHIM_PATH = BUNFS_PACKAGE_ROOT
-	? bunfsPath("coding-agent", "src", "extensibility", "legacy-pi-coding-agent-shim.js")
+// startup (issue #1474 follow-up). In compiled-binary mode the legacy
+// `@(scope)/pi-coding-agent` root therefore resolves through the bundled
+// registry shim; in dev / source-link / installed-package mode it points at
+// the sibling source shim whose distinct file path avoids the #1474 collision
+// while still re-exporting the canonical package surface.
+const LEGACY_PI_CODING_AGENT_SHIM_PATH = IS_COMPILED_BINARY
+	? bundledRegistryVirtualSpecifier(`${CANONICAL_PI_SCOPE}/pi-coding-agent`)
 	: sourceShimPath("legacy-pi-coding-agent-shim.ts");
 
-// Package-root overrides. Shim entries are always applied because they replace
-// (or augment) the canonical surface even in non-compiled installs. The bunfs
-// entries are added only in compiled-binary mode — in dev / source-link /
-// installed-package mode the canonical specifier resolves cleanly through
-// `Bun.resolveSync`, and hardcoding a relative source-tree path would break
-// installs where the bundled packages live at `node_modules/@pk-nerdsaver-ai/pi-*`
-// rather than `packages/*`.
+// Package-root overrides. Shim entries (`pi-ai`, `pi-coding-agent`) always
+// replace the canonical surface so the legacy `Type` runtime and the legacy
+// helpers stay reachable. The bundled host packages (`pi-agent-core`,
+// `pi-natives`, `pi-tui`, `pi-utils`) are added only in compiled-binary mode
+// to route extensions onto the in-process module instance — in dev /
+// source-link / installed-package mode the canonical specifier resolves
+// cleanly through `Bun.resolveSync` and hardcoding a source-tree path would
+// miss installs where the bundled packages live at `node_modules/@pk-nerdsaver-ai/pi-*`.
 //
-// Every override target is validated against the on-disk filesystem at module
-// init: any entry whose file is missing (e.g. a compiled binary where Bun's
-// `--compile` quietly dropped an additional entrypoint — issue #2168) is left
-// out so `resolveCanonicalPiSpecifier` falls through to `getResolvedSpecifier`,
-// which throws under bunfs and triggers the catch in `rewriteLegacyPiImports`.
-// That catch leaves the specifier untouched so Bun resolves the canonical
-// `@pk-nerdsaver-ai/pi-*` import from the extension's own `node_modules` instead of
-// emitting a bunfs `file://` URL to a module that isn't actually present.
+// Compiled-binary entries are `omp-legacy-pi-bundled:<key>` specifiers handed
+// to the synthetic onLoad in `installLegacyPiSpecifierShim()` — bunfs paths
+// are unusable on Bun 1.3.14+ (issue #3423). Filesystem-shaped overrides are
+// still validated against on-disk presence so a missing dev-mode shim falls
+// through to `getResolvedSpecifier`.
 
 /**
- * Drop overrides whose targets are missing on disk so they can fall through to
- * the canonical-resolution path. Exported for the test seam in #2168.
+ * Drop overrides whose filesystem targets are missing so they can fall
+ * through to the canonical-resolution path. Virtual `omp-legacy-pi-bundled:`
+ * entries always pass — the bundled registry is the source of truth in
+ * compiled-binary mode where bunfs paths are unreachable (issue #3423).
  *
- * `pathExistsSync` defaults to `fs.existsSync`; the tests inject a stub to
+ * `pathExistsSync` defaults to `fs.existsSync`; tests inject a stub to
  * simulate the missing-entrypoint failure mode without touching the real FS.
  */
 export function __validateLegacyPiPackageRootOverrides(
 	candidates: Record<string, string>,
 	pathExistsSync: (p: string) => boolean = fs.existsSync,
 ): Record<string, string> {
-	return Object.fromEntries(Object.entries(candidates).filter(([, candidate]) => pathExistsSync(candidate)));
+	return Object.fromEntries(
+		Object.entries(candidates).filter(
+			([, candidate]) => isBundledVirtualSpecifier(candidate) || pathExistsSync(candidate),
+		),
+	);
 }
 
-const LEGACY_PI_PACKAGE_ROOT_OVERRIDES = __validateLegacyPiPackageRootOverrides({
-	[`${CANONICAL_PI_SCOPE}/pi-ai`]: LEGACY_PI_AI_SHIM_PATH,
-	[`${CANONICAL_PI_SCOPE}/pi-coding-agent`]: LEGACY_PI_CODING_AGENT_SHIM_PATH,
-	...(BUNFS_PACKAGE_ROOT
-		? {
-				[`${CANONICAL_PI_SCOPE}/pi-agent-core`]: bunfsPath("agent", "src", "index.js"),
-				[`${CANONICAL_PI_SCOPE}/pi-natives`]: bunfsPath("natives", "native", "index.js"),
-				[`${CANONICAL_PI_SCOPE}/pi-tui`]: bunfsPath("tui", "src", "index.js"),
-				[`${CANONICAL_PI_SCOPE}/pi-utils`]: bunfsPath("utils", "src", "index.js"),
-			}
-		: {}),
-});
+/**
+ * Compute the override map keyed by every canonical specifier the host serves
+ * directly: the pi-ai / pi-coding-agent roots (compat shims that re-attach
+ * legacy helpers) plus, in compiled-binary mode, every other canonical pi-*
+ * package root AND every non-wildcard subpath registered in the bundled
+ * registry (see `legacy-pi-bundled-keys.ts`). Subpath coverage is what stops
+ * `@(scope)/pi-ai/oauth` and friends from falling through to the extension's
+ * own — possibly absent — peer install when bunfs filesystem walks fail
+ * (issue #3442 follow-up to #3423). Exported as a test seam so the
+ * compiled-binary branch is verifiable from dev tests.
+ */
+export function __buildLegacyPiPackageRootOverrides(isCompiled: boolean): Record<string, string> {
+	const candidates: Record<string, string> = {
+		[`${CANONICAL_PI_SCOPE}/pi-ai`]: LEGACY_PI_AI_SHIM_PATH,
+		[`${CANONICAL_PI_SCOPE}/pi-coding-agent`]: LEGACY_PI_CODING_AGENT_SHIM_PATH,
+	};
+	if (isCompiled) {
+		for (const key of BUNDLED_PI_REGISTRY_KEYS) {
+			// Shim-bearing roots above already mapped to their compat surface;
+			// the bundled typebox shim has a dedicated TYPEBOX_SHIM_PATH route.
+			if (key in candidates || key === TYPEBOX_BUNDLED_REGISTRY_KEY) continue;
+			candidates[key] = bundledRegistryVirtualSpecifier(key);
+		}
+	}
+	return __validateLegacyPiPackageRootOverrides(candidates);
+}
+
+const LEGACY_PI_PACKAGE_ROOT_OVERRIDES = __buildLegacyPiPackageRootOverrides(IS_COMPILED_BINARY);
 
 let isLegacyPiSpecifierShimInstalled = false;
 
@@ -270,6 +419,12 @@ function resolveCanonicalPiSpecifier(remappedSpecifier: string): string {
 }
 
 function toImportSpecifier(resolvedPath: string): string {
+	// Virtual `omp-legacy-pi-bundled:` specifiers are served by the synthetic
+	// onLoad in `installLegacyPiSpecifierShim()`; wrapping them as `file://`
+	// would corrupt the scheme and bypass the bundled registry.
+	if (isBundledVirtualSpecifier(resolvedPath)) {
+		return resolvedPath;
+	}
 	return url.pathToFileURL(resolvedPath).href;
 }
 
@@ -302,20 +457,31 @@ const TYPEBOX_IMPORT_SPECIFIER_REGEX = /((?:from\s+|import\s+|import\s*\(\s*)["'
 
 /**
  * Rewrite the extension-owned specifiers OMP must host-resolve — legacy
- * `@(scope)/pi-*`, bare TypeBox packages, and package `imports` aliases like
- * `#src/*` — to absolute `file://` URLs. Every other specifier (relative
- * siblings and third-party dependencies) is left untouched so Bun resolves it
- * natively from the extension's real on-disk location.
+ * `@(scope)/pi-*`, bare TypeBox packages, package `imports` aliases like
+ * `#src/*`, and extension-local bare dependencies — to absolute `file://` URLs
+ * or compiled-mode virtual specifiers. Relative siblings and built-in modules
+ * are left untouched so Bun resolves them from the extension's real on-disk
+ * location.
  */
 async function rewriteLegacyExtensionSource(source: string, importerPath: string): Promise<string> {
 	const withPi = rewriteLegacyPiImports(source);
-	const withTypeBox = withPi.replace(
-		TYPEBOX_IMPORT_SPECIFIER_REGEX,
-		(_match, prefix: string, _specifier: string, suffix: string) => {
-			return `${prefix}${toImportSpecifier(TYPEBOX_SHIM_PATH)}${suffix}`;
-		},
-	);
-	return rewriteExtensionPackageImports(withTypeBox, importerPath);
+	// When the TypeBox shim is missing (release build dropped the entrypoint —
+	// issue #3414), leave bare specifiers untouched so Bun resolves a real
+	// `typebox` / `@sinclair/typebox` install from the extension's own
+	// `node_modules`. `resolveTypeBoxSpecifier` mirrors the fall-through.
+	const withTypeBox = TYPEBOX_SHIM_PATH
+		? withPi.replace(
+				TYPEBOX_IMPORT_SPECIFIER_REGEX,
+				(_match, prefix: string, _specifier: string, suffix: string) =>
+					`${prefix}${toImportSpecifier(TYPEBOX_SHIM_PATH)}${suffix}`,
+			)
+		: withPi;
+	return rewriteExtensionBareImports(await rewriteExtensionPackageImports(withTypeBox, importerPath), importerPath);
+}
+
+/** Test seam for compiled-binary legacy extension source rewriting. */
+export async function __rewriteLegacyExtensionSourceForTests(source: string, importerPath: string): Promise<string> {
+	return rewriteLegacyExtensionSource(source, importerPath);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -529,6 +695,187 @@ async function rewriteExtensionPackageImports(source: string, importerPath: stri
 	return `${rewritten}${source.slice(lastIndex)}`;
 }
 
+const BARE_EXTENSION_IMPORT_SPECIFIER_REGEX = /((?:from\s+|import\s+|import\s*\(\s*)["'])([^"'()\s]+)(["'])/g;
+
+function isBareExtensionDependencySpecifier(specifier: string): boolean {
+	if (
+		specifier.startsWith(".") ||
+		specifier.startsWith("/") ||
+		specifier.startsWith("#") ||
+		specifier.startsWith("node:") ||
+		specifier.startsWith("bun:") ||
+		/^[a-z][a-z0-9+.-]*:/i.test(specifier)
+	) {
+		return false;
+	}
+	const packageName = specifier.startsWith("@") ? specifier.split("/").slice(0, 2).join("/") : specifier.split("/")[0];
+	return Boolean(packageName && !isBuiltin(packageName));
+}
+
+interface BarePackageSpecifier {
+	readonly name: string;
+	readonly subpath: string | null;
+}
+
+function splitBarePackageSpecifier(specifier: string): BarePackageSpecifier | null {
+	const parts = specifier.split("/");
+	if (specifier.startsWith("@")) {
+		const [scope, name, ...rest] = parts;
+		if (!scope || !name) return null;
+		return { name: `${scope}/${name}`, subpath: rest.length > 0 ? rest.join("/") : null };
+	}
+	const [name, ...rest] = parts;
+	if (!name) return null;
+	return { name, subpath: rest.length > 0 ? rest.join("/") : null };
+}
+
+async function findNodePackageRoot(packageName: string, importerPath: string): Promise<string | null> {
+	let dir = path.dirname(importerPath);
+	while (true) {
+		const candidate = path.join(dir, "node_modules", packageName);
+		if (await pathExists(path.join(candidate, "package.json"))) {
+			return candidate;
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) {
+			return null;
+		}
+		dir = parent;
+	}
+}
+
+async function readPackageManifest(packageRoot: string): Promise<Record<string, unknown> | null> {
+	try {
+		const manifest = await Bun.file(path.join(packageRoot, "package.json")).json();
+		return isRecord(manifest) ? manifest : null;
+	} catch {
+		return null;
+	}
+}
+
+async function resolvePackageExportTarget(
+	packageRoot: string,
+	target: string,
+	wildcard: string | null,
+): Promise<string | null> {
+	if (!target.startsWith("./")) {
+		return null;
+	}
+	const substituted = wildcard === null ? target : target.replaceAll("*", wildcard);
+	return resolveSourceModuleFile(path.resolve(packageRoot, substituted));
+}
+
+async function resolveNodePackageExport(
+	packageRoot: string,
+	subpath: string | null,
+	manifest: Record<string, unknown>,
+): Promise<string | null> {
+	const exportsField = manifest.exports;
+	const rootTarget = subpath === null ? selectPackageImportTarget(exportsField) : null;
+	if (rootTarget !== null && rootTarget !== PACKAGE_IMPORT_EXCLUDED) {
+		return resolvePackageExportTarget(packageRoot, rootTarget, null);
+	}
+	if (!isRecord(exportsField)) {
+		return null;
+	}
+
+	const exactKey = subpath === null ? "." : `./${subpath}`;
+	const exactTarget = selectPackageImportTarget(exportsField[exactKey]);
+	if (exactTarget !== null && exactTarget !== PACKAGE_IMPORT_EXCLUDED) {
+		return resolvePackageExportTarget(packageRoot, exactTarget, null);
+	}
+
+	for (const [key, entry] of Object.entries(exportsField)) {
+		const starIndex = key.indexOf("*");
+		if (starIndex === -1 || subpath === null) continue;
+		const prefix = key.slice(2, starIndex);
+		const suffix = key.slice(starIndex + 1);
+		if (!subpath.startsWith(prefix) || !subpath.endsWith(suffix)) {
+			continue;
+		}
+		const target = selectPackageImportTarget(entry);
+		if (target === null || target === PACKAGE_IMPORT_EXCLUDED) {
+			continue;
+		}
+		return resolvePackageExportTarget(
+			packageRoot,
+			target,
+			subpath.slice(prefix.length, subpath.length - suffix.length),
+		);
+	}
+	return null;
+}
+
+async function resolveNodePackageFallback(
+	packageRoot: string,
+	subpath: string | null,
+	manifest: Record<string, unknown>,
+): Promise<string | null> {
+	if (subpath !== null) {
+		return resolveSourceModuleFile(path.join(packageRoot, subpath));
+	}
+	for (const field of ["module", "main"]) {
+		const target = manifest[field];
+		if (typeof target === "string") {
+			const resolved = await resolveSourceModuleFile(path.resolve(packageRoot, target));
+			if (resolved) return resolved;
+		}
+	}
+	return resolveSourceModuleFile(path.join(packageRoot, "index"));
+}
+
+async function resolveNodePackageDependency(specifier: string, importerPath: string): Promise<string | null> {
+	const parsed = splitBarePackageSpecifier(specifier);
+	if (!parsed) return null;
+	const packageRoot = await findNodePackageRoot(parsed.name, importerPath);
+	if (!packageRoot) return null;
+	const manifest = await readPackageManifest(packageRoot);
+	if (!manifest) return null;
+	return (
+		(await resolveNodePackageExport(packageRoot, parsed.subpath, manifest)) ??
+		(await resolveNodePackageFallback(packageRoot, parsed.subpath, manifest))
+	);
+}
+
+async function resolveExtensionBareDependency(specifier: string, importerPath: string): Promise<string | null> {
+	if (!isBareExtensionDependencySpecifier(specifier)) {
+		return null;
+	}
+	try {
+		const resolved = Bun.resolveSync(specifier, path.dirname(importerPath));
+		if (resolved && resolved !== specifier && !resolved.startsWith("node:") && !resolved.startsWith("bun:")) {
+			return resolved;
+		}
+	} catch {
+		// Compiled binaries do not reliably resolve runtime extension node_modules.
+	}
+	return resolveNodePackageDependency(specifier, importerPath);
+}
+
+async function rewriteExtensionBareImports(source: string, importerPath: string): Promise<string> {
+	let rewritten = "";
+	let lastIndex = 0;
+	for (const match of source.matchAll(BARE_EXTENSION_IMPORT_SPECIFIER_REGEX)) {
+		const matchIndex = match.index;
+		if (matchIndex === undefined) continue;
+
+		const [fullMatch, prefix, specifier, suffix] = match;
+		if (!prefix || !specifier || !suffix) continue;
+
+		const resolved = await resolveExtensionBareDependency(specifier, importerPath);
+		if (!resolved) continue;
+
+		rewritten += source.slice(lastIndex, matchIndex);
+		rewritten += `${prefix}${toImportSpecifier(resolved)}${suffix}`;
+		lastIndex = matchIndex + fullMatch.length;
+	}
+
+	if (lastIndex === 0) {
+		return source;
+	}
+	return `${rewritten}${source.slice(lastIndex)}`;
+}
+
 function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -687,8 +1034,8 @@ function resolveLegacyPiSpecifier(args: { path: string; importer: string }): { p
 	}
 }
 
-function resolveTypeBoxSpecifier(): { path: string } {
-	return { path: TYPEBOX_SHIM_PATH };
+function resolveTypeBoxSpecifier(): { path: string } | undefined {
+	return TYPEBOX_SHIM_PATH ? { path: TYPEBOX_SHIM_PATH } : undefined;
 }
 
 export function installLegacyPiSpecifierShim(): void {
@@ -702,6 +1049,12 @@ export function installLegacyPiSpecifierShim(): void {
 		setup(build) {
 			build.onResolve({ filter: LEGACY_PI_SPECIFIER_FILTER, namespace: "file" }, resolveLegacyPiSpecifier);
 			build.onResolve({ filter: TYPEBOX_SPECIFIER_FILTER, namespace: "file" }, resolveTypeBoxSpecifier);
+			// Compiled-binary mode: serve `omp-legacy-pi-bundled:<key>` imports
+			// from the JS-heap registry. The rewrite path emits these specifiers
+			// in place of unreachable `file:///$bunfs/...` URLs (issue #3423).
+			build.onLoad({ filter: /.*/, namespace: BUNDLED_VIRTUAL_NAMESPACE }, async args => {
+				return { contents: await synthesizeBundledModuleSource(args.path), loader: "js" };
+			});
 		},
 	});
 }

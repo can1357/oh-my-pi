@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import { listResourceTemplates } from "../src/mcp/client";
 import { MCPManager } from "../src/mcp/manager";
 import type { MCPServerConnection, MCPStdioServerConfig, MCPTransport } from "../src/mcp/types";
@@ -79,7 +80,7 @@ describe("MCPManager loads resources for a templates-less server", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(workDir, { recursive: true, force: true });
+		removeSyncWithRetries(workDir);
 	});
 
 	it("keeps concrete resources when resources/templates/list is unimplemented", async () => {

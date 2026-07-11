@@ -3,11 +3,37 @@ import * as fs from "node:fs";
 import { $env, isBunTestRuntime, isTerminalHeadless, logger } from "@pk-nerdsaver-ai/pi-utils";
 import { setKittyProtocolActive } from "./keys";
 import { StdinBuffer } from "./stdin-buffer";
-import { NotifyProtocol, setCellDimensions, setOsc99Supported, TERMINAL } from "./terminal-capabilities";
+import {
+	isInsideTmux,
+	NotifyProtocol,
+	setCellDimensions,
+	setOsc99Supported,
+	TERMINAL,
+	wrapTmuxPassthrough,
+} from "./terminal-capabilities";
+import { type HangulCompatibilityJamoWidth, setHangulCompatibilityJamoWidth } from "./utils";
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
+// Hangul Compatibility Jamo (U+3131..=U+318E) render width is terminal-dependent:
+// Ghostty follows UAX#11 (2 cells); Terminal.app and iTerm2 render narrow (1),
+// matching the macOS platform default. Override only for terminals known to
+// disagree — the rest keep the platform default (macOS narrow, otherwise UAX#11),
+// so this is a no-op everywhere except Ghostty. A runtime DSR/CPR probe that
+// auto-detects the width on unknown terminals is tracked separately.
+export function resolveHangulCompatibilityJamoWidthFromTerminalIdentity(
+	env: NodeJS.ProcessEnv = Bun.env,
+): HangulCompatibilityJamoWidth {
+	if (
+		env.GHOSTTY_RESOURCES_DIR ||
+		env.TERM_PROGRAM?.toLowerCase() === "ghostty" ||
+		env.TERM?.toLowerCase().includes("ghostty")
+	) {
+		return 2;
+	}
+	return "platform";
+}
 
 /**
  * Maximum encoded UTF-8 bytes per `process.stdout.write` call on Windows.
@@ -435,7 +461,6 @@ export class ProcessTerminal implements Terminal {
 	#inBandResizeBuffer = "";
 	#reportedColumns?: number;
 	#reportedRows?: number;
-	#osc11PollTimer?: Timer;
 	#mode2031DebounceTimer?: Timer;
 	#progressTimer?: Timer;
 
@@ -509,6 +534,7 @@ export class ProcessTerminal implements Terminal {
 		// The query handler intercepts input temporarily, then installs the user's handler
 		// See: https://sw.kovidgoyal.net/kitty/keyboard-protocol/
 		this.#queryAndEnableKittyProtocol();
+		setHangulCompatibilityJamoWidth(resolveHangulCompatibilityJamoWidthFromTerminalIdentity());
 
 		// Query terminal background color via OSC 11 for dark/light detection.
 		// Uses DA1 (Primary Device Attributes) as a sentinel: terminals process
@@ -527,24 +553,18 @@ export class ProcessTerminal implements Terminal {
 		// actual background color (following Neovim convention) with 100ms debounce.
 		this.#safeWrite("\x1b[?2031h");
 
-		// Start periodic OSC 11 re-query for terminals without Mode 2031
-		// (Warp, Alacritty, older WezTerm). Stops once Mode 2031 support is
-		// confirmed via DECRQM (probed below) or a Mode 2031 change notification
-		// fires — push notifications supersede polling, and the poll's repeated
-		// OSC 11/DA1 writes clear the user's active text selection on some
-		// terminals (copy breaks every 2s).
-		// Windows Terminal under WSL has been observed to close the hosting tab
-		// after repeated OSC 11/DA1 probes. Keep the initial/event-driven probes,
-		// but avoid background polling there.
-		const isWSL = process.platform === "linux" && (!!$env.WSL_DISTRO_NAME || !!$env.WSL_INTEROP);
-		if (!isWSL) {
-			this.#startOsc11Poll();
-		}
+		// Theme detection relies on (1) the startup OSC 11 probe above and
+		// (2) DEC Mode 2031 push notifications. Terminals without Mode 2031
+		// (macOS Terminal.app, Warp, VS Code's built-in, older Alacritty/
+		// WezTerm) detect the appearance once at startup and pick up later OS
+		// theme changes on next launch. Earlier builds polled OSC 11 every 30 s
+		// here for those terminals, but each poll's OSC 11/DA1 write wiped the
+		// user's active text selection on several of them (#3297).
 
 		// Probe DEC private-mode support via DECRQM. 2026 (synchronized output)
 		// gates the renderer's begin/end markers; 2048 (in-band resize) is enabled
 		// only after the terminal confirms support; 2031 (appearance change
-		// notifications) stops the OSC 11 poll once confirmed. Xterm ?1010/?1011
+		// notifications) drives mid-session theme tracking. Xterm ?1010/?1011
 		// are disabled while OMP owns the TTY so typing in the editor does not
 		// force a reader scrolled into native history back to the tail. Each probe
 		// rides the shared DA1 sentinel, so terminals that ignore DECRQM resolve as
@@ -869,7 +889,6 @@ export class ProcessTerminal implements Terminal {
 			// (Neovim convention — coalesces rapid notifications during transitions)
 			const appearanceMatch = sequence.match(appearanceDsrPattern);
 			if (appearanceMatch) {
-				this.#stopOsc11Poll();
 				if (this.#mode2031DebounceTimer) clearTimeout(this.#mode2031DebounceTimer);
 				this.#mode2031DebounceTimer = setTimeout(() => {
 					this.#mode2031DebounceTimer = undefined;
@@ -936,7 +955,14 @@ export class ProcessTerminal implements Terminal {
 		const id = `omp-probe-${nextOsc99ProbeId++}`;
 		this.#osc99PendingId = id;
 		this.#da1SentinelOwners.push({ kind: "osc99Probe", id });
-		this.#safeWrite(`\x1b]99;i=${id}:p=?;\x1b\\\x1b[c`);
+		// Wrap the probe under tmux so terminals behind `allow-passthrough on`
+		// can still respond (mirroring how `TerminalInfo.sendNotification`
+		// wraps notification deliveries). Without it the probe is swallowed
+		// inside tmux even when the outer terminal speaks OSC 99, and rich
+		// notifications stay permanently downgraded to the single-line fallback.
+		const probe = `\x1b]99;i=${id}:p=?;\x1b\\`;
+		const sequence = isInsideTmux() ? wrapTmuxPassthrough(probe) : probe;
+		this.#safeWrite(`${sequence}\x1b[c`);
 	}
 
 	#handleOsc99CapabilityResponse(metaRaw: string, payload: string): boolean {
@@ -981,32 +1007,6 @@ export class ProcessTerminal implements Terminal {
 			} catch {
 				/* ignore callback errors */
 			}
-		}
-	}
-
-	/**
-	 * Start periodic OSC 11 re-queries for terminals without Mode 2031 (Warp, Alacritty, WezTerm).
-	 * Self-disables once Mode 2031 fires (push-based is better than polling).
-	 * The interval is deliberately long: each poll's OSC 11 + DA1 write clears
-	 * an active text selection on several terminals, so polling exists only to
-	 * eventually notice a rare OS theme switch, not to track it promptly.
-	 */
-	#startOsc11Poll(): void {
-		this.#stopOsc11Poll();
-		this.#osc11PollTimer = setInterval(() => {
-			if (this.#dead) {
-				this.#stopOsc11Poll();
-				return;
-			}
-			this.#queryBackgroundColor();
-		}, 30_000);
-		this.#osc11PollTimer.unref();
-	}
-
-	#stopOsc11Poll(): void {
-		if (this.#osc11PollTimer) {
-			clearInterval(this.#osc11PollTimer);
-			this.#osc11PollTimer = undefined;
 		}
 	}
 
@@ -1060,9 +1060,7 @@ export class ProcessTerminal implements Terminal {
 	/**
 	 * Record DECRQM support for a private mode (idempotent — first result wins)
 	 * and notify subscribers. Enables DEC 2048 in-band resize when 2048 resolves
-	 * supported, and stops the OSC 11 poll when 2031 resolves supported (Mode 2031
-	 * push notifications make periodic re-querying redundant — and the poll's
-	 * OSC 11/DA1 writes clobber active text selections on some terminals).
+	 * supported.
 	 */
 	#resolvePrivateMode(mode: number, supported: boolean): void {
 		if (this.#privateModeSupport.has(mode)) return;
@@ -1075,7 +1073,6 @@ export class ProcessTerminal implements Terminal {
 			}
 		}
 		if (mode === 2048 && supported) this.#enableInBandResize();
-		if (mode === 2031 && supported) this.#stopOsc11Poll();
 	}
 
 	#disableXtermScrollToBottomMode(mode: number): void {
@@ -1224,7 +1221,6 @@ export class ProcessTerminal implements Terminal {
 			this.#safeWrite("\x1b[?2048l");
 			this.#inBandResizeActive = false;
 		}
-		this.#stopOsc11Poll();
 		if (this.#mode2031DebounceTimer) {
 			clearTimeout(this.#mode2031DebounceTimer);
 			this.#mode2031DebounceTimer = undefined;

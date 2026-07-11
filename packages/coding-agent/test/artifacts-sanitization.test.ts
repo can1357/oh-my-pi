@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ArtifactManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/artifacts";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("ArtifactManager tool-type sanitization", () => {
 	const dirs: string[] = [];
@@ -15,7 +15,7 @@ describe("ArtifactManager tool-type sanitization", () => {
 
 	afterEach(() => {
 		for (const dir of dirs.splice(0)) {
-			fs.rmSync(dir, { recursive: true, force: true });
+			removeSyncWithRetries(dir);
 		}
 	});
 

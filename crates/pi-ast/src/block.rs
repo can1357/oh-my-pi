@@ -547,4 +547,36 @@ mod tests {
 	fn unrecognized_language_falls_back_to_none() {
 		assert_eq!(boundaries(TS_FN, "x.unknownext", &[(1, 1)]), None);
 	}
+
+	const MD_DOC: &str = "# H1\nintro\n\n## H2 alpha\nbody a\nmore a\n\n### H3 deep\ndeep \
+	                      body\n\n## H2 beta\nbody b\n";
+
+	#[test]
+	fn resolves_markdown_h2_to_whole_section() {
+		// tree-sitter-md nests the heading and its body (including deeper
+		// subsections) in one `section` node, so anchoring the `## H2 alpha`
+		// line (4) resolves the whole section — heading through the nested
+		// `### H3 deep` and its trailing blank, up to the next `## H2 beta`.
+		assert_eq!(resolve(MD_DOC, "plan.md", 4), Some(BlockRange { start_line: 4, end_line: 10 }));
+	}
+
+	#[test]
+	fn resolves_markdown_h3_to_its_subsection() {
+		// A deeper heading resolves only its own subsection, not the enclosing
+		// `## H2` — the `### H3 deep` section spans line 8 through its body.
+		assert_eq!(resolve(MD_DOC, "plan.md", 8), Some(BlockRange { start_line: 8, end_line: 10 }));
+	}
+
+	#[test]
+	fn resolves_markdown_h1_to_whole_document_section() {
+		// The top-level heading owns every nested section, so `# H1` resolves
+		// the entire document body.
+		assert_eq!(resolve(MD_DOC, "plan.md", 1), Some(BlockRange { start_line: 1, end_line: 12 }));
+	}
+
+	#[test]
+	fn markdown_blank_line_resolves_to_nothing() {
+		// A blank separator line opens no section.
+		assert_eq!(resolve(MD_DOC, "plan.md", 3), None);
+	}
 }

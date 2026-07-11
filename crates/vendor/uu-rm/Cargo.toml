@@ -1,0 +1,29 @@
+# Vendored from uutils/coreutils tag 0.8.0 (src/uu/rm), patched to resolve path
+# operands against the shell working directory and route I/O through
+# pi-uutils-ctx so it can run in-process as a shell builtin. See src/rm.rs and
+# src/platform/unix.rs for the patch markers (`pi-uutils:` comments).
+[package]
+name = "uu_rm"
+version = "0.8.0"
+edition = "2024"
+license = "MIT"
+description = "rm ~ (uutils) remove PATHNAME (vendored + patched for in-process embedding)"
+
+[lib]
+path = "src/rm.rs"
+
+[dependencies]
+thiserror = "2.0.3"
+clap = { version = "4.5", features = ["wrap_help", "cargo", "color"] }
+uucore = { version = "0.8.0", features = ["fs", "parser"] }
+indicatif = "0.18.0"
+pi-uutils-ctx = { path = "../../pi-uutils-ctx" }
+
+[target.'cfg(all(unix, not(target_os = "redox")))'.dependencies]
+uucore = { version = "0.8.0", features = ["safe-traversal"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.172"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.0", default-features = false, features = ["Win32_Storage_FileSystem"] }

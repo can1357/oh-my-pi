@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package exa.diff_action_pb;
+
+import "exa/codeium_common_pb/codeium_common.proto";
+
+enum UnifiedDiffLineType {
+  UNIFIED_DIFF_LINE_TYPE_UNSPECIFIED = 0;
+  UNIFIED_DIFF_LINE_TYPE_INSERT = 1;
+  UNIFIED_DIFF_LINE_TYPE_DELETE = 2;
+  UNIFIED_DIFF_LINE_TYPE_UNCHANGED = 3;
+}
+
+enum DiffChangeType {
+  DIFF_CHANGE_TYPE_UNSPECIFIED = 0;
+  DIFF_CHANGE_TYPE_INSERT = 1;
+  DIFF_CHANGE_TYPE_DELETE = 2;
+  DIFF_CHANGE_TYPE_UNCHANGED = 3;
+}
+
+enum DiffType {
+  DIFF_TYPE_UNSPECIFIED = 0;
+  DIFF_TYPE_UNIFIED = 1;
+  DIFF_TYPE_CHARACTER = 2;
+  DIFF_TYPE_COMBO = 3;
+
+  reserved 4;
+  reserved 5;
+}
+
+message UnifiedDiff {
+  message UnifiedDiffLine {
+    string text = 1;
+    .exa.diff_action_pb.UnifiedDiffLineType type = 2;
+  }
+
+  repeated .exa.diff_action_pb.UnifiedDiff.UnifiedDiffLine lines = 3;
+}
+
+message DiffBlock {
+  int32 start_line = 1;
+  int32 end_line = 2;
+  .exa.diff_action_pb.UnifiedDiff unified_diff = 3;
+  .exa.codeium_common_pb.Language from_language = 4;
+  .exa.codeium_common_pb.Language to_language = 5;
+}
+
+message CharacterDiffChange {
+  string text = 1;
+  .exa.diff_action_pb.DiffChangeType type = 2;
+}
+
+message CharacterDiff {
+  repeated .exa.diff_action_pb.CharacterDiffChange changes = 1;
+}
+
+message ComboDiffLine {
+  string text = 1;
+  .exa.diff_action_pb.DiffChangeType type = 2;
+  .exa.diff_action_pb.CharacterDiff character_diff = 3;
+}
+
+message ComboDiff {
+  repeated .exa.diff_action_pb.ComboDiffLine lines = 1;
+}
+
+message DiffSet {
+  .exa.diff_action_pb.UnifiedDiff unified_diff = 1;
+  .exa.diff_action_pb.CharacterDiff character_diff = 2;
+  .exa.diff_action_pb.ComboDiff combo_diff = 3;
+}
+
+message DiffList {
+  repeated .exa.diff_action_pb.DiffBlock diffs = 2;
+}

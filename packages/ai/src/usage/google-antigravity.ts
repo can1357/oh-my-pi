@@ -1,4 +1,5 @@
 import { getAntigravityUserAgent } from "@pk-nerdsaver-ai/pi-catalog/wire/gemini-headers";
+import * as AIError from "../error";
 import type {
 	CredentialRankingContext,
 	CredentialRankingStrategy,
@@ -181,7 +182,7 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 				break;
 			}
 
-			if (response.status === 429 || (response.status >= 500 && response.status < 600)) {
+			if (AIError.isTransientStatus(response.status)) {
 				continue;
 			}
 			break;

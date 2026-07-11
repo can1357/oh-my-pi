@@ -22,7 +22,7 @@ import * as path from "node:path";
 
 const THRESHOLD = 1.05; // 5% regression budget
 const BASELINE_PATH = path.join(import.meta.dir, "..", "bench", "boot-baseline.json");
-const BENCH_COMMAND = "PI_TIMING=x bun src/cli.ts";
+const BENCH_COMMAND = "PI_TIMING=x PI_STRICT_EDIT_MODE=1 bun src/cli.ts";
 const cwd = path.join(import.meta.dir, "..");
 
 function medianOf(hyperfineJson: string): number {

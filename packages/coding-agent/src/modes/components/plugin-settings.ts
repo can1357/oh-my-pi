@@ -11,6 +11,7 @@
 import {
 	Container,
 	Input,
+	matchesKey,
 	type SelectItem,
 	SelectList,
 	type SettingItem,
@@ -36,13 +37,18 @@ import { DynamicBorder } from "./dynamic-border";
 
 /**
  * Forwards a keystroke to `input`, but cancels via `onCancel` when the user presses Escape.
+ *
+ * Escape is decoded via `matchesKey` rather than a raw `\x1b` compare: inside the
+ * fullscreen settings overlay the kitty keyboard protocol is active (ghostty/kitty),
+ * where the Escape key arrives as the CSI-u sequence `\x1b[27u`, not a bare `\x1b`.
+ * The literal fallbacks preserve legacy single/double-escape on terminals without it.
  */
 export function handleInputOrEscape(
 	data: string,
 	input: { handleInput(data: string): void },
 	onCancel: () => void,
 ): void {
-	if (data === "\x1b" || data === "\x1b\x1b") {
+	if (data === "\x1b" || data === "\x1b\x1b" || matchesKey(data, "escape")) {
 		onCancel();
 		return;
 	}

@@ -1,3 +1,4 @@
+import * as AIError from "../error";
 import type { OAuthController, OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
 
@@ -11,7 +12,7 @@ const AUTH_URL = "https://developers.cloudflare.com/ai-gateway/configuration/aut
  */
 export async function loginCloudflareAiGateway(options: OAuthController): Promise<string> {
 	if (!options.onPrompt) {
-		throw new Error("Cloudflare AI Gateway login requires onPrompt callback");
+		throw new AIError.OnPromptRequiredError("Cloudflare AI Gateway");
 	}
 
 	options.onAuth?.({
@@ -26,12 +27,12 @@ export async function loginCloudflareAiGateway(options: OAuthController): Promis
 	});
 
 	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		throw new AIError.LoginCancelledError();
 	}
 
 	const trimmed = apiKey.trim();
 	if (!trimmed) {
-		throw new Error("API key is required");
+		throw new AIError.ApiKeyRequiredError();
 	}
 
 	return trimmed;

@@ -1,5 +1,10 @@
 import { beforeAll, describe, expect, it } from "bun:test";
-import { GALLERY_STATES, renderGalleryState, resolveFixture } from "@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-cli";
+import {
+	GALLERY_STATES,
+	parseGalleryStates,
+	renderGalleryState,
+	resolveFixture,
+} from "@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-cli";
 import type { GalleryFixture } from "@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-fixtures";
 import { resetSettingsForTest, Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { initTheme, theme } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
@@ -12,6 +17,22 @@ beforeAll(async () => {
 });
 
 describe("gallery harness", () => {
+	it("accepts displayed gallery state labels and legacy tokens", () => {
+		expect(parseGalleryStates(["streaming args", "in progress", "done", "failed"])).toEqual([
+			"streaming",
+			"progress",
+			"success",
+			"error",
+		]);
+		expect(parseGalleryStates(["streaming", "progress", "success", "error", "failed"])).toEqual([...GALLERY_STATES]);
+	});
+
+	it("rejects unknown gallery state tokens before rendering", () => {
+		expect(() => parseGalleryStates(["bogus"])).toThrow(
+			/Invalid --state 'bogus'.*streaming args.*in progress.*done.*failed/,
+		);
+	});
+
 	it("renders every registered tool in every lifecycle state without throwing", async () => {
 		for (const name in toolRenderers) {
 			const fixture = resolveFixture(name);
@@ -66,6 +87,20 @@ describe("gallery harness", () => {
 		expect(stripped.some(line => line.startsWith(theme.boxRound.topLeft) && line.includes("Task"))).toBe(true);
 		// ...but no standalone "Task" label line precedes it.
 		expect(stripped).not.toContain("Task");
+	});
+
+	it("renders curated failed states as failures", async () => {
+		const cases = [
+			["irc_inbox", "IRC inbox failed: message store unavailable.", "IRC inbox empty"],
+			["irc_list", "IRC list failed: agent hub is unavailable.", "no other agents"],
+			["job", "Subagent exited 1: Redis connection string is missing.", "cancelled"],
+		] as const;
+
+		for (const [name, expected, forbidden] of cases) {
+			const output = Bun.stripANSI((await renderGalleryState(name, resolveFixture(name), "error", 100)).join("\n"));
+			expect(output).toContain(expected);
+			expect(output).not.toContain(forbidden);
+		}
 	});
 
 	it("renders gallery-only read group fixtures", async () => {

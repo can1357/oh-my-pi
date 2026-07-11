@@ -48,6 +48,14 @@ describe("OPTIONAL_VALUE_FLAGS table is honored by args.ts parseArgs", () => {
 	}
 });
 
+describe("--tools legacy aliases", () => {
+	it("maps search and find to grep and glob", () => {
+		const result = parseArgs(["--tools", "search,find,grep"]);
+
+		expect(result.tools).toEqual(["grep", "glob"]);
+	});
+});
+
 describe("OPTIONAL_FLAGS per-flag quirks", () => {
 	it("treats empty string as bare resume for --resume", () => {
 		const result = parseArgs(["--resume", ""]);

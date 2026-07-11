@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as AIError from "@pk-nerdsaver-ai/pi-ai/error";
 import { streamAnthropic } from "@pk-nerdsaver-ai/pi-ai/providers/anthropic";
-import { AnthropicApiError, type AnthropicMessagesClientLike } from "@pk-nerdsaver-ai/pi-ai/providers/anthropic-client";
+import type { AnthropicMessagesClientLike } from "@pk-nerdsaver-ai/pi-ai/providers/anthropic-client";
 import type { Context, Model } from "@pk-nerdsaver-ai/pi-ai/types";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
 import { waitForDelayOrAbort } from "./helpers";
@@ -236,7 +237,7 @@ describe("anthropic first-event timeout retries", () => {
 		expect(requestTimeouts).toEqual([1, 1]);
 		expect(requestMaxRetries).toEqual([0, 0]);
 		expect(result.stopReason).toBe("stop");
-		expect(result.content).toEqual([{ type: "text", text: "retry recovered" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "retry recovered" }]);
 		expect(result.responseId).toBe("msg_retry_success");
 	});
 
@@ -285,7 +286,7 @@ describe("anthropic first-event timeout retries", () => {
 
 		expect(attempt).toBe(2);
 		expect(result.stopReason).toBe("stop");
-		expect(result.content).toEqual([{ type: "text", text: "retry recovered" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "retry recovered" }]);
 	});
 
 	it("does not arm the Anthropic first-event watchdog before the stream connects", async () => {
@@ -313,7 +314,7 @@ describe("anthropic first-event timeout retries", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(seenRequestTimeout).toBe(20);
 		expect(seenRequestMaxRetries).toBe(0);
-		expect(result.content).toEqual([{ type: "text", text: "delayed connect" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "delayed connect" }]);
 	});
 
 	it("times out before the Anthropic stream connects and forwards the budget to the SDK request", async () => {
@@ -418,7 +419,7 @@ describe("anthropic first-event timeout retries", () => {
 		expect(providerRetryWait).not.toHaveBeenCalled();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe("Anthropic stream stalled while waiting for the next event");
-		expect(result.content).toEqual([
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([
 			{
 				type: "toolCall",
 				id: "toolu_stalled_todo",
@@ -436,7 +437,7 @@ describe("anthropic provider retry delays", () => {
 			attempt += 1;
 			if (attempt === 1) {
 				return createRejectedAnthropicRequest(
-					new AnthropicApiError(
+					new AIError.AnthropicApiError(
 						529,
 						'529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
 						new Headers({ "retry-after": "30" }),
@@ -457,7 +458,51 @@ describe("anthropic provider retry delays", () => {
 		expect(attempt).toBe(2);
 		expect(providerRetryWait).toHaveBeenCalledWith(30_000, undefined);
 		expect(result.stopReason).toBe("stop");
-		expect(result.content).toEqual([{ type: "text", text: "after backoff" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "after backoff" }]);
+	});
+
+	it("retries transient TLS server errors before surfacing them to the session", async () => {
+		let attempt = 0;
+		const create = ((_body: unknown, requestOptions?: { signal?: AbortSignal }) => {
+			attempt += 1;
+			if (attempt === 1) {
+				return createRejectedAnthropicRequest(
+					new Error(
+						'Post "https://api.anthropic.com/v1/messages?beta=true": remote error: tls: bad record MAC (type=server_error)',
+					),
+				) as never;
+			}
+			return createAnthropicMockStream({
+				signal: requestOptions?.signal,
+				events: createSuccessfulAnthropicEvents("recovered from tls retry"),
+			}) as never;
+		}) as unknown as AnthropicMessagesClientLike["messages"]["create"];
+		const client = { messages: { create } } as AnthropicMessagesClientLike;
+		const providerRetryWait = vi.fn(async (_delayMs: number, _signal: AbortSignal | undefined) => {});
+
+		const result = await streamAnthropic(model, context, { client, providerRetryWait }).result();
+
+		expect(attempt).toBe(2);
+		expect(providerRetryWait).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe("stop");
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "recovered from tls retry" }]);
+	});
+
+	it("does not retry permanent TLS configuration failures", async () => {
+		let attempt = 0;
+		const create = ((_body: unknown) => {
+			attempt += 1;
+			return createRejectedAnthropicRequest(new Error("tls: failed to verify certificate")) as never;
+		}) as unknown as AnthropicMessagesClientLike["messages"]["create"];
+		const client = { messages: { create } } as AnthropicMessagesClientLike;
+		const providerRetryWait = vi.fn(async (_delayMs: number, _signal: AbortSignal | undefined) => {});
+
+		const result = await streamAnthropic(model, context, { client, providerRetryWait }).result();
+
+		expect(attempt).toBe(1);
+		expect(providerRetryWait).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("tls: failed to verify certificate");
 	});
 
 	it("retries 502s ten times with Anthropic-style capped backoff", async () => {
@@ -467,7 +512,7 @@ describe("anthropic provider retry delays", () => {
 			attempt += 1;
 			if (attempt <= 10) {
 				return createRejectedAnthropicRequest(
-					new AnthropicApiError(502, "502 Bad Gateway", new Headers()),
+					new AIError.AnthropicApiError(502, "502 Bad Gateway", new Headers()),
 				) as never;
 			}
 			return createAnthropicMockStream({
@@ -485,6 +530,6 @@ describe("anthropic provider retry delays", () => {
 			500, 1000, 2000, 4000, 8000, 8000, 8000, 8000, 8000, 8000,
 		]);
 		expect(result.stopReason).toBe("stop");
-		expect(result.content).toEqual([{ type: "text", text: "recovered from 502" }]);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "recovered from 502" }]);
 	});
 });

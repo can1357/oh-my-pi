@@ -55,7 +55,7 @@ export function allowsUnauthenticatedCatalogDiscovery(descriptor: CatalogProvide
  * - Every entry is a member of `KnownProvider`.
  * - `createModelManagerOptions` present (and not `specialModelManager`) ⇒
  *   appears in `PROVIDER_DESCRIPTORS` for runtime model discovery.
- * - `catalogDiscovery` present ⇒ participates in `generate-models.ts`.
+ * - \`catalogDiscovery\` present ⇒ participates in \`generate-models.ts\`.
  */
 export interface ProviderCatalogEntry {
 	readonly id: string;

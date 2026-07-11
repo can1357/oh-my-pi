@@ -18,15 +18,15 @@ import { bashToolRenderer } from "./bash";
 import { browserToolRenderer } from "./browser/render";
 import { debugToolRenderer } from "./debug";
 import { evalToolRenderer } from "./eval-render";
-import { findToolRenderer } from "./find";
 import { githubToolRenderer } from "./gh-renderer";
+import { globToolRenderer } from "./glob";
+import { grepToolRenderer } from "./grep";
 import { inspectImageToolRenderer } from "./inspect-image-renderer";
 import { ircToolRenderer } from "./irc";
 import { jobToolRenderer } from "./job";
 import { recallToolRenderer, reflectToolRenderer, retainToolRenderer } from "./memory-render";
 import { readToolRenderer } from "./read";
 import { resolveToolRenderer } from "./resolve";
-import { searchToolRenderer } from "./search";
 import { searchToolBm25Renderer } from "./search-tool-bm25";
 import { sshToolRenderer } from "./ssh";
 import { todoToolRenderer } from "./todo";
@@ -52,6 +52,17 @@ export type ToolRenderer = {
 	 * streams rows the result render preserves.
 	 */
 	provisionalPendingPreview?: boolean | "collapsed";
+	/**
+	 * Whether the partial-result render is provisional: chrome rows (header
+	 * glyph, frame state) that change between `options.isPartial === true` and
+	 * the final result render. When `true`, the block is treated as
+	 * commit-unstable while a partial result is in flight, so the
+	 * stable-prefix ratchet in `deriveLiveCommitState` cannot promote the
+	 * partial chrome to native scrollback only to have the final render strand
+	 * it above the settled frame. Absent = the partial render is byte-stable
+	 * with the final render and may commit like any settled stream.
+	 */
+	provisionalPartialResult?: boolean;
 };
 
 export const toolRenderers: Record<string, ToolRenderer> = {
@@ -64,8 +75,8 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	eval: evalToolRenderer as ToolRenderer,
 	edit: editToolRenderer as ToolRenderer,
 	apply_patch: editToolRenderer as ToolRenderer,
-	find: findToolRenderer as ToolRenderer,
-	search: searchToolRenderer as ToolRenderer,
+	glob: globToolRenderer as ToolRenderer,
+	grep: grepToolRenderer as ToolRenderer,
 	lsp: lspToolRenderer as ToolRenderer,
 	inspect_image: inspectImageToolRenderer as ToolRenderer,
 	irc: ircToolRenderer as ToolRenderer,

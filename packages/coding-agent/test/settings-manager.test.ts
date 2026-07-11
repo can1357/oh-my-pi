@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { Effort } from "@pk-nerdsaver-ai/pi-ai";
+import { clearCustomApis } from "@pk-nerdsaver-ai/pi-ai/api-registry";
+import { createMockModel, registerMockApi } from "@pk-nerdsaver-ai/pi-ai/providers/mock";
+import { __providerInFlightForTesting, streamSimple } from "@pk-nerdsaver-ai/pi-ai/stream";
+import type { Context } from "@pk-nerdsaver-ai/pi-ai/types";
 import {
 	getDefault,
 	getEnumValues,
@@ -12,27 +15,33 @@ import {
 	type SettingPath,
 	Settings,
 } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
-import { getProjectAgentDir, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { AgentStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-storage";
+import { getProjectAgentDir, TempDir } from "@pk-nerdsaver-ai/pi-utils";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
+function context(): Context {
+	return {
+		systemPrompt: [],
+		messages: [{ role: "user", content: "hi", timestamp: 0 }],
+	};
+}
+
 describe("Settings", () => {
 	let settingsState: SettingsTestState | undefined;
-	let testDir = "";
+	let tempDir: TempDir;
 	let agentDir: string;
 	let projectDir: string;
 
 	beforeEach(() => {
 		settingsState = beginSettingsTest();
 
-		// Use snowflake to isolate parallel test runs (SQLite files can't be shared)
-		testDir = path.join(os.tmpdir(), "test-settings-tmp", Snowflake.next());
-		agentDir = path.join(testDir, "agent");
-		projectDir = path.join(testDir, "project");
+		// Use TempDir for Windows-safe cleanup (retries on EBUSY from SQLite
+		// file handle release delays).
+		tempDir = TempDir.createSync("@pi-settings-test-");
+		agentDir = tempDir.join("agent");
+		projectDir = tempDir.join("project");
 
-		if (fs.existsSync(testDir)) {
-			fs.rmSync(testDir, { recursive: true, force: true });
-		}
 		fs.mkdirSync(agentDir, { recursive: true });
 		fs.mkdirSync(getProjectAgentDir(projectDir), { recursive: true });
 	});
@@ -52,13 +61,14 @@ describe("Settings", () => {
 		return parsed as Record<string, unknown>;
 	};
 
-	afterEach(() => {
+	afterEach(async () => {
+		clearCustomApis();
+		__providerInFlightForTesting.setRoot(undefined);
+		AgentStorage.resetInstance();
 		restoreSettingsTestState(settingsState);
 		settingsState = undefined;
-		if (testDir && fs.existsSync(testDir)) {
-			fs.rmSync(testDir, { recursive: true, force: true });
-		}
-		testDir = "";
+		await Bun.sleep(0);
+		await tempDir?.remove();
 	});
 	describe("defaults", () => {
 		it("keeps eight inline images live by default", async () => {
@@ -66,10 +76,22 @@ describe("Settings", () => {
 			expect(settings.get("tui.maxInlineImages")).toBe(8);
 		});
 
+		it("keeps native terminal progress disabled by default", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("terminal.showProgress")).toBe(false);
+			expect(getDefault("terminal.showProgress")).toBe(false);
+		});
+
 		it("keeps the normal startup splash disabled by default", async () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.get("startup.showSplash")).toBe(false);
 			expect(getDefault("startup.showSplash")).toBe(false);
+		});
+
+		it("defaults provider in-flight request limits to an empty map", async () => {
+			const settings = Settings.isolated();
+			expect(settings.get("providers.maxInFlightRequests")).toEqual({});
+			expect(getDefault("providers.maxInFlightRequests")).toEqual({});
 		});
 
 		it("exposes all tool calling mode options", () => {
@@ -84,7 +106,6 @@ describe("Settings", () => {
 				"anthropic",
 				"deepseek",
 				"harmony",
-				"pi",
 				"qwen3",
 				"gemini",
 				"gemma",
@@ -124,7 +145,7 @@ describe("Settings", () => {
 		});
 
 		it("re-resolves path-scoped arrays when cwd changes", async () => {
-			const otherDir = path.join(testDir, "other-project");
+			const otherDir = path.join(tempDir.toString(), "other-project");
 			fs.mkdirSync(otherDir, { recursive: true });
 
 			const settings = await Settings.init({
@@ -158,6 +179,12 @@ describe("Settings", () => {
 			expect(Settings.isolated({ "snapcompact.systemPrompt": true }).get("snapcompact.systemPrompt")).toBe("all");
 			const nestedLegacy = { snapcompact: { systemPrompt: false } } as Partial<Record<SettingPath, unknown>>;
 			expect(Settings.isolated(nestedLegacy).get("snapcompact.systemPrompt")).toBe("none");
+		});
+
+		it("migrates legacy inlineToolDescriptors booleans to the on/off enum", () => {
+			expect(Settings.isolated({ inlineToolDescriptors: true }).get("inlineToolDescriptors")).toBe("on");
+			expect(Settings.isolated({ inlineToolDescriptors: false }).get("inlineToolDescriptors")).toBe("off");
+			expect(Settings.isolated().get("inlineToolDescriptors")).toBe("auto");
 		});
 	});
 
@@ -243,6 +270,17 @@ describe("Settings", () => {
 			expect(savedSettings.defaultThinkingLevel).toBe(Effort.High);
 			expect(savedSettings.theme).toEqual({ dark: "anthracite" });
 			expect((savedSettings.modelRoles as { default?: string } | undefined)?.default).toBe("claude-sonnet");
+		});
+
+		it("persists native terminal progress only after the user changes it", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(await readSettings()).toEqual({});
+
+			settings.set("terminal.showProgress", true);
+			await settings.flush();
+
+			const savedSettings = await readSettings();
+			expect(savedSettings.terminal).toEqual({ showProgress: true });
 		});
 
 		it("filters model allow-list and disabled providers by current path prefix", async () => {
@@ -367,6 +405,22 @@ describe("Settings", () => {
 			settings.clearOverride("modelRoles");
 
 			expect(settings.getModelRole("default")).toBe("anthropic/claude-opus-4-5");
+		});
+	});
+
+	describe("getEditVariantForModel", () => {
+		it("matches configured model variants case-insensitively", async () => {
+			await writeSettings({
+				edit: {
+					modelVariants: {
+						kimi: "hashline",
+					},
+				},
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.getEditVariantForModel("openrouter/moonshotai/Kimi-K2-Instruct")).toBe("hashline");
 		});
 	});
 
@@ -495,6 +549,69 @@ describe("Settings", () => {
 			expect(fs.readFileSync(path.join(agentDir, "last-changelog-version"), "utf8")).toBe("0.41.0");
 		});
 
+		it("migrates legacy find and search settings to glob and grep", async () => {
+			await writeSettings({
+				find: { enabled: false },
+				search: {
+					enabled: false,
+					contextBefore: 2,
+					contextAfter: 5,
+				},
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("glob.enabled")).toBe(false);
+			expect(settings.get("grep.enabled")).toBe(false);
+			expect(settings.get("grep.contextBefore")).toBe(2);
+			expect(settings.get("grep.contextAfter")).toBe(5);
+		});
+
+		it("migrates flat legacy find and search settings keys to nested glob and grep", async () => {
+			await writeSettings({
+				"find.enabled": false,
+				"search.enabled": false,
+				"search.contextBefore": 2,
+				"search.contextAfter": 5,
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("glob.enabled")).toBe(false);
+			expect(settings.get("grep.enabled")).toBe(false);
+			expect(settings.get("grep.contextBefore")).toBe(2);
+			expect(settings.get("grep.contextAfter")).toBe(5);
+		});
+
+		it("does not clobber existing glob/grep settings when migrating legacy find/search ones", async () => {
+			await writeSettings({
+				find: { enabled: false },
+				glob: { enabled: true },
+				search: { enabled: false },
+				grep: { enabled: true },
+				"find.enabled": false,
+				"glob.enabled": true,
+				"search.enabled": false,
+				"grep.enabled": true,
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("glob.enabled")).toBe(true);
+			expect(settings.get("grep.enabled")).toBe(true);
+		});
+
+		it("migrates legacy tool names in persisted essential overrides", async () => {
+			await writeSettings({
+				tools: { essentialOverride: ["read", "find", "search", "grep"] },
+				"tools.essentialOverride": ["find", "search", "read"],
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("tools.essentialOverride")).toEqual(["read", "glob", "grep"]);
+		});
+
 		it("migrates from settings.json containing comments", async () => {
 			const jsonPath = path.join(agentDir, "settings.json");
 			await fs.promises.writeFile(
@@ -590,6 +707,79 @@ describe("Settings", () => {
 			});
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.get("power.sleepPrevention")).toBe("off");
+		});
+
+		describe("provider request limits", () => {
+			it("uses the effective merged value when configuring hooks", async () => {
+				const settings = Settings.isolated({ "providers.maxInFlightRequests": { openai: 1 } });
+				__providerInFlightForTesting.setRoot(tempDir.join("provider-inflight"));
+				registerMockApi();
+				const firstStarted = Promise.withResolvers<void>();
+				const releaseFirst = Promise.withResolvers<void>();
+				let active = 0;
+				let maxActive = 0;
+				let callIndex = 0;
+				const mock = createMockModel({
+					provider: "openai",
+					handler: async () => {
+						callIndex++;
+						active++;
+						maxActive = Math.max(maxActive, active);
+						try {
+							if (callIndex === 1) {
+								firstStarted.resolve();
+								await releaseFirst.promise;
+							}
+							return { content: [`reply ${callIndex}`] };
+						} finally {
+							active--;
+						}
+					},
+				});
+
+				settings.set("providers.maxInFlightRequests", { openai: 4 });
+
+				const first = streamSimple(mock.model, context());
+				const firstResult = first.result();
+				await firstStarted.promise;
+				const second = streamSimple(mock.model, context());
+				await Bun.sleep(20);
+
+				expect(settings.get("providers.maxInFlightRequests")).toEqual({ openai: 1 });
+				expect(mock.calls).toHaveLength(1);
+
+				releaseFirst.resolve();
+				await Promise.all([firstResult, second.result()]);
+				expect(maxActive).toBe(1);
+			});
+
+			it("rejects invalid provider limits from config.yml", async () => {
+				await writeSettings({ providers: { maxInFlightRequests: { openai: "2" } } });
+
+				await expect(Settings.init({ cwd: projectDir, agentDir })).rejects.toThrow(
+					"Provider request limits must be positive numbers: openai",
+				);
+			});
+
+			it("rejects invalid provider limits from project settings", async () => {
+				await Bun.write(
+					path.join(getProjectAgentDir(projectDir), "settings.json"),
+					JSON.stringify({ providers: { maxInFlightRequests: { anthropic: 0 } } }),
+				);
+
+				await expect(Settings.init({ cwd: projectDir, agentDir, inMemory: true })).rejects.toThrow(
+					"Provider request limits must be positive numbers: anthropic",
+				);
+			});
+
+			it("rejects invalid provider limits from config overlays", async () => {
+				const overlayPath = tempDir.join("overlay.yml");
+				await Bun.write(overlayPath, YAML.stringify({ providers: { maxInFlightRequests: { umans: -1 } } }));
+
+				await expect(
+					Settings.init({ cwd: projectDir, agentDir, inMemory: true, configFiles: [overlayPath] }),
+				).rejects.toThrow("Provider request limits must be positive numbers: umans");
+			});
 		});
 	});
 });

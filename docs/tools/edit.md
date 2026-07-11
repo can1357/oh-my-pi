@@ -22,7 +22,7 @@
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `input` | `string` | Yes | One or more file sections. Anchored sections must start with `[PATH#TAG]`; `TAG` is the four-hex snapshot tag emitted by the latest `read`/`search`/`write`/successful `edit`. Optional `*** Begin Patch` / `*** End Patch` envelope is ignored if present. |
+| `input` | `string` | Yes | One or more file sections. Anchored sections must start with `[PATH#TAG]`; `TAG` is the four-hex snapshot tag emitted by the latest `read`/`grep`/`write`/successful `edit`. Optional `*** Begin Patch` / `*** End Patch` envelope is ignored if present. |
 
 Patch language inside `input`:
 
@@ -35,6 +35,7 @@ Patch language inside `input`:
   - `INS.PRE N:` — insert body rows immediately before line N.
   - `INS.POST N:` — insert body rows immediately after line N.
   - `INS.BLK.POST N:` — insert body rows after the last line of the tree-sitter block beginning on line N. Point N at the line that opens the construct, never its closing delimiter / last visible line; if you can see the last line already, use plain `INS.POST M:`. An anchor that can't resolve to a block is lowered to plain `INS.POST N:` with a warning instead of failing the patch.
+  - **Markdown sections**: tree-sitter-md nests a heading and its body (including deeper subsections) in one `section` node, so all three block ops anchored on a `#`/`##`/`###` heading line resolve the whole section — heading through every nested deeper heading, up to the next same-or-higher heading. `DEL.BLK` drops the section, `SWAP.BLK` rewrites it, `INS.BLK.POST` lands after it. A heading with no body resolves to a single line and falls back to the plain op like any other single-line block.
   - `INS.HEAD:` — insert body rows at the start of the file.
   - `INS.TAIL:` — insert body rows at the end of the file.
 - **Body rows**:
@@ -44,7 +45,7 @@ Patch language inside `input`:
   - There is no repeat row kind. To keep a line, leave it out of every range; split edits into multiple hunks when needed.
   - `-` rows are invalid. Literal text beginning with `-` or `+` must be written as `+-text` / `++text`.
 
-Anchors come from `read`/`search` output. `read` emits a `[PATH#TAG]` header from the session snapshot store and lines as `LINE:TEXT`; copy the header into the edit section and copy only the line number into hunk headers.
+Anchors come from `read`/`grep` output. `read` emits a `[PATH#TAG]` header from the session snapshot store and lines as `LINE:TEXT`; copy the header into the edit section and copy only the line number into hunk headers.
 
 ### Tolerated input shapes (lenient parsing)
 

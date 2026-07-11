@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@pk-nerdsaver-ai/pi-ai/auth-storage";
 import * as kimiOauth from "@pk-nerdsaver-ai/pi-ai/registry/oauth/kimi";
+import { removeWithRetries } from "../../utils/src/temp";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -112,7 +113,7 @@ describe("issue #957 - Kimi OAuth refresh", () => {
 			}
 		} finally {
 			store.close();
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 		}
 	});
 });

@@ -75,7 +75,7 @@ import * as path from "node:path";
 import { complete } from "@pk-nerdsaver-ai/pi-ai/stream";
 import type { Api, Context, ImageContent, Model, OptionsForApi, UserMessage } from "@pk-nerdsaver-ai/pi-ai/types";
 import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
-import { $which } from "@pk-nerdsaver-ai/pi-utils";
+import { $which, removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import { e2eApiKey } from "./oauth";
 
 const TEMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "omp-temp-images-"));
@@ -239,7 +239,7 @@ describe("Image Limits E2E Tests", () => {
 
 	afterAll(() => {
 		// Clean up temp directory
-		fs.rmSync(TEMP_DIR, { recursive: true, force: true });
+		removeSyncWithRetries(TEMP_DIR);
 	});
 
 	// -------------------------------------------------------------------------

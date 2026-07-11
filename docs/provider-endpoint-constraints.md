@@ -257,8 +257,9 @@ session/provider path.
 ### Responses and Codex custom tools
 
 Responses and Codex both support freeform custom grammar tools for `apply_patch`.
-Both disable request-level parallel tool calls when any custom grammar tool is
-present. Responses additionally:
+Custom grammar tools do not force request-level `parallel_tool_calls`; Codex
+`responsesLite` separately disables request-level parallel tool calls whenever
+tools are present. Responses additionally:
 
 - sanitizes schemas differently
 - quarantines invalid enum/const schema contradictions

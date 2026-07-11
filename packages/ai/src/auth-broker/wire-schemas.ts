@@ -183,8 +183,15 @@ const usageLimitSchema = type({
 	"notes?": "string[]",
 });
 
+const usageResetCreditDetailSchema = type({
+	"grantedAt?": "string",
+	"expiresAt?": "string",
+	"status?": "string",
+});
+
 const usageResetCreditsSchema = type({
 	availableCount: "number",
+	"credits?": usageResetCreditDetailSchema.array(),
 });
 
 const arkUsageReportSchema = type({
@@ -192,6 +199,7 @@ const arkUsageReportSchema = type({
 	fetchedAt: "number",
 	limits: usageLimitSchema.array(),
 	"resetCredits?": usageResetCreditsSchema,
+	"notes?": "string[]",
 	"metadata?": { "[string]": "unknown" },
 	"raw?": "unknown",
 });

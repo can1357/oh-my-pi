@@ -1,0 +1,262 @@
+syntax = "proto3";
+
+package exa.cascade_plugins_pb;
+
+import "buf/validate/validate.proto";
+import "exa/codeium_common_pb/codeium_common.proto";
+
+message CascadePluginTemplate {
+  string title = 1;
+  string id = 2;
+  string link = 3;
+  string description = 4;
+  map<string, .exa.cascade_plugins_pb.CascadePluginCommand> commands = 5 [deprecated = true];
+  oneof configuration {
+    .exa.cascade_plugins_pb.CascadePluginLocalConfig local = 9;
+    .exa.cascade_plugins_pb.CascadePluginRemoteConfig remote = 10;
+  }
+  int64 installation_count = 6;
+  string trust_level = 7;
+  string readme = 8;
+}
+
+message CascadePluginLocalConfig {
+  map<string, .exa.cascade_plugins_pb.CascadePluginCommand> commands = 5;
+}
+
+message CascadePluginCommand {
+  .exa.cascade_plugins_pb.CascadePluginCommandTemplate template = 1;
+  repeated .exa.cascade_plugins_pb.CascadePluginCommandVariable variables = 2;
+}
+
+message CascadePluginCommandTemplate {
+  string command = 1;
+  repeated string args = 2;
+  map<string, string> env = 3;
+}
+
+message CascadePluginCommandVariable {
+  string name = 1;
+  string title = 2;
+  string description = 3;
+  string link = 4;
+  string type = 5;
+}
+
+message CascadePluginRemoteConfig {
+  .exa.cascade_plugins_pb.CascadePluginRemoteConfigTemplate template = 1;
+}
+
+message CascadePluginRemoteConfigTemplate {
+  string server_url = 1;
+  map<string, string> headers = 2;
+}
+
+message GetAvailableCascadePluginsRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  string os = 2;
+  optional string search_query = 3 [deprecated = true];
+}
+
+message GetAvailableCascadePluginsResponse {
+  repeated .exa.cascade_plugins_pb.CascadePluginTemplate plugins = 1;
+}
+
+message InstallCascadePluginRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  string plugin_id = 2;
+}
+
+message InstallCascadePluginResponse {
+  int64 installation_count = 1;
+}
+
+message GetCascadePluginByIdRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  string os = 2;
+  string plugin_id = 3;
+}
+
+message GetCascadePluginByIdResponse {
+  .exa.cascade_plugins_pb.CascadePluginTemplate plugin = 1;
+}
+
+message McpClientInfo {
+  string client_id = 1;
+  string client_secret = 2;
+}
+
+message GetMcpClientInfosRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+}
+
+message GetMcpClientInfosResponse {
+  map<string, .exa.cascade_plugins_pb.McpClientInfo> client_infos = 1;
+}
+
+message GetMcpRegistryServersRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  string search_query = 2;
+  int32 limit = 3;
+  string cursor = 4;
+  string registry_url = 5;
+}
+
+message GetMcpRegistryServersResponse {
+  repeated .exa.cascade_plugins_pb.McpRegistryServer servers = 1;
+  int32 count = 2;
+  string next_cursor = 3;
+}
+
+message McpRegistryApiResponse {
+  .exa.cascade_plugins_pb.McpRegistryApiResponseMetadata metadata = 1;
+  repeated .exa.cascade_plugins_pb.McpRegistryApiEntry servers = 2;
+}
+
+message McpRegistryApiResponseMetadata {
+  int32 count = 1;
+  string next_cursor = 2;
+}
+
+message McpRegistryApiEntry {
+  .exa.cascade_plugins_pb.McpRegistryOfficialMeta meta = 1;
+  .exa.cascade_plugins_pb.McpRegistryServer server = 2;
+}
+
+message McpRegistryOfficialMeta {
+  .exa.cascade_plugins_pb.McpRegistryOfficialMetaDetail official = 1;
+}
+
+message McpRegistryOfficialMetaDetail {
+  bool is_latest = 1;
+  string status = 2;
+  string status_message = 3;
+  string published_at = 4;
+  string updated_at = 5;
+}
+
+message McpRegistryServer {
+  string name = 1;
+  string title = 2;
+  string description = 3;
+  string version = 4;
+  string website_url = 5;
+  .exa.cascade_plugins_pb.McpRegistryRepository repository = 6;
+  repeated .exa.cascade_plugins_pb.McpRegistryPackage packages = 7;
+  repeated .exa.cascade_plugins_pb.McpRegistryRemote remotes = 8;
+  repeated .exa.cascade_plugins_pb.McpRegistryIcon icons = 9;
+  bool is_latest = 10;
+  string status = 11;
+  string schema = 12;
+}
+
+message McpRegistryRepository {
+  string url = 1;
+  string source = 2;
+  string id = 3;
+  string subfolder = 4;
+}
+
+message McpRegistryIcon {
+  string src = 1;
+  string mime_type = 2;
+  string theme = 3;
+  repeated string sizes = 4;
+}
+
+message McpRegistryPackage {
+  string registry_type = 1;
+  string identifier = 2;
+  string version = 3;
+  string runtime_hint = 4;
+  repeated .exa.cascade_plugins_pb.McpRegistryEnvironmentVariable environment_variables = 5;
+  .exa.cascade_plugins_pb.McpRegistryTransport transport = 6;
+  repeated .exa.cascade_plugins_pb.McpRegistryArgument package_arguments = 7;
+  repeated .exa.cascade_plugins_pb.McpRegistryArgument runtime_arguments = 8;
+  string registry_base_url = 9;
+  string file_sha256 = 10;
+}
+
+message McpRegistryTransport {
+  string type = 1;
+  string url = 2;
+  repeated .exa.cascade_plugins_pb.McpRegistryKeyValueInput headers = 3;
+  map<string, .exa.cascade_plugins_pb.McpRegistryInput> variables = 4;
+}
+
+message McpRegistryEnvironmentVariable {
+  string name = 1;
+  string description = 2;
+  bool is_required = 3;
+  bool is_secret = 4;
+  string default = 5;
+  string value = 6;
+  string placeholder = 7;
+  string format = 8;
+  repeated string choices = 9;
+  map<string, .exa.cascade_plugins_pb.McpRegistryInput> variables = 10;
+}
+
+message McpRegistryRemote {
+  string type = 1;
+  string url = 2;
+  repeated .exa.cascade_plugins_pb.McpRegistryKeyValueInput headers = 3;
+  map<string, .exa.cascade_plugins_pb.McpRegistryInput> variables = 4;
+}
+
+message McpRegistryKeyValueInput {
+  string name = 1;
+  string description = 2;
+  bool is_required = 3;
+  bool is_secret = 4;
+  string default = 5;
+  string value = 6;
+  string placeholder = 7;
+  string format = 8;
+  repeated string choices = 9;
+  map<string, .exa.cascade_plugins_pb.McpRegistryInput> variables = 10;
+}
+
+message McpRegistryInput {
+  string description = 1;
+  bool is_required = 2;
+  bool is_secret = 3;
+  string default = 4;
+  string value = 5;
+  string placeholder = 6;
+  string format = 7;
+  repeated string choices = 8;
+}
+
+message McpRegistryArgument {
+  string type = 1;
+  string name = 2;
+  string description = 3;
+  bool is_required = 4;
+  bool is_secret = 5;
+  bool is_repeated = 6;
+  string default = 7;
+  string value = 8;
+  string placeholder = 9;
+  string format = 10;
+  repeated string choices = 11;
+  string value_hint = 12;
+  map<string, .exa.cascade_plugins_pb.McpRegistryInput> variables = 13;
+}
+
+message GetAllAcpRegistriesRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+  string version = 2;
+}
+
+message GetAllAcpRegistriesResponse {
+  string registry_json = 1;
+}
+
+service CascadePluginsService {
+  rpc GetAvailableCascadePlugins (.exa.cascade_plugins_pb.GetAvailableCascadePluginsRequest) returns (.exa.cascade_plugins_pb.GetAvailableCascadePluginsResponse);
+  rpc InstallCascadePlugin (.exa.cascade_plugins_pb.InstallCascadePluginRequest) returns (.exa.cascade_plugins_pb.InstallCascadePluginResponse);
+  rpc GetCascadePluginById (.exa.cascade_plugins_pb.GetCascadePluginByIdRequest) returns (.exa.cascade_plugins_pb.GetCascadePluginByIdResponse);
+  rpc GetMcpClientInfos (.exa.cascade_plugins_pb.GetMcpClientInfosRequest) returns (.exa.cascade_plugins_pb.GetMcpClientInfosResponse);
+  rpc GetAllAcpRegistries (.exa.cascade_plugins_pb.GetAllAcpRegistriesRequest) returns (.exa.cascade_plugins_pb.GetAllAcpRegistriesResponse);
+}

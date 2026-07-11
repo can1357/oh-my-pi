@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import { MCPManager } from "../src/mcp/manager";
 import type { MCPStdioServerConfig } from "../src/mcp/types";
 
@@ -34,7 +35,7 @@ describe("MCP startup (issue #2100)", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(workDir, { recursive: true, force: true });
+		removeSyncWithRetries(workDir);
 	});
 
 	it("returns promptly when a configured MCP server stalls on initialize", async () => {

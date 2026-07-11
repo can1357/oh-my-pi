@@ -1,13 +1,16 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import "./setup";
+import { configureRecallFeatures } from "@pk-nerdsaver-ai/pi-mnemopi/config";
 import { BeamMemory } from "@pk-nerdsaver-ai/pi-mnemopi/core/beam";
 import type { EpisodicGraph, RelatedMemory } from "@pk-nerdsaver-ai/pi-mnemopi/core/episodic-graph";
+import { Mnemopi } from "@pk-nerdsaver-ai/pi-mnemopi/core/memory";
 
 const previousProactive = process.env.MNEMOPI_PROACTIVE_LINKING;
 
 afterEach(() => {
 	if (previousProactive === undefined) delete process.env.MNEMOPI_PROACTIVE_LINKING;
 	else process.env.MNEMOPI_PROACTIVE_LINKING = previousProactive;
+	configureRecallFeatures({ proactiveLinking: false });
 });
 
 function linkedIds(edges: readonly RelatedMemory[]): Set<string> {
@@ -34,6 +37,170 @@ describe("proactive memory linking", () => {
 			expect(linkedIds(edges).has(first)).toBe(true);
 			expect(edges.some(edge => edge.memoryId === first && edge.edgeType === "related_to")).toBe(true);
 			expect(linkedIds(edges).has(second)).toBe(false);
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("honors host configuration when the environment variable is unset", () => {
+		delete process.env.MNEMOPI_PROACTIVE_LINKING;
+		configureRecallFeatures({ proactiveLinking: true });
+		const beam = new BeamMemory({ sessionId: "proactive-host-config", dbPath: ":memory:" });
+		try {
+			const first = beam.remember("Alice set up the CI/CD pipeline for backend deployment", {
+				importance: 0.8,
+			});
+			const second = beam.remember("Alice configured the deployment pipeline for continuous integration", {
+				importance: 0.8,
+			});
+
+			const edges = graphOf(beam).findRelatedMemories(second, 1);
+			expect(linkedIds(edges).has(first)).toBe(true);
+			expect(edges.some(edge => edge.memoryId === first && edge.edgeType === "related_to")).toBe(true);
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("keeps host configuration scoped to each BeamMemory instance", () => {
+		delete process.env.MNEMOPI_PROACTIVE_LINKING;
+		const enabled = new BeamMemory({
+			sessionId: "proactive-instance-on",
+			dbPath: ":memory:",
+			proactiveLinking: true,
+		});
+		configureRecallFeatures({ proactiveLinking: false });
+		const disabled = new BeamMemory({
+			sessionId: "proactive-instance-off",
+			dbPath: ":memory:",
+			proactiveLinking: false,
+		});
+		try {
+			const enabledFirst = enabled.remember("Alice set up the CI/CD pipeline for backend deployment", {
+				importance: 0.8,
+			});
+			const enabledSecond = enabled.remember("Alice configured the deployment pipeline for continuous integration", {
+				importance: 0.8,
+			});
+			const disabledFirst = disabled.remember("Alice set up the CI/CD pipeline for backend deployment", {
+				importance: 0.8,
+			});
+			const disabledSecond = disabled.remember(
+				"Alice configured the deployment pipeline for continuous integration",
+				{
+					importance: 0.8,
+				},
+			);
+
+			expect(linkedIds(graphOf(enabled).findRelatedMemories(enabledSecond, 1)).has(enabledFirst)).toBe(true);
+			expect(linkedIds(graphOf(disabled).findRelatedMemories(disabledSecond, 1)).has(disabledFirst)).toBe(false);
+		} finally {
+			enabled.close();
+			disabled.close();
+		}
+	});
+
+	it("keeps host configuration scoped to each Mnemopi instance", () => {
+		delete process.env.MNEMOPI_PROACTIVE_LINKING;
+		const enabled = new Mnemopi({
+			sessionId: "proactive-mnemopi-on",
+			dbPath: ":memory:",
+			proactiveLinking: true,
+		});
+		configureRecallFeatures({ proactiveLinking: false });
+		const disabled = new Mnemopi({
+			sessionId: "proactive-mnemopi-off",
+			dbPath: ":memory:",
+			proactiveLinking: false,
+		});
+		try {
+			const enabledFirst = enabled.remember("Database indexing improves query performance significantly", {
+				importance: 0.8,
+			});
+			const enabledSecond = enabled.remember("Database indexing optimizes query performance and efficiency", {
+				importance: 0.8,
+			});
+			const disabledFirst = disabled.remember("Database indexing improves query performance significantly", {
+				importance: 0.8,
+			});
+			const disabledSecond = disabled.remember("Database indexing optimizes query performance and efficiency", {
+				importance: 0.8,
+			});
+
+			expect(linkedIds(graphOf(enabled.beam).findRelatedMemories(enabledSecond, 1)).has(enabledFirst)).toBe(true);
+			expect(linkedIds(graphOf(disabled.beam).findRelatedMemories(disabledSecond, 1)).has(disabledFirst)).toBe(
+				false,
+			);
+		} finally {
+			enabled.close();
+			disabled.close();
+		}
+	});
+
+	it("lets the environment variable override instance configuration", () => {
+		process.env.MNEMOPI_PROACTIVE_LINKING = "0";
+		const disabledByEnv = new BeamMemory({
+			sessionId: "proactive-env-off",
+			dbPath: ":memory:",
+			proactiveLinking: true,
+		});
+		try {
+			const disabledFirst = disabledByEnv.remember("Alice set up the CI/CD pipeline for backend deployment", {
+				importance: 0.8,
+			});
+			const disabledSecond = disabledByEnv.remember(
+				"Alice configured the deployment pipeline for continuous integration",
+				{
+					importance: 0.8,
+				},
+			);
+			process.env.MNEMOPI_PROACTIVE_LINKING = "1";
+			const enabledByEnv = new BeamMemory({
+				sessionId: "proactive-env-on",
+				dbPath: ":memory:",
+				proactiveLinking: false,
+			});
+			try {
+				const enabledFirst = enabledByEnv.remember("Alice set up the CI/CD pipeline for backend deployment", {
+					importance: 0.8,
+				});
+				const enabledSecond = enabledByEnv.remember(
+					"Alice configured the deployment pipeline for continuous integration",
+					{
+						importance: 0.8,
+					},
+				);
+
+				expect(linkedIds(graphOf(enabledByEnv).findRelatedMemories(enabledSecond, 1)).has(enabledFirst)).toBe(true);
+			} finally {
+				enabledByEnv.close();
+			}
+
+			expect(linkedIds(graphOf(disabledByEnv).findRelatedMemories(disabledSecond, 1)).has(disabledFirst)).toBe(
+				false,
+			);
+		} finally {
+			disabledByEnv.close();
+		}
+	});
+
+	it("does not snapshot a construction-time environment override into instance defaults", () => {
+		process.env.MNEMOPI_PROACTIVE_LINKING = "1";
+		const beam = new BeamMemory({
+			sessionId: "proactive-env-snapshot",
+			dbPath: ":memory:",
+			proactiveLinking: false,
+		});
+		delete process.env.MNEMOPI_PROACTIVE_LINKING;
+		try {
+			const first = beam.remember("Alice set up the CI/CD pipeline for backend deployment", {
+				importance: 0.8,
+			});
+			const second = beam.remember("Alice configured the deployment pipeline for continuous integration", {
+				importance: 0.8,
+			});
+
+			expect(linkedIds(graphOf(beam).findRelatedMemories(second, 1)).has(first)).toBe(false);
 		} finally {
 			beam.close();
 		}

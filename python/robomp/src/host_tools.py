@@ -1121,6 +1121,8 @@ def _enforce_impl_authorization(
     """Refuse first publish on issue classes that require maintainer authorization."""
     if bindings.impl_authorized:
         return
+    if bindings.db.has_authorized_impl_event(bindings.issue_key):
+        return
     row = bindings.db.get_issue(bindings.issue_key)
     if row is not None:
         if row.pr_number is not None:

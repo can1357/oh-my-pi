@@ -19,6 +19,7 @@ import type { Instruction } from "@pk-nerdsaver-ai/pi-coding-agent/capability/in
 import type { Prompt } from "@pk-nerdsaver-ai/pi-coding-agent/capability/prompt";
 import { type Rule, resetActiveRulesForTests, setActiveRules } from "@pk-nerdsaver-ai/pi-coding-agent/capability/rule";
 import { RuleProtocolHandler } from "@pk-nerdsaver-ai/pi-coding-agent/internal-urls/rule-protocol";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import "@pk-nerdsaver-ai/pi-coding-agent/capability/context-file";
 import "@pk-nerdsaver-ai/pi-coding-agent/capability/instruction";
 import "@pk-nerdsaver-ai/pi-coding-agent/capability/prompt";
@@ -57,7 +58,7 @@ describe("github discovery — Copilot user-global surface", () => {
 			if (savedEnv[key] === undefined) delete process.env[key];
 			else process.env[key] = savedEnv[key];
 		}
-		if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
+		if (tempDir) removeSyncWithRetries(tempDir);
 	});
 
 	test("loads user-global ~/.copilot/copilot-instructions.md via COPILOT_HOME (#1913)", async () => {

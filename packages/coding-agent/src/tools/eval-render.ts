@@ -2,11 +2,12 @@
  * TUI rendering for the eval tool.
  *
  * Split out from `eval.ts` so the renderer can be imported by `renderers.ts`
- * without dragging the eval *runtime* (JS/Python backends -> agent bridge ->
- * task executor -> sdk -> extension loader -> root barrel) into the renderer
- * module graph. That transitive chain re-enters `renderers.ts` while `eval.ts`
- * is still initializing, which previously crashed module load with a TDZ
- * `Cannot access 'evalToolRenderer' before initialization`.
+ * without dragging the eval *runtime* (JS/Python/Ruby/Julia backends ->
+ * agent bridge -> task executor -> sdk -> extension loader -> root barrel)
+ * into the renderer module graph. That transitive chain re-enters
+ * `renderers.ts` while `eval.ts` is still initializing, which previously
+ * crashed module load with a TDZ `Cannot access 'evalToolRenderer' before
+ * initialization`.
  */
 import type { Component } from "@pk-nerdsaver-ai/pi-tui";
 import { Markdown, Text } from "@pk-nerdsaver-ai/pi-tui";
@@ -17,7 +18,7 @@ import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { formatContextUsage } from "../modes/components/status-line/context-thresholds";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
-import { markFramedBlockComponent, renderCodeCell } from "../tui";
+import { markFramedBlockComponent, outputBlockContentWidth, renderCodeCell } from "../tui";
 import {
 	JSON_TREE_MAX_DEPTH_COLLAPSED,
 	JSON_TREE_MAX_DEPTH_EXPANDED,
@@ -41,8 +42,11 @@ import {
 } from "./render-utils";
 export const EVAL_DEFAULT_PREVIEW_LINES = 10;
 
-function languageForHighlighter(language: EvalLanguage | undefined): "python" | "javascript" {
-	return language === "js" ? "javascript" : "python";
+function languageForHighlighter(language: EvalLanguage | undefined): "python" | "javascript" | "ruby" | "julia" {
+	if (language === "js") return "javascript";
+	if (language === "ruby") return "ruby";
+	if (language === "julia") return "julia";
+	return "python";
 }
 
 interface EvalRenderCellArg {
@@ -52,6 +56,9 @@ interface EvalRenderCellArg {
 }
 
 interface EvalRenderArgs {
+	language?: string;
+	code?: string;
+	title?: string;
 	cells?: EvalRenderCellArg[];
 	__partialJson?: string;
 }
@@ -70,12 +77,15 @@ interface EvalRenderCell {
 }
 
 function normalizeRenderLanguage(value: string | undefined): EvalLanguage {
-	return value === "js" ? "js" : "python";
+	if (value === "js") return "js";
+	if (value === "rb" || value === "ruby") return "ruby";
+	if (value === "jl" || value === "julia") return "julia";
+	return "python";
 }
 
 function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {
-	const raw = args?.cells;
-	if (!Array.isArray(raw)) return [];
+	if (!args) return [];
+	const raw = Array.isArray(args.cells) ? args.cells : typeof args.code === "string" ? [args] : [];
 	const out: EvalRenderCell[] = [];
 	for (const cell of raw) {
 		if (!cell || typeof cell !== "object") continue;
@@ -231,14 +241,12 @@ function formatStatusEvent(event: EvalStatusEvent, theme: Theme): string {
 	const opIcons: Record<string, AvailableIcon> = {
 		read: "icon.file",
 		write: "icon.file",
-		append: "icon.file",
 		cat: "icon.file",
 		touch: "icon.file",
 		ls: "icon.folder",
 		cd: "icon.folder",
 		pwd: "icon.folder",
 		mkdir: "icon.folder",
-		tree: "icon.folder",
 		git_status: "icon.git",
 		git_diff: "icon.git",
 		git_log: "icon.git",
@@ -270,7 +278,6 @@ function formatStatusEvent(event: EvalStatusEvent, theme: Theme): string {
 			if (data.path) parts.push(`from ${shortenPath(String(data.path))}`);
 			break;
 		case "write":
-		case "append":
 			parts.push(`${data.chars ?? data.bytes ?? 0} chars`);
 			if (data.path) parts.push(`to ${shortenPath(String(data.path))}`);
 			break;
@@ -308,13 +315,6 @@ function formatStatusEvent(event: EvalStatusEvent, theme: Theme): string {
 		case "git_diff":
 			parts.push(`${data.lines} line${(data.lines as number) !== 1 ? "s" : ""}`);
 			if (data.staged) parts.push("(staged)");
-			break;
-		case "diff":
-			if (data.identical) {
-				parts.push("files identical");
-			} else {
-				parts.push("files differ");
-			}
 			break;
 		case "batch":
 			parts.push(`${data.files} file${(data.files as number) !== 1 ? "s" : ""} processed`);
@@ -405,8 +405,6 @@ function formatStatusEventExpanded(event: EvalStatusEvent, theme: Theme): string
 		case "cat":
 		case "head":
 		case "tail":
-		case "tree":
-		case "diff":
 		case "git_diff":
 		case "sh":
 			if (data.preview) addPreview(String(data.preview));
@@ -461,23 +459,33 @@ function formatCellOutputLines(
 		return { lines: [], hiddenCount: 0 };
 	}
 
+	// Cell output lands in renderCodeCell → renderOutputBlock, which re-wraps it
+	// at the box's inner content width. Bound the collapsed tail by VISUAL rows
+	// at that width so a long-line tail can't wrap into more rows than budgeted
+	// and scroll its mutating preview above the live-region window — the
+	// duplicate "ctrl+o to expand" scrollback spray.
+	const innerWidth = outputBlockContentWidth(width);
+
 	if (cell.hasMarkdown && cell.status !== "error") {
 		const md = new Markdown(cell.output, 0, 0, getMarkdownTheme());
-		const allLines = md.render(width);
+		const allLines = md.render(innerWidth);
 		const displayLines = expanded ? allLines : allLines.slice(-previewLines);
 		const hiddenCount = allLines.length - displayLines.length;
 		return { lines: displayLines, hiddenCount };
 	}
 
-	const rawLines = cell.output.split("\n");
-	const displayLines = expanded ? rawLines : rawLines.slice(-previewLines);
-	const hiddenCount = rawLines.length - displayLines.length;
-	const outputLines = displayLines.map(line => {
-		const cleaned = replaceTabs(line);
-		return cell.status === "error" ? theme.fg("error", cleaned) : theme.fg("toolOutput", cleaned);
-	});
-
-	return { lines: outputLines, hiddenCount };
+	const styledOutput = cell.output
+		.split("\n")
+		.map(line => {
+			const cleaned = replaceTabs(line);
+			return cell.status === "error" ? theme.fg("error", cleaned) : theme.fg("toolOutput", cleaned);
+		})
+		.join("\n");
+	if (expanded) {
+		return { lines: styledOutput.split("\n"), hiddenCount: 0 };
+	}
+	const { visualLines, skippedCount } = truncateToVisualLines(styledOutput, previewLines, innerWidth);
+	return { lines: visualLines, hiddenCount: skippedCount };
 }
 
 export const evalToolRenderer = {
@@ -506,6 +514,7 @@ export const evalToolRenderer = {
 						{
 							code: cell.code,
 							language: languageForHighlighter(cell.language),
+							showLanguage: true,
 							index: i,
 							total: cells.length,
 							title: cell.title,
@@ -578,7 +587,10 @@ export const evalToolRenderer = {
 			return markFramedBlockComponent({
 				render: (width: number): readonly string[] => {
 					const expanded = options.renderContext?.expanded ?? options.expanded;
-					const previewLines = options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES;
+					const previewLines = Math.min(
+						options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES,
+						previewWindowRows(),
+					);
 					const key = `${expanded}|${previewLines}|${options.spinnerFrame}|${previewWindowRows()}`;
 					if (cached && cached.key === key && cached.width === width) {
 						return cached.result;
@@ -608,6 +620,7 @@ export const evalToolRenderer = {
 							{
 								code: cell.code,
 								language: languageForHighlighter(cell.language ?? details?.language),
+								showLanguage: true,
 								index: i,
 								total: cellResults.length,
 								title: cell.title,
@@ -708,7 +721,10 @@ export const evalToolRenderer = {
 
 		return {
 			render: (width: number): readonly string[] => {
-				const previewLines = options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES;
+				const previewLines = Math.min(
+					options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES,
+					previewWindowRows(),
+				);
 				if (cachedLines === undefined || cachedWidth !== width || cachedPreviewLines !== previewLines) {
 					const result = truncateToVisualLines(textContent, previewLines, width);
 					cachedLines = result.visualLines;

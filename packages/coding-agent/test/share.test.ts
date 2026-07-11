@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionData } from "../src/export/html";
-import { buildShareSnapshot, normalizeShareServerUrl, SERVER_MAX_SEALED_BYTES, sealToFit } from "../src/export/share";
+import {
+	buildShareSnapshot,
+	normalizeShareServerUrl,
+	SERVER_MAX_SEALED_BYTES,
+	sealToFit,
+	shareSession,
+} from "../src/export/share";
 import { SecretObfuscator } from "../src/secrets/obfuscator";
 import type { SessionEntry } from "../src/session/session-entries";
 import type { SessionManager } from "../src/session/session-manager";
@@ -121,6 +127,128 @@ describe("buildShareSnapshot", () => {
 		const plain = buildShareSnapshot(sm, {});
 		expect(JSON.stringify(plain)).toContain("hunter2-XYZZY");
 	});
+
+	test("redacts header cwd, bookmark labels, and file-mention paths", () => {
+		const secret = "shareleak-ABCDE";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const entries: SessionEntry[] = [
+			{
+				type: "label",
+				id: "l1",
+				parentId: null,
+				timestamp: ts,
+				targetId: "e1",
+				label: `bookmark ${secret}`,
+			} as SessionEntry,
+			{
+				type: "message",
+				id: "e1",
+				parentId: null,
+				timestamp: ts,
+				message: {
+					role: "fileMention",
+					files: [{ path: `/home/${secret}/.env`, content: `KEY=${secret}` }],
+					timestamp: 1,
+				},
+			} as unknown as SessionEntry,
+		];
+		const header = { type: "session", version: 3, id: "t", timestamp: ts, cwd: `/home/${secret}/proj` };
+		const sm = {
+			getHeader: () => header,
+			getEntries: () => entries,
+			getLeafId: () => "e1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+
+		const snapshot = buildShareSnapshot(sm, { obfuscator });
+		const flat = JSON.stringify(snapshot);
+
+		// cwd, label, file path, and file content are all redacted...
+		expect(flat).not.toContain(secret);
+		// ...while surrounding structure (the path shape) survives.
+		expect(flat).toContain("/.env");
+		// Source entries keep the real values; redaction is share-only.
+		expect(JSON.stringify(entries)).toContain(secret);
+	});
+
+	test("redacts assistant tool calls / error messages and bash meta, and drops provider replay payloads", () => {
+		const secret = "asst-secret-ABCDE";
+		const replaySentinel = "REPLAY_BLOB_SENTINEL_XYZ";
+		const ts = "2026-06-12T00:00:00.000Z";
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "a1",
+				parentId: null,
+				timestamp: ts,
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "text", text: `answer ${secret}` },
+						{
+							type: "toolCall",
+							id: "c1",
+							name: "read",
+							arguments: { path: `/x/${secret}` },
+							intent: `intent ${secret}`,
+							rawBlock: `raw ${secret}`,
+						},
+					],
+					api: "test",
+					provider: "test",
+					model: "test",
+					usage,
+					stopReason: "toolUse",
+					errorMessage: `boom ${secret}`,
+					providerPayload: { type: "openaiResponsesHistory", items: [{ note: replaySentinel }] },
+					timestamp: 1,
+				},
+			} as unknown as SessionEntry,
+			{
+				type: "message",
+				id: "b1",
+				parentId: "a1",
+				timestamp: ts,
+				message: {
+					role: "bashExecution",
+					command: `echo ${secret}`,
+					output: `out ${secret}`,
+					exitCode: 0,
+					cancelled: false,
+					truncated: false,
+					meta: {
+						source: { type: "path", value: `/home/${secret}/log` },
+						diagnostics: { summary: `diag ${secret}`, messages: [`msg ${secret}`] },
+					},
+					timestamp: 2,
+				},
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "b1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		// Every freeform occurrence (text, tool-call args/intent/rawBlock, errorMessage, bash output + meta) is redacted.
+		expect(flat).not.toContain(secret);
+		// Opaque provider-replay payload is dropped wholesale — the sentinel is NOT a configured secret,
+		// so its absence proves the subtree was removed rather than merely obfuscated.
+		expect(flat).not.toContain(replaySentinel);
+		// Source entries keep the real values; redaction is share-only.
+		expect(JSON.stringify(entries)).toContain(secret);
+	});
 });
 
 describe("normalizeShareServerUrl", () => {
@@ -129,5 +257,47 @@ describe("normalizeShareServerUrl", () => {
 		expect(normalizeShareServerUrl("https://example.com/s///")).toBe("https://example.com/s");
 		expect(normalizeShareServerUrl(undefined)).toBe("https://my.omp.sh/s");
 		expect(normalizeShareServerUrl("   ")).toBe("https://my.omp.sh/s");
+	});
+});
+
+describe("shareSession", () => {
+	test("default store seals the snapshot and uploads it to the share server", async () => {
+		const entries = [messageEntry("e1", null, "share me"), messageEntry("e2", "e1", "second")];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "e2",
+		} as unknown as SessionManager;
+
+		let uploaded: Uint8Array<ArrayBuffer> | null = null;
+		const server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (req.method !== "POST") return new Response("nope", { status: 405 });
+				uploaded = new Uint8Array(await req.arrayBuffer());
+				return Response.json({ id: "blobshareid01" });
+			},
+		});
+		try {
+			const base = `http://localhost:${server.port}`;
+			const result = await shareSession(sm, { serverUrl: base });
+
+			// Default store ("blob") routes to the server, not a gist: server-issued id, no gistUrl.
+			expect(result.method).toBe("server");
+			expect(result.gistUrl).toBeUndefined();
+			const [link, keyText] = result.url.split("#");
+			expect(link).toBe(`${base}/blobshareid01`);
+			expect(uploaded).not.toBeNull();
+
+			// The #key fragment decrypts the exact bytes the server received.
+			const key = await crypto.subtle.importKey("raw", Buffer.from(keyText, "base64url"), "AES-GCM", false, [
+				"decrypt",
+			]);
+			const opened = await open(key, uploaded as unknown as Uint8Array<ArrayBuffer>);
+			expect(opened.entries).toHaveLength(2);
+			expect(JSON.stringify(opened)).toContain("share me");
+		} finally {
+			server.stop(true);
+		}
 	});
 });

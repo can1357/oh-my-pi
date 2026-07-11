@@ -3,11 +3,11 @@ import { SessionSelectorComponent } from "@pk-nerdsaver-ai/pi-coding-agent/modes
 import { initTheme } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
 import type { SessionInfo } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-listing";
 
-beforeAll(() => {
-	initTheme();
+beforeAll(async () => {
+	await initTheme();
 });
 
-function createSession(id: string, title: string, cwd: string): SessionInfo {
+function createSession(id: string, title: string, cwd: string, parentSessionPath?: string): SessionInfo {
 	return {
 		path: `${cwd}/${id}.jsonl`,
 		id,
@@ -19,6 +19,7 @@ function createSession(id: string, title: string, cwd: string): SessionInfo {
 		size: 0,
 		firstMessage: `${title} first message`,
 		allMessagesText: `${title} first message`,
+		...(parentSessionPath ? { parentSessionPath } : {}),
 	};
 }
 
@@ -90,18 +91,47 @@ describe("SessionSelectorComponent scope toggle", () => {
 		expect(selected[0]?.cwd).toBe("/work/other-project");
 	});
 
-	it("opens directly in all-projects scope when started there with a preloaded list", () => {
+	it("starts in current-folder scope even when the cwd is empty and a global list is preloaded (#3099)", () => {
 		const global = [createSession("remote", "Remote", "/work/other-project")];
+		// `startInAllScope` was the toggle behind #3099 (an empty folder auto-opened
+		// the picker in all-projects scope). The fix removes the option, so force it
+		// via a cast to prove the component now ignores it and stays folder-scoped —
+		// without this, the test would pass against the buggy code too.
+		const opts = { allSessions: global, loadAllSessions: async () => global };
+		(opts as { startInAllScope?: boolean }).startInAllScope = true;
 		const selector = new SessionSelectorComponent(
 			[],
 			() => {},
 			() => {},
 			() => {},
-			{ allSessions: global, startInAllScope: true, loadAllSessions: async () => global },
+			opts,
 		);
 
 		const rendered = selector.render(120).join("\n");
-		expect(rendered).toContain("(all projects)");
-		expect(rendered).toContain("other-project");
+		// Header stays scoped to the cwd so the user is never silently shown
+		// other projects' sessions just because the current folder is empty.
+		expect(rendered).toContain("(current folder)");
+		expect(rendered).not.toContain("(all projects)");
+		expect(rendered).not.toContain("other-project");
+		// The empty-state hint must be visible so the user knows Tab is the way out.
+		expect(rendered).toContain("No sessions in current folder");
+		expect(rendered).toContain("Press Tab to view all");
+	});
+
+	it("marks forked child sessions in the rendered list", () => {
+		const parent = createSession("root", "Incident", "/work/current");
+		const child = createSession("child", "Incident", "/work/current", parent.path);
+		const selector = new SessionSelectorComponent(
+			[parent, child],
+			() => {},
+			() => {},
+			() => {},
+		);
+
+		const rendered = selector.render(120).join("\n");
+		const forkLines = rendered.split("\n").filter(line => line.includes("fork"));
+
+		expect(forkLines).toHaveLength(1);
+		expect(forkLines[0]).toContain("fork");
 	});
 });

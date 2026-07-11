@@ -144,6 +144,9 @@ function formatProviderTabLabel(providerId: string): string {
 function createProviderTab(providerId: string): ProviderTabState {
 	return { id: providerId, label: formatProviderTabLabel(providerId), providerId };
 }
+const TEMPORARY_MODEL_PICKER_HINT =
+	"Temporary model selection is session-only. Use Alt+M or /model for role models (default/smol/plan/task/slow/custom roles).";
+
 /**
  * Component that renders a model selector with provider tabs and context menu.
  * - Tab/Arrow Left/Right: Switch between provider tabs
@@ -230,6 +233,10 @@ export class ModelSelectorComponent extends Container {
 				: "Only showing models with configured API keys (see README for details)";
 		this.addChild(new Text(theme.fg("warning", hintText), 0, 0));
 		this.addChild(new Spacer(1));
+		if (this.#temporaryOnly) {
+			this.addChild(new Text(theme.fg("muted", TEMPORARY_MODEL_PICKER_HINT), 0, 0));
+			this.addChild(new Spacer(1));
+		}
 
 		// Create header container for tab bar
 		this.#headerContainer = new Container();
@@ -698,9 +705,21 @@ export class ModelSelectorComponent extends Container {
 		return this.#getActiveTabId() === CANONICAL_TAB;
 	}
 
-	#isModelOverContextLimit(model: Model): boolean {
+	#isModelOverCurrentContext(model: Model): boolean {
 		const contextWindow = model.contextWindow ?? 0;
 		return this.#currentContextTokens > 0 && contextWindow > 0 && this.#currentContextTokens > contextWindow;
+	}
+
+	#isModelOverContextLimit(model: Model): boolean {
+		return this.#temporaryOnly && this.#isModelOverCurrentContext(model);
+	}
+
+	#isDefaultRoleActionOverContextLimit(action: MenuRoleAction, model: Model): boolean {
+		return action.role === "default" && this.#isModelOverCurrentContext(model);
+	}
+
+	#formatCurrentContextLimitSuffix(model: Model): string {
+		return ` ${theme.status.disabled} context>${formatNumber(model.contextWindow ?? 0).toLowerCase()}`;
 	}
 
 	#isItemDisabled(item: ModelItem | CanonicalModelItem): boolean {
@@ -711,7 +730,7 @@ export class ModelSelectorComponent extends Container {
 		if (!this.#isModelOverContextLimit(model)) {
 			return "";
 		}
-		return ` ${theme.status.disabled} context>${formatNumber(model.contextWindow ?? 0).toLowerCase()}`;
+		return this.#formatCurrentContextLimitSuffix(model);
 	}
 
 	#getVisibleItems(): ReadonlyArray<ModelItem | CanonicalModelItem> {
@@ -1046,6 +1065,50 @@ export class ModelSelectorComponent extends Container {
 			: this.#filteredModels[this.#selectedIndex];
 	}
 
+	#isMenuRoleIndexDisabled(index: number, selectedItem: ModelItem | CanonicalModelItem): boolean {
+		const action = this.#menuRoleActions[index];
+		return action ? this.#isDefaultRoleActionOverContextLimit(action, selectedItem.model) : false;
+	}
+
+	#coerceMenuSelectedIndex(index: number, selectedItem: ModelItem | CanonicalModelItem): number {
+		const maxIndex = this.#menuRoleActions.length - 1;
+		if (maxIndex < 0) {
+			return 0;
+		}
+		const clamped = Math.max(0, Math.min(index, maxIndex));
+		if (!this.#isMenuRoleIndexDisabled(clamped, selectedItem)) {
+			return clamped;
+		}
+		for (let i = clamped + 1; i <= maxIndex; i++) {
+			if (!this.#isMenuRoleIndexDisabled(i, selectedItem)) {
+				return i;
+			}
+		}
+		for (let i = clamped - 1; i >= 0; i--) {
+			if (!this.#isMenuRoleIndexDisabled(i, selectedItem)) {
+				return i;
+			}
+		}
+		return clamped;
+	}
+
+	#moveMenuSelection(delta: number, selectedItem: ModelItem | CanonicalModelItem, optionCount: number): void {
+		let index = this.#menuSelectedIndex;
+		for (let step = 0; step < optionCount; step++) {
+			index = (index + delta + optionCount) % optionCount;
+			if (this.#menuStep !== "role" || !this.#isMenuRoleIndexDisabled(index, selectedItem)) {
+				this.#menuSelectedIndex = index;
+				this.#updateMenu();
+				return;
+			}
+		}
+		this.#menuSelectedIndex =
+			this.#menuStep === "role"
+				? this.#coerceMenuSelectedIndex(this.#menuSelectedIndex, selectedItem)
+				: this.#menuSelectedIndex;
+		this.#updateMenu();
+	}
+
 	#openMenu(): void {
 		const selectedItem = this.#getSelectedItem();
 		if (!selectedItem || this.#isItemDisabled(selectedItem)) return;
@@ -1053,7 +1116,7 @@ export class ModelSelectorComponent extends Container {
 		this.#isMenuOpen = true;
 		this.#menuStep = "role";
 		this.#menuSelectedRole = null;
-		this.#menuSelectedIndex = 0;
+		this.#menuSelectedIndex = this.#coerceMenuSelectedIndex(0, selectedItem);
 		// Collapse the model list while the action/thinking menu is open so the
 		// menu owns the full viewport instead of stacking below a now-irrelevant
 		// (and often off-screen) list.
@@ -1086,7 +1149,9 @@ export class ModelSelectorComponent extends Container {
 				})
 			: this.#menuRoleActions.map((action, index) => {
 					const prefix = index === this.#menuSelectedIndex ? `  ${theme.nav.cursor} ` : "    ";
-					return `${prefix}${action.label}`;
+					const disabled = this.#isDefaultRoleActionOverContextLimit(action, selectedItem.model);
+					const suffix = disabled ? this.#formatCurrentContextLimitSuffix(selectedItem.model) : "";
+					return `${prefix}${action.label}${suffix}`;
 				});
 
 		const selectedRoleName = this.#menuSelectedRole ? getRoleInfo(this.#menuSelectedRole, this.#settings).name : "";
@@ -1224,21 +1289,19 @@ export class ModelSelectorComponent extends Container {
 		if (optionCount === 0) return;
 
 		if (matchesSelectUp(keyData)) {
-			this.#menuSelectedIndex = (this.#menuSelectedIndex - 1 + optionCount) % optionCount;
-			this.#updateMenu();
+			this.#moveMenuSelection(-1, selectedItem, optionCount);
 			return;
 		}
 
 		if (matchesSelectDown(keyData)) {
-			this.#menuSelectedIndex = (this.#menuSelectedIndex + 1) % optionCount;
-			this.#updateMenu();
+			this.#moveMenuSelection(1, selectedItem, optionCount);
 			return;
 		}
 
 		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
 			if (this.#menuStep === "role") {
 				const action = this.#menuRoleActions[this.#menuSelectedIndex];
-				if (!action) return;
+				if (!action || this.#isDefaultRoleActionOverContextLimit(action, selectedItem.model)) return;
 				this.#menuSelectedRole = action.role;
 				this.#menuStep = "thinking";
 				this.#menuSelectedIndex = this.#getThinkingPreselectIndex(action.role, selectedItem.model);

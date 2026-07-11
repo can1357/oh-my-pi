@@ -93,10 +93,20 @@ describe("resolveServiceTier", () => {
 });
 
 describe("shouldSendServiceTier", () => {
-	it("returns false for non-OpenAI providers", () => {
-		expect(shouldSendServiceTier("priority", "fireworks")).toBe(false);
+	it("returns false for non-OpenAI/non-Fireworks providers", () => {
 		expect(shouldSendServiceTier("flex", "azure-openai-responses")).toBe(false);
 		expect(shouldSendServiceTier("scale", "firepass")).toBe(false);
+		expect(shouldSendServiceTier("priority", "anthropic")).toBe(false);
+	});
+
+	it("returns true for fireworks only with the priority tier", () => {
+		expect(shouldSendServiceTier("priority", "fireworks")).toBe(true);
+		// Fireworks realizes only the Priority serving path — flex/scale are OpenAI-only.
+		expect(shouldSendServiceTier("flex", "fireworks")).toBe(false);
+		expect(shouldSendServiceTier("scale", "fireworks")).toBe(false);
+		expect(shouldSendServiceTier("auto", "fireworks")).toBe(false);
+		expect(shouldSendServiceTier("default", "fireworks")).toBe(false);
+		expect(shouldSendServiceTier(undefined, "fireworks")).toBe(false);
 	});
 
 	it("returns true for openai with priority/flex/scale tiers", () => {

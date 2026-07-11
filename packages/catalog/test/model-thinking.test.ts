@@ -94,6 +94,56 @@ describe("model thinking derivation", () => {
 		expect(gptOss.thinking?.effortMap).toBeUndefined();
 	});
 
+	it("stores MiMo OpenAI-compatible effort limits in model metadata", () => {
+		const mimo = createModel({
+			id: "mimo-v2.5-pro",
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+		});
+		const openRouterMimo = createModel({
+			id: "xiaomi/mimo-v2.5-pro",
+			api: "openrouter",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+		});
+		const staleMimo = createModel({
+			id: "mimo-v2.5-pro",
+			api: "openai-completions",
+			provider: "nanogpt",
+			baseUrl: "https://nano-gpt.com/api/v1",
+			compat: { reasoningEffortMap: {} },
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				effortMap: { minimal: "low", xhigh: "high" },
+			},
+		});
+		const nativeXiaomi = createModel({
+			id: "mimo-v2.5-pro",
+			api: "openai-completions",
+			provider: "xiaomi",
+			baseUrl: "https://api.xiaomimimo.com/v1",
+		});
+
+		const expectedThinking = {
+			mode: "effort" as const,
+			efforts: [Effort.Low, Effort.Medium, Effort.High],
+		};
+		expect(mimo.thinking).toEqual(expectedThinking);
+		expect(openRouterMimo.thinking).toEqual(expectedThinking);
+		expect(staleMimo.thinking).toEqual(expectedThinking);
+		expect(mimo.compat.reasoningEffortMap).toEqual({ minimal: "low", xhigh: "high" });
+		expect(openRouterMimo.compat.reasoningEffortMap).toEqual({ minimal: "low", xhigh: "high" });
+		expect(staleMimo.compat.reasoningEffortMap).toEqual({ minimal: "low", xhigh: "high" });
+		expect(requireSupportedEffort(mimo, Effort.High)).toBe(Effort.High);
+		expect(() => requireSupportedEffort(mimo, Effort.XHigh)).toThrow(/Supported efforts: low, medium, high/);
+		expect(clampThinkingLevelForModel(mimo, Effort.Minimal)).toBe(Effort.Low);
+		expect(clampThinkingLevelForModel(mimo, Effort.XHigh)).toBe(Effort.High);
+
+		expect(nativeXiaomi.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]);
+	});
+
 	it("normalizes stale explicit MiniMax M2 / GPT-OSS effort metadata from caches", () => {
 		const staleMinimax = createModel({
 			id: "minimax-m2.7",
@@ -326,7 +376,27 @@ describe("model thinking derivation", () => {
 		const minimaxM2 = createModel({ id: "MiniMax-M2.7", api: "anthropic-messages", provider: "minimax" });
 		const minimaxM3 = createModel({ id: "MiniMax-M3", api: "anthropic-messages", provider: "minimax" });
 
+		// Direct Anthropic Claude 4.5: Opus 4.5 supports `output_config.effort`
+		// (sent alongside `thinking.budget_tokens`), Sonnet 4.5 and Haiku 4.5
+		// reject the field with HTTP 400 "This model does not support the effort
+		// parameter." (#3497). Adaptive (4.6+) classification is exercised below.
 		expect(opus45.thinking?.mode).toBe("anthropic-budget-effort");
+		const opus45Bedrock = createModel({
+			id: "us.anthropic.claude-opus-4-5-20251101",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+		});
+		expect(opus45Bedrock.thinking?.mode).toBe("anthropic-budget-effort");
+		const sonnet45 = createModel({ id: "claude-sonnet-4-5", api: "anthropic-messages", provider: "anthropic" });
+		expect(sonnet45.thinking?.mode).toBe("budget");
+		const haiku45 = createModel({ id: "claude-haiku-4-5", api: "anthropic-messages", provider: "anthropic" });
+		expect(haiku45.thinking?.mode).toBe("budget");
+		const sonnet45Bedrock = createModel({
+			id: "us.anthropic.claude-sonnet-4-5-20250929",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+		});
+		expect(sonnet45Bedrock.thinking?.mode).toBe("budget");
 		expect(opus46.thinking?.mode).toBe("anthropic-adaptive");
 		expect(sonnet46.thinking?.mode).toBe("anthropic-adaptive");
 		expect(mythosBedrock.thinking?.mode).toBe("anthropic-adaptive");

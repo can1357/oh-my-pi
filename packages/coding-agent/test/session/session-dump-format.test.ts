@@ -82,8 +82,8 @@ describe("formatSessionDumpText tool parameters", () => {
 			messages: [],
 			tools: [
 				{
-					name: "find",
-					description: "Finds files.",
+					name: "glob",
+					description: "Globs files.",
 					parameters: findSchema,
 					examples: [{ call: { paths: ["src/**/*.ts"] } }],
 				},
@@ -92,7 +92,7 @@ describe("formatSessionDumpText tool parameters", () => {
 
 		expect(out).toContain("## Available Tools");
 		expect(out).toContain("<examples>");
-		expect(out).toContain('<invoke name="find">');
+		expect(out).toContain('<invoke name="glob">');
 	});
 
 	it("omits the Available Tools section if inlineToolDescriptors is true", () => {

@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@pk-nerdsaver-ai/pi-ai/auth-storage";
+import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
 
 // Clear every env var the providers under test alias, so ambient shell / ~/.env
@@ -30,7 +31,7 @@ describe("AuthStorage.getCredentialOrigin", () => {
 		store = null;
 		auth = null;
 		if (tempDir) {
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 			tempDir = "";
 		}
 	});

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
+import type { ImageContent } from "@pk-nerdsaver-ai/pi-ai";
 import { InputController } from "@pk-nerdsaver-ai/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@pk-nerdsaver-ai/pi-coding-agent/modes/types";
 
@@ -11,6 +12,8 @@ type FakeEditor = {
 	setActionKeys(action: string, keys: string[]): void;
 	setCustomKeyHandler(key: string, handler: () => void): void;
 	clearCustomKeyHandlers(): void;
+	pendingImages: ImageContent[];
+	pendingImageLinks: (string | undefined)[];
 };
 
 function createContext() {
@@ -33,6 +36,8 @@ function createContext() {
 		setActionKeys: vi.fn(),
 		setCustomKeyHandler: vi.fn(),
 		clearCustomKeyHandlers: vi.fn(),
+		pendingImages: [] as ImageContent[],
+		pendingImageLinks: [] as (string | undefined)[],
 	};
 
 	const ctx = {
@@ -49,8 +54,6 @@ function createContext() {
 			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		} as unknown as InteractiveModeContext["session"],
 		sessionManager: { getSessionName: () => "named-session" } as unknown as InteractiveModeContext["sessionManager"],
-		pendingImages: [] as InteractiveModeContext["pendingImages"],
-		pendingImageLinks: [] as InteractiveModeContext["pendingImageLinks"],
 		compactionQueuedMessages: [] as InteractiveModeContext["compactionQueuedMessages"],
 		locallySubmittedUserSignatures: new Set<string>(),
 		onInputCallback,

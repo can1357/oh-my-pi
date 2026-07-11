@@ -196,6 +196,16 @@ describe("openai-completions wire-quirk compat detection", () => {
 			buildOpenAICompat(completionsSpec({ provider: "fireworks", baseUrl: "https://api.fireworks.ai/inference/v1" }))
 				.wireModelIdMode,
 		).toBe("fireworks");
+		// Fireworks "Fast" variants route through the router namespace (like Fire Pass).
+		expect(
+			buildOpenAICompat(
+				completionsSpec({
+					provider: "fireworks",
+					id: "kimi-k2.6-fast",
+					baseUrl: "https://api.fireworks.ai/inference/v1",
+				}),
+			).wireModelIdMode,
+		).toBe("firepass");
 		expect(
 			buildOpenAICompat(completionsSpec({ provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" }))
 				.wireModelIdMode,

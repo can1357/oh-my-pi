@@ -20,7 +20,7 @@ if (!snapcompact.isShape(shape)) {
 	throw new Error(`shape json is not a complete Shape: ${shapeJson}`);
 }
 
-const frames = snapcompact.renderMany(text, { shape, maxFrames: 1 });
+const frames = await snapcompact.renderMany(text, { shape, maxFrames: 1 });
 if (frames.length === 0) {
 	throw new Error("renderMany produced no frames");
 }

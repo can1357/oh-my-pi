@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import { ReadTool } from "@pk-nerdsaver-ai/pi-coding-agent/tools/read";
-import { Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -43,7 +43,7 @@ describe("read tool directory listings honor line selectors (regression: was sil
 	});
 
 	afterEach(() => {
-		fs.rmSync(testDir, { recursive: true, force: true });
+		removeSyncWithRetries(testDir);
 	});
 
 	it("returns the full listing when no selector is given", async () => {

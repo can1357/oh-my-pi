@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resolveUpdateMethodForTest } from "@pk-nerdsaver-ai/pi-coding-agent/cli/update-cli";
+import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
 // Issue #845: on Windows with Bun installed via Scoop, ~/.bun is a junction
 // to scoop\persist\Oven-sh.Bun\.bun. `bun pm bin -g` and the omp path that
@@ -34,7 +35,7 @@ describe("issue-845: resolveUpdateMethod follows symlinks/junctions", () => {
 	});
 
 	afterAll(() => {
-		fs.rmSync(tmpRoot, { recursive: true, force: true });
+		removeSyncWithRetries(tmpRoot);
 	});
 
 	it("classifies omp reached through a symlinked bin dir as bun-managed", () => {
