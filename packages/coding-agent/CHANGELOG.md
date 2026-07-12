@@ -10,6 +10,7 @@
 - Added spawnable `browser-control` subagent type for browser tasks and the `browser-operation` compatibility agent. Primary browser surface is IX Bridge (`http://127.0.0.1:18086`); model role `pi/browser-control` defaults to MiniMax-M3 via 9router and is changeable like `default`/`smol`/`task`/`advisor`. `ix-browser-fast` remains a short-loop IX Bridge specialist sharing that role; `pi/browser-operation` remains available as a compatibility role.
 - Added a write-scope spawn contract for exclusive, isolated-patch, and proposal-only lanes with mergeOwner validation.
 - Added a criterion-level adjudication module with pass/fail/blocked/unproven judgments consumed by the root completion gate.
+- Added ephemeral root task-contract compilation with deterministic clarification scoring, executor/advisor digest injection, retry-safe recovery context, and session-bound cleanup; evidence-backed completion enforcement remains deferred to M2.
 
 
 - Added `agent.profile` and `agent.profiles` settings for named, swappable role-based model bundles that retarget every role-resolving agent slot at once (explicit `modelRoles` still wins per-role).

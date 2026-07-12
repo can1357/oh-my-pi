@@ -267,15 +267,13 @@ function parseExecutionPolicy(raw: unknown, diagnostics: ReasoningPlanDiagnostic
 		});
 		return null;
 	}
-	const schedulingPolicy: SchedulingPolicy =
-		raw.schedulingPolicy === "judgment" ? "judgment" : "critical_path";
+	const schedulingPolicy: SchedulingPolicy = raw.schedulingPolicy === "judgment" ? "judgment" : "critical_path";
 	return Object.freeze({
 		orchestrationMode: mode as ExecutionPolicy["orchestrationMode"],
 		schedulingPolicy,
 		maxConcurrentWorkers: typeof raw.maxConcurrentWorkers === "number" ? Math.max(1, raw.maxConcurrentWorkers) : 4,
 		maxRounds: typeof raw.maxRounds === "number" ? Math.max(1, raw.maxRounds) : 4,
-		maxSameBlockerRetries:
-			typeof raw.maxSameBlockerRetries === "number" ? Math.max(0, raw.maxSameBlockerRetries) : 1,
+		maxSameBlockerRetries: typeof raw.maxSameBlockerRetries === "number" ? Math.max(0, raw.maxSameBlockerRetries) : 1,
 	});
 }
 
@@ -313,7 +311,11 @@ function parseTaskProfile(raw: unknown, diagnostics: ReasoningPlanDiagnostic[]):
 	}
 	const taskClass = typeof raw.taskClass === "string" ? raw.taskClass.trim() : "";
 	if (!taskClass) {
-		diagnostics.push({ code: "missing_field", message: "taskProfile.taskClass is required", path: "taskProfile.taskClass" });
+		diagnostics.push({
+			code: "missing_field",
+			message: "taskProfile.taskClass is required",
+			path: "taskProfile.taskClass",
+		});
 		return null;
 	}
 	const complexity = VALID_COMPLEXITY.has(raw.complexity as string)
@@ -351,7 +353,11 @@ export function computeTaskContractDigest(contract: TaskContractV1): string {
 		completionCriteria: contract.completionCriteria,
 		nonSolutions: contract.nonSolutions,
 		knownFailureModes: contract.knownFailureModes,
+		evidenceRequirements: contract.evidenceRequirements,
 		constraints: contract.constraints,
+		assumptions: contract.assumptions,
+		verificationPolicy: contract.verificationPolicy,
+		orchestrationPolicy: contract.orchestrationPolicy,
 	});
 	return createHash("sha256").update(payload).digest("hex");
 }
@@ -494,8 +500,7 @@ export function auditReasoningPlan(plan: ReasoningPlanV1): readonly PlanAuditFin
 
 	const hasFalsifier = plan.selectedModules.some(m => m.workerMode === "falsify");
 	const hasAuditor = plan.selectedModules.some(m => m.workerMode === "audit");
-	const isComplex =
-		plan.taskProfile.complexity === "complex" || plan.taskProfile.complexity === "open_ended";
+	const isComplex = plan.taskProfile.complexity === "complex" || plan.taskProfile.complexity === "open_ended";
 	if (isComplex && !hasFalsifier && !hasAuditor) {
 		findings.push({
 			severity: "warning",
@@ -504,10 +509,7 @@ export function auditReasoningPlan(plan: ReasoningPlanV1): readonly PlanAuditFin
 		});
 	}
 
-	if (
-		plan.executionPolicy.maxConcurrentWorkers > 1 &&
-		plan.executionPolicy.orchestrationMode === "direct"
-	) {
+	if (plan.executionPolicy.maxConcurrentWorkers > 1 && plan.executionPolicy.orchestrationMode === "direct") {
 		findings.push({
 			severity: "warning",
 			code: "concurrent_workers_with_direct_mode",
@@ -542,7 +544,9 @@ function detectDagCycle(
 			adj.get(e.fromModuleInstanceId)?.push(e.toModuleInstanceId);
 		}
 	}
-	const WHITE = 0, GRAY = 1, BLACK = 2;
+	const WHITE = 0,
+		GRAY = 1,
+		BLACK = 2;
 	const color = new Map<string, number>();
 	const parent = new Map<string, string>();
 	for (const id of adj.keys()) color.set(id, WHITE);

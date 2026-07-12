@@ -53,6 +53,18 @@ If `advisor.enabled` is true but no `modelRoles.advisor` value resolves to an av
 
 ## What the advisor sees
 
+### Task-contract block
+
+For a substantial root-session request, `AgentSession` compiles an ephemeral `TaskContractV1` and rebuilds the advisor's runtime system prompt with the compact `<active-task-contract>` block from `buildContractInjectionBlock(contract, digest, "advisor")`. The base advisor prompt is unchanged; the block exists only for the active in-memory root turn and is cleared on new/switch/reload/branch/tree boundaries.
+
+The block contains objective, inline deliverables, criterion ids, non-solutions, critical/high unverified assumptions, and blocking/significant unresolved gaps. It carries the same digest prefix as the executor's `<task-contract>` message block, including during normal retries and post-compaction recovery.
+
+The advisor can use this context to identify drift, but it cannot enforce completion. Evidence-backed completion gating remains a separate M2 mechanism and is not enabled by this M1 task-contract wiring.
+
+See [`docs/task-contract-orchestration.md`](task-contract-orchestration.md) for the runtime and clarification policy.
+
+### Transcript delta
+
 At each primary turn end, `AdvisorRuntime` receives only the new transcript delta since the last advisor update. Deltas are rendered with `formatSessionHistoryMarkdown(..., { includeThinking: true, includeToolIntent: true, watchedRoles: true, expandPrimaryContext: true })`, so the advisor can review assistant reasoning as well as user-visible text, tool calls, and tool results.
 
 Most hidden `custom` messages collapse to a one-line summary in the delta. The exception is the primary agent's injected constraint context — the types in `PRIMARY_CONTEXT_CUSTOM_TYPES` (`plan-mode-context`, `plan-mode-reference`). `expandPrimaryContext` renders these verbatim inside a `<primary-context kind="…">` wrapper (XML-escaped, so plan/objective text cannot break out or read as advisor instructions). Without this the advisor only saw a 120-char truncation of the plan-mode rules — which cut off mid-sentence at `NEVER create, edit, or delete files — excep…`, hiding the "except the single plan file" carve-out and producing false blockers against the agent writing its own plan file. Because these prompts are re-injected verbatim every primary turn, `AdvisorRuntime` dedupes them: a byte-identical re-injection collapses to a `(unchanged — still in effect)` marker, and the full body re-expands whenever the content changes or the advisor re-primes. `goal-mode-context` is deliberately excluded — its live budget counters change every turn, so it can neither dedupe nor expand cheaply.

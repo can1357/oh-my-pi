@@ -5,6 +5,7 @@ import {
 	formatTaskContractXmlBlock,
 	isSubstantialRequest,
 	parseTaskContract,
+	startsWithSubstantialAction,
 	toActiveTaskContractSnapshot,
 } from "../../src/orchestration/task-contract";
 
@@ -62,6 +63,15 @@ describe("task-contract", () => {
 			expect(isSubstantialRequest("hi")).toBe(false);
 			expect(isSubstantialRequest("")).toBe(false);
 			expect(isSubstantialRequest("what time is it")).toBe(false);
+		});
+	});
+
+	describe("startsWithSubstantialAction", () => {
+		it("recognizes every canonical first-word action without matching mentions", () => {
+			expect(startsWithSubstantialAction("Deploy production")).toBe(true);
+			expect(startsWithSubstantialAction("Configure the worker")).toBe(true);
+			expect(startsWithSubstantialAction("Test the migration")).toBe(true);
+			expect(startsWithSubstantialAction("Discuss how to deploy production")).toBe(false);
 		});
 	});
 

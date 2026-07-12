@@ -280,7 +280,7 @@ function escapeXml(text: string): string {
 }
 
 /** Generic OMPK defaults applied when the compiler cannot derive specific criteria. */
-const OMPK_DEFAULT_CRITERIA: readonly TaskCriterion[] = Object.freeze([
+export const OMPK_DEFAULT_CRITERIA: readonly TaskCriterion[] = Object.freeze([
 	Object.freeze({
 		id: "targeted_verification",
 		description:
@@ -292,17 +292,17 @@ const OMPK_DEFAULT_CRITERIA: readonly TaskCriterion[] = Object.freeze([
 	}),
 ]);
 
-const OMPK_DEFAULT_NON_SOLUTIONS: readonly string[] = Object.freeze([
+export const OMPK_DEFAULT_NON_SOLUTIONS: readonly string[] = Object.freeze([
 	"Claiming completion without concrete verification",
 	"Producing output that does not address the stated objective",
 ]);
 
-const OMPK_DEFAULT_FAILURE_MODES: readonly TaskFailureMode[] = Object.freeze([
+export const OMPK_DEFAULT_FAILURE_MODES: readonly TaskFailureMode[] = Object.freeze([
 	Object.freeze({ id: "narrative_only", description: "Reporting done without any concrete checks or evidence" }),
 	Object.freeze({ id: "scope_drift", description: "Addressing a different problem than the one requested" }),
 ]);
 
-const OMPK_DEFAULT_EVIDENCE_REQUIREMENTS: readonly TaskEvidenceRequirement[] = Object.freeze([
+export const OMPK_DEFAULT_EVIDENCE_REQUIREMENTS: readonly TaskEvidenceRequirement[] = Object.freeze([
 	Object.freeze({
 		id: "concrete_checks",
 		description:
@@ -361,6 +361,15 @@ export function isSubstantialRequest(userText: string): boolean {
 	if (trimmed.length > 200) return true;
 	const lower = trimmed.toLowerCase();
 	return SUBSTANTIAL_KEYWORDS.some(kw => lower.includes(kw));
+}
+
+/** Whether the first word explicitly starts a canonical substantial action. */
+export function startsWithSubstantialAction(userText: string): boolean {
+	const action = userText
+		.trim()
+		.match(/^([a-z]+)/i)?.[1]
+		?.toLowerCase();
+	return action !== undefined && SUBSTANTIAL_KEYWORDS.includes(action);
 }
 
 function extractObjective(userText: string): string {

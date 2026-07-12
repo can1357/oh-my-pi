@@ -223,18 +223,26 @@ import {
 	type CompletionGateInput,
 	evaluateCompletionGate,
 } from "../orchestration/completion-gate";
+import { buildContractInjectionBlock, type InjectionBlock } from "../orchestration/contract-injector";
+import {
+	type AssumptionRecord,
+	type ContractGap,
+	compileIntent,
+	patchContractFromAnswer,
+	type QuestionSpec,
+} from "../orchestration/intent-compiler";
 import {
 	createOrchestrationTelemetrySink,
 	type OrchestrationTelemetrySink,
 	recordAdvisorInterventionTelemetry,
 } from "../orchestration/orchestration-telemetry";
+import { computeTaskContractDigest } from "../orchestration/reasoning-plan";
 import { buildCompletionGateInputFromTranscript } from "../orchestration/root-completion-gate";
 import {
 	type ActiveTaskContractSnapshot,
-	compileTaskContractFromRequest,
-	formatRootTaskContractXml,
 	isSubstantialRequest,
-	toActiveTaskContractSnapshot,
+	startsWithSubstantialAction,
+	type TaskContractV1,
 } from "../orchestration/task-contract";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { PlanModeState } from "../plan-mode/state";
@@ -1113,19 +1121,18 @@ const MAGIC_KEYWORD_NOTICE_TYPES: ReadonlySet<string> = new Set([
 const IMAGE_ATTACHMENT_DESCRIPTION_TYPE = "image-attachment-description";
 
 /**
- * A hidden, user-attributed companion of a queued user prompt: the magic-keyword
- * notices (`ultrathink`/`orchestrate`/`workflow`) enqueued alongside the user
- * message. They are `attribution: "user"` but `display: false`, so they are not
- * editor-restorable; when the user pulls their prompt back out of the queue these
- * must leave with it rather than linger as stale, companion-less steering. Scoped to
- * the known notice types so an unrelated hidden user custom is never silently dropped.
+ * A hidden, user-attributed companion of a queued user prompt: magic-keyword
+ * notices and task contracts. It is not editor-restorable; removing its prompt
+ * must also remove this stale steering context.
  */
 function isHiddenUserCompanion(message: AgentMessage): boolean {
 	return (
 		message.role === "custom" &&
 		message.attribution === "user" &&
 		message.display === false &&
-		(MAGIC_KEYWORD_NOTICE_TYPES.has(message.customType) || message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE)
+		(MAGIC_KEYWORD_NOTICE_TYPES.has(message.customType) ||
+			message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE ||
+			message.customType === "task-contract-notice")
 	);
 }
 
@@ -1145,6 +1152,18 @@ function toRestoredQueuedMessage(message: AgentMessage): RestoredQueuedMessage {
 function appendTraceSection(summary: string, traceMarkdown: string): string {
 	if (summary.includes("## Trace")) return summary;
 	return `${summary.trimEnd()}\n\n${traceMarkdown}`;
+}
+
+interface ActiveCompiledTaskContract {
+	readonly contract: TaskContractV1;
+	readonly digest: string;
+	readonly executorBlock: InjectionBlock;
+	readonly advisorBlock: InjectionBlock;
+	readonly gaps: readonly ContractGap[];
+	readonly assumptions: readonly AssumptionRecord[];
+	readonly pendingClarification?: QuestionSpec;
+	readonly clarificationAnswered: boolean;
+	readonly unresolvedBlocked: boolean;
 }
 
 export class AgentSession {
@@ -1207,6 +1226,8 @@ export class AgentSession {
 	#advisorReadOnlyTools?: AgentTool[];
 	#advisorWatchdogPrompt?: string;
 	#activeTaskContract?: ActiveTaskContractSnapshot;
+	/** Ephemeral compiled root contract. Separate from the M2 assignment/evidence snapshot. */
+	#activeCompiledTaskContract?: ActiveCompiledTaskContract;
 	#taskContractActivatedAt?: number;
 	#completionGateReminderCount = 0;
 	#completionGateAwaitingProgress = false;
@@ -1955,6 +1976,7 @@ export class AgentSession {
 			basePrompt: advisorSystemPrompt,
 			watchdogPrompt: this.#advisorWatchdogPrompt,
 			activeTaskContract: this.#activeTaskContract,
+			compiledTaskContractBlock: this.#activeCompiledTaskContract?.advisorBlock.text,
 		});
 		const advisorSessionId = this.sessionId ? `${this.sessionId}-advisor` : undefined;
 
@@ -2694,8 +2716,11 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
-			// Check if this is a hook/custom message
-			if (event.message.role === "hookMessage" || event.message.role === "custom") {
+			// Task-contract notices are runtime-only context and must not follow a session.
+			if (
+				event.message.role === "hookMessage" ||
+				(event.message.role === "custom" && event.message.customType !== "task-contract-notice")
+			) {
 				// Persist as CustomMessageEntry
 				this.sessionManager.appendCustomMessageEntry(
 					event.message.customType,
@@ -3077,6 +3102,24 @@ export class AgentSession {
 						options?.onSkip?.();
 						return;
 					}
+					const compiledContract = this.#activeCompiledTaskContract;
+					const retainedContractNotice = this.agent.state.messages.some(
+						message =>
+							message.role === "custom" &&
+							message.customType === "task-contract-notice" &&
+							message.content === compiledContract?.executorBlock.text,
+					);
+					if (compiledContract && !retainedContractNotice) {
+						this.agent.appendMessage({
+							role: "custom",
+							customType: "task-contract-notice",
+							content: compiledContract.executorBlock.text,
+							display: false,
+							attribution: "agent",
+							timestamp: Date.now(),
+						});
+					}
+
 					await this.agent.continue();
 				} catch (error) {
 					logger.warn("agent.continue failed after scheduling", {
@@ -5848,35 +5891,127 @@ export class AgentSession {
 		return this.settings.get("magicKeywords.enabled") && this.settings.get(`magicKeywords.${keyword}`);
 	}
 
-	/**
-	 * Compile and inject a root `<task-contract>` block for substantial user requests.
-	 *
-	 * Rules:
-	 * - Only for user-initiated prompts (attribution "user", not synthetic, not agent-attributed).
-	 * - Only when no contract is already active (avoids clobbering a mid-task contract).
-	 * - Only when the request is heuristically "substantial" (multi-step, action keyword, etc.).
-	 *
-	 * Subagent sessions receive prompts with `attribution: "agent"` from the executor, which
-	 * ensures the gate is only active on root user-facing sessions.
-	 */
-	#maybeCreateTaskContractNotice(text: string, synthetic?: boolean): CustomMessage | undefined {
-		// Skip synthetic turns and agent-attributed turns (subagent executor prompts)
-		if (synthetic) return undefined;
-		// Don't overwrite an already-active contract
-		if (this.#activeTaskContract) return undefined;
-		if (!isSubstantialRequest(text)) return undefined;
+	/** Build immutable per-session root-turn state without enabling M2 completion gating. */
+	#createActiveCompiledTaskContract(
+		contract: TaskContractV1,
+		gaps: readonly ContractGap[],
+		assumptions: readonly AssumptionRecord[],
+		pendingClarification: QuestionSpec | undefined,
+		clarificationAnswered: boolean,
+		unresolvedBlocked: boolean,
+	): ActiveCompiledTaskContract {
+		const digest = computeTaskContractDigest(contract);
+		const injectedGaps = clarificationAnswered && !unresolvedBlocked ? [] : gaps;
+		return Object.freeze({
+			contract,
+			digest,
+			gaps: Object.freeze([...gaps]),
+			assumptions: Object.freeze([...assumptions]),
+			pendingClarification,
+			clarificationAnswered,
+			unresolvedBlocked,
+			executorBlock: buildContractInjectionBlock(
+				contract,
+				digest,
+				"executor",
+				injectedGaps,
+				assumptions,
+				unresolvedBlocked,
+			),
+			advisorBlock: buildContractInjectionBlock(
+				contract,
+				digest,
+				"advisor",
+				injectedGaps,
+				assumptions,
+				unresolvedBlocked,
+			),
+		});
+	}
 
-		const contract = compileTaskContractFromRequest(text);
-		this.setActiveTaskContract(toActiveTaskContractSnapshot(contract));
-		const xml = formatRootTaskContractXml(contract);
+	#activateCompiledTaskContract(contract: ActiveCompiledTaskContract | undefined): void {
+		this.#activeCompiledTaskContract = contract;
+		this.#syncAdvisorSystemPrompt();
+	}
+
+	#createTaskContractNotice(contract: ActiveCompiledTaskContract): CustomMessage {
 		return {
 			role: "custom",
 			customType: "task-contract-notice",
-			content: xml,
+			content: contract.executorBlock.text,
 			display: false,
 			attribution: "user",
 			timestamp: Date.now(),
-		} satisfies CustomMessage;
+		};
+	}
+
+	/**
+	 * Compile a root request into ephemeral runtime state and append its executor
+	 * block to that turn. A pending material clarification consumes exactly one
+	 * later user response; M1 does not gate completion on evidence or success.
+	 */
+	#maybeCreateTaskContractNotice(text: string, synthetic?: boolean): CustomMessage | undefined {
+		if (synthetic || this.#agentKind !== "main") return undefined;
+
+		const active = this.#activeCompiledTaskContract;
+		const startsFreshRootTask = startsWithSubstantialAction(text);
+		if (active?.pendingClarification && !active.clarificationAnswered && !startsFreshRootTask) {
+			const patchedContract = patchContractFromAnswer(active.contract, active.pendingClarification.field, text);
+			const answer = text.trim();
+			const answeredAssumptions = active.assumptions.map(assumption =>
+				assumption.field === active.pendingClarification?.field
+					? Object.freeze({
+							...assumption,
+							statement: `User-confirmed ${assumption.field}: "${answer}"`,
+							confidence: 1,
+							provenance: "explicit" as const,
+							verified: true,
+						})
+					: assumption,
+			);
+			const answeredAssumptionsById = new Map(
+				answeredAssumptions
+					.filter(assumption => assumption.verified)
+					.map(assumption => [assumption.id, assumption] as const),
+			);
+			const answeredContract = Object.freeze({
+				...patchedContract,
+				assumptions: Object.freeze(
+					patchedContract.assumptions.map(assumption => {
+						const answeredAssumption = answeredAssumptionsById.get(assumption.id);
+						return answeredAssumption
+							? Object.freeze({ ...assumption, statement: answeredAssumption.statement, verified: true })
+							: assumption;
+					}),
+				),
+			});
+			const remainingGaps = active.gaps
+				.filter(gap => gap.field !== active.pendingClarification?.field)
+				.map(gap => Object.freeze({ ...gap, questionSpec: undefined }));
+			const answered = this.#createActiveCompiledTaskContract(
+				answeredContract,
+				remainingGaps,
+				answeredAssumptions,
+				undefined,
+				true,
+				remainingGaps.length > 0,
+			);
+			this.#activateCompiledTaskContract(answered);
+			return this.#createTaskContractNotice(answered);
+		}
+
+		if (!isSubstantialRequest(text)) return active ? this.#createTaskContractNotice(active) : undefined;
+		const compiled = compileIntent(text);
+		const next = this.#createActiveCompiledTaskContract(
+			compiled.contract,
+			compiled.unresolved,
+			compiled.assumptions,
+			compiled.topClarificationQuestion,
+			false,
+			false,
+		);
+		this.#activateCompiledTaskContract(next);
+		return this.#createTaskContractNotice(next);
 	}
 
 	#createMagicKeywordNotices(text: string): CustomMessage[] {
@@ -5967,9 +6102,9 @@ export class AgentSession {
 		// agent-initiated turns never trigger them.
 		const keywordNotices = options?.synthetic ? [] : this.#createMagicKeywordNotices(expandedText);
 
-		// Root task contract: compile and inject ephemeral <task-contract> block for substantial
-		// user requests. Skipped for synthetic turns, agent-attributed turns (subagent executor
-		// prompts), and when a contract is already active from an earlier turn.
+		// Root task contracts compile only on root user turns. A pending material
+		// clarification consumes the next user response; later substantial root turns
+		// replace the ephemeral contract without touching M2 completion gating.
 		const taskContractNotice = this.#maybeCreateTaskContractNotice(
 			expandedText,
 			options?.synthetic || options?.attribution === "agent",
@@ -5991,6 +6126,9 @@ export class AgentSession {
 			// model reads the steering notice ahead of the prompt it modifies.
 			for (const notice of keywordNotices) {
 				await this.sendCustomMessage(notice, { deliverAs: options.streamingBehavior });
+			}
+			if (taskContractNotice) {
+				await this.sendCustomMessage(taskContractNotice, { deliverAs: options.streamingBehavior });
 			}
 			if (options.streamingBehavior === "followUp") {
 				await this.#queueUserMessage(expandedText, options?.images, "followUp");
@@ -6709,13 +6847,15 @@ export class AgentSession {
 				return true;
 			}
 			this.agent.appendMessage(normalizedAppMessage);
-			this.sessionManager.appendCustomMessageEntry(
-				normalizedAppMessage.customType,
-				normalizedAppMessage.content,
-				message.display,
-				message.details,
-				message.attribution ?? "agent",
-			);
+			if (normalizedAppMessage.customType !== "task-contract-notice") {
+				this.sessionManager.appendCustomMessageEntry(
+					normalizedAppMessage.customType,
+					normalizedAppMessage.content,
+					message.display,
+					message.details,
+					message.attribution ?? "agent",
+				);
+			}
 			return false;
 		}
 
@@ -6729,13 +6869,15 @@ export class AgentSession {
 		}
 
 		this.agent.appendMessage(normalizedAppMessage);
-		this.sessionManager.appendCustomMessageEntry(
-			normalizedAppMessage.customType,
-			normalizedAppMessage.content,
-			message.display,
-			message.details,
-			message.attribution ?? "agent",
-		);
+		if (normalizedAppMessage.customType !== "task-contract-notice") {
+			this.sessionManager.appendCustomMessageEntry(
+				normalizedAppMessage.customType,
+				normalizedAppMessage.content,
+				message.display,
+				message.details,
+				message.attribution ?? "agent",
+			);
+		}
 		return false;
 	}
 
@@ -6806,6 +6948,10 @@ export class AgentSession {
 			? isAdvisorCard
 			: m => !isUserQueuedMessage(m) && !isHiddenUserCompanion(m);
 		this.agent.replaceQueues(steeringAll.filter(keep), followUpAll.filter(keep));
+		const removedTaskContractNotice = [...steeringAll, ...followUpAll].some(
+			message => message.role === "custom" && message.customType === "task-contract-notice",
+		);
+		if (removedTaskContractNotice) this.#activateCompiledTaskContract(undefined);
 		return { steering, followUp };
 	}
 
@@ -6844,23 +6990,36 @@ export class AgentSession {
 		// Notices queue immediately before their user message, so dropping the popped
 		// prompt means also dropping the contiguous hidden-user companions right before
 		// it — companions of other queued prompts stay put.
-		const removeWithCompanions = (queue: readonly AgentMessage[], userIndex: number): AgentMessage[] => {
+		const removeWithCompanions = (
+			queue: readonly AgentMessage[],
+			userIndex: number,
+		): { queue: AgentMessage[]; removedTaskContractNotice: boolean } => {
 			let start = userIndex;
 			while (start > 0 && isHiddenUserCompanion(queue[start - 1])) start--;
+			const removed = queue.slice(start, userIndex + 1);
 			const next = queue.slice();
 			next.splice(start, userIndex - start + 1);
-			return next;
+			return {
+				queue: next,
+				removedTaskContractNotice: removed.some(
+					message => message.role === "custom" && message.customType === "task-contract-notice",
+				),
+			};
 		};
 		const fromSteer = lastUserIndex(steering);
 		if (fromSteer >= 0) {
 			const removed = steering[fromSteer];
-			this.agent.replaceQueues(removeWithCompanions(steering, fromSteer), followUp.slice());
+			const next = removeWithCompanions(steering, fromSteer);
+			this.agent.replaceQueues(next.queue, followUp.slice());
+			if (next.removedTaskContractNotice) this.#activateCompiledTaskContract(undefined);
 			return toRestoredQueuedMessage(removed);
 		}
 		const fromFollowUp = lastUserIndex(followUp);
 		if (fromFollowUp >= 0) {
 			const removed = followUp[fromFollowUp];
-			this.agent.replaceQueues(steering.slice(), removeWithCompanions(followUp, fromFollowUp));
+			const next = removeWithCompanions(followUp, fromFollowUp);
+			this.agent.replaceQueues(steering.slice(), next.queue);
+			if (next.removedTaskContractNotice) this.#activateCompiledTaskContract(undefined);
 			return toRestoredQueuedMessage(removed);
 		}
 		return undefined;
@@ -7058,6 +7217,8 @@ export class AgentSession {
 		this.#todoReminderAwaitingProgress = false;
 		this.#planReferenceSent = false;
 		this.#planReferencePath = "local://PLAN.md";
+		this.setActiveTaskContract(undefined);
+		this.#activateCompiledTaskContract(undefined);
 		this.#resetAdvisorSessionState();
 		this.#reconnectToAgent();
 
@@ -9090,6 +9251,23 @@ export class AgentSession {
 	 */
 	#buildPostCompactionEagerNudges(): AgentMessage[] {
 		const nudges: AgentMessage[] = [];
+		const compiledContract = this.#activeCompiledTaskContract;
+		const retainedContractNotice = this.agent.state.messages.some(
+			message =>
+				message.role === "custom" &&
+				message.customType === "task-contract-notice" &&
+				message.content === compiledContract?.executorBlock.text,
+		);
+		if (compiledContract && !retainedContractNotice) {
+			nudges.push({
+				role: "custom",
+				customType: "task-contract-notice",
+				content: compiledContract.executorBlock.text,
+				display: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
+		}
 		const todo = this.#createEagerTodoPrelude(undefined);
 		if (todo) nudges.push(todo.message);
 		const task = this.#createEagerTaskPrelude(undefined);
@@ -12076,6 +12254,8 @@ export class AgentSession {
 			}
 
 			this.agent.replaceMessages(sessionContext.messages);
+			this.setActiveTaskContract(undefined);
+			this.#activateCompiledTaskContract(undefined);
 			this.#resetAdvisorSessionState();
 			this.#syncTodoPhasesFromBranch();
 			if (switchingToDifferentSession) {
@@ -12281,6 +12461,8 @@ export class AgentSession {
 			});
 		}
 
+		this.setActiveTaskContract(undefined);
+		this.#activateCompiledTaskContract(undefined);
 		if (!skipConversationRestore) {
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#resetAdvisorSessionState();
@@ -12372,6 +12554,8 @@ export class AgentSession {
 		}
 
 		this.agent.replaceMessages(sessionContext.messages);
+		this.setActiveTaskContract(undefined);
+		this.#activateCompiledTaskContract(undefined);
 		this.#resetAdvisorSessionState();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 
@@ -12538,6 +12722,8 @@ export class AgentSession {
 		const displayContext = deobfuscateSessionContext(stateContext, this.#obfuscator);
 		await this.#restoreMCPSelectionsForSessionContext(displayContext);
 		this.agent.replaceMessages(displayContext.messages);
+		this.setActiveTaskContract(undefined);
+		this.#activateCompiledTaskContract(undefined);
 		this.#resetAdvisorSessionState();
 		this.#syncTodoPhasesFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
@@ -13164,9 +13350,14 @@ export class AgentSession {
 		return this.#advisorAgent !== undefined;
 	}
 
+	/** Exposes the live advisor for provider-parity and runtime contract tests. */
+	getAdvisorAgent(): Agent | undefined {
+		return this.#advisorAgent;
+	}
+
 	/**
-	 * Set the active root/assignment contract snapshot for advisor watchdog review.
-	 * Rebuilds the advisor system prompt when the runtime is already active.
+	 * Set the legacy assignment/evidence snapshot. Compiled root contracts use
+	 * separate ephemeral state so M1 does not activate completion enforcement.
 	 */
 	setActiveTaskContract(snapshot: ActiveTaskContractSnapshot | undefined): void {
 		this.#activeTaskContract = snapshot;
@@ -13207,6 +13398,7 @@ export class AgentSession {
 			basePrompt: advisorSystemPrompt,
 			watchdogPrompt: this.#advisorWatchdogPrompt,
 			activeTaskContract: this.#activeTaskContract,
+			compiledTaskContractBlock: this.#activeCompiledTaskContract?.advisorBlock.text,
 		});
 		this.#advisorAgent.setSystemPrompt(systemPrompt);
 	}
