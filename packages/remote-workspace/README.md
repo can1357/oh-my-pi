@@ -78,6 +78,9 @@ Remote cloning is disabled by default. To enable it, configure `networkEgress: "
 - Custom environment variables and secret injection are unsupported until a secure injection path exists.
 - The package does not create or enforce the restricted-egress Docker network; its operator must configure that network to allow only the intended repository traffic.
 - `cancel` terminates an active worker and records cleanup proof when managed runtime resources exist.
+- The library API is for a trusted local operator. `validationCommands` are intentional shell commands inside the sandbox; there is no multi-user authentication or authorization layer.
+- Cleanup is guaranteed for handled success, failure, timeout, and cancellation paths. A host-process crash can leave labeled Docker resources behind; automatic startup reconciliation/reaping is not implemented yet.
+- The SQLite job database stores task prompts and is restricted to the owner (`0600`) on POSIX. Windows access follows the containing directory ACL.
 
 ## Development commands
 

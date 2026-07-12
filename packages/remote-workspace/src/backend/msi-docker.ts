@@ -13,7 +13,7 @@
 
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
 import type {
@@ -147,7 +147,22 @@ async function createEntrypointFile(script: string): Promise<EntrypointFile> {
 }
 
 async function removeEntrypointDirectory(directory: string): Promise<void> {
-	await rm(directory, { recursive: true, force: true });
+	const resolvedRoot = resolve(tmpdir());
+	const resolvedDirectory = resolve(directory);
+	const relativePath = relative(resolvedRoot, resolvedDirectory);
+	if (
+		isAbsolute(relativePath) ||
+		relativePath === ".." ||
+		relativePath.startsWith(`..${pathSeparator()}`) ||
+		!basename(resolvedDirectory).startsWith("ompk-remote-workspace-")
+	) {
+		throw new Error("Refusing to remove an entrypoint directory outside the managed temporary root");
+	}
+	await rm(resolvedDirectory, { recursive: true, force: true });
+}
+
+function pathSeparator(): string {
+	return process.platform === "win32" ? "\\" : "/";
 }
 
 function safeHttpsRepositoryUrl(repoUrl: string): URL {
@@ -351,6 +366,16 @@ export class MsiDockerBackend implements ExecutionBackend {
 				"--network",
 				"none",
 				"--read-only",
+				"--security-opt",
+				"no-new-privileges",
+				"--user",
+				"1000:1000",
+				"--cpus",
+				this.#opts.cpuLimit,
+				"--memory",
+				this.#opts.memoryLimit,
+				"--pids-limit",
+				String(this.#opts.pidsLimit),
 				"--tmpfs",
 				"/tmp:rw,noexec,nosuid,size=64m",
 				"--volume",

@@ -10,6 +10,7 @@
  */
 
 import { Database } from "bun:sqlite";
+import { chmodSync } from "node:fs";
 import type { JobState, RemoteJobV1 } from "../job/types";
 
 const SCHEMA = `
@@ -39,6 +40,7 @@ export class JobStore {
 
 	constructor(opts: JobStoreOptions) {
 		this.#db = new Database(opts.path, { create: true });
+		if (process.platform !== "win32" && opts.path !== ":memory:") chmodSync(opts.path, 0o600);
 		this.#db.run("PRAGMA journal_mode = WAL");
 		this.#db.run("PRAGMA synchronous = NORMAL");
 		this.#db.run("PRAGMA busy_timeout = 5000");

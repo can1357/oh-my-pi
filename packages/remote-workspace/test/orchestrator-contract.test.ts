@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import { TempDir } from "@pk-nerdsaver-ai/pi-utils";
 import type {
 	BackendCapabilities,
@@ -596,6 +597,16 @@ describe("MsiDockerBackend artifact collection contract", () => {
 				"--volume",
 				"volume-docker-contract:/workspace:ro",
 				"example.test/worker:latest",
+				"--security-opt",
+				"no-new-privileges",
+				"--user",
+				"1000:1000",
+				"--cpus",
+				"2",
+				"--memory",
+				"4g",
+				"--pids-limit",
+				"256",
 			]),
 		);
 	});
@@ -647,5 +658,23 @@ describe("MsiDockerBackend artifact collection contract", () => {
 		await expect(backend.launch({ ...spec, repoUrl: "https://secret@example.test/acme/repo.git" })).rejects.toThrow(
 			"credential-free HTTPS",
 		);
+	});
+
+	it("refuses to remove an entrypoint directory outside the managed temporary root", async () => {
+		const executeDocker: DockerCommandRunner = async args =>
+			args[0] === "inspect" ? dockerCommandResult("", 1, "No such object") : dockerCommandResult("");
+		const backend = new MsiDockerBackend({ executeDocker });
+		const runtime: RuntimeHandle = {
+			...dockerRuntime(),
+			metadata: {
+				...dockerRuntime().metadata,
+				entrypointDirectory: path.resolve("must-not-delete"),
+			},
+		};
+
+		const cleanup = await backend.cleanup(runtime);
+
+		expect(cleanup.workspaceDirGone).toBe(false);
+		expect(cleanup.errors.join("\n")).toContain("Refusing to remove an entrypoint directory");
 	});
 });
