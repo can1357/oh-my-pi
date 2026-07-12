@@ -254,7 +254,14 @@ export class PiRunnerAdapter implements CaptureRunnerAdapter {
 			},
 		});
 		run.channel.close();
-		run.runtime.gateway.dispose();
+		try {
+			run.runtime.gateway.dispose();
+		} catch (disposeError) {
+			logger.error("Failed to dispose capture gateway", {
+				runnerRunId: run.runnerRunId,
+				error: disposeError instanceof Error ? disposeError.message : String(disposeError),
+			});
+		}
 		try {
 			await run.runtime.session.dispose();
 		} catch (disposeError) {

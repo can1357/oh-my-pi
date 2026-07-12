@@ -73,7 +73,8 @@ describe("capture-to-agent end to end", () => {
 			"/api/capture/tasks",
 		);
 		expect(submitResponse?.status).toBe(202);
-		const { task } = (await submitResponse?.json()) as { task: { id: string } };
+		if (!submitResponse) throw new Error("submit did not return a response");
+		const { task } = (await submitResponse.json()) as { task: { id: string } };
 
 		// 5. The task appears in Telegram with a screenshot preview.
 		await waitFor(() => transport.callsOf("sendMessage").length >= 1);
