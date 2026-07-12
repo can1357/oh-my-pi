@@ -5405,6 +5405,23 @@ export class AgentSession {
 		return this.#obfuscator.obfuscate(text);
 	}
 
+	#obfuscatePreserveDataForProvider(
+		preserveData: Record<string, unknown> | undefined,
+	): Record<string, unknown> | undefined {
+		if (!preserveData || !this.#obfuscator?.hasSecrets()) return preserveData;
+		const archive = snapcompact.getPreservedArchive(preserveData);
+		if (!archive) return preserveData;
+		return {
+			...preserveData,
+			[snapcompact.PRESERVE_KEY]: {
+				...archive,
+				text: this.#obfuscateTextForProvider(archive.text),
+				textHead: this.#obfuscateTextForProvider(archive.textHead),
+				textTail: this.#obfuscateTextForProvider(archive.textTail),
+			} satisfies snapcompact.Archive,
+		};
+	}
+
 	#obfuscatePreparationForProvider(preparation: CompactionPreparation): CompactionPreparation {
 		if (!this.#obfuscator?.hasSecrets()) return preparation;
 		if (!preparation.previousSummary && !preparation.previousPreserveData) return preparation;
@@ -5413,7 +5430,7 @@ export class AgentSession {
 			previousSummary: preparation.previousSummary
 				? this.#obfuscator.obfuscate(preparation.previousSummary)
 				: preparation.previousSummary,
-			previousPreserveData: preparation.previousPreserveData,
+			previousPreserveData: this.#obfuscatePreserveDataForProvider(preparation.previousPreserveData),
 		};
 	}
 
