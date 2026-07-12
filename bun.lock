@@ -224,6 +224,20 @@
         "@types/bun": "catalog:",
       },
     },
+    "packages/remote-workspace": {
+      "name": "@pk-nerdsaver-ai/pi-remote-workspace",
+      "version": "16.2.6",
+      "bin": {
+        "ompk-remote": "./src/cli.ts",
+      },
+      "dependencies": {
+        "@pk-nerdsaver-ai/pi-utils": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+        "typescript": "catalog:",
+      },
+    },
     "packages/snapcompact": {
       "name": "@pk-nerdsaver-ai/snapcompact",
       "version": "16.2.6",
@@ -277,6 +291,16 @@
       },
       "peerDependencies": {
         "@pk-nerdsaver-ai/pi-coding-agent": "^13",
+      },
+    },
+    "packages/terminal-bench": {
+      "name": "@pk-nerdsaver-ai/terminal-bench",
+      "version": "0.0.1",
+      "bin": {
+        "tb2": "src/runner.ts",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
       },
     },
     "packages/tui": {
@@ -828,6 +852,8 @@
 
     "@pk-nerdsaver-ai/pi-natives": ["@pk-nerdsaver-ai/pi-natives@workspace:packages/natives"],
 
+    "@pk-nerdsaver-ai/pi-remote-workspace": ["@pk-nerdsaver-ai/pi-remote-workspace@workspace:packages/remote-workspace"],
+
     "@pk-nerdsaver-ai/pi-tui": ["@pk-nerdsaver-ai/pi-tui@workspace:packages/tui"],
 
     "@pk-nerdsaver-ai/pi-utils": ["@pk-nerdsaver-ai/pi-utils@workspace:packages/utils"],
@@ -837,6 +863,8 @@
     "@pk-nerdsaver-ai/snapcompact": ["@pk-nerdsaver-ai/snapcompact@workspace:packages/snapcompact"],
 
     "@pk-nerdsaver-ai/swarm-extension": ["@pk-nerdsaver-ai/swarm-extension@workspace:packages/swarm-extension"],
+
+    "@pk-nerdsaver-ai/terminal-bench": ["@pk-nerdsaver-ai/terminal-bench@workspace:packages/terminal-bench"],
 
     "@pk-nerdsaver-ai/typescript-edit-benchmark": ["@pk-nerdsaver-ai/typescript-edit-benchmark@workspace:packages/typescript-edit-benchmark"],
 
