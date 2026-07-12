@@ -1,4 +1,4 @@
-import { logger } from "@pk-nerdsaver-ai/pi-utils";
+import * as logger from "@pk-nerdsaver-ai/pi-utils/logger";
 import type { ActionLevel, ContextPacket, Executor, RoutingDecision } from "./types";
 import { isCaptureMode } from "./types";
 

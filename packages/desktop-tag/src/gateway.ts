@@ -8,6 +8,11 @@ import { type CapabilityRegistry, createDefaultRegistry, routeContext, updateAva
 import type { AgentEvent, AgentWorker, ApprovalDecision, CaptureMode, CaptureRegion, ContextPacket } from "./types";
 import { PiWorker } from "./worker";
 
+/** Structural interface for the capture-to-agent HTTP router (see capture/http.ts). */
+export interface CaptureRouterLike {
+	handle(request: Request, pathname: string): Promise<Response | undefined>;
+}
+
 export interface ServerOptions {
 	port: number;
 	hostname?: string;
@@ -15,6 +20,8 @@ export interface ServerOptions {
 	captureService?: CaptureService;
 	registry?: CapabilityRegistry;
 	worker?: AgentWorker;
+	/** Mounts the capture-to-agent workflow under /api/capture/. */
+	captureRouter?: CaptureRouterLike;
 }
 
 interface SocketData {
@@ -140,6 +147,19 @@ export class TagGatewayServer {
 			const upgraded = server.upgrade(req, { data: {} as SocketData });
 			if (upgraded) return undefined;
 			return new Response("WebSocket upgrade failed", { status: 400 });
+		}
+
+		if (url.pathname.startsWith("/api/capture/") && this.#options.captureRouter) {
+			if (this.#stopping) return new Response("Gateway is shutting down", { status: 503 });
+			// The Telegram webhook authenticates with its own secret token and may
+			// arrive through a tunnel whose Host is not loopback; every other
+			// capture route keeps the loopback same-origin check.
+			const isTelegramWebhook = url.pathname === "/api/capture/telegram/webhook";
+			if (!isTelegramWebhook && !isAllowedWebSocketOrigin(req.headers.get("Origin"), url)) {
+				return new Response("Origin forbidden", { status: 403 });
+			}
+			const handled = await this.#trackOperation(this.#options.captureRouter.handle(req, url.pathname));
+			return handled ?? new Response("Not found", { status: 404 });
 		}
 
 		if (url.pathname.startsWith("/api/")) {

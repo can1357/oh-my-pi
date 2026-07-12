@@ -58,8 +58,22 @@
 
     <label><input type="checkbox" id="clipboard" checked> Include clipboard / selected text</label>
 
+    <fieldset class="region-inputs" id="task-options">
+      <legend>Agent task routing</legend>
+      <div class="region-grid">
+        <label>Session
+          <select id="session-select"><option value="">New session</option></select>
+        </label>
+        <label>Runner
+          <select id="runner-select"><option value="">Auto</option></select>
+        </label>
+      </div>
+      <label><input type="checkbox" id="telegram" checked> Share progress in Telegram</label>
+    </fieldset>
+
     <div class="row">
-      <button id="submit" class="primary">Tag it</button>
+      <button id="submit-task" class="primary">Create agent task</button>
+      <button id="submit">Tag it (interactive)</button>
       <button id="cancel">Cancel</button>
     </div>
 
@@ -142,6 +156,99 @@
 
     document.getElementById('cancel').addEventListener('click', () => {
       ws.send(JSON.stringify({ type: 'cancel' }));
+      if (activeTaskEvents) { activeTaskEvents.close(); activeTaskEvents = undefined; }
+      if (activeTaskId) {
+        fetch(`/api/capture/tasks/${activeTaskId}/cancel`, { method: 'POST' }).catch(() => {});
+        activeTaskId = undefined;
+      }
+    });
+
+    // ---- Async capture-task flow (routes into runners + Telegram) ----
+    let activeTaskId;
+    let activeTaskEvents;
+
+    async function loadTaskOptions() {
+      try {
+        const [sessions, runners] = await Promise.all([
+          fetch('/api/capture/sessions').then(r => r.ok ? r.json() : { sessions: [] }),
+          fetch('/api/capture/runners').then(r => r.ok ? r.json() : { runners: [] }),
+        ]);
+        const sessionSelect = document.getElementById('session-select');
+        for (const s of sessions.sessions ?? []) {
+          const option = document.createElement('option');
+          option.value = s.sessionId;
+          option.textContent = `${s.sessionId.slice(0, 8)} — ${s.instruction}`;
+          sessionSelect.appendChild(option);
+        }
+        const runnerSelect = document.getElementById('runner-select');
+        for (const r of runners.runners ?? []) {
+          const option = document.createElement('option');
+          option.value = r.id;
+          option.textContent = r.available ? r.name : `${r.name} (offline)`;
+          runnerSelect.appendChild(option);
+        }
+      } catch { /* capture API disabled */ }
+    }
+    loadTaskOptions();
+
+    function followTask(taskId) {
+      activeTaskEvents = new EventSource(`/api/capture/events/${taskId}`);
+      activeTaskEvents.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'run.status') setStatus(`Task ${msg.status}`);
+        if (msg.type === 'run.tool' && msg.phase === 'started') log(`[${msg.summary}]`);
+        if (msg.type === 'run.message.delta') log(msg.text);
+        if (msg.type === 'run.result') { log('\n--- result ---\n' + msg.text); }
+        if (msg.type === 'run.status' && ['completed', 'failed', 'cancelled'].includes(msg.status)) {
+          activeTaskEvents.close();
+          activeTaskEvents = undefined;
+        }
+      };
+      activeTaskEvents.addEventListener('end', () => { activeTaskEvents?.close(); activeTaskEvents = undefined; });
+      activeTaskEvents.onerror = () => { activeTaskEvents?.close(); activeTaskEvents = undefined; };
+    }
+
+    document.getElementById('submit-task').addEventListener('click', async () => {
+      const instruction = requestEl.value.trim();
+      if (!instruction) { setStatus('Enter an instruction first.'); return; }
+      const capture = { mode, includeClipboard: document.getElementById('clipboard').checked };
+      if (mode === 'region') {
+        const region = readRegion();
+        if (!region) return;
+        capture.region = region;
+      }
+      const sessionId = document.getElementById('session-select').value;
+      const runnerId = document.getElementById('runner-select').value;
+      const payload = {
+        requestId: crypto.randomUUID(),
+        source: {
+          type: mode === 'browser' ? 'browser' : mode === 'window' ? 'active-window' : mode === 'region' ? 'screen-region' : 'full-screen',
+          capturedAt: new Date().toISOString(),
+        },
+        instruction,
+        capture,
+        routing: {
+          ...(sessionId ? { sessionId } : {}),
+          ...(runnerId ? { runnerId } : {}),
+        },
+        collaboration: document.getElementById('telegram').checked ? {} : { disabled: true },
+      };
+      logEl.textContent = '';
+      setStatus('Submitting task…');
+      try {
+        const response = await fetch('/api/capture/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const body = await response.json();
+        if (!response.ok) { setStatus(`Failed: ${body.error ?? response.status}`); return; }
+        activeTaskId = body.task.id;
+        setStatus(`Task ${body.task.status} (${activeTaskId.slice(0, 8)})`);
+        followTask(activeTaskId);
+      } catch (error) {
+        setStatus('Failed to submit task');
+      }
     });
 
     function showApproval(req) {
