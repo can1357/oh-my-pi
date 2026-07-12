@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { AssistantMessage, Context, ImageContent, Message, TextContent } from "@pk-nerdsaver-ai/pi-ai";
+import type { AssistantMessage, Context, ImageContent, Message, TextContent, Tool } from "@pk-nerdsaver-ai/pi-ai";
+import { toolWireSchema } from "@pk-nerdsaver-ai/pi-ai/utils/schema";
 import type { SessionContext } from "../session/session-context";
 import { compileSecretRegex } from "./regex";
 
@@ -391,6 +392,24 @@ export function obfuscateProviderContext(obfuscator: SecretObfuscator | undefine
 	if (!obfuscator?.hasSecrets()) return context;
 	const messages = obfuscateMessages(obfuscator, context.messages);
 	return messages === context.messages ? context : { ...context, messages };
+}
+
+function obfuscateProviderVisibleValue<T>(obfuscator: SecretObfuscator, value: T): T {
+	return mapJsonStrings(value as JsonValue, text => obfuscator.obfuscate(text)) as T;
+}
+
+/** Convert tool schemas to wire JSON Schema before obfuscating provider-visible strings. */
+export function obfuscateProviderTools(
+	obfuscator: SecretObfuscator | undefined,
+	tools: Tool[] | undefined,
+): Tool[] | undefined {
+	if (!tools || !obfuscator?.hasSecrets()) return tools;
+	return tools.map(tool => ({
+		...tool,
+		description: obfuscator.obfuscate(tool.description),
+		parameters: obfuscateProviderVisibleValue(obfuscator, toolWireSchema(tool)),
+		customFormat: tool.customFormat ? obfuscateProviderVisibleValue(obfuscator, tool.customFormat) : undefined,
+	}));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

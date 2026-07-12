@@ -14,7 +14,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { configureProviderMaxInFlightRequests } from "@pk-nerdsaver-ai/pi-ai/stream";
 import {
 	getAgentDbPath,
 	getAgentDir,
@@ -1402,9 +1401,6 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 			appendOnlyModeSignal.fire(value);
 		}
 	},
-	"providers.maxInFlightRequests": value => {
-		configureProviderMaxInFlightRequests(validateProviderMaxInFlightRequests(value));
-	},
 	"hindsight.bankId": () => hindsightScopeSignal.fire(),
 	"hindsight.bankIdPrefix": () => hindsightScopeSignal.fire(),
 	"hindsight.scoping": () => hindsightScopeSignal.fire(),
@@ -1480,7 +1476,6 @@ export function resetSettingsForTest(): void {
 	globalInstance = null;
 	globalInstancePromise = null;
 	clearBoundSettingsMethods();
-	configureProviderMaxInFlightRequests(undefined);
 }
 
 /**

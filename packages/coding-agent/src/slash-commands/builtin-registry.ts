@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getOAuthProviders } from "@pk-nerdsaver-ai/pi-ai/oauth";
-import { setNextRequestDebugPath } from "@pk-nerdsaver-ai/pi-ai/utils/request-debug";
+import * as requestDebug from "@pk-nerdsaver-ai/pi-ai/utils/request-debug";
 import { type AutocompleteItem, Markdown, Spacer } from "@pk-nerdsaver-ai/pi-tui";
 import { $which, APP_NAME, setProjectDir } from "@pk-nerdsaver-ai/pi-utils";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
@@ -32,6 +32,8 @@ import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession, FreshSessionResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { clearSpeechHardStop, enableSpeechHardStop, isSpeechHardStopped } from "../tts/speech-hard-stop";
+import { vocalizer } from "../tts/vocalizer";
 import { urlHyperlinkAlways } from "../tui";
 import { getChangelogPath, parseChangelog } from "../utils/changelog";
 import { handleWikigraphCommand, handleWikigraphCommandTui } from "./builtin/wikigraph";
@@ -50,8 +52,6 @@ import { handleSshAcp } from "./helpers/ssh";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleSubagentSlashCommand } from "./helpers/subagent";
 import { handleTodoAcp } from "./helpers/todo";
-import { vocalizer } from "../tts/vocalizer";
-import { clearSpeechHardStop, enableSpeechHardStop, isSpeechHardStopped } from "../tts/speech-hard-stop";
 import { buildUsageReportText } from "./helpers/usage-report";
 import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
 import type {
@@ -301,7 +301,14 @@ async function handleDebugSubcommand(
 				return commandConsumed();
 			}
 			const requestPath = resolveDebugRequestDumpPath(rest, cwd);
-			setNextRequestDebugPath(requestPath);
+			const setNextPath: unknown = Object.getOwnPropertyDescriptor(requestDebug, "setNextRequestDebugPath")?.value;
+			if (typeof setNextPath !== "function") {
+				await output(
+					"Per-request paths are unavailable in this pi-ai build; set PI_REQ_DEBUG=1 before startup instead.",
+				);
+				return commandConsumed();
+			}
+			setNextPath(requestPath);
 			await output(`Next AI provider request will be dumped to ${requestPath}`);
 			return commandConsumed();
 		}
@@ -354,9 +361,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			if (arg === "status") {
 				const enabled = runtime.settings.get("speech.enabled");
 				const hard = isSpeechHardStopped();
-				await runtime.output(
-					`pk-speak: speech ${enabled ? "on" : "off"}${hard ? " (hard-stopped)" : ""}.`,
-				);
+				await runtime.output(`pk-speak: speech ${enabled ? "on" : "off"}${hard ? " (hard-stopped)" : ""}.`);
 				return commandConsumed();
 			}
 			return usage("Usage: /pk-speak [stop|off|on|status]", runtime);

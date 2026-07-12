@@ -98,12 +98,11 @@ import {
 	clearAnthropicFastModeFallback,
 	deriveClaudeDeviceId,
 	Effort,
-	isContextOverflow,
-	isUsageLimitError,
 	parseRateLimitReason,
 	resolveServiceTier,
 	streamSimple,
 } from "@pk-nerdsaver-ai/pi-ai";
+import { isContextOverflow, isUsageLimit as isUsageLimitError } from "@pk-nerdsaver-ai/pi-ai/error";
 import { stripToolDescriptions } from "@pk-nerdsaver-ai/pi-ai/utils/schema";
 import { THINKING_LOOP_ERROR_MARKER } from "@pk-nerdsaver-ai/pi-ai/utils/thinking-loop";
 import { getSupportedEfforts } from "@pk-nerdsaver-ai/pi-catalog/model-thinking";
@@ -264,7 +263,9 @@ import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import {
+	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
+	obfuscateMessages,
 	obfuscateProviderContext,
 	obfuscateProviderTools,
 	type SecretObfuscator,
@@ -2610,7 +2611,7 @@ export class AgentSession {
 		const obfuscator = this.#obfuscator;
 		if (obfuscator && event.type === "message_end" && event.message.role === "assistant") {
 			const message = event.message;
-			const deobfuscatedContent = obfuscator.deobfuscateObject(message.content);
+			const deobfuscatedContent = deobfuscateAssistantContent(obfuscator, message.content);
 			if (deobfuscatedContent !== message.content) {
 				displayEvent = { ...event, message: { ...message, content: deobfuscatedContent } };
 			}
@@ -5393,9 +5394,10 @@ export class AgentSession {
 		return deobfuscateSessionContext(this.sessionManager.buildSessionContext({ transcript: true }), this.#obfuscator);
 	}
 
-	#obfuscateForProvider<T>(value: T): T {
-		if (!this.#obfuscator?.hasSecrets()) return value;
-		return this.#obfuscator.obfuscateObject(value);
+	#obfuscateTextArrayForProvider(value: readonly string[] | undefined): string[] | undefined {
+		const obfuscator = this.#obfuscator;
+		if (!value || !obfuscator?.hasSecrets()) return value ? [...value] : undefined;
+		return value.map(text => obfuscator.obfuscate(text));
 	}
 
 	#obfuscateTextForProvider(text: string | undefined): string | undefined {
@@ -5411,9 +5413,7 @@ export class AgentSession {
 			previousSummary: preparation.previousSummary
 				? this.#obfuscator.obfuscate(preparation.previousSummary)
 				: preparation.previousSummary,
-			previousPreserveData: preparation.previousPreserveData
-				? this.#obfuscator.obfuscateObject(preparation.previousPreserveData)
-				: preparation.previousPreserveData,
+			previousPreserveData: preparation.previousPreserveData,
 		};
 	}
 
@@ -5431,7 +5431,8 @@ export class AgentSession {
 	}
 
 	#convertToLlmForSideRequest(messages: AgentMessage[]): Message[] {
-		return this.#obfuscateForProvider(convertToLlm(messages));
+		const converted = convertToLlm(messages);
+		return this.#obfuscator ? obfuscateMessages(this.#obfuscator, converted) : converted;
 	}
 
 	/** Convert session messages using the same pre-LLM pipeline as the active session. */
@@ -8324,8 +8325,8 @@ export class AgentSession {
 						compactionAbortController.signal,
 						{
 							promptOverride: this.#obfuscateTextForProvider(compactionPrep.hookPrompt),
-							extraContext: this.#obfuscateForProvider(compactionPrep.hookContext),
-							remoteInstructions: this.#obfuscateForProvider(this.#baseSystemPrompt.join("\n\n")),
+							extraContext: this.#obfuscateTextArrayForProvider(compactionPrep.hookContext),
+							remoteInstructions: this.#obfuscateTextForProvider(this.#baseSystemPrompt.join("\n\n")),
 							convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 						},
 					);
@@ -8570,7 +8571,7 @@ export class AgentSession {
 				model,
 				this.#modelRegistry.resolver(model, this.sessionId),
 				{
-					systemPrompt: this.#obfuscateForProvider(this.#baseSystemPrompt),
+					systemPrompt: this.#obfuscateTextArrayForProvider(this.#baseSystemPrompt) ?? [...this.#baseSystemPrompt],
 					tools: obfuscateProviderTools(
 						this.#obfuscator,
 						this.#pruneToolDescriptions ? stripToolDescriptions(this.agent.state.tools) : this.agent.state.tools,
@@ -10475,8 +10476,8 @@ export class AgentSession {
 								autoCompactionSignal,
 								{
 									promptOverride: this.#obfuscateTextForProvider(compactionPrep.hookPrompt),
-									extraContext: this.#obfuscateForProvider(compactionPrep.hookContext),
-									remoteInstructions: this.#obfuscateForProvider(this.#baseSystemPrompt.join("\n\n")),
+									extraContext: this.#obfuscateTextArrayForProvider(compactionPrep.hookContext),
+									remoteInstructions: this.#obfuscateTextForProvider(this.#baseSystemPrompt.join("\n\n")),
 									metadata: this.agent.metadataForProvider(candidate.provider),
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
@@ -12064,7 +12065,7 @@ export class AgentSession {
 			}
 			if (event.type === "done") {
 				assistantMessage = this.#obfuscator?.hasSecrets()
-					? { ...event.message, content: this.#obfuscator.deobfuscateObject(event.message.content) }
+					? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, event.message.content) }
 					: event.message;
 				break;
 			}

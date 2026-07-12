@@ -1,18 +1,22 @@
-import {
-	Ellipsis,
-	type ExtractSegmentsResult,
-	extractSegments as nativeExtractSegments,
-	setHangulCompatJamoWidthOverride as nativeSetHangulCompatJamoWidthOverride,
-	sliceWithWidth as nativeSliceWithWidth,
-	truncateToWidth as nativeTruncateToWidth,
-	wrapTextWithAnsi as nativeWrapTextWithAnsi,
-	type SliceResult,
-} from "@pk-nerdsaver-ai/pi-natives";
+import type { ExtractSegmentsResult, Ellipsis as NativeEllipsis, SliceResult } from "@pk-nerdsaver-ai/pi-natives";
+import * as nativeBindings from "@pk-nerdsaver-ai/pi-natives";
 import { DEFAULT_TAB_WIDTH } from "@pk-nerdsaver-ai/pi-utils";
 
-export { Ellipsis } from "@pk-nerdsaver-ai/pi-natives";
+export const Ellipsis = nativeBindings.Ellipsis;
+export type Ellipsis = NativeEllipsis;
 
 export { DEFAULT_TAB_WIDTH } from "@pk-nerdsaver-ai/pi-utils";
+
+const nativeExtractSegments = nativeBindings.extractSegments;
+const nativeSliceWithWidth = nativeBindings.sliceWithWidth;
+const nativeTruncateToWidth = nativeBindings.truncateToWidth;
+const nativeWrapTextWithAnsi = nativeBindings.wrapTextWithAnsi;
+type NativeBindingsWithOptionalHangul = typeof nativeBindings & {
+	setHangulCompatJamoWidthOverride?: (value: number) => void;
+};
+
+const nativeSetHangulCompatJamoWidthOverride = (nativeBindings as NativeBindingsWithOptionalHangul)
+	.setHangulCompatJamoWidthOverride;
 
 export type HangulCompatibilityJamoWidth = "platform" | "unicode" | 1 | 2;
 
@@ -33,13 +37,13 @@ export function getHangulCompatibilityJamoWidth(): HangulCompatibilityJamoWidth 
 export function setHangulCompatibilityJamoWidth(width: HangulCompatibilityJamoWidth): boolean {
 	const changed = hangulCompatibilityJamoWidth !== width;
 	hangulCompatibilityJamoWidth = width;
-	nativeSetHangulCompatJamoWidthOverride(nativeHangulCompatibilityJamoOverride(width));
+	nativeSetHangulCompatJamoWidthOverride?.(nativeHangulCompatibilityJamoOverride(width));
 	return changed;
 }
 
 export function resetHangulCompatibilityJamoWidthForTests(): void {
 	hangulCompatibilityJamoWidth = "platform";
-	nativeSetHangulCompatJamoWidthOverride(0);
+	nativeSetHangulCompatJamoWidthOverride?.(0);
 }
 
 export type TextSizingScale = 1 | 2 | 3;

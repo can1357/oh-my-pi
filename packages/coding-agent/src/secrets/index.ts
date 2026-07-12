@@ -9,6 +9,7 @@ export {
 	deobfuscateToolArguments,
 	obfuscateMessages,
 	obfuscateProviderContext,
+	obfuscateProviderTools,
 	type SecretEntry,
 	SecretObfuscator,
 } from "./obfuscator";

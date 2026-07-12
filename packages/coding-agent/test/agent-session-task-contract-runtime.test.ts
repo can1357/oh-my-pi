@@ -51,6 +51,7 @@ describe("AgentSession task-contract runtime", () => {
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-task-contract-runtime-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage.setRuntimeApiKey("mock", "test-key");
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 	});
 
@@ -82,9 +83,10 @@ describe("AgentSession task-contract runtime", () => {
 	 *  real model call. The compiled-contract state still mutates per turn. */
 	function capturePromptTurns(target: AgentSession): AgentMessage[][] {
 		const captures: AgentMessage[][] = [];
-		vi.spyOn(target.agent, "prompt").mockImplementation(async (messages: AgentMessage[]) => {
-			captures.push(messages);
-			return undefined;
+		vi.spyOn(target.agent, "prompt").mockImplementation(async (...args: unknown[]) => {
+			const messages = args[0];
+			if (!Array.isArray(messages)) throw new Error("Expected an AgentMessage array");
+			captures.push(messages as AgentMessage[]);
 		});
 		return captures;
 	}

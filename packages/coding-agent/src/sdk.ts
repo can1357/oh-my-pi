@@ -101,7 +101,7 @@ import {
 	type MCPToolsLoadResult,
 	parseMCPToolName,
 } from "./mcp";
-import { MCP_CONNECTING_EVENT_CHANNEL, type McpConnectingEvent } from "./mcp/startup-events";
+import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import type { MnemopiSessionState } from "./mnemopi/state";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
@@ -118,8 +118,8 @@ import {
 } from "./secrets";
 import { AgentSession } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
-import type { ClientBridge } from "./session/client-bridge";
 import type { AuthStorage } from "./session/auth-storage";
+import type { ClientBridge } from "./session/client-bridge";
 import { parseFusionPoolEntries } from "./session/fusion-router";
 import {
 	type CustomMessage,
@@ -170,7 +170,6 @@ import {
 	discoverStartupLspServers,
 	EditTool,
 	EvalTool,
-	FindTool,
 	filterInitialToolsForDiscoveryAll,
 	getSearchTools,
 	HIDDEN_TOOLS,
@@ -183,7 +182,6 @@ import {
 	ReadTool,
 	ResolveTool,
 	renderSearchToolBm25Description,
-	SearchTool,
 	SearchToolBm25Tool,
 	setExcludedSearchProviders,
 	setPreferredImageProvider,
@@ -634,12 +632,10 @@ export {
 	createTools,
 	EditTool,
 	EvalTool,
-	FindTool,
 	HIDDEN_TOOLS,
 	loadSshTool,
 	ReadTool,
 	ResolveTool,
-	SearchTool,
 	type ToolSession,
 	WebSearchTool,
 	WriteTool,
@@ -1674,12 +1670,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			| ((liveSession: AgentSession, activation: DeferredMCPActivation) => void)
 			| undefined;
 		const startupQuiet = settings.get("startup.quiet");
-		const onMCPConnecting = (serverNames: string[]) => {
-			if (!options.hasUI || startupQuiet || serverNames.length === 0) return;
-			eventBus.emit(MCP_CONNECTING_EVENT_CHANNEL, { serverNames } satisfies McpConnectingEvent);
+		const onMCPStatus = (event: McpConnectionStatusEvent) => {
+			if (!options.hasUI || startupQuiet) return;
+			if (event.type === "connecting" && event.serverNames.length === 0) return;
+			eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event);
 		};
 		const mcpDiscoverOptions = {
-			onConnecting: onMCPConnecting,
+			onStatus: onMCPStatus,
 			enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
 			// Always filter Exa - we have native integration
 			filterExa: true,

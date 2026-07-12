@@ -42,7 +42,6 @@ import {
 	veniceModelManagerOptions,
 	vercelAiGatewayModelManagerOptions,
 	vllmModelManagerOptions,
-	waferPassModelManagerOptions,
 	waferServerlessModelManagerOptions,
 	xaiModelManagerOptions,
 	xaiOAuthModelManagerOptions,
@@ -365,8 +364,6 @@ export const CATALOG_PROVIDERS = [
 		id: "wafer-pass",
 		defaultModel: "GLM-5.1",
 		envVars: ["WAFER_PASS_API_KEY"],
-		createModelManagerOptions: (config: ModelManagerConfig) => waferPassModelManagerOptions(config),
-		catalogDiscovery: { label: "Wafer Pass", oauthProvider: "wafer-pass" },
 	},
 	{
 		id: "wafer-serverless",

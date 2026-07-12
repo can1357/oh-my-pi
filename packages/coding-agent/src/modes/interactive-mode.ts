@@ -70,7 +70,12 @@ import type { Goal, GoalModeState } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
-import { formatMCPConnectingMessage, isMcpConnectingEvent, MCP_CONNECTING_EVENT_CHANNEL } from "../mcp/startup-events";
+import {
+	formatMCPConnectionStatusMessage,
+	isMcpConnectionStatusEvent,
+	MCP_CONNECTION_STATUS_EVENT_CHANNEL,
+	type McpConnectionStatusEvent,
+} from "../mcp/startup-events";
 import {
 	humanizePlanTitle,
 	type PlanApprovalDetails,
@@ -547,6 +552,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#observerRegistry: SessionObserverRegistry;
 	#eventBus?: EventBus;
 	#eventBusUnsubscribers: Array<() => void> = [];
+	#mcpPendingServers: string[] = [];
+	#mcpConnectedServers: string[] = [];
+	#mcpFailedServers = new Map<string, string>();
 	#welcomeComponent?: WelcomeComponent;
 	readonly #chatHost: ChatBlockHost = { requestRender: () => this.ui.requestRender() };
 
@@ -580,13 +588,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				}),
 			);
 			this.#eventBusUnsubscribers.push(
-				eventBus.on(MCP_CONNECTING_EVENT_CHANNEL, data => {
-					if (!isMcpConnectingEvent(data)) {
-						logger.warn("Ignoring malformed mcp:connecting event", { data });
+				eventBus.on(MCP_CONNECTION_STATUS_EVENT_CHANNEL, data => {
+					if (!isMcpConnectionStatusEvent(data)) {
+						logger.warn("Ignoring malformed MCP connection-status event", { data });
 						return;
 					}
 					if (this.settings.get("startup.quiet")) return;
-					this.showStatus(formatMCPConnectingMessage(data.serverNames));
+					this.#handleMcpConnectionStatusEvent(data);
 				}),
 			);
 		}
@@ -3316,6 +3324,33 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showWarning(message: string): void {
 		this.#uiHelpers.showWarning(message);
+	}
+
+	#handleMcpConnectionStatusEvent(event: McpConnectionStatusEvent): void {
+		switch (event.type) {
+			case "connecting":
+				this.#mcpPendingServers = [...event.serverNames];
+				this.#mcpConnectedServers = [];
+				this.#mcpFailedServers.clear();
+				break;
+			case "connected":
+				this.#mcpPendingServers = this.#mcpPendingServers.filter(server => server !== event.serverName);
+				if (!this.#mcpConnectedServers.includes(event.serverName)) this.#mcpConnectedServers.push(event.serverName);
+				this.#mcpFailedServers.delete(event.serverName);
+				break;
+			case "failed":
+				this.#mcpPendingServers = this.#mcpPendingServers.filter(server => server !== event.serverName);
+				this.#mcpConnectedServers = this.#mcpConnectedServers.filter(server => server !== event.serverName);
+				this.#mcpFailedServers.set(event.serverName, event.error);
+				break;
+		}
+		this.showStatus(
+			formatMCPConnectionStatusMessage({
+				pendingServers: this.#mcpPendingServers,
+				connectedServers: this.#mcpConnectedServers,
+				failedServers: [...this.#mcpFailedServers].map(([serverName, error]) => ({ serverName, error })),
+			}),
+		);
 	}
 
 	#handleLspStartupEvent(event: LspStartupEvent): void {

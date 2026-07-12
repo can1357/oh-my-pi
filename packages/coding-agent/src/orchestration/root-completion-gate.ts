@@ -3,7 +3,8 @@
  * session transcript when the main agent stops without a structured yield.
  */
 
-import type { Message, ToolResultMessage } from "@pk-nerdsaver-ai/pi-ai";
+import type { AgentMessage } from "@pk-nerdsaver-ai/pi-agent-core";
+import type { ToolResultMessage } from "@pk-nerdsaver-ai/pi-ai";
 import type { CompletionGateInput } from "./completion-gate";
 import type { ActiveTaskContractSnapshot } from "./task-contract";
 
@@ -18,7 +19,7 @@ const DELIVERABLE_TOOL_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 export function collectRecentToolResults(
-	messages: readonly Message[],
+	messages: readonly AgentMessage[],
 	sinceTimestamp?: number,
 ): readonly ToolResultMessage[] {
 	return messages.filter((message): message is ToolResultMessage => {
@@ -34,7 +35,7 @@ export function collectRecentToolResults(
  */
 export function buildCompletionGateInputFromTranscript(
 	contract: ActiveTaskContractSnapshot,
-	messages: readonly Message[],
+	messages: readonly AgentMessage[],
 	sinceTimestamp?: number,
 ): CompletionGateInput {
 	const toolResults = collectRecentToolResults(messages, sinceTimestamp);
