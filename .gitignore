@@ -97,5 +97,9 @@ scratch/
 docs/improvements/
 /UsersprestAppDataLocalTemplin_snap*.json
 
+# Side-agent coordination runtime state (file-based multi-agent queue)
+.side-agent/
+.side-agent-archive/
+
 # Local CodeGraph index (per-machine, not source)
 .codegraph/
