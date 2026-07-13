@@ -23,3 +23,7 @@ Recent additions (2026-07-12):
 # References
 
 * [References](references/) - external sources (papers, vendor docs) mirrored as first-class concepts.
+
+# History
+
+* [Recent History — 2026-07](concepts/recent-history-2026-07.md) — browser agents, context evidence, orchestration, side-agent coordination, remote workspaces, and environments-cloud routing.

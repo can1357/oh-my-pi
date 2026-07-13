@@ -1,5 +1,9 @@
 # Bundle Update Log
 
+## 2026-07-13
+* **Creation**: Added [Recent History — 2026-07](concepts/recent-history-2026-07.md), covering committed changes from `9ed73a788..1895db95e` and separating current uncommitted work.
+* **Update**: Indexed the history synthesis under the knowledge bundle's History section.
+
 ## 2026-07-12
 * **Creation**: Added [Environments-cloud routing](/concepts/environments-cloud-routing.md) for MSI pkscloudenvs SoT wiring (resolvers, `ompk-remote environments`, coding-agent skill auto-route).
 * **Creation**: Added [Remote workspace](/concepts/remote-workspace.md) documenting phase-1 Docker sandbox jobs (`packages/remote-workspace`, `ompk-remote`), lifecycle, and the split from multi-node mesh SoT.
