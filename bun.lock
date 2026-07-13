@@ -19,6 +19,16 @@
         "typescript": "catalog:",
       },
     },
+    "packages/activity-journal": {
+      "name": "@pk-nerdsaver-ai/pi-activity-journal",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pk-nerdsaver-ai/pi-context-policy": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+      },
+    },
     "packages/agent": {
       "name": "@pk-nerdsaver-ai/pi-agent-core",
       "version": "16.2.6",
@@ -150,6 +160,13 @@
         "@types/bun": "catalog:",
         "@types/react": "catalog:",
         "@types/react-dom": "catalog:",
+      },
+    },
+    "packages/context-policy": {
+      "name": "@pk-nerdsaver-ai/pi-context-policy",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@types/bun": "catalog:",
       },
     },
     "packages/desktop-tag": {
@@ -838,6 +855,8 @@
 
     "@pk-nerdsaver-ai/omp-stats": ["@pk-nerdsaver-ai/omp-stats@workspace:packages/stats"],
 
+    "@pk-nerdsaver-ai/pi-activity-journal": ["@pk-nerdsaver-ai/pi-activity-journal@workspace:packages/activity-journal"],
+
     "@pk-nerdsaver-ai/pi-agent-core": ["@pk-nerdsaver-ai/pi-agent-core@workspace:packages/agent"],
 
     "@pk-nerdsaver-ai/pi-ai": ["@pk-nerdsaver-ai/pi-ai@workspace:packages/ai"],
@@ -845,6 +864,8 @@
     "@pk-nerdsaver-ai/pi-catalog": ["@pk-nerdsaver-ai/pi-catalog@workspace:packages/catalog"],
 
     "@pk-nerdsaver-ai/pi-coding-agent": ["@pk-nerdsaver-ai/pi-coding-agent@workspace:packages/coding-agent"],
+
+    "@pk-nerdsaver-ai/pi-context-policy": ["@pk-nerdsaver-ai/pi-context-policy@workspace:packages/context-policy"],
 
     "@pk-nerdsaver-ai/pi-desktop-tag": ["@pk-nerdsaver-ai/pi-desktop-tag@workspace:packages/desktop-tag"],
 

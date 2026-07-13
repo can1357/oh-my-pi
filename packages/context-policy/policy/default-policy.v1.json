@@ -1,0 +1,30 @@
+{
+  "version": "context-retention/v1",
+  "enabledByDefault": false,
+  "remoteStorageEnabledByDefault": false,
+  "categories": {
+    "raw_capture": { "ttlDays": 30, "coldAfterDays": 7, "queryable": false },
+    "extracted_text": { "ttlDays": 90, "queryable": true },
+    "session_summary": { "ttlDays": 90, "queryable": true },
+    "workflow_state": { "ttlMode": "case_closed_plus_days", "daysAfterClose": 30, "queryable": true },
+    "preference": { "ttlDays": 365, "queryable": true, "governed": true },
+    "audit_action": { "ttlDays": 730, "immutable": true, "queryable": false },
+    "final_deliverable": { "ttlMode": "governed", "queryable": false },
+    "error_log": { "ttlDays": 60, "queryable": false },
+    "temporary": { "ttlDays": 7, "queryable": false },
+    "quarantine": { "ttlDays": 14, "queryable": false }
+  },
+  "hardRules": {
+    "requireExplicitConsent": true,
+    "requireVerifiedIdentity": true,
+    "requireCategory": true,
+    "requireProvenance": true,
+    "encryptBeforeRemoteUpload": true,
+    "denyCrossUserReads": true,
+    "denyCrossProjectReadsByDefault": true,
+    "denyRawPromptInjection": true,
+    "cascadeDeletion": true,
+    "minimumFreeDiskBytes": 21474836480,
+    "minimumFreeDiskPercent": 10
+  }
+}
