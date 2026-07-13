@@ -4,6 +4,7 @@
 
 ### Added
 - Added offline `/help [question]` recommendations that match natural-language questions to built-in oh-my-pk features, explain when to use them, and link to local documentation.
+- Added same-CWD cross-process IRC discovery and authenticated loopback delivery, with `--no-irc` and `/irc on|off|status` controls.
 - Session skill routing for environments-cloud (pkscloudenvs): `loadSkills()` auto-includes `C:\dev\desktop-infra\environments-cloud\.agents\skills` (or `OMPK_ENVIRONMENTS_CLOUD_ROOT` / `PKS_ENVIRONMENTS_CLOUD_ROOT`) when present on disk, so mesh-orchestrator / colab-warmup resolve without a guessed path.
 - Added a transport-neutral agent gateway and durable `omp runtime` shell with unified SQLite state, searchable task episodes, crash-recoverable leases/checkpoints, UTC cron scheduling, headless OMP execution, file/webhook notifications, privacy-bounded trajectory and correction events, and safer validated auto-learned skills.
 - Integrated deterministic small-model orchestration profiles through task/Fusion/tool/IRC/extension/SDK seams: allocation-free `SpawnPlan` preallocation, typed `task_spawn_policy` extension hook with default-off llm-router registration, source-aware tool ceilings, assignment-contract verification with fail-closed Yield, request-fallback-then-fresh-child recovery, persisted collaboration/tool-policy revive, and startup structural/semantic selector validation.

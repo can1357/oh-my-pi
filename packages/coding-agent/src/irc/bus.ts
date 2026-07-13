@@ -23,6 +23,7 @@ import {
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
+import type { IrcIpc } from "./ipc";
 
 export interface IrcMessage {
 	id: string;
@@ -52,6 +53,8 @@ export interface IrcSendOptions {
 	expectsReply?: boolean;
 	/** Marks fan-out deliveries so report-only and narrowed peer policies can reject broadcasts. */
 	isBroadcast?: boolean;
+	/** Skips the display-only main-UI relay for an already-visible delivery. */
+	suppressRelay?: boolean;
 }
 
 interface WakeReservation {
@@ -78,6 +81,7 @@ export class IrcBus {
 	}
 
 	readonly #registry: AgentRegistry;
+	#ipc: IrcIpc | undefined;
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
@@ -89,6 +93,15 @@ export class IrcBus {
 		// Lazy: the lifecycle global self-constructs against the global registry,
 		// so only touch it when a parked recipient actually needs reviving.
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+	}
+
+	attachIpc(ipc: IrcIpc | undefined): void {
+		this.#ipc = ipc;
+	}
+
+	/** Deliver a message received from a same-CWD remote process. */
+	async deliverRemote(message: IrcMessage, opts?: IrcSendOptions): Promise<IrcDeliveryReceipt> {
+		return this.send(message, opts);
 	}
 
 	/**
@@ -117,6 +130,10 @@ export class IrcBus {
 	 */
 	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: IrcSendOptions): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		if (!this.#registry.get(message.to) && this.#ipc) {
+			const remoteReceipt = await this.#ipc.send(message.to, msg, opts);
+			if (remoteReceipt) return remoteReceipt;
+		}
 		const ref = this.#registry.get(message.to);
 		if (!ref || ref.status === "aborted") {
 			return { to: message.to, outcome: "failed", error: `Unknown or terminated agent "${message.to}".` };

@@ -293,6 +293,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--continue",
 	"--no-session",
 	"--no-tools",
+	"--no-irc",
 	"--no-lsp",
 	"--no-pty",
 	"--hide-thinking",

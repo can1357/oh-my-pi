@@ -16,6 +16,7 @@ import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
+import type { IrcIpc } from "../irc/ipc";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
 import type { MnemopiSessionState } from "../mnemopi/state";
@@ -243,6 +244,10 @@ export interface ToolSession {
 	getToolByName?: (name: string) => AgentTool | undefined;
 	/** Agent registry for IRC routing across live sessions. */
 	agentRegistry?: AgentRegistry;
+	/** Cross-process IRC transport for this process. */
+	ircIpc?: IrcIpc;
+	/** Runtime IRC availability (launch and slash-command opt-out). */
+	ircEnabled?: () => boolean;
 	/** Get artifacts directory for artifact:// URLs */
 	getArtifactsDir?: () => string | null;
 	/** Get the ArtifactManager backing this session (shared across parent + subagents). */

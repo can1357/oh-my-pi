@@ -121,6 +121,9 @@ export default class Index extends Command {
 		"no-extensions": Flags.boolean({
 			description: "Disable extension discovery (explicit -e paths still work)",
 		}),
+		"no-irc": Flags.boolean({
+			description: "Disable cross-process IRC for this session",
+		}),
 		"no-skills": Flags.boolean({
 			description: "Disable skills discovery and loading",
 		}),

@@ -22,6 +22,7 @@ import { type } from "arktype";
 import type { Settings } from "../config/settings";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../irc/bus";
+import type { IrcRemotePeer } from "../irc/ipc";
 import { isValidThemeColor, type Theme, type ThemeColor } from "../modes/theme/theme";
 import ircDescription from "../prompts/tools/irc.md" with { type: "text" };
 import type { AgentRegistry } from "../registry/agent-registry";
@@ -157,6 +158,7 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 	}
 
 	static createIf(session: ToolSession): IrcTool | null {
+		if (session.ircEnabled && !session.ircEnabled()) return null;
 		if (!isIrcEnabled(session.settings, session.taskDepth ?? 0)) return null;
 		if (!session.agentRegistry || !session.getAgentId) return null;
 		return new IrcTool(session);
@@ -169,6 +171,9 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 		_onUpdate?: AgentToolUpdateCallback<IrcDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<IrcDetails>> {
+		if (this.session.ircEnabled && !this.session.ircEnabled()) {
+			return errorResult("IRC is disabled for this process.", { op: params.op });
+		}
 		const registry = this.session.agentRegistry;
 		const senderId = this.session.getAgentId?.() ?? null;
 		if (!registry) {
@@ -194,9 +199,9 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 		}
 	}
 
-	#executeList(registry: AgentRegistry, senderId: string): AgentToolResult<IrcDetails> {
+	async #executeList(registry: AgentRegistry, senderId: string): Promise<AgentToolResult<IrcDetails>> {
 		const bus = IrcBus.global();
-		const peers = registry
+		const localPeers = registry
 			.list(senderId)
 			.filter(ref => ref.status !== "aborted")
 			.map(ref => ({
@@ -210,6 +215,8 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 				activity: ref.activity,
 				color: ref.color,
 			}));
+		const remotePeers: IrcRemotePeer[] = this.session.ircIpc ? await this.session.ircIpc.list(senderId) : [];
+		const peers = [...localPeers, ...remotePeers];
 		const lines: string[] = [];
 		if (peers.length === 0) {
 			lines.push("No other agents.");
@@ -299,7 +306,14 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 			// Broadcasts fan out to live peers only (running | idle); reviving every
 			// parked agent on a broadcast would be a stampede. Direct sends go
 			// through the bus unfiltered so parked recipients are revived.
-			const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
+			const localTargets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [];
+			const remoteTargets =
+				isBroadcast && this.session.ircIpc
+					? (await this.session.ircIpc.list(senderId))
+							.filter(peer => peer.status === "running" || peer.status === "idle")
+							.map(peer => peer.id)
+					: [];
+			const targets = isBroadcast ? [...localTargets, ...remoteTargets] : [to];
 			const receipts = await Promise.all(
 				targets.map(target =>
 					bus.send(

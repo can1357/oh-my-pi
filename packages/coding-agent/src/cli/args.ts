@@ -51,6 +51,7 @@ export interface Args {
 	models?: string[];
 	tools?: string[];
 	noTools?: boolean;
+	noIrc?: boolean;
 	noLsp?: boolean;
 	noPty?: boolean;
 	hooks?: string[];
@@ -205,6 +206,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noSession = true;
 		} else if (arg === "--no-tools") {
 			result.noTools = true;
+		} else if (arg === "--no-irc") {
+			result.noIrc = true;
 		} else if (arg === "--no-lsp") {
 			result.noLsp = true;
 		} else if (arg === "--no-pty") {

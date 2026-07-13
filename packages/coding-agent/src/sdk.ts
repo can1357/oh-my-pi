@@ -92,6 +92,8 @@ import {
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
+import { IrcBus } from "./irc/bus";
+import { IrcIpc } from "./irc/ipc";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
 	discoverAndLoadMCPTools,
@@ -485,6 +487,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Enable MCP server discovery from .mcp.json files. Default: true */
 	enableMCP?: boolean;
+	/** Enable local cross-process IRC discovery and delivery. Default: true. */
+	enableIrc?: boolean;
 	/** Existing MCP manager to reuse (skips discovery, propagates to toolSession). */
 	mcpManager?: MCPManager;
 
@@ -1433,6 +1437,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const enableLsp = options.enableLsp ?? true;
 	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
+	const ircIpc = IrcIpc.global();
+	if ((options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix) {
+		void ircIpc.setEnabled(options.enableIrc !== false);
+	}
+	IrcBus.global().attachIpc(ircIpc);
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
 	const resolvedAgentDisplayName =
 		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
@@ -1553,6 +1562,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
+			ircIpc,
+			ircEnabled: () => ircIpc.enabled,
 			getSessionSpawns: () => options.spawns ?? "*",
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
@@ -2497,6 +2508,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			cwd,
 			collaborationPolicy: options.collaborationPolicy,
 		});
+		if (ircIpc) {
+			void ircIpc.configure({ cwd, registry: agentRegistry, bus: IrcBus.global() }).catch(error => {
+				logger.debug("IRC IPC registration failed", { error: String(error) });
+			});
+		}
 		hasRegistered = true;
 
 		const { systemPrompt } = await logger.time(

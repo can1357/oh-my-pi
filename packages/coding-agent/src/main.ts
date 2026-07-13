@@ -916,6 +916,9 @@ async function buildSessionOptions(
 	} else if (parsed.tools) {
 		options.toolNames = parsed.tools;
 	}
+	if (parsed.noIrc) {
+		options.enableIrc = false;
+	}
 
 	if (parsed.noLsp) {
 		options.enableLsp = false;
