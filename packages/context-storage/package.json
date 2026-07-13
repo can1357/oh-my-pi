@@ -1,0 +1,31 @@
+{
+	"name": "@pk-nerdsaver-ai/pi-context-storage",
+	"version": "0.1.0",
+	"description": "Storage contracts and pressure controls for opt-in persistent context",
+	"private": true,
+	"type": "module",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"import": "./src/index.ts"
+		}
+	},
+	"scripts": {
+		"check": "biome check . && bun run check:types",
+		"check:types": "tsgo -p tsconfig.json --noEmit",
+		"lint": "biome lint .",
+		"test": "bun test --parallel"
+	},
+	"dependencies": {
+		"@pk-nerdsaver-ai/pi-context-policy": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/bun": "catalog:"
+	},
+	"engines": {
+		"bun": ">=1.3.14"
+	},
+	"files": ["src", "CHANGELOG.md"]
+}

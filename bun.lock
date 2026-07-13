@@ -169,6 +169,16 @@
         "@types/bun": "catalog:",
       },
     },
+    "packages/context-storage": {
+      "name": "@pk-nerdsaver-ai/pi-context-storage",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pk-nerdsaver-ai/pi-context-policy": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+      },
+    },
     "packages/desktop-tag": {
       "name": "@pk-nerdsaver-ai/pi-desktop-tag",
       "version": "16.2.6",
@@ -866,6 +876,8 @@
     "@pk-nerdsaver-ai/pi-coding-agent": ["@pk-nerdsaver-ai/pi-coding-agent@workspace:packages/coding-agent"],
 
     "@pk-nerdsaver-ai/pi-context-policy": ["@pk-nerdsaver-ai/pi-context-policy@workspace:packages/context-policy"],
+
+    "@pk-nerdsaver-ai/pi-context-storage": ["@pk-nerdsaver-ai/pi-context-storage@workspace:packages/context-storage"],
 
     "@pk-nerdsaver-ai/pi-desktop-tag": ["@pk-nerdsaver-ai/pi-desktop-tag@workspace:packages/desktop-tag"],
 

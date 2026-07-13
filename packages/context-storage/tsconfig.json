@@ -1,0 +1,9 @@
+{
+	"extends": "../tsconfig.workspace.json",
+	"compilerOptions": {
+		"paths": {
+			"@pk-nerdsaver-ai/pi-context-policy": ["../context-policy/src/index.ts"]
+		}
+	},
+	"include": ["src", "test"]
+}

@@ -1,0 +1,28 @@
+{
+  "persistentContext": {
+    "enabled": false,
+    "consentScope": "none",
+    "remoteStorage": { "enabled": false, "provider": "none" },
+    "capture": {
+      "mode": "event_driven",
+      "apps": [],
+      "fullScreenshotPolicy": "explicit_or_required",
+      "maxFramesPerMinute": 6,
+      "storeRawScreenshots": false
+    },
+    "storage": {
+      "tempMaxBytes": 524288000,
+      "rawMaxBytes": 5368709120,
+      "processedMaxBytes": 2147483648,
+      "databaseMaxBytes": 5368709120,
+      "totalMaxBytes": 12884901888,
+      "minimumFreeDiskBytes": 21474836480,
+      "minimumFreeDiskPercent": 10
+    },
+    "retrieval": {
+      "maxTokens": 4000,
+      "maxArtifactReads": 500,
+      "allowOlderThanDaysWithoutExplicitRequest": 30
+    }
+  }
+}
