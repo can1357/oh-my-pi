@@ -1271,18 +1271,36 @@ export class SelectorController {
 			resumeSession: (sessionPath: string) => this.handleResumeSession(sessionPath),
 		});
 
+		const mount = () => {
+			this.ctx.editorContainer.clear();
+			this.ctx.editorContainer.addChild(hub);
+			this.ctx.ui.setFocus(hub);
+			this.ctx.ui.requestRender();
+		};
+
 		// The double-← gesture passes requireContent so it stays inert when there
-		// are no subagents to show; the explicit hub/observe keys still open the
-		// empty roster. The freshly built hub already ran the persisted-subagent
-		// scan, so its row count is the authoritative "is there anything to show".
+		// is nothing to show; the explicit hub/observe keys still open the empty
+		// roster. The persisted-subagent scan is synchronous, but background
+		// sessions load via an async disk scan — with no live subagents the hub
+		// looks empty at construction, which used to make ←← a no-op even when
+		// background sessions existed. Await the scan before judging emptiness.
 		if (options?.requireContent && hub.isEmpty) {
-			hub.dispose();
+			void hub.backgroundsLoaded().then(() => {
+				if (hub.isEmpty) {
+					hub.dispose();
+					return;
+				}
+				// The scan is fast but real I/O: if the user started typing in the
+				// meantime, opening the hub now would steal a non-empty editor.
+				if (this.ctx.editor.getText().trim() !== "") {
+					hub.dispose();
+					return;
+				}
+				mount();
+			});
 			return;
 		}
 
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(hub);
-		this.ctx.ui.setFocus(hub);
-		this.ctx.ui.requestRender();
+		mount();
 	}
 }

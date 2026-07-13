@@ -348,6 +348,8 @@ export class AgentHubOverlayComponent extends Container {
 	#backgroundRefs: HubAgentRef[] = [];
 	#backgroundSessionPaths = new Map<string, string>();
 	#backgroundLoadGeneration = 0;
+	/** Resolves when the constructor's initial background-session disk scan has landed. */
+	#backgroundsLoaded: Promise<void> = Promise.resolve();
 	#expandedLanes = new Set<string>([MAIN_AGENT_ID]);
 	#collapsedFolders = new Set<string>();
 	#backgroundSubagents = new Map<string, HubAgentRef[]>();
@@ -421,7 +423,8 @@ export class AgentHubOverlayComponent extends Container {
 
 		if (!this.#remote) {
 			registerPersistedSubagents(this.#registry, deps.sessionFile);
-			void this.#loadBackgroundInstances();
+			// Never rejects: #loadBackgroundInstances catches internally.
+			this.#backgroundsLoaded = this.#loadBackgroundInstances();
 		}
 		this.#refreshRows();
 	}
@@ -433,6 +436,15 @@ export class AgentHubOverlayComponent extends Container {
 	 */
 	get isEmpty(): boolean {
 		return this.#rows.every(row => isFolder(row.ref) || row.ref.id === MAIN_AGENT_ID);
+	}
+
+	/**
+	 * Resolves once the initial background-session disk scan has populated the
+	 * rows. `isEmpty` is only authoritative after this settles — the double-←
+	 * gesture awaits it so background-only sessions still open the hub.
+	 */
+	backgroundsLoaded(): Promise<void> {
+		return this.#backgroundsLoaded;
 	}
 
 	/** Tear down every subscription and timer. Called by the overlay owner on close. */

@@ -5,7 +5,7 @@
  * the consolidation of the old `/backgrounds` switcher into the Agent Hub.
  */
 
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,6 +15,7 @@ import { SessionObserverRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/modes/
 import { initTheme } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
 import { AgentRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
 
 const LANE_NAME = "api-worker";
 
@@ -65,6 +66,13 @@ async function renderUntil(hub: AgentHubOverlayComponent, needle: string, timeou
 describe("Agent hub background lanes", () => {
 	beforeAll(async () => {
 		await initTheme();
+	});
+
+	beforeEach(() => {
+		// When the per-directory scan comes back empty the hub falls back to
+		// SessionManager.listAll() — the whole machine's sessions. Pin it to []
+		// so these tests only ever see what they seed into their tmp dirs.
+		vi.spyOn(SessionManager, "listAll").mockResolvedValue([]);
 	});
 
 	afterEach(() => {
@@ -222,6 +230,67 @@ describe("Agent hub background lanes", () => {
 				} finally {
 					hub.dispose();
 				}
+			}
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	// Contract behind the ←← gesture: with no live subagents, `isEmpty` is only
+	// authoritative once the async background disk scan lands. The gesture path
+	// awaits `backgroundsLoaded()` before deciding to stay inert — without this,
+	// background-only sessions made double-← a permanent no-op.
+	it("backgroundsLoaded resolves after the disk scan and flips isEmpty for background-only sessions", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bg-hub-ready-"));
+		try {
+			await seedBackgroundSession(tmp);
+			const registry = new AgentRegistry();
+			const hub = new AgentHubOverlayComponent({
+				observers: new SessionObserverRegistry(),
+				hubKeys: [],
+				onDone: () => {},
+				requestRender: () => {},
+				registry,
+				irc: new IrcBus(registry),
+				focusAgent: async () => {},
+				cwd: tmp,
+				sessionDir: tmp,
+				resumeSession: async () => {},
+				kanbanSync: null,
+			});
+			try {
+				await hub.backgroundsLoaded();
+				expect(hub.isEmpty).toBe(false);
+			} finally {
+				hub.dispose();
+			}
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("stays empty after the scan when no background sessions exist", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bg-hub-empty-"));
+		try {
+			const registry = new AgentRegistry();
+			const hub = new AgentHubOverlayComponent({
+				observers: new SessionObserverRegistry(),
+				hubKeys: [],
+				onDone: () => {},
+				requestRender: () => {},
+				registry,
+				irc: new IrcBus(registry),
+				focusAgent: async () => {},
+				cwd: tmp,
+				sessionDir: tmp,
+				resumeSession: async () => {},
+				kanbanSync: null,
+			});
+			try {
+				await hub.backgroundsLoaded();
+				expect(hub.isEmpty).toBe(true);
+			} finally {
+				hub.dispose();
 			}
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });

@@ -40,6 +40,7 @@
 - Trimmed a second pass of tool-prompt prose across `read`/`bash`/`apply-patch`/`patch`/`todo`/`ast-grep`/`github`, dropping schema-inferable and duplicate content while preserving RFC-2119 keywords and Handlebars structure.
 
 ### Fixed
+- Fixed the double-tap `←` gesture staying inert when only background sessions exist: the Agent Hub's emptiness check ran before the async background-session disk scan finished, so `←←` never opened the backgrounds view unless a live subagent happened to be registered.
 - Fixed `irc wait` (and `send await:true`) hanging forever on Windows: the wait timeout timer was unref'd, and on Bun/Windows an unref'd timer whose promise is the only pending work never fires. The same hang made `test/tools/irc.test.ts` unrunnable on Windows.
 - Fixed broadcast fan-out relaying sibling legs to the main UI even when the broadcast already reached the main agent directly, duplicating the identical body once per sibling (`suppressRelay` was adopted on the bus during the upstream sync but never set by the fork's diverged send path).
 - Fixed AssignmentContractV2 evidencePolicy, priorBlockedRoutes, and resultRequirements to survive digest, parse, and transport after they were silently dropped with an unchanged digest.
