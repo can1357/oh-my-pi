@@ -26,6 +26,7 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
+import { renderHelp } from "../help/recommendations";
 import { IrcIpc } from "../irc/ipc";
 import { resolveMemoryBackend } from "../memory-backend";
 import { getMarkdownTheme, theme } from "../modes/theme/theme";
@@ -400,6 +401,20 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		description: "Open settings menu",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showSettingsSelector();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "help",
+		description: "Recommend built-in features and show related documentation",
+		inlineHint: "[question]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			await runtime.output(renderHelp(command.args));
+			return commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			runtime.ctx.showStatus(renderHelp(command.args));
 			runtime.ctx.editor.setText("");
 		},
 	},
