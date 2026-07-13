@@ -16,7 +16,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
-import { Container, Ellipsis, matchesKey, type OverlayHandle, type TUI } from "@pk-nerdsaver-ai/pi-tui";
+import { Container, Ellipsis, matchesKey, type OverlayHandle, type TUI, visibleWidth } from "@pk-nerdsaver-ai/pi-tui";
 import { formatAge, getProjectDir, logger, normalizePathForComparison } from "@pk-nerdsaver-ai/pi-utils";
 import { ADVISOR_TRANSCRIPT_FILENAME } from "../../advisor";
 import type { KeyId } from "../../config/keybindings";
@@ -25,7 +25,11 @@ import { IrcBus } from "../../irc/bus";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
-import { backgroundInstanceDisplayName, isBackgroundInstanceSession } from "../../session/session-listing";
+import {
+	backgroundInstanceDisplayName,
+	isBackgroundInstanceSession,
+	type SessionStatus,
+} from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import type { ObservableSession, SessionObserverRegistry } from "../session-observer-registry";
@@ -79,7 +83,60 @@ type HubAgentRef = Omit<AgentRef, "kind"> & {
 	laneCount?: number;
 	/** Folder rows only: whether this folder holds the active (current) session. */
 	isCurrentFolder?: boolean;
+	/** Background lanes only: coarse lifecycle status derived from the session file tail. */
+	sessionStatus?: SessionStatus;
+	/** Background lanes only: last assistant message text, shown as the row preview. */
+	preview?: string;
 };
+
+/** Outcome word + color for a session lane, Claude Code jobs-list style. */
+interface HubOutcome {
+	label: string;
+	color: ThemeColor;
+}
+
+/**
+ * Map a lane to its outcome column. Explicit markers in the last assistant
+ * message (`result:` / `failed:` / `needs input:`) win; otherwise the coarse
+ * {@link SessionStatus} decides. Live registry work reads as Working.
+ */
+function laneOutcome(ref: HubAgentRef): HubOutcome | undefined {
+	if (ref.id === MAIN_AGENT_ID) {
+		return ref.status === "running" ? { label: "Working", color: "accent" } : { label: "Idle", color: "success" };
+	}
+	if (!isBackgroundLane(ref)) return undefined;
+	const preview = ref.preview ?? "";
+	const marker = /(^|\n)\s*(result|failed|needs input):/i.exec(preview)?.[2]?.toLowerCase();
+	if (marker === "result") return { label: "Done", color: "success" };
+	if (marker === "failed") return { label: "Failed", color: "error" };
+	if (marker === "needs input") return { label: "Needs input", color: "warning" };
+	switch (ref.sessionStatus) {
+		case "complete":
+			return { label: "Done", color: "success" };
+		case "error":
+		case "aborted":
+			return { label: "Failed", color: "error" };
+		case "pending":
+		case "interrupted":
+			return { label: "Needs input", color: "warning" };
+		default:
+			return undefined;
+	}
+}
+
+/**
+ * One-line preview for a background lane: the text following an explicit
+ * `result:`/`failed:`/`needs input:` marker when present (the outcome column
+ * already conveys the marker), otherwise the last assistant message itself.
+ */
+function lanePreview(ref: HubAgentRef): string | undefined {
+	const preview = ref.preview?.trim();
+	if (!preview) return undefined;
+	const marker = /(^|\n)\s*(result|failed|needs input):\s*/i.exec(preview);
+	const text = marker ? preview.slice((marker.index ?? 0) + marker[0].length) : preview;
+	const line = text.replace(/\s+/g, " ").trim();
+	return line || undefined;
+}
 
 function isRegistryAgentRef(ref: HubAgentRef): ref is AgentRef {
 	return ref.kind !== "background" && ref.kind !== "folder" && ref.id !== MAIN_AGENT_ID;
@@ -159,13 +216,13 @@ function collectBackgroundLaneSubagents(sessionFile: string, laneId: string): Hu
 function statusBadge(status: AgentStatus): string {
 	switch (status) {
 		case "running":
-			return theme.fg("accent", `${theme.status.running} running`);
+			return theme.fg("accent", `${theme.status.running} working`);
 		case "idle":
 			return theme.fg("success", `${theme.status.enabled} idle`);
 		case "parked":
 			return theme.fg("muted", `${theme.status.shadowed} parked`);
 		case "aborted":
-			return theme.fg("error", `${theme.status.aborted} aborted`);
+			return theme.fg("error", `${theme.status.aborted} failed`);
 	}
 }
 
@@ -503,6 +560,8 @@ export class AgentHubOverlayComponent extends Container {
 						? `background session · ${session.backgroundInstance.model}`
 						: "background session",
 					cwd: session.cwd,
+					sessionStatus: session.status,
+					preview: session.lastAssistantText,
 				});
 				sessionPaths.set(id, session.path);
 				subagentsByLane.set(id, collectBackgroundLaneSubagents(session.path, id));
@@ -797,19 +856,33 @@ export class AgentHubOverlayComponent extends Container {
 	// renderMainHeader deleted; Main renders as a selectable depth-0 row.
 
 	#statusSummary(): string {
-		const counts: Record<AgentStatus, number> = { running: 0, idle: 0, parked: 0, aborted: 0 };
-		let backgroundCount = 0;
+		// Claude Code jobs-list style: outcome counts across session lanes first,
+		// then the subagent tally.
+		const outcomes = new Map<string, number>();
+		let laneCount = 0;
+		for (const row of this.#rows) {
+			if (!isLane(row.ref)) continue;
+			laneCount++;
+			const outcome = laneOutcome(row.ref);
+			if (outcome) outcomes.set(outcome.label, (outcomes.get(outcome.label) ?? 0) + 1);
+		}
+		const parts: string[] = [];
+		for (const [label, key] of [
+			["Needs input", "awaiting input"],
+			["Working", "working"],
+			["Done", "completed"],
+			["Failed", "failed"],
+		] as const) {
+			const count = outcomes.get(label);
+			if (count) parts.push(`${count} ${key}`);
+		}
+		if (parts.length === 0 && laneCount > 0) {
+			parts.push(`${laneCount} ${laneCount === 1 ? "session" : "sessions"}`);
+		}
 		const subagentRows = this.#rows.filter(row => !isLane(row.ref) && !isFolder(row.ref));
-		for (const row of subagentRows) {
-			counts[row.ref.status]++;
-			if (row.ref.kind === "background") backgroundCount++;
+		if (subagentRows.length > 0) {
+			parts.push(`${subagentRows.length} ${subagentRows.length === 1 ? "agent" : "agents"}`);
 		}
-		const parts: string[] = [`${subagentRows.length} ${subagentRows.length === 1 ? "agent" : "agents"}`];
-		for (const status of ["running", "idle", "parked", "aborted"] as const) {
-			const count = counts[status];
-			if (count > 0) parts.push(`${count} ${status}`);
-		}
-		if (backgroundCount > 0) parts.push(`${backgroundCount} background`);
 		return parts.join(theme.sep.dot);
 	}
 
@@ -855,9 +928,11 @@ export class AgentHubOverlayComponent extends Container {
 		const label =
 			ref.id === MAIN_AGENT_ID
 				? `${caret}current session`
-				: folder || ref.kind === "background"
-					? `${caret}${ref.displayName}`
-					: ref.id;
+				: folder
+					? `${caret}${ref.cwd ? shortenPath(ref.cwd) : ref.displayName}`
+					: ref.kind === "background"
+						? `${caret}${ref.displayName}`
+						: ref.id;
 		const idText = color ? theme.bold(theme.fg(color, replaceTabs(label))) : theme.bold(replaceTabs(label));
 		const parts: string[] = lane || folder ? [idText] : [statusBadge(ref.status), idText];
 		if (folder) {
@@ -865,21 +940,24 @@ export class AgentHubOverlayComponent extends Container {
 			const bits: string[] = [];
 			if (ref.isCurrentFolder) bits.push("current");
 			bits.push(`${count} ${count === 1 ? "session" : "sessions"}`);
-			if (ref.cwd) bits.push(shortenPath(ref.cwd));
 			parts.push(theme.fg("muted", bits.join(theme.sep.dot)));
 		} else if (ref.id === MAIN_AGENT_ID) {
+			const outcome = laneOutcome(ref);
+			if (outcome) parts.push(theme.fg(outcome.color, outcome.label));
 			const subCount = this.#registry.list().filter(r => r.id !== MAIN_AGENT_ID).length;
-			const bits = [subCount > 0 ? `${subCount} ${subCount === 1 ? "agent" : "agents"}` : "0 agents"];
-			parts.push(theme.fg("muted", bits.join(theme.sep.dot)));
+			if (subCount > 0) {
+				parts.push(theme.fg("muted", `${subCount} ${subCount === 1 ? "agent" : "agents"}`));
+			}
 		} else if (ref.kind === "background") {
 			if (lane) {
+				const outcome = laneOutcome(ref);
+				if (outcome) parts.push(theme.fg(outcome.color, outcome.label));
+				const preview = lanePreview(ref);
+				if (preview) parts.push(theme.fg("muted", sanitizeLine(preview, TRUNCATE_LENGTHS.TITLE)));
 				const subCount = this.#backgroundSubagents.get(ref.id)?.length ?? 0;
-				const model = ref.activity?.startsWith("background session · ")
-					? ref.activity.slice("background session · ".length)
-					: undefined;
-				const bits = [`session${subCount > 0 ? ` · ${subCount} ${subCount === 1 ? "agent" : "agents"}` : ""}`];
-				if (model) bits.push(`model ${model}`);
-				parts.push(theme.fg("muted", bits.join(theme.sep.dot)));
+				if (subCount > 0) {
+					parts.push(theme.fg("dim", `${subCount} ${subCount === 1 ? "agent" : "agents"}`));
+				}
 			} else {
 				parts.push(theme.fg("muted", "background subagent"));
 			}
@@ -918,16 +996,24 @@ export class AgentHubOverlayComponent extends Container {
 			parts.push(theme.fg(colorName, syncStatus));
 		}
 
-		parts.push(theme.fg("dim", formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)))));
 		const rawLine = ` ${cursor} ${theme.fg("dim", row.prefix)}${parts.join(theme.sep.dot)}`;
 		const sanitized = rawLine.replace(/[\r\n]+/g, " ");
-		const maxWidth = Math.max(1, width - 1);
+		// clampHubLine (render()) trims every hub line to width-2; build to that
+		// budget so the right-aligned age column survives the final clamp.
+		const maxWidth = Math.max(1, width - 2);
+		// Age renders as a right-aligned column (Claude Code jobs-list style); the
+		// folder header rows skip it — their lanes carry the meaningful timestamps.
+		const age = folder ? "" : formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)));
+		const leftWidth = Math.max(1, maxWidth - (age ? visibleWidth(age) + 2 : 0));
+		const left = truncateToWidth(sanitized, leftWidth);
+		const padding = Math.max(age ? 2 : 0, maxWidth - visibleWidth(left) - visibleWidth(age));
+		const line = age ? `${left}${" ".repeat(padding)}${theme.fg("dim", age)}` : left;
 		// Selected row: wash the whole padded line with the selection background so
 		// the highlight is visible while navigating, not just the tiny cursor glyph.
 		if (selected) {
-			return theme.bg("selectedBg", truncateToWidth(sanitized, maxWidth, Ellipsis.Omit, true));
+			return theme.bg("selectedBg", truncateToWidth(line, maxWidth, Ellipsis.Omit, true));
 		}
-		return truncateToWidth(sanitized, maxWidth);
+		return truncateToWidth(line, maxWidth);
 	}
 
 	#handleKanbanSyncInput(keyData: string): void {

@@ -3,6 +3,21 @@ import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../
 
 export const MCP_CONNECTION_STATUS_EVENT_CHANNEL = "mcp:connection-status";
 
+/**
+ * Legacy channel for the initial "servers are connecting" burst. sdk.ts emits
+ * it and interactive-mode listens; restored here because the callers landed
+ * without this module gaining the export.
+ */
+export const MCP_CONNECTING_EVENT_CHANNEL = "mcp:connecting";
+
+export type McpConnectingEvent = { serverNames: readonly string[] };
+
+export function isMcpConnectingEvent(data: unknown): data is McpConnectingEvent {
+	if (!data || typeof data !== "object") return false;
+	const serverNames = (data as { serverNames?: unknown }).serverNames;
+	return Array.isArray(serverNames) && serverNames.every(name => typeof name === "string");
+}
+
 export type McpConnectionStatusEvent =
 	| { type: "connecting"; serverNames: string[] }
 	| { type: "connected"; serverName: string }
