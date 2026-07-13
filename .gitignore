@@ -103,3 +103,16 @@ docs/improvements/
 
 # Local CodeGraph index (per-machine, not source)
 .codegraph/
+
+# Generated local collaboration/runtime databases
+packages/coding-agent/omp-operational-*/
+packages/coding-agent/runtime-cli-*/
+packages/coding-agent/runtime-cli-state-*/
+
+# Generated Cloudflare Wrangler local state (miniflare caches, DO/R2 sqlite, dev bundles)
+.wrangler/
+
+# Local agent and generated evaluation artifacts
+.omx/
+evals/agent-gui/reports/
+mcps/
