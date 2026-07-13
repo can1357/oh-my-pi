@@ -18,43 +18,65 @@ The user should not need to choose agents, ticket owners, lane counts, branch al
 
 ## Root Task Contract
 
-Every root objective compiles into a versioned contract containing:
+Every root objective compiles into a versioned contract. The existing `TaskContractV1` in `packages/coding-agent/src/orchestration/task-contract.ts` already provides:
+
+- `version` (`task-contract/v1`), `objective`, `deliverables`, `completionCriteria`, `nonSolutions`, `knownFailureModes`, `evidenceRequirements`, `constraints`, `assumptions`, `verificationPolicy`, `orchestrationPolicy`.
+
+Autonomous root-task execution requires the following **additive** fields, introduced as `TaskContractV2` (a superset of V1; V1 continues to parse and remains valid for non-root use):
 
 ```yaml
-version: TaskContractV1
+version: TaskContractV2
+# --- inherited from V1 ---
 objective:
-scope:
-non_goals:
+deliverables:
+completionCriteria:
+nonSolutions:
+knownFailureModes:
+evidenceRequirements:
 constraints:
-write_boundaries:
-dependencies:
-required_artifacts:
-acceptance_tests:
-evidence_policy:
-failure_modes:
-escalation_conditions:
-external_reconciliation:
+assumptions:
+verificationPolicy:
+orchestrationPolicy:
+# --- V2 additions for autonomous root execution ---
+scope:                    # in-scope surfaces (paths, systems, modules)
+nonGoals:                 # explicit exclusions distinct from nonSolutions
+writeBoundaries:          # array of WriteScope (see packages/coding-agent/src/task/write-scope.ts)
+dependencies:             # ordered/DAG dependencies between decomposed work
+requiredArtifacts:        # concrete files, PRs, or records that must exist at completion
+acceptanceTests:          # AcceptanceCriterion[] (see packages/coding-agent/src/task/assignment-contract.ts)
+evidencePolicy:           # risk-proportional validation selection (see "Validation and Completion")
+escalationConditions:     # concrete triggers matching "Escalation Policy" below
+externalReconciliation:   # required GitHub/Linear projection targets
 ```
 
 The compiled contract is immutable for a run. Redirects create a new revision linked to the previous contract and preserve already verified work when still valid.
 
+Field-naming note: fields are camelCase to match the existing `TaskContractV1` shape and its parser conventions. The YAML above uses camelCase keys accordingly.
+
 ## Work Units
 
-The planner converts the root contract into independently executable work units. Each unit must declare:
+The planner converts the root contract into independently executable work units. Each unit reuses existing primitives where they exist and must declare:
 
 ```yaml
 id:
 objective:
 scope:
-non_goals:
-write_boundary:
-strategy_family:
+nonGoals:
+writeBoundary:        # single WriteScope from packages/coding-agent/src/task/write-scope.ts
+                      # (mode: exclusive | isolated-patch | proposal-only). "writeBoundary" is
+                      # the singular, work-unit-scoped view of a root writeBoundaries entry —
+                      # not a rename. Overlap detection uses the existing WriteScope logic.
+strategyFamily:       # maps to ApproachRecord.family in
+                      # packages/coding-agent/src/orchestration/approach-registry.ts.
+                      # No parallel registry is introduced.
 dependencies:
-required_artifact:
-acceptance_tests:
-evidence_policy:
-failure_modes:
-escalation_conditions:
+requiredArtifact:
+acceptanceTests:      # AcceptanceCriterion[] (existing schema on AssignmentContractV1) —
+                      # the per-work-unit list is the same shape, not a separate representation.
+                      # Check kinds (command_exit, artifact_exists, json_schema, …) are reused.
+evidencePolicy:
+failureModes:
+escalationConditions:
 ```
 
 Workers receive only the context required for their unit. Full project history must not be copied into every worker prompt.
@@ -70,17 +92,30 @@ available -> claimed -> active -> validating -> completed
                       blocked       released
 ```
 
+This work-unit lifecycle is **distinct from and layered above** `AssignmentVerificationStatus` (`"submitted" | "verifying" | "verified" | "verification_failed"`) in `packages/coding-agent/src/task/types.ts`, which tracks a single assignment's verification outcome. Mapping:
+
+| Work-unit state | Assignment-level status |
+|---|---|
+| available | (no assignment yet) |
+| claimed | (no assignment yet — claim precedes assignment submission) |
+| active | `submitted` while worker is executing |
+| validating | `verifying` |
+| completed | `verified` |
+| blocked / released | `verification_failed`, expired lease, or explicit release; assignment status is preserved for audit |
+
+The work-unit lifecycle supersedes assignment-level status for **root-task tracking and gating**; assignment-level status is retained for per-assignment audit and replay.
+
 A claim records:
 
 ```yaml
-worker_id:
-work_unit_id:
-strategy_family:
-lease_started_at:
-lease_expires_at:
-write_boundary:
-expected_artifact:
-heartbeat_at:
+workerId:
+workUnitId:
+strategyFamily:       # ApproachRecord.family (see Work Units above)
+leaseStartedAt:
+leaseExpiresAt:
+writeBoundary:        # WriteScope (see Work Units above)
+expectedArtifact:
+heartbeatAt:
 ```
 
 Expired or abandoned leases are reconciled and released. A released unit becomes claimable again unless the root planner marks it superseded, unnecessary, or terminally blocked.
@@ -100,7 +135,7 @@ parallelism = min(
 
 Parallel execution is allowed only when units have distinct write boundaries, independent acceptance criteria, limited shared mutable state, and meaningful latency benefit.
 
-When multiple agents investigate the same problem, they must use distinct `strategy_family` values. Otherwise the work is duplicate reasoning and should be sequenced or eliminated.
+When multiple agents investigate the same problem, they must use distinct `strategyFamily` values. Distinctness is enforced against the existing `ApproachRegistry` (`packages/coding-agent/src/orchestration/approach-registry.ts`): two live claims sharing the same `family` are treated as duplicate reasoning and must be sequenced or eliminated. Blocked-fingerprint reuse (`ApproachRegistry.hasBlockedFingerprint`) also prevents re-spawning a family against a known-blocked route.
 
 ## Validation and Completion
 
@@ -108,19 +143,38 @@ Implementation and completion judgment are separate responsibilities.
 
 Validation depth is proportional to risk. Documentation-only or low-risk changes may use deterministic checks. Authentication, infrastructure, migrations, state reconciliation, and destructive workflows require independent falsification or integration review.
 
-Child completion is evidence, not root completion. The root task may close only when all required conditions are true:
+Child completion is evidence, not root completion. The root task may close only when all required conditions are true.
+
+The existing `CompletionGate` interface in `packages/coding-agent/src/orchestration/completion-gate.ts` already asserts:
 
 ```yaml
-objective_satisfied: true
-required_artifacts_present: true
-acceptance_tests_passed: true
-integration_verified: true
-unresolved_blockers: []
-claims_reconciled: true
-github_reconciled: true
-linear_reconciled: true
-cleanup_verified: true
+allDeliverablesPresent: true
+criteriaSatisfied: true
+nonSolutionTriggered: false
+requiredEvidencePresent: true
+unresolvedBlockersAcknowledged: true
+scopeValid: true
 ```
+
+Autonomous root execution adds the following **additive** fields as a new gate layer (`RootReconciliationGate`) that composes with `CompletionGate` rather than replacing it — the root completion decision is the AND of both layers:
+
+```yaml
+# --- existing CompletionGate (unchanged) ---
+allDeliverablesPresent: true
+criteriaSatisfied: true
+nonSolutionTriggered: false
+requiredEvidencePresent: true
+unresolvedBlockersAcknowledged: true
+scopeValid: true
+# --- new RootReconciliationGate additions ---
+integrationVerified: true
+claimsReconciled: true
+githubReconciled: true
+linearReconciled: true
+cleanupVerified: true
+```
+
+Where each root-level field slots in is explicit: reconciliation fields live on `RootReconciliationGate`, not on `CompletionGate`, so implementation does not have to guess.
 
 ## External Reconciliation
 
@@ -172,14 +226,14 @@ Routine implementation choices, retries, lease recovery, branch allocation, loca
 
 ## Required Implementation Tests
 
-The implementation must add externally observable tests for:
+This document is a draft contract. The tests below are **required in the follow-up implementation commit**, not in this doc-only PR. The implementation must add externally observable tests for:
 
-- root objective compilation into `TaskContractV1`;
+- root objective compilation into `TaskContractV2` (superset of `TaskContractV1`, with V1 still parsing);
 - lease acquisition, heartbeat, expiry, release, and reclaim;
-- prevention of concurrent conflicting write boundaries;
-- distinct strategy-family enforcement for redundant investigations;
+- prevention of concurrent conflicting write boundaries (via existing `WriteScope` overlap detection);
+- distinct `strategyFamily` enforcement for redundant investigations (via existing `ApproachRegistry`);
 - risk-proportional validation selection;
-- root completion refusing to close on incomplete evidence;
+- root completion refusing to close when either `CompletionGate` or `RootReconciliationGate` fails;
 - explicit reconciliation of skipped, blocked, superseded, and released work;
 - redirect preserving still-valid verified artifacts;
 - legacy explicit agent and lane controls remaining available as overrides.
