@@ -116,3 +116,5 @@ packages/coding-agent/runtime-cli-state-*/
 .omx/
 evals/agent-gui/reports/
 mcps/
+# Wrangler local secret store (per-machine dev secrets)
+.dev.vars
