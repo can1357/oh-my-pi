@@ -40,6 +40,8 @@
 - Trimmed a second pass of tool-prompt prose across `read`/`bash`/`apply-patch`/`patch`/`todo`/`ast-grep`/`github`, dropping schema-inferable and duplicate content while preserving RFC-2119 keywords and Handlebars structure.
 
 ### Fixed
+- Fixed `irc wait` (and `send await:true`) hanging forever on Windows: the wait timeout timer was unref'd, and on Bun/Windows an unref'd timer whose promise is the only pending work never fires. The same hang made `test/tools/irc.test.ts` unrunnable on Windows.
+- Fixed broadcast fan-out relaying sibling legs to the main UI even when the broadcast already reached the main agent directly, duplicating the identical body once per sibling (`suppressRelay` was adopted on the bus during the upstream sync but never set by the fork's diverged send path).
 - Fixed AssignmentContractV2 evidencePolicy, priorBlockedRoutes, and resultRequirements to survive digest, parse, and transport after they were silently dropped with an unchanged digest.
 - Fixed Fusion sidekick observability: `/fusion status` now reports live Sidekick registry state (idle/running/parked/unavailable) and marks Fusion as degraded when the sidekick is missing; spawn now waits for AgentRegistry registration before retaining a sidekick id so failed starts no longer latch a phantom Sidekick.
 - Fixed `/remote` in ACP/text mode: it is now consumed with an explicit interactive-TUI requirement instead of being forwarded to the model as ordinary prompt text.

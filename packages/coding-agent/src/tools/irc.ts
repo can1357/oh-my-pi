@@ -25,7 +25,7 @@ import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../irc/bus";
 import type { IrcRemotePeer } from "../irc/ipc";
 import { isValidThemeColor, type Theme, type ThemeColor } from "../modes/theme/theme";
 import ircDescription from "../prompts/tools/irc.md" with { type: "text" };
-import type { AgentRegistry } from "../registry/agent-registry";
+import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { canSpawnAtDepth } from "../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
@@ -314,6 +314,10 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 							.map(peer => peer.id)
 					: [];
 			const targets = isBroadcast ? [...localTargets, ...remoteTargets] : [to];
+			// When the broadcast reaches the main agent directly, its own incoming
+			// card already shows the body — relaying every sibling leg to the main
+			// UI would render the identical message once per sibling.
+			const broadcastReachesMain = isBroadcast && targets.includes(MAIN_AGENT_ID);
 			const receipts = await Promise.all(
 				targets.map(target =>
 					bus.send(
@@ -327,6 +331,7 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 							? {
 									...(params.await ? { expectsReply: true } : {}),
 									...(isBroadcast ? { isBroadcast: true } : {}),
+									...(broadcastReachesMain && target !== MAIN_AGENT_ID ? { suppressRelay: true } : {}),
 								}
 							: undefined,
 					),

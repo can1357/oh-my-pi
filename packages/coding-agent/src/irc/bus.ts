@@ -313,11 +313,15 @@ export class IrcBus {
 			signal.addEventListener("abort", onAbort, { once: true });
 		}
 		if (timeoutMs > 0) {
+			// Deliberately ref'd: on Bun/Windows an unref'd timeout whose promise
+			// is the only pending work never fires, hanging `irc wait` (and any
+			// `send await:true`) forever instead of timing out. The wait is
+			// abortable via `signal`, so shutdown paths are not blocked by the
+			// pending timer.
 			timer = setTimeout(() => {
 				cleanup();
 				resolve(null);
 			}, timeoutMs);
-			timer.unref?.();
 		}
 
 		let waiters = this.#waiters.get(agentId);
