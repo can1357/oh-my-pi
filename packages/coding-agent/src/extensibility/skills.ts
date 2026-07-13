@@ -8,6 +8,10 @@ import {
 } from "../autolearn/managed-skills";
 import { BUILTIN_SKILLS_PROVIDER_ID, skillCapability } from "../capability/skill";
 import type { SourceMeta } from "../capability/types";
+import {
+	mergeEnvironmentsCloudSkillDirectories,
+	resolvePresentEnvironmentsCloudSkillDirectories,
+} from "../config/environments-cloud-skills";
 import type { SkillsSettings } from "../config/settings";
 import { type Skill as CapabilitySkill, loadCapability } from "../discovery";
 import { compareSkillOrder, scanSkillsFromDir } from "../discovery/helpers";
@@ -117,6 +121,13 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 export interface LoadSkillsOptions extends SkillsSettings {
 	/** Working directory for project-local skills. Default: getProjectDir() */
 	cwd?: string;
+	/**
+	 * Environments-cloud (pkscloudenvs) root for auto skill routing.
+	 * - `undefined` (default): resolve MSI path / env override and include when present on disk
+	 * - `string`: use this root's `.agents/skills` when present
+	 * - `null`: disable auto environments-cloud skill directories
+	 */
+	environmentsCloudRoot?: string | null;
 }
 
 /**
@@ -136,16 +147,30 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		enablePiProject = true,
 		enableAgentsUser = true,
 		enableAgentsProject = true,
-		customDirectories = [],
+		customDirectories: configuredCustomDirectories = [],
 		ignoredSkills = [],
 		includeSkills = [],
 		disabledExtensions = [],
+		environmentsCloudRoot,
 	} = options;
 
 	// Early return if skills are disabled
 	if (!enabled) {
 		return { skills: [], warnings: [] };
 	}
+
+	// Session/skill routing: auto-include environments-cloud (pkscloudenvs) skills
+	// when the MSI-local (or overridden) checkout is present.
+	const autoEnvironmentsCloudDirs =
+		projectOnly || environmentsCloudRoot === null
+			? []
+			: await resolvePresentEnvironmentsCloudSkillDirectories(
+					environmentsCloudRoot === undefined ? {} : { root: environmentsCloudRoot },
+				);
+	const customDirectories = mergeEnvironmentsCloudSkillDirectories(
+		configuredCustomDirectories,
+		autoEnvironmentsCloudDirs,
+	);
 	// Fall-through gate for third-party CLI providers (claude-plugins, opencode,
 	// gemini, github, ...) that share user intent with the named third-party
 	// source toggles but don't have a dedicated control of their own. Only the

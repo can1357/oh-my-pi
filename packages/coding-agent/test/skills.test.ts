@@ -38,6 +38,8 @@ const DISABLE_ALL_BUILTIN_SKILLS = {
 	enablePiProject: false,
 	enableAgentsUser: false,
 	enableAgentsProject: false,
+	// Isolate unit tests from the operator's real environments-cloud checkout.
+	environmentsCloudRoot: null,
 } as const;
 
 async function writeSkill(root: string, name: string, description: string): Promise<void> {
@@ -263,6 +265,7 @@ describe("skills", () => {
 					enableClaudeProject: false,
 					enablePiUser: false,
 					enablePiProject: false,
+					environmentsCloudRoot: null,
 					// enableAgentsUser/enableAgentsProject left at their default-true value
 					cwd: tempCwd,
 				});
@@ -349,6 +352,7 @@ describe("skills", () => {
 					enableClaudeProject: false,
 					enablePiUser: false,
 					enablePiProject: false,
+					environmentsCloudRoot: null,
 					// enableAgentsUser / enableAgentsProject default true
 					cwd: tempCwd,
 				});

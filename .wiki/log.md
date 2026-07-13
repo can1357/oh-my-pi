@@ -1,5 +1,13 @@
 # Bundle Update Log
 
+## 2026-07-12
+* **Creation**: Added [Environments-cloud routing](/concepts/environments-cloud-routing.md) for MSI pkscloudenvs SoT wiring (resolvers, `ompk-remote environments`, coding-agent skill auto-route).
+* **Creation**: Added [Remote workspace](/concepts/remote-workspace.md) documenting phase-1 Docker sandbox jobs (`packages/remote-workspace`, `ompk-remote`), lifecycle, and the split from multi-node mesh SoT.
+* **Creation**: Added [Task-contract and orchestration runtime](/concepts/task-contract-orchestration.md) covering M1 ephemeral contracts, intent compilation, and Phase 0A evidence/completion modules under `src/orchestration/`.
+* **Creation**: Added [Ethereal workspaces](/concepts/ethereal-workspaces.md) documenting session-scoped cwd isolation vs remote-workspace Docker jobs.
+* **Creation**: Added [Collab live sessions](/concepts/collab-live-sessions.md) pointing at `/collab` and `packages/collab-web` (long-form in `docs/collab.md`).
+* **Update**: Indexed the new concepts under [concepts/index.md](/concepts/index.md).
+
 ## 2026-07-09
 * **Creation**: Added [Coding-agent reliability hardening](/concepts/coding-agent-reliability-hardening.md) documenting implemented WikiGraph path sandboxing, 9router ID normalization, offload artifact protocol round-trip tests, and bundled-agent check fixes.
 * **Creation**: Added [Light context layer](/concepts/light-context-layer.md) documenting the implemented `context_oracle` tool, typed LSP query seam, evidence shape, config, tests, and next compression slice.

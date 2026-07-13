@@ -8,6 +8,16 @@ Skills are file-backed capability packs discovered at startup and exposed to the
 
 This document covers current runtime behavior in `src/extensibility/skills.ts`, `src/discovery/builtin.ts`, `src/internal-urls/skill-protocol.ts`, and `src/discovery/agents-md.ts`.
 
+## Mesh / cloud skills (environments-cloud)
+
+Mesh and Colab warmup skills are **not** authored in the OMPK monorepo. On MSI-1 they live under:
+
+```text
+C:\dev\desktop-infra\environments-cloud\.agents\skills\
+```
+
+`loadSkills()` auto-merges that directory when it exists (`src/config/environments-cloud-skills.ts`). Override with `OMPK_ENVIRONMENTS_CLOUD_ROOT` or `PKS_ENVIRONMENTS_CLOUD_ROOT`. Pass `environmentsCloudRoot: null` to disable (tests). Details: [`environments-cloud.md`](./environments-cloud.md).
+
 ## What a skill is in this codebase
 
 A discovered skill is represented as:

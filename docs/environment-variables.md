@@ -352,6 +352,11 @@ These are consumed via `@pk-nerdsaver-ai/pi-utils/dirs` and affect where coding-
 | `PI_CONFIG_DIR`       | Config root dirname under home (default `.omp`)                               |
 | `PI_CODING_AGENT_DIR` | Full override for agent directory (default `~/<PI_CONFIG_DIR or .omp>/agent`) |
 | `PWD`                 | Used when matching canonical current working directory in path helpers        |
+| `OMPK_REMOTE_DB`      | SQLite path for phase-1 remote-workspace jobs (default `~/.omp/remote-jobs.sqlite`) |
+| `OMPK_ENVIRONMENTS_CLOUD_ROOT` | Override MSI-local environments-cloud (pkscloudenvs) root; default `C:\dev\desktop-infra\environments-cloud`. Used by remote-workspace resolvers and coding-agent skill auto-routing. |
+| `PKS_ENVIRONMENTS_CLOUD_ROOT` | Secondary override when `OMPK_ENVIRONMENTS_CLOUD_ROOT` is unset |
+
+Mesh/cloud routing: [`environments-cloud.md`](./environments-cloud.md).
 
 ---
 

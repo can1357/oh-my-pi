@@ -46,6 +46,7 @@ const ONLY_BUILTIN_SKILLS = {
 	enablePiProject: false,
 	enableAgentsUser: false,
 	enableAgentsProject: false,
+	environmentsCloudRoot: null,
 } as const;
 
 function builtinProvider() {

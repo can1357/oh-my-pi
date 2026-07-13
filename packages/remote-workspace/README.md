@@ -1,17 +1,47 @@
 # @pk-nerdsaver-ai/pi-remote-workspace
 
-Phase-1 library and CLI for recording and running isolated Docker workspace jobs. It is a standalone package; it is not yet integrated with the top-level `omp` CLI.
+Phase-1 library and CLI for recording and running **local isolated Docker workspace jobs**. It is a standalone package; it is not yet integrated with the top-level `omp` CLI.
+
+## Local sandbox vs cloud mesh SoT
+
+This package is **not** the mesh orchestrator.
+
+| Concern | Source of truth |
+| --- | --- |
+| Local Docker sandbox jobs (`ompk-remote run`, `MsiDockerBackend`) | This package |
+| Mesh / cloud / auth / codespace-style launch | **environments-cloud (pkscloudenvs)** |
+
+**MSI-local canonical root:** `C:\dev\desktop-infra\environments-cloud`  
+Upstream: [kingkillery/pkscloudenvs](https://github.com/kingkillery/pkscloudenvs). Override with `OMPK_ENVIRONMENTS_CLOUD_ROOT` (or `PKS_ENVIRONMENTS_CLOUD_ROOT`).
+
+```sh
+bun src/cli.ts environments
+bun src/cli.ts environments skill mesh-orchestrator
+bun src/cli.ts environments handoff mesh status
+bun src/cli.ts environments handoff cloud status
+```
+
+```ts
+import {
+	resolveEnvironmentsCloudRoot,
+	resolveEnvironmentsCloudSkill,
+	resolveMeshHandoff,
+	environmentsCloudSkillCustomDirectories,
+} from "@pk-nerdsaver-ai/pi-remote-workspace";
+```
+
+Coding-agent auto-includes `{root}/.agents/skills` when present. See `docs/environments-cloud.md` and `.wiki/concepts/environments-cloud-routing.md`.
 
 ## Requirements
 
 - Bun 1.3.14 or later
-- Docker CLI with a reachable Docker daemon
+- Docker CLI with a reachable Docker daemon (for phase-1 local jobs only)
 - The local `oh-my-pi/pi:dev` worker image
 
 Check the backend before use:
 
 ```sh
-bun run src/cli.ts doctor
+bun src/cli.ts doctor
 ```
 
 `doctor` reports whether Docker is reachable and whether the worker image exists locally. The job database defaults to `~/.omp/remote-jobs.sqlite`; set `OMPK_REMOTE_DB` to use another path.
@@ -21,11 +51,15 @@ bun run src/cli.ts doctor
 From this package directory, run:
 
 ```sh
-bun run src/cli.ts doctor
-bun run src/cli.ts run <repo-url> [ref] [prompt...]
-bun run src/cli.ts status [job-id]
-bun run src/cli.ts cancel <job-id>
-bun run src/cli.ts list
+bun src/cli.ts doctor
+bun src/cli.ts run <repo-url> [ref] [prompt...]
+bun src/cli.ts status [job-id]
+bun src/cli.ts cancel <job-id>
+bun src/cli.ts list
+bun src/cli.ts environments
+bun src/cli.ts environments skill mesh-orchestrator
+bun src/cli.ts environments handoff mesh status
+bun src/cli.ts cloud
 ```
 
 `run` records a job, runs it synchronously, and prints its logs, patch (when available), and cleanup proof. `status` without an ID lists all stored jobs; `list` is an alias. Installed packages expose the same commands through the `ompk-remote` binary.
@@ -71,7 +105,7 @@ Remote cloning is disabled by default. To enable it, configure `networkEgress: "
 
 ## Current limitations
 
-- Only the local `msi-docker` backend is implemented; there is no remote-host, cloud, or backend-selection integration.
+- Only the local `msi-docker` backend is implemented. Cloud mesh orchestration, auth, and multi-node launch stay in environments-cloud (pkscloudenvs); this package only resolves and documents handoff to those entrypoints.
 - Remote cloning is disabled by default. The CLI does not expose restricted-egress network or repository-host configuration, so its `run` command fails safely before launching a clone job.
 - The worker only clones a repository, prints the supplied prompt, and runs the supplied validation commands. It does not invoke an Oh My Pi agent, publish branches or pull requests, or provision credentials.
 - The CLI always uses `echo ok` as its validation command and has no flags for resource limits, image choice, or result mode.
