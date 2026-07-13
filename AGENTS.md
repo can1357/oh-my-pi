@@ -6,6 +6,7 @@
 - Other packages: `ai` LLM client, `catalog` model catalog, `agent` runtime, `tui`, `natives`, `stats`, `utils`, `llm-router-agent`, `crates/pi-natives`.
 - Catalog values import from `@pk-nerdsaver-ai/pi-catalog/<module>`, never through `@pk-nerdsaver-ai/pi-ai`; type-only `Model`, `Api`, `ThinkingConfig`, `Effort` from `pi-ai` are okay.
 - Review logical clusters before staging; never commit `AGENTS.md` without `git diff --stat`.
+- For multi-agent Linear/fork collaboration and queue admission, follow [docs/multi-agent-fork-collaboration.md](docs/multi-agent-fork-collaboration.md).
 
 ## GitHub
 
