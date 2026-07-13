@@ -388,6 +388,32 @@ export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Messag
  * Redact outbound provider context. Only conversation messages are rewritten;
  * the static system prompt and tool schemas pass through unchanged.
  */
+/**
+ * Obfuscate secret strings inside tool definitions (name stays; description and
+ * parameter schema strings are mapped) before they leave for a provider.
+ * Mirrors {@link obfuscateProviderContext}; restored for callers that landed
+ * without this export.
+ */
+export function obfuscateProviderTools<T extends { description?: string; parameters?: unknown }>(
+	obfuscator: SecretObfuscator | undefined,
+	tools: T[],
+): T[] {
+	if (!obfuscator?.hasSecrets()) return tools;
+	let changed = false;
+	const out = tools.map(tool => {
+		const description =
+			typeof tool.description === "string" ? obfuscator.obfuscate(tool.description) : tool.description;
+		const parameters =
+			tool.parameters === undefined
+				? undefined
+				: mapJsonStrings(tool.parameters as JsonValue, s => obfuscator.obfuscate(s));
+		if (description === tool.description && parameters === tool.parameters) return tool;
+		changed = true;
+		return { ...tool, ...(description !== undefined ? { description } : {}), ...(parameters !== undefined ? { parameters } : {}) };
+	});
+	return changed ? out : tools;
+}
+
 export function obfuscateProviderContext(obfuscator: SecretObfuscator | undefined, context: Context): Context {
 	if (!obfuscator?.hasSecrets()) return context;
 	const messages = obfuscateMessages(obfuscator, context.messages);
