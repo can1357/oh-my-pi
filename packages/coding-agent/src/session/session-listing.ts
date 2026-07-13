@@ -49,6 +49,12 @@ export interface SessionInfo {
 	 * synthesized {@link SessionInfo}s (cross-project stubs, tests) leave it unset.
 	 */
 	status?: SessionStatus;
+	/**
+	 * Text of the most recent assistant message found in the tail window; used as
+	 * the last-message preview in session/agent lists. Only set when the list was
+	 * built with status derivation enabled.
+	 */
+	lastAssistantText?: string;
 }
 
 export interface ResolvedSessionMatch {
@@ -129,9 +135,17 @@ function extractTextFromContent(content: Message["content"]): string {
  * partial fragment — it simply fails to parse and is skipped. We walk backwards to
  * the last `message` entry and classify by its role / stop reason.
  */
-function deriveSessionStatus(suffix: string): SessionStatus {
-	if (!suffix) return "unknown";
+/**
+ * Derive the {@link SessionStatus} plus the most recent assistant text from a
+ * tail window. Walks backwards: the last `message` entry decides the status,
+ * and the walk continues until an assistant message with text is found (they
+ * are often the same entry).
+ */
+function deriveSessionTail(suffix: string): { status: SessionStatus; lastAssistantText?: string } {
+	if (!suffix) return { status: "unknown" };
 	const lines = suffix.split("\n");
+	let status: SessionStatus | undefined;
+	let lastAssistantText: string | undefined;
 	for (let i = lines.length - 1; i >= 0; i--) {
 		const line = lines[i];
 		// Every persisted entry is `JSON.stringify(obj)` → starts with `{`. This
@@ -144,11 +158,18 @@ function deriveSessionStatus(suffix: string): SessionStatus {
 		} catch {
 			continue;
 		}
-		if (entry.type === "message" && entry.message) {
-			return statusFromTailMessage(entry.message);
+		if (entry.type !== "message" || !entry.message) continue;
+		status ??= statusFromTailMessage(entry.message);
+		if (lastAssistantText === undefined && entry.message.role === "assistant") {
+			const content = entry.message.content;
+			if (typeof content === "string" || Array.isArray(content)) {
+				const text = extractTextFromContent(content as Message["content"]).trim();
+				if (text) lastAssistantText = text;
+			}
 		}
+		if (status !== undefined && lastAssistantText !== undefined) break;
 	}
-	return "unknown";
+	return { status: status ?? "unknown", lastAssistantText };
 }
 
 function extractBackgroundInstanceFromContent(content: string): SessionInfo["backgroundInstance"] | undefined {
@@ -426,7 +447,7 @@ async function scanSessionFile(
 			size,
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText: allMessages.length > 0 ? allMessages.join(" ") : firstMessage,
-			status: withStatus ? deriveSessionStatus(suffix) : undefined,
+			...(withStatus ? deriveSessionTail(suffix) : {}),
 		};
 	} catch {
 		return undefined;

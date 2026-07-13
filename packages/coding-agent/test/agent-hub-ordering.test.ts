@@ -66,7 +66,7 @@ function renderedAgentIds(hub: AgentHubOverlayComponent): string[] {
 		.map(line => line.split(" · "))
 		.filter(
 			parts =>
-				parts.length >= 4 && ["running", "idle", "parked", "aborted"].some(status => parts[0].endsWith(status)),
+				parts.length >= 4 && ["working", "idle", "parked", "failed"].some(status => parts[0].endsWith(status)),
 		)
 		.map(parts => parts[1]!);
 }
