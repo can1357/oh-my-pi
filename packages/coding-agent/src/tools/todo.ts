@@ -1,3 +1,4 @@
+import * as nodePath from "node:path";
 import type {
 	AgentTool,
 	AgentToolContext,
@@ -139,6 +140,28 @@ function normalizeInProgressTask(phases: TodoPhase[]): void {
 }
 
 export const USER_TODO_EDIT_CUSTOM_TYPE = "user_todo_edit";
+
+/**
+ * Resolve the target path for `/todo export|import [path]`: strips surrounding
+ * quotes, defaults to `todos.md`, appends `todos.md` to directory-style args,
+ * and resolves relative paths against the session cwd.
+ *
+ * (Restores an export whose callers landed in ee661cb41 without a definition.)
+ */
+export function resolveTodoMarkdownPath(rawArgs: string, cwd: string): string {
+	let target = rawArgs.trim();
+	if (
+		(target.startsWith('"') && target.endsWith('"') && target.length >= 2) ||
+		(target.startsWith("'") && target.endsWith("'") && target.length >= 2)
+	) {
+		target = target.slice(1, -1).trim();
+	}
+	if (!target) target = "todos.md";
+	if (target.endsWith("/") || target.endsWith(nodePath.sep)) {
+		target = nodePath.join(target, "todos.md");
+	}
+	return nodePath.isAbsolute(target) ? target : nodePath.resolve(cwd, target);
+}
 
 export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPhase[] {
 	for (let i = entries.length - 1; i >= 0; i--) {

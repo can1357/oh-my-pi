@@ -61,6 +61,10 @@
 			"types": "./src/index.ts",
 			"import": "./src/index.ts"
 		},
+		"./error": {
+			"types": "./src/error/index.ts",
+			"import": "./src/error/index.ts"
+		},
 		"./*": {
 			"types": "./src/*.ts",
 			"import": "./src/*.ts"
