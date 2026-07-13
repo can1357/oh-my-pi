@@ -1,0 +1,30 @@
+name = "ompk-linear-agent"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Atomic job queue: a single Durable Object instance serializes admission,
+# leasing, and fenced completion (KV read-modify-write was racy and is gone).
+[[durable_objects.bindings]]
+name = "JOB_QUEUE"
+class_name = "JobQueue"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = [ "JobQueue" ]
+
+# Non-secret dispatch allowlists. Empty values fail closed (nothing dispatches).
+#   LINEAR_AGENT_USER_ID  - Linear user id of the agent principal; only issues
+#                           assigned to it may dispatch
+#   ALLOWED_PROJECT_IDS   - comma-separated Linear project ids allowed to dispatch
+#   ALLOWED_MODELS        - comma-separated `model:` combo ids allowed to dispatch
+[vars]
+LINEAR_AGENT_USER_ID = ""
+ALLOWED_PROJECT_IDS = ""
+ALLOWED_MODELS = ""
+
+# Secrets (set via `wrangler secret put <NAME>`, never committed):
+#   LINEAR_WEBHOOK_SECRET   - signing secret from the Linear OAuth app's webhook config
+#   LINEAR_API_TOKEN        - the app's developer (actor=app) token, used to read issues/labels
+#                             and post comments back as the ompk agent
+#   RELAY_TOKEN             - shared secret the Windows-side relay presents when polling/submitting
+#   STATUS_TOKEN            - separate administrative credential required by /status

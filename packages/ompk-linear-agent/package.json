@@ -1,0 +1,20 @@
+{
+	"name": "@pk-nerdsaver-ai/ompk-linear-agent",
+	"version": "0.1.0",
+	"description": "Cloudflare Worker: Linear Agent webhook receiver + job queue for dispatching ompk/Claude Code/Codex runs over the Tailscale mesh",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "wrangler dev",
+		"deploy": "wrangler deploy",
+		"tail": "wrangler tail",
+		"relay": "bun relay/relay.ts",
+		"test": "bun test test",
+		"check:types": "tsc -p tsconfig.json --noEmit"
+	},
+	"devDependencies": {
+		"wrangler": "^4.80.0",
+		"@cloudflare/workers-types": "^4.20250101.0",
+		"typescript": "^5.6.0"
+	}
+}
