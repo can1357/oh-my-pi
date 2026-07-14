@@ -68,7 +68,7 @@ describe("collab link parsing", () => {
 	});
 
 	it("parses web deep links (https://<relay>/#<link>)", () => {
-		const bare = parseCollabLink(`https://my.omp.sh/#${ROOM}#${KEY_TEXT}`);
+		const bare = parseCollabLink(`https://collab.pkking.computer/#${ROOM}#${KEY_TEXT}`);
 		if ("error" in bare) throw new Error(bare.error);
 		expect(bare.wsUrl).toBe(`${DEFAULT_RELAY_URL}/r/${ROOM}`);
 		expect(bare.key).toEqual(KEY);
@@ -108,7 +108,7 @@ describe("collab link parsing", () => {
 	});
 
 	it("parses dot-joined web deep links (https://<relay>/#<roomId>.<key>)", () => {
-		const parsed = parseCollabLink(`https://my.omp.sh/#${ROOM}.${KEY_TEXT}`);
+		const parsed = parseCollabLink(`https://collab.pkking.computer/#${ROOM}.${KEY_TEXT}`);
 		if ("error" in parsed) throw new Error(parsed.error);
 		expect(parsed.wsUrl).toBe(`${DEFAULT_RELAY_URL}/r/${ROOM}`);
 		expect(parsed.key).toEqual(KEY);
@@ -122,7 +122,7 @@ describe("collab link parsing", () => {
 	});
 
 	it("accepts %23-mangled legacy deep links (macOS Foundation re-encoding)", () => {
-		const parsed = parseCollabLink(`https://my.omp.sh/#${ROOM}%23${KEY_TEXT}`);
+		const parsed = parseCollabLink(`https://collab.pkking.computer/#${ROOM}%23${KEY_TEXT}`);
 		if ("error" in parsed) throw new Error(parsed.error);
 		expect(parsed.wsUrl).toBe(`${DEFAULT_RELAY_URL}/r/${ROOM}`);
 		expect(parsed.key).toEqual(KEY);

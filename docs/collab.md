@@ -15,7 +15,7 @@ prints
 ```
 Collab session started!
  • Join from another terminal: oh-my-pk join "mgAYTZwEnpRQtca0CTgn-Q.gdJUbTovD94ofDaa8YvhY0-ty16w4fn8PgB6PLnoA30"
- • or any web browser: my.omp.sh/#mgAYTZwEnpRQtca0CTgn-Q.gdJUbTovD94ofDaa8YvhY0-ty16w4fn8PgB6PLnoA30
+ • or any web browser: collab.pkking.computer/#mgAYTZwEnpRQtca0CTgn-Q.gdJUbTovD94ofDaa8YvhY0-ty16w4fn8PgB6PLnoA30
 ```
 
 The browser line is click-to-join (an OSC 8 hyperlink to the full `https://` deep link): the relay serves the web guest client at `/`, and the room id + key ride in the URL fragment. From another omp (any directory, any machine), either form works:
@@ -23,7 +23,7 @@ The browser line is click-to-join (an OSC 8 hyperlink to the full `https://` dee
 Running `/collab`, `/remote-control`, `/collab view`, or `/remote-control view` starts or displays the active hosting session, rendering both the terminal/browser join links and their corresponding QR codes.
 
 ```
-/join my.omp.sh/#mgAYTZwEnpRQtca0CTgn-Q.gdJU…
+/join collab.pkking.computer/#mgAYTZwEnpRQtca0CTgn-Q.gdJU…
 ```
 
 The guest's previous session is restored on `/leave` (or when the host stops).
@@ -49,7 +49,7 @@ The guest's previous session is restored on `/leave` (or when the host stops).
 Accepted by `/join <link>` and `oh-my-pk join "<link>"`:
 
 ```
-<roomId>.<key>                                                    → default relay (wss://my.omp.sh)
+<roomId>.<key>                                                    → default relay (wss://collab.pkking.computer)
 <roomId>#<key>                                                    → legacy bare form
 host[:port]/r/<roomId>.<key>                                     → custom relay, wss:// inferred
 host[:port]/r/<roomId>#<key>                                     → legacy direct relay form
@@ -108,15 +108,17 @@ Set `collab.webUrl` when the browser UI is hosted separately from the websocket 
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `collab.relayUrl` | `wss://my.omp.sh` | Relay used by `/collab` when no relay is passed inline |
+| `collab.relayUrl` | `wss://collab.pkking.computer` | Relay used by `/collab` when no relay is passed inline |
 | `collab.webUrl` | empty | Browser UI URL for `/collab` links; empty derives from relay; explicit `http://` is allowed only for localhost |
 | `collab.displayName` | OS username | Name shown to other participants |
-| `share.serverUrl` | `https://my.omp.sh/s` | Share viewer/upload base used by `/share` (links are `<base>/<id>#<key>`) |
+| `share.serverUrl` | `https://collab.pkking.computer/s` | Share viewer/upload base used by `/share` (links are `<base>/<id>#<key>`) |
 | `share.redactSecrets` | `true` | Run the secret obfuscator over `/share` snapshots before upload |
 
 ## Self-hosting the relay
 
-The relay is a small content-blind Go service. It keeps no state beyond live connections and exposes:
+The owned collaboration service is deployed as the `ompk-collab` Cloudflare Worker at `collab.pkking.computer`. It keeps live room coordination in one Durable Object per room and stores sealed share blobs in the configured R2 bucket. The relay never decrypts session content. Share uploads are capped at 1 MB and rate-limited to 12 per Cloudflare client IP per hour.
+
+It exposes:
 
 - `GET /` — the static collab-web guest client (target of the `/collab` deep link),
 - `GET /r/<roomId>?role=host|guest` — WebSocket upgrade,

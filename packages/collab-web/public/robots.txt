@@ -2,4 +2,4 @@ User-agent: *
 Allow: /
 Disallow: /r/
 
-Sitemap: https://my.omp.sh/sitemap.xml
+Sitemap: https://collab.pkking.computer/sitemap.xml

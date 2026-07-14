@@ -14,6 +14,7 @@
 - Added a write-scope spawn contract for exclusive, isolated-patch, and proposal-only lanes with mergeOwner validation.
 - Added a criterion-level adjudication module with pass/fail/blocked/unproven judgments consumed by the root completion gate.
 - Added ephemeral root task-contract compilation with deterministic clarification scoring, executor/advisor digest injection, retry-safe recovery context, and session-bound cleanup; evidence-backed completion enforcement remains deferred to M2.
+- Added `/hub` for encrypted, cloud-durable session handoff: provision account access from a local admin secret, publish a replication snapshot from one device, and resume its full JSONL history as a local fork on another device using the complete hub link.
 
 
 - Added `agent.profile` and `agent.profiles` settings for named, swappable role-based model bundles that retarget every role-resolving agent slot at once (explicit `modelRoles` still wins per-role).
@@ -27,6 +28,7 @@
 - Added prompt-btw subagent handoff mode to `/btw`: invoking "use promptbtw for subagent handoff: <raw task>" returns a structured SUBAGENT HANDOFF PROMPT instead of an answer.
 
 ### Changed
+- Changed the default collaboration relay and encrypted share endpoints to `collab.pkking.computer`.
 
 - Changed blind/staged-independent context to mechanically clamp child collaboration to report-only, denying discovery, messaging, wake, and busy replies.
 - Changed the completion gate to distinguish failed from unproven criteria and require full criterion evidence coverage.
@@ -40,7 +42,9 @@
 - Trimmed a second pass of tool-prompt prose across `read`/`bash`/`apply-patch`/`patch`/`todo`/`ast-grep`/`github`, dropping schema-inferable and duplicate content while preserving RFC-2119 keywords and Handlebars structure.
 
 ### Fixed
+- Fixed subagent (`task`) dispatch only falling back to the parent session's active model when the resolved model has no working credentials, instead of first walking the rest of `modelRoles.task`'s own priority list. A comma-separated `modelRoles.task` value (e.g. `provider/most-intelligent, provider/fallback-1, provider/fallback-2`, up to 3 entries, position 1 = most intelligent) now tries each candidate in order for both catalog existence and credentials before ever considering the parent's model, and the remaining untried entries still seed the runtime retry-on-failure chain.
 - Fixed the double-tap `←` gesture staying inert when only background sessions exist: the Agent Hub's emptiness check ran before the async background-session disk scan finished, so `←←` never opened the backgrounds view unless a live subagent happened to be registered.
+- Fixed encrypted `/share` links on the owned relay by serving the standalone client-side decryption viewer, enforcing read-time expiry, and making the viewer generator Windows-safe.
 - Fixed `irc wait` (and `send await:true`) hanging forever on Windows: the wait timeout timer was unref'd, and on Bun/Windows an unref'd timer whose promise is the only pending work never fires. The same hang made `test/tools/irc.test.ts` unrunnable on Windows.
 - Fixed broadcast fan-out relaying sibling legs to the main UI even when the broadcast already reached the main agent directly, duplicating the identical body once per sibling (`suppressRelay` was adopted on the bus during the upstream sync but never set by the fork's diverged send path).
 - Fixed AssignmentContractV2 evidencePolicy, priorBlockedRoutes, and resultRequirements to survive digest, parse, and transport after they were silently dropped with an unchanged digest.

@@ -91,7 +91,7 @@ describe("collab link format", () => {
 		for (const legacy of [
 			`${roomId}#${keyText}`,
 			`relay.example.com:8443/r/${roomId}#${keyText}`,
-			`https://my.omp.sh/#${roomId}#${keyText}`,
+			`https://collab.pkking.computer/#${roomId}#${keyText}`,
 		]) {
 			const parsed = parseCollabLink(legacy);
 			if ("error" in parsed) throw new Error(`${legacy}: ${parsed.error}`);
@@ -102,7 +102,7 @@ describe("collab link format", () => {
 
 	it("accepts %23-mangled legacy deep links (macOS Foundation re-encoding)", () => {
 		const keyText = Buffer.from(key).toString("base64url");
-		const parsed = parseCollabLink(`https://my.omp.sh/#${roomId}%23${keyText}`);
+		const parsed = parseCollabLink(`https://collab.pkking.computer/#${roomId}%23${keyText}`);
 		if ("error" in parsed) throw new Error(parsed.error);
 		expect(parsed.wsUrl).toBe(`${DEFAULT_RELAY_URL}/r/${roomId}`);
 		expect(Buffer.from(parsed.key)).toEqual(Buffer.from(key));
@@ -165,7 +165,7 @@ describe("collab link format", () => {
 	});
 
 	it("parses the scheme-less display form of web deep links", () => {
-		const parsed = parseCollabLink(`my.omp.sh/#${formatCollabLink(DEFAULT_RELAY_URL, roomId, key)}`);
+		const parsed = parseCollabLink(`collab.pkking.computer/#${formatCollabLink(DEFAULT_RELAY_URL, roomId, key)}`);
 		if ("error" in parsed) throw new Error(parsed.error);
 		expect(parsed.wsUrl).toBe(`${DEFAULT_RELAY_URL}/r/${roomId}`);
 		expect(Buffer.from(parsed.key)).toEqual(Buffer.from(key));
@@ -200,7 +200,7 @@ describe("collab link format", () => {
 	it("keeps the key out of web-link path and query", () => {
 		const webLink = formatCollabWebLink(DEFAULT_RELAY_URL, roomId, key);
 		const url = new URL(webLink);
-		expect(url.origin).toBe("https://my.omp.sh");
+		expect(url.origin).toBe("https://collab.pkking.computer");
 		expect(url.pathname).toBe("/");
 		expect(url.search).toBe("");
 		expect(url.hash).toBe(`#${roomId}.${Buffer.from(key).toString("base64url")}`);

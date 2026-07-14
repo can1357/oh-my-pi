@@ -65,11 +65,7 @@ import { filterAutoToolNames, type ResolvedToolProfile, resolveToolProfile } fro
 import type { EventBus } from "../utils/event-bus";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
-import {
-	type AssignmentContract,
-	type AssignmentResult,
-	parseAssignmentResult,
-} from "./assignment-contract";
+import { type AssignmentContract, type AssignmentResult, parseAssignmentResult } from "./assignment-contract";
 import {
 	type AssignmentVerificationResult,
 	type AssignmentVerifierRunners,
@@ -230,9 +226,17 @@ function installSubagentRetryFallbackChain(args: {
 	candidates: SubagentRetryFallbackCandidate[];
 	model: Model<Api> | undefined;
 	authFallbackUsed: boolean;
+	/** Which mechanism supplied the fallback model, when `authFallbackUsed` is true. */
+	fallbackKind?: "priority-list" | "parent";
 }): string | undefined {
-	const { settings, id, candidates, model, authFallbackUsed } = args;
-	if (!model || authFallbackUsed || candidates.length <= 1) return undefined;
+	const { settings, id, candidates, model, authFallbackUsed, fallbackKind } = args;
+	// A parent-model fallback is not one of `candidates` (it comes from the
+	// PARENT session's active model pattern, outside the task's own priority
+	// list), so a retry chain built from `candidates` would be meaningless —
+	// skip early. A priority-list fallback (candidate 2, 3, …) IS one of
+	// `candidates`; still install a chain from whatever ordered candidates
+	// remain after the one actually selected.
+	if (!model || (authFallbackUsed && fallbackKind !== "priority-list") || candidates.length <= 1) return undefined;
 
 	const selectedIndex = candidates.findIndex(
 		candidate => candidate.model.provider === model.provider && candidate.model.id === model.id,
@@ -2208,12 +2212,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				logger.debug("runSubagent: reusing parent modelRegistry; skipping refresh");
 			}
 			checkAbort();
-
 			const {
 				model,
 				thinkingLevel: resolvedThinkingLevel,
 				explicitThinkingLevel,
 				authFallbackUsed,
+				fallbackKind,
 			} = await awaitAbortable(
 				resolveModelOverrideWithAuthFallback(
 					modelPatterns,
@@ -2223,12 +2227,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				),
 			);
 			if (authFallbackUsed && model) {
-				logger.warn("Subagent model has no working credentials; falling back to parent session model", {
-					requested: modelPatterns,
-					parentModel: options.parentActiveModelPattern,
-					resolvedProvider: model.provider,
-					resolvedModel: model.id,
-				});
+				if (fallbackKind === "priority-list") {
+					logger.warn(
+						"Subagent priority-1 model has no working credentials; falling back to next priority model",
+						{
+							requested: modelPatterns,
+							resolvedProvider: model.provider,
+							resolvedModel: model.id,
+						},
+					);
+				} else {
+					logger.warn("Subagent model has no working credentials; falling back to parent session model", {
+						requested: modelPatterns,
+						parentModel: options.parentActiveModelPattern,
+						resolvedProvider: model.provider,
+						resolvedModel: model.id,
+					});
+				}
 			}
 			const retryFallbackRole = installSubagentRetryFallbackChain({
 				settings: subagentSettings,
@@ -2236,6 +2251,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, settings),
 				model,
 				authFallbackUsed,
+				fallbackKind,
 			});
 			if (retryFallbackRole) {
 				logger.debug("Configured subagent runtime model fallback chain", {
@@ -2358,19 +2374,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					const contractPrompt = options.assignmentContract
 						? `${prompt.render(assignmentContractPromptTemplate, {})}\n\n\`\`\`json\n${JSON.stringify(options.assignmentContract, null, 2)}\n\`\`\``
 						: undefined;
-				const recoveryPrompt = options.recoveryCapsule
-					? `# Recovery Capsule\n\nThis is a fresh child. Use only this compact failure capsule; do not request or reconstruct the failed transcript.\n\n\`\`\`json\n${JSON.stringify(options.recoveryCapsule, null, 2)}\n\`\`\``
-					: undefined;
-				const harnessGuidancePrompt = options.harnessGuidance
-					? `<harness-guidance>\n${options.harnessGuidance}\n</harness-guidance>`
-					: undefined;
-				const prompts =
-					defaultPrompt.length === 0
-						? [subagentPrompt]
-						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
-				return [...prompts, harnessGuidancePrompt, contractPrompt, recoveryPrompt].filter(
-					(value): value is string => value !== undefined,
-				);
+					const recoveryPrompt = options.recoveryCapsule
+						? `# Recovery Capsule\n\nThis is a fresh child. Use only this compact failure capsule; do not request or reconstruct the failed transcript.\n\n\`\`\`json\n${JSON.stringify(options.recoveryCapsule, null, 2)}\n\`\`\``
+						: undefined;
+					const harnessGuidancePrompt = options.harnessGuidance
+						? `<harness-guidance>\n${options.harnessGuidance}\n</harness-guidance>`
+						: undefined;
+					const prompts =
+						defaultPrompt.length === 0
+							? [subagentPrompt]
+							: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
+					return [...prompts, harnessGuidancePrompt, contractPrompt, recoveryPrompt].filter(
+						(value): value is string => value !== undefined,
+					);
 				},
 				sessionManager: sessionManagerForRun,
 				hasUI: false,

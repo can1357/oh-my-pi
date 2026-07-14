@@ -253,10 +253,10 @@ describe("buildShareSnapshot", () => {
 
 describe("normalizeShareServerUrl", () => {
 	test("strips trailing slashes and falls back to the default", () => {
-		expect(normalizeShareServerUrl("https://my.omp.sh/s/")).toBe("https://my.omp.sh/s");
+		expect(normalizeShareServerUrl("https://collab.pkking.computer/s/")).toBe("https://collab.pkking.computer/s");
 		expect(normalizeShareServerUrl("https://example.com/s///")).toBe("https://example.com/s");
-		expect(normalizeShareServerUrl(undefined)).toBe("https://my.omp.sh/s");
-		expect(normalizeShareServerUrl("   ")).toBe("https://my.omp.sh/s");
+		expect(normalizeShareServerUrl(undefined)).toBe("https://collab.pkking.computer/s");
+		expect(normalizeShareServerUrl("   ")).toBe("https://collab.pkking.computer/s");
 	});
 });
 

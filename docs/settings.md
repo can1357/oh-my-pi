@@ -284,6 +284,17 @@ Every key below is defined in the settings schema; `oh-my-pk config list` shows 
 
 `modelRoles`, `modelTags`, and `cycleOrder` work together to define the models you can switch between. Role values may carry a thinking suffix (`:minimal`, `:low`, `:medium`, `:high`, `:xhigh`).
 
+Any role value may also be a comma-separated **priority list** of model selectors, tried in order — position 1 is preferred (most intelligent/capable), later entries are fallbacks used only when an earlier one is unavailable (missing from the catalog). This ordering always applies wherever a role is resolved.
+
+`modelRoles.task` (and any other role resolved for subagent dispatch, e.g. via `task.agentModelOverrides`) additionally gets **credential-aware** fallback and a **runtime retry-on-failure chain**: if the first available entry has no working credentials, dispatch walks to the next entry instead of jumping straight to the parent session's model; whatever entries remain untried also seed the retry chain used if the selected model errors out mid-run. This credential-aware walk and retry-chain seeding apply only to subagent dispatch — the primary session's own roles (`default`, `smol`, `slow`, etc.) use plain catalog-existence ordering with no credential check or retry-chain installation. A priority list works with any number of entries; 3 is a practical recommendation for `modelRoles.task` (most intelligent, then progressively cheaper/faster fallbacks), not an enforced limit.
+
+```yaml
+modelRoles:
+  task: openai-codex/gpt-5.6-sol:xhigh, anthropic/claude-opus-4-5:high, openai/gpt-4.1-mini
+```
+
+Here subagent dispatch tries `gpt-5.6-sol` first; if it has no working credentials, `claude-opus-4-5` is tried next, then `gpt-4.1-mini`.
+
 ```yaml
 modelRoles:
   default: anthropic/claude-sonnet-4-5

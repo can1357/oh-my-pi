@@ -31,8 +31,8 @@ function fakeHost(options?: {
 	return {
 		link: "relay.example.com/r/full-control",
 		viewLink: "relay.example.com/r/read-only",
-		webLink: options?.webLink ?? "https://my.omp.sh/#full-control",
-		webViewLink: options?.webViewLink ?? "https://my.omp.sh/#read-only",
+		webLink: options?.webLink ?? "https://collab.pkking.computer/#full-control",
+		webViewLink: options?.webViewLink ?? "https://collab.pkking.computer/#read-only",
 		participants: [{ name: "host", role: "host" }],
 	} as unknown as NonNullable<InteractiveModeContext["collabHost"]>;
 }
@@ -70,8 +70,8 @@ function mockStartedHostLinks() {
 		Object.defineProperties(this, {
 			link: { value: "relay.example.com/r/full-control", configurable: true },
 			viewLink: { value: "relay.example.com/r/read-only", configurable: true },
-			webLink: { value: "https://my.omp.sh/#started-full", configurable: true },
-			webViewLink: { value: "https://my.omp.sh/#started-view", configurable: true },
+			webLink: { value: "https://collab.pkking.computer/#started-full", configurable: true },
+			webViewLink: { value: "https://collab.pkking.computer/#started-view", configurable: true },
 			participants: { value: [{ name: "host", role: "host" as const }], configurable: true },
 		});
 		return Promise.resolve();
@@ -90,12 +90,12 @@ describe("/collab slash command QR code rendering", () => {
 		expect(startSpy).toHaveBeenCalledWith("wss://relay.example.com", "");
 		expect(harness.ctx.collabHost).toBeInstanceOf(CollabHost);
 		const statusText = harness.showStatus.mock.calls[0]?.[0] as string;
-		expect(statusText).toContain("my.omp.sh/#started-full");
+		expect(statusText).toContain("collab.pkking.computer/#started-full");
 		const presented = harness.present.mock.calls[0]?.[0] as readonly unknown[];
 		expect(presented[0]).toBeInstanceOf(Spacer);
 		expect(presented[1]).toBeInstanceOf(CollabQrCodeComponent);
 		const component = presented[1] as CollabQrCodeComponent;
-		expect(component.url).toBe("https://my.omp.sh/#started-full");
+		expect(component.url).toBe("https://collab.pkking.computer/#started-full");
 		expect(component.render(120).join("\n")).toMatch(/\x1b\[(?:47|40)m/);
 	});
 
@@ -109,13 +109,13 @@ describe("/collab slash command QR code rendering", () => {
 		expect(startSpy).toHaveBeenCalledWith("wss://relay.example.com", "");
 		expect(harness.ctx.collabHost).toBeInstanceOf(CollabHost);
 		const statusText = harness.showStatus.mock.calls[0]?.[0] as string;
-		expect(statusText).toContain("my.omp.sh/#started-view");
-		expect(statusText).not.toContain("my.omp.sh/#started-full");
+		expect(statusText).toContain("collab.pkking.computer/#started-view");
+		expect(statusText).not.toContain("collab.pkking.computer/#started-full");
 		const presented = harness.present.mock.calls[0]?.[0] as readonly unknown[];
 		expect(presented[0]).toBeInstanceOf(Spacer);
 		expect(presented[1]).toBeInstanceOf(CollabQrCodeComponent);
 		const component = presented[1] as CollabQrCodeComponent;
-		expect(component.url).toBe("https://my.omp.sh/#started-view");
+		expect(component.url).toBe("https://collab.pkking.computer/#started-view");
 	});
 
 	it("prints the active full-control browser QR when hosting", async () => {
@@ -125,7 +125,7 @@ describe("/collab slash command QR code rendering", () => {
 
 		expect(handled).toBe(true);
 		const statusText = harness.showStatus.mock.calls[0]?.[0] as string;
-		expect(statusText).toContain("my.omp.sh/#full-control");
+		expect(statusText).toContain("collab.pkking.computer/#full-control");
 		const presented = harness.present.mock.calls[0]?.[0] as readonly unknown[];
 		expect(presented[0]).toBeInstanceOf(Spacer);
 		expect(presented[1]).toBeInstanceOf(CollabQrCodeComponent);
@@ -134,8 +134,8 @@ describe("/collab slash command QR code rendering", () => {
 	});
 
 	it("prints a one-shot read-only browser QR when hosting", async () => {
-		const webLink = "https://my.omp.sh/#full-control";
-		const webViewLink = "https://my.omp.sh/#read-only";
+		const webLink = "https://collab.pkking.computer/#full-control";
+		const webViewLink = "https://collab.pkking.computer/#read-only";
 		const harness = createRuntimeHarness({ collabHost: fakeHost({ webLink, webViewLink }) });
 
 		const handled = await executeBuiltinSlashCommand("/collab view", harness.runtime);

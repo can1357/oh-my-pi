@@ -3,8 +3,8 @@
   "name": "@pk-nerdsaver-ai/collab-web",
   "version": "15.11.7",
   "private": true,
-  "description": "Browser guest client and local relay tools for omp collab live sessions",
-  "homepage": "https://omp.sh",
+  "description": "Browser guest client and local relay tools for OMP collaboration",
+  "homepage": "https://collab.pkking.computer",
   "author": "Can Boluk",
   "license": "MIT",
   "repository": {

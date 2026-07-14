@@ -13,6 +13,6 @@ describe("collab wire constants", () => {
 		expect(COLLAB_PROMPT_MESSAGE_TYPE).toBe("collab-prompt");
 		expect(ENVELOPE_HEADER_LENGTH).toBe(4);
 		expect(ROOM_ID_BYTES).toBe(16);
-		expect(DEFAULT_RELAY_URL).toBe("wss://my.omp.sh");
+		expect(DEFAULT_RELAY_URL).toBe("wss://collab.pkking.computer");
 	});
 });

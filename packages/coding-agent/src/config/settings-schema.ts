@@ -1836,6 +1836,44 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Hub
+	"hub.relayUrl": {
+		type: "string",
+		default: "https://collab.pkking.computer/h",
+		ui: {
+			tab: "interaction",
+			group: "Collab",
+			label: "Hub Relay URL",
+			description: "Cloud-durable hub base used by /hub publish/resume (HTTPS endpoint that accepts sealed blobs)",
+		},
+	},
+
+	"hub.token": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "interaction",
+			group: "Collab",
+			label: "Hub Access Token",
+			description:
+				"Account access token for /hub. Provision once, then install it on every device you want to hand off between.",
+			sensitive: true,
+		},
+	},
+
+	"hub.deviceId": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "interaction",
+			group: "Collab",
+			label: "Hub Device ID",
+			description: "Stable per-install identifier allocated on first /hub publish.",
+		},
+	},
+
+	"hub.activeId": { type: "string", default: "" },
+	"hub.activeKey": { type: "string", default: "" },
 	// Speech-to-text
 	"stt.enabled": {
 		type: "boolean",

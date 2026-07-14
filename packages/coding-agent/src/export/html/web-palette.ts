@@ -1,6 +1,6 @@
 /**
  * Web/export palette — the omp brand identity shared by the collab-web live
- * client (`my.omp.sh/`) and every public HTML export / share viewer (`/s/<id>`).
+ * client (`collab.pkking.computer/`) and every public HTML export / share viewer (`/s/<id>`).
  *
  * Why this exists separately from `modes/theme/dark.json`: the `dark` theme is
  * the **default TUI theme** — its amber accent (`#febc38`) drives the terminal

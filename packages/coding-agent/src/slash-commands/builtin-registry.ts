@@ -33,6 +33,8 @@ import { getMarkdownTheme, theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession, FreshSessionResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
+import { HubError, HubService, parseHubLink } from "../session/hub-service";
+import { SessionManager } from "../session/session-manager";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { clearSpeechHardStop, enableSpeechHardStop, isSpeechHardStopped } from "../tts/speech-hard-stop";
 import { vocalizer } from "../tts/vocalizer";
@@ -861,6 +863,132 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: async (_command, runtime) => {
 			await runtime.ctx.handleShareCommand();
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "hub",
+		description: "Cloud-durable encrypted session handoff between your devices",
+		inlineHint:
+			"[provision [name] | login | publish | new | list | resume <link> | devices <hubId> | revoke [hubId]]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args.trim());
+			const hub = new HubService({
+				baseUrl: runtime.settings.get("hub.relayUrl"),
+				token: runtime.settings.get("hub.token") || undefined,
+				deviceId: runtime.settings.get("hub.deviceId") || undefined,
+			});
+			try {
+				if (verb === "provision") {
+					const adminToken = Bun.env.OMP_HUB_ADMIN_TOKEN;
+					if (!adminToken)
+						return usage("Set OMP_HUB_ADMIN_TOKEN, then run /hub provision [device group name].", runtime);
+					const result = await hub.provision(adminToken, rest || os.userInfo().username);
+					runtime.settings.set("hub.token", result.token);
+					await runtime.output(
+						`Hub access provisioned for ${result.displayName}. Copy hub.token to each device you want to hand off between.`,
+					);
+					return commandConsumed();
+				}
+				if (verb === "login") {
+					const token = Bun.env.OMP_HUB_TOKEN;
+					if (!token)
+						return usage(
+							"Set OMP_HUB_TOKEN locally, then run /hub login. Do not paste tokens into session history.",
+							runtime,
+						);
+					runtime.settings.set("hub.token", token);
+					await runtime.output("Hub access token saved for this device.");
+					return commandConsumed();
+				}
+				if (verb === "publish" || verb === "new") {
+					const activeId = runtime.settings.get("hub.activeId");
+					const activeKey = runtime.settings.get("hub.activeKey");
+					const target =
+						rest.length > 0
+							? parseHubLink(rest)
+							: verb === "publish" && activeId && activeKey
+								? { hubId: activeId, keyText: activeKey }
+								: undefined;
+					const result = await hub.publish(runtime.sessionManager, {
+						hubId: target?.hubId,
+						keyText: target?.keyText,
+					});
+					runtime.settings.set("hub.deviceId", result.deviceId);
+					runtime.settings.set("hub.activeId", result.hubId);
+					runtime.settings.set("hub.activeKey", result.keyText);
+					await runtime.output(
+						[
+							`Hub link: ${result.url}`,
+							`Saved ${result.devices} device snapshot(s). Paste the full link into /hub resume on the next device.`,
+						].join("\n"),
+					);
+					return commandConsumed();
+				}
+				if (verb === "list") {
+					const entries = await hub.list();
+					if (entries.length === 0) {
+						await runtime.output("No hub sessions are available to this account.");
+						return commandConsumed();
+					}
+					await runtime.output(
+						entries
+							.map(
+								entry =>
+									`${entry.hubId}  ${entry.title}  ${entry.devices} devices  ${entry.entryCount} entries`,
+							)
+							.join("\n"),
+					);
+					return commandConsumed();
+				}
+				if (verb === "resume") {
+					if (!rest) return usage("Usage: /hub resume <full hub link>", runtime);
+					const link = parseHubLink(rest);
+					const snapshot = await hub.resume(link);
+					const temporaryPath = path.join(os.tmpdir(), `omp-hub-${crypto.randomUUID()}.jsonl`);
+					try {
+						await Bun.write(temporaryPath, snapshot.jsonl);
+						const imported = await SessionManager.forkFrom(temporaryPath, runtime.cwd);
+						const sessionPath = imported.getSessionFile();
+						if (!sessionPath) throw new HubError("hub import did not create a local session file");
+						if (!(await runtime.session.switchSession(sessionPath))) return commandConsumed();
+					} finally {
+						await fs.unlink(temporaryPath).catch(() => undefined);
+					}
+					runtime.settings.set("hub.activeId", link.hubId);
+					runtime.settings.set("hub.activeKey", link.keyText);
+					await runtime.output(
+						`Resumed ${snapshot.entryCount} hub entries from ${snapshot.devices.length} device(s) into a local session fork.`,
+					);
+					return commandConsumed();
+				}
+				if (verb === "devices") {
+					const hubId = rest.startsWith("http") ? parseHubLink(rest).hubId : rest;
+					if (!hubId) return usage("Usage: /hub devices <hubId or hub link>", runtime);
+					const devices = await hub.devices(hubId);
+					await runtime.output(
+						devices.length > 0
+							? devices
+									.map(device => `${device.deviceId}  ${device.displayName}  ${device.entryCount} entries`)
+									.join("\n")
+							: "(no device snapshots yet)",
+					);
+					return commandConsumed();
+				}
+				if (verb === "revoke") {
+					const hubId = rest.startsWith("http")
+						? parseHubLink(rest).hubId
+						: rest || runtime.settings.get("hub.activeId");
+					if (!hubId) return usage("Usage: /hub revoke <hubId or hub link>", runtime);
+					await hub.revoke(hubId);
+					await runtime.output(`Removed this device's snapshot from hub ${hubId}.`);
+					return commandConsumed();
+				}
+				return usage("Usage: /hub [provision|login|publish|new|list|resume|devices|revoke] [args]", runtime);
+			} catch (err) {
+				const message = err instanceof HubError ? err.message : `hub error: ${errorMessage(err)}`;
+				return usage(message, runtime);
+			}
 		},
 	},
 	{

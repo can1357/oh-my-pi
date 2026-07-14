@@ -454,6 +454,10 @@
         return div.innerHTML;
       }
 
+      function escapeAttribute(text) {
+        return escapeHtml(String(text)).replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+      }
+
       function canonicalizeMessage(text) {
         if (!text) return '';
         const trimmed = text.trim();
@@ -1358,11 +1362,49 @@
         return text.replace(/<(?=[a-zA-Z\/])/g, '&lt;');
       }
 
+      function safeMarkdownLinkHref(href) {
+        const value = String(href || '').trim();
+        if (!value || value.startsWith('//')) return null;
+        if (value.startsWith('#')) return value;
+        if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value)) return value;
+        try {
+          const protocol = new URL(value).protocol;
+          return protocol === 'http:' || protocol === 'https:' || protocol === 'mailto:' ? value : null;
+        } catch {
+          return null;
+        }
+      }
+
+      function safeMarkdownImageHref(href) {
+        const value = String(href || '').trim();
+        return /^data:image\/(?:png|jpeg|gif|webp);base64,[a-zA-Z0-9+/=]+$/i.test(value) ? value : null;
+      }
+
       // Configure marked with syntax highlighting and HTML escaping for text
       marked.use({
         breaks: true,
         gfm: true,
         renderer: {
+          // Raw HTML in session text is untrusted. Render it visibly, never as DOM.
+          html(token) {
+            return escapeHtml(token.text);
+          },
+          // Reject executable URL schemes while preserving ordinary relative and web links.
+          link(token) {
+            const label = escapeHtml(token.text);
+            const href = safeMarkdownLinkHref(token.href);
+            if (!href) return label;
+            const title = token.title ? ` title="${escapeAttribute(token.title)}"` : '';
+            return `<a href="${escapeAttribute(href)}"${title} rel="noreferrer noopener">${label}</a>`;
+          },
+          // Remote Markdown images are tracking beacons. Only embedded raster data is automatic.
+          image(token) {
+            const href = safeMarkdownImageHref(token.href);
+            const alt = escapeAttribute(token.text || 'image');
+            if (!href) return `<span>[remote image blocked: ${escapeHtml(token.text || 'image')}]</span>`;
+            const title = token.title ? ` title="${escapeAttribute(token.title)}"` : '';
+            return `<img src="${escapeAttribute(href)}" alt="${alt}"${title}>`;
+          },
           // Code blocks: syntax highlight, no HTML escaping
           code(token) {
             const code = token.text;

@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Changed the default collaboration relay and encrypted share endpoints to the owned `collab.pkking.computer` service.
 
 ## [16.1.9] - 2026-06-20
 

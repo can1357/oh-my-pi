@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Changed
+- Updated deployment metadata and default collaboration links for the owned `collab.pkking.computer` service.
 
 - Redesigned the browser collaboration client as a focused coding workspace with a persistent desktop agent sidebar, responsive mobile navigation, a floating composer, and a clearer session join experience inspired by T3 Code.
 

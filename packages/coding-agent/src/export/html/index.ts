@@ -40,8 +40,8 @@ export interface ExportOptions {
 	/**
 	 * Which color palette the export ships with.
 	 * - `"web"` (default) — the omp brand identity (collab-web pink/purple),
-	 *   so public HTML exports and the `/s/<id>` share viewer match the live
-	 *   `my.omp.sh` client. See `web-palette.ts`.
+	 *   so public HTML exports and the `/s/<id>` share viewer match the owned
+	 *   `collab.pkking.computer` client. See `web-palette.ts`.
 	 * - `"theme"` — derive from `themeName` (or the active TUI theme), preserving
 	 *   the pre-15.12 behavior where an export mirrored the user's terminal.
 	 */
@@ -122,7 +122,7 @@ function deriveExportColors(baseColor: string): { pageBg: string; cardBg: string
  *   • `generateThemeVars("web" | "theme", themeName?)` — explicit palette.
  *     `"web"` (the default for public artifacts) returns the fixed omp brand
  *     palette from `web-palette.ts` — collab-web pink/purple identity, shared
- *     with the live `my.omp.sh` client, so exports and the share viewer render
+ *     with the live `collab.pkking.computer` client, so exports and the share viewer render
  *     identically to it. `"theme"` derives from the TUI theme via
  *     `getResolvedThemeColors(themeName)` plus the three
  *     `export.{pageBg,cardBg,infoBg}` surface overrides.

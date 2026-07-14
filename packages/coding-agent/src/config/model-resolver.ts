@@ -1240,25 +1240,27 @@ export function resolveModelOverride(
 }
 
 /**
- * Resolve a list of override patterns to the first matching model, with an
- * auth-aware fallback to the parent session's active model.
+ * Resolve a list of override patterns to the first candidate with WORKING
+ * credentials, walking the list in priority order (index 0 = highest
+ * priority). Falls back to the parent session's active model only if every
+ * pattern in the list is either unresolvable or lacks working credentials.
  *
- * If the resolved subagent model has no working credentials (provider has no
- * usable auth), and the parent's active model resolves with working auth,
- * use the parent's model instead. This prevents subagent dispatch from
- * silently routing to a provider the user can't actually call (e.g.
- * `modelRoles.task` pointing at an unqualified id whose only available
- * provider variant has no configured credentials — see #985).
+ * This is the auth-aware counterpart to {@link resolveModelOverride}, which
+ * only checks catalog existence: a pattern can resolve to a real model yet
+ * have no usable credentials (expired OAuth, unset API key), and without
+ * this walk that unusable model would win priority 1 and only fail later,
+ * via the terminal-failure recovery system, instead of gracefully falling
+ * through to priority 2/3 (see the `task.models` priority-list feature).
  *
  * Keyless-by-design providers (llama.cpp, ollama, lm-studio) advertise the
  * `kNoAuth` sentinel from `getApiKey` to signal that they do not require
  * credentials. Those are treated as authenticated here so an explicitly
- * configured local model is never silently rerouted to the parent's remote
- * provider (see #1008).
+ * configured local model is never silently skipped in favor of a later
+ * pattern or the parent's remote provider (see #1008).
  *
- * If neither the subagent nor the parent has working auth, returns the
- * primary resolution unchanged so the existing error path still surfaces
- * a meaningful failure downstream.
+ * If no pattern has working credentials and the parent has none either,
+ * returns the first pattern's resolution unchanged so the existing error
+ * path still surfaces a meaningful failure downstream.
  */
 export async function resolveModelOverrideWithAuthFallback(
 	modelPatterns: string[],
@@ -1270,17 +1272,36 @@ export async function resolveModelOverrideWithAuthFallback(
 	thinkingLevel?: ThinkingLevel;
 	explicitThinkingLevel: boolean;
 	authFallbackUsed: boolean;
+	/** Which mechanism supplied the fallback model, when `authFallbackUsed` is true. */
+	fallbackKind?: "priority-list" | "parent";
 }> {
 	const primary = resolveModelOverride(modelPatterns, modelRegistry, settings);
-	if (!primary.model || !parentActiveModelPattern) {
+	if (!primary.model) {
 		return { ...primary, authFallbackUsed: false };
 	}
-
 	const primaryKey = await modelRegistry.getApiKey(primary.model);
 	if (primaryKey === kNoAuth || isAuthenticated(primaryKey)) {
 		return { ...primary, authFallbackUsed: false };
 	}
 
+	// Priority 1 has no working credentials — walk the remaining ordered
+	// patterns (priority 2, 3, …) before giving up on the user's own list.
+	const seenModelKeys = new Set<string>([`${primary.model.provider}/${primary.model.id}`]);
+	for (const pattern of modelPatterns) {
+		const candidate = resolveModelOverride([pattern], modelRegistry, settings);
+		if (!candidate.model) continue;
+		const key = `${candidate.model.provider}/${candidate.model.id}`;
+		if (seenModelKeys.has(key)) continue;
+		seenModelKeys.add(key);
+		const candidateKey = await modelRegistry.getApiKey(candidate.model);
+		if (candidateKey === kNoAuth || isAuthenticated(candidateKey)) {
+			return { ...candidate, authFallbackUsed: true, fallbackKind: "priority-list" };
+		}
+	}
+
+	if (!parentActiveModelPattern) {
+		return { ...primary, authFallbackUsed: false };
+	}
 	const fallback = resolveModelOverride([parentActiveModelPattern], modelRegistry, settings);
 	if (!fallback.model) {
 		return { ...primary, authFallbackUsed: false };
@@ -1293,7 +1314,7 @@ export async function resolveModelOverrideWithAuthFallback(
 		return { ...primary, authFallbackUsed: false };
 	}
 
-	return { ...fallback, authFallbackUsed: true };
+	return { ...fallback, authFallbackUsed: true, fallbackKind: "parent" };
 }
 
 /**
