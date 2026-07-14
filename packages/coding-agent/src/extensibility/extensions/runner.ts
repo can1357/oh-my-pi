@@ -27,6 +27,7 @@ import type {
 	ContextUsage,
 	Extension,
 	ExtensionActions,
+	ExtensionBuiltinCommandResult,
 	ExtensionCommandContext,
 	ExtensionCommandContextActions,
 	ExtensionContext,
@@ -214,6 +215,7 @@ export class ExtensionRunner {
 	#switchSessionHandler: SwitchSessionHandler = async () => ({ cancelled: false });
 	#reloadHandler: () => Promise<void> = async () => {};
 	#shutdownHandler: ShutdownHandler = () => {};
+	#executeBuiltinCommandFn?: (command: string) => Promise<ExtensionBuiltinCommandResult>;
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
 	#initialized = false;
@@ -266,6 +268,7 @@ export class ExtensionRunner {
 		this.#hasPendingMessagesFn = contextActions.hasPendingMessages;
 		this.#shutdownHandler = contextActions.shutdown;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
+		this.#executeBuiltinCommandFn = contextActions.executeBuiltinCommand;
 
 		// Command context actions (optional, only for interactive mode)
 		if (commandContextActions) {
@@ -517,6 +520,7 @@ export class ExtensionRunner {
 			shutdown: () => this.#shutdownHandler(),
 			getSystemPrompt: () => this.#getSystemPromptFn(),
 			memory: this.#getMemoryFn?.(),
+			executeBuiltinCommand: this.#executeBuiltinCommandFn,
 		};
 	}
 

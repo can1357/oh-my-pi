@@ -10,6 +10,7 @@ import { renderSegmentTrack } from "../../modes/components/segment-track";
 import { TinyTitleDownloadProgressComponent } from "../../modes/components/tiny-title-download-progress";
 import { expandEmoticons } from "../../modes/emoji-autocomplete";
 import { materializeImageReferenceLinks, shiftImageMarkers } from "../../modes/image-references";
+import { isOwnerCommandInFlight } from "../../modes/owner-command-guard";
 import { createPromptActionAutocompleteProvider } from "../../modes/prompt-action-autocomplete";
 import type { InteractiveModeContext } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
@@ -532,6 +533,7 @@ export class InputController {
 				await this.#submitToFocusedSession(text, "steer");
 				return;
 			}
+			if (this.#ownerCommandBlocksSubmission()) return;
 
 			// Empty submit while streaming with queued messages: abort the active
 			// turn and let the post-unwind drain deliver the agent-core queue.
@@ -591,6 +593,8 @@ export class InputController {
 					);
 				}
 			}
+
+			if (this.#ownerCommandBlocksSubmission()) return;
 
 			if (!text) return;
 
@@ -687,6 +691,8 @@ export class InputController {
 					return;
 				}
 			}
+
+			if (this.#ownerCommandBlocksSubmission()) return;
 
 			// While loop mode is on, every user-typed prompt becomes the new loop
 			// prompt that auto-resubmits after each yield.
@@ -1067,6 +1073,13 @@ export class InputController {
 		}
 	}
 
+	#ownerCommandBlocksSubmission(): boolean {
+		if (!isOwnerCommandInFlight(this.ctx.sessionManager)) return false;
+		this.ctx.showStatus("Busy: Hub session handoff is in progress.");
+		this.ctx.ui.requestRender();
+		return true;
+	}
+
 	/** Send editor text as a follow-up message (queued behind current stream). */
 	async handleFollowUp(): Promise<void> {
 		let text = this.ctx.editor.getText().trim();
@@ -1077,6 +1090,7 @@ export class InputController {
 			await this.#submitToFocusedSession(text, "followUp");
 			return;
 		}
+		if (this.#ownerCommandBlocksSubmission()) return;
 
 		// Compaction first: while compacting, free text gets queued via
 		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a
@@ -1111,6 +1125,8 @@ export class InputController {
 		if (await this.#invokeDollarSkillCommand(text, "followUp")) {
 			return;
 		}
+
+		if (this.#ownerCommandBlocksSubmission()) return;
 
 		// Forward any pending clipboard-pasted images alongside the queued text;
 		// otherwise the follow-up would drop the image (mirrors the Enter/steer path).

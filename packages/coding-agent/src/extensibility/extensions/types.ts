@@ -331,6 +331,13 @@ export interface ExtensionModelQuery {
 	family(model: Model): string;
 }
 
+export interface ExtensionBuiltinCommandResult {
+	readonly handled: boolean;
+	readonly output: string[];
+	readonly prompt?: string;
+	readonly busy?: boolean;
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -362,6 +369,8 @@ export interface ExtensionContext {
 	getSystemPrompt(): string[];
 	/** Structured memory runtime for status/search/save across the configured backend. */
 	memory?: MemoryRuntimeContext;
+	/** Execute a core builtin in this owning session without adding it to input history. */
+	executeBuiltinCommand?(command: string): Promise<ExtensionBuiltinCommandResult>;
 }
 
 /**
@@ -1353,6 +1362,7 @@ export interface ExtensionContextActions {
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	getSystemPrompt: () => string[];
+	executeBuiltinCommand?: (command: string) => Promise<ExtensionBuiltinCommandResult>;
 }
 
 /** Actions for ExtensionCommandContext (ctx.* in command handlers). */

@@ -1,6 +1,8 @@
 import type { Component, OverlayHandle, TUI } from "@pk-nerdsaver-ai/pi-tui";
 import { Container, Spacer, Text } from "@pk-nerdsaver-ai/pi-tui";
+import { reset as resetCapabilities } from "../../capability";
 import { KeybindingsManager } from "../../config/keybindings";
+import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import type {
 	CompactOptions,
 	ExtensionActions,
@@ -21,9 +23,11 @@ import { createExtensionModelQuery } from "../../extensibility/extensions/model-
 import { HookEditorComponent } from "../../modes/components/hook-editor";
 import { HookInputComponent } from "../../modes/components/hook-input";
 import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/components/hook-selector";
+import { beginOwnerCommand, finishOwnerCommand, isOwnerCommandInFlight } from "../../modes/owner-command-guard";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
+import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { setSessionTerminalTitle, setTerminalTitle } from "../../utils/title-generator";
 
 const MAX_WIDGET_LINES = 10;
@@ -123,7 +127,7 @@ export class ExtensionUiController {
 		};
 		const contextActions: ExtensionContextActions = {
 			getModel: () => this.ctx.session.model,
-			isIdle: () => !this.ctx.session.isStreaming,
+			isIdle: () => !this.ctx.session.isStreaming && !isOwnerCommandInFlight(this.ctx.sessionManager),
 			abort: () => this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL }),
 			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
 			shutdown: () => {
@@ -135,6 +139,7 @@ export class ExtensionUiController {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
+			executeBuiltinCommand: command => this.#executeBuiltinCommand(command),
 		};
 		const commandActions: ExtensionCommandContextActions = {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
@@ -251,6 +256,46 @@ export class ExtensionUiController {
 		});
 	}
 
+	async #executeBuiltinCommand(command: string) {
+		if (!beginOwnerCommand(this.ctx.sessionManager)) return { handled: true, output: [], busy: true };
+		try {
+			const output: string[] = [];
+			const previousSessionFile = this.ctx.sessionManager.getSessionFile();
+			if (/^\/hub\s+resume(?:\s|$)/i.test(command.trim())) this.clearHookWidgets();
+			const result = await executeAcpBuiltinSlashCommand(command, {
+				session: this.ctx.session,
+				sessionManager: this.ctx.sessionManager,
+				settings: this.ctx.settings,
+				cwd: this.ctx.sessionManager.getCwd(),
+				output: text => {
+					output.push(text);
+				},
+				refreshCommands: () => this.ctx.refreshSlashCommandState(),
+				reloadPlugins: async () => {
+					const cwd = this.ctx.sessionManager.getCwd();
+					const projectPath = await resolveActiveProjectRegistryPath(cwd);
+					clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+					resetCapabilities();
+					await this.ctx.refreshSlashCommandState(cwd);
+					await this.ctx.session.refreshSshTool({ activateIfAvailable: true });
+				},
+			});
+			if (previousSessionFile !== this.ctx.sessionManager.getSessionFile()) {
+				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
+				this.ctx.chatContainer.clear();
+				this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+				await this.ctx.reloadTodos();
+			}
+			return {
+				handled: result !== false,
+				output,
+				...(result && "prompt" in result ? { prompt: result.prompt } : {}),
+			};
+		} finally {
+			finishOwnerCommand(this.ctx.sessionManager);
+		}
+	}
+
 	setHookWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void {
 		const placement = options?.placement ?? "aboveEditor";
 		this.#removeHookWidget(this.#hookWidgetsAbove, key);
@@ -359,7 +404,7 @@ export class ExtensionUiController {
 		};
 		const contextActions: ExtensionContextActions = {
 			getModel: () => this.ctx.session.model,
-			isIdle: () => !this.ctx.session.isStreaming,
+			isIdle: () => !this.ctx.session.isStreaming && !isOwnerCommandInFlight(this.ctx.sessionManager),
 			abort: () => this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL }),
 			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
 			shutdown: () => {
@@ -371,6 +416,7 @@ export class ExtensionUiController {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
+			executeBuiltinCommand: command => this.#executeBuiltinCommand(command),
 		};
 		const commandActions: ExtensionCommandContextActions = {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
@@ -498,7 +544,7 @@ export class ExtensionUiController {
 							this.ctx.session.settings,
 							() => this.ctx.session.model,
 						),
-						isIdle: () => !this.ctx.session.isStreaming,
+						isIdle: () => !this.ctx.session.isStreaming && !isOwnerCommandInFlight(this.ctx.sessionManager),
 						hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
 						abort: () => {
 							this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
@@ -803,6 +849,10 @@ export class ExtensionUiController {
 	}
 
 	#sendExtensionUserMessage: SendUserMessageHandler = (content, options) => {
+		if (isOwnerCommandInFlight(this.ctx.sessionManager)) {
+			this.ctx.showError("Extension sendUserMessage blocked while an owner command is in progress.");
+			return;
+		}
 		this.ctx.session.sendUserMessage(content, options).catch((err: unknown) => {
 			this.ctx.showError(`Extension sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`);
 		});

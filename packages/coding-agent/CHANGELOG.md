@@ -14,7 +14,7 @@
 - Added a write-scope spawn contract for exclusive, isolated-patch, and proposal-only lanes with mergeOwner validation.
 - Added a criterion-level adjudication module with pass/fail/blocked/unproven judgments consumed by the root completion gate.
 - Added ephemeral root task-contract compilation with deterministic clarification scoring, executor/advisor digest injection, retry-safe recovery context, and session-bound cleanup; evidence-backed completion enforcement remains deferred to M2.
-- Added `/hub` for encrypted, cloud-durable session handoff: provision account access from a local admin secret, publish a replication snapshot from one device, and resume its full JSONL history as a local fork on another device using the complete hub link.
+- Added `/hub` for encrypted, cloud-durable session handoff: provision account access from a local admin secret, publish a replication snapshot from one device, and resume its full JSONL history as a local fork on another device using the complete hub link. Trusted extensions can invoke owner-local builtins through `ctx.executeBuiltinCommand()` so remote control surfaces reuse the live session owner instead of spawning a competing writer.
 
 
 - Added `agent.profile` and `agent.profiles` settings for named, swappable role-based model bundles that retarget every role-resolving agent slot at once (explicit `modelRoles` still wins per-role).
