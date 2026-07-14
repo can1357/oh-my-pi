@@ -468,6 +468,26 @@ internally; the catch path reports `status: "blocked"` instead of conflating
 with generic tool errors. Pre-run interrupts and tail-sweep skips are
 recorded as `"skipped"` even though they never start a span.
 
+## Examples
+
+### Lite profile (`examples/lite/`)
+
+A minimal agent profile for small/weak models: three flat-schema tools
+(`run_bash`, `read_file`, `write_file` — whole-file replace, no patch
+grammar), a ~150-token static system prompt, and optional owned text-dialect
+tool calling (`preferredDialect(model.id)`) for models with unreliable native
+tool calling.
+
+```bash
+bun packages/agent/examples/lite/lite-agent.ts "your task"
+```
+
+Reference implementation only — nothing imports it and no lite/full routing
+is wired. Low-priority follow-up: route by model capability tier (e.g. via a
+router decision), with capability and blast radius as hard gates and
+escalation to the full harness as the safety valve. Never route down
+mid-task.
+
 ## License
 
 MIT

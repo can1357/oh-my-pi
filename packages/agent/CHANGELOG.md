@@ -5,6 +5,7 @@
 ### Added
 
 - Added `maskConsumedObservations()` pruning pass that deterministically replaces tool results the model has already acted on with `[<toolName> result consumed]` placeholders, preserving reasoning traces and action history. Marks masked entries via `ToolResultMessage.consumed` so downstream consumers (compaction boundary tracking, transcript rebuilds, telemetry) can tell the observation was elided rather than dropped.
+- Added `examples/lite/` reference implementation: a minimal agent profile for small/weak models with three flat-schema tools (`run_bash`, `read_file`, `write_file`) and optional owned text-dialect tool calling via `preferredDialect`. Documented in the README `Examples` section; nothing imports it and no lite/full routing is wired.
 
 ### Changed
 
