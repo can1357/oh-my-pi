@@ -14,7 +14,7 @@ import { createPromptActionAutocompleteProvider } from "../../modes/prompt-actio
 import type { InteractiveModeContext } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
 import { SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails, USER_INTERRUPT_LABEL } from "../../session/messages";
-import { executeBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import { executeBuiltinSlashCommand, shouldPersistBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { isTinyTitleLocalModelKey } from "../../tiny/models";
 import { isLowSignalTitleInput } from "../../tiny/text";
 import { tinyTitleClient } from "../../tiny/title-client";
@@ -110,6 +110,18 @@ const TINY_TITLE_PROGRESS_REVEAL_DELAY_MS = 1_000;
 // deliberate human double-tap is always tens of milliseconds apart.
 const LEFT_DOUBLE_TAP_MIN_GAP_MS = 40;
 const LEFT_DOUBLE_TAP_MAX_GAP_MS = 500;
+
+export function shouldSkipHistory(text: string): boolean {
+	const trimmed = text.trim();
+	if (!trimmed.startsWith("/")) return false;
+	if (!shouldPersistBuiltinSlashCommand(trimmed)) return true;
+	const match = /^\/([^:\s]+)(?::|\s+)?(.*)$/s.exec(trimmed);
+	if (!match) return false;
+	const command = match[1]?.toLowerCase();
+	const args = match[2]?.trim() ?? "";
+	if ((command === "login" || command === "join") && args.length > 0) return true;
+	return command === "mcp" && /^add\b/i.test(args) && /(?:^|\s)--token(?:=|\s|$)/i.test(args);
+}
 
 export class InputController {
 	constructor(
@@ -587,6 +599,7 @@ export class InputController {
 				ctx: this.ctx,
 			});
 			if (slashResult === true) {
+				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 				return;
 			}
 			if (typeof slashResult === "string") {
@@ -613,7 +626,7 @@ export class InputController {
 					this.ctx.showStatus("This collab link is read-only — prompting is disabled");
 					return;
 				}
-				this.ctx.editor.addToHistory(text);
+				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 				this.ctx.editor.setText("");
 				this.ctx.editor.imageLinks = undefined;
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
@@ -648,7 +661,7 @@ export class InputController {
 						this.ctx.editor.setText(text);
 						return;
 					}
-					this.ctx.editor.addToHistory(text);
+					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					await this.ctx.handleBashCommand(command, isExcluded);
 					this.ctx.isBashMode = false;
 					this.ctx.updateEditorBorderColor();
@@ -667,7 +680,7 @@ export class InputController {
 						this.ctx.editor.setText(text);
 						return;
 					}
-					this.ctx.editor.addToHistory(text);
+					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					await this.ctx.handlePythonCommand(code, isExcluded);
 					this.ctx.isPythonMode = false;
 					this.ctx.updateEditorBorderColor();
@@ -691,7 +704,7 @@ export class InputController {
 			// If streaming, use prompt() with steer behavior
 			// This handles extension commands (execute immediately), prompt template expansion, and queueing
 			if (this.ctx.session.isStreaming) {
-				this.ctx.editor.addToHistory(text);
+				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 				this.ctx.editor.setText("");
 				this.ctx.editor.imageLinks = undefined;
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;

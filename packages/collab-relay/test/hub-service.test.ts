@@ -27,6 +27,7 @@ const DEVICE_B = "dev_laptop_beta";
 
 class MemoryHubBucket implements HubBucketBinding {
 	readonly objects = new Map<string, HubStoredValue>();
+	pageSize = Number.POSITIVE_INFINITY;
 
 	async get(key: string): Promise<HubStoredValue | null> {
 		const value = this.objects.get(key);
@@ -43,11 +44,14 @@ class MemoryHubBucket implements HubBucketBinding {
 	}
 
 	async list(options: { prefix: string; limit: number; cursor?: string }) {
-		const objects: HubStoredObject[] = [...this.objects.entries()]
-			.filter(([key]) => key.startsWith(options.prefix))
-			.slice(0, options.limit)
-			.map(([key, value]) => ({ key, uploaded: value.uploaded }));
-		return { objects, truncated: false };
+		const offset = options.cursor ? Number.parseInt(options.cursor, 10) : 0;
+		const matches = [...this.objects.entries()].filter(([key]) => key.startsWith(options.prefix));
+		const pageLimit = Math.min(options.limit, this.pageSize);
+		const page = matches.slice(offset, offset + pageLimit);
+		const objects: HubStoredObject[] = page.map(([key, value]) => ({ key, uploaded: value.uploaded }));
+		const nextOffset = offset + page.length;
+		const truncated = nextOffset < matches.length;
+		return { objects, truncated, cursor: truncated ? String(nextOffset) : undefined };
 	}
 }
 
@@ -93,14 +97,14 @@ async function handled(requestValue: Request, deps: HubServiceDependencies): Pro
 	return response;
 }
 
-function publishRequest(hubId: string, deviceId: string, body: Uint8Array): Request {
+function publishRequest(hubId: string, deviceId: string, body: Uint8Array, entryCount = 1): Request {
 	return request(`/h/${hubId}`, {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/octet-stream",
 			"X-OMP-Hub-Id": hubId,
 			"X-OMP-Device-Id": deviceId,
-			"X-OMP-Hub-Title": "car ride",
+			"X-OMP-Entry-Count": String(entryCount),
 		},
 		body,
 	});
@@ -171,17 +175,17 @@ describe("hub service", () => {
 
 	test("lets every linked device publish and retrieve the account's latest snapshot", async () => {
 		const { deps } = seededDeps();
-		const phone = await handled(publishRequest("hub_alpha01", DEVICE_A, new Uint8Array(64).fill(7)), deps);
+		const phone = await handled(publishRequest("hub_alpha01", DEVICE_A, new Uint8Array(64).fill(7), 500), deps);
 		expect(phone.status).toBe(201);
-		const laptop = await handled(publishRequest("hub_alpha01", DEVICE_B, new Uint8Array(64).fill(9)), deps);
+		const laptop = await handled(publishRequest("hub_alpha01", DEVICE_B, new Uint8Array(64).fill(9), 700), deps);
 		expect(laptop.status).toBe(201);
 
 		const devices = await handled(request("/h/hub_alpha01/devices"), deps);
 		expect(await responseRecord(devices)).toEqual({
 			hubId: "hub_alpha01",
 			devices: [
-				{ deviceId: DEVICE_A, displayName: "alice", lastPublishedAt: "2026-07-14T12:00:00.000Z", entryCount: 1 },
-				{ deviceId: DEVICE_B, displayName: "alice", lastPublishedAt: "2026-07-14T12:00:00.000Z", entryCount: 1 },
+				{ deviceId: DEVICE_A, displayName: "alice", lastPublishedAt: "2026-07-14T12:00:00.000Z", entryCount: 500 },
+				{ deviceId: DEVICE_B, displayName: "alice", lastPublishedAt: "2026-07-14T12:00:00.000Z", entryCount: 700 },
 			],
 		});
 
@@ -190,10 +194,10 @@ describe("hub service", () => {
 			hubId: "hub_alpha01",
 			sealed: btoa(String.fromCharCode(...new Uint8Array(64).fill(9))),
 			lastPublishedAt: "2026-07-14T12:00:00.000Z",
-			entryCount: 1,
+			entryCount: 700,
 			devices: [
-				{ deviceId: DEVICE_A, displayName: "alice", lastPublishedAt: "2026-07-14T12:00:00.000Z", entryCount: 1 },
-				{ deviceId: DEVICE_B, displayName: "alice", lastPublishedAt: "2026-07-14T12:00:00.000Z", entryCount: 1 },
+				{ deviceId: DEVICE_A, displayName: "alice", lastPublishedAt: "2026-07-14T12:00:00.000Z", entryCount: 500 },
+				{ deviceId: DEVICE_B, displayName: "alice", lastPublishedAt: "2026-07-14T12:00:00.000Z", entryCount: 700 },
 			],
 		});
 
@@ -202,10 +206,10 @@ describe("hub service", () => {
 			entries: [
 				{
 					hubId: "hub_alpha01",
-					title: "car ride",
+					title: "OMP session",
 					devices: 2,
 					lastPublishedAt: "2026-07-14T12:00:00.000Z",
-					entryCount: 2,
+					entryCount: 700,
 					resumable: true,
 				},
 			],
@@ -232,10 +236,36 @@ describe("hub service", () => {
 			}),
 			deps,
 		);
+		const missingEntryCount = await handled(
+			request("/h/hub_alpha01", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/octet-stream",
+					"X-OMP-Device-Id": DEVICE_A,
+				},
+				body: new Uint8Array(64),
+			}),
+			deps,
+		);
+		expect(missingEntryCount.status).toBe(400);
+
 		expect(wrongMedia.status).toBe(415);
 
 		const noToken = await handled(new Request("https://collab.pkking.computer/h/hub_alpha01/head"), deps);
 		expect(noToken.status).toBe(401);
+	});
+
+	test("returns 405 with Allow for unsupported read-route methods", async () => {
+		const { deps } = seededDeps();
+		for (const [path, method] of [
+			["/h", "POST"],
+			["/h/hub_alpha01/head", "DELETE"],
+			["/h/hub_alpha01/devices", "POST"],
+		] as const) {
+			const response = await handled(request(path, { method }), deps);
+			expect(response.status).toBe(405);
+			expect(response.headers.get("Allow")).toBe("GET");
+		}
 	});
 
 	test("revoke removes only the current device snapshot", async () => {
@@ -260,6 +290,21 @@ describe("hub service", () => {
 				},
 			],
 		});
+	});
+
+	test("reads and prunes every paginated bucket page", async () => {
+		const { bucket, deps } = seededDeps();
+		bucket.pageSize = 1;
+		await handled(publishRequest("hub_alpha01", DEVICE_A, new Uint8Array(64), 3), deps);
+		await handled(publishRequest("hub_beta002", DEVICE_B, new Uint8Array(64), 4), deps);
+		const listing = await handled(request("/h"), deps);
+		const payload = await responseRecord(listing);
+		expect(Array.isArray(payload.entries) ? payload.entries.length : 0).toBe(2);
+		for (const [key, value] of bucket.objects) {
+			bucket.objects.set(key, { ...value, uploaded: new Date(NOW - HUB_RETENTION_MS - 1) });
+		}
+		expect(await pruneHubs(bucket, NOW)).toBe(2);
+		expect(bucket.objects.size).toBe(0);
 	});
 
 	test("prunes expired device records", async () => {

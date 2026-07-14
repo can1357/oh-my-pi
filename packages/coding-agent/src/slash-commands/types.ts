@@ -20,6 +20,8 @@ export interface BuiltinSlashCommand {
 	subcommands?: SubcommandDef[];
 	/** Static inline hint when command takes a simple argument (no subcommands). */
 	inlineHint?: string;
+	/** False for commands whose arguments may contain credentials or encryption keys. */
+	persistInHistory?: boolean;
 	/** TUI-only dynamic status text for command-name autocomplete. Static `description` remains canonical for ACP/help. */
 	getTuiAutocompleteDescription?: (runtime: TuiSlashCommandRuntime) => string | undefined;
 }

@@ -249,6 +249,7 @@ function r2ToHubBucket(bucket: R2Bucket): HubBucketBinding {
 			return {
 				objects: listing.objects.map(object => ({ key: object.key, uploaded: object.uploaded })),
 				truncated: listing.truncated,
+				cursor: listing.truncated ? listing.cursor : undefined,
 			};
 		},
 	};
@@ -290,7 +291,7 @@ function deserializeHubRecord(value: unknown): HubStoredValue | null {
 function kvToHubTokens(kv: KVNamespace): HubTokenBinding {
 	return {
 		async get(token) {
-			const raw = await kv.get(`token:${token}`);
+			const raw = await kv.get(`token:${await sha256Hex(token)}`);
 			if (!raw) return null;
 			try {
 				const parsed: unknown = JSON.parse(raw);
@@ -300,9 +301,14 @@ function kvToHubTokens(kv: KVNamespace): HubTokenBinding {
 			}
 		},
 		async put(token, value) {
-			await kv.put(`token:${token}`, JSON.stringify(value));
+			await kv.put(`token:${await sha256Hex(token)}`, JSON.stringify(value));
 		},
 	};
+}
+
+async function sha256Hex(value: string): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+	return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function deserializeHubAccessToken(value: unknown): HubAccessToken | null {

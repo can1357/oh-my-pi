@@ -99,6 +99,7 @@ describe("SessionManager collab replication", () => {
 		expect(snapshot.header.id).toBe(manager.getSessionId());
 		expect(snapshot.header.cwd).toBe(path.resolve(cwd));
 		expect(snapshot.entries).toHaveLength(1);
+		expect(snapshot.leafId).toBe(manager.getLeafId());
 
 		// Deep copy: mutating the snapshot must not leak into the live session.
 		const entry = snapshot.entries[0]!;

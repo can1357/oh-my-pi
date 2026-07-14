@@ -47,6 +47,11 @@ describe("shouldSkipHistory — security filter for slash command history", () =
 		expect(shouldSkipHistory("/mcp reload")).toBe(false);
 	});
 
+	it("skips hub commands whose arguments can carry an AES key", () => {
+		expect(shouldSkipHistory("/hub resume https://relay.example/h/hub_alpha01#secret-key")).toBe(true);
+		expect(shouldSkipHistory("/hub publish https://relay.example/h/hub_alpha01#secret-key")).toBe(true);
+	});
+
 	it("does not skip ordinary slash commands", () => {
 		expect(shouldSkipHistory("/plan do something")).toBe(false);
 		expect(shouldSkipHistory("/settings")).toBe(false);

@@ -456,11 +456,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		inlineHint: "[prompt]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
-			const hadArgs = !!command.args;
 			await runtime.ctx.handlePlanModeCommand(command.args || undefined);
-			if (hadArgs) {
-				runtime.ctx.editor.addToHistory(command.text);
-			}
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -486,11 +482,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		inlineHint: "[objective]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
-			const hadArgs = !!command.args;
 			await runtime.ctx.handleGoalModeCommand(command.args || undefined);
-			if (hadArgs) {
-				runtime.ctx.editor.addToHistory(command.text);
-			}
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -871,6 +863,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		inlineHint:
 			"[provision [name] | login | publish | new | list | resume <link> | devices <hubId> | revoke [hubId]]",
 		allowArgs: true,
+		persistInHistory: false,
 		handle: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args.trim());
 			const hub = new HubService({
@@ -944,21 +937,18 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				if (verb === "resume") {
 					if (!rest) return usage("Usage: /hub resume <full hub link>", runtime);
 					const link = parseHubLink(rest);
-					const snapshot = await hub.resume(link);
-					const temporaryPath = path.join(os.tmpdir(), `omp-hub-${crypto.randomUUID()}.jsonl`);
-					try {
-						await Bun.write(temporaryPath, snapshot.jsonl);
-						const imported = await SessionManager.forkFrom(temporaryPath, runtime.cwd);
-						const sessionPath = imported.getSessionFile();
-						if (!sessionPath) throw new HubError("hub import did not create a local session file");
-						if (!(await runtime.session.switchSession(sessionPath))) return commandConsumed();
-					} finally {
-						await fs.unlink(temporaryPath).catch(() => undefined);
-					}
+					const result = await hub.resume(link);
+					const imported = await SessionManager.forkFromSnapshot(result.snapshot, runtime.cwd);
+					const sessionPath = imported.getSessionFile();
+					if (!sessionPath) throw new HubError("hub import did not create a local session file");
+					await imported.close();
+					if (!(await runtime.session.switchSession(sessionPath))) return commandConsumed();
+					if (result.snapshot.leafId === null) runtime.sessionManager.resetLeaf();
+					else runtime.sessionManager.branch(result.snapshot.leafId);
 					runtime.settings.set("hub.activeId", link.hubId);
 					runtime.settings.set("hub.activeKey", link.keyText);
 					await runtime.output(
-						`Resumed ${snapshot.entryCount} hub entries from ${snapshot.devices.length} device(s) into a local session fork.`,
+						`Resumed ${result.entryCount} hub entries from ${result.devices.length} device(s) into a local session fork.`,
 					);
 					return commandConsumed();
 				}
@@ -1697,7 +1687,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: handleMcpAcp,
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.addToHistory(command.text);
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleMCPCommand(command.text);
 		},
@@ -1720,7 +1709,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: handleSshAcp,
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.addToHistory(command.text);
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleSSHCommand(command.text);
 		},
@@ -2860,6 +2848,7 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
 		description: command.description,
 		subcommands: command.subcommands,
 		inlineHint: command.inlineHint,
+		persistInHistory: command.persistInHistory,
 	}),
 );
 
@@ -2895,6 +2884,12 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<
  * ACP dispatcher requires `handle` and skips TUI-only entries.
  */
 export const BUILTIN_SLASH_COMMANDS_INTERNAL: ReadonlyArray<SlashCommandSpec> = BUILTIN_SLASH_COMMAND_REGISTRY;
+/** Whether editor prompt history may persist this builtin invocation. */
+export function shouldPersistBuiltinSlashCommand(text: string): boolean {
+	const parsed = parseSlashCommand(text);
+	if (!parsed) return true;
+	return BUILTIN_SLASH_COMMAND_LOOKUP.get(parsed.name)?.persistInHistory !== false;
+}
 
 /**
  * Execute a builtin slash command in the interactive TUI.

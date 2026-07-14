@@ -16,7 +16,13 @@
  *   DELETE /h/<hubId>         remove the caller's current-device snapshot
  */
 
-import type { HubAccessToken, HubBucketBinding, HubServiceDependencies, HubStoredValue } from "./hub-types";
+import type {
+	HubAccessToken,
+	HubBucketBinding,
+	HubServiceDependencies,
+	HubStoredObject,
+	HubStoredValue,
+} from "./hub-types";
 
 export type { HubServiceDependencies } from "./hub-types";
 
@@ -59,17 +65,20 @@ export async function handleHubRequest(request: Request, deps: HubServiceDepende
 	const url = new URL(request.url);
 	if (url.pathname === HUB_TOKEN_PATH) return provisionAccessToken(request, deps);
 	if (url.pathname === HUB_ROOT_PATH || url.pathname === `${HUB_ROOT_PATH}/`) {
+		if (request.method !== "GET") return json({ error: "method not allowed" }, 405, { Allow: "GET" });
 		const access = await authorise(request, deps);
 		return access instanceof Response ? access : listHubs(access, deps);
 	}
 
 	const head = matchPath(HUB_HEAD_PATH_RE, url.pathname);
 	if (head) {
+		if (request.method !== "GET") return json({ error: "method not allowed" }, 405, { Allow: "GET" });
 		const access = await authorise(request, deps);
 		return access instanceof Response ? access : serveHubHead(head, access, deps);
 	}
 	const devices = matchPath(HUB_DEVICES_PATH_RE, url.pathname);
 	if (devices) {
+		if (request.method !== "GET") return json({ error: "method not allowed" }, 405, { Allow: "GET" });
 		const access = await authorise(request, deps);
 		return access instanceof Response ? access : serveHubDevices(devices, access, deps);
 	}
@@ -80,18 +89,18 @@ export async function handleHubRequest(request: Request, deps: HubServiceDepende
 	if (request.method === "POST") return publishHub(hubId, request, access, deps);
 	if (request.method === "GET") return serveHubOverview(hubId, access, deps);
 	if (request.method === "DELETE") return revokeHub(hubId, request, access, deps);
-	return json({ error: "method not allowed" }, 405);
+	return json({ error: "method not allowed" }, 405, { Allow: "GET, POST, DELETE" });
 }
 
 function matchPath(re: RegExp, pathname: string): string | null {
 	const match = re.exec(pathname);
-	return match ? (match[1] ?? null) : null;
+	return match?.[1] ?? null;
 }
 
-function json(data: unknown, status = 200): Response {
+function json(data: unknown, status = 200, extraHeaders: Readonly<Record<string, string>> = {}): Response {
 	return new Response(JSON.stringify(data), {
 		status,
-		headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
+		headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", ...extraHeaders },
 	});
 }
 
@@ -172,17 +181,19 @@ async function publishHub(
 	if (limit) return limit;
 	const sealed = await readBoundedBody(request);
 	if (!sealed || sealed.byteLength <= 12) return json({ error: "hub blob exceeds 1 MB or is truncated" }, 413);
-	const title = normaliseTitle(request.headers.get("X-OMP-Hub-Title")) ?? "OMP session";
+	const entryCountText = request.headers.get("X-OMP-Entry-Count");
+	const entryCount = entryCountText === null ? Number.NaN : Number(entryCountText);
+	if (!Number.isSafeInteger(entryCount) || entryCount < 0) {
+		return json({ error: "X-OMP-Entry-Count must be a non-negative integer" }, 400);
+	}
 	const now = new Date((deps.now ?? Date.now)());
 	const key = hubObjectKey(access.accountId, hubId, deviceId);
-	const existing = await deps.hubs.get(key);
-	const entryCount = (existing?.entryCount ?? 0) + 1;
 	await deps.hubs.put(key, {
 		accountId: access.accountId,
 		hubId,
 		deviceId,
 		displayName: access.displayName,
-		title,
+		title: "OMP session",
 		sealed,
 		entryCount,
 		uploaded: now,
@@ -258,7 +269,7 @@ async function listHubs(access: HubAccessToken, deps: HubServiceDependencies): P
 				title: head.title,
 				devices: group.length,
 				lastPublishedAt: head.uploaded.toISOString(),
-				entryCount: group.reduce((sum, record) => sum + record.entryCount, 0),
+				entryCount: head.entryCount,
 				resumable: true,
 			};
 		})
@@ -275,9 +286,9 @@ async function listHubRecords(
 	accountId: string,
 	deps: HubServiceDependencies,
 ): Promise<HubStoredValue[]> {
-	const listings = await deps.hubs.list({ prefix: `${HUB_KEY_PREFIX}${accountId}/${hubId}/`, limit: 200 });
+	const listings = await listAllHubObjects(deps.hubs, `${HUB_KEY_PREFIX}${accountId}/${hubId}/`, 200);
 	const records: HubStoredValue[] = [];
-	for (const listing of listings.objects) {
+	for (const listing of listings) {
 		const value = await deps.hubs.get(listing.key);
 		if (value?.accountId === accountId && value.hubId === hubId) records.push(value);
 	}
@@ -285,13 +296,30 @@ async function listHubRecords(
 }
 
 async function listHubRecordsForAccount(accountId: string, deps: HubServiceDependencies): Promise<HubStoredValue[]> {
-	const listings = await deps.hubs.list({ prefix: `${HUB_KEY_PREFIX}${accountId}/`, limit: 200 });
+	const listings = await listAllHubObjects(deps.hubs, `${HUB_KEY_PREFIX}${accountId}/`, 200);
 	const records: HubStoredValue[] = [];
-	for (const listing of listings.objects) {
+	for (const listing of listings) {
 		const value = await deps.hubs.get(listing.key);
 		if (value?.accountId === accountId) records.push(value);
 	}
 	return records;
+}
+
+async function listAllHubObjects(hubs: HubBucketBinding, prefix: string, limit: number): Promise<HubStoredObject[]> {
+	const objects: HubStoredObject[] = [];
+	let cursor: string | undefined;
+	let hasMore = true;
+	while (hasMore) {
+		const page = await hubs.list({ prefix, limit, cursor });
+		objects.push(...page.objects);
+		hasMore = page.truncated;
+		if (hasMore) {
+			if (!page.cursor || page.cursor === cursor)
+				throw new Error("hub bucket returned an invalid pagination cursor");
+			cursor = page.cursor;
+		}
+	}
+	return objects;
 }
 
 async function countDevices(hubId: string, accountId: string, deps: HubServiceDependencies): Promise<number> {
@@ -386,12 +414,6 @@ function normaliseDisplayName(value: unknown): string | null {
 	return normalized.length > 0 && normalized.length <= 80 ? normalized : null;
 }
 
-function normaliseTitle(value: string | null): string | null {
-	if (!value) return null;
-	const normalized = value.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
-	return normalized.length > 0 ? normalized.slice(0, 240) : null;
-}
-
 function randomBase64Url(bytesLength: number): string {
 	const bytes = new Uint8Array(bytesLength);
 	crypto.getRandomValues(bytes);
@@ -403,13 +425,13 @@ function base64Encode(bytes: Uint8Array): string {
 	for (const byte of bytes) binary += String.fromCharCode(byte);
 	return btoa(binary);
 }
-
 export async function pruneHubs(hubs: HubBucketBinding, now: number = Date.now()): Promise<number> {
-	const listings = await hubs.list({ prefix: HUB_KEY_PREFIX, limit: 1_000 });
-	const expired: string[] = [];
-	for (const listing of listings.objects) {
-		if (now - listing.uploaded.getTime() > HUB_RETENTION_MS) expired.push(listing.key);
+	const listings = await listAllHubObjects(hubs, HUB_KEY_PREFIX, 1_000);
+	const expired = listings
+		.filter(listing => now - listing.uploaded.getTime() > HUB_RETENTION_MS)
+		.map(listing => listing.key);
+	for (let offset = 0; offset < expired.length; offset += 1_000) {
+		await hubs.delete(expired.slice(offset, offset + 1_000));
 	}
-	if (expired.length > 0) await hubs.delete(expired);
 	return expired.length;
 }

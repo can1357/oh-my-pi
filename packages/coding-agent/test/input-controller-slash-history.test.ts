@@ -36,6 +36,8 @@ function makeCtx() {
 		},
 		focusedAgentId: undefined,
 		collabGuest: undefined,
+		pendingImages: [] as unknown[],
+		pendingImageLinks: [] as unknown[],
 		handleHotkeysCommand: vi.fn(),
 		handleMCPCommand,
 		showStatus: vi.fn(),

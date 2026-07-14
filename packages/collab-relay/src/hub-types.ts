@@ -27,7 +27,7 @@ export interface HubBucketBinding {
 		prefix: string;
 		limit: number;
 		cursor?: string;
-	}): Promise<{ objects: HubStoredObject[]; truncated: boolean }>;
+	}): Promise<{ objects: HubStoredObject[]; truncated: boolean; cursor?: string }>;
 }
 
 export interface HubAccessToken {

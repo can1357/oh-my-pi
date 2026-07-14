@@ -9,13 +9,14 @@
 import type { SessionEntry, SessionHeader } from "./session-entries";
 
 export const HUB_MAX_SEALED_BYTES = 1_000_000;
+export const HUB_MAX_PLAINTEXT_BYTES = 16_000_000;
 const HUB_KEY_BYTES = 32;
 const HUB_ID_RE = /^[A-Za-z0-9_-]{10,64}$/;
 const HUB_PATH_RE = /^\/h\/([A-Za-z0-9_-]{10,64})\/?$/;
 const HUB_SNAPSHOT_VERSION = 1;
 
 export interface HubSnapshotSource {
-	snapshotForReplication(): { header: SessionHeader; entries: SessionEntry[] };
+	snapshotForReplication(): HubSessionSnapshot;
 }
 
 export interface HubLink {
@@ -51,8 +52,13 @@ export interface HubResumeResult {
 	readonly devices: ReadonlyArray<HubDeviceSummary>;
 	readonly lastPublishedAt: string;
 	readonly entryCount: number;
-	/** Validated JSONL suitable for `SessionManager.forkFrom()`. */
-	readonly jsonl: string;
+	readonly snapshot: HubSessionSnapshot;
+}
+
+export interface HubSessionSnapshot {
+	readonly header: SessionHeader;
+	readonly entries: SessionEntry[];
+	readonly leafId: string | null;
 }
 
 export interface HubProvisionResult {
@@ -67,7 +73,6 @@ export interface HubPublishOptions {
 	hubId?: string;
 	/** Reuse the current hub key; omit only when allocating a new hub. */
 	keyText?: string;
-	title?: string;
 	deviceId?: string;
 }
 
@@ -124,27 +129,34 @@ export class HubService {
 		if (!HUB_ID_RE.test(hubId)) throw new HubError(`invalid hub id: ${hubId}`);
 		const deviceId = options.deviceId ?? this.#ensureDeviceId();
 		const snapshot = sessionManager.snapshotForReplication();
-		const plaintext = JSON.stringify({
-			version: HUB_SNAPSHOT_VERSION,
-			header: snapshot.header,
-			entries: snapshot.entries,
-		});
+		const leafId = snapshot.leafId;
+		const entries = activeBranchEntries(snapshot.entries, leafId);
+		const plaintext = new TextEncoder().encode(
+			JSON.stringify({
+				version: HUB_SNAPSHOT_VERSION,
+				header: snapshot.header,
+				entries,
+				leafId,
+			}),
+		);
+		if (plaintext.byteLength > HUB_MAX_PLAINTEXT_BYTES) {
+			throw new HubError(
+				`session snapshot is ${plaintext.byteLength} bytes plaintext; hub maximum is ${HUB_MAX_PLAINTEXT_BYTES}`,
+			);
+		}
 		const sealed = await sealSnapshot(plaintext, options.keyText);
 		if (sealed.bytes.byteLength > HUB_MAX_SEALED_BYTES) {
 			throw new HubError(
 				`session snapshot is ${sealed.bytes.byteLength} bytes sealed; hub maximum is ${HUB_MAX_SEALED_BYTES}`,
 			);
 		}
-		const title =
-			options.title ?? (typeof snapshot.header.title === "string" ? snapshot.header.title : "OMP session");
 		const response = await fetch(this.#hubUrl(hubId), {
 			method: "POST",
 			headers: {
 				Authorization: `Bearer ${token}`,
 				"Content-Type": "application/octet-stream",
 				"X-OMP-Hub-Id": hubId,
-				"X-OMP-Device-Id": deviceId,
-				"X-OMP-Hub-Title": title,
+				"X-OMP-Entry-Count": String(entries.length),
 			},
 			body: sealed.bytes,
 		});
@@ -195,10 +207,10 @@ export class HubService {
 		if (!response.ok) throw new HubError(`hub resume failed (${response.status}): ${errorText(payload)}`);
 		const sealed = stringValue(payload, "sealed");
 		if (!sealed) throw new HubError("hub head response was missing its sealed snapshot");
-		const jsonl = await decryptSnapshot(base64Decode(sealed), link.keyText);
+		const snapshot = await decryptSnapshot(base64Decode(sealed), link.keyText);
 		return {
 			hubId: link.hubId,
-			jsonl,
+			snapshot,
 			devices: parseDevices(payload),
 			lastPublishedAt: stringValue(payload, "lastPublishedAt") ?? "",
 			entryCount: numberValue(payload, "entryCount") ?? 0,
@@ -280,17 +292,34 @@ function generateHubId(): string {
 	return `hub_${randomBase64Url(16)}`;
 }
 
+function activeBranchEntries(entries: ReadonlyArray<SessionEntry>, leafId: string | null): SessionEntry[] {
+	if (leafId === null) return [];
+	const byId = new Map(entries.map(entry => [entry.id, entry]));
+	if (byId.size !== entries.length) throw new HubError("session snapshot contains duplicate entry ids");
+	const branch: SessionEntry[] = [];
+	const seen = new Set<string>();
+	let cursor = byId.get(leafId);
+	while (cursor) {
+		if (seen.has(cursor.id)) throw new HubError("active session branch contains a cycle");
+		seen.add(cursor.id);
+		branch.unshift(cursor);
+		cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+	}
+	if (branch.at(-1)?.id !== leafId) throw new HubError("active session leaf is missing from the replication snapshot");
+	if (branch[0]?.parentId !== null) throw new HubError("active session branch has a missing parent");
+	return structuredClone(branch) as SessionEntry[];
+}
+
 function arrayBufferBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
 	const copy = new Uint8Array(bytes.byteLength);
 	copy.set(bytes);
 	return copy;
 }
-
-async function sealSnapshot(plaintext: string, keyText?: string): Promise<{ bytes: Uint8Array; keyText: string }> {
+async function sealSnapshot(plaintext: Uint8Array, keyText?: string): Promise<{ bytes: Uint8Array; keyText: string }> {
 	const keyBytes = arrayBufferBytes(keyText ? validateKey(keyText) : randomBytes(HUB_KEY_BYTES));
 	const key = await crypto.subtle.importKey("raw", keyBytes, "AES-GCM", false, ["encrypt"]);
 	const iv = arrayBufferBytes(randomBytes(12));
-	const compressed = arrayBufferBytes(Bun.gzipSync(new TextEncoder().encode(plaintext)));
+	const compressed = arrayBufferBytes(Bun.gzipSync(arrayBufferBytes(plaintext)));
 	const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, compressed));
 	const bytes = new Uint8Array(iv.byteLength + ciphertext.byteLength);
 	bytes.set(iv);
@@ -298,14 +327,14 @@ async function sealSnapshot(plaintext: string, keyText?: string): Promise<{ byte
 	return { bytes, keyText: keyText ?? base64UrlEncode(keyBytes) };
 }
 
-async function decryptSnapshot(sealed: Uint8Array, keyText: string): Promise<string> {
+async function decryptSnapshot(sealed: Uint8Array, keyText: string): Promise<HubSessionSnapshot> {
 	if (sealed.byteLength <= 12) throw new HubError("hub snapshot is truncated");
 	const key = await crypto.subtle.importKey("raw", arrayBufferBytes(validateKey(keyText)), "AES-GCM", false, [
 		"decrypt",
 	]);
-	let plaintext: ArrayBuffer;
+	let compressed: ArrayBuffer;
 	try {
-		plaintext = await crypto.subtle.decrypt(
+		compressed = await crypto.subtle.decrypt(
 			{ name: "AES-GCM", iv: arrayBufferBytes(sealed.subarray(0, 12)) },
 			key,
 			arrayBufferBytes(sealed.subarray(12)),
@@ -315,31 +344,81 @@ async function decryptSnapshot(sealed: Uint8Array, keyText: string): Promise<str
 	}
 	let value: unknown;
 	try {
-		value = JSON.parse(new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(plaintext))));
-	} catch {
+		const plaintext = await gunzipBounded(new Uint8Array(compressed), HUB_MAX_PLAINTEXT_BYTES);
+		value = JSON.parse(new TextDecoder().decode(plaintext));
+	} catch (error) {
+		if (error instanceof HubError) throw error;
 		throw new HubError("hub snapshot is not valid compressed session data");
 	}
-	return snapshotJsonl(value);
+	return parseSnapshot(value);
 }
 
-function snapshotJsonl(value: unknown): string {
+async function gunzipBounded(compressed: Uint8Array, limit: number): Promise<Uint8Array> {
+	const stream = new Blob([arrayBufferBytes(compressed)]).stream().pipeThrough(new DecompressionStream("gzip"));
+	const reader = stream.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	while (true) {
+		const { value, done } = await reader.read();
+		if (done) break;
+		total += value.byteLength;
+		if (total > limit) {
+			await reader.cancel();
+			throw new HubError(`hub snapshot exceeds the ${limit}-byte plaintext limit`);
+		}
+		chunks.push(value);
+	}
+	const output = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		output.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return output;
+}
+
+function parseSnapshot(value: unknown): HubSessionSnapshot {
 	if (
 		!isRecord(value) ||
 		value.version !== HUB_SNAPSHOT_VERSION ||
-		!isRecord(value.header) ||
-		!Array.isArray(value.entries)
+		!isSessionHeader(value.header) ||
+		!Array.isArray(value.entries) ||
+		(value.leafId !== null && typeof value.leafId !== "string")
 	) {
 		throw new HubError("hub snapshot has an unsupported session shape");
 	}
 	const header = value.header;
-	if (header.type !== "session" || typeof header.id !== "string" || typeof header.cwd !== "string") {
-		throw new HubError("hub snapshot has an invalid session header");
+	if (!value.entries.every(isSessionEntry)) {
+		throw new HubError("hub snapshot contains an invalid session entry");
 	}
-	if (!value.entries.every(isRecord)) throw new HubError("hub snapshot contains an invalid session entry");
-	return [header, ...value.entries]
-		.map(entry => JSON.stringify(entry))
-		.join("\n")
-		.concat("\n");
+	if (value.leafId && !value.entries.some(entry => entry.id === value.leafId)) {
+		throw new HubError("hub snapshot active leaf is missing");
+	}
+	return {
+		header: structuredClone(header),
+		entries: structuredClone(value.entries),
+		leafId: value.leafId,
+	};
+}
+
+function isSessionHeader(value: unknown): value is SessionHeader {
+	return (
+		isRecord(value) &&
+		value.type === "session" &&
+		typeof value.id === "string" &&
+		typeof value.timestamp === "string" &&
+		typeof value.cwd === "string"
+	);
+}
+
+function isSessionEntry(value: unknown): value is SessionEntry {
+	return (
+		isRecord(value) &&
+		typeof value.type === "string" &&
+		typeof value.id === "string" &&
+		(value.parentId === null || typeof value.parentId === "string") &&
+		typeof value.timestamp === "string"
+	);
 }
 
 async function responseRecord(response: Response): Promise<Record<string, unknown>> {

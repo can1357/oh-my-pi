@@ -68,10 +68,7 @@ import {
 	type SessionStorage,
 	type SessionStorageWriter,
 } from "./session-storage";
-import {
-	SessionWriterGuard,
-	type SessionWriterGuardHandle,
-} from "./session-writer-guard";
+import { SessionWriterGuard, type SessionWriterGuardHandle } from "./session-writer-guard";
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 
@@ -113,6 +110,23 @@ function fileSafeTimestamp(iso: string): string {
 
 function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
 	return sessionFile ? sessionFile.slice(0, -JSONL_SUFFIX_LENGTH) : null;
+}
+function replicationBranch(entries: ReadonlyArray<SessionEntry>, leafId: string | null): SessionEntry[] {
+	if (leafId === null) return [];
+	const byId = new Map(entries.map(entry => [entry.id, entry]));
+	if (byId.size !== entries.length) throw new Error("replication snapshot contains duplicate entry ids");
+	const branch: SessionEntry[] = [];
+	const seen = new Set<string>();
+	let cursor = byId.get(leafId);
+	while (cursor) {
+		if (seen.has(cursor.id)) throw new Error("replication snapshot branch contains a cycle");
+		seen.add(cursor.id);
+		branch.unshift(cursor);
+		cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+	}
+	if (branch.at(-1)?.id !== leafId) throw new Error("replication snapshot active leaf is missing");
+	if (branch[0]?.parentId !== null) throw new Error("replication snapshot branch has a missing parent");
+	return branch;
 }
 
 /**
@@ -328,6 +342,12 @@ export type ReadonlySessionManager = Pick<
 	| "putBlob"
 	| "putBlobSync"
 >;
+
+export interface SessionReplicationSnapshot {
+	header: SessionHeader;
+	entries: SessionEntry[];
+	leafId: string | null;
+}
 
 interface SessionManagerStateSnapshot {
 	cwd: string;
@@ -1217,8 +1237,12 @@ export class SessionManager {
 	 * copy of every entry (the host mutates entries in place on rewrite paths, so
 	 * guests must not share references).
 	 */
-	snapshotForReplication(): { header: SessionHeader; entries: SessionEntry[] } {
-		return { header: structuredClone(this.#header), entries: structuredClone(this.#entries) as SessionEntry[] };
+	snapshotForReplication(): SessionReplicationSnapshot {
+		return {
+			header: structuredClone(this.#header),
+			entries: structuredClone(this.#entries) as SessionEntry[],
+			leafId: this.#index.leafId(),
+		};
 	}
 
 	/**
@@ -1704,6 +1728,37 @@ export class SessionManager {
 
 		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
+		manager.#resetToNewSession({ parentSession: sourceHeader?.id }, options?.sessionFile);
+		manager.#header.title = sourceHeader?.title;
+		manager.#header.titleSource = sourceHeader?.titleSource;
+		manager.#sessionName = manager.#header.title;
+		manager.#titleSource = manager.#header.titleSource;
+		manager.#entries = history;
+		manager.#index.rebuild(history);
+		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
+		manager.#forceFileCreation = true;
+		await manager.#rewriteAtomically();
+		return manager;
+	}
+
+	/** Fork an already-decoded replication snapshot without writing plaintext to a temporary file. */
+	static async forkFromSnapshot(
+		snapshot: SessionReplicationSnapshot,
+		cwd: string,
+		sessionDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+		options?: { suppressBreadcrumb?: boolean; sessionFile?: string },
+	): Promise<SessionManager> {
+		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+		const manager = new SessionManager(cwd, dir, true, storage);
+		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
+
+		const sourceEntries = structuredClone([snapshot.header, ...snapshot.entries]) as FileEntry[];
+		migrateToCurrentVersion(sourceEntries);
+		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
+		const allHistory = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
+		const history = replicationBranch(allHistory, snapshot.leafId);
+
 		manager.#resetToNewSession({ parentSession: sourceHeader?.id }, options?.sessionFile);
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;
