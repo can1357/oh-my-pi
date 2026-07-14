@@ -34,9 +34,11 @@ bucket_name = "ompk-collab-shares"
 
 [[r2_buckets]]
 binding = "HUB_BLOBS"
+bucket_name = "ompk-hub-blobs"
 
 [[kv_namespaces]]
 binding = "HUB_TOKENS"
+id = "b4d7210bd6d94d3f972b09c2de85d68e"
 
 [triggers]
 crons = [ "0 * * * *" ]
