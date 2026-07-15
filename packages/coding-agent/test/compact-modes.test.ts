@@ -1,22 +1,20 @@
 import { describe, expect, it } from "bun:test";
-import { findCompactMode, parseCompactArgs } from "@pk-nerdsaver-ai/pi-coding-agent/session/compact-modes";
+import {
+	findCompactMode,
+	parseCompactArgs,
+	SNAPCOMPACT_RETIREMENT_ERROR,
+} from "@pk-nerdsaver-ai/pi-coding-agent/session/compact-modes";
 
 describe("compact mode registry", () => {
-	it("maps each mode to the settings overrides the engine relies on", () => {
-		// These override values are load-bearing: the engine merges them over the
-		// configured compaction.* settings, so a regression here silently changes
-		// what `/compact <mode>` does.
+	it("maps the supported modes to the settings overrides the engine relies on", () => {
 		expect(findCompactMode("soft")?.overrides).toEqual({ strategy: "context-full", remoteEnabled: false });
 		expect(findCompactMode("remote")?.overrides).toEqual({ strategy: "context-full", remoteEnabled: true });
-		expect(findCompactMode("snapcompact")?.overrides).toEqual({ strategy: "snapcompact" });
+		expect(findCompactMode("snapcompact")).toBeUndefined();
 	});
 
-	it("flags remote as remote-requiring and snapcompact as focus-rejecting", () => {
+	it("flags only remote as remote-requiring", () => {
 		expect(findCompactMode("remote")?.requiresRemote).toBe(true);
-		expect(findCompactMode("snapcompact")?.rejectsFocus).toBe(true);
-		// soft is a plain local summary: neither flag.
 		expect(findCompactMode("soft")?.requiresRemote).toBeUndefined();
-		expect(findCompactMode("soft")?.rejectsFocus).toBeUndefined();
 	});
 
 	it("resolves mode names case-insensitively and rejects unknowns", () => {
@@ -33,10 +31,9 @@ describe("parseCompactArgs", () => {
 		expect(parseCompactArgs("   ")).toEqual({});
 	});
 
-	it("detects a leading mode token", () => {
+	it("detects supported leading mode tokens", () => {
 		expect(parseCompactArgs("soft")).toEqual({ mode: "soft" });
 		expect(parseCompactArgs("remote")).toEqual({ mode: "remote" });
-		expect(parseCompactArgs("snapcompact")).toEqual({ mode: "snapcompact" });
 	});
 
 	it("splits a mode from its trailing focus instructions", () => {
@@ -50,17 +47,14 @@ describe("parseCompactArgs", () => {
 		});
 	});
 
-	it("treats a non-mode first token as plain focus instructions (backward compatible)", () => {
+	it("treats a non-mode first token as plain focus instructions", () => {
 		expect(parseCompactArgs("summarize the auth flow")).toEqual({ instructions: "summarize the auth flow" });
-		// A bare word that is not a mode is still focus text, not an error.
 		expect(parseCompactArgs("everything")).toEqual({ instructions: "everything" });
 	});
 
-	it("rejects focus instructions for modes that produce no summary", () => {
-		const result = parseCompactArgs("snapcompact keep the diffs");
-		expect(result).toHaveProperty("error");
-		expect("error" in result && result.error).toContain("snapcompact");
-		// Bare snapcompact is fine.
-		expect(parseCompactArgs("snapcompact")).toEqual({ mode: "snapcompact" });
+	it("rejects every removed snapcompact invocation with the retirement error", () => {
+		for (const input of ["snapcompact", "snapcompact keep the diffs"]) {
+			expect(parseCompactArgs(input)).toEqual({ error: SNAPCOMPACT_RETIREMENT_ERROR });
+		}
 	});
 });

@@ -15,7 +15,8 @@ export interface BoxSymbols {
 export interface SymbolTheme {
 	cursor: string;
 	inputCursor: string;
-	boxRound: Omit<BoxSymbols, "teeDown" | "teeUp" | "teeLeft" | "teeRight" | "cross">;
+	boxRound: Omit<BoxSymbols, "teeDown" | "teeUp" | "teeLeft" | "teeRight" | "cross"> &
+		Partial<Pick<BoxSymbols, "teeLeft" | "teeRight">>;
 	boxSharp: BoxSymbols;
 	table: BoxSymbols;
 	quoteBorder: string;

@@ -14,21 +14,13 @@ function expectAttribution(message: Message | undefined, expected: "user" | "age
 }
 
 describe("convertToLlm compaction summary", () => {
-	it("appends snapcompact frames as image blocks after the summary text", () => {
-		// Regression: the live session uses THIS converter (not agent-core's
-		// defaultConvertToLlm). Dropping the frames here silently severs the
-		// archive from the provider request — the model sees a summary that
-		// references attached frames that never arrive.
-		const images: ImageContent[] = [
-			{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
-			{ type: "image", data: "ZmFrZTI=", mimeType: "image/png" },
-		];
+	it("drops legacy compaction frames while preserving the native summary text", () => {
 		const messages: AgentMessage[] = [
 			{
 				role: "compactionSummary",
 				summary: "the film archive",
 				tokensBefore: 1000,
-				images,
+				images: [{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" }],
 				timestamp: Date.now(),
 			},
 		];
@@ -37,12 +29,10 @@ describe("convertToLlm compaction summary", () => {
 
 		expect(converted).toHaveLength(1);
 		expect(converted[0]?.role).toBe("user");
-		const content = converted[0]?.content as Array<TextContent | ImageContent>;
-		expect(content).toHaveLength(3);
-		expect(content[0].type).toBe("text");
-		expect((content[0] as TextContent).text).toContain("the film archive");
-		expect(content[1]).toEqual(images[0]);
-		expect(content[2]).toEqual(images[1]);
+		const content = converted[0]?.content as TextContent[];
+		expect(content).toHaveLength(1);
+		expect(content[0]?.text).toContain("the film archive");
+		expect(JSON.stringify(converted)).not.toContain("ZmFrZQ==");
 	});
 
 	it("emits text-only content when no frames are archived", () => {

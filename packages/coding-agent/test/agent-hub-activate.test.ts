@@ -134,6 +134,7 @@ describe("Agent hub Enter activation", () => {
 		const editor = {};
 		let capturedHub: AgentHubOverlayComponent | undefined;
 		let editorRestoredCount = 0;
+		let remountCalls = 0;
 		const focusedIds: string[] = [];
 		const focusResolved = Promise.withResolvers<void>();
 		const editorFocused = Promise.withResolvers<void>();
@@ -156,6 +157,11 @@ describe("Agent hub Enter activation", () => {
 			},
 			editor,
 			editorContainer,
+			remountEditorComposer: () => {
+				remountCalls++;
+				editorContainer.clear();
+				editorContainer.addChild(editor);
+			},
 			collabGuest: { agentRegistry: agents, hubRemote: undefined },
 			focusAgentSession: async (id: string) => {
 				focusedIds.push(id);
@@ -179,6 +185,7 @@ describe("Agent hub Enter activation", () => {
 		await editorFocused.promise;
 
 		expect(focusedIds).toEqual([AGENT_ID]);
+		expect(remountCalls).toBe(1);
 		expect(editorRestoredCount).toBe(1);
 		expect(focusTargets.at(-1)).toBe(editor);
 		capturedHub!.dispose();
@@ -197,6 +204,13 @@ describe("Agent hub double-← gating", () => {
 	function setup(agents: AgentRegistry) {
 		let shown: AgentHubOverlayComponent | undefined;
 		const editor = {};
+		let remountCalls = 0;
+		const editorContainer = {
+			clear: () => {},
+			addChild: (child: unknown) => {
+				if (child !== editor) shown = child as AgentHubOverlayComponent;
+			},
+		};
 		const ctx = {
 			keybindings: { getKeys: () => [] },
 			ui: {
@@ -204,11 +218,11 @@ describe("Agent hub double-← gating", () => {
 				requestRender: () => {},
 			},
 			editor,
-			editorContainer: {
-				clear: () => {},
-				addChild: (child: unknown) => {
-					if (child !== editor) shown = child as AgentHubOverlayComponent;
-				},
+			editorContainer,
+			remountEditorComposer: () => {
+				remountCalls++;
+				editorContainer.clear();
+				editorContainer.addChild(editor);
 			},
 			collabGuest: { agentRegistry: agents, hubRemote: undefined },
 			focusAgentSession: async () => {},
@@ -217,7 +231,7 @@ describe("Agent hub double-← gating", () => {
 			hideThinkingBlock: false,
 		};
 		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
-		return { controller, shown: () => shown };
+		return { controller, shown: () => shown, remountCalls: () => remountCalls };
 	}
 
 	function registerWorker(agents: AgentRegistry) {
@@ -252,21 +266,25 @@ describe("Agent hub double-← gating", () => {
 	it("requireContent opens the hub once a subagent exists", () => {
 		const agents = new AgentRegistry();
 		registerWorker(agents);
-		const { controller, shown } = setup(agents);
+		const { controller, shown, remountCalls } = setup(agents);
 
 		controller.showAgentHub(new SessionObserverRegistry(), { requireContent: true });
 
 		expect(shown()).toBeDefined();
-		shown()!.dispose();
+		// Close through the hub's own quit key so teardown runs the controller's
+		// done callback (which delegates to remountEditorComposer).
+		shown()!.handleInput("q");
+		expect(remountCalls()).toBe(1);
 	});
 
 	it("the explicit hub key opens the empty roster even with no subagents", () => {
 		const agents = new AgentRegistry();
-		const { controller, shown } = setup(agents);
+		const { controller, shown, remountCalls } = setup(agents);
 
 		controller.showAgentHub(new SessionObserverRegistry());
 
 		expect(shown()).toBeDefined();
-		shown()!.dispose();
+		shown()!.handleInput("q");
+		expect(remountCalls()).toBe(1);
 	});
 });

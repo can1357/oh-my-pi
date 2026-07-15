@@ -1,1 +1,0 @@
-[The result of this tool call is in the PNG frame(s) below — read them as the output; they contain it verbatim. Delivering it as an image is deliberate harness behavior to save context, not a tool malfunction. NEVER re-run the call or report a tool issue because of it.]

@@ -90,8 +90,7 @@ export class SelectorController {
 	 */
 	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
 		const done = () => {
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.editor);
+			this.ctx.remountEditorComposer();
 			this.ctx.ui.setFocus(this.ctx.editor);
 		};
 		const { component, focus } = create(done);
@@ -306,6 +305,32 @@ export class SelectorController {
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
 				break;
 
+			case "composer.layout": {
+				const effectiveLayout = this.ctx.settings.get("composer.layout");
+				this.ctx.editor.placeholder = effectiveLayout === "intent" ? "Describe the outcome you want…" : undefined;
+				if (effectiveLayout !== "intent" && this.ctx.getComposerWorkMode() === "ask") {
+					void this.ctx.restoreComposerAskTools().catch(error => {
+						this.ctx.showError(
+							`Failed to exit Ask mode while changing composer layout: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					});
+				}
+				this.ctx.updateEditorTopBorder();
+				this.ctx.ui.requestRender();
+				break;
+			}
+			case "plan.enabled":
+				if (
+					value === false &&
+					(this.ctx.getComposerWorkMode() === "plan" || this.ctx.session.getPlanModeState?.())
+				) {
+					void this.ctx
+						.disableComposerPlanMode()
+						.catch(error => this.ctx.showError(error instanceof Error ? error.message : String(error)));
+				}
+				this.ctx.updateEditorTopBorder();
+				this.ctx.ui.requestRender();
+				break;
 			// Settings with UI side effects
 			case "showImages":
 				for (const child of this.ctx.chatContainer.children) {
@@ -995,8 +1020,7 @@ export class SelectorController {
 					const codeInput = new Input();
 					codeInput.onSubmit = () => {
 						const code = codeInput.getValue();
-						this.ctx.editorContainer.clear();
-						this.ctx.editorContainer.addChild(this.ctx.editor);
+						this.ctx.remountEditorComposer();
 						this.ctx.ui.setFocus(this.ctx.editor);
 						resolve(code);
 					};
@@ -1246,8 +1270,7 @@ export class SelectorController {
 		// commits above it exactly once and the hub repaints in place.
 		const done = () => {
 			hub?.dispose();
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.editor);
+			this.ctx.remountEditorComposer();
 			this.ctx.ui.setFocus(this.ctx.editor);
 			this.ctx.ui.requestRender();
 		};

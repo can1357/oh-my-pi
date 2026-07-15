@@ -25,11 +25,28 @@ beforeEach(async () => {
 	await initTheme();
 });
 
-afterEach(() => {
+const createdComponents: StatusLineComponent[] = [];
+
+afterEach(async () => {
+	// Dispose every component first: a successful render can install an
+	// fs.watch on the temp repo's HEAD, and Windows rejects rmSync (EBUSY)
+	// while the watcher handle is open.
+	for (const component of createdComponents.splice(0)) {
+		component.dispose();
+	}
 	restoreSettingsTestState(settingsState);
 	settingsState = undefined;
 	if (projectDir) {
-		fs.rmSync(projectDir, { recursive: true, force: true });
+		// An in-flight async git-status probe can briefly hold a handle inside
+		// the temp dir on Windows; retry, then tolerate the leaked temp dir.
+		for (let attempt = 0; attempt < 10; attempt++) {
+			try {
+				fs.rmSync(projectDir, { recursive: true, force: true });
+				break;
+			} catch {
+				await Bun.sleep(50);
+			}
+		}
 	}
 	projectDir = "";
 });
@@ -47,11 +64,11 @@ function makeSession(sessionName = "Cache Session") {
 		isStreaming: false,
 		isAutoThinking: false,
 		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
+		isFastModeEnabled: () => false,
 		isAdvisorActive: () => false,
 		getGoalModeState: () => null,
 		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
+		settings: { get: () => false, isConfigured: () => false },
 		modelRegistry: { isUsingOAuth: () => false },
 		sessionManager: {
 			getSessionName: () => sessionName,
@@ -70,6 +87,7 @@ function makeSession(sessionName = "Cache Session") {
 
 function makeComponent(statusLineSettings: StatusLineSettings): StatusLineComponent {
 	const component = new StatusLineComponent(makeSession());
+	createdComponents.push(component);
 	component.updateSettings(statusLineSettings);
 	return component;
 }
@@ -229,7 +247,7 @@ describe("StatusLineComponent effective settings cache", () => {
 		}
 	});
 
-	it("skips git probes when no git-backed segment is visible", async () => {
+	it("skips git probes when no git-backed segment is visible and nobody subscribed", async () => {
 		const headSpy = spyOn(git.head, "resolveSync").mockReturnValue(null);
 		const statusSpy = spyOn(git.status, "summary").mockResolvedValue({ staged: 0, unstaged: 0, untracked: 0 });
 		const repoSpy = spyOn(git.repo, "resolveSync").mockReturnValue(null);
@@ -241,9 +259,6 @@ describe("StatusLineComponent effective settings cache", () => {
 				sessionAccent: false,
 			});
 
-			component.watchBranch(() => {
-				throw new Error("git watcher should not fire when no git-backed segment is visible");
-			});
 			component.getTopBorder(100);
 			await Promise.resolve();
 
@@ -254,6 +269,28 @@ describe("StatusLineComponent effective settings cache", () => {
 			repoSpy.mockRestore();
 			statusSpy.mockRestore();
 			headSpy.mockRestore();
+		}
+	});
+
+	it("an explicit branch subscriber forces watching even without git-backed segments", async () => {
+		// The composer's branch chip subscribes via watchBranch(); a checkout must
+		// repaint the chip even when the status line renders no git segment.
+		const repoSpy = spyOn(git.repo, "resolveSync").mockReturnValue(null);
+		try {
+			const component = makeComponent({
+				preset: "custom",
+				leftSegments: ["pi"],
+				rightSegments: ["session_name"],
+				sessionAccent: false,
+			});
+
+			component.watchBranch(() => {});
+			await Promise.resolve();
+
+			// The watcher setup path resolves the repository to find HEAD.
+			expect(repoSpy).toHaveBeenCalled();
+		} finally {
+			repoSpy.mockRestore();
 		}
 	});
 });

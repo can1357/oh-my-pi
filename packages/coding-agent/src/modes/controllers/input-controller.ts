@@ -387,7 +387,29 @@ export class InputController {
 		this.registerExtensionShortcuts();
 		const planModeKeys = this.ctx.keybindings.getKeys("app.plan.toggle");
 		for (const key of planModeKeys) {
-			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handlePlanModeCommand());
+			this.ctx.editor.setCustomKeyHandler(key, () => {
+				// Work-mode mutations always target the main session; ignore the
+				// legacy plan toggle while a subagent is focus-proxied so the
+				// composer cannot silently change the main session's mode.
+				if (this.ctx.focusedAgentId) return;
+				void this.ctx.handlePlanModeCommand();
+			});
+		}
+		for (const key of this.ctx.keybindings.getKeys("app.composer.mode.cycle")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => {
+				if (this.ctx.focusedAgentId) return;
+				if (!this.ctx.isIntentComposerEnabled() && this.ctx.getComposerWorkMode() === "ask") {
+					void this.ctx
+						.restoreComposerAskTools()
+						.catch(error => this.ctx.showError(error instanceof Error ? error.message : String(error)));
+					return;
+				}
+				if (this.ctx.isIntentComposerEnabled()) {
+					void this.ctx
+						.cycleComposerWorkMode()
+						.catch(error => this.ctx.showError(error instanceof Error ? error.message : String(error)));
+				}
+			});
 		}
 
 		for (const key of this.ctx.keybindings.getKeys("app.session.new")) {
@@ -525,6 +547,7 @@ export class InputController {
 		const handle = async (text: string): Promise<void> => {
 			text = text.trim();
 			if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
+			if (this.ctx.isIntentComposerEnabled()) await this.ctx.waitForComposerTransition();
 
 			// Focused subagent session: the editor is a plain chat box for it.
 			// Everything below (continue shortcuts, slash/bash/python, loop,
@@ -830,7 +853,7 @@ export class InputController {
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
 			}
-			this.ctx.editor.addToHistory(text);
+			if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 		};
 		this.ctx.editor.onSubmit = (text: string) => {
 			// Serialize: run each submit only after the previous one settles, so a

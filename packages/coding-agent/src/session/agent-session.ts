@@ -51,7 +51,6 @@ import {
 	compact,
 	createCompactionSummaryMessage,
 	DEFAULT_SHAKE_CONFIG,
-	effectiveReserveTokens,
 	estimateTokens,
 	generateBranchSummary,
 	generateHandoff,
@@ -320,7 +319,7 @@ import {
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
-import { findCompactMode } from "./compact-modes";
+import { findCompactMode, SNAPCOMPACT_RETIREMENT_ERROR } from "./compact-modes";
 import {
 	classifyFusionRoute,
 	type FusionPoolTier,
@@ -356,6 +355,8 @@ import { ToolChoiceQueue } from "./tool-choice-queue";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
 import { YieldQueue } from "./yield-queue";
 
+type SessionSwitchReconciler = (() => Promise<void>) | { before?: () => Promise<void>; after?: () => Promise<void> };
+
 const SESSION_STOP_CONTINUATION_CAP = 8;
 
 /** Session-specific events that extend the core AgentEvent */
@@ -364,10 +365,12 @@ export type AgentSessionEvent =
 	| {
 			type: "auto_compaction_start";
 			reason: "threshold" | "overflow" | "idle" | "incomplete";
+			/** @deprecated Never emitted anymore; kept so existing listener switch cases still compile. */
 			action: "context-full" | "handoff" | "shake" | "snapcompact";
 	  }
 	| {
 			type: "auto_compaction_end";
+			/** @deprecated Never emitted anymore; kept so existing listener switch cases still compile. */
 			action: "context-full" | "handoff" | "shake" | "snapcompact";
 			result: CompactionResult | undefined;
 			aborted: boolean;
@@ -1250,6 +1253,16 @@ export class AgentSession {
 	#allowAcpAgentInitiatedTurns = false;
 	/** Per-session memory of allow_always / reject_always decisions for gated tools. */
 	#acpPermissionDecisions: Map<string, "allow_always" | "reject_always"> = new Map();
+	/** Ephemeral ceiling applied to every runtime active-tool mutation (e.g. Ask mode). */
+	#activeToolCeiling: ReadonlySet<string> | undefined;
+	/**
+	 * Serializes `#applyActiveToolsByName` runs. Concurrent applies race across
+	 * the awaited system-prompt rebuild: a wide apply started before a ceiling
+	 * was installed could commit `agent.setTools` AFTER the ceiling-restricted
+	 * apply, silently re-widening Ask mode. Chaining makes each apply observe
+	 * the ceiling state left by the previous one.
+	 */
+	#applyActiveToolsChain: Promise<void> = Promise.resolve();
 
 	// Compaction state
 	#compactionAbortController: AbortController | undefined = undefined;
@@ -2207,10 +2220,7 @@ export class AgentSession {
 			? ThinkingLevel.Off
 			: advisor.state.thinkingLevel;
 
-		// Advisor state is in-memory-only, so snapcompact's frame archive has no
-		// stable SessionEntry preserveData slot to carry across future advisor
-		// maintenance runs. Use an LLM summary even when the primary session is
-		// configured for snapcompact.
+		// Advisor state is in-memory-only, so maintenance always uses a native-text LLM summary.
 		const availableModels = this.#modelRegistry.getAvailable();
 		const candidates = this.#resolveCompactionModelCandidates(advisorModel, availableModels);
 		if (candidates.length === 0) {
@@ -2379,10 +2389,16 @@ export class AgentSession {
 		this.#standingResolveHandler = handler ?? undefined;
 	}
 
-	#sessionSwitchReconciler: (() => Promise<void>) | undefined;
+	#sessionSwitchReconciler: { before?: () => Promise<void>; after?: () => Promise<void> } | undefined;
 
-	setSessionSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
-		this.#sessionSwitchReconciler = reconciler ?? undefined;
+	setSessionSwitchReconciler(reconciler: SessionSwitchReconciler | null): void {
+		if (!reconciler) {
+			this.#sessionSwitchReconciler = undefined;
+		} else if (typeof reconciler === "function") {
+			this.#sessionSwitchReconciler = { after: reconciler };
+		} else {
+			this.#sessionSwitchReconciler = reconciler;
+		}
 	}
 
 	/** Provider-scoped mutable state store for transport/session caches. */
@@ -4967,12 +4983,28 @@ export class AgentSession {
 		return source !== undefined && isAllowedByToolProfile(this.#toolProfile, source, name);
 	}
 
-	async #applyActiveToolsByName(
+	#applyActiveToolsByName(
 		toolNames: string[],
 		options?: { persistMCPSelection?: boolean; previousSelectedMCPToolNames?: string[] },
 	): Promise<void> {
-		toolNames = [...new Set(toolNames.map(name => name.toLowerCase()))];
+		const run = this.#applyActiveToolsChain.then(() => this.#applyActiveToolsByNameSerialized(toolNames, options));
+		this.#applyActiveToolsChain = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
+	}
+
+	async #applyActiveToolsByNameSerialized(
+		toolNames: string[],
+		options?: { persistMCPSelection?: boolean; previousSelectedMCPToolNames?: string[] },
+	): Promise<void> {
 		const previousSelectedMCPToolNames = options?.previousSelectedMCPToolNames ?? this.getSelectedMCPToolNames();
+		const ceilingActive = this.#activeToolCeiling !== undefined;
+		toolNames = [...new Set(toolNames.map(name => name.toLowerCase()))];
+		if (ceilingActive) {
+			toolNames = toolNames.filter(name => this.#activeToolCeiling?.has(name));
+		}
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
 		for (const name of toolNames) {
@@ -4983,11 +5015,12 @@ export class AgentSession {
 				validToolNames.push(name);
 			}
 		}
-		// Auto-QA tool must survive any runtime tool-set mutation.
+		// Auto-QA tool must survive runtime mutations only when not ceiling-restricted.
 		if (
 			isAutoQaEnabled(this.settings) &&
 			!validToolNames.includes("report_tool_issue") &&
-			this.#isToolNameAllowedByProfile("report_tool_issue")
+			this.#isToolNameAllowedByProfile("report_tool_issue") &&
+			(!this.#activeToolCeiling || this.#activeToolCeiling.has("report_tool_issue"))
 		) {
 			const qaTool = this.#toolRegistry.get("report_tool_issue");
 			if (qaTool) {
@@ -4995,24 +5028,24 @@ export class AgentSession {
 				validToolNames.push("report_tool_issue");
 			}
 		}
-		if (this.#mcpDiscoveryEnabled) {
-			this.#selectedMCPToolNames = new Set(
-				validToolNames.filter(
-					name => isMCPToolName(name) && this.#discoverableMCPTools.has(name) && this.#toolRegistry.has(name),
-				),
-			);
-		}
+		const nextSelectedMCPToolNames = ceilingActive
+			? this.#selectedMCPToolNames
+			: this.#mcpDiscoveryEnabled
+				? new Set(
+						validToolNames.filter(
+							name =>
+								isMCPToolName(name) && this.#discoverableMCPTools.has(name) && this.#toolRegistry.has(name),
+						),
+					)
+				: this.#selectedMCPToolNames;
 		const activeNameSet = new Set(validToolNames);
-		for (const name of Array.from(this.#selectedDiscoveredToolNames)) {
-			if (!activeNameSet.has(name) || isMCPToolName(name) || !this.#toolRegistry.has(name)) {
-				this.#selectedDiscoveredToolNames.delete(name);
-			}
-		}
-		this.agent.setTools(tools);
-
-		// Active tool set changed → discoverable tool list (which excludes already-active tools)
-		// is now stale. Invalidate before any prompt-template hook reads the discovery list.
-		this.#invalidateDiscoveryCaches();
+		const nextSelectedDiscoveredToolNames = ceilingActive
+			? this.#selectedDiscoveredToolNames
+			: new Set(
+					Array.from(this.#selectedDiscoveredToolNames).filter(
+						name => activeNameSet.has(name) && !isMCPToolName(name) && this.#toolRegistry.has(name),
+					),
+				);
 
 		// Rebuild base system prompt with new tool set, but only when the tool set
 		// actually changed. MCP servers can reconnect at arbitrary times and call
@@ -5029,7 +5062,16 @@ export class AgentSession {
 				this.#promptModelKey = this.#currentPromptModelKey();
 			}
 		}
-		if (options?.persistMCPSelection !== false) {
+		// Re-read the ceiling at commit time: it may have been installed while the
+		// prompt rebuild above was awaited. Committing the stale wide set here
+		// would pierce Ask mode for the rest of the session.
+		const commitCeiling = this.#activeToolCeiling;
+		const committedTools = commitCeiling ? tools.filter(tool => commitCeiling.has(tool.name.toLowerCase())) : tools;
+		this.#selectedMCPToolNames = nextSelectedMCPToolNames;
+		this.#selectedDiscoveredToolNames = nextSelectedDiscoveredToolNames;
+		this.#invalidateDiscoveryCaches();
+		this.agent.setTools(committedTools);
+		if (options?.persistMCPSelection !== false && !this.#activeToolCeiling) {
 			this.#persistSelectedMCPToolNamesIfChanged(previousSelectedMCPToolNames);
 		}
 	}
@@ -5081,6 +5123,21 @@ export class AgentSession {
 	 */
 	async setActiveToolsByName(toolNames: string[]): Promise<void> {
 		await this.#applyActiveToolsByName(toolNames);
+	}
+
+	/** Apply an ephemeral runtime ceiling without persisting MCP selections. */
+	async setActiveToolCeiling(
+		toolNames: readonly string[] | undefined,
+		desiredActiveNames: readonly string[] = this.getActiveToolNames(),
+	): Promise<void> {
+		const previousCeiling = this.#activeToolCeiling;
+		this.#activeToolCeiling = toolNames ? new Set(toolNames.map(name => name.toLowerCase())) : undefined;
+		try {
+			await this.#applyActiveToolsByName([...desiredActiveNames], { persistMCPSelection: false });
+		} catch (error) {
+			this.#activeToolCeiling = previousCeiling;
+			throw error;
+		}
 	}
 
 	async #restoreMCPSelectionsForSessionContext(
@@ -5422,6 +5479,13 @@ export class AgentSession {
 		};
 	}
 
+	/** Remove legacy snapcompact frame archives from newly rebuilt context state. */
+	#stripRetiredSnapcompactPreserveData(
+		preserveData: Record<string, unknown> | undefined,
+	): Record<string, unknown> | undefined {
+		return snapcompact.stripPreservedArchive(preserveData);
+	}
+
 	#obfuscatePreparationForProvider(preparation: CompactionPreparation): CompactionPreparation {
 		if (!this.#obfuscator?.hasSecrets()) return preparation;
 		if (!preparation.previousSummary && !preparation.previousPreserveData) return preparation;
@@ -5645,7 +5709,9 @@ export class AgentSession {
 	setClientBridge(bridge: ClientBridge | undefined): void {
 		this.#clientBridge = bridge;
 		this.#acpPermissionDecisions.clear();
-		const activeToolNames = this.getActiveToolNames();
+		const activeToolNames = this.getActiveToolNames().filter(
+			name => !this.#activeToolCeiling || this.#activeToolCeiling.has(name),
+		);
 		const activeTools = activeToolNames
 			.map(name => this.#toolRegistry.get(name))
 			.filter((tool): tool is AgentTool => tool !== undefined)
@@ -8178,12 +8244,10 @@ export class AgentSession {
 		}
 		// Resolve the `/compact <mode>` subcommand up front so input validation
 		// runs before we disconnect/abort the active agent operation below.
-		const compactMode = options?.mode ? findCompactMode(options.mode) : undefined;
-		// Modes that produce no LLM summary (snapcompact) have nothing to focus.
-		// Reject focus text loudly so programmatic callers don't silently lose
-		// instructions (the slash path pre-validates via parseCompactArgs).
-		if (compactMode?.rejectsFocus && customInstructions) {
-			throw new Error(`/compact ${compactMode.name} does not take focus instructions.`);
+		const requestedMode = options?.mode;
+		const compactMode = requestedMode !== undefined ? findCompactMode(requestedMode) : undefined;
+		if (requestedMode !== undefined && !compactMode) {
+			throw new Error(SNAPCOMPACT_RETIREMENT_ERROR);
 		}
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
@@ -8199,7 +8263,7 @@ export class AgentSession {
 			// The `/compact <mode>` override (resolved above) replaces the configured
 			// strategy/remote flags for this one invocation. Merged before
 			// prepareCompaction so the remote gating (preparation.settings.
-			// remoteEnabled/endpoint) and the snapcompact decision below both see it.
+			// remoteEnabled/endpoint) and the selected compaction path both see them.
 			const effectiveSettings = compactMode
 				? { ...compactionSettings, ...compactMode.overrides }
 				: compactionSettings;
@@ -8250,64 +8314,11 @@ export class AgentSession {
 
 			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, hookCompaction);
 
-			// Strategy honored on manual /compact too. Custom instructions imply a
-			// directed LLM summary; a text-only model cannot read the frames back —
-			// both take the summarizer path (the latter loudly).
-			const wantsSnapcompact =
-				compactionPrep.kind !== "fromHook" && effectiveSettings.strategy === "snapcompact" && !customInstructions;
-			let snapcompactReady = wantsSnapcompact && this.model.input.includes("image");
-			if (wantsSnapcompact && !snapcompactReady) {
-				this.emitNotice(
-					"warning",
-					`snapcompact needs a vision-capable model (${this.model.id} is text-only) — using an LLM summary instead`,
-					"compaction",
-				);
-			} else if (snapcompactReady) {
-				const text = snapcompact.serializeConversation(convertToLlm(preparation.messagesToSummarize));
-				const renderScan = snapcompact.scanRenderability(text);
-				if (!renderScan.isSafe) {
-					this.emitNotice(
-						"warning",
-						`snapcompact disabled: high non-ASCII rate detected (${(renderScan.unrenderableRatio * 100).toFixed(1)}%). Falling back to an LLM summary to prevent data loss.`,
-						"compaction",
-					);
-					snapcompactReady = false;
-				}
-			}
-
 			let summary: string;
 			let shortSummary: string | undefined;
 			let firstKeptEntryId: string;
 			let tokensBefore: number;
 			let details: unknown;
-
-			// Snapcompact runs locally first; if its frame archive plus the kept
-			// history still overflows the model window, fall back to an LLM summary
-			// (far cheaper than ~FRAME_TOKEN_ESTIMATE per frame).
-			let snapcompactResult: snapcompact.CompactionResult | undefined;
-			if (snapcompactReady) {
-				snapcompactResult = await snapcompact.compact(preparation, {
-					convertToLlm,
-					model: this.model,
-					shape: snapcompact.resolveShape(this.model, this.settings.get("snapcompact.shape")),
-				});
-				const ctxWindow = this.model?.contextWindow ?? 0;
-				const budget =
-					ctxWindow > 0
-						? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
-						: Number.POSITIVE_INFINITY;
-				if (this.#projectSnapcompactContextTokens(preparation, snapcompactResult) > budget) {
-					logger.warn("Snapcompact still overflows the window; falling back to an LLM summary", {
-						model: this.model?.id,
-					});
-					this.emitNotice(
-						"warning",
-						"snapcompact could not bring the context under the limit — using an LLM summary instead",
-						"compaction",
-					);
-					snapcompactResult = undefined;
-				}
-			}
 
 			if (compactionPrep.kind === "fromHook") {
 				summary = compactionPrep.summary;
@@ -8316,13 +8327,6 @@ export class AgentSession {
 				tokensBefore = compactionPrep.tokensBefore;
 				details = compactionPrep.details;
 				preserveData = compactionPrep.preserveData;
-			} else if (snapcompactResult) {
-				summary = snapcompactResult.summary;
-				shortSummary = snapcompactResult.shortSummary;
-				firstKeptEntryId = snapcompactResult.firstKeptEntryId;
-				tokensBefore = snapcompactResult.tokensBefore;
-				details = snapcompactResult.details;
-				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(snapcompactResult.preserveData ?? {}) };
 			} else {
 				// Generate compaction result. Only convert known abort-shaped
 				// rejections (AbortError raised while the abort signal is set,
@@ -8375,7 +8379,7 @@ export class AgentSession {
 				preparation,
 			});
 			summary = tracedCompaction.summary;
-			preserveData = tracedCompaction.preserveData;
+			preserveData = this.#stripRetiredSnapcompactPreserveData(tracedCompaction.preserveData);
 
 			this.sessionManager.appendCompaction(
 				summary,
@@ -8703,7 +8707,7 @@ export class AgentSession {
 		// Auto-promote first: switching to a larger-context model avoids compacting
 		// the history at all. The post-turn threshold path already promotes before
 		// compacting; without this, the pre-prompt path would pre-empt promotion and
-		// compact (snapcompact/summary) a session that should have just been promoted.
+		// compact or summarize a session that should have just been promoted.
 		if (await this.#promoteContextModel()) {
 			logger.debug("Pre-prompt context promotion avoided compaction", {
 				contextTokens,
@@ -10178,33 +10182,6 @@ export class AgentSession {
 	}
 
 	/**
-	 * Project the post-compaction context size of a snapcompact result: kept
-	 * recent messages + the summary message with its re-attached frames + the
-	 * fixed non-message overhead (system prompt + tools). Mirrors how the
-	 * compacted context is rebuilt, so the estimate matches the wire shape, and
-	 * lets the caller decide whether snapcompact brought the context under the
-	 * window or should fall back to an LLM summary.
-	 */
-	#projectSnapcompactContextTokens(preparation: CompactionPreparation, result: snapcompact.CompactionResult): number {
-		const archive = snapcompact.getPreservedArchive(result.preserveData);
-		const blocks = archive ? snapcompact.historyBlocks(archive) : undefined;
-		const summaryMessage = createCompactionSummaryMessage(
-			result.summary,
-			result.tokensBefore,
-			new Date().toISOString(),
-			result.shortSummary,
-			undefined,
-			undefined,
-			blocks,
-		);
-		let tokens = computeNonMessageTokens(this) + estimateTokens(summaryMessage);
-		for (const message of preparation.recentMessages) {
-			tokens += estimateTokens(message);
-		}
-		return tokens;
-	}
-
-	/**
 	 * Internal: Run auto-compaction with events.
 	 *
 	 * @param allowDefer If true (default), threshold-driven handoff strategy is allowed to
@@ -10264,27 +10241,8 @@ export class AgentSession {
 			return COMPACTION_CHECK_DEFERRED_HANDOFF;
 		}
 
-		// "overflow" forces context-full because the input itself is broken — a handoff
-		// LLM call would hit the same overflow. "incomplete" is an output-side problem,
-		// so a handoff request on the existing context is still viable. Snapcompact is
-		// safe for every reason (it makes no LLM call at all) but requires a vision
-		// model to be worth anything — fall back to context-full otherwise.
-		let action: "context-full" | "handoff" | "snapcompact" =
+		let action: "context-full" | "handoff" =
 			compactionSettings.strategy === "handoff" && reason !== "overflow" ? "handoff" : "context-full";
-		if (compactionSettings.strategy === "snapcompact") {
-			if (this.model?.input.includes("image")) {
-				action = "snapcompact";
-			} else {
-				logger.warn("Snapcompact compaction requires a vision-capable model; falling back to context-full", {
-					model: this.model?.id,
-				});
-				this.emitNotice(
-					"warning",
-					`snapcompact needs a vision-capable model (${this.model?.id ?? "unknown"} is text-only) — using an LLM summary instead`,
-					"compaction",
-				);
-			}
-		}
 		// Abort any older auto-compaction before installing this run's controller.
 		this.#autoCompactionAbortController?.abort();
 		const autoCompactionAbortController = new AbortController();
@@ -10422,39 +10380,6 @@ export class AgentSession {
 			let tokensBefore: number;
 			let details: unknown;
 
-			// Snapcompact runs locally first; if its frame archive plus the kept
-			// history still overflows the model window (frames default to
-			// MAX_FRAMES_DEFAULT and cost ~FRAME_TOKEN_ESTIMATE each), an LLM
-			// summary is far cheaper — downgrade to context-full and take the
-			// summarizer path.
-			let snapcompactResult: snapcompact.CompactionResult | undefined;
-			if (action === "snapcompact" && compactionPrep.kind !== "fromHook") {
-				snapcompactResult = await snapcompact.compact(preparation, {
-					convertToLlm,
-					model: this.model,
-				});
-				const ctxWindow = this.model?.contextWindow ?? 0;
-				const budget =
-					ctxWindow > 0
-						? ctxWindow - effectiveReserveTokens(ctxWindow, compactionSettings)
-						: Number.POSITIVE_INFINITY;
-				const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
-				if (projected > budget) {
-					logger.warn("Snapcompact still overflows the window; falling back to an LLM summary", {
-						model: this.model?.id,
-						projected,
-						budget,
-					});
-					this.emitNotice(
-						"warning",
-						"snapcompact could not bring the context under the limit — using an LLM summary instead",
-						"compaction",
-					);
-					action = "context-full";
-					snapcompactResult = undefined;
-				}
-			}
-
 			if (compactionPrep.kind === "fromHook") {
 				summary = compactionPrep.summary;
 				shortSummary = compactionPrep.shortSummary;
@@ -10462,13 +10387,6 @@ export class AgentSession {
 				tokensBefore = compactionPrep.tokensBefore;
 				details = compactionPrep.details;
 				preserveData = compactionPrep.preserveData;
-			} else if (snapcompactResult) {
-				summary = snapcompactResult.summary;
-				shortSummary = snapcompactResult.shortSummary;
-				firstKeptEntryId = snapcompactResult.firstKeptEntryId;
-				tokensBefore = snapcompactResult.tokensBefore;
-				details = snapcompactResult.details;
-				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(snapcompactResult.preserveData ?? {}) };
 			} else {
 				const candidates = this.#getCompactionModelCandidates(availableModels);
 				const retrySettings = this.settings.getGroup("retry");
@@ -10610,7 +10528,7 @@ export class AgentSession {
 				preparation,
 			});
 			summary = tracedCompaction.summary;
-			preserveData = tracedCompaction.preserveData;
+			preserveData = this.#stripRetiredSnapcompactPreserveData(tracedCompaction.preserveData);
 
 			this.sessionManager.appendCompaction(
 				summary,
@@ -12218,6 +12136,7 @@ export class AgentSession {
 
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
+		await this.#sessionSwitchReconciler?.before?.();
 		const previousSessionState = this.sessionManager.captureState();
 		const previousSessionContext = this.buildDisplaySessionContext();
 		// switchSession replaces these arrays wholesale during load/rollback, so retaining
@@ -12353,7 +12272,7 @@ export class AgentSession {
 			}
 			this.#reconnectToAgent();
 			try {
-				await this.#sessionSwitchReconciler?.();
+				await this.#sessionSwitchReconciler?.after?.();
 			} catch (error) {
 				logger.warn("Failed to reconcile session mode after switch", {
 					targetSessionFile: sessionPath,
@@ -12380,7 +12299,11 @@ export class AgentSession {
 					error: String(mcpError),
 				});
 				this.#selectedMCPToolNames = new Set(previousSelectedMCPToolNames);
-				this.agent.setTools(previousTools);
+				this.agent.setTools(
+					this.#activeToolCeiling
+						? previousTools.filter(tool => this.#activeToolCeiling?.has(tool.name))
+						: previousTools,
+				);
 				this.#baseSystemPrompt = previousBaseSystemPrompt;
 				this.agent.setSystemPrompt(previousSystemPrompt);
 			}

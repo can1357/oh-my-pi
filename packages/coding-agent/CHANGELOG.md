@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- Added opt-in global image background packs from explicit outside-workspace manifests, with exact-model qualification, profitability gating, content/profile caching, non-authoritative provenance, and fail-closed warnings.
+- Added the default intent composer with enforceable Ask/Build/Plan work modes, context chips, an execution rail, and a configurable mode-cycle keybinding; the classic layout remains selectable.
 - Added offline `/help [question]` recommendations that match natural-language questions to built-in oh-my-pk features, explain when to use them, and link to local documentation.
 - Added same-CWD cross-process IRC discovery and authenticated loopback delivery, with `--no-irc` and `/irc on|off|status` controls.
 - Session skill routing for environments-cloud (pkscloudenvs): `loadSkills()` auto-includes `C:\dev\desktop-infra\environments-cloud\.agents\skills` (or `OMPK_ENVIRONMENTS_CLOUD_ROOT` / `PKS_ENVIRONMENTS_CLOUD_ROOT`) when present on disk, so mesh-orchestrator / colab-warmup resolve without a guessed path.
@@ -54,6 +56,10 @@
 - Fixed auto-learn thresholding so only successful tool calls count toward `autolearn.minToolCalls`; failed calls no longer trigger a capture nudge.
 
 - Serialized editor submit handling so a fast double-Enter can't race concurrent submit handlers: a second empty Enter previously read `queuedMessageCount` before a steer finished registering it and no-op'd instead of flushing.
+
+### Removed
+
+- Removed unsafe experimental coding-agent imaging of system prompts, conversation history, and tool results; stale Snapcompact compaction settings now migrate to native-text `context-full`.
 
 ## [16.2.5] - 2026-07-02
 

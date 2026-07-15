@@ -8,7 +8,6 @@
 
 import { beforeAll, describe, expect, it } from "bun:test";
 import { createCompactionSummaryMessage } from "@pk-nerdsaver-ai/pi-agent-core/compaction";
-import type { ImageContent } from "@pk-nerdsaver-ai/pi-ai";
 import { CompactionSummaryMessageComponent } from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/compaction-summary-message";
 import { initTheme } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
 
@@ -18,9 +17,9 @@ beforeAll(() => {
 
 const SUMMARY = "Earlier the user fixed the login TTL bug.";
 
-function makeComponent(images?: ImageContent[]): CompactionSummaryMessageComponent {
+function makeComponent(): CompactionSummaryMessageComponent {
 	return new CompactionSummaryMessageComponent(
-		createCompactionSummaryMessage(SUMMARY, 84000, new Date().toISOString(), undefined, undefined, images),
+		createCompactionSummaryMessage(SUMMARY, 84000, new Date().toISOString()),
 	);
 }
 
@@ -36,14 +35,13 @@ describe("CompactionSummaryMessageComponent", () => {
 		expect(rule).not.toContain(SUMMARY);
 	});
 
-	it("expanded: reveals the summary (and snapcompact frame count) below the divider", () => {
-		const component = makeComponent([{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" }]);
+	it("expanded: reveals the native summary below the divider", () => {
+		const component = makeComponent();
 		component.setExpanded(true);
 		const text = Bun.stripANSI(component.render(80).join("\n"));
 		expect(text).toContain("compacted");
 		expect(text).toContain(SUMMARY);
 		expect(text).toContain("tokens");
-		expect(text).toContain("1 snapcompact frame attached");
 	});
 
 	it("degrades to a bare label when the viewport is too narrow for a framed rule", () => {

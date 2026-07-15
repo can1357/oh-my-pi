@@ -37,6 +37,7 @@ import { ADVISOR_READONLY_TOOL_NAMES, discoverWatchdogFiles } from "./advisor";
 import { type AsyncJob, AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { loadCapability } from "./capability";
+import { findRepoRoot } from "./capability/fs";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
@@ -54,6 +55,12 @@ import {
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { validateSpawnSelectorsSemantic, validateSpawnSelectorsStructural } from "./config/spawn-selector-validation";
+import {
+	BackgroundPackRenderer,
+	countContextImages,
+	injectBackgroundPackMessages,
+	resolveBackgroundPackManifests,
+} from "./context/background-packs";
 import { CursorExecHandlers } from "./cursor";
 import type { AgentExecutionProfile } from "./orchestration/agent-execution-profile";
 import type { CollaborationPolicy } from "./orchestration/collaboration-policy";
@@ -132,8 +139,6 @@ import {
 } from "./session/messages";
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
-import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
-import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
 import { closeAllConnections } from "./ssh/connection-manager";
 import { unmountAll } from "./ssh/sshfs-mount";
 import {
@@ -2570,31 +2575,56 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const withContext = await extensionRunner.emitContext(messages);
 			return wrapSteeringForModel(withContext);
 		};
-		// Per-request provider-context transforms. Obfuscate FIRST so secrets are
-		// redacted from text before snapcompact rasterizes it into PNG frames.
-		// Both operate on the transient outgoing Context only — never persisted.
-		const snapcompactSystemPromptMode = settings.get("snapcompact.systemPrompt");
-		const snapcompactInline =
-			snapcompactSystemPromptMode !== "none" || settings.get("snapcompact.toolResults")
-				? new SnapcompactInlineTransformer(
-						{
-							renderSystemPrompt: snapcompactSystemPromptMode,
-							renderToolResults: settings.get("snapcompact.toolResults"),
-							shape: settings.get("snapcompact.shape"),
-						},
-						// Journal the tokens each imaged tool result keeps off the wire
-						// (frames never reach session.jsonl, so this is their only trace).
-						createSnapcompactSavingsRecorder(() => sessionManager.getSessionFile() ?? null),
-					)
-				: undefined;
-		const transformProviderContext =
-			obfuscator || snapcompactInline
-				? (context: Context, transformModel: Model): Context => {
-						let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
-						if (snapcompactInline) transformed = snapcompactInline.transform(transformed, transformModel);
-						return transformed;
-					}
-				: undefined;
+		// Background-pack rendering is intentionally separated from the request:
+		// only manifest-resolved source text crosses into BackgroundPackRenderer.
+		const backgroundPackRenderer = new BackgroundPackRenderer();
+		const reportedBackgroundPackWarnings = new Set<string>();
+		let backgroundPackUiContext: ExtensionUIContext | undefined;
+		let backgroundPackHasUi = false;
+		const reportBackgroundPackWarning = (message: string): void => {
+			if (reportedBackgroundPackWarnings.has(message)) return;
+			reportedBackgroundPackWarnings.add(message);
+			logger.warn(message);
+			if (backgroundPackHasUi) backgroundPackUiContext?.notify(message, "warning");
+		};
+		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
+			const transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+			const backgroundPacksEnabled: unknown = settings.getGlobal("backgroundPacks.enabled");
+			if (backgroundPacksEnabled !== true) return transformed;
+			const globalBlockImages: unknown = settings.getGlobal("images.blockImages");
+			const effectiveBlockImages: unknown = settings.get("images.blockImages");
+			if (globalBlockImages === true || effectiveBlockImages === true) {
+				reportBackgroundPackWarning("Background packs skipped: image reading is disabled.");
+				return transformed;
+			}
+
+			const manifestPaths: unknown = settings.getGlobal("backgroundPacks.manifests");
+			if (Array.isArray(manifestPaths) && manifestPaths.length === 0) {
+				reportBackgroundPackWarning("Background packs are enabled, but no user-level manifests are configured.");
+				return transformed;
+			}
+			try {
+				const activeCwd = sessionManager.getCwd();
+				const repositoryRoot = await findRepoRoot(activeCwd);
+				const workspaceRoots =
+					repositoryRoot && repositoryRoot !== activeCwd ? [activeCwd, repositoryRoot] : [activeCwd];
+				const resolved = await resolveBackgroundPackManifests(manifestPaths, {
+					agentDir,
+					workspaceRoots,
+				});
+				for (const warning of resolved.warnings) reportBackgroundPackWarning(warning.message);
+				const prepared = await backgroundPackRenderer.prepare(resolved.packs, transformModel, {
+					reservedImageCount: countContextImages(transformed),
+				});
+				for (const warning of prepared.warnings) reportBackgroundPackWarning(warning.message);
+				if (prepared.messages.length === 0) return transformed;
+
+				return injectBackgroundPackMessages(transformed, prepared.messages);
+			} catch {
+				reportBackgroundPackWarning("Background packs skipped: optional image preparation failed.");
+				return transformed;
+			}
+		};
 		const onPayload = async (payload: unknown, _model?: Model) => {
 			return await extensionRunner.emitBeforeProviderRequest(payload);
 		};
@@ -2603,6 +2633,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		};
 
 		const setToolUIContext = (uiContext: ExtensionUIContext, hasUI: boolean) => {
+			backgroundPackUiContext = uiContext;
+			backgroundPackHasUi = hasUI;
 			toolContextStore.setUIContext(uiContext, hasUI);
 		};
 

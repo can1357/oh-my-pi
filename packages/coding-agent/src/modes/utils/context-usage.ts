@@ -10,7 +10,6 @@ import { toolWireSchema } from "@pk-nerdsaver-ai/pi-ai/utils/schema";
 import { formatNumber } from "@pk-nerdsaver-ai/pi-utils";
 import type { Skill } from "../../extensibility/skills";
 import type { AgentSession } from "../../session/agent-session";
-import { estimateInlineSavings, type SnapcompactSavingsEstimate } from "../../session/snapcompact-inline";
 import type { Tool } from "../../tools";
 import type { theme as Theme } from "../theme/theme";
 
@@ -41,8 +40,6 @@ export interface ContextBreakdown {
 	usedTokens: number;
 	autoCompactBufferTokens: number;
 	freeTokens: number;
-	/** Estimated snapcompact wire savings; set when requested and a snapcompact.* setting is enabled. */
-	snapcompact?: SnapcompactSavingsEstimate;
 }
 
 const EMPTY_STRING_PARTS: readonly string[] = [];
@@ -120,10 +117,7 @@ export function computeNonMessageBreakdown(session: AgentSession): {
  * Compute a breakdown of estimated context usage by category for the active
  * session and model.
  */
-export function computeContextBreakdown(
-	session: AgentSession,
-	options?: { snapcompactSavings?: boolean },
-): ContextBreakdown {
+export function computeContextBreakdown(session: AgentSession): ContextBreakdown {
 	const model = session.model;
 	const contextWindow = model?.contextWindow ?? 0;
 
@@ -196,22 +190,6 @@ export function computeContextBreakdown(
 
 	const freeTokens = Math.max(0, contextWindow - usedTokens - autoCompactBufferTokens);
 
-	// Estimated wire savings from snapcompact inline imaging. Opt-in: only the
-	// /context surfaces need it; other callers skip the extra token counting.
-	let snapcompactSavings: SnapcompactSavingsEstimate | undefined;
-	if (options?.snapcompactSavings) {
-		const renderSystemPrompt = session.settings.get("snapcompact.systemPrompt");
-		const renderToolResults = session.settings.get("snapcompact.toolResults");
-		if (renderSystemPrompt !== "none" || renderToolResults) {
-			snapcompactSavings = estimateInlineSavings({
-				options: { renderSystemPrompt, renderToolResults, shape: session.settings.get("snapcompact.shape") },
-				model,
-				systemPrompt: session.systemPrompt ?? [],
-				messages: session.messages ?? [],
-			});
-		}
-	}
-
 	return {
 		model,
 		contextWindow,
@@ -219,7 +197,6 @@ export function computeContextBreakdown(
 		usedTokens,
 		autoCompactBufferTokens,
 		freeTokens,
-		snapcompact: snapcompactSavings,
 	};
 }
 
@@ -340,57 +317,6 @@ function buildLegendLines(breakdown: ContextBreakdown, theme: typeof Theme): str
 				`tokens (${percentString(autoCompactBufferTokens, contextWindow)})`,
 			)}`,
 		);
-	}
-
-	const snap = breakdown.snapcompact;
-	if (snap) {
-		lines.push("");
-		if (!snap.visionCapable) {
-			lines.push(theme.fg("muted", "Snapcompact: inactive (model has no image input)"));
-		} else {
-			lines.push(theme.fg("muted", "Snapcompact (estimated wire savings)"));
-			if (snap.systemPrompt) {
-				const sp = snap.systemPrompt;
-				if (sp.applied) {
-					lines.push(
-						`  System prompt (${sp.scope === "agents-md" ? "AGENTS.md" : "all"}): saves ${theme.bold(`~${formatNumber(sp.savedTokens)}`)} ` +
-							theme.fg(
-								"dim",
-								`(${formatNumber(sp.textTokens)} text → ${sp.frames} frame${sp.frames === 1 ? "" : "s"} ≈ ${formatNumber(sp.imageTokens)})`,
-							),
-					);
-				} else {
-					const reason =
-						sp.reason === "budget"
-							? "image budget exhausted"
-							: sp.reason === "empty"
-								? "nothing to image"
-								: "frames would not save tokens";
-					lines.push(
-						`  System prompt (${sp.scope === "agents-md" ? "AGENTS.md" : "all"}): ${theme.fg("dim", `stays text (${reason})`)}`,
-					);
-				}
-			}
-			if (snap.toolResults) {
-				const tr = snap.toolResults;
-				if (tr.swapped > 0) {
-					lines.push(
-						`  Tool results: saves ${theme.bold(`~${formatNumber(tr.savedTokens)}`)} ` +
-							theme.fg(
-								"dim",
-								`(${tr.swapped}/${tr.total} imaged, ${formatNumber(tr.textTokens)} text → ${tr.frames} frames ≈ ${formatNumber(tr.imageTokens)})`,
-							),
-					);
-				} else {
-					lines.push(`  Tool results: ${theme.fg("dim", `none imaged (${tr.total} in history)`)}`);
-				}
-			}
-			if (snap.savedTokens > 0) {
-				lines.push(
-					`  Next request: ${theme.bold(`~${formatNumber(Math.max(0, usedTokens - snap.savedTokens))}`)} ${theme.fg("dim", "tokens on the wire")}`,
-				);
-			}
-		}
 	}
 
 	return lines;

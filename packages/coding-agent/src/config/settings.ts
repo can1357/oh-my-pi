@@ -229,6 +229,50 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, 
 // Settings Class
 // ═══════════════════════════════════════════════════════════════════════════
 
+export function migrateUnsafeActiveContextImageSettings(raw: RawSettings): boolean {
+	let migrated = false;
+	const compaction = raw.compaction as Record<string, unknown> | undefined;
+	if (compaction?.strategy === "snapcompact") {
+		compaction.strategy = "context-full";
+		migrated = true;
+	}
+	if (raw["compaction.strategy"] === "snapcompact") {
+		raw["compaction.strategy"] = "context-full";
+		migrated = true;
+	}
+	if (raw.snapcompact && typeof raw.snapcompact === "object") {
+		delete raw.snapcompact;
+		migrated = true;
+	}
+	for (const key of ["snapcompact.systemPrompt", "snapcompact.toolResults", "snapcompact.shape"] as const) {
+		if (key in raw) {
+			delete raw[key];
+			migrated = true;
+		}
+	}
+	return migrated;
+}
+
+export async function persistUnsafeActiveContextImageSettingsMigration(configPath: string): Promise<boolean> {
+	try {
+		return await withFileLock(configPath, async () => {
+			const parsed = YAML.parse(await Bun.file(configPath).text());
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+			const raw = parsed as RawSettings;
+			if (!migrateUnsafeActiveContextImageSettings(raw)) return false;
+			await Bun.write(configPath, YAML.stringify(raw));
+			return true;
+		});
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.warn("Settings: failed to persist the active-context imaging safety migration", {
+				error: String(error),
+			});
+		}
+		return false;
+	}
+}
+
 export class Settings {
 	#configPath: string | null;
 	#cwd: string;
@@ -254,6 +298,7 @@ export class Settings {
 
 	/** Legacy `lastChangelogVersion` captured from config.yml during migration (now a marker file). */
 	#legacyLastChangelogVersion?: string;
+	#reportedSnapcompactSafetyMigration = false;
 
 	/** Pending save (debounced) */
 	#saveTimer?: NodeJS.Timeout;
@@ -364,6 +409,17 @@ export class Settings {
 		const resolved =
 			value !== undefined ? (resolvePathScopedStringArray(path, value, this.#cwd) ?? value) : getDefault(path);
 		this.#resolvedCache.set(path, resolved);
+		return resolved as SettingValue<P>;
+	}
+
+	/**
+	 * Read only the persisted user-level value (plus schema default). Project
+	 * settings, config overlays, and runtime overrides cannot affect this path.
+	 */
+	getGlobal<P extends SettingPath>(path: P): SettingValue<P> {
+		const value = getByPath(this.#global, SETTING_PATH_SEGMENTS[path]);
+		const resolved =
+			value !== undefined ? (resolvePathScopedStringArray(path, value, this.#cwd) ?? value) : getDefault(path);
 		return resolved as SettingValue<P>;
 	}
 
@@ -680,6 +736,9 @@ export class Settings {
 		if (this.#persist) {
 			this.#storage = await AgentStorage.open(getAgentDbPath(this.#agentDir));
 			await this.#migrateFromLegacy();
+			if (await persistUnsafeActiveContextImageSettingsMigration(this.#configPath!)) {
+				this.#reportUnsafeActiveContextImageMigration();
+			}
 			this.#global = await this.#loadYaml(this.#configPath!);
 			await this.#seedLastChangelogVersionMarker();
 		}
@@ -819,6 +878,14 @@ export class Settings {
 	}
 
 	/** Apply schema migrations to raw settings */
+	#reportUnsafeActiveContextImageMigration(): void {
+		if (this.#reportedSnapcompactSafetyMigration) return;
+		this.#reportedSnapcompactSafetyMigration = true;
+		logger.warn(
+			"Settings: retired unsafe active-context image conversion; migrated Snapcompact configuration to native-text context-full behavior",
+		);
+	}
+
 	#migrateRawSettings(raw: RawSettings): RawSettings {
 		// queueMode -> steeringMode
 		if ("queueMode" in raw && !("steeringMode" in raw)) {
@@ -920,24 +987,11 @@ export class Settings {
 			raw["edit.mode"] = "hashline";
 		}
 
-		// compaction.strategy: removed local-model shake-summary mode; plain shake
-		// keeps the same mechanical artifact-backed reduction without background CPU.
 		const compactionObj = raw.compaction as Record<string, unknown> | undefined;
-		if (compactionObj?.strategy === "shake-summary") {
-			compactionObj.strategy = "shake";
-		}
-		if (raw["compaction.strategy"] === "shake-summary") {
-			raw["compaction.strategy"] = "shake";
-		}
+		if (compactionObj?.strategy === "shake-summary") compactionObj.strategy = "shake";
+		if (raw["compaction.strategy"] === "shake-summary") raw["compaction.strategy"] = "shake";
 
-		// snapcompact.systemPrompt: boolean -> scoped enum.
-		const snapcompactObj = raw.snapcompact as Record<string, unknown> | undefined;
-		if (snapcompactObj && typeof snapcompactObj.systemPrompt === "boolean") {
-			snapcompactObj.systemPrompt = snapcompactObj.systemPrompt ? "all" : "none";
-		}
-		if (typeof raw["snapcompact.systemPrompt"] === "boolean") {
-			raw["snapcompact.systemPrompt"] = raw["snapcompact.systemPrompt"] ? "all" : "none";
-		}
+		if (migrateUnsafeActiveContextImageSettings(raw)) this.#reportUnsafeActiveContextImageMigration();
 
 		// inlineToolDescriptors: boolean -> enum (auto | on | off). The old
 		// `true`/`false` mapped directly onto inline-on/inline-off, so preserve

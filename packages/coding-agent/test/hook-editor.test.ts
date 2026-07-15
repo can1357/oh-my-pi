@@ -70,14 +70,19 @@ function createControllerContext() {
 		setFocus: Mock<any>;
 		requestRender: Mock<any>;
 	};
+	const remountEditorComposer = vi.fn(() => {
+		editorContainer.clear();
+		editorContainer.addChild(editor);
+	});
 	const ctx = {
 		editor,
 		editorContainer,
+		remountEditorComposer,
 		ui,
 		hookEditor: undefined,
 	} as unknown as TestContext;
 
-	return { ctx, editor, editorContainer, ui };
+	return { ctx, editor, editorContainer, ui, remountEditorComposer };
 }
 
 describe("HookEditorComponent default (hook) mode", () => {
@@ -423,7 +428,7 @@ describe("HookEditorComponent prompt-style mode", () => {
 
 describe("ExtensionUiController hook editor abort", () => {
 	it("hides the hook editor and resolves undefined when the caller aborts", async () => {
-		const { ctx, editor, editorContainer, ui } = createControllerContext();
+		const { ctx, editor, editorContainer, ui, remountEditorComposer } = createControllerContext();
 		const controller = new ExtensionUiController(ctx);
 		const abortController = new AbortController();
 		const controllerWithAbort = controller as unknown as {
@@ -444,6 +449,7 @@ describe("ExtensionUiController hook editor abort", () => {
 		await Bun.sleep(0);
 
 		expect(editorContainer.children).toEqual([editor]);
+		expect(remountEditorComposer).toHaveBeenCalledTimes(1);
 		expect(ctx.hookEditor).toBeUndefined();
 		expect(ui.setFocus).toHaveBeenLastCalledWith(editor);
 
@@ -453,7 +459,7 @@ describe("ExtensionUiController hook editor abort", () => {
 	});
 
 	it("forwards editorOptions to HookEditorComponent", async () => {
-		const { ctx, editorContainer } = createControllerContext();
+		const { ctx, editorContainer, remountEditorComposer } = createControllerContext();
 		const controller = new ExtensionUiController(ctx);
 		const controllerWithOptions = controller as unknown as {
 			showHookEditor: (
@@ -481,6 +487,7 @@ describe("ExtensionUiController hook editor abort", () => {
 		// The promise should resolve since Enter submits in prompt-style mode.
 		const result = await promise;
 		// Result depends on what the editor captured. The key thing is it resolved.
+		expect(remountEditorComposer).toHaveBeenCalledTimes(1);
 		expect(result).toBeDefined();
 	});
 });
@@ -495,7 +502,7 @@ describe("ExtensionUiController dialog serialization", () => {
 	};
 
 	it("queues a second selector instead of clobbering the open one", async () => {
-		const { ctx, editor, editorContainer } = createControllerContext();
+		const { ctx, editor, editorContainer, remountEditorComposer } = createControllerContext();
 		const controller = new ExtensionUiController(ctx) as unknown as SelectorController;
 
 		const abortA = new AbortController();
@@ -527,11 +534,14 @@ describe("ExtensionUiController dialog serialization", () => {
 		await Bun.sleep(0);
 		expect(await promiseB).toBeUndefined();
 		expect(ctx.hookSelector).toBeUndefined();
+		// Each dialog teardown delegates to the composer remount: once when A
+		// hands the surface to queued B, once when B restores the editor.
+		expect(remountEditorComposer).toHaveBeenCalledTimes(2);
 		expect(editorContainer.children).toEqual([editor]);
 	});
 
 	it("never presents a queued selector whose signal aborts before its turn", async () => {
-		const { ctx, editor, editorContainer } = createControllerContext();
+		const { ctx, editor, editorContainer, remountEditorComposer } = createControllerContext();
 		const controller = new ExtensionUiController(ctx) as unknown as SelectorController;
 
 		const abortA = new AbortController();
@@ -553,6 +563,7 @@ describe("ExtensionUiController dialog serialization", () => {
 		await Bun.sleep(0);
 		expect(await promiseA).toBeUndefined();
 		expect(ctx.hookSelector).toBeUndefined();
+		expect(remountEditorComposer).toHaveBeenCalledTimes(1);
 		expect(editorContainer.children).toEqual([editor]);
 	});
 });

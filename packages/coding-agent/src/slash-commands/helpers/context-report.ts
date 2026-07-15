@@ -9,7 +9,7 @@ import { renderAsciiBar } from "./format";
  */
 export function buildContextReportText(runtime: SlashCommandRuntime): string {
 	try {
-		const breakdown = computeContextBreakdown(runtime.session, { snapcompactSavings: true });
+		const breakdown = computeContextBreakdown(runtime.session);
 		if (breakdown.contextWindow <= 0) {
 			return "Context usage is unavailable: no model is selected for this session.";
 		}
@@ -29,33 +29,6 @@ export function buildContextReportText(runtime: SlashCommandRuntime): string {
 		if (breakdown.freeTokens > 0) {
 			const fraction = breakdown.freeTokens / breakdown.contextWindow;
 			lines.push(`  ${"Free".padEnd(16)} ${renderAsciiBar(fraction)}  ${breakdown.freeTokens} tokens`);
-		}
-		const snap = breakdown.snapcompact;
-		if (snap) {
-			if (!snap.visionCapable) {
-				lines.push("Snapcompact: inactive (model has no image input)");
-			} else {
-				lines.push("Snapcompact (estimated wire savings):");
-				if (snap.systemPrompt) {
-					const sp = snap.systemPrompt;
-					lines.push(
-						sp.applied
-							? `  System prompt: ${sp.textTokens} text tokens → ${sp.frames} frame${sp.frames === 1 ? "" : "s"} ≈ ${sp.imageTokens} tokens (saves ~${sp.savedTokens})`
-							: "  System prompt: stays text (no net savings)",
-					);
-				}
-				if (snap.toolResults) {
-					const tr = snap.toolResults;
-					lines.push(
-						tr.swapped > 0
-							? `  Tool results: ${tr.swapped} of ${tr.total} imaged, ${tr.textTokens} text tokens → ${tr.frames} frames ≈ ${tr.imageTokens} tokens (saves ~${tr.savedTokens})`
-							: `  Tool results: none imaged (${tr.total} in history)`,
-					);
-				}
-				if (snap.savedTokens > 0) {
-					lines.push(`  Estimated next request: ~${breakdown.usedTokens - snap.savedTokens} tokens on the wire`);
-				}
-			}
 		}
 		return lines.join("\n");
 	} catch {

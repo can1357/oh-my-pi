@@ -1108,21 +1108,125 @@ describe("buildSessionContext", () => {
 		expect((loaded.messages[0] as any).summary).toContain("Summary of 1,a,2,b");
 	});
 
-	it("re-attaches snapcompact frames from preserveData as compaction summary images", () => {
+	it("recovers legacy archive text without re-attaching compaction images", () => {
 		const u1 = createMessageEntry(createUserMessage("1"));
 		const a1 = createMessageEntry(createAssistantMessage("a"));
 		const u2 = createMessageEntry(createUserMessage("2"));
 		const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 4 };
 		const compaction: CompactionEntry = {
 			...createCompactionEntry("Filmed summary", u2.id),
-			preserveData: { snapcompact: { frames: [frame], totalChars: 4, truncatedChars: 0 } },
+			preserveData: {
+				snapcompact: { frames: [frame], totalChars: 4, truncatedChars: 0, text: "Legacy archive source" },
+			},
 		};
 		const u3 = createMessageEntry(createUserMessage("3"));
 
 		const loaded = buildSessionContext([u1, a1, u2, compaction, u3]);
 		const summaryMessage = loaded.messages[0] as { role: string; images?: unknown };
 		expect(summaryMessage.role).toBe("compactionSummary");
-		expect(summaryMessage.images).toEqual([{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" }]);
+		expect(summaryMessage.images).toBeUndefined();
+		expect(JSON.stringify(summaryMessage)).toContain("Legacy archive source");
+	});
+
+	it("replaces stale snapcompact lead-in while preserving file summary and native archive text", () => {
+		const u1 = createMessageEntry(createUserMessage("1"));
+		const compaction: CompactionEntry = {
+			...createCompactionEntry(
+				"Prior conversation history has been archived verbatim onto 1 snapcompact frame — the bitmap image attached below.\n\n<files>\nREADME.md (Read)\n</files>",
+				u1.id,
+			),
+			preserveData: {
+				snapcompact: {
+					frames: [{ data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 4 }],
+					totalChars: 4,
+					truncatedChars: 0,
+					text: "Recovered native archive text",
+				},
+			},
+		};
+
+		const loaded = buildSessionContext([u1, compaction]);
+		const summaryMessage = loaded.messages[0];
+		expect(summaryMessage?.role).toBe("compactionSummary");
+		if (summaryMessage?.role !== "compactionSummary") return;
+		expect(summaryMessage.summary).toContain("Archived history is provided as native text below");
+		expect(summaryMessage.summary).toContain("<files>");
+		expect(summaryMessage.summary).not.toContain("bitmap image");
+		expect(summaryMessage.blocks?.[0]).toEqual({ type: "text", text: "Recovered native archive text" });
+	});
+
+	it("replaces current snapcompact lead and removes attached-image instructions", () => {
+		const u1 = createMessageEntry(createUserMessage("1"));
+		const compaction: CompactionEntry = {
+			...createCompactionEntry(
+				"You are resuming a prior conversation. Its earlier turns were archived to reclaim context and are reproduced under HISTORY below, oldest to newest.\n\nReading HISTORY:\nSome middle sections are attached as images instead of text.\n\nHISTORY\n===================\nUseful preserved history.",
+				u1.id,
+			),
+		};
+
+		const loaded = buildSessionContext([u1, compaction]);
+		const summaryMessage = loaded.messages[0];
+		expect(summaryMessage?.role).toBe("compactionSummary");
+		if (summaryMessage?.role !== "compactionSummary") return;
+		expect(summaryMessage.summary).toContain("Archived history is provided as native text below");
+		expect(summaryMessage.summary).toContain("HISTORY\n===================\nUseful preserved history.");
+		expect(summaryMessage.summary).not.toContain("attached as images");
+	});
+	it("marks the unrecoverable middle between legacy archive text edges", () => {
+		const u1 = createMessageEntry(createUserMessage("1"));
+		const compaction: CompactionEntry = {
+			...createCompactionEntry("Filmed summary", u1.id),
+			preserveData: {
+				snapcompact: {
+					frames: [{ data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 4 }],
+					totalChars: 100_000,
+					truncatedChars: 0,
+					textHead: `HEAD sentinel ${"h".repeat(50_000)}`,
+					textTail: `${"t".repeat(50_000)} TAIL sentinel`,
+				},
+			},
+		};
+
+		const loaded = buildSessionContext([u1, compaction]);
+		const summaryMessage = loaded.messages[0];
+		expect(summaryMessage?.role).toBe("compactionSummary");
+		if (summaryMessage?.role !== "compactionSummary") return;
+		const recovered = summaryMessage.blocks?.[0];
+		expect(recovered?.type).toBe("text");
+		if (recovered?.type !== "text") return;
+		const marker = "[1 archived frames from a retired image format could not be restored as native text.]";
+		expect(recovered.text.length).toBeLessThanOrEqual(80_000);
+		expect(recovered.text.startsWith("HEAD sentinel")).toBe(true);
+		expect(recovered.text.indexOf(marker)).toBeGreaterThan(0);
+		expect(recovered.text.endsWith("TAIL sentinel")).toBe(true);
+		expect(recovered.text.indexOf(marker)).toBeLessThan(recovered.text.lastIndexOf("TAIL sentinel"));
+	});
+
+	it("preserves omission marker for truncated text-only archive edges", () => {
+		const u1 = createMessageEntry(createUserMessage("1"));
+		const compaction: CompactionEntry = {
+			...createCompactionEntry("summary", u1.id),
+			preserveData: {
+				snapcompact: {
+					frames: [],
+					totalChars: 10,
+					truncatedChars: 5,
+					textHead: "HEAD",
+					textTail: "TAIL",
+				},
+			},
+		};
+
+		const loaded = buildSessionContext([u1, compaction]);
+		const summaryMessage = loaded.messages[0];
+		expect(summaryMessage?.role).toBe("compactionSummary");
+		if (summaryMessage?.role !== "compactionSummary") return;
+		const recovered = summaryMessage.blocks?.[0];
+		expect(recovered?.type).toBe("text");
+		if (recovered?.type !== "text") return;
+		expect(recovered.text).toContain("HEAD");
+		expect(recovered.text).toContain("middle history omitted above");
+		expect(recovered.text).toContain("TAIL");
 	});
 
 	it("transcript option keeps full history with every compaction inline at its position", () => {
@@ -1152,8 +1256,8 @@ describe("buildSessionContext", () => {
 		const second = transcript.messages[4] as { summary: string; images?: unknown };
 		expect(first.summary).toContain("First summary");
 		expect(second.summary).toContain("Second summary");
-		// Snapcompact frames ride along in the transcript too.
-		expect(second.images).toEqual([{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" }]);
+		// Retired archive frames never ride along in the transcript.
+		expect(second.images).toBeUndefined();
 
 		// LLM context is untouched by the option: latest compaction replaces history.
 		const llm = buildSessionContext(entries);

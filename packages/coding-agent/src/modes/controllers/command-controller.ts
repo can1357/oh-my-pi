@@ -173,8 +173,7 @@ export class CommandController {
 
 		const restoreEditor = () => {
 			loader.dispose();
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.editor);
+			this.ctx.remountEditorComposer();
 			this.ctx.ui.setFocus(this.ctx.editor);
 		};
 		loader.onAbort = () => {
@@ -502,7 +501,7 @@ export class CommandController {
 	}
 
 	handleContextCommand(): void {
-		const breakdown = computeContextBreakdown(this.ctx.session, { snapcompactSavings: true });
+		const breakdown = computeContextBreakdown(this.ctx.session);
 		if (breakdown.contextWindow <= 0) {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;

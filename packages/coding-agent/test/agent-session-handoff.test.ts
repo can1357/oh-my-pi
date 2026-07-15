@@ -373,67 +373,6 @@ describe("AgentSession handoff", () => {
 		expect(preserve.openaiRemoteCompaction).toBe(replaySlot);
 	});
 
-	it("does not call the LLM summarizer when manual snapcompact preflight fails", async () => {
-		const entries = sessionManager.getBranch();
-		const lastEntryId = entries[entries.length - 1]?.id;
-		if (!lastEntryId) throw new Error("Expected a seeded entry id");
-		const fixedPreparation: compactionModule.CompactionPreparation = {
-			firstKeptEntryId: lastEntryId,
-			messagesToSummarize: [
-				{ role: "user", content: [{ type: "text", text: "中文内容".repeat(100) }], timestamp: 1 },
-			],
-			turnPrefixMessages: [],
-			recentMessages: [],
-			isSplitTurn: false,
-			tokensBefore: 100,
-			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
-			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "snapcompact" },
-		};
-		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
-		const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("429 quota exhausted"));
-
-		await expect(session.compact(undefined, { mode: "snapcompact" })).rejects.toThrow(
-			"snapcompact cannot render this conversation locally",
-		);
-
-		expect(compactSpy).not.toHaveBeenCalled();
-	});
-
-	it("does not call the LLM summarizer when auto snapcompact preflight fails", async () => {
-		session.settings.set("compaction.strategy", "snapcompact");
-		const entries = sessionManager.getBranch();
-		const lastEntryId = entries[entries.length - 1]?.id;
-		if (!lastEntryId) throw new Error("Expected a seeded entry id");
-		const fixedPreparation: compactionModule.CompactionPreparation = {
-			firstKeptEntryId: lastEntryId,
-			messagesToSummarize: [
-				{ role: "user", content: [{ type: "text", text: "中文内容".repeat(100) }], timestamp: 1 },
-			],
-			turnPrefixMessages: [],
-			recentMessages: [],
-			isSplitTurn: false,
-			tokensBefore: 100,
-			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
-			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "snapcompact" },
-		};
-		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
-		const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("429 quota exhausted"));
-
-		await session.runIdleCompaction();
-
-		const endEvent = events.find(
-			(event): event is Extract<AgentSessionEvent, { type: "auto_compaction_end" }> =>
-				event.type === "auto_compaction_end",
-		);
-		expect(compactSpy).not.toHaveBeenCalled();
-		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "idle", action: "snapcompact" });
-		expect(endEvent).toMatchObject({
-			type: "auto_compaction_end",
-			action: "snapcompact",
-			errorMessage: expect.stringContaining("snapcompact cannot render this conversation locally"),
-		});
-	});
-
 	it("strips hook-supplied snapcompact data when persisting context-full compaction", async () => {
 		const localTempDir = TempDir.createSync("@pi-context-full-preserve-data-");
 		const localSessionManager = SessionManager.inMemory(localTempDir.path());
@@ -1148,7 +1087,7 @@ describe("AgentSession handoff", () => {
 
 		expect(session.autoCompactionEnabled).toBe(false);
 		session.setAutoCompactionEnabled(true);
-		expect(session.settings.get("compaction.strategy")).toBe("snapcompact");
+		expect(session.settings.get("compaction.strategy")).toBe("context-full");
 		expect(session.autoCompactionEnabled).toBe(true);
 	});
 

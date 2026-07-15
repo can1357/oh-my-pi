@@ -536,8 +536,7 @@ export class MCPCommandController {
 
 		// Save current editor state
 		const done = () => {
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.editor);
+			this.ctx.remountEditorComposer();
 			this.ctx.ui.setFocus(this.ctx.editor);
 		};
 

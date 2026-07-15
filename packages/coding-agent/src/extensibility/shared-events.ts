@@ -216,12 +216,14 @@ export interface TurnEndEvent {
 export interface AutoCompactionStartEvent {
 	type: "auto_compaction_start";
 	reason: "threshold" | "overflow" | "idle" | "incomplete";
+	/** @deprecated Never emitted anymore; kept so existing listener switch cases still compile. */
 	action: "context-full" | "handoff" | "shake" | "snapcompact";
 }
 
 /** Fired when auto-compaction ends */
 export interface AutoCompactionEndEvent {
 	type: "auto_compaction_end";
+	/** @deprecated Never emitted anymore; kept so existing listener switch cases still compile. */
 	action: "context-full" | "handoff" | "shake" | "snapcompact";
 	result: CompactionResult | undefined;
 	aborted: boolean;

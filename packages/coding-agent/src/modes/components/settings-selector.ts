@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { Effort } from "@pk-nerdsaver-ai/pi-ai";
+import type { Api, Effort } from "@pk-nerdsaver-ai/pi-ai";
 import {
 	type Component,
 	Container,
@@ -25,12 +25,13 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@pk-nerdsaver-ai/pi-tui";
-import type { ShapeTarget } from "@pk-nerdsaver-ai/snapcompact";
 import {
 	getDefault,
 	getType,
 	normalizeProviderMaxInFlightRequests,
 	type SettingPath,
+	type Settings,
+	type SettingValue,
 	settings,
 	validateProviderMaxInFlightRequests,
 } from "../../config/settings";
@@ -47,7 +48,6 @@ import { getTabBarTheme } from "../shared";
 import { bottomBorder, divider, row, topBorder } from "./overlay-box";
 import { handleInputOrEscape, PluginSettingsComponent } from "./plugin-settings";
 import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
-import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { getPreset } from "./status-line/presets";
 
 /**
@@ -179,7 +179,7 @@ class SelectSubmenu extends Container {
 		this.addChild(new Spacer(1));
 		this.addChild(new Text(theme.fg("dim", "  Enter to select · Esc to go back"), 0, 0));
 
-		// Footer (e.g. the snapcompact shape preview) below the interactive rows,
+		// Footer below the interactive rows,
 		// so the list never shifts while browsing.
 		if (footer) {
 			this.addChild(new Spacer(1));
@@ -371,8 +371,8 @@ export interface SettingsRuntimeContext {
 	providers: string[];
 	/** Working directory for plugins tab */
 	cwd: string;
-	/** Active model (api + id); resolves what the snapcompact `auto` shape maps to. */
-	model?: ShapeTarget;
+	/** Active model identity for model-aware settings. */
+	model?: { api?: Api; id?: string };
 	/** Shared TUI image budget (graphics ids + transmit-once) for image previews. */
 	imageBudget?: ImageBudget;
 	/** Schedules a re-render after async preview work completes. */
@@ -402,6 +402,20 @@ export interface SettingsCallbacks {
 	onPluginsChanged?: () => void | Promise<void>;
 	/** Called when settings panel is closed */
 	onCancel: () => void;
+}
+
+/**
+ * Read a setting as displayed by the selector. Background pack enablement is
+ * intentionally global-only, matching the runtime accessor and global writes.
+ */
+export function getSettingsSelectorValue<P extends SettingPath>(
+	path: P,
+	settingsSource: Settings = settings,
+): SettingValue<P> {
+	if (path === "backgroundPacks.enabled") {
+		return settingsSource.getGlobal(path) as SettingValue<P>;
+	}
+	return settingsSource.get(path);
 }
 
 /**
@@ -857,7 +871,7 @@ export class SettingsSelectorComponent implements Component {
 	 * Get the current value for a setting.
 	 */
 	#getCurrentValue(def: SettingDef): unknown {
-		return settings.get(def.path);
+		return getSettingsSelectorValue(def.path);
 	}
 
 	#isChanged(def: SettingDef, currentValue: unknown): boolean {
@@ -940,14 +954,6 @@ export class SettingsSelectorComponent implements Component {
 				const separator = settings.get("statusLine.separator");
 				this.callbacks.onStatusLinePreview?.({ separator });
 			};
-		} else if (def.path === "snapcompact.shape") {
-			const shapePreview = new SnapcompactShapePreview(currentValue, {
-				model: this.context.model,
-				imageBudget: this.context.imageBudget,
-				requestRender: this.context.requestRender,
-			});
-			onPreview = value => shapePreview.setValue(value);
-			footer = shapePreview;
 		}
 
 		// Provide status line preview for theme selection
@@ -1036,7 +1042,7 @@ export class SettingsSelectorComponent implements Component {
 	 * Set a setting value, handling type conversion.
 	 */
 	#setSettingValue(path: SettingPath, value: string): void {
-		const currentValue = settings.get(path);
+		const currentValue = getSettingsSelectorValue(path);
 		const schemaType = getType(path);
 		if (path === "compaction.thresholdPercent" && value === "default") {
 			settings.set(path, -1 as never);

@@ -359,6 +359,23 @@ export interface EditorTopBorder {
 	width: number;
 }
 
+/**
+ * Rows rendered inside the editor frame below the text.
+ *
+ * `bodyRows` sit directly under the text (e.g. context chips). `footerRows`
+ * render at the bottom of the frame below a `├───┤` divider (e.g. an action
+ * rail). Rows are pre-styled strings; the editor truncates and pads each one
+ * to the content width.
+ */
+export interface EditorBottomSection {
+	bodyRows?: readonly string[];
+	footerRows?: readonly string[];
+}
+interface VisibleBottomSection {
+	bodyRows: readonly string[];
+	footerRows: readonly string[];
+}
+
 interface HistoryEntry {
 	prompt: string;
 }
@@ -470,6 +487,10 @@ export class Editor implements Component, Focusable {
 	// Custom top border (for status line integration)
 	#topBorderContent?: EditorTopBorder;
 	#borderVisible = true;
+	// Rows rendered inside the frame below the text (chips / action rail)
+	#bottomSection?: EditorBottomSection | (() => EditorBottomSection | undefined);
+	/** Ghost text shown at the cursor while the editor is empty (e.g. "Describe the outcome you want…"). */
+	placeholder?: string;
 
 	constructor(theme: EditorTheme) {
 		this.#theme = theme;
@@ -486,6 +507,42 @@ export class Editor implements Component, Focusable {
 	 */
 	setTopBorder(content: EditorTopBorder | undefined): void {
 		this.#topBorderContent = content;
+	}
+
+	/**
+	 * Set rows rendered inside the frame below the text (context chips, action
+	 * rails). Accepts a provider so hosts can derive rows from live state at
+	 * render time. Pass undefined to restore the plain fused bottom border.
+	 */
+	setBottomSection(section: EditorBottomSection | (() => EditorBottomSection | undefined) | undefined): void {
+		this.#bottomSection = section;
+	}
+
+	#resolveBottomSection(): EditorBottomSection | undefined {
+		if (!this.#borderVisible) return undefined;
+		const section = typeof this.#bottomSection === "function" ? this.#bottomSection() : this.#bottomSection;
+		if (!section) return undefined;
+		if ((section.bodyRows?.length ?? 0) === 0 && (section.footerRows?.length ?? 0) === 0) return undefined;
+		return section;
+	}
+	#getVisibleBottomSection(section: EditorBottomSection | undefined): VisibleBottomSection {
+		const bodyRows = section?.bodyRows ?? [];
+		const footerRows = section?.footerRows ?? [];
+		if (this.#maxHeight === undefined || !section || !this.#borderVisible || this.#maxHeight < 3) {
+			return { bodyRows, footerRows };
+		}
+
+		// Reserve one text row plus the top and bottom borders. Drop body rows
+		// before dropping the divider/footer unit when the section exceeds the cap.
+		const sectionBudget = Math.max(0, this.#maxHeight - 3);
+		const footerHeight = footerRows.length > 0 ? footerRows.length + 1 : 0;
+		if (footerHeight > sectionBudget) {
+			return { bodyRows: bodyRows.slice(0, sectionBudget), footerRows: [] };
+		}
+		return {
+			bodyRows: bodyRows.slice(0, Math.max(0, sectionBudget - footerHeight)),
+			footerRows,
+		};
 	}
 
 	/**
@@ -664,9 +721,12 @@ export class Editor implements Component, Focusable {
 		return Math.max(1, contentWidth - cursorReserve);
 	}
 
-	#getVisibleContentHeight(contentLines: number): number {
+	#getVisibleContentHeight(contentLines: number, sectionRows?: VisibleBottomSection): number {
 		if (this.#maxHeight === undefined) return contentLines;
-		const verticalChrome = this.#borderVisible ? 2 : 0;
+		let verticalChrome = this.#borderVisible ? 2 : 0;
+		const section = sectionRows ?? this.#getVisibleBottomSection(this.#resolveBottomSection());
+		const footerRows = section.footerRows.length;
+		verticalChrome += section.bodyRows.length + footerRows + (footerRows > 0 ? 1 : 0);
 		return Math.max(1, this.#maxHeight - verticalChrome);
 	}
 
@@ -786,9 +846,10 @@ export class Editor implements Component, Focusable {
 		const contentAreaWidth = this.#getContentWidth(width, paddingX);
 		const layoutWidth = this.#getLayoutWidth(width, paddingX);
 		this.#lastLayoutWidth = layoutWidth;
-
 		// Box-drawing characters for rounded corners
 		const box = this.#theme.symbols.boxRound;
+		const bottomSection = this.#resolveBottomSection();
+		const visibleBottomSection = this.#getVisibleBottomSection(bottomSection);
 		const borderWidth = this.#getHorizontalChromeWidth(paddingX);
 		const topLeft = this.borderColor(`${box.topLeft}${box.horizontal.repeat(paddingX)}`);
 		const topRight = this.borderColor(`${box.horizontal.repeat(paddingX)}${box.topRight}`);
@@ -797,7 +858,7 @@ export class Editor implements Component, Focusable {
 
 		// Layout the text
 		const layoutLines = this.#layoutText(layoutWidth);
-		const visibleContentHeight = this.#getVisibleContentHeight(layoutLines.length);
+		const visibleContentHeight = this.#getVisibleContentHeight(layoutLines.length, visibleBottomSection);
 		this.#updateScrollOffset(layoutWidth, layoutLines, visibleContentHeight);
 		const visibleLayoutLines = layoutLines.slice(this.#scrollOffset, this.#scrollOffset + visibleContentHeight);
 
@@ -829,10 +890,10 @@ export class Editor implements Component, Focusable {
 		const emitCursorMarker = this.focused && !this.#autocompleteState;
 		const lineContentWidth = contentAreaWidth;
 
-		// Compute inline hint text (dim ghost text after cursor)
-		const inlineHint = this.#getInlineHint();
+		const autocompleteHint = this.#getInlineHint();
+		const placeholderHint = autocompleteHint === null ? this.#getPlaceholderHint() : null;
+		const inlineHint = autocompleteHint ?? placeholderHint;
 		const hintStyle = this.#theme.hintStyle ?? ((t: string) => `\x1b[2m${t}\x1b[0m`);
-
 		for (let visibleIndex = 0; visibleIndex < visibleLayoutLines.length; visibleIndex++) {
 			const layoutLine = visibleLayoutLines[visibleIndex]!;
 			let displayText = layoutLine.text;
@@ -905,6 +966,10 @@ export class Editor implements Component, Focusable {
 					} else {
 						displayText = before + marker + after;
 					}
+				} else if (placeholderHint && displayWidth === 0) {
+					const hintText = hintStyle(truncateToWidth(placeholderHint, lineContentWidth));
+					displayText = hintText;
+					displayWidth = Math.min(visibleWidth(placeholderHint), lineContentWidth);
 				}
 			} else if (hasCursor && !this.#useTerminalCursor) {
 				const before = displayText.slice(0, layoutLine.cursorPos);
@@ -988,7 +1053,7 @@ export class Editor implements Component, Focusable {
 			// trailing `─`, but never the corner/vertical bar itself.
 			const isLastLine = visibleIndex === visibleLayoutLines.length - 1;
 			const rightChromeCells = Math.max(1, paddingX + 1 - cursorPaddingOverflow);
-			if (isLastLine) {
+			if (isLastLine && bottomSection === undefined) {
 				const rightPad = Math.max(0, rightChromeCells - 2);
 				const includeHorizontal = rightChromeCells >= 2;
 				const bottomRightAdjusted = this.borderColor(
@@ -1000,6 +1065,38 @@ export class Editor implements Component, Focusable {
 				const rightBorder = this.borderColor(`${padding(Math.max(0, rightChromeCells - 1))}${box.vertical}`);
 				result.push(leftBorder + displayText + linePad + rightBorder);
 			}
+		}
+
+		// Bottom section: chips/body rows under the text, then an optional
+		// divider + footer rows (action rail), then a plain bottom border. In
+		// this shape no text line fuses with the bottom border row.
+		if (borderVisible && bottomSection) {
+			// At narrow widths, reduce horizontal padding so side rows and the
+			// divider/bottom border share one effective visible width.
+			const effectiveRowWidth = Math.max(2, width);
+			const innerWidth = effectiveRowWidth - 2;
+			const effectivePaddingX = Math.min(paddingX, Math.floor(innerWidth / 2));
+			const sectionContentWidth = Math.max(0, innerWidth - effectivePaddingX * 2);
+			const sideLeft = this.borderColor(`${box.vertical}${padding(effectivePaddingX)}`);
+			const sideRight = this.borderColor(`${padding(effectivePaddingX)}${box.vertical}`);
+			const pushSectionRow = (row: string): void => {
+				const truncated = truncateToWidth(row, sectionContentWidth);
+				const rowPad = padding(Math.max(0, sectionContentWidth - visibleWidth(truncated)));
+				result.push(sideLeft + truncated + rowPad + sideRight);
+			};
+			for (const row of visibleBottomSection.bodyRows) {
+				pushSectionRow(row);
+			}
+			const footerRows = visibleBottomSection.footerRows;
+			if (footerRows.length > 0) {
+				const teeRight = box.teeRight ?? box.vertical;
+				const teeLeft = box.teeLeft ?? box.vertical;
+				result.push(this.borderColor(`${teeRight}${box.horizontal.repeat(innerWidth)}${teeLeft}`));
+				for (const row of footerRows) {
+					pushSectionRow(row);
+				}
+			}
+			result.push(this.borderColor(`${box.bottomLeft}${box.horizontal.repeat(innerWidth)}${box.bottomRight}`));
 		}
 
 		// Add autocomplete list if active
@@ -3023,13 +3120,19 @@ https://github.com/EsotericSoftware/spine-runtimes/actions/runs/19536643416/job/
 
 		// Fall back to provider's getInlineHint
 		if (this.#autocompleteProvider?.getInlineHint) {
-			return this.#autocompleteProvider.getInlineHint(
+			const providerHint = this.#autocompleteProvider.getInlineHint(
 				this.#state.lines,
 				this.#state.cursorLine,
 				this.#state.cursorCol,
 			);
+			if (providerHint) return providerHint;
 		}
 
+		return null;
+	}
+
+	#getPlaceholderHint(): string | null {
+		if (this.placeholder && this.#isEditorEmpty()) return this.placeholder;
 		return null;
 	}
 }

@@ -610,7 +610,6 @@ import * as bundledPiCodingAgentModesComponentsSettingsDefs from "@pk-nerdsaver-
 import * as bundledPiCodingAgentModesComponentsSettingsSelector from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/settings-selector";
 import * as bundledPiCodingAgentModesComponentsShowImagesSelector from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/show-images-selector";
 import * as bundledPiCodingAgentModesComponentsSkillMessage from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/skill-message";
-import * as bundledPiCodingAgentModesComponentsSnapcompactShapePreview from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/snapcompact-shape-preview";
 import * as bundledPiCodingAgentModesComponentsStatusLine from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/status-line";
 import * as bundledPiCodingAgentModesComponentsStatusLineComponent from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/status-line/component";
 import * as bundledPiCodingAgentModesComponentsStatusLineContextThresholds from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/status-line/context-thresholds";
@@ -726,8 +725,6 @@ import * as bundledPiCodingAgentSessionSessionPersistence from "@pk-nerdsaver-ai
 import * as bundledPiCodingAgentSessionSessionStorage from "@pk-nerdsaver-ai/pi-coding-agent/session/session-storage";
 import * as bundledPiCodingAgentSessionSettingsStreamFn from "@pk-nerdsaver-ai/pi-coding-agent/session/settings-stream-fn";
 import * as bundledPiCodingAgentSessionShakeTypes from "@pk-nerdsaver-ai/pi-coding-agent/session/shake-types";
-import * as bundledPiCodingAgentSessionSnapcompactInline from "@pk-nerdsaver-ai/pi-coding-agent/session/snapcompact-inline";
-import * as bundledPiCodingAgentSessionSnapcompactSavingsJournal from "@pk-nerdsaver-ai/pi-coding-agent/session/snapcompact-savings-journal";
 import * as bundledPiCodingAgentSessionSqlSessionStorage from "@pk-nerdsaver-ai/pi-coding-agent/session/sql-session-storage";
 import * as bundledPiCodingAgentSessionStreamingOutput from "@pk-nerdsaver-ai/pi-coding-agent/session/streaming-output";
 import * as bundledPiCodingAgentSessionToolChoiceQueue from "@pk-nerdsaver-ai/pi-coding-agent/session/tool-choice-queue";
@@ -1027,12 +1024,13 @@ import * as bundledTypeBoxShim from "../typebox";
  */
 export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
 	"@pk-nerdsaver-ai/pi-agent-core": bundledPiAgentCore as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-agent-core/compaction": bundledPiAgentCoreCompaction as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-agent-core/compaction/branch-summarization":
-		bundledPiAgentCoreCompactionBranchSummarization as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-agent-core/compaction/compaction": bundledPiAgentCoreCompactionCompaction as unknown as Readonly<
+	"@pk-nerdsaver-ai/pi-agent-core/compaction": bundledPiAgentCoreCompaction as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-agent-core/compaction/branch-summarization":
+		bundledPiAgentCoreCompactionBranchSummarization as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-agent-core/compaction/compaction":
+		bundledPiAgentCoreCompactionCompaction as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-agent-core/compaction/entries": bundledPiAgentCoreCompactionEntries as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1060,13 +1058,17 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-ai/error": bundledPiAiError as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/auth-broker": bundledPiAiAuthBroker as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/auth-gateway": bundledPiAiAuthGateway as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/utils/harmony-leak": bundledPiAiUtilsHarmonyLeak as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/utils/harmony-leak": bundledPiAiUtilsHarmonyLeak as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/dialect": bundledPiAiDialect as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/oauth": bundledPiAiOauth as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/registry": bundledPiAiRegistry as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/registry/oauth": bundledPiAiRegistryOauth as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/utils/schema": bundledPiAiUtilsSchema as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/auth-broker/client": bundledPiAiAuthBrokerClient as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/auth-broker/client": bundledPiAiAuthBrokerClient as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/auth-broker/discover": bundledPiAiAuthBrokerDiscover as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1076,17 +1078,27 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-ai/auth-broker/remote-store": bundledPiAiAuthBrokerRemoteStore as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/auth-broker/server": bundledPiAiAuthBrokerServer as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/auth-broker/server": bundledPiAiAuthBrokerServer as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/auth-broker/snapshot-cache": bundledPiAiAuthBrokerSnapshotCache as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/auth-broker/types": bundledPiAiAuthBrokerTypes as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/auth-broker/types": bundledPiAiAuthBrokerTypes as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/auth-broker/wire-schemas": bundledPiAiAuthBrokerWireSchemas as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/auth-gateway/http": bundledPiAiAuthGatewayHttp as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/auth-gateway/server": bundledPiAiAuthGatewayServer as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/auth-gateway/types": bundledPiAiAuthGatewayTypes as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/auth-gateway/http": bundledPiAiAuthGatewayHttp as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-ai/auth-gateway/server": bundledPiAiAuthGatewayServer as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-ai/auth-gateway/types": bundledPiAiAuthGatewayTypes as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/providers/amazon-bedrock": bundledPiAiProvidersAmazonBedrock as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1100,25 +1112,29 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-ai/providers/anthropic-wire": bundledPiAiProvidersAnthropicWire as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/providers/anthropic": bundledPiAiProvidersAnthropic as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/providers/anthropic": bundledPiAiProvidersAnthropic as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/providers/aws-credentials": bundledPiAiProvidersAwsCredentials as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-ai/providers/aws-eventstream": bundledPiAiProvidersAwsEventstream as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/providers/aws-sigv4": bundledPiAiProvidersAwsSigv4 as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/providers/azure-openai-responses": bundledPiAiProvidersAzureOpenaiResponses as unknown as Readonly<
+	"@pk-nerdsaver-ai/pi-ai/providers/aws-sigv4": bundledPiAiProvidersAwsSigv4 as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/providers/cursor": bundledPiAiProvidersCursor as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/providers/azure-openai-responses":
+		bundledPiAiProvidersAzureOpenaiResponses as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/providers/cursor": bundledPiAiProvidersCursor as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/providers/devin": bundledPiAiProvidersDevin as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/providers/error-message": bundledPiAiProvidersErrorMessage as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/providers/github-copilot-headers": bundledPiAiProvidersGithubCopilotHeaders as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-ai/providers/github-copilot-headers":
+		bundledPiAiProvidersGithubCopilotHeaders as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/providers/gitlab-duo-workflow": bundledPiAiProvidersGitlabDuoWorkflow as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1140,14 +1156,19 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-ai/providers/google-vertex": bundledPiAiProvidersGoogleVertex as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/providers/google": bundledPiAiProvidersGoogle as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/providers/grammar": bundledPiAiProvidersGrammar as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/providers/kimi": bundledPiAiProvidersKimi as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/providers/mock": bundledPiAiProvidersMock as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/providers/ollama": bundledPiAiProvidersOllama as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/providers/openai-anthropic-shim": bundledPiAiProvidersOpenaiAnthropicShim as unknown as Readonly<
+	"@pk-nerdsaver-ai/pi-ai/providers/google": bundledPiAiProvidersGoogle as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-ai/providers/grammar": bundledPiAiProvidersGrammar as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-ai/providers/kimi": bundledPiAiProvidersKimi as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/providers/mock": bundledPiAiProvidersMock as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/providers/ollama": bundledPiAiProvidersOllama as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-ai/providers/openai-anthropic-shim":
+		bundledPiAiProvidersOpenaiAnthropicShim as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/providers/openai-chat-server-schema":
 		bundledPiAiProvidersOpenaiChatServerSchema as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/providers/openai-chat-server": bundledPiAiProvidersOpenaiChatServer as unknown as Readonly<
@@ -1156,9 +1177,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-ai/providers/openai-chat-wire": bundledPiAiProvidersOpenaiChatWire as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/providers/openai-codex-responses": bundledPiAiProvidersOpenaiCodexResponses as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-ai/providers/openai-codex-responses":
+		bundledPiAiProvidersOpenaiCodexResponses as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/providers/openai-completions": bundledPiAiProvidersOpenaiCompletions as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1168,9 +1188,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiAiProvidersOpenaiResponsesServerSchema as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/providers/openai-responses-server":
 		bundledPiAiProvidersOpenaiResponsesServer as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/providers/openai-responses-wire": bundledPiAiProvidersOpenaiResponsesWire as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-ai/providers/openai-responses-wire":
+		bundledPiAiProvidersOpenaiResponsesWire as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/providers/openai-responses": bundledPiAiProvidersOpenaiResponses as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1186,7 +1205,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-ai/providers/register-builtins": bundledPiAiProvidersRegisterBuiltins as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/providers/synthetic": bundledPiAiProvidersSynthetic as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/providers/synthetic": bundledPiAiProvidersSynthetic as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/providers/transform-messages": bundledPiAiProvidersTransformMessages as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1206,7 +1227,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-ai/usage/kimi": bundledPiAiUsageKimi as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/usage/minimax-code": bundledPiAiUsageMinimaxCode as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/usage/minimax-code": bundledPiAiUsageMinimaxCode as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/usage/ollama": bundledPiAiUsageOllama as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/usage/openai-codex-base-url": bundledPiAiUsageOpenaiCodexBaseUrl as unknown as Readonly<
 		Record<string, unknown>
@@ -1214,22 +1237,30 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-ai/usage/openai-codex-reset": bundledPiAiUsageOpenaiCodexReset as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/usage/openai-codex": bundledPiAiUsageOpenaiCodex as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/usage/opencode-go": bundledPiAiUsageOpencodeGo as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/usage/openai-codex": bundledPiAiUsageOpenaiCodex as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-ai/usage/opencode-go": bundledPiAiUsageOpencodeGo as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/usage/shared": bundledPiAiUsageShared as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/usage/zai": bundledPiAiUsageZai as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/utils/abort": bundledPiAiUtilsAbort as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/utils/anthropic-auth": bundledPiAiUtilsAnthropicAuth as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/utils/block-symbols": bundledPiAiUtilsBlockSymbols as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/utils/block-symbols": bundledPiAiUtilsBlockSymbols as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/utils/deterministic-id": bundledPiAiUtilsDeterministicId as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-ai/utils/empty-completion-retry": bundledPiAiUtilsEmptyCompletionRetry as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/utils/event-stream": bundledPiAiUtilsEventStream as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/utils/event-stream": bundledPiAiUtilsEventStream as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/utils/foundry": bundledPiAiUtilsFoundry as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/utils/google-validation": bundledPiAiUtilsGoogleValidation as unknown as Readonly<
 		Record<string, unknown>
@@ -1237,8 +1268,12 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-ai/utils/http-inspector": bundledPiAiUtilsHttpInspector as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/utils/idle-iterator": bundledPiAiUtilsIdleIterator as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/utils/openai-http": bundledPiAiUtilsOpenaiHttp as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/utils/idle-iterator": bundledPiAiUtilsIdleIterator as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-ai/utils/openai-http": bundledPiAiUtilsOpenaiHttp as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/utils/openrouter-headers": bundledPiAiUtilsOpenrouterHeaders as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1247,8 +1282,12 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-ai/utils/proxy": bundledPiAiUtilsProxy as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/utils/request-debug": bundledPiAiUtilsRequestDebug as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/utils/retry-after": bundledPiAiUtilsRetryAfter as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/utils/request-debug": bundledPiAiUtilsRequestDebug as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-ai/utils/retry-after": bundledPiAiUtilsRetryAfter as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/utils/retry": bundledPiAiUtilsRetry as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/utils/sdk-stream-timeout": bundledPiAiUtilsSdkStreamTimeout as unknown as Readonly<
 		Record<string, unknown>
@@ -1257,9 +1296,15 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-ai/utils/stream-markup-healing": bundledPiAiUtilsStreamMarkupHealing as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/utils/thinking-loop": bundledPiAiUtilsThinkingLoop as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/utils/tool-choice": bundledPiAiUtilsToolChoice as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/utils/validation": bundledPiAiUtilsValidation as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/utils/thinking-loop": bundledPiAiUtilsThinkingLoop as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-ai/utils/tool-choice": bundledPiAiUtilsToolChoice as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-ai/utils/validation": bundledPiAiUtilsValidation as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/oauth/anthropic": bundledPiAiOauthAnthropic as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/oauth/callback-server": bundledPiAiOauthCallbackServer as unknown as Readonly<
 		Record<string, unknown>
@@ -1283,27 +1328,39 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-ai/oauth/kimi": bundledPiAiOauthKimi as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/oauth/minimax-code": bundledPiAiOauthMinimaxCode as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/oauth/openai-codex": bundledPiAiOauthOpenaiCodex as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/oauth/minimax-code": bundledPiAiOauthMinimaxCode as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-ai/oauth/openai-codex": bundledPiAiOauthOpenaiCodex as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/oauth/opencode": bundledPiAiOauthOpencode as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/oauth/perplexity": bundledPiAiOauthPerplexity as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/oauth/perplexity": bundledPiAiOauthPerplexity as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/oauth/pkce": bundledPiAiOauthPkce as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/oauth/types": bundledPiAiOauthTypes as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/oauth/wafer": bundledPiAiOauthWafer as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/oauth/xai-oauth": bundledPiAiOauthXaiOauth as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/oauth/xiaomi": bundledPiAiOauthXiaomi as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/utils/schema/adapt": bundledPiAiUtilsSchemaAdapt as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/utils/schema/adapt": bundledPiAiUtilsSchemaAdapt as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/utils/schema/compatibility": bundledPiAiUtilsSchemaCompatibility as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-ai/utils/schema/dereference": bundledPiAiUtilsSchemaDereference as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/utils/schema/draft": bundledPiAiUtilsSchemaDraft as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/utils/schema/draft": bundledPiAiUtilsSchemaDraft as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/utils/schema/equality": bundledPiAiUtilsSchemaEquality as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/utils/schema/fields": bundledPiAiUtilsSchemaFields as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/utils/schema/fields": bundledPiAiUtilsSchemaFields as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/utils/schema/json-schema-validator":
 		bundledPiAiUtilsSchemaJsonSchemaValidator as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/utils/schema/meta-validator": bundledPiAiUtilsSchemaMetaValidator as unknown as Readonly<
@@ -1312,18 +1369,25 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-ai/utils/schema/normalize": bundledPiAiUtilsSchemaNormalize as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/utils/schema/spill": bundledPiAiUtilsSchemaSpill as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/utils/schema/stamps": bundledPiAiUtilsSchemaStamps as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/utils/schema/spill": bundledPiAiUtilsSchemaSpill as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-ai/utils/schema/stamps": bundledPiAiUtilsSchemaStamps as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/utils/schema/strict-tool-validation":
 		bundledPiAiUtilsSchemaStrictToolValidation as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/utils/schema/types": bundledPiAiUtilsSchemaTypes as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/utils/schema/types": bundledPiAiUtilsSchemaTypes as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/utils/schema/typescript": bundledPiAiUtilsSchemaTypescript as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-ai/utils/schema/wire": bundledPiAiUtilsSchemaWire as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-ai/utils/schema/zod-decontaminate": bundledPiAiUtilsSchemaZodDecontaminate as unknown as Readonly<
+	"@pk-nerdsaver-ai/pi-ai/utils/schema/wire": bundledPiAiUtilsSchemaWire as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-ai/utils/schema/zod-decontaminate":
+		bundledPiAiUtilsSchemaZodDecontaminate as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent": bundledPiCodingAgent as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/async": bundledPiCodingAgentAsync as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/autoresearch": bundledPiCodingAgentAutoresearch as unknown as Readonly<
@@ -1332,16 +1396,16 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/capability": bundledPiCodingAgentCapability as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-fixtures": bundledPiCodingAgentCliGalleryFixtures as unknown as Readonly<
+	"@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-fixtures":
+		bundledPiCodingAgentCliGalleryFixtures as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commit": bundledPiCodingAgentCommit as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/commit": bundledPiCodingAgentCommit as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/agentic": bundledPiCodingAgentCommitAgentic as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/commit/agentic/tools": bundledPiCodingAgentCommitAgenticTools as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commit/agentic/tools":
+		bundledPiCodingAgentCommitAgenticTools as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/analysis": bundledPiCodingAgentCommitAnalysis as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1353,7 +1417,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/dap": bundledPiCodingAgentDap as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/debug": bundledPiCodingAgentDebug as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/discovery": bundledPiCodingAgentDiscovery as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/discovery": bundledPiCodingAgentDiscovery as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/edit": bundledPiCodingAgentEdit as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/exa": bundledPiCodingAgentExa as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/export/html": bundledPiCodingAgentExportHtml as unknown as Readonly<
@@ -1369,12 +1435,10 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentExtensibilityCustomTools as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/extensions":
 		bundledPiCodingAgentExtensibilityExtensions as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/hooks": bundledPiCodingAgentExtensibilityHooks as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins": bundledPiCodingAgentExtensibilityPlugins as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/hooks":
+		bundledPiCodingAgentExtensibilityHooks as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins":
+		bundledPiCodingAgentExtensibilityPlugins as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/marketplace":
 		bundledPiCodingAgentExtensibilityPluginsMarketplace as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/internal-urls": bundledPiCodingAgentInternalUrls as unknown as Readonly<
@@ -1385,18 +1449,26 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/lsp/clients": bundledPiCodingAgentLspClients as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/markit": bundledPiCodingAgentMarkit as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/markit": bundledPiCodingAgentMarkit as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/mcp": bundledPiCodingAgentMcp as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/mcp/transports": bundledPiCodingAgentMcpTransports as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/memories": bundledPiCodingAgentMemories as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/memories": bundledPiCodingAgentMemories as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/memory-backend": bundledPiCodingAgentMemoryBackend as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/hindsight": bundledPiCodingAgentHindsight as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/hindsight": bundledPiCodingAgentHindsight as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes": bundledPiCodingAgentModes as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/modes/acp": bundledPiCodingAgentModesAcp as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/acp": bundledPiCodingAgentModesAcp as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/components": bundledPiCodingAgentModesComponents as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1407,10 +1479,11 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/setup-wizard": bundledPiCodingAgentModesSetupWizard as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/modes/theme/defaults": bundledPiCodingAgentModesThemeDefaults as unknown as Readonly<
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/theme/defaults":
+		bundledPiCodingAgentModesThemeDefaults as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/secrets": bundledPiCodingAgentSecrets as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/secrets": bundledPiCodingAgentSecrets as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/stt": bundledPiCodingAgentStt as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/task": bundledPiCodingAgentTask as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools": bundledPiCodingAgentTools as unknown as Readonly<Record<string, unknown>>,
@@ -1424,21 +1497,18 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/async/job-manager": bundledPiCodingAgentAsyncJobManager as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/autoresearch/dashboard": bundledPiCodingAgentAutoresearchDashboard as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/autoresearch/dashboard":
+		bundledPiCodingAgentAutoresearchDashboard as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/autoresearch/git": bundledPiCodingAgentAutoresearchGit as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/autoresearch/helpers": bundledPiCodingAgentAutoresearchHelpers as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/autoresearch/helpers":
+		bundledPiCodingAgentAutoresearchHelpers as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/autoresearch/state": bundledPiCodingAgentAutoresearchState as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/autoresearch/storage": bundledPiCodingAgentAutoresearchStorage as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/autoresearch/storage":
+		bundledPiCodingAgentAutoresearchStorage as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/autoresearch/types": bundledPiCodingAgentAutoresearchTypes as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1454,18 +1524,16 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentCapabilityContextFile as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/capability/extension-module":
 		bundledPiCodingAgentCapabilityExtensionModule as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/capability/extension": bundledPiCodingAgentCapabilityExtension as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/capability/extension":
+		bundledPiCodingAgentCapabilityExtension as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/capability/fs": bundledPiCodingAgentCapabilityFs as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/capability/hook": bundledPiCodingAgentCapabilityHook as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/capability/instruction": bundledPiCodingAgentCapabilityInstruction as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/capability/instruction":
+		bundledPiCodingAgentCapabilityInstruction as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/capability/mcp": bundledPiCodingAgentCapabilityMcp as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1477,9 +1545,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/capability/rule": bundledPiCodingAgentCapabilityRule as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/capability/settings": bundledPiCodingAgentCapabilitySettings as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/capability/settings":
+		bundledPiCodingAgentCapabilitySettings as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/capability/skill": bundledPiCodingAgentCapabilitySkill as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1499,21 +1566,21 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/agents-cli": bundledPiCodingAgentCliAgentsCli as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/cli/args": bundledPiCodingAgentCliArgs as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/cli/args": bundledPiCodingAgentCliArgs as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/auth-broker-cli": bundledPiCodingAgentCliAuthBrokerCli as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/cli/auth-gateway-cli": bundledPiCodingAgentCliAuthGatewayCli as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/cli/auth-gateway-cli":
+		bundledPiCodingAgentCliAuthGatewayCli as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/bench-cli": bundledPiCodingAgentCliBenchCli as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/classify-install-target":
 		bundledPiCodingAgentCliClassifyInstallTarget as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/cli/claude-trace-cli": bundledPiCodingAgentCliClaudeTraceCli as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/cli/claude-trace-cli":
+		bundledPiCodingAgentCliClaudeTraceCli as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/completion-gen": bundledPiCodingAgentCliCompletionGen as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1535,10 +1602,11 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-cli": bundledPiCodingAgentCliGalleryCli as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-screenshot": bundledPiCodingAgentCliGalleryScreenshot as unknown as Readonly<
+	"@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-screenshot":
+		bundledPiCodingAgentCliGalleryScreenshot as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/cli/gc-cli": bundledPiCodingAgentCliGcCli as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/cli/gc-cli": bundledPiCodingAgentCliGcCli as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/grep-cli": bundledPiCodingAgentCliGrepCli as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1557,9 +1625,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/profile-alias": bundledPiCodingAgentCliProfileAlias as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/cli/profile-bootstrap": bundledPiCodingAgentCliProfileBootstrap as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/cli/profile-bootstrap":
+		bundledPiCodingAgentCliProfileBootstrap as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/read-cli": bundledPiCodingAgentCliReadCli as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1569,9 +1636,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/setup-cli": bundledPiCodingAgentCliSetupCli as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/cli/setup-model-picker": bundledPiCodingAgentCliSetupModelPicker as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/cli/setup-model-picker":
+		bundledPiCodingAgentCliSetupModelPicker as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/shell-cli": bundledPiCodingAgentCliShellCli as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1608,9 +1674,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentCliGalleryFixturesCodeintel as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-fixtures/edit":
 		bundledPiCodingAgentCliGalleryFixturesEdit as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-fixtures/fs": bundledPiCodingAgentCliGalleryFixturesFs as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-fixtures/fs":
+		bundledPiCodingAgentCliGalleryFixturesFs as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-fixtures/interaction":
 		bundledPiCodingAgentCliGalleryFixturesInteraction as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-fixtures/memory":
@@ -1625,21 +1690,18 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentCliGalleryFixturesTypes as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-fixtures/web":
 		bundledPiCodingAgentCliGalleryFixturesWeb as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/cli/commands/init-xdg": bundledPiCodingAgentCliCommandsInitXdg as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/cli/commands/init-xdg":
+		bundledPiCodingAgentCliCommandsInitXdg as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/acp": bundledPiCodingAgentCommandsAcp as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/agents": bundledPiCodingAgentCommandsAgents as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/commands/auth-broker": bundledPiCodingAgentCommandsAuthBroker as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/commands/auth-gateway": bundledPiCodingAgentCommandsAuthGateway as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commands/auth-broker":
+		bundledPiCodingAgentCommandsAuthBroker as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commands/auth-gateway":
+		bundledPiCodingAgentCommandsAuthGateway as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/bench": bundledPiCodingAgentCommandsBench as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1649,15 +1711,13 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/complete": bundledPiCodingAgentCommandsComplete as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/commands/completions": bundledPiCodingAgentCommandsCompletions as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commands/completions":
+		bundledPiCodingAgentCommandsCompletions as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/config": bundledPiCodingAgentCommandsConfig as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/commands/dry-balance": bundledPiCodingAgentCommandsDryBalance as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commands/dry-balance":
+		bundledPiCodingAgentCommandsDryBalance as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/gallery": bundledPiCodingAgentCommandsGallery as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1667,9 +1727,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/grep": bundledPiCodingAgentCommandsGrep as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/commands/grievances": bundledPiCodingAgentCommandsGrievances as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commands/grievances":
+		bundledPiCodingAgentCommandsGrievances as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/install": bundledPiCodingAgentCommandsInstall as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1703,9 +1762,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/stats": bundledPiCodingAgentCommandsStats as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/commands/tiny-models": bundledPiCodingAgentCommandsTinyModels as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commands/tiny-models":
+		bundledPiCodingAgentCommandsTinyModels as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/token": bundledPiCodingAgentCommandsToken as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1730,9 +1788,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/message": bundledPiCodingAgentCommitMessage as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/commit/model-selection": bundledPiCodingAgentCommitModelSelection as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commit/model-selection":
+		bundledPiCodingAgentCommitModelSelection as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/pipeline": bundledPiCodingAgentCommitPipeline as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1745,19 +1802,16 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/utils": bundledPiCodingAgentCommitUtils as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/commit/agentic/agent": bundledPiCodingAgentCommitAgenticAgent as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commit/agentic/agent":
+		bundledPiCodingAgentCommitAgenticAgent as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/agentic/fallback":
 		bundledPiCodingAgentCommitAgenticFallback as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/commit/agentic/state": bundledPiCodingAgentCommitAgenticState as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commit/agentic/state":
+		bundledPiCodingAgentCommitAgenticState as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/agentic/topo-sort":
 		bundledPiCodingAgentCommitAgenticTopoSort as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/commit/agentic/trivial": bundledPiCodingAgentCommitAgenticTrivial as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commit/agentic/trivial":
+		bundledPiCodingAgentCommitAgenticTrivial as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/agentic/validation":
 		bundledPiCodingAgentCommitAgenticValidation as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/agentic/tools/analyze-file":
@@ -1780,9 +1834,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentCommitAgenticToolsSplitCommit as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/analysis/conventional":
 		bundledPiCodingAgentCommitAnalysisConventional as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/commit/analysis/scope": bundledPiCodingAgentCommitAnalysisScope as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commit/analysis/scope":
+		bundledPiCodingAgentCommitAnalysisScope as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/analysis/summary":
 		bundledPiCodingAgentCommitAnalysisSummary as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/analysis/validation":
@@ -1791,9 +1844,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentCommitChangelogDetect as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/changelog/generate":
 		bundledPiCodingAgentCommitChangelogGenerate as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/commit/changelog/parse": bundledPiCodingAgentCommitChangelogParse as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commit/changelog/parse":
+		bundledPiCodingAgentCommitChangelogParse as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/git/diff": bundledPiCodingAgentCommitGitDiff as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1801,14 +1853,12 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentCommitMapReduceMapPhase as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/map-reduce/reduce-phase":
 		bundledPiCodingAgentCommitMapReduceReducePhase as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/commit/map-reduce/utils": bundledPiCodingAgentCommitMapReduceUtils as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commit/map-reduce/utils":
+		bundledPiCodingAgentCommitMapReduceUtils as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commit/utils/exclusions":
 		bundledPiCodingAgentCommitUtilsExclusions as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/config/api-key-resolver": bundledPiCodingAgentConfigApiKeyResolver as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/config/api-key-resolver":
+		bundledPiCodingAgentConfigApiKeyResolver as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/append-only-context-mode":
 		bundledPiCodingAgentConfigAppendOnlyContextMode as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/config-file": bundledPiCodingAgentConfigConfigFile as unknown as Readonly<
@@ -1822,23 +1872,19 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/config/keybindings": bundledPiCodingAgentConfigKeybindings as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/config/model-discovery": bundledPiCodingAgentConfigModelDiscovery as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/config/model-registry": bundledPiCodingAgentConfigModelRegistry as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/config/model-resolver": bundledPiCodingAgentConfigModelResolver as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/config/model-discovery":
+		bundledPiCodingAgentConfigModelDiscovery as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/config/model-registry":
+		bundledPiCodingAgentConfigModelRegistry as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/config/model-resolver":
+		bundledPiCodingAgentConfigModelResolver as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/model-roles": bundledPiCodingAgentConfigModelRoles as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/models-config-schema":
 		bundledPiCodingAgentConfigModelsConfigSchema as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/config/models-config": bundledPiCodingAgentConfigModelsConfig as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/config/models-config":
+		bundledPiCodingAgentConfigModelsConfig as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/prompt-templates":
 		bundledPiCodingAgentConfigPromptTemplates as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/resolve-config-value":
@@ -1846,9 +1892,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/config/service-tier": bundledPiCodingAgentConfigServiceTier as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/config/settings-schema": bundledPiCodingAgentConfigSettingsSchema as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/config/settings-schema":
+		bundledPiCodingAgentConfigSettingsSchema as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/settings": bundledPiCodingAgentConfigSettings as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1861,28 +1906,26 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/dap/session": bundledPiCodingAgentDapSession as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/dap/types": bundledPiCodingAgentDapTypes as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/debug/log-formatting": bundledPiCodingAgentDebugLogFormatting as unknown as Readonly<
+	"@pk-nerdsaver-ai/pi-coding-agent/dap/types": bundledPiCodingAgentDapTypes as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/debug/log-formatting":
+		bundledPiCodingAgentDebugLogFormatting as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/debug/log-viewer": bundledPiCodingAgentDebugLogViewer as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/debug/profiler": bundledPiCodingAgentDebugProfiler as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/debug/protocol-probe": bundledPiCodingAgentDebugProtocolProbe as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/debug/raw-sse-buffer": bundledPiCodingAgentDebugRawSseBuffer as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/debug/protocol-probe":
+		bundledPiCodingAgentDebugProtocolProbe as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/debug/raw-sse-buffer":
+		bundledPiCodingAgentDebugRawSseBuffer as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/debug/raw-sse": bundledPiCodingAgentDebugRawSse as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/debug/remote-debugger": bundledPiCodingAgentDebugRemoteDebugger as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/debug/remote-debugger":
+		bundledPiCodingAgentDebugRemoteDebugger as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/debug/report-bundle": bundledPiCodingAgentDebugReportBundle as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1898,9 +1941,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/discovery/agents": bundledPiCodingAgentDiscoveryAgents as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/discovery/at-imports": bundledPiCodingAgentDiscoveryAtImports as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/discovery/at-imports":
+		bundledPiCodingAgentDiscoveryAtImports as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/discovery/builtin-defaults":
 		bundledPiCodingAgentDiscoveryBuiltinDefaults as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/discovery/builtin": bundledPiCodingAgentDiscoveryBuiltin as unknown as Readonly<
@@ -1934,9 +1976,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/discovery/omp-extension-roots":
 		bundledPiCodingAgentDiscoveryOmpExtensionRoots as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/discovery/omp-plugins": bundledPiCodingAgentDiscoveryOmpPlugins as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/discovery/omp-plugins":
+		bundledPiCodingAgentDiscoveryOmpPlugins as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/discovery/opencode": bundledPiCodingAgentDiscoveryOpencode as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1953,7 +1994,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/discovery/windsurf": bundledPiCodingAgentDiscoveryWindsurf as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/edit/diff": bundledPiCodingAgentEditDiff as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/edit/diff": bundledPiCodingAgentEditDiff as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/edit/file-snapshot-store":
 		bundledPiCodingAgentEditFileSnapshotStore as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/edit/normalize": bundledPiCodingAgentEditNormalize as unknown as Readonly<
@@ -1971,9 +2014,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/edit/streaming": bundledPiCodingAgentEditStreaming as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/edit/modes/apply-patch": bundledPiCodingAgentEditModesApplyPatch as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/edit/modes/apply-patch":
+		bundledPiCodingAgentEditModesApplyPatch as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/edit/modes/patch": bundledPiCodingAgentEditModesPatch as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1983,11 +2025,15 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/exa/mcp-client": bundledPiCodingAgentExaMcpClient as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/exa/types": bundledPiCodingAgentExaTypes as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/exa/types": bundledPiCodingAgentExaTypes as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/exec/bash-executor": bundledPiCodingAgentExecBashExecutor as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/exec/exec": bundledPiCodingAgentExecExec as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/exec/exec": bundledPiCodingAgentExecExec as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/exec/non-interactive-env":
 		bundledPiCodingAgentExecNonInteractiveEnv as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/export/custom-share": bundledPiCodingAgentExportCustomShare as unknown as Readonly<
@@ -1999,9 +2045,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/export/ttsr": bundledPiCodingAgentExportTtsr as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/export/html/web-palette": bundledPiCodingAgentExportHtmlWebPalette as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/export/html/web-palette":
+		bundledPiCodingAgentExportHtmlWebPalette as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/legacy-pi-ai-shim":
 		bundledPiCodingAgentExtensibilityLegacyPiAiShim as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/legacy-pi-coding-agent-shim":
@@ -2010,21 +2055,18 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentExtensibilitySessionHandlerTypes as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/shared-events":
 		bundledPiCodingAgentExtensibilitySharedEvents as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/skills": bundledPiCodingAgentExtensibilitySkills as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/skills":
+		bundledPiCodingAgentExtensibilitySkills as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/slash-commands":
 		bundledPiCodingAgentExtensibilitySlashCommands as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/tool-event-input":
 		bundledPiCodingAgentExtensibilityToolEventInput as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/tool-proxy":
 		bundledPiCodingAgentExtensibilityToolProxy as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/typebox": bundledPiCodingAgentExtensibilityTypebox as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/utils": bundledPiCodingAgentExtensibilityUtils as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/typebox":
+		bundledPiCodingAgentExtensibilityTypebox as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/utils":
+		bundledPiCodingAgentExtensibilityUtils as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/custom-commands/loader":
 		bundledPiCodingAgentExtensibilityCustomCommandsLoader as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/custom-commands/types":
@@ -2120,9 +2162,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/internal-urls/registry-helpers":
 		bundledPiCodingAgentInternalUrlsRegistryHelpers as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/internal-urls/router": bundledPiCodingAgentInternalUrlsRouter as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/internal-urls/router":
+		bundledPiCodingAgentInternalUrlsRouter as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/internal-urls/rule-protocol":
 		bundledPiCodingAgentInternalUrlsRuleProtocol as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/internal-urls/skill-protocol":
@@ -2134,9 +2175,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/internal-urls/vault-protocol":
 		bundledPiCodingAgentInternalUrlsVaultProtocol as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/eval/js/context-manager": bundledPiCodingAgentEvalJsContextManager as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/eval/js/context-manager":
+		bundledPiCodingAgentEvalJsContextManager as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/eval/js/executor": bundledPiCodingAgentEvalJsExecutor as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2146,9 +2186,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/eval/js/worker-core": bundledPiCodingAgentEvalJsWorkerCore as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/eval/js/worker-protocol": bundledPiCodingAgentEvalJsWorkerProtocol as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/eval/js/worker-protocol":
+		bundledPiCodingAgentEvalJsWorkerProtocol as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/eval/py/display": bundledPiCodingAgentEvalPyDisplay as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2164,9 +2203,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/eval/py/runtime": bundledPiCodingAgentEvalPyRuntime as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/eval/py/spawn-options": bundledPiCodingAgentEvalPySpawnOptions as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/eval/py/spawn-options":
+		bundledPiCodingAgentEvalPySpawnOptions as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/eval/py/tool-bridge": bundledPiCodingAgentEvalPyToolBridge as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2176,10 +2214,11 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/lsp/config": bundledPiCodingAgentLspConfig as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/lsp/diagnostics-ledger": bundledPiCodingAgentLspDiagnosticsLedger as unknown as Readonly<
+	"@pk-nerdsaver-ai/pi-coding-agent/lsp/diagnostics-ledger":
+		bundledPiCodingAgentLspDiagnosticsLedger as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/lsp/edits": bundledPiCodingAgentLspEdits as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/lsp/edits": bundledPiCodingAgentLspEdits as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/lsp/format-options": bundledPiCodingAgentLspFormatOptions as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2192,8 +2231,12 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/lsp/startup-events": bundledPiCodingAgentLspStartupEvents as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/lsp/types": bundledPiCodingAgentLspTypes as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/lsp/utils": bundledPiCodingAgentLspUtils as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/lsp/types": bundledPiCodingAgentLspTypes as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/lsp/utils": bundledPiCodingAgentLspUtils as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/lsp/clients/biome-client":
 		bundledPiCodingAgentLspClientsBiomeClient as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/lsp/clients/lsp-linter-client":
@@ -2224,9 +2267,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/mcp/manager": bundledPiCodingAgentMcpManager as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/mcp/oauth-credentials": bundledPiCodingAgentMcpOauthCredentials as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/mcp/oauth-credentials":
+		bundledPiCodingAgentMcpOauthCredentials as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/mcp/oauth-discovery": bundledPiCodingAgentMcpOauthDiscovery as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2239,12 +2281,10 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/mcp/smithery-auth": bundledPiCodingAgentMcpSmitheryAuth as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/mcp/smithery-connect": bundledPiCodingAgentMcpSmitheryConnect as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/mcp/smithery-registry": bundledPiCodingAgentMcpSmitheryRegistry as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/mcp/smithery-connect":
+		bundledPiCodingAgentMcpSmitheryConnect as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/mcp/smithery-registry":
+		bundledPiCodingAgentMcpSmitheryRegistry as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/mcp/startup-events": bundledPiCodingAgentMcpStartupEvents as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2257,13 +2297,14 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/mcp/tool-cache": bundledPiCodingAgentMcpToolCache as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/mcp/types": bundledPiCodingAgentMcpTypes as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/mcp/types": bundledPiCodingAgentMcpTypes as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/mcp/transports/http": bundledPiCodingAgentMcpTransportsHttp as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/mcp/transports/stdio": bundledPiCodingAgentMcpTransportsStdio as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/mcp/transports/stdio":
+		bundledPiCodingAgentMcpTransportsStdio as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/memories/storage": bundledPiCodingAgentMemoriesStorage as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2271,15 +2312,12 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentMemoryBackendLocalBackend as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/memory-backend/off-backend":
 		bundledPiCodingAgentMemoryBackendOffBackend as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/memory-backend/resolve": bundledPiCodingAgentMemoryBackendResolve as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/memory-backend/runtime": bundledPiCodingAgentMemoryBackendRuntime as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/memory-backend/types": bundledPiCodingAgentMemoryBackendTypes as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/memory-backend/resolve":
+		bundledPiCodingAgentMemoryBackendResolve as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/memory-backend/runtime":
+		bundledPiCodingAgentMemoryBackendRuntime as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/memory-backend/types":
+		bundledPiCodingAgentMemoryBackendTypes as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/hindsight/backend": bundledPiCodingAgentHindsightBackend as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2300,30 +2338,25 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/hindsight/state": bundledPiCodingAgentHindsightState as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/hindsight/transcript": bundledPiCodingAgentHindsightTranscript as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/hindsight/transcript":
+		bundledPiCodingAgentHindsightTranscript as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/emoji-autocomplete":
 		bundledPiCodingAgentModesEmojiAutocomplete as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/gradient-highlight":
 		bundledPiCodingAgentModesGradientHighlight as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/modes/image-references": bundledPiCodingAgentModesImageReferences as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/modes/interactive-mode": bundledPiCodingAgentModesInteractiveMode as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/image-references":
+		bundledPiCodingAgentModesImageReferences as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/interactive-mode":
+		bundledPiCodingAgentModesInteractiveMode as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/internal-url-autocomplete":
 		bundledPiCodingAgentModesInternalUrlAutocomplete as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/loop-limit": bundledPiCodingAgentModesLoopLimit as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/modes/magic-keywords": bundledPiCodingAgentModesMagicKeywords as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/modes/markdown-prose": bundledPiCodingAgentModesMarkdownProse as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/magic-keywords":
+		bundledPiCodingAgentModesMagicKeywords as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/markdown-prose":
+		bundledPiCodingAgentModesMarkdownProse as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/oauth-manual-input":
 		bundledPiCodingAgentModesOauthManualInput as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/orchestrate": bundledPiCodingAgentModesOrchestrate as unknown as Readonly<
@@ -2369,9 +2402,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/acp/acp-mode": bundledPiCodingAgentModesAcpAcpMode as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/modes/acp/terminal-auth": bundledPiCodingAgentModesAcpTerminalAuth as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/acp/terminal-auth":
+		bundledPiCodingAgentModesAcpTerminalAuth as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/components/advisor-message":
 		bundledPiCodingAgentModesComponentsAdvisorMessage as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/components/agent-dashboard":
@@ -2408,9 +2440,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentModesComponentsCustomEditor as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/components/custom-message":
 		bundledPiCodingAgentModesComponentsCustomMessage as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/modes/components/diff": bundledPiCodingAgentModesComponentsDiff as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/components/diff":
+		bundledPiCodingAgentModesComponentsDiff as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/components/dynamic-border":
 		bundledPiCodingAgentModesComponentsDynamicBorder as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/components/error-banner":
@@ -2483,8 +2514,6 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentModesComponentsShowImagesSelector as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/components/skill-message":
 		bundledPiCodingAgentModesComponentsSkillMessage as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/modes/components/snapcompact-shape-preview":
-		bundledPiCodingAgentModesComponentsSnapcompactShapePreview as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/components/theme-selector":
 		bundledPiCodingAgentModesComponentsThemeSelector as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/components/thinking-selector":
@@ -2569,28 +2598,24 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentModesControllersTodoCommandController as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/controllers/tool-args-reveal":
 		bundledPiCodingAgentModesControllersToolArgsReveal as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/modes/setup-wizard/lazy": bundledPiCodingAgentModesSetupWizardLazy as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/setup-wizard/lazy":
+		bundledPiCodingAgentModesSetupWizardLazy as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/setup-wizard/startup-splash":
 		bundledPiCodingAgentModesSetupWizardStartupSplash as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/setup-wizard/wizard-overlay":
 		bundledPiCodingAgentModesSetupWizardWizardOverlay as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/modes/rpc/host-tools": bundledPiCodingAgentModesRpcHostTools as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/rpc/host-tools":
+		bundledPiCodingAgentModesRpcHostTools as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/rpc/host-uris": bundledPiCodingAgentModesRpcHostUris as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/modes/rpc/rpc-client": bundledPiCodingAgentModesRpcRpcClient as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/rpc/rpc-client":
+		bundledPiCodingAgentModesRpcRpcClient as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/rpc/rpc-mode": bundledPiCodingAgentModesRpcRpcMode as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/modes/rpc/rpc-subagents": bundledPiCodingAgentModesRpcRpcSubagents as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/rpc/rpc-subagents":
+		bundledPiCodingAgentModesRpcRpcSubagents as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/rpc/rpc-types": bundledPiCodingAgentModesRpcRpcTypes as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2616,15 +2641,12 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentModesUtilsToolsMarkdown as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/utils/transcript-render-helpers":
 		bundledPiCodingAgentModesUtilsTranscriptRenderHelpers as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/modes/utils/ui-helpers": bundledPiCodingAgentModesUtilsUiHelpers as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/plan-mode/approved-plan": bundledPiCodingAgentPlanModeApprovedPlan as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/plan-mode/plan-handoff": bundledPiCodingAgentPlanModePlanHandoff as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/utils/ui-helpers":
+		bundledPiCodingAgentModesUtilsUiHelpers as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/plan-mode/approved-plan":
+		bundledPiCodingAgentPlanModeApprovedPlan as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/plan-mode/plan-handoff":
+		bundledPiCodingAgentPlanModePlanHandoff as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/plan-mode/plan-protection":
 		bundledPiCodingAgentPlanModePlanProtection as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/plan-mode/state": bundledPiCodingAgentPlanModeState as unknown as Readonly<
@@ -2636,31 +2658,26 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/secrets/regex": bundledPiCodingAgentSecretsRegex as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/session/agent-session": bundledPiCodingAgentSessionAgentSession as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/session/agent-storage": bundledPiCodingAgentSessionAgentStorage as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/agent-session":
+		bundledPiCodingAgentSessionAgentSession as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/agent-storage":
+		bundledPiCodingAgentSessionAgentStorage as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/artifacts": bundledPiCodingAgentSessionArtifacts as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/auth-broker-config":
 		bundledPiCodingAgentSessionAuthBrokerConfig as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage": bundledPiCodingAgentSessionAuthStorage as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage":
+		bundledPiCodingAgentSessionAuthStorage as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/blob-store": bundledPiCodingAgentSessionBlobStore as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/session/client-bridge": bundledPiCodingAgentSessionClientBridge as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/client-bridge":
+		bundledPiCodingAgentSessionClientBridge as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/codex-auto-reset":
 		bundledPiCodingAgentSessionCodexAutoReset as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/session/compact-modes": bundledPiCodingAgentSessionCompactModes as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/compact-modes":
+		bundledPiCodingAgentSessionCompactModes as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/history-storage":
 		bundledPiCodingAgentSessionHistoryStorage as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/indexed-session-storage":
@@ -2682,16 +2699,14 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentSessionSessionHistoryFormat as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/session-listing":
 		bundledPiCodingAgentSessionSessionListing as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/session/session-loader": bundledPiCodingAgentSessionSessionLoader as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/session-loader":
+		bundledPiCodingAgentSessionSessionLoader as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/session-manager":
 		bundledPiCodingAgentSessionSessionManager as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/session-migrations":
 		bundledPiCodingAgentSessionSessionMigrations as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/session/session-paths": bundledPiCodingAgentSessionSessionPaths as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/session-paths":
+		bundledPiCodingAgentSessionSessionPaths as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/session-persistence":
 		bundledPiCodingAgentSessionSessionPersistence as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/session-storage":
@@ -2701,10 +2716,6 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/session/shake-types": bundledPiCodingAgentSessionShakeTypes as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/session/snapcompact-inline":
-		bundledPiCodingAgentSessionSnapcompactInline as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/session/snapcompact-savings-journal":
-		bundledPiCodingAgentSessionSnapcompactSavingsJournal as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/sql-session-storage":
 		bundledPiCodingAgentSessionSqlSessionStorage as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/streaming-output":
@@ -2726,15 +2737,13 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentSlashCommandsBuiltinRegistry as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/slash-commands/marketplace-install-parser":
 		bundledPiCodingAgentSlashCommandsMarketplaceInstallParser as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/slash-commands/types": bundledPiCodingAgentSlashCommandsTypes as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/slash-commands/types":
+		bundledPiCodingAgentSlashCommandsTypes as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/ssh/config-writer": bundledPiCodingAgentSshConfigWriter as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/ssh/connection-manager": bundledPiCodingAgentSshConnectionManager as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/ssh/connection-manager":
+		bundledPiCodingAgentSshConnectionManager as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/ssh/file-transfer": bundledPiCodingAgentSshFileTransfer as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2744,7 +2753,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/ssh/sshfs-mount": bundledPiCodingAgentSshSshfsMount as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/ssh/utils": bundledPiCodingAgentSshUtils as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/ssh/utils": bundledPiCodingAgentSshUtils as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/stt/asr-client": bundledPiCodingAgentSttAsrClient as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2772,7 +2783,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/stt/transcriber": bundledPiCodingAgentSttTranscriber as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/stt/wav": bundledPiCodingAgentSttWav as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/stt/wav": bundledPiCodingAgentSttWav as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/task/agents": bundledPiCodingAgentTaskAgents as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2785,9 +2798,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/task/executor": bundledPiCodingAgentTaskExecutor as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/task/isolation-runner": bundledPiCodingAgentTaskIsolationRunner as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/task/isolation-runner":
+		bundledPiCodingAgentTaskIsolationRunner as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/task/name-generator": bundledPiCodingAgentTaskNameGenerator as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2800,9 +2812,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/task/parallel": bundledPiCodingAgentTaskParallel as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/task/persisted-revive": bundledPiCodingAgentTaskPersistedRevive as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/task/persisted-revive":
+		bundledPiCodingAgentTaskPersistedRevive as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/task/render": bundledPiCodingAgentTaskRender as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2828,7 +2839,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/approval": bundledPiCodingAgentToolsApproval as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/ask": bundledPiCodingAgentToolsAsk as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/ask": bundledPiCodingAgentToolsAsk as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/ast-edit": bundledPiCodingAgentToolsAstEdit as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2839,17 +2852,14 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentToolsAutoGeneratedGuard as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/bash-command-fixup":
 		bundledPiCodingAgentToolsBashCommandFixup as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/bash-interactive": bundledPiCodingAgentToolsBashInteractive as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/bash-interceptor": bundledPiCodingAgentToolsBashInterceptor as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/bash-interactive":
+		bundledPiCodingAgentToolsBashInteractive as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/bash-interceptor":
+		bundledPiCodingAgentToolsBashInterceptor as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/bash-pty-selection":
 		bundledPiCodingAgentToolsBashPtySelection as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/bash-skill-urls": bundledPiCodingAgentToolsBashSkillUrls as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/bash-skill-urls":
+		bundledPiCodingAgentToolsBashSkillUrls as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/bash": bundledPiCodingAgentToolsBash as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2862,9 +2872,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/checkpoint": bundledPiCodingAgentToolsCheckpoint as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/conflict-detect": bundledPiCodingAgentToolsConflictDetect as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/conflict-detect":
+		bundledPiCodingAgentToolsConflictDetect as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/context": bundledPiCodingAgentToolsContext as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2896,7 +2905,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/gh-renderer": bundledPiCodingAgentToolsGhRenderer as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/gh": bundledPiCodingAgentToolsGh as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/gh": bundledPiCodingAgentToolsGh as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/github-cache": bundledPiCodingAgentToolsGithubCache as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2916,16 +2927,19 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/inspect-image": bundledPiCodingAgentToolsInspectImage as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/irc": bundledPiCodingAgentToolsIrc as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/job": bundledPiCodingAgentToolsJob as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/irc": bundledPiCodingAgentToolsIrc as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/job": bundledPiCodingAgentToolsJob as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/json-tree": bundledPiCodingAgentToolsJsonTree as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/jtd-to-json-schema":
 		bundledPiCodingAgentToolsJtdToJsonSchema as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/jtd-to-typescript": bundledPiCodingAgentToolsJtdToTypescript as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/jtd-to-typescript":
+		bundledPiCodingAgentToolsJtdToTypescript as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/jtd-utils": bundledPiCodingAgentToolsJtdUtils as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2938,18 +2952,16 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/manage-skill": bundledPiCodingAgentToolsManageSkill as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/match-line-format": bundledPiCodingAgentToolsMatchLineFormat as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/match-line-format":
+		bundledPiCodingAgentToolsMatchLineFormat as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/memory-edit": bundledPiCodingAgentToolsMemoryEdit as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/memory-recall": bundledPiCodingAgentToolsMemoryRecall as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/memory-reflect": bundledPiCodingAgentToolsMemoryReflect as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/memory-reflect":
+		bundledPiCodingAgentToolsMemoryReflect as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/memory-render": bundledPiCodingAgentToolsMemoryRender as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2964,9 +2976,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/path-utils": bundledPiCodingAgentToolsPathUtils as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/plan-mode-guard": bundledPiCodingAgentToolsPlanModeGuard as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/plan-mode-guard":
+		bundledPiCodingAgentToolsPlanModeGuard as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/read": bundledPiCodingAgentToolsRead as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2976,22 +2987,22 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/renderers": bundledPiCodingAgentToolsRenderers as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/report-tool-issue": bundledPiCodingAgentToolsReportToolIssue as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/report-tool-issue":
+		bundledPiCodingAgentToolsReportToolIssue as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/resolve": bundledPiCodingAgentToolsResolve as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/review": bundledPiCodingAgentToolsReview as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/search-tool-bm25": bundledPiCodingAgentToolsSearchToolBm25 as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/search-tool-bm25":
+		bundledPiCodingAgentToolsSearchToolBm25 as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/sqlite-reader": bundledPiCodingAgentToolsSqliteReader as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/ssh": bundledPiCodingAgentToolsSsh as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/ssh": bundledPiCodingAgentToolsSsh as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/todo": bundledPiCodingAgentToolsTodo as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -3004,7 +3015,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/tool-timeouts": bundledPiCodingAgentToolsToolTimeouts as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tools/tts": bundledPiCodingAgentToolsTts as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/tts": bundledPiCodingAgentToolsTts as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/write": bundledPiCodingAgentToolsWrite as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -3029,11 +3042,14 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/tui/tree-list": bundledPiCodingAgentTuiTreeList as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tui/types": bundledPiCodingAgentTuiTypes as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tui/utils": bundledPiCodingAgentTuiUtils as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/tui/width-aware-text": bundledPiCodingAgentTuiWidthAwareText as unknown as Readonly<
+	"@pk-nerdsaver-ai/pi-coding-agent/tui/types": bundledPiCodingAgentTuiTypes as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tui/utils": bundledPiCodingAgentTuiUtils as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tui/width-aware-text":
+		bundledPiCodingAgentTuiWidthAwareText as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/active-repo-context":
 		bundledPiCodingAgentUtilsActiveRepoContext as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/block-context": bundledPiCodingAgentUtilsBlockContext as unknown as Readonly<
@@ -3053,22 +3069,21 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/edit-mode": bundledPiCodingAgentUtilsEditMode as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/utils/enhanced-paste": bundledPiCodingAgentUtilsEnhancedPaste as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/utils/enhanced-paste":
+		bundledPiCodingAgentUtilsEnhancedPaste as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/event-bus": bundledPiCodingAgentUtilsEventBus as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/utils/external-editor": bundledPiCodingAgentUtilsExternalEditor as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/utils/file-display-mode": bundledPiCodingAgentUtilsFileDisplayMode as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/utils/external-editor":
+		bundledPiCodingAgentUtilsExternalEditor as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/utils/file-display-mode":
+		bundledPiCodingAgentUtilsFileDisplayMode as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/file-mentions": bundledPiCodingAgentUtilsFileMentions as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/utils/git": bundledPiCodingAgentUtilsGit as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/utils/git": bundledPiCodingAgentUtilsGit as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/image-loading": bundledPiCodingAgentUtilsImageLoading as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -3077,20 +3092,22 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/image-vision-fallback":
 		bundledPiCodingAgentUtilsImageVisionFallback as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/utils/ipc": bundledPiCodingAgentUtilsIpc as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/utils/jj": bundledPiCodingAgentUtilsJj as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/utils/lang-from-path": bundledPiCodingAgentUtilsLangFromPath as unknown as Readonly<
+	"@pk-nerdsaver-ai/pi-coding-agent/utils/ipc": bundledPiCodingAgentUtilsIpc as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/utils/jj": bundledPiCodingAgentUtilsJj as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/utils/lang-from-path":
+		bundledPiCodingAgentUtilsLangFromPath as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/markit-cache": bundledPiCodingAgentUtilsMarkitCache as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/markit": bundledPiCodingAgentUtilsMarkit as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/utils/mupdf-wasm-embed": bundledPiCodingAgentUtilsMupdfWasmEmbed as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/utils/mupdf-wasm-embed":
+		bundledPiCodingAgentUtilsMupdfWasmEmbed as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/open": bundledPiCodingAgentUtilsOpen as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -3103,18 +3120,15 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/session-color": bundledPiCodingAgentUtilsSessionColor as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/utils/shell-snapshot": bundledPiCodingAgentUtilsShellSnapshot as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/utils/shell-snapshot":
+		bundledPiCodingAgentUtilsShellSnapshot as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/sixel": bundledPiCodingAgentUtilsSixel as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/utils/thinking-display": bundledPiCodingAgentUtilsThinkingDisplay as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/utils/title-generator": bundledPiCodingAgentUtilsTitleGenerator as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/utils/thinking-display":
+		bundledPiCodingAgentUtilsThinkingDisplay as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/utils/title-generator":
+		bundledPiCodingAgentUtilsTitleGenerator as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/tool-choice": bundledPiCodingAgentUtilsToolChoice as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -3124,8 +3138,12 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/turndown": bundledPiCodingAgentUtilsTurndown as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/utils/zip": bundledPiCodingAgentUtilsZip as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/kagi": bundledPiCodingAgentWebKagi as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/utils/zip": bundledPiCodingAgentUtilsZip as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/kagi": bundledPiCodingAgentWebKagi as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/parallel": bundledPiCodingAgentWebParallel as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -3137,60 +3155,47 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/aur": bundledPiCodingAgentWebScrapersAur as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/biorxiv": bundledPiCodingAgentWebScrapersBiorxiv as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/bluesky": bundledPiCodingAgentWebScrapersBluesky as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/biorxiv":
+		bundledPiCodingAgentWebScrapersBiorxiv as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/bluesky":
+		bundledPiCodingAgentWebScrapersBluesky as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/brew": bundledPiCodingAgentWebScrapersBrew as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/cheatsh": bundledPiCodingAgentWebScrapersCheatsh as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/cheatsh":
+		bundledPiCodingAgentWebScrapersCheatsh as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/chocolatey":
 		bundledPiCodingAgentWebScrapersChocolatey as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/choosealicense":
 		bundledPiCodingAgentWebScrapersChoosealicense as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/cisa-kev": bundledPiCodingAgentWebScrapersCisaKev as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/clojars": bundledPiCodingAgentWebScrapersClojars as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/coingecko": bundledPiCodingAgentWebScrapersCoingecko as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/crates-io": bundledPiCodingAgentWebScrapersCratesIo as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/crossref": bundledPiCodingAgentWebScrapersCrossref as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/cisa-kev":
+		bundledPiCodingAgentWebScrapersCisaKev as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/clojars":
+		bundledPiCodingAgentWebScrapersClojars as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/coingecko":
+		bundledPiCodingAgentWebScrapersCoingecko as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/crates-io":
+		bundledPiCodingAgentWebScrapersCratesIo as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/crossref":
+		bundledPiCodingAgentWebScrapersCrossref as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/devto": bundledPiCodingAgentWebScrapersDevto as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/discogs": bundledPiCodingAgentWebScrapersDiscogs as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/discourse": bundledPiCodingAgentWebScrapersDiscourse as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/dockerhub": bundledPiCodingAgentWebScrapersDockerhub as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/docs-rs": bundledPiCodingAgentWebScrapersDocsRs as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/discogs":
+		bundledPiCodingAgentWebScrapersDiscogs as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/discourse":
+		bundledPiCodingAgentWebScrapersDiscourse as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/dockerhub":
+		bundledPiCodingAgentWebScrapersDockerhub as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/docs-rs":
+		bundledPiCodingAgentWebScrapersDocsRs as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/fdroid": bundledPiCodingAgentWebScrapersFdroid as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/firefox-addons":
 		bundledPiCodingAgentWebScrapersFirefoxAddons as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/flathub": bundledPiCodingAgentWebScrapersFlathub as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/flathub":
+		bundledPiCodingAgentWebScrapersFlathub as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/github-gist":
 		bundledPiCodingAgentWebScrapersGithubGist as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/github": bundledPiCodingAgentWebScrapersGithub as unknown as Readonly<
@@ -3202,9 +3207,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/go-pkg": bundledPiCodingAgentWebScrapersGoPkg as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/hackage": bundledPiCodingAgentWebScrapersHackage as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/hackage":
+		bundledPiCodingAgentWebScrapersHackage as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/hackernews":
 		bundledPiCodingAgentWebScrapersHackernews as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/hex": bundledPiCodingAgentWebScrapersHex as unknown as Readonly<
@@ -3220,21 +3224,18 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/lemmy": bundledPiCodingAgentWebScrapersLemmy as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/lobsters": bundledPiCodingAgentWebScrapersLobsters as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/mastodon": bundledPiCodingAgentWebScrapersMastodon as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/lobsters":
+		bundledPiCodingAgentWebScrapersLobsters as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/mastodon":
+		bundledPiCodingAgentWebScrapersMastodon as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/maven": bundledPiCodingAgentWebScrapersMaven as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/mdn": bundledPiCodingAgentWebScrapersMdn as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/metacpan": bundledPiCodingAgentWebScrapersMetacpan as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/metacpan":
+		bundledPiCodingAgentWebScrapersMetacpan as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/musicbrainz":
 		bundledPiCodingAgentWebScrapersMusicbrainz as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/npm": bundledPiCodingAgentWebScrapersNpm as unknown as Readonly<
@@ -3249,9 +3250,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/ollama": bundledPiCodingAgentWebScrapersOllama as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/open-vsx": bundledPiCodingAgentWebScrapersOpenVsx as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/open-vsx":
+		bundledPiCodingAgentWebScrapersOpenVsx as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/opencorporates":
 		bundledPiCodingAgentWebScrapersOpencorporates as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/openlibrary":
@@ -3262,12 +3262,10 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/osv": bundledPiCodingAgentWebScrapersOsv as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/packagist": bundledPiCodingAgentWebScrapersPackagist as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/pub-dev": bundledPiCodingAgentWebScrapersPubDev as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/packagist":
+		bundledPiCodingAgentWebScrapersPackagist as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/pub-dev":
+		bundledPiCodingAgentWebScrapersPubDev as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/pubmed": bundledPiCodingAgentWebScrapersPubmed as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -3282,44 +3280,37 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/reddit": bundledPiCodingAgentWebScrapersReddit as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/repology": bundledPiCodingAgentWebScrapersRepology as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/repology":
+		bundledPiCodingAgentWebScrapersRepology as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/rfc": bundledPiCodingAgentWebScrapersRfc as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/rubygems": bundledPiCodingAgentWebScrapersRubygems as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/rubygems":
+		bundledPiCodingAgentWebScrapersRubygems as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/searchcode":
 		bundledPiCodingAgentWebScrapersSearchcode as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/sec-edgar": bundledPiCodingAgentWebScrapersSecEdgar as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/sec-edgar":
+		bundledPiCodingAgentWebScrapersSecEdgar as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/semantic-scholar":
 		bundledPiCodingAgentWebScrapersSemanticScholar as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/snapcraft": bundledPiCodingAgentWebScrapersSnapcraft as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/snapcraft":
+		bundledPiCodingAgentWebScrapersSnapcraft as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/sourcegraph":
 		bundledPiCodingAgentWebScrapersSourcegraph as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/spdx": bundledPiCodingAgentWebScrapersSpdx as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/spotify": bundledPiCodingAgentWebScrapersSpotify as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/spotify":
+		bundledPiCodingAgentWebScrapersSpotify as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/stackoverflow":
 		bundledPiCodingAgentWebScrapersStackoverflow as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/terraform": bundledPiCodingAgentWebScrapersTerraform as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/terraform":
+		bundledPiCodingAgentWebScrapersTerraform as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/tldr": bundledPiCodingAgentWebScrapersTldr as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/twitter": bundledPiCodingAgentWebScrapersTwitter as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/twitter":
+		bundledPiCodingAgentWebScrapersTwitter as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/types": bundledPiCodingAgentWebScrapersTypes as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -3334,15 +3325,12 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/w3c": bundledPiCodingAgentWebScrapersW3c as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/wikidata": bundledPiCodingAgentWebScrapersWikidata as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/wikipedia": bundledPiCodingAgentWebScrapersWikipedia as unknown as Readonly<
-		Record<string, unknown>
-	>,
-	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/youtube": bundledPiCodingAgentWebScrapersYoutube as unknown as Readonly<
-		Record<string, unknown>
-	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/wikidata":
+		bundledPiCodingAgentWebScrapersWikidata as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/wikipedia":
+		bundledPiCodingAgentWebScrapersWikipedia as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers/youtube":
+		bundledPiCodingAgentWebScrapersYoutube as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/search/provider": bundledPiCodingAgentWebSearchProvider as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -3400,13 +3388,20 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-natives": bundledPiNatives as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-tui": bundledPiTui as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-tui/components/box": bundledPiTuiComponentsBox as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-tui/components/cancellable-loader": bundledPiTuiComponentsCancellableLoader as unknown as Readonly<
+	"@pk-nerdsaver-ai/pi-tui/components/cancellable-loader":
+		bundledPiTuiComponentsCancellableLoader as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-tui/components/editor": bundledPiTuiComponentsEditor as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-tui/components/editor": bundledPiTuiComponentsEditor as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-tui/components/image": bundledPiTuiComponentsImage as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-tui/components/input": bundledPiTuiComponentsInput as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-tui/components/loader": bundledPiTuiComponentsLoader as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-tui/components/image": bundledPiTuiComponentsImage as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-tui/components/input": bundledPiTuiComponentsInput as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-tui/components/loader": bundledPiTuiComponentsLoader as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-tui/components/markdown": bundledPiTuiComponentsMarkdown as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -3419,9 +3414,15 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-tui/components/settings-list": bundledPiTuiComponentsSettingsList as unknown as Readonly<
 		Record<string, unknown>
 	>,
-	"@pk-nerdsaver-ai/pi-tui/components/spacer": bundledPiTuiComponentsSpacer as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-tui/components/tab-bar": bundledPiTuiComponentsTabBar as unknown as Readonly<Record<string, unknown>>,
-	"@pk-nerdsaver-ai/pi-tui/components/text": bundledPiTuiComponentsText as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-tui/components/spacer": bundledPiTuiComponentsSpacer as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-tui/components/tab-bar": bundledPiTuiComponentsTabBar as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-tui/components/text": bundledPiTuiComponentsText as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-tui/components/truncated-text": bundledPiTuiComponentsTruncatedText as unknown as Readonly<
 		Record<string, unknown>
 	>,

@@ -2,6 +2,7 @@
  * Interactive mode for the coding agent.
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
  */
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -16,6 +17,7 @@ import type { AssistantMessage, ImageContent, Message, Model, Usage, UsageReport
 import { modelsAreEqual } from "@pk-nerdsaver-ai/pi-catalog/models";
 import type {
 	Component,
+	EditorBottomSection,
 	EditorTheme,
 	LoaderMessageColorFn,
 	NativeScrollbackLiveRegion,
@@ -108,8 +110,10 @@ import { type ResolveToolDetails, runResolveInvocation } from "../tools/resolve"
 import { formatPhaseDisplayName, selectStickyTodoWindow, todoMatchesAnyDescription } from "../tools/todo";
 import { ToolError } from "../tools/tool-errors";
 import { vocalizer } from "../tts/vocalizer";
+import { resolveActiveRepoContextSync } from "../utils/active-repo-context";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
+import * as git from "../utils/git";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
 import {
@@ -121,6 +125,17 @@ import {
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
+import {
+	buildChipsRow,
+	buildRailRow,
+	type ComposerChip,
+	ComposerDiagnosticsComponent,
+	ComposerModeBar,
+	type ComposerWorkMode,
+	computeAskModeTools,
+	getComposerWorkModeDef,
+	nextComposerWorkMode,
+} from "./components/composer";
 import { CustomEditor } from "./components/custom-editor";
 import { DynamicBorder } from "./components/dynamic-border";
 import { ErrorBannerComponent } from "./components/error-banner";
@@ -160,7 +175,7 @@ import { OAuthManualInputManager } from "./oauth-manual-input";
 import type { ObservableSession } from "./session-observer-registry";
 import { SessionObserverRegistry } from "./session-observer-registry";
 import { runProviderSetupWizard } from "./setup-wizard/lazy";
-import { interruptHint } from "./shared";
+import { interruptHint, sanitizeStatusText } from "./shared";
 import { clearMermaidCache } from "./theme/mermaid-cache";
 import { type ShimmerPalette, shimmerEnabled, shimmerSegments, shimmerText } from "./theme/shimmer";
 import type { Theme } from "./theme/theme";
@@ -235,21 +250,27 @@ const EDITOR_FALLBACK_ROWS = 24;
 const EDITOR_MIN_CHROME_ROWS = 4; // rows reserved for transcript + status on small terms
 const EDITOR_MIN_RENDERED_ROWS = 3; // bordered editor floor: top+bottom border + 1 content row
 
+/** Rows rendered outside the editor frame by the intent composer. */
+export interface ComposerChromeRows {
+	readonly modeBar: number;
+	readonly diagnostics: number;
+}
+
 /**
  * Editor max-height cap for a terminal of `terminalRows` rows.
  *
- * Roomy terminals get the comfortable [6, 18] band. Small terminals shrink the
- * cap so the editor leaves at least EDITOR_MIN_CHROME_ROWS rows for the
- * transcript + status line. The editor is bordered, so it never renders fewer
- * than EDITOR_MIN_RENDERED_ROWS rows; once the terminal is too small for both
- * (terminalRows < EDITOR_MIN_RENDERED_ROWS + EDITOR_MIN_CHROME_ROWS) the cap is
- * pinned to that floor — returning a smaller number would not shrink the editor
- * any further, it would only misreport the rows it actually occupies.
+ * Intent-composer rows live beside (rather than inside) the editor frame, so
+ * they must be deducted from the available budget. Classic callers omit the
+ * option and retain the historical sizing exactly.
  */
-export function computeEditorMaxHeight(terminalRows: number): number {
+export function computeEditorMaxHeight(terminalRows: number, chrome?: ComposerChromeRows): number {
 	const rows = Number.isFinite(terminalRows) && terminalRows > 0 ? terminalRows : EDITOR_FALLBACK_ROWS;
-	const comfortable = Math.max(EDITOR_MAX_HEIGHT_MIN, Math.min(EDITOR_MAX_HEIGHT_MAX, rows - EDITOR_RESERVED_ROWS));
-	return Math.max(EDITOR_MIN_RENDERED_ROWS, Math.min(comfortable, rows - EDITOR_MIN_CHROME_ROWS));
+	const externalRows = chrome ? Math.max(0, chrome.modeBar) + Math.max(0, chrome.diagnostics) : 0;
+	const comfortable = Math.max(
+		EDITOR_MAX_HEIGHT_MIN,
+		Math.min(EDITOR_MAX_HEIGHT_MAX, rows - EDITOR_RESERVED_ROWS - externalRows),
+	);
+	return Math.max(EDITOR_MIN_RENDERED_ROWS, Math.min(comfortable, rows - EDITOR_MIN_CHROME_ROWS - externalRows));
 }
 
 const HUD_NOTE_SUP_DIGITS: Record<string, string> = {
@@ -411,6 +432,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	todoExpanded = false;
 	planModeEnabled = false;
 	planModePaused = false;
+	askModeEnabled = false;
 	goalModeEnabled = false;
 	goalModePaused = false;
 	planModePlanFilePath: string | undefined = undefined;
@@ -482,6 +504,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #version: string;
 	readonly #changelogMarkdown: string | undefined;
 	#planModePreviousTools: string[] | undefined;
+	#askModePreviousTools: string[] | undefined;
+	#composerBranchCache: { dir: string; value: string | null; readAt: number } | undefined;
+	readonly #composerModeBar: ComposerModeBar;
+	readonly #composerDiagnostics: ComposerDiagnosticsComponent;
+	#composerTransition: Promise<void> = Promise.resolve();
 	#goalModePreviousTools: string[] | undefined;
 	#goalContinuationTimer: NodeJS.Timeout | undefined;
 	#goalTurnHadToolCalls = false;
@@ -642,9 +669,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hookWidgetContainerAbove.addChild(new Spacer(1));
 		this.hookWidgetContainerBelow = new Container();
 		this.editorContainer = new Container();
-		this.editorContainer.addChild(this.editor);
 		this.statusLine = new StatusLineComponent(session);
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
+		this.#composerModeBar = new ComposerModeBar({
+			isEnabled: () => this.isIntentComposerEnabled() && !this.focusedAgentId,
+			getSelectedMode: () => this.getComposerWorkMode(),
+			isModeAvailable: mode => this.isComposerModeAvailable(mode),
+			getCycleKeyHint: () => this.keybindings.getKeys("app.composer.mode.cycle")[0],
+		});
+		this.#composerDiagnostics = new ComposerDiagnosticsComponent({
+			isEnabled: () => this.isIntentComposerEnabled(),
+			getStatusLine: width => this.statusLine.getTopBorder(width),
+		});
+		this.#mountComposer(this.editor);
 
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
 
@@ -854,7 +891,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.isInitialized = true;
 		this.ui.requestRender(true);
 
-		// Initialize hooks with TUI-based UI context
 		await this.initHooksAndCustomTools();
 
 		// Fusion cost mode: bring up the persistent warm sidekick (best-effort, non-blocking).
@@ -863,9 +899,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Restore mode from session (e.g. plan mode on resume), then reconcile the
 		// per-session Fusion sidekick. `switchSession` clears the tracked id before
 		// invoking this hook, so force-spawn gives the new session its own warm peer.
-		this.session.setSessionSwitchReconciler?.(async () => {
-			await this.#reconcileModeFromSession({ preserveActiveGoal: true });
-			await ensureFusionSidekick(this, { force: true });
+		this.session.setSessionSwitchReconciler?.({
+			before: async () => {
+				await this.restoreComposerAskTools();
+			},
+			after: async () => {
+				await this.#reconcileModeFromSession({ preserveActiveGoal: true, restoreAskTools: false });
+				await ensureFusionSidekick(this, { force: true });
+			},
 		});
 		await this.#reconcileModeFromSession();
 
@@ -943,6 +984,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Set up git branch watcher
 		this.statusLine.watchBranch(() => {
+			this.#composerBranchCache = undefined;
 			this.updateEditorTopBorder();
 			this.ui.requestRender();
 		});
@@ -1407,8 +1449,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	#getComposerChromeRows(): ComposerChromeRows | undefined {
+		if (!this.isIntentComposerEnabled() || !this.#composerModeBar || !this.#composerDiagnostics) return undefined;
+		const width = this.editor.getTopBorderAvailableWidth(this.ui.terminal.columns);
+		return {
+			modeBar: this.#composerModeBar.rowCount(width),
+			diagnostics: this.#composerDiagnostics.rowCount(width),
+		};
+	}
+
 	#computeEditorMaxHeight(): number {
-		return computeEditorMaxHeight(this.ui.terminal.rows);
+		return computeEditorMaxHeight(this.ui.terminal.rows, this.#getComposerChromeRows());
 	}
 
 	#syncEditorMaxHeight(): void {
@@ -1464,9 +1515,239 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	updateEditorTopBorder(): void {
+		this.#syncEditorMaxHeight();
+		if (this.isIntentComposerEnabled()) {
+			// Intent layout: runtime metadata lives in the diagnostics line below
+			// the composer; the editable frame keeps a plain border.
+			this.editor.setTopBorder(undefined);
+			return;
+		}
 		const availableWidth = this.editor.getTopBorderAvailableWidth(this.ui.terminal.columns);
 		const topBorder = this.statusLine.getTopBorder(availableWidth);
 		this.editor.setTopBorder(topBorder);
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// Composer (intent-first layout): work modes, context chips, execution rail
+	// ═══════════════════════════════════════════════════════════════════════
+
+	isIntentComposerEnabled(): boolean {
+		return this.settings.get("composer.layout") === "intent";
+	}
+
+	/** Selected work mode, derived from authoritative session state (never stored separately). */
+	getComposerWorkMode(): ComposerWorkMode {
+		if (this.planModeEnabled) return "plan";
+		if (this.askModeEnabled) return "ask";
+		return "build";
+	}
+
+	isComposerModeAvailable(mode: ComposerWorkMode): boolean {
+		if (this.focusedAgentId) return false;
+		if (mode === "plan") return !isSettingsInitialized() || this.session.settings.get("plan.enabled") === true;
+		return true;
+	}
+
+	async cycleComposerWorkMode(): Promise<void> {
+		if (this.focusedAgentId) return;
+		await this.setComposerWorkMode(
+			nextComposerWorkMode(this.getComposerWorkMode(), this.isComposerModeAvailable("plan")),
+		);
+	}
+
+	/**
+	 * Switch the composer work mode. Every branch maps to existing runtime
+	 * enforcement: Ask restricts the session's active toolset to the explicit
+	 * observational allowlist (the same setActiveToolsByName primitive plan/goal
+	 * modes use), Build restores the saved toolset, Plan routes through the
+	 * plan-mode toggle so draft confirmation and session mode entries stay
+	 * authoritative. Mode switches never widen permissions: Build/Plan keep the
+	 * per-call approval gates (`tools.approvalMode`) untouched.
+	 */
+	async setComposerWorkMode(target: ComposerWorkMode): Promise<void> {
+		const transition = this.#composerTransition.then(() => this.#setComposerWorkMode(target));
+		this.#composerTransition = transition.catch(() => {});
+		return transition;
+	}
+
+	waitForComposerTransition(): Promise<void> {
+		return this.#composerTransition;
+	}
+
+	async #setComposerWorkMode(target: ComposerWorkMode): Promise<void> {
+		if (this.focusedAgentId) return;
+		const current = this.getComposerWorkMode();
+		if (target === current) return;
+		if (!this.isComposerModeAvailable(target)) {
+			this.showWarning("Plan mode is disabled in settings.");
+			return;
+		}
+		if (this.session.isStreaming && !(current === "ask" && target === "build")) {
+			this.showStatus("Finish the current turn (esc to stop) before switching work modes.");
+			return;
+		}
+		if (this.goalModeEnabled || this.goalModePaused) {
+			this.showWarning("Goal mode manages its own toolset — exit goal mode first.");
+			return;
+		}
+
+		if (current === "ask") await this.#exitAskMode();
+		if (current === "plan") {
+			await this.handlePlanModeCommand();
+			if (this.planModeEnabled) return; // user cancelled the exit confirmation
+		}
+		if (target === "ask") {
+			await this.#enterAskMode();
+		} else if (target === "plan") {
+			if (this.planModePaused) await this.handlePlanModeCommand(); // paused → off
+			if (!this.planModeEnabled) await this.handlePlanModeCommand(); // off → on
+		}
+		this.updateEditorBorderColor();
+		this.ui.requestRender();
+	}
+
+	async restoreComposerAskTools(): Promise<void> {
+		const transition = this.#composerTransition.then(() => this.#restoreComposerAskTools());
+		this.#composerTransition = transition.catch(() => {});
+		return transition;
+	}
+
+	async #restoreComposerAskTools(): Promise<void> {
+		if (!this.askModeEnabled) return;
+		await this.#exitAskMode();
+		this.updateEditorBorderColor();
+		this.ui.requestRender();
+	}
+
+	async disableComposerPlanMode(): Promise<void> {
+		const transition = this.#composerTransition.then(async () => {
+			if (this.planModeEnabled) await this.#exitPlanMode({ silent: true, paused: false });
+			if (this.planModePaused) {
+				this.planModePaused = false;
+				this.#planModeHasEntered = false;
+				this.#updatePlanModeStatus();
+				this.sessionManager.appendModeChange("none");
+			}
+			this.updateEditorTopBorder();
+			this.#syncEditorMaxHeight();
+			this.ui.requestRender();
+		});
+		this.#composerTransition = transition.catch(() => {});
+		return transition;
+	}
+
+	async #enterAskMode(): Promise<void> {
+		if (this.askModeEnabled) return;
+		const previousTools = this.session.getActiveToolNames();
+		const askTools = computeAskModeTools(previousTools);
+		this.#askModePreviousTools = previousTools;
+		try {
+			await this.session.setActiveToolCeiling(askTools, previousTools);
+			this.askModeEnabled = true;
+			this.showStatus("Ask mode: observational tools only (no edits, shell, or delegation).");
+		} catch (error) {
+			this.#askModePreviousTools = undefined;
+			throw error;
+		}
+	}
+
+	async #exitAskMode(): Promise<void> {
+		if (!this.askModeEnabled) return;
+		const previousTools = this.#askModePreviousTools;
+		if (previousTools !== undefined) await this.session.setActiveToolCeiling(undefined, previousTools);
+		this.#askModePreviousTools = undefined;
+		this.askModeEnabled = false;
+	}
+
+	/** Mount mode bar + editor + diagnostics into the editor container (constructor and editor swaps). */
+	#mountComposer(editor: CustomEditor): void {
+		if (this.isIntentComposerEnabled()) {
+			editor.placeholder = "Describe the outcome you want…";
+		}
+		editor.setBottomSection(() => this.#buildComposerBottomSection());
+		this.editorContainer.addChild(this.#composerModeBar);
+		this.editorContainer.addChild(editor);
+		this.editorContainer.addChild(this.#composerDiagnostics);
+	}
+
+	/** Restore the editor slot with the complete composer chrome. */
+	remountEditorComposer(): void {
+		this.editorContainer.clear();
+		this.#mountComposer(this.editor);
+	}
+
+	/** Live provider for the in-frame chips row + execution rail; reads session state at render time. */
+	#buildComposerBottomSection(): EditorBottomSection | undefined {
+		if (!this.isIntentComposerEnabled()) return undefined;
+		const width = this.editor.getTopBorderAvailableWidth(this.ui.terminal.columns);
+		if (width <= 0) return undefined;
+		const chipsRow = buildChipsRow(this.#collectComposerChips(), width);
+		const focused = this.focusedAgentId !== undefined;
+		const def = getComposerWorkModeDef(this.getComposerWorkMode());
+		const hasInput = this.editor.getText().trim().length > 0 || this.pendingImages.length > 0;
+		const viewSession = this.viewSession;
+		const streaming = this.collabGuest?.state?.isStreaming === true || viewSession.isStreaming;
+		const railRow = buildRailRow(
+			{
+				modeLabel: focused ? "Focused" : def.label,
+				cta: focused ? "Send" : def.cta,
+				streaming,
+				hasInput,
+				queuedCount: viewSession.queuedMessageCount,
+				stopKeyHint: focused || this.collabGuest ? undefined : this.keybindings.getKeys("app.interrupt")[0],
+			},
+			width,
+		);
+		return { bodyRows: chipsRow ? [chipsRow] : [], footerRows: [railRow] };
+	}
+
+	#collectComposerChips(): ComposerChip[] {
+		const chips: ComposerChip[] = [];
+		if (!this.focusedAgentId) {
+			// `git.enabled` is the master kill-switch for git probes; without it
+			// the chip degrades to the bare project-directory name.
+			const gitEnabled = this.session.settings.get("git.enabled");
+			const branch = gitEnabled ? this.#currentGitBranch() : null;
+			const repoDir = gitEnabled ? (this.#composerBranchCache?.dir ?? getProjectDir()) : getProjectDir();
+			const repo = sanitizeStatusText(path.basename(repoDir));
+			chips.push({ label: branch ? `${repo}/${sanitizeStatusText(branch)}` : repo, kind: "auto" });
+			if (this.planModeEnabled && this.planModePlanFilePath) {
+				chips.push({
+					label: `plan: ${sanitizeStatusText(path.basename(this.planModePlanFilePath))}`,
+					kind: "auto",
+				});
+			}
+		}
+		const imageCount = this.pendingImages.length;
+		if (imageCount > 0)
+			chips.push({ label: imageCount === 1 ? "1 image" : `${imageCount} images`, kind: "attached" });
+		return chips;
+	}
+
+	/** Best-effort branch name for the repo/branch chip; cached for 5s to keep render cheap. */
+	#currentGitBranch(): string | null {
+		const projectDir = getProjectDir();
+		const activeRepo = resolveActiveRepoContextSync(projectDir);
+		const repository = git.repo.resolveSync(activeRepo?.repoRoot ?? projectDir);
+		const cacheDir = repository?.repoRoot ?? activeRepo?.repoRoot ?? projectDir;
+		const now = Date.now();
+		if (
+			this.#composerBranchCache &&
+			this.#composerBranchCache.dir === cacheDir &&
+			now - this.#composerBranchCache.readAt < 5_000
+		) {
+			return this.#composerBranchCache.value;
+		}
+		let value: string | null = null;
+		try {
+			const content = repository ? fsSync.readFileSync(repository.headPath, "utf8") : "";
+			const match = content.match(/^ref: refs\/heads\/(.+)$/m);
+			value = match?.[1]?.trim() ?? null;
+		} catch {
+			value = null;
+		}
+		this.#composerBranchCache = { dir: cacheDir, value, readAt: now };
+		return value;
 	}
 
 	rebuildChatFromMessages(): void {
@@ -1881,7 +2162,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async #clearTransientModeState(): Promise<void> {
+	async #clearTransientModeState(options?: { restoreAskTools?: boolean }): Promise<void> {
 		if (this.planModeEnabled || this.planModePaused) {
 			if (this.#planModePreviousTools !== undefined) {
 				await this.session.setActiveToolsByName(this.#planModePreviousTools);
@@ -1896,6 +2177,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#pendingModelSwitch = undefined;
 			this.#planModeHasEntered = false;
 			this.#updatePlanModeStatus();
+		}
+
+		if (this.askModeEnabled) {
+			if (options?.restoreAskTools !== false && this.#askModePreviousTools !== undefined) {
+				await this.session.setActiveToolsByName(this.#askModePreviousTools);
+			}
+			this.#askModePreviousTools = undefined;
+			this.askModeEnabled = false;
 		}
 
 		if (this.goalModeEnabled || this.goalModePaused) {
@@ -1915,8 +2204,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Reconcile mode state from session entries on resume/switch. */
-	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
-		await this.#clearTransientModeState();
+	async #reconcileModeFromSession(options?: {
+		preserveActiveGoal?: boolean;
+		restoreAskTools?: boolean;
+	}): Promise<void> {
+		await this.#clearTransientModeState({ restoreAskTools: options?.restoreAskTools });
 		const sessionContext = this.sessionManager.buildSessionContext();
 		const goalEnabled = this.session.settings.get("goal.enabled");
 		if (!goalEnabled && (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused")) {
@@ -2125,6 +2417,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #enterGoalMode(options: { objective?: string; resume?: boolean; silent?: boolean }): Promise<void> {
+		await this.#exitAskMode();
 		if (this.goalModeEnabled) {
 			return;
 		}
@@ -2610,6 +2903,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Plan mode is disabled. Enable it in settings (plan.enabled).");
 			return;
 		}
+		await this.#exitAskMode();
 		await this.#enterPlanMode();
 		if (initialPrompt && this.onInputCallback) {
 			this.onInputCallback(this.startPendingSubmission({ text: initialPrompt }));
@@ -3259,7 +3553,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.editorContainer.clear();
 		this.editor = nextEditor;
-		this.editorContainer.addChild(nextEditor);
+		this.#mountComposer(nextEditor);
 		this.ui.setFocus(nextEditor);
 
 		this.#inputController.setupKeyHandlers();

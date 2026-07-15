@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import type { CompactOptions } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/extensions/types";
 import type { InteractiveModeContext } from "@pk-nerdsaver-ai/pi-coding-agent/modes/types";
 import type { CompactMode } from "@pk-nerdsaver-ai/pi-coding-agent/session/compact-modes";
+import { SNAPCOMPACT_RETIREMENT_ERROR } from "@pk-nerdsaver-ai/pi-coding-agent/session/compact-modes";
 import {
 	ACP_BUILTIN_SLASH_COMMANDS,
 	executeAcpBuiltinSlashCommand,
@@ -39,7 +40,7 @@ describe("/compact dispatch (ACP)", () => {
 	});
 
 	it("threads each mode subcommand into compact()", async () => {
-		for (const mode of ["soft", "remote", "snapcompact"] as const satisfies readonly CompactMode[]) {
+		for (const mode of ["soft", "remote"] as const satisfies readonly CompactMode[]) {
 			const h = acpRuntime();
 			await executeAcpBuiltinSlashCommand(`/compact ${mode}`, h.runtime);
 			expect(h.compact).toHaveBeenCalledWith(undefined, { mode });
@@ -58,18 +59,18 @@ describe("/compact dispatch (ACP)", () => {
 		expect(h.compact).toHaveBeenCalledWith("summarize the auth flow", undefined);
 	});
 
-	it("rejects focus text on snapcompact without compacting", async () => {
+	it("rejects the removed snapcompact mode without compacting", async () => {
 		const h = acpRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/compact snapcompact keep the diffs", h.runtime);
+		const result = await executeAcpBuiltinSlashCommand("/compact snapcompact", h.runtime);
 		expect(h.compact).not.toHaveBeenCalled();
 		expect(result).toEqual({ consumed: true });
-		expect((h.output.mock.calls[0]?.[0] as string) ?? "").toContain("snapcompact");
+		expect((h.output.mock.calls[0]?.[0] as string) ?? "").toContain(SNAPCOMPACT_RETIREMENT_ERROR);
 	});
 
 	it("advertises the mode subcommands and input hint to ACP clients", () => {
 		const advertised = ACP_BUILTIN_SLASH_COMMANDS.find(c => c.name === "compact");
 		expect(advertised).toBeDefined();
-		expect(advertised?.input?.hint).toBe("[soft|remote|snapcompact] [focus]");
+		expect(advertised?.input?.hint).toBe("[soft|remote] [focus]");
 	});
 });
 
@@ -88,10 +89,10 @@ describe("/compact dispatch (TUI)", () => {
 		expect(h.handleCompactCommand).toHaveBeenCalledWith(undefined, undefined);
 	});
 
-	it("warns on snapcompact + focus text and does not compact", async () => {
+	it("warns on the removed snapcompact mode and does not compact", async () => {
 		const h = tuiRuntime();
 		await executeBuiltinSlashCommand("/compact snapcompact keep diffs", h.runtime);
 		expect(h.handleCompactCommand).not.toHaveBeenCalled();
-		expect(h.showWarning).toHaveBeenCalled();
+		expect(h.showWarning).toHaveBeenCalledWith(SNAPCOMPACT_RETIREMENT_ERROR);
 	});
 });

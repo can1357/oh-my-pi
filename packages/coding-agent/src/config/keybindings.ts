@@ -52,6 +52,7 @@ interface AppKeybindings {
 	"app.tree.foldOrUp": true;
 	"app.tree.unfoldOrDown": true;
 	"app.plan.toggle": true;
+	"app.composer.mode.cycle": true;
 	"app.history.search": true;
 	"app.stt.toggle": true;
 }
@@ -216,6 +217,10 @@ export const KEYBINDINGS = {
 	"app.plan.toggle": {
 		defaultKeys: "alt+shift+p",
 		description: "Toggle plan mode",
+	},
+	"app.composer.mode.cycle": {
+		defaultKeys: "alt+shift+m",
+		description: "Cycle composer work mode (Ask / Build / Plan)",
 	},
 	"app.history.search": {
 		defaultKeys: "ctrl+r",

@@ -555,17 +555,21 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 				}
 				return out;
 			}
+			case "compactionSummary": {
+				const nativeBlocks = m.blocks?.filter((block): block is TextContent => block.type === "text");
+				const converted = convertMessageToLlm({ ...m, images: undefined, blocks: nativeBlocks });
+				return converted ? [converted] : [];
+			}
 			case "custom":
 			case "hookMessage":
 			case "branchSummary":
-			case "compactionSummary":
 			case "user":
 			case "developer":
 			case "assistant":
 			case "toolResult": {
 				// Core roles share one transformer with agent-core —
-				// duplicating them here is how snapcompact frames once
-				// silently fell off the provider request.
+				// legacy compaction images are stripped above; duplicating core roles here once
+				// caused provider conversion behavior to diverge.
 				const converted = convertMessageToLlm(m);
 				return converted ? [converted] : [];
 			}

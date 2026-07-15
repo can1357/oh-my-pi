@@ -26,6 +26,7 @@ import type { LspStartupServerInfo } from "../tools";
 import type { EventBus } from "../utils/event-bus";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
+import type { ComposerWorkMode } from "./components/composer";
 import type { CustomEditor } from "./components/custom-editor";
 import type { EvalExecutionComponent } from "./components/eval-execution";
 import type { HookEditorComponent } from "./components/hook-editor";
@@ -141,6 +142,7 @@ export interface InteractiveModeContext {
 	toolOutputExpanded: boolean;
 	todoExpanded: boolean;
 	planModeEnabled: boolean;
+	askModeEnabled: boolean;
 	goalModeEnabled: boolean;
 	goalModePaused: boolean;
 	loopModeEnabled: boolean;
@@ -272,6 +274,7 @@ export interface InteractiveModeContext {
 	extractAssistantText(message: AssistantMessage): string;
 	updateEditorTopBorder(): void;
 	updateEditorBorderColor(): void;
+	remountEditorComposer(): void;
 	rebuildChatFromMessages(): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;
 	reloadTodos(): Promise<void>;
@@ -372,6 +375,13 @@ export interface InteractiveModeContext {
 	openExternalEditor(): void;
 	registerExtensionShortcuts(): void;
 	handlePlanModeCommand(initialPrompt?: string): Promise<void>;
+	isIntentComposerEnabled(): boolean;
+	getComposerWorkMode(): ComposerWorkMode;
+	setComposerWorkMode(mode: ComposerWorkMode): Promise<void>;
+	waitForComposerTransition(): Promise<void>;
+	restoreComposerAskTools(): Promise<void>;
+	disableComposerPlanMode(): Promise<void>;
+	cycleComposerWorkMode(): Promise<void>;
 	handleGoalModeCommand(rest?: string): Promise<void>;
 	handleGuidedGoalCommand(rest?: string): Promise<void>;
 	handleLoopCommand(args?: string): Promise<string | undefined>;

@@ -1070,9 +1070,7 @@ export class EventController {
 				? "Auto-handoff"
 				: event.action === "shake"
 					? "Auto-shake"
-					: event.action === "snapcompact"
-						? "Auto-snapcompact"
-						: "Auto context-full maintenance";
+					: "Auto context-full maintenance";
 		this.ctx.autoCompactionLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("accent", spinner),
@@ -1094,16 +1092,13 @@ export class EventController {
 		}
 		const isHandoffAction = event.action === "handoff";
 		const isShakeAction = event.action === "shake";
-		const isSnapcompactAction = event.action === "snapcompact";
 		if (event.aborted) {
 			this.ctx.showStatus(
 				isHandoffAction
 					? "Auto-handoff cancelled"
 					: isShakeAction
 						? "Auto-shake cancelled"
-						: isSnapcompactAction
-							? "Auto-snapcompact cancelled"
-							: "Auto context-full maintenance cancelled",
+						: "Auto context-full maintenance cancelled",
 			);
 		} else if (isShakeAction) {
 			// Shake produces no CompactionResult; rebuild on success, suppress benign skips.
@@ -1142,8 +1137,6 @@ export class EventController {
 		} else if (event.skipped) {
 			// Benign skip: no model selected, no candidate models available, or nothing
 			// to compact yet. Not a failure — suppress the warning.
-		} else if (isSnapcompactAction) {
-			this.ctx.showWarning("Auto-snapcompact maintenance failed; continuing without maintenance");
 		} else {
 			this.ctx.showWarning("Auto context-full maintenance failed; continuing without maintenance");
 		}

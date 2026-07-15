@@ -175,10 +175,12 @@ describe("Settings", () => {
 			expect(settings.get("disabledProviders")).toEqual(["always-provider", "other-provider"]);
 		});
 
-		it("migrates legacy snapcompact system prompt booleans to scoped modes", () => {
-			expect(Settings.isolated({ "snapcompact.systemPrompt": true }).get("snapcompact.systemPrompt")).toBe("all");
-			const nestedLegacy = { snapcompact: { systemPrompt: false } } as Partial<Record<SettingPath, unknown>>;
-			expect(Settings.isolated(nestedLegacy).get("snapcompact.systemPrompt")).toBe("none");
+		it("migrates the retired snapcompact strategy to native-text context-full", () => {
+			const legacy = {
+				"compaction.strategy": "snapcompact",
+				"snapcompact.systemPrompt": true,
+			} as unknown as Partial<Record<SettingPath, unknown>>;
+			expect(Settings.isolated(legacy).get("compaction.strategy")).toBe("context-full");
 		});
 
 		it("migrates legacy inlineToolDescriptors booleans to the on/off enum", () => {

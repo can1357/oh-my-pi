@@ -1,6 +1,17 @@
 import type { AgentMessage } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { ProviderPayload, ServiceTier } from "@pk-nerdsaver-ai/pi-ai";
+import type { ProviderPayload, ServiceTier, TextContent } from "@pk-nerdsaver-ai/pi-ai";
+import { prompt } from "@pk-nerdsaver-ai/pi-utils";
 import * as snapcompact from "@pk-nerdsaver-ai/snapcompact";
+import currentSnapcompactLeadPrefixPrompt from "../prompts/system/current-snapcompact-lead-prefix.md" with {
+	type: "text",
+};
+import legacyArchiveElisionPrompt from "../prompts/system/legacy-archive-elision.md" with { type: "text" };
+import legacyArchiveFrameMarkerPrompt from "../prompts/system/legacy-archive-frame-marker.md" with { type: "text" };
+import legacyArchiveRecoveryPrompt from "../prompts/system/legacy-archive-recovery.md" with { type: "text" };
+import legacyArchiveTruncationPrompt from "../prompts/system/legacy-archive-truncation.md" with { type: "text" };
+import legacySnapcompactLeadPrefixPrompt from "../prompts/system/legacy-snapcompact-lead-prefix.md" with {
+	type: "text",
+};
 import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "./messages";
 import { renderPreservedOffloadTraceMarkdown } from "./offload-trace";
 import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
@@ -65,9 +76,10 @@ export function summaryWithPreservedOffloadTrace(
 	summary: string,
 	preserveData: Record<string, unknown> | undefined,
 ): string {
-	if (summary.includes("## Trace")) return summary;
+	const normalizedSummary = normalizeLegacySnapcompactSummary(summary);
+	if (normalizedSummary.includes("## Trace")) return normalizedSummary;
 	const trace = renderPreservedOffloadTraceMarkdown(preserveData, { maxCanvasChars: 2000, maxNodes: 24 });
-	return trace ? `${summary.trimEnd()}\n\n${trace}` : summary;
+	return trace ? `${normalizedSummary.trimEnd()}\n\n${trace}` : normalizedSummary;
 }
 
 export interface BuildSessionContextOptions {
@@ -77,9 +89,86 @@ export interface BuildSessionContextOptions {
 	 * `collapseCompactedHistory` for the live TUI surface to render only the
 	 * latest compacted tail.
 	 */
-	transcript?: boolean;
-	/** In transcript mode, elide entries replaced by the latest compaction. */
 	collapseCompactedHistory?: boolean;
+}
+
+const MAX_LEGACY_ARCHIVE_TEXT_CHARS = 80_000;
+const LEGACY_ARCHIVE_ELISION_MARKER = prompt.render(legacyArchiveElisionPrompt).trimEnd();
+const LEGACY_ARCHIVE_TRUNCATION_MARKER = prompt.render(legacyArchiveTruncationPrompt).trimEnd();
+const LEGACY_SNAPCOMPACT_LEAD_PREFIXES = [legacySnapcompactLeadPrefixPrompt, currentSnapcompactLeadPrefixPrompt].map(
+	promptText => prompt.render(promptText).trim(),
+);
+const LEGACY_ARCHIVE_RECOVERY_NOTICE = prompt.render(legacyArchiveRecoveryPrompt).trim();
+
+function normalizeLegacySnapcompactSummary(summary: string): string {
+	const leadPrefix = LEGACY_SNAPCOMPACT_LEAD_PREFIXES.find(prefix => summary.startsWith(prefix));
+	if (!leadPrefix) return summary;
+	const remainder = summary.slice(leadPrefix.length);
+	const preservedStart = remainder.search(/\n(?=(?:<files>|(?:##\s*)?(?:files|history)\b))/i);
+	const preserved = preservedStart >= 0 ? remainder.slice(preservedStart).trimStart() : "";
+	return preserved ? `${LEGACY_ARCHIVE_RECOVERY_NOTICE}\n\n${preserved}` : LEGACY_ARCHIVE_RECOVERY_NOTICE;
+}
+
+function boundLegacyArchiveText(text: string, protectedMarker?: string, protectedMarkerIndex?: number): string {
+	if (text.length <= MAX_LEGACY_ARCHIVE_TEXT_CHARS) return text;
+	if (protectedMarker) {
+		const markerIndex = protectedMarkerIndex ?? text.lastIndexOf(protectedMarker);
+		if (markerIndex >= 0) {
+			const available =
+				MAX_LEGACY_ARCHIVE_TEXT_CHARS - protectedMarker.length - LEGACY_ARCHIVE_ELISION_MARKER.length * 2;
+			const headLength = Math.min(markerIndex, Math.ceil(available / 2));
+			const tailStart = markerIndex + protectedMarker.length;
+			const tailLength = Math.min(text.length - tailStart, Math.floor(available / 2));
+			const head = text.slice(0, headLength);
+			const tail = tailLength > 0 ? text.slice(-tailLength) : "";
+			return `${head}${LEGACY_ARCHIVE_ELISION_MARKER}${protectedMarker}${LEGACY_ARCHIVE_ELISION_MARKER}${tail}`;
+		}
+	}
+	const available = MAX_LEGACY_ARCHIVE_TEXT_CHARS - LEGACY_ARCHIVE_ELISION_MARKER.length;
+	const headLength = Math.ceil(available / 2);
+	const tailLength = Math.floor(available / 2);
+	return `${text.slice(0, headLength)}${LEGACY_ARCHIVE_ELISION_MARKER}${text.slice(-tailLength)}`;
+}
+
+function legacyArchivePartText(part: string | undefined): string {
+	if (!part) return "";
+	return snapcompact.archiveSourceText({ frames: [], totalChars: part.length, truncatedChars: 0, text: part }) ?? "";
+}
+
+function legacyArchiveFrameMarker(frameCount: number): string {
+	return prompt.render(legacyArchiveFrameMarkerPrompt, { frameCount }).trim();
+}
+
+/** Recover readable source from retired image archives without re-attaching frames. */
+function legacySnapcompactTextBlocks(preserveData: Record<string, unknown> | undefined): TextContent[] | undefined {
+	const archive = snapcompact.getPreservedArchive(preserveData);
+	if (!archive) return undefined;
+	const hasLegacyFrameGap =
+		archive.text === undefined &&
+		archive.frames.length > 0 &&
+		(archive.textHead !== undefined || archive.textTail !== undefined);
+	if (hasLegacyFrameGap) {
+		const marker = legacyArchiveFrameMarker(archive.frames.length);
+		const head = legacyArchivePartText(archive.textHead);
+		const tail = legacyArchivePartText(archive.textTail);
+		const text = [head, marker, tail].filter(part => part.length > 0).join("\n\n");
+		const markerIndex = head.length > 0 ? head.length + 2 : 0;
+		return [{ type: "text", text: boundLegacyArchiveText(text, marker, markerIndex) }];
+	}
+	if (archive.text === undefined && archive.frames.length === 0 && archive.truncatedChars > 0 && archive.textTail) {
+		const head = legacyArchivePartText(archive.textHead);
+		const tail = legacyArchivePartText(archive.textTail);
+		const text = `${head}${LEGACY_ARCHIVE_TRUNCATION_MARKER}${tail}`;
+		return [
+			{
+				type: "text",
+				text: boundLegacyArchiveText(text, LEGACY_ARCHIVE_TRUNCATION_MARKER, head.length),
+			},
+		];
+	}
+	const text = snapcompact.archiveSourceText(archive);
+	if (text) return [{ type: "text", text: boundLegacyArchiveText(text) }];
+	return [{ type: "text", text: legacyArchiveFrameMarker(archive.frames.length) }];
 }
 
 /**
@@ -267,14 +356,11 @@ export function buildSessionContext(
 	};
 
 	if (options?.transcript && !options.collapseCompactedHistory) {
-		// Display transcript: every entry in chronological order. Compactions do
-		// not erase prior history here — each renders inline (as a divider in the
-		// TUI) at the point it fired, with any snapcompact frames re-attached so
-		// the component can report them.
+		// Display transcript: every entry in chronological order. Legacy image archives
+		// are recovered as native text and their persisted frames are never re-attached.
 		for (const entry of path) {
 			handleEntryResetTracking(entry);
 			if (entry.type === "compaction") {
-				const snapcompactArchive = snapcompact.getPreservedArchive(entry.preserveData);
 				pushMessage(
 					createCompactionSummaryMessage(
 						summaryWithPreservedOffloadTrace(entry.summary, entry.preserveData),
@@ -283,7 +369,7 @@ export function buildSessionContext(
 						entry.shortSummary,
 						undefined,
 						undefined,
-						snapcompactArchive ? snapcompact.historyBlocks(snapcompactArchive) : undefined,
+						legacySnapcompactTextBlocks(entry.preserveData),
 					),
 				);
 			} else {
@@ -306,9 +392,7 @@ export function buildSessionContext(
 		const remoteReplacementHistory = providerPayload?.items;
 
 		if (options?.transcript) handleEntryResetTracking(compaction);
-		// Emit summary first; re-attach any archived snapcompact frames so the
-		// model can keep reading the archived history after every context rebuild.
-		const snapcompactArchive = snapcompact.getPreservedArchive(compaction.preserveData);
+		// Emit the summary first and recover legacy archive source as native text.
 		pushMessage(
 			createCompactionSummaryMessage(
 				summaryWithPreservedOffloadTrace(compaction.summary, compaction.preserveData),
@@ -317,7 +401,7 @@ export function buildSessionContext(
 				compaction.shortSummary,
 				providerPayload,
 				undefined,
-				snapcompactArchive ? snapcompact.historyBlocks(snapcompactArchive) : undefined,
+				legacySnapcompactTextBlocks(compaction.preserveData),
 			),
 		);
 

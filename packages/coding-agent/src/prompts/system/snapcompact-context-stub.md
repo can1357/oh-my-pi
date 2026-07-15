@@ -1,1 +1,0 @@
-Loaded context-file instructions were moved to PNG image(s) attached below at the start of the first user message. Read every frame in order where this marker appears, then apply those instructions as if the original context-file text remained here.

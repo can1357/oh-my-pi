@@ -106,10 +106,7 @@ export class CompactionSummaryMessageComponent implements Component {
 
 	#detailMarkdown(): string {
 		const tokenStr = this.message.tokensBefore.toLocaleString();
-		const frameCount = this.message.images?.length ?? 0;
-		const frameNote =
-			frameCount > 0 ? `\n\n_${frameCount} snapcompact frame${frameCount === 1 ? "" : "s"} attached_` : "";
-		return `**Compacted from ${tokenStr} tokens**\n\n${this.message.summary}${frameNote}`;
+		return `**Compacted from ${tokenStr} tokens**\n\n${this.message.summary}`;
 	}
 }
 

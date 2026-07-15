@@ -349,7 +349,11 @@ export class StatusLineComponent implements Component {
 			this.#gitWatcher = null;
 		}
 
-		if (!this.#gitEnabled() || !this.#hasGitBackedSegment()) {
+		// `git.enabled` is the master kill-switch for every probe. Below it, an
+		// explicit branch-change subscriber (the composer's branch chip) forces
+		// watching even when the status line shows no Git-backed segment —
+		// otherwise a checkout could never repaint the chip.
+		if (!this.#gitEnabled() || (!this.#hasGitBackedSegment() && !this.#onBranchChange)) {
 			this.#invalidateGitCaches();
 			return;
 		}
