@@ -1,0 +1,9 @@
+{
+  "Rules": [
+    { "ID": "temp-delete", "Status": "Enabled", "Filter": { "Prefix": "temp/" }, "Expiration": { "Days": 7 } },
+    { "ID": "raw-tier-delete", "Status": "Enabled", "Filter": { "Prefix": "raw/" }, "Expiration": { "Days": 30 } },
+    { "ID": "processed-delete", "Status": "Enabled", "Filter": { "Prefix": "processed/" }, "Expiration": { "Days": 90 } },
+    { "ID": "error-delete", "Status": "Enabled", "Filter": { "Prefix": "errors/" }, "Expiration": { "Days": 60 } },
+    { "ID": "audit-tier-delete", "Status": "Enabled", "Filter": { "Prefix": "audit/" }, "Expiration": { "Days": 730 } }
+  ]
+}
