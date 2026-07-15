@@ -1,9 +1,66 @@
 {
   "Rules": [
-    { "ID": "temp-delete", "Status": "Enabled", "Filter": { "Prefix": "temp/" }, "Expiration": { "Days": 7 } },
-    { "ID": "raw-tier-delete", "Status": "Enabled", "Filter": { "Prefix": "raw/" }, "Expiration": { "Days": 30 } },
-    { "ID": "processed-delete", "Status": "Enabled", "Filter": { "Prefix": "processed/" }, "Expiration": { "Days": 90 } },
-    { "ID": "error-delete", "Status": "Enabled", "Filter": { "Prefix": "errors/" }, "Expiration": { "Days": 60 } },
-    { "ID": "audit-tier-delete", "Status": "Enabled", "Filter": { "Prefix": "audit/" }, "Expiration": { "Days": 730 } }
+    {
+      "ID": "raw_capture-expire",
+      "Status": "Enabled",
+      "Filter": { "And": { "Prefix": "raw_capture/", "Tags": [{ "Key": "legal_hold", "Value": "false" }] } },
+      "Expiration": { "Days": 30 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }
+    },
+    {
+      "ID": "extracted_text-expire",
+      "Status": "Enabled",
+      "Filter": { "And": { "Prefix": "extracted_text/", "Tags": [{ "Key": "legal_hold", "Value": "false" }] } },
+      "Expiration": { "Days": 90 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 90 }
+    },
+    {
+      "ID": "session_summary-expire",
+      "Status": "Enabled",
+      "Filter": { "And": { "Prefix": "session_summary/", "Tags": [{ "Key": "legal_hold", "Value": "false" }] } },
+      "Expiration": { "Days": 90 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 90 }
+    },
+    {
+      "ID": "preference-expire",
+      "Status": "Enabled",
+      "Filter": { "And": { "Prefix": "preference/", "Tags": [{ "Key": "legal_hold", "Value": "false" }] } },
+      "Expiration": { "Days": 365 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 365 }
+    },
+    {
+      "ID": "audit_action-expire",
+      "Status": "Enabled",
+      "Filter": { "And": { "Prefix": "audit_action/", "Tags": [{ "Key": "legal_hold", "Value": "false" }] } },
+      "Expiration": { "Days": 730 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 730 }
+    },
+    {
+      "ID": "error_log-expire",
+      "Status": "Enabled",
+      "Filter": { "And": { "Prefix": "error_log/", "Tags": [{ "Key": "legal_hold", "Value": "false" }] } },
+      "Expiration": { "Days": 60 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 60 }
+    },
+    {
+      "ID": "temporary-expire",
+      "Status": "Enabled",
+      "Filter": { "And": { "Prefix": "temporary/", "Tags": [{ "Key": "legal_hold", "Value": "false" }] } },
+      "Expiration": { "Days": 7 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 7 }
+    },
+    {
+      "ID": "quarantine-expire",
+      "Status": "Enabled",
+      "Filter": { "And": { "Prefix": "quarantine/", "Tags": [{ "Key": "legal_hold", "Value": "false" }] } },
+      "Expiration": { "Days": 14 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 14 }
+    },
+    {
+      "ID": "expired-delete-marker-cleanup",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "Expiration": { "ExpiredObjectDeleteMarker": true }
+    }
   ]
 }
