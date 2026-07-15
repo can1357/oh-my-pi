@@ -51,7 +51,7 @@ describe("DurableRunner", () => {
 	});
 
 	function openStore(clock?: TestClock, ids?: TestIds): OperationalStore {
-		tempDir = TempDir.createSync("omp-durable-runner-");
+		tempDir = TempDir.createSync("@omp-durable-runner-");
 		const s = OperationalStore.open({
 			dbPath: path.join(tempDir.path(), "operational.db"),
 			now: clock?.now,

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Added a Consurg Guard hook example that evaluates every scoped file or command tool call, including multi-path and workspace-root searches, and can fail closed when its guard is unavailable.
 - Added opt-in global image background packs from explicit outside-workspace manifests, with exact-model qualification, profitability gating, content/profile caching, non-authoritative provenance, and fail-closed warnings.
 - Added the default intent composer with enforceable Ask/Build/Plan work modes, context chips, an execution rail, and a configurable mode-cycle keybinding; the classic layout remains selectable.
 - Added offline `/help [question]` recommendations that match natural-language questions to built-in oh-my-pk features, explain when to use them, and link to local documentation.

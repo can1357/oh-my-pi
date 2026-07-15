@@ -16,7 +16,7 @@ describe("autocompleteMaxVisible setting", () => {
 
 	beforeEach(() => {
 		settingsState = beginSettingsTest();
-		tempDir = TempDir.createSync("test-autocomplete-settings-");
+		tempDir = TempDir.createSync("@test-autocomplete-settings-");
 		agentDir = path.join(tempDir.path(), "agent");
 		projectDir = path.join(tempDir.path(), "project");
 		fs.mkdirSync(agentDir, { recursive: true });
