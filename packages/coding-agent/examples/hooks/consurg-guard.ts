@@ -28,8 +28,17 @@ const READ_TOOLS: Record<string, true> = {
 	glob: true,
 	find: true,
 	ls: true,
+	ast_grep: true,
+	context_oracle: true,
+	inspect_image: true,
+	generate_image: true,
 };
-const WRITE_TOOLS: Record<string, true> = { write: true, edit: true, multi_edit: true };
+const WRITE_TOOLS: Record<string, true> = {
+	write: true,
+	edit: true,
+	multi_edit: true,
+	ast_edit: true,
+};
 const COMMAND_TOOLS: Record<string, true> = { bash: true };
 
 const LOCKFILE_NAME = ".consurg-guard.lock";
@@ -49,24 +58,26 @@ function isFailClosed(): boolean {
 	return process.env.CONSURG_FAIL_CLOSED === "1";
 }
 
+function addPathValue(value: unknown, paths: string[]): boolean {
+	if (typeof value !== "string" || value.length === 0) return false;
+	paths.push(value);
+	return true;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
-function pathTargets(input: Record<string, unknown>): PathTargets {
+function pathTargets(toolName: string, input: Record<string, unknown>): PathTargets {
 	const paths: string[] = [];
 	let hasTarget = false;
 	let inspectable = true;
 
-	for (const key of ["path", "file_path"] as const) {
+	for (const key of ["path", "file_path", "filePath", "file", "scope"] as const) {
 		if (!(key in input)) continue;
 		hasTarget = true;
-		const value = input[key];
-		if (typeof value !== "string" || value.length === 0) {
-			inspectable = false;
-			continue;
-		}
-		paths.push(value);
+		if (key === "scope" && input[key] === "*") paths.push(".");
+		else if (!addPathValue(input[key], paths)) inspectable = false;
 	}
 
 	if ("paths" in input) {
@@ -86,6 +97,52 @@ function pathTargets(input: Record<string, unknown>): PathTargets {
 		}
 	}
 
+	for (const key of ["rename", "move", "moveDest"] as const) {
+		if (!(key in input)) continue;
+		hasTarget = true;
+		if (!addPathValue(input[key], paths)) inspectable = false;
+	}
+
+	if (toolName === "lsp" && input.action === "rename_file" && "new_name" in input) {
+		hasTarget = true;
+		if (!addPathValue(input.new_name, paths)) inspectable = false;
+	}
+
+	if ("edits" in input && Array.isArray(input.edits)) {
+		for (const edit of input.edits) {
+			if (!isRecord(edit)) continue;
+			for (const key of ["rename", "move", "moveDest"] as const) {
+				if (!(key in edit)) continue;
+				hasTarget = true;
+				if (!addPathValue(edit[key], paths)) inspectable = false;
+			}
+		}
+	}
+
+	if ("input" in input && Array.isArray(input.input)) {
+		for (const source of input.input) {
+			if (!isRecord(source) || !("path" in source)) continue;
+			hasTarget = true;
+			if (!addPathValue(source.path, paths)) inspectable = false;
+		}
+	}
+
+	for (const value of [input.input, input._input]) {
+		if (typeof value !== "string") continue;
+		for (const line of value.split(/\r?\n/u)) {
+			const trimmed = line.trim();
+			const hashlineHeader = /^\[(.+?)#[0-9a-fA-F]{4}\]$/u.exec(trimmed);
+			const applyPatchSource = /^\*{3}\s+(?:Add|Update|Delete)\s+File:\s*(.+?)\s*$/u.exec(trimmed);
+			const applyPatchDestination = /^\*{3}\s+Move to:\s*(.+?)\s*$/u.exec(trimmed);
+			const hashlineMove = /^MV\s+(.+)$/u.exec(trimmed);
+			for (const match of [hashlineHeader, applyPatchSource, applyPatchDestination, hashlineMove]) {
+				if (!match) continue;
+				hasTarget = true;
+				if (!addPathValue(match[1], paths)) inspectable = false;
+			}
+		}
+	}
+
 	return {
 		paths: [...new Set(paths)],
 		inspectable: hasTarget && inspectable && paths.length > 0,
@@ -97,7 +154,40 @@ function blockedUninspectable(reason: string): { block: true; reason: string } {
 }
 
 function isTargetedInput(input: Record<string, unknown>): boolean {
-	return "path" in input || "file_path" in input || "filePath" in input || "paths" in input;
+	return [
+		"path",
+		"file_path",
+		"filePath",
+		"file",
+		"scope",
+		"paths",
+		"rename",
+		"move",
+		"moveDest",
+		"edits",
+		"input",
+	].some(key => key in input);
+}
+function isWorkspaceSearchInput(toolName: string, input: Record<string, unknown>): boolean {
+	if (toolName !== "grep" && toolName !== "search") return false;
+	if (!("paths" in input)) return !isTargetedInput(input);
+	if ("path" in input || "file_path" in input || "filePath" in input) return false;
+	const value = input.paths;
+	return value === "" || (Array.isArray(value) && value.length === 0);
+}
+
+function isWorkspaceOracleInput(toolName: string, input: Record<string, unknown>): boolean {
+	if (toolName !== "context_oracle") return false;
+	// Unscoped or empty-scoped oracle calls (ask/symbol/editImpact) read
+	// workspace-wide. Malformed non-string targets are NOT workspace calls;
+	// they stay uninspectable so fail-closed mode still blocks them.
+	for (const key of ["path", "file_path", "filePath", "file", "scope", "paths"] as const) {
+		if (!(key in input)) continue;
+		const value = input[key];
+		if (value === "" || (Array.isArray(value) && value.length === 0)) continue;
+		return false;
+	}
+	return true;
 }
 
 function guardPort(cwd: string): number | null {
@@ -143,20 +233,13 @@ export default function (pi: HookAPI) {
 		const isWrite = WRITE_TOOLS[event.toolName] === true;
 		const isCommand = COMMAND_TOOLS[event.toolName] === true;
 		const failClosed = isFailClosed();
-		const cwd = process.cwd();
+		const cwd = ctx.cwd;
 		const port = guardPort(cwd);
 
 		if (port === null) {
 			// No guard: only enforce when a session explicitly declared one.
 			if (process.env.CONSURG_ACTIVE === "1" && failClosed) {
 				return blockedUninspectable("Consurg guard expected (CONSURG_ACTIVE=1) but not reachable");
-			}
-			return undefined;
-		}
-
-		if (!isRead && !isWrite && !isCommand) {
-			if (failClosed && isTargetedInput(event.input)) {
-				return blockedUninspectable("Consurg guard cannot inspect this targeted tool call (fail-closed mode)");
 			}
 			return undefined;
 		}
@@ -194,12 +277,16 @@ export default function (pi: HookAPI) {
 			};
 		}
 
-		let targets = pathTargets(event.input);
-		if ((event.toolName === "grep" || event.toolName === "search") && !isTargetedInput(event.input)) {
+		let targets = pathTargets(event.toolName, event.input);
+		if (isWorkspaceSearchInput(event.toolName, event.input)) {
+			targets = { paths: ["."], inspectable: true };
+		} else if (isWorkspaceOracleInput(event.toolName, event.input)) {
+			// Evaluate workspace-wide oracle reads against the workspace root
+			// instead of letting them bypass scope enforcement.
 			targets = { paths: ["."], inspectable: true };
 		}
 		if (!targets.inspectable) {
-			if (failClosed) {
+			if (failClosed && (isRead || isWrite || isTargetedInput(event.input))) {
 				return blockedUninspectable("Consurg guard cannot inspect this targeted call (fail-closed mode)");
 			}
 			return undefined;
