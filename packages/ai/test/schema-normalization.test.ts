@@ -252,7 +252,7 @@ describe("normalizeSchemaForGoogle", () => {
 		expect(sanitized.enum).toEqual([null]);
 	});
 
-	it("preserves a property schema literally named additionalProperties inside properties", () => {
+	it("keeps a property literally named additionalProperties, coercing its boolean schema", () => {
 		const sanitized = normalizeSchemaForGoogle({
 			type: "object",
 			properties: {
@@ -261,21 +261,79 @@ describe("normalizeSchemaForGoogle", () => {
 			},
 		}) as Record<string, unknown>;
 
+		// The property must not be stripped as the `additionalProperties`
+		// keyword; its boolean schema form is rewritten to an object because
+		// Google's Schema proto rejects boolean subschemas (HTTP 400).
 		const properties = sanitized.properties as Record<string, unknown>;
 		expect(Object.hasOwn(properties, "additionalProperties")).toBe(true);
-		expect(properties.additionalProperties).toBe(false);
+		expect(properties.additionalProperties).toEqual({});
 	});
 
-	it("preserves boolean schemas for a single property literally named additionalProperties", () => {
+	it("coerces boolean property schemas to empty object schemas for the Google wire", () => {
+		// Regression: `router_capture_tool_use` declares `args`/`result`/`error`
+		// as the JSON Schema `true` ("any value"). Cloud Code Assist rejected the
+		// whole request with `Invalid value at '...properties[9].value'` because
+		// the Schema proto cannot parse a boolean where a message is expected.
 		const schema = {
 			type: "object",
 			properties: {
-				additionalProperties: false,
+				toolName: { type: "string" },
+				args: true,
+				result: true,
+				error: false,
 			},
-			required: ["additionalProperties"],
+			required: ["toolName"],
+		};
+
+		for (const normalize of [normalizeSchemaForGoogle, normalizeSchemaForCCA]) {
+			const sanitized = normalize(schema) as Record<string, unknown>;
+			const properties = sanitized.properties as Record<string, unknown>;
+			expect(properties.toolName).toEqual({ type: "string" });
+			expect(properties.args).toEqual({});
+			expect(properties.result).toEqual({});
+			expect(properties.error).toEqual({});
+		}
+	});
+
+	it("coerces boolean subschemas in items and applies union algebra to combinator variants", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				list: { type: "array", items: true },
+				either: { anyOf: [{ type: "string" }, true] },
+				narrowed: { anyOf: [{ type: "string" }, false] },
+			},
+		};
+
+		for (const normalize of [normalizeSchemaForGoogle, normalizeSchemaForCCA]) {
+			const sanitized = normalize(schema) as Record<string, unknown>;
+			const properties = sanitized.properties as Record<string, Record<string, unknown>>;
+			// The whole node survives — CCA must not collapse to its whole-schema
+			// fallback because of a boolean combinator variant.
+			expect(sanitized.type).toBe("object");
+			expect(properties.list?.items).toEqual({});
+			// `true` variant ⇒ the union accepts anything ⇒ combinator dropped.
+			expect(properties.either?.anyOf).toBeUndefined();
+			// `false` variants are never-valid branches and are removed. Google
+			// keeps the single-variant union; CCA's same-type collapse folds it
+			// into a bare `type: "string"` node — both preserve the semantics.
+			if (normalize === normalizeSchemaForGoogle) {
+				expect(properties.narrowed?.anyOf).toEqual([{ type: "string" }]);
+			} else {
+				expect(properties.narrowed).toEqual({ type: "string" });
+			}
+		}
+	});
+
+	it("preserves boolean subschemas on the MCP path", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				args: true,
+			},
 		} as const;
 
-		expect(normalizeSchemaForGoogle(schema)).toEqual(schema);
+		expect(normalizeSchemaForMCP(schema)).toEqual(schema);
 	});
 
 	it("inlines local $ref / $defs entries for Google compatibility", () => {

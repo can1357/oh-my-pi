@@ -50,6 +50,7 @@ export interface NormalizeSchemaOptions {
 	inferTypeForBareEnum: boolean;
 	foldOneOfIntoAnyOf: boolean;
 	dropNonScalarEnum: boolean;
+	coerceBooleanSubschemas?: boolean;
 	rejectResidualIncompatibilities?: ReadonlyArray<ResidualSchemaIncompatibility>;
 	validateAndFallback?: { fallback: unknown };
 }
@@ -74,6 +75,18 @@ const SNAKE_TO_CAMEL_RENAMES = new Map<string, string>([
 
 const JSON_SCHEMA_COMBINERS = ["anyOf", "oneOf"] as const;
 const CCA_FORBIDDEN_COMBINERS = new Set(["anyOf", "oneOf", "allOf"]);
+
+/** Keys whose value is a single subschema and may legally be the boolean form. */
+const BOOLEAN_SUBSCHEMA_KEYS = new Set([
+	"items",
+	"additionalItems",
+	"additionalProperties",
+	"contains",
+	"not",
+	"propertyNames",
+	"unevaluatedItems",
+	"unevaluatedProperties",
+]);
 
 const CLOUD_CODE_ASSIST_CLAUDE_FALLBACK_SCHEMA = {
 	type: "object",
@@ -227,6 +240,47 @@ function applyDescriptionSpill(
 	spillToDescription(result, spill, lift.format ?? "spill");
 }
 
+/** Sentinel: the key holding this subschema should be dropped entirely. */
+const DROP_SUBSCHEMA_KEY = Symbol("normalize.drop-subschema-key");
+
+/**
+ * JSON Schema allows the boolean schemas `true` ("accept anything") and
+ * `false` ("accept nothing") anywhere a subschema is expected. Google's
+ * Schema proto (Gemini API / Cloud Code Assist) parses only message objects,
+ * so a boolean property value such as `{ args: true }` fails the entire
+ * request with HTTP 400 (`Invalid value at '...properties[N].value'`).
+ * Rewrite boolean subschemas to their closest object form: `true` → `{}`
+ * (unconstrained). `false` has no proto representation and is rewritten to
+ * `{}` as well — permissive, but the request stays valid.
+ *
+ * Combinators use union algebra instead of per-variant rewriting: a `true`
+ * variant makes the whole union unconstrained (drop the combinator key —
+ * keeping a typeless `{}` variant would trip CCA's combiner collapse into the
+ * whole-schema fallback), and `false` variants are never-valid branches that
+ * contribute nothing (drop the variant; drop the key if none remain).
+ */
+function coerceBooleanSubschemaEntry(
+	entry: unknown,
+	key: string,
+	options: NormalizeSchemaWalkOptions,
+): unknown | typeof DROP_SUBSCHEMA_KEY {
+	if (!options.coerceBooleanSubschemas) return entry;
+	if (typeof entry === "boolean") {
+		return options.insideProperties || BOOLEAN_SUBSCHEMA_KEYS.has(key) ? {} : entry;
+	}
+	if (
+		!options.insideProperties &&
+		Array.isArray(entry) &&
+		(COMBINATOR_KEYS as readonly string[]).includes(key) &&
+		entry.some(variant => typeof variant === "boolean")
+	) {
+		if (entry.includes(true)) return DROP_SUBSCHEMA_KEY;
+		const variants = entry.filter(variant => variant !== false);
+		return variants.length > 0 ? variants : DROP_SUBSCHEMA_KEY;
+	}
+	return entry;
+}
+
 function normalizeSchemaNode(value: unknown, options: NormalizeSchemaWalkOptions): unknown {
 	if (Array.isArray(value)) {
 		if (!enter(value)) return [];
@@ -303,7 +357,9 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 				continue;
 			}
 			if (options.stripNullableKeyword && key === "nullable") continue;
-			result[key] = normalizeSchemaNode(entry, {
+			const coerced = coerceBooleanSubschemaEntry(entry, key, options);
+			if (coerced === DROP_SUBSCHEMA_KEY) continue;
+			result[key] = normalizeSchemaNode(coerced, {
 				...options,
 				insideProperties: !options.insideProperties && key === "properties",
 			});
@@ -325,7 +381,9 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 			constValue = entry;
 			continue;
 		}
-		result[key] = normalizeSchemaNode(entry, {
+		const coerced = coerceBooleanSubschemaEntry(entry, key, options);
+		if (coerced === DROP_SUBSCHEMA_KEY) continue;
+		result[key] = normalizeSchemaNode(coerced, {
 			...options,
 			insideProperties: !options.insideProperties && key === "properties",
 		});
@@ -919,6 +977,7 @@ export function normalizeSchemaForGoogle(value: unknown): unknown {
 		inferTypeForBareEnum: true,
 		dropNonScalarEnum: false,
 		foldOneOfIntoAnyOf: false,
+		coerceBooleanSubschemas: true,
 	});
 }
 
@@ -940,6 +999,7 @@ export function normalizeSchemaForCCA(value: unknown): unknown {
 		inferTypeForBareEnum: true,
 		dropNonScalarEnum: false,
 		foldOneOfIntoAnyOf: false,
+		coerceBooleanSubschemas: true,
 		rejectResidualIncompatibilities: ["type-array", "type-null", "nullable", "combiners"],
 		validateAndFallback: { fallback: CLOUD_CODE_ASSIST_CLAUDE_FALLBACK_SCHEMA },
 	});

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Google Gemini CLI / Antigravity HTTP 400 (`Invalid value at '...function_declarations[N].parameters.properties[...].value'`) when a tool declares a boolean JSON subschema (e.g. an "any value" property like `args: true`): `normalizeSchemaForGoogle` and `normalizeSchemaForCCA` now coerce boolean subschemas in properties, `items`, and combinator variants to `{}`, which Google's Schema proto accepts.
+
 ## [16.2.3] - 2026-07-02
 
 ### Added
