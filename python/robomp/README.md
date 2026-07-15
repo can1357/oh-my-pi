@@ -44,6 +44,98 @@ the worktree) plus the host tools in `src/host_tools.py` — the
 exclusive surface for GitHub writes. Every host-tool invocation is audited
 into the `tool_calls` table with credential-redacted args and results.
 
+## GitHub invocation and agent selection
+
+**Decision:** roboomp is the repository-owned mention gateway. Provider agents keep
+their own identities, permissions, and invocation paths; they are not aliases for
+roboomp.
+
+### Supported roboomp invocation
+
+- `issues.opened` in an allowlisted repository starts automatic triage.
+- With `ROBOMP_PR_REVIEW_ENABLED=true`, incoming non-draft PRs are reviewed on
+  `opened`, `reopened`, and `ready_for_review` by default, or only on the
+  trusted fresh `vouched` label event when
+  `ROBOMP_PR_REVIEW_TRIGGER=vouched_label`. Incoming PR conversation/re-review
+  directives are not wired; follow-up directives apply only to roboomp-authored
+  PR threads.
+- On an issue, or on a conversation/review thread for a PR authored by roboomp,
+  a trusted maintainer may post an `@<ROBOMP_BOT_LOGIN>` directive:
+
+  ```text
+  @<ROBOMP_BOT_LOGIN> investigate and fix this
+  /model <alias>
+  /thinking low
+  ```
+
+  The author must be an `OWNER`, `MEMBER`, or `COLLABORATOR`, or be listed in
+  `ROBOMP_MAINTAINER_LOGINS`. `/model` and `/thinking` are optional; put each on
+  its own line. Only an `OWNER` or allowlisted maintainer can authorize
+  implementation. Configured reviewer bots can provide directives, but their
+  directives never authorize implementation. Bot/self events and non-allowlisted
+  repositories are skipped.
+
+**Trust boundary:** The signed webhook authenticates GitHub's delivery, not the
+commenter. Every allowlisted issue body and ordinary issue follow-up is untrusted
+model input. `bug`/`documentation` auto-PRs and updates to already-existing
+roboomp PRs may publish without a new owner mention, so mention authorization is
+not a complete prompt-injection or write gate. Keep human review/merge and the
+per-user rate limits.
+
+### Choose the path
+
+| Path | Invocation and boundary |
+| --- | --- |
+| **roboomp** | `issues.opened` auto-triage, eligible non-draft PR auto-review when enabled, or an authorized `@<ROBOMP_BOT_LOGIN>` directive on an issue or roboomp-authored PR thread; repository-owned gateway and audited host-tool writes. |
+| **[Copilot cloud agent](https://docs.github.com/en/copilot/concepts/agents/cloud-agent/about-cloud-agent) / [Claude / Codex coding agents](https://docs.github.com/en/copilot/concepts/agents/about-third-party-coding-agents)** | Provider-owned coding task, started by issue assignment/Agents UI or a PR `@`-mention; separate identity and settings from roboomp, with availability policy-dependent. |
+| **[Claude Code Action](https://docs.anthropic.com/en/docs/claude-code/github-actions)** | A separate GitHub Actions workflow and secret; not configured in this repository snapshot (no workflow or secret), and not a roboomp trigger. |
+| **[CodeRabbit](https://docs.coderabbit.ai/guides/commands)** | Review-oriented PR integration, for example `@coderabbitai review` or `@coderabbitai full review`; checks/comments are not proof of coding-agent invocability or implementation authorization. |
+
+### Activation and controlled verification
+
+Activation is administrative/deployment work, not a README command and not a
+provider selection. Use this runbook only as an operator checklist:
+
+1. **Baseline, read-only.** In repository **Settings**, inspect and record
+   Installed GitHub Apps, **Webhooks**, Actions workflows, repository
+   **Secrets and variables**, **Environments**, branch protection, and recent
+   check suites. The current admin snapshot found no repository hooks, secrets,
+   variables, or environments; `main` was unprotected; active workflows were
+   CI, vouch, and dependency; and check suites included CodeRabbit, Claude, and
+   Devin, with CodeRabbit comments present. Re-check these facts before relying
+   on them: App/check-suite presence does not prove that `@` invocation works.
+
+**Hard prerequisite:** Before activation, protect `main` with required PR,
+review, and status rules and no roboomp-bot bypass. The current `vouch-manage`
+direct `GITHUB_TOKEN` commit to `main` must be migrated to a separately
+controlled, approved mechanism or disabled before that protection is enabled.
+
+2. **Activate.** For roboomp, an administrator must deploy the service, set the
+   repository allowlist and `ROBOMP_BOT_LOGIN`, configure `GITHUB_WEBHOOK_SECRET`
+   and `ROBOMP_GH_PROXY_HMAC_KEY`, and expose the signed webhook at
+   `/webhook/github` for Issues, Issue comments, Pull requests, and Pull request
+   review comments. Keep sidecar-only `GITHUB_TOKEN`
+   in `gh-proxy`. Grant the PAT only Contents / Issues / Pull requests RW plus
+   Metadata R. Keep provider credentials in their own integration. For another
+   provider, follow its official installation and workflow/Agents setup instead
+   of routing through roboomp.
+
+3. **Controlled verification.** First confirm the activation settings
+   read-only. Then use a pre-approved allowlisted issue or roboomp-authored PR
+   thread and have an authorized maintainer post the exact directive above.
+   Record webhook delivery, `issue_comment.created` or
+   `pull_request_review_comment.created`, queue/log/audit entries, and the
+   resulting GitHub action. Inspect SQLite `events.payload_json`; the authorized
+   maintainer event must persist `_robomp_directive.authorizes_impl == true`.
+   Separately exercise a configured reviewer-bot directive and verify it
+   persists `_robomp_directive.authorizes_impl == false`.
+
+`X-GitHub-Delivery` deduplication, durable event/issue status, retry/replay
+state, and the `tool_calls` audit distinguish progress from failure.
+
+Do not infer success from an App, check suite, or comment alone. Do not claim
+deployment or trigger success until the controlled run has been observed.
+
 ## Setup
 
 Requires Docker Compose v2 and a LiteLLM-style proxy on the host that your
@@ -89,9 +181,8 @@ stay localhost-only.
 
 In *Settings → Webhooks*: payload URL `https://…/webhook/github`, content
 type `application/json`, secret = `GITHUB_WEBHOOK_SECRET`, events =
-*Issues, Issue comments, Pull requests, Pull request reviews, Pull
-request review comments*. GitHub's `ping` should produce
-`POST /webhook/github 202` within a second.
+*Issues, Issue comments, Pull requests, Pull request review comments*. GitHub's
+`ping` should produce `POST /webhook/github 202` within a second.
 
 ### Configuration
 

@@ -1,5 +1,11 @@
 # Bundle Update Log
 
+## 2026-07-14
+* **Update**: Documented the uncommitted Snapcompact removal in [Recent History — 2026-07](concepts/recent-history-2026-07.md#july-14-snapcompact-removal): full deletion list (shape-preview component/doc, five system-prompt stub/note markdown files, inline-compaction and savings-journal modules, three test files), the `packages/coding-agent/CHANGELOG.md` `### Removed` justification (unsafe experimental prompt/history/tool-result imaging; stale `Snapcompact` setting migrates to `context-full`), and the surrounding surfaces (`session/*`, `modes/*`, `config/settings*`, `slash-commands/*`) that were updated in lockstep rather than left dangling.
+
+## 2026-07-13 (late)
+* **Update**: Extended [Recent History — 2026-07](concepts/recent-history-2026-07.md) to cover committed work through `0e110b9d9`. New sections document the Claude Code-style agent hub, multi-agent fork collaboration policy, the privacy-first `packages/activity-journal/` evidence ledger with its gopk capture-daemon bridge (`72d9dd96d`), the linear-agent hardening pass, IRC peer-discovery and Windows-timeout fixes, the `/help` recommender + concurrent-commit fix, trusted actor settings for `robomp`, and `packages/context-policy/` with `context-retention/v1` as the receiving consent/policy contract for the bridge.
+
 ## 2026-07-13
 * **Creation**: Added [Recent History — 2026-07](concepts/recent-history-2026-07.md), covering committed changes from `9ed73a788..1895db95e` and separating current uncommitted work.
 * **Update**: Indexed the history synthesis under the knowledge bundle's History section.
