@@ -49,7 +49,7 @@ describe("OperationalStore", () => {
 	});
 
 	function openStore(options?: { clock?: TestClock; ids?: TestIds; maxEventPayloadBytes?: number }): OperationalStore {
-		tempDir = TempDir.createSync("omp-operational-");
+		tempDir = TempDir.createSync("@omp-operational-");
 		const clock = options?.clock ?? new TestClock(1_700_000_000_000);
 		const ids = options?.ids ?? new TestIds();
 		store = OperationalStore.open({
@@ -303,7 +303,7 @@ describe("OperationalStore", () => {
 	});
 
 	it("reopens persisted operational state across processes", () => {
-		tempDir = TempDir.createSync("omp-operational-reopen-");
+		tempDir = TempDir.createSync("@omp-operational-reopen-");
 		const dbPath = path.join(tempDir.path(), "state.db");
 		const first = new OperationalStore({
 			dbPath,

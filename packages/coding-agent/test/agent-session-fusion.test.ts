@@ -59,7 +59,7 @@ const FRONTIER_ID = "claude-sonnet-4-5";
 const COMPACT_ID = "claude-sonnet-4-0";
 
 async function buildFusionHarness(fusionSettings: Record<string, unknown> = {}): Promise<FusionHarness> {
-	const tempDir = TempDir.createSync("fusion-test-");
+	const tempDir = TempDir.createSync("@fusion-test-");
 	const authDb = path.join(tempDir.path(), "auth.db");
 	const sessionsDir = path.join(tempDir.path(), "sessions");
 

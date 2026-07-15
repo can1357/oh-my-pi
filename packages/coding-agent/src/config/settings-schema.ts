@@ -4406,6 +4406,17 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Provider selection
+	"providers.maxInFlightRequests": {
+		type: "record",
+		default: {} as Record<string, number>,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Max In-Flight Requests",
+			description:
+				"Per-provider cap on concurrent in-flight requests (map of provider id to a positive integer; omit a provider to leave it unlimited)",
+		},
+	},
 	"providers.webSearch": {
 		type: "enum",
 		values: SEARCH_PROVIDER_PREFERENCES,

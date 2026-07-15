@@ -35,7 +35,7 @@ describe("notification sinks", () => {
 	});
 
 	it("appends JSONL records to a file sink", async () => {
-		tempDir = await TempDir.create("notify-file-");
+		tempDir = await TempDir.create("@notify-file-");
 		const filePath = path.join(tempDir.path(), "out", "notify.jsonl");
 		const sink = createFileNotificationSink({ filePath });
 		await sink.notify(sampleNotification("a"));

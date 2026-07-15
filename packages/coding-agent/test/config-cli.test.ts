@@ -11,7 +11,7 @@ const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 beforeEach(() => {
 	resetSettingsForTest();
-	testAgentDir = TempDir.createSync("omp-config-cli-");
+	testAgentDir = TempDir.createSync("@omp-config-cli-");
 	setAgentDir(testAgentDir.path());
 });
 

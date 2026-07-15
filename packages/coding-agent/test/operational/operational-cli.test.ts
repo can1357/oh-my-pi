@@ -44,7 +44,7 @@ describe("operational runtime CLI", () => {
 	}
 
 	it("enqueues omp jobs, lists them, and runs once with injected executor", async () => {
-		tempDir = await TempDir.create("runtime-cli-");
+		tempDir = await TempDir.create("@runtime-cli-");
 		const s = openStore();
 		const seen: string[] = [];
 		const executor: JobExecutor = async ctx => {
@@ -85,7 +85,7 @@ describe("operational runtime CLI", () => {
 	});
 
 	it("supports state, history search, schedule-add, and corrections", async () => {
-		tempDir = await TempDir.create("runtime-cli-state-");
+		tempDir = await TempDir.create("@runtime-cli-state-");
 		const s = openStore();
 		const executor: JobExecutor = async () => ({ ok: true });
 
@@ -175,7 +175,7 @@ describe("operational runtime CLI", () => {
 	});
 
 	it("redacts secret-like values in events output", async () => {
-		tempDir = await TempDir.create("runtime-cli-events-");
+		tempDir = await TempDir.create("@runtime-cli-events-");
 		const s = openStore();
 		s.appendEvent({
 			kind: "outcome",

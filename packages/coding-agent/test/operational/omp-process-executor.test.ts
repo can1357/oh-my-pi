@@ -135,7 +135,7 @@ describe("omp process executor runtime", () => {
 	});
 
 	it("checkpoints session file, respects output bounds, and throws after nonzero exit", async () => {
-		tempDir = await TempDir.create("omp-exec-");
+		tempDir = await TempDir.create("@omp-exec-");
 		const sessionDir = path.join(tempDir.path(), "sessions");
 		const sessionFile = path.join(sessionDir, "run.jsonl");
 
@@ -194,7 +194,7 @@ describe("omp process executor runtime", () => {
 	});
 
 	it("uses --resume with checkpoint and aborts the child process", async () => {
-		tempDir = await TempDir.create("omp-exec-abort-");
+		tempDir = await TempDir.create("@omp-exec-abort-");
 		const sessionDir = tempDir.path();
 		const sessionFile = path.join(sessionDir, "prior.jsonl");
 		await Bun.write(sessionFile, String.fromCharCode(123, 125, 10));
@@ -252,7 +252,7 @@ describe("omp process executor runtime", () => {
 	});
 
 	it("truncates oversized stdout capture", async () => {
-		tempDir = await TempDir.create("omp-exec-bounds-");
+		tempDir = await TempDir.create("@omp-exec-bounds-");
 		const sessionDir = path.join(tempDir.path(), "sessions");
 
 		const executor = createOmpProcessExecutor({
