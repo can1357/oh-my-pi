@@ -1256,8 +1256,23 @@ async function readLearnedLessons(memoryRoot: string): Promise<string> {
 		.join("\n");
 }
 
+/**
+ * Cap on the encoded-cwd directory name inside the memories root. The memory
+ * root embeds the whole cwd, so a deep project path used to produce an
+ * unbounded component — and `Bun.write` fails with ENAMETOOLONG once the total
+ * artifact path passes ~260 chars on Windows. Short cwds keep the legacy
+ * verbatim encoding (existing memory roots stay attached); long ones keep the
+ * distinguishing tail plus a stable hash of the full cwd for uniqueness.
+ */
+const MAX_ENCODED_PROJECT_CHARS = 64;
+
 function encodeProjectPath(cwd: string): string {
-	return `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+	const body = cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-");
+	const encoded = `--${body}--`;
+	if (encoded.length <= MAX_ENCODED_PROJECT_CHARS) return encoded;
+	const hash = Bun.hash.xxHash64(cwd).toString(36);
+	const keep = MAX_ENCODED_PROJECT_CHARS - hash.length - 5;
+	return `--${body.slice(-keep)}-${hash}--`;
 }
 
 function unixNow(): number {

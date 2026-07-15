@@ -114,13 +114,17 @@ async function settle(promise: Promise<void>, label: string, timeoutMs = 3000): 
 }
 
 beforeAll(async () => {
-	sharedRoot = await TempDir.create(`memories-runtime-${Snowflake.next()}`);
+	sharedRoot = await TempDir.create(`@memories-runtime-${Snowflake.next()}`);
 });
 
 afterAll(async () => {
 	if (sharedRoot) {
 		await Bun.sleep(0);
-		await sharedRoot.remove();
+		// Best-effort: Windows (Defender/indexer scanning %TEMP%) can hold
+		// handles past the retry window; a leftover under the OS temp dir is
+		// harmless and reclaimed by the OS, unlike the repo-dir leaks this
+		// @-prefix placement prevents.
+		await sharedRoot.remove().catch(() => {});
 	}
 	sharedRoot = undefined;
 });
@@ -467,5 +471,25 @@ describe("buildMemoryToolDeveloperInstructions", () => {
 		expect(payload).toContain("memory://root/memory_summary.md");
 		expect(payload).not.toContain(memoryRoot);
 		expect(payload).toContain("...[truncated]...");
+	});
+});
+
+describe("getMemoryRoot project encoding", () => {
+	test("bounds the encoded component, keeps it stable and collision-resistant", () => {
+		const agentDir = "C:\\agent";
+		const deepCwd = ["C:", ...Array(20).fill("deeply-nested-project-segment")].join(path.sep);
+		const component = path.basename(getMemoryRoot(agentDir, deepCwd));
+		// Bounded: Bun.write fails with ENAMETOOLONG once the total artifact
+		// path passes ~260 chars on Windows, so the cwd-derived component must
+		// not grow with cwd depth.
+		expect(component.length).toBeLessThanOrEqual(64);
+		// Deterministic across calls (memory roots must stay attached).
+		expect(path.basename(getMemoryRoot(agentDir, deepCwd))).toBe(component);
+		// Two long cwds sharing a tail must not collide into one root.
+		const sibling = deepCwd.replace("C:", "D:");
+		expect(path.basename(getMemoryRoot(agentDir, sibling))).not.toBe(component);
+		// Short cwds keep the legacy verbatim encoding so existing users'
+		// memory roots are not orphaned.
+		expect(path.basename(getMemoryRoot(agentDir, "C:\\proj"))).toBe("--C--proj--");
 	});
 });

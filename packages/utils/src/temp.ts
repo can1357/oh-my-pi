@@ -73,6 +73,12 @@ function normalizePrefix(prefix?: string): string {
 		return `${kTempDir}${path.sep}pi-temp-`;
 	} else if (prefix.startsWith("@")) {
 		return path.join(kTempDir, prefix.slice(1));
+	} else if (!path.isAbsolute(prefix)) {
+		// A bare relative prefix would silently create the directory under the
+		// caller's CWD (historically leaking fixture dirs into repositories);
+		// treat it as tmpdir-relative. Callers that genuinely want a specific
+		// location must pass an absolute prefix.
+		return path.join(kTempDir, prefix);
 	}
 	return prefix;
 }

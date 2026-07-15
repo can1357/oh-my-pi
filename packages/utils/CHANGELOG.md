@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `TempDir.create`/`createSync` now treat bare relative prefixes as tmpdir-relative instead of CWD-relative, so a missing `@` can no longer leak fixture directories into the repository; absolute prefixes are still honored verbatim.
+
 ## [16.2.0] - 2026-06-27
 
 ### Added
