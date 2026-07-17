@@ -4,6 +4,7 @@ import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl } from "../types";
+import { buildDevinFallbackModel } from "./devin";
 
 // ---------------------------------------------------------------------------
 // OpenAI Codex
@@ -135,6 +136,7 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 	const { apiKey, baseUrl, fetch } = config;
 	return {
 		providerId: "devin",
+		staticModels: [buildDevinFallbackModel(baseUrl)],
 		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
 		...(apiKey
 			? {

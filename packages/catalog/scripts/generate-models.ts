@@ -28,6 +28,7 @@ import {
 	isCatalogDescriptor,
 } from "../src/provider-models/descriptor-types";
 import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
+import { buildDevinFallbackModel } from "../src/provider-models/devin";
 import {
 	ANTHROPIC_CURATED_FALLBACK_MODELS,
 	buildClineStaticSeed,
@@ -502,6 +503,11 @@ async function generateModels() {
 	// Sakana is authoritative and stale seed IDs must stay out.
 	if (!authoritativeCatalogProviders.has("sakana")) {
 		allModels.push(...SAKANA_FUGU_STATIC_MODELS);
+	}
+	// Devin discovery is credential-gated. Keep a deterministic default in fresh
+	// catalogs unless a successful authoritative snapshot has replaced it.
+	if (!authoritativeCatalogProviders.has("devin")) {
+		allModels.push(buildDevinFallbackModel());
 	}
 	// Seed the GitLab Duo Agent fallback model so a fresh install (no credentialed
 	// dynamic discovery/cache yet) still surfaces the provider's default model in the

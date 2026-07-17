@@ -20,6 +20,26 @@ describe("catalog provider descriptors", () => {
 		expect(DEFAULT_MODEL_PER_PROVIDER).not.toHaveProperty("kagi");
 	});
 
+	test("exposes Devin for catalog and runtime model discovery", async () => {
+		const devin = PROVIDER_DESCRIPTORS.find(descriptor => descriptor.providerId === "devin");
+
+		expect(devin?.defaultModel).toBe("swe-1-6");
+		expect(devin?.dynamicModelsAuthoritative).toBe(true);
+		expect(devin?.catalogDiscovery).toEqual({
+			label: "Devin",
+			envVars: ["DEVIN_API_KEY"],
+			oauthProvider: "devin",
+		});
+		const manager = devin?.createModelManagerOptions({
+			apiKey: "token",
+			fetch: async () => new Response(new Uint8Array()),
+		});
+		expect(manager?.providerId).toBe("devin");
+		expect(manager?.dynamicModelsAuthoritative).toBe(true);
+		expect(typeof manager?.fetchDynamicModels).toBe("function");
+		expect(await manager?.fetchDynamicModels?.()).toEqual([]);
+	});
+
 	test("every descriptor has a default model and a factory that preserves provider identity", () => {
 		for (const descriptor of PROVIDER_DESCRIPTORS) {
 			expect(descriptor.defaultModel).toBeTruthy();

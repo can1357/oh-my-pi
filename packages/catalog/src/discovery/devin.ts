@@ -1,5 +1,10 @@
 import { gunzipSync } from "node:zlib";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+import {
+	DEVIN_DEFAULT_BASE_URL,
+	DEVIN_DEFAULT_CONTEXT_WINDOW,
+	DEVIN_DEFAULT_MAX_TOKENS,
+} from "../provider-models/devin";
 import type { FetchImpl, ModelSpec } from "../types";
 import {
 	GetCliModelConfigsRequestSchema,
@@ -7,14 +12,10 @@ import {
 } from "./devin-gen/exa/api_server_pb/api_server_pb";
 import { type ClientModelConfig, MetadataSchema } from "./devin-gen/exa/codeium_common_pb/codeium_common_pb";
 
-const DEVIN_DEFAULT_BASE_URL = "https://server.codeium.com";
 const DEVIN_GET_CLI_MODEL_CONFIGS_PATH = "/exa.api_server_pb.ApiServerService/GetCliModelConfigs";
 const DEVIN_IDE_VERSION = "3.2.23";
 const DEVIN_EXTENSION_VERSION = "1.48.2";
 const DEVIN_SESSION_TOKEN_PREFIX = "devin-session-token$";
-
-const DEFAULT_CONTEXT_WINDOW = 200_000;
-const DEFAULT_MAX_TOKENS = 64_000;
 
 /** Best-effort match for labels whose wording implies a thinking / reasoning-effort variant. */
 const REASONING_LABEL_PATTERN = /think|thinking|minimal|high|medium|low|xhigh|max|reasoning/i;
@@ -131,7 +132,7 @@ function normalizeDevinModels(
 			continue;
 		}
 		const input: ("text" | "image")[] = config.supportsImages ? ["text", "image"] : ["text"];
-		const contextWindow = config.maxTokens > 0 ? config.maxTokens : DEFAULT_CONTEXT_WINDOW;
+		const contextWindow = config.maxTokens > 0 ? config.maxTokens : DEVIN_DEFAULT_CONTEXT_WINDOW;
 		byId.set(id, {
 			id,
 			name: config.label.trim() || id,
@@ -143,7 +144,10 @@ function normalizeDevinModels(
 			supportsTools: true,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow,
-			maxTokens: Math.min(config.maxTokens > 0 ? config.maxTokens : DEFAULT_MAX_TOKENS, DEFAULT_MAX_TOKENS),
+			maxTokens: Math.min(
+				config.maxTokens > 0 ? config.maxTokens : DEVIN_DEFAULT_MAX_TOKENS,
+				DEVIN_DEFAULT_MAX_TOKENS,
+			),
 		});
 	}
 	return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));

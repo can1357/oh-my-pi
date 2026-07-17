@@ -18,6 +18,7 @@ import { ProviderHttpError } from "./errors";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { CursorOptions } from "./providers/cursor";
+import type { DevinOptions } from "./providers/devin";
 import { isGitLabDuoModel, streamGitLabDuo } from "./providers/gitlab-duo";
 import type { GoogleOptions } from "./providers/google";
 import { getVertexAccessToken } from "./providers/google-auth";
@@ -43,6 +44,7 @@ import {
 	streamAzureOpenAIResponses,
 	streamBedrock,
 	streamCursor,
+	streamDevin,
 	streamGoogle,
 	streamGoogleGeminiCli,
 	streamGoogleVertex,
@@ -334,6 +336,9 @@ function streamDispatch<TApi extends Api>(
 
 		case "cursor-agent":
 			return streamCursor(model as Model<"cursor-agent">, context, providerOptions as CursorOptions);
+
+		case "devin-agent":
+			return streamDevin(model as Model<"devin-agent">, context, providerOptions as DevinOptions);
 
 		default:
 			throw new Error(`Unhandled API: ${api}`);
@@ -1171,6 +1176,19 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				execHandlers,
 				onToolResult,
+			});
+		}
+
+		case "devin-agent": {
+			const devinModel = model as Model<"devin-agent">;
+			const effort =
+				devinModel.reasoning && options?.reasoning && !options.disableReasoning
+					? requireSupportedEffort(devinModel, options.reasoning)
+					: undefined;
+			return castApi<"devin-agent">({
+				...base,
+				chatModelUid: resolveWireModelId(devinModel, effort),
+				stopSequences: options?.stopSequences,
 			});
 		}
 
