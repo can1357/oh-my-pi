@@ -72,6 +72,8 @@ const fastWorkspacePackages = [
 	"packages/ai",
 	"packages/snapcompact",
 	"packages/agent",
+	"packages/context-policy",
+	"packages/context-storage",
 ];
 
 // These suites cover the native package, TUI/browser-ish behavior, local servers,
