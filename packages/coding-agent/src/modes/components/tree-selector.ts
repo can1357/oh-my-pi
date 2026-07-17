@@ -740,7 +740,8 @@ class TreeList implements Component {
 					.slice(0, 50);
 				return `[bash: ${cmd}${rawCmd.length > 50 ? "..." : ""}]`;
 			}
-			case "grep": {
+			case "grep":
+			case "search": {
 				const pattern = String(args.pattern || "");
 				const searchPathsInput =
 					typeof args.paths === "string" || Array.isArray(args.paths)
@@ -750,7 +751,7 @@ class TreeList implements Component {
 							: undefined;
 				const paths = toPathList(searchPathsInput);
 				const scope = paths.length > 0 ? paths.join(", ") : ".";
-				return `[grep: /${pattern}/ in ${shortenPath(scope)}]`;
+				return `[${name}: /${pattern}/ in ${shortenPath(scope)}]`;
 			}
 			case "glob": {
 				const paths = Array.isArray(args.paths) ? args.paths.join(", ") : String(args.pattern || ".");

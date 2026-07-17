@@ -152,6 +152,7 @@ function groupedEdges(edges: WikiEdgeRow[]): string {
 export class WikigraphProtocolHandler implements ProtocolHandler {
 	readonly scheme = "wikigraph";
 	readonly immutable = true;
+	readonly hiddenCompletion = true;
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		if (!isEnabled()) throw new Error("wikigraph: disabled in settings (wikigraph.enabled)");

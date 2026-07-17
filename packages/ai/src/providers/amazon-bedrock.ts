@@ -10,7 +10,13 @@
 import type { Effort } from "@pk-nerdsaver-ai/pi-catalog/effort";
 import { mapEffortToAnthropicAdaptiveEffort, requireSupportedEffort } from "@pk-nerdsaver-ai/pi-catalog/model-thinking";
 import { calculateCost } from "@pk-nerdsaver-ai/pi-catalog/models";
-import { $env, $flag, fetchWithRetry, parseStreamingJson, parseStreamingJsonThrottled } from "@pk-nerdsaver-ai/pi-utils";
+import {
+	$env,
+	$flag,
+	fetchWithRetry,
+	parseStreamingJson,
+	parseStreamingJsonThrottled,
+} from "@pk-nerdsaver-ai/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import type {

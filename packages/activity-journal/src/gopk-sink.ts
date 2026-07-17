@@ -22,6 +22,14 @@ export interface GopkCapturedDerivative {
 	readonly rawClip?: { readonly localPointer: string; readonly expiresAt: string };
 }
 
+/**
+ * Structural so hosts can route sink diagnostics through their own logging
+ * facility; defaults to `console.warn`.
+ */
+export interface GopkSinkLogger {
+	warn(message: string, context?: Record<string, unknown>): void;
+}
+
 export interface GopkSinkOptions {
 	readonly ledger: ActivityLedger;
 	readonly consent: ConsentRecord | undefined;
@@ -33,6 +41,7 @@ export interface GopkSinkOptions {
 		readonly projectId?: string;
 	};
 	readonly captureRoot: string;
+	readonly logger?: GopkSinkLogger;
 }
 
 export type GopkActivitySink = (derivative: GopkCapturedDerivative) => Promise<void>;
@@ -40,21 +49,22 @@ export type GopkActivitySink = (derivative: GopkCapturedDerivative) => Promise<v
 export function createGopkActivitySink(options: GopkSinkOptions): GopkActivitySink {
 	const captureRoot = path.resolve(options.captureRoot);
 	const rawClipRemover = createConstrainedRawClipRemover(captureRoot);
+	const logger: GopkSinkLogger = options.logger ?? console;
 	return async derivative => {
 		if (derivative.sessionId !== options.capture.sessionId) {
-			console.warn("gopk activity sink rejected derivative: capture session mismatch");
+			logger.warn("gopk activity sink rejected derivative: capture session mismatch");
 			return;
 		}
 		if (derivative.sanitizationAttestation.status !== "sanitized") {
-			console.warn("gopk activity sink rejected derivative: sanitization was not attested");
+			logger.warn("gopk activity sink rejected derivative: sanitization was not attested");
 			return;
 		}
 		if (!(await isContainedPathReal(derivative.localManifestPointer, captureRoot))) {
-			console.warn("gopk activity sink rejected derivative: manifest path escapes capture root");
+			logger.warn("gopk activity sink rejected derivative: manifest path escapes capture root");
 			return;
 		}
 		if (derivative.rawClip && !(await isContainedPathReal(derivative.rawClip.localPointer, captureRoot))) {
-			console.warn("gopk activity sink rejected derivative: raw clip path escapes capture root");
+			logger.warn("gopk activity sink rejected derivative: raw clip path escapes capture root");
 			return;
 		}
 		const startedAtMs = Date.parse(derivative.window.startedAt);
@@ -65,7 +75,7 @@ export function createGopkActivitySink(options: GopkSinkOptions): GopkActivitySi
 			[startedAtMs, endedAtMs, completedAtMs].some(timestamp => !Number.isFinite(timestamp)) ||
 			(rawExpiresAtMs !== undefined && !Number.isFinite(rawExpiresAtMs))
 		) {
-			console.warn("gopk activity sink rejected derivative: invalid timestamp");
+			logger.warn("gopk activity sink rejected derivative: invalid timestamp");
 			return;
 		}
 		const startedAt = new Date(startedAtMs).toISOString();
@@ -103,10 +113,10 @@ export function createGopkActivitySink(options: GopkSinkOptions): GopkActivitySi
 				try {
 					await rawClipRemover.remove(result.rawClipToDelete);
 				} catch {
-					console.warn("gopk activity sink could not delete rejected raw clip");
+					logger.warn("gopk activity sink could not delete rejected raw clip");
 				}
 			}
-			console.warn("gopk activity sink rejected derivative", {
+			logger.warn("gopk activity sink rejected derivative", {
 				reason: result.reason,
 				rawClipToDelete: result.rawClipToDelete,
 			});

@@ -1,3 +1,22 @@
+{{#if LIGHT_READ_GRAMMAR}}
+Read local workspace files and directories via one `path`. Light grammar only: {{READ_SELECTOR_GUIDANCE}}
+
+## Parameters
+
+- `path` — required. Local workspace path only. Append `:<sel>` for a single line range (e.g. `src/foo.ts:50-200`).
+
+## Selectors
+
+- _(none)_ — parseable code → structural summary; other files → from start (up to {{DEFAULT_LIMIT}} lines).
+- `:50` / `:50-` — from line 50 onward.
+- `:50-200` — lines 50–200 inclusive.
+- `:50+150` — 150 lines from 50.
+
+<critical>
+- Line ranges go in the selector: `path="src/foo.ts:50-200"`.
+- No URLs, internal URIs, `:raw`, multi-range, or `:conflicts`.
+</critical>
+{{else}}
 Read files, directories, archives, SQLite, images, documents, internal resources, and web URLs via one `path`.
 
 <instruction>
@@ -75,3 +94,4 @@ All URI schemes take the same line selectors. `artifact://<id>` recovers full ou
 - Line ranges go in the selector: `path="src/foo.ts:50-200"`.
 - Summary footer names elided ranges? Re-issue ONLY those ranges. NEVER guess `..`/`…` content.
 </critical>
+{{/if}}

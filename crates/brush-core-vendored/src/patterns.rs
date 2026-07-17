@@ -240,17 +240,16 @@ impl Pattern {
 				third_component.as_deref(),
 			)
 		});
-		let (absolute_root, components_to_remove) =
-			if let Some((root, consumed)) = alias_root {
-				(Some(root), consumed)
-			} else {
-				(
-					first_component
-						.as_deref()
-						.and_then(sys::fs::pattern_path_root),
-					1,
-				)
-			};
+		let (absolute_root, components_to_remove) = if let Some((root, consumed)) = alias_root {
+			(Some(root), consumed)
+		} else {
+			(
+				first_component
+					.as_deref()
+					.and_then(sys::fs::pattern_path_root),
+				1,
+			)
+		};
 
 		let prefix_to_remove;
 		let mut paths_so_far = if let Some(root) = absolute_root {

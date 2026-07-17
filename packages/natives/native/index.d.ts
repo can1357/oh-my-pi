@@ -118,6 +118,13 @@ export declare class Shell {
    * Returns `Ok(())` even when no commands are running.
    */
   abort(): Promise<void>
+  /**
+   * Count live background jobs (`&`/`nohup` children still running) on this
+   * session. Completed jobs are reaped first. The host uses this to retain a
+   * per-call shell whose background processes are still running instead of
+   * dropping it (which would SIGKILL them via kill-on-drop).
+   */
+  liveBackgroundJobCount(): Promise<number>
 }
 
 /**
@@ -1432,6 +1439,18 @@ export interface ShellRunResult {
    */
   minimized?: MinimizerResult
 }
+
+/**
+ * Runtime override for Hangul Compatibility Jamo (U+3131..=U+318E) cell width.
+ *   0 = unset → platform default (macOS: narrow 1 cell; otherwise UAX#11)
+ *   1 = force narrow (1 cell)
+ *   2 = force wide (2 cells)
+ *   3 = force Unicode width (no correction)
+ * The actual width is decided by the *client* terminal, not the host OS, so it
+ * is resolved at runtime from the terminal identity (see packages/tui
+ * terminal.ts) and pushed here.
+ */
+export declare function setHangulCompatJamoWidthOverride(value: number): void
 
 /**
  * Visible slice of a line after ANSI-aware column selection

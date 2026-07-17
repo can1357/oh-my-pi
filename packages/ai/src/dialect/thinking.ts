@@ -19,6 +19,7 @@ const TAGS: readonly Tag[] = [
 	{ open: "<thinking>", close: "</thinking>" }, // anthropic, minimax, xml
 	{ open: "<scratchpad>", close: "</scratchpad>" }, // anthropic
 	{ open: "```thinking\n", close: "```" }, // gemini fenced thinking
+	{ open: "¤\n", close: "\n¤" }, // pi thinking sigil
 	{ open: "<|channel>thought\n", close: "<channel|>" }, // gemma reasoning channel
 	{ open: "<|start|>assistant<|channel|>analysis<|message|>", close: "<|end|>" }, // harmony analysis (rendered)
 	{ open: "<|channel|>analysis<|message|>", close: "<|end|>" }, // harmony analysis (bare leak)

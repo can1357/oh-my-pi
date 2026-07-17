@@ -560,7 +560,16 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 				const converted = convertMessageToLlm({ ...m, images: undefined, blocks: nativeBlocks });
 				return converted ? [converted] : [];
 			}
-			case "custom":
+			case "custom": {
+				// Task-contract notices are runtime-only executor context: they stay in
+				// agent state (completion gate, advisor digest, retry replay) but never
+				// reach the provider wire as a standalone message.
+				if (m.customType === "task-contract-notice") {
+					return [];
+				}
+				const converted = convertMessageToLlm(m);
+				return converted ? [converted] : [];
+			}
 			case "hookMessage":
 			case "branchSummary":
 			case "user":

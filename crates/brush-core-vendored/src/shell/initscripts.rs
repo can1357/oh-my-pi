@@ -133,7 +133,7 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 				if let Some(config_path) = self.env_str(env_var_name) {
 					let config_path = config_path.into_owned();
 					let options = expansion::ExpanderOptions {
-						brace_expand:    false,
+						brace_expand: false,
 						pathname_expand: false,
 						..Default::default()
 					};
@@ -146,7 +146,9 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 					.await?;
 
 					if !expanded_path.is_empty() {
-						self.source_if_exists(PathBuf::from(expanded_path), &params).await?;
+						self
+							.source_if_exists(PathBuf::from(expanded_path), &params)
+							.await?;
 					}
 				}
 			}

@@ -746,7 +746,7 @@ describe("OpenAI responses history payload", () => {
 		expect(reasoningItem?.encrypted_content).toBe("enc_opaque");
 		expect(functionCallItem?.call_id).toBe(expectedCallId);
 		expect(functionCallOutputItem?.call_id).toBe(expectedCallId);
-		expect((functionCallItem?.call_id as string).length).toBeLessThanOrEqual(64);
+		expect((functionCallItem!.call_id as string).length).toBeLessThanOrEqual(64);
 		expect(containsAssistantOutputText(payload.input, "Sanitized assistant answer")).toBe(true);
 		expect(replayHistoryItems[0]?.id).toBe(opaqueReasoningId);
 		expect(replayHistoryItems[1]?.id).toBe(opaqueMessageId);

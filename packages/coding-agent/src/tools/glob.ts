@@ -1,6 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@pk-nerdsaver-ai/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+} from "@pk-nerdsaver-ai/pi-agent-core";
 import type { ToolExample } from "@pk-nerdsaver-ai/pi-ai";
 import * as natives from "@pk-nerdsaver-ai/pi-natives";
 import type { Component } from "@pk-nerdsaver-ai/pi-tui";

@@ -61,14 +61,14 @@ describe("loadCustomTools per-session binding (#2190 review fix)", () => {
 		expect(parentResult.tools).toHaveLength(1);
 		expect(subagentResult.tools).toHaveLength(1);
 
-		const parentApi = (parentResult.tools[0]?.tool as unknown as { __boundApi: CustomToolAPI }).__boundApi;
-		const subagentApi = (subagentResult.tools[0]?.tool as unknown as { __boundApi: CustomToolAPI }).__boundApi;
+		const parentApi = (parentResult.tools[0]!.tool as unknown as { __boundApi: CustomToolAPI }).__boundApi;
+		const subagentApi = (subagentResult.tools[0]!.tool as unknown as { __boundApi: CustomToolAPI }).__boundApi;
 
 		expect(parentApi.cwd).toBe("/tmp/parent-cwd");
 		expect(subagentApi.cwd).toBe("/tmp/subagent-cwd");
 		expect(subagentApi).not.toBe(parentApi);
 		// Different tool instances — a session must never see the other's tool.
-		expect(subagentResult.tools[0]?.tool).not.toBe(parentResult.tools[0]?.tool);
+		expect(subagentResult.tools[0]!.tool).not.toBe(parentResult.tools[0]!.tool);
 	});
 
 	it("routes pushPendingAction to the loader's own callback, not a shared one", async () => {
@@ -82,8 +82,8 @@ describe("loadCustomTools per-session binding (#2190 review fix)", () => {
 			subagentLog.push(`subagent:${action.label}`),
 		);
 
-		const parentApi = (parentResult.tools[0]?.tool as unknown as { __boundApi: CustomToolAPI }).__boundApi;
-		const subagentApi = (subagentResult.tools[0]?.tool as unknown as { __boundApi: CustomToolAPI }).__boundApi;
+		const parentApi = (parentResult.tools[0]!.tool as unknown as { __boundApi: CustomToolAPI }).__boundApi;
+		const subagentApi = (subagentResult.tools[0]!.tool as unknown as { __boundApi: CustomToolAPI }).__boundApi;
 
 		// Cast: the test fixture exposes the runtime API verbatim.
 		parentApi.pushPendingAction({

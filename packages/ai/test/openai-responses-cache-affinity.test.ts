@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@pk-nerdsaver-ai/pi-ai/providers/openai-responses";
 import { stream as streamModel, streamSimple } from "@pk-nerdsaver-ai/pi-ai/stream";
-import type { Context, FetchImpl, Model, ProviderSessionState, SimpleStreamOptions } from "@pk-nerdsaver-ai/pi-ai/types";
+import type {
+	Context,
+	FetchImpl,
+	Model,
+	ProviderSessionState,
+	SimpleStreamOptions,
+} from "@pk-nerdsaver-ai/pi-ai/types";
 import { buildOpenAIResponsesCompat } from "@pk-nerdsaver-ai/pi-catalog/compat/openai";
 import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
 

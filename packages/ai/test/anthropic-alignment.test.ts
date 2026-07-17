@@ -383,11 +383,11 @@ describe("Anthropic request fingerprint alignment", () => {
 		// a breakpoint — Anthropic rejects cache_control on thinking blocks.
 		const assistant = payload.messages?.find(message => message.role === "assistant");
 		expect(Array.isArray(assistant?.content)).toBe(true);
-		for (const block of assistant?.content as Array<{ type: string; cache_control?: unknown }>) {
+		for (const block of assistant!.content as Array<{ type: string; cache_control?: unknown }>) {
 			expect(block.cache_control).toBeUndefined();
 		}
 		const last = payload.messages?.at(-1);
-		expect((last?.content as Array<{ cache_control?: unknown }>)[0]?.cache_control).toBeDefined();
+		expect((last!.content as Array<{ cache_control?: unknown }>)[0]?.cache_control).toBeDefined();
 	});
 
 	it("adds effort and mid-conversation betas to API-key requests that use those features", async () => {

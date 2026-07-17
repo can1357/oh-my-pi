@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { formatThinkingForDisplay, hasDisplayableThinking } from "@pk-nerdsaver-ai/pi-coding-agent/utils/thinking-display";
+import {
+	formatThinkingForDisplay,
+	hasDisplayableThinking,
+} from "@pk-nerdsaver-ai/pi-coding-agent/utils/thinking-display";
 
 describe("formatThinkingForDisplay", () => {
 	it("should not format if proseOnly is false", () => {

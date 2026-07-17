@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { getOAuthProviders } from "@pk-nerdsaver-ai/pi-ai/oauth";
 import * as requestDebug from "@pk-nerdsaver-ai/pi-ai/utils/request-debug";
 import { type AutocompleteItem, Markdown, Spacer } from "@pk-nerdsaver-ai/pi-tui";
-import { $which, APP_NAME, setProjectDir } from "@pk-nerdsaver-ai/pi-utils";
+import { $which, APP_NAME, getProjectDir, setProjectDir } from "@pk-nerdsaver-ai/pi-utils";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
 import { writeCollabLinkFile } from "../collab/link-file";
@@ -34,6 +34,7 @@ import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession, FreshSessionResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { HubError, HubService, parseHubLink } from "../session/hub-service";
+import { resolveResumableSession } from "../session/session-listing";
 import { SessionManager } from "../session/session-manager";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { clearSpeechHardStop, enableSpeechHardStop, isSpeechHardStopped } from "../tts/speech-hard-stop";
@@ -330,6 +331,57 @@ function parseShakeMode(args: string): ShakeMode | { error: string } {
 	return { error: `Unknown /shake mode "${verb}". Use elide or images.` };
 }
 
+function resolveMoveCompletionBase(base: string, cwd: string): string {
+	if (!base) return cwd;
+	if (base === "~" || base === "~/") return os.homedir();
+	if (base.startsWith("~/")) return path.join(os.homedir(), base.slice(2));
+	if (path.isAbsolute(base)) return base;
+	return path.resolve(cwd, base);
+}
+
+async function listMoveDirectoryCompletions(
+	dir: string,
+	displayPrefix: string,
+	query: string,
+): Promise<AutocompleteItem[] | null> {
+	let names: string[];
+	try {
+		names = await fs.readdir(dir);
+	} catch {
+		return null;
+	}
+	const includeHidden = query.startsWith(".");
+	const lower = query.toLowerCase();
+	const items: AutocompleteItem[] = [];
+	for (const name of names.sort((a, b) => a.localeCompare(b))) {
+		if (!includeHidden && name.startsWith(".")) continue;
+		if (query && !name.toLowerCase().startsWith(lower)) continue;
+		try {
+			if (!(await fs.stat(path.join(dir, name))).isDirectory()) continue;
+		} catch {
+			continue;
+		}
+		items.push({ value: `${displayPrefix}${name}/`, label: `${name}/` });
+	}
+	return items.length > 0 ? items : null;
+}
+
+/** Directory completions for `/move <path>`: `~`, absolute, and cwd-relative prefixes. */
+function completeMoveDirectories(argumentPrefix: string): Promise<AutocompleteItem[] | null> {
+	const cwd = getProjectDir();
+	const normalized = argumentPrefix.replace(/\\/g, "/");
+	const slashIdx = normalized.lastIndexOf("/");
+	const base = slashIdx === -1 ? "" : normalized.slice(0, slashIdx + 1);
+	const query = slashIdx === -1 ? normalized : normalized.slice(slashIdx + 1);
+	// A bare navigation token (".", "..", "~") means "list that directory's
+	// children", not "filter the current listing by it".
+	if (query === "." || query === ".." || query === "~") {
+		const asBase = `${normalized}/`;
+		return listMoveDirectoryCompletions(resolveMoveCompletionBase(asBase, cwd), asBase, "");
+	}
+	return listMoveDirectoryCompletions(resolveMoveCompletionBase(base, cwd), base, query);
+}
+
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "pk-speak",
@@ -592,6 +644,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		description: "Toggle priority service tier (OpenAI service_tier=priority, Anthropic speed=fast)",
 		acpDescription: "Toggle fast mode",
 		acpInputHint: "[on|off|status]",
+		getTuiAutocompleteDescription: runtime => `Fast: ${formatFastModeStatus(runtime.ctx.session)}`,
 		subcommands: [
 			{ name: "on", description: "Enable fast mode" },
 			{ name: "off", description: "Disable fast mode" },
@@ -825,7 +878,22 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: async (_command, runtime) => {
 			const text = runtime.session.formatSessionAsText();
-			await runtime.output(text || "No messages to dump yet.");
+			if (!text) {
+				await runtime.output("No messages to dump yet.");
+				return commandConsumed();
+			}
+			// Best-effort LLM request JSON sidecar; the transcript is still
+			// useful without it, so failures just omit the pointer.
+			let sidecarPath: string | undefined;
+			try {
+				sidecarPath = await runtime.session.dumpLlmRequestToTmpDir();
+			} catch {
+				sidecarPath = undefined;
+			}
+			const output = sidecarPath
+				? `${text}\n\n---\nLLM request JSON: ${sidecarPath}\nThis file persists on disk and may contain raw context/secrets — treat accordingly.`
+				: text;
+			await runtime.output(output);
 			return commandConsumed();
 		},
 		handleTui: (_command, runtime) => {
@@ -1865,9 +1933,28 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "resume",
 		description: "Resume a different session",
-		handleTui: (_command, runtime) => {
-			runtime.ctx.showSessionSelector();
+		inlineHint: "[session-id]",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			const sessionArg = command.text.slice(`/${command.name}`.length).trim();
 			runtime.ctx.editor.setText("");
+			if (!sessionArg) {
+				runtime.ctx.showSessionSelector();
+				return;
+			}
+			// Direct resume by id/filename prefix: the active session directory is
+			// checked first, then every cwd bucket (matching `omp --resume <id>`).
+			const match = await resolveResumableSession(
+				sessionArg,
+				runtime.ctx.sessionManager.getCwd(),
+				runtime.ctx.sessionManager.getSessionDir(),
+				{ allowGlobalFallback: true },
+			);
+			if (!match) {
+				runtime.ctx.showError(`Session "${sessionArg}" not found`);
+				return;
+			}
+			await runtime.ctx.handleResumeSession(match.session.path);
 		},
 	},
 	{
@@ -2066,6 +2153,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		acpDescription: "Move the current session file",
 		inlineHint: "<path>",
 		allowArgs: true,
+		getArgumentCompletions: completeMoveDirectories,
 		handle: async (command, runtime) => {
 			if (runtime.session.isStreaming) return usage("Cannot move while streaming.", runtime);
 			if (!command.args) return usage("Usage: /move <path>", runtime);
@@ -2092,14 +2180,8 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			const targetPath = command.args;
-			if (!targetPath) {
-				runtime.ctx.showError("Usage: /move <path>");
-				runtime.ctx.editor.setText("");
-				return;
-			}
 			runtime.ctx.editor.setText("");
-			await runtime.ctx.handleMoveCommand(targetPath);
+			await runtime.ctx.handleMoveCommand(command.args.trim() || undefined);
 		},
 	},
 	{
@@ -2849,6 +2931,8 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
 		subcommands: command.subcommands,
 		inlineHint: command.inlineHint,
 		persistInHistory: command.persistInHistory,
+		getTuiAutocompleteDescription: command.getTuiAutocompleteDescription,
+		getArgumentCompletions: command.getArgumentCompletions,
 	}),
 );
 
@@ -2858,14 +2942,14 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
  */
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<
 	BuiltinSlashCommand & {
-		getArgumentCompletions?: (prefix: string) => AutocompleteItem[] | null;
+		getArgumentCompletions?: (prefix: string) => AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
 		getInlineHint?: (argumentText: string) => string | null;
 	}
 > = BUILTIN_SLASH_COMMAND_DEFS.map(cmd => {
 	if (cmd.subcommands) {
 		return {
 			...cmd,
-			getArgumentCompletions: buildArgumentCompletions(cmd.subcommands),
+			getArgumentCompletions: cmd.getArgumentCompletions ?? buildArgumentCompletions(cmd.subcommands),
 			getInlineHint: buildSubcommandInlineHint(cmd.subcommands),
 		};
 	}

@@ -7,7 +7,7 @@ import type {
 import type { ImageContent, ToolExample } from "@pk-nerdsaver-ai/pi-ai";
 import { prompt } from "@pk-nerdsaver-ai/pi-utils";
 import { type } from "arktype";
-import { jsBackend, pythonBackend } from "../eval";
+import { jsBackend, juliaBackend, pythonBackend, rubyBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
 import { IdleTimeout } from "../eval/idle-timeout";
@@ -35,28 +35,71 @@ import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 
 export { EVAL_DEFAULT_PREVIEW_LINES, evalToolRenderer } from "./eval-render";
 
-/**
- * Per-cell input. Each cell runs in order; state persists within a language
- * across cells and across tool calls.
- */
-const evalCellSchema = type({
-	language: type("'py' | 'js'").describe('runtime: "py" for the IPython kernel, "js" for the persistent JS VM'),
-	code: type("string").describe("cell body, verbatim. Use top-level await freely."),
-	"title?": type("string").describe('short label shown in transcript (e.g. "imports", "load config")'),
-	"timeout?": type("number").describe("per-cell timeout in seconds"),
-	"reset?": type("boolean").describe(
-		"wipe this cell's language kernel before running. Other languages are untouched.",
-	),
-});
-export type EvalCellInput = typeof evalCellSchema.infer;
+/** Wire language ids: py/js are always advertised; rb/jl appear once their backends are enabled. */
+type EvalWireLanguage = "py" | "js" | "rb" | "jl";
 
-export const evalSchema = type({
-	cells: evalCellSchema
-		.array()
-		.atLeastLength(1)
-		.describe("cells executed in order. State persists within each language across cells and tool calls."),
-});
-export type EvalToolParams = typeof evalSchema.infer;
+const WIRE_LANGUAGE_ORDER: readonly EvalWireLanguage[] = ["py", "js", "rb", "jl"];
+
+const LANGUAGE_DESCRIPTION_PARTS: Record<EvalWireLanguage, string> = {
+	py: '"py" for the IPython kernel',
+	js: '"js" for the persistent JS VM',
+	rb: '"rb" for the persistent Ruby kernel',
+	jl: '"jl" for the persistent Julia kernel',
+};
+
+const BASE_CODE_DESCRIPTION = "code to run in this eval call, verbatim. Use top-level await freely.";
+const REPL_CODE_DESCRIPTION =
+	"code to run in this eval call, verbatim. Top-level `await` is available in py/js; rb/jl auto-display the last expression like a REPL.";
+
+/**
+ * Build the flat single-call schema for the advertised language set. State
+ * persists within a language across tool calls; rb/jl stay out of the wire
+ * schema (byte-identical to the pre-feature py/js one) until enabled.
+ */
+function buildEvalSchema(languages: readonly EvalWireLanguage[]) {
+	const hasReplBackends = languages.includes("rb") || languages.includes("jl");
+	const languageUnion = languages.map(language => `'${language}'`).join(" | ") as "'py' | 'js'";
+	return type({
+		language: type(languageUnion).describe(
+			`runtime: ${languages.map(language => LANGUAGE_DESCRIPTION_PARTS[language]).join(", ")}`,
+		),
+		code: type("string").describe(hasReplBackends ? REPL_CODE_DESCRIPTION : BASE_CODE_DESCRIPTION),
+		"title?": type("string").describe('short label shown in transcript (e.g. "imports", "load config")'),
+		"timeout?": type("number").describe("per-cell timeout in seconds"),
+		"reset?": type("boolean").describe(
+			"wipe this cell's language kernel before running. Other languages are untouched.",
+		),
+	});
+}
+
+export const evalSchema = buildEvalSchema(["py", "js"]);
+type EvalSchemaType = typeof evalSchema;
+
+// Memoized per advertised-language set: the schema is stable for a given
+// backend allowance, and tool consumers may read `parameters` per render.
+const evalSchemaCache = new Map<string, EvalSchemaType>([["py,js", evalSchema]]);
+
+function evalSchemaForLanguages(languages: readonly EvalWireLanguage[]): EvalSchemaType {
+	const key = languages.join(",");
+	let schema = evalSchemaCache.get(key);
+	if (!schema) {
+		schema = buildEvalSchema(languages);
+		evalSchemaCache.set(key, schema);
+	}
+	return schema;
+}
+
+function advertisedLanguages(session: ToolSession | null): EvalWireLanguage[] {
+	const backends = session ? resolveEvalBackends(session) : undefined;
+	return WIRE_LANGUAGE_ORDER.filter(language => {
+		if (language === "rb") return backends?.ruby === true;
+		if (language === "jl") return backends?.julia === true;
+		return true;
+	});
+}
+
+export type EvalCellInput = { language: "py" | "js" | "rb" | "jl" } & Omit<typeof evalSchema.infer, "language">;
+export type EvalToolParams = EvalCellInput;
 
 export type EvalToolResult = {
 	content: Array<{ type: "text"; text: string }>;
@@ -100,6 +143,10 @@ function formatDisplayOutputsForText(outputs: EvalDisplayOutput[]): string {
 export interface EvalToolDescriptionOptions {
 	py?: boolean;
 	js?: boolean;
+	/** Ruby backend advertisement; opt-in, default false (mirrors eval.rb). */
+	rb?: boolean;
+	/** Julia backend advertisement; opt-in, default false (mirrors eval.jl). */
+	jl?: boolean;
 	/**
 	 * Whether `agent()` is allowed in this session. Driven by the parent's
 	 * spawn policy (`getSessionSpawns`). Defaults to `true` for backward
@@ -113,8 +160,10 @@ export interface EvalToolDescriptionOptions {
 export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
 	const py = options.py ?? true;
 	const js = options.js ?? true;
+	const rb = options.rb ?? false;
+	const jl = options.jl ?? false;
 	const spawns = options.spawns ?? true;
-	return prompt.render(evalDescription, { py, js, spawns });
+	return prompt.render(evalDescription, { py, js, rb, jl, spawns });
 }
 
 export interface EvalToolOptions {
@@ -161,11 +210,9 @@ export function formatEvalCancellationMessage(cause: EvalCancellationCause, effe
 
 async function resolveBackend(session: ToolSession, language: EvalLanguage): Promise<ResolvedBackend> {
 	const backends = resolveEvalBackends(session);
-	const allowPy = backends.python;
-	const allowJs = backends.js;
 
 	if (language === "python") {
-		if (!allowPy) throw new ToolError("Python backend is disabled (PI_PY=0 or eval.py = false).");
+		if (!backends.python) throw new ToolError("Python backend is disabled (PI_PY=0 or eval.py = false).");
 		if (!(await pythonBackend.isAvailable(session))) {
 			throw new ToolError(
 				'Python backend is unavailable in this session. Pass language: "js" or install the python kernel.',
@@ -173,7 +220,25 @@ async function resolveBackend(session: ToolSession, language: EvalLanguage): Pro
 		}
 		return { backend: pythonBackend };
 	}
-	if (!allowJs) throw new ToolError("JavaScript backend is disabled (PI_JS=0 or eval.js = false).");
+	if (language === "ruby") {
+		if (!backends.ruby) throw new ToolError("Ruby backend is disabled (PI_RB=0 or eval.rb = false).");
+		if (!(await rubyBackend.isAvailable(session))) {
+			throw new ToolError(
+				'Ruby backend is unavailable in this session. Pass language: "js" or install a ruby interpreter (see the ruby.interpreter setting).',
+			);
+		}
+		return { backend: rubyBackend };
+	}
+	if (language === "julia") {
+		if (!backends.julia) throw new ToolError("Julia backend is disabled (PI_JL=0 or eval.jl = false).");
+		if (!(await juliaBackend.isAvailable(session))) {
+			throw new ToolError(
+				'Julia backend is unavailable in this session. Pass language: "js" or install a julia interpreter (see the julia.interpreter setting).',
+			);
+		}
+		return { backend: juliaBackend };
+	}
+	if (!backends.js) throw new ToolError("JavaScript backend is disabled (PI_JS=0 or eval.js = false).");
 	return { backend: jsBackend };
 }
 
@@ -181,58 +246,94 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	readonly name = "eval";
 	readonly approval = "exec" as const;
 	readonly formatApprovalDetails = (args: unknown): string[] => {
-		const params = args as Partial<EvalToolParams>;
-		const cells = Array.isArray(params.cells) ? params.cells : [];
-		const firstCell = cells[0] as Partial<EvalCellInput> | undefined;
-		if (!firstCell) return [];
-		const language = typeof firstCell.language === "string" ? firstCell.language : "(missing)";
-		const code = typeof firstCell.code === "string" ? firstCell.code : "";
-		const lines = [`Language: ${language}`, `Code:\n${truncateForPrompt(code)}`];
-		if (cells.length > 1) {
-			lines.push(`+${cells.length - 1} more cell${cells.length === 2 ? "" : "s"}`);
-		}
-		return lines;
+		const params = (args ?? {}) as Partial<EvalCellInput>;
+		if (typeof params.language !== "string" && typeof params.code !== "string") return [];
+		const language = typeof params.language === "string" ? params.language : "(missing)";
+		const code = typeof params.code === "string" ? params.code : "";
+		return [`Language: ${language}`, `Code:\n${truncateForPrompt(code)}`];
 	};
-	readonly summary = "Execute Python or JavaScript code in an in-process eval backend";
-	readonly loadMode = "discoverable";
+	/** Backend list reflects the enabled set: rb/jl stay out of the summary until opted in. */
+	get summary(): string {
+		const backends = this.session ? resolveEvalBackends(this.session) : undefined;
+		const names = ["Python", "JavaScript"];
+		if (backends?.ruby) names.push("Ruby");
+		if (backends?.julia) names.push("Julia");
+		if (names.length === 2) return "Execute Python or JavaScript code in an in-process eval backend";
+		return `Execute ${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]} code in a persistent eval backend`;
+	}
+	readonly loadMode = "essential";
 	readonly label = "Eval";
 	get description(): string {
 		if (!this.session) return getEvalToolDescription();
 		const backends = resolveEvalBackends(this.session);
 		const sessionSpawns = this.session.getSessionSpawns?.() ?? "*";
 		const spawnsAllowed = sessionSpawns !== "" && sessionSpawns !== null;
-		return getEvalToolDescription({ py: backends.python, js: backends.js, spawns: spawnsAllowed });
+		return getEvalToolDescription({
+			py: backends.python,
+			js: backends.js,
+			rb: backends.ruby,
+			jl: backends.julia,
+			spawns: spawnsAllowed,
+		});
 	}
-	readonly examples: readonly ToolExample<typeof evalSchema.infer>[] = [
-		{
-			call: {
-				cells: [
-					{
-						language: "py",
-						title: "imports",
-						timeout: 10,
-						code: "import json\nfrom pathlib import Path",
-					},
-					{
-						language: "py",
-						title: "load config",
-						code: "data = json.loads(read('package.json'))\ndisplay(data)",
-					},
-				],
+	/** Examples advertise only enabled backends (a disabled rb/jl example would teach a throwing call). */
+	get examples(): readonly ToolExample<EvalToolParams>[] {
+		const backends = this.session ? resolveEvalBackends(this.session) : undefined;
+		const examples: ToolExample<EvalToolParams>[] = [
+			{
+				call: {
+					language: "py",
+					title: "imports",
+					timeout: 10,
+					code: "import json\nfrom pathlib import Path",
+				},
 			},
-		},
-	];
-	readonly parameters = evalSchema;
+			{
+				call: {
+					language: "py",
+					title: "load config",
+					code: "data = json.loads(read('package.json'))\ndisplay(data)",
+				},
+			},
+			{
+				call: {
+					language: "py",
+					title: "inspect",
+					code: "print(sorted(data.keys()))",
+				},
+			},
+		];
+		if (backends?.ruby) {
+			examples.push(
+				{
+					call: {
+						language: "rb",
+						title: "load config",
+						code: "data = JSON.parse(read('package.json'))\ndata.keys",
+					},
+				},
+				{
+					call: {
+						language: "rb",
+						title: "peek output",
+						code: 'output("job-1", limit: 2)',
+					},
+				},
+			);
+		}
+		return examples;
+	}
+	get parameters(): EvalSchemaType {
+		return evalSchemaForLanguages(advertisedLanguages(this.session));
+	}
 	readonly concurrency = "exclusive";
 	readonly strict = true;
-	readonly intent = (args: Partial<typeof evalSchema.infer>): string | undefined => {
-		const cells = Array.isArray(args.cells) ? args.cells : [];
-		const first = cells.find(c => c && typeof c === "object");
-		if (!first) return "evaluating";
-		const title = typeof first.title === "string" ? first.title : undefined;
-		const language = typeof first.language === "string" ? first.language : "?";
-		const label = title || `running ${language}`;
-		return cells.length > 1 ? `${label} (+${cells.length - 1})` : label;
+	readonly intent = (args: Partial<EvalToolParams>): string | undefined => {
+		if (!args || typeof args !== "object") return "evaluating";
+		const title = typeof args.title === "string" ? args.title : undefined;
+		const language = typeof args.language === "string" ? args.language : undefined;
+		if (!title && !language) return "evaluating";
+		return title || `running ${language}`;
 	};
 
 	readonly #proxyExecutor?: EvalProxyExecutor;
@@ -246,7 +347,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 	async execute(
 		_toolCallId: string,
-		params: typeof evalSchema.infer,
+		params: EvalToolParams,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback,
 		_ctx?: AgentToolContext,
@@ -261,10 +362,20 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const session = this.session;
 		const excludeWebP = webpExclusionForModel(session.getActiveModel?.());
 
+		// Flat single-cell call; the execution core still speaks cell lists so a
+		// future batch shape (and the legacy transcripts that carry one) keep working.
+		const cellInputs: EvalCellInput[] = [params];
 		const cells: ResolvedEvalCell[] = [];
-		for (let i = 0; i < params.cells.length; i++) {
-			const cell = params.cells[i];
-			const language: EvalLanguage = cell.language === "py" ? "python" : "js";
+		for (let i = 0; i < cellInputs.length; i++) {
+			const cell = cellInputs[i];
+			const language: EvalLanguage =
+				cell.language === "py"
+					? "python"
+					: cell.language === "rb"
+						? "ruby"
+						: cell.language === "jl"
+							? "julia"
+							: "js";
 			const resolved = await resolveBackend(session, language);
 			cells.push({
 				index: i,
@@ -401,6 +512,13 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							reset: cell.reset,
 							onChunk: chunk => {
 								outputSink!.push(chunk);
+								// Live bridge: stdout streamed by a still-running cell lands in
+								// the running cell's rendered output *before* execute() returns,
+								// so long-running cells show progress in the eval card instead
+								// of dumping everything at once on completion/interrupt.
+								// Completion overwrites with the authoritative full output below.
+								cellResult.output = (cellResult.output ?? "") + chunk;
+								pushUpdate();
 							},
 							onStatus: event => {
 								if (event.op === EVAL_TIMEOUT_PAUSE_OP) {

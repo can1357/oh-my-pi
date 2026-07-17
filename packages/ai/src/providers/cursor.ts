@@ -621,7 +621,25 @@ export type ToolCallState = ToolCall & {
 	[kStreamingBlockIndex]: number;
 	[kStreamingPartialJson]?: string;
 	[kStreamingBlockKind]: "mcp" | "todo";
+	/**
+	 * Read-only view of the accumulated streamed argument JSON for observers of
+	 * the in-flight state. Backed by a non-enumerable accessor that aliases
+	 * {@link kStreamingPartialJson}, so no string-keyed property leaks into
+	 * serialized blocks.
+	 */
+	readonly partialJson?: string;
 };
+
+/** Exposes the in-flight streamed argument JSON as a non-enumerable `partialJson` accessor. */
+function definePartialJsonAlias(block: ToolCallState): void {
+	Object.defineProperty(block, "partialJson", {
+		get(this: ToolCallState) {
+			return this[kStreamingPartialJson];
+		},
+		enumerable: false,
+		configurable: true,
+	});
+}
 
 export interface BlockState {
 	currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null;
@@ -2071,6 +2089,7 @@ export function processInteractionUpdate(
 					[kStreamingPartialJson]: "",
 					[kStreamingBlockKind]: "mcp",
 				};
+				definePartialJsonAlias(block);
 				output.content.push(block);
 				state.setToolCall(block);
 				stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });

@@ -53,7 +53,7 @@
       "@types/turndown": "5.0.6",
       "@typescript/native-preview": "7.0.0-dev.20260609.1",
       "@xterm/headless": "^6.0.0",
-      "arktype": "^2.2.0",
+      "arktype": "2.2.1",
       "chalk": "^5.6.2",
       "chart.js": "^4.5.1",
       "date-fns": "^4.4.0",

@@ -322,11 +322,13 @@ export interface UserAgentOverride {
 	userAgentMetadata: {
 		brands: Array<{ brand: string; version: string }>;
 		fullVersion: string;
-		fullVersionList: Array<{ brand: string; version: string }>;
+		/** Optional in CDP: omitted overrides fall back to the brands list. */
+		fullVersionList?: Array<{ brand: string; version: string }>;
 		platform: string;
 		platformVersion: string;
 		architecture: string;
-		bitness: string;
+		/** Optional in CDP: Chrome derives it when absent. */
+		bitness?: string;
 		model: string;
 		mobile: boolean;
 	};

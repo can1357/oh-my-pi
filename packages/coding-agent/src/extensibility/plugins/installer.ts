@@ -78,6 +78,7 @@ export async function installPlugin(packageName: string): Promise<InstalledPlugi
 		manifest: pkg.omp || pkg.pi || { version: pkg.version },
 		enabledFeatures: null,
 		enabled: true,
+		scope: "user",
 	};
 }
 
@@ -123,6 +124,7 @@ export async function listPlugins(): Promise<InstalledPlugin[]> {
 				manifest: pkg.omp || pkg.pi || { version: pkg.version },
 				enabledFeatures: null,
 				enabled: true,
+				scope: "user",
 			});
 		}
 	}

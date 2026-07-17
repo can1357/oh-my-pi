@@ -233,6 +233,12 @@ const pathSegment: StatusLineSegment = {
 			pwd = `${ellipsis}${pwd.slice(-sliceLen)}`;
 		}
 
+		// The active nested repo suffix is appended after truncation so it stays
+		// visible even when the parent cwd gets clipped.
+		if (ctx.activeRepo) {
+			pwd = `${pwd} ↳ ${ctx.activeRepo.relativeRepoRoot}`;
+		}
+
 		const showScratchIcon = scratch && opts.stripWorkPrefix !== false;
 		const icon = showScratchIcon ? theme.icon.scratchFolder : theme.icon.folder;
 		const content = withIcon(icon, pwd);
@@ -384,7 +390,7 @@ const contextPctSegment: StatusLineSegment = {
 		const window = ctx.contextWindow;
 
 		const autoIcon = ctx.autoCompactEnabled && theme.icon.auto ? ` ${theme.icon.auto}` : "";
-		const text = `${formatContextUsage(pct, window)}${autoIcon}`;
+		const text = `${formatContextUsage(pct, window, ctx.contextTokens)}${autoIcon}`;
 
 		const color = getContextUsageThemeColor(getContextUsageLevel(pct ?? 0, window));
 		const content = withIcon(theme.icon.context, theme.fg(color, text));
@@ -578,7 +584,12 @@ const usageSegment: StatusLineSegment = {
 					: "";
 			parts.push(`7d ${pctText}${reset}`);
 		}
-		const content = withIcon(theme.icon.time, parts.join(theme.sep.dot));
+		let joined = parts.join(theme.sep.dot);
+		if (u.tier) {
+			const tierLabel = sanitizeStatusText(u.tier);
+			if (tierLabel) joined += theme.fg("muted", ` ${tierLabel}`);
+		}
+		const content = withIcon(theme.icon.time, joined);
 		return { content, visible: true };
 	},
 };

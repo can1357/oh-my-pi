@@ -1,15 +1,15 @@
 import * as fs from "node:fs/promises";
 import {
 	LOCAL_AGENT_OWNER_PROTOCOL,
-	LocalAgentOwnerProtocolError,
-	MAX_OWNER_FRAME_BYTES,
-	MAX_OWNER_TRANSCRIPT_BYTES,
 	type LocalAgentOwnerClientFrame,
 	type LocalAgentOwnerCommand,
+	LocalAgentOwnerProtocolError,
 	type LocalAgentOwnerResponseData,
 	type LocalAgentOwnerServerFrame,
 	type LocalAgentRuntimeDescriptor,
 	type LocalAgentTranscriptChunk,
+	MAX_OWNER_FRAME_BYTES,
+	MAX_OWNER_TRANSCRIPT_BYTES,
 	type SequencedLocalAgentOwnerEvent,
 } from "./local-agent-owner-types";
 import type { GatewayCommand } from "./types";
@@ -117,7 +117,10 @@ export class LocalAgentOwnerClient {
 		return { text: frame.text, newSize: frame.newSize, eof: frame.eof };
 	}
 
-	async #request(command: LocalAgentOwnerCommand, requestId = Bun.randomUUIDv7()): Promise<LocalAgentOwnerResponseData> {
+	async #request(
+		command: LocalAgentOwnerCommand,
+		requestId = Bun.randomUUIDv7(),
+	): Promise<LocalAgentOwnerResponseData> {
 		await this.connect();
 		const frame = await this.#sendRequest({
 			t: "command",
@@ -136,10 +139,13 @@ export class LocalAgentOwnerClient {
 		const socket = new WebSocket(this.#initialDescriptor.endpoint);
 		this.#socket = socket;
 		const connected = Promise.withResolvers<LocalAgentRuntimeDescriptor>();
-		const timeout = setTimeout(() => {
-			socket.close();
-			connected.reject(new Error("Timed out connecting to local agent owner"));
-		}, Math.max(100, timeoutMs));
+		const timeout = setTimeout(
+			() => {
+				socket.close();
+				connected.reject(new Error("Timed out connecting to local agent owner"));
+			},
+			Math.max(100, timeoutMs),
+		);
 		socket.onopen = () => {
 			const hello: LocalAgentOwnerClientFrame = {
 				t: "hello",
@@ -172,9 +178,15 @@ export class LocalAgentOwnerClient {
 			if (frame.t === "event") {
 				if (frame.ownerEpoch !== this.#descriptor.ownerEpoch || frame.seq <= this.#lastSeq) return;
 				this.#lastSeq = frame.seq;
-				if (frame.event.type === "heartbeat") this.#descriptor = { ...this.#descriptor, leaseExpiresAt: frame.event.leaseExpiresAt, eventSeq: frame.seq };
+				if (frame.event.type === "heartbeat")
+					this.#descriptor = {
+						...this.#descriptor,
+						leaseExpiresAt: frame.event.leaseExpiresAt,
+						eventSeq: frame.seq,
+					};
 				else if (frame.event.type === "snapshot") this.#descriptor = frame.event.descriptor;
-				for (const listener of this.#listeners) listener({ ownerEpoch: frame.ownerEpoch, seq: frame.seq, event: frame.event });
+				for (const listener of this.#listeners)
+					listener({ ownerEpoch: frame.ownerEpoch, seq: frame.seq, event: frame.event });
 				return;
 			}
 			if (frame.t === "response" || frame.t === "transcript") {
@@ -197,10 +209,14 @@ export class LocalAgentOwnerClient {
 		return connected.promise;
 	}
 
-	#sendRequest(frame: Extract<LocalAgentOwnerClientFrame, { requestId: string }>): Promise<LocalAgentOwnerServerFrame> {
+	#sendRequest(
+		frame: Extract<LocalAgentOwnerClientFrame, { requestId: string }>,
+	): Promise<LocalAgentOwnerServerFrame> {
 		const socket = this.#socket;
-		if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error("Local agent owner is not connected"));
-		if (this.#pending.has(frame.requestId)) return Promise.reject(new Error(`Duplicate in-flight request id: ${frame.requestId}`));
+		if (!socket || socket.readyState !== WebSocket.OPEN)
+			return Promise.reject(new Error("Local agent owner is not connected"));
+		if (this.#pending.has(frame.requestId))
+			return Promise.reject(new Error(`Duplicate in-flight request id: ${frame.requestId}`));
 		const result = Promise.withResolvers<LocalAgentOwnerServerFrame>();
 		this.#pending.set(frame.requestId, { resolve: result.resolve, reject: result.reject });
 		socket.send(JSON.stringify(frame));

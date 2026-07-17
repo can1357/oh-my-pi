@@ -1390,18 +1390,24 @@ export class AgentHubOverlayComponent extends Container {
 		void (async () => {
 			try {
 				const sm = await SessionManager.open(sessionPath, this.#sessionDir ?? "");
-				const current = sm.getBackgroundInstance();
-				if (!current) {
-					this.#notice = `Background session "${ref.displayName}" is no longer active.`;
-				} else {
-					sm.appendBackgroundInstance({ ...current, name: newName });
-					await sm.flush();
-					this.#backgroundRefs = this.#backgroundRefs.map(backgroundRef =>
-						backgroundRef.id === ref.id
-							? { ...backgroundRef, displayName: newName, lastActivity: Date.now() }
-							: backgroundRef,
-					);
-					this.#notice = undefined;
+				try {
+					const current = sm.getBackgroundInstance();
+					if (!current) {
+						this.#notice = `Background session "${ref.displayName}" is no longer active.`;
+					} else {
+						sm.appendBackgroundInstance({ ...current, name: newName });
+						await sm.flush();
+						this.#backgroundRefs = this.#backgroundRefs.map(backgroundRef =>
+							backgroundRef.id === ref.id
+								? { ...backgroundRef, displayName: newName, lastActivity: Date.now() }
+								: backgroundRef,
+						);
+						this.#notice = undefined;
+					}
+				} finally {
+					// Release the transient writer (and its session guard) so later
+					// maintenance ops on this session don't contend with a leaked handle.
+					await sm.close();
 				}
 			} catch (error) {
 				this.#notice = `Failed to rename session: ${error instanceof Error ? error.message : String(error)}`;
@@ -1575,8 +1581,14 @@ export class AgentHubOverlayComponent extends Container {
 			void (async () => {
 				try {
 					const sm = await SessionManager.open(sessionPath, this.#sessionDir ?? "");
-					sm.archiveBackgroundInstance();
-					await sm.flush();
+					try {
+						sm.archiveBackgroundInstance();
+						await sm.flush();
+					} finally {
+						// Release the transient writer (and its session guard) so later
+						// maintenance ops on this session don't contend with a leaked handle.
+						await sm.close();
+					}
 					this.#backgroundRefs = this.#backgroundRefs.filter(r => r.id !== ref.id);
 					this.#notice = `Removed background session "${ref.displayName}"`;
 				} catch (error) {

@@ -5,7 +5,13 @@ import * as path from "node:path";
 import * as mcpClient from "@pk-nerdsaver-ai/pi-coding-agent/mcp/client";
 import { MCPCommandController } from "@pk-nerdsaver-ai/pi-coding-agent/modes/controllers/mcp-command-controller";
 import { initTheme } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
-import { getConfigRootDir, getProjectDir, removeWithRetries, setAgentDir, setProjectDir } from "@pk-nerdsaver-ai/pi-utils";
+import {
+	getConfigRootDir,
+	getProjectDir,
+	removeWithRetries,
+	setAgentDir,
+	setProjectDir,
+} from "@pk-nerdsaver-ai/pi-utils";
 
 const originalProjectDir = getProjectDir();
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;

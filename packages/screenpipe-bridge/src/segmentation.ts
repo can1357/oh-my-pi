@@ -1,0 +1,85 @@
+import type { FrameSegment, ScreenpipeFrameRow } from "./types";
+
+export interface SegmentationOptions {
+	readonly maximumIdleMs?: number;
+}
+
+export const DEFAULT_MAXIMUM_IDLE_MS = 5 * 60_000;
+
+/**
+ * Groups frames (already redaction-complete, ordered by id) into contiguous
+ * activity segments — one per device, broken whenever the focused app/window
+ * changes or the gap between consecutive frames exceeds `maximumIdleMs`.
+ */
+export function segmentFramesIntoClips(
+	frames: readonly ScreenpipeFrameRow[],
+	options: SegmentationOptions = {},
+): readonly FrameSegment[] {
+	const maximumIdleMs = options.maximumIdleMs ?? DEFAULT_MAXIMUM_IDLE_MS;
+	if (!Number.isSafeInteger(maximumIdleMs) || maximumIdleMs <= 0)
+		throw new Error("maximumIdleMs must be a positive integer");
+
+	const byDevice = new Map<string, ScreenpipeFrameRow[]>();
+	for (const frame of frames) {
+		const bucket = byDevice.get(frame.device_name);
+		if (bucket) bucket.push(frame);
+		else byDevice.set(frame.device_name, [frame]);
+	}
+
+	const segments: FrameSegment[] = [];
+	for (const [deviceName, deviceFrames] of byDevice) {
+		let current: ScreenpipeFrameRow[] = [];
+		let previousMs: number | undefined;
+		for (const frame of deviceFrames) {
+			const frameMs = Date.parse(frame.timestamp);
+			const previous = current[current.length - 1];
+			const sameActivity =
+				previous === undefined ||
+				(previous.app_name === frame.app_name && previous.window_name === frame.window_name);
+			const withinIdle = previousMs === undefined || frameMs - previousMs <= maximumIdleMs;
+			if (!sameActivity || !withinIdle) {
+				if (current.length > 0) segments.push(toSegment(deviceName, current));
+				current = [];
+			}
+			current.push(frame);
+			previousMs = frameMs;
+		}
+		if (current.length > 0) segments.push(toSegment(deviceName, current));
+	}
+
+	return [...segments].sort((left, right) => left.window.startedAt.localeCompare(right.window.startedAt));
+}
+
+/** A single-frame segment attests at least momentary activity; give its window this much width. */
+const MINIMUM_SEGMENT_DURATION_MS = 1_000;
+
+function toSegment(deviceName: string, frames: readonly ScreenpipeFrameRow[]): FrameSegment {
+	const first = frames[0];
+	const last = frames[frames.length - 1];
+	if (!first || !last) throw new Error("segment must contain at least one frame");
+	const browserOrigin = first.browser_url ? safeOrigin(first.browser_url) : undefined;
+	const startedAtMs = Date.parse(first.timestamp);
+	// The gopk sink rejects windows where endedAt <= startedAt, which every
+	// single-frame segment would otherwise produce.
+	const endedAtMs = Math.max(Date.parse(last.timestamp), startedAtMs + MINIMUM_SEGMENT_DURATION_MS);
+	return {
+		deviceName,
+		frames,
+		window: {
+			startedAt: new Date(startedAtMs).toISOString(),
+			endedAt: new Date(endedAtMs).toISOString(),
+		},
+		appIdentity: {
+			processName: (first.app_name ?? "unknown").trim().toLowerCase(),
+			...(browserOrigin ? { browserOrigin } : {}),
+		},
+	};
+}
+
+function safeOrigin(url: string): string | undefined {
+	try {
+		return new URL(url).origin;
+	} catch {
+		return undefined;
+	}
+}

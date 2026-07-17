@@ -633,7 +633,7 @@ export class ExtensionUiController {
 	 */
 	hideHookSelector(): void {
 		this.ctx.hookSelector?.dispose();
-		this.ctx.remountEditorComposer();
+		this.ctx.remountEditorComposer?.();
 		this.ctx.hookSelector = undefined;
 		this.ctx.ui.setFocus(this.ctx.editor);
 		this.ctx.ui.requestRender();
@@ -680,7 +680,7 @@ export class ExtensionUiController {
 	 */
 	hideHookInput(): void {
 		this.ctx.hookInput?.dispose();
-		this.ctx.remountEditorComposer();
+		this.ctx.remountEditorComposer?.();
 		this.ctx.hookInput = undefined;
 		this.ctx.ui.setFocus(this.ctx.editor);
 		this.ctx.ui.requestRender();
@@ -716,7 +716,7 @@ export class ExtensionUiController {
 	 * Hide the hook editor.
 	 */
 	hideHookEditor(): void {
-		this.ctx.remountEditorComposer();
+		this.ctx.remountEditorComposer?.();
 		this.ctx.hookEditor = undefined;
 		this.ctx.ui.setFocus(this.ctx.editor);
 		this.ctx.ui.requestRender();
@@ -762,7 +762,7 @@ export class ExtensionUiController {
 			overlayHandle?.hide();
 			overlayHandle = undefined;
 			if (!options?.overlay) {
-				this.ctx.remountEditorComposer();
+				this.ctx.remountEditorComposer?.();
 				this.ctx.editor.setText(savedText);
 			}
 			this.ctx.ui.setFocus(this.ctx.editor);

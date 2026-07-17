@@ -294,10 +294,6 @@ export const sshToolRenderer = {
 		const details = result.details;
 		const host = args?.host || "…";
 		const command = args?.command ?? "";
-		const header = renderStatusLine(
-			{ iconOverride: uiTheme.styledSymbol("tool.ssh", "accent"), title: "SSH", description: `[${host}]` },
-			uiTheme,
-		);
 		const cmdLines = formatSshCommandLines(command, uiTheme);
 		const textContent = result.content?.find(c => c.type === "text")?.text ?? "";
 		const outputBlock = new CachedOutputBlock();
@@ -305,7 +301,17 @@ export const sshToolRenderer = {
 		return markFramedBlockComponent({
 			render: (width: number): readonly string[] => {
 				// REACTIVE: read mutable options at render time
-				const { expanded, renderContext } = options;
+				const { expanded, renderContext, isPartial } = options;
+				const header = isPartial
+					? renderStatusLine({ icon: "pending", title: "SSH", description: `[${host}]` }, uiTheme)
+					: renderStatusLine(
+							{
+								iconOverride: uiTheme.styledSymbol("tool.ssh", "accent"),
+								title: "SSH",
+								description: `[${host}]`,
+							},
+							uiTheme,
+						);
 				// Strip LLM-facing notice so we don't echo it next to the styled warning.
 				const output = stripOutputNotice(textContent, details?.meta).trimEnd();
 				const outputLines: string[] = [];
@@ -347,7 +353,7 @@ export const sshToolRenderer = {
 				return outputBlock.render(
 					{
 						header,
-						state: "success",
+						state: isPartial ? "pending" : "success",
 						sections: [
 							{
 								// Viewport-sized tail window in every state — streaming and final
@@ -371,4 +377,8 @@ export const sshToolRenderer = {
 	// that shifts while args stream. Expanded output is top-anchored enough for
 	// the transcript to commit its settled prefix.
 	provisionalPendingPreview: "collapsed",
+	// Partial results render pending chrome (⏳ header, pending frame) that the
+	// final render replaces with the SSH glyph + success frame — commit-unstable
+	// while partial so the stable-prefix ratchet cannot strand the pending header.
+	provisionalPartialResult: true,
 };

@@ -8,6 +8,7 @@ import type {
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	ToolTier,
 } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { Component } from "@pk-nerdsaver-ai/pi-tui";
 import { isEnoent, isRecord, prompt, untilAborted } from "@pk-nerdsaver-ai/pi-utils";
@@ -45,7 +46,7 @@ import {
 } from "./conflict-detect";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 import { type OutputMeta, outputMeta } from "./output-meta";
-import { formatPathRelativeToCwd, isInternalUrlPath } from "./path-utils";
+import { formatPathRelativeToCwd, isInternalUrlPath, pathTargetsSsh, peelWriteUrlSelector } from "./path-utils";
 import { enforcePlanModeWrite, resolvePlanPath, unwrapHashlineHeaderPath } from "./plan-mode-guard";
 import {
 	cachedRenderedString,
@@ -276,8 +277,11 @@ function parseSqliteWriteTarget(subPath: string, queryString: string): { table: 
  */
 export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails> {
 	readonly name = "write";
-	readonly approval = (args: unknown) => {
+	readonly approval = (args: unknown): ToolTier => {
 		const rawPath = (args as Partial<WriteParams>).path;
+		// Substring scan on the raw arg so a hashline-wrapped `[ssh://…#TAG]`
+		// path cannot dodge the exec tier.
+		if (typeof rawPath === "string" && pathTargetsSsh(rawPath)) return "exec";
 		if (typeof rawPath !== "string" || !isInternalUrlPath(rawPath)) return "write";
 		// Internal URLs are usually session-local artifacts (read tier), but a
 		// scheme whose handler exposes a `write` hook mutates handler-owned
@@ -797,7 +801,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// (which fails on a leading `[`) and the bridge router would send a
 		// `[local://scratch.md#ABCD]` write to the editor instead of the
 		// session-local sandbox.
-		const path = unwrapHashlineHeaderPath(rawPath);
+		// Peel read-tool selectors off internal-URL targets up front: whole-file
+		// display modes (`:raw`, `:conflicts`) drop harmlessly, anything else
+		// (line ranges, malformed tails) throws before any handler/SSH op runs.
+		const path = peelWriteUrlSelector(unwrapHashlineHeaderPath(rawPath));
 		return untilAborted(signal, async () => {
 			// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output
 			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);

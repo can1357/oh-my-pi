@@ -362,11 +362,15 @@ export function createSpawnPlan(input: SpawnPlanInput): SpawnPlanResult {
 	}
 
 	if (narrowed.eligible.length === 0) {
-		diagnostics.push({
-			code: "no-eligible-candidates",
-			message: "No eligible spawn candidates remained after validation.",
-		});
-		return { ok: false, diagnostics };
+		const unconstrained =
+			input.eligible === undefined && seedSelectors === undefined && !profile.modelPoolConstrained;
+		if (!unconstrained) {
+			diagnostics.push({
+				code: "no-eligible-candidates",
+				message: "No eligible spawn candidates remained after validation.",
+			});
+			return { ok: false, diagnostics };
+		}
 	}
 
 	// Allocation callbacks are intentionally never invoked — including on success.

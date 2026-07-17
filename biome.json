@@ -58,6 +58,7 @@
 			"packages/*/scripts/**/*.ts",
 			"packages/*/*.ts",
 			"!packages/natives/native/index.d.ts",
+			"!packages/collab-relay/worker-configuration.d.ts",
 			"!**/vendor/**/*",
 			"!**/node_modules/**/*",
 			"!**/test-sessions.ts",

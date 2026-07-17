@@ -50,7 +50,6 @@ impl builtins::Command for MapFileCommand {
 		&self,
 		mut context: brush_core::ExecutionContext<'_, SE>,
 	) -> Result<brush_core::ExecutionResult, Self::Error> {
-
 		if let Some(origin) = self.origin {
 			if origin < 0 {
 				writeln!(context.stderr(), "{}: {origin}: invalid array origin", context.command_name)?;
@@ -200,7 +199,10 @@ async fn run_callback<SE: brush_core::ShellExtensions>(
 	command.push_str(line_arg.as_ref());
 
 	let source_info = context.shell.call_stack().current_pos_as_source_info();
-	context.shell.run_string(command, &source_info, &context.params).await
+	context
+		.shell
+		.run_string(command, &source_info, &context.params)
+		.await
 }
 
 fn setup_terminal_settings(

@@ -17,6 +17,7 @@ function makePlugin(pluginPath: string, manifest: PluginManifest): InstalledPlug
 		manifest,
 		enabledFeatures: null,
 		enabled: true,
+		scope: "user",
 	};
 }
 

@@ -1,7 +1,7 @@
 import { logger, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 import type { Subprocess } from "bun";
+import { type KernelExecutionError, mapKernelErrorFrame } from "./kernel-error-evidence";
 import { type KernelDisplayOutput, renderKernelDisplay } from "./py/display";
-import { mapKernelErrorFrame, type KernelExecutionError } from "./kernel-error-evidence";
 
 export type KernelRuntimeEnv = Record<string, string | null>;
 

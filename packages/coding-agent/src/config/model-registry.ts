@@ -1384,7 +1384,7 @@ export class ModelRegistry {
 
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
 		if (providerConfig.discovery.type === "openai-models-list") {
-			return `${providerConfig.provider}:openai-models-list-context-v3`;
+			return `${providerConfig.provider}:openai-models-list-context-v2`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
 			return `${providerConfig.provider}:litellm-rich-v1`;

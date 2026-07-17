@@ -84,7 +84,6 @@ impl builtins::Command for ReadCommand {
 		&self,
 		context: brush_core::ExecutionContext<'_, SE>,
 	) -> Result<brush_core::ExecutionResult, Self::Error> {
-
 		// Validate timeout value if provided.
 		if let Some(result) = self.validate_timeout(&context)? {
 			return Ok(result);

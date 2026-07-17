@@ -57,6 +57,6 @@ describe("armPreResponseTimeout", () => {
 		expect(signal?.aborted).toBe(false);
 		caller.abort(new Error("caller cancelled"));
 		expect(signal?.aborted).toBe(true);
-		expect((signal?.reason as Error).message).toBe("caller cancelled");
+		expect((signal!.reason as Error).message).toBe("caller cancelled");
 	});
 });

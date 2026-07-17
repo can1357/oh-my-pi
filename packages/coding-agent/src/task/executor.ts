@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentTelemetryConfig, ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { Api, Model, Usage } from "@pk-nerdsaver-ai/pi-ai";
+import type { Api, Model, ServiceTier, Usage } from "@pk-nerdsaver-ai/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@pk-nerdsaver-ai/pi-utils";
 import type { Rule } from "../capability/rule";
 import { ModelRegistry } from "../config/model-registry";
@@ -19,6 +19,7 @@ import {
 	resolveModelOverrideWithAuthFallback,
 } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
+import { resolveSubagentServiceTier } from "../config/service-tier";
 import { Settings } from "../config/settings";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
@@ -71,6 +72,7 @@ import {
 	type AssignmentVerifierRunners,
 	verifyAssignment,
 } from "./assignment-verifier";
+import { Semaphore } from "./parallel";
 import {
 	type AssignmentFailureClass,
 	classifyRecoveryFailure,
@@ -191,6 +193,40 @@ function normalizeModelPatterns(value: string | string[] | undefined): string[] 
 		.split(",")
 		.map(entry => entry.trim())
 		.filter(Boolean);
+}
+
+/**
+ * Per-provider ceilings for concurrently RUNNING subagent sessions, keyed by
+ * resolved provider id. Most providers tolerate parallel task spawns fine, but
+ * ollama-cloud enforces a hard account-level concurrency cap, so spawns that
+ * resolve to it must queue at the spawn boundary instead of bursting into
+ * rate-limit backoff (issue #3464).
+ */
+const PROVIDER_SPAWN_CONCURRENCY_SETTINGS = {
+	"ollama-cloud": "providers.ollama-cloud.maxConcurrency",
+} as const;
+
+const providerSpawnSemaphores = new Map<string, Semaphore>();
+
+/**
+ * Resolve the spawn semaphore for a provider with a configured concurrency
+ * ceiling. The shared instance is resized in place (never replaced) on later
+ * setting changes so in-flight holders stay counted and a runtime limit change
+ * can never push concurrency past the cap.
+ */
+function getProviderSpawnSemaphore(provider: string, settings: Settings): Semaphore | undefined {
+	const settingPath =
+		PROVIDER_SPAWN_CONCURRENCY_SETTINGS[provider as keyof typeof PROVIDER_SPAWN_CONCURRENCY_SETTINGS];
+	if (!settingPath) return undefined;
+	const maxConcurrency = settings.get(settingPath);
+	const existing = providerSpawnSemaphores.get(provider);
+	if (existing) {
+		existing.resize(maxConcurrency);
+		return existing;
+	}
+	const semaphore = new Semaphore(maxConcurrency);
+	providerSpawnSemaphores.set(provider, semaphore);
+	return semaphore;
 }
 
 const SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX = "subagent:";
@@ -408,6 +444,21 @@ export interface ExecutorOptions {
 	 * watchdog is already suspended for the call's duration.
 	 */
 	maxRuntimeMs?: number;
+	/**
+	 * Keep the finished subagent session alive (registry-interrogable, parked
+	 * on the idle-TTL lifecycle) after a non-aborted, non-isolated run.
+	 * Defaults to true; the eval `agent()` bridge passes `false` so its
+	 * short-lived programmatic helpers are disposed immediately.
+	 */
+	keepAlive?: boolean;
+	/**
+	 * The parent session's live effective service tier, consumed when
+	 * `serviceTierSubagent` is `"inherit"`: `null` means the parent explicitly
+	 * has no tier (e.g. `/fast off`), `undefined` means no live session is
+	 * available so inherit falls back to the parent's configured `serviceTier`
+	 * setting. See {@link resolveSubagentServiceTier}.
+	 */
+	parentServiceTier?: ServiceTier | null;
 	enableLsp?: boolean;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
@@ -858,6 +909,77 @@ export function createSubagentSettings(
 		"tools.approvalMode": "yolo",
 		...overrides,
 	});
+}
+
+/** Inputs for {@link finalizeSubagentLifecycle}. */
+export interface FinalizeSubagentLifecycleOptions {
+	id: string;
+	session: AgentSession;
+	/** The run was hard-aborted (caller signal / wall-clock / budget). */
+	aborted: boolean;
+	/** Keep the finished session alive on the idle-TTL lifecycle (see {@link ExecutorOptions.keepAlive}). */
+	keepAlive: boolean;
+	/** The run used an isolated worktree (merged + cleaned; the session is not resumable). */
+	isolated: boolean;
+	/** TTL before an adopted idle subagent is parked; <= 0 disables parking. */
+	agentIdleTtlMs: number;
+	/** Cold-revive factory for lifecycle adoption, or null when unavailable. */
+	reviveSession: (() => Promise<AgentSession>) | null;
+}
+
+/**
+ * Registry/lifecycle teardown for a finished subagent run: aborted runs tear
+ * down terminally, isolated runs park a detached (non-resumable) ref,
+ * keep-alive opt-outs dispose immediately, and everything else stays
+ * interrogable under the lifecycle manager's idle-TTL parking.
+ */
+export async function finalizeSubagentLifecycle(options: FinalizeSubagentLifecycleOptions): Promise<void> {
+	const { id, session, aborted, keepAlive, isolated, agentIdleTtlMs, reviveSession } = options;
+	const registry = AgentRegistry.global();
+	if (aborted) {
+		// Hard abort (caller signal / wall-clock / budget): terminal teardown.
+		registry.setStatus(id, "aborted");
+		try {
+			await untilAborted(AbortSignal.timeout(5000), () => session.dispose());
+		} catch {
+			// Ignore cleanup errors
+		}
+	} else if (isolated) {
+		// Isolated run: the worktree is merged + cleaned after the run, so
+		// the session is not resumable. Park the ref WITHOUT adopting — the
+		// transcript stays reachable (history://), but ensureLive will throw.
+		// Status must flip to "parked" before dispose so the sdk dispose
+		// wrapper skips unregister.
+		registry.setStatus(id, "parked");
+		try {
+			await untilAborted(AbortSignal.timeout(5000), () => session.dispose());
+		} catch {
+			// Ignore cleanup errors
+		}
+		registry.detachSession(id);
+	} else if (!keepAlive) {
+		// Keep-alive opt-out (eval `agent()` bridge): the helper is a
+		// short-lived programmatic spawn nobody interrogates afterwards,
+		// so tear the session down now instead of parking it on the
+		// idle-TTL lifecycle. The sdk dispose wrapper usually unregisters the
+		// ref (not parked); the explicit unregister below is idempotent and
+		// covers sessions without the wrapper.
+		registry.setStatus(id, "idle");
+		try {
+			await untilAborted(AbortSignal.timeout(5000), () => session.dispose());
+		} catch {
+			// Ignore cleanup errors
+		}
+		registry.unregister(id);
+	} else {
+		// Keep-alive: finished and failed subagents both stay interrogable.
+		// The lifecycle manager owns idle-TTL parking + revival from here on.
+		registry.setStatus(id, "idle");
+		AgentLifecycleManager.global().adopt(id, {
+			idleTtlMs: agentIdleTtlMs,
+			revive: reviveSession ?? undefined,
+		});
+	}
 }
 
 type AbortReason = "signal" | "terminate" | "timeout" | "budget";
@@ -2030,10 +2152,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	const settings = options.settings ?? Settings.isolated();
-	const subagentSettings = createSubagentSettings(
-		settings,
-		agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
+	// Stamp the subagent's service tier: a concrete `serviceTierSubagent` wins,
+	// `"inherit"` follows the parent's live effective tier (options.parentServiceTier)
+	// or, absent a live session, the parent's configured `serviceTier` setting.
+	const subagentServiceTier = resolveSubagentServiceTier(
+		settings.get("serviceTierSubagent"),
+		settings.get("serviceTier"),
+		options.parentServiceTier,
 	);
+	const subagentSettings = createSubagentSettings(settings, {
+		serviceTier: subagentServiceTier,
+		...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+	});
 	const executionProfile = options.executionProfile ?? options.spawnPlan?.profile;
 	const toolPolicyActive =
 		options.executionProfile !== undefined ||
@@ -2180,6 +2310,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		let error: string | undefined;
 		let aborted = false;
 		let abortReasonText: string | undefined;
+		let releaseProviderSpawnSlot: (() => void) | undefined;
 		// runSubagent defers abort classification to the finally block below; the
 		// helper still throws so control flow mirrors the prior inline implementation.
 		const { checkAbort, awaitAbortable } = createAbortHelpers(abortSignal, () => {});
@@ -2218,14 +2349,20 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				explicitThinkingLevel,
 				authFallbackUsed,
 				fallbackKind,
-			} = await awaitAbortable(
-				resolveModelOverrideWithAuthFallback(
-					modelPatterns,
-					options.parentActiveModelPattern,
-					modelRegistry,
-					settings,
-				),
-			);
+			} = typeof modelRegistry.getApiKey === "function"
+				? await awaitAbortable(
+						resolveModelOverrideWithAuthFallback(
+							modelPatterns,
+							options.parentActiveModelPattern,
+							modelRegistry,
+							settings,
+						),
+					)
+				: {
+						...resolveModelOverride(modelPatterns, modelRegistry, settings),
+						authFallbackUsed: false,
+						fallbackKind: undefined,
+					};
 			if (authFallbackUsed && model) {
 				if (fallbackKind === "priority-list") {
 					logger.warn(
@@ -2271,6 +2408,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				? resolvedThinkingLevel
 				: (thinkingLevel ?? resolvedThinkingLevel);
 			resolvedAt = performance.now();
+
+			// Providers with a hard account-level concurrency cap (ollama-cloud)
+			// bound concurrent subagent RUNS at the spawn boundary: queue here —
+			// before the session is even created — until a slot frees up, instead
+			// of bursting every parallel spawn into rate-limit backoff (#3464).
+			// acquire(abortSignal) also vacates the queue slot if this spawn is
+			// cancelled while waiting.
+			const providerSpawnSemaphore = model ? getProviderSpawnSemaphore(model.provider, settings) : undefined;
+			if (providerSpawnSemaphore) {
+				await providerSpawnSemaphore.acquire(abortSignal);
+				releaseProviderSpawnSlot = () => providerSpawnSemaphore.release();
+			}
+			checkAbort();
 
 			const effectiveCwd = worktree ?? cwd;
 			const sessionManager = sessionFile
@@ -2592,6 +2742,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				error = err instanceof Error ? err.stack || err.message : String(err);
 			}
 		} finally {
+			releaseProviderSpawnSlot?.();
+			releaseProviderSpawnSlot = undefined;
 			if (abortSignal.aborted) {
 				aborted = monitor.isAbortedRun();
 				if (aborted) {
@@ -2611,37 +2763,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const session = monitor.takeActiveSession();
 			if (session) {
 				monitor.captureSalvage(session);
-				const registry = AgentRegistry.global();
-				if (aborted) {
-					// Hard abort (caller signal / wall-clock / budget): terminal teardown.
-					registry.setStatus(id, "aborted");
-					try {
-						await untilAborted(AbortSignal.timeout(5000), () => session.dispose());
-					} catch {
-						// Ignore cleanup errors
-					}
-				} else if (worktree !== undefined) {
-					// Isolated run: the worktree is merged + cleaned after the run, so
-					// the session is not resumable. Park the ref WITHOUT adopting — the
-					// transcript stays reachable (history://), but ensureLive will throw.
-					// Status must flip to "parked" before dispose so the sdk dispose
-					// wrapper skips unregister.
-					registry.setStatus(id, "parked");
-					try {
-						await untilAborted(AbortSignal.timeout(5000), () => session.dispose());
-					} catch {
-						// Ignore cleanup errors
-					}
-					registry.detachSession(id);
-				} else {
-					// Keep-alive: finished and failed subagents both stay interrogable.
-					// The lifecycle manager owns idle-TTL parking + revival from here on.
-					registry.setStatus(id, "idle");
-					AgentLifecycleManager.global().adopt(id, {
-						idleTtlMs: agentIdleTtlMs,
-						revive: reviveSession ?? undefined,
-					});
-				}
+				await finalizeSubagentLifecycle({
+					id,
+					session,
+					aborted,
+					keepAlive: options.keepAlive !== false,
+					isolated: worktree !== undefined,
+					agentIdleTtlMs,
+					reviveSession,
+				});
 			}
 		}
 

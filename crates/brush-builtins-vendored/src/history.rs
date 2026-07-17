@@ -364,11 +364,7 @@ fn find_history_event(
 	match_result.ok_or(())
 }
 
-fn select_history_words(
-	event: &str,
-	selector: char,
-	number: Option<usize>,
-) -> Result<String, ()> {
+fn select_history_words(event: &str, selector: char, number: Option<usize>) -> Result<String, ()> {
 	let words: Vec<&str> = event.split_whitespace().collect();
 	match selector {
 		'0'..='9' => {
@@ -521,7 +517,11 @@ mod tests {
 		history.add(history::Item::new("local"))?;
 
 		let updated_file_path = write_temp_history("history-n-updated", "one\ntwo\nthree\n")?;
-		append_history_file_to_session(&mut history, updated_file_path.clone(), HistoryReadMode::Unread)?;
+		append_history_file_to_session(
+			&mut history,
+			updated_file_path.clone(),
+			HistoryReadMode::Unread,
+		)?;
 
 		assert_eq!(history.count(), 4);
 		assert_eq!(history.get(2).map(|item| item.command_line.as_str()), Some("local"));

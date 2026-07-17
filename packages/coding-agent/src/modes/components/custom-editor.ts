@@ -1,3 +1,4 @@
+import type { ImageContent } from "@pk-nerdsaver-ai/pi-ai";
 import {
 	addKeyAliases,
 	canonicalKeyId,
@@ -6,6 +7,7 @@ import {
 	parseKey,
 	parseKittySequence,
 } from "@pk-nerdsaver-ai/pi-tui";
+import { BracketedPasteHandler } from "@pk-nerdsaver-ai/pi-tui/bracketed-paste";
 import type { AppKeybinding } from "../../config/keybindings";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { imageReferenceHyperlink, PLACEHOLDER_REGEX, renderPlaceholders } from "../image-references";
@@ -68,8 +70,12 @@ function buildMatchKeys(keys: readonly KeyId[]): Set<string> {
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 const BRACKETED_IMAGE_PATH_REGEX = /\.(?:png|jpe?g|gif|webp)$/i;
-const BRACKETED_IMAGE_PATH_BOUNDARY_REGEX = /\.(?:png|jpe?g|gif|webp)(?=$|["']?\s)/gi;
+const BRACKETED_PATH_BOUNDARY_REGEX = /\.[a-z0-9]+(?=$|["']?\s)/gi;
 const SHELL_ESCAPED_PATH_CHAR_REGEX = /\\([\\\s'"()[\]{}&;<>|?*!$`])/g;
+/** Explicit-directory anchors: absolute, home-relative, or a Windows drive.
+ *  A bare filename is almost always a project-relative reference the user
+ *  wants as text, so it never counts as a pasted path. */
+const ABSOLUTE_PATH_PREFIX_REGEX = /^(?:\/|~\/|[A-Za-z]:[\\/])/;
 
 /** Max gap (ms) between two spaces for the later one to count as OS key auto-repeat rather than a
  *  deliberate press. OS auto-repeat is fast; a deliberate tap (even a fast one) is slower. */
@@ -115,47 +121,80 @@ function imagePathBoundaryEnd(payload: string, segmentStart: number, extensionEn
 	return undefined;
 }
 
-function normalizePastedImagePath(path: string): string {
+/** Decode a `file://` URL to its local filesystem path. macOS terminals
+ *  (Ghostty, iTerm2) sometimes forward the pasteboard's `public.file-url`
+ *  representation on Finder→Copy + Cmd+V; without decoding, image loading
+ *  would try to read a literal `file:///…` path and fail. Percent-escapes
+ *  are only decoded inside `file://` URLs — plain paths pass through. */
+function decodePastedFileUrl(path: string): string {
+	const match = path.match(/^file:\/\/(?:localhost)?(?=\/)/i);
+	if (!match) return path;
+	const rest = path.slice(match[0].length);
+	try {
+		return decodeURIComponent(rest);
+	} catch {
+		return rest;
+	}
+}
+
+function normalizePastedPath(path: string): string {
 	const trimmed = path.trim();
 	const first = trimmed[0];
 	const last = trimmed[trimmed.length - 1];
 	const unquoted =
 		trimmed.length > 1 && (first === '"' || first === "'") && last === first ? trimmed.slice(1, -1) : trimmed;
-	return unquoted.replace(SHELL_ESCAPED_PATH_CHAR_REGEX, "$1");
+	return decodePastedFileUrl(unquoted.replace(SHELL_ESCAPED_PATH_CHAR_REGEX, "$1"));
 }
 
-export function extractBracketedImagePastePaths(data: string): string[] | undefined {
-	if (!data.startsWith(BRACKETED_PASTE_START)) return undefined;
-	const endIndex = data.indexOf(BRACKETED_PASTE_END, BRACKETED_PASTE_START.length);
-	if (endIndex === -1 || endIndex + BRACKETED_PASTE_END.length !== data.length) return undefined;
-
-	const pasted = data.slice(BRACKETED_PASTE_START.length, endIndex).trim();
-	if (!pasted) return undefined;
-
+/**
+ * Extract explicitly-anchored file paths from pasted text: dot-extension
+ * terminated segments, each quoted/shell-escaped form normalized and required
+ * to carry an explicit directory anchor (see ABSOLUTE_PATH_PREFIX_REGEX).
+ * Returns undefined unless the entire text parses as one or more such paths —
+ * partial matches fall back to the normal text path.
+ */
+export function extractPastePathsFromText(pasted: string): string[] | undefined {
 	const paths: string[] = [];
 	let segmentStart = 0;
-	BRACKETED_IMAGE_PATH_BOUNDARY_REGEX.lastIndex = 0;
+	BRACKETED_PATH_BOUNDARY_REGEX.lastIndex = 0;
 	for (
-		let match = BRACKETED_IMAGE_PATH_BOUNDARY_REGEX.exec(pasted);
+		let match = BRACKETED_PATH_BOUNDARY_REGEX.exec(pasted);
 		match;
-		match = BRACKETED_IMAGE_PATH_BOUNDARY_REGEX.exec(pasted)
+		match = BRACKETED_PATH_BOUNDARY_REGEX.exec(pasted)
 	) {
 		const extensionEnd = match.index + match[0].length;
 		const boundaryEnd = imagePathBoundaryEnd(pasted, segmentStart, extensionEnd);
 		if (boundaryEnd === undefined) continue;
 
-		const path = normalizePastedImagePath(pasted.slice(segmentStart, boundaryEnd));
-		if (!path || !BRACKETED_IMAGE_PATH_REGEX.test(path)) return undefined;
+		const path = normalizePastedPath(pasted.slice(segmentStart, boundaryEnd));
+		if (!path || !ABSOLUTE_PATH_PREFIX_REGEX.test(path)) return undefined;
 		paths.push(path);
 
 		segmentStart = boundaryEnd;
 		while (segmentStart < pasted.length && isPastedPathSeparator(pasted[segmentStart])) {
 			segmentStart++;
 		}
-		BRACKETED_IMAGE_PATH_BOUNDARY_REGEX.lastIndex = segmentStart;
+		BRACKETED_PATH_BOUNDARY_REGEX.lastIndex = segmentStart;
 	}
 
 	if (paths.length === 0 || segmentStart !== pasted.length) return undefined;
+	return paths;
+}
+
+/** Extract explicitly-anchored file paths from a bracketed-paste envelope. */
+export function extractBracketedPastePaths(data: string): string[] | undefined {
+	if (!data.startsWith(BRACKETED_PASTE_START)) return undefined;
+	const endIndex = data.indexOf(BRACKETED_PASTE_END, BRACKETED_PASTE_START.length);
+	if (endIndex === -1 || endIndex + BRACKETED_PASTE_END.length !== data.length) return undefined;
+
+	const pasted = data.slice(BRACKETED_PASTE_START.length, endIndex).trim();
+	if (!pasted) return undefined;
+	return extractPastePathsFromText(pasted);
+}
+
+export function extractBracketedImagePastePaths(data: string): string[] | undefined {
+	const paths = extractBracketedPastePaths(data);
+	if (!paths || !paths.every(path => BRACKETED_IMAGE_PATH_REGEX.test(path))) return undefined;
 	return paths;
 }
 
@@ -165,10 +204,38 @@ export function extractBracketedImagePastePath(data: string): string | undefined
 }
 
 /**
+ * Extract a single image path from plain (non-bracketed) text, e.g. a
+ * clipboard read (issue #3506). Delegates to the pasted-path splitter first;
+ * when that mis-segments a single anchored path containing unescaped spaces
+ * (macOS screenshot names), a whole-text branch — gated on
+ * ABSOLUTE_PATH_PREFIX_REGEX so prose never triggers it — recovers the path.
+ */
+export function extractImagePathFromText(text: string): string | undefined {
+	const trimmed = text.trim();
+	if (!trimmed) return undefined;
+
+	const paths = extractPastePathsFromText(trimmed);
+	if (paths !== undefined) {
+		return paths.length === 1 && BRACKETED_IMAGE_PATH_REGEX.test(paths[0]) ? paths[0] : undefined;
+	}
+
+	const whole = normalizePastedPath(trimmed);
+	if (ABSOLUTE_PATH_PREFIX_REGEX.test(whole) && BRACKETED_IMAGE_PATH_REGEX.test(whole) && !whole.includes("\n")) {
+		return whole;
+	}
+	return undefined;
+}
+
+/**
  * Custom editor that handles configurable app-level shortcuts for coding-agent.
  */
 export class CustomEditor extends Editor {
 	imageLinks?: readonly (string | undefined)[];
+
+	/** Images attached to the composed draft, aligned with its `[Image #N]` markers. */
+	pendingImages: ImageContent[] = [];
+	/** Source hyperlink (file path / URL) per pending image, aligned by index. */
+	pendingImageLinks: (string | undefined)[] = [];
 
 	/** Treat image/paste markers as indivisible: a stray backspace deletes the whole token
 	 *  instead of corrupting `[Paste #1, +30 lines]` into plain text. */
@@ -255,6 +322,9 @@ export class CustomEditor extends Editor {
 	}
 	onEscape?: () => void;
 	onClear?: () => void;
+	/** Host hook invoked by {@link clearDraft} so composer-owned draft state
+	 *  (pending images and their hyperlinks) is dropped with the buffer. */
+	onClearDraft?: () => void;
 	onExit?: () => void;
 	onDisplayReset?: () => void;
 	onCycleThinkingLevel?: () => void;
@@ -297,6 +367,14 @@ export class CustomEditor extends Editor {
 	/** Custom key handlers from extensions and non-built-in app actions. */
 	#customKeyHandlers = new Map<KeyId, () => void>();
 	#customMatchKeys = new Map<string, () => void>();
+	/** Assembles bracketed pastes (possibly split across stdin chunks) ahead of the
+	 *  base editor so the empty/image-path/text routing always sees the full payload. */
+	#pasteAssembler = new BracketedPasteHandler();
+	/** True while an empty-paste `onPasteImage` clipboard read is in flight; trailing
+	 *  input queues behind it so a follow-up Enter cannot submit pre-image. */
+	#pasteImageInFlight = false;
+	/** Input chunks received while the image read is in flight, dispatched on settle. */
+	#pendingPasteInput: string[] = [];
 	/** Spaces actually inserted in the current run; tracked back out when a hold is recognized. */
 	#spaceRunInserted = 0;
 	/** Consecutive "mechanical" deltas (fast + steady); a sustained run of these confirms a held bar. */
@@ -364,6 +442,22 @@ export class CustomEditor extends Editor {
 	clearCustomKeyHandlers(): void {
 		this.#customKeyHandlers.clear();
 		this.#rebuildCustomMatchKeys();
+	}
+
+	/**
+	 * Discard the composed draft: empty the buffer, drop the pending images
+	 * and their image-reference hyperlinks, then let the host clear any extra
+	 * draft state via {@link onClearDraft}. Pass the draft's text to record it
+	 * in prompt history first (used when the draft is queued rather than
+	 * submitted).
+	 */
+	clearDraft(historyText?: string): void {
+		if (historyText) this.addToHistory(historyText);
+		this.setText("");
+		this.pendingImages = [];
+		this.pendingImageLinks = [];
+		this.imageLinks = undefined;
+		this.onClearDraft?.();
 	}
 
 	#spaceHoldGestureEnabled(): boolean {
@@ -451,6 +545,11 @@ export class CustomEditor extends Editor {
 	}
 
 	handleInput(data: string): void {
+		if (this.#pasteImageInFlight) {
+			this.#pendingPasteInput.push(data);
+			return;
+		}
+
 		const kittyParsed = parseKittySequence(data);
 		if (kittyParsed && (kittyParsed.modifier & 64) !== 0 && this.onCapsLock) {
 			// Caps Lock is modifier bit 64
@@ -458,13 +557,11 @@ export class CustomEditor extends Editor {
 			return;
 		}
 
-		const pastedImagePaths = extractBracketedImagePastePaths(data);
-		if (pastedImagePaths && this.onPasteImagePath) {
-			void (async () => {
-				for (const path of pastedImagePaths) {
-					await this.onPasteImagePath?.(path);
-				}
-			})();
+		const paste = this.#pasteAssembler.process(data);
+		if (paste.handled) {
+			if (paste.pasteContent !== undefined) {
+				this.#routeAssembledPaste(paste.pasteContent, paste.remaining);
+			}
 			return;
 		}
 
@@ -623,5 +720,46 @@ export class CustomEditor extends Editor {
 
 		// Pass to parent for normal handling
 		super.handleInput(data);
+	}
+
+	/** Route a fully-assembled bracketed paste. A strictly-empty payload is the macOS
+	 *  image-only clipboard Cmd+V shape (#3601) and goes to the smart clipboard reader;
+	 *  a payload of explicit image-file paths attaches via {@link onPasteImagePath}
+	 *  (#3506); everything else — including whitespace-only pastes — stays a text paste. */
+	#routeAssembledPaste(payload: string, remaining: string): void {
+		if (payload.length === 0) {
+			if (this.onPasteImage) {
+				this.#pasteImageInFlight = true;
+				if (remaining.length > 0) this.#pendingPasteInput.unshift(remaining);
+				Promise.resolve(this.onPasteImage()).then(
+					() => this.#onPasteImageSettled(),
+					() => this.#onPasteImageSettled(),
+				);
+			} else if (remaining.length > 0) {
+				this.handleInput(remaining);
+			}
+			return;
+		}
+		const paths = extractPastePathsFromText(payload.trim());
+		if (paths?.every(path => BRACKETED_IMAGE_PATH_REGEX.test(path)) && this.onPasteImagePath) {
+			void (async () => {
+				for (const path of paths) {
+					await this.onPasteImagePath?.(path);
+				}
+			})();
+		} else {
+			this.pasteText(payload);
+		}
+		if (remaining.length > 0) this.handleInput(remaining);
+	}
+
+	/** Drain input queued behind the in-flight image read, in arrival order. Stops if a
+	 *  drained chunk starts another empty-paste read; that read's settle resumes the drain. */
+	#onPasteImageSettled(): void {
+		this.#pasteImageInFlight = false;
+		while (this.#pendingPasteInput.length > 0 && !this.#pasteImageInFlight) {
+			const chunk = this.#pendingPasteInput.shift();
+			if (chunk !== undefined) this.handleInput(chunk);
+		}
 	}
 }

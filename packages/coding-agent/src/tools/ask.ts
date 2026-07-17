@@ -360,35 +360,39 @@ async function askSingleQuestion(
 			initialIndex = Math.max(0, Math.min(initialIndex, maxIndex));
 		}
 
-		const {
-			choice,
-			timedOut: selectTimedOut,
-			navigation: arrowNavigation,
-		} = await selectOption(promptWithProgress, optionsWithNavigation, initialIndex, {
-			selectionMarker: "radio",
-			markableCount: displayOptions.length,
-		});
-		timedOut = selectTimedOut;
+		while (true) {
+			const {
+				choice,
+				timedOut: selectTimedOut,
+				navigation: arrowNavigation,
+			} = await selectOption(promptWithProgress, optionsWithNavigation, initialIndex, {
+				selectionMarker: "radio",
+				markableCount: displayOptions.length,
+			});
+			timedOut = selectTimedOut;
 
-		if (arrowNavigation) {
-			return { selectedOptions, customInput, timedOut, navigation: arrowNavigation };
-		}
-		if (choice === undefined) {
-			if (!timedOut) {
-				return { selectedOptions, customInput, timedOut, cancelled: true };
+			if (arrowNavigation) {
+				return { selectedOptions, customInput, timedOut, navigation: arrowNavigation };
 			}
-		} else if (choice === OTHER_OPTION) {
-			if (!selectTimedOut) {
-				const customResult = await promptForCustomInput();
-				if (customResult.input !== undefined) {
+			if (choice === undefined) {
+				if (!timedOut) {
+					return { selectedOptions, customInput, timedOut, cancelled: true };
+				}
+			} else if (choice === OTHER_OPTION) {
+				if (!selectTimedOut) {
+					const customResult = await promptForCustomInput();
+					if (customResult.input === undefined) {
+						initialIndex = displayOptions.length;
+						continue;
+					}
 					customInput = customResult.input;
 					selectedOptions = [];
 				}
-				// If editor was dismissed (undefined), keep prior selectedOptions/customInput intact
+			} else {
+				selectedOptions = [stripRecommendedSuffix(choice)];
+				customInput = undefined;
 			}
-		} else {
-			selectedOptions = [stripRecommendedSuffix(choice)];
-			customInput = undefined;
+			break;
 		}
 		if (navigation?.allowForward) {
 			return { selectedOptions, customInput, timedOut, navigation: "forward" };

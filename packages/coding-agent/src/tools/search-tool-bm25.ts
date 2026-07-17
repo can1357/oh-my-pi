@@ -254,12 +254,16 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 		private readonly options: SearchToolBm25Options = {},
 	) {}
 
+	static create(session: ToolSession, options?: SearchToolBm25Options): SearchToolBm25Tool | null {
+		if (options?.toolProfile && !options.toolProfile.allowDiscovery) return null;
+		return supportsToolDiscoveryExecution(session) ? new SearchToolBm25Tool(session, options) : null;
+	}
+
 	static createIf(session: ToolSession, options?: SearchToolBm25Options): SearchToolBm25Tool | null {
 		// Direct createTools() calls do not know the final MCP/extension catalog yet, so
 		// auto mode is activated later by createAgentSession after the full registry exists.
 		if (resolveEffectiveToolDiscoveryMode(session.settings, 0) === "off") return null;
-		if (options?.toolProfile && !options.toolProfile.allowDiscovery) return null;
-		return supportsToolDiscoveryExecution(session) ? new SearchToolBm25Tool(session, options) : null;
+		return SearchToolBm25Tool.create(session, options);
 	}
 
 	async execute(

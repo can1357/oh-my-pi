@@ -1,12 +1,11 @@
+import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { describe, expect, it } from "bun:test";
-
 import {
-	BrowserContextError,
 	type BrowserContextCaptureOptions,
+	BrowserContextError,
 	type CapturedBrowserContext,
 } from "../src/browser-context";
 import {

@@ -84,6 +84,9 @@ import * as bundledPiAiProvidersGitlabDuoWorkflow from "@pk-nerdsaver-ai/pi-ai/p
 import * as bundledPiAiProvidersGoogle from "@pk-nerdsaver-ai/pi-ai/providers/google";
 import * as bundledPiAiProvidersGoogleAuth from "@pk-nerdsaver-ai/pi-ai/providers/google-auth";
 import * as bundledPiAiProvidersGoogleGeminiCli from "@pk-nerdsaver-ai/pi-ai/providers/google-gemini-cli";
+import * as bundledPiAiProvidersGoogleInteractions from "@pk-nerdsaver-ai/pi-ai/providers/google-interactions";
+import * as bundledPiAiProvidersGoogleInteractionsActions from "@pk-nerdsaver-ai/pi-ai/providers/google-interactions-actions";
+import * as bundledPiAiProvidersGoogleInteractionsTypes from "@pk-nerdsaver-ai/pi-ai/providers/google-interactions-types";
 import * as bundledPiAiProvidersGoogleShared from "@pk-nerdsaver-ai/pi-ai/providers/google-shared";
 import * as bundledPiAiProvidersGoogleTypes from "@pk-nerdsaver-ai/pi-ai/providers/google-types";
 import * as bundledPiAiProvidersGoogleVertex from "@pk-nerdsaver-ai/pi-ai/providers/google-vertex";
@@ -137,8 +140,10 @@ import * as bundledPiAiUtilsGoogleValidation from "@pk-nerdsaver-ai/pi-ai/utils/
 import * as bundledPiAiUtilsHarmonyLeak from "@pk-nerdsaver-ai/pi-ai/utils/harmony-leak";
 import * as bundledPiAiUtilsHttpInspector from "@pk-nerdsaver-ai/pi-ai/utils/http-inspector";
 import * as bundledPiAiUtilsIdleIterator from "@pk-nerdsaver-ai/pi-ai/utils/idle-iterator";
+import * as bundledPiAiUtilsJsonParse from "@pk-nerdsaver-ai/pi-ai/utils/json-parse";
 import * as bundledPiAiUtilsOpenaiHttp from "@pk-nerdsaver-ai/pi-ai/utils/openai-http";
 import * as bundledPiAiUtilsOpenrouterHeaders from "@pk-nerdsaver-ai/pi-ai/utils/openrouter-headers";
+import * as bundledPiAiUtilsOverflow from "@pk-nerdsaver-ai/pi-ai/utils/overflow";
 import * as bundledPiAiUtilsParseBind from "@pk-nerdsaver-ai/pi-ai/utils/parse-bind";
 import * as bundledPiAiUtilsProviderResponse from "@pk-nerdsaver-ai/pi-ai/utils/provider-response";
 import * as bundledPiAiUtilsProxy from "@pk-nerdsaver-ai/pi-ai/utils/proxy";
@@ -189,6 +194,7 @@ import * as bundledPiCodingAgentCapabilityFs from "@pk-nerdsaver-ai/pi-coding-ag
 import * as bundledPiCodingAgentCapabilityHook from "@pk-nerdsaver-ai/pi-coding-agent/capability/hook";
 import * as bundledPiCodingAgentCapabilityInstruction from "@pk-nerdsaver-ai/pi-coding-agent/capability/instruction";
 import * as bundledPiCodingAgentCapabilityMcp from "@pk-nerdsaver-ai/pi-coding-agent/capability/mcp";
+import * as bundledPiCodingAgentCapabilityOkf from "@pk-nerdsaver-ai/pi-coding-agent/capability/okf";
 import * as bundledPiCodingAgentCapabilityPrompt from "@pk-nerdsaver-ai/pi-coding-agent/capability/prompt";
 import * as bundledPiCodingAgentCapabilityRule from "@pk-nerdsaver-ai/pi-coding-agent/capability/rule";
 import * as bundledPiCodingAgentCapabilityRuleBuckets from "@pk-nerdsaver-ai/pi-coding-agent/capability/rule-buckets";
@@ -199,6 +205,7 @@ import * as bundledPiCodingAgentCapabilitySsh from "@pk-nerdsaver-ai/pi-coding-a
 import * as bundledPiCodingAgentCapabilitySystemPrompt from "@pk-nerdsaver-ai/pi-coding-agent/capability/system-prompt";
 import * as bundledPiCodingAgentCapabilityTool from "@pk-nerdsaver-ai/pi-coding-agent/capability/tool";
 import * as bundledPiCodingAgentCapabilityTypes from "@pk-nerdsaver-ai/pi-coding-agent/capability/types";
+import * as bundledPiCodingAgentCli9routerCli from "@pk-nerdsaver-ai/pi-coding-agent/cli/9router-cli";
 import * as bundledPiCodingAgentCliAgentsCli from "@pk-nerdsaver-ai/pi-coding-agent/cli/agents-cli";
 import * as bundledPiCodingAgentCliArgs from "@pk-nerdsaver-ai/pi-coding-agent/cli/args";
 import * as bundledPiCodingAgentCliAuthBrokerCli from "@pk-nerdsaver-ai/pi-coding-agent/cli/auth-broker-cli";
@@ -232,6 +239,8 @@ import * as bundledPiCodingAgentCliGrepCli from "@pk-nerdsaver-ai/pi-coding-agen
 import * as bundledPiCodingAgentCliGrievancesCli from "@pk-nerdsaver-ai/pi-coding-agent/cli/grievances-cli";
 import * as bundledPiCodingAgentCliInitialMessage from "@pk-nerdsaver-ai/pi-coding-agent/cli/initial-message";
 import * as bundledPiCodingAgentCliModelsCli from "@pk-nerdsaver-ai/pi-coding-agent/cli/models-cli";
+import * as bundledPiCodingAgentCliOkfCli from "@pk-nerdsaver-ai/pi-coding-agent/cli/okf-cli";
+import * as bundledPiCodingAgentCliOperationalCli from "@pk-nerdsaver-ai/pi-coding-agent/cli/operational-cli";
 import * as bundledPiCodingAgentCliPluginCli from "@pk-nerdsaver-ai/pi-coding-agent/cli/plugin-cli";
 import * as bundledPiCodingAgentCliProfileAlias from "@pk-nerdsaver-ai/pi-coding-agent/cli/profile-alias";
 import * as bundledPiCodingAgentCliProfileBootstrap from "@pk-nerdsaver-ai/pi-coding-agent/cli/profile-bootstrap";
@@ -246,14 +255,17 @@ import * as bundledPiCodingAgentCliStatsCli from "@pk-nerdsaver-ai/pi-coding-age
 import * as bundledPiCodingAgentCliTinyModelsCli from "@pk-nerdsaver-ai/pi-coding-agent/cli/tiny-models-cli";
 import * as bundledPiCodingAgentCliTtsrCli from "@pk-nerdsaver-ai/pi-coding-agent/cli/ttsr-cli";
 import * as bundledPiCodingAgentCliUpdateCli from "@pk-nerdsaver-ai/pi-coding-agent/cli/update-cli";
+import * as bundledPiCodingAgentCliUpdateReleaseSource from "@pk-nerdsaver-ai/pi-coding-agent/cli/update-release-source";
 import * as bundledPiCodingAgentCliUsageCli from "@pk-nerdsaver-ai/pi-coding-agent/cli/usage-cli";
 import * as bundledPiCodingAgentCliWebSearchCli from "@pk-nerdsaver-ai/pi-coding-agent/cli/web-search-cli";
 import * as bundledPiCodingAgentCliWorktreeCli from "@pk-nerdsaver-ai/pi-coding-agent/cli/worktree-cli";
+import * as bundledPiCodingAgentCommands9router from "@pk-nerdsaver-ai/pi-coding-agent/commands/9router";
 import * as bundledPiCodingAgentCommandsAcp from "@pk-nerdsaver-ai/pi-coding-agent/commands/acp";
 import * as bundledPiCodingAgentCommandsAgents from "@pk-nerdsaver-ai/pi-coding-agent/commands/agents";
 import * as bundledPiCodingAgentCommandsAuthBroker from "@pk-nerdsaver-ai/pi-coding-agent/commands/auth-broker";
 import * as bundledPiCodingAgentCommandsAuthGateway from "@pk-nerdsaver-ai/pi-coding-agent/commands/auth-gateway";
 import * as bundledPiCodingAgentCommandsBench from "@pk-nerdsaver-ai/pi-coding-agent/commands/bench";
+import * as bundledPiCodingAgentCommandsBg from "@pk-nerdsaver-ai/pi-coding-agent/commands/bg";
 import * as bundledPiCodingAgentCommandsCommit from "@pk-nerdsaver-ai/pi-coding-agent/commands/commit";
 import * as bundledPiCodingAgentCommandsComplete from "@pk-nerdsaver-ai/pi-coding-agent/commands/complete";
 import * as bundledPiCodingAgentCommandsCompletions from "@pk-nerdsaver-ai/pi-coding-agent/commands/completions";
@@ -267,8 +279,10 @@ import * as bundledPiCodingAgentCommandsInstall from "@pk-nerdsaver-ai/pi-coding
 import * as bundledPiCodingAgentCommandsJoin from "@pk-nerdsaver-ai/pi-coding-agent/commands/join";
 import * as bundledPiCodingAgentCommandsLaunch from "@pk-nerdsaver-ai/pi-coding-agent/commands/launch";
 import * as bundledPiCodingAgentCommandsModels from "@pk-nerdsaver-ai/pi-coding-agent/commands/models";
+import * as bundledPiCodingAgentCommandsOkf from "@pk-nerdsaver-ai/pi-coding-agent/commands/okf";
 import * as bundledPiCodingAgentCommandsPlugin from "@pk-nerdsaver-ai/pi-coding-agent/commands/plugin";
 import * as bundledPiCodingAgentCommandsRead from "@pk-nerdsaver-ai/pi-coding-agent/commands/read";
+import * as bundledPiCodingAgentCommandsRuntime from "@pk-nerdsaver-ai/pi-coding-agent/commands/runtime";
 import * as bundledPiCodingAgentCommandsSay from "@pk-nerdsaver-ai/pi-coding-agent/commands/say";
 import * as bundledPiCodingAgentCommandsSetup from "@pk-nerdsaver-ai/pi-coding-agent/commands/setup";
 import * as bundledPiCodingAgentCommandsShell from "@pk-nerdsaver-ai/pi-coding-agent/commands/shell";
@@ -324,20 +338,26 @@ import * as bundledPiCodingAgentCommitUtilsExclusions from "@pk-nerdsaver-ai/pi-
 import * as bundledPiCodingAgentConfigApiKeyResolver from "@pk-nerdsaver-ai/pi-coding-agent/config/api-key-resolver";
 import * as bundledPiCodingAgentConfigAppendOnlyContextMode from "@pk-nerdsaver-ai/pi-coding-agent/config/append-only-context-mode";
 import * as bundledPiCodingAgentConfigConfigFile from "@pk-nerdsaver-ai/pi-coding-agent/config/config-file";
+import * as bundledPiCodingAgentConfigEnvironmentsCloudSkills from "@pk-nerdsaver-ai/pi-coding-agent/config/environments-cloud-skills";
 import * as bundledPiCodingAgentConfigFileLock from "@pk-nerdsaver-ai/pi-coding-agent/config/file-lock";
 import * as bundledPiCodingAgentConfigInlineToolDescriptorsMode from "@pk-nerdsaver-ai/pi-coding-agent/config/inline-tool-descriptors-mode";
 import * as bundledPiCodingAgentConfigKeybindings from "@pk-nerdsaver-ai/pi-coding-agent/config/keybindings";
+import * as bundledPiCodingAgentConfigMoaPresets from "@pk-nerdsaver-ai/pi-coding-agent/config/moa-presets";
+import * as bundledPiCodingAgentConfigMoaResolver from "@pk-nerdsaver-ai/pi-coding-agent/config/moa-resolver";
 import * as bundledPiCodingAgentConfigModelDiscovery from "@pk-nerdsaver-ai/pi-coding-agent/config/model-discovery";
 import * as bundledPiCodingAgentConfigModelRegistry from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
 import * as bundledPiCodingAgentConfigModelResolver from "@pk-nerdsaver-ai/pi-coding-agent/config/model-resolver";
 import * as bundledPiCodingAgentConfigModelRoles from "@pk-nerdsaver-ai/pi-coding-agent/config/model-roles";
 import * as bundledPiCodingAgentConfigModelsConfig from "@pk-nerdsaver-ai/pi-coding-agent/config/models-config";
 import * as bundledPiCodingAgentConfigModelsConfigSchema from "@pk-nerdsaver-ai/pi-coding-agent/config/models-config-schema";
+import * as bundledPiCodingAgentConfigNineRouterController from "@pk-nerdsaver-ai/pi-coding-agent/config/nine-router-controller";
 import * as bundledPiCodingAgentConfigPromptTemplates from "@pk-nerdsaver-ai/pi-coding-agent/config/prompt-templates";
 import * as bundledPiCodingAgentConfigResolveConfigValue from "@pk-nerdsaver-ai/pi-coding-agent/config/resolve-config-value";
 import * as bundledPiCodingAgentConfigServiceTier from "@pk-nerdsaver-ai/pi-coding-agent/config/service-tier";
 import * as bundledPiCodingAgentConfigSettings from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import * as bundledPiCodingAgentConfigSettingsSchema from "@pk-nerdsaver-ai/pi-coding-agent/config/settings-schema";
+import * as bundledPiCodingAgentConfigSpawnSelectorValidation from "@pk-nerdsaver-ai/pi-coding-agent/config/spawn-selector-validation";
+import * as bundledPiCodingAgentConfigSubagentModelAliases from "@pk-nerdsaver-ai/pi-coding-agent/config/subagent-model-aliases";
 import * as bundledPiCodingAgentDap from "@pk-nerdsaver-ai/pi-coding-agent/dap";
 import * as bundledPiCodingAgentDapClient from "@pk-nerdsaver-ai/pi-coding-agent/dap/client";
 import * as bundledPiCodingAgentDapConfig from "@pk-nerdsaver-ai/pi-coding-agent/dap/config";
@@ -369,6 +389,7 @@ import * as bundledPiCodingAgentDiscoveryGemini from "@pk-nerdsaver-ai/pi-coding
 import * as bundledPiCodingAgentDiscoveryGithub from "@pk-nerdsaver-ai/pi-coding-agent/discovery/github";
 import * as bundledPiCodingAgentDiscoveryHelpers from "@pk-nerdsaver-ai/pi-coding-agent/discovery/helpers";
 import * as bundledPiCodingAgentDiscoveryMcpJson from "@pk-nerdsaver-ai/pi-coding-agent/discovery/mcp-json";
+import * as bundledPiCodingAgentDiscoveryOkf from "@pk-nerdsaver-ai/pi-coding-agent/discovery/okf";
 import * as bundledPiCodingAgentDiscoveryOmpExtensionRoots from "@pk-nerdsaver-ai/pi-coding-agent/discovery/omp-extension-roots";
 import * as bundledPiCodingAgentDiscoveryOmpPlugins from "@pk-nerdsaver-ai/pi-coding-agent/discovery/omp-plugins";
 import * as bundledPiCodingAgentDiscoveryOpencode from "@pk-nerdsaver-ai/pi-coding-agent/discovery/opencode";
@@ -445,6 +466,7 @@ import * as bundledPiCodingAgentExtensibilityPluginsLegacyPiBundledRegistry from
 import * as bundledPiCodingAgentExtensibilityPluginsLegacyPiCompat from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import * as bundledPiCodingAgentExtensibilityPluginsLoader from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/loader";
 import * as bundledPiCodingAgentExtensibilityPluginsManager from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/manager";
+import * as bundledPiCodingAgentExtensibilityPluginsManifest from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/manifest";
 import * as bundledPiCodingAgentExtensibilityPluginsMarketplace from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/marketplace";
 import * as bundledPiCodingAgentExtensibilityPluginsMarketplaceCache from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/marketplace/cache";
 import * as bundledPiCodingAgentExtensibilityPluginsMarketplaceFetcher from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/marketplace/fetcher";
@@ -464,6 +486,13 @@ import * as bundledPiCodingAgentExtensibilityToolEventInput from "@pk-nerdsaver-
 import * as bundledPiCodingAgentExtensibilityToolProxy from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/tool-proxy";
 import * as bundledPiCodingAgentExtensibilityTypebox from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/typebox";
 import * as bundledPiCodingAgentExtensibilityUtils from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/utils";
+import * as bundledPiCodingAgentGateway from "@pk-nerdsaver-ai/pi-coding-agent/gateway";
+import * as bundledPiCodingAgentGatewayAgentSessionGateway from "@pk-nerdsaver-ai/pi-coding-agent/gateway/agent-session-gateway";
+import * as bundledPiCodingAgentGatewayLocalAgentOwnerClient from "@pk-nerdsaver-ai/pi-coding-agent/gateway/local-agent-owner-client";
+import * as bundledPiCodingAgentGatewayLocalAgentOwnerRecovery from "@pk-nerdsaver-ai/pi-coding-agent/gateway/local-agent-owner-recovery";
+import * as bundledPiCodingAgentGatewayLocalAgentOwnerServer from "@pk-nerdsaver-ai/pi-coding-agent/gateway/local-agent-owner-server";
+import * as bundledPiCodingAgentGatewayLocalAgentOwnerTypes from "@pk-nerdsaver-ai/pi-coding-agent/gateway/local-agent-owner-types";
+import * as bundledPiCodingAgentGatewayTypes from "@pk-nerdsaver-ai/pi-coding-agent/gateway/types";
 import * as bundledPiCodingAgentHindsight from "@pk-nerdsaver-ai/pi-coding-agent/hindsight";
 import * as bundledPiCodingAgentHindsightBackend from "@pk-nerdsaver-ai/pi-coding-agent/hindsight/backend";
 import * as bundledPiCodingAgentHindsightBank from "@pk-nerdsaver-ai/pi-coding-agent/hindsight/bank";
@@ -493,6 +522,7 @@ import * as bundledPiCodingAgentInternalUrlsSkillProtocol from "@pk-nerdsaver-ai
 import * as bundledPiCodingAgentInternalUrlsSshProtocol from "@pk-nerdsaver-ai/pi-coding-agent/internal-urls/ssh-protocol";
 import * as bundledPiCodingAgentInternalUrlsTypes from "@pk-nerdsaver-ai/pi-coding-agent/internal-urls/types";
 import * as bundledPiCodingAgentInternalUrlsVaultProtocol from "@pk-nerdsaver-ai/pi-coding-agent/internal-urls/vault-protocol";
+import * as bundledPiCodingAgentInternalUrlsWikigraphProtocol from "@pk-nerdsaver-ai/pi-coding-agent/internal-urls/wikigraph-protocol";
 import * as bundledPiCodingAgentLsp from "@pk-nerdsaver-ai/pi-coding-agent/lsp";
 import * as bundledPiCodingAgentLspClient from "@pk-nerdsaver-ai/pi-coding-agent/lsp/client";
 import * as bundledPiCodingAgentLspClients from "@pk-nerdsaver-ai/pi-coding-agent/lsp/clients";
@@ -508,6 +538,13 @@ import * as bundledPiCodingAgentLspRender from "@pk-nerdsaver-ai/pi-coding-agent
 import * as bundledPiCodingAgentLspStartupEvents from "@pk-nerdsaver-ai/pi-coding-agent/lsp/startup-events";
 import * as bundledPiCodingAgentLspTypes from "@pk-nerdsaver-ai/pi-coding-agent/lsp/types";
 import * as bundledPiCodingAgentLspUtils from "@pk-nerdsaver-ai/pi-coding-agent/lsp/utils";
+import * as bundledPiCodingAgentMapreduce from "@pk-nerdsaver-ai/pi-coding-agent/mapreduce";
+import * as bundledPiCodingAgentMapreduceCostModel from "@pk-nerdsaver-ai/pi-coding-agent/mapreduce/cost-model";
+import * as bundledPiCodingAgentMapreduceGraph from "@pk-nerdsaver-ai/pi-coding-agent/mapreduce/graph";
+import * as bundledPiCodingAgentMapreducePartitioner from "@pk-nerdsaver-ai/pi-coding-agent/mapreduce/partitioner";
+import * as bundledPiCodingAgentMapreduceReducers from "@pk-nerdsaver-ai/pi-coding-agent/mapreduce/reducers";
+import * as bundledPiCodingAgentMapreduceScheduler from "@pk-nerdsaver-ai/pi-coding-agent/mapreduce/scheduler";
+import * as bundledPiCodingAgentMapreduceSelectors from "@pk-nerdsaver-ai/pi-coding-agent/mapreduce/selectors";
 import * as bundledPiCodingAgentMarkit from "@pk-nerdsaver-ai/pi-coding-agent/markit";
 import * as bundledPiCodingAgentMarkitRegistry from "@pk-nerdsaver-ai/pi-coding-agent/markit/registry";
 import * as bundledPiCodingAgentMarkitTypes from "@pk-nerdsaver-ai/pi-coding-agent/markit/types";
@@ -552,6 +589,7 @@ import * as bundledPiCodingAgentModesComponents from "@pk-nerdsaver-ai/pi-coding
 import * as bundledPiCodingAgentModesComponentsAdvisorMessage from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/advisor-message";
 import * as bundledPiCodingAgentModesComponentsAgentDashboard from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/agent-dashboard";
 import * as bundledPiCodingAgentModesComponentsAgentHub from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/agent-hub";
+import * as bundledPiCodingAgentModesComponentsAgentHubKanbanSync from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/agent-hub-kanban-sync";
 import * as bundledPiCodingAgentModesComponentsAgentTranscriptViewer from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/agent-transcript-viewer";
 import * as bundledPiCodingAgentModesComponentsAssistantMessage from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/assistant-message";
 import * as bundledPiCodingAgentModesComponentsBackgroundTanMessage from "@pk-nerdsaver-ai/pi-coding-agent/modes/components/background-tan-message";
@@ -654,10 +692,12 @@ import * as bundledPiCodingAgentModesImageReferences from "@pk-nerdsaver-ai/pi-c
 import * as bundledPiCodingAgentModesInteractiveMode from "@pk-nerdsaver-ai/pi-coding-agent/modes/interactive-mode";
 import * as bundledPiCodingAgentModesInternalUrlAutocomplete from "@pk-nerdsaver-ai/pi-coding-agent/modes/internal-url-autocomplete";
 import * as bundledPiCodingAgentModesLoopLimit from "@pk-nerdsaver-ai/pi-coding-agent/modes/loop-limit";
+import * as bundledPiCodingAgentModesLoopSynthesis from "@pk-nerdsaver-ai/pi-coding-agent/modes/loop-synthesis";
 import * as bundledPiCodingAgentModesMagicKeywords from "@pk-nerdsaver-ai/pi-coding-agent/modes/magic-keywords";
 import * as bundledPiCodingAgentModesMarkdownProse from "@pk-nerdsaver-ai/pi-coding-agent/modes/markdown-prose";
 import * as bundledPiCodingAgentModesOauthManualInput from "@pk-nerdsaver-ai/pi-coding-agent/modes/oauth-manual-input";
 import * as bundledPiCodingAgentModesOrchestrate from "@pk-nerdsaver-ai/pi-coding-agent/modes/orchestrate";
+import * as bundledPiCodingAgentModesOwnerCommandGuard from "@pk-nerdsaver-ai/pi-coding-agent/modes/owner-command-guard";
 import * as bundledPiCodingAgentModesPrintMode from "@pk-nerdsaver-ai/pi-coding-agent/modes/print-mode";
 import * as bundledPiCodingAgentModesPromptActionAutocomplete from "@pk-nerdsaver-ai/pi-coding-agent/modes/prompt-action-autocomplete";
 import * as bundledPiCodingAgentModesRpcHostTools from "@pk-nerdsaver-ai/pi-coding-agent/modes/rpc/host-tools";
@@ -691,6 +731,16 @@ import * as bundledPiCodingAgentModesUtilsToolsMarkdown from "@pk-nerdsaver-ai/p
 import * as bundledPiCodingAgentModesUtilsTranscriptRenderHelpers from "@pk-nerdsaver-ai/pi-coding-agent/modes/utils/transcript-render-helpers";
 import * as bundledPiCodingAgentModesUtilsUiHelpers from "@pk-nerdsaver-ai/pi-coding-agent/modes/utils/ui-helpers";
 import * as bundledPiCodingAgentModesWorkflow from "@pk-nerdsaver-ai/pi-coding-agent/modes/workflow";
+import * as bundledPiCodingAgentOkf from "@pk-nerdsaver-ai/pi-coding-agent/okf";
+import * as bundledPiCodingAgentOkfParser from "@pk-nerdsaver-ai/pi-coding-agent/okf/parser";
+import * as bundledPiCodingAgentOperational from "@pk-nerdsaver-ai/pi-coding-agent/operational";
+import * as bundledPiCodingAgentOperationalCron from "@pk-nerdsaver-ai/pi-coding-agent/operational/cron";
+import * as bundledPiCodingAgentOperationalNotificationSinks from "@pk-nerdsaver-ai/pi-coding-agent/operational/notification-sinks";
+import * as bundledPiCodingAgentOperationalOmpProcessExecutor from "@pk-nerdsaver-ai/pi-coding-agent/operational/omp-process-executor";
+import * as bundledPiCodingAgentOperationalRunner from "@pk-nerdsaver-ai/pi-coding-agent/operational/runner";
+import * as bundledPiCodingAgentOperationalStore from "@pk-nerdsaver-ai/pi-coding-agent/operational/store";
+import * as bundledPiCodingAgentOperationalTrajectoryRecorder from "@pk-nerdsaver-ai/pi-coding-agent/operational/trajectory-recorder";
+import * as bundledPiCodingAgentOperationalTypes from "@pk-nerdsaver-ai/pi-coding-agent/operational/types";
 import * as bundledPiCodingAgentPlanModeApprovedPlan from "@pk-nerdsaver-ai/pi-coding-agent/plan-mode/approved-plan";
 import * as bundledPiCodingAgentPlanModePlanHandoff from "@pk-nerdsaver-ai/pi-coding-agent/plan-mode/plan-handoff";
 import * as bundledPiCodingAgentPlanModePlanProtection from "@pk-nerdsaver-ai/pi-coding-agent/plan-mode/plan-protection";
@@ -707,9 +757,14 @@ import * as bundledPiCodingAgentSessionBlobStore from "@pk-nerdsaver-ai/pi-codin
 import * as bundledPiCodingAgentSessionClientBridge from "@pk-nerdsaver-ai/pi-coding-agent/session/client-bridge";
 import * as bundledPiCodingAgentSessionCodexAutoReset from "@pk-nerdsaver-ai/pi-coding-agent/session/codex-auto-reset";
 import * as bundledPiCodingAgentSessionCompactModes from "@pk-nerdsaver-ai/pi-coding-agent/session/compact-modes";
+import * as bundledPiCodingAgentSessionFusionRouter from "@pk-nerdsaver-ai/pi-coding-agent/session/fusion-router";
+import * as bundledPiCodingAgentSessionFusionSidekick from "@pk-nerdsaver-ai/pi-coding-agent/session/fusion-sidekick";
+import * as bundledPiCodingAgentSessionFusionUsage from "@pk-nerdsaver-ai/pi-coding-agent/session/fusion-usage";
 import * as bundledPiCodingAgentSessionHistoryStorage from "@pk-nerdsaver-ai/pi-coding-agent/session/history-storage";
+import * as bundledPiCodingAgentSessionHubService from "@pk-nerdsaver-ai/pi-coding-agent/session/hub-service";
 import * as bundledPiCodingAgentSessionIndexedSessionStorage from "@pk-nerdsaver-ai/pi-coding-agent/session/indexed-session-storage";
 import * as bundledPiCodingAgentSessionMessages from "@pk-nerdsaver-ai/pi-coding-agent/session/messages";
+import * as bundledPiCodingAgentSessionOffloadTrace from "@pk-nerdsaver-ai/pi-coding-agent/session/offload-trace";
 import * as bundledPiCodingAgentSessionProviderImageBudget from "@pk-nerdsaver-ai/pi-coding-agent/session/provider-image-budget";
 import * as bundledPiCodingAgentSessionRedisSessionStorage from "@pk-nerdsaver-ai/pi-coding-agent/session/redis-session-storage";
 import * as bundledPiCodingAgentSessionSessionContext from "@pk-nerdsaver-ai/pi-coding-agent/session/session-context";
@@ -723,6 +778,7 @@ import * as bundledPiCodingAgentSessionSessionMigrations from "@pk-nerdsaver-ai/
 import * as bundledPiCodingAgentSessionSessionPaths from "@pk-nerdsaver-ai/pi-coding-agent/session/session-paths";
 import * as bundledPiCodingAgentSessionSessionPersistence from "@pk-nerdsaver-ai/pi-coding-agent/session/session-persistence";
 import * as bundledPiCodingAgentSessionSessionStorage from "@pk-nerdsaver-ai/pi-coding-agent/session/session-storage";
+import * as bundledPiCodingAgentSessionSessionWriterGuard from "@pk-nerdsaver-ai/pi-coding-agent/session/session-writer-guard";
 import * as bundledPiCodingAgentSessionSettingsStreamFn from "@pk-nerdsaver-ai/pi-coding-agent/session/settings-stream-fn";
 import * as bundledPiCodingAgentSessionShakeTypes from "@pk-nerdsaver-ai/pi-coding-agent/session/shake-types";
 import * as bundledPiCodingAgentSessionSqlSessionStorage from "@pk-nerdsaver-ai/pi-coding-agent/session/sql-session-storage";
@@ -755,6 +811,8 @@ import * as bundledPiCodingAgentSttTranscriber from "@pk-nerdsaver-ai/pi-coding-
 import * as bundledPiCodingAgentSttWav from "@pk-nerdsaver-ai/pi-coding-agent/stt/wav";
 import * as bundledPiCodingAgentTask from "@pk-nerdsaver-ai/pi-coding-agent/task";
 import * as bundledPiCodingAgentTaskAgents from "@pk-nerdsaver-ai/pi-coding-agent/task/agents";
+import * as bundledPiCodingAgentTaskAssignmentContract from "@pk-nerdsaver-ai/pi-coding-agent/task/assignment-contract";
+import * as bundledPiCodingAgentTaskAssignmentVerifier from "@pk-nerdsaver-ai/pi-coding-agent/task/assignment-verifier";
 import * as bundledPiCodingAgentTaskCommands from "@pk-nerdsaver-ai/pi-coding-agent/task/commands";
 import * as bundledPiCodingAgentTaskDiscovery from "@pk-nerdsaver-ai/pi-coding-agent/task/discovery";
 import * as bundledPiCodingAgentTaskExecutor from "@pk-nerdsaver-ai/pi-coding-agent/task/executor";
@@ -764,11 +822,15 @@ import * as bundledPiCodingAgentTaskOmpCommand from "@pk-nerdsaver-ai/pi-coding-
 import * as bundledPiCodingAgentTaskOutputManager from "@pk-nerdsaver-ai/pi-coding-agent/task/output-manager";
 import * as bundledPiCodingAgentTaskParallel from "@pk-nerdsaver-ai/pi-coding-agent/task/parallel";
 import * as bundledPiCodingAgentTaskPersistedRevive from "@pk-nerdsaver-ai/pi-coding-agent/task/persisted-revive";
+import * as bundledPiCodingAgentTaskRecoveryPolicy from "@pk-nerdsaver-ai/pi-coding-agent/task/recovery-policy";
 import * as bundledPiCodingAgentTaskRender from "@pk-nerdsaver-ai/pi-coding-agent/task/render";
 import * as bundledPiCodingAgentTaskRepairArgs from "@pk-nerdsaver-ai/pi-coding-agent/task/repair-args";
+import * as bundledPiCodingAgentTaskRepoEvidence from "@pk-nerdsaver-ai/pi-coding-agent/task/repo-evidence";
+import * as bundledPiCodingAgentTaskSpawnPlan from "@pk-nerdsaver-ai/pi-coding-agent/task/spawn-plan";
 import * as bundledPiCodingAgentTaskSubprocessToolRegistry from "@pk-nerdsaver-ai/pi-coding-agent/task/subprocess-tool-registry";
 import * as bundledPiCodingAgentTaskTypes from "@pk-nerdsaver-ai/pi-coding-agent/task/types";
 import * as bundledPiCodingAgentTaskWorktree from "@pk-nerdsaver-ai/pi-coding-agent/task/worktree";
+import * as bundledPiCodingAgentTaskWriteScope from "@pk-nerdsaver-ai/pi-coding-agent/task/write-scope";
 import * as bundledPiCodingAgentToolDiscoveryMode from "@pk-nerdsaver-ai/pi-coding-agent/tool-discovery/mode";
 import * as bundledPiCodingAgentToolDiscoveryToolIndex from "@pk-nerdsaver-ai/pi-coding-agent/tool-discovery/tool-index";
 import * as bundledPiCodingAgentTools from "@pk-nerdsaver-ai/pi-coding-agent/tools";
@@ -789,12 +851,14 @@ import * as bundledPiCodingAgentToolsBuiltinNames from "@pk-nerdsaver-ai/pi-codi
 import * as bundledPiCodingAgentToolsCheckpoint from "@pk-nerdsaver-ai/pi-coding-agent/tools/checkpoint";
 import * as bundledPiCodingAgentToolsConflictDetect from "@pk-nerdsaver-ai/pi-coding-agent/tools/conflict-detect";
 import * as bundledPiCodingAgentToolsContext from "@pk-nerdsaver-ai/pi-coding-agent/tools/context";
+import * as bundledPiCodingAgentToolsContextOracle from "@pk-nerdsaver-ai/pi-coding-agent/tools/context-oracle";
 import * as bundledPiCodingAgentToolsDebug from "@pk-nerdsaver-ai/pi-coding-agent/tools/debug";
 import * as bundledPiCodingAgentToolsEval from "@pk-nerdsaver-ai/pi-coding-agent/tools/eval";
 import * as bundledPiCodingAgentToolsEvalBackends from "@pk-nerdsaver-ai/pi-coding-agent/tools/eval-backends";
 import * as bundledPiCodingAgentToolsEvalRender from "@pk-nerdsaver-ai/pi-coding-agent/tools/eval-render";
 import * as bundledPiCodingAgentToolsFetch from "@pk-nerdsaver-ai/pi-coding-agent/tools/fetch";
 import * as bundledPiCodingAgentToolsFileRecorder from "@pk-nerdsaver-ai/pi-coding-agent/tools/file-recorder";
+import * as bundledPiCodingAgentToolsFind from "@pk-nerdsaver-ai/pi-coding-agent/tools/find";
 import * as bundledPiCodingAgentToolsFsCacheInvalidation from "@pk-nerdsaver-ai/pi-coding-agent/tools/fs-cache-invalidation";
 import * as bundledPiCodingAgentToolsGh from "@pk-nerdsaver-ai/pi-coding-agent/tools/gh";
 import * as bundledPiCodingAgentToolsGhCacheInvalidation from "@pk-nerdsaver-ai/pi-coding-agent/tools/gh-cache-invalidation";
@@ -808,6 +872,7 @@ import * as bundledPiCodingAgentToolsImageGen from "@pk-nerdsaver-ai/pi-coding-a
 import * as bundledPiCodingAgentToolsInspectImage from "@pk-nerdsaver-ai/pi-coding-agent/tools/inspect-image";
 import * as bundledPiCodingAgentToolsInspectImageRenderer from "@pk-nerdsaver-ai/pi-coding-agent/tools/inspect-image-renderer";
 import * as bundledPiCodingAgentToolsIrc from "@pk-nerdsaver-ai/pi-coding-agent/tools/irc";
+import * as bundledPiCodingAgentToolsIxBridge from "@pk-nerdsaver-ai/pi-coding-agent/tools/ix-bridge";
 import * as bundledPiCodingAgentToolsJob from "@pk-nerdsaver-ai/pi-coding-agent/tools/job";
 import * as bundledPiCodingAgentToolsJsonTree from "@pk-nerdsaver-ai/pi-coding-agent/tools/json-tree";
 import * as bundledPiCodingAgentToolsJtdToJsonSchema from "@pk-nerdsaver-ai/pi-coding-agent/tools/jtd-to-json-schema";
@@ -832,11 +897,13 @@ import * as bundledPiCodingAgentToolsRenderers from "@pk-nerdsaver-ai/pi-coding-
 import * as bundledPiCodingAgentToolsReportToolIssue from "@pk-nerdsaver-ai/pi-coding-agent/tools/report-tool-issue";
 import * as bundledPiCodingAgentToolsResolve from "@pk-nerdsaver-ai/pi-coding-agent/tools/resolve";
 import * as bundledPiCodingAgentToolsReview from "@pk-nerdsaver-ai/pi-coding-agent/tools/review";
+import * as bundledPiCodingAgentToolsSearch from "@pk-nerdsaver-ai/pi-coding-agent/tools/search";
 import * as bundledPiCodingAgentToolsSearchToolBm25 from "@pk-nerdsaver-ai/pi-coding-agent/tools/search-tool-bm25";
 import * as bundledPiCodingAgentToolsSqliteReader from "@pk-nerdsaver-ai/pi-coding-agent/tools/sqlite-reader";
 import * as bundledPiCodingAgentToolsSsh from "@pk-nerdsaver-ai/pi-coding-agent/tools/ssh";
 import * as bundledPiCodingAgentToolsTodo from "@pk-nerdsaver-ai/pi-coding-agent/tools/todo";
 import * as bundledPiCodingAgentToolsToolErrors from "@pk-nerdsaver-ai/pi-coding-agent/tools/tool-errors";
+import * as bundledPiCodingAgentToolsToolProfiles from "@pk-nerdsaver-ai/pi-coding-agent/tools/tool-profiles";
 import * as bundledPiCodingAgentToolsToolResult from "@pk-nerdsaver-ai/pi-coding-agent/tools/tool-result";
 import * as bundledPiCodingAgentToolsToolTimeouts from "@pk-nerdsaver-ai/pi-coding-agent/tools/tool-timeouts";
 import * as bundledPiCodingAgentToolsTts from "@pk-nerdsaver-ai/pi-coding-agent/tools/tts";
@@ -992,6 +1059,17 @@ import * as bundledPiCodingAgentWebSearchProvidersZai from "@pk-nerdsaver-ai/pi-
 import * as bundledPiCodingAgentWebSearchRender from "@pk-nerdsaver-ai/pi-coding-agent/web/search/render";
 import * as bundledPiCodingAgentWebSearchTypes from "@pk-nerdsaver-ai/pi-coding-agent/web/search/types";
 import * as bundledPiCodingAgentWebSearchUtils from "@pk-nerdsaver-ai/pi-coding-agent/web/search/utils";
+import * as bundledPiCodingAgentWorkspace from "@pk-nerdsaver-ai/pi-coding-agent/workspace";
+import * as bundledPiCodingAgentWorkspaceCopy from "@pk-nerdsaver-ai/pi-coding-agent/workspace/copy";
+import * as bundledPiCodingAgentWorkspaceEthereal from "@pk-nerdsaver-ai/pi-coding-agent/workspace/ethereal";
+import * as bundledPiCodingAgentWorkspaceManifest from "@pk-nerdsaver-ai/pi-coding-agent/workspace/manifest";
+import * as bundledPiCodingAgentWorkspaceMaterialize from "@pk-nerdsaver-ai/pi-coding-agent/workspace/materialize";
+import * as bundledPiCodingAgentWorkspaceOptions from "@pk-nerdsaver-ai/pi-coding-agent/workspace/options";
+import * as bundledPiCodingAgentWorkspacePatch from "@pk-nerdsaver-ai/pi-coding-agent/workspace/patch";
+import * as bundledPiCodingAgentWorkspacePaths from "@pk-nerdsaver-ai/pi-coding-agent/workspace/paths";
+import * as bundledPiCodingAgentWorkspaceRedaction from "@pk-nerdsaver-ai/pi-coding-agent/workspace/redaction";
+import * as bundledPiCodingAgentWorkspaceSecrets from "@pk-nerdsaver-ai/pi-coding-agent/workspace/secrets";
+import * as bundledPiCodingAgentWorkspaceTypes from "@pk-nerdsaver-ai/pi-coding-agent/workspace/types";
 import * as bundledPiNatives from "@pk-nerdsaver-ai/pi-natives";
 import * as bundledPiTui from "@pk-nerdsaver-ai/pi-tui";
 import * as bundledPiTuiComponentsBox from "@pk-nerdsaver-ai/pi-tui/components/box";
@@ -1147,6 +1225,12 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-ai/providers/google-gemini-cli": bundledPiAiProvidersGoogleGeminiCli as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-ai/providers/google-interactions-actions":
+		bundledPiAiProvidersGoogleInteractionsActions as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/providers/google-interactions-types":
+		bundledPiAiProvidersGoogleInteractionsTypes as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/providers/google-interactions":
+		bundledPiAiProvidersGoogleInteractions as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/providers/google-shared": bundledPiAiProvidersGoogleShared as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1271,12 +1355,14 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-ai/utils/idle-iterator": bundledPiAiUtilsIdleIterator as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-ai/utils/json-parse": bundledPiAiUtilsJsonParse as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/utils/openai-http": bundledPiAiUtilsOpenaiHttp as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-ai/utils/openrouter-headers": bundledPiAiUtilsOpenrouterHeaders as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-ai/utils/overflow": bundledPiAiUtilsOverflow as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/utils/parse-bind": bundledPiAiUtilsParseBind as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/utils/provider-response": bundledPiAiUtilsProviderResponse as unknown as Readonly<
 		Record<string, unknown>
@@ -1396,6 +1482,7 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/capability": bundledPiCodingAgentCapability as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/okf": bundledPiCodingAgentOkf as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/gallery-fixtures":
 		bundledPiCodingAgentCliGalleryFixtures as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commit": bundledPiCodingAgentCommit as unknown as Readonly<
@@ -1445,8 +1532,14 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/eval": bundledPiCodingAgentEval as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/gateway": bundledPiCodingAgentGateway as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/lsp": bundledPiCodingAgentLsp as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/lsp/clients": bundledPiCodingAgentLspClients as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/mapreduce": bundledPiCodingAgentMapreduce as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/markit": bundledPiCodingAgentMarkit as unknown as Readonly<
@@ -1481,6 +1574,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/theme/defaults":
 		bundledPiCodingAgentModesThemeDefaults as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/operational": bundledPiCodingAgentOperational as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/secrets": bundledPiCodingAgentSecrets as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1488,6 +1584,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/task": bundledPiCodingAgentTask as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools": bundledPiCodingAgentTools as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tui": bundledPiCodingAgentTui as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/workspace": bundledPiCodingAgentWorkspace as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/web/scrapers": bundledPiCodingAgentWebScrapers as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1537,6 +1636,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/capability/mcp": bundledPiCodingAgentCapabilityMcp as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/capability/okf": bundledPiCodingAgentCapabilityOkf as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/capability/prompt": bundledPiCodingAgentCapabilityPrompt as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1561,6 +1663,12 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/capability/types": bundledPiCodingAgentCapabilityTypes as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/okf/parser": bundledPiCodingAgentOkfParser as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/cli/9router-cli": bundledPiCodingAgentCli9routerCli as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/agents-cli": bundledPiCodingAgentCliAgentsCli as unknown as Readonly<
@@ -1619,6 +1727,12 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/models-cli": bundledPiCodingAgentCliModelsCli as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/cli/okf-cli": bundledPiCodingAgentCliOkfCli as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/cli/operational-cli": bundledPiCodingAgentCliOperationalCli as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/plugin-cli": bundledPiCodingAgentCliPluginCli as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1659,6 +1773,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/update-cli": bundledPiCodingAgentCliUpdateCli as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/cli/update-release-source":
+		bundledPiCodingAgentCliUpdateReleaseSource as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/usage-cli": bundledPiCodingAgentCliUsageCli as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1692,6 +1808,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentCliGalleryFixturesWeb as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/cli/commands/init-xdg":
 		bundledPiCodingAgentCliCommandsInitXdg as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commands/9router": bundledPiCodingAgentCommands9router as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/acp": bundledPiCodingAgentCommandsAcp as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1703,6 +1822,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/auth-gateway":
 		bundledPiCodingAgentCommandsAuthGateway as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/bench": bundledPiCodingAgentCommandsBench as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commands/bg": bundledPiCodingAgentCommandsBg as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/commit": bundledPiCodingAgentCommandsCommit as unknown as Readonly<
@@ -1741,10 +1863,16 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/models": bundledPiCodingAgentCommandsModels as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commands/okf": bundledPiCodingAgentCommandsOkf as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/plugin": bundledPiCodingAgentCommandsPlugin as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/read": bundledPiCodingAgentCommandsRead as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/commands/runtime": bundledPiCodingAgentCommandsRuntime as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/commands/say": bundledPiCodingAgentCommandsSay as unknown as Readonly<
@@ -1864,12 +1992,20 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/config/config-file": bundledPiCodingAgentConfigConfigFile as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/config/environments-cloud-skills":
+		bundledPiCodingAgentConfigEnvironmentsCloudSkills as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/file-lock": bundledPiCodingAgentConfigFileLock as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/inline-tool-descriptors-mode":
 		bundledPiCodingAgentConfigInlineToolDescriptorsMode as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/keybindings": bundledPiCodingAgentConfigKeybindings as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/config/moa-presets": bundledPiCodingAgentConfigMoaPresets as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/config/moa-resolver": bundledPiCodingAgentConfigMoaResolver as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/model-discovery":
@@ -1885,6 +2021,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentConfigModelsConfigSchema as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/models-config":
 		bundledPiCodingAgentConfigModelsConfig as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/config/nine-router-controller":
+		bundledPiCodingAgentConfigNineRouterController as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/prompt-templates":
 		bundledPiCodingAgentConfigPromptTemplates as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/resolve-config-value":
@@ -1897,6 +2035,10 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/config/settings": bundledPiCodingAgentConfigSettings as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/config/spawn-selector-validation":
+		bundledPiCodingAgentConfigSpawnSelectorValidation as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/config/subagent-model-aliases":
+		bundledPiCodingAgentConfigSubagentModelAliases as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/dap/client": bundledPiCodingAgentDapClient as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -1972,6 +2114,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/discovery/mcp-json": bundledPiCodingAgentDiscoveryMcpJson as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/discovery/okf": bundledPiCodingAgentDiscoveryOkf as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/discovery/omp-extension-roots":
@@ -2115,6 +2260,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentExtensibilityPluginsLoader as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/manager":
 		bundledPiCodingAgentExtensibilityPluginsManager as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/manifest":
+		bundledPiCodingAgentExtensibilityPluginsManifest as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/marketplace-auto-update":
 		bundledPiCodingAgentExtensibilityPluginsMarketplaceAutoUpdate as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/extensibility/plugins/parser":
@@ -2175,6 +2322,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/internal-urls/vault-protocol":
 		bundledPiCodingAgentInternalUrlsVaultProtocol as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/internal-urls/wikigraph-protocol":
+		bundledPiCodingAgentInternalUrlsWikigraphProtocol as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/eval/js/context-manager":
 		bundledPiCodingAgentEvalJsContextManager as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/eval/js/executor": bundledPiCodingAgentEvalJsExecutor as unknown as Readonly<
@@ -2206,6 +2355,19 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/eval/py/spawn-options":
 		bundledPiCodingAgentEvalPySpawnOptions as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/eval/py/tool-bridge": bundledPiCodingAgentEvalPyToolBridge as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/gateway/agent-session-gateway":
+		bundledPiCodingAgentGatewayAgentSessionGateway as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/gateway/local-agent-owner-client":
+		bundledPiCodingAgentGatewayLocalAgentOwnerClient as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/gateway/local-agent-owner-recovery":
+		bundledPiCodingAgentGatewayLocalAgentOwnerRecovery as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/gateway/local-agent-owner-server":
+		bundledPiCodingAgentGatewayLocalAgentOwnerServer as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/gateway/local-agent-owner-types":
+		bundledPiCodingAgentGatewayLocalAgentOwnerTypes as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/gateway/types": bundledPiCodingAgentGatewayTypes as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/lsp/client": bundledPiCodingAgentLspClient as unknown as Readonly<
@@ -2243,6 +2405,20 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentLspClientsLspLinterClient as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/lsp/clients/swiftlint-client":
 		bundledPiCodingAgentLspClientsSwiftlintClient as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/mapreduce/cost-model":
+		bundledPiCodingAgentMapreduceCostModel as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/mapreduce/graph": bundledPiCodingAgentMapreduceGraph as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/mapreduce/partitioner":
+		bundledPiCodingAgentMapreducePartitioner as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/mapreduce/reducers": bundledPiCodingAgentMapreduceReducers as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/mapreduce/scheduler":
+		bundledPiCodingAgentMapreduceScheduler as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/mapreduce/selectors":
+		bundledPiCodingAgentMapreduceSelectors as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/markit/registry": bundledPiCodingAgentMarkitRegistry as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2353,6 +2529,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/loop-limit": bundledPiCodingAgentModesLoopLimit as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/loop-synthesis":
+		bundledPiCodingAgentModesLoopSynthesis as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/magic-keywords":
 		bundledPiCodingAgentModesMagicKeywords as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/markdown-prose":
@@ -2362,6 +2540,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/orchestrate": bundledPiCodingAgentModesOrchestrate as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/owner-command-guard":
+		bundledPiCodingAgentModesOwnerCommandGuard as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/print-mode": bundledPiCodingAgentModesPrintMode as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2408,6 +2588,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentModesComponentsAdvisorMessage as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/components/agent-dashboard":
 		bundledPiCodingAgentModesComponentsAgentDashboard as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/modes/components/agent-hub-kanban-sync":
+		bundledPiCodingAgentModesComponentsAgentHubKanbanSync as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/components/agent-hub":
 		bundledPiCodingAgentModesComponentsAgentHub as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/components/agent-transcript-viewer":
@@ -2643,6 +2825,24 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentModesUtilsTranscriptRenderHelpers as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/modes/utils/ui-helpers":
 		bundledPiCodingAgentModesUtilsUiHelpers as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/operational/cron": bundledPiCodingAgentOperationalCron as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/operational/notification-sinks":
+		bundledPiCodingAgentOperationalNotificationSinks as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/operational/omp-process-executor":
+		bundledPiCodingAgentOperationalOmpProcessExecutor as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/operational/runner": bundledPiCodingAgentOperationalRunner as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/operational/store": bundledPiCodingAgentOperationalStore as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/operational/trajectory-recorder":
+		bundledPiCodingAgentOperationalTrajectoryRecorder as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/operational/types": bundledPiCodingAgentOperationalTypes as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/plan-mode/approved-plan":
 		bundledPiCodingAgentPlanModeApprovedPlan as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/plan-mode/plan-handoff":
@@ -2678,13 +2878,24 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentSessionCodexAutoReset as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/compact-modes":
 		bundledPiCodingAgentSessionCompactModes as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/fusion-router":
+		bundledPiCodingAgentSessionFusionRouter as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/fusion-sidekick":
+		bundledPiCodingAgentSessionFusionSidekick as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/fusion-usage":
+		bundledPiCodingAgentSessionFusionUsage as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/history-storage":
 		bundledPiCodingAgentSessionHistoryStorage as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/hub-service": bundledPiCodingAgentSessionHubService as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/indexed-session-storage":
 		bundledPiCodingAgentSessionIndexedSessionStorage as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/messages": bundledPiCodingAgentSessionMessages as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/offload-trace":
+		bundledPiCodingAgentSessionOffloadTrace as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/provider-image-budget":
 		bundledPiCodingAgentSessionProviderImageBudget as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/redis-session-storage":
@@ -2711,6 +2922,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentSessionSessionPersistence as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/session-storage":
 		bundledPiCodingAgentSessionSessionStorage as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/session-writer-guard":
+		bundledPiCodingAgentSessionSessionWriterGuard as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/settings-stream-fn":
 		bundledPiCodingAgentSessionSettingsStreamFn as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/shake-types": bundledPiCodingAgentSessionShakeTypes as unknown as Readonly<
@@ -2789,6 +3002,10 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/task/agents": bundledPiCodingAgentTaskAgents as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/task/assignment-contract":
+		bundledPiCodingAgentTaskAssignmentContract as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/task/assignment-verifier":
+		bundledPiCodingAgentTaskAssignmentVerifier as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/task/commands": bundledPiCodingAgentTaskCommands as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2814,10 +3031,18 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/task/persisted-revive":
 		bundledPiCodingAgentTaskPersistedRevive as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/task/recovery-policy":
+		bundledPiCodingAgentTaskRecoveryPolicy as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/task/render": bundledPiCodingAgentTaskRender as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/task/repair-args": bundledPiCodingAgentTaskRepairArgs as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/task/repo-evidence": bundledPiCodingAgentTaskRepoEvidence as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/task/spawn-plan": bundledPiCodingAgentTaskSpawnPlan as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/task/subprocess-tool-registry":
@@ -2826,6 +3051,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/task/worktree": bundledPiCodingAgentTaskWorktree as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/task/write-scope": bundledPiCodingAgentTaskWriteScope as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tool-discovery/mode": bundledPiCodingAgentToolDiscoveryMode as unknown as Readonly<
@@ -2874,6 +3102,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/conflict-detect":
 		bundledPiCodingAgentToolsConflictDetect as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/context-oracle":
+		bundledPiCodingAgentToolsContextOracle as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/context": bundledPiCodingAgentToolsContext as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2893,6 +3123,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/file-recorder": bundledPiCodingAgentToolsFileRecorder as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/find": bundledPiCodingAgentToolsFind as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/fs-cache-invalidation":
@@ -2928,6 +3161,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/irc": bundledPiCodingAgentToolsIrc as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/ix-bridge": bundledPiCodingAgentToolsIxBridge as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/job": bundledPiCodingAgentToolsJob as unknown as Readonly<
@@ -2997,6 +3233,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/search-tool-bm25":
 		bundledPiCodingAgentToolsSearchToolBm25 as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/search": bundledPiCodingAgentToolsSearch as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/sqlite-reader": bundledPiCodingAgentToolsSqliteReader as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -3007,6 +3246,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/tool-errors": bundledPiCodingAgentToolsToolErrors as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/tool-profiles": bundledPiCodingAgentToolsToolProfiles as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/tool-result": bundledPiCodingAgentToolsToolResult as unknown as Readonly<
@@ -3050,6 +3292,34 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tui/width-aware-text":
 		bundledPiCodingAgentTuiWidthAwareText as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/workspace/copy": bundledPiCodingAgentWorkspaceCopy as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/workspace/ethereal": bundledPiCodingAgentWorkspaceEthereal as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/workspace/manifest": bundledPiCodingAgentWorkspaceManifest as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/workspace/materialize":
+		bundledPiCodingAgentWorkspaceMaterialize as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/workspace/options": bundledPiCodingAgentWorkspaceOptions as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/workspace/patch": bundledPiCodingAgentWorkspacePatch as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/workspace/paths": bundledPiCodingAgentWorkspacePaths as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/workspace/redaction":
+		bundledPiCodingAgentWorkspaceRedaction as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/workspace/secrets": bundledPiCodingAgentWorkspaceSecrets as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/workspace/types": bundledPiCodingAgentWorkspaceTypes as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/active-repo-context":
 		bundledPiCodingAgentUtilsActiveRepoContext as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/utils/block-context": bundledPiCodingAgentUtilsBlockContext as unknown as Readonly<

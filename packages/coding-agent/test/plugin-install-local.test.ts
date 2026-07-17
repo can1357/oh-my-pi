@@ -29,6 +29,7 @@ const FAKE_INSTALLED: InstalledPlugin = {
 	manifest: { version: "1.0.0" },
 	enabledFeatures: null,
 	enabled: true,
+	scope: "user",
 };
 
 async function createLocalPlugin(root: string): Promise<string> {

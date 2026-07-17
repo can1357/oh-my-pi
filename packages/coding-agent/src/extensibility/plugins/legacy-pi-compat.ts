@@ -158,7 +158,7 @@ const CANONICAL_PI_SCOPE = "@pk-nerdsaver-ai";
 // of internal pi-* packages. `@pk-nerdsaver-ai` is intentionally included so direct
 // canonical imports still pass through the same host-bundled package resolution
 // path instead of pulling a duplicate copy from plugin node_modules.
-const PI_SCOPE_ALIASES = ["oh-my-pi", "mariozechner", "earendil-works"] as const;
+const PI_SCOPE_ALIASES = ["oh-my-pi", "pk-nerdsaver-ai", "mariozechner", "earendil-works"] as const;
 
 // Internal pi-* package basenames bundled inside the omp binary.
 const PI_PACKAGE_NAMES = ["pi-agent-core", "pi-ai", "pi-coding-agent", "pi-natives", "pi-tui", "pi-utils"] as const;
@@ -1013,7 +1013,14 @@ function resolveLegacyPiSpecifier(args: { path: string; importer: string }): { p
 	// Primary: resolve the canonical @pk-nerdsaver-ai/* specifier from the host binary
 	// location. Works in dev mode and in source-link installs.
 	try {
-		return { path: resolveCanonicalPiSpecifier(remappedSpecifier) };
+		const resolved = resolveCanonicalPiSpecifier(remappedSpecifier);
+		// The compat shims themselves re-export the canonical package root; let
+		// that import fall through to native resolution instead of looping the
+		// shim back onto itself.
+		if (resolved === args.importer) {
+			return undefined;
+		}
+		return { path: resolved };
 	} catch {
 		// Fallback for compiled binary mode: the bundled packages live inside
 		// /$bunfs/root and aren't reachable by filesystem resolution. Prefer the

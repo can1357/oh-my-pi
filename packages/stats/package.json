@@ -30,6 +30,8 @@
 	"scripts": {
 		"build": "bun run build.ts",
 		"dev": "bun run src/index.ts",
+		"gen:stats": "bun scripts/generate-client-bundle.ts --generate",
+		"gen:stats:reset": "bun scripts/generate-client-bundle.ts --reset",
 		"check": "biome check . && bun run check:types",
 		"check:types": "tsgo -p tsconfig.json --noEmit && tsgo -p tsconfig.client.json --noEmit",
 		"lint": "biome lint .",

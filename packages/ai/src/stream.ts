@@ -1,3 +1,4 @@
+import { scheduler } from "node:timers/promises";
 import type { Effort } from "@pk-nerdsaver-ai/pi-catalog/effort";
 import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl } from "@pk-nerdsaver-ai/pi-catalog/hosts";
 import {
@@ -11,6 +12,8 @@ import { CATALOG_PROVIDERS, type ProviderCatalogEntry } from "@pk-nerdsaver-ai/p
 import { $env, $pickenv, extractHttpStatusFromError } from "@pk-nerdsaver-ai/pi-utils";
 import { getCustomApi } from "./api-registry";
 import { AUTH_RETRY_STEPS, isApiKeyResolver, resolveRetryKey } from "./auth-retry";
+import * as AIError from "./error";
+import { isUsageLimitOutcome } from "./error/rate-limit";
 import { ProviderHttpError } from "./errors";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
@@ -23,7 +26,9 @@ import type { GoogleInteractionsOptions } from "./providers/google-interactions"
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { isKimiModel, streamKimi } from "./providers/kimi";
 import type { OllamaChatOptions } from "./providers/ollama";
+import type { OpenAICodexResponsesOptions } from "./providers/openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
+import type { OpenAIResponsesOptions } from "./providers/openai-responses";
 import { streamPiNative } from "./providers/pi-native-client";
 // Heavy provider stream functions are imported lazily via register-builtins,
 // which wraps each provider module in a dynamic import. This keeps the
@@ -47,7 +52,6 @@ import {
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
 import { isSyntheticModel, streamSynthetic } from "./providers/synthetic";
-import { isUsageLimitError } from "./rate-limit-utils";
 import { PROVIDER_REGISTRY } from "./registry";
 import type {
 	Api,
@@ -63,8 +67,11 @@ import type {
 	ToolChoice,
 } from "./types";
 import { AssistantMessageEventStream } from "./utils/event-stream";
+import { resolveProviderMaxInFlightRequests, streamWithProviderSlot } from "./utils/provider-inflight";
 import { withRequestDebugFetch } from "./utils/request-debug";
-import { withGeminiThinkingLoopGuard } from "./utils/thinking-loop";
+import { THINKING_LOOP_ERROR_MARKER, withGeminiThinkingLoopGuard } from "./utils/thinking-loop";
+
+export { __providerInFlightForTesting, configureProviderMaxInFlightRequests } from "./utils/provider-inflight";
 
 function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 	return (
@@ -333,13 +340,51 @@ function streamDispatch<TApi extends Api>(
 	}
 }
 
+/** Guarded samples of a thinking-loop stall (initial + re-samples) before the cook pass. */
+const THINKING_LOOP_GUARDED_ATTEMPTS = 3;
+/** Backoff between thinking-loop re-samples; a loop is a model-side stall, not load. */
+const THINKING_LOOP_RESAMPLE_DELAY_MS = 500;
+
+/**
+ * The loop guard's synthetic stall: an error terminal that streamed no
+ * observable content. A contentful marker error is replay-unsafe output and is
+ * never re-sampled.
+ */
+function isThinkingLoopStall(message: AssistantMessage): boolean {
+	if (message.stopReason !== "error" || message.content.length > 0) return false;
+	return (
+		AIError.is(message.errorId, AIError.Flag.ThinkingLoop) ||
+		(message.errorMessage?.includes(THINKING_LOOP_ERROR_MARKER) ?? false)
+	);
+}
+
+/**
+ * Result-path counterpart of the loop guard: re-sample a thinking-loop stall a
+ * few times, then let a stubborn loop cook through one unguarded pass instead
+ * of surfacing the stall. Streaming consumers keep the raw stall (their retry
+ * loop lives in the session); result-awaiting callers have nowhere to retry, so
+ * the bounded loop lives here.
+ */
+async function resultWithThinkingLoopCook<O extends Pick<StreamOptions, "signal" | "loopGuard">>(
+	options: O | undefined,
+	dispatch: (options: O | undefined) => Promise<AssistantMessage>,
+): Promise<AssistantMessage> {
+	let result = await dispatch(options);
+	for (let attempt = 1; attempt < THINKING_LOOP_GUARDED_ATTEMPTS && isThinkingLoopStall(result); attempt++) {
+		await scheduler.wait(THINKING_LOOP_RESAMPLE_DELAY_MS, { signal: options?.signal });
+		result = await dispatch(options);
+	}
+	if (!isThinkingLoopStall(result)) return result;
+	await scheduler.wait(THINKING_LOOP_RESAMPLE_DELAY_MS, { signal: options?.signal });
+	return dispatch({ ...(options ?? {}), loopGuard: { ...options?.loopGuard, enabled: false } } as O);
+}
+
 export async function complete<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): Promise<AssistantMessage> {
-	const s = stream(model, context, options);
-	return s.result();
+	return resultWithThinkingLoopCook(options, opts => stream(model, context, opts).result());
 }
 
 type AuthRetryFailure = {
@@ -355,15 +400,17 @@ function extractStatusFromAssistantError(message: AssistantMessage): number | un
 }
 
 function isRetryableUpstreamError(error: unknown, status: number | undefined, message: string | undefined): boolean {
-	// 401 means the credential is bad. Usage-limit phrasing (Codex's
-	// "You have hit your ChatGPT usage limit", Anthropic's "usage_limit_reached",
-	// Google's "resource_exhausted") means this account is parked but a
-	// sibling credential can usually pick the request up. Both are
-	// rotatable via `onAuthError` — the auth-gateway maps the former to
-	// `invalidateCredentialMatching` and the latter to `markUsageLimitReached`.
+	// 401 means the credential is bad. Usage-limit outcomes (Codex's
+	// "You have hit your ChatGPT usage limit" or its opaque bare-429 shape,
+	// Anthropic's "usage_limit_reached", Google's "resource_exhausted") mean
+	// this account is parked but a sibling credential can usually pick the
+	// request up. Both are rotatable via `onAuthError` — the auth-gateway maps
+	// the former to `invalidateCredentialMatching` and the latter to
+	// `markUsageLimitReached`. Informative transient 429 bodies stay in the
+	// provider's own backoff layer.
 	if (status === 401) return true;
 	void error;
-	return !!message && isUsageLimitError(message);
+	return isUsageLimitOutcome(status, message);
 }
 
 function createAssistantAuthError(message: AssistantMessage): Error {
@@ -379,6 +426,24 @@ function emitBufferedEvents(stream: AssistantMessageEventStream, events: Assista
 }
 
 export function streamSimple<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+	// Per-provider in-flight limit (per-request option or the process-global
+	// configuration): gate the entire dispatch — including auth-retry key
+	// resolution — behind a cross-process slot. Unlimited providers keep the
+	// direct path and its stream object untouched.
+	const limit = resolveProviderMaxInFlightRequests(model.provider, options?.maxInFlightRequests);
+	if (limit === undefined) {
+		return streamSimpleUnlimited(model, context, options);
+	}
+	return streamWithProviderSlot(model.provider, limit, options?.signal, () =>
+		streamSimpleUnlimited(model, context, options),
+	);
+}
+
+function streamSimpleUnlimited<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: SimpleStreamOptions,
@@ -402,7 +467,9 @@ export function streamSimple<TApi extends Api>(
 			};
 
 			try {
-				const inner = streamSimple(model, context, { ...requestOptions, apiKey });
+				// Recurse into the unlimited entry point: the public wrapper already
+				// holds the provider slot for this request (when one applies).
+				const inner = streamSimpleUnlimited(model, context, { ...requestOptions, apiKey });
 				for await (const event of inner) {
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
 						bufferedEvents.push(event);
@@ -567,8 +634,7 @@ export async function completeSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): Promise<AssistantMessage> {
-	const s = streamSimple(model, context, options);
-	return s.result();
+	return resultWithThinkingLoopCook(options, opts => streamSimple(model, context, opts).result());
 }
 
 const MIN_OUTPUT_TOKENS = 1024;
@@ -796,12 +862,18 @@ function mapOptionsForApi<TApi extends Api>(
 				});
 			}
 
+			// Budget-effort models (e.g. GLM-5.2 behind Anthropic-compatible
+			// gateways) pair `thinking.budget_tokens` with `output_config.effort`;
+			// forward the requested level so the provider can map it.
+			const budgetEffortReasoning = model.thinking?.mode === "anthropic-budget-effort" ? reasoning : undefined;
+
 			if (ANTHROPIC_USE_INTERLEAVED_THINKING) {
 				return castApi<"anthropic-messages">({
 					...base,
 					requestModelId: resolveWireModelId(model, reasoning),
 					thinkingEnabled: true,
 					thinkingBudgetTokens: thinkingBudget,
+					reasoning: budgetEffortReasoning,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 					thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
 					serviceTier: options?.serviceTier,
@@ -833,6 +905,7 @@ function mapOptionsForApi<TApi extends Api>(
 					requestModelId: resolveWireModelId(model, reasoning),
 					thinkingEnabled: true,
 					thinkingBudgetTokens: thinkingBudget,
+					reasoning: budgetEffortReasoning,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 					thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
 					serviceTier: options?.serviceTier,
@@ -914,6 +987,7 @@ function mapOptionsForApi<TApi extends Api>(
 				reasoning: resolveOpenAiReasoningEffort(model, options),
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
+				textVerbosity: options?.textVerbosity as OpenAIResponsesOptions["textVerbosity"],
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
@@ -935,6 +1009,7 @@ function mapOptionsForApi<TApi extends Api>(
 				reasoning: resolveOpenAiReasoningEffort(model, options),
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
+				textVerbosity: options?.textVerbosity as OpenAICodexResponsesOptions["textVerbosity"],
 				preferWebsockets: options?.preferWebsockets,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 			});

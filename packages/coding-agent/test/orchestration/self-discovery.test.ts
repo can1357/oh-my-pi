@@ -31,7 +31,12 @@ describe("classifyForSelfDiscovery", () => {
 			makeContract({
 				orchestrationPolicy: {
 					preferIndependence: true,
-					searchBudget: { maxInitialFamilies: 3, maxRounds: 3, maxSameBlockerRetries: 1, minEvidenceGainToContinue: 0.1 },
+					searchBudget: {
+						maxInitialFamilies: 3,
+						maxRounds: 3,
+						maxSameBlockerRetries: 1,
+						minEvidenceGainToContinue: 0.1,
+					},
 				},
 			}),
 		);
@@ -129,7 +134,12 @@ describe("classifyForSelfDiscovery", () => {
 				objective: "Migrate and deploy the full system to remote Docker with security audit",
 				orchestrationPolicy: {
 					preferIndependence: true,
-					searchBudget: { maxInitialFamilies: 4, maxRounds: 4, maxSameBlockerRetries: 1, minEvidenceGainToContinue: 0.1 },
+					searchBudget: {
+						maxInitialFamilies: 4,
+						maxRounds: 4,
+						maxSameBlockerRetries: 1,
+						minEvidenceGainToContinue: 0.1,
+					},
 				},
 				completionCriteria: [
 					{ id: "C1", description: "migrated" },

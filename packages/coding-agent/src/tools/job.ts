@@ -119,11 +119,13 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 		const ownerFilter = ownerId ? { ownerId } : undefined;
 
 		// `list` is a read-only snapshot mode. Replaces the legacy `jobs://` URL.
+		// It never acknowledges deliveries: a snapshot is not a wait, so pending
+		// completions must still reach their owner sessions.
 		if (params.list) {
 			if (params.cancel?.length || params.poll?.length) {
 				throw new ToolError("`list` cannot be combined with `poll` or `cancel`.");
 			}
-			return this.#buildResult(manager, manager.getAllJobs(ownerFilter), []);
+			return this.#buildResult(manager, manager.getAllJobs(ownerFilter), [], { acknowledge: false });
 		}
 
 		const cancelIds = params.cancel ?? [];
@@ -310,6 +312,7 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 			errorText?: string;
 		}[],
 		cancelOutcomes: CancelOutcome[],
+		options?: { acknowledge?: boolean },
 	): AgentToolResult<JobToolDetails> {
 		// Deduplicate by id (cancelled jobs may also appear in the watched set).
 		const seen = new Set<string>();
@@ -320,7 +323,9 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 		});
 		const jobResults = this.#snapshotJobs(uniqueJobs);
 
-		manager.acknowledgeDeliveries(jobResults.filter(j => j.status !== "running").map(j => j.id));
+		if (options?.acknowledge !== false) {
+			manager.acknowledgeDeliveries(jobResults.filter(j => j.status !== "running").map(j => j.id));
+		}
 
 		const completed = jobResults.filter(j => j.status !== "running");
 		const running = jobResults.filter(j => j.status === "running");

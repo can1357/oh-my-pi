@@ -32,6 +32,9 @@ Skills are specialized knowledge. If one matches your task, you MUST read `skill
 {{/each}}
 </skills>
 {{/if}}
+{{#if skillsLazy}}
+{{lazySkillCount}} specialized skills are available but not listed here. Before specialized work, search with `read` path `skill://?q=<keywords>`; read any matching `skill://<name>`.
+{{/if}}
 
 {{#if alwaysApplyRules.length}}
 <generic-rules>

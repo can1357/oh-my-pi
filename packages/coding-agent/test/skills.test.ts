@@ -5,8 +5,8 @@ import * as path from "node:path";
 import { type Skill as CapabilitySkill, skillCapability } from "@pk-nerdsaver-ai/pi-coding-agent/capability/skill";
 import { getCapability } from "@pk-nerdsaver-ai/pi-coding-agent/discovery";
 import { loadSkills, loadSkillsFromDir, type Skill } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/skills";
-import { getAgentDir, setAgentDir } from "@pk-nerdsaver-ai/pi-utils/dirs";
 import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
+import { getAgentDir, setAgentDir } from "@pk-nerdsaver-ai/pi-utils/dirs";
 
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");

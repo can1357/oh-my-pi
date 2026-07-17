@@ -3,7 +3,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { closeDb, initDb, insertMessageStats } from "@pk-nerdsaver-ai/omp-stats/db";
-import { dedupeProjects, getGainDashboardStats, normalizeProjectPath } from "@pk-nerdsaver-ai/omp-stats/gain-aggregator";
+import {
+	dedupeProjects,
+	getGainDashboardStats,
+	normalizeProjectPath,
+} from "@pk-nerdsaver-ai/omp-stats/gain-aggregator";
 import type { MessageStats } from "@pk-nerdsaver-ai/omp-stats/types";
 import { getAgentDir, getStatsDbPath, setAgentDir, TempDir } from "@pk-nerdsaver-ai/pi-utils";
 

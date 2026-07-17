@@ -389,8 +389,8 @@ export class TtsClient {
 		const shouldRef = this.#pending.size > 0;
 		if (shouldRef === this.#refed) return;
 		this.#refed = shouldRef;
-		if (shouldRef) worker.ref();
-		else worker.unref();
+		if (shouldRef) worker.ref?.();
+		else worker.unref?.();
 	}
 
 	#handleMessage(message: TtsWorkerOutbound): void {

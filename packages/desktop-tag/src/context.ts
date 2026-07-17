@@ -4,10 +4,10 @@ import * as path from "node:path";
 
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
 import {
-	BrowserContextError,
-	IxBrowserContextClient,
 	type BrowserContextCaptureOptions,
+	BrowserContextError,
 	type CapturedBrowserContext,
+	IxBrowserContextClient,
 } from "./browser-context";
 import type {
 	Annotation,

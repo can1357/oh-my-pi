@@ -3,7 +3,12 @@ import * as path from "node:path";
 import { Agent, type AgentMessage, type AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { AssistantMessage, Message, ThinkingContent } from "@pk-nerdsaver-ai/pi-ai";
 import { z } from "@pk-nerdsaver-ai/pi-ai";
-import { createMockModel, type MockContent, type MockModel, type MockResponse } from "@pk-nerdsaver-ai/pi-ai/providers/mock";
+import {
+	createMockModel,
+	type MockContent,
+	type MockModel,
+	type MockResponse,
+} from "@pk-nerdsaver-ai/pi-ai/providers/mock";
 import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";

@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { type EditMode, type EditModeSessionLike, resolveEditMode } from "@pk-nerdsaver-ai/pi-coding-agent/utils/edit-mode";
+import {
+	type EditMode,
+	type EditModeSessionLike,
+	resolveEditMode,
+} from "@pk-nerdsaver-ai/pi-coding-agent/utils/edit-mode";
 
 const originalEditVariant = Bun.env.PI_EDIT_VARIANT;
 const originalStrictEditMode = Bun.env.PI_STRICT_EDIT_MODE;

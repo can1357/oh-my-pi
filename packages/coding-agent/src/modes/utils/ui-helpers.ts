@@ -244,6 +244,7 @@ export class UiHelpers {
 					if (options?.populateHistory && message.role === "user" && !isSynthetic) {
 						this.ctx.editor.addToHistory(textContent);
 					}
+					return [userComponent];
 				}
 				break;
 			}

@@ -8,6 +8,7 @@ import type {
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	ToolTier,
 } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { ImageContent, TextContent } from "@pk-nerdsaver-ai/pi-ai";
 import { glob, type SummaryResult, summarizeCode } from "@pk-nerdsaver-ai/pi-natives";
@@ -27,7 +28,7 @@ import {
 import { normalizeToLF } from "../edit/normalize";
 import { isNotebookPath, readEditableNotebookText } from "../edit/notebook";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
-import { InternalUrlRouter } from "../internal-urls";
+import { InternalUrlRouter, resolveLocalUrlToFile } from "../internal-urls";
 import { parseInternalUrl } from "../internal-urls/parse";
 import type { InternalUrl } from "../internal-urls/types";
 import { getLanguageFromPath, type Theme } from "../modes/theme/theme";
@@ -88,6 +89,7 @@ import {
 	formatPathRelativeToCwd,
 	type LineRange,
 	parseLineRanges,
+	pathTargetsSsh,
 	resolveReadPath,
 	splitDelimitedPathEntry,
 	splitInternalUrlSel,
@@ -193,18 +195,9 @@ function recordFullHashlineContext(
 	};
 }
 
-async function readHashlineHeaderContext(
-	session: ToolSession,
-	absolutePath: string,
-	cwd: string,
-): Promise<HashlineHeaderContext> {
+async function readHashlineHeaderContext(session: ToolSession, absolutePath: string): Promise<HashlineHeaderContext> {
 	const fullText = await Bun.file(absolutePath).text();
-	const context = recordFullHashlineContext(
-		session,
-		absolutePath,
-		formatPathRelativeToCwd(absolutePath, cwd),
-		fullText,
-	);
+	const context = recordFullHashlineContext(session, absolutePath, path.basename(absolutePath), fullText);
 	if (!context) throw new ToolError(`Cannot record hashline snapshot for non-absolute path: ${absolutePath}`);
 	return context;
 }
@@ -853,7 +846,10 @@ type SuffixMatchCache = Map<string, { absolutePath: string; displayPath: string 
  */
 export class ReadTool implements AgentTool<typeof readSchema | typeof lightReadSchema, ReadToolDetails> {
 	readonly name = "read";
-	readonly approval = "read" as const;
+	readonly approval = (args: unknown): ToolTier => {
+		const readPath = (args as { path?: unknown }).path;
+		return typeof readPath === "string" && pathTargetsSsh(readPath) ? "exec" : "read";
+	};
 	readonly label = "Read";
 	readonly loadMode = "essential";
 	readonly description: string;
@@ -1579,7 +1575,7 @@ export class ReadTool implements AgentTool<typeof readSchema | typeof lightReadS
 			const tag = await recordFileSnapshot(this.session, absolutePath);
 			if (tag) {
 				recordSeenLinesFromBody(this.session, absolutePath, tag, outputText);
-				outputText = `${formatHashlineHeader(formatPathRelativeToCwd(absolutePath, this.session.cwd), tag)}\n${outputText}`;
+				outputText = `${formatHashlineHeader(path.basename(absolutePath), tag)}\n${outputText}`;
 			}
 		}
 		if (notices.length > 0) {
@@ -2064,7 +2060,15 @@ export class ReadTool implements AgentTool<typeof readSchema | typeof lightReadS
 					`Invalid selector ':${internalTarget.sel}' on '${internalTarget.path}'. Use :N, :N-M, :N+K, :N- (open-ended), a comma-separated list of ranges, :raw, or a range combined with raw (e.g. :raw:50-100).`,
 				);
 			}
-			return this.#handleInternalUrl(internalTarget.path, parsed, signal);
+			const localFilePath = await this.#resolveLocalNonTextFile(internalTarget.path);
+			if (localFilePath === null) {
+				return this.#handleInternalUrl(internalTarget.path, parsed, signal);
+			}
+			// local:// image/binary fast path: read the resolved on-disk file through
+			// the plain filesystem flow (inline image blocks, streaming binary
+			// rejection) instead of the text-only resource contract, which would
+			// UTF-8-decode the bytes into mojibake.
+			readPath = internalTarget.sel !== undefined ? `${localFilePath}:${internalTarget.sel}` : localFilePath;
 		}
 
 		// One suffix-glob memo per read call — archive, sqlite, and plain-path
@@ -2219,10 +2223,12 @@ export class ReadTool implements AgentTool<typeof readSchema | typeof lightReadS
 					throw new ToolError(`Image file too large: ${sizeStr} exceeds ${maxStr} limit.`);
 				}
 				try {
+					// Direct file reads attach the original bytes and magic-detected
+					// mime; model-context normalization owns any resize/re-encode.
 					const imageInput = await loadImageInput({
 						path: readPath,
 						cwd: this.session.cwd,
-						autoResize: this.#autoResizeImages,
+						autoResize: false,
 						maxBytes: MAX_IMAGE_SIZE,
 						resolvedPath: absolutePath,
 						detectedMimeType: mimeType,
@@ -2304,7 +2310,7 @@ export class ReadTool implements AgentTool<typeof readSchema | typeof lightReadS
 						renderedSummary.elidedLines,
 					);
 					const summaryHashContext = displayMode.hashLines
-						? await readHashlineHeaderContext(this.session, absolutePath, this.session.cwd)
+						? await readHashlineHeaderContext(this.session, absolutePath)
 						: undefined;
 					const bodyText = footer ? `${renderedSummary.text}\n\n${footer}` : renderedSummary.text;
 					const modelText = prependHashlineHeader(bodyText, summaryHashContext);
@@ -2430,7 +2436,13 @@ export class ReadTool implements AgentTool<typeof readSchema | typeof lightReadS
 					// ASCII range) — emit a notice instead of mojibake filling the
 					// line budget. `:raw` stays an explicit escape hatch.
 					if (!rawSelector) {
-						for (const line of collectedLines) {
+						// A first line larger than the byte budget never lands in
+						// `collectedLines`, so sniff the streamed preview instead —
+						// without this a NUL-filled video/archive blob would be
+						// UTF-8-decoded and emitted as text.
+						const sniffSources =
+							collectedLines.length === 0 && firstLinePreview ? [firstLinePreview.text] : collectedLines;
+						for (const line of sniffSources) {
 							if (line.includes("\u0000")) {
 								return toolResult<ReadToolDetails>({ resolvedPath: absolutePath, suffixResolution })
 									.text(
@@ -2509,7 +2521,7 @@ export class ReadTool implements AgentTool<typeof readSchema | typeof lightReadS
 								)
 							: await recordFileSnapshot(this.session, absolutePath);
 						if (tag) {
-							hashContext = hashlineHeaderContext(formatPathRelativeToCwd(absolutePath, this.session.cwd), tag);
+							hashContext = hashlineHeaderContext(path.basename(absolutePath), tag);
 						}
 					}
 
@@ -2754,6 +2766,38 @@ export class ReadTool implements AgentTool<typeof readSchema | typeof lightReadS
 	}
 
 	/**
+	 * Resolve a `local://` URL to its on-disk file when the file is a genuine
+	 * image or a NUL-carrying binary, applying the same realpath + containment
+	 * guards as the protocol handler. Text files (and non-file targets) return
+	 * null so they keep flowing through the internal-URL resource contract.
+	 */
+	async #resolveLocalNonTextFile(url: string): Promise<string | null> {
+		if (!/^local:\/\//i.test(url.trim())) return null;
+		let file: { path: string; size: number } | null;
+		try {
+			file = await resolveLocalUrlToFile(url, {
+				cwd: this.session.cwd,
+				settings: this.session.settings,
+				localProtocolOptions: this.session.localProtocolOptions,
+			});
+		} catch (error) {
+			throw new ToolError(error instanceof Error ? error.message : String(error));
+		}
+		if (!file) return null;
+		if (await readImageMetadata(file.path)) return file.path;
+		const sniffBytes = Math.min(file.size, DEFAULT_MAX_BYTES);
+		if (sniffBytes <= 0) return null;
+		const handle = await fs.open(file.path, "r");
+		try {
+			const buffer = Buffer.allocUnsafe(sniffBytes);
+			const { bytesRead } = await handle.read(buffer, 0, sniffBytes, 0);
+			return buffer.subarray(0, bytesRead).includes(0) ? file.path : null;
+		} finally {
+			await handle.close();
+		}
+	}
+
+	/**
 	 * Handle internal URLs (agent://, artifact://, memory://, skill://, rule://, local://, mcp://).
 	 * Supports pagination via offset/limit but rejects them when query extraction is used.
 	 */
@@ -2792,6 +2836,7 @@ export class ReadTool implements AgentTool<typeof readSchema | typeof lightReadS
 			settings: this.session.settings,
 			signal,
 			localProtocolOptions: this.session.localProtocolOptions,
+			skills: this.session.skills,
 		});
 		const details: ReadToolDetails = { resolvedPath: resource.sourcePath, contentType: resource.contentType };
 

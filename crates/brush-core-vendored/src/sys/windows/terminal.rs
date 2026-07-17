@@ -6,9 +6,9 @@ use windows_sys::Win32::{
 	Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
 	System::{
 		Console::{
-			ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
-			ENABLE_PROCESSED_OUTPUT, GetConsoleMode, GetConsoleWindow, GetStdHandle,
-			STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
+			ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_PROCESSED_OUTPUT,
+			GetConsoleMode, GetConsoleWindow, GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+			SetConsoleMode,
 		},
 		Diagnostics::ToolHelp::{
 			CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -35,7 +35,7 @@ impl Drop for Snapshot {
 /// Terminal configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
-	input_mode: u32,
+	input_mode:  u32,
 	output_mode: u32,
 }
 
@@ -53,10 +53,7 @@ impl Config {
 		let input_mode = console_mode(input_handle)?;
 		let output_mode = console_mode(output_handle)?;
 
-		Ok(Self {
-			input_mode,
-			output_mode,
-		})
+		Ok(Self { input_mode, output_mode })
 	}
 
 	/// Applies the terminal settings to the terminal associated with the given

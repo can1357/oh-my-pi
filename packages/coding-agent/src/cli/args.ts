@@ -1,11 +1,11 @@
 /**
  * CLI argument parsing and help display
  */
-import { type Effort, THINKING_EFFORTS } from "@pk-nerdsaver-ai/pi-catalog/effort";
+import { THINKING_EFFORTS } from "@pk-nerdsaver-ai/pi-catalog/effort";
 import { APP_NAME, CONFIG_DIR_NAME, logger } from "@pk-nerdsaver-ai/pi-utils";
 import chalk from "chalk";
-import { parseEffort } from "../thinking";
-import { BUILTIN_TOOL_NAMES } from "../tools/builtin-names";
+import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
+import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
@@ -32,7 +32,7 @@ export interface Args {
 	apiKey?: string;
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
-	thinking?: Effort;
+	thinking?: ConfiguredThinkingLevel;
 	hideThinking?: boolean;
 	advisor?: boolean;
 	continue?: boolean;
@@ -104,8 +104,9 @@ export interface Args {
  */
 const PARSE_DEPS: ParseDeps = {
 	logger,
-	parseEffort,
+	parseConfiguredThinkingLevel,
 	builtinToolNames: BUILTIN_TOOL_NAMES,
+	normalizeToolNames,
 	thinkingEfforts: THINKING_EFFORTS,
 };
 

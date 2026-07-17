@@ -74,7 +74,8 @@ describe("legacy pi compat compiled-mode subpath overrides (issue #3442)", () =>
 			// pi-ai/pi-coding-agent roots intentionally use the legacy compat shims
 			// (they re-attach `Type`, `defineTool`, etc. dropped from the canonical
 			// package surface); typebox is served via TYPEBOX_SHIM_PATH.
-			if (key === "@pk-nerdsaver-ai/pi-ai" || key === "@pk-nerdsaver-ai/pi-coding-agent" || key === "typebox") continue;
+			if (key === "@pk-nerdsaver-ai/pi-ai" || key === "@pk-nerdsaver-ai/pi-coding-agent" || key === "typebox")
+				continue;
 			if (overrides[key] !== `omp-legacy-pi-bundled:${key}`) {
 				missing.push(key);
 			}

@@ -113,7 +113,6 @@ fn unset_name_reference(
 	}
 }
 
-
 fn unset_array_index(
 	shell: &mut Shell<impl brush_core::ShellExtensions>,
 	name: &str,

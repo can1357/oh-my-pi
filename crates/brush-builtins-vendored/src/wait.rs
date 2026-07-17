@@ -113,7 +113,8 @@ impl builtins::Command for WaitCommand {
 			}
 		}
 
-		if let (Some(variable), Some(identifier)) = (&self.variable_to_receive_id, waited_identifier) {
+		if let (Some(variable), Some(identifier)) = (&self.variable_to_receive_id, waited_identifier)
+		{
 			assign_wait_variable(context.shell, variable, identifier)?;
 		}
 
@@ -137,9 +138,7 @@ fn resolve_wait_selectors<SE: brush_core::ShellExtensions>(
 				selectors.push(selector);
 			} else {
 				writeln!(context.stderr(), "{}: no such job: {}", context.command_name, id)?;
-				return Ok(WaitSelectorResolution::Failure(
-					ExecutionExitCode::GeneralError.into(),
-				));
+				return Ok(WaitSelectorResolution::Failure(ExecutionExitCode::GeneralError.into()));
 			}
 		} else if let Ok(pid) = int_utils::parse::<i32>(id, 10) {
 			if context.shell.jobs().contains_process_id(pid) {
@@ -154,9 +153,7 @@ fn resolve_wait_selectors<SE: brush_core::ShellExtensions>(
 			}
 		} else {
 			writeln!(context.stderr(), "{}: no such job: {}", context.command_name, id)?;
-			return Ok(WaitSelectorResolution::Failure(
-				ExecutionExitCode::GeneralError.into(),
-			));
+			return Ok(WaitSelectorResolution::Failure(ExecutionExitCode::GeneralError.into()));
 		}
 	}
 	Ok(WaitSelectorResolution::Selectors(selectors))
@@ -177,7 +174,6 @@ fn assign_wait_variable(
 }
 
 fn job_identifier(job: &Job) -> String {
-	job
-		.representative_pid()
+	job.representative_pid()
 		.map_or_else(|| job.id.to_string(), |pid| pid.to_string())
 }

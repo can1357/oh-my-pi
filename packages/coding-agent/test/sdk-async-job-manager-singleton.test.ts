@@ -5,9 +5,9 @@ import * as path from "node:path";
 import { AsyncJobManager } from "@pk-nerdsaver-ai/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
+import { AgentRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-registry";
 import { createAgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
-import { AgentRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-registry";
 import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("AsyncJobManager singleton across concurrent top-level sessions", () => {
@@ -180,7 +180,9 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 				const primaryList = await primary.getToolByName("job")!.execute("list-a", { list: true });
 				const secondaryList = await secondary.getToolByName("job")!.execute("list-b", { list: true });
 				expect((primaryList.details as { jobs: Array<{ id: string }> }).jobs.map(job => job.id)).toEqual([taskId]);
-				expect((secondaryList.details as { jobs: Array<{ id: string }> }).jobs.map(job => job.id)).toEqual([bashId]);
+				expect((secondaryList.details as { jobs: Array<{ id: string }> }).jobs.map(job => job.id)).toEqual([
+					bashId,
+				]);
 				await manager!.waitForAll();
 				await manager!.drainDeliveries({ timeoutMs: 1_000 });
 				expect(primaryDeliveries).toEqual([taskId]);
@@ -202,9 +204,9 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		const manager = AsyncJobManager.instance();
 		expect(manager).toBeDefined();
 		const gate = Promise.withResolvers<string>();
-		const warn = vi.spyOn(await import("@pk-nerdsaver-ai/pi-utils").then(module => module.logger), "warn").mockImplementation(
-			() => {},
-		);
+		const warn = vi
+			.spyOn(await import("@pk-nerdsaver-ai/pi-utils").then(module => module.logger), "warn")
+			.mockImplementation(() => {});
 		try {
 			manager!.register("task", "vanishing task", async () => gate.promise, {
 				id: "vanished-owner-job",

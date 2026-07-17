@@ -17,6 +17,7 @@ import todoDescription from "../prompts/tools/todo.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import type { SessionEntry } from "../session/session-entries";
 import { framedBlock, renderStatusLine, renderTreeList } from "../tui";
+import { resolveToCwd } from "./path-utils";
 import { formatErrorDetail, PREVIEW_LIMITS } from "./render-utils";
 
 // =============================================================================
@@ -57,21 +58,21 @@ const InitListEntry = type({
 	items: type("string").describe("task content").array().atLeastLength(1).describe("tasks for this phase"),
 });
 
-const TodoOpEntry = type({
+// Flat single-op call shape. The top-level `items` array deliberately has no
+// `atLeastLength(1)`: a stray `items: []` on an op that ignores items (e.g.
+// `view`) must not be a hard schema rejection — length is enforced per-op at
+// runtime (see initPhases/appendItems).
+const todoSchema = type({
 	op: TodoOp,
 	"list?": InitListEntry.array().describe("phased task list (init)"),
 	"task?": type("string").describe("task content"),
 	"phase?": type("string").describe("phase name"),
-	"items?": type("string").describe("task content").array().atLeastLength(1).describe("tasks to append"),
-});
-
-const todoSchema = type({
-	ops: TodoOpEntry.array().atLeastLength(1).describe("ordered todo operations"),
-}).describe("apply ordered todo operations");
+	"items?": type("string").describe("task content").array().describe("tasks to append"),
+}).describe("apply a todo operation");
 
 type TodoParams = TodoSchema;
 type TodoSchema = typeof todoSchema.infer;
-type TodoOpEntryValue = TodoParams["ops"][number];
+type TodoOpEntryValue = TodoParams;
 
 // =============================================================================
 // State helpers
@@ -143,8 +144,10 @@ export const USER_TODO_EDIT_CUSTOM_TYPE = "user_todo_edit";
 
 /**
  * Resolve the target path for `/todo export|import [path]`: strips surrounding
- * quotes, defaults to `todos.md`, appends `todos.md` to directory-style args,
- * and resolves relative paths against the session cwd.
+ * quotes, defaults to `TODO.md`, appends `TODO.md` to directory-style args,
+ * and resolves relative paths against the session cwd. Internal-scheme paths
+ * (`artifact://`, `local://`, ...) are rejected — they are protocol handles,
+ * not filesystem targets.
  *
  * (Restores an export whose callers landed in ee661cb41 without a definition.)
  */
@@ -156,11 +159,11 @@ export function resolveTodoMarkdownPath(rawArgs: string, cwd: string): string {
 	) {
 		target = target.slice(1, -1).trim();
 	}
-	if (!target) target = "todos.md";
+	if (!target) target = "TODO.md";
 	if (target.endsWith("/") || target.endsWith(nodePath.sep)) {
-		target = nodePath.join(target, "todos.md");
+		target = nodePath.join(target, "TODO.md");
 	}
-	return nodePath.isAbsolute(target) ? target : nodePath.resolve(cwd, target);
+	return resolveToCwd(target, cwd);
 }
 
 export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPhase[] {
@@ -427,10 +430,13 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 	}
 }
 
-function applyParams(phases: TodoPhase[], params: TodoParams): { phases: TodoPhase[]; errors: string[] } {
+function applyEntries(
+	phases: TodoPhase[],
+	entries: readonly TodoOpEntryValue[],
+): { phases: TodoPhase[]; errors: string[] } {
 	const errors: string[] = [];
 	let next = phases;
-	for (const entry of params.ops) {
+	for (const entry of entries) {
 		next = applyEntry(next, entry, errors);
 	}
 	normalizeInProgressTask(next);
@@ -440,9 +446,9 @@ function applyParams(phases: TodoPhase[], params: TodoParams): { phases: TodoPha
 /** Apply an array of `todo`-style ops to existing phases. Used by /todo slash command. */
 export function applyOpsToPhases(
 	currentPhases: TodoPhase[],
-	ops: TodoParams["ops"],
+	ops: readonly TodoOpEntryValue[],
 ): { phases: TodoPhase[]; errors: string[] } {
-	return applyParams(clonePhases(currentPhases), { ops });
+	return applyEntries(clonePhases(currentPhases), ops);
 }
 
 // =============================================================================
@@ -594,64 +600,44 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		{
 			caption: "Initial setup (multi-phase)",
 			call: {
-				ops: [
-					{
-						op: "init",
-						list: [
-							{ phase: "Foundation", items: ["Scaffold crate", "Wire workspace"] },
-							{ phase: "Auth", items: ["Port credential store", "Wire OAuth providers"] },
-							{ phase: "Verification", items: ["Run cargo test"] },
-						],
-					},
+				op: "init",
+				list: [
+					{ phase: "Foundation", items: ["Scaffold crate", "Wire workspace"] },
+					{ phase: "Auth", items: ["Port credential store", "Wire OAuth providers"] },
+					{ phase: "Verification", items: ["Run cargo test"] },
 				],
 			},
 		},
 		{
 			caption: "View current state (read-only)",
-			call: {
-				ops: [{ op: "view" }],
-			},
+			call: { op: "view" },
 		},
 		{
 			caption: "Initial setup (single phase)",
 			call: {
-				ops: [
-					{
-						op: "init",
-						list: [{ phase: "Implementation", items: ["Apply fix", "Run tests"] }],
-					},
-				],
+				op: "init",
+				list: [{ phase: "Implementation", items: ["Apply fix", "Run tests"] }],
 			},
 		},
 		{
 			caption: "Complete one task",
-			call: {
-				ops: [{ op: "done", task: "Wire workspace" }],
-			},
+			call: { op: "done", task: "Wire workspace" },
 		},
 		{
 			caption: "Complete a whole phase",
-			call: {
-				ops: [{ op: "done", phase: "Auth" }],
-			},
+			call: { op: "done", phase: "Auth" },
 		},
 		{
 			caption: "Remove all tasks",
-			call: {
-				ops: [{ op: "rm" }],
-			},
+			call: { op: "rm" },
 		},
 		{
 			caption: "Drop one task",
-			call: {
-				ops: [{ op: "drop", task: "Run cargo test" }],
-			},
+			call: { op: "drop", task: "Run cargo test" },
 		},
 		{
 			caption: "Append tasks to a phase",
-			call: {
-				ops: [{ op: "append", phase: "Auth", items: ["Handle retries", "Run tests"] }],
-			},
+			call: { op: "append", phase: "Auth", items: ["Handle retries", "Run tests"] },
 		},
 	];
 	readonly loadMode = "discoverable";
@@ -668,13 +654,13 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	): Promise<AgentToolResult<TodoToolDetails>> {
 		const previousPhases = clonePhases(this.session.getTodoPhases?.() ?? []);
 		// Pure-view calls are reads: no normalization, no state write.
-		const readOnly = params.ops.every(entry => entry.op === "view");
+		const readOnly = params.op === "view";
 		const { phases: updated, errors } = readOnly
 			? { phases: previousPhases, errors: [] as string[] }
-			: applyParams(clonePhases(previousPhases), params);
-		// A batch with any error is discarded wholesale: persisting a
-		// half-applied batch makes the natural retry hit "already exists" for
-		// the ops that did land. State and rendered summary stay at previous.
+			: applyEntries(clonePhases(previousPhases), [params]);
+		// An op with any error is discarded wholesale: persisting a
+		// half-applied update makes the natural retry hit "already exists" for
+		// the parts that did land. State and rendered summary stay at previous.
 		const failed = errors.length > 0;
 		const effective = failed ? previousPhases : updated;
 		const completedTasks = readOnly || failed ? [] : getCompletionTransitions(previousPhases, updated);
@@ -695,14 +681,33 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 // TUI Renderer
 // =============================================================================
 
-type TodoRenderArgs = {
-	ops?: Array<{
-		op?: string;
-		task?: string;
-		phase?: string;
-		items?: string[];
-	}>;
+type TodoRenderEntry = {
+	op?: string;
+	task?: string;
+	phase?: string;
+	items?: string[];
 };
+
+/** Raw render-time args: the flat single-op shape, or the legacy `{ ops: [...] }` batch from old transcripts. */
+type TodoRenderArgs = TodoRenderEntry & {
+	ops?: TodoRenderEntry[];
+};
+
+/**
+ * Normalize raw (possibly streaming-truncated) todo call args to a list of op
+ * entries. Tolerates the flat single-op shape, the legacy `{ ops: [...] }`
+ * batch, non-array `ops` strings surfaced mid-stream by `parseStreamingJson`
+ * (#2005), and non-object entries. Never throws.
+ */
+function normalizeTodoArg(args: TodoRenderArgs | undefined): TodoRenderEntry[] {
+	if (!args || typeof args !== "object") return [];
+	if ("ops" in args && args.ops !== undefined) {
+		if (!Array.isArray(args.ops)) return [];
+		return args.ops.filter((entry): entry is TodoRenderEntry => entry !== null && typeof entry === "object");
+	}
+	if (args.op !== undefined) return [args];
+	return [];
+}
 
 // =============================================================================
 // Phase numbering (display-only)
@@ -816,9 +821,8 @@ function computeTouchedPhases(
 	for (const transition of completedTasks) touched.add(transition.phase);
 	// Phases explicitly named by the ops that ran. `init` replaces the whole
 	// list, so the entire plan is fresh and every phase counts as touched.
-	const ops = Array.isArray(args?.ops) ? args.ops : [];
+	const ops = normalizeTodoArg(args);
 	for (const op of ops) {
-		if (!op || typeof op !== "object") continue;
 		if (op.op === "init") {
 			for (const phase of phases) touched.add(phase.name);
 			break;
@@ -847,19 +851,19 @@ export const todoToolRenderer = {
 	renderCall(args: TodoRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 		// `args` here is the raw partially-parsed JSON from the streaming
 		// tool-call delta and may not satisfy `TodoRenderArgs` at runtime:
-		// `parseStreamingJson` can hand back `{ ops: "[" }` mid-delta, or
-		// entries that are `null` / strings before fields stream. Guard
-		// against non-array `ops` and non-object entries so a malformed
-		// delta never breaks the TUI render loop (#2005).
-		const opsList = Array.isArray(args?.ops) ? args.ops : [];
+		// `parseStreamingJson` can hand back `{ ops: "[" }` mid-delta, a
+		// truncated `{ op: 1 }` before the discriminator string lands, or
+		// entries that are `null` / strings before fields stream. Normalize
+		// leniently so a malformed delta never breaks the TUI render loop
+		// (#2005).
+		const opsList = normalizeTodoArg(args);
 		const ops =
 			opsList.length === 0
 				? ["update"]
-				: opsList.map(entry => {
-						const e = entry && typeof entry === "object" ? entry : ({} as NonNullable<typeof entry>);
-						const parts = [e.op ?? "update"];
-						if (e.task) parts.push(e.task);
-						if (e.phase) parts.push(e.phase);
+				: opsList.map(e => {
+						const parts = [typeof e.op === "string" && e.op ? e.op : "update"];
+						if (typeof e.task === "string" && e.task) parts.push(e.task);
+						if (typeof e.phase === "string" && e.phase) parts.push(e.phase);
 						if (Array.isArray(e.items) && e.items.length) {
 							parts.push(`${e.items.length} item${e.items.length === 1 ? "" : "s"}`);
 						}

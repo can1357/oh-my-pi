@@ -96,6 +96,8 @@ describe("Settings", () => {
 
 		it("exposes all tool calling mode options", () => {
 			const values = getEnumValues("tools.format");
+			// "pi" is fork-local: the sigil-delimited owned dialect
+			// (src/dialect/pi.ts) registered in DIALECT_DEFINITIONS.
 			expect(values).toEqual([
 				"auto",
 				"native",
@@ -106,6 +108,7 @@ describe("Settings", () => {
 				"anthropic",
 				"deepseek",
 				"harmony",
+				"pi",
 				"qwen3",
 				"gemini",
 				"gemma",

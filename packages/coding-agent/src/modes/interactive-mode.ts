@@ -172,6 +172,7 @@ import {
 } from "./loop-limit";
 import * as loopSynthesis from "./loop-synthesis";
 import { OAuthManualInputManager } from "./oauth-manual-input";
+import { countRunningSubagentBadgeAgents, getRunningSubagentBadgeRegistry } from "./running-subagent-badge";
 import type { ObservableSession } from "./session-observer-registry";
 import { SessionObserverRegistry } from "./session-observer-registry";
 import { runProviderSetupWizard } from "./setup-wizard/lazy";
@@ -449,8 +450,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
 	todoPhases: TodoPhase[] = [];
 	hideThinkingBlock = false;
-	pendingImages: ImageContent[] = [];
-	pendingImageLinks: (string | undefined)[] = [];
+	proseOnlyThinking = false;
+	initialChatRendered = false;
+	/** Components rendered for the pending optimistic user message, so a superseding authoritative message can replace them. */
+	#optimisticUserComponents: Component[] | undefined;
 	compactionQueuedMessages: CompactionQueuedMessage[] = [];
 	pendingTools = new Map<string, ToolExecutionHandle>();
 	pendingBashComponents: BashExecutionComponent[] = [];
@@ -637,6 +640,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new StatusContainer();
 		this.todoContainer = new Container();
+		// The loader sits below the todo HUD, so the HUD must report its own
+		// live-region seam — otherwise its rows commit to scrollback as stale
+		// duplicates on short terminals. The whole block is live while populated.
+		(this.todoContainer as Container & NativeScrollbackLiveRegion).getNativeScrollbackLiveRegionStart = () =>
+			this.todoContainer.children.length > 0 ? 0 : undefined;
 		this.subagentContainer = new Container();
 		this.btwContainer = new Container();
 		this.omfgContainer = new Container();
@@ -684,6 +692,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#mountComposer(this.editor);
 
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
+		this.proseOnlyThinking = settings.get("thinking.proseOnly");
 
 		const hookCommands: SlashCommand[] = (
 			this.session.extensionRunner?.getRegisteredCommands(BUILTIN_SLASH_COMMAND_RESERVED_NAMES) ?? []
@@ -709,8 +718,16 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 		}
 
+		// Bind session-backed builtin status descriptions (e.g. `/fast` → "Fast: on")
+		// so the autocomplete picker shows live state instead of the static copy.
+		const builtinCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.map(cmd => {
+			const getTuiAutocompleteDescription = cmd.getTuiAutocompleteDescription;
+			if (!getTuiAutocompleteDescription) return cmd;
+			return { ...cmd, getAutocompleteDescription: () => getTuiAutocompleteDescription({ ctx: this }) };
+		});
+
 		// Store pending commands for init() where file commands are loaded async
-		this.#pendingSlashCommands = [...BUILTIN_SLASH_COMMANDS, ...hookCommands, ...customCommands, ...skillCommandList];
+		this.#pendingSlashCommands = [...builtinCommands, ...hookCommands, ...customCommands, ...skillCommandList];
 
 		this.#uiHelpers = new UiHelpers(this);
 		this.#btwController = new BtwController(this);
@@ -1133,7 +1150,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#goalSuppressNextContinuation) return;
 		if (this.#pendingSubmittedInput) return;
 		if (this.editor.getText().trim().length > 0) return;
-		if ((this.pendingImages?.length ?? 0) > 0) return;
+		if ((this.editor.pendingImages?.length ?? 0) > 0) return;
 		const state = this.session.getGoalModeState();
 		if (!state?.enabled || state.goal.status !== "active") return;
 		const prompt = this.session.goalRuntime.buildContinuationPrompt();
@@ -1152,7 +1169,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (this.#isAutoSubmitBlocked()) return;
 			if (this.#pendingSubmittedInput) return;
 			if (this.editor.getText().trim().length > 0) return;
-			if ((this.pendingImages?.length ?? 0) > 0) return;
+			if ((this.editor.pendingImages?.length ?? 0) > 0) return;
 			const latestState = this.session.getGoalModeState();
 			if (!latestState?.enabled || latestState.goal.status !== "active") return;
 			this.#goalContinuationTurnInFlight = true;
@@ -1370,7 +1387,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			const imageCount = submission.images?.length ?? 0;
 			this.optimisticUserMessageSignature = `${submission.text}\u0000${imageCount}`;
 			this.#pendingSubmissionDispose = this.recordLocalSubmission(submission.text, imageCount);
-			this.addMessageToChat(
+			this.#optimisticUserComponents = this.addMessageToChat(
 				{
 					role: "user",
 					content: [{ type: "text", text: submission.text }, ...(submission.images ?? [])],
@@ -1409,9 +1426,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#stopLoadingAnimation(true);
 		}
 		if (!submission.customType) {
-			this.pendingImages = submission.images ? [...submission.images] : [];
-			this.pendingImageLinks = submission.imageLinks ? [...submission.imageLinks] : [];
-			this.editor.imageLinks = this.pendingImageLinks;
+			this.editor.pendingImages = submission.images ? [...submission.images] : [];
+			this.editor.pendingImageLinks = submission.imageLinks ? [...submission.imageLinks] : [];
+			this.editor.imageLinks = this.editor.pendingImageLinks;
 			this.rebuildChatFromMessages();
 			this.editor.setText(submission.text);
 		}
@@ -1684,7 +1701,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const chipsRow = buildChipsRow(this.#collectComposerChips(), width);
 		const focused = this.focusedAgentId !== undefined;
 		const def = getComposerWorkModeDef(this.getComposerWorkMode());
-		const hasInput = this.editor.getText().trim().length > 0 || this.pendingImages.length > 0;
+		const hasInput = this.editor.getText().trim().length > 0 || this.editor.pendingImages.length > 0;
 		const viewSession = this.viewSession;
 		const streaming = this.collabGuest?.state?.isStreaming === true || viewSession.isStreaming;
 		const railRow = buildRailRow(
@@ -1718,7 +1735,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				});
 			}
 		}
-		const imageCount = this.pendingImages.length;
+		const imageCount = this.editor.pendingImages.length;
 		if (imageCount > 0)
 			chips.push({ label: imageCount === 1 ? "1 image" : `${imageCount} images`, kind: "attached" });
 		return chips;
@@ -1771,7 +1788,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!this.optimisticUserMessageSignature) return;
 		const submission = this.#pendingSubmittedInput;
 		if (!submission || submission.cancelled || submission.customType) return;
-		this.addMessageToChat(
+		this.#optimisticUserComponents = this.addMessageToChat(
 			{
 				role: "user",
 				content: [{ type: "text", text: submission.text }, ...(submission.images ?? [])],
@@ -1780,6 +1797,29 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 			{ imageLinks: submission.imageLinks },
 		);
+	}
+
+	/** Thinking-block visibility actually applied when rendering assistant messages. */
+	get effectiveHideThinkingBlock(): boolean {
+		return this.hideThinkingBlock;
+	}
+
+	clearOptimisticUserMessage(): void {
+		this.optimisticUserMessageSignature = undefined;
+		this.#optimisticUserComponents = undefined;
+	}
+
+	replaceOptimisticUserMessage(message: AgentMessage): void {
+		this.optimisticUserMessageSignature = undefined;
+		this.#pendingSubmissionDispose?.();
+		this.#pendingSubmissionDispose = undefined;
+		if (this.#optimisticUserComponents) {
+			for (const component of this.#optimisticUserComponents) {
+				this.chatContainer.removeChild(component);
+			}
+			this.#optimisticUserComponents = undefined;
+		}
+		this.addMessageToChat(message);
 	}
 
 	#formatTodoLine(todo: TodoItem, prefix: string, matched: boolean): string {
@@ -1932,13 +1972,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		return active ?? nonEmpty[nonEmpty.length - 1];
 	}
 
+	/** Stages rendered below the root header: the active stage plus up to four following ones. */
+	static readonly #TODO_HUD_MAX_STAGES = 5;
+
+	/** Stage header: roman-numbered name (multi-stage only) plus completed/total task progress. */
+	#formatTodoStageHeader(phase: TodoPhase, oneBasedIndex: number, multiStage: boolean, active: boolean): string {
+		const name = multiStage ? formatPhaseDisplayName(phase.name, oneBasedIndex) : phase.name;
+		const done = phase.tasks.filter(task => task.status === "completed" || task.status === "abandoned").length;
+		const header = `${name}  ${done}/${phase.tasks.length}`;
+		return active ? theme.fg("accent", header) : theme.fg("dim", header);
+	}
+
 	#renderTodoList(): void {
 		this.todoContainer.clear();
 		const phases = this.todoPhases.filter(phase => phase.tasks.length > 0);
 		if (phases.length === 0) return;
 		const indent = "  ";
-		const hook = theme.tree.hook;
-		const lines = ["", indent + theme.bold(theme.fg("accent", "Todos"))];
+		const multiStage = phases.length > 1;
+		const activeIdx = Math.max(0, phases.indexOf(this.#getActivePhase(phases) ?? phases[0]));
+		// Root header carries the overall stage progression; a lone stage's
+		// redundant "1/1" is omitted.
+		const progression = multiStage ? theme.fg("dim", `  ${activeIdx + 1}/${phases.length}`) : "";
+		const lines = ["", indent + theme.bold(theme.fg("accent", "Todos")) + progression];
 
 		const activeDescs = this.#getActiveSubagentDescriptions();
 		// A pending todo "lights up" (accent + running glyph) when an in-flight
@@ -1946,32 +2001,36 @@ export class InteractiveMode implements InteractiveModeContext {
 		const isMatched = (todo: TodoItem): boolean =>
 			activeDescs.length > 0 && todoMatchesAnyDescription(todo.content, activeDescs);
 
-		if (!this.todoExpanded) {
-			const activeIdx = phases.indexOf(this.#getActivePhase(phases) ?? phases[0]);
-			const activePhase = phases[activeIdx];
-			if (!activePhase) return;
-			const { visible, hiddenOpenCount } = selectStickyTodoWindow(activePhase.tasks, 5);
-
-			lines.push(
-				`${indent}${theme.fg("accent", `${hook} ${formatPhaseDisplayName(activePhase.name, activeIdx + 1)}`)}`,
-			);
-			visible.forEach((todo, index) => {
-				const prefix = `${indent}${index === 0 ? hook : " "} `;
-				lines.push(this.#formatTodoLine(todo, prefix, isMatched(todo)));
+		const pushTaskRows = (tasks: TodoItem[]): void => {
+			tasks.forEach((todo, index) => {
+				const connector = index === tasks.length - 1 ? theme.tree.last : theme.tree.branch;
+				lines.push(this.#formatTodoLine(todo, `${indent}${connector} `, isMatched(todo)));
 			});
-			if (hiddenOpenCount > 0) {
-				lines.push(theme.fg("muted", `${indent}  ${hook} +${hiddenOpenCount} more`));
-			}
+		};
+
+		if (!this.todoExpanded) {
+			// Active stage expands (open-task sticky window, completed rows slide
+			// out); the following stages collapse to header + progress, capped so
+			// the HUD stays shallow. No overflow rows — the header counts imply
+			// what is hidden.
+			const visiblePhases = phases.slice(activeIdx, activeIdx + InteractiveMode.#TODO_HUD_MAX_STAGES);
+			visiblePhases.forEach((phase, offset) => {
+				const phaseIndex = activeIdx + offset;
+				lines.push(`${indent}${this.#formatTodoStageHeader(phase, phaseIndex + 1, multiStage, offset === 0)}`);
+				if (offset === 0) {
+					const { visible } = selectStickyTodoWindow(phase.tasks, 5);
+					pushTaskRows(visible);
+				}
+			});
 			this.todoContainer.addChild(new Text(lines.join("\n"), 1, 0));
 			return;
 		}
 
 		phases.forEach((phase, phaseIndex) => {
-			lines.push(`${indent}${theme.fg("accent", `${hook} ${formatPhaseDisplayName(phase.name, phaseIndex + 1)}`)}`);
-			phase.tasks.forEach((todo, index) => {
-				const prefix = `${indent}${index === 0 ? hook : " "} `;
-				lines.push(this.#formatTodoLine(todo, prefix, isMatched(todo)));
-			});
+			lines.push(
+				`${indent}${this.#formatTodoStageHeader(phase, phaseIndex + 1, multiStage, phaseIndex === activeIdx)}`,
+			);
+			pushTaskRows(phase.tasks);
 		});
 
 		this.todoContainer.addChild(new Text(lines.join("\n"), 1, 0));
@@ -2275,7 +2334,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		const planFilePath = options?.planFilePath ?? (await this.#getPlanFilePath());
 		const previousTools = this.session.getActiveToolNames();
 		const hasResolveTool = this.session.getToolByName("resolve") !== undefined;
-		const planTools = hasResolveTool ? [...previousTools, "resolve"] : previousTools;
+		// Plan-mode authoring needs `write`/`edit` even when tool discovery hid
+		// them from the initial active set (issue #3165). Only genuine builtins
+		// are force-activated — a same-named custom tool never auto-activates.
+		const planAuthoringTools = ["write", "edit"].filter(
+			name => this.session.getToolByName(name) !== undefined && this.session.isBuiltInTool(name),
+		);
+		const planTools = [...previousTools, ...(hasResolveTool ? ["resolve"] : []), ...planAuthoringTools];
 		const uniquePlanTools = [...new Set(planTools)];
 
 		this.#planModePreviousTools = previousTools;
@@ -3330,17 +3395,27 @@ export class InteractiveMode implements InteractiveModeContext {
 				}
 				// Capture the operator's tier choice and hand it to #approvePlan, which
 				// applies it AFTER #exitPlanMode. #exitPlanMode normally restores
-				// #planModePreviousModelState (the model from before plan mode), so
-				// applying the slider choice any earlier would be silently reverted —
-				// the bug that made "continue with slow" keep executing on the default
-				// model. For compact-context approval, the plan model is kept through
-				// compaction, then a successful compaction transitions to the slider model
-				// (or restores the pre-plan model when no slider choice was made).
-				// `cycle.currentIndex` is exactly that restored model, so any chosen tier
-				// differing from it needs an explicit executionModel — this also covers
-				// leaving the slider on its `default` anchor while planning ran elsewhere.
+				// #planModePreviousModelState (the model + thinking from before plan
+				// mode), so applying the slider choice any earlier would be silently
+				// reverted — the bug that made "continue with slow" keep executing on
+				// the default model. For compact-context approval, the plan model is
+				// kept through compaction, then a successful compaction transitions to
+				// the slider model (or restores the pre-plan model when no slider
+				// choice was made). A tier is a choice only when it differs from that
+				// restore target in model OR thinking (a model-only check would treat
+				// "stay on default" as implicit and lose the tier's configured thinking
+				// override) — so sliding onto the tier the restore lands on anyway
+				// stays implicit, and a hidden slider never pins the lone tier.
+				const restoreState = this.#planModePreviousModelState;
+				const restoreModel = restoreState ? restoreState.model : this.session.model;
+				const restoreThinking = restoreState ? restoreState.thinkingLevel : this.session.thinkingLevel;
+				const selectedTier = slider ? cycle?.models[selectedTierIndex] : undefined;
 				const executionModel =
-					cycle && selectedTierIndex !== cycle.currentIndex ? cycle.models[selectedTierIndex] : undefined;
+					selectedTier &&
+					(!modelsAreEqual(selectedTier.model, restoreModel) ||
+						(selectedTier.explicitThinkingLevel && selectedTier.thinkingLevel !== restoreThinking))
+						? selectedTier
+						: undefined;
 				await this.#approvePlan(latestPlanContent, {
 					planFilePath,
 					title: details.title,
@@ -3948,7 +4023,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleForkCommand();
 	}
 
-	handleMoveCommand(targetPath: string): Promise<void> {
+	handleMoveCommand(targetPath?: string): Promise<void> {
 		return this.#commandController.handleMoveCommand(targetPath);
 	}
 
@@ -4211,6 +4286,19 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleBtwBranchKey(): Promise<boolean> {
 		return this.#btwController.handleBranch();
+	}
+
+	canCopyBtw(): boolean {
+		return this.#btwController.canCopy();
+	}
+
+	handleBtwCopyKey(): Promise<boolean> {
+		return this.#btwController.handleCopy();
+	}
+
+	syncRunningSubagentBadge(): void {
+		const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
+		this.statusLine.setSubagentCount(countRunningSubagentBadgeAgents(registry));
 	}
 
 	async handleBtwBranch(question: string, assistantMessage: AssistantMessage): Promise<void> {

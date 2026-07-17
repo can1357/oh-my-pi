@@ -1,11 +1,4 @@
-import type {
-	ChatAdapter,
-	ChatDraft,
-	ChatMessage,
-	ChatTargetIdentity,
-	IxTransport,
-	PreparedDispatch,
-} from "./types";
+import type { ChatAdapter, ChatDraft, ChatMessage, ChatTargetIdentity, IxTransport, PreparedDispatch } from "./types";
 
 const MAX_READ_MESSAGES = 50;
 
@@ -66,7 +59,8 @@ function parseMessage(value: unknown): ChatMessage {
 	) {
 		throw new MessagingIxError("verify", "IX returned malformed or unbounded message evidence");
 	}
-	const stableId = "stableId" in value.author && typeof value.author.stableId === "string" ? value.author.stableId : undefined;
+	const stableId =
+		"stableId" in value.author && typeof value.author.stableId === "string" ? value.author.stableId : undefined;
 	const sentAt = "sentAt" in value && typeof value.sentAt === "number" ? value.sentAt : undefined;
 	return {
 		providerMessageId: value.providerMessageId,

@@ -4,17 +4,17 @@ import * as path from "node:path";
 import type { AgentSessionGateway } from "./agent-session-gateway";
 import {
 	LOCAL_AGENT_OWNER_PROTOCOL,
-	LocalAgentOwnerProtocolError,
-	MAX_OWNER_FRAME_BYTES,
-	MAX_OWNER_REPLAY_EVENTS,
-	MAX_OWNER_REQUEST_CACHE,
-	MAX_OWNER_TRANSCRIPT_BYTES,
 	type LocalAgentOwnerClientFrame,
 	type LocalAgentOwnerCommand,
+	LocalAgentOwnerProtocolError,
 	type LocalAgentOwnerResponseData,
 	type LocalAgentOwnerServerFrame,
 	type LocalAgentRefSnapshot,
 	type LocalAgentRuntimeDescriptor,
+	MAX_OWNER_FRAME_BYTES,
+	MAX_OWNER_REPLAY_EVENTS,
+	MAX_OWNER_REQUEST_CACHE,
+	MAX_OWNER_TRANSCRIPT_BYTES,
 	type SequencedLocalAgentOwnerEvent,
 } from "./local-agent-owner-types";
 import type { GatewayCommand, GatewayEvent, GatewayResponseData } from "./types";
@@ -74,7 +74,8 @@ export class LocalAgentOwnerServer {
 	#stopping = false;
 
 	constructor(options: LocalAgentOwnerServerOptions) {
-		if (!Number.isSafeInteger(options.ownerEpoch) || options.ownerEpoch < 1) throw new Error("ownerEpoch must be positive");
+		if (!Number.isSafeInteger(options.ownerEpoch) || options.ownerEpoch < 1)
+			throw new Error("ownerEpoch must be positive");
 		this.#options = options;
 		this.#gateway = options.gateway;
 		this.#ownerId = options.ownerId ?? Bun.randomUUIDv7();
@@ -162,11 +163,23 @@ export class LocalAgentOwnerServer {
 		this.#heartbeat = undefined;
 		this.#unsubscribeGateway?.();
 		this.#unsubscribeGateway = undefined;
-		for (const socket of this.#sockets) socket.terminate();
 		this.#sockets.clear();
 		const server = this.#server;
 		this.#server = undefined;
-		await server?.stop(true);
+		// Bun 1.3.x wedge: after any server-initiated `ws.close()`, the promise
+		// from `Server.stop()` (soft or force) never resolves — even with every
+		// client fully closed. `stop(true)` still tears the listener down
+		// synchronously, so bound the await instead of trusting it to settle.
+		const stopped = server?.stop(true);
+		if (stopped) {
+			await Promise.race([
+				stopped,
+				new Promise<void>(resolve => {
+					const grace = setTimeout(resolve, 1_000);
+					grace.unref?.();
+				}),
+			]);
+		}
 		fs.rmSync(this.#options.tokenFilePath, { force: true });
 		this.#token = "";
 	}
@@ -227,7 +240,13 @@ export class LocalAgentOwnerServer {
 			return socket.close(1008, "unauthorized");
 		}
 		socket.data.authenticated = true;
-		socket.send(JSON.stringify({ t: "hello_ok", descriptor: this.descriptor, latestSeq: this.#seq } satisfies LocalAgentOwnerServerFrame));
+		socket.send(
+			JSON.stringify({
+				t: "hello_ok",
+				descriptor: this.descriptor,
+				latestSeq: this.#seq,
+			} satisfies LocalAgentOwnerServerFrame),
+		);
 		const afterSeq = frame.afterSeq ?? 0;
 		const firstSeq = this.#events[0]?.seq ?? this.#seq + 1;
 		if (afterSeq < firstSeq - 1) {
@@ -235,7 +254,8 @@ export class LocalAgentOwnerServer {
 			return;
 		}
 		for (const event of this.#events) {
-			if (event.seq > afterSeq) socket.send(JSON.stringify({ t: "event", ...event } satisfies LocalAgentOwnerServerFrame));
+			if (event.seq > afterSeq)
+				socket.send(JSON.stringify({ t: "event", ...event } satisfies LocalAgentOwnerServerFrame));
 		}
 	}
 
@@ -243,7 +263,8 @@ export class LocalAgentOwnerServer {
 		socket: Bun.ServerWebSocket<OwnerSocketData>,
 		frame: Extract<LocalAgentOwnerClientFrame, { t: "command" }>,
 	): Promise<void> {
-		if (frame.ownerEpoch !== this.#options.ownerEpoch) return this.#sendError(socket, frame.requestId, "stale_epoch", "Owner epoch is stale");
+		if (frame.ownerEpoch !== this.#options.ownerEpoch)
+			return this.#sendError(socket, frame.requestId, "stale_epoch", "Owner epoch is stale");
 		if (this.#stopping) return this.#sendError(socket, frame.requestId, "owner_stopping", "Owner is stopping");
 		if (typeof frame.requestId !== "string" || frame.requestId.length === 0 || frame.requestId.length > 256) {
 			return this.#sendError(socket, "", "invalid", "Invalid request id");
@@ -251,37 +272,69 @@ export class LocalAgentOwnerServer {
 		const fingerprint = commandFingerprint(frame.command);
 		const cached = this.#requests.get(frame.requestId);
 		if (cached) {
-			if (cached.fingerprint !== fingerprint) return this.#sendError(socket, frame.requestId, "invalid", "Request id was reused with different content");
+			if (cached.fingerprint !== fingerprint)
+				return this.#sendError(socket, frame.requestId, "invalid", "Request id was reused with different content");
 			socket.send(JSON.stringify(cached.frame));
 			return;
 		}
 		let response: LocalAgentOwnerServerFrame;
 		try {
 			const data = await this.#runCommand(frame.requestId, frame.command);
-			response = { t: "response", requestId: frame.requestId, ownerEpoch: this.#options.ownerEpoch, ok: true, ...(data === undefined ? {} : { data }) };
+			response = {
+				t: "response",
+				requestId: frame.requestId,
+				ownerEpoch: this.#options.ownerEpoch,
+				ok: true,
+				...(data === undefined ? {} : { data }),
+			};
 		} catch (error) {
-			const protocolError = error instanceof LocalAgentOwnerProtocolError ? error : new LocalAgentOwnerProtocolError("internal", error instanceof Error ? error.message : String(error));
-			response = { t: "response", requestId: frame.requestId, ownerEpoch: this.#options.ownerEpoch, ok: false, code: protocolError.code, error: protocolError.message };
+			const protocolError =
+				error instanceof LocalAgentOwnerProtocolError
+					? error
+					: new LocalAgentOwnerProtocolError("internal", error instanceof Error ? error.message : String(error));
+			response = {
+				t: "response",
+				requestId: frame.requestId,
+				ownerEpoch: this.#options.ownerEpoch,
+				ok: false,
+				code: protocolError.code,
+				error: protocolError.message,
+			};
 		}
 		this.#requests.set(frame.requestId, { fingerprint, frame: response });
-		if (this.#requests.size > this.#requestCacheLimit) this.#requests.delete(this.#requests.keys().next().value as string);
+		if (this.#requests.size > this.#requestCacheLimit)
+			this.#requests.delete(this.#requests.keys().next().value as string);
 		socket.send(JSON.stringify(response));
 	}
 
 	async #runCommand(requestId: string, command: LocalAgentOwnerCommand): Promise<LocalAgentOwnerResponseData> {
 		switch (command.type) {
-			case "status": return this.descriptor;
-			case "list": return [{ ...this.#options.ref }];
+			case "status":
+				return this.descriptor;
+			case "list":
+				return [{ ...this.#options.ref }];
 			case "chat": {
-				if (typeof command.text !== "string" || command.text.trim().length === 0) throw new LocalAgentOwnerProtocolError("invalid", "Chat text is required");
-				await this.#dispatchGateway({ id: requestId, type: "prompt", identity: { channelId: "local-owner", sessionKey: this.#options.sessionId }, message: command.text, streamingBehavior: "steer" });
+				if (typeof command.text !== "string" || command.text.trim().length === 0)
+					throw new LocalAgentOwnerProtocolError("invalid", "Chat text is required");
+				await this.#dispatchGateway({
+					id: requestId,
+					type: "prompt",
+					identity: { channelId: "local-owner", sessionKey: this.#options.sessionId },
+					message: command.text,
+					streamingBehavior: "steer",
+				});
 				return { accepted: true };
 			}
 			case "abort":
-				await this.#dispatchGateway({ id: requestId, type: "abort", identity: { channelId: "local-owner", sessionKey: this.#options.sessionId } });
+				await this.#dispatchGateway({
+					id: requestId,
+					type: "abort",
+					identity: { channelId: "local-owner", sessionKey: this.#options.sessionId },
+				});
 				return { cancelled: true };
 			case "revive":
-				if (!this.#options.onRevive) throw new LocalAgentOwnerProtocolError("not_found", "This owner has no revive handler");
+				if (!this.#options.onRevive)
+					throw new LocalAgentOwnerProtocolError("not_found", "This owner has no revive handler");
 				return this.#options.onRevive();
 			case "gateway":
 				await this.#dispatchGateway(command.command);
@@ -308,8 +361,14 @@ export class LocalAgentOwnerServer {
 		socket: Bun.ServerWebSocket<OwnerSocketData>,
 		frame: Extract<LocalAgentOwnerClientFrame, { t: "read_transcript" }>,
 	): Promise<void> {
-		if (frame.ownerEpoch !== this.#options.ownerEpoch) return this.#sendError(socket, frame.requestId, "stale_epoch", "Owner epoch is stale");
-		if (!Number.isSafeInteger(frame.fromByte) || frame.fromByte < 0 || !Number.isSafeInteger(frame.maxBytes) || frame.maxBytes < 1) {
+		if (frame.ownerEpoch !== this.#options.ownerEpoch)
+			return this.#sendError(socket, frame.requestId, "stale_epoch", "Owner epoch is stale");
+		if (
+			!Number.isSafeInteger(frame.fromByte) ||
+			frame.fromByte < 0 ||
+			!Number.isSafeInteger(frame.maxBytes) ||
+			frame.maxBytes < 1
+		) {
 			return this.#sendError(socket, frame.requestId, "invalid", "Invalid transcript range");
 		}
 		const maxBytes = Math.min(frame.maxBytes, MAX_OWNER_TRANSCRIPT_BYTES);
@@ -318,19 +377,48 @@ export class LocalAgentOwnerServer {
 		try {
 			const file = Bun.file(this.#options.transcriptPath);
 			fileSize = file.size;
-			if (frame.fromByte > fileSize) return this.#sendError(socket, frame.requestId, "invalid", "Transcript offset exceeds file size");
-			bytes = new Uint8Array(await file.slice(frame.fromByte, Math.min(fileSize, frame.fromByte + maxBytes)).arrayBuffer());
+			if (frame.fromByte > fileSize)
+				return this.#sendError(socket, frame.requestId, "invalid", "Transcript offset exceeds file size");
+			bytes = new Uint8Array(
+				await file.slice(frame.fromByte, Math.min(fileSize, frame.fromByte + maxBytes)).arrayBuffer(),
+			);
 		} catch (error) {
-			return this.#sendError(socket, frame.requestId, "not_found", error instanceof Error ? error.message : "Transcript unavailable");
+			return this.#sendError(
+				socket,
+				frame.requestId,
+				"not_found",
+				error instanceof Error ? error.message : "Transcript unavailable",
+			);
 		}
 		const completeLength = bytes.lastIndexOf(10) + 1;
 		const complete = bytes.subarray(0, completeLength);
 		const newSize = frame.fromByte + complete.byteLength;
-		const response: LocalAgentOwnerServerFrame = { t: "transcript", requestId: frame.requestId, ownerEpoch: this.#options.ownerEpoch, text: new TextDecoder().decode(complete), newSize, eof: newSize === fileSize };
+		const response: LocalAgentOwnerServerFrame = {
+			t: "transcript",
+			requestId: frame.requestId,
+			ownerEpoch: this.#options.ownerEpoch,
+			text: new TextDecoder().decode(complete),
+			newSize,
+			eof: newSize === fileSize,
+		};
 		socket.send(JSON.stringify(response));
 	}
 
-	#sendError(socket: Bun.ServerWebSocket<OwnerSocketData>, requestId: string, code: "stale_epoch" | "invalid" | "not_found" | "owner_stopping", error: string): void {
-		socket.send(JSON.stringify({ t: "response", requestId, ownerEpoch: this.#options.ownerEpoch, ok: false, code, error } satisfies LocalAgentOwnerServerFrame));
+	#sendError(
+		socket: Bun.ServerWebSocket<OwnerSocketData>,
+		requestId: string,
+		code: "stale_epoch" | "invalid" | "not_found" | "owner_stopping",
+		error: string,
+	): void {
+		socket.send(
+			JSON.stringify({
+				t: "response",
+				requestId,
+				ownerEpoch: this.#options.ownerEpoch,
+				ok: false,
+				code,
+				error,
+			} satisfies LocalAgentOwnerServerFrame),
+		);
 	}
 }

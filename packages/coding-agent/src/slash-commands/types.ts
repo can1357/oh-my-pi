@@ -1,3 +1,4 @@
+import type { AutocompleteItem } from "@pk-nerdsaver-ai/pi-tui";
 import type { Settings } from "../config/settings";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
@@ -24,6 +25,8 @@ export interface BuiltinSlashCommand {
 	persistInHistory?: boolean;
 	/** TUI-only dynamic status text for command-name autocomplete. Static `description` remains canonical for ACP/help. */
 	getTuiAutocompleteDescription?: (runtime: TuiSlashCommandRuntime) => string | undefined;
+	/** Custom argument completion provider (e.g. /move directory completion). Overrides subcommand-derived completions. */
+	getArgumentCompletions?: (argumentPrefix: string) => AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
 }
 
 /** Parsed slash-command text after stripping the leading "/". */

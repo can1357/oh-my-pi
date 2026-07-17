@@ -32,15 +32,14 @@ export type {
 	KernelShutdownOptions,
 	KernelShutdownResult,
 } from "../kernel-base";
-
-export type { KernelDisplayOutput, PythonStatusEvent } from "./display";
-export { renderKernelDisplay } from "./display";
 export {
 	formatKernelProcessErrorEvidence,
-	mapKernelErrorFrame,
 	type KernelErrorFrame,
 	type KernelExecutionError,
+	mapKernelErrorFrame,
 } from "../kernel-error-evidence";
+export type { KernelDisplayOutput, PythonStatusEvent } from "./display";
+export { renderKernelDisplay } from "./display";
 
 const TRACE_IPC = $flag("PI_PYTHON_IPC_TRACE");
 

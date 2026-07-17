@@ -160,18 +160,24 @@ mod tests {
 	fn null_device_polls_ready() {
 		// Regression: on macOS `poll(/dev/null, POLLIN)` times out forever, so a
 		// `read` with no `-t` deadline hangs. `poll_for_input` must report ready.
-		let Ok(null) = crate::openfiles::null() else { return };
+		let Ok(null) = crate::openfiles::null() else {
+			return;
+		};
 		let ready = poll_for_input(&null, Duration::from_millis(50));
 		assert!(matches!(ready, Ok(true)));
 	}
 
 	#[test]
 	fn null_device_detection_is_specific() {
-		let Ok(null) = std::fs::File::open("/dev/null") else { return };
+		let Ok(null) = std::fs::File::open("/dev/null") else {
+			return;
+		};
 		assert!(is_null_device(null.as_fd()));
 
 		// A regular file is not the null device.
-		let Ok(tmp) = tempfile::NamedTempFile::new() else { return };
+		let Ok(tmp) = tempfile::NamedTempFile::new() else {
+			return;
+		};
 		assert!(!is_null_device(tmp.as_file().as_fd()));
 	}
 }

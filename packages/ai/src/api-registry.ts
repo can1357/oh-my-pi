@@ -27,6 +27,7 @@ const BUILTIN_API_IDS = [
 	"google-generative-ai",
 	"google-gemini-cli",
 	"google-vertex",
+	"google-interactions",
 	"ollama-chat",
 	"cursor-agent",
 	"gitlab-duo-agent",

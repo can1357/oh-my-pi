@@ -7,7 +7,6 @@ import type { LocalModelInitializer } from "@pk-nerdsaver-ai/pi-mnemopi/core";
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
 import {
 	composeRecallQuery,
-	formatCurrentTime,
 	prepareRetentionTranscript,
 	prepareUserRetentionTranscript,
 	truncateRecallQuery,

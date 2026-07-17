@@ -11,7 +11,6 @@ import { EventLoopKeepalive } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { ImageContent } from "@pk-nerdsaver-ai/pi-ai";
 import {
 	$env,
-	APP_NAME,
 	directoryExists,
 	getLogPath,
 	getProjectDir,
@@ -159,6 +158,10 @@ const RPC_BACKGROUND_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 
 function applyDefaultSettingOverrides(settingPaths: SettingPath[], targetSettings: Settings): void {
 	for (const settingPath of settingPaths) {
+		// #3207: the schema default only fills holes — explicitly configured
+		// values (caller, project, --config overlay, or global) must survive
+		// protocol-host startup.
+		if (targetSettings.isConfigured(settingPath)) continue;
 		targetSettings.override(settingPath, getDefault(settingPath));
 	}
 }
@@ -649,7 +652,7 @@ export async function createSessionManager(
 		if (!match) {
 			throw new SessionResolutionError(
 				`Session "${forkSource}" not found.`,
-				`Run \`${APP_NAME} --resume\` without an argument to pick from recent sessions, or \`${APP_NAME}\` to start a new one.`,
+				"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.",
 			);
 		}
 		return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
@@ -667,7 +670,7 @@ export async function createSessionManager(
 		if (!match) {
 			throw new SessionResolutionError(
 				`Session "${sessionArg}" not found.`,
-				`Run \`${APP_NAME} --resume\` without an argument to pick from recent sessions, or \`${APP_NAME}\` to start a new one.`,
+				"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.",
 			);
 		}
 		if (match.scope === "local") {
@@ -963,6 +966,8 @@ interface RunRootCommandDependencies {
 	settings?: Settings;
 	runInteractiveMode?: RunInteractiveMode;
 	forceSetupWizard?: boolean;
+	/** Injectable `--resume` session picker so tests can drive cancel/select flows headlessly. */
+	selectSession?: typeof selectSession;
 }
 
 export async function runRootCommand(
@@ -1209,14 +1214,17 @@ export async function runRootCommand(
 				startInAllScope = true;
 			}
 			pauseStartupWatchdog();
-			const selected = await logger.time("selectSession", selectSession, folderSessions, {
+			const selected = await logger.time("selectSession", deps.selectSession ?? selectSession, folderSessions, {
 				allSessions: preloadedAllSessions,
 				startInAllScope,
 			});
 			resumeStartupWatchdog();
 			if (!selected) {
 				writeStartupNotice(parsedArgs, `${chalk.dim("No session selected")}\n`);
-				return;
+				// Exit instead of returning: startup services (watchdog timers,
+				// auth broker sockets) are already live, so a plain return leaves
+				// the process hanging with no UI attached.
+				process.exit(0);
 			}
 			// Resuming a session from another project: switch the process into that
 			// project's directory and refresh cwd-derived caches before the session is

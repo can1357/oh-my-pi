@@ -1,6 +1,6 @@
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Database } from "bun:sqlite";
 import { getAgentDir, toError } from "@pk-nerdsaver-ai/pi-utils";
 
 const LOCK_SCHEMA = `
@@ -29,6 +29,17 @@ export interface AcquireSessionWriterGuardOptions {
 	readonly transcriptPath: string;
 	readonly lockRoot?: string;
 	readonly busyTimeoutMs?: number;
+	/**
+	 * Behavior when this process already holds the session's writer guard.
+	 *
+	 * - "reject" (default): throw {@link SessionAlreadyOwnedError}, treating an
+	 *   in-process holder exactly like a foreign process. Recovery gates rely on
+	 *   this: acquisition succeeding is proof that no live writer exists.
+	 * - "share": adopt the existing in-process ownership instead of contending
+	 *   through SQLite. The underlying lock (and its open transaction fencing
+	 *   other processes) is released only when every sharing handle releases.
+	 */
+	readonly sameProcessOwner?: "reject" | "share";
 }
 
 export class SessionAlreadyOwnedError extends Error {
@@ -53,21 +64,34 @@ function lockName(sessionId: string): string {
 	return `${hasher.digest("hex")}.db`;
 }
 
+interface GuardLockRecord {
+	readonly dbPath: string;
+	readonly db: Database;
+	holders: number;
+}
+
+/**
+ * Live in-process lock records keyed by lock-db path. Lets an opted-in acquire
+ * share ownership this process already holds instead of dead-locking against
+ * its own open transaction (SQLite reports a sibling connection as plain BUSY).
+ */
+const liveLockRecords = new Map<string, GuardLockRecord>();
+
 class SqliteSessionWriterGuard implements SessionWriterGuardHandle {
 	readonly sessionId: string;
 	readonly transcriptPath: string;
 	readonly guardId: string;
-	#db: Database | undefined;
+	#record: GuardLockRecord | undefined;
 
-	constructor(db: Database, sessionId: string, transcriptPath: string, guardId: string) {
-		this.#db = db;
+	constructor(record: GuardLockRecord, sessionId: string, transcriptPath: string, guardId: string) {
+		this.#record = record;
 		this.sessionId = sessionId;
 		this.transcriptPath = transcriptPath;
 		this.guardId = guardId;
 	}
 
 	get released(): boolean {
-		return this.#db === undefined;
+		return this.#record === undefined;
 	}
 
 	async release(): Promise<void> {
@@ -75,13 +99,16 @@ class SqliteSessionWriterGuard implements SessionWriterGuardHandle {
 	}
 
 	releaseSync(): void {
-		const db = this.#db;
-		if (!db) return;
-		this.#db = undefined;
+		const record = this.#record;
+		if (!record) return;
+		this.#record = undefined;
+		record.holders -= 1;
+		if (record.holders > 0) return;
+		liveLockRecords.delete(record.dbPath);
 		try {
-			db.run("ROLLBACK");
+			record.db.run("ROLLBACK");
 		} finally {
-			db.close();
+			record.db.close();
 		}
 	}
 }
@@ -91,18 +118,36 @@ class SqliteSessionWriterGuard implements SessionWriterGuardHandle {
  *
  * Each session uses a dedicated rollback-journal SQLite database. The returned
  * handle owns a BEGIN IMMEDIATE transaction until release, so process death is
- * fenced by the operating system rather than by a renewable WAL lease.
+ * fenced by the operating system rather than by a renewable WAL lease. Within
+ * one process, `sameProcessOwner: "share"` lets additional handles adopt an
+ * ownership this process already holds (see {@link AcquireSessionWriterGuardOptions}).
  */
-export class SessionWriterGuard {
-	static acquire(options: AcquireSessionWriterGuardOptions): SessionWriterGuardHandle {
+// eslint-disable-next-line @typescript-eslint/no-namespace
+export namespace SessionWriterGuard {
+	export function acquire(options: AcquireSessionWriterGuardOptions): SessionWriterGuardHandle {
 		validateIdentity(options.sessionId, "sessionId");
 		validateIdentity(options.transcriptPath, "transcriptPath");
 		const transcriptPath = path.resolve(options.transcriptPath);
 		const lockRoot = path.resolve(options.lockRoot ?? path.join(getAgentDir(), "session-locks"));
-		fs.mkdirSync(lockRoot, { recursive: true, mode: 0o700 });
 		const dbPath = path.join(lockRoot, lockName(options.sessionId));
-		const db = new Database(dbPath, { create: true, strict: true });
 		const guardId = Bun.randomUUIDv7();
+
+		const owned = liveLockRecords.get(dbPath);
+		if (owned) {
+			if (options.sameProcessOwner !== "share") {
+				throw new SessionAlreadyOwnedError(options.sessionId, transcriptPath);
+			}
+			// Adopt in-process ownership: refresh the guard row inside the
+			// already-held transaction, then hand out a sharing handle.
+			owned.db
+				.query("UPDATE writer_guard SET transcript_path = ?, guard_id = ?, acquired_at = ? WHERE singleton = 1")
+				.run(transcriptPath, guardId, Date.now());
+			owned.holders += 1;
+			return new SqliteSessionWriterGuard(owned, options.sessionId, transcriptPath, guardId);
+		}
+
+		fs.mkdirSync(lockRoot, { recursive: true, mode: 0o700 });
+		const db = new Database(dbPath, { create: true, strict: true });
 		try {
 			db.run(`PRAGMA busy_timeout = ${Math.max(0, Math.min(options.busyTimeoutMs ?? 0, 60_000))}`);
 			db.exec(LOCK_SCHEMA);
@@ -111,7 +156,9 @@ export class SessionWriterGuard {
 			db.query(
 				"INSERT INTO writer_guard(singleton, session_id, transcript_path, guard_id, acquired_at) VALUES (1, ?, ?, ?, ?)",
 			).run(options.sessionId, transcriptPath, guardId, Date.now());
-			return new SqliteSessionWriterGuard(db, options.sessionId, transcriptPath, guardId);
+			const record: GuardLockRecord = { dbPath, db, holders: 1 };
+			liveLockRecords.set(dbPath, record);
+			return new SqliteSessionWriterGuard(record, options.sessionId, transcriptPath, guardId);
 		} catch (error) {
 			try {
 				db.close();

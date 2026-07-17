@@ -664,10 +664,11 @@ export class SessionSelectorComponent extends Container {
 		// place: the dialog competes only with the SessionList's rendered budget,
 		// never the SessionList AND the picker chrome, so the picker frame stays
 		// inside the terminal viewport and the TUI never commits the header into
-		// scrollback (issue #3283).
+		// scrollback (issue #3283). No explicit render request: the delete gesture
+		// arrives through input handling, whose post-dispatch repaint covers the
+		// mount — only closeDialog re-renders explicitly.
 		this.#contentSlot.clear();
 		this.#contentSlot.addChild(this.#confirmationDialog);
-		this.#onRequestRender?.();
 	}
 
 	/**

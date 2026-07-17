@@ -175,7 +175,11 @@ describe("EDIT_MODE_STRATEGIES.matcherEntries", () => {
  * TTSR pipeline does after the fix.
  */
 import { getCapability } from "@pk-nerdsaver-ai/pi-coding-agent/capability";
-import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule, ruleCapability } from "@pk-nerdsaver-ai/pi-coding-agent/capability/rule";
+import {
+	BUILTIN_DEFAULTS_PROVIDER_ID,
+	type Rule,
+	ruleCapability,
+} from "@pk-nerdsaver-ai/pi-coding-agent/capability/rule";
 import type { LoadContext } from "@pk-nerdsaver-ai/pi-coding-agent/capability/types";
 // Register all discovery providers as a side effect.
 import "@pk-nerdsaver-ai/pi-coding-agent/discovery";

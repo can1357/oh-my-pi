@@ -7,7 +7,10 @@ export const TEAMS_SELECTORS = {
 	account: ['[data-tid="app-header"] [data-tenant-id]', '[data-tid="me-control-avatar-trigger"][data-user-id]'],
 	conversation: ['[data-tid="chat-header"][data-thread-id]', '[data-tid="channel-header"][data-channel-id]'],
 	thread: ['[data-tid="thread-pane"][data-thread-id]', '[data-tid="channel-pane"][data-thread-id]'],
-	composer: ['[data-tid="ckeditor"] [contenteditable="true"]', '[data-tid="message-compose-input"][contenteditable="true"]'],
+	composer: [
+		'[data-tid="ckeditor"] [contenteditable="true"]',
+		'[data-tid="message-compose-input"][contenteditable="true"]',
+	],
 	message: ['[data-tid="chat-pane-message"][data-message-id]', '[data-tid="message-body"][data-message-id]'],
 	selfAuthor: ['[data-tid="message-author"][data-is-self="true"]', '[data-author-is-self="true"]'],
 	delivered: ['[data-message-id][data-delivery-state="delivered"]', '[data-message-id][data-delivery-state="read"]'],

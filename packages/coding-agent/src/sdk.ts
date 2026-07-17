@@ -33,7 +33,7 @@ import {
 	Snowflake,
 } from "@pk-nerdsaver-ai/pi-utils";
 import { INTENT_FIELD } from "@pk-nerdsaver-ai/pi-wire";
-import { ADVISOR_READONLY_TOOL_NAMES, discoverWatchdogFiles } from "./advisor";
+import { ADVISOR_READONLY_TOOL_NAMES, discoverWatchdogFiles, formatActiveRepoWatchdogPrompt } from "./advisor";
 import { type AsyncJob, AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { loadCapability } from "./capability";
@@ -65,6 +65,7 @@ import { CursorExecHandlers } from "./cursor";
 import type { AgentExecutionProfile } from "./orchestration/agent-execution-profile";
 import type { CollaborationPolicy } from "./orchestration/collaboration-policy";
 import type { ResolvedToolProfile, ToolSource } from "./tools/tool-profiles";
+import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
@@ -199,6 +200,7 @@ import {
 	WriteTool,
 	warmupLspServers,
 } from "./tools";
+import { normalizeToolNames } from "./tools/builtin-names";
 import { ToolContextStore } from "./tools/context";
 import { getImageGenTools } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
@@ -842,6 +844,7 @@ export interface BuildSystemPromptOptions {
  * as separate entries so providers can cache prompt prefixes without concatenating blocks.
  */
 export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<BuildSystemPromptResult> {
+	const providedTools = options.tools ? new Map(options.tools.map(tool => [tool.name, tool])) : undefined;
 	return await buildSystemPromptInternal({
 		cwd: options.cwd,
 		customPrompt: options.customPrompt,
@@ -849,6 +852,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		contextFiles: options.contextFiles,
 		appendSystemPrompt: options.appendPrompt,
 		inlineToolDescriptors: options.inlineToolDescriptors,
+		tools: providedTools ? buildSystemPromptToolMetadata(providedTools) : undefined,
+		toolNames: options.tools?.map(tool => tool.name),
 	});
 }
 
@@ -1728,9 +1733,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							logMCPLoadErrors(mcpResult.errors);
 							// `tools.discoveryMode: "auto"` was resolved against a registry that
 							// held only built-ins plus persisted placeholder names. Recompute with
-							// the real MCP tool count: a large toolset must flip discovery on
-							// BEFORE the refresh, or activateAll would dump every MCP tool into
-							// the active set with no search_tool_bm25 registered.
+							// the real MCP tool count. `isMCPDiscoveryEnabled()` is the only
+							// readiness signal consumers can poll, so every effect of the flip
+							// (search_tool_bm25 active, registry + discoverable set populated)
+							// must be final before it flips: a pre-flip refresh registers the
+							// tools without activating any (discovery selection resolves empty
+							// while the flag is off), and the post-flip refresh below applies
+							// selection defaults, persistence, and the prompt rebuild.
 							let discoveryEnabled = activation.mcpDiscoveryEnabled;
 							let activateAll = activation.activateAllMCPTools;
 							if (!discoveryEnabled) {
@@ -1744,9 +1753,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 									mcpDiscoveryEnabled = true;
 									discoveryEnabled = true;
 									activateAll = false;
-									liveSession.enableMCPDiscovery();
 									if (!toolRegistry.has("search_tool_bm25")) {
-										const searchTool: Tool | null = SearchToolBm25Tool.createIf(toolSession, {
+										const searchTool: Tool | null = SearchToolBm25Tool.create(toolSession, {
 											toolProfile: options.toolProfile ?? toolSession.toolProfile,
 										});
 										if (searchTool) {
@@ -1763,6 +1771,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 										...liveSession.getActiveToolNames(),
 										"search_tool_bm25",
 									]);
+									await liveSession.refreshMCPTools(mcpResult.tools, { activateAll: false });
+									liveSession.enableMCPDiscovery();
 								}
 							}
 							await liveSession.refreshMCPTools(mcpResult.tools, { activateAll });
@@ -1968,7 +1978,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				const semanticSpawnDiagnostics = validateSpawnSelectorsSemantic({
 					selectors: [...requiredSelectors],
 					resolveStatus: selector => {
-						const resolved = resolveModelRoleValue(selector, modelRegistry.getAvailable() as Model[], {
+						const resolved = resolveModelRoleValue(selector, modelRegistry.getAll() as Model[], {
 							settings,
 							matchPreferences: getModelMatchPreferences(settings),
 							modelRegistry,
@@ -1985,11 +1995,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						};
 					},
 				});
-				if (semanticSpawnDiagnostics.length > 0) {
-					const message = semanticSpawnDiagnostics
+				// Missing credentials are not a startup failure: the selector names a
+				// real model, so the session proceeds and the default-model fallback
+				// (with its allow-list filters) decides what actually runs.
+				const fatalSpawnDiagnostics = semanticSpawnDiagnostics.filter(
+					diagnostic => diagnostic.code !== "unauthenticated-selector",
+				);
+				if (fatalSpawnDiagnostics.length > 0) {
+					const message = fatalSpawnDiagnostics
 						.map(diagnostic => `- [${diagnostic.code}] ${diagnostic.selector ?? ""} ${diagnostic.message}`.trim())
 						.join("\n");
 					throw new Error(`Spawn selector semantic validation failed:\n${message}`);
+				}
+				for (const diagnostic of semanticSpawnDiagnostics) {
+					logger.warn("Spawn selector resolved without configured auth", { selector: diagnostic.selector });
 				}
 			}
 		}
@@ -2054,9 +2073,35 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// Re-resolve the allowed set: extension factories above may have
 			// registered providers/models that weren't visible at startup.
 			const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
-			const defaultModel = pickDefaultAvailableModel(fallbackCandidates.filter(hasModelAuth));
-			if (defaultModel) {
-				model = defaultModel;
+			// Retry `modelRoles.default` against the post-extension set before the
+			// generic fallback: a role pointing at an extension-registered provider
+			// was invisible to the early defaultRoleSpec resolution (issue #3569).
+			if (!hasExplicitModel) {
+				const retriedRoleSpec = resolveModelRoleValue(settings.getModelRole("default"), fallbackCandidates, {
+					settings,
+					matchPreferences: modelMatchPreferences,
+					modelRegistry,
+				});
+				const roleModel = retriedRoleSpec.model;
+				if (roleModel && hasModelAuth(roleModel)) {
+					model = roleModel;
+					modelFallbackMessage = undefined;
+					thinkingLevel = retriedRoleSpec.explicitThinkingLevel
+						? retriedRoleSpec.thinkingLevel
+						: pickInitialThinkingLevel(roleModel);
+					autoThinking = thinkingLevel === AUTO_THINKING;
+					effectiveThinkingLevel = thinkingLevel === AUTO_THINKING ? undefined : thinkingLevel;
+					effectiveThinkingLevel = autoThinking
+						? resolveProvisionalAutoLevel(roleModel)
+						: resolveThinkingLevelForModel(roleModel, effectiveThinkingLevel);
+					preconnectModelHost(roleModel.baseUrl);
+				}
+			}
+			if (!model) {
+				const defaultModel = pickDefaultAvailableModel(fallbackCandidates.filter(hasModelAuth));
+				if (defaultModel) {
+					model = defaultModel;
+				}
 			}
 			if (model) {
 				if (modelFallbackMessage) {
@@ -2192,7 +2237,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			countToolsForAutoDiscovery(toolRegistry.keys()),
 		);
 		if (effectiveDiscoveryMode !== "off" && !toolRegistry.has("search_tool_bm25")) {
-			const searchTool: Tool | null = SearchToolBm25Tool.createIf(toolSession, {
+			const searchTool: Tool | null = SearchToolBm25Tool.create(toolSession, {
 				toolProfile: options.toolProfile ?? toolSession.toolProfile,
 			});
 			if (searchTool) {
@@ -2223,7 +2268,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			emitEvent: event => cursorEventEmitter?.(event),
 		});
 
-		const inlineToolDescriptors = settings.get("inlineToolDescriptors");
+		const inlineToolDescriptorsSetting = settings.get("inlineToolDescriptors");
+		// "auto" inlines only for owned (non-native) tool dialects, which require
+		// the descriptor catalog in-prompt; native tool calling keeps the compact
+		// name list and provider-side schemas.
+		const resolveInlineToolDescriptors = (nativeTools: boolean): boolean =>
+			inlineToolDescriptorsSetting === "on" || (inlineToolDescriptorsSetting === "auto" && !nativeTools);
 		const eagerTasks = settings.get("task.eager") !== "default";
 		const eagerTasksAlways = settings.get("task.eager") === "always";
 		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
@@ -2315,7 +2365,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				alwaysApplyRules,
 				resolvedAppendSystemPrompt: appendPrompt,
 				skillsSettings: settings.getGroup("skills"),
-				inlineToolDescriptors,
+				inlineToolDescriptors: resolveInlineToolDescriptors(nativeTools),
 				nativeTools,
 				intentField,
 				mcpDiscoveryMode: hasDiscoverableTools,
@@ -2355,9 +2405,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		};
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
-		const explicitlyRequestedToolNames = options.toolNames
-			? [...new Set(options.toolNames.map(name => name.toLowerCase()))]
-			: undefined;
+		const explicitlyRequestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 		// When `requireYieldTool` is set, the subagent's prompts and idle-reminders demand a
 		// `yield` call to terminate. The tool registry already includes `yield` (see
 		// `createTools`), but an explicit `toolNames` list would otherwise drop it from the
@@ -2480,7 +2528,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			initialToolNames = filterInitialToolsForDiscoveryAll(initialToolNames, {
 				loadModeOf: name => toolRegistry.get(name)?.loadMode,
 				essentialNames: new Set(computeEssentialBuiltinNames(settings)),
-				explicitlyRequested: new Set(options.toolNames?.map(name => name.toLowerCase()) ?? []),
+				explicitlyRequested: new Set(options.toolNames ? normalizeToolNames(options.toolNames) : []),
 				// Back-compat: persisted activations live under selectedMCPToolNames today (built-in
 				// activation persistence is a follow-up). MCP names won't collide with built-in names.
 				restored: new Set(existingSession.selectedMCPToolNames),
@@ -2742,7 +2790,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				return result;
 			},
 			intentTracing: !!intentField,
-			pruneToolDescriptions: inlineToolDescriptors,
+			pruneToolDescriptions: resolveInlineToolDescriptors(
+				resolveDialect(settings.get("tools.format"), model) === undefined,
+			),
 			dialect: resolveDialect(settings.get("tools.format"), model),
 			abortOnFabricatedToolResult: settings.get("tools.abortOnFabricatedResult"),
 			getToolChoice: () => session?.nextToolChoiceDirective(),
@@ -2805,8 +2855,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			.map(wrapToolWithMetaNotice);
 
 		let advisorWatchdogPrompt: string | undefined;
-		if (watchdogFiles && watchdogFiles.length > 0) {
-			advisorWatchdogPrompt = watchdogFiles.join("\n\n");
+		const advisorWatchdogBlocks = [...(watchdogFiles ?? [])];
+		// Built-in active-repo watchdog: when the cwd sits outside git with exactly
+		// one direct child repo, the advisor gets the same "check under <repo>/"
+		// guardrail the primary system prompt renders — appended after user
+		// watchdog files so user rules stay first.
+		const advisorActiveRepoContext = await resolveActiveRepoContext(cwd);
+		if (advisorActiveRepoContext) {
+			advisorWatchdogBlocks.push(formatActiveRepoWatchdogPrompt(advisorActiveRepoContext));
+		}
+		if (advisorWatchdogBlocks.length > 0) {
+			advisorWatchdogPrompt = advisorWatchdogBlocks.join("\n\n");
 		}
 		// Owned only when this session created the manager; subagents receive a
 		// parent's manager via `options.mcpManager` and MUST NOT disconnect it.
@@ -2814,7 +2873,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		session = new AgentSession({
 			advisorWatchdogPrompt,
 			agent,
-			pruneToolDescriptions: inlineToolDescriptors,
+			pruneToolDescriptions: resolveInlineToolDescriptors(
+				resolveDialect(settings.get("tools.format"), model) === undefined,
+			),
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			sessionManager,
 			settings,
@@ -2844,6 +2905,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				: undefined,
 			modelRegistry,
 			toolRegistry,
+			builtInToolNames,
 			transformContext,
 			onPayload,
 			onResponse,

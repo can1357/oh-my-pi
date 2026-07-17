@@ -13622,6 +13622,35 @@
 			}
 		}
 	},
+	"coreweave": {
+		"openai/gpt-oss-120b": {
+			"id": "openai/gpt-oss-120b",
+			"name": "GPT OSS 120B",
+			"api": "openai-completions",
+			"provider": "coreweave",
+			"baseUrl": "https://api.inference.wandb.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.15,
+				"output": 0.6,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 32768,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high"
+				]
+			}
+		}
+	},
 	"cursor": {
 		"claude-4-sonnet": {
 			"id": "claude-4-sonnet",
@@ -72057,6 +72086,107 @@
 			"maxTokens": 8192
 		}
 	},
+	"sakana": {
+		"fugu": {
+			"id": "fugu",
+			"name": "Fugu",
+			"api": "openai-responses",
+			"provider": "sakana",
+			"baseUrl": "https://api.sakana.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": null,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"xhigh"
+				],
+				"effortMap": {
+					"xhigh": "max"
+				}
+			},
+			"compat": {
+				"includeEncryptedReasoning": false,
+				"streamIdleTimeoutMs": 0
+			}
+		},
+		"fugu-ultra": {
+			"id": "fugu-ultra",
+			"name": "Fugu Ultra",
+			"api": "openai-responses",
+			"provider": "sakana",
+			"baseUrl": "https://api.sakana.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 5,
+				"output": 30,
+				"cacheRead": 0.5,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": null,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"xhigh"
+				],
+				"effortMap": {
+					"xhigh": "max"
+				}
+			},
+			"compat": {
+				"includeEncryptedReasoning": false,
+				"streamIdleTimeoutMs": 0
+			}
+		},
+		"fugu-ultra-20260615": {
+			"id": "fugu-ultra-20260615",
+			"name": "Fugu Ultra 20260615",
+			"api": "openai-responses",
+			"provider": "sakana",
+			"baseUrl": "https://api.sakana.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 5,
+				"output": 30,
+				"cacheRead": 0.5,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": null,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"xhigh"
+				],
+				"effortMap": {
+					"xhigh": "max"
+				}
+			},
+			"compat": {
+				"includeEncryptedReasoning": false,
+				"streamIdleTimeoutMs": 0
+			}
+		}
+	},
 	"synthetic": {
 		"hf:deepseek-ai/DeepSeek-R1": {
 			"id": "hf:deepseek-ai/DeepSeek-R1",
@@ -73991,8 +74121,7 @@
 			"baseUrl": "https://api.code.umans.ai",
 			"reasoning": true,
 			"input": [
-				"text",
-				"image"
+				"text"
 			],
 			"cost": {
 				"input": 0,
@@ -74024,18 +74153,18 @@
 			"baseUrl": "https://api.code.umans.ai",
 			"reasoning": true,
 			"thinking": {
-				"mode": "budget",
+				"mode": "anthropic-budget-effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
 					"high",
 					"xhigh"
-				]
+				],
+				"effortMap": {
+					"xhigh": "max"
+				},
+				"defaultLevel": "high"
 			},
 			"input": [
-				"text",
-				"image"
+				"text"
 			],
 			"cost": {
 				"input": 0,

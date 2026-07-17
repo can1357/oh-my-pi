@@ -179,7 +179,8 @@ impl<SE: extensions::ShellExtensions> Registration<SE> {
 
 	/// Marks this builtin as a transparent wrapper when used as an asynchronous
 	/// background command. The first word argument becomes the launched command,
-	/// and the wrapper itself is skipped so `$!` can refer to the real child PID.
+	/// and the wrapper itself is skipped so `$!` can refer to the real child
+	/// PID.
 	#[must_use]
 	pub const fn transparent_background_wrapper(self) -> Self {
 		Self { transparent_background_wrapper: true, ..self }
@@ -517,10 +518,10 @@ pub trait SimpleCommand {
 pub fn simple_builtin<B: SimpleCommand + Send + Sync, SE: extensions::ShellExtensions>()
 -> Registration<SE> {
 	Registration {
-		execute_func:        exec_simple_builtin::<B, SE>,
-		content_func:        B::get_content,
-		disabled:            false,
-		special_builtin:     false,
+		execute_func: exec_simple_builtin::<B, SE>,
+		content_func: B::get_content,
+		disabled: false,
+		special_builtin: false,
 		declaration_builtin: false,
 		transparent_background_wrapper: false,
 	}
@@ -530,10 +531,10 @@ pub fn simple_builtin<B: SimpleCommand + Send + Sync, SE: extensions::ShellExten
 /// `Command` trait.
 pub fn builtin<B: Command + Send + Sync, SE: extensions::ShellExtensions>() -> Registration<SE> {
 	Registration {
-		execute_func:        exec_builtin::<B, SE>,
-		content_func:        get_builtin_content::<B>,
-		disabled:            false,
-		special_builtin:     false,
+		execute_func: exec_builtin::<B, SE>,
+		content_func: get_builtin_content::<B>,
+		disabled: false,
+		special_builtin: false,
 		declaration_builtin: false,
 		transparent_background_wrapper: false,
 	}
@@ -545,10 +546,10 @@ pub fn builtin<B: Command + Send + Sync, SE: extensions::ShellExtensions>() -> R
 pub fn decl_builtin<B: DeclarationCommand + Send + Sync, SE: extensions::ShellExtensions>()
 -> Registration<SE> {
 	Registration {
-		execute_func:        exec_declaration_builtin::<B, SE>,
-		content_func:        get_builtin_content::<B>,
-		disabled:            false,
-		special_builtin:     false,
+		execute_func: exec_declaration_builtin::<B, SE>,
+		content_func: get_builtin_content::<B>,
+		disabled: false,
+		special_builtin: false,
 		declaration_builtin: true,
 		transparent_background_wrapper: false,
 	}
@@ -566,10 +567,10 @@ pub fn raw_arg_builtin<
 	SE: extensions::ShellExtensions,
 >() -> Registration<SE> {
 	Registration {
-		execute_func:        exec_raw_arg_builtin::<B, SE>,
-		content_func:        get_builtin_content::<B>,
-		disabled:            false,
-		special_builtin:     false,
+		execute_func: exec_raw_arg_builtin::<B, SE>,
+		content_func: get_builtin_content::<B>,
+		disabled: false,
+		special_builtin: false,
 		declaration_builtin: true,
 		transparent_background_wrapper: false,
 	}

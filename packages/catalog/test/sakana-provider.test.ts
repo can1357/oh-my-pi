@@ -7,7 +7,10 @@ import { getEnvApiKey } from "@pk-nerdsaver-ai/pi-ai/stream";
 import { Effort } from "@pk-nerdsaver-ai/pi-catalog/effort";
 import { resolveProviderModels } from "@pk-nerdsaver-ai/pi-catalog/model-manager";
 import { getBundledModels } from "@pk-nerdsaver-ai/pi-catalog/models";
-import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@pk-nerdsaver-ai/pi-catalog/provider-models/descriptors";
+import {
+	DEFAULT_MODEL_PER_PROVIDER,
+	PROVIDER_DESCRIPTORS,
+} from "@pk-nerdsaver-ai/pi-catalog/provider-models/descriptors";
 import { sakanaModelManagerOptions } from "@pk-nerdsaver-ai/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, ModelSpec, ResolvedOpenAIResponsesCompat } from "@pk-nerdsaver-ai/pi-catalog/types";
 

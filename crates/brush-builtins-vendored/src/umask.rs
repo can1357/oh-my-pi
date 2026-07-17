@@ -76,7 +76,10 @@ cfg_if! {
 	 }
 }
 
-fn parse_symbolic_umask(mode: &str, current_umask: u32) -> Result<nix::sys::stat::mode_t, brush_core::Error> {
+fn parse_symbolic_umask(
+	mode: &str,
+	current_umask: u32,
+) -> Result<nix::sys::stat::mode_t, brush_core::Error> {
 	let mut umask = current_umask & 0o777;
 	let mut chars = mode.chars().peekable();
 	let mut saw_clause = false;
@@ -125,7 +128,7 @@ fn parse_symbolic_umask(mode: &str, current_umask: u32) -> Result<nix::sys::stat
 				'=' => {
 					umask |= who_bits;
 					umask &= !perm_bits;
-				}
+				},
 				_ => unreachable!(),
 			}
 
@@ -136,7 +139,7 @@ fn parse_symbolic_umask(mode: &str, current_umask: u32) -> Result<nix::sys::stat
 						return Err(ErrorKind::InvalidUmask.into());
 					}
 					break;
-				}
+				},
 				Some('+' | '-' | '=') => continue,
 				Some(_) => return Err(ErrorKind::InvalidUmask.into()),
 				None => break,

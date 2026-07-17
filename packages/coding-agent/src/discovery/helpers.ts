@@ -18,6 +18,7 @@ import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { parseThinkingLevel } from "../thinking";
+import { normalizeToolNames } from "../tools/builtin-names";
 
 import { buildPluginDirRoot } from "./plugin-dir-roots";
 
@@ -260,15 +261,13 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	if (toolsSpecified) {
 		// Preserve explicit empty arrays — do not collapse `tools: []` to omission.
 		if (Array.isArray(frontmatter.tools)) {
-			tools = frontmatter.tools
-				.filter((item): item is string => typeof item === "string")
-				.map(tool => tool.toLowerCase());
+			tools = normalizeToolNames(frontmatter.tools.filter((item): item is string => typeof item === "string"));
 		} else if (typeof frontmatter.tools === "string") {
-			tools = parseCSV(frontmatter.tools).map(tool => tool.toLowerCase());
+			tools = normalizeToolNames(parseCSV(frontmatter.tools));
 		} else if (frontmatter.tools == null) {
 			tools = [];
 		} else {
-			tools = parseArrayOrCSV(frontmatter.tools)?.map(tool => tool.toLowerCase()) ?? [];
+			tools = normalizeToolNames(parseArrayOrCSV(frontmatter.tools) ?? []);
 		}
 	}
 

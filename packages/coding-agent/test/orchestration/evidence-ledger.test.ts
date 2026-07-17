@@ -1,8 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-	EvidenceLedger,
-	EVIDENCE_RECORD_VERSION,
-} from "../../src/orchestration/evidence-ledger";
+import { EVIDENCE_RECORD_VERSION, EvidenceLedger } from "../../src/orchestration/evidence-ledger";
 
 const CONTRACT_ID = "contract-abc";
 

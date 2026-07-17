@@ -84,10 +84,14 @@ export function summaryWithPreservedOffloadTrace(
 
 export interface BuildSessionContextOptions {
 	/**
-	 * Build the display transcript instead of the LLM context. By default this
-	 * preserves every path entry with compactions inline; set
-	 * `collapseCompactedHistory` for the live TUI surface to render only the
-	 * latest compacted tail.
+	 * Build the display transcript instead of the LLM context: every path entry
+	 * is preserved in chronological order with compactions inline, and
+	 * display-only bookkeeping (reset tracking, cache-miss markers) is emitted.
+	 */
+	transcript?: boolean;
+	/**
+	 * In transcript mode, render only the latest compacted tail instead of the
+	 * full inline history — used by the live TUI surface.
 	 */
 	collapseCompactedHistory?: boolean;
 }

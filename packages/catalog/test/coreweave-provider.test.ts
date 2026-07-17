@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { getBundledModels } from "@pk-nerdsaver-ai/pi-catalog/models";
-import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@pk-nerdsaver-ai/pi-catalog/provider-models/descriptors";
+import {
+	DEFAULT_MODEL_PER_PROVIDER,
+	PROVIDER_DESCRIPTORS,
+} from "@pk-nerdsaver-ai/pi-catalog/provider-models/descriptors";
 import {
 	coreWeaveModelManagerOptions,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,

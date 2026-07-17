@@ -67,12 +67,20 @@ export type CollabFrame =
 			t: "welcome";
 			proto: number;
 			header: SessionHeader;
-			entries: SessionEntry[];
+			/**
+			 * Number of transcript entries that follow in the `snapshot-chunk`
+			 * train. The welcome itself never carries the transcript inline — a
+			 * multi-MB single-frame welcome spent the guest's first-welcome
+			 * timeout on the default relay (#3144).
+			 */
+			entryCount: number;
 			state: CollabSessionState;
 			agents: AgentSnapshot[];
 			/** True when this peer joined through a read-only (view) link. */
 			readOnly?: boolean;
 	  }
+	/** Transcript snapshot train following a welcome; only the last chunk carries `final: true`. */
+	| { t: "snapshot-chunk"; entries: SessionEntry[]; final: boolean }
 	| { t: "entry"; entry: SessionEntry }
 	| { t: "event"; event: AgentSessionEvent }
 	| { t: "state"; state: CollabSessionState }

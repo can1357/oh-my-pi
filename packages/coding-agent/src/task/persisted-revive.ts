@@ -126,38 +126,51 @@ export function createPersistedSubagentReviverFactory(
 			// re-discovery), exactly as the executor does for live subagents.
 			const mcpManager = MCPManager.instance();
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
-			const { session } = await createAgentSession({
-				cwd: ctx.session.sessionManager.getCwd(),
-				authStorage: ctx.authStorage,
-				modelRegistry: ctx.modelRegistry,
-				settings: createSubagentSettings(
-					ctx.settings,
-					init.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
-				),
-				sessionManager: reopened,
-				agentId: ref.id,
-				agentDisplayName: ref.displayName,
-				parentTaskPrefix: ref.id,
-				parentAgentId: ref.parentId,
-				taskDepth,
-				executionProfile: init.executionProfile,
-				toolProfile,
-				collaborationPolicy,
-				toolNames: activeToolNames,
-				outputSchema: init.outputSchema,
-				requireYieldTool: true,
-				maxModelRequestsPerRun: init.fusionSidekick ? init.maxModelRequestsPerRun : undefined,
-				systemPrompt: () => [init.systemPrompt],
-				// Old files predate persisted spawns: deny re-spawning rather than let
-				// createAgentSession default to wildcard ("*").
-				spawns: init.spawns ?? "",
-				hasUI: false,
-				enableLsp: ctx.enableLsp,
-				enableMCP: !mcpManager,
-				mcpManager,
-				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
-				clientBridge: ctx.session.clientBridge,
-			});
+			// `reopened` holds the session's single-writer guard. If session
+			// creation throws or returns a session built on a different manager,
+			// close it here or the guard is held until process exit.
+			let created: Awaited<ReturnType<typeof createAgentSession>>;
+			try {
+				created = await createAgentSession({
+					cwd: ctx.session.sessionManager.getCwd(),
+					authStorage: ctx.authStorage,
+					modelRegistry: ctx.modelRegistry,
+					settings: createSubagentSettings(
+						ctx.settings,
+						init.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
+					),
+					sessionManager: reopened,
+					agentId: ref.id,
+					agentDisplayName: ref.displayName,
+					parentTaskPrefix: ref.id,
+					parentAgentId: ref.parentId,
+					taskDepth,
+					executionProfile: init.executionProfile,
+					toolProfile,
+					collaborationPolicy,
+					toolNames: activeToolNames,
+					outputSchema: init.outputSchema,
+					requireYieldTool: true,
+					maxModelRequestsPerRun: init.fusionSidekick ? init.maxModelRequestsPerRun : undefined,
+					systemPrompt: () => [init.systemPrompt],
+					// Old files predate persisted spawns: deny re-spawning rather than let
+					// createAgentSession default to wildcard ("*").
+					spawns: init.spawns ?? "",
+					hasUI: false,
+					enableLsp: ctx.enableLsp,
+					enableMCP: !mcpManager,
+					mcpManager,
+					customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+					clientBridge: ctx.session.clientBridge,
+				});
+			} catch (error) {
+				await reopened.close();
+				throw error;
+			}
+			const { session } = created;
+			if (session.sessionManager !== reopened) {
+				await reopened.close();
+			}
 			// Clamp the active set to the persisted names intersected with the
 			// reconstructed source-aware ceiling. Unknown names are ignored.
 			session.setCollaborationPolicy(collaborationPolicy);

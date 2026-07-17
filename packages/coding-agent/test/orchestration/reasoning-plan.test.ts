@@ -7,8 +7,8 @@ import {
 	parseReasoningPlan,
 	REASONING_PLAN_VERSION,
 } from "../../src/orchestration/reasoning-plan";
-import { TASK_CONTRACT_VERSION } from "../../src/orchestration/task-contract";
 import type { TaskContractV1 } from "../../src/orchestration/task-contract";
+import { TASK_CONTRACT_VERSION } from "../../src/orchestration/task-contract";
 
 function makeContract(overrides?: Partial<TaskContractV1>): TaskContractV1 {
 	return Object.freeze({

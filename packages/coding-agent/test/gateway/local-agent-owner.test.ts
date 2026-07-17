@@ -1,14 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import { TempDir } from "@pk-nerdsaver-ai/pi-utils";
-import type { AgentSessionEventListener } from "../../src/session/agent-session";
-import {
-	createAgentSessionGateway,
-	type AgentSessionGatewayHost,
-} from "../../src/gateway/agent-session-gateway";
+import { type AgentSessionGatewayHost, createAgentSessionGateway } from "../../src/gateway/agent-session-gateway";
 import { LocalAgentOwnerClient } from "../../src/gateway/local-agent-owner-client";
 import { LocalAgentOwnerServer } from "../../src/gateway/local-agent-owner-server";
 import type { LocalAgentRefSnapshot, SequencedLocalAgentOwnerEvent } from "../../src/gateway/local-agent-owner-types";
+import type { AgentSessionEventListener } from "../../src/session/agent-session";
 
 const servers = new Set<LocalAgentOwnerServer>();
 const clients = new Set<LocalAgentOwnerClient>();
@@ -52,7 +49,10 @@ function createHost(): { host: AgentSessionGatewayHost; prompts: string[]; abort
 	};
 }
 
-async function startOwner(temp: TempDir, replayLimit = 8): Promise<{
+async function startOwner(
+	temp: TempDir,
+	replayLimit = 8,
+): Promise<{
 	server: LocalAgentOwnerServer;
 	client: LocalAgentOwnerClient;
 	prompts: string[];
@@ -99,7 +99,9 @@ describe("LocalAgentOwner protocol", () => {
 
 		const badTokenPath = temp.join("bad.token");
 		await fs.writeFile(badTokenPath, "0".repeat(64));
-		const attacker = new LocalAgentOwnerClient({ descriptor: { ...owner.server.descriptor, tokenFilePath: badTokenPath } });
+		const attacker = new LocalAgentOwnerClient({
+			descriptor: { ...owner.server.descriptor, tokenFilePath: badTokenPath },
+		});
 		clients.add(attacker);
 		await expect(attacker.connect()).rejects.toThrow(/rejected|failed/);
 	});

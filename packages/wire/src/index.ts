@@ -335,11 +335,19 @@ export type HostFrame =
 			t: "welcome";
 			proto: number;
 			header: SessionHeader;
-			entries: SessionEntry[];
+			/**
+			 * Number of transcript entries that follow in the `snapshot-chunk`
+			 * train. The welcome itself never carries the transcript inline — a
+			 * multi-MB single-frame welcome spent the guest's first-welcome
+			 * timeout on the default relay (#3144).
+			 */
+			entryCount: number;
 			state: SessionState;
 			agents: AgentSnapshot[];
 			readOnly?: boolean;
 	  }
+	/** Transcript snapshot train following a welcome; only the last chunk carries `final: true`. */
+	| { t: "snapshot-chunk"; entries: SessionEntry[]; final: boolean }
 	| { t: "entry"; entry: SessionEntry }
 	| { t: "event"; event: AgentEvent }
 	| { t: "state"; state: SessionState }
@@ -363,7 +371,7 @@ export type HostFrame =
 export type WireFrame = GuestFrame | HostFrame;
 
 /** Wire protocol version carried in `hello`; the host rejects mismatches. */
-export const COLLAB_PROTO = 1;
+export const COLLAB_PROTO = 2;
 
 /** Parameter key used for intent tracing (e.g. prompt explanation/reasoning) */
 export const INTENT_FIELD = "i";

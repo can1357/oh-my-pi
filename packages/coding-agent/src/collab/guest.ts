@@ -20,6 +20,7 @@ import type { AgentHubRemote } from "../modes/components/agent-hub";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
+import type { SessionEntry } from "../session/session-entries";
 import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
 import { setSessionTerminalTitle } from "../utils/title-generator";
 import { importRoomKey } from "./crypto";
@@ -64,6 +65,8 @@ export class CollabGuestLink {
 	#applyChain: Promise<void> = Promise.resolve();
 	#welcomed = false;
 	#left = false;
+	/** Welcome whose snapshot-chunk train is still in flight (#3144). */
+	#pendingSnapshot?: { frame: WelcomeFrame; entries: SessionEntry[] };
 	/** base64url write token from a full link; absent when joined via a view link. */
 	#writeToken: string | undefined;
 	/** True when the host marked this peer read-only (view link). */
@@ -144,6 +147,7 @@ export class CollabGuestLink {
 		this.#socket = socket;
 
 		const firstWelcome = Promise.withResolvers<void>();
+		const welcomeSeen = Promise.withResolvers<void>();
 		let joined = false;
 
 		socket.onOpen = () => {
@@ -157,14 +161,45 @@ export class CollabGuestLink {
 				writeToken: this.#writeToken,
 			});
 		};
+		// Apply the fully-assembled snapshot; pre-join failures reject the join
+		// instead of dying silently in the apply chain.
+		const completeSnapshot = async (frame: WelcomeFrame, entries: SessionEntry[]): Promise<void> => {
+			try {
+				await this.#applyWelcome(frame, entries, joined);
+			} catch (err) {
+				if (!joined) {
+					firstWelcome.reject(err instanceof Error ? err : new Error(String(err)));
+					return;
+				}
+				throw err;
+			}
+			if (!joined) {
+				joined = true;
+				firstWelcome.resolve();
+			}
+		};
 		socket.onFrame = frame => {
 			this.#applyChain = this.#applyChain
 				.then(async () => {
 					if (frame.t === "welcome") {
-						await this.#applyWelcome(frame, joined);
-						if (!joined) {
-							joined = true;
-							firstWelcome.resolve();
+						// The small welcome clears the first-welcome timeout on
+						// arrival — the multi-MB transcript follows in the
+						// snapshot-chunk train and must not spend it (#3144).
+						welcomeSeen.resolve();
+						if (frame.entryCount === 0) {
+							await completeSnapshot(frame, []);
+							return;
+						}
+						this.#pendingSnapshot = { frame, entries: [] };
+						return;
+					}
+					if (frame.t === "snapshot-chunk") {
+						const pending = this.#pendingSnapshot;
+						if (!pending) return;
+						pending.entries.push(...frame.entries);
+						if (frame.final) {
+							this.#pendingSnapshot = undefined;
+							await completeSnapshot(pending.frame, pending.entries);
 						}
 						return;
 					}
@@ -193,9 +228,17 @@ export class CollabGuestLink {
 			() => firstWelcome.reject(new Error("timed out waiting for the host's welcome")),
 			WELCOME_TIMEOUT_MS,
 		);
+		// The timeout guards only the wait for the (small) welcome frame — the
+		// chunked transcript that follows may legitimately take longer (#3144).
+		void welcomeSeen.promise.then(() => clearTimeout(timeout));
+		// Registered before the first welcome applies so registry consumers
+		// (running-subagents badge) already resolve the guest mirror registry
+		// while the snapshot's agent list lands.
+		this.#ctx.collabGuest = this;
 		try {
 			await firstWelcome.promise;
 		} catch (err) {
+			this.#ctx.collabGuest = undefined;
 			this.#left = true;
 			socket.close();
 			this.#socket = null;
@@ -203,8 +246,6 @@ export class CollabGuestLink {
 		} finally {
 			clearTimeout(timeout);
 		}
-
-		this.#ctx.collabGuest = this;
 	}
 
 	/** User-initiated leave (or post-disconnect cleanup): restore the previous session. */
@@ -224,11 +265,11 @@ export class CollabGuestLink {
 		this.#socket?.send({ t: "abort" });
 	}
 
-	/** Write the welcome snapshot to the replica file and (re)load it through the resume machinery. */
-	async #applyWelcome(frame: WelcomeFrame, isResync: boolean): Promise<void> {
+	/** Write the assembled snapshot to the replica file and (re)load it through the resume machinery. */
+	async #applyWelcome(frame: WelcomeFrame, entries: SessionEntry[], isResync: boolean): Promise<void> {
 		if (this.#left) return;
 		const replicaPath = path.join(getConfigRootDir(), "collab", `${this.#roomId}.jsonl`);
-		const lines = [frame.header, ...frame.entries].map(entry => JSON.stringify(entry)).join("\n");
+		const lines = [frame.header, ...entries].map(entry => JSON.stringify(entry)).join("\n");
 		await Bun.write(replicaPath, `${lines}\n`);
 
 		// Resume sequence (selector-controller.handleResumeSession) minus
@@ -236,11 +277,13 @@ export class CollabGuestLink {
 		// SessionManager still adopts the header cwd for display/relativization.
 		this.#clearTransientUi();
 		this.#clearAgentMirror();
+		this.#ctx.syncRunningSubagentBadge?.();
 		await this.#ctx.session.switchSession(replicaPath);
 		this.state = frame.state;
 		this.#applyHostState(frame.state);
 		this.#ctx.resetObserverRegistry();
 		this.#applyAgentSnapshots(frame.agents);
+		this.#ctx.syncRunningSubagentBadge?.();
 		this.#assistantStreamSynced = false;
 		setSessionTerminalTitle(frame.state.sessionName ?? frame.header.title, frame.state.cwd);
 		this.#ctx.chatContainer.clear();
@@ -290,6 +333,7 @@ export class CollabGuestLink {
 				break;
 			case "agents":
 				this.#applyAgentSnapshots(frame.agents);
+				this.#ctx.syncRunningSubagentBadge?.();
 				break;
 			case "transcript": {
 				const resolve = this.#pendingTranscripts.get(frame.reqId);
@@ -425,6 +469,7 @@ export class CollabGuestLink {
 		this.#ctx.statusLine.setCollabStatus(null);
 		this.#flushPendingTranscripts();
 		this.#clearAgentMirror();
+		this.#ctx.syncRunningSubagentBadge?.();
 		this.#ctx.resetObserverRegistry();
 		this.#clearTransientUi();
 		// Replica file stays on disk: it is a valid session file outside the

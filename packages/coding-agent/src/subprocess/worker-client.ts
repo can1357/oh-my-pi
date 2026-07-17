@@ -49,10 +49,13 @@ export interface WorkerHandle<Inbound, Outbound> {
  * keeps the parent event loop alive while an idle worker never blocks exit.
  */
 export interface RefCountedWorkerHandle<Inbound, Outbound> extends WorkerHandle<Inbound, Outbound> {
-	/** Re-reference the subprocess so a pending request keeps the parent event loop alive. */
-	ref(): void;
-	/** Drop the reference once the worker is idle so it never blocks process exit. */
-	unref(): void;
+	/**
+	 * Re-reference the subprocess so a pending request keeps the parent event
+	 * loop alive. Optional: in-process test fakes have no subprocess to pin.
+	 */
+	ref?(): void;
+	/** Drop the reference once the worker is idle so it never blocks process exit. Optional (see {@link ref}). */
+	unref?(): void;
 }
 
 /** The raw spawned subprocess plus the parent-side fan-out sets. */

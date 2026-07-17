@@ -8,6 +8,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getPluginsLockfile, getPluginsNodeModules, getPluginsPackageJson, isEnoent } from "@pk-nerdsaver-ai/pi-utils";
 import { getConfigDirPaths } from "../../config";
+import { resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { installLegacyPiSpecifierShim } from "./legacy-pi-compat";
 import { readSupportedPluginManifest } from "./manifest";
 import { normalizePluginRuntimeConfig } from "./runtime-config";
@@ -28,7 +29,10 @@ installLegacyPiSpecifierShim();
  * `LoadContext.home`).
  */
 async function loadRuntimeConfig(home?: string): Promise<PluginRuntimeConfig> {
-	const lockPath = getPluginsLockfile(home);
+	return loadRuntimeConfigAt(getPluginsLockfile(home));
+}
+
+async function loadRuntimeConfigAt(lockPath: string): Promise<PluginRuntimeConfig> {
 	try {
 		return normalizePluginRuntimeConfig(await Bun.file(lockPath).json());
 	} catch (err) {
@@ -66,76 +70,111 @@ async function loadProjectOverrides(cwd: string): Promise<ProjectPluginOverrides
 export async function getEnabledPlugins(cwd: string, opts: { home?: string } = {}): Promise<InstalledPlugin[]> {
 	const { home } = opts;
 
-	const nodeModulesPath = getPluginsNodeModules(home);
-	if (!fs.existsSync(nodeModulesPath)) {
-		return [];
+	interface PluginRootPaths {
+		scope: "user" | "project";
+		nodeModulesPath: string;
+		pkgJsonPath: string;
+		lockPath: string;
 	}
 
-	let depsKeys: string[] = [];
-	const pkgJsonPath = getPluginsPackageJson(home);
-	try {
-		const pkg: { dependencies?: Record<string, string> } = await Bun.file(pkgJsonPath).json();
-		depsKeys = Object.keys(pkg.dependencies ?? {});
-	} catch (err) {
-		// Linked-only setups may have no `<plugins>/package.json` yet — that's
-		// fine, the lockfile still records the link.
-		if (!isEnoent(err)) throw err;
-	}
-
-	const runtimeConfig = await loadRuntimeConfig(home);
-	const projectOverrides = await loadProjectOverrides(cwd);
-
-	// Union: dependencies (npm/marketplace installs) ∪ runtime-config plugins
-	// (links + already-recorded installs). Set preserves first-seen order,
-	// putting deps before link-only entries for deterministic output.
-	const names = new Set<string>(depsKeys);
-	for (const name of Object.keys(runtimeConfig.plugins ?? {})) {
-		names.add(name);
-	}
-
-	const plugins: InstalledPlugin[] = [];
-	for (const name of names) {
-		const pluginPath = path.join(nodeModulesPath, name);
-		const pluginPkgPath = path.join(pluginPath, "package.json");
-		let pluginPkg: { version: string; omp?: PluginManifest; pi?: PluginManifest };
-		try {
-			pluginPkg = await Bun.file(pluginPkgPath).json();
-		} catch (err) {
-			// Lockfile entry without a corresponding node_modules tree means the
-			// link was deleted out from under us; skip silently.
-			if (isEnoent(err)) continue;
-			throw err;
-		}
-
-		const manifest = await readSupportedPluginManifest(pluginPath, pluginPkg);
-		if (!manifest) {
-			// Not an OMP/Pi-compatible plugin, skip. Codex plugins with
-			// `.codex-plugin/plugin.json` are accepted for sub-discovery parity.
-			continue;
-		}
-
-		const runtimeState = runtimeConfig.plugins[name];
-
-		// Check if disabled globally
-		if (runtimeState && !runtimeState.enabled) {
-			continue;
-		}
-
-		// Check if disabled in project
-		if (projectOverrides.disabled?.includes(name)) {
-			continue;
-		}
-
-		// Resolve enabled features (project overrides take precedence)
-		const enabledFeatures = projectOverrides.features?.[name] ?? runtimeState?.enabledFeatures ?? null;
-		plugins.push({
-			name,
-			version: pluginPkg.version,
-			path: pluginPath,
-			manifest,
-			enabledFeatures,
-			enabled: true,
+	// Project-scope installs live under the nearest project's `<config>/plugins`
+	// root (resolved the same way the marketplace installer picks its project
+	// registry) and shadow user-scope installs of the same name.
+	const roots: PluginRootPaths[] = [];
+	const projectRegistryPath = await resolveActiveProjectRegistryPath(cwd);
+	if (projectRegistryPath) {
+		const projectPluginsDir = path.dirname(projectRegistryPath);
+		roots.push({
+			scope: "project",
+			nodeModulesPath: path.join(projectPluginsDir, "node_modules"),
+			pkgJsonPath: path.join(projectPluginsDir, "package.json"),
+			lockPath: path.join(projectPluginsDir, "omp-plugins.lock.json"),
 		});
+	}
+	roots.push({
+		scope: "user",
+		nodeModulesPath: getPluginsNodeModules(home),
+		pkgJsonPath: getPluginsPackageJson(home),
+		lockPath: getPluginsLockfile(home),
+	});
+
+	const projectOverrides = await loadProjectOverrides(cwd);
+	const plugins: InstalledPlugin[] = [];
+	const seen = new Set<string>();
+
+	for (const root of roots) {
+		if (!fs.existsSync(root.nodeModulesPath)) {
+			continue;
+		}
+
+		let depsKeys: string[] = [];
+		try {
+			const pkg: { dependencies?: Record<string, string> } = await Bun.file(root.pkgJsonPath).json();
+			depsKeys = Object.keys(pkg.dependencies ?? {});
+		} catch (err) {
+			// Linked-only setups may have no `<plugins>/package.json` yet — that's
+			// fine, the lockfile still records the link.
+			if (!isEnoent(err)) throw err;
+		}
+
+		const runtimeConfig = await loadRuntimeConfigAt(root.lockPath);
+
+		// Union: dependencies (npm/marketplace installs) ∪ runtime-config plugins
+		// (links + already-recorded installs). Set preserves first-seen order,
+		// putting deps before link-only entries for deterministic output.
+		const names = new Set<string>(depsKeys);
+		for (const name of Object.keys(runtimeConfig.plugins ?? {})) {
+			names.add(name);
+		}
+
+		for (const name of names) {
+			if (seen.has(name)) {
+				continue;
+			}
+			const pluginPath = path.join(root.nodeModulesPath, name);
+			const pluginPkgPath = path.join(pluginPath, "package.json");
+			let pluginPkg: { version: string; omp?: PluginManifest; pi?: PluginManifest };
+			try {
+				pluginPkg = await Bun.file(pluginPkgPath).json();
+			} catch (err) {
+				// Lockfile entry without a corresponding node_modules tree means the
+				// link was deleted out from under us; skip silently.
+				if (isEnoent(err)) continue;
+				throw err;
+			}
+
+			const manifest = await readSupportedPluginManifest(pluginPath, pluginPkg);
+			if (!manifest) {
+				// Not an OMP/Pi-compatible plugin, skip. Codex plugins with
+				// `.codex-plugin/plugin.json` are accepted for sub-discovery parity.
+				continue;
+			}
+
+			const runtimeState = runtimeConfig.plugins[name];
+
+			// Check if disabled globally
+			if (runtimeState && !runtimeState.enabled) {
+				continue;
+			}
+
+			// Check if disabled in project
+			if (projectOverrides.disabled?.includes(name)) {
+				continue;
+			}
+
+			// Resolve enabled features (project overrides take precedence)
+			const enabledFeatures = projectOverrides.features?.[name] ?? runtimeState?.enabledFeatures ?? null;
+			seen.add(name);
+			plugins.push({
+				name,
+				version: pluginPkg.version,
+				path: pluginPath,
+				manifest,
+				enabledFeatures,
+				enabled: true,
+				scope: root.scope,
+			});
+		}
 	}
 
 	return plugins;

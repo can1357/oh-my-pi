@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
-import { fetchLiteLLMRichModels, litellmModelManagerOptions } from "@pk-nerdsaver-ai/pi-catalog/provider-models/openai-compat";
+import {
+	fetchLiteLLMRichModels,
+	litellmModelManagerOptions,
+} from "@pk-nerdsaver-ai/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@pk-nerdsaver-ai/pi-catalog/types";
 
 const ORIGINAL_LITELLM_BASE_URL = Bun.env.LITELLM_BASE_URL;

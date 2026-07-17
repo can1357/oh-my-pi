@@ -1,10 +1,10 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getAgentDir, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
 import type { InteractiveModeContext } from "@pk-nerdsaver-ai/pi-coding-agent/modes/types";
 import { executeBuiltinSlashCommand } from "@pk-nerdsaver-ai/pi-coding-agent/slash-commands/builtin-registry";
+import { getAgentDir, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
 import {
 	clearSpeechHardStop,
 	enableSpeechHardStop,
@@ -91,9 +91,7 @@ describe("/pk-speak slash command", () => {
 		expect(store.enabled).toBe(false);
 		expect(harness.set).toHaveBeenCalledWith("speech.enabled", false);
 		expect(isSpeechHardStopped(agentDir)).toBe(true);
-		expect(harness.showStatus).toHaveBeenCalledWith(
-			"pk-speak stopped: speech disabled and playback cleared.",
-		);
+		expect(harness.showStatus).toHaveBeenCalledWith("pk-speak stopped: speech disabled and playback cleared.");
 		expect(harness.setText).toHaveBeenCalledWith("");
 	});
 

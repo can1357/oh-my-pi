@@ -116,6 +116,13 @@ export interface InstalledPlugin {
 	enabledFeatures: string[] | null;
 	/** Whether the plugin is enabled */
 	enabled: boolean;
+	/**
+	 * Settings scope the install belongs to. Installs and links live under the
+	 * per-user plugins root (`<plugins>/node_modules`), so enumeration always
+	 * yields `"user"` today; discovery consumers thread it through as the
+	 * extension root's level.
+	 */
+	scope: "user" | "project";
 }
 
 // =============================================================================

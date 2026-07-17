@@ -7,7 +7,6 @@ use std::{
 
 use brush_parser::ast::{self, CommandPrefixOrSuffixItem};
 use itertools::Itertools;
-
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -30,7 +29,7 @@ struct PipelineExecutionContext<'a, SE: extensions::ShellExtensions> {
 	/// Process group ID for spawned processes.
 	process_group_id: Option<i32>,
 	/// Whether this command is part of a multi-command pipeline.
-	in_pipeline:       bool,
+	in_pipeline:      bool,
 }
 
 /// Information about an expanded external command launch.
@@ -262,7 +261,6 @@ fn ensure_not_cancelled(params: &ExecutionParameters) -> Result<(), error::Error
 	Ok(())
 }
 
-
 #[derive(Clone, Debug, Default)]
 /// Policy for how to manage spawned external processes.
 pub enum ProcessGroupPolicy {
@@ -483,8 +481,8 @@ fn unwrap_transparent_background_wrapper(pipeline: &ast::Pipeline) -> Option<ast
 
 	Some(ast::Pipeline {
 		timed: pipeline.timed.clone(),
-		bang: pipeline.bang,
-		seq: vec![ast::Command::Simple(unwrapped)],
+		bang:  pipeline.bang,
+		seq:   vec![ast::Command::Simple(unwrapped)],
 	})
 }
 
@@ -729,7 +727,6 @@ async fn spawn_pipeline_processes(
 		if pipeline_len > 1 {
 			cmd_params.disable_command_output_marking();
 		}
-
 
 		// Install pipes.
 		if let Some(Some(reader)) = pipe_readers.pop() {
@@ -1020,7 +1017,7 @@ impl Execute for ast::CoprocessCommand {
 			let pipeline_context = PipelineExecutionContext {
 				shell:            commands::ShellForCommand::ParentShell(&mut child_shell),
 				process_group_id: None,
-				in_pipeline:       false,
+				in_pipeline:      false,
 			};
 			let spawn_result = body
 				.execute_in_pipeline(pipeline_context, child_params)
@@ -1544,12 +1541,11 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 				commands::ShellForCommand::ParentShell(parent_shell)
 			};
 
-			let context =
-				PipelineExecutionContext {
-					shell,
-					process_group_id: context.process_group_id,
-					in_pipeline: context.in_pipeline,
-				};
+			let context = PipelineExecutionContext {
+				shell,
+				process_group_id: context.process_group_id,
+				in_pipeline: context.in_pipeline,
+			};
 
 			match execute_command(context, params, cmd_name, assignments, args).await {
 				Ok(result) => Ok(result),
@@ -1968,10 +1964,12 @@ pub(crate) async fn setup_redirect(
 						ast::IoFileRedirectKind::DuplicateInput => 0,
 						ast::IoFileRedirectKind::DuplicateOutput => 1,
 						_ => {
-							return Err(error::ErrorKind::InternalError(format!(
-								"unexpected redirect kind for file descriptor target: {kind:?}"
-							))
-							.into());
+							return Err(
+								error::ErrorKind::InternalError(format!(
+									"unexpected redirect kind for file descriptor target: {kind:?}"
+								))
+								.into(),
+							);
 						},
 					};
 
@@ -1991,10 +1989,12 @@ pub(crate) async fn setup_redirect(
 						ast::IoFileRedirectKind::DuplicateInput => 0,
 						ast::IoFileRedirectKind::DuplicateOutput => 1,
 						_ => {
-							return Err(error::ErrorKind::InternalError(format!(
-								"unexpected redirect kind for duplicate target: {kind:?}"
-							))
-							.into());
+							return Err(
+								error::ErrorKind::InternalError(format!(
+									"unexpected redirect kind for duplicate target: {kind:?}"
+								))
+								.into(),
+							);
 						},
 					};
 
@@ -2066,10 +2066,12 @@ pub(crate) async fn setup_redirect(
 							params.open_files.set_fd(fd_num, target_file);
 						},
 						_ => {
-							return Err(error::ErrorKind::InternalError(format!(
-								"process substitution used with invalid redirect kind: {kind:?}"
-							))
-							.into());
+							return Err(
+								error::ErrorKind::InternalError(format!(
+									"process substitution used with invalid redirect kind: {kind:?}"
+								))
+								.into(),
+							);
 						},
 					}
 				},
@@ -2211,7 +2213,6 @@ fn setup_process_substitution(
 			.await;
 	});
 
-
 	Ok((candidate_fd_num, target_file))
 }
 
@@ -2223,10 +2224,9 @@ fn setup_process_substitution(
 // function returns. Concrete buffer sizes:
 //
 //   * Linux:    64 KiB default, growable via `F_SETPIPE_SZ` up to
-//               `/proc/sys/fs/pipe-max-size` (1 MiB default).
+//     `/proc/sys/fs/pipe-max-size` (1 MiB default).
 //   * macOS:    16-64 KiB, no `F_SETPIPE_SZ` equivalent.
-//   * Windows:  ~4 KiB (`CreatePipe(nSize = 0)`), no portable knob to
-//               raise it.
+//   * Windows:  ~4 KiB (`CreatePipe(nSize = 0)`), no portable knob to raise it.
 //
 // We keep the `F_SETPIPE_SZ` fast path for Linux (avoids a thread spawn
 // for the common in-process case) but fall through to a detached writer

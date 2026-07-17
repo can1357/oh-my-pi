@@ -31,13 +31,22 @@
 
 import * as path from "node:path";
 import { parseArgs } from "node:util";
-import { type Api, AuthStorage, completeSimple, Effort, type Model, SqliteAuthCredentialStore, type Tool, type ToolCall } from "@pk-nerdsaver-ai/pi-ai";
+import {
+	type Api,
+	AuthStorage,
+	completeSimple,
+	Effort,
+	type Model,
+	SqliteAuthCredentialStore,
+	type Tool,
+	type ToolCall,
+} from "@pk-nerdsaver-ai/pi-ai";
 import { type GeneratedProvider, getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
 import { getAgentDbPath } from "@pk-nerdsaver-ai/pi-utils";
 import { z } from "zod/v4";
 import {
-	changelogPaths,
 	type ChangelogDocument,
+	changelogPaths,
 	type NumberedLine,
 	parseChangelog,
 	parseItems,
@@ -143,12 +152,14 @@ interface RewrittenSection {
 }
 
 const REWRITE_RESPONSE = z.object({
-	sections: z.array(
-		z.object({
-			category: z.enum(["Breaking Changes", "Added", "Changed", "Fixed", "Removed"]),
-			items: z.array(z.string()),
-		})
-	).default([]),
+	sections: z
+		.array(
+			z.object({
+				category: z.enum(["Breaking Changes", "Added", "Changed", "Fixed", "Removed"]),
+				items: z.array(z.string()),
+			}),
+		)
+		.default([]),
 });
 
 const REWRITE_PARAMETERS = {
@@ -200,7 +211,10 @@ function validateRewrite(args: Record<string, unknown>): RewrittenSection[] {
 }
 
 function normalizeRewriteItem(text: string): string[] {
-	const lines = text.trim().split("\n").map(l => l.trimEnd());
+	const lines = text
+		.trim()
+		.split("\n")
+		.map(l => l.trimEnd());
 	if (lines.length === 0) return [];
 	const first = lines[0] ?? "";
 	const content = first.startsWith("- ") ? first.slice(2) : first.startsWith("* ") ? first.slice(2) : first;
@@ -212,7 +226,11 @@ function normalizeRewriteItem(text: string): string[] {
 	return out;
 }
 
-async function requestRewrite(model: RewriteModel, packageName: string, unreleasedBody: string): Promise<RewrittenSection[]> {
+async function requestRewrite(
+	model: RewriteModel,
+	packageName: string,
+	unreleasedBody: string,
+): Promise<RewrittenSection[]> {
 	const userText = `Package: \`${packageName}\`
 
 Original \`[Unreleased]\` section body:
@@ -239,7 +257,9 @@ Consolidate and rewrite this content into user-visible release notes. Keep all p
 			continue;
 		}
 
-		const call = response.content.find((content): content is ToolCall => content.type === "toolCall" && content.name === "rewrite");
+		const call = response.content.find(
+			(content): content is ToolCall => content.type === "toolCall" && content.name === "rewrite",
+		);
 		if (!call) {
 			lastError = "model returned no structured tool call";
 			continue;
@@ -248,7 +268,6 @@ Consolidate and rewrite this content into user-visible release notes. Keep all p
 			return validateRewrite(call.arguments);
 		} catch (error) {
 			lastError = error instanceof Error ? error.message : String(error);
-			continue;
 		}
 	}
 	throw new Error(`rewrite call failed for ${packageName}: ${lastError}`);
@@ -278,11 +297,13 @@ interface RunResult {
 }
 
 function applyRewrite(section: ReleaseSection, sections: RewrittenSection[]): void {
-	section.subsections = sections.map(sec => {
-		const rawLines = sec.items.flatMap(normalizeRewriteItem);
-		const lines: NumberedLine[] = rawLines.map(text => ({ text, lineNumber: 0 }));
-		return { title: sec.category, lines };
-	}).filter(sub => sub.lines.length > 0);
+	section.subsections = sections
+		.map(sec => {
+			const rawLines = sec.items.flatMap(normalizeRewriteItem);
+			const lines: NumberedLine[] = rawLines.map(text => ({ text, lineNumber: 0 }));
+			return { title: sec.category, lines };
+		})
+		.filter(sub => sub.lines.length > 0);
 }
 
 async function run(options: RunOptions): Promise<RunResult> {
@@ -301,40 +322,35 @@ async function run(options: RunOptions): Promise<RunResult> {
 			const changelogPath = paths[i];
 			if (!changelogPath) continue;
 
-			try {
-				const absolutePath = path.join(repoRoot, changelogPath);
-				const content = await Bun.file(absolutePath).text();
-				const document = parseChangelog(content);
-				const section = unreleasedSection(document);
-				if (!section) continue;
+			const absolutePath = path.join(repoRoot, changelogPath);
+			const content = await Bun.file(absolutePath).text();
+			const document = parseChangelog(content);
+			const section = unreleasedSection(document);
+			if (!section) continue;
 
-				const originalCount = section.subsections.reduce((sum, sub) => sum + parseItems(sub.lines).length, 0);
-				if (originalCount === 0) continue;
+			const originalCount = section.subsections.reduce((sum, sub) => sum + parseItems(sub.lines).length, 0);
+			if (originalCount === 0) continue;
 
-				const unreleasedBody = renderChangelog({ prefixLines: [], sections: [section] })
-					.replace(/^## \[Unreleased\]\n?/, "")
-					.trim();
+			const unreleasedBody = renderChangelog({ prefixLines: [], sections: [section] })
+				.replace(/^## \[Unreleased\]\n?/, "")
+				.trim();
 
-				const rewritten = await requestRewrite(model, changelogPath, unreleasedBody);
-				applyRewrite(section, rewritten);
-				const next = renderChangelog(document);
-				if (next === content) continue;
+			const rewritten = await requestRewrite(model, changelogPath, unreleasedBody);
+			applyRewrite(section, rewritten);
+			const next = renderChangelog(document);
+			if (next === content) continue;
 
-				const rewrittenCount = rewritten.reduce((sum, sec) => sum + sec.items.length, 0);
-				if (options.write) {
-					await Bun.write(absolutePath, next);
-				}
-
-				results[i] = {
-					path: changelogPath,
-					originalCount,
-					rewrittenCount,
-					sections: rewritten,
-				};
-			} catch (error) {
-				// Bubble errors from workers
-				throw error;
+			const rewrittenCount = rewritten.reduce((sum, sec) => sum + sec.items.length, 0);
+			if (options.write) {
+				await Bun.write(absolutePath, next);
 			}
+
+			results[i] = {
+				path: changelogPath,
+				originalCount,
+				rewrittenCount,
+				sections: rewritten,
+			};
 		}
 	}
 
@@ -447,4 +463,4 @@ if (import.meta.main) {
 	await main();
 }
 
-export { applyRewrite, collectEntries, run, type RunResult, unreleasedSection, validateRewrite };
+export { applyRewrite, collectEntries, type RunResult, run, unreleasedSection, validateRewrite };

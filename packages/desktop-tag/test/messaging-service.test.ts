@@ -5,12 +5,11 @@ import { MessagingService } from "../src/messaging/service";
 import type {
 	ApprovalBroker,
 	ChatAdapter,
-	ChatDraft,
-	SendApprovalRequest,
 	Clock,
 	IxOperation,
 	IxTransport,
 	SendApproval,
+	SendApprovalRequest,
 } from "../src/messaging/types";
 
 const clock: Clock = { now: () => 1_000 };
@@ -92,7 +91,16 @@ describe("MessagingService", () => {
 			],
 		]);
 		const broker: ApprovalBroker = { request: async draft => approvalFor(draft) };
-		const service = new MessagingService({ adapters: [adapter], transport, broker, clock, id: (() => { let n = 0; return () => `id-${++n}`; })() });
+		const service = new MessagingService({
+			adapters: [adapter],
+			transport,
+			broker,
+			clock,
+			id: (() => {
+				let n = 0;
+				return () => `id-${++n}`;
+			})(),
+		});
 		const draft = await service.prepare({ target, body: "hello" });
 
 		// When
@@ -135,7 +143,13 @@ describe("MessagingService", () => {
 		};
 		const transport = new RecordingTransport([prepared, []]);
 		const broker: ApprovalBroker = { request: async draft => approvalFor(draft) };
-		const service = new MessagingService({ adapters: [adapter], transport, broker, clock, id: () => crypto.randomUUID() });
+		const service = new MessagingService({
+			adapters: [adapter],
+			transport,
+			broker,
+			clock,
+			id: () => crypto.randomUUID(),
+		});
 		const draft = await service.prepare({ target, body: "hello" });
 
 		// When

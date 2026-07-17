@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { applyEligibleNestedPatches, mergeIsolatedChanges } from "@pk-nerdsaver-ai/pi-coding-agent/task/isolation-runner";
+import {
+	applyEligibleNestedPatches,
+	mergeIsolatedChanges,
+} from "@pk-nerdsaver-ai/pi-coding-agent/task/isolation-runner";
 import type { SingleResult } from "@pk-nerdsaver-ai/pi-coding-agent/task/types";
 import * as worktreeModule from "@pk-nerdsaver-ai/pi-coding-agent/task/worktree";
 

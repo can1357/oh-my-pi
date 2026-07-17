@@ -1,11 +1,10 @@
 //! Process management
 
-use futures::FutureExt;
 use std::io::Write;
-
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 
+use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::{error, openfiles::OpenFile, sys};
@@ -26,16 +25,16 @@ pub(crate) type WaitableChildProcess = std::pin::Pin<
 pub struct ChildProcess {
 	/// A waitable future that will yield the results of a child process's
 	/// execution.
-	exec_future: WaitableChildProcess,
+	exec_future:       WaitableChildProcess,
 	/// Tracks whether this process has already been reaped.
-	reaped:      bool,
+	reaped:            bool,
 	/// If available, the process ID of the child.
-	pid:         Option<sys::process::ProcessId>,
+	pid:               Option<sys::process::ProcessId>,
 	/// If available, the process group ID of the child.
-	pgid:        Option<sys::process::ProcessId>,
+	pgid:              Option<sys::process::ProcessId>,
 	/// Windows handle duplicated from the child process for safe termination.
 	#[cfg(windows)]
-	kill_handle: Option<OwnedHandle>,
+	kill_handle:       Option<OwnedHandle>,
 	completion_marker: Option<CompletionMarker>,
 }
 
@@ -89,7 +88,8 @@ impl ChildProcess {
 
 	/// Waits for the process to exit.
 	///
-	/// If a cancellation token is provided and triggered, the process will be killed.
+	/// If a cancellation token is provided and triggered, the process will be
+	/// killed.
 	pub async fn wait(
 		&mut self,
 		cancel_token: Option<CancellationToken>,
@@ -215,15 +215,7 @@ fn duplicate_handle(handle: RawHandle) -> Option<OwnedHandle> {
 	// `out_handle` is a valid out pointer checked below before ownership is
 	// transferred to OwnedHandle.
 	let ok = unsafe {
-		DuplicateHandle(
-			current,
-			handle,
-			current,
-			&mut out_handle,
-			0,
-			0,
-			DUPLICATE_SAME_ACCESS,
-		)
+		DuplicateHandle(current, handle, current, &mut out_handle, 0, 0, DUPLICATE_SAME_ACCESS)
 	};
 	if ok == 0 || out_handle.is_null() {
 		return None;
@@ -245,22 +237,25 @@ fn terminate_raw_handle(handle: RawHandle) -> bool {
 
 #[cfg(windows)]
 fn terminate_process_id(pid: sys::process::ProcessId) -> bool {
-	use windows_sys::Win32::Foundation::CloseHandle;
-	use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE};
+	use windows_sys::Win32::{
+		Foundation::CloseHandle,
+		System::Threading::{OpenProcess, PROCESS_TERMINATE},
+	};
 
 	let Ok(pid) = u32::try_from(pid) else {
 		return false;
 	};
 
-	// SAFETY: OpenProcess is called with PROCESS_TERMINATE for a numeric process id.
-	// A null handle is handled below.
+	// SAFETY: OpenProcess is called with PROCESS_TERMINATE for a numeric process
+	// id. A null handle is handled below.
 	let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
 	if handle.is_null() {
 		return false;
 	}
 
 	let terminated = terminate_raw_handle(handle);
-	// SAFETY: The handle was returned by OpenProcess and is closed exactly once here.
+	// SAFETY: The handle was returned by OpenProcess and is closed exactly once
+	// here.
 	let _close_result = unsafe { CloseHandle(handle) };
 	terminated
 }

@@ -173,7 +173,7 @@ export class CommandController {
 
 		const restoreEditor = () => {
 			loader.dispose();
-			this.ctx.remountEditorComposer();
+			this.ctx.remountEditorComposer?.();
 			this.ctx.ui.setFocus(this.ctx.editor);
 		};
 		loader.onAbort = () => {

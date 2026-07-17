@@ -2,23 +2,21 @@
 
 use std::{
 	ffi::OsStr,
+	os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
 	path::{Path, PathBuf},
 	sync::LazyLock,
 };
-use std::os::windows::{
-	fs::OpenOptionsExt,
-	io::AsRawHandle,
-};
 
-use crate::error;
-// Selectively re-export items from stubs that we don't override.
-pub(crate) use crate::sys::stubs::fs::MetadataExt;
 use windows_sys::Win32::{
 	Foundation::HANDLE,
 	Storage::FileSystem::{
 		BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle,
 	},
 };
+
+use crate::error;
+// Selectively re-export items from stubs that we don't override.
+pub(crate) use crate::sys::stubs::fs::MetadataExt;
 
 /// Cached list of executable extensions from the `PATHEXT` environment
 /// variable. Each entry retains its leading dot (e.g. `".exe"`) and is stored
@@ -176,16 +174,13 @@ impl crate::sys::fs::PathExt for Path {
 			// SAFETY: `file.as_raw_handle()` is a live file handle owned by `file`
 			// for the duration of the call, and `info` points to initialized writable
 			// storage for the API's output structure.
-			(unsafe {
-				GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info)
-			}) != 0
+			(unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) }) != 0
 		};
 		if !succeeded {
 			return Err(std::io::Error::last_os_error().into());
 		}
 
-		let file_index = (u64::from(info.nFileIndexHigh) << 32)
-			| u64::from(info.nFileIndexLow);
+		let file_index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
 		Ok((u64::from(info.dwVolumeSerialNumber), file_index))
 	}
 }
@@ -195,9 +190,7 @@ impl crate::sys::fs::PathExt for Path {
 /// On Windows, entries are parsed with [`std::env::split_paths`] and then have
 /// surrounding double quotes removed. Quoted PATH entries are common on Windows
 /// and must resolve to the unquoted directory when searching for executables.
-pub fn split_paths<T: AsRef<OsStr> + ?Sized>(
-	s: &T,
-) -> impl Iterator<Item = PathBuf> + '_ {
+pub fn split_paths<T: AsRef<OsStr> + ?Sized>(s: &T) -> impl Iterator<Item = PathBuf> + '_ {
 	std::env::split_paths(s).map(trim_surrounding_path_quotes)
 }
 

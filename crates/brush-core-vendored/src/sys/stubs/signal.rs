@@ -89,9 +89,9 @@ pub fn kill_process(
 ) -> Result<(), error::Error> {
 	#[cfg(windows)]
 	{
-		use windows_sys::Win32::Foundation::CloseHandle;
-		use windows_sys::Win32::System::Threading::{
-			OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+		use windows_sys::Win32::{
+			Foundation::CloseHandle,
+			System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess},
 		};
 
 		let pid = u32::try_from(_pid).map_err(|_| error::ErrorKind::FailedToSendSignal)?;
@@ -104,7 +104,8 @@ pub fn kill_process(
 
 		// SAFETY: The handle was returned by OpenProcess and checked for null.
 		let ok = unsafe { TerminateProcess(handle, 1) };
-		// SAFETY: The handle was returned by OpenProcess and is closed exactly once here.
+		// SAFETY: The handle was returned by OpenProcess and is closed exactly once
+		// here.
 		let _close_result = unsafe { CloseHandle(handle) };
 		if ok == 0 {
 			return Err(error::ErrorKind::FailedToSendSignal.into());

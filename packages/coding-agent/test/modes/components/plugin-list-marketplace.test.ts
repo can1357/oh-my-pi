@@ -27,6 +27,7 @@ const npm = (name: string, opts: Partial<InstalledPlugin> = {}): InstalledPlugin
 	manifest: { version: "1.2.3", description: `desc ${name}` },
 	enabledFeatures: null,
 	enabled: true,
+	scope: "user",
 	...opts,
 });
 

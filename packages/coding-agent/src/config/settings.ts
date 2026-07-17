@@ -14,6 +14,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { configureProviderMaxInFlightRequests } from "@pk-nerdsaver-ai/pi-ai/stream";
 import {
 	getAgentDbPath,
 	getAgentDir,
@@ -748,6 +749,10 @@ export class Settings {
 
 		// Build merged view (global → project → overrides; project wins over global)
 		this.#rebuildMerged();
+		// Reject malformed provider request limits from ANY layer (config.yml,
+		// project settings, overlays) at load time, before hooks silently
+		// normalize them away.
+		validateProviderMaxInFlightRequests(this.get("providers.maxInFlightRequests"));
 		this.#fireAllHooks();
 		return this;
 	}
@@ -891,6 +896,12 @@ export class Settings {
 		if ("queueMode" in raw && !("steeringMode" in raw)) {
 			raw.steeringMode = raw.queueMode;
 			delete raw.queueMode;
+		}
+
+		// inlineToolDescriptors: legacy boolean -> "on"/"off" enum ("auto" is the
+		// new default and only reachable by leaving the key unset).
+		if (typeof raw.inlineToolDescriptors === "boolean") {
+			raw.inlineToolDescriptors = raw.inlineToolDescriptors ? "on" : "off";
 		}
 
 		// lastChangelogVersion moved out of config.yml into the
@@ -1454,6 +1465,13 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 		if (typeof value === "string") {
 			appendOnlyModeSignal.fire(value);
 		}
+	},
+	// Fires with the EFFECTIVE merged value (set() re-merges before the hook,
+	// #fireAllHooks reads get()), so runtime overrides/config layers win over a
+	// bare set(). Normalize silently here — load-time rejection of invalid
+	// limits happens in #load via validateProviderMaxInFlightRequests.
+	"providers.maxInFlightRequests": value => {
+		configureProviderMaxInFlightRequests(normalizeProviderMaxInFlightRequests(value));
 	},
 	"hindsight.bankId": () => hindsightScopeSignal.fire(),
 	"hindsight.bankIdPrefix": () => hindsightScopeSignal.fire(),

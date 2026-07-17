@@ -641,7 +641,15 @@ export type OpenAIReasoningDisableReason = "caller" | "forced-tool-choice" | "to
 
 export type OpenAICompatPolicyCompat = ResolvedOpenAISharedCompat &
 	Partial<ResolvedOpenAICompat> &
-	Partial<ResolvedOpenAIResponsesCompat>;
+	Partial<ResolvedOpenAIResponsesCompat> & {
+		/**
+		 * Qwen-family + local-cache compat flag resolved by
+		 * `catalog/src/compat/openai.ts`: emit `preserve_thinking` /
+		 * `chat_template_kwargs.preserve_thinking` so Qwen chat templates keep
+		 * rendering historic `<think>` blocks and prefix KV caches survive.
+		 */
+		qwenPreserveThinking?: boolean;
+	};
 
 export interface ResolveOpenAICompatPolicyOptions {
 	endpoint: OpenAICompatEndpoint;

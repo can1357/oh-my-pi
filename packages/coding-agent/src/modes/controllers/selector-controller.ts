@@ -85,12 +85,47 @@ export class SelectorController {
 		);
 	}
 	/**
+	 * Provider/source ids for the settings runtime context — the same set the
+	 * /model selector tabs over: providers of every registry-available model
+	 * plus the discoverable (dynamic-listing) providers. Registry load errors
+	 * degrade to the discoverable list so settings still open.
+	 */
+	#availableProviderIds(): string[] {
+		const registry = this.ctx.session.modelRegistry;
+		const providerSet = new Set<string>();
+		try {
+			for (const model of registry.getAvailable()) {
+				providerSet.add(model.provider);
+			}
+		} catch {
+			// Registry failed to load — the settings UI still works with the rest.
+		}
+		for (const provider of registry.getDiscoverableProviders()) {
+			providerSet.add(provider);
+		}
+		return [...providerSet].sort((a, b) => a.localeCompare(b));
+	}
+
+	/**
+	 * Restore focus to whatever currently occupies the editor slot. Closing a
+	 * fullscreen overlay (settings, dashboards) while a hook selector /
+	 * approval prompt has replaced the editor must focus that prompt — not the
+	 * no-longer-mounted editor the prompt replaced (#3349). Falls back to the
+	 * editor when the slot is empty.
+	 */
+	focusActiveEditorArea(): void {
+		const children = this.ctx.editorContainer.children;
+		const active = children.length > 0 ? children[children.length - 1] : undefined;
+		this.ctx.ui.setFocus((active ?? this.ctx.editor) as Component);
+	}
+
+	/**
 	 * Shows a selector component in place of the editor.
 	 * @param create Factory that receives a `done` callback and returns the component and focus target
 	 */
 	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
 		const done = () => {
-			this.ctx.remountEditorComposer();
+			this.ctx.remountEditorComposer?.();
 			this.ctx.ui.setFocus(this.ctx.editor);
 		};
 		const { component, focus } = create(done);
@@ -108,7 +143,9 @@ export class SelectorController {
 			let overlayHandle: OverlayHandle | undefined;
 			const done = () => {
 				overlayHandle?.hide();
-				this.ctx.ui.setFocus(this.ctx.editor);
+				// The overlay never touched the editor slot — a hook prompt may be
+				// occupying it, and it (not the editor) must get the focus back (#3349).
+				this.focusActiveEditorArea();
 				this.ctx.ui.requestRender();
 			};
 			const selector = new SettingsSelectorComponent(
@@ -116,6 +153,7 @@ export class SelectorController {
 					availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
 					thinkingLevel: this.ctx.session.thinkingLevel,
 					availableThemes,
+					providers: this.#availableProviderIds(),
 					cwd: getProjectDir(),
 					model: this.ctx.session.model,
 					imageBudget: this.ctx.ui.imageBudget,
@@ -308,8 +346,8 @@ export class SelectorController {
 			case "composer.layout": {
 				const effectiveLayout = this.ctx.settings.get("composer.layout");
 				this.ctx.editor.placeholder = effectiveLayout === "intent" ? "Describe the outcome you want…" : undefined;
-				if (effectiveLayout !== "intent" && this.ctx.getComposerWorkMode() === "ask") {
-					void this.ctx.restoreComposerAskTools().catch(error => {
+				if (effectiveLayout !== "intent" && this.ctx.getComposerWorkMode?.() === "ask") {
+					void this.ctx.restoreComposerAskTools?.().catch(error => {
 						this.ctx.showError(
 							`Failed to exit Ask mode while changing composer layout: ${error instanceof Error ? error.message : String(error)}`,
 						);
@@ -322,10 +360,10 @@ export class SelectorController {
 			case "plan.enabled":
 				if (
 					value === false &&
-					(this.ctx.getComposerWorkMode() === "plan" || this.ctx.session.getPlanModeState?.())
+					(this.ctx.getComposerWorkMode?.() === "plan" || this.ctx.session.getPlanModeState?.())
 				) {
 					void this.ctx
-						.disableComposerPlanMode()
+						.disableComposerPlanMode?.()
 						.catch(error => this.ctx.showError(error instanceof Error ? error.message : String(error)));
 				}
 				this.ctx.updateEditorTopBorder();
@@ -842,13 +880,13 @@ export class SelectorController {
 			this.ctx.sessionManager.getCwd(),
 			this.ctx.sessionManager.getSessionDir(),
 		);
-		// Current folder has no sessions: preload the global list so the picker
-		// can open straight into all-projects scope instead of dead-ending.
+		// Current folder has no sessions: preload the global list so the first
+		// Tab toggle into all-projects is instant. The picker still opens
+		// folder-scoped with the "Press Tab to view all" hint — auto-opening in
+		// all-projects scope silently surfaced other projects' history (#3099).
 		let allSessions: SessionInfo[] | undefined;
-		let startInAllScope = false;
 		if (sessions.length === 0) {
 			allSessions = await SessionManager.listAll();
-			startInAllScope = allSessions.length > 0;
 		}
 		const historyStorage = this.ctx.historyStorage;
 		const historyMatcher = historyStorage ? (query: string) => historyStorage.matchingSessionIds(query) : undefined;
@@ -884,7 +922,6 @@ export class SelectorController {
 					historyMatcher,
 					loadAllSessions: () => SessionManager.listAll(),
 					allSessions,
-					startInAllScope,
 					getTerminalRows: () => this.ctx.ui.terminal.rows,
 				},
 			);
@@ -1020,7 +1057,7 @@ export class SelectorController {
 					const codeInput = new Input();
 					codeInput.onSubmit = () => {
 						const code = codeInput.getValue();
-						this.ctx.remountEditorComposer();
+						this.ctx.remountEditorComposer?.();
 						this.ctx.ui.setFocus(this.ctx.editor);
 						resolve(code);
 					};
@@ -1270,7 +1307,7 @@ export class SelectorController {
 		// commits above it exactly once and the hub repaints in place.
 		const done = () => {
 			hub?.dispose();
-			this.ctx.remountEditorComposer();
+			this.ctx.remountEditorComposer?.();
 			this.ctx.ui.setFocus(this.ctx.editor);
 			this.ctx.ui.requestRender();
 		};

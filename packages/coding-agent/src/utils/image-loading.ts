@@ -168,7 +168,9 @@ export async function loadImageInput(options: LoadImageInputOptions): Promise<Lo
 		}
 	}
 
-	let textNote = `Read image file [${outputMimeType}]`;
+	// The note names what the file IS (magic-detected); the content block's
+	// mimeType names the encoding the model receives after any re-encode.
+	let textNote = `Read image file [${mimeType}]`;
 	if (dimensionNote) {
 		textNote += `\n${dimensionNote}`;
 	}

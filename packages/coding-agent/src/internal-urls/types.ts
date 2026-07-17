@@ -169,4 +169,11 @@ export interface ProtocolHandler {
 	 * (e.g. ssh:// hosts from a project `ssh.json`, local:// roots per session).
 	 */
 	complete?(query?: string, context?: ResolveContext): Promise<UrlCompletion[]>;
+	/**
+	 * When true, the scheme is excluded from the router's `completionSchemes()`
+	 * even though {@link complete} exists: on-demand `router.complete(scheme, …)`
+	 * dispatch still works, but per-keystroke prompt autocomplete never fires
+	 * for it (e.g. wikigraph://, whose candidates come from a sqlite index).
+	 */
+	readonly hiddenCompletion?: boolean;
 }

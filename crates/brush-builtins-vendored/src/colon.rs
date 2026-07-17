@@ -13,10 +13,11 @@ impl builtins::SimpleCommand for ColonCommand {
 			builtins::ContentType::DetailedHelp => Ok("Null command; always returns success.".into()),
 			builtins::ContentType::ShortUsage => Ok(":: :".into()),
 			builtins::ContentType::ShortDescription => Ok(": - Null command".into()),
-			builtins::ContentType::ManPage => Ok(
-				"NAME\n    : - Null command.\n\nSYNOPSIS\n    :\n\nDESCRIPTION\n    Null command.\n\n    No effect; the command does nothing.\n\n    Exit Status:\n    Always succeeds.\n"
-					.into(),
-			),
+			builtins::ContentType::ManPage => Ok("NAME\n    : - Null command.\n\nSYNOPSIS\n    \
+			                                      :\n\nDESCRIPTION\n    Null command.\n\n    No \
+			                                      effect; the command does nothing.\n\n    Exit \
+			                                      Status:\n    Always succeeds.\n"
+				.into()),
 		}
 	}
 

@@ -8,6 +8,7 @@ export type Dialect =
 	| "anthropic"
 	| "deepseek"
 	| "harmony"
+	| "pi"
 	| "qwen3"
 	| "gemini"
 	| "gemma"

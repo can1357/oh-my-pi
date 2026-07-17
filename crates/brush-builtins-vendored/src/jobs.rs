@@ -99,12 +99,15 @@ impl JobsCommand {
 	}
 }
 
-fn resolve_job_spec<'a>(job_manager: &'a jobs::JobManager, job_spec: &str) -> Option<&'a jobs::Job> {
+fn resolve_job_spec<'a>(
+	job_manager: &'a jobs::JobManager,
+	job_spec: &str,
+) -> Option<&'a jobs::Job> {
 	match job_manager.resolve_job_spec_selector(job_spec)? {
 		jobs::JobSelector::JobId(id) => job_manager.jobs.iter().find(|job| job.id == id),
-		jobs::JobSelector::ProcessId(pid) => job_manager
-			.jobs
-			.iter()
-			.find(|job| job.representative_pid().is_some_and(|job_pid| job_pid == pid)),
+		jobs::JobSelector::ProcessId(pid) => job_manager.jobs.iter().find(|job| {
+			job.representative_pid()
+				.is_some_and(|job_pid| job_pid == pid)
+		}),
 	}
 }

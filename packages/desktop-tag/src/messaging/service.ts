@@ -8,6 +8,7 @@ import type {
 	ChatTargetIdentity,
 	MessagingServiceOptions,
 	PrepareDraftInput,
+	PreparedDispatch,
 	SendApproval,
 	SendApprovalRequest,
 	SendOutcome,
@@ -46,7 +47,11 @@ function normalizeRenderedBody(body: string): string {
 	return body.replaceAll("\r\n", "\n");
 }
 
-function verifiedMessage(messages: readonly ChatMessage[], draft: ChatDraft, baseline: ReadonlySet<string>): ChatMessage | undefined {
+function verifiedMessage(
+	messages: readonly ChatMessage[],
+	draft: ChatDraft,
+	baseline: ReadonlySet<string>,
+): ChatMessage | undefined {
 	const matches = messages.filter(
 		message =>
 			!baseline.has(message.providerMessageId) &&
@@ -114,7 +119,8 @@ export class MessagingService {
 
 	async read(target: ChatTargetIdentity, limit = 20, signal?: AbortSignal): Promise<readonly ChatMessage[]> {
 		const adapter = this.#adapters[target.provider];
-		if (!adapter) throw new MessagingServiceError("unsupported_provider", `unsupported chat provider: ${target.provider}`);
+		if (!adapter)
+			throw new MessagingServiceError("unsupported_provider", `unsupported chat provider: ${target.provider}`);
 		return this.#ix.read(adapter, target, limit, signal);
 	}
 
@@ -135,9 +141,10 @@ export class MessagingService {
 			throw error;
 		}
 		if (approval.decision === "deny") return { status: "not_sent", reason: "approval_denied" };
-		if (!approvalMatches(approval, approvalRequest, this.#clock.now())) return { status: "not_sent", reason: "approval_mismatch" };
+		if (!approvalMatches(approval, approvalRequest, this.#clock.now()))
+			return { status: "not_sent", reason: "approval_mismatch" };
 
-		let prepared;
+		let prepared: PreparedDispatch;
 		try {
 			prepared = await this.#ix.prepareDispatch(adapter, draft, signal);
 		} catch (error) {

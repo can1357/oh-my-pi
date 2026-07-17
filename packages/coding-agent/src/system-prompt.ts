@@ -3,6 +3,7 @@
  */
 
 import * as os from "node:os";
+import * as path from "node:path";
 import type { AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { ToolExample, TSchema } from "@pk-nerdsaver-ai/pi-ai";
 import { renderToolInventory } from "@pk-nerdsaver-ai/pi-ai/dialect";
@@ -696,11 +697,21 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
 	const hasRead = toolNames.includes("read");
 	const visibleSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
-	// Request-only skill discovery: never inject skill descriptions into the system
-	// prompt. Keep context space for the active task; the model searches descriptions
-	// on demand via `read skill://?q=<keywords>` and then reads the chosen skill.
-	const skillsLazy = visibleSkills.length > 0;
-	const filteredSkills: typeof visibleSkills = [];
+	// Request-only skill discovery: keep skill descriptions out of the system prompt
+	// and let the model search them on demand via `read skill://?q=<keywords>`.
+	// Workspace-local skills stay inline, and a custom base prompt replaces the
+	// built-in discovery guidance, so its skills render inline instead of deferring
+	// to the lazy notice.
+	const inlineSkills = Boolean(resolvedCustomPrompt);
+	const workspaceRoot = path.resolve(resolvedCwd);
+	const filteredSkills = inlineSkills
+		? visibleSkills
+		: visibleSkills.filter(skill => {
+				const skillRoot = path.resolve(skill.baseDir);
+				return skillRoot === workspaceRoot || skillRoot.startsWith(workspaceRoot + path.sep);
+			});
+	const lazySkillCount = visibleSkills.length - filteredSkills.length;
+	const skillsLazy = lazySkillCount > 0;
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,
@@ -732,7 +743,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		workspaceTree,
 		skills: filteredSkills,
 		skillsLazy,
-		lazySkillCount: visibleSkills.length,
+		lazySkillCount,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
 		date,

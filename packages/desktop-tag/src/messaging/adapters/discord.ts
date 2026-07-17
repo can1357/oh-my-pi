@@ -5,8 +5,14 @@ export const DISCORD_SELECTORS = {
 	version: "discord-web-2026-07-v1",
 	supportedHosts: ["discord.com"],
 	account: ['[data-list-id="guildsnav"] [data-user-id]', '[aria-label="User area"] [data-user-id]'],
-	conversation: ['[data-list-id="channels"] [data-channel-id][aria-selected="true"]', '[data-channel-id][aria-current="page"]'],
-	thread: ['[data-thread-id][aria-selected="true"]', '[data-list-id="threads"] [data-channel-id][aria-selected="true"]'],
+	conversation: [
+		'[data-list-id="channels"] [data-channel-id][aria-selected="true"]',
+		'[data-channel-id][aria-current="page"]',
+	],
+	thread: [
+		'[data-thread-id][aria-selected="true"]',
+		'[data-list-id="threads"] [data-channel-id][aria-selected="true"]',
+	],
 	composer: ['main form [role="textbox"][contenteditable="true"]', '[data-slate-editor="true"][role="textbox"]'],
 	message: ['li[id^="chat-messages-"][data-list-item-id]', '[data-list-item-id^="chat-messages___"]'],
 	selfAuthor: ['[data-author-self="true"]', '[class*="messageListItem"] [data-user-id][aria-label*="(you)"]'],

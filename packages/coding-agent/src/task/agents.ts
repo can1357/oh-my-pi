@@ -6,13 +6,12 @@
 import { Effort } from "@pk-nerdsaver-ai/pi-ai";
 import { parseFrontmatter, prompt } from "@pk-nerdsaver-ai/pi-utils";
 import { parseAgentFields } from "../discovery/helpers";
-import falsifyMd from "../prompts/agents/falsify.md" with { type: "text" };
 import auditMd from "../prompts/agents/audit.md" with { type: "text" };
-import synthesizeMd from "../prompts/agents/synthesize.md" with { type: "text" };
 import browserControlMd from "../prompts/agents/browser-control.md" with { type: "text" };
 import browserOperationMd from "../prompts/agents/browser-operation.md" with { type: "text" };
 import designerMd from "../prompts/agents/designer.md" with { type: "text" };
 import exploreMd from "../prompts/agents/explore.md" with { type: "text" };
+import falsifyMd from "../prompts/agents/falsify.md" with { type: "text" };
 // Embed agent markdown files at build time
 import agentFrontmatterTemplate from "../prompts/agents/frontmatter.md" with { type: "text" };
 import ixBrowserFastMd from "../prompts/agents/ix-browser-fast.md" with { type: "text" };
@@ -22,6 +21,7 @@ import mrWorkerMd from "../prompts/agents/mr-worker.md" with { type: "text" };
 import oracleMd from "../prompts/agents/oracle.md" with { type: "text" };
 import planMd from "../prompts/agents/plan.md" with { type: "text" };
 import reviewerMd from "../prompts/agents/reviewer.md" with { type: "text" };
+import synthesizeMd from "../prompts/agents/synthesize.md" with { type: "text" };
 import taskMd from "../prompts/agents/task.md" with { type: "text" };
 import totReasonerMd from "../prompts/agents/tot-reasoner.md" with { type: "text" };
 

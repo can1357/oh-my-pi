@@ -851,8 +851,20 @@ function buildResultLines(
 		case "wait":
 			return renderWaitResult(result, details, args, expanded, theme);
 		case "inbox":
+			if (result.isError) {
+				return [
+					renderStatusLine({ icon: "error", title: "IRC inbox" }, theme),
+					formatErrorDetail(textContent(result) || "IRC inbox failed.", theme),
+				];
+			}
 			return renderInboxResult(details, args, expanded, theme);
 		case "list":
+			if (result.isError) {
+				return [
+					renderStatusLine({ icon: "error", title: "IRC peers" }, theme),
+					formatErrorDetail(textContent(result) || "IRC list failed.", theme),
+				];
+			}
 			return renderListResult(details, expanded, theme);
 		default: {
 			const text = textContent(result) || (result.isError ? "IRC call failed." : "Done.");

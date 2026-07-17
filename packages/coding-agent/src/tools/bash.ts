@@ -1387,7 +1387,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 								.map(line => uiTheme.fg("toolOutput", replaceTabs(line)))
 								.join("\n");
 							const textContent = styledOutput;
-							const result = truncateToVisualLines(textContent, previewLines, width);
+							const result = truncateToVisualLines(textContent, Math.min(previewLines, previewWindow), width);
 							if (result.skippedCount > 0) {
 								outputLines.push(
 									uiTheme.fg(

@@ -65,17 +65,24 @@ export function createChatReadTool(context: MessagingToolContext): CustomTool<ty
 			const messages = await context.service.read(target, params.limit ?? 20, signal);
 			return {
 				content: [{ type: "text", text: JSON.stringify(messages) }],
-				details: { provider: target.provider, targetFingerprint: target.identityFingerprint, count: messages.length },
+				details: {
+					provider: target.provider,
+					targetFingerprint: target.identityFingerprint,
+					count: messages.length,
+				},
 			};
 		},
 	};
 }
 
-export function createChatPrepareTool(context: MessagingToolContext): CustomTool<typeof chatPrepareSchema, PrepareDetails> {
+export function createChatPrepareTool(
+	context: MessagingToolContext,
+): CustomTool<typeof chatPrepareSchema, PrepareDetails> {
 	return {
 		name: "chat_prepare",
 		label: "Chat Prepare",
-		description: "Create a private immutable one-shot draft for the frozen chat target. This does not touch the site composer.",
+		description:
+			"Create a private immutable one-shot draft for the frozen chat target. This does not touch the site composer.",
 		parameters: chatPrepareSchema,
 		strict: true,
 		approval: "read",
@@ -102,11 +109,13 @@ export function createChatSendTool(context: MessagingToolContext): CustomTool<ty
 	return {
 		name: "chat_send",
 		label: "Chat Send",
-		description: "Request exact one-shot operator approval, dispatch once to the frozen target, and post-verify delivery. Never retry an unknown outcome.",
+		description:
+			"Request exact one-shot operator approval, dispatch once to the frozen target, and post-verify delivery. Never retry an unknown outcome.",
 		parameters: chatSendSchema,
 		strict: true,
 		approval: { tier: "write", reason: "Outbound chat message", override: true },
-		formatApprovalDetails: () => "A separate internal approval still requires Send as-is for the exact immutable draft.",
+		formatApprovalDetails: () =>
+			"A separate internal approval still requires Send as-is for the exact immutable draft.",
 		async execute(_toolCallId, params, _onUpdate, _toolContext, signal) {
 			const outcome = await context.service.send(params.draftId, signal);
 			return {

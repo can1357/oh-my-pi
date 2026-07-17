@@ -9,7 +9,14 @@
 import { describe, expect, it } from "bun:test";
 import type { ProxyAssistantMessageEvent } from "@pk-nerdsaver-ai/pi-agent-core/proxy";
 import { type ProxyMessageEventStream, streamProxy } from "@pk-nerdsaver-ai/pi-agent-core/proxy";
-import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl, Model, ToolCall } from "@pk-nerdsaver-ai/pi-ai";
+import type {
+	AssistantMessage,
+	AssistantMessageEvent,
+	Context,
+	FetchImpl,
+	Model,
+	ToolCall,
+} from "@pk-nerdsaver-ai/pi-ai";
 import { getStreamingPartialJson } from "@pk-nerdsaver-ai/pi-ai/utils/block-symbols";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
 

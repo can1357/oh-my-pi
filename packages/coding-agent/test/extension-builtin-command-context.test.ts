@@ -52,10 +52,11 @@ describe("extension owner-local builtin commands", () => {
 			},
 		};
 		const gate = Promise.withResolvers<void>();
-		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => {
+		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
 			await gate.promise;
 			return new Response(JSON.stringify({ entries: [] }));
-		});
+			// Bare async fn lacks Bun's `fetch.preconnect` static; the mock never uses it.
+		}) as unknown as typeof fetch);
 		const ctx = {
 			session: { extensionRunner, isStreaming: false, queuedMessageCount: 0 },
 			sessionManager: {
@@ -99,10 +100,11 @@ describe("extension owner-local builtin commands", () => {
 			hasHandlers: () => false,
 		};
 		const gate = Promise.withResolvers<void>();
-		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => {
+		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
 			await gate.promise;
 			return new Response(JSON.stringify({ entries: [] }));
-		});
+			// Bare async fn lacks Bun's `fetch.preconnect` static; the mock never uses it.
+		}) as unknown as typeof fetch);
 		let submittedText = "/hotkeys";
 		let handledHotkeys = false;
 		let sentMessages = 0;

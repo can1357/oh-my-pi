@@ -34,6 +34,7 @@ import {
 } from "../tts/models";
 import { EDIT_MODES } from "../utils/edit-mode";
 import { SEARCH_PROVIDER_OPTIONS, SEARCH_PROVIDER_PREFERENCES, type SearchProviderId } from "../web/search/types";
+import { SERVICE_TIER_INHERIT_OPTIONS, SERVICE_TIER_INHERIT_SETTING_VALUES } from "./service-tier";
 
 /** Unified settings schema - single source of truth for all settings.
  *
@@ -104,8 +105,8 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
  * Ungrouped settings render first, before any section heading.
  */
 export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
-	appearance: ["Theme", "Status Line", "Display", "Images"],
-	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Vision"],
+	appearance: ["Theme", "Composer", "Status Line", "Display", "Images"],
+	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Agent Model Profiles", "Vision"],
 	interaction: [
 		"Input",
 		"Approvals",
@@ -120,8 +121,8 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Mixture of Agents",
 		"Fusion",
 	],
-	context: ["General", "Light Context", "Compaction", "Rules (TTSR)", "Experimental"],
-	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight"],
+	context: ["General", "Light Context", "Compaction", "Background Packs", "Rules (TTSR)", "Experimental"],
+	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Screenpipe"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Python"],
 	tools: [
@@ -344,6 +345,21 @@ export const SETTINGS_SCHEMA = {
 	// General settings (no UI)
 	// ────────────────────────────────────────────────────────────────────────
 	setupVersion: { type: "number", default: 0 },
+
+	// `omp gc` — session-store garbage collection. Only applied when the user
+	// runs the gc CLI; the booleans pick which categories run by default and
+	// the numbers set retention (days before cold sessions archive, and how
+	// many newest sessions to always keep globally / per project directory).
+	"gc.blobs": { type: "boolean", default: true },
+	"gc.archive": { type: "boolean", default: true },
+	"gc.wal": { type: "boolean", default: true },
+	"gc.coldArchiveAfterDays": { type: "number", default: 30 },
+	"gc.retainNewestGlobal": { type: "number", default: 500 },
+	"gc.retainNewestPerCwd": { type: "number", default: 50 },
+
+	// Text verbosity request parameter for OpenAI responses-family APIs
+	// ("low" | "medium" | "high"); unset sends no verbosity parameter.
+	textVerbosity: { type: "string", default: undefined },
 
 	// Auth broker — credentials proxied through a remote `omp auth-broker serve`
 	// host. Hidden from the UI; populate via env vars or hand-edited config.yml.
@@ -999,6 +1015,20 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Report busy/idle state via the terminal progress escape sequence
+	// (OSC 9;4) so terminals that support it show a task indicator. Opt-in.
+	"terminal.showProgress": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Native Terminal Progress",
+			description:
+				"Report busy/idle state via the OSC 9;4 progress sequence so supporting terminals show a task indicator",
+		},
+	},
+
 	"images.autoResize": {
 		type: "boolean",
 		default: true,
@@ -1182,6 +1212,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"thinking.proseOnly": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "Prose-Only Thinking",
+			description: "Render thinking blocks with code fences elided, keeping only the prose",
+		},
+	},
+
 	"model.loopGuard.enabled": {
 		type: "boolean",
 		default: true,
@@ -1204,15 +1245,28 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Session-level Gemini header-runaway guard: interrupt a reasoning stream that
+	// keeps emitting distinct planning headers without ever calling a tool, then
+	// re-drive the turn with a hidden tool-call reminder. Requires
+	// model.loopGuard.enabled; the pi-ai similarity guard misses this shape
+	// because the titles are genuinely distinct.
+	"model.loopGuard.toolCallReminder": { type: "boolean", default: true },
+
 	inlineToolDescriptors: {
-		type: "boolean",
-		default: false,
+		type: "enum",
+		values: ["auto", "on", "off"] as const,
+		default: "auto",
 		ui: {
 			tab: "model",
 			group: "Prompt",
 			label: "Inline Tool Descriptors",
 			description:
-				"Render full tool descriptors in the system prompt and strip top-level/nested descriptions from provider tool schemas so descriptor text is sent once",
+				"Render full tool descriptors in the system prompt and strip top-level/nested descriptions from provider tool schemas so descriptor text is sent once. Auto inlines only for owned (non-native) tool dialects, which need the catalog in-prompt.",
+			options: [
+				{ value: "auto", label: "Auto", description: "Inline only when an owned tool dialect is active" },
+				{ value: "on", label: "On", description: "Always inline descriptors and strip wire schemas" },
+				{ value: "off", label: "Off", description: "Never inline; provider tool schemas carry descriptions" },
+			],
 		},
 	},
 
@@ -1400,6 +1454,20 @@ export const SETTINGS_SCHEMA = {
 					description: "Anthropic fast mode on direct Claude requests; ignored elsewhere (incl. Bedrock/Vertex)",
 				},
 			],
+		},
+	},
+
+	serviceTierSubagent: {
+		type: "enum",
+		values: SERVICE_TIER_INHERIT_SETTING_VALUES,
+		default: "inherit",
+		ui: {
+			tab: "model",
+			group: "Sampling",
+			label: "Service Tier (Subagents)",
+			description:
+				"Processing priority hint stamped onto spawned subagents. Inherit follows the main agent's live effective tier (so /fast on|off carries over); the remaining values mirror Service Tier.",
+			options: SERVICE_TIER_INHERIT_OPTIONS,
 		},
 	},
 
@@ -1846,6 +1914,14 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Where /share uploads the sealed blob: the share server ("blob", default)
+	// or a secret GitHub gist ("gist", needs an authenticated `gh`).
+	"share.store": {
+		type: "enum",
+		values: ["blob", "gist"] as const,
+		default: "blob",
+	},
+
 	"share.redactSecrets": {
 		type: "boolean",
 		default: true,
@@ -2089,6 +2165,13 @@ export const SETTINGS_SCHEMA = {
 	"compaction.keepRecentTokens": { type: "number", default: 20000 },
 
 	"compaction.autoContinue": { type: "boolean", default: true },
+
+	// Mid-turn threshold compaction: when a tool-call turn finishes over the
+	// compaction threshold and the run is about to continue, compact in place
+	// between provider calls instead of waiting for the run to yield. Always
+	// uses the in-place context-full path (never handoff) so the live run is
+	// not reset mid-loop.
+	"compaction.midTurnEnabled": { type: "boolean", default: true },
 
 	"compaction.remoteEndpoint": { type: "string", default: undefined },
 
@@ -2473,6 +2556,18 @@ export const SETTINGS_SCHEMA = {
 			group: "Mnemopi",
 			label: "Mnemopi Enhanced Recall",
 			description: "Enable the tiered query result cache for repeated and similar recall queries",
+			condition: "mnemopiActive",
+		},
+	},
+
+	"mnemopi.proactiveLinking": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Mnemopi",
+			label: "Mnemopi Proactive Linking",
+			description: "Proactively link related memories to each other when retaining new ones",
 			condition: "mnemopiActive",
 		},
 	},
@@ -3208,6 +3303,33 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"eval.rb": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Eval & Python",
+			label: "Ruby Eval Backend",
+			description: "Allow the eval tool to dispatch Ruby cells to a local Ruby interpreter (opt-in)",
+		},
+	},
+
+	"eval.jl": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "shell",
+			group: "Eval & Python",
+			label: "Julia Eval Backend",
+			description: "Allow the eval tool to dispatch Julia cells to a local Julia interpreter (opt-in)",
+		},
+	},
+
+	// Interpreter binary overrides for the opt-in Ruby/Julia eval backends;
+	// unset means resolve from PATH.
+	"ruby.interpreter": { type: "string", default: undefined },
+	"julia.interpreter": { type: "string", default: undefined },
+
 	// Python kernel knobs (consumed by the eval py backend and the /python slash command)
 	"python.kernelMode": {
 		type: "enum",
@@ -3405,6 +3527,33 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+
+	"glob.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Glob",
+			description: "Enable the glob tool for filename pattern search",
+		},
+	},
+
+	"grep.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Grep",
+			description: "Enable the grep tool for content search",
+		},
+	},
+
+	// Default context lines the grep tool includes around matches when the
+	// caller doesn't pass contextBefore/contextAfter explicitly. 0 = none.
+	"grep.contextBefore": { type: "number", default: 0 },
+	"grep.contextAfter": { type: "number", default: 0 },
 
 	"astGrep.enabled": {
 		type: "boolean",
@@ -4287,6 +4436,54 @@ export const SETTINGS_SCHEMA = {
 		default: "~/.claude/custom-endpoint.json",
 	},
 
+	// Screenpipe activity bridge — local-only, opt-in. Polls a locally running
+	// screenpipe daemon for already-redacted frame metadata and records
+	// privacy-preserving activity clips in the local ledger. Nothing leaves the
+	// machine; requires the user to run screenpipe themselves.
+	"screenpipe.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Screenpipe",
+			label: "Screenpipe Activity Bridge",
+			description:
+				"Poll a locally running screenpipe daemon and record redacted activity clips in the local ledger (opt-in, local-only)",
+		},
+	},
+	"screenpipe.baseUrl": {
+		type: "string",
+		default: "http://127.0.0.1:3030",
+		ui: {
+			tab: "memory",
+			group: "Screenpipe",
+			label: "Screenpipe URL",
+			description: "Base URL of the local screenpipe daemon",
+		},
+	},
+	"screenpipe.pollIntervalMs": {
+		type: "number",
+		default: 60_000,
+		ui: {
+			tab: "memory",
+			group: "Screenpipe",
+			label: "Poll Interval (ms)",
+			description: "Delay between successful screenpipe polls",
+		},
+	},
+	// No default on purpose: keyframe hashing stays off unless the user
+	// explicitly points at screenpipe's media directory.
+	"screenpipe.mediaRoot": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Screenpipe",
+			label: "Screenpipe Media Root",
+			description: "Screenpipe media directory; when set, keyframe hashes are recorded for snapshots under it",
+		},
+	},
+
 	// Skills
 	"skills.enabled": { type: "boolean", default: true },
 	"skills.projectOnly": { type: "boolean", default: false },
@@ -4404,6 +4601,12 @@ export const SETTINGS_SCHEMA = {
 			description: "Obfuscate secrets before sending to AI providers",
 		},
 	},
+
+	// Ceiling on concurrently RUNNING ollama-cloud subagent sessions. Ollama
+	// Cloud enforces a hard account-level concurrency cap, so parallel task
+	// spawns that resolve to it must queue at the spawn boundary instead of
+	// bursting into rate-limit backoff (issue #3464). 0 = unlimited.
+	"providers.ollama-cloud.maxConcurrency": { type: "number", default: 0 },
 
 	// Provider selection
 	"providers.maxInFlightRequests": {
@@ -4846,6 +5049,10 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Minimum delay between Exa search requests (client-side throttle for the
+	// shared API key). 0 disables the throttle.
+	"exa.searchDelayMs": { type: "number", default: 0 },
+
 	"exa.enableWebsets": {
 		type: "boolean",
 		default: false,
@@ -5058,6 +5265,7 @@ export interface CompactionSettings {
 	idleEnabled: boolean;
 	idleThresholdTokens: number;
 	idleTimeoutSeconds: number;
+	midTurnEnabled: boolean;
 	supersedeReads: boolean;
 	dropUseless: boolean;
 	maskConsumedObservations: boolean;

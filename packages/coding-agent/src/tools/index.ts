@@ -46,6 +46,7 @@ import { ContextOracleTool } from "./context-oracle";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
+import { FindTool } from "./find";
 import { GithubTool } from "./gh";
 import { GlobTool } from "./glob";
 import { GrepTool } from "./grep";
@@ -64,6 +65,7 @@ import { ReadTool } from "./read";
 import { createReportToolIssueTool, isAutoQaEnabled } from "./report-tool-issue";
 import { ResolveTool } from "./resolve";
 import { reportFindingTool } from "./review";
+import { SearchTool } from "./search";
 import { SearchToolBm25Tool } from "./search-tool-bm25";
 import { loadSshTool } from "./ssh";
 import { type TodoPhase, TodoTool } from "./todo";
@@ -424,8 +426,6 @@ export const DEFAULT_ESSENTIAL_TOOL_NAMES: readonly string[] = [
 	"read",
 	"bash",
 	"edit",
-	"find",
-	"search",
 	"write",
 	"todo",
 	"glob",
@@ -684,6 +684,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "todo") return !includeYield && session.settings.get("todo.enabled");
 		if (name === "glob") return session.settings.get("glob.enabled");
 		if (name === "grep") return session.settings.get("grep.enabled");
+		if (name === "find") return session.settings.get("glob.enabled");
+		if (name === "search") return session.settings.get("grep.enabled");
 		if (name === "github") return session.settings.get("github.enabled");
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
@@ -728,6 +730,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 					...Object.entries(BUILTIN_TOOLS)
 						.filter(([name]) => isToolAllowed(name, "builtin"))
 						.map(([name, factory]) => [name, factory, "builtin"] as const),
+					...(isToolAllowed("find", "builtin")
+						? ([["find", (s: ToolSession) => new FindTool(s), "builtin"]] as const)
+						: []),
+					...(isToolAllowed("search", "builtin")
+						? ([["search", (s: ToolSession) => new SearchTool(s), "builtin"]] as const)
+						: []),
 					...(includeYield && isToolAllowed("yield", "hidden")
 						? ([["yield", HIDDEN_TOOLS.yield, "hidden"]] as const)
 						: []),

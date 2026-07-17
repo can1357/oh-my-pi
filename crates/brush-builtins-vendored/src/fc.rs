@@ -122,11 +122,8 @@ impl FcCommand {
 			let temp_file = FcTempFile::create()?;
 			fs::write(temp_file.path(), commands)?;
 
-			let edit_cmd = format!(
-				"{} {}",
-				editor.as_deref().unwrap_or("vi"),
-				shell_quote_path(temp_file.path())
-			);
+			let edit_cmd =
+				format!("{} {}", editor.as_deref().unwrap_or("vi"), shell_quote_path(temp_file.path()));
 			let source_info = brush_core::SourceInfo::from("(fc editor)");
 			let edit_result = context
 				.shell
@@ -403,11 +400,13 @@ impl FcTempFile {
 			}
 		}
 
-		Err(std::io::Error::new(
-			std::io::ErrorKind::AlreadyExists,
-			"failed to create a unique fc temporary file",
+		Err(
+			std::io::Error::new(
+				std::io::ErrorKind::AlreadyExists,
+				"failed to create a unique fc temporary file",
+			)
+			.into(),
 		)
-		.into())
 	}
 
 	fn path(&self) -> &Path {

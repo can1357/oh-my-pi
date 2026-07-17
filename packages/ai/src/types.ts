@@ -36,6 +36,8 @@ import type { AnthropicOptions } from "./providers/anthropic";
 import type { StopDetails } from "./providers/anthropic-wire";
 import type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses";
 import type { CursorOptions } from "./providers/cursor";
+import type { DevinOptions } from "./providers/devin";
+import type { GitLabDuoWorkflowOptions } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleInteractionsOptions } from "./providers/google-interactions";
@@ -44,6 +46,7 @@ import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICodexResponsesOptions } from "./providers/openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import type { OpenAIResponsesOptions } from "./providers/openai-responses";
+import type { kStreamingPartialJson } from "./utils/block-symbols";
 import type { AssistantMessageEventStream } from "./utils/event-stream";
 
 export type { StopDetails } from "./providers/anthropic-wire";
@@ -76,6 +79,8 @@ export interface ApiOptionsMap {
 	"google-interactions": GoogleInteractionsOptions;
 	"ollama-chat": OllamaChatOptions;
 	"cursor-agent": CursorOptions;
+	"gitlab-duo-agent": GitLabDuoWorkflowOptions;
+	"devin-agent": DevinOptions;
 }
 // Compile-time exhaustiveness check - this will fail if ApiOptionsMap doesn't have all KnownApi keys
 type _CheckExhaustive =
@@ -152,14 +157,17 @@ export function resolveServiceTier(
 
 /**
  * True when the (possibly scoped) tier should be sent as OpenAI's
- * `service_tier` request field for the given provider. Non-OpenAI
- * providers, unsupported tiers (`"auto"`, `"default"`), and scope
- * mismatches all return false.
+ * `service_tier` request field for the given provider. Fireworks realizes
+ * only the Priority serving path; other non-OpenAI providers, unsupported
+ * tiers (`"auto"`, `"default"`), and scope mismatches all return false.
  */
 export function shouldSendServiceTier(
 	serviceTier: ServiceTier | null | undefined,
 	provider: Provider | undefined,
 ): boolean {
+	if (provider === "fireworks") {
+		return resolveServiceTier(serviceTier, provider) === "priority";
+	}
 	if (provider !== "openai" && provider !== "openai-codex") return false;
 	const resolved = resolveServiceTier(serviceTier, provider);
 	return resolved === "flex" || resolved === "scale" || resolved === "priority";
@@ -395,6 +403,26 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	openrouterVariant?: string;
 	/** Antigravity endpoint routing mode: "auto" (default with failover), "production", "sandbox". */
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
+	/**
+	 * Response text verbosity for OpenAI Responses-family endpoints
+	 * (`"low" | "medium" | "high"`). Forwarded as the request's
+	 * `text.verbosity` parameter; unset sends no verbosity parameter.
+	 * Ignored by non-Responses providers.
+	 */
+	textVerbosity?: string;
+	/**
+	 * Per-provider cap on concurrent LLM requests, keyed by provider id
+	 * (e.g. `{ openrouter: 4 }`). Supplied by hosts from user settings;
+	 * providers without an entry are unlimited.
+	 */
+	maxInFlightRequests?: Record<string, number>;
+	/**
+	 * Working directory of the requesting session. Used by providers whose
+	 * discovery is workspace-scoped (e.g. GitLab Duo keys namespace/project
+	 * discovery off this cwd's git remote). Hosts can override it per call via
+	 * `AgentLoopConfig.getCwd`.
+	 */
+	cwd?: string;
 }
 
 // Generic StreamFunction with typed options
@@ -460,6 +488,12 @@ export interface ToolCall {
 	 * JSON function tools.
 	 */
 	customWireName?: string;
+	/**
+	 * Raw streamed argument JSON accumulated while the call is in flight.
+	 * Providers write it via the symbol so no string-keyed property leaks into
+	 * serialization; read it with `getStreamingPartialJson`.
+	 */
+	[kStreamingPartialJson]?: string;
 }
 
 export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
@@ -525,6 +559,8 @@ export interface AssistantMessage {
 	errorMessage?: string;
 	/** HTTP status surfaced by the provider when the request failed. Populated by every provider's catch block alongside `errorMessage` so consumers (auth retry, telemetry, UI) can branch without regex-scraping the message. */
 	errorStatus?: number;
+	/** Structured error flag id from the `AIError` classifier. Populated by every provider's catch block (via `AIError.finalize`) alongside `errorMessage`/`errorStatus` so consumers can branch on error kind (abort, context overflow, thinking loop, …) without regex-scraping the message. */
+	errorId?: number;
 	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection

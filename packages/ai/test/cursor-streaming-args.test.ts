@@ -6,12 +6,7 @@ import {
 	type ToolCallState,
 	type UsageState,
 } from "@pk-nerdsaver-ai/pi-ai/providers/cursor";
-import type {
-	AssistantMessage,
-	AssistantMessageEvent,
-	TextContent,
-	ThinkingContent,
-} from "@pk-nerdsaver-ai/pi-ai/types";
+import type { AssistantMessage, AssistantMessageEvent } from "@pk-nerdsaver-ai/pi-ai/types";
 import { AssistantMessageEventStream } from "@pk-nerdsaver-ai/pi-ai/utils/event-stream";
 
 interface Harness {
@@ -48,8 +43,8 @@ function newHarness(): Harness {
 		origPush(event);
 	};
 
-	let textBlock: (TextContent & { index: number }) | null = null;
-	let thinkingBlock: (ThinkingContent & { index: number }) | null = null;
+	let textBlock: BlockState["currentTextBlock"] = null;
+	let thinkingBlock: BlockState["currentThinkingBlock"] = null;
 	let toolCall: ToolCallState | null = null;
 	const state: BlockState = {
 		get currentTextBlock() {

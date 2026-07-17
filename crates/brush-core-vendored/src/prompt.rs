@@ -175,7 +175,10 @@ fn format_current_history_number(shell: &Shell<impl extensions::ShellExtensions>
 	// Bash renders \! as the history number that will be assigned to the next
 	// interactive command. When command history is disabled, bash keeps this at
 	// 1 rather than rendering 0.
-	shell.history().map_or(1, |history| history.count() + 1).to_string()
+	shell
+		.history()
+		.map_or(1, |history| history.count() + 1)
+		.to_string()
 }
 
 fn format_time<Tz: chrono::TimeZone>(

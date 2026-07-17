@@ -15,6 +15,7 @@ import { type GitSource, parseGitUrl } from "./git-url";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "./legacy-pi-compat";
 import { resolvePluginManifestEntries } from "./loader";
 import { type PluginPackageJson, readPluginManifestOrFallback, readSupportedPluginManifest } from "./manifest";
+import { getInstalledPluginsRegistryPath, readInstalledPluginsRegistry } from "./marketplace/registry";
 import { extractPackageName, parsePluginSpec } from "./parser";
 import { normalizePluginRuntimeConfig } from "./runtime-config";
 import type {
@@ -357,6 +358,7 @@ export class PluginManager {
 				manifest: { version: "0.0.0-dryrun" },
 				enabledFeatures: spec.features === "*" ? null : (spec.features as string[] | null),
 				enabled: true,
+				scope: "user",
 			};
 		}
 		const pkgJsonPath = getPluginsPackageJson();
@@ -496,6 +498,7 @@ export class PluginManager {
 				manifest,
 				enabledFeatures,
 				enabled: true,
+				scope: "user",
 			};
 
 			await this.#validateInstalledExtensions(installedPlugin);
@@ -557,6 +560,46 @@ export class PluginManager {
 	}
 
 	/**
+	 * Collect the install paths owned by the marketplace installer. Marketplace
+	 * packages are surfaced through the marketplace registry, not the npm plugin
+	 * list, so list()/doctor() skip runtime links that resolve into these paths.
+	 * Entries are matched by path (not the registry `scope` field) so legacy
+	 * registries written before the scope field stay hidden too.
+	 */
+	async #marketplaceManagedPaths(): Promise<Set<string>> {
+		const managed = new Set<string>();
+		let registry: Awaited<ReturnType<typeof readInstalledPluginsRegistry>>;
+		try {
+			registry = await readInstalledPluginsRegistry(getInstalledPluginsRegistryPath());
+		} catch (err) {
+			logger.warn("Failed to read marketplace plugin registry", { error: String(err) });
+			return managed;
+		}
+		for (const entries of Object.values(registry.plugins)) {
+			for (const entry of entries) {
+				if (typeof entry.installPath !== "string" || entry.installPath.length === 0) continue;
+				managed.add(path.resolve(entry.installPath));
+				try {
+					managed.add(await fs.promises.realpath(entry.installPath));
+				} catch {
+					// Missing cache dir — path-equality match above still applies.
+				}
+			}
+		}
+		return managed;
+	}
+
+	async #isMarketplaceManaged(pluginPath: string, managed: Set<string>): Promise<boolean> {
+		if (managed.size === 0) return false;
+		if (managed.has(path.resolve(pluginPath))) return true;
+		try {
+			return managed.has(await fs.promises.realpath(pluginPath));
+		} catch {
+			return false;
+		}
+	}
+
+	/**
 	 * List all installed plugins.
 	 */
 	async list(): Promise<InstalledPlugin[]> {
@@ -573,9 +616,11 @@ export class PluginManager {
 		const config = await this.#ensureConfigLoaded();
 		const plugins: InstalledPlugin[] = [];
 		const installedNames = this.#collectInstalledNames(deps, config);
+		const marketplacePaths = await this.#marketplaceManagedPaths();
 
 		for (const name of installedNames) {
 			const pluginPath = path.join(getPluginsNodeModules(), name);
+			if (await this.#isMarketplaceManaged(pluginPath, marketplacePaths)) continue;
 			const pluginPkgPath = path.join(pluginPath, "package.json");
 			let pluginPkg: PluginPackageJson;
 			try {
@@ -602,6 +647,7 @@ export class PluginManager {
 				manifest,
 				enabledFeatures: projectFeatures ?? runtimeState.enabledFeatures,
 				enabled: runtimeState.enabled && !isDisabledInProject,
+				scope: "user",
 			});
 		}
 
@@ -666,6 +712,7 @@ export class PluginManager {
 			manifest,
 			enabledFeatures: null,
 			enabled: true,
+			scope: "user",
 		};
 	}
 
@@ -816,9 +863,11 @@ export class PluginManager {
 		const deps = pkg.dependencies || {};
 		const config = await this.#ensureConfigLoaded();
 		const installedNames = this.#collectInstalledNames(deps, config);
+		const marketplacePaths = await this.#marketplaceManagedPaths();
 
 		for (const name of installedNames) {
 			const pluginPath = path.join(nodeModulesPath, name);
+			if (await this.#isMarketplaceManaged(pluginPath, marketplacePaths)) continue;
 			const pluginPkgPath = path.join(pluginPath, "package.json");
 			const fromDependencies = name in deps;
 

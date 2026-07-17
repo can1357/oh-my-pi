@@ -251,7 +251,8 @@ impl ExecutionSpawnResult {
 
 	/// Waits for the command to complete.
 	///
-	/// If a cancellation token is provided and triggered, the process will be killed.
+	/// If a cancellation token is provided and triggered, the process will be
+	/// killed.
 	pub async fn wait_with_cancel(
 		self,
 		cancel_token: Option<CancellationToken>,
@@ -279,6 +280,7 @@ impl ExecutionSpawnResult {
 
 		Ok(result)
 	}
+
 	pub(crate) async fn poll(self) -> Result<ExecutionWaitResult, error::Error> {
 		let result = match self {
 			Self::StartedProcess(child) => ExecutionWaitResult::Stopped(child),

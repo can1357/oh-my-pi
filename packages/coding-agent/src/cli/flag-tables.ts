@@ -30,7 +30,7 @@
  * real implementations at the dispatch site.
  */
 
-import type { Effort } from "@pk-nerdsaver-ai/pi-ai";
+import type { ConfiguredThinkingLevel } from "../thinking";
 import type { Args } from "./args";
 
 /**
@@ -44,8 +44,9 @@ import type { Args } from "./args";
  */
 export interface ParseDeps {
 	logger: { warn: (message: string, meta?: Record<string, unknown>) => void };
-	parseEffort: (value: string | null | undefined) => Effort | undefined;
+	parseConfiguredThinkingLevel: (value: string | null | undefined) => ConfiguredThinkingLevel | undefined;
 	builtinToolNames: readonly string[];
+	normalizeToolNames: (names: Iterable<string>) => string[];
 	thinkingEfforts: readonly string[];
 }
 
@@ -160,10 +161,12 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.models = value.split(",").map(s => s.trim());
 	},
 	"--tools": (result, value, deps) => {
-		const names = value
-			.split(",")
-			.map(s => s.trim().toLowerCase())
-			.filter(Boolean);
+		const names = deps.normalizeToolNames(
+			value
+				.split(",")
+				.map(s => s.trim())
+				.filter(Boolean),
+		);
 		const valid: string[] = [];
 		for (const name of names) {
 			if (deps.builtinToolNames.includes(name)) {
@@ -178,8 +181,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.tools = valid;
 	},
 	"--thinking": (result, value, deps) => {
-		const thinking = deps.parseEffort(value);
-		if (thinking !== undefined) {
+		const thinking = deps.parseConfiguredThinkingLevel(value);
+		// `inherit` is the internal scoped-model sentinel, not a CLI-facing level.
+		if (thinking !== undefined && thinking !== "inherit") {
 			result.thinking = thinking;
 		} else {
 			deps.logger.warn("Invalid thinking level passed to --thinking", {
@@ -312,3 +316,20 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--cleanup-workspace",
 	"--copy-env",
 ]);
+
+/**
+ * True for a `--`-prefixed token that is not any known launch flag and carries
+ * no inline `=value`: an UNKNOWN long option (typically an extension string
+ * flag) that may consume the next argv token as its value. The bootstrap
+ * pre-parser treats such a token's successor as value-like so it never steals
+ * that token as a global `--profile`/`--alias` value.
+ */
+export function isUnknownLongValueCandidate(arg: string): boolean {
+	if (!arg.startsWith("--") || arg === "--" || arg.includes("=")) return false;
+	return (
+		!STRING_VALUE_FLAGS.has(arg) &&
+		!OPTIONAL_VALUE_FLAGS.has(arg) &&
+		!VALUELESS_FLAGS.has(arg) &&
+		arg !== PROFILE_BOOTSTRAP_BOUNDARY_ARG
+	);
+}

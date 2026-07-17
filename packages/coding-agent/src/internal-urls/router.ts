@@ -76,7 +76,7 @@ export class InternalUrlRouter {
 	completionSchemes(): string[] {
 		const schemes: string[] = [];
 		for (const [scheme, handler] of this.#handlers) {
-			if (handler.complete) schemes.push(scheme);
+			if (handler.complete && !handler.hiddenCompletion) schemes.push(scheme);
 		}
 		return schemes;
 	}

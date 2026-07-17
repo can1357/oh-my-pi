@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { pathTargetsSsh, peelWriteUrlSelector, splitInternalUrlSel } from "@pk-nerdsaver-ai/pi-coding-agent/tools/path-utils";
+import {
+	pathTargetsSsh,
+	peelWriteUrlSelector,
+	splitInternalUrlSel,
+} from "@pk-nerdsaver-ai/pi-coding-agent/tools/path-utils";
 
 describe("splitInternalUrlSel", () => {
 	it("returns the input unchanged when there is no selector tail", () => {

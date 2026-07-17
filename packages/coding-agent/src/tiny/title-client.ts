@@ -174,7 +174,6 @@ export class TinyTitleClient {
 	#unsubscribeMessage: (() => void) | null = null;
 	#unsubscribeError: (() => void) | null = null;
 	#pending = new Map<string, PendingRequest>();
-	#failedModels = new Set<TinyLocalModelKey>();
 	#progressListeners = new Set<(event: TinyTitleProgressEvent) => void>();
 	#nextRequestId = 0;
 	#refed = false;
@@ -200,7 +199,7 @@ export class TinyTitleClient {
 	): Promise<string | null> {
 		const options = normalizeTinyTitleGenerateOptions(optionsOrSignal);
 		if (!isTinyTitleLocalModelKey(modelKey)) return null;
-		if (options.signal?.aborted || this.#failedModels.has(modelKey)) return null;
+		if (options.signal?.aborted) return null;
 
 		try {
 			const worker = this.#ensureWorker();
@@ -239,7 +238,7 @@ export class TinyTitleClient {
 		options: { maxTokens?: number; signal?: AbortSignal } = {},
 	): Promise<string | null> {
 		if (!isTinyMemoryLocalModelKey(modelKey)) return null;
-		if (options.signal?.aborted || this.#failedModels.has(modelKey)) return null;
+		if (options.signal?.aborted) return null;
 
 		try {
 			const worker = this.#ensureWorker();
@@ -356,8 +355,8 @@ export class TinyTitleClient {
 		const shouldRef = this.#pending.size > 0;
 		if (shouldRef === this.#refed) return;
 		this.#refed = shouldRef;
-		if (shouldRef) worker.ref();
-		else worker.unref();
+		if (shouldRef) worker.ref?.();
+		else worker.unref?.();
 	}
 
 	#handleMessage(message: TinyTitleWorkerOutbound): void {
@@ -387,15 +386,13 @@ export class TinyTitleClient {
 			return;
 		}
 		logger.debug("tiny-title: worker returned error", { error: message.error });
-		this.#markFailedModel(pending);
+		// Recycle, don't blacklist: execution errors are routinely transient
+		// (model load hiccup, OOM after a long prompt), so the model stays
+		// eligible and the next call spawns a fresh worker (#1940).
 		this.#emitProgress({ modelKey: pending.modelKey, status: "error" });
 		if (pending.kind === "generate" || pending.kind === "complete") pending.resolve(null);
 		else pending.resolve(false);
 		void this.terminate();
-	}
-
-	#markFailedModel(pending: PendingRequest): void {
-		if (pending.kind === "generate" || pending.kind === "complete") this.#failedModels.add(pending.modelKey);
 	}
 
 	#emitProgress(event: TinyTitleProgressEvent): void {

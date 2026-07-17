@@ -1,10 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { EventBus } from "../../src/utils/event-bus";
 import {
 	createOrchestrationTelemetrySink,
 	ORCHESTRATION_TELEMETRY_CHANNEL,
 	recordSpawnTelemetry,
 } from "../../src/orchestration/orchestration-telemetry";
+import { EventBus } from "../../src/utils/event-bus";
 
 describe("orchestration telemetry", () => {
 	it("records spawn events with stable shape", () => {

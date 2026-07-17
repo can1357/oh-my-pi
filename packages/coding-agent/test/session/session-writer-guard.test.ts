@@ -116,9 +116,9 @@ describe("SessionWriterGuard", () => {
 		if (!recovered.recovered) return;
 		guards.add(recovered.guard);
 		expect(recoveredEpoch).toBe(8);
-		expect(() =>
-			SessionWriterGuard.acquire({ sessionId: "session-shared", transcriptPath, lockRoot }),
-		).toThrow(SessionAlreadyOwnedError);
+		expect(() => SessionWriterGuard.acquire({ sessionId: "session-shared", transcriptPath, lockRoot })).toThrow(
+			SessionAlreadyOwnedError,
+		);
 	});
 
 	test("does not attempt recovery while the owner lease is fresh", async () => {

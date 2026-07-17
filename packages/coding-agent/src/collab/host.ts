@@ -61,6 +61,8 @@ const STATE_DEBOUNCE_MS = 100;
 const AGENTS_DEBOUNCE_MS = 100;
 const STREAMING_STATE_INTERVAL_MS = 2000;
 const WELCOME_IMAGE_STRIP_THRESHOLD = 24 * 1024 * 1024;
+/** Serialized-size cap per `snapshot-chunk` frame in the post-welcome transcript train (#3144). */
+const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
 const WIRE_AGENT_EVENT_TYPES: Record<WireAgentEvent["type"], true> = {
 	agent_start: true,
 	agent_end: true,
@@ -361,21 +363,40 @@ export class CollabHost {
 			for (const entry of snapshot.entries) {
 				if (entry.type === "message") stripped += stripImagesFromMessage(entry.message);
 			}
-			logger.info("collab welcome exceeded size threshold; stripped images", { stripped });
+			logger.info("collab snapshot exceeded size threshold; stripped images", { stripped });
 		}
 		const entries = snapshot.entries.filter(isWireSessionEntry);
+		// Small welcome first — the guest clears its first-welcome timeout on
+		// arrival — then the transcript as a `snapshot-chunk` train, all queued
+		// synchronously so no other directed frame can interleave (#3144).
 		this.#socket?.send(
 			{
 				t: "welcome",
 				proto: COLLAB_PROTO,
 				header: snapshot.header,
-				entries,
+				entryCount: entries.length,
 				state: this.#buildState(),
 				agents: this.#snapshotAgents(),
 				readOnly: canWrite ? undefined : true,
 			},
 			fromPeer,
 		);
+		let chunk: typeof entries = [];
+		let chunkBytes = 0;
+		const flush = (final: boolean): void => {
+			this.#socket?.send({ t: "snapshot-chunk", entries: chunk, final }, fromPeer);
+			chunk = [];
+			chunkBytes = 0;
+		};
+		for (const entry of entries) {
+			const bytes = JSON.stringify(entry).length;
+			if (chunk.length > 0 && chunkBytes + bytes > SNAPSHOT_CHUNK_BYTES) flush(false);
+			chunk.push(entry);
+			chunkBytes += bytes;
+		}
+		// The final (possibly empty) chunk terminates the train; the guest resumes
+		// the replica only after seeing it.
+		flush(true);
 	}
 
 	#resyncGuests(): void {

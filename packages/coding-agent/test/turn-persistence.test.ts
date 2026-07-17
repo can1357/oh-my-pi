@@ -16,7 +16,10 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@pk-nerdsaver-ai/pi-agent-core";
-import { planTurnPersistence, sessionMessagePersistenceKey } from "@pk-nerdsaver-ai/pi-coding-agent/session/turn-persistence";
+import {
+	planTurnPersistence,
+	sessionMessagePersistenceKey,
+} from "@pk-nerdsaver-ai/pi-coding-agent/session/turn-persistence";
 
 function assistant(overrides: Partial<Extract<AgentMessage, { role: "assistant" }>> = {}) {
 	return {

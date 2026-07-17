@@ -17,7 +17,8 @@ pub fn normalize_shell_path(path: &Path) -> Cow<'_, Path> {
 	}
 }
 
-/// Returns a Windows drive root for a shell pattern that starts with an MSYS/WSL drive alias.
+/// Returns a Windows drive root for a shell pattern that starts with an
+/// MSYS/WSL drive alias.
 pub fn pattern_drive_alias_root(
 	starts_with_forward_slash: bool,
 	first: &str,
@@ -87,7 +88,11 @@ fn translate_unix_drive_path(path: &Path) -> Option<PathBuf> {
 	native.push(':');
 	native.push('\\');
 	for &byte in tail {
-		native.push(if is_path_separator(byte) { '\\' } else { char::from(byte) });
+		native.push(if is_path_separator(byte) {
+			'\\'
+		} else {
+			char::from(byte)
+		});
 	}
 	Some(PathBuf::from(native))
 }
@@ -166,10 +171,7 @@ mod tests {
 	#[test]
 	fn pattern_drive_alias_roots_require_forward_slash_prefix() {
 		assert_eq!(pattern_drive_alias_root_impl(false, "", Some("d"), Some("logs")), None);
-		assert_eq!(
-			pattern_drive_alias_root_impl(false, "", Some("mnt"), Some("d")),
-			None,
-		);
+		assert_eq!(pattern_drive_alias_root_impl(false, "", Some("mnt"), Some("d")), None,);
 		assert_eq!(pattern_drive_alias_root_impl(true, "", Some("mnt"), Some("data")), None);
 	}
 

@@ -766,8 +766,8 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 							`or pass a UTF-8 text member.`,
 					);
 				}
-				const normalizedContextBefore = this.session.settings.get("search.contextBefore");
-				const normalizedContextAfter = this.session.settings.get("search.contextAfter");
+				const normalizedContextBefore = this.session.settings.get("grep.contextBefore");
+				const normalizedContextAfter = this.session.settings.get("grep.contextAfter");
 				const ignoreCase = !(caseSensitive ?? true);
 				const useGitignore = gitignore ?? true;
 				const patternHasNewline = normalizedPattern.includes("\n") || normalizedPattern.includes("\\n");

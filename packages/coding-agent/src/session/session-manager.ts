@@ -463,9 +463,15 @@ export class SessionManager {
 		if (this.#writerGuard && !this.#writerGuard.released) {
 			throw new Error("Cannot change writable sessions before releasing the prior writer guard");
 		}
+		// Share ownership the process already holds: reopening a live session in
+		// the same process (reload-style tests, hub rename/archive maintenance,
+		// collab replication loading a peer's file) is legitimate — the guard
+		// exists to fence *other* processes, and the underlying lock stays held
+		// until every in-process handle releases.
 		this.#writerGuard = SessionWriterGuard.acquire({
 			sessionId: this.#sessionId,
 			transcriptPath: this.#sessionFile,
+			sameProcessOwner: "share",
 		});
 	}
 
@@ -1264,11 +1270,12 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	appendThinkingLevelChange(thinkingLevel?: string): string {
+	appendThinkingLevelChange(thinkingLevel?: string, configured?: string): string {
 		const entry: ThinkingLevelChangeEntry = {
 			type: "thinking_level_change",
 			...this.#freshEntryFields(),
 			thinkingLevel: thinkingLevel ?? null,
+			...(configured !== undefined ? { configured } : {}),
 		};
 		this.#recordEntry(entry);
 		return entry.id;
@@ -1691,6 +1698,30 @@ export class SessionManager {
 	}
 
 	/**
+	 * Create a fresh, header-only session file in `cwd`'s default session
+	 * directory and return its path. Used by /move to mint the target session
+	 * before switching into it; the file is a valid session (one header entry,
+	 * no messages) that `setSessionFile` can adopt directly.
+	 */
+	static createEmptySessionFile(cwd: string): string {
+		const resolvedCwd = path.resolve(cwd);
+		const sessionDir = SessionManager.getDefaultSessionDir(resolvedCwd);
+		fs.mkdirSync(sessionDir, { recursive: true });
+		const timestamp = nowIso();
+		const sessionId = mintSessionId();
+		const sessionFile = path.join(sessionDir, `${fileSafeTimestamp(timestamp)}_${sessionId}.jsonl`);
+		const header: SessionHeader = {
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id: sessionId,
+			timestamp,
+			cwd: resolvedCwd,
+		};
+		fs.writeFileSync(sessionFile, `${JSON.stringify(header)}\n`, { flag: "wx" });
+		return sessionFile;
+	}
+
+	/**
 	 * Create a new session.
 	 * @param cwd Working directory (stored in the session header)
 	 * @param sessionDir Optional session directory; defaults to the cwd-derived dir.
@@ -1972,4 +2003,26 @@ export class SessionManager {
 	static listAll(storage: SessionStorage = new FileSessionStorage()): Promise<SessionInfo[]> {
 		return listAllSessions(storage);
 	}
+}
+
+/**
+ * Drop a /move target session that never gained real content. `/move` mints an
+ * empty session file (see {@link SessionManager.createEmptySessionFile}) and
+ * records it as the owning move marker; if the session is abandoned before any
+ * user or assistant message lands, this deletes the file so moves don't litter
+ * the session directory. A session that received real messages — or a session
+ * whose file is not the marked one — is left untouched.
+ */
+export async function cleanupEmptyMoveSession(
+	manager: SessionManager,
+	movedFromEmptySessionFile: string | undefined,
+): Promise<void> {
+	if (!movedFromEmptySessionFile) return;
+	const currentFile = manager.getSessionFile();
+	if (!currentFile || path.resolve(currentFile) !== path.resolve(movedFromEmptySessionFile)) return;
+	const hasRealMessages = manager
+		.getEntries()
+		.some(entry => entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant"));
+	if (hasRealMessages) return;
+	await manager.dropSession(movedFromEmptySessionFile);
 }

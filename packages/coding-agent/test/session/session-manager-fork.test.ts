@@ -4,7 +4,13 @@ import * as path from "node:path";
 import { CURRENT_SESSION_VERSION, type SessionHeader } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
 import { getTerminalId } from "@pk-nerdsaver-ai/pi-tui";
-import { getAgentDir, getTerminalSessionsDir, removeWithRetries, setAgentDir, TempDir } from "@pk-nerdsaver-ai/pi-utils";
+import {
+	getAgentDir,
+	getTerminalSessionsDir,
+	removeWithRetries,
+	setAgentDir,
+	TempDir,
+} from "@pk-nerdsaver-ai/pi-utils";
 
 interface JsonlMessageEntry {
 	type: "message";

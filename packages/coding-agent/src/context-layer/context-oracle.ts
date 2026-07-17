@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type AssistantMessage, completeSimple } from "@pk-nerdsaver-ai/pi-ai";
@@ -533,8 +534,14 @@ export class ContextOracle {
 	}
 
 	async #fileStamp(absolute: string): Promise<string> {
-		const stat = await fs.stat(absolute);
-		return `${absolute}:${stat.mtimeMs}:${stat.size}`;
+		// mtime+size alone misses same-length rewrites within the filesystem's
+		// timestamp granularity (two writes in the same millisecond), serving a
+		// stale summary from the shared cache. A content digest closes that hole;
+		// the summary path reads the file anyway, so the extra read is cheap
+		// relative to the LSP/summary work a miss triggers.
+		const [stat, content] = await Promise.all([fs.stat(absolute), fs.readFile(absolute)]);
+		const digest = createHash("sha1").update(content).digest("hex");
+		return `${absolute}:${stat.mtimeMs}:${stat.size}:${digest}`;
 	}
 
 	#resolve(filePath: string): string {
