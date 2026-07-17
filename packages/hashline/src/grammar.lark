@@ -7,13 +7,15 @@ file_header: "[" filename "#" file_hash "]" LF
 file_hash: /[0-9A-F]{4}/
 filename: /[^#\r\n]+/
 
-hunk: replace_hunk | replace_block_hunk | insert_hunk | insert_block_hunk | delete_hunk | delete_block_hunk
+hunk: replace_hunk | replace_block_hunk | insert_hunk | insert_block_hunk | delete_hunk | delete_block_hunk | remove_hunk | move_hunk
 replace_hunk: replace_anchor LF emit_op*
 replace_block_hunk: replace_block_anchor LF emit_op+
 insert_hunk: insert_anchor LF emit_op+
 insert_block_hunk: insert_block_anchor LF emit_op+
 delete_hunk: "DEL " header_range LF
 delete_block_hunk: "DEL.BLK " LID LF
+remove_hunk: "REM" LF
+move_hunk: "MV " filename LF
 replace_anchor: "SWAP " header_range ":"
 replace_block_anchor: "SWAP.BLK " LID ":"
 insert_anchor:  "INS." insert_pos ":"
