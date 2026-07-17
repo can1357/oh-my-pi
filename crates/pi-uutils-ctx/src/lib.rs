@@ -29,6 +29,7 @@ struct Ctx {
 	stdin:                 Box<dyn Read + Send>,
 	/// Raw fd backing `stdin` when it is a real OS file/pipe, used for
 	/// cancellable readiness polling on unix. `None` for non-fd readers.
+	#[cfg_attr(not(unix), allow(dead_code))]
 	stdin_fd:              Option<i32>,
 	/// Whether stdin is a shell pipe/stream that should be searched implicitly.
 	stdin_is_search_input: bool,
