@@ -9,7 +9,15 @@
  * of the fixture JSONL — exactly the frames a real `omp /collab` host emits.
  */
 
-import type { AgentSnapshot, HostFrame, SessionEntry, SessionState, WireFrame } from "@pk-nerdsaver-ai/pi-wire";
+import type {
+	AgentSnapshot,
+	HostFrame,
+	RemoteSessionScope,
+	RemoteSessionSnapshot,
+	SessionEntry,
+	SessionState,
+	WireFrame,
+} from "@pk-nerdsaver-ai/pi-wire";
 import { generateRoomKey, importRoomKey, open, seal } from "../src/lib/codec";
 import { COLLAB_PROTO, formatCollabLink, generateRoomId, packEnvelope, unpackEnvelope } from "../src/lib/link";
 import {
@@ -192,18 +200,7 @@ function handleHello(name: string, proto: number, fromPeer: number): void {
 	}
 	const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
 	peers.set(fromPeer, cleanName);
-	sendFrame(
-		{
-			t: "welcome",
-			proto: COLLAB_PROTO,
-			header: fixtureHeader,
-			state: buildState(),
-			agents: agents.map(agent => ({ ...agent })),
-			entryCount: entries.length,
-		},
-		fromPeer,
-	);
-	sendFrame({ t: "snapshot-chunk", entries: [...entries], final: true }, fromPeer);
+	sendWelcome(fromPeer);
 	console.log(`mock-host: ${cleanName} joined (peer ${fromPeer})`);
 	broadcastState();
 }
@@ -250,6 +247,73 @@ function handleFetchTranscript(reqId: number, fromByte: number, fromPeer: number
 	sendFrame({ t: "transcript", reqId, text, newSize: total }, fromPeer);
 }
 
+const fixtureSessions: RemoteSessionSnapshot[] = [
+	{
+		path: "/mock/sessions/auth-refresh.jsonl",
+		id: "auth-refresh",
+		cwd: fixtureHeader.cwd,
+		title: "Fix auth token refresh",
+		created: "2026-07-15T09:00:00.000Z",
+		modified: "2026-07-16T14:30:00.000Z",
+		messageCount: 42,
+		size: 128_440,
+		firstMessage: "the refresh token flow drops sessions",
+		status: "complete",
+	},
+	{
+		path: "/mock/sessions/rate-limit-retry.jsonl",
+		id: "rate-limit-retry",
+		cwd: "/work/relay",
+		title: "Retry budget for rate limits",
+		created: "2026-07-14T11:00:00.000Z",
+		modified: "2026-07-15T08:12:00.000Z",
+		messageCount: 17,
+		size: 64_208,
+		firstMessage: "429s should honor Retry-After",
+		status: "interrupted",
+	},
+];
+
+function sendWelcome(fromPeer: number): void {
+	sendFrame(
+		{
+			t: "welcome",
+			proto: COLLAB_PROTO,
+			header: fixtureHeader,
+			state: buildState(),
+			agents: agents.map(agent => ({ ...agent })),
+			entryCount: entries.length,
+		},
+		fromPeer,
+	);
+	sendFrame({ t: "snapshot-chunk", entries: [...entries], final: true }, fromPeer);
+}
+
+function handleListSessions(reqId: number, scope: RemoteSessionScope | undefined, fromPeer: number): void {
+	sendFrame(
+		{
+			t: "sessions",
+			reqId,
+			scope: scope === "all" ? "all" : "project",
+			sessions: fixtureSessions,
+			currentPath: fixtureSessions[0]?.path,
+		},
+		fromPeer,
+	);
+}
+
+function handleLoadSession(reqId: number, path: string, fromPeer: number): void {
+	const session = fixtureSessions.find(candidate => candidate.path === path);
+	if (!session) {
+		sendFrame({ t: "session-loaded", reqId, error: "session is not in the known session list" }, fromPeer);
+		return;
+	}
+	sendFrame({ t: "session-loaded", reqId, session }, fromPeer);
+	notice("info", `${peerName(fromPeer)} loaded session "${session.title ?? session.id}"`);
+	// Mirror the real host: after resuming, every guest gets a fresh welcome snapshot.
+	for (const peer of peers.keys()) sendWelcome(peer);
+}
+
 function handleFrame(frame: WireFrame, fromPeer: number): void {
 	switch (frame.t) {
 		case "hello":
@@ -266,6 +330,12 @@ function handleFrame(frame: WireFrame, fromPeer: number): void {
 			break;
 		case "fetch-transcript":
 			handleFetchTranscript(frame.reqId, frame.fromByte, fromPeer);
+			break;
+		case "list-sessions":
+			handleListSessions(frame.reqId, frame.scope, fromPeer);
+			break;
+		case "load-session":
+			handleLoadSession(frame.reqId, frame.path, fromPeer);
 			break;
 		default:
 			// Host-frame echoes or unknown types: ignore.

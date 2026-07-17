@@ -1,4 +1,4 @@
-import { LogOut, PanelLeft } from "lucide-react";
+import { History, LogOut, PanelLeft } from "lucide-react";
 import type { ReactNode } from "react";
 import type { GuestSnapshot } from "../../lib/client";
 import { fmtPercent, shortenPath } from "../../lib/format";
@@ -9,10 +9,18 @@ export interface HeaderBarProps {
 	subCount: number;
 	railOpen: boolean;
 	onToggleRail(): void;
+	onOpenSessions(): void;
 	onLeave(): void;
 }
 
-export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave }: HeaderBarProps): ReactNode {
+export function HeaderBar({
+	snapshot,
+	subCount,
+	railOpen,
+	onToggleRail,
+	onOpenSessions,
+	onLeave,
+}: HeaderBarProps): ReactNode {
 	const { header, state, phase, readOnly } = snapshot;
 	const title = header?.title ?? state?.sessionName ?? "session";
 	const usage = state?.contextUsage;
@@ -82,6 +90,17 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 							</span>
 						))}
 					</span>
+				)}
+				{!readOnly && (
+					<button
+						type="button"
+						className="sh-btn sh-btn-icon"
+						onClick={onOpenSessions}
+						title="browse host sessions"
+						aria-label="Browse host sessions"
+					>
+						<History size={14} />
+					</button>
 				)}
 				<span className={`sh-dot sh-dot-${phase}`} title={phase} />
 				<ThemeToggle />

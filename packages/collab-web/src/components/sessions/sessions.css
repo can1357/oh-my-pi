@@ -1,0 +1,290 @@
+/* Host-session picker drawer. `ss-*` prefix; design-token vars only. */
+
+/* ── Drawer ───────────────────────────────────────────────────────── */
+
+.ss-drawer-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 35;
+	background: var(--backdrop);
+	animation: ss-fade-in 150ms ease-out;
+}
+
+@keyframes ss-fade-in {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+
+.ss-drawer {
+	position: fixed;
+	top: 0;
+	right: 0;
+	bottom: 0;
+	z-index: 40;
+	display: flex;
+	flex-direction: column;
+	width: min(440px, 92vw);
+	border-left: 1px solid var(--border-strong);
+	background: var(--bg-overlay);
+	box-shadow:
+		-12px 0 32px color-mix(in srgb, var(--bg-inset) 55%, transparent),
+		-32px 0 80px color-mix(in srgb, var(--bg-inset) 35%, transparent);
+	animation: ss-drawer-in 150ms ease-out;
+}
+
+@keyframes ss-drawer-in {
+	from {
+		transform: translateX(100%);
+	}
+	to {
+		transform: translateX(0);
+	}
+}
+
+.ss-drawer-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 10px 14px;
+	border-bottom: 1px solid var(--border);
+}
+
+.ss-drawer-title {
+	display: flex;
+	flex: 1;
+	align-items: center;
+	gap: 10px;
+	min-width: 0;
+}
+
+.ss-drawer-name {
+	overflow: hidden;
+	font-size: 13px;
+	font-weight: 600;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.ss-drawer-actions {
+	display: flex;
+	flex: none;
+	align-items: center;
+	gap: 6px;
+}
+
+/* ── Scope toggle ─────────────────────────────────────────────────── */
+
+.ss-scope {
+	display: inline-flex;
+	flex: none;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	overflow: hidden;
+}
+
+.ss-scope-btn {
+	padding: 2px 8px;
+	border: none;
+	background: none;
+	color: var(--fg-muted);
+	font: inherit;
+	font-size: 11px;
+	cursor: pointer;
+	transition:
+		background 150ms ease-out,
+		color 150ms ease-out;
+}
+
+.ss-scope-btn:hover {
+	color: var(--fg);
+}
+
+.ss-scope-btn--active {
+	background: var(--bg-raised);
+	color: var(--fg);
+}
+
+.ss-scope-btn:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: -2px;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────── */
+
+.ss-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	margin-top: 8px;
+	padding: 3px 8px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--bg-raised);
+	color: var(--fg-muted);
+	font: inherit;
+	font-size: 12px;
+	cursor: pointer;
+	transition:
+		background 150ms ease-out,
+		color 150ms ease-out;
+}
+
+.ss-btn:hover {
+	background: color-mix(in srgb, var(--bg-raised) 94%, var(--fg));
+	color: var(--fg);
+}
+
+.ss-btn:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
+
+.ss-iconbtn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 3px;
+	border: none;
+	border-radius: var(--radius-sm);
+	background: none;
+	color: var(--fg-muted);
+	cursor: pointer;
+	transition: color 150ms ease-out;
+}
+
+.ss-iconbtn:hover {
+	color: var(--fg);
+}
+
+.ss-iconbtn:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
+
+/* ── Body & rows ──────────────────────────────────────────────────── */
+
+.ss-drawer-body {
+	display: flex;
+	flex: 1;
+	flex-direction: column;
+	gap: 2px;
+	min-height: 0;
+	padding: 10px 14px;
+	overflow-y: auto;
+	font-size: 13px;
+}
+
+.ss-row {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	width: 100%;
+	padding: 7px 9px;
+	border: 1px solid transparent;
+	border-radius: var(--radius);
+	background: none;
+	color: var(--fg);
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+	transition: background 150ms ease-out;
+}
+
+.ss-row:hover:not(:disabled) {
+	background: var(--bg-raised);
+}
+
+.ss-row:disabled {
+	cursor: default;
+	opacity: 0.7;
+}
+
+.ss-row:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
+
+.ss-row-head {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	min-width: 0;
+}
+
+.ss-row-name {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	font-weight: 500;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.ss-row-cwd {
+	overflow: hidden;
+	color: var(--fg-muted);
+	font-family: var(--font-mono);
+	font-size: 11px;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.ss-row-meta {
+	display: flex;
+	gap: 10px;
+	color: var(--fg-faint);
+	font-family: var(--font-mono);
+	font-size: 11px;
+}
+
+.ss-row-meta-when {
+	margin-left: auto;
+}
+
+/* ── Chips / states ───────────────────────────────────────────────── */
+
+.ss-chip {
+	flex: none;
+	padding: 1px 5px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	color: var(--fg-muted);
+	font-family: var(--font-mono);
+	font-size: 10px;
+	line-height: 1.5;
+	white-space: nowrap;
+}
+
+.ss-chip--current {
+	border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+	color: var(--ok);
+}
+
+.ss-empty {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	padding: 14px 10px;
+	color: var(--fg-faint);
+	font-size: 12px;
+	font-style: italic;
+	text-align: center;
+}
+
+.ss-error {
+	padding: 8px 14px;
+	border-top: 1px solid var(--border);
+	color: var(--err);
+	font-family: var(--font-mono);
+	font-size: 11px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.ss-drawer {
+		animation: none;
+	}
+}

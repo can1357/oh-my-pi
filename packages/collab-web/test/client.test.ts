@@ -1,8 +1,10 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import type {
 	AgentSnapshot,
 	AssistantMessage,
+	GuestFrame,
 	HostFrame,
+	RemoteSessionSnapshot,
 	SessionEntry,
 	SessionHeader,
 	SessionState,
@@ -11,6 +13,7 @@ import type {
 } from "@pk-nerdsaver-ai/pi-wire";
 import { GuestClient } from "../src/lib/client";
 import { encodeBase64Url } from "../src/lib/link";
+import { CollabSocket } from "../src/lib/socket";
 
 const LINK = `roomroomroom1234#${encodeBase64Url(new Uint8Array(32))}`;
 
@@ -241,5 +244,121 @@ describe("GuestClient frame apply", () => {
 		expect(after).not.toBe(before);
 		expect(after.agents).not.toBe(before.agents);
 		expect(after.entries).toBe(before.entries);
+	});
+});
+
+const SESSION_SNAPSHOT: RemoteSessionSnapshot = {
+	path: "/sessions/one.jsonl",
+	id: "one",
+	cwd: "/work",
+	title: "Fix auth",
+	created: "2026-06-12T00:00:00.000Z",
+	modified: "2026-06-12T01:00:00.000Z",
+	messageCount: 4,
+	size: 512,
+	firstMessage: "fix the auth flow",
+	status: "complete",
+};
+
+describe("GuestClient remote session requests", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	function captureSentFrames(): GuestFrame[] {
+		const sentFrames: GuestFrame[] = [];
+		vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {
+			sentFrames.push(frame);
+		});
+		return sentFrames;
+	}
+
+	it("listSessions sends a correlated list-sessions frame and resolves with the host reply", async () => {
+		const sentFrames = captureSentFrames();
+		const client = liveClient();
+		const promise = client.listSessions("all", 5);
+		expect(sentFrames).toHaveLength(1);
+		expect(sentFrames[0]).toMatchObject({ t: "list-sessions", scope: "all", limit: 5 });
+		const reqId = (sentFrames[0] as Extract<GuestFrame, { t: "list-sessions" }>).reqId;
+		client.applyFrameForTest({
+			t: "sessions",
+			reqId,
+			scope: "all",
+			sessions: [SESSION_SNAPSHOT],
+			currentPath: "/sessions/current.jsonl",
+		});
+		const result = await promise;
+		expect(result).toEqual({
+			ok: true,
+			list: { scope: "all", sessions: [SESSION_SNAPSHOT], currentPath: "/sessions/current.jsonl" },
+		});
+	});
+
+	it("loadSession sends a correlated load-session frame and resolves with the loaded session", async () => {
+		const sentFrames = captureSentFrames();
+		const client = liveClient();
+		const promise = client.loadSession(SESSION_SNAPSHOT.path);
+		expect(sentFrames).toHaveLength(1);
+		expect(sentFrames[0]).toMatchObject({ t: "load-session", path: SESSION_SNAPSHOT.path });
+		const reqId = (sentFrames[0] as Extract<GuestFrame, { t: "load-session" }>).reqId;
+		client.applyFrameForTest({ t: "session-loaded", reqId, session: SESSION_SNAPSHOT });
+		const result = await promise;
+		expect(result).toEqual({ ok: true, session: SESSION_SNAPSHOT });
+	});
+
+	it("host error replies surface their message instead of resolving as success", async () => {
+		const sentFrames = captureSentFrames();
+		const client = liveClient();
+		const listPromise = client.listSessions();
+		const listReqId = (sentFrames[0] as Extract<GuestFrame, { t: "list-sessions" }>).reqId;
+		client.applyFrameForTest({ t: "sessions", reqId: listReqId, scope: "project", sessions: [], error: "disk gone" });
+		expect(await listPromise).toEqual({ ok: false, error: "disk gone" });
+
+		const loadPromise = client.loadSession("/sessions/missing.jsonl");
+		const loadReqId = (sentFrames[1] as Extract<GuestFrame, { t: "load-session" }>).reqId;
+		client.applyFrameForTest({
+			t: "session-loaded",
+			reqId: loadReqId,
+			error: "session is not in the known session list",
+		});
+		expect(await loadPromise).toEqual({ ok: false, error: "session is not in the known session list" });
+	});
+
+	it("session requests resolve with an error when the reply never arrives", async () => {
+		vi.useFakeTimers();
+		try {
+			captureSentFrames();
+			const client = liveClient();
+			const listPromise = client.listSessions();
+			const loadPromise = client.loadSession(SESSION_SNAPSHOT.path);
+			vi.advanceTimersByTime(20_000);
+			expect(await listPromise).toEqual({ ok: false, error: "session listing failed: request timed out" });
+			expect(await loadPromise).toEqual({ ok: false, error: "session loading failed: request timed out" });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("pending session requests resolve when the connection ends", async () => {
+		captureSentFrames();
+		const client = liveClient();
+		const promise = client.listSessions();
+		client.applyFrameForTest({ t: "bye", reason: "host left" });
+		expect(await promise).toEqual({ ok: false, error: "session listing failed: connection ended" });
+	});
+
+	it("read-only guests are blocked client-side without sending a frame", async () => {
+		const sentFrames = captureSentFrames();
+		const client = new GuestClient(LINK, "tester");
+		client.applyFrameForTest(welcomeFrame(0, true));
+		expect(await client.listSessions()).toEqual({
+			ok: false,
+			error: "session listing is disabled on a read-only link",
+		});
+		expect(await client.loadSession(SESSION_SNAPSHOT.path)).toEqual({
+			ok: false,
+			error: "session loading is disabled on a read-only link",
+		});
+		expect(sentFrames).toHaveLength(0);
 	});
 });

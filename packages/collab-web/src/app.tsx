@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentDrawer } from "./components/agents/AgentDrawer";
 import { AgentsPanel } from "./components/agents/AgentsPanel";
+import { SessionDrawer } from "./components/sessions/SessionDrawer";
 import { Banners } from "./components/shell/Banners";
 import { Composer } from "./components/shell/Composer";
 import { ConnectScreen } from "./components/shell/ConnectScreen";
@@ -123,6 +124,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 	const snap = useGuestSnapshot(client);
 	const [railOpen, setRailOpen] = useState(() => window.matchMedia("(min-width: 769px)").matches);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
+	const [sessionsOpen, setSessionsOpen] = useState(false);
 	const autoOpenedRef = useRef(false);
 
 	const subCount = useMemo(() => snap.agents.filter(a => a.kind === "sub").length, [snap.agents]);
@@ -189,6 +191,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 					subCount={subCount}
 					railOpen={railOpen}
 					onToggleRail={() => setRailOpen(open => !open)}
+					onOpenSessions={() => setSessionsOpen(true)}
 					onLeave={onLeave}
 				/>
 				<main className="sh-main">
@@ -218,6 +221,12 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 						host={toolHost}
 						onClose={() => setSelectedId(null)}
 					/>
+				</>
+			)}
+			{sessionsOpen && (
+				<>
+					<div className="ss-drawer-backdrop" onClick={() => setSessionsOpen(false)} />
+					<SessionDrawer client={client} onClose={() => setSessionsOpen(false)} />
 				</>
 			)}
 			<Banners phase={snap.phase} endedReason={snap.endedReason} onRejoin={onRejoin} onNewLink={onLeave} />

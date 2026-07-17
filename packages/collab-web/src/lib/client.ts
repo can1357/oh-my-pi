@@ -12,6 +12,8 @@ import type {
 	AgentSnapshot,
 	AssistantMessage,
 	HostFrame,
+	RemoteSessionScope,
+	RemoteSessionSnapshot,
 	SessionEntry,
 	SessionHeader,
 	SessionState,
@@ -63,8 +65,20 @@ export interface GuestSnapshot {
 	notices: readonly Notice[];
 }
 
+/** Host session metadata list returned by {@link GuestClient.listSessions}. */
+export interface RemoteSessionList {
+	scope: RemoteSessionScope;
+	sessions: readonly RemoteSessionSnapshot[];
+	currentPath?: string;
+}
+
+export type ListSessionsResult = { ok: true; list: RemoteSessionList } | { ok: false; error: string };
+export type LoadSessionResult = { ok: true; session: RemoteSessionSnapshot } | { ok: false; error: string };
+
 const MAX_NOTICES = 50;
 const TRANSCRIPT_TIMEOUT_MS = 10_000;
+/** Correlated list/load session requests; mirrors the TUI guest's 20s transcript timeout. */
+const SESSION_REQUEST_TIMEOUT_MS = 20_000;
 /** Mirrors the TUI guest's WELCOME_TIMEOUT_MS: a host that never answers hello ends the join. */
 const WELCOME_TIMEOUT_MS = 30_000;
 /** Mirrors the TUI guest's SNAPSHOT_PROGRESS_TIMEOUT_MS: every snapshot chunk must make progress. */
@@ -75,6 +89,12 @@ interface PendingTranscript {
 	timer: Timer;
 }
 
+interface PendingSessionRequest {
+	timer: Timer;
+	onReply: (frame: Extract<HostFrame, { t: "sessions" | "session-loaded" }>) => void;
+	onAbort: (reason: string) => void;
+}
+
 export class GuestClient {
 	readonly #socket: CollabSocket;
 	readonly #name: string;
@@ -82,6 +102,7 @@ export class GuestClient {
 	readonly #writeToken: string | undefined;
 	readonly #listeners = new Set<() => void>();
 	readonly #pendingTranscripts = new Map<number, PendingTranscript>();
+	readonly #pendingSessionRequests = new Map<number, PendingSessionRequest>();
 	#reqSeq = 0;
 	#noticeSeq = 0;
 	#everConnected = false;
@@ -187,6 +208,76 @@ export class GuestClient {
 		return promise;
 	}
 
+	/** List host sessions for the remote picker. Error result on host error, timeout, or read-only link. */
+	listSessions(scope: RemoteSessionScope = "project", limit?: number): Promise<ListSessionsResult> {
+		const blocked = this.#rejectReadOnlyRequest("session listing");
+		if (blocked) return Promise.resolve(blocked);
+		const reqId = ++this.#reqSeq;
+		const { promise, resolve } = Promise.withResolvers<ListSessionsResult>();
+		this.#registerSessionRequest(
+			reqId,
+			frame => {
+				if (frame.t !== "sessions") {
+					resolve({ ok: false, error: "session listing failed: unexpected reply" });
+					return;
+				}
+				if (frame.error !== undefined) {
+					resolve({ ok: false, error: frame.error });
+					return;
+				}
+				resolve({
+					ok: true,
+					list: { scope: frame.scope, sessions: frame.sessions, currentPath: frame.currentPath },
+				});
+			},
+			reason => resolve({ ok: false, error: `session listing failed: ${reason}` }),
+		);
+		this.#socket.send({ t: "list-sessions", reqId, scope, limit });
+		return promise;
+	}
+
+	/** Ask the host TUI to resume a session; the host resyncs every guest with a fresh welcome. */
+	loadSession(path: string): Promise<LoadSessionResult> {
+		const blocked = this.#rejectReadOnlyRequest("session loading");
+		if (blocked) return Promise.resolve(blocked);
+		const reqId = ++this.#reqSeq;
+		const { promise, resolve } = Promise.withResolvers<LoadSessionResult>();
+		this.#registerSessionRequest(
+			reqId,
+			frame => {
+				if (frame.t !== "session-loaded") {
+					resolve({ ok: false, error: "session loading failed: unexpected reply" });
+					return;
+				}
+				if (frame.error !== undefined || !frame.session) {
+					resolve({ ok: false, error: frame.error ?? "session loading failed" });
+					return;
+				}
+				resolve({ ok: true, session: frame.session });
+			},
+			reason => resolve({ ok: false, error: `session loading failed: ${reason}` }),
+		);
+		this.#socket.send({ t: "load-session", reqId, path });
+		return promise;
+	}
+
+	#registerSessionRequest(
+		reqId: number,
+		onReply: (frame: Extract<HostFrame, { t: "sessions" | "session-loaded" }>) => void,
+		onAbort: (reason: string) => void,
+	): void {
+		const timer = setTimeout(() => {
+			this.#pendingSessionRequests.delete(reqId);
+			onAbort("request timed out");
+		}, SESSION_REQUEST_TIMEOUT_MS);
+		this.#pendingSessionRequests.set(reqId, { timer, onReply, onAbort });
+	}
+
+	#rejectReadOnlyRequest(action: string): { ok: false; error: string } | null {
+		if (!this.#readOnly) return null;
+		return { ok: false, error: `${action} is disabled on a read-only link` };
+	}
+
 	/** Test seam: apply a synthetic host frame through the real apply path. */
 	applyFrameForTest(frame: HostFrame): void {
 		this.#applyFrameSafe(frame);
@@ -221,6 +312,11 @@ export class GuestClient {
 			pending.resolve(null);
 		}
 		this.#pendingTranscripts.clear();
+		for (const [, pending] of this.#pendingSessionRequests) {
+			clearTimeout(pending.timer);
+			pending.onAbort("connection ended");
+		}
+		this.#pendingSessionRequests.clear();
 		this.#commit();
 		this.#socket.close();
 	}
@@ -339,6 +435,16 @@ export class GuestClient {
 					this.#pendingTranscripts.delete(frame.reqId);
 					clearTimeout(pending.timer);
 					pending.resolve(frame.error !== undefined ? null : { text: frame.text, newSize: frame.newSize });
+				}
+				break;
+			}
+			case "sessions":
+			case "session-loaded": {
+				const pending = this.#pendingSessionRequests.get(frame.reqId);
+				if (pending) {
+					this.#pendingSessionRequests.delete(frame.reqId);
+					clearTimeout(pending.timer);
+					pending.onReply(frame);
 				}
 				break;
 			}

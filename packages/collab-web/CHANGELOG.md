@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a host-session picker to the browser guest: the header gains a sessions button (writable links only) that lists the host's project/all sessions over the wire `list-sessions`/`load-session` protocol and asks the host TUI to resume one, after which every guest resyncs from the host's fresh welcome. Requests are correlated by `reqId` with timeout, disconnect, host-error, and read-only handling. The mock host now answers both frames so the flow is exercisable offline.
+
 ### Changed
 - Updated deployment metadata and default collaboration links for the owned `collab.pkking.computer` service.
 
