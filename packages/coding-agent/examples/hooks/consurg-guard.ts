@@ -75,9 +75,13 @@ function pathTargets(toolName: string, input: Record<string, unknown>): PathTarg
 
 	for (const key of ["path", "file_path", "filePath", "file", "scope"] as const) {
 		if (!(key in input)) continue;
+		const value = input[key];
+		// context_oracle's file/scope fields are optional. An empty companion
+		// field must not hide another valid scope from the active guard.
+		if (toolName === "context_oracle" && (key === "file" || key === "scope") && value === "") continue;
 		hasTarget = true;
-		if (key === "scope" && input[key] === "*") paths.push(".");
-		else if (!addPathValue(input[key], paths)) inspectable = false;
+		if (key === "scope" && value === "*") paths.push(".");
+		else if (!addPathValue(value, paths)) inspectable = false;
 	}
 
 	if ("paths" in input) {

@@ -252,6 +252,63 @@ describe("Consurg guard hook contract", () => {
 		);
 	});
 
+	it("evaluates unscoped context_oracle reads as repository-root requests", async () => {
+		await withGuard(
+			request =>
+				request.filePath === "." ? { decision: "deny", message: "workspace denied" } : { decision: "allow" },
+			async requests => {
+				const calls = [
+					{ action: "ask", query: "where is auth handled?" },
+					{ action: "symbol", symbol: "AgentSession" },
+					{ action: "editImpact", symbol: "AgentSession" },
+				];
+				for (const input of calls) {
+					expect(await invokeHook("context_oracle", input)).toEqual({
+						block: true,
+						reason: "workspace denied",
+					});
+				}
+				expect(requests.map(request => request.filePath)).toEqual([".", ".", "."]);
+			},
+		);
+	});
+
+	it("allows an unscoped context_oracle read when repository root is permitted", async () => {
+		await withGuard(
+			request => (request.filePath === "." ? { decision: "allow" } : { decision: "deny", message: "scope denied" }),
+			async requests => {
+				expect(
+					await invokeHook("context_oracle", { action: "ask", query: "where is auth handled?" }),
+				).toBeUndefined();
+				expect(requests.map(request => request.filePath)).toEqual(["."]);
+			},
+		);
+	});
+
+	it("keeps explicit context_oracle scopes and ignores empty optional companions", async () => {
+		await withGuard(
+			request =>
+				request.filePath === "." ? { decision: "deny", message: "workspace denied" } : { decision: "allow" },
+			async requests => {
+				expect(
+					await invokeHook("context_oracle", { action: "ask", query: "summarize auth", file: "src/auth.ts" }),
+				).toBeUndefined();
+				expect(
+					await invokeHook("context_oracle", { action: "symbol", symbol: "AgentSession", scope: "src/**" }),
+				).toBeUndefined();
+				expect(
+					await invokeHook("context_oracle", {
+						action: "editImpact",
+						symbol: "AgentSession",
+						file: "src/agent.ts",
+						scope: "",
+					}),
+				).toBeUndefined();
+				expect(requests.map(request => request.filePath)).toEqual(["src/auth.ts", "src/**", "src/agent.ts"]);
+			},
+		);
+	});
+
 	it("guards known and generic path-bearing tools", async () => {
 		await withGuard(
 			request => {
@@ -290,16 +347,6 @@ describe("Consurg guard hook contract", () => {
 					block: true,
 					reason: "LSP move denied",
 				});
-				expect(await invokeHook("context_oracle", { action: "ask", query: "where is auth handled?" })).toEqual({
-					block: true,
-					reason: "workspace denied",
-				});
-				expect(await invokeHook("context_oracle", { action: "symbol", symbol: "AgentSession", scope: "" })).toEqual(
-					{
-						block: true,
-						reason: "workspace denied",
-					},
-				);
 				expect(requests.map(request => request.filePath)).toEqual([
 					"source.ts",
 					"src/**",
@@ -308,8 +355,6 @@ describe("Consurg guard hook contract", () => {
 					"lsp.ts",
 					"lsp-source.ts",
 					"lsp-renamed.ts",
-					".",
-					".",
 				]);
 			},
 		);
