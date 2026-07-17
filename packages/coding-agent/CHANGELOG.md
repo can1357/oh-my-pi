@@ -46,6 +46,7 @@
 - Trimmed a second pass of tool-prompt prose across `read`/`bash`/`apply-patch`/`patch`/`todo`/`ast-grep`/`github`, dropping schema-inferable and duplicate content while preserving RFC-2119 keywords and Handlebars structure.
 
 ### Fixed
+- Fixed internal-URL autocomplete dropping the active project cwd and AST tools failing to resolve session-loaded `skill://` paths.
 - Fixed active Consurg scopes allowing unscoped `context_oracle` `ask`, `symbol`, and `editImpact` reads to bypass repository-root authorization; empty optional scope fields no longer hide a valid explicit path.
 - Fixed memory startup failing with `ENAMETOOLONG` for deep project paths on Windows: the memories root embedded the full cwd as one directory name, so long cwds pushed artifact paths past the ~260-char limit `Bun.write` enforces. The encoded component is now capped at 64 chars — short cwds keep the legacy verbatim encoding, long ones keep the distinguishing tail plus a stable hash of the full cwd.
 - Fixed `providers.maxInFlightRequests` missing from the settings schema while the settings selector, config CLI, and the per-request stream wrapper still read it — `settings.get` threw on every stream call that did not supply an explicit override, and `omp config set/get` rejected the key as unknown.

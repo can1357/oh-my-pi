@@ -221,6 +221,28 @@ describe("internal-url-autocomplete", () => {
 			expect(result?.items.map(i => i.value)).toEqual(["skill://humanizer"]);
 		});
 
+		it("uses the provider base path for cwd-aware URL completion", async () => {
+			const result: CapabilityResult<SSHHost> = {
+				items: [
+					{
+						name: "project-host",
+						host: "10.0.0.2",
+						_source: { provider: "ssh-json", providerName: "SSH Config", path: "/x", level: "project" },
+					},
+				],
+				all: [],
+				warnings: [],
+				providers: [],
+			};
+			const spy = vi.spyOn(capability, "loadCapability").mockResolvedValue(result as CapabilityResult<unknown>);
+			const provider = new PromptActionAutocompleteProvider([], "/tmp/provider-project", []);
+
+			const suggestions = await provider.getSuggestions(["ssh://"], 0, "ssh://".length);
+
+			expect(suggestions?.items.map(item => item.value)).toEqual(["ssh://project-host"]);
+			expect(spy.mock.calls[0]?.[1]).toEqual({ cwd: "/tmp/provider-project" });
+		});
+
 		it("applies the selected url candidate in place", async () => {
 			const provider = new PromptActionAutocompleteProvider([], process.cwd(), []);
 			const line = "look at skill://hum";

@@ -110,9 +110,11 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 	#baseProvider: CombinedAutocompleteProvider;
 	#actions: PromptActionDefinition[];
 	#skillCommands: SlashCommand[];
+	#basePath: string;
 
 	constructor(commands: SlashCommand[], basePath: string, actions: PromptActionDefinition[]) {
 		this.#baseProvider = new CombinedAutocompleteProvider(commands, basePath);
+		this.#basePath = basePath;
 		this.#actions = actions;
 		this.#skillCommands = commands.filter(command => command.name.startsWith("skill:"));
 	}
@@ -171,7 +173,7 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			}
 		}
 
-		const urlSuggestions = await getInternalUrlSuggestions(textBeforeCursor);
+		const urlSuggestions = await getInternalUrlSuggestions(textBeforeCursor, this.#basePath);
 		if (urlSuggestions) return urlSuggestions;
 
 		if (!isSettingsInitialized() || settings.get("emojiAutocomplete")) {

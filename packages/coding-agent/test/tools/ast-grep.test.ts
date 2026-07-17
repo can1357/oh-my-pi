@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
+import type { Skill } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/skills";
 import { createTools, type ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
@@ -138,6 +139,39 @@ describe("ast_grep parse errors", () => {
 			expect(text).toContain("Inc");
 			expect(details?.matchCount).toBe(1);
 			expect(details?.parseErrors).toBeUndefined();
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("resolves skill URLs from the calling session's skills", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-session-skill-"));
+		try {
+			const skillDir = path.join(tempDir, "session-skill");
+			await fs.mkdir(skillDir, { recursive: true });
+			await Bun.write(path.join(skillDir, "SKILL.md"), "# Session skill\n");
+			await Bun.write(path.join(skillDir, "source.ts"), "const sessionScopedSymbol = true;\n");
+			const skills: Skill[] = [
+				{
+					name: "session-skill",
+					description: "Session-only skill",
+					filePath: path.join(skillDir, "SKILL.md"),
+					baseDir: skillDir,
+					source: "test",
+				},
+			];
+			const tools = await createTools(createTestSession(tempDir, { skills }));
+			const tool = tools.find(entry => entry.name === "ast_grep");
+			if (!tool) throw new Error("Missing ast_grep tool");
+
+			const result = await tool.execute("ast-grep-session-skill", {
+				pat: "sessionScopedSymbol",
+				paths: ["skill://session-skill/source.ts"],
+			});
+
+			const text = result.content.find(content => content.type === "text")?.text ?? "";
+			expect(text).toContain("sessionScopedSymbol");
+			expect((result.details as { matchCount?: number } | undefined)?.matchCount).toBe(1);
 		} finally {
 			await removeWithRetries(tempDir);
 		}

@@ -285,10 +285,17 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				rawPaths: params.paths,
 				cwd: this.session.cwd,
 				internalUrlAction: "rewrite",
+				trackImmutableSources: true,
 				settings: this.session.settings,
 				signal,
 				localProtocolOptions: this.session.localProtocolOptions,
+				skills: this.session.skills,
 			});
+			if (scope.immutableSourcePaths.size > 0) {
+				throw new ToolError(
+					"Cannot rewrite immutable internal URL content. Use `ast_grep` to inspect it, then edit a writable project file.",
+				);
+			}
 			const { searchPath: resolvedSearchPath, scopePath, isDirectory, multiTargets, globFilter } = scope;
 
 			const result = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {

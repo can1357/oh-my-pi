@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { adaptSchemaForStrict, toolWireSchema } from "@pk-nerdsaver-ai/pi-ai/utils/schema";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
+import type { Skill } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/skills";
 import { ToolChoiceQueue } from "@pk-nerdsaver-ai/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
@@ -271,6 +272,40 @@ describe("ast_edit tool schema", () => {
 			const invoker = queue.peekPendingInvoker()!;
 			await invoker({ action: "apply", reason: "apply tlaplus AST edit" });
 			expect(await Bun.file(filePath).text()).toContain("Start == x = 0");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("rejects immutable skill URLs from the calling session's skills", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-session-skill-"));
+		try {
+			const skillDir = path.join(tempDir, "session-skill");
+			await fs.mkdir(skillDir, { recursive: true });
+			await Bun.write(path.join(skillDir, "SKILL.md"), "# Session skill\n");
+			const sourcePath = path.join(skillDir, "source.ts");
+			const source = "legacyWrap(sessionValue, sessionArg);\n";
+			await Bun.write(sourcePath, source);
+			const skills: Skill[] = [
+				{
+					name: "session-skill",
+					description: "Session-only skill",
+					filePath: path.join(skillDir, "SKILL.md"),
+					baseDir: skillDir,
+					source: "test",
+				},
+			];
+			const tools = await createTools(createTestSession(tempDir, { skills }));
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			if (!tool) throw new Error("Missing ast_edit tool");
+
+			await expect(
+				tool.execute("ast-edit-session-skill", {
+					ops: [{ pat: "legacyWrap($A, $B)", out: "modernWrap($A, $B)" }],
+					paths: ["skill://session-skill/source.ts"],
+				}),
+			).rejects.toThrow("Cannot rewrite immutable internal URL content");
+			expect(await Bun.file(sourcePath).text()).toBe(source);
 		} finally {
 			await removeWithRetries(tempDir);
 		}
