@@ -170,9 +170,23 @@ describe("host grace window", () => {
 		const host = await room.connect("host");
 		const guest = await room.connect("guest");
 		await room.disconnect(host);
+		room.now += HOST_GRACE_MS;
 		await roomAlarm(room.deps());
 		expect(guest.controls()).toEqual([{ t: "host-away", graceMs: HOST_GRACE_MS }, { t: "room-closed" }]);
 		expect(guest.closed).toEqual({ code: CLOSE_ROOM_CLOSED, reason: "room closed" });
+	});
+
+	test("a stale alarm before the deadline re-arms instead of closing", async () => {
+		const room = new FakeRoom();
+		const host = await room.connect("host");
+		const guest = await room.connect("guest");
+		await room.disconnect(host);
+		const deadline = room.now + HOST_GRACE_MS;
+		room.now += 1_000;
+		room.alarmAt = 0;
+		await roomAlarm(room.deps());
+		expect(guest.closed).toBeNull();
+		expect(room.alarmAt).toBe(deadline);
 	});
 
 	test("alarm racing a returned host closes nothing", async () => {
@@ -183,6 +197,15 @@ describe("host grace window", () => {
 		await room.connect("host");
 		await roomAlarm(room.deps());
 		expect(guest.closed).toBeNull();
+	});
+
+	test("frames from a replaced host socket are not fanned out to guests", async () => {
+		const room = new FakeRoom();
+		const stale = await room.connect("host");
+		const guest = await room.connect("guest");
+		await room.connect("host");
+		roomMessage(room.deps(), stale.attachment()!, envelope(0, [3]));
+		expect(guest.sent.filter(data => typeof data !== "string")).toHaveLength(0);
 	});
 
 	test("a replaced host socket's close does not start the grace window", async () => {

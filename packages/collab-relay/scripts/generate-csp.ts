@@ -17,15 +17,16 @@ const EXECUTABLE_TYPES = new Set(["module", "text/javascript", "application/java
 const distRoot = path.resolve(process.argv[2] ?? "dist");
 const html = await Bun.file(path.join(distRoot, "index.html")).text();
 
-const hashes: string[] = [];
+const hashes = new Set<string>();
 for (const match of html.matchAll(SCRIPT_RE)) {
 	const attrs = match[1] ?? "";
 	const body = match[2] ?? "";
-	if (/\bsrc\s*=/i.test(attrs) || body.length === 0) continue;
-	const type = /\btype\s*=\s*["']?([^"'\s>]+)/i.exec(attrs)?.[1]?.toLowerCase();
+	// (?:^|\s) keeps data-src / data-type attributes from masquerading as src / type.
+	if (/(?:^|\s)src\s*=/i.test(attrs) || body.length === 0) continue;
+	const type = /(?:^|\s)type\s*=\s*["']?([^"'\s>]+)/i.exec(attrs)?.[1]?.toLowerCase();
 	if (type !== undefined && !EXECUTABLE_TYPES.has(type)) continue;
 	const digest = new Bun.CryptoHasher("sha256").update(body).digest("base64");
-	hashes.push(`'sha256-${digest}'`);
+	hashes.add(`'sha256-${digest}'`);
 }
 
 const csp = [
@@ -48,4 +49,4 @@ const csp = [
 ].join("; ");
 
 await Bun.write(path.join(distRoot, "csp.txt"), `${csp}\n`);
-console.log(`Wrote csp.txt (${hashes.length} inline script hash${hashes.length === 1 ? "" : "es"})`);
+console.log(`Wrote csp.txt (${hashes.size} inline script hash${hashes.size === 1 ? "" : "es"})`);

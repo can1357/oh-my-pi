@@ -138,6 +138,8 @@ export function roomMessage(deps: RoomDeps, sender: SocketAttachment, bytes: Uin
 		host.send(bytes);
 		return;
 	}
+	// A frame queued on a replaced host socket must not fan out as the live host's.
+	if ((sender.epoch ?? 0) !== (host.attachment()?.epoch ?? 0)) return;
 	const targetPeer = readPeerId(bytes);
 	if (targetPeer === null) return;
 	for (const socket of sockets) {
@@ -175,9 +177,19 @@ export async function roomClose(deps: RoomDeps, attachment: SocketAttachment): P
 
 /** Grace window expired: close the room unless the host made it back. */
 export async function roomAlarm(deps: RoomDeps): Promise<void> {
-	await deps.storage.delete([KEY_HOST_AWAY, KEY_PENDING_PEER_LEFTS]);
 	const sockets = deps.sockets();
-	if (hostOf(sockets)) return;
+	if (hostOf(sockets)) {
+		await deps.storage.delete([KEY_HOST_AWAY, KEY_PENDING_PEER_LEFTS]);
+		return;
+	}
+	const away = await deps.storage.get<number>(KEY_HOST_AWAY);
+	if (away !== undefined && away + HOST_GRACE_MS > deps.now()) {
+		// A stale alarm (at-least-once delivery racing a newer grace window)
+		// must not cut the current window short: re-arm to its real deadline.
+		await deps.storage.setAlarm(away + HOST_GRACE_MS);
+		return;
+	}
+	await deps.storage.delete([KEY_HOST_AWAY, KEY_PENDING_PEER_LEFTS]);
 	for (const guest of guestsOf(sockets)) {
 		guest.send(JSON.stringify({ t: "room-closed" }));
 		guest.close(CLOSE_ROOM_CLOSED, "room closed");
