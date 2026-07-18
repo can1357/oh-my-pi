@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `host-away` / `host-back` relay→guest control messages: the relay now holds a room open for a grace window when the host socket drops instead of closing guests immediately.
+
 ### Changed
 
 - Changed the default collaboration relay and encrypted share endpoints to the owned `collab.pkking.computer` service.

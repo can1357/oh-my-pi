@@ -6,11 +6,14 @@ compatibility_date = "2026-07-13"
 pattern = "collab.pkking.computer"
 custom_domain = true
 
+# run_worker_first = true routes every request (including asset hits) through
+# the worker so HTML responses get the client CSP and security headers stamped
+# by src/asset-service.ts; assets previously bypassed the worker entirely.
 [assets]
 directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "none"
-run_worker_first = [ "/healthz", "/r/*", "/s", "/s/*", "/h", "/h/*" ]
+run_worker_first = true
 
 [[durable_objects.bindings]]
 name = "COLLAB_ROOMS"

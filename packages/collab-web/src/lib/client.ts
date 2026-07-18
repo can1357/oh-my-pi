@@ -116,6 +116,8 @@ export class GuestClient {
 		this.#socket.onFrame = frame => this.#applyFrameSafe(frame);
 		this.#socket.onControl = msg => {
 			if (msg.t === "room-closed") this.#end("room closed");
+			else if (msg.t === "host-away") this.#pushNotice("warning", "host connection lost — waiting for it to return");
+			else if (msg.t === "host-back") this.#pushNotice("info", "host reconnected");
 		};
 		this.#socket.onClose = (reason, willReconnect) => this.#handleClose(reason, willReconnect);
 		this.#snapshot = this.#buildSnapshot();

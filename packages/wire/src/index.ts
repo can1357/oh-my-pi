@@ -417,5 +417,10 @@ export interface ParsedCollabLink {
 /** Relay → host control message. */
 export type RelayControlToHost = { t: "peer-joined" | "peer-left"; peer: number };
 /** Relay → guest control message. */
-export type RelayControlToGuest = { t: "room-closed" };
+export type RelayControlToGuest =
+	| { t: "room-closed" }
+	/** Host socket dropped; the relay holds the room open for `graceMs` awaiting its return. */
+	| { t: "host-away"; graceMs: number }
+	/** The host reconnected within the grace window; the session resumes. */
+	| { t: "host-back" };
 export type RelayControlMessage = RelayControlToHost | RelayControlToGuest;

@@ -118,6 +118,8 @@ Set `collab.webUrl` when the browser UI is hosted separately from the websocket 
 
 The owned collaboration service is deployed as the `ompk-collab` Cloudflare Worker at `collab.pkking.computer`. It keeps live room coordination in one Durable Object per room and stores sealed share blobs in the configured R2 bucket. The relay never decrypts session content. Share uploads are capped at 1 MB and rate-limited to 12 per Cloudflare client IP per hour.
 
+A host disconnect does not end the room immediately: guests receive a `host-away` control message and the relay holds the room open for a ~45 s grace window. If the host reconnects in time, guests get `host-back` and the session resumes; otherwise the room closes as before (`room-closed`, close code 4001). A new host connection replaces a lingering half-open host socket (closed with 4010) so a host that lost its network can always re-claim its room. The guest client page is served with a strict build-generated Content-Security-Policy (inline scripts allowed by hash only), `Referrer-Policy: no-referrer`, and `X-Content-Type-Options: nosniff`.
+
 It exposes:
 
 - `GET /` — the static collab-web guest client (target of the `/collab` deep link),

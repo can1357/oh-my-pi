@@ -208,6 +208,14 @@ export class CollabGuestLink {
 				})
 				.catch(err => logger.warn("collab guest frame apply failed", { type: frame.t, error: String(err) }));
 		};
+		socket.onControl = msg => {
+			if (this.#left) return;
+			if (msg.t === "host-away") {
+				this.#ctx.showStatus("Collab host connection lost, waiting for it to return…", { dim: true });
+			} else if (msg.t === "host-back") {
+				this.#ctx.showStatus("Collab host reconnected");
+			}
+		};
 		socket.onClose = (reason, willReconnect) => {
 			this.#flushPendingTranscripts();
 			if (this.#left) return;
