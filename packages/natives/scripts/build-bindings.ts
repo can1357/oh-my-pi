@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { $ } from "bun";
 import { detectHostAvx2Support, resolveLocalHostAddon } from "../../../scripts/host-detect";
 import { generateEnumExports } from "./gen-enums";
+import { parseBuildBindingsArgs } from "./build-bindings-options";
 
 // pcre2-sys prefers a system libpcre2 when pkg-config finds one. Keep the
 // static build so the local addon never retains host Homebrew paths.
@@ -58,6 +59,9 @@ const repoRoot = path.join(import.meta.dir, "../../..");
 const rustDir = path.join(repoRoot, "crates/pi-natives");
 const nativeDir = path.join(import.meta.dir, "../native");
 const packageJsonPath = path.join(import.meta.dir, "../package.json");
+const { dest: requestedDest } = parseBuildBindingsArgs(process.argv.slice(2));
+const installDir = requestedDest ? path.resolve(requestedDest) : nativeDir;
+const updatesWorkspaceBindings = path.relative(nativeDir, installDir) === "";
 
 const localAddon = resolveLocalHostAddon({
 	platform: process.platform,
@@ -175,12 +179,12 @@ async function installGeneratedBindings(outputDir: string): Promise<void> {
 }
 
 const canonicalAddonFilename = localAddon.filename;
-const canonicalAddonPath = path.join(nativeDir, canonicalAddonFilename);
+const canonicalAddonPath = path.join(installDir, canonicalAddonFilename);
 
 console.log(`Building pi-natives bindings for ${process.platform}-${process.arch}${variantSuffix} (local)…`);
 
-await fs.mkdir(nativeDir, { recursive: true });
-await cleanupStaleTemps(nativeDir);
+await fs.mkdir(installDir, { recursive: true });
+await cleanupStaleTemps(updatesWorkspaceBindings ? nativeDir : installDir);
 await fs.mkdir(path.join(nativeDir, ".build"), { recursive: true });
 const buildOutputDir = await fs.mkdtemp(
 	path.join(nativeDir, ".build", `${process.platform}-${process.arch}-${effectiveVariant ?? "default"}-local-`),
@@ -261,9 +265,10 @@ try {
 		await installBinary(builtAddonPath, canonicalAddonPath);
 	}
 
-	await installGeneratedBindings(buildOutputDir);
-
-	await generateEnumExports();
+	if (updatesWorkspaceBindings) {
+		await installGeneratedBindings(buildOutputDir);
+		await generateEnumExports();
+	}
 
 	console.log("Bindings build complete.");
 } finally {

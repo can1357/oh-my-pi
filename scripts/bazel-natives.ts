@@ -222,11 +222,16 @@ async function installAddon(sourcePath: string, destPath: string): Promise<void>
 	}
 }
 
+/** Invoke the local N-API build with an isolated output directory. */
+export function createHostBuildCommand(script: string, destDir: string): string[] {
+	return [process.execPath, script, "--dest", destDir];
+}
+
 /** Build and install the host addon through the local Cargo/N-API path. */
 async function buildLocalHostAddon(host: HostInfo, destDir: string): Promise<void> {
 	const script = path.join(repoRoot, "packages/natives/scripts/build-bindings.ts");
 	console.log(`local host build: using ${path.relative(repoRoot, script)}`);
-	const proc = Bun.spawn([process.execPath, script], {
+	const proc = Bun.spawn(createHostBuildCommand(script, destDir), {
 		cwd: repoRoot,
 		stdout: "inherit",
 		stderr: "inherit",
@@ -235,12 +240,11 @@ async function buildLocalHostAddon(host: HostInfo, destDir: string): Promise<voi
 	if (exitCode !== 0) process.exit(exitCode || 1);
 
 	const filename = resolveLocalHostAddon(host).filename;
-	const builtPath = path.join(repoRoot, "packages/natives/native", filename);
-	if (path.dirname(builtPath) !== destDir) {
-		await fs.mkdir(destDir, { recursive: true });
-		await installAddon(builtPath, path.join(destDir, filename));
+	const outputPath = path.join(destDir, filename);
+	if (!(await Bun.file(outputPath).exists())) {
+		throw new Error(`Host native build did not produce ${outputPath}`);
 	}
-	console.log(`installed ${filename} → ${path.join(destDir, filename)}`);
+	console.log(`installed ${filename} → ${outputPath}`);
 }
 
 async function main(): Promise<void> {

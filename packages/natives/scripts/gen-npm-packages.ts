@@ -46,6 +46,8 @@ export interface GenerateNpmPackagesInput {
 	dryRun?: boolean;
 	version?: string;
 	tags?: readonly string[];
+	/** Directory containing host addon artifacts; defaults to `<packageDir>/native`. */
+	nativeDir?: string;
 }
 
 export const LEAF_TARGETS: readonly LeafTarget[] = [
@@ -137,10 +139,22 @@ export async function generateNpmPackages({
 	dryRun = false,
 	version,
 	tags,
+	nativeDir: nativeDirOverride,
 }: GenerateNpmPackagesInput = {}): Promise<GeneratedLeafPackage[]> {
-	const manifestVersion =
-		version ?? ((await Bun.file(path.join(packageDir, "package.json")).json()) as { version: string }).version;
-	const nativeDir = path.join(packageDir, "native");
+	const manifest = await Bun.file(path.join(packageDir, "package.json")).json();
+	let manifestVersion = version;
+	if (manifestVersion === undefined) {
+		if (
+			typeof manifest !== "object" ||
+			manifest === null ||
+			!("version" in manifest) ||
+			typeof manifest.version !== "string"
+		) {
+			throw new Error(`Package version missing from ${packageDir}`);
+		}
+		manifestVersion = manifest.version;
+	}
+	const nativeDir = nativeDirOverride ?? path.join(packageDir, "native");
 	const npmDir = path.join(packageDir, "npm");
 	const leaves: GeneratedLeafPackage[] = [];
 

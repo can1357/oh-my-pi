@@ -601,6 +601,16 @@ bun dev
 
 `bun setup` installs Bun workspaces and builds `@oh-my-pi/pi-natives`. Re-run `bun run build:native` after changing Rust crates or `packages/natives`.
 
+### Build a detached local package
+
+To package the current checkout and replace the source-linked `omp` command with a detached local install:
+
+```sh
+bun run install:local-package
+```
+
+The installer writes tarballs and a launcher outside the repository. Double-click `install-local-package.cmd` on Windows for the same path.
+
 Nix users get the pinned Bun and Rust toolchains plus all native build dependencies:
 
 ```sh

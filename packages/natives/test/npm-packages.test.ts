@@ -98,6 +98,26 @@ describe("generated native npm leaf packages", () => {
 		}
 	});
 
+	it("generates a host leaf from an isolated native build directory", async () => {
+		const packageDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-natives-npm-isolated-"));
+		const nativeDir = path.join(packageDir, "isolated-native");
+		try {
+			await fs.mkdir(nativeDir, { recursive: true });
+			await Bun.write(path.join(packageDir, "package.json"), JSON.stringify({ version: "15.5.15" }));
+			await Bun.write(path.join(nativeDir, "pi_natives.win32-x64-baseline.node"), "addon");
+			await Bun.write(path.join(packageDir, "LICENSE"), "MIT payload\n");
+			await Bun.write(path.join(packageDir, "THIRD-PARTY-NOTICES.txt"), "Notice payload\n");
+			const leaves = await generateNpmPackages({ packageDir, nativeDir, tags: ["win32-x64"] });
+			expect(leaves).toHaveLength(1);
+			expect(leaves[0]?.files).toEqual(["pi_natives.win32-x64-baseline.node"]);
+			expect(await Bun.file(path.join(packageDir, "npm/win32-x64/pi_natives.win32-x64-baseline.node")).text()).toBe(
+				"addon",
+			);
+		} finally {
+			await fs.rm(packageDir, { recursive: true, force: true });
+		}
+	});
+
 	it("uses the repository notice when direct generation has only package-local licenses", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-natives-npm-notice-"));
 		const packageDir = path.join(root, "packages/natives");
