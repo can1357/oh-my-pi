@@ -5,7 +5,7 @@ import { createSignal } from "solid-js";
 // Views stay mounted; Shell toggles visibility so filter state + Browse's
 // createResource survive view switches.
 
-export type View = "operations" | "activity" | "triage";
+export type View = "operations" | "activity" | "triage" | "conversation";
 
 const [activeView, setActiveView] = createSignal<View>("operations");
 

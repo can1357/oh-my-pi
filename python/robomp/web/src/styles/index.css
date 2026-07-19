@@ -1295,6 +1295,92 @@ code,
   color: var(--color-ink-400);
 }
 
+/* Conversation mode preview. The surface is complete while the transport stays
+   deliberately unavailable until its backend contract lands. */
+.rmp-conversation {
+  width: min(100%, 760px);
+  margin: clamp(20px, 7vh, 72px) auto 0;
+  padding: clamp(24px, 4vw, 40px);
+  border: 1px solid var(--color-stroke-soft);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 20px;
+}
+.rmp-conversation-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--color-accent) 14%, transparent);
+  color: var(--color-accent);
+  display: grid;
+  place-items: center;
+}
+.rmp-conversation-copy h2 {
+  margin: 6px 0 8px;
+  color: var(--color-ink-100);
+  font-size: clamp(22px, 3vw, 30px);
+  line-height: 1.1;
+  letter-spacing: -0.025em;
+}
+.rmp-conversation-copy p {
+  max-width: 58ch;
+  margin: 0;
+  color: var(--color-ink-300);
+  font-size: 13px;
+  line-height: 1.65;
+}
+.rmp-conversation-capabilities {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.rmp-conversation-capabilities span,
+.rmp-nav-item-status {
+  color: var(--color-ink-300);
+  background: var(--color-surface-2);
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+.rmp-conversation-capabilities span { padding: 5px 8px; }
+.rmp-nav-item-status {
+  padding: 2px 5px;
+  text-transform: uppercase;
+}
+.rmp-conversation-composer {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+  padding-top: 20px;
+  border-top: 1px solid var(--color-stroke-soft);
+}
+.rmp-conversation-composer label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--color-ink-300);
+  font-size: 11px;
+  font-weight: 600;
+}
+.rmp-conversation-input-row { display: flex; gap: 8px; }
+.rmp-conversation-input-row input { flex: 1; min-width: 0; }
+.rmp-conversation-note {
+  display: block;
+  margin-top: 8px;
+  color: var(--color-ink-300);
+  font-size: 11px;
+}
+@media (max-width: 639px) {
+  .rmp-conversation {
+    margin-top: 4px;
+    grid-template-columns: 1fr;
+  }
+  .rmp-conversation-capabilities { grid-column: 1; }
+  .rmp-conversation-input-row { align-items: stretch; flex-direction: column; }
+  .rmp-conversation-input-row button { justify-content: center; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .rmp-nav-item,
   .rmp-mobile-menu-btn,

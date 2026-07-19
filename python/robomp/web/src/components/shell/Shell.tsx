@@ -2,6 +2,7 @@ import { createEffect, createSignal, type JSX, Show } from "solid-js";
 
 import { activeView } from "../../view";
 import { Activity } from "../views/Activity";
+import { Conversation } from "../views/Conversation";
 import { Operations } from "../views/Operations";
 import { Triage } from "../views/Triage";
 import { Rail } from "./Rail";
@@ -49,7 +50,7 @@ export function Shell(): JSX.Element {
         <TopBar onMenuToggle={() => setDrawerOpen(true)} />
         <main class="rmp-content scrollable">
           <div class="rmp-content-inner">
-            {/* All 3 views stay mounted; visibility toggled by activeView so
+            {/* All views stay mounted; visibility toggled by activeView so
                 view-local UI state (Logs/Browse filters) persists and Browse
                 does not refetch on view switches. The enter animation
                 (rmp-view-enter) restarts automatically when a view flips
@@ -63,6 +64,9 @@ export function Shell(): JSX.Element {
             </div>
             <div class="rmp-view rmp-view-enter" style={{ display: viewDisplay("triage") }}>
               <Triage />
+            </div>
+            <div class="rmp-view rmp-view-enter" style={{ display: viewDisplay("conversation") }}>
+              <Conversation />
             </div>
           </div>
         </main>

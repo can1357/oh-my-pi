@@ -33,6 +33,15 @@ function TriageIcon(): JSX.Element {
     </svg>
   );
 }
+function ConversationIcon(): JSX.Element {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z" />
+      <path d="M8 9h8M8 13h5" />
+    </svg>
+  );
+}
 function LockIcon(): JSX.Element {
   return (
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -48,12 +57,20 @@ interface NavDef {
   label: string;
   icon: () => JSX.Element;
   locked: boolean;
+  status?: string;
 }
 
 const NAV: NavDef[] = [
   { id: "operations", label: "Operations", icon: OpsIcon, locked: false },
   { id: "activity", label: "Activity", icon: ActivityIcon, locked: false },
   { id: "triage", label: "Triage", icon: TriageIcon, locked: !CONFIG.replayEnabled },
+  {
+    id: "conversation",
+    label: "Conversation mode",
+    icon: ConversationIcon,
+    locked: false,
+    status: "preview",
+  },
 ];
 
 export function Rail(): JSX.Element {
@@ -71,7 +88,7 @@ export function Rail(): JSX.Element {
       {/* Always-on vitals: health/sync + running# + failed# + 5 counts + runtime meta */}
       <Vitals />
 
-      {/* Nav: Operations / Activity / Triage */}
+      {/* Primary workspace navigation */}
       <nav class="rmp-nav">
         {NAV.map((item) => (
           <button
@@ -85,6 +102,9 @@ export function Rail(): JSX.Element {
           >
             <span class="rmp-nav-item-icon">{item.icon()}</span>
             <span class="rmp-nav-item-label">{item.label}</span>
+            <Show when={item.status}>
+              <span class="rmp-nav-item-status">{item.status}</span>
+            </Show>
             <Show when={item.locked}>
               <span class="rmp-nav-item-lock" title="read-only">
                 <LockIcon />
