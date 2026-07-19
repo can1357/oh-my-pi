@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { serveClientAsset } from "./asset-service";
 import { handleHubRequest, pruneHubs } from "./hub-service";
 import type {
 	HubAccessToken,
@@ -7,14 +8,17 @@ import type {
 	HubStoredValue,
 	HubTokenBinding,
 } from "./hub-types";
+import {
+	parseAttachment,
+	type RoomDeps,
+	type RoomSocket,
+	roomAlarm,
+	roomClose,
+	roomConnect,
+	roomMessage,
+	type SocketAttachment,
+} from "./room-service";
 import { handleShareRequest, pruneShares, type ShareServiceDependencies } from "./share-service";
-
-type RelayRole = "host" | "guest";
-
-interface SocketAttachment {
-	role: RelayRole;
-	peerId: number;
-}
 
 interface Env {
 	ASSETS: Fetcher;
@@ -27,7 +31,6 @@ interface Env {
 }
 
 const ROOM_PATH_RE = /^\/r\/([A-Za-z0-9_-]{10,64})$/;
-const ENVELOPE_HEADER_LENGTH = 4;
 const SHARE_UPLOAD_LIMIT = 12;
 const SHARE_UPLOAD_WINDOW_MS = 60 * 60 * 1_000;
 
@@ -43,25 +46,12 @@ function asBinary(message: ArrayBuffer | string): Uint8Array<ArrayBuffer> | null
 	return new Uint8Array(message);
 }
 
-function readPeerId(bytes: Uint8Array): number | null {
-	if (bytes.byteLength < ENVELOPE_HEADER_LENGTH) return null;
-	return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, false);
-}
-
-function rewritePeerId(bytes: Uint8Array, peerId: number): void {
-	new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).setUint32(0, peerId, false);
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function attachmentOf(socket: WebSocket): SocketAttachment | null {
-	const value: unknown = socket.deserializeAttachment();
-	if (!isRecord(value)) return null;
-	const record = value;
-	if ((record.role !== "host" && record.role !== "guest") || typeof record.peerId !== "number") return null;
-	return { role: record.role, peerId: record.peerId };
+	return parseAttachment(socket.deserializeAttachment());
 }
 
 function relayResponse(request: Request, env: Env): Promise<Response> {
@@ -97,16 +87,24 @@ function shareDependencies(env: Env): ShareServiceDependencies {
 	};
 }
 
-async function assetOrSpa(request: Request, assets: Fetcher): Promise<Response> {
-	const asset = await assets.fetch(request);
-	if (asset.status !== 404 || request.method !== "GET") return asset;
-	const rootUrl = new URL(request.url);
-	rootUrl.pathname = "/";
-	rootUrl.search = "";
-	return assets.fetch(new Request(rootUrl, { headers: request.headers }));
-}
-
 export class CollabRoom extends DurableObject<Env> {
+	#deps(): RoomDeps {
+		return {
+			sockets: () => this.ctx.getWebSockets().map(socket => this.#roomSocket(socket)),
+			storage: this.ctx.storage,
+			now: () => Date.now(),
+		};
+	}
+
+	#roomSocket(socket: WebSocket): RoomSocket {
+		return {
+			attachment: () => attachmentOf(socket),
+			setAttachment: attachment => socket.serializeAttachment(attachment),
+			send: data => socket.send(data),
+			close: (code, reason) => socket.close(code, reason),
+		};
+	}
+
 	async fetch(request: Request): Promise<Response> {
 		if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
 			return new Response("websocket upgrade required", { status: 426 });
@@ -117,30 +115,8 @@ export class CollabRoom extends DurableObject<Env> {
 		const pair = new WebSocketPair();
 		const client = pair[0];
 		const server = pair[1];
-		const sockets = this.ctx.getWebSockets();
-		const host = sockets.find(socket => attachmentOf(socket)?.role === "host");
-
 		this.ctx.acceptWebSocket(server);
-		if (role === "host" && host) {
-			server.close(4009, "a host is already connected for this room");
-			return new Response(null, { status: 101, webSocket: client });
-		}
-		if (role === "guest" && !host) {
-			server.close(4004, "no such room");
-			return new Response(null, { status: 101, webSocket: client });
-		}
-
-		let peerId = 0;
-		if (role === "guest") {
-			peerId = (await this.ctx.storage.get<number>("nextPeerId")) ?? 1;
-			if (peerId > 0xfffffffe) {
-				server.close(4029, "room is full");
-				return new Response(null, { status: 101, webSocket: client });
-			}
-			await this.ctx.storage.put("nextPeerId", peerId + 1);
-		}
-		server.serializeAttachment({ role, peerId } satisfies SocketAttachment);
-		if (role === "guest") host?.send(JSON.stringify({ t: "peer-joined", peer: peerId }));
+		await roomConnect(this.#deps(), this.#roomSocket(server), role);
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
@@ -148,41 +124,17 @@ export class CollabRoom extends DurableObject<Env> {
 		const attachment = attachmentOf(socket);
 		const bytes = asBinary(message);
 		if (!attachment || !bytes) return;
-		const sockets = this.ctx.getWebSockets();
-		const host = sockets.find(candidate => attachmentOf(candidate)?.role === "host");
-		if (!host) return;
-
-		if (attachment.role === "guest") {
-			if (bytes.byteLength < ENVELOPE_HEADER_LENGTH) return;
-			rewritePeerId(bytes, attachment.peerId);
-			host.send(bytes);
-			return;
-		}
-
-		const targetPeer = readPeerId(bytes);
-		if (targetPeer === null) return;
-		for (const candidate of sockets) {
-			const candidateAttachment = attachmentOf(candidate);
-			if (candidateAttachment?.role !== "guest") continue;
-			if (targetPeer === 0 || targetPeer === candidateAttachment.peerId) candidate.send(bytes);
-		}
+		roomMessage(this.#deps(), attachment, bytes);
 	}
 
-	webSocketClose(socket: WebSocket): void {
+	async webSocketClose(socket: WebSocket): Promise<void> {
 		const attachment = attachmentOf(socket);
 		if (!attachment) return;
-		const sockets = this.ctx.getWebSockets();
-		if (attachment.role === "host") {
-			for (const candidate of sockets) {
-				const candidateAttachment = attachmentOf(candidate);
-				if (candidateAttachment?.role !== "guest") continue;
-				candidate.send(JSON.stringify({ t: "room-closed" }));
-				candidate.close(4001, "room closed");
-			}
-			return;
-		}
-		const host = sockets.find(candidate => attachmentOf(candidate)?.role === "host");
-		if (host) host.send(JSON.stringify({ t: "peer-left", peer: attachment.peerId }));
+		await roomClose(this.#deps(), attachment);
+	}
+
+	async alarm(): Promise<void> {
+		await roomAlarm(this.#deps());
 	}
 }
 
@@ -357,7 +309,7 @@ export default {
 		if (shareResponse) return shareResponse;
 		const hubResponse = await handleHubRequest(request, hubDependencies(env));
 		if (hubResponse) return hubResponse;
-		return assetOrSpa(request, env.ASSETS);
+		return serveClientAsset(request, env.ASSETS);
 	},
 
 	async scheduled(_controller: ScheduledController, env: Env): Promise<void> {

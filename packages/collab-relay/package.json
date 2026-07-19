@@ -5,7 +5,8 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"build": "rm -rf dist && bun build ../collab-web/index.html --outdir=dist --minify --entry-naming=[hash].[ext] --chunk-naming=[hash].[ext] --asset-naming=[hash].[ext] && mv dist/*.html dist/index.html && cp -R ../collab-web/public/* dist/ && mkdir -p dist/share-viewer && bun ../coding-agent/scripts/generate-share-viewer.ts dist/share-viewer/index.html && bun scripts/verify-build.ts dist",
+		"build:client": "rm -rf dist && bun build ../collab-web/index.html --outdir=dist --minify --entry-naming=[hash].[ext] --chunk-naming=[hash].[ext] --asset-naming=[hash].[ext] && mv dist/*.html dist/index.html && cp -R ../collab-web/public/* dist/ && bun scripts/generate-csp.ts dist",
+		"build": "bun run build:client && mkdir -p dist/share-viewer && bun ../coding-agent/scripts/generate-share-viewer.ts dist/share-viewer/index.html && bun scripts/verify-build.ts dist",
 		"dev": "bun run build && wrangler dev",
 		"deploy": "bun run build && wrangler deploy",
 		"check": "biome check src test scripts && bun run check:types",

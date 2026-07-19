@@ -102,6 +102,7 @@
     "collab:relay": "bun --cwd=packages/collab-web run relay",
     "collab:mock-host": "bun --cwd=packages/collab-web run mock-host",
     "collab:web:build": "bun --cwd=packages/collab-web run build",
+    "collab:relay:build": "bun --cwd=packages/collab-relay run build",
     "claude:trace": "bun scripts/claude-trace.ts",
     "build": "bun run --workspaces --if-present build",
     "build:native": "bun --cwd=packages/natives run build",

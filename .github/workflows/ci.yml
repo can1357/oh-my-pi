@@ -207,6 +207,10 @@ jobs:
            run: bun run ci:check:full
          - name: Build collab web
            run: bun run collab:web:build
+         # Client bundle + CSP generation only: the full relay build's share-viewer
+         # step needs the native addon, which this job intentionally lacks.
+         - name: Build collab relay client assets
+           run: bun --cwd=packages/collab-relay run build:client
 
    # Linux x64 baseline + modern: required by `test`, so it runs on every PR
    # unless native_artifact_lookup found a cached run. Release runs always

@@ -14,6 +14,7 @@ const FATAL_CLOSE_REASONS: Record<number, string> = {
 	4001: "room closed",
 	4004: "no such room",
 	4009: "a host is already connected for this room",
+	4010: "host connection replaced",
 	4029: "room is full",
 };
 
