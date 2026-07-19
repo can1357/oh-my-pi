@@ -1,0 +1,611 @@
+workflow:
+  name: complete-ompk-prs
+  description: Finish PR 5 first, then rebase, validate, and finish stacked PR 4.
+  version: "1.0.0"
+  entry_point: preflight_clean
+
+  runtime:
+    provider: copilot
+    default_model: gpt-5.2
+    default_reasoning_effort: high
+    max_agent_iterations: 50
+
+  input:
+    repo:
+      type: string
+      default: kingkillery/oh-my-pk
+      description: GitHub repository in owner/name form.
+    remote:
+      type: string
+      default: oh-my-pk
+      description: Git remote containing the PR branches.
+    workspace:
+      type: string
+      default: "."
+      description: Disposable checkout used by the workflow.
+    base_branch:
+      type: string
+      default: main
+      description: Final integration branch.
+    pr5:
+      type: number
+      default: 5
+      description: Foundational fork-sync PR number.
+    pr4:
+      type: number
+      default: 4
+      description: Stacked capture-to-agent PR number.
+    pr5_branch:
+      type: string
+      default: claude/fix-fork-sync-ci
+      description: PR 5 head branch.
+    pr4_branch:
+      type: string
+      default: claude/capture-to-agent-workflow-j30cki
+      description: PR 4 head branch.
+
+  context:
+    mode: accumulate
+
+  limits:
+    max_iterations: 50
+    timeout_seconds: 14400
+
+  instructions:
+    - !file ../AGENTS.md
+    - |
+      This workflow is intentionally stacked: PR 5 repairs main and is the
+      base of PR 4. Work only in the supplied disposable checkout and keep
+      the worktree clean before starting. Never push, retarget, or merge until
+      a human_gate approves it. Do not post GitHub comments. Verify review
+      findings against the current code before changing anything; skip stale
+      or non-actionable findings with a reason. Never weaken or delete tests.
+
+agents:
+  - name: preflight_clean
+    type: script
+    description: Refuse to operate on a dirty checkout.
+    command: git
+    args: [status, --porcelain]
+    working_dir: "{{ workflow.input.workspace }}"
+    timeout: 30
+    routes:
+      - to: pr5_inventory
+        when: "stdout == ''"
+      - to: stop_dirty
+
+  - name: pr5_inventory
+    type: script
+    description: Snapshot PR 5 state before any local edits.
+    command: gh
+    args:
+      - pr
+      - view
+      - "{{ workflow.input.pr5 }}"
+      - --repo
+      - "{{ workflow.input.repo }}"
+      - --json
+      - number,title,state,isDraft,mergeable,baseRefName,headRefName,headRefOid,reviewDecision,statusCheckRollup,commits,changedFiles,additions,deletions
+    working_dir: "{{ workflow.input.workspace }}"
+    timeout: 60
+    routes:
+      - to: pr4_inventory
+        when: "exit_code == 0"
+      - to: stop_pr5_inventory
+
+  - name: pr4_inventory
+    type: script
+    description: Snapshot stacked PR 4 state before edits.
+    command: gh
+    args:
+      - pr
+      - view
+      - "{{ workflow.input.pr4 }}"
+      - --repo
+      - "{{ workflow.input.repo }}"
+      - --json
+      - number,title,state,isDraft,mergeable,baseRefName,headRefName,headRefOid,reviewDecision,statusCheckRollup,commits,changedFiles,additions,deletions
+    working_dir: "{{ workflow.input.workspace }}"
+    timeout: 60
+    routes:
+      - to: pr5_review_fix
+        when: "exit_code == 0"
+      - to: stop_pr4_inventory
+
+  - name: pr5_review_fix
+    description: Verify and fix valid PR 5 review findings without pushing.
+    prompt: |
+      Work on PR {{ workflow.input.pr5 }} (`{{ workflow.input.pr5_branch }}`),
+      currently targeting `{{ workflow.input.base_branch }}`. The inventory was:
+
+      {{ pr5_inventory.output.stdout }}
+
+      Review the live PR discussion with `gh` and inspect the actual branch
+      before editing. Fetch the branch and check it out in the disposable
+      workspace. Do not push or merge.
+
+      Prioritize correctness and merge blockers. The currently known review
+      hotspots include: thinking-display formatting in
+      `packages/coding-agent/src/modes/components/assistant-message.ts`, the
+      issue-1940 worker-recycling regression test, forwarding `errorId`,
+      forwarding `keepAlive`/`parentServiceTier`, resolving advisor context
+      from the session cwd, making `createEmptySessionFile` storage-aware,
+      restoring all environment variables in session-manager tests, closing
+      reopened sessions in finally blocks, quoting the native tarball glob in
+      `scripts/install-tests/run-ci.sh`, and closing the session manager in
+      `agent-hub.ts.removeAgent`.
+
+      Verify every finding against the current code. Fix valid findings with
+      minimal, contract-level changes and add or preserve regression tests when
+      the behavior is externally observable. Skip stale, duplicate, or
+      non-blocking nitpicks with a concrete reason. Do not broaden scope into
+      unrelated cleanup. Commit the local fixes so the next validation step can
+      inspect the exact diff, but do not push.
+
+      Return a structured summary with status, changed_files, fixed_findings,
+      skipped_findings, remaining_risks, and commit.
+    output:
+      status: { type: string }
+      changed_files: { type: array, items: { type: string } }
+      fixed_findings: { type: array, items: { type: string } }
+      skipped_findings: { type: array, items: { type: string } }
+      remaining_risks: { type: array, items: { type: string } }
+      commit: { type: string }
+    routes:
+      - to: pr5_validate
+
+  - name: pr5_validate
+    description: Run the PR 5 merge-gate checks.
+    prompt: |
+      Validate the current PR 5 branch after the review-fix pass. Do not push.
+      Run the checks that the PR claims and the repository exposes, including:
+
+      - `bun run check:types`
+      - `biome check .`
+      - `cargo fmt --all -- --check`
+      - `bun run build:native`
+      - focused tests for changed packages plus the relevant Rust crate tests
+
+      Inspect failures rather than treating a command timeout or missing native
+      dependency as success. A check is merge-blocking unless the failure is
+      demonstrably pre-existing and recorded with command output. Set `ready`
+      true only when the branch is locally validated and all applicable review
+      findings are fixed or explicitly justified. Do not make opportunistic
+      changes in this step.
+
+      Return ready, checks, failures, and a concise summary.
+    output:
+      ready: { type: boolean }
+      checks: { type: array, items: { type: string } }
+      failures: { type: array, items: { type: string } }
+      summary: { type: string }
+    routes:
+      - to: pr5_push_gate
+        when: "{{ output.ready }}"
+      - to: pr5_repair
+
+  - name: pr5_repair
+    description: Repair only failures reported by PR 5 validation.
+    prompt: |
+      Repair the current PR 5 branch using the validation report below.
+      Reproduce each failure, fix only failures caused by this branch or valid
+      review findings, and add no speculative refactors. Keep the worktree
+      local and commit the repair; do not push.
+
+      Validation report:
+      {{ pr5_validate.output.summary }}
+      Failures:
+      {{ pr5_validate.output.failures | join("; ") }}
+
+      Return the commit and a short explanation of every repair or skipped
+      pre-existing failure. The next step will rerun the full validation.
+    output:
+      status: { type: string }
+      repairs: { type: array, items: { type: string } }
+      skipped: { type: array, items: { type: string } }
+      commit: { type: string }
+    routes:
+      - to: pr5_validate
+
+  - name: pr5_push_gate
+    type: human_gate
+    prompt: |
+      PR {{ workflow.input.pr5 }} is locally fixed and validated.
+
+      Validation:
+      {{ pr5_validate.output.summary }}
+
+      Review fixes:
+      Fixed: {{ pr5_review_fix.output.fixed_findings | join("; ") }}
+      Skipped: {{ pr5_review_fix.output.skipped_findings | join("; ") }}
+
+      Approving will push `HEAD` to `{{ workflow.input.remote }}/{{ workflow.input.pr5_branch }}`. It will not merge yet.
+    options:
+      - label: Approve push
+        value: approve
+        route: pr5_push
+      - label: Request repair
+        value: repair
+        route: pr5_repair
+      - label: Stop before push
+        value: stop
+        route: stop_pr5
+
+  - name: pr5_push
+    type: script
+    description: Push the approved PR 5 commits.
+    command: git
+    args: [push, "{{ workflow.input.remote }}", "HEAD:{{ workflow.input.pr5_branch }}"]
+    working_dir: "{{ workflow.input.workspace }}"
+    timeout: 300
+    routes:
+      - to: pr5_ci
+        when: "exit_code == 0"
+      - to: stop_pr5_push
+
+  - name: pr5_ci
+    type: script
+    description: Wait for PR 5 required checks.
+    command: gh
+    args: [pr, checks, "{{ workflow.input.pr5 }}", --repo, "{{ workflow.input.repo }}", --watch, --fail-fast]
+    working_dir: "{{ workflow.input.workspace }}"
+    timeout: 1800
+    routes:
+      - to: pr5_merge_gate
+        when: "exit_code == 0"
+      - to: pr5_ci_repair
+
+  - name: pr5_ci_repair
+    description: Diagnose and repair a failed PR 5 CI run.
+    prompt: |
+      Inspect the failed CI output for PR {{ workflow.input.pr5 }}, fetch the
+      failing job logs with `gh`, and repair only branch-caused failures. Keep
+      the changes minimal, run the focused reproducer, commit locally, and do
+      not push. If the failure is a repository or runner outage, report it
+      precisely instead of changing code.
+
+      CI output:
+      {{ pr5_ci.output.stdout }}
+      {{ pr5_ci.output.stderr }}
+    output:
+      status: { type: string }
+      repairs: { type: array, items: { type: string } }
+      blocked_reason: { type: string }
+      commit: { type: string }
+    routes:
+      - to: pr5_validate
+
+  - name: pr5_merge_gate
+    type: human_gate
+    prompt: |
+      PR {{ workflow.input.pr5 }} is pushed and its watched checks passed.
+      Confirm the live PR is still open, non-conflicting, and has no unresolved
+      blocking review thread. Approving will merge it into
+      `{{ workflow.input.base_branch }}`; this is the dependency required before
+      PR {{ workflow.input.pr4 }} can be retargeted.
+    options:
+      - label: Merge PR 5
+        value: merge
+        route: pr5_merge
+      - label: Run another CI repair
+        value: repair
+        route: pr5_ci_repair
+      - label: Stop after PR 5 checks
+        value: stop
+        route: stop_pr5
+
+  - name: pr5_merge
+    type: script
+    description: Merge the approved foundational PR 5.
+    command: gh
+    args: [pr, merge, "{{ workflow.input.pr5 }}", --repo, "{{ workflow.input.repo }}", --squash, --delete-branch=false]
+    working_dir: "{{ workflow.input.workspace }}"
+    timeout: 300
+    routes:
+      - to: pr4_rebase_prepare
+        when: "exit_code == 0"
+      - to: stop_pr5_merge
+
+  - name: pr4_rebase_prepare
+    description: Rebase stacked PR 4 onto the merged main branch locally.
+    prompt: |
+      PR 5 has just merged. Prepare PR {{ workflow.input.pr4 }} for final
+      integration:
+
+      1. Fetch `{{ workflow.input.remote }}` and verify
+         `{{ workflow.input.base_branch }}` contains the PR 5 merge.
+      2. Check out `{{ workflow.input.pr4_branch }}` in the disposable checkout.
+      3. Rebase it onto `{{ workflow.input.remote }}/{{ workflow.input.base_branch }}` and resolve conflicts carefully.
+      4. Preserve the capture-to-agent behavior, Telegram security guarantees,
+         durable session mapping, and its tests and documentation.
+      5. Commit the rebase/conflict resolution locally; do not push and do not
+         retarget the GitHub PR yet.
+
+      If PR 5 is not actually present in the fetched base, stop and report the
+      exact state. Return ready, conflicts, summary, and commit.
+    output:
+      ready: { type: boolean }
+      conflicts: { type: array, items: { type: string } }
+      summary: { type: string }
+      commit: { type: string }
+    routes:
+      - to: pr4_review_fix
+        when: "{{ output.ready }}"
+      - to: pr4_rebase_repair
+
+  - name: pr4_rebase_repair
+    description: Repair a failed PR 4 rebase without pushing.
+    prompt: |
+      Resolve the PR 4 rebase preparation failure below. Reproduce the state,
+      resolve only real conflicts or missing-base problems, preserve feature
+      behavior, commit locally, and do not push.
+
+      Report:
+      {{ pr4_rebase_prepare.output.summary }}
+      Conflicts:
+      {{ pr4_rebase_prepare.output.conflicts | join("; ") }}
+    output:
+      ready: { type: boolean }
+      repairs: { type: array, items: { type: string } }
+      commit: { type: string }
+    routes:
+      - to: pr4_review_fix
+        when: "{{ output.ready }}"
+      - to: stop_pr4_rebase
+
+  - name: pr4_review_fix
+    description: Verify and fix valid PR 4 review findings without pushing.
+    prompt: |
+      Work on PR {{ workflow.input.pr4 }} after its rebase onto
+      `{{ workflow.input.base_branch }}`. Inspect the live review threads and
+      current code; do not assume a CodeRabbit suggestion is still valid.
+      Do not push or retarget.
+
+      Known review hotspots to verify include: recoverable Telegram update
+      acknowledgement and attachment failures; finite deadlines and AbortSignal
+      propagation for every Telegram request; mandatory webhook-secret
+      authentication; redaction at every Telegram output boundary; no
+      latest-run fallback for an explicit unmapped reply; PNG/JPEG MIME
+      allowlisting; safe handling of circular metadata; durable follow-up
+      idempotency; bounded follow-up queues; cancellation during startup;
+      single-consumption of terminal runner events; replay-channel cleanup on
+      startup failure; asset-file/database compensation and explicit terminal
+      field clearing; runner timeout and gateway-disposal cleanup; and logging
+      retention-sweep failures.
+
+      Fix valid correctness, security, durability, and CI findings with minimal
+      contract-level changes. Preserve or add regression tests for each changed
+      boundary. Skip stale, duplicate, or non-blocking findings with reasons.
+      Commit locally and return status, changed_files, fixed_findings,
+      skipped_findings, remaining_risks, and commit.
+    output:
+      status: { type: string }
+      changed_files: { type: array, items: { type: string } }
+      fixed_findings: { type: array, items: { type: string } }
+      skipped_findings: { type: array, items: { type: string } }
+      remaining_risks: { type: array, items: { type: string } }
+      commit: { type: string }
+    routes:
+      - to: pr4_validate
+
+  - name: pr4_validate
+    description: Run the PR 4 feature and repository merge-gate checks.
+    prompt: |
+      Validate the current PR 4 branch after review fixes. Do not push.
+      At minimum run:
+
+      - `bun --cwd=packages/desktop-tag test test/capture-*.test.ts`
+      - the package-scoped typecheck and biome checks
+      - the repository checks required by CI, including native/build checks
+        that are affected by the rebased PR 5 base
+      - focused regression tests for every changed review boundary
+
+      Exercise the matching surface when possible: start the local capture
+      gateway in a disposable process, verify one valid request and one rejected
+      request, and shut it down cleanly. Do not report “should work” without
+      observing the result. Set ready true only when the feature checks, CI
+      prerequisites, and review ledger are complete. Return ready, checks,
+      failures, manual_qa, and summary.
+    output:
+      ready: { type: boolean }
+      checks: { type: array, items: { type: string } }
+      failures: { type: array, items: { type: string } }
+      manual_qa: { type: array, items: { type: string } }
+      summary: { type: string }
+    routes:
+      - to: pr4_push_gate
+        when: "{{ output.ready }}"
+      - to: pr4_repair
+
+  - name: pr4_repair
+    description: Repair only failures reported by PR 4 validation.
+    prompt: |
+      Repair the current PR 4 branch using this validation report:
+
+      {{ pr4_validate.output.summary }}
+
+      Failures:
+      {{ pr4_validate.output.failures | join("; ") }}
+
+      Reproduce failures, fix only branch-caused problems, preserve the capture
+      workflow's security and persistence contracts, add no speculative
+      cleanup, commit locally, and do not push. Report repairs and any truly
+      pre-existing blockers. The next step reruns validation.
+    output:
+      status: { type: string }
+      repairs: { type: array, items: { type: string } }
+      skipped: { type: array, items: { type: string } }
+      commit: { type: string }
+    routes:
+      - to: pr4_validate
+
+  - name: pr4_push_gate
+    type: human_gate
+    prompt: |
+      PR {{ workflow.input.pr4 }} is rebased, locally validated, and ready to
+      push. Manual QA observed:
+
+      {{ pr4_validate.output.manual_qa | join("; ") }}
+
+      Approving will force-with-lease push `HEAD` to
+      `{{ workflow.input.remote }}/{{ workflow.input.pr4_branch }}` and retarget PR {{ workflow.input.pr4 }} from its stacked base to
+      `{{ workflow.input.base_branch }}`. It will not merge yet.
+    options:
+      - label: Approve push and retarget
+        value: approve
+        route: pr4_push
+      - label: Request repair
+        value: repair
+        route: pr4_repair
+      - label: Stop before push
+        value: stop
+        route: stop_pr4
+
+  - name: pr4_push
+    type: script
+    description: Push the approved rebased PR 4 branch.
+    command: git
+    args: [push, --force-with-lease, "{{ workflow.input.remote }}", "HEAD:{{ workflow.input.pr4_branch }}"]
+    working_dir: "{{ workflow.input.workspace }}"
+    timeout: 300
+    routes:
+      - to: pr4_retarget
+        when: "exit_code == 0"
+      - to: stop_pr4_push
+
+  - name: pr4_retarget
+    type: script
+    description: Retarget PR 4 onto main after PR 5 merged.
+    command: gh
+    args: [pr, edit, "{{ workflow.input.pr4 }}", --repo, "{{ workflow.input.repo }}", --base, "{{ workflow.input.base_branch }}"]
+    working_dir: "{{ workflow.input.workspace }}"
+    timeout: 120
+    routes:
+      - to: pr4_ci
+        when: "exit_code == 0"
+      - to: stop_pr4_retarget
+
+  - name: pr4_ci
+    type: script
+    description: Wait for PR 4 required checks after retargeting.
+    command: gh
+    args: [pr, checks, "{{ workflow.input.pr4 }}", --repo, "{{ workflow.input.repo }}", --watch, --fail-fast]
+    working_dir: "{{ workflow.input.workspace }}"
+    timeout: 1800
+    routes:
+      - to: pr4_merge_gate
+        when: "exit_code == 0"
+      - to: pr4_ci_repair
+
+  - name: pr4_ci_repair
+    description: Diagnose and repair a failed PR 4 CI run.
+    prompt: |
+      Inspect the failed CI output for PR {{ workflow.input.pr4 }}, fetch the
+      relevant job logs with `gh`, and repair only branch-caused failures. Run a
+      focused reproducer, commit locally, and do not push. Report infrastructure
+      outages without changing code.
+
+      CI output:
+      {{ pr4_ci.output.stdout }}
+      {{ pr4_ci.output.stderr }}
+    output:
+      status: { type: string }
+      repairs: { type: array, items: { type: string } }
+      blocked_reason: { type: string }
+      commit: { type: string }
+    routes:
+      - to: pr4_validate
+
+  - name: pr4_merge_gate
+    type: human_gate
+    prompt: |
+      PR {{ workflow.input.pr4 }} is retargeted to `{{ workflow.input.base_branch }}`
+      and its watched checks passed. Confirm the live PR is open, non-conflicting,
+      review-complete, and that the manual QA evidence is sufficient. Approving
+      will merge the capture-to-agent workflow.
+    options:
+      - label: Merge PR 4
+        value: merge
+        route: pr4_merge
+      - label: Run another CI repair
+        value: repair
+        route: pr4_ci_repair
+      - label: Stop after PR 4 checks
+        value: stop
+        route: stop_pr4
+
+  - name: pr4_merge
+    type: script
+    description: Merge the approved capture-to-agent PR 4.
+    command: gh
+    args: [pr, merge, "{{ workflow.input.pr4 }}", --repo, "{{ workflow.input.repo }}", --squash, --delete-branch=false]
+    working_dir: "{{ workflow.input.workspace }}"
+    timeout: 300
+    routes:
+      - to: complete
+        when: "exit_code == 0"
+      - to: stop_pr4_merge
+
+  - name: stop_dirty
+    type: terminate
+    status: failed
+    reason: "The supplied workspace is dirty; the workflow will not risk overwriting user changes."
+
+  - name: stop_pr5_inventory
+    type: terminate
+    status: failed
+    reason: "GitHub inventory for PR 5 failed; inspect gh authentication and repository inputs."
+
+  - name: stop_pr4_inventory
+    type: terminate
+    status: failed
+    reason: "GitHub inventory for PR 4 failed; inspect gh authentication and repository inputs."
+
+  - name: stop_pr5
+    type: terminate
+    status: success
+    reason: "Stopped at the PR 5 human gate before the next external mutation."
+
+  - name: stop_pr5_push
+    type: terminate
+    status: failed
+    reason: "The approved PR 5 push failed; inspect the script output before retrying."
+
+  - name: stop_pr5_merge
+    type: terminate
+    status: failed
+    reason: "PR 5 merge failed or became blocked after approval."
+
+  - name: stop_pr4_rebase
+    type: terminate
+    status: failed
+    reason: "PR 4 could not be prepared on top of the merged PR 5 base."
+
+  - name: stop_pr4
+    type: terminate
+    status: success
+    reason: "Stopped at the PR 4 human gate before the next external mutation."
+
+  - name: stop_pr4_push
+    type: terminate
+    status: failed
+    reason: "The approved PR 4 push failed; inspect the script output before retrying."
+
+  - name: stop_pr4_retarget
+    type: terminate
+    status: failed
+    reason: "PR 4 could not be retargeted to the final base branch."
+
+  - name: stop_pr4_merge
+    type: terminate
+    status: failed
+    reason: "PR 4 merge failed or became blocked after approval."
+
+  - name: complete
+    type: terminate
+    status: success
+    reason: "Both PRs passed review, validation, CI, and human-approved merge gates."
+    output_template:
+      result: completed
+      pr5: "{{ workflow.input.pr5 }}"
+      pr4: "{{ workflow.input.pr4 }}"
