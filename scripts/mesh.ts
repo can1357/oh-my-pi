@@ -237,6 +237,7 @@ async function init(): Promise<void> {
 		mac: { kind: "ssh", host: "100.109.244.1", user: "jimpizouw" },
 		pi: { kind: "ssh", host: "100.111.69.99", user: "pk" },
 		hetzner: { kind: "ssh", host: "100.64.216.11", user: "root" },
+		"cloudpk1": { kind: "ssh", host: "100.87.107.97", user: "prest" },
 		colab: { kind: "colab" },
 	};
 	await Bun.write(NODES_PATH, `${JSON.stringify(seed, null, 2)}\n`);
