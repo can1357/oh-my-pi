@@ -118,3 +118,7 @@ evals/agent-gui/reports/
 mcps/
 # Wrangler local secret store (per-machine dev secrets)
 .dev.vars
+
+# Local review/triage scratch worktrees (agent audit workflows)
+.review-scratch/
+.triage-scratch/

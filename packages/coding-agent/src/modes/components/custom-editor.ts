@@ -194,7 +194,7 @@ export function extractBracketedPastePaths(data: string): string[] | undefined {
 
 export function extractBracketedImagePastePaths(data: string): string[] | undefined {
 	const paths = extractBracketedPastePaths(data);
-	if (!paths || !paths.every(path => BRACKETED_IMAGE_PATH_REGEX.test(path))) return undefined;
+	if (!paths?.every(path => BRACKETED_IMAGE_PATH_REGEX.test(path))) return undefined;
 	return paths;
 }
 

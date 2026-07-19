@@ -352,7 +352,7 @@ export class LocalAgentOwnerServer {
 		} finally {
 			unsubscribe();
 		}
-		if (!response || response.type !== "response") throw new Error("Gateway did not correlate a response");
+		if (response?.type !== "response") throw new Error("Gateway did not correlate a response");
 		if (!response.success) throw new Error(response.error);
 		return response.data;
 	}
