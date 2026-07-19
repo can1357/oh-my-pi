@@ -5,7 +5,6 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 
 /** Resolve the Pi Speak config dir per the shared gateway contract. */
