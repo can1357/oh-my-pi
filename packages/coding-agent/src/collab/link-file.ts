@@ -13,7 +13,7 @@ function resolveConfigDir(): string {
 	if (process.env.PI_SPEAK_CONFIG_DIR) return process.env.PI_SPEAK_CONFIG_DIR;
 	if (process.env.LOCALAPPDATA) return path.join(process.env.LOCALAPPDATA, "pi-speak");
 	if (process.env.APPDATA) return path.join(process.env.APPDATA, "pi-speak");
-	return path.join(os.homedir(), ".pi-speak");
+	return path.join(process.cwd(), ".pi-speak");
 }
 
 function collabFilePath(): string {
