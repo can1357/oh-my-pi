@@ -9,7 +9,6 @@
  */
 import * as path from "node:path";
 
-const ANALYTICS_ORIGIN = "https://um.can.ac";
 const SCRIPT_RE = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
 /** Executable inline script types; data blocks like application/ld+json are not governed by script-src. */
 const EXECUTABLE_TYPES = new Set(["module", "text/javascript", "application/javascript"]);
@@ -31,13 +30,12 @@ for (const match of html.matchAll(SCRIPT_RE)) {
 
 const csp = [
 	"default-src 'self'",
-	`script-src 'self' ${[...hashes, ANALYTICS_ORIGIN].join(" ")}`,
+	`script-src 'self' ${[...hashes].join(" ")}`,
 	// React style attributes need inline styles; CSS injection is a far smaller blast radius than script.
 	"style-src 'self' 'unsafe-inline'",
 	// Session images arrive inline in entry frames and render as data:/blob: URIs.
 	"img-src 'self' data: blob:",
-	// Custom relays from pasted links are arbitrary wss hosts; plain ws is localhost-only by link policy.
-	`connect-src 'self' wss: ws://localhost:* ws://127.0.0.1:* ${ANALYTICS_ORIGIN}`,
+	"connect-src 'self' wss: ws://localhost:* ws://127.0.0.1:*",
 	"font-src 'self' data:",
 	"media-src 'self' data: blob:",
 	"manifest-src 'self'",
