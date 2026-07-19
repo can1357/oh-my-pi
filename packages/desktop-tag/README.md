@@ -33,3 +33,7 @@ Task execution is asynchronous. A task completes only when the agent emits `agen
 - `extension.ts` / `cli.ts` — extension and standalone entrypoints.
 
 Phase 1 ships screenshot, region, selection, and browser-context capture with local `pi` AgentSession execution. IX Bridge DOM snapshots, native desktop actions, and remote hubs are future work.
+
+## Capture-to-agent workflow
+
+`src/capture/` adds an asynchronous capture workflow on top of the same gateway: capture tasks are validated, persisted (SQLite under `~/.omp/agent/capture`), executed in new or resumed oh-my-pk sessions through the `AgentSessionGateway`, and mirrored to a shared Telegram chat where replies continue the same session. Endpoints live under `/api/capture/`; see `docs/capture-to-agent.md` for architecture, configuration (`.env.capture.example`), Telegram bot setup, the security model, and troubleshooting.
