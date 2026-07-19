@@ -131,6 +131,8 @@ export class CaptureOrchestrator {
 	readonly #registry: CapabilityRegistry;
 	readonly #adapters: CollaborationAdapter[] = [];
 	readonly #runs = new Map<string, RunState>();
+	/** Serializes runner resumes that open the same persisted session file. */
+	readonly #sessionLocks = new Map<string, Promise<unknown>>();
 	#captureService: CaptureServiceLike | undefined;
 	readonly #maxScreenshotBytes: number;
 	readonly #defaultRunnerId: string | undefined;
@@ -465,15 +467,18 @@ export class CaptureOrchestrator {
 		let handle: RunnerRunHandle;
 		if (request.routing.sessionId) {
 			// Resume an explicitly selected existing session; prefer a mapping that
-			// already knows the persisted session file.
+			// already knows the persisted session file. Hoist the id: narrowing does
+			// not survive into the lock closure below.
+			const sessionId = request.routing.sessionId;
 			const existing = this.#store
 				.listRuns(500)
-				.find(
-					candidate => candidate.sessionId === request.routing.sessionId && candidate.sessionFile !== undefined,
-				);
-			handle = await this.#runner.resumeSession(
-				{ sessionId: request.routing.sessionId, sessionFile: existing?.sessionFile },
-				{ message, ...(images ? { images } : {}) },
+				.find(candidate => candidate.sessionId === sessionId && candidate.sessionFile !== undefined);
+			const lockKey = existing?.sessionFile ?? `session:${sessionId}`;
+			handle = await this.#withSessionLock(lockKey, () =>
+				this.#runner.resumeSession(
+					{ sessionId, sessionFile: existing?.sessionFile },
+					{ message, ...(images ? { images } : {}) },
+				),
 			);
 		} else {
 			handle = await this.#runner.createSession({
@@ -539,15 +544,36 @@ export class CaptureOrchestrator {
 			annotations: [...(request.annotations ?? []), ...packet.visual.annotations],
 		};
 	}
+	/**
+	 * Run `fn` while holding the per-session-file lock. Two runs resuming the
+	 * same persisted session otherwise race `SessionManager.open` on one JSONL
+	 * and interleave appends; chaining promises serializes them across runs.
+	 */
+	async #withSessionLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+		const previous = this.#sessionLocks.get(key) ?? Promise.resolve();
+		const { promise: mine, resolve: release } = Promise.withResolvers<void>();
+		const tail = previous.then(() => mine);
+		this.#sessionLocks.set(key, tail);
+		await previous.catch(() => {});
+		try {
+			return await fn();
+		} finally {
+			release();
+			if (this.#sessionLocks.get(key) === tail) this.#sessionLocks.delete(key);
+		}
+	}
 
 	async #dispatchResume(runId: string, turn: PendingTurn): Promise<void> {
 		const run = this.#store.getRun(runId);
 		if (!run || (!run.sessionId && !run.sessionFile)) {
 			throw new Error("The mapped session no longer exists.");
 		}
-		const handle = await this.#runner.resumeSession(
-			{ sessionId: run.sessionId ?? "", sessionFile: run.sessionFile },
-			{ message: turn.message, ...(turn.images ? { images: turn.images } : {}) },
+		const lockKey = run.sessionFile ?? `session:${run.sessionId}`;
+		const handle = await this.#withSessionLock(lockKey, () =>
+			this.#runner.resumeSession(
+				{ sessionId: run.sessionId ?? "", sessionFile: run.sessionFile },
+				{ message: turn.message, ...(turn.images ? { images: turn.images } : {}) },
+			),
 		);
 		this.#store.updateRun(runId, {
 			sessionId: handle.session.sessionId,

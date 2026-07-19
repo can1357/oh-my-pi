@@ -57,6 +57,16 @@ describe("CaptureStore", () => {
 		}
 	});
 
+	it("does not resolve a topic-bound run from a bare chat lookup", () => {
+		const store = new CaptureStore({ dataDir: tempDataDir() });
+		const topicRun = sampleRun({ telegramChatId: "-100", telegramTopicId: "777" });
+		store.createRun(topicRun.requestId, undefined, topicRun);
+		// Bare chat lookups must not leak forum-topic runs; topic lookups still resolve.
+		expect(store.findLatestRunForChat("-100")).toBeUndefined();
+		expect(store.findLatestRunForChat("-100", "777")?.id).toBe(topicRun.id);
+		store.close();
+	});
+
 	it("updates runs with partial patches", () => {
 		const store = new CaptureStore({ dataDir: tempDataDir() });
 		const run = sampleRun();

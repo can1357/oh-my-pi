@@ -5,8 +5,11 @@ import type {
 	CaptureRun,
 	CaptureRunEvent,
 	CaptureRunStatus,
+	CaptureTurnInput,
 	CollaborationAdapter,
 	CollaborationMessageRef,
+	RunnerRunHandle,
+	RunnerSessionRef,
 } from "../src/capture/types";
 import { baseRequest, createTestStore, FakeRunnerAdapter, PNG_BASE64, waitFor } from "./helpers/capture-fakes";
 
@@ -31,6 +34,24 @@ class RecordingAdapter implements CollaborationAdapter {
 
 	async parseInboundMessage(): Promise<null> {
 		return null;
+	}
+}
+
+/** Fake runner that gates entry into resumeSession so tests can measure concurrency. */
+class GatedResumeRunner extends FakeRunnerAdapter {
+	active = 0;
+	maxActive = 0;
+	readonly gate = Promise.withResolvers<void>();
+
+	override async resumeSession(session: RunnerSessionRef, input: CaptureTurnInput): Promise<RunnerRunHandle> {
+		this.active++;
+		this.maxActive = Math.max(this.maxActive, this.active);
+		try {
+			await this.gate.promise;
+			return await super.resumeSession(session, input);
+		} finally {
+			this.active--;
+		}
 	}
 }
 
@@ -322,5 +343,38 @@ describe("CaptureOrchestrator", () => {
 		expect(seen).toContain("run.result");
 		expect(seen[seen.length - 1]).toBe("status:completed");
 		abort.abort();
+	});
+
+	it("serializes concurrent resumes of the same session file across runs", async () => {
+		const { store } = createTestStore();
+		const runner = new GatedResumeRunner();
+		const orchestrator = new CaptureOrchestrator({ store, runner });
+
+		// Run A completes, leaving session-1 / s1.jsonl as the persisted mapping.
+		const first = await orchestrator.submitTask(baseRequest());
+		if (!first.ok) throw new Error(first.error);
+		await waitFor(() => runner.dispatches.length === 1);
+		runner.finish("done");
+		await waitFor(() => store.getRun(first.value.id)?.status === "completed");
+
+		// Two concurrent resume attempts on session-1: a follow-up on run A and a
+		// new run B that explicitly selects the same session.
+		const followUpPromise = orchestrator.followUp(first.value.id, { text: "continue", source: "api" });
+		const secondPromise = orchestrator.submitTask(baseRequest({ routing: { sessionId: "session-1" } }));
+
+		// The lock admits one resume; the other must wait outside resumeSession.
+		await waitFor(() => runner.active === 1);
+		await Bun.sleep(30);
+		expect(runner.maxActive).toBe(1);
+
+		runner.gate.resolve();
+		await followUpPromise;
+		await secondPromise;
+		await waitFor(() => runner.dispatches.length === 3);
+		expect(runner.maxActive).toBe(1);
+
+		// Both resumed turns complete normally afterwards.
+		runner.finish("one");
+		runner.finish("two");
 	});
 });

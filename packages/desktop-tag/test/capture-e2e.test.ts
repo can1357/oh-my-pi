@@ -27,6 +27,7 @@ const TELEGRAM_CONFIG: TelegramCaptureConfig = {
 	allowedUserIds: new Set(),
 	defaultChatId: "-100",
 	longPollEnabled: false,
+	requireReply: true,
 };
 
 function buildStack(dataDir: string, transport = new FakeTelegramTransport(), runner = new FakeRunnerAdapter()) {

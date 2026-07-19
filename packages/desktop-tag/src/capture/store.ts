@@ -461,7 +461,7 @@ export class CaptureStore {
 					.get(chatId, topicId)
 			: this.#db
 					.query<RunRow, [string]>(
-						"SELECT * FROM capture_runs WHERE telegram_chat_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+						"SELECT * FROM capture_runs WHERE telegram_chat_id = ? AND telegram_topic_id IS NULL ORDER BY created_at DESC, id DESC LIMIT 1",
 					)
 					.get(chatId);
 		return row ? rowToRun(row) : undefined;

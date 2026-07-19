@@ -14,6 +14,7 @@ function config(overrides: Partial<TelegramCaptureConfig> = {}): TelegramCapture
 		allowedChatIds: new Set(["-100"]),
 		allowedUserIds: new Set(),
 		longPollEnabled: false,
+		requireReply: false,
 		...overrides,
 	};
 }
@@ -190,6 +191,26 @@ describe("TelegramBridge inbound", () => {
 		store.createRun(newer.requestId, undefined, newer);
 		await bridge.handleUpdate(messageUpdate({}, 902));
 		expect(dispatcher.followUps[0]?.runId).toBe(newer.id);
+	});
+
+	it("ignores non-reply follow-ups when requireReply is on", async () => {
+		const { store, bridge, dispatcher } = setup({ requireReply: true });
+		const run = sampleRun({ telegramChatId: "-100" });
+		store.createRun(run.requestId, undefined, run);
+		const outcome = await bridge.handleUpdate(messageUpdate({}, 950));
+		expect(outcome.kind).toBe("ignored");
+		expect(String((outcome as { reason?: string }).reason)).toContain("TELEGRAM_REQUIRE_REPLY");
+		expect(dispatcher.followUps).toHaveLength(0);
+	});
+
+	it("still routes reply-targeted follow-ups when requireReply is on", async () => {
+		const { store, bridge, dispatcher } = setup({ requireReply: true });
+		const run = sampleRun({ telegramChatId: "-100" });
+		store.createRun(run.requestId, undefined, run);
+		store.recordCollabMessage("telegram", "-100", "321", run.id, "root");
+		const outcome = await bridge.handleUpdate(messageUpdate({ reply_to_message: { message_id: 321 } }, 951));
+		expect(outcome).toEqual({ kind: "follow_up", runId: run.id });
+		expect(dispatcher.followUps[0]?.runId).toBe(run.id);
 	});
 
 	it("downloads photo attachments and forwards them as images", async () => {

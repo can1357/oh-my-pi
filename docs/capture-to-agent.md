@@ -115,7 +115,7 @@ Environment variables (see `.env.capture.example` at the repo root):
 | `CAPTURE_DEFAULT_RUNNER_ID` | — | Skip auto-routing and pin a runner |
 | `CAPTURE_GLOBAL_SHORTCUT` | `Ctrl+Shift+Space` | Advertised capture shortcut (client-side) |
 | `CAPTURE_GATEWAY_TOKEN` | — | Bearer token required on capture endpoints |
-| `CAPTURE_AUTO_APPROVE` | `true` | Auto-approve tools in headless capture sessions |
+| `CAPTURE_AUTO_APPROVE` | `false` | Auto-approve unrestricted tools in headless capture sessions (opt in only with a tightly scoped allowlist) |
 | `TELEGRAM_CAPTURE_ENABLED` | `false` | Enable the Telegram bridge |
 | `TELEGRAM_BOT_TOKEN` | — | Bot token from @BotFather |
 | `TELEGRAM_WEBHOOK_SECRET` | — | Secret for `X-Telegram-Bot-Api-Secret-Token` |
@@ -123,6 +123,7 @@ Environment variables (see `.env.capture.example` at the repo root):
 | `TELEGRAM_ALLOWED_USER_IDS` | — | Optional additional user allowlist |
 | `TELEGRAM_DEFAULT_CHAT_ID` | — | Chat used when a task does not name one |
 | `TELEGRAM_LONG_POLL` | `true` | Poll `getUpdates` instead of requiring a webhook |
+| `TELEGRAM_REQUIRE_REPLY` | `true` | Only reply-targeted messages continue a run; set `false` for ambient-chat follow-ups |
 
 ## Telegram bot setup
 
@@ -191,10 +192,15 @@ skips Telegram for that task.
   labels only).
 - Task creation, follow-ups, cancellations, and rejected Telegram access are
   written to the `capture_audit` table.
-- `CAPTURE_AUTO_APPROVE=true` (default) lets headless capture sessions run
-  tools without interactive approval. Set it to `false` for
-  approval-restricted environments — side-effecting tools will then fail
-  rather than execute.
+- `CAPTURE_AUTO_APPROVE` defaults to `false`: capture sessions reject
+  side-effecting tools rather than run an unrestricted autonomous agent that
+  any allowlisted chat user could steer. Set it to `true` only when
+  `TELEGRAM_ALLOWED_CHAT_IDS` (and optionally `TELEGRAM_ALLOWED_USER_IDS`)
+  is tightly scoped — the CLI logs a loud warning at startup when it is on.
+- `TELEGRAM_REQUIRE_REPLY` defaults to `true`, so ambient chatter in an
+  allowlisted chat cannot become agent input — only replies to the bot's own
+  mapped messages (root task, progress, result) continue a session. Commands
+  (`/new`, `/resume`, `/status`, …) are unaffected.
 
 ## Failure handling
 

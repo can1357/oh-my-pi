@@ -33,6 +33,13 @@ function main(): void {
 	if (captureConfig.enabled) {
 		store = new CaptureStore({ dataDir: captureConfig.dataDir });
 		const runner = new PiRunnerAdapter({ autoApprove: captureConfig.autoApprove });
+		if (captureConfig.autoApprove) {
+			logger.warn(
+				"CAPTURE_AUTO_APPROVE is on: capture sessions run with UNRESTRICTED tools and no approval prompts. " +
+					"Any user in an allowlisted Telegram chat can drive a fully autonomous agent on this host. " +
+					"Keep TELEGRAM_ALLOWED_CHAT_IDS tightly scoped.",
+			);
+		}
 		const orchestrator = new CaptureOrchestrator({
 			store,
 			runner,

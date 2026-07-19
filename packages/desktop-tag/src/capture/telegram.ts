@@ -602,6 +602,12 @@ export class TelegramBridge implements CollaborationAdapter {
 	): Promise<TelegramUpdateOutcome> {
 		const orchestrator = this.#orchestrator;
 		if (!orchestrator) return { kind: "ignored", reason: "orchestrator not bound" };
+		// Ambient chat in an allowlisted chat must not silently become agent input:
+		// with requireReply on, only messages that reply to a mapped collab message
+		// (root task / progress / result) continue a run. Bare text is ignored.
+		if (this.#config.requireReply && !message.reply_to_message) {
+			return { kind: "ignored", reason: "non-reply follow-up ignored (TELEGRAM_REQUIRE_REPLY on)" };
+		}
 		const run = this.#resolveRun(message, chatId);
 		if (!run) return { kind: "ignored", reason: "no mapped run for this thread" };
 

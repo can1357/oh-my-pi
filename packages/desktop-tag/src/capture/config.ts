@@ -17,6 +17,8 @@ export interface TelegramCaptureConfig {
 	defaultChatId?: string;
 	/** Poll getUpdates instead of relying on an externally reachable webhook. */
 	longPollEnabled: boolean;
+	/** When true, ignore non-reply text as follow-ups — only reply-targeted messages drive the agent. */
+	requireReply: boolean;
 }
 
 export interface CaptureConfig {
@@ -31,9 +33,11 @@ export interface CaptureConfig {
 	/** Optional bearer token required on capture HTTP endpoints (in addition to loopback binding). */
 	gatewayToken?: string;
 	/**
-	 * Auto-approve tool executions in capture sessions. Defaults to true because
-	 * capture runs are headless (no overlay to answer approval prompts); disable
-	 * to reject side-effecting tools instead.
+	 * Auto-approve tool executions in capture sessions. Defaults to false so a
+	 * compromised or mis-scoped Telegram chat cannot drive an unrestricted
+	 * autonomous agent on the host without an explicit opt-in. Enable only when
+	 * the chat allowlist is tightly scoped — capture runs are headless, so there
+	 * is no overlay to answer approval prompts either way.
 	 */
 	autoApprove: boolean;
 	telegram: TelegramCaptureConfig;
@@ -74,7 +78,7 @@ export function loadCaptureConfig(env: Record<string, string | undefined> = Bun.
 		defaultRunnerId: env.CAPTURE_DEFAULT_RUNNER_ID?.trim() || undefined,
 		globalShortcut: env.CAPTURE_GLOBAL_SHORTCUT?.trim() || "Ctrl+Shift+Space",
 		gatewayToken: env.CAPTURE_GATEWAY_TOKEN?.trim() || undefined,
-		autoApprove: parseBoolean(env.CAPTURE_AUTO_APPROVE, true),
+		autoApprove: parseBoolean(env.CAPTURE_AUTO_APPROVE, false),
 		telegram: {
 			enabled: telegramEnabled,
 			botToken,
@@ -83,6 +87,7 @@ export function loadCaptureConfig(env: Record<string, string | undefined> = Bun.
 			allowedUserIds: parseIdList(env.TELEGRAM_ALLOWED_USER_IDS),
 			defaultChatId: env.TELEGRAM_DEFAULT_CHAT_ID?.trim() || undefined,
 			longPollEnabled: parseBoolean(env.TELEGRAM_LONG_POLL, true),
+			requireReply: parseBoolean(env.TELEGRAM_REQUIRE_REPLY, true),
 		},
 	};
 }
