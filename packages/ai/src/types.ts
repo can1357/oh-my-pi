@@ -535,16 +535,6 @@ export interface ContextSnapshot {
 	promptTokens: number; // authoritative provider prompt/input tokens
 	nonMessageTokens: number; // estimated non-message total at send time
 	lastMessageTimestamp?: number;
-	/**
-	 * Composition of the non-message context at send time (estimated).
-	 * Persisted per turn so post-hoc analysis (omp stats) can track how much
-	 * of the window goes to harness overhead vs conversation — tool schemas
-	 * and skills are structural spend that no compaction pass can reclaim.
-	 */
-	toolSchemaTokens?: number;
-	skillsTokens?: number;
-	systemPromptTokens?: number;
-	systemContextTokens?: number;
 }
 
 export interface AssistantMessage {

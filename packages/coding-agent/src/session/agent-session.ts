@@ -2935,14 +2935,9 @@ export class AgentSession {
 				if (event.message.role === "assistant") {
 					const assistantMsg = event.message as AssistantMessage;
 					if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
-						const composition = computeNonMessageBreakdown(this);
 						assistantMsg.contextSnapshot = {
 							promptTokens: calculatePromptTokens(assistantMsg.usage),
 							nonMessageTokens: this.#pendingContextSnapshot?.nonMessageTokens ?? computeNonMessageTokens(this),
-							toolSchemaTokens: composition.toolsTokens,
-							skillsTokens: composition.skillsTokens,
-							systemPromptTokens: composition.systemPromptTokens,
-							systemContextTokens: composition.systemContextTokens,
 						};
 					}
 				}
