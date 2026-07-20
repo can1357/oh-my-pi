@@ -21,6 +21,7 @@ import type {
 import type { Dialect } from "@pk-nerdsaver-ai/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@pk-nerdsaver-ai/pi-ai/utils/harmony-leak";
 import type { AppendOnlyContextManager } from "./append-only-context";
+import type { CacheAttributionTracker } from "./cache-attribution";
 import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
 import type { AgentTelemetryConfig } from "./telemetry";
 
@@ -296,6 +297,14 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * `i` intent fields.
 	 */
 	appendOnlyContext?: AppendOnlyContextManager;
+
+	/**
+	 * Prompt-cache observability — fingerprints each outbound request and
+	 * attributes cache breaks (system-prompt change, tool-list change, history
+	 * rewrite, model change, provider-side) from response usage. Owned by the
+	 * host so stats persist across loop invocations.
+	 */
+	cacheAttribution?: CacheAttributionTracker;
 
 	/**
 	 * Inspect assistant streaming events before they are published to the outer agent event stream.

@@ -661,10 +661,44 @@ export function forgetWorking(beam: BeamMemoryState, memoryId: string): boolean 
 		deleted = result.changes;
 		if (deleted > 0) {
 			beam.db.prepare("DELETE FROM annotations WHERE memory_id = ?").run(memoryId);
+			cascadeEraseDerivatives(beam, memoryId);
 		}
 	});
 	if (deleted > 0) invalidateCaches(beam);
 	return deleted > 0;
+}
+
+/**
+ * Derivative-aware erasure: deleting a working-memory row alone leaves its
+ * content recoverable through embeddings, extracted facts/triples, episodic
+ * consolidation summaries, and graph gists — the classic "naive deletion is
+ * 18% robust" failure. Cascade over every table that carries a derivation
+ * edge back to the erased memory. Each delete is individually best-effort so
+ * a missing optional table (older DBs, partial configs) cannot abort the
+ * primary erasure.
+ */
+function cascadeEraseDerivatives(beam: BeamMemoryState, memoryId: string): void {
+	const safeRun = (sql: string, ...params: SQLQueryBindings[]): void => {
+		try {
+			beam.db.prepare(sql).run(...params);
+		} catch (error) {
+			logger.debug("mnemopi: erasure cascade step skipped", {
+				sql: sql.slice(0, 60),
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	};
+	// Embedding derivatives (semantic recall would otherwise still surface it).
+	safeRun("DELETE FROM memory_embeddings WHERE memory_id = ?", memoryId);
+	safeRun("DELETE FROM binary_vectors WHERE memory_id = ?", memoryId);
+	// Structured extractions.
+	safeRun("DELETE FROM facts WHERE source_msg_id = ?", memoryId);
+	safeRun("DELETE FROM triples WHERE source = ?", memoryId);
+	safeRun("DELETE FROM gists WHERE memory_id = ?", memoryId);
+	safeRun("DELETE FROM graph_edges WHERE source = ? OR target = ?", memoryId, memoryId);
+	// Episodic consolidation summaries derived from this memory (summary_of
+	// carries the source working-memory ids).
+	safeRun("DELETE FROM episodic_memory WHERE summary_of LIKE '%' || ? || '%'", memoryId);
 }
 
 export function scratchpadWrite(beam: BeamMemoryState, content: string): string {

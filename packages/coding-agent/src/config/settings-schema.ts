@@ -3875,7 +3875,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "Tool Discovery",
 			description:
-				"Hide tools behind a search tool to save tokens. 'all' (default) hides all non-essential built-ins and MCP tools; 'auto' hides MCP tools once the tool set has more than 40 tools; 'mcp-only' always hides MCP tools; 'off' sends everything.",
+				"Hide tools behind a search tool to save tokens. 'all' (default) hides all non-essential built-ins and MCP tools; 'auto' hides MCP tools once the tool set has more than 40 tools or the estimated tool-schema spend exceeds ~16K tokens; 'mcp-only' always hides MCP tools; 'off' sends everything.",
 		},
 	},
 
@@ -5011,9 +5011,9 @@ export const SETTINGS_SCHEMA = {
 			group: "Protocol",
 			label: "Append-Only Context",
 			description:
-				"Cache system prompt + tool specs and keep an append-only message log so provider prefix caches (DeepSeek, Xiaomi/SGLang, Anthropic) hit at maximum rate. Auto enables for known prefix-cache providers.",
+				"Cache system prompt + tool specs and keep an append-only message log so provider prefix caches (DeepSeek, Xiaomi/SGLang, Anthropic, OpenAI, local servers) hit at maximum rate. Auto enables for every provider with a selected model.",
 			options: [
-				{ value: "auto", label: "Auto", description: "Enable for known prefix-cache providers (recommended)" },
+				{ value: "auto", label: "Auto", description: "Enable for every provider (recommended)" },
 				{ value: "on", label: "On", description: "Always enable append-only context" },
 				{ value: "off", label: "Off", description: "Disable append-only context" },
 			],

@@ -32,6 +32,8 @@ import {
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
 	type AsideMessage,
+	CacheAttributionTracker,
+	type CacheStats,
 	type CompactionSummaryMessage,
 	countTokens,
 	resolveTelemetry,
@@ -227,7 +229,11 @@ import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
 import { getCurrentThemeName, theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
-import { computeNonMessageBreakdown, computeNonMessageTokens } from "../modes/utils/context-usage";
+import {
+	computeNonMessageBreakdown,
+	computeNonMessageTokens,
+	estimateToolSchemaTokens,
+} from "../modes/utils/context-usage";
 import { containsWorkflow, WORKFLOW_NOTICE } from "../modes/workflow";
 import { ApproachRegistry } from "../orchestration/approach-registry";
 import { authorizeIrcDelivery, type CollaborationPolicy } from "../orchestration/collaboration-policy";
@@ -1277,6 +1283,23 @@ export class AgentSession {
 	/** Consecutive failed tool results on this session; fuels the Fusion failure-streak escalation. */
 	#fusionToolFailureStreak = 0;
 	#advisorRuntime?: AdvisorRuntime;
+	#cacheAttribution = new CacheAttributionTracker({
+		onTrace: trace => {
+			if (trace.broke) {
+				logger.debug("Prompt cache break", {
+					model: trace.model,
+					causes: trace.causes,
+					rewriteReason: trace.rewriteReason,
+					firstDivergence: trace.firstDivergence,
+					hitRatio: trace.hitRatio === undefined ? undefined : Number(trace.hitRatio.toFixed(3)),
+					previousPromptTokens: trace.previousPromptTokens,
+					cacheReadTokens: trace.cacheReadTokens,
+					cacheWriteTokens: trace.cacheWriteTokens,
+					promptTokens: trace.promptTokens,
+				});
+			}
+		},
+	});
 	#advisorEnabled = false;
 	/** Screenpipe activity-bridge manager; built when `screenpipe.enabled` is on, re-bound on
 	 *  every session transition, torn down in dispose. Undefined when the feature is off. */
@@ -1699,6 +1722,7 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		this.agent.setCacheAttribution(this.#cacheAttribution);
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#autoApprove = config.autoApprove === true;
@@ -4994,11 +5018,12 @@ export class AgentSession {
 
 	// ── Generic tool discovery (covers built-in + MCP + extension) ────────────
 
-	/** Resolve effective discovery mode from the current registry size. */
+	/** Resolve effective discovery mode from the current registry size and schema spend. */
 	#resolveEffectiveDiscoveryMode(): "off" | "mcp-only" | "all" {
 		const mode = resolveEffectiveToolDiscoveryMode(
 			this.settings,
 			countToolsForAutoDiscovery(this.#toolRegistry.keys()),
+			estimateToolSchemaTokens([...this.#toolRegistry.values()]),
 		);
 		if (mode !== "off") return mode;
 		return this.#mcpDiscoveryEnabled ? "mcp-only" : "off";
@@ -8314,13 +8339,59 @@ export class AgentSession {
 		}
 		if (result.prunedCount === 0) return result;
 
+		await this.#commitHistoryRewrite("prune");
+		return result;
+	}
+
+	/**
+	 * Compaction-to-memory bridge (U13): LLM compaction summaries are lossy and
+	 * die with the session, yet they are the last carrier of the discarded
+	 * span's durable facts (file paths, decisions, invariants, error
+	 * signatures). Retaining the summary into mnemopi with compaction
+	 * provenance makes those facts recallable from any future session via the
+	 * backend's own extraction pipeline. Deterministic rungs (mask, shake,
+	 * snapcompact) lose no information, so only the LLM-summary path retains.
+	 */
+	#retainCompactionSummaryToMemory(summary: string, shortSummary: string | undefined, lossless: boolean): void {
+		if (lossless) return;
+		if (this.settings.get("memory.backend") !== "mnemopi") return;
+		const state = this.getMnemopiSessionState();
+		if (!state || !summary.trim()) return;
+		try {
+			state.rememberScoped(summary, {
+				source: "compaction",
+				importance: 0.6,
+				metadata: {
+					session_id: state.sessionId,
+					cwd: this.sessionManager.getCwd(),
+					short_summary: shortSummary ?? null,
+				},
+				scope: "bank",
+				extract: true,
+				extractEntities: true,
+				memoryType: "fact",
+			});
+		} catch (error) {
+			logger.warn("Compaction-to-memory retain failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	/**
+	 * Commit an in-place history rewrite: persist entries, rebuild the agent's
+	 * message view, and reset every runtime that caches message identity. Every
+	 * rewrite path MUST go through this (or replicate all of it) — skipping the
+	 * Codex teardown corrupts provider sessions after a rewrite.
+	 */
+	async #commitHistoryRewrite(reason: "prune" | "compaction"): Promise<void> {
+		this.#cacheAttribution.noteHistoryRewrite(reason);
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#advisorRuntime?.reset();
 		this.#syncTodoPhasesFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
-		return result;
 	}
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const branchEntries = this.sessionManager.getBranch();
@@ -8357,6 +8428,7 @@ export class AgentSession {
 			tokensSaved: result.tokensSaved + (maskResult?.tokensSaved ?? 0),
 		};
 
+		this.#cacheAttribution.noteHistoryRewrite("prune");
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
@@ -8417,6 +8489,7 @@ export class AgentSession {
 			tokensSaved: result.tokensSaved + (maskResult?.tokensSaved ?? 0),
 		};
 
+		this.#cacheAttribution.noteHistoryRewrite("prune");
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
@@ -8468,6 +8541,7 @@ export class AgentSession {
 		if (removed === 0) {
 			return { removed: 0 };
 		}
+		this.#cacheAttribution.noteHistoryRewrite("prune");
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
@@ -8524,6 +8598,7 @@ export class AgentSession {
 		});
 
 		applyShakeRegions(items);
+		this.#cacheAttribution.noteHistoryRewrite("compaction");
 
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
@@ -8735,7 +8810,9 @@ export class AgentSession {
 				fromExtension,
 				preserveData,
 			);
+			this.#retainCompactionSummaryToMemory(summary, shortSummary, false);
 			const newEntries = this.sessionManager.getEntries();
+			this.#cacheAttribution.noteHistoryRewrite("compaction");
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
 			// Compaction discarded the conversation history that carried the approved
@@ -9128,6 +9205,7 @@ export class AgentSession {
 			}
 
 			// Rebuild agent messages from session
+			this.#cacheAttribution.noteHistoryRewrite("compaction");
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#advisorRuntime?.reset();
@@ -11195,6 +11273,7 @@ export class AgentSession {
 				fromExtension,
 				preserveData,
 			);
+			this.#retainCompactionSummaryToMemory(summary, shortSummary, false);
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
@@ -13719,6 +13798,15 @@ export class AgentSession {
 			skillsTokens,
 			messagesTokens,
 		};
+	}
+
+	/**
+	 * Aggregate prompt-cache statistics for this session: lifetime hit rate and
+	 * cache-break counts attributed by cause (system-prompt change, tool-list
+	 * change, history rewrite, model change, provider-side).
+	 */
+	getCacheStats(): CacheStats {
+		return this.#cacheAttribution.stats();
 	}
 
 	getContextUsage(options?: { contextWindow?: number }): ContextUsage | undefined {

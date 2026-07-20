@@ -1190,6 +1190,8 @@ async function streamAssistantResponse(
 		};
 	}
 
+	config.cacheAttribution?.observeRequest(messages, llmContext, config.model);
+
 	const streamFunction = streamFn || streamSimple;
 
 	const dynamicReasoning = config.getReasoning?.();
@@ -1268,6 +1270,7 @@ async function streamAssistantResponse(
 	};
 
 	const finishChat = async (message: AssistantMessage): Promise<void> => {
+		config.cacheAttribution?.observeUsage(message);
 		await finishChatSpan(telemetry, chatSpan, message, {
 			stepNumber: chatStepNumber,
 			serviceTier: effectiveServiceTier,

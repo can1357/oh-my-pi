@@ -114,6 +114,7 @@ import {
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import type { MnemopiSessionState } from "./mnemopi/state";
+import { estimateToolSchemaTokens } from "./modes/utils/context-usage";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -1570,6 +1571,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,
+			getForkContext: () =>
+				session
+					? {
+							systemPrompt: [...(session.systemPrompt ?? [])],
+							toolNames: (session.agent?.state.tools ?? []).map(tool => tool.name),
+							model: session.model,
+							messages: [...session.messages],
+						}
+					: undefined,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
 			ircIpc,
@@ -1747,6 +1757,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 								const projectedMode = resolveEffectiveToolDiscoveryMode(
 									settings,
 									countToolsForAutoDiscovery([...nonMCPToolNames, ...mcpResult.tools.map(tool => tool.name)]),
+									estimateToolSchemaTokens([
+										...[...toolRegistry.values()].filter(tool => !isMCPToolName(tool.name)),
+										...mcpResult.tools,
+									]),
 								);
 								if (projectedMode !== "off") {
 									effectiveDiscoveryMode = projectedMode;

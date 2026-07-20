@@ -6,6 +6,7 @@ export * from "./agent";
 export * from "./agent-loop";
 // Append-only context mode
 export * from "./append-only-context";
+export * from "./cache-attribution";
 // Compaction
 export * from "./compaction";
 // Mixture-of-Agents stream composition

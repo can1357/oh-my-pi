@@ -24,6 +24,7 @@
   - `siblingFindings?`: text summary of sibling worker findings for staged synthesis (required when `revealSiblingFindings` is true)
   - `model?`: explicit model selector; aliases and concrete catalog names resolve before agent defaults
   - `cwd?`: working directory; defaults to parent session cwd
+  - `fork?`: inherit the parent's exact context (system prompt, tools, model, and a snapshot of this conversation's history) instead of a fresh one — the provider re-reads the parent's warm prompt cache; agent-specific prompts/tools and output schemas are ignored. Use fresh (default) for independent work
 {{#if isolationEnabled}}
   - `isolated?`: run in isolated env; returns patches. Agent is torn down at completion — not addressable afterwards
 {{/if}}

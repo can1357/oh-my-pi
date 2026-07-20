@@ -5,6 +5,7 @@ import { dbPath as configuredDbPath } from "../config";
 import { closeQuietly } from "../db";
 import type { MemoryInput, Metadata } from "../types";
 import { AnnotationStore } from "./annotations";
+import { type MemoryAuditOp, recordMemoryAudit } from "./audit-log";
 import { BankManager } from "./banks";
 import { BeamMemory, initBeam } from "./beam/index";
 import { reconcileEmbeddingModel } from "./beam/store";
@@ -368,6 +369,20 @@ function defaultFor(bank: string | null | undefined = null): Mnemopi {
 }
 
 export class Mnemopi {
+	/** Best-effort audit append for every facade-level memory operation. */
+	#audit(
+		op: MemoryAuditOp,
+		fields: { memoryId?: string | null; query?: string | null; detail?: Record<string, unknown> } = {},
+	): void {
+		recordMemoryAudit(this.db, {
+			op,
+			bank: this.bank,
+			sessionId: this.sessionId,
+			authorId: this.authorId,
+			...fields,
+		});
+	}
+
 	readonly sessionId: string;
 	readonly bank: string;
 	readonly dbPath?: string;
@@ -436,25 +451,31 @@ export class Mnemopi {
 
 	remember(memory: string | RememberInput, options: RememberFacadeOptions = {}): string {
 		const content = typeof memory === "string" ? memory : memory.content;
-		return this.#withRuntimeOptions(() => this.beam.remember(content, toRememberOptions(memory, options)));
+		const memoryId = this.#withRuntimeOptions(() => this.beam.remember(content, toRememberOptions(memory, options)));
+		this.#audit("remember", { memoryId, detail: { source: options.source ?? null } });
+		return memoryId;
 	}
 
-	recall(query: string, topK = 5, options: RecallFacadeOptions = {}): Promise<RecallResult[]> {
-		return this.#withRuntimeOptions(() => this.beam.recall(query, topK, toRecallOptions(options)));
+	async recall(query: string, topK = 5, options: RecallFacadeOptions = {}): Promise<RecallResult[]> {
+		const results = await this.#withRuntimeOptions(() => this.beam.recall(query, topK, toRecallOptions(options)));
+		this.#audit("recall", { query, detail: { results: results.length } });
+		return results;
 	}
 
-	recallEnhanced(
+	async recallEnhanced(
 		query: string,
 		topK = 5,
 		options: RecallFacadeOptions & RecallEnhancedOptions = {},
 	): Promise<RecallResult[]> {
-		return this.#withRuntimeOptions(() =>
+		const results = await this.#withRuntimeOptions(() =>
 			this.beam.recallEnhanced(query, topK, {
 				...toRecallOptions(options),
 				useCache: options.useCache,
 				includeFacts: options.includeFacts,
 			}),
 		);
+		this.#audit("recall_enhanced", { query, detail: { results: results.length } });
+		return results;
 	}
 
 	getContext(limit = 10): unknown[] {
@@ -492,19 +513,27 @@ export class Mnemopi {
 	}
 
 	get(memoryId: string): unknown | null {
-		return this.#withRuntimeOptions(() => this.beam.get(memoryId));
+		const result = this.#withRuntimeOptions(() => this.beam.get(memoryId));
+		this.#audit("get", { memoryId, detail: { found: result !== null } });
+		return result;
 	}
 
 	forget(memoryId: string): boolean {
-		return this.#withRuntimeOptions(() => this.beam.forgetWorking(memoryId));
+		const deleted = this.#withRuntimeOptions(() => this.beam.forgetWorking(memoryId));
+		this.#audit("forget", { memoryId, detail: { deleted } });
+		return deleted;
 	}
 
 	update(memoryId: string, content: string | null = null, importance: number | null = null): boolean {
-		return this.#withRuntimeOptions(() => this.beam.updateWorking(memoryId, content, importance));
+		const updated = this.#withRuntimeOptions(() => this.beam.updateWorking(memoryId, content, importance));
+		this.#audit("update", { memoryId, detail: { updated } });
+		return updated;
 	}
 
 	sleep(dryRun = false): SleepResult {
-		return this.#withRuntimeOptions(() => this.beam.sleep(dryRun));
+		const result = this.#withRuntimeOptions(() => this.beam.sleep(dryRun));
+		this.#audit("sleep", { detail: { dryRun } });
+		return result;
 	}
 
 	sleepAllSessions(dryRun = false): SleepResult {
@@ -512,7 +541,9 @@ export class Mnemopi {
 	}
 
 	scratchpadWrite(content: string): string {
-		return this.#withRuntimeOptions(() => this.beam.scratchpadWrite(content));
+		const padId = this.#withRuntimeOptions(() => this.beam.scratchpadWrite(content));
+		this.#audit("scratchpad_write", { memoryId: padId });
+		return padId;
 	}
 
 	scratchpadRead(): unknown[] {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `fork` parameter being silently dropped in batch task submissions: `taskItemSchema` and `taskItemSchemaIsolated` both had `"+": "delete"` but omitted `"fork?": "boolean"`, so a batch item with `fork: true` was stripped before `spawnParamsFor` could see it, falling back to a fresh context with no error.
+
 ### Added
 - Added an opt-in, local-only screenpipe activity bridge (`screenpipe.enabled`, default off, with `screenpipe.baseUrl`, `screenpipe.pollIntervalMs`, and `screenpipe.mediaRoot` settings under the memory tab). When enabled, each session starts a background poller that reads already-redacted frame metadata from a locally running screenpipe daemon and records privacy-preserving activity clips in a local SQLite ledger under the agent dir; password-manager windows are always denied, nothing leaves the machine, and a broken or absent daemon never affects the session (backoff + single warning per outage). Capture ownership follows the active session across every transition (`newSession`, `switchSession`, `fork`, `branch`, `freshSession`, handoff): a `ScreenpipeSessionManager` disposes the prior session's bridge before binding the new one, so no post-transition activity, cursor progress, or manifest is ever attributed to the previous session and exactly one poller is ever live. The poller is torn down in session dispose.
 - Added a Consurg Guard hook example that evaluates every scoped file or command tool call, including multi-path and workspace-root searches, and can fail closed when its guard is unavailable.
@@ -26,6 +30,12 @@
 
 - Added `compaction.maskConsumedObservations` (default `true`) and a new `maskConsumedObservations` pruning pass that replaces tool results the model has already acted on with deterministic placeholders (e.g. `[bash result consumed]`). This preserves reasoning traces and action history while cutting the verbatim observation tokens that the JetBrains study identified as cheaper to mask than to summarize.
 
+- Added fork-mode subagents: `task` tool `fork` parameter spawns a child that inherits the parent session's exact prefix (system prompt, tool set, model) plus a read-only history snapshot, so its first request re-reads the parent's warm provider prompt cache — the cheapest way to run a quick in-context lookup in parallel. Fresh contexts remain the default.
+- Append-only context (StablePrefix + append-only message log) now auto-enables for every provider, not just known prefix-cache backends — byte-stable prefixes raise cache hit rates on Anthropic cache_control and OpenAI automatic caching too. Opt out with `provider.appendOnlyContext: off`.
+- Added a graduated compaction escalation ladder (`compaction.strategy: "ladder"`, now the default): mask aged tool results, then shake, then snapcompact (vision models), and only fall back to an LLM summary when the cheaper rungs cannot get under the threshold. Re-enabling auto-compaction from "off" restores the ladder default.
+- Added `compaction.maskToolResults` (default on): tool results older than the keep-recent window are continuously replaced with outcome-preserving placeholders, with the batch gate lowered from 20K to 4K tokens.
+- Added prompt-cache observability: per-session cache hit rate and cache breaks attributed by cause, exposed via `AgentSession.getCacheStats()` and shown in `/context` alongside a new tool-result waste audit (per-tool token spend + masked residue).
+- Added per-turn context-composition persistence: assistant `contextSnapshot` now records tool-schema, skills, system-prompt, and system-context token estimates for post-hoc analysis.
 - Added an Agentic MapReduce backbone for deterministic selector execution, evidence-graph sharding, bounded scheduling, reducer-tree aggregation, and concurrency/cost modeling.
 - Added bundled `mr-worker`, `mr-reducer`, and `tot-reasoner` agents implementing Agentic MapReduce map/reduce phases and Tree-of-Thoughts reasoning as builtin task-agent types.
 - Added an embedded builtin-skills provider shipping `agentic-mapreduce`, `tree-of-thoughts`, and `promptbtw-handoff` skills compiled into the binary, served in-memory via `skill://` and `/skill:` with lowest-priority name override semantics and a `skills.enableBuiltinSkills` toggle.
