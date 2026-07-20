@@ -7,6 +7,7 @@
 - Catalog values import from `@pk-nerdsaver-ai/pi-catalog/<module>`, never through `@pk-nerdsaver-ai/pi-ai`; type-only `Model`, `Api`, `ThinkingConfig`, `Effort` from `pi-ai` are okay.
 - Review logical clusters before staging; never commit `AGENTS.md` without `git diff --stat`.
 - For multi-agent Linear/fork collaboration and queue admission, follow [docs/multi-agent-fork-collaboration.md](docs/multi-agent-fork-collaboration.md).
+- Fork surface boundaries (collab vs remote vs identity): see [docs/fork-boundaries.md](docs/fork-boundaries.md).
 
 ## GitHub
 

@@ -1,7 +1,7 @@
 // Ported from NousResearch/hermes-agent (MIT) — tools/xai_http.py.
 
 import { getBundledModels } from "@pk-nerdsaver-ai/pi-catalog/models";
-import { $env } from "@pk-nerdsaver-ai/pi-utils";
+import { $env, APP_NAME } from "@pk-nerdsaver-ai/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
 const DEFAULT_BASE_URL = "https://api.x.ai/v1";
@@ -12,8 +12,8 @@ interface XAICredentials {
 	baseURL: string;
 }
 
-export function ohMyPiXAIUserAgent(): string {
-	return "oh-my-pi/xai";
+export function ohMyPkXAIUserAgent(): string {
+	return `${APP_NAME}/xai`;
 }
 
 type XAIProvider = "xai-oauth" | "xai";

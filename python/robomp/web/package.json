@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Flat SolidJS operations console bundled by Vite and served by robomp's FastAPI app.",
-  "homepage": "https://omp.sh",
+  "homepage": "https://oh-my-pk.pkking.computer",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

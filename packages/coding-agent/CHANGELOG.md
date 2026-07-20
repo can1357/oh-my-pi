@@ -43,6 +43,7 @@
 
 ### Changed
 - Changed the default collaboration relay and encrypted share endpoints to `collab.pkking.computer`.
+- Changed fork-owned outbound identifiers (OpenRouter/xAI HTTP headers, protocol-probe link, and benchmark homepages) from upstream `Oh-My-Pi`/`omp.sh` to `oh-my-pk`/`oh-my-pk.pkking.computer`. The Auto-QA push endpoint default is now empty (disabled) so the fork does not leak telemetry to upstream's `qa.omp.sh` receiver; set `dev.autoqaPush.endpoint` explicitly to re-enable it.
 
 - Changed blind/staged-independent context to mechanically clamp child collaboration to report-only, denying discovery, messaging, wake, and busy replies.
 - Changed the completion gate to distinguish failed from unproven criteria and require full criterion evidence coverage.
@@ -68,7 +69,7 @@
 - Fixed broadcast fan-out relaying sibling legs to the main UI even when the broadcast already reached the main agent directly, duplicating the identical body once per sibling (`suppressRelay` was adopted on the bus during the upstream sync but never set by the fork's diverged send path).
 - Fixed AssignmentContractV2 evidencePolicy, priorBlockedRoutes, and resultRequirements to survive digest, parse, and transport after they were silently dropped with an unchanged digest.
 - Fixed Fusion sidekick observability: `/fusion status` now reports live Sidekick registry state (idle/running/parked/unavailable) and marks Fusion as degraded when the sidekick is missing; spawn now waits for AgentRegistry registration before retaining a sidekick id so failed starts no longer latch a phantom Sidekick.
-- Fixed `/remote` in ACP/text mode: it is now consumed with an explicit interactive-TUI requirement instead of being forwarded to the model as ordinary prompt text.
+- Fixed the built-in collab-based `/remote-control` alias shadowing pk-speak's richer `/remote` extension command; `/remote` is now available to the extension while encrypted session sharing remains explicit at `/collab` and `/remote-control`.
 - Fixed source installers, mise updates, package metadata, and release instructions to use the `kingkillery/oh-my-pk` fork instead of the upstream `oh-my-pi` repository.
 - Fixed auto-learn thresholding so only successful tool calls count toward `autolearn.minToolCalls`; failed calls no longer trigger a capture nudge.
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { getFastembedCacheDir } from "@pk-nerdsaver-ai/pi-utils";
+import { APP_NAME, getFastembedCacheDir } from "@pk-nerdsaver-ai/pi-utils";
 import "./setup";
 import {
 	available,
@@ -133,9 +133,9 @@ describe("optional embeddings", () => {
 			fetch: async request => {
 				requests += 1;
 				expect(request.headers.get("content-type")).toBe("application/json");
-				expect(request.headers.get("user-agent")).toBe(`Oh-My-Pi/${packageJson.version}`);
-				expect(request.headers.get("http-referer")).toBe("https://omp.sh/");
-				expect(request.headers.get("x-openrouter-title")).toBe("Oh-My-Pi");
+				expect(request.headers.get("user-agent")).toBe(`${APP_NAME}/${packageJson.version}`);
+				expect(request.headers.get("http-referer")).toBe("https://oh-my-pk.pkking.computer/");
+				expect(request.headers.get("x-openrouter-title")).toBe("Oh-My-PK");
 				expect(request.headers.get("x-openrouter-categories")).toBe("cli-agent");
 				expect(request.headers.get("x-title")).toBeNull();
 				expect(request.headers.get("authorization")).toBeNull();

@@ -1106,7 +1106,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "remote-control",
-		aliases: ["remote"],
 		description: "Control this session from a phone, browser, or Kanban",
 		inlineHint: "[start|view|status|stop|kanban] [relayUrl]",
 		subcommands: [
@@ -1119,7 +1118,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: async (_command, runtime) => {
 			await runtime.output(
-				"Remote control requires the interactive TUI. Start `omp` in a terminal, then run `/remote`.",
+				"Remote control requires the interactive TUI. Start `oh-my-pk` in a terminal, then run `/remote-control`.",
 			);
 		},
 		handleTui: async (command, runtime) => {

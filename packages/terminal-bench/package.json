@@ -4,7 +4,7 @@
   "name": "@pk-nerdsaver-ai/terminal-bench",
   "version": "0.0.1",
   "description": "Run harbor-framework/terminal-bench-2 against the local omp build with a live progress/spend/success dashboard",
-  "homepage": "https://omp.sh",
+  "homepage": "https://oh-my-pk.pkking.computer",
   "author": "Can Boluk",
   "license": "MIT",
   "repository": {

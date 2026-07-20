@@ -22,6 +22,8 @@ The browser line is click-to-join (an OSC 8 hyperlink to the full `https://` dee
 
 Running `/collab`, `/remote-control`, `/collab view`, or `/remote-control view` starts or displays the active hosting session, rendering both the terminal/browser join links and their corresponding QR codes.
 
+`/remote-control` uses the same encrypted transport as `/collab` (ephemeral session sharing). It is distinct from `/remote`, which is owned by the pk-speak extension and provides a persistent operator gateway (voice, routing, sessions, workspace). If pk-speak is loaded, `/remote` controls the gateway; `/remote-control` controls collab sharing.
+
 ```
 /join collab.pkking.computer/#mgAYTZwEnpRQtca0CTgn-Q.gdJU…
 ```

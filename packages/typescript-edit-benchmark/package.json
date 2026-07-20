@@ -4,7 +4,7 @@
   "name": "@pk-nerdsaver-ai/typescript-edit-benchmark",
   "version": "0.0.1",
   "description": "Edit benchmark suite using TypeScript source code mutations",
-  "homepage": "https://omp.sh",
+  "homepage": "https://oh-my-pk.pkking.computer",
   "author": "Can Boluk",
   "license": "MIT",
   "repository": {

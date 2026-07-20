@@ -238,14 +238,19 @@ describe("ACP builtin slash commands", () => {
 		expect(output).toEqual(["Fast mode is off."]);
 	});
 
-	it("consumes remote control commands with an interactive-TUI requirement", async () => {
-		const { output, runtime } = createRuntime();
+	it("keeps /remote available to extensions while consuming explicit /remote-control", async () => {
+		const extension = createRuntime();
+		const extensionResult = await executeAcpBuiltinSlashCommand("/remote status", extension.runtime);
 
-		const result = await executeAcpBuiltinSlashCommand("/remote status", runtime);
+		expect(extensionResult).toBe(false);
+		expect(extension.output).toEqual([]);
 
-		expect(result).toEqual({ consumed: true });
-		expect(output).toEqual([
-			"Remote control requires the interactive TUI. Start `omp` in a terminal, then run `/remote`.",
+		const builtin = createRuntime();
+		const builtinResult = await executeAcpBuiltinSlashCommand("/remote-control status", builtin.runtime);
+
+		expect(builtinResult).toEqual({ consumed: true });
+		expect(builtin.output).toEqual([
+			"Remote control requires the interactive TUI. Start `oh-my-pk` in a terminal, then run `/remote-control`.",
 		]);
 	});
 

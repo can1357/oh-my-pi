@@ -12,6 +12,7 @@ import {
 import { getAntigravityUserAgent } from "@pk-nerdsaver-ai/pi-catalog/wire/gemini-headers";
 import {
 	$env,
+	APP_NAME,
 	isEnoent,
 	parseImageMetadata,
 	prompt,
@@ -25,7 +26,7 @@ import packageJson from "../../package.json" with { type: "json" };
 import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
 import { settings } from "../config/settings";
 import type { CustomTool } from "../extensibility/custom-tools/types";
-import { ohMyPiXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
+import { ohMyPkXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
 import { resolveReadPath } from "./path-utils";
 
@@ -38,6 +39,7 @@ const MAX_IMAGE_SIZE = 35 * 1024 * 1024;
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const OPENAI_IMAGE_OUTPUT_FORMAT = "webp";
 const OPENAI_IMAGE_MIME_TYPE = "image/webp";
+const OPENROUTER_APP_TITLE = APP_NAME.replace(/\b\w/g, character => character.toUpperCase()).replace(/Pk$/, "PK");
 
 const DEFAULT_ANTIGRAVITY_ENDPOINT_PROD = "https://daily-cloudcode-pa.googleapis.com";
 const DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX = "https://daily-cloudcode-pa.sandbox.googleapis.com";
@@ -1317,7 +1319,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 							headers: {
 								Authorization: `Bearer ${key}`,
 								"Content-Type": "application/json",
-								"User-Agent": ohMyPiXAIUserAgent(),
+								"User-Agent": ohMyPkXAIUserAgent(),
 							},
 							body: JSON.stringify(xaiBody),
 							signal: requestSignal,
@@ -1403,8 +1405,8 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 							headers: {
 								"Content-Type": "application/json",
 								Authorization: `Bearer ${key}`,
-								"HTTP-Referer": "https://omp.sh/",
-								"X-OpenRouter-Title": "Oh-My-Pi",
+								"HTTP-Referer": "https://oh-my-pk.pkking.computer/",
+								"X-OpenRouter-Title": OPENROUTER_APP_TITLE,
 								"X-OpenRouter-Categories": "cli-agent",
 							},
 							body: JSON.stringify(requestBody),

@@ -126,7 +126,7 @@ a.ghost { color: var(--text); background: transparent; border-color: var(--line)
 <div class="actions">
 <a class="button" href="${escapeHtml(primaryHref)}">${escapeHtml(primaryLabel)}</a>
 <a class="button ghost" href="${escapeHtml(cliOrigin)}/install.ps1">Install for Windows</a>
-<a class="button ghost" href="https://github.com/kingkillery/oh-my-pi">GitHub</a>
+<a class="button ghost" href="https://github.com/kingkillery/oh-my-pk">GitHub</a>
 </div>
 </div>
 <div class="card">

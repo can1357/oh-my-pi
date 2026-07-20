@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed OpenRouter request headers to identify the fork as `oh-my-pk` and link to `oh-my-pk.pkking.computer` instead of using upstream `Oh-My-Pi`/`omp.sh` branding.
+
 ### Fixed
 
 - Fixed the registered Devin provider being unreachable through generic `stream` and `streamSimple` calls by wiring lazy dispatch and shared-option mapping for `devin-agent`.
