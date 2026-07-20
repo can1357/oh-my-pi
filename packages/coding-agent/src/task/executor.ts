@@ -2571,6 +2571,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				enableMCP,
 				mcpManager: options.mcpManager,
 				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+				customToolSources:
+					mcpProxyTools.length > 0 ? new Map(mcpProxyTools.map(tool => [tool.name, "mcp" as const])) : undefined,
 				clientBridge: options.clientBridge,
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,

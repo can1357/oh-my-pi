@@ -93,6 +93,8 @@ export interface WriteToolDetails {
 	/** Absolute filesystem path the write resolved to. Used by the renderer to wrap
 	 * the (possibly cwd-relative) header path in an OSC 8 `file://` hyperlink. */
 	resolvedPath?: string;
+	/** Structured result returned by an xd:// mounted tool execution. */
+	xdev?: { toolName: string; details?: unknown };
 }
 
 /**
@@ -269,6 +271,18 @@ function parseSqliteWriteTarget(subPath: string, queryString: string): { table: 
 
 	return { table, key };
 }
+function internalUrlSchemeForWritePath(rawPath: string): string | undefined {
+	let normalizedPath: string;
+	try {
+		normalizedPath = peelWriteUrlSelector(unwrapHashlineHeaderPath(rawPath));
+	} catch {
+		// Invalid write selectors fail before dispatch in execute(). They cannot
+		// authorize or execute a mounted tool, so no scheme tier applies here.
+		return undefined;
+	}
+	const match = /^([a-z][a-z0-9+.-]*):\/\//i.exec(normalizedPath.trim());
+	return match?.[1]?.toLowerCase();
+}
 
 /**
  * Write tool implementation.
@@ -282,13 +296,17 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// Substring scan on the raw arg so a hashline-wrapped `[ssh://…#TAG]`
 		// path cannot dodge the exec tier.
 		if (typeof rawPath === "string" && pathTargetsSsh(rawPath)) return "exec";
-		if (typeof rawPath !== "string" || !isInternalUrlPath(rawPath)) return "write";
+		if (typeof rawPath !== "string") return "write";
+		const scheme = internalUrlSchemeForWritePath(rawPath);
+		// xd:// dispatches an arbitrary mounted MCP/custom tool, so it must not
+		// inherit the ordinary write tier merely because it uses the write surface.
+		if (scheme === "xd") return "exec";
+		if (!scheme || !isInternalUrlPath(rawPath)) return "write";
 		// Internal URLs are usually session-local artifacts (read tier), but a
 		// scheme whose handler exposes a `write` hook mutates handler-owned
 		// user data (e.g. vault:// notes, host-owned mcp:// URIs) and must take
 		// the write tier so always-ask mode actually prompts.
-		const match = /^([a-z][a-z0-9+.-]*):\/\//i.exec(rawPath.trim());
-		const handler = match ? InternalUrlRouter.instance().getHandler(match[1]!.toLowerCase()) : undefined;
+		const handler = InternalUrlRouter.instance().getHandler(scheme);
 		return handler?.write ? "write" : "read";
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
@@ -817,7 +835,26 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					// Handler-owned writes (vault:// notes, host URIs) mutate user
 					// data outside the local sandbox — plan mode must reject them.
 					enforcePlanModeWrite(this.session, path, { op: "update" });
-					await handler.write(parsed, cleanContent, { cwd: this.session.cwd, signal });
+					const executeXdevTool = this.session.executeXdevTool?.bind(this.session);
+					const writeResult = await handler.write(parsed, cleanContent, {
+						cwd: this.session.cwd,
+						signal,
+						localProtocolOptions: this.session.localProtocolOptions,
+						xdev: executeXdevTool
+							? {
+									getRegistry: () => this.session.getXdevRegistry?.(),
+									execute: (toolName, args, executionSignal) =>
+										executeXdevTool(toolName, args, executionSignal, context),
+								}
+							: undefined,
+					});
+					if (writeResult) {
+						const toolName = parsed.rawHost || parsed.hostname;
+						return {
+							content: writeResult.content,
+							details: { xdev: { toolName, details: writeResult.details } },
+						};
+					}
 					let resultText = `Successfully wrote ${cleanContent.length} bytes to ${path}`;
 					if (stripped) {
 						resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;

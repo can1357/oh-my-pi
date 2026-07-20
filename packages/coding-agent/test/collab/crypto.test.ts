@@ -129,9 +129,9 @@ describe("collab link format", () => {
 			roomId,
 			key,
 			undefined,
-			"https://web.example",
+			"https://web.pkking.computer",
 		);
-		expect(webLink.startsWith("https://web.example/#relay.example.com:8443/r/")).toBe(true);
+		expect(webLink.startsWith("https://web.pkking.computer/#relay.example.com:8443/r/")).toBe(true);
 		const parsed = parseCollabLink(webLink);
 		if ("error" in parsed) throw new Error(parsed.error);
 		expect(parsed.wsUrl).toBe(`wss://relay.example.com:8443/r/${roomId}`);
@@ -207,17 +207,17 @@ describe("collab link format", () => {
 	});
 
 	it("normalizes explicit web UI roots, paths, trailing slashes, and ports", () => {
-		const rootLink = formatCollabWebLink(DEFAULT_RELAY_URL, roomId, key, undefined, " https://web.example/ ");
-		expect(rootLink.startsWith("https://web.example/#")).toBe(true);
+		const rootLink = formatCollabWebLink(DEFAULT_RELAY_URL, roomId, key, undefined, " https://web.pkking.computer/ ");
+		expect(rootLink.startsWith("https://web.pkking.computer/#")).toBe(true);
 
 		const pathLink = formatCollabWebLink(
 			DEFAULT_RELAY_URL,
 			roomId,
 			key,
 			undefined,
-			"https://web.example:8443/collab///",
+			"https://preview.pkking.computer:8443/collab///",
 		);
-		expect(pathLink.startsWith("https://web.example:8443/collab/#")).toBe(true);
+		expect(pathLink.startsWith("https://preview.pkking.computer:8443/collab/#")).toBe(true);
 
 		const localHttpLink = formatCollabWebLink(
 			DEFAULT_RELAY_URL,
@@ -227,6 +227,30 @@ describe("collab link format", () => {
 			"http://localhost:5173/app/",
 		);
 		expect(localHttpLink.startsWith("http://localhost:5173/app/#")).toBe(true);
+	});
+
+	it("replaces persisted upstream web origins with the OMPK-owned collab origin", () => {
+		const webLink = formatCollabWebLink(DEFAULT_RELAY_URL, roomId, key, undefined, "https://my.omp.sh/");
+		expect(webLink.startsWith("https://collab.pkking.computer/#")).toBe(true);
+		expect(webLink).not.toContain("omp.sh");
+	});
+
+	it("migrates legacy upstream origins before applying current URL policy", () => {
+		const webLink = formatCollabWebLink(
+			DEFAULT_RELAY_URL,
+			roomId,
+			key,
+			undefined,
+			"http://legacy.omp.sh/stale?theme=dark#old",
+		);
+		expect(webLink.startsWith("https://collab.pkking.computer/#")).toBe(true);
+		expect(webLink).not.toContain("omp.sh");
+	});
+
+	it("rejects hosted web origins outside the pkking.computer domain", () => {
+		expect(() =>
+			formatCollabWebLink(DEFAULT_RELAY_URL, roomId, key, undefined, "https://web.example/collab"),
+		).toThrow("collab.webUrl host must match <subdomain>.pkking.computer");
 	});
 
 	it("rejects web UI URLs without an http or https protocol", () => {

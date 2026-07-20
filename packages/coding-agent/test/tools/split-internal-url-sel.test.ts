@@ -142,6 +142,17 @@ describe("splitInternalUrlSel", () => {
 	it("still peels authority-trailing selectors for non-ssh schemes (artifact://5:1-50)", () => {
 		expect(splitInternalUrlSel("artifact://5:1-50")).toEqual({ path: "artifact://5", sel: "1-50" });
 	});
+
+	it("peels selectors from xd tool-device URLs", () => {
+		expect(splitInternalUrlSel("xd://mcp__demo__lookup:raw")).toEqual({
+			path: "xd://mcp__demo__lookup",
+			sel: "raw",
+		});
+		expect(splitInternalUrlSel("xd://mcp__demo__lookup:1-20")).toEqual({
+			path: "xd://mcp__demo__lookup",
+			sel: "1-20",
+		});
+	});
 });
 
 describe("peelWriteUrlSelector (write/read selector parity)", () => {
@@ -167,11 +178,13 @@ describe("peelWriteUrlSelector (write/read selector parity)", () => {
 		// the base resource read resolves, not a note/file literally named `note:raw`.
 		expect(peelWriteUrlSelector("vault://note:raw")).toBe("vault://note");
 		expect(peelWriteUrlSelector("local://foo.txt:conflicts")).toBe("local://foo.txt");
+		expect(peelWriteUrlSelector("xd://mcp__demo__lookup:raw")).toBe("xd://mcp__demo__lookup");
 		expect(() => peelWriteUrlSelector("vault://note:1-20")).toThrow(/whole file/);
 	});
 
 	it("rejects line-range and malformed selectors instead of silently stripping them", () => {
 		expect(() => peelWriteUrlSelector("ssh://h/f:1-20")).toThrow(/whole file/);
+		expect(() => peelWriteUrlSelector("xd://mcp__demo__lookup:1-20")).toThrow(/whole file/);
 		expect(() => peelWriteUrlSelector("ssh://h/f:-10")).toThrow(/whole file/);
 		expect(() => peelWriteUrlSelector("ssh://h/f:raw:1-20")).toThrow(/whole file/);
 		expect(() => peelWriteUrlSelector("ssh://h/f:conflicts:1-20")).toThrow(/whole file/);

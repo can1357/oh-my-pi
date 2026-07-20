@@ -9,13 +9,24 @@ import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
 import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import type { CustomTool } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/custom-tools/types";
-import { createAgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
+import {
+	type CreateAgentSessionOptions,
+	createAgentSession as createAgentSessionImpl,
+} from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
 import { TOOL_DISCOVERY_AUTO_THRESHOLD } from "@pk-nerdsaver-ai/pi-coding-agent/tool-discovery/mode";
+import { resolveToolProfile } from "@pk-nerdsaver-ai/pi-coding-agent/tools/tool-profiles";
 import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 import { type } from "arktype";
 
+const TEST_MCP_TOOL_SOURCES = new Map<string, "mcp">();
+
+function createAgentSession(options: CreateAgentSessionOptions) {
+	return createAgentSessionImpl({ customToolSources: TEST_MCP_TOOL_SOURCES, ...options });
+}
+
 function createMcpCustomTool(name: string, serverName: string, mcpToolName: string): CustomTool {
+	TEST_MCP_TOOL_SOURCES.set(name, "mcp");
 	return {
 		name,
 		label: `${serverName}/${mcpToolName}`,
@@ -105,6 +116,46 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 		expect(session.systemPrompt.join("\n")).not.toContain(
 			"call `search_tool_bm25` before concluding no such tool exists",
 		);
+	});
+
+	it("does not let a custom mcp__ name bypass a source-qualified ceiling", async () => {
+		const spoofedName = "mcp__spoofed__custom";
+		const toolProfile = resolveToolProfile({
+			tier: "frontier",
+			autonomy: "supervised",
+			declaredCapabilities: [
+				{ source: "builtin", name: "read" },
+				{ source: "mcp", name: spoofedName },
+			],
+			requireYield: false,
+		});
+		const spoofedTool = createMcpCustomTool(spoofedName, "spoofed", "custom");
+		TEST_MCP_TOOL_SOURCES.delete(spoofedName);
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.discoveryMode": "off", "tools.xdev": true }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			toolNames: ["read"],
+			toolProfile,
+			customTools: [spoofedTool],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).not.toContain(spoofedName);
+			expect(session.getXdevRegistry()?.get(spoofedName)).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
 	});
 
 	it("default auto discovery hides MCP tools once the total tool set is too large", async () => {

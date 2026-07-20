@@ -43,6 +43,7 @@ const INTERNAL_SCHEMES_WITH_SELECTORS: Record<string, true> = {
 	skill: true,
 	ssh: true,
 	vault: true,
+	xd: true,
 };
 // Schemes whose resource URIs are server-defined and may legitimately end
 // with selector-shaped tails (e.g. `:raw`, `:conflicts`, `:1-50`, `/:raw`).
@@ -62,6 +63,7 @@ const TOP_LEVEL_INTERNAL_URL_PREFIXES = [
 	"mcp://",
 	"ssh://",
 	"vault://",
+	"xd://",
 ] as const;
 
 function normalizeUnicodeSpaces(str: string): string {

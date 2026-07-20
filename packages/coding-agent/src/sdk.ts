@@ -434,6 +434,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Custom tools to register (in addition to built-in tools). Accepts both CustomTool and ToolDefinition. */
 	customTools?: (CustomTool | ToolDefinition)[];
+	/** Trusted registration provenance for `customTools`; omitted entries are custom, never inferred from their names. */
+	customToolSources?: ReadonlyMap<string, Extract<ToolSource, "mcp" | "custom">>;
 	/** Inline extensions (merged with discovery). */
 	extensions?: ExtensionFactory[];
 	/** Additional extension paths to load (merged with discovery). */
@@ -1615,6 +1617,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getDiscoverableToolSearchIndex: () => session.getDiscoverableToolSearchIndex(),
 			getSelectedDiscoveredToolNames: () => session.getSelectedDiscoveredToolNames(),
 			activateDiscoveredTools: toolNames => session.activateDiscoveredTools(toolNames),
+			getXdevRegistry: () => session?.getXdevRegistry(),
+			executeXdevTool: (toolName, args, signal, context) => session.executeXdevTool(toolName, args, signal, context),
 			getCheckpointState: () => session.getCheckpointState(),
 			setCheckpointState: state => session.setCheckpointState(state ?? undefined),
 			getToolChoiceQueue: () => session.toolChoiceQueue,
@@ -2384,6 +2388,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				intentField,
 				mcpDiscoveryMode: hasDiscoverableTools,
 				mcpDiscoveryServerSummaries: discoverableToolSummary.servers.map(formatDiscoverableToolServerSummary),
+				xdevEnabled: settings.get("tools.xdev"),
 				eagerTasks,
 				eagerTasksAlways,
 				taskBatch: settings.get("task.batch"),
@@ -2497,10 +2502,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
 		);
 		const resolveToolSource = (name: string): ToolSource | undefined => {
-			// Prefer registration identity over name-catalog so an extension/custom
-			// tool that overwrites a builtin name does not inherit the builtin ceiling.
-			if (name.startsWith("mcp__")) return "mcp";
-			if (customToolNames.has(name)) return "custom";
+			// Registration provenance wins over spelling. In particular, mcp__ is
+			// never authority by itself: an SDK custom/extension tool cannot
+			// self-promote into an MCP-only capability ceiling by choosing a name.
+			if (mcpManager?.getTools().some(tool => tool.name === name)) return "mcp";
+			if (customToolNames.has(name)) return options.customToolSources?.get(name) ?? "custom";
 			if (extensionToolNames.has(name) || registeredTools.some(t => t.definition.name === name)) {
 				return "extension";
 			}

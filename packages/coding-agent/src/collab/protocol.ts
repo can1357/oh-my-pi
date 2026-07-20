@@ -134,6 +134,9 @@ const ROOM_PATH_RE = /^\/r\/([A-Za-z0-9_-]{10,64})(?:\.([A-Za-z0-9_-]+))?$/;
 const BARE_LINK_RE = /^([A-Za-z0-9_-]{10,64})[#.]([A-Za-z0-9_-]+)$/;
 const B64URL_RE = /^[A-Za-z0-9_-]+$/;
 const LOCAL_HOSTNAMES: Record<string, true> = { localhost: true, "127.0.0.1": true, "::1": true, "[::1]": true };
+const PKKING_WEB_HOST_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+pkking\.computer$/i;
+const LEGACY_UPSTREAM_WEB_HOST_RE = /^(?:[a-z0-9-]+\.)*omp\.sh$/i;
+const DEFAULT_COLLAB_WEB_ORIGIN = DEFAULT_RELAY_URL.replace(/^wss:/, "https:");
 
 function isLocalHostname(hostname: string): boolean {
 	return LOCAL_HOSTNAMES[hostname] === true;
@@ -220,11 +223,17 @@ function normalizeCollabWebBaseUrl(relayUrl: string, webUrl?: string): string {
 	if (url.protocol !== "http:" && url.protocol !== "https:") {
 		throw new Error("collab.webUrl must start with http:// or https://");
 	}
+	// OMPK and upstream Oh My Pi are independent products. Migrate every
+	// persisted upstream origin before applying current hosted-URL policy.
+	if (LEGACY_UPSTREAM_WEB_HOST_RE.test(url.hostname)) return DEFAULT_COLLAB_WEB_ORIGIN;
 	if (url.protocol === "http:" && !isLocalHostname(url.hostname)) {
 		throw new Error("collab.webUrl must use https:// unless it targets localhost");
 	}
 	if (url.search || url.hash) {
 		throw new Error("collab.webUrl must not include a query string or fragment");
+	}
+	if (!isLocalHostname(url.hostname) && !PKKING_WEB_HOST_RE.test(url.hostname)) {
+		throw new Error("collab.webUrl host must match <subdomain>.pkking.computer (or localhost for development)");
 	}
 	const path = url.pathname.replace(/\/+$/, "");
 	return `${url.origin}${path}`;

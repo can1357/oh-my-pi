@@ -29,6 +29,7 @@ import {
 	type AgentMessage,
 	type AgentState,
 	type AgentTool,
+	type AgentToolContext,
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
 	type AsideMessage,
@@ -220,7 +221,7 @@ import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slas
 import { GoalRuntime } from "../goals/runtime";
 import type { Goal, GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
-import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
+import { type LocalProtocolOptions, resolveLocalUrlToPath, type XdevWriteResult } from "../internal-urls";
 import { IrcBus, type IrcMessage } from "../irc/bus";
 import { resolveMemoryBackend } from "../memory-backend";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
@@ -327,6 +328,7 @@ import { getLatestTodoPhasesFromEntries, type TodoItem, type TodoPhase } from ".
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import type { ResolvedToolProfile, ToolSource } from "../tools/tool-profiles";
 import { clampTimeout } from "../tools/tool-timeouts";
+import { XdevRegistry } from "../tools/xdev";
 import { parseCommandArgs } from "../utils/command-args";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -1475,6 +1477,7 @@ export class AgentSession {
 	#discoverableToolSearchIndex: DiscoverableToolSearchIndex | null = null;
 	#selectedDiscoveredToolNames = new Set<string>();
 	#rpcHostToolNames = new Set<string>();
+	#xdevRegistry: XdevRegistry | undefined;
 	#defaultSelectedMCPServerNames = new Set<string>();
 	#defaultSelectedMCPToolNames = new Set<string>();
 	#sessionDefaultSelectedMCPToolNames = new Map<string, string[]>();
@@ -1864,6 +1867,7 @@ export class AgentSession {
 		this.#collaborationPolicy = config.collaborationPolicy;
 		this.#toolProfile = config.toolProfile;
 		this.#toolSourceOf = config.toolSourceOf;
+		this.#reconcileXdevRegistry();
 		this.#providerSessionId = config.providerSessionId;
 		this.agent.setAssistantMessageEventInterceptor((message, assistantMessageEvent) => {
 			this.#watchGeminiHeaderRunaway(assistantMessageEvent);
@@ -4931,6 +4935,56 @@ export class AgentSession {
 		return this.#toolRegistry.get(name);
 	}
 
+	getXdevRegistry(): XdevRegistry | undefined {
+		this.#reconcileXdevRegistry();
+		return this.#xdevRegistry;
+	}
+
+	#reconcileXdevRegistry(): void {
+		if (!this.settings.get("tools.xdev")) {
+			this.#xdevRegistry = undefined;
+			return;
+		}
+		this.#xdevRegistry ??= new XdevRegistry({
+			enabled: true,
+			sourceOf: name => (this.#rpcHostToolNames.has(name) ? "custom" : this.#toolSourceOf?.(name)),
+		});
+		this.#xdevRegistry.reconcile(
+			Array.from(this.#toolRegistry.values()).filter(tool => this.#isToolNameAllowedByProfile(tool.name)),
+		);
+	}
+
+	async executeXdevTool(
+		name: string,
+		args: Record<string, unknown>,
+		signal?: AbortSignal,
+		context?: AgentToolContext,
+	): Promise<XdevWriteResult> {
+		const registry = this.getXdevRegistry();
+		const tool = registry?.get(name);
+		if (!registry || !tool) throw new ToolError(`Tool is not mounted under xd://: ${name}`);
+
+		if (!this.getActiveToolNames().includes(name)) {
+			await this.activateDiscoveredTools([name]);
+			if (!this.getActiveToolNames().includes(name)) {
+				throw new ToolError(`Mounted tool could not be activated: ${name}`);
+			}
+		}
+
+		const result = await tool.execute(`xd-${name}-${crypto.randomUUID()}`, args, signal, undefined, context);
+		if (result.isError) {
+			const message = result.content
+				.filter((block): block is TextContent => block.type === "text")
+				.map(block => block.text)
+				.join("\n");
+			throw new ToolError(message || `xd://${name} execution failed`);
+		}
+		return {
+			content: result.content.length > 0 ? result.content : [{ type: "text", text: "(tool returned no content)" }],
+			details: result.details,
+		};
+	}
+
 	/**
 	 * Get all configured tool names (built-in via --tools or default, plus custom tools).
 	 */
@@ -5276,13 +5330,15 @@ export class AgentSession {
 		if (!this.#toolProfile) return true;
 		const source =
 			this.#toolSourceOf?.(name) ??
-			(isMCPToolName(name)
-				? "mcp"
-				: name in BUILTIN_TOOLS
-					? "builtin"
-					: name in HIDDEN_TOOLS
-						? "hidden"
-						: undefined);
+			(this.#rpcHostToolNames.has(name)
+				? "custom"
+				: isMCPToolName(name)
+					? "mcp"
+					: name in BUILTIN_TOOLS
+						? "builtin"
+						: name in HIDDEN_TOOLS
+							? "hidden"
+							: undefined);
 		return source !== undefined && isAllowedByToolProfile(this.#toolProfile, source, name);
 	}
 
@@ -5611,6 +5667,7 @@ export class AgentSession {
 			) as AgentTool;
 			this.#toolRegistry.set(finalTool.name, finalTool);
 		}
+		this.#reconcileXdevRegistry();
 
 		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
 		this.#pruneSelectedMCPToolNames();
@@ -5672,6 +5729,7 @@ export class AgentSession {
 			this.#toolRegistry.set(finalTool.name, finalTool);
 			this.#rpcHostToolNames.add(finalTool.name);
 		}
+		this.#reconcileXdevRegistry();
 
 		// Registry contents changed — invalidate discovery caches so the next BM25 lookup sees
 		// the new RPC-host tool set. (#applyActiveToolsByName below also invalidates, but doing

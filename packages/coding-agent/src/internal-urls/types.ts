@@ -5,7 +5,9 @@
  * providing access to agent outputs and server resources without exposing filesystem paths.
  */
 
+import type { ImageContent, TextContent } from "@pk-nerdsaver-ai/pi-ai";
 import type { Skill } from "../extensibility/skills";
+import type { XdevRegistry } from "../tools/xdev";
 import type { LocalProtocolOptions } from "./local-protocol";
 
 /**
@@ -72,13 +74,26 @@ export interface InternalUrl extends URL {
 	rawPathname?: string;
 }
 
+/** Session bridge exposed to read-only xd:// protocol operations. */
+export interface XdevResolveBridge {
+	getRegistry(): XdevRegistry | undefined;
+}
+
+export interface XdevWriteResult {
+	content: Array<TextContent | ImageContent>;
+	details?: unknown;
+}
+
+export interface XdevWriteBridge extends XdevResolveBridge {
+	execute(toolName: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<XdevWriteResult>;
+}
+
 /**
  * Caller-supplied context that the router threads into protocol handlers.
  *
  * Read tool calls `InternalUrlRouter.resolve(url, { cwd, settings, signal })`
- * so handlers can resolve relative defaults (e.g. `issue://N` → which repo?)
- * against the actual session that initiated the read, not whichever session
- * happens to be registered first in the global `AgentRegistry`.
+ * so handlers can resolve relative defaults against the actual session that
+ * initiated the read, not whichever session was registered first.
  */
 export interface ResolveContext {
 	/** Working directory of the calling session. */
@@ -107,6 +122,8 @@ export interface ResolveContext {
 	 * reject directory resources, so they never need the listing.
 	 */
 	skipDirectoryListing?: boolean;
+	/** Session-scoped virtual tool device registry. */
+	xdev?: XdevResolveBridge;
 }
 
 /**
@@ -121,6 +138,8 @@ export interface WriteContext {
 	signal?: AbortSignal;
 	/** Calling session's `local://` root mapping — see {@link ResolveContext.localProtocolOptions}. */
 	localProtocolOptions?: LocalProtocolOptions;
+	/** Session-scoped virtual tool device registry and execution bridge. */
+	xdev?: XdevWriteBridge;
 }
 
 /**
@@ -154,7 +173,7 @@ export interface ProtocolHandler {
 	 * Handlers that omit this method are treated as read-only; the write tool
 	 * surfaces a clear "not writable" error when invoked against them.
 	 */
-	write?(url: InternalUrl, content: string, context?: WriteContext): Promise<void>;
+	write?(url: InternalUrl, content: string, context?: WriteContext): Promise<void> | Promise<XdevWriteResult>;
 	/**
 	 * Optional autocomplete hook. Returns candidate completions for the
 	 * host/path portion of a `scheme://` URL while the user composes a prompt.

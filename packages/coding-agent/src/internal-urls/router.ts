@@ -20,6 +20,7 @@ import { SshProtocolHandler } from "./ssh-protocol";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 import { VaultProtocolHandler } from "./vault-protocol";
 import { WikigraphProtocolHandler } from "./wikigraph-protocol";
+import { XdProtocolHandler } from "./xd-protocol";
 
 export class InternalUrlRouter {
 	static #instance: InternalUrlRouter | undefined;
@@ -41,6 +42,7 @@ export class InternalUrlRouter {
 		this.register(new PrProtocolHandler());
 		this.register(new HistoryProtocolHandler());
 		this.register(new SshProtocolHandler());
+		this.register(new XdProtocolHandler());
 	}
 
 	/** Process-global router instance. */

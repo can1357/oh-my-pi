@@ -425,6 +425,8 @@ export interface BuildSystemPromptOptions {
 	mcpDiscoveryMode?: boolean;
 	/** Discoverable MCP server summaries to advertise when discovery mode is active. */
 	mcpDiscoveryServerSummaries?: string[];
+	/** Whether xd:// virtual tool devices are enabled for this prompt build. */
+	xdevEnabled?: boolean;
 	/** Encourage the agent to delegate via tasks unless changes are trivial. */
 	eagerTasks?: boolean;
 	/** When true, the Eager Tasks section uses the hard MUST/ONLY wording (`task.eager: always`) rather than the softer `preferred` nudge. */
@@ -756,6 +758,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		mcpDiscoveryMode,
 		hasMCPDiscoveryServers: mcpDiscoveryServerSummaries.length > 0,
 		mcpDiscoveryServerSummaries,
+		xdevEnabled: options.xdevEnabled === true,
 		eagerTasks,
 		eagerTasksAlways,
 		taskBatch,

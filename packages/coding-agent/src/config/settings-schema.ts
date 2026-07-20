@@ -1887,7 +1887,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Collab",
 			label: "Web UI URL",
 			description:
-				"Browser UI used by /collab links; empty derives from collab.relayUrl; explicit http:// is localhost-only",
+				"Browser UI used by /collab links; empty derives from collab.relayUrl; hosted overrides must match https://<subdomain>.pkking.computer (localhost HTTP is development-only)",
 		},
 	},
 
@@ -3888,6 +3888,18 @@ export const SETTINGS_SCHEMA = {
 			label: "Essential Tools Override",
 			description:
 				"Override the always-loaded built-in tools (default: read, bash, edit, find, search, write, todo). Leave empty to use defaults.",
+		},
+	},
+
+	"tools.xdev": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "Virtual Tool Devices (xd://)",
+			description:
+				"Mount MCP, custom, and extension tools under xd:// for progressive discovery/execution. Essential built-ins stay top-level. Default off.",
 		},
 	},
 
