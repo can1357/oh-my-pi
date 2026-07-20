@@ -1,5 +1,5 @@
 import type { InMemorySnapshotStore } from "@pk-nerdsaver-ai/hashline";
-import type { AgentMessage, AgentTelemetryConfig, AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
+import type { AgentMessage, AgentTelemetryConfig, AgentTool, AgentToolContext } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { FetchImpl, ImageContent, Model, ServiceTier, ToolChoice } from "@pk-nerdsaver-ai/pi-ai";
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
@@ -15,7 +15,7 @@ import type { Skill } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
-import type { LocalProtocolOptions } from "../internal-urls";
+import type { LocalProtocolOptions, XdevWriteResult } from "../internal-urls";
 import type { IrcIpc } from "../irc/ipc";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
@@ -76,6 +76,7 @@ import {
 	type ToolSource,
 } from "./tool-profiles";
 import { WriteTool } from "./write";
+import type { XdevRegistry } from "./xdev";
 import { YieldTool } from "./yield";
 
 export * from "../edit";
@@ -120,6 +121,7 @@ export * from "./todo";
 export * from "./tool-profiles";
 export * from "./tts";
 export * from "./write";
+export * from "./xdev";
 export * from "./yield";
 
 /** Tool type (AgentTool from pi-ai) */
@@ -347,6 +349,15 @@ export interface ToolSession {
 	getSelectedDiscoveredToolNames?: () => string[];
 	/** Merge tool selections into the active session tool set. */
 	activateDiscoveredTools?: (toolNames: string[]) => Promise<string[]>;
+	/** Get the session-owned xd:// registry when virtual devices are enabled. */
+	getXdevRegistry?: () => XdevRegistry | undefined;
+	/** Execute a mounted xd:// tool through the owning agent session. */
+	executeXdevTool?: (
+		toolName: string,
+		args: Record<string, unknown>,
+		signal?: AbortSignal,
+		context?: AgentToolContext,
+	) => Promise<XdevWriteResult>;
 	/** The tool-choice queue used to force forthcoming tool invocations and carry invocation handlers. */
 	getToolChoiceQueue?(): ToolChoiceQueue;
 	/** Build a model-provider-specific ToolChoice that targets the named tool, or undefined if unsupported. */

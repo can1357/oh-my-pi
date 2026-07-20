@@ -2837,6 +2837,7 @@ export class ReadTool implements AgentTool<typeof readSchema | typeof lightReadS
 			signal,
 			localProtocolOptions: this.session.localProtocolOptions,
 			skills: this.session.skills,
+			xdev: { getRegistry: () => this.session.getXdevRegistry?.() },
 		});
 		const details: ReadToolDetails = { resolvedPath: resource.sourcePath, contentType: resource.contentType };
 

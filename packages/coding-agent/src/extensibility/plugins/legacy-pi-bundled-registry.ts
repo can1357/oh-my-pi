@@ -145,6 +145,7 @@ import * as bundledPiAiUtilsOpenaiHttp from "@pk-nerdsaver-ai/pi-ai/utils/openai
 import * as bundledPiAiUtilsOpenrouterHeaders from "@pk-nerdsaver-ai/pi-ai/utils/openrouter-headers";
 import * as bundledPiAiUtilsOverflow from "@pk-nerdsaver-ai/pi-ai/utils/overflow";
 import * as bundledPiAiUtilsParseBind from "@pk-nerdsaver-ai/pi-ai/utils/parse-bind";
+import * as bundledPiAiUtilsProviderInflight from "@pk-nerdsaver-ai/pi-ai/utils/provider-inflight";
 import * as bundledPiAiUtilsProviderResponse from "@pk-nerdsaver-ai/pi-ai/utils/provider-response";
 import * as bundledPiAiUtilsProxy from "@pk-nerdsaver-ai/pi-ai/utils/proxy";
 import * as bundledPiAiUtilsRequestDebug from "@pk-nerdsaver-ai/pi-ai/utils/request-debug";
@@ -523,6 +524,7 @@ import * as bundledPiCodingAgentInternalUrlsSshProtocol from "@pk-nerdsaver-ai/p
 import * as bundledPiCodingAgentInternalUrlsTypes from "@pk-nerdsaver-ai/pi-coding-agent/internal-urls/types";
 import * as bundledPiCodingAgentInternalUrlsVaultProtocol from "@pk-nerdsaver-ai/pi-coding-agent/internal-urls/vault-protocol";
 import * as bundledPiCodingAgentInternalUrlsWikigraphProtocol from "@pk-nerdsaver-ai/pi-coding-agent/internal-urls/wikigraph-protocol";
+import * as bundledPiCodingAgentInternalUrlsXdProtocol from "@pk-nerdsaver-ai/pi-coding-agent/internal-urls/xd-protocol";
 import * as bundledPiCodingAgentLsp from "@pk-nerdsaver-ai/pi-coding-agent/lsp";
 import * as bundledPiCodingAgentLspClient from "@pk-nerdsaver-ai/pi-coding-agent/lsp/client";
 import * as bundledPiCodingAgentLspClients from "@pk-nerdsaver-ai/pi-coding-agent/lsp/clients";
@@ -908,6 +910,7 @@ import * as bundledPiCodingAgentToolsToolResult from "@pk-nerdsaver-ai/pi-coding
 import * as bundledPiCodingAgentToolsToolTimeouts from "@pk-nerdsaver-ai/pi-coding-agent/tools/tool-timeouts";
 import * as bundledPiCodingAgentToolsTts from "@pk-nerdsaver-ai/pi-coding-agent/tools/tts";
 import * as bundledPiCodingAgentToolsWrite from "@pk-nerdsaver-ai/pi-coding-agent/tools/write";
+import * as bundledPiCodingAgentToolsXdev from "@pk-nerdsaver-ai/pi-coding-agent/tools/xdev";
 import * as bundledPiCodingAgentToolsYield from "@pk-nerdsaver-ai/pi-coding-agent/tools/yield";
 import * as bundledPiCodingAgentTui from "@pk-nerdsaver-ai/pi-coding-agent/tui";
 import * as bundledPiCodingAgentTuiCodeCell from "@pk-nerdsaver-ai/pi-coding-agent/tui/code-cell";
@@ -1364,6 +1367,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	>,
 	"@pk-nerdsaver-ai/pi-ai/utils/overflow": bundledPiAiUtilsOverflow as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/utils/parse-bind": bundledPiAiUtilsParseBind as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/utils/provider-inflight": bundledPiAiUtilsProviderInflight as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/utils/provider-response": bundledPiAiUtilsProviderResponse as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2324,6 +2330,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentInternalUrlsVaultProtocol as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/internal-urls/wikigraph-protocol":
 		bundledPiCodingAgentInternalUrlsWikigraphProtocol as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/internal-urls/xd-protocol":
+		bundledPiCodingAgentInternalUrlsXdProtocol as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/eval/js/context-manager":
 		bundledPiCodingAgentEvalJsContextManager as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/eval/js/executor": bundledPiCodingAgentEvalJsExecutor as unknown as Readonly<
@@ -3261,6 +3269,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/write": bundledPiCodingAgentToolsWrite as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/xdev": bundledPiCodingAgentToolsXdev as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/yield": bundledPiCodingAgentToolsYield as unknown as Readonly<

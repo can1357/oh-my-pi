@@ -161,6 +161,10 @@ export function createPersistedSubagentReviverFactory(
 					enableMCP: !mcpManager,
 					mcpManager,
 					customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+					customToolSources:
+						mcpProxyTools.length > 0
+							? new Map(mcpProxyTools.map(tool => [tool.name, "mcp" as const]))
+							: undefined,
 					clientBridge: ctx.session.clientBridge,
 				});
 			} catch (error) {

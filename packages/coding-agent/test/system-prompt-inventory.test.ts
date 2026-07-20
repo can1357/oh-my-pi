@@ -118,6 +118,23 @@ describe("system prompt tool inventory", () => {
 		expect(text).not.toContain("- Read: `read`");
 	});
 
+	it("advertises xd:// only when virtual tool devices are enabled", async () => {
+		const renderXdev = async (xdevEnabled: boolean): Promise<string> => {
+			const { systemPrompt } = await buildSystemPrompt({
+				cwd: tempDir,
+				contextFiles: [],
+				skills: [],
+				rules: [],
+				workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+				xdevEnabled,
+			});
+			return systemPrompt.join("\n\n");
+		};
+
+		expect(await renderXdev(true)).toContain("`xd://<tool>`: mounted MCP/custom/extension tool docs");
+		expect(await renderXdev(false)).not.toContain("`xd://<tool>`");
+	});
+
 	it("uses a conservative fallback inventory when no tools map is provided", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,

@@ -118,6 +118,9 @@ export class TanCommandController {
 							hasUI: false,
 							enableMCP: false,
 							customTools,
+							customToolSources: customTools
+								? new Map(customTools.map(tool => [tool.name, "mcp" as const]))
+								: undefined,
 							enableLsp,
 							agentId: cloneId,
 							agentDisplayName: "tan",

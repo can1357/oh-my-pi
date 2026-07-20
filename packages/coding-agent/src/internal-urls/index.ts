@@ -25,3 +25,4 @@ export * from "./ssh-protocol";
 export type * from "./types";
 export * from "./vault-protocol";
 export * from "./wikigraph-protocol";
+export * from "./xd-protocol";
