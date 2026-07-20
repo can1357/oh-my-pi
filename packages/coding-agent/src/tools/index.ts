@@ -1,11 +1,6 @@
 import type { InMemorySnapshotStore } from "@pk-nerdsaver-ai/hashline";
-<<<<<<< HEAD
-import type { AgentTelemetryConfig, AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { FetchImpl, ImageContent, Model, ServiceTier, ToolChoice } from "@pk-nerdsaver-ai/pi-ai";
-=======
 import type { AgentMessage, AgentTelemetryConfig, AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { FetchImpl, ImageContent, Model, ToolChoice } from "@pk-nerdsaver-ai/pi-ai";
->>>>>>> 055e9e880 (feat(coding-agent): fork-mode subagents (U11))
+import type { FetchImpl, ImageContent, Model, ServiceTier, ToolChoice } from "@pk-nerdsaver-ai/pi-ai";
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";

@@ -8392,7 +8392,6 @@ export class AgentSession {
 		this.#advisorRuntime?.reset();
 		this.#syncTodoPhasesFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
-		return result;
 	}
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const branchEntries = this.sessionManager.getBranch();
@@ -8811,7 +8810,7 @@ export class AgentSession {
 				fromExtension,
 				preserveData,
 			);
-			this.#retainCompactionSummaryToMemory(summary, shortSummary, snapcompactResult !== undefined);
+			this.#retainCompactionSummaryToMemory(summary, shortSummary, false);
 			const newEntries = this.sessionManager.getEntries();
 			this.#cacheAttribution.noteHistoryRewrite("compaction");
 			const sessionContext = this.buildDisplaySessionContext();
@@ -11274,7 +11273,7 @@ export class AgentSession {
 				fromExtension,
 				preserveData,
 			);
-			this.#retainCompactionSummaryToMemory(summary, shortSummary, snapcompactResult !== undefined);
+			this.#retainCompactionSummaryToMemory(summary, shortSummary, false);
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);

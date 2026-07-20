@@ -8,17 +8,17 @@ import {
 
 describe("tool discovery schema-token budget (U9)", () => {
 	test("auto stays off when both count and schema spend are under budget", () => {
-		const settings = Settings.isolated({});
+		const settings = Settings.isolated({ "tools.discoveryMode": "auto" });
 		expect(resolveEffectiveToolDiscoveryMode(settings, 10, 1_000)).toBe("off");
 	});
 
 	test("auto flips to mcp-only when schema spend crosses the budget despite a small tool count", () => {
-		const settings = Settings.isolated({});
+		const settings = Settings.isolated({ "tools.discoveryMode": "auto" });
 		expect(resolveEffectiveToolDiscoveryMode(settings, 10, TOOL_DISCOVERY_AUTO_SCHEMA_TOKENS + 1)).toBe("mcp-only");
 	});
 
 	test("count threshold keeps working without schema info", () => {
-		const settings = Settings.isolated({});
+		const settings = Settings.isolated({ "tools.discoveryMode": "auto" });
 		expect(resolveEffectiveToolDiscoveryMode(settings, TOOL_DISCOVERY_AUTO_THRESHOLD + 1)).toBe("mcp-only");
 	});
 

@@ -249,7 +249,7 @@ export class CacheAttributionTracker {
 
 	#hashSystemPrompt(systemPrompt: Context["systemPrompt"]): bigint {
 		if (!systemPrompt) return 0n;
-		const text = typeof systemPrompt === "string" ? systemPrompt : systemPrompt.join(" ");
+		const text = typeof systemPrompt === "string" ? systemPrompt : systemPrompt.join("\0");
 		return Bun.hash.wyhash(text);
 	}
 
