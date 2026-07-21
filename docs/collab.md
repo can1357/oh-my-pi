@@ -15,7 +15,7 @@ prints
 ```
 Collab session started!
  • Join from another terminal: oh-my-pk join "mgAYTZwEnpRQtca0CTgn-Q.gdJUbTovD94ofDaa8YvhY0-ty16w4fn8PgB6PLnoA30"
- • or any web browser: collab.pkking.computer/#mgAYTZwEnpRQtca0CTgn-Q.gdJUbTovD94ofDaa8YvhY0-ty16w4fn8PgB6PLnoA30
+ • or any web browser: oh-my-pk.pkking.computer/collab/#mgAYTZwEnpRQtca0CTgn-Q.gdJUbTovD94ofDaa8YvhY0-ty16w4fn8PgB6PLnoA30
 ```
 
 The browser line is click-to-join (an OSC 8 hyperlink to the full `https://` deep link): the relay serves the web guest client at `/`, and the room id + key ride in the URL fragment. From another omp (any directory, any machine), either form works:
@@ -25,7 +25,7 @@ Running `/collab`, `/remote-control`, `/collab view`, or `/remote-control view` 
 `/remote-control` uses the same encrypted transport as `/collab` (ephemeral session sharing). It is distinct from `/remote`, which is owned by the pk-speak extension and provides a persistent operator gateway (voice, routing, sessions, workspace). If pk-speak is loaded, `/remote` controls the gateway; `/remote-control` controls collab sharing.
 
 ```
-/join collab.pkking.computer/#mgAYTZwEnpRQtca0CTgn-Q.gdJU…
+/join oh-my-pk.pkking.computer/collab/#mgAYTZwEnpRQtca0CTgn-Q.gdJU…
 ```
 
 The guest's previous session is restored on `/leave` (or when the host stops).
@@ -111,14 +111,14 @@ Set `collab.webUrl` when the browser UI is hosted separately from the websocket 
 | Setting | Default | Meaning |
 |---|---|---|
 | `collab.relayUrl` | `wss://collab.pkking.computer` | Relay used by `/collab` when no relay is passed inline |
-| `collab.webUrl` | empty | Browser UI URL for `/collab` links; empty derives from relay; explicit `http://` is allowed only for localhost |
+| `collab.webUrl` | empty | Browser UI URL for `/collab` links; empty uses `https://oh-my-pk.pkking.computer/collab/` for the owned relay and derives from custom relays; explicit `http://` is allowed only for localhost |
 | `collab.displayName` | OS username | Name shown to other participants |
 | `share.serverUrl` | `https://collab.pkking.computer/s` | Share viewer/upload base used by `/share` (links are `<base>/<id>#<key>`) |
 | `share.redactSecrets` | `true` | Run the secret obfuscator over `/share` snapshots before upload |
 
 ## Self-hosting the relay
 
-The owned collaboration service is deployed as the `ompk-collab` Cloudflare Worker at `collab.pkking.computer`. It keeps live room coordination in one Durable Object per room and stores sealed share blobs in the configured R2 bucket. The relay never decrypts session content. Share uploads are capped at 1 MB and rate-limited to 12 per Cloudflare client IP per hour.
+The browser client is exposed at `oh-my-pk.pkking.computer/collab/` through the product-host Worker. Its relay, share, and hub service remains the `ompk-collab` Cloudflare Worker at `collab.pkking.computer`. The relay keeps live room coordination in one Durable Object per room and stores sealed share blobs in the configured R2 bucket; it never decrypts session content. Share uploads are capped at 1 MB and rate-limited to 12 per Cloudflare client IP per hour.
 
 A host disconnect does not end the room immediately: guests receive a `host-away` control message and the relay holds the room open for a ~45 s grace window. If the host reconnects in time, guests get `host-back` and the session resumes; otherwise the room closes as before (`room-closed`, close code 4001). A new host connection replaces a lingering half-open host socket (closed with 4010) so a host that lost its network can always re-claim its room. The guest client page is served with a strict build-generated Content-Security-Policy (inline scripts allowed by hash only), `Referrer-Policy: no-referrer`, and `X-Content-Type-Options: nosniff`.
 

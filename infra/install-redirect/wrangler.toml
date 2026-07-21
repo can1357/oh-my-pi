@@ -12,6 +12,10 @@ routes = [
 	{ pattern = "oh-my-pi.pkking.computer", custom_domain = true },
 ]
 
+[[services]]
+binding = "COLLAB"
+service = "ompk-collab"
+
 [vars]
 # Private Hugging Face repo that stores the release binaries (free storage + egress).
 HF_REPO = "pkkidking/oh-my-pi-binaries"

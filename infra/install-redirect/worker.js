@@ -7,6 +7,7 @@
 //   /install.ps1                          -> proxy scripts/install.ps1  (GitHub raw)
 //   /version                              -> latest tag, from the private HF repo
 //   /bin/<path>                           -> binary, from the private HF repo
+//   /collab/*                             -> product-hosted collab browser client
 //
 // Binaries live in a PRIVATE Hugging Face repo (free storage, free egress). The
 // repo stays private: this Worker holds the HF token as a secret and proxies
@@ -14,6 +15,7 @@
 //   vars:    HF_REPO     e.g. "pkkidking/oh-my-pi-binaries"
 //   secret:  HF_TOKEN    a read-scoped HF access token (wrangler secret put HF_TOKEN)
 //   var (optional): HF_REPO_TYPE "models" (default) | "datasets"
+//   service: COLLAB      ompk-collab Worker binding
 
 const GITHUB_RAW_BASE = "https://raw.githubusercontent.com/kingkillery/oh-my-pi/main/scripts";
 
@@ -154,6 +156,12 @@ function escapeHtml(value) {
 	return value.replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 }
 
+async function proxyCollabClient(request, env) {
+	if (!env.COLLAB) return new Response("Collab client unavailable", { status: 503 });
+	const upstreamUrl = new URL(request.url);
+	upstreamUrl.pathname = upstreamUrl.pathname.slice("/collab".length) || "/";
+	return env.COLLAB.fetch(new Request(upstreamUrl, request));
+}
 
 export default {
 	async fetch(request, env, ctx) {
@@ -162,6 +170,11 @@ export default {
 		}
 		const url = new URL(request.url);
 		const pathname = url.pathname;
+		if (pathname === "/collab") {
+			url.pathname = "/collab/";
+			return Response.redirect(url, 308);
+		}
+		if (pathname.startsWith("/collab/")) return proxyCollabClient(request, env);
 
 		switch (pathname) {
 			case "/":

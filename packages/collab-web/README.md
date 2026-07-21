@@ -20,7 +20,7 @@ Host a session from any omp instance (`/collab`, or `/collab ws://localhost:7466
 bun run build   # static site in dist/
 ```
 
-`dist/` is a fully static SPA — host it anywhere. JS/CSS bundles are content-hashed; favicons, `manifest.webmanifest`, `robots.txt`, `sitemap.xml`, and `og-image.png` are emitted at the site root under stable names (canonical URL: `https://collab.pkking.computer/`). Two runtime requirements:
+`dist/` is a fully static SPA — host it anywhere. JS/CSS bundles are content-hashed; favicons, `manifest.webmanifest`, `robots.txt`, `sitemap.xml`, and `og-image.png` are emitted at the site root under stable names (canonical URL: `https://oh-my-pk.pkking.computer/collab/`). Two runtime requirements:
 
 - **Secure context**: room keys are unwrapped with WebCrypto (`crypto.subtle`), which browsers expose only on `https://` or `localhost`.
 - **Relay reachability**: the client connects straight to the relay over WebSocket (`wss://` for anything that isn't localhost). The default owned relay is `wss://collab.pkking.computer`; bare `<roomId>.<key>` links resolve against it (legacy `<roomId>#<key>` and `%23`-mangled links still parse).
