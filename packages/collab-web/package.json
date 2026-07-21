@@ -4,7 +4,7 @@
   "version": "15.11.7",
   "private": true,
   "description": "Browser guest client and local relay tools for OMP collaboration",
-  "homepage": "https://collab.pkking.computer",
+  "homepage": "https://oh-my-pk.pkking.computer/collab/",
   "author": "Can Boluk",
   "license": "MIT",
   "repository": {

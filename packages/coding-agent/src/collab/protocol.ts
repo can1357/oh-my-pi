@@ -136,7 +136,9 @@ const B64URL_RE = /^[A-Za-z0-9_-]+$/;
 const LOCAL_HOSTNAMES: Record<string, true> = { localhost: true, "127.0.0.1": true, "::1": true, "[::1]": true };
 const PKKING_WEB_HOST_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+pkking\.computer$/i;
 const LEGACY_UPSTREAM_WEB_HOST_RE = /^(?:[a-z0-9-]+\.)*omp\.sh$/i;
-const DEFAULT_COLLAB_WEB_ORIGIN = DEFAULT_RELAY_URL.replace(/^wss:/, "https:");
+const LEGACY_OMPK_WEB_HOST = "collab.pkking.computer";
+const OMPK_PRODUCT_WEB_ORIGIN = "https://oh-my-pk.pkking.computer";
+const DEFAULT_COLLAB_WEB_BASE_URL = `${OMPK_PRODUCT_WEB_ORIGIN}/collab`;
 
 function isLocalHostname(hostname: string): boolean {
 	return LOCAL_HOSTNAMES[hostname] === true;
@@ -209,6 +211,7 @@ function normalizeCollabWebBaseUrl(relayUrl: string, webUrl?: string): string {
 	if (!explicitWebUrl) {
 		const normalized = normalizeRelayOrigin(relayUrl);
 		if ("error" in normalized) throw new Error(normalized.error);
+		if (normalized.origin === DEFAULT_RELAY_URL) return DEFAULT_COLLAB_WEB_BASE_URL;
 		return normalized.origin.startsWith("wss://")
 			? `https://${normalized.origin.slice("wss://".length)}`
 			: `http://${normalized.origin.slice("ws://".length)}`;
@@ -224,8 +227,11 @@ function normalizeCollabWebBaseUrl(relayUrl: string, webUrl?: string): string {
 		throw new Error("collab.webUrl must start with http:// or https://");
 	}
 	// OMPK and upstream Oh My Pi are independent products. Migrate every
-	// persisted upstream origin before applying current hosted-URL policy.
-	if (LEGACY_UPSTREAM_WEB_HOST_RE.test(url.hostname)) return DEFAULT_COLLAB_WEB_ORIGIN;
+	// persisted upstream origin and the previous fork web host before applying
+	// current hosted-URL policy.
+	if (LEGACY_UPSTREAM_WEB_HOST_RE.test(url.hostname) || url.hostname === LEGACY_OMPK_WEB_HOST) {
+		return DEFAULT_COLLAB_WEB_BASE_URL;
+	}
 	if (url.protocol === "http:" && !isLocalHostname(url.hostname)) {
 		throw new Error("collab.webUrl must use https:// unless it targets localhost");
 	}
@@ -234,6 +240,9 @@ function normalizeCollabWebBaseUrl(relayUrl: string, webUrl?: string): string {
 	}
 	if (!isLocalHostname(url.hostname) && !PKKING_WEB_HOST_RE.test(url.hostname)) {
 		throw new Error("collab.webUrl host must match <subdomain>.pkking.computer (or localhost for development)");
+	}
+	if (url.origin === OMPK_PRODUCT_WEB_ORIGIN && /^\/*$/.test(url.pathname)) {
+		return DEFAULT_COLLAB_WEB_BASE_URL;
 	}
 	const path = url.pathname.replace(/\/+$/, "");
 	return `${url.origin}${path}`;

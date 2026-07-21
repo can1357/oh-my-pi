@@ -2,4 +2,4 @@ User-agent: *
 Allow: /
 Disallow: /r/
 
-Sitemap: https://collab.pkking.computer/sitemap.xml
+Sitemap: https://oh-my-pk.pkking.computer/collab/sitemap.xml

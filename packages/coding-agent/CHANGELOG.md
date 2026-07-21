@@ -5,7 +5,7 @@
 ### Fixed
 
 - Fixed `fork` parameter being silently dropped in batch task submissions: `taskItemSchema` and `taskItemSchemaIsolated` both had `"+": "delete"` but omitted `"fork?": "boolean"`, so a batch item with `fork: true` was stripped before `spawnParamsFor` could see it, falling back to a fresh context with no error.
-- Fixed OMPK `/collab` browser links to stay on `*.pkking.computer`: persisted legacy `*.omp.sh` web origins now normalize to `collab.pkking.computer`, and non-local hosted overrides outside the owned domain are rejected.
+- Fixed OMPK `/collab` browser links to open the product-hosted client at `oh-my-pk.pkking.computer/collab/`: persisted legacy `*.omp.sh` and previous `collab.pkking.computer` web origins now normalize there, while non-local hosted overrides outside the owned domain remain rejected.
 
 ### Added
 - Added opt-in `tools.xdev` virtual tool devices (`xd://`) for progressive MCP/custom/extension tool docs and execution, leaving essential builtins and BM25 discovery unchanged.

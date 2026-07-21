@@ -1887,7 +1887,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Collab",
 			label: "Web UI URL",
 			description:
-				"Browser UI used by /collab links; empty derives from collab.relayUrl; hosted overrides must match https://<subdomain>.pkking.computer (localhost HTTP is development-only)",
+				"Browser UI used by /collab links; empty uses oh-my-pk.pkking.computer/collab for the owned relay and derives from custom relays; hosted overrides must match https://<subdomain>.pkking.computer (localhost HTTP is development-only)",
 		},
 	},
 

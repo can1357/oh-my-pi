@@ -164,8 +164,10 @@ describe("collab link format", () => {
 		expect(parsed.wsUrl).toBe(`wss://relay.example.com/r/${roomId}`);
 	});
 
-	it("parses the scheme-less display form of web deep links", () => {
-		const parsed = parseCollabLink(`collab.pkking.computer/#${formatCollabLink(DEFAULT_RELAY_URL, roomId, key)}`);
+	it("parses the scheme-less display form of product-hosted web deep links", () => {
+		const parsed = parseCollabLink(
+			`oh-my-pk.pkking.computer/collab/#${formatCollabLink(DEFAULT_RELAY_URL, roomId, key)}`,
+		);
 		if ("error" in parsed) throw new Error(parsed.error);
 		expect(parsed.wsUrl).toBe(`${DEFAULT_RELAY_URL}/r/${roomId}`);
 		expect(Buffer.from(parsed.key)).toEqual(Buffer.from(key));
@@ -200,8 +202,8 @@ describe("collab link format", () => {
 	it("keeps the key out of web-link path and query", () => {
 		const webLink = formatCollabWebLink(DEFAULT_RELAY_URL, roomId, key);
 		const url = new URL(webLink);
-		expect(url.origin).toBe("https://collab.pkking.computer");
-		expect(url.pathname).toBe("/");
+		expect(url.origin).toBe("https://oh-my-pk.pkking.computer");
+		expect(url.pathname).toBe("/collab/");
 		expect(url.search).toBe("");
 		expect(url.hash).toBe(`#${roomId}.${Buffer.from(key).toString("base64url")}`);
 	});
@@ -209,6 +211,15 @@ describe("collab link format", () => {
 	it("normalizes explicit web UI roots, paths, trailing slashes, and ports", () => {
 		const rootLink = formatCollabWebLink(DEFAULT_RELAY_URL, roomId, key, undefined, " https://web.pkking.computer/ ");
 		expect(rootLink.startsWith("https://web.pkking.computer/#")).toBe(true);
+
+		const productRootLink = formatCollabWebLink(
+			DEFAULT_RELAY_URL,
+			roomId,
+			key,
+			undefined,
+			"https://oh-my-pk.pkking.computer/",
+		);
+		expect(productRootLink.startsWith("https://oh-my-pk.pkking.computer/collab/#")).toBe(true);
 
 		const pathLink = formatCollabWebLink(
 			DEFAULT_RELAY_URL,
@@ -229,9 +240,9 @@ describe("collab link format", () => {
 		expect(localHttpLink.startsWith("http://localhost:5173/app/#")).toBe(true);
 	});
 
-	it("replaces persisted upstream web origins with the OMPK-owned collab origin", () => {
+	it("replaces persisted upstream web origins with the OMPK product collab URL", () => {
 		const webLink = formatCollabWebLink(DEFAULT_RELAY_URL, roomId, key, undefined, "https://my.omp.sh/");
-		expect(webLink.startsWith("https://collab.pkking.computer/#")).toBe(true);
+		expect(webLink.startsWith("https://oh-my-pk.pkking.computer/collab/#")).toBe(true);
 		expect(webLink).not.toContain("omp.sh");
 	});
 
@@ -243,8 +254,13 @@ describe("collab link format", () => {
 			undefined,
 			"http://legacy.omp.sh/stale?theme=dark#old",
 		);
-		expect(webLink.startsWith("https://collab.pkking.computer/#")).toBe(true);
+		expect(webLink.startsWith("https://oh-my-pk.pkking.computer/collab/#")).toBe(true);
 		expect(webLink).not.toContain("omp.sh");
+	});
+
+	it("migrates the previous fork collab web host to the product host", () => {
+		const webLink = formatCollabWebLink(DEFAULT_RELAY_URL, roomId, key, undefined, "https://collab.pkking.computer/");
+		expect(webLink.startsWith("https://oh-my-pk.pkking.computer/collab/#")).toBe(true);
 	});
 
 	it("rejects hosted web origins outside the pkking.computer domain", () => {

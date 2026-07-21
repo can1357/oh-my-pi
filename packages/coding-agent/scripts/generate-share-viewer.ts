@@ -32,7 +32,7 @@ if (!outPath) {
 
 const loaderJs = await Bun.file(new URL("../src/export/html/share-loader.js", import.meta.url)).text();
 // Pin the omp brand palette (collab-web pink/purple identity) — the viewer is
-// a public artifact matching the live collab.pkking.computer client, not a per-user export
+// a public artifact matching the live oh-my-pk.pkking.computer/collab/ client, not a per-user export
 // that should mirror the host's terminal theme.
 const themeVars = await generateThemeVars("web");
 

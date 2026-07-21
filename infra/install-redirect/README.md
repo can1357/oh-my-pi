@@ -4,7 +4,8 @@ The install scripts use binaries from a **private Hugging Face repo** (free
 storage + egress), independently of the GitHub Release assets built by Actions.
 A **Cloudflare Worker** at `oh-my-pk.pkking.computer` holds the HF token as a
 secret and proxies downloads, so the repo stays private and the installer never
-sees a token.
+sees a token. It also proxies `/collab/*` through the `ompk-collab` Worker service
+binding, keeping browser collaboration links on the product hostname.
 
 ```
 build host(s) ── publish-binaries-hf.ts ──▶ private HF repo ──▶ CF Worker ──▶ install.sh / install.ps1 ──▶ user
@@ -23,8 +24,10 @@ build host(s) ── publish-binaries-hf.ts ──▶ private HF repo ──▶ 
    wrangler secret put HF_TOKEN      # paste the READ token
    wrangler deploy
    ```
-   `wrangler.toml` already sets `HF_REPO` / `HF_REPO_TYPE` and the custom-domain route.
-   (Requires a Cloudflare account on the **free** Workers plan — no paid features used.)
+   `wrangler.toml` already sets `HF_REPO` / `HF_REPO_TYPE`, the custom-domain route,
+   and the `COLLAB` service binding to the separately deployed `ompk-collab` Worker.
+   Deploy `packages/collab-relay` first. (Requires a Cloudflare account on the
+   **free** Workers plan — no paid features used.)
 
 ## Each release
 
