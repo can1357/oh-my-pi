@@ -228,6 +228,7 @@ async function cmdRelease(version: string): Promise<void> {
 
 	// Filter out private packages
 	const publicPkgPaths: string[] = [];
+	const publicPkgNames: string[] = [];
 	for (const pkgPath of pkgJsonPaths) {
 		const pkgJson = await Bun.file(pkgPath).json();
 		if (pkgJson.private) {
@@ -235,6 +236,7 @@ async function cmdRelease(version: string): Promise<void> {
 			continue;
 		}
 		publicPkgPaths.push(pkgPath);
+		if (pkgJson.name) publicPkgNames.push(pkgJson.name);
 	}
 
 	await $`sd '"version": "[^"]+"' ${`"version": "${version}"`} ${publicPkgPaths}`;
@@ -247,12 +249,16 @@ async function cmdRelease(version: string): Promise<void> {
 	}
 	console.log();
 
-	// Update @pk-nerdsaver-ai/* catalog entries in root package.json
+	// Update catalog entries in root package.json for public workspace packages
 	console.log("Updating root catalog versions...");
 	let rootPkgRaw = await Bun.file("package.json").text();
-	rootPkgRaw = rootPkgRaw.replace(/("@pk-nerdsaver-ai\/[^"]+":\s*)"[^"]+"/g, `$1"${version}"`);
+	for (const name of publicPkgNames) {
+		const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const regex = new RegExp(`("${escapedName}":\\s*)"[^"]+"`, "g");
+		rootPkgRaw = rootPkgRaw.replace(regex, `$1"${version}"`);
+	}
 	await Bun.write("package.json", rootPkgRaw);
-	console.log("  Updated root catalog @pk-nerdsaver-ai/* entries");
+	console.log("  Updated root catalog entries for public packages");
 
 	// 3. Update Rust workspace version
 	console.log(`Updating Rust workspace version to ${version}…`);
