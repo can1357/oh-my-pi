@@ -293,14 +293,12 @@ describe("readArgsTargetInternalUrl", () => {
 		expect(readArgsTargetInternalUrl({ file_path: target })).toBe(true);
 	});
 
-	it.each([
-		[path.resolve("/tmp/example.ts")],
-		["./relative/path.md"],
-		["https://example.com/file"],
-		[""],
-	])("treats %s as a filesystem/external target", target => {
-		expect(readArgsTargetInternalUrl({ path: target })).toBe(false);
-	});
+	it.each([[path.resolve("/tmp/example.ts")], ["./relative/path.md"], ["https://example.com/file"], [""]])(
+		"treats %s as a filesystem/external target",
+		target => {
+			expect(readArgsTargetInternalUrl({ path: target })).toBe(false);
+		},
+	);
 
 	it("returns false for non-record / missing arguments", () => {
 		expect(readArgsTargetInternalUrl(undefined)).toBe(false);

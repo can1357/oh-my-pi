@@ -41,6 +41,7 @@ import { clearSpeechHardStop, enableSpeechHardStop, isSpeechHardStopped } from "
 import { vocalizer } from "../tts/vocalizer";
 import { urlHyperlinkAlways } from "../tui";
 import { getChangelogPath, parseChangelog } from "../utils/changelog";
+import { handleGraphtreeCommand, handleGraphtreeCommandTui } from "./builtin/graphtree";
 import { handleWikigraphCommand, handleWikigraphCommandTui } from "./builtin/wikigraph";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
 import { buildContextReportText } from "./helpers/context-report";
@@ -2859,6 +2860,25 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			}
 			return usage("Usage: /irc [on|off|status]", runtime);
 		},
+	},
+	{
+		name: "graphtree",
+		aliases: ["gt", "fractal"],
+		description: "Fractal-style multi-agent graph/tree node workflows",
+		acpDescription: "Fractal multi-agent workflow tree",
+		acpInputHint: "[status|list|init|run|merge|prune|help]",
+		subcommands: [
+			{ name: "status", description: "View active GraphTree node hierarchy (ASCII tree)" },
+			{ name: "list", description: "List details of active GraphTree worktree nodes" },
+			{ name: "init", description: "Initialize an isolated GraphTree worktree node", usage: "<name> [branch]" },
+			{ name: "run", description: "Launch a Fractal multi-agent tree execution plan", usage: "<objective>" },
+			{ name: "merge", description: "Squash-merge a completed GraphTree node into HEAD", usage: "<name>" },
+			{ name: "prune", description: "Clean up finished GraphTree worktree nodes" },
+			{ name: "help", description: "Show GraphTree workflow help" },
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => handleGraphtreeCommand(command.args, runtime),
+		handleTui: async (command, runtime) => handleGraphtreeCommandTui(command.args, runtime),
 	},
 	{
 		name: "quit",

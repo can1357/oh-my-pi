@@ -1326,14 +1326,13 @@ describe("InteractiveMode plan review rendering", () => {
 	// `#approvePlan`'s `finally`. No aborted message_end is required to consume it,
 	// so a stranded flag could otherwise silence the next unrelated abort. One
 	// parametrized case per outcome keeps ok/cancelled/failed each covered.
-	it.each([
-		"ok",
-		"cancelled",
-		"failed",
-	] as const)("B1-B3: Approve and compact context + %s outcome → flag cleared by finally", async outcome => {
-		await approveWithCompact(outcome);
-		expect(session.isPlanInternalAbortPending).toBe(false);
-	});
+	it.each(["ok", "cancelled", "failed"] as const)(
+		"B1-B3: Approve and compact context + %s outcome → flag cleared by finally",
+		async outcome => {
+			await approveWithCompact(outcome);
+			expect(session.isPlanInternalAbortPending).toBe(false);
+		},
+	);
 
 	it("B4: Approve and compact context + handleCompactCommand throws → showError surfaces the failure AND flag cleared by finally before the outer catch", async () => {
 		// `handlePlanApproval` wraps `#approvePlan` in a try/catch

@@ -26,14 +26,13 @@ describe("opencode-go resolver routes 404-ing ids to openai-completions (issue #
 	// would route them to /v1/messages on opencode.ai/zen/go which 404s.
 	const npmAnthropic: ModelsDevModel = { provider: { npm: "@ai-sdk/anthropic" }, tool_call: true };
 
-	test.each([
-		["minimax-m2.7"],
-		["qwen3.5-plus"],
-		["qwen3.6-plus"],
-	])("%s resolves to openai-completions on /v1/chat/completions", modelId => {
-		const resolved = descriptor?.resolveApi?.(modelId, npmAnthropic);
-		expect(resolved).toEqual({ api: "openai-completions", baseUrl: OPENCODE_GO_BASE });
-	});
+	test.each([["minimax-m2.7"], ["qwen3.5-plus"], ["qwen3.6-plus"]])(
+		"%s resolves to openai-completions on /v1/chat/completions",
+		modelId => {
+			const resolved = descriptor?.resolveApi?.(modelId, npmAnthropic);
+			expect(resolved).toEqual({ api: "openai-completions", baseUrl: OPENCODE_GO_BASE });
+		},
+	);
 
 	test("minimax-m2.5 (control: works empirically) also resolves to openai-completions", () => {
 		// models.dev currently lists minimax-m2.5 without an explicit provider.npm,

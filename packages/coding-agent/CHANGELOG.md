@@ -11,6 +11,7 @@
 - Fixed the Intent Composer regression that hid Agent Hub navigation by restoring a persistent rail affordance with the configured hub key and stable double-left (`←←`) shortcut.
 
 ### Added
+- Added `/graphtree` (aliases `/gt`, `/fractal`) slash command for Fractal-style multi-agent tree and worktree node workflows.
 - Added interactive spawned-agent tier controls: `/tier status|light|mid|frontier|auto` and the `/settings` **Default Spawn Tier** selector can constrain stronger models to light or mid capability envelopes, with restrictive composition against existing agent/workflow policies.
 - Added `/subagent using <alias-or-model> "<prompt>"` quick launch: model and task are resolved up front, the parent thinking level is inherited, and the TUI asks only for an optional generated-name override.
 - Added opt-in `tools.xdev` virtual tool devices (`xd://`) for progressive MCP/custom/extension tool docs and execution, leaving essential builtins and BM25 discovery unchanged.
