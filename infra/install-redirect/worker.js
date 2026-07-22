@@ -17,7 +17,7 @@
 //   var (optional): HF_REPO_TYPE "models" (default) | "datasets"
 //   service: COLLAB      ompk-collab Worker binding
 
-const GITHUB_RAW_BASE = "https://raw.githubusercontent.com/kingkillery/oh-my-pi/main/scripts";
+const GITHUB_RAW_BASE = "https://raw.githubusercontent.com/kingkillery/oh-my-pk/main/scripts";
 
 function hfResolveUrl(env, repoPath) {
 	const repoType = env.HF_REPO_TYPE === "datasets" ? "datasets/" : "";

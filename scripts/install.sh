@@ -257,12 +257,12 @@ case "$MODE" in
         install_binary
         ;;
     *)
-        # Default: use bun if available, otherwise binary
-        if has_bun; then
-            require_bun_version
-            install_via_bun
-        else
-            install_binary
+        # Default: install/validate bun (if needed) and use the npm package.
+        # Pass --binary explicitly to always fetch the prebuilt binary instead.
+        if ! has_bun; then
+            install_bun
         fi
+        require_bun_version
+        install_via_bun
         ;;
 esac

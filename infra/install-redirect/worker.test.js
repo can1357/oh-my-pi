@@ -33,6 +33,44 @@ describe("oh-my-pk product host docs route", () => {
 	});
 });
 
+describe("oh-my-pk installer script proxy", () => {
+	it("proxies install.sh from the canonical kingkillery/oh-my-pk raw source", async () => {
+		const originalFetch = globalThis.fetch;
+		const calls = [];
+		globalThis.fetch = (url, init) => {
+			calls.push(String(url));
+			return Promise.resolve(new Response("#!/bin/sh\necho canonical\n", { status: 200 }));
+		};
+
+		try {
+			const response = await worker.fetch(new Request("https://oh-my-pk.pkking.computer/install.sh"), {}, {});
+			expect(response.status).toBe(200);
+			expect(calls).toHaveLength(1);
+			expect(calls[0]).toBe("https://raw.githubusercontent.com/kingkillery/oh-my-pk/main/scripts/install.sh");
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("proxies install.ps1 from the canonical kingkillery/oh-my-pk raw source", async () => {
+		const originalFetch = globalThis.fetch;
+		const calls = [];
+		globalThis.fetch = (url, init) => {
+			calls.push(String(url));
+			return Promise.resolve(new Response("# ps1\n", { status: 200 }));
+		};
+
+		try {
+			const response = await worker.fetch(new Request("https://oh-my-pk.pkking.computer/install.ps1"), {}, {});
+			expect(response.status).toBe(200);
+			expect(calls).toHaveLength(1);
+			expect(calls[0]).toBe("https://raw.githubusercontent.com/kingkillery/oh-my-pk/main/scripts/install.ps1");
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+});
+
 describe("oh-my-pk product host collab route", () => {
 	it("proxies the collab app root and assets through the collab Worker binding", async () => {
 		const calls = [];

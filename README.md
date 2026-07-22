@@ -36,12 +36,6 @@ Canonical product name: `oh-my-pk`. Canonical install endpoint: `https://oh-my-p
 curl -fsSL https://oh-my-pk.pkking.computer/install.sh | sh
 ```
 
-**Homebrew**
-
-```sh
-brew install kingkillery/tap/omp
-```
-
 **Bun (recommended)**
 
 ```sh
@@ -54,13 +48,13 @@ bun install -g @pk-nerdsaver-ai/pi-coding-agent
 irm https://oh-my-pk.pkking.computer/install.ps1 | iex
 ```
 
-**Pinned versions (mise)**
-
-```sh
-mise use -g github:kingkillery/oh-my-pi
-```
-
 macOS · Linux · Windows · bun ≥ 1.3.14
+
+The install scripts install/validate Bun and use the npm package by default;
+pass `--binary` (`-Binary` on Windows) to always fetch the prebuilt binary
+instead. There is no Homebrew tap or mise registry entry for this fork —
+don't use `brew install kingkillery/tap/omp` or `mise use -g
+github:kingkillery/oh-my-pi`, neither is published.
 
 ### Shell completions
 
@@ -494,6 +488,25 @@ Key ideas:
 - Keep interactive terminal-first UX for real coding work
 - Include practical built-ins (tools, sessions, branching, subagents, extensibility)
 - Make advanced behavior configurable rather than hidden
+
+## GraphTree: parallel multi-agent worktrees
+
+`/graphtree` manages a tree of isolated git worktree nodes for running
+several agents on the same repository side by side. `/graphtree status`
+(or bare `/graphtree`) prints the active node hierarchy; `/graphtree list`
+shows each node's branch and path; `/graphtree init <name> [branch]`
+creates a new worktree node (defaults to branch `graphtree/<name>`, or an
+explicit branch you pass); `/graphtree run <objective>` hands the model a
+static prompt that walks it through planning, sharding work across nodes,
+and reducing the results — it does not itself guarantee parallel
+execution or correctness, only orchestrates the prompt; `/graphtree merge
+<name>` squash-merges a node's branch into `HEAD`, staging the combined
+changes for your review rather than committing them outright; and
+`/graphtree prune` cleans up finished worktree nodes, refusing to
+force-delete worktrees with uncommitted changes. Node operations are
+scoped to worktrees under the current repository. See
+[`docs/graphtree.md`](docs/graphtree.md) for the full command reference
+and lifecycle details.
 
 ---
 
