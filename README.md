@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A coding agent with the IDE wired in.</strong>
-  <strong><a href="https://omp.sh">omp.sh</a></strong>
+  <strong><a href="https://oh-my-pk.pkking.computer">oh-my-pk.pkking.computer</a></strong>
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 
 The most capable agent surface that ships. Continuously tuned by real-world use — complete out of the box, open all the way down.
 
-Canonical product name: `oh-my-pk`. Canonical install/update endpoint: `https://oh-my-pk.pkking.computer`. Legacy repository URLs and the old `oh-my-pi.pkking.computer` route may remain during migration.
+Canonical product name: `oh-my-pk`. Canonical install endpoint: `https://oh-my-pk.pkking.computer`. Complete documentation home: [`https://oh-my-pk.pkking.computer/docs`](https://oh-my-pk.pkking.computer/docs). Legacy repository URLs and the old `oh-my-pi.pkking.computer` route may remain during migration.
 
 **40+** providers · **32** built-in tools · **14** lsp ops · **28** dap ops · **~55k** lines of Rust core.
 
@@ -277,7 +277,7 @@ Stealth's on by default, so pages see a normal user instead of a headless bot. T
 
 Setting-gated, off by default: `github`, `inspect_image`, `tts`, `checkpoint`, `rewind`, `search_tool_bm25`, `retain`, `recall`, `reflect`. Flip them on once, scoped per project.
 
-[Full reference →](https://omp.sh/docs/tools)
+[Full tool reference →](https://oh-my-pk.pkking.computer/docs)
 
 ## Forty-plus providers, hundreds of models, _one /model away_.
 
@@ -310,7 +310,7 @@ Ollama `local` · Ollama Cloud · LM Studio `local` · llama.cpp `local` · vLLM
 - **Path-scoped models** — Scope `enabledModels` and `disabledProviders` entries to a `path:` prefix to pin a different model set on one repo without touching the global config. Scoped entries cover the path and everything under it.
 - **Round-robin credentials** — Stack API keys per provider and the runtime rotates with session affinity and per-credential backoff. Useful when one key would burn its quota by lunch.
 
-Full provider & routing reference at [omp.sh/docs/providers](https://omp.sh/docs/providers).
+Full provider & routing reference at [oh-my-pk.pkking.computer/docs](https://oh-my-pk.pkking.computer/docs).
 
 ## Fourteen backends. _One tool the agent already knows_.
 
@@ -358,7 +358,7 @@ Vuln lookups answer with vendor data, not blog summaries.
 - **OSV** — open source vuln feed
 - **CISA KEV** — known exploited vulns
 
-[`web_search` reference ↗](https://omp.sh/docs/tools#web_search)
+[`web_search` reference ↗](https://github.com/kingkillery/oh-my-pk/tree/main/docs/tools/web_search.md)
 
 ## Roughly **~55,000** lines of Rust, doing the work other harnesses shell out for.
 
@@ -465,11 +465,11 @@ The [Agent Client Protocol](https://github.com/zed-industries/agent-client-proto
 | `write`                       | `fs/write_text_file`                |
 | `edit, bash`                  | `session/request_permission`        |
 
-Full reference: [omp.sh/docs/sdk](https://omp.sh/docs/sdk).
+Full reference: [SDK docs](https://github.com/kingkillery/oh-my-pk/tree/main/docs/sdk.md).
 
 ## A harness worth keeping is one you _don't_ outgrow.
 
-Pick it up at **[omp.sh](https://omp.sh)**.
+Pick it up at **[oh-my-pk.pkking.computer](https://oh-my-pk.pkking.computer)** and read the full docs at **[oh-my-pk.pkking.computer/docs](https://oh-my-pk.pkking.computer/docs)**.
 
 omp is a fork of [Pi](https://github.com/badlogic/pi-mono) by [Mario Zechner](https://github.com/mariozechner), rewritten as a coding-first surface: sessions, subagents, slash commands, extensions — all TypeScript, all MIT, all on [GitHub](https://github.com/can1357/oh-my-pi). Shape it from config, hook it from outside, or read the source when you need to.
 

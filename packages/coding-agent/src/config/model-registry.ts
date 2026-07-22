@@ -2006,11 +2006,14 @@ export class ModelRegistry {
 	 * {@link ModelRegistry.resolver}.
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
-		const keyConfig = this.#customProviderApiKeys.get(model.provider);
+		return this.hasConfiguredProviderAuth(model.provider);
+	}
+
+	/** Side-effect-free provider-level variant for startup services without a model instance. */
+	hasConfiguredProviderAuth(provider: string): boolean {
+		const keyConfig = this.#customProviderApiKeys.get(provider);
 		return (
-			isCommandConfigValue(keyConfig) ||
-			this.#keylessProviders.has(model.provider) ||
-			this.authStorage.hasAuth(model.provider)
+			isCommandConfigValue(keyConfig) || this.#keylessProviders.has(provider) || this.authStorage.hasAuth(provider)
 		);
 	}
 

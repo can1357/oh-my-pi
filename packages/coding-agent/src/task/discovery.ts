@@ -22,7 +22,7 @@ import { listClaudePluginRoots } from "../discovery/helpers";
 import { loadBundledAgents, parseAgent } from "./agents";
 import type { AgentDefinition, AgentSource } from "./types";
 
-const TASK_AGENT_CONFIG_SOURCE = ".omp";
+const TASK_AGENT_CONFIG_SOURCE = ".ompk";
 
 /** Result of agent discovery */
 export interface DiscoveryResult {

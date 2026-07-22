@@ -1104,7 +1104,10 @@ function normalizeAntigravityTools(
 		...tool,
 		functionDeclarations: tool.functionDeclarations.map(declaration => {
 			if ("parameters" in declaration) {
-				return declaration;
+				return {
+					...declaration,
+					parameters: normalizeSchemaForCCA(declaration.parameters),
+				};
 			}
 
 			const { parametersJsonSchema, ...rest } = declaration;

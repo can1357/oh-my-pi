@@ -10,6 +10,29 @@ function collabBinding(calls) {
 	};
 }
 
+describe("oh-my-pk product host docs route", () => {
+	it("serves the complete documentation home and links from the landing page", async () => {
+		const docsResponse = await worker.fetch(new Request("https://oh-my-pk.pkking.computer/docs"), {}, {});
+		const docsHtml = await docsResponse.text();
+		expect(docsResponse.status).toBe(200);
+		expect(docsHtml).toContain("oh-my-pk docs");
+		expect(docsHtml).toContain("Tool reference");
+		expect(docsHtml).toContain('/docs/tools/search_tool_bm25');
+		expect(docsHtml).toContain('/docs/collab');
+
+		const landingResponse = await worker.fetch(new Request("https://oh-my-pk.pkking.computer/"), {}, {});
+		const landingHtml = await landingResponse.text();
+		expect(landingResponse.status).toBe(200);
+		expect(landingHtml).toContain('/docs">Documentation</a>');
+	});
+
+	it("serves the slash-suffixed docs route as the same documentation home", async () => {
+		const response = await worker.fetch(new Request("https://oh-my-pk.pkking.computer/docs/"), {}, {});
+		expect(response.status).toBe(200);
+		expect(await response.text()).toContain("oh-my-pk docs");
+	});
+});
+
 describe("oh-my-pk product host collab route", () => {
 	it("proxies the collab app root and assets through the collab Worker binding", async () => {
 		const calls = [];

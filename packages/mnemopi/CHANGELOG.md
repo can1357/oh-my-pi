@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Validated and quoted generated SQLite table, column, and alias identifiers before interpolating them into Mnemopi queries.
+
 ## [16.2.2] - 2026-06-27
 
 ### Fixed

@@ -20,8 +20,8 @@ import { engines, version } from "../package.json" with { type: "json" };
  * (`CONFIG_DIR_NAME`, the XDG dir, the binary-artifact base) are kept separate. */
 export const APP_NAME: string = "oh-my-pk";
 
-/** Config directory name (e.g. ".omp") */
-export const CONFIG_DIR_NAME: string = ".omp";
+/** Config directory name (e.g. ".ompk") */
+export const CONFIG_DIR_NAME: string = ".ompk";
 
 /** Version (e.g. "1.0.0") */
 export const VERSION: string = version;

@@ -53,6 +53,8 @@ export function buildChipsRow(chips: readonly ComposerChip[], width: number): st
 export interface ComposerRailState {
 	/** Label of the active work mode (already localized, e.g. "Build"). */
 	readonly modeLabel: string;
+	/** Stable keyboard affordance for opening the background-agent hub. */
+	readonly agentHubHint?: string;
 	/** Primary-action label for the active mode (e.g. "Run", "Send"). */
 	readonly cta: string;
 	/** A turn is currently streaming: show queue/stop semantics instead of the CTA. */
@@ -73,7 +75,9 @@ export interface ComposerRailState {
 export function buildRailRow(state: ComposerRailState, width: number): string {
 	if (width <= 0) return "";
 
-	let left = theme.fg("accent", `◆ ${state.modeLabel}`) + theme.fg("dim", "  + @ context");
+	const agentHub = state.agentHubHint ? `  ${state.agentHubHint}` : "";
+	let left =
+		theme.fg("accent", `◆ ${state.modeLabel}`) + theme.fg("muted", agentHub) + theme.fg("dim", "  + @ context");
 
 	let right: string;
 	let rightPlainWidth: number;

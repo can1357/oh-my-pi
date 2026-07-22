@@ -1,4 +1,5 @@
 import { normalizedRecallWeights, temporalHalflifeHours } from "../../config";
+import { quoteSqlIdentifier, quoteSqlQualifiedIdentifier } from "../../util/sql";
 import { embedQuery } from "../embeddings";
 import { mmrRerank } from "../mmr";
 import { adjustWeights, classifyIntent } from "../query-intent";
@@ -437,7 +438,7 @@ function factsHaveScopeColumn(beam: BeamMemoryState): boolean {
 }
 
 function factVisibilityWhere(beam: BeamMemoryState, tableAlias: string): { where: string; params: DbValue[] } {
-	const prefix = tableAlias.length === 0 ? "" : `${tableAlias}.`;
+	const prefix = tableAlias.length === 0 ? "" : `${quoteSqlIdentifier(tableAlias)}.`;
 	if (factsHaveScopeColumn(beam)) {
 		return { where: `(${prefix}session_id = ? OR ${prefix}scope = 'global')`, params: [beam.sessionId] };
 	}
@@ -449,7 +450,7 @@ function buildWhere(
 	tableAlias: string,
 	options: RecallOptionsInternal,
 ): { where: string; params: DbValue[] } {
-	const prefix = tableAlias.length === 0 ? "" : `${tableAlias}.`;
+	const prefix = tableAlias.length === 0 ? "" : `${quoteSqlIdentifier(tableAlias)}.`;
 	const clauses = [`(${prefix}valid_until IS NULL OR ${prefix}valid_until > ?)`, `${prefix}superseded_by IS NULL`];
 	const params: DbValue[] = [nowIso()];
 	const channelId = options.channelId ?? null;
@@ -508,6 +509,13 @@ function buildWhere(
 const MEMORY_COLUMNS =
 	"id, content, source, timestamp, session_id, importance, metadata_json, veracity, memory_type, recall_count, last_recalled, valid_until, superseded_by, scope, author_id, author_type, channel_id, event_date, event_date_precision, temporal_tags";
 const EPISODIC_COLUMNS = `${MEMORY_COLUMNS}, rowid, summary_of, tier`;
+
+function quoteColumnList(columns: string, tableAlias?: string): string {
+	return columns
+		.split(", ")
+		.map(column => (tableAlias ? quoteSqlQualifiedIdentifier(tableAlias, column) : quoteSqlIdentifier(column)))
+		.join(", ");
+}
 
 function ftsRows(
 	beam: BeamMemoryState,
@@ -606,7 +614,8 @@ function allVisibleIds(
 	options: RecallOptionsInternal,
 ): string[] {
 	const { where, params } = buildWhere(beam, "", options);
-	const rows = queryAll(beam, `SELECT id FROM ${table} WHERE ${where} ORDER BY timestamp DESC LIMIT ?`, [
+	const tableSql = quoteSqlIdentifier(table);
+	const rows = queryAll(beam, `SELECT id FROM ${tableSql} WHERE ${where} ORDER BY timestamp DESC LIMIT ?`, [
 		...params,
 		DEFAULT_LIMIT,
 	]);
@@ -625,13 +634,13 @@ function fetchCandidates(
 	const table = tierLabel === "working" ? "working_memory" : "episodic_memory";
 	const keyColumn = tierLabel === "working" ? "id" : "rowid";
 	const columns = tierLabel === "working" ? MEMORY_COLUMNS : EPISODIC_COLUMNS;
+	const tableSql = quoteSqlIdentifier(table);
+	const keyColumnSql = quoteSqlQualifiedIdentifier("m", keyColumn);
+	const columnsSql = quoteColumnList(columns, "m");
 	const { where, params } = buildWhere(beam, "m", options);
 	const rows = queryAll(
 		beam,
-		`SELECT ${columns
-			.split(", ")
-			.map(column => `m.${column}`)
-			.join(", ")} FROM ${table} m WHERE m.${keyColumn} IN (${placeholders(idsOrRowids.length)}) AND ${where}`,
+		`SELECT ${columnsSql} FROM ${tableSql} m WHERE ${keyColumnSql} IN (${placeholders(idsOrRowids.length)}) AND ${where}`,
 		[...idsOrRowids, ...params],
 	);
 	const out: MemoryCandidate[] = [];
@@ -663,8 +672,10 @@ function fallbackCandidates(
 ): MemoryCandidate[] {
 	const table = tierLabel === "working" ? "working_memory" : "episodic_memory";
 	const columns = tierLabel === "working" ? MEMORY_COLUMNS : EPISODIC_COLUMNS;
+	const tableSql = quoteSqlIdentifier(table);
+	const columnsSql = quoteColumnList(columns);
 	const { where, params } = buildWhere(beam, "", options);
-	const rows = queryAll(beam, `SELECT ${columns} FROM ${table} WHERE ${where} ORDER BY timestamp DESC LIMIT ?`, [
+	const rows = queryAll(beam, `SELECT ${columnsSql} FROM ${tableSql} WHERE ${where} ORDER BY timestamp DESC LIMIT ?`, [
 		...params,
 		Math.min(DEFAULT_LIMIT, 2000),
 	]);
@@ -848,9 +859,10 @@ function updateRecallCounts(
 		const ids = results.filter(r => r.tier_label === tierLabel).map(r => r.id);
 		if (ids.length === 0) continue;
 		const table = tierLabel === "working" ? "working_memory" : "episodic_memory";
+		const tableSql = quoteSqlIdentifier(table);
 		const { where, params } = buildWhere(beam, "", options);
 		beam.db.run(
-			`UPDATE ${table} SET recall_count = COALESCE(recall_count, 0) + 1, last_recalled = ? WHERE id IN (${placeholders(ids.length)}) AND ${where}`,
+			`UPDATE ${tableSql} SET recall_count = COALESCE(recall_count, 0) + 1, last_recalled = ? WHERE id IN (${placeholders(ids.length)}) AND ${where}`,
 			[timestamp, ...ids, ...params],
 		);
 	}

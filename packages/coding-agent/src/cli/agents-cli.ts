@@ -46,7 +46,7 @@ function resolveTargetDir(flags: AgentsCommandArgs["flags"]): string {
 	}
 
 	if (flags.project) {
-		return path.resolve(getProjectDir(), ".omp", "agents");
+		return path.resolve(getProjectDir(), ".ompk", "agents");
 	}
 
 	return path.join(getAgentDir(), "agents");

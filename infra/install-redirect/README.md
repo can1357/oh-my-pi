@@ -5,12 +5,22 @@ storage + egress), independently of the GitHub Release assets built by Actions.
 A **Cloudflare Worker** at `oh-my-pk.pkking.computer` holds the HF token as a
 secret and proxies downloads, so the repo stays private and the installer never
 sees a token. It also proxies `/collab/*` through the `ompk-collab` Worker service
-binding, keeping browser collaboration links on the product hostname.
+binding, keeping browser collaboration links on the product hostname, and serves
+the documentation home at `/docs`.
 
 ```
 build host(s) ── publish-binaries-hf.ts ──▶ private HF repo ──▶ CF Worker ──▶ install.sh / install.ps1 ──▶ user
    (host-bound)                              (free storage)     (token secret)   (oh-my-pk.pkking.computer)
 ```
+
+## Routes
+
+- `/` — install landing page with links to `/docs`.
+- `/docs` — complete documentation home grouped by workflow; individual pages stay
+  versioned in `docs/` and link to the canonical GitHub docs tree.
+- `/install`, `/install.sh`, `/install.ps1` — installer scripts.
+- `/version` and `/bin/<tag>/<binary>` — private HF-backed release channel.
+- `/collab/*` — product-hosted browser collaboration client.
 
 ## One-time setup
 

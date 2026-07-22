@@ -122,6 +122,25 @@ describe("extendRecallWithLegacyBanks (#2412)", () => {
 		const extended = extendRecallWithLegacyBanks(["active-bank"], mainDbPath, childCwd);
 		expect(extended).not.toContain("mixed-cwd-legacy");
 	});
+
+	it("invalidates cached discovery when a bank's metadata changes", async () => {
+		const activeCwd = path.join(rootDir.path(), "projects", "cache-invalidation");
+		const bank = "mutable-legacy";
+		createBankFixture(bank, [{ cwd: activeCwd }]);
+		expect(extendRecallWithLegacyBanks(["active-bank"], mainDbPath, activeCwd)).toContain(bank);
+
+		await Bun.sleep(2);
+		const db = new Database(path.join(banksDir, bank, "mnemopi.db"));
+		try {
+			db.query("UPDATE working_memory SET metadata_json = ?").run(
+				JSON.stringify({ cwd: path.join(rootDir.path(), "other-project") }),
+			);
+		} finally {
+			db.close();
+		}
+
+		expect(extendRecallWithLegacyBanks(["active-bank"], mainDbPath, activeCwd)).not.toContain(bank);
+	});
 });
 
 describe("extendRecallWithLegacyBanks edge cases", () => {

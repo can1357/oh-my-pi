@@ -4,10 +4,15 @@
 
 ### Fixed
 
+- Fixed isolated subagent runs discarding partial work on abort or failure: `runIsolatedSubprocess` now captures a best-effort `.partial.patch` artifact on non-zero exit or abort, and `mergeIsolatedChanges` surfaces it via a `<system-notification>` without auto-applying.
+- Fixed interactive startup hanging before the first TUI frame when `search_tool_bm25` was active: discovery-mode schema estimation no longer recursively evaluates the search tool's self-referential description.
 - Fixed `fork` parameter being silently dropped in batch task submissions: `taskItemSchema` and `taskItemSchemaIsolated` both had `"+": "delete"` but omitted `"fork?": "boolean"`, so a batch item with `fork: true` was stripped before `spawnParamsFor` could see it, falling back to a fresh context with no error.
 - Fixed OMPK `/collab` browser links to open the product-hosted client at `oh-my-pk.pkking.computer/collab/`: persisted legacy `*.omp.sh` and previous `collab.pkking.computer` web origins now normalize there, while non-local hosted overrides outside the owned domain remain rejected.
+- Fixed the Intent Composer regression that hid Agent Hub navigation by restoring a persistent rail affordance with the configured hub key and stable double-left (`←←`) shortcut.
 
 ### Added
+- Added interactive spawned-agent tier controls: `/tier status|light|mid|frontier|auto` and the `/settings` **Default Spawn Tier** selector can constrain stronger models to light or mid capability envelopes, with restrictive composition against existing agent/workflow policies.
+- Added `/subagent using <alias-or-model> "<prompt>"` quick launch: model and task are resolved up front, the parent thinking level is inherited, and the TUI asks only for an optional generated-name override.
 - Added opt-in `tools.xdev` virtual tool devices (`xd://`) for progressive MCP/custom/extension tool docs and execution, leaving essential builtins and BM25 discovery unchanged.
 - Added an opt-in, local-only screenpipe activity bridge (`screenpipe.enabled`, default off, with `screenpipe.baseUrl`, `screenpipe.pollIntervalMs`, and `screenpipe.mediaRoot` settings under the memory tab). When enabled, each session starts a background poller that reads already-redacted frame metadata from a locally running screenpipe daemon and records privacy-preserving activity clips in a local SQLite ledger under the agent dir; password-manager windows are always denied, nothing leaves the machine, and a broken or absent daemon never affects the session (backoff + single warning per outage). Capture ownership follows the active session across every transition (`newSession`, `switchSession`, `fork`, `branch`, `freshSession`, handoff): a `ScreenpipeSessionManager` disposes the prior session's bridge before binding the new one, so no post-transition activity, cursor progress, or manifest is ever attributed to the previous session and exactly one poller is ever live. The poller is torn down in session dispose.
 - Added a Consurg Guard hook example that evaluates every scoped file or command tool call, including multi-path and workspace-root searches, and can fail closed when its guard is unavailable.
@@ -44,6 +49,7 @@
 - Added prompt-btw subagent handoff mode to `/btw`: invoking "use promptbtw for subagent handoff: <raw task>" returns a structured SUBAGENT HANDOFF PROMPT instead of an answer.
 
 ### Changed
+- Reduced interactive launch latency by caching validated legacy Mnemopi bank scans, deferring embedding credential resolution until first use, and reading only enough session headers to populate the recent-session welcome list.
 - Changed the default collaboration relay and encrypted share endpoints to `collab.pkking.computer`.
 - Changed fork-owned outbound identifiers (OpenRouter/xAI HTTP headers, protocol-probe link, and benchmark homepages) from upstream `Oh-My-Pi`/`omp.sh` to `oh-my-pk`/`oh-my-pk.pkking.computer`. The Auto-QA push endpoint default is now empty (disabled) so the fork does not leak telemetry to upstream's `qa.omp.sh` receiver; set `dev.autoqaPush.endpoint` explicitly to re-enable it.
 

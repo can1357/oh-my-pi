@@ -305,7 +305,11 @@ import {
 	toReasoningEffort,
 } from "../thinking";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
-import { countToolsForAutoDiscovery, resolveEffectiveToolDiscoveryMode } from "../tool-discovery/mode";
+import {
+	countToolsForAutoDiscovery,
+	resolveEffectiveToolDiscoveryMode,
+	TOOL_DISCOVERY_SEARCH_TOOL_NAME,
+} from "../tool-discovery/mode";
 import {
 	buildDiscoverableToolSearchIndex,
 	collectDiscoverableTools,
@@ -5074,10 +5078,22 @@ export class AgentSession {
 
 	/** Resolve effective discovery mode from the current registry size and schema spend. */
 	#resolveEffectiveDiscoveryMode(): "off" | "mcp-only" | "all" {
+		const configuredMode = this.settings.get("tools.discoveryMode");
+		if (configuredMode === "all" || configuredMode === "mcp-only") return configuredMode;
+		if (this.settings.get("mcp.discoveryMode")) return "mcp-only";
+		if (configuredMode !== "auto") return this.#mcpDiscoveryEnabled ? "mcp-only" : "off";
+
+		// Auto mode alone needs schema accounting. The search tool's description is
+		// derived from getDiscoverableTools(), which calls back into this resolver;
+		// exclude that self-referential description just as the count excludes its
+		// name. Explicit modes above never evaluate schemas at all.
+		const toolsForSchemaEstimate = [...this.#toolRegistry.values()].filter(
+			tool => tool.name !== TOOL_DISCOVERY_SEARCH_TOOL_NAME,
+		);
 		const mode = resolveEffectiveToolDiscoveryMode(
 			this.settings,
 			countToolsForAutoDiscovery(this.#toolRegistry.keys()),
-			estimateToolSchemaTokens([...this.#toolRegistry.values()]),
+			estimateToolSchemaTokens(toolsForSchemaEstimate),
 		);
 		if (mode !== "off") return mode;
 		return this.#mcpDiscoveryEnabled ? "mcp-only" : "off";

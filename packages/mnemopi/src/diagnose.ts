@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import { dataDir as configuredDataDir, dbPath as configuredDbPath } from "./config";
 import { initBeam } from "./core/beam";
 import { closeQuietly, openDatabase } from "./db";
+import { quoteSqlIdentifier } from "./util/sql";
 
 export interface DiagnosticEntry {
 	readonly ts: string;
@@ -72,12 +73,14 @@ function hasTable(db: Database, table: string): boolean {
 }
 
 function tableColumns(db: Database, table: string): Set<string> {
-	return new Set((db.query(`PRAGMA table_info(${table})`).all() as ColumnRow[]).map(row => row.name));
+	const tableSql = quoteSqlIdentifier(table);
+	return new Set((db.query(`PRAGMA table_info(${tableSql})`).all() as ColumnRow[]).map(row => row.name));
 }
 
 function safeCount(db: Database, table: string): number | null {
 	if (!hasTable(db, table)) return null;
-	return (db.query(`SELECT COUNT(*) AS count FROM ${table}`).get() as CountRow).count;
+	const tableSql = quoteSqlIdentifier(table);
+	return (db.query(`SELECT COUNT(*) AS count FROM ${tableSql}`).get() as CountRow).count;
 }
 
 function safeEnv(name: string): string {

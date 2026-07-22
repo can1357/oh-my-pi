@@ -683,16 +683,20 @@ export class Settings {
 		workflowDefaultKey = "default",
 	): AgentPolicySettings | undefined {
 		const policies = this.getAgentPolicies();
+		const globalTier = this.get("agent.tier");
+		const globalPolicy: AgentPolicySettings | undefined =
+			globalTier && globalTier !== "auto" ? { tier: globalTier as "light" | "mid" | "frontier" } : undefined;
 		const agentIdPolicy = agentId ? policies[agentId] : undefined;
 		const agentTypePolicy = agentType ? policies[agentType] : undefined;
 		const workflowPolicy = workflowDefaultKey ? policies[workflowDefaultKey] : undefined;
-		if (!agentIdPolicy && !agentTypePolicy && !workflowPolicy) {
+		if (!globalPolicy && !agentIdPolicy && !agentTypePolicy && !workflowPolicy) {
 			return undefined;
 		}
 		const composed = composeAgentPolicyFields({
-			workflowPolicy,
-			agentTypePolicy,
-			agentIdPolicy,
+			workflowPolicy: globalPolicy,
+			agentTypePolicy: workflowPolicy,
+			agentIdPolicy: agentTypePolicy,
+			override: agentIdPolicy,
 		});
 		// Compose returns `modelPool?: readonly string[]`; settings boundary stays mutable.
 		const { modelPool, ...rest } = composed;

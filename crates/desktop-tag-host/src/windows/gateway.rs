@@ -25,7 +25,7 @@ use crate::{
 };
 
 const READINESS_TIMEOUT: Duration = Duration::from_secs(15);
-const HEALTHY_RESET: Duration = Duration::from_secs(60);
+const HEALTHY_RESET: Duration = Duration::from_mins(1);
 const MAX_HTTP_RESPONSE: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug, Default)]
@@ -59,7 +59,7 @@ impl GatewaySupervisor {
 		let thread = thread::Builder::new()
 			.name("desktop-tag-gateway".into())
 			.spawn(move || {
-				supervise(program, thread_token, capture_root, thread_state, thread_stopped)
+				supervise(program, thread_token, capture_root, thread_state, thread_stopped);
 			})?;
 		Ok(Self { state, stopped, thread: Some(thread), token_file })
 	}
@@ -165,14 +165,11 @@ fn spawn_gateway(
 		let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
 		let _ = sender.send(result);
 	});
-	let line = match receiver.recv_timeout(READINESS_TIMEOUT) {
-		Ok(result) => result?,
-		Err(_) => {
-			let _ = child.kill();
-			let _ = child.wait();
-			bail!("gateway readiness timed out");
-		},
-	};
+	let line = if let Ok(result) = receiver.recv_timeout(READINESS_TIMEOUT) { result? } else {
+ 			let _ = child.kill();
+ 			let _ = child.wait();
+ 			bail!("gateway readiness timed out");
+ 		};
 	let ready: GatewayReady =
 		serde_json::from_str(line.trim()).context("invalid gateway readiness JSON")?;
 	validate_ready(&ready, child.id())?;

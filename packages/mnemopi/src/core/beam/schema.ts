@@ -1,17 +1,20 @@
 import type { Database } from "bun:sqlite";
+import { quoteSqlIdentifier } from "../../util/sql";
 
 type PragmaTableInfoRow = {
 	name: string;
 };
 
 function addColumnIfMissing(db: Database, table: string, column: string, definition: string): boolean {
-	const rows = db.query(`PRAGMA table_info(${table})`).all() as PragmaTableInfoRow[];
+	const tableSql = quoteSqlIdentifier(table);
+	const columnSql = quoteSqlIdentifier(column);
+	const rows = db.query(`PRAGMA table_info(${tableSql})`).all() as PragmaTableInfoRow[];
 	for (const row of rows) {
 		if (row.name === column) {
 			return false;
 		}
 	}
-	db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+	db.run(`ALTER TABLE ${tableSql} ADD COLUMN ${columnSql} ${definition}`);
 	return true;
 }
 

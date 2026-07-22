@@ -55,7 +55,7 @@ export async function discoverWatchdogFiles(cwd: string, agentDir?: string): Pro
 	// 2. Project levels (both standalone and native config .omp/): walk up from cwd to repoRoot / home
 	let current = cwd;
 	while (true) {
-		candidates.add(path.resolve(current, ".omp", "WATCHDOG.md"));
+		candidates.add(path.resolve(current, ".ompk", "WATCHDOG.md"));
 		candidates.add(path.resolve(current, "WATCHDOG.md"));
 
 		if (current === (repoRoot ?? home)) break;
@@ -74,10 +74,10 @@ export async function discoverWatchdogFiles(cwd: string, agentDir?: string): Pro
 			const baseName = parent.split(path.sep).pop() ?? "";
 
 			const isUser = userPath !== null && candidate === userPath;
-			const ownerDir = baseName === ".omp" ? path.dirname(parent) : parent;
+			const ownerDir = baseName === ".ompk" ? path.dirname(parent) : parent;
 			const ownerBaseName = ownerDir.split(path.sep).pop() ?? "";
 
-			if (isUser || !ownerBaseName.startsWith(".") || baseName === ".omp") {
+			if (isUser || !ownerBaseName.startsWith(".") || baseName === ".ompk") {
 				const relative = path.relative(cwd, ownerDir);
 				const depth = relative === "" ? 0 : relative.split(path.sep).filter(Boolean).length;
 				items.push({

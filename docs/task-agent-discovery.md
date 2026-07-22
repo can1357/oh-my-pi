@@ -147,6 +147,12 @@ In `src/task/index.ts`, command helpers are re-exported with agent discovery hel
 
 An agent can be discoverable but still unavailable to run because of execution guardrails.
 
+### Execution-profile policy
+
+Every spawn resolves an immutable `AgentExecutionProfile` across independent tier, autonomy, collaboration, work-class, edit-mode, request-budget, runtime-budget, and model-pool axes. `task.agentPolicies` supplies workflow/default, agent-type, and stable agent-id layers; restrictive composition prevents a more-specific policy from widening an earlier ceiling.
+
+Interactive sessions can add a global tier ceiling with `/tier light|mid|frontier|auto`, or through `/settings` → **Model** → **Agent Model Profiles** → **Default Spawn Tier**. This `agent.tier` setting is deliberately independent from model selection, so a stronger model can run with the simpler light or mid tool/edit grammar. The task tool reads settings for each spawn, so changes apply immediately to subsequent child launches in the same TUI. Already-running children keep their frozen profile.
+
 ### Disabled-agent settings
 
 `TaskTool.#executeSync` checks `task.disabledAgents` after resolving the agent. If the requested name is disabled, execution returns an immediate error listing enabled alternatives when available.

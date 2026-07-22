@@ -51,6 +51,12 @@ describe("binary vector helpers", () => {
 });
 
 describe("BinaryVectorStore", () => {
+	it("rejects unsafe custom table identifiers before opening the database", () => {
+		expect(() => new BinaryVectorStore({ dbPath: ":memory:", tableName: "vectors; DROP TABLE vectors" })).toThrow(
+			"Invalid SQL identifier",
+		);
+	});
+
 	it("stores, searches, deletes, and reports compact binary vectors", () => {
 		const store = new BinaryVectorStore({ dbPath: ":memory:" });
 		try {

@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { embeddingDim, type VecType } from "../config";
 import { closeQuietly, type DatabasePath, openDatabase } from "../db";
+import { assertSqlIdentifier, quoteSqlIdentifier } from "../util/sql";
 
 export { cosineSimilarity } from "./vector-math";
 
@@ -53,13 +54,6 @@ interface StatsRow {
 	avg_bytes: number | null;
 	max_bytes: number | null;
 	min_bytes: number | null;
-}
-
-function assertSqlIdentifier(name: string): string {
-	if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
-		throw new Error(`Invalid SQL identifier: ${name}`);
-	}
-	return name;
 }
 
 function toFiniteNumber(value: number | string | boolean | null | undefined): number {
@@ -179,19 +173,21 @@ export class BinaryVectorStore {
 	readonly conn: Database;
 	readonly dbPath: DatabasePath;
 	readonly tableName: string;
-	private readonly ownsConnection: boolean;
+	readonly #tableSql: string;
+	readonly #ownsConnection: boolean;
 
 	constructor(options: BinaryVectorStoreOptions = {}) {
 		this.dbPath = options.dbPath ?? ":memory:";
 		this.tableName = assertSqlIdentifier(options.tableName ?? "binary_vectors");
+		this.#tableSql = quoteSqlIdentifier(this.tableName);
 		this.conn = options.conn ?? openDatabase(this.dbPath, { create: true, readwrite: true });
-		this.ownsConnection = options.conn === undefined;
+		this.#ownsConnection = options.conn === undefined;
 		this.initTable();
 	}
 
 	private initTable(): void {
 		this.conn.exec(`
-			CREATE TABLE IF NOT EXISTS ${this.tableName} (
+			CREATE TABLE IF NOT EXISTS ${this.#tableSql} (
 				memory_id TEXT PRIMARY KEY,
 				binary_vector BLOB NOT NULL,
 				original_dim INTEGER DEFAULT ${EMBEDDING_DIM},
@@ -214,7 +210,7 @@ export class BinaryVectorStore {
 		const binary = maximallyInformativeBinarization(embedding);
 		this.conn
 			.query(
-				`INSERT OR REPLACE INTO ${this.tableName}
+				`INSERT OR REPLACE INTO ${this.#tableSql}
 				 (memory_id, binary_vector, original_dim, magnitude)
 				 VALUES (?, ?, ?, ?)`,
 			)
@@ -224,7 +220,7 @@ export class BinaryVectorStore {
 		const queryDim = Math.min(queryEmbedding.length, EMBEDDING_DIM);
 		const queryBinary = maximallyInformativeBinarization(queryEmbedding);
 		const rows = this.conn
-			.query(`SELECT memory_id, binary_vector, original_dim, magnitude FROM ${this.tableName}`)
+			.query(`SELECT memory_id, binary_vector, original_dim, magnitude FROM ${this.#tableSql}`)
 			.all() as VectorRow[];
 		const results: BinaryVectorSearchResult[] = [];
 		for (const row of rows) {
@@ -245,7 +241,7 @@ export class BinaryVectorStore {
 		return queryEmbeddings.map(embedding => this.search(embedding, topK));
 	}
 	deleteVector(memoryId: string): void {
-		this.conn.query(`DELETE FROM ${this.tableName} WHERE memory_id = ?`).run(memoryId);
+		this.conn.query(`DELETE FROM ${this.#tableSql} WHERE memory_id = ?`).run(memoryId);
 	}
 	getStats(): BinaryVectorStats {
 		const row = this.conn
@@ -254,7 +250,7 @@ export class BinaryVectorStore {
 					AVG(LENGTH(binary_vector)) AS avg_bytes,
 					MAX(LENGTH(binary_vector)) AS max_bytes,
 					MIN(LENGTH(binary_vector)) AS min_bytes
-				 FROM ${this.tableName}`,
+				 FROM ${this.#tableSql}`,
 			)
 			.get() as StatsRow;
 		const count = row.count;
@@ -269,7 +265,7 @@ export class BinaryVectorStore {
 		};
 	}
 	close(): void {
-		if (this.ownsConnection) {
+		if (this.#ownsConnection) {
 			closeQuietly(this.conn);
 		}
 	}

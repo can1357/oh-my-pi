@@ -522,6 +522,32 @@ export const SETTINGS_SCHEMA = {
 				"Named role->model maps, e.g. `frugal: { smol: nvidia/…, task: …, slow: … }`. Activate one via `agent.profile`.",
 		},
 	},
+	"agent.tier": {
+		type: "enum",
+		values: ["auto", "light", "mid", "frontier"] as const,
+		default: "auto",
+		ui: {
+			tab: "model",
+			group: "Agent Model Profiles",
+			label: "Default Spawn Tier",
+			description:
+				"Constrain newly spawned agents—including agents using stronger models—to a simpler capability envelope. Existing child sessions keep their immutable profile. Auto leaves tier selection to agent/workflow policies and otherwise uses the normal frontier default.",
+			options: [
+				{ value: "auto", label: "Auto", description: "Use agent/workflow policy or the normal frontier default" },
+				{
+					value: "light",
+					label: "Light",
+					description: "Read/search/report controls only; no execution, editing, delegation, or discovery",
+				},
+				{ value: "mid", label: "Mid", description: "Basic execution/delegation tools with replace-only editing" },
+				{
+					value: "frontier",
+					label: "Frontier",
+					description: "Permit frontier capabilities; more-specific policies may still restrict them",
+				},
+			],
+		},
+	},
 
 	modelProviderOrder: { type: "array", default: EMPTY_STRING_ARRAY },
 

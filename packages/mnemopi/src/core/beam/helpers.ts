@@ -12,6 +12,7 @@ import {
 	RECALL_SYNONYMS,
 	recallTokens,
 } from "../../util/regex";
+import { quoteSqlIdentifier } from "../../util/sql";
 import { currentEmbeddingModel, embed } from "../embeddings";
 import { getMnemopiRuntimeOptions, mnemopiDebugEnabled, withMnemopiRuntimeOptions } from "../runtime-options";
 import { buildExactVectorIndex, searchExactVectorIndex } from "../vector-index";
@@ -265,12 +266,13 @@ export function cjkLikeSearch(
 ): Array<FtsRankResult | WorkingFtsRankResult> {
 	const cjkChars = cjkCharsForSearch(query);
 	if (cjkChars.length === 0) return [];
-	const table = working ? "working_memory" : "episodic_memory";
+	const tableSql = quoteSqlIdentifier(working ? "working_memory" : "episodic_memory");
 	const idColumn = working ? "id" : "rowid";
+	const idColumnSql = quoteSqlIdentifier(idColumn);
 	const conditions = cjkChars.map(() => "content LIKE ? ESCAPE '\\'").join(" OR ");
 	try {
 		const rows = db
-			.query(`SELECT ${idColumn}, content FROM ${table} WHERE ${conditions} LIMIT ?`)
+			.query(`SELECT ${idColumnSql}, content FROM ${tableSql} WHERE ${conditions} LIMIT ?`)
 			.all(...cjkChars.map(ch => `%${ch}%`), k * 5) as Record<string, unknown>[];
 		const scored: Array<{ id: string | number; score: number }> = [];
 		for (const row of rows) {

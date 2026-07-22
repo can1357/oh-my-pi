@@ -26,6 +26,9 @@ Redesign the Agent Hub keybindings to follow standard TUI conventions, add missi
 | `Esc` | Close | Exit the hub overlay |
 | `←←` | Close | Double-tap left arrow (within 500ms) |
 | Hub key | Toggle | `alt+a`, `ctrl+s`, or `ctrl+shift+b` toggles hub open/closed |
+| Composer `←←` | Open | Double-tap left arrow at the empty prompt opens the hub |
+
+> **Intent Composer:** The execution rail always surfaces the Agent Hub action with its configured hub key and the stable `←←` fallback. The editor callback remains the source of truth for double-left detection, so the shortcut survives composer layout changes.
 
 > **Background sessions (post-consolidation):** The hub also opens via `ctrl+shift+b` (`app.session.backgrounds`) and the `/backgrounds` slash command; `/background [name]` promotes the current session into a persistent named background agent and then opens the hub. The hub is one folder → session → subagent tree: the current session and persistent background instances are session lanes grouped under collapsible per-folder headers (keyed by working directory, folders expanded by default with the current folder first). `Space` toggles the selected folder or session lane; background lanes are collapsed by default and expand to reveal their nested subagents; `Enter` on a background lane resumes that session.
 

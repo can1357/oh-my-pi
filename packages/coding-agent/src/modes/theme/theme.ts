@@ -321,7 +321,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.context": "◫",
 	"icon.cost": "💲",
 	"icon.time": "⏱",
-	"icon.pi": "π",
+	"icon.pi": "pk",
 	"icon.ghost": "👻",
 	"icon.agents": "👥",
 	"icon.job": "⚙",
@@ -589,7 +589,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	// pick:  | alt: ◷ ◴
 	"icon.time": "\uf017",
 	// pick:  | alt: π ∏ ∑
-	"icon.pi": "\ue22c",
+	"icon.pi": "PK",
 	// pick: 󰊠 (nf-md-ghost) | alt: 👻
 	"icon.ghost": "\u{f02a0}",
 	// pick:  | alt: 
@@ -828,7 +828,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.context": "ctx:",
 	"icon.cost": "$",
 	"icon.time": "t:",
-	"icon.pi": "pi",
+	"icon.pi": "pk",
 	"icon.ghost": "@",
 	"icon.agents": "AG",
 	"icon.job": "bg",

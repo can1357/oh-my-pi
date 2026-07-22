@@ -26,7 +26,7 @@ import {
 } from "./environments-cloud";
 import { RemoteWorkspaceOrchestrator } from "./orchestrator";
 
-const DB_PATH = process.env.OMPK_REMOTE_DB ?? path.join(os.homedir(), ".omp", "remote-jobs.sqlite");
+const DB_PATH = process.env.OMPK_REMOTE_DB ?? path.join(os.homedir(), ".ompk", "remote-jobs.sqlite");
 
 function makeOrchestrator(): RemoteWorkspaceOrchestrator {
 	const backend = new MsiDockerBackend();

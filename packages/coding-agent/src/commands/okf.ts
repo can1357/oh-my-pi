@@ -1,6 +1,6 @@
 /**
  * `omp okf` — inspect and validate the project's Open Knowledge Format (OKF)
- * v0.1 knowledge bundle (`.wiki/` and `~/.omp/okf/`).
+ * v0.1 knowledge bundle (`.wiki/` and `~/.ompk/okf/`).
  */
 import { APP_NAME } from "@pk-nerdsaver-ai/pi-utils";
 import { Args, Command, Flags, renderCommandHelp } from "@pk-nerdsaver-ai/pi-utils/cli";

@@ -476,6 +476,14 @@ String entries apply everywhere. Scoped entries apply when the current working d
 
 Subagent model aliases allow mapping user-defined names to concrete model selectors for spawned subagents (via `/subagent using <alias>` or `/delegate using <alias>`).
 
+The interactive quick-launch form accepts both the model selector and prompt:
+
+```text
+/subagent using <alias-or-model> "Investigate the Agent Hub regression"
+```
+
+It resolves the model immediately, pre-fills the quoted task, inherits the parent thinking level, and asks only for an optional name. Press `Enter` on the empty name field to use the generated name and launch. The plain `/subagent` form retains the full model, thinking, name, color, and task wizard.
+
 Built-in subagent model aliases:
 - `browser-fast` maps to `google/gemini-2.5-flash-lite`. It is the recommended fast model for bounded browser executor tasks.
 

@@ -175,13 +175,15 @@ function applyAcpDefaultSettingOverrides(targetSettings: Settings = settings): v
 	applyDefaultSettingOverrides(HOST_DEFAULTED_SETTING_PATHS, targetSettings);
 }
 
+const PIPED_STDIN_NOTICE_MS = 5_000;
+
 async function readPipedInput(): Promise<string | undefined> {
 	if (process.stdin.isTTY !== false) return undefined;
 	// stdin is a pipe: a producer that never writes nor closes would block
 	// startup forever with zero output. Say what we're blocked on after 1s.
 	const notice = setTimeout(() => {
 		process.stderr.write(`${chalk.dim("Reading prompt from piped stdin (waiting for EOF; ctrl+c to abort)…")}\n`);
-	}, 1000);
+	}, PIPED_STDIN_NOTICE_MS);
 	notice.unref?.();
 	try {
 		const text = await Bun.stdin.text();

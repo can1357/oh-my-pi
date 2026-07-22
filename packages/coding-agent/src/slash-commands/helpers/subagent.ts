@@ -73,41 +73,50 @@ const SUBAGENT_COLOR_OPTIONS: readonly ThemeColor[] = [
 	"statusLineSubagents",
 ];
 
+interface ConsumedSlashValue {
+	value: string;
+	rest: string;
+}
+
+function consumeSlashValue(input: string): ConsumedSlashValue {
+	const source = input.trimStart();
+	const quote = source[0];
+	if (quote !== '"' && quote !== "'") {
+		const boundary = source.search(/\s/);
+		return boundary === -1
+			? { value: source, rest: "" }
+			: { value: source.slice(0, boundary), rest: source.slice(boundary).trimStart() };
+	}
+
+	let value = "";
+	for (let index = 1; index < source.length; index++) {
+		const character = source[index];
+		if (character === "\\" && index + 1 < source.length) {
+			value += source[++index];
+			continue;
+		}
+		if (character === quote) {
+			return { value, rest: source.slice(index + 1).trimStart() };
+		}
+		value += character;
+	}
+	return { value, rest: "" };
+}
+
 export function parseUsingForm(args: string): ParsedUsingForm | null {
 	const trimmed = args.trim();
 	if (!/^using(?:\s|$)/i.test(trimmed)) return null;
-	let rest = trimmed.slice("using".length).trimStart();
-	if (!rest) return { modelInput: "", task: "" };
+	const source = trimmed.slice("using".length).trimStart();
+	if (!source) return { modelInput: "", task: "" };
 
-	const quote = rest[0];
-	if (quote === '"' || quote === "'") {
-		let modelInput = "";
-		let index = 1;
-		let closed = false;
-		for (; index < rest.length; index++) {
-			const ch = rest[index];
-			if (ch === "\\" && index + 1 < rest.length) {
-				modelInput += rest[++index];
-				continue;
-			}
-			if (ch === quote) {
-				closed = true;
-				index++;
-				break;
-			}
-			modelInput += ch;
-		}
-		rest = closed ? rest.slice(index).trimStart() : "";
-		return { modelInput: modelInput.trim(), task: rest };
-	}
+	const model = consumeSlashValue(source);
+	if (!model.rest) return { modelInput: model.value.trim(), task: "" };
 
-	const boundary = rest.search(/\s/);
-	if (boundary === -1) {
-		return { modelInput: rest.trim(), task: "" };
-	}
+	const task =
+		model.rest[0] === '"' || model.rest[0] === "'" ? consumeSlashValue(model.rest) : { value: model.rest, rest: "" };
 	return {
-		modelInput: rest.slice(0, boundary).trim(),
-		task: rest.slice(boundary).trimStart(),
+		modelInput: model.value.trim(),
+		task: `${task.value}${task.rest ? ` ${task.rest}` : ""}`.trim(),
 	};
 }
 
@@ -316,6 +325,33 @@ export async function spawnSubagent(
 	return id;
 }
 
+export async function collectSubagentWizardState(
+	ctx: InteractiveModeContext,
+	model: Model<Api>,
+	modelOverride: string,
+	prefilledTask: string,
+	quickTask: boolean,
+): Promise<SubagentWizardState | undefined> {
+	const thinkingLevel = quickTask
+		? (ctx.session.thinkingLevel ?? ThinkingLevel.Inherit)
+		: await selectThinkingLevel(ctx, model);
+	if (thinkingLevel === undefined) return undefined;
+
+	const name = await promptOptionalName(ctx);
+	if (name === null) return undefined;
+
+	const color = quickTask ? undefined : await promptOptionalColor(ctx);
+	if (color === null) return undefined;
+
+	const task = quickTask && prefilledTask.trim() ? prefilledTask.trim() : await promptTask(ctx, prefilledTask);
+	if (!task) {
+		ctx.showError("Subagent task is required.");
+		return undefined;
+	}
+
+	return { modelOverride, thinkingLevel, name, color, task };
+}
+
 async function completeWizard(
 	ctx: InteractiveModeContext,
 	model: Model<Api>,
@@ -323,28 +359,9 @@ async function completeWizard(
 	prefilledTask: string,
 	quickTask: boolean,
 ): Promise<void> {
-	const thinkingLevel = await selectThinkingLevel(ctx, model);
-	if (thinkingLevel === undefined) return;
-
-	const name = await promptOptionalName(ctx);
-	if (name === null) return;
-
-	const color = await promptOptionalColor(ctx);
-	if (color === null) return;
-
-	const task = quickTask && prefilledTask.trim() ? prefilledTask.trim() : await promptTask(ctx, prefilledTask);
-	if (!task) {
-		ctx.showError("Subagent task is required.");
-		return;
-	}
-
-	await spawnSubagent(ctx, {
-		modelOverride,
-		thinkingLevel,
-		name,
-		color,
-		task,
-	});
+	const state = await collectSubagentWizardState(ctx, model, modelOverride, prefilledTask, quickTask);
+	if (!state) return;
+	await spawnSubagent(ctx, state);
 }
 
 async function handleUsingForm(ctx: InteractiveModeContext, usingForm: ParsedUsingForm): Promise<void> {

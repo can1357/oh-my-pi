@@ -323,6 +323,42 @@ describe("Google Gemini CLI alignment", () => {
 		expect(parameters).toBeDefined();
 		expect(JSON.stringify(parameters)).not.toContain('"patternProperties"');
 	});
+	it("coerces boolean property schemas in Antigravity legacy parameters", () => {
+		const toolContext: Context = {
+			messages: [{ role: "user", content: "capture tool telemetry", timestamp: Date.now() }],
+			tools: [
+				{
+					name: "router_capture_tool_use",
+					description: "Capture tool telemetry",
+					parameters: {
+						type: "object",
+						properties: {
+							toolName: { type: "string" },
+							args: true,
+							result: true,
+							error: true,
+						},
+						required: ["toolName"],
+					} as TJsonSchema,
+				},
+			],
+		};
+		const payload = buildRequest(createModel("google-antigravity"), toolContext, "proj-123", {}, true) as {
+			request: { tools?: Array<{ functionDeclarations: Array<{ parameters?: unknown }> }> };
+		};
+
+		expect(payload.request.tools?.[0]?.functionDeclarations[0]?.parameters).toEqual({
+			type: "object",
+			properties: {
+				toolName: { type: "string" },
+				args: {},
+				result: {},
+				error: {},
+			},
+			required: ["toolName"],
+			propertyOrdering: ["toolName", "args", "result", "error"],
+		});
+	});
 	it("injects ANTIGRAVITY_SYSTEM_INSTRUCTION for gemini-3.1-pro-high and gemini-3.1-pro-low", () => {
 		// Regression test for #1274: shouldInjectAntigravitySystemInstruction checked
 		// "gemini-3-pro-high" (hyphen) but the deployed model IDs use "gemini-3.1-pro-high" (dot),

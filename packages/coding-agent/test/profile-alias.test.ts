@@ -28,12 +28,6 @@ function mockFs(seed: Array<[string, string]> = []) {
 	};
 }
 
-// Mirror the (unexported) quoting helpers in src/cli/profile-alias.ts so the
-// source-invocation expectations stay correct regardless of which separators the
-// host's path module produces.
-const quoteForShell = (p: string) => `'${p.replace(/'/g, `'"'"'`)}'`;
-const quoteForPowerShell = (p: string) => `'${p.replace(/'/g, `''`)}'`;
-
 describe("profile alias installer", () => {
 	it("writes a bash-compatible function that forwards subcommands through oh-my-pk", async () => {
 		const fs = mockFs();

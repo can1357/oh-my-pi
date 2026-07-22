@@ -65,6 +65,10 @@ Cleared on `/new`, session switch/reload, branch, `/btw` branch, and tree naviga
 
 Evidence kinds include `command`, `test`, `source`, `artifact`, `runtime`, `review`, `cleanup`. Progress prose alone is not evidence — records must tie to criterion IDs for the root completion gate.
 
+## Interactive execution-tier control
+
+The interactive TUI exposes the default tier ceiling for newly spawned agents through `/tier [status|light|mid|frontier|auto]` and the `/settings` **Default Spawn Tier** selector. The persisted `agent.tier` value composes restrictively beneath `task.agentPolicies`, so model strength and capability envelope remain independent: a frontier model can be assigned the light or mid path without exposing the frontier tool grammar. Changes affect subsequent spawns in the live session; existing children retain their immutable profile.
+
 ## Session wiring
 
 Primary owner: `packages/coding-agent/src/session/agent-session.ts` (ephemeral root state, injection, lifecycle clear). Advisor composition: `src/advisor/task-contract-block.ts`.

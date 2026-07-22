@@ -447,18 +447,17 @@ async function loadMnemopiConfigWithProviders(
  * When mnemopi targets OpenRouter (its default embedding host) without a
  * user-pinned key, hand it the central {@link ApiKeyResolver} so requests pick
  * up AuthStorage credentials, force-refresh on 401, and rotate across sibling
- * keys. Returns undefined when the URL points elsewhere or when no OpenRouter
- * credential exists, preserving mnemopi's env-key fallback and its
- * "no key -> API embeddings unavailable" gating.
+ * keys. The startup check is synchronous and side-effect-free: command-backed
+ * keys are not executed and OAuth tokens are not refreshed until an embedding
+ * request actually needs them.
  */
-async function openrouterKeyResolver(
+function openrouterKeyResolver(
 	modelRegistry: ModelRegistry,
 	sessionId: string,
 	baseUrl: string | undefined,
-): Promise<ApiKeyResolver | undefined> {
+): ApiKeyResolver | undefined {
 	if (baseUrl !== undefined && !hostMatchesUrl(baseUrl, "openrouter")) return undefined;
-	const key = await modelRegistry.getApiKeyForProvider("openrouter", sessionId);
-	if (key === undefined || key === "") return undefined;
+	if (!modelRegistry.hasConfiguredProviderAuth("openrouter")) return undefined;
 	return modelRegistry.resolver("openrouter", { sessionId });
 }
 
@@ -474,7 +473,7 @@ async function resolveMnemopiProviderOptions(
 		embeddingApiUrl: config.providerOptions.embeddingApiUrl,
 		embeddingApiKey:
 			config.providerOptions.embeddingApiKey ??
-			(await openrouterKeyResolver(modelRegistry, sessionId, config.providerOptions.embeddingApiUrl)),
+			openrouterKeyResolver(modelRegistry, sessionId, config.providerOptions.embeddingApiUrl),
 		llm: false,
 	};
 
@@ -504,7 +503,7 @@ async function resolveMnemopiProviderOptions(
 					config.llmApiKey ??
 					(config.llmBaseUrl === undefined
 						? undefined
-						: await openrouterKeyResolver(modelRegistry, sessionId, config.llmBaseUrl)),
+						: openrouterKeyResolver(modelRegistry, sessionId, config.llmBaseUrl)),
 				model: config.llmModel,
 			},
 		};

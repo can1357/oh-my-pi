@@ -136,7 +136,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		const taskBaseline = structuredClone(opts.context.baseline);
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
-		const result = await runSubprocess({
+		let result = await runSubprocess({
 			...opts.baseOptions,
 			worktree: isolationDir,
 			preloadedExtensionPaths: undefined,
@@ -177,6 +177,18 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			} catch (patchErr) {
 				const msg = patchErr instanceof Error ? patchErr.message : String(patchErr);
 				return { ...result, error: `Patch capture failed: ${msg}` };
+			}
+		}
+		if (result.aborted || result.exitCode !== 0) {
+			try {
+				const delta = await captureDeltaPatch(isolationDir, taskBaseline);
+				if (delta.rootPatch.trim()) {
+					const partialPath = path.join(opts.artifactsDir, `${opts.agentId}.partial.patch`);
+					await Bun.write(partialPath, delta.rootPatch);
+					result = { ...result, patchPath: partialPath };
+				}
+			} catch {
+				// Best-effort: a capture failure must never mask the original run failure.
 			}
 		}
 		return result;
@@ -225,6 +237,14 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 			const canApplyNestedOnly =
 				!result.branchName && result.exitCode === 0 && !result.aborted && (result.nestedPatches?.length ?? 0) > 0;
 			if (!result.branchName || result.exitCode !== 0 || result.aborted) {
+				if (result.patchPath) {
+					return {
+						summary: `\n\n<system-notification>Subagent run did not complete; partial changes were captured but NOT applied.</system-notification>\n\nPatch artifact:\n- ${result.patchPath}`,
+						changesApplied: false,
+						hadAnyChanges: false,
+						mergedBranchForNestedPatches: false,
+					};
+				}
 				return {
 					summary: canApplyNestedOnly
 						? "\n\nNo root changes to apply; nested repository patches captured."
@@ -265,7 +285,7 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 		let hadAnyChanges: boolean;
 		const succeeded = result.exitCode === 0 && !result.error && !result.aborted;
 		if (!succeeded) {
-			changesApplied = true;
+			changesApplied = !result.patchPath;
 			hadAnyChanges = false;
 		} else if (!result.patchPath) {
 			changesApplied = false;

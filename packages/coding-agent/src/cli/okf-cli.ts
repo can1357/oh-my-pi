@@ -2,7 +2,7 @@
  * OKF CLI command handlers.
  *
  * `omp okf list` — enumerate every concept discovered across the project's
- * `.wiki/` bundle and the user's `~/.omp/okf/` bundle.
+ * `.wiki/` bundle and the user's `~/.ompk/okf/` bundle.
  * `omp okf show <id>` — print one concept's frontmatter summary and body.
  * `omp okf lint` — validate every discovered concept against OKF v0.1
  * conformance rules (spec §9) and exit non-zero on errors.
@@ -156,7 +156,7 @@ ${chalk.bold("Usage:")}
   omp okf <action> [id] [options]
 
 ${chalk.bold("Actions:")}
-  list          List every concept discovered in .wiki/ and ~/.omp/okf/
+  list          List every concept discovered in .wiki/ and ~/.ompk/okf/
   show <id>     Print one concept's frontmatter summary and body
   lint          Validate concepts against OKF v0.1 conformance rules (exits 1 on error)
 

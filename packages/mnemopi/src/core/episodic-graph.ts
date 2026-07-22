@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { closeQuietly, type DatabasePath, openDatabase } from "../db";
+import { quoteSqlIdentifier } from "../util/sql";
 
 export interface Gist {
 	readonly id: string;
@@ -560,7 +561,8 @@ export class EpisodicGraph {
 	}
 
 	private count(table: "gists" | "facts" | "graph_edges"): number {
-		const row = this.db.query(`SELECT COUNT(*) AS count FROM ${table}`).get() as CountRow;
+		const tableSql = quoteSqlIdentifier(table);
+		const row = this.db.query(`SELECT COUNT(*) AS count FROM ${tableSql}`).get() as CountRow;
 		return row.count;
 	}
 

@@ -40,7 +40,7 @@ use std::{
 
 /// Default directory name for OMP's per-user state (overridable via
 /// `PI_CONFIG_DIR`, matching `packages/utils/src/dirs.ts`).
-const DEFAULT_CONFIG_DIR: &str = ".omp";
+const DEFAULT_CONFIG_DIR: &str = ".ompk";
 
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 /// App name used as the XDG-root subdirectory (`$XDG_STATE_HOME/omp/`),

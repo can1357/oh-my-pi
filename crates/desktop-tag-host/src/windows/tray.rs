@@ -175,6 +175,6 @@ fn open_run_key(access: u32) -> Result<HKEY> {
 	Ok(key)
 }
 
-pub fn tray_event_message(lparam: LPARAM) -> u32 {
+pub const fn tray_event_message(lparam: LPARAM) -> u32 {
 	(lparam as u32) & 0xffff
 }

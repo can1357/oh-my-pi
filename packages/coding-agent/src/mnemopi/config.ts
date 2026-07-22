@@ -106,6 +106,14 @@ const DEFAULT_SHARED_BANK = "default";
 // Cap legacy-bank scanning at session start so a pathological banks/
 // directory cannot dominate startup latency.
 const LEGACY_BANK_SCAN_LIMIT = 64;
+const LEGACY_BANK_CACHE_VERSION = 1;
+
+interface LegacyBankCache {
+	version: number;
+	cwd: string;
+	directoryFingerprint: string;
+	extras: string[];
+}
 
 export interface MnemopiBankScope {
 	baseBank: string;
@@ -207,17 +215,71 @@ export function extendRecallWithLegacyBanks(
 	} catch {
 		return resolved;
 	}
+	const bankNames = entries.filter(entry => entry.isDirectory()).map(entry => entry.name);
+	const directoryFingerprint = Bun.hash(
+		bankNames
+			.map(bankName => {
+				try {
+					const stat = fs.statSync(path.join(banksDir, bankName, "mnemopi.db"));
+					return `${bankName}:${stat.size}:${stat.mtimeMs}`;
+				} catch {
+					return `${bankName}:missing`;
+				}
+			})
+			.toSorted()
+			.join("\0"),
+	).toString(36);
+	const cachePath = legacyBankCachePath(dbPath, cwdAbs);
+	const cached = readLegacyBankCache(cachePath, cwdAbs, directoryFingerprint);
+	if (cached) return cached.length === 0 ? resolved : [...resolved, ...cached];
+
 	const have = new Set(resolved);
 	const extras: string[] = [];
 	let scanned = 0;
-	for (const entry of entries) {
-		if (!entry.isDirectory() || have.has(entry.name)) continue;
+	for (const bankName of bankNames) {
+		if (have.has(bankName)) continue;
 		if (scanned >= LEGACY_BANK_SCAN_LIMIT) break;
 		scanned++;
-		const candidate = path.join(banksDir, entry.name, "mnemopi.db");
-		if (bankOnlyHasCwd(candidate, cwdAbs)) extras.push(entry.name);
+		const candidate = path.join(banksDir, bankName, "mnemopi.db");
+		if (bankOnlyHasCwd(candidate, cwdAbs)) extras.push(bankName);
 	}
+	writeLegacyBankCache(cachePath, {
+		version: LEGACY_BANK_CACHE_VERSION,
+		cwd: cwdAbs,
+		directoryFingerprint,
+		extras,
+	});
 	return extras.length === 0 ? resolved : [...resolved, ...extras];
+}
+
+function legacyBankCachePath(dbPath: string, cwd: string): string {
+	return path.join(path.dirname(dbPath), `.legacy-banks-${Bun.hash(cwd).toString(36)}.json`);
+}
+
+function readLegacyBankCache(cachePath: string, cwd: string, directoryFingerprint: string): string[] | undefined {
+	try {
+		const cached = JSON.parse(fs.readFileSync(cachePath, "utf8")) as Partial<LegacyBankCache>;
+		if (
+			cached.version !== LEGACY_BANK_CACHE_VERSION ||
+			cached.cwd !== cwd ||
+			cached.directoryFingerprint !== directoryFingerprint ||
+			!Array.isArray(cached.extras) ||
+			!cached.extras.every(value => typeof value === "string")
+		) {
+			return undefined;
+		}
+		return cached.extras;
+	} catch {
+		return undefined;
+	}
+}
+
+function writeLegacyBankCache(cachePath: string, cache: LegacyBankCache): void {
+	try {
+		fs.writeFileSync(cachePath, JSON.stringify(cache));
+	} catch (error) {
+		logger.debug("Mnemopi: failed to cache legacy bank discovery", { cachePath, error: String(error) });
+	}
 }
 
 function bankOnlyHasCwd(dbPath: string, cwd: string): boolean {

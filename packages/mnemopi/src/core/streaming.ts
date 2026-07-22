@@ -1,6 +1,7 @@
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { quoteSqlIdentifier } from "../util/sql";
 
 export const ALLOWED_DELTA_TABLES = new Set(["working_memory", "episodic_memory"] as const);
 export type DeltaTable = "working_memory" | "episodic_memory";
@@ -374,7 +375,7 @@ export class DeltaSync {
 					skipped++;
 					continue;
 				}
-				const setSql = entries.map(([key]) => `${key} = ?`).join(", ");
+				const setSql = entries.map(([key]) => `${quoteSqlIdentifier(key)} = ?`).join(", ");
 				const params: SQLQueryBindings[] = [...entries.map(([, value]) => value), id];
 				this.db.run(`UPDATE ${qname} SET ${setSql} WHERE id = ?`, params);
 				updated++;
@@ -392,7 +393,7 @@ export class DeltaSync {
 					skipped++;
 					continue;
 				}
-				const columns = entries.map(([key]) => key);
+				const columns = entries.map(([key]) => quoteSqlIdentifier(key));
 				const placeholders = columns.map(() => "?").join(", ");
 				const params: SQLQueryBindings[] = entries.map(([, value]) => value);
 				this.db.run(`INSERT INTO ${qname} (${columns.join(", ")}) VALUES (${placeholders})`, params);

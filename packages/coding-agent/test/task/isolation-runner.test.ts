@@ -61,6 +61,34 @@ describe("mergeIsolatedChanges", () => {
 		expect(outcome.hadAnyChanges).toBe(false);
 		expect(outcome.mergedBranchForNestedPatches).toBe(false);
 	});
+	it("surfaces partial patch artifact in patch mode when run was aborted or failed", async () => {
+		const res = result({ aborted: true, patchPath: "/tmp/x.partial.patch" });
+		const outcome = await mergeIsolatedChanges({ result: res, repoRoot: "/tmp/repo", mergeMode: "patch" });
+		expect(outcome.changesApplied).toBe(false);
+		expect(outcome.hadAnyChanges).toBe(false);
+		expect(outcome.summary).toContain("must be handled manually");
+		expect(outcome.summary).toContain("/tmp/x.partial.patch");
+	});
+
+	it("surfaces partial patch artifact in branch mode when run did not complete", async () => {
+		const res = result({ aborted: true, patchPath: "/tmp/y.partial.patch" });
+		const outcome = await mergeIsolatedChanges({ result: res, repoRoot: "/tmp/repo", mergeMode: "branch" });
+		expect(outcome.changesApplied).toBe(false);
+		expect(outcome.hadAnyChanges).toBe(false);
+		expect(outcome.summary).toContain("did not complete");
+		expect(outcome.summary).toContain("/tmp/y.partial.patch");
+	});
+
+	it("returns no changes to apply when run aborted without a partial patch artifact", async () => {
+		const res = result({ aborted: true });
+		const patchOutcome = await mergeIsolatedChanges({ result: res, repoRoot: "/tmp/repo", mergeMode: "patch" });
+		expect(patchOutcome.changesApplied).toBe(true);
+		expect(patchOutcome.summary).toContain("No changes to apply");
+
+		const branchOutcome = await mergeIsolatedChanges({ result: res, repoRoot: "/tmp/repo", mergeMode: "branch" });
+		expect(branchOutcome.changesApplied).toBe(true);
+		expect(branchOutcome.summary).toContain("No changes to apply");
+	});
 });
 
 describe("applyEligibleNestedPatches", () => {

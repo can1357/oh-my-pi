@@ -352,19 +352,6 @@ export function requestIxBridgeCommand(
 	);
 }
 
-async function extractJsonText(response: Response | undefined, key: string): Promise<string | undefined> {
-	if (!response) return undefined;
-	const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-	const value = body[key];
-	if (typeof value === "string") return value;
-	const result = body.result;
-	if (result && typeof result === "object" && key in result) {
-		const nested = (result as Record<string, unknown>)[key];
-		return typeof nested === "string" ? nested : undefined;
-	}
-	return undefined;
-}
-
 export async function captureScreenshot(screenshotPath: string, region?: CaptureRegion): Promise<void> {
 	if (region !== undefined) assertCaptureRegion(region);
 	if (process.platform !== "win32") {

@@ -772,7 +772,7 @@ fn matches_unix_file_type(filter: &TypeFilter, file_type: fs::FileType) -> bool 
 }
 
 #[cfg(not(unix))]
-fn matches_unix_file_type(_filter: &TypeFilter, _file_type: fs::FileType) -> bool {
+const fn matches_unix_file_type(_filter: &TypeFilter, _file_type: fs::FileType) -> bool {
 	false
 }
 
@@ -855,7 +855,7 @@ fn matches_owner_filters(filters: &[OwnerMatcher], metadata: Option<&Metadata>) 
 }
 
 #[cfg(not(unix))]
-fn matches_owner_filters(filters: &[OwnerMatcher], _metadata: Option<&Metadata>) -> bool {
+const fn matches_owner_filters(filters: &[OwnerMatcher], _metadata: Option<&Metadata>) -> bool {
 	filters.is_empty()
 }
 

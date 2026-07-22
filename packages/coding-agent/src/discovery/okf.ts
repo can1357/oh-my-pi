@@ -3,7 +3,7 @@
  *
  * Loads OKF v0.1 concept documents from the project's `.wiki/` knowledge bundle
  * (the `oh-my-pi` OKF root). The user-level equivalent lives under
- * `~/.omp/okf/`.
+ * `~/.ompk/okf/`.
  *
  * Spec: https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md
  */
@@ -20,9 +20,9 @@ const DESCRIPTION = "Load Open Knowledge Format (OKF) v0.1 concept documents fro
 const PRIORITY = 90;
 
 const PROJECT_BUNDLE_DIRNAME = ".wiki";
-const USER_BUNDLE_DIRNAME = path.join(".omp", "okf");
+const USER_BUNDLE_DIRNAME = path.join(".ompk", "okf");
 
-/** User-level bundle root: `~/.omp/okf`. */
+/** User-level bundle root: `~/.ompk/okf`. */
 function getUserBundlePath(ctx: LoadContext): string {
 	return path.join(ctx.home, USER_BUNDLE_DIRNAME);
 }

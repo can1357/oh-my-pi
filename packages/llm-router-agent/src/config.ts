@@ -131,7 +131,7 @@ function candidatePaths(cwd: string, explicit?: string, home?: string): string[]
 	if (explicit) paths.push(resolvePath(explicit, cwd));
 	paths.push(resolvePath(".llm-router/config.json", cwd));
 	paths.push(resolvePath(".llm-router.json", cwd));
-	if (home) paths.push(resolvePath(".omp/agent/llm-router.json", home));
+	if (home) paths.push(resolvePath(".ompk/agent/llm-router.json", home));
 	return paths;
 }
 

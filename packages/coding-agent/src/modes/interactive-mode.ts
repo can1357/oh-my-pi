@@ -2,7 +2,6 @@
  * Interactive mode for the coding agent.
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
  */
-import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -110,10 +109,9 @@ import { type ResolveToolDetails, runResolveInvocation } from "../tools/resolve"
 import { formatPhaseDisplayName, selectStickyTodoWindow, todoMatchesAnyDescription } from "../tools/todo";
 import { ToolError } from "../tools/tool-errors";
 import { vocalizer } from "../tts/vocalizer";
-import { resolveActiveRepoContextSync } from "../utils/active-repo-context";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
-import * as git from "../utils/git";
+
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
 import {
@@ -508,7 +506,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #changelogMarkdown: string | undefined;
 	#planModePreviousTools: string[] | undefined;
 	#askModePreviousTools: string[] | undefined;
-	#composerBranchCache: { dir: string; value: string | null; readAt: number } | undefined;
 	readonly #composerModeBar: ComposerModeBar;
 	readonly #composerDiagnostics: ComposerDiagnosticsComponent;
 	#composerTransition: Promise<void> = Promise.resolve();
@@ -1001,7 +998,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Set up git branch watcher
 		this.statusLine.watchBranch(() => {
-			this.#composerBranchCache = undefined;
 			this.updateEditorTopBorder();
 			this.ui.requestRender();
 		});
@@ -1701,6 +1697,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		const chipsRow = buildChipsRow(this.#collectComposerChips(), width);
 		const focused = this.focusedAgentId !== undefined;
 		const def = getComposerWorkModeDef(this.getComposerWorkMode());
+		const hubKeys = this.keybindings.getKeys("app.agents.hub");
+		const agentHubHint = `${theme.icon.agents} Agent Hub (${hubKeys[0] ?? "alt+a"} or ←←)`;
 		const hasInput = this.editor.getText().trim().length > 0 || this.editor.pendingImages.length > 0;
 		const viewSession = this.viewSession;
 		const streaming = this.collabGuest?.state?.isStreaming === true || viewSession.isStreaming;
@@ -1712,6 +1710,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				hasInput,
 				queuedCount: viewSession.queuedMessageCount,
 				stopKeyHint: focused || this.collabGuest ? undefined : this.keybindings.getKeys("app.interrupt")[0],
+				agentHubHint,
 			},
 			width,
 		);
@@ -1720,51 +1719,16 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#collectComposerChips(): ComposerChip[] {
 		const chips: ComposerChip[] = [];
-		if (!this.focusedAgentId) {
-			// `git.enabled` is the master kill-switch for git probes; without it
-			// the chip degrades to the bare project-directory name.
-			const gitEnabled = this.session.settings.get("git.enabled");
-			const branch = gitEnabled ? this.#currentGitBranch() : null;
-			const repoDir = gitEnabled ? (this.#composerBranchCache?.dir ?? getProjectDir()) : getProjectDir();
-			const repo = sanitizeStatusText(path.basename(repoDir));
-			chips.push({ label: branch ? `${repo}/${sanitizeStatusText(branch)}` : repo, kind: "auto" });
-			if (this.planModeEnabled && this.planModePlanFilePath) {
-				chips.push({
-					label: `plan: ${sanitizeStatusText(path.basename(this.planModePlanFilePath))}`,
-					kind: "auto",
-				});
-			}
+		if (!this.focusedAgentId && this.planModeEnabled && this.planModePlanFilePath) {
+			chips.push({
+				label: `plan: ${sanitizeStatusText(path.basename(this.planModePlanFilePath))}`,
+				kind: "auto",
+			});
 		}
 		const imageCount = this.editor.pendingImages.length;
 		if (imageCount > 0)
 			chips.push({ label: imageCount === 1 ? "1 image" : `${imageCount} images`, kind: "attached" });
 		return chips;
-	}
-
-	/** Best-effort branch name for the repo/branch chip; cached for 5s to keep render cheap. */
-	#currentGitBranch(): string | null {
-		const projectDir = getProjectDir();
-		const activeRepo = resolveActiveRepoContextSync(projectDir);
-		const repository = git.repo.resolveSync(activeRepo?.repoRoot ?? projectDir);
-		const cacheDir = repository?.repoRoot ?? activeRepo?.repoRoot ?? projectDir;
-		const now = Date.now();
-		if (
-			this.#composerBranchCache &&
-			this.#composerBranchCache.dir === cacheDir &&
-			now - this.#composerBranchCache.readAt < 5_000
-		) {
-			return this.#composerBranchCache.value;
-		}
-		let value: string | null = null;
-		try {
-			const content = repository ? fsSync.readFileSync(repository.headPath, "utf8") : "";
-			const match = content.match(/^ref: refs\/heads\/(.+)$/m);
-			value = match?.[1]?.trim() ?? null;
-		} catch {
-			value = null;
-		}
-		this.#composerBranchCache = { dir: cacheDir, value, readAt: now };
-		return value;
 	}
 
 	rebuildChatFromMessages(): void {

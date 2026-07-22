@@ -1,5 +1,6 @@
 import type { SQLQueryBindings } from "bun:sqlite";
 import { generateId, stableMemoryId } from "../../util/ids";
+import { quoteSqlIdentifier } from "../../util/sql";
 import { aaakEncode } from "../aaak";
 import { REGEX_EXTRACTION_MAX_INPUT_CHARS } from "../entities";
 import { EpisodicGraph } from "../episodic-graph";
@@ -732,7 +733,8 @@ export function getMemoriaStats(beam: BeamMemoryState): BeamStats {
 		"memoria_instructions",
 		"memoria_preferences",
 	] as const) {
-		const count = (beam.db.query(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
+		const tableSql = quoteSqlIdentifier(table);
+		const count = (beam.db.query(`SELECT COUNT(*) AS count FROM ${tableSql}`).get() as { count: number }).count;
 		stats[table] = count;
 		total += count;
 	}

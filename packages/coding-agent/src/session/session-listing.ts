@@ -616,13 +616,33 @@ export async function getRecentSessions(
 	limit = 4,
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<RecentSessionInfo[]> {
-	const sessions = await scanSessionDir(sessionDir, storage, false);
-	const recent: RecentSessionInfo[] = [];
-	for (let i = 0; i < sessions.length && i < limit; i++) {
-		const info = sessions[i];
-		recent.push({ path: info.path, name: sessionDisplayName(info), timeAgo: formatTimeAgo(info.modified) });
+	if (limit <= 0) return [];
+	try {
+		await recoverOrphanedBackups(sessionDir, storage);
+		// The welcome screen only needs a handful of rows. Sort lightweight file
+		// metadata first, then parse candidates newest-first until the limit is
+		// satisfied instead of reading every transcript header in large projects.
+		const candidates = storage
+			.listFilesSync(sessionDir, "*.jsonl")
+			.flatMap(file => {
+				try {
+					return [{ file, modified: storage.statSync(file).mtimeMs }];
+				} catch {
+					return [];
+				}
+			})
+			.sort((left, right) => right.modified - left.modified);
+		const recent: RecentSessionInfo[] = [];
+		for (const candidate of candidates) {
+			const info = await scanSessionFile(candidate.file, storage, false);
+			if (!info) continue;
+			recent.push({ path: info.path, name: sessionDisplayName(info), timeAgo: formatTimeAgo(info.modified) });
+			if (recent.length >= limit) break;
+		}
+		return recent;
+	} catch {
+		return [];
 	}
-	return recent;
 }
 
 export function isBackgroundInstanceSession(session: SessionInfo): boolean {

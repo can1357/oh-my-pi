@@ -56,6 +56,7 @@ import { describeRedeemOutcome, type ResetUsageAccount, toResetUsageAccounts } f
 import { handleSshAcp } from "./helpers/ssh";
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleSubagentSlashCommand } from "./helpers/subagent";
+import { handleTierSlashCommand, handleTierSlashCommandTui } from "./helpers/tier";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
 import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
@@ -459,6 +460,25 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "tier",
+		description: "Configure or inspect the default spawned-agent execution tier",
+		allowArgs: true,
+		subcommands: [
+			{ name: "status", description: "Show the effective default spawn envelope" },
+			{ name: "light", description: "Constrain new agents to read/search/report controls" },
+			{ name: "mid", description: "Constrain new agents to basic tools and replace-only editing" },
+			{ name: "frontier", description: "Permit frontier capabilities for new agents" },
+			{ name: "auto", description: "Use agent/workflow policies or the normal frontier default" },
+		],
+		handle: async (command, runtime) => {
+			await handleTierSlashCommand(command.args, runtime);
+			return commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			handleTierSlashCommandTui(command.args, runtime);
+		},
+	},
+	{
 		name: "help",
 		description: "Recommend built-in features and show related documentation",
 		inlineHint: "[question]",
@@ -613,8 +633,8 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "subagent",
-		description: "Spawn a configured subagent",
-		inlineHint: "[using <alias-or-model>] [task]",
+		description: "Spawn a subagent; the using form preselects model and task, leaving only optional name",
+		inlineHint: 'using <alias-or-model> "<prompt>"',
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");

@@ -97,7 +97,7 @@ describe("OKF discovery provider", () => {
 		const projectBundle = makeBundle();
 		const wiki = path.join(projectBundle, ".wiki");
 		const home = makeBundle();
-		const userOkf = path.join(home, ".omp", "okf");
+		const userOkf = path.join(home, ".ompk", "okf");
 		writeConcept(wiki, "tables/orders.md", { type: "BigQuery Table", title: "Project" }, "project body");
 		writeConcept(userOkf, "tables/users.md", { type: "BigQuery Table", title: "User" }, "user body");
 

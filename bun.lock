@@ -192,6 +192,18 @@
         "@types/bun": "catalog:",
       },
     },
+    "packages/deep-research": {
+      "name": "@pk-nerdsaver-ai/pi-deep-research",
+      "version": "0.1.0",
+      "dependencies": {
+        "@pk-nerdsaver-ai/pi-ai": "catalog:",
+        "@pk-nerdsaver-ai/pi-catalog": "catalog:",
+        "handlebars": "catalog:",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+      },
+    },
     "packages/desktop-tag": {
       "name": "@pk-nerdsaver-ai/pi-desktop-tag",
       "version": "16.2.6",
@@ -987,6 +999,8 @@
     "@pk-nerdsaver-ai/pi-context-policy": ["@pk-nerdsaver-ai/pi-context-policy@workspace:packages/context-policy"],
 
     "@pk-nerdsaver-ai/pi-context-storage": ["@pk-nerdsaver-ai/pi-context-storage@workspace:packages/context-storage"],
+
+    "@pk-nerdsaver-ai/pi-deep-research": ["@pk-nerdsaver-ai/pi-deep-research@workspace:packages/deep-research"],
 
     "@pk-nerdsaver-ai/pi-desktop-tag": ["@pk-nerdsaver-ai/pi-desktop-tag@workspace:packages/desktop-tag"],
 
