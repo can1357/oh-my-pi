@@ -296,11 +296,11 @@ if ($Source) {
 } elseif ($Binary) {
     Install-Binary
 } else {
-    # Default: use bun if available, otherwise binary
-    if (Test-BunInstalled) {
-        Assert-BunVersion $MinimumBunVersion
-        Install-ViaBun
-    } else {
-        Install-Binary
+    # Default: install/validate bun (if needed) and use the npm package.
+    # Pass -Binary explicitly to always fetch the prebuilt binary instead.
+    if (-not (Test-BunInstalled)) {
+        Install-Bun
     }
+    Assert-BunVersion $MinimumBunVersion
+    Install-ViaBun
 }
