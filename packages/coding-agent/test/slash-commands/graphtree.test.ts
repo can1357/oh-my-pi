@@ -4,17 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { InteractiveModeContext } from "@pk-nerdsaver-ai/pi-coding-agent/modes/types";
 import { executeBuiltinSlashCommand } from "@pk-nerdsaver-ai/pi-coding-agent/slash-commands/builtin-registry";
-import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
-
-// Isolate every `git` invocation from the developer's host configuration, same
-// rationale as gh.test.ts: dozens of throwaway-repo git spawns must not pick up
-// `~/.gitconfig`, credential helpers, or commit signing.
-process.env.GIT_CONFIG_GLOBAL = "/dev/null";
-process.env.GIT_CONFIG_SYSTEM = "/dev/null";
-process.env.GIT_CONFIG_NOSYSTEM = "1";
-process.env.GIT_TERMINAL_PROMPT = "0";
-process.env.GIT_ASKPASS = "true";
-delete process.env.XDG_CONFIG_HOME;
+import * as piUtils from "@pk-nerdsaver-ai/pi-utils";
 
 function runGit(cwd: string, args: string[]): string {
 	const result = Bun.spawnSync(["git", ...args], {
@@ -23,6 +13,11 @@ function runGit(cwd: string, args: string[]): string {
 		stderr: "pipe",
 		env: {
 			...process.env,
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			GIT_CONFIG_SYSTEM: "/dev/null",
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_TERMINAL_PROMPT: "0",
+			GIT_ASKPASS: "true",
 			GIT_AUTHOR_NAME: "Test User",
 			GIT_AUTHOR_EMAIL: "test@example.com",
 			GIT_COMMITTER_NAME: "Test User",
@@ -79,14 +74,11 @@ function lastStatusText(showStatus: ReturnType<typeof vi.fn>): string {
  */
 async function setupWorktreeBase(): Promise<{ base: string; cleanup: () => Promise<void> }> {
 	const base = await fs.mkdtemp(path.join(os.tmpdir(), "graphtree-wtbase-"));
-	const previous = process.env.OMP_WORKTREE_DIR;
-	process.env.OMP_WORKTREE_DIR = base;
+	vi.spyOn(piUtils, "getWorktreeDir").mockImplementation(name => path.join(base, name));
 	return {
 		base,
 		cleanup: async () => {
-			if (previous === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = previous;
-			await removeWithRetries(base);
+			await piUtils.removeWithRetries(base);
 		},
 	};
 }
@@ -102,13 +94,13 @@ afterEach(async () => {
 	}
 	while (tempDirs.length) {
 		const dir = tempDirs.pop();
-		if (dir) await removeWithRetries(dir);
+		if (dir) await piUtils.removeWithRetries(dir);
 	}
 });
 
 describe("/graphtree slash command", () => {
 	it("renders graph tree status output", async () => {
-		const { base, cleanup } = await setupWorktreeBase();
+		const { cleanup } = await setupWorktreeBase();
 		cleanups.push(cleanup);
 		const repoRoot = await createTempRepo("graphtree-status", "main");
 		tempDirs.push(repoRoot);
@@ -117,11 +109,33 @@ describe("/graphtree slash command", () => {
 		await executeBuiltinSlashCommand("/graphtree", runtime);
 		expect(showStatus).toHaveBeenCalled();
 		expect(lastStatusText(showStatus)).toContain("Fractal GraphTree Workflows");
-		void base;
+	});
+
+	it("reports a friendly error outside a Git repository", async () => {
+		const nonRepo = await fs.mkdtemp(path.join(os.tmpdir(), "graphtree-nonrepo-"));
+		tempDirs.push(nonRepo);
+
+		const { runtime, showStatus } = createHarness(nonRepo);
+		await executeBuiltinSlashCommand("/graphtree status", runtime);
+		expect(lastStatusText(showStatus)).toContain("requires a Git repository");
+	});
+
+	it("identifies a detached root instead of fabricating the main branch", async () => {
+		const { cleanup } = await setupWorktreeBase();
+		cleanups.push(cleanup);
+		const repoRoot = await createTempRepo("graphtree-detached", "main");
+		tempDirs.push(repoRoot);
+		runGit(repoRoot, ["checkout", "--detach", "HEAD"]);
+
+		const { runtime, showStatus } = createHarness(repoRoot);
+		await executeBuiltinSlashCommand("/graphtree status", runtime);
+		const outputText = lastStatusText(showStatus);
+		expect(outputText).toContain("detached@");
+		expect(outputText).not.toContain("branch: main");
 	});
 
 	it("renders help output on /graphtree help", async () => {
-		const { base, cleanup } = await setupWorktreeBase();
+		const { cleanup } = await setupWorktreeBase();
 		cleanups.push(cleanup);
 		const repoRoot = await createTempRepo("graphtree-help", "main");
 		tempDirs.push(repoRoot);
@@ -135,7 +149,7 @@ describe("/graphtree slash command", () => {
 	});
 
 	it("returns a prompt object for multi-agent execution on /graphtree run", async () => {
-		const { base, cleanup } = await setupWorktreeBase();
+		const { cleanup } = await setupWorktreeBase();
 		cleanups.push(cleanup);
 		const repoRoot = await createTempRepo("graphtree-run", "main");
 		tempDirs.push(repoRoot);
@@ -189,6 +203,11 @@ describe("/graphtree slash command", () => {
 		expect(worktreesBefore()).toBe(initialWorktrees);
 		await expect(fs.access(path.join(base, "..", "escape"))).rejects.toThrow();
 
+		const { runtime: runtimeFlag, showStatus: statusFlag } = createHarness(repoRoot);
+		await executeBuiltinSlashCommand("/graphtree init flag-node -u", runtimeFlag);
+		expect(lastStatusText(statusFlag)).toContain("Failed to create branch");
+		expect(worktreesBefore()).toBe(initialWorktrees);
+
 		const { runtime: runtimeValid, showStatus: statusValid } = createHarness(repoRoot);
 		await executeBuiltinSlashCommand("/graphtree init valid-node", runtimeValid);
 		expect(lastStatusText(statusValid)).not.toMatch(/invalid|reject|not allowed/i);
@@ -237,7 +256,7 @@ describe("/graphtree slash command", () => {
 		expect(mergeOutput).not.toMatch(/failed/i);
 
 		const markerContent = await fs.readFile(path.join(repoRoot, "marker.txt"), "utf8");
-		expect(markerContent).toBe("from custom branch\n");
+		expect(markerContent.trim()).toBe("from custom branch");
 	});
 
 	it("prune requires a node, refuses a dirty node without deleting it, and removes a clean named node", async () => {
@@ -269,7 +288,7 @@ describe("/graphtree slash command", () => {
 		await executeBuiltinSlashCommand("/graphtree prune dirty-node", pruneDirtyRuntime);
 		expect(lastStatusText(pruneDirtyStatus).toLowerCase()).toMatch(/dirty|uncommitted|refus/);
 		// The refusal must not delete the worktree.
-		await expect(fs.access(dirtyWorktreePath)).resolves.toBeUndefined();
+		expect((await fs.stat(dirtyWorktreePath)).isDirectory()).toBe(true);
 		expect(runGit(repoRoot, ["worktree", "list", "--porcelain"])).toContain("dirty-node");
 
 		// Clean node: init, then remove with no pending changes.

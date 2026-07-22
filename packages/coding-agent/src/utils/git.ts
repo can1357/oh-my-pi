@@ -1247,7 +1247,7 @@ export const branch = {
 
 	/** Create a new branch at the given start point. */
 	async create(cwd: string, name: string, startPoint = "HEAD", signal?: AbortSignal): Promise<void> {
-		await runEffect(cwd, ["branch", name, startPoint], { signal });
+		await runEffect(cwd, ["branch", "--", name, startPoint], { signal });
 	},
 
 	/** Force-move a branch to a new start point. */

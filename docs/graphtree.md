@@ -26,13 +26,13 @@ any outcome beyond what the model does with the prompt it's handed.
 | `/graphtree init <name> [branch]` | Create a new worktree node under the worktrees directory. Without an explicit branch, the node is created on `graphtree/<name>`; pass a second argument to use a custom branch name instead. |
 | `/graphtree run <objective>` | Return a static, prompt-driven plan: decompose the objective, create worktree nodes as needed, spawn subagents, and reduce the results back into the root. This only shapes what the model attempts next turn — it is not a guarantee of parallel execution, isolation, or success. |
 | `/graphtree merge <name>` | Squash-merge the node's branch into the current `HEAD`. This stages the combined changes in the working tree for you to review and commit — it does not commit on your behalf. |
-| `/graphtree prune` / `/graphtree cleanup` | Remove finished worktree nodes. Cleanup refuses to force-delete a worktree that has uncommitted or unnamed state; clean up or commit inside the node first. |
+| `/graphtree prune <name>` / `/graphtree cleanup <name>` | Remove one named, clean worktree node. With no name, print usage and candidates without removing anything. Cleanup refuses to force-delete a worktree that has uncommitted state; clean up or commit inside the node first. |
 | `/graphtree help` | Show the command list. |
 
 ## Aliases
 
 `/graphtree` with no subcommand is an alias for `/graphtree status`.
-`/graphtree cleanup` is an alias for `/graphtree prune`.
+`/graphtree cleanup <name>` is an alias for `/graphtree prune <name>`.
 `/graphtree tree` is an alias for `/graphtree status`.
 
 ## Lifecycle
@@ -44,10 +44,10 @@ any outcome beyond what the model does with the prompt it's handed.
 3. Once a node's work is done and committed, `/graphtree merge <name>`
    squash-merges its branch into the current `HEAD` as staged changes —
    review and commit as you would any other staged diff.
-4. `/graphtree prune` removes worktree nodes once you're done with them. A
-   node with uncommitted changes is left in place rather than force-deleted;
+4. `/graphtree prune <name>` removes a worktree node once you're done with it.
+   A node with uncommitted changes is left in place rather than force-deleted;
    commit, stash, or discard the changes inside the node first, then prune
-   again.
+   that named node again.
 
 ## Repository scoping
 

@@ -144,10 +144,10 @@ function Configure-BashShell {
 
             # Write settings
             $settings | ConvertTo-Json -Depth 10 | Set-Content $settingsFile -Encoding UTF8
-            Write-Host "✓ Configured shell path in $settingsFile" -ForegroundColor Green
+            Write-Host "[OK] Configured shell path in $settingsFile" -ForegroundColor Green
         } else {
             Write-Host ""
-            Write-Host "⚠ No bash shell found!" -ForegroundColor Yellow
+            Write-Host "[WARN] No bash shell found!" -ForegroundColor Yellow
             Write-Host "  oh-my-pk requires a bash shell on Windows. Options:" -ForegroundColor Yellow
             Write-Host "    1. Install Git for Windows: https://git-scm.com/download/win" -ForegroundColor Yellow
             Write-Host "    2. Use WSL, Cygwin, or MSYS2" -ForegroundColor Yellow
@@ -157,7 +157,7 @@ function Configure-BashShell {
             Write-Host '    { "shellPath": "C:\\path\\to\\bash.exe" }' -ForegroundColor Yellow
         }
     } catch {
-        Write-Host "⚠ Could not configure bash shell: $_" -ForegroundColor Yellow
+        Write-Host "[WARN] Could not configure bash shell: $_" -ForegroundColor Yellow
     }
 }
 
@@ -229,7 +229,7 @@ function Install-ViaBun {
     }
 
     Write-Host ""
-    Write-Host "✓ Installed oh-my-pk via bun" -ForegroundColor Green
+    Write-Host "[OK] Installed oh-my-pk via bun" -ForegroundColor Green
 
     Configure-BashShell
 
@@ -263,7 +263,7 @@ function Install-Binary {
     Copy-Item -Path $OutPath -Destination (Join-Path $InstallDir "ompk.exe") -Force
 
     Write-Host ""
-    Write-Host "✓ Installed oh-my-pk to $OutPath (aliases: omp.exe, ompk.exe)" -ForegroundColor Green
+    Write-Host "[OK] Installed oh-my-pk to $OutPath (aliases: omp.exe, ompk.exe)" -ForegroundColor Green
 
     # Add to PATH if not already there
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")

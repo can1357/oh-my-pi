@@ -1,8 +1,8 @@
 import * as path from "node:path";
 import { getWorktreeDir, hashPath, prompt } from "@pk-nerdsaver-ai/pi-utils";
 import { $ } from "bun";
-import * as git from "../../utils/git";
 import { PREVIEW_LIMITS, replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
+import * as git from "../../utils/git";
 import { commandConsumed, parseSubcommand } from "../helpers/parse";
 import type { SlashCommandResult, SlashCommandRuntime, TuiSlashCommandRuntime } from "../types";
 import graphtreeRunTemplate from "./graphtree-run.md" with { type: "text" };
@@ -52,7 +52,8 @@ function branchFromRef(ref: string | undefined): string | undefined {
 async function getGraphTreeNodes(cwd: string, signal?: AbortSignal): Promise<GraphTreeNode[]> {
 	const nodes: GraphTreeNode[] = [];
 
-	const rootBranch = (await git.branch.current(cwd, signal)) ?? "main";
+	const currentBranch = await git.branch.current(cwd, signal);
+	const rootBranch = currentBranch ?? `detached@${(await git.head.short(cwd, 7, signal)) ?? "unknown"}`;
 	nodes.push({
 		id: "root",
 		name: "root",
@@ -118,7 +119,9 @@ function renderAsciiGraphTree(nodes: GraphTreeNode[]): string {
 			const statusColor = child.status === "active" ? "\x1b[33m" : "\x1b[90m";
 			const branchInfo = child.branch ? ` \x1b[2m(${child.branch})\x1b[0m` : "";
 			const shortPath = child.worktreePath ? shortenPath(child.worktreePath) : "N/A";
-			lines.push(truncateLine(`${prefix}${statusColor}◆ ${child.name}\x1b[0m${branchInfo} \x1b[2m[${shortPath}]\x1b[0m`));
+			lines.push(
+				truncateLine(`${prefix}${statusColor}◆ ${child.name}\x1b[0m${branchInfo} \x1b[2m[${shortPath}]\x1b[0m`),
+			);
 		});
 		if (children.length > shown.length) {
 			lines.push(`  └── \x1b[2m(+${children.length - shown.length} more; use /graphtree list to see all)\x1b[0m`);
@@ -137,8 +140,16 @@ async function runGraphtreeCommand(
 	runtime: SlashCommandRuntime | TuiSlashCommandRuntime,
 	output: (text: string) => Promise<void> | void,
 ): Promise<SlashCommandResult> {
-	const cwd = "sessionManager" in runtime ? runtime.sessionManager.getCwd() : runtime.ctx.sessionManager.getCwd();
+	const sessionCwd =
+		"sessionManager" in runtime ? runtime.sessionManager.getCwd() : runtime.ctx.sessionManager.getCwd();
 	const { verb, rest } = parseSubcommand(args);
+	const requiresRepository = new Set(["", "status", "tree", "list", "init", "run", "merge", "prune", "cleanup"]);
+	const repoRoot = requiresRepository.has(verb) ? await git.repo.root(sessionCwd) : sessionCwd;
+	if (!repoRoot) {
+		await output("GraphTree requires a Git repository. Start a session inside a repository and try again.");
+		return commandConsumed();
+	}
+	const cwd = repoRoot;
 
 	switch (verb) {
 		case "":
@@ -154,7 +165,9 @@ async function runGraphtreeCommand(
 			const lines = ["Active GraphTree Worktree Nodes:"];
 			for (const node of nodes) {
 				const shortPath = node.worktreePath ? shortenPath(node.worktreePath) : "N/A";
-				lines.push(truncateLine(`- ${node.name} (${node.kind}): branch=${node.branch ?? "N/A"}, path=${shortPath}`));
+				lines.push(
+					truncateLine(`- ${node.name} (${node.kind}): branch=${node.branch ?? "N/A"}, path=${shortPath}`),
+				);
 			}
 			await output(lines.join("\n"));
 			return commandConsumed();
@@ -173,7 +186,8 @@ async function runGraphtreeCommand(
 				return commandConsumed();
 			}
 
-			const segment = `${NODE_PREFIX}-${hashPath(cwd)}-${name}`;
+			const repositoryIdentity = (await git.repo.primaryRoot(cwd)) ?? cwd;
+			const segment = `${NODE_PREFIX}-${hashPath(repositoryIdentity)}-${name}`;
 			const wtDir = getWorktreeDir(segment);
 			const branchName = customBranch ?? `graphtree/${name}`;
 
@@ -244,7 +258,9 @@ async function runGraphtreeCommand(
 
 			if (!nodeName) {
 				if (nodes.length === 0) {
-					await output("Usage: /graphtree prune <node-name>\nNo GraphTree worktree nodes are currently registered.");
+					await output(
+						"Usage: /graphtree prune <node-name>\nNo GraphTree worktree nodes are currently registered.",
+					);
 				} else {
 					const candidates = nodes.map(n => `  - ${n.name}${n.status === "active" ? " (dirty)" : ""}`).join("\n");
 					await output(`Usage: /graphtree prune <node-name>\nCandidates:\n${candidates}`);

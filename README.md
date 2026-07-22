@@ -502,9 +502,10 @@ and reducing the results — it does not itself guarantee parallel
 execution or correctness, only orchestrates the prompt; `/graphtree merge
 <name>` squash-merges a node's branch into `HEAD`, staging the combined
 changes for your review rather than committing them outright; and
-`/graphtree prune` cleans up finished worktree nodes, refusing to
-force-delete worktrees with uncommitted changes. Node operations are
-scoped to worktrees under the current repository. See
+`/graphtree prune <name>` removes one finished worktree node, while bare
+`/graphtree prune` only lists candidates; cleanup refuses to force-delete
+worktrees with uncommitted changes. Node operations are scoped to worktrees
+under the current repository. See
 [`docs/graphtree.md`](docs/graphtree.md) for the full command reference
 and lifecycle details.
 
