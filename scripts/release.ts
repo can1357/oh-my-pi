@@ -239,7 +239,11 @@ async function cmdRelease(version: string): Promise<void> {
 		if (pkgJson.name) publicPkgNames.push(pkgJson.name);
 	}
 
-	await $`sd '"version": "[^"]+"' ${`"version": "${version}"`} ${publicPkgPaths}`;
+	for (const pkgPath of publicPkgPaths) {
+		const text = await Bun.file(pkgPath).text();
+		const updated = text.replace(/"version":\s*"[^"]+"/, `"version": "${version}"`);
+		await Bun.write(pkgPath, updated);
+	}
 
 	// Verify
 	console.log("  Verifying versions:");
@@ -262,7 +266,9 @@ async function cmdRelease(version: string): Promise<void> {
 
 	// 3. Update Rust workspace version
 	console.log(`Updating Rust workspace version to ${version}…`);
-	await $`sd '^version = "[^"]+"' ${`version = "${version}"`} Cargo.toml`;
+	let cargoTomlRaw = await Bun.file("Cargo.toml").text();
+	cargoTomlRaw = cargoTomlRaw.replace(/^version = "[^"]+"/m, `version = "${version}"`);
+	await Bun.write("Cargo.toml", cargoTomlRaw);
 
 	// Verify
 	const cargoToml = await Bun.file("Cargo.toml").text();
@@ -299,7 +305,11 @@ async function cmdRelease(version: string): Promise<void> {
 		"packages/natives/native/index.d.ts",
 		"packages/natives/native/index.js",
 	];
-	await $`sd '__piNativesV[A-Za-z0-9_]+' ${sentinelName} ${sentinelFiles}`;
+	for (const file of sentinelFiles) {
+		const text = await Bun.file(file).text();
+		const updated = text.replace(/__piNativesV[A-Za-z0-9_]+/g, sentinelName);
+		await Bun.write(file, updated);
+	}
 	const libRs = await Bun.file("crates/pi-natives/src/lib.rs").text();
 	if (!libRs.includes(`js_name = "${sentinelName}"`)) {
 		console.error(
@@ -314,7 +324,7 @@ async function cmdRelease(version: string): Promise<void> {
 	console.log("Regenerating lockfiles...");
 	await $`rm -f bun.lock`;
 	await $`bun install`;
-	await $`cargo generate-lockfile`;
+	await $`cargo check --offline`;
 	console.log();
 
 	// 5. Update changelogs
