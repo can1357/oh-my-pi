@@ -1,9 +1,18 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getWorktreesDir, isEnoent } from "@pk-nerdsaver-ai/pi-utils";
+import { getWorktreeDir, hashPath, prompt } from "@pk-nerdsaver-ai/pi-utils";
 import { $ } from "bun";
+import * as git from "../../utils/git";
+import { PREVIEW_LIMITS, replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { commandConsumed, parseSubcommand } from "../helpers/parse";
 import type { SlashCommandResult, SlashCommandRuntime, TuiSlashCommandRuntime } from "../types";
+import graphtreeRunTemplate from "./graphtree-run.md" with { type: "text" };
+
+const NODE_PREFIX = "graphtree";
+/** A short, filesystem-safe single path segment (no separators, no leading dot). */
+const NODE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+const NEW_FORMAT_RE = /^graphtree-[0-9a-f]{7}-(.+)$/;
+const LEGACY_FORMAT_RE = /^graphtree-(.+)$/;
+const LOCAL_BRANCH_PREFIX = "refs/heads/";
 
 export interface GraphTreeNode {
 	id: string;
@@ -14,18 +23,36 @@ export interface GraphTreeNode {
 	status: "active" | "idle" | "merged" | "stale";
 }
 
-async function getGraphTreeNodes(cwd: string): Promise<GraphTreeNode[]> {
+function isValidNodeName(name: string): boolean {
+	return NODE_NAME_RE.test(name);
+}
+
+function parseNodeName(dirName: string): string | undefined {
+	const newFormat = NEW_FORMAT_RE.exec(dirName);
+	if (newFormat) return newFormat[1];
+	const legacy = LEGACY_FORMAT_RE.exec(dirName);
+	return legacy?.[1];
+}
+
+function branchFromRef(ref: string | undefined): string | undefined {
+	if (!ref) return undefined;
+	return ref.startsWith(LOCAL_BRANCH_PREFIX) ? ref.slice(LOCAL_BRANCH_PREFIX.length) : ref;
+}
+
+/**
+ * Discover this feature's worktree nodes for the current repository.
+ *
+ * `git.worktree.list` is inherently repository-scoped (it reads the current
+ * repo's `.git/worktrees` registrations), so every entry it returns already
+ * belongs to this repository — there is no cross-repository leakage to guard
+ * against here. We only need to recognize which entries are GraphTree nodes
+ * (by directory-name convention) and resolve their real branch from the
+ * entry itself rather than reconstructing it.
+ */
+async function getGraphTreeNodes(cwd: string, signal?: AbortSignal): Promise<GraphTreeNode[]> {
 	const nodes: GraphTreeNode[] = [];
 
-	// Add root node
-	let rootBranch = "main";
-	try {
-		const currentBranch = await $`git branch --show-current`.cwd(cwd).text();
-		if (currentBranch.trim()) rootBranch = currentBranch.trim();
-	} catch {
-		// Ignore git branch error
-	}
-
+	const rootBranch = (await git.branch.current(cwd, signal)) ?? "main";
 	nodes.push({
 		id: "root",
 		name: "root",
@@ -35,39 +62,36 @@ async function getGraphTreeNodes(cwd: string): Promise<GraphTreeNode[]> {
 		status: "active",
 	});
 
-	// Scan worktree directory (~/.omp/wt)
-	const wtBase = getWorktreesDir();
-	try {
-		const entries = await fs.readdir(wtBase, { withFileTypes: true });
-		for (const entry of entries) {
-			if (!entry.isDirectory()) continue;
-			const dirPath = path.join(wtBase, entry.name);
-			let branch: string | undefined;
+	const entries = await git.worktree.list(cwd, signal);
+	for (const entry of entries) {
+		if (!entry.path || path.resolve(entry.path) === path.resolve(cwd)) continue;
+		const dirName = path.basename(entry.path);
+		const name = parseNodeName(dirName);
+		if (!name) continue;
 
-			try {
-				const headContent = await fs.readFile(path.join(dirPath, "HEAD"), "utf8");
-				const match = headContent.match(/^ref: refs\/heads\/(.+)$/m);
-				if (match) branch = match[1].trim();
-			} catch {
-				// Search .git file or folder
-			}
+		let dirty = false;
+		try {
+			const summary = await git.status.summary(entry.path, signal);
+			dirty = (summary?.staged ?? 0) > 0 || (summary?.unstaged ?? 0) > 0 || (summary?.untracked ?? 0) > 0;
+		} catch {
+			// Worktree may be missing on disk (administrative entry only); leave dirty=false.
+		}
 
-			nodes.push({
-				id: entry.name,
-				name: entry.name.replace(/^graphtree-/, ""),
-				branch,
-				worktreePath: dirPath,
-				kind: "worktree-node",
-				status: "active",
-			});
-		}
-	} catch (err) {
-		if (!isEnoent(err)) {
-			// ignore directory scanning error if missing
-		}
+		nodes.push({
+			id: dirName,
+			name,
+			branch: branchFromRef(entry.branch),
+			worktreePath: entry.path,
+			kind: "worktree-node",
+			status: dirty ? "active" : "idle",
+		});
 	}
 
 	return nodes;
+}
+
+function truncateLine(text: string): string {
+	return truncateToWidth(replaceTabs(text), TRUNCATE_LENGTHS.LINE);
 }
 
 function renderAsciiGraphTree(nodes: GraphTreeNode[]): string {
@@ -77,23 +101,28 @@ function renderAsciiGraphTree(nodes: GraphTreeNode[]): string {
 		id: "root",
 		name: "root",
 		branch: "main",
-		kind: "root",
-		status: "active",
+		kind: "root" as const,
+		status: "active" as const,
 	};
 
-	lines.push(`\x1b[32m● ${root.name}\x1b[0m \x1b[2m(branch: ${root.branch ?? "main"})\x1b[0m [HEAD]`);
+	lines.push(truncateLine(`\x1b[32m● ${root.name}\x1b[0m \x1b[2m(branch: ${root.branch ?? "main"})\x1b[0m [HEAD]`));
 
 	const children = nodes.filter(n => n.kind !== "root");
 	if (children.length === 0) {
 		lines.push("  └── \x1b[2m(No child worktree nodes active. Initialize one with /graphtree init <name>)\x1b[0m");
 	} else {
-		children.forEach((child, index) => {
-			const isLast = index === children.length - 1;
+		const shown = children.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS);
+		shown.forEach((child, index) => {
+			const isLast = index === shown.length - 1 && shown.length === children.length;
 			const prefix = isLast ? "  └── " : "  ├── ";
 			const statusColor = child.status === "active" ? "\x1b[33m" : "\x1b[90m";
 			const branchInfo = child.branch ? ` \x1b[2m(${child.branch})\x1b[0m` : "";
-			lines.push(`${prefix}${statusColor}◆ ${child.name}\x1b[0m${branchInfo} \x1b[2m[${child.worktreePath}]\x1b[0m`);
+			const shortPath = child.worktreePath ? shortenPath(child.worktreePath) : "N/A";
+			lines.push(truncateLine(`${prefix}${statusColor}◆ ${child.name}\x1b[0m${branchInfo} \x1b[2m[${shortPath}]\x1b[0m`));
 		});
+		if (children.length > shown.length) {
+			lines.push(`  └── \x1b[2m(+${children.length - shown.length} more; use /graphtree list to see all)\x1b[0m`);
+		}
 	}
 
 	lines.push("");
@@ -124,9 +153,8 @@ async function runGraphtreeCommand(
 			const nodes = await getGraphTreeNodes(cwd);
 			const lines = ["Active GraphTree Worktree Nodes:"];
 			for (const node of nodes) {
-				lines.push(
-					`- ${node.name} (${node.kind}): branch=${node.branch ?? "N/A"}, path=${node.worktreePath ?? "N/A"}`,
-				);
+				const shortPath = node.worktreePath ? shortenPath(node.worktreePath) : "N/A";
+				lines.push(truncateLine(`- ${node.name} (${node.kind}): branch=${node.branch ?? "N/A"}, path=${shortPath}`));
 			}
 			await output(lines.join("\n"));
 			return commandConsumed();
@@ -138,15 +166,35 @@ async function runGraphtreeCommand(
 				return commandConsumed();
 			}
 			const [name, customBranch] = rest.split(/\s+/);
+			if (!name || !isValidNodeName(name)) {
+				await output(
+					`Invalid node name "${name ?? ""}". Node names must be a single filesystem-safe segment matching ${NODE_NAME_RE.source}.`,
+				);
+				return commandConsumed();
+			}
+
+			const segment = `${NODE_PREFIX}-${hashPath(cwd)}-${name}`;
+			const wtDir = getWorktreeDir(segment);
 			const branchName = customBranch ?? `graphtree/${name}`;
-			const wtDir = path.join(getWorktreesDir(), `graphtree-${name}`);
 
 			try {
-				await fs.mkdir(getWorktreesDir(), { recursive: true });
-				await $`git worktree add -b ${branchName} ${wtDir}`.cwd(cwd).text();
-				await output(`Created GraphTree worktree node "${name}" on branch "${branchName}".\nLocation: ${wtDir}`);
+				// Validate (and create) the branch through Git first — an invalid ref
+				// name fails here, before any worktree directory is touched.
+				await git.branch.create(cwd, branchName);
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
+				await output(`Failed to create branch "${branchName}" for node "${name}": ${msg}`);
+				return commandConsumed();
+			}
+
+			try {
+				await git.worktree.add(cwd, wtDir, branchName);
+				await output(
+					`Created GraphTree worktree node "${name}" on branch "${branchName}".\nLocation: ${shortenPath(wtDir)}`,
+				);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				await git.branch.tryDelete(cwd, branchName, { force: true });
 				await output(`Failed to initialize GraphTree node "${name}": ${msg}`);
 			}
 			return commandConsumed();
@@ -160,18 +208,7 @@ async function runGraphtreeCommand(
 				return commandConsumed();
 			}
 
-			const prompt = [
-				`[FRACTAL GRAPHTREE MULTI-AGENT WORKFLOW]`,
-				`Objective: ${rest}`,
-				``,
-				`Execute a Fractal tree-structured workflow:`,
-				`1. Plan: Decompose the objective into discrete, parallel task nodes (Plan -> Shard -> Map -> Reduce).`,
-				`2. Worktrees: Create isolated worktree nodes for independent modules/subtasks if necessary.`,
-				`3. Execute: Spawn parallel subagent tasks (using agentic-mapreduce or side-agent primitives).`,
-				`4. Reduce: Validate outcomes, clean up sub-nodes, and integrate results into main.`,
-			].join("\n");
-
-			return { prompt };
+			return { prompt: prompt.render(graphtreeRunTemplate, { objective: rest }) };
 		}
 
 		case "merge": {
@@ -180,11 +217,19 @@ async function runGraphtreeCommand(
 				return commandConsumed();
 			}
 			const nodeName = rest.trim();
-			const branchName = `graphtree/${nodeName}`;
+			const nodes = await getGraphTreeNodes(cwd);
+			const node = nodes.find(n => n.kind === "worktree-node" && n.name === nodeName);
+			if (!node?.branch) {
+				await output(`No GraphTree node named "${nodeName}" was found. Use /graphtree list to see active nodes.`);
+				return commandConsumed();
+			}
 
 			try {
-				await $`git merge --squash ${branchName}`.cwd(cwd).text();
-				await output(`Squash-merged GraphTree node branch "${branchName}" into HEAD.`);
+				await $`git merge --squash ${node.branch}`.cwd(cwd).text();
+				await output(
+					`Squash-merged GraphTree node "${nodeName}" (branch "${node.branch}") into HEAD.\n` +
+						"Changes are staged in the working tree for review — commit them to finalize the merge.",
+				);
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				await output(`Failed to merge GraphTree node "${nodeName}": ${msg}`);
@@ -194,24 +239,37 @@ async function runGraphtreeCommand(
 
 		case "prune":
 		case "cleanup": {
-			const wtBase = getWorktreesDir();
-			let pruned = 0;
-			try {
-				const entries = await fs.readdir(wtBase);
-				for (const entry of entries) {
-					if (!entry.startsWith("graphtree-")) continue;
-					const targetPath = path.join(wtBase, entry);
-					try {
-						await $`git worktree remove --force ${targetPath}`.cwd(cwd).text();
-					} catch {
-						await fs.rm(targetPath, { recursive: true, force: true });
-					}
-					pruned++;
+			const nodes = (await getGraphTreeNodes(cwd)).filter(n => n.kind === "worktree-node");
+			const nodeName = rest.trim();
+
+			if (!nodeName) {
+				if (nodes.length === 0) {
+					await output("Usage: /graphtree prune <node-name>\nNo GraphTree worktree nodes are currently registered.");
+				} else {
+					const candidates = nodes.map(n => `  - ${n.name}${n.status === "active" ? " (dirty)" : ""}`).join("\n");
+					await output(`Usage: /graphtree prune <node-name>\nCandidates:\n${candidates}`);
 				}
-				await output(`Pruned ${pruned} GraphTree worktree node(s).`);
+				return commandConsumed();
+			}
+
+			const node = nodes.find(n => n.name === nodeName);
+			if (!node?.worktreePath) {
+				await output(`No GraphTree node named "${nodeName}" was found. Use /graphtree list to see active nodes.`);
+				return commandConsumed();
+			}
+			if (node.status === "active") {
+				await output(
+					`Refusing to prune GraphTree node "${nodeName}": it has uncommitted changes. Commit, stash, or discard them first.`,
+				);
+				return commandConsumed();
+			}
+
+			try {
+				await git.worktree.remove(cwd, node.worktreePath, { force: false });
+				await output(`Pruned GraphTree worktree node "${nodeName}".`);
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
-				await output(`Failed to prune GraphTree nodes: ${msg}`);
+				await output(`Failed to prune GraphTree node "${nodeName}": ${msg}`);
 			}
 			return commandConsumed();
 		}
@@ -224,8 +282,8 @@ async function runGraphtreeCommand(
 				"  /graphtree list                        List details of active GraphTree nodes",
 				"  /graphtree init <name> [branch]        Initialize an isolated GraphTree worktree node",
 				"  /graphtree run <objective>             Launch a Fractal multi-agent tree execution plan",
-				"  /graphtree merge <name>                Squash-merge a completed GraphTree node into HEAD",
-				"  /graphtree prune                       Clean up finished GraphTree worktree nodes",
+				"  /graphtree merge <name>                Squash-merge a completed GraphTree node into HEAD (stages, does not commit)",
+				"  /graphtree prune [name]                Remove a clean, named GraphTree worktree node (no arg: list candidates)",
 				"  /graphtree help                        Show this help guide",
 			].join("\n");
 			await output(helpText);
