@@ -1,11 +1,58 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { InteractiveModeContext } from "@pk-nerdsaver-ai/pi-coding-agent/modes/types";
 import { executeBuiltinSlashCommand } from "@pk-nerdsaver-ai/pi-coding-agent/slash-commands/builtin-registry";
+import { removeWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 
-function createHarness() {
+// Isolate every `git` invocation from the developer's host configuration, same
+// rationale as gh.test.ts: dozens of throwaway-repo git spawns must not pick up
+// `~/.gitconfig`, credential helpers, or commit signing.
+process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+process.env.GIT_CONFIG_SYSTEM = "/dev/null";
+process.env.GIT_CONFIG_NOSYSTEM = "1";
+process.env.GIT_TERMINAL_PROMPT = "0";
+process.env.GIT_ASKPASS = "true";
+delete process.env.XDG_CONFIG_HOME;
+
+function runGit(cwd: string, args: string[]): string {
+	const result = Bun.spawnSync(["git", ...args], {
+		cwd,
+		stdout: "pipe",
+		stderr: "pipe",
+		env: {
+			...process.env,
+			GIT_AUTHOR_NAME: "Test User",
+			GIT_AUTHOR_EMAIL: "test@example.com",
+			GIT_COMMITTER_NAME: "Test User",
+			GIT_COMMITTER_EMAIL: "test@example.com",
+		},
+	});
+	if (result.exitCode !== 0) {
+		const stderr = new TextDecoder().decode(result.stderr).trim();
+		const stdout = new TextDecoder().decode(result.stdout).trim();
+		const detail = stderr || stdout || `exit code ${result.exitCode}`;
+		throw new Error(`git ${args.join(" ")} failed: ${detail}`);
+	}
+	return new TextDecoder().decode(result.stdout).trim();
+}
+
+async function createTempRepo(prefix: string, branch: string): Promise<string> {
+	const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-`));
+	runGit(repoRoot, ["init", "-b", branch, repoRoot]);
+	runGit(repoRoot, ["config", "user.name", "Test User"]);
+	runGit(repoRoot, ["config", "user.email", "test@example.com"]);
+	await fs.writeFile(path.join(repoRoot, "README.md"), "base\n");
+	runGit(repoRoot, ["add", "README.md"]);
+	runGit(repoRoot, ["commit", "-m", "base commit"]);
+	return repoRoot;
+}
+
+function createHarness(cwd: string) {
 	const showStatus = vi.fn();
 	const setText = vi.fn();
-	const getCwd = vi.fn(() => process.cwd());
+	const getCwd = vi.fn(() => cwd);
 
 	const ctx = {
 		collabGuest: false,
@@ -18,31 +65,231 @@ function createHarness() {
 	return { runtime: { ctx }, showStatus, setText };
 }
 
+function lastStatusText(showStatus: ReturnType<typeof vi.fn>): string {
+	const call = showStatus.mock.calls.at(-1);
+	if (!call) throw new Error("showStatus was never called");
+	return call[0] as string;
+}
+
+/**
+ * `getWorktreesDir()` resolves `OMP_WORKTREE_DIR` first, ahead of any on-disk
+ * default or override, so pointing it at a per-test temp dir is sufficient to
+ * isolate every graphtree worktree operation from the developer's real
+ * `~/.omp/wt` without touching internal resolver state.
+ */
+async function setupWorktreeBase(): Promise<{ base: string; cleanup: () => Promise<void> }> {
+	const base = await fs.mkdtemp(path.join(os.tmpdir(), "graphtree-wtbase-"));
+	const previous = process.env.OMP_WORKTREE_DIR;
+	process.env.OMP_WORKTREE_DIR = base;
+	return {
+		base,
+		cleanup: async () => {
+			if (previous === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = previous;
+			await removeWithRetries(base);
+		},
+	};
+}
+
+const tempDirs: string[] = [];
+const cleanups: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+	vi.restoreAllMocks();
+	while (cleanups.length) {
+		const cleanup = cleanups.pop();
+		if (cleanup) await cleanup();
+	}
+	while (tempDirs.length) {
+		const dir = tempDirs.pop();
+		if (dir) await removeWithRetries(dir);
+	}
+});
+
 describe("/graphtree slash command", () => {
 	it("renders graph tree status output", async () => {
-		const { runtime, showStatus } = createHarness();
+		const { base, cleanup } = await setupWorktreeBase();
+		cleanups.push(cleanup);
+		const repoRoot = await createTempRepo("graphtree-status", "main");
+		tempDirs.push(repoRoot);
+
+		const { runtime, showStatus } = createHarness(repoRoot);
 		await executeBuiltinSlashCommand("/graphtree", runtime);
 		expect(showStatus).toHaveBeenCalled();
-		const outputText = showStatus.mock.calls[0][0];
-		expect(outputText).toContain("Fractal GraphTree Workflows");
+		expect(lastStatusText(showStatus)).toContain("Fractal GraphTree Workflows");
+		void base;
 	});
 
 	it("renders help output on /graphtree help", async () => {
-		const { runtime, showStatus } = createHarness();
+		const { base, cleanup } = await setupWorktreeBase();
+		cleanups.push(cleanup);
+		const repoRoot = await createTempRepo("graphtree-help", "main");
+		tempDirs.push(repoRoot);
+
+		const { runtime, showStatus } = createHarness(repoRoot);
 		await executeBuiltinSlashCommand("/graphtree help", runtime);
-		expect(showStatus).toHaveBeenCalled();
-		const outputText = showStatus.mock.calls[0][0];
+		const outputText = lastStatusText(showStatus);
 		expect(outputText).toContain("Fractal GraphTree Workflow Commands:");
 		expect(outputText).toContain("/graphtree init");
 		expect(outputText).toContain("/graphtree run");
 	});
 
 	it("returns a prompt object for multi-agent execution on /graphtree run", async () => {
-		const { runtime } = createHarness();
+		const { base, cleanup } = await setupWorktreeBase();
+		cleanups.push(cleanup);
+		const repoRoot = await createTempRepo("graphtree-run", "main");
+		tempDirs.push(repoRoot);
+
+		const { runtime } = createHarness(repoRoot);
 		const result = await executeBuiltinSlashCommand("/graphtree run refactor system authentication", runtime);
 		expect(result).toBeDefined();
 		expect(typeof result).toBe("string");
 		expect(result).toContain("FRACTAL GRAPHTREE MULTI-AGENT WORKFLOW");
 		expect(result).toContain("refactor system authentication");
+	});
+
+	it("status excludes another repository's managed worktree and displays the actual branch", async () => {
+		const { cleanup } = await setupWorktreeBase();
+		cleanups.push(cleanup);
+
+		const repoA = await createTempRepo("graphtree-repoa", "main");
+		const repoB = await createTempRepo("graphtree-repob", "main");
+		tempDirs.push(repoA, repoB);
+		runGit(repoB, ["checkout", "-b", "feature/observed-branch"]);
+
+		// Create a worktree node owned by repo A under the shared worktree base.
+		const { runtime: runtimeA } = createHarness(repoA);
+		await executeBuiltinSlashCommand("/graphtree init foreign-node", runtimeA);
+
+		// Query status scoped to repo B; repo A's node must not leak into it.
+		const { runtime: runtimeB, showStatus } = createHarness(repoB);
+		await executeBuiltinSlashCommand("/graphtree status", runtimeB);
+		const outputText = lastStatusText(showStatus);
+		expect(outputText).not.toContain("foreign-node");
+		expect(outputText).toContain("feature/observed-branch");
+	});
+
+	it("init rejects path separators and parent traversal, and creates a repo-qualified node for a valid name", async () => {
+		const { base, cleanup } = await setupWorktreeBase();
+		cleanups.push(cleanup);
+		const repoRoot = await createTempRepo("graphtree-init", "main");
+		tempDirs.push(repoRoot);
+
+		const worktreesBefore = () => runGit(repoRoot, ["worktree", "list", "--porcelain"]);
+		const initialWorktrees = worktreesBefore();
+
+		const { runtime: runtimeSlash, showStatus: statusSlash } = createHarness(repoRoot);
+		await executeBuiltinSlashCommand("/graphtree init foo/bar", runtimeSlash);
+		expect(lastStatusText(statusSlash).toLowerCase()).toMatch(/invalid|reject|not allowed/);
+		expect(worktreesBefore()).toBe(initialWorktrees);
+
+		const { runtime: runtimeDots, showStatus: statusDots } = createHarness(repoRoot);
+		await executeBuiltinSlashCommand("/graphtree init ../escape", runtimeDots);
+		expect(lastStatusText(statusDots).toLowerCase()).toMatch(/invalid|reject|not allowed/);
+		expect(worktreesBefore()).toBe(initialWorktrees);
+		await expect(fs.access(path.join(base, "..", "escape"))).rejects.toThrow();
+
+		const { runtime: runtimeValid, showStatus: statusValid } = createHarness(repoRoot);
+		await executeBuiltinSlashCommand("/graphtree init valid-node", runtimeValid);
+		expect(lastStatusText(statusValid)).not.toMatch(/invalid|reject|not allowed/i);
+		expect(worktreesBefore()).not.toBe(initialWorktrees);
+
+		// Repo-qualification: a second repo sharing the same worktree base can use
+		// the identical node name without colliding with repo A's worktree.
+		const repoOther = await createTempRepo("graphtree-init-other", "main");
+		tempDirs.push(repoOther);
+		const { runtime: runtimeOther, showStatus: statusOther } = createHarness(repoOther);
+		await executeBuiltinSlashCommand("/graphtree init valid-node", runtimeOther);
+		expect(lastStatusText(statusOther)).not.toMatch(/invalid|reject|not allowed/i);
+		expect(runGit(repoOther, ["worktree", "list", "--porcelain"])).not.toBe(initialWorktrees);
+	});
+
+	it("uses the custom branch passed to init when merging the node", async () => {
+		const { cleanup } = await setupWorktreeBase();
+		cleanups.push(cleanup);
+		const repoRoot = await createTempRepo("graphtree-merge", "main");
+		tempDirs.push(repoRoot);
+
+		const customBranch = "feature/custom-merge-target";
+		const { runtime: initRuntime, showStatus: initStatus } = createHarness(repoRoot);
+		await executeBuiltinSlashCommand(`/graphtree init merge-node ${customBranch}`, initRuntime);
+		const initOutput = lastStatusText(initStatus);
+		expect(initOutput).not.toMatch(/failed/i);
+
+		// Find the worktree checked out on the custom branch and commit a marker
+		// file there so a successful merge is independently observable.
+		const worktreeList = runGit(repoRoot, ["worktree", "list", "--porcelain"]);
+		const entries = worktreeList.split("\n\n").filter(Boolean);
+		const nodeEntry = entries.find(entry => entry.includes(`branch refs/heads/${customBranch}`));
+		expect(nodeEntry).toBeDefined();
+		const worktreePathLine = nodeEntry?.split("\n").find(line => line.startsWith("worktree "));
+		const nodeWorktreePath = worktreePathLine?.slice("worktree ".length).trim();
+		expect(nodeWorktreePath).toBeTruthy();
+		if (!nodeWorktreePath) throw new Error("unreachable: asserted above");
+
+		await fs.writeFile(path.join(nodeWorktreePath, "marker.txt"), "from custom branch\n");
+		runGit(nodeWorktreePath, ["add", "marker.txt"]);
+		runGit(nodeWorktreePath, ["commit", "-m", "marker commit on custom branch"]);
+
+		const { runtime: mergeRuntime, showStatus: mergeStatus } = createHarness(repoRoot);
+		await executeBuiltinSlashCommand("/graphtree merge merge-node", mergeRuntime);
+		const mergeOutput = lastStatusText(mergeStatus);
+		expect(mergeOutput).not.toMatch(/failed/i);
+
+		const markerContent = await fs.readFile(path.join(repoRoot, "marker.txt"), "utf8");
+		expect(markerContent).toBe("from custom branch\n");
+	});
+
+	it("prune requires a node, refuses a dirty node without deleting it, and removes a clean named node", async () => {
+		const { cleanup } = await setupWorktreeBase();
+		cleanups.push(cleanup);
+		const repoRoot = await createTempRepo("graphtree-prune", "main");
+		tempDirs.push(repoRoot);
+
+		const { runtime: noArgRuntime, showStatus: noArgStatus } = createHarness(repoRoot);
+		await executeBuiltinSlashCommand("/graphtree prune", noArgRuntime);
+		expect(lastStatusText(noArgStatus).toLowerCase()).toMatch(/usage|node name|required/);
+
+		// Dirty node: init, then leave an uncommitted change in its worktree.
+		const { runtime: dirtyInit } = createHarness(repoRoot);
+		await executeBuiltinSlashCommand("/graphtree init dirty-node", dirtyInit);
+		const dirtyWorktreeList = runGit(repoRoot, ["worktree", "list", "--porcelain"]);
+		const dirtyEntry = dirtyWorktreeList
+			.split("\n\n")
+			.filter(Boolean)
+			.find(entry => entry.includes("dirty-node"));
+		expect(dirtyEntry).toBeDefined();
+		const dirtyPathLine = dirtyEntry?.split("\n").find(line => line.startsWith("worktree "));
+		const dirtyWorktreePath = dirtyPathLine?.slice("worktree ".length).trim();
+		expect(dirtyWorktreePath).toBeTruthy();
+		if (!dirtyWorktreePath) throw new Error("unreachable: asserted above");
+		await fs.writeFile(path.join(dirtyWorktreePath, "uncommitted.txt"), "dirty\n");
+
+		const { runtime: pruneDirtyRuntime, showStatus: pruneDirtyStatus } = createHarness(repoRoot);
+		await executeBuiltinSlashCommand("/graphtree prune dirty-node", pruneDirtyRuntime);
+		expect(lastStatusText(pruneDirtyStatus).toLowerCase()).toMatch(/dirty|uncommitted|refus/);
+		// The refusal must not delete the worktree.
+		await expect(fs.access(dirtyWorktreePath)).resolves.toBeUndefined();
+		expect(runGit(repoRoot, ["worktree", "list", "--porcelain"])).toContain("dirty-node");
+
+		// Clean node: init, then remove with no pending changes.
+		const { runtime: cleanInit } = createHarness(repoRoot);
+		await executeBuiltinSlashCommand("/graphtree init clean-node", cleanInit);
+		const cleanWorktreeList = runGit(repoRoot, ["worktree", "list", "--porcelain"]);
+		const cleanEntry = cleanWorktreeList
+			.split("\n\n")
+			.filter(Boolean)
+			.find(entry => entry.includes("clean-node"));
+		expect(cleanEntry).toBeDefined();
+		const cleanPathLine = cleanEntry?.split("\n").find(line => line.startsWith("worktree "));
+		const cleanWorktreePath = cleanPathLine?.slice("worktree ".length).trim();
+		expect(cleanWorktreePath).toBeTruthy();
+		if (!cleanWorktreePath) throw new Error("unreachable: asserted above");
+
+		const { runtime: pruneCleanRuntime, showStatus: pruneCleanStatus } = createHarness(repoRoot);
+		await executeBuiltinSlashCommand("/graphtree prune clean-node", pruneCleanRuntime);
+		expect(lastStatusText(pruneCleanStatus).toLowerCase()).not.toMatch(/dirty|uncommitted|refus/);
+		await expect(fs.access(cleanWorktreePath)).rejects.toThrow();
+		expect(runGit(repoRoot, ["worktree", "list", "--porcelain"])).not.toContain("clean-node");
 	});
 });
