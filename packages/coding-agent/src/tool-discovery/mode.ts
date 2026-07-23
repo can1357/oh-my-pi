@@ -9,7 +9,9 @@ export const TOOL_DISCOVERY_AUTO_THRESHOLD = 40;
  * the estimated wire tokens of every registered tool schema cross this
  * budget (~8% of a 200K window).
  */
-export const TOOL_DISCOVERY_AUTO_SCHEMA_TOKENS = 16_000;
+/** Maximum active wire-schema spend after progressive discovery. */
+export const TOOL_DISCOVERY_SCHEMA_TOKEN_BUDGET = 16_000;
+export const TOOL_DISCOVERY_AUTO_SCHEMA_TOKENS = TOOL_DISCOVERY_SCHEMA_TOKEN_BUDGET;
 export const TOOL_DISCOVERY_SEARCH_TOOL_NAME = "search_tool_bm25";
 
 export type ToolDiscoveryModeSetting = SettingValue<"tools.discoveryMode">;

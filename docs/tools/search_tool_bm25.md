@@ -59,8 +59,8 @@
 
 ## Modes / Variants
 - Discovery-mode gating:
-  - `tools.discoveryMode = "auto"` (default): when the registered tool set has more than 40 tools, searches hidden MCP tools only; otherwise discovery stays off.
-  - `tools.discoveryMode = "all"`: searches hidden discoverable built-ins plus hidden MCP tools.
+  - `tools.discoveryMode = "auto"`: when the registered tool set has more than 40 tools or 16K estimated schema tokens, searches hidden MCP tools only; otherwise discovery stays off.
+  - `tools.discoveryMode = "all"` (default): searches hidden discoverable built-ins plus hidden MCP tools.
   - `tools.discoveryMode = "mcp-only"`: searches hidden MCP tools only.
   - legacy `mcp.discoveryMode = true`: same as MCP-only.
 - Search-index source:
@@ -73,7 +73,7 @@
 ## Side Effects
 - Session state
   - Adds matched tools to the active session tool set through `activateDiscoveredTools()` / `activateDiscoveredMCPTools()`.
-  - Updates discovered-tool selection state so repeated searches accumulate selections instead of replacing them.
+  - Keeps discovered tools active for the current user turn only. Repeated searches retain the newest useful selections while evicting older discoveries as needed to stay within the active schema budget.
   - Invalidates the cached discoverable search index when newly activated built-ins change the hidden corpus (`packages/coding-agent/src/session/agent-session.ts`).
   - Tool availability changes before the next model call in the same turn; the prompt text says this explicitly.
 - User-visible prompts / interactive UI
@@ -81,6 +81,7 @@
   - The TUI renderer shows ranked matches, but the model-visible text summary does not.
 
 ## Limits & Caps
+- Active wire-schema budget: `16,000` estimated tokens (`TOOL_DISCOVERY_SCHEMA_TOKEN_BUDGET`). New matches take priority; one individually oversized tool remains usable and replaces prior discoveries.
 - Default result cap: `8` (`DEFAULT_LIMIT` in `packages/coding-agent/src/tools/search-tool-bm25.ts`).
 - `limit` must be a positive integer; no tool-level upper bound beyond corpus size.
 - Renderer collapsed list cap: `5` (`COLLAPSED_MATCH_LIMIT`).
@@ -113,6 +114,6 @@
   - Built-in entries appear only in `"all"` mode and only for registry tools whose `loadMode === "discoverable"` and are not currently active.
   - Hidden/internal built-ins are intentionally excluded from the built-in corpus: `resolve`, `yield`, `report_finding`, `report_tool_issue` are called out in the `#collectDiscoverableBuiltinTools()` comment.
 - `DiscoverableToolSource` includes `"extension"` and `"custom"`, but `AgentSession.getDiscoverableTools()` currently assembles only built-in and MCP sources.
-- On startup, `packages/coding-agent/src/sdk.ts` resolves `"auto"` after the full registry exists and injects `search_tool_bm25` when the count exceeds 40. It hides non-essential discoverable built-ins only in `tools.discoveryMode = "all"`. Tools whose class is marked as `loadMode === "essential"` (defaults are `read`, `bash`, `edit`, `write`, and `glob`) are always active; they survive hiding regardless of configuration. `tools.essentialOverride` can be used to treat additional discoverable tools as essential (active on startup) or to explicitly specify the active essential list.
+- On startup, `packages/coding-agent/src/sdk.ts` resolves `"auto"` after the full registry exists and injects `search_tool_bm25` when the count exceeds 40 or the full registry exceeds 16K estimated schema tokens. It hides non-essential discoverable built-ins only in `tools.discoveryMode = "all"`. Tools whose class is marked as `loadMode === "essential"` (defaults are `read`, `bash`, `edit`, `write`, and `glob`) are always active; they survive hiding regardless of configuration. `tools.essentialOverride` can be used to treat additional discoverable tools as essential (active on startup) or to explicitly specify the active essential list.
 - Query tokenization is simple and deterministic: Unicode is NFKD-normalized, combining marks are dropped, acronym/camelCase and digit-to-capital boundaries are split, non-letter/non-number characters become spaces, tokens are lowercased, and only non-empty tokens survive.
 - Scores are rounded differently by surface: `details.tools[].score` keeps 6 decimals; the TUI line renders 3.

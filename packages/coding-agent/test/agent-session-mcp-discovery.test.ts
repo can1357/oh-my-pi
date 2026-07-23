@@ -16,6 +16,7 @@ import type { CustomTool } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/
 import { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
 import type { OutputMeta } from "@pk-nerdsaver-ai/pi-coding-agent/tools/output-meta";
+import { SearchToolBm25Tool } from "@pk-nerdsaver-ai/pi-coding-agent/tools/search-tool-bm25";
 import { resolveToolProfile } from "@pk-nerdsaver-ai/pi-coding-agent/tools/tool-profiles";
 import { removeSyncWithRetries } from "@pk-nerdsaver-ai/pi-utils";
 import { type } from "arktype";
@@ -475,6 +476,41 @@ describe("AgentSession MCP discovery", () => {
 		expect(session.getSelectedMCPToolNames()).toEqual(["mcp__docs_search", "mcp__slack_send_message"]);
 		expect(session.getActiveToolNames()).toEqual(["read", "mcp__docs_search", "mcp__slack_send_message"]);
 		expect(session.systemPrompt).toEqual(["tools:read,mcp__docs_search,mcp__slack_send_message"]);
+	});
+
+	it("bounds progressively discovered tool schemas while keeping the newest match usable", async () => {
+		const readTool = createBasicTool("read", "Read");
+		const oversizedDescription = "schema field ".repeat(20_000);
+		const firstTool = createMcpTool("mcp__large_first", "large", "first", oversizedDescription, ["query"]);
+		const secondTool = createMcpTool("mcp__large_second", "large", "second", oversizedDescription, ["query"]);
+		const toolRegistry = new Map([
+			[readTool.name, readTool],
+			[firstTool.name, firstTool],
+			[secondTool.name, secondTool],
+		]);
+		const agent = new Agent({
+			initialState: { model: createModel(), systemPrompt: ["initial"], tools: [readTool], messages: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.discoveryMode": "all", "mcp.discoveryMode": true }),
+			modelRegistry: {} as never,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async toolNames => ({ systemPrompt: [`tools:${toolNames.join(",")}`] }),
+		});
+		sessions.push(session);
+
+		const searchTool = new SearchToolBm25Tool(session);
+		const firstSearch = await searchTool.execute("first-search", { query: "large first", limit: 1 });
+		expect(firstSearch.details?.activated_tools).toEqual([firstTool.name]);
+		expect(session.getActiveToolNames()).toEqual(["read", firstTool.name]);
+
+		const secondSearch = await searchTool.execute("second-search", { query: "large second", limit: 1 });
+		expect(secondSearch.details?.activated_tools).toEqual([secondTool.name]);
+		expect(session.getActiveToolNames()).toEqual(["read", secondTool.name]);
+		expect(session.getDiscoverableTools({ source: "mcp" }).map(tool => tool.name)).toContain(firstTool.name);
 	});
 
 	it("does not persist search-activated MCP tools into future resumed context", async () => {

@@ -69,6 +69,7 @@
 
 ### Fixed
 - Fixed `search_tool_bm25` activations accumulating tool schemas across turns and persisting arbitrary search results into resumed sessions. Discovered tools now remain additive only within the current user turn; explicit tool selections and configured MCP defaults remain durable.
+- Fixed repeated `search_tool_bm25` calls within one turn growing active tool schemas without bound: newly matched tools now take priority under a 16K-token wire-schema budget, with oversized single tools still usable.
 - Fixed internal-URL autocomplete dropping the active project cwd and AST tools failing to resolve session-loaded `skill://` paths.
 - Fixed active Consurg scopes allowing unscoped `context_oracle` `ask`, `symbol`, and `editImpact` reads to bypass repository-root authorization; empty optional scope fields no longer hide a valid explicit path.
 - Fixed memory startup failing with `ENAMETOOLONG` for deep project paths on Windows: the memories root embedded the full cwd as one directory name, so long cwds pushed artifact paths past the ~260-char limit `Bun.write` enforces. The encoded component is now capped at 64 chars — short cwds keep the legacy verbatim encoding, long ones keep the distinguishing tail plus a stable hash of the full cwd.

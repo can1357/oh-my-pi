@@ -308,6 +308,7 @@ import { shutdownTinyTitleClient } from "../tiny/title-client";
 import {
 	countToolsForAutoDiscovery,
 	resolveEffectiveToolDiscoveryMode,
+	TOOL_DISCOVERY_SCHEMA_TOKEN_BUDGET,
 	TOOL_DISCOVERY_SEARCH_TOOL_NAME,
 } from "../tool-discovery/mode";
 import {
@@ -1358,6 +1359,8 @@ export class AgentSession {
 	 * the ceiling state left by the previous one.
 	 */
 	#applyActiveToolsChain: Promise<void> = Promise.resolve();
+	/** Serializes discovery selection so concurrent searches cannot bypass the schema budget. */
+	#discoveredToolActivationChain: Promise<void> = Promise.resolve();
 
 	// Compaction state
 	#compactionAbortController: AbortController | undefined = undefined;
@@ -4911,8 +4914,11 @@ export class AgentSession {
 
 	#persistSelectedMCPToolNamesIfChanged(previousSelectedMCPToolNames: string[]): void {
 		if (!this.#mcpDiscoveryEnabled) return;
-		const nextSelectedMCPToolNames = this.getSelectedMCPToolNames();
-		if (this.#selectedMCPToolNamesMatch(previousSelectedMCPToolNames, nextSelectedMCPToolNames)) {
+		const persistentSelections = (toolNames: Iterable<string>): string[] =>
+			Array.from(toolNames).filter(name => !this.#turnDiscoveredToolNames.has(name));
+		const previousPersistentMCPToolNames = persistentSelections(previousSelectedMCPToolNames);
+		const nextSelectedMCPToolNames = persistentSelections(this.getSelectedMCPToolNames());
+		if (this.#selectedMCPToolNamesMatch(previousPersistentMCPToolNames, nextSelectedMCPToolNames)) {
 			return;
 		}
 		this.sessionManager.appendMCPToolSelection(nextSelectedMCPToolNames);
@@ -5155,12 +5161,6 @@ export class AgentSession {
 		return this.#discoverableToolSearchIndex;
 	}
 
-	/** Invalidate the generic search index cache (call after tool set changes).
-	 *  Delegates to {@link #invalidateDiscoveryCaches} so all discovery-related caches stay in sync. */
-	#invalidateDiscoverableToolSearchIndex(): void {
-		this.#invalidateDiscoveryCaches();
-	}
-
 	getSelectedDiscoveredToolNames(): string[] {
 		// Union of MCP-selected and generic non-MCP selected. Non-MCP selections are only
 		// selected while they are still active; otherwise BM25 must be able to rediscover them.
@@ -5183,39 +5183,61 @@ export class AgentSession {
 	}
 
 	async activateDiscoveredTools(toolNames: string[]): Promise<string[]> {
-		const mcpNames = toolNames.filter(isMCPToolName);
-		const nonMcpNames = toolNames.filter(name => !isMCPToolName(name));
-		const activated: string[] = [];
+		let activated: string[] = [];
+		const run = this.#discoveredToolActivationChain.then(async () => {
+			activated = await this.#activateDiscoveredToolsWithinBudget(toolNames);
+		});
+		this.#discoveredToolActivationChain = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		await run;
+		return activated;
+	}
 
-		// Activate MCP tools via existing path
-		if (mcpNames.length > 0) {
-			const activatedMcp = await this.activateDiscoveredMCPTools(mcpNames);
-			activated.push(...activatedMcp);
+	async #activateDiscoveredToolsWithinBudget(toolNames: string[]): Promise<string[]> {
+		const currentActive = this.getActiveToolNames();
+		const baseActive = currentActive.filter(name => !this.#turnDiscoveredToolNames.has(name));
+		const baseActiveSet = new Set(baseActive);
+		const requested = normalizeToolNames(toolNames).filter(
+			name =>
+				this.#toolRegistry.has(name) &&
+				!baseActiveSet.has(name) &&
+				this.#isToolNameAllowedByProfile(name) &&
+				(isMCPToolName(name)
+					? this.#discoverableMCPTools.has(name)
+					: this.#toolRegistry.get(name)?.loadMode === "discoverable"),
+		);
+		if (requested.length === 0) return [];
+
+		// New search matches take priority. Retain the newest tools from earlier
+		// searches only while the complete active wire schema stays within budget.
+		const requestedSet = new Set(requested);
+		const older = Array.from(this.#turnDiscoveredToolNames)
+			.reverse()
+			.filter(name => !requestedSet.has(name) && this.#toolRegistry.has(name));
+		const candidates = [...requested, ...older];
+		const baseTools = baseActive.flatMap(name => {
+			const tool = this.#toolRegistry.get(name);
+			return tool ? [tool] : [];
+		});
+		let schemaTokens = estimateToolSchemaTokens(baseTools);
+		const selected: string[] = [];
+		for (const name of candidates) {
+			const tool = this.#toolRegistry.get(name);
+			if (!tool) continue;
+			const toolTokens = estimateToolSchemaTokens([tool]);
+			// A single required tool remains usable even when its own schema exceeds
+			// the budget; subsequent discoveries replace it rather than accumulating.
+			if (selected.length > 0 && schemaTokens + toolTokens > TOOL_DISCOVERY_SCHEMA_TOKEN_BUDGET) continue;
+			selected.push(name);
+			schemaTokens += toolTokens;
 		}
 
-		// Activate non-MCP tools (built-ins that are in the registry but not currently active)
-		if (nonMcpNames.length > 0) {
-			const currentActiveNames = new Set(this.getActiveToolNames());
-			const newlyAdded: string[] = [];
-			for (const name of nonMcpNames) {
-				if (
-					this.#toolRegistry.has(name) &&
-					!currentActiveNames.has(name) &&
-					this.#isToolNameAllowedByProfile(name)
-				) {
-					newlyAdded.push(name);
-					this.#turnDiscoveredToolNames.add(name);
-					activated.push(name);
-				}
-			}
-			if (newlyAdded.length > 0) {
-				const nextActive = [...this.getActiveToolNames(), ...newlyAdded];
-				await this.#applyActiveToolsByName(nextActive, { persistMCPSelection: false });
-				this.#invalidateDiscoverableToolSearchIndex();
-			}
-		}
-
-		return [...new Set(activated)];
+		await this.#applyActiveToolsByName([...baseActive, ...selected], { persistMCPSelection: false });
+		this.#turnDiscoveredToolNames.clear();
+		for (const name of selected) this.#turnDiscoveredToolNames.add(name);
+		return requested.filter(name => selected.includes(name));
 	}
 
 	/**
