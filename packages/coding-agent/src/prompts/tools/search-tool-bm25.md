@@ -16,9 +16,9 @@ Input:
 
 Behavior:
 - Matches against tool name, label, server name, description/summary, and input schema keys
-- Activates the top matching tools for the rest of the current session
-- Repeated searches add to the active tool set; they do not remove earlier selections
-- Newly activated tools become available before the next model call in the same overall turn
+- Activates top matches for the current user turn
+- Repeated same-turn searches add without removing earlier matches
+- Activated tools are available before the next model call
 
 Notes:
 - Start with `limit` 5–10 if unsure.

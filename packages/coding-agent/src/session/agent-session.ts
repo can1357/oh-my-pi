@@ -1480,6 +1480,9 @@ export class AgentSession {
 	// Generic tool discovery (covers built-in + MCP + extension when tools.discoveryMode === "all")
 	#discoverableToolSearchIndex: DiscoverableToolSearchIndex | null = null;
 	#selectedDiscoveredToolNames = new Set<string>();
+	/** Tools activated by search discovery during the current user turn.
+	 *  They stay callable for the turn's tool loop, then leave the next turn's schema. */
+	#turnDiscoveredToolNames = new Set<string>();
 	#rpcHostToolNames = new Set<string>();
 	#xdevRegistry: XdevRegistry | undefined;
 	#defaultSelectedMCPServerNames = new Set<string>();
@@ -5050,6 +5053,7 @@ export class AgentSession {
 
 	async activateDiscoveredMCPTools(toolNames: string[]): Promise<string[]> {
 		const nextSelectedMCPToolNames = new Set(this.#selectedMCPToolNames);
+		const activeNames = new Set(this.getActiveToolNames());
 		const activated: string[] = [];
 		for (const name of toolNames) {
 			if (
@@ -5059,6 +5063,9 @@ export class AgentSession {
 				!this.#isToolNameAllowedByProfile(name)
 			) {
 				continue;
+			}
+			if (!activeNames.has(name)) {
+				this.#turnDiscoveredToolNames.add(name);
 			}
 			nextSelectedMCPToolNames.add(name);
 			activated.push(name);
@@ -5070,7 +5077,7 @@ export class AgentSession {
 			...this.#getActiveNonMCPToolNames(),
 			...this.#filterSelectableMCPToolNames(nextSelectedMCPToolNames),
 		];
-		await this.setActiveToolsByName(nextActive);
+		await this.#applyActiveToolsByName(nextActive, { persistMCPSelection: false });
 		return [...new Set(activated)];
 	}
 
@@ -5165,6 +5172,16 @@ export class AgentSession {
 		return [...new Set([...mcpSelected, ...nonMcpSelected])];
 	}
 
+	async #resetTurnDiscoveredTools(): Promise<void> {
+		if (this.#turnDiscoveredToolNames.size === 0) return;
+		const discoveredNames = new Set(this.#turnDiscoveredToolNames);
+		const nextActive = this.getActiveToolNames().filter(name => !discoveredNames.has(name));
+		await this.#applyActiveToolsByName(nextActive, { persistMCPSelection: false });
+		for (const name of discoveredNames) {
+			this.#turnDiscoveredToolNames.delete(name);
+		}
+	}
+
 	async activateDiscoveredTools(toolNames: string[]): Promise<string[]> {
 		const mcpNames = toolNames.filter(isMCPToolName);
 		const nonMcpNames = toolNames.filter(name => !isMCPToolName(name));
@@ -5187,13 +5204,13 @@ export class AgentSession {
 					this.#isToolNameAllowedByProfile(name)
 				) {
 					newlyAdded.push(name);
-					this.#selectedDiscoveredToolNames.add(name);
+					this.#turnDiscoveredToolNames.add(name);
 					activated.push(name);
 				}
 			}
 			if (newlyAdded.length > 0) {
 				const nextActive = [...this.getActiveToolNames(), ...newlyAdded];
-				await this.setActiveToolsByName(nextActive);
+				await this.#applyActiveToolsByName(nextActive, { persistMCPSelection: false });
 				this.#invalidateDiscoverableToolSearchIndex();
 			}
 		}
@@ -5497,6 +5514,9 @@ export class AgentSession {
 	 * Changes take effect before the next model call.
 	 */
 	async setActiveToolsByName(toolNames: string[]): Promise<void> {
+		for (const name of toolNames) {
+			this.#turnDiscoveredToolNames.delete(name);
+		}
 		await this.#applyActiveToolsByName(toolNames);
 	}
 
@@ -6550,6 +6570,10 @@ export class AgentSession {
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
+		const userInitiated = options?.userInitiated ?? !options?.synthetic;
+		if (!this.isStreaming && userInitiated) {
+			await this.#resetTurnDiscoveredTools();
+		}
 
 		// Handle extension commands first (execute immediately, even during streaming)
 		if (expandPromptTemplates && text.startsWith("/")) {
@@ -6593,7 +6617,7 @@ export class AgentSession {
 		// A user-initiated prompt (typed message or the `.`/`c` continue shortcut)
 		// re-enables advisor auto-resume that a prior user interrupt suppressed.
 		// Agent-initiated synthetic prompts (auto-continue, plan, reminders) do not.
-		if (options?.userInitiated ?? !options?.synthetic) {
+		if (userInitiated) {
 			this.#advisorAutoResumeSuppressed = false;
 		}
 
@@ -7644,12 +7668,6 @@ export class AgentSession {
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		const previousSessionFile = this.sessionFile;
-		const nextDiscoverySessionToolNames = this.#mcpDiscoveryEnabled
-			? [
-					...this.#getActiveNonMCPToolNames(),
-					...this.#filterSelectableMCPToolNames(this.#defaultSelectedMCPToolNames),
-				]
-			: undefined;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -7662,6 +7680,13 @@ export class AgentSession {
 				return false;
 			}
 		}
+		await this.#resetTurnDiscoveredTools();
+		const nextDiscoverySessionToolNames = this.#mcpDiscoveryEnabled
+			? [
+					...this.#getActiveNonMCPToolNames(),
+					...this.#filterSelectableMCPToolNames(this.#defaultSelectedMCPToolNames),
+				]
+			: undefined;
 
 		const bgInstance = this.sessionManager.getBackgroundInstance();
 		if (bgInstance && this.isStreaming && previousSessionFile) {
@@ -13033,6 +13058,7 @@ export class AgentSession {
 
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
+		await this.#resetTurnDiscoveredTools();
 		await this.#sessionSwitchReconciler?.before?.();
 		const previousSessionState = this.sessionManager.captureState();
 		const previousSessionContext = this.buildDisplaySessionContext();
@@ -13283,6 +13309,7 @@ export class AgentSession {
 			}
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
+		await this.#resetTurnDiscoveredTools();
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
@@ -13521,6 +13548,7 @@ export class AgentSession {
 				fromExtension = true;
 			}
 		}
+		await this.#resetTurnDiscoveredTools();
 
 		// Run default summarizer if needed
 		let summaryText: string | undefined;
