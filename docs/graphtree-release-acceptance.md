@@ -4,17 +4,16 @@
 
 **HOLD.** GraphTree's local safety and behavior gates pass, but the public release channel is incomplete and the canonical GitHub CI run is red. Do not bump the package version, publish a release, or advance the hosted `/version` pointer.
 
-## Integrated scope
-
 - Repository-scoped worktree discovery through `git worktree list`.
 - Repository-qualified node paths and filesystem-safe node names.
 - Custom branch discovery and squash merge into staged, reviewable changes.
 - Named cleanup only, with dirty-worktree refusal and no force/raw-delete fallback.
-- Static `/graphtree run` prompt imported from `graphtree-run.md`.
-- Canonical README and `docs/graphtree.md` command/lifecycle documentation.
+- Static `/graphtree run` prompt with configured bounds (`task.maxRecursionDepth`, `task.maxConcurrency`, `task.maxRuntimeMs`, `task.isolation.mode`) imported from `graphtree-run.md`.
+- Live recursive `AgentRegistry` parent/child hierarchy visualization via `/graphtree agents`.
+- Lifecycle controls (`/graphtree stop`, `/graphtree steer`, `/graphtree revive`) backed by `AgentLifecycleManager` with Main/advisor guardrails.
+- Canonical README and `docs/graphtree.md` command/lifecycle documentation with external Fractal parity matrix.
 - Fresh installs default to Bun/npm; binary installation is explicit.
 - Installer Worker proxies scripts from `kingkillery/oh-my-pk`.
-
 ## Adversarial audit remediation
 
 A fresh read-only audit found branch-option injection, non-repository error handling, and detached-HEAD display gaps. The acceptance pass:
@@ -28,7 +27,7 @@ A fresh read-only audit found branch-option injection, non-repository error hand
 
 ## Verification
 
-Run from the repository root on 2026-07-22:
+Original release gates run from the repository root on 2026-07-22:
 
 | Gate | Result |
 | --- | --- |
@@ -38,7 +37,18 @@ Run from the repository root on 2026-07-22:
 | Windows PowerShell parser for `scripts/install.ps1` | PASS after ASCII-safe status labels |
 | `git diff --check` | PASS |
 
-Behavioral tests cover repository isolation, real/custom branches, traversal and option-injection rejection, detached HEAD, non-Git directories, merge staging, explicit prune, dirty refusal, and clean removal.
+Additional command and lifecycle verification run on 2026-07-23:
+
+| Gate | Result |
+| --- | --- |
+| `bun test --timeout 30000 packages/coding-agent/test/slash-commands/graphtree.test.ts` | PASS — 18 tests |
+| `bun test packages/coding-agent/test/registry/agent-lifecycle.test.ts` | PASS — 17 tests |
+| `bun test packages/coding-agent/test/modes/controllers/selector-controller-resume-owned.test.ts` | PASS — 4 tests |
+| `bun test infra/install-redirect/worker.test.js` | PASS — 7 tests |
+| `bun --cwd=packages/coding-agent run check:types` | PASS |
+| `git diff --check` | PASS (line-ending conversion warnings only) |
+
+Behavioral tests cover repository isolation, real/custom branches, traversal and option-injection rejection, detached HEAD, non-Git directories, merge staging, explicit prune, dirty refusal, clean removal, bounded and sanitized recursive AgentRegistry rendering, configured run bounds injection, subagent stop abort/release (including abort failure), parked steering and revival, live-agent revive reporting, and Main/advisor guardrails. Lifecycle tests separately cover serialized park/revive/release races.
 
 ## External release blockers
 

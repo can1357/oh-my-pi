@@ -489,25 +489,33 @@ Key ideas:
 - Include practical built-ins (tools, sessions, branching, subagents, extensibility)
 - Make advanced behavior configurable rather than hidden
 
-## GraphTree: parallel multi-agent worktrees
+## GraphTree: parallel multi-agent worktrees and Fractal parity
 
-`/graphtree` manages a tree of isolated git worktree nodes for running
-several agents on the same repository side by side. `/graphtree status`
-(or bare `/graphtree`) prints the active node hierarchy; `/graphtree list`
-shows each node's branch and path; `/graphtree init <name> [branch]`
-creates a new worktree node (defaults to branch `graphtree/<name>`, or an
-explicit branch you pass); `/graphtree run <objective>` hands the model a
-static prompt that walks it through planning, sharding work across nodes,
-and reducing the results — it does not itself guarantee parallel
-execution or correctness, only orchestrates the prompt; `/graphtree merge
-<name>` squash-merges a node's branch into `HEAD`, staging the combined
-changes for your review rather than committing them outright; and
-`/graphtree prune <name>` removes one finished worktree node, while bare
-`/graphtree prune` only lists candidates; cleanup refuses to force-delete
-worktrees with uncommitted changes. Node operations are scoped to worktrees
-under the current repository. See
-[`docs/graphtree.md`](docs/graphtree.md) for the full command reference
-and lifecycle details.
+`/graphtree` manages isolated git worktree nodes and recursive agent lifecycle trees for running several agents on the same repository side by side.
+
+- `/graphtree status` (or bare `/graphtree`): prints active worktree node hierarchy as ASCII tree.
+- `/graphtree list`: lists worktree node details (branch, path).
+- `/graphtree agents`: renders a bounded live recursive `AgentRegistry` parent/child tree with sanitized status, attention, activity, and working directory context.
+- `/graphtree init <name> [branch]`: creates a new worktree node (defaults to branch `graphtree/<name>`).
+- `/graphtree run <objective>`: hands the model a prompt with configured hard bounds (`task.maxRecursionDepth`, `task.maxConcurrency`, `task.maxRuntimeMs`, `task.isolation.mode`) to plan, shard, and reduce work across nodes. Note: `/graphtree run` is prompt-driven and relies on local task/agent primitives rather than a standalone daemon.
+- `/graphtree stop <agent-id>`: aborts and releases a non-main, non-advisor agent via `AgentLifecycleManager`.
+- `/graphtree steer <agent-id> <guidance>`: revives a subagent if parked and sends steering guidance.
+- `/graphtree revive <agent-id>`: revives a parked subagent; live agents report their current state without claiming a revival.
+- `/graphtree merge <name>`: squash-merges a node's branch into `HEAD` as staged changes for review.
+- `/graphtree prune <name>`: removes a clean, named worktree node (refuses dirty worktrees).
+
+### External Fractal Parity Matrix
+
+| Capability | External Systems (`plasma-ai/fractal`, `TinyAGI/fractals`) | Local Primitive in oh-my-pi |
+| --- | --- | --- |
+| Recursive Agent Tree | Autonomous sub-tree spawning | `AgentRegistry` parent/child hierarchy + nested task recursion |
+| Worktree & Path Isolation | Separate directories / worktree clones | `task.isolation.mode` + `git worktree` nodes |
+| Bounded Execution | Recursion & concurrency limits | `task.maxRecursionDepth`, `task.maxConcurrency`, `task.maxRuntimeMs` |
+| Lifecycle Controls | Pause, stop, steer sub-tasks | `/graphtree stop`, `/graphtree steer`, `/graphtree revive` via `AgentLifecycleManager` |
+| Persistence & Revival | Disk-backed agent state | Parked session files (`sessionFile`) with on-demand cold revival |
+| Tree Visualization | Graph/tree terminal UI | ASCII tree rendering (`/graphtree` & `/graphtree agents`) |
+
+See [`docs/graphtree.md`](docs/graphtree.md) for the complete reference and architectural details.
 
 ---
 

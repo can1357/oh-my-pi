@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed `/resume` and the session picker treating switch failures as Unhandled Rejections: live writer-owner conflicts and other failures now remain recoverable in the UI, successful switches rebuild the selected conversation, and hook-cancelled switches no longer claim that a session resumed.
+- Fixed `AgentLifecycleManager` races between TTL parking, revival, and release: transitions now serialize per agent so steering never targets a disposing session and release cannot leak an in-flight revived session or writer guard.
 - Fixed isolated subagent runs discarding partial work on abort or failure: `runIsolatedSubprocess` now captures a best-effort `.partial.patch` artifact on non-zero exit or abort, and `mergeIsolatedChanges` surfaces it via a `<system-notification>` without auto-applying.
 - Fixed interactive startup hanging before the first TUI frame when `search_tool_bm25` was active: discovery-mode schema estimation no longer recursively evaluates the search tool's self-referential description.
 - Fixed `fork` parameter being silently dropped in batch task submissions: `taskItemSchema` and `taskItemSchemaIsolated` both had `"+": "delete"` but omitted `"fork?": "boolean"`, so a batch item with `fork: true` was stripped before `spawnParamsFor` could see it, falling back to a fresh context with no error.
@@ -11,7 +13,7 @@
 - Fixed the Intent Composer regression that hid Agent Hub navigation by restoring a persistent rail affordance with the configured hub key and stable double-left (`←←`) shortcut.
 
 ### Added
-- Added `/graphtree` (aliases `/gt`, `/fractal`) slash command for Fractal-style multi-agent tree and worktree node workflows.
+- Added `/graphtree` (aliases `/gt`, `/fractal`) slash command for Fractal-style multi-agent tree and worktree node workflows with `/graphtree agents`, `/graphtree stop`, `/graphtree steer`, and `/graphtree revive` controls, configured settings bounds (`task.maxRecursionDepth`, `task.maxConcurrency`, `task.maxRuntimeMs`, `task.isolation.mode`), and disk-backed parked session revival.
 - Added interactive spawned-agent tier controls: `/tier status|light|mid|frontier|auto` and the `/settings` **Default Spawn Tier** selector can constrain stronger models to light or mid capability envelopes, with restrictive composition against existing agent/workflow policies.
 - Added `/subagent using <alias-or-model> "<prompt>"` quick launch: model and task are resolved up front, the parent thinking level is inherited, and the TUI asks only for an optional generated-name override.
 - Added opt-in `tools.xdev` virtual tool devices (`xd://`) for progressive MCP/custom/extension tool docs and execution, leaving essential builtins and BM25 discovery unchanged.
@@ -66,6 +68,7 @@
 - Trimmed a second pass of tool-prompt prose across `read`/`bash`/`apply-patch`/`patch`/`todo`/`ast-grep`/`github`, dropping schema-inferable and duplicate content while preserving RFC-2119 keywords and Handlebars structure.
 
 ### Fixed
+- Fixed `search_tool_bm25` activations accumulating tool schemas across turns and persisting arbitrary search results into resumed sessions. Discovered tools now remain additive only within the current user turn; explicit tool selections and configured MCP defaults remain durable.
 - Fixed internal-URL autocomplete dropping the active project cwd and AST tools failing to resolve session-loaded `skill://` paths.
 - Fixed active Consurg scopes allowing unscoped `context_oracle` `ask`, `symbol`, and `editImpact` reads to bypass repository-root authorization; empty optional scope fields no longer hide a valid explicit path.
 - Fixed memory startup failing with `ENAMETOOLONG` for deep project paths on Windows: the memories root embedded the full cwd as one directory name, so long cwds pushed artifact paths past the ~260-char limit `Bun.write` enforces. The encoded component is now capped at 64 chars — short cwds keep the legacy verbatim encoding, long ones keep the distinguishing tail plus a stable hash of the full cwd.

@@ -3,7 +3,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { InteractiveModeContext } from "@pk-nerdsaver-ai/pi-coding-agent/modes/types";
+import { AgentLifecycleManager } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry, MAIN_AGENT_ID } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
+import { USER_INTERRUPT_LABEL } from "@pk-nerdsaver-ai/pi-coding-agent/session/messages";
 import { executeBuiltinSlashCommand } from "@pk-nerdsaver-ai/pi-coding-agent/slash-commands/builtin-registry";
+import { TRUNCATE_LENGTHS } from "@pk-nerdsaver-ai/pi-coding-agent/tools/render-utils";
 import * as piUtils from "@pk-nerdsaver-ai/pi-utils";
 
 function runGit(cwd: string, args: string[]): string {
@@ -44,17 +49,18 @@ async function createTempRepo(prefix: string, branch: string): Promise<string> {
 	return repoRoot;
 }
 
-function createHarness(cwd: string) {
+function createHarness(cwd: string, customSettings?: Record<string, unknown>) {
 	const showStatus = vi.fn();
 	const setText = vi.fn();
 	const getCwd = vi.fn(() => cwd);
+	const getSetting = vi.fn((key: string) => customSettings?.[key]);
 
 	const ctx = {
 		collabGuest: false,
 		showStatus,
 		editor: { setText },
 		sessionManager: { getCwd },
-		settings: { get: vi.fn() },
+		settings: { get: getSetting },
 	} as unknown as InteractiveModeContext;
 
 	return { runtime: { ctx }, showStatus, setText };
@@ -87,6 +93,8 @@ const tempDirs: string[] = [];
 const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
+	AgentRegistry.resetGlobalForTests();
+	AgentLifecycleManager.resetGlobalForTests();
 	vi.restoreAllMocks();
 	while (cleanups.length) {
 		const cleanup = cleanups.pop();
@@ -310,5 +318,263 @@ describe("/graphtree slash command", () => {
 		expect(lastStatusText(pruneCleanStatus).toLowerCase()).not.toMatch(/dirty|uncommitted|refus/);
 		await expect(fs.access(cleanWorktreePath)).rejects.toThrow();
 		expect(runGit(repoRoot, ["worktree", "list", "--porcelain"])).not.toContain("clean-node");
+	});
+
+	it("renders recursive AgentRegistry parent/child tree on /graphtree agents", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: "Main",
+			kind: "main",
+			session: null,
+			status: "running",
+		});
+		const sub1 = registry.register({
+			id: "sub-1",
+			displayName: "Worker 1",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: null,
+			status: "running",
+			cwd: "/tmp/worker1",
+		});
+		registry.setActivity(sub1.id, "building parser");
+
+		const sub2 = registry.register({
+			id: "sub-2",
+			displayName: "Worker 2",
+			kind: "sub",
+			parentId: "sub-1",
+			session: null,
+			status: "idle",
+		});
+		registry.setAttention(sub2.id, "ask: confirmation needed");
+
+		const { runtime, showStatus } = createHarness("/tmp");
+		await executeBuiltinSlashCommand("/graphtree agents", runtime);
+
+		const text = lastStatusText(showStatus);
+		expect(text).toContain("AgentRegistry Tree:");
+		expect(text).toContain("Main [running] (main)");
+		expect(text).toContain("Worker 1 (sub-1) [running] (sub)");
+		expect(text).toContain('activity: "building parser"');
+		expect(text).toContain("Worker 2 (sub-2) [idle] (sub)");
+		expect(text).toContain("[ATTENTION: ask: confirmation needed]");
+	});
+
+	it("bounds and sanitizes the recursive AgentRegistry tree", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: "Main",
+			kind: "main",
+			session: null,
+			status: "running",
+		});
+		for (let index = 0; index < 15; index++) {
+			const id = index === 0 ? "sub-\u001b[31munsafe" : `sub-${index}`;
+			registry.register({
+				id,
+				displayName: index === 0 ? `Worker\t${"wide".repeat(40)}` : `Worker ${index}`,
+				kind: "sub",
+				parentId: index === 0 ? MAIN_AGENT_ID : index === 1 ? "sub-\u001b[31munsafe" : `sub-${index - 1}`,
+				session: null,
+				status: "idle",
+			});
+		}
+
+		const { runtime, showStatus } = createHarness("/tmp");
+		await executeBuiltinSlashCommand("/graphtree agents", runtime);
+
+		const text = lastStatusText(showStatus);
+		expect(text).not.toContain("\u001b");
+		expect(text).toContain("more agents not shown");
+		expect(Math.max(...text.split("\n").map(line => Bun.stringWidth(line)))).toBeLessThanOrEqual(
+			TRUNCATE_LENGTHS.LINE,
+		);
+	});
+
+	it("injects configured hard bounds into the run prompt on /graphtree run", async () => {
+		const { cleanup } = await setupWorktreeBase();
+		cleanups.push(cleanup);
+		const repoRoot = await createTempRepo("graphtree-bounds", "main");
+		tempDirs.push(repoRoot);
+
+		const customSettings = {
+			"task.maxRecursionDepth": 4,
+			"task.maxConcurrency": 16,
+			"task.maxRuntimeMs": 600000,
+			"task.isolation.mode": "auto",
+		};
+		const { runtime } = createHarness(repoRoot, customSettings);
+		const result = await executeBuiltinSlashCommand("/graphtree run refactor system authentication", runtime);
+
+		expect(result).toBeDefined();
+		expect(typeof result).toBe("string");
+		expect(result).toContain("maxRecursionDepth=4");
+		expect(result).toContain("maxConcurrency=16");
+		expect(result).toContain("maxRuntimeMs=600000");
+		expect(result).toContain("isolationMode=auto");
+	});
+	it("aborts running session and releases agent on /graphtree stop", async () => {
+		const registry = AgentRegistry.global();
+		const mockSession = {
+			abort: vi.fn(async () => {}),
+			dispose: vi.fn(async () => {}),
+		} as unknown as AgentSession;
+
+		registry.register({
+			id: "sub-target",
+			displayName: "Target Agent",
+			kind: "sub",
+			session: mockSession,
+			status: "running",
+		});
+		AgentLifecycleManager.global().adopt("sub-target", { idleTtlMs: 1000 });
+
+		const { runtime, showStatus } = createHarness("/tmp");
+		await executeBuiltinSlashCommand("/graphtree stop sub-target", runtime);
+
+		expect(mockSession.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		expect(lastStatusText(showStatus)).toContain('Stopped and released GraphTree agent "sub-target"');
+		expect(registry.get("sub-target")).toBeUndefined();
+		expect(AgentLifecycleManager.global().has("sub-target")).toBe(false);
+	});
+
+	it("releases a running agent even when abort fails", async () => {
+		const registry = AgentRegistry.global();
+		const mockSession = {
+			abort: vi.fn(async () => {
+				throw new Error("abort\tfailed\n\u001b[31munsafe");
+			}),
+			dispose: vi.fn(async () => {}),
+		} as unknown as AgentSession;
+		registry.register({
+			id: "sub-abort-failure",
+			displayName: "Target Agent",
+			kind: "sub",
+			session: mockSession,
+			status: "running",
+		});
+		AgentLifecycleManager.global().adopt("sub-abort-failure", { idleTtlMs: 1000 });
+
+		const { runtime, showStatus } = createHarness("/tmp");
+		await executeBuiltinSlashCommand("/graphtree stop sub-abort-failure", runtime);
+
+		expect(mockSession.dispose).toHaveBeenCalledTimes(1);
+		expect(registry.get("sub-abort-failure")).toBeUndefined();
+		expect(lastStatusText(showStatus)).toContain("after abort failed: abort failed [31munsafe");
+		expect(lastStatusText(showStatus)).not.toContain("\u001b");
+	});
+
+	it("ensures live and steers agent on /graphtree steer", async () => {
+		const registry = AgentRegistry.global();
+		const mockSession = {
+			steer: vi.fn(async () => {}),
+			dispose: vi.fn(async () => {}),
+		} as unknown as AgentSession;
+
+		registry.register({
+			id: "sub-steerable",
+			displayName: "Steerable Agent",
+			kind: "sub",
+			session: null,
+			status: "parked",
+			sessionFile: "/tmp/session.json",
+		});
+
+		const reviver = vi.fn(async () => mockSession);
+		AgentLifecycleManager.global().adopt("sub-steerable", { idleTtlMs: 1000, revive: reviver });
+
+		const { runtime, showStatus } = createHarness("/tmp");
+		await executeBuiltinSlashCommand("/graphtree steer sub-steerable refocus on unit tests", runtime);
+
+		expect(mockSession.steer).toHaveBeenCalledWith("refocus on unit tests");
+		expect(lastStatusText(showStatus)).toContain('Steered agent "sub-steerable"');
+		expect(reviver).toHaveBeenCalledTimes(1);
+		expect(registry.get("sub-steerable")?.status).toBe("idle");
+	});
+
+	it("revives parked agent on /graphtree revive", async () => {
+		const registry = AgentRegistry.global();
+		const mockSession = {
+			dispose: vi.fn(async () => {}),
+		} as unknown as AgentSession;
+
+		registry.register({
+			id: "sub-parked",
+			displayName: "Parked Agent",
+			kind: "sub",
+			session: null,
+			status: "parked",
+			sessionFile: "/tmp/parked-session.json",
+		});
+
+		const reviver = async () => mockSession;
+		AgentLifecycleManager.global().adopt("sub-parked", { idleTtlMs: 1000, revive: reviver });
+
+		const { runtime, showStatus } = createHarness("/tmp");
+		await executeBuiltinSlashCommand("/graphtree revive sub-parked", runtime);
+
+		expect(lastStatusText(showStatus)).toContain('Revived agent "sub-parked"');
+		expect(registry.get("sub-parked")?.session).toBe(mockSession);
+	});
+
+	it("reports already-live agents without claiming a revival", async () => {
+		const registry = AgentRegistry.global();
+		const mockSession = {
+			dispose: vi.fn(async () => {}),
+		} as unknown as AgentSession;
+		registry.register({
+			id: "sub-live",
+			displayName: "Live Agent",
+			kind: "sub",
+			session: mockSession,
+			status: "idle",
+		});
+
+		const { runtime, showStatus } = createHarness("/tmp");
+		await executeBuiltinSlashCommand("/graphtree revive sub-live", runtime);
+
+		expect(lastStatusText(showStatus)).toContain('Agent "sub-live" is already idle');
+		expect(registry.get("sub-live")?.session).toBe(mockSession);
+	});
+
+	it("refuses stop, steer, and revive on Main, advisor, or unknown agent IDs", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: "Main",
+			kind: "main",
+			session: null,
+			status: "running",
+		});
+		registry.register({
+			id: "advisor-1",
+			displayName: "Advisor",
+			kind: "advisor",
+			session: null,
+			status: "running",
+		});
+
+		const { runtime: runtimeStopMain, showStatus: statusStopMain } = createHarness("/tmp");
+		await executeBuiltinSlashCommand("/graphtree stop Main", runtimeStopMain);
+		expect(lastStatusText(statusStopMain)).toContain("Refusing to stop agent");
+
+		const { runtime: runtimeStopAdv, showStatus: statusStopAdv } = createHarness("/tmp");
+		await executeBuiltinSlashCommand("/graphtree stop advisor-1", runtimeStopAdv);
+		expect(lastStatusText(statusStopAdv)).toContain("Refusing to stop agent");
+
+		const { runtime: runtimeStopUnknown, showStatus: statusStopUnknown } = createHarness("/tmp");
+		await executeBuiltinSlashCommand("/graphtree stop ghost-id", runtimeStopUnknown);
+		expect(lastStatusText(statusStopUnknown)).toContain("Refusing to stop agent");
+
+		const { runtime: runtimeSteerMain, showStatus: statusSteerMain } = createHarness("/tmp");
+		await executeBuiltinSlashCommand("/graphtree steer Main pivot plan", runtimeSteerMain);
+		expect(lastStatusText(statusSteerMain)).toContain("Refusing to steer agent");
+
+		const { runtime: runtimeReviveMain, showStatus: statusReviveMain } = createHarness("/tmp");
+		await executeBuiltinSlashCommand("/graphtree revive Main", runtimeReviveMain);
+		expect(lastStatusText(statusReviveMain)).toContain("Refusing to revive agent");
 	});
 });

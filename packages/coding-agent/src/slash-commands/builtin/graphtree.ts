@@ -1,6 +1,10 @@
 import * as path from "node:path";
 import { getWorktreeDir, hashPath, prompt } from "@pk-nerdsaver-ai/pi-utils";
 import { $ } from "bun";
+import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { USER_INTERRUPT_LABEL } from "../../session/messages";
+import { oneLineLabel } from "../../task/types";
 import { PREVIEW_LIMITS, replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import * as git from "../../utils/git";
 import { commandConsumed, parseSubcommand } from "../helpers/parse";
@@ -135,6 +139,99 @@ function renderAsciiGraphTree(nodes: GraphTreeNode[]): string {
 	return lines.join("\n");
 }
 
+function renderAgentRegistryTree(registry: AgentRegistry = AgentRegistry.global()): string {
+	const allRefs = registry.list();
+	const refs = allRefs.filter(r => r.kind !== "advisor");
+	if (refs.length === 0) {
+		return "No active agents registered in AgentRegistry.";
+	}
+
+	const refMap = new Map<string, AgentRef>();
+	const childrenMap = new Map<string, AgentRef[]>();
+
+	for (const r of refs) {
+		refMap.set(r.id, r);
+	}
+
+	for (const r of refs) {
+		if (r.parentId && refMap.has(r.parentId)) {
+			const list = childrenMap.get(r.parentId) ?? [];
+			list.push(r);
+			childrenMap.set(r.parentId, list);
+		}
+	}
+
+	const roots: AgentRef[] = [];
+	const mainRef = refs.find(r => r.id === MAIN_AGENT_ID || r.kind === "main");
+	if (mainRef) {
+		roots.push(mainRef);
+	}
+	for (const r of refs) {
+		if (r !== mainRef && (!r.parentId || !refMap.has(r.parentId))) {
+			roots.push(r);
+		}
+	}
+
+	const lines: string[] = ["AgentRegistry Tree:"];
+	const visited = new Set<string>();
+
+	function formatNodeDetails(r: AgentRef): string {
+		const name = oneLineLabel(r.displayName);
+		const id = oneLineLabel(r.id);
+		let details = `${name !== id ? `${name} (${id})` : id} [${r.status}] (${r.kind})`;
+		if (r.needsAttention) {
+			const reason = r.attentionReason ? oneLineLabel(r.attentionReason) : undefined;
+			details += ` [ATTENTION${reason ? `: ${reason}` : ""}]`;
+		}
+		if (r.activity) {
+			details += ` activity: "${oneLineLabel(r.activity)}"`;
+		}
+		if (r.cwd) {
+			details += ` cwd: ${shortenPath(r.cwd)}`;
+		}
+		return details;
+	}
+
+	const maxNodes = PREVIEW_LIMITS.EXPANDED_LINES;
+	let renderedCount = 0;
+
+	function walk(node: AgentRef, prefix: string, isLast: boolean, isRoot: boolean): void {
+		if (visited.has(node.id) || renderedCount >= maxNodes) return;
+		visited.add(node.id);
+		renderedCount++;
+
+		const connector = isRoot ? "" : isLast ? "└── " : "├── ";
+		lines.push(truncateLine(prefix + connector + formatNodeDetails(node)));
+
+		const children = childrenMap.get(node.id) ?? [];
+		const childPrefix = isRoot ? "" : prefix + (isLast ? "    " : "│   ");
+
+		for (let i = 0; i < children.length && renderedCount < maxNodes; i++) {
+			walk(children[i], childPrefix, i === children.length - 1, false);
+		}
+	}
+
+	for (let i = 0; i < roots.length && renderedCount < maxNodes; i++) {
+		walk(roots[i], "", i === roots.length - 1, true);
+	}
+
+	for (const r of refs) {
+		if (renderedCount >= maxNodes) break;
+		if (!visited.has(r.id)) {
+			visited.add(r.id);
+			renderedCount++;
+			lines.push(truncateLine(`? ${formatNodeDetails(r)}`));
+		}
+	}
+
+	const omitted = refs.length - visited.size;
+	if (omitted > 0) {
+		lines.push(truncateLine(`… ${omitted} more agents not shown`));
+	}
+
+	return lines.join("\n");
+}
+
 async function runGraphtreeCommand(
 	args: string,
 	runtime: SlashCommandRuntime | TuiSlashCommandRuntime,
@@ -214,6 +311,11 @@ async function runGraphtreeCommand(
 			return commandConsumed();
 		}
 
+		case "agents": {
+			await output(renderAgentRegistryTree());
+			return commandConsumed();
+		}
+
 		case "run": {
 			if (!rest) {
 				await output(
@@ -222,7 +324,142 @@ async function runGraphtreeCommand(
 				return commandConsumed();
 			}
 
-			return { prompt: prompt.render(graphtreeRunTemplate, { objective: rest }) };
+			const settings = "settings" in runtime ? runtime.settings : runtime.ctx.settings;
+			const maxRecursionDepth = settings.get("task.maxRecursionDepth") ?? 2;
+			const maxConcurrency = settings.get("task.maxConcurrency") ?? 32;
+			const maxRuntimeMs = settings.get("task.maxRuntimeMs") ?? 0;
+			const isolationMode = settings.get("task.isolation.mode") ?? "none";
+
+			return {
+				prompt: prompt.render(graphtreeRunTemplate, {
+					objective: rest,
+					maxRecursionDepth,
+					maxConcurrency,
+					maxRuntimeMs,
+					isolationMode,
+				}),
+			};
+		}
+
+		case "stop": {
+			const agentId = rest.trim();
+			if (!agentId) {
+				await output("Usage: /graphtree stop <agent-id>");
+				return commandConsumed();
+			}
+			const registry = AgentRegistry.global();
+			const ref = registry.get(agentId);
+			const safeAgentId = oneLineLabel(agentId);
+			if (!ref || ref.id === MAIN_AGENT_ID || ref.kind === "main" || ref.kind === "advisor") {
+				await output(
+					truncateLine(
+						`Refusing to stop agent "${safeAgentId}": Main, advisor, or unknown agents cannot be stopped via graphtree.`,
+					),
+				);
+				return commandConsumed();
+			}
+			let abortError: unknown;
+			if (ref.status === "running" && ref.session) {
+				try {
+					await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
+				} catch (error) {
+					abortError = error;
+				}
+			}
+			try {
+				await AgentLifecycleManager.global().release(ref.id);
+			} catch (error) {
+				const releaseMessage = oneLineLabel(error instanceof Error ? error.message : String(error));
+				const abortMessage = abortError
+					? ` Abort also failed: ${oneLineLabel(abortError instanceof Error ? abortError.message : String(abortError))}.`
+					: "";
+				await output(truncateLine(`Failed to release agent "${safeAgentId}": ${releaseMessage}.${abortMessage}`));
+				return commandConsumed();
+			}
+			if (abortError) {
+				const message = oneLineLabel(abortError instanceof Error ? abortError.message : String(abortError));
+				await output(truncateLine(`Released GraphTree agent "${safeAgentId}" after abort failed: ${message}.`));
+			} else {
+				await output(truncateLine(`Stopped and released GraphTree agent "${safeAgentId}".`));
+			}
+			return commandConsumed();
+		}
+
+		case "steer": {
+			if (!rest) {
+				await output("Usage: /graphtree steer <agent-id> <guidance>");
+				return commandConsumed();
+			}
+			const spaceIdx = rest.search(/\s/);
+			if (spaceIdx === -1) {
+				await output("Usage: /graphtree steer <agent-id> <guidance>");
+				return commandConsumed();
+			}
+			const agentId = rest.slice(0, spaceIdx).trim();
+			let guidance = rest.slice(spaceIdx).trim();
+			if (
+				(guidance.startsWith('"') && guidance.endsWith('"')) ||
+				(guidance.startsWith("'") && guidance.endsWith("'"))
+			) {
+				guidance = guidance.slice(1, -1).trim();
+			}
+			if (!agentId || !guidance) {
+				await output("Usage: /graphtree steer <agent-id> <guidance>");
+				return commandConsumed();
+			}
+			const registry = AgentRegistry.global();
+			const ref = registry.get(agentId);
+			const safeAgentId = oneLineLabel(agentId);
+			if (!ref || ref.id === MAIN_AGENT_ID || ref.kind === "main" || ref.kind === "advisor") {
+				await output(
+					truncateLine(
+						`Refusing to steer agent "${safeAgentId}": Main, advisor, or unknown agents cannot be steered via graphtree.`,
+					),
+				);
+				return commandConsumed();
+			}
+			try {
+				const session = await AgentLifecycleManager.global().ensureLive(agentId);
+				await session.steer(guidance);
+				await output(truncateLine(`Steered agent "${safeAgentId}".`));
+			} catch (err) {
+				const msg = oneLineLabel(err instanceof Error ? err.message : String(err));
+				await output(truncateLine(`Failed to steer agent "${safeAgentId}": ${msg}`));
+			}
+			return commandConsumed();
+		}
+
+		case "revive": {
+			const agentId = rest.trim();
+			if (!agentId) {
+				await output("Usage: /graphtree revive <agent-id>");
+				return commandConsumed();
+			}
+			const registry = AgentRegistry.global();
+			const ref = registry.get(agentId);
+			const safeAgentId = oneLineLabel(agentId);
+			if (!ref || ref.id === MAIN_AGENT_ID || ref.kind === "main" || ref.kind === "advisor") {
+				await output(
+					truncateLine(
+						`Refusing to revive agent "${safeAgentId}": Main, advisor, or unknown agents cannot be revived via graphtree.`,
+					),
+				);
+				return commandConsumed();
+			}
+			if (ref.status !== "parked") {
+				await output(
+					truncateLine(`Agent "${safeAgentId}" is already ${ref.status}; only parked agents can be revived.`),
+				);
+				return commandConsumed();
+			}
+			try {
+				await AgentLifecycleManager.global().ensureLive(agentId);
+				await output(truncateLine(`Revived agent "${safeAgentId}".`));
+			} catch (err) {
+				const msg = oneLineLabel(err instanceof Error ? err.message : String(err));
+				await output(truncateLine(`Failed to revive agent "${safeAgentId}": ${msg}`));
+			}
+			return commandConsumed();
 		}
 
 		case "merge": {
@@ -293,11 +530,15 @@ async function runGraphtreeCommand(
 		default: {
 			const helpText = [
 				"Fractal GraphTree Workflow Commands:",
-				"  /graphtree                             View active GraphTree node hierarchy (ASCII tree)",
-				"  /graphtree status                      View active GraphTree node hierarchy",
-				"  /graphtree list                        List details of active GraphTree nodes",
+				"  /graphtree                             View active GraphTree worktree node hierarchy (ASCII tree)",
+				"  /graphtree status                      View active GraphTree worktree node hierarchy",
+				"  /graphtree list                        List details of active GraphTree worktree nodes",
+				"  /graphtree agents                      View live recursive agent registry tree with status & activity",
 				"  /graphtree init <name> [branch]        Initialize an isolated GraphTree worktree node",
-				"  /graphtree run <objective>             Launch a Fractal multi-agent tree execution plan",
+				"  /graphtree run <objective>             Launch a Fractal multi-agent tree execution plan with configured bounds",
+				"  /graphtree stop <agent-id>             Abort and release a subagent",
+				"  /graphtree steer <agent-id> <guidance> Send steering guidance to a subagent (revives if parked)",
+				"  /graphtree revive <agent-id>           Revive a parked subagent",
 				"  /graphtree merge <name>                Squash-merge a completed GraphTree node into HEAD (stages, does not commit)",
 				"  /graphtree prune [name]                Remove a clean, named GraphTree worktree node (no arg: list candidates)",
 				"  /graphtree help                        Show this help guide",
