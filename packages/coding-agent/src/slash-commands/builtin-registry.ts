@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { getOAuthProviders } from "@pk-nerdsaver-ai/pi-ai/oauth";
 import * as requestDebug from "@pk-nerdsaver-ai/pi-ai/utils/request-debug";
 import { type AutocompleteItem, Markdown, Spacer } from "@pk-nerdsaver-ai/pi-tui";
-import { $which, APP_NAME, getProjectDir, setProjectDir } from "@pk-nerdsaver-ai/pi-utils";
+import { $which, APP_NAME, getProjectDir, prompt, setProjectDir } from "@pk-nerdsaver-ai/pi-utils";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
 import { writeCollabLinkFile } from "../collab/link-file";
@@ -31,6 +31,7 @@ import { IrcIpc } from "../irc/ipc";
 import { resolveMemoryBackend } from "../memory-backend";
 import { getMarkdownTheme, theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
+import deepResearchCommandTemplate from "../prompts/commands/deep-research.md" with { type: "text" };
 import type { AgentSession, FreshSessionResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { HubError, HubService, parseHubLink } from "../session/hub-service";
@@ -2829,6 +2830,26 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			const prompt = command.args.trim();
 			runtime.ctx.editor.setText("");
 			await handleCatGptCommand(prompt, "normal", runtime, true);
+		},
+	},
+	{
+		name: "deep-research",
+		description: "Run multi-step deep web research and produce a cited report",
+		inlineHint: "<question>",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const question = command.args.trim();
+			if (!question) return usage("Usage: /deep-research <question>", runtime);
+			return { prompt: prompt.render(deepResearchCommandTemplate, { question }) };
+		},
+		handleTui: (command, runtime) => {
+			const question = command.args.trim();
+			runtime.ctx.editor.setText("");
+			if (!question) {
+				runtime.ctx.showError("Usage: /deep-research <question>");
+				return;
+			}
+			return { prompt: prompt.render(deepResearchCommandTemplate, { question }) };
 		},
 	},
 	{

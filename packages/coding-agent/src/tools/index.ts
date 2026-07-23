@@ -6,6 +6,7 @@ import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
+import { DeepResearchTool } from "../deep-research/tool";
 import { EditTool } from "../edit";
 import { checkJuliaKernelAvailability } from "../eval/jl/kernel";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
@@ -562,6 +563,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	irc: IrcTool.createIf,
 	todo: s => new TodoTool(s),
 	web_search: s => new WebSearchTool(s),
+	deep_research: s => new DeepResearchTool(s),
 	search_tool_bm25: s => SearchToolBm25Tool.createIf(s, { toolProfile: s.toolProfile }),
 	write: s => new WriteTool(s),
 	memory_edit: MemoryEditTool.createIf,

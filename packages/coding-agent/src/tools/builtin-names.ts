@@ -23,6 +23,7 @@ export const BUILTIN_TOOL_NAMES = [
 	"irc",
 	"todo",
 	"web_search",
+	"deep_research",
 	"search_tool_bm25",
 	"write",
 	"memory_edit",
