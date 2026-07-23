@@ -261,6 +261,12 @@ export class QueueCore {
 		job.attempts += 1;
 		job.attemptId = crypto.randomUUID();
 		job.leaseToken = crypto.randomUUID();
+		job.logicalAttemptKey = `linear:${job.organizationId ?? "unknown"}:${job.issueId}:${job.attempts}`;
+		if (job.stagedPrompt !== undefined) {
+			// The issue was revised between attempts: latest revision wins.
+			job.prompt = job.stagedPrompt;
+			job.stagedPrompt = undefined;
+		}
 		job.leasedAt = new Date(now).toISOString();
 		job.lastHeartbeatAt = job.leasedAt;
 		job.leaseExpiresAt = new Date(now + this.#limits.leaseMs).toISOString();
@@ -271,6 +277,56 @@ export class QueueCore {
 		await this.#saveJob(job);
 		await this.#addToList(LEASED_KEY, job.id);
 		return { job, attemptId: job.attemptId, leaseToken: job.leaseToken };
+	}
+
+	/**
+	 * Apply an issue revision to the active job instead of failing closed.
+	 * A `pending` job takes the new prompt immediately; an in-flight
+	 * (`leased`/`reconcile`) job stages it for the next grant — the current
+	 * attempt keeps the prompt it started with. Latest revision wins, and
+	 * the delivery is recorded in the dedupe map so replays no-op.
+	 */
+	async refreshPrompt(
+		issueId: string,
+		prompt: string,
+		dedupeKey: string,
+	): Promise<
+		| { ok: true; job: Job; applied: "immediate" | "staged" }
+		| { ok: false; code: "no_active_job" | "duplicate" }
+	> {
+		const existingByDedupe = await this.#storage.get<{ jobId: string }>(dedupeStorageKey(dedupeKey));
+		if (existingByDedupe) return { ok: false, code: "duplicate" };
+		const activeForIssue = await this.#storage.get<{ jobId: string }>(issueKey(issueId));
+		if (!activeForIssue) return { ok: false, code: "no_active_job" };
+		const job = await this.#job(activeForIssue.jobId);
+		if (!job || (job.status !== "pending" && job.status !== "leased" && job.status !== "reconcile")) {
+			return { ok: false, code: "no_active_job" };
+		}
+		// Content idempotency: re-deliveries of the same revision (different
+		// delivery ids, identical body) must not report a refresh.
+		if ((job.stagedPrompt ?? job.prompt) === prompt) return { ok: false, code: "duplicate" };
+		if (job.status === "pending") {
+			job.prompt = prompt;
+			job.stagedPrompt = undefined;
+		} else {
+			job.stagedPrompt = prompt;
+		}
+		await this.#saveJob(job);
+		await this.#storage.put(dedupeStorageKey(dedupeKey), { jobId: job.id });
+		return { ok: true, job, applied: job.status === "pending" ? "immediate" : "staged" };
+	}
+
+	/**
+	 * Read-only fence introspection for branch-mutation guards: valid only
+	 * while the presented fence is the CURRENT lease of a live attempt.
+	 * Terminal, pending, and superseded fences are all invalid.
+	 */
+	async checkFence(id: string, attemptId: string, leaseToken: string): Promise<{ valid: boolean }> {
+		const job = await this.#job(id);
+		if (!job) return { valid: false };
+		if (job.status !== "leased" && job.status !== "reconcile") return { valid: false };
+		if (!job.attemptId || !job.leaseToken) return { valid: false };
+		return { valid: job.attemptId === attemptId && job.leaseToken === leaseToken };
 	}
 
 	/**

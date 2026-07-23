@@ -102,6 +102,21 @@ export class JobQueue extends DurableObject<Env> {
 		return this.ctx.blockConcurrencyWhile(() => this.#core.resolveReconcileByRunner(runner, reason, Date.now()));
 	}
 
+	async refreshPrompt(
+		issueId: string,
+		prompt: string,
+		dedupeKey: string,
+	): Promise<
+		| { ok: true; job: Job; applied: "immediate" | "staged" }
+		| { ok: false; code: "no_active_job" | "duplicate" }
+	> {
+		return this.ctx.blockConcurrencyWhile(() => this.#core.refreshPrompt(issueId, prompt, dedupeKey));
+	}
+
+	async checkFence(id: string, attemptId: string, leaseToken: string): Promise<{ valid: boolean }> {
+		return this.ctx.blockConcurrencyWhile(() => this.#core.checkFence(id, attemptId, leaseToken));
+	}
+
 	async complete(
 		id: string,
 		attemptId: string,

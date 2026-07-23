@@ -1,0 +1,30 @@
+#!/bin/sh
+# ompk fence guard: blocks pushes from runners whose queue lease is no
+# longer current (superseded attempt, resolved reconcile, terminal job).
+#
+# Installed for relay-spawned children via a GIT_CONFIG_* core.hooksPath
+# override; the fence triple arrives in the environment. Outside a relay
+# run (no OMPK_FENCE_URL) the guard is a no-op so the hooks directory is
+# safe to reuse.
+#
+# Fail-closed on network errors: a partitioned runner cannot verify its
+# lease, and a partitioned runner is exactly the double-writer this guard
+# exists to stop. Its heartbeats are failing too, so the job reconciles.
+
+[ -z "$OMPK_FENCE_URL" ] && exit 0
+
+if [ -z "$OMPK_FENCE_JOB" ] || [ -z "$OMPK_FENCE_ATTEMPT" ] || [ -z "$OMPK_FENCE_TOKEN" ]; then
+	echo "ompk fence guard: incomplete fence environment; refusing to push" >&2
+	exit 1
+fi
+
+body="{\"jobId\":\"$OMPK_FENCE_JOB\",\"attemptId\":\"$OMPK_FENCE_ATTEMPT\",\"leaseToken\":\"$OMPK_FENCE_TOKEN\"}"
+
+if curl -fsS --max-time 10 -X POST -H "Content-Type: application/json" \
+	-d "$body" "$OMPK_FENCE_URL" >/dev/null 2>&1; then
+	exit 0
+fi
+
+echo "ompk fence guard: queue lease is not current for this attempt; push blocked" >&2
+echo "ompk fence guard: (superseded attempt, resolved reconcile, or network partition)" >&2
+exit 1

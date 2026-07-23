@@ -65,6 +65,14 @@ class FakeQueueStub implements JobQueueStub {
 	async listJobs() {
 		return this.core.listJobs();
 	}
+
+	async refreshPrompt(issueId: string, prompt: string, dedupeKey: string) {
+		return this.core.refreshPrompt(issueId, prompt, dedupeKey);
+	}
+
+	async checkFence(id: string, attemptId: string, leaseToken: string) {
+		return this.core.checkFence(id, attemptId, leaseToken);
+	}
 }
 
 const WEBHOOK_SECRET = "test-webhook-secret";
@@ -228,7 +236,8 @@ describe("webhook authorization", () => {
 			makeEnv(),
 		);
 		const body = (await second.json()) as { skipped?: string };
-		expect(body.skipped).toBe("active_job_exists");
+		// Same content, different delivery id: a duplicate, never a refresh.
+		expect(body.skipped).toBe("duplicate");
 		expect(await harness.stub.listJobs()).toHaveLength(1);
 	});
 });
@@ -672,5 +681,133 @@ describe("transient retry via /result", () => {
 			makeEnv(),
 		);
 		expect(res.status).toBe(400);
+	});
+});
+
+describe("prompt refresh and attempt identity", () => {
+	let harness: Harness;
+
+	beforeEach(async () => {
+		harness = makeHarness();
+		await harness.worker.fetch(await webhookRequest(ISSUE_UPDATE_PAYLOAD), makeEnv());
+	});
+
+	it("stamps the logical attempt key from the webhook organization on grant", async () => {
+		harness.setIssue(makeIssue());
+		const withOrg = makeHarness();
+		await withOrg.worker.fetch(
+			await webhookRequest({ ...ISSUE_UPDATE_PAYLOAD, organizationId: "org-1" }),
+			makeEnv(),
+		);
+		const grant = await withOrg.stub.lease("relay-1");
+		expect(grant?.job.logicalAttemptKey).toBe("linear:org-1:issue-1:1");
+	});
+
+	it("refreshes a pending job's prompt immediately on an authorized revision", async () => {
+		harness.setIssue(makeIssue({ description: "Updated: also handle CRLF", updatedAt: "2026-07-14T00:00:00.000Z" }));
+		const response = await harness.worker.fetch(
+			await webhookRequest(ISSUE_UPDATE_PAYLOAD, { deliveryId: "delivery-2" }),
+			makeEnv(),
+		);
+		expect((await response.json()) as Record<string, unknown>).toMatchObject({ ok: true, refreshed: "immediate" });
+		const jobs = await harness.stub.listJobs();
+		expect(jobs).toHaveLength(1);
+		expect(jobs[0]!.prompt).toContain("Updated: also handle CRLF");
+	});
+
+	it("stages a revision while an attempt is in flight and applies it on the next grant", async () => {
+		const first = await harness.stub.lease("relay-1");
+		harness.setIssue(makeIssue({ description: "Second thoughts: different approach", updatedAt: "2026-07-15T00:00:00.000Z" }));
+		const response = await harness.worker.fetch(
+			await webhookRequest(ISSUE_UPDATE_PAYLOAD, { deliveryId: "delivery-3" }),
+			makeEnv(),
+		);
+		expect((await response.json()) as Record<string, unknown>).toMatchObject({ ok: true, refreshed: "staged" });
+		// The in-flight attempt keeps the prompt it started with.
+		expect((await harness.stub.getJob(first!.job.id))?.prompt).toContain("It breaks on");
+
+		// Transient failure ends the attempt; the regrant carries the revision.
+		await harness.stub.complete(first!.job.id, first!.attemptId, first!.leaseToken, {
+			success: false,
+			output: "",
+			error: "socket hang up",
+			failureClass: "transient",
+		});
+		harness.stub.nowOffsetMs = 31_000;
+		const second = await harness.stub.lease("relay-2");
+		expect(second?.job.prompt).toContain("Second thoughts");
+		expect(second?.job.stagedPrompt).toBeUndefined();
+	});
+
+	it("ignores a replayed revision delivery", async () => {
+		harness.setIssue(makeIssue({ updatedAt: "2026-07-14T00:00:00.000Z" }));
+		await harness.worker.fetch(await webhookRequest(ISSUE_UPDATE_PAYLOAD, { deliveryId: "delivery-2" }), makeEnv());
+		const replay = await harness.worker.fetch(
+			await webhookRequest(ISSUE_UPDATE_PAYLOAD, { deliveryId: "delivery-2" }),
+			makeEnv(),
+		);
+		expect((await replay.json()) as Record<string, unknown>).toMatchObject({ ok: true, skipped: "duplicate" });
+	});
+});
+
+describe("fence-check endpoint", () => {
+	let harness: Harness;
+	let leased: { id: string; attemptId: string; leaseToken: string };
+
+	beforeEach(async () => {
+		harness = makeHarness();
+		await harness.worker.fetch(await webhookRequest(ISSUE_UPDATE_PAYLOAD), makeEnv());
+		const grant = await harness.stub.lease("relay-1");
+		leased = { id: grant!.job.id, attemptId: grant!.attemptId, leaseToken: grant!.leaseToken };
+	});
+
+	function fenceRequest(body: unknown): Request {
+		return new Request("https://worker.test/fence-check", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		});
+	}
+
+	it("validates the current fence and rejects forged or malformed ones", async () => {
+		const ok = await harness.worker.fetch(
+			fenceRequest({ jobId: leased.id, attemptId: leased.attemptId, leaseToken: leased.leaseToken }),
+			makeEnv(),
+		);
+		expect(ok.status).toBe(200);
+		expect((await ok.json()) as Record<string, unknown>).toEqual({ valid: true });
+
+		const forged = await harness.worker.fetch(
+			fenceRequest({ jobId: leased.id, attemptId: leased.attemptId, leaseToken: "forged" }),
+			makeEnv(),
+		);
+		expect(forged.status).toBe(409);
+
+		const malformed = await harness.worker.fetch(fenceRequest({ jobId: leased.id }), makeEnv());
+		expect(malformed.status).toBe(400);
+	});
+
+	it("invalidates a superseded fence after retry and re-grant", async () => {
+		await harness.stub.complete(leased.id, leased.attemptId, leased.leaseToken, {
+			success: false,
+			output: "",
+			error: "timeout",
+			failureClass: "transient",
+		});
+		harness.stub.nowOffsetMs = 31_000;
+		const regrant = await harness.stub.lease("relay-2");
+		expect(regrant?.job.id).toBe(leased.id);
+
+		const stale = await harness.worker.fetch(
+			fenceRequest({ jobId: leased.id, attemptId: leased.attemptId, leaseToken: leased.leaseToken }),
+			makeEnv(),
+		);
+		expect(stale.status).toBe(409);
+
+		const fresh = await harness.worker.fetch(
+			fenceRequest({ jobId: leased.id, attemptId: regrant!.attemptId, leaseToken: regrant!.leaseToken }),
+			makeEnv(),
+		);
+		expect(fresh.status).toBe(200);
 	});
 });

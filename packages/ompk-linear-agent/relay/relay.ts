@@ -27,6 +27,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { hostname } from "node:os";
+import { fileURLToPath } from "node:url";
 
 const WORKER_URL = process.env.WORKER_URL ?? "https://ompk-linear-agent.pkkidking.workers.dev";
 const RELAY_TOKEN = process.env.RELAY_TOKEN;
@@ -87,8 +88,14 @@ export function buildOmpArgs(model: string, prompt: string): string[] {
 export type SpawnFn = (
 	command: string,
 	args: readonly string[],
-	options: { cwd: string; shell?: false },
+	options: { cwd: string; shell?: false; env?: NodeJS.ProcessEnv },
 ) => ChildProcess;
+
+export interface RunHooks {
+	onSpawn?: (child: ChildProcess) => void;
+	/** Full child environment (replaces, not merges; spread process.env in). */
+	env?: NodeJS.ProcessEnv;
+}
 
 /** Runs the job's prompt through `omp` headlessly — argv only, no shell. */
 export function runOmp(
@@ -96,11 +103,14 @@ export function runOmp(
 	prompt: string,
 	spawnImpl: SpawnFn = spawn,
 	timeoutMs: number = JOB_TIMEOUT_MS,
-	onSpawn?: (child: ChildProcess) => void,
+	hooks: RunHooks = {},
 ): Promise<JobRunResult> {
 	const { promise, resolve } = Promise.withResolvers<JobRunResult>();
-	const child = spawnImpl(OMP_BIN, buildOmpArgs(model, prompt), { cwd: WORKSPACE_DIR });
-	onSpawn?.(child);
+	const child = spawnImpl(OMP_BIN, buildOmpArgs(model, prompt), {
+		cwd: WORKSPACE_DIR,
+		...(hooks.env ? { env: hooks.env } : {}),
+	});
+	hooks.onSpawn?.(child);
 
 	let stdout = "";
 	let stderr = "";
@@ -141,7 +151,7 @@ export async function executeJob(
 	allowedModels: readonly string[],
 	spawnImpl: SpawnFn = spawn,
 	timeoutMs: number = JOB_TIMEOUT_MS,
-	onSpawn?: (child: ChildProcess) => void,
+	hooks: RunHooks = {},
 ): Promise<JobRunResult> {
 	if (!allowedModels.includes(job.model)) {
 		// Capacity/config mismatch, not a property of the work: another
@@ -153,7 +163,7 @@ export async function executeJob(
 			failureClass: "transient",
 		};
 	}
-	return runOmp(job.model, job.prompt, spawnImpl, timeoutMs, onSpawn);
+	return runOmp(job.model, job.prompt, spawnImpl, timeoutMs, hooks);
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -232,6 +242,29 @@ async function announceStartup(token: string): Promise<void> {
 	}
 }
 
+/** Hooks directory shipped next to the relay; contains the pre-push fence guard. */
+const GIT_HOOKS_DIR = fileURLToPath(new URL("git-hooks/", import.meta.url)).replace(/[\\/]+$/, "");
+
+/**
+ * Child environment for one attempt: the fence triple (the pre-push guard's
+ * credential — never the relay bearer token) plus a `core.hooksPath`
+ * override injected through GIT_CONFIG_* so every git invocation in the
+ * child tree runs the fence guard. The override shadows repo-local hooks
+ * for the child, which is intended for a headless runner workspace.
+ */
+function fenceEnv(job: Job): NodeJS.ProcessEnv {
+	return {
+		...process.env,
+		OMPK_FENCE_URL: `${WORKER_URL}/fence-check`,
+		OMPK_FENCE_JOB: job.id,
+		OMPK_FENCE_ATTEMPT: job.attemptId,
+		OMPK_FENCE_TOKEN: job.leaseToken,
+		GIT_CONFIG_COUNT: "1",
+		GIT_CONFIG_KEY_0: "core.hooksPath",
+		GIT_CONFIG_VALUE_0: GIT_HOOKS_DIR,
+	};
+}
+
 async function runOnce(token: string, allowedModels: readonly string[]): Promise<boolean> {
 	const job = await pollJob(token);
 	if (!job) return false;
@@ -249,8 +282,11 @@ async function runOnce(token: string, allowedModels: readonly string[]): Promise
 		});
 	}, cadence);
 	try {
-		const result = await executeJob(job, allowedModels, spawn, JOB_TIMEOUT_MS, spawned => {
-			child = spawned;
+		const result = await executeJob(job, allowedModels, spawn, JOB_TIMEOUT_MS, {
+			onSpawn: spawned => {
+				child = spawned;
+			},
+			env: fenceEnv(job),
 		});
 		if (fenceLost) {
 			console.error(`[${new Date().toISOString()}] job ${job.id} discarded: lease no longer held`);

@@ -484,3 +484,70 @@ describe("retry classification and backoff", () => {
 		expect(dupe).toEqual({ ok: false, code: "not_leased" });
 	});
 });
+
+describe("attempt identity and fence introspection", () => {
+	it("stamps a logical attempt key per grant, with an unknown-org fallback", async () => {
+		const core = new QueueCore(new MemoryStorage(), { backoffScheduleMs: [10] });
+		const job = makeJob({ organizationId: "org-9" });
+		const anon = makeJob();
+		await core.admit(job);
+		await core.admit(anon);
+
+		const first = await core.lease("relay-1", T0);
+		expect(first?.job.logicalAttemptKey).toBe(`linear:org-9:${job.issueId}:1`);
+		const second = await core.lease("relay-1", T0);
+		expect(second?.job.logicalAttemptKey).toBe(`linear:unknown:${anon.issueId}:1`);
+
+		// The key advances with the attempt counter on re-grant.
+		await core.complete(job.id, first!.attemptId, first!.leaseToken, {
+			success: false,
+			output: "",
+			failureClass: "transient",
+		}, T0 + 1);
+		const retry = await core.lease("relay-2", T0 + 100);
+		expect(retry?.job.logicalAttemptKey).toBe(`linear:org-9:${job.issueId}:2`);
+	});
+
+	it("treats a reconcile-parked fence as current and terminal fences as invalid", async () => {
+		const core = new QueueCore(new MemoryStorage(), { leaseMs: 100 });
+		const job = makeJob();
+		await core.admit(job);
+		const grant = await core.lease("relay-1", T0);
+
+		expect(await core.checkFence(job.id, grant!.attemptId, grant!.leaseToken)).toEqual({ valid: true });
+		expect(await core.checkFence(job.id, grant!.attemptId, "forged")).toEqual({ valid: false });
+		expect(await core.checkFence("missing", "a", "t")).toEqual({ valid: false });
+
+		// Parked in reconcile: the original runner still holds the current
+		// attempt, so its branch pushes remain legitimate.
+		await core.sweep(T0 + 101);
+		expect(await core.checkFence(job.id, grant!.attemptId, grant!.leaseToken)).toEqual({ valid: true });
+
+		// Terminal: nothing may push under this job's identity.
+		await core.complete(job.id, grant!.attemptId, grant!.leaseToken, { success: true, output: "ok" }, T0 + 120);
+		expect(await core.checkFence(job.id, grant!.attemptId, grant!.leaseToken)).toEqual({ valid: false });
+	});
+
+	it("latest revision wins when refreshes stack up while in flight", async () => {
+		const core = new QueueCore(new MemoryStorage(), { backoffScheduleMs: [10] });
+		const job = makeJob();
+		await core.admit(job);
+		const grant = await core.lease("relay-1", T0);
+
+		expect(await core.refreshPrompt(job.issueId, "revision A", "d-1")).toMatchObject({ ok: true, applied: "staged" });
+		expect(await core.refreshPrompt(job.issueId, "revision B", "d-2")).toMatchObject({ ok: true, applied: "staged" });
+		expect(await core.refreshPrompt(job.issueId, "revision B again", "d-2")).toEqual({ ok: false, code: "duplicate" });
+
+		await core.complete(job.id, grant!.attemptId, grant!.leaseToken, {
+			success: false,
+			output: "",
+			failureClass: "transient",
+		}, T0 + 1);
+		const regrant = await core.lease("relay-1", T0 + 100);
+		expect(regrant?.job.prompt).toBe("revision B");
+
+		// Terminal job: refresh reports no active job.
+		await core.complete(job.id, regrant!.attemptId, regrant!.leaseToken, { success: true, output: "done" }, T0 + 200);
+		expect(await core.refreshPrompt(job.issueId, "too late", "d-3")).toEqual({ ok: false, code: "no_active_job" });
+	});
+});

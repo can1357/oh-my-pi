@@ -45,6 +45,19 @@ export interface Job {
 	dedupeKey: string;
 	/** Number of lease attempts consumed so far. */
 	attempts: number;
+	/** Linear workspace this job belongs to, from the webhook payload. */
+	organizationId?: string;
+	/**
+	 * Logical attempt identity, `linear:<org>:<issueId>:<attempt>`, stamped
+	 * per grant. Stable across systems for audit and cross-referencing;
+	 * the unguessable fence (`attemptId` + `leaseToken`) stays separate.
+	 */
+	logicalAttemptKey?: string;
+	/**
+	 * Prompt refresh staged while an attempt is in flight (issue revised
+	 * mid-run); applied on the next grant. Latest revision wins.
+	 */
+	stagedPrompt?: string;
 	/** Current lease fencing identity; only the holder may complete. */
 	attemptId?: string;
 	leaseToken?: string;
@@ -75,6 +88,7 @@ export interface RedactedJob {
 	status: JobStatus;
 	createdAt: string;
 	attempts: number;
+	logicalAttemptKey?: string;
 	leasedAt?: string;
 	leasedBy?: string;
 	lastHeartbeatAt?: string;
@@ -98,6 +112,7 @@ export function redactJob(job: Job): RedactedJob {
 		...(job.reconcileAt ? { reconcileAt: job.reconcileAt } : {}),
 		...(job.reconcileReason ? { reconcileReason: job.reconcileReason } : {}),
 		...(job.notBefore ? { notBefore: job.notBefore } : {}),
+		...(job.logicalAttemptKey ? { logicalAttemptKey: job.logicalAttemptKey } : {}),
 		...(job.result ? { result: { success: job.result.success, completedAt: job.result.completedAt } } : {}),
 	};
 }

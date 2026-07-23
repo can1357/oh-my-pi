@@ -8,7 +8,7 @@ posts the result back to Linear as a comment.
 ## Pieces
 
 - `src/index.ts` — Cloudflare entrypoint (binds the real Linear API + Durable Object queue)
-- `src/worker.ts` — request handlers (`/webhook`, `/poll`, `/result`, `/heartbeat`, `/reconcile`, `/status`)
+- `src/worker.ts` — request handlers (`/webhook`, `/poll`, `/result`, `/heartbeat`, `/reconcile`, `/fence-check`, `/status`)
 - `src/dispatch-policy.ts` — webhook dispatch authorization + replay dedupe key
 - `src/linear.ts` — webhook signature verification + Linear GraphQL calls
 - `src/queue-core.ts` / `src/queue-do.ts` — atomic, lease-fenced job queue (Durable Object)
@@ -64,6 +64,32 @@ Failures are classified for retry (`failureClass` on the result):
   posts nothing to Linear (no per-retry noise), and invalidates the
   attempt's fence; the gate never blocks later jobs in the queue. On
   budget exhaustion the failure comment carries the budget note.
+
+Attempt identity and prompt refresh:
+
+- Every grant stamps a logical attempt key,
+  `linear:<organizationId>:<issueId>:<attempt>` (`unknown` when the webhook
+  carried no organization), exposed in `/status` for audit and
+  cross-referencing; the unguessable fence stays separate.
+- An authorized issue revision arriving while a job is active refreshes the
+  prompt instead of being dropped: a `pending` job takes it immediately, an
+  in-flight job stages it for the next grant (the running attempt keeps the
+  prompt it started with). Latest revision wins; identical content and
+  replayed deliveries no-op as duplicates.
+
+Branch-mutation fencing:
+
+- The relay exports the fence triple (`OMPK_FENCE_JOB` / `_ATTEMPT` /
+  `_TOKEN`, plus `OMPK_FENCE_URL`) and a `core.hooksPath` override
+  (`GIT_CONFIG_*`) into the `omp` child, pointing at
+  `relay/git-hooks/pre-push`. Every `git push` in the child tree first
+  validates the fence against `POST /fence-check` (unauthenticated by
+  design: the fence triple is the credential, and the runner env must never
+  carry relay bearer tokens). Superseded, resolved, or terminal fences —
+  and network partitions — block the push fail-closed; a reconcile-parked
+  fence remains valid because the original runner still owns the attempt.
+  The override shadows repo-local hooks for the child, which is intended
+  for a headless runner workspace.
 
 ## Flow
 
@@ -178,14 +204,15 @@ This Worker implements the *manual admission* mode of
 [docs/multi-agent-fork-collaboration.md](../../docs/multi-agent-fork-collaboration.md):
 a human dispatcher sets `Queue/Queued` and the assignee before anything runs.
 
-Of the fuller automation contract described there, the liveness and retry
-halves are now implemented: fenced heartbeats, reconcile parking (never a
-direct re-grant), runner startup attestation, reconcile/dead-letter
-surfacing to Linear as issue comments, and transient-failure retries with
-the documented backoff schedule. Still intentionally unimplemented until
-built and verified: logical attempt identity keyed to the Linear agent
-session, fencing enforced on branch mutations, and the `Queue/Reconcile` /
-`Queue/Dead Letter` label mirroring (comments only today).
+Of the fuller automation contract described there, the liveness, retry,
+identity, and branch-fencing pieces are now implemented: fenced heartbeats,
+reconcile parking (never a direct re-grant), runner startup attestation,
+reconcile/dead-letter surfacing as issue comments, transient-failure
+retries with the documented backoff schedule, per-grant logical attempt
+keys, in-flight prompt refresh, and the pre-push fence guard on branch
+mutations. Still intentionally unimplemented until built and verified: the
+`Queue/Reconcile` / `Queue/Dead Letter` label mirroring (comments only
+today) and the append-only transition audit log.
 
 ## Testing
 

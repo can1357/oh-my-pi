@@ -47,6 +47,15 @@ export interface JobQueueStub {
 		opts: { requeue: boolean; reason: string; attemptId?: string; leaseToken?: string },
 	): Promise<ReconcileOutcome>;
 	resolveReconcileByRunner(runner: string, reason: string): Promise<Array<{ job: Job; disposition: ReconcileDisposition }>>;
+	refreshPrompt(
+		issueId: string,
+		prompt: string,
+		dedupeKey: string,
+	): Promise<
+		| { ok: true; job: Job; applied: "immediate" | "staged" }
+		| { ok: false; code: "no_active_job" | "duplicate" }
+	>;
+	checkFence(id: string, attemptId: string, leaseToken: string): Promise<{ valid: boolean }>;
 	getJob(id: string): Promise<Job | null>;
 	listJobs(): Promise<Job[]>;
 }
@@ -79,6 +88,7 @@ function bearerAuthorized(request: Request, expectedSecret: string | undefined):
 interface LinearWebhookPayload {
 	action?: string;
 	type?: string;
+	organizationId?: string;
 	data?: {
 		id?: string;
 		issueId?: string;
@@ -134,22 +144,34 @@ async function handleWebhook(request: Request, env: Env, deps: WorkerDeps): Prom
 		return json({ ok: true, skipped: decision.reason, issue: issue.identifier });
 	}
 
+	const prompt = `${issue.title}\n\n${issue.description ?? ""}`.trim();
 	const job: Job = {
 		id: crypto.randomUUID(),
 		issueId: issue.id,
 		issueIdentifier: issue.identifier,
 		model: decision.model,
-		prompt: `${issue.title}\n\n${issue.description ?? ""}`.trim(),
+		prompt,
 		status: "pending",
 		createdAt: new Date().toISOString(),
 		dedupeKey: decision.dedupeKey,
 		attempts: 0,
+		...(payload.organizationId ? { organizationId: payload.organizationId } : {}),
 	};
 	const admitted = await deps.queue(env).admit(job);
-	if (!admitted.accepted) {
-		return json({ ok: true, skipped: admitted.reason, issue: issue.identifier });
+	if (admitted.accepted) {
+		return json({ ok: true, queued: admitted.jobId, issue: issue.identifier, model: decision.model });
 	}
-	return json({ ok: true, queued: admitted.jobId, issue: issue.identifier, model: decision.model });
+	if (admitted.reason === "active_job_exists") {
+		// The issue was revised while a job is active: attach the new prompt
+		// instead of dropping the delivery (latest revision wins; in-flight
+		// attempts keep the prompt they started with).
+		const refreshed = await deps.queue(env).refreshPrompt(issue.id, prompt, decision.dedupeKey);
+		if (refreshed.ok) {
+			return json({ ok: true, refreshed: refreshed.applied, job: refreshed.job.id, issue: issue.identifier });
+		}
+		return json({ ok: true, skipped: refreshed.code, issue: issue.identifier });
+	}
+	return json({ ok: true, skipped: admitted.reason, issue: issue.identifier });
 }
 
 /**
@@ -365,6 +387,32 @@ async function handleStatus(request: Request, env: Env, deps: WorkerDeps): Promi
 	return json({ jobs: jobs.map(redactJob) });
 }
 
+interface FenceCheckBody {
+	jobId?: unknown;
+	attemptId?: unknown;
+	leaseToken?: unknown;
+}
+
+/**
+ * Read-only fence introspection for branch-mutation guards (git pre-push).
+ * Deliberately unauthenticated: the fence triple IS the credential, the
+ * response leaks only validity, and the runner env must never carry relay
+ * bearer tokens (it executes model-directed work).
+ */
+async function handleFenceCheck(request: Request, env: Env, deps: WorkerDeps): Promise<Response> {
+	let body: FenceCheckBody;
+	try {
+		body = (await request.json()) as FenceCheckBody;
+	} catch {
+		return json({ error: "invalid body" }, 400);
+	}
+	if (typeof body.jobId !== "string" || typeof body.attemptId !== "string" || typeof body.leaseToken !== "string") {
+		return json({ error: "invalid body" }, 400);
+	}
+	const { valid } = await deps.queue(env).checkFence(body.jobId, body.attemptId, body.leaseToken);
+	return valid ? json({ valid: true }) : json({ valid: false }, 409);
+}
+
 export function createWorker(deps: WorkerDeps): { fetch(request: Request, env: Env): Promise<Response> } {
 	return {
 		async fetch(request: Request, env: Env): Promise<Response> {
@@ -384,6 +432,9 @@ export function createWorker(deps: WorkerDeps): { fetch(request: Request, env: E
 			}
 			if (request.method === "POST" && url.pathname === "/reconcile") {
 				return handleReconcile(request, env, deps);
+			}
+			if (request.method === "POST" && url.pathname === "/fence-check") {
+				return handleFenceCheck(request, env, deps);
 			}
 			if (request.method === "GET" && url.pathname === "/status") {
 				return handleStatus(request, env, deps);

@@ -18,7 +18,7 @@ class FakeChild extends EventEmitter {
 interface SpawnCapture {
 	command: string;
 	args: readonly string[];
-	options: { cwd: string; shell?: false };
+	options: { cwd: string; shell?: false; env?: NodeJS.ProcessEnv };
 }
 
 function makeSpawn(script: (child: FakeChild) => void): { spawn: SpawnFn; calls: SpawnCapture[] } {
@@ -58,6 +58,34 @@ describe("buildOmpArgs", () => {
 	it("keeps a flag-shaped prompt positional", () => {
 		const args = buildOmpArgs("combo-a", "--api-key steal");
 		expect(args.slice(args.indexOf("--"))).toEqual(["--", "--api-key steal"]);
+	});
+});
+
+describe("fence environment threading", () => {
+	it("passes the hooks env through to the spawned process verbatim", async () => {
+		const { spawn, calls } = makeSpawn(child => {
+			child.emit("close", 0);
+		});
+		const env = {
+			OMPK_FENCE_URL: "https://worker.test/fence-check",
+			OMPK_FENCE_JOB: "job-1",
+			OMPK_FENCE_ATTEMPT: "attempt-1",
+			OMPK_FENCE_TOKEN: "token-1",
+			GIT_CONFIG_COUNT: "1",
+			GIT_CONFIG_KEY_0: "core.hooksPath",
+			GIT_CONFIG_VALUE_0: "/relay/git-hooks",
+		};
+		await executeJob({ model: "combo-a", prompt: "p" }, ["combo-a"], spawn, 1_000, { env });
+		expect(calls).toHaveLength(1);
+		expect(calls[0]!.options.env).toEqual(env);
+	});
+
+	it("spawns with the inherited environment when no hooks env is given", async () => {
+		const { spawn, calls } = makeSpawn(child => {
+			child.emit("close", 0);
+		});
+		await executeJob({ model: "combo-a", prompt: "p" }, ["combo-a"], spawn, 1_000);
+		expect(calls[0]!.options.env).toBeUndefined();
 	});
 });
 
