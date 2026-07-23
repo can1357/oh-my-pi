@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 
 function runCommand(command: string, args: string[]): string | null {
 	try {
-		const result = Bun.spawnSync([command, ...args], { stdout: "pipe", stderr: "pipe" });
+		const result = Bun.spawnSync([command, ...args], { stdout: "pipe", stderr: "pipe", windowsHide: true });
 		if (result.exitCode !== 0) return null;
 		return result.stdout.toString("utf-8").trim();
 	} catch {

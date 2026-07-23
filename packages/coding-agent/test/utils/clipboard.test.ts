@@ -90,6 +90,7 @@ describe("readImageFromClipboard on WSL", () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.cmd[0]).toBe("powershell.exe");
 		expect(calls[0]?.cmd).toContain("-NoProfile");
+		expect(calls[0]?.options.windowsHide).toBe(true);
 		expect(image).not.toBeNull();
 		expect(image?.mimeType).toBe("image/png");
 		// PNG magic bytes — proves we actually base64-decoded the payload.
@@ -157,6 +158,7 @@ describe("readImageFromClipboard dispatch", () => {
 
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.cmd[0]).toBe("powershell.exe");
+		expect(calls[0]?.options.windowsHide).toBe(true);
 		expect(image?.mimeType).toBe("image/png");
 		expect(Array.from(image!.data.subarray(0, 8))).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 		expect(calls[0]?.cmd).toContain("-Sta");

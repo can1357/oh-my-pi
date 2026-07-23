@@ -232,7 +232,7 @@ const VARIANT_CACHE_ENV_KEY = "__PI_NATIVE_VARIANT_CACHE";
 function runCommand(command, args) {
 	if (typeof Bun !== "undefined" && typeof Bun.spawnSync === "function") {
 		try {
-			const result = Bun.spawnSync([command, ...args], { stdout: "pipe", stderr: "pipe" });
+			const result = Bun.spawnSync([command, ...args], { stdout: "pipe", stderr: "pipe", windowsHide: true });
 			if (result.exitCode === 0) {
 				return result.stdout.toString("utf-8").trim();
 			}
@@ -241,7 +241,7 @@ function runCommand(command, args) {
 		}
 	}
 	try {
-		const result = childProcess.spawnSync(command, args, { encoding: "utf-8" });
+		const result = childProcess.spawnSync(command, args, { encoding: "utf-8", windowsHide: true });
 		if (result.error) return null;
 		if (result.status !== 0) return null;
 		return (result.stdout || "").trim();
