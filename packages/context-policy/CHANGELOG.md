@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.3.0] - 2026-07-23
+
 ### Added
 
 - Added opt-in capture admission and default retention policy primitives for persistent context.

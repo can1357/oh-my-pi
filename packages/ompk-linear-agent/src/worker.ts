@@ -46,14 +46,16 @@ export interface JobQueueStub {
 		id: string,
 		opts: { requeue: boolean; reason: string; attemptId?: string; leaseToken?: string },
 	): Promise<ReconcileOutcome>;
-	resolveReconcileByRunner(runner: string, reason: string): Promise<Array<{ job: Job; disposition: ReconcileDisposition }>>;
+	resolveReconcileByRunner(
+		runner: string,
+		reason: string,
+	): Promise<Array<{ job: Job; disposition: ReconcileDisposition }>>;
 	refreshPrompt(
 		issueId: string,
 		prompt: string,
 		dedupeKey: string,
 	): Promise<
-		| { ok: true; job: Job; applied: "immediate" | "staged" }
-		| { ok: false; code: "no_active_job" | "duplicate" }
+		{ ok: true; job: Job; applied: "immediate" | "staged" } | { ok: false; code: "no_active_job" | "duplicate" }
 	>;
 	checkFence(id: string, attemptId: string, leaseToken: string): Promise<{ valid: boolean }>;
 	getJob(id: string): Promise<Job | null>;
@@ -191,7 +193,10 @@ async function handlePoll(request: Request, env: Env, deps: WorkerDeps): Promise
 		} catch (err) {
 			// Best-effort mirror: the parked state is authoritative and visible
 			// via /status; a Linear hiccup must not block job pickup.
-			console.error(`reconcile comment failed for ${job.issueIdentifier}:`, err instanceof Error ? err.message : err);
+			console.error(
+				`reconcile comment failed for ${job.issueIdentifier}:`,
+				err instanceof Error ? err.message : err,
+			);
 		}
 	}
 	const grant = await queue.lease(relayName);

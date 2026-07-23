@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.3.0] - 2026-07-23
+
 ### Added
 
 - Added a gopk capture-daemon activity sink with capture-root validation and constrained raw-clip cleanup.

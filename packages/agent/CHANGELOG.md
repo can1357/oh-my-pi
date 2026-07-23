@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.3.0] - 2026-07-23
+
 ### Added
 
 - Added `maskConsumedObservations()` pruning pass that deterministically replaces tool results the model has already acted on with `[<toolName> result consumed]` placeholders, preserving reasoning traces and action history. Marks masked entries via `ToolResultMessage.consumed` so downstream consumers (compaction boundary tracking, transcript rebuilds, telemetry) can tell the observation was elided rather than dropped.
@@ -16,6 +18,7 @@
 ### Added
 
 - Added Mixture-of-Agents stream composition for read-only candidate lanes feeding private advice into a tool-capable synthesizer/verifier model.
+
 ## [16.2.2] - 2026-06-27
 
 ### Added

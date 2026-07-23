@@ -291,8 +291,7 @@ export class QueueCore {
 		prompt: string,
 		dedupeKey: string,
 	): Promise<
-		| { ok: true; job: Job; applied: "immediate" | "staged" }
-		| { ok: false; code: "no_active_job" | "duplicate" }
+		{ ok: true; job: Job; applied: "immediate" | "staged" } | { ok: false; code: "no_active_job" | "duplicate" }
 	> {
 		const existingByDedupe = await this.#storage.get<{ jobId: string }>(dedupeStorageKey(dedupeKey));
 		if (existingByDedupe) return { ok: false, code: "duplicate" };

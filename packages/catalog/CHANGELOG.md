@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.3.0] - 2026-07-23
+
 ### Added
 
 - Added the Devin (`devin-agent`) catalog descriptor, credentialed runtime discovery, and an offline `swe-1-6` fallback model for startup before discovery completes.

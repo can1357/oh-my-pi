@@ -50,7 +50,10 @@ class FakeQueueStub implements JobQueueStub {
 		return this.core.sweep(this.#now());
 	}
 
-	async resolveReconcile(id: string, opts: { requeue: boolean; reason: string; attemptId?: string; leaseToken?: string }) {
+	async resolveReconcile(
+		id: string,
+		opts: { requeue: boolean; reason: string; attemptId?: string; leaseToken?: string },
+	) {
 		return this.core.resolveReconcile(id, { ...opts, now: this.#now() });
 	}
 
@@ -486,7 +489,10 @@ describe("liveness endpoints", () => {
 		expect(malformed.status).toBe(400);
 
 		const wrongCredential = await harness.worker.fetch(
-			heartbeatRequest({ jobId: leased.id, attemptId: leased.attemptId, leaseToken: leased.leaseToken }, STATUS_TOKEN),
+			heartbeatRequest(
+				{ jobId: leased.id, attemptId: leased.attemptId, leaseToken: leased.leaseToken },
+				STATUS_TOKEN,
+			),
 			makeEnv(),
 		);
 		expect(wrongCredential.status).toBe(401);
@@ -695,10 +701,7 @@ describe("prompt refresh and attempt identity", () => {
 	it("stamps the logical attempt key from the webhook organization on grant", async () => {
 		harness.setIssue(makeIssue());
 		const withOrg = makeHarness();
-		await withOrg.worker.fetch(
-			await webhookRequest({ ...ISSUE_UPDATE_PAYLOAD, organizationId: "org-1" }),
-			makeEnv(),
-		);
+		await withOrg.worker.fetch(await webhookRequest({ ...ISSUE_UPDATE_PAYLOAD, organizationId: "org-1" }), makeEnv());
 		const grant = await withOrg.stub.lease("relay-1");
 		expect(grant?.job.logicalAttemptKey).toBe("linear:org-1:issue-1:1");
 	});
@@ -717,7 +720,9 @@ describe("prompt refresh and attempt identity", () => {
 
 	it("stages a revision while an attempt is in flight and applies it on the next grant", async () => {
 		const first = await harness.stub.lease("relay-1");
-		harness.setIssue(makeIssue({ description: "Second thoughts: different approach", updatedAt: "2026-07-15T00:00:00.000Z" }));
+		harness.setIssue(
+			makeIssue({ description: "Second thoughts: different approach", updatedAt: "2026-07-15T00:00:00.000Z" }),
+		);
 		const response = await harness.worker.fetch(
 			await webhookRequest(ISSUE_UPDATE_PAYLOAD, { deliveryId: "delivery-3" }),
 			makeEnv(),

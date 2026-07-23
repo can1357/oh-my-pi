@@ -66,7 +66,10 @@ export function normalizeRepoKey(remoteUrl: string): string | null {
 			return null;
 		}
 	}
-	path = path.replace(/^\/+/, "").replace(/\.git$/, "").replace(/\/+$/, "");
+	path = path
+		.replace(/^\/+/, "")
+		.replace(/\.git$/, "")
+		.replace(/\/+$/, "");
 	const segments = path.split("/");
 	if (segments.length !== 2 || segments.some(s => s.length === 0)) return null;
 	return `${segments[0]}/${segments[1]}`.toLowerCase();

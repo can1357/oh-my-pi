@@ -107,8 +107,7 @@ export class JobQueue extends DurableObject<Env> {
 		prompt: string,
 		dedupeKey: string,
 	): Promise<
-		| { ok: true; job: Job; applied: "immediate" | "staged" }
-		| { ok: false; code: "no_active_job" | "duplicate" }
+		{ ok: true; job: Job; applied: "immediate" | "staged" } | { ok: false; code: "no_active_job" | "duplicate" }
 	> {
 		return this.ctx.blockConcurrencyWhile(() => this.#core.refreshPrompt(issueId, prompt, dedupeKey));
 	}

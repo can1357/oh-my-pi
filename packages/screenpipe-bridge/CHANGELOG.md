@@ -2,11 +2,12 @@
 
 ## [Unreleased]
 
+## [16.3.0] - 2026-07-23
+
 ### Added
 
 - Added `ScreenpipeBridgeRunner`, a poll loop around `ScreenpipeBridge.runOnce()` for host processes: an unref'd single-timer chain (polls never overlap and an idle loop never keeps the process alive), exponential backoff on failure capped at a configurable ceiling (a stopped local daemon is routine, so only the first failure of a streak warns), and an idempotent `stop()` that awaits any in-flight poll so hosts can dispose it deterministically. The pure delay policy is exported as `computeNextPollDelayMs`.
 - Added a structural `BridgeLogger` (`info`/`warn` with optional context) accepted by `ScreenpipeClient` and `ScreenpipeBridgeRunner`, with a `consoleBridgeLogger` default, so hosts can route bridge diagnostics through their own logging facility; the client's dropped-row warning now goes through it instead of `console.warn`.
-
 - Added `ScreenpipeClient`, a read-only client for a local screenpipe instance's `/raw_sql` endpoint that only returns frames where every present payload carries its matching redaction watermark — text surfaces need their text-redaction watermarks, a snapshot needs the image-redaction watermark — re-validated client-side since screenpipe is a separate, untrusted process. Zoneless SQLite timestamps are normalized as UTC, SQL `NULL` serialized as `""` is treated as absent, and dropped rows are counted in a warning rather than vanishing silently. The query touches neither `image_redaction_version`/`image_redaction_regions` (dropped by screenpipe migration `20260507000000`) nor `content_hash` (a perceptual fingerprint of pre-redaction screen content).
 - Added `segmentFramesIntoClips` to group redacted frames into per-device activity segments, split on app/window change (field-wise comparison, immune to concatenation collisions) or an idle gap; single-frame segments get a one-second minimum window so the sink's `endedAt > startedAt` check accepts them.
 - Added `buildClipDerivative` to turn a segment into a `GopkCapturedDerivative` for the activity-journal gopk sink: an atomically-written local JSON manifest, a `clipHash` computed over frame identity only (never screen content), and an attestation built from screenpipe's redaction watermarks. The sanitized digest is built only from app identity and browser origin, never window titles or OCR text. Keyframe hashing requires an explicit `mediaRoot` and only reads a `snapshot_path` that resolves inside it — the path comes from an untrusted process, and hashing an attacker-chosen file would leak a content fingerprint.

@@ -2,17 +2,10 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed `/resume` and the session picker treating switch failures as Unhandled Rejections: live writer-owner conflicts and other failures now remain recoverable in the UI, successful switches rebuild the selected conversation, and hook-cancelled switches no longer claim that a session resumed.
-- Fixed `AgentLifecycleManager` races between TTL parking, revival, and release: transitions now serialize per agent so steering never targets a disposing session and release cannot leak an in-flight revived session or writer guard.
-- Fixed isolated subagent runs discarding partial work on abort or failure: `runIsolatedSubprocess` now captures a best-effort `.partial.patch` artifact on non-zero exit or abort, and `mergeIsolatedChanges` surfaces it via a `<system-notification>` without auto-applying.
-- Fixed interactive startup hanging before the first TUI frame when `search_tool_bm25` was active: discovery-mode schema estimation no longer recursively evaluates the search tool's self-referential description.
-- Fixed `fork` parameter being silently dropped in batch task submissions: `taskItemSchema` and `taskItemSchemaIsolated` both had `"+": "delete"` but omitted `"fork?": "boolean"`, so a batch item with `fork: true` was stripped before `spawnParamsFor` could see it, falling back to a fresh context with no error.
-- Fixed OMPK `/collab` browser links to open the product-hosted client at `oh-my-pk.pkking.computer/collab/`: persisted legacy `*.omp.sh` and previous `collab.pkking.computer` web origins now normalize there, while non-local hosted overrides outside the owned domain remain rejected.
-- Fixed the Intent Composer regression that hid Agent Hub navigation by restoring a persistent rail affordance with the configured hub key and stable double-left (`←←`) shortcut.
+## [16.3.0] - 2026-07-23
 
 ### Added
+
 - Added the `deep_research` discoverable tool (surfaced via `search_tool_bm25`) and the `/deep-research <question>` slash command, wiring the `@pk-nerdsaver-ai/pi-deep-research` pipeline into sessions: researcher searches route through the configured omp web-search provider chain. The pipeline model is selectable per call (`model` parameter, any `provider/model-id` in the model registry) or via `deepResearch.model`, with per-role overrides (`deepResearch.summarizationModel`, `deepResearch.compressionModel`, `deepResearch.reportModel`); defaults to the active session model. Runs accept an overall token budget (`max_total_tokens` parameter or `deepResearch.maxTotalTokens`) that winds research down gracefully near the limit with cooldown pauses (`deepResearch.cooldownMs`) instead of dying on provider limits, and budget-limited reports carry an explicit disclosure.
 - Added `/graphtree` (aliases `/gt`, `/fractal`) slash command for Fractal-style multi-agent tree and worktree node workflows with `/graphtree agents`, `/graphtree stop`, `/graphtree steer`, and `/graphtree revive` controls, configured settings bounds (`task.maxRecursionDepth`, `task.maxConcurrency`, `task.maxRuntimeMs`, `task.isolation.mode`), and disk-backed parked session revival.
 - Added interactive spawned-agent tier controls: `/tier status|light|mid|frontier|auto` and the `/settings` **Default Spawn Tier** selector can constrain stronger models to light or mid capability envelopes, with restrictive composition against existing agent/workflow policies.
@@ -34,13 +27,9 @@
 - Added a criterion-level adjudication module with pass/fail/blocked/unproven judgments consumed by the root completion gate.
 - Added ephemeral root task-contract compilation with deterministic clarification scoring, executor/advisor digest injection, retry-safe recovery context, and session-bound cleanup; evidence-backed completion enforcement remains deferred to M2.
 - Added `/hub` for encrypted, cloud-durable session handoff: provision account access from a local admin secret, publish a replication snapshot from one device, and resume its full JSONL history as a local fork on another device using the complete hub link. Trusted extensions can invoke owner-local builtins through `ctx.executeBuiltinCommand()` so remote control surfaces reuse the live session owner instead of spawning a competing writer.
-
-
 - Added `agent.profile` and `agent.profiles` settings for named, swappable role-based model bundles that retarget every role-resolving agent slot at once (explicit `modelRoles` still wins per-role).
 - Added `omp 9router route` and a `NineRouterController` (also accessible as the `/9router [route|probe]` slash command) that probes the local 9router gateway, selects the first working combo per model role (subscription first, then cheap, then free), and writes the chosen selectors into `settings.modelRoles`. Supports `list` mode (presence in `/v1/models`) and `probe` mode (tiny chat completion), with `--api-key` / `9ROUTER_API_KEY` / `NINEROUTER_API_KEY` auth for probes.
-
 - Added `compaction.maskConsumedObservations` (default `true`) and a new `maskConsumedObservations` pruning pass that replaces tool results the model has already acted on with deterministic placeholders (e.g. `[bash result consumed]`). This preserves reasoning traces and action history while cutting the verbatim observation tokens that the JetBrains study identified as cheaper to mask than to summarize.
-
 - Added fork-mode subagents: `task` tool `fork` parameter spawns a child that inherits the parent session's exact prefix (system prompt, tool set, model) plus a read-only history snapshot, so its first request re-reads the parent's warm provider prompt cache — the cheapest way to run a quick in-context lookup in parallel. Fresh contexts remain the default.
 - Append-only context (StablePrefix + append-only message log) now auto-enables for every provider, not just known prefix-cache backends — byte-stable prefixes raise cache hit rates on Anthropic cache_control and OpenAI automatic caching too. Opt out with `provider.appendOnlyContext: off`.
 - Added a graduated compaction escalation ladder (`compaction.strategy: "ladder"`, now the default): mask aged tool results, then shake, then snapcompact (vision models), and only fall back to an LLM summary when the cheaper rungs cannot get under the threshold. Re-enabling auto-compaction from "off" restores the ladder default.
@@ -53,14 +42,13 @@
 - Added prompt-btw subagent handoff mode to `/btw`: invoking "use promptbtw for subagent handoff: <raw task>" returns a structured SUBAGENT HANDOFF PROMPT instead of an answer.
 
 ### Changed
+
 - Reduced interactive launch latency by caching validated legacy Mnemopi bank scans, deferring embedding credential resolution until first use, and reading only enough session headers to populate the recent-session welcome list.
 - Changed the default collaboration relay and encrypted share endpoints to `collab.pkking.computer`.
 - Changed fork-owned outbound identifiers (OpenRouter/xAI HTTP headers, protocol-probe link, and benchmark homepages) from upstream `Oh-My-Pi`/`omp.sh` to `oh-my-pk`/`oh-my-pk.pkking.computer`. The Auto-QA push endpoint default is now empty (disabled) so the fork does not leak telemetry to upstream's `qa.omp.sh` receiver; set `dev.autoqaPush.endpoint` explicitly to re-enable it.
-
 - Changed blind/staged-independent context to mechanically clamp child collaboration to report-only, denying discovery, messaging, wake, and busy replies.
 - Changed the completion gate to distinguish failed from unproven criteria and require full criterion evidence coverage.
 - Changed yield to stop inferring deliverables from changedFiles or accepting bare self-reported passes as evidence.
-
 - Changed default `tools.discoveryMode` from `auto` to `all`, keeping only essential built-in tools (`read`, `bash`, `edit`, `find`, `search`, `write`, `todo`) active on session start; non-essential tools remain accessible via `search_tool_bm25`.
 - Added a context-file injection warning when an injected project context file (e.g., `AGENTS.md`, `CLAUDE.md`) exceeds 8KB.
 - Pruned `AGENTS.md` to ~7.2KB and added a maintenance rule to keep it under the 8KB injection budget.
@@ -69,6 +57,14 @@
 - Trimmed a second pass of tool-prompt prose across `read`/`bash`/`apply-patch`/`patch`/`todo`/`ast-grep`/`github`, dropping schema-inferable and duplicate content while preserving RFC-2119 keywords and Handlebars structure.
 
 ### Fixed
+
+- Fixed `/resume` and the session picker treating switch failures as Unhandled Rejections: live writer-owner conflicts and other failures now remain recoverable in the UI, successful switches rebuild the selected conversation, and hook-cancelled switches no longer claim that a session resumed.
+- Fixed `AgentLifecycleManager` races between TTL parking, revival, and release: transitions now serialize per agent so steering never targets a disposing session and release cannot leak an in-flight revived session or writer guard.
+- Fixed isolated subagent runs discarding partial work on abort or failure: `runIsolatedSubprocess` now captures a best-effort `.partial.patch` artifact on non-zero exit or abort, and `mergeIsolatedChanges` surfaces it via a `<system-notification>` without auto-applying.
+- Fixed interactive startup hanging before the first TUI frame when `search_tool_bm25` was active: discovery-mode schema estimation no longer recursively evaluates the search tool's self-referential description.
+- Fixed `fork` parameter being silently dropped in batch task submissions: `taskItemSchema` and `taskItemSchemaIsolated` both had `"+": "delete"` but omitted `"fork?": "boolean"`, so a batch item with `fork: true` was stripped before `spawnParamsFor` could see it, falling back to a fresh context with no error.
+- Fixed OMPK `/collab` browser links to open the product-hosted client at `oh-my-pk.pkking.computer/collab/`: persisted legacy `*.omp.sh` and previous `collab.pkking.computer` web origins now normalize there, while non-local hosted overrides outside the owned domain remain rejected.
+- Fixed the Intent Composer regression that hid Agent Hub navigation by restoring a persistent rail affordance with the configured hub key and stable double-left (`←←`) shortcut.
 - Fixed `search_tool_bm25` activations accumulating tool schemas across turns and persisting arbitrary search results into resumed sessions. Discovered tools now remain additive only within the current user turn; explicit tool selections and configured MCP defaults remain durable.
 - Fixed repeated `search_tool_bm25` calls within one turn growing active tool schemas without bound: newly matched tools now take priority under a 16K-token wire-schema budget, with oversized single tools still usable.
 - Fixed internal-URL autocomplete dropping the active project cwd and AST tools failing to resolve session-loaded `skill://` paths.
@@ -86,7 +82,6 @@
 - Fixed the built-in collab-based `/remote-control` alias shadowing pk-speak's richer `/remote` extension command; `/remote` is now available to the extension while encrypted session sharing remains explicit at `/collab` and `/remote-control`.
 - Fixed source installers, mise updates, package metadata, and release instructions to use the `kingkillery/oh-my-pk` fork instead of the upstream `oh-my-pi` repository.
 - Fixed auto-learn thresholding so only successful tool calls count toward `autolearn.minToolCalls`; failed calls no longer trigger a capture nudge.
-
 - Serialized editor submit handling so a fast double-Enter can't race concurrent submit handlers: a second empty Enter previously read `queuedMessageCount` before a steer finished registering it and no-op'd instead of flushing.
 
 ### Removed

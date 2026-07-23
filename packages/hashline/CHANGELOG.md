@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.3.0] - 2026-07-23
+
 ### Fixed
 
 - Fixed the hashline grammar rejecting `REM` and `MV` file operations that the parser and patch application pipeline already support.

@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+
+## [16.3.0] - 2026-07-23
+
 ### Added
 
 - Added `host-away` / `host-back` relay→guest control messages: the relay now holds a room open for a grace window when the host socket drops instead of closing guests immediately.

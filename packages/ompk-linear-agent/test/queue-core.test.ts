@@ -273,7 +273,13 @@ describe("heartbeats", () => {
 		// Restored means live: later sweeps inside the window leave it alone.
 		expect((await core.sweep(T0 + 150)).reconciled).toHaveLength(0);
 
-		const done = await core.complete(job.id, grant!.attemptId, grant!.leaseToken, { success: true, output: "ok" }, T0 + 160);
+		const done = await core.complete(
+			job.id,
+			grant!.attemptId,
+			grant!.leaseToken,
+			{ success: true, output: "ok" },
+			T0 + 160,
+		);
 		expect(done).toMatchObject({ ok: true, duplicate: false });
 	});
 });
@@ -338,9 +344,10 @@ describe("reconcile resolution", () => {
 		const job = makeJob();
 		await core.admit(job);
 		const grant = await core.lease("relay-1", T0);
-		expect(
-			await core.resolveReconcile(job.id, { requeue: true, reason: "r", now: T0 + 10 }),
-		).toEqual({ ok: false, code: "not_reconcile" });
+		expect(await core.resolveReconcile(job.id, { requeue: true, reason: "r", now: T0 + 10 })).toEqual({
+			ok: false,
+			code: "not_reconcile",
+		});
 
 		await core.sweep(T0 + 101);
 		expect(
@@ -499,11 +506,17 @@ describe("attempt identity and fence introspection", () => {
 		expect(second?.job.logicalAttemptKey).toBe(`linear:unknown:${anon.issueId}:1`);
 
 		// The key advances with the attempt counter on re-grant.
-		await core.complete(job.id, first!.attemptId, first!.leaseToken, {
-			success: false,
-			output: "",
-			failureClass: "transient",
-		}, T0 + 1);
+		await core.complete(
+			job.id,
+			first!.attemptId,
+			first!.leaseToken,
+			{
+				success: false,
+				output: "",
+				failureClass: "transient",
+			},
+			T0 + 1,
+		);
 		const retry = await core.lease("relay-2", T0 + 100);
 		expect(retry?.job.logicalAttemptKey).toBe(`linear:org-9:${job.issueId}:2`);
 	});
@@ -536,13 +549,22 @@ describe("attempt identity and fence introspection", () => {
 
 		expect(await core.refreshPrompt(job.issueId, "revision A", "d-1")).toMatchObject({ ok: true, applied: "staged" });
 		expect(await core.refreshPrompt(job.issueId, "revision B", "d-2")).toMatchObject({ ok: true, applied: "staged" });
-		expect(await core.refreshPrompt(job.issueId, "revision B again", "d-2")).toEqual({ ok: false, code: "duplicate" });
+		expect(await core.refreshPrompt(job.issueId, "revision B again", "d-2")).toEqual({
+			ok: false,
+			code: "duplicate",
+		});
 
-		await core.complete(job.id, grant!.attemptId, grant!.leaseToken, {
-			success: false,
-			output: "",
-			failureClass: "transient",
-		}, T0 + 1);
+		await core.complete(
+			job.id,
+			grant!.attemptId,
+			grant!.leaseToken,
+			{
+				success: false,
+				output: "",
+				failureClass: "transient",
+			},
+			T0 + 1,
+		);
 		const regrant = await core.lease("relay-1", T0 + 100);
 		expect(regrant?.job.prompt).toBe("revision B");
 

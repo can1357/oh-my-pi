@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.3.0] - 2026-07-23
+
 ### Added
 
 - Environments-cloud / pkscloudenvs routing: pure resolvers for the MSI-local canonical root (`C:\dev\desktop-infra\environments-cloud`), skill paths (`mesh-orchestrator`, `colab-warmup`), and mesh handoff argv (`mesh` / `mesh-run` / `cloud` / …), plus `ompk-remote environments` (alias `cloud`) CLI. Override with `OMPK_ENVIRONMENTS_CLOUD_ROOT`.

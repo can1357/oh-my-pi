@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.3.0] - 2026-07-23
+
 ### Changed
 
 - Changed OpenRouter request headers to identify the fork as `oh-my-pk` and link to `oh-my-pk.pkking.computer` instead of using upstream `Oh-My-Pi`/`omp.sh` branding.
@@ -16,6 +18,7 @@
 ### Added
 
 - Added Cline account login (`/login cline`): a WorkOS device-authorization flow whose tokens are registered with `api.cline.bot`, persisting the Cline access/refresh credentials and refreshing them automatically via `https://api.cline.bot/api/v1/auth/refresh`.
+
 ### Changed
 
 - Default reasoning context to `all_turns` for all Codex requests

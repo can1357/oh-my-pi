@@ -2,13 +2,15 @@
 
 ## [Unreleased]
 
+## [16.3.0] - 2026-07-23
+
 ### Added
 
 - Added a host-session picker to the browser guest: the header gains a sessions button (writable links only) that lists the host's project/all sessions over the wire `list-sessions`/`load-session` protocol and asks the host TUI to resume one, after which every guest resyncs from the host's fresh welcome. Requests are correlated by `reqId` with timeout, disconnect, host-error, and read-only handling. The mock host now answers both frames so the flow is exercisable offline.
 
 ### Changed
-- Updated deployment metadata and default collaboration links for the product-hosted `oh-my-pk.pkking.computer/collab/` client while retaining `collab.pkking.computer` as the relay service.
 
+- Updated deployment metadata and default collaboration links for the product-hosted `oh-my-pk.pkking.computer/collab/` client while retaining `collab.pkking.computer` as the relay service.
 - Redesigned the browser collaboration client as a focused coding workspace with a persistent desktop agent sidebar, responsive mobile navigation, a floating composer, and a clearer session join experience inspired by T3 Code.
 
 ## [16.2.0] - 2026-06-27
