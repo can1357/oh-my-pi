@@ -165,11 +165,13 @@ fn spawn_gateway(
 		let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
 		let _ = sender.send(result);
 	});
-	let line = if let Ok(result) = receiver.recv_timeout(READINESS_TIMEOUT) { result? } else {
- 			let _ = child.kill();
- 			let _ = child.wait();
- 			bail!("gateway readiness timed out");
- 		};
+	let line = if let Ok(result) = receiver.recv_timeout(READINESS_TIMEOUT) {
+		result?
+	} else {
+		let _ = child.kill();
+		let _ = child.wait();
+		bail!("gateway readiness timed out");
+	};
 	let ready: GatewayReady =
 		serde_json::from_str(line.trim()).context("invalid gateway readiness JSON")?;
 	validate_ready(&ready, child.id())?;

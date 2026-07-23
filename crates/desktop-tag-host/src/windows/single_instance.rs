@@ -160,13 +160,16 @@ fn serve(
 		let result = BufReader::new(&mut file)
 			.take(MAX_MESSAGE as u64 + 1)
 			.read_line(&mut data);
-		if result.is_ok() && data.len() <= MAX_MESSAGE && !data.is_empty()
-			&& let Ok(request) = serde_json::from_str::<ControlRequest>(&data) {
-				let response = handler(request);
-				if serde_json::to_writer(&mut file, &response).is_ok() {
-					let _ = file.write_all(b"\n");
-				}
+		if result.is_ok()
+			&& data.len() <= MAX_MESSAGE
+			&& !data.is_empty()
+			&& let Ok(request) = serde_json::from_str::<ControlRequest>(&data)
+		{
+			let response = handler(request);
+			if serde_json::to_writer(&mut file, &response).is_ok() {
+				let _ = file.write_all(b"\n");
 			}
+		}
 		unsafe { DisconnectNamedPipe(pipe) };
 	}
 }
