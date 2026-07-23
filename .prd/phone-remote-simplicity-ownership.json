@@ -1,0 +1,68 @@
+{
+  "name": "phone-remote-simplicity",
+  "repos": [
+    "C:/Dev/desktop-projects/oh-my-pi-fork",
+    "C:/Dev/desktop-projects/pi-speak-extension"
+  ],
+  "lanes": {
+    "A": {
+      "archetype": "pre-phase",
+      "files": [
+        "docs/phone-remote-happy-path.md",
+        ".prd/phone-remote-simplicity-ownership.json"
+      ],
+      "requiredDeliverables": [
+        "docs/phone-remote-happy-path.md",
+        ".prd/phone-remote-simplicity-ownership.json"
+      ]
+    },
+    "B": {
+      "archetype": "parallel-builder",
+      "dependsOn": ["A"],
+      "files": [
+        "C:/Dev/desktop-projects/pi-speak-extension/pairing.ts",
+        "C:/Dev/desktop-projects/pi-speak-extension/server-app.ts",
+        "C:/Dev/desktop-projects/pi-speak-extension/control-server.ts",
+        "C:/Dev/desktop-projects/pi-speak-extension/index.ts",
+        "C:/Dev/desktop-projects/pi-speak-extension/android-app/app/src/main/java/com/example/PairingRequiredGate.kt",
+        "C:/Dev/desktop-projects/pi-speak-extension/android-app/app/src/main/java/com/example/PairingQrScanner.kt",
+        "C:/Dev/desktop-projects/pi-speak-extension/android-app/app/src/test/java/com/example/SetupDeepLinkTest.kt",
+        "packages/coding-agent/src/slash-commands/helpers/collab-qrcode.ts",
+        "packages/coding-agent/src/slash-commands/builtin-registry.ts"
+      ]
+    },
+    "C": {
+      "archetype": "parallel-builder",
+      "dependsOn": ["A"],
+      "files": [
+        "C:/Dev/desktop-projects/pi-speak-extension/agent-hub-dashboard.ts",
+        "C:/Dev/desktop-projects/pi-speak-extension/session-routing.ts",
+        "C:/Dev/desktop-projects/pi-speak-extension/realtime-session-target.ts"
+      ]
+    },
+    "D": {
+      "archetype": "parallel-builder",
+      "dependsOn": ["A"],
+      "files": [
+        "C:/Dev/desktop-projects/pi-speak-extension/agent-provider-factory.ts",
+        "C:/Dev/desktop-projects/pi-speak-extension/session-working-directory.ts",
+        "C:/Dev/desktop-projects/pi-speak-extension/realtime-gateway.ts",
+        "C:/Dev/desktop-projects/pi-speak-extension/agent-hub-actions.ts"
+      ]
+    },
+    "E": {
+      "archetype": "acceptance-gate",
+      "dependsOn": ["A", "B", "C", "D"],
+      "files": [
+        "docs/phone-remote-acceptance.md"
+      ],
+      "requiredDeliverables": [
+        "docs/phone-remote-acceptance.md"
+      ],
+      "cleanupGlobs": [
+        "findings-*.md",
+        "**/findings-*.md"
+      ]
+    }
+  }
+}
