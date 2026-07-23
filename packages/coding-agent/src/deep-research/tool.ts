@@ -11,6 +11,7 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 } from "@pk-nerdsaver-ai/pi-agent-core";
+import type { Model } from "@pk-nerdsaver-ai/pi-ai";
 import {
 	type DeepResearchEvent,
 	type ResearchTool,
@@ -19,6 +20,7 @@ import {
 } from "@pk-nerdsaver-ai/pi-deep-research";
 import { prompt } from "@pk-nerdsaver-ai/pi-utils";
 import { type } from "arktype";
+import { parseModelString } from "../config/model-resolver";
 import deepResearchDescription from "../prompts/tools/deep-research.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { createOmpSearchTool } from "./search-adapter";
@@ -26,6 +28,8 @@ import { createOmpSearchTool } from "./search-adapter";
 export const deepResearchSchema = type({
 	question: "string",
 	max_researchers: "number?",
+	model: "string?",
+	max_total_tokens: "number?",
 });
 
 export type DeepResearchToolParams = typeof deepResearchSchema.infer;
@@ -39,6 +43,7 @@ export interface DeepResearchRenderDetails {
 	researchersCompleted?: number;
 	notesCount?: number;
 	usage?: UsageTotals;
+	budgetExhausted?: boolean;
 	error?: string;
 }
 
@@ -63,6 +68,10 @@ function progressLine(event: DeepResearchEvent, started: number, completed: numb
 			return `Researcher finished (${completed}/${started})`;
 		case "final_report_start":
 			return "Writing final report…";
+		case "budget_cooldown":
+			return `Cooling down ${Math.round(event.delayMs / 1000)}s (${event.usedTokens}/${event.maxTotalTokens} tokens used)`;
+		case "budget_exhausted":
+			return `Token budget reached (${event.usedTokens}/${event.maxTotalTokens}) — wrapping up with findings so far`;
 		default:
 			return undefined;
 	}
@@ -94,15 +103,65 @@ export class DeepResearchTool implements AgentTool<typeof deepResearchSchema, De
 		onUpdate?: AgentToolUpdateCallback<DeepResearchRenderDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<DeepResearchRenderDetails>> {
-		const model = this.#session.getActiveModel?.();
-		if (!model) {
-			const error = "Deep research requires an active session model, but none is set.";
-			return {
-				content: [{ type: "text", text: `Error: ${error}` }],
-				details: { status: "error", question: params.question, progress: "", error },
-				isError: true,
-			};
+		const settings = this.#session.settings;
+		const modelError = (error: string): AgentToolResult<DeepResearchRenderDetails> => ({
+			content: [{ type: "text", text: `Error: ${error}` }],
+			details: { status: "error", question: params.question, progress: "", error },
+			isError: true,
+		});
+
+		const resolveSpec = (spec: string, origin: string): Model | AgentToolResult<DeepResearchRenderDetails> => {
+			const registry = this.#session.modelRegistry;
+			if (!registry) return modelError(`Cannot resolve ${origin} "${spec}": no model registry is available.`);
+			const parsed = parseModelString(spec);
+			if (!parsed) {
+				return modelError(
+					`Invalid ${origin} "${spec}". Expected "provider/model-id" (e.g. "anthropic/claude-sonnet-4-5").`,
+				);
+			}
+			const found = registry.find(parsed.provider, parsed.id);
+			if (!found) {
+				return modelError(
+					`Unknown ${origin} "${spec}" — not found in the model registry. Use "provider/model-id" for any model available to omp.`,
+				);
+			}
+			return found;
+		};
+
+		const baseSpec = params.model?.trim() || (settings.get("deepResearch.model") ?? "").trim();
+		let model: Model | undefined;
+		if (baseSpec) {
+			const resolved = resolveSpec(
+				baseSpec,
+				params.model?.trim() ? "model parameter" : "deepResearch.model setting",
+			);
+			if (!("provider" in resolved)) return resolved;
+			model = resolved;
+		} else {
+			model = this.#session.getActiveModel?.();
 		}
+		if (!model) {
+			return modelError("Deep research requires an active session model, but none is set.");
+		}
+		const baseModel = model;
+
+		const roleModel = (
+			key: "deepResearch.summarizationModel" | "deepResearch.compressionModel" | "deepResearch.reportModel",
+		): Model | AgentToolResult<DeepResearchRenderDetails> => {
+			const spec = (settings.get(key) ?? "").trim();
+			if (!spec) return baseModel;
+			return resolveSpec(spec, `${key} setting`);
+		};
+		const summarizationModel = roleModel("deepResearch.summarizationModel");
+		if (!("provider" in summarizationModel)) return summarizationModel;
+		const compressionModel = roleModel("deepResearch.compressionModel");
+		if (!("provider" in compressionModel)) return compressionModel;
+		const reportModel = roleModel("deepResearch.reportModel");
+		if (!("provider" in reportModel)) return reportModel;
+
+		const configuredBudget = params.max_total_tokens ?? settings.get("deepResearch.maxTotalTokens");
+		const maxTotalTokens = configuredBudget > 0 ? configuredBudget : undefined;
+		const cooldownMs = Math.max(0, settings.get("deepResearch.cooldownMs"));
 
 		let progress = "Starting deep research…";
 		let researchersStarted = 0;
@@ -128,11 +187,13 @@ export class DeepResearchTool implements AgentTool<typeof deepResearchSchema, De
 		try {
 			const result = await runDeepResearch(params.question, {
 				researchModel: model,
-				summarizationModel: model,
-				compressionModel: model,
-				finalReportModel: model,
+				summarizationModel,
+				compressionModel,
+				finalReportModel: reportModel,
 				allowClarification: false,
 				maxConcurrentResearchUnits: params.max_researchers ?? 5,
+				maxTotalTokens,
+				cooldownMs,
 				searchApi: "none",
 				searchTool: this.#createSearchTool(this.#session),
 				modelOptions: signal ? { signal } : {},
@@ -157,8 +218,11 @@ export class DeepResearchTool implements AgentTool<typeof deepResearchSchema, De
 				};
 			}
 
+			const budgetNote = result.budgetExhausted
+				? `\n\n> Note: the run's token budget (${maxTotalTokens} tokens) was reached before research finished; this report is based on the findings gathered up to that point.`
+				: "";
 			return {
-				content: [{ type: "text", text: result.finalReport }],
+				content: [{ type: "text", text: result.finalReport + budgetNote }],
 				details: {
 					status: "completed",
 					question: params.question,
@@ -168,6 +232,7 @@ export class DeepResearchTool implements AgentTool<typeof deepResearchSchema, De
 					researchersCompleted,
 					notesCount: result.notes.length,
 					usage: result.usage,
+					budgetExhausted: result.budgetExhausted,
 				},
 			};
 		} catch (error) {

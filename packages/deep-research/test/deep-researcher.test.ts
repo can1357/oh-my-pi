@@ -275,3 +275,65 @@ describe("resolveModel", () => {
 		expect(() => resolveModel("nope:does-not-exist")).toThrow("Unknown provider");
 	});
 });
+
+describe("token budget", () => {
+	test("winds research down gracefully when the budget is exhausted, still writing the report", async () => {
+		// Each mocked call reports 15 tokens; a 30-token budget is spent after
+		// the brief + first supervisor turn, before any researcher tool loop.
+		const model = createPipelineMock({ supervisorTopics: ["topic A", "topic B"] });
+		const events: DeepResearchEvent[] = [];
+		const result = await runDeepResearch("Compare topic A and topic B", {
+			researchModel: model,
+			summarizationModel: model,
+			compressionModel: model,
+			finalReportModel: model,
+			allowClarification: false,
+			maxConcurrentResearchUnits: 2,
+			maxTotalTokens: 30,
+			cooldownMs: 0,
+			tavilyApiKey: "test-key",
+			fetch: fakeTavilyFetch(),
+			onEvent: event => events.push(event),
+		});
+
+		expect(result.status).toBe("completed");
+		expect(result.budgetExhausted).toBe(true);
+		// The run degraded instead of aborting: a real report was still written.
+		expect(result.finalReport).toContain("# Final Report");
+		// Researchers stopped before searching — no tool-loop transcripts were captured.
+		expect(result.rawNotes.join("\n")).not.toContain("Search results");
+		// Exhaustion is announced exactly once.
+		expect(events.filter(event => event.type === "budget_exhausted")).toHaveLength(1);
+		// Wind-down path: brief + one supervisor turn + one compression per topic + final report.
+		expect(model.calls).toHaveLength(5);
+	});
+
+	test("pauses with budget_cooldown events once usage crosses the threshold", async () => {
+		const model = createPipelineMock();
+		const events: DeepResearchEvent[] = [];
+		const result = await runDeepResearch("Tell me about topic A", {
+			researchModel: model,
+			summarizationModel: model,
+			compressionModel: model,
+			finalReportModel: model,
+			allowClarification: false,
+			maxTotalTokens: 10_000,
+			cooldownThresholdRatio: 0.001,
+			cooldownMs: 1,
+			tavilyApiKey: "test-key",
+			fetch: fakeTavilyFetch(),
+			onEvent: event => events.push(event),
+		});
+
+		expect(result.status).toBe("completed");
+		expect(result.budgetExhausted).toBe(false);
+		const cooldowns = events.filter(event => event.type === "budget_cooldown");
+		// Every call after the first paused: the threshold sits below one call's usage.
+		expect(cooldowns.length).toBeGreaterThanOrEqual(1);
+		for (const cooldown of cooldowns) {
+			expect(cooldown.usedTokens).toBeGreaterThan(0);
+			expect(cooldown.maxTotalTokens).toBe(10_000);
+			expect(cooldown.delayMs).toBe(1);
+		}
+	});
+});

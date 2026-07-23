@@ -3929,6 +3929,78 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Deep Research
+	"deepResearch.model": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "tools",
+			group: "Deep Research",
+			label: "Deep Research Model",
+			description:
+				"Model for the deep_research pipeline as provider/model-id (any model available to omp). Empty = the session's active model. Applies to all pipeline roles unless a per-role override is set.",
+		},
+	},
+
+	"deepResearch.summarizationModel": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "tools",
+			group: "Deep Research",
+			label: "Summarization Model",
+			description:
+				"Model summarizing raw webpage content (provider/model-id). Empty = the Deep Research Model. A cheaper model is usually fine here.",
+		},
+	},
+
+	"deepResearch.compressionModel": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "tools",
+			group: "Deep Research",
+			label: "Compression Model",
+			description:
+				"Model compressing each researcher's findings (provider/model-id). Empty = the Deep Research Model.",
+		},
+	},
+
+	"deepResearch.reportModel": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "tools",
+			group: "Deep Research",
+			label: "Report Model",
+			description: "Model writing the final report (provider/model-id). Empty = the Deep Research Model.",
+		},
+	},
+
+	"deepResearch.maxTotalTokens": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "tools",
+			group: "Deep Research",
+			label: "Token Budget",
+			description:
+				"Overall token budget for one deep_research run (input + output across all pipeline calls). When crossed, research winds down gracefully and the report is written from findings so far. 0 = unlimited.",
+		},
+	},
+
+	"deepResearch.cooldownMs": {
+		type: "number",
+		default: 30000,
+		ui: {
+			tab: "tools",
+			group: "Deep Research",
+			label: "Cooldown Pause (ms)",
+			description:
+				"Pause inserted before each pipeline model call once usage passes 80% of the token budget, giving provider rate/credit limits room to breathe. Only active when a token budget is set. 0 disables.",
+		},
+	},
+
 	// MCP
 	"mcp.enableProjectConfig": {
 		type: "boolean",

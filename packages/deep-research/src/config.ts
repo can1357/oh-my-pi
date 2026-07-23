@@ -17,6 +17,8 @@ export const DEFAULT_CONFIG: DeepResearchConfig = {
 	maxResearcherIterations: 6,
 	maxReactToolCalls: 10,
 	maxStructuredOutputRetries: 3,
+	cooldownThresholdRatio: 0.8,
+	cooldownMs: 30_000,
 	searchApi: "tavily",
 	tavilyMaxResults: 5,
 	tavilyTopic: "general",
@@ -68,6 +70,8 @@ export interface RunContext {
 		finalReport: Model;
 	};
 	usage: UsageTotals;
+	/** Set once the `budget_exhausted` event has been emitted for this run. */
+	budgetExhaustedAnnounced: boolean;
 }
 
 export function createRunContext(input: DeepResearchConfigInput = {}): RunContext {
@@ -81,5 +85,42 @@ export function createRunContext(input: DeepResearchConfigInput = {}): RunContex
 			finalReport: resolveModel(config.finalReportModel),
 		},
 		usage: emptyUsageTotals(),
+		budgetExhaustedAnnounced: false,
 	};
+}
+
+/**
+ * True when the run's token budget is spent. Emits `budget_exhausted` once on
+ * the first crossing. Callers use this to wind the research phase down
+ * gracefully instead of aborting mid-flight.
+ */
+export function isBudgetExhausted(run: RunContext): boolean {
+	const max = run.config.maxTotalTokens;
+	if (!max || max <= 0) return false;
+	if (run.usage.totalTokens < max) return false;
+	if (!run.budgetExhaustedAnnounced) {
+		run.budgetExhaustedAnnounced = true;
+		run.config.onEvent({ type: "budget_exhausted", usedTokens: run.usage.totalTokens, maxTotalTokens: max });
+	}
+	return true;
+}
+
+/**
+ * Pause before a model call once usage crosses the cooldown threshold, giving
+ * provider rate/credit limits room to breathe instead of slamming into them.
+ * No-op when no budget is set, cooldown is disabled, or the budget is already
+ * exhausted (wrap-up calls should finish promptly).
+ */
+export async function budgetCooldown(run: RunContext): Promise<void> {
+	const max = run.config.maxTotalTokens;
+	if (!max || max <= 0 || run.config.cooldownMs <= 0) return;
+	if (run.usage.totalTokens < max * run.config.cooldownThresholdRatio) return;
+	if (isBudgetExhausted(run)) return;
+	run.config.onEvent({
+		type: "budget_cooldown",
+		usedTokens: run.usage.totalTokens,
+		maxTotalTokens: max,
+		delayMs: run.config.cooldownMs,
+	});
+	await Bun.sleep(run.config.cooldownMs);
 }

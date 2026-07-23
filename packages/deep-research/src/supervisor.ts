@@ -1,5 +1,5 @@
 import { type Context, completeSimple, type Message } from "@pk-nerdsaver-ai/pi-ai";
-import type { RunContext } from "./config";
+import { budgetCooldown, isBudgetExhausted, type RunContext } from "./config";
 import { accumulateUsage, getNotesFromToolCalls, toolCallsOf, toolResultMessage, userMessage } from "./messages";
 import { prompts } from "./prompts";
 import { runResearcher } from "./researcher";
@@ -34,6 +34,11 @@ export async function runSupervisor(run: RunContext, researchBrief: string): Pro
 
 	for (let iteration = 1; ; iteration++) {
 		config.onEvent({ type: "supervisor_iteration", iteration, maxIterations: config.maxResearcherIterations });
+
+		if (isBudgetExhausted(run)) {
+			return { notes: getNotesFromToolCalls(supervisorMessages), rawNotes };
+		}
+		await budgetCooldown(run);
 
 		const context: Context = { systemPrompt: [systemPrompt], messages: supervisorMessages, tools: SUPERVISOR_TOOLS };
 		const response = await completeSimple(run.models.research, context, {

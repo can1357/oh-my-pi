@@ -7,3 +7,8 @@ Before calling:
 - Do not use this tool for simple fact lookups; use `web_search` instead.
 
 The question should be a single, detailed paragraph describing exactly what the report should cover.
+
+Optional parameters:
+- `model`: run the whole pipeline on a specific model as `provider/model-id` (any model available to omp), instead of the session's active model. Per-role overrides come from the `deepResearch.*` settings.
+- `max_total_tokens`: overall token budget for the run. When crossed, research winds down gracefully and the report is written from findings gathered so far (a cooldown pause also slows calls near the limit). Overrides the `deepResearch.maxTotalTokens` setting.
+- `max_researchers`: cap on concurrent researcher sub-agents (default 5).

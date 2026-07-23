@@ -1,5 +1,5 @@
 import { type AssistantMessage, completeSimple, type Message } from "@pk-nerdsaver-ai/pi-ai";
-import { createRunContext, type RunContext } from "./config";
+import { budgetCooldown, createRunContext, isBudgetExhausted, type RunContext } from "./config";
 import { accumulateUsage, getBufferString, messageText, userMessage } from "./messages";
 import { prompts } from "./prompts";
 import { runSupervisor } from "./supervisor";
@@ -25,6 +25,7 @@ export async function runDeepResearch(
 
 	// Step 1: optionally assess whether a clarifying question is needed.
 	if (config.allowClarification) {
+		await budgetCooldown(run);
 		const { value, message } = await completeStructured({
 			model: run.models.research,
 			context: { messages: [userMessage(prompts.clarifyWithUser({ messages: getBufferString(messages), date }))] },
@@ -51,6 +52,7 @@ export async function runDeepResearch(
 				rawNotes: [],
 				messages: [...messages, assistantTextMessage(run, value.question)],
 				usage: run.usage,
+				budgetExhausted: false,
 			};
 		}
 		messages.push(assistantTextMessage(run, value.verification));
@@ -59,6 +61,7 @@ export async function runDeepResearch(
 	}
 
 	// Step 2: translate the conversation into a focused research brief.
+	await budgetCooldown(run);
 	const briefResult = await completeStructured({
 		model: run.models.research,
 		context: { messages: [userMessage(prompts.researchBrief({ messages: getBufferString(messages), date }))] },
@@ -92,6 +95,7 @@ export async function runDeepResearch(
 		rawNotes,
 		messages,
 		usage: run.usage,
+		budgetExhausted: isBudgetExhausted(run),
 	};
 }
 
@@ -133,6 +137,7 @@ async function generateFinalReport(
 	let findingsCharLimit: number | null = null;
 
 	for (let retry = 0; retry <= FINAL_REPORT_MAX_RETRIES; retry++) {
+		await budgetCooldown(run);
 		const prompt = prompts.finalReport({
 			research_brief: researchBrief,
 			messages: getBufferString(messages),

@@ -1,5 +1,5 @@
 import { z } from "@pk-nerdsaver-ai/pi-ai";
-import type { RunContext } from "./config";
+import { budgetCooldown, type RunContext } from "./config";
 import { accumulateUsage, userMessage } from "./messages";
 import { prompts } from "./prompts";
 import { completeStructured } from "./tools";
@@ -60,6 +60,7 @@ const webpageSummaryStructuredSchema = z.object({
 /** Summarize one webpage; on timeout or model failure, fall back to the raw content (Python behavior). */
 async function summarizeWebpage(run: RunContext, rawContent: string): Promise<string> {
 	try {
+		await budgetCooldown(run);
 		const { value, message } = await completeStructured({
 			model: run.models.summarization,
 			context: {

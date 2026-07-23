@@ -1,5 +1,5 @@
 import { type AssistantMessage, type Context, completeSimple, type Message } from "@pk-nerdsaver-ai/pi-ai";
-import type { RunContext } from "./config";
+import { budgetCooldown, isBudgetExhausted, type RunContext } from "./config";
 import {
 	accumulateUsage,
 	messageText,
@@ -66,6 +66,8 @@ export async function runResearcher(run: RunContext, topic: string): Promise<Res
 
 	let toolCallIterations = 0;
 	for (;;) {
+		if (isBudgetExhausted(run)) break;
+		await budgetCooldown(run);
 		const context: Context = { systemPrompt: [systemPrompt], messages, tools: tools.map(entry => entry.tool) };
 		const response = await completeSimple(run.models.research, context, {
 			...config.modelOptions,
@@ -100,7 +102,7 @@ export async function runResearcher(run: RunContext, topic: string): Promise<Res
 		messages.push(...results);
 
 		const researchCompleteCalled = calls.some(call => call.name === RESEARCH_COMPLETE_TOOL_NAME);
-		if (toolCallIterations >= config.maxReactToolCalls || researchCompleteCalled) break;
+		if (toolCallIterations >= config.maxReactToolCalls || researchCompleteCalled || isBudgetExhausted(run)) break;
 	}
 
 	return compressResearch(run, messages);
@@ -114,6 +116,7 @@ async function compressResearch(run: RunContext, researcherMessages: Message[]):
 
 	let messages = attemptMessages;
 	for (let attempt = 0; attempt < COMPRESSION_MAX_ATTEMPTS; attempt++) {
+		await budgetCooldown(run);
 		let response: AssistantMessage;
 		try {
 			response = await completeSimple(

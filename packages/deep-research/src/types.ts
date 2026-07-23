@@ -48,6 +48,18 @@ export interface DeepResearchConfig {
 	/** Max retries for structured-output (forced tool call) generations. */
 	maxStructuredOutputRetries: number;
 
+	/**
+	 * Overall token budget for the run (input + output across every model call).
+	 * When crossed, the research phase winds down gracefully — the supervisor stops
+	 * delegating, researchers stop iterating — and the final report is still written
+	 * from the findings gathered so far. Unset or <= 0 means unlimited.
+	 */
+	maxTotalTokens?: number;
+	/** Fraction of `maxTotalTokens` (0–1) past which cooldown pauses begin. */
+	cooldownThresholdRatio: number;
+	/** Pause inserted before each model call once past the cooldown threshold. 0 disables pausing. */
+	cooldownMs: number;
+
 	/** Search backend. "none" leaves researchers with only injected extra tools. */
 	searchApi: SearchApi;
 	/** Tavily API key. Falls back to the TAVILY_API_KEY environment variable. */
@@ -99,7 +111,9 @@ export type DeepResearchEvent =
 	| { type: "researcher_start"; topic: string }
 	| { type: "researcher_complete"; topic: string; compressedLength: number }
 	| { type: "final_report_start" }
-	| { type: "final_report_complete"; reportLength: number };
+	| { type: "final_report_complete"; reportLength: number }
+	| { type: "budget_cooldown"; usedTokens: number; maxTotalTokens: number; delayMs: number }
+	| { type: "budget_exhausted"; usedTokens: number; maxTotalTokens: number };
 
 export interface DeepResearchResult {
 	/** "clarification_needed" when the agent ended the run by asking the user a question. */
@@ -117,6 +131,8 @@ export interface DeepResearchResult {
 	/** Outer conversation transcript (input messages plus generated replies). */
 	messages: Message[];
 	usage: UsageTotals;
+	/** True when `maxTotalTokens` was crossed and the research phase ended early. */
+	budgetExhausted: boolean;
 }
 
 /** Structured output of the clarification step. */
