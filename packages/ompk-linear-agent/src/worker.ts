@@ -17,8 +17,17 @@
 
 import { evaluateDispatch, resolveDispatchConfig } from "./dispatch-policy";
 import type { IssueDetails } from "./linear";
-import { timingSafeEqual, verifyLinearSignature } from "./linear";
-import type { AdmitOutcome, CompleteOutcome, LeaseGrant } from "./queue-core";
+import { deadLetterComment, reconcileComment, timingSafeEqual, verifyLinearSignature } from "./linear";
+import type {
+	AdmitOutcome,
+	CompleteOutcome,
+	HeartbeatOutcome,
+	LeaseGrant,
+	ReconcileDisposition,
+	ReconcileOutcome,
+	SweepResult,
+} from "./queue-core";
+import { DEFAULT_QUEUE_LIMITS } from "./queue-core";
 import type { Env, Job, JobResult } from "./types";
 import { redactJob } from "./types";
 
@@ -31,6 +40,13 @@ export interface JobQueueStub {
 		leaseToken: string,
 		result: Omit<JobResult, "completedAt">,
 	): Promise<CompleteOutcome>;
+	heartbeat(id: string, attemptId: string, leaseToken: string): Promise<HeartbeatOutcome>;
+	sweep(): Promise<SweepResult>;
+	resolveReconcile(
+		id: string,
+		opts: { requeue: boolean; reason: string; attemptId?: string; leaseToken?: string },
+	): Promise<ReconcileOutcome>;
+	resolveReconcileByRunner(runner: string, reason: string): Promise<Array<{ job: Job; disposition: ReconcileDisposition }>>;
 	getJob(id: string): Promise<Job | null>;
 	listJobs(): Promise<Job[]>;
 }
@@ -136,12 +152,27 @@ async function handleWebhook(request: Request, env: Env, deps: WorkerDeps): Prom
 	return json({ ok: true, queued: admitted.jobId, issue: issue.identifier, model: decision.model });
 }
 
-/** Relay long-poll: leases the next job (fenced) or returns 204. */
+/**
+ * Relay long-poll: parks silent leases (mirroring each to Linear), then
+ * leases the next pending job (fenced) or returns 204. The grant carries
+ * the heartbeat cadence the relay must sustain.
+ */
 async function handlePoll(request: Request, env: Env, deps: WorkerDeps): Promise<Response> {
 	if (!bearerAuthorized(request, env.RELAY_TOKEN)) return unauthorized();
 	const url = new URL(request.url);
 	const relayName = url.searchParams.get("relay") ?? "unknown-relay";
-	const grant = await deps.queue(env).lease(relayName);
+	const queue = deps.queue(env);
+	const { reconciled } = await queue.sweep();
+	for (const job of reconciled) {
+		try {
+			await deps.postComment(env.LINEAR_API_TOKEN, job.issueId, reconcileComment(job));
+		} catch (err) {
+			// Best-effort mirror: the parked state is authoritative and visible
+			// via /status; a Linear hiccup must not block job pickup.
+			console.error(`reconcile comment failed for ${job.issueIdentifier}:`, err instanceof Error ? err.message : err);
+		}
+	}
+	const grant = await queue.lease(relayName);
 	if (!grant) return new Response(null, { status: 204 });
 	const { job, attemptId, leaseToken } = grant;
 	return json({
@@ -154,6 +185,7 @@ async function handlePoll(request: Request, env: Env, deps: WorkerDeps): Promise
 		createdAt: job.createdAt,
 		attemptId,
 		leaseToken,
+		heartbeatMs: DEFAULT_QUEUE_LIMITS.heartbeatMs,
 	});
 }
 
@@ -203,6 +235,116 @@ async function handleResult(request: Request, env: Env, deps: WorkerDeps): Promi
 	return json({ ok: true, duplicate: outcome.duplicate, job: redactJob(outcome.job) });
 }
 
+interface HeartbeatBody {
+	jobId?: unknown;
+	attemptId?: unknown;
+	leaseToken?: unknown;
+}
+
+/** Fenced liveness signal from the relay; re-arms the lease or restores a reconcile-parked job. */
+async function handleHeartbeat(request: Request, env: Env, deps: WorkerDeps): Promise<Response> {
+	if (!bearerAuthorized(request, env.RELAY_TOKEN)) return unauthorized();
+	let body: HeartbeatBody;
+	try {
+		body = (await request.json()) as HeartbeatBody;
+	} catch {
+		return json({ error: "invalid body" }, 400);
+	}
+	if (typeof body.jobId !== "string" || typeof body.attemptId !== "string" || typeof body.leaseToken !== "string") {
+		return json({ error: "invalid body" }, 400);
+	}
+	const outcome = await deps.queue(env).heartbeat(body.jobId, body.attemptId, body.leaseToken);
+	if (!outcome.ok) {
+		if (outcome.code === "not_found") return json({ error: "job not found" }, 404);
+		return json({ error: `heartbeat rejected: ${outcome.code}` }, 409);
+	}
+	return json({ ok: true, leaseExpiresAt: outcome.leaseExpiresAt, restored: outcome.restored });
+}
+
+interface ReconcileBody {
+	jobId?: unknown;
+	attemptId?: unknown;
+	leaseToken?: unknown;
+	requeue?: unknown;
+	reason?: unknown;
+	runner?: unknown;
+	startupSweep?: unknown;
+}
+
+/**
+ * Resolve reconcile-parked jobs once the prior runner's fate is confirmed.
+ *
+ * Authorization matrix:
+ * - `{ runner, startupSweep: true }` — relay credential; the restarted relay
+ *   attests it has no live children, so every job it owned is requeued (or
+ *   dead-lettered on budget exhaustion).
+ * - `{ jobId, attemptId, leaseToken, ... }` — fenced self-report; the fence
+ *   proves the caller held the parked attempt.
+ * - `{ jobId, ... }` without a fence — admin credential only (human
+ *   confirmed termination out-of-band).
+ *
+ * Dead-lettered and failed dispositions post the last error plus recovery
+ * action to the Linear issue.
+ */
+async function handleReconcile(request: Request, env: Env, deps: WorkerDeps): Promise<Response> {
+	const relayAuth = bearerAuthorized(request, env.RELAY_TOKEN);
+	const adminAuth = bearerAuthorized(request, env.STATUS_TOKEN);
+	if (!relayAuth && !adminAuth) return unauthorized();
+	let body: ReconcileBody;
+	try {
+		body = (await request.json()) as ReconcileBody;
+	} catch {
+		return json({ error: "invalid body" }, 400);
+	}
+
+	if (body.startupSweep === true) {
+		if (!relayAuth) return unauthorized();
+		if (typeof body.runner !== "string" || body.runner.length === 0) {
+			return json({ error: "invalid body" }, 400);
+		}
+		const resolved = await deps
+			.queue(env)
+			.resolveReconcileByRunner(body.runner, `relay ${body.runner} restarted with no live jobs`);
+		for (const { job, disposition } of resolved) {
+			if (disposition === "requeued") continue;
+			await deps.postComment(
+				env.LINEAR_API_TOKEN,
+				job.issueId,
+				deadLetterComment(job, job.result?.error ?? "runner terminated"),
+			);
+		}
+		return json({
+			ok: true,
+			resolved: resolved.length,
+			requeued: resolved.filter(r => r.disposition === "requeued").length,
+			deadLettered: resolved.filter(r => r.disposition !== "requeued").length,
+		});
+	}
+
+	if (typeof body.jobId !== "string") return json({ error: "invalid body" }, 400);
+	const fenced = typeof body.attemptId === "string" && typeof body.leaseToken === "string";
+	if (!fenced && !adminAuth) return unauthorized();
+	const requeue = body.requeue !== false;
+	const reason = typeof body.reason === "string" && body.reason.length > 0 ? body.reason : "runner terminated";
+	const outcome = await deps.queue(env).resolveReconcile(body.jobId, {
+		requeue,
+		reason,
+		...(fenced ? { attemptId: body.attemptId as string, leaseToken: body.leaseToken as string } : {}),
+	});
+	if (!outcome.ok) {
+		if (outcome.code === "not_found") return json({ error: "job not found" }, 404);
+		return json({ error: `reconcile rejected: ${outcome.code}` }, 409);
+	}
+	if (outcome.disposition !== "requeued") {
+		await deps.postComment(
+			env.LINEAR_API_TOKEN,
+			outcome.job.issueId,
+			deadLetterComment(outcome.job, outcome.job.result?.error ?? reason),
+		);
+	}
+	return json({ ok: true, disposition: outcome.disposition, job: redactJob(outcome.job) });
+}
+
 async function handleStatus(request: Request, env: Env, deps: WorkerDeps): Promise<Response> {
 	if (!bearerAuthorized(request, env.STATUS_TOKEN)) return unauthorized();
 	const url = new URL(request.url);
@@ -228,6 +370,12 @@ export function createWorker(deps: WorkerDeps): { fetch(request: Request, env: E
 			}
 			if (request.method === "POST" && url.pathname === "/result") {
 				return handleResult(request, env, deps);
+			}
+			if (request.method === "POST" && url.pathname === "/heartbeat") {
+				return handleHeartbeat(request, env, deps);
+			}
+			if (request.method === "POST" && url.pathname === "/reconcile") {
+				return handleReconcile(request, env, deps);
 			}
 			if (request.method === "GET" && url.pathname === "/status") {
 				return handleStatus(request, env, deps);

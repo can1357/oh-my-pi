@@ -51,6 +51,8 @@ export interface Job {
 	createdAt: string;
 	attemptId: string;
 	leaseToken: string;
+	/** Heartbeat cadence the Worker expects; two missed beats park the job. */
+	heartbeatMs?: number;
 }
 
 export interface JobRunResult {
@@ -87,9 +89,11 @@ export function runOmp(
 	prompt: string,
 	spawnImpl: SpawnFn = spawn,
 	timeoutMs: number = JOB_TIMEOUT_MS,
+	onSpawn?: (child: ChildProcess) => void,
 ): Promise<JobRunResult> {
 	const { promise, resolve } = Promise.withResolvers<JobRunResult>();
 	const child = spawnImpl(OMP_BIN, buildOmpArgs(model, prompt), { cwd: WORKSPACE_DIR });
+	onSpawn?.(child);
 
 	let stdout = "";
 	let stderr = "";
@@ -124,6 +128,7 @@ export async function executeJob(
 	allowedModels: readonly string[],
 	spawnImpl: SpawnFn = spawn,
 	timeoutMs: number = JOB_TIMEOUT_MS,
+	onSpawn?: (child: ChildProcess) => void,
 ): Promise<JobRunResult> {
 	if (!allowedModels.includes(job.model)) {
 		return {
@@ -132,7 +137,7 @@ export async function executeJob(
 			error: "model is not on this relay's allowlist (OMPK_RELAY_MODELS)",
 		};
 	}
-	return runOmp(job.model, job.prompt, spawnImpl, timeoutMs);
+	return runOmp(job.model, job.prompt, spawnImpl, timeoutMs, onSpawn);
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -162,14 +167,84 @@ async function submitResult(token: string, job: Job, result: JobRunResult): Prom
 	if (!res.ok) throw new Error(`result submit failed: ${res.status} ${await res.text()}`);
 }
 
+const HEARTBEAT_FALLBACK_MS = 10 * 60_000;
+
+/**
+ * Fenced heartbeat. Returns false when the Worker rejects the fence (409):
+ * the lease was reassigned or resolved, so this attempt must stop burning
+ * tokens — the caller kills the child and skips the result submit.
+ */
+async function sendHeartbeat(token: string, job: Job): Promise<boolean> {
+	const res = await fetch(`${WORKER_URL}/heartbeat`, {
+		method: "POST",
+		headers: { ...authHeaders(token), "Content-Type": "application/json" },
+		body: JSON.stringify({ jobId: job.id, attemptId: job.attemptId, leaseToken: job.leaseToken }),
+	});
+	if (res.status === 409) return false;
+	if (!res.ok) {
+		// Network or Worker hiccup: keep running; the next beat may recover
+		// and a reconcile-parked job is restored by any later fenced beat.
+		console.error(`[${new Date().toISOString()}] heartbeat for ${job.id} failed: ${res.status}`);
+	}
+	return true;
+}
+
+/**
+ * Startup attestation: this relay has no live children, so every job it
+ * left parked in reconcile can be requeued (or dead-lettered on budget
+ * exhaustion). Tolerates older Workers without the endpoint.
+ */
+async function announceStartup(token: string): Promise<void> {
+	try {
+		const res = await fetch(`${WORKER_URL}/reconcile`, {
+			method: "POST",
+			headers: { ...authHeaders(token), "Content-Type": "application/json" },
+			body: JSON.stringify({ runner: RELAY_NAME, startupSweep: true }),
+		});
+		if (!res.ok) {
+			console.error(`startup reconcile sweep skipped: ${res.status} ${await res.text()}`);
+			return;
+		}
+		const summary = (await res.json()) as { resolved?: number; requeued?: number; deadLettered?: number };
+		if (summary.resolved) {
+			console.log(
+				`startup reconcile sweep: ${summary.resolved} job(s) resolved (${summary.requeued ?? 0} requeued, ${summary.deadLettered ?? 0} dead-lettered)`,
+			);
+		}
+	} catch (err) {
+		console.error("startup reconcile sweep failed:", err instanceof Error ? err.message : err);
+	}
+}
+
 async function runOnce(token: string, allowedModels: readonly string[]): Promise<boolean> {
 	const job = await pollJob(token);
 	if (!job) return false;
 
 	console.log(`[${new Date().toISOString()}] running job ${job.id} (${job.issueIdentifier}, model=${job.model})`);
-	const result = await executeJob(job, allowedModels);
-	await submitResult(token, job, result);
-	console.log(`[${new Date().toISOString()}] job ${job.id} ${result.success ? "succeeded" : "failed"}`);
+	let child: ChildProcess | undefined;
+	let fenceLost = false;
+	const cadence = job.heartbeatMs ?? HEARTBEAT_FALLBACK_MS;
+	const beat = setInterval(() => {
+		void sendHeartbeat(token, job).then(live => {
+			if (live || fenceLost) return;
+			fenceLost = true;
+			console.error(`[${new Date().toISOString()}] lease for job ${job.id} was fenced off; killing runner`);
+			child?.kill();
+		});
+	}, cadence);
+	try {
+		const result = await executeJob(job, allowedModels, spawn, JOB_TIMEOUT_MS, spawned => {
+			child = spawned;
+		});
+		if (fenceLost) {
+			console.error(`[${new Date().toISOString()}] job ${job.id} discarded: lease no longer held`);
+			return true;
+		}
+		await submitResult(token, job, result);
+		console.log(`[${new Date().toISOString()}] job ${job.id} ${result.success ? "succeeded" : "failed"}`);
+	} finally {
+		clearInterval(beat);
+	}
 	return true;
 }
 
@@ -186,6 +261,7 @@ async function main(): Promise<void> {
 	console.log(
 		`ompk relay "${RELAY_NAME}" starting — polling ${WORKER_URL} every ${POLL_INTERVAL_MS}ms, ${allowedModels.length} allowed model(s)`,
 	);
+	await announceStartup(RELAY_TOKEN);
 	for (;;) {
 		try {
 			const ranSomething = await runOnce(RELAY_TOKEN, allowedModels);

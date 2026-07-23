@@ -6,7 +6,8 @@ import type { Job } from "../src/types";
  * In-memory QueueStorage. The Durable Object serializes every public op via
  * `blockConcurrencyWhile`; these tests exercise the state-transition contract
  * the core must uphold under that serialization: no lost jobs, single active
- * lease, fenced completion, idempotent duplicates, deterministic expiry.
+ * lease, fenced completion, idempotent duplicates, and liveness handling —
+ * a silent lease parks in `reconcile` and is never re-granted directly.
  */
 class MemoryStorage implements QueueStorage {
 	readonly #data = new Map<string, unknown>();
@@ -83,6 +84,18 @@ describe("queue admission", () => {
 		const afterDone = await core.admit(makeJob({ issueId: "issue-same" }));
 		expect(afterDone.accepted).toBe(true);
 	});
+
+	it("retains the issue claim while a job is parked in reconcile", async () => {
+		const core = new QueueCore(new MemoryStorage(), { leaseMs: 100 });
+		const job = makeJob({ issueId: "issue-parked" });
+		await core.admit(job);
+		await core.lease("relay-1", T0);
+		await core.sweep(T0 + 101);
+		expect((await core.getJob(job.id))?.status).toBe("reconcile");
+
+		const during = await core.admit(makeJob({ issueId: "issue-parked" }));
+		expect(during).toEqual({ accepted: false, reason: "active_job_exists", jobId: job.id });
+	});
 });
 
 describe("lease fencing", () => {
@@ -106,14 +119,24 @@ describe("lease fencing", () => {
 		expect((await core.getJob(job.id))?.status).toBe("leased");
 	});
 
-	it("fences a stale lease out of completing a newer attempt", async () => {
+	it("fences a superseded attempt out after park, resolve, and re-grant", async () => {
 		const core = new QueueCore(new MemoryStorage(), { leaseMs: 100, maxAttempts: 5 });
 		const job = makeJob();
 		await core.admit(job);
 		const stale = await core.lease("relay-1", T0);
-		// Lease expires; a second relay picks the job up as a new attempt.
-		const fresh = await core.lease("relay-2", T0 + 101);
+		// The lease goes silent; it parks in reconcile and is NOT re-granted.
+		await core.sweep(T0 + 101);
+		expect(await core.lease("relay-2", T0 + 102)).toBeNull();
+		// Termination is confirmed; the job requeues and relay-2 takes attempt 2.
+		const resolved = await core.resolveReconcile(job.id, {
+			requeue: true,
+			reason: "runner terminated",
+			now: T0 + 110,
+		});
+		expect(resolved).toMatchObject({ ok: true, disposition: "requeued" });
+		const fresh = await core.lease("relay-2", T0 + 120);
 		expect(fresh?.job.id).toBe(job.id);
+		expect(fresh?.job.attempts).toBe(2);
 		expect(fresh?.leaseToken).not.toBe(stale?.leaseToken);
 
 		const staleOutcome = await core.complete(
@@ -141,8 +164,10 @@ describe("lease fencing", () => {
 		const job = makeJob();
 		await core.admit(job);
 		const stale = await core.lease("relay-1", T0);
-		const fresh = await core.lease("relay-2", T0 + 101);
-		await core.complete(job.id, fresh!.attemptId, fresh!.leaseToken, { success: true, output: "kept" }, T0 + 110);
+		await core.sweep(T0 + 101);
+		await core.resolveReconcile(job.id, { requeue: true, reason: "terminated", now: T0 + 105 });
+		const fresh = await core.lease("relay-2", T0 + 110);
+		await core.complete(job.id, fresh!.attemptId, fresh!.leaseToken, { success: true, output: "kept" }, T0 + 120);
 
 		const lateStale = await core.complete(
 			job.id,
@@ -192,27 +217,158 @@ describe("idempotent completion", () => {
 	});
 });
 
-describe("lease expiry and retry budget", () => {
-	it("re-leases an expired job with a fresh attempt while budget remains", async () => {
-		const core = new QueueCore(new MemoryStorage(), { leaseMs: 100, maxAttempts: 3 });
+describe("heartbeats", () => {
+	it("re-arms the lease so a beating runner is never parked", async () => {
+		const core = new QueueCore(new MemoryStorage(), { leaseMs: 100 });
 		const job = makeJob();
 		await core.admit(job);
-		const first = await core.lease("relay-1", T0);
-		expect(first?.job.attempts).toBe(1);
-		const second = await core.lease("relay-1", T0 + 101);
-		expect(second?.job.id).toBe(job.id);
-		expect(second?.job.attempts).toBe(2);
+		const grant = await core.lease("relay-1", T0);
+
+		const beat = await core.heartbeat(job.id, grant!.attemptId, grant!.leaseToken, T0 + 80);
+		expect(beat).toMatchObject({ ok: true, restored: false });
+
+		// Past the original expiry (T0+100) but inside the re-armed window.
+		expect((await core.sweep(T0 + 150)).reconciled).toHaveLength(0);
+		expect((await core.getJob(job.id))?.status).toBe("leased");
+
+		// Silence after the last beat eventually parks it.
+		expect((await core.sweep(T0 + 181)).reconciled.map(j => j.id)).toEqual([job.id]);
 	});
 
-	it("dead-letters a job when the retry budget is exhausted", async () => {
-		const core = new QueueCore(new MemoryStorage(), { leaseMs: 100, maxAttempts: 1 });
+	it("parks a lease after two missed heartbeats even before lease expiry", async () => {
+		const core = new QueueCore(new MemoryStorage(), { leaseMs: 10_000, heartbeatMs: 100 });
 		const job = makeJob();
 		await core.admit(job);
 		await core.lease("relay-1", T0);
-		// Budget is spent; the expired lease is dead-lettered instead of re-leased.
-		expect(await core.lease("relay-1", T0 + 101)).toBeNull();
+
+		expect((await core.sweep(T0 + 150)).reconciled).toHaveLength(0);
+		const swept = await core.sweep(T0 + 201);
+		expect(swept.reconciled.map(j => j.id)).toEqual([job.id]);
+		const parked = await core.getJob(job.id);
+		expect(parked?.status).toBe("reconcile");
+		expect(parked?.reconcileReason).toContain("no heartbeat");
+	});
+
+	it("rejects unfenced, unknown, and unleased heartbeats", async () => {
+		const core = new QueueCore(new MemoryStorage());
+		const job = makeJob();
+		await core.admit(job);
+		expect(await core.heartbeat(job.id, "a", "t", T0)).toEqual({ ok: false, code: "not_leased" });
+		expect(await core.heartbeat("missing", "a", "t", T0)).toEqual({ ok: false, code: "not_found" });
+		const grant = await core.lease("relay-1", T0);
+		expect(await core.heartbeat(job.id, grant!.attemptId, "forged", T0 + 1)).toEqual({ ok: false, code: "fenced" });
+	});
+
+	it("restores a parked job on a fenced beat and lets it complete normally", async () => {
+		const core = new QueueCore(new MemoryStorage(), { leaseMs: 100 });
+		const job = makeJob();
+		await core.admit(job);
+		const grant = await core.lease("relay-1", T0);
+		await core.sweep(T0 + 101);
+		expect((await core.getJob(job.id))?.status).toBe("reconcile");
+
+		const beat = await core.heartbeat(job.id, grant!.attemptId, grant!.leaseToken, T0 + 120);
+		expect(beat).toMatchObject({ ok: true, restored: true });
+		expect((await core.getJob(job.id))?.status).toBe("leased");
+		// Restored means live: later sweeps inside the window leave it alone.
+		expect((await core.sweep(T0 + 150)).reconciled).toHaveLength(0);
+
+		const done = await core.complete(job.id, grant!.attemptId, grant!.leaseToken, { success: true, output: "ok" }, T0 + 160);
+		expect(done).toMatchObject({ ok: true, duplicate: false });
+	});
+});
+
+describe("reconcile resolution", () => {
+	it("accepts a late fenced completion from a parked job and releases the claim", async () => {
+		const core = new QueueCore(new MemoryStorage(), { leaseMs: 100 });
+		const job = makeJob({ issueId: "issue-late" });
+		await core.admit(job);
+		const grant = await core.lease("relay-1", T0);
+		await core.sweep(T0 + 101);
+
+		const late = await core.complete(
+			job.id,
+			grant!.attemptId,
+			grant!.leaseToken,
+			{ success: true, output: "finished after all" },
+			T0 + 200,
+		);
+		expect(late).toMatchObject({ ok: true, duplicate: false });
+		expect((await core.getJob(job.id))?.status).toBe("done");
+		expect((await core.admit(makeJob({ issueId: "issue-late" }))).accepted).toBe(true);
+	});
+
+	it("requeues preserving the attempt count and dead-letters on budget exhaustion", async () => {
+		const core = new QueueCore(new MemoryStorage(), { leaseMs: 100, maxAttempts: 2 });
+		const job = makeJob({ issueId: "issue-budget" });
+		await core.admit(job);
+		await core.lease("relay-1", T0);
+		await core.sweep(T0 + 101);
+		const first = await core.resolveReconcile(job.id, { requeue: true, reason: "terminated", now: T0 + 110 });
+		expect(first).toMatchObject({ ok: true, disposition: "requeued" });
+		expect((await core.getJob(job.id))?.attempts).toBe(1);
+
+		await core.lease("relay-1", T0 + 120);
+		await core.sweep(T0 + 300);
+		const second = await core.resolveReconcile(job.id, { requeue: true, reason: "terminated again", now: T0 + 310 });
+		expect(second).toMatchObject({ ok: true, disposition: "dead_lettered" });
 		const dead = await core.getJob(job.id);
 		expect(dead?.status).toBe("failed");
 		expect(dead?.result?.error).toContain("retry budget exhausted");
+		expect((await core.admit(makeJob({ issueId: "issue-budget" }))).accepted).toBe(true);
+	});
+
+	it("fails a job outright on explicit terminate", async () => {
+		const core = new QueueCore(new MemoryStorage(), { leaseMs: 100 });
+		const job = makeJob();
+		await core.admit(job);
+		await core.lease("relay-1", T0);
+		await core.sweep(T0 + 101);
+		const outcome = await core.resolveReconcile(job.id, {
+			requeue: false,
+			reason: "operator terminated the VM",
+			now: T0 + 110,
+		});
+		expect(outcome).toMatchObject({ ok: true, disposition: "failed" });
+		expect((await core.getJob(job.id))?.result?.error).toBe("operator terminated the VM");
+	});
+
+	it("rejects resolution with a mismatched fence or wrong state", async () => {
+		const core = new QueueCore(new MemoryStorage(), { leaseMs: 100 });
+		const job = makeJob();
+		await core.admit(job);
+		const grant = await core.lease("relay-1", T0);
+		expect(
+			await core.resolveReconcile(job.id, { requeue: true, reason: "r", now: T0 + 10 }),
+		).toEqual({ ok: false, code: "not_reconcile" });
+
+		await core.sweep(T0 + 101);
+		expect(
+			await core.resolveReconcile(job.id, {
+				requeue: true,
+				reason: "r",
+				now: T0 + 110,
+				attemptId: grant!.attemptId,
+				leaseToken: "forged",
+			}),
+		).toEqual({ ok: false, code: "fenced" });
+		expect((await core.getJob(job.id))?.status).toBe("reconcile");
+	});
+
+	it("resolves by runner only for that runner's parked jobs", async () => {
+		const core = new QueueCore(new MemoryStorage(), { leaseMs: 100 });
+		const mine = makeJob();
+		const theirs = makeJob();
+		await core.admit(mine);
+		await core.admit(theirs);
+		await core.lease("relay-1", T0);
+		await core.lease("relay-2", T0);
+		await core.sweep(T0 + 101);
+
+		const resolved = await core.resolveReconcileByRunner("relay-1", "relay-1 restarted", T0 + 110);
+		expect(resolved.map(r => r.job.id)).toEqual([mine.id]);
+		expect(resolved[0]!.disposition).toBe("requeued");
+		expect((await core.getJob(mine.id))?.status).toBe("pending");
+		expect((await core.getJob(theirs.id))?.status).toBe("reconcile");
 	});
 });

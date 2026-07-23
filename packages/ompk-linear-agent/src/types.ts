@@ -17,7 +17,7 @@ export interface Env {
 	ALLOWED_MODELS: string;
 }
 
-export type JobStatus = "pending" | "leased" | "done" | "failed";
+export type JobStatus = "pending" | "leased" | "reconcile" | "done" | "failed";
 
 export interface JobResult {
 	success: boolean;
@@ -44,6 +44,12 @@ export interface Job {
 	leaseExpiresAt?: string;
 	leasedAt?: string;
 	leasedBy?: string;
+	/** Last accepted fenced heartbeat; liveness signal while leased. */
+	lastHeartbeatAt?: string;
+	/** When the job entered reconcile (liveness uncertain). */
+	reconcileAt?: string;
+	/** Why the job entered reconcile (queue-generated, never runner text). */
+	reconcileReason?: string;
 	/** Fencing identity that produced the accepted terminal result. */
 	completedAttemptId?: string;
 	completedLeaseToken?: string;
@@ -60,6 +66,9 @@ export interface RedactedJob {
 	attempts: number;
 	leasedAt?: string;
 	leasedBy?: string;
+	lastHeartbeatAt?: string;
+	reconcileAt?: string;
+	reconcileReason?: string;
 	result?: { success: boolean; completedAt: string };
 }
 
@@ -73,6 +82,9 @@ export function redactJob(job: Job): RedactedJob {
 		attempts: job.attempts,
 		...(job.leasedAt ? { leasedAt: job.leasedAt } : {}),
 		...(job.leasedBy ? { leasedBy: job.leasedBy } : {}),
+		...(job.lastHeartbeatAt ? { lastHeartbeatAt: job.lastHeartbeatAt } : {}),
+		...(job.reconcileAt ? { reconcileAt: job.reconcileAt } : {}),
+		...(job.reconcileReason ? { reconcileReason: job.reconcileReason } : {}),
 		...(job.result ? { result: { success: job.result.success, completedAt: job.result.completedAt } } : {}),
 	};
 }

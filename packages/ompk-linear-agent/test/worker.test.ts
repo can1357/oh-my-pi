@@ -23,17 +23,39 @@ class MemoryStorage implements QueueStorage {
 /** Fake stub running the REAL queue core, so endpoint tests exercise production queue semantics. */
 class FakeQueueStub implements JobQueueStub {
 	readonly core = new QueueCore(new MemoryStorage());
+	/** Simulated clock skew so endpoint tests can trigger liveness parking. */
+	nowOffsetMs = 0;
+
+	#now(): number {
+		return Date.now() + this.nowOffsetMs;
+	}
 
 	async admit(job: Job) {
 		return this.core.admit(job);
 	}
 
 	async lease(leasedBy: string) {
-		return this.core.lease(leasedBy, Date.now());
+		return this.core.lease(leasedBy, this.#now());
 	}
 
 	async complete(id: string, attemptId: string, leaseToken: string, result: Omit<JobResult, "completedAt">) {
-		return this.core.complete(id, attemptId, leaseToken, result, Date.now());
+		return this.core.complete(id, attemptId, leaseToken, result, this.#now());
+	}
+
+	async heartbeat(id: string, attemptId: string, leaseToken: string) {
+		return this.core.heartbeat(id, attemptId, leaseToken, this.#now());
+	}
+
+	async sweep() {
+		return this.core.sweep(this.#now());
+	}
+
+	async resolveReconcile(id: string, opts: { requeue: boolean; reason: string; attemptId?: string; leaseToken?: string }) {
+		return this.core.resolveReconcile(id, { ...opts, now: this.#now() });
+	}
+
+	async resolveReconcileByRunner(runner: string, reason: string) {
+		return this.core.resolveReconcileByRunner(runner, reason, this.#now());
 	}
 
 	async getJob(id: string) {
@@ -382,5 +404,179 @@ describe("status endpoint", () => {
 	it("returns 404 for unknown job ids", async () => {
 		const detail = await harness.worker.fetch(statusRequest(STATUS_TOKEN, "missing-id"), makeEnv());
 		expect(detail.status).toBe(404);
+	});
+});
+
+describe("liveness endpoints", () => {
+	let harness: Harness;
+	let leased: { id: string; attemptId: string; leaseToken: string; heartbeatMs: number };
+
+	beforeEach(async () => {
+		harness = makeHarness();
+		await harness.worker.fetch(await webhookRequest(ISSUE_UPDATE_PAYLOAD), makeEnv());
+		leased = (await (
+			await harness.worker.fetch(
+				new Request("https://worker.test/poll?relay=relay-1", {
+					headers: { authorization: `Bearer ${RELAY_TOKEN}` },
+				}),
+				makeEnv(),
+			)
+		).json()) as typeof leased;
+	});
+
+	function heartbeatRequest(body: unknown, token = RELAY_TOKEN): Request {
+		return new Request("https://worker.test/heartbeat", {
+			method: "POST",
+			headers: { authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		});
+	}
+
+	function reconcileRequest(body: unknown, token = RELAY_TOKEN): Request {
+		return new Request("https://worker.test/reconcile", {
+			method: "POST",
+			headers: { authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		});
+	}
+
+	function pollAgain(): Promise<Response> {
+		return harness.worker.fetch(
+			new Request("https://worker.test/poll?relay=relay-1", {
+				headers: { authorization: `Bearer ${RELAY_TOKEN}` },
+			}),
+			makeEnv(),
+		);
+	}
+
+	it("grants leases carrying the heartbeat cadence", () => {
+		expect(leased.heartbeatMs).toBeGreaterThan(0);
+	});
+
+	it("accepts a fenced heartbeat and rejects forged, unknown, or unauthorized ones", async () => {
+		const ok = await harness.worker.fetch(
+			heartbeatRequest({ jobId: leased.id, attemptId: leased.attemptId, leaseToken: leased.leaseToken }),
+			makeEnv(),
+		);
+		expect(ok.status).toBe(200);
+		expect((await ok.json()) as { ok: boolean; restored: boolean }).toMatchObject({ ok: true, restored: false });
+
+		const forged = await harness.worker.fetch(
+			heartbeatRequest({ jobId: leased.id, attemptId: leased.attemptId, leaseToken: "forged" }),
+			makeEnv(),
+		);
+		expect(forged.status).toBe(409);
+
+		const unknown = await harness.worker.fetch(
+			heartbeatRequest({ jobId: "missing", attemptId: "a", leaseToken: "t" }),
+			makeEnv(),
+		);
+		expect(unknown.status).toBe(404);
+
+		const malformed = await harness.worker.fetch(heartbeatRequest({ jobId: 42 }), makeEnv());
+		expect(malformed.status).toBe(400);
+
+		const wrongCredential = await harness.worker.fetch(
+			heartbeatRequest({ jobId: leased.id, attemptId: leased.attemptId, leaseToken: leased.leaseToken }, STATUS_TOKEN),
+			makeEnv(),
+		);
+		expect(wrongCredential.status).toBe(401);
+	});
+
+	it("parks a silent lease on poll, comments exactly once, and never re-grants it", async () => {
+		harness.stub.nowOffsetMs = 21 * 60_000;
+		const parked = await pollAgain();
+		expect(parked.status).toBe(204);
+		expect(harness.comments).toHaveLength(1);
+		expect(harness.comments[0]!.body).toContain("liveness uncertain");
+
+		await pollAgain();
+		expect(harness.comments).toHaveLength(1);
+		expect((await harness.stub.getJob(leased.id))?.status).toBe("reconcile");
+	});
+
+	it("restores a parked job on a fenced heartbeat and completes it normally", async () => {
+		harness.stub.nowOffsetMs = 21 * 60_000;
+		await pollAgain();
+
+		const beat = await harness.worker.fetch(
+			heartbeatRequest({ jobId: leased.id, attemptId: leased.attemptId, leaseToken: leased.leaseToken }),
+			makeEnv(),
+		);
+		expect(beat.status).toBe(200);
+		expect(((await beat.json()) as { restored: boolean }).restored).toBe(true);
+		expect((await harness.stub.getJob(leased.id))?.status).toBe("leased");
+
+		const done = await harness.worker.fetch(
+			new Request("https://worker.test/result", {
+				method: "POST",
+				headers: { authorization: `Bearer ${RELAY_TOKEN}`, "Content-Type": "application/json" },
+				body: JSON.stringify({
+					jobId: leased.id,
+					attemptId: leased.attemptId,
+					leaseToken: leased.leaseToken,
+					success: true,
+					output: "survived the partition",
+				}),
+			}),
+			makeEnv(),
+		);
+		expect(done.status).toBe(200);
+		expect(harness.comments.some(c => c.body.includes("survived the partition"))).toBe(true);
+	});
+
+	it("startup sweep requeues only that runner's parked jobs and dispatch resumes", async () => {
+		harness.stub.nowOffsetMs = 21 * 60_000;
+		await pollAgain();
+
+		const adminAttempt = await harness.worker.fetch(
+			reconcileRequest({ runner: "relay-1", startupSweep: true }, STATUS_TOKEN),
+			makeEnv(),
+		);
+		expect(adminAttempt.status).toBe(401);
+
+		const swept = await harness.worker.fetch(reconcileRequest({ runner: "relay-1", startupSweep: true }), makeEnv());
+		expect(swept.status).toBe(200);
+		expect((await swept.json()) as Record<string, unknown>).toMatchObject({
+			ok: true,
+			resolved: 1,
+			requeued: 1,
+			deadLettered: 0,
+		});
+
+		const regrant = await pollAgain();
+		expect(regrant.status).toBe(200);
+		expect(((await regrant.json()) as { id: string }).id).toBe(leased.id);
+		expect((await harness.stub.getJob(leased.id))?.attempts).toBe(2);
+		// Parking comment only; requeues are not mirrored.
+		expect(harness.comments).toHaveLength(1);
+	});
+
+	it("requires the admin credential for unfenced resolution and mirrors the dead letter", async () => {
+		harness.stub.nowOffsetMs = 21 * 60_000;
+		await pollAgain();
+
+		const relayUnfenced = await harness.worker.fetch(
+			reconcileRequest({ jobId: leased.id, requeue: false, reason: "killed" }),
+			makeEnv(),
+		);
+		expect(relayUnfenced.status).toBe(401);
+
+		const adminTerminate = await harness.worker.fetch(
+			reconcileRequest({ jobId: leased.id, requeue: false, reason: "operator terminated the runner" }, STATUS_TOKEN),
+			makeEnv(),
+		);
+		expect(adminTerminate.status).toBe(200);
+		expect(((await adminTerminate.json()) as { disposition: string }).disposition).toBe("failed");
+		expect(harness.comments.some(c => c.body.includes("dead-lettered"))).toBe(true);
+		expect((await harness.stub.getJob(leased.id))?.status).toBe("failed");
+	});
+
+	it("rejects resolution of a job that is not parked", async () => {
+		const active = await harness.worker.fetch(
+			reconcileRequest({ jobId: leased.id, attemptId: leased.attemptId, leaseToken: leased.leaseToken }),
+			makeEnv(),
+		);
+		expect(active.status).toBe(409);
 	});
 });

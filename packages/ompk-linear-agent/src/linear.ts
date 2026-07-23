@@ -113,6 +113,41 @@ export async function postComment(token: string, issueId: string, body: string):
 	);
 }
 
+/**
+ * Issue comment for a job parked in reconcile (liveness uncertain). Shared
+ * by the /poll sweep and the Durable Object alarm so both surfaces post the
+ * identical, bounded notice. Never embeds prompts or runner output.
+ */
+export function reconcileComment(job: {
+	model: string;
+	attempts: number;
+	leasedBy?: string;
+	reconcileReason?: string;
+}): string {
+	const runner = job.leasedBy ?? "unknown relay";
+	const reason = job.reconcileReason ?? "no heartbeat";
+	return (
+		`**ompk (${job.model}) — liveness uncertain**\n\n` +
+		`Attempt ${job.attempts} on relay \`${runner}\` stopped heartbeating (${reason}). ` +
+		`The job is parked in reconcile and its claims are retained: confirm or terminate ` +
+		`the runner, then requeue or dead-letter it. A replacement will not start until then.`
+	);
+}
+
+/**
+ * Issue comment for a dead-lettered or explicitly failed reconcile
+ * resolution: last error plus the concrete recovery action, per the
+ * automation contract.
+ */
+export function deadLetterComment(job: { model: string; attempts: number }, error: string): string {
+	return (
+		`**ompk (${job.model}) — dead-lettered**\n\n` +
+		`${error}\n\n` +
+		`Recovery: fix the underlying failure, then re-apply the \`Queue/Queued\` admission ` +
+		`state so a fresh delivery admits a new job (attempt budget was ${job.attempts}).`
+	);
+}
+
 /** Extracts the 9router/model combo id from a `model:<combo-id>` label, if present. */
 export function extractModelLabel(labels: string[]): string | null {
 	const label = labels.find(l => l.toLowerCase().startsWith("model:"));

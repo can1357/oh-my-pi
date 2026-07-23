@@ -8,7 +8,7 @@ posts the result back to Linear as a comment.
 ## Pieces
 
 - `src/index.ts` — Cloudflare entrypoint (binds the real Linear API + Durable Object queue)
-- `src/worker.ts` — request handlers (`/webhook`, `/poll`, `/result`, `/status`)
+- `src/worker.ts` — request handlers (`/webhook`, `/poll`, `/result`, `/heartbeat`, `/reconcile`, `/status`)
 - `src/dispatch-policy.ts` — webhook dispatch authorization + replay dedupe key
 - `src/linear.ts` — webhook signature verification + Linear GraphQL calls
 - `src/queue-core.ts` / `src/queue-do.ts` — atomic, lease-fenced job queue (Durable Object)
@@ -31,12 +31,28 @@ active job may exist per issue. Missing allowlist configuration fails closed.
 
 ## Queue semantics
 
-The queue is a single Durable Object (`JobQueue`); admission, leasing, and
-completion are serialized. Every lease issues an `attemptId` + `leaseToken`;
-completion requires both, so a stale relay can never overwrite a newer
-attempt or repeat the Linear comment (duplicate completion of the accepted
-attempt is acknowledged idempotently). Expired leases re-lease up to 5
-attempts (30-minute lease), then dead-letter as `failed`.
+The queue is a single Durable Object (`JobQueue`); admission, leasing,
+heartbeats, and completion are serialized. Every lease issues an
+`attemptId` + `leaseToken`; completion requires both, so a stale relay can
+never overwrite a newer attempt or repeat the Linear comment (duplicate
+completion of the accepted attempt is acknowledged idempotently).
+
+Liveness follows the reconcile contract from
+`docs/multi-agent-fork-collaboration.md`:
+
+- The relay heartbeats every `heartbeatMs` (10 min, carried on the lease
+  grant); each fenced beat re-arms the 30-minute lease.
+- A lease that misses two heartbeats (or expires) is parked in `reconcile`
+  by the poll-time sweep or the Durable Object storage alarm — it is never
+  re-granted directly, and its issue claim is retained. Each parking is
+  mirrored to the Linear issue as a comment.
+- Reconcile resolves only by: a fenced heartbeat (runner was alive —
+  restored to `leased`), a fenced late completion (finished work is kept),
+  a relay startup sweep attesting it has no live children, or an
+  admin-credential resolution after out-of-band confirmation.
+- Confirmed-terminated jobs requeue while attempts remain (5 total) and
+  dead-letter as `failed` once the budget is exhausted; dead letters post
+  the last error plus recovery action to the issue.
 
 ## Flow
 
@@ -46,11 +62,16 @@ attempts (30-minute lease), then dead-letter as `failed`.
    authorizes the dispatch as above, and admits a job into the Durable Object
    queue.
 3. The relay polls `/poll` with `RELAY_TOKEN`, receives the job plus its lease
-   identity, checks the model against its own `OMPK_RELAY_MODELS` allowlist,
-   and spawns `omp --print --yolo --model <combo-id> -- <prompt>` — argv only,
-   never a shell.
+   identity and heartbeat cadence, checks the model against its own
+   `OMPK_RELAY_MODELS` allowlist, and spawns
+   `omp --print --yolo --model <combo-id> -- <prompt>` — argv only, never a
+   shell. While the job runs it posts fenced heartbeats to `/heartbeat`; a
+   409 means the lease was lost, so the relay kills the child and discards
+   the result.
 4. The relay posts the result (with `attemptId` + `leaseToken`) to `/result`;
-   the Worker validates the fence and comments on the Linear issue once.
+   the Worker validates the fence and comments on the Linear issue once. On
+   startup the relay posts `{ runner, startupSweep: true }` to `/reconcile`,
+   attesting it has no live children so its parked jobs can requeue.
 
 `/status` requires the separate `STATUS_TOKEN` admin credential and returns
 redacted operational metadata only — never prompts, outputs, or tokens.
@@ -145,10 +166,15 @@ untrusted-input surfaces:
 This Worker implements the *manual admission* mode of
 [docs/multi-agent-fork-collaboration.md](../../docs/multi-agent-fork-collaboration.md):
 a human dispatcher sets `Queue/Queued` and the assignee before anything runs.
-The fuller automation contract described there — heartbeats, `Queue/Reconcile`
-liveness handling, retry classification, and dead-letter surfacing back to
-Linear — is intentionally unimplemented until that contract is built and
-verified.
+
+Of the fuller automation contract described there, the liveness half is now
+implemented: fenced heartbeats, reconcile parking (never a direct re-grant),
+runner startup attestation, and reconcile/dead-letter surfacing to Linear as
+issue comments. Still intentionally unimplemented until built and verified:
+retry classification with backoff (a reported `omp` failure is terminal; only
+confirmed-terminated reconciles requeue), logical attempt identity keyed to
+the Linear agent session, fencing enforced on branch mutations, and the
+`Queue/Reconcile` / `Queue/Dead Letter` label mirroring (comments only today).
 
 ## Testing
 
@@ -163,5 +189,9 @@ bun --cwd=packages/ompk-linear-agent run check:types
   a job to a different mesh host (mac/hetzner/pi) would mean wrapping the
   argv-based `spawn` call in an SSH exec (see the `pkmesh` skill) — not
   implemented yet since jobs don't carry a target-host field.
-- No retry/backoff on `omp` failures beyond lease re-grant (5 attempts) and a
-  failed comment.
+- No retry/backoff on `omp` failures: a relay-reported failure completes the
+  job as `failed`; only confirmed-terminated reconcile jobs requeue (5-attempt
+  budget). Transient/permanent failure classification is not implemented.
+- The startup sweep assumes `omp` children died with the relay process. On
+  hosts where a child can outlive the relay, verify manually before relying
+  on the attestation.

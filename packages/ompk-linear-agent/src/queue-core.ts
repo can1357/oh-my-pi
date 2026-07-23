@@ -11,6 +11,20 @@
  * so a stale relay can never overwrite a newer attempt or repeat side
  * effects — duplicate completion of the accepted attempt is reported as
  * `duplicate: true` so callers skip external side effects.
+ *
+ * Liveness model (docs/multi-agent-fork-collaboration.md, target automation
+ * contract): a leased runner heartbeats every `heartbeatMs`; each fenced
+ * heartbeat re-arms the lease. A leased job that misses two heartbeats (or
+ * outlives its lease) moves to `reconcile` via {@link QueueCore.sweep} — it
+ * is NEVER re-granted directly. Reconcile resolves only by:
+ * - a fenced heartbeat (the runner was alive all along → restored to leased);
+ * - a fenced completion (a late result proves the attempt finished);
+ * - {@link QueueCore.resolveReconcile} after the prior runner is confirmed
+ *   terminated — requeued while attempts remain, otherwise dead-lettered.
+ *
+ * `sweep` is the ONLY leased→reconcile authority; `lease` grants strictly
+ * from the pending list, so a replacement can never start while liveness is
+ * merely uncertain.
  */
 
 import type { Job, JobResult } from "./types";
@@ -22,15 +36,18 @@ export interface QueueStorage {
 }
 
 export interface QueueLimits {
-	/** Lease duration before a job becomes reclaimable. */
+	/** Lease duration; a fenced heartbeat re-arms it. */
 	leaseMs: number;
-	/** Attempts (initial + re-leases) before a job dead-letters as failed. */
+	/** Attempts (initial + requeues) before a job dead-letters as failed. */
 	maxAttempts: number;
+	/** Expected heartbeat cadence; two missed beats move a lease to reconcile. */
+	heartbeatMs: number;
 }
 
 export const DEFAULT_QUEUE_LIMITS: QueueLimits = {
 	leaseMs: 30 * 60_000,
 	maxAttempts: 5,
+	heartbeatMs: 10 * 60_000,
 };
 
 export interface AdmitOutcome {
@@ -49,8 +66,26 @@ export type CompleteOutcome =
 	| { ok: true; job: Job; duplicate: boolean }
 	| { ok: false; code: "not_found" | "not_leased" | "fenced" | "stale" };
 
+export type HeartbeatOutcome =
+	| { ok: true; job: Job; leaseExpiresAt: string; restored: boolean }
+	| { ok: false; code: "not_found" | "not_leased" | "fenced" };
+
+export type ReconcileDisposition = "requeued" | "dead_lettered" | "failed";
+
+export type ReconcileOutcome =
+	| { ok: true; job: Job; disposition: ReconcileDisposition }
+	| { ok: false; code: "not_found" | "not_reconcile" | "fenced" };
+
+export interface SweepResult {
+	/** Jobs that transitioned leased → reconcile in this sweep. */
+	reconciled: Job[];
+	/** Earliest liveness deadline among still-live leases, for alarm arming. */
+	nextDeadlineAt: number | null;
+}
+
 const PENDING_KEY = "queue:pending";
 const LEASED_KEY = "queue:leased";
+const RECONCILE_KEY = "queue:reconcile";
 
 function jobKey(id: string): string {
 	return `job:${id}`;
@@ -68,9 +103,9 @@ export class QueueCore {
 	readonly #storage: QueueStorage;
 	readonly #limits: QueueLimits;
 
-	constructor(storage: QueueStorage, limits: QueueLimits = DEFAULT_QUEUE_LIMITS) {
+	constructor(storage: QueueStorage, limits: Partial<QueueLimits> = {}) {
 		this.#storage = storage;
-		this.#limits = limits;
+		this.#limits = { ...DEFAULT_QUEUE_LIMITS, ...limits };
 	}
 
 	async #ids(key: string): Promise<string[]> {
@@ -85,9 +120,37 @@ export class QueueCore {
 		await this.#storage.put(jobKey(job.id), job);
 	}
 
+	async #removeFromList(key: string, id: string): Promise<void> {
+		await this.#storage.put(
+			key,
+			(await this.#ids(key)).filter(entry => entry !== id),
+		);
+	}
+
+	async #addToList(key: string, id: string): Promise<void> {
+		const ids = await this.#ids(key);
+		if (!ids.includes(id)) {
+			ids.push(id);
+			await this.#storage.put(key, ids);
+		}
+	}
+
+	/**
+	 * A lease is presumed dead at the earlier of its expiry and two missed
+	 * heartbeats. Jobs leased before the heartbeat era fall back to expiry.
+	 */
+	#livenessDeadline(job: Job): number {
+		const leaseExpiry = job.leaseExpiresAt ? Date.parse(job.leaseExpiresAt) : 0;
+		const lastBeat = job.lastHeartbeatAt ?? job.leasedAt;
+		if (!lastBeat) return leaseExpiry;
+		return Math.min(leaseExpiry, Date.parse(lastBeat) + 2 * this.#limits.heartbeatMs);
+	}
+
 	/**
 	 * Admit a job exactly once per dedupe key, with at most one active
-	 * (pending/leased) job per issue.
+	 * (pending/leased/reconcile) job per issue. Reconcile retains the issue
+	 * claim: liveness uncertainty must be resolved, not papered over by a
+	 * second admission.
 	 */
 	async admit(job: Job): Promise<AdmitOutcome> {
 		const existingByDedupe = await this.#storage.get<{ jobId: string }>(dedupeStorageKey(job.dedupeKey));
@@ -97,57 +160,73 @@ export class QueueCore {
 		const activeForIssue = await this.#storage.get<{ jobId: string }>(issueKey(job.issueId));
 		if (activeForIssue) {
 			const active = await this.#job(activeForIssue.jobId);
-			if (active && (active.status === "pending" || active.status === "leased")) {
+			if (active && (active.status === "pending" || active.status === "leased" || active.status === "reconcile")) {
 				return { accepted: false, reason: "active_job_exists", jobId: active.id };
 			}
 			await this.#storage.delete(issueKey(job.issueId));
 		}
 		await this.#saveJob(job);
-		const pending = await this.#ids(PENDING_KEY);
-		pending.push(job.id);
-		await this.#storage.put(PENDING_KEY, pending);
+		await this.#addToList(PENDING_KEY, job.id);
 		await this.#storage.put(dedupeStorageKey(job.dedupeKey), { jobId: job.id });
 		await this.#storage.put(issueKey(job.issueId), { jobId: job.id });
 		return { accepted: true, jobId: job.id };
 	}
 
 	/**
-	 * Grant the next lease: expired leases are reclaimed first (re-lease or
-	 * dead-letter on attempt exhaustion), then the oldest pending job.
+	 * Move every leased job past its liveness deadline to `reconcile`.
+	 * Fence identity is retained so a late fenced heartbeat or completion
+	 * from the original runner can still resolve the uncertainty.
 	 */
-	async lease(leasedBy: string, now: number): Promise<LeaseGrant | null> {
+	async sweep(now: number): Promise<SweepResult> {
 		const leased = await this.#ids(LEASED_KEY);
-		for (const id of [...leased]) {
+		const reconciled: Job[] = [];
+		const remaining: string[] = [];
+		let nextDeadlineAt: number | null = null;
+		let dirty = false;
+		for (const id of leased) {
 			const job = await this.#job(id);
 			if (job?.status !== "leased") {
-				await this.#storage.put(
-					LEASED_KEY,
-					(await this.#ids(LEASED_KEY)).filter(entry => entry !== id),
-				);
+				dirty = true;
 				continue;
 			}
-			const expiresAt = job.leaseExpiresAt ? Date.parse(job.leaseExpiresAt) : 0;
-			if (expiresAt > now) continue;
-			if (job.attempts >= this.#limits.maxAttempts) {
-				job.status = "failed";
-				job.leaseToken = undefined;
-				job.result = {
-					success: false,
-					output: "",
-					error: `lease expired after ${job.attempts} attempt(s); retry budget exhausted`,
-					completedAt: new Date(now).toISOString(),
-				};
-				await this.#saveJob(job);
-				await this.#storage.delete(issueKey(job.issueId));
-				await this.#storage.put(
-					LEASED_KEY,
-					(await this.#ids(LEASED_KEY)).filter(entry => entry !== id),
-				);
+			const deadline = this.#livenessDeadline(job);
+			if (deadline > now) {
+				remaining.push(id);
+				nextDeadlineAt = nextDeadlineAt === null ? deadline : Math.min(nextDeadlineAt, deadline);
 				continue;
 			}
-			return this.#grant(job, leasedBy, now, false);
+			job.status = "reconcile";
+			job.reconcileAt = new Date(now).toISOString();
+			job.reconcileReason = job.lastHeartbeatAt
+				? `no heartbeat since ${job.lastHeartbeatAt}`
+				: `no heartbeat since lease at ${job.leasedAt ?? "unknown"}`;
+			await this.#saveJob(job);
+			await this.#addToList(RECONCILE_KEY, id);
+			reconciled.push(job);
+			dirty = true;
 		}
+		if (dirty) await this.#storage.put(LEASED_KEY, remaining);
+		return { reconciled, nextDeadlineAt };
+	}
 
+	/** Earliest liveness deadline among leased jobs; `null` when none are leased. */
+	async nextDeadline(): Promise<number | null> {
+		let next: number | null = null;
+		for (const id of await this.#ids(LEASED_KEY)) {
+			const job = await this.#job(id);
+			if (job?.status !== "leased") continue;
+			const deadline = this.#livenessDeadline(job);
+			next = next === null ? deadline : Math.min(next, deadline);
+		}
+		return next;
+	}
+
+	/**
+	 * Grant the oldest pending job. Expired or silent leases are NOT
+	 * re-granted here; they are parked by {@link sweep} until explicitly
+	 * resolved.
+	 */
+	async lease(leasedBy: string, now: number): Promise<LeaseGrant | null> {
 		const pending = await this.#ids(PENDING_KEY);
 		while (pending.length > 0) {
 			const id = pending.shift();
@@ -155,32 +234,57 @@ export class QueueCore {
 			if (!id) continue;
 			const job = await this.#job(id);
 			if (job?.status !== "pending") continue;
-			return this.#grant(job, leasedBy, now, true);
+			return this.#grant(job, leasedBy, now);
 		}
 		return null;
 	}
 
-	async #grant(job: Job, leasedBy: string, now: number, addToLeased: boolean): Promise<LeaseGrant> {
+	async #grant(job: Job, leasedBy: string, now: number): Promise<LeaseGrant> {
 		job.status = "leased";
 		job.attempts += 1;
 		job.attemptId = crypto.randomUUID();
 		job.leaseToken = crypto.randomUUID();
 		job.leasedAt = new Date(now).toISOString();
+		job.lastHeartbeatAt = job.leasedAt;
 		job.leaseExpiresAt = new Date(now + this.#limits.leaseMs).toISOString();
 		job.leasedBy = leasedBy;
+		job.reconcileAt = undefined;
+		job.reconcileReason = undefined;
 		await this.#saveJob(job);
-		if (addToLeased) {
-			const leased = await this.#ids(LEASED_KEY);
-			if (!leased.includes(job.id)) {
-				leased.push(job.id);
-				await this.#storage.put(LEASED_KEY, leased);
-			}
-		}
+		await this.#addToList(LEASED_KEY, job.id);
 		return { job, attemptId: job.attemptId, leaseToken: job.leaseToken };
 	}
 
 	/**
-	 * Fenced completion: only the current lease holder may complete. The
+	 * Fenced liveness signal. Re-arms the lease; a fenced beat on a
+	 * `reconcile` job proves the runner is alive and restores it to `leased`
+	 * (`restored: true`), so no replacement can be admitted around it.
+	 */
+	async heartbeat(id: string, attemptId: string, leaseToken: string, now: number): Promise<HeartbeatOutcome> {
+		const job = await this.#job(id);
+		if (!job) return { ok: false, code: "not_found" };
+		if (job.status !== "leased" && job.status !== "reconcile") return { ok: false, code: "not_leased" };
+		if (!job.attemptId || !job.leaseToken || job.attemptId !== attemptId || job.leaseToken !== leaseToken) {
+			return { ok: false, code: "fenced" };
+		}
+		const restored = job.status === "reconcile";
+		job.status = "leased";
+		job.lastHeartbeatAt = new Date(now).toISOString();
+		job.leaseExpiresAt = new Date(now + this.#limits.leaseMs).toISOString();
+		job.reconcileAt = undefined;
+		job.reconcileReason = undefined;
+		await this.#saveJob(job);
+		if (restored) {
+			await this.#removeFromList(RECONCILE_KEY, id);
+			await this.#addToList(LEASED_KEY, id);
+		}
+		return { ok: true, job, leaseExpiresAt: job.leaseExpiresAt, restored };
+	}
+
+	/**
+	 * Fenced completion: only the current lease holder may complete. Valid
+	 * from `leased` AND `reconcile` — a late fenced result resolves liveness
+	 * uncertainty positively instead of discarding finished work. The
 	 * accepted attempt may repeat its completion idempotently
 	 * (`duplicate: true`, no state change); anything else is rejected.
 	 */
@@ -199,7 +303,7 @@ export class QueueCore {
 			}
 			return { ok: false, code: "stale" };
 		}
-		if (job.status !== "leased") return { ok: false, code: "not_leased" };
+		if (job.status !== "leased" && job.status !== "reconcile") return { ok: false, code: "not_leased" };
 		if (!job.attemptId || !job.leaseToken || job.attemptId !== attemptId || job.leaseToken !== leaseToken) {
 			return { ok: false, code: "fenced" };
 		}
@@ -209,13 +313,83 @@ export class QueueCore {
 		job.completedLeaseToken = leaseToken;
 		job.leaseToken = undefined;
 		job.leaseExpiresAt = undefined;
+		job.reconcileAt = undefined;
+		job.reconcileReason = undefined;
 		await this.#saveJob(job);
-		await this.#storage.put(
-			LEASED_KEY,
-			(await this.#ids(LEASED_KEY)).filter(entry => entry !== id),
-		);
+		await this.#removeFromList(LEASED_KEY, id);
+		await this.#removeFromList(RECONCILE_KEY, id);
 		await this.#storage.delete(issueKey(job.issueId));
 		return { ok: true, job, duplicate: false };
+	}
+
+	/**
+	 * Resolve a reconcile-parked job after its runner's fate is known.
+	 * When `attemptId`/`leaseToken` are provided they must match the parked
+	 * attempt (runner self-report); admin resolution omits them. `requeue`
+	 * re-queues while attempts remain and dead-letters on budget exhaustion;
+	 * `requeue: false` fails the job outright.
+	 */
+	async resolveReconcile(
+		id: string,
+		opts: { requeue: boolean; reason: string; now: number; attemptId?: string; leaseToken?: string },
+	): Promise<ReconcileOutcome> {
+		const job = await this.#job(id);
+		if (!job) return { ok: false, code: "not_found" };
+		if (job.status !== "reconcile") return { ok: false, code: "not_reconcile" };
+		if (opts.attemptId !== undefined || opts.leaseToken !== undefined) {
+			if (job.attemptId !== opts.attemptId || job.leaseToken !== opts.leaseToken) {
+				return { ok: false, code: "fenced" };
+			}
+		}
+		return this.#resolveParked(job, opts.requeue, opts.reason, opts.now);
+	}
+
+	/**
+	 * Resolve every reconcile-parked job owned by `runner` as terminated,
+	 * requeueing each (or dead-lettering on budget exhaustion). Called when
+	 * a runner restarts and attests it has no live children.
+	 */
+	async resolveReconcileByRunner(
+		runner: string,
+		reason: string,
+		now: number,
+	): Promise<Array<{ job: Job; disposition: ReconcileDisposition }>> {
+		const resolved: Array<{ job: Job; disposition: ReconcileDisposition }> = [];
+		for (const id of [...(await this.#ids(RECONCILE_KEY))]) {
+			const job = await this.#job(id);
+			if (job?.status !== "reconcile" || job.leasedBy !== runner) continue;
+			const outcome = await this.#resolveParked(job, true, reason, now);
+			if (outcome.ok) resolved.push({ job: outcome.job, disposition: outcome.disposition });
+		}
+		return resolved;
+	}
+
+	async #resolveParked(job: Job, requeue: boolean, reason: string, now: number): Promise<ReconcileOutcome> {
+		await this.#removeFromList(RECONCILE_KEY, job.id);
+		job.attemptId = undefined;
+		job.leaseToken = undefined;
+		job.leaseExpiresAt = undefined;
+		job.lastHeartbeatAt = undefined;
+		job.reconcileAt = undefined;
+		job.reconcileReason = undefined;
+		if (requeue && job.attempts < this.#limits.maxAttempts) {
+			job.status = "pending";
+			job.leasedAt = undefined;
+			job.leasedBy = undefined;
+			await this.#saveJob(job);
+			await this.#addToList(PENDING_KEY, job.id);
+			return { ok: true, job, disposition: "requeued" };
+		}
+		job.status = "failed";
+		job.result = {
+			success: false,
+			output: "",
+			error: requeue ? `${reason}; retry budget exhausted after ${job.attempts} attempt(s)` : reason,
+			completedAt: new Date(now).toISOString(),
+		};
+		await this.#saveJob(job);
+		await this.#storage.delete(issueKey(job.issueId));
+		return { ok: true, job, disposition: requeue ? "dead_lettered" : "failed" };
 	}
 
 	async getJob(id: string): Promise<Job | null> {
@@ -223,7 +397,11 @@ export class QueueCore {
 	}
 
 	async listJobs(limit = 50): Promise<Job[]> {
-		const ids = [...(await this.#ids(PENDING_KEY)), ...(await this.#ids(LEASED_KEY))];
+		const ids = [
+			...(await this.#ids(PENDING_KEY)),
+			...(await this.#ids(LEASED_KEY)),
+			...(await this.#ids(RECONCILE_KEY)),
+		];
 		const jobs: Job[] = [];
 		for (const id of ids.slice(0, limit)) {
 			const job = await this.#job(id);
