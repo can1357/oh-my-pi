@@ -23,6 +23,13 @@ export interface JobResult {
 	success: boolean;
 	output: string;
 	error?: string;
+	/**
+	 * Failure taxonomy for retry decisions: `transient` (spawn failure,
+	 * timeout, provider hiccup) may requeue with backoff; `permanent`
+	 * (deterministic failure, invalid contract, auth) is terminal. Absent
+	 * means permanent — older relays fail closed.
+	 */
+	failureClass?: "transient" | "permanent";
 	completedAt: string;
 }
 
@@ -50,6 +57,10 @@ export interface Job {
 	reconcileAt?: string;
 	/** Why the job entered reconcile (queue-generated, never runner text). */
 	reconcileReason?: string;
+	/** Earliest time a pending retry may be granted (backoff gate). */
+	notBefore?: string;
+	/** Error of the most recent failed attempt, kept across retries. */
+	lastError?: string;
 	/** Fencing identity that produced the accepted terminal result. */
 	completedAttemptId?: string;
 	completedLeaseToken?: string;
@@ -69,6 +80,7 @@ export interface RedactedJob {
 	lastHeartbeatAt?: string;
 	reconcileAt?: string;
 	reconcileReason?: string;
+	notBefore?: string;
 	result?: { success: boolean; completedAt: string };
 }
 
@@ -85,6 +97,7 @@ export function redactJob(job: Job): RedactedJob {
 		...(job.lastHeartbeatAt ? { lastHeartbeatAt: job.lastHeartbeatAt } : {}),
 		...(job.reconcileAt ? { reconcileAt: job.reconcileAt } : {}),
 		...(job.reconcileReason ? { reconcileReason: job.reconcileReason } : {}),
+		...(job.notBefore ? { notBefore: job.notBefore } : {}),
 		...(job.result ? { result: { success: job.result.success, completedAt: job.result.completedAt } } : {}),
 	};
 }

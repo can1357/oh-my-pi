@@ -196,6 +196,7 @@ interface ResultBody {
 	success?: unknown;
 	output?: unknown;
 	error?: unknown;
+	failureClass?: unknown;
 }
 
 async function handleResult(request: Request, env: Env, deps: WorkerDeps): Promise<Response> {
@@ -212,7 +213,8 @@ async function handleResult(request: Request, env: Env, deps: WorkerDeps): Promi
 		typeof body.leaseToken !== "string" ||
 		typeof body.success !== "boolean" ||
 		typeof body.output !== "string" ||
-		(body.error !== undefined && typeof body.error !== "string")
+		(body.error !== undefined && typeof body.error !== "string") ||
+		(body.failureClass !== undefined && body.failureClass !== "transient" && body.failureClass !== "permanent")
 	) {
 		return json({ error: "invalid body" }, 400);
 	}
@@ -221,15 +223,21 @@ async function handleResult(request: Request, env: Env, deps: WorkerDeps): Promi
 		success: body.success,
 		output: body.output,
 		error: body.error,
+		failureClass: body.failureClass as "transient" | "permanent" | undefined,
 	});
 	if (!outcome.ok) {
 		if (outcome.code === "not_found") return json({ error: "job not found" }, 404);
 		return json({ error: `completion rejected: ${outcome.code}` }, 409);
 	}
+	if (outcome.retryScheduled) {
+		// Scheduled retry: no terminal result exists yet, so nothing is
+		// mirrored to Linear (context discipline: no per-retry noise).
+		return json({ ok: true, retryScheduled: true, job: redactJob(outcome.job) });
+	}
 	if (!outcome.duplicate) {
 		const commentBody = body.success
 			? `**ompk (${outcome.job.model}) — done**\n\n${body.output}`
-			: `**ompk (${outcome.job.model}) — failed**\n\n${body.error ?? "unknown error"}\n\n${body.output}`;
+			: `**ompk (${outcome.job.model}) — failed**\n\n${outcome.job.result?.error ?? body.error ?? "unknown error"}\n\n${body.output}`;
 		await deps.postComment(env.LINEAR_API_TOKEN, outcome.job.issueId, commentBody);
 	}
 	return json({ ok: true, duplicate: outcome.duplicate, job: redactJob(outcome.job) });

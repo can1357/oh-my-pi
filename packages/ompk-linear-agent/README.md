@@ -54,6 +54,17 @@ Liveness follows the reconcile contract from
   dead-letter as `failed` once the budget is exhausted; dead letters post
   the last error plus recovery action to the issue.
 
+Failures are classified for retry (`failureClass` on the result):
+
+- The relay marks timeouts, spawn errors, and allowlist mismatches as
+  `transient`; a clean non-zero `omp` exit is `permanent` (deterministic
+  until proven otherwise), and an absent class fails closed as permanent.
+- A transient failure inside the attempt budget returns the job to
+  `pending` behind a backoff gate (30s / 2m / 5m / 15m / 30m by attempt),
+  posts nothing to Linear (no per-retry noise), and invalidates the
+  attempt's fence; the gate never blocks later jobs in the queue. On
+  budget exhaustion the failure comment carries the budget note.
+
 ## Flow
 
 1. The dispatcher assigns the issue to the `ompk` agent, adds
@@ -167,14 +178,14 @@ This Worker implements the *manual admission* mode of
 [docs/multi-agent-fork-collaboration.md](../../docs/multi-agent-fork-collaboration.md):
 a human dispatcher sets `Queue/Queued` and the assignee before anything runs.
 
-Of the fuller automation contract described there, the liveness half is now
-implemented: fenced heartbeats, reconcile parking (never a direct re-grant),
-runner startup attestation, and reconcile/dead-letter surfacing to Linear as
-issue comments. Still intentionally unimplemented until built and verified:
-retry classification with backoff (a reported `omp` failure is terminal; only
-confirmed-terminated reconciles requeue), logical attempt identity keyed to
-the Linear agent session, fencing enforced on branch mutations, and the
-`Queue/Reconcile` / `Queue/Dead Letter` label mirroring (comments only today).
+Of the fuller automation contract described there, the liveness and retry
+halves are now implemented: fenced heartbeats, reconcile parking (never a
+direct re-grant), runner startup attestation, reconcile/dead-letter
+surfacing to Linear as issue comments, and transient-failure retries with
+the documented backoff schedule. Still intentionally unimplemented until
+built and verified: logical attempt identity keyed to the Linear agent
+session, fencing enforced on branch mutations, and the `Queue/Reconcile` /
+`Queue/Dead Letter` label mirroring (comments only today).
 
 ## Testing
 
@@ -189,9 +200,9 @@ bun --cwd=packages/ompk-linear-agent run check:types
   a job to a different mesh host (mac/hetzner/pi) would mean wrapping the
   argv-based `spawn` call in an SSH exec (see the `pkmesh` skill) — not
   implemented yet since jobs don't carry a target-host field.
-- No retry/backoff on `omp` failures: a relay-reported failure completes the
-  job as `failed`; only confirmed-terminated reconcile jobs requeue (5-attempt
-  budget). Transient/permanent failure classification is not implemented.
+- Retry classification is coarse: every clean non-zero `omp` exit is treated
+  as permanent, including provider 5xx surfaced as exit codes. Refining it
+  means parsing runner output, which is deliberately out of scope for now.
 - The startup sweep assumes `omp` children died with the relay process. On
   hosts where a child can outlive the relay, verify manually before relying
   on the attestation.

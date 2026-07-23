@@ -263,4 +263,4 @@ It moves to Done only after the merge owner merges it and final verification pas
 
 ## Current implementation boundary
 
-Current operation is manual admission: one dispatcher enforces the queue labels, claims, and WIP limits before delegation. The deployed Linear Agent Worker enforces atomic admission, fenced leases with heartbeats, reconcile parking, and dead-letter surfacing; retry classification with backoff, Linear-session attempt identity, and branch-mutation fencing remain unimplemented. Automated delegation remains disabled by policy until the remaining contract is implemented and verified.
+Current operation is manual admission: one dispatcher enforces the queue labels, claims, and WIP limits before delegation. The deployed Linear Agent Worker enforces atomic admission, fenced leases with heartbeats, reconcile parking, dead-letter surfacing, and transient-failure retries with the documented backoff schedule; Linear-session attempt identity and branch-mutation fencing remain unimplemented. Automated delegation remains disabled by policy until the remaining contract is implemented and verified.

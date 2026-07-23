@@ -72,6 +72,8 @@ describe("executeJob", () => {
 		);
 		expect(result.success).toBe(false);
 		expect(result.error).toContain("allowlist");
+		// Another relay may carry this model: retryable, not terminal.
+		expect(result.failureClass).toBe("transient");
 		expect(calls).toHaveLength(0);
 	});
 
@@ -98,6 +100,8 @@ describe("executeJob", () => {
 		const result = await executeJob({ model: "combo-a", prompt: "p" }, ["combo-a"], spawn, 1_000);
 		expect(result.success).toBe(false);
 		expect(result.error).toBe("model exploded");
+		// Clean non-zero exits are deterministic: never auto-retried.
+		expect(result.failureClass).toBe("permanent");
 	});
 
 	it("times out a hung child and kills it", async () => {
@@ -108,6 +112,16 @@ describe("executeJob", () => {
 		const result = await executeJob({ model: "combo-a", prompt: "p" }, ["combo-a"], spawn, 10);
 		expect(result.success).toBe(false);
 		expect(result.error).toContain("timed out");
+		expect(result.failureClass).toBe("transient");
 		expect(spawned?.killed).toBe(true);
+	});
+
+	it("classifies a spawn error as transient", async () => {
+		const { spawn } = makeSpawn(child => {
+			child.emit("error", new Error("EBUSY: omp binary locked"));
+		});
+		const result = await executeJob({ model: "combo-a", prompt: "p" }, ["combo-a"], spawn, 1_000);
+		expect(result.success).toBe(false);
+		expect(result.failureClass).toBe("transient");
 	});
 });

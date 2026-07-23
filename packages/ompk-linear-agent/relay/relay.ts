@@ -59,6 +59,13 @@ export interface JobRunResult {
 	success: boolean;
 	output: string;
 	error?: string;
+	/**
+	 * Retry taxonomy: `transient` failures (timeout, spawn error, model not
+	 * runnable on THIS relay) may be requeued with backoff by the queue;
+	 * `permanent` (non-zero omp exit — deterministic by default) is
+	 * terminal. Successes carry no class.
+	 */
+	failureClass?: "transient" | "permanent";
 }
 
 /** Parse the operator's model allowlist; empty/missing means "allow nothing". */
@@ -99,7 +106,7 @@ export function runOmp(
 	let stderr = "";
 	const timer = setTimeout(() => {
 		child.kill();
-		resolve({ success: false, output: stdout, error: `timed out after ${timeoutMs}ms` });
+		resolve({ success: false, output: stdout, error: `timed out after ${timeoutMs}ms`, failureClass: "transient" });
 	}, timeoutMs);
 
 	child.stdout?.on("data", d => {
@@ -110,11 +117,17 @@ export function runOmp(
 	});
 	child.on("error", err => {
 		clearTimeout(timer);
-		resolve({ success: false, output: stdout, error: err.message });
+		resolve({ success: false, output: stdout, error: err.message, failureClass: "transient" });
 	});
 	child.on("close", code => {
 		clearTimeout(timer);
-		resolve({ success: code === 0, output: stdout, error: code === 0 ? undefined : stderr || `exit code ${code}` });
+		if (code === 0) {
+			resolve({ success: true, output: stdout });
+			return;
+		}
+		// A clean non-zero exit is deterministic until proven otherwise:
+		// retrying a failing contract burns tokens without new information.
+		resolve({ success: false, output: stdout, error: stderr || `exit code ${code}`, failureClass: "permanent" });
 	});
 	return promise;
 }
@@ -131,10 +144,13 @@ export async function executeJob(
 	onSpawn?: (child: ChildProcess) => void,
 ): Promise<JobRunResult> {
 	if (!allowedModels.includes(job.model)) {
+		// Capacity/config mismatch, not a property of the work: another
+		// relay (or this one, reconfigured) may run it after backoff.
 		return {
 			success: false,
 			output: "",
 			error: "model is not on this relay's allowlist (OMPK_RELAY_MODELS)",
+			failureClass: "transient",
 		};
 	}
 	return runOmp(job.model, job.prompt, spawnImpl, timeoutMs, onSpawn);

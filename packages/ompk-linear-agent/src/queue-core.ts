@@ -42,12 +42,18 @@ export interface QueueLimits {
 	maxAttempts: number;
 	/** Expected heartbeat cadence; two missed beats move a lease to reconcile. */
 	heartbeatMs: number;
+	/**
+	 * Backoff before retry N+1 after transient failure N (last entry
+	 * repeats). Doc target: 30s / 2m / 5m / 15m / 30m.
+	 */
+	backoffScheduleMs: readonly number[];
 }
 
 export const DEFAULT_QUEUE_LIMITS: QueueLimits = {
 	leaseMs: 30 * 60_000,
 	maxAttempts: 5,
 	heartbeatMs: 10 * 60_000,
+	backoffScheduleMs: [30_000, 120_000, 300_000, 900_000, 1_800_000],
 };
 
 export interface AdmitOutcome {
@@ -63,7 +69,7 @@ export interface LeaseGrant {
 }
 
 export type CompleteOutcome =
-	| { ok: true; job: Job; duplicate: boolean }
+	| { ok: true; job: Job; duplicate: boolean; retryScheduled: boolean }
 	| { ok: false; code: "not_found" | "not_leased" | "fenced" | "stale" };
 
 export type HeartbeatOutcome =
@@ -228,15 +234,26 @@ export class QueueCore {
 	 */
 	async lease(leasedBy: string, now: number): Promise<LeaseGrant | null> {
 		const pending = await this.#ids(PENDING_KEY);
-		while (pending.length > 0) {
-			const id = pending.shift();
-			await this.#storage.put(PENDING_KEY, pending);
-			if (!id) continue;
+		const kept: string[] = [];
+		let granted: Job | null = null;
+		for (const id of pending) {
+			if (granted) {
+				kept.push(id);
+				continue;
+			}
 			const job = await this.#job(id);
 			if (job?.status !== "pending") continue;
-			return this.#grant(job, leasedBy, now);
+			if (job.notBefore && Date.parse(job.notBefore) > now) {
+				// Backoff gate: hold this retry without starving later jobs.
+				kept.push(id);
+				continue;
+			}
+			granted = job;
 		}
-		return null;
+		if (granted || kept.length !== pending.length) {
+			await this.#storage.put(PENDING_KEY, kept);
+		}
+		return granted ? this.#grant(granted, leasedBy, now) : null;
 	}
 
 	async #grant(job: Job, leasedBy: string, now: number): Promise<LeaseGrant> {
@@ -250,6 +267,7 @@ export class QueueCore {
 		job.leasedBy = leasedBy;
 		job.reconcileAt = undefined;
 		job.reconcileReason = undefined;
+		job.notBefore = undefined;
 		await this.#saveJob(job);
 		await this.#addToList(LEASED_KEY, job.id);
 		return { job, attemptId: job.attemptId, leaseToken: job.leaseToken };
@@ -299,7 +317,7 @@ export class QueueCore {
 		if (!job) return { ok: false, code: "not_found" };
 		if (job.status === "done" || job.status === "failed") {
 			if (job.completedAttemptId === attemptId && job.completedLeaseToken === leaseToken) {
-				return { ok: true, job, duplicate: true };
+				return { ok: true, job, duplicate: true, retryScheduled: false };
 			}
 			return { ok: false, code: "stale" };
 		}
@@ -307,19 +325,48 @@ export class QueueCore {
 		if (!job.attemptId || !job.leaseToken || job.attemptId !== attemptId || job.leaseToken !== leaseToken) {
 			return { ok: false, code: "fenced" };
 		}
+		if (!result.success && result.failureClass === "transient" && job.attempts < this.#limits.maxAttempts) {
+			// Scheduled retry: this attempt ends, the job returns to pending
+			// behind a backoff gate; no terminal result is recorded. A
+			// duplicate submit of the same fence now reports not_leased —
+			// the fence died with the attempt.
+			const schedule = this.#limits.backoffScheduleMs;
+			const delay = schedule[Math.min(job.attempts - 1, schedule.length - 1)] ?? 0;
+			job.status = "pending";
+			job.lastError = result.error;
+			job.notBefore = new Date(now + delay).toISOString();
+			job.attemptId = undefined;
+			job.leaseToken = undefined;
+			job.leasedAt = undefined;
+			job.leasedBy = undefined;
+			job.lastHeartbeatAt = undefined;
+			job.leaseExpiresAt = undefined;
+			job.reconcileAt = undefined;
+			job.reconcileReason = undefined;
+			await this.#saveJob(job);
+			await this.#removeFromList(LEASED_KEY, id);
+			await this.#removeFromList(RECONCILE_KEY, id);
+			await this.#addToList(PENDING_KEY, id);
+			return { ok: true, job, duplicate: false, retryScheduled: true };
+		}
 		job.status = result.success ? "done" : "failed";
-		job.result = { ...result, completedAt: new Date(now).toISOString() };
+		const exhausted = !result.success && result.failureClass === "transient";
+		const error = exhausted
+			? `${result.error ?? "transient failure"}; retry budget exhausted after ${job.attempts} attempt(s)`
+			: result.error;
+		job.result = { ...result, ...(error !== undefined ? { error } : {}), completedAt: new Date(now).toISOString() };
 		job.completedAttemptId = attemptId;
 		job.completedLeaseToken = leaseToken;
 		job.leaseToken = undefined;
 		job.leaseExpiresAt = undefined;
 		job.reconcileAt = undefined;
 		job.reconcileReason = undefined;
+		job.notBefore = undefined;
 		await this.#saveJob(job);
 		await this.#removeFromList(LEASED_KEY, id);
 		await this.#removeFromList(RECONCILE_KEY, id);
 		await this.#storage.delete(issueKey(job.issueId));
-		return { ok: true, job, duplicate: false };
+		return { ok: true, job, duplicate: false, retryScheduled: false };
 	}
 
 	/**

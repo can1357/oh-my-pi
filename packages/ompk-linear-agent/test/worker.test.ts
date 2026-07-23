@@ -580,3 +580,97 @@ describe("liveness endpoints", () => {
 		expect(active.status).toBe(409);
 	});
 });
+
+describe("transient retry via /result", () => {
+	let harness: Harness;
+	let leased: { id: string; attemptId: string; leaseToken: string };
+
+	beforeEach(async () => {
+		harness = makeHarness();
+		await harness.worker.fetch(await webhookRequest(ISSUE_UPDATE_PAYLOAD), makeEnv());
+		leased = (await (
+			await harness.worker.fetch(
+				new Request("https://worker.test/poll?relay=relay-1", {
+					headers: { authorization: `Bearer ${RELAY_TOKEN}` },
+				}),
+				makeEnv(),
+			)
+		).json()) as typeof leased;
+	});
+
+	function resultRequest(body: unknown): Request {
+		return new Request("https://worker.test/result", {
+			method: "POST",
+			headers: { authorization: `Bearer ${RELAY_TOKEN}`, "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		});
+	}
+
+	it("schedules a transient failure silently and re-grants after the backoff gate", async () => {
+		const res = await harness.worker.fetch(
+			resultRequest({
+				jobId: leased.id,
+				attemptId: leased.attemptId,
+				leaseToken: leased.leaseToken,
+				success: false,
+				output: "",
+				error: "socket hang up",
+				failureClass: "transient",
+			}),
+			makeEnv(),
+		);
+		expect(res.status).toBe(200);
+		expect((await res.json()) as Record<string, unknown>).toMatchObject({ ok: true, retryScheduled: true });
+		// No per-retry noise on the Linear issue.
+		expect(harness.comments).toHaveLength(0);
+		expect((await harness.stub.getJob(leased.id))?.status).toBe("pending");
+
+		// The fence died with the attempt: a duplicate submit is rejected.
+		const dupe = await harness.worker.fetch(
+			resultRequest({
+				jobId: leased.id,
+				attemptId: leased.attemptId,
+				leaseToken: leased.leaseToken,
+				success: false,
+				output: "",
+				failureClass: "transient",
+			}),
+			makeEnv(),
+		);
+		expect(dupe.status).toBe(409);
+
+		// Not grantable before the gate opens; grantable after (default 30s).
+		const early = await harness.worker.fetch(
+			new Request("https://worker.test/poll?relay=relay-2", {
+				headers: { authorization: `Bearer ${RELAY_TOKEN}` },
+			}),
+			makeEnv(),
+		);
+		expect(early.status).toBe(204);
+		harness.stub.nowOffsetMs = 31_000;
+		const regrant = await harness.worker.fetch(
+			new Request("https://worker.test/poll?relay=relay-2", {
+				headers: { authorization: `Bearer ${RELAY_TOKEN}` },
+			}),
+			makeEnv(),
+		);
+		expect(regrant.status).toBe(200);
+		expect(((await regrant.json()) as { id: string }).id).toBe(leased.id);
+		expect((await harness.stub.getJob(leased.id))?.attempts).toBe(2);
+	});
+
+	it("rejects an unknown failureClass", async () => {
+		const res = await harness.worker.fetch(
+			resultRequest({
+				jobId: leased.id,
+				attemptId: leased.attemptId,
+				leaseToken: leased.leaseToken,
+				success: false,
+				output: "",
+				failureClass: "sometimes",
+			}),
+			makeEnv(),
+		);
+		expect(res.status).toBe(400);
+	});
+});

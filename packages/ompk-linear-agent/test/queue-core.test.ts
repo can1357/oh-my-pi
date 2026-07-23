@@ -372,3 +372,115 @@ describe("reconcile resolution", () => {
 		expect((await core.getJob(theirs.id))?.status).toBe("reconcile");
 	});
 });
+
+describe("retry classification and backoff", () => {
+	it("schedules transient failures behind the backoff gate without starving FIFO", async () => {
+		const core = new QueueCore(new MemoryStorage(), { maxAttempts: 3, backoffScheduleMs: [100, 200] });
+		const flaky = makeJob();
+		const steady = makeJob();
+		await core.admit(flaky);
+		await core.admit(steady);
+		const grant = await core.lease("relay-1", T0);
+		const outcome = await core.complete(
+			flaky.id,
+			grant!.attemptId,
+			grant!.leaseToken,
+			{ success: false, output: "", error: "socket hang up", failureClass: "transient" },
+			T0 + 10,
+		);
+		expect(outcome).toMatchObject({ ok: true, retryScheduled: true });
+		const parked = await core.getJob(flaky.id);
+		expect(parked?.status).toBe("pending");
+		expect(parked?.notBefore).toBe(new Date(T0 + 110).toISOString());
+		expect(parked?.lastError).toBe("socket hang up");
+
+		// The gated retry does not starve later arrivals.
+		const next = await core.lease("relay-1", T0 + 20);
+		expect(next?.job.id).toBe(steady.id);
+		// Closed gate: nothing grantable.
+		expect(await core.lease("relay-2", T0 + 50)).toBeNull();
+		// Open gate: fresh fence, attempt 2, gate cleared.
+		const retry = await core.lease("relay-2", T0 + 111);
+		expect(retry?.job.id).toBe(flaky.id);
+		expect(retry?.job.attempts).toBe(2);
+		expect(retry?.job.notBefore).toBeUndefined();
+		// The second transient failure takes the next backoff step.
+		await core.complete(
+			flaky.id,
+			retry!.attemptId,
+			retry!.leaseToken,
+			{ success: false, output: "", error: "reset", failureClass: "transient" },
+			T0 + 120,
+		);
+		expect((await core.getJob(flaky.id))?.notBefore).toBe(new Date(T0 + 320).toISOString());
+	});
+
+	it("dead-letters a transient failure once the attempt budget is exhausted", async () => {
+		const core = new QueueCore(new MemoryStorage(), { maxAttempts: 2, backoffScheduleMs: [10] });
+		const job = makeJob({ issueId: "issue-flaky" });
+		await core.admit(job);
+		const first = await core.lease("relay-1", T0);
+		await core.complete(
+			job.id,
+			first!.attemptId,
+			first!.leaseToken,
+			{ success: false, output: "", error: "timeout", failureClass: "transient" },
+			T0 + 5,
+		);
+		const second = await core.lease("relay-1", T0 + 100);
+		const final = await core.complete(
+			job.id,
+			second!.attemptId,
+			second!.leaseToken,
+			{ success: false, output: "", error: "timeout again", failureClass: "transient" },
+			T0 + 200,
+		);
+		expect(final).toMatchObject({ ok: true, duplicate: false, retryScheduled: false });
+		const dead = await core.getJob(job.id);
+		expect(dead?.status).toBe("failed");
+		expect(dead?.result?.error).toBe("timeout again; retry budget exhausted after 2 attempt(s)");
+		expect((await core.admit(makeJob({ issueId: "issue-flaky" }))).accepted).toBe(true);
+	});
+
+	it("keeps permanent and unclassified failures terminal with budget remaining", async () => {
+		const core = new QueueCore(new MemoryStorage(), { maxAttempts: 5 });
+		for (const failureClass of ["permanent", undefined] as const) {
+			const job = makeJob();
+			await core.admit(job);
+			const grant = await core.lease("relay-1", T0);
+			const outcome = await core.complete(
+				job.id,
+				grant!.attemptId,
+				grant!.leaseToken,
+				{ success: false, output: "", error: "verification failed", ...(failureClass ? { failureClass } : {}) },
+				T0 + 1,
+			);
+			expect(outcome).toMatchObject({ ok: true, retryScheduled: false });
+			const terminal = await core.getJob(job.id);
+			expect(terminal?.status).toBe("failed");
+			expect(terminal?.result?.error).toBe("verification failed");
+		}
+	});
+
+	it("rejects a duplicate submit of a retried attempt", async () => {
+		const core = new QueueCore(new MemoryStorage(), { backoffScheduleMs: [1_000] });
+		const job = makeJob();
+		await core.admit(job);
+		const grant = await core.lease("relay-1", T0);
+		await core.complete(
+			job.id,
+			grant!.attemptId,
+			grant!.leaseToken,
+			{ success: false, output: "", failureClass: "transient" },
+			T0 + 1,
+		);
+		const dupe = await core.complete(
+			job.id,
+			grant!.attemptId,
+			grant!.leaseToken,
+			{ success: false, output: "", failureClass: "transient" },
+			T0 + 2,
+		);
+		expect(dupe).toEqual({ ok: false, code: "not_leased" });
+	});
+});
