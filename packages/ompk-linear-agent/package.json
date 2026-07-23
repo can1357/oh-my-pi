@@ -9,6 +9,7 @@
 		"deploy": "wrangler deploy",
 		"tail": "wrangler tail",
 		"relay": "bun relay/relay.ts",
+		"resolve:project": "bun scripts/resolve-project.ts",
 		"test": "bun test test",
 		"check:types": "tsc -p tsconfig.json --noEmit"
 	},

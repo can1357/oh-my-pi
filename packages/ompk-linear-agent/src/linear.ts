@@ -113,6 +113,81 @@ export async function postComment(token: string, issueId: string, body: string):
 	);
 }
 
+export interface LinearProject {
+	id: string;
+	name: string;
+	description: string;
+	archivedAt: string | null;
+}
+
+const PROJECT_FIELDS = `id name description archivedAt`;
+
+/** Fetch one project by id; `null` when Linear reports it does not exist. */
+export async function fetchProject(token: string, projectId: string): Promise<LinearProject | null> {
+	try {
+		const data = await linearGraphQL<{ project: LinearProject | null }>(
+			token,
+			`query($id: String!) { project(id: $id) { ${PROJECT_FIELDS} } }`,
+			{ id: projectId },
+		);
+		return data.project;
+	} catch (err) {
+		if (err instanceof Error && /not found|could not be found/i.test(err.message)) return null;
+		throw err;
+	}
+}
+
+/**
+ * List projects a page at a time (newest workspaces here are small; the
+ * resolver caps pagination). Archived projects are included so the resolver
+ * can refuse to silently recreate an archived registry target.
+ */
+export async function listProjects(
+	token: string,
+	after: string | null,
+): Promise<{ nodes: LinearProject[]; endCursor: string | null; hasNextPage: boolean }> {
+	const data = await linearGraphQL<{
+		projects: {
+			nodes: LinearProject[];
+			pageInfo: { endCursor: string | null; hasNextPage: boolean };
+		};
+	}>(
+		token,
+		`query($after: String) {
+			projects(first: 100, after: $after, includeArchived: true) {
+				nodes { ${PROJECT_FIELDS} }
+				pageInfo { endCursor hasNextPage }
+			}
+		}`,
+		{ after },
+	);
+	return {
+		nodes: data.projects.nodes,
+		endCursor: data.projects.pageInfo.endCursor,
+		hasNextPage: data.projects.pageInfo.hasNextPage,
+	};
+}
+
+/** Create a project bound to one team; the description must embed the repo-key token. */
+export async function createLinearProject(
+	token: string,
+	input: { name: string; description: string; teamId: string },
+): Promise<LinearProject> {
+	const data = await linearGraphQL<{
+		projectCreate: { success: boolean; project: LinearProject | null };
+	}>(
+		token,
+		`mutation($input: ProjectCreateInput!) {
+			projectCreate(input: $input) { success project { ${PROJECT_FIELDS} } }
+		}`,
+		{ input: { name: input.name, description: input.description, teamIds: [input.teamId] } },
+	);
+	if (!data.projectCreate.success || !data.projectCreate.project) {
+		throw new Error("Linear project creation failed");
+	}
+	return data.projectCreate.project;
+}
+
 /**
  * Issue comment for a job parked in reconcile (liveness uncertain). Shared
  * by the /poll sweep and the Durable Object alarm so both surfaces post the

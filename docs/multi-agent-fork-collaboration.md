@@ -2,6 +2,28 @@
 
 This is the operating policy for agents working from Linear on the same repository. It applies to root agents, remote runners, task subagents that own a code slice, reviewers, and the merge integrator.
 
+## When Linear is mandatory
+
+Linear is required the moment work crosses a session or ownership boundary; work that dies inside one interactive session may skip it. Any one of these conditions requires an issue before proceeding:
+
+- Another party must act: review, a merge by someone other than the author, unblocking, or a handoff.
+- More than one agent or session will own code: task fan-out with owned slices, remote runners, or work resumed later.
+- The work claims paths or shared resources a concurrent agent could also touch. Claims exist only inside an issue contract; no issue means no claim and no protection.
+- Execution is unattended. Relay-dispatched work is Linear-born by construction and cannot exist without an issue.
+
+Solo interactive edits with the human present, merged within the session, are exempt. Branch names make the rule checkable: `linear/<issue-key>-…` is required wherever any condition above holds, so a boundary-crossing branch without an issue key is a policy violation, not a style choice.
+
+## Project resolution
+
+One repository maps to exactly one Linear project. Identity is the canonical repo key — `owner/repo`, normalized and lowercased from the git remote URL — never a human-typed project name.
+
+- The committed registry `.ompk/linear.json` is the source of truth; changes to it ship through review. The worker's `ALLOWED_PROJECT_IDS` allowlist is generated from it, not hand-maintained.
+- A bound project embeds the exact line `repo-key: <owner/repo>` in its description. Matching is line-exact, so `owner/repo` never matches `owner/repo-two`.
+- Resolution is fail-closed via `bun run resolve:project` in `packages/ompk-linear-agent`:
+  1. Registry hit → verify the project is live. Archived or deleted targets stop for a human decision; never recreate silently.
+  2. No entry → scan project descriptions for the token. Exactly one match is adopted into the registry; zero matches create only with `--create` plus a configured `defaults.teamId`; two or more matches stop and list the candidates. The resolver never tie-breaks.
+- Creation is deliberate and rare. Search-then-create races cannot be locked through Linear itself, so a duplicate created out-of-band is caught by the multiple-match stop on the next resolution instead of compounding.
+
 ## Repository decision
 
 Use one shared GitHub fork and isolate work with branches and git worktrees.
@@ -119,7 +141,7 @@ Rules:
 
 ## Current manual queue mode
 
-No automatic lease, heartbeat, retry, idempotent admission, or dead-letter enforcement exists today. Exactly one designated queue dispatcher may set `delegate` or start workers. Parent orchestrators may prepare `Queue/Ready` issues but must not dispatch them. The dispatcher re-reads blockers and retained claims immediately before one delegation and records the resulting AgentSession/run ID. Do not bulk-delegate, automatically redispatch, or infer liveness from Linear status alone.
+The transport queue enforces atomic idempotent admission, fenced leases with heartbeats, reconcile parking, and dead-letter surfacing (`packages/ompk-linear-agent`); automatic retry classification and redispatch do not exist. Exactly one designated queue dispatcher may set `delegate` or start workers. Parent orchestrators may prepare `Queue/Ready` issues but must not dispatch them. The dispatcher re-reads blockers and retained claims immediately before one delegation and records the resulting AgentSession/run ID. Do not bulk-delegate, automatically redispatch, or infer liveness from Linear status alone.
 
 ## Queue states
 
@@ -241,4 +263,4 @@ It moves to Done only after the merge owner merges it and final verification pas
 
 ## Current implementation boundary
 
-Current operation is manual admission: one dispatcher enforces the queue labels, claims, and WIP limits before delegation. The deployed Linear Agent Worker still dispatches through `waitUntil` and does not enforce atomic attempts, leases, retries, reconciliation, or dead letters. Automated delegation remains disabled by policy until the target automation contract is implemented and verified.
+Current operation is manual admission: one dispatcher enforces the queue labels, claims, and WIP limits before delegation. The deployed Linear Agent Worker enforces atomic admission, fenced leases with heartbeats, reconcile parking, and dead-letter surfacing; retry classification with backoff, Linear-session attempt identity, and branch-mutation fencing remain unimplemented. Automated delegation remains disabled by policy until the remaining contract is implemented and verified.
