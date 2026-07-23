@@ -502,7 +502,18 @@ describe("AgentSession MCP discovery", () => {
 		});
 		sessions.push(session);
 
-		const searchTool = new SearchToolBm25Tool(session);
+		const searchTool = new SearchToolBm25Tool({
+			cwd: process.cwd(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			settings: session.settings,
+			isToolDiscoveryEnabled: () => session.isToolDiscoveryEnabled(),
+			getDiscoverableTools: filter => session.getDiscoverableTools(filter),
+			getDiscoverableToolSearchIndex: () => session.getDiscoverableToolSearchIndex(),
+			getSelectedDiscoveredToolNames: () => session.getSelectedDiscoveredToolNames(),
+			activateDiscoveredTools: toolNames => session.activateDiscoveredTools(toolNames),
+		});
 		const firstSearch = await searchTool.execute("first-search", { query: "large first", limit: 1 });
 		expect(firstSearch.details?.activated_tools).toEqual([firstTool.name]);
 		expect(session.getActiveToolNames()).toEqual(["read", firstTool.name]);
@@ -551,6 +562,110 @@ describe("AgentSession MCP discovery", () => {
 
 		expect(session.getActiveToolNames()).toEqual(["read"]);
 		expect(sessionManager.buildSessionContext().selectedMCPToolNames).toEqual([]);
+	});
+
+	it("persists an explicit selection that promotes a search-activated MCP tool", async () => {
+		const readTool = createBasicTool("read", "Read");
+		const docsSearchTool = createMcpTool("mcp__docs_search", "docs", "search", "Search internal docs", ["query"]);
+		const sessionManager = SessionManager.inMemory();
+		const agent = new Agent({
+			initialState: { model: createModel(), systemPrompt: ["initial"], tools: [readTool], messages: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			modelRegistry: {} as never,
+			toolRegistry: new Map([
+				[readTool.name, readTool],
+				[docsSearchTool.name, docsSearchTool],
+			]),
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async toolNames => ({ systemPrompt: [`tools:${toolNames.join(",")}`] }),
+		});
+		sessions.push(session);
+
+		await session.activateDiscoveredMCPTools([docsSearchTool.name]);
+		await session.setActiveToolsByName([readTool.name.toUpperCase(), docsSearchTool.name.toUpperCase()]);
+
+		expect(sessionManager.buildSessionContext().hasPersistedMCPToolSelection).toBe(true);
+		expect(sessionManager.buildSessionContext().selectedMCPToolNames).toEqual([docsSearchTool.name]);
+	});
+
+	it("retains discovery markers when explicit promotion fails", async () => {
+		const readTool = createBasicTool("read", "Read");
+		const writeTool = createBasicTool("write", "Write");
+		const docsSearchTool = createMcpTool("mcp__docs_search", "docs", "search", "Search internal docs", ["query"]);
+		let failRebuild = false;
+		const sessionManager = SessionManager.inMemory();
+		const agent = new Agent({
+			initialState: { model: createModel(), systemPrompt: ["initial"], tools: [readTool], messages: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			modelRegistry: {} as never,
+			toolRegistry: new Map([
+				[readTool.name, readTool],
+				[writeTool.name, writeTool],
+				[docsSearchTool.name, docsSearchTool],
+			]),
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async toolNames => {
+				if (failRebuild) throw new Error("prompt rebuild failed");
+				return { systemPrompt: [`tools:${toolNames.join(",")}`] };
+			},
+		});
+		sessions.push(session);
+
+		await session.activateDiscoveredMCPTools([docsSearchTool.name]);
+		failRebuild = true;
+		// Include a not-yet-active tool so the applied signature changes and the
+		// system-prompt rebuild actually runs (same-set promotions skip it).
+		await expect(session.setActiveToolsByName([readTool.name, writeTool.name, docsSearchTool.name])).rejects.toThrow(
+			"prompt rebuild failed",
+		);
+		failRebuild = false;
+
+		// The failed promotion must keep mcp__docs_search marked turn-discovered:
+		// a later persisting apply must not treat it as a durable MCP selection.
+		await session.setActiveToolsByName([readTool.name]);
+		expect(sessionManager.buildSessionContext().hasPersistedMCPToolSelection).toBe(false);
+
+		await session.newSession();
+
+		expect(session.getActiveToolNames()).toEqual([readTool.name]);
+	});
+
+	it("keeps configured MCP defaults durable when refresh promotes an ephemeral match", async () => {
+		const readTool = createBasicTool("read", "Read");
+		const docsSearchTool = createMcpTool("mcp__docs_search", "docs", "search", "Search internal docs", ["query"]);
+		const agent = new Agent({
+			initialState: { model: createModel(), systemPrompt: ["initial"], tools: [readTool], messages: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			modelRegistry: {} as never,
+			toolRegistry: new Map([
+				[readTool.name, readTool],
+				[docsSearchTool.name, docsSearchTool],
+			]),
+			mcpDiscoveryEnabled: true,
+			defaultSelectedMCPToolNames: [docsSearchTool.name],
+			rebuildSystemPrompt: async toolNames => ({ systemPrompt: [`tools:${toolNames.join(",")}`] }),
+		});
+		sessions.push(session);
+
+		await session.activateDiscoveredMCPTools([docsSearchTool.name]);
+		await session.refreshMCPTools([
+			createMcpCustomTool(docsSearchTool.name, "docs", "search", "Search internal docs", ["query"]),
+		]);
+		await session.newSession();
+
+		expect(session.getActiveToolNames()).toEqual([readTool.name, docsSearchTool.name]);
 	});
 	it("reapplies default MCP server baselines when refreshed tools reconnect", async () => {
 		const readTool = createBasicTool("read", "Read");
