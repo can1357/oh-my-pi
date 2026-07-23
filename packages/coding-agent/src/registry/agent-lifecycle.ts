@@ -63,7 +63,7 @@ export class AgentLifecycleManager {
 				clearTimeout(adopted.timer);
 			}
 			current.#adopted.clear();
-			current.#revivals.clear();
+			current.#transitions.clear();
 			current.#parking.clear();
 			current.#persistedReviverFactory = undefined;
 		}
@@ -74,8 +74,8 @@ export class AgentLifecycleManager {
 	readonly #adopted = new Map<string, AdoptedAgent>();
 	/** Ids whose session is being disposed by {@link park} right now. */
 	readonly #parking = new Set<string>();
-	/** In-flight revives, so concurrent {@link ensureLive} calls coalesce. */
-	readonly #revivals = new Map<string, Promise<AgentSession>>();
+	/** Per-agent transition tails; unrelated agents never wait on one another. */
+	readonly #transitions = new Map<string, Promise<void>>();
 	#unsubscribe: (() => void) | undefined;
 	#persistedReviverFactory: PersistedSubagentReviverFactory | undefined;
 	/** TTL applied when a cold-revived ref is adopted on demand. */
@@ -128,27 +128,29 @@ export class AgentLifecycleManager {
 	 * Dispose the live session, detach it from the registry, and mark the
 	 * agent `parked`. No-op unless the id is adopted and live.
 	 */
-	async park(id: string): Promise<void> {
-		const adopted = this.#adopted.get(id);
-		if (!adopted) return;
-		const ref = this.#registry.get(id);
-		if (!ref?.session) return;
-		if (adopted.timer) {
-			clearTimeout(adopted.timer);
-			adopted.timer = undefined;
-		}
-		this.#parking.add(id);
-		try {
-			try {
-				await ref.session.dispose();
-			} catch (error) {
-				logger.warn("AgentLifecycleManager.park: session dispose failed", { id, error: String(error) });
+	park(id: string): Promise<void> {
+		return this.#withTransition(id, async () => {
+			const adopted = this.#adopted.get(id);
+			if (!adopted) return;
+			const ref = this.#registry.get(id);
+			if (!ref?.session) return;
+			if (adopted.timer) {
+				clearTimeout(adopted.timer);
+				adopted.timer = undefined;
 			}
-			this.#registry.detachSession(id);
-			this.#registry.setStatus(id, "parked");
-		} finally {
-			this.#parking.delete(id);
-		}
+			this.#parking.add(id);
+			try {
+				try {
+					await ref.session.dispose();
+				} catch (error) {
+					logger.warn("AgentLifecycleManager.park: session dispose failed", { id, error: String(error) });
+				}
+				this.#registry.detachSession(id);
+				this.#registry.setStatus(id, "parked");
+			} finally {
+				this.#parking.delete(id);
+			}
+		});
 	}
 
 	/**
@@ -156,23 +158,17 @@ export class AgentLifecycleManager {
 	 * Throws a plain Error if the id is unknown or parked without a reviver.
 	 * Concurrent calls share one in-flight revive.
 	 */
-	async ensureLive(id: string, options?: EnsureLiveOptions): Promise<AgentSession> {
-		const ref = this.#registry.get(id);
-		if (!ref) {
-			throw new Error(
-				`Unknown agent "${id}" — it was never registered or has been released. If a transcript exists, read history://${id}.`,
-			);
-		}
-		if (ref.session) return ref.session;
-		const inflight = this.#revivals.get(id);
-		if (inflight) return inflight;
-		const revival = this.#resolveAndRevive(id, ref, options);
-		this.#revivals.set(id, revival);
-		try {
-			return await revival;
-		} finally {
-			this.#revivals.delete(id);
-		}
+	ensureLive(id: string, options?: EnsureLiveOptions): Promise<AgentSession> {
+		return this.#withTransition(id, async () => {
+			const ref = this.#registry.get(id);
+			if (!ref) {
+				throw new Error(
+					`Unknown agent "${id}" — it was never registered or has been released. If a transcript exists, read history://${id}.`,
+				);
+			}
+			if (ref.session) return ref.session;
+			return this.#resolveAndRevive(id, ref, options);
+		});
 	}
 
 	/**
@@ -213,19 +209,21 @@ export class AgentLifecycleManager {
 	}
 
 	/** Hard removal: dispose if live, unregister from registry, drop timers. */
-	async release(id: string): Promise<void> {
-		const adopted = this.#adopted.get(id);
-		clearTimeout(adopted?.timer);
-		this.#adopted.delete(id);
-		const ref = this.#registry.get(id);
-		if (ref?.session) {
-			try {
-				await ref.session.dispose();
-			} catch (error) {
-				logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
+	release(id: string): Promise<void> {
+		return this.#withTransition(id, async () => {
+			const adopted = this.#adopted.get(id);
+			clearTimeout(adopted?.timer);
+			this.#adopted.delete(id);
+			const ref = this.#registry.get(id);
+			if (ref?.session) {
+				try {
+					await ref.session.dispose();
+				} catch (error) {
+					logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
+				}
 			}
-		}
-		this.#registry.unregister(id);
+			this.#registry.unregister(id);
+		});
 	}
 
 	/** Teardown everything (process exit / main session dispose). */
@@ -234,7 +232,6 @@ export class AgentLifecycleManager {
 		this.#unsubscribe = undefined;
 		const ids = [...this.#adopted.keys()];
 		await Promise.all(ids.map(id => this.release(id)));
-		this.#revivals.clear();
 		this.#parking.clear();
 		this.#persistedReviverFactory = undefined;
 	}
@@ -247,6 +244,34 @@ export class AgentLifecycleManager {
 		// Emits status_changed → "idle", which re-arms the TTL timer below.
 		this.#registry.setStatus(id, "idle");
 		return session;
+	}
+
+	/**
+	 * Serialize state-changing work for one registry id. A transition observes
+	 * the state left by its predecessor, while other ids proceed independently.
+	 */
+	#withTransition<T>(id: string, transition: () => Promise<T>): Promise<T> {
+		const previous = this.#transitions.get(id);
+		const { promise: current, resolve: finish } = Promise.withResolvers<void>();
+		this.#transitions.set(id, current);
+
+		const { promise: result, resolve: resolveResult, reject: rejectResult } = Promise.withResolvers<T>();
+		const run = async (): Promise<void> => {
+			try {
+				resolveResult(await transition());
+			} catch (error) {
+				rejectResult(error);
+			} finally {
+				// Resolve the caller before admitting the next transition. In
+				// particular, park must not start disposing a session before the
+				// ensureLive caller can observe the session it just revived.
+				finish();
+				if (this.#transitions.get(id) === current) this.#transitions.delete(id);
+			}
+		};
+		if (previous) void previous.then(run);
+		else void run();
+		return result;
 	}
 
 	#armTimer(id: string, adopted: AdoptedAgent): void {

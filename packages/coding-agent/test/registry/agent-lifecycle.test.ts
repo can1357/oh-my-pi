@@ -145,6 +145,90 @@ describe("AgentLifecycleManager", () => {
 		expect(b).toBe(revived.session);
 	});
 
+	it("ensureLive waits for an in-flight park before reviving instead of returning the disposing session", async () => {
+		const disposeGate = deferred();
+		const parked = makeSessionStub(() => disposeGate.promise);
+		const revived = makeSessionStub();
+		let reviverRuns = 0;
+		registerIdleSub("4-ParkRace", parked.session);
+		lifecycle.adopt("4-ParkRace", {
+			idleTtlMs: 0,
+			revive: async () => {
+				reviverRuns++;
+				return revived.session;
+			},
+		});
+
+		const parking = lifecycle.park("4-ParkRace");
+		const ensuring = lifecycle.ensureLive("4-ParkRace");
+		let ensureSettled = false;
+		void ensuring.then(() => {
+			ensureSettled = true;
+		});
+
+		await flushAsync();
+		expect(parked.disposeCalls()).toBe(1);
+		expect(lifecycle.isParking("4-ParkRace")).toBe(true);
+		expect(ensureSettled).toBe(false);
+		expect(reviverRuns).toBe(0);
+
+		disposeGate.resolve();
+		await parking;
+		const session = await ensuring;
+
+		expect(session).toBe(revived.session);
+		expect(reviverRuns).toBe(1);
+		expect(parked.disposeCalls()).toBe(1);
+		expect(registry.get("4-ParkRace")?.session).toBe(revived.session);
+		expect(registry.get("4-ParkRace")?.status).toBe("idle");
+		expect(lifecycle.isParking("4-ParkRace")).toBe(false);
+	});
+
+	it("park queued during revival cannot start disposing before ensureLive exposes the revived session", async () => {
+		const reviveStarted = deferred();
+		const reviveGate = deferred();
+		const disposeGate = deferred();
+		const revived = makeSessionStub(() => disposeGate.promise);
+		registry.register({
+			id: "4-ReviveRace",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/4-ReviveRace.jsonl",
+			status: "parked",
+		});
+		lifecycle.adopt("4-ReviveRace", {
+			idleTtlMs: 0,
+			revive: async () => {
+				reviveStarted.resolve();
+				await reviveGate.promise;
+				return revived.session;
+			},
+		});
+
+		const ensuring = lifecycle.ensureLive("4-ReviveRace");
+		await reviveStarted.promise;
+		const parking = lifecycle.park("4-ReviveRace");
+		const observed = ensuring.then(session => {
+			expect(revived.disposeCalls()).toBe(0);
+			expect(lifecycle.isParking("4-ReviveRace")).toBe(false);
+			return session;
+		});
+
+		reviveGate.resolve();
+		expect(await observed).toBe(revived.session);
+		await flushAsync();
+		expect(revived.disposeCalls()).toBe(1);
+		expect(lifecycle.isParking("4-ReviveRace")).toBe(true);
+		expect(registry.get("4-ReviveRace")?.status).toBe("idle");
+
+		disposeGate.resolve();
+		await parking;
+		expect(lifecycle.isParking("4-ReviveRace")).toBe(false);
+		expect(registry.get("4-ReviveRace")?.status).toBe("parked");
+		expect(registry.get("4-ReviveRace")?.session).toBeNull();
+	});
+
 	it("ensureLive on an unknown id throws and points at history://", async () => {
 		await expect(lifecycle.ensureLive("9-Ghost")).rejects.toThrow(/history:\/\/9-Ghost/);
 	});
@@ -250,6 +334,55 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("6-Sub")).toBeUndefined();
 	});
 
+	it("release waits for an in-flight revival, disposes its session, and remains terminal", async () => {
+		const reviveStarted = deferred();
+		const reviveGate = deferred();
+		const revived = makeSessionStub();
+		registry.register({
+			id: "6-ReleaseRace",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/6-ReleaseRace.jsonl",
+			status: "parked",
+		});
+		lifecycle.adopt("6-ReleaseRace", {
+			idleTtlMs: 0,
+			revive: async () => {
+				reviveStarted.resolve();
+				await reviveGate.promise;
+				return revived.session;
+			},
+		});
+
+		const revival = lifecycle.ensureLive("6-ReleaseRace");
+		await reviveStarted.promise;
+		const releasing = lifecycle.release("6-ReleaseRace");
+		const ensureQueuedAfterRelease = lifecycle.ensureLive("6-ReleaseRace").then(
+			() => "resolved",
+			error => String(error),
+		);
+		let releaseSettled = false;
+		void releasing.then(() => {
+			releaseSettled = true;
+		});
+
+		await flushAsync();
+		expect(releaseSettled).toBe(false);
+		expect(registry.get("6-ReleaseRace")?.status).toBe("parked");
+		expect(revived.disposeCalls()).toBe(0);
+
+		reviveGate.resolve();
+		expect(await revival).toBe(revived.session);
+		await releasing;
+
+		expect(revived.disposeCalls()).toBe(1);
+		expect(registry.get("6-ReleaseRace")).toBeUndefined();
+		expect(lifecycle.has("6-ReleaseRace")).toBe(false);
+		expect(await ensureQueuedAfterRelease).toMatch(/never registered or has been released/);
+		await expect(lifecycle.ensureLive("6-ReleaseRace")).rejects.toThrow(/never registered or has been released/);
+	});
+
 	it("adopt(Main) is a no-op: Main is never adopted or parked", async () => {
 		vi.useFakeTimers();
 		const stub = makeSessionStub();
@@ -290,6 +423,30 @@ describe("AgentLifecycleManager", () => {
 		expect(lifecycle.isParking("7-Sub")).toBe(false);
 		expect(registry.get("7-Sub")?.status).toBe("parked");
 		expect(registry.get("7-Sub")?.session).toBeNull();
+	});
+
+	it("a blocked transition for one agent does not serialize another agent", async () => {
+		const firstDisposeGate = deferred();
+		const first = makeSessionStub(() => firstDisposeGate.promise);
+		const second = makeSessionStub();
+		registerIdleSub("7-First", first.session);
+		registerIdleSub("7-Second", second.session);
+		lifecycle.adopt("7-First", { idleTtlMs: 0 });
+		lifecycle.adopt("7-Second", { idleTtlMs: 0 });
+
+		const firstParking = lifecycle.park("7-First");
+		expect(first.disposeCalls()).toBe(1);
+		expect(lifecycle.isParking("7-First")).toBe(true);
+
+		await lifecycle.park("7-Second");
+		expect(second.disposeCalls()).toBe(1);
+		expect(registry.get("7-Second")?.status).toBe("parked");
+		expect(lifecycle.isParking("7-First")).toBe(true);
+		expect(registry.get("7-First")?.status).toBe("idle");
+
+		firstDisposeGate.resolve();
+		await firstParking;
+		expect(registry.get("7-First")?.status).toBe("parked");
 	});
 
 	it("idleTtlMs <= 0 adopts without a timer: the agent never parks", async () => {

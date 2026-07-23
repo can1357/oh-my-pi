@@ -31,12 +31,14 @@ import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../s
 import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { FileSessionStorage } from "../../session/session-storage";
+import { SessionAlreadyOwnedError } from "../../session/session-writer-guard";
 import { type LogoutAccount, toLogoutAccounts } from "../../slash-commands/helpers/logout";
 import {
 	describeRedeemOutcome,
 	type ResetUsageAccount,
 	toResetUsageAccounts,
 } from "../../slash-commands/helpers/reset-usage";
+import { oneLineLabel } from "../../task/types";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
 import {
 	isImageProviderPreference,
@@ -46,7 +48,7 @@ import {
 	setPreferredImageProvider,
 	setPreferredSearchProvider,
 } from "../../tools";
-import { shortenPath } from "../../tools/render-utils";
+import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { AgentDashboard } from "../components/agent-dashboard";
@@ -963,12 +965,29 @@ export class SelectorController {
 	}
 
 	async handleResumeSession(sessionPath: string): Promise<void> {
-		this.ctx.clearTransientSessionUi();
-
 		const previousCwd = this.ctx.sessionManager.getCwd();
 		// Switch session via AgentSession (emits hook and tool session events). The
 		// SessionManager adopts the resumed session's own cwd when it differs.
-		await this.ctx.session.switchSession(sessionPath);
+		// Switch failures must stay in the UI because the session-selector callback
+		// awaits this method without its own rejection handler.
+		let switched: boolean;
+		try {
+			switched = await this.ctx.session.switchSession(sessionPath);
+		} catch (error) {
+			const message =
+				error instanceof SessionAlreadyOwnedError
+					? "This session already has a writable owner. Close the other ompk window or stuck ompk resume process, then retry."
+					: error instanceof Error
+						? error.message
+						: String(error);
+			this.ctx.showError(truncateToWidth(oneLineLabel(message, TRUNCATE_LENGTHS.LINE), TRUNCATE_LENGTHS.LINE));
+			return;
+		}
+		if (!switched) {
+			this.ctx.showStatus("Session resume cancelled");
+			return;
+		}
+		this.ctx.clearTransientSessionUi();
 		const newCwd = this.ctx.sessionManager.getCwd();
 		const movedProject = normalizePathForComparison(newCwd) !== normalizePathForComparison(previousCwd);
 		if (movedProject) {

@@ -184,15 +184,15 @@ Lifecycle/state transition:
 
 ## UI state rebuild after interactive switch
 
-`SelectorController.handleResumeSession` performs UI reset around `switchSession`:
+`SelectorController.handleResumeSession` rebuilds the interactive UI only after `switchSession` succeeds:
 
-- stop loading animation
-- clear status container
-- clear pending-message UI and pending tool map
-- reset streaming component/message references
-- call `session.switchSession(...)`
+- call `session.switchSession(...)` while leaving the current conversation and transient state intact
+- if `switchSession` throws `SessionAlreadyOwnedError` (another process holds the writer guard), show a sanitized, recoverable UI error and keep the current session
+- for any other switch failure, show a sanitized error message and keep the current session
+- if a `session_before_switch` hook cancels the switch (`false`), show `Session resume cancelled` and keep the current conversation rendered
+- after a successful switch, stop loading animation, clear the status container, clear pending-message UI and the pending tool map, and reset streaming component/message references
 - if the resumed session's cwd differs from the previous one, re-point the process and cwd-derived caches at it (`applyCwdChange`)
-- clear chat container and rerender from session context (`renderInitialMessages`)
+- clear the chat container and rerender from session context (`renderInitialMessages`)
 - reload todos from new session artifacts
 - show `Resumed session` (or `Resumed session in <dir>` for a cross-project resume)
 
