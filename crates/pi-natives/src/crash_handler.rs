@@ -18,7 +18,7 @@
 //!   `$XDG_STATE_HOME/omp/logs/` on Linux / macOS when the user has migrated to
 //!   XDG (i.e. that directory already exists and `PI_CODING_AGENT_DIR` isn't
 //!   pointed somewhere custom), otherwise `<home>/<PI_CONFIG_DIR>/logs/`
-//!   (defaulting to `~/.omp/logs/`).
+//!   (defaulting to `~/.ompk/logs/`).
 //! - Hook installation is idempotent across repeated module loads.
 
 use std::{
@@ -349,9 +349,9 @@ mod tests {
 	}
 
 	#[test]
-	fn resolve_logs_dir_defaults_under_dot_omp() {
+	fn resolve_logs_dir_defaults_under_dot_ompk() {
 		let dir = resolve_logs_dir(Path::new("/tmp/pi-natives-test-home"), None, None);
-		assert_eq!(dir, PathBuf::from("/tmp/pi-natives-test-home/.omp/logs"));
+		assert_eq!(dir, PathBuf::from("/tmp/pi-natives-test-home/.ompk/logs"));
 	}
 
 	#[test]
@@ -404,7 +404,7 @@ mod tests {
 	fn resolve_logs_dir_ignores_empty_pi_config_dir() {
 		let dir =
 			resolve_logs_dir(Path::new("/tmp/pi-natives-test-home"), Some(OsStr::new("")), None);
-		assert_eq!(dir, PathBuf::from("/tmp/pi-natives-test-home/.omp/logs"));
+		assert_eq!(dir, PathBuf::from("/tmp/pi-natives-test-home/.ompk/logs"));
 	}
 
 	#[test]
@@ -472,9 +472,9 @@ mod tests {
 	}
 
 	#[test]
-	fn default_agent_dir_uses_dot_omp_by_default() {
+	fn default_agent_dir_uses_dot_ompk_by_default() {
 		let dir = default_agent_dir(Path::new("/tmp/pi-natives-test-home"), None);
-		assert_eq!(dir, PathBuf::from("/tmp/pi-natives-test-home/.omp/agent"));
+		assert_eq!(dir, PathBuf::from("/tmp/pi-natives-test-home/.ompk/agent"));
 	}
 
 	#[test]
