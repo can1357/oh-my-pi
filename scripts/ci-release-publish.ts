@@ -108,6 +108,7 @@ export const packages: PublishPackage[] = [
 		extraTypeConfigs: ["tsconfig.publish.client.json"],
 	},
 	{ dir: "packages/agent", kind: "typescript" },
+	{ dir: "packages/deep-research", kind: "typescript" },
 	{
 		dir: "packages/coding-agent",
 		kind: "typescript",
