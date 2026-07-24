@@ -99,10 +99,13 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
  *   advice is acted on immediately.
  * - If the primary tail is already a terminal text answer and there is no queued
  *   work, a late `concern` is preserved as a visible card instead of waking the
- *   primary to restate completion. A `blocker` is the exception: it means the
- *   agent handed off broken or unexercised work, so it still steers a triggered
- *   turn to force the primary to acknowledge and continue before the turn is
- *   considered done (#5628) — deferring it to the next user turn is the bug.
+ *   primary to restate completion, unless `lateConcern` is "steer" (the
+ *   `advisor.lateConcern` setting), which opts a late concern into the same
+ *   triggered-turn steer as a blocker. That is useful for slow advisors whose
+ *   review always lands after the turn completes, so their concerns would
+ *   otherwise never wake the agent. A `blocker` steers a triggered turn either
+ *   way: it means the agent handed off broken or unexercised work, so it must
+ *   acknowledge and continue before the turn is considered done (#5628).
  * - After a deliberate user interrupt (`autoResumeSuppressed`) the advisor must
  *   not auto-resume the stopped run. While the agent is idle — or still tearing
  *   the interrupted turn down (`aborting`) — the note is preserved as a visible
@@ -124,11 +127,18 @@ export function resolveAdvisorDeliveryChannel(opts: {
 	terminalAnswerNoQueuedWork?: boolean;
 	interruptImmuneTurnActive?: boolean;
 	preserveOnly?: boolean;
+	lateConcern?: "preserve" | "steer";
 }): AdvisorDeliveryChannel {
 	if (opts.preserveOnly && !opts.streaming) return "preserve";
 	if (!isInterruptingSeverity(opts.severity)) return "aside";
 	if (opts.autoResumeSuppressed && (opts.aborting || !opts.streaming)) return "preserve";
-	if (opts.terminalAnswerNoQueuedWork && opts.severity !== "blocker" && !opts.streaming && !opts.aborting)
+	if (
+		opts.terminalAnswerNoQueuedWork &&
+		opts.severity !== "blocker" &&
+		opts.lateConcern !== "steer" &&
+		!opts.streaming &&
+		!opts.aborting
+	)
 		return "preserve";
 	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "aside";
 	return "steer";
