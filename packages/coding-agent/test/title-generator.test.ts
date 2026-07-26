@@ -10,6 +10,7 @@ import {
 	setTerminalTitle,
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import { isConPTYHosted } from "@oh-my-pi/pi-tui";
 import { logger, setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
 
@@ -767,5 +768,60 @@ describe("terminal title runtime", () => {
 		} finally {
 			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
 		}
+	});
+
+	it("releases the override when an extension sets an empty title", () => {
+		// CONTRACT: `setTitle("")` is the obvious way an extension author clears a
+		// title, so an empty override must RELEASE ownership back to the run-state
+		// composer rather than latch as a live verbatim override. Otherwise the
+		// title is stranded at the bare brand and the run state can never show again.
+		setSessionTerminalTitle("my-session");
+		setExtensionTerminalTitle("Deploying prod");
+		writes.length = 0;
+
+		setExtensionTerminalTitle("");
+
+		// The composed run-state title is back, not the bare `π` default.
+		const last = emittedTitles().at(-1);
+		expect(last).toBeDefined();
+		expect(last).toContain("my-session");
+		expect(last).not.toContain("Deploying prod");
+	});
+
+	it("keeps the run state live after an extension clears its title with an empty string", () => {
+		// CONTRACT (the stranding bug): after `setTitle("")` the spinner must still
+		// be able to drive the title. A latched empty override silently kills every
+		// subsequent state change — zero writes, dead spinner, until something calls
+		// `setSessionTerminalTitle` again.
+		setSessionTerminalTitle("my-session");
+		setExtensionTerminalTitle("");
+		writes.length = 0;
+
+		setTerminalTitleState("working");
+
+		const last = emittedTitles().at(-1);
+		expect(last).toBeDefined();
+		expect(last).toContain("my-session");
+		// Under ConPTY the spinner is a static `:` title (no interval), so a frame
+		// only renders off-ConPTY; the release assertion above holds on every host.
+		if (!isConPTYHosted()) expect(SPINNER_FRAMES.some(frame => last?.includes(frame))).toBe(true);
+	});
+
+	it("releases the override for a blank title, not just an empty string", () => {
+		// CONTRACT: release is defined by what the title RENDERS to, not by JS
+		// falsiness. `setTerminalTitle` sanitizes with `sanitizeTerminalTitlePart`,
+		// which trims — so `"   "` renders as the bare `π` default while being
+		// truthy. Storing it verbatim would latch it as a live override and strand
+		// the run state exactly as `""` did.
+		setSessionTerminalTitle("my-session");
+		setExtensionTerminalTitle("   ");
+		writes.length = 0;
+
+		setTerminalTitleState("working");
+
+		const last = emittedTitles().at(-1);
+		expect(last).toBeDefined();
+		expect(last).toContain("my-session");
+		if (!isConPTYHosted()) expect(SPINNER_FRAMES.some(frame => last?.includes(frame))).toBe(true);
 	});
 });

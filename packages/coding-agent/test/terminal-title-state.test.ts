@@ -145,4 +145,67 @@ describe("disposeTerminalTitleState", () => {
 		vi.advanceTimersByTime(4000);
 		expect(writes.filter(payload => payload.includes(OSC_TITLE_SEQ))).toEqual([]);
 	});
+
+	it("latches: a run-state change after dispose cannot re-arm the spinner", () => {
+		// CONTRACT: dispose is teardown, not a pause. `InteractiveMode.shutdown()`
+		// calls `disposeTerminalTitleState()` and `popTerminalTitle()` BEFORE
+		// `this.stop()` unsubscribes the session, so in that window a live
+		// `#handleAgentStart` can still call `setTerminalTitleState("working")`.
+		// If dispose only stops the timer, that call re-arms it and a tick writes
+		// `π ⠋ …` into the parent shell's tab — the exact leak the ordering
+		// comment in `shutdown()` claims to prevent.
+		disposeTerminalTitleState();
+
+		writes.length = 0;
+		setTerminalTitleState("working");
+
+		// Assert on the TIMER, not only the writes: the `emitTerminalTitle` latch
+		// already silences anything a re-armed interval would emit, so a write-only
+		// assertion cannot tell "never re-armed" from "re-armed and ticking
+		// silently forever" — the latter leaks an interval past shutdown that no
+		// later dispose reaches.
+		expect(vi.getTimerCount()).toBe(0);
+
+		vi.advanceTimersByTime(4000);
+		expect(writes.filter(payload => payload.includes(OSC_TITLE_SEQ))).toEqual([]);
+	});
+
+	it("re-emits on release even when the new session's title is unchanged", () => {
+		// CONTRACT: `popTerminalTitle()` hands the terminal back to the shell, so
+		// after dispose the runtime does NOT know what is on screen. Deduping the
+		// first post-release write against a pre-dispose `lastEmitted` would leave
+		// the shell's own title in place while the runtime believes it owns the
+		// tab. Same label in and out is the case that catches it.
+		setSessionTerminalTitle("same-session");
+		setTerminalTitleState("idle");
+		disposeTerminalTitleState();
+
+		writes.length = 0;
+		setSessionTerminalTitle("same-session");
+
+		expect(writes.some(payload => payload.includes("same-session"))).toBe(true);
+	});
+
+	it.skipIf(isConPTYHosted())(
+		"releases the latch and re-arms a live spinner when a new session is established",
+		() => {
+			// CONTRACT: the latch is teardown-scoped, not permanent. A new authoritative
+			// session owns the terminal again, so the title must resume — including a
+			// LIVE spinner if the run state is still `working`. Releasing the flag alone
+			// would leave a stopped timer behind a `working` state: a frozen frame.
+			setTerminalTitleState("working");
+			disposeTerminalTitleState();
+
+			writes.length = 0;
+			setSessionTerminalTitle("next-session");
+
+			// The new session's title emitted...
+			expect(writes.some(payload => payload.includes("next-session"))).toBe(true);
+
+			// ...and the spinner is genuinely ticking again, not frozen on one frame.
+			writes.length = 0;
+			vi.advanceTimersByTime(400);
+			expect(writes.filter(payload => payload.includes(OSC_TITLE_SEQ)).length).toBeGreaterThan(0);
+		},
+	);
 });

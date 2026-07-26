@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `disposeTerminalTitleState()` now latches the title runtime off until a session title re-establishes ownership; direct importers of `utils/title-generator` must call `setSessionTerminalTitle()` to resume after dispose.
+
+### Fixed
+
+- Fixed an extension setting an empty terminal title stranding the working spinner on the bare `π` default.
+- Fixed the terminal-title spinner re-arming after teardown and writing into the parent shell's tab.
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
