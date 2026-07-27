@@ -122,7 +122,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Fusion",
 	],
 	context: ["General", "Light Context", "Compaction", "Background Packs", "Rules (TTSR)", "Experimental"],
-	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Screenpipe"],
+	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Screenpipe", "Gopk Clips"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Python"],
 	tools: [
@@ -4591,6 +4591,54 @@ export const SETTINGS_SCHEMA = {
 			group: "Screenpipe",
 			label: "Screenpipe Media Root",
 			description: "Screenpipe media directory; when set, keyframe hashes are recorded for snapshots under it",
+		},
+	},
+
+	// Gopk-clips activity handoff — local-only, opt-in. Polls the capture
+	// daemon's journal-handoff drop directory for sanitized activity
+	// derivatives and ingests them into the local activity ledger, running the
+	// raw-clip retention purge on an interval. Nothing leaves the machine;
+	// requires the user to run the gopk-clips Context Mode daemon themselves.
+	"gopkClips.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Gopk Clips",
+			label: "Gopk Clips Activity Handoff",
+			description:
+				"Ingest sanitized activity derivatives dropped by the gopk-clips Context Mode daemon into the local ledger (opt-in, local-only)",
+		},
+	},
+	"gopkClips.captureRoot": {
+		type: "string",
+		default: "~/.omp/agent/gopk-clips/capture",
+		ui: {
+			tab: "memory",
+			group: "Gopk Clips",
+			label: "Capture Root",
+			description:
+				"gopk-clips capture root; the handoff drop lives at <root>/journal-handoff and derivative pointers must resolve under it",
+		},
+	},
+	"gopkClips.pollIntervalMs": {
+		type: "number",
+		default: 15_000,
+		ui: {
+			tab: "memory",
+			group: "Gopk Clips",
+			label: "Poll Interval (ms)",
+			description: "Delay between handoff-directory polls",
+		},
+	},
+	"gopkClips.cleanupIntervalMs": {
+		type: "number",
+		default: 600_000,
+		ui: {
+			tab: "memory",
+			group: "Gopk Clips",
+			label: "Retention Interval (ms)",
+			description: "Delay between raw-clip retention purge passes",
 		},
 	},
 

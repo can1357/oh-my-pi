@@ -284,6 +284,7 @@ import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" w
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
+import type { GopkClipsHostState } from "../gopk-clips/session-state";
 import type { ScreenpipeSessionManager } from "../screenpipe/session-state";
 import {
 	deobfuscateAssistantContent,
@@ -1314,6 +1315,12 @@ export class AgentSession {
 	/** Resolves once the (dynamically imported) manager has been constructed. Set only when the
 	 *  feature is enabled; dispose and session re-binds await it so a slow start cannot leak the poller. */
 	#screenpipeManagerReady?: Promise<void>;
+	/** Gopk-clips handoff host; built when `gopkClips.enabled` is on, torn down in dispose.
+	 *  Not re-bound on session transitions — derivatives carry their own capture session id. */
+	#gopkClipsHost?: GopkClipsHostState;
+	/** Resolves once the (dynamically imported) host has been constructed. Set only when the
+	 *  feature is enabled; dispose awaits it so a slow start cannot leak the poller. */
+	#gopkClipsHostReady?: Promise<void>;
 	/** Session file minted empty by /move; cleaned up at dispose if it never gained real messages. */
 	#movedFromEmptySessionFile?: string;
 	/** Provenance set of built-in tool names in the registry (see AgentSessionConfig.builtInToolNames). */
@@ -1938,6 +1945,8 @@ export class AgentSession {
 
 		if (this.settings.get("screenpipe.enabled") as boolean) this.#startScreenpipeBridge();
 
+		if (this.settings.get("gopkClips.enabled") as boolean) this.#startGopkClipsHost();
+
 		// Always subscribe to agent events for internal handling
 		// (session persistence, hooks, auto-compaction, retry logic)
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
@@ -1967,6 +1976,25 @@ export class AgentSession {
 			})
 			.catch(error => {
 				logger.warn("Failed to start screenpipe activity bridge", { error: String(error) });
+			});
+	}
+
+	// Same passive-observer contract as the screenpipe bridge: a broken host
+	// (unwritable capture root, corrupt ledger) must never stop the session
+	// from starting, and the stack is loaded dynamically for the same
+	// private-workspace-dependency reason.
+	#startGopkClipsHost(): void {
+		const config = {
+			captureRoot: this.settings.get("gopkClips.captureRoot") as string,
+			pollIntervalMs: this.settings.get("gopkClips.pollIntervalMs") as number,
+			cleanupIntervalMs: this.settings.get("gopkClips.cleanupIntervalMs") as number,
+		};
+		this.#gopkClipsHostReady = import("../gopk-clips/session-state")
+			.then(({ createGopkClipsHost }) => {
+				this.#gopkClipsHost = createGopkClipsHost(config);
+			})
+			.catch(error => {
+				logger.warn("Failed to start gopk-clips activity host", { error: String(error) });
 			});
 	}
 
@@ -4673,6 +4701,19 @@ export class AgentSession {
 				logger.warn("Failed to dispose screenpipe activity bridge", { error: String(error) });
 			}
 			this.#screenpipeManager = undefined;
+		}
+		// Tear down the gopk-clips handoff host (stops its poll/retention loops
+		// and closes its ledger). Same await-the-async-start guard as above.
+		if (this.#gopkClipsHostReady) {
+			const ready = this.#gopkClipsHostReady;
+			this.#gopkClipsHostReady = undefined;
+			try {
+				await ready;
+				await this.#gopkClipsHost?.dispose();
+			} catch (error) {
+				logger.warn("Failed to dispose gopk-clips activity host", { error: String(error) });
+			}
+			this.#gopkClipsHost = undefined;
 		}
 		// Tear down the embeddings subprocess AFTER mnemopi state.dispose:
 		// consolidate-on-dispose may still call `embed()` to store the final

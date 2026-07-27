@@ -30,7 +30,7 @@ import { getAgentDir, getInstallId, logger } from "@pk-nerdsaver-ai/pi-utils";
  * redacted-metadata form. Matched against screenpipe's lowercased process
  * name by the gopk ingestion policy.
  */
-const DENIED_APPLICATION_IDS: readonly string[] = [
+export const DENIED_APPLICATION_IDS: readonly string[] = [
 	"1password",
 	"bitwarden",
 	"dashlane",
@@ -41,7 +41,7 @@ const DENIED_APPLICATION_IDS: readonly string[] = [
 ];
 
 /** How long a rejected clip's raw pointer may linger before retention purges it. */
-const MAXIMUM_RAW_CLIP_RETENTION_MS = 10 * 60_000;
+export const MAXIMUM_RAW_CLIP_RETENTION_MS = 10 * 60_000;
 
 export interface ScreenpipeSessionConfig {
 	readonly sessionId: string;
