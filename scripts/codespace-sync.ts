@@ -497,41 +497,86 @@ async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void> {
 
 	console.log(`✓ git handoff complete — ${opts.sshTarget}:${opts.remoteDir} on branch ${branch}`);
 
-	// 4. Optionally launch an ompk agent session on the target inside tmux.
+	// 4. Auto-launch an ompk session via the target's handoff-bot (if running).
 	if (opts.launch) {
-		const sessionName = `ompk-${repoName}`.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 50);
-		console.log(`→ launch ompk session on ${opts.sshTarget} (tmux: ${sessionName})`);
+		await autoLaunchHandoffBotSession(opts.sshTarget, remoteDirSsh, repoName);
+	}
 
-		const checkCmd = `which ompk >/dev/null 2>&1 && echo OMPK_OK || echo OMPK_MISSING; which tmux >/dev/null 2>&1 && echo TMUX_OK || echo TMUX_MISSING`;
-		const check = await sshRun(opts.sshTarget, checkCmd);
-		const checkOut = check.stdout.trim();
-		if (!checkOut.includes("OMPK_OK")) {
-			console.log(`  ⚠ ompk not found on ${opts.sshTarget} — skipping session launch.`);
-			console.log(`✓ handoff complete (git only, no agent session)`);
-			return;
-		}
-		if (!checkOut.includes("TMUX_OK")) {
-			console.log(`  ⚠ tmux not found on ${opts.sshTarget} — skipping session launch.`);
-			console.log(`✓ handoff complete (git only, no agent session)`);
-			return;
-		}
-
-		const launchCmd = [
-			`tmux kill-session -t ${sessionName} 2>/dev/null || true`,
-			`tmux new-session -d -s ${sessionName} -c "${remoteDirSsh}"`,
-			`tmux send-keys -t ${sessionName} 'ompk --cwd "${remoteDirSsh}"' Enter`,
-		].join(" && ");
-		const launch = await sshRun(opts.sshTarget, launchCmd);
-		if (launch.code !== 0) {
-			console.log(`  ⚠ failed to launch ompk session:\n${launch.stderr}`);
-			console.log(`✓ handoff complete (git ok, agent session launch failed)`);
-			return;
-		}
-
-		console.log(`✓ ompk session launched — attach on ${opts.sshTarget} with: tmux attach -t ${sessionName}`);
+	// 5. Clean up the handoff branch on GitHub.
+	console.log(`→ cleanup handoff branch origin/${branch}`);
+	const deleteRes = await direct(["git", "push", "origin", "--delete", branch], { cwd: plan.localRepo });
+	if (deleteRes.code === 0) {
+		console.log(`✓ deleted origin/${branch}`);
+	} else {
+		console.log(`  (branch cleanup skipped: ${deleteRes.stderr.trim() || "unknown"})`);
 	}
 
 	console.log(`✓ handoff complete`);
+}
+
+/**
+ * Auto-launch an ompk session on the target via its handoff-bot.
+ * Reads the bot token from the target's config over SSH, then sends a
+ * /new <repo> message via the Telegram Bot API. The handoff-bot on the
+ * target picks up the message and creates the session automatically.
+ */
+async function autoLaunchHandoffBotSession(sshTarget: string, remoteDirSsh: string, repoName: string): Promise<void> {
+	console.log(`→ auto-launch handoff-bot session on ${sshTarget}`);
+
+	// Read the bot config from the target
+	const configCmd = `cat ~/.handoff-bot/config.json 2>/dev/null || cat /data/.handoff-bot/config.json 2>/dev/null || echo NONE`;
+	const configRes = await sshRun(sshTarget, configCmd);
+	if (configRes.stdout.trim() === "NONE") {
+		console.log(`  ⚠ no handoff-bot config found on ${sshTarget} — skipping auto-launch`);
+		console.log(`  (install handoff-bot on the target: run handoff-bot/install.sh)`);
+		return;
+	}
+
+	let botConfig: { botToken?: string; allowedChatIds?: string[] };
+	try {
+		botConfig = JSON.parse(configRes.stdout);
+	} catch {
+		console.log(`  ⚠ cannot parse handoff-bot config on ${sshTarget} — skipping auto-launch`);
+		return;
+	}
+
+	if (!botConfig.botToken) {
+		console.log(`  ⚠ no botToken in handoff-bot config on ${sshTarget} — skipping auto-launch`);
+		return;
+	}
+
+	// Determine the chat ID
+	let chatId = (botConfig.allowedChatIds || [])[0];
+	if (!chatId) {
+		// Use the most recent chat from getUpdates
+		const updatesUrl = `https://api.telegram.org/bot${botConfig.botToken}/getUpdates?limit=1`;
+		const updatesRes = await direct(["curl", "-s", updatesUrl]);
+		try {
+			const updates = JSON.parse(updatesRes.stdout);
+			if (updates.ok && updates.result && updates.result.length > 0) {
+				chatId = updates.result[0].message?.chat?.id?.toString();
+			}
+		} catch {}
+	}
+
+	if (!chatId) {
+		console.log(`  ⚠ cannot determine chat ID — send a message to the bot on Telegram first, then retry`);
+		return;
+	}
+
+	// Send /new <repo> to the bot via Telegram API
+	const sendUrl = `https://api.telegram.org/bot${botConfig.botToken}/sendMessage`;
+	const sendRes = await direct(["curl", "-s", "-X", "POST", sendUrl, "-d", `chat_id=${chatId}`, "-d", `text=/new ${repoName}`]);
+	try {
+		const resp = JSON.parse(sendRes.stdout);
+		if (resp.ok) {
+			console.log(`✓ handoff-bot session auto-launched — check Telegram, the session is ready`);
+		} else {
+			console.log(`  ⚠ Telegram sendMessage failed: ${resp.description || "unknown"}`);
+		}
+	} catch {
+		console.log(`  ⚠ cannot parse Telegram API response — skipping auto-launch`);
+	}
 }
 
 /** Fallback: push to GitHub, then fetch + checkout on the remote. */
