@@ -470,7 +470,7 @@ provider "muse-code" {
 }
 ```
 
-Only `discovery` enrolls a provider in `generate-models.ts`; providers without it are never fetched at generation time (see the `charm-hyper` entry for why a live gateway deliberately omits it).
+Only `discovery` enrolls a provider in `generate-models.ts`; providers without it are never fetched at generation time (see the `charm-hyper` entry for why a live gateway deliberately omits it). `ignore-api-key=#true` on `discovery` makes generation skip every credential (env and `agent.db`) so the bundle reflects the full public catalog rather than one account's roster; `requesty` uses it.
 
 `automatic-default #false` keeps a provider available for explicit selection but excludes it from startup fallback and automatic model presets. The default is `#true`; `apple` opts out because its on-device context cannot accommodate the standard coding-agent prompt in many projects.
 

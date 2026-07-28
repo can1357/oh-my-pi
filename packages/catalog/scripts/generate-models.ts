@@ -176,6 +176,9 @@ export function mergePreviousSnapshotModels(
 }
 
 async function resolveProviderApiKey(providerId: string, catalog: CatalogDiscoveryConfig): Promise<string | undefined> {
+	if (catalog.ignoreApiKey) {
+		return undefined;
+	}
 	for (const envVar of catalog.envVars ?? []) {
 		const value = $env[envVar as keyof typeof $env];
 		if (typeof value === "string" && value.length > 0) {

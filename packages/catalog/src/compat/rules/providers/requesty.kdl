@@ -2,5 +2,5 @@ provider "requesty" {
 	default-model "openai/gpt-5.5"
 	env "REQUESTY_API_KEY"
 	dynamic-models-authoritative #true
-	discovery label="Requesty" allow-unauthenticated=#true
+	discovery label="Requesty" allow-unauthenticated=#true ignore-api-key=#true
 }
