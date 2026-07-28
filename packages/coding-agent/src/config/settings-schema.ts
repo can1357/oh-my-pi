@@ -122,7 +122,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Fusion",
 	],
 	context: ["General", "Light Context", "Compaction", "Background Packs", "Rules (TTSR)", "Experimental"],
-	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Screenpipe", "Gopk Clips"],
+	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Screenpipe", "Activity Memory"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Python"],
 	tools: [
@@ -132,6 +132,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"GitHub",
 		"Output Limits",
 		"Execution",
+		"Deep Research",
 		"Discovery & MCP",
 		"Developer",
 	],
@@ -4604,10 +4605,10 @@ export const SETTINGS_SCHEMA = {
 		default: false,
 		ui: {
 			tab: "memory",
-			group: "Gopk Clips",
-			label: "Gopk Clips Activity Handoff",
+			group: "Activity Memory",
+			label: "Remember what I work on",
 			description:
-				"Ingest sanitized activity derivatives dropped by the gopk-clips Context Mode daemon into the local ledger (opt-in, local-only)",
+				"Let this agent read your recent activity (which apps/windows, titles only) from the local Activity Memory timeline during sessions. The timeline is recorded by the always-on Activity Memory app; this only controls in-session recall. Local-only.",
 		},
 	},
 	// No default on purpose: unset means <agentDir>/gopk-clips/capture, which
@@ -4617,7 +4618,7 @@ export const SETTINGS_SCHEMA = {
 		default: undefined,
 		ui: {
 			tab: "memory",
-			group: "Gopk Clips",
+			group: "Activity Memory",
 			label: "Capture Root",
 			description:
 				"gopk-clips capture root (default: <agent dir>/gopk-clips/capture); the handoff drop lives at <root>/journal-handoff and derivative pointers must resolve under it",
@@ -4628,7 +4629,7 @@ export const SETTINGS_SCHEMA = {
 		default: 15_000,
 		ui: {
 			tab: "memory",
-			group: "Gopk Clips",
+			group: "Activity Memory",
 			label: "Poll Interval (ms)",
 			description: "Delay between handoff-directory polls",
 		},
@@ -4638,7 +4639,7 @@ export const SETTINGS_SCHEMA = {
 		default: 600_000,
 		ui: {
 			tab: "memory",
-			group: "Gopk Clips",
+			group: "Activity Memory",
 			label: "Retention Interval (ms)",
 			description: "Delay between raw-clip retention purge passes",
 		},
