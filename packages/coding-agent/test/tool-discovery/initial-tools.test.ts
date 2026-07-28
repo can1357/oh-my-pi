@@ -29,6 +29,7 @@ const allToolsSettings = Settings.isolated({
 	"todo.enabled": true,
 	"memory.backend": "mnemopi",
 	"autolearn.enabled": true,
+	"gopkClips.enabled": true,
 	"tools.discoveryMode": "all",
 });
 

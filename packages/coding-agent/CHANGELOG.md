@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `activity` discoverable tool, gated by `gopkClips.enabled` (default off), which answers "what was I working on this morning?" by reading the local Activity Memory ledger: tracked time, application mix, and sanitized window-title digests bucketed by local hour, for a calendar day (`date`) or a trailing window (`lastHours`). Read-only and local-only — it never records anything itself.
+- Added `SqliteActivityLedgerReader` to `@pk-nerdsaver-ai/pi-activity-journal`: a read-only ledger view that opens the sqlite handle read-only and skips the `CREATE TABLE` bootstrap, so readers cannot take a write lock or contend with the live ingest daemon. Recall and the `activity` tool both use it.
+
+### Changed
+
+- Activity Memory ingestion is now owned exclusively by the always-on `gopk-ingest` daemon. `AgentSession` no longer starts a second ingest host when `gopkClips.enabled` is on: two consumers raced to delete the same journal-handoff files and contended for the ledger's write lock, which could split clips across ledgers. `gopkClips.enabled` now gates in-session *reading* only.
+- Unified gopk-clips path resolution behind a single resolver (explicit override, then the shared `config.json`, then the agent dir), with `~` expansion and absolute resolution applied to both the capture root and the ledger path. Previously the daemon's `ingest.pid` lock could land in a cwd-relative `./~/` directory while its host resolved elsewhere.
+
+### Fixed
+
+- Fixed hour-over-hour activity recall on days that are not 24 hours long: the day window is now derived from local midnight to the next local midnight, so DST transition days correctly span 23 or 25 hours instead of being truncated or overrun.
+- Fixed activity recall bucketing in half-hour-offset timezones (IST, NPT): buckets now start on real local hour marks rather than UTC hour boundaries labelled with the local hour, and are keyed by absolute instant so the repeated hour on a fall-back day stays two distinct buckets.
+
+### Removed
+
+- Removed the `gopkClips.captureRoot`, `gopkClips.pollIntervalMs`, and `gopkClips.cleanupIntervalMs` settings. They configured the in-session ingest host, which no longer exists; the `gopk-ingest` daemon takes its paths from its own `config.json` and hardcodes its intervals, so these could not affect anything. Stale entries in an existing `settings.json` are ignored rather than rejected.
+
 ## [16.3.0] - 2026-07-23
 
 ### Added

@@ -4595,53 +4595,23 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// Gopk-clips activity handoff — local-only, opt-in. Polls the capture
-	// daemon's journal-handoff drop directory for sanitized activity
-	// derivatives and ingests them into the local activity ledger, running the
-	// raw-clip retention purge on an interval. Nothing leaves the machine;
-	// requires the user to run the gopk-clips Context Mode daemon themselves.
+	// Activity Memory — local-only, opt-in, READ-ONLY from this agent's side.
+	// Recording and ingestion belong entirely to the separate always-on
+	// Activity Memory app and its `gopk-ingest` daemon, which is the sole
+	// writer of the local ledger. This setting gates the `activity` tool, which
+	// only queries that ledger. Capture root, poll interval, and retention
+	// interval are the daemon's own configuration and are deliberately not
+	// settings here — it reads them from its config.json, so exposing them
+	// would have been a knob that changed nothing.
 	"gopkClips.enabled": {
 		type: "boolean",
 		default: false,
 		ui: {
 			tab: "memory",
 			group: "Activity Memory",
-			label: "Remember what I work on",
+			label: "Let me look up what you were working on",
 			description:
-				"Let this agent read your recent activity (which apps/windows, titles only) from the local Activity Memory timeline during sessions. The timeline is recorded by the always-on Activity Memory app; this only controls in-session recall. Local-only.",
-		},
-	},
-	// No default on purpose: unset means <agentDir>/gopk-clips/capture, which
-	// tracks PI_CONFIG_DIR/profile overrides instead of hardcoding a home path.
-	"gopkClips.captureRoot": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "memory",
-			group: "Activity Memory",
-			label: "Capture Root",
-			description:
-				"gopk-clips capture root (default: <agent dir>/gopk-clips/capture); the handoff drop lives at <root>/journal-handoff and derivative pointers must resolve under it",
-		},
-	},
-	"gopkClips.pollIntervalMs": {
-		type: "number",
-		default: 15_000,
-		ui: {
-			tab: "memory",
-			group: "Activity Memory",
-			label: "Poll Interval (ms)",
-			description: "Delay between handoff-directory polls",
-		},
-	},
-	"gopkClips.cleanupIntervalMs": {
-		type: "number",
-		default: 600_000,
-		ui: {
-			tab: "memory",
-			group: "Activity Memory",
-			label: "Retention Interval (ms)",
-			description: "Delay between raw-clip retention purge passes",
+				'Give this agent the `activity` tool, so it can answer questions like "what was I working on this morning?" by reading the local Activity Memory timeline (which apps and window titles had focus, and for how long — no screenshots or page contents). Recording is done by the separate always-on Activity Memory app; this only controls whether the agent may read it. Local-only.',
 		},
 	},
 

@@ -36,6 +36,7 @@ import type { DiscoverableTool, DiscoverableToolSearchIndex } from "../tool-disc
 import type { EventBus } from "../utils/event-bus";
 import { WebSearchTool } from "../web/search";
 import type { WorkspaceTree } from "../workspace-tree";
+import { ActivityTool } from "./activity";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
@@ -572,6 +573,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	reflect: MemoryReflectTool.createIf,
 	learn: LearnTool.createIf,
 	manage_skill: ManageSkillTool.createIf,
+	activity: ActivityTool.createIf,
 };
 
 export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
@@ -728,6 +730,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "retain" || name === "recall" || name === "reflect") {
 			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
 		}
+		if (name === "activity") return session.settings.get("gopkClips.enabled");
 		if (name === "manage_skill") return session.settings.get("autolearn.enabled") && (session.taskDepth ?? 0) === 0;
 		if (name === "learn") {
 			return (

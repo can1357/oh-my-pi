@@ -9,6 +9,18 @@ export interface ActivityLedger {
 	close(): void;
 }
 
+/**
+ * The query-only half of {@link ActivityLedger}. Consumers that only read —
+ * recall, reporting, in-session activity lookup — should depend on this and
+ * open via {@link SqliteActivityLedgerReader}, never on the read-write class.
+ */
+export interface ActivityLedgerReader {
+	list(): readonly ActivityEvidence[];
+	/** Evidence whose window overlaps `[startedAt, endedAt)`; both ISO-8601. */
+	listOverlapping(startedAt: string, endedAt: string): readonly ActivityEvidence[];
+	close(): void;
+}
+
 interface LedgerRow {
 	readonly id: string;
 	readonly payload: string;
@@ -99,6 +111,53 @@ export class SqliteActivityLedger implements ActivityLedger {
 			[JSON.stringify(updated), deletedAt, evidenceId],
 		);
 		return result.changes === 1;
+	}
+
+	close(): void {
+		this.#db.close();
+	}
+}
+
+/**
+ * Read-only view of a ledger someone else owns.
+ *
+ * Deliberately does NOT run the `CREATE TABLE IF NOT EXISTS` bootstrap that
+ * {@link SqliteActivityLedger} does: DDL takes a write lock, so a reader that
+ * bootstraps would contend with the live writer on every open. The sqlite
+ * handle itself is opened read-only, which makes that a structural guarantee
+ * rather than a convention — any stray write throws instead of racing.
+ *
+ * Requires the database to already exist; opening a missing file throws, since
+ * "the ledger has not been created yet" is a caller-visible state, not
+ * something a reader should paper over by creating an empty database.
+ */
+export class SqliteActivityLedgerReader implements ActivityLedgerReader {
+	#db: Database;
+
+	constructor(path: string) {
+		this.#db = new Database(path, { readonly: true, strict: true });
+	}
+
+	list(): readonly ActivityEvidence[] {
+		return this.#db
+			.query<LedgerRow, []>("SELECT id, payload FROM activity_evidence ORDER BY started_at, id")
+			.all()
+			.map(row => parseEvidence(row));
+	}
+
+	listOverlapping(startedAt: string, endedAt: string): readonly ActivityEvidence[] {
+		// Half-open overlap: the row starts before the window ends and ends
+		// after it begins. Both columns hold `Date#toISOString()` output, whose
+		// fixed-width UTC form sorts lexicographically in chronological order,
+		// so string comparison is a correct range test here.
+		return this.#db
+			.query<LedgerRow, [string, string]>(
+				`SELECT id, payload FROM activity_evidence
+				 WHERE started_at < ? AND ended_at > ?
+				 ORDER BY started_at, id`,
+			)
+			.all(endedAt, startedAt)
+			.map(row => parseEvidence(row));
 	}
 
 	close(): void {

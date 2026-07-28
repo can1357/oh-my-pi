@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ActivityLedgerReader` and `SqliteActivityLedgerReader`: a query-only view over a ledger owned by another process. It opens the sqlite handle read-only and deliberately skips the `CREATE TABLE IF NOT EXISTS` bootstrap that `SqliteActivityLedger` runs, since that DDL takes a write lock and would contend with the live writer on every open. Adds `listOverlapping(startedAt, endedAt)` for windowed queries.
+
 ## [16.3.0] - 2026-07-23
 
 ### Added
