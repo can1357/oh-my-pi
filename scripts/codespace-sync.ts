@@ -8,9 +8,16 @@
  *   bun scripts/codespace-sync.ts push  <ssh-target> [--path <remote-dir>]
  *   bun scripts/codespace-sync.ts pull  <ssh-target> [--path <remote-dir>]
  *   bun scripts/codespace-sync.ts status <ssh-target> [--path <remote-dir>]
+ *   bun scripts/codespace-sync.ts handoff <ssh-target> [--path <remote-dir>] [--launch]
  *
  * <ssh-target>  user@host form, e.g. pk@100.111.69.99
  * <remote-dir>  absolute path on remote (default: ~/codespace-<repo-basename>)
+ *
+ * The `handoff` action uses GitHub as the transport instead of git bundle + tar.
+ * It commits everything locally, force-pushes to a persistent handoff/<target>
+ * branch on origin, then SSHes to the target and clones (if missing) or pulls
+ * that branch. When --launch is passed, it also spawns an ompk agent session
+ * on the target inside a tmux window.
  *
  * Env vars (for tests / non-default ssh ports / custom key):
  *   CODESPACE_SYNC_KEY   absolute path to ssh private key
@@ -20,12 +27,13 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
-type Direction = "push" | "pull" | "status";
+type Direction = "push" | "pull" | "status" | "handoff";
 
 interface SyncOptions {
 	direction: Direction;
 	sshTarget: string;
 	remoteDir: string;
+	launch: boolean;
 }
 
 interface PlanResult {
@@ -78,23 +86,26 @@ const RSYNC_EXCLUDES = [
 function parseArgs(argv: string[]): SyncOptions {
 	const args = argv.slice(2);
 	if (args.length < 2) {
-		throw new Error("usage: codespace-sync <push|pull|status> <ssh-target> [--path <remote-dir>]");
+		throw new Error("usage: codespace-sync <push|pull|status|handoff> <ssh-target> [--path <remote-dir>] [--launch]");
 	}
 	const direction = args[0] as Direction;
-	if (direction !== "push" && direction !== "pull" && direction !== "status") {
+	if (direction !== "push" && direction !== "pull" && direction !== "status" && direction !== "handoff") {
 		throw new Error(`unknown direction: ${direction}`);
 	}
 	const sshTarget = args[1];
 	let remoteDir = "";
+	let launch = false;
 	for (let i = 2; i < args.length; i++) {
 		if (args[i] === "--path") {
 			remoteDir = args[++i] ?? "";
+		} else if (args[i] === "--launch") {
+			launch = true;
 		}
 	}
 	if (!remoteDir) {
 		remoteDir = `~/codespace-${path.basename(process.cwd())}`;
 	}
-	return { direction, sshTarget, remoteDir };
+	return { direction, sshTarget, remoteDir, launch };
 }
 
 // Direct argv spawn. Use for git / ssh / scp / tar where Windows OpenSSH or
@@ -377,6 +388,120 @@ async function pull(opts: SyncOptions, plan: PlanResult): Promise<void> {
 	console.log("✓ pull complete (working tree staged in .codespace-sync-incoming)");
 }
 
+// ── handoff action (GitHub-branch transport) ──
+
+/** Branch name on the GitHub remote: handoff/<target-node>, derived from ssh target. */
+function buildHandoffBranch(sshTarget: string): string {
+	const node = sshTarget.includes("@") ? sshTarget.split("@")[1] : sshTarget;
+	return `handoff/${node}`;
+}
+
+/** Convert a leading ~ to $HOME so the path is safe inside double-quoted SSH commands. */
+function sshSafePath(p: string): string {
+	return p.replace(/^~(?=\/|$)/, "$HOME");
+}
+
+/**
+ * GitHub-branch handoff: commit everything locally, force-push to handoff/<node>
+ * on origin, then SSH to the target and clone-or-pull that branch. When --launch
+ * is passed, also spawns an ompk agent session on the target inside tmux.
+ */
+async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void> {
+	const branch = buildHandoffBranch(opts.sshTarget);
+	const remoteDirSsh = sshSafePath(opts.remoteDir);
+	const repoName = path.basename(plan.localRepo);
+
+	// 1. Resolve GitHub remote URL.
+	console.log("→ resolve GitHub remote URL");
+	const remoteRes = await direct(["git", "remote", "get-url", "origin"], { cwd: plan.localRepo });
+	if (remoteRes.code !== 0) {
+		throw new Error(`cannot resolve git remote 'origin':\n${remoteRes.stderr}`);
+	}
+	const remoteUrl = remoteRes.stdout.trim();
+	console.log(`  origin: ${remoteUrl}`);
+
+	// 2. Stage all changes (including untracked) and commit.
+	console.log("→ stage all changes (including untracked)");
+	await direct(["git", "add", "-A"], { cwd: plan.localRepo });
+
+	const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+	console.log("→ commit (allow-empty)");
+	const commitRes = await direct(["git", "commit", "-m", `handoff: ${ts}`, "--allow-empty"], { cwd: plan.localRepo });
+	// exit 0 = committed, exit 1 = nothing to commit — both ok.
+	if (commitRes.code !== 0 && commitRes.code !== 1) {
+		throw new Error(`git commit failed:\n${commitRes.stderr}`);
+	}
+
+	// 3. Force-push current HEAD to handoff/<node> on origin.
+	console.log(`→ push to origin/${branch} (force)`);
+	const pushRes = await direct(["git", "push", "--force", "origin", `HEAD:${branch}`], { cwd: plan.localRepo });
+	if (pushRes.code !== 0) {
+		throw new Error(`git push failed:\n${pushRes.stderr}`);
+	}
+
+	// 4. SSH to target: clone if missing, then fetch + checkout the handoff branch.
+	console.log(`→ SSH to ${opts.sshTarget}: check if ${opts.remoteDir} exists`);
+	const probe = await sshRun(opts.sshTarget, `test -d "${remoteDirSsh}/.git" && echo EXISTS || echo FRESH`);
+	if (probe.code !== 0) {
+		throw new Error(`cannot reach ${opts.sshTarget}:\n${probe.stderr}`);
+	}
+
+	if (probe.stdout.trim() === "FRESH") {
+		console.log(`→ clone ${remoteUrl} → ${opts.remoteDir}`);
+		const cloneCmd = `mkdir -p "$(dirname "${remoteDirSsh}")" && git clone "${remoteUrl}" "${remoteDirSsh}"`;
+		const clone = await sshRun(opts.sshTarget, cloneCmd);
+		if (clone.code !== 0) {
+			throw new Error(`remote clone failed:\n${clone.stderr}\n${clone.stdout}`);
+		}
+	}
+
+	console.log(`→ fetch + checkout ${branch} on ${opts.sshTarget}`);
+	const syncCmd = `cd "${remoteDirSsh}" && git fetch origin ${branch} && git checkout -B ${branch} origin/${branch} && git reset --hard origin/${branch}`;
+	const sync = await sshRun(opts.sshTarget, syncCmd);
+	if (sync.code !== 0) {
+		throw new Error(`remote sync failed:\n${sync.stderr}\n${sync.stdout}`);
+	}
+
+	console.log(`✓ git handoff complete — ${opts.sshTarget}:${opts.remoteDir} on branch ${branch}`);
+	console.log(`  branch stays open on origin/${branch} until merged or manually deleted`);
+
+	// 5. Optionally launch an ompk agent session on the target inside tmux.
+	if (opts.launch) {
+		const sessionName = `ompk-${repoName}`.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 50);
+		console.log(`→ launch ompk session on ${opts.sshTarget} (tmux: ${sessionName})`);
+
+		const checkCmd = `which ompk >/dev/null 2>&1 && echo OMPK_OK || echo OMPK_MISSING; which tmux >/dev/null 2>&1 && echo TMUX_OK || echo TMUX_MISSING`;
+		const check = await sshRun(opts.sshTarget, checkCmd);
+		const checkOut = check.stdout.trim();
+		if (!checkOut.includes("OMPK_OK")) {
+			console.log(`  ⚠ ompk not found on ${opts.sshTarget} — skipping session launch. Install ompk on the target to enable this.`);
+			console.log(`✓ handoff complete (git only, no agent session)`);
+			return;
+		}
+		if (!checkOut.includes("TMUX_OK")) {
+			console.log(`  ⚠ tmux not found on ${opts.sshTarget} — skipping session launch. Install tmux on the target to enable this.`);
+			console.log(`✓ handoff complete (git only, no agent session)`);
+			return;
+		}
+
+		const launchCmd = [
+			`tmux kill-session -t ${sessionName} 2>/dev/null || true`,
+			`tmux new-session -d -s ${sessionName} -c "${remoteDirSsh}"`,
+			`tmux send-keys -t ${sessionName} 'ompk --cwd "${remoteDirSsh}"' Enter`,
+		].join(" && ");
+		const launch = await sshRun(opts.sshTarget, launchCmd);
+		if (launch.code !== 0) {
+			console.log(`  ⚠ failed to launch ompk session:\n${launch.stderr}`);
+			console.log(`✓ handoff complete (git ok, agent session launch failed)`);
+			return;
+		}
+
+		console.log(`✓ ompk session launched — attach on ${opts.sshTarget} with: tmux attach -t ${sessionName}`);
+	}
+
+	console.log(`✓ handoff complete`);
+}
+
 async function main(): Promise<void> {
 	const opts = parseArgs(process.argv);
 	const plan = await makePlan(opts);
@@ -385,7 +510,9 @@ async function main(): Promise<void> {
 		console.log("(status only — no transfer)");
 		return;
 	}
-	if (opts.direction === "push") {
+	if (opts.direction === "handoff") {
+		await handoff(opts, plan);
+	} else if (opts.direction === "push") {
 		await push(opts, plan);
 	} else {
 		await pull(opts, plan);
