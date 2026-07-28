@@ -23,49 +23,15 @@
  *   --once  run a single poll+cleanup pass and exit (smoke test)
  */
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-// Subpath imports keep the compiled gopk-ingest.exe free of the pi_natives
+// Subpath import keeps the compiled gopk-ingest.exe free of the pi_natives
 // native addon (which the pi-utils barrel eagerly loads). See session-state.ts.
-import { getAgentDir } from "@pk-nerdsaver-ai/pi-utils/dirs";
 import * as logger from "@pk-nerdsaver-ai/pi-utils/logger";
+import { resolveGopkClipsPaths } from "./paths";
 import { createGopkClipsHost, type GopkClipsHostState } from "./session-state";
 
 const POLL_INTERVAL_MS = 15_000;
 const CLEANUP_INTERVAL_MS = 600_000;
-
-/** Well-known config.json shared with the gopk-clips capture side. */
-function sharedConfigPath(): string {
-	if (process.platform === "win32") {
-		const base = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
-		return path.join(base, "gopk-clips", "config.json");
-	}
-	const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
-	return path.join(base, "gopk-clips", "config.json");
-}
-
-interface ResolvedPaths {
-	captureRoot: string;
-	ledgerPath: string;
-}
-
-/** Prefer setup's config.json; else the same defaults createGopkClipsHost uses. */
-function resolvePaths(): ResolvedPaths {
-	const agentRoot = path.join(getAgentDir(), "gopk-clips");
-	const fallback: ResolvedPaths = {
-		captureRoot: path.join(agentRoot, "capture"),
-		ledgerPath: path.join(agentRoot, "activity-ledger.sqlite"),
-	};
-	try {
-		const parsed = JSON.parse(fs.readFileSync(sharedConfigPath(), "utf8")) as Partial<ResolvedPaths>;
-		return {
-			captureRoot: parsed.captureRoot || fallback.captureRoot,
-			ledgerPath: parsed.ledgerPath || fallback.ledgerPath,
-		};
-	} catch {
-		return fallback;
-	}
-}
 
 function pidFilePath(captureRoot: string): string {
 	return path.join(captureRoot, "ingest.pid");
@@ -112,7 +78,9 @@ async function main(): Promise<void> {
 	const argv = process.argv.slice(2);
 	const stop = argv.includes("--stop");
 	const once = argv.includes("--once");
-	const { captureRoot, ledgerPath } = resolvePaths();
+	// Absolute and `~`-expanded, so the pid lock below can never land somewhere
+	// other than the capture root the host itself resolves.
+	const { captureRoot, ledgerPath } = resolveGopkClipsPaths();
 	fs.mkdirSync(captureRoot, { recursive: true });
 	const pidPath = pidFilePath(captureRoot);
 
@@ -137,7 +105,12 @@ async function main(): Promise<void> {
 
 	let host: GopkClipsHostState;
 	try {
-		host = createGopkClipsHost({ captureRoot, ledgerPath, pollIntervalMs: POLL_INTERVAL_MS, cleanupIntervalMs: CLEANUP_INTERVAL_MS });
+		host = createGopkClipsHost({
+			captureRoot,
+			ledgerPath,
+			pollIntervalMs: POLL_INTERVAL_MS,
+			cleanupIntervalMs: CLEANUP_INTERVAL_MS,
+		});
 	} catch (error) {
 		logger.warn("ingest daemon: failed to start", { error: String(error) });
 		process.exitCode = 1;

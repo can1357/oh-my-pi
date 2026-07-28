@@ -27,8 +27,7 @@ import { getAgentDir, getInstallId, logger } from "@pk-nerdsaver-ai/pi-utils";
 
 // Denied-app list and raw-clip retention live in a dependency-free module so
 // the standalone ingester can share them without importing this screenpipe
-// module; re-exported here for existing call sites.
-export { DENIED_APPLICATION_IDS, MAXIMUM_RAW_CLIP_RETENTION_MS } from "../gopk-clips/policy-constants";
+// module (which pulls in the pi-utils barrel and its native addon).
 import { DENIED_APPLICATION_IDS, MAXIMUM_RAW_CLIP_RETENTION_MS } from "../gopk-clips/policy-constants";
 
 export interface ScreenpipeSessionConfig {
