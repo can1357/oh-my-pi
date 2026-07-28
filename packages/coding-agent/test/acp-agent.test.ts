@@ -344,6 +344,10 @@ class FakeAgentSession {
 		return this.fastMode;
 	}
 
+	isFastModeActive(): boolean {
+		return this.fastMode;
+	}
+
 	setForcedToolChoice(toolName: string): void {
 		this.forcedToolChoice = toolName;
 	}

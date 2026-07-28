@@ -124,7 +124,12 @@ const modelSegment: StatusLineSegment = {
 		// use distinct colors that remain legible beside the model name.
 		let content = theme.fg("statusLineModel", withIcon(theme.icon.model, modelName));
 		if (fastModeIndicator) {
-			content += theme.fg(ctx.session.isFastModeEnabled() ? "warning" : "muted", fastModeIndicator);
+			// `isFastModeActive` (not `isFastModeEnabled`): the bolt reports whether
+			// fast mode applies to the NEXT REQUEST, so a scoped tier that does not
+			// match the current model's provider (e.g. `openai-only` on an Anthropic
+			// model) must read as off. Keying off the merely-configured tier lit the
+			// bolt on providers that never realize it, making the signal useless.
+			content += theme.fg(ctx.session.isFastModeActive() ? "warning" : "muted", fastModeIndicator);
 		}
 		if (ctx.session.isAdvisorActive()) {
 			content += theme.fg("success", "++");

@@ -217,6 +217,10 @@ class FakeAgentSession {
 		return this.fastMode;
 	}
 
+	isFastModeActive(): boolean {
+		return this.fastMode;
+	}
+
 	setForcedToolChoice(_toolName: string): void {}
 
 	async sendCustomMessage(_message: string, _options?: unknown): Promise<void> {}

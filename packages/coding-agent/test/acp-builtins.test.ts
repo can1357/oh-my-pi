@@ -27,6 +27,7 @@ interface FakeAcpBuiltinSession {
 	toggleFastMode(): boolean;
 	setFastMode(enabled: boolean): void;
 	isFastModeEnabled(): boolean;
+	isFastModeActive(): boolean;
 	setForcedToolChoice(toolName: string): void;
 	fetchUsageReports?: () => Promise<unknown>;
 	getAsyncJobSnapshot: (opts?: { recentLimit?: number }) => { running: unknown[]; recent: unknown[] } | null;
@@ -99,6 +100,9 @@ function createRuntime() {
 			this.fastMode = enabled;
 		},
 		isFastModeEnabled() {
+			return this.fastMode;
+		},
+		isFastModeActive() {
 			return this.fastMode;
 		},
 		setForcedToolChoice(toolName: string) {

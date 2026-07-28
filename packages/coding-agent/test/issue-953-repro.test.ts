@@ -12,6 +12,7 @@ function createCtx(usage: Partial<SegmentContext["usageStats"]>): SegmentContext
 		session: {
 			state: {},
 			isFastModeEnabled: () => false,
+			isFastModeActive: () => false,
 			modelRegistry: { isUsingOAuth: () => false },
 			sessionManager: undefined,
 		} as unknown as SegmentContext["session"],

@@ -31,6 +31,7 @@ function createCtx(overrides?: { pathMaxLength?: number; branch?: string | null 
 		session: {
 			state: {},
 			isFastModeEnabled: () => false,
+			isFastModeActive: () => false,
 			modelRegistry: { isUsingOAuth: () => false },
 			sessionManager: undefined,
 		} as unknown as SegmentContext["session"],
@@ -78,6 +79,7 @@ function createStatusLineSession(sessionName: string) {
 		getAsyncJobSnapshot: () => ({ running: [] }),
 		getCurrentModel: () => undefined,
 		isFastModeEnabled: () => false,
+		isFastModeActive: () => false,
 		sessionManager: {
 			getSessionName: () => sessionName,
 			getUsageStatistics: () => ({
