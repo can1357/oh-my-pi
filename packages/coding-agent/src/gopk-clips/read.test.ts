@@ -1,17 +1,48 @@
-// TZ is pinned before any Date work so the DST and local-hour assertions are
-// deterministic rather than dependent on the machine running the suite.
-// America/New_York: 2026-03-08 springs forward (23h day), 2026-11-01 falls
-// back (25h day).
-process.env.TZ = "America/New_York";
-
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type ActivityEvidence, SqliteActivityLedger } from "@pk-nerdsaver-ai/pi-activity-journal";
-import { floorToLocalHour, localDayWindow, localHourStarts, readActivitySummary, summarizeActivity } from "./read";
+import {
+	floorToLocalHour,
+	localDateOf,
+	localDayWindow,
+	localHourStarts,
+	readActivitySummary,
+	summarizeActivity,
+} from "./read";
 
 const HOUR = 3_600_000;
+
+// This file never assigns `process.env.TZ`. A process timezone can only be
+// changed once — Bun applies the first assignment and then ignores `delete`
+// and any later re-assignment — so setting it here would irreversibly re-zone
+// every sibling suite sharing this `bun test` process. Zone-dependent
+// assertions run in a child instead (see ./tz-probe-fixture.ts); everything
+// below is written to hold in ANY timezone.
+
+interface ZoneProbe {
+	zone: string;
+	dayHours: number;
+	markCount: number;
+	labels: number[];
+	markMinutes: number[];
+	marksAreFixpoints: boolean;
+	firstMarkCoversStart: boolean;
+}
+
+const FIXTURE = path.join(import.meta.dir, "tz-probe-fixture.ts");
+
+/** Measure one calendar day under `zone`, in a child process. */
+function probeZone(zone: string, date: string): ZoneProbe {
+	const run = Bun.spawnSync(["bun", FIXTURE, date], {
+		env: { ...process.env, TZ: zone },
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	if (run.exitCode !== 0) throw new Error(`probe ${zone} ${date} failed: ${run.stderr.toString()}`);
+	return JSON.parse(run.stdout.toString()) as ZoneProbe;
+}
 
 /** Minimal evidence row; only the fields the summarizer reads are meaningful. */
 function evidence(startedAt: number, endedAt: number, appId: string, digest?: string): ActivityEvidence {
@@ -32,85 +63,104 @@ function evidence(startedAt: number, endedAt: number, appId: string, digest?: st
 	};
 }
 
-describe("localDayWindow", () => {
+/** A six-hour window starting on a local hour mark — six buckets in any zone. */
+function sixHourWindow(): { startedAt: number; endedAt: number } {
+	const startedAt = floorToLocalHour(Date.parse("2026-07-27T12:00:00Z"));
+	return { startedAt, endedAt: startedAt + 6 * HOUR };
+}
+
+describe("localDayWindow / localHourStarts across timezones", () => {
+	// America/New_York: 2026-03-08 springs forward, 2026-11-01 falls back.
 	it("spans 24 hours on an ordinary day", () => {
-		const { startedAt, endedAt } = localDayWindow("2026-07-27");
-		expect((endedAt - startedAt) / HOUR).toBe(24);
-		expect(new Date(startedAt).getHours()).toBe(0);
+		const probe = probeZone("America/New_York", "2026-07-27");
+		expect(probe.dayHours).toBe(24);
+		expect(probe.markCount).toBe(24);
 	});
 
-	it("spans 23 hours across a spring-forward transition", () => {
-		const { startedAt, endedAt } = localDayWindow("2026-03-08");
-		expect((endedAt - startedAt) / HOUR).toBe(23);
+	it("spans 23 hours across a spring-forward transition and skips the lost hour", () => {
+		const probe = probeZone("America/New_York", "2026-03-08");
+		expect(probe.dayHours).toBe(23);
+		expect(probe.markCount).toBe(23);
+		expect(probe.labels).not.toContain(2);
 	});
 
-	it("spans 25 hours across a fall-back transition", () => {
-		const { startedAt, endedAt } = localDayWindow("2026-11-01");
-		expect((endedAt - startedAt) / HOUR).toBe(25);
+	it("spans 25 hours across a fall-back transition and keeps the repeated hour", () => {
+		const probe = probeZone("America/New_York", "2026-11-01");
+		expect(probe.dayHours).toBe(25);
+		expect(probe.markCount).toBe(25);
+		expect(probe.labels.filter(hour => hour === 1).length).toBe(2);
+	});
+
+	it("puts every bucket on a real local hour mark in half-hour-offset zones", () => {
+		// The bug this replaced floored to UTC hour boundaries, which land at
+		// :30 local in Asia/Kolkata (+5:30) and :45 in Asia/Kathmandu (+5:45).
+		for (const zone of ["Asia/Kolkata", "Asia/Kathmandu", "Australia/Adelaide"]) {
+			const probe = probeZone(zone, "2026-07-27");
+			expect({ zone, minutes: probe.markMinutes }).toEqual({ zone, minutes: [0] });
+			expect(probe.markCount).toBe(24);
+			expect(probe.marksAreFixpoints).toBe(true);
+		}
+	});
+
+	it("never emits a first mark that starts after the window it covers", () => {
+		for (const [zone, date] of [
+			["America/New_York", "2026-03-08"],
+			["Asia/Kolkata", "2026-07-27"],
+			["UTC", "2026-07-27"],
+			["Australia/Sydney", "2026-10-04"],
+		] as const) {
+			expect({ zone, ok: probeZone(zone, date).firstMarkCoversStart }).toEqual({ zone, ok: true });
+		}
 	});
 
 	it("rejects malformed and non-existent dates", () => {
 		expect(() => localDayWindow("27-07-2026")).toThrow();
 		expect(() => localDayWindow("2026-02-30")).toThrow();
+		expect(() => localDayWindow("")).toThrow();
 	});
-});
 
-describe("localHourStarts", () => {
-	it("emits one mark per local hour, all on a local hour boundary", () => {
-		const window = localDayWindow("2026-07-27");
-		const starts = localHourStarts(window);
-		expect(starts.length).toBe(24);
-		for (const start of starts) {
-			expect(new Date(start).getMinutes()).toBe(0);
-			expect(floorToLocalHour(start)).toBe(start);
+	it("round-trips localDateOf through localDayWindow", () => {
+		const today = localDateOf();
+		const { startedAt } = localDayWindow(today);
+		expect(localDateOf(startedAt)).toBe(today);
+	});
+
+	it("emits marks one hour apart, each a floorToLocalHour fixpoint", () => {
+		const starts = localHourStarts(sixHourWindow());
+		expect(starts.length).toBe(6);
+		for (let i = 0; i < starts.length; i++) {
+			expect(floorToLocalHour(starts[i] as number)).toBe(starts[i]);
+			if (i > 0) expect((starts[i] as number) - (starts[i - 1] as number)).toBe(HOUR);
 		}
-	});
-
-	it("emits 23 marks on the spring-forward day, skipping the lost hour", () => {
-		const starts = localHourStarts(localDayWindow("2026-03-08"));
-		expect(starts.length).toBe(23);
-		expect(starts.map(s => new Date(s).getHours())).not.toContain(2);
-	});
-
-	it("emits 25 marks on the fall-back day, keeping the repeated hour distinct", () => {
-		const starts = localHourStarts(localDayWindow("2026-11-01"));
-		expect(starts.length).toBe(25);
-		const ones = starts.filter(s => new Date(s).getHours() === 1);
-		expect(ones.length).toBe(2);
-		expect(ones[0]).not.toBe(ones[1]);
 	});
 });
 
 describe("summarizeActivity", () => {
 	it("returns an all-zero summary for no evidence", () => {
-		const window = localDayWindow("2026-07-27");
-		const summary = summarizeActivity([], window);
+		const summary = summarizeActivity([], sixHourWindow());
 		expect(summary.clipCount).toBe(0);
 		expect(summary.trackedMs).toBe(0);
 		expect(summary.apps).toEqual([]);
-		expect(summary.hours.length).toBe(24);
+		expect(summary.hours.length).toBe(6);
 		expect(summary.hours.every(hour => hour.trackedMs === 0)).toBe(true);
 	});
 
 	it("splits a window spanning an hour boundary across both hours", () => {
-		const window = localDayWindow("2026-07-27");
-		const tenAm = new Date(2026, 6, 27, 10).getTime();
-		// 09:58 -> 10:04: two minutes in hour 9, four in hour 10.
-		const summary = summarizeActivity([evidence(tenAm - 2 * 60_000, tenAm + 4 * 60_000, "code")], window);
+		const window = sixHourWindow();
+		const boundary = window.startedAt + 2 * HOUR;
+		// 2 minutes before the boundary, 4 after.
+		const summary = summarizeActivity([evidence(boundary - 2 * 60_000, boundary + 4 * 60_000, "code")], window);
 
 		expect(summary.clipCount).toBe(1);
 		expect(summary.trackedMs).toBe(6 * 60_000);
-		const nine = summary.hours.find(hour => hour.hourLabel === 9);
-		const ten = summary.hours.find(hour => hour.hourLabel === 10);
-		expect(nine?.trackedMs).toBe(2 * 60_000);
-		expect(ten?.trackedMs).toBe(4 * 60_000);
+		expect(summary.hours[1]?.trackedMs).toBe(2 * 60_000);
+		expect(summary.hours[2]?.trackedMs).toBe(4 * 60_000);
 		// Counted once overall, not once per bucket it touches.
 		expect(summary.apps).toEqual([["code", 6 * 60_000]]);
 	});
 
 	it("clips evidence to the requested window", () => {
-		const window = localDayWindow("2026-07-27");
-		// Starts 30m before local midnight, ends 30m after.
+		const window = sixHourWindow();
 		const summary = summarizeActivity(
 			[evidence(window.startedAt - 30 * 60_000, window.startedAt + 30 * 60_000, "code")],
 			window,
@@ -119,46 +169,37 @@ describe("summarizeActivity", () => {
 	});
 
 	it("ignores evidence entirely outside the window", () => {
-		const window = localDayWindow("2026-07-27");
+		const window = sixHourWindow();
 		const summary = summarizeActivity([evidence(window.endedAt + HOUR, window.endedAt + 2 * HOUR, "code")], window);
 		expect(summary.clipCount).toBe(0);
 		expect(summary.trackedMs).toBe(0);
 	});
 
-	it("keeps the two repeated 1am hours separate on a fall-back day", () => {
-		const window = localDayWindow("2026-11-01");
-		const [firstOne, secondOne] = localHourStarts(window).filter(s => new Date(s).getHours() === 1);
-		const summary = summarizeActivity(
-			[
-				evidence((firstOne as number) + 10 * 60_000, (firstOne as number) + 20 * 60_000, "code"),
-				evidence((secondOne as number) + 10 * 60_000, (secondOne as number) + 40 * 60_000, "comet"),
-			],
-			window,
-		);
-		const ones = summary.hours.filter(hour => hour.hourLabel === 1);
-		expect(ones.length).toBe(2);
-		expect(ones[0]?.trackedMs).toBe(10 * 60_000);
-		expect(ones[1]?.trackedMs).toBe(30 * 60_000);
+	it("conserves total time across bucket splits", () => {
+		const window = sixHourWindow();
+		// Spans the whole window and overhangs both ends.
+		const summary = summarizeActivity([evidence(window.startedAt - HOUR, window.endedAt + HOUR, "code")], window);
+		const bucketed = summary.hours.reduce((total, hour) => total + hour.trackedMs, 0);
+		expect(summary.trackedMs).toBe(window.endedAt - window.startedAt);
+		expect(bucketed).toBe(summary.trackedMs);
 	});
 
 	it("dedupes multi-line digests into one collapsed line", () => {
-		const window = localDayWindow("2026-07-27");
-		const tenAm = new Date(2026, 6, 27, 10).getTime();
+		const window = sixHourWindow();
 		const summary = summarizeActivity(
-			[evidence(tenAm, tenAm + 60_000, "code", "main.rs\n  main.rs  \nlib.rs\n")],
+			[evidence(window.startedAt, window.startedAt + 60_000, "code", "main.rs\n  main.rs  \nlib.rs\n")],
 			window,
 		);
-		expect(summary.hours.find(hour => hour.hourLabel === 10)?.digests).toEqual(["main.rs  ·  lib.rs"]);
+		expect(summary.hours[0]?.digests).toEqual(["main.rs  ·  lib.rs"]);
 	});
 
 	it("orders apps by tracked time, descending", () => {
-		const window = localDayWindow("2026-07-27");
-		const nineAm = new Date(2026, 6, 27, 9).getTime();
+		const window = sixHourWindow();
 		const summary = summarizeActivity(
 			[
-				evidence(nineAm, nineAm + 5 * 60_000, "comet"),
-				evidence(nineAm, nineAm + 20 * 60_000, "code"),
-				evidence(nineAm, nineAm + 10 * 60_000, "notion"),
+				evidence(window.startedAt, window.startedAt + 5 * 60_000, "comet"),
+				evidence(window.startedAt, window.startedAt + 20 * 60_000, "code"),
+				evidence(window.startedAt, window.startedAt + 10 * 60_000, "notion"),
 			],
 			window,
 		);
@@ -179,42 +220,38 @@ describe("readActivitySummary", () => {
 		await fs.rm(root, { recursive: true, force: true });
 	});
 
-	it("reports an absent ledger instead of creating one", () => {
-		const summary = readActivitySummary({ window: localDayWindow("2026-07-27"), ledgerPath });
+	it("reports an absent ledger instead of creating one", async () => {
+		const summary = readActivitySummary({ window: sixHourWindow(), ledgerPath });
 		expect(summary.ledgerPresent).toBe(false);
 		expect(summary.clipCount).toBe(0);
-		expect(summary.hours.length).toBe(24);
-	});
-
-	it("does not create the ledger file as a side effect of reading", async () => {
-		readActivitySummary({ window: localDayWindow("2026-07-27"), ledgerPath });
+		expect(summary.hours.length).toBe(6);
 		expect(await fs.exists(ledgerPath)).toBe(false);
 	});
 
 	it("reads an existing ledger without mutating it", async () => {
+		const window = sixHourWindow();
 		const writer = new SqliteActivityLedger(ledgerPath);
-		const tenAm = new Date(2026, 6, 27, 10).getTime();
-		writer.record(evidence(tenAm, tenAm + 15 * 60_000, "code", "main.rs"));
-		writer.record(evidence(tenAm + HOUR, tenAm + HOUR + 5 * 60_000, "comet"));
+		writer.record(evidence(window.startedAt, window.startedAt + 15 * 60_000, "code", "main.rs"));
+		writer.record(evidence(window.startedAt + HOUR, window.startedAt + HOUR + 5 * 60_000, "comet"));
 		writer.close();
 		const before = (await fs.stat(ledgerPath)).size;
 
-		const summary = readActivitySummary({ window: localDayWindow("2026-07-27"), ledgerPath });
+		const summary = readActivitySummary({ window, ledgerPath });
 		expect(summary.ledgerPresent).toBe(true);
 		expect(summary.clipCount).toBe(2);
 		expect(summary.trackedMs).toBe(20 * 60_000);
-		expect(summary.hours.find(hour => hour.hourLabel === 10)?.digests).toEqual(["main.rs"]);
+		expect(summary.hours[0]?.digests).toEqual(["main.rs"]);
 		expect((await fs.stat(ledgerPath)).size).toBe(before);
 	});
 
-	it("excludes rows outside the requested day", () => {
+	it("excludes rows outside the requested window", () => {
+		const window = sixHourWindow();
 		const writer = new SqliteActivityLedger(ledgerPath);
-		const tenAm = new Date(2026, 6, 27, 10).getTime();
-		writer.record(evidence(tenAm, tenAm + 10 * 60_000, "code"));
-		writer.record(evidence(tenAm - 24 * HOUR, tenAm - 24 * HOUR + 10 * 60_000, "comet"));
+		writer.record(evidence(window.startedAt, window.startedAt + 10 * 60_000, "code"));
+		writer.record(evidence(window.startedAt - 24 * HOUR, window.startedAt - 24 * HOUR + 10 * 60_000, "comet"));
 		writer.close();
 
-		const summary = readActivitySummary({ window: localDayWindow("2026-07-27"), ledgerPath });
+		const summary = readActivitySummary({ window, ledgerPath });
 		expect(summary.clipCount).toBe(1);
 		expect(summary.apps).toEqual([["code", 10 * 60_000]]);
 	});

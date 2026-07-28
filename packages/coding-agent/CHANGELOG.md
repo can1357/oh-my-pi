@@ -19,7 +19,7 @@
 
 ### Removed
 
-- Removed the `gopkClips.captureRoot`, `gopkClips.pollIntervalMs`, and `gopkClips.cleanupIntervalMs` settings. They configured the in-session ingest host, which no longer exists; the `gopk-ingest` daemon takes its paths from its own `config.json` and hardcodes its intervals, so these could not affect anything. Stale entries in an existing `settings.json` are ignored rather than rejected.
+- Removed the `gopkClips.captureRoot`, `gopkClips.pollIntervalMs`, and `gopkClips.cleanupIntervalMs` settings. They configured the in-session ingest host, which no longer exists; the `gopk-ingest` daemon takes its paths from its own `config.json` and hardcodes its intervals, so these could not affect anything. Stale entries left behind in an existing config (`~/.ompk/agent/config.yml`, or a project `.ompk/settings.json`) are ignored rather than rejected, since settings are read by schema path and unknown keys are never validated.
 
 ## [16.3.0] - 2026-07-23
 

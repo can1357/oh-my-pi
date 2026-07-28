@@ -8,15 +8,22 @@
  * `gopkClips.enabled`, the sampler wrote handoffs forever and the ledger — and
  * therefore the report and recall — stayed permanently empty.
  *
- * This daemon runs the exact same host (poll handoffs -> sanitizing ingest ->
- * retention purge) as a standalone, lifecycle-independent process that setup
- * autostarts alongside the sampler. No duplicated ingest/retention logic: it
- * reuses `createGopkClipsHost` wholesale. The agent-session host remains as an
- * optional extra consumer for in-session recall.
+ * This daemon runs that same host (poll handoffs -> sanitizing ingest ->
+ * retention purge) as a standalone, lifecycle-independent process, reusing
+ * `createGopkClipsHost` wholesale rather than duplicating the logic.
+ *
+ * It is now the ONLY ingester. The agent-session host was removed: two
+ * consumers raced to unlink the same handoff files and contended for the
+ * ledger's write lock. Sessions read the ledger (see ./read.ts and the
+ * `activity` tool); they never drain the queue. Do not reintroduce a second
+ * caller of `createGopkClipsHost`.
+ *
+ * Nothing autostarts this yet — that gap is tracked separately. If it is not
+ * running, the sampler keeps writing handoffs and the ledger stops growing.
  *
  * Single instance per ledger via an `ingest.pid` lock next to the capture
  * root; graceful shutdown on SIGINT/SIGTERM. Paths come from the shared
- * gopk-clips config.json when present, else the historical agent-dir default.
+ * gopk-clips config.json when present, else the agent-dir default.
  *
  * Usage: bun packages/coding-agent/src/gopk-clips/daemon.ts [--stop] [--once]
  *   --stop  terminate a running daemon via its pid file
