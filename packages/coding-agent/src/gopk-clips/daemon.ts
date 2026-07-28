@@ -68,7 +68,25 @@ function pidFilePath(captureRoot: string): string {
 	return path.join(captureRoot, "ingest.pid");
 }
 
-/** The pid recorded in the lock when that process is still alive, else undefined. */
+/**
+ * On Windows, confirm the pid is a bun process (our daemon runs as `bun run`),
+ * so a recycled pid from a stale lock after a reboot is not mistaken for a
+ * live daemon and doesn't block restart. On other platforms, existence stands.
+ */
+function isOurProcess(pid: number): boolean {
+	if (process.platform !== "win32") return true;
+	try {
+		const result = Bun.spawnSync(["tasklist", "/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], {
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		return result.stdout.toString().toLowerCase().includes("bun.exe");
+	} catch {
+		return true;
+	}
+}
+
+/** The pid recorded in the lock when that process is still alive AND ours, else undefined. */
 function readAlivePid(pidPath: string): number | undefined {
 	let pid: number;
 	try {
@@ -79,10 +97,10 @@ function readAlivePid(pidPath: string): number | undefined {
 	if (!Number.isInteger(pid) || pid <= 0) return undefined;
 	try {
 		process.kill(pid, 0);
-		return pid;
 	} catch {
 		return undefined;
 	}
+	return isOurProcess(pid) ? pid : undefined;
 }
 
 async function main(): Promise<void> {

@@ -9,9 +9,31 @@
  *   bun src/gopk-clips/recall-cli.ts [--date YYYY-MM-DD] [--ledger <path>]
  *     [--digests] [--json]
  */
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { type ActivityEvidence, SqliteActivityLedger } from "@pk-nerdsaver-ai/pi-activity-journal";
 import { getAgentDir } from "@pk-nerdsaver-ai/pi-utils";
+
+/**
+ * Resolve the ledger path the always-on daemon actually writes: prefer the
+ * shared gopk-clips config.json (so a custom captureRoot / profile lines up),
+ * fall back to the agent-dir default. Keeps recall pointed at the same ledger
+ * as the report and the daemon regardless of PI_CONFIG_DIR/profile.
+ */
+function resolveLedgerPath(): string {
+	const fallback = path.join(getAgentDir(), "gopk-clips", "activity-ledger.sqlite");
+	const configPath =
+		process.platform === "win32"
+			? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "gopk-clips", "config.json")
+			: path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "gopk-clips", "config.json");
+	try {
+		const parsed = JSON.parse(fs.readFileSync(configPath, "utf8")) as { ledgerPath?: string };
+		return parsed.ledgerPath || fallback;
+	} catch {
+		return fallback;
+	}
+}
 
 interface HourBucket {
 	readonly hour: number;
@@ -25,7 +47,7 @@ function parseArgs(argv: string[]): { date: string; ledgerPath: string; digests:
 	const localDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 	const options = {
 		date: localDate,
-		ledgerPath: path.join(getAgentDir(), "gopk-clips", "activity-ledger.sqlite"),
+		ledgerPath: resolveLedgerPath(),
 		digests: false,
 		json: false,
 	};
