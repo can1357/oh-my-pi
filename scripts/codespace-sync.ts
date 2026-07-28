@@ -402,9 +402,14 @@ function sshSafePath(p: string): string {
 }
 
 /**
- * GitHub-branch handoff: commit everything locally, force-push to handoff/<node>
+ * GitHub-branch handoff: commit everything locally, push to handoff/<node>
  * on origin, then SSH to the target and clone-or-pull that branch. When --launch
  * is passed, also spawns an ompk agent session on the target inside tmux.
+ *
+ * For large repos where `git push` is slow (1GB+ .git), this uses a fast-path
+ * that creates a patch of just the new commits and applies it on the remote
+ * via SSH, skipping the push entirely. The remote must already have the repo
+ * cloned for the fast path.
  */
 async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void> {
 	const branch = buildHandoffBranch(opts.sshTarget);
@@ -427,45 +432,72 @@ async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void> {
 	const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
 	console.log("→ commit (allow-empty)");
 	const commitRes = await direct(["git", "commit", "-m", `handoff: ${ts}`, "--allow-empty"], { cwd: plan.localRepo });
-	// exit 0 = committed, exit 1 = nothing to commit — both ok.
 	if (commitRes.code !== 0 && commitRes.code !== 1) {
 		throw new Error(`git commit failed:\n${commitRes.stderr}`);
 	}
 
-	// 3. Force-push current HEAD to handoff/<node> on origin.
-	console.log(`→ push to origin/${branch} (force)`);
-	const pushRes = await direct(["git", "push", "--force", "origin", `HEAD:${branch}`], { cwd: plan.localRepo });
-	if (pushRes.code !== 0) {
-		throw new Error(`git push failed:\n${pushRes.stderr}`);
-	}
-
-	// 4. SSH to target: clone if missing, then fetch + checkout the handoff branch.
+	// 3. Check if the target already has the repo cloned.
 	console.log(`→ SSH to ${opts.sshTarget}: check if ${opts.remoteDir} exists`);
 	const probe = await sshRun(opts.sshTarget, `test -d "${remoteDirSsh}/.git" && echo EXISTS || echo FRESH`);
 	if (probe.code !== 0) {
 		throw new Error(`cannot reach ${opts.sshTarget}:\n${probe.stderr}`);
 	}
 
-	if (probe.stdout.trim() === "FRESH") {
-		console.log(`→ clone ${remoteUrl} → ${opts.remoteDir}`);
-		const cloneCmd = `mkdir -p "$(dirname "${remoteDirSsh}")" && git clone "${remoteUrl}" "${remoteDirSsh}"`;
-		const clone = await sshRun(opts.sshTarget, cloneCmd);
-		if (clone.code !== 0) {
-			throw new Error(`remote clone failed:\n${clone.stderr}\n${clone.stdout}`);
-		}
-	}
+	const remoteExists = probe.stdout.trim() === "EXISTS";
 
-	console.log(`→ fetch + checkout ${branch} on ${opts.sshTarget}`);
-	const syncCmd = `cd "${remoteDirSsh}" && git fetch origin ${branch} && git checkout -B ${branch} origin/${branch} && git reset --hard origin/${branch}`;
-	const sync = await sshRun(opts.sshTarget, syncCmd);
-	if (sync.code !== 0) {
-		throw new Error(`remote sync failed:\n${sync.stderr}\n${sync.stdout}`);
+	if (remoteExists) {
+		// FAST PATH: The remote already has the repo. Instead of pushing the
+		// entire branch to GitHub (slow for large repos — git push negotiates
+		// and re-sends objects even if the remote already has them), create a
+		// patch of just the new commits and pipe it over SSH to `git am`.
+		// This only transfers the diff, not the full object database.
+		console.log(`→ fast-path: patch over SSH (skipping slow git push)`);
+
+		const remoteHeadRes = await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git rev-parse HEAD 2>/dev/null || echo NONE`);
+		const remoteHead = remoteHeadRes.stdout.trim();
+
+		if (remoteHead !== "NONE" && remoteHead.length === 40) {
+			// Create a patch from the remote HEAD to our current HEAD
+			const patchRes = await direct(["git", "format-patch", "--stdout", remoteHead + "..HEAD"], { cwd: plan.localRepo });
+			if (patchRes.code === 0 && patchRes.stdout.length > 0) {
+				const localHeadRes = await direct(["git", "rev-parse", "--short", "HEAD"], { cwd: plan.localRepo });
+				console.log(`  patch: ${patchRes.stdout.length} bytes (${remoteHead.slice(0, 8)}..${localHeadRes.stdout.trim()})`);
+
+				// Apply the patch on the remote via SSH stdin
+				const applyProc = Bun.spawn({
+					cmd: [...buildSshArgv(), opts.sshTarget, `cd "${remoteDirSsh}" && git am --abort 2>/dev/null; git checkout -B ${branch} 2>/dev/null; git am --3way`],
+					stdin: new TextEncoder().encode(patchRes.stdout),
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				const [applyCode, applyOut, applyErr] = await Promise.all([
+					applyProc.exited,
+					applyProc.stdout ? new Response(applyProc.stdout).text() : "",
+					applyProc.stderr ? new Response(applyProc.stderr).text() : "",
+				]);
+				if (applyCode !== 0) {
+					console.log(`  ⚠ patch apply failed, falling back to git push`);
+					await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git am --abort 2>/dev/null`);
+					await gitPushFallback(opts, plan, branch, remoteUrl, remoteDirSsh);
+				} else {
+					console.log(`✓ patch applied on ${opts.sshTarget}:${opts.remoteDir} (branch ${branch})`);
+				}
+			} else {
+				console.log(`  no new commits — remote is already up to date`);
+				await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git checkout -B ${branch} 2>/dev/null`);
+			}
+		} else {
+			console.log(`  cannot determine remote HEAD, falling back to git push`);
+			await gitPushFallback(opts, plan, branch, remoteUrl, remoteDirSsh);
+		}
+	} else {
+		// SLOW PATH: Remote doesn't have the repo yet — push to GitHub, then clone.
+		await gitPushFallback(opts, plan, branch, remoteUrl, remoteDirSsh);
 	}
 
 	console.log(`✓ git handoff complete — ${opts.sshTarget}:${opts.remoteDir} on branch ${branch}`);
-	console.log(`  branch stays open on origin/${branch} until merged or manually deleted`);
 
-	// 5. Optionally launch an ompk agent session on the target inside tmux.
+	// 4. Optionally launch an ompk agent session on the target inside tmux.
 	if (opts.launch) {
 		const sessionName = `ompk-${repoName}`.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 50);
 		console.log(`→ launch ompk session on ${opts.sshTarget} (tmux: ${sessionName})`);
@@ -474,12 +506,12 @@ async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void> {
 		const check = await sshRun(opts.sshTarget, checkCmd);
 		const checkOut = check.stdout.trim();
 		if (!checkOut.includes("OMPK_OK")) {
-			console.log(`  ⚠ ompk not found on ${opts.sshTarget} — skipping session launch. Install ompk on the target to enable this.`);
+			console.log(`  ⚠ ompk not found on ${opts.sshTarget} — skipping session launch.`);
 			console.log(`✓ handoff complete (git only, no agent session)`);
 			return;
 		}
 		if (!checkOut.includes("TMUX_OK")) {
-			console.log(`  ⚠ tmux not found on ${opts.sshTarget} — skipping session launch. Install tmux on the target to enable this.`);
+			console.log(`  ⚠ tmux not found on ${opts.sshTarget} — skipping session launch.`);
 			console.log(`✓ handoff complete (git only, no agent session)`);
 			return;
 		}
@@ -500,6 +532,32 @@ async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void> {
 	}
 
 	console.log(`✓ handoff complete`);
+}
+
+/** Fallback: push to GitHub, then fetch + checkout on the remote. */
+async function gitPushFallback(opts: SyncOptions, plan: PlanResult, branch: string, remoteUrl: string, remoteDirSsh: string): Promise<void> {
+	console.log(`→ push to origin/${branch} (force)`);
+	const pushRes = await direct(["git", "push", "--force", "origin", `HEAD:${branch}`], { cwd: plan.localRepo });
+	if (pushRes.code !== 0) {
+		throw new Error(`git push failed:\n${pushRes.stderr}`);
+	}
+
+	const probe = await sshRun(opts.sshTarget, `test -d "${remoteDirSsh}/.git" && echo EXISTS || echo FRESH`);
+	if (probe.stdout.trim() === "FRESH") {
+		console.log(`→ clone ${remoteUrl} → ${opts.remoteDir}`);
+		const cloneCmd = `mkdir -p "$(dirname "${remoteDirSsh}")" && git clone "${remoteUrl}" "${remoteDirSsh}"`;
+		const clone = await sshRun(opts.sshTarget, cloneCmd);
+		if (clone.code !== 0) {
+			throw new Error(`remote clone failed:\n${clone.stderr}\n${clone.stdout}`);
+		}
+	}
+
+	console.log(`→ fetch + checkout ${branch} on ${opts.sshTarget}`);
+	const syncCmd = `cd "${remoteDirSsh}" && git fetch origin ${branch} && git checkout -B ${branch} origin/${branch} && git reset --hard origin/${branch}`;
+	const sync = await sshRun(opts.sshTarget, syncCmd);
+	if (sync.code !== 0) {
+		throw new Error(`remote sync failed:\n${sync.stderr}\n${sync.stdout}`);
+	}
 }
 
 /**
