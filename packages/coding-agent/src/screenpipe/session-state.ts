@@ -25,23 +25,11 @@ import {
 } from "@pk-nerdsaver-ai/pi-screenpipe-bridge";
 import { getAgentDir, getInstallId, logger } from "@pk-nerdsaver-ai/pi-utils";
 
-/**
- * Applications whose windows must never become activity evidence, even in
- * redacted-metadata form. Matched against screenpipe's lowercased process
- * name by the gopk ingestion policy.
- */
-export const DENIED_APPLICATION_IDS: readonly string[] = [
-	"1password",
-	"bitwarden",
-	"dashlane",
-	"keepassxc",
-	"keeper",
-	"lastpass",
-	"protonpass",
-];
-
-/** How long a rejected clip's raw pointer may linger before retention purges it. */
-export const MAXIMUM_RAW_CLIP_RETENTION_MS = 10 * 60_000;
+// Denied-app list and raw-clip retention live in a dependency-free module so
+// the standalone ingester can share them without importing this screenpipe
+// module; re-exported here for existing call sites.
+export { DENIED_APPLICATION_IDS, MAXIMUM_RAW_CLIP_RETENTION_MS } from "../gopk-clips/policy-constants";
+import { DENIED_APPLICATION_IDS, MAXIMUM_RAW_CLIP_RETENTION_MS } from "../gopk-clips/policy-constants";
 
 export interface ScreenpipeSessionConfig {
 	readonly sessionId: string;

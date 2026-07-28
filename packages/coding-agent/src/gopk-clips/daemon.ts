@@ -25,7 +25,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getAgentDir, logger } from "@pk-nerdsaver-ai/pi-utils";
+// Subpath imports keep the compiled gopk-ingest.exe free of the pi_natives
+// native addon (which the pi-utils barrel eagerly loads). See session-state.ts.
+import { getAgentDir } from "@pk-nerdsaver-ai/pi-utils/dirs";
+import * as logger from "@pk-nerdsaver-ai/pi-utils/logger";
 import { createGopkClipsHost, type GopkClipsHostState } from "./session-state";
 
 const POLL_INTERVAL_MS = 15_000;
@@ -80,7 +83,9 @@ function isOurProcess(pid: number): boolean {
 			stdout: "pipe",
 			stderr: "ignore",
 		});
-		return result.stdout.toString().toLowerCase().includes("bun.exe");
+		// bun.exe (dev) or gopk-ingest.exe / gopk-clips.exe (compiled).
+		const image = result.stdout.toString().toLowerCase();
+		return image.includes("bun.exe") || image.includes("gopk");
 	} catch {
 		return true;
 	}

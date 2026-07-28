@@ -34,6 +34,7 @@
 	},
 	"scripts": {
 		"build": "bun scripts/build-binary.ts",
+		"build:ingest-exe": "bun build --compile --target=bun-windows-x64 src/gopk-clips/daemon.ts --outfile dist/gopk-ingest.exe",
 		"gen:docs": "bun scripts/generate-docs-index.ts --generate",
 		"gen:docs:reset": "bun scripts/generate-docs-index.ts --reset",
 		"gen:mupdf": "bun scripts/embed-mupdf-wasm.ts",

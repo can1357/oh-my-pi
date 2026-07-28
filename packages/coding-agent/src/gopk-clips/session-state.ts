@@ -34,8 +34,13 @@ import {
 	SqliteActivityLedger,
 } from "@pk-nerdsaver-ai/pi-activity-journal";
 import type { ConsentRecord } from "@pk-nerdsaver-ai/pi-context-policy";
-import { getAgentDir, getInstallId, logger } from "@pk-nerdsaver-ai/pi-utils";
-import { DENIED_APPLICATION_IDS, MAXIMUM_RAW_CLIP_RETENTION_MS } from "../screenpipe/session-state";
+// Subpath imports (not the barrel): the pi-utils barrel eagerly loads the
+// pi_natives native addon, which can't bundle into a compiled single-file exe
+// (gopk-ingest.exe). dirs.ts / logger.ts are native-free, so importing narrowly
+// keeps this module — and the standalone ingester built from it — self-contained.
+import { getAgentDir, getInstallId } from "@pk-nerdsaver-ai/pi-utils/dirs";
+import * as logger from "@pk-nerdsaver-ai/pi-utils/logger";
+import { DENIED_APPLICATION_IDS, MAXIMUM_RAW_CLIP_RETENTION_MS } from "./policy-constants";
 
 export interface GopkClipsHostConfig {
 	/**

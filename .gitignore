@@ -122,3 +122,5 @@ mcps/
 # Local review/triage scratch worktrees (agent audit workflows)
 .review-scratch/
 .triage-scratch/
+
+packages/coding-agent/dist/
