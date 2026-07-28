@@ -4610,15 +4610,17 @@ export const SETTINGS_SCHEMA = {
 				"Ingest sanitized activity derivatives dropped by the gopk-clips Context Mode daemon into the local ledger (opt-in, local-only)",
 		},
 	},
+	// No default on purpose: unset means <agentDir>/gopk-clips/capture, which
+	// tracks PI_CONFIG_DIR/profile overrides instead of hardcoding a home path.
 	"gopkClips.captureRoot": {
 		type: "string",
-		default: "~/.omp/agent/gopk-clips/capture",
+		default: undefined,
 		ui: {
 			tab: "memory",
 			group: "Gopk Clips",
 			label: "Capture Root",
 			description:
-				"gopk-clips capture root; the handoff drop lives at <root>/journal-handoff and derivative pointers must resolve under it",
+				"gopk-clips capture root (default: <agent dir>/gopk-clips/capture); the handoff drop lives at <root>/journal-handoff and derivative pointers must resolve under it",
 		},
 	},
 	"gopkClips.pollIntervalMs": {

@@ -1984,10 +1984,11 @@ export class AgentSession {
 	// from starting, and the stack is loaded dynamically for the same
 	// private-workspace-dependency reason.
 	#startGopkClipsHost(): void {
+		const captureRoot = this.settings.get("gopkClips.captureRoot") as string | undefined;
 		const config = {
-			captureRoot: this.settings.get("gopkClips.captureRoot") as string,
 			pollIntervalMs: this.settings.get("gopkClips.pollIntervalMs") as number,
 			cleanupIntervalMs: this.settings.get("gopkClips.cleanupIntervalMs") as number,
+			...(captureRoot ? { captureRoot } : {}),
 		};
 		this.#gopkClipsHostReady = import("../gopk-clips/session-state")
 			.then(({ createGopkClipsHost }) => {

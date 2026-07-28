@@ -42,8 +42,9 @@ export interface GopkClipsHostConfig {
 	 * The capture daemon's root directory. The handoff drop lives at
 	 * `<captureRoot>/journal-handoff`, and manifest / raw-clip pointers inside
 	 * derivatives must resolve under this root or the sink rejects them.
+	 * Unset means `<agentDir>/gopk-clips/capture`.
 	 */
-	readonly captureRoot: string;
+	readonly captureRoot?: string;
 	readonly pollIntervalMs: number;
 	readonly cleanupIntervalMs: number;
 	/** Test seam; defaults to `<agentDir>/gopk-clips/activity-ledger.sqlite`. */
@@ -85,7 +86,9 @@ export function createGopkClipsHost(
 	hostLogger: GopkClipsHostLogger = logger,
 ): GopkClipsHostState {
 	const installId = getInstallId();
-	const captureRoot = path.resolve(expandHomePath(config.captureRoot));
+	const captureRoot = path.resolve(
+		config.captureRoot ? expandHomePath(config.captureRoot) : path.join(getAgentDir(), "gopk-clips", "capture"),
+	);
 	const handoffDir = path.join(captureRoot, HANDOFF_DIR_NAME);
 	fs.mkdirSync(handoffDir, { recursive: true });
 	const ledgerPath = config.ledgerPath ?? path.join(getAgentDir(), "gopk-clips", "activity-ledger.sqlite");

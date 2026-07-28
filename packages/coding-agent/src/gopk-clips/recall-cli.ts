@@ -48,6 +48,7 @@ function parseArgs(argv: string[]): { date: string; ledgerPath: string; digests:
 }
 
 function formatMinutes(ms: number): string {
+	if (ms <= 0) return "0m";
 	const minutes = ms / 60_000;
 	if (minutes >= 60) return `${(minutes / 60).toFixed(1)}h`;
 	return `${Math.max(1, Math.round(minutes))}m`;
