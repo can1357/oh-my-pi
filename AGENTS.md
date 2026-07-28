@@ -77,8 +77,8 @@ Test externally observable contracts: behavior, output shape, transitions, error
 
 Package changelogs live at `packages/*/CHANGELOG.md`. Add entries only under `## [Unreleased]`; released sections are immutable. Section order: `Breaking Changes`, `Added`, `Changed`, `Fixed`, `Removed`. Do not flag ordering/formatting in reviews; release tooling normalizes it.
 
-- Internal issue: `Fixed foo ([#123](https://github.com/can1357/oh-my-pi/issues/123)).`
-- External contribution: `Added X ([#456](https://github.com/can1357/oh-my-pi/pull/456) by [@user](https://github.com/user)).`
+- Internal issue: `Fixed foo ([#123](https://github.com/kingkillery/oh-my-pk/issues/123)).`
+- External contribution: `Added X ([#456](https://github.com/kingkillery/oh-my-pk/pull/456) by [@user](https://github.com/user)).`
 
 ## Releasing
 
