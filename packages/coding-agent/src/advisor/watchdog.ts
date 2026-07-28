@@ -31,7 +31,7 @@ export function formatAdvisorContextPrompt(
 }
 
 /**
- * Discover and load WATCHDOG.md files walking up from cwd, project .omp folder, and user agent dir.
+ * Discover and load WATCHDOG.md files walking up from cwd, project .ompk folder, and user agent dir.
  * Returns formatted watchdog file blocks ready to be appended to the advisor system prompt.
  */
 export async function discoverWatchdogFiles(cwd: string, agentDir?: string): Promise<string[]> {
@@ -47,12 +47,12 @@ export async function discoverWatchdogFiles(cwd: string, agentDir?: string): Pro
 
 	const candidates = new Set<string>();
 
-	// 1. User level: ~/.omp/WATCHDOG.md (or active profile agent dir)
+	// 1. User level: ~/.ompk/WATCHDOG.md (or active profile agent dir)
 	if (resolvedAgentDir) {
 		candidates.add(path.resolve(resolvedAgentDir, "WATCHDOG.md"));
 	}
 
-	// 2. Project levels (both standalone and native config .omp/): walk up from cwd to repoRoot / home
+	// 2. Project levels (both standalone and native config .ompk/): walk up from cwd to repoRoot / home
 	let current = cwd;
 	while (true) {
 		candidates.add(path.resolve(current, ".ompk", "WATCHDOG.md"));
