@@ -502,6 +502,17 @@ async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void> {
 	console.log(`✓ handoff complete`);
 }
 
+/**
+ * Check if the repo has a GitHub `origin` remote. When it does, `push` can
+ * use the fast GitHub-branch handoff instead of the slow bundle+tar transport.
+ */
+async function hasGitHubOrigin(cwd: string): Promise<boolean> {
+	const r = await direct(["git", "remote", "get-url", "origin"], { cwd });
+	if (r.code !== 0) return false;
+	const url = r.stdout.trim();
+	return url.includes("github.com") || url.startsWith("git@") || url.startsWith("https://");
+}
+
 async function main(): Promise<void> {
 	const opts = parseArgs(process.argv);
 	const plan = await makePlan(opts);
@@ -513,7 +524,16 @@ async function main(): Promise<void> {
 	if (opts.direction === "handoff") {
 		await handoff(opts, plan);
 	} else if (opts.direction === "push") {
-		await push(opts, plan);
+		// Auto-redirect push → handoff when origin is a GitHub remote.
+		// The GitHub-branch handoff is much faster than bundle+tar because
+		// it only pushes the delta to GitHub (which already has most of the
+		// history) instead of transferring the entire repo over SSH.
+		if (await hasGitHubOrigin(plan.localRepo)) {
+			console.log("→ push → handoff (origin is a GitHub remote, using fast GitHub-branch transport)");
+			await handoff(opts, plan);
+		} else {
+			await push(opts, plan);
+		}
 	} else {
 		await pull(opts, plan);
 	}
