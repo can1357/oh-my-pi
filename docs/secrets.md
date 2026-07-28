@@ -32,10 +32,10 @@ Two modes control what happens to each secret:
 
 Define custom secret entries in YAML. Two locations are checked:
 
-| Level   | Path                       | Purpose                     |
-| ------- | -------------------------- | --------------------------- |
-| Global  | `~/.omp/agent/secrets.yml` | Secrets across all projects |
-| Project | `<cwd>/.omp/secrets.yml`   | Project-specific secrets    |
+| Level   | Path                        | Purpose                     |
+| ------- | --------------------------- | --------------------------- |
+| Global  | `~/.ompk/agent/secrets.yml` | Secrets across all projects |
+| Project | `<cwd>/.ompk/secrets.yml`   | Project-specific secrets    |
 
 Project entries override global entries with matching `content`.
 
