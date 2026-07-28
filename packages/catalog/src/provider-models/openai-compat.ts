@@ -4775,6 +4775,81 @@ export function veniceModelManagerOptions(
 		},
 	});
 }
+// ---------------------------------------------------------------------------
+// Requesty
+// ---------------------------------------------------------------------------
+
+export interface RequestyModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+const REQUESTY_BASE_URL = "https://router.requesty.ai/v1";
+
+function toPricePerMillionTokens(value: unknown, fallback = 0): number {
+	const num = toNumber(value);
+	return num !== undefined && num >= 0 ? num * 1_000_000 : fallback;
+}
+
+// Requesty namespaces ids by upstream provider, so Anthropic models are not
+// always `anthropic/`-prefixed (e.g. `bedrock/claude-sonnet-4@us-west-2`).
+function isRequestyAnthropicModel(modelId: string, ownedBy?: string): boolean {
+	const id = modelId.toLowerCase();
+	const owner = ownedBy?.toLowerCase() ?? "";
+	return id.includes("anthropic") || id.includes("claude") || owner.includes("anthropic") || owner.includes("claude");
+}
+
+export function requestyModelManagerOptions(config?: RequestyModelManagerConfig): ModelManagerOptions<Api> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? REQUESTY_BASE_URL;
+	const references = createBundledReferenceMap<Api>("requesty");
+	return {
+		providerId: "requesty",
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels<Api>({
+				api: "openai-completions",
+				provider: "requesty",
+				baseUrl,
+				apiKey,
+				mapModel: (entry, defaults) => {
+					const reference = references.get(defaults.id);
+					const model = mapWithBundledReference(entry, defaults, reference);
+					const ownedBy = typeof entry.owned_by === "string" ? entry.owned_by : undefined;
+					const api: Api = isRequestyAnthropicModel(defaults.id, ownedBy)
+						? "anthropic-messages"
+						: "openai-completions";
+					const cost = {
+						input: toPricePerMillionTokens(entry.input_price, reference?.cost.input ?? 0),
+						output: toPricePerMillionTokens(entry.output_price, reference?.cost.output ?? 0),
+						cacheRead: toPricePerMillionTokens(entry.cached_price, reference?.cost.cacheRead ?? 0),
+						cacheWrite: toPricePerMillionTokens(entry.caching_price, reference?.cost.cacheWrite ?? 0),
+					};
+					return {
+						...model,
+						api,
+						name: typeof entry.name === "string" && entry.name.length > 0 ? entry.name : model.name,
+						reasoning: entry.supports_reasoning === true || (reference?.reasoning ?? false),
+						input:
+							entry.supports_vision === true || (reference?.input.includes("image") ?? false)
+								? ["text", "image"]
+								: ["text"],
+						cost,
+						contextWindow: toPositiveNumber(
+							entry.context_window,
+							reference?.contextWindow ?? defaults.contextWindow ?? 128000,
+						),
+						maxTokens: toPositiveNumber(
+							entry.max_output_tokens,
+							reference?.maxTokens ?? defaults.maxTokens ?? 4096,
+						),
+					};
+				},
+				fetch: config?.fetch,
+			}),
+	};
+}
 
 // ---------------------------------------------------------------------------
 // 14.5 Baseten
@@ -7913,6 +7988,15 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 	}),
 	// --- Modular ---
 	openAiCompletionsDescriptor("modular", "modular", "https://api.modular.com/v1"),
+	// --- Requesty ---
+	openAiCompletionsDescriptor("requesty", "requesty", REQUESTY_BASE_URL, {
+		resolveApi: modelId => {
+			if (isRequestyAnthropicModel(modelId)) {
+				return { api: "anthropic-messages" as const, baseUrl: REQUESTY_BASE_URL };
+			}
+			return { api: "openai-completions" as const, baseUrl: REQUESTY_BASE_URL };
+		},
+	}),
 ];
 /** All provider descriptors for models.dev data mapping in generate-models.ts. */
 export const MODELS_DEV_PROVIDER_DESCRIPTORS: readonly ModelsDevProviderDescriptor[] = [
