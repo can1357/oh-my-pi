@@ -1311,8 +1311,8 @@ export interface PtyStartOptions {
 export declare function readImageFromClipboard(): Promise<ClipboardImage | undefined | null>
 
 /**
- * Render one snapcompact frame: print pre-normalized text onto a
- * `size`-wide bitmap and encode it as PNG.
+ * Render one snapcompact frame on a libuv worker: print pre-normalized text
+ * onto a `size`-wide bitmap and encode it as PNG.
  *
  * The bitmap height hugs the rows the text actually occupies
  * (`usedRows * lineRepeat * cellHeight`), so a partially filled frame never
@@ -1324,11 +1324,11 @@ export declare function readImageFromClipboard(): Promise<ClipboardImage | undef
  * requested cell box; `columns: 2` flows pre-wrapped newline-separated lines
  * down two newspaper columns. `U+000E`/`U+000F` in `text` toggle dim-gray ink
  * spans without occupying a cell.
- * Returns the PNG encoded as base64, created as a one-byte (Latin-1) JS
- * string straight from native code — no `Uint8Array` hop or JS-side
- * re-encode.
+ * Returns a promise for the PNG encoded as base64, created as a one-byte
+ * (Latin-1) JS string straight from native code — no `Uint8Array` hop or
+ * JS-side re-encode.
  */
-export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): string
+export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
 
 /**
  * Search content for a pattern (one-shot, compiles pattern each time).
@@ -1378,6 +1378,8 @@ export interface SearchResult {
   /** Error message, if any. */
   error?: string
 }
+
+export declare function setHangulCompatJamoWidthOverride(value: number): void
 
 /** Options for executing a shell command via brush-core. */
 export interface ShellExecuteOptions {
@@ -1439,18 +1441,6 @@ export interface ShellRunResult {
    */
   minimized?: MinimizerResult
 }
-
-/**
- * Runtime override for Hangul Compatibility Jamo (U+3131..=U+318E) cell width.
- *   0 = unset → platform default (macOS: narrow 1 cell; otherwise UAX#11)
- *   1 = force narrow (1 cell)
- *   2 = force wide (2 cells)
- *   3 = force Unicode width (no correction)
- * The actual width is decided by the *client* terminal, not the host OS, so it
- * is resolved at runtime from the terminal identity (see packages/tui
- * terminal.ts) and pushed here.
- */
-export declare function setHangulCompatJamoWidthOverride(value: number): void
 
 /**
  * Visible slice of a line after ANSI-aware column selection
