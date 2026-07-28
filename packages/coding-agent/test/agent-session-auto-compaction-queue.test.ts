@@ -97,10 +97,15 @@ describe("AgentSession auto-compaction queue resume", () => {
 			modelRegistry,
 		);
 
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) {
+		const bundledModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundledModel) {
 			throw new Error("Expected built-in anthropic model to exist");
 		}
+		// The usage fixtures below are written against a 200k window. Pinned here
+		// rather than inherited from the catalog, whose claude-sonnet-4-5 entry
+		// tracks the live model and moved to 1M — which drops 191k to ~19% of the
+		// window, so compaction never triggers and the awaited event never fires.
+		const model = { ...bundledModel, contextWindow: 200_000 };
 
 		const agent = new Agent({
 			initialState: {
