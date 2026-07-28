@@ -17,13 +17,17 @@
  *
  * Unlike the screenpipe bridge, this host is not re-bound on agent session
  * transitions — each derivative carries the *capture* session id it was
- * recorded under, and the sink attributes evidence to that id. One host per
- * `AgentSession` lifetime; built when `gopkClips.enabled` is on, torn down in
- * the session's `dispose()`.
+ * recorded under, and the sink attributes evidence to that id.
+ *
+ * Exactly one host may run per ledger, and it is owned by the always-on
+ * `gopk-ingest` daemon (see ./daemon.ts) — never by an `AgentSession`. The
+ * handoff directory is a single-consumer queue: a second host would race the
+ * daemon to `unlink` each file (splitting clips between them) and contend for
+ * the ledger's SQLite write lock. Sessions that want activity data read the
+ * ledger the daemon writes; they do not ingest.
  */
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import {
 	createGopkActivitySink,
@@ -38,8 +42,9 @@ import type { ConsentRecord } from "@pk-nerdsaver-ai/pi-context-policy";
 // pi_natives native addon, which can't bundle into a compiled single-file exe
 // (gopk-ingest.exe). dirs.ts / logger.ts are native-free, so importing narrowly
 // keeps this module — and the standalone ingester built from it — self-contained.
-import { getAgentDir, getInstallId } from "@pk-nerdsaver-ai/pi-utils/dirs";
+import { getInstallId } from "@pk-nerdsaver-ai/pi-utils/dirs";
 import * as logger from "@pk-nerdsaver-ai/pi-utils/logger";
+import { resolveGopkClipsPaths } from "./paths";
 import { DENIED_APPLICATION_IDS, MAXIMUM_RAW_CLIP_RETENTION_MS } from "./policy-constants";
 
 export interface GopkClipsHostConfig {
@@ -47,12 +52,13 @@ export interface GopkClipsHostConfig {
 	 * The capture daemon's root directory. The handoff drop lives at
 	 * `<captureRoot>/journal-handoff`, and manifest / raw-clip pointers inside
 	 * derivatives must resolve under this root or the sink rejects them.
-	 * Unset means `<agentDir>/gopk-clips/capture`.
+	 * Unset defers to {@link resolveGopkClipsPaths} (shared config, then
+	 * `<agentDir>/gopk-clips/capture`).
 	 */
 	readonly captureRoot?: string;
 	readonly pollIntervalMs: number;
 	readonly cleanupIntervalMs: number;
-	/** Test seam; defaults to `<agentDir>/gopk-clips/activity-ledger.sqlite`. */
+	/** Test seam; unset defers to {@link resolveGopkClipsPaths}. */
 	readonly ledgerPath?: string;
 }
 
@@ -74,13 +80,6 @@ export interface GopkClipsHostLogger {
 const HANDOFF_DIR_NAME = "journal-handoff";
 const REJECTED_SUFFIX = ".rejected";
 
-/** Expand a leading `~` so user-supplied capture roots behave like shell paths. */
-export function expandHomePath(value: string): string {
-	if (value === "~") return os.homedir();
-	if (value.startsWith("~/") || value.startsWith("~\\")) return path.join(os.homedir(), value.slice(2));
-	return value;
-}
-
 /**
  * Build the host and start both loops. Throws when the handoff directory or
  * ledger cannot be created — callers gate session startup on that never
@@ -91,12 +90,11 @@ export function createGopkClipsHost(
 	hostLogger: GopkClipsHostLogger = logger,
 ): GopkClipsHostState {
 	const installId = getInstallId();
-	const captureRoot = path.resolve(
-		config.captureRoot ? expandHomePath(config.captureRoot) : path.join(getAgentDir(), "gopk-clips", "capture"),
-	);
+	// Shared resolver: the daemon and the recall CLI derive the same absolute,
+	// `~`-expanded paths from the same precedence chain.
+	const { captureRoot, ledgerPath } = resolveGopkClipsPaths(config);
 	const handoffDir = path.join(captureRoot, HANDOFF_DIR_NAME);
 	fs.mkdirSync(handoffDir, { recursive: true });
-	const ledgerPath = config.ledgerPath ?? path.join(getAgentDir(), "gopk-clips", "activity-ledger.sqlite");
 	fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
 
 	const consent: ConsentRecord = {
@@ -166,9 +164,11 @@ export function createGopkClipsHost(
 			}
 			try {
 				// The sink re-validates timestamps, attestation, and path
-				// containment; rejected derivatives are logged (and their raw
-				// clips deleted) inside it. Either way the handoff file is
-				// consumed — replaying a rejected derivative can never succeed.
+				// containment; a derivative it *rejects* is logged (and its raw
+				// clip deleted) inside it and still returns normally, so the
+				// handoff file is consumed — replaying it could never succeed.
+				// A derivative it *throws* on (I/O fault, ledger contention)
+				// leaves the file in place for the next poll to retry.
 				await sinkFor(derivative.sessionId)(derivative);
 				await fsp.unlink(filePath);
 			} catch (error) {
@@ -194,24 +194,35 @@ export function createGopkClipsHost(
 		}
 	};
 
+	// Both passes swallow their own errors, but a rejection escaping one would
+	// poison `inFlight` and — since rescheduling is chained off it — silently
+	// stop the loop for the rest of the host's life. Absorb here so the next
+	// tick is always scheduled.
+	const guard = (pass: () => Promise<void>) => (): Promise<void> =>
+		pass().catch(error => {
+			hostLogger.warn("gopk-clips host pass threw", { error: String(error) });
+		});
+	const guardedPoll = guard(pollOnce);
+	const guardedCleanup = guard(cleanupOnce);
+
 	// setTimeout chains (not setInterval) so passes never overlap, however slow
 	// a pass runs; `inFlight` lets dispose await whichever pass is running.
 	const schedulePoll = (): void => {
 		if (stopped) return;
 		pollTimer = setTimeout(() => {
-			inFlight = inFlight.then(pollOnce).then(schedulePoll);
+			inFlight = inFlight.then(guardedPoll).then(schedulePoll);
 		}, config.pollIntervalMs);
 	};
 	const scheduleCleanup = (): void => {
 		if (stopped) return;
 		cleanupTimer = setTimeout(() => {
-			inFlight = inFlight.then(cleanupOnce).then(scheduleCleanup);
+			inFlight = inFlight.then(guardedCleanup).then(scheduleCleanup);
 		}, config.cleanupIntervalMs);
 	};
 
 	// One immediate pass of each: drain anything a dead host left behind, and
 	// purge raw clips that expired while nothing was running.
-	inFlight = inFlight.then(pollOnce).then(cleanupOnce);
+	inFlight = inFlight.then(guardedPoll).then(guardedCleanup);
 	schedulePoll();
 	scheduleCleanup();
 
