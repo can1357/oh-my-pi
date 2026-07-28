@@ -6,6 +6,10 @@
 
 - Added `ActivityLedgerReader` and `SqliteActivityLedgerReader`: a query-only view over a ledger owned by another process. It opens the sqlite handle read-only and deliberately skips the `CREATE TABLE IF NOT EXISTS` bootstrap that `SqliteActivityLedger` runs, since that DDL takes a write lock and would contend with the live writer on every open. Adds `listOverlapping(startedAt, endedAt)` for windowed queries.
 
+### Changed
+
+- `SqliteActivityLedger` now opens with `PRAGMA journal_mode = WAL` and `PRAGMA busy_timeout = 5000`. WAL lets readers proceed during writes instead of blocking on the rollback journal; the busy timeout turns a lost write race into a short wait instead of an immediate `SQLITE_BUSY` throw. WAL produces `-wal` and `-shm` sidecar files beside the main database — any code that copies, backs up, or deletes the ledger path must account for them.
+
 ## [16.3.0] - 2026-07-23
 
 ### Added

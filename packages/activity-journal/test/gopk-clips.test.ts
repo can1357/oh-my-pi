@@ -1,4 +1,8 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { ConsentRecord } from "@pk-nerdsaver-ai/pi-context-policy";
 import {
 	createActivitySynthesisFacts,
@@ -146,5 +150,24 @@ describe("gopk clip activity ingestion", () => {
 		expect(removed).toEqual(["C:\\captures\\clip-1.webm"]);
 		expect(ledger.list()[0]?.rawClip?.deletedAt).toBe("2026-07-13T14:11:00.000Z");
 		ledger.close();
+	});
+});
+
+describe("SqliteActivityLedger durability pragmas", () => {
+	it("persists WAL mode so readers don't block on a writer's rollback journal", () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-pragma-"));
+		const ledgerPath = path.join(tmpDir, "test.sqlite");
+		try {
+			const ledger = new SqliteActivityLedger(ledgerPath);
+			ledger.close();
+			// WAL mode is a database-level property that persists across
+			// connections; re-opening read-only proves the writer set it.
+			const probe = new Database(ledgerPath, { readonly: true, strict: true });
+			const row = probe.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get();
+			probe.close();
+			expect(row?.journal_mode.toLowerCase()).toBe("wal");
+		} finally {
+			fs.rmSync(tmpDir, { recursive: true, force: true });
+		}
 	});
 });

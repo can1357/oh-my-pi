@@ -30,12 +30,22 @@ interface LedgerRow {
  * Local-only source of truth for redacted activity evidence. Raw clip bytes are
  * never written to this database; a short-lived local pointer may be retained
  * solely so the configured lifecycle can delete the source file.
+ *
+ * The writer opens in WAL mode with a 5s busy_timeout. WAL produces
+ * `-wal` and `-shm` sidecar files beside the main database file; any code
+ * that copies, backs up, or deletes the ledger path must account for them.
  */
 export class SqliteActivityLedger implements ActivityLedger {
 	#db: Database;
 
 	constructor(path: string) {
 		this.#db = new Database(path, { create: true, strict: true });
+		// WAL lets readers proceed during writes; busy_timeout turns a lost
+		// write race into a short wait instead of an immediate SQLITE_BUSY
+		// throw. Both apply only to the writer — readers open read-only via
+		// SqliteActivityLedgerReader and are unaffected.
+		this.#db.exec("PRAGMA journal_mode = WAL");
+		this.#db.exec("PRAGMA busy_timeout = 5000");
 		this.#db.exec(`
 			CREATE TABLE IF NOT EXISTS activity_evidence (
 				id TEXT PRIMARY KEY,
