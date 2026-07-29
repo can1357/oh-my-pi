@@ -411,7 +411,7 @@ function sshSafePath(p: string): string {
  * via SSH, skipping the push entirely. The remote must already have the repo
  * cloned for the fast path.
  */
-async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void> {
+export async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void> {
 	const branch = buildHandoffBranch(opts.sshTarget);
 	const remoteDirSsh = sshSafePath(opts.remoteDir);
 	const repoName = path.basename(plan.localRepo);
@@ -465,7 +465,7 @@ async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void> {
 
 				// Apply the patch on the remote via SSH stdin
 				const applyProc = Bun.spawn({
-					cmd: [...buildSshArgv(), opts.sshTarget, `cd "${remoteDirSsh}" && git am --abort 2>/dev/null; git checkout -B ${branch} 2>/dev/null; git am --3way`],
+					cmd: [...sshArgv(), opts.sshTarget, `cd "${remoteDirSsh}" && git am --abort 2>/dev/null; git checkout -B ${branch} 2>/dev/null; git am --3way`],
 					stdin: new TextEncoder().encode(patchRes.stdout),
 					stdout: "pipe",
 					stderr: "pipe",
@@ -642,7 +642,9 @@ async function main(): Promise<void> {
 	}
 }
 
-main().catch((err: unknown) => {
-	console.error(`\n✗ ${err instanceof Error ? err.message : String(err)}`);
-	process.exit(1);
-});
+if (import.meta.main) {
+	main().catch((err: unknown) => {
+		console.error(`\n✗ ${err instanceof Error ? err.message : String(err)}`);
+		process.exit(1);
+	});
+}
