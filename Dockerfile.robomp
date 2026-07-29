@@ -62,6 +62,20 @@ RUN pip install --no-cache-dir \
         "click>=8.1" \
     && pip install --no-cache-dir --no-deps .
 
+# mise — runtime toolchain manager for per-repo language versions.
+# Go repos declare their version in go.mod (toolchain directive) or
+# .go-version; mise auto-detects and installs the right version per worktree.
+# Also benefits any future repos needing Node/Python/Rust version pinning.
+# System-wide install so all slot users (omp-1..omp-N) share tool installs
+# without per-user duplication.
+ENV MISE_DATA_DIR="/usr/local/share/mise" \
+    MISE_CONFIG_DIR="/usr/local/share/mise" \
+    MISE_CACHE_DIR="/data/cache/mise" \
+    PATH="/usr/local/share/mise/shims:$PATH"
+RUN curl -fsSL https://mise.run | sh \
+    && mise install --system go@latest \
+    && mise reshim
+
 # Host agent config is mounted read-only under /srv/agent-home-stage with
 # host-controlled permissions. The entrypoint copies it into root-owned
 # world-readable files under /srv/agent-home; the agent subprocess runs with
