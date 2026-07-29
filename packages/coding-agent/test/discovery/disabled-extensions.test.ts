@@ -12,12 +12,18 @@ describe("disabledExtensions runtime filtering", () => {
 	let tempHomeDir = "";
 	let originalHome: string | undefined;
 
+	// Restore this spy individually rather than via `vi.restoreAllMocks()`.
+	// That call IS `mock.restore()` (same native function), and the global
+	// restore walks Bun's mock registry to unpatch the sealed `os` namespace,
+	// segfaulting this shared-process bucket (exit 132) once a later file
+	// imports an overlapping module graph.
+	let homedirSpy: { mockRestore: () => void } | undefined;
 	beforeEach(async () => {
 		resetSettingsForTest();
 		originalHome = process.env.HOME;
 		tempHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-disabled-ext-home-"));
 		process.env.HOME = tempHomeDir;
-		vi.spyOn(os, "homedir").mockReturnValue(tempHomeDir);
+		homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(tempHomeDir);
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-disabled-ext-"));
 		await fs.mkdir(path.join(tempDir, ".ompk"), { recursive: true });
 		await fs.writeFile(path.join(tempDir, ".ompk", "AGENTS.md"), "# project instructions\n");
@@ -34,7 +40,8 @@ describe("disabledExtensions runtime filtering", () => {
 
 	afterEach(async () => {
 		resetSettingsForTest();
-		vi.restoreAllMocks();
+		homedirSpy?.mockRestore();
+		homedirSpy = undefined;
 		if (originalHome === undefined) {
 			delete process.env.HOME;
 		} else {

@@ -19,6 +19,12 @@ describe("Claude Code slash command discovery", () => {
 	let project = "";
 	let originalHome: string | undefined;
 
+	// Restore this spy individually rather than via `vi.restoreAllMocks()`.
+	// That call IS `mock.restore()` (same native function), and the global
+	// restore walks Bun's mock registry to unpatch the sealed `os` namespace,
+	// segfaulting this shared-process bucket (exit 132) once a later file
+	// imports an overlapping module graph.
+	let homedirSpy: { mockRestore: () => void } | undefined;
 	beforeEach(async () => {
 		clearFsCache();
 		resetSettingsForTest();
@@ -27,14 +33,15 @@ describe("Claude Code slash command discovery", () => {
 		home = path.join(root, "home");
 		project = path.join(root, "project");
 		process.env.HOME = home;
-		vi.spyOn(os, "homedir").mockReturnValue(home);
+		homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(home);
 		await fs.mkdir(path.join(project, ".git"), { recursive: true });
 	});
 
 	afterEach(async () => {
 		clearFsCache();
 		resetSettingsForTest();
-		vi.restoreAllMocks();
+		homedirSpy?.mockRestore();
+		homedirSpy = undefined;
 		if (originalHome === undefined) {
 			delete process.env.HOME;
 		} else {

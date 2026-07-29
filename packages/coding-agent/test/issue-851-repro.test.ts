@@ -13,19 +13,26 @@ describe("issue-851: claude-plugins loads flat .mcp.json shape", () => {
 	let tempDir: string;
 	let originalHome: string | undefined;
 
+	// Restore this spy individually rather than via `vi.restoreAllMocks()`.
+	// That call IS `mock.restore()` (same native function), and the global
+	// restore walks Bun's mock registry to unpatch the sealed `os` namespace,
+	// segfaulting this shared-process bucket (exit 132) once a later file
+	// imports an overlapping module graph.
+	let homedirSpy: { mockRestore: () => void } | undefined;
 	beforeEach(async () => {
 		clearClaudePluginRootsCache();
 		clearFsCache();
 		originalHome = process.env.HOME;
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "issue-851-"));
 		process.env.HOME = tempDir;
-		vi.spyOn(os, "homedir").mockReturnValue(tempDir);
+		homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(tempDir);
 	});
 
 	afterEach(async () => {
 		clearClaudePluginRootsCache();
 		clearFsCache();
-		vi.restoreAllMocks();
+		homedirSpy?.mockRestore();
+		homedirSpy = undefined;
 		if (originalHome === undefined) delete process.env.HOME;
 		else process.env.HOME = originalHome;
 		await removeWithRetries(tempDir);
