@@ -49,10 +49,22 @@ const validModes = new Set<Mode>([
 // separate `bun --smol test` child process. A fresh process per chunk resets Bun's
 // heap and reaps any dangling spawned children between groups, keeping peak RSS
 // under the CI runner's OOM ceiling (a single 170–370-file invocation gets
-// SIGKILLed at 137). The singleton/global-state bucket is left whole: its suites
-// co-locate in one process to exercise process-wide state, so they must not split.
+// SIGKILLed at 137).
+//
+// The singleton bucket was historically left whole so its suites co-locate in
+// one process and exercise process-wide state. It is now chunked as a
+// mitigation for a Bun 1.3.14 crash (`panic(main thread): Segmentation fault
+// at address 0x4`, exit 132 — Bun's banner says "a bug in Bun, not your
+// code"): the crash follows accumulated runtime state across many files in one
+// process. A deterministic two-file trigger was removed by disposing leaked
+// harnesses (see acp-agent-fusion-sidekick.test.ts), but CI still crashed
+// ~25s into a single 54-file process (Peak RSS ~2GB, 70+ spawns), so bounding
+// accumulation to 10 files per process is the remaining lever. Groups of 10
+// still share a process, so per-chunk process-wide behaviour is exercised; a
+// suite that needs cross-chunk state must pin its files into one chunk.
+// Tracked in NER-134; revert when a fixed Bun ships.
 const codingAgentBucketPlans: Record<CodingAgentBucket, { label: string; parallel: number; chunkSize?: number }> = {
-	singleton: { label: "singleton/global-state bucket", parallel: 1 },
+	singleton: { label: "singleton/global-state bucket", parallel: 1, chunkSize: 10 },
 	ui: { label: "UI/TUI bucket", parallel: 1, chunkSize: 10 },
 	runtime: { label: "runtime/session bucket", parallel: 1, chunkSize: 10 },
 	native: { label: "native/tooling/browser/unit bucket", parallel: 1, chunkSize: 10 },
