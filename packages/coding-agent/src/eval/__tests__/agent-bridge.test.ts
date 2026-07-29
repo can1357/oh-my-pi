@@ -22,6 +22,16 @@ import { disposeAllVmContexts } from "../js/context-manager";
 import { executeJs } from "../js/executor";
 import { disposeAllKernelSessions, executePython } from "../py/executor";
 
+const trackedSpies: Array<{ mockRestore: () => void }> = [];
+function trackedSpyOn<T extends object, K extends keyof T>(obj: T, key: K) {
+	const spy = vi.spyOn(obj, key);
+	trackedSpies.push(spy as unknown as { mockRestore: () => void });
+	return spy;
+}
+function restoreTrackedSpies(): void {
+	for (const spy of trackedSpies.splice(0).reverse()) spy.mockRestore();
+}
+
 const taskAgent = {
 	name: "task",
 	description: "Task agent",
@@ -87,7 +97,7 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 }
 
 function mockAgents(agents: AgentDefinition[] = [taskAgent, reviewerAgent]): void {
-	vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
+	trackedSpyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
 }
 
 function singleResult(options: ExecutorOptions, overrides: Partial<SingleResult> = {}): SingleResult {
@@ -141,7 +151,7 @@ function spyConcurrencyBarrier(limit: number): { maxInFlight: () => number } {
 	const saturated = new Promise<void>(resolve => {
 		saturate = resolve;
 	});
-	vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+	trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
 		inFlight++;
 		max = Math.max(max, inFlight);
 		if (inFlight >= limit) saturate?.();
@@ -157,14 +167,14 @@ function spyConcurrencyBarrier(limit: number): { maxInFlight: () => number } {
 
 describe("runEvalAgent", () => {
 	afterEach(() => {
-		vi.restoreAllMocks();
+		restoreTrackedSpies();
 		AgentRegistry.resetGlobalForTests();
 		resetRegisteredArtifactDirsForTests();
 	});
 
 	it("resolves the default task agent and agent overrides", async () => {
 		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+		const runSpy = trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
 			singleResult(options, {
 				output: options.agent.name,
 			}),
@@ -182,7 +192,7 @@ describe("runEvalAgent", () => {
 
 	it("throws for an unknown agent", async () => {
 		mockAgents([taskAgent]);
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
 		await expect(runEvalAgent({ prompt: "hello", agent: "missing" }, { session: makeSession() })).rejects.toThrow(
 			'Unknown agent "missing"',
@@ -191,7 +201,9 @@ describe("runEvalAgent", () => {
 
 	it("enforces spawn restrictions and the eval recursion cap", async () => {
 		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const runSpy = trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options),
+		);
 
 		await expect(runEvalAgent({ prompt: "hello" }, { session: makeSession({ spawns: "" }) })).rejects.toThrow(
 			"spawns disabled",
@@ -207,7 +219,9 @@ describe("runEvalAgent", () => {
 
 	it("throws instead of spawning from plan mode", async () => {
 		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const runSpy = trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options),
+		);
 
 		await expect(runEvalAgent({ prompt: "hello" }, { session: makeSession({ planMode: true }) })).rejects.toThrow(
 			"unavailable in plan mode",
@@ -217,7 +231,9 @@ describe("runEvalAgent", () => {
 
 	it("passes parent execution options and only sets outputSchema when schema is supplied", async () => {
 		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const runSpy = trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options),
+		);
 		const abortController = new AbortController();
 		const schema = { type: "object", properties: { ok: { type: "boolean" } } };
 		const session = makeSession({ depth: 2, activeModel: "p/current", modelString: "p/fallback" });
@@ -243,7 +259,9 @@ describe("runEvalAgent", () => {
 
 	it("forces LSP off for bridge subagents even when task.enableLsp is on", async () => {
 		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const runSpy = trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options),
+		);
 		// makeSession() defaults to enableLsp: true and task.enableLsp: true.
 		const session = makeSession();
 
@@ -257,7 +275,7 @@ describe("runEvalAgent", () => {
 
 	it("registers temp artifact dirs for in-memory handle results so agent URLs resolve", async () => {
 		mockAgents();
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+		trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
 			if (!options.artifactsDir) throw new Error("artifactsDir missing");
 			await fs.mkdir(options.artifactsDir, { recursive: true });
 			await fs.writeFile(path.join(options.artifactsDir, `${options.id}.md`), "recoverable output");
@@ -279,7 +297,7 @@ describe("runEvalAgent", () => {
 				disposed = true;
 			},
 		} as unknown as AgentSession;
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+		trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
 			AgentRegistry.global().register({
 				id: options.id,
 				displayName: options.id,
@@ -312,7 +330,7 @@ describe("runEvalAgent", () => {
 
 	it("maps successful and failed subagent results", async () => {
 		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess");
+		const runSpy = trackedSpyOn(taskExecutor, "runSubprocess");
 		runSpy.mockImplementationOnce(async options =>
 			singleResult(options, {
 				id: "0-EvalAgent",
@@ -344,7 +362,7 @@ describe("runEvalAgent", () => {
 	// surfaced the generic `bridge call '__agent__' failed`. See #2006.
 	it("surfaces abortReason for aborts that leave stderr empty", async () => {
 		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess");
+		const runSpy = trackedSpyOn(taskExecutor, "runSubprocess");
 		runSpy.mockImplementationOnce(async options =>
 			singleResult(options, {
 				exitCode: 1,
@@ -399,7 +417,7 @@ describe("agent() through eval runtimes", () => {
 	const sharedJsSessionId = "agent-bridge-shared-js";
 
 	afterEach(() => {
-		vi.restoreAllMocks();
+		restoreTrackedSpies();
 		vi.useRealTimers();
 	});
 
@@ -412,7 +430,7 @@ describe("agent() through eval runtimes", () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-js-");
 		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent");
 		mockAgents();
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+		trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
 			singleResult(options, {
 				output: options.outputSchema ? '{"ok":true,"n":3}' : "hello from agent",
 			}),
@@ -454,7 +472,7 @@ describe("agent() through eval runtimes", () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-js-reject-");
 		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent-reject");
 		mockAgents();
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+		trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
 			if (options.assignment === "bad") {
 				return singleResult(options, { exitCode: 1, output: "", stderr: "boom", error: "boom" });
 			}
@@ -476,7 +494,7 @@ describe("agent() through eval runtimes", () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-py-");
 		const { session, sessionFile, sessionId } = makeEvalSession(tempDir, "py-agent");
 		mockAgents();
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+		trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
 			singleResult(options, { output: "hello from python" }),
 		);
 
@@ -544,7 +562,7 @@ describe("agent() through eval runtimes", () => {
 		const saturated = new Promise<void>(resolve => {
 			markSaturated = resolve;
 		});
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+		trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
 			// task.maxConcurrency=6 → six bridge calls block at once; signal then.
 			if (++inFlight >= 6) markSaturated?.();
 			await Bun.sleep(9000); // deliberately ignores options.signal
@@ -627,7 +645,7 @@ describe("agent() through eval runtimes", () => {
 			...overrides,
 		});
 
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+		trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
 			options.onProgress?.(
 				makeProgress(options, {
 					status: "running",
@@ -713,7 +731,7 @@ describe("agent() through eval runtimes", () => {
 		const inFlight = new Promise<void>(resolve => {
 			markInFlight = resolve;
 		});
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+		trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
 			markInFlight?.();
 			await released;
 			return singleResult(options, { output: "done" });
@@ -773,7 +791,7 @@ describe("agent() through eval runtimes", () => {
 		const inFlight = new Promise<void>(resolve => {
 			markInFlight = resolve;
 		});
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+		trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
 			for (let i = 0; i < 20; i++) {
 				options.onProgress?.({
 					index: options.index,
@@ -834,7 +852,7 @@ describe("agent() through eval runtimes", () => {
 
 describe("runEvalAgent isolation", () => {
 	afterEach(() => {
-		vi.restoreAllMocks();
+		restoreTrackedSpies();
 	});
 
 	function isolatedSession(overrides: Partial<Parameters<typeof Settings.isolated>[0]> = {}): ToolSession {
@@ -850,7 +868,7 @@ describe("runEvalAgent isolation", () => {
 
 	function mockIsolationContext(): { repoRoot: string } {
 		const repoRoot = "/repo-root";
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+		trackedSpyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
 			repoRoot,
 			baseline: {
 				root: { repoRoot, headCommit: "HEAD", staged: "", unstaged: "", untracked: [], untrackedPatch: "" },
@@ -862,8 +880,10 @@ describe("runEvalAgent isolation", () => {
 
 	it("rejects isolated=true when task.isolation.mode is 'none'", async () => {
 		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-		const prepSpy = vi.spyOn(isolationRunner, "prepareIsolationContext");
+		const runSpy = trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options),
+		);
+		const prepSpy = trackedSpyOn(isolationRunner, "prepareIsolationContext");
 
 		const session = makeSession(); // default settings: isolation.mode === "none"
 
@@ -877,13 +897,13 @@ describe("runEvalAgent isolation", () => {
 	it("stays non-isolated by default even when task.isolation.mode is set; isolated=true opts in", async () => {
 		mockAgents();
 		mockIsolationContext();
-		const isolatedSpy = vi
-			.spyOn(isolationRunner, "runIsolatedSubprocess")
-			.mockImplementation(async opts => singleResult(opts.baseOptions, { output: "isolated-run" }));
-		const plainSpy = vi
-			.spyOn(taskExecutor, "runSubprocess")
-			.mockImplementation(async options => singleResult(options, { output: "plain-run" }));
-		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+		const isolatedSpy = trackedSpyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+			singleResult(opts.baseOptions, { output: "isolated-run" }),
+		);
+		const plainSpy = trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options, { output: "plain-run" }),
+		);
+		const mergeSpy = trackedSpyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
 			summary: "",
 			changesApplied: true,
 			hadAnyChanges: false,
@@ -908,8 +928,8 @@ describe("runEvalAgent isolation", () => {
 
 	it("preserves temp artifacts for non-isolated handle outputs", async () => {
 		mockAgents();
-		const rmSpy = vi.spyOn(fs, "rm").mockResolvedValue(undefined);
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const rmSpy = trackedSpyOn(fs, "rm").mockResolvedValue(undefined);
+		trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 
 		await runEvalAgent({ prompt: "plain handle", handle: true }, { session: makeSession() });
 
@@ -922,13 +942,13 @@ describe("runEvalAgent isolation", () => {
 	it("forwards merge=false as patch mode and passes the worktree cwd through baseOptions", async () => {
 		mockAgents();
 		const { repoRoot } = mockIsolationContext();
-		const isolatedSpy = vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+		const isolatedSpy = trackedSpyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
 			singleResult(opts.baseOptions, {
 				output: "isolated-run",
 				patchPath: `/artifacts/${opts.agentId}.patch`,
 			}),
 		);
-		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+		trackedSpyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
 			summary: "\n\nApplied patches: yes",
 			changesApplied: true,
 			hadAnyChanges: true,
@@ -953,11 +973,11 @@ describe("runEvalAgent isolation", () => {
 		mockAgents();
 		mockIsolationContext();
 		const ops: string[] = [];
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => {
+		trackedSpyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts => {
 			ops.push("subprocess");
 			return singleResult(opts.baseOptions, { output: "done", patchPath: `/artifacts/${opts.agentId}.patch` });
 		});
-		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockImplementation(async () => {
+		trackedSpyOn(isolationRunner, "mergeIsolatedChanges").mockImplementation(async () => {
 			ops.push("merge");
 			return {
 				summary: "\n\nMerged",
@@ -989,7 +1009,7 @@ describe("runEvalAgent isolation", () => {
 	it("keeps the timeout paused through isolation baseline capture", async () => {
 		mockAgents();
 		const ops: string[] = [];
-		vi.spyOn(isolationRunner, "prepareIsolationContext").mockImplementation(async () => {
+		trackedSpyOn(isolationRunner, "prepareIsolationContext").mockImplementation(async () => {
 			ops.push("prepare");
 			return {
 				repoRoot: "/repo-root",
@@ -1006,10 +1026,10 @@ describe("runEvalAgent isolation", () => {
 				},
 			};
 		});
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+		trackedSpyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
 			singleResult(opts.baseOptions, { output: "done", patchPath: `/artifacts/${opts.agentId}.patch` }),
 		);
-		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+		trackedSpyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
 			summary: "\n\nMerged",
 			changesApplied: true,
 			hadAnyChanges: true,
@@ -1038,13 +1058,13 @@ describe("runEvalAgent isolation", () => {
 		mockAgents();
 		mockIsolationContext();
 		const structuredOutput = JSON.stringify({ status: "ok" });
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+		trackedSpyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
 			singleResult(opts.baseOptions, {
 				output: structuredOutput,
 				patchPath: `/artifacts/${opts.agentId}.patch`,
 			}),
 		);
-		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+		trackedSpyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
 			summary: "\n\nNo changes to apply.",
 			changesApplied: true,
 			hadAnyChanges: false,
@@ -1073,13 +1093,13 @@ describe("runEvalAgent isolation", () => {
 		mockAgents();
 		mockIsolationContext();
 		const structuredOutput = JSON.stringify({ status: "ok" });
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+		trackedSpyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
 			singleResult(opts.baseOptions, {
 				output: structuredOutput,
 				patchPath: `/artifacts/${opts.agentId}.patch`,
 			}),
 		);
-		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+		trackedSpyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
 			summary: "\n\n<system-notification>Patch apply failed: conflict in foo.ts</system-notification>",
 			changesApplied: false,
 			hadAnyChanges: false,
@@ -1105,13 +1125,13 @@ describe("runEvalAgent isolation", () => {
 	it("throws on apply failure for non-schema callers too instead of burying the warning in text", async () => {
 		mockAgents();
 		mockIsolationContext();
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+		trackedSpyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
 			singleResult(opts.baseOptions, {
 				output: "ran",
 				branchName: `omp/task/${opts.agentId}`,
 			}),
 		);
-		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+		trackedSpyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
 			summary: "\n\n<system-notification>Branch merge failed: omp/task/x.\nConflict: foo.ts</system-notification>",
 			changesApplied: false,
 			hadAnyChanges: false,
@@ -1128,14 +1148,14 @@ describe("runEvalAgent isolation", () => {
 		mockAgents();
 		mockIsolationContext();
 		const nestedPatch = "diff --git a/file b/file\n";
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+		trackedSpyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
 			singleResult(opts.baseOptions, {
 				output: "ran",
 				patchPath: `/artifacts/${opts.agentId}.patch`,
 				nestedPatches: [{ relativePath: "sub/nested", patch: nestedPatch }],
 			}),
 		);
-		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+		trackedSpyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
 			summary: "\n\n<system-notification>Patch apply failed: conflict in foo.ts</system-notification>",
 			changesApplied: false,
 			hadAnyChanges: false,
@@ -1162,20 +1182,20 @@ describe("runEvalAgent isolation", () => {
 		mockAgents();
 		mockIsolationContext();
 		const nestedPatch = "diff --git a/file b/file\n";
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+		trackedSpyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
 			singleResult(opts.baseOptions, {
 				output: JSON.stringify({ status: "ok" }),
 				patchPath: `/artifacts/${opts.agentId}.patch`,
 				nestedPatches: [{ relativePath: "sub/nested", patch: nestedPatch }],
 			}),
 		);
-		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+		trackedSpyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
 			summary: "\n\nApplied patches: yes",
 			changesApplied: true,
 			hadAnyChanges: true,
 			mergedBranchForNestedPatches: false,
 		});
-		vi.spyOn(isolationRunner, "applyEligibleNestedPatches").mockResolvedValue(
+		trackedSpyOn(isolationRunner, "applyEligibleNestedPatches").mockResolvedValue(
 			"\n\n<system-notification>Some nested repository patches failed to apply.</system-notification>",
 		);
 
@@ -1200,13 +1220,13 @@ describe("runEvalAgent isolation", () => {
 	it("skips the merge phase when apply=false and surfaces the patch artifact instead", async () => {
 		mockAgents();
 		mockIsolationContext();
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+		trackedSpyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
 			singleResult(opts.baseOptions, {
 				output: "captured",
 				patchPath: "/artifacts/captured.patch",
 			}),
 		);
-		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
+		const mergeSpy = trackedSpyOn(isolationRunner, "mergeIsolatedChanges");
 
 		const result = await runEvalAgent(
 			{ prompt: "scout", isolated: true, apply: false },
@@ -1224,13 +1244,13 @@ describe("runEvalAgent isolation", () => {
 	it("surfaces a captured branch name when apply=false and the run used branch mode", async () => {
 		mockAgents();
 		mockIsolationContext();
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+		trackedSpyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
 			singleResult(opts.baseOptions, {
 				output: "branched",
 				branchName: `omp/task/${opts.agentId}`,
 			}),
 		);
-		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
+		const mergeSpy = trackedSpyOn(isolationRunner, "mergeIsolatedChanges");
 
 		const session = isolatedSession({ "task.isolation.merge": "branch" });
 		const result = await runEvalAgent({ prompt: "scout", isolated: true, apply: false }, { session });
@@ -1244,13 +1264,13 @@ describe("runEvalAgent isolation", () => {
 	it("surfaces nested patches when apply=false captured branch-mode nested-only changes", async () => {
 		mockAgents();
 		mockIsolationContext();
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+		trackedSpyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
 			singleResult(opts.baseOptions, {
 				output: "nested-only",
 				nestedPatches: [{ relativePath: "nested", patch: "diff --git a/file b/file\n" }],
 			}),
 		);
-		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
+		const mergeSpy = trackedSpyOn(isolationRunner, "mergeIsolatedChanges");
 
 		const session = isolatedSession({ "task.isolation.merge": "branch" });
 		const result = await runEvalAgent({ prompt: "scout", isolated: true, apply: false }, { session });
@@ -1266,8 +1286,8 @@ describe("runEvalAgent isolation", () => {
 	it("preserves the temp artifacts dir when apply=false so details.patchPath remains valid", async () => {
 		mockAgents();
 		mockIsolationContext();
-		const rmSpy = vi.spyOn(fs, "rm").mockResolvedValue(undefined);
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+		const rmSpy = trackedSpyOn(fs, "rm").mockResolvedValue(undefined);
+		trackedSpyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
 			singleResult(opts.baseOptions, { output: "captured", patchPath: `/artifacts/${opts.agentId}.patch` }),
 		);
 
@@ -1286,11 +1306,11 @@ describe("runEvalAgent isolation", () => {
 	it("still cleans the temp artifacts dir when apply succeeds", async () => {
 		mockAgents();
 		mockIsolationContext();
-		const rmSpy = vi.spyOn(fs, "rm").mockResolvedValue(undefined);
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+		const rmSpy = trackedSpyOn(fs, "rm").mockResolvedValue(undefined);
+		trackedSpyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
 			singleResult(opts.baseOptions, { output: "captured", patchPath: `/artifacts/${opts.agentId}.patch` }),
 		);
-		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+		trackedSpyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
 			summary: "\n\nApplied",
 			changesApplied: true,
 			hadAnyChanges: true,
@@ -1308,11 +1328,11 @@ describe("runEvalAgent isolation", () => {
 	it("preserves the temp artifacts dir after a successful apply when handle is requested", async () => {
 		mockAgents();
 		mockIsolationContext();
-		const rmSpy = vi.spyOn(fs, "rm").mockResolvedValue(undefined);
-		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
+		const rmSpy = trackedSpyOn(fs, "rm").mockResolvedValue(undefined);
+		trackedSpyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async opts =>
 			singleResult(opts.baseOptions, { output: "captured", patchPath: `/artifacts/${opts.agentId}.patch` }),
 		);
-		vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+		trackedSpyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
 			summary: "\n\nApplied",
 			changesApplied: true,
 			hadAnyChanges: true,

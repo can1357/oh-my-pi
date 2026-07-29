@@ -91,9 +91,19 @@ const emptyWorkspaceTree = (cwd: string): WorkspaceTree => ({
 	agentsMdFiles: [],
 });
 
+const trackedSpies: Array<{ mockRestore: () => void }> = [];
+function trackedSpyOn<T extends object, K extends keyof T>(obj: T, key: K) {
+	const spy = vi.spyOn(obj, key);
+	trackedSpies.push(spy as unknown as { mockRestore: () => void });
+	return spy;
+}
+function restoreTrackedSpies(): void {
+	for (const spy of trackedSpies.splice(0).reverse()) spy.mockRestore();
+}
+
 const mockPositiveSleepsImmediate = () => {
 	const realSleep = Bun.sleep.bind(Bun);
-	return vi.spyOn(Bun, "sleep").mockImplementation((duration?: number | Date) => {
+	return trackedSpyOn(Bun, "sleep").mockImplementation((duration?: number | Date) => {
 		if (typeof duration === "number" && duration > 0) {
 			return Promise.resolve();
 		}
@@ -166,7 +176,7 @@ describe("AgentSession python cleanup", () => {
 			Bun.env.NULL_PROMPT = originalNullPrompt;
 		}
 		originalNullPrompt = undefined;
-		vi.restoreAllMocks();
+		restoreTrackedSpies();
 		AgentStorage.resetInstance();
 		await pythonExecutor.disposeAllKernelSessions();
 		await Bun.sleep(0);
@@ -187,10 +197,10 @@ describe("AgentSession python cleanup", () => {
 		const throwingExtension: ExtensionFactory = () => {
 			throw new Error("Extension init failed");
 		};
-		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
-		const startSpy = vi
-			.spyOn(pythonKernel.PythonKernel, "start")
-			.mockResolvedValueOnce(unrelatedKernel as unknown as PythonKernelInstance);
+		trackedSpyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const startSpy = trackedSpyOn(pythonKernel.PythonKernel, "start").mockResolvedValueOnce(
+			unrelatedKernel as unknown as PythonKernelInstance,
+		);
 
 		await pythonExecutor.executePython("print('unrelated before')", {
 			cwd: unrelatedCwd,
@@ -251,12 +261,12 @@ describe("AgentSession python cleanup", () => {
 		tempDirs.push(tempDir);
 		const unrelatedKernel = createMockKernel();
 		const unrelatedCwd = tempDir.join("unrelated-after");
-		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
-		const startSpy = vi
-			.spyOn(pythonKernel.PythonKernel, "start")
-			.mockResolvedValueOnce(unrelatedKernel as unknown as PythonKernelInstance);
+		trackedSpyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const startSpy = trackedSpyOn(pythonKernel.PythonKernel, "start").mockResolvedValueOnce(
+			unrelatedKernel as unknown as PythonKernelInstance,
+		);
 		const throwingRegistry = new AgentRegistry();
-		vi.spyOn(throwingRegistry, "register").mockImplementation(() => {
+		trackedSpyOn(throwingRegistry, "register").mockImplementation(() => {
 			throw new Error("Agent registry failed");
 		});
 
@@ -333,10 +343,10 @@ describe("AgentSession python cleanup", () => {
 		kernel.blockedExecution = blockedExecution.promise;
 		kernel.blockedExecutionStarted = () => blockedExecutionStarted.resolve();
 		kernel.blockedExecutionReject = error => blockedExecution.reject(error);
-		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
-		const startSpy = vi
-			.spyOn(pythonKernel.PythonKernel, "start")
-			.mockResolvedValue(kernel as unknown as PythonKernelInstance);
+		trackedSpyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const startSpy = trackedSpyOn(pythonKernel.PythonKernel, "start").mockResolvedValue(
+			kernel as unknown as PythonKernelInstance,
+		);
 		const firstSession = await createSession(tempDir, cwd);
 		const secondSession = await createSession(tempDir, cwd);
 		expect(startSpy).toHaveBeenCalledTimes(0);
@@ -392,7 +402,7 @@ describe("AgentSession python cleanup", () => {
 		const { tempDir, cwd } = createTempProject();
 		tempDirs.push(tempDir);
 		const blockedExecuteStarted = Promise.withResolvers<void>();
-		const executeSpy = vi.spyOn(pythonExecutor, "executePython").mockImplementation(async (_code, options) => {
+		const executeSpy = trackedSpyOn(pythonExecutor, "executePython").mockImplementation(async (_code, options) => {
 			const signal = options?.signal;
 			if (!signal) {
 				throw new Error("Expected abort signal");
@@ -419,7 +429,7 @@ describe("AgentSession python cleanup", () => {
 				signal.addEventListener("abort", onAbort, { once: true });
 			});
 		});
-		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		trackedSpyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
 
 		const session = await createSession(tempDir, cwd);
 		const EvalTool = session.getToolByName("eval");
@@ -462,12 +472,12 @@ describe("AgentSession python cleanup", () => {
 		kernel.blockedExecutionStarted = () => blockedExecutionStarted.resolve();
 		kernel.abortBlockedExecution = false;
 
-		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
-		const sleepSpy = vi.spyOn(Bun, "sleep").mockResolvedValue(undefined);
+		trackedSpyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const sleepSpy = trackedSpyOn(Bun, "sleep").mockResolvedValue(undefined);
 
-		const startSpy = vi
-			.spyOn(pythonKernel.PythonKernel, "start")
-			.mockResolvedValue(kernel as unknown as PythonKernelInstance);
+		const startSpy = trackedSpyOn(pythonKernel.PythonKernel, "start").mockResolvedValue(
+			kernel as unknown as PythonKernelInstance,
+		);
 
 		const firstSession = await createSession(tempDir, cwd);
 		const secondSession = await createSession(tempDir, cwd);
@@ -513,7 +523,7 @@ describe("AgentSession python cleanup", () => {
 	it("rejects direct session Python starts once dispose begins", async () => {
 		const { tempDir, cwd } = createTempProject();
 		tempDirs.push(tempDir);
-		const executeSpy = vi.spyOn(pythonExecutor, "executePython").mockResolvedValue({
+		const executeSpy = trackedSpyOn(pythonExecutor, "executePython").mockResolvedValue({
 			output: "late",
 			exitCode: 0,
 			cancelled: false,
@@ -547,7 +557,7 @@ describe("AgentSession python cleanup", () => {
 				return undefined;
 			});
 		};
-		const executeSpy = vi.spyOn(pythonExecutor, "executePython").mockResolvedValue({
+		const executeSpy = trackedSpyOn(pythonExecutor, "executePython").mockResolvedValue({
 			output: "late",
 			exitCode: 0,
 			cancelled: false,
@@ -601,7 +611,7 @@ describe("AgentSession python cleanup", () => {
 				};
 			});
 		};
-		const executeSpy = vi.spyOn(pythonExecutor, "executePython").mockResolvedValue({
+		const executeSpy = trackedSpyOn(pythonExecutor, "executePython").mockResolvedValue({
 			output: "late",
 			exitCode: 0,
 			cancelled: false,
@@ -634,7 +644,7 @@ describe("AgentSession python cleanup", () => {
 	it("rejects eval starts once dispose begins", async () => {
 		const { tempDir, cwd } = createTempProject();
 		tempDirs.push(tempDir);
-		const executeSpy = vi.spyOn(pythonExecutor, "executePython").mockResolvedValue({
+		const executeSpy = trackedSpyOn(pythonExecutor, "executePython").mockResolvedValue({
 			output: "late",
 			exitCode: 0,
 			cancelled: false,
@@ -661,7 +671,7 @@ describe("AgentSession python cleanup", () => {
 	it("rejects eval starts that reach async preflight after dispose begins", async () => {
 		const { tempDir, cwd } = createTempProject();
 		tempDirs.push(tempDir);
-		const executeSpy = vi.spyOn(pythonExecutor, "executePython").mockResolvedValue({
+		const executeSpy = trackedSpyOn(pythonExecutor, "executePython").mockResolvedValue({
 			output: "late",
 			exitCode: 0,
 			cancelled: false,
@@ -676,7 +686,7 @@ describe("AgentSession python cleanup", () => {
 		const artifactStarted = Promise.withResolvers<void>();
 		const releaseArtifact = Promise.withResolvers<void>();
 		const sessionManager = SessionManager.inMemory(cwd);
-		vi.spyOn(sessionManager, "allocateArtifactPath").mockImplementation(async () => {
+		trackedSpyOn(sessionManager, "allocateArtifactPath").mockImplementation(async () => {
 			artifactStarted.resolve();
 			await releaseArtifact.promise;
 			return {};
@@ -714,8 +724,8 @@ describe("AgentSession python cleanup", () => {
 			if (starts >= 2) bothStarted.resolve();
 		};
 
-		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
-		vi.spyOn(pythonKernel.PythonKernel, "start").mockResolvedValue(kernel as unknown as PythonKernelInstance);
+		trackedSpyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		trackedSpyOn(pythonKernel.PythonKernel, "start").mockResolvedValue(kernel as unknown as PythonKernelInstance);
 
 		const session = await createSession(tempDir, cwd);
 
