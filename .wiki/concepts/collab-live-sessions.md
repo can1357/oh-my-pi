@@ -21,7 +21,7 @@ Status: implemented
 | --- | --- |
 | Host TUI | `/collab` starts hosting; prints join link + QR |
 | Guest TUI | `oh-my-pk join "<token>"` (or equivalent) |
-| Browser | Relay serves guest client; room id + key in URL fragment (e.g. `my.omp.sh/#…`) |
+| Browser | Relay serves guest client; room id + key in URL fragment (e.g. `oh-my-pk.pkking.computer/collab/#…`) |
 | `packages/collab-web` | Browser guest client and local relay tooling |
 
 ## Operator doc
