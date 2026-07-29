@@ -53,7 +53,7 @@ async function writeSkill(root: string, name: string, description: string): Prom
 
 /**
  * Run `fn` with home and the agent dir redirected to a fresh temp location so
- * the developer's real `~/.omp` (including unconditional managed skills) can
+ * the developer's real `~/.ompk` (including unconditional managed skills) can
  * never leak into assertions. Restores both seams in a finally, per-test scoped
  * (full-suite safe). Mirrors the pattern in autolearn-discovery.test.ts.
  */
@@ -64,7 +64,7 @@ async function withIsolatedHome<T>(fn: (tempCwd: string) => Promise<T>): Promise
 	await fs.mkdir(tempCwd, { recursive: true });
 	const originalAgentDir = getAgentDir();
 	const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempHome);
-	setAgentDir(path.join(tempHome, ".omp", "agent"));
+	setAgentDir(path.join(tempHome, ".ompk", "agent"));
 	try {
 		return await fn(tempCwd);
 	} finally {

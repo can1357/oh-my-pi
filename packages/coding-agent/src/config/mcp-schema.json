@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
   "title": "OMP MCP configuration",
-  "description": "Schema for mcp.json, .mcp.json, .omp/mcp.json, and ~/.omp/agent/mcp.json used by the OMP coding agent.",
+  "description": "Schema for mcp.json, .mcp.json, .ompk/mcp.json, and ~/.ompk/agent/mcp.json used by the OMP coding agent.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

@@ -1,15 +1,15 @@
 # session-stats
 
 Ad-hoc analyses over the local agent session corpus
-(`~/.omp/agent/sessions/`). SQLite-backed; data is synced once into the same
-`~/.omp/stats.db` that `packages/stats` uses, then queried by short Python
+(`~/.ompk/agent/sessions/`). SQLite-backed; data is synced once into the same
+`~/.ompk/stats.db` that `packages/stats` uses, then queried by short Python
 scripts.
 
 ## Layout
 
 ```
 scripts/session-stats/
-  sync.py          # walks ~/.omp/agent/sessions/ and populates ss_* tables
+  sync.py          # walks ~/.ompk/agent/sessions/ and populates ss_* tables
   analyze.py       # tools | edits | followups subcommands over the synced db
   audit.ts         # LLM-assisted token-usage audit (no sync needed)
   audit-prompt.md  # system prompt for the audit classifier
@@ -102,7 +102,7 @@ been split or handed off, task spawns that were wasteful or failed to transfer
 context, and the biggest waste sources with concrete fixes. A final aggregate
 call distills systemic findings and quick wins across sessions.
 
-Verdicts are cached in `~/.omp/stats-audit-cache.json` (keyed by session id +
+Verdicts are cached in `~/.ompk/stats-audit-cache.json` (keyed by session id +
 digest hash + model + prompt hash, so any change to the transcript, digest
 format, or `audit-prompt.md` invalidates the entry automatically). Re-runs
 reuse cached verdicts for free; `--no-cache` bypasses reads but still writes

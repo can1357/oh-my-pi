@@ -35,7 +35,7 @@ Does not cover `/tree` UI rendering behavior beyond semantics that affect sessio
 Default session file location:
 
 ```text
-~/.omp/agent/sessions/<dir-encoded>/<timestamp>_<sessionId>.jsonl
+~/.ompk/agent/sessions/<dir-encoded>/<timestamp>_<sessionId>.jsonl
 ```
 
 `<dir-encoded>` depends on where the canonicalized cwd lives:
@@ -49,13 +49,13 @@ Old `--<home-encoded>-*--` directories are migrated to the new home-relative nam
 Blob store location:
 
 ```text
-~/.omp/agent/blobs/<sha256>
+~/.ompk/agent/blobs/<sha256>
 ```
 
 Terminal breadcrumb files are written under:
 
 ```text
-~/.omp/agent/terminal-sessions/<terminal-id>
+~/.ompk/agent/terminal-sessions/<terminal-id>
 ```
 
 Breadcrumb content is two lines: original cwd, then session file path. `continueRecent()` prefers this terminal-scoped pointer before scanning most-recent mtime.
@@ -479,7 +479,7 @@ Discovery helpers live in `session-listing.ts`; `SessionManager` re-exposes the 
 - `getRecentSessions(sessionDir, limit?)` -> lightweight metadata for UI/session picker, capped by `limit` (default 4)
 - `findMostRecentSession(sessionDir)` -> newest by mtime
 - `listSessions(sessionDir, storage)` (a.k.a. `SessionManager.list(cwd, sessionDir?)`) -> sessions in one project scope
-- `listAllSessions(storage)` (a.k.a. `SessionManager.listAll()`) -> sessions across all project scopes under `~/.omp/agent/sessions`
+- `listAllSessions(storage)` (a.k.a. `SessionManager.listAll()`) -> sessions across all project scopes under `~/.ompk/agent/sessions`
 - `resolveResumableSession(sessionArg, cwd, sessionDir?)` -> local then global resume/fork target lookup
 
 Metadata extraction for `getRecentSessions` reads a prefix via `readTextSlices(..., 4096, 0)`. `listSessions`/`listAllSessions` read a 4KB prefix plus a bounded 32 KiB tail through one `readTextSlices(...)` call per file, using the prefix for metadata and the tail for lifecycle status. Resume matching is case-insensitive and accepts session id prefixes, full filename prefixes, or the id suffix after the timestamp in `<timestamp>_<sessionId>.jsonl`.
@@ -488,7 +488,7 @@ Metadata extraction for `getRecentSessions` reads a prefix via `readTextSlices(.
 
 `HistoryStorage` (`history-storage.ts`) is a separate SQLite subsystem for prompt recall/search, not session replay.
 
-- DB: `~/.omp/agent/history.db`
+- DB: `~/.ompk/agent/history.db`
 - Table: `history(id, prompt, created_at, cwd, session_id)`
 - FTS5 index: `history_fts` with trigger-maintained sync
 - Deduplicates consecutive identical prompts using in-memory last-prompt cache

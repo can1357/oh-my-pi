@@ -91,7 +91,7 @@ a viewer link. Implementation: [`../packages/coding-agent/src/export/share.ts`](
 
 ### Phase 1: custom share handler (if present)
 
-`loadCustomShare()` checks `~/.omp/agent` for first existing candidate:
+`loadCustomShare()` checks `~/.ompk/agent` for first existing candidate:
 
 - `share.ts`
 - `share.js`

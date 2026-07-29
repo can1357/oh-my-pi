@@ -26,7 +26,7 @@ Full-featured example demonstrating:
 omp --tool examples/custom-tools/todo/index.ts
 
 # Or copy entire folder to tools directory for persistent use
-cp -r todo ~/.omp/agent/tools/
+cp -r todo ~/.ompk/agent/tools/
 ```
 
 Then in omp:

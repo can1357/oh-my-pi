@@ -16,8 +16,8 @@ Most runtime lookups use `$env` from `@pk-nerdsaver-ai/pi-utils` (`packages/util
 
 1. Existing process environment (`Bun.env`)
 2. Project `.env` (`$PWD/.env`) for keys not already set
-3. Agent `.env` (`~/.omp/agent/.env`, respecting `PI_CONFIG_DIR` / `PI_CODING_AGENT_DIR`) for keys not already set
-4. Config-root `.env` (`~/.omp/.env`, respecting `PI_CONFIG_DIR`) for keys not already set
+3. Agent `.env` (`~/.ompk/agent/.env`, respecting `PI_CONFIG_DIR` / `PI_CODING_AGENT_DIR`) for keys not already set
+4. Config-root `.env` (`~/.ompk/.env`, respecting `PI_CONFIG_DIR`) for keys not already set
 5. Home `.env` (`~/.env`) for keys not already set
 
 Additional rule inside each `.env` file: `OMP_*` keys are mirrored to `PI_*` keys in that parsed file.
@@ -101,9 +101,9 @@ When the broker is enabled, the local SQLite credential store is bypassed and al
 | Variable                | Used for                                                                                     | Required when                                                                                                             | Notes / precedence                                                                                                                                                                         |
 | ----------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `OMP_AUTH_BROKER_URL`   | Base URL of the remote auth-broker (e.g. `https://broker.tailnet:8765`); selects broker mode | Resolving credentials through a broker; also required by `oh-my-pk auth-gateway serve` (the gateway is itself a broker client) | Wins over `auth.broker.url` in `config.yml`. When set with no resolvable token, `resolveAuthBrokerConfig()` hard-errors instead of falling back to local SQLite.                           |
-| `OMP_AUTH_BROKER_TOKEN` | Bearer token sent on every broker endpoint except `/v1/healthz`                              | `OMP_AUTH_BROKER_URL` is set and no token is available from `auth.broker.token` or `<config-dir>/auth-broker.token`       | Resolution: this env → `auth.broker.token` (`$ENV_NAME` indirection supported) → `<config-dir>/auth-broker.token` (mode `0600`). `<config-dir>` is `~/.omp/` (respecting `PI_CONFIG_DIR`). |
+| `OMP_AUTH_BROKER_TOKEN` | Bearer token sent on every broker endpoint except `/v1/healthz`                              | `OMP_AUTH_BROKER_URL` is set and no token is available from `auth.broker.token` or `<config-dir>/auth-broker.token`       | Resolution: this env → `auth.broker.token` (`$ENV_NAME` indirection supported) → `<config-dir>/auth-broker.token` (mode `0600`). `<config-dir>` is `~/.ompk/` (respecting `PI_CONFIG_DIR`). |
 | `OMP_AUTH_BROKER_SNAPSHOT_TTL_MS` | Freshness window for the encrypted local broker snapshot cache | Optional in broker mode | Default `3600000` (1 h). Freshness is based on broker `snapshot.generatedAt`; `0` disables cache reads/writes and forces the old blocking fetch every startup. |
-| `OMP_AUTH_BROKER_SNAPSHOT_CACHE` | Path to the encrypted local broker snapshot cache | Optional in broker mode | Defaults to `~/.omp/cache/auth-broker-snapshot.enc` (or XDG cache equivalent). Useful for tests, ephemeral hosts, or relocating the `0600` cache file. |
+| `OMP_AUTH_BROKER_SNAPSHOT_CACHE` | Path to the encrypted local broker snapshot cache | Optional in broker mode | Defaults to `~/.ompk/cache/auth-broker-snapshot.enc` (or XDG cache equivalent). Useful for tests, ephemeral hosts, or relocating the `0600` cache file. |
 
 The gateway has no dedicated env vars — it inherits `OMP_AUTH_BROKER_*`. Its own inbound bearer token lives at `<config-dir>/auth-gateway.token` and is managed via `oh-my-pk auth-gateway token`.
 
@@ -248,7 +248,7 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 | `SEARXNG_ENDPOINT`, `SEARXNG_TOKEN`                 | SearXNG endpoint and optional bearer token                    |
 | `SEARXNG_BASIC_USERNAME`, `SEARXNG_BASIC_PASSWORD`  | SearXNG HTTP Basic Auth credentials                           |
 
-SearXNG also reads the equivalent `searxng.endpoint`, `searxng.token`, `searxng.basicUsername`, and `searxng.basicPassword` settings from `~/.omp/agent/config.yml`; environment variables are fallbacks.
+SearXNG also reads the equivalent `searxng.endpoint`, `searxng.token`, `searxng.basicUsername`, and `searxng.basicPassword` settings from `~/.ompk/agent/config.yml`; environment variables are fallbacks.
 
 ### Anthropic web search auth chain
 
@@ -350,10 +350,10 @@ These are consumed via `@pk-nerdsaver-ai/pi-utils/dirs` and affect where coding-
 
 | Variable              | Default / behavior                                                            |
 | --------------------- | ----------------------------------------------------------------------------- |
-| `PI_CONFIG_DIR`       | Config root dirname under home (default `.omp`)                               |
-| `PI_CODING_AGENT_DIR` | Full override for agent directory (default `~/<PI_CONFIG_DIR or .omp>/agent`) |
+| `PI_CONFIG_DIR`       | Config root dirname under home (default `.ompk`)                               |
+| `PI_CODING_AGENT_DIR` | Full override for agent directory (default `~/<PI_CONFIG_DIR or .ompk>/agent`) |
 | `PWD`                 | Used when matching canonical current working directory in path helpers        |
-| `OMPK_REMOTE_DB`      | SQLite path for phase-1 remote-workspace jobs (default `~/.omp/remote-jobs.sqlite`) |
+| `OMPK_REMOTE_DB`      | SQLite path for phase-1 remote-workspace jobs (default `~/.ompk/remote-jobs.sqlite`) |
 | `OMPK_ENVIRONMENTS_CLOUD_ROOT` | Override MSI-local environments-cloud (pkscloudenvs) root; default `C:\dev\desktop-infra\environments-cloud`. Used by remote-workspace resolvers and coding-agent skill auto-routing. |
 | `PKS_ENVIRONMENTS_CLOUD_ROOT` | Secondary override when `OMPK_ENVIRONMENTS_CLOUD_ROOT` is unset |
 

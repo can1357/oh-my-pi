@@ -30,7 +30,7 @@ cli=$scripts_dir/../src/cli.ts
 preload=$scripts_dir/omp.ts
 timing_preload=$scripts_dir/../../utils/src/module-timer.ts
 
-launch_dir=${OMP_DEV_LAUNCH_DIR:-${HOME}/.omp/.dev-cwd}
+launch_dir=${OMP_DEV_LAUNCH_DIR:-${HOME}/.ompk/.dev-cwd}
 mkdir -p "$launch_dir"
 
 OMP_LAUNCH_CWD=$PWD

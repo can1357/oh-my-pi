@@ -57,7 +57,7 @@ describe("enumeratePythonRuntimes", () => {
 		vi.restoreAllMocks();
 	});
 
-	const managedDir = path.join(path.sep, "fake", ".omp", "python-env");
+	const managedDir = path.join(path.sep, "fake", ".ompk", "python-env");
 	const managedBin = path.join(managedDir, process.platform === "win32" ? "Scripts" : "bin");
 	const managedPy = path.join(managedBin, process.platform === "win32" ? "python.exe" : "python");
 	const systemPy = path.join(path.sep, "usr", "bin", "python3");

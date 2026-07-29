@@ -25,16 +25,16 @@ OMP merges LSP config from multiple files, lowest to highest priority:
 | ----------- | --------------------------------------------------------------------------------------------------------------------------- |
 | 5 (lowest)  | `~/lsp.json`, `~/.lsp.json`, `~/lsp.yaml`, `~/.lsp.yaml`, `~/lsp.yml`, `~/.lsp.yml`                                         |
 | 4           | Plugin LSP configs (marketplace / `--plugin-dir` roots)                                                                     |
-| 3           | User config dirs: `~/.omp/agent/lsp.*`, `~/.claude/lsp.*`, `~/.codex/lsp.*`, `~/.gemini/lsp.*`                              |
-| 2           | Project config dirs: `<project>/.omp/lsp.*`, `<project>/.claude/lsp.*`, `<project>/.codex/lsp.*`, `<project>/.gemini/lsp.*` |
+| 3           | User config dirs: `~/.ompk/agent/lsp.*`, `~/.claude/lsp.*`, `~/.codex/lsp.*`, `~/.gemini/lsp.*`                              |
+| 2           | Project config dirs: `<project>/.ompk/lsp.*`, `<project>/.claude/lsp.*`, `<project>/.codex/lsp.*`, `<project>/.gemini/lsp.*` |
 | 1 (highest) | Project root: `<project>/lsp.*` and `<project>/.lsp.*`                                                                      |
 
 Each location accepts `.json`, `.yaml`, and `.yml` variants, including hidden-file versions (`.lsp.json`, `.lsp.yaml`, `.lsp.yml`). Files are merged in order: higher-priority files override lower-priority fields for the same server. Servers not mentioned in any override file remain at their built-in defaults.
 
 **Recommended locations:**
 
-- User-wide preferences → `~/.omp/agent/lsp.json`
-- Project-specific overrides → `<project>/.omp/lsp.json`
+- User-wide preferences → `~/.ompk/agent/lsp.json`
+- Project-specific overrides → `<project>/.ompk/lsp.json`
 
 > **Note:** Auto-detection is skipped only when at least one config file contributes server overrides. A config file that only sets `idleTimeoutMs` still lets OMP auto-detect built-in servers. When server overrides exist, OMP merges them with defaults and then loads servers that have matching `rootMarkers`, an available binary, and are not explicitly `disabled`.
 
@@ -166,7 +166,7 @@ Shut down language servers that have been inactive for more than five minutes:
 
 ### Disable a server for one project, keep it globally
 
-Place the override in `<project>/.omp/lsp.json`:
+Place the override in `<project>/.ompk/lsp.json`:
 
 ```json
 {
@@ -178,7 +178,7 @@ Place the override in `<project>/.omp/lsp.json`:
 }
 ```
 
-The user-level config in `~/.omp/agent/lsp.json` is unaffected; pylsp is only suppressed in this project.
+The user-level config in `~/.ompk/agent/lsp.json` is unaffected; pylsp is only suppressed in this project.
 
 ## Built-in server list
 

@@ -7,7 +7,7 @@ You are the parallel-builder+remediation sub-agent for oh-my-pi-fork at `C:/dev/
 **Read first** (each in full):
 - `.prd/small-model-orchestration-overview.md`
 - `.prd/small-model-orchestration-A-foundations.md`
-- `.omp/mapreduce/small-model-orchestration/implementation-inventory.md` — INV-09
+- `.ompk/mapreduce/small-model-orchestration/implementation-inventory.md` — INV-09
 - `packages/llm-router-agent/src/extension.ts`
 - `packages/llm-router-agent/src/policy.ts`
 - `packages/coding-agent/src/extensibility/extensions/types.ts` — read-only future hook seam; do not edit

@@ -3,7 +3,7 @@
 Combined artifact. Originally produced as two cross-referencing files
 (`docs/build-deployment-tooling-fixes-prompt.md` and
 `docs/build-deployment-tooling-verifier-prompt.md`) by `prompt-optimizer`.
-Preserved verbatim under `.omp/agents/` so the cross-reference resolves
+Preserved verbatim under `.ompk/agents/` so the cross-reference resolves
 inside one file and the prompts sit with the rest of the harness's
 agent metadata rather than in `docs/`.
 

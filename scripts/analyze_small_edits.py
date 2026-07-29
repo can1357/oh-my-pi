@@ -84,7 +84,7 @@ class RunStats:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze small edit/ast_edit tool usage in session logs.")
-    parser.add_argument("--sessions-dir", type=Path, default=Path.home() / ".omp" / "agent" / "sessions")
+    parser.add_argument("--sessions-dir", type=Path, default=Path.home() / ".ompk" / "agent" / "sessions")
     parser.add_argument("--sample-size", type=positive_int, default=30)
     parser.add_argument("--max-files", type=positive_int, default=500)
     parser.add_argument("--since-days", type=positive_int, default=30)

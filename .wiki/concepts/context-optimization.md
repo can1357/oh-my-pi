@@ -33,7 +33,7 @@ The dominant variable is usually the **active tool schema block**: exposing ever
 
 `tools.discoveryMode: all` keeps only a small essential set (`read`, `bash`, `edit`, `find`, `search`, `write`, `todo`) plus the `search_tool_bm25` coordinator active. Specialized tools are retrieved on demand via `search_tool_bm25`.
 
-- Location: `~/.omp/agent/config.yml`
+- Location: `~/.ompk/agent/config.yml`
 - Default in schema: already `all`, but writing it explicitly makes the behavior permanent and visible.
 
 ```yaml

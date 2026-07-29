@@ -26,7 +26,7 @@ submit → authorize → provision → clone → install → run_agent
   → validate → checkpoint → clean → succeed | fail
 ```
 
-- State machine + durable SQLite job store (`JobStore`, default `~/.omp/remote-jobs.sqlite`, override `OMPK_REMOTE_DB`).
+- State machine + durable SQLite job store (`JobStore`, default `~/.ompk/remote-jobs.sqlite`, override `OMPK_REMOTE_DB`).
 - Backend interface `ExecutionBackend`; only `MsiDockerBackend` is implemented.
 - Cleanup runs on success, failure, timeout, and cancel paths and records cleanup proof (container/volume/network gone).
 

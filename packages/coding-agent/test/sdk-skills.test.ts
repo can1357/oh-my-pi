@@ -49,13 +49,13 @@ describe("createAgentSession skills option", () => {
 
 	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-sdk-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		// Create skill in .omp/skills/ for native project-level discovery
-		skillsDir = path.join(tempDir, ".omp", "skills", "test-skill");
+		// Create skill in .ompk/skills/ for native project-level discovery
+		skillsDir = path.join(tempDir, ".ompk", "skills", "test-skill");
 		fs.mkdirSync(skillsDir, { recursive: true });
 		originalHome = process.env.HOME;
 		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sdk-home-"));
 		process.env.HOME = tempHomeDir;
-		const nativeUserSkillsDir = path.join(tempHomeDir, ".omp", "agent", "skills");
+		const nativeUserSkillsDir = path.join(tempHomeDir, ".ompk", "agent", "skills");
 		fs.mkdirSync(nativeUserSkillsDir, { recursive: true });
 
 		// Create a test skill in the pi skills directory
@@ -118,7 +118,7 @@ Loaded via symbolic link.
 	});
 
 	it("should still discover project skills when user skills directory is missing", async () => {
-		const userAgentDir = path.join(tempHomeDir, ".omp", "agent");
+		const userAgentDir = path.join(tempHomeDir, ".ompk", "agent");
 		removeSyncWithRetries(path.join(userAgentDir, "skills"));
 		fs.writeFileSync(path.join(userAgentDir, "placeholder.txt"), "placeholder");
 

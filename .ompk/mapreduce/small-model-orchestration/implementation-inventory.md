@@ -14,7 +14,7 @@ Source: six `mr-worker` shards reduced by `OrchestrationReducer` at commit `1555
 | Router extension policy | 4 | 1 | 3 |
 | **Total** | **26** | **4** | **22** |
 
-Coverage equation: **26 = 4 + 22**. The finite queue is `.omp/mapreduce/small-model-orchestration/small-model-orchestration.batches.json`.
+Coverage equation: **26 = 4 + 22**. The finite queue is `.ompk/mapreduce/small-model-orchestration/small-model-orchestration.batches.json`.
 
 ## Existing mechanisms to preserve
 

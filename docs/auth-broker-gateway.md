@@ -142,7 +142,7 @@ The 15 s client window deliberately sits below the broker’s 5 min server cache
 
 ## Client snapshot cache
 
-`discoverAuthStorage()` persists the broker snapshot to `~/.omp/cache/auth-broker-snapshot.enc` after the initial `/v1/snapshot` fetch and after later broker-sourced full snapshots. The file is AES-256-GCM encrypted with `SHA-256(OMP_AUTH_BROKER_TOKEN)` and authenticated with the broker URL as additional data, so changing either the token or URL makes the cache unreadable. The file is written atomically with mode `0600`.
+`discoverAuthStorage()` persists the broker snapshot to `~/.ompk/cache/auth-broker-snapshot.enc` after the initial `/v1/snapshot` fetch and after later broker-sourced full snapshots. The file is AES-256-GCM encrypted with `SHA-256(OMP_AUTH_BROKER_TOKEN)` and authenticated with the broker URL as additional data, so changing either the token or URL makes the cache unreadable. The file is written atomically with mode `0600`.
 
 Freshness is anchored to the broker-stamped `snapshot.generatedAt`, not local write time. Default TTL is 1 h (`OMP_AUTH_BROKER_SNAPSHOT_TTL_MS`); `0` disables the cache and restores the old always-fetch boot path. When the cached snapshot is still fresh, `omp` boots from it and skips the blocking `/v1/snapshot` query. `RemoteAuthCredentialStore` still starts its normal SSE / long-poll background sync immediately, so deleted or rotated credentials reconcile after startup, and expired OAuth access tokens still refresh through `POST /v1/credential/:id/refresh`.
 
@@ -159,7 +159,7 @@ The broker is **off** unless `OMP_AUTH_BROKER_URL` (or `auth.broker.url` in `con
 | `OMP_AUTH_BROKER_URL`   | Base URL of the remote auth-broker (e.g. `https://broker.tailnet:8765`). Selecting this puts the client in broker mode — local SQLite is bypassed. | Any time the omp client should resolve credentials through a broker (and required by `oh-my-pk auth-gateway serve`).           |
 | `OMP_AUTH_BROKER_TOKEN` | Bearer token used for every broker endpoint except `/v1/healthz`.                                                                                  | When `OMP_AUTH_BROKER_URL` is set and no token is available from `auth.broker.token` or `<config-dir>/auth-broker.token`. |
 | `OMP_AUTH_BROKER_SNAPSHOT_TTL_MS` | Freshness window for the encrypted local snapshot cache. Default `3600000` (1 h); `0` disables cache reads and writes. | Optional in broker mode. |
-| `OMP_AUTH_BROKER_SNAPSHOT_CACHE`  | Path override for the encrypted local snapshot cache. Default `~/.omp/cache/auth-broker-snapshot.enc` (or XDG cache equivalent). | Optional in broker mode. |
+| `OMP_AUTH_BROKER_SNAPSHOT_CACHE`  | Path override for the encrypted local snapshot cache. Default `~/.ompk/cache/auth-broker-snapshot.enc` (or XDG cache equivalent). | Optional in broker mode. |
 
 Resolution order in `resolveAuthBrokerConfig()`:
 
@@ -183,7 +183,7 @@ The gateway has no dedicated env vars — it inherits `OMP_AUTH_BROKER_*` becaus
 | `<config-dir>/auth-broker.token`  | `oh-my-pk auth-broker serve` (created at first start)     | `0600` in a `0700` parent dir |
 | `<config-dir>/auth-gateway.token` | `oh-my-pk auth-gateway serve` (skipped under `--no-auth`) | `0600` in a `0700` parent dir |
 
-`<config-dir>` resolves to `~/.omp/` (respecting `PI_CONFIG_DIR`).
+`<config-dir>` resolves to `~/.ompk/` (respecting `PI_CONFIG_DIR`).
 
 ## Interaction with the local API-key resolution order
 

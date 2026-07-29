@@ -14,7 +14,7 @@
  *   against `bun:sqlite`.
  *
  * Tool artifacts and image blobs are out of scope: `ArtifactManager` /
- * `BlobStore` keep writing to `~/.omp/agent/...`. Reach for object storage
+ * `BlobStore` keep writing to `~/.ompk/agent/...`. Reach for object storage
  * if you need those off-host too.
  */
 

@@ -529,7 +529,7 @@ That gives you better cost control than “maximize fan-out.”
 2. Add failure modes and non-solutions to assignment formatting.
 3. Inject the active task contract into the advisor.
 4. Add auditor and falsifier role templates.
-5. Add project-level OMPK risks to `.omp/WATCHDOG.md`.
+5. Add project-level OMPK risks to `.ompk/WATCHDOG.md`.
 
 ## Phase 2 — typed harness changes
 

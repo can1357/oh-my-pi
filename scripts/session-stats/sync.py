@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Sync ~/.omp/agent/sessions/**/*.jsonl into ~/.omp/stats.db (ss_* tables).
+Sync ~/.ompk/agent/sessions/**/*.jsonl into ~/.ompk/stats.db (ss_* tables).
 
 Incremental: per-file byte offset + mtime is tracked in ss_sessions. Only new
 bytes are parsed on re-runs. Tokenization (o200k_base) and the hashline edit
@@ -49,8 +49,8 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 # Config
 
-SESSIONS_ROOT = Path.home() / ".omp" / "agent" / "sessions"
-DB_PATH = Path.home() / ".omp" / "stats.db"
+SESSIONS_ROOT = Path.home() / ".ompk" / "agent" / "sessions"
+DB_PATH = Path.home() / ".ompk" / "stats.db"
 TOKENIZER_NAME = "o200k_base"
 SCHEMA_VERSION = 3
 # Bump whenever parse_hashline_input / find_longest_repeat / duplicated_anchors

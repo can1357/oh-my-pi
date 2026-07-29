@@ -5,15 +5,15 @@
 Implement a boundary-resolved orchestration layer so light models operate inside a deterministic exoskeleton while frontier models retain broad planning and swarm autonomy. Parallel dispatch is justified because the MapReduce audit isolated three disjoint feature bundles—contracts/recovery/observability, tool/collaboration policy, and optional spawn-only routing—behind one solo contract phase and one serial runtime-integration gate.
 
 Authoritative inputs:
-- `.omp/mapreduce/small-model-orchestration/small-model-orchestration.selectors.md`
-- `.omp/mapreduce/small-model-orchestration/small-model-orchestration.batches.json`
-- `.omp/mapreduce/small-model-orchestration/implementation-inventory.md`
+- `.ompk/mapreduce/small-model-orchestration/small-model-orchestration.selectors.md`
+- `.ompk/mapreduce/small-model-orchestration/small-model-orchestration.batches.json`
+- `.ompk/mapreduce/small-model-orchestration/implementation-inventory.md`
 - `.prd/small-model-orchestration-ownership.json`
 
 Coverage: 26 deterministic signals; 4 cleared and 22 confirmed. Remote owner semantics (INV-07) are deferred until product policy is chosen. Per-turn routing remains a non-goal.
 
 Before worktree dispatch:
-1. Commit this `.prd/` set and `.omp/mapreduce/small-model-orchestration/` artifacts so every worktree can read them.
+1. Commit this `.prd/` set and `.ompk/mapreduce/small-model-orchestration/` artifacts so every worktree can read them.
 2. Record the committed baseline with `git update-ref refs/omp/orchestration/small-model-baseline HEAD`; final union audits use this ref.
 3. Run `git config core.longpaths true` on Windows.
 4. Place A–D worktrees beside the repo, e.g. `C:/dev/desktop-projects/_wt-omp-orch-a`, not inside nested artifact directories.
@@ -70,7 +70,7 @@ Lane E may import and wire A–D exports but MUST NOT edit their owned modules. 
 
 ## 5. Execution sequence
 
-1. **Bootstrap:** commit `.prd/` and `.omp/mapreduce/small-model-orchestration/`; confirm every existing owned path is tracked, then run `git update-ref refs/omp/orchestration/small-model-baseline HEAD`.
+1. **Bootstrap:** commit `.prd/` and `.ompk/mapreduce/small-model-orchestration/`; confirm every existing owned path is tracked, then run `git update-ref refs/omp/orchestration/small-model-baseline HEAD`.
 2. **Phase 0:** dispatch Lane A alone. Block, review its exported contracts, commit, merge/fast-forward into `main`.
 3. **Phase 1:** create three worktrees from the post-A commit. Dispatch B, C, and D in one `task` call. Each agent receives its lane PRD and overview; no dependency-backed gates.
 4. **Phase 1.5:** merge B, C, D sequentially with `git merge --no-ff`. Disjoint ownership means any conflict is a planning failure. Reconcile exports only by returning a defect to its owner; no suppression bridge is expected.

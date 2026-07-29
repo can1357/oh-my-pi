@@ -14,7 +14,7 @@ describe("contextFileCapability.key", () => {
 	const key = contextFileCapability.key.bind(contextFileCapability);
 
 	test("user-level files share the same key regardless of depth", () => {
-		const a = makeContextFile({ path: "/home/user/.omp/agent/AGENTS.md", level: "user" });
+		const a = makeContextFile({ path: "/home/user/.ompk/agent/AGENTS.md", level: "user" });
 		const b = makeContextFile({ path: "/home/user/.claude/CLAUDE.md", level: "user" });
 		expect(key(a)).toBe("user");
 		expect(key(b)).toBe("user");
@@ -44,7 +44,7 @@ describe("contextFileCapability.key", () => {
 	});
 
 	test("user key never collides with any project key", () => {
-		const user = makeContextFile({ path: "/home/user/.omp/AGENTS.md", level: "user" });
+		const user = makeContextFile({ path: "/home/user/.ompk/AGENTS.md", level: "user" });
 		for (let depth = 0; depth < 20; depth++) {
 			const project = makeContextFile({ path: `/repo/AGENTS.md`, level: "project", depth });
 			expect(key(user)).not.toBe(key(project));

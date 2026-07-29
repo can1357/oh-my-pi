@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TARGET="${1:-$PWD/.omp/extensions/llm-router-agent-tooluse}"
+TARGET="${1:-$PWD/.ompk/extensions/llm-router-agent-tooluse}"
 
 npm --prefix "$ROOT" run build
 mkdir -p "$TARGET"

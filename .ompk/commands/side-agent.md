@@ -28,8 +28,8 @@ This is unambiguous: only an exact match to one of the five role aliases selects
 
 Apply the role-selection table above.
 
-- **Sub-agent** → read `.omp/skills/side-agent/SUB-AGENT.md` and follow the sub-agent protocol.
-- **Main-agent** → read `.omp/skills/side-agent/MAIN-AGENT.md` and follow the main agent protocol, using the work description (if any).
+- **Sub-agent** → read `.ompk/skills/side-agent/SUB-AGENT.md` and follow the sub-agent protocol.
+- **Main-agent** → read `.ompk/skills/side-agent/MAIN-AGENT.md` and follow the main agent protocol, using the work description (if any).
 
 ### 2. Main agent path
 
@@ -92,4 +92,4 @@ The agent asks the user what work to coordinate, then proceeds with the main age
 - The coordination is entirely file-based. No IPC, no sockets, no extensions required.
 - Use portable atomic primitives only: POSIX `mkdir` / PowerShell `New-Item -ErrorAction Stop` for claims; POSIX `mv -n` / PowerShell `Move-Item -ErrorAction Stop` for fencing renames; temp-write+replace for heartbeat/result rewrites. Never use cmd.exe `mkdir`.
 - After a fencing rename, verify source absence, destination presence, and the expected claim token; command exit status alone is not proof (`mv -n` can skip with success).
-- Full protocol spec: [PROTOCOL.md](../skills/side-agent/PROTOCOL.md) (also reachable as `.omp/skills/side-agent/PROTOCOL.md` from the workspace root).
+- Full protocol spec: [PROTOCOL.md](../skills/side-agent/PROTOCOL.md) (also reachable as `.ompk/skills/side-agent/PROTOCOL.md` from the workspace root).

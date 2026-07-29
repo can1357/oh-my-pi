@@ -24,13 +24,13 @@ Study the repo and author **selectors**: relevance tests concrete enough to run 
 Rules:
 - Each selector targets one concept the task cares about (e.g. "deserialization sinks", "callers of the deprecated API"). Name it.
 - Test each selector against at least one known-positive example before trusting it. Completeness rests entirely on selector recall — a file no selector matches never gets investigated.
-- **Persist selectors** (when the session allows writes) to `.omp/mapreduce/<task-name>.selectors.md` (name, tool, exact pattern, rationale) so re-runs and reviewers can inspect, test, and tune them. In read-only sessions, include the selector table in your final report instead.
+- **Persist selectors** (when the session allows writes) to `.ompk/mapreduce/<task-name>.selectors.md` (name, tool, exact pattern, rationale) so re-runs and reviewers can inspect, test, and tune them. In read-only sessions, include the selector table in your final report instead.
 
 ## Stage 2 — Shard (deterministic, no model)
 
 1. Run every selector over the repo. Each match is a **signal**: `{file, line, selector, evidence}`.
 2. Drop files with zero signals — they never reach the Map stage.
-3. Group signals into **bounded batches**: target 10–20 signals or ≤ ~8 files per batch; keep same-file signals in one batch. Write batches to a scratch file (e.g. `.omp/mapreduce/<task-name>.batches.json`) when writes are allowed; otherwise inline each batch directly in its worker assignment.
+3. Group signals into **bounded batches**: target 10–20 signals or ≤ ~8 files per batch; keep same-file signals in one batch. Write batches to a scratch file (e.g. `.ompk/mapreduce/<task-name>.batches.json`) when writes are allowed; otherwise inline each batch directly in its worker assignment.
 
 The finite batch queue IS the coverage guarantee: the run is complete when the queue is exhausted, not when an agent feels done.
 

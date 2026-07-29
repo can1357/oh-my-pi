@@ -10,7 +10,7 @@ Which layer owns which rules — avoid duplicating the same instruction in multi
 | `task.md` (tool schema) | Delegation protocol, independence vs fan-out, assignment formatting, work-class verification | Immutable child acceptance checks |
 | Assignment contract (`assignment-contract/v1+`) | Immutable child objective, scope, procedures, acceptance | Parent orchestration portfolio, advisor general review |
 | Advisor prompt | Adversarial review behavior, contract watchdog when `<active-task-contract>` is present | Executor instructions, child yield schema |
-| `.omp/WATCHDOG.md` | Persistent project-specific reviewer traps (advisor-only) | Task-specific criteria (inject dynamically) |
+| `.ompk/WATCHDOG.md` | Persistent project-specific reviewer traps (advisor-only) | Task-specific criteria (inject dynamically) |
 | Agent templates (`prompts/agents/*.md`) | Worker-mode identity (`explore`, `falsify`, `audit`, …) | Parent batch context policy |
 | Triggered rules / hindsight | Rare course correction, durable learned facts | Standing completion criteria |
 

@@ -61,10 +61,10 @@ RUN pip install --no-cache-dir \
 # Host agent config is mounted read-only under /srv/agent-home-stage with
 # host-controlled permissions. The entrypoint copies it into root-owned
 # world-readable files under /srv/agent-home; the agent subprocess runs with
-# HOME=/srv/agent-home, so ~/.omp and ~/.agent resolve there without exposing
+# HOME=/srv/agent-home, so ~/.ompk and ~/.agent resolve there without exposing
 # mutable host mounts.
-RUN mkdir -p /srv/agent-home/.agent /srv/agent-home/.omp/agent \
-    && mkdir -p /srv/agent-home-stage/.agent /srv/agent-home-stage/.omp/agent \
+RUN mkdir -p /srv/agent-home/.agent /srv/agent-home/.ompk/agent \
+    && mkdir -p /srv/agent-home-stage/.agent /srv/agent-home-stage/.ompk/agent \
     && printf '[install]\nbackend = "copyfile"\n' > /srv/agent-home/.bunfig.toml
 
 COPY python/robomp/entrypoint.sh /usr/local/bin/robomp-entrypoint

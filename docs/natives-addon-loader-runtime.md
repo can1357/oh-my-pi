@@ -38,7 +38,7 @@ At module initialization, `native/index.js` computes:
     - Non-Windows: `~/.local/bin`.
 - **Natives cache root** (`getNativesDir()`):
   - if `$XDG_DATA_HOME/omp` exists, `$XDG_DATA_HOME/omp/natives`;
-  - otherwise `~/.omp/natives`.
+  - otherwise `~/.ompk/natives`.
 - **Compiled-binary mode** (`detectCompiledBinary`): true if any of:
   - embedded-addon manifest is non-null,
   - `PI_COMPILED` env var is set,

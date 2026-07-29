@@ -162,7 +162,7 @@ npm run build
 Then either add the built extension directly:
 
 ```yaml
-# .omp/config.yml or ~/.omp/agent/config.yml
+# .ompk/config.yml or ~/.ompk/agent/config.yml
 extensions:
   - /absolute/path/to/llm-router-agent-tooluse/dist/extension.js
 ```
@@ -170,7 +170,7 @@ extensions:
 or copy the whole package directory into a discovered extension path:
 
 ```text
-<repo>/.omp/extensions/llm-router-agent-tooluse/
+<repo>/.ompk/extensions/llm-router-agent-tooluse/
   package.json
   dist/extension.js
   dist/**/*.js
@@ -223,7 +223,7 @@ Config lookup order:
 1. `LLM_ROUTER_CONFIG=/path/to/config.json`
 2. `<cwd>/.llm-router/config.json`
 3. `<cwd>/.llm-router.json`
-4. `~/.omp/agent/llm-router.json`
+4. `~/.ompk/agent/llm-router.json`
 5. built-in defaults
 
 ## CLI commands

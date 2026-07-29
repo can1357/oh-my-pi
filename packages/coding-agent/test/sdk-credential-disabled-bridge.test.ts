@@ -98,7 +98,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 		agentDir: dirs.agentDir,
 		authStorage,
 		// Pin the model registry at a temp models.json. Without an explicit path, ModelRegistry
-		// loads the developer's real ~/.omp models config on every construction (~100ms each,
+		// loads the developer's real ~/.ompk models config on every construction (~100ms each,
 		// and non-isolated). Pointing it at the (absent) temp file keeps construction at ~2ms and
 		// avoids leaking host config into the test. Providing the registry also skips the
 		// fire-and-forget background model discovery, which is irrelevant to credential_disabled.

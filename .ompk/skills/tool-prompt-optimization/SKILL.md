@@ -14,7 +14,7 @@ Core move: give a model only `(name, JSON schema, outline)` and have it predict 
 `scripts/probe.ts` routes through `@pk-nerdsaver-ai/pi-ai` (`completeSimple`) so model/auth/provider behavior matches production.
 
 ```bash
-bun .omp/skills/tool-prompt-optimization/scripts/probe.ts \
+bun .ompk/skills/tool-prompt-optimization/scripts/probe.ts \
   --schema <file|json> --template <file|text> --name <tool_name>
 ```
 
@@ -28,7 +28,7 @@ bun .omp/skills/tool-prompt-optimization/scripts/probe.ts \
 Skip building the two inputs by hand — `scripts/probe-builtin.ts` instantiates the live tool, pulls the EXACT wire schema (`toolWireSchema`) and rendered prompt (`tool.description`), and derives the outline for you:
 
 ```bash
-bun .omp/skills/tool-prompt-optimization/scripts/probe-builtin.ts --tool <name> [--no-summary] [--show]
+bun .ompk/skills/tool-prompt-optimization/scripts/probe-builtin.ts --tool <name> [--no-summary] [--show]
 ```
 
 - `--show` prints the resolved schema + derived outline + real prompt and exits (no API calls) — use it to eyeball inputs before spending tokens.

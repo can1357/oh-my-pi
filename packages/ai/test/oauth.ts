@@ -1,5 +1,5 @@
 /**
- * Test helper for resolving API keys from ~/.omp/agent/testauth.db
+ * Test helper for resolving API keys from ~/.ompk/agent/testauth.db
  *
  * Supports both API key and OAuth credentials.
  * OAuth tokens are automatically refreshed if expired and saved back to testauth.db.
@@ -58,7 +58,7 @@ async function saveAuthStorage(storage: AuthStorage): Promise<void> {
 }
 
 /**
- * Resolve API key for a provider from ~/.omp/agent/testauth.db
+ * Resolve API key for a provider from ~/.ompk/agent/testauth.db
  *
  * For API key credentials, returns the key directly.
  * For OAuth credentials, returns the access token (refreshing if expired and saving back).

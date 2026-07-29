@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Token-usage audit over the local omp session corpus (~/.omp/agent/sessions/).
+ * Token-usage audit over the local omp session corpus (~/.ompk/agent/sessions/).
  *
  * Phase 1 (scan, no LLM): walks recent sessions, sums *real* per-request usage
  * (input/output/cacheRead/cacheWrite + nominal cost recorded in each assistant
@@ -23,7 +23,7 @@
  *   bun scripts/session-stats/audit.ts --json out.json
  *
  * Auth: resolves an API key for the classifier provider through omp's auth
- * storage (~/.omp/agent/agent.db: stored key, OAuth, or env var fallback).
+ * storage (~/.ompk/agent/agent.db: stored key, OAuth, or env var fallback).
  */
 
 import type { Dirent } from "node:fs";
@@ -44,9 +44,9 @@ import { type GeneratedProvider, getBundledModel } from "@pk-nerdsaver-ai/pi-cat
 import { getAgentDbPath, isEnoent } from "@pk-nerdsaver-ai/pi-utils";
 import SYSTEM_PROMPT from "./audit-prompt.md" with { type: "text" };
 
-const SESSIONS_ROOT = path.join(os.homedir(), ".omp", "agent", "sessions");
+const SESSIONS_ROOT = path.join(os.homedir(), ".ompk", "agent", "sessions");
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
-const CACHE_PATH = path.join(os.homedir(), ".omp", "stats-audit-cache.json");
+const CACHE_PATH = path.join(os.homedir(), ".ompk", "stats-audit-cache.json");
 
 // --------------------------------------------------------------------------
 // CLI
@@ -106,7 +106,7 @@ function parseCli(argv: string[]): CliOptions {
 	});
 	if (values.help) {
 		console.log(
-			`session audit — token usage analysis over ~/.omp/agent/sessions\n\n` +
+			`session audit — token usage analysis over ~/.ompk/agent/sessions\n\n` +
 				`  --since <12h|3d|1w|1mo>  window by session mtime (default 1w)\n` +
 				`  --folder <substr>        only folders containing substring\n` +
 				`  --exclude <substr>       drop folders containing substring\n` +
@@ -117,7 +117,7 @@ function parseCli(argv: string[]): CliOptions {
 				`  --json <file>            write full machine-readable results\n` +
 				`  --digest-dir <dir>       dump per-session digests fed to the model\n` +
 				`  --session <substr>       classify sessions whose id/title matches (ignores --min-cost)\n` +
-				`  --no-cache               skip the verdict cache (~/.omp/stats-audit-cache.json)\n` +
+				`  --no-cache               skip the verdict cache (~/.ompk/stats-audit-cache.json)\n` +
 				`  --no-llm                 scan + report only\n` +
 				`  --limit <n>              scan at most n session groups (debug)`,
 		);

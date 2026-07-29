@@ -2,7 +2,7 @@
 """
 Replay-based optimizer for the read tool's config.
 
-Inputs (from ~/.omp/stats.db, since --since):
+Inputs (from ~/.ompk/stats.db, since --since):
   * every `read` call's args  (selector / offset / limit / bare)
   * every result's `[Showing lines A-B of N]` footer  → actual returned
     range AND the file's total line count
@@ -40,7 +40,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
 
-DB_PATH = Path.home() / ".omp" / "stats.db"
+DB_PATH = Path.home() / ".ompk" / "stats.db"
 OUT_DIR = Path(__file__).resolve().parent / "out"
 DEFAULT_SINCE = "2026-05-04"
 

@@ -287,7 +287,7 @@ describe("MarketplacePluginDetailComponent", () => {
 
 	it("shortens home-relative install paths to ~ before rendering", () => {
 		const home = os.homedir();
-		const installPath = `${home}/.omp/cache/plugins/sample@mkt`;
+		const installPath = `${home}/.ompk/cache/plugins/sample@mkt`;
 		const plugin = marketplace("sample@mkt", { entry: { installPath } });
 
 		const component = new MarketplacePluginDetailComponent(plugin, {
@@ -298,7 +298,7 @@ describe("MarketplacePluginDetailComponent", () => {
 		const text = stripVTControlCharacters(component.render(120).join("\n"));
 		// `shortenPath` keeps the rest of the path intact but replaces $HOME with `~`,
 		// so the user's home directory never leaks into the rendered TUI surface.
-		expect(text).toContain("~/.omp/cache/plugins/sample@mkt");
+		expect(text).toContain("~/.ompk/cache/plugins/sample@mkt");
 		expect(text).not.toContain(home);
 	});
 });

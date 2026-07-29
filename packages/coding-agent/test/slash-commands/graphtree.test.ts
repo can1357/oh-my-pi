@@ -76,7 +76,7 @@ function lastStatusText(showStatus: ReturnType<typeof vi.fn>): string {
  * `getWorktreesDir()` resolves `OMP_WORKTREE_DIR` first, ahead of any on-disk
  * default or override, so pointing it at a per-test temp dir is sufficient to
  * isolate every graphtree worktree operation from the developer's real
- * `~/.omp/wt` without touching internal resolver state.
+ * `~/.ompk/wt` without touching internal resolver state.
  */
 async function setupWorktreeBase(): Promise<{ base: string; cleanup: () => Promise<void> }> {
 	const base = await fs.mkdtemp(path.join(os.tmpdir(), "graphtree-wtbase-"));

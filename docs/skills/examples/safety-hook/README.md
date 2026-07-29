@@ -11,7 +11,7 @@ An `oh-my-pi` extension that demonstrates `tool_call` blocking. It intercepts `b
 ## Install
 
 ```
-cp -r . ~/.omp/agent/extensions/safety-hook
+cp -r . ~/.ompk/agent/extensions/safety-hook
 ```
 
 Restart `omp`. The hook is active for all sessions.

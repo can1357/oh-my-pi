@@ -10,7 +10,7 @@ You are the acceptance-gate sub-agent for oh-my-pi-fork in the dependency-bearin
 - `.prd/small-model-orchestration-B-contracts-recovery.md`
 - `.prd/small-model-orchestration-C-tool-collaboration.md`
 - `.prd/small-model-orchestration-D-router-adapter.md`
-- `.omp/mapreduce/small-model-orchestration/implementation-inventory.md` — INV-10
+- `.ompk/mapreduce/small-model-orchestration/implementation-inventory.md` — INV-10
 - every Lane A–D final report and any `findings-*.md` fragment in the worktree
 - `AGENTS.md` — repository development and verification rules
 

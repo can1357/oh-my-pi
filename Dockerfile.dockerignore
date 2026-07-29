@@ -15,7 +15,7 @@ runs/
 .wt/
 .opencode/
 .pi_config/
-.omp/plugins/
+.ompk/plugins/
 
 # VCS, editors, IDEs — irrelevant to the build, churn on every IDE keystroke.
 .git/

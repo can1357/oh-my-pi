@@ -126,7 +126,7 @@ def _stage_agent_home() -> None:
     if not _AGENT_HOME_STAGE.exists():
         return
 
-    for rel in (Path(".agent"), Path(".omp/agent")):
+    for rel in (Path(".agent"), Path(".ompk/agent")):
         src = _AGENT_HOME_STAGE / rel
         if not src.exists():
             continue
