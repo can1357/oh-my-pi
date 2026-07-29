@@ -279,7 +279,18 @@ async function scpFile(localPath: string, sshTarget: string, remoteDir: string):
 }
 
 async function sshRun(sshTarget: string, cmd: string): Promise<SpawnResult> {
-	return direct([...sshArgv(), sshTarget, cmd]);
+	// Tailscale SSH (check-mode sessions) does not propagate the remote
+	// command's exit status — every failure looks like exit 0. Remote stdout
+	// IS reliable, so smuggle the real status through it and parse it back.
+	const res = await direct([...sshArgv(), sshTarget, `${cmd}\n__sc_rc=$?; echo "__SSH_RC=$__sc_rc"`]);
+	const m = res.stdout.match(/__SSH_RC=(\d+)\s*$/);
+	if (m) {
+		return { code: res.code !== 0 ? res.code : Number(m[1]), stdout: res.stdout.replace(/__SSH_RC=\d+\s*$/, ""), stderr: res.stderr };
+	}
+	// Missing sentinel = the remote shell never reached our echo (dead session,
+	// unreachable host). Fail closed — returning res.code would recreate the
+	// exact false-success condition this wrapper exists to prevent.
+	return { code: res.code !== 0 ? res.code : 255, stdout: res.stdout, stderr: `${res.stderr}\n[sshRun] remote exit marker missing — treating as failure`.trim() };
 }
 
 // On the remote, init a fresh git repo from the bundle we scp'd, then check
@@ -471,20 +482,28 @@ export async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void
 				const localHeadRes = await direct(["git", "rev-parse", "--short", "HEAD"], { cwd: plan.localRepo });
 				console.log(`  patch: ${patchRes.stdout.length} bytes (${remoteHead.slice(0, 8)}..${localHeadRes.stdout.trim()})`);
 
-				// Apply the patch on the remote via SSH stdin
+				// Apply the patch on the remote via SSH stdin. The remote is a
+				// disposable mirror: reset --hard first (same contract as the
+				// git-push fallback) so stray local edits can't abort `git am`.
+				// The exit status is smuggled via stdout because Tailscale SSH
+				// check-mode sessions always report exit 0.
 				const applyProc = Bun.spawn({
-					cmd: [...sshArgv(), opts.sshTarget, `cd "${remoteDirSsh}" && (git am --abort 2>/dev/null || true) && git checkout -B "${branch}" && git am --3way`],
+					cmd: [...sshArgv(), opts.sshTarget, `cd "${remoteDirSsh}" && (git am --abort 2>/dev/null || true) && git checkout -B "${branch}" && git reset --hard && git am --3way\n__sc_rc=$?; echo "__SSH_RC=$__sc_rc"`],
 					stdin: new TextEncoder().encode(patchRes.stdout),
 					stdout: "pipe",
 					stderr: "pipe",
 				});
-				const [applyCode, applyOut, applyErr] = await Promise.all([
+				const [applyExit, applyOut, applyErr] = await Promise.all([
 					applyProc.exited,
 					applyProc.stdout ? new Response(applyProc.stdout).text() : "",
 					applyProc.stderr ? new Response(applyProc.stderr).text() : "",
 				]);
+				const applyRc = applyOut.match(/__SSH_RC=(\d+)\s*$/);
+				// Missing sentinel = the remote shell never reached our echo — fail closed.
+				const applyCode = applyExit !== 0 ? applyExit : applyRc ? Number(applyRc[1]) : 255;
 				if (applyCode !== 0) {
-					console.log(`  ⚠ patch apply failed, falling back to git push`);
+					console.log(`  ⚠ patch apply failed (rc ${applyCode}), falling back to git push`);
+					console.log(`  ${applyErr.trim().split("\n").slice(-3).join("\n  ")}`);
 					await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git am --abort 2>/dev/null`);
 					await gitPushFallback(opts, plan, branch, remoteUrl, remoteDirSsh);
 				} else {

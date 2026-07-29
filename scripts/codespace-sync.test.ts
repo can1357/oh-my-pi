@@ -46,31 +46,30 @@ let bareOrigin: string;
 const sshCalls: string[][] = [];
 
 /** Emulated ssh: translates the engine's remote payloads into local git
- * operations against the fixture "remote" checkout. Everything else (git,
- * format-patch, commit, push --delete) passes through to the real spawn. */
+ * operations against the fixture "remote" checkout, mimicking Tailscale SSH:
+ * transport exit is always 0; the real status travels via the __SSH_RC
+ * sentinel the engine appends. Everything else (git, format-patch, commit,
+ * push --delete) passes through to the real spawn. */
 const fakeSpawnImpl = (call: SpawnCall) => {
 	if (call.cmd[0] !== "ssh") return realSpawn(call);
 	sshCalls.push([...call.cmd]);
 	const payload = call.cmd[call.cmd.length - 1];
-	if (payload.includes("test -d")) return scripted("EXISTS\n");
-	if (payload.includes("git rev-parse HEAD")) return scripted(`${git(remoteRepo, "rev-parse", "HEAD")}\n`);
+	if (payload.includes("test -d")) return scripted("EXISTS\n__SSH_RC=0\n");
+	if (payload.includes("git rev-parse HEAD")) return scripted(`${git(remoteRepo, "rev-parse", "HEAD")}\n__SSH_RC=0\n`);
 	if (payload.includes("git am --3way")) {
 		const branchMatch = payload.match(/git checkout -B "([^"]+)"/) ?? payload.match(/git checkout -B (\S+)/);
 		if (branchMatch) git(remoteRepo, "checkout", "-B", branchMatch[1]);
-		return realSpawn({
-			cmd: ["git", "am", "--3way"],
-			cwd: remoteRepo,
-			stdin: call.stdin,
-			stdout: "pipe",
-			stderr: "pipe",
-		});
+		if (payload.includes("git reset --hard")) git(remoteRepo, "reset", "--hard");
+		const am = Bun.spawnSync(["git", "am", "--3way"], { cwd: remoteRepo, stdin: call.stdin, stdout: "pipe", stderr: "pipe" });
+		const amOut = new TextDecoder().decode(am.stdout);
+		return scripted(`${amOut}__SSH_RC=${am.exitCode}\n`);
 	}
 	if (payload.includes("git checkout -B")) {
 		const branchMatch = payload.match(/git checkout -B "([^"]+)"/) ?? payload.match(/git checkout -B (\S+)/);
 		if (branchMatch) git(remoteRepo, "checkout", "-B", branchMatch[1]);
-		return scripted("");
+		return scripted("__SSH_RC=0\n");
 	}
-	return scripted("", 1);
+	return scripted("__SSH_RC=1\n");
 };
 // The engine only uses the object-form overload; widening the narrow test
 // double to Bun.spawn's full overloaded type is inexpressible without a cast.
