@@ -25,6 +25,7 @@
  */
 
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 
 type Direction = "push" | "pull" | "status" | "handoff";
@@ -467,65 +468,92 @@ export async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void
 	if (remoteExists) {
 		// FAST PATH: The remote already has the repo. Instead of pushing the
 		// entire branch to GitHub (slow for large repos — git push negotiates
-		// and re-sends objects even if the remote already has them), create a
-		// patch of just the new commits and pipe it over SSH to `git am`.
-		// This only transfers the diff, not the full object database.
-		console.log(`→ fast-path: patch over SSH (skipping slow git push)`);
+		// and re-sends objects even if the remote already has them), ship an
+		// incremental git bundle over the SSH channel and fetch it remotely.
+		// This only transfers the missing objects, not the full database.
+		console.log(`→ fast-path: bundle over SSH (skipping slow git push)`);
 
-		const remoteHeadRes = await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git rev-parse HEAD 2>/dev/null || echo NONE`);
-		const remoteHead = remoteHeadRes.stdout.trim();
+		// Ship real git objects as a bundle over the SSH channel — no GitHub
+		// round-trip (some targets have no GitHub egress at all), and unlike
+		// `git am` this preserves commit shas, so the next handoff stays
+		// incremental instead of replaying ever-growing history. Find the
+		// newest remote commit the local repo also has (legacy am-based
+		// handoffs left rewritten shas); the remote is a disposable mirror,
+		// so rewinding to it is safe.
+		const remoteListRes = await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git rev-list --max-count=100 HEAD 2>/dev/null || echo NONE`);
+		const remoteShas = remoteListRes.stdout.split("\n").map((s) => s.trim()).filter((s) => /^[0-9a-f]{40}$/.test(s));
+		let base = "";
+		for (const sha of remoteShas) {
+			const known = await direct(["git", "cat-file", "-e", `${sha}^{commit}`], { cwd: plan.localRepo });
+			if (known.code === 0) {
+				base = sha;
+				break;
+			}
+		}
+		const localHead = (await direct(["git", "rev-parse", "HEAD"], { cwd: plan.localRepo })).stdout.trim();
 
-		if (remoteHead !== "NONE" && remoteHead.length === 40) {
-			// Create a patch from the remote HEAD to our current HEAD
-			const patchRes = await direct(["git", "format-patch", "--stdout", remoteHead + "..HEAD"], { cwd: plan.localRepo });
-			if (patchRes.code === 0 && patchRes.stdout.length > 0) {
-				const localHeadRes = await direct(["git", "rev-parse", "--short", "HEAD"], { cwd: plan.localRepo });
-				console.log(`  patch: ${patchRes.stdout.length} bytes (${remoteHead.slice(0, 8)}..${localHeadRes.stdout.trim()})`);
-
-				// Apply the patch on the remote via SSH stdin. The remote is a
-				// disposable mirror: reset --hard first (same contract as the
-				// git-push fallback) so stray local edits can't abort `git am`.
-				// The exit status is smuggled via stdout because Tailscale SSH
-				// check-mode sessions always report exit 0.
-				const applyProc = Bun.spawn({
-					cmd: [...sshArgv(), opts.sshTarget, `cd "${remoteDirSsh}" && (git am --abort 2>/dev/null || true) && git checkout -B "${branch}" && git reset --hard && git clean -fd && git am --3way --empty=keep\n__sc_rc=$?; echo "__SSH_RC=$__sc_rc"`],
-					stdin: new TextEncoder().encode(patchRes.stdout),
-					stdout: "pipe",
-					stderr: "pipe",
-				});
-				const [applyExit, applyOut, applyErr] = await Promise.all([
-					applyProc.exited,
-					applyProc.stdout ? new Response(applyProc.stdout).text() : "",
-					applyProc.stderr ? new Response(applyProc.stderr).text() : "",
-				]);
-				const applyRc = applyOut.match(/__SSH_RC=(\d+)\s*$/);
-				// Missing sentinel = the remote shell never reached our echo — fail closed.
-				const applyCode = applyExit !== 0 ? applyExit : applyRc ? Number(applyRc[1]) : 255;
-				if (applyCode !== 0) {
-					console.log(`  ⚠ patch apply failed (rc ${applyCode}), falling back to git push`);
-					console.log(`  ${applyErr.trim().split("\n").slice(-3).join("\n  ")}`);
-					await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git am --abort 2>/dev/null`);
+		if (base && localHead.length === 40) {
+			let fastPathOk = false;
+			if (base === localHead) {
+				// Remote already has every object — just align branch + worktree.
+				console.log(`  remote already at local HEAD — aligning branch`);
+				const align = await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git reset --hard && git clean -fd && git checkout -B "${branch}" ${localHead}`);
+				fastPathOk = align.code === 0;
+				if (!fastPathOk) console.log(`  ⚠ branch align failed (rc ${align.code})`);
+			} else {
+				const bundlePath = path.join(os.tmpdir(), `codespace-handoff-${Date.now()}.bundle`);
+				try {
+					const bundleRes = await direct(["git", "bundle", "create", bundlePath, `${base}..HEAD`], { cwd: plan.localRepo });
+					if (bundleRes.code !== 0) {
+						console.log(`  ⚠ bundle create failed:\n${bundleRes.stderr.trim()}`);
+					} else {
+						const bundleBytes = (await fs.stat(bundlePath)).size;
+						console.log(`  bundle: ${bundleBytes} bytes (${base.slice(0, 8)}..${localHead.slice(0, 8)})`);
+						// Pipe the bundle to the remote, fetch its objects, then
+						// point the branch at the exact local HEAD sha. Exit
+						// status is smuggled via stdout because Tailscale SSH
+						// check-mode sessions always report exit 0.
+						const applyProc = Bun.spawn({
+							cmd: [...sshArgv(), opts.sshTarget, `cd "${remoteDirSsh}" && cat > .git/codespace-handoff.bundle && git reset --hard && git clean -fd && git fetch .git/codespace-handoff.bundle HEAD && git checkout -B "${branch}" ${localHead} && rm -f .git/codespace-handoff.bundle\n__sc_rc=$?; echo "__SSH_RC=$__sc_rc"`],
+							stdin: Bun.file(bundlePath),
+							stdout: "pipe",
+							stderr: "pipe",
+						});
+						const [applyExit, applyOut, applyErr] = await Promise.all([
+							applyProc.exited,
+							applyProc.stdout ? new Response(applyProc.stdout).text() : "",
+							applyProc.stderr ? new Response(applyProc.stderr).text() : "",
+						]);
+						const applyRc = applyOut.match(/__SSH_RC=(\d+)\s*$/);
+						// Missing sentinel = remote shell never reached our echo — fail closed.
+						const applyCode = applyExit !== 0 ? applyExit : applyRc ? Number(applyRc[1]) : 255;
+						if (applyCode !== 0) {
+							console.log(`  ⚠ bundle apply failed (rc ${applyCode})`);
+							console.log(`  ${applyErr.trim().split("\n").slice(-3).join("\n  ")}`);
+						} else {
+							fastPathOk = true;
+						}
+					}
+				} finally {
+					await fs.rm(bundlePath, { force: true });
+				}
+			}
+			if (fastPathOk) {
+				// The mirror contract is tree equality — verify it directly.
+				const localTree = (await direct(["git", "rev-parse", "HEAD^{tree}"], { cwd: plan.localRepo })).stdout.trim();
+				const remoteTree = (await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git rev-parse "HEAD^{tree}" 2>/dev/null || echo NONE`)).stdout.trim();
+				if (localTree.length !== 40 || localTree !== remoteTree) {
+					console.log(`  ⚠ apply reported success but remote tree does not match local tree — falling back to git push`);
 					await gitPushFallback(opts, plan, branch, remoteUrl, remoteDirSsh);
 				} else {
-					// `git am` exits 0 on empty stdin — a dropped ssh stdin stream
-					// (seen with Tailscale SSH check-mode interception) reports
-					// success without applying anything. Trust only an advanced HEAD.
-					const verify = await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git rev-parse HEAD 2>/dev/null || echo NONE`);
-					const newHead = verify.stdout.trim();
-					if (newHead.length !== 40 || newHead === remoteHead) {
-						console.log(`  ⚠ apply reported success but remote HEAD did not advance — falling back to git push`);
-						await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git am --abort 2>/dev/null`);
-						await gitPushFallback(opts, plan, branch, remoteUrl, remoteDirSsh);
-					} else {
-						console.log(`✓ patch applied on ${opts.sshTarget}:${opts.remoteDir} (branch ${branch})`);
-					}
+					console.log(`✓ bundle applied on ${opts.sshTarget}:${opts.remoteDir} (branch ${branch})`);
 				}
 			} else {
-				console.log(`  no new commits — remote is already up to date`);
-				await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git checkout -B ${branch} 2>/dev/null`);
+				console.log(`  falling back to git push`);
+				await gitPushFallback(opts, plan, branch, remoteUrl, remoteDirSsh);
 			}
 		} else {
-			console.log(`  cannot determine remote HEAD, falling back to git push`);
+			console.log(`  no shared commit with the remote, falling back to git push`);
 			await gitPushFallback(opts, plan, branch, remoteUrl, remoteDirSsh);
 		}
 	} else {
