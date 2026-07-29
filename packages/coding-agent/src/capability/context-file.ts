@@ -34,7 +34,16 @@ export const contextFileCapability = defineCapability<ContextFile>({
 	// Clamp depth >= 0: files inside config subdirectories of an ancestor (e.g. .claude/, .github/)
 	// are same-scope as the ancestor itself.
 	key: file => (file.level === "user" ? "user" : `project:${Math.max(0, file.depth ?? 0)}`),
-	toExtensionId: file => `context-file:${file.level}:${path.basename(file.path)}`,
+	// Path-qualified: keying by basename alone made one disabled id suppress
+	// EVERY same-named file at that level (disabling one project's AGENTS.md
+	// silently disabled all of them). Forward slashes keep the id stable across
+	// path separators on the same machine.
+	toExtensionId: file => `context-file:${file.level}:${path.resolve(file.path).split(path.sep).join("/")}`,
+	// Entries persisted before the path-qualified format used the basename form.
+	// Keep honouring them — dropping the legacy key would silently re-enable
+	// files users deliberately disabled. Legacy entries retain the old collision
+	// behaviour (they match by basename); only new disables are precise.
+	toLegacyExtensionIds: file => [`context-file:${file.level}:${path.basename(file.path)}`],
 	validate: file => {
 		if (!file.path) return "Missing path";
 		if (file.content === undefined) return "Missing content";
