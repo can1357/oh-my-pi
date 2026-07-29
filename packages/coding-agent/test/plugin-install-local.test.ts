@@ -69,18 +69,21 @@ async function createLocalCodexPlugin(root: string): Promise<string> {
 
 describe("runPluginCommand({ action: 'install', args: [<local>] })", () => {
 	let tmpRoot: string;
+	let namespaceSpies: Array<{ mockRestore: () => void }> = [];
 
 	beforeEach(async () => {
 		tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-plugin-install-local-"));
 		const pluginsDir = path.join(tmpRoot, "plugins");
 		await fs.mkdir(path.join(pluginsDir, "node_modules"), { recursive: true });
 
-		spyOn(piUtils, "getPluginsDir").mockReturnValue(pluginsDir);
-		spyOn(piUtils, "getPluginsNodeModules").mockReturnValue(path.join(pluginsDir, "node_modules"));
-		spyOn(piUtils, "getPluginsPackageJson").mockReturnValue(path.join(pluginsDir, "package.json"));
-		spyOn(piUtils, "getPluginsLockfile").mockReturnValue(path.join(tmpRoot, "omp-plugins.lock.json"));
-		spyOn(piUtils, "getProjectDir").mockReturnValue(tmpRoot);
-		spyOn(piUtils, "getProjectPluginOverridesPath").mockReturnValue(path.join(tmpRoot, "plugin-overrides.json"));
+		namespaceSpies = [
+			spyOn(piUtils, "getPluginsDir").mockReturnValue(pluginsDir),
+			spyOn(piUtils, "getPluginsNodeModules").mockReturnValue(path.join(pluginsDir, "node_modules")),
+			spyOn(piUtils, "getPluginsPackageJson").mockReturnValue(path.join(pluginsDir, "package.json")),
+			spyOn(piUtils, "getPluginsLockfile").mockReturnValue(path.join(tmpRoot, "omp-plugins.lock.json")),
+			spyOn(piUtils, "getProjectDir").mockReturnValue(tmpRoot),
+			spyOn(piUtils, "getProjectPluginOverridesPath").mockReturnValue(path.join(tmpRoot, "plugin-overrides.json")),
+		];
 		// runPluginCommand always builds a MarketplaceManager to enumerate
 		// registered marketplaces. Stub the registry list so classification has
 		// no marketplace candidates to confuse local paths with.
@@ -91,10 +94,15 @@ describe("runPluginCommand({ action: 'install', args: [<local>] })", () => {
 		spyOn(console, "error").mockImplementation(() => undefined);
 	});
 	afterEach(async () => {
-		// Restore every spy installed in beforeEach plus the per-test
-		// linkSpy/installSpy/console spies. Without this, the piUtils.*
-		// stubs leak into sibling test files (e.g. marketplace/manager.test.ts
-		// breaks because listMarketplaces() still returns []).
+		// Undo the pi-utils namespace spies FIRST, individually. `mock.restore()`
+		// walking Bun's registry to unpatch a sealed ESM namespace is what
+		// segfaults a shared-process bucket (exit 132); with those already
+		// restored, the blanket call has no namespace patch left to undo.
+		for (const spy of namespaceSpies.splice(0)) spy.mockRestore();
+		// Still needed for the per-test linkSpy/installSpy/console spies and the
+		// MarketplaceManager.prototype stub — those are ordinary objects, not
+		// module namespaces. Without this, listMarketplaces() keeps returning []
+		// and breaks sibling files such as marketplace/manager.test.ts.
 		mock.restore();
 		await fs.rm(tmpRoot, { recursive: true, force: true });
 	});
