@@ -10,6 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getProjectDir, logger } from "@pk-nerdsaver-ai/pi-utils";
 
+import { registerSettingsResetHook } from "../config/reset-hooks";
 import type { Settings } from "../config/settings";
 import { clearCache as clearFsCache, findRepoRoot, cacheStats as fsCacheStats, invalidate as invalidateFs } from "./fs";
 import type {
@@ -41,6 +42,28 @@ const disabledProviders = new Set<string>();
 
 /** Settings manager for persistence (if set) */
 let settings: Settings | null = null;
+
+/**
+ * Drop the pinned `Settings` reference whenever the settings singleton is reset.
+ *
+ * Without this, `initializeWithSettings` pins an object that outlives
+ * `resetSettingsForTest()`: every later `loadCapability()` in the process keeps
+ * reading `disabledExtensions` off the discarded instance. Because test buckets
+ * share one process, a single test that disabled an extension suppressed it for
+ * every subsequent file in the run.
+ *
+ * Registered lazily on first `initializeWithSettings` so importing this module
+ * has no side effect, and idempotent via the hook set.
+ */
+let capabilityResetHookRegistered = false;
+function registerCapabilitySettingsReset(): void {
+	if (capabilityResetHookRegistered) return;
+	capabilityResetHookRegistered = true;
+	registerSettingsResetHook(() => {
+		settings = null;
+		disabledProviders.clear();
+	});
+}
 
 // =============================================================================
 // Registration API
@@ -249,6 +272,7 @@ export async function loadCapability<T>(capabilityId: string, options: LoadOptio
  * Call this once on startup to enable persistent provider state.
  */
 export function initializeWithSettings(activeSettings: Settings): void {
+	registerCapabilitySettingsReset();
 	settings = activeSettings;
 	// Load disabled providers from settings
 	const disabled = settings.get("disabledProviders");
