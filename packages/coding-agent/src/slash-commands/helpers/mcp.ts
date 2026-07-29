@@ -353,7 +353,7 @@ async function handleSmitherySearchCommand(rest: string, runtime: SlashCommandRu
 		const message = errorMessage(err);
 		if (AIError.is(AIError.classify(err), AIError.Flag.AuthFailed)) {
 			return usage(
-				"Smithery authentication required. Run /mcp smithery-login in the TUI client or add an API key to ~/.omp/agent/smithery.json.",
+				"Smithery authentication required. Run /mcp smithery-login in the TUI client or add an API key to ~/.ompk/agent/smithery.json.",
 				runtime,
 			);
 		}

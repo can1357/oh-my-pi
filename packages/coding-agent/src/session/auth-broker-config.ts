@@ -8,9 +8,9 @@
  *
  * Precedence (highest first):
  *   1. `OMP_AUTH_BROKER_URL` / `OMP_AUTH_BROKER_TOKEN` env vars.
- *   2. `auth.broker.url` / `auth.broker.token` in `~/.omp/agent/config.yml`
+ *   2. `auth.broker.url` / `auth.broker.token` in `~/.ompk/agent/config.yml`
  *      (hidden from the settings UI; `!command` resolution supported).
- *   3. Token file `~/.omp/auth-broker.token` (paired with URL from env or config).
+ *   3. Token file `~/.ompk/auth-broker.token` (paired with URL from env or config).
  *
  * Returns null when no broker URL is configured — caller falls back to the
  * local SQLite store.

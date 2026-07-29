@@ -157,7 +157,7 @@ export interface PluginRuntimeConfig {
 // =============================================================================
 
 /**
- * Project-local plugin overrides (stored in .omp/plugin-overrides.json).
+ * Project-local plugin overrides (stored in .ompk/plugin-overrides.json).
  * Allows per-project plugin configuration without modifying global state.
  */
 export interface ProjectPluginOverrides {

@@ -17,7 +17,7 @@ function expandRoot(root: string, cwd: string): string {
 function configuredRoots(runtime: SlashCommandRuntime | TuiSlashCommandRuntime): string[] {
 	const cwd = "sessionManager" in runtime ? runtime.sessionManager.getCwd() : runtime.ctx.sessionManager.getCwd();
 	const settingsSource = "settings" in runtime ? runtime.settings : runtime.ctx.settings;
-	let roots: string[] = ["~/.omp/agent/wiki", "<cwd>/.omp/wiki"];
+	let roots: string[] = ["~/.ompk/agent/wiki", "<cwd>/.ompk/wiki"];
 	try {
 		const configured = settingsSource.get("wikigraph.roots" as never) as unknown;
 		if (Array.isArray(configured)) roots = configured;

@@ -2,8 +2,8 @@
  * Agent discovery from filesystem.
  *
  * Discovers agent definitions from OMP-native task-agent roots:
- *   - ~/.omp/agent/agents/*.md (user-level)
- *   - .omp/agents/*.md (project-level)
+ *   - ~/.ompk/agent/agents/*.md (user-level)
+ *   - .ompk/agents/*.md (project-level)
  *
  * Claude Code marketplace plugin agents are discovered separately via the
  * claude-plugins provider. Direct cross-harness roots such as .claude/agents
@@ -55,7 +55,7 @@ async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<Agen
 /**
  * Discover agents from filesystem and merge with bundled agents.
  *
- * Precedence (highest wins): project .omp, user .omp, Claude plugin agents, then bundled
+ * Precedence (highest wins): project .ompk, user .ompk, Claude plugin agents, then bundled
  * @param cwd - Current working directory for project agent discovery
  */
 export async function discoverAgents(cwd: string, home: string = os.homedir()): Promise<DiscoveryResult> {

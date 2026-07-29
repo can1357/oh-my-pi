@@ -117,7 +117,7 @@ type EventRow = {
 };
 
 export interface OperationalStoreOptions {
-	/** Explicit SQLite path. Defaults to `~/.omp/agent/operational.db`. */
+	/** Explicit SQLite path. Defaults to `~/.ompk/agent/operational.db`. */
 	readonly dbPath?: string;
 	/** Injected clock (epoch ms) for deterministic tests. */
 	readonly now?: () => number;

@@ -5,7 +5,7 @@
  * - `ls` (default): list every available model with a canonical + provider view.
  * - `find <substring>`: list models whose provider, id, or name contains the substring.
  * - `refresh`: force an online catalog re-fetch (ignoring the model cache TTL),
- *   then list. This is the supported replacement for `rm -rf ~/.omp/models.db`
+ *   then list. This is the supported replacement for `rm -rf ~/.ompk/models.db`
  *   when a provider ships a new model that the 24h cache has not picked up yet.
  *
  * `ls`/`find` use the cache when fresh (`online-if-uncached`); only `refresh`

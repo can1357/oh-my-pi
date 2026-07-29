@@ -39,7 +39,7 @@ export default class Models extends Command {
 		`# List every available model, grouped by provider\n  ${APP_NAME} models`,
 		`# List one provider's models (any provider name works)\n  ${APP_NAME} models openai-codex`,
 		`# Find models by substring\n  ${APP_NAME} models find minimax`,
-		`# Force a fresh catalog fetch (replaces rm -rf ~/.omp/models.db)\n  ${APP_NAME} models refresh`,
+		`# Force a fresh catalog fetch (replaces rm -rf ~/.ompk/models.db)\n  ${APP_NAME} models refresh`,
 		`# Show the coalesced canonical model view\n  ${APP_NAME} models canonical`,
 		`# Machine-readable output\n  ${APP_NAME} models --json`,
 	];
