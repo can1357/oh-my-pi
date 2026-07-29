@@ -256,6 +256,11 @@ class StagedReviewComment:
     start_side: str | None = None
 
 
+def _platform_from_row(row: sqlite3.Row) -> str:
+    """Return the platform from a DB row, defaulting to ``"github"``."""
+    return row["platform"] if "platform" in row.keys() else "github"
+
+
 def _event_row_from_db_row(row: sqlite3.Row) -> EventRow:
     return EventRow(
         delivery_id=row["delivery_id"],
@@ -267,7 +272,7 @@ def _event_row_from_db_row(row: sqlite3.Row) -> EventRow:
         state=row["state"],
         attempts=int(row["attempts"]),
         last_error=row["last_error"],
-        platform=row["platform"] if "platform" in row.keys() else "github",
+        platform=_platform_from_row(row),
     )
 
 
@@ -454,7 +459,7 @@ class Database:
                 state="running",
                 attempts=int(row["attempts"]) + 1,
                 last_error=row["last_error"],
-                platform=row["platform"] if "platform" in row.keys() else "github",
+                platform=_platform_from_row(row),
             )
 
     def mark_event(self, delivery_id: str, state: EventState, *, error: str | None = None) -> None:
@@ -507,7 +512,7 @@ class Database:
                 state=row["state"],
                 attempts=int(row["attempts"]),
                 last_error=row["last_error"],
-                platform=row["platform"] if "platform" in row.keys() else "github",
+                platform=_platform_from_row(row),
             )
             for row in rows
         ]
@@ -716,7 +721,7 @@ class Database:
             state=row["state"],
             attempts=int(row["attempts"]),
             last_error=row["last_error"],
-            platform=row["platform"] if "platform" in row.keys() else "github",
+            platform=_platform_from_row(row),
         )
 
     def has_authorized_impl_event(self, issue_key: str) -> bool:

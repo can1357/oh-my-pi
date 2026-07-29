@@ -143,10 +143,12 @@ class IssueIndexSync:
     rather than hogging one.
     """
 
-    def __init__(self, *, settings: Settings, db: Database, github: GitHubBackend) -> None:
+    def __init__(self, *, settings: Settings, db: Database, github: GitHubBackend,
+                 forgejo_github: GitHubBackend | None = None) -> None:
         self._settings = settings
         self._db = db
         self._github = github
+        self._forgejo_github = forgejo_github
         self._task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
 
@@ -212,6 +214,11 @@ class IssueIndexSync:
 
     async def sync_repo(self, repo: str) -> int:
         """Pull updated issues/PRs for one repo into the index. Returns count ingested."""
+        gh = (
+            self._forgejo_github
+            if (self._forgejo_github is not None and repo in self._settings.forgejo_repos)
+            else self._github
+        )
         started_at = _utcnow_iso()
         watermark = self._db.issue_index_watermark(repo)
         since = _overlapped(watermark) if watermark else None
@@ -219,7 +226,7 @@ class IssueIndexSync:
         exhausted = False
         last_seen = ""
         for page in range(1, _MAX_PAGES_PER_TICK + 1):
-            batch = await self._github.list_issue_index_entries(repo, since=since, page=page, per_page=_PAGE_SIZE)
+            batch = await gh.list_issue_index_entries(repo, since=since, page=page, per_page=_PAGE_SIZE)
             for entry in batch:
                 self._db.upsert_issue_index(entry)
                 if entry.updated_at > last_seen:

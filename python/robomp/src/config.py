@@ -13,6 +13,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 ThinkingLevel = Literal["off", "low", "medium", "high", "xhigh", "max"]
 
 
+def _is_blank_secret(value: object) -> bool:
+    """True if *value* is a blank string or a SecretStr with blank inner."""
+    if isinstance(value, str) and not value.strip():
+        return True
+    if hasattr(value, "get_secret_value"):
+        inner = value.get_secret_value()  # type: ignore[attr-defined]
+        if isinstance(inner, str) and not inner.strip():
+            return True
+    return False
+
+
 class Settings(BaseSettings):
     """Strongly-typed runtime configuration.
 
@@ -33,6 +44,7 @@ class Settings(BaseSettings):
     # the PAT. Validated end-to-end in `_validate_proxy_or_pat` below.
     github_token: SecretStr | None = Field(None, alias="GITHUB_TOKEN")
     forgejo_token: SecretStr | None = Field(None, alias="FORGEJO_TOKEN")
+    forgejo_repos_raw: str = Field("", alias="ROBOMP_FORGEJO_REPOS")
     api_base: str = Field("https://api.github.com", alias="ROBOMP_API_BASE")
     git_host: str = Field("github.com", alias="ROBOMP_GIT_HOST")
     github_webhook_secret: SecretStr = Field(..., alias="GITHUB_WEBHOOK_SECRET")
@@ -189,44 +201,24 @@ class Settings(BaseSettings):
         # Treat empty/whitespace strings as 'disabled'. Without this, an empty
         # ROBOMP_REPLAY_TOKEN becomes SecretStr("") which the server would
         # happily compare against an empty X-Robomp-Replay-Token header.
-        if isinstance(value, str) and not value.strip():
-            return None
-        if hasattr(value, "get_secret_value"):
-            inner = value.get_secret_value()  # type: ignore[attr-defined]
-            if isinstance(inner, str) and not inner.strip():
-                return None
-        return value
+        return None if _is_blank_secret(value) else value
 
     @field_validator("github_token", "forgejo_token", mode="before")
     @classmethod
     def _blank_token_disables(cls, value: object) -> object:
         """Treat empty/whitespace `GITHUB_TOKEN`/`FORGEJO_TOKEN` as 'unset' so
         proxy-only deployments don't have to remove the env var."""
-        if isinstance(value, str) and not value.strip():
-            return None
-        if hasattr(value, "get_secret_value"):
-            inner = value.get_secret_value()  # type: ignore[attr-defined]
-            if isinstance(inner, str) and not inner.strip():
-                return None
-        return value
+        return None if _is_blank_secret(value) else value
 
     @field_validator("gh_proxy_url", mode="before")
     @classmethod
     def _blank_proxy_url_disables(cls, value: object) -> object:
-        if isinstance(value, str) and not value.strip():
-            return None
-        return value
+        return None if _is_blank_secret(value) else value
 
     @field_validator("gh_proxy_hmac_key", mode="before")
     @classmethod
     def _blank_proxy_key_disables(cls, value: object) -> object:
-        if isinstance(value, str) and not value.strip():
-            return None
-        if hasattr(value, "get_secret_value"):
-            inner = value.get_secret_value()  # type: ignore[attr-defined]
-            if isinstance(inner, str) and not inner.strip():
-                return None
-        return value
+        return None if _is_blank_secret(value) else value
 
     @model_validator(mode="after")
     def _validate_proxy_or_pat(self) -> Settings:
@@ -271,6 +263,11 @@ class Settings(BaseSettings):
     @property
     def repo_allowlist(self) -> frozenset[str]:
         items = [piece.strip().lower() for piece in self.repo_allowlist_raw.split(",")]
+        return frozenset(item for item in items if item)
+
+    @property
+    def forgejo_repos(self) -> frozenset[str]:
+        items = [piece.strip().lower() for piece in self.forgejo_repos_raw.split(",")]
         return frozenset(item for item in items if item)
 
     @field_validator("rate_limit_unlimited_raw", mode="before")
@@ -437,24 +434,14 @@ class _ProxyEnvLoader(BaseSettings):
     @field_validator("github_token", "gh_proxy_hmac_key", mode="before")
     @classmethod
     def _reject_blank(cls, value: object) -> object:
-        if isinstance(value, str) and not value.strip():
+        if _is_blank_secret(value):
             raise ValueError("must be a non-empty string")
-        if hasattr(value, "get_secret_value"):
-            inner = value.get_secret_value()  # type: ignore[attr-defined]
-            if isinstance(inner, str) and not inner.strip():
-                raise ValueError("must be a non-empty string")
         return value
 
     @field_validator("forgejo_token", mode="before")
     @classmethod
     def _blank_forgejo_token_disables(cls, value: object) -> object:
-        if isinstance(value, str) and not value.strip():
-            return None
-        if hasattr(value, "get_secret_value"):
-            inner = value.get_secret_value()  # type: ignore[attr-defined]
-            if isinstance(inner, str) and not inner.strip():
-                return None
-        return value
+        return None if _is_blank_secret(value) else value
 
 
 def load_proxy_settings() -> Settings:

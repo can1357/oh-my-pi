@@ -369,6 +369,14 @@ class WorkerPool:
         else:
             self.db.mark_event(row.delivery_id, "done")
 
+    def _proxy_auth(self) -> tuple[str, bytes]:
+        """Return (base_url, hmac_key) shared by GitHubProxyClient and ProxyGitTransport."""
+        base_url = self.settings.gh_proxy_url or ""
+        key = b""
+        if self.settings.gh_proxy_hmac_key:
+            key = self.settings.gh_proxy_hmac_key.get_secret_value().encode("utf-8")
+        return base_url, key
+
     def _platform_github(self, platform: str) -> GitHubBackend:
         """Return a proxy client scoped to the event's platform.
 
@@ -378,10 +386,7 @@ class WorkerPool:
         gh-proxy routes to the Forgejo API + token.
         """
         if platform == "forgejo":
-            base_url = self.settings.gh_proxy_url or ""
-            key = b""
-            if self.settings.gh_proxy_hmac_key:
-                key = self.settings.gh_proxy_hmac_key.get_secret_value().encode("utf-8")
+            base_url, key = self._proxy_auth()
             return GitHubProxyClient(
                 base_url=base_url, hmac_key=key, platform="forgejo",
             )
@@ -390,19 +395,15 @@ class WorkerPool:
     def _platform_transport(self, platform: str) -> GitTransport:
         """Return a git transport scoped to the event's platform."""
         if platform == "forgejo":
-            base_url = self.settings.gh_proxy_url or ""
-            key = b""
-            if self.settings.gh_proxy_hmac_key:
-                key = self.settings.gh_proxy_hmac_key.get_secret_value().encode("utf-8")
+            base_url, key = self._proxy_auth()
             return ProxyGitTransport(
                 base_url=base_url, hmac_key=key, platform="forgejo",
             )
         return self.git_transport
 
     async def _dispatch(self, row: EventRow, *, slot_uid: int | None = None) -> None:
-        # Swap the sandbox's transport to match the event's platform so git
-        # operations route through the correct host/token.
-        self.sandbox.transport = self._platform_transport(row.platform)
+        github = self._platform_github(row.platform)
+        git_transport = self._platform_transport(row.platform)
         event = row.event_type
         action = str(row.payload.get("action") or "")
         log.info(
@@ -420,9 +421,9 @@ class WorkerPool:
             await tasks.triage_issue(
                 settings=self.settings,
                 db=self.db,
-                github=self._platform_github(row.platform),
+                github=github,
                 sandbox=self.sandbox,
-                git_transport=self._platform_transport(row.platform),
+                git_transport=git_transport,
                 payload=row.payload,
                 delivery_id=row.delivery_id,
                 attempts=row.attempts,
@@ -446,9 +447,9 @@ class WorkerPool:
                 await tasks.handle_pr_conversation(
                     settings=self.settings,
                     db=self.db,
-                    github=self._platform_github(row.platform),
+                    github=github,
                     sandbox=self.sandbox,
-                    git_transport=self._platform_transport(row.platform),
+                    git_transport=git_transport,
                     payload=row.payload,
                     delivery_id=row.delivery_id,
                     attempts=row.attempts,
@@ -458,9 +459,9 @@ class WorkerPool:
                 await tasks.handle_comment(
                     settings=self.settings,
                     db=self.db,
-                    github=self._platform_github(row.platform),
+                    github=github,
                     sandbox=self.sandbox,
-                    git_transport=self._platform_transport(row.platform),
+                    git_transport=git_transport,
                     payload=row.payload,
                     delivery_id=row.delivery_id,
                     attempts=row.attempts,
@@ -470,9 +471,9 @@ class WorkerPool:
             await tasks.review_pr(
                 settings=self.settings,
                 db=self.db,
-                github=self._platform_github(row.platform),
+                github=github,
                 sandbox=self.sandbox,
-                git_transport=self._platform_transport(row.platform),
+                git_transport=git_transport,
                 payload=row.payload,
                 delivery_id=row.delivery_id,
                 attempts=row.attempts,
@@ -482,9 +483,9 @@ class WorkerPool:
             await tasks.handle_review(
                 settings=self.settings,
                 db=self.db,
-                github=self._platform_github(row.platform),
+                github=github,
                 sandbox=self.sandbox,
-                git_transport=self._platform_transport(row.platform),
+                git_transport=git_transport,
                 payload=row.payload,
                 delivery_id=row.delivery_id,
                 attempts=row.attempts,

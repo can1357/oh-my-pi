@@ -12,6 +12,7 @@ from robomp.config import Settings
 from robomp.db import Database, IssueRow, IssueState, issue_key
 from robomp.git_ops import rev_parse_head
 from robomp.github_backend import GitHubBackend
+from robomp.github_events import normalize_review_to_comment
 from robomp.github_client import (
     CommentInfo,
     GitHubError,
@@ -527,6 +528,7 @@ async def triage_issue(
         default_branch=repo.default_branch,
         author_name=settings.resolved_author_name,
         author_email=settings.git_author_email,
+        transport=git_transport,
         slot_uid=slot_uid,
     )
     db.upsert_issue(
@@ -606,6 +608,7 @@ async def review_pr(
         pr_head_same_repo=(pr.head_repo == repo.full_name),
         author_name=settings.resolved_author_name,
         author_email=settings.git_author_email,
+        transport=git_transport,
         slot_uid=slot_uid,
     )
     db.upsert_issue(
@@ -671,6 +674,7 @@ async def handle_comment(
             default_branch=repo.default_branch,
             author_name=settings.resolved_author_name,
             author_email=settings.git_author_email,
+            transport=git_transport,
             slot_uid=slot_uid,
         )
         db.upsert_issue(
@@ -724,6 +728,7 @@ async def handle_comment(
             default_branch=repo.default_branch,
             author_name=settings.resolved_author_name,
             author_email=settings.git_author_email,
+            transport=git_transport,
             slot_uid=slot_uid,
         )
         db.upsert_issue(
@@ -761,6 +766,7 @@ async def handle_comment(
         existing_branch=existing.branch,
         author_name=settings.resolved_author_name,
         author_email=settings.git_author_email,
+        transport=git_transport,
         slot_uid=slot_uid,
     )
     inputs = TaskInputs(
@@ -836,6 +842,7 @@ async def handle_review(
         existing_branch=existing_branch,
         author_name=settings.resolved_author_name,
         author_email=settings.git_author_email,
+        transport=git_transport,
         slot_uid=slot_uid,
     )
     if issue_row is None:
@@ -848,15 +855,7 @@ async def handle_review(
             session_dir=str(workspace.session_dir),
             pr_number=pr_number,
         )
-    comment = payload.get("comment") or {}
-    # Forgejo sends review content in payload.review.content, not payload.comment.body
-    if not comment and "review" in payload:
-        review = payload.get("review") or {}
-        comment = {
-            "body": review.get("content") or "",
-            "user": payload.get("sender") or {},
-            "id": review.get("id"),
-        }
+    comment = normalize_review_to_comment(payload)
     user = comment.get("user") or {}
     body = str(comment.get("body") or "").strip()
     # Forgejo #7935: pull_request_review_comment webhook payloads carry empty
@@ -1009,6 +1008,7 @@ async def handle_pr_conversation(
         existing_branch=existing_branch,
         author_name=settings.resolved_author_name,
         author_email=settings.git_author_email,
+        transport=git_transport,
         slot_uid=slot_uid,
     )
     if issue_row is None:
