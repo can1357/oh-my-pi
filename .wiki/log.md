@@ -1,5 +1,8 @@
 # Bundle Update Log
 
+## 2026-07-29
+* **Update**: Extended [Coding-agent reliability hardening](concepts/coding-agent-reliability-hardening.md) with the CI-repair conclusions from PR #18, the requirement to reproduce the actual Linux CI harness and treat skipped fail-fast chunks as unknown, and the temporary ten-file singleton-bucket mitigation for the Bun 1.3.14 crash in PR #32. Recorded the path-qualified, dual-read context-file disable-ID migration in pending PR #33 so the wiki distinguishes new precision from legacy compatibility.
+
 ## 2026-07-14
 * **Update**: Documented the uncommitted Snapcompact removal in [Recent History — 2026-07](concepts/recent-history-2026-07.md#july-14-snapcompact-removal): full deletion list (shape-preview component/doc, five system-prompt stub/note markdown files, inline-compaction and savings-journal modules, three test files), the `packages/coding-agent/CHANGELOG.md` `### Removed` justification (unsafe experimental prompt/history/tool-result imaging; stale `Snapcompact` setting migrates to `context-full`), and the surrounding surfaces (`session/*`, `modes/*`, `config/settings*`, `slash-commands/*`) that were updated in lockstep rather than left dangling.
 
