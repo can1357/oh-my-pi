@@ -17,6 +17,25 @@ const originalProjectDir = getProjectDir();
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
+// Per-file spy tracking. `vi.restoreAllMocks()` IS `mock.restore()` — the same
+// native function — and that global restore walks Bun's whole mock registry to
+// unpatch spies. When one of them patched a sealed ESM module namespace, the
+// walk segfaults the process (exit 132) once a later file in the same run
+// imports an overlapping module graph, taking the shared-process bucket with it.
+//
+// The tracker is deliberately PER FILE. A module-shared array would let one
+// file's teardown restore another file's still-live spies — the same cross-file
+// leak, pointing the other way.
+const trackedSpies: Array<{ mockRestore: () => void }> = [];
+function trackedSpyOn<T extends object, K extends keyof T>(obj: T, key: K) {
+	const spy = vi.spyOn(obj, key);
+	trackedSpies.push(spy as unknown as { mockRestore: () => void });
+	return spy;
+}
+function restoreTrackedSpies(): void {
+	for (const spy of trackedSpies.splice(0).reverse()) spy.mockRestore();
+}
+
 describe("issue #956: interactive /mcp test", () => {
 	let projectDir = "";
 	let agentDir = "";
@@ -50,7 +69,7 @@ describe("issue #956: interactive /mcp test", () => {
 	});
 
 	afterEach(async () => {
-		vi.restoreAllMocks();
+		restoreTrackedSpies();
 		setProjectDir(originalProjectDir);
 		if (originalAgentDir) {
 			setAgentDir(originalAgentDir);
@@ -81,9 +100,9 @@ describe("issue #956: interactive /mcp test", () => {
 		const requestRender = vi.fn();
 		const addChild = vi.fn();
 		const refreshMCPTools = vi.fn();
-		const connectToServer = vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(connection);
-		const listTools = vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
-		const disconnectServer = vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue();
+		const connectToServer = trackedSpyOn(mcpClient, "connectToServer").mockResolvedValue(connection);
+		const listTools = trackedSpyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
+		const disconnectServer = trackedSpyOn(mcpClient, "disconnectServer").mockResolvedValue();
 		const controller = new MCPCommandController({
 			chatContainer: { addChild },
 			present: (content: unknown) => {

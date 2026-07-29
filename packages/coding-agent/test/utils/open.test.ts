@@ -45,7 +45,7 @@ function spySpawn(calls: SpawnCall[]) {
 		calls.push({ cmd, options });
 		return fakeProcess();
 	}
-	return vi.spyOn(Bun, "spawn").mockImplementation(mockSpawn);
+	return trackedSpyOn(Bun, "spawn").mockImplementation(mockSpawn);
 }
 
 function spyWslPath(calls: string[][], output: string, exitCode = 0) {
@@ -66,7 +66,7 @@ function spyWslPath(calls: string[][], output: string, exitCode = 0) {
 		calls.push(Array.isArray(first) ? first : first.cmd);
 		return result;
 	}
-	return vi.spyOn(Bun, "spawnSync").mockImplementation(mockSpawnSync);
+	return trackedSpyOn(Bun, "spawnSync").mockImplementation(mockSpawnSync);
 }
 
 beforeEach(() => {
@@ -84,15 +84,36 @@ afterEach(() => {
 		else process.env[key] = prior;
 	}
 	restorePlatform();
-	vi.restoreAllMocks();
+	restoreTrackedSpies();
 });
+
+// Per-file spy tracking. `vi.restoreAllMocks()` IS `mock.restore()` — the same
+// native function — and that global restore walks Bun's whole mock registry to
+// unpatch spies. When one of them patched a sealed ESM module namespace, the
+// walk segfaults the process (exit 132) once a later file in the same run
+// imports an overlapping module graph, taking the shared-process bucket with it.
+//
+// The tracker is deliberately PER FILE. A module-shared array would let one
+// file's teardown restore another file's still-live spies — the same cross-file
+// leak, pointing the other way.
+const trackedSpies: Array<{ mockRestore: () => void }> = [];
+function trackedSpyOn<T extends object, K extends keyof T>(obj: T, key: K) {
+	const spy = vi.spyOn(obj, key);
+	trackedSpies.push(spy as unknown as { mockRestore: () => void });
+	return spy;
+}
+function restoreTrackedSpies(): void {
+	for (const spy of trackedSpies.splice(0).reverse()) spy.mockRestore();
+}
 
 describe("openPath", () => {
 	it("opens existing WSL mount files through wslview with a Windows path", () => {
 		setPlatform("linux");
 		process.env.WSL_DISTRO_NAME = "Ubuntu";
-		vi.spyOn(piUtils, "$which").mockImplementation(command => (command === "wslview" ? "/usr/bin/wslview" : null));
-		vi.spyOn(fs, "existsSync").mockImplementation(candidate => candidate === existingLinuxPath);
+		trackedSpyOn(piUtils, "$which").mockImplementation(command =>
+			command === "wslview" ? "/usr/bin/wslview" : null,
+		);
+		trackedSpyOn(fs, "existsSync").mockImplementation(candidate => candidate === existingLinuxPath);
 
 		const spawnSyncCalls: string[][] = [];
 		spyWslPath(spawnSyncCalls, windowsPath);
@@ -108,8 +129,8 @@ describe("openPath", () => {
 	it("keeps WSL URL opening on xdg-open without path conversion", () => {
 		setPlatform("linux");
 		process.env.WSL_INTEROP = "/run/WSL/1_interop";
-		vi.spyOn(piUtils, "$which").mockReturnValue("/usr/bin/wslview");
-		const spawnSyncSpy = vi.spyOn(Bun, "spawnSync");
+		trackedSpyOn(piUtils, "$which").mockReturnValue("/usr/bin/wslview");
+		const spawnSyncSpy = trackedSpyOn(Bun, "spawnSync");
 		const spawnCalls: SpawnCall[] = [];
 		spySpawn(spawnCalls);
 
@@ -122,8 +143,8 @@ describe("openPath", () => {
 	it("falls back to xdg-open when wslview is unavailable", () => {
 		setPlatform("linux");
 		process.env.WSL_DISTRO_NAME = "Ubuntu";
-		vi.spyOn(piUtils, "$which").mockReturnValue(null);
-		const spawnSyncSpy = vi.spyOn(Bun, "spawnSync");
+		trackedSpyOn(piUtils, "$which").mockReturnValue(null);
+		const spawnSyncSpy = trackedSpyOn(Bun, "spawnSync");
 		const spawnCalls: SpawnCall[] = [];
 		spySpawn(spawnCalls);
 

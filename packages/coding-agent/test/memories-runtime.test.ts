@@ -129,13 +129,32 @@ afterAll(async () => {
 	sharedRoot = undefined;
 });
 
+// Per-file spy tracking. `vi.restoreAllMocks()` IS `mock.restore()` — the same
+// native function — and that global restore walks Bun's whole mock registry to
+// unpatch spies. When one of them patched a sealed ESM module namespace, the
+// walk segfaults the process (exit 132) once a later file in the same run
+// imports an overlapping module graph, taking the shared-process bucket with it.
+//
+// The tracker is deliberately PER FILE. A module-shared array would let one
+// file's teardown restore another file's still-live spies — the same cross-file
+// leak, pointing the other way.
+const trackedSpies: Array<{ mockRestore: () => void }> = [];
+function trackedSpyOn<T extends object, K extends keyof T>(obj: T, key: K) {
+	const spy = vi.spyOn(obj, key);
+	trackedSpies.push(spy as unknown as { mockRestore: () => void });
+	return spy;
+}
+function restoreTrackedSpies(): void {
+	for (const spy of trackedSpies.splice(0).reverse()) spy.mockRestore();
+}
+
 describe("memories runtime", () => {
 	let savedXdgData: string | undefined;
 	let savedXdgState: string | undefined;
 
 	beforeEach(() => {
 		vi.clearAllMocks();
-		vi.restoreAllMocks();
+		restoreTrackedSpies();
 		// Prevent getXdgDataPath/getXdgStatePath from resolving to real user data
 		savedXdgData = process.env.XDG_DATA_HOME;
 		savedXdgState = process.env.XDG_STATE_HOME;
@@ -144,14 +163,14 @@ describe("memories runtime", () => {
 	});
 
 	afterEach(async () => {
-		vi.restoreAllMocks();
+		restoreTrackedSpies();
 		process.env.XDG_DATA_HOME = savedXdgData;
 		process.env.XDG_STATE_HOME = savedXdgState;
 	});
 
 	test("startup gating skips when disabled or subagent depth", async () => {
 		const disabled = await createFixture({ "memories.enabled": false });
-		const openSpy = vi.spyOn(memoryStorage, "openMemoryDb");
+		const openSpy = trackedSpyOn(memoryStorage, "openMemoryDb");
 		startMemoryStartupTask({
 			session: disabled.session,
 			settings: disabled.settings,
@@ -174,10 +193,10 @@ describe("memories runtime", () => {
 
 	test("startup gating skips when DB is unavailable", async () => {
 		const fx = await createFixture();
-		vi.spyOn(memoryStorage, "openMemoryDb").mockImplementation(() => {
+		trackedSpyOn(memoryStorage, "openMemoryDb").mockImplementation(() => {
 			throw new Error("db unavailable");
 		});
-		const stage1Spy = vi.spyOn(ai, "completeSimple");
+		const stage1Spy = trackedSpyOn(ai, "completeSimple");
 
 		startMemoryStartupTask({
 			session: fx.session,
@@ -330,7 +349,7 @@ describe("memories runtime", () => {
 
 	test("phase2 sync prunes stale summaries and preserves raw memory ordering", async () => {
 		const fx = await createFixture();
-		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+		trackedSpyOn(ai, "completeSimple").mockResolvedValue({
 			stopReason: "end_turn",
 			content: [
 				{
@@ -436,7 +455,7 @@ describe("buildMemoryToolDeveloperInstructions", () => {
 	});
 
 	afterEach(async () => {
-		vi.restoreAllMocks();
+		restoreTrackedSpies();
 		process.env.XDG_DATA_HOME = savedXdgData;
 		process.env.XDG_STATE_HOME = savedXdgState;
 	});
