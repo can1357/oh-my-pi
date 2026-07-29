@@ -30,7 +30,11 @@ The investigation established two distinct mitigations:
 1. `acp-agent-fusion-sidekick.test.ts` now disposes the harnesses it creates. This removes a deterministic two-file trigger, but was not by itself sufficient for the exact CI file list and invocation.
 2. [PR #32](https://github.com/kingkillery/oh-my-pk/pull/32) chunks the singleton bucket into groups of ten files, retaining per-chunk process-state coverage while bounding heap growth and leaked child-process accumulation. Its PR CI passed the singleton job and every non-release CI job.
 
-The first post-merge `main` run (`30482788360`) kept the singleton job green but failed separately in the native/unit bucket: `julia-prelude.test.ts` timed out in a hook. That bucket then stopped after its first 10-file chunk, leaving the remaining 51 chunks explicitly **unknown**. It is a distinct test-reliability follow-up, not evidence that the singleton crash returned.
+The first post-merge `main` run (`30482788360`) kept the singleton job green but failed separately in the native/unit bucket: `julia-prelude.test.ts` timed out in a hook. That bucket then stopped after its first 10-file chunk, leaving the remaining 51 chunks explicitly **unknown**. It was a distinct test-reliability follow-up, not evidence that the singleton crash returned.
+
+That follow-up is resolved. The hook timeout was not disposal — [PR #21](https://github.com/kingkillery/oh-my-pk/pull/21) had already bounded that at 10s per phase — but the file's own `30_000` test budgets, which never accounted for Julia's cold-start JIT on a loaded two-core runner; the reported 35s was that budget plus hook overage. [PR #34](https://github.com/kingkillery/oh-my-pk/pull/34) raised both to 120s. `main` @ `1d4011dd6` then went fully green, so the previously-unknown chunks are now known-passing.
+
+Singleton has stayed green across every CI run since the mitigation landed (PR #32's own run, two runs at `2a2ef3afc`, the #33 and #34 branch runs, and `1d4011dd6`) — six consecutive greens against a crash that previously failed most full-bucket runs. NER-134 is closed on that basis as *mitigated, not cured*: the root cause remains a Bun 1.3.14 defect, and a recurrence should reopen NER-134 rather than open a new issue.
 
 The chunking is explicitly a temporary NER-134 mitigation. Re-evaluate and remove it when a Bun release fixes the underlying crash; any suite that genuinely requires cross-file state must keep those files in the same chunk.
 
