@@ -387,6 +387,40 @@ if (!validModes.has(requestedMode as Mode)) {
 	throw new Error(`Unknown mode ${shellQuote(requestedMode)}. Expected one of: ${[...validModes].join(", ")}`);
 }
 
-for (const testCommand of await commandsForMode(requestedMode as Mode)) {
-	await runTestCommand(testCommand);
+// Fail-fast is the default: a failing chunk aborts the run so CI turns red fast.
+// The hazard is that it does so SILENTLY — every later chunk is simply never
+// executed, and a log that ends after chunk 3 of 51 reads exactly like a log
+// where chunks 4-51 passed. That has repeatedly made a single fix look like it
+// "introduced" new failures, when it only unblocked chunks that were already
+// broken. So say plainly how much was skipped, and offer a mode that runs
+// everything and reports the true failure set.
+const keepGoing = args.includes("--keep-going");
+const commands = await commandsForMode(requestedMode as Mode);
+const failures: string[] = [];
+
+for (let index = 0; index < commands.length; index += 1) {
+	const testCommand = commands[index];
+	try {
+		await runTestCommand(testCommand);
+	} catch (error) {
+		failures.push(testCommand.label);
+		if (!keepGoing) {
+			const skipped = commands.length - index - 1;
+			if (skipped > 0) {
+				console.error(`\n!! ABORTED after ${index + 1} of ${commands.length} commands.`);
+				console.error(`!! ${skipped} command(s) were NOT run. Their state is UNKNOWN — not passing.`);
+				console.error(`!! Re-run with --keep-going to execute every command and see the full failure set.`);
+			}
+			throw error;
+		}
+		console.error(`\n!! FAILED (continuing under --keep-going): ${testCommand.label}`);
+	}
+}
+
+if (failures.length > 0) {
+	console.error(`\n!! ${failures.length} of ${commands.length} command(s) failed:`);
+	for (const label of failures) {
+		console.error(`!!   ${label}`);
+	}
+	process.exit(1);
 }

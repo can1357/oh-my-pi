@@ -65,7 +65,12 @@ Test externally observable contracts: behavior, output shape, transitions, error
 
 - No placeholders, tautologies, bare `not.toThrow()`, non-empty checks, “length grew,” or prompt-exists assertions without semantics.
 - Prefer contract/integration coverage over implementation wiring. Do not duplicate the same contract across abstraction levels.
-- Tests must be full-suite safe. Avoid file-wide mutation of `Bun.*`, `process.platform`, `process.env`, or `Bun.env`; use per-test `vi.spyOn()` and `vi.restoreAllMocks()` in `afterEach`.
+- Tests must be full-suite safe. Avoid file-wide mutation of `Bun.*`, `process.platform`, `process.env`, or `Bun.env`; use per-test `vi.spyOn()` and restore each spy individually in `afterEach`:
+  ```ts
+  const spy = vi.spyOn(target, "method");
+  afterEach(() => spy.mockRestore());
+  ```
+- **Do not call `vi.restoreAllMocks()` / `jest.restoreAllMocks()` / `mock.restore()` in a file that spies a module namespace.** All three are the *same* native function — `vi.restoreAllMocks === mock.restore` is `true` under Bun 1.3.14 — and the global restore walks Bun's entire mock registry to unpatch the sealed ESM namespace, segfaulting the process (`panic(main thread): Segmentation fault at address 0x4`, exit 132) once a later file in the same run imports an overlapping module graph. Test buckets share one process, so the crash takes every co-resident file down with it. A blanket restore is only safe when nothing in the file spied a namespace — spies on ordinary objects and class prototypes are unaffected.
 - Never use `mock.module()`; it leaks through Bun’s global module registry. Namespace-import dependencies and spy on exports/pass `.run` methods.
 - For lifecycle code, test invariants/transitions. For errors, trigger the real failure and assert surfaced behavior rather than constructing error classes or inspecting internal metadata.
 - Smoke tests are only for failures narrower tests cannot expose. “Package boots” alone is insufficient.
