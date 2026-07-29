@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,20 +10,28 @@ describe("plugin config", () => {
 	let tmpRoot: string;
 	let pluginsDir: string;
 	let lockfile: string;
+	// Restore each spy individually rather than via `mock.restore()`. These patch
+	// the pi-utils barrel — a sealed ESM namespace that nearly every other test
+	// file imports — and the global restore walks Bun's whole mock registry to
+	// undo that, segfaulting the shared-process bucket (exit 132) as soon as a
+	// later file touches an overlapping module graph.
+	let spies: Array<{ mockRestore: () => void }> = [];
 
 	beforeEach(async () => {
 		tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-plugin-config-"));
 		pluginsDir = path.join(tmpRoot, "plugins");
 		lockfile = path.join(pluginsDir, "omp-plugins.lock.json");
 
-		spyOn(piUtils, "getPluginsDir").mockReturnValue(pluginsDir);
-		spyOn(piUtils, "getPluginsLockfile").mockReturnValue(lockfile);
-		spyOn(piUtils, "getProjectDir").mockReturnValue(tmpRoot);
-		spyOn(piUtils, "getProjectPluginOverridesPath").mockReturnValue(path.join(tmpRoot, "plugin-overrides.json"));
+		spies = [
+			spyOn(piUtils, "getPluginsDir").mockReturnValue(pluginsDir),
+			spyOn(piUtils, "getPluginsLockfile").mockReturnValue(lockfile),
+			spyOn(piUtils, "getProjectDir").mockReturnValue(tmpRoot),
+			spyOn(piUtils, "getProjectPluginOverridesPath").mockReturnValue(path.join(tmpRoot, "plugin-overrides.json")),
+		];
 	});
 
 	afterEach(async () => {
-		mock.restore();
+		for (const spy of spies.splice(0)) spy.mockRestore();
 		await removeWithRetries(tmpRoot);
 	});
 
