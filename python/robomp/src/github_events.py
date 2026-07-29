@@ -391,7 +391,12 @@ def route(
         pr = payload.get("pull_request") or {}
         return _pr_review_pr(pr, repo, action, bot_login)
 
-    if event_type == "pull_request_review_comment" and action == "created":
+    # GitHub sends "pull_request_review_comment" for inline review comments.
+    # Forgejo/Gitea sends "pull_request_comment" instead (the Event() method
+    # in modules/webhook/type.go maps HookEventPullRequestReviewComment to
+    # "pull_request_comment", NOT "pull_request_review_comment").
+    # Accept both event type names so the same endpoint handles both platforms.
+    if event_type in ("pull_request_review_comment", "pull_request_comment") and action == "created":
         comment = payload.get("comment") or {}
         rb_login = _reviewer_bot_login(comment.get("user"))
         if rb_login is None and _is_bot_account(comment.get("user"), bot_login):
