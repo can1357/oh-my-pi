@@ -478,7 +478,7 @@ class WorkerPool:
                 attempts=row.attempts,
                 slot_uid=slot_uid,
             )
-        elif event == "pull_request_review_comment" and action == "created":
+        elif event in ("pull_request_review_comment", "pull_request_comment") and action == "created":
             await tasks.handle_review(
                 settings=self.settings,
                 db=self.db,
