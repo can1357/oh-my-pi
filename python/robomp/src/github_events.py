@@ -436,7 +436,7 @@ def route(
             "handle_review",
             repo,
             key,
-            "pull_request_review_comment.created",
+            f"{event_type}.{action}",
             submitter=login,
             association=assoc,
             **_directive_kwargs(comment, login, assoc),
