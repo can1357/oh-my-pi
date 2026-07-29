@@ -1,0 +1,24 @@
+{
+  "hosts": {
+    "remote": {
+      "host": "100.111.69.99",
+      "username": "pk",
+      "description": "Primary remote Pi environment"
+    },
+    "pi": {
+      "host": "100.111.69.99",
+      "username": "pk",
+      "description": "Raspberry Pi"
+    },
+    "mac": {
+      "host": "100.109.244.1",
+      "username": "k",
+      "description": "macOS Mini (Crabbox)"
+    },
+    "hetzner": {
+      "host": "100.64.216.11",
+      "username": "root",
+      "description": "Hetzner Cloud VPS"
+    }
+  }
+}

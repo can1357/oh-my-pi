@@ -64,8 +64,10 @@ const fakeSpawnImpl = (call: SpawnCall) => {
 		}
 	};
 	if (payload.includes("test -d")) return scripted("EXISTS\n__SSH_RC=0\n");
-	if (payload.includes("git rev-list")) return scripted(`${git(remoteRepo, "rev-list", "--max-count=100", "HEAD")}\n__SSH_RC=0\n`);
-	if (payload.includes('git rev-parse "HEAD^{tree}"')) return scripted(`${git(remoteRepo, "rev-parse", "HEAD^{tree}")}\n__SSH_RC=0\n`);
+	if (payload.includes("git rev-list"))
+		return scripted(`${git(remoteRepo, "rev-list", "--max-count=100", "HEAD")}\n__SSH_RC=0\n`);
+	if (payload.includes('git rev-parse "HEAD^{tree}"'))
+		return scripted(`${git(remoteRepo, "rev-parse", "HEAD^{tree}")}\n__SSH_RC=0\n`);
 	if (payload.includes("git rev-parse HEAD")) return scripted(`${git(remoteRepo, "rev-parse", "HEAD")}\n__SSH_RC=0\n`);
 	if (payload.includes("codespace-handoff.bundle")) {
 		// Bundle apply: the engine streams the local bundle file via stdin
@@ -179,7 +181,7 @@ test("handoff fast path delivers a bundle over ssh with exact sha alignment", as
 
 	// The apply argv must come from sshArgv() (regression: an undefined
 	// buildSshArgv() call once crashed exactly this branch).
-	const apply = sshCalls.find((c) => c[c.length - 1].includes("codespace-handoff.bundle"));
+	const apply = sshCalls.find(c => c[c.length - 1].includes("codespace-handoff.bundle"));
 	expect(apply).toBeDefined();
 	expect(apply?.[0]).toBe("ssh");
 	expect(apply).toContain("StrictHostKeyChecking=no");
@@ -203,8 +205,8 @@ test("second handoff stays incremental (regression: rewritten shas replayed whol
 
 	// …via a second incremental bundle on the fast path (no git-push fallback).
 	const secondRun = sshCalls.slice(before);
-	expect(secondRun.some((c) => c[c.length - 1].includes("codespace-handoff.bundle"))).toBe(true);
-	expect(secondRun.some((c) => c[c.length - 1].includes("git fetch \""))).toBe(false);
+	expect(secondRun.some(c => c[c.length - 1].includes("codespace-handoff.bundle"))).toBe(true);
+	expect(secondRun.some(c => c[c.length - 1].includes('git fetch "'))).toBe(false);
 	const carried = await fs.readFile(path.join(remoteRepo, "file3.txt"), "utf8");
 	expect(carried.replace(/\r\n/g, "\n")).toBe("three\n");
 });

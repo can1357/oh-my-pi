@@ -286,12 +286,20 @@ async function sshRun(sshTarget: string, cmd: string): Promise<SpawnResult> {
 	const res = await direct([...sshArgv(), sshTarget, `${cmd}\n__sc_rc=$?; echo "__SSH_RC=$__sc_rc"`]);
 	const m = res.stdout.match(/__SSH_RC=(\d+)\s*$/);
 	if (m) {
-		return { code: res.code !== 0 ? res.code : Number(m[1]), stdout: res.stdout.replace(/__SSH_RC=\d+\s*$/, ""), stderr: res.stderr };
+		return {
+			code: res.code !== 0 ? res.code : Number(m[1]),
+			stdout: res.stdout.replace(/__SSH_RC=\d+\s*$/, ""),
+			stderr: res.stderr,
+		};
 	}
 	// Missing sentinel = the remote shell never reached our echo (dead session,
 	// unreachable host). Fail closed — returning res.code would recreate the
 	// exact false-success condition this wrapper exists to prevent.
-	return { code: res.code !== 0 ? res.code : 255, stdout: res.stdout, stderr: `${res.stderr}\n[sshRun] remote exit marker missing — treating as failure`.trim() };
+	return {
+		code: res.code !== 0 ? res.code : 255,
+		stdout: res.stdout,
+		stderr: `${res.stderr}\n[sshRun] remote exit marker missing — treating as failure`.trim(),
+	};
 }
 
 // On the remote, init a fresh git repo from the bundle we scp'd, then check
@@ -464,7 +472,18 @@ export async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void
 	// (a stale 337 MB bundle once ballooned every handoff patch and broke the
 	// GitHub fallback with GH001 file-size rejections).
 	await direct(
-		["git", "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".codespace-sync.bundle", ".codespace-sync.stash.bundle", ".codespace-sync-incoming"],
+		[
+			"git",
+			"rm",
+			"-r",
+			"-q",
+			"--cached",
+			"--ignore-unmatch",
+			"--",
+			".codespace-sync.bundle",
+			".codespace-sync.stash.bundle",
+			".codespace-sync-incoming",
+		],
 		{ cwd: plan.localRepo },
 	);
 
@@ -499,8 +518,14 @@ export async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void
 		// newest remote commit the local repo also has (legacy am-based
 		// handoffs left rewritten shas); the remote is a disposable mirror,
 		// so rewinding to it is safe.
-		const remoteListRes = await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git rev-list --max-count=100 HEAD 2>/dev/null || echo NONE`);
-		const remoteShas = remoteListRes.stdout.split("\n").map((s) => s.trim()).filter((s) => /^[0-9a-f]{40}$/.test(s));
+		const remoteListRes = await sshRun(
+			opts.sshTarget,
+			`cd "${remoteDirSsh}" && git rev-list --max-count=100 HEAD 2>/dev/null || echo NONE`,
+		);
+		const remoteShas = remoteListRes.stdout
+			.split("\n")
+			.map(s => s.trim())
+			.filter(s => /^[0-9a-f]{40}$/.test(s));
 		let base = "";
 		for (const sha of remoteShas) {
 			const known = await direct(["git", "cat-file", "-e", `${sha}^{commit}`], { cwd: plan.localRepo });
@@ -516,13 +541,18 @@ export async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void
 			if (base === localHead) {
 				// Remote already has every object — just align branch + worktree.
 				console.log(`  remote already at local HEAD — aligning branch`);
-				const align = await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git reset --hard && git clean -fd && git checkout -B "${branch}" ${localHead}`);
+				const align = await sshRun(
+					opts.sshTarget,
+					`cd "${remoteDirSsh}" && git reset --hard && git clean -fd && git checkout -B "${branch}" ${localHead}`,
+				);
 				fastPathOk = align.code === 0;
 				if (!fastPathOk) console.log(`  ⚠ branch align failed (rc ${align.code})`);
 			} else {
 				const bundlePath = path.join(os.tmpdir(), `codespace-handoff-${Date.now()}.bundle`);
 				try {
-					const bundleRes = await direct(["git", "bundle", "create", bundlePath, `${base}..HEAD`], { cwd: plan.localRepo });
+					const bundleRes = await direct(["git", "bundle", "create", bundlePath, `${base}..HEAD`], {
+						cwd: plan.localRepo,
+					});
 					if (bundleRes.code !== 0) {
 						console.log(`  ⚠ bundle create failed:\n${bundleRes.stderr.trim()}`);
 					} else {
@@ -533,7 +563,11 @@ export async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void
 						// status is smuggled via stdout because Tailscale SSH
 						// check-mode sessions always report exit 0.
 						const applyProc = Bun.spawn({
-							cmd: [...sshArgv(), opts.sshTarget, `cd "${remoteDirSsh}" && cat > .git/codespace-handoff.bundle && git reset --hard && git clean -fd && git fetch .git/codespace-handoff.bundle HEAD && git checkout -B "${branch}" ${localHead} && rm -f .git/codespace-handoff.bundle\n__sc_rc=$?; echo "__SSH_RC=$__sc_rc"`],
+							cmd: [
+								...sshArgv(),
+								opts.sshTarget,
+								`cd "${remoteDirSsh}" && cat > .git/codespace-handoff.bundle && git reset --hard && git clean -fd && git fetch .git/codespace-handoff.bundle HEAD && git checkout -B "${branch}" ${localHead} && rm -f .git/codespace-handoff.bundle\n__sc_rc=$?; echo "__SSH_RC=$__sc_rc"`,
+							],
 							stdin: Bun.file(bundlePath),
 							stdout: "pipe",
 							stderr: "pipe",
@@ -559,10 +593,19 @@ export async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void
 			}
 			if (fastPathOk) {
 				// The mirror contract is tree equality — verify it directly.
-				const localTree = (await direct(["git", "rev-parse", "HEAD^{tree}"], { cwd: plan.localRepo })).stdout.trim();
-				const remoteTree = (await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git rev-parse "HEAD^{tree}" 2>/dev/null || echo NONE`)).stdout.trim();
+				const localTree = (
+					await direct(["git", "rev-parse", "HEAD^{tree}"], { cwd: plan.localRepo })
+				).stdout.trim();
+				const remoteTree = (
+					await sshRun(
+						opts.sshTarget,
+						`cd "${remoteDirSsh}" && git rev-parse "HEAD^{tree}" 2>/dev/null || echo NONE`,
+					)
+				).stdout.trim();
 				if (localTree.length !== 40 || localTree !== remoteTree) {
-					console.log(`  ⚠ apply reported success but remote tree does not match local tree — falling back to git push`);
+					console.log(
+						`  ⚠ apply reported success but remote tree does not match local tree — falling back to git push`,
+					);
 					await gitPushFallback(opts, plan, branch, remoteUrl, remoteDirSsh);
 				} else {
 					console.log(`✓ bundle applied on ${opts.sshTarget}:${opts.remoteDir} (branch ${branch})`);
@@ -651,7 +694,17 @@ async function autoLaunchHandoffBotSession(sshTarget: string, remoteDirSsh: stri
 
 	// Send /new <repo> to the bot via Telegram API
 	const sendUrl = `https://api.telegram.org/bot${botConfig.botToken}/sendMessage`;
-	const sendRes = await direct(["curl", "-s", "-X", "POST", sendUrl, "-d", `chat_id=${chatId}`, "-d", `text=/new ${repoName}`]);
+	const sendRes = await direct([
+		"curl",
+		"-s",
+		"-X",
+		"POST",
+		sendUrl,
+		"-d",
+		`chat_id=${chatId}`,
+		"-d",
+		`text=/new ${repoName}`,
+	]);
 	try {
 		const resp = JSON.parse(sendRes.stdout);
 		if (resp.ok) {
@@ -665,7 +718,13 @@ async function autoLaunchHandoffBotSession(sshTarget: string, remoteDirSsh: stri
 }
 
 /** Fallback: push to GitHub, then fetch + checkout on the remote. */
-async function gitPushFallback(opts: SyncOptions, plan: PlanResult, branch: string, remoteUrl: string, remoteDirSsh: string): Promise<void> {
+async function gitPushFallback(
+	opts: SyncOptions,
+	plan: PlanResult,
+	branch: string,
+	remoteUrl: string,
+	remoteDirSsh: string,
+): Promise<void> {
 	console.log(`→ push to origin/${branch} (force)`);
 	const pushRes = await direct(["git", "push", "--force", "origin", `HEAD:${branch}`], { cwd: plan.localRepo });
 	if (pushRes.code !== 0) {

@@ -751,6 +751,10 @@ describe("AgentSession handoff", () => {
 				"compaction.autoContinue": false,
 				"compaction.strategy": "context-full",
 				"compaction.thresholdTokens": 8_000,
+				// Keep-window must sit below the ~15k stored conversation, otherwise the
+				// whole branch is "recent", nothing is left to summarize, and compaction
+				// no-ops before the floor under test can matter.
+				"compaction.keepRecentTokens": 2_000,
 				"contextPromotion.enabled": false,
 			}),
 			modelRegistry,
