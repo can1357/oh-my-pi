@@ -64,26 +64,6 @@ interface SpawnResult {
 
 const STASH_BUNDLE_NAME = ".codespace-sync-stash.bundle";
 
-// Folders that should never ship over the wire. Conservative — false negatives
-// (extra bytes) are cheap; false positives (missing source) cost a rebuild.
-const RSYNC_EXCLUDES = [
-	".git",
-	"node_modules",
-	"target",
-	"dist",
-	"build",
-	".next",
-	".turbo",
-	".cache",
-	"__pycache__",
-	".venv",
-	"venv",
-	".pytest_cache",
-	".mypy_cache",
-	"coverage",
-	".parcel-cache",
-];
-
 function parseArgs(argv: string[]): SyncOptions {
 	const args = argv.slice(2);
 	if (args.length < 2) {
@@ -217,7 +197,7 @@ function formatPlan(p: PlanResult): string {
 		`dirty files:  ${p.dirtyFiles}`,
 		`untracked:    ${p.untrackedFiles}`,
 		`stash count:  ${p.stashCount}`,
-		`xfer est.:    ${kb} KiB working tree (excludes .git, node_modules, target, dist, …)`,
+		`xfer est.:    ${kb} KiB working tree (tracked + non-ignored untracked files)`,
 	].join("\n");
 }
 
@@ -246,19 +226,85 @@ async function buildBundle(localRepo: string, destDir: string): Promise<BundleRe
 
 // Push the working tree as a tar over ssh. Windows OpenSSH rsync on this box
 // is broken (exits 53 silently); tar-over-ssh is portable and dependency-free.
+//
+// The file list comes from git, not from walking `.` with --exclude patterns.
+// With `-C <repo> .` every member is prefixed `./`, so bare patterns like
+// `node_modules` never matched and the stream silently carried the whole
+// checkout (measured: 532 MiB / 323 s on a repo whose real payload is ~1 MB).
+// `git ls-files` also honours .gitignore, so bulky ignored state is skipped
+// without maintaining a hand-written exclude list.
+async function workingTreeFileList(localRepo: string): Promise<string[]> {
+	// -s exposes the mode so gitlinks (160000) can be dropped: tar would
+	// recursively archive an initialized submodule directory, dragging in its
+	// .git file and ignored state that `git ls-files` never selected.
+	const r = await direct(["git", "ls-files", "-z", "-s", "--cached", "--others", "--exclude-standard"], {
+		cwd: localRepo,
+	});
+	if (r.code !== 0) throw new Error(`git ls-files failed:\n${r.stderr}`);
+	const files: string[] = [];
+	for (const entry of r.stdout.split("\0").filter(Boolean)) {
+		// Staged form: "<mode> <sha> <stage>\t<path>". Untracked (--others)
+		// entries have no metadata prefix and arrive as a bare path.
+		const tab = entry.indexOf("\t");
+		if (tab === -1) {
+			files.push(entry);
+			continue;
+		}
+		const mode = entry.slice(0, entry.indexOf(" "));
+		if (mode === "160000") continue; // submodule gitlink
+		files.push(entry.slice(tab + 1));
+	}
+	// Drop cached entries whose file is gone from the worktree, or tar would
+	// abort on a path it cannot stat. `git ls-files --deleted` is the right
+	// question: it reports exactly "in the index, missing on disk", which also
+	// covers a file staged and then removed (`git add f && rm f`) — a case
+	// `git diff --diff-filter=D HEAD` misses entirely because HEAD never had
+	// it. A staged rename needs no special handling here: `git mv` removes the
+	// old path from the index, so it never enters `files` in the first place.
+	const gone = await direct(["git", "ls-files", "-z", "--deleted"], { cwd: localRepo });
+	if (gone.code !== 0) throw new Error(`git ls-files --deleted failed:\n${gone.stderr}`);
+	const deleted = new Set(gone.stdout.split("\0").filter(Boolean));
+	return files.filter(f => !deleted.has(f));
+}
+
 async function rsyncPush(localRepo: string, sshTarget: string, remoteDir: string): Promise<void> {
-	const tarArgs = ["tar", "-cf", "-", ...RSYNC_EXCLUDES.flatMap(e => ["--exclude", e]), "-C", localRepo, "."];
+	const files = await workingTreeFileList(localRepo);
+	// An empty list is legitimate (empty-tree commit, or every tracked file
+	// deleted locally). The bundle already established HEAD and the caller's
+	// sweep removes deleted paths, so there is simply nothing to overlay.
+	if (files.length === 0) return;
+	const listPath = path.join(os.tmpdir(), `codespace-sync-files-${process.pid}.lst`);
+	await Bun.write(listPath, files.join("\0"));
+	// --no-recursion: every path is already enumerated by git, so a listed
+	// directory must never be expanded by tar itself.
+	const tarArgs = [
+		"tar",
+		"-cf",
+		"-",
+		"-C",
+		localRepo,
+		"--null",
+		"--no-recursion",
+		"--files-from",
+		toWinPath(listPath),
+	];
 	const sshArgs = [...sshArgv(), sshTarget, `tar -xf - -C ${remoteDir} --no-same-owner`];
-	const tar = Bun.spawn({ cmd: tarArgs, stdout: "pipe", stderr: "pipe" });
-	const ssh = Bun.spawn({ cmd: sshArgs, stdin: tar.stdout, stdout: "pipe", stderr: "pipe" });
-	const [tarCode, sshCode, tarErr, sshErr] = await Promise.all([
-		tar.exited,
-		ssh.exited,
-		tar.stderr ? new Response(tar.stderr).text() : Promise.resolve(""),
-		ssh.stderr ? new Response(ssh.stderr).text() : Promise.resolve(""),
-	]);
-	if (tarCode !== 0) throw new Error(`tar failed (exit ${tarCode}):\n${tarErr}`);
-	if (sshCode !== 0) throw new Error(`remote untar failed (exit ${sshCode}):\n${sshErr}`);
+	try {
+		const tar = Bun.spawn({ cmd: tarArgs, stdout: "pipe", stderr: "pipe" });
+		const ssh = Bun.spawn({ cmd: sshArgs, stdin: tar.stdout, stdout: "pipe", stderr: "pipe" });
+		const [tarCode, sshCode, tarErr, sshErr] = await Promise.all([
+			tar.exited,
+			ssh.exited,
+			tar.stderr ? new Response(tar.stderr).text() : Promise.resolve(""),
+			ssh.stderr ? new Response(ssh.stderr).text() : Promise.resolve(""),
+		]);
+		if (tarCode !== 0) throw new Error(`tar failed (exit ${tarCode}):\n${tarErr}`);
+		if (sshCode !== 0) throw new Error(`remote untar failed (exit ${sshCode}):\n${sshErr}`);
+	} finally {
+		await Bun.file(listPath)
+			.delete()
+			.catch(() => {});
+	}
 }
 
 async function scpFile(localPath: string, sshTarget: string, remoteDir: string): Promise<void> {
