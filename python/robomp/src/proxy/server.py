@@ -50,6 +50,12 @@ from robomp.git_ops import (
     push_release as git_push_release,
 )
 from robomp.github_client import GitHubClient, GitHubError
+from robomp.platform_utils import (
+    auth_prefix_for_platform,
+    resolve_api_base_for_platform,
+    resolve_git_host_for_platform,
+    resolve_token_for_platform,
+)
 from robomp.proxy_hmac import HEADER_SIGNATURE, HEADER_TIMESTAMP, verify
 from robomp.sandbox import _safe_directory_env, _slot_subprocess_kwargs
 from robomp.sandbox import workspace_key as compute_workspace_key
@@ -219,22 +225,6 @@ def _workspace_repo_dir(cfg: Settings, workspace_key: str) -> Path:
     return Path(cfg.workspace_root) / workspace_key / "repo"
 
 
-def _resolve_token_for_platform(cfg: Settings, platform: str) -> str:
-    """Return the PAT for the given platform."""
-    if platform == "forgejo" and cfg.forgejo_token is not None:
-        return cfg.forgejo_token.get_secret_value()
-    if cfg.github_token is None:
-        raise HTTPException(500, "gh-proxy: GITHUB_TOKEN not configured")
-    return cfg.github_token.get_secret_value()
-
-
-def _resolve_api_base_for_platform(cfg: Settings, platform: str) -> str:
-    """Return the API base URL for the given platform."""
-    if platform == "forgejo":
-        return cfg.api_base
-    return "https://api.github.com"
-
-
 def _resolve_hmac_key(cfg: Settings) -> bytes:
     if cfg.gh_proxy_hmac_key is None:
         raise HTTPException(500, "gh-proxy: ROBOMP_GH_PROXY_HMAC_KEY not configured")
@@ -398,7 +388,10 @@ def create_proxy_app(settings: Settings) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        app.state.github = GitHubClient(_resolve_token_for_platform(settings, "github"))
+        try:
+            app.state.github = GitHubClient(resolve_token_for_platform(settings, "github"))
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
         app.state.settings = settings
         yield
 
@@ -415,9 +408,12 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         is short-lived (one request) so transport pooling is irrelevant.
         """
         platform = _platform(request)
-        token = _resolve_token_for_platform(settings, platform)
-        base_url = _resolve_api_base_for_platform(settings, platform)
-        auth_prefix = "token" if platform == "forgejo" else "Bearer"
+        try:
+            token = resolve_token_for_platform(settings, platform)
+        except ValueError as exc:
+            raise HTTPException(500, str(exc))
+        base_url = resolve_api_base_for_platform(settings, platform)
+        auth_prefix = auth_prefix_for_platform(platform)
         return GitHubClient(token, base_url=base_url, auth_prefix=auth_prefix)
 
     def _request_target(request: Request) -> str:
@@ -868,7 +864,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo = _require_str(data.get("repo"), "repo")
         clone_url = _require_str(data.get("clone_url"), "clone_url")
         default_branch = _require_str(data.get("default_branch"), "default_branch")
-        remote = _clone_remote_auth(clone_url, repo, _resolve_token_for_platform(settings, _platform(request)), git_host=settings.git_host)
+        remote = _clone_remote_auth(clone_url, repo, resolve_token_for_platform(settings, _platform(request)), git_host=resolve_git_host_for_platform(settings, _platform(request)))
         target = _pool_dir(settings, repo)
         try:
             await _run_git_op(
@@ -888,7 +884,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         data = await _json_body(request)
         repo = _require_str(data.get("repo"), "repo")
         target = _pool_dir(settings, repo)
-        remote = await asyncio.to_thread(_origin_remote_auth, target, repo, _resolve_token_for_platform(settings, _platform(request)), git_host=settings.git_host)
+        remote = await asyncio.to_thread(_origin_remote_auth, target, repo, resolve_token_for_platform(settings, _platform(request)), git_host=resolve_git_host_for_platform(settings, _platform(request)))
         try:
             await _run_git_op(
                 git_fetch_prune,
@@ -907,7 +903,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo = _require_str(data.get("repo"), "repo")
         ref = _require_fetch_ref(data.get("ref"))
         target = _pool_dir(settings, repo)
-        remote = await asyncio.to_thread(_origin_remote_auth, target, repo, _resolve_token_for_platform(settings, _platform(request)), git_host=settings.git_host)
+        remote = await asyncio.to_thread(_origin_remote_auth, target, repo, resolve_token_for_platform(settings, _platform(request)), git_host=resolve_git_host_for_platform(settings, _platform(request)))
         # fetch_ref is intentionally best-effort; never surfaces a 5xx.
         await _run_git_op(
             git_fetch_ref,
@@ -925,7 +921,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo = _require_str(data.get("repo"), "repo")
         pr_number = _require_int(data.get("pr_number"), "pr_number")
         target = _pool_dir(settings, repo)
-        remote = await asyncio.to_thread(_origin_remote_auth, target, repo, _resolve_token_for_platform(settings, _platform(request)), git_host=settings.git_host)
+        remote = await asyncio.to_thread(_origin_remote_auth, target, repo, resolve_token_for_platform(settings, _platform(request)), git_host=resolve_git_host_for_platform(settings, _platform(request)))
         try:
             await _run_git_op(
                 git_fetch_pr_head,
@@ -958,10 +954,10 @@ def create_proxy_app(settings: Settings) -> FastAPI:
             _origin_remote_auth,
             repo_dir,
             repo,
-            _resolve_token_for_platform(settings, _platform(request)),
+            resolve_token_for_platform(settings, _platform(request)),
             push=True,
             slot_uid=slot_uid,
-            git_host=settings.git_host,
+            git_host=resolve_git_host_for_platform(settings, _platform(request)),
         )
         try:
             result = await _run_git_op(

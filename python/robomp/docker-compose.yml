@@ -146,6 +146,8 @@ services:
       ROBOMP_GIT_AUTHOR_EMAIL: ${ROBOMP_GIT_AUTHOR_EMAIL:?ROBOMP_GIT_AUTHOR_EMAIL must be set in .env}
       ROBOMP_REPO_ALLOWLIST: ${ROBOMP_REPO_ALLOWLIST:?ROBOMP_REPO_ALLOWLIST must be set in .env}
       FORGEJO_TOKEN: ${FORGEJO_TOKEN:-}
+      ROBOMP_API_BASE: ${ROBOMP_API_BASE:-https://api.github.com}
+      ROBOMP_GIT_HOST: ${ROBOMP_GIT_HOST:-github.com}
     networks:
       # `default` gives gh-proxy outbound NAT to api.github.com; `robomp_internal`
       # is how the orchestrator reaches it. No `ports:` mapping → still
