@@ -400,6 +400,9 @@ class WorkerPool:
         return self.git_transport
 
     async def _dispatch(self, row: EventRow, *, slot_uid: int | None = None) -> None:
+        # Swap the sandbox's transport to match the event's platform so git
+        # operations route through the correct host/token.
+        self.sandbox.transport = self._platform_transport(row.platform)
         event = row.event_type
         action = str(row.payload.get("action") or "")
         log.info(
