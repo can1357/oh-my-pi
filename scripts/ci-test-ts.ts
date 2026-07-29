@@ -75,6 +75,7 @@ const fastWorkspacePackages = [
 	"packages/context-policy",
 	"packages/context-storage",
 	"packages/collab-relay",
+	"packages/stats",
 ];
 
 // These suites cover the native package, TUI/browser-ish behavior, local servers,

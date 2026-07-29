@@ -38,7 +38,15 @@ afterEach(() => {
 		else process.env[key] = prior;
 	}
 	setAgentDir(originalAgentDir);
-	tempDir?.removeSync();
+	// Best-effort: the stats SQLite handles can still be open when teardown
+	// runs, and Windows then refuses the delete with EBUSY — failing a test whose
+	// assertions all passed and masking any genuine failure behind it.
+	// Reclaiming an OS temp dir is not what these tests assert.
+	try {
+		tempDir?.removeSync();
+	} catch {
+		// leave it to the OS temp reaper
+	}
 	tempDir = null;
 });
 
