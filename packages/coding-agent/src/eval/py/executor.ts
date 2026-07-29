@@ -15,6 +15,7 @@ import {
 	createCancelledKernelResult,
 	getExecutionDeadlineMs,
 	getRemainingTimeoutMs,
+	settleWithin,
 	waitForPromiseWithCancellation,
 } from "../executor-base";
 import type { JsStatusEvent } from "../js/shared/types";
@@ -420,7 +421,7 @@ export async function disposeKernelSessionsByOwner(ownerId: string): Promise<voi
 	for (const session of toShutdown) {
 		if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
 	}
-	const results = await Promise.allSettled(toShutdown.map(session => session.kernel.shutdown()));
+	const results = await settleWithin(toShutdown.map(session => session.kernel.shutdown()));
 	for (let i = 0; i < toShutdown.length; i += 1) {
 		const session = toShutdown[i];
 		const result = results[i];
