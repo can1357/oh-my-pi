@@ -617,7 +617,11 @@ async function gitPushFallback(opts: SyncOptions, plan: PlanResult, branch: stri
 	}
 
 	console.log(`→ fetch + checkout ${branch} on ${opts.sshTarget}`);
-	const syncCmd = `cd "${remoteDirSsh}" && git fetch origin ${branch} && git checkout -B ${branch} origin/${branch} && git reset --hard origin/${branch}`;
+	// Fetch from the resolved GitHub URL, not the remote's `origin`: legacy
+	// bundle-clones have origin pointing at a local .codespace-sync.bundle
+	// path, which silently can never contain the new commits. FETCH_HEAD
+	// pins the sync to exactly what was just pushed.
+	const syncCmd = `cd "${remoteDirSsh}" && git fetch "${remoteUrl}" "${branch}" && git checkout -B "${branch}" FETCH_HEAD && git reset --hard FETCH_HEAD`;
 	const sync = await sshRun(opts.sshTarget, syncCmd);
 	if (sync.code !== 0) {
 		throw new Error(`remote sync failed:\n${sync.stderr}\n${sync.stdout}`);

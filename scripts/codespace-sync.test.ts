@@ -101,6 +101,12 @@ beforeAll(async () => {
 	// New uncommitted work the fast path must carry over (handoff stages+commits it).
 	await fs.writeFile(path.join(localRepo, "file2.txt"), "two\n");
 
+	// A stale transport artifact in the worktree — the guard must keep it out
+	// of the handoff commit even though no .gitignore covers it (regression:
+	// a 337 MB bundle once got committed by `git add -A` and ballooned every
+	// subsequent handoff patch).
+	await fs.writeFile(path.join(localRepo, ".codespace-sync.bundle"), "stale-bundle-bytes\n");
+
 	delete process.env.CODESPACE_SYNC_KEY;
 	delete process.env.CODESPACE_SYNC_PORT;
 });
@@ -146,4 +152,10 @@ test("handoff fast path applies patch over ssh (regression: buildSshArgv Referen
 	expect(apply).toBeDefined();
 	expect(apply?.[0]).toBe("ssh");
 	expect(apply).toContain("StrictHostKeyChecking=no");
+
+	// Artifact guard: the bundle survives on disk but never enters the commit —
+	// locally or on the remote.
+	expect(await Bun.file(path.join(localRepo, ".codespace-sync.bundle")).exists()).toBe(true);
+	expect(git(localRepo, "ls-tree", "-r", "--name-only", "HEAD")).not.toContain(".codespace-sync.bundle");
+	expect(git(remoteRepo, "ls-tree", "-r", "--name-only", "HEAD")).not.toContain(".codespace-sync.bundle");
 });
