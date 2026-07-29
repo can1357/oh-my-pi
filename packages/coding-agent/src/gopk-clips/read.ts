@@ -148,7 +148,11 @@ export function summarizeActivity(
 		if (end <= window.startedAt || start >= window.endedAt) continue;
 		clipCount++;
 		const appId = item.application?.id ?? "unknown";
-		const digest = collapseDigest(item.redactedDigest);
+		const digestText =
+			item.ocrSnippet && !item.redactedDigest?.includes(item.ocrSnippet)
+				? `${item.redactedDigest ?? ""}\n${item.ocrSnippet}`
+				: item.redactedDigest;
+		const digest = collapseDigest(digestText);
 
 		for (let index = 0; index < hourStarts.length; index++) {
 			const hourStart = hourStarts[index] as number;

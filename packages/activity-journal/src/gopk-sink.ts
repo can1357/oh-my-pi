@@ -1,7 +1,12 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ConsentRecord } from "@pk-nerdsaver-ai/pi-context-policy";
-import { type GopkClipAnalysis, type GopkClipIngestionPolicy, ingestGopkClip } from "./gopk-clips";
+import {
+	type GopkClipAnalysis,
+	type GopkClipIngestionPolicy,
+	ingestGopkClip,
+	redactGopkHandoffText,
+} from "./gopk-clips";
 import type { ActivityLedger } from "./ledger";
 import { purgeExpiredRawClips, type RawClipCleanupResult, type RawClipRemover } from "./retention";
 
@@ -11,6 +16,7 @@ export interface GopkCapturedDerivative {
 	readonly window: { readonly startedAt: string; readonly endedAt: string };
 	readonly appIdentity: { readonly processName: string; readonly browserOrigin?: string };
 	readonly sanitizedDigest: string;
+	readonly ocrSnippet?: string;
 	readonly sanitizationAttestation: {
 		readonly status: "sanitized";
 		readonly completedAt: string;
@@ -59,6 +65,10 @@ export function createGopkActivitySink(options: GopkSinkOptions): GopkActivitySi
 			logger.warn("gopk activity sink rejected derivative: sanitization was not attested");
 			return;
 		}
+		if (!isValidOcrSnippet(derivative.ocrSnippet)) {
+			logger.warn("gopk activity sink rejected derivative: invalid OCR snippet");
+			return;
+		}
 		if (!(await isContainedPathReal(derivative.localManifestPointer, captureRoot))) {
 			logger.warn("gopk activity sink rejected derivative: manifest path escapes capture root");
 			return;
@@ -83,13 +93,17 @@ export function createGopkActivitySink(options: GopkSinkOptions): GopkActivitySi
 		const completedAt = new Date(completedAtMs).toISOString();
 		const rawExpiresAt = rawExpiresAtMs === undefined ? undefined : new Date(rawExpiresAtMs).toISOString();
 
+		const redactedDigest = redactGopkHandoffText(derivative.sanitizedDigest, 16_000);
+		const ocrSnippet =
+			derivative.ocrSnippet === undefined ? undefined : redactGopkHandoffText(derivative.ocrSnippet, 280).trim();
 		const processName = derivative.appIdentity.processName.trim().toLowerCase();
 		const analysis: GopkClipAnalysis = {
 			clipId: `${derivative.sessionId}:${derivative.clipId}`,
 			window: { startedAt, endedAt },
 			application: { id: processName, category: inferAppCategory(processName) },
 			redaction: { status: "redacted", completedAt },
-			redactedDigest: derivative.sanitizedDigest,
+			redactedDigest,
+			...(ocrSnippet ? { ocrSnippet } : {}),
 			activityCategory: "unknown",
 			confidence: "medium",
 			confidenceReason: `Sanitized by ${derivative.sanitizationAttestation.sanitizerVersion}`,
@@ -165,6 +179,10 @@ async function isContainedPathReal(localPointer: string, captureRoot: string): P
 	} catch {
 		return false;
 	}
+}
+
+function isValidOcrSnippet(value: unknown): value is string | undefined {
+	return value === undefined || (typeof value === "string" && value.length > 0 && value.length <= 280);
 }
 
 function inferAppCategory(processName: string): string {

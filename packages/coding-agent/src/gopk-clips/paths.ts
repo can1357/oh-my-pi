@@ -30,6 +30,11 @@ export interface GopkClipsPaths {
 /** Any subset of {@link GopkClipsPaths}; empty strings count as unset. */
 export type GopkClipsPathOverrides = Partial<GopkClipsPaths>;
 
+export interface GopkClipsCapturePolicy {
+	readonly enabled: boolean;
+	readonly ocrEnabled: boolean;
+}
+
 /** Expand a leading `~` so user-supplied paths behave like shell paths. */
 export function expandHomePath(value: string): string {
 	if (value === "~") return os.homedir();
@@ -58,6 +63,32 @@ function readSharedConfig(): GopkClipsPathOverrides {
 		};
 	} catch {
 		return {};
+	}
+}
+
+/** Read the shared capture consent fail-closed for the standalone ingester. */
+export function resolveSharedGopkClipsCapturePolicy(): GopkClipsCapturePolicy {
+	try {
+		const parsed = JSON.parse(fs.readFileSync(sharedConfigPath(), "utf8")) as Record<string, unknown>;
+		if (typeof parsed !== "object" || parsed === null) return { enabled: false, ocrEnabled: false };
+		const consent = parsed.consent;
+		if (typeof consent !== "object" || consent === null || Array.isArray(consent)) {
+			return { enabled: false, ocrEnabled: false };
+		}
+		const record = consent as Record<string, unknown>;
+		const current =
+			record.policyVersion === "context-retention/v2" &&
+			typeof record.acceptedAt === "string" &&
+			Number.isFinite(Date.parse(record.acceptedAt)) &&
+			typeof record.framesOptIn === "boolean" &&
+			(record.ocrOptIn === undefined || typeof record.ocrOptIn === "boolean");
+		const enabled = current && parsed.enabled === true;
+		return {
+			enabled,
+			ocrEnabled: enabled && parsed.ocrEnabled === true && record.framesOptIn === true && record.ocrOptIn === true,
+		};
+	} catch {
+		return { enabled: false, ocrEnabled: false };
 	}
 }
 

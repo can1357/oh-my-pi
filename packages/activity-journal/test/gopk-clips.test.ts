@@ -24,6 +24,7 @@ const consent: ConsentRecord = {
 
 const policy: GopkClipIngestionPolicy = {
 	enabled: true,
+	ocrEnabled: true,
 	allowedApplicationIds: ["code"],
 	deniedApplicationIds: ["password-manager"],
 	maximumRawClipRetentionMs: 10 * 60_000,
@@ -87,6 +88,7 @@ describe("gopk clip activity ingestion", () => {
 		const serializedFacts = JSON.stringify(createActivitySynthesisFacts(timeline));
 		expect(serializedFacts).not.toContain("C:\\captures");
 		expect(serializedFacts).not.toContain("Edited the activity journal adapter");
+		expect(result.evidence.ocrSnippet).toBeUndefined();
 		ledger.close();
 	});
 
@@ -132,6 +134,18 @@ describe("gopk clip activity ingestion", () => {
 			status: "rejected",
 			reason: "application is denied by capture policy",
 			rawClipToDelete: "C:\\captures\\clip-1.webm",
+		});
+		expect(ledger.list()).toEqual([]);
+		ledger.close();
+	});
+
+	it("rejects OCR snippets longer than 280 characters", () => {
+		const ledger = new SqliteActivityLedger(":memory:");
+		const result = ingest(ledger, { ocrSnippet: "x".repeat(281) });
+
+		expect(result).toMatchObject({
+			status: "rejected",
+			reason: "OCR snippet must be a non-empty string of at most 280 characters",
 		});
 		expect(ledger.list()).toEqual([]);
 		ledger.close();

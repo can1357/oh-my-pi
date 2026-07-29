@@ -23,6 +23,7 @@ const consent: ConsentRecord = {
 
 const policy: GopkClipIngestionPolicy = {
 	enabled: true,
+	ocrEnabled: true,
 	allowedApplicationIds: ["code"],
 	deniedApplicationIds: ["1password"],
 	maximumRawClipRetentionMs: 10 * 60_000,
@@ -37,6 +38,7 @@ function createDerivative(localManifestPointer: string): GopkCapturedDerivative 
 		window: { startedAt: "2026-07-13T14:00:00.000Z", endedAt: "2026-07-13T14:05:00.000Z" },
 		appIdentity: { processName: "code" },
 		sanitizedDigest: "Edited the activity journal adapter.",
+		ocrSnippet: "Updated the activity journal adapter.",
 		sanitizationAttestation: {
 			status: "sanitized",
 			completedAt: "2026-07-13T14:05:30.000Z",
@@ -64,6 +66,29 @@ describe("gopk activity sink", () => {
 			strength: "corroborating",
 			application: { id: "code", category: "editor" },
 		});
+		expect(ledger.list()[0]?.ocrSnippet).toBe("Updated the activity journal adapter.");
+		ledger.close();
+		await fs.rm(captureRoot, { recursive: true, force: true });
+	});
+
+	it("re-redacts untrusted handoff text before ledger persistence", async () => {
+		const ledger = new SqliteActivityLedger(":memory:");
+		const captureRoot = await fs.mkdtemp(path.join(os.tmpdir(), "activity-journal-gopk-"));
+		const manifestPath = path.join(captureRoot, "clip-1.manifest.json");
+		await Bun.write(manifestPath, "{}");
+		const sink = createGopkActivitySink({ ledger, consent, policy, capture, captureRoot });
+		const token = `github_pat_${"A".repeat(40)}`;
+
+		await sink({
+			...createDerivative(manifestPath),
+			sanitizedDigest: `Build failed with ${token}`,
+			ocrSnippet: `ERROR token ${token}`,
+		});
+
+		const [stored] = ledger.list();
+		expect(stored?.redactedDigest).toContain("[REDACTED]");
+		expect(stored?.ocrSnippet).toContain("[REDACTED]");
+		expect(JSON.stringify(stored)).not.toContain(token);
 		ledger.close();
 		await fs.rm(captureRoot, { recursive: true, force: true });
 	});
@@ -78,6 +103,20 @@ describe("gopk activity sink", () => {
 
 		expect(ledger.list()).toEqual([]);
 		ledger.close();
+	});
+
+	it("rejects OCR snippets longer than 280 characters", async () => {
+		const ledger = new SqliteActivityLedger(":memory:");
+		const captureRoot = await fs.mkdtemp(path.join(os.tmpdir(), "activity-journal-gopk-"));
+		const manifestPath = path.join(captureRoot, "clip-1.manifest.json");
+		await Bun.write(manifestPath, "{}");
+		const sink = createGopkActivitySink({ ledger, consent, policy, capture, captureRoot });
+
+		await sink({ ...createDerivative(manifestPath), ocrSnippet: "x".repeat(281) });
+
+		expect(ledger.list()).toEqual([]);
+		ledger.close();
+		await fs.rm(captureRoot, { recursive: true, force: true });
 	});
 
 	it("deletes raw clips inside the capture root", async () => {

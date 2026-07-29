@@ -45,7 +45,13 @@ function probeZone(zone: string, date: string): ZoneProbe {
 }
 
 /** Minimal evidence row; only the fields the summarizer reads are meaningful. */
-function evidence(startedAt: number, endedAt: number, appId: string, digest?: string): ActivityEvidence {
+function evidence(
+	startedAt: number,
+	endedAt: number,
+	appId: string,
+	digest?: string,
+	ocrSnippet?: string,
+): ActivityEvidence {
 	return {
 		id: `gopk_clips:${appId}:${startedAt}`,
 		source: "gopk_clips",
@@ -59,6 +65,7 @@ function evidence(startedAt: number, endedAt: number, appId: string, digest?: st
 		confidence: "medium",
 		confidenceReason: "test",
 		...(digest ? { redactedDigest: digest } : {}),
+		...(ocrSnippet ? { ocrSnippet } : {}),
 		evidenceRefs: [],
 	};
 }
@@ -191,6 +198,15 @@ describe("summarizeActivity", () => {
 			window,
 		);
 		expect(summary.hours[0]?.digests).toEqual(["main.rs  ·  lib.rs"]);
+	});
+
+	it("includes independent OCR snippets in activity digests", () => {
+		const window = sixHourWindow();
+		const summary = summarizeActivity(
+			[evidence(window.startedAt, window.startedAt + 60_000, "code", "editor title", "ERROR ZephyrQuill42 failed")],
+			window,
+		);
+		expect(summary.hours[0]?.digests).toEqual(["editor title  ·  ERROR ZephyrQuill42 failed"]);
 	});
 
 	it("orders apps by tracked time, descending", () => {

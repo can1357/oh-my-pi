@@ -74,6 +74,7 @@ export function createScreenpipeSessionState(config: ScreenpipeSessionConfig): S
 	};
 	const policy: GopkClipIngestionPolicy = {
 		enabled: true,
+		ocrEnabled: false,
 		allowedApplicationIds: [],
 		deniedApplicationIds: [...DENIED_APPLICATION_IDS],
 		maximumRawClipRetentionMs: MAXIMUM_RAW_CLIP_RETENTION_MS,
