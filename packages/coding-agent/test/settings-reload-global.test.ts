@@ -190,6 +190,45 @@ describe("Settings.reloadGlobal", () => {
 		}
 	});
 
+	it("does not let an overlapping check resolve before the reload it skipped has committed", async () => {
+		await writeConfig({ defaultThinkingLevel: "low" });
+		const s = await openSettings();
+
+		await rewriteConfigWithNewMtime({ defaultThinkingLevel: "xhigh" });
+
+		// A fire-and-forget turn-boundary pickup, then the pre-prompt check that a prompt
+		// actually awaits. The mtime is recorded before the reload is awaited, so an
+		// unserialized second caller stats, sees the first one's already-recorded mtime,
+		// concludes there is nothing to do, and resolves while the value is still
+		// uncommitted. Awaiting it would then be no guarantee at all.
+		const boundaryPickup = s.reloadGlobalIfChangedOnDisk();
+		const prePromptCheck = await s.reloadGlobalIfChangedOnDisk();
+
+		// The load-bearing assertion: whatever the second caller reported, by the time it
+		// resolved the new value must already be live, because a prompt starts here.
+		expect(s.get("defaultThinkingLevel")).toBe(Effort.XHigh);
+
+		const boundaryReport = await boundaryPickup;
+		// Exactly one of them did the work; the other saw committed state.
+		const applied = [boundaryReport, prePromptCheck].filter(report => report?.status === "applied");
+		expect(applied).toHaveLength(1);
+	});
+
+	it("serializes a direct reload against a concurrent on-disk check", async () => {
+		await writeConfig({ defaultThinkingLevel: "low" });
+		const s = await openSettings();
+
+		await rewriteConfigWithNewMtime({ defaultThinkingLevel: "xhigh" });
+
+		// `/reload-config` calls `reloadGlobal` directly while a boundary pickup may be in
+		// flight; both must share one critical section rather than double-applying.
+		const [direct, checked] = await Promise.all([s.reloadGlobal(), s.reloadGlobalIfChangedOnDisk()]);
+
+		expect(direct.status).not.toBe("failed");
+		expect(checked?.status).not.toBe("failed");
+		expect(s.get("defaultThinkingLevel")).toBe(Effort.XHigh);
+	});
+
 	it("classifies a changed restart-only setting instead of claiming it applied", async () => {
 		// The workspace tree is built once at startup and never rebuilt, so nothing can
 		// make this take effect in a live session.
@@ -228,5 +267,132 @@ describe("Settings.reloadGlobal", () => {
 		expect(partial?.reason).toContain("restart");
 		// Not double-reported: partial is distinct from restart-only.
 		expect(report.restartRequired).not.toContain("disabledProviders");
+	});
+});
+
+describe("Settings.reloadGlobalIfChangedOnDisk overlay coverage", () => {
+	let tempDir: TempDir;
+	let agentDir: string;
+	let configPath: string;
+	let overlayPath: string;
+	let settings: Settings | undefined;
+
+	beforeEach(async () => {
+		tempDir = TempDir.createSync("@pi-reload-overlay-");
+		agentDir = path.join(tempDir.path(), "agent");
+		await Bun.write(path.join(agentDir, ".keep"), "");
+		configPath = path.join(agentDir, "config.yml");
+		overlayPath = path.join(tempDir.path(), "overlay.yml");
+	});
+
+	afterEach(async () => {
+		await settings?.flush().catch(() => {});
+		settings = undefined;
+		tempDir.removeSync();
+	});
+
+	it("picks up an overlay edit even when the main config is untouched", async () => {
+		await Bun.write(configPath, YAML.stringify({ defaultThinkingLevel: "low" }));
+		await Bun.write(overlayPath, YAML.stringify({ hideThinkingBlock: false }));
+		settings = await Settings.loadIsolated({
+			cwd: tempDir.path(),
+			agentDir,
+			configFiles: [overlayPath],
+		});
+		expect(settings.get("hideThinkingBlock")).toBe(false);
+
+		// Take the change-detection baseline first. The very first call always reloads
+		// while it establishes that baseline, so without this the assertion below would
+		// pass even if overlays were not tracked at all.
+		await settings.reloadGlobalIfChangedOnDisk();
+		expect(await settings.reloadGlobalIfChangedOnDisk()).toBeUndefined();
+
+		// Now only the overlay changes. Watching just the main config's mtime would never
+		// notice, yet overlays outrank global in the merge and are re-staged by the same
+		// reload, so their edits have to trigger it too.
+		await Bun.write(overlayPath, YAML.stringify({ hideThinkingBlock: true }));
+		const bumped = new Date(Date.now() + 10_000);
+		fs.utimesSync(overlayPath, bumped, bumped);
+
+		const report = await settings.reloadGlobalIfChangedOnDisk();
+
+		expect(report?.status).toBe("applied");
+		expect(report?.changed).toContain("hideThinkingBlock");
+		expect(settings.get("hideThinkingBlock")).toBe(true);
+	});
+
+	it("keeps the selected config path when an overlay fails to parse", async () => {
+		await Bun.write(configPath, YAML.stringify({ defaultThinkingLevel: "low" }));
+		await Bun.write(overlayPath, YAML.stringify({ hideThinkingBlock: true }));
+		settings = await Settings.loadIsolated({
+			cwd: tempDir.path(),
+			agentDir,
+			configFiles: [overlayPath],
+		});
+
+		// Main config staging runs before overlay staging, so a mutation there would
+		// survive an overlay failure and break the "previous state intact" promise.
+		await Bun.write(overlayPath, "hideThinkingBlock: [unclosed\n");
+		const report = await settings.reloadGlobal();
+
+		expect(report.status).toBe("failed");
+		expect(settings.get("defaultThinkingLevel")).toBe(Effort.Low);
+		expect(settings.get("hideThinkingBlock")).toBe(true);
+	});
+	it("does not repoint the save target when a later stage aborts the reload", async () => {
+		// Only the legacy filename exists, so it becomes this session's save target.
+		const legacyPath = path.join(agentDir, "config.yaml");
+		await Bun.write(legacyPath, YAML.stringify({ defaultThinkingLevel: "low" }));
+		await Bun.write(overlayPath, YAML.stringify({ hideThinkingBlock: true }));
+		settings = await Settings.loadIsolated({
+			cwd: tempDir.path(),
+			agentDir,
+			configFiles: [overlayPath],
+		});
+
+		// `config.yml` outranks `config.yaml`, so staging now selects the new file...
+		await Bun.write(configPath, YAML.stringify({ defaultThinkingLevel: "medium" }));
+		// ...but the overlay fails, so the whole reload must abort with nothing adopted.
+		await Bun.write(overlayPath, "hideThinkingBlock: [unclosed\n");
+
+		const report = await settings.reloadGlobal();
+		expect(report.status).toBe("failed");
+
+		// Main-config staging runs before overlay staging. Assigning the selected path
+		// there would leave this session saving into the file it never actually adopted.
+		settings.set("symbolPreset", "nerd");
+		await settings.flush();
+
+		const legacy = YAML.parse(await Bun.file(legacyPath).text()) as Record<string, unknown>;
+		const promoted = YAML.parse(await Bun.file(configPath).text()) as Record<string, unknown>;
+		expect(legacy.symbolPreset).toBe("nerd");
+		expect(promoted.symbolPreset).toBeUndefined();
+	});
+	it("detects a rewrite that reuses the same mtime", async () => {
+		// A whole second round-trips exactly through `utimesSync`, so both writes below
+		// can be given a byte-identical nanosecond mtime. An arbitrary value cannot:
+		// Number(ns) / 1e9 loses precision at that scale.
+		const FIXED_SECONDS = 1_700_000_000;
+		const FIXED_NS = BigInt(FIXED_SECONDS) * 1_000_000_000n;
+
+		await Bun.write(configPath, YAML.stringify({ defaultThinkingLevel: "low" }));
+		fs.utimesSync(configPath, FIXED_SECONDS, FIXED_SECONDS);
+		settings = await Settings.loadIsolated({ cwd: tempDir.path(), agentDir });
+
+		await settings.reloadGlobalIfChangedOnDisk();
+		expect(await settings.reloadGlobalIfChangedOnDisk()).toBeUndefined();
+
+		// A fast editor write can land inside the filesystem's timestamp granularity and
+		// reuse the previous mtime. Pinning both writes to the same second reproduces
+		// that exactly: a stamp keyed on mtime alone sees no change here at all.
+		await Bun.write(configPath, YAML.stringify({ defaultThinkingLevel: "xhigh" }));
+		fs.utimesSync(configPath, FIXED_SECONDS, FIXED_SECONDS);
+		// Precondition, not decoration: without an identical mtime this proves nothing.
+		expect(fs.statSync(configPath, { bigint: true }).mtimeNs).toBe(FIXED_NS);
+
+		const report = await settings.reloadGlobalIfChangedOnDisk();
+
+		expect(report?.status).toBe("applied");
+		expect(settings.get("defaultThinkingLevel")).toBe(Effort.XHigh);
 	});
 });
