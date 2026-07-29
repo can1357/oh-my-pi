@@ -73,6 +73,7 @@ ENV MISE_DATA_DIR="/usr/local/share/mise" \
     MISE_CACHE_DIR="/data/cache/mise" \
     PATH="/usr/local/share/mise/shims:$PATH"
 RUN curl -fsSL https://mise.run | sh \
+    && mv /root/.local/bin/mise /usr/local/bin/mise \
     && mise install --system go@latest \
     && mise reshim
 
