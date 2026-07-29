@@ -396,8 +396,17 @@ def route(
     # in modules/webhook/type.go maps HookEventPullRequestReviewComment to
     # "pull_request_comment", NOT "pull_request_review_comment").
     # Accept both event type names so the same endpoint handles both platforms.
-    if event_type in ("pull_request_review_comment", "pull_request_comment") and action == "created":
+    if event_type in ("pull_request_review_comment", "pull_request_comment") and action in ("created", "reviewed"):
+        # GitHub sends payload.comment with body/user/path/line.
+        # Forgejo sends payload.review with content, and sender as the author.
         comment = payload.get("comment") or {}
+        if not comment and "review" in payload:
+            review = payload.get("review") or {}
+            comment = {
+                "body": review.get("content") or "",
+                "user": payload.get("sender") or {},
+                "id": review.get("id"),
+            }
         rb_login = _reviewer_bot_login(comment.get("user"))
         if rb_login is None and _is_bot_account(comment.get("user"), bot_login):
             return RouteDecision("skip", None, repo, None, "bot/self review comment")
