@@ -35,6 +35,7 @@ import { AgentStorage } from "../session/agent-storage";
 import { normalizeToolName } from "../tools/builtin-names";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { withFileLock } from "./file-lock";
+import { runSettingsResetHooks } from "./reset-hooks";
 import {
 	type AgentPolicySettings,
 	type BashInterceptorRule,
@@ -1552,6 +1553,9 @@ export function resetSettingsForTest(): void {
 	globalInstance = null;
 	globalInstancePromise = null;
 	clearBoundSettingsMethods();
+	// Modules that pinned their own reference to the discarded instance must drop
+	// it too — see config/reset-hooks.ts.
+	runSettingsResetHooks();
 }
 
 /**
