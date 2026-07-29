@@ -66,6 +66,7 @@ out.jsonl
 out.html
 pi-*.html
 .close_issue.sh
+local/forgejo-handoff.md
 
 # Generated files
 packages/coding-agent/export-assets/
