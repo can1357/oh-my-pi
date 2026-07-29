@@ -492,7 +492,7 @@ class GitHubClient:
             ev = event.get("event")
             source = event.get("source") or {}
             src_issue = source.get("issue") if isinstance(source, Mapping) else None
-            if not isinstance(src_issue, Mapping) or "pull_request" not in src_issue:
+            if not isinstance(src_issue, Mapping) or src_issue.get("pull_request") is None:
                 continue
             pr_number = src_issue.get("number")
             if not isinstance(pr_number, int):
@@ -546,7 +546,7 @@ class GitHubClient:
         )
         out: list[IssueSummary] = []
         for item in data or []:
-            if "pull_request" in item:
+            if item.get("pull_request") is not None:
                 continue  # GitHub's /issues endpoint also returns PRs; skip them.
             out.append(_summary_from_item(repo, item))
         return out
@@ -886,7 +886,7 @@ def _issue_from_payload(repo: str, data: Mapping[str, Any]) -> IssueInfo:
         state=str(data.get("state") or "open"),
         author=str(user.get("login") or ""),
         labels=labels,
-        is_pull_request="pull_request" in data,
+        is_pull_request=data.get("pull_request") is not None,
     )
 
 

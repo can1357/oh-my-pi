@@ -217,7 +217,7 @@ def _issue_cache_mutation(
     number = issue.get("number")
     if not isinstance(number, int):
         return None
-    if "pull_request" in issue:
+    if issue.get("pull_request") is not None:
         return repo, number, None
     if str(payload.get("action") or "") == "deleted":
         return repo, number, None
