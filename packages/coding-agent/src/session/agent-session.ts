@@ -5255,7 +5255,15 @@ export class AgentSession {
 
 		await this.#applyActiveToolsByName([...baseActive, ...selected], { persistMCPSelection: false });
 		this.#turnDiscoveredToolNames.clear();
-		for (const name of selected) this.#turnDiscoveredToolNames.add(name);
+		for (const name of selected) {
+			this.#turnDiscoveredToolNames.add(name);
+			// Record non-MCP discoveries. `#applyActiveToolsByName` rebuilds the MCP
+			// selection from the active set, but only ever *filters* the non-MCP one,
+			// so without this the set stays empty and `getSelectedDiscoveredToolNames`
+			// never reports a builtin that discovery just activated. Deactivation
+			// still prunes it there, which is what lets BM25 rediscover the tool.
+			if (!isMCPToolName(name)) this.#selectedDiscoveredToolNames.add(name);
+		}
 		return requested.filter(name => selected.includes(name));
 	}
 
