@@ -48,7 +48,7 @@ Anything ambiguous defaults to `worthy` — let the human decide on a real branc
 
 ```bash
 gh_PR=<NUMBER>
-# pr_checkout creates ~/.omp/wt/<encoded-repo>/pr-<N>/ and configures push remote
+# pr_checkout creates ~/.ompk/wt/<encoded-repo>/pr-<N>/ and configures push remote
 ```
 
 Use the `github pr_checkout` tool, **not** raw `gh pr checkout`. That gives a dedicated worktree wired up for `pr_push` later.
@@ -119,7 +119,7 @@ Each subagent returns a short structured report:
 ```
 PR #<N>  <title>
 Decision: worthy | slop | superseded
-Worktree: ~/.omp/wt/.../pr-<N>   (or: not checked out)
+Worktree: ~/.ompk/wt/.../pr-<N>   (or: not checked out)
 Rebase:   clean | conflicts (resolved | aborted: <reason>)
 Fixes:    <commit shas + one-liners>   (or: none needed)
 Blockers: <anything the human must decide>

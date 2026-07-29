@@ -1,4 +1,4 @@
-# Add one of these to .omp/config.yml or ~/.omp/agent/config.yml.
+# Add one of these to .ompk/config.yml or ~/.ompk/agent/config.yml.
 
 # Direct file mode:
 extensions:

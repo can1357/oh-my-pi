@@ -65,12 +65,12 @@ export default class Ttsr extends Command {
 		`${APP_NAME} ttsr test src/foo.ts`,
 		`${APP_NAME} ttsr test --file src/foo.ts`,
 		`${APP_NAME} ttsr test --file src/foo.ts --source text`,
-		`${APP_NAME} ttsr test --rule .omp/rules/no-any.md --source tool --path src/foo.ts 'const x: any = 1'`,
+		`${APP_NAME} ttsr test --rule .ompk/rules/no-any.md --source tool --path src/foo.ts 'const x: any = 1'`,
 		`echo 'Box::leak(&mut v)' | ${APP_NAME} ttsr test --file - --path src/lib.rs`,
 		`${APP_NAME} ttsr test --source tool --tool edit --path src/foo.ts 'const x: any = 1'`,
 		`${APP_NAME} ttsr scan`,
 		`${APP_NAME} ttsr scan src/`,
-		`${APP_NAME} ttsr scan -r .omp/rules/no-any.md src/`,
+		`${APP_NAME} ttsr scan -r .ompk/rules/no-any.md src/`,
 	];
 
 	async run(): Promise<void> {

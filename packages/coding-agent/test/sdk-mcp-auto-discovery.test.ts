@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -55,11 +55,19 @@ describe("createAgentSession deferred MCP auto discovery", () => {
 		}
 	});
 
+	// Restore this spy individually rather than via `mock.restore()`. It patches a
+	// sealed ESM module namespace, and the global restore walks Bun's whole mock
+	// registry to undo that, segfaulting the process once a later file in the same
+	// run imports an overlapping module graph. This bucket shares one process by
+	// design, so that crash takes the whole bucket down (exit 132). Same reasoning
+	// as acp-agent-fusion-sidekick.test.ts.
+	let homedirSpy: { mockRestore: () => void } | undefined;
+
 	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-sdk-mcp-auto-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		setAgentDir(tempDir);
-		spyOn(os, "homedir").mockReturnValue(isolatedHome);
+		homedirSpy = spyOn(os, "homedir").mockReturnValue(isolatedHome);
 	});
 
 	afterEach(() => {
@@ -67,7 +75,8 @@ describe("createAgentSession deferred MCP auto discovery", () => {
 		if (tempDir && fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
 		}
-		mock.restore();
+		homedirSpy?.mockRestore();
+		homedirSpy = undefined;
 	});
 
 	const writeMcpConfig = (extraArgs: string[] = []) => {

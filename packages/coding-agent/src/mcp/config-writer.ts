@@ -1,7 +1,7 @@
 /**
  * MCP Configuration File Writer
  *
- * Utilities for reading/writing .omp/mcp.json files at user or project level.
+ * Utilities for reading/writing .ompk/mcp.json files at user or project level.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";

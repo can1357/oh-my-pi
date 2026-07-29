@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@pk-nerdsaver-ai/pi-utils";
 
-/** Persistent hard-mute sentinel under `~/.omp/agent/speech-disabled`. */
+/** Persistent hard-mute sentinel under `~/.ompk/agent/speech-disabled`. */
 export function getSpeechHardStopPath(agentDir: string = getAgentDir()): string {
 	return join(agentDir, "speech-disabled");
 }

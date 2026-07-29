@@ -225,8 +225,8 @@ oh-my-pk plugin install name@marketplace-name
 
 Scope behavior:
 
-- **user** (default) — installed in `~/.omp/plugins/installed_plugins.json`, available in all projects
-- **project** — installed in `<project>/.omp/plugins/installed_plugins.json`, available only in that project
+- **user** (default) — installed in `~/.ompk/plugins/installed_plugins.json`, available in all projects
+- **project** — installed in `<project>/.ompk/plugins/installed_plugins.json`, available only in that project
 
 Project-scoped installs shadow user-scoped installs of the same plugin name.
 

@@ -37,7 +37,7 @@ Each subagent **MUST** follow this exact workflow:
 
 1. Read `issue://<N>` (or `issue://<owner>/<repo>/<N>` for cross-repo) — fetches the issue body plus comments; comments often carry the real repro and fix hints. Append `?comments=0` only if you explicitly want to skip them.
 2. `gh search prs` for the issue number to see if a fix is already in flight.
-   - If a PR exists and looks reasonable → switch tracks: review that PR per `.omp/commands/review-prs.md` instead, and report back as `existing-pr`. Do **not** open a competing fix.
+   - If a PR exists and looks reasonable → switch tracks: review that PR per `.ompk/commands/review-prs.md` instead, and report back as `existing-pr`. Do **not** open a competing fix.
 
 #### b. Diagnose & try to reproduce — **in the current cwd, on `main`**
 
@@ -59,13 +59,13 @@ Only after a confirmed local repro:
 ```bash
 MAIN="$(git rev-parse --show-toplevel)"
 ENC="$(printf '%s' "$MAIN" | sed 's|[/\\:]|-|g')"
-WT="$HOME/.omp/wt/${ENC}/fix-issue-<N>"
+WT="$HOME/.ompk/wt/${ENC}/fix-issue-<N>"
 
 git -C "$MAIN" fetch origin main
 git -C "$MAIN" worktree add -B "fix/issue-<N>" "$WT" origin/main
 ```
 
-Branch naming: `fix/issue-<N>` (or `fix/issue-<N>-<slug>` if you'll open multiple). Path under `~/.omp/wt/<encoded-main-path>/...` matches the convention `pr_checkout` uses.
+Branch naming: `fix/issue-<N>` (or `fix/issue-<N>-<slug>` if you'll open multiple). Path under `~/.ompk/wt/<encoded-main-path>/...` matches the convention `pr_checkout` uses.
 
 #### d. Symlink build artifacts
 
@@ -118,7 +118,7 @@ Each subagent returns a short structured report:
 Issue #<N>  <title>
 Status:    fixed | unreproduced | not-a-bug | existing-pr (#<M>)
 Repro:     <test path inside worktree>            (if applicable)
-Worktree:  ~/.omp/wt/.../fix-issue-<N>            (if created)
+Worktree:  ~/.ompk/wt/.../fix-issue-<N>            (if created)
 Branch:    fix/issue-<N>                          (if created)
 Commits:   <shas + one-liners>                    (if any)
 Notes:     <root cause in one sentence; or what info is missing>

@@ -27,14 +27,14 @@ The extension deliberately avoids a hard runtime import from `@oh-my-pi/pi-codin
 Place the built package under:
 
 ```text
-<repo>/.omp/extensions/llm-router-agent/
+<repo>/.ompk/extensions/llm-router-agent/
 ```
 
-OMP can discover extension modules from project `.omp/extensions` and user `~/.omp/agent/extensions` paths.
+OMP can discover extension modules from project `.ompk/extensions` and user `~/.ompk/agent/extensions` paths.
 
 ### Explicit config
 
-Add a path to `.omp/config.yml` or `~/.omp/agent/config.yml`:
+Add a path to `.ompk/config.yml` or `~/.ompk/agent/config.yml`:
 
 ```yaml
 extensions:

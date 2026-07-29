@@ -238,7 +238,7 @@ describe("advisor watchdog prompt discovery", () => {
 		const tempDir = TempDir.createSync("@pi-advisor-watchdog-");
 		tempDirs.push(tempDir);
 		const cwd = tempDir.join("project-root");
-		const ompDir = path.join(cwd, ".omp");
+		const ompDir = path.join(cwd, ".ompk");
 		const userAgentDir = tempDir.join("user-agent");
 		fs.mkdirSync(cwd, { recursive: true });
 		fs.mkdirSync(ompDir, { recursive: true });
@@ -290,7 +290,7 @@ describe("advisor watchdog prompt discovery", () => {
 			expect(dump).toContain(nativeWatchdogContent);
 			expect(dump).toContain(standaloneWatchdogContent);
 
-			// Check ordering: user-level should appear first, then native project level (.omp/WATCHDOG.md has depth 0),
+			// Check ordering: user-level should appear first, then native project level (.ompk/WATCHDOG.md has depth 0),
 			// then standalone project level (cwd/WATCHDOG.md has depth 0).
 			// Between native and standalone, they both have depth 0, so their relative order doesn't strictly matter
 			// as long as user-level comes before both of them.

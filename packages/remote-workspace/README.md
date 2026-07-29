@@ -44,7 +44,7 @@ Check the backend before use:
 bun src/cli.ts doctor
 ```
 
-`doctor` reports whether Docker is reachable and whether the worker image exists locally. The job database defaults to `~/.omp/remote-jobs.sqlite`; set `OMPK_REMOTE_DB` to use another path.
+`doctor` reports whether Docker is reachable and whether the worker image exists locally. The job database defaults to `~/.ompk/remote-jobs.sqlite`; set `OMPK_REMOTE_DB` to use another path.
 
 ## CLI
 

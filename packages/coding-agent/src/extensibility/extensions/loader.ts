@@ -482,7 +482,7 @@ async function discoverExtensionsInDir(dir: string): Promise<string[]> {
 /**
  * Discover absolute paths of extensions to load, without importing or
  * binding factories. Hot path on session startup — the scan walks native
- * `.omp`/`.pi` extension capabilities, JS/TS hook factories, the
+ * `.ompk`/`.pi` extension capabilities, JS/TS hook factories, the
  * installed-plugin tree, and any configured paths.
  *
  * Subagents reuse the parent's collected paths via the SDK's
@@ -519,7 +519,7 @@ export async function discoverExtensionPaths(
 		}
 	};
 
-	// 1. Discover extension modules via capability API (native .omp/.pi only)
+	// 1. Discover extension modules via capability API (native .ompk/.pi only)
 	const discovered = await loadCapability<ExtensionModule>(extensionModuleCapability.id, loadOptions);
 	for (const ext of discovered.items) {
 		if (ext._source.provider !== "native") continue;

@@ -30,7 +30,7 @@ The standalone runner has no timeout. It runs iteration after iteration until th
 
 ### Inside oh-my-pi (TUI)
 
-Register the extension in your config (`~/.omp/config.json` or `.omp/config.json`):
+Register the extension in your config (`~/.ompk/config.json` or `.ompk/config.json`):
 
 ```json
 {

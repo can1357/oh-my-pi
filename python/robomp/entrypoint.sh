@@ -57,13 +57,13 @@ find /data/cache /data/workspaces/_pool -type f ! -perm /111 -exec chmod 0660 {}
 chmod 0700 /data/logs
 
 
-rm -rf /srv/agent-home/.agent /srv/agent-home/.omp/agent
-mkdir -p /srv/agent-home/.agent /srv/agent-home/.omp/agent
+rm -rf /srv/agent-home/.agent /srv/agent-home/.ompk/agent
+mkdir -p /srv/agent-home/.agent /srv/agent-home/.ompk/agent
 if [ -e /srv/agent-home-stage/.agent ]; then
     cp -a /srv/agent-home-stage/.agent/. /srv/agent-home/.agent/
 fi
-if [ -e /srv/agent-home-stage/.omp/agent ]; then
-    cp -a /srv/agent-home-stage/.omp/agent/. /srv/agent-home/.omp/agent/
+if [ -e /srv/agent-home-stage/.ompk/agent ]; then
+    cp -a /srv/agent-home-stage/.ompk/agent/. /srv/agent-home/.ompk/agent/
 fi
 chown -R root:root /srv/agent-home || true
 find /srv/agent-home -type d -exec chmod 0755 {} +

@@ -157,7 +157,7 @@ Side-channel artifacts outside the model tool result:
   - `attach`: explicit `adapter` wins; otherwise remote `port` prefers `debugpy`, then native debuggers, then first available adapter.
 - **Custom adapter config**
   - Debug adapters can be added or overridden with `dap.json`, `.dap.json`, `dap.yaml`, `.dap.yaml`, `dap.yml`, or `.dap.yml`.
-  - Search order mirrors LSP config: project root, project config dirs (`.omp/`, `.pi/`, `.claude/`), user config dirs, plugin roots, then home-root fallback. Files are merged from lowest to highest priority.
+  - Search order mirrors LSP config: project root, project config dirs (`.ompk/`, `.pi/`, `.claude/`), user config dirs, plugin roots, then home-root fallback. Files are merged from lowest to highest priority.
   - Config shape may be either `{ "adapters": { ... } }` or a top-level adapter map.
   - Adapter fields:
     - `command`: executable name or path. Required.
@@ -170,7 +170,7 @@ Side-channel artifacts outside the model tool result:
     - `connectMode`: `"stdio"` (default) or `"socket"`.
     - `acceptsDirectoryProgram`: set `true` for adapters such as `dlv` that can launch a package/project directory.
 
-Example `.omp/dap.json`:
+Example `.ompk/dap.json`:
 
 ```json
 {

@@ -28,7 +28,7 @@ describe("renderFormula", () => {
 	});
 
 	// Regression: completions generation must run with HOME redirected so the
-	// popened binary doesn't touch the real `~/.omp` (denied by Homebrew's
+	// popened binary doesn't touch the real `~/.ompk` (denied by Homebrew's
 	// sandbox profile) during the build (issue #2398).
 	it("wraps `generate_completions_from_executable` with a HOME redirect to buildpath", () => {
 		expect(formula).toMatch(

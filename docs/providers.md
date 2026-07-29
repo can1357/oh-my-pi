@@ -11,7 +11,7 @@ This page covers how providers become available, how credentials are resolved, t
 At startup the model registry assembles its catalog from four sources, in order:
 
 1. The bundled model catalog (every built-in provider and its known models).
-2. Custom provider and model entries from `~/.omp/agent/models.yml`.
+2. Custom provider and model entries from `~/.ompk/agent/models.yml`.
 3. Runtime-discovered models for providers that support discovery (local engines and discovery-enabled gateways).
 4. Providers and models registered by extensions.
 
@@ -35,7 +35,7 @@ When a provider needs an API key, `omp` resolves it in this order (first match w
 5. **Provider environment variable** — including values loaded from `.env` files (see [the env-var table](#environment-variables-and-env-files)).
 6. **`models.yml` fallback resolver** — keys for custom providers not otherwise registered.
 
-Stored credentials live in the auth store at `~/.omp/agent/agent.db` for local auth, or in the configured auth-broker snapshot when running in broker mode. (`PI_CODING_AGENT_DIR` relocates the `~/.omp/agent` base, and the auth store moves with it.)
+Stored credentials live in the auth store at `~/.ompk/agent/agent.db` for local auth, or in the configured auth-broker snapshot when running in broker mode. (`PI_CODING_AGENT_DIR` relocates the `~/.ompk/agent` base, and the auth store moves with it.)
 
 ### OAuth vs API key, and provider-scoped logins
 
@@ -55,7 +55,7 @@ When a model has no credentials, `omp` tells you to run `/login` or set the prov
 A custom provider's `apiKey` is resolved as **environment-variable-name-or-literal**: if the value names an existing environment variable, that variable's value is used; otherwise the string itself is the key. Prefixing the value with `!` runs it as a shell command and uses the trimmed stdout (see [Model and Provider Configuration](./models.md) for the full value syntax).
 
 ```yaml
-# ~/.omp/agent/models.yml
+# ~/.ompk/agent/models.yml
 providers:
   my-gateway:
     baseUrl: https://gateway.example.com/v1
@@ -139,11 +139,11 @@ OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-
 
 1. The process environment inherited by `omp` (already-set variables always win).
 2. `<cwd>/.env`
-3. `~/.omp/agent/.env`
-4. `~/.omp/.env`
+3. `~/.ompk/agent/.env`
+4. `~/.ompk/.env`
 5. `~/.env`
 
-A variable already present in the process environment is never overwritten by a `.env` file. Among the files, a value set in `<cwd>/.env` wins over `~/.omp/agent/.env`, which wins over `~/.omp/.env`, which wins over `~/.env`. So a shell-exported `OPENAI_API_KEY` beats every `.env` file, and a project's `<cwd>/.env` beats your home `~/.env`.
+A variable already present in the process environment is never overwritten by a `.env` file. Among the files, a value set in `<cwd>/.env` wins over `~/.ompk/agent/.env`, which wins over `~/.ompk/.env`, which wins over `~/.env`. So a shell-exported `OPENAI_API_KEY` beats every `.env` file, and a project's `<cwd>/.env` beats your home `~/.env`.
 
 Project-local `.env` is the simplest way to make one repository use a project-specific gateway, key, or local endpoint:
 
@@ -183,7 +183,7 @@ For installing and running these engines, see [Local models](./local-models.md).
 Use the `disabledProviders` setting to remove a provider's models from selection:
 
 ```yaml
-# ~/.omp/agent/config.yml or <project>/.omp/config.yml
+# ~/.ompk/agent/config.yml or <project>/.ompk/config.yml
 disabledProviders:
   - anthropic
   - openai
@@ -205,10 +205,10 @@ Disabling a provider does not delete its stored credentials — re-enable it by 
 
 ## Project-specific provider control
 
-Project settings live in `<project>/.omp/config.yml`. Use them when one repository must allow or hide a different provider set than your global default:
+Project settings live in `<project>/.ompk/config.yml`. Use them when one repository must allow or hide a different provider set than your global default:
 
 ```yaml
-# <project>/.omp/config.yml
+# <project>/.ompk/config.yml
 disabledProviders:
   - openai
   - openrouter
@@ -217,13 +217,13 @@ disabledProviders:
 Settings arrays are **replaced** wholesale by the higher-precedence layer, not merged or appended. If the global file disables three providers and the project file disables one, the project sees only the project list:
 
 ```yaml
-# ~/.omp/agent/config.yml
+# ~/.ompk/agent/config.yml
 disabledProviders:
   - anthropic
   - openai
   - google
 
-# <project>/.omp/config.yml
+# <project>/.ompk/config.yml
 disabledProviders:
   - groq
 ```
@@ -283,7 +283,7 @@ Watch the related names. The Google Gemini **API** models use the model provider
 
 ## Custom providers in `models.yml`
 
-Custom providers live in `~/.omp/agent/models.yml` under `providers:`. A provider ID defined there participates in the same selection, credential resolution, and `disabledProviders` rules as built-in providers.
+Custom providers live in `~/.ompk/agent/models.yml` under `providers:`. A provider ID defined there participates in the same selection, credential resolution, and `disabledProviders` rules as built-in providers.
 
 Minimal OpenAI-compatible provider:
 
@@ -344,7 +344,7 @@ disabledProviders:
 
 **The wrong key is being used (a stale key from `.env`).** Resolution favors runtime `--api-key`, then a `models.yml` config key, then stored credentials, then environment/`.env`. An already-set process environment variable also beats every `.env` file, and `<cwd>/.env` beats `~/.env`. If an unexpected key wins, check for an exported shell variable and the four `.env` files in precedence order, and clear the one that should not apply.
 
-**A provider still appears even though I disabled it.** `disabledProviders` arrays are replaced, not merged: a project `<project>/.omp/config.yml` array fully overrides the global one. Verify the *effective* list for the directory you are in (path-scoped entries only apply at or under their configured path), and confirm the ID is spelled exactly. Use `oh-my-pk config get disabledProviders` to inspect the merged value (see [Settings](./settings.md)).
+**A provider still appears even though I disabled it.** `disabledProviders` arrays are replaced, not merged: a project `<project>/.ompk/config.yml` array fully overrides the global one. Verify the *effective* list for the directory you are in (path-scoped entries only apply at or under their configured path), and confirm the ID is spelled exactly. Use `oh-my-pk config get disabledProviders` to inspect the merged value (see [Settings](./settings.md)).
 
 **A discovery provider name had no effect on models (or vice-versa).** The ID namespace is shared. `gemini`, `codex`, `claude`, `native`, and `agents` are discovery-source IDs; the Google model backend is `google`. Make sure you are disabling the right kind of provider.
 

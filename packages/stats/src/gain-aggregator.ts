@@ -66,7 +66,9 @@ function matchesProject(cwd: string | undefined, project: string): boolean {
 export function normalizeProjectPath(p: string): string | null {
 	const clean = canonicalProjectPath(p);
 	if (TEMP_PATH_RE.test(clean)) return null;
-	if (/\/\.omp\/wt\//u.test(clean)) return null;
+	// Both spellings: `.ompk` is the pre-fork config dir, still present in
+	// historical stats rows; `.ompk` is what new sessions write.
+	if (/\/\.ompk?\/wt\//u.test(clean)) return null;
 
 	const worktreePatterns = [
 		/^(.+)\/\.wt\/[^/]+(?:\/.*)?$/u,

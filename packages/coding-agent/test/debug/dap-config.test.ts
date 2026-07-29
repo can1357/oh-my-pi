@@ -91,11 +91,11 @@ describe("DAP adapter configuration", () => {
 
 	it("loads adapter config from project config directories and YAML", async () => {
 		const cwd = await makeTempDir("omp-dap-config-yaml-");
-		await fs.mkdir(path.join(cwd, ".omp"), { recursive: true });
+		await fs.mkdir(path.join(cwd, ".ompk"), { recursive: true });
 		await fs.writeFile(path.join(cwd, "build.gradle.kts"), "plugins {}\n");
 		await fs.writeFile(path.join(cwd, "Main.kt"), "fun main() {}\n");
 		await fs.writeFile(
-			path.join(cwd, ".omp", "dap.yaml"),
+			path.join(cwd, ".ompk", "dap.yaml"),
 			[
 				"adapters:",
 				"  yaml-kotlin:",

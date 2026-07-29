@@ -15,7 +15,7 @@ LimitMode = Literal["calls", "events"]
 DEFAULT_MAX_ITEMS = 50_000
 DEFAULT_SINCE_DAYS = 30
 DEFAULT_MAX_FILES = 500
-DEFAULT_SESSIONS_DIR = Path.home() / ".omp" / "agent" / "sessions"
+DEFAULT_SESSIONS_DIR = Path.home() / ".ompk" / "agent" / "sessions"
 
 
 TOOL_GROUPS: dict[str, tuple[str, ...]] = {

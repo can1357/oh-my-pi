@@ -7,7 +7,7 @@ A minimal `oh-my-pi` extension that demonstrates the two most common authoring p
 **Option A — drop into user extensions directory:**
 
 ```
-cp -r . ~/.omp/agent/extensions/hello-extension
+cp -r . ~/.ompk/agent/extensions/hello-extension
 ```
 
 Restart `omp`. You will see the startup notification immediately.
@@ -15,7 +15,7 @@ Restart `omp`. You will see the startup notification immediately.
 **Option B — point the settings `extensions` array at it:**
 
 ```yaml
-# ~/.omp/agent/config.yml
+# ~/.ompk/agent/config.yml
 extensions:
   - /path/to/hello-extension
 ```

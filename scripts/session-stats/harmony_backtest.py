@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Backtest GPT-5 Harmony-header leak handling against ~/.omp/stats.db.
+Backtest GPT-5 Harmony-header leak handling against ~/.ompk/stats.db.
 
 This is a dry-run analysis tool. It does not mutate stats.db or session JSONL.
 It scans stored assistant/tool-call surfaces, applies a selected detection and
@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-DB_PATH = Path.home() / ".omp" / "stats.db"
+DB_PATH = Path.home() / ".ompk" / "stats.db"
 
 MARKER_RE = re.compile(r"\bto=functions\.[A-Za-z_][A-Za-z0-9_]*")
 HARMONY_RE = re.compile(r"<\|(start|end|channel|message|call|return)\|>")

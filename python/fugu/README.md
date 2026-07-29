@@ -29,7 +29,7 @@ fugu solve "2+2?" --mock
 fugu serve --port 8088
 ```
 
-Omp provider config is available at `configs/omp_provider.yml`; merge its `providers.fugu` block into `~/.omp/agent/models.yml`, then use `fugu/fugu` or `fugu/fugu-ultra` while `fugu serve` is running.
+Omp provider config is available at `configs/omp_provider.yml`; merge its `providers.fugu` block into `~/.ompk/agent/models.yml`, then use `fugu/fugu` or `fugu/fugu-ultra` while `fugu serve` is running.
 
 Runtime knobs: `FUGU_COORDINATOR_MODEL` (default `9router/cline-deepseek-v4-flash`), `FUGU_9ROUTER_RPM` (default `80`, `0` disables the local limiter), `FUGU_API_KEY` (optional bearer auth for `fugu serve`), `NINEROUTER_API_KEY` / `9ROUTER_API_KEY`, and `9ROUTER_BASE_URL`.
 

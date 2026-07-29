@@ -91,7 +91,7 @@ approval: (args) =>
 
 ## ACP sessions
 
-ACP (`oh-my-pk acp`) uses the same settings resolver as normal OMP launches. Global `~/.omp/agent/config.yml` applies, project config for the ACP session `cwd` applies, and any `--config <file>` overlays passed to the ACP server process apply to sessions created by that process.
+ACP (`oh-my-pk acp`) uses the same settings resolver as normal OMP launches. Global `~/.ompk/agent/config.yml` applies, project config for the ACP session `cwd` applies, and any `--config <file>` overlays passed to the ACP server process apply to sessions created by that process.
 
 To auto-approve ACP tool calls, set the mode in global or project config:
 

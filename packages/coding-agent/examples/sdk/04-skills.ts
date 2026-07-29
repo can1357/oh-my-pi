@@ -6,7 +6,7 @@
  */
 import { createAgentSession, discoverSkills, SessionManager, type Skill } from "@pk-nerdsaver-ai/pi-coding-agent";
 
-// Discover all skills from cwd/.omp/skills, ~/.omp/agent/skills, etc.
+// Discover all skills from cwd/.ompk/skills, ~/.ompk/agent/skills, etc.
 const { skills: allSkills } = await discoverSkills();
 console.log(
 	"Discovered skills:",

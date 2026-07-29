@@ -13,13 +13,13 @@ The `/agent` slash command is a project-scoped file-based slash command designed
 ## Configuration and path
 
 The command is defined as a Markdown command:
-- **Path**: `.omp/commands/agent.md`
+- **Path**: `.ompk/commands/agent.md`
 - **Discovered by**: The `builtin` discovery provider, which registers commands in project `commands/*.md`.
 
 ## Argument mapping
 
 It takes a single free-text argument (`$ARGUMENTS`), which represents the task assignment. The parser splits the command line to parse the arguments and interpolates them:
-- `/agent <prompt>` expands to the prompt template inside `.omp/commands/agent.md`.
+- `/agent <prompt>` expands to the prompt template inside `.ompk/commands/agent.md`.
 - `$ARGUMENTS` is replaced with the raw text after `/agent`.
 
 ## Expansion prompt structure

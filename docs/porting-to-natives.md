@@ -105,7 +105,7 @@ rm packages/natives/native/pi_natives.<platform>-<arch>-baseline.node
 bun --cwd=packages/natives run build
 ```
 
-For compiled binaries or Windows staging, delete the versioned addon cache shown in the loader error (normally under `~/.omp/natives/<version>` unless `$XDG_DATA_HOME/omp` is used).
+For compiled binaries or Windows staging, delete the versioned addon cache shown in the loader error (normally under `~/.ompk/natives/<version>` unless `$XDG_DATA_HOME/omp` is used).
 
 ### 2) Generated types do not match loaded binary
 

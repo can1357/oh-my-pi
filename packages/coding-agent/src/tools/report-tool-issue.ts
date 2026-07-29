@@ -187,7 +187,7 @@ let cachedDb: Database | null = null;
 
 /**
  * Open (or return the cached handle for) the auto-QA SQLite database at
- * `~/.omp/agent/autoqa.db`. Idempotently runs schema creation, the
+ * `~/.ompk/agent/autoqa.db`. Idempotently runs schema creation, the
  * `pushed`-column migration, and index setup so every consumer — tool
  * execute path, manual `omp grievances push`, future debug scripts —
  * sees the same prepared schema. Returns `null` only on a hard open
@@ -474,7 +474,7 @@ export function createReportToolIssueTool(session: ToolSession, activeBuiltinNam
 		intent: "omit",
 		async execute(_toolCallId, rawParams) {
 			// Save is unconditional: the row lives in the user's own SQLite
-			// at ~/.omp/agent/autoqa.db regardless of consent — they always
+			// at ~/.ompk/agent/autoqa.db regardless of consent — they always
 			// own their local data and can inspect or wipe it via `omp grievances`.
 			// Consent only gates whether the row is *shipped* to the shared
 			// backend; that decision rides on `dev.autoqa.consent` and is

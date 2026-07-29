@@ -98,7 +98,7 @@ Tell the user exactly what to do. Be specific. Example:
 
 Adapt the instruction to the IDE:
 - **oh-my-pi / Claude Code / Cursor / Windsurf** — open a new session/window and run `/side-agent join`.
-- **Any other CLI agent** — open a new terminal, navigate to the workspace, and tell the agent: "Read `.omp/skills/side-agent/SUB-AGENT.md` and follow the sub-agent protocol."
+- **Any other CLI agent** — open a new terminal, navigate to the workspace, and tell the agent: "Read `.ompk/skills/side-agent/SUB-AGENT.md` and follow the sub-agent protocol."
 - **If the IDE supports splitting** — use split panes or side-by-side views.
 
 ## Step 5: Poll for results

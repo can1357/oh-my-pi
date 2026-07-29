@@ -19,8 +19,8 @@ A **plugin** is a directory containing Claude/OMP plugin content such as skills,
 
 **Scopes**: marketplace plugins can be installed at two scopes:
 
-- **user** (default) -- available in all projects, stored in `~/.omp/plugins/installed_plugins.json`
-- **project** -- available only in the active project, stored in the nearest project `.omp/plugins/installed_plugins.json`
+- **user** (default) -- available in all projects, stored in `~/.ompk/plugins/installed_plugins.json`
+- **project** -- available only in the active project, stored in the nearest project `.ompk/plugins/installed_plugins.json`
 
 Enabled project-scoped installs shadow enabled user-scoped installs of the same plugin. A disabled project install does not shadow the user install.
 
@@ -204,7 +204,7 @@ Current installer behavior rejects npm marketplace sources with `npm plugin sour
 ## On-disk layout
 
 ```
-~/.omp/
+~/.ompk/
   marketplaces.json              # Registry of added marketplaces
   plugins/
     installed_plugins.json       # User-scoped marketplace plugins (version: 2)
@@ -212,7 +212,7 @@ Current installer behavior rejects npm marketplace sources with `npm plugin sour
       marketplaces/<name>/       # Cached marketplace clone/catalog
       plugins/<marketplace>___<plugin>___<version>/  # Cached plugin directories
 
-<project>/.omp/
+<project>/.ompk/
   plugins/
     installed_plugins.json       # Project-scoped marketplace plugins (version: 2)
 ```

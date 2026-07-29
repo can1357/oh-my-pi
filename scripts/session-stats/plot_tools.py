@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Plot token-usage trends for the top N tools from ~/.omp/stats.db.
+Plot token-usage trends for the top N tools from ~/.ompk/stats.db.
 
 Reads ss_tool_calls + ss_tool_results and renders:
   1. daily total tokens (args + results)         -- stacked area
@@ -28,7 +28,7 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 
-DB_PATH = Path.home() / ".omp" / "stats.db"
+DB_PATH = Path.home() / ".ompk" / "stats.db"
 OUT_DIR = Path(__file__).resolve().parent / "out"
 
 DAY_MS = 86_400_000

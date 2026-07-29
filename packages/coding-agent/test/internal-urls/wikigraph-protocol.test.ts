@@ -74,7 +74,7 @@ describe("wikigraph:// protocol", () => {
 
 	it("allows wikigraph path reads only from cwd and configured wiki roots", async () => {
 		const project = path.join(cleanupRoot, "project");
-		const wikiRoot = path.join(project, ".omp", "wiki");
+		const wikiRoot = path.join(project, ".ompk", "wiki");
 		const configuredRoot = path.join(cleanupRoot, "configured-wiki");
 		await fs.mkdir(wikiRoot, { recursive: true });
 		await fs.mkdir(configuredRoot, { recursive: true });
@@ -82,10 +82,10 @@ describe("wikigraph:// protocol", () => {
 		await fs.writeFile(path.join(configuredRoot, "configured.md"), "# Configured\n\nConfigured wiki body.");
 		await fs.writeFile(path.join(project, "session.md"), "# Session\n\nSession body.");
 		await fs.writeFile(path.join(cleanupRoot, "secret.md"), "secret body");
-		const settings = Settings.isolated({ "wikigraph.roots": [configuredRoot, "<cwd>/.omp/wiki"] });
+		const settings = Settings.isolated({ "wikigraph.roots": [configuredRoot, "<cwd>/.ompk/wiki"] });
 
 		const router = InternalUrlRouter.instance();
-		const allowedWiki = await router.resolve("wikigraph://path/.omp/wiki/allowed.md#L1-L2", {
+		const allowedWiki = await router.resolve("wikigraph://path/.ompk/wiki/allowed.md#L1-L2", {
 			cwd: project,
 			settings,
 		});

@@ -36,4 +36,4 @@ Phase 1 ships screenshot, region, selection, and browser-context capture with lo
 
 ## Capture-to-agent workflow
 
-`src/capture/` adds an asynchronous capture workflow on top of the same gateway: capture tasks are validated, persisted (SQLite under `~/.omp/agent/capture`), executed in new or resumed oh-my-pk sessions through the `AgentSessionGateway`, and mirrored to a shared Telegram chat where replies continue the same session. Endpoints live under `/api/capture/`; see `docs/capture-to-agent.md` for architecture, configuration (`.env.capture.example`), Telegram bot setup, the security model, and troubleshooting.
+`src/capture/` adds an asynchronous capture workflow on top of the same gateway: capture tasks are validated, persisted (SQLite under `~/.ompk/agent/capture`), executed in new or resumed oh-my-pk sessions through the `AgentSessionGateway`, and mirrored to a shared Telegram chat where replies continue the same session. Endpoints live under `/api/capture/`; see `docs/capture-to-agent.md` for architecture, configuration (`.env.capture.example`), Telegram bot setup, the security model, and troubleshooting.

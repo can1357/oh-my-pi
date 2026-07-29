@@ -8,7 +8,7 @@ this installs the working tree at `/work/pi`:
   * we upload it, install Bun, `bun install` the bundle's external deps + the
     platform native addon, and run `bun .../dist/cli.js`.
 
-Auth never enters the container: a generated `~/.omp/agent/models.yml` routes the
+Auth never enters the container: a generated `~/.ompk/agent/models.yml` routes the
 configured providers' `baseUrl` at the host's pm2 auth-gateway (default
 `http://host.docker.internal:4000`, `transport: pi-native`), so the gateway
 resolves credentials host-side. No provider API keys are passed in.
@@ -273,7 +273,7 @@ class OmpLocal(BaseInstalledAgent):
             else:
                 self._cli = await self._install_local(environment)
 
-        # 3) Auth + model config under $HOME/.omp/agent.
+        # 3) Auth + model config under $HOME/.ompk/agent.
         if self._gateway_on:
             # Gateway routing — no provider keys ever enter the container.
             await self._write_models_yaml(environment)
@@ -357,8 +357,8 @@ class OmpLocal(BaseInstalledAgent):
         await self.exec_as_agent(
             environment,
             command=(
-                f'mkdir -p "$HOME/.omp/agent"; '
-                f'cp {shlex.quote(staged)} "$HOME/.omp/agent/models.yml"'
+                f'mkdir -p "$HOME/.ompk/agent"; '
+                f'cp {shlex.quote(staged)} "$HOME/.ompk/agent/models.yml"'
             ),
         )
 
@@ -375,7 +375,7 @@ class OmpLocal(BaseInstalledAgent):
         return "\n".join(lines)
 
     async def _write_config(self, environment: BaseEnvironment) -> None:
-        """Write $HOME/.omp/agent/config.yml: web_search toggle + optional advisor.
+        """Write $HOME/.ompk/agent/config.yml: web_search toggle + optional advisor.
 
         The advisor is a separate model with its own spend; its turns are written
         to <session>/__advisor.jsonl (requires a persisted session, see run()).
@@ -400,8 +400,8 @@ class OmpLocal(BaseInstalledAgent):
         await self.exec_as_agent(
             environment,
             command=(
-                f'mkdir -p "$HOME/.omp/agent"; '
-                f'cp {shlex.quote(_CONFIG_DST)} "$HOME/.omp/agent/config.yml"'
+                f'mkdir -p "$HOME/.ompk/agent"; '
+                f'cp {shlex.quote(_CONFIG_DST)} "$HOME/.ompk/agent/config.yml"'
             ),
         )
 
@@ -478,7 +478,7 @@ class OmpLocal(BaseInstalledAgent):
             # Preserve omp's exit code, then collect advisor spend into the mounted dir.
             run += (
                 "; rc=$?; "
-                f'find "$HOME/.omp/agent/sessions" -name __advisor.jsonl -exec cat {{}} + '
+                f'find "$HOME/.ompk/agent/sessions" -name __advisor.jsonl -exec cat {{}} + '
                 f"> /logs/agent/{_ADVISOR_FILENAME} 2>/dev/null || true; exit $rc"
             )
         # Exec env for the omp run. Direct-auth (no-gateway) mode contributes the

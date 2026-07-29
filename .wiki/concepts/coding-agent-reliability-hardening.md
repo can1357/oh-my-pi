@@ -22,7 +22,7 @@ Implementation notes:
 - Target and roots are canonicalized with `fs.realpath` when possible, with `path.resolve` fallback.
 - Relative traversal and absolute paths outside allowed roots fail with `wikigraph: path is outside allowed roots`.
 
-Tests cover allowed session-cwd reads, allowed `<cwd>/.omp/wiki` reads, allowed configured root reads, `../` rejection, and absolute-path rejection.
+Tests cover allowed session-cwd reads, allowed `<cwd>/.ompk/wiki` reads, allowed configured root reads, `../` rejection, and absolute-path rejection.
 
 ## 9router ID normalization
 

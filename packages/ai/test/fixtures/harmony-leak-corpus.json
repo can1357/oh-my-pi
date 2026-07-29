@@ -1,5 +1,5 @@
 {
-	"_note": "Extracted from ~/.omp/stats.db ss_tool_calls. Positives are real contaminated tool args observed in production. Negatives are crafted to exercise the false-positive guards in the trip rule.",
+	"_note": "Extracted from ~/.ompk/stats.db ss_tool_calls. Positives are real contaminated tool args observed in production. Negatives are crafted to exercise the false-positive guards in the trip rule.",
 	"positives": [
 		{
 			"id": "rid1096312",

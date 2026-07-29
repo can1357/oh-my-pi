@@ -46,18 +46,18 @@ describe("monorepo skill discovery", () => {
 		removeSyncWithRetries(tempDir);
 	});
 
-	test("finds skills in ancestor .omp/skills/ directories", async () => {
+	test("finds skills in ancestor .ompk/skills/ directories", async () => {
 		// Root has a skill
-		writeSkill(path.join(repoRoot, ".omp", "skills"), "root-skill", "From repo root");
+		writeSkill(path.join(repoRoot, ".ompk", "skills"), "root-skill", "From repo root");
 		// Sub-project has a skill
-		writeSkill(path.join(subProject, ".omp", "skills"), "local-skill", "From sub-project");
+		writeSkill(path.join(subProject, ".ompk", "skills"), "local-skill", "From sub-project");
 
 		// Simulate the walk-up pattern used by the builtin provider
 		const results: LoadResult<Skill>[] = [];
 		let current = subProject;
 		while (true) {
 			const result = await scanSkillsFromDir(ctx, {
-				dir: path.join(current, ".omp", "skills"),
+				dir: path.join(current, ".ompk", "skills"),
 				providerId: "native",
 				level: "project",
 			});
@@ -79,14 +79,14 @@ describe("monorepo skill discovery", () => {
 
 	test("closest skill wins when same name exists at multiple levels", async () => {
 		// Same skill name at root and sub-project
-		writeSkill(path.join(repoRoot, ".omp", "skills"), "shared-skill", "Root version");
-		writeSkill(path.join(subProject, ".omp", "skills"), "shared-skill", "Local version");
+		writeSkill(path.join(repoRoot, ".ompk", "skills"), "shared-skill", "Root version");
+		writeSkill(path.join(subProject, ".ompk", "skills"), "shared-skill", "Local version");
 
 		const results: LoadResult<Skill>[] = [];
 		let current = subProject;
 		while (true) {
 			const result = await scanSkillsFromDir(ctx, {
-				dir: path.join(current, ".omp", "skills"),
+				dir: path.join(current, ".ompk", "skills"),
 				providerId: "native",
 				level: "project",
 			});
@@ -111,7 +111,7 @@ describe("monorepo skill discovery", () => {
 		let current = subProject;
 		while (true) {
 			const result = await scanSkillsFromDir(ctx, {
-				dir: path.join(current, ".omp", "skills"),
+				dir: path.join(current, ".ompk", "skills"),
 				providerId: "native",
 				level: "project",
 			});
@@ -128,15 +128,15 @@ describe("monorepo skill discovery", () => {
 	test("finds skills across multiple ancestor levels", async () => {
 		// Three levels: repo root, packages/, and sub-project
 		const packagesDir = path.join(repoRoot, "packages");
-		writeSkill(path.join(repoRoot, ".omp", "skills"), "root-skill", "Root");
-		writeSkill(path.join(packagesDir, ".omp", "skills"), "packages-skill", "Packages");
-		writeSkill(path.join(subProject, ".omp", "skills"), "app-skill", "App");
+		writeSkill(path.join(repoRoot, ".ompk", "skills"), "root-skill", "Root");
+		writeSkill(path.join(packagesDir, ".ompk", "skills"), "packages-skill", "Packages");
+		writeSkill(path.join(subProject, ".ompk", "skills"), "app-skill", "App");
 
 		const results: LoadResult<Skill>[] = [];
 		let current = subProject;
 		while (true) {
 			const result = await scanSkillsFromDir(ctx, {
-				dir: path.join(current, ".omp", "skills"),
+				dir: path.join(current, ".ompk", "skills"),
 				providerId: "native",
 				level: "project",
 			});
@@ -158,16 +158,16 @@ describe("monorepo skill discovery", () => {
 
 	test("walk-up stops at repo root and does not find skills above it", async () => {
 		// Skill ABOVE the repo root (should NOT be found)
-		writeSkill(path.join(tempDir, ".omp", "skills"), "above-repo-skill", "Above repo");
+		writeSkill(path.join(tempDir, ".ompk", "skills"), "above-repo-skill", "Above repo");
 		// Skill AT the repo root (should be found)
-		writeSkill(path.join(repoRoot, ".omp", "skills"), "root-skill", "At repo root");
+		writeSkill(path.join(repoRoot, ".ompk", "skills"), "root-skill", "At repo root");
 
 		// Simulate the walk-up with repo root boundary (matching builtin provider pattern)
 		const results: LoadResult<Skill>[] = [];
 		let current = subProject;
 		while (true) {
 			const result = await scanSkillsFromDir(ctx, {
-				dir: path.join(current, ".omp", "skills"),
+				dir: path.join(current, ".ompk", "skills"),
 				providerId: "native",
 				level: "project",
 			});

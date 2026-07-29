@@ -37,6 +37,19 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 	const NOTICE_SOURCE = "compaction";
 	const NO_PROGRESS_FRAGMENT = "Compaction freed too little context to make progress";
+	/**
+	 * Context window every fixture in this suite is written against: the billed
+	 * usage numbers, the mocked `getContextUsage` residuals, and the ~80%
+	 * threshold / 0.8×threshold recovery-band math all assume 200k.
+	 *
+	 * It is pinned here instead of inherited from the bundled catalog entry
+	 * because that entry tracks the live model: `anthropic/claude-sonnet-4-5`
+	 * moved to a 1M window, which silently dropped every fixture below the
+	 * compaction threshold (191k of 1M is ~19%) so no pass ever ran and the
+	 * guard was never reached. The guard scales off the real window, so the
+	 * suite has to own the window to test the guard rather than the catalog.
+	 */
+	const CONTEXT_WINDOW = 200_000;
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-auto-compaction-progress-");
@@ -80,10 +93,11 @@ describe("AgentSession auto-compaction progress guard", () => {
 			modelRegistry,
 		);
 
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) {
+		const bundledModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundledModel) {
 			throw new Error("Expected built-in anthropic model to exist");
 		}
+		const model = { ...bundledModel, contextWindow: CONTEXT_WINDOW };
 
 		const agent = new Agent({
 			initialState: {

@@ -20,14 +20,14 @@ omp plugin <npm/link action> ...
   -> src/commands/plugin.ts
   -> runPluginCommand(...) in src/cli/plugin-cli.ts
   -> PluginManager method (install/list/uninstall/link/...)
-  -> mutate ~/.omp/plugins/{package.json,node_modules,omp-plugins.lock.json}
+  -> mutate ~/.ompk/plugins/{package.json,node_modules,omp-plugins.lock.json}
   -> runtime discovery: discoverAndLoadCustomTools(...) and discoverAndLoadExtensions(...)
   -> getAllPluginToolPaths(cwd) / getAllPluginExtensionPaths(cwd)
   -> custom tool loader imports tool modules; extension loader imports extension modules
 
 omp plugin install name@marketplace / omp install name@marketplace
   -> MarketplaceManager
-  -> mutate ~/.omp/marketplaces.json, ~/.omp/plugins/installed_plugins.json, cache dirs
+  -> mutate ~/.ompk/marketplaces.json, ~/.ompk/plugins/installed_plugins.json, cache dirs
   -> installed marketplace plugin cache is surfaced as plugin roots/capabilities
 ```
 
@@ -41,7 +41,7 @@ omp plugin install name@marketplace / omp install name@marketplace
 
 ## On-disk model
 
-Global plugin state lives under `~/.omp/plugins`:
+Global plugin state lives under `~/.ompk/plugins`:
 
 - `package.json` — dependency manifest used by `bun install`/`bun uninstall` for npm-installed plugins
 - `node_modules/` — installed npm plugin packages or symlinks
@@ -52,16 +52,16 @@ Global plugin state lives under `~/.omp/plugins`:
 
 Project-local overrides live at:
 
-- `<cwd>/.omp/plugin-overrides.json`
+- `<cwd>/.ompk/plugin-overrides.json`
 
 Overrides are read-only from manager/loader perspective (no write path here) and can disable plugins or override features/settings for this project.
 
 Marketplace registries live separately:
 
-- `~/.omp/marketplaces.json` — configured marketplace catalogs
-- `~/.omp/plugins/installed_plugins.json` — user-scoped marketplace installs
-- `<cwd>/.omp/plugins/installed_plugins.json` — project-scoped marketplace installs when available
-- `~/.omp/plugins/cache/{marketplaces,plugins}/` — cached catalogs and plugin directories
+- `~/.ompk/marketplaces.json` — configured marketplace catalogs
+- `~/.ompk/plugins/installed_plugins.json` — user-scoped marketplace installs
+- `<cwd>/.ompk/plugins/installed_plugins.json` — project-scoped marketplace installs when available
+- `~/.ompk/plugins/cache/{marketplaces,plugins}/` — cached catalogs and plugin directories
 
 ## Plugin spec parsing and metadata interpretation
 
@@ -101,7 +101,7 @@ Malformed `package.json` JSON is a hard failure at read time; malformed manifest
 1. Parse feature bracket syntax from install spec.
 2. Validate the spec: git specs via `validateGitSpec`; npm specs against the package-name regex + shell-metacharacter denylist.
 3. Ensure plugin `package.json` exists (`omp-plugins`, private dependencies map).
-4. Run `bun install <packageSpec>` in `~/.omp/plugins`.
+4. Run `bun install <packageSpec>` in `~/.ompk/plugins`.
 5. Resolve the installed package name (npm: strip version via `extractPackageName`; git: diff `dependencies` before/after) and read `node_modules/<name>/package.json`.
 6. Resolve manifest and compute `enabledFeatures`:
    - `[*]`: all declared features (or `null` if no feature map)
@@ -131,9 +131,9 @@ If uninstall command fails, runtime state is not changed.
 
 ## List flow (`PluginManager.list`)
 
-1. Read plugin dependency map from `~/.omp/plugins/package.json`.
+1. Read plugin dependency map from `~/.ompk/plugins/package.json`.
 2. Load lockfile runtime config (missing file -> empty defaults).
-3. Load project overrides (`<cwd>/.omp/plugin-overrides.json`, parse/read errors -> empty object with warning).
+3. Load project overrides (`<cwd>/.ompk/plugin-overrides.json`, parse/read errors -> empty object with warning).
 4. For each dependency with a resolvable package.json:
    - build `InstalledPlugin` record
    - merge feature/enable state:
@@ -145,7 +145,7 @@ This is the effective state used by CLI status output and settings/features oper
 
 ## Link flow (`PluginManager.link`)
 
-`link` supports local plugin development by symlinking a local package into `~/.omp/plugins/node_modules/<pkg.name>`.
+`link` supports local plugin development by symlinking a local package into `~/.ompk/plugins/node_modules/<pkg.name>`.
 
 Behavior:
 

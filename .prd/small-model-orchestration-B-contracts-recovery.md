@@ -7,7 +7,7 @@ You are the parallel-builder+remediation sub-agent for oh-my-pi-fork at `C:/dev/
 **Read first** (each in full):
 - `.prd/small-model-orchestration-overview.md`
 - `.prd/small-model-orchestration-A-foundations.md`
-- `.omp/mapreduce/small-model-orchestration/implementation-inventory.md` — INV-04, INV-05, INV-08
+- `.ompk/mapreduce/small-model-orchestration/implementation-inventory.md` — INV-04, INV-05, INV-08
 - `packages/coding-agent/src/task/executor.ts` — read-only integration seam; do not edit
 - `packages/coding-agent/src/tools/yield.ts` — read-only integration seam; do not edit
 - `packages/coding-agent/src/eval/backend.ts`

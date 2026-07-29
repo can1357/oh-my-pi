@@ -10,7 +10,7 @@
  * `SessionManager.list`, …) continues to work unmodified.
  *
  * Tool artifacts and image blobs are out of scope: `ArtifactManager` /
- * `BlobStore` keep writing to `~/.omp/agent/...`. Reach for an object store
+ * `BlobStore` keep writing to `~/.ompk/agent/...`. Reach for an object store
  * (S3, R2, GCS) if you need those off-host too.
  */
 

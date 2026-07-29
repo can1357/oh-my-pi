@@ -6,8 +6,8 @@ You are the pre-phase sub-agent for oh-my-pi-fork at `C:/dev/desktop-projects/oh
 
 **Read first** (each in full):
 - `.prd/small-model-orchestration-overview.md` — pipeline context
-- `.omp/mapreduce/small-model-orchestration/implementation-inventory.md` — INV-01 and INV-02 evidence
-- `.omp/mapreduce/small-model-orchestration/small-model-orchestration.selectors.md` — coverage contract
+- `.ompk/mapreduce/small-model-orchestration/implementation-inventory.md` — INV-01 and INV-02 evidence
+- `.ompk/mapreduce/small-model-orchestration/small-model-orchestration.selectors.md` — coverage contract
 - `packages/coding-agent/src/config/model-resolver.ts`
 - `packages/coding-agent/src/task/index.ts` — read-only consumer; do not edit
 - `packages/coding-agent/src/session/fusion-sidekick.ts` — read-only consumer; do not edit

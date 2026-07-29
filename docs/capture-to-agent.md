@@ -108,7 +108,7 @@ Environment variables (see `.env.capture.example` at the repo root):
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `CAPTURE_ENABLED` | `true` | Enable the capture workflow on the gateway |
-| `CAPTURE_DATA_DIR` | `~/.omp/agent/capture` | SQLite database + screenshot assets |
+| `CAPTURE_DATA_DIR` | `~/.ompk/agent/capture` | SQLite database + screenshot assets |
 | `CAPTURE_ASSET_RETENTION_DAYS` | `14` | Screenshot retention window |
 | `CAPTURE_MAX_UPLOAD_MB` | `20` | Screenshot upload limit |
 | `CAPTURE_DEFAULT_AGENT_ROLE` | `task` | Role recorded for new runs |

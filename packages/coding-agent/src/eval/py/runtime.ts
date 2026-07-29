@@ -221,7 +221,7 @@ export function resolveExplicitPythonRuntime(
 
 /**
  * Enumerate candidate Python runtimes in priority order: an active/project venv,
- * the managed `~/.omp/python-env`, then the system interpreter on PATH. Every
+ * the managed `~/.ompk/python-env`, then the system interpreter on PATH. Every
  * candidate that physically exists is returned so callers can probe each in turn
  * rather than committing to the first — a managed env left behind by a removed
  * `uv` install no longer shadows a working system Python.

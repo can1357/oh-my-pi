@@ -33,7 +33,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-DB_PATH = Path.home() / ".omp" / "stats.db"
+DB_PATH = Path.home() / ".ompk" / "stats.db"
 OUT_DIR = Path(__file__).resolve().parent / "out"
 
 DEFAULT_SINCE = "2026-04-01"   # search/grep traffic before this is sparse

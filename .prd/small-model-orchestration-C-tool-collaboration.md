@@ -7,7 +7,7 @@ You are the parallel-builder+remediation sub-agent for oh-my-pi-fork at `C:/dev/
 **Read first** (each in full):
 - `.prd/small-model-orchestration-overview.md`
 - `.prd/small-model-orchestration-A-foundations.md`
-- `.omp/mapreduce/small-model-orchestration/implementation-inventory.md` — INV-03 and INV-06
+- `.ompk/mapreduce/small-model-orchestration/implementation-inventory.md` — INV-03 and INV-06
 - `packages/coding-agent/src/tools/index.ts` — read-only central wiring; do not edit
 - `packages/coding-agent/src/irc/bus.ts` — read-only central wiring; do not edit
 - `packages/coding-agent/src/registry/agent-registry.ts` — read-only central wiring; do not edit

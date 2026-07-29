@@ -398,7 +398,12 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 				createMcpCustomTool("mcp__slack_post_message", "slack", "post_message"),
 			],
 		});
-		await firstSession.activateDiscoveredMCPTools(["mcp__slack_post_message"]);
+		// Select explicitly rather than via `activateDiscoveredMCPTools`: discovery
+		// activations are turn-scoped by design (`#persistSelectedMCPToolNames-
+		// IfChanged` filters out `#turnDiscoveredToolNames`), so they are
+		// deliberately absent from the session file. This test is about restoring
+		// an *explicit* selection across a resume.
+		await firstSession.setActiveToolsByName(["read", "search_tool_bm25", "mcp__slack_post_message"]);
 		firstSession.sessionManager.appendThinkingLevelChange(ThinkingLevel.Off);
 		firstSession.sessionManager.appendServiceTierChange("priority");
 		expect(firstSession.sessionManager.buildSessionContext().thinkingLevel).toBe(ThinkingLevel.Off);

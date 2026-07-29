@@ -122,8 +122,8 @@ async function isDirectory(p: string): Promise<boolean> {
  * are dropped):
  *
  * 1. CLI roots injected via {@link injectOmpExtensionCliRoots}
- * 2. Project `<cwd>/.omp/settings.json#extensions`
- * 3. User `~/.omp/agent/settings.json#extensions`
+ * 2. Project `<cwd>/.ompk/settings.json#extensions`
+ * 3. User `~/.ompk/agent/settings.json#extensions`
  * 4. Enabled npm/link plugins installed under `<plugins>/node_modules/` (for
  *    `omp install <pkg>` / `omp plugin install` / `omp plugin link`). Marketplace
  *    installs are loaded by the `claude-plugins` provider and are excluded here.

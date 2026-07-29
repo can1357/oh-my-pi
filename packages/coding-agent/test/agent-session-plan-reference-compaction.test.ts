@@ -133,8 +133,13 @@ describe("AgentSession approved-plan reference re-injection after compaction (is
 			resolve: (call: ObservedPromptCall) => void;
 		}> = [];
 
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const bundledModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundledModel) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		// The usage fixtures below are written against a 200k window. Pinned here
+		// rather than inherited from the catalog, whose claude-sonnet-4-5 entry
+		// tracks the live model and moved to 1M — which drops 191k to ~19% of the
+		// window, so compaction never triggers and the awaited event never fires.
+		const model = { ...bundledModel, contextWindow: 200_000 };
 
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), `testauth-${cleanups.length}.db`));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
