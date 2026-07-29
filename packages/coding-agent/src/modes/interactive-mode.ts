@@ -63,6 +63,7 @@ import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
 	onModelRolesChanged,
+	onStatusLineChanged,
 	onStatusLineSessionAccentChanged,
 	Settings,
 	settings,
@@ -1360,6 +1361,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			onStatusLineSessionAccentChanged(() => {
 				this.#syncStatusLineSettings();
 				this.#handleSessionAccentInputsChanged();
+			}),
+			// Any other `statusLine.*` change (preset, segments, separator) also needs
+			// the component's settings record replaced; the accent signal above only
+			// covers one key, so an external config edit to the rest would otherwise
+			// keep rendering stale values.
+			onStatusLineChanged(() => {
+				this.#syncStatusLineSettings();
+				this.statusLine.invalidate();
 			}),
 		);
 		// Resync the welcome banner to the live model: init-time reconciliations
@@ -3307,6 +3316,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.#applyPlanExecutionModel(executionModel);
 		} else {
 			await this.#restorePlanPreviousModel(deferredPrev);
+			// Same reason as the immediate restore in `#exitPlanMode`: this snapshot was
+			// taken on plan entry, so a config reload that moved the default role while plan
+			// mode held the model would otherwise strand the session on the replaced model
+			// with no later reload able to correct it. Skipped above when an execution model
+			// was chosen explicitly, since that is a deliberate selection rather than a
+			// restore.
+			await this.session.reapplyDefaultRoleModel();
 		}
 	}
 
@@ -3355,6 +3371,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			if (this.#planModePreviousModelState && !options?.deferModelRestore) {
 				await this.#restorePlanPreviousModel(this.#planModePreviousModelState);
+				// The snapshot was captured on plan entry, so it names whatever the default
+				// role resolved to then. If a config reload moved that role while plan mode
+				// held the model, restoring alone would strand the session on the model the
+				// operator replaced, and no later reload would correct it: the role change is
+				// already committed, so a second reload reports "unchanged" and never rebinds.
+				// Plan state is cleared above, so this resolves the role fresh; a session on a
+				// manually picked model still declines through the ownership guard.
+				await this.session.reapplyDefaultRoleModel();
 			}
 			// If #applyPlanModeModel queued a deferred switch to the plan-role model
 			// (because the session was streaming on entry), drop it now: we are
