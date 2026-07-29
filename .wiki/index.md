@@ -12,8 +12,9 @@ plain markdown + YAML frontmatter, diffable in git, readable by humans and agent
 
 * [Concepts](concepts/) - design decisions and synthesized patterns for this codebase.
 
-Recent additions (2026-07-12):
+Recent additions (2026-07-29):
 
+* [Coding-agent reliability hardening](concepts/coding-agent-reliability-hardening.md) — CI recovery evidence, Bun 1.3.14 singleton-bucket mitigation, and context-file disable-ID migration status
 * [Environments-cloud routing](concepts/environments-cloud-routing.md) — pkscloudenvs MSI SoT handoff
 * [Remote workspace](concepts/remote-workspace.md) — phase-1 Docker sandbox jobs
 * [Task-contract orchestration](concepts/task-contract-orchestration.md) — ephemeral contracts + evidence stack
