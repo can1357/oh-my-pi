@@ -75,6 +75,7 @@ ENV MISE_DATA_DIR="/usr/local/share/mise" \
 RUN curl -fsSL https://mise.run | sh \
     && mv /root/.local/bin/mise /usr/local/bin/mise \
     && mise install --system go@latest \
+    && mise use --system go@latest \
     && mise reshim
 
 # Host agent config is mounted read-only under /srv/agent-home-stage with
