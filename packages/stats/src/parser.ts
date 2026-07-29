@@ -314,7 +314,20 @@ export async function listSessionFolders(): Promise<string[]> {
 export async function listSessionFiles(folderPath: string): Promise<string[]> {
 	try {
 		const entries = await fs.readdir(folderPath, { recursive: true, withFileTypes: true });
-		return entries.filter(e => e.isFile() && e.name.endsWith(".jsonl")).map(e => path.join(e.parentPath, e.name));
+		return (
+			entries
+				.filter(e => e.isFile() && e.name.endsWith(".jsonl"))
+				.map(e => path.join(e.parentPath, e.name))
+				// Sort, because the fork guard in `insertMessageStats` is
+				// first-write-wins across a lineage: a forked session deep-copies its
+				// parent's entries, and whichever file syncs FIRST owns the row.
+				// `readdir` order is filesystem-dependent — Windows returns these
+				// sorted, ext4 does not — so without this the same data attributes to
+				// the parent on one machine and the fork on another. Session files are
+				// timestamp-prefixed, so lexicographic order is chronological, which
+				// puts a parent ahead of anything forked from it.
+				.sort((a, b) => a.localeCompare(b))
+		);
 	} catch {
 		return [];
 	}
