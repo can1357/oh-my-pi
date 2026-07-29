@@ -52,7 +52,19 @@ function pack(text: string, contentHash = "pack-hash", name = "Reference"): Reso
 	return { name, text, contentHash, sourceCount: 1 };
 }
 
-const profitableText = "General background reference sentence with stable public facts.\n".repeat(5_000);
+// A pack only clears the profitability gate when its text is token-dense.
+// Image encoding costs a flat ~2882 tokens per frame and a frame holds ~13.9k
+// characters, so the break-even point is around 4.3 characters per token.
+// Repetitive English sits near 7.1 (cl100k collapses the repeats), which makes
+// it permanently unprofitable — the gate is right to reject it. High-entropy
+// identifier/hash-style content lands near 1.8, which is what a real reference
+// pack of symbol tables, checksums, or tabular data looks like.
+const profitableText = (() => {
+	let seed = 987_654_321;
+	const next = () => (seed = (seed * 1_103_515_245 + 12_345) & 0x7fff_ffff);
+	const word = () => next().toString(16).padStart(8, "0");
+	return Array.from({ length: 4_000 }, () => `${word()}${word()}`).join("\n");
+})();
 
 describe("background-pack renderer", () => {
 	it("skips non-vision and unqualified exact models without a text fallback", async () => {
