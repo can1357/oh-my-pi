@@ -321,7 +321,7 @@ def route(
 
     if event_type == "issues":
         issue = payload.get("issue") or {}
-        if "pull_request" in issue:
+        if issue.get("pull_request") is not None:
             return RouteDecision("skip", None, repo, None, "issue is a pull request")
         number = issue.get("number")
         if not isinstance(number, int):
@@ -349,7 +349,7 @@ def route(
         number = issue.get("number")
         if not isinstance(number, int):
             return RouteDecision("skip", None, repo, None, "comment missing issue number")
-        if "pull_request" in issue:
+        if issue.get("pull_request") is not None:
             # Conversation comments on incoming contributor PRs are intentionally
             # ignored for now: the one-shot review runs on open, and re-review
             # directives are not wired yet. Only bot-authored PRs resume a live
