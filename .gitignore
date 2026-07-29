@@ -124,3 +124,8 @@ mcps/
 .triage-scratch/
 
 packages/coding-agent/dist/
+
+# codespace-sync transport artifacts (never commit)
+.codespace-sync.bundle
+.codespace-sync.stash.bundle
+.codespace-sync-incoming/

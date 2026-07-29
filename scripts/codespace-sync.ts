@@ -428,6 +428,14 @@ export async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void
 	// 2. Stage all changes (including untracked) and commit.
 	console.log("→ stage all changes (including untracked)");
 	await direct(["git", "add", "-A"], { cwd: plan.localRepo });
+	// Never ship transport artifacts: a prior bundle/tar run can leave
+	// .codespace-sync.* files in the tree, and `git add -A` would commit them
+	// (a stale 337 MB bundle once ballooned every handoff patch and broke the
+	// GitHub fallback with GH001 file-size rejections).
+	await direct(
+		["git", "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".codespace-sync.bundle", ".codespace-sync.stash.bundle", ".codespace-sync-incoming"],
+		{ cwd: plan.localRepo },
+	);
 
 	const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
 	console.log("→ commit (allow-empty)");
