@@ -10,7 +10,7 @@ import type { PlanModeState } from "@pk-nerdsaver-ai/pi-coding-agent/plan-mode/s
 import type { AgentSession, AgentSessionEvent } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
 import * as fusionSidekickModule from "@pk-nerdsaver-ai/pi-coding-agent/session/fusion-sidekick";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
-import { getConfigRootDir, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
+import { getConfigRootDir, removeWithRetries, setAgentDir } from "@pk-nerdsaver-ai/pi-utils";
 
 // ---------------------------------------------------------------------------
 // Test models
@@ -271,7 +271,11 @@ afterEach(async () => {
 	resetSettingsForTest();
 
 	for (const root of cleanupRoots.splice(0)) {
-		await fs.rm(root, { recursive: true, force: true });
+		// Best-effort: the harness leaves session handles open long enough that
+		// Windows refuses the delete even after removeWithRetries exhausts its
+		// retries. Reclaiming an OS temp dir is not what these tests assert, so a
+		// teardown failure must not fail a test whose assertions all passed.
+		await removeWithRetries(root).catch(() => {});
 	}
 });
 
