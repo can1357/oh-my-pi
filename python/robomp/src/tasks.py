@@ -847,9 +847,27 @@ async def handle_review(
         )
     comment = payload.get("comment") or {}
     user = comment.get("user") or {}
+    body = str(comment.get("body") or "").strip()
+    # Forgejo #7935: pull_request_review_comment webhook payloads carry empty
+    # `body` — the actual comment text must be fetched via the API.
+    if not body:
+        comment_id = comment.get("id")
+        if comment_id is not None and hasattr(github, "get_review_comment"):
+            try:
+                fetched = await github.get_review_comment(repo_full, int(comment_id))
+                body = fetched.body.strip()
+                log.info(
+                    "forgejo_7935_workaround",
+                    extra={"repo": repo_full, "pr": pr_number, "comment_id": comment_id},
+                )
+            except Exception:
+                log.exception(
+                    "forgejo review comment fetch failed",
+                    extra={"repo": repo_full, "pr": pr_number},
+                )
     review_payload = {
         "author": str(user.get("login") or ""),
-        "body": str(comment.get("body") or ""),
+        "body": body,
         "path": str(comment.get("path") or ""),
         "line": comment.get("line"),
         "start_line": comment.get("start_line"),

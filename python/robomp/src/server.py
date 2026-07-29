@@ -384,6 +384,11 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         except Exception as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid json: {exc}") from exc
 
+        # Detect platform: Forgejo sends X-Gitea-Delivery or X-Forgejo-Delivery
+        platform = "forgejo" if (
+            request.headers.get("X-Gitea-Delivery") or request.headers.get("X-Forgejo-Delivery")
+        ) else "github"
+
         db: Database = bag["db"]
         issue_cache: _IssueBrowseCache = bag["issue_browse_cache"]
         await issue_cache.apply_webhook(
@@ -466,6 +471,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                 payload=payload,
                 state="skipped",
                 last_error=decision.reason,
+                platform=platform,
             )
             return JSONResponse({"delivery": x_github_delivery, "state": "skipped"}, status_code=202)
 
@@ -511,6 +517,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                     payload=payload,
                     state="skipped",
                     last_error=reason,
+                    platform=platform,
                 )
                 return JSONResponse(
                     {"delivery": x_github_delivery, "state": "skipped", "reason": "rate_limited"},
@@ -524,6 +531,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             issue_key=decision.issue_key,
             payload=payload,
             state="queued",
+            platform=platform,
         )
         if inserted:
             pool: _AppPool = bag["pool"]

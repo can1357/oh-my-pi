@@ -219,11 +219,20 @@ def _workspace_repo_dir(cfg: Settings, workspace_key: str) -> Path:
     return Path(cfg.workspace_root) / workspace_key / "repo"
 
 
-def _resolve_token(cfg: Settings) -> str:
+def _resolve_token_for_platform(cfg: Settings, platform: str) -> str:
+    """Return the PAT for the given platform."""
+    if platform == "forgejo" and cfg.forgejo_token is not None:
+        return cfg.forgejo_token.get_secret_value()
     if cfg.github_token is None:
-        # Will already have been caught at startup, but stay defensive.
         raise HTTPException(500, "gh-proxy: GITHUB_TOKEN not configured")
     return cfg.github_token.get_secret_value()
+
+
+def _resolve_api_base_for_platform(cfg: Settings, platform: str) -> str:
+    """Return the API base URL for the given platform."""
+    if platform == "forgejo":
+        return cfg.api_base
+    return "https://api.github.com"
 
 
 def _resolve_hmac_key(cfg: Settings) -> bytes:
@@ -260,9 +269,9 @@ def _validate_repo_name(repo: str) -> None:
         raise HTTPException(400, f"invalid repo {repo!r}")
 
 
-def _github_url_for_repo(repo: str) -> str:
+def _github_url_for_repo(repo: str, git_host: str = "github.com") -> str:
     _validate_repo_name(repo)
-    return f"https://github.com/{repo}.git"
+    return f"https://{git_host}/{repo}.git"
 
 
 def _git_probe_env(repo_dir: Path) -> dict[str, str]:
@@ -311,11 +320,11 @@ def _read_single_remote_url(repo_dir: Path, expected_repo: str, *, push: bool, s
     return urls[0]
 
 
-def _normalized_github_https_url(url: str, expected_repo: str) -> str:
+def _normalized_github_https_url(url: str, expected_repo: str, git_host: str = "github.com") -> str:
     _validate_repo_name(expected_repo)
     parsed = urlparse(url)
     if (parsed.scheme or "").lower() != "https":
-        raise HTTPException(400, f"remote url must be https://github.com/{expected_repo}[.git]")
+        raise HTTPException(400, f"remote url must be https://{git_host}/{expected_repo}[.git]")
     if parsed.username or parsed.password:
         raise HTTPException(400, "remote url must not contain embedded credentials")
     try:
@@ -324,8 +333,8 @@ def _normalized_github_https_url(url: str, expected_repo: str) -> str:
         raise HTTPException(400, "remote url has invalid port") from exc
     if port is not None:
         raise HTTPException(400, "remote url must not specify a port")
-    if (parsed.hostname or "").lower() != "github.com":
-        raise HTTPException(400, f"remote url host must be github.com for repo {expected_repo!r}")
+    if (parsed.hostname or "").lower() != git_host.lower():
+        raise HTTPException(400, f"remote url host must be {git_host} for repo {expected_repo!r}")
     if parsed.params or parsed.query or parsed.fragment:
         raise HTTPException(400, "remote url must not contain params, query, or fragment")
     path = parsed.path.strip("/")
@@ -333,10 +342,10 @@ def _normalized_github_https_url(url: str, expected_repo: str) -> str:
         path = path[:-4]
     if path.lower() != expected_repo.lower():
         raise HTTPException(400, f"remote url does not match repo {expected_repo!r}")
-    return _github_url_for_repo(expected_repo)
+    return _github_url_for_repo(expected_repo, git_host=git_host)
 
 
-def _remote_auth_for_url(url: str, expected_repo: str, token: str) -> _RemoteAuth:
+def _remote_auth_for_url(url: str, expected_repo: str, token: str, git_host: str = "github.com") -> _RemoteAuth:
     raw = url.strip()
     if not raw or raw != url:
         raise HTTPException(400, "remote url must not be empty or padded")
@@ -348,14 +357,14 @@ def _remote_auth_for_url(url: str, expected_repo: str, token: str) -> _RemoteAut
         raise HTTPException(400, "git remote helper transports are disabled")
     scheme = (urlparse(raw).scheme or "").lower()
     if scheme in ("http", "https"):
-        normalized = _normalized_github_https_url(raw, expected_repo)
+        normalized = _normalized_github_https_url(raw, expected_repo, git_host=git_host)
         return _RemoteAuth(url=normalized, token=token, auth_url=normalized)
     return _RemoteAuth(url=raw, token=None, auth_url=None)
 
 
-def _clone_remote_auth(clone_url: str, expected_repo: str, token: str) -> _RemoteAuth:
+def _clone_remote_auth(clone_url: str, expected_repo: str, token: str, git_host: str = "github.com") -> _RemoteAuth:
     try:
-        return _remote_auth_for_url(clone_url, expected_repo, token)
+        return _remote_auth_for_url(clone_url, expected_repo, token, git_host=git_host)
     except HTTPException:
         log.warning(
             "gh-proxy: refusing clone — clone_url is not permitted",
@@ -371,10 +380,11 @@ def _origin_remote_auth(
     *,
     push: bool = False,
     slot_uid: int | None = None,
+    git_host: str = "github.com",
 ) -> _RemoteAuth:
     url = _read_single_remote_url(repo_dir, expected_repo, push=push, slot_uid=slot_uid)
     try:
-        return _remote_auth_for_url(url, expected_repo, token)
+        return _remote_auth_for_url(url, expected_repo, token, git_host=git_host)
     except HTTPException:
         log.warning(
             "gh-proxy: refusing git op — origin url is not permitted",
@@ -388,11 +398,27 @@ def create_proxy_app(settings: Settings) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        app.state.github = GitHubClient(_resolve_token(settings))
+        app.state.github = GitHubClient(_resolve_token_for_platform(settings, "github"))
         app.state.settings = settings
         yield
 
     app = FastAPI(title="robomp-gh-proxy", version="0.1.0", lifespan=lifespan)
+
+    def _platform(request: Request) -> str:
+        """Read platform from query params, defaulting to 'github'."""
+        return str(request.query_params.get("platform", "github"))
+
+    def _github_client_for(request: Request) -> GitHubClient:
+        """Create a GitHubClient appropriate for the request's platform.
+
+        Per-request so the correct token + base URL are used. The client
+        is short-lived (one request) so transport pooling is irrelevant.
+        """
+        platform = _platform(request)
+        token = _resolve_token_for_platform(settings, platform)
+        base_url = _resolve_api_base_for_platform(settings, platform)
+        auth_prefix = "token" if platform == "forgejo" else "Bearer"
+        return GitHubClient(token, base_url=base_url, auth_prefix=auth_prefix)
 
     def _request_target(request: Request) -> str:
         """Canonical signing target: `path` plus raw query string if any.
@@ -469,7 +495,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
     @app.get("/gh/v1/authenticated_login")
     async def authenticated_login(request: Request) -> dict[str, str]:
         await _authenticate(request)
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             login = await github.get_authenticated_login()
         except GitHubError as exc:
@@ -479,7 +505,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
     @app.get("/gh/v1/repo")
     async def get_repo(request: Request, repo: str) -> JSONResponse:
         await _authenticate(request)
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             info = await github.get_repo(repo)
         except GitHubError as exc:
@@ -544,7 +570,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
     @app.get("/gh/v1/issue")
     async def get_issue(request: Request, repo: str, number: int) -> JSONResponse:
         await _authenticate(request)
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             info = await github.get_issue(repo, number)
         except GitHubError as exc:
@@ -554,7 +580,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
     @app.get("/gh/v1/closing_prs")
     async def list_closing_prs(request: Request, repo: str, number: int) -> JSONResponse:
         await _authenticate(request)
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             prs = await github.list_closing_pull_requests(repo, number)
         except GitHubError as exc:
@@ -564,7 +590,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
     @app.get("/gh/v1/pull_request")
     async def get_pull_request(request: Request, repo: str, number: int) -> JSONResponse:
         await _authenticate(request)
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             info = await github.get_pull_request(repo, number)
         except GitHubError as exc:
@@ -574,7 +600,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
     @app.get("/gh/v1/pr_files")
     async def list_pr_files(request: Request, repo: str, pr_number: int) -> JSONResponse:
         await _authenticate(request)
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             items = await github.list_pr_files(repo, pr_number)
         except GitHubError as exc:
@@ -584,7 +610,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
     @app.get("/gh/v1/issues")
     async def list_issues(request: Request, repo: str, state: str = "open", limit: int = 30) -> JSONResponse:
         await _authenticate(request)
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             items = await github.list_issues(repo, state=state, limit=limit)
         except GitHubError as exc:
@@ -594,7 +620,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
     @app.get("/gh/v1/search_issues")
     async def search_issues(request: Request, repo: str, q: str, limit: int = 10) -> JSONResponse:
         await _authenticate(request)
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             items = await github.search_issues(repo, q, limit=limit)
         except GitHubError as exc:
@@ -610,7 +636,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         per_page: int = 100,
     ) -> JSONResponse:
         await _authenticate(request)
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             items = await github.list_issue_index_entries(repo, since=since, page=page, per_page=per_page)
         except GitHubError as exc:
@@ -620,7 +646,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
     @app.get("/gh/v1/comments")
     async def list_comments(request: Request, repo: str, number: int) -> JSONResponse:
         await _authenticate(request)
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             items = await github.list_comments(repo, number)
         except GitHubError as exc:
@@ -630,17 +656,27 @@ def create_proxy_app(settings: Settings) -> FastAPI:
     @app.get("/gh/v1/review_comments")
     async def list_review_comments(request: Request, repo: str, pr_number: int) -> JSONResponse:
         await _authenticate(request)
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             items = await github.list_review_comments(repo, pr_number)
         except GitHubError as exc:
             return _gh_error_response(exc)
         return JSONResponse({"items": [_serialize(c) for c in items]})
 
+    @app.get("/gh/v1/get_review_comment")
+    async def get_review_comment(request: Request, repo: str, comment_id: int) -> JSONResponse:
+        await _authenticate(request)
+        github = _github_client_for(request)
+        try:
+            info = await github.get_review_comment(repo, comment_id)
+        except GitHubError as exc:
+            return _gh_error_response(exc)
+        return JSONResponse(_serialize(info))
+
     @app.get("/gh/v1/pr_reviews")
     async def list_pr_reviews(request: Request, repo: str, pr_number: int) -> JSONResponse:
         await _authenticate(request)
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             items = await github.list_pr_reviews(repo, pr_number)
         except GitHubError as exc:
@@ -664,7 +700,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo = _require_str(data.get("repo"), "repo")
         number = _require_int(data.get("number"), "number")
         body = _require_str(data.get("body"), "body")
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             info = await github.post_comment(repo, number, body)
         except GitHubError as exc:
@@ -681,7 +717,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         body = _require_str(data.get("body"), "body")
         draft = bool(data.get("draft", False))
         mcm = bool(data.get("maintainer_can_modify", True))
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             pr = await github.open_pull_request(
                 repo=repo,
@@ -703,7 +739,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         pr_number = _require_int(data.get("pr_number"), "pr_number")
         reviewers = _optional_str_list(data.get("reviewers"), "reviewers")
         team_reviewers = _optional_str_list(data.get("team_reviewers"), "team_reviewers")
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             await github.request_reviewers(
                 repo=repo,
@@ -721,7 +757,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo = _require_str(data.get("repo"), "repo")
         number = _require_int(data.get("number"), "number")
         labels = _optional_str_list(data.get("labels"), "labels") or []
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             applied = await github.add_issue_labels(repo, number, labels)
         except GitHubError as exc:
@@ -734,7 +770,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo = _require_str(data.get("repo"), "repo")
         number = _require_int(data.get("number"), "number")
         label = _require_str(data.get("label"), "label")
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             await github.remove_issue_label(repo, number, label)
         except GitHubError as exc:
@@ -751,7 +787,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         comments = _require_review_comments(data.get("comments"))
         commit_id_raw = data.get("commit_id")
         commit_id = commit_id_raw if isinstance(commit_id_raw, str) and commit_id_raw else None
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             review = await github.submit_pr_review(
                 repo=repo,
@@ -771,7 +807,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo = _require_str(data.get("repo"), "repo")
         number = _require_int(data.get("number"), "number")
         assignees = _optional_str_list(data.get("assignees"), "assignees") or []
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             await github.add_assignees(repo, number, assignees)
         except GitHubError as exc:
@@ -781,7 +817,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
     @app.get("/gh/v1/comment_reactions")
     async def list_comment_reactions(request: Request, repo: str, comment_id: int) -> JSONResponse:
         await _authenticate(request)
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             reactions = await github.list_comment_reactions(repo, comment_id)
         except GitHubError as exc:
@@ -795,7 +831,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         number = _require_int(data.get("number"), "number")
         reason_raw = data.get("reason")
         reason = reason_raw if isinstance(reason_raw, str) and reason_raw else "completed"
-        github: GitHubClient = request.app.state.github
+        github = _github_client_for(request)
         try:
             await github.close_issue(repo, number, reason=reason)
         except GitHubError as exc:
@@ -832,7 +868,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo = _require_str(data.get("repo"), "repo")
         clone_url = _require_str(data.get("clone_url"), "clone_url")
         default_branch = _require_str(data.get("default_branch"), "default_branch")
-        remote = _clone_remote_auth(clone_url, repo, _resolve_token(settings))
+        remote = _clone_remote_auth(clone_url, repo, _resolve_token_for_platform(settings, _platform(request)), git_host=settings.git_host)
         target = _pool_dir(settings, repo)
         try:
             await _run_git_op(
@@ -852,7 +888,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         data = await _json_body(request)
         repo = _require_str(data.get("repo"), "repo")
         target = _pool_dir(settings, repo)
-        remote = await asyncio.to_thread(_origin_remote_auth, target, repo, _resolve_token(settings))
+        remote = await asyncio.to_thread(_origin_remote_auth, target, repo, _resolve_token_for_platform(settings, _platform(request)), git_host=settings.git_host)
         try:
             await _run_git_op(
                 git_fetch_prune,
@@ -871,7 +907,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo = _require_str(data.get("repo"), "repo")
         ref = _require_fetch_ref(data.get("ref"))
         target = _pool_dir(settings, repo)
-        remote = await asyncio.to_thread(_origin_remote_auth, target, repo, _resolve_token(settings))
+        remote = await asyncio.to_thread(_origin_remote_auth, target, repo, _resolve_token_for_platform(settings, _platform(request)), git_host=settings.git_host)
         # fetch_ref is intentionally best-effort; never surfaces a 5xx.
         await _run_git_op(
             git_fetch_ref,
@@ -889,7 +925,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo = _require_str(data.get("repo"), "repo")
         pr_number = _require_int(data.get("pr_number"), "pr_number")
         target = _pool_dir(settings, repo)
-        remote = await asyncio.to_thread(_origin_remote_auth, target, repo, _resolve_token(settings))
+        remote = await asyncio.to_thread(_origin_remote_auth, target, repo, _resolve_token_for_platform(settings, _platform(request)), git_host=settings.git_host)
         try:
             await _run_git_op(
                 git_fetch_pr_head,
@@ -922,9 +958,10 @@ def create_proxy_app(settings: Settings) -> FastAPI:
             _origin_remote_auth,
             repo_dir,
             repo,
-            _resolve_token(settings),
+            _resolve_token_for_platform(settings, _platform(request)),
             push=True,
             slot_uid=slot_uid,
+            git_host=settings.git_host,
         )
         try:
             result = await _run_git_op(
@@ -963,9 +1000,10 @@ def create_proxy_app(settings: Settings) -> FastAPI:
             _origin_remote_auth,
             repo_dir,
             repo,
-            _resolve_token(settings),
+            _resolve_token_for_platform(settings, _platform(request)),
             push=True,
             slot_uid=slot_uid,
+            git_host=settings.git_host,
         )
         try:
             result = await _run_git_op(

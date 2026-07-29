@@ -209,6 +209,7 @@ class EventRow:
     state: EventState
     attempts: int
     last_error: str | None
+    platform: str = "github"
 
 
 @dataclass(slots=True, frozen=True)
@@ -266,6 +267,7 @@ def _event_row_from_db_row(row: sqlite3.Row) -> EventRow:
         state=row["state"],
         attempts=int(row["attempts"]),
         last_error=row["last_error"],
+        platform=row.get("platform", "github") or "github",
     )
 
 
@@ -352,6 +354,8 @@ class Database:
             self._conn.execute("ALTER TABLE events ADD COLUMN model TEXT")
         if "available_at" not in event_cols:
             self._conn.execute("ALTER TABLE events ADD COLUMN available_at TEXT")
+        if "platform" not in event_cols:
+            self._conn.execute("ALTER TABLE events ADD COLUMN platform TEXT NOT NULL DEFAULT 'github'")
 
     def close(self) -> None:
         with self._lock:
@@ -379,6 +383,7 @@ class Database:
         payload: Mapping[str, Any],
         state: EventState = "queued",
         last_error: str | None = None,
+        platform: str = "github",
     ) -> bool:
         """Insert a webhook event. Returns False if duplicate (by delivery id).
 
@@ -390,8 +395,8 @@ class Database:
             cur = self._conn.execute(
                 """
                 INSERT OR IGNORE INTO events
-                  (delivery_id, event_type, repo, issue_key, payload_json, received_at, state, last_error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  (delivery_id, event_type, repo, issue_key, payload_json, received_at, state, last_error, platform)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     delivery_id,
@@ -402,6 +407,7 @@ class Database:
                     now,
                     state,
                     last_error,
+                    platform,
                 ),
             )
             return cur.rowcount > 0
@@ -414,7 +420,7 @@ class Database:
                 """
                 SELECT queued.delivery_id, queued.event_type, queued.repo, queued.issue_key,
                        queued.payload_json, queued.received_at, queued.state, queued.attempts,
-                       queued.last_error
+                       queued.last_error, queued.platform
                 FROM events AS queued
                 WHERE queued.state = 'queued'
                   AND (queued.available_at IS NULL OR queued.available_at <= ?)
@@ -448,6 +454,7 @@ class Database:
                 state="running",
                 attempts=int(row["attempts"]) + 1,
                 last_error=row["last_error"],
+                platform=row.get("platform", "github") or "github",
             )
 
     def mark_event(self, delivery_id: str, state: EventState, *, error: str | None = None) -> None:
@@ -482,7 +489,7 @@ class Database:
             rows = self._conn.execute(
                 """
                 SELECT delivery_id, event_type, repo, issue_key, payload_json, received_at,
-                       state, attempts, last_error
+                       state, attempts, last_error, platform
                 FROM events
                 ORDER BY received_at DESC
                 LIMIT ?
@@ -500,6 +507,7 @@ class Database:
                 state=row["state"],
                 attempts=int(row["attempts"]),
                 last_error=row["last_error"],
+                platform=row.get("platform", "github") or "github",
             )
             for row in rows
         ]
@@ -561,7 +569,7 @@ class Database:
             row = self._conn.execute(
                 f"""
                 SELECT delivery_id, event_type, repo, issue_key, payload_json, received_at,
-                       state, attempts, last_error
+                       state, attempts, last_error, platform
                 FROM events
                 WHERE issue_key = ?
                   {state_filter}
@@ -593,7 +601,7 @@ class Database:
                 rows = self._conn.execute(
                     f"""
                     SELECT delivery_id, event_type, repo, issue_key, payload_json, received_at,
-                           state, attempts, last_error
+                           state, attempts, last_error, platform
                     FROM events
                     WHERE issue_key IN ({placeholders})
                       {state_filter}
@@ -691,7 +699,7 @@ class Database:
             row = self._conn.execute(
                 """
                 SELECT delivery_id, event_type, repo, issue_key, payload_json, received_at,
-                       state, attempts, last_error
+                       state, attempts, last_error, platform
                 FROM events WHERE delivery_id = ?
                 """,
                 (delivery_id,),
@@ -708,6 +716,7 @@ class Database:
             state=row["state"],
             attempts=int(row["attempts"]),
             last_error=row["last_error"],
+            platform=row.get("platform", "github") or "github",
         )
 
     def has_authorized_impl_event(self, issue_key: str) -> bool:

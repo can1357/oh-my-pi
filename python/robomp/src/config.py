@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # the orchestrator then talks to gh-proxy over HMAC RPC and never sees
     # the PAT. Validated end-to-end in `_validate_proxy_or_pat` below.
     github_token: SecretStr | None = Field(None, alias="GITHUB_TOKEN")
+    forgejo_token: SecretStr | None = Field(None, alias="FORGEJO_TOKEN")
+    api_base: str = Field("https://api.github.com", alias="ROBOMP_API_BASE")
+    git_host: str = Field("github.com", alias="ROBOMP_GIT_HOST")
     github_webhook_secret: SecretStr = Field(..., alias="GITHUB_WEBHOOK_SECRET")
     bot_login: str = Field(..., alias="ROBOMP_BOT_LOGIN")
     git_author_name: str | None = Field(None, alias="ROBOMP_GIT_AUTHOR_NAME")
@@ -194,11 +197,11 @@ class Settings(BaseSettings):
                 return None
         return value
 
-    @field_validator("github_token", mode="before")
+    @field_validator("github_token", "forgejo_token", mode="before")
     @classmethod
     def _blank_token_disables(cls, value: object) -> object:
-        """Treat empty/whitespace `GITHUB_TOKEN` as 'unset' so proxy-only
-        deployments don't have to remove the env var."""
+        """Treat empty/whitespace `GITHUB_TOKEN`/`FORGEJO_TOKEN` as 'unset' so
+        proxy-only deployments don't have to remove the env var."""
         if isinstance(value, str) and not value.strip():
             return None
         if hasattr(value, "get_secret_value"):
@@ -420,6 +423,9 @@ class _ProxyEnvLoader(BaseSettings):
     )
 
     github_token: SecretStr = Field(..., alias="GITHUB_TOKEN")
+    forgejo_token: SecretStr | None = Field(None, alias="FORGEJO_TOKEN")
+    api_base: str = Field("https://api.github.com", alias="ROBOMP_API_BASE")
+    git_host: str = Field("github.com", alias="ROBOMP_GIT_HOST")
     gh_proxy_hmac_key: SecretStr = Field(..., alias="ROBOMP_GH_PROXY_HMAC_KEY")
     gh_proxy_bind_host: str = Field("0.0.0.0", alias="ROBOMP_GH_PROXY_BIND_HOST")
     gh_proxy_bind_port: int = Field(8081, alias="ROBOMP_GH_PROXY_BIND_PORT")
@@ -439,6 +445,17 @@ class _ProxyEnvLoader(BaseSettings):
                 raise ValueError("must be a non-empty string")
         return value
 
+    @field_validator("forgejo_token", mode="before")
+    @classmethod
+    def _blank_forgejo_token_disables(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        if hasattr(value, "get_secret_value"):
+            inner = value.get_secret_value()  # type: ignore[attr-defined]
+            if isinstance(inner, str) and not inner.strip():
+                return None
+        return value
+
 
 def load_proxy_settings() -> Settings:
     """Build a `Settings` instance suitable for the gh-proxy process.
@@ -452,6 +469,9 @@ def load_proxy_settings() -> Settings:
     loader = _ProxyEnvLoader()  # type: ignore[call-arg]
     return Settings.model_construct(
         github_token=loader.github_token,
+        forgejo_token=loader.forgejo_token,
+        api_base=loader.api_base,
+        git_host=loader.git_host,
         github_webhook_secret=SecretStr(""),
         bot_login="gh-proxy",
         git_author_email="gh-proxy@invalid",
