@@ -234,11 +234,25 @@ async function buildBundle(localRepo: string, destDir: string): Promise<BundleRe
 // `git ls-files` also honours .gitignore, so bulky ignored state is skipped
 // without maintaining a hand-written exclude list.
 async function workingTreeFileList(localRepo: string): Promise<string[]> {
-	const r = await direct(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: localRepo });
+	// -s exposes the mode so gitlinks (160000) can be dropped: tar would
+	// recursively archive an initialized submodule directory, dragging in its
+	// .git file and ignored state that `git ls-files` never selected.
+	const r = await direct(["git", "ls-files", "-z", "-s", "--cached", "--others", "--exclude-standard"], { cwd: localRepo });
 	if (r.code !== 0) throw new Error(`git ls-files failed:\n${r.stderr}`);
-	const files = r.stdout.split("\0").filter(Boolean);
-	// Deleted-but-still-tracked paths would make tar fail on a missing source.
-	const gone = await direct(["git", "diff", "--name-only", "-z", "--diff-filter=D", "HEAD"], { cwd: localRepo });
+	const files: string[] = [];
+	for (const entry of r.stdout.split("\0").filter(Boolean)) {
+		// Staged form: "<mode> <sha> <stage>\t<path>". Untracked (--others)
+		// entries have no metadata prefix and arrive as a bare path.
+		const tab = entry.indexOf("\t");
+		if (tab === -1) { files.push(entry); continue; }
+		const mode = entry.slice(0, entry.indexOf(" "));
+		if (mode === "160000") continue; // submodule gitlink
+		files.push(entry.slice(tab + 1));
+	}
+	// `--no-renames` matters: with default rename detection a staged `git mv` is
+	// one R entry, so --diff-filter=D reports nothing and tar would then try to
+	// archive the now-missing old pathname.
+	const gone = await direct(["git", "diff", "--name-only", "-z", "--no-renames", "--diff-filter=D", "HEAD"], { cwd: localRepo });
 	if (gone.code !== 0) throw new Error(`git diff failed:\n${gone.stderr}`);
 	const deleted = new Set(gone.stdout.split("\0").filter(Boolean));
 	return files.filter(f => !deleted.has(f));
@@ -246,10 +260,15 @@ async function workingTreeFileList(localRepo: string): Promise<string[]> {
 
 async function rsyncPush(localRepo: string, sshTarget: string, remoteDir: string): Promise<void> {
 	const files = await workingTreeFileList(localRepo);
-	if (files.length === 0) throw new Error("nothing to transfer: git reported no tracked or untracked files");
+	// An empty list is legitimate (empty-tree commit, or every tracked file
+	// deleted locally). The bundle already established HEAD and the caller's
+	// sweep removes deleted paths, so there is simply nothing to overlay.
+	if (files.length === 0) return;
 	const listPath = path.join(os.tmpdir(), `codespace-sync-files-${process.pid}.lst`);
 	await Bun.write(listPath, files.join("\0"));
-	const tarArgs = ["tar", "-cf", "-", "-C", localRepo, "--null", "--files-from", toWinPath(listPath)];
+	// --no-recursion: every path is already enumerated by git, so a listed
+	// directory must never be expanded by tar itself.
+	const tarArgs = ["tar", "-cf", "-", "-C", localRepo, "--null", "--no-recursion", "--files-from", toWinPath(listPath)];
 	const sshArgs = [...sshArgv(), sshTarget, `tar -xf - -C ${remoteDir} --no-same-owner`];
 	try {
 		const tar = Bun.spawn({ cmd: tarArgs, stdout: "pipe", stderr: "pipe" });
