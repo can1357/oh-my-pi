@@ -226,11 +226,14 @@ class GitHubClient:
         token: str,
         *,
         transport: httpx.BaseTransport | None = None,
+        base_url: str = GITHUB_API,
+        auth_prefix: str = "Bearer",
         platform: str = "github",
     ) -> None:
         self._token = token
+        self._base_url = base_url
         self._headers = {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"{auth_prefix} {token}",
             "Accept": ACCEPT,
             "X-GitHub-Api-Version": API_VERSION,
             "User-Agent": "robomp/0.1",
@@ -240,7 +243,7 @@ class GitHubClient:
 
     def _client(self) -> httpx.Client:
         return httpx.Client(
-            base_url=GITHUB_API,
+            base_url=self._base_url,
             headers=self._headers,
             transport=self._transport,
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -249,7 +252,7 @@ class GitHubClient:
 
     def _async_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            base_url=GITHUB_API,
+            base_url=self._base_url,
             headers=self._headers,
             transport=self._transport,  # type: ignore[arg-type]
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -767,6 +770,27 @@ class GitHubClient:
             "POST",
             f"/repos/{repo}/issues/{number}/assignees",
             json={"assignees": assignees},
+        )
+
+    async def get_review_comment(self, repo: str, comment_id: int) -> ReviewCommentInfo:
+        """Fetch a single inline review comment by id.
+
+        Workaround for Forgejo #7935: `pull_request_review_comment` webhook
+        payloads on Forgejo carry empty `body` — the API returns the actual text.
+        """
+        data = await self.request("GET", f"/repos/{repo}/pulls/comments/{comment_id}")
+        user = data.get("user") or {}
+        line = data.get("line")
+        if not isinstance(line, int):
+            orig = data.get("original_line")
+            line = orig if isinstance(orig, int) else None
+        return ReviewCommentInfo(
+            id=int(data.get("id") or comment_id),
+            author=str(user.get("login") or ""),
+            body=str(data.get("body") or ""),
+            path=str(data.get("path") or ""),
+            line=line,
+            created_at=str(data.get("created_at") or ""),
         )
 
     async def list_comment_reactions(self, repo: str, comment_id: int) -> tuple[ReactionInfo, ...]:
