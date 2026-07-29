@@ -55,7 +55,7 @@ const fakeSpawnImpl = (call: SpawnCall) => {
 	if (payload.includes("test -d")) return scripted("EXISTS\n");
 	if (payload.includes("git rev-parse HEAD")) return scripted(`${git(remoteRepo, "rev-parse", "HEAD")}\n`);
 	if (payload.includes("git am --3way")) {
-		const branchMatch = payload.match(/git checkout -B (\S+)/);
+		const branchMatch = payload.match(/git checkout -B "([^"]+)"/) ?? payload.match(/git checkout -B (\S+)/);
 		if (branchMatch) git(remoteRepo, "checkout", "-B", branchMatch[1]);
 		return realSpawn({
 			cmd: ["git", "am", "--3way"],
@@ -66,7 +66,7 @@ const fakeSpawnImpl = (call: SpawnCall) => {
 		});
 	}
 	if (payload.includes("git checkout -B")) {
-		const branchMatch = payload.match(/git checkout -B (\S+)/);
+		const branchMatch = payload.match(/git checkout -B "([^"]+)"/) ?? payload.match(/git checkout -B (\S+)/);
 		if (branchMatch) git(remoteRepo, "checkout", "-B", branchMatch[1]);
 		return scripted("");
 	}

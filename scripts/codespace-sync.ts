@@ -465,7 +465,7 @@ export async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void
 
 				// Apply the patch on the remote via SSH stdin
 				const applyProc = Bun.spawn({
-					cmd: [...sshArgv(), opts.sshTarget, `cd "${remoteDirSsh}" && git am --abort 2>/dev/null; git checkout -B ${branch} 2>/dev/null; git am --3way`],
+					cmd: [...sshArgv(), opts.sshTarget, `cd "${remoteDirSsh}" && (git am --abort 2>/dev/null || true) && git checkout -B "${branch}" && git am --3way`],
 					stdin: new TextEncoder().encode(patchRes.stdout),
 					stdout: "pipe",
 					stderr: "pipe",
@@ -480,7 +480,18 @@ export async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void
 					await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git am --abort 2>/dev/null`);
 					await gitPushFallback(opts, plan, branch, remoteUrl, remoteDirSsh);
 				} else {
-					console.log(`✓ patch applied on ${opts.sshTarget}:${opts.remoteDir} (branch ${branch})`);
+					// `git am` exits 0 on empty stdin — a dropped ssh stdin stream
+					// (seen with Tailscale SSH check-mode interception) reports
+					// success without applying anything. Trust only an advanced HEAD.
+					const verify = await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git rev-parse HEAD 2>/dev/null || echo NONE`);
+					const newHead = verify.stdout.trim();
+					if (newHead.length !== 40 || newHead === remoteHead) {
+						console.log(`  ⚠ apply reported success but remote HEAD did not advance — falling back to git push`);
+						await sshRun(opts.sshTarget, `cd "${remoteDirSsh}" && git am --abort 2>/dev/null`);
+						await gitPushFallback(opts, plan, branch, remoteUrl, remoteDirSsh);
+					} else {
+						console.log(`✓ patch applied on ${opts.sshTarget}:${opts.remoteDir} (branch ${branch})`);
+					}
 				}
 			} else {
 				console.log(`  no new commits — remote is already up to date`);
