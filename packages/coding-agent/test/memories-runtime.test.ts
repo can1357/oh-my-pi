@@ -219,8 +219,7 @@ describe("memories runtime", () => {
 		];
 		await fs.writeFile(rolloutPath, `${rolloutRows.map(row => JSON.stringify(row)).join("\n")}\n`);
 
-		const completeSpy = vi
-			.spyOn(ai, "completeSimple")
+		const completeSpy = trackedSpyOn(ai, "completeSimple")
 			.mockResolvedValueOnce({
 				stopReason: "end_turn",
 				content: [
@@ -298,8 +297,7 @@ describe("memories runtime", () => {
 		];
 		await fs.writeFile(rolloutPath, `${rolloutRows.map(row => JSON.stringify(row)).join("\n")}\n`);
 
-		const spy = vi
-			.spyOn(ai, "completeSimple")
+		const spy = trackedSpyOn(ai, "completeSimple")
 			.mockResolvedValueOnce({
 				stopReason: "end_turn",
 				content: [
