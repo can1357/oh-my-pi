@@ -133,6 +133,16 @@ export interface Capability<T> {
 	 */
 	toExtensionId?(item: T): string | undefined;
 
+	/**
+	 * Optional additional IDs under which this item may appear in persisted
+	 * `disabledExtensions` settings. Used when a capability's ID format changes:
+	 * new disables are written in the `toExtensionId` format, but entries users
+	 * persisted under the old format must keep disabling — silently re-enabling
+	 * something a user deliberately turned off is worse than honouring a legacy
+	 * key. Matching is OR across `toExtensionId` and every legacy ID.
+	 */
+	toLegacyExtensionIds?(item: T): string[];
+
 	/** Registered providers, sorted by priority (highest first) */
 	providers: Provider<T>[];
 }

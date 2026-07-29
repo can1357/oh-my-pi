@@ -176,6 +176,13 @@ async function loadImpl<T>(
 			if (extensionId && disabledExtensionIds.has(extensionId)) {
 				continue;
 			}
+			// Honour IDs persisted under an older format too — a user's existing
+			// `disabledExtensions` entries must keep disabling after an ID-format
+			// change (see toLegacyExtensionIds in types.ts).
+			const legacyIds = capability.toLegacyExtensionIds?.(itemWithSource);
+			if (legacyIds?.some(id => disabledExtensionIds.has(id))) {
+				continue;
+			}
 
 			itemWithSource._source.providerName = provider.displayName;
 			allItems.push(itemWithSource as T & { _source: SourceMeta; _shadowed?: boolean });
