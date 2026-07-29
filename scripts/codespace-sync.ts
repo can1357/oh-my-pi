@@ -297,7 +297,7 @@ async function sshRun(sshTarget: string, cmd: string): Promise<SpawnResult> {
 // On the remote, init a fresh git repo from the bundle we scp'd, then check
 // out the branch. Use single ssh calls per step because BusyBox sh on slim
 // images misbehaves with `&&` chains.
-async function remoteInitRepo(sshTarget: string, remoteDir: string, branch: string): Promise<void> {
+async function remoteInitRepo(sshTarget: string, remoteDir: string, branch: string, localHead: string): Promise<void> {
 	const probe = await sshRun(sshTarget, `cd ${remoteDir} && test -d .git && echo EXISTS || echo FRESH`);
 	const isFresh = probe.stdout.trim() === "FRESH";
 	if (isFresh) {
@@ -309,7 +309,16 @@ async function remoteInitRepo(sshTarget: string, remoteDir: string, branch: stri
 			throw new Error(`remote bundle clone failed:\n${init.stderr}\n${init.stdout}`);
 		}
 	}
-	const co = await sshRun(sshTarget, `cd ${remoteDir} && git checkout ${branch} || git checkout -b ${branch} || true`);
+
+	const fetch = await sshRun(
+		sshTarget,
+		`cd ${remoteDir} && git fetch --force ./.codespace-sync.bundle "+refs/heads/*:refs/remotes/codespace-sync/*" "+refs/tags/*:refs/tags/*"`,
+	);
+	if (fetch.code !== 0) {
+		throw new Error(`remote bundle fetch failed:\n${fetch.stderr}\n${fetch.stdout}`);
+	}
+
+	const co = await sshRun(sshTarget, `cd ${remoteDir} && git reset --hard && git checkout -B ${branch} ${localHead}`);
 	if (co.code !== 0) {
 		throw new Error(`remote checkout failed:\n${co.stderr}\n${co.stdout}`);
 	}
@@ -319,26 +328,36 @@ async function push(opts: SyncOptions, plan: PlanResult): Promise<void> {
 	console.log("→ ensure remote dir exists");
 	await ensureRemoteDir(opts.sshTarget, opts.remoteDir);
 
-	console.log("→ build local bundle (all branches + tags)");
-	const bundle = await buildBundle(plan.localRepo, plan.localRepo);
-	console.log(`  bundle: ${bundle.bundlePath} (${Math.round(bundle.bytes / 1024)} KiB)`);
-	if (bundle.stashBundlePath) {
-		console.log(`  stash bundle: ${bundle.stashBundlePath}`);
+	const bundleDir = await fs.mkdtemp(path.join(os.tmpdir(), "codespace-sync-push-"));
+	try {
+		console.log("→ build local bundle (all branches + tags)");
+		const bundle = await buildBundle(plan.localRepo, bundleDir);
+		console.log(`  bundle: ${bundle.bundlePath} (${Math.round(bundle.bytes / 1024)} KiB)`);
+		if (bundle.stashBundlePath) {
+			console.log(`  stash bundle: ${bundle.stashBundlePath}`);
+		}
+
+		console.log("→ scp bundle(s) to remote");
+		await scpFile(bundle.bundlePath, opts.sshTarget, opts.remoteDir);
+		if (bundle.stashBundlePath) {
+			await scpFile(bundle.stashBundlePath, opts.sshTarget, opts.remoteDir);
+		}
+
+		const localHead = (await direct(["git", "rev-parse", "HEAD"], { cwd: plan.localRepo })).stdout.trim();
+		if (!/^[0-9a-f]{40}$/.test(localHead)) {
+			throw new Error(`cannot resolve local HEAD: ${localHead || "(empty)"}`);
+		}
+
+		console.log("→ init/refresh remote repo from bundle");
+		await remoteInitRepo(opts.sshTarget, opts.remoteDir, plan.branch, localHead);
+
+		console.log("→ tar working tree to remote");
+		await rsyncPush(plan.localRepo, opts.sshTarget, opts.remoteDir);
+
+		console.log("✓ push complete");
+	} finally {
+		await fs.rm(bundleDir, { recursive: true, force: true });
 	}
-
-	console.log("→ tar working tree to remote");
-	await rsyncPush(plan.localRepo, opts.sshTarget, opts.remoteDir);
-
-	console.log("→ scp bundle(s) to remote");
-	await scpFile(bundle.bundlePath, opts.sshTarget, opts.remoteDir);
-	if (bundle.stashBundlePath) {
-		await scpFile(bundle.stashBundlePath, opts.sshTarget, opts.remoteDir);
-	}
-
-	console.log("→ init/refresh remote repo from bundle");
-	await remoteInitRepo(opts.sshTarget, opts.remoteDir, plan.branch);
-
-	console.log("✓ push complete");
 }
 
 async function pull(opts: SyncOptions, plan: PlanResult): Promise<void> {
