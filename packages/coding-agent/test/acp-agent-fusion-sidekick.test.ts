@@ -243,6 +243,14 @@ interface AgentHarness {
 	findSession(sessionId: string): FakeAgentSession | undefined;
 }
 
+// Every test builds a real AcpAgent with live sessions. Nothing used to tear
+// them down, so six undisposed harnesses accumulated across the file — open
+// session handles that made Windows refuse the temp-dir delete with EBUSY, and
+// that leave enough runtime state behind to crash Bun 1.3.14 when the next file
+// in the same process loads (`bun --smol test acp-agent-fusion-sidekick
+// system-prompt-model` segfaults 5/5 without this; neither file crashes alone).
+// Disposing per test keeps the accumulation bounded.
+const liveHarnesses: AgentHarness[] = [];
 const cleanupRoots: string[] = [];
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
@@ -269,6 +277,20 @@ afterEach(async () => {
 		delete process.env.PI_CODING_AGENT_DIR;
 	}
 	resetSettingsForTest();
+
+	// Release live sessions before deleting their directories: an undisposed
+	// session keeps handles open, which is both the EBUSY source below and the
+	// state accumulation that trips the runtime in the next file.
+	for (const harness of liveHarnesses.splice(0)) {
+		harness.abortController.abort();
+		for (const session of harness.sessions.splice(0)) {
+			try {
+				await session.dispose();
+			} catch {
+				// A session that never fully started has nothing to release.
+			}
+		}
+	}
 
 	for (const root of cleanupRoots.splice(0)) {
 		// Best-effort: the harness leaves session handles open long enough that
@@ -309,7 +331,7 @@ async function createHarness(): Promise<AgentHarness> {
 	};
 
 	const agent = new AcpAgent(connection, factory, initialSession as unknown as AgentSession);
-	return {
+	const harness: AgentHarness = {
 		agent,
 		abortController,
 		sessions,
@@ -317,6 +339,8 @@ async function createHarness(): Promise<AgentHarness> {
 		cwdB,
 		findSession: (sessionId: string) => sessions.findLast(s => s.sessionId === sessionId),
 	};
+	liveHarnesses.push(harness);
+	return harness;
 }
 
 // ---------------------------------------------------------------------------
