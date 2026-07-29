@@ -13,6 +13,7 @@ import {
 	getRemainingTimeoutMs,
 	isCancellationError,
 	isTimedOutCancellation,
+	settleWithin,
 	waitForPromiseWithCancellation,
 } from "../executor-base";
 import type { JsStatusEvent } from "../js/shared/types";
@@ -335,14 +336,14 @@ export async function disposeRubyKernelSessionsByOwner(ownerId: string): Promise
 	for (const session of toShutdown) {
 		if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
 	}
-	const started = await Promise.allSettled(startingToShutdown.map(starting => starting.promise));
+	const started = await settleWithin(startingToShutdown.map(starting => starting.promise));
 	for (const result of started) {
 		if (result.status !== "fulfilled") continue;
 		const session = result.value;
 		if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
 		toShutdown.push(session);
 	}
-	const results = await Promise.allSettled(toShutdown.map(session => session.kernel.shutdown()));
+	const results = await settleWithin(toShutdown.map(session => session.kernel.shutdown()));
 	for (let i = 0; i < toShutdown.length; i += 1) {
 		const session = toShutdown[i];
 		const result = results[i];
