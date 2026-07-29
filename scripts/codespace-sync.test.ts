@@ -60,7 +60,7 @@ const fakeSpawnImpl = (call: SpawnCall) => {
 		const branchMatch = payload.match(/git checkout -B "([^"]+)"/) ?? payload.match(/git checkout -B (\S+)/);
 		if (branchMatch) git(remoteRepo, "checkout", "-B", branchMatch[1]);
 		if (payload.includes("git reset --hard")) git(remoteRepo, "reset", "--hard");
-		const am = Bun.spawnSync(["git", "am", "--3way"], { cwd: remoteRepo, stdin: call.stdin, stdout: "pipe", stderr: "pipe" });
+		const am = Bun.spawnSync(["git", "am", "--3way", "--empty=keep"], { cwd: remoteRepo, stdin: call.stdin, stdout: "pipe", stderr: "pipe" });
 		const amOut = new TextDecoder().decode(am.stdout);
 		return scripted(`${amOut}__SSH_RC=${am.exitCode}\n`);
 	}

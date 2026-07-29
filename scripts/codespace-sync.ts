@@ -488,7 +488,7 @@ export async function handoff(opts: SyncOptions, plan: PlanResult): Promise<void
 				// The exit status is smuggled via stdout because Tailscale SSH
 				// check-mode sessions always report exit 0.
 				const applyProc = Bun.spawn({
-					cmd: [...sshArgv(), opts.sshTarget, `cd "${remoteDirSsh}" && (git am --abort 2>/dev/null || true) && git checkout -B "${branch}" && git reset --hard && git clean -fd && git am --3way\n__sc_rc=$?; echo "__SSH_RC=$__sc_rc"`],
+					cmd: [...sshArgv(), opts.sshTarget, `cd "${remoteDirSsh}" && (git am --abort 2>/dev/null || true) && git checkout -B "${branch}" && git reset --hard && git clean -fd && git am --3way --empty=keep\n__sc_rc=$?; echo "__SSH_RC=$__sc_rc"`],
 					stdin: new TextEncoder().encode(patchRes.stdout),
 					stdout: "pipe",
 					stderr: "pipe",
