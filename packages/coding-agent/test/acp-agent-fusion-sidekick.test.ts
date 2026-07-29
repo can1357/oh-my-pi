@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -247,8 +247,21 @@ const cleanupRoots: string[] = [];
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
+// Restore each spy individually instead of calling `mock.restore()`. These spies
+// patch an ESM module namespace, which is sealed; the global restore walks Bun's
+// whole mock registry to undo that and segfaults the process (`panic(main
+// thread): Segmentation fault at address 0x4`) once a later file in the same run
+// imports an overlapping module graph. The singleton bucket shares one process by
+// design, so the crash took the entire bucket down — reliably reproducible as
+// `bun test acp-agent-fusion-sidekick.test.ts system-prompt-model.test.ts`.
+const trackedSpies: Array<{ mockRestore: () => void }> = [];
+const track = <T extends { mockRestore: () => void }>(spy: T): T => {
+	trackedSpies.push(spy);
+	return spy;
+};
+
 afterEach(async () => {
-	mock.restore();
+	for (const spy of trackedSpies.splice(0)) spy.mockRestore();
 	if (originalAgentDir) {
 		setAgentDir(originalAgentDir);
 	} else {
@@ -308,7 +321,7 @@ async function createHarness(): Promise<AgentHarness> {
 
 describe("ACP agent fusion sidekick spawn", () => {
 	it("calls ensureFusionSidekick when newSession creates a fresh session", async () => {
-		const spy = spyOn(fusionSidekickModule, "ensureFusionSidekick");
+		const spy = track(spyOn(fusionSidekickModule, "ensureFusionSidekick"));
 		const harness = await createHarness();
 
 		const result = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
@@ -325,7 +338,7 @@ describe("ACP agent fusion sidekick spawn", () => {
 	});
 
 	it("does NOT call ensureFusionSidekick when resumeManagedSession finds an in-memory session", async () => {
-		const spy = spyOn(fusionSidekickModule, "ensureFusionSidekick");
+		const spy = track(spyOn(fusionSidekickModule, "ensureFusionSidekick"));
 		const harness = await createHarness();
 
 		// Create the session first so it is cached in memory
@@ -344,7 +357,7 @@ describe("ACP agent fusion sidekick spawn", () => {
 	});
 
 	it("calls ensureFusionSidekick when resumeManagedSession loads a stored session from disk", async () => {
-		const spy = spyOn(fusionSidekickModule, "ensureFusionSidekick");
+		const spy = track(spyOn(fusionSidekickModule, "ensureFusionSidekick"));
 		const harness = await createHarness();
 
 		// Create and persist a session to disk
@@ -374,7 +387,7 @@ describe("ACP agent fusion sidekick spawn", () => {
 	});
 
 	it("calls ensureFusionSidekick when loadManagedSession loads a stored session from disk", async () => {
-		const spy = spyOn(fusionSidekickModule, "ensureFusionSidekick");
+		const spy = track(spyOn(fusionSidekickModule, "ensureFusionSidekick"));
 		const harness = await createHarness();
 
 		// Create and persist a session to disk
@@ -404,7 +417,7 @@ describe("ACP agent fusion sidekick spawn", () => {
 	});
 
 	it("does NOT call ensureFusionSidekick when loadManagedSession finds an in-memory session", async () => {
-		const spy = spyOn(fusionSidekickModule, "ensureFusionSidekick");
+		const spy = track(spyOn(fusionSidekickModule, "ensureFusionSidekick"));
 		const harness = await createHarness();
 
 		// Create the session first so it is cached in memory
@@ -423,7 +436,7 @@ describe("ACP agent fusion sidekick spawn", () => {
 	});
 
 	it("calls ensureFusionSidekick when forkManagedSession creates a forked session", async () => {
-		const spy = spyOn(fusionSidekickModule, "ensureFusionSidekick");
+		const spy = track(spyOn(fusionSidekickModule, "ensureFusionSidekick"));
 		const harness = await createHarness();
 
 		// Create and persist a source session
