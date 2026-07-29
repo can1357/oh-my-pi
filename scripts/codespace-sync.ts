@@ -237,23 +237,32 @@ async function workingTreeFileList(localRepo: string): Promise<string[]> {
 	// -s exposes the mode so gitlinks (160000) can be dropped: tar would
 	// recursively archive an initialized submodule directory, dragging in its
 	// .git file and ignored state that `git ls-files` never selected.
-	const r = await direct(["git", "ls-files", "-z", "-s", "--cached", "--others", "--exclude-standard"], { cwd: localRepo });
+	const r = await direct(["git", "ls-files", "-z", "-s", "--cached", "--others", "--exclude-standard"], {
+		cwd: localRepo,
+	});
 	if (r.code !== 0) throw new Error(`git ls-files failed:\n${r.stderr}`);
 	const files: string[] = [];
 	for (const entry of r.stdout.split("\0").filter(Boolean)) {
 		// Staged form: "<mode> <sha> <stage>\t<path>". Untracked (--others)
 		// entries have no metadata prefix and arrive as a bare path.
 		const tab = entry.indexOf("\t");
-		if (tab === -1) { files.push(entry); continue; }
+		if (tab === -1) {
+			files.push(entry);
+			continue;
+		}
 		const mode = entry.slice(0, entry.indexOf(" "));
 		if (mode === "160000") continue; // submodule gitlink
 		files.push(entry.slice(tab + 1));
 	}
-	// `--no-renames` matters: with default rename detection a staged `git mv` is
-	// one R entry, so --diff-filter=D reports nothing and tar would then try to
-	// archive the now-missing old pathname.
-	const gone = await direct(["git", "diff", "--name-only", "-z", "--no-renames", "--diff-filter=D", "HEAD"], { cwd: localRepo });
-	if (gone.code !== 0) throw new Error(`git diff failed:\n${gone.stderr}`);
+	// Drop cached entries whose file is gone from the worktree, or tar would
+	// abort on a path it cannot stat. `git ls-files --deleted` is the right
+	// question: it reports exactly "in the index, missing on disk", which also
+	// covers a file staged and then removed (`git add f && rm f`) — a case
+	// `git diff --diff-filter=D HEAD` misses entirely because HEAD never had
+	// it. A staged rename needs no special handling here: `git mv` removes the
+	// old path from the index, so it never enters `files` in the first place.
+	const gone = await direct(["git", "ls-files", "-z", "--deleted"], { cwd: localRepo });
+	if (gone.code !== 0) throw new Error(`git ls-files --deleted failed:\n${gone.stderr}`);
 	const deleted = new Set(gone.stdout.split("\0").filter(Boolean));
 	return files.filter(f => !deleted.has(f));
 }
@@ -268,7 +277,17 @@ async function rsyncPush(localRepo: string, sshTarget: string, remoteDir: string
 	await Bun.write(listPath, files.join("\0"));
 	// --no-recursion: every path is already enumerated by git, so a listed
 	// directory must never be expanded by tar itself.
-	const tarArgs = ["tar", "-cf", "-", "-C", localRepo, "--null", "--no-recursion", "--files-from", toWinPath(listPath)];
+	const tarArgs = [
+		"tar",
+		"-cf",
+		"-",
+		"-C",
+		localRepo,
+		"--null",
+		"--no-recursion",
+		"--files-from",
+		toWinPath(listPath),
+	];
 	const sshArgs = [...sshArgv(), sshTarget, `tar -xf - -C ${remoteDir} --no-same-owner`];
 	try {
 		const tar = Bun.spawn({ cmd: tarArgs, stdout: "pipe", stderr: "pipe" });
@@ -282,7 +301,9 @@ async function rsyncPush(localRepo: string, sshTarget: string, remoteDir: string
 		if (tarCode !== 0) throw new Error(`tar failed (exit ${tarCode}):\n${tarErr}`);
 		if (sshCode !== 0) throw new Error(`remote untar failed (exit ${sshCode}):\n${sshErr}`);
 	} finally {
-		await Bun.file(listPath).delete().catch(() => {});
+		await Bun.file(listPath)
+			.delete()
+			.catch(() => {});
 	}
 }
 
