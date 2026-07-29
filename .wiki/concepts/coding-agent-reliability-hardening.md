@@ -30,6 +30,8 @@ The investigation established two distinct mitigations:
 1. `acp-agent-fusion-sidekick.test.ts` now disposes the harnesses it creates. This removes a deterministic two-file trigger, but was not by itself sufficient for the exact CI file list and invocation.
 2. [PR #32](https://github.com/kingkillery/oh-my-pk/pull/32) chunks the singleton bucket into groups of ten files, retaining per-chunk process-state coverage while bounding heap growth and leaked child-process accumulation. Its PR CI passed the singleton job and every non-release CI job.
 
+The first post-merge `main` run (`30482788360`) kept the singleton job green but failed separately in the native/unit bucket: `julia-prelude.test.ts` timed out in a hook. That bucket then stopped after its first 10-file chunk, leaving the remaining 51 chunks explicitly **unknown**. It is a distinct test-reliability follow-up, not evidence that the singleton crash returned.
+
 The chunking is explicitly a temporary NER-134 mitigation. Re-evaluate and remove it when a Bun release fixes the underlying crash; any suite that genuinely requires cross-file state must keep those files in the same chunk.
 
 ### Context-file disable IDs: precise going forward, compatible for existing users
