@@ -144,7 +144,7 @@ type ProjectSettingsReadResult = {
 type PersistedReloadMode = "strict" | "keep-last-good";
 
 /** Layer refreshes serialized by `Settings.#exclusive`: disk reloads and cwd re-scopes. */
-type LayerRefreshKind = PersistedReloadMode | "rescope";
+type LayerRefreshKind = PersistedReloadMode | "rescope" | "global";
 
 /** Quiet period after the last config-file event before the watcher reloads from disk. */
 const CONFIG_WATCH_DEBOUNCE_MS = 200;
@@ -168,6 +168,22 @@ export interface SettingsOptions {
 	/** Extra config.yml-style overlays loaded after global/project settings */
 	configFiles?: string[];
 }
+/** Result of an explicit reload of the global config and its overlays. */
+export interface SettingsReloadReport {
+	status: "applied" | "unchanged" | "failed";
+	changed: string[];
+	restartRequired: string[];
+	partiallyApplied: Array<{ key: string; reason: string }>;
+	error?: string;
+}
+
+const RESTART_REQUIRED_SETTINGS = new Set(["includeWorkspaceTree"]);
+const PARTIAL_RELOAD_SETTINGS = new Map([
+	["disabledProviders", "provider availability updates immediately, but discovered providers require a restart"],
+	["extensions", "run /reload-plugins to refresh extension discovery"],
+	["disabledExtensions", "run /reload-plugins to refresh extension discovery"],
+	["plan.enabled", "plan mode updates now; a write tool absent at startup requires a restart"],
+]);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Path Utilities
@@ -1259,6 +1275,63 @@ export class Settings {
 		if (!this.#persist) return;
 		await this.#exclusive("strict", () => this.#reloadPersistedLayers("strict"));
 	}
+
+	/** Refresh the global config and explicit overlays without re-reading the project layer. */
+	async reloadGlobal(): Promise<SettingsReloadReport> {
+		const unchanged = (): SettingsReloadReport => ({
+			status: "unchanged", changed: [], restartRequired: [], partiallyApplied: [],
+		});
+		if (!this.#persist) return unchanged();
+		let result = unchanged();
+		await this.#exclusive("global", async () => {
+			const settings = allSettings();
+			// A save may adopt external edits before the refresh starts. Capture values first
+			// so their listeners and the command report still account for those edits.
+			const previous = this.#snapshot();
+			for (;;) {
+				try {
+					await this.flush();
+					if (this.#modified.size || this.#modifiedGlobalModelRoles.size) {
+						throw new Error("unsaved global settings could not be persisted");
+					}
+					const generation = this.#persistedMutationGeneration;
+					const [global, overlay] = await Promise.all([
+						this.#readExistingMainYaml(false), this.#readConfigOverlays(false),
+					]);
+					if (generation !== this.#persistedMutationGeneration) continue;
+					const layers: OwnLayers = {
+						...this.#ownLayers(), global: global.settings ?? {}, configOverlay: overlay.settings,
+					};
+					const settled = this.#settlePins(layers);
+					this.#validateAll(this.#mergeOverParent(this.#mergeOwnLayers(layers)), this.#cwd);
+					this.#global = layers.global;
+					this.#configOverlay = layers.configOverlay;
+					this.#overrides = layers.overrides;
+					this.#configPath = global.configPath;
+					this.#overlayShellPathSource = overlay.shellPathSource;
+					for (const setting of settled) this.#softPins.delete(setting);
+					this.#rebuildMerged();
+					const changed = settings.filter((setting, i) =>
+						!settingValuesEqual(setting.get(this), previous[i])).map(setting => setting.id);
+					this.#fireChangesSince(previous);
+					result = changed.length ? {
+						status: "applied", changed,
+						restartRequired: changed.filter(key => RESTART_REQUIRED_SETTINGS.has(key)),
+						partiallyApplied: changed.flatMap(key => {
+							const reason = PARTIAL_RELOAD_SETTINGS.get(key);
+							return reason ? [{ key, reason }] : [];
+						}),
+					} : unchanged();
+					return;
+				} catch (error) {
+					result = { ...unchanged(), status: "failed", error: String(error) };
+					return;
+				}
+			}
+		});
+		return result;
+	}
+
 
 	/**
 	 * Run one disk reload at a time, also serialized with {@link reloadForCwd}

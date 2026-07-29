@@ -123,7 +123,7 @@ import {
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
-import type { Settings } from "../config/settings";
+import type { Settings, SettingsReloadReport } from "../config/settings";
 import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { getEditStore } from "../edit/store";
 import { releaseCompletionHandles } from "../eval/completion-bridge";
@@ -278,6 +278,7 @@ import type {
 	RoleModelCycle,
 	RoleModelCycleResult,
 	SendUserMessageOptions,
+	RoleModelRebindOutcome,
 	SessionHandoffOptions,
 	SessionOAuthAccountList,
 	SessionStats,
@@ -383,7 +384,12 @@ import {
 	queueChipText,
 	toRestoredQueuedMessage,
 } from "./queued-messages";
-import type { ServingModel } from "./retry-fallback-chains";
+import {
+	formatRetryFallbackSelector,
+	parseRetryFallbackSelector,
+	type RetryFallbackSelector,
+	type ServingModel,
+} from "./retry-fallback-chains";
 import {
 	type AdvisorStats,
 	type AdvisorStatusOverviewEntry,
@@ -998,6 +1004,16 @@ export class AgentSession implements SettingsScope {
 	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
 	#inFlightSettledCallbacks: Array<() => void | Promise<void>> = [];
+	/**
+	 * Model this session last bound because a role resolved to it, as opposed to a
+	 * manual `/model` pick. Lets {@link reapplyDefaultRoleModel} tell "still on the
+	 * role's model" from "the user chose this deliberately".
+	 */
+	#roleBoundModel: Model | undefined;
+	/** A role rebind that arrived mid-turn and is owed at the next turn boundary. */
+	#pendingRoleModelRebind = false;
+	/** Serializes config reload + role rebind so callers never race a half-applied one. */
+	#configReloadInFlight: Promise<unknown> | undefined;
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
 	#obfuscator: SecretObfuscator | undefined;
@@ -2200,6 +2216,31 @@ export class AgentSession implements SettingsScope {
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		cfgProviderAppendOnlyContext.listen(this, () => this.#syncAppendOnlyContext(this.model));
 		cfgModelRoles.listen(this, () => this.#advisors.reconcileModelRoles());
+		// Record which model this session holds *by role*, so a later rebind can tell an
+		// intentional model from a session still sitting on its role's model.
+		//
+		// Gated on provenance from the caller, never inferred: a startup model may come
+		// from an explicit `--model`, a restored session's history, or the `default` role
+		// (`sdk.ts:1381`, `:1389-1392`, `:1427-1432`), and only the last may be rebound.
+		// An explicit `--model` matching today's default must stay explicit once the
+		// default moves, so equality cannot stand in for knowing.
+		//
+		// A session can also boot already inside a fallback (`config.initialRetryFallback`,
+		// e.g. startup found the configured primary suppressed). There `this.model` is the
+		// fallback and the role-bound primary is the fallback's `originalSelector`, so the
+		// candidate comes from that instead.
+		if (config.modelFromDefaultRole) {
+			const startupPrimary = this.#recovery.retryFallbackRestoreSelector;
+			const startupPrimarySelector = startupPrimary
+				? parseRetryFallbackSelector(startupPrimary, this.#modelRegistry)
+				: undefined;
+			this.#roleBoundModel =
+				(startupPrimarySelector
+					? this.#modelRegistry.find(startupPrimarySelector.provider, startupPrimarySelector.id)
+					: undefined) ??
+				this.model ??
+				undefined;
+		}
 		// Re-derive the active model's effective context window when the
 		// extended-context setting flips at runtime: the registry re-clamps (or
 		// restores) premium long-context windows, and the live model object must
@@ -3618,6 +3659,16 @@ export class AgentSession implements SettingsScope {
 		}
 
 		if (event.type === "turn_end") this.#ttsr.onTurnEnd();
+		// A role rebind that arrived while this turn was streaming is owed now: the
+		// turn has settled, so switching the model cannot disturb an in-flight
+		// request. Matches the boundary the maintenance path already treats as safe
+		// (`session/session-maintenance.ts:999`).
+		if (event.type === "turn_end" && this.#pendingRoleModelRebind) {
+			this.#pendingRoleModelRebind = false;
+			void this.reapplyDefaultRoleModel().catch(error => {
+				logger.warn("Failed to apply deferred role model rebind", { error: String(error) });
+			});
+		}
 		// Finalize the tool-choice queue's in-flight yield after tools have executed.
 		// This must happen at turn_end (not message_end) because onInvoked handlers
 		// run during tool execution, which happens between message_end and turn_end.
@@ -5694,6 +5745,11 @@ export class AgentSession implements SettingsScope {
 	 */
 	get servingModel(): ServingModel | undefined {
 		return this.#recovery.servingModel;
+	}
+
+	/** Selector this session returns to when an active retry fallback is released. */
+	get retryFallbackRestoreSelector(): string | undefined {
+		return this.#recovery.retryFallbackRestoreSelector;
 	}
 
 	/** Install the interactive decision surface for reserve-triggered model changes. */
@@ -9278,6 +9334,42 @@ export class AgentSession implements SettingsScope {
 		await this.sessionManager.moveTo(newCwd, targetSessionDir);
 	}
 
+	/**
+	 * Re-read the global config layer and, when the model roles moved, reapply the
+	 * `default` role, as one serialized operation.
+	 *
+	 * Both must happen under a single lock. `Settings` already serializes reloads
+	 * against each other, but it releases that lock before the rebind, and the
+	 * turn-boundary pickups are fire-and-forget: a second caller could otherwise
+	 * observe a committed reload, find nothing to do, and proceed while a rebind was
+	 * still switching the model. `/reload-config` and the hot-reload pickup therefore
+	 * share this method rather than calling the two halves themselves.
+	 *
+	 * The rebind is gated on `modelRoles` actually changing, because
+	 * {@link reapplyDefaultRoleModel} can retarget an active retry fallback's restore
+	 * selector and an unrelated setting edit must never do that.
+	 */
+	async reloadConfigAndReapplyRole(): Promise<{
+		report: SettingsReloadReport | undefined;
+		rebind: RoleModelRebindOutcome | undefined;
+	}> {
+		const previous = this.#configReloadInFlight;
+		const run = (async () => {
+			if (previous) await previous.catch(() => {});
+			const report = await this.settings.reloadGlobal();
+			if (report?.status !== "applied" || !report.changed.includes("modelRoles")) {
+				return { report, rebind: undefined };
+			}
+			return { report, rebind: await this.reapplyDefaultRoleModel() };
+		})();
+		this.#configReloadInFlight = run;
+		try {
+			return await run;
+		} finally {
+			if (this.#configReloadInFlight === run) this.#configReloadInFlight = undefined;
+		}
+	}
+
 	// =========================================================================
 	// Model Management
 	// =========================================================================
@@ -9301,6 +9393,94 @@ export class AgentSession implements SettingsScope {
 		},
 	): Promise<{ switched: boolean }> {
 		return this.#models.setModel(model, role, options);
+	}
+
+	/**
+	 * Re-resolve the `default` role and apply it after its configured value changed
+	 * underneath the session (a `config.yml` reload, not a `/model` pick).
+	 *
+	 * Nothing else does this: `modelRolesSignal` only drives the advisor rebuild and
+	 * the plan-mode reapply, so a reload changes `modelRoles.default` without changing
+	 * what the next turn runs on.
+	 *
+	 * The role value carries an effort as well as a model (`model:xhigh`), and an
+	 * effort-only edit is the common case, so the thinking level is applied in both the
+	 * switched and the same-model paths. `setModel` reapplies the model's own default
+	 * effort, which would otherwise silently discard the role's.
+	 *
+	 * Deliberately conservative, because the wrong switch is worse than no switch:
+	 *
+	 * - Never mid-turn. A streaming session records the intent and applies it at the
+	 *   next turn boundary, so a model is not swapped under an in-flight request.
+	 * - Never against plan mode, which owns the active model. `#exitPlanMode` restores
+	 *   its entry snapshot and calls this again, which is what applies the change; a
+	 *   second reload could not, since the role change is already committed and would
+	 *   report `unchanged`.
+	 * - Never over an active retry fallback. A session in a cascade is deliberately off
+	 *   its role model and `setModel` would clear that state
+	 *   (`session/model-controls.ts:197`), so the cascade's restore target is retargeted
+	 *   instead; otherwise `#maybeRestoreRetryFallbackPrimary` would return the session
+	 *   to the selector captured when the cascade began and lose the change.
+	 * - Never over a deliberate choice. Only a session still sitting on the model its
+	 *   role resolved to is rebound, so an explicit `--model`, a restored session's
+	 *   model, and a manual `/model` pick all win over a config edit.
+	 */
+	async reapplyDefaultRoleModel(): Promise<RoleModelRebindOutcome> {
+		if (this.#isDisposed) return "declined";
+		if (this.#planModeState?.enabled === true) return "deferred-plan-mode";
+		const resolved = this.#models.resolveRoleModelWithThinking("default");
+		const target = resolved.model;
+		if (!target) return "declined";
+		if (this.retryFallbackModel !== undefined) {
+			// Only a cascade that started from this session's role-bound model belongs to
+			// the role; one rooted at a manual pick must keep restoring to that pick.
+			if (!this.#roleBoundModel) return "declined";
+			if (!this.#recovery.retargetActiveRetryFallbackPrimary(this.#roleBoundModel, target, resolved.thinkingLevel))
+				return "declined";
+			this.#roleBoundModel = target;
+			return "fallback-retargeted";
+		}
+		const current = this.model;
+		const sameModel = current !== undefined && current !== null && modelsAreEqual(current, target);
+		// Unowned (explicit `--model`, restored session model, arbitrary availability
+		// pick) or drifted off the role's model by a manual `/model`: leave it alone.
+		if (!this.#roleBoundModel) return "declined";
+		if (!sameModel && current && !modelsAreEqual(current, this.#roleBoundModel)) return "declined";
+		// Mirror `setModel`: an explicit role effort wins, otherwise the target model's
+		// own default applies. Without the fallback, dropping a suffix (`model:xhigh` to
+		// plain `model`) would leave the old level pinned forever.
+		const desiredThinking = resolved.explicitThinkingLevel ? resolved.thinkingLevel : target.thinking?.defaultLevel;
+		const thinkingMatches = desiredThinking === undefined || desiredThinking === this.configuredThinkingLevel();
+		// Nothing to do at all, checked before the streaming deferral so a no-op is never
+		// reported as pending.
+		if (sameModel && thinkingMatches) {
+			this.#roleBoundModel = target;
+			return "unchanged";
+		}
+		// Ahead of BOTH the model switch and the effort application: an effort-only role
+		// edit would otherwise call `setThinkingLevel` in the middle of a live request,
+		// which is exactly what "never mid-turn" is meant to prevent.
+		if (this.isStreaming) {
+			this.#pendingRoleModelRebind = true;
+			return "deferred-turn";
+		}
+		this.#pendingRoleModelRebind = false;
+		if (sameModel) {
+			this.#roleBoundModel = target;
+			// An effort-only role edit still has to land, and there is no model switch to
+			// carry it.
+			this.setThinkingLevel(desiredThinking);
+			return "thinking-applied";
+		}
+		const result = await this.setModel(target, "default");
+		if (!result.switched) return "declined";
+		this.#roleBoundModel = target;
+		// `setModel` reapplies the target model's own default effort, so the role's
+		// explicit level has to be restored afterwards.
+		if (desiredThinking !== undefined && desiredThinking !== this.configuredThinkingLevel()) {
+			this.setThinkingLevel(desiredThinking);
+		}
+		return "switched";
 	}
 
 	/** Selects a model for this session without updating persisted model settings. */
