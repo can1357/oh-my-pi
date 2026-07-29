@@ -605,6 +605,10 @@ export class Settings {
 	#modifiedGlobalModelRoleMutations = new Map<string, PendingYamlMutation>();
 	/** Changes whenever a live API mutates a persisted layer. */
 	#persistedMutationGeneration = 0;
+	/** Change stamp across the main config and overlays at the last outside-edit check. */
+	#configSignature: string | undefined;
+	/** Whether {@link Settings.reloadGlobalIfChangedOnDisk} has taken its baseline yet. */
+	#configSignatureSeen = false;
 	/** Serializes config reloads so overlapping callers cannot skip an uncommitted one. */
 	#configReloadInFlight: Promise<unknown> | undefined;
 	/**
@@ -939,12 +943,12 @@ export class Settings {
 	/**
 	 * Run one config-reload operation at a time.
 	 *
-	 * Every entry point funnels through here so two overlapping reloads cannot let the
-	 * second decide there is nothing to do while the first is still committing, which
-	 * would leave a caller awaiting that second one proceeding on uncommitted settings.
-	 * It also stops `/reload-config` from overlapping another reload and double-firing
-	 * hooks. A change-detecting entry point layered on top must run its detection inside
-	 * this section too, for the same reason.
+	 * Every entry point funnels through here because the mtime bookkeeping in
+	 * {@link reloadGlobalIfChangedOnDisk} records the new value before awaiting the
+	 * reload: two overlapping checks would let the second decide there was nothing to
+	 * do while the first was still committing, and a caller awaiting that second one
+	 * would proceed on uncommitted settings. Serializing also stops `/reload-config`
+	 * from overlapping a turn-boundary pickup and double-firing hooks.
 	 */
 	async #serializeConfigReload<T>(operation: () => Promise<T>): Promise<T> {
 		const previous = this.#configReloadInFlight;
@@ -1062,6 +1066,70 @@ export class Settings {
 			status: "failed",
 			error: "global settings changed concurrently on every attempt; try again once writes settle",
 		};
+	}
+
+	/**
+	 * Reload the global layer only when the config file changed on disk since this
+	 * session last looked.
+	 *
+	 * Cheap enough for a turn boundary: one `stat` when nothing changed. Returns
+	 * `undefined` when there was nothing to do, so a caller can stay quiet.
+	 *
+	 * This session's own saves also move the mtime, so the first check after a local
+	 * `set()` costs one reload that reports `unchanged`. That is preferable to
+	 * threading mtime bookkeeping through the save path.
+	 */
+	async reloadGlobalIfChangedOnDisk(): Promise<SettingsReloadReport | undefined> {
+		if (!this.#persist || !this.#configPath) return undefined;
+		// The stat and the reload share one critical section. Checked outside it, a
+		// caller could stat while another reload was mid-commit, see that reload's
+		// already-recorded signature, conclude there was nothing to do, and return —
+		// letting an awaiting prompt start on settings that had not landed yet.
+		return this.#serializeConfigReload(async () => {
+			const signature = await this.#readConfigSignature();
+			if (this.#configSignatureSeen && this.#configSignature === signature) return undefined;
+			this.#configSignature = signature;
+			this.#configSignatureSeen = true;
+			return this.#reloadGlobalOnce();
+		});
+	}
+
+	/**
+	 * Change stamp across every file the global layer could be built from: each
+	 * `MAIN_CONFIG_FILENAMES` candidate in the agent dir, plus each `--config` /
+	 * `PI_CONFIG_FILES` overlay.
+	 *
+	 * Every candidate is stamped rather than just the currently selected
+	 * `#configPath`, because `#stageMainYaml` picks the first that exists: creating a
+	 * higher-priority filename changes which file wins, and watching only the old
+	 * selection would miss that entirely. Overlays are included because they are
+	 * re-staged in the same transaction and outrank global in the merge. Absent files
+	 * contribute a marker instead of being skipped, so a file appearing or
+	 * disappearing counts as a change.
+	 *
+	 * Each stamp carries more than `mtime` because a rewrite inside the filesystem's
+	 * timestamp granularity can reuse the same value, which would make a rapid edit
+	 * invisible. Nanosecond mtime, inode-change time, size and inode together catch
+	 * that: a same-mtime rewrite still moves `ctime` and usually `size`, and a
+	 * replace-by-rename moves `ino`. Still one `stat` per path.
+	 */
+	async #readConfigSignature(): Promise<string> {
+		const candidates = [
+			...MAIN_CONFIG_FILENAMES.map(filename => path.join(this.#agentDir, filename)),
+			...this.#configFiles,
+		];
+		const parts: string[] = [];
+		for (const filePath of candidates) {
+			let stamp = "absent";
+			try {
+				const stats = await fs.promises.stat(filePath, { bigint: true });
+				stamp = `${stats.mtimeNs}:${stats.ctimeNs}:${stats.size}:${stats.ino}`;
+			} catch {
+				// Missing or unreadable: the marker above is the signal.
+			}
+			parts.push(`${filePath}@${stamp}`);
+		}
+		return parts.join("|");
 	}
 
 	/**

@@ -477,6 +477,23 @@ export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
 	setupVersion: { type: "number", default: 0 },
 
+	/**
+	 * Pick up outside edits to `~/.omp/agent/config.yml` automatically at safe
+	 * boundaries instead of requiring `/reload-config`. Costs one `stat` per check.
+	 * Default off so a session's configuration never changes without being asked.
+	 */
+	"settings.hotReload": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "general",
+			group: "Settings",
+			label: "Auto-reload config",
+			description:
+				"Re-read config.yml when it changes on disk, applied before the next turn or at the end of the current one",
+		},
+	},
+
 	// Auth broker — credentials proxied through a remote `omp auth-broker serve`
 	// host. Hidden from the UI; populate via env vars or hand-edited config.yml.
 	// Env (`OMP_AUTH_BROKER_URL` / `OMP_AUTH_BROKER_TOKEN`) takes precedence so
