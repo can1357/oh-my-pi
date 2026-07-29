@@ -75,7 +75,16 @@ export function getPermissionIntent(
 ): { toolName: string; title: string; paths?: string[]; cacheKey: string } | undefined {
 	const input = isRecord(args) ? args : {};
 	if (toolName === "bash") {
-		const command = stringProperty(input, "command")?.slice(0, 80);
+		// No truncation: matches `claude-agent-acp`'s untruncated `input.command`
+		// title for its Bash tool, and Zed renders the full title for
+		// `execute`-kind tool calls regardless of length (see
+		// `ToolCallUpdateFields::title` handling in `acp_thread.rs`). A `slice`
+		// here previously cut the command off mid-word with no ellipsis, which
+		// only showed up during the brief live permission prompt — the
+		// eventual `tool_execution_start` update (after approval) always used
+		// the untruncated command, so a `session/load` replay (which only ever
+		// sees that final title) never reproduced the truncation.
+		const command = stringProperty(input, "command");
 		return { toolName, title: command || toolName, cacheKey: toolName };
 	}
 	if (toolName === "delete") {

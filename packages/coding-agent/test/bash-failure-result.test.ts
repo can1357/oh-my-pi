@@ -48,6 +48,10 @@ describe("BashTool execution results", () => {
 		// The LLM-facing text still states the exit code verbatim.
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
 		expect(text).toContain("Command exited with code 3");
+
+		// Mirrored out of band so a renderer that replaces the inline text with a
+		// terminal widget (ACP) can still show the exit code.
+		expect(result.details?.notices).toContain("Command exited with code 3");
 	});
 
 	it("returns a warning-state timeout result with one timeout notice", async () => {

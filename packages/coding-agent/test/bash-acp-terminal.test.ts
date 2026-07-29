@@ -287,7 +287,15 @@ describe("BashTool ACP terminal routing", () => {
 		const tool = new BashTool(makeSession(bridge));
 		const executePromise = tool.execute("call-timeout", { command: "sleep 60", timeout: 1 });
 
-		await expect(executePromise).rejects.toThrow(/Command timed out after 1 seconds/);
+		// A timeout is a completed-but-failed command, returned as an error
+		// *result* rather than thrown: a throw becomes `buildToolErrorResult`
+		// (`cursor.ts`), which carries no `details`, so every renderer would
+		// lose the live terminal id and the timeout/wall-time notices with it.
+		const result = await executePromise;
+		expect(result.isError).toBe(true);
+		expect(result.content.find(c => c.type === "text")?.text).toMatch(/Command timed out after 1 seconds/);
+		expect(result.details?.terminalId).toBe("term-timeout");
+		expect(result.details?.timedOut).toBe(true);
 
 		expect(killSpy).toHaveBeenCalledTimes(1);
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
@@ -318,7 +326,12 @@ describe("BashTool ACP terminal routing", () => {
 		const tool = new BashTool(makeSession(bridge));
 		const executePromise = tool.execute("call-hung-poll", { command: "sleep 60", timeout: 1 });
 
-		await expect(executePromise).rejects.toThrow(/Command timed out after 1 seconds/);
+		const result = await executePromise;
+		expect(result.isError).toBe(true);
+		expect(result.content.find(c => c.type === "text")?.text).toMatch(/Command timed out after 1 seconds/);
+		// The hung poll read means no output snapshot arrived, but the terminal
+		// the client already owns must still be named on the result.
+		expect(result.details?.terminalId).toBe("term-hung-poll");
 		expect(killSpy).toHaveBeenCalledTimes(1);
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 	}, 8000);

@@ -83,6 +83,120 @@ export interface OutputMeta {
 }
 
 // =============================================================================
+// Runtime validation
+// =============================================================================
+
+/** The package has no shared type-guard module; this is the one canonical `Record` guard `acp-event-mapper.ts` also imports instead of redefining. */
+export function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
+function isLineRange(value: unknown): boolean {
+	return isRecord(value) && isFiniteNumber(value.start) && isFiniteNumber(value.end);
+}
+
+/**
+ * Key lists are `satisfies`-checked against the types above: a renamed
+ * `TruncationMeta`/`LimitsMeta` field would otherwise make a validator
+ * reject every real `details.meta`, silently dropping the notice it gates.
+ *
+ * Each sibling (`truncation`/`source`/`diagnostics`/`limits`) is validated
+ * and reconstructed independently, down to `limits`' own four sub-fields —
+ * never as one all-or-nothing object. `formatOutputNotice` already renders
+ * each as its own notice line, so a malformed `diagnostics` must not take a
+ * valid `truncation` down with it: the ACP mapper's `isDisplayReRendered`
+ * reads `meta.truncation`/`meta.limits.columnTruncated` as a producer's own
+ * signal that a result is a display re-render (column truncation, head/tail
+ * elision) rather than new output, and losing that signal to an unrelated
+ * sibling's malformed shape re-enables a duplicate-delivery bug
+ * (oh-my-pi/oh-my-pi#7078 review 4824091334): a re-rendered body gets diffed
+ * against the raw streamed watermark, finds no overlap, and both fires a
+ * false "[terminal output discontinuity]" notice and resends the whole body
+ * a second time.
+ */
+function isValidTruncationMeta(value: unknown): value is TruncationMeta {
+	if (!isRecord(value)) return false;
+	if (value.direction !== "head" && value.direction !== "tail" && value.direction !== "middle") return false;
+	if (value.truncatedBy !== "lines" && value.truncatedBy !== "bytes" && value.truncatedBy !== "middle") return false;
+	for (const key of [
+		"totalLines",
+		"totalBytes",
+		"outputLines",
+		"outputBytes",
+	] as const satisfies readonly (keyof TruncationMeta)[]) {
+		if (!isFiniteNumber(value[key])) return false;
+	}
+	for (const key of [
+		"maxBytes",
+		"elidedBytes",
+		"elidedLines",
+		"nextOffset",
+	] as const satisfies readonly (keyof TruncationMeta)[]) {
+		if (value[key] !== undefined && !isFiniteNumber(value[key])) return false;
+	}
+	for (const key of ["shownRange", "headRange", "tailRange"] as const satisfies readonly (keyof TruncationMeta)[]) {
+		if (value[key] !== undefined && !isLineRange(value[key])) return false;
+	}
+	return value.artifactId === undefined || typeof value.artifactId === "string";
+}
+
+function isValidSourceMeta(value: unknown): value is SourceMeta {
+	return (
+		isRecord(value) &&
+		typeof value.value === "string" &&
+		(value.type === "path" || value.type === "url" || value.type === "internal")
+	);
+}
+
+function isValidDiagnosticMeta(value: unknown): value is DiagnosticMeta {
+	return (
+		isRecord(value) &&
+		typeof value.summary === "string" &&
+		Array.isArray(value.messages) &&
+		value.messages.every(message => typeof message === "string")
+	);
+}
+
+function isValidLimitEntry(value: unknown): value is { reached: number; suggestion: number } {
+	return isRecord(value) && isFiniteNumber(value.reached) && isFiniteNumber(value.suggestion);
+}
+
+/** Rebuilds `limits` field-by-field: a malformed `matchLimit` must not discard a valid `columnTruncated`. */
+function sanitizeLimitsMeta(value: unknown): LimitsMeta | undefined {
+	if (!isRecord(value)) return undefined;
+	const limits: LimitsMeta = {};
+	for (const key of ["matchLimit", "resultLimit", "headLimit"] as const satisfies readonly (keyof LimitsMeta)[]) {
+		if (isValidLimitEntry(value[key])) limits[key] = value[key];
+	}
+	if (isRecord(value.columnTruncated) && isFiniteNumber(value.columnTruncated.maxColumn)) {
+		limits.columnTruncated = { maxColumn: value.columnTruncated.maxColumn };
+	}
+	return Object.keys(limits).length > 0 ? limits : undefined;
+}
+
+/**
+ * Rebuilds an `OutputMeta` field-by-field from an unvalidated value (an
+ * extension/MCP tool's `details.meta`, a corrupted `session/load` replay
+ * record), dropping only the siblings that fail their own independent
+ * check. The sole read path for any consumer of a producer-supplied `meta`
+ * that didn't come from {@link OutputMetaBuilder}.
+ */
+export function sanitizeOutputMeta(value: unknown): OutputMeta | undefined {
+	if (!isRecord(value)) return undefined;
+	const meta: OutputMeta = {};
+	if (isValidTruncationMeta(value.truncation)) meta.truncation = value.truncation;
+	if (isValidSourceMeta(value.source)) meta.source = value.source;
+	if (isValidDiagnosticMeta(value.diagnostics)) meta.diagnostics = value.diagnostics;
+	const limits = sanitizeLimitsMeta(value.limits);
+	if (limits) meta.limits = limits;
+	return meta;
+}
+
+// =============================================================================
 // OutputMetaBuilder - Fluent API for building OutputMeta
 // =============================================================================
 

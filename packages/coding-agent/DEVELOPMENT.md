@@ -61,7 +61,7 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 | Directory | Responsibility | Reference |
 |---|---|---|
 | `cli/`, `commands/`, `commit/`, `export/` | Command-line adapters and concrete subcommands | — |
-| `modes/` | Interactive TUI, print, and RPC runtimes | [rpc.md](../../docs/rpc.md), [sdk.md](../../docs/sdk.md) |
+| `modes/` | Interactive TUI, print, RPC, and ACP runtimes | [rpc.md](../../docs/rpc.md), [sdk.md](../../docs/sdk.md); ACP: `modes/acp/`, tested via `test/acp-*.test.ts` (in-process) and [acp-probe](https://github.com/marton78/acp-probe) (real stdio transport — see Testing Guidance in the root `AGENTS.md`) |
 | `session/` | `AgentSession`, JSONL session tree, storage, history | [session.md](../../docs/session.md), [session-tree-plan.md](../../docs/session-tree-plan.md) |
 | `config/`, `registry/`, `secrets/` | Settings, model/provider registry, secret obfuscation | [settings.md](../../docs/settings.md), [config-usage.md](../../docs/config-usage.md), [models.md](../../docs/models.md), [secrets.md](../../docs/secrets.md) |
 | `tools/` | Built-in tool implementations + render/meta helpers | [custom-tools.md](../../docs/custom-tools.md), [`tools/`](../../docs/tools/) |

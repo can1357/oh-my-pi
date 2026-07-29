@@ -85,10 +85,14 @@ import {
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
+	buildMetaTerminalOutput,
+	buildTerminalMeta,
 	extractAssistantMessageText,
 	mapAgentSessionEventToAcpSessionUpdates,
 	normalizeReplayToolArguments,
+	wantsMetaTerminal,
 } from "./acp-event-mapper";
+import { assertAcpUpdateInvariants } from "./acp-update-invariants";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
 
 const ACP_DEFAULT_MODE_ID = "default";
@@ -176,6 +180,11 @@ type ManagedSessionRecord = {
 	liveMessageId: string | undefined;
 	liveMessageProgress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined;
 	toolArgsById: Map<string, unknown>;
+	// Cumulative meta-terminal output already delivered per tool call, so
+	// `mapAgentSessionEventToAcpSessionUpdates` can emit only the new bytes on
+	// each `tool_execution_update`/`tool_execution_end` instead of resending
+	// everything shown so far (see `AcpEventMapperOptions.getMetaTerminalSent`).
+	metaTerminalSent: Map<string, string>;
 	extensionsConfigured: boolean;
 	// Installed inside `#scheduleBootstrapUpdates` (post-race-guard); released
 	// in `#disposeSessionRecord`. Lives independent of any prompt turn.
@@ -624,6 +633,35 @@ export class AcpAgent implements Agent {
 		this.#createSession = createSession;
 	}
 
+	/**
+	 * Whether the connected client advertised the display-only terminal
+	 * `_meta` convention (see `wantsMetaTerminal` in acp-event-mapper.ts) at
+	 * `initialize`. Shared by every live/replay event-mapping call site so
+	 * eval/replayed-command output can render as a rich terminal block
+	 * instead of falling back to fenced text.
+	 */
+	#terminalMetaCapable(): boolean {
+		return this.#clientCapabilities?._meta?.terminal_output === true;
+	}
+
+	/**
+	 * Single emit chokepoint for every outbound `session/update` — checks the
+	 * finished frame against `checkAcpUpdateInvariants` (a terminal content item
+	 * must be the update's only content item; an `_meta.terminal_*` key requires
+	 * the negotiated capability; a completed status must not sit above a nonzero
+	 * exit code) before forwarding it unchanged. See
+	 * `acp-update-invariants.ts` for why this
+	 * needs to run on the assembled frame rather than at each builder: a
+	 * violation is often only visible after content arrays from different
+	 * builders are merged. Returns the connection's promise directly (not
+	 * `async`) so callers that need the delivery promise itself (see the
+	 * `agent_message_chunk` streaming path) keep the same timing.
+	 */
+	#sendUpdate(notification: SessionNotification): Promise<void> {
+		assertAcpUpdateInvariants(notification, { terminalMetaCapable: this.#terminalMetaCapable() });
+		return this.#connection.sessionUpdate(notification);
+	}
+
 	setCancelCleanupTimeoutForTesting(timeoutMs: number): void {
 		this.#cancelCleanupTimeoutMs = Math.max(1, timeoutMs);
 	}
@@ -763,7 +801,7 @@ export class AcpAgent implements Agent {
 	async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
 		const record = this.#getSessionRecord(params.sessionId);
 		this.#applyModeChange(record.session, params.modeId);
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId: record.session.sessionId,
 			update: this.#buildCurrentModeUpdate(record.session),
 		});
@@ -795,7 +833,7 @@ export class AcpAgent implements Agent {
 		// `current_mode_update` notification that `setSessionMode` emits so
 		// ACP clients tracking session-mode state see a consistent transition.
 		if (params.configId === MODE_CONFIG_ID) {
-			await this.#connection.sessionUpdate({
+			await this.#sendUpdate({
 				sessionId: record.session.sessionId,
 				update: this.#buildCurrentModeUpdate(record.session),
 			});
@@ -985,7 +1023,7 @@ export class AcpAgent implements Agent {
 				await this.#waitForPromptEventHandlers(record);
 			},
 			notifyTitleChanged: async () => {
-				await this.#connection.sessionUpdate({
+				await this.#sendUpdate({
 					sessionId: record.session.sessionId,
 					update: {
 						sessionUpdate: "session_info_update",
@@ -1350,6 +1388,7 @@ export class AcpAgent implements Agent {
 			liveMessageId: undefined,
 			liveMessageProgress: undefined,
 			toolArgsById: new Map(),
+			metaTerminalSent: new Map(),
 			extensionsConfigured: false,
 			closedError: undefined,
 			promptEventHandlers: new Set(),
@@ -1440,8 +1479,12 @@ export class AcpAgent implements Agent {
 			getToolArgs: toolCallId => record.toolArgsById.get(toolCallId),
 			cwd: record.session.sessionManager.getCwd(),
 			resolveImageData: resolveImageDataForAcp,
+			terminalMetaCapable: this.#terminalMetaCapable(),
+			realTerminalCapable: this.#clientCapabilities?.terminal === true,
+			getMetaTerminalSent: toolCallId => record.metaTerminalSent.get(toolCallId),
+			setMetaTerminalSent: (toolCallId, text) => record.metaTerminalSent.set(toolCallId, text),
 		})) {
-			const delivery = this.#connection.sessionUpdate(notification);
+			const delivery = this.#sendUpdate(notification);
 			if (streamedAssistantError) {
 				// Resolves true only once the error chunk actually reached the
 				// client — a failed delivery keeps the agent_end fallback armed.
@@ -1456,6 +1499,7 @@ export class AcpAgent implements Agent {
 		}
 		if (event.type === "tool_execution_end") {
 			record.toolArgsById.delete(event.toolCallId);
+			record.metaTerminalSent.delete(event.toolCallId);
 		}
 		this.#clearLiveAssistantMessageAfterEvent(record, event);
 
@@ -1508,7 +1552,7 @@ export class AcpAgent implements Agent {
 			return;
 		}
 		progress.textEmitted = true;
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId: record.session.sessionId,
 			update: {
 				sessionUpdate: "agent_message_chunk",
@@ -1546,7 +1590,7 @@ export class AcpAgent implements Agent {
 		if (!errorMessage || isSilentAbort(lastAssistant)) {
 			return;
 		}
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId: record.session.sessionId,
 			update: {
 				sessionUpdate: "agent_message_chunk",
@@ -1666,7 +1710,7 @@ export class AcpAgent implements Agent {
 		if (!text) {
 			return;
 		}
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId: record.session.sessionId,
 			update: {
 				sessionUpdate: "agent_message_chunk",
@@ -1725,7 +1769,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async #pushConfigOptionUpdateForSession(session: AgentSession): Promise<void> {
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId: session.sessionId,
 			update: {
 				sessionUpdate: "config_option_update",
@@ -1924,7 +1968,7 @@ export class AcpAgent implements Agent {
 		session.setPlanProposalHandler?.(null);
 		session.setPlanModeState(undefined);
 		try {
-			await this.#connection.sessionUpdate({
+			await this.#sendUpdate({
 				sessionId: session.sessionId,
 				update: this.#buildCurrentModeUpdate(session),
 			});
@@ -2093,14 +2137,14 @@ export class AcpAgent implements Agent {
 		if (this.#sessions.get(sessionId) !== record) {
 			return;
 		}
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId,
 			update: {
 				sessionUpdate: "available_commands_update",
 				availableCommands: await this.#buildAvailableCommands(record.session),
 			},
 		});
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId,
 			update: {
 				sessionUpdate: "session_info_update",
@@ -2111,7 +2155,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async #emitAvailableCommandsUpdate(record: ManagedSessionRecord): Promise<void> {
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId: record.session.sessionId,
 			update: {
 				sessionUpdate: "available_commands_update",
@@ -2148,7 +2192,7 @@ export class AcpAgent implements Agent {
 		const contextUsage = record.session.getContextUsage();
 		if (contextUsage) {
 			const usageStats = record.session.sessionManager.getUsageStatistics();
-			await this.#connection.sessionUpdate({
+			await this.#sendUpdate({
 				sessionId,
 				update: {
 					sessionUpdate: "usage_update",
@@ -2159,7 +2203,7 @@ export class AcpAgent implements Agent {
 			});
 		}
 
-		await this.#connection.sessionUpdate({
+		await this.#sendUpdate({
 			sessionId,
 			update: {
 				sessionUpdate: "session_info_update",
@@ -2248,16 +2292,122 @@ export class AcpAgent implements Agent {
 		const cwd = record.session.sessionManager.getCwd();
 		const replayedToolCallIds = new Set<string>();
 		const replayedToolCallArgs = new Map<string, unknown>();
-		for (const message of record.session.sessionManager.buildSessionContext().messages as ReplayableMessage[]) {
+		// Ids that actually got a `tool_call` notification sent to the client
+		// (i.e. `mapAgentSessionEventToAcpSessionUpdates` returned a non-empty
+		// start). Distinct from `replayedToolCallIds`, which also tracks ids
+		// suppressed on purpose (`isInternalHubMessageTool`) so `#replayToolResult`
+		// never re-attempts their start through its own, narrower args
+		// reconstruction (`#buildReplayToolArgs` only knows `path`, so it can't
+		// re-derive hub args and would wrongly un-suppress them). Only an id in
+		// *this* set was ever announced, so only these can dangle in the
+		// client's eyes — the cleanup loop below must never synthesize a
+		// `tool_call_update` for a `toolCallId` the client was never told about.
+		const announcedToolCallIds = new Set<string>();
+		// toolCallId -> toolName for every id in `announcedToolCallIds`, so the
+		// dangling-cleanup loop below knows whether a stuck call registered a
+		// display-only meta terminal (`wantsMetaTerminal`) at its `tool_call`
+		// start and therefore owes that terminal a matching `terminal_exit` —
+		// otherwise the embedded terminal card is left permanently unterminated
+		// even though the tool call itself is marked `failed`.
+		const announcedToolNames = new Map<string, string>();
+		// Ids that reached a persisted `toolResult` message during replay. Any
+		// id left in `announcedToolCallIds` but not here was started (assistant
+		// turn persisted) but never finished — the process was killed before
+		// its result landed. `keepDanglingToolCalls` (below) is what makes such
+		// a call replay at all instead of being silently dropped; see the
+		// synthesized `failed` update after the loop for why it can't stay
+		// `pending` forever.
+		const resolvedToolCallIds = new Set<string>();
+		// `buildSessionContext()` (the default) builds the *LLM* context: it
+		// collapses pre-compaction history behind a summary and silently strips
+		// tool calls left dangling by an interrupted/killed process (no
+		// persisted result yet) — exactly wrong for reconstructing what a human
+		// should see on `session/load`. `buildTranscriptSessionContext` is the
+		// dedicated full-fidelity display builder (the same one `--resume`'s
+		// initial TUI redraw uses): every entry in chronological order,
+		// compactions inline, and `keepDanglingToolCalls` keeps a still-running
+		// call visible as pending instead of erasing the box entirely.
+		const context = record.session.buildTranscriptSessionContext({ keepDanglingToolCalls: true });
+		for (const message of context.messages as ReplayableMessage[]) {
 			for (const notification of this.#messageToReplayNotifications(
 				record.session.sessionId,
 				message,
 				cwd,
 				replayedToolCallIds,
 				replayedToolCallArgs,
+				announcedToolCallIds,
+				announcedToolNames,
+				resolvedToolCallIds,
 			)) {
-				await this.#connection.sessionUpdate(notification);
+				await this.#sendUpdate(notification);
 			}
+		}
+		// `keepDanglingToolCalls` is only correct for a *live* stream, where the
+		// still-running call really will resolve later (see `ui-helpers.ts`'s
+		// `viewSession.isStreaming` gate for the TUI's equivalent). A loaded,
+		// no-longer-running session has no live execution left to finish a
+		// dangling call, but the mapper's `tool_execution_start` alone leaves
+		// Zed's card in `Pending` — a state Zed only ever clears on cancel or
+		// error (`acp_thread.rs`'s `mark_pending_entries_as_canceled`), never at
+		// normal turn end, so it would spin forever. ACP v1 has no `canceled`
+		// tool-call status, so `failed` is the terminal state available; this
+		// keeps the call visible (why `keepDanglingToolCalls` is used at all)
+		// without a permanent spinner.
+		for (const toolCallId of announcedToolCallIds) {
+			if (resolvedToolCallIds.has(toolCallId)) continue;
+			const toolName = announcedToolNames.get(toolCallId);
+			const explanation = "Interrupted: no result recorded before the process ended.";
+			// A dangling call that registered a display-only meta terminal at its
+			// `tool_call` start (see `buildToolCallStartUpdate`) owes that terminal
+			// a `terminal_exit` — without one Zed's embedded terminal card stays
+			// open forever even though the tool call itself now reads `failed`.
+			// Zed's `has_terminals` (`thread_view.rs`) routes a terminal-bearing
+			// tool call exclusively through the terminal card, so the sibling
+			// `content` text below never renders for one of these — the
+			// explanation must ride as `terminal_output` bytes on the same
+			// terminal id instead, sent before the `terminal_exit`.
+			// `args` is `undefined` here deliberately: this options object never sets
+			// `realTerminalCapable`, so `wantsMetaTerminal` always resolves via its
+			// `realTerminalCapable !== true` branch regardless of whether the
+			// original (now-dangling) call requested `pty` — the pty-vs-real-terminal
+			// distinction only matters when `realTerminalCapable` could otherwise be
+			// `true`.
+			const isMetaTerminal =
+				!!toolName && wantsMetaTerminal(toolName, undefined, { terminalMetaCapable: this.#terminalMetaCapable() });
+			const metaTerminalMeta = isMetaTerminal
+				? buildTerminalMeta(
+						{ terminalMetaCapable: this.#terminalMetaCapable() },
+						{
+							// `replayedToolCallArgs` (not `args` above) on purpose: an
+							// interrupted `eval` call's source has nowhere else to render
+							// once this cleanup fires (see `buildMetaTerminalOutput`) — the
+							// tool call's own args from the persisted transcript are the
+							// only place it survives. `getMetaTerminalSent` is empty for a
+							// dangling call (it never reached a live `tool_execution_update`/
+							// `_end` during replay), so the header is included exactly once.
+							output: buildMetaTerminalOutput(
+								toolCallId,
+								toolName ?? "",
+								replayedToolCallArgs.get(toolCallId),
+								`\n${explanation}\n`,
+								{ getMetaTerminalSent: id => record.metaTerminalSent.get(id) },
+							),
+							exit: { terminal_id: toolCallId, exit_code: null, signal: null },
+						},
+					)
+				: undefined;
+			await this.#sendUpdate({
+				sessionId: record.session.sessionId,
+				update: {
+					sessionUpdate: "tool_call_update",
+					toolCallId,
+					status: "failed",
+					...(isMetaTerminal
+						? {}
+						: { content: [{ type: "content", content: { type: "text", text: explanation } }] }),
+					...(metaTerminalMeta ? { _meta: metaTerminalMeta } : {}),
+				},
+			});
 		}
 	}
 
@@ -2267,9 +2417,20 @@ export class AcpAgent implements Agent {
 		cwd: string,
 		replayedToolCallIds: Set<string>,
 		replayedToolCallArgs: Map<string, unknown>,
+		announcedToolCallIds: Set<string>,
+		announcedToolNames: Map<string, string>,
+		resolvedToolCallIds: Set<string>,
 	): SessionNotification[] {
 		if (message.role === "assistant") {
-			return this.#replayAssistantMessage(sessionId, message, cwd, replayedToolCallIds, replayedToolCallArgs);
+			return this.#replayAssistantMessage(
+				sessionId,
+				message,
+				cwd,
+				replayedToolCallIds,
+				replayedToolCallArgs,
+				announcedToolCallIds,
+				announcedToolNames,
+			);
 		}
 		if (
 			message.role === "user" ||
@@ -2289,6 +2450,7 @@ export class AcpAgent implements Agent {
 			typeof message.toolCallId === "string" &&
 			typeof message.toolName === "string"
 		) {
+			resolvedToolCallIds.add(message.toolCallId);
 			return this.#replayToolResult(
 				sessionId,
 				cwd,
@@ -2324,6 +2486,8 @@ export class AcpAgent implements Agent {
 		cwd: string,
 		replayedToolCallIds: Set<string>,
 		replayedToolCallArgs: Map<string, unknown>,
+		announcedToolCallIds: Set<string>,
+		announcedToolNames: Map<string, string>,
 	): SessionNotification[] {
 		const notifications: SessionNotification[] = [];
 		const messageId = crypto.randomUUID();
@@ -2380,20 +2544,36 @@ export class AcpAgent implements Agent {
 					typeof toolItem.name === "string"
 				) {
 					const args = this.#buildReplayAssistantToolArgs(toolItem);
-					notifications.push(
-						...mapAgentSessionEventToAcpSessionUpdates(
-							{
-								type: "tool_execution_start",
-								toolCallId: toolItem.id,
-								toolName: toolItem.name,
-								args,
-							},
-							sessionId,
-							{ cwd },
-						),
+					const startNotifications = mapAgentSessionEventToAcpSessionUpdates(
+						{
+							type: "tool_execution_start",
+							toolCallId: toolItem.id,
+							toolName: toolItem.name,
+							args,
+						},
+						sessionId,
+						// No live client terminal can exist for a call replayed from a
+						// persisted transcript (see `#replayToolResult`'s matching note),
+						// so `realTerminalCapable` is forced `false` here too.
+						{ cwd, terminalMetaCapable: this.#terminalMetaCapable(), realTerminalCapable: false },
 					);
+					notifications.push(...startNotifications);
+					// Always dedup-track the id for `includeStart` below, even when
+					// suppressed (`isInternalHubMessageTool`) — `#replayToolResult`'s
+					// own args reconstruction (`#buildReplayToolArgs`, `path`-only)
+					// can't re-derive hub args and would wrongly un-suppress a start
+					// already (correctly) handled here. Only track in
+					// `announcedToolCallIds` when a `tool_call` notification actually
+					// went out — that's the set the dangling-cleanup loop in
+					// `#replaySessionHistory` walks, so it never synthesizes a
+					// `tool_call_update` for a `toolCallId` the client was never told
+					// about.
 					replayedToolCallIds.add(toolItem.id);
 					replayedToolCallArgs.set(toolItem.id, args);
+					if (startNotifications.length > 0) {
+						announcedToolCallIds.add(toolItem.id);
+						announcedToolNames.set(toolItem.id, toolItem.name);
+					}
 				}
 			}
 		}
@@ -2444,15 +2624,30 @@ export class AcpAgent implements Agent {
 				errorMessage: message.errorMessage,
 			},
 		};
+		const terminalMetaCapable = this.#terminalMetaCapable();
 		const notifications = mapAgentSessionEventToAcpSessionUpdates(endEvent, sessionId, {
 			cwd,
 			getToolArgs: toolCallId => (toolCallId === message.toolCallId ? options.toolArgs : undefined),
 			resolveImageData: (data, _mimeType) => resolveImageDataSync(this.#blobs, data),
+			// Persisted `details.terminalId`s name terminals from the connection that
+			// ran the command. This client never created them and cannot resolve
+			// them, so replayed commands must render their recorded output as text
+			// (or, when the client supports it, the meta-terminal convention below).
+			isTerminalLive: () => false,
+			terminalMetaCapable,
+			realTerminalCapable: false,
 		});
 		if (options.includeStart === false) {
 			return notifications;
 		}
-		return [...mapAgentSessionEventToAcpSessionUpdates(startEvent, sessionId, { cwd }), ...notifications];
+		return [
+			...mapAgentSessionEventToAcpSessionUpdates(startEvent, sessionId, {
+				cwd,
+				terminalMetaCapable,
+				realTerminalCapable: false,
+			}),
+			...notifications,
+		];
 	}
 
 	#buildReplayToolArgs(details: unknown): { path?: string } {

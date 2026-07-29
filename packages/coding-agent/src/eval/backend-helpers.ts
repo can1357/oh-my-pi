@@ -32,6 +32,7 @@ export function toExecutorBackendResult(result: {
 	outputLines: number;
 	outputBytes: number;
 	displayOutputs: EvalDisplayOutput[];
+	annotation?: string;
 }): ExecutorBackendResult {
 	return {
 		output: result.output,
@@ -44,5 +45,6 @@ export function toExecutorBackendResult(result: {
 		outputLines: result.outputLines,
 		outputBytes: result.outputBytes,
 		displayOutputs: result.displayOutputs,
+		annotation: result.annotation,
 	};
 }

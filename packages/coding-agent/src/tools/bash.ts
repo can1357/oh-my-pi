@@ -28,7 +28,13 @@ import type {
 	ClientBridgeTerminalHandle,
 	ClientBridgeTerminalOutput,
 } from "../session/client-bridge";
-import { DEFAULT_MAX_BYTES, enforceInlineByteCap, streamTailUpdates, TailBuffer } from "../session/streaming-output";
+import {
+	DEFAULT_MAX_BYTES,
+	enforceInlineByteCap,
+	formatRawOutputArtifactNotice,
+	streamTailUpdates,
+	TailBuffer,
+} from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent, outputBlockContentWidth } from "../tui/output-block";
 import { getSixelLineMask } from "../utils/sixel";
@@ -353,6 +359,14 @@ export interface BashToolDetails {
 	/** True when the command was killed by its timeout deadline (not a failure). */
 	timedOut?: boolean;
 	terminalId?: string;
+	/**
+	 * Agent-synthesized notes appended after the raw output (wall time,
+	 * `(output truncated)`, exit code, `[raw output: artifact://N]`). A renderer
+	 * that shows the raw stream some other way — an ACP client-bridge terminal
+	 * replaces the inline text entirely — surfaces these separately so the exit
+	 * code and the artifact pointer survive.
+	 */
+	notices?: readonly string[];
 	async?: {
 		state: "running" | "completed" | "failed";
 		jobId: string;
@@ -682,6 +696,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const failedExit = exitCode !== undefined && exitCode !== 0;
 
 		const outputLines = [this.#formatResultOutput(result)];
+		// Every notice appended below is mirrored into `details.notices`: they are
+		// agent-synthesized, absent from the process byte stream, and would be lost
+		// by a renderer that replaces the inline text with a live terminal widget.
 		const notices: string[] = [];
 		if (options.wallTimeMs !== undefined) {
 			notices.push(formatWallTimeNotice(options.wallTimeMs));
@@ -692,7 +709,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			}
 		}
 		if (notices.length > 0) outputLines.push("", ...notices);
-		if (failedExit) outputLines.push("", formatExitCodeNotice(exitCode));
+		if (failedExit) {
+			const exitNotice = formatExitCodeNotice(exitCode);
+			notices.push(exitNotice);
+			outputLines.push("", exitNotice);
+		}
 		const outputText = outputLines.join("\n");
 
 		// Timeouts are not failures — the command ran its course. Return an error
@@ -728,21 +749,41 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// sink spilled, its artifact already holds the full raw stream — reuse
 		// that id instead of saving a second (already-truncated) copy, so the
 		// `[raw output: artifact://N]` footer and the truncation notice agree.
+		let spilledArtifactId: string | undefined;
 		const inlineCap = {
 			maxBytes: resolveInlineByteCapBudget(this.session.settings),
-			saveArtifact: (full: string) => result.artifactId ?? saveBashOriginalArtifact(this.session, full),
+			saveArtifact: async (full: string) => {
+				spilledArtifactId = result.artifactId ?? (await saveBashOriginalArtifact(this.session, full));
+				return spilledArtifactId;
+			},
 		};
 
 		if (isTimeout) {
 			details.timedOut = true;
-			const message =
-				timeoutSec === undefined ? "Command timed out" : `Command timed out after ${timeoutSec} seconds`;
-			// executeBash has already emitted this leading sink notice. PTY output
-			// has not, so provide the LLM-facing annotation exactly once.
-			if (!normalizeResultOutput(result).startsWith(`[${message}]\n`)) {
-				outputLines.push("", `[${message}]`);
+			// `executeBash` bakes this line into `output` itself via
+			// `sink.dump(notice)` (which never streams it through `onChunk`);
+			// the PTY path emits nothing. `result.annotation` distinguishes the
+			// two without re-deriving the wording, so the *text* echo stays
+			// conditional — it must appear exactly once.
+			//
+			// The *structural* mirror is unconditional. `details.notices` is the
+			// only channel a terminal-rendering client has: for a live
+			// client-owned terminal the process bytes went straight to the
+			// terminal and this annotation never did, and for a display-only
+			// meta terminal the mapper classifies an annotation-prefixed final
+			// body as a re-render and sends structured facts alone. Gating this
+			// push on the text branch is what hid the timeout reason from both
+			// (oh-my-pi/oh-my-pi#7078 review r3694816752).
+			const annotation =
+				result.annotation ??
+				`[${timeoutSec === undefined ? "Command timed out" : `Command timed out after ${timeoutSec} seconds`}]`;
+			if (!normalizeResultOutput(result).startsWith(`${annotation}\n`)) {
+				outputLines.push("", annotation);
 			}
+			notices.push(annotation);
 			const timeoutOutputText = await enforceInlineByteCap(outputLines.join("\n"), inlineCap);
+			if (spilledArtifactId) notices.push(formatRawOutputArtifactNotice(spilledArtifactId));
+			if (notices.length > 0) details.notices = notices;
 			return toolResult(details)
 				.text(timeoutOutputText)
 				.truncationFromSummary(result, { direction: "tail" })
@@ -755,6 +796,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 		// No-op for already-bounded output; see `inlineCap` above.
 		const cappedOutputText = await enforceInlineByteCap(outputText, inlineCap);
+		if (spilledArtifactId) notices.push(formatRawOutputArtifactNotice(spilledArtifactId));
+		if (notices.length > 0) details.notices = notices;
 
 		const resultBuilder = toolResult(details)
 			.text(cappedOutputText)
@@ -1221,8 +1264,19 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						outputLines: 0,
 						outputBytes: 0,
 					};
-					this.#throwIfUnfinished(timedOutResult, timeoutSec, this.#formatResultOutput(timedOutResult));
-					throw new ToolError("Command timed out");
+					// Same as every other timeout path (see `#buildCompletedResult`'s
+					// `isTimeout` branch): a timeout is a completed command that
+					// failed, returned as an error *result* carrying its execution
+					// details, not a throw — a throw is turned into
+					// `buildToolErrorResult` (`cursor.ts`), which has no `details`
+					// at all, so every fact a renderer reads structurally (the
+					// timeout annotation and timeout/clamp notices here, plus the
+					// live terminal id below) would be dropped.
+					return this.#buildCompletedResult(timedOutResult, timeoutSec, {
+						requestedTimeoutSec,
+						notices: pendingNotices,
+						wallTimeMs: performance.now() - bridgeWallTimeStart,
+					});
 				}
 
 				handle = createRaced.handle;
@@ -1291,8 +1345,20 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 							outputLines: current.output.length > 0 ? current.output.split("\n").length : 0,
 							outputBytes: current.output.length,
 						};
-						this.#throwIfUnfinished(timedOutResult, timeoutSec, this.#formatResultOutput(timedOutResult));
-						throw new ToolError("Command timed out");
+						// Keep the client-owned terminal id (and the notices) on the
+						// result: the ACP mapper renders this call through that
+						// terminal, and a thrown error carries no `details`, so the
+						// live terminal card would be replaced by a plain text block
+						// at the exact moment the user needs to see why it stopped.
+						const timeoutNotices = current.truncated
+							? ["(output truncated)", ...pendingNotices]
+							: [...pendingNotices];
+						return this.#buildCompletedResult(timedOutResult, timeoutSec, {
+							requestedTimeoutSec,
+							notices: timeoutNotices,
+							terminalId: handle.terminalId,
+							wallTimeMs: performance.now() - bridgeWallTimeStart,
+						});
 					}
 
 					if (raced.kind === "exit") {

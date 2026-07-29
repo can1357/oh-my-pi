@@ -417,9 +417,20 @@ export async function executeLaunch(
 		}
 		if (params.op === "list" && resumedOwner && !resumedDaemonFound) completionLease?.reject(true);
 		else completionLease?.retain();
+		const details = await toolDetails(result, params);
+		// A `start`/`restart` that comes back `failed` is a failed tool call, not a
+		// successful report about a failure: the op didn't produce the process the
+		// caller asked for. The state lives in `details.daemon`, but only the
+		// result-level flag reaches every renderer (`toolResultFailed`) — the TUI
+		// card already derived failure from `daemon.state` itself, while the ACP
+		// mapper showed a success card for the same call. Queries about an
+		// already-failed daemon (`describe`, `logs`, `stop`) succeeded at what they
+		// were asked to do, so they stay non-error.
+		const failed = (details.op === "start" || details.op === "restart") && details.daemon?.state === "failed";
 		return {
 			content: [{ type: "text", text: replaceTabs(toolContent(result, params)) }],
-			details: await toolDetails(result, params),
+			details,
+			...(failed ? { isError: true } : {}),
 		};
 	} catch (error) {
 		if (error instanceof DaemonBrokerRejectedError && owner) {

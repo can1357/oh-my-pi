@@ -614,7 +614,7 @@ it("permission requests report the gated tool call as pending", async () => {
 	expect(bashTool.executeCalls).toBe(1);
 });
 
-it("bash permission requests include execute metadata and command content", async () => {
+it("bash permission requests include execute metadata, no redundant command echo", async () => {
 	const bashTool = makeFakeTool("bash");
 	const requests: ClientBridgePermissionToolCall[] = [];
 	const bridge: ClientBridge = {
@@ -645,8 +645,10 @@ it("bash permission requests include execute metadata and command content", asyn
 		kind: "execute",
 		status: "pending",
 		rawInput: { command: "git status --short" },
-		content: [{ type: "content", content: { type: "text", text: "$ git status --short" } }],
 	});
+	// Matches claude-agent-acp's reference bash permission request: the bare
+	// command is the title, with no separate content block re-echoing it.
+	expect(requests[0].content).toBeUndefined();
 	expect(bashTool.executeCalls).toBe(1);
 });
 

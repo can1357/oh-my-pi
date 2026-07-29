@@ -182,6 +182,7 @@ async function executeApplyPatchPerFile(
 
 	const perFileResults: EditToolPerFileResult[] = [];
 	const contentTexts: string[] = [];
+	const unattemptedPaths: string[] = [];
 	let hasError = false;
 
 	for (let i = 0; i < fileEntries.length; i++) {
@@ -219,12 +220,9 @@ async function executeApplyPatchPerFile(
 				contentTexts.push(`Files already applied: ${appliedPaths}.`);
 			}
 			if (i + 1 < fileEntries.length) {
-				const skippedPaths = fileEntries
-					.slice(i + 1)
-					.map(e => e.path)
-					.join(", ");
+				unattemptedPaths.push(...fileEntries.slice(i + 1).map(e => e.path));
 				contentTexts.push(
-					`Files NOT applied: ${skippedPaths}; re-read the affected files and re-issue only the failed and unapplied files.`,
+					`Files NOT applied: ${unattemptedPaths.join(", ")}; re-read the affected files and re-issue only the failed and unapplied files.`,
 				);
 			}
 			// Stopping early skips the last-entry flush above; finalize the
@@ -253,7 +251,10 @@ async function executeApplyPatchPerFile(
 	// partial application as a successful edit.
 	return createAggregateEditToolResult(
 		joinEditResultText(contentTexts),
-		createAggregateEditDetails({ perFileResults }),
+		createAggregateEditDetails({
+			perFileResults,
+			...(unattemptedPaths.length > 0 ? { unattemptedPaths } : {}),
+		}),
 		hasError,
 	);
 }
@@ -400,6 +401,21 @@ function extractApprovalPaths(args: unknown, mode: EditMode): string[] {
 	return typeof targetPath === "string" && targetPath.length > 0 ? [targetPath] : [];
 }
 
+/**
+ * The edit tool's target file path: a top-level `path` arg for patch/replace
+ * modes, or embedded in the `input` payload for hashline (`[path#TAG]`
+ * header) / apply_patch (`*** Update File: path`) modes. Returns `undefined`
+ * when no path can be resolved; callers needing a display fallback (e.g.
+ * approval details' `"(unknown)"`) add their own sentinel.
+ */
+export function parseEditTargetPath(args: unknown): string | undefined {
+	for (const mode of ["sloppy", "hashline", "apply_patch"] as const) {
+		const [first] = extractApprovalPaths(args, mode);
+		if (first) return first;
+	}
+	return undefined;
+}
+
 export class EditTool implements AgentTool<TInput> {
 	readonly approval = (args: unknown) => {
 		// Internal-resource edits (memory://, skill://, local://, …) are read-tier,
@@ -416,6 +432,7 @@ export class EditTool implements AgentTool<TInput> {
 		if (targets.length === 0) return ["File: (unknown)"];
 		return targets.map(target => `File: ${truncateForPrompt(target)}`);
 	};
+
 	readonly name = "edit";
 	readonly label = "Edit";
 	readonly loadMode = "essential";

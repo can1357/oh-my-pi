@@ -66,6 +66,8 @@ export interface JuliaResult {
 	outputBytes: number;
 	displayOutputs: EvalDisplayOutput[];
 	stdinRequested: boolean;
+	/** See `KernelExecutionResult`'s doc comment (executor-base.ts). */
+	annotation?: string;
 }
 
 class JuliaExecutionCancelledError extends Error {

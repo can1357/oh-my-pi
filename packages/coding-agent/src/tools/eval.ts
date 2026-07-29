@@ -691,6 +691,14 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			const jsonOutputs: unknown[] = [];
 			const images: ImageContent[] = [];
 			const statusEvents: EvalStatusEvent[] = [];
+			// Executor-synthesized notes (kernel timeout/kill, a stdin request)
+			// mirrored from `ExecutorBackendResult.annotation`: `dump(notice)`
+			// bakes them into the model-facing `output` text but never streams
+			// them through `onChunk`, so the ACP terminal path — which reads only
+			// structured facts — would otherwise lose the reason a cell stopped
+			// (oh-my-pi/oh-my-pi#7078 review r3693523855). Same convention as
+			// `BashToolDetails.notices`.
+			const cellNotices: string[] = [];
 
 			const cellResults: EvalCellResult[] = cells.map(cell => ({
 				index: cell.index,
@@ -705,11 +713,27 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			// appended to its rendered `output` live so a long-running cell (e.g. a
 			// sleep loop) shows progress instead of nothing until it returns. A
 			// dedicated per-cell tail buffer keeps attribution correct and avoids
-			// double-counting against the aggregate `tailBuffer`; on completion the
-			// authoritative `cellResult.output` (below) overwrites this live tail.
+			// double-counting against the aggregate `tailBuffer`. `tailBuffer` is
+			// append-only (it backs a live progress stream, never replaced): at
+			// completion below, only the parts of `cellOutput` never streamed via
+			// `OutputSink.onChunk` (display/image notes) are appended — re-adding
+			// the already-streamed stdout would duplicate it.
 			let activeLiveCell: { result: EvalCellResult; buf: TailBuffer } | undefined;
-
+			// Mirrors the `"\n\n"` join between entries of `cellOutputs` below
+			// (the eventual authoritative `combinedOutput`) so the *streamed*
+			// tail — the live ACP meta-terminal watches this cumulative text —
+			// never diverges from what the final result actually contains. Set
+			// right after a cell contributes non-empty output (see
+			// `cellOutputs.push` below); consumed by the next contribution,
+			// whichever cell that turns out to be, so a cell that itself
+			// produces nothing doesn't insert a spurious blank gap.
+			let awaitingCellSeparator = false;
 			const appendTail = (text: string) => {
+				if (!text) return;
+				if (awaitingCellSeparator) {
+					tailBuffer.append("\n\n");
+					awaitingCellSeparator = false;
+				}
 				tailBuffer.append(text);
 			};
 
@@ -733,6 +757,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				}
 				if (notice) {
 					details.notice = notice;
+				}
+				if (cellNotices.length > 0) {
+					details.notices = [...cellNotices];
 				}
 				return details;
 			};
@@ -828,6 +855,10 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					activeLiveCell = undefined;
 				}
 				const durationMs = Date.now() - startTime;
+				// Already bracketed by `OutputSink.dump` and spelled exactly as
+				// the copy baked into `output`, so the mirror can't drift from
+				// the text (see `OutputSummary.annotation`).
+				if (result.annotation) cellNotices.push(result.annotation);
 
 				const cellStatusEvents: EvalStatusEvent[] = [];
 				const cellDisplayOutputs: EvalDisplayOutput[] = [];
@@ -889,7 +920,10 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 				if (cellOutput) {
 					cellOutputs.push(cellOutput);
-					appendTail(cellOutput);
+					if (visibleDisplayText) {
+						appendTail(stdoutTrimmed ? `\n\n${visibleDisplayText}` : visibleDisplayText);
+					}
+					awaitingCellSeparator = true;
 				}
 
 				if (result.cancelled) {
@@ -909,10 +943,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						isError: true,
 					};
 					if (notice) details.notice = notice;
+					if (cellNotices.length > 0) details.notices = [...cellNotices];
 
 					return toolResult(details)
 						.content([{ type: "text", text: outputText }, ...images])
 						.truncationFromSummary(summaryForMeta, { direction: "tail" })
+						.error()
 						.done();
 				}
 
@@ -920,9 +956,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					cellResult.status = "error";
 					pushUpdate();
 					const combinedOutput = cellOutputs.join("\n\n");
-					const outputText = combinedOutput
-						? `${combinedOutput}\n\nCommand exited with code ${result.exitCode}`
-						: `Command exited with code ${result.exitCode}`;
+					const exitNotice = `Command exited with code ${result.exitCode}`;
+					const outputText = combinedOutput ? `${combinedOutput}\n\n${exitNotice}` : exitNotice;
+					cellNotices.push(exitNotice);
 
 					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
 					const details: EvalToolDetails = {
@@ -934,10 +970,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						isError: true,
 					};
 					if (notice) details.notice = notice;
+					if (cellNotices.length > 0) details.notices = [...cellNotices];
 
 					return toolResult(details)
 						.content([{ type: "text", text: outputText }, ...images])
 						.truncationFromSummary(summaryForMeta, { direction: "tail" })
+						.error()
 						.done();
 				}
 
@@ -962,6 +1000,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
 			};
 			if (notice) details.notice = notice;
+			if (cellNotices.length > 0) details.notices = [...cellNotices];
 
 			return toolResult(details)
 				.content([{ type: "text", text: outputText }, ...images])

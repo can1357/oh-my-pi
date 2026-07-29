@@ -51,4 +51,12 @@ export interface EvalToolDetails {
 		jobId: string;
 		type: "eval";
 	};
+	/**
+	 * Agent-synthesized notes (kernel timeout/kill, a stdin request) that are
+	 * absent from the process byte stream — mirrored from
+	 * `ExecutorBackendResult.annotation` so the ACP terminal path, which reads
+	 * only structured facts and never the model-facing text, doesn't silently
+	 * drop the reason a cell stopped. Same convention as `BashToolDetails.notices`.
+	 */
+	notices?: readonly string[];
 }

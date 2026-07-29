@@ -26,6 +26,7 @@ import * as path from "node:path";
 import { removeSyncWithRetries, withTimeout } from "@oh-my-pi/pi-utils";
 import { MCPManager } from "../src/mcp/manager";
 import type { MCPStdioServerConfig } from "../src/mcp/types";
+import { connectServersAndWaitReady } from "./helpers/mcp-connect";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "instructions-mcp.ts");
 const BUN_EXEC = process.execPath;
@@ -44,8 +45,11 @@ describe("owned-manager dispose disconnect is bounded (PR #2839)", () => {
 	it("bounds the owned disconnect when a transport close stalls", async () => {
 		const manager = new MCPManager(workDir);
 		const config: MCPStdioServerConfig = { type: "stdio", command: BUN_EXEC, args: [FIXTURE_PATH] };
-		const result = await manager.connectServers({ instr: config }, {});
-		expect(result.errors.has("instr")).toBe(false);
+		// `connectServers` alone resolves after a fixed 250 ms startup budget,
+		// which a loaded runner routinely outlives — see
+		// `connectServersAndWaitReady`. It also rejects with the real error if
+		// the fixture failed to start, replacing the old `result.errors` check.
+		await connectServersAndWaitReady(manager, { instr: config });
 		expect(manager.getConnectedServers()).toContain("instr");
 
 		const connection = manager.getConnection("instr");

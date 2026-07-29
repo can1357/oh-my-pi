@@ -30,14 +30,27 @@ describe("MCPManager connection status events", () => {
 			args: [FIXTURE_PATH],
 		};
 		const invalid: MCPServerConfig = { type: "stdio", command: "" };
+		const { promise: connected, resolve: markConnected, reject: failConnect } = Promise.withResolvers<void>();
 
 		try {
-			const result = await manager.connectServers({ alpha: success, broken: invalid }, {}, event =>
-				events.push(event),
-			);
+			const result = await manager.connectServers({ alpha: success, broken: invalid }, {}, event => {
+				events.push(event);
+				if (event.type === "connected" && event.serverName === "alpha") markConnected();
+				// Surface a real alpha failure as the test error instead of
+				// waiting out bun's per-test timeout on `connected`.
+				if (event.type === "failed" && event.serverName === "alpha") {
+					failConnect(new Error(`alpha failed to connect: ${event.error}`));
+				}
+			});
 
-			expect(result.connectedServers).toContain("alpha");
 			expect(result.errors.get("broken")).toBe('Server "broken": stdio server requires "command" field');
+			// `connected` is emitted from the background tool-load continuation,
+			// which can land after `connectServers`' fixed 250 ms startup budget
+			// (`STARTUP_TIMEOUT_MS`) on a loaded runner — so neither the event
+			// nor `result.connectedServers` is settled when connectServers
+			// resolves. Await the event; the ordering below is the contract.
+			await connected;
+			expect(manager.getConnectedServers()).toContain("alpha");
 			expect(events).toEqual([
 				{ type: "connecting", serverNames: ["alpha", "broken"] },
 				{ type: "failed", serverName: "broken", error: 'Server "broken": stdio server requires "command" field' },

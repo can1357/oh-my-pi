@@ -66,6 +66,15 @@ export interface BashResult {
 	outputBytes: number;
 	artifactId?: string;
 	workingDir?: string;
+	/**
+	 * `OutputSummary.annotation` — the bracketed `[Command timed out after N
+	 * seconds]`/`[Command cancelled]` line `sink.dump(notice)` prefixed onto
+	 * `output` without ever streaming it through `onChunk`. Arrives here for
+	 * free via the `...(await sink.dump(...))` spreads below; `bash.ts`
+	 * mirrors it into `details.notices` so a renderer that shows a terminal
+	 * instead of this text still learns why the command stopped.
+	 */
+	annotation?: string;
 }
 
 /** POSIX-safe variable name — gates which direnv unsets we inject into the

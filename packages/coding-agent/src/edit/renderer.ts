@@ -29,6 +29,7 @@ import {
 	truncateDiffByHunk,
 } from "../tools/render-utils";
 import type { ToolActivityContext, ToolActivitySummary } from "../tools/renderers";
+import { toolResultFailed } from "../tools/tool-result";
 import {
 	fileHyperlink,
 	framedBlock,
@@ -93,6 +94,8 @@ export interface EditToolDetails {
 	meta?: OutputMeta;
 	/** Per-file results (multi-file edits) */
 	perFileResults?: EditToolPerFileResult[];
+	/** Paths of files never attempted because an earlier file in the same multi-file edit failed first. */
+	unattemptedPaths?: string[];
 	/** Absolute file path for single-file edit results. Required by ACP diff metadata consumers. */
 	path?: string;
 	/** Source-of-truth content before the edit; `undefined` for create operations. */
@@ -950,7 +953,7 @@ function renderSingleFileResult(
 	args?: EditRenderArgs,
 ): Component {
 	const details = result.details;
-	const isError = result.isError ?? (details && "isError" in details ? details.isError : false);
+	const isError = toolResultFailed(result);
 	const edits = Array.isArray(args?.edits) ? args.edits : undefined;
 	const firstEdit = edits?.[0];
 	const hashlineInputSummary = getHashlineInputRenderSummary(args ?? {}, options.renderContext?.editMode);

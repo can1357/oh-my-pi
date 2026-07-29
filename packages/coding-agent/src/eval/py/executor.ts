@@ -133,6 +133,13 @@ export interface PythonResult {
 	displayOutputs: KernelDisplayOutput[];
 	/** Whether stdin was requested */
 	stdinRequested: boolean;
+	/**
+	 * A synthesized note (kernel timeout/kill, or a stdin request) that
+	 * `dump(notice)` already head-prefixed into `output` but never streamed
+	 * through `onChunk` — see {@link KernelExecutionResult}'s doc comment.
+	 * Undefined for a plain success/error completion with nothing synthesized.
+	 */
+	annotation?: string;
 }
 
 // ---------------------------------------------------------------------------

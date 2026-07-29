@@ -13,6 +13,7 @@ import {
 	AcpAgent,
 	createAcpExtensionUiContext,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
+import { EvalSourceDeliveryAuditor } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-update-invariants";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type {
 	AgentSession,
@@ -144,6 +145,9 @@ class FakeAgentSession {
 	refreshSkillsCalls = 0;
 	async refreshSkills(): Promise<void> {
 		this.refreshSkillsCalls++;
+	}
+	buildTranscriptSessionContext(options?: { keepDanglingToolCalls?: boolean; collapseCompactedHistory?: boolean }) {
+		return this.sessionManager.buildSessionContext({ transcript: true, ...options });
 	}
 	planModeState: PlanModeState | undefined;
 	waitForIdleCalls = 0;
@@ -1455,16 +1459,14 @@ describe("ACP agent", () => {
 				rawInput: { command: "npm test" },
 			}),
 		);
-		expect(starts[0]).toEqual(
-			expect.objectContaining({
-				content: expect.arrayContaining([{ type: "content", content: { type: "text", text: "$ npm test" } }]),
-			}),
-		);
+		expect("content" in starts[0]!).toBe(false);
 		expect(starts.some(update => "rawInput" in update && JSON.stringify(update.rawInput) === "{}")).toBe(false);
 		expect(completions).toHaveLength(1);
 		expect(completions[0]).toEqual(
 			expect.objectContaining({
-				content: expect.arrayContaining([{ type: "content", content: { type: "text", text: "tests passed" } }]),
+				content: expect.arrayContaining([
+					{ type: "content", content: { type: "text", text: "```\ntests passed\n```" } },
+				]),
 			}),
 		);
 
@@ -1565,6 +1567,262 @@ describe("ACP agent", () => {
 				rawInput: "raw custom payload",
 			}),
 		);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("marks a dangling replayed tool call failed instead of leaving it pending forever", async () => {
+		// Regression test: a process killed after persisting the assistant's
+		// tool_use but before its result leaves `toolu_dangling` with a
+		// tool_execution_start replay and no matching toolResult message.
+		// `keepDanglingToolCalls` is what makes it replay at all (rather than
+		// being silently dropped) -- but Zed only clears a Pending tool-call
+		// card on cancel/error, never at normal turn end, so leaving it as
+		// `pending` spins forever. It must resolve to `failed`.
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		stored.sessionManager.appendMessage({ role: "user", content: "run something", timestamp: Date.now() });
+		stored.sessionManager.appendMessage({
+			role: "assistant",
+			content: [
+				{ type: "tool_use", id: "toolu_dangling", name: "bash", input: { command: "sleep 100" } },
+			] as unknown as Array<{ type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> }>,
+			api: "openai-responses",
+			provider: "openai",
+			model: TEST_MODELS[1].id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		await harness.agent.loadSession({
+			sessionId: stored.sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
+		});
+
+		const toolUpdates = harness.updates
+			.filter(update => update.sessionId === stored.sessionId)
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === "toolu_dangling",
+			);
+		expect(toolUpdates.at(-1)).toEqual(expect.objectContaining({ status: "failed" }));
+		expect(toolUpdates.some(update => update.sessionUpdate === "tool_call" && update.status === "pending")).toBe(
+			true,
+		);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("sends terminal_exit alongside the failed status for a dangling meta-terminal replay", async () => {
+		// Regression test: a dangling `eval`/`bash` call under the display-only
+		// meta-terminal convention (`_meta.terminal_output` client capability)
+		// registers `terminal_info` at its replayed `tool_call` start. The prior
+		// fix only changed the tool call's `status` to `failed` on cleanup and
+		// never sent the matching `terminal_exit`, leaving the embedded terminal
+		// card permanently unterminated even though the call itself reads failed.
+		//
+		// Follow-up regression (oh-my-pi/oh-my-pi#7078 review 4819042330): Zed's
+		// `has_terminals` (`thread_view.rs`) routes a terminal-bearing tool call
+		// exclusively through the terminal card, so a sibling `content` text
+		// block explaining the interruption never renders — it must ride as
+		// `terminal_output` bytes on the same terminal id instead, and the
+		// sibling `content` block must not be sent at all for this case.
+		//
+		// Second follow-up (oh-my-pi/oh-my-pi#7078 review 4823843361): the
+		// original fixture used `input: { cells: [] }`, an empty eval with no
+		// source — `buildEvalCodeText` degenerates to `undefined` for it, so
+		// the eval-source-loss bug this test exists to catch (the cleanup wrote
+		// only the interruption text, never the interrupted code) was invisible
+		// no matter which shape shipped. A real single-cell `code` argument is
+		// required for this assertion to be capable of failing.
+		const harness = await createHarness();
+		await harness.agent.initialize({
+			protocolVersion: 1,
+			clientCapabilities: { _meta: { terminal_output: true } },
+		} as Parameters<typeof harness.agent.initialize>[0]);
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		stored.sessionManager.appendMessage({ role: "user", content: "run something", timestamp: Date.now() });
+		stored.sessionManager.appendMessage({
+			role: "assistant",
+			content: [
+				{
+					type: "tool_use",
+					id: "toolu_dangling_meta",
+					name: "eval",
+					input: { language: "py", code: "print('interrupted')" },
+				},
+			] as unknown as Array<{ type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> }>,
+			api: "openai-responses",
+			provider: "openai",
+			model: TEST_MODELS[1].id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		await harness.agent.loadSession({
+			sessionId: stored.sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
+		});
+
+		const toolUpdates = harness.updates
+			.filter(update => update.sessionId === stored.sessionId)
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === "toolu_dangling_meta",
+			);
+		const failedUpdate = toolUpdates.at(-1) as {
+			status?: string;
+			content?: unknown;
+			_meta?: {
+				terminal_exit?: { terminal_id: string; exit_code: number | null; signal: null };
+				terminal_output?: { terminal_id: string; data: string };
+			};
+		};
+		expect(failedUpdate.status).toBe("failed");
+		expect(failedUpdate._meta?.terminal_exit).toEqual({
+			terminal_id: "toolu_dangling_meta",
+			exit_code: null,
+			signal: null,
+		});
+		expect(failedUpdate._meta?.terminal_output).toEqual({
+			terminal_id: "toolu_dangling_meta",
+			data: `print('interrupted')\n${"─".repeat(48)}\n\nInterrupted: no result recorded before the process ended.\n`,
+		});
+		expect(failedUpdate.content).toBeUndefined();
+		// Generic guard (rule 13): whatever channel the final frame actually
+		// renders through, the interrupted eval's own source must appear on it
+		// somewhere across the whole replay sequence — not just in this one
+		// hand-picked `terminal_output` assertion above. Feeding the full
+		// `announcedToolCallIds` sequence through the same auditor the mapper
+		// suite uses exercises the actual `#replaySessionHistory` code path
+		// this bug lived in, not a mapper-only reproduction of it.
+		const auditor = new EvalSourceDeliveryAuditor();
+		auditor.expect("toolu_dangling_meta", "eval", { language: "py", code: "print('interrupted')" });
+		const violations = toolUpdates.flatMap(update => auditor.observe({ sessionId: stored.sessionId, update }));
+		expect(violations).toEqual([]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("does not synthesize a failed update for a dangling internal Hub call", async () => {
+		// Regression test: an internal Hub coordination call
+		// (`isInternalHubMessageTool`) never gets a `tool_call` notification --
+		// the mapper returns `[]` for its start. If a process dies before that
+		// call's result is persisted, the dangling-cleanup loop must not
+		// synthesize a `tool_call_update` for a `toolCallId` the client was
+		// never told about in the first place (an orphan update that would also
+		// leak an internal call's existence).
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		stored.sessionManager.appendMessage({ role: "user", content: "Delegate this task", timestamp: Date.now() });
+		stored.sessionManager.appendMessage({
+			...makeAssistantMessage(""),
+			content: [
+				{
+					type: "toolCall",
+					id: "toolu_hub_dangling",
+					name: "hub",
+					arguments: { op: "send", to: "Scout", message: "Private coordination" },
+				},
+			],
+			stopReason: "toolUse",
+		});
+		// No matching toolResult message -- the process died before persisting one.
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		await harness.agent.loadSession({
+			sessionId: stored.sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
+		});
+
+		const hubUpdates = harness.updates
+			.filter(update => update.sessionId === stored.sessionId)
+			.map(notification => notification.update)
+			.filter(update => "toolCallId" in update && update.toolCallId === "toolu_hub_dangling");
+		expect(hubUpdates).toEqual([]);
+
+		harness.abortController.abort();
+	});
+
+	it("does not synthesize a failed update for a tool call that already resolved", async () => {
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		stored.sessionManager.appendMessage({ role: "user", content: "read a file", timestamp: Date.now() });
+		stored.sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "toolu_resolved", name: "read", arguments: { path: "foo.ts" } }],
+			api: "openai-responses",
+			provider: "openai",
+			model: TEST_MODELS[1].id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+		stored.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "toolu_resolved",
+			toolName: "read",
+			content: [{ type: "text", text: "file contents" }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+
+		await harness.agent.loadSession({
+			sessionId: stored.sessionId,
+			cwd: harness.cwdA,
+			mcpServers: [],
+		});
+
+		const toolUpdates = harness.updates
+			.filter(update => update.sessionId === stored.sessionId)
+			.map(notification => notification.update)
+			.filter(
+				(update): update is Extract<typeof update, { toolCallId: string }> =>
+					"toolCallId" in update && update.toolCallId === "toolu_resolved",
+			);
+		expect(toolUpdates.some(update => "status" in update && update.status === "failed")).toBe(false);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

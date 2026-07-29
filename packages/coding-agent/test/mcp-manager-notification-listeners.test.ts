@@ -6,6 +6,7 @@ import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { CUSTOM_NOTIFICATION_METHOD, CUSTOM_NOTIFICATION_PAYLOAD } from "./fixtures/notifications-mcp";
+import { connectServersAndWaitReady } from "./helpers/mcp-connect";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "notifications-mcp.ts");
 const BUN_EXEC = process.execPath;
@@ -71,8 +72,11 @@ describe("MCPManager notification listeners", () => {
 		expect(typeof unsubscribe).toBe("function");
 
 		try {
-			await manager.connectServers({ alpha: serverConfig() }, {});
-
+			// `connectServers` alone resolves after a fixed 250 ms startup
+			// budget, so `connectedServers` is a latency snapshot rather than a
+			// contract — see `connectServersAndWaitReady`.
+			await connectServersAndWaitReady(manager, { alpha: serverConfig() });
+			expect(manager.getConnectedServers()).toContain("alpha");
 			// Await both the known list_changed and the server-custom frame
 			// independently. Arrival order across the two isn't guaranteed
 			// because list_changed triggers an internal `tools/list` refresh

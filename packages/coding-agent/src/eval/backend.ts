@@ -43,6 +43,16 @@ export interface ExecutorBackendResult {
 	outputLines: number;
 	outputBytes: number;
 	displayOutputs: EvalDisplayOutput[];
+	/**
+	 * `OutputSummary.annotation` verbatim: the bracketed synthesized note
+	 * (kernel timeout/kill, stdin request) `OutputSink.dump(notice)` baked into
+	 * `output` without ever streaming it through `onChunk`, unlike `push()`,
+	 * which every other chunk goes through. `eval.ts` mirrors it into
+	 * `EvalToolDetails.notices` so the ACP terminal path — which reads only
+	 * structured facts, never the model-facing text — doesn't silently drop the
+	 * reason a cell stopped (oh-my-pi/oh-my-pi#7078 review r3693523855).
+	 */
+	annotation?: string;
 }
 
 /** Pluggable language backend for the eval tool. */
