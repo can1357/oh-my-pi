@@ -64,26 +64,6 @@ interface SpawnResult {
 
 const STASH_BUNDLE_NAME = ".codespace-sync-stash.bundle";
 
-// Folders that should never ship over the wire. Conservative — false negatives
-// (extra bytes) are cheap; false positives (missing source) cost a rebuild.
-const RSYNC_EXCLUDES = [
-	".git",
-	"node_modules",
-	"target",
-	"dist",
-	"build",
-	".next",
-	".turbo",
-	".cache",
-	"__pycache__",
-	".venv",
-	"venv",
-	".pytest_cache",
-	".mypy_cache",
-	"coverage",
-	".parcel-cache",
-];
-
 function parseArgs(argv: string[]): SyncOptions {
 	const args = argv.slice(2);
 	if (args.length < 2) {
@@ -217,7 +197,7 @@ function formatPlan(p: PlanResult): string {
 		`dirty files:  ${p.dirtyFiles}`,
 		`untracked:    ${p.untrackedFiles}`,
 		`stash count:  ${p.stashCount}`,
-		`xfer est.:    ${kb} KiB working tree (excludes .git, node_modules, target, dist, …)`,
+		`xfer est.:    ${kb} KiB working tree (tracked + non-ignored untracked files)`,
 	].join("\n");
 }
 
@@ -246,19 +226,45 @@ async function buildBundle(localRepo: string, destDir: string): Promise<BundleRe
 
 // Push the working tree as a tar over ssh. Windows OpenSSH rsync on this box
 // is broken (exits 53 silently); tar-over-ssh is portable and dependency-free.
+//
+// The file list comes from git, not from walking `.` with --exclude patterns.
+// With `-C <repo> .` every member is prefixed `./`, so bare patterns like
+// `node_modules` never matched and the stream silently carried the whole
+// checkout (measured: 532 MiB / 323 s on a repo whose real payload is ~1 MB).
+// `git ls-files` also honours .gitignore, so bulky ignored state is skipped
+// without maintaining a hand-written exclude list.
+async function workingTreeFileList(localRepo: string): Promise<string[]> {
+	const r = await direct(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: localRepo });
+	if (r.code !== 0) throw new Error(`git ls-files failed:\n${r.stderr}`);
+	const files = r.stdout.split("\0").filter(Boolean);
+	// Deleted-but-still-tracked paths would make tar fail on a missing source.
+	const gone = await direct(["git", "diff", "--name-only", "-z", "--diff-filter=D", "HEAD"], { cwd: localRepo });
+	if (gone.code !== 0) throw new Error(`git diff failed:\n${gone.stderr}`);
+	const deleted = new Set(gone.stdout.split("\0").filter(Boolean));
+	return files.filter(f => !deleted.has(f));
+}
+
 async function rsyncPush(localRepo: string, sshTarget: string, remoteDir: string): Promise<void> {
-	const tarArgs = ["tar", "-cf", "-", ...RSYNC_EXCLUDES.flatMap(e => ["--exclude", e]), "-C", localRepo, "."];
+	const files = await workingTreeFileList(localRepo);
+	if (files.length === 0) throw new Error("nothing to transfer: git reported no tracked or untracked files");
+	const listPath = path.join(os.tmpdir(), `codespace-sync-files-${process.pid}.lst`);
+	await Bun.write(listPath, files.join("\0"));
+	const tarArgs = ["tar", "-cf", "-", "-C", localRepo, "--null", "--files-from", toWinPath(listPath)];
 	const sshArgs = [...sshArgv(), sshTarget, `tar -xf - -C ${remoteDir} --no-same-owner`];
-	const tar = Bun.spawn({ cmd: tarArgs, stdout: "pipe", stderr: "pipe" });
-	const ssh = Bun.spawn({ cmd: sshArgs, stdin: tar.stdout, stdout: "pipe", stderr: "pipe" });
-	const [tarCode, sshCode, tarErr, sshErr] = await Promise.all([
-		tar.exited,
-		ssh.exited,
-		tar.stderr ? new Response(tar.stderr).text() : Promise.resolve(""),
-		ssh.stderr ? new Response(ssh.stderr).text() : Promise.resolve(""),
-	]);
-	if (tarCode !== 0) throw new Error(`tar failed (exit ${tarCode}):\n${tarErr}`);
-	if (sshCode !== 0) throw new Error(`remote untar failed (exit ${sshCode}):\n${sshErr}`);
+	try {
+		const tar = Bun.spawn({ cmd: tarArgs, stdout: "pipe", stderr: "pipe" });
+		const ssh = Bun.spawn({ cmd: sshArgs, stdin: tar.stdout, stdout: "pipe", stderr: "pipe" });
+		const [tarCode, sshCode, tarErr, sshErr] = await Promise.all([
+			tar.exited,
+			ssh.exited,
+			tar.stderr ? new Response(tar.stderr).text() : Promise.resolve(""),
+			ssh.stderr ? new Response(ssh.stderr).text() : Promise.resolve(""),
+		]);
+		if (tarCode !== 0) throw new Error(`tar failed (exit ${tarCode}):\n${tarErr}`);
+		if (sshCode !== 0) throw new Error(`remote untar failed (exit ${sshCode}):\n${sshErr}`);
+	} finally {
+		await Bun.file(listPath).delete().catch(() => {});
+	}
 }
 
 async function scpFile(localPath: string, sshTarget: string, remoteDir: string): Promise<void> {
