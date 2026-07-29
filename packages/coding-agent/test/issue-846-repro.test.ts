@@ -65,12 +65,31 @@ function createModelRegistry(model: Model): ModelRegistryLike {
 	};
 }
 
+// Per-file spy tracking. `vi.restoreAllMocks()` IS `mock.restore()` — the same
+// native function — and that global restore walks Bun's whole mock registry to
+// unpatch spies. When one of them patched a sealed ESM module namespace, the
+// walk segfaults the process (exit 132) once a later file in the same run
+// imports an overlapping module graph, taking the shared-process bucket with it.
+//
+// The tracker is deliberately PER FILE. A module-shared array would let one
+// file's teardown restore another file's still-live spies — the same cross-file
+// leak, pointing the other way.
+const trackedSpies: Array<{ mockRestore: () => void }> = [];
+function trackedSpyOn<T extends object, K extends keyof T>(obj: T, key: K) {
+	const spy = vi.spyOn(obj, key);
+	trackedSpies.push(spy as unknown as { mockRestore: () => void });
+	return spy;
+}
+function restoreTrackedSpies(): void {
+	for (const spy of trackedSpies.splice(0).reverse()) spy.mockRestore();
+}
+
 describe("issue #846: phase1 stage1 failures must be logged", () => {
 	let savedXdgData: string | undefined;
 	let savedXdgState: string | undefined;
 
 	beforeEach(() => {
-		vi.restoreAllMocks();
+		restoreTrackedSpies();
 		savedXdgData = process.env.XDG_DATA_HOME;
 		savedXdgState = process.env.XDG_STATE_HOME;
 		process.env.XDG_DATA_HOME = "/nonexistent-xdg-data";
@@ -78,7 +97,7 @@ describe("issue #846: phase1 stage1 failures must be logged", () => {
 	});
 
 	afterEach(async () => {
-		vi.restoreAllMocks();
+		restoreTrackedSpies();
 		process.env.XDG_DATA_HOME = savedXdgData;
 		process.env.XDG_STATE_HOME = savedXdgState;
 		await Bun.sleep(0);
@@ -132,8 +151,8 @@ describe("issue #846: phase1 stage1 failures must be logged", () => {
 		]);
 		memoryStorage.closeMemoryDb(db);
 
-		const completeSpy = vi.spyOn(ai, "completeSimple");
-		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+		const completeSpy = trackedSpyOn(ai, "completeSimple");
+		const errorSpy = trackedSpyOn(logger, "error").mockImplementation(() => {});
 
 		// Use a sessionish object that matches the AgentSession surface used by
 		// startMemoryStartupTask. The function only touches sessionManager.* and
