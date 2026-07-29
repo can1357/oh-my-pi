@@ -802,7 +802,7 @@ async def run_task(
     thread: tuple[ThreadMessage, ...] = (),
 ) -> str | None:
     """Async wrapper that runs the synchronous RPC driver on a worker thread."""
-    review_mode = task_kind == "review_pr" or inputs.workspace.branch.startswith("review/pr-")
+    review_mode = task_kind in ("review_pr", "handle_review") or inputs.workspace.branch.startswith("review/pr-")
     loop = asyncio.get_running_loop()
     release_binding: ReleaseToolContext | None = None
     if inputs.release is not None:
