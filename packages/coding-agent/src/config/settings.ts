@@ -638,6 +638,12 @@ export class Settings {
 	#modifiedGlobalModelRoleMutations = new Map<string, PendingYamlMutation>();
 	/** Changes whenever a live API mutates a persisted layer. */
 	#persistedMutationGeneration = 0;
+	/** Change stamp across the main config and overlays at the last outside-edit check. */
+	#configSignature: string | undefined;
+	/** Whether {@link Settings.reloadGlobalIfChangedOnDisk} has taken its baseline yet. */
+	#configSignatureSeen = false;
+	/** Serializes config reloads so overlapping callers cannot skip an uncommitted one. */
+	#configReloadInFlight: Promise<unknown> | undefined;
 	/**
 	 * Original process-wide model-role overrides captured before a project edit
 	 * temporarily replaced them via `#updateRuntimeModelRoleOverride`. Restored
@@ -1228,6 +1234,86 @@ export class Settings {
 	 * `cwd` and re-applies its own layers on top, so inherited values carry over.
 	 *
 	 * @throws Error when a configured value fails its definition's `validate` check.
+	 */
+	async #serializeConfigReload<T>(operation: () => Promise<T>): Promise<T> {
+		const previous = this.#configReloadInFlight;
+		const run = (async () => {
+			if (previous) await previous.catch(() => {});
+			return operation();
+		})();
+		this.#configReloadInFlight = run;
+		try {
+			return await run;
+		} finally {
+			if (this.#configReloadInFlight === run) this.#configReloadInFlight = undefined;
+		}
+	}
+
+	async reloadGlobalIfChangedOnDisk(): Promise<SettingsReloadReport | undefined> {
+		if (!this.#persist || !this.#configPath) return undefined;
+		// The stat and the reload share one critical section. Checked outside it, a
+		// caller could stat while another reload was mid-commit, see that reload's
+		// already-recorded signature, conclude there was nothing to do, and return —
+		// letting an awaiting prompt start on settings that had not landed yet.
+		return this.#serializeConfigReload(async () => {
+			const signature = await this.#readConfigSignature();
+			if (this.#configSignatureSeen && this.#configSignature === signature) return undefined;
+			this.#configSignature = signature;
+			this.#configSignatureSeen = true;
+			return this.reloadGlobal();
+		});
+	}
+
+	/**
+	 * Change stamp across every file the global layer could be built from: each
+	 * `MAIN_CONFIG_FILENAMES` candidate in the agent dir, plus each `--config` /
+	 * `PI_CONFIG_FILES` overlay.
+	 *
+	 * Every candidate is stamped rather than just the currently selected
+	 * `#configPath`, because `#stageMainYaml` picks the first that exists: creating a
+	 * higher-priority filename changes which file wins, and watching only the old
+	 * selection would miss that entirely. Overlays are included because they are
+	 * re-staged in the same transaction and outrank global in the merge. Absent files
+	 * contribute a marker instead of being skipped, so a file appearing or
+	 * disappearing counts as a change.
+	 *
+	 * Each stamp carries more than `mtime` because a rewrite inside the filesystem's
+	 * timestamp granularity can reuse the same value, which would make a rapid edit
+	 * invisible. Nanosecond mtime, inode-change time, size and inode together catch
+	 * that: a same-mtime rewrite still moves `ctime` and usually `size`, and a
+	 * replace-by-rename moves `ino`. Still one `stat` per path.
+	 */
+	async #readConfigSignature(): Promise<string> {
+		const candidates = [
+			...MAIN_CONFIG_FILENAMES.map(filename => path.join(this.#agentDir, filename)),
+			...this.#configFiles,
+		];
+		const parts: string[] = [];
+		for (const filePath of candidates) {
+			let stamp = "absent";
+			try {
+				const stats = await fs.promises.stat(filePath, { bigint: true });
+				stamp = `${stats.mtimeNs}:${stats.ctimeNs}:${stats.size}:${stats.ino}`;
+			} catch {
+				// Missing or unreadable: the marker above is the signal.
+			}
+			parts.push(`${filePath}@${stamp}`);
+		}
+		return parts.join("|");
+	}
+
+	/**
+	 * Read the main config file without touching live state.
+	 *
+	 * Builds on `#loadYamlIfPresent`, whose `YamlLoadResult` already separates a
+	 * missing file from an invalid one; a reload must distinguish them because
+	 * adopting a parse failure as an empty layer would reset every global setting to
+	 * its schema default and re-fire every hook with that default.
+	 *
+	 * Returns the selected path rather than assigning `#configPath`, because staging
+	 * runs before the overlays are staged: mutating it here would leave the instance
+	 * pointing at a newly discovered file after an overlay parse failure aborted the
+	 * reload, which is exactly the "previous state intact" promise being made.
 	 */
 	async cloneForCwd(cwd: string): Promise<Settings> {
 		let cloned: Settings;

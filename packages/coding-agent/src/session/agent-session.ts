@@ -469,6 +469,7 @@ import {
 	cfgImagesAutoResize,
 	cfgMagicKeyword,
 	cfgMagicKeywordsEnabled,
+	cfgSettingsHotReload,
 	cfgThemeDark,
 	cfgThemeLight,
 } from "../modes/settings";
@@ -3668,6 +3669,11 @@ export class AgentSession implements SettingsScope {
 			void this.reapplyDefaultRoleModel().catch(error => {
 				logger.warn("Failed to apply deferred role model rebind", { error: String(error) });
 			});
+		}
+		// An outside config edit made while this turn was streaming lands here rather
+		// than mid-request, for the same reason.
+		if (event.type === "turn_end") {
+			void this.#pickUpOutsideConfigEdits();
 		}
 		// Finalize the tool-choice queue's in-flight yield after tools have executed.
 		// This must happen at turn_end (not message_end) because onInvoked handlers
@@ -7444,6 +7450,13 @@ export class AgentSession implements SettingsScope {
 			this.#resetPromptMaintenanceState();
 			this.#recovery.setAcceptTerminalEmptyStop(options?.acceptTerminalEmptyStop === true);
 
+			// Pick up an outside `config.yml` edit BEFORE this turn resolves a model or
+			// validates its key below. Deferring to `turn_end` would leave the next turn
+			// running on the old settings and only apply them afterwards, which is the
+			// off-by-one the boundary is meant to avoid. Opt-in, one `stat` when nothing
+			// changed.
+			await this.#pickUpOutsideConfigEdits();
+
 			// Validate model
 			if (!this.model) {
 				throw new Error(
@@ -9335,6 +9348,25 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * Apply an outside edit to the global config at a safe boundary, when
+	 * `settings.hotReload` is on.
+	 *
+	 * Called from two places for one reason: an idle session has no turn boundary
+	 * coming, so the pre-prompt call is what stops the next turn running on stale
+	 * settings, while the `turn_end` call covers an edit made while a turn was
+	 * already streaming. Failures are logged and swallowed — a malformed config file
+	 * must never take a prompt down with it.
+	 */
+	async #pickUpOutsideConfigEdits(): Promise<void> {
+		if (!cfgSettingsHotReload.get(this.settings)) return;
+		try {
+			await this.reloadConfigAndReapplyRole({ onlyIfChangedOnDisk: true });
+		} catch (error) {
+			logger.warn("Failed to pick up outside config edits", { error: String(error) });
+		}
+	}
+
+	/**
 	 * Re-read the global config layer and, when the model roles moved, reapply the
 	 * `default` role, as one serialized operation.
 	 *
@@ -9349,14 +9381,16 @@ export class AgentSession implements SettingsScope {
 	 * {@link reapplyDefaultRoleModel} can retarget an active retry fallback's restore
 	 * selector and an unrelated setting edit must never do that.
 	 */
-	async reloadConfigAndReapplyRole(): Promise<{
+	async reloadConfigAndReapplyRole(options?: { onlyIfChangedOnDisk?: boolean }): Promise<{
 		report: SettingsReloadReport | undefined;
 		rebind: RoleModelRebindOutcome | undefined;
 	}> {
 		const previous = this.#configReloadInFlight;
 		const run = (async () => {
 			if (previous) await previous.catch(() => {});
-			const report = await this.settings.reloadGlobal();
+			const report = options?.onlyIfChangedOnDisk
+				? await this.settings.reloadGlobalIfChangedOnDisk()
+				: await this.settings.reloadGlobal();
 			if (report?.status !== "applied" || !report.changed.includes("modelRoles")) {
 				return { report, rebind: undefined };
 			}

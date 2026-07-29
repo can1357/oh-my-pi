@@ -26,6 +26,19 @@ const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 // ────────────────────────────────────────────────────────────────────────
 export const cfgSetupVersion = register({ id: "setupVersion", type: "number", default: 0 });
 
+/** Re-read external edits at idle/turn boundaries when enabled. */
+export const cfgSettingsHotReload = register({
+	id: "settings.hotReload",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "general",
+		group: "Settings",
+		label: "Auto-reload config",
+		description: "Re-read config.yml before the next turn or at the end of the current one",
+	},
+});
+
 export const cfgAutoResume = register({
 	id: "autoResume",
 	type: "boolean",
