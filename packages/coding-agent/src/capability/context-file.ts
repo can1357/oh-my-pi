@@ -6,7 +6,7 @@
  */
 import * as path from "node:path";
 import { defineCapability } from ".";
-import type { SourceMeta } from "./types";
+import type { LoadContext, SourceMeta } from "./types";
 
 /**
  * A context file that provides persistent instructions to the agent.
@@ -24,6 +24,26 @@ export interface ContextFile {
 	_source: SourceMeta;
 }
 
+function relativeTo(root: string, filePath: string): string | undefined {
+	const rel = path.relative(root, filePath);
+	if (!rel || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return undefined;
+	return rel.split(path.sep).join("/");
+}
+
+/**
+ * Scope-stable identity for a context file: `./`-prefixed repo-relative inside a
+ * repository, `~/`-relative under home, absolute otherwise. Keeps ids portable
+ * across checkouts while still distinguishing same-named files, and always
+ * yields a path-shaped scope so it can never collide with a legacy basename id.
+ */
+function extensionScope(file: ContextFile, ctx: LoadContext): string {
+	const fromRepo = ctx.repoRoot ? relativeTo(ctx.repoRoot, file.path) : undefined;
+	if (fromRepo) return `./${fromRepo}`;
+	const fromHome = relativeTo(ctx.home, file.path);
+	if (fromHome) return `~/${fromHome}`;
+	return file.path.split(path.sep).join("/");
+}
+
 export const contextFileCapability = defineCapability<ContextFile>({
 	id: "context-files",
 	displayName: "Context Files",
@@ -34,7 +54,10 @@ export const contextFileCapability = defineCapability<ContextFile>({
 	// Clamp depth >= 0: files inside config subdirectories of an ancestor (e.g. .claude/, .github/)
 	// are same-scope as the ancestor itself.
 	key: file => (file.level === "user" ? "user" : `project:${Math.max(0, file.depth ?? 0)}`),
-	toExtensionId: file => `context-file:${file.level}:${path.basename(file.path)}`,
+	// Scoped by location, not file name: a basename-keyed id would disable every
+	// same-named context file in the process.
+	toExtensionId: (file, ctx) => `context-file:${file.level}:${extensionScope(file, ctx)}`,
+	toLegacyExtensionIds: file => [`context-file:${file.level}:${path.basename(file.path)}`],
 	validate: file => {
 		if (!file.path) return "Missing path";
 		if (file.content === undefined) return "Missing content";

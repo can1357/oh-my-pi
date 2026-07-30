@@ -19,6 +19,7 @@ import {
 	disableProvider,
 	enableProvider,
 	getAllProvidersInfo,
+	isExtensionDisabled,
 	isProviderEnabled,
 	loadCapability,
 } from "../../../discovery";
@@ -255,8 +256,8 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 		for (const file of contextFiles.all) {
 			// Extract filename from path for display
 			const name = path.basename(file.path);
-			const id = makeExtensionId("context-file", `${file.level}:${name}`);
-			const isDisabled = disabledExtensions.has(id);
+			const id = file._source.extensionId ?? makeExtensionId("context-file", `${file.level}:${name}`);
+			const isDisabled = isExtensionDisabled(file._source, disabledExtensions);
 			const isShadowed = (file as { _shadowed?: boolean })._shadowed;
 			const providerEnabled = isProviderEnabled(file._source.provider);
 
@@ -278,6 +279,7 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 
 			extensions.push({
 				id,
+				legacyIds: file._source.legacyExtensionIds,
 				kind: "context-file",
 				name,
 				displayName: name,

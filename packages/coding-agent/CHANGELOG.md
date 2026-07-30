@@ -14,6 +14,8 @@
 
 ### Fixed
 
+- Fixed `disabledExtensions` leaking across settings instances: `initializeWithSettings()` pinned a `Settings` reference that outlived the instance, so every later `loadCapability()` in the process kept filtering against discarded settings. The global settings singleton now rebinds the capability registry whenever it is initialized or discarded; `reset()` stays cache-only, so a mid-session cache invalidation no longer risks dropping the filter.
+- Fixed a single disabled context file suppressing every same-named context file: `context-file` extension ids are now scoped by location (`context-file:project:./packages/app/AGENTS.md`) instead of by basename, so disabling one project's `AGENTS.md` no longer hides `AGENTS.md` elsewhere. Existing bare-basename ids keep working, and the extensions dashboard clears them when an item is re-enabled.
 - Fixed hour-over-hour activity recall on days that are not 24 hours long: the day window is now derived from local midnight to the next local midnight, so DST transition days correctly span 23 or 25 hours instead of being truncated or overrun.
 - Fixed activity recall bucketing in half-hour-offset timezones (IST, NPT): buckets now start on real local hour marks rather than UTC hour boundaries labelled with the local hour, and are keyed by absolute instant so the repeated hour on a fall-back day stays two distinct buckets.
 

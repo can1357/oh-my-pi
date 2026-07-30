@@ -86,6 +86,10 @@ export interface SourceMeta {
 	path: string;
 	/** Whether this came from user-level, project-level, or native config */
 	level: "user" | "project" | "native";
+	/** `disabledExtensions` ID for this item, when its capability defines one */
+	extensionId?: string;
+	/** Superseded ID forms that still match `disabledExtensions` entries */
+	legacyExtensionIds?: string[];
 }
 
 /**
@@ -131,7 +135,13 @@ export interface Capability<T> {
 	 * Optional disabledExtensions ID for this item.
 	 * When present, loadCapability() can hide items disabled via settings.
 	 */
-	toExtensionId?(item: T): string | undefined;
+	toExtensionId?(item: T, ctx: LoadContext): string | undefined;
+
+	/**
+	 * Superseded ID forms that still match `disabledExtensions` entries, so
+	 * configs written against an older ID scheme keep working.
+	 */
+	toLegacyExtensionIds?(item: T, ctx: LoadContext): string[];
 
 	/** Registered providers, sorted by priority (highest first) */
 	providers: Provider<T>[];

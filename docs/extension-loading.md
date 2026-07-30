@@ -119,6 +119,25 @@ disabledExtensions:
   - extension-module:foo
 ```
 
+### Disable specific context files
+
+Context files are scoped by location, not by file name, so disabling one `AGENTS.md`
+leaves same-named files elsewhere active:
+
+- `context-file:<level>:./<path relative to the repo root>` inside a git repo
+- `context-file:<level>:~/<path relative to home>` outside a repo but under home
+- `context-file:<level>:<absolute path>` otherwise
+
+```yaml
+disabledExtensions:
+  - context-file:project:./packages/app/AGENTS.md
+  - context-file:user:~/.claude/CLAUDE.md
+```
+
+Bare-basename ids (`context-file:project:AGENTS.md`) are the superseded form. They
+still disable matching files for back-compat, but they match by file name, so they
+suppress every same-named context file at that level. Prefer the path-scoped ids.
+
 ---
 
 ## Path and entry resolution
