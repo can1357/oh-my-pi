@@ -110,14 +110,12 @@ async function main(): Promise<void> {
 		}
 	}
 
-	const capturePolicy = resolveSharedGopkClipsCapturePolicy();
 	let host: GopkClipsHostState;
 	try {
 		host = createGopkClipsHost({
 			captureRoot,
 			ledgerPath,
-			captureEnabled: capturePolicy.enabled,
-			ocrEnabled: capturePolicy.ocrEnabled,
+			capturePolicyProvider: resolveSharedGopkClipsCapturePolicy,
 			pollIntervalMs: POLL_INTERVAL_MS,
 			cleanupIntervalMs: CLEANUP_INTERVAL_MS,
 		});

@@ -36,13 +36,17 @@ describe("gopk-clips handoff host", () => {
 		await fs.rm(captureRoot, { recursive: true, force: true });
 	});
 
-	function makeHost(ocrEnabled = true): GopkClipsHostState {
+	function makeHost(
+		capturePolicyProvider = (): { enabled: boolean; ocrEnabled: boolean } => ({
+			enabled: true,
+			ocrEnabled: true,
+		}),
+	): GopkClipsHostState {
 		host = createGopkClipsHost(
 			// Hour-long intervals: only the startup pass and explicit *Once calls run.
 			{
 				captureRoot,
-				captureEnabled: true,
-				ocrEnabled,
+				capturePolicyProvider,
 				pollIntervalMs: 3_600_000,
 				cleanupIntervalMs: 3_600_000,
 				ledgerPath,
@@ -88,9 +92,14 @@ describe("gopk-clips handoff host", () => {
 		expect(await fs.readdir(handoffDir)).toEqual([]);
 	});
 
-	it("consumes but does not persist queued OCR after consent is disabled", async () => {
+	it("rechecks current consent and consumes queued OCR without persistence after revocation", async () => {
 		await writeDerivative({ ocrSnippet: "must not persist after revocation" });
-		const state = makeHost(false);
+		let capturePolicy = { enabled: true, ocrEnabled: true };
+		const state = makeHost(() => capturePolicy);
+
+		// Revocation happens after host creation but synchronously before its
+		// scheduled startup pass can consume the already-queued derivative.
+		capturePolicy = { enabled: true, ocrEnabled: false };
 		await state.pollOnce();
 
 		const inspector = new SqliteActivityLedger(ledgerPath);
@@ -146,8 +155,9 @@ describe("gopk-clips handoff host", () => {
 		await fs.writeFile(rawPath, "raw-bytes", "utf8");
 		// Expires 5 minutes after the (hour-old) window — within the 10-minute
 		// retention policy, and already in the past.
-		await writeDerivative({ rawClip: { localPointer: rawPath, expiresAt: isoAt(-55 * 60_000) } });
 		const state = makeHost();
+		await state.pollOnce(); // finish the empty startup poll and cleanup
+		await writeDerivative({ rawClip: { localPointer: rawPath, expiresAt: isoAt(-55 * 60_000) } });
 		await state.pollOnce();
 		expect(await fs.exists(rawPath)).toBe(true);
 		await state.cleanupOnce();
