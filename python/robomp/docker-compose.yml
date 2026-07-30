@@ -78,6 +78,7 @@ services:
       ROBOMP_REPLAY_TOKEN: ${ROBOMP_REPLAY_TOKEN:-}
       ROBOMP_API_BASE: ${ROBOMP_API_BASE:-https://api.github.com}
       ROBOMP_GIT_HOST: ${ROBOMP_GIT_HOST:-github.com}
+      ROBOMP_FORGEJO_REPOS: ${ROBOMP_FORGEJO_REPOS:-}
 
       # --- container-fixed paths ---
       ROBOMP_OMP_COMMAND: omp
@@ -148,6 +149,7 @@ services:
       FORGEJO_TOKEN: ${FORGEJO_TOKEN:-}
       ROBOMP_API_BASE: ${ROBOMP_API_BASE:-https://api.github.com}
       ROBOMP_GIT_HOST: ${ROBOMP_GIT_HOST:-github.com}
+      ROBOMP_FORGEJO_REPOS: ${ROBOMP_FORGEJO_REPOS:-}
     networks:
       # `default` gives gh-proxy outbound NAT to api.github.com; `robomp_internal`
       # is how the orchestrator reaches it. No `ports:` mapping → still
