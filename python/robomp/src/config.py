@@ -421,6 +421,7 @@ class _ProxyEnvLoader(BaseSettings):
 
     github_token: SecretStr = Field(..., alias="GITHUB_TOKEN")
     forgejo_token: SecretStr | None = Field(None, alias="FORGEJO_TOKEN")
+    forgejo_repos_raw: str = Field("", alias="ROBOMP_FORGEJO_REPOS")
     api_base: str = Field("https://api.github.com", alias="ROBOMP_API_BASE")
     git_host: str = Field("github.com", alias="ROBOMP_GIT_HOST")
     gh_proxy_hmac_key: SecretStr = Field(..., alias="ROBOMP_GH_PROXY_HMAC_KEY")
@@ -457,6 +458,7 @@ def load_proxy_settings() -> Settings:
     return Settings.model_construct(
         github_token=loader.github_token,
         forgejo_token=loader.forgejo_token,
+        forgejo_repos_raw=loader.forgejo_repos_raw,
         api_base=loader.api_base,
         git_host=loader.git_host,
         github_webhook_secret=SecretStr(""),
