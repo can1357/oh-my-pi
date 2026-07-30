@@ -52,12 +52,21 @@ class AutocloseScheduler:
         settings: Settings,
         db: Database,
         github: GitHubBackend,
+        forgejo_github: GitHubBackend | None = None,
     ) -> None:
         self._settings = settings
         self._db = db
         self._github = github
+        self._forgejo_github = forgejo_github
         self._task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
+
+    def _gh_for(self, repo: str) -> GitHubBackend:
+        return (
+            self._forgejo_github
+            if (self._forgejo_github is not None and repo in self._settings.forgejo_repos)
+            else self._github
+        )
 
     @property
     def enabled(self) -> bool:
@@ -146,8 +155,9 @@ class AutocloseScheduler:
 
     async def _process_row(self, row: PendingClosureRow) -> str:
         """Resolve a single claimed row. Returns `closed`/`cancelled`/`retried`."""
+        gh = self._gh_for(row.repo)
         try:
-            reactions = await self._github.list_comment_reactions(row.repo, row.comment_id)
+            reactions = await gh.list_comment_reactions(row.repo, row.comment_id)
         except GitHubError as exc:
             log.warning(
                 "autoclose: list_comment_reactions failed; will retry",
@@ -167,7 +177,7 @@ class AutocloseScheduler:
             return "cancelled"
 
         try:
-            await self._github.close_issue(row.repo, row.number, reason="completed")
+            await gh.close_issue(row.repo, row.number, reason="completed")
         except GitHubError as exc:
             if exc.status == 404:
                 self._db.finalize_closure(row.issue_key, state="cancelled", reason="already_closed")

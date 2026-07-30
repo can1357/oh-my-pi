@@ -151,10 +151,16 @@ def _signed(
     return {HEADER_TIMESTAMP: timestamp, HEADER_SIGNATURE: sig}
 
 
-def _build_app(cfg: Settings, gh_handler: Callable[[httpx.Request], httpx.Response] | None = None):
+def _build_app(
+    cfg: Settings,
+    gh_handler: Callable[[httpx.Request], httpx.Response] | None = None,
+    fj_handler: Callable[[httpx.Request], httpx.Response] | None = None,
+):
     app = create_proxy_app(cfg)
-    transport = httpx.MockTransport(gh_handler) if gh_handler is not None else None
-    app.state.github = GitHubClient(_TOKEN, transport=transport)
+    gh_transport = httpx.MockTransport(gh_handler) if gh_handler is not None else None
+    fj_transport = httpx.MockTransport(fj_handler) if fj_handler is not None else None
+    app.state.github = GitHubClient(_TOKEN, transport=gh_transport)
+    app.state.forgejo_github = GitHubClient(_TOKEN, transport=fj_transport) if fj_handler else None
     app.state.settings = cfg
     return app
 
