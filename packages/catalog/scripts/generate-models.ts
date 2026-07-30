@@ -631,7 +631,7 @@ async function generateModels() {
 	}
 
 	// Generate JSON file
-	await Bun.write(path.join(packageRoot, "src/models.json"), JSON.stringify(MODELS, null, "	"));
+	await Bun.write(path.join(packageRoot, "src/models.json"), JSON.stringify(MODELS));
 	console.log("Generated src/models.json");
 
 	// Print statistics
