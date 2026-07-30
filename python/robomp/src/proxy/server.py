@@ -388,10 +388,23 @@ def create_proxy_app(settings: Settings) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        try:
-            app.state.github = GitHubClient(resolve_token_for_platform(settings, "github"))
-        except ValueError as exc:
-            raise RuntimeError(str(exc)) from exc
+        # Preserve injected clients (e.g. tests with MockTransport).
+        if not hasattr(app.state, "github") or app.state.github is None:
+            try:
+                app.state.github = GitHubClient(resolve_token_for_platform(settings, "github"))
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+        if not hasattr(app.state, "forgejo_github"):
+            app.state.forgejo_github = None
+            if settings.forgejo_repos:
+                try:
+                    token = resolve_token_for_platform(settings, "forgejo")
+                    base_url = resolve_api_base_for_platform(settings, "forgejo")
+                    app.state.forgejo_github = GitHubClient(
+                        token, base_url=base_url, auth_prefix=auth_prefix_for_platform("forgejo")
+                    )
+                except ValueError as exc:
+                    raise RuntimeError(str(exc)) from exc
         app.state.settings = settings
         yield
 
@@ -402,19 +415,20 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         return str(request.query_params.get("platform", "github"))
 
     def _github_client_for(request: Request) -> GitHubClient:
-        """Create a GitHubClient appropriate for the request's platform.
+        """Return a GitHubClient for the request's platform from app state.
 
-        Per-request so the correct token + base URL are used. The client
-        is short-lived (one request) so transport pooling is irrelevant.
+        In production the client is created once during lifespan (with a real
+        transport). Tests inject mock-transport clients via app.state before
+        the lifespan runs, and the lifespan preserves them.
         """
         platform = _platform(request)
-        try:
-            token = resolve_token_for_platform(settings, platform)
-        except ValueError as exc:
-            raise HTTPException(500, str(exc))
-        base_url = resolve_api_base_for_platform(settings, platform)
-        auth_prefix = auth_prefix_for_platform(platform)
-        return GitHubClient(token, base_url=base_url, auth_prefix=auth_prefix)
+        if platform == "github":
+            return request.app.state.github
+        if platform == "forgejo":
+            if request.app.state.forgejo_github is None:
+                raise HTTPException(500, "Forgejo platform not configured")
+            return request.app.state.forgejo_github
+        raise HTTPException(400, f"Unknown platform: {platform}")
 
     def _request_target(request: Request) -> str:
         """Canonical signing target: `path` plus raw query string if any.
