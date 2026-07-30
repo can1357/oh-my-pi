@@ -322,6 +322,7 @@ def _build_state(settings: Settings, pool_factory: _PoolFactory) -> dict[str, An
         "settings": settings,
         "db": db,
         "github": github,
+        "forgejo_github": forgejo_github,
         "git_transport": git_transport,
         "sandbox": sandbox,
         "natives_cache": natives_cache,
@@ -598,16 +599,21 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             raise HTTPException(400, "state must be open|closed|all")
         capped = max(1, min(int(limit), 100))
         github: GitHubBackend = bag["github"]
+        forgejo_github: GitHubBackend | None = bag["forgejo_github"]
         issue_cache: _IssueBrowseCache = bag["issue_browse_cache"]
         repos = tuple(sorted(cfg.repo_allowlist))
         if not repos:
             return {"issues": [], "errors": [], "repos": [], "cache": {"hit": False, "fetched_at": time.time()}}
 
+        def _backend_for(repo: str) -> GitHubBackend:
+            return forgejo_github if forgejo_github and repo.lower() in cfg.forgejo_repos else github
+
         async def _fetch() -> tuple[list[IssueSummary], list[dict[str, str]]]:
             # Fan out across allowlisted repos; per-repo failures don't take down the panel.
             async def _one(repo: str) -> tuple[str, list[IssueSummary], str | None]:
+                backend = _backend_for(repo)
                 try:
-                    items = await github.list_issues(repo, state=state, limit=capped)
+                    items = await backend.list_issues(repo, state=state, limit=capped)
                     return repo, items, None
                 except Exception as exc:  # GitHubError, network, etc.
                     log.warning("list_issues failed", extra={"repo": repo, "err": str(exc)})
@@ -652,6 +658,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
 
         db: Database = bag["db"]
         github: GitHubBackend = bag["github"]
+        forgejo_github: GitHubBackend | None = bag["forgejo_github"]
         pool: _AppPool = bag["pool"]
 
         mode = str(payload.get("mode") or "").strip().lower()
@@ -670,10 +677,11 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                 raise HTTPException(400, str(exc)) from exc
             if not cfg.allows(repo_full):
                 raise HTTPException(403, f"{repo_full} not in ROBOMP_REPO_ALLOWLIST")
+            backend = forgejo_github if forgejo_github and repo_full.lower() in cfg.forgejo_repos else github
             try:
                 delivery = await enqueue_manual_triage(
                     db=db,
-                    github=github,
+                    github=backend,
                     repo_full=repo_full,
                     number=number,
                 )
