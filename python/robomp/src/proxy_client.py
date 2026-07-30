@@ -478,7 +478,8 @@ class ProxyGitTransport:
                     query_parts.append(f"platform={self._platform}")
                 target = path
                 if query_parts:
-                    target = f"{path}?{"&".join(query_parts)}"
+                    query_str = "&".join(query_parts)
+                    target = f"{path}?{query_str}"
                 headers = _signed_headers("POST", target, body_bytes, self._key)
                 headers["Content-Type"] = "application/json"
                 with self._client() as client:

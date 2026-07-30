@@ -1161,6 +1161,7 @@ def _review_bindings(
         inbound_thread_number=99,
         inbound_is_pr=True,
         review_mode=True,
+        block_git_push=True,
     )
     db.upsert_issue(
         key=bindings.issue_key,
