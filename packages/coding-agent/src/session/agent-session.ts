@@ -6917,16 +6917,18 @@ export class AgentSession implements SettingsScope {
 		// Expand file-based prompt templates if requested
 		const templated = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
 		const expandedText = options?.synthetic ? templated : this.#modelMentions.expandMentions(templated);
+		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
+		const userInitiated = options?.userInitiated ?? (!options?.synthetic && promptAttribution === "user");
 
 		// Magic keywords (see modes/magic-keywords.ts): append hidden system notices after the
 		// user's message that steer this turn. User-authored prompts only — synthetic /
 		// agent-initiated turns never trigger them.
-		const keywordNotices = options?.synthetic ? [] : this.#createMagicKeywordNotices(expandedText);
+		const keywordNotices = userInitiated ? this.#createMagicKeywordNotices(expandedText) : [];
 
 		// A user-initiated prompt (typed message or the `.`/`c` continue shortcut)
 		// re-enables advisor auto-resume that a prior user interrupt suppressed.
 		// Agent-initiated synthetic prompts (auto-continue, plan, reminders) do not.
-		if (options?.userInitiated ?? !options?.synthetic) {
+		if (userInitiated) {
 			this.#advisors.autoResumeSuppressed = false;
 			this.#planModeReminderCount = 0;
 			this.#planModeReminderAwaitingProgress = false;
@@ -6935,7 +6937,6 @@ export class AgentSession implements SettingsScope {
 			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
 		}
 
-		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
 
 		// If streaming, queue via steer()/followUp()/aside based on option
 		if (this.isStreaming) {
@@ -6953,6 +6954,7 @@ export class AgentSession implements SettingsScope {
 				attribution: promptAttribution,
 				prependMessages: keywordNotices,
 				rawText: typedText,
+				userInitiated,
 			});
 			outcome.sessionClaimed = true;
 			return true;
@@ -6962,7 +6964,7 @@ export class AgentSession implements SettingsScope {
 		const hasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
 		const activeModel = this.agent.state.model;
 		const externalThinkingToolChoice =
-			!options?.synthetic &&
+			userInitiated &&
 			!hasPendingUserDirective &&
 			cfgExternalThinking.get(this.settings) &&
 			this.getEnabledToolNames().includes("think") &&
@@ -6970,9 +6972,9 @@ export class AgentSession implements SettingsScope {
 				? buildNamedToolChoice("think", activeModel)
 				: undefined;
 		const eagerTodoPrelude =
-			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
+			userInitiated && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
 		const eagerTaskPrelude =
-			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
+			userInitiated && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
 		const attachmentSourceNotices = this.#createAttachmentSourceNotices(options?.images, submittedAt);
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
 
@@ -7005,6 +7007,7 @@ export class AgentSession implements SettingsScope {
 				attribution: promptAttribution,
 				prependMessages: keywordNotices,
 				rawText: typedText,
+				userInitiated,
 				preprocessed: {
 					images: normalizedImages,
 					descriptionNotice: imageDescriptionNotice,
@@ -7043,6 +7046,8 @@ export class AgentSession implements SettingsScope {
 		if (eagerTaskPrelude) {
 			preludeMessages.push(eagerTaskPrelude);
 		}
+
+		if (userInitiated) this.#recordUserActivity();
 
 		let dispatched = false;
 		try {
@@ -7133,6 +7138,7 @@ export class AgentSession implements SettingsScope {
 			| undefined,
 		outcome: PromptDispatchOutcome,
 	): Promise<boolean> {
+		const userInitiated = message.attribution === "user";
 		const textContent =
 			typeof message.content === "string"
 				? message.content
@@ -7169,6 +7175,7 @@ export class AgentSession implements SettingsScope {
 				if (this.isStreaming) outcome.sessionClaimed = this.agent.state.isStreaming;
 				throw new AgentBusyError();
 			}
+			if (userInitiated) this.#recordUserActivity();
 
 			await this.#queueCustomMessage(message, streamingBehavior, {
 				queueChipText: options?.queueChipText,
@@ -7207,6 +7214,7 @@ export class AgentSession implements SettingsScope {
 				outcome.sessionClaimed = this.agent.state.isStreaming;
 				throw new AgentBusyError();
 			}
+			if (userInitiated) this.#recordUserActivity();
 			await this.#queueCustomMessage(message, streamingBehavior, {
 				queueChipText: options?.queueChipText,
 				preprocessed: { content: preparedMessage.content, descriptionNotice },
@@ -7215,6 +7223,7 @@ export class AgentSession implements SettingsScope {
 			outcome.sessionClaimed = true;
 			return true;
 		}
+		if (userInitiated) this.#recordUserActivity();
 		outcome.sessionClaimed = await this.#promptWithMessage(preparedMessage, textContent, {
 			...options,
 			prependMessages:
@@ -7874,9 +7883,11 @@ export class AgentSession implements SettingsScope {
 				images?: ImageContent[];
 				descriptionNotice?: CustomMessage;
 			};
+			userInitiated?: boolean;
 		},
 	): Promise<void> {
 		const attribution = options?.attribution ?? "user";
+		const userInitiated = options?.userInitiated ?? attribution === "user";
 		const timestamp = options?.timestamp;
 		const rawText = options?.rawText ?? text;
 		const preprocessed = options?.preprocessed;
@@ -7893,7 +7904,8 @@ export class AgentSession implements SettingsScope {
 		// user-driven (folds into context via #resumeStrandedIrcAsides's post-interrupt
 		// branch) until the next deliberate steer/follow-up/prompt, matching the
 		// sendCustomMessage aside path (queueAside), which never touches this flag.
-		if (mode !== "aside") this.#advisors.autoResumeSuppressed = false;
+		if (userInitiated) this.#recordUserActivity();
+		if (userInitiated && mode !== "aside") this.#advisors.autoResumeSuppressed = false;
 		// The pre-dispatch re-check in prompt() arrives with normalization and the
 		// vision description already done — reuse them instead of paying a second
 		// vision-model request for the same attachment.
