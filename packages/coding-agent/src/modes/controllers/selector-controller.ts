@@ -43,6 +43,9 @@ import {
 	theme,
 } from "../../modes/theme/theme";
 import type { AgentHubOpenOptions, InteractiveModeContext } from "../../modes/types";
+import { parsePanelSettings } from "../../panel/config";
+import { formatPanelCompletionStatus, type PanelRunResult } from "../../panel/runtime";
+import type { PanelPersona, PanelSettings, PanelTaskMode } from "../../panel/types";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import {
@@ -99,6 +102,9 @@ import { LogoutAccountSelectorComponent } from "../components/logout-account-sel
 import { ModelHubComponent, type ModelRoleSelectionScope } from "../components/model-hub";
 import { ModelPickerComponent } from "../components/model-picker";
 import { OAuthSelectorComponent } from "../components/oauth-selector";
+import { PanelLineupBuilderOverlayComponent } from "../components/panel-lineup-builder";
+import { PanelPersonaEditorComponent } from "../components/panel-persona-editor";
+import { PanelRolePickerComponent } from "../components/panel-role-picker";
 import { PluginSelectorComponent } from "../components/plugin-selector";
 import { ReadToolGroupComponent } from "../components/read-tool-group";
 import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
@@ -800,6 +806,140 @@ export class SelectorController {
 			return;
 		}
 		this.#showModelHub({});
+	}
+
+	/**
+	 * Saved-role picker shown when a standard `/panel` invocation omits `@role`
+	 * and no default role is configured. Resolves with the picked role id, or
+	 * `undefined` on cancel; settles exactly once.
+	 */
+	showPanelRolePicker(settings: PanelSettings): Promise<string | undefined> {
+		return new Promise<string | undefined>(resolve => {
+			let settled = false;
+			this.showSelector(done => {
+				const picker = new PanelRolePickerComponent({
+					roles: settings.roles,
+					defaultRole: settings.defaultRole,
+					onSelect: roleId => {
+						if (settled) return;
+						settled = true;
+						done();
+						resolve(roleId);
+					},
+					onCancel: () => {
+						if (settled) return;
+						settled = true;
+						done();
+						resolve(undefined);
+					},
+				});
+				return { component: picker, focus: picker.getSelectList() };
+			});
+		});
+	}
+
+	/**
+	 * Fullscreen one-off panel lineup builder (`/panel lineup <answer|plan>
+	 * <request>`). The component never runs the panel itself: `onSubmit` is
+	 * the only path into `session.runPanel`, dispatched with `ephemeralRole`
+	 * so nothing is persisted. A rejected `onSubmit` is surfaced by the
+	 * component's own `notify` callback and leaves the builder open and
+	 * editable; the overlay only closes on success or explicit close/cancel.
+	 */
+	showPanelLineupBuilder(taskMode: PanelTaskMode, request: string): Promise<PanelRunResult | undefined> {
+		return new Promise<PanelRunResult | undefined>(resolve => {
+			let panelSettings: PanelSettings;
+			try {
+				panelSettings = parsePanelSettings(this.ctx.settings.get("panel"));
+			} catch (error) {
+				this.ctx.showError(error instanceof Error ? error.message : String(error));
+				resolve(undefined);
+				return;
+			}
+			let settled = false;
+			const done = () => {
+				if (settled) return;
+				settled = true;
+				overlayHandle?.hide();
+				this.focusActiveEditorArea();
+				this.ctx.ui.requestRender();
+			};
+			const builder = new PanelLineupBuilderOverlayComponent(
+				this.ctx.ui,
+				{
+					modelRegistry: this.ctx.session.modelRegistry,
+					settings: this.ctx.settings,
+					scopedModels: this.ctx.session.scopedModels,
+				},
+				{ panelSettings, taskMode, request },
+				{
+					onSubmit: async role => {
+						const result = await this.ctx.session.runPanel({ taskMode, request, ephemeralRole: role });
+						this.ctx.showStatus(formatPanelCompletionStatus(result));
+						done();
+						resolve(result);
+					},
+					onAbort: () => this.ctx.session.abortPanel(),
+					onClose: () => {
+						done();
+						resolve(undefined);
+					},
+					notify: message => this.ctx.showStatus(message),
+					requestRender: () => this.ctx.ui.requestRender(),
+				},
+			);
+			const overlayHandle = this.ctx.ui.showOverlay(builder, {
+				anchor: "bottom-center",
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
+				fullscreen: true,
+			});
+			this.ctx.ui.setFocus(builder);
+			this.ctx.ui.requestRender();
+		});
+	}
+
+	/**
+	 * Fullscreen explicit-save panel persona editor (`/panel personas`). Raw
+	 * current personas (valid or not) are handed to the editor unfiltered so
+	 * malformed entries stay inspectable/deletable until saved away. Save
+	 * persists only `{ ...existingPanel, personas: next }`, leaving `roles`
+	 * and `defaultRole` untouched.
+	 */
+	showPanelPersonaEditor(): void {
+		const existingPanel = this.ctx.settings.get("panel");
+		let settled = false;
+		const done = () => {
+			if (settled) return;
+			settled = true;
+			overlayHandle?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+		const editor = new PanelPersonaEditorComponent(this.ctx.ui, existingPanel.personas, {
+			save: next => {
+				// `next` mixes re-validated persona shapes with unchanged raw
+				// quarantined entries (see PanelPersonaEditorCallbacks.save); it is
+				// intentionally not a fully-typed PanelPersona record pre-persist.
+				this.ctx.settings.set("panel", {
+					...existingPanel,
+					personas: next as Readonly<Record<string, PanelPersona>>,
+				});
+			},
+			close: () => done(),
+			notify: message => this.ctx.showStatus(message),
+			requestRender: () => this.ctx.ui.requestRender(),
+		});
+		const overlayHandle = this.ctx.ui.showOverlay(editor, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
+		this.ctx.ui.setFocus(editor);
+		this.ctx.ui.requestRender();
 	}
 
 	/**
