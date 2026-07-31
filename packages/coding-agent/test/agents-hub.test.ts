@@ -14,6 +14,9 @@ import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-regis
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentsHubComponent } from "@oh-my-pi/pi-coding-agent/modes/components/agents-hub";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
+import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
+import type { PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -219,5 +222,40 @@ describe("AgentsHub configuration strips", () => {
 		hub.handleInput("\x1b"); // close strip
 		expect(strip()).not.toContain("dev →");
 		expect(cancelled()).toBe(false);
+	});
+
+	test("marks the agent-creation architect prompt as agent-attributed", async () => {
+		mockAgents();
+		const prompts: Array<{ text: string; options?: PromptOptions }> = [];
+		const session = {
+			prompt: async (text: string, options?: PromptOptions) => {
+				prompts.push({ text, options });
+				throw new Error("stop after prompt attribution");
+			},
+			subscribe: () => () => {},
+			dispose: async () => {},
+		};
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({ session } as unknown as CreateAgentSessionResult);
+		const modelRegistry = {
+			authStorage: {} as never,
+			refresh: async () => {},
+			getAvailable: () => [sonnet],
+		} as unknown as ModelRegistry;
+		const hub = await AgentsHubComponent.create(
+			tuiStub,
+			tempCwd,
+			Settings.isolated(),
+			{ modelRegistry },
+			{ onCancel: () => {} },
+		);
+
+		for (let i = 0; i < 3; i++) hub.handleInput("\x1b[B");
+		hub.handleInput("\r");
+		for (const char of "Generate a release-notes agent") hub.handleInput(char);
+		hub.handleInput("\x11");
+		for (let i = 0; i < 100 && prompts.length === 0; i++) await Bun.sleep(1);
+
+		expect(prompts).toHaveLength(1);
+		expect(prompts[0]?.options).toMatchObject({ attribution: "agent", expandPromptTemplates: false });
 	});
 });
