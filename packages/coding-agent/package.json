@@ -422,6 +422,10 @@
       "types": "./src/hindsight/*.ts",
       "import": "./src/hindsight/*.ts"
     },
+    "./panel": {
+      "types": "./src/panel/index.ts",
+      "import": "./src/panel/index.ts"
+    },
     "./modes": {
       "types": "./src/modes/index.ts",
       "import": "./src/modes/index.ts"
