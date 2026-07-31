@@ -495,6 +495,12 @@ export class InputController {
 				return;
 			}
 
+			if (!this.ctx.focusedAgentId && this.ctx.session.isPanelRunning) {
+				void this.ctx.session.abortPanel();
+				this.ctx.showStatus("Cancelling panel…");
+				return;
+			}
+
 			if (!this.ctx.focusedAgentId) {
 				const viewSession = this.ctx.viewSession;
 				let aborted = false;
@@ -1520,6 +1526,12 @@ export class InputController {
 		// and let shutdown() take its force-quit escape hatch.
 		if (this.ctx.teardownFailed) {
 			void this.ctx.shutdown();
+			return;
+		}
+
+		if (this.ctx.session.isPanelRunning) {
+			void this.ctx.session.abortPanel();
+			this.ctx.showStatus("Cancelling panel…");
 			return;
 		}
 

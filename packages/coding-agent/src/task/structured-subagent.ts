@@ -1,12 +1,13 @@
 /**
- * Shared policy resolution and execution for task and eval subagents.
+ * Shared policy resolution and execution for task, eval, and panel subagents.
  *
- * The two public frontends deliberately retain their presentation concerns, but
+ * The public frontends deliberately retain their presentation concerns, but
  * every decision that affects what a child may run lives here.
  */
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { resolveAgentModelSelection, resolveConfiguredModelPatterns } from "../config/model-resolver";
@@ -28,7 +29,7 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
+import type { ConfiguredThinkingLevel, TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
@@ -94,6 +95,16 @@ export interface StructuredSubagentIsolationControls {
 	apply?: boolean;
 }
 
+/**
+ * A static capability definition supplied by the panel runtime.
+ *
+ * Runtime policy requires the definition to be bundled and read-only. `allowLsp`
+ * is definition-owned so a panel caller cannot enable LSP for one dispatch.
+ */
+export interface PanelAgentDefinition extends AgentDefinition {
+	allowLsp?: boolean;
+}
+
 /** Identity and presentation metadata supplied by the calling surface. */
 export interface StructuredSubagentIdentity {
 	/** A previously reserved output/registry id. */
@@ -105,18 +116,26 @@ export interface StructuredSubagentIdentity {
 /** One normalized child invocation. */
 export interface StructuredSubagentRequest {
 	session: ToolSession;
-	invocationKind: "task" | "eval";
+	invocationKind: "task" | "eval" | "panel";
 	assignment: string;
 	context?: string;
 	agent?: string;
+	/** A static bundled agent accepted only for `invocationKind: "panel"`. */
+	agentDefinition?: PanelAgentDefinition;
 	model?: string | string[];
 	/** Presence, rather than truthiness, makes this the highest-priority schema. */
 	outputSchema?: unknown;
 	schemaMode?: StructuredSubagentSchemaMode;
 	/** Per-spawn thinking effort mapped onto the resolved model's supported range; overrides the agent's default selector. */
 	effort?: TaskEffort;
-	/** Caller's description of how open-ended the work is; steers the child's `auto` thinking classification. */
+	/** Caller's description of how open-ended the work is; steers the child's auto thinking classification. */
 	solutionSpace?: string;
+	/**
+	 * An exact thinking selector, primarily for panel dispatch. When no coarse
+	 * effort or explicit model selector overrides it in the executor, this
+	 * takes precedence over the effective agent-definition default.
+	 */
+	thinkingLevel?: ConfiguredThinkingLevel;
 	identity?: StructuredSubagentIdentity;
 	index?: number;
 	parentToolCallId?: string;
@@ -177,6 +196,10 @@ export interface EffectiveSubagentPolicy {
 	applyChanges: boolean;
 	enableLsp: boolean;
 	enableIrc: boolean;
+	/** Whether the child may receive MCP capabilities. */
+	enableMCP: boolean;
+	/** Whether executor tool names are limited to the supplied agent definition and yield. */
+	restrictToolNames: boolean;
 }
 
 /** Settled child execution plus data needed by the frontends' own rendering. */
@@ -208,6 +231,8 @@ export class StructuredSubagentError extends Error {
 }
 
 const PLAN_MODE_TOOLS = ["read", "grep", "glob", "web_search"] as const;
+
+const PANEL_TOOL_NAMES: Record<string, true> = { read: true, grep: true, glob: true, yield: true };
 
 function renderSubagentPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, { assignment: assignment.trim() });
@@ -247,6 +272,69 @@ function createPlanModeAgent(agent: AgentDefinition): AgentDefinition {
 		spawns: undefined,
 		prewalk: undefined,
 	};
+}
+
+function assertPanelInvocationAllowed(request: StructuredSubagentRequest): PanelAgentDefinition {
+	const agent = request.agentDefinition;
+	if (!agent) {
+		throw new StructuredSubagentError("preflight", "Panel subagents require a bundled agent definition.");
+	}
+	if (request.agent !== undefined) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Panel subagents use their bundled agent definition; agent selection is unavailable.",
+		);
+	}
+	if (request.isolation !== undefined) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Panel subagents do not support isolation, apply, or merge controls.",
+		);
+	}
+	if (request.effort !== undefined) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Panel subagents use exact thinking selectors; coarse effort is unavailable.",
+		);
+	}
+	if (request.thinkingLevel === ThinkingLevel.Inherit) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Panel subagents require an explicit thinking selector instead of inherit.",
+		);
+	}
+	if (request.enableIrc !== undefined || request.enableLsp !== undefined) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Panel subagent IRC and LSP policy is controlled by its bundled agent definition.",
+		);
+	}
+	if (agent.source !== "bundled") {
+		throw new StructuredSubagentError("preflight", 'Panel agent definitions must have source "bundled".');
+	}
+	if (agent.spawns !== undefined) {
+		throw new StructuredSubagentError("preflight", "Panel agent definitions may not declare nested spawns.");
+	}
+	if (agent.prewalk !== undefined || (agent.autoloadSkills?.length ?? 0) > 0) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Panel agent definitions may not declare prewalk or autoloaded skills.",
+		);
+	}
+	if (!agent.tools?.length) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Panel agent definitions must explicitly declare at least one tool.",
+		);
+	}
+	const unsupportedTools = agent.tools.filter(tool => !PANEL_TOOL_NAMES[tool]);
+	if (unsupportedTools.length > 0) {
+		throw new StructuredSubagentError(
+			"preflight",
+			`Panel agent definitions may only use read-only tools: ${unsupportedTools.join(", ")}.`,
+		);
+	}
+	return agent;
 }
 
 function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode: boolean): void {
@@ -291,6 +379,46 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 	}
 }
 
+function resolvePanelSubagentPolicy(request: StructuredSubagentRequest): EffectiveSubagentPolicy {
+	const agent = assertPanelInvocationAllowed(request);
+	const planMode = request.session.getPlanModeState?.()?.enabled === true;
+	const schema = resolveSchema(request, agent);
+	if (schema.source === "caller" || (schema.source !== "none" && schema.mode === "strict")) {
+		const { error } = buildOutputValidator(schema.schema);
+		if (error) {
+			const scope =
+				schema.source === "caller" ? (schema.mode === "strict" ? "strict caller" : "caller") : "strict effective";
+			throw new StructuredSubagentError("preflight", `Invalid ${scope} output schema: ${error}`);
+		}
+	}
+	const parentActiveModelPattern = request.session.getActiveModelString?.();
+	return {
+		discovery: { agents: [agent], projectAgentsDir: null },
+		agentName: agent.name,
+		agent,
+		// Panel definitions are already capability attenuated. Never inject the
+		// plan-mode prompt or tool mutation just because the parent is planning.
+		effectiveAgent: agent,
+		modelOverride: resolveConfiguredModelPatterns({
+			settingsOverride: request.model,
+			agentModel: agent.model,
+			settings: request.session.settings,
+			activeModelPattern: parentActiveModelPattern,
+			fallbackModelPattern: request.session.getModelString?.(),
+		}),
+		parentActiveModelPattern,
+		schema,
+		planMode,
+		isIsolated: false,
+		mergeMode: "patch",
+		applyChanges: false,
+		enableLsp: agent.allowLsp === true,
+		enableIrc: false,
+		enableMCP: false,
+		restrictToolNames: true,
+	};
+}
+
 /**
  * In-flight agent discovery, keyed by resolved cwd, the effective extension
  * roots and the provider/source toggles `discoverAgents` consults. Concurrent
@@ -333,6 +461,15 @@ export async function resolveEffectiveSubagentPolicy(
 	request: StructuredSubagentRequest,
 ): Promise<EffectiveSubagentPolicy> {
 	await request.session.settings.reloadFromDisk();
+	if (request.invocationKind === "panel") {
+		return resolvePanelSubagentPolicy(request);
+	}
+	if (request.agentDefinition !== undefined) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Bundled agent definitions are only available for panel subagents.",
+		);
+	}
 	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
 	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;
@@ -433,6 +570,8 @@ export async function resolveEffectiveSubagentPolicy(
 			(request.enableIrc ??
 				(request.session.enableIrc !== false &&
 					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
+		enableMCP: !planMode && (request.session.enableMCP ?? true),
+		restrictToolNames: planMode,
 	};
 }
 
@@ -502,7 +641,7 @@ async function leaseArtifacts(
 	}
 	const artifactsDir = path.join(
 		os.tmpdir(),
-		`${invocationKind === "eval" ? "omp-eval-agent" : "omp-task"}-${Snowflake.next()}`,
+		`${invocationKind === "eval" ? "omp-eval-agent" : invocationKind === "panel" ? "omp-panel" : "omp-task"}-${Snowflake.next()}`,
 	);
 	await fs.mkdir(artifactsDir, { recursive: true });
 	return { sessionFile: null, artifactsDir, temporary: true, unregister: registerArtifactsDir(artifactsDir) };
@@ -523,10 +662,13 @@ function buildExecutorOptions(
 	id: string,
 ): ExecutorOptions {
 	const { session } = request;
-	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
+	const { skills, autoloadSkills } =
+		request.invocationKind === "panel"
+			? { skills: [], autoloadSkills: [] }
+			: resolveAutoloadSkills(session, policy.agent);
 	const localProtocolOptions = sessionLocalProtocolOptions(session);
-	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
-	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+	const restrictToolNames = policy.restrictToolNames || session.restrictToolNames === true;
+	const enableMCP = !restrictToolNames && policy.enableMCP;
 	return {
 		cwd: session.cwd,
 		additionalDirectories: session.additionalDirectories,
@@ -554,7 +696,7 @@ function buildExecutorOptions(
 		compactionThresholdOverride: policy.compactionThresholdOverride,
 		oauthAccountPools: policy.oauthAccountPools,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
-		thinkingLevel: policy.effectiveAgent.thinkingLevel,
+		thinkingLevel: request.thinkingLevel ?? policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,
 		solutionSpace: request.solutionSpace?.trim() || undefined,
 		...(policy.schema.source === "none"
