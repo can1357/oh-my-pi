@@ -117,7 +117,7 @@ async function runWithDetachedModeDraft(
 /** `/fast status` label for the active model: "ultra" for the Ultrafast tier, "on" for priority, else "off". */
 function formatFastModeStatus(session: AgentSession): string {
 	if (session.isUltrafastModeEnabled()) return "ultra";
-	return session.isFastModeEnabled() ? "on" : "off";
+	return session.isFastModeActive() ? "on" : "off";
 }
 
 const FAST_USAGE = "Usage: /fast [on|ultra|off|status]";
