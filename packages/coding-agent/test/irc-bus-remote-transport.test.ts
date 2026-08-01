@@ -97,4 +97,31 @@ describe("IrcBus RemoteTransport seam", () => {
 		const receipt = await bus.send({ from: "Main", to: "ghost", body: "hi" });
 		expect(receipt.outcome).toBe("failed");
 	});
+
+	it("routes a `remote`-kind proxy ref to the transport (murmur-q00p), not local delivery", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
+		const bus = new IrcBus(registry);
+		const { transport, seen } = recordingTransport("injected");
+		bus.setRemoteTransport(transport);
+
+		const receipt = await bus.send({ from: "Main", to: "beatrice", body: "hi remote" });
+
+		expect(receipt).toEqual({ to: "beatrice", outcome: "injected" });
+		expect(seen).toHaveLength(1);
+		expect(seen[0]!.to).toBe("beatrice");
+	});
+
+	it("deliverInbound rejects a `remote`-kind target and never bounces to the transport", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
+		const bus = new IrcBus(registry);
+		const { transport, seen } = recordingTransport("injected");
+		bus.setRemoteTransport(transport);
+
+		const { receipt } = await bus.deliverInbound({ from: "peer", to: "beatrice", body: "hi" });
+
+		expect(receipt.outcome).toBe("failed");
+		expect(seen).toHaveLength(0);
+	});
 });

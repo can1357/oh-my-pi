@@ -148,9 +148,9 @@ export class IrcBus {
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
 	): Promise<IrcDeliveryReceipt> {
 		const ref = this.#registry.get(message.to);
-		if (!ref) {
-			// Local-registry MISS: hand off to the remote transport if one is installed
-			// (murmur bridge), else fail. This is the ONLY branch that may leave the process.
+		if (!ref || ref.kind === "remote") {
+			// Local-registry MISS, or a `remote` proxy peer (murmur-q00p): hand off to the remote
+			// transport if one is installed (murmur bridge), else fail. Only branch that leaves the process.
 			if (this.#remote) return this.#remote.send(message);
 			return {
 				to: message.to,
@@ -175,7 +175,7 @@ export class IrcBus {
 	): Promise<{ receipt: IrcDeliveryReceipt; id: string }> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		const ref = this.#registry.get(message.to);
-		if (!ref) {
+		if (!ref || ref.kind === "remote") {
 			return {
 				receipt: { to: message.to, outcome: "failed", error: `Unknown agent "${message.to}" — not on this node.` },
 				id: message.id,
