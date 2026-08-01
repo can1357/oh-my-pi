@@ -25,6 +25,11 @@ while [ -L "$self" ]; do
 	*) self=$(dirname "$self")/$link ;;
 	esac
 done
+
+# Preserve the wrapper for a child that resumes this session after a source
+# rebuild. Re-running Bun directly would skip the cwd-restoring preload above.
+OMP_AUTO_RESTART_COMMAND=$self
+export OMP_AUTO_RESTART_COMMAND
 scripts_dir=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd -P)
 cli=$scripts_dir/../src/cli.ts
 preload=$scripts_dir/omp.ts

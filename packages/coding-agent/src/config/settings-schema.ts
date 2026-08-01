@@ -477,6 +477,22 @@ export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
 	setupVersion: { type: "number", default: 0 },
 
+	/**
+	 * Restart a persisted interactive session after its running executable is
+	 * replaced. The current turn always settles first; unsaved editor text is
+	 * restored through the normal session-resume path.
+	 */
+	"settings.autoRestartOnUpdate": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Startup & Updates",
+			label: "Auto-restart after update",
+			description:
+				"When the running OMP executable changes, resume this session with the new version after the current turn",
+		},
+	},
 	// Auth broker — credentials proxied through a remote `omp auth-broker serve`
 	// host. Hidden from the UI; populate via env vars or hand-edited config.yml.
 	// Env (`OMP_AUTH_BROKER_URL` / `OMP_AUTH_BROKER_TOKEN`) takes precedence so
