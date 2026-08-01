@@ -7,9 +7,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { IrcBus, type RemoteTransport } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 
-function recordingTransport(outcome: "injected" | "failed" = "injected"): { transport: RemoteTransport; seen: IrcMessage[] } {
+function recordingTransport(outcome: "injected" | "failed" = "injected"): {
+	transport: RemoteTransport;
+	seen: IrcMessage[];
+} {
 	const seen: IrcMessage[] = [];
 	return {
 		seen,
@@ -123,5 +127,63 @@ describe("IrcBus RemoteTransport seam", () => {
 
 		expect(receipt.outcome).toBe("failed");
 		expect(seen).toHaveLength(0);
+	});
+
+	it("deliverInbound to a live local recipient delivers in-process and never re-forwards to the transport (murmur-ffh4)", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "worker",
+			displayName: "worker",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			status: "running",
+		});
+		const bus = new IrcBus(registry);
+		const { transport, seen } = recordingTransport();
+		bus.setRemoteTransport(transport);
+
+		// A message that arrived FROM murmur (inbound) delivers to the local waiter in-process and
+		// must NOT bounce back onto the bus — the inbound-never-re-forwarded invariant (contract §8).
+		const reply = bus.wait("worker", { from: "alice" }, 1000);
+		const { receipt } = await bus.deliverInbound({ from: "alice", to: "worker", body: "from murmur" });
+
+		expect(receipt.outcome).toBe("injected");
+		expect(seen).toHaveLength(0);
+		expect((await reply)?.body).toBe("from murmur");
+	});
+
+	it("the Main-UI relay of an inbound message is display-only and never re-enters the transport (murmur-ffh4 no echo loop)", async () => {
+		const registry = AgentRegistry.global();
+		const relayed: unknown[] = [];
+		// `Main` is both the omp root and (in a bridged cluster) a murmur roster entry — the exact
+		// double-membership that could loop. Its UI relay must observe cross-agent traffic display-only,
+		// never re-dispatching it onto the transport.
+		registry.register({
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			session: { emitIrcRelayObservation: () => relayed.push(1) } as unknown as AgentSession,
+			status: "running",
+		});
+		registry.register({
+			id: "worker",
+			displayName: "worker",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			status: "running",
+		});
+		const bus = new IrcBus(registry);
+		const { transport, seen } = recordingTransport();
+		bus.setRemoteTransport(transport);
+
+		const reply = bus.wait("worker", { from: "alice" }, 1000);
+		const { receipt } = await bus.deliverInbound({ from: "alice", to: "worker", body: "hi worker" });
+		await reply;
+
+		expect(receipt.outcome).toBe("injected");
+		expect(seen).toHaveLength(0); // inbound never bounces outbound
+		expect(relayed).toHaveLength(1); // Main got a display-only copy — the relay ran but did not re-enter delivery
 	});
 });
