@@ -16,8 +16,11 @@ function coordinationErrorResult(text: string, details: CoordinationDetails): Ag
 /** Messaging is available to subagents and to top-level sessions able to spawn peers. */
 export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
 	if (taskDepth > 0) return true;
+	// Top-level session: peers exist if it can still spawn subagents (the capacity gate the task tool
+	// uses, reused to avoid drift) OR a remote transport is installed — the murmur bridge seeds remote
+	// cluster peers as proxy refs (murmur-q00p), so even a leaf root has peers to reach.
 	const maxDepth = cfgTaskMaxRecursionDepth.get(settings);
-	return canSpawnAtDepth(maxDepth, taskDepth);
+	return canSpawnAtDepth(maxDepth, taskDepth) || IrcBus.global().hasRemoteTransport();
 }
 
 export function formatIncoming(msg: IrcMessage): string {

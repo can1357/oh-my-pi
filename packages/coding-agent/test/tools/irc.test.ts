@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { isIrcEnabled } from "@oh-my-pi/pi-coding-agent/irc/messaging";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -513,6 +514,7 @@ describe("IRC", () => {
 		});
 	});
 
+
 	describe("AgentSession.deliverIrcMessage", () => {
 		it("wakes an idle session with a real turn and emits the irc_message event", async () => {
 			const { session } = createRealSession();
@@ -636,5 +638,25 @@ describe("IRC", () => {
 			if (parentSteer?.role !== "user") throw new Error("expected queued parent IRC steer");
 			expect(parentSteer.content).toContain("change approach");
 		});
+	});
+});
+
+describe("isIrcEnabled", () => {
+	it("returns true for a leaf top-level session once a remote transport is installed (murmur-q00p)", () => {
+		const settings = Settings.isolated();
+		settings.set("task.maxRecursionDepth", 0); // cannot spawn — no LOCAL peers
+		const bus = IrcBus.global();
+		try {
+			expect(isIrcEnabled(settings, 0)).toBe(false);
+			// The murmur bridge installs a transport + seeds remote proxies: a leaf root now has peers.
+			bus.setRemoteTransport({
+				async send(m) {
+					return { to: m.to, outcome: "injected" };
+				},
+			});
+			expect(isIrcEnabled(settings, 0)).toBe(true);
+		} finally {
+			bus.setRemoteTransport(undefined);
+		}
 	});
 });
