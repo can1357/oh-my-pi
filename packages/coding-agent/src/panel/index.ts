@@ -22,13 +22,16 @@ export {
 	renderPanelSynthesisInput,
 } from "./prompts";
 export {
-	formatPanelCompletionStatus,
 	PANEL_MAX_CONCURRENCY,
 	type PanelRunOptions,
+	type PanelRunPlan,
+	type PanelRunPreview,
 	type PanelRunResult,
 	type PanelUsage,
+	preparePanelRun,
 	runPanel,
 } from "./runtime";
+export { formatPanelCompletionStatus, formatPanelProgress } from "./status";
 export {
 	PANEL_MAX_MEMBERS,
 	PANEL_PERSONA_TOOLS,
