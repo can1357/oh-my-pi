@@ -43,7 +43,19 @@ export const cfgAutoResume = register({
 			"Automatically resume the most recent session in the current directory. If its model cannot be restored and model fallback is disabled, interactive startup warns and starts a new session without the saved history",
 	},
 });
-
+/** Restart a persisted interactive session when the running executable is replaced. */
+export const cfgSettingsAutoRestartOnUpdate = register({
+	id: "settings.autoRestartOnUpdate",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Auto-restart after update",
+		description:
+			"When the running OMP executable changes, resume this session with the new version after the current turn",
+	},
+});
 export const cfgGitEnabled = register({
 	id: "git.enabled",
 	type: "boolean",
