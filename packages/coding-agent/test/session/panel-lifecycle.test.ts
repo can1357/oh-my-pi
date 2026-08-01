@@ -20,7 +20,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
-import type { PanelRunOptions, PanelRunResult } from "../../src/panel/runtime";
+import type { PanelRunOptions, PanelRunPlan, PanelRunResult } from "../../src/panel/runtime";
 
 // `runPanelImpl` is swapped per test; the mock factory below delegates to
 // whatever implementation the current test installed. Bun keys `mock.module`
@@ -28,7 +28,9 @@ import type { PanelRunOptions, PanelRunResult } from "../../src/panel/runtime";
 // every specifier that resolves to `src/panel/runtime.ts`, including the
 // relative one `agent-session.ts` uses internally.
 let runPanelImpl: (options: PanelRunOptions) => Promise<PanelRunResult>;
+let preparePanelRunImpl: (options: Omit<PanelRunOptions, "onProgress" | "plan" | "signal">) => PanelRunPlan;
 mock.module("../../src/panel/runtime", () => ({
+	preparePanelRun: (options: Omit<PanelRunOptions, "onProgress" | "plan" | "signal">) => preparePanelRunImpl(options),
 	runPanel: (options: PanelRunOptions) => runPanelImpl(options),
 }));
 
@@ -42,6 +44,7 @@ function fakePanelResult(): PanelRunResult {
 		role: { roleId: "test", role: { strategy: "independent", members: [] } },
 		members: [],
 		results: [],
+		cancelled: false,
 		usage: { tokens: 0, requests: 0, cost: 0 },
 		synthesisInput: "synthesis",
 	} as unknown as PanelRunResult;
@@ -71,6 +74,9 @@ describe("AgentSession panel lifecycle", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
+		preparePanelRunImpl = () => {
+			throw new Error("preparePanelRun is not used by this test");
+		};
 	});
 
 	afterEach(async () => {
@@ -111,6 +117,33 @@ describe("AgentSession panel lifecycle", () => {
 		// The session admits a new run once the prior one has settled and cleared.
 		runPanelImpl = () => Promise.resolve(fakePanelResult());
 		await expect(session.runPanel({ taskMode: "answer", request: "third" })).resolves.toBeDefined();
+	});
+
+	it("dispatches an approved plan through its original ToolSession", async () => {
+		const plan = {
+			preview: {
+				role: { roleId: "prepared", role: { strategy: "independent", members: [] } },
+				members: [],
+			},
+			taskMode: "answer",
+			request: "prepared request",
+		} as PanelRunPlan;
+		let preparedSession: PanelRunOptions["session"] | undefined;
+		let dispatched: PanelRunOptions | undefined;
+		preparePanelRunImpl = options => {
+			preparedSession = options.session;
+			return plan;
+		};
+		runPanelImpl = options => {
+			dispatched = options;
+			return Promise.resolve(fakePanelResult());
+		};
+
+		const approved = session.preparePanelRun({ taskMode: "answer", request: "prepared request" });
+		await session.runPanel({ taskMode: "answer", request: "prepared request", plan: approved });
+
+		expect(dispatched?.plan).toBe(plan);
+		expect(dispatched?.session).toBe(preparedSession);
 	});
 
 	it("abort() signals a dispatched active panel immediately and awaits its settlement before returning", async () => {

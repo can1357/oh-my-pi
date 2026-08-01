@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	createPanelPersonaAgent,
+	formatPanelProgress,
 	PANEL_ASSIGNMENT_MAX_BYTES,
 	PANEL_ASSIGNMENT_MAX_CHARS,
 	PANEL_INDEPENDENT_AGENT,
@@ -12,6 +15,7 @@ import {
 	type PanelRole,
 	type PanelSettings,
 	parsePanelSettings,
+	preparePanelRun,
 	type ResolvedPanelMember,
 	renderPanelAssignment,
 	renderPanelSynthesisInput,
@@ -115,6 +119,18 @@ test("resolves the default and explicit roles while rejecting inherited role nam
 		expect(() => resolvePanelRole(settings, roleId)).toThrow(PanelConfigError);
 	}
 });
+
+test("live panel progress counts both missing and explicitly pending members", () => {
+	expect(
+		formatPanelProgress(
+			4,
+			new Map([
+				["member-1", { status: "running" as const }],
+				["member-2", { status: "pending" as const }],
+			]),
+		),
+	).toBe("Panel: 0 completed, 0 failed, 0 aborted, 1 running, 3 pending.");
+});
 test("runtime rejects a run that combines a saved requestedRole with an ephemeralRole", async () => {
 	const fakeSession = {} as unknown as ToolSession;
 
@@ -127,6 +143,73 @@ test("runtime rejects a run that combines a saved requestedRole with an ephemera
 			ephemeralRole: independentRole(),
 		}),
 	).rejects.toThrow(PanelConfigError);
+});
+
+test("runtime retains a cancelled approved plan after model availability changes", async () => {
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	const gptModel = getBundledModel("openai", "gpt-5.4");
+	if (!model || !gptModel) throw new Error("Test model not found");
+	const controller = new AbortController();
+	let available = [model, gptModel];
+	const session = {
+		settings: Settings.isolated({
+			panel: {
+				roles: {
+					cancelled: {
+						strategy: "independent",
+						members: [{ model: "anthropic/claude-sonnet-4-5" }, { model: "openai/gpt-5.4" }],
+					},
+				},
+			},
+		}),
+		modelRegistry: {
+			getAvailable: () => available,
+			hasConfiguredAuth: () => true,
+		},
+	} as unknown as ToolSession;
+
+	const plan = preparePanelRun({
+		session,
+		taskMode: "answer",
+		request: "cancelled before dispatch",
+		requestedRole: "cancelled",
+	});
+	const reviewedMember = plan.preview.members[0]!;
+	expect(Object.isFrozen(plan.preview)).toBe(true);
+	expect(Object.isFrozen(plan.preview.role)).toBe(true);
+	expect(Object.isFrozen(plan.preview.role.role)).toBe(true);
+	expect(Object.isFrozen(plan.preview.role.role.members)).toBe(true);
+	expect(Object.isFrozen(plan.preview.role.role.members[0])).toBe(true);
+	expect(Object.isFrozen(plan.preview.members)).toBe(true);
+	expect(Object.isFrozen(reviewedMember)).toBe(true);
+	expect(() => {
+		(reviewedMember as unknown as { selector: string }).selector = "openai/gpt-5.5";
+	}).toThrow(TypeError);
+	expect(() => {
+		(plan.preview.members as unknown as ResolvedPanelMember[])[0] = {
+			...reviewedMember,
+			selector: "openai/gpt-5.5",
+		};
+	}).toThrow(TypeError);
+	expect(() => {
+		(plan.preview.role as unknown as { roleId: string }).roleId = "mutated";
+	}).toThrow(TypeError);
+	expect(plan.preview.members[0]).toBe(reviewedMember);
+	available = [];
+	controller.abort();
+
+	const result = await runPanel({
+		session,
+		taskMode: "answer",
+		request: "cancelled before dispatch",
+		requestedRole: "cancelled",
+		plan,
+		signal: controller.signal,
+	});
+
+	expect(result.cancelled).toBe(true);
+	expect(result.members).toBe(plan.preview.members);
+	expect(result.results.every(member => member.status === "aborted")).toBe(true);
 });
 test("personas resolve built-ins without configuration and custom personas override them", () => {
 	const builtinSettings = parsePanelSettings({
