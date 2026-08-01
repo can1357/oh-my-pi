@@ -54,6 +54,8 @@ export interface PanelRunOptions {
 	readonly requestedRole?: string;
 	/** A one-off role parsed and validated for this run only. Mutually exclusive with `requestedRole`. */
 	readonly ephemeralRole?: PanelRole;
+	/** Immutable prepared dispatch returned by {@link preparePanelRun}. */
+	readonly plan?: PanelRunPlan;
 	readonly signal?: AbortSignal;
 	readonly onProgress?: (progress: AgentProgress) => void;
 }
@@ -63,8 +65,26 @@ export interface PanelRunResult {
 	readonly role: ResolvedPanelRole;
 	readonly members: readonly ResolvedPanelMember[];
 	readonly results: readonly PanelistResult[];
+	/** True only when the panel-level cancellation signal was aborted. */
+	readonly cancelled: boolean;
 	readonly usage: PanelUsage;
 	readonly synthesisInput: string;
+}
+
+/** A fully resolved, pre-dispatch panel lineup. */
+export interface PanelRunPreview {
+	readonly role: ResolvedPanelRole;
+	readonly members: readonly ResolvedPanelMember[];
+}
+
+/**
+ * An approved, immutable panel dispatch. It retains the exact resolved role,
+ * members, assignments, and persona configuration selected for one request.
+ */
+export interface PanelRunPlan {
+	readonly preview: PanelRunPreview;
+	readonly taskMode: PanelTaskMode;
+	readonly request: string;
 }
 
 interface PreparedPanelMember {
@@ -72,6 +92,15 @@ interface PreparedPanelMember {
 	readonly assignment: string;
 	readonly agentDefinition: AgentDefinition;
 }
+
+interface PreparedPanelRun {
+	readonly session: ToolSession;
+	readonly requestedRole?: string;
+	readonly ephemeralRole?: PanelRole;
+	readonly prepared: PreparedPanelMember[];
+}
+
+const preparedPanelRuns = new WeakMap<PanelRunPlan, PreparedPanelRun>();
 
 function memberPath(roleId: string, index: number, field: "model" | "thinking" | "persona"): string {
 	return `panel.roles.${roleId}.members[${index}].${field}`;
@@ -147,6 +176,53 @@ function resolveMembers(options: { session: ToolSession; role: ResolvedPanelRole
 	});
 }
 
+interface ResolvedPanelRun {
+	readonly settings: PanelSettings;
+	readonly preview: PanelRunPreview;
+}
+
+function resolvePanelRun(
+	options: Pick<PanelRunOptions, "session" | "taskMode" | "requestedRole" | "ephemeralRole">,
+): ResolvedPanelRun {
+	const { session, taskMode, requestedRole, ephemeralRole } = options;
+	if (requestedRole !== undefined && ephemeralRole !== undefined) {
+		throw new PanelConfigError("panel", "requestedRole and ephemeralRole cannot be combined");
+	}
+
+	const settings = parsePanelSettings(session.settings.get("panel"));
+	const role =
+		ephemeralRole === undefined
+			? resolvePanelRole(settings, requestedRole)
+			: resolveEphemeralPanelRole(ephemeralRole, settings);
+	const members = resolveMembers({ session, role });
+	validateResolvedPanelRole(role.roleId, role.role, members, taskMode);
+	return { settings, preview: { role, members } };
+}
+
+/** Clone and freeze the preview boundary before it can be handed to the TUI. */
+function freezePanelPreview(preview: PanelRunPreview): PanelRunPreview {
+	const roleMembers = Object.freeze(preview.role.role.members.map(member => Object.freeze({ ...member })));
+	const roleConfig = Object.freeze({ strategy: preview.role.role.strategy, members: roleMembers });
+	const role = Object.freeze({ roleId: preview.role.roleId, role: roleConfig });
+	const members = Object.freeze(preview.members.map(member => Object.freeze({ ...member })));
+	return Object.freeze({ role, members });
+}
+
+function preparedPanelRunFor(options: PanelRunOptions, plan: PanelRunPlan): PreparedPanelRun {
+	const prepared = preparedPanelRuns.get(plan);
+	if (
+		prepared === undefined ||
+		prepared.session !== options.session ||
+		plan.taskMode !== options.taskMode ||
+		plan.request !== options.request ||
+		prepared.requestedRole !== options.requestedRole ||
+		prepared.ephemeralRole !== options.ephemeralRole
+	) {
+		throw new PanelConfigError("panel", "approved panel plan does not match this dispatch");
+	}
+	return prepared;
+}
+
 function prepareMembers(options: {
 	role: ResolvedPanelRole;
 	members: readonly ResolvedPanelMember[];
@@ -172,6 +248,35 @@ function prepareMembers(options: {
 	});
 }
 
+/**
+ * Resolve, validate, and prepare an immutable panel dispatch before a user
+ * approves it. Passing the returned plan to {@link runPanel} prevents a second
+ * settings/model resolution between preview and member dispatch.
+ */
+export function preparePanelRun(options: Omit<PanelRunOptions, "onProgress" | "plan" | "signal">): PanelRunPlan {
+	const resolved = resolvePanelRun(options);
+	const preview = freezePanelPreview(resolved.preview);
+	const prepared = prepareMembers({
+		role: preview.role,
+		members: preview.members,
+		taskMode: options.taskMode,
+		request: options.request,
+		settings: resolved.settings,
+	});
+	const plan = Object.freeze({
+		preview,
+		taskMode: options.taskMode,
+		request: options.request,
+	});
+	preparedPanelRuns.set(plan, {
+		session: options.session,
+		requestedRole: options.requestedRole,
+		ephemeralRole: options.ephemeralRole,
+		prepared,
+	});
+	return plan;
+}
+
 function failedPanelistResult(options: {
 	member: ResolvedPanelMember;
 	status: "failed" | "aborted";
@@ -183,6 +288,7 @@ function failedPanelistResult(options: {
 		output: "",
 		error: options.error,
 		truncated: false,
+
 		durationMs: 0,
 		tokens: 0,
 		requests: 0,
@@ -223,39 +329,18 @@ function aggregateUsage(results: readonly PanelistResult[]): PanelUsage {
 	);
 }
 
-/** Summary line shared by text and TUI panel command completions. */
-export function formatPanelCompletionStatus(result: PanelRunResult): string {
-	let completed = 0;
-	let failed = 0;
-	let aborted = 0;
-	for (const panelist of result.results) {
-		if (panelist.status === "completed") completed += 1;
-		else if (panelist.status === "failed") failed += 1;
-		else aborted += 1;
-	}
-	const { tokens, requests, cost } = result.usage;
-	return `Panel: ${completed} completed, ${failed} failed, ${aborted} aborted. Usage: ${tokens.toLocaleString()} tokens, ${requests.toLocaleString()} request${requests === 1 ? "" : "s"}, $${cost.toFixed(4)}.`;
-}
-
 /**
  * Resolve and run every member of a saved role or parsed one-off role, retaining
  * a typed record for every success, failure, and cancellation before rendering
  * primary-session synthesis input.
  */
 export async function runPanel(options: PanelRunOptions): Promise<PanelRunResult> {
-	const { session, taskMode, request, requestedRole, ephemeralRole, signal, onProgress } = options;
-	if (requestedRole !== undefined && ephemeralRole !== undefined) {
-		throw new PanelConfigError("panel", "requestedRole and ephemeralRole cannot be combined");
-	}
-
-	const settings = parsePanelSettings(session.settings.get("panel"));
-	const role =
-		ephemeralRole === undefined
-			? resolvePanelRole(settings, requestedRole)
-			: resolveEphemeralPanelRole(ephemeralRole, settings);
-	const members = resolveMembers({ session, role });
-	validateResolvedPanelRole(role.roleId, role.role, members, taskMode);
-	const prepared = prepareMembers({ role, members, taskMode, request, settings });
+	const { session, taskMode, request, signal, onProgress } = options;
+	const plan = options.plan ?? preparePanelRun(options);
+	const {
+		preview: { role, members },
+	} = plan;
+	const { prepared } = preparedPanelRunFor(options, plan);
 
 	const settled = await mapWithConcurrencyLimitAllSettled(
 		prepared,
@@ -278,7 +363,8 @@ export async function runPanel(options: PanelRunOptions): Promise<PanelRunResult
 		signal,
 	);
 
-	const results = settled.results.map((result, index): PanelistResult => {
+	const results = Array.from({ length: prepared.length }, (_, index): PanelistResult => {
+		const result = settled.results[index];
 		const member = prepared[index].member;
 		if (result === undefined) {
 			return failedPanelistResult({
@@ -297,6 +383,7 @@ export async function runPanel(options: PanelRunOptions): Promise<PanelRunResult
 		return panelistResultFromExecution(member, result.value.result);
 	});
 	const usage = aggregateUsage(results);
+	const cancelled = signal?.aborted === true;
 	const synthesisInput = renderPanelSynthesisInput({
 		roleId: role.roleId,
 		taskMode,
@@ -305,5 +392,5 @@ export async function runPanel(options: PanelRunOptions): Promise<PanelRunResult
 		results,
 	});
 
-	return { role, members, results, usage, synthesisInput };
+	return { role, members, results, usage, synthesisInput, cancelled };
 }

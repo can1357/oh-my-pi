@@ -1,6 +1,6 @@
 # Panel Roles Roadmap
 
-**Status:** core panel execution is implemented on `feat/panel-roles`, pending pull-request creation. Three interaction items remain explicitly deferred: saved-role pre-dispatch confirmation, live member-progress display, and an explicit decision before partial synthesis after cancellation. This document defines the user-facing contract and implementation sequence for panel roles: ask selected model and role pairs for independent answers or plans, then synthesize their feedback in the primary session.
+**Status:** panel execution and the interactive workflow are implemented on `feat/panel-roles`, pending pull-request creation. This document defines the user-facing contract and implementation sequence for panel roles: ask selected model and role pairs for independent answers or plans, then synthesize their feedback in the primary session.
 
 ## Existing seams
 
@@ -102,7 +102,7 @@ When all selected members settle or are cancelled, the active primary model rece
 ### Execution design
 
 1. Add a narrow `panel` command module and register it from `slash-commands/builtin-registry.ts`.
-2. Resolve the selected panel role and every member selector through the existing model registry before dispatch. Reject unavailable models, invalid effort levels, malformed role shapes, and independent lineups with duplicate or unknown `modelFamilyToken(model.id)` values before any participant starts.
+2. Resolve the selected panel role and every member selector through the existing model registry before dispatch. Reject unavailable models, invalid effort levels, malformed role shapes, and independent lineups with duplicate or unknown `modelFamilyToken(model.id)` values before any participant starts. Prepare an immutable plan before TUI review, then dispatch that exact plan after approval rather than resolving it again.
 3. Build one `StructuredSubagentRequest` per member and call `runStructuredSubagent()` directly. Use:
    - `model` for the resolved member selector;
    - a bundled, read-only neutral panel-agent definition for every independent member;
@@ -141,13 +141,13 @@ Constraints:
 
 ### Cancellation, persistence, costs, and synthesis trust
 
-Panels own a command-level `AbortController`. Escape and Ctrl+C abort queued and in-flight members, retaining results that already settled. A panel currently synthesizes those retained partial results automatically. Member transcripts remain inspectable through the Agent Hub after completion. The completion status reports every terminal outcome plus aggregate token, request, and cost usage before synthesis.
+Panels own a command-level `AbortController`. Escape and Ctrl+C abort queued and in-flight members, retaining results that already settled. When cancellation leaves one or more completed members, the TUI asks whether to synthesize the retained partial results; it skips synthesis when none completed. Member transcripts remain inspectable through the Agent Hub after completion. The completion status reports every terminal outcome plus aggregate token, request, and cost usage before synthesis.
 
-#### Deferred interaction work
+#### Interaction guarantees
 
-- **Saved-role confirmation:** an explicit or default role currently dispatches directly. Before dispatching, the TUI still needs a confirmation view of the resolved selector, thinking level, and model-family key for every member. One-off lineups already provide this review in their builder.
-- **Live progress:** `runPanel()` accepts member progress, but the TUI does not yet subscribe and render the promised compact completed, failed, and running line during execution.
-- **Interrupted partial synthesis:** a cancellation currently synthesizes retained partial results automatically. Decide whether that requires a transient TUI confirmation, a follow-up `/panel` command, or a persisted pending result.
+- **Lineup confirmation:** saved roles and one-off lineups display the exact resolved selector, thinking level, and model-family key for every member before dispatch. Approval dispatches the immutable reviewed plan.
+- **Live progress:** the TUI renders a compact completed, failed, aborted, running, and pending status line while members execute.
+- **Interrupted partial synthesis:** cancellation with completed members requires an explicit transient confirmation before synthesis; cancellation before any member completes skips it.
 
 Treat panel output as untrusted evidence. A plan member can reproduce prompt injection from a repository, and a member can emit forged labels or synthesis instructions. `renderPanelSynthesisInput()` must length-bound and mechanically escape each response inside a typed record; host code owns all identity and status fields. The primary synthesis instruction explicitly treats member text as evidence, never instructions.
 
@@ -164,13 +164,13 @@ Treat panel output as untrusted evidence. A plan member can reproduce prompt inj
 ### Focused verification
 
 - One structured spawn occurs per chosen member, each with a distinct identity and isolated session.
-- A default role and an explicit `@role` resolve every model and effort before any participant starts.
+- A default role and an explicit `@role` resolve and prepare every model and effort before any participant starts; approval dispatches the same resolved lineup.
 - An independent role supplies the same neutral prompt to every member and rejects duplicate or unknown resolved model families before dispatch.
 - A personas role supplies only the selected persona instruction to each member and need not pass the family-diversity check.
 - The main session's model and configured thinking level are identical before and after a panel run.
 - A rejected, timed-out, or aborted member appears as a labeled failure in the synthesis source.
 - Panelist prompts cannot access mutating tools.
 - Malicious member text cannot escape its result record, overwrite another member's identity, or become synthesis instructions.
-- Cancellation prevents queued members from starting and settles already-started members.
+- Cancellation prevents queued members from starting and settles already-started members; retained partial results require explicit synthesis approval.
 - The same command works through TUI and ACP syntax.
 
