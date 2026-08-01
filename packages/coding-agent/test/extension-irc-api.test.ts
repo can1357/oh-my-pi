@@ -1,9 +1,9 @@
 /**
- * pi.irc — the scoped inbound-IRC ExtensionAPI surface (murmur-4e7n / PR-A).
+ * pi.irc — the scoped IRC ExtensionAPI surface (murmur-4e7n inbound, murmur-l5vv outbound).
  *
- * A narrow door onto the process-global IrcBus: `pi.irc.deliverInbound` delegates to
- * `IrcBus.global().deliverInbound`, so an extension (the murmur bridge) reaches inbound
- * delivery without the bus class ever being exported to extensions.
+ * A narrow door onto the process-global IrcBus so an extension (the murmur bridge) reaches
+ * inbound delivery (deliverInbound) and installs the outbound transport (setRemoteTransport)
+ * without the bus class ever being exported to extensions.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -53,5 +53,20 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		IrcBus.global().wait("Main", { from: "peer" }, 1000);
 		const { receipt } = await irc.deliverInbound({ from: "peer", to: "Main", body: "hi" });
 		expect(receipt.outcome).not.toBe("failed");
+	});
+
+	it("exposes setRemoteTransport and installs it on the global bus (a registry miss routes to it)", async () => {
+		const irc = await captureIrc();
+		expect(typeof irc.setRemoteTransport).toBe("function");
+		let seen: string | undefined;
+		irc.setRemoteTransport?.({
+			async send(message) {
+				seen = message.to;
+				return { to: message.to, outcome: "injected" };
+			},
+		});
+		const receipt = await IrcBus.global().send({ from: "Main", to: "remote-peer", body: "hi" });
+		expect(seen).toBe("remote-peer");
+		expect(receipt.outcome).toBe("injected");
 	});
 });
