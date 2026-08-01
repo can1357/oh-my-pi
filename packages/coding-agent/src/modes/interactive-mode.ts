@@ -93,7 +93,7 @@ import {
 	type McpConnectionFailure,
 	type McpConnectionStatusEvent,
 } from "../mcp/startup-events";
-import type { PanelRunResult } from "../panel/runtime";
+import type { PanelRunOptions, PanelRunResult } from "../panel/runtime";
 import type { PanelSettings, PanelTaskMode } from "../panel/types";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../plan-mode/approved-plan";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
@@ -5733,6 +5733,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showPanelRolePicker(settings: PanelSettings): Promise<string | undefined> {
 		return this.#selectorController.showPanelRolePicker(settings);
+	}
+
+	runPanelWithConfirmation(
+		options: Omit<PanelRunOptions, "onProgress" | "session" | "signal">,
+	): Promise<PanelRunResult | undefined> {
+		return this.#selectorController.runPanelWithConfirmation(options);
 	}
 
 	showPanelLineupBuilder(taskMode: PanelTaskMode, request: string): Promise<PanelRunResult | undefined> {

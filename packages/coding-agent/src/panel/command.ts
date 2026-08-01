@@ -1,7 +1,7 @@
 import { usage } from "../slash-commands/helpers/parse";
 import type { SlashCommandSpec } from "../slash-commands/types";
 import { parsePanelSettings } from "./config";
-import { formatPanelCompletionStatus } from "./runtime";
+import { formatPanelCompletionStatus } from "./status";
 import type { PanelSettings, PanelTaskMode } from "./types";
 
 const PANEL_USAGE = "Usage: /panel <answer|plan> [@role] <request>";
@@ -93,6 +93,15 @@ export const PANEL_SLASH_COMMAND: SlashCommandSpec = {
 			request: parsed.request,
 			...(parsed.requestedRole !== undefined ? { requestedRole: parsed.requestedRole } : {}),
 		});
+		if (result.cancelled) {
+			const completed = result.results.some(member => member.status === "completed");
+			await runtime.output(
+				completed
+					? `${formatPanelCompletionStatus(result)} Partial synthesis requires confirmation in the interactive TUI.`
+					: `${formatPanelCompletionStatus(result)} No member completed; synthesis was skipped.`,
+			);
+			return;
+		}
 		await runtime.output(formatPanelCompletionStatus(result));
 		return { prompt: result.synthesisInput };
 	},
@@ -128,13 +137,13 @@ export const PANEL_SLASH_COMMAND: SlashCommandSpec = {
 		}
 
 		if (parsed.requestedRole !== undefined) {
-			const result = await ctx.session.runPanel({
+			const result = await ctx.runPanelWithConfirmation({
 				taskMode: parsed.taskMode,
 				request: parsed.request,
 				requestedRole: parsed.requestedRole,
 			});
 			ctx.editor.setText("");
-			ctx.showStatus(formatPanelCompletionStatus(result));
+			if (!result) return;
 			return { prompt: result.synthesisInput };
 		}
 
@@ -148,9 +157,9 @@ export const PANEL_SLASH_COMMAND: SlashCommandSpec = {
 		}
 
 		if (panelSettings.defaultRole !== undefined) {
-			const result = await ctx.session.runPanel({ taskMode: parsed.taskMode, request: parsed.request });
+			const result = await ctx.runPanelWithConfirmation({ taskMode: parsed.taskMode, request: parsed.request });
 			ctx.editor.setText("");
-			ctx.showStatus(formatPanelCompletionStatus(result));
+			if (!result) return;
 			return { prompt: result.synthesisInput };
 		}
 
@@ -158,12 +167,12 @@ export const PANEL_SLASH_COMMAND: SlashCommandSpec = {
 		ctx.editor.setText("");
 		if (roleId === undefined) return;
 
-		const result = await ctx.session.runPanel({
+		const result = await ctx.runPanelWithConfirmation({
 			taskMode: parsed.taskMode,
 			request: parsed.request,
 			requestedRole: roleId,
 		});
-		ctx.showStatus(formatPanelCompletionStatus(result));
+		if (!result) return;
 		return { prompt: result.synthesisInput };
 	},
 };

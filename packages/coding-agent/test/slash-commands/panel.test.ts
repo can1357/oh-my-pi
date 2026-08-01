@@ -37,6 +37,7 @@ function acpRuntime(overrides?: { runPanel?: (options: unknown) => Promise<unkno
 		overrides?.runPanel ??
 			(async () => ({
 				results: [panelistResult("completed"), panelistResult("completed")],
+				cancelled: false,
 				usage: { tokens: 20, requests: 2, cost: 0.1 },
 				synthesisInput: "synthesis prompt",
 			})),
@@ -60,6 +61,7 @@ const SAVED_ROLE_PANEL_SETTINGS = {
 interface TuiRuntimeOverrides {
 	readonly panelSettings?: unknown;
 	readonly runPanel?: (options: unknown) => Promise<unknown>;
+	readonly runPanelWithConfirmation?: (options: unknown) => Promise<PanelRunResult | undefined>;
 	readonly showPanelRolePicker?: (settings: PanelSettings) => Promise<string | undefined>;
 	readonly showPanelLineupBuilder?: (taskMode: PanelTaskMode, request: string) => Promise<PanelRunResult | undefined>;
 }
@@ -69,9 +71,20 @@ function tuiRuntime(overrides: TuiRuntimeOverrides = {}) {
 		overrides.runPanel ??
 			(async () => ({
 				results: [panelistResult("completed"), panelistResult("completed")],
+				cancelled: false,
 				usage: { tokens: 20, requests: 2, cost: 0.1 },
 				synthesisInput: "tui synthesis prompt",
 			})),
+	);
+	const runPanelWithConfirmation = vi.fn(
+		overrides.runPanelWithConfirmation ??
+			(async () =>
+				({
+					results: [panelistResult("completed"), panelistResult("completed")],
+					cancelled: false,
+					usage: { tokens: 20, requests: 2, cost: 0.1 },
+					synthesisInput: "tui synthesis prompt",
+				}) as unknown as PanelRunResult),
 	);
 	const showStatus = vi.fn();
 	const setText = vi.fn();
@@ -86,12 +99,21 @@ function tuiRuntime(overrides: TuiRuntimeOverrides = {}) {
 			showStatus,
 			editor: { setText },
 			showPanelRolePicker,
+			runPanelWithConfirmation,
 			showPanelLineupBuilder,
 			refreshSlashCommandState: vi.fn(),
 			refreshSkillState: vi.fn(),
 		} as unknown as InteractiveModeContext,
 	};
-	return { runPanel, showStatus, setText, showPanelRolePicker, showPanelLineupBuilder, runtime };
+	return {
+		runPanel,
+		runPanelWithConfirmation,
+		showStatus,
+		setText,
+		showPanelRolePicker,
+		showPanelLineupBuilder,
+		runtime,
+	};
 }
 
 describe("/panel slash command", () => {
@@ -163,10 +185,11 @@ describe("/panel slash command", () => {
 		);
 	});
 
-	it("reports every terminal status plus aggregate usage and returns the synthesis prompt", async () => {
+	it("withholds partial synthesis in ACP because it cannot obtain a confirmation", async () => {
 		const h = acpRuntime({
 			runPanel: async () => ({
 				results: [panelistResult("completed"), panelistResult("failed"), panelistResult("aborted")],
+				cancelled: true,
 				usage: { tokens: 30, requests: 3, cost: 0.125 },
 				synthesisInput: "combined synthesis",
 			}),
@@ -175,9 +198,45 @@ describe("/panel slash command", () => {
 		const result = await executeAcpBuiltinSlashCommand("/panel plan build it", h.runtime);
 
 		expect(h.output).toHaveBeenCalledWith(
-			"Panel: 1 completed, 1 failed, 1 aborted. Usage: 30 tokens, 3 requests, $0.1250.",
+			"Panel: 1 completed, 1 failed, 1 aborted. Usage: 30 tokens, 3 requests, $0.1250. Partial synthesis requires confirmation in the interactive TUI.",
 		);
-		expect(result).toEqual({ prompt: "combined synthesis" });
+		expect(result).not.toEqual({ prompt: "combined synthesis" });
+	});
+
+	it("skips synthesis when every ACP panel member is aborted", async () => {
+		const h = acpRuntime({
+			runPanel: async () => ({
+				results: [panelistResult("aborted"), panelistResult("aborted")],
+				cancelled: true,
+				usage: { tokens: 0, requests: 0, cost: 0 },
+				synthesisInput: "must not be returned",
+			}),
+		});
+
+		const result = await executeAcpBuiltinSlashCommand("/panel answer build it", h.runtime);
+
+		expect(h.output).toHaveBeenCalledWith(
+			"Panel: 0 completed, 0 failed, 2 aborted. Usage: 0 tokens, 0 requests, $0.0000. No member completed; synthesis was skipped.",
+		);
+		expect(result).not.toEqual({ prompt: "must not be returned" });
+	});
+
+	it("synthesizes ACP results with member-only aborts", async () => {
+		const h = acpRuntime({
+			runPanel: async () => ({
+				results: [panelistResult("completed"), panelistResult("aborted")],
+				cancelled: false,
+				usage: { tokens: 10, requests: 1, cost: 0.1 },
+				synthesisInput: "timeout synthesis",
+			}),
+		});
+
+		const result = await executeAcpBuiltinSlashCommand("/panel answer build it", h.runtime);
+
+		expect(h.output).toHaveBeenCalledWith(
+			"Panel: 1 completed, 0 failed, 1 aborted. Usage: 10 tokens, 1 request, $0.1000.",
+		);
+		expect(result).toEqual({ prompt: "timeout synthesis" });
 	});
 
 	it("consumes lineup and personas in ACP with a TUI-required status", async () => {
@@ -203,11 +262,12 @@ describe("/panel slash command", () => {
 });
 
 describe("/panel slash command (TUI adapter over shared handle)", () => {
-	it("routes a saved-role answer through session.runPanel and clears the editor", async () => {
+	it("routes a saved-role answer through the TUI confirmation workflow and clears the editor", async () => {
 		const h = tuiRuntime();
 		const promptText = await executeBuiltinSlashCommand("/panel answer what now?", h.runtime);
 
-		expect(h.runPanel).toHaveBeenCalledWith({ taskMode: "answer", request: "what now?" });
+		expect(h.runPanelWithConfirmation).toHaveBeenCalledWith({ taskMode: "answer", request: "what now?" });
+		expect(h.runPanel).not.toHaveBeenCalled();
 		expect(promptText).toBe("tui synthesis prompt");
 		expect(h.setText).toHaveBeenCalledWith("");
 	});
@@ -229,11 +289,11 @@ describe("/panel slash command (TUI adapter over shared handle)", () => {
 
 		const handled = executeBuiltinSlashCommand("/panel plan  retain   this\tspacing", h.runtime);
 		expect(h.showPanelRolePicker).toHaveBeenCalledTimes(1);
-		expect(h.runPanel).not.toHaveBeenCalled();
+		expect(h.runPanelWithConfirmation).not.toHaveBeenCalled();
 
 		picker.resolve("chosen");
 		await expect(handled).resolves.toBe("tui synthesis prompt");
-		expect(h.runPanel).toHaveBeenCalledWith({
+		expect(h.runPanelWithConfirmation).toHaveBeenCalledWith({
 			taskMode: "plan",
 			request: " retain   this\tspacing",
 			requestedRole: "chosen",
@@ -254,10 +314,9 @@ describe("/panel slash command (TUI adapter over shared handle)", () => {
 			},
 			showPanelRolePicker: async () => undefined,
 		});
-
 		await expect(executeBuiltinSlashCommand("/panel answer what now?", h.runtime)).resolves.toBe(true);
-		expect(h.showPanelRolePicker).toHaveBeenCalledTimes(1);
-		expect(h.runPanel).not.toHaveBeenCalled();
+
+		expect(h.runPanelWithConfirmation).not.toHaveBeenCalled();
 		expect(h.showStatus).not.toHaveBeenCalled();
 		expect(h.setText).toHaveBeenCalledWith("");
 	});

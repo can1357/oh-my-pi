@@ -44,7 +44,8 @@ import {
 } from "../../modes/theme/theme";
 import type { AgentHubOpenOptions, InteractiveModeContext } from "../../modes/types";
 import { parsePanelSettings } from "../../panel/config";
-import { formatPanelCompletionStatus, type PanelRunResult } from "../../panel/runtime";
+import type { PanelRunOptions, PanelRunPreview, PanelRunResult } from "../../panel/runtime";
+import { formatPanelCompletionStatus, formatPanelProgress } from "../../panel/status";
 import type { PanelPersona, PanelSettings, PanelTaskMode } from "../../panel/types";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
@@ -68,6 +69,7 @@ import {
 } from "../../slash-commands/helpers/reset-usage";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
 import { loadDailyActivity } from "../../stats/activity-client";
+import type { AgentProgress } from "../../task/types";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -102,6 +104,7 @@ import { LogoutAccountSelectorComponent } from "../components/logout-account-sel
 import { ModelHubComponent, type ModelRoleSelectionScope } from "../components/model-hub";
 import { ModelPickerComponent } from "../components/model-picker";
 import { OAuthSelectorComponent } from "../components/oauth-selector";
+import { PanelConfirmationComponent } from "../components/panel-confirmation";
 import { PanelLineupBuilderOverlayComponent } from "../components/panel-lineup-builder";
 import { PanelPersonaEditorComponent } from "../components/panel-persona-editor";
 import { PanelRolePickerComponent } from "../components/panel-role-picker";
@@ -121,6 +124,28 @@ import { renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
+
+type InteractivePanelRunOptions = Omit<PanelRunOptions, "onProgress" | "plan" | "session" | "signal">;
+
+function panelPreviewDetails(preview: PanelRunPreview, request: string): string[] {
+	const normalizedRequest = request.replace(/\s+/g, " ").trim();
+	const requestPreview =
+		normalizedRequest.length <= 160 ? normalizedRequest : `${normalizedRequest.slice(0, 157).trimEnd()}...`;
+	return [
+		`Role: @${preview.role.roleId} · ${preview.role.role.strategy}`,
+		...preview.members.map(member => {
+			const parts = [`${member.index + 1}. ${member.selector}`];
+			if (member.thinking !== undefined) parts.push(`thinking ${member.thinking}`);
+			if (member.persona !== undefined) parts.push(`persona ${member.persona}`);
+			return parts.join(" · ");
+		}),
+		...(requestPreview ? [`Request: ${requestPreview}`] : []),
+	];
+}
+
+function panelHasCompletedResults(result: PanelRunResult): boolean {
+	return result.results.some(member => member.status === "completed");
+}
 
 export class SelectorController {
 	constructor(private ctx: InteractiveModeContext) {}
@@ -839,12 +864,90 @@ export class SelectorController {
 	}
 
 	/**
+	 * Review a resolved lineup before dispatch, then keep one compact status
+	 * line current until all members settle or are aborted.
+	 */
+	async runPanelWithConfirmation(options: InteractivePanelRunOptions): Promise<PanelRunResult | undefined> {
+		const plan = this.ctx.session.preparePanelRun(options);
+		const { preview } = plan;
+		const approved = await this.#showPanelConfirmation({
+			title: "Run panel?",
+			details: panelPreviewDetails(preview, options.request),
+			confirmLabel: `Run ${preview.members.length}-member panel`,
+			cancelLabel: "Cancel",
+		});
+		if (!approved) return undefined;
+
+		const progress = new Map<string, Pick<AgentProgress, "status">>();
+		this.ctx.showStatus(formatPanelProgress(preview.members.length, progress));
+		const result = await this.ctx.session.runPanel({
+			...options,
+			plan,
+			onProgress: update => {
+				progress.set(update.id, { status: update.status });
+				this.ctx.showStatus(formatPanelProgress(preview.members.length, progress));
+			},
+		});
+		this.ctx.showStatus(formatPanelCompletionStatus(result));
+
+		if (result.cancelled) {
+			if (!panelHasCompletedResults(result)) {
+				this.ctx.showStatus("Panel cancelled before any member completed.");
+				return undefined;
+			}
+			if (!(await this.#confirmPartialPanelSynthesis(result))) {
+				this.ctx.showStatus("Panel partial synthesis discarded.");
+				return undefined;
+			}
+		}
+		return result;
+	}
+
+	#showPanelConfirmation(options: {
+		title: string;
+		details: readonly string[];
+		confirmLabel: string;
+		cancelLabel: string;
+	}): Promise<boolean> {
+		return new Promise<boolean>(resolve => {
+			let settled = false;
+			this.showSelector(done => {
+				const settle = (approved: boolean) => {
+					if (settled) return;
+					settled = true;
+					done();
+					resolve(approved);
+				};
+				const component = new PanelConfirmationComponent({
+					...options,
+					onConfirm: () => settle(true),
+					onCancel: () => settle(false),
+				});
+				return { component, focus: component.getSelectList() };
+			});
+		});
+	}
+
+	#confirmPartialPanelSynthesis(result: PanelRunResult): Promise<boolean> {
+		const completed = result.results.filter(member => member.status === "completed").length;
+		const failed = result.results.filter(member => member.status === "failed").length;
+		const aborted = result.results.filter(member => member.status === "aborted").length;
+		return this.#showPanelConfirmation({
+			title: "Panel cancelled",
+			details: [
+				`${completed} completed · ${failed} failed · ${aborted} aborted`,
+				"Use the retained completed results for a partial synthesis?",
+			],
+			confirmLabel: "Synthesize partial results",
+			cancelLabel: "Discard partial results",
+		});
+	}
+
+	/**
 	 * Fullscreen one-off panel lineup builder (`/panel lineup <answer|plan>
-	 * <request>`). The component never runs the panel itself: `onSubmit` is
-	 * the only path into `session.runPanel`, dispatched with `ephemeralRole`
-	 * so nothing is persisted. A rejected `onSubmit` is surfaced by the
-	 * component's own `notify` callback and leaves the builder open and
-	 * editable; the overlay only closes on success or explicit close/cancel.
+	 * <request>`). The component hands its parsed ephemeral role to the host;
+	 * the host closes the builder and presents the same resolved-lineup review
+	 * that saved roles use before any member is dispatched.
 	 */
 	showPanelLineupBuilder(taskMode: PanelTaskMode, request: string): Promise<PanelRunResult | undefined> {
 		return new Promise<PanelRunResult | undefined>(resolve => {
@@ -874,10 +977,13 @@ export class SelectorController {
 				{ panelSettings, taskMode, request },
 				{
 					onSubmit: async role => {
-						const result = await this.ctx.session.runPanel({ taskMode, request, ephemeralRole: role });
-						this.ctx.showStatus(formatPanelCompletionStatus(result));
 						done();
-						resolve(result);
+						try {
+							resolve(await this.runPanelWithConfirmation({ taskMode, request, ephemeralRole: role }));
+						} catch (error) {
+							this.ctx.showError(error instanceof Error ? error.message : String(error));
+							resolve(undefined);
+						}
 					},
 					onAbort: () => this.ctx.session.abortPanel(),
 					onClose: () => {

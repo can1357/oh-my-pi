@@ -164,7 +164,13 @@ import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
-import { type PanelRunOptions, type PanelRunResult, runPanel as runPanelRuntime } from "../panel/runtime";
+import {
+	type PanelRunOptions,
+	type PanelRunPlan,
+	type PanelRunResult,
+	preparePanelRun as preparePanelRunRuntime,
+	runPanel as runPanelRuntime,
+} from "../panel/runtime";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
@@ -616,6 +622,8 @@ export class AgentSession {
 	/** Session-owned cancellation and settlement state for the active panel run. */
 	#panelAbortController: AbortController | undefined;
 	#panelRun: Promise<PanelRunResult> | undefined;
+	/** Pre-dispatch plans retain their original ToolSession through approval. */
+	#panelPlanSessions = new WeakMap<PanelRunPlan, ToolSession>();
 	/** Output-id registry retained across panel runs for stable agent:// artifacts. */
 	#panelAgentOutputManager: ToolSession["agentOutputManager"];
 
@@ -7526,6 +7534,14 @@ export class AgentSession {
 		return this.#panelRun !== undefined;
 	}
 
+	/** Prepare an immutable panel lineup and assignments for a TUI review step. */
+	preparePanelRun(options: Omit<PanelRunOptions, "onProgress" | "plan" | "session" | "signal">): PanelRunPlan {
+		const toolSession = this.#createPanelToolSession();
+		const plan = preparePanelRunRuntime({ ...options, session: toolSession });
+		this.#panelPlanSessions.set(plan, toolSession);
+		return plan;
+	}
+
 	/**
 	 * Run one saved panel role, or a fully parsed and validated one-off
 	 * `ephemeralRole` lineup that is never persisted to settings, through this
@@ -7538,10 +7554,16 @@ export class AgentSession {
 			return Promise.reject(new Error("A panel is already running."));
 		}
 
+		const toolSession =
+			options.plan === undefined ? this.#createPanelToolSession() : this.#panelPlanSessions.get(options.plan);
+		if (toolSession === undefined) {
+			return Promise.reject(new Error("Panel plan does not belong to this session."));
+		}
+
 		const controller = new AbortController();
 		const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
 		const panelRun: Promise<PanelRunResult> = Promise.resolve()
-			.then(() => runPanelRuntime({ ...options, session: this.#createPanelToolSession(), signal }))
+			.then(() => runPanelRuntime({ ...options, session: toolSession, signal }))
 			.finally(() => {
 				if (this.#panelRun === panelRun) {
 					this.#panelRun = undefined;
