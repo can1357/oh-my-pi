@@ -92,6 +92,11 @@ export class IrcBus {
 		this.#remote = transport;
 	}
 
+	/** Whether an outbound transport is installed (murmur-q00p): a leaf agent then still has peers. */
+	hasRemoteTransport(): boolean {
+		return this.#remote != null;
+	}
+
 	/**
 	 * Fire-and-forget delivery. Never blocks on the recipient generating
 	 * anything: the receipt reports how the message reached the recipient

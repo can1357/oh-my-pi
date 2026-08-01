@@ -95,10 +95,11 @@ function formatRosterSummary(counts: HubRosterCounts, emptyNoun: string): string
  */
 export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
 	if (taskDepth > 0) return true;
-	// Top-level session: peers exist only if it can still spawn subagents — the
-	// same capacity gate the task tool uses, reused here to avoid drift.
+	// Top-level session: peers exist if it can still spawn subagents (the capacity gate the task tool
+	// uses, reused to avoid drift) OR a remote transport is installed — the murmur bridge seeds remote
+	// cluster peers as proxy refs (murmur-q00p), so even a leaf root has peers to reach.
 	const maxDepth = settings.get("task.maxRecursionDepth") ?? 2;
-	return canSpawnAtDepth(maxDepth, taskDepth);
+	return canSpawnAtDepth(maxDepth, taskDepth) || IrcBus.global().hasRemoteTransport();
 }
 
 export function formatIncoming(msg: IrcMessage): string {

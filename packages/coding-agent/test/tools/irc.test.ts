@@ -653,6 +653,23 @@ describe("IRC", () => {
 			expect(isIrcEnabled(settings, 2)).toBe(true);
 		});
 
+		it("isIrcEnabled returns true for a leaf top-level session once a remote transport is installed (murmur-q00p)", () => {
+			const settings = Settings.isolated();
+			settings.set("task.maxRecursionDepth", 0); // cannot spawn — no LOCAL peers
+			const bus = IrcBus.global();
+			try {
+				// The murmur bridge installs a transport + seeds remote proxies: a leaf root now has peers.
+				bus.setRemoteTransport({
+					async send(m) {
+						return { to: m.to, outcome: "injected" };
+					},
+				});
+				expect(isIrcEnabled(settings, 0)).toBe(true);
+			} finally {
+				bus.setRemoteTransport(undefined);
+			}
+		});
+
 		it("returns an error result for messaging ops on a session without registry/agentId", async () => {
 			const session: ToolSession = {
 				cwd: "/tmp",
