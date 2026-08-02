@@ -401,7 +401,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
                     token = resolve_token_for_platform(settings, "forgejo")
                     base_url = resolve_api_base_for_platform(settings, "forgejo")
                     app.state.forgejo_github = GitHubClient(
-                        token, base_url=base_url, auth_prefix=auth_prefix_for_platform("forgejo")
+                        token, base_url=base_url, auth_prefix=auth_prefix_for_platform("forgejo"), platform="forgejo"
                     )
                 except ValueError as exc:
                     raise RuntimeError(str(exc)) from exc

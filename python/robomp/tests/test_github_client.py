@@ -280,6 +280,7 @@ def test_submit_pr_review_forgejo_uses_new_position_payload() -> None:
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+
         captured["path"] = request.url.path
         captured["body"] = json.loads(request.content)
         return httpx.Response(
