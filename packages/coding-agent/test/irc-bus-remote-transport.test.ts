@@ -116,6 +116,21 @@ describe("IrcBus RemoteTransport seam", () => {
 		expect(seen[0]!.to).toBe("beatrice");
 	});
 
+	it("surfaces a transport rejection as a failed receipt instead of throwing (Codex: no whole hub-call exception)", async () => {
+		const bus = new IrcBus(AgentRegistry.global());
+		bus.setRemoteTransport({
+			async send() {
+				throw new Error("proxy unreachable");
+			},
+		});
+
+		const receipt = await bus.send({ from: "Main", to: "remote-peer", body: "hi" });
+
+		expect(receipt.outcome).toBe("failed");
+		expect(receipt.to).toBe("remote-peer");
+		expect(receipt.error).toContain("proxy unreachable");
+	});
+
 	it("deliverInbound rejects a `remote`-kind target and never bounces to the transport", async () => {
 		const registry = AgentRegistry.global();
 		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
@@ -185,5 +200,45 @@ describe("IrcBus RemoteTransport seam", () => {
 		expect(receipt.outcome).toBe("injected");
 		expect(seen).toHaveLength(0); // inbound never bounces outbound
 		expect(relayed).toHaveLength(1); // Main got a display-only copy — the relay ran but did not re-enter delivery
+	});
+});
+
+describe("AgentRegistry.listVisibleTo remote proxies (murmur-q00p)", () => {
+	beforeEach(() => {
+		AgentRegistry.resetGlobalForTests();
+	});
+	afterEach(() => {
+		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("includes running/idle remote proxies but excludes parked/aborted ones", () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "running" });
+		registry.register({
+			id: "live-remote",
+			displayName: "live-remote",
+			kind: "remote",
+			session: null,
+			status: "idle",
+		});
+		registry.register({
+			id: "gone-remote",
+			displayName: "gone-remote",
+			kind: "remote",
+			session: null,
+			status: "parked",
+		});
+		registry.register({
+			id: "dead-remote",
+			displayName: "dead-remote",
+			kind: "remote",
+			session: null,
+			status: "aborted",
+		});
+
+		const visible = registry.listVisibleTo("Main").map(ref => ref.id);
+		expect(visible).toContain("live-remote");
+		expect(visible).not.toContain("gone-remote");
+		expect(visible).not.toContain("dead-remote");
 	});
 });

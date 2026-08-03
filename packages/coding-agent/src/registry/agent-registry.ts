@@ -330,14 +330,12 @@ export class AgentRegistry {
 	/**
 	 * Returns every alive agent (running | idle) except the caller. Advisor refs
 	 * are observability-only transcripts, never peers, so they are excluded.
-	 * Flat namespace: every other agent is visible.
+	 * Flat namespace: every other agent is visible — including remote proxies, which
+	 * the bridge registers with a live running/idle status (murmur-q00p).
 	 */
 	listVisibleTo(id: string): AgentRef[] {
 		return this.list().filter(
-			ref =>
-				ref.id !== id &&
-				ref.kind !== "advisor" &&
-				(ref.status === "running" || ref.status === "idle" || ref.kind === "remote"),
+			ref => ref.id !== id && ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle"),
 		);
 	}
 
