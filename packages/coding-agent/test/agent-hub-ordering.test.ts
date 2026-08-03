@@ -362,6 +362,22 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 
+	it("excludes remote proxies from the hub rows (murmur-q00p) — no local session to focus/revive/kill", () => {
+		geometry = stubStdoutGeometry(120);
+		const agents = new AgentRegistry();
+		agents.register({ id: "Worker", displayName: "Worker", kind: "sub", session: {} as AgentSession });
+		agents.register({ id: "remote-peer", displayName: "remote-peer", kind: "remote", session: null, status: "idle" });
+
+		const hub = makeHub(agents);
+		try {
+			const ids = renderedAgentIds(hub);
+			expect(ids).toContain("Worker");
+			expect(ids).not.toContain("remote-peer");
+		} finally {
+			hub.dispose();
+		}
+	});
+
 	it("truncates lines and sanitizes newlines to prevent terminal wrapping", () => {
 		geometry = stubStdoutGeometry(80);
 		const agents = new AgentRegistry();
