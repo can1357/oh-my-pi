@@ -353,6 +353,7 @@ import * as bundledPiCodingAgentConfigModelsConfig from "@pk-nerdsaver-ai/pi-cod
 import * as bundledPiCodingAgentConfigModelsConfigSchema from "@pk-nerdsaver-ai/pi-coding-agent/config/models-config-schema";
 import * as bundledPiCodingAgentConfigNineRouterController from "@pk-nerdsaver-ai/pi-coding-agent/config/nine-router-controller";
 import * as bundledPiCodingAgentConfigPromptTemplates from "@pk-nerdsaver-ai/pi-coding-agent/config/prompt-templates";
+import * as bundledPiCodingAgentConfigResetHooks from "@pk-nerdsaver-ai/pi-coding-agent/config/reset-hooks";
 import * as bundledPiCodingAgentConfigResolveConfigValue from "@pk-nerdsaver-ai/pi-coding-agent/config/resolve-config-value";
 import * as bundledPiCodingAgentConfigServiceTier from "@pk-nerdsaver-ai/pi-coding-agent/config/service-tier";
 import * as bundledPiCodingAgentConfigSettings from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
@@ -837,6 +838,7 @@ import * as bundledPiCodingAgentToolDiscoveryMode from "@pk-nerdsaver-ai/pi-codi
 import * as bundledPiCodingAgentToolDiscoveryToolIndex from "@pk-nerdsaver-ai/pi-coding-agent/tool-discovery/tool-index";
 import * as bundledPiCodingAgentTools from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import * as bundledPiCodingAgentToolsAcpBridge from "@pk-nerdsaver-ai/pi-coding-agent/tools/acp-bridge";
+import * as bundledPiCodingAgentToolsActivity from "@pk-nerdsaver-ai/pi-coding-agent/tools/activity";
 import * as bundledPiCodingAgentToolsApproval from "@pk-nerdsaver-ai/pi-coding-agent/tools/approval";
 import * as bundledPiCodingAgentToolsAsk from "@pk-nerdsaver-ai/pi-coding-agent/tools/ask";
 import * as bundledPiCodingAgentToolsAstEdit from "@pk-nerdsaver-ai/pi-coding-agent/tools/ast-edit";
@@ -2031,6 +2033,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentConfigNineRouterController as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/prompt-templates":
 		bundledPiCodingAgentConfigPromptTemplates as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/config/reset-hooks": bundledPiCodingAgentConfigResetHooks as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/resolve-config-value":
 		bundledPiCodingAgentConfigResolveConfigValue as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/config/service-tier": bundledPiCodingAgentConfigServiceTier as unknown as Readonly<
@@ -3070,6 +3075,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/tool-discovery/tool-index":
 		bundledPiCodingAgentToolDiscoveryToolIndex as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/acp-bridge": bundledPiCodingAgentToolsAcpBridge as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/tools/activity": bundledPiCodingAgentToolsActivity as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/tools/approval": bundledPiCodingAgentToolsApproval as unknown as Readonly<
