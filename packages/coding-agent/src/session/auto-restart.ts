@@ -60,12 +60,23 @@ export function buildAutoRestartCommand(processInfo: AutoRestartProcess): string
 }
 
 /**
+ * A replacement process launched during an automatic executable handoff.
+ */
+export interface AutoRestartChild {
+	exited: Promise<number>;
+}
+
+/**
  * Keep the handoff parent alive until its replacement exits. The shell remains
  * an external parent of the foreground process group, so the replacement can
  * change terminal attributes without tcsetattr() failing with EIO.
  */
-export async function awaitAutoRestartExit(exited: Promise<number>): Promise<number> {
-	return await exited;
+export async function handoffAutoRestart(
+	spawn: () => AutoRestartChild,
+	quit: (exitCode: number) => Promise<void>,
+): Promise<void> {
+	const child = spawn();
+	await quit(await child.exited);
 }
 
 /**
