@@ -3,9 +3,9 @@ import {
 	AUTO_RESTART_COMMAND_ENV,
 	AUTO_RESTART_SESSION_FILE_ENV,
 	type AutoRestartableArgs,
-	awaitAutoRestartExit,
 	buildAutoRestartCommand,
 	ExecutableUpdateMonitor,
+	handoffAutoRestart,
 	prepareAutoRestartArgs,
 } from "../../src/session/auto-restart";
 
@@ -100,22 +100,31 @@ describe("auto restart handoff", () => {
 		).toEqual(["/opt/omp", "--advisor"]);
 	});
 
-	it("keeps the handoff parent alive until the replacement exits", async () => {
-		let resolveExit!: (exitCode: number) => void;
-		const exit = new Promise<number>(resolve => {
-			resolveExit = resolve;
+	it("does not quit the handoff parent before the replacement exits", async () => {
+		let resolveChildExit!: (exitCode: number) => void;
+		const childExit = new Promise<number>(resolve => {
+			resolveChildExit = resolve;
 		});
-		const waiting = awaitAutoRestartExit(exit);
-		let settled = false;
-		void waiting.then(() => {
-			settled = true;
-		});
+		let spawnCalls = 0;
+		const quitCodes: number[] = [];
 
+		const handoff = handoffAutoRestart(
+			() => {
+				spawnCalls++;
+				return { exited: childExit };
+			},
+			async exitCode => {
+				quitCodes.push(exitCode);
+			},
+		);
+
+		expect(spawnCalls).toBe(1);
 		await Promise.resolve();
-		expect(settled).toBe(false);
+		expect(quitCodes).toEqual([]);
 
-		resolveExit(17);
-		expect(await waiting).toBe(17);
+		resolveChildExit(17);
+		await handoff;
+		expect(quitCodes).toEqual([17]);
 	});
 
 	it("forces the resumed session while preserving ordinary launch options", () => {
