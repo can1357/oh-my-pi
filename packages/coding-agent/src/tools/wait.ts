@@ -163,9 +163,12 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 					return buildJobResult(this.session, manager, "wait", [...undelivered, ...jobs], []);
 				}
 				const serviceRunning = hasLiveOwnedService(this.session);
+				// A waitable peer is a running local agent, or a live remote proxy that can deliver
+				// inbound at any time (band-aid; can1357/oh-my-pi#7503).
 				const runningPeer =
-					messaging?.registry.listVisibleTo(messaging.senderId).some(ref => messaging.registry.isRunning(ref)) ??
-					false;
+					messaging?.registry
+						.listVisibleTo(messaging.senderId)
+						.some(ref => ref.kind === "remote" || messaging.registry.isRunning(ref)) ?? false;
 				if (jobs.length === 0 && !runningPeer && !serviceRunning) {
 					return nothingToWaitForResult(this.session);
 				}

@@ -150,6 +150,22 @@ describe("IrcBus RemoteTransport seam", () => {
 		expect(seenOpts[1]?.expectsReply).toBeUndefined();
 	});
 
+	it("a wait for an idle remote peer is NOT aborted by the liveness gate (band-aid; can1357/oh-my-pi#7503)", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "running" });
+		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "idle" });
+		const bus = new IrcBus(registry);
+
+		// An idle remote is alive and can deliver inbound → the wait must block (not abort), then resolve.
+		const waitP = bus.wait("Main", { from: "beatrice" }, 5000, undefined, {
+			liveness: { registry, senderId: "Main" },
+		});
+		await bus.deliverInbound({ from: "beatrice", to: "Main", body: "hi from remote" });
+		const msg = await waitP;
+		expect(msg?.from).toBe("beatrice");
+		expect(msg?.body).toBe("hi from remote");
+	});
+
 	it("surfaces a transport rejection as a failed receipt instead of throwing (Codex: no whole hub-call exception)", async () => {
 		const bus = new IrcBus(AgentRegistry.global());
 		bus.setRemoteTransport({
