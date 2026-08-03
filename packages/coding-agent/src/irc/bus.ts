@@ -345,8 +345,8 @@ export class IrcBus {
 
 		const liveness = options?.liveness;
 		const livenessReason = filter.from
-			? `IRC wait aborted: agent "${filter.from}" is not available`
-			: "IRC wait aborted: no waitable peers remain";
+			? `IRC wait aborted: agent "${filter.from}" is not running`
+			: "IRC wait aborted: no running peers remain";
 
 		const settle = (
 			outcome: { kind: "message"; msg: IrcMessage } | { kind: "timeout" } | { kind: "abort"; error: Error },
