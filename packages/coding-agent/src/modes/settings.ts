@@ -37,6 +37,7 @@ export const cfgAutoResume = register({
 		description: "Automatically resume the most recent session in the current directory",
 	},
 });
+
 /** Restart a persisted interactive session when the running executable is replaced. */
 export const cfgSettingsAutoRestartOnUpdate = register({
 	id: "settings.autoRestartOnUpdate",
@@ -50,6 +51,7 @@ export const cfgSettingsAutoRestartOnUpdate = register({
 			"When the running OMP executable changes, resume this session with the new version after the current turn",
 	},
 });
+
 export const cfgGitEnabled = register({
 	id: "git.enabled",
 	type: "boolean",
