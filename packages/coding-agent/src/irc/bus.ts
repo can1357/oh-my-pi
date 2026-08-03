@@ -345,8 +345,8 @@ export class IrcBus {
 
 		const liveness = options?.liveness;
 		const livenessReason = filter.from
-			? `IRC wait aborted: agent "${filter.from}" is not running`
-			: "IRC wait aborted: no running peers remain";
+			? `IRC wait aborted: agent "${filter.from}" is not available`
+			: "IRC wait aborted: no waitable peers remain";
 
 		const settle = (
 			outcome: { kind: "message"; msg: IrcMessage } | { kind: "timeout" } | { kind: "abort"; error: Error },
@@ -397,9 +397,11 @@ export class IrcBus {
 
 		if (liveness) {
 			const { registry, senderId } = liveness;
-			const hasRunningSender = (from?: string): boolean =>
-				registry.listVisibleTo(senderId).some(ref => registry.isRunning(ref) && (!from || ref.id === from));
-			const check = filter.from ? () => hasRunningSender(filter.from) : () => hasRunningSender();
+			const hasWaitableSender = (from?: string): boolean =>
+				registry
+					.listVisibleTo(senderId)
+					.some(ref => (ref.kind === "remote" || registry.isRunning(ref)) && (!from || ref.id === from));
+			const check = filter.from ? () => hasWaitableSender(filter.from) : () => hasWaitableSender();
 			unsubscribeLiveness = registry.onChange(() => {
 				if (!check()) {
 					settle({ kind: "abort", error: new Error(livenessReason) });

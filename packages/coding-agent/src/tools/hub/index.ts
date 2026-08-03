@@ -400,13 +400,13 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			const queued = IrcBus.global().take(messaging.senderId, from);
 			if (queued) return messageResult(messaging.senderId, queued);
 			if (!from) {
-				// A bare wait can only be satisfied by a running peer eventually
-				// sending something; with none, return the snapshot immediately
-				// instead of blocking a full message-timeout window.
-				const hasRunningPeer = messaging.registry
+				// A bare wait needs at least one waitable peer — a running local agent, or a live
+				// remote proxy that can deliver inbound at any time; with none, return the snapshot
+				// immediately instead of blocking a full message-timeout window.
+				const hasWaitablePeer = messaging.registry
 					.listVisibleTo(messaging.senderId)
-					.some(ref => messaging.registry.isRunning(ref));
-				if (!hasRunningPeer) return nothingToWaitForResult(this.session);
+					.some(ref => ref.kind === "remote" || messaging.registry.isRunning(ref));
+				if (!hasWaitablePeer) return nothingToWaitForResult(this.session);
 			}
 			try {
 				return await executeMessageWait(messaging, { from, timeoutMs: nextWindowMs() }, signal);
