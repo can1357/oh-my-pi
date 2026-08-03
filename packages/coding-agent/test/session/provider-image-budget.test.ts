@@ -163,6 +163,27 @@ describe("provider context image budgets", () => {
 		expect(imageData(clamped)).toEqual(Array.from({ length: 10 }, (_, index) => `kept-image-${index}`));
 	});
 
+	it("keeps image-only user and developer turns on the wire when every image is dropped", () => {
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				// Submitting images with no prompt still emits a text block, empty.
+				{ role: "user", content: [text(""), image("user-image")], timestamp: 0 },
+				{ role: "developer", content: [image("developer-image")], timestamp: 1 },
+				{ role: "user", content: [text("and now?")], timestamp: 2 },
+			],
+		};
+		configureProviderImageByteBudgets({ umans: 1 });
+
+		const clamped = clampProviderContextImages(context, UMANS_MODEL);
+
+		expect(imageData(clamped)).toEqual([]);
+		expect(clamped.messages[0]?.content).toEqual([text("[image omitted: provider image limit]")]);
+		expect(clamped.messages[1]?.content).toEqual([text("[image omitted: provider image limit]")]);
+		expect(clamped.messages[2]).toBe(context.messages[2]);
+	});
+
 	it("preserves context identity when the provider cap is not exceeded", () => {
 		const context: Context = {
 			systemPrompt: [],

@@ -17,10 +17,20 @@ import { providerImageBudget, providerImageByteBudget } from "@oh-my-pi/snapcomp
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { imageDecodeFailureReason } from "../utils/image-loading";
 
-const TOOL_RESULT_IMAGE_OMISSION: TextContent = {
+const IMAGE_OMISSION: TextContent = {
 	type: "text",
 	text: "[image omitted: provider image limit]",
 };
+
+/**
+ * Providers skip blocks that carry nothing and then skip the message itself, so
+ * a turn clamped down to no images and no non-blank text vanishes from the wire
+ * (an image-only user turn arrives as `[{ type: "text", text: "" }]`).
+ */
+function withOmissionFallback(content: (TextContent | ImageContent)[]): (TextContent | ImageContent)[] {
+	const survives = content.some(part => (part.type === "text" ? part.text.trim().length > 0 : true));
+	return survives ? content : [IMAGE_OMISSION];
+}
 
 /** Image sizes in message order; assistant images are never dropped, so their bytes are charged as retained. */
 function imageStats(context: Context): { droppable: number[]; retainedBytes: number; total: number } {
@@ -59,20 +69,20 @@ function clampContent(
 function clampUserMessage(message: UserMessage, state: { remainingDrops: number }): UserMessage {
 	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
-	return content ? { ...message, content, providerPayload: undefined } : message;
+	return content ? { ...message, content: withOmissionFallback(content), providerPayload: undefined } : message;
 }
 
 function clampDeveloperMessage(message: DeveloperMessage, state: { remainingDrops: number }): DeveloperMessage {
 	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
-	return content ? { ...message, content, providerPayload: undefined } : message;
+	return content ? { ...message, content: withOmissionFallback(content), providerPayload: undefined } : message;
 }
 
 function clampToolResultMessage(message: ToolResultMessage, state: { remainingDrops: number }): ToolResultMessage {
 	if (state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
 	if (!content) return message;
-	return { ...message, content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] };
+	return { ...message, content: withOmissionFallback(content) };
 }
 
 /** Drops oldest transient image blocks so outgoing vision requests fit the active provider's image and byte caps. */
