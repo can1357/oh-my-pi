@@ -3,6 +3,7 @@ import {
 	AUTO_RESTART_COMMAND_ENV,
 	AUTO_RESTART_SESSION_FILE_ENV,
 	type AutoRestartableArgs,
+	awaitAutoRestartExit,
 	buildAutoRestartCommand,
 	ExecutableUpdateMonitor,
 	prepareAutoRestartArgs,
@@ -97,6 +98,24 @@ describe("auto restart handoff", () => {
 				env: {},
 			}),
 		).toEqual(["/opt/omp", "--advisor"]);
+	});
+
+	it("keeps the handoff parent alive until the replacement exits", async () => {
+		let resolveExit!: (exitCode: number) => void;
+		const exit = new Promise<number>(resolve => {
+			resolveExit = resolve;
+		});
+		const waiting = awaitAutoRestartExit(exit);
+		let settled = false;
+		void waiting.then(() => {
+			settled = true;
+		});
+
+		await Promise.resolve();
+		expect(settled).toBe(false);
+
+		resolveExit(17);
+		expect(await waiting).toBe(17);
 	});
 
 	it("forces the resumed session while preserving ordinary launch options", () => {

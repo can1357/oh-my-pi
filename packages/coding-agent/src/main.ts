@@ -89,6 +89,14 @@ import {
 import type { AgentSession } from "./session/agent-session";
 import { describeAuthBrokerStartupError } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
+import {
+	AUTO_RESTART_SESSION_FILE_ENV,
+	awaitAutoRestartExit,
+	buildAutoRestartCommand,
+	defaultAutoRestartWatchPaths,
+	ExecutableUpdateMonitor,
+	prepareAutoRestartArgs,
+} from "./session/auto-restart";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
 import {
 	createForeignSessionStore,
