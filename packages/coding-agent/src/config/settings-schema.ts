@@ -659,7 +659,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Max Image Bytes Per Request",
 			description:
-				"Maximum total base64 image bytes one request may carry per provider id. Set this for gateways that reject large request bodies; the oldest droppable images are removed until the request fits. Omitted providers are unbounded.",
+				"Budget in base64 image bytes for one request, per provider id. Set this for gateways that reject large request bodies. The oldest droppable images are removed until the request fits or none are left; images already retained in assistant turns are never removed and count against the budget, so a budget below their size stays exceeded. Omitted providers are unbounded.",
 		},
 	},
 

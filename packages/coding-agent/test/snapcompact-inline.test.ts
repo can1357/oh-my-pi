@@ -486,6 +486,31 @@ describe("SnapcompactInlineTransformer", () => {
 		}
 	});
 
+	it("inherits the wire API family budget for an unknown provider", async () => {
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+		);
+		const context: Context = {
+			messages: [
+				userMessage("go"),
+				toolResult("call_1", LARGE),
+				toolResult("call_2", LARGE),
+				toolResult("call_3", LARGE),
+				toolResult("call_4", LARGE),
+			],
+		};
+		// Same context and shape as the floor test above, but this gateway speaks the
+		// Anthropic wire API, so it inherits that family's budget of 90 instead of the
+		// floor of 5. call_3 flips from text to frames, which proves `model.api` reaches
+		// the budget lookup rather than only `model.provider`. call_4 stays text either
+		// way: the newest tool result is never a candidate (see the `length - 1` bound in
+		// planInlineSwaps).
+		const result = await transformer.transform(context, makeModel({ provider: "unknown-gateway" }));
+		expect(imageCount(result)).toBeGreaterThan(5);
+		expect(result.messages[3]).not.toBe(context.messages[3]);
+		expect(result.messages[4]).toBe(context.messages[4]);
+	});
+
 	it("caches renders across turns: identical input does not re-rasterize", async () => {
 		const spy = spyOn(snapcompact, "renderMany");
 		try {

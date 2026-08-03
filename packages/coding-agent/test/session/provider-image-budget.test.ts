@@ -216,6 +216,26 @@ describe("provider context image budgets", () => {
 		expect(textData(clamped)).toEqual(["first", "second"]);
 	});
 
+	it("stops at the retained assistant images when the byte budget cannot be met", () => {
+		configureProviderImageByteBudgets({ umans: 1500 });
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				assistantImage("a".repeat(2000)),
+				{ role: "user", content: [text("only"), image("b".repeat(1000))], timestamp: 1 },
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, UMANS_MODEL);
+
+		// Every droppable image goes, yet 2000 retained bytes still exceed the 1500 budget:
+		// the clamp never touches assistant content, so the overage is irreducible here.
+		expect(imageData(clamped)).toEqual(["a".repeat(2000)]);
+		expect(clamped.messages[0]).toBe(context.messages[0]);
+		expect(textData(clamped)).toEqual(["only"]);
+	});
+
 	it("preserves context identity when the byte budget is not exceeded", () => {
 		configureProviderImageByteBudgets({ umans: 1_000_000 });
 		const context: Context = {
