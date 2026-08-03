@@ -1,7 +1,8 @@
-import { describe, expect, it } from "bun:test";
-import type { Context, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { afterEach, describe, expect, it } from "bun:test";
+import type { AssistantMessage, Context, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { clampProviderContextImages } from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
+import { configureProviderImageBudgets, configureProviderImageByteBudgets } from "@oh-my-pi/snapcompact";
 
 const UMANS_MODEL = buildModel({
 	id: "umans-glm-5.2",
@@ -22,6 +23,26 @@ function image(data: string): ImageContent {
 
 function text(value: string): TextContent {
 	return { type: "text", text: value };
+}
+
+function assistantImage(data: string): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [image(data)],
+		api: "anthropic-messages",
+		provider: "umans",
+		model: "umans-glm-5.2",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 0,
+	};
 }
 
 function imageData(context: Context): string[] {
@@ -50,6 +71,11 @@ function textData(context: Context): string[] {
 }
 
 describe("provider context image budgets", () => {
+	afterEach(() => {
+		configureProviderImageBudgets(undefined);
+		configureProviderImageByteBudgets(undefined);
+	});
+
 	it("drops oldest images above the active provider cap while preserving text", () => {
 		const context: Context = {
 			systemPrompt: ["system"],
@@ -138,6 +164,60 @@ describe("provider context image budgets", () => {
 	});
 
 	it("preserves context identity when the provider cap is not exceeded", () => {
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "user",
+					content: [text("ok"), ...Array.from({ length: 10 }, (_, index) => image(`image-${index}`))],
+					timestamp: 1,
+				},
+			],
+		};
+
+		expect(clampProviderContextImages(context, UMANS_MODEL)).toBe(context);
+	});
+
+	it("drops oldest images until the configured byte budget fits", () => {
+		configureProviderImageByteBudgets({ umans: 2500 });
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: Array.from({ length: 4 }, (_, index) => ({
+				role: "user",
+				content: [text(`text-${index}`), image(`${index}`.repeat(1000))],
+				timestamp: index,
+			})),
+		};
+
+		const clamped = clampProviderContextImages(context, UMANS_MODEL);
+
+		expect(imageData(clamped)).toEqual(["2".repeat(1000), "3".repeat(1000)]);
+		expect(textData(clamped)).toEqual(["text-0", "text-1", "text-2", "text-3"]);
+	});
+
+	it("charges retained assistant image bytes against the byte budget", () => {
+		configureProviderImageByteBudgets({ umans: 2500 });
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				assistantImage("a".repeat(2000)),
+				{ role: "user", content: [text("first"), image("b".repeat(1000))], timestamp: 1 },
+				{ role: "user", content: [text("second"), image("c".repeat(1000))], timestamp: 2 },
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, UMANS_MODEL);
+
+		expect(imageData(clamped)).toEqual(["a".repeat(2000)]);
+		expect(clamped.messages[0]).toBe(context.messages[0]);
+		expect(textData(clamped)).toEqual(["first", "second"]);
+	});
+
+	it("preserves context identity when the byte budget is not exceeded", () => {
+		configureProviderImageByteBudgets({ umans: 1_000_000 });
 		const context: Context = {
 			systemPrompt: [],
 			tools: [],

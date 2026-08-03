@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import type { AssistantMessage, Message, Usage } from "@oh-my-pi/pi-ai";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import * as snapcompact from "../src";
@@ -1221,6 +1221,39 @@ describe("archive helpers", () => {
 		// providerFrameBudget so their lower image floors cannot archive frames
 		// the send path will drop.
 		expect(snapcompact.MAX_FRAMES_DEFAULT).toBeLessThanOrEqual(snapcompact.providerImageBudget("anthropic"));
+	});
+
+	describe("configurable budgets", () => {
+		afterEach(() => {
+			snapcompact.configureProviderImageBudgets(undefined);
+			snapcompact.configureProviderImageByteBudgets(undefined);
+		});
+
+		it("falls back to the wire API family before the floor", () => {
+			expect(snapcompact.providerImageBudget("custom-proxy", "anthropic-messages")).toBe(90);
+			expect(snapcompact.providerImageBudget("custom-proxy", "google-generative-ai")).toBe(200);
+			// openai-completions is what arbitrary routers speak, so it keeps the floor.
+			expect(snapcompact.providerImageBudget("custom-proxy", "openai-completions")).toBe(
+				snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET,
+			);
+			// An explicit provider entry outranks its API family.
+			expect(snapcompact.providerImageBudget("umans", "anthropic-messages")).toBe(10);
+		});
+
+		it("lets configuration override both the provider table and the API family", () => {
+			snapcompact.configureProviderImageBudgets({ "custom-proxy": 12, umans: 40 });
+			expect(snapcompact.providerImageBudget("custom-proxy", "anthropic-messages")).toBe(12);
+			expect(snapcompact.providerImageBudget("umans", "anthropic-messages")).toBe(40);
+			expect(snapcompact.providerImageBudget("anthropic")).toBe(90);
+		});
+
+		it("has no built-in byte budgets until one is configured", () => {
+			expect(snapcompact.providerImageByteBudget("custom-proxy")).toBeUndefined();
+			expect(snapcompact.providerImageByteBudget(undefined)).toBeUndefined();
+			snapcompact.configureProviderImageByteBudgets({ "custom-proxy": 7_000_000 });
+			expect(snapcompact.providerImageByteBudget("custom-proxy")).toBe(7_000_000);
+			expect(snapcompact.providerImageByteBudget("anthropic")).toBeUndefined();
+		});
 	});
 });
 

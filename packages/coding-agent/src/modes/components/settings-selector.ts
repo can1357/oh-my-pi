@@ -32,6 +32,8 @@ import {
 	normalizeProviderMaxInFlightRequests,
 	type SettingPath,
 	settings,
+	validateProviderMaxImageBytesPerRequest,
+	validateProviderMaxImagesPerRequest,
 	validateProviderMaxInFlightRequests,
 } from "../../config/settings";
 import type {
@@ -1292,6 +1294,10 @@ export class SettingsSelectorComponent implements Component {
 			}
 			if (path === "providers.maxInFlightRequests") {
 				parsed = validateProviderMaxInFlightRequests(parsed);
+			} else if (path === "providers.maxImagesPerRequest") {
+				parsed = validateProviderMaxImagesPerRequest(parsed);
+			} else if (path === "providers.maxImageBytesPerRequest") {
+				parsed = validateProviderMaxImageBytesPerRequest(parsed);
 			}
 			settings.set(path, parsed as never);
 		} else if (typeof currentValue === "number") {

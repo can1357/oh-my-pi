@@ -29,6 +29,7 @@ import {
 	setWorktreesDir,
 } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
+import { configureProviderImageBudgets, configureProviderImageByteBudgets } from "@oh-my-pi/snapcompact";
 import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
@@ -238,31 +239,37 @@ export function dropSettingsGroupShadows(data: RawSettings, sourcePath: string, 
 	return result;
 }
 
-export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
+function positiveNumberRecord(value: unknown, label?: string): Record<string, number> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	const invalid: string[] = [];
 	const normalized: Record<string, number> = {};
-	for (const [provider, rawLimit] of Object.entries(value)) {
-		if (typeof rawLimit !== "number" || !Number.isFinite(rawLimit) || rawLimit <= 0) continue;
-		normalized[provider] = Math.max(1, Math.floor(rawLimit));
+	for (const [key, raw] of Object.entries(value)) {
+		if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) {
+			invalid.push(key);
+			continue;
+		}
+		normalized[key] = Math.max(1, Math.floor(raw));
+	}
+	if (label !== undefined && invalid.length > 0) {
+		throw new Error(`${label} must be positive numbers: ${invalid.join(", ")}`);
 	}
 	return normalized;
 }
 
+export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
+	return positiveNumberRecord(value);
+}
+
 export function validateProviderMaxInFlightRequests(value: unknown): Record<string, number> {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-	const invalidProviders: string[] = [];
-	const normalized: Record<string, number> = {};
-	for (const [provider, rawLimit] of Object.entries(value)) {
-		if (typeof rawLimit !== "number" || !Number.isFinite(rawLimit) || rawLimit <= 0) {
-			invalidProviders.push(provider);
-			continue;
-		}
-		normalized[provider] = Math.max(1, Math.floor(rawLimit));
-	}
-	if (invalidProviders.length > 0) {
-		throw new Error(`Provider request limits must be positive numbers: ${invalidProviders.join(", ")}`);
-	}
-	return normalized;
+	return positiveNumberRecord(value, "Provider request limits");
+}
+
+export function validateProviderMaxImagesPerRequest(value: unknown): Record<string, number> {
+	return positiveNumberRecord(value, "Provider image limits");
+}
+
+export function validateProviderMaxImageBytesPerRequest(value: unknown): Record<string, number> {
+	return positiveNumberRecord(value, "Provider image byte limits");
 }
 
 const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders"]);
@@ -2773,6 +2780,12 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	"providers.maxInFlightRequests": value => {
 		configureProviderMaxInFlightRequests(validateProviderMaxInFlightRequests(value));
 	},
+	"providers.maxImagesPerRequest": value => {
+		configureProviderImageBudgets(validateProviderMaxImagesPerRequest(value));
+	},
+	"providers.maxImageBytesPerRequest": value => {
+		configureProviderImageByteBudgets(validateProviderMaxImageBytesPerRequest(value));
+	},
 	"secrets.enabled": value => {
 		configureCredentialRedaction(value === true);
 	},
@@ -2903,6 +2916,8 @@ export function resetSettingsForTest(): void {
 	globalInstancePromise = null;
 	clearBoundSettingsMethods();
 	configureProviderMaxInFlightRequests(undefined);
+	configureProviderImageBudgets(undefined);
+	configureProviderImageByteBudgets(undefined);
 	configureCredentialRedaction(false);
 }
 

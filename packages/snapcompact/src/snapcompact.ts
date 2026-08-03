@@ -519,9 +519,57 @@ export const PROVIDER_IMAGE_BUDGETS: Record<string, number> = {
 /** Safe floor for unknown providers (strictest mainstream measured: Groq ~5). */
 export const DEFAULT_PROVIDER_IMAGE_BUDGET = 5;
 
-/** Per-request image budget for `provider`; unknown providers get the floor. */
-export function providerImageBudget(provider: string | undefined): number {
-	return (provider !== undefined ? PROVIDER_IMAGE_BUDGETS[provider] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
+/**
+ * Per-request image-count budgets by wire API, for provider ids absent from
+ * {@link PROVIDER_IMAGE_BUDGETS}. A private gateway proxying one vendor API
+ * verbatim inherits that vendor's budget instead of the unknown-provider floor.
+ * `openai-completions` is deliberately absent: it is the lingua franca of
+ * arbitrary routers (Groq's ~5 cap is why the floor exists), so it keeps the
+ * floor.
+ */
+export const API_IMAGE_BUDGETS: Record<string, number> = {
+	"anthropic-messages": 90,
+	"bedrock-converse-stream": 90,
+	"openai-responses": 200,
+	"openai-codex-responses": 200,
+	"azure-openai-responses": 200,
+	"google-generative-ai": 200,
+	"google-gemini-cli": 200,
+	"google-vertex": 200,
+	openrouter: 90,
+};
+
+let configuredImageBudgets: Record<string, number> = {};
+let configuredImageByteBudgets: Record<string, number> = {};
+
+/** Install user-configured per-provider image-count caps; they win over {@link PROVIDER_IMAGE_BUDGETS}. */
+export function configureProviderImageBudgets(budgets: Record<string, number> | undefined): void {
+	configuredImageBudgets = budgets ?? {};
+}
+
+/** Install user-configured per-provider base64 image-byte caps. There are no built-in defaults. */
+export function configureProviderImageByteBudgets(budgets: Record<string, number> | undefined): void {
+	configuredImageByteBudgets = budgets ?? {};
+}
+
+/** User-configured base64 image-byte cap for `provider`; `undefined` means unbounded. */
+export function providerImageByteBudget(provider: string | undefined): number | undefined {
+	return provider === undefined ? undefined : configuredImageByteBudgets[provider];
+}
+
+/**
+ * Per-request image budget for `provider`. Resolution order: user configuration
+ * ({@link configureProviderImageBudgets}) -> {@link PROVIDER_IMAGE_BUDGETS} ->
+ * `api` family default ({@link API_IMAGE_BUDGETS}) -> {@link DEFAULT_PROVIDER_IMAGE_BUDGET}.
+ */
+export function providerImageBudget(provider: string | undefined, api?: Api): number {
+	if (provider !== undefined) {
+		const configured = configuredImageBudgets[provider];
+		if (configured !== undefined) return configured;
+		const known = PROVIDER_IMAGE_BUDGETS[provider];
+		if (known !== undefined) return known;
+	}
+	return (api !== undefined ? API_IMAGE_BUDGETS[api] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
 }
 
 /** Archive frame cap for `provider`: image budget, never above {@link MAX_FRAMES_DEFAULT}. */

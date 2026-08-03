@@ -13,7 +13,7 @@ import type {
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { providerImageBudget } from "@oh-my-pi/snapcompact";
+import { providerImageBudget, providerImageByteBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { imageDecodeFailureReason } from "../utils/image-loading";
 
@@ -22,15 +22,25 @@ const TOOL_RESULT_IMAGE_OMISSION: TextContent = {
 	text: "[image omitted: provider image limit]",
 };
 
-function countImages(context: Context): number {
-	let count = 0;
+/**
+ * Image sizes in message order, split by whether the clamp may drop them.
+ * Assistant images are counted but never dropped, so their bytes are charged
+ * against the byte budget instead of being available to reclaim.
+ */
+function imageStats(context: Context): { droppable: number[]; retainedBytes: number; total: number } {
+	const droppable: number[] = [];
+	let retainedBytes = 0;
+	let total = 0;
 	for (const message of context.messages) {
 		if (!Array.isArray(message.content)) continue;
 		for (const part of message.content) {
-			if (part.type === "image") count++;
+			if (part.type !== "image") continue;
+			total++;
+			if (message.role === "assistant") retainedBytes += part.data.length;
+			else droppable.push(part.data.length);
 		}
 	}
-	return count;
+	return { droppable, retainedBytes, total };
 }
 
 function clampContent(
@@ -69,14 +79,28 @@ function clampToolResultMessage(message: ToolResultMessage, state: { remainingDr
 	return { ...message, content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] };
 }
 
-/** Drops oldest transient image blocks so outgoing vision requests fit the active provider's image cap. */
+/**
+ * Drops oldest transient image blocks so outgoing vision requests fit the active provider's
+ * image-count cap and, where one is configured, its total base64 image-byte cap.
+ */
 export function clampProviderContextImages(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
-	const limit = providerImageBudget(model.provider);
-	const totalImages = countImages(context);
-	if (totalImages <= limit) return context;
+	const { droppable, retainedBytes, total } = imageStats(context);
+	let drops = Math.max(0, total - providerImageBudget(model.provider, model.api));
+	const byteLimit = providerImageByteBudget(model.provider);
+	if (byteLimit !== undefined) {
+		let kept = retainedBytes;
+		for (let index = Math.min(drops, droppable.length); index < droppable.length; index++) {
+			kept += droppable[index] ?? 0;
+		}
+		while (drops < droppable.length && kept > byteLimit) {
+			kept -= droppable[drops] ?? 0;
+			drops++;
+		}
+	}
+	if (drops === 0) return context;
 
-	const state = { remainingDrops: totalImages - limit };
+	const state = { remainingDrops: drops };
 	const messages = context.messages.map(message => {
 		switch (message.role) {
 			case "user":

@@ -53,7 +53,7 @@ function makeModel(
 	overrides: {
 		provider?: string;
 		input?: ("text" | "image")[];
-		api?: "anthropic-messages" | "google-generative-ai";
+		api?: "anthropic-messages" | "google-generative-ai" | "openai-completions";
 		baseUrl?: string;
 	} = {},
 ) {
@@ -428,9 +428,11 @@ describe("SnapcompactInlineTransformer", () => {
 				toolResult("call_4", LARGE),
 			],
 		};
-		// Unknown provider → default budget 5. Each LARGE needs 2 frames:
-		// call_1 (2) + call_2 (2) fit, call_3 needs 2 > 1 remaining → text.
-		const result = await transformer.transform(context, makeModel({ provider: "groq" }));
+		// Groq speaks the OpenAI-completions wire API, which carries no family
+		// budget, so this unknown provider keeps the default budget of 5. Each
+		// LARGE needs 2 frames: call_1 (2) + call_2 (2) fit, call_3 needs 2 > 1
+		// remaining → text.
+		const result = await transformer.transform(context, makeModel({ provider: "groq", api: "openai-completions" }));
 		expect(imageCount(result)).toBeLessThanOrEqual(5);
 		expect(result.messages[3]).toBe(context.messages[3]);
 		expect(result.messages[4]).toBe(context.messages[4]);

@@ -17,6 +17,8 @@ import {
 	Settings,
 	type SettingValue,
 	settings,
+	validateProviderMaxImageBytesPerRequest,
+	validateProviderMaxImagesPerRequest,
 	validateProviderMaxInFlightRequests,
 } from "../config/settings";
 import { SETTINGS_SCHEMA } from "../config/settings-schema";
@@ -225,6 +227,10 @@ function parseAndSetValue(path: SettingPath, rawValue: string): void {
 			}
 			if (path === "providers.maxInFlightRequests") {
 				parsed = validateProviderMaxInFlightRequests(parsed);
+			} else if (path === "providers.maxImagesPerRequest") {
+				parsed = validateProviderMaxImagesPerRequest(parsed);
+			} else if (path === "providers.maxImageBytesPerRequest") {
+				parsed = validateProviderMaxImageBytesPerRequest(parsed);
 			}
 			parsedValue = parsed;
 			break;
