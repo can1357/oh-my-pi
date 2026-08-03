@@ -13,13 +13,17 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 function recordingTransport(outcome: "injected" | "failed" = "injected"): {
 	transport: RemoteTransport;
 	seen: IrcMessage[];
+	seenOpts: ({ expectsReply?: boolean } | undefined)[];
 } {
 	const seen: IrcMessage[] = [];
+	const seenOpts: ({ expectsReply?: boolean } | undefined)[] = [];
 	return {
 		seen,
+		seenOpts,
 		transport: {
-			async send(message) {
+			async send(message, opts) {
 				seen.push(message);
+				seenOpts.push(opts);
 				return { to: message.to, outcome };
 			},
 		},
@@ -128,6 +132,22 @@ describe("IrcBus RemoteTransport seam", () => {
 		expect(receipt.outcome).toBe("failed");
 		expect(receipt.error).toContain("aborted");
 		expect(seen).toHaveLength(0);
+	});
+
+	it("forwards expectsReply to the transport on an awaited remote send (Codex)", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
+		const bus = new IrcBus(registry);
+		const { transport, seenOpts } = recordingTransport("injected");
+		bus.setRemoteTransport(transport);
+
+		await bus.send({ from: "Main", to: "beatrice", body: "await me" }, { expectsReply: true });
+		expect(seenOpts).toHaveLength(1);
+		expect(seenOpts[0]?.expectsReply).toBe(true);
+
+		// A non-awaited send carries no expectsReply across the seam.
+		await bus.send({ from: "Main", to: "beatrice", body: "fire and forget" });
+		expect(seenOpts[1]?.expectsReply).toBeUndefined();
 	});
 
 	it("surfaces a transport rejection as a failed receipt instead of throwing (Codex: no whole hub-call exception)", async () => {
