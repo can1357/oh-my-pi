@@ -24,14 +24,15 @@ import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { CustomMessage } from "../session/messages";
 
 /**
- * Transport for messages whose recipient is absent from this process's registry (a
- * local-registry MISS). Installed via {@link IrcBus.setRemoteTransport} by the murmur bridge
- * extension; `send` invokes it ONLY on the `!ref` branch — never for aborted / advisor /
- * no-session / handoff-error recipients (those are local-but-broken and stay `failed`). It
- * returns a synthesized {@link IrcDeliveryReceipt} so callers see a uniform outcome.
+ * Transport for messages whose recipient is absent from this process's registry (a local-registry
+ * MISS) or is a `remote` proxy peer. Installed via {@link IrcBus.setRemoteTransport} by the murmur
+ * bridge extension; `send` invokes it ONLY on the miss / `remote` branch — never for aborted /
+ * advisor / no-session recipients (those stay local `failed`). `opts.expectsReply` is forwarded so
+ * an awaited send (sender blocked on a reply) gets the same side-channel auto-reply behaviour
+ * cross-process as a local send. Returns a synthesized {@link IrcDeliveryReceipt} for a uniform outcome.
  */
 export interface RemoteTransport {
-	send(message: IrcMessage): Promise<IrcDeliveryReceipt>;
+	send(message: IrcMessage, opts?: { expectsReply?: boolean }): Promise<IrcDeliveryReceipt>;
 }
 
 interface IrcWaiter {
@@ -171,7 +172,7 @@ export class IrcBus {
 			// hint below) become the transport's responsibility: a miss is routed out, not reported here.
 			if (this.#remote) {
 				try {
-					return await this.#remote.send(message);
+					return await this.#remote.send(message, opts?.expectsReply ? { expectsReply: true } : undefined);
 				} catch (error) {
 					// A transport that rejects (transient network/proxy failure) must not escape
 					// IrcBus.send and turn a whole (possibly broadcast) `hub send` into a tool
