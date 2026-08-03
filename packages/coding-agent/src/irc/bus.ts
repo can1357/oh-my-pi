@@ -154,6 +154,17 @@ export class IrcBus {
 	): Promise<IrcDeliveryReceipt> {
 		const ref = this.#registry.get(message.to);
 		if (!ref || ref.kind === "remote") {
+			// A `remote` proxy the bridge has marked `aborted` is terminally dead — fail it like a
+			// local aborted agent (§#deliverToLocalRef) instead of handing a tombstone to the transport
+			// (broadcast/visible-peer paths already skip it, murmur-q00p). A `parked`/live remote still
+			// forwards below: the remote side revives it, mirroring a local parked→revive.
+			if (ref?.status === "aborted") {
+				return {
+					to: message.to,
+					outcome: "failed",
+					error: `Agent "${message.to}" was aborted and cannot be messaged.`,
+				};
+			}
 			// Local-registry MISS, or a `remote` proxy peer (murmur-q00p): hand off to the remote
 			// transport if one is installed (murmur bridge), else fail. Only branch that leaves the
 			// process. Once a transport is installed, unknown-recipient diagnostics (the `irc list`

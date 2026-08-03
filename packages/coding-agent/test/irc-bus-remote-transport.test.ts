@@ -116,6 +116,20 @@ describe("IrcBus RemoteTransport seam", () => {
 		expect(seen[0]!.to).toBe("beatrice");
 	});
 
+	it("does NOT forward an `aborted` remote proxy to the transport — fails like a local aborted agent (Codex)", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "aborted" });
+		const bus = new IrcBus(registry);
+		const { transport, seen } = recordingTransport("injected");
+		bus.setRemoteTransport(transport);
+
+		const receipt = await bus.send({ from: "Main", to: "beatrice", body: "hi remote" });
+
+		expect(receipt.outcome).toBe("failed");
+		expect(receipt.error).toContain("aborted");
+		expect(seen).toHaveLength(0);
+	});
+
 	it("surfaces a transport rejection as a failed receipt instead of throwing (Codex: no whole hub-call exception)", async () => {
 		const bus = new IrcBus(AgentRegistry.global());
 		bus.setRemoteTransport({
