@@ -117,8 +117,13 @@ export async function hasResolvableTranscript(agentId: string): Promise<boolean>
 		const registry = AgentRegistry.global();
 		const lower = agentId.toLowerCase();
 		let ref = registry.get(agentId);
-		if (ref?.kind === "advisor") ref = undefined;
-		ref ??= registry.list().find(candidate => candidate.kind !== "advisor" && candidate.id.toLowerCase() === lower);
+		if (ref?.kind === "advisor" || ref?.kind === "remote") ref = undefined;
+		ref ??= registry
+			.list()
+			.find(
+				candidate =>
+					candidate.kind !== "advisor" && candidate.kind !== "remote" && candidate.id.toLowerCase() === lower,
+			);
 		if (ref?.session) return true;
 		if (ref?.sessionFile && (await isReadableFile(ref.sessionFile))) return true;
 		const files = await sessionFilesFromDisk();

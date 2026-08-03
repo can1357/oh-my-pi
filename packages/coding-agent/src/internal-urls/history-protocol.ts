@@ -306,9 +306,9 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		// first, so a same-named transcript restored by another root's scan
 		// never shadows this caller's own on-disk transcript.
 		const preferredArtifactDir = rootSessionFile?.slice(0, -".jsonl".length);
-		// Advisor transcripts are observability-only — surfaced in the Agent Hub, never
-		// in the agent-facing roster. Hide them from the index, lookup, and completions.
-		const visible = registry.list().filter(ref => ref.kind !== "advisor");
+		// Advisor transcripts are observability-only, and remote proxies (murmur-q00p) have no local
+		// transcript — neither belongs in the agent-facing history. Hide both from index/lookup/completions.
+		const visible = registry.list().filter(ref => ref.kind !== "advisor" && ref.kind !== "remote");
 
 		if (!agentId) {
 			const content = await this.#renderIndex(visible);
@@ -321,7 +321,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		}
 
 		let ref = registry.get(agentId);
-		if (ref?.kind === "advisor") ref = undefined;
+		if (ref?.kind === "advisor" || ref?.kind === "remote") ref = undefined;
 		if (!ref) {
 			// Case-insensitive fallback: agent ids are human-typed (e.g. AuthLoader).
 			const lower = agentId.toLowerCase();
@@ -431,7 +431,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const completions: UrlCompletion[] = [];
 		const seen = new Set<string>();
 		for (const ref of AgentRegistry.global().list()) {
-			if (ref.kind === "advisor") continue;
+			if (ref.kind === "advisor" || ref.kind === "remote") continue;
 			seen.add(ref.id);
 			completions.push({
 				value: ref.id,

@@ -539,7 +539,10 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 	#refreshRows(): void {
 		const selectedId = this.#rows[this.#selectedRow]?.id;
-		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID);
+		// Remote proxies (murmur-q00p) are messaging peers, not local sessions: they have no
+		// session/transcript and the hub's focus/revive/kill act on the local lifecycle, so exclude
+		// them here. They stay discoverable via `hub list` and reachable by broadcast.
+		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID && ref.kind !== "remote");
 		this.#observedById = new Map();
 		for (const session of this.#observers.getSessions()) this.#observedById.set(session.id, session);
 		// Stable roster order: capture the status+recency ranking once so keyboard
