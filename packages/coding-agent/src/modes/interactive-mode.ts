@@ -186,6 +186,7 @@ import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { type DictationTarget, MicCursor, type SttCallbacks, STTController, type SttState } from "../stt";
 import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 import { resolveRestartCmd } from "../subprocess/worker-client";
+
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
 import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
@@ -3511,6 +3512,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#scheduleGoalContinuation();
 
 		return await promise;
+	}
+	interruptIdleInputForAutoRestart(): void {
+		this.onInputCallback?.({ text: "", cancelled: true, started: false });
 	}
 
 	#scheduleLoopAutoSubmit(): void {
