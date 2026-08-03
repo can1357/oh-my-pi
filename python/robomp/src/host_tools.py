@@ -48,6 +48,7 @@ _PRE_PR_TEST_COMMAND = ("bun", "run", "test")
 _BUN_INSTALL_COMMAND = ("bun", "install", "--frozen-lockfile", "--ignore-scripts")
 _BUN_INSTALL_TIMEOUT_SECONDS = 300.0
 _REPO_COMMAND_SCRUBBED_ENV_KEYS: tuple[str, ...] = (
+    "FORGEJO_TOKEN",
     "GITHUB_TOKEN",
     "GITHUB_WEBHOOK_SECRET",
     "ROBOMP_REPLAY_TOKEN",

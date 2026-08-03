@@ -2491,6 +2491,9 @@ def test_ensure_clone_uses_provided_transport(tmp_path: Path) -> None:
     """ensure_clone with explicit transport= uses it rather than self.transport."""
     from unittest.mock import Mock
 
+    # Mock(spec=[]) denies all attributes, so only the explicitly-attached
+    # methods (clone_pool/fetch_pool) are callable — any other transport method
+    # the sandbox reaches for fails loudly instead of silently succeeding.
     mock_tr = Mock(spec=[])
     mock_tr.clone_pool = Mock()
     mock_tr.fetch_pool = Mock()

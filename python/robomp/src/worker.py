@@ -127,6 +127,7 @@ def _resolve_pragma_overrides(
 _SCRUBBED_ENV_KEYS: tuple[str, ...] = (
     # Secrets that MUST NOT reach the agent subprocess; an agent with the
     # `bash` tool could otherwise `printenv` them out of roboomp's env.
+    "FORGEJO_TOKEN",
     "GITHUB_TOKEN",
     "GITHUB_WEBHOOK_SECRET",
     "ROBOMP_REPLAY_TOKEN",

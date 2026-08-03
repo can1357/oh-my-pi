@@ -31,6 +31,7 @@ from robomp.github_client import (
     index_entry_from_issue_object,
     index_entry_from_pr_object,
 )
+from robomp.platform_utils import backend_for_repo
 
 log = logging.getLogger(__name__)
 
@@ -214,11 +215,7 @@ class IssueIndexSync:
 
     async def sync_repo(self, repo: str) -> int:
         """Pull updated issues/PRs for one repo into the index. Returns count ingested."""
-        gh = (
-            self._forgejo_github
-            if (self._forgejo_github is not None and repo in self._settings.forgejo_repos)
-            else self._github
-        )
+        gh = backend_for_repo(self._settings, repo, self._github, self._forgejo_github)
         started_at = _utcnow_iso()
         watermark = self._db.issue_index_watermark(repo)
         since = _overlapped(watermark) if watermark else None

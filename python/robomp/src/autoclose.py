@@ -24,6 +24,7 @@ from robomp.config import Settings
 from robomp.db import Database, PendingClosureRow
 from robomp.github_backend import GitHubBackend
 from robomp.github_client import GitHubError
+from robomp.platform_utils import backend_for_repo
 
 log = logging.getLogger(__name__)
 
@@ -62,11 +63,7 @@ class AutocloseScheduler:
         self._stop_event: asyncio.Event | None = None
 
     def _gh_for(self, repo: str) -> GitHubBackend:
-        return (
-            self._forgejo_github
-            if (self._forgejo_github is not None and repo in self._settings.forgejo_repos)
-            else self._github
-        )
+        return backend_for_repo(self._settings, repo, self._github, self._forgejo_github)
 
     @property
     def enabled(self) -> bool:

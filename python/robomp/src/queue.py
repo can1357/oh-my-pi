@@ -14,6 +14,7 @@ from robomp.cancellation import clear_current_event, set_current_event
 from robomp.config import Settings
 from robomp.db import Database, EventRow
 from robomp.github_backend import GitHubBackend
+from robomp.platform_utils import proxy_credentials
 from robomp.proxy_client import GitHubProxyClient, ProxyGitTransport
 from robomp.sandbox import GitTransport, SandboxManager, _reap_slot
 from robomp.slot_pool import SlotPool
@@ -371,11 +372,7 @@ class WorkerPool:
 
     def _proxy_auth(self) -> tuple[str, bytes]:
         """Return (base_url, hmac_key) shared by GitHubProxyClient and ProxyGitTransport."""
-        base_url = self.settings.gh_proxy_url or ""
-        key = b""
-        if self.settings.gh_proxy_hmac_key:
-            key = self.settings.gh_proxy_hmac_key.get_secret_value().encode("utf-8")
-        return base_url, key
+        return proxy_credentials(self.settings)
 
     def _platform_github(self, platform: str) -> GitHubBackend:
         """Return a proxy client scoped to the event's platform.

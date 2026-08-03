@@ -39,6 +39,7 @@ from robomp.manual_triage import (
     parse_issue_ref,
 )
 from robomp.natives_cache import NativesCache
+from robomp.platform_utils import backend_for_repo, proxy_credentials
 from robomp.proxy_client import GitHubProxyClient, ProxyGitTransport
 from robomp.queue import WorkerPool
 from robomp.sandbox import SandboxManager
@@ -267,7 +268,7 @@ def _require_proxy_mode(cfg: Settings) -> tuple[str, bytes]:
             "robomp orchestrator requires ROBOMP_GH_PROXY_URL and "
             "ROBOMP_GH_PROXY_HMAC_KEY (run gh-proxy in a sibling container)."
         )
-    return cfg.gh_proxy_url, cfg.gh_proxy_hmac_key.get_secret_value().encode("utf-8")
+    return proxy_credentials(cfg)
 
 
 def _build_orchestrator(cfg: Settings) -> tuple[GitHubBackend, ProxyGitTransport]:
@@ -311,10 +312,7 @@ def _build_state(settings: Settings, pool_factory: _PoolFactory) -> dict[str, An
     pool = pool_factory(settings, db, github, sandbox, git_transport)
     forgejo_github: GitHubBackend | None = None
     if settings.forgejo_repos:
-        base_url = settings.gh_proxy_url or ""
-        key = b""
-        if settings.gh_proxy_hmac_key:
-            key = settings.gh_proxy_hmac_key.get_secret_value().encode("utf-8")
+        base_url, key = proxy_credentials(settings)
         forgejo_github = GitHubProxyClient(base_url=base_url, hmac_key=key, platform="forgejo")
     autoclose = AutocloseScheduler(settings=settings, db=db, github=github, forgejo_github=forgejo_github)
     index_sync = IssueIndexSync(settings=settings, db=db, github=github, forgejo_github=forgejo_github)
@@ -396,7 +394,12 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
 
         # Detect platform from Forgejo-specific headers before assuming GitHub.
         platform = "forgejo" if (x_gitea_delivery or x_forgejo_delivery) else "github"
-        delivery_id = x_github_delivery or x_gitea_delivery or x_forgejo_delivery or ""
+        delivery_id = x_github_delivery or x_gitea_delivery or x_forgejo_delivery
+        if not delivery_id:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "missing delivery id header (X-GitHub-Delivery, X-Gitea-Delivery, or X-Forgejo-Delivery)",
+            )
 
         db: Database = bag["db"]
         issue_cache: _IssueBrowseCache = bag["issue_browse_cache"]
@@ -606,7 +609,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             return {"issues": [], "errors": [], "repos": [], "cache": {"hit": False, "fetched_at": time.time()}}
 
         def _backend_for(repo: str) -> GitHubBackend:
-            return forgejo_github if forgejo_github and repo.lower() in cfg.forgejo_repos else github
+            return backend_for_repo(cfg, repo, github, forgejo_github)
 
         async def _fetch() -> tuple[list[IssueSummary], list[dict[str, str]]]:
             # Fan out across allowlisted repos; per-repo failures don't take down the panel.
@@ -677,13 +680,15 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                 raise HTTPException(400, str(exc)) from exc
             if not cfg.allows(repo_full):
                 raise HTTPException(403, f"{repo_full} not in ROBOMP_REPO_ALLOWLIST")
-            backend = forgejo_github if forgejo_github and repo_full.lower() in cfg.forgejo_repos else github
+            backend = backend_for_repo(cfg, repo_full, github, forgejo_github)
+            platform = "forgejo" if backend is forgejo_github else "github"
             try:
                 delivery = await enqueue_manual_triage(
                     db=db,
                     github=backend,
                     repo_full=repo_full,
                     number=number,
+                    platform=platform,
                 )
             except ManualTriageConflict as exc:
                 raise HTTPException(409, str(exc)) from exc

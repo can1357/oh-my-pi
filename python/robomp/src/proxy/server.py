@@ -212,8 +212,8 @@ def _require_review_comments(value: Any) -> list[dict[str, Any]]:
     return comments
 
 
-def _pool_dir(cfg: Settings, repo: str) -> Path:
-    _validate_repo_name(repo)
+def _pool_dir(cfg: Settings, repo: str, *, platform: str = "github") -> Path:
+    _validate_repo_name(repo, platform=platform)
     return Path(cfg.workspace_root) / "_pool" / repo.replace("/", "__")
 
 
@@ -237,10 +237,12 @@ _ORIGIN_READ_TIMEOUT_SECONDS = 5.0
 _REMOTE_HELPER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
 _FORBIDDEN_URL_BYTES_RE = re.compile(r"[\x00-\x1f\x7f]|%(?:00|0a|0d)", re.IGNORECASE)
 _GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]+$")
+_FORGEJO_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9._-]+$")
 _GIT_PROBE_SCRUBBED_ENV_KEYS = (
     "ROBOMP_GIT_HTTP_AUTH",
     "GITHUB_TOKEN",
     "GH_TOKEN",
+    "FORGEJO_TOKEN",
     "GITHUB_WEBHOOK_SECRET",
     "ROBOMP_REPLAY_TOKEN",
     "ROBOMP_GH_PROXY_HMAC_KEY",
@@ -254,13 +256,36 @@ class _RemoteAuth:
     auth_url: str | None
 
 
-def _validate_repo_name(repo: str) -> None:
-    if not _GITHUB_REPO_RE.fullmatch(repo) or "/.." in repo or "../" in repo:
+def _validate_repo_name(repo: str, *, platform: str = "github") -> None:
+    pattern = _FORGEJO_REPO_RE if platform == "forgejo" else _GITHUB_REPO_RE
+    if not pattern.fullmatch(repo) or "/.." in repo or "../" in repo:
         raise HTTPException(400, f"invalid repo {repo!r}")
 
 
-def _github_url_for_repo(repo: str, git_host: str = "github.com") -> str:
-    _validate_repo_name(repo)
+def _split_git_host(git_host: str) -> tuple[str, int | None]:
+    """Split a configured git host like ``host`` or ``host:3000`` into (hostname, port).
+
+    A bracketed IPv6 literal like ``[fec0::1]:3000`` yields host ``fec0::1`` and
+    port 3000; a bare IPv6 literal like ``2001:db8::1`` (no port, no brackets) is
+    treated as the whole host without a port.
+    """
+    if git_host.startswith("[") and "]:" in git_host:
+        host, port_str = git_host.rsplit("]:", 1)
+        host = host[1:]
+        if not host or not port_str.isdigit():
+            raise HTTPException(400, f"invalid git host {git_host!r}")
+        return host, int(port_str)
+    if git_host.count(":") == 1:
+        host, _, port_str = git_host.rpartition(":")
+        if not host or not port_str.isdigit():
+            raise HTTPException(400, f"invalid git host {git_host!r}")
+        return host, int(port_str)
+    # multiple colons => bare IPv6 literal, no port
+    return git_host, None
+
+
+def _github_url_for_repo(repo: str, git_host: str = "github.com", *, platform: str = "github") -> str:
+    _validate_repo_name(repo, platform=platform)
     return f"https://{git_host}/{repo}.git"
 
 
@@ -310,8 +335,10 @@ def _read_single_remote_url(repo_dir: Path, expected_repo: str, *, push: bool, s
     return urls[0]
 
 
-def _normalized_github_https_url(url: str, expected_repo: str, git_host: str = "github.com") -> str:
-    _validate_repo_name(expected_repo)
+def _normalized_github_https_url(
+    url: str, expected_repo: str, git_host: str = "github.com", *, platform: str = "github"
+) -> str:
+    _validate_repo_name(expected_repo, platform=platform)
     parsed = urlparse(url)
     if (parsed.scheme or "").lower() != "https":
         raise HTTPException(400, f"remote url must be https://{git_host}/{expected_repo}[.git]")
@@ -321,10 +348,14 @@ def _normalized_github_https_url(url: str, expected_repo: str, git_host: str = "
         port = parsed.port
     except ValueError as exc:
         raise HTTPException(400, "remote url has invalid port") from exc
-    if port is not None:
-        raise HTTPException(400, "remote url must not specify a port")
-    if (parsed.hostname or "").lower() != git_host.lower():
+    host, configured_port = _split_git_host(git_host)
+    if (parsed.hostname or "").lower() != host.lower():
         raise HTTPException(400, f"remote url host must be {git_host} for repo {expected_repo!r}")
+    if configured_port is not None:
+        if port != configured_port:
+            raise HTTPException(400, f"remote url port must be {configured_port} for repo {expected_repo!r}")
+    elif port is not None:
+        raise HTTPException(400, "remote url must not specify a port")
     if parsed.params or parsed.query or parsed.fragment:
         raise HTTPException(400, "remote url must not contain params, query, or fragment")
     path = parsed.path.strip("/")
@@ -332,10 +363,12 @@ def _normalized_github_https_url(url: str, expected_repo: str, git_host: str = "
         path = path[:-4]
     if path.lower() != expected_repo.lower():
         raise HTTPException(400, f"remote url does not match repo {expected_repo!r}")
-    return _github_url_for_repo(expected_repo, git_host=git_host)
+    return _github_url_for_repo(expected_repo, git_host=git_host, platform=platform)
 
 
-def _remote_auth_for_url(url: str, expected_repo: str, token: str, git_host: str = "github.com") -> _RemoteAuth:
+def _remote_auth_for_url(
+    url: str, expected_repo: str, token: str, git_host: str = "github.com", *, platform: str = "github"
+) -> _RemoteAuth:
     raw = url.strip()
     if not raw or raw != url:
         raise HTTPException(400, "remote url must not be empty or padded")
@@ -347,14 +380,16 @@ def _remote_auth_for_url(url: str, expected_repo: str, token: str, git_host: str
         raise HTTPException(400, "git remote helper transports are disabled")
     scheme = (urlparse(raw).scheme or "").lower()
     if scheme in ("http", "https"):
-        normalized = _normalized_github_https_url(raw, expected_repo, git_host=git_host)
+        normalized = _normalized_github_https_url(raw, expected_repo, git_host=git_host, platform=platform)
         return _RemoteAuth(url=normalized, token=token, auth_url=normalized)
     return _RemoteAuth(url=raw, token=None, auth_url=None)
 
 
-def _clone_remote_auth(clone_url: str, expected_repo: str, token: str, git_host: str = "github.com") -> _RemoteAuth:
+def _clone_remote_auth(
+    clone_url: str, expected_repo: str, token: str, git_host: str = "github.com", *, platform: str = "github"
+) -> _RemoteAuth:
     try:
-        return _remote_auth_for_url(clone_url, expected_repo, token, git_host=git_host)
+        return _remote_auth_for_url(clone_url, expected_repo, token, git_host=git_host, platform=platform)
     except HTTPException:
         log.warning(
             "gh-proxy: refusing clone — clone_url is not permitted",
@@ -371,10 +406,11 @@ def _origin_remote_auth(
     push: bool = False,
     slot_uid: int | None = None,
     git_host: str = "github.com",
+    platform: str = "github",
 ) -> _RemoteAuth:
     url = _read_single_remote_url(repo_dir, expected_repo, push=push, slot_uid=slot_uid)
     try:
-        return _remote_auth_for_url(url, expected_repo, token, git_host=git_host)
+        return _remote_auth_for_url(url, expected_repo, token, git_host=git_host, platform=platform)
     except HTTPException:
         log.warning(
             "gh-proxy: refusing git op — origin url is not permitted",
@@ -397,6 +433,11 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         if not hasattr(app.state, "forgejo_github"):
             app.state.forgejo_github = None
             if settings.forgejo_repos:
+                if settings.api_base == "https://api.github.com" or settings.git_host == "github.com":
+                    raise RuntimeError(
+                        "ROBOMP_FORGEJO_REPOS is set but ROBOMP_API_BASE/ROBOMP_GIT_HOST still default to "
+                        "GitHub; set both to your Forgejo instance's API base and git host"
+                    )
                 try:
                     token = resolve_token_for_platform(settings, "forgejo")
                     base_url = resolve_api_base_for_platform(settings, "forgejo")
@@ -878,8 +919,15 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo = _require_str(data.get("repo"), "repo")
         clone_url = _require_str(data.get("clone_url"), "clone_url")
         default_branch = _require_str(data.get("default_branch"), "default_branch")
-        remote = _clone_remote_auth(clone_url, repo, resolve_token_for_platform(settings, _platform(request)), git_host=resolve_git_host_for_platform(settings, _platform(request)))
-        target = _pool_dir(settings, repo)
+        platform = _platform(request)
+        remote = _clone_remote_auth(
+            clone_url,
+            repo,
+            resolve_token_for_platform(settings, platform),
+            git_host=resolve_git_host_for_platform(settings, platform),
+            platform=platform,
+        )
+        target = _pool_dir(settings, repo, platform=platform)
         try:
             await _run_git_op(
                 git_clone,
@@ -897,8 +945,16 @@ def create_proxy_app(settings: Settings) -> FastAPI:
     async def git_fetch_endpoint(request: Request) -> JSONResponse:
         data = await _json_body(request)
         repo = _require_str(data.get("repo"), "repo")
-        target = _pool_dir(settings, repo)
-        remote = await asyncio.to_thread(_origin_remote_auth, target, repo, resolve_token_for_platform(settings, _platform(request)), git_host=resolve_git_host_for_platform(settings, _platform(request)))
+        platform = _platform(request)
+        target = _pool_dir(settings, repo, platform=platform)
+        remote = await asyncio.to_thread(
+            _origin_remote_auth,
+            target,
+            repo,
+            resolve_token_for_platform(settings, platform),
+            git_host=resolve_git_host_for_platform(settings, platform),
+            platform=platform,
+        )
         try:
             await _run_git_op(
                 git_fetch_prune,
@@ -916,8 +972,16 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         data = await _json_body(request)
         repo = _require_str(data.get("repo"), "repo")
         ref = _require_fetch_ref(data.get("ref"))
-        target = _pool_dir(settings, repo)
-        remote = await asyncio.to_thread(_origin_remote_auth, target, repo, resolve_token_for_platform(settings, _platform(request)), git_host=resolve_git_host_for_platform(settings, _platform(request)))
+        platform = _platform(request)
+        target = _pool_dir(settings, repo, platform=platform)
+        remote = await asyncio.to_thread(
+            _origin_remote_auth,
+            target,
+            repo,
+            resolve_token_for_platform(settings, platform),
+            git_host=resolve_git_host_for_platform(settings, platform),
+            platform=platform,
+        )
         # fetch_ref is intentionally best-effort; never surfaces a 5xx.
         await _run_git_op(
             git_fetch_ref,
@@ -934,8 +998,16 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         data = await _json_body(request)
         repo = _require_str(data.get("repo"), "repo")
         pr_number = _require_int(data.get("pr_number"), "pr_number")
-        target = _pool_dir(settings, repo)
-        remote = await asyncio.to_thread(_origin_remote_auth, target, repo, resolve_token_for_platform(settings, _platform(request)), git_host=resolve_git_host_for_platform(settings, _platform(request)))
+        platform = _platform(request)
+        target = _pool_dir(settings, repo, platform=platform)
+        remote = await asyncio.to_thread(
+            _origin_remote_auth,
+            target,
+            repo,
+            resolve_token_for_platform(settings, platform),
+            git_host=resolve_git_host_for_platform(settings, platform),
+            platform=platform,
+        )
         try:
             await _run_git_op(
                 git_fetch_pr_head,
@@ -972,6 +1044,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
             push=True,
             slot_uid=slot_uid,
             git_host=resolve_git_host_for_platform(settings, _platform(request)),
+            platform=_platform(request),
         )
         try:
             result = await _run_git_op(
