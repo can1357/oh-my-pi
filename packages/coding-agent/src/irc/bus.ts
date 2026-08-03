@@ -155,8 +155,23 @@ export class IrcBus {
 		const ref = this.#registry.get(message.to);
 		if (!ref || ref.kind === "remote") {
 			// Local-registry MISS, or a `remote` proxy peer (murmur-q00p): hand off to the remote
-			// transport if one is installed (murmur bridge), else fail. Only branch that leaves the process.
-			if (this.#remote) return this.#remote.send(message);
+			// transport if one is installed (murmur bridge), else fail. Only branch that leaves the
+			// process. Once a transport is installed, unknown-recipient diagnostics (the `irc list`
+			// hint below) become the transport's responsibility: a miss is routed out, not reported here.
+			if (this.#remote) {
+				try {
+					return await this.#remote.send(message);
+				} catch (error) {
+					// A transport that rejects (transient network/proxy failure) must not escape
+					// IrcBus.send and turn a whole (possibly broadcast) `hub send` into a tool
+					// exception — surface it as a failed receipt, symmetric with local delivery.
+					return {
+						to: message.to,
+						outcome: "failed",
+						error: error instanceof Error ? error.message : String(error),
+					};
+				}
+			}
 			return {
 				to: message.to,
 				outcome: "failed",
