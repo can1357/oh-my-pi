@@ -535,3 +535,183 @@ def test_missing_tag_and_release_return_none() -> None:
     )
     assert _run_async(client.get_tag_sha("octo/widget", "v1.2.3")) is None
     assert _run_async(client.get_release_by_tag("octo/widget", "v1.2.3")) is None
+
+
+def test_search_issues_forgejo_uses_scoped_list_issues_endpoint() -> None:
+    """The Forgejo branch uses the repo-scoped, PR-inclusive `ListIssues` GET
+    (`/repos/{owner}/{repo}/issues`) with a bare query and omits the `type` param
+    so both issues AND pull requests come back, parsing the bare JSON array
+    through `_summary_from_item`."""
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["params"] = dict(request.url.params)
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "number": 9,
+                    "title": "parser crash",
+                    "state": "open",
+                    "user": {"login": "bob"},
+                    "labels": [{"name": "bug"}],
+                    "comments": 2,
+                    "updated_at": "2026-02-01T00:00:00Z",
+                    "created_at": "2026-01-15T00:00:00Z",
+                    "html_url": "https://example/9",
+                    "state_reason": "",
+                }
+            ],
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    results = _run_async(client.search_issues("my_org/widget", "parser"))
+
+    assert captured["path"] == "/repos/my_org/widget/issues"
+    assert captured["params"] == {
+        "q": "parser",
+        "state": "all",
+        "limit": "10",
+        # no `type` -> returns both issues AND pull requests
+    }
+    assert len(results) == 1
+    assert results[0].number == 9
+    assert results[0].author == "bob"
+    assert results[0].title == "parser crash"
+    assert results[0].is_pull_request is False
+
+
+def test_search_issues_forgejo_maps_is_pr_to_type_pulls() -> None:
+    """A query asking for pull requests maps to Gitea's `type=pulls` param for PR
+    inclusive behavior via `is:pr`."""
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["params"] = dict(request.url.params)
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "number": 12,
+                    "title": "fix flaky test",
+                    "state": "open",
+                    "user": {"login": "alice"},
+                    "labels": [],
+                    "comments": 3,
+                    "updated_at": "2026-02-02T00:00:00Z",
+                    "created_at": "2026-01-20T00:00:00Z",
+                    "html_url": "https://example/12",
+                    "state_reason": "",
+                    "pull_request": {},
+                }
+            ],
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    results = _run_async(client.search_issues("my_org/widget", "flaky is:pr"))
+
+    assert captured["path"] == "/repos/my_org/widget/issues"
+    assert captured["params"]["type"] == "pulls"
+    assert captured["params"]["q"] == "flaky is:pr"
+    assert captured["params"]["state"] == "all"
+    assert captured["params"]["limit"] == "10"
+    assert len(results) == 1
+    assert results[0].number == 12
+    assert results[0].is_pull_request is True
+
+
+def test_search_issues_github_uses_search_issues_with_items() -> None:
+    """The GitHub branch still hits `/search/issues` with a `repo:`-qualified query
+    and parses the `items` array."""
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["params"] = dict(request.url.params)
+        return httpx.Response(
+            200,
+            json={
+                "total_count": 1,
+                "items": [
+                    {
+                        "number": 9,
+                        "title": "parser crash",
+                        "state": "open",
+                        "user": {"login": "bob"},
+                        "labels": [],
+                        "comments": 0,
+                        "updated_at": "",
+                        "created_at": "",
+                        "html_url": "",
+                        "state_reason": "",
+                    }
+                ],
+            },
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    results = _run_async(client.search_issues("octo/widget", "parser is:pr"))
+
+    assert captured["path"] == "/search/issues"
+    assert captured["params"]["q"] == "repo:octo/widget parser is:pr"
+    assert captured["params"]["per_page"] == "10"
+    assert len(results) == 1
+    assert results[0].number == 9
+
+
+def test_get_review_comment_fetches_canonical_endpoint() -> None:
+    """`get_review_comment` (the Forgejo #7935 workaround) reads the actual text
+    from the canonical `/repos/{repo}/pulls/comments/{id}` endpoint."""
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        return httpx.Response(
+            200,
+            json={
+                "id": 42,
+                "body": "the real comment text",
+                "path": "src/app.py",
+                "line": 5,
+                "user": {"login": "alice"},
+                "created_at": "2026-01-01T00:00:00Z",
+            },
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    rc = _run_async(client.get_review_comment("octo/widget", 42))
+
+    assert captured["path"] == "/repos/octo/widget/pulls/comments/42"
+    assert rc.id == 42
+    assert rc.body == "the real comment text"
+    assert rc.path == "src/app.py"
+    assert rc.line == 5
+
+
+def test_list_issues_treats_pull_request_null_as_plain_issue() -> None:
+    """An item whose `pull_request` is explicitly `null` is a plain issue and
+    must NOT be skipped as a pull request."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "number": 9,
+                    "title": "a real issue",
+                    "state": "open",
+                    "pull_request": None,
+                    "user": {"login": "alice"},
+                    "labels": [],
+                }
+            ],
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    issues = _run_async(client.list_issues("octo/widget"))
+
+    assert len(issues) == 1
+    assert issues[0].number == 9
+    assert issues[0].is_pull_request is False

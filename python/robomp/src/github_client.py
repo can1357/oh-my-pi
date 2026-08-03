@@ -560,11 +560,30 @@ class GitHubClient:
         serves triage lookups (duplicates, prior fixes), not pagination.
         """
         per_page = max(1, min(int(limit), 30))
-        data = await self.request(
-            "GET",
-            "/search/issues",
-            params={"q": f"repo:{repo} {query}".strip(), "per_page": per_page},
-        )
+        if self._platform == "forgejo":
+            # Forgejo/Gitea ListIssues is repo-scoped and PR-inclusive, so prefer
+            # /repos/{owner}/{repo}/issues over the global /repos/issues/search.
+            # Map GitHub `is:pr`-style intent to Gitea's `type` param (pulls/
+            # issues); omit it so plain queries return both. `limit` replaces
+            # GitHub's `per_page`.
+            type_param = None
+            low = query.lower()
+            if "is:pr" in low or "is:pull" in low or "type:pr" in low:
+                type_param = "pulls"
+            elif "is:issue" in low or "type:issue" in low:
+                type_param = "issues"
+            params: dict[str, Any] = {
+                "q": query,
+                "state": "all",
+                "limit": per_page,
+            }
+            if type_param:
+                params["type"] = type_param
+            data = await self.request("GET", f"/repos/{repo}/issues", params=params)
+            items = data if isinstance(data, list) else []
+            return [_summary_from_item(repo, item) for item in items]
+        params = {"q": f"repo:{repo} {query}".strip(), "per_page": per_page}
+        data = await self.request("GET", "/search/issues", params=params)
         items = (data or {}).get("items") or []
         return [_summary_from_item(repo, item) for item in items]
 
@@ -918,7 +937,7 @@ def _summary_from_item(repo: str, item: Mapping[str, Any]) -> IssueSummary:
         created_at=str(item.get("created_at") or ""),
         html_url=str(item.get("html_url") or ""),
         state_reason=str(item.get("state_reason") or ""),
-        is_pull_request="pull_request" in item,
+        is_pull_request=item.get("pull_request") is not None,
     )
 
 

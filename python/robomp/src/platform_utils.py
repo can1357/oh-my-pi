@@ -6,7 +6,12 @@ event queue, issue index sync) doesn't duplicate inline checks.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from robomp.config import Settings
+
+if TYPE_CHECKING:
+    from robomp.github_backend import GitHubBackend
 
 
 def resolve_token_for_platform(cfg: Settings, platform: str) -> str:
@@ -37,3 +42,22 @@ def resolve_git_host_for_platform(cfg: Settings, platform: str) -> str:
 def auth_prefix_for_platform(platform: str) -> str:
     """Return the HTTP Authorization prefix for the given platform."""
     return "token" if platform == "forgejo" else "Bearer"
+
+
+def backend_for_repo(
+    settings: Settings, repo: str, github: GitHubBackend, forgejo_github: GitHubBackend | None
+) -> GitHubBackend:
+    """Return the backend that serves ``repo``: the Forgejo client when the
+    (case-insensitive) repo is in ``forgejo_repos``, else the GitHub client."""
+    if forgejo_github is not None and repo.lower() in settings.forgejo_repos:
+        return forgejo_github
+    return github
+
+
+def proxy_credentials(cfg: Settings) -> tuple[str, bytes]:
+    """Return ``(base_url, hmac_key)`` for gh-proxy, with None fallbacks."""
+    base_url = cfg.gh_proxy_url or ""
+    key = b""
+    if cfg.gh_proxy_hmac_key:
+        key = cfg.gh_proxy_hmac_key.get_secret_value().encode("utf-8")
+    return base_url, key
