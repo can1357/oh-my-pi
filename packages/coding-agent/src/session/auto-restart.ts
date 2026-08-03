@@ -60,6 +60,15 @@ export function buildAutoRestartCommand(processInfo: AutoRestartProcess): string
 }
 
 /**
+ * Keep the handoff parent alive until its replacement exits. The shell remains
+ * an external parent of the foreground process group, so the replacement can
+ * change terminal attributes without tcsetattr() failing with EIO.
+ */
+export async function awaitAutoRestartExit(exited: Promise<number>): Promise<number> {
+	return await exited;
+}
+
+/**
  * Return real on-disk artifacts whose replacement means the current process is
  * stale. Virtual Bun entrypoints have no host file and are intentionally omitted.
  */
