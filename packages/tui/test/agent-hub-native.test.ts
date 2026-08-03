@@ -55,6 +55,7 @@ function createHub(agents: AgentRecordLike[], focused: string[] = []): AgentHubO
 			throw new Error("lifecycle is not used by selection");
 		},
 		irc: { unreadCount: () => 0 },
+		hasLocalPresence: kind => kind !== "remote",
 		activity: { setLive() {}, sync: async () => {}, query: () => [], recent: () => [] },
 		focusAgent: async id => {
 			focused.push(id);
