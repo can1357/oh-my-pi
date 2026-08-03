@@ -22,11 +22,7 @@ const TOOL_RESULT_IMAGE_OMISSION: TextContent = {
 	text: "[image omitted: provider image limit]",
 };
 
-/**
- * Image sizes in message order, split by whether the clamp may drop them.
- * Assistant images are counted but never dropped, so their bytes are charged
- * against the byte budget instead of being available to reclaim.
- */
+/** Image sizes in message order; assistant images are never dropped, so their bytes are charged as retained. */
 function imageStats(context: Context): { droppable: number[]; retainedBytes: number; total: number } {
 	const droppable: number[] = [];
 	let retainedBytes = 0;
@@ -79,10 +75,7 @@ function clampToolResultMessage(message: ToolResultMessage, state: { remainingDr
 	return { ...message, content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] };
 }
 
-/**
- * Drops oldest transient image blocks so outgoing vision requests fit the active provider's
- * image-count cap and, where one is configured, its total base64 image-byte cap.
- */
+/** Drops oldest transient image blocks so outgoing vision requests fit the active provider's image and byte caps. */
 export function clampProviderContextImages(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
 	const { droppable, retainedBytes, total } = imageStats(context);

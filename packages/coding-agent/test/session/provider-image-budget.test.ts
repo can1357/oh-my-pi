@@ -229,8 +229,6 @@ describe("provider context image budgets", () => {
 
 		const clamped = clampProviderContextImages(context, UMANS_MODEL);
 
-		// Every droppable image goes, yet 2000 retained bytes still exceed the 1500 budget:
-		// the clamp never touches assistant content, so the overage is irreducible here.
 		expect(imageData(clamped)).toEqual(["a".repeat(2000)]);
 		expect(clamped.messages[0]).toBe(context.messages[0]);
 		expect(textData(clamped)).toEqual(["only"]);

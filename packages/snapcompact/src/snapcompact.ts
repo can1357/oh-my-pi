@@ -520,12 +520,9 @@ export const PROVIDER_IMAGE_BUDGETS: Record<string, number> = {
 export const DEFAULT_PROVIDER_IMAGE_BUDGET = 5;
 
 /**
- * Per-request image-count budgets by wire API, for provider ids absent from
- * {@link PROVIDER_IMAGE_BUDGETS}. A private gateway proxying one vendor API
- * verbatim inherits that vendor's budget instead of the unknown-provider floor.
- * `openai-completions` is deliberately absent: it is the lingua franca of
- * arbitrary routers (Groq's ~5 cap is why the floor exists), so it keeps the
- * floor.
+ * Image-count budgets by wire API for provider ids missing from {@link PROVIDER_IMAGE_BUDGETS}, so a
+ * private gateway proxying a vendor API inherits that vendor's budget. `openai-completions` is
+ * deliberately absent: arbitrary routers speak it, so it keeps the floor.
  */
 export const API_IMAGE_BUDGETS: Record<string, number> = {
 	"anthropic-messages": 90,
@@ -557,11 +554,7 @@ export function providerImageByteBudget(provider: string | undefined): number | 
 	return provider === undefined ? undefined : configuredImageByteBudgets[provider];
 }
 
-/**
- * Per-request image budget for `provider`. Resolution order: user configuration
- * ({@link configureProviderImageBudgets}) -> {@link PROVIDER_IMAGE_BUDGETS} ->
- * `api` family default ({@link API_IMAGE_BUDGETS}) -> {@link DEFAULT_PROVIDER_IMAGE_BUDGET}.
- */
+/** Per-request image budget: configured override, then `provider`, then `api` family, then the floor. */
 export function providerImageBudget(provider: string | undefined, api?: Api): number {
 	if (provider !== undefined) {
 		const configured = configuredImageBudgets[provider];

@@ -428,10 +428,8 @@ describe("SnapcompactInlineTransformer", () => {
 				toolResult("call_4", LARGE),
 			],
 		};
-		// Groq speaks the OpenAI-completions wire API, which carries no family
-		// budget, so this unknown provider keeps the default budget of 5. Each
-		// LARGE needs 2 frames: call_1 (2) + call_2 (2) fit, call_3 needs 2 > 1
-		// remaining → text.
+		// openai-completions carries no family budget → default 5. Each LARGE needs 2 frames:
+		// call_1 (2) + call_2 (2) fit, call_3 needs 2 > 1 remaining → text.
 		const result = await transformer.transform(context, makeModel({ provider: "groq", api: "openai-completions" }));
 		expect(imageCount(result)).toBeLessThanOrEqual(5);
 		expect(result.messages[3]).toBe(context.messages[3]);
@@ -499,12 +497,8 @@ describe("SnapcompactInlineTransformer", () => {
 				toolResult("call_4", LARGE),
 			],
 		};
-		// Same context and shape as the floor test above, but this gateway speaks the
-		// Anthropic wire API, so it inherits that family's budget of 90 instead of the
-		// floor of 5. call_3 flips from text to frames, which proves `model.api` reaches
-		// the budget lookup rather than only `model.provider`. call_4 stays text either
-		// way: the newest tool result is never a candidate (see the `length - 1` bound in
-		// planInlineSwaps).
+		// Same fixture, but an anthropic-messages gateway inherits that family's 90, so call_3
+		// flips to frames. call_4 stays text: the newest tool result is never a candidate.
 		const result = await transformer.transform(context, makeModel({ provider: "unknown-gateway" }));
 		expect(imageCount(result)).toBeGreaterThan(5);
 		expect(result.messages[3]).not.toBe(context.messages[3]);
