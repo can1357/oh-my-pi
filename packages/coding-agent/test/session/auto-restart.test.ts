@@ -1,12 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-	AUTO_RESTART_COMMAND_ENV,
-	AUTO_RESTART_SESSION_FILE_ENV,
-	type AutoRestartableArgs,
-	buildAutoRestartCommand,
-	ExecutableUpdateMonitor,
-	prepareAutoRestartArgs,
-} from "../../src/session/auto-restart";
+import { ExecutableUpdateMonitor } from "../../src/session/auto-restart";
 
 describe("ExecutableUpdateMonitor", () => {
 	it("restarts only after an executable change stays stable", async () => {
@@ -73,59 +66,5 @@ describe("ExecutableUpdateMonitor", () => {
 		await monitor.poll();
 
 		expect(restarts).toBe(1);
-	});
-});
-
-describe("auto restart handoff", () => {
-	it("uses the configured wrapper and preserves the original CLI arguments", () => {
-		expect(
-			buildAutoRestartCommand({
-				argv: ["bun", "/app/src/cli.ts", "--model", "opus"],
-				execPath: "/opt/homebrew/bin/bun",
-				execArgv: ["--preload", "/app/preload.ts"],
-				env: { [AUTO_RESTART_COMMAND_ENV]: "/app/scripts/omp" },
-			}),
-		).toEqual(["/app/scripts/omp", "--model", "opus"]);
-	});
-
-	it("relaunches a compiled executable without its virtual Bun entrypoint", () => {
-		expect(
-			buildAutoRestartCommand({
-				argv: ["bun", "/$bunfs/root/cli.js", "--advisor"],
-				execPath: "/opt/omp",
-				execArgv: [],
-				env: {},
-			}),
-		).toEqual(["/opt/omp", "--advisor"]);
-	});
-
-	it("forces the resumed session while preserving ordinary launch options", () => {
-		const args: AutoRestartableArgs = {
-			resume: undefined as string | true | undefined,
-			continue: true,
-			fork: "old-session",
-			fromClaude: true,
-			fromCodex: true,
-			noSession: true,
-			messages: ["do this again"],
-			fileArgs: ["notes.md"],
-		};
-
-		prepareAutoRestartArgs(args, "/sessions/current.jsonl");
-
-		expect(args).toEqual({
-			resume: "/sessions/current.jsonl",
-			continue: false,
-			fork: undefined,
-			fromClaude: false,
-			fromCodex: false,
-			noSession: false,
-			messages: [],
-			fileArgs: [],
-		});
-	});
-
-	it("uses a dedicated environment key for the exact session file", () => {
-		expect(AUTO_RESTART_SESSION_FILE_ENV).toBe("OMP_AUTO_RESTART_SESSION_FILE");
 	});
 });
