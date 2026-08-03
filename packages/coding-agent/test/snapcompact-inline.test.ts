@@ -1,6 +1,7 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import type { Context, ImageContent, Message, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { clampProviderContextImages } from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
 import {
 	estimateInlineSavings,
 	planInlineSwaps,
@@ -93,6 +94,10 @@ function imageCount(context: Context): number {
 }
 
 describe("SnapcompactInlineTransformer", () => {
+	afterEach(() => {
+		snapcompact.configureProviderImageByteBudgets(undefined);
+	});
+
 	it("is a no-op for text-only models", async () => {
 		const transformer = new SnapcompactInlineTransformer(
 			withTestShape({ renderSystemPrompt: "all", renderToolResults: true }),
@@ -505,6 +510,60 @@ describe("SnapcompactInlineTransformer", () => {
 		expect(result.messages[4]).toBe(context.messages[4]);
 	});
 
+	it("leaves tool results as text when the byte budget cannot hold their frames", async () => {
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+		);
+		const context: Context = {
+			messages: [userMessage("go"), toolResult("call_1", LARGE), toolResult("call_2", SMALL)],
+		};
+		snapcompact.configureProviderImageByteBudgets({ anthropic: 1000 });
+		const model = makeModel();
+		const result = await transformer.transform(context, model);
+		expect(result).toBe(context);
+		// The clamp runs after the transform: a swap it would reclaim leaves the
+		// note pointing at frames that never reach the provider.
+		expect(clampProviderContextImages(result, model)).toBe(result);
+	});
+
+	it("swaps only the frames the byte budget holds, leaving the clamp nothing to reclaim", async () => {
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+		);
+		const context: Context = {
+			messages: [
+				userMessage("go"),
+				toolResult("call_1", LARGE),
+				toolResult("call_2", LARGE),
+				toolResult("call_3", LARGE),
+			],
+		};
+		// Two frames' worth of FRAME_DATA_BYTES_ESTIMATE: enough for call_1's pair,
+		// not for call_2's. call_3 is the newest and is never a candidate.
+		snapcompact.configureProviderImageByteBudgets({ anthropic: 2 * snapcompact.FRAME_DATA_BYTES_ESTIMATE });
+		const model = makeModel();
+		const result = await transformer.transform(context, model);
+		expect(result.messages[1]).not.toBe(context.messages[1]);
+		expect(result.messages[2]).toBe(context.messages[2]);
+		expect(result.messages[3]).toBe(context.messages[3]);
+		expect(clampProviderContextImages(result, model)).toBe(result);
+	});
+
+	it("keeps the system prompt as text when its frames would exceed the byte budget", async () => {
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "all", renderToolResults: false }),
+		);
+		const context: Context = {
+			systemPrompt: ["You are a coding agent.", LARGE],
+			messages: [userMessage("go")],
+		};
+		snapcompact.configureProviderImageByteBudgets({ anthropic: 1000 });
+		const model = makeModel();
+		const result = await transformer.transform(context, model);
+		expect(result).toBe(context);
+		expect(clampProviderContextImages(result, model)).toBe(result);
+	});
+
 	it("caches renders across turns: identical input does not re-rasterize", async () => {
 		const spy = spyOn(snapcompact, "renderMany");
 		try {
@@ -636,6 +695,10 @@ describe("planInlineSwaps", () => {
 });
 
 describe("estimateInlineSavings", () => {
+	afterEach(() => {
+		snapcompact.configureProviderImageByteBudgets(undefined);
+	});
+
 	it("reports vision-incapable models as inactive with zero savings", () => {
 		const estimate = estimateInlineSavings({
 			options: { renderSystemPrompt: "all", renderToolResults: true, shape: TEST_SHAPE },
@@ -712,5 +775,28 @@ describe("estimateInlineSavings", () => {
 		// The tiny two-part system prompt stays text in both paths.
 		expect(estimate.systemPrompt?.applied).toBe(false);
 		expect(result.systemPrompt).toBe(context.systemPrompt);
+	});
+
+	it("mirrors the transform's byte budget: nothing is reported as swapped when no frame fits", async () => {
+		const options: SnapcompactInlineOptions = {
+			renderSystemPrompt: "all",
+			renderToolResults: true,
+			shape: TEST_SHAPE,
+		};
+		const context = makeContext();
+		const model = makeModel();
+		snapcompact.configureProviderImageByteBudgets({ anthropic: 1000 });
+
+		const estimate = estimateInlineSavings({
+			options,
+			model,
+			systemPrompt: context.systemPrompt!,
+			messages: context.messages,
+		});
+		const result = await new SnapcompactInlineTransformer(withTestShape(options)).transform(context, model);
+
+		expect(estimate.toolResults?.swapped).toBe(0);
+		expect(estimate.savedTokens).toBe(0);
+		expect(result).toBe(context);
 	});
 });
