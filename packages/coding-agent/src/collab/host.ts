@@ -1044,10 +1044,17 @@ export class CollabHost {
 			this.#rejectReadOnly("agent control", fromPeer);
 			return;
 		}
-		// Advisor refs are excluded from snapshots, but reject control by id defensively:
-		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
-		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
-			this.#send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
+		// Advisor + remote refs are excluded from snapshots, but reject control by id defensively — a
+		// stale/malicious client can send agent-cmd for any id, not only snapshotted ones. Neither may
+		// drive the local lifecycle: an advisor is a read-only transcript, a remote proxy has no local
+		// session (remote peers are controlled over IRC, not the hub).
+		const targetKind = AgentRegistry.global().get(agentId)?.kind;
+		if (targetKind === "advisor" || targetKind === "remote") {
+			const why =
+				targetKind === "advisor"
+					? "advisor transcripts are read-only"
+					: "remote peers are controlled over IRC, not the hub";
+			this.#send({ t: "error", message: `agent ${agentId}: ${why}` }, fromPeer);
 			return;
 		}
 		const fail = (err: unknown) => {

@@ -1788,4 +1788,56 @@ describe("hub direct addressing refreshes the caller root without a prior list",
 		expect(unknown.isError).toBeTruthy();
 		expect(unknown.details?.receipts?.[0]?.outcome).toBe("failed");
 	});
+
+	it("still restores persisted peers when only a remote proxy is in memory (murmur-q00p)", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-list-remote-guard-");
+		const sessionFile = path.join(tempDir.path(), "main.jsonl");
+		const workerSessionFile = path.join(tempDir.path(), "main", "Worker.jsonl");
+		await Bun.write(sessionFile, `${sessionHeader("main")}\n`);
+		await Bun.write(
+			workerSessionFile,
+			`${[
+				sessionHeader("worker"),
+				JSON.stringify({
+					type: "session_init",
+					id: "si",
+					parentId: null,
+					timestamp: "2026-08-13T17:14:49.000Z",
+					systemPrompt: "review",
+					task: "review the diff",
+					tools: ["read"],
+				}),
+			].join("\n")}\n`,
+		);
+
+		const registry = new AgentRegistry();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			sessionFile,
+			status: "running",
+		});
+		// A seeded remote proxy must NOT suppress the persisted-subagent disk restore.
+		registry.register({
+			id: "remote-peer",
+			displayName: "remote-peer",
+			kind: "remote",
+			session: null,
+			status: "idle",
+		});
+
+		const result = await executeList(registry, MAIN_AGENT_ID);
+		if (!result.details) throw new Error("Expected coordination details");
+		const ids = (result.details.peers ?? []).map(peer => peer.id);
+		expect(ids).toContain("remote-peer"); // remotes are still listed as peers
+
+		// The remote proxy did NOT suppress the persisted-subagent disk restore: Worker is now a known
+		// (parked) peer, so a direct send revives it instead of missing. Upstream lists parked refs
+		// only in the status="parked" view, never the default running+idle roster.
+		const parked = await executeList(registry, MAIN_AGENT_ID, { status: "parked" });
+		const parkedIds = (parked.details?.peers ?? []).map(peer => peer.id);
+		expect(parkedIds).toContain("Worker"); // restored from disk despite the remote proxy in memory
+	});
 });
