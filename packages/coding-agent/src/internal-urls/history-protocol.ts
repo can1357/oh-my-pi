@@ -20,7 +20,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { AgentRef } from "../registry/agent-registry";
-import { AgentRegistry } from "../registry/agent-registry";
+import { AgentRegistry, isLocalSession } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { formatSessionHistoryMarkdown } from "../session/session-history-format";
 import {
@@ -293,7 +293,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			}
 			return this.#resolveCurrentFull(url, context);
 		}
-		const registry = AgentRegistry.global();
+		const registry = context?.agentRegistry ?? AgentRegistry.global();
 		// A caller resolving a possibly-parked id refreshes its own root's
 		// persisted roster first: a same-named parked ref restored by another
 		// root's scan must not be served (or listed as known) in its place.
@@ -308,7 +308,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const preferredArtifactDir = rootSessionFile?.slice(0, -".jsonl".length);
 		// Advisor transcripts are observability-only, and remote proxies (murmur-q00p) have no local
 		// transcript — neither belongs in the agent-facing history. Hide both from index/lookup/completions.
-		const visible = registry.list().filter(ref => ref.kind !== "advisor" && ref.kind !== "remote");
+		const visible = registry.list().filter(ref => isLocalSession(ref.kind));
 
 		if (!agentId) {
 			const content = await this.#renderIndex(visible);
@@ -321,7 +321,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		}
 
 		let ref = registry.get(agentId);
-		if (ref?.kind === "advisor" || ref?.kind === "remote") ref = undefined;
+		if (ref && !isLocalSession(ref.kind)) ref = undefined;
 		if (!ref) {
 			// Case-insensitive fallback: agent ids are human-typed (e.g. AuthLoader).
 			const lower = agentId.toLowerCase();
@@ -431,7 +431,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const completions: UrlCompletion[] = [];
 		const seen = new Set<string>();
 		for (const ref of AgentRegistry.global().list()) {
-			if (ref.kind === "advisor" || ref.kind === "remote") continue;
+			if (!isLocalSession(ref.kind)) continue;
 			seen.add(ref.id);
 			completions.push({
 				value: ref.id,

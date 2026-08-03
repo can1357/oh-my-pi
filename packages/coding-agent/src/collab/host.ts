@@ -23,7 +23,7 @@ import type {
 } from "@oh-my-pi/pi-wire";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, isLocalSession } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
@@ -1017,7 +1017,7 @@ export class CollabHost {
 				// transcripts are local observability only, and `remote` proxies (murmur-q00p)
 				// have no local session — the wire AgentSnapshot kind is `main | sub`, and guests
 				// must never chat/kill/revive either (guest actions call ensureLive/release).
-				.filter((ref): ref is AgentRef & { kind: "main" | "sub" } => ref.kind === "main" || ref.kind === "sub")
+				.filter((ref): ref is AgentRef & { kind: "main" | "sub" } => isLocalSession(ref.kind))
 				.map(ref => ({
 					id: ref.id,
 					displayName: ref.displayName,
@@ -1049,7 +1049,7 @@ export class CollabHost {
 		// drive the local lifecycle: an advisor is a read-only transcript, a remote proxy has no local
 		// session (remote peers are controlled over IRC, not the hub).
 		const targetKind = AgentRegistry.global().get(agentId)?.kind;
-		if (targetKind === "advisor" || targetKind === "remote") {
+		if (targetKind && !isLocalSession(targetKind)) {
 			const why =
 				targetKind === "advisor"
 					? "advisor transcripts are read-only"

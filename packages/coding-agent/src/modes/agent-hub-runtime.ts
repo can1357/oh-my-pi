@@ -6,7 +6,7 @@ import { getRoleInfo } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { IrcBus } from "../irc/bus";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, hasLocalPresence } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import { parseSessionEntries } from "../session/session-loader";
 
@@ -30,11 +30,12 @@ export function createAgentHubRuntime(
 	} = {},
 ): Pick<
 	AgentHubDeps<AgentRef>,
-	"registry" | "lifecycle" | "irc" | "activity" | "manageActivityLive" | "transcript" | "loadPersisted" | "getRoleInfo"
+	"registry" | "hasLocalPresence" | "lifecycle" | "irc" | "activity" | "manageActivityLive" | "transcript" | "loadPersisted" | "getRoleInfo"
 > {
 	const registry = options.registry ?? AgentRegistry.global();
 	return {
 		registry,
+		hasLocalPresence,
 		lifecycle: () => options.lifecycle ?? AgentLifecycleManager.global(),
 		irc: options.irc ?? IrcBus.global(),
 		activity: options.activity ?? new AgentActivityIndex({ remote: options.remote }),
