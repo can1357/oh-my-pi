@@ -25,11 +25,6 @@ while [ -L "$self" ]; do
 	*) self=$(dirname "$self")/$link ;;
 	esac
 done
-
-# Preserve the wrapper for a child that resumes this session after a source
-# rebuild. Re-running Bun directly would skip the cwd-restoring preload above.
-OMP_AUTO_RESTART_COMMAND=$self
-export OMP_AUTO_RESTART_COMMAND
 scripts_dir=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd -P)
 cli=$scripts_dir/../src/cli.ts
 preload=$scripts_dir/omp.ts
@@ -40,6 +35,10 @@ mkdir -p "$launch_dir"
 
 OMP_LAUNCH_CWD=$PWD
 export OMP_LAUNCH_CWD
+# `/restart` and executable-update restarts re-enter this launcher, not bare
+# `bun src/cli.ts`, so the relaunch keeps the bunfig-free cwd and this shim.
+OMP_DEV_LAUNCHER=$scripts_dir/$(basename -- "$self")
+export OMP_DEV_LAUNCHER
 cd "$launch_dir"
 # Herdr 0.7.5 validates the foreground process name. The macOS shell can
 # preserve OMP's identity while still running the development CLI through Bun.
