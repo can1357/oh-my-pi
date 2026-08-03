@@ -1013,10 +1013,11 @@ export class CollabHost {
 		return (
 			AgentRegistry.global()
 				.list()
-				// Advisor transcripts are local observability only; never mirror them to
-				// guests (the wire AgentSnapshot kind has no `advisor`, and guests must not
-				// be able to chat/kill/revive them).
-				.filter((ref): ref is AgentRef & { kind: "main" | "sub" } => ref.kind !== "advisor")
+				// Only mirror the user-facing agent tree (main | sub) to guests. Advisor
+				// transcripts are local observability only, and `remote` proxies (murmur-q00p)
+				// have no local session — the wire AgentSnapshot kind is `main | sub`, and guests
+				// must never chat/kill/revive either (guest actions call ensureLive/release).
+				.filter((ref): ref is AgentRef & { kind: "main" | "sub" } => ref.kind === "main" || ref.kind === "sub")
 				.map(ref => ({
 					id: ref.id,
 					displayName: ref.displayName,
