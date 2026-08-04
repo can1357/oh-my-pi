@@ -36,6 +36,7 @@ export interface TuiBuiltinSlashCommand extends BuiltinSlashCommand {
 }
 
 
+
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	...BUILTIN_MODE_SLASH_COMMANDS,
 	...BUILTIN_COLLABORATION_SLASH_COMMANDS,

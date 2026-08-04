@@ -69,11 +69,12 @@ async function runWithDetachedModeDraft(
 	}
 }
 
-/** `/fast status` label for the active model: "on" when its family is priority, else "off". */
+/** /fast status for the active model, including provider refusal. */
 function formatFastModeStatus(session: AgentSession): string {
 	const model = session.model;
 	if (!model || !serviceTierFamily(model)) return "off";
-	return session.isFastModeActive() ? "on" : "off";
+	const state = session.fastModeState();
+	return state === "active" ? "on" : state;
 }
 
 /** `/extended-context status` label for the premium long-context window setting. */
