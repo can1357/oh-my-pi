@@ -5,6 +5,7 @@ import * as AIError from "../error";
 import {
 	type CredentialRankingContext,
 	type CredentialRankingStrategy,
+	type PriorityEntitlement,
 	resolveUsedFraction,
 	type UsageAmount,
 	type UsageFetchContext,
@@ -39,6 +40,8 @@ interface ParsedUsageBucket {
 
 interface ClaudeExtraUsage {
 	is_enabled?: boolean;
+	user_disabled?: boolean;
+	spend_limit_reached?: boolean;
 	monthly_limit?: number | null;
 	used_credits?: number;
 	decimal_places?: number;
@@ -511,6 +514,26 @@ function buildClaudeExtraUsageLimit(payload: ClaudeUsageResponse): UsageLimit | 
 	};
 }
 
+/**
+ * Anthropic gates fast mode (`speed: "fast"`) on usage credits: with extra
+ * usage switched off the Messages API answers `429 rate_limit_error … Usage
+ * credits are required for fast mode`, so the entitlement is knowable before
+ * the request. Payloads carrying neither block leave it unknown (`undefined`),
+ * which callers MUST read as "attempt priority anyway".
+ */
+function buildClaudePriorityEntitlement(payload: ClaudeUsageResponse): PriorityEntitlement | undefined {
+	const enabled = payload.spend?.enabled ?? payload.extra_usage?.is_enabled;
+	if (typeof enabled !== "boolean") return undefined;
+	if (enabled) return { available: true };
+	return {
+		available: false,
+		reason:
+			payload.extra_usage?.spend_limit_reached === true
+				? "usage credit spend limit reached"
+				: "usage credits are disabled",
+	};
+}
+
 function buildUsageLimit(args: {
 	id: string;
 	label: string;
@@ -771,7 +794,8 @@ export function parseClaudeUsagePayload(
 		buildClaudeExtraUsageLimit(payload),
 	].filter((limit): limit is UsageLimit => limit !== null);
 
-	if (limits.length === 0) return null;
+	const priorityEntitlement = buildClaudePriorityEntitlement(payload);
+	if (limits.length === 0 && !priorityEntitlement) return null;
 	// The response speaks for the token that fetched it; stored metadata may be stale.
 	const payloadIdentity = extractUsageIdentity(payload);
 	const accountId = payloadIdentity.accountId ?? identity.accountId;
@@ -780,11 +804,12 @@ export function parseClaudeUsagePayload(
 		provider: "anthropic",
 		fetchedAt,
 		limits,
+		...(priorityEntitlement ? { priorityEntitlement } : {}),
 		metadata: {
 			...(endpoint ? { endpoint } : {}),
 			...(accountId ? { accountId } : {}),
 			...(email ? { email } : {}),
-			...(identity.orgId ? { orgId: identity.orgId } : {}),
+			...(payloadIdentity.orgId ?? identity.orgId ? { orgId: payloadIdentity.orgId ?? identity.orgId } : {}),
 		},
 		raw: payload,
 	};
@@ -796,7 +821,7 @@ export const claudeUsageProvider: UsageProvider = {
 	// account email stop sharing a slot. v3 retires parsed reports created before
 	// Anthropic extra-usage rows existed; header ingestion can otherwise keep
 	// renewing those incomplete reports throughout the 24h last-good retention.
-	cacheVersion: 3,
+	cacheVersion: 4,
 	fetchUsage: fetchClaudeUsage,
 	parseRateLimitHeaders: parseClaudeRateLimitHeaders,
 	supports: params => params.provider === "anthropic" && params.credential.type === "oauth",
