@@ -1,6 +1,6 @@
 # Panel Roles Roadmap
 
-**Status:** panel execution and the interactive workflow are implemented on `feat/panel-roles`, pending pull-request creation. This document defines the user-facing contract and implementation sequence for panel roles: ask selected model and role pairs for independent answers or plans, then synthesize their feedback in the primary session.
+**Status:** panel execution and the interactive workflow are implemented locally in `tau`; the upstream pull request is still pending.
 
 ## Existing seams
 
