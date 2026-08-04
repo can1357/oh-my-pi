@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Upgraded the collaboration protocol to version 4. Guests using version 3 are rejected because the host and guest now exchange durable IRC history and message-delivery frames.
+
+### Added
+
+- Added `fetch-irc-history`, `irc-history`, `irc-send`, and `irc-sent` collaboration frames for remote Agent Hub message history and delivery.
+
 ## [16.3.0] - 2026-07-02
 
 ### Breaking Changes

@@ -13,7 +13,9 @@ import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
@@ -41,6 +43,7 @@ function makeHostContext(): HostHarness {
 		settings: { get: () => "" },
 		sessionManager: {
 			getSessionId: () => "sess-1",
+			getSessionFile: () => null,
 			getCwd: () => "/tmp",
 			snapshotForReplication: () => ({
 				header: { type: "session", id: "sess-1", timestamp: new Date().toISOString(), cwd: "/tmp" },
@@ -146,11 +149,17 @@ async function joinAsGuest(link: string, name: string, writeTokenOverride?: stri
 const guestCleanups: (() => void)[] = [];
 let harness: HostHarness;
 let host: CollabHost;
+let registry: AgentRegistry;
+let lifecycle: AgentLifecycleManager;
+let irc: IrcBus;
 
 beforeAll(async () => {
 	installInMemoryRelay();
 	harness = makeHostContext();
-	host = new CollabHost(harness.ctx);
+	registry = new AgentRegistry();
+	lifecycle = new AgentLifecycleManager(registry);
+	irc = new IrcBus(registry, lifecycle);
+	host = new CollabHost(harness.ctx, { registry, lifecycle, irc });
 	// Port is irrelevant: the fake transport routes by the `role` query param.
 	await host.start("ws://localhost:8787");
 });
@@ -166,6 +175,7 @@ afterAll(async () => {
 	// the host's socket holds its own FakeWebSocket/relay refs, so teardown still works.
 	uninstallInMemoryRelay();
 	await host.stop("test done");
+	await lifecycle.dispose();
 });
 
 describe("collab read-only links", () => {
@@ -194,6 +204,26 @@ describe("collab read-only links", () => {
 		const cmdReply = await guest.nextFrame();
 		expect(cmdReply.t).toBe("error");
 
+		guest.socket.send({ t: "irc-send", reqId: 1, to: "Worker", body: "mutate" });
+		const ircReply = await guest.nextFrame();
+		if (ircReply.t !== "irc-sent") throw new Error(`expected irc-sent, got ${ircReply.t}`);
+		expect(ircReply.error).toContain("read-only");
+
+		guest.socket.send({
+			t: "fetch-irc-history",
+			reqId: { amplify: "x".repeat(1024 * 1024) },
+		} as unknown as CollabFrame);
+		guest.socket.send({ t: "fetch-irc-history", reqId: 2 });
+		const historyReply = await guest.nextFrame();
+		if (historyReply.t !== "irc-history") throw new Error(`expected irc-history, got ${historyReply.t}`);
+		expect(historyReply.error).toBeUndefined();
+		expect(Array.isArray(historyReply.records)).toBe(true);
+		guest.socket.send({ t: "fetch-irc-history", reqId: 3 });
+		const rateLimitedReply = await guest.nextFrame();
+		if (rateLimitedReply.t !== "irc-history") {
+			throw new Error(`expected irc-history, got ${rateLimitedReply.t}`);
+		}
+		expect(rateLimitedReply.error).toContain("rate limit");
 		expect(host.participants.find(p => p.name === "viewer")?.readOnly).toBe(true);
 	});
 
@@ -213,6 +243,85 @@ describe("collab read-only links", () => {
 		expect(host.participants.find(p => p.name === "writer")?.readOnly).toBeUndefined();
 	});
 
+	it("fetches IRC history and sends through the host-owned bus for writable guests", async () => {
+		const guest = await joinAsGuest(host.link, "writer-irc");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		const delivered = Promise.withResolvers<{ body: string; replyTo?: string }>();
+		const session = {
+			deliverIrcMessage: async (message: { body: string; replyTo?: string }) => {
+				delivered.resolve(message);
+				return "injected" as const;
+			},
+			emitIrcRelayObservation() {},
+		} as unknown as AgentSession;
+		registry.register({ id: "IrcWorker", displayName: "IRC Worker", kind: "sub", parentId: "Main", session });
+		irc.history.clear();
+		guestCleanups.push(() => registry.unregister("IrcWorker"));
+
+		guest.socket.send({ t: "irc-send", reqId: 10, to: "IrcWorker", body: "Patch auth", replyTo: "prior" });
+		expect(await delivered.promise).toMatchObject({ body: "Patch auth", replyTo: "prior" });
+		const sendReply = await guest.nextFrame();
+		if (sendReply.t !== "irc-sent") throw new Error(`expected irc-sent, got ${sendReply.t}`);
+		expect(sendReply.error).toBeUndefined();
+
+		for (let index = 0; index < 40; index++) {
+			irc.history.recordMessage({
+				id: `large-${index}`,
+				from: "Worker",
+				to: "Main",
+				body: "x".repeat(20_000),
+				ts: 10_000 + index,
+			});
+		}
+		guest.socket.send({ t: "fetch-irc-history", reqId: 11 });
+		const historyReply = await guest.nextFrame();
+		if (historyReply.t !== "irc-history") throw new Error(`expected irc-history, got ${historyReply.t}`);
+		expect(historyReply.records.find(record => record.message.body === "Patch auth")?.message).toMatchObject({
+			from: "Main",
+			to: "IrcWorker",
+			replyTo: "prior",
+		});
+		expect(Buffer.byteLength(JSON.stringify(historyReply), "utf8")).toBeLessThanOrEqual(512 * 1024);
+		expect(historyReply.records.length).toBeLessThan(40);
+
+		guest.socket.send({ t: "irc-send", reqId: 12, to: "IrcWorker", body: 42 } as unknown as CollabFrame);
+		const malformedReply = await guest.nextFrame();
+		if (malformedReply.t !== "irc-sent") throw new Error(`expected irc-sent, got ${malformedReply.t}`);
+		expect(malformedReply.error).toContain("Malformed");
+
+		guest.socket.send({ t: "irc-send", reqId: 13, to: "IrcWorker", body: "x".repeat(64 * 1024 + 1) });
+
+		const oversizedReply = await guest.nextFrame();
+		if (oversizedReply.t !== "irc-sent") throw new Error(`expected irc-sent, got ${oversizedReply.t}`);
+		expect(oversizedReply.error).toContain("exceeds");
+		guest.socket.send({ t: "irc-send", reqId: 16, to: "Main", body: "self" });
+		const selfReply = await guest.nextFrame();
+		if (selfReply.t !== "irc-sent") throw new Error(`expected irc-sent, got ${selfReply.t}`);
+		expect(selfReply.error).toContain("yourself");
+
+		const failingSession = {
+			deliverIrcMessage: async () => {
+				throw new Error("recipient failed");
+			},
+			emitIrcRelayObservation() {},
+		} as unknown as AgentSession;
+		registry.register({
+			id: "FailingWorker",
+			displayName: "Failing Worker",
+			kind: "sub",
+			parentId: "Main",
+			session: failingSession,
+		});
+		guestCleanups.push(() => registry.unregister("FailingWorker"));
+		guest.socket.send({ t: "irc-send", reqId: 14, to: "all", body: "Status" });
+		const partialReply = await guest.nextFrame();
+		if (partialReply.t !== "irc-sent") throw new Error(`expected irc-sent, got ${partialReply.t}`);
+		expect(partialReply.error).toContain("1/2 agents");
+	});
+
 	it("keeps a remotely killed subagent tombstoned", async () => {
 		const guest = await joinAsGuest(host.link, "writer-kill");
 		guestCleanups.push(() => guest.socket.close());
@@ -220,7 +329,6 @@ describe("collab read-only links", () => {
 		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
 
 		const id = "Remote-Killed-Sub";
-		const registry = AgentRegistry.global();
 		let aborts = 0;
 		const session = {
 			abort: async () => {

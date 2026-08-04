@@ -1142,4 +1142,184 @@ describe("Agent hub row ordering", () => {
 			hub.dispose();
 		}
 	});
+
+	it("renders durable IRC conversations and sends replies from the Messages view", async () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(28);
+		const agents = new AgentRegistry();
+		const delivered: Array<{ body: string; replyTo?: string }> = [];
+		const { promise: deliveryObserved, resolve: resolveDelivery } = Promise.withResolvers<void>();
+		const session = {
+			deliverIrcMessage: async (message: { body: string; replyTo?: string }) => {
+				delivered.push(message);
+				resolveDelivery();
+				return "injected" as const;
+			},
+			emitIrcRelayObservation() {},
+		} as unknown as AgentSession;
+		agents.register({ id: "Worker", displayName: "Worker", kind: "sub", parentId: "Main", session });
+		const irc = new IrcBus(agents);
+		irc.history.recordMessage({ id: "m1", from: "Main", to: "Worker", body: "Inspect auth", ts: 1_000 });
+		irc.history.recordDelivery("m1", { to: "Worker", outcome: "injected" });
+		irc.history.recordMessage({
+			id: "m2",
+			from: "Worker",
+			to: "Main",
+			body: "Found one issue",
+			ts: 2_000,
+			replyTo: "m1",
+		});
+		irc.history.recordDelivery("m2", { to: "Main", outcome: "injected" });
+		const hub = makeHub(agents, { irc, initialSection: "messages" });
+
+		try {
+			const wide = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(wide).toContain("3 Messages");
+			expect(wide).toContain("Conversations");
+			expect(wide).toContain("Worker · 2 messages");
+			expect(wide).toContain("Found one issue");
+			expect(wide).toContain("↳m1");
+
+			const narrowList = Bun.stripANSI(hub.render(80).join("\n"));
+			expect(narrowList).toContain("Conversations");
+			hub.handleInput("\r");
+			const narrowThread = Bun.stripANSI(hub.render(80).join("\n"));
+			expect(narrowThread).toContain("Inspect auth");
+			expect(narrowThread).toContain("Found one issue");
+
+			hub.handleInput("R");
+			for (const key of "Please patch it") hub.handleInput(key);
+			hub.handleInput("\r");
+			await deliveryObserved;
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0]).toMatchObject({ body: "Please patch it", replyTo: "m2" });
+			expect(Bun.stripANSI(hub.render(80).join("\n"))).toContain("Please patch it");
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("keeps scrolled Messages selections visible and mouse hit targets aligned", () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(14);
+		const agents = new AgentRegistry();
+		agents.register({ id: "Target", displayName: "Target", kind: "sub", parentId: "Main", session: null });
+		const irc = new IrcBus(agents);
+		for (let index = 0; index < 30; index++) {
+			irc.history.recordMessage({
+				id: `target-${index}`,
+				from: "Target",
+				to: "Main",
+				body: `Target update ${index}`,
+				ts: 10_000 + index,
+			});
+		}
+		for (let index = 0; index < 20; index++) {
+			const id = `Other-${index.toString().padStart(2, "0")}`;
+			agents.register({
+				id,
+				displayName: `Other ${index.toString().padStart(2, "0")}`,
+				kind: "sub",
+				parentId: "Main",
+				session: null,
+			});
+			irc.history.recordMessage({
+				id: `other-${index}`,
+				from: id,
+				to: "Main",
+				body: `Other update ${index}`,
+				ts: 2_000 + index,
+			});
+		}
+		const hub = makeHub(agents, { irc, initialSection: "messages" });
+
+		try {
+			hub.handleInput("\t");
+			for (let index = 0; index < 20; index++) hub.handleInput("k");
+			const scrolledThread = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(scrolledThread).toContain("Target update 9");
+
+			hub.handleInput("\t");
+			for (let index = 0; index < 10; index++) hub.handleInput("j");
+			const frame = hub.render(120).map(Bun.stripANSI);
+			const visible = frame
+				.map((line, index) => ({ line, index, match: / (Other \d{2}) /u.exec(line) }))
+				.find(entry => entry.match);
+			expect(visible).toBeDefined();
+			hub.handleInput(leftClick(visible!.index + 1));
+			const selected = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(selected).toContain(`❯ ${visible!.match![1]}`);
+		} finally {
+			hub.dispose();
+		}
+	});
+	it("loads and sends Messages through the collab Agent Hub remote", async () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(28);
+		const agents = new AgentRegistry();
+		agents.register({ id: "Worker", displayName: "Worker", kind: "sub", parentId: "Main", session: null });
+		const records = [
+			{
+				message: { id: "m1", from: "Main", to: "Worker", body: "Inspect auth", ts: 1_000 },
+				outcome: "injected" as const,
+				updatedAt: 1_000,
+			},
+			{
+				message: { id: "m2", from: "Worker", to: "Main", body: "Found one issue", ts: 2_000, replyTo: "m1" },
+				outcome: "injected" as const,
+				updatedAt: 2_000,
+			},
+		];
+		const sent: Array<{ to: string; body: string; replyTo?: string }> = [];
+		const firstRender = Promise.withResolvers<void>();
+		const sendObserved = Promise.withResolvers<void>();
+		const refreshObserved = Promise.withResolvers<void>();
+		let readCount = 0;
+		const hub = makeHub(agents, {
+			initialSection: "messages",
+			requestRender: () => firstRender.resolve(),
+			remote: {
+				chat: () => {},
+				kill: () => {},
+				revive: () => {},
+				readTranscript: async () => null,
+				readMessages: async () => {
+					readCount++;
+					if (readCount === 2) refreshObserved.resolve();
+					return records;
+				},
+				sendMessage: async (to, body, replyTo) => {
+					sent.push({ to, body, replyTo });
+					sendObserved.resolve();
+					return undefined;
+				},
+			},
+		});
+
+		try {
+			await firstRender.promise;
+			const rendered = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(rendered).toContain("Worker · 2 messages");
+			expect(rendered).toContain("Found one issue");
+
+			records.push({
+				message: { id: "m3", from: "Worker", to: "Main", body: "New remote update", ts: 3_000 },
+				outcome: "injected",
+				updatedAt: 3_000,
+			});
+			hub.handleInput("1");
+			hub.handleInput("3");
+			await refreshObserved.promise;
+			await Promise.resolve();
+			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("New remote update");
+
+			hub.handleInput("R");
+			for (const key of "Please patch it remotely") hub.handleInput(key);
+			hub.handleInput("\r");
+			await sendObserved.promise;
+			expect(sent).toEqual([{ to: "Worker", body: "Please patch it remotely", replyTo: "m2" }]);
+		} finally {
+			hub.dispose();
+		}
+	});
 });

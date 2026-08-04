@@ -321,6 +321,21 @@ export type CollabUiRequestDraft =
 
 export type CollabUiRequest = CollabUiRequestDraft & { reqId: number };
 
+export interface IrcHistoryWireRecord {
+	message: {
+		id: string;
+		from: string;
+		to: string;
+		body: string;
+		ts: number;
+		replyTo?: string;
+		broadcastId?: string;
+	};
+	outcome: "pending" | "injected" | "woken" | "revived" | "failed";
+	error?: string;
+	updatedAt: number;
+}
+
 export type GuestFrame =
 	| {
 			t: "hello";
@@ -337,7 +352,9 @@ export type GuestFrame =
 	| { t: "ui-response"; reqId: number; value?: CollabUiResponseValue }
 	| { t: "abort" }
 	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
-	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number };
+	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number }
+	| { t: "fetch-irc-history"; reqId: number }
+	| { t: "irc-send"; reqId: number; to: string; body: string; replyTo?: string };
 
 /** EventBus channels mirrored to guests (task subagent traffic only). */
 export type BusChannel = "task:subagent:progress" | "task:subagent:lifecycle";
@@ -376,6 +393,8 @@ export type HostFrame =
 	| { t: "ui-request-end"; reqId: number }
 	/** Targeted reply to fetch-transcript; `text` is decoded JSONL from `fromByte`, `newSize` the next offset base. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
+	| { t: "irc-history"; reqId: number; records: IrcHistoryWireRecord[]; error?: string }
+	| { t: "irc-sent"; reqId: number; error?: string }
 	| { t: "bye"; reason: string }
 	| { t: "error"; message: string };
 
@@ -393,8 +412,9 @@ export type WireFrame = GuestFrame | HostFrame;
  *   answered by the `ui-response` guest frame. Guests that predate the
  *   grammar would silently drop `ui-request` (asks hang forever on the
  *   host), so they must be rejected at hello.
+ * - `4`: guests can fetch durable IRC history and send through the host-owned bus.
  */
-export const COLLAB_PROTO = 3;
+export const COLLAB_PROTO = 4;
 
 /** Parameter key used for intent tracing (e.g. prompt explanation/reasoning) */
 export const INTENT_FIELD = "i";

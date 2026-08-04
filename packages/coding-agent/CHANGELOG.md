@@ -1125,6 +1125,9 @@
 
 - Reworked the Ctrl+S Agent Hub into a responsive fullscreen roster and selected-agent inspector, featuring aggregate status/usage metrics, detailed per-agent views (task, model, activity, usage, lineage), roster and spawn-tree views, stable ordering, asynchronous persisted-session discovery, restored historical metadata, and improved keyboard and mouse navigation.
 - Replaced `arktype` with `@oh-my-pi/omptype` for all tool parameter and configuration schemas, resulting in significantly faster startup times. Configuration schema errors are now reported via `OmpErrors` entries using the standard `path`/`problem` format.
+- Replaced arktype with `@oh-my-pi/omptype` across all tool parameter and config schemas: ~100x faster schema construction removes the arktype startup tax (the `scope({}, { jitless: true })` workarounds are gone). Config schema errors now report via `OmpErrors` entries with the same `path`/`problem` shape.
+- Reworked the Ctrl+S Agent Hub into a responsive fullscreen roster and selected-agent inspector with aggregate status/usage, per-agent task/model/activity/usage/lineage details, roster and spawn-tree views, stable ordering, bounded large-roster rendering, asynchronous persisted-session discovery, restored task/timestamp metadata for historical agents, and consistent keyboard and mouse navigation.
+- Added Activity and Messages views to the Agent Hub: a merged, searchable, filterable multi-agent timeline links directly into transcripts, while durable IRC conversations support unread state, replies, broadcasts, restart reconstruction, and collab-host messaging.
 
 ### Fixed
 

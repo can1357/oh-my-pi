@@ -107,7 +107,7 @@ export interface RenderSessionContextOptions {
 export interface AgentHubOpenOptions {
 	requireContent?: boolean;
 	armCloseTap?: boolean;
-	initialSection?: "agents" | "activity";
+	initialSection?: "agents" | "activity" | "messages";
 }
 
 export interface InteractiveModeContext {

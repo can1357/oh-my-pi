@@ -30,7 +30,7 @@ import type { RenderResultOptions } from "../../extensibility/custom-tools/types
 import { IrcBus } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
 import hubDescription from "../../prompts/tools/hub.md" with { type: "text" };
-import type { AgentRegistry } from "../../registry/agent-registry";
+import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { ToolSession } from "..";
 import type { ToolActivitySummary } from "../renderers";
 import {
@@ -261,7 +261,9 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			registry,
 			senderId,
 			settings: this.session.settings,
-			sessionFileHint: this.session.getSessionFile?.() ?? null,
+			sessionFileHint:
+				registry.get(MAIN_AGENT_ID)?.sessionFile ??
+				(typeof this.session.getSessionFile === "function" ? this.session.getSessionFile() : null),
 		};
 	}
 
