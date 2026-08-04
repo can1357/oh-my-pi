@@ -948,6 +948,12 @@ The `cache` segment (in the `full` and `nerd` presets) shows before you send whe
 | `startup.setupWizard`          | boolean | `true`          | Show newly added onboarding steps once per setup version.                                                                                                                                                                                                   |
 | `update.auto`                  | boolean | `false`         | Install a newer release in the background on interactive startup, through whatever owns the install (standalone binary, Homebrew, mise, bun, npm); progress shows after the welcome banner's version and the next launch runs the new build. Ignored under Tern, Nix, and source checkouts. Status and worker log: `~/.omp/update/`. |
 
+### Startup and updates
+
+| Key | Type | Default | Values |
+|---|---|---|---|
+| `settings.autoRestartOnUpdate` | boolean | `false` | When a persisted interactive session's executable is replaced, let the current turn settle, then resume that session with the new executable. Unsaved editor text is retained. |
+
 ### Providers and services
 
 Model/backend ordering for image generation, web search, speech, dictation, and judgments is configured through the corresponding `modelRoles` and `retry.fallbackChains` entries in [Models](#models). This section contains transport and service behavior that remains independent of model selection.
