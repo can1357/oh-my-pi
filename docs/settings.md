@@ -771,6 +771,12 @@ The `cost` segment shows recorded session costs. For an active provider/model wi
 | `ask.timeout`          | number  | `0`             | Seconds before an `ask` prompt times out; `0` = no timeout. |
 | `ask.notify`           | enum    | `on`            | `on`, `off`.                                                                                            |
 
+### Startup and updates
+
+| Key | Type | Default | Values |
+|---|---|---|---|
+| `settings.autoRestartOnUpdate` | boolean | `false` | When a persisted interactive session's executable is replaced, let the current turn settle, then resume that session with the new executable. Unsaved editor text is retained. |
+
 ### Providers and services
 
 Model/backend ordering for image generation, web search, speech, dictation, and judgments is configured through the corresponding `modelRoles` and `retry.fallbackChains` entries in [Models](#models). This section contains transport and service behavior that remains independent of model selection.
