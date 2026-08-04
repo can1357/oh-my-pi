@@ -1416,6 +1416,7 @@
 - Fixed `omp setup python` to validate the same configured or discovered interpreter used by the Python eval runtime.
 - Fixed self-update misclassifying glibc Linux hosts with an installed musl loader as musl hosts, which could download an unusable musl binary instead of the glibc release.
 - Fixed a crash where opening the Agent Hub after a resume and moving the selection triggered an unbounded `ExtensionExitError` unhandled-rejection storm and exit 129. The postmortem module bound the native hard-exit at first evaluation; when the bundler deferred that evaluation into a `withHostGuard` window it froze the guard's throwing replacement, poisoning every later signal/fatal exit. The native exit is now resolved per call, and the guard stamps its replacement with the native primitive it shadows so mid-guard signals still exit ([#7393](https://github.com/can1357/oh-my-pi/issues/7393)).
+- Added saved `/panel` roles. A role declares an independent family-diverse or named-persona lineup; `/panel answer` and `/panel plan` preview the resolved lineup, dispatch isolated read-only participants, and synthesize their labeled results in the primary session.
 
 ## [17.2.8] - 2026-08-04
 
