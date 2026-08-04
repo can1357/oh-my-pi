@@ -5,6 +5,7 @@ import * as AIError from "../error";
 import {
 	type CredentialRankingContext,
 	type CredentialRankingStrategy,
+	type PriorityEntitlement,
 	resolveUsedFraction,
 	type UsageAmount,
 	type UsageFetchContext,
@@ -41,6 +42,8 @@ interface ParsedUsageBucket {
 
 interface ClaudeExtraUsage {
 	is_enabled?: boolean;
+	user_disabled?: boolean;
+	spend_limit_reached?: boolean;
 	monthly_limit?: number | null;
 	used_credits?: number;
 	decimal_places?: number;
@@ -519,6 +522,26 @@ function buildClaudeExtraUsageLimit(payload: ClaudeUsageResponse): UsageLimit | 
 	};
 }
 
+/**
+ * Anthropic gates fast mode (`speed: "fast"`) on usage credits: with extra
+ * usage switched off the Messages API answers `429 rate_limit_error … Usage
+ * credits are required for fast mode`, so the entitlement is knowable before
+ * the request. Payloads carrying neither block leave it unknown (`undefined`),
+ * which callers MUST read as "attempt priority anyway".
+ */
+function buildClaudePriorityEntitlement(payload: ClaudeUsageResponse): PriorityEntitlement | undefined {
+	const enabled = payload.spend?.enabled ?? payload.extra_usage?.is_enabled;
+	if (typeof enabled !== "boolean") return undefined;
+	if (enabled) return { available: true };
+	return {
+		available: false,
+		reason:
+			payload.extra_usage?.spend_limit_reached === true
+				? "usage credit spend limit reached"
+				: "usage credits are disabled",
+	};
+}
+
 function buildUsageLimit(args: {
 	id: string;
 	label: string;
@@ -753,11 +776,13 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 		reportOrgId ??= orgId;
 	}
 
+	const priorityEntitlement = buildClaudePriorityEntitlement(payload);
 	const report: UsageReport = {
 		provider: params.provider,
 		fetchedAt: Date.now(),
 		limits,
 		...(resetCredits ? { resetCredits } : {}),
+		...(priorityEntitlement ? { priorityEntitlement } : {}),
 		metadata: {
 			endpoint: url,
 			...(accountId ? { accountId } : {}),
