@@ -6,6 +6,7 @@
 
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 - Added opt-in `bash.allowCompoundCommands` approval for conservative literal `&&` chains, with ordered per-segment rules and normal bash policy fallback for unmatched segments. The opt-in requires a positively classified POSIX-quoting shell; incompatible and unknown shells retain legacy approval. Whole-chain denies take precedence over earlier prompts.
+- Added opt-in `settings.autoRestartOnUpdate` (default `false`). A persisted interactive session detects a stable replacement of its running executable, waits for the active turn to settle, then resumes through the normal session path with unsaved editor text retained.
 
 ### Fixed
 
