@@ -762,6 +762,8 @@ searxng:
 | `auth.broker.token`                 | string  | _(unset)_ | Auth-broker token. Overridden by `OMP_AUTH_BROKER_TOKEN`.                                                                                                                                                                                                                                                                                                                                                                              |
 | `secrets.enabled`                   | boolean | `false`   | Enable configured secret obfuscation and built-in credential-shaped token redaction before provider requests. See [Secret obfuscation](./secrets.md).                                                                                                                                                                                                                                                                                  |
 
+`providers.maxInFlightRequests`, `providers.maxImagesPerRequest`, and `providers.maxImageBytesPerRequest` take effect through process-global state that is written when a value is set from the CLI or the settings panel, or when a settings file is loaded. A `Settings` instance an SDK caller builds with `Settings.isolated({...})` and passes as `CreateAgentSessionOptions.settings` reports the configured values but does not install them. Such a session uses whatever budgets are already installed in the process, from an earlier settings load or set, and the built-in budgets only when nothing has installed any.
+
 Provider credentials and custom model definitions are configured separately — see [Providers](./providers.md) and [Models](./models.md).
 
 ### Other groups
