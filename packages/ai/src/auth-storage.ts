@@ -714,7 +714,11 @@ const USAGE_REPORT_CACHE_KEY_VERSION_OVERRIDES: Partial<Record<Provider, number>
 	// account email stop sharing a slot. v3 retires parsed reports created before
 	// Anthropic extra-usage rows existed; header ingestion can otherwise keep
 	// renewing those incomplete reports throughout the 24h last-good retention.
-	anthropic: 3,
+	// v4 retires reports created before `priorityEntitlement`: the cache is
+	// persistent and shared across concurrently running builds, so without the
+	// bump an older build keeps refilling the slot with entitlement-free reports
+	// and the priority gate reads "unknown" forever.
+	anthropic: 4,
 };
 const DEFAULT_OAUTH_REFRESH_TIMEOUT_MS = 10_000;
 const OAUTH_REFRESH_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
