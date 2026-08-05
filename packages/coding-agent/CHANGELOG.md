@@ -1,5 +1,11 @@
 # Changelog
 
+> **Note on `.omp` paths below.** The configuration directory was renamed to
+> `~/.ompk` (and project-local `.omp/` to `.ompk/`). Entries dated before that
+> rename still say `.omp` because that is what those releases actually shipped;
+> they are left unedited so this history stays accurate. When following an older
+> entry today, read `.omp` as `.ompk`.
+
 ## [Unreleased]
 
 ### Added
@@ -14,8 +20,8 @@
 
 ### Fixed
 
-- Fixed `disabledExtensions` leaking across settings instances: `initializeWithSettings()` pinned a `Settings` reference that outlived the instance, so every later `loadCapability()` in the process kept filtering against discarded settings. The global settings singleton now rebinds the capability registry whenever it is initialized or discarded; `reset()` stays cache-only, so a mid-session cache invalidation no longer risks dropping the filter.
-- Fixed a single disabled context file suppressing every same-named context file: `context-file` extension ids are now scoped by location (`context-file:project:./packages/app/AGENTS.md`) instead of by basename, so disabling one project's `AGENTS.md` no longer hides `AGENTS.md` elsewhere. Existing bare-basename ids keep working, and the extensions dashboard clears them when an item is re-enabled.
+- Fixed `disabledExtensions` filtering against a discarded `Settings` instance whenever the singleton is *replaced* rather than reset: the capability registry is now rebound on every swap (`Settings.init` included), not only by the test-reset hook. `reset()` stays cache-only, so a mid-session cache invalidation still cannot drop the filter.
+- Fixed context-file disable ids being machine-specific: they are now repo-root-relative (`context-file:project:./packages/app/AGENTS.md`), so a checked-in `disabledExtensions` entry survives a different checkout path, falling back to `~/`-relative and then absolute outside a repo. Legacy bare-basename ids still disable, and the extensions dashboard now shows the canonical id and clears legacy entries when an item is re-enabled.
 - Fixed hour-over-hour activity recall on days that are not 24 hours long: the day window is now derived from local midnight to the next local midnight, so DST transition days correctly span 23 or 25 hours instead of being truncated or overrun.
 - Fixed activity recall bucketing in half-hour-offset timezones (IST, NPT): buckets now start on real local hour marks rather than UTC hour boundaries labelled with the local hour, and are keyed by absolute instant so the repeated hour on a fall-back day stays two distinct buckets.
 

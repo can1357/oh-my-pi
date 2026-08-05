@@ -64,19 +64,26 @@ describe("listClaudePluginRoots", () => {
 	let tempDir: string;
 	let originalHome: string | undefined;
 
+	// Restore this spy individually rather than via `vi.restoreAllMocks()`.
+	// That call IS `mock.restore()` (same native function), and the global
+	// restore walks Bun's mock registry to unpatch the sealed `os` namespace,
+	// segfaulting this shared-process bucket (exit 132) once a later file
+	// imports an overlapping module graph.
+	let homedirSpy: { mockRestore: () => void } | undefined;
 	beforeEach(async () => {
 		clearClaudePluginRootsCache();
 		clearFsCache();
 		originalHome = process.env.HOME;
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-plugins-test-"));
 		process.env.HOME = tempDir;
-		vi.spyOn(os, "homedir").mockReturnValue(tempDir);
+		homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(tempDir);
 	});
 
 	afterEach(async () => {
 		clearClaudePluginRootsCache();
 		clearFsCache();
-		vi.restoreAllMocks();
+		homedirSpy?.mockRestore();
+		homedirSpy = undefined;
 		if (originalHome === undefined) {
 			delete process.env.HOME;
 		} else {

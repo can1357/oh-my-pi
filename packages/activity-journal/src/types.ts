@@ -43,6 +43,7 @@ export interface ActivityEvidence {
 	readonly confidence: ActivityConfidence;
 	readonly confidenceReason: string;
 	readonly redactedDigest?: string;
+	readonly ocrSnippet?: string;
 	readonly evidenceRefs: readonly EvidenceReference[];
 	readonly rawClip?: RawClipReference;
 }

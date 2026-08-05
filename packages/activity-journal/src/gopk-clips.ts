@@ -18,6 +18,7 @@ export interface GopkClipAnalysis {
 		readonly completedAt: string;
 	};
 	readonly redactedDigest?: string;
+	readonly ocrSnippet?: string;
 	readonly activityCategory: ActivityCategory;
 	readonly confidence: ActivityConfidence;
 	readonly confidenceReason: string;
@@ -27,8 +28,31 @@ export interface GopkClipAnalysis {
 	readonly rawClip?: { readonly localPointer: string; readonly expiresAt: string };
 }
 
+const GOPK_REDACTION_PATTERNS = [
+	/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gi,
+	/sk-[A-Za-z0-9]{20,}/g,
+	/ghp_[A-Za-z0-9]{36,}/g,
+	/github_pat_[A-Za-z0-9_]{20,}/g,
+	/gpat_[A-Za-z0-9]{22,}/g,
+	/xox[baprs]-[A-Za-z0-9-]+/gi,
+	/AKIA[A-Z0-9]{16}/g,
+	/Bearer [A-Za-z0-9._+/=-]+/gi,
+	/(password|secret|token|api[_-]?key|access[_-]?key)["'\s]*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n]+)/gi,
+	/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g,
+	/\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/g,
+	/\b\d{6,8}\b/g,
+] as const;
+
+/** Re-establish the redaction boundary for untrusted filesystem handoffs. */
+export function redactGopkHandoffText(source: string, maxChars: number): string {
+	let text = source.replace(/C:[\\/]+Users[\\/]+[^\\/]+[\\/]/gi, "~/");
+	for (const pattern of GOPK_REDACTION_PATTERNS) text = text.replace(pattern, "[REDACTED]");
+	return text.slice(0, maxChars);
+}
+
 export interface GopkClipIngestionPolicy {
 	readonly enabled: boolean;
+	readonly ocrEnabled: boolean;
 	readonly allowedApplicationIds: readonly string[];
 	readonly deniedApplicationIds: readonly string[];
 	readonly maximumRawClipRetentionMs: number;
@@ -72,6 +96,16 @@ function validate(request: GopkClipIngestionRequest): string | undefined {
 	if (policy.allowedApplicationIds.length > 0 && !policy.allowedApplicationIds.includes(analysis.application.id)) {
 		return "application is outside the capture allowlist";
 	}
+	if (!isValidOcrSnippet(analysis.ocrSnippet))
+		return "OCR snippet must be a non-empty string of at most 280 characters";
+	if (analysis.ocrSnippet !== undefined && !policy.ocrEnabled) return "OCR capture is disabled";
+	if (
+		analysis.redactedDigest !== undefined &&
+		redactGopkHandoffText(analysis.redactedDigest, 16_000) !== analysis.redactedDigest
+	)
+		return "clip digest redaction was incomplete";
+	if (analysis.ocrSnippet !== undefined && redactGopkHandoffText(analysis.ocrSnippet, 280) !== analysis.ocrSnippet)
+		return "OCR snippet redaction was incomplete";
 	if (analysis.redaction.status !== "redacted") return "clip redaction was not completed";
 	if (!isLocalPointer(analysis.localPointer)) return "clip evidence pointer must remain local";
 	if (!isValidWindow(analysis.window.startedAt, analysis.window.endedAt)) return "clip window is invalid";
@@ -116,6 +150,7 @@ function toActivityEvidence(request: GopkClipIngestionRequest): ActivityEvidence
 		confidence: capScreenConfidence(analysis.confidence),
 		confidenceReason: `Gopk clip corroborates screen activity only: ${analysis.confidenceReason}`,
 		redactedDigest: analysis.redactedDigest,
+		...(analysis.ocrSnippet !== undefined ? { ocrSnippet: analysis.ocrSnippet } : {}),
 		evidenceRefs,
 		...(rawClip ? { rawClip } : {}),
 	};
@@ -136,6 +171,10 @@ function isRawRetentionValid(analysis: GopkClipAnalysis, maximumRawClipRetention
 	const end = Date.parse(analysis.window.endedAt);
 	const expiresAt = Date.parse(analysis.rawClip?.expiresAt ?? "");
 	return Number.isFinite(expiresAt) && expiresAt > end && expiresAt - end <= maximumRawClipRetentionMs;
+}
+
+function isValidOcrSnippet(value: unknown): value is string | undefined {
+	return value === undefined || (typeof value === "string" && value.length > 0 && value.length <= 280);
 }
 
 function isLocalPointer(pointer: string): boolean {

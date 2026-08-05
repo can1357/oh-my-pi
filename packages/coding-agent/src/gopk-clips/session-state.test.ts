@@ -36,10 +36,17 @@ describe("gopk-clips handoff host", () => {
 		await fs.rm(captureRoot, { recursive: true, force: true });
 	});
 
-	function makeHost(): GopkClipsHostState {
+	function makeHost(ocrEnabled = true): GopkClipsHostState {
 		host = createGopkClipsHost(
 			// Hour-long intervals: only the startup pass and explicit *Once calls run.
-			{ captureRoot, pollIntervalMs: 3_600_000, cleanupIntervalMs: 3_600_000, ledgerPath },
+			{
+				captureRoot,
+				captureEnabled: true,
+				ocrEnabled,
+				pollIntervalMs: 3_600_000,
+				cleanupIntervalMs: 3_600_000,
+				ledgerPath,
+			},
 			quiet,
 		);
 		return host;
@@ -68,7 +75,7 @@ describe("gopk-clips handoff host", () => {
 	}
 
 	it("ingests a valid derivative, attributes it to the capture session, and consumes the file", async () => {
-		await writeDerivative();
+		await writeDerivative({ ocrSnippet: "edited main.rs" });
 		const state = makeHost();
 		await state.pollOnce();
 
@@ -77,6 +84,18 @@ describe("gopk-clips handoff host", () => {
 		inspector.close();
 		expect(rows.length).toBe(1);
 		expect(rows[0]?.sourceEventId).toBe("capture-session-1:clip-1");
+		expect(rows[0]?.ocrSnippet).toBe("edited main.rs");
+		expect(await fs.readdir(handoffDir)).toEqual([]);
+	});
+
+	it("consumes but does not persist queued OCR after consent is disabled", async () => {
+		await writeDerivative({ ocrSnippet: "must not persist after revocation" });
+		const state = makeHost(false);
+		await state.pollOnce();
+
+		const inspector = new SqliteActivityLedger(ledgerPath);
+		expect(inspector.list()).toEqual([]);
+		inspector.close();
 		expect(await fs.readdir(handoffDir)).toEqual([]);
 	});
 
@@ -92,7 +111,7 @@ describe("gopk-clips handoff host", () => {
 		inspector.close();
 	});
 
-	it("quarantines unparseable and shape-invalid files instead of deleting them", async () => {
+	it("replaces unparseable and shape-invalid files with scrubbed diagnostics", async () => {
 		await fs.writeFile(path.join(handoffDir, "garbage.json"), "not json", "utf8");
 		await fs.writeFile(path.join(handoffDir, "empty.json"), "{}", "utf8");
 		const state = makeHost();
@@ -100,6 +119,11 @@ describe("gopk-clips handoff host", () => {
 
 		const entries = (await fs.readdir(handoffDir)).sort();
 		expect(entries).toEqual(["empty.json.rejected", "garbage.json.rejected"]);
+		for (const entry of entries) {
+			const diagnostic = await fs.readFile(path.join(handoffDir, entry), "utf8");
+			expect(diagnostic).toContain('"reason":"invalid handoff"');
+			expect(diagnostic).not.toContain("not json");
+		}
 		const inspector = new SqliteActivityLedger(ledgerPath);
 		expect(inspector.list().length).toBe(0);
 		inspector.close();
@@ -154,20 +178,58 @@ describe("parseDerivative", () => {
 		).toBeUndefined();
 	});
 
-	it("accepts an empty sanitized digest", () => {
-		expect(
-			parseDerivative(
-				JSON.stringify({
-					clipId: "c",
-					sessionId: "s",
-					window: { startedAt: "a", endedAt: "b" },
-					appIdentity: { processName: "code" },
-					sanitizedDigest: "",
-					sanitizationAttestation: { status: "sanitized", completedAt: "t", sanitizerVersion: "v" },
-					clipHash: "h",
-					localManifestPointer: "/x",
-				}),
-			),
-		).toBeDefined();
+	it("accepts old handoffs without an OCR snippet", () => {
+		const derivative = parseDerivative(
+			JSON.stringify({
+				clipId: "c",
+				sessionId: "s",
+				window: { startedAt: "a", endedAt: "b" },
+				appIdentity: { processName: "code" },
+				sanitizedDigest: "",
+				sanitizationAttestation: { status: "sanitized", completedAt: "t", sanitizerVersion: "v" },
+				clipHash: "h",
+				localManifestPointer: "/x",
+			}),
+		);
+		expect(derivative).toBeDefined();
+		expect(derivative?.ocrSnippet).toBeUndefined();
 	});
+
+	it("accepts a non-empty OCR snippet at the 280-character limit", () => {
+		const ocrSnippet = "x".repeat(280);
+		const derivative = parseDerivative(
+			JSON.stringify({
+				clipId: "c",
+				sessionId: "s",
+				window: { startedAt: "a", endedAt: "b" },
+				appIdentity: { processName: "code" },
+				sanitizedDigest: "",
+				ocrSnippet,
+				sanitizationAttestation: { status: "sanitized", completedAt: "t", sanitizerVersion: "v" },
+				clipHash: "h",
+				localManifestPointer: "/x",
+			}),
+		);
+		expect(derivative?.ocrSnippet).toBe(ocrSnippet);
+	});
+
+	it.each(["", 123, "x".repeat(281)])(
+		"drops invalid optional OCR snippet %# without quarantining the derivative",
+		ocrSnippet => {
+			const handoff = {
+				clipId: "c",
+				sessionId: "s",
+				window: { startedAt: "a", endedAt: "b" },
+				appIdentity: { processName: "code" },
+				sanitizedDigest: "",
+				ocrSnippet,
+				sanitizationAttestation: { status: "sanitized", completedAt: "t", sanitizerVersion: "v" },
+				clipHash: "h",
+				localManifestPointer: "/x",
+			};
+			const derivative = parseDerivative(JSON.stringify(handoff));
+			expect(derivative).toBeDefined();
+			expect(derivative?.ocrSnippet).toBeUndefined();
+		},
+	);
 });

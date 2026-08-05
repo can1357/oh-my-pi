@@ -423,3 +423,52 @@ export async function executeWithKernelBase<
 		unregisterBridge?.();
 	}
 }
+
+/**
+ * Default ceiling for kernel-disposal waits. Generous enough that a healthy
+ * kernel always finishes inside it, short enough that a wedged one cannot
+ * outlast a test hook budget or a session teardown.
+ */
+export const KERNEL_DISPOSE_TIMEOUT_MS = 10_000;
+
+/**
+ * `Promise.allSettled` with a ceiling.
+ *
+ * Kernel disposal awaits two things that can block indefinitely: a *starting*
+ * kernel's boot promise (Julia's cold-start JIT is the worst offender) and
+ * `kernel.shutdown()` on a wedged process. Neither has an internal timeout, so
+ * a single stuck kernel hangs disposal forever — which in tests blew a 35s
+ * beforeEach/afterEach hook budget and failed a test whose assertions had all
+ * passed, and in a live session would stall teardown.
+ *
+ * On timeout every outstanding entry is reported as `rejected`, which is the
+ * path every caller already handles: log "shutdown not confirmed" and re-register
+ * the session rather than dropping it. So a timeout degrades to the existing
+ * unconfirmed-shutdown behaviour instead of inventing a new one.
+ */
+export async function settleWithin<T>(
+	promises: ReadonlyArray<Promise<T>>,
+	timeoutMs: number = KERNEL_DISPOSE_TIMEOUT_MS,
+): Promise<PromiseSettledResult<T>[]> {
+	if (promises.length === 0) return [];
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<PromiseSettledResult<T>[]>(resolve => {
+		timer = setTimeout(
+			() =>
+				resolve(
+					promises.map(() => ({
+						status: "rejected" as const,
+						reason: new Error(`kernel disposal timed out after ${timeoutMs}ms`),
+					})),
+				),
+			timeoutMs,
+		);
+		// Never let the ceiling itself keep the process alive.
+		(timer as { unref?: () => void }).unref?.();
+	});
+	try {
+		return await Promise.race([Promise.allSettled(promises), timeout]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}

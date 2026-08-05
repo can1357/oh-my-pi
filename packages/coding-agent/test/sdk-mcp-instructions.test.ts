@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -48,10 +48,18 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		}
 	});
 
+	// Restore this spy individually rather than via `mock.restore()`. It patches a
+	// sealed ESM module namespace (os.homedir), and the global restore walks Bun's
+	// whole mock registry to undo that, segfaulting the process once a later file
+	// in the same run imports an overlapping module graph. Buckets share one
+	// process, so that crash takes every co-resident file down (exit 132).
+	// `vi.restoreAllMocks()` is the same native function — not a safer spelling.
+	let homedirSpy: { mockRestore: () => void } | undefined;
+
 	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-sdk-mcp-instr-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
-		spyOn(os, "homedir").mockReturnValue(isolatedHome);
+		homedirSpy = spyOn(os, "homedir").mockReturnValue(isolatedHome);
 		fs.writeFileSync(
 			path.join(tempDir, ".mcp.json"),
 			JSON.stringify({
@@ -66,7 +74,8 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		if (tempDir && fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
 		}
-		mock.restore();
+		homedirSpy?.mockRestore();
+		homedirSpy = undefined;
 	});
 
 	it("folds server instructions into the prompt once deferred discovery connects", async () => {

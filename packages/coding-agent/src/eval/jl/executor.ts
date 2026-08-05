@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { getProjectDir, logger } from "@pk-nerdsaver-ai/pi-utils";
 import type { ToolSession } from "../../tools";
-import { attachSessionOwner, createCancelledKernelResult, executeWithKernelBase } from "../executor-base";
+import { attachSessionOwner, createCancelledKernelResult, executeWithKernelBase, settleWithin } from "../executor-base";
 import { ensurePyToolBridge, type PyToolBridgeInfo } from "../py/tool-bridge";
 import type { EvalDisplayOutput, EvalStatusEvent } from "../types";
 import {
@@ -382,14 +382,14 @@ export async function disposeJuliaKernelSessionsByOwner(ownerId: string): Promis
 	for (const session of toShutdown) {
 		if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
 	}
-	const started = await Promise.allSettled(startingToShutdown.map(starting => starting.promise));
+	const started = await settleWithin(startingToShutdown.map(starting => starting.promise));
 	for (const result of started) {
 		if (result.status !== "fulfilled") continue;
 		const session = result.value;
 		if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
 		toShutdown.push(session);
 	}
-	const results = await Promise.allSettled(toShutdown.map(session => session.kernel.shutdown()));
+	const results = await settleWithin(toShutdown.map(session => session.kernel.shutdown()));
 	for (let i = 0; i < toShutdown.length; i += 1) {
 		const session = toShutdown[i];
 		const result = results[i];

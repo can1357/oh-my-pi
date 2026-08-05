@@ -25,6 +25,7 @@ const consent: ConsentRecord = {
 
 const policy: GopkClipIngestionPolicy = {
 	enabled: true,
+	ocrEnabled: false,
 	allowedApplicationIds: [],
 	deniedApplicationIds: ["1password"],
 	maximumRawClipRetentionMs: 10 * 60_000,

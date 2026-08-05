@@ -10,10 +10,10 @@
  * Handoff contract: the daemon atomically drops `<name>.json` files (tmp-write
  * + rename) under `<captureRoot>/journal-handoff`. This host owns files from
  * the moment they appear — a file is deleted after its derivative has been
- * handed to the sink, and renamed to `<name>.json.rejected` when it cannot be
- * parsed or fails shape validation, so nothing disappears silently. Replays
- * after a crash between ingest and delete are safe: the ledger dedupes by
- * clip identity.
+ * handed to the sink. Malformed files are deleted and replaced by a scrubbed
+ * `<name>.json.rejected` diagnostic marker, so untrusted content is never
+ * retained while operators can still see that a rejection occurred. Replays
+ * after a crash between ingest and delete remain safe because the ledger deduplicates by clip identity.
  *
  * Unlike the screenpipe bridge, this host is not re-bound on agent session
  * transitions — each derivative carries the *capture* session id it was
@@ -56,6 +56,8 @@ export interface GopkClipsHostConfig {
 	 * `<agentDir>/gopk-clips/capture`).
 	 */
 	readonly captureRoot?: string;
+	readonly captureEnabled: boolean;
+	readonly ocrEnabled: boolean;
 	readonly pollIntervalMs: number;
 	readonly cleanupIntervalMs: number;
 	/** Test seam; unset defers to {@link resolveGopkClipsPaths}. */
@@ -97,17 +99,21 @@ export function createGopkClipsHost(
 	fs.mkdirSync(handoffDir, { recursive: true });
 	fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
 
+	// The policy package currently names its local-persistence contract v1;
+	// config.captureEnabled was already derived fail-closed from shared
+	// context-retention/v2 consent before constructing this adapter record.
 	const consent: ConsentRecord = {
 		userId: installId,
 		deviceId: installId,
 		identityVerified: true,
-		enabled: true,
+		enabled: config.captureEnabled,
 		scope: "device",
 		remoteStorageEnabled: false,
 		policyVersion: "context-retention/v1",
 	};
 	const policy: GopkClipIngestionPolicy = {
-		enabled: true,
+		enabled: config.captureEnabled,
+		ocrEnabled: config.ocrEnabled,
 		allowedApplicationIds: [],
 		deniedApplicationIds: [...DENIED_APPLICATION_IDS],
 		maximumRawClipRetentionMs: MAXIMUM_RAW_CLIP_RETENTION_MS,
@@ -252,10 +258,19 @@ export function createGopkClipsHost(
 
 async function quarantine(filePath: string, hostLogger: GopkClipsHostLogger): Promise<void> {
 	try {
-		await fsp.rename(filePath, `${filePath}${REJECTED_SUFFIX}`);
-		hostLogger.warn("gopk-clips host quarantined malformed handoff file", { file: path.basename(filePath) });
+		await fsp.rm(filePath, { force: true });
+		await fsp.writeFile(
+			`${filePath}${REJECTED_SUFFIX}`,
+			JSON.stringify({ rejectedAt: new Date().toISOString(), reason: "invalid handoff" }),
+			{ flag: "wx" },
+		);
+		hostLogger.warn("gopk-clips host discarded malformed handoff and wrote a scrubbed diagnostic", {
+			file: path.basename(filePath),
+		});
 	} catch (error) {
-		hostLogger.warn("gopk-clips host could not quarantine handoff file", {
+		// The raw handoff is removed before this path; diagnostic failure cannot
+		// preserve user content.
+		hostLogger.warn("gopk-clips host could not write rejected-handoff diagnostic", {
 			file: path.basename(filePath),
 			error: String(error),
 		});
@@ -299,9 +314,15 @@ export function parseDerivative(raw: string): GopkCapturedDerivative | undefined
 		if (typeof rawClip !== "object" || rawClip === null) return undefined;
 		if (!isNonEmptyString(rawClip.localPointer) || !isNonEmptyString(rawClip.expiresAt)) return undefined;
 	}
-	return value as GopkCapturedDerivative;
+	const derivative = { ...record };
+	if (!isValidOcrSnippet(derivative.ocrSnippet)) delete derivative.ocrSnippet;
+	return derivative as unknown as GopkCapturedDerivative;
 }
 
 function isNonEmptyString(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0;
+}
+
+function isValidOcrSnippet(value: unknown): value is string | undefined {
+	return value === undefined || (typeof value === "string" && value.length > 0 && value.length <= 280);
 }

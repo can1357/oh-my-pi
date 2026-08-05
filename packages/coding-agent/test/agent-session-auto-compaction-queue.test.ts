@@ -31,6 +31,26 @@ function getRuntimeSignals(): string[] {
  * Regression test: auto-compaction completion should resume the agent loop when
  * there are queued agent-level messages (follow-up/steering/custom).
  */
+// Per-file spy tracking. `vi.restoreAllMocks()` IS `mock.restore()` — the same
+// native function — and that global restore walks Bun's whole mock registry to
+// unpatch spies. When one of them patched a sealed ESM module namespace (here
+// `logger` and `unexpectedStopClassifier`), the walk segfaults the process
+// (exit 132) once a later file in the same run imports an overlapping module
+// graph, taking the shared-process bucket with it.
+//
+// The tracker is deliberately PER FILE. A module-shared array would let one
+// file's teardown restore another file's still-live spies — the same cross-file
+// leak, pointing the other way.
+const trackedSpies: Array<{ mockRestore: () => void }> = [];
+function trackedSpyOn<T extends object, K extends keyof T>(obj: T, key: K) {
+	const spy = vi.spyOn(obj, key);
+	trackedSpies.push(spy as unknown as { mockRestore: () => void });
+	return spy;
+}
+function restoreTrackedSpies(): void {
+	for (const spy of trackedSpies.splice(0).reverse()) spy.mockRestore();
+}
+
 describe("AgentSession auto-compaction queue resume", () => {
 	let tempDir: TempDir;
 	let session: AgentSession;
@@ -149,7 +169,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 				getRuntimeSignals().length = 0;
 				(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
 					undefined;
-				vi.restoreAllMocks();
+				restoreTrackedSpies();
 			}
 		}
 	});
@@ -165,7 +185,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		expect(session.agent.hasQueuedMessages()).toBe(true);
 
-		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+		const continueSpy = trackedSpyOn(session.agent, "continue").mockImplementation(async () => {
 			// Real continue() polls and consumes the queued steering/follow-up
 			// messages. Mirror that here so the stranded-queue drain settles after
 			// one resume instead of rescheduling itself forever (a no-op mock
@@ -255,7 +275,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const abortEntered = Promise.withResolvers<void>();
 		const releaseAbort = Promise.withResolvers<void>();
 		let compactingDuringAbort: boolean | undefined;
-		vi.spyOn(session, "abort").mockImplementation(async () => {
+		trackedSpyOn(session, "abort").mockImplementation(async () => {
 			compactingDuringAbort = session.isCompacting;
 			abortEntered.resolve();
 			await releaseAbort.promise;
@@ -299,7 +319,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
 			gate.promise;
 
-		const appendCompactionSpy = vi.spyOn(sessionManager, "appendCompaction");
+		const appendCompactionSpy = trackedSpyOn(sessionManager, "appendCompaction");
 		let autoAborted: boolean | undefined;
 		const autoEnded = Promise.withResolvers<void>();
 		session.subscribe(event => {
@@ -391,7 +411,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	it("runs active-goal threshold compaction after yield followed by a trailing empty stop", async () => {
-		const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => {});
+		const debugSpy = trackedSpyOn(logger, "debug").mockImplementation(() => {});
 
 		const now = Date.now();
 		session.setGoalModeState({
@@ -579,7 +599,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			},
 		});
 
-		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+		trackedSpyOn(session.agent, "continue").mockImplementation(async () => {
 			session.agent.clearAllQueues();
 		});
 
@@ -644,8 +664,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 		session.settings.set("features.unexpectedStopDetection", true);
 		session.settings.set("providers.unexpectedStopModel", "online");
 
-		vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
-		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+		trackedSpyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
+		trackedSpyOn(session.agent, "continue").mockImplementation(async () => {
 			session.agent.clearAllQueues();
 		});
 
@@ -706,8 +726,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 		session.settings.set("retry.maxRetries", 1);
 		session.settings.set("retry.modelFallback", false);
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
-		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+		trackedSpyOn(scheduler, "wait").mockResolvedValue(undefined);
+		trackedSpyOn(session.agent, "continue").mockImplementation(async () => {
 			session.agent.clearAllQueues();
 		});
 
@@ -801,7 +821,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		session.settings.set("compaction.autoContinue", true);
 		session.settings.set("contextPromotion.enabled", false);
 
-		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+		trackedSpyOn(session.agent, "continue").mockImplementation(async () => {
 			session.agent.clearAllQueues();
 		});
 
@@ -871,7 +891,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		// Defensive: mirror the resume-drain stub so any queued continuation settles
 		// instead of spinning the drain (see the threshold test above).
-		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+		trackedSpyOn(session.agent, "continue").mockImplementation(async () => {
 			session.agent.clearAllQueues();
 		});
 
@@ -902,7 +922,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	it("forwards todo reminder lifecycle signals to extensions", async () => {
-		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const continueSpy = trackedSpyOn(session.agent, "continue").mockResolvedValue();
 
 		session.setTodoPhases([
 			{

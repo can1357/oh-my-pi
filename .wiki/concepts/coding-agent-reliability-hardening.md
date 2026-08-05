@@ -11,6 +11,39 @@ status: implemented
 
 Recent hardening work focused on making advanced harness paths safer and easier to verify.
 
+## July 29: CI recovery and repeatability
+
+### Treat the CI harness as the test contract
+
+The initial CI-repair work merged as [PR #18](https://github.com/kingkillery/oh-my-pk/pull/18). Its durable lesson is procedural: reproduce the **actual CI unit**, not a convenient local subset.
+
+- `scripts/ci-test-ts.ts` is the authoritative runner. It classifies coding-agent tests into buckets, selects the exact files, runs each group with Bun's `--smol` mode, applies the CI-style environment scrub, and carries the aggregate's `--only-failures` behaviour.
+- Reproduce a failing bucket on Linux with the same native addon and runner flags that CI uses. Windows-only path, casing, and home-directory mocks are useful diagnostics but are not acceptance evidence for the Linux job.
+- The runner fails fast by default. A failure leaves later chunks **unknown**, not green; use `--keep-going` when the goal is the complete failure set. This prevents a fix that merely exposes a later failure from being misreported as a regression.
+
+### Bound Bun runtime-state accumulation
+
+The unchunked singleton/global-state bucket exposed a Bun 1.3.14 runtime crash (`panic(main thread): Segmentation fault at address 0x4`, exit 132) after substantial state accumulated in one process. Bun's own crash banner identifies this as a runtime bug rather than an application exception.
+
+The investigation established two distinct mitigations:
+
+1. `acp-agent-fusion-sidekick.test.ts` now disposes the harnesses it creates. This removes a deterministic two-file trigger, but was not by itself sufficient for the exact CI file list and invocation.
+2. [PR #32](https://github.com/kingkillery/oh-my-pk/pull/32) chunks the singleton bucket into groups of ten files, retaining per-chunk process-state coverage while bounding heap growth and leaked child-process accumulation. Its PR CI passed the singleton job and every non-release CI job.
+
+The first post-merge `main` run (`30482788360`) kept the singleton job green but failed separately in the native/unit bucket: `julia-prelude.test.ts` timed out in a hook. That bucket then stopped after its first 10-file chunk, leaving the remaining 51 chunks explicitly **unknown**. It was a distinct test-reliability follow-up, not evidence that the singleton crash returned.
+
+That follow-up is resolved. The hook timeout was not disposal — [PR #21](https://github.com/kingkillery/oh-my-pk/pull/21) had already bounded that at 10s per phase — but the file's own `30_000` test budgets, which never accounted for Julia's cold-start JIT on a loaded two-core runner; the reported 35s was that budget plus hook overage. [PR #34](https://github.com/kingkillery/oh-my-pk/pull/34) raised both to 120s. `main` @ `1d4011dd6` then went fully green, so the previously-unknown chunks are now known-passing.
+
+Singleton has stayed green across every CI run since the mitigation landed (PR #32's own run, two runs at `2a2ef3afc`, the #33 and #34 branch runs, and `1d4011dd6`) — six consecutive greens against a crash that previously failed most full-bucket runs. NER-134 is closed on that basis as *mitigated, not cured*: the root cause remains a Bun 1.3.14 defect, and a recurrence should reopen NER-134 rather than open a new issue.
+
+The chunking is explicitly a temporary NER-134 mitigation. Re-evaluate and remove it when a Bun release fixes the underlying crash; any suite that genuinely requires cross-file state must keep those files in the same chunk.
+
+### Context-file disable IDs: precise going forward, compatible for existing users
+
+[PR #33](https://github.com/kingkillery/oh-my-pk/pull/33) is the remaining context-file follow-up, pending CI at the time this note was written. It changes newly written `disabledExtensions` IDs for context files from a basename-only form to a resolved, path-qualified form with forward slashes. Disabling one project's `AGENTS.md` therefore no longer suppresses same-named context files in another project.
+
+The change deliberately dual-reads the old basename ID. Existing settings continue to disable the files they previously matched, including the old collision behaviour, rather than silently re-enabling a file that a user deliberately disabled. Only newly created disable entries receive the path-level precision.
+
 ## WikiGraph path sandbox
 
 `wikigraph://path/...` is now constrained to the calling session `cwd` plus configured `wikigraph.roots`.
