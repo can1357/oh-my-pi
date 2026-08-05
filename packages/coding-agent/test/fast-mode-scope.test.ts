@@ -1,8 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ProviderSessionState, ServiceTier } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model, ProviderSessionState, ServiceTier } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -344,6 +345,66 @@ describe("/fast targets the current model's service-tier family", () => {
 			await session.waitForIdle();
 
 			expect(session.agent.serviceTierResolver?.(model)).toBeUndefined();
+		});
+
+		it("warns once when the provider refuses an activity-lease priority request", async () => {
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled claude-sonnet-4-5 model to exist");
+			// The provider drops the priority signal and reports it on every later
+			// turn of the session, so the warning has to dedupe by provider/model.
+			const session = await createSessionForModel(
+				model,
+				Settings.isolated({
+					"tier.autoFastMode": true,
+					"tier.autoFastModeDurationMinutes": 20,
+					"compaction.enabled": false,
+				}),
+				streamModel => {
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						const message: AssistantMessage = {
+							role: "assistant",
+							content: [{ type: "text", text: "Done" }],
+							api: streamModel.api,
+							provider: streamModel.provider,
+							model: streamModel.id,
+							usage: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 0,
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							},
+							stopReason: "stop",
+							disabledFeatures: ["priority"],
+							timestamp: Date.now(),
+						};
+						stream.push({ type: "start", partial: message });
+						stream.push({ type: "text_start", contentIndex: 0, partial: message });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: "Done", partial: message });
+						stream.push({ type: "text_end", contentIndex: 0, content: "Done", partial: message });
+						stream.push({ type: "done", reason: "stop", message });
+					});
+					return stream;
+				},
+			);
+			const notices: string[] = [];
+			session.subscribe(event => {
+				if (event.type === "notice" && event.source === "priority") notices.push(event.message);
+			});
+
+			await session.prompt("First prompt");
+			await session.waitForIdle();
+			await session.prompt("Second prompt");
+			await session.waitForIdle();
+
+			expect(notices).toEqual([
+				`Auto fast mode rejected for ${model.provider}/${model.id}; retried without it. Other models keep auto fast mode; /fast on re-arms this one.`,
+			]);
+			// The lease is per-request, so the family map stays untouched and every
+			// other model keeps its own lease.
+			expect(session.serviceTierByFamily).toEqual({});
 		});
 	});
 });

@@ -6,7 +6,7 @@
 
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 - Added opt-in `bash.allowCompoundCommands` approval for conservative literal `&&` chains, with ordered per-segment rules and normal bash policy fallback for unmatched segments. The opt-in requires a positively classified POSIX-quoting shell; incompatible and unknown shells retain legacy approval. Whole-chain denies take precedence over earlier prompts.
-- Added opt-in `tier.autoFastMode` (default `false`) and `tier.autoFastModeDurationMinutes` (default `20`). Primary-session requests use priority processing for the configured duration after a user prompt; manual `/fast` remains authoritative, while tasks, advisors, panels, side-channel turns, and auto-learn capture keep their configured tiers.
+- Added opt-in `tier.autoFastMode` (default `false`) and `tier.autoFastModeDurationMinutes` (default `20`). Primary-session requests use priority processing for the configured duration after a user prompt; manual `/fast` remains authoritative, while tasks, advisors, panels, side-channel turns, and auto-learn capture keep their configured tiers. A provider that refuses the lease's priority request is reported once per model instead of silently dropping the status-line indicator.
 
 ### Fixed
 
