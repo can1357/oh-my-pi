@@ -11,10 +11,11 @@ describe("Volcengine Ark Agent Plan catalog", () => {
 	test("ships its stable direct default and documented aliases without model discovery", () => {
 		const descriptor = CATALOG_PROVIDERS.find(provider => provider.id === "volcengine-agent-plan");
 		expect(descriptor).toMatchObject({
-			defaultModel: "doubao-seed-2.1-turbo",
+			defaultModel: "ark-code-latest",
 			envVars: ["VOLCENGINE_AGENT_PLAN_API_KEY"],
 		});
 		const ids = VOLCENGINE_AGENT_PLAN_STATIC_MODELS.map(model => model.id);
+		expect(ids).toContain("ark-code-latest");
 		expect(ids).toContain("doubao-seed-2.1-turbo");
 		expect(ids).toContain("glm-latest");
 		const manager = volcengineAgentPlanModelManagerOptions();
@@ -24,7 +25,8 @@ describe("Volcengine Ark Agent Plan catalog", () => {
 
 	test("pins official limits, modalities, protocols, and PAYG reference rates", () => {
 		const models = new Map(VOLCENGINE_AGENT_PLAN_STATIC_MODELS.map(model => [model.id, buildModel(model)]));
-		expect(models.size).toBe(15);
+		expect(models.size).toBe(16);
+		expect(models.get("ark-code-latest")?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 		expect(models.get("doubao-seed-2.1-turbo")).toMatchObject({
 			api: "openai-responses",
 			baseUrl: VOLCENGINE_AGENT_PLAN_BASE_URL,
