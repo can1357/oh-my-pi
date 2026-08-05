@@ -573,6 +573,11 @@ export class AgentSession {
 
 	#lastUserPromptAt: number | undefined;
 	#autoFastModeSuppressed = false;
+	/**
+	 * `provider/model` keys already warned about a refused activity-lease
+	 * priority request, so one rejection does not warn on every later turn.
+	 */
+	readonly #autoFastRejectionNoticed = new Set<string>();
 
 	readonly #providerBoundary: SessionProviderBoundary;
 	#promptTemplates: PromptTemplate[];
@@ -3051,16 +3056,30 @@ export class AgentSession {
 						ttftMs: assistantMsg.ttft,
 					});
 				}
-				if (
-					assistantMsg.disabledFeatures?.includes("priority") &&
-					this.serviceTierByFamily.anthropic === "priority"
-				) {
-					this.setServiceTierFamily("anthropic", undefined);
-					this.emitNotice(
-						"warning",
-						"Priority/fast mode rejected for this model; retried without it. Fast mode is now off.",
-						"priority",
-					);
+				if (assistantMsg.disabledFeatures?.includes("priority")) {
+					if (this.serviceTierByFamily.anthropic === "priority") {
+						this.setServiceTierFamily("anthropic", undefined);
+						this.emitNotice(
+							"warning",
+							"Priority/fast mode rejected for this model; retried without it. Fast mode is now off.",
+							"priority",
+						);
+					} else {
+						// An activity lease supplies `priority` per request without touching
+						// the family map, so the branch above never fires for it and the
+						// refusal would otherwise be silent: the status-line indicator just
+						// goes dark. Warn once per model — `disabledFeatures` repeats the
+						// marker on every later turn while the refusal stands.
+						const key = `${assistantMsg.provider}/${assistantMsg.model}`;
+						if (!this.#autoFastRejectionNoticed.has(key)) {
+							this.#autoFastRejectionNoticed.add(key);
+							this.emitNotice(
+								"warning",
+								`Auto fast mode rejected for ${key}; retried without it. Other models keep auto fast mode; /fast on re-arms this one.`,
+								"priority",
+							);
+						}
+					}
 				}
 				this.#ttsr.onAssistantMessageEnd(assistantMsg);
 				if (this.#handoff.isGeneratingHandoff) {
