@@ -263,18 +263,19 @@ export class ExtensionDashboard implements Component {
 		const sm = this.settings ?? Settings.instance;
 		if (!sm) return;
 
-		const disabled = ((sm.get("disabledExtensions") as string[]) ?? []).slice();
+		const current = (sm.get("disabledExtensions") as string[]) ?? [];
+		let disabled = current;
 		if (enabled) {
-			const index = disabled.indexOf(extensionId);
-			if (index !== -1) {
-				disabled.splice(index, 1);
-				sm.set("disabledExtensions", disabled);
-			}
-		} else {
-			if (!disabled.includes(extensionId)) {
-				disabled.push(extensionId);
-				sm.set("disabledExtensions", disabled);
-			}
+			// Entries written against an older id scheme still disable the item,
+			// so re-enabling has to drop those too.
+			const legacyIds = this.#state.extensions.find(ext => ext.id === extensionId)?.legacyIds ?? [];
+			const stale = new Set([extensionId, ...legacyIds]);
+			disabled = current.filter(id => !stale.has(id));
+		} else if (!current.includes(extensionId)) {
+			disabled = [...current, extensionId];
+		}
+		if (disabled !== current && disabled.length !== current.length) {
+			sm.set("disabledExtensions", disabled);
 		}
 
 		this.#applyDisabledExtensions(disabled);

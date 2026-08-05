@@ -119,6 +119,16 @@ export function registerProvider<T>(capabilityId: string, provider: Provider<T>)
 // =============================================================================
 
 /**
+ * Whether an item is suppressed by a `disabledExtensions` entry, matching both
+ * its current ID and any legacy forms its capability still honors.
+ */
+export function isExtensionDisabled(source: SourceMeta, disabledIds: ReadonlySet<string>): boolean {
+	if (disabledIds.size === 0) return false;
+	if (source.extensionId !== undefined && disabledIds.has(source.extensionId)) return true;
+	return source.legacyExtensionIds?.some(id => disabledIds.has(id)) ?? false;
+}
+
+/**
  * Async loading logic shared by loadCapability().
  */
 async function loadImpl<T>(
@@ -172,16 +182,17 @@ async function loadImpl<T>(
 				continue;
 			}
 
-			const extensionId = capability.toExtensionId?.(itemWithSource);
-			if (extensionId && disabledExtensionIds.has(extensionId)) {
-				continue;
-			}
-			// Honour IDs persisted under an older format too — a user's existing
-			// `disabledExtensions` entries must keep disabling after an ID-format
-			// change (see toLegacyExtensionIds in types.ts).
-			const legacyIds = capability.toLegacyExtensionIds?.(itemWithSource);
-			if (legacyIds?.some(id => disabledExtensionIds.has(id))) {
-				continue;
+			const extensionId = capability.toExtensionId?.(itemWithSource, ctx);
+			if (extensionId) {
+				itemWithSource._source.extensionId = extensionId;
+				// Entries persisted under an older ID format must keep disabling.
+				const legacyIds = capability.toLegacyExtensionIds?.(itemWithSource, ctx);
+				if (legacyIds && legacyIds.length > 0) {
+					itemWithSource._source.legacyExtensionIds = legacyIds;
+				}
+				if (isExtensionDisabled(itemWithSource._source, disabledExtensionIds)) {
+					continue;
+				}
 			}
 
 			itemWithSource._source.providerName = provider.displayName;
@@ -273,6 +284,15 @@ export async function loadCapability<T>(capabilityId: string, options: LoadOptio
 // =============================================================================
 // Provider Enable/Disable API
 // =============================================================================
+
+/**
+ * Bind the settings instance capability loads read `disabledExtensions` from.
+ * The global settings singleton keeps this in sync as it is (re)initialized and
+ * discarded, so a replaced instance cannot keep filtering later loads.
+ */
+export function setSettings(activeSettings: Settings | null): void {
+	settings = activeSettings;
+}
 
 /**
  * Initialize capability system with settings manager for persistence.

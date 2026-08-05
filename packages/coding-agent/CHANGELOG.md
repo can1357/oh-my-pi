@@ -20,6 +20,8 @@
 
 ### Fixed
 
+- Fixed `disabledExtensions` filtering against a discarded `Settings` instance whenever the singleton is *replaced* rather than reset: the capability registry is now rebound on every swap (`Settings.init` included), not only by the test-reset hook. `reset()` stays cache-only, so a mid-session cache invalidation still cannot drop the filter.
+- Fixed context-file disable ids being machine-specific: they are now repo-root-relative (`context-file:project:./packages/app/AGENTS.md`), so a checked-in `disabledExtensions` entry survives a different checkout path, falling back to `~/`-relative and then absolute outside a repo. Legacy bare-basename ids still disable, and the extensions dashboard now shows the canonical id and clears legacy entries when an item is re-enabled.
 - Fixed hour-over-hour activity recall on days that are not 24 hours long: the day window is now derived from local midnight to the next local midnight, so DST transition days correctly span 23 or 25 hours instead of being truncated or overrun.
 - Fixed activity recall bucketing in half-hour-offset timezones (IST, NPT): buckets now start on real local hour marks rather than UTC hour boundaries labelled with the local hour, and are keyed by absolute instant so the repeated hour on a fall-back day stays two distinct buckets.
 

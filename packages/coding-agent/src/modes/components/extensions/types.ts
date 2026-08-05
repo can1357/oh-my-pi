@@ -35,6 +35,8 @@ export type DisabledReason = "provider-disabled" | "item-disabled" | "shadowed";
 export interface Extension {
 	/** Unique ID: `${kind}:${name}` */
 	id: string;
+	/** Superseded IDs that still disable this item when present in settings */
+	legacyIds?: string[];
 	/** Extension kind */
 	kind: ExtensionKind;
 	/** Extension name */

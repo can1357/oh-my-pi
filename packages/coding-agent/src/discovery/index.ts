@@ -55,6 +55,7 @@ export {
 	// Initialization
 	initializeWithSettings,
 	invalidate,
+	isExtensionDisabled,
 	isProviderEnabled,
 	listCapabilities,
 	// Loading API
@@ -62,6 +63,7 @@ export {
 	// Cache management
 	reset,
 	setDisabledProviders,
+	setSettings,
 } from "../capability";
 export type { ContextFile } from "../capability/context-file";
 export type { Extension, ExtensionManifest } from "../capability/extension";
