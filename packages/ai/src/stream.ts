@@ -2159,6 +2159,7 @@ function mapOptionsForApi<TApi extends Api>(
 				disableReasoning: options?.disableReasoning,
 				forceReasoningOff: options?.forceReasoningOff,
 				textVerbosity: options?.textVerbosity,
+				include: options?.include,
 				promptCache: options?.promptCache,
 				statefulResponses: options?.statefulResponses,
 			});

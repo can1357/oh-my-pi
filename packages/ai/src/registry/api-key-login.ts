@@ -11,6 +11,7 @@ import {
 	validateAnthropicCompatibleApiKey,
 	validateApiKeyAgainstModelsEndpoint,
 	validateOpenAICompatibleApiKey,
+	validateOpenAIResponsesApiKey,
 } from "./api-key-validation";
 import type { OAuthController } from "./oauth/types";
 
@@ -23,6 +24,12 @@ type ChatCompletionsValidation = {
 	tolerateModelDenied?: boolean;
 	maxTokensField?: "max_tokens" | "max_completion_tokens";
 	maxTokens?: number;
+};
+type ResponsesValidation = {
+	kind: "responses";
+	provider: string;
+	baseUrl: string;
+	acceptedErrorCode: string;
 };
 type AnthropicMessagesValidation = {
 	kind: "anthropic-messages";
@@ -50,7 +57,12 @@ export type ApiKeyLoginConfig = {
 	/** Placeholder string for the prompt (e.g. "sk-...", "csk-..."). */
 	placeholder: string;
 	/** Validation strategy, or `null` to skip validation. */
-	validation: ChatCompletionsValidation | AnthropicMessagesValidation | ModelsEndpointValidation | null;
+	validation:
+		| ChatCompletionsValidation
+		| ResponsesValidation
+		| AnthropicMessagesValidation
+		| ModelsEndpointValidation
+		| null;
 	/** Value returned for an empty key; also allows an empty prompt response. */
 	emptyKeyFallback?: string;
 };
@@ -105,6 +117,15 @@ export function createApiKeyLogin(config: ApiKeyLoginConfig): (options: OAuthCon
 					signal: options.signal,
 					fetch: options.fetch,
 					tolerateModelDenied: config.validation.tolerateModelDenied,
+				});
+			} else if (config.validation.kind === "responses") {
+				await validateOpenAIResponsesApiKey({
+					provider: config.validation.provider,
+					apiKey: trimmed,
+					baseUrl: config.validation.baseUrl,
+					acceptedErrorCode: config.validation.acceptedErrorCode,
+					signal: options.signal,
+					fetch: options.fetch,
 				});
 			} else if (config.validation.kind === "anthropic-messages") {
 				await validateAnthropicCompatibleApiKey({
