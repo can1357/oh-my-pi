@@ -674,6 +674,7 @@ async function generateModels() {
 			modelsDevSnapshotExcludedProviders.add(model.provider);
 		}
 	}
+	const previousSnapshotExcludedProviders = new Set(["volcengine-agent-plan"]);
 	// Merge previous models.json entries as fallback for provider/model pairs not
 	// fetched dynamically. Providers covered by authoritative endpoint discovery
 	// or authoritative stencil.so sources keep that upstream list exactly, so
@@ -697,7 +698,8 @@ async function generateModels() {
 				!RETIRED_PROVIDERS.has(model.provider) &&
 				!authoritativeCatalogProviders.has(model.provider) &&
 				!authoritativeSpecialDiscoveryProviders.has(model.provider) &&
-				!modelsDevSnapshotExcludedProviders.has(model.provider)
+				!modelsDevSnapshotExcludedProviders.has(model.provider) &&
+				!previousSnapshotExcludedProviders.has(model.provider)
 			) {
 				allModels.push(model);
 			}

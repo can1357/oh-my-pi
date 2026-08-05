@@ -3473,17 +3473,6 @@ function volcengineAgentPlanModel<TApi extends VolcengineAgentPlanApi>(
 
 export const VOLCENGINE_AGENT_PLAN_STATIC_MODELS: readonly ModelSpec<VolcengineAgentPlanApi>[] = [
 	volcengineAgentPlanModel({
-		id: "ark-code-latest",
-		name: "Ark Code Latest (Auto)",
-		api: "openai-responses",
-		reasoning: true,
-		input: ["text", "image"],
-		cost: VOLCENGINE_AGENT_PLAN_COST["doubao-seed-2.1-turbo"],
-		contextWindow: 256_000,
-		maxTokens: 32_000,
-		compat: VOLCENGINE_AGENT_PLAN_RESPONSES_COMPAT,
-	}),
-	volcengineAgentPlanModel({
 		id: "doubao-seed-2.0-mini",
 		name: "Doubao Seed 2.0 Mini",
 		api: "openai-responses",

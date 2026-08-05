@@ -336786,39 +336786,6 @@
 		}
 	},
 	"volcengine-agent-plan": {
-		"ark-code-latest": {
-			"id": "ark-code-latest",
-			"name": "Ark Code Latest (Auto)",
-			"api": "openai-responses",
-			"reasoning": true,
-			"input": [
-				"text",
-				"image"
-			],
-			"cost": {
-				"input": 0.442,
-				"output": 2.21,
-				"cacheRead": 0.0884,
-				"cacheWrite": 0
-			},
-			"contextWindow": 256000,
-			"maxTokens": 32000,
-			"compat": {
-				"supportsDeveloperRole": false
-			},
-			"provider": "volcengine-agent-plan",
-			"baseUrl": "https://ark.cn-beijing.volces.com/api/plan/v3",
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high",
-					"xhigh"
-				]
-			}
-		},
 		"deepseek-v4-flash": {
 			"id": "deepseek-v4-flash",
 			"name": "deepseek-v4-flash",

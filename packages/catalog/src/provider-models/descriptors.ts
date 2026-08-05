@@ -551,7 +551,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "volcengine-agent-plan",
-		defaultModel: "ark-code-latest",
+		defaultModel: "doubao-seed-2.1-turbo",
 		envVars: ["VOLCENGINE_AGENT_PLAN_API_KEY"],
 		createModelManagerOptions: () => volcengineAgentPlanModelManagerOptions(),
 	},

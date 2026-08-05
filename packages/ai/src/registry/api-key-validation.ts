@@ -124,8 +124,10 @@ export async function validateOpenAICompatibleApiKey(options: OpenAICompatibleVa
 	throw await createApiKeyValidationError(options.provider, response, envelope);
 }
 /**
- * validation only after credentials are accepted. The caller owns the exact
- * provider-specific validation error code that proves authentication passed.
+ * Validate an API key against an OpenAI-compatible Responses endpoint.
+ *
+ * Treats the caller-provided error code as successful validation because the
+ * provider returns it only after accepting the credentials.
  */
 export async function validateOpenAIResponsesApiKey(options: OpenAIResponsesValidationOptions): Promise<void> {
 	const timeoutSignal = AbortSignal.timeout(VALIDATION_TIMEOUT_MS);
