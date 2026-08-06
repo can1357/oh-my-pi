@@ -1327,6 +1327,16 @@ export const SETTINGS_SCHEMA = {
 			description: "Show the total prompt-to-yield time (including tool calls) on assistant message usage rows",
 		},
 	},
+	"display.showUsageModels": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Show Usage Model List",
+			description: "List the models mapped to each provider's live usage data in /usage output",
+		},
+	},
 	"display.cacheMissMarker": {
 		type: "boolean",
 		default: false,
