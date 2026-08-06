@@ -90,6 +90,7 @@ import {
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
 } from "../../utils/title-generator";
+import { resolveUsageModelSelectors } from "../../utils/usage-display";
 import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { createAgentsHubDeps } from "../agents-hub-deps";
@@ -354,7 +355,9 @@ export class SelectorController {
 					this.ctx.session.sessionId,
 				)
 			: undefined;
-		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(reports);
+		const usageModelSelectors = resolveUsageModelSelectors(reports, this.ctx.settings, next =>
+			this.ctx.session.getUsageReportingModelSelectors(next),
+		);
 		const done = () => {
 			overlayHandle?.hide();
 			this.focusActiveEditorArea();
