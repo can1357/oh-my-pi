@@ -9,7 +9,6 @@ Fields:
 
 - `language` — {{#if py}}`"py"` IPython kernel{{/if}}{{#ifAll py js}}, {{/ifAll}}{{#if js}}`"js"` persistent JavaScript VM{{/if}}{{#if rb}}{{#ifAny py js}}, {{/ifAny}}`"rb"` persistent Ruby kernel{{/if}}{{#if jl}}{{#ifAny py js rb}}, {{/ifAny}}`"jl"` persistent Julia kernel{{/if}}.
 - `code` — cell body, verbatim. Newlines/quotes JSON-encoded; no fences, no headers.
-- `title` (optional) — short transcript label (e.g. `"imports"`).
 - `timeout` (optional) — seconds. Raise only for heavy compute or long non-agent tool calls.
 - `reset` (optional) — wipe this language's kernel first.{{#ifAll py js}} Per-language: a `py` reset never touches the JS VM.{{/ifAll}}
 
