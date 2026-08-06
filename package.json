@@ -109,7 +109,7 @@
     "build:native": "bun --cwd=packages/natives run build",
     "test": "bun run --parallel test:ts test:rs",
     "test:ts": "GITHUB_ACTIONS= bun run --workspaces --if-present test -- --only-failures && bun run test:scripts",
-    "test:scripts": "bun test scripts/ci-concurrency.test.ts scripts/ci-release-notes.test.ts scripts/publish-binaries-hf.test.ts",
+    "test:scripts": "bun test scripts/ci-concurrency.test.ts scripts/ci-release-notes.test.ts scripts/publish-binaries-hf.test.ts scripts/ompk-mention-agent.test.ts",
     "test:rs": "bun scripts/run-rs-task.ts test:rs",
     "check": "bun run --parallel check:ts check:rs",
     "check:ts": "bun run check:tools && bun run --workspaces --if-present check",
