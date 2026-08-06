@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://github.com/kingkillery/oh-my-pk/blob/main/assets/hero.png?raw=true" alt="omp">
+  <img src="https://raw.githubusercontent.com/kingkillery/oh-my-pk/refs/heads/main/assets/hero.png" alt="omp">
 </p>
 
 <p align="center">
@@ -26,7 +26,7 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 
 Canonical product name: `oh-my-pk`. Canonical install endpoint: `https://oh-my-pk.pkking.computer`. Complete documentation home: [`https://oh-my-pk.pkking.computer/docs`](https://oh-my-pk.pkking.computer/docs). Legacy repository URLs and the old `oh-my-pi.pkking.computer` route may remain during migration.
 
-**40+** providers · **32** built-in tools · **14** lsp ops · **28** dap ops · **~55k** lines of Rust core.
+**59** bundled provider namespaces · **3,991** catalog entries · **34** built-in tools · **14** LSP ops · **28** DAP ops · **63,239** maintained lines of Rust.
 
 ## Install
 
@@ -48,11 +48,12 @@ bun install -g @pk-nerdsaver-ai/pi-coding-agent
 irm https://oh-my-pk.pkking.computer/install.ps1 | iex
 ```
 
+`oh-my-pk` requires Bash on Windows. Install Git for Windows (recommended), or use WSL, Cygwin, or MSYS2; the installer detects Git Bash or `bash.exe` on `PATH` and records the shell path.
+
 macOS · Linux · Windows · bun ≥ 1.3.14
 
-The install scripts install/validate Bun and use the npm package by default;
-pass `--binary` (`-Binary` on Windows) to always fetch the prebuilt binary
-instead. There is no Homebrew tap or mise registry entry for this fork —
+The install scripts install/validate Bun and use the npm package by default. Prebuilt binaries are currently available with `--binary` on Linux x64/arm64 and `-Binary` on Windows x64; macOS uses the Bun/npm install path.
+There is no Homebrew tap or mise registry entry for this fork —
 don't use `brew install kingkillery/tap/omp` or `mise use -g
 github:kingkillery/oh-my-pi`, neither is published.
 
@@ -83,7 +84,7 @@ Edits that land on the first attempt. Reads that summarize files instead of dump
 | MiniMax          | 2.1×         | Pass rate more than doubles. Same weights, same prompt.               |
 
 - `read` : summarized snippets · ideal defaults · selector hit rate
-- `search` : fastest in the west
+- `grep` : fastest in the west
 - `lsp` : everything your IDE knows, the agent knows
 - `prompts` : adjusted relentlessly for each model
 
@@ -95,7 +96,7 @@ Originally built on [Mario Zechner](https://github.com/mariozechner)'s wonderful
 
 ### 01 · Code execution w/ tool-calling
 
-Most harnesses give the agent a Python sandbox and call it done. Ours runs persistent Python and a Bun worker, and either kernel can call back into the agent's own tools — read, search, task — over a loopback bridge. The agent loads a CSV with tool.read from inside Python, charts it from JavaScript, and never leaves the cell.
+Most harnesses give the agent a Python sandbox and call it done. Ours runs persistent Python and a Bun worker, and either kernel can call back into the agent's own tools — `read`, `grep`, `task` — over a loopback bridge. The agent loads a CSV with `tool.read` from inside Python, charts it from JavaScript, and never leaves the cell.
 
 ### 02 · LSP wired into every write
 
@@ -111,20 +112,29 @@ Your rules sit dormant until the model goes off-script. A regex match aborts the
 
 ### 05 · First-class subagents
 
-Split a job across workers and get typed results back. task fans out into isolated worktrees, each worker runs its own tool surface, and the final yield is a schema-validated object the parent reads directly. No prose to parse, no merge conflicts between siblings, no orphaned edits.
-Agent Hub can sync background agents into [pk-kanban](https://github.com/kingkillery/pk-kanban), keeping long-running worker state visible on the same local board you use for project coordination.
+Split a job across workers and get typed results back. `task` fans workers out in parallel; opt editing workers into isolated copy-on-write/worktree environments when you need overlap-safe patches. Each worker runs its own tool surface, and `yield` returns a schema-validated object the parent reads directly.
+
+Launch one directly with `/subagent using <alias-or-model> "<prompt>"`, cap new workers with `/tier light|mid|frontier|auto`, or pass `fork: true` to `task` for an ephemeral child that inherits the parent's system prompt, tools, model, and read-only history snapshot. Fresh contexts remain the default.
+
+For whole-repository coverage, the bundled `agentic-mapreduce` skill turns deterministic selectors into bounded map shards and a typed reducer pass with `mr-worker` and `mr-reducer`; `tree-of-thoughts` and `tot-reasoner` cover shards that need adversarial branching.
+
+Agent Hub can sync background agents into pk-kanban, keeping long-running worker state visible on the same local board you use for project coordination.
 
 ### 06 · A second model, watching every turn.
 
 Pair a reviewer model to the 'advisor' role and it reads every turn the main agent takes, injecting notes inline — a quiet aside, a concern, or a hard blocker. It runs on its own context and its own model, so it catches what the doer rushed past. The main agent sees the note and course-corrects, or tells you why it won't.
 
+Need the second model to do work instead of review it? `/fusion on` keeps a warm cheap sidekick for settled mechanical tasks while the frontier model keeps the reasoning. Choose `delegate` or `escalate`, optionally route through a model pool, and inspect live sidekick state and token split with `/fusion status`. Fusion is opt-in and requires an available, credentialed sidekick model.
+
 ### 07 · Hand someone the link, they're in.
 
 /collab puts your live session on a relay and hands back a link — and a QR. A teammate joins from another terminal with oh-my-pk join, or just opens it in a browser. Share read-write to pair on the same agent, or /collab view for a read-only link anyone can watch but no one can steer. Frames are sealed client-side; the relay never sees your keys.
 
+`/hub` is the durable counterpart: publish a client-side encrypted replication snapshot on one device, then run `/hub resume <link>` to restore the full history as a local session fork on another. Hub handoff requires provisioned account access, relay connectivity, and the complete link including its fragment key.
+
 ### 08 · Read a pdf on arxiv, why not?
 
-web_search chains fourteen ranked providers and hands whatever URLs it finds straight to read. Arxiv PDFs, GitHub pages, Stack Overflow threads come back as structured markdown with anchors intact — the same tool surface you use on local files. Cite, follow, quote, never lose where you came from.
+`web_search` walks an eighteen-provider availability/fallback chain and hands whatever URLs it finds straight to `read`. Arxiv PDFs, GitHub pages, Stack Overflow threads come back as structured markdown with anchors intact — the same tool surface you use on local files. Cite, follow, quote, never lose where you came from.
 
 ### 09 · Unapologetically native. Even on Windows.
 
@@ -150,9 +160,9 @@ The agent remembers your codebase between sessions. It writes facts mid-run with
 
 Run omp inside Zed and you get the same agent you drive from the terminal — reading the buffer you're actually looking at, writing through the editor's save path, spawning shells in the editor's terminal. Destructive tools pause for a permission prompt you can answer once and forget. No bridge, no plugin, no second brain to keep in sync.
 
-### 15 · Inherits what your other tools already wrote
+### 15 · Reads the configuration your other tools already wrote
 
-Every other agent ships an importer and expects you to convert. omp reads the eight formats already on disk in their native shape — Cursor MDC, Cline .clinerules, Codex AGENTS.md, Copilot applyTo, and the rest. No migration script, no YAML-to-TOML port, no "supported subset" footnotes. The config your team wrote last quarter still works tonight.
+Every other agent ships an importer and expects you to convert. `oh-my-pk` discovers the supported parts of eight auto-registered ecosystems already on disk — Claude Code, Cursor, Windsurf, Codex, Cline, GitHub Copilot, VS Code, and OpenCode. Nothing is copied or migrated; the Discovery table below names the exact surfaces that load.
 
 ### 16 · oh-my-pk commit: atomic splits, validated messages
 
@@ -160,7 +170,7 @@ oh-my-pk commit reads the working tree through git_overview, git_file_diff, and 
 
 ### 17 · Read PRs. _Walk skills._ Pull JSON out of subagents.
 
-Twelve internal schemes — `pr://`, `issue://`, `agent://`, `skill://`, `rule://`, and the rest — resolve transparently inside every FS-shaped tool the agent already calls. `read pr://1428` returns the same shape as `read src/foo.ts`. `search` walks a diff like a directory. `agent://<id>/findings.0.path` pulls a field out of a subagent's output by path.
+Fifteen internal schemes — `pr://`, `issue://`, `agent://`, `skill://`, `rule://`, and the rest — resolve transparently inside every FS-shaped tool the agent already calls. `read pr://1428` returns the same shape as `read src/foo.ts`. `grep` walks a diff like a directory. `agent://<id>/findings.0.path` pulls a field out of a subagent's output by path.
 
 ### 18 · Conflict resolution, made easy.
 
@@ -176,7 +186,7 @@ Stealth's on by default, so pages see a normal user instead of a headless bot. T
 
 ## Whatever the task needs, _it's already in the box_.
 
-32 tools live in the same namespace as `read` and `bash`. Pin the active set with `--tools read,edit,bash,…` and the rest stay hidden but indexed — `search_tool_bm25` pulls them back in mid-session when `tools.discoveryMode` says so.
+34 canonical built-ins live in the same namespace as `read` and `bash`. Pin the active set with `--tools read,edit,bash,…`; discoverable tools can stay out of the prompt until `search_tool_bm25` surfaces them when discovery is enabled.
 
 **Files & search**
 
@@ -185,8 +195,9 @@ Stealth's on by default, so pages see a normal user instead of a headless bot. T
 - `edit` — hashline patches with content-hash anchors and stale-anchor recovery.
 - `ast_edit` — structural rewrites previewed before apply, via ast-grep.
 - `ast_grep` — structural code queries over 50+ tree-sitter grammars.
-- `search` — regex over files, globs, and internal URLs.
-- `find` — glob-based path lookup; reach for `search` when you need content matches.
+- `grep` — regex content search over files, globs, and internal URLs; legacy alias: `search`.
+- `glob` — glob-based path lookup; legacy alias: `find`.
+- `context_oracle` — ask a lightweight repository-context service for cited LSP, file, diagnostic, and edit-impact evidence.
 
 **Runtime**
 
@@ -196,8 +207,8 @@ Stealth's on by default, so pages see a normal user instead of a headless bot. T
 
 **Code intelligence**
 
-- `lsp` — diagnostics, navigation, symbols, renames, code actions, raw requests.
-- `debug` — drive a DAP session — breakpoints, stepping, threads, stack, variables.
+- `lsp` — diagnostics, navigation, symbols, renames, code actions, and raw requests.
+- `debug` — drive a DAP session: breakpoints, stepping, threads, stack, and variables.
 
 **Coordination**
 
@@ -209,88 +220,98 @@ Stealth's on by default, so pages see a normal user instead of a headless bot. T
 
 **Outside the box**
 
-- `browser` — Puppeteer tabs over headless Chromium or CDP-attached apps.
-- `web_search` — one query across configured providers, returning answer plus citations.
-- `github` — GitHub CLI ops — repo, PR, issues, code search, Actions run-watch.
-- `generate_image` — generate or edit raster images via Gemini, GPT, or xAI Grok image models.
+- `browser` — cmux WKWebView tabs when available, otherwise Puppeteer over local/headless Chromium or CDP-attached/spawned apps.
+- `web_search` — query configured providers, returning an answer plus citations.
+- `deep_research` — run multi-step web research and produce a cited report.
+- `ix_bridge` — drive the local IX Bridge daemon/Chrome extension with status, guide, and command actions.
+- `github` — GitHub CLI operations for repos, PRs, issues, code search, and Actions run-watch.
 - `inspect_image` — vision-model analysis of a local image file.
-- `tts` — text-to-speech via xAI Grok Voice — five built-in voices, WAV or MP3.
 
 **Memory & state**
 
 - `checkpoint` — mark conversation state for a later collapse-and-report.
-- `rewind` — prune exploratory context, keep a concise report.
-- `retain` — queue durable facts into the active Hindsight bank.
-- `recall` — search the Hindsight bank for raw memories.
-- `reflect` — ask Hindsight to synthesize an answer over the bank.
+- `rewind` — prune exploratory context and keep a concise report.
+- `memory_edit` — edit durable memory through the active Mnemopi backend.
+- `retain` — queue durable facts into the active Hindsight or Mnemopi backend.
+- `recall` — search the active Hindsight or Mnemopi backend for raw memories.
+- `reflect` — synthesize an answer over the active Hindsight or Mnemopi memory bank.
+- `learn` — capture a reusable lesson in long-term memory and optionally create or update a managed skill.
+- `manage_skill` — create, update, or delete an isolated managed skill.
+- `activity` — read the local Activity Memory timeline by calendar day or trailing hours; local-only and read-only.
 
 **Misc**
 
-- `resolve` — apply or discard a queued preview action.
-- `search_tool_bm25` — BM25 over the hidden tool index; activates top matches mid-session.
+- `search_tool_bm25` — BM25 over the discoverable tool index; activates top matches mid-session.
 
-Setting-gated, off by default: `github`, `inspect_image`, `tts`, `checkpoint`, `rewind`, `search_tool_bm25`, `retain`, `recall`, `reflect`. Flip them on once, scoped per project.
+**Bundled session extensions — not included in the 34 built-ins**
+
+- `generate_image` — generate or edit raster images via Gemini, GPT, or xAI Grok image models.
+- `tts` — local Kokoro-82M WAV/PCM16 or xAI Grok Voice WAV/MP3; automatic backend selection prefers local.
+
+**Hidden control tool — not included in the 34 built-ins**
+
+- `resolve` — apply or discard a queued preview action.
+
+Availability for canonical built-ins: off by default — `github` (`github.enabled`), `inspect_image` (`inspect_image.enabled`), `checkpoint`/`rewind` (`checkpoint.enabled`), `activity` (`gopkClips.enabled`), `memory_edit` (`memory.backend: mnemopi`), `retain`/`recall`/`reflect` (`memory.backend: hindsight` or `mnemopi`), `manage_skill` (`autolearn.enabled`; top-level only), and `learn` (`autolearn.enabled`; top-level only; memory backend `local`, `hindsight`, or `mnemopi`). `search_tool_bm25` is available whenever discovery is enabled; `tools.discoveryMode` defaults to `all`. Bundled extension `tts` is separately gated by `speechgen.enabled` and is off by default.
 
 [Full tool reference →](https://oh-my-pk.pkking.computer/docs)
 
-## Forty-plus providers, hundreds of models, _one /model away_.
+## 59 bundled provider namespaces, 3,991 catalog entries, _one /model away_.
 
-Roles route work by intent. `default` for normal turns. `smol` for cheap subagent fan-out. `slow` for deep reasoning. `plan` for plan mode. `commit` for changelogs. Override at launch with `--smol`, `--slow`, or `--plan`; cycle through the configured models for the active role with `Ctrl+P`. Swap the active model mid-session with the `/model` slash command.
+Roles route work by intent. Common roles are `default`, `smol` (fast/cheap), `slow` (thinking), `vision`, `plan`, `designer`, `commit`, `task`, and `advisor`; specialized roles cover browser operation/control, route prediction, fast context, and `budget`/`balanced`/`max-intelligence`/`free` tiers. `title` and `tiny` are functional but hidden. General delegated agents use `task`; quick mechanical agents can use `smol`; `commit` drives commit generation, including changelog work. Override at launch with `--smol`, `--slow`, or `--plan`; cycle through configured models for the active role with `Ctrl+P`; swap the active model mid-session with `/model`.
 
-Auth tags below: `oauth` signs in with your provider account, `plan` routes through a coding-plan subscription, `local` runs against a local server with the key optional.
+The lists below are selected bundled providers, not the exhaustive 59-namespace catalog. `/login` handles supported OAuth/account-backed providers; API-key-backed APIs and coding gateways use their provider credentials.
 
-### Frontier APIs
+### Selected direct APIs and gateways
 
-Direct APIs and gateways. Mix providers per role.
+Anthropic · OpenAI · Google Gemini · Google Vertex · Azure OpenAI · Amazon Bedrock · xAI · Z.AI (direct) · DeepSeek · Mistral · Groq · Cerebras · Fireworks · Together · Hugging Face · NVIDIA · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway
 
-Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Antigravity `oauth` · xAI · Mistral · Groq · Cerebras · Fireworks · Together · Hugging Face · NVIDIA · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Perplexity `oauth`
+### Selected accounts, coding plans, and gateways
 
-### Coding plans
+OpenAI Codex `oauth` · Google Antigravity `oauth` · Google Gemini CLI `oauth` · Cursor `oauth` · GitHub Copilot `oauth` · Cline `oauth` · Qwen Portal `oauth` · Ollama Cloud `oauth` · Wafer Serverless `oauth` · GitLab Duo · Kimi Code · MiniMax Coding Plan · Alibaba Coding Plan · Zhipu Coding Plan · Xiaomi token plans · Wafer Pass · OpenCode Go · OpenCode Zen · Moonshot · Qianfan · NanoGPT · Venice · Kilo · ZenMux
 
-Subscription-routed. `/login` attaches the session.
+Perplexity is a `web_search` backend, not a bundled `/model` provider.
 
-Cursor `oauth` · GitHub Copilot `oauth` · GitLab Duo · Kimi Code `plan` · Moonshot · MiniMax Coding Plan `plan` · MiniMax Coding Plan CN `plan` · Alibaba Coding Plan `plan` · Qwen Portal · Z.AI / GLM Coding Plan `plan` · Xiaomi MiMo · Qianfan · NanoGPT · Venice · Kilo · Cline `oauth` · ZenMux · Wafer Pass `plan` · OpenCode Go · OpenCode Zen
+### Local and self-hosted
 
-### Run it yourself
-
-OpenAI-compatible `/v1/models`. Local instances skip the key.
-
-Ollama `local` · Ollama Cloud · LM Studio `local` · llama.cpp `local` · vLLM `local` · LiteLLM
+The three implicit keyless engines are Ollama, llama.cpp, and LM Studio. Ollama discovers through native `/api/tags` and `/api/show`; llama.cpp uses its model endpoints; LM Studio uses `/v1/models`. vLLM and LiteLLM also support runtime discovery and can be configured keyless when the server permits it. Ollama Cloud is hosted and requires API-key or OAuth authentication.
 
 ### Four knobs that make routing useful
 
-- **Custom providers** — Declare anything that speaks `openai-completions`, `openai-responses`, `openai-codex-responses`, `azure-openai-responses`, `anthropic-messages`, `google-generative-ai`, or `google-vertex` in `~/.ompk/agent/models.yml`.
+- **Custom providers** — Declare providers in `~/.ompk/agent/models.yml` with any supported transport: `openai-completions`, `openai-responses`, `openai-codex-responses`, `azure-openai-responses`, `anthropic-messages`, `google-generative-ai`, `google-gemini-cli`, or `google-vertex`.
 - **Fallback chains** — Per-role chains under `retry.fallbackChains`. When the primary throws 429s or hits a quota wall, the next entry takes the rest of the turn — restored on cooldown.
 - **Path-scoped models** — Scope `enabledModels` and `disabledProviders` entries to a `path:` prefix to pin a different model set on one repo without touching the global config. Scoped entries cover the path and everything under it.
 - **Round-robin credentials** — Stack API keys per provider and the runtime rotates with session affinity and per-credential backoff. Useful when one key would burn its quota by lunch.
 
 Full provider & routing reference at [oh-my-pk.pkking.computer/docs](https://oh-my-pk.pkking.computer/docs).
 
-## Fourteen backends. _One tool the agent already knows_.
+## Eighteen backends. _One tool the agent already knows_.
 
-`web_search` is built in, not bolted on. `auto` walks a fourteen-provider chain; pin one by name if you already pay for it. Behind every hit, site-aware extraction turns GitHub, registries, arXiv, Stack Overflow, and docs into structured markdown — anchors and link targets survive.
+`web_search` is built in, not bolted on. `auto` walks an eighteen-provider availability/fallback chain in the order below. Choose a preferred provider to try it first, or use `auto` for the normal order; failures and empty results continue through the remaining available providers. Exclude providers explicitly when they must never be used. Behind every hit, site-aware extraction turns GitHub, registries, arXiv, Stack Overflow, and docs into structured Markdown — anchors and link targets survive.
 
 ### Search providers
 
-Fourteen backends. Pin one, or let `auto` walk the chain in order.
-
-| provider     | auth                   |
-| ------------ | ---------------------- |
-| `auto`       | chain                  |
-| `exa`        | `EXA_API_KEY` (or mcp) |
-| `brave`      | `BRAVE_API_KEY`        |
-| `jina`       | `JINA_API_KEY`         |
-| `kimi`       | `MOONSHOT_API_KEY`     |
-| `zai`        | `ZAI_API_KEY`          |
-| `anthropic`  | oauth                  |
-| `perplexity` | `PERPLEXITY_API_KEY`   |
-| `gemini`     | oauth                  |
-| `codex`      | oauth                  |
-| `tavily`     | `TAVILY_API_KEY`       |
-| `parallel`   | `PARALLEL_API_KEY`     |
-| `kagi`       | `KAGI_API_KEY`         |
-| `synthetic`  | `SYNTHETIC_API_KEY`    |
-| `searxng`    | self-hosted            |
+| provider | auth / availability |
+| --- | --- |
+| `auto` | ordered availability-and-failure fallback |
+| `perplexity` | `PERPLEXITY_COOKIES`, OAuth, or `PERPLEXITY_API_KEY`; explicit selection also has anonymous fallback |
+| `gemini` | `google-gemini-cli` or `google-antigravity` OAuth |
+| `anthropic` | `ANTHROPIC_SEARCH_API_KEY`, or Anthropic OAuth / `ANTHROPIC_API_KEY` |
+| `codex` | OpenAI Codex / ChatGPT OAuth |
+| `xai` | `XAI_API_KEY` |
+| `zai` | `ZAI_API_KEY` or stored `zai` credential |
+| `exa` | `EXA_API_KEY` or stored Exa credential; explicit selection can use public Exa MCP |
+| `tinyfish` | `TINYFISH_API_KEY` |
+| `jina` | `JINA_API_KEY` |
+| `kagi` | `KAGI_API_KEY` (Search API beta access) |
+| `tavily` | `TAVILY_API_KEY` |
+| `firecrawl` | `FIRECRAWL_API_KEY` |
+| `brave` | `BRAVE_API_KEY` |
+| `kimi` | `MOONSHOT_SEARCH_API_KEY` or `KIMI_SEARCH_API_KEY`, then stored `moonshot` / `kimi-code` auth |
+| `parallel` | `PARALLEL_API_KEY` |
+| `synthetic` | `SYNTHETIC_API_KEY` |
+| `searxng` | `SEARXNG_ENDPOINT` or `searxng.endpoint`; optional bearer/basic auth |
+| `duckduckgo` | no key; official Instant Answer API |
 
 ### Specialised handlers
 
@@ -312,45 +333,50 @@ Vuln lookups answer with vendor data, not blog summaries.
 - **OSV** — open source vuln feed
 - **CISA KEV** — known exploited vulns
 
-[`web_search` reference ↗](https://github.com/kingkillery/oh-my-pk/tree/main/docs/tools/web_search.md)
+[`web_search` reference ↗](docs/tools/web_search.md)
 
-## Roughly **~55,000** lines of Rust, doing the work other harnesses shell out for.
+## More than **63,000 lines of maintained Rust**, doing the work other harnesses shell out for.
 
-Four crates, one platform-tagged N-API addon. Search, shell, AST, highlight, PTY, image decode, BPE counting — all in-process on the libuv pool. No fork/exec on the hot path.
+`pi-natives` is the aggregate N-API `cdylib`, linking `pi-shell`, `pi-ast`, and `pi-iso`. The maintained Cargo workspace has seven packages: those four, shell-support libraries `pi-uutils-ctx` and `pi_uu_grep`, and the separate Windows-only `desktop-tag-host` helper. The 63,239-line audited total counts tracked Rust source, including maintained tests and build files, and excludes `crates/vendor` and both Brush mirrors.
 
-- Crates: `pi-natives`, `pi-shell`, `pi-ast`, `pi-iso`
-- Platforms: `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64`
+Search, globbing, AST operations, text processing, highlighting, image rendering, and many shell builtins run in process. CPU/blocking N-API jobs use libuv, async shell/PTY/isolation paths use Tokio with blocking syscalls offloaded, and token batches use Rayon. External shell commands and some isolation backends/fallbacks still launch child processes.
 
-The table below is a per-module breakdown that intentionally omits glue and tests.
+- Maintained workspace packages: `pi-natives`, `pi-shell`, `pi-ast`, `pi-iso`, `pi-uutils-ctx`, `pi_uu_grep`, `desktop-tag-host`
+- Release npm leaf-package tags: `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64`
 
-| Module     | What it does                                                                         | Powered by                                |  ~LoC |
-| ---------- | ------------------------------------------------------------------------------------ | ----------------------------------------- | ----: |
-| shell      | Embedded bash · persistent sessions · timeout/abort · custom builtins                | brush-shell (vendored)                    | 3,700 |
-| grep       | Regex search · parallel/sequential · glob & type filters · fuzzy find                | grep-regex · grep-searcher                | 1,900 |
-| keys       | Kitty keyboard protocol with xterm fallback · PHF perfect-hash lookup                | phf                                       | 1,490 |
-| text       | ANSI-aware width · truncation · column slicing · SGR-preserving wrap                 | unicode-width · segmentation              | 1,450 |
-| summary    | Tree-sitter structural source summaries with elision controls                        | tree-sitter · ast-grep-core               | 1,040 |
-| ast        | ast-grep pattern matching and structural rewrites                                    | ast-grep-core                             | 1,000 |
-| fs_cache   | Mtime-keyed file cache shared by read · grep · lsp                                   | in-tree                                   |   840 |
-| highlight  | Syntax highlighting · 11 semantic categories · 30+ aliases                           | syntect                                   |   470 |
-| pty        | Native PTY allocation for sudo · ssh interactive prompts                             | portable-pty                              |   455 |
-| glob       | Discovery with glob · type filters · mtime sort · gitignore respect                  | ignore · globset                          |   410 |
-| workspace  | Workspace walker with gitignore + AGENTS.md discovery in one pass                    | ignore                                    |   385 |
-| appearance | Mode 2031 + native macOS dark/light via CoreFoundation FFI                           | core-foundation                           |   270 |
-| power      | macOS power-assertion API for idle/system/display-sleep prevention                   | IOKit FFI                                 |   270 |
-| task       | Blocking work on libuv thread pool · cancellation · timeout · profiling              | tokio · napi                              |   260 |
-| fd         | Filesystem walker for find-tool replacement                                          | ignore                                    |   250 |
-| iso        | Workspace isolation shim · apfs · btrfs · zfs · reflink · overlayfs · projfs · rcopy | pi-iso (PAL)                              |   245 |
-| prof       | Circular buffer profiler with folded-stack and SVG flamegraph output                 | inferno                                   |   240 |
-| ps         | Cross-platform process-tree kill and descendant listing                              | libc · libproc · CreateToolhelp32Snapshot |   195 |
-| clipboard  | Text copy and image read from system clipboard · no xclip/pbcopy                     | arboard                                   |    80 |
-| tokens     | O200k / Cl100k BPE token counting · both tables embedded                             | tiktoken-rs                               |    65 |
-| sixel      | Terminal image rendering · decode PNG · JPEG · WebP · GIF · resize · SIXEL encode    | icy_sixel · image                         |    55 |
-| html       | HTML to Markdown with optional content cleaning                                      | html-to-markdown-rs                       |    50 |
+The table below is a responsibility-oriented breakdown of maintained native runtime code; glue and tests are omitted, and deliberately volatile per-module LoC estimates are not duplicated.
 
-## Four entry points: _interactive_, _one-shot_, RPC, and ACP.
+| Module | What it does |
+| --- | --- |
+| `shell` | Persistent embedded Brush shell sessions · custom builtins · timeout/abort · fixups/cancellation · process management |
+| `minimizer` | Opt-in shell-output compression · command detection · fail-safe built-in/user pipelines · original-output artifact preservation |
+| `grep` | Regex search · parallel/sequential execution · glob and type filters |
+| `fd` | Fuzzy path discovery for autocomplete and `@` mentions |
+| `keys` | Kitty keyboard protocol with xterm fallback · PHF perfect-hash lookup |
+| `text` | ANSI-aware width · truncation · column slicing · SGR-preserving wrap |
+| `summary` | Tree-sitter structural source summaries with elision controls |
+| `block` | Tree-sitter block ranges and enclosing-boundary resolution |
+| `ast` | ast-grep pattern matching and structural rewrites |
+| `fs_cache` | TTL-based directory-scan cache with explicit invalidation |
+| `highlight` | Syntax highlighting · semantic categories · language aliases |
+| `pty` | Native PTY allocation for sudo, SSH, and interactive prompts; owned by `pi-natives` |
+| `glob` | Discovery with glob/type filters, mtime sort, and gitignore respect |
+| `workspace` | Workspace walking with gitignore and `AGENTS.md` discovery in one pass |
+| `appearance` | Native macOS dark/light detection and observation via CoreFoundation FFI |
+| `power` | macOS power assertions for idle/system/display-sleep prevention |
+| `task` | Libuv blocking jobs and Tokio async futures with cancellation, timeout, and profiling |
+| `iso` | APFS clonefile · btrfs subvolume snapshots · ZFS snapshot+clone · Linux FICLONE · OverlayFS/fuse-overlayfs · Windows block clones · ProjFS · git-worktree/recursive-copy fallback |
+| `prof` | Circular-buffer profiler with folded stacks and SVG flamegraphs |
+| `ps` | Stable process references, child traversal, status/wait, and process-tree termination |
+| `clipboard` | Text copy and image read from the system clipboard without `xclip`/`pbcopy` |
+| `tokens` | Embedded O200k/Cl100k BPE token counting; Rayon-backed batches |
+| `snapcompact` | Bitmap conversation-frame rendering to PNG with bundled pixel fonts |
+| `sixel` | PNG/JPEG/WebP/GIF decode, resize, and SIXEL rendering |
+| `html` | HTML-to-Markdown conversion with optional content cleaning |
 
-Same engine, four wrappers. `oh-my-pk` runs the TUI. `oh-my-pk -p` answers a single prompt and exits. The Node SDK embeds the session in your process. `oh-my-pk --mode rpc` and `oh-my-pk acp` hand the wheel to another program over stdio.
+## Five entry points: _interactive_, _one-shot_, the Node SDK, RPC, and ACP.
+
+Same engine, five surfaces. `oh-my-pk` runs the TUI. `oh-my-pk -p` prints a final response and exits; `oh-my-pk --mode json` emits the one-shot session as newline-delimited JSON events. The Node SDK embeds the session in your process. `oh-my-pk --mode rpc` and `oh-my-pk acp` hand the wheel to another program over stdio.
 
 ### Interactive — when in doubt, the agent asks
 
@@ -372,22 +398,30 @@ Node and TypeScript hosts pull the engine in directly. The package exposes `Mode
 
 ```ts
 import {
-  ModelRegistry,
-  SessionManager,
   createAgentSession,
-  discoverAuthStorage,
+  SessionManager,
 } from "@pk-nerdsaver-ai/pi-coding-agent";
 
-const auth = await discoverAuthStorage();
-const models = new ModelRegistry(auth);
-await models.refresh();
-
-const { session } = await createAgentSession({
+const { session, modelFallbackMessage } = await createAgentSession({
   sessionManager: SessionManager.inMemory(),
-  authStorage: auth,
-  modelRegistry: models,
 });
+
+if (modelFallbackMessage) {
+  process.stderr.write(`${modelFallbackMessage}\n`);
+}
+
+const unsubscribe = session.subscribe((event) => {
+  if (
+    event.type === "message_update" &&
+    event.assistantMessageEvent.type === "text_delta"
+  ) {
+    process.stdout.write(event.assistantMessageEvent.delta);
+  }
+});
+
 await session.prompt("list .ts files");
+unsubscribe();
+await session.dispose();
 ```
 
 ### RPC — drive over stdio
@@ -396,10 +430,11 @@ await session.prompt("list .ts files");
 
 For non-Node embedders, or when you want process isolation. NDJSON commands in, response and event frames out. `--mode rpc-ui` adds tool cards, selectors, and dialogs as `extension_ui_request` frames the host must answer.
 
-```
+```text
 $ oh-my-pk --mode rpc --no-session
+< {"type":"ready"}
 > {"id":"r1","type":"prompt","message":"list .ts files"}
-< {"id":"r1","type":"response", ...}
+< {"id":"r1","type":"response","command":"prompt","success":true}
 > {"id":"r2","type":"set_model","provider":"anthropic","modelId":"sonnet-4.5"}
 > {"id":"r3","type":"abort"}
 ```
@@ -417,7 +452,7 @@ The [Agent Client Protocol](https://github.com/zed-industries/agent-client-proto
 | `write`                       | `fs/write_text_file`                |
 | `edit, bash`                  | `session/request_permission`        |
 
-Full reference: [SDK docs](https://github.com/kingkillery/oh-my-pk/tree/main/docs/sdk.md).
+Full references: [SDK docs](docs/sdk.md) · [RPC protocol](docs/rpc.md) · [ACP specification](https://github.com/zed-industries/agent-client-protocol).
 
 ## A harness worth keeping is one you _don't_ outgrow.
 
@@ -431,11 +466,22 @@ An extension is a TypeScript module. Same tool API, same slash-command registry,
 
 ### Discovery
 
-On first run omp inherits whatever is already on disk: rules, skills, and MCP servers from `.claude`, `.cursor`, `.windsurf`, `.gemini`, `.codex`, `.cline`, `.github/copilot`, and `.vscode`. No migration script.
+At session startup, `oh-my-pk` discovers supported configuration already on disk; nothing is copied or migrated.
+
+| Ecosystem | Discovered surface |
+| --- | --- |
+| Claude Code | `.claude/CLAUDE.md` context, `.claude/skills`, commands, supported MCP files, tools/settings, and system-prompt files; `.claude/rules/*.md` is not currently discovered |
+| Cursor | `.cursor/rules/*.{mdc,md}`, `mcp.json`, and project settings; Cursor skills and legacy root `.cursorrules` are not currently discovered |
+| Windsurf | user `global_rules.md`, project `.windsurf/rules/*.md`, and `mcp_config.json`; Windsurf skills and legacy `.windsurfrules` are not currently discovered |
+| Codex | user/project `AGENTS.md`, `config.toml` MCP, skills, and supported commands/prompts/hooks/tools/settings |
+| Cline | project `.clinerules` as either a file or a directory of Markdown rules |
+| GitHub Copilot | project `.github/copilot-instructions.md`, recursive `*.instructions.md` `applyTo` rules, `.github/skills`, and `.github/prompts`; user files come from `~/.copilot` or `COPILOT_HOME`; Copilot MCP is not currently ingested |
+| VS Code | project `.vscode/mcp.json` MCP configuration |
+| OpenCode | project `opencode.json` and `.opencode/{skills,commands,plugins}`, plus user configuration under `~/.config/opencode`; supported MCP, context, settings, commands, skills, and plugins load by capability |
 
 ### Extensibility
 
-Ask omp to write the piece you're missing, then `/reload-plugins`. Keep it local, ship it in a `marketplace`, or publish it to npm.
+Ask `oh-my-pk` to write the piece you're missing. Restart the session to load a newly written extension, skill, hook, custom tool, agent, or MCP configuration; `/reload-plugins` currently refreshes discovery caches, file slash commands, and SSH state. Keep extensions local, ship them in a `marketplace`, or publish them to npm.
 
 ## Philosophy
 
@@ -464,7 +510,7 @@ Key ideas:
 
 ### External Fractal Parity Matrix
 
-| Capability | External Systems (`plasma-ai/fractal`, `TinyAGI/fractals`) | Local Primitive in oh-my-pi |
+| Capability | External Systems (`plasma-ai/fractal`, `TinyAGI/fractals`) | Local Primitive in oh-my-pk |
 | --- | --- | --- |
 | Recursive Agent Tree | Autonomous sub-tree spawning | `AgentRegistry` parent/child hierarchy + nested task recursion |
 | Worktree & Path Isolation | Separate directories / worktree clones | `task.isolation.mode` + `git worktree` nodes |
@@ -506,35 +552,50 @@ For architecture and contribution guidelines, see [packages/coding-agent/DEVELOP
 
 ## Monorepo Packages
 
-| Package                                                   | Description                                                                |
-| --------------------------------------------------------- | -------------------------------------------------------------------------- |
-| **[@pk-nerdsaver-ai/collab-web](packages/collab-web)**           | Browser guest client, mock host, and local relay for collab live sessions  |
-| **[@pk-nerdsaver-ai/pi-ai](packages/ai)**                        | Multi-provider LLM client with streaming and model/provider integration    |
-| **[@pk-nerdsaver-ai/pi-catalog](packages/catalog)**              | Model catalog: bundled model database, provider descriptors, and identity  |
-| **[@pk-nerdsaver-ai/pi-agent-core](packages/agent)**             | Agent runtime with tool calling and state management                       |
-| **[@pk-nerdsaver-ai/pi-coding-agent](packages/coding-agent)**    | Interactive coding agent CLI and SDK                                       |
-| **[@pk-nerdsaver-ai/pi-tui](packages/tui)**                      | Terminal UI library with differential rendering                            |
-| **[@pk-nerdsaver-ai/pi-natives](packages/natives)**              | N-API bindings for grep, shell, image, text, syntax highlighting, and more |
-| **[@pk-nerdsaver-ai/omp-stats](packages/stats)**                 | Local observability dashboard for AI usage statistics                      |
-| **[@pk-nerdsaver-ai/pi-utils](packages/utils)**                  | Shared utilities (logging, streams, dirs/env/process helpers)              |
-| **[@pk-nerdsaver-ai/pi-wire](packages/wire)**                    | Shared collab live-session protocol types and relay constants              |
-| **[@pk-nerdsaver-ai/hashline](packages/hashline)**               | Line-anchored patch language and applier behind the `edit` tool            |
-| **[@pk-nerdsaver-ai/pi-mnemopi](packages/mnemopi)**              | Local SQLite memory engine for Oh My Pi agents                             |
-| **[@pk-nerdsaver-ai/snapcompact](packages/snapcompact)**         | Bitmap-frame context compression package and SQuAD eval suite              |
-| **[@pk/llm-router-agent](packages/llm-router-agent)**             | Configurable LLM routing extension and standalone router                   |
-| **[@pk-nerdsaver-ai/swarm-extension](packages/swarm-extension)** | Swarm orchestration extension package                                      |
-| **[@pk-nerdsaver-ai/verifier-extension](packages/verifier-extension)** | LLM-as-verifier candidate comparison and audit extension package           |
+| Package | Description |
+| --- | --- |
+| **[@pk-nerdsaver-ai/pi-activity-journal](packages/activity-journal)** | Local, evidence-backed activity journal with privacy-first clip ingestion |
+| **[@pk-nerdsaver-ai/pi-ai](packages/ai)** | Multi-provider LLM client with streaming and model/provider integration |
+| **[@pk-nerdsaver-ai/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
+| **[@pk-nerdsaver-ai/pi-catalog](packages/catalog)** | Model catalog: bundled model database, provider descriptors, and identity |
+| **[@pk-nerdsaver-ai/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI and SDK |
+| **[@pk-nerdsaver-ai/clips-extension](packages/clips-extension)** | Extension that feeds Clips (gopk.xyz) screen recordings to agents |
+| **[@pk-nerdsaver-ai/collab-relay](packages/collab-relay)** | Cloudflare relay and share service for oh-my-pk collaboration |
+| **[@pk-nerdsaver-ai/collab-web](packages/collab-web)** | Browser guest client, mock host, and local relay for collab live sessions |
+| **[@pk-nerdsaver-ai/pi-context-policy](packages/context-policy)** | Consent and retention policy primitives for opt-in persistent context |
+| **[@pk-nerdsaver-ai/pi-context-storage](packages/context-storage)** | Storage contracts and pressure controls for opt-in persistent context |
+| **[@pk-nerdsaver-ai/pi-deep-research](packages/deep-research)** | Supervisor/researcher deep-research agent built on `pi-ai` |
+| **[@pk-nerdsaver-ai/pi-desktop-tag](packages/desktop-tag)** | Desktop extension for triggering agents with screenshots, selected text, and screen regions |
+| **[@pk-nerdsaver-ai/hashline](packages/hashline)** | Line-anchored patch language and applier behind the `edit` tool |
+| **[@pk/llm-router-agent](packages/llm-router-agent)** | Configurable LLM-routing extension and standalone router |
+| **[@pk-nerdsaver-ai/pi-mnemopi](packages/mnemopi)** | Local SQLite memory engine for oh-my-pk agents |
+| **[@pk-nerdsaver-ai/ompk-linear-agent](packages/ompk-linear-agent)** | Cloudflare Worker and job queue dispatching Linear-triggered ompk, Claude Code, or Codex runs over Tailscale |
+| **[@pk-nerdsaver-ai/pi-natives](packages/natives)** | N-API bindings for grep, shell, image, text, syntax highlighting, and more |
+| **[@pk-nerdsaver-ai/pi-remote-workspace](packages/remote-workspace)** | Docker-backed ephemeral workspace job runner for oh-my-pk |
+| **[@pk-nerdsaver-ai/pi-screenpipe-bridge](packages/screenpipe-bridge)** | Bridges a local screenpipe capture daemon into the activity-journal gopk sink |
+| **[@pk-nerdsaver-ai/snapcompact](packages/snapcompact)** | Bitmap-frame context compression package and SQuAD eval suite |
+| **[@pk-nerdsaver-ai/omp-stats](packages/stats)** | Local observability dashboard for AI usage statistics |
+| **[@pk-nerdsaver-ai/swarm-extension](packages/swarm-extension)** | Swarm orchestration extension package |
+| **[@pk-nerdsaver-ai/terminal-bench](packages/terminal-bench)** | Terminal Bench 2 runner for the local oh-my-pk build with live progress and spend reporting |
+| **[@pk-nerdsaver-ai/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
+| **[@pk-nerdsaver-ai/typescript-edit-benchmark](packages/typescript-edit-benchmark)** | Edit benchmark suite built from TypeScript source-code mutations |
+| **[@pk-nerdsaver-ai/pi-utils](packages/utils)** | Shared utilities for logging, streams, directories, environment, and processes |
+| **[@pk-nerdsaver-ai/verifier-extension](packages/verifier-extension)** | LLM-as-verifier candidate comparison and audit extension package |
+| **[@pk-nerdsaver-ai/pi-wire](packages/wire)** | Shared collab live-session protocol types and relay constants |
 
 ### Rust Crates
 
-| Crate                                                         | Description                                                                                         |
-| ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| **[pi-natives](crates/pi-natives)**                           | Core Rust native addon (N-API `cdylib`) used by `@pk-nerdsaver-ai/pi-natives`; aggregates the crates below |
-| **[pi-shell](crates/pi-shell)**                               | Embedded shell / PTY / process management split out of `pi-natives` (wraps `brush-*`)               |
-| **[pi-ast](crates/pi-ast)**                                   | tree-sitter-based code summarizer and AST utilities (50+ language grammars)                         |
-| **[pi-iso](crates/pi-iso)**                                   | Task isolation backend resolver: APFS clones, btrfs/zfs reflinks, overlayfs, projfs, rcopy          |
-| **[brush-core-vendored](crates/brush-core-vendored)**         | Vendored fork of [brush-shell](https://github.com/reubeno/brush) for embedded bash execution        |
-| **[brush-builtins-vendored](crates/brush-builtins-vendored)** | Vendored bash builtins (cd, echo, test, printf, read, export, etc.)                                 |
+| Crate | Description |
+| --- | --- |
+| **[pi-natives](crates/pi-natives)** | Aggregate N-API `cdylib` for `@pk-nerdsaver-ai/pi-natives`; owns the N-API modules and links `pi-shell`, `pi-ast`, and `pi-iso` |
+| **[pi-shell](crates/pi-shell)** | Embedded Brush shell sessions, output minimization, in-process coreutils/grep, fixups/cancellation, and process management; PTY allocation remains in `pi-natives` |
+| **[pi-ast](crates/pi-ast)** | Tree-sitter summaries, syntactic block resolution, and AST search/rewrite across 58 supported language variants |
+| **[pi-iso](crates/pi-iso)** | Isolation PAL and diff capture: APFS clonefile, btrfs snapshots, ZFS snapshot+clone, Linux reflinks, OverlayFS, Windows block clones, ProjFS, and git-worktree/recursive-copy fallback |
+| **[pi-uutils-ctx](crates/pi-uutils-ctx)** | Thread-local stdio/cwd/environment/cancellation shim for embedded uutils |
+| **[pi_uu_grep](crates/pi-uu-grep)** | ripgrep-library-backed in-process `grep` and `rg` shell builtins |
+| **[desktop-tag-host](crates/desktop-tag-host)** | Unpublished Windows tray/hotkey/capture host that supervises the ompk-tag gateway |
+
+Vendored dependency inputs are separate from the maintained workspace: [`brush-core`](crates/brush-core-vendored) and [`brush-builtins`](crates/brush-builtins-vendored) are local Brush mirrors, and additional upstream mirrors live under `crates/vendor`. They are excluded from the 63,239 maintained-line total.
 
 ## Contributing
 
