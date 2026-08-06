@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `display.showUsageModels` setting (default `true`) that opts out of the "Models with usage data" list in `/usage`, for users who only want the quota bars ([#7852](https://github.com/can1357/oh-my-pi/pull/7852) by [@mvid](https://github.com/mvid)).
+
 ### Changed
 
 - Agent Hub keeps existing agents in place while open; new agents appear first in the flat roster or within their tree sibling group ([#13066](https://github.com/can1357/oh-my-pi/pull/13066) by [@kmccleary3301](https://github.com/kmccleary3301))
