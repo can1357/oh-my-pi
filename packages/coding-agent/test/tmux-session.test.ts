@@ -33,6 +33,13 @@ function createRunner(captured: string | undefined = "shell\t1"): RecordingRunne
 }
 
 let runner: RecordingRunner;
+/**
+ * `TMUX_PANE` feeds `getTerminalId()`, which keys the terminal-session
+ * breadcrumbs every SessionManager suite reads. Restore whatever the developer's
+ * shell actually had instead of deleting, so running this file inside tmux does
+ * not strip that identity from every test file after it in the same process.
+ */
+const ambientTmuxEnv = { TMUX: Bun.env.TMUX, TMUX_PANE: Bun.env.TMUX_PANE };
 
 beforeEach(() => {
 	runner = createRunner();
@@ -45,8 +52,10 @@ beforeEach(() => {
 afterEach(() => {
 	setTmuxCommandRunnerForTesting(undefined);
 	setTmuxWindowNameEnabled(false);
-	delete Bun.env.TMUX;
-	delete Bun.env.TMUX_PANE;
+	for (const [key, value] of Object.entries(ambientTmuxEnv)) {
+		if (value === undefined) delete Bun.env[key];
+		else Bun.env[key] = value;
+	}
 });
 
 /** Every `rename-window` argv the runner saw, in order. */
