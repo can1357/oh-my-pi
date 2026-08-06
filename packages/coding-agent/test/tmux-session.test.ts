@@ -26,6 +26,9 @@ function createRunner(captured: string | undefined = "shell\t1"): RecordingRunne
 			calls.push(args);
 			return this.captured;
 		},
+		runSync(args) {
+			calls.push(args);
+		},
 	};
 }
 
@@ -160,6 +163,22 @@ describe("restoreTmuxWindowName", () => {
 
 		restoreTmuxWindowName();
 		await drainTmuxWindowQueue();
+
+		expect(runner.calls).toEqual([
+			["rename-window", "-t", "%7", "shell"],
+			["set-window-option", "-t", "%7", "automatic-rename", "on"],
+		]);
+	});
+
+	it("restores synchronously, because the caller exits the process immediately after", async () => {
+		setTmuxWindowName("session", "/tmp/project");
+		await drainTmuxWindowQueue();
+		runner.calls.length = 0;
+
+		// Deliberately NOT awaited: an enqueued async spawn never runs once the
+		// shutdown path calls process.exit, stranding the window on the omp name
+		// with automatic-rename left off.
+		restoreTmuxWindowName();
 
 		expect(runner.calls).toEqual([
 			["rename-window", "-t", "%7", "shell"],

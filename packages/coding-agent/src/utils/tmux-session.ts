@@ -17,7 +17,7 @@ const TMUX_NAME_WHITESPACE = /\s+/g;
 const TMUX_NAME_MAX_LENGTH = 64;
 
 /**
- * The two shapes of tmux invocation this module needs. Injectable so tests
+ * The three shapes of tmux invocation this module needs. Injectable so tests
  * never spawn a real tmux (CI has none).
  */
 export interface TmuxCommandRunner {
@@ -25,6 +25,12 @@ export interface TmuxCommandRunner {
 	run(args: string[]): Promise<void>;
 	/** Capture stdout; `undefined` when tmux is missing or exits nonzero. */
 	capture(args: string[]): Promise<string | undefined>;
+	/**
+	 * Blocking variant for the shutdown restore. An awaited spawn loses the race
+	 * with process exit, which would strand the window under the omp session name
+	 * with `automatic-rename` still off, so restore must finish before we return.
+	 */
+	runSync(args: string[]): void;
 }
 
 const defaultRunner: TmuxCommandRunner = {
@@ -43,6 +49,13 @@ const defaultRunner: TmuxCommandRunner = {
 			return exitCode === 0 ? stdout : undefined;
 		} catch {
 			return undefined;
+		}
+	},
+	runSync(args) {
+		try {
+			Bun.spawnSync(["tmux", ...args], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+		} catch {
+			// Same policy as `run`: a cosmetic window name never breaks shutdown.
 		}
 	},
 };
@@ -153,22 +166,20 @@ export function setTmuxWindowName(sessionName: string | undefined, cwd?: string)
 	});
 }
 
-/** Put the pre-omp window name and `automatic-rename` back on shutdown. */
+/**
+ * Put the pre-omp window name and `automatic-rename` back on shutdown.
+ *
+ * Synchronous on purpose: the caller exits the process immediately afterwards,
+ * and an enqueued async spawn never runs, which would leave the window stuck on
+ * the omp session name with `automatic-rename` disabled.
+ */
 export function restoreTmuxWindowName(): void {
 	const pane = Bun.env.TMUX_PANE;
 	const original = tmuxWindowRuntime.original;
 	tmuxWindowRuntime.lastName = undefined;
 	tmuxWindowRuntime.original = undefined;
 	if (!pane || !original) return;
-	enqueueTmuxCall(async () => {
-		await tmuxWindowRuntime.runner.run(["rename-window", "-t", pane, original.name]);
-		// rename-window forces automatic-rename off, so reinstate it afterwards.
-		await tmuxWindowRuntime.runner.run([
-			"set-window-option",
-			"-t",
-			pane,
-			"automatic-rename",
-			original.automaticRename,
-		]);
-	});
+	tmuxWindowRuntime.runner.runSync(["rename-window", "-t", pane, original.name]);
+	// rename-window forces automatic-rename off, so reinstate it afterwards.
+	tmuxWindowRuntime.runner.runSync(["set-window-option", "-t", pane, "automatic-rename", original.automaticRename]);
 }
