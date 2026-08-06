@@ -2102,10 +2102,12 @@ export function kiloModelManagerOptions(config?: KiloModelManagerConfig): ModelM
 }
 
 // ---------------------------------------------------------------------------
-// 10.7 Cline (cline.bot account gateway)
+// 10.7 Cline account gateways
 // ---------------------------------------------------------------------------
 
 const CLINE_BASE_URL = "https://api.cline.bot/api/v1";
+const CLINE_PASS_MODEL_PREFIX = "cline-pass/";
+const CLINE_PASS_RECOMMENDED_MODELS_PATH = "/ai/cline/recommended-models";
 
 interface ClineSeedModel {
 	id: string;
@@ -2116,12 +2118,15 @@ interface ClineSeedModel {
 	input?: ("text" | "image")[];
 }
 
+interface ClineRecommendedModelsResponse {
+	clinePass?: unknown;
+}
+
 /**
- * Curated offline seed for the Cline gateway. Cline is absent from models.dev
- * and its `/api/v1/models` listing is auth-gated, so without a seed the picker
- * is empty until a live `/login cline` refresh runs. Ids are taken verbatim
- * from Cline's published catalog (docs/api/models.mdx); live discovery is
- * authoritative and overlays real pricing/limits after login.
+ * Curated offline seed for the Cline usage-billing gateway. Cline is absent
+ * from models.dev and its `/api/v1/models` listing is auth-gated, so without a
+ * seed the picker is empty until a live `/login cline` refresh runs. Live
+ * discovery is authoritative and overlays real pricing/limits after login.
  */
 const CLINE_SEED_MODELS: readonly ClineSeedModel[] = [
 	{
@@ -2152,20 +2157,128 @@ const CLINE_SEED_MODELS: readonly ClineSeedModel[] = [
 	{ id: "minimax/minimax-m2.5", name: "MiniMax M2.5", reasoning: true, contextWindow: 200_000, maxTokens: 8_192 },
 ];
 
+/**
+ * Subscription-only ClinePass models. IDs and limits mirror Cline's published
+ * ClinePass catalog; cost stays zero because this provider represents flat-rate
+ * subscription usage rather than Cline's usage-billing rates.
+ */
+const CLINE_PASS_SEED_MODELS: readonly ClineSeedModel[] = [
+	{
+		id: "cline-pass/deepseek-v4-flash",
+		name: "DeepSeek V4 Flash",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+	},
+	{
+		id: "cline-pass/qwen3.8-max",
+		name: "Qwen3.8 Max",
+		reasoning: true,
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+		input: ["text", "image"],
+	},
+	{
+		id: "cline-pass/kimi-k3",
+		name: "Kimi K3",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 1_048_576,
+		input: ["text", "image"],
+	},
+	{
+		id: "cline-pass/deepseek-v4-pro",
+		name: "DeepSeek V4 Pro",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 384_000,
+	},
+	{
+		id: "cline-pass/glm-5.2",
+		name: "GLM-5.2",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 262_144,
+	},
+	{
+		id: "cline-pass/kimi-k2.7-code",
+		name: "Kimi K2.7 Code",
+		reasoning: true,
+		contextWindow: 262_144,
+		maxTokens: 262_144,
+		input: ["text", "image"],
+	},
+	{
+		id: "cline-pass/kimi-k2.6",
+		name: "Kimi K2.6",
+		reasoning: true,
+		contextWindow: 262_144,
+		maxTokens: 262_144,
+		input: ["text", "image"],
+	},
+	{
+		id: "cline-pass/mimo-v2.5-pro",
+		name: "MiMo-V2.5-Pro",
+		reasoning: true,
+		contextWindow: 1_050_000,
+		maxTokens: 131_072,
+	},
+	{
+		id: "cline-pass/mimo-v2.5",
+		name: "MiMo-V2.5",
+		reasoning: true,
+		contextWindow: 1_050_000,
+		maxTokens: 131_072,
+		input: ["text", "image"],
+	},
+	{
+		id: "cline-pass/minimax-m3",
+		name: "MiniMax-M3",
+		reasoning: true,
+		contextWindow: 1_048_576,
+		maxTokens: 512_000,
+		input: ["text", "image"],
+	},
+	{
+		id: "cline-pass/qwen3.7-max",
+		name: "Qwen3.7 Max",
+		reasoning: true,
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+	},
+	{
+		id: "cline-pass/qwen3.7-plus",
+		name: "Qwen3.7 Plus",
+		reasoning: true,
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+		input: ["text", "image"],
+	},
+];
+
 export interface ClineModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
 }
 
-export function buildClineStaticSeed(baseUrl?: string): ModelSpec<"openai-completions">[] {
-	const resolvedBaseUrl = baseUrl ?? CLINE_BASE_URL;
-	return CLINE_SEED_MODELS.map(
+function resolveClineBaseUrl(baseUrl?: string): string {
+	const resolved = baseUrl ?? CLINE_BASE_URL;
+	return resolved.endsWith("/") ? resolved.slice(0, -1) : resolved;
+}
+
+function buildClineSeed(
+	provider: Provider,
+	seeds: readonly ClineSeedModel[],
+	baseUrl?: string,
+): ModelSpec<"openai-completions">[] {
+	const resolvedBaseUrl = resolveClineBaseUrl(baseUrl);
+	return seeds.map(
 		(seed): ModelSpec<"openai-completions"> => ({
 			id: seed.id,
 			name: seed.name,
 			api: "openai-completions",
-			provider: "cline",
+			provider,
 			baseUrl: resolvedBaseUrl,
 			reasoning: seed.reasoning,
 			input: seed.input ?? ["text"],
@@ -2176,12 +2289,73 @@ export function buildClineStaticSeed(baseUrl?: string): ModelSpec<"openai-comple
 	);
 }
 
+export function buildClineStaticSeed(baseUrl?: string): ModelSpec<"openai-completions">[] {
+	return buildClineSeed("cline", CLINE_SEED_MODELS, baseUrl);
+}
+
+export function buildClinePassStaticSeed(baseUrl?: string): ModelSpec<"openai-completions">[] {
+	return buildClineSeed("cline-pass", CLINE_PASS_SEED_MODELS, baseUrl);
+}
+
+async function fetchClinePassRecommendedModels(
+	baseUrl: string,
+	fetchImpl: FetchImpl = fetch,
+): Promise<ModelSpec<"openai-completions">[] | null> {
+	let response: Response;
+	try {
+		response = await fetchImpl(`${baseUrl}${CLINE_PASS_RECOMMENDED_MODELS_PATH}`, {
+			method: "GET",
+			headers: { Accept: "application/json" },
+		});
+	} catch {
+		return null;
+	}
+	if (!response.ok) {
+		return null;
+	}
+
+	const payload = (await response.json().catch(() => null)) as ClineRecommendedModelsResponse | null;
+	if (!payload || !Array.isArray(payload.clinePass)) {
+		return null;
+	}
+
+	const staticModels = new Map(buildClinePassStaticSeed(baseUrl).map(model => [model.id, model]));
+	const models: ModelSpec<"openai-completions">[] = [];
+	for (const entry of payload.clinePass) {
+		if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id.startsWith(CLINE_PASS_MODEL_PREFIX)) {
+			continue;
+		}
+		const staticModel = staticModels.get(entry.id);
+		const name = toModelName(entry.name, staticModel?.name ?? entry.id);
+		models.push(
+			staticModel
+				? { ...staticModel, name }
+				: {
+						id: entry.id,
+						name,
+						api: "openai-completions",
+						provider: "cline-pass",
+						baseUrl,
+						reasoning: true,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128_000,
+						maxTokens: 8_192,
+					},
+		);
+	}
+	return models.length > 0 ? models : null;
+}
+
 export function clineModelManagerOptions(config?: ClineModelManagerConfig): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? CLINE_BASE_URL;
+	const baseUrl = resolveClineBaseUrl(config?.baseUrl);
 	return {
 		providerId: "cline",
+		// Isolate pre-split caches that may contain subscription-only `cline-pass/*` rows.
+		cacheProviderId: "cline-canonical-v2",
 		staticModels: buildClineStaticSeed(baseUrl),
+		dynamicModelsAuthoritative: true,
 		fetchDynamicModels: () =>
 			fetchOpenAICompatibleModels({
 				api: "openai-completions",
@@ -2189,7 +2363,20 @@ export function clineModelManagerOptions(config?: ClineModelManagerConfig): Mode
 				baseUrl,
 				apiKey,
 				fetch: config?.fetch,
+				filterModel: (_entry, model) => !model.id.startsWith(CLINE_PASS_MODEL_PREFIX),
 			}),
+	};
+}
+
+export function clinePassModelManagerOptions(
+	config?: ClineModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const baseUrl = resolveClineBaseUrl(config?.baseUrl);
+	return {
+		providerId: "cline-pass",
+		staticModels: buildClinePassStaticSeed(baseUrl),
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () => fetchClinePassRecommendedModels(baseUrl, config?.fetch),
 	};
 }
 
@@ -4209,8 +4396,9 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 	openAiCompletionsDescriptor("huggingface", "huggingface", "https://router.huggingface.co/v1"),
 	// --- Kilo Gateway ---
 	openAiCompletionsDescriptor("kilo", "kilo", "https://api.kilo.ai/api/gateway"),
-	// --- Cline (cline.bot account gateway) ---
+	// --- Cline account gateways ---
 	openAiCompletionsDescriptor("cline", "cline", "https://api.cline.bot/api/v1"),
+	openAiCompletionsDescriptor("cline-pass", "cline-pass", "https://api.cline.bot/api/v1"),
 	// --- Moonshot AI ---
 	openAiCompletionsDescriptor("moonshotai", "moonshot", "https://api.moonshot.ai/v1"),
 	// --- NanoGPT ---

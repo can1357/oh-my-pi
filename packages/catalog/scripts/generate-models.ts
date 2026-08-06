@@ -31,6 +31,7 @@ import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import { buildDevinFallbackModel } from "../src/provider-models/devin";
 import {
 	ANTHROPIC_CURATED_FALLBACK_MODELS,
+	buildClinePassStaticSeed,
 	buildClineStaticSeed,
 	buildFireworksFastSeed,
 	buildXaiOAuthStaticSeed,
@@ -493,6 +494,11 @@ async function generateModels() {
 	// the curated bundle so a persisted `modelRoles.default = "cline/<id>"`
 	// resolves at boot before the async post-login discovery refresh fires.
 	allModels.push(...buildClineStaticSeed());
+	// ClinePass serves a public recommended-models catalog. Keep its curated
+	// subscription seed only when that live catalog is unavailable.
+	if (!authoritativeCatalogProviders.has("cline-pass")) {
+		allModels.push(...buildClinePassStaticSeed());
+	}
 	// Seed Anthropic models that are live on the first-party API or in limited
 	// release but that models.dev has not catalogued yet (e.g. Claude Fable 5 /
 	// Mythos 5). Deduped behind upstream entries; metadata is pinned in

@@ -15,6 +15,7 @@ import { getEnvApiKey } from "@pk-nerdsaver-ai/pi-ai/stream";
 const FIXTURE_SOURCE = "provider-registry-test";
 const ENV_KEYS = [
 	"COREWEAVE_API_KEY",
+	"CLINE_API_KEY",
 	"ZENMUX_API_KEY",
 	"EXA_API_KEY",
 	"XAI_OAUTH_TOKEN",
@@ -45,6 +46,9 @@ describe("provider registry auth surface", () => {
 		expect(getEnvApiKey("zenmux")).toBe("zenmux-env");
 		Bun.env.UMANS_AI_CODING_PLAN_API_KEY = "umans-env";
 		expect(getEnvApiKey("umans")).toBe("umans-env");
+		Bun.env.CLINE_API_KEY = "cline-env";
+		expect(getEnvApiKey("cline")).toBe("cline-env");
+		expect(getEnvApiKey("cline-pass")).toBe("cline-env");
 		Bun.env.LLAMA_CPP_API_KEY = "llama-env";
 		expect(getEnvApiKey("llama.cpp")).toBe("llama-env");
 		// Legacy search-tool key preserved (not a registry provider def).
@@ -62,10 +66,14 @@ describe("provider registry auth surface", () => {
 	});
 
 	test("login list contains loginable providers and excludes env-only model providers", () => {
-		const ids = getOAuthProviders().map(provider => provider.id);
+		const providers = getOAuthProviders();
+		const ids = providers.map(provider => provider.id);
 		expect(ids).toContain("zenmux");
 		expect(ids).toContain("kagi");
 		expect(ids).toContain("umans");
+		expect(ids).toContain("cline");
+		expect(ids).toContain("cline-pass");
+		expect(providers.find(provider => provider.id === "cline-pass")).toMatchObject({ name: "ClinePass" });
 		expect(ids).toContain("llama.cpp");
 		// openai has no interactive login flow.
 		expect(ids).not.toContain("openai");

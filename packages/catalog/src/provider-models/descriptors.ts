@@ -14,6 +14,7 @@ import {
 	anthropicModelManagerOptions,
 	cerebrasModelManagerOptions,
 	clineModelManagerOptions,
+	clinePassModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
 	deepseekModelManagerOptions,
@@ -102,6 +103,14 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => clineModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "Cline", oauthProvider: "cline" },
+	},
+	{
+		id: "cline-pass",
+		defaultModel: "cline-pass/deepseek-v4-flash",
+		envVars: ["CLINE_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => clinePassModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "ClinePass", allowUnauthenticated: true },
 	},
 	{
 		id: "cloudflare-ai-gateway",

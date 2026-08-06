@@ -34,6 +34,7 @@ const DEFAULT_MODEL_PROVIDER_ORDER = [
 	"opencode-go",
 	"kilo",
 	"cline",
+	"cline-pass",
 	"vercel-ai-gateway",
 	"cloudflare-ai-gateway",
 	"nanogpt",

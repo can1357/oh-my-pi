@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the separate `cline-pass` subscription provider on Cline's OpenAI-compatible API, with a deterministic subscription-model seed and live refresh from Cline's recommended-models feed.
+
 ## [16.3.0] - 2026-07-23
 
 ### Added

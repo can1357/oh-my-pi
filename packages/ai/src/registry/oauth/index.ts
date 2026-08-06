@@ -240,6 +240,7 @@ export async function getOAuthApiKey(
 		provider === "google-gemini-cli" ||
 		provider === "google-antigravity" ||
 		provider === "alibaba-coding-plan";
+	const providerApiKey = getProviderDefinition(provider)?.getApiKey?.(creds);
 	const apiKey = needsStructuredApiKey
 		? JSON.stringify({
 				apiEndpoint: creds.apiEndpoint,
@@ -251,7 +252,7 @@ export async function getOAuthApiKey(
 				email: creds.email,
 				accountId: creds.accountId,
 			})
-		: creds.access;
+		: (providerApiKey ?? creds.access);
 	return { newCredentials: creds, apiKey };
 }
 

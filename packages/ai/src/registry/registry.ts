@@ -6,6 +6,7 @@ import { anthropicProvider } from "./anthropic";
 import { azureProvider } from "./azure";
 import { cerebrasProvider } from "./cerebras";
 import { clineProvider } from "./cline";
+import { clinePassProvider } from "./cline-pass";
 import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
 import { coreWeaveProvider } from "./coreweave";
 import { cursorProvider } from "./cursor";
@@ -86,6 +87,7 @@ const ALL = [
 	githubCopilotProvider,
 	cursorProvider,
 	clineProvider,
+	clinePassProvider,
 	devinProvider,
 	googleAntigravityProvider,
 	googleGeminiCliProvider,

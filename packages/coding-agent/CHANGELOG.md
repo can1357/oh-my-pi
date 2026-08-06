@@ -10,6 +10,8 @@
 
 ### Added
 
+- Added ClinePass to the interactive login selector as `/login cline-pass`, with ClinePass-only models and shared `CLINE_API_KEY` environment fallback kept separate from canonical Cline usage-billing models.
+
 - Added the `activity` discoverable tool, gated by `gopkClips.enabled` (default off), which answers "what was I working on this morning?" by reading the local Activity Memory ledger: tracked time, application mix, and sanitized window-title digests bucketed by local hour, for a calendar day (`date`) or a trailing window (`lastHours`). Read-only and local-only — it never records anything itself.
 - Added `SqliteActivityLedgerReader` to `@pk-nerdsaver-ai/pi-activity-journal`: a read-only ledger view that opens the sqlite handle read-only and skips the `CREATE TABLE` bootstrap, so readers cannot take a write lock or contend with the live ingest daemon. Recall and the `activity` tool both use it.
 
