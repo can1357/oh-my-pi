@@ -625,6 +625,18 @@ export const cfgTuiMaxFps = register({
 });
 effect(cfgTuiMaxFps, setMaxFps);
 
+export const cfgTuiTmuxWindowName = register({
+	id: "tui.tmuxWindowName",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Tmux Window Name",
+		description:
+			"Rename the enclosing tmux window to the current session name so `tmux list-windows -a` identifies live sessions; the original window name is restored on exit",
+	},
+});
 export const cfgTuiHyperlinks = register({
 	id: "tui.hyperlinks",
 	type: "enum",
