@@ -601,6 +601,18 @@ export const cfgDisplayHideToolActivity = register({
 	},
 });
 
+export const cfgDisplayShowUsageModels = register({
+	id: "display.showUsageModels",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Show Usage Models",
+		description: "List models with live usage data in /usage",
+	},
+});
+
 export const cfgDisplayShowTokenUsage = register({
 	id: "display.showTokenUsage",
 	type: "boolean",
