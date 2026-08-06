@@ -1466,7 +1466,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			this.#requestRender();
 			return;
 		}
-if (this.#section === "messages") {
+		if (this.#section === "messages") {
 			if (index === this.#selectedConversationRow) {
 				this.#messageFocus = "thread";
 				this.#messageThreadOpen = true;
