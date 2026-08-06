@@ -13,8 +13,8 @@
  *     --tool <name>      builtin tool name (e.g. irc, github, read). Required.
  *     --no-summary       ablation: blank the one-line summary too (isolate schema-alone).
  *     --show             print resolved schema + outline + real prompt and exit (no API calls).
+ *     --stored-auth      use stored OMPK credentials, including OpenAI Codex OAuth.
  *     --samples / --model / --max-tokens / --json  forwarded to probe().
- *
  * The heavy coding-agent import lives here; probe.ts stays pi-ai-only.
  */
 import { parseArgs } from "node:util";
@@ -107,6 +107,7 @@ async function main(): Promise<void> {
 			tool: { type: "string" },
 			"no-summary": { type: "boolean" },
 			show: { type: "boolean" },
+			"stored-auth": { type: "boolean" },
 			samples: { type: "string" },
 			model: { type: "string" },
 			"max-tokens": { type: "string" },
@@ -116,7 +117,7 @@ async function main(): Promise<void> {
 	});
 
 	if (!values.tool) {
-		console.error("usage: bun probe-builtin.ts --tool <name> [--no-summary] [--show] [--samples N] [--model p/id,...] [--max-tokens N] [--json]");
+		console.error("usage: bun probe-builtin.ts --tool <name> [--no-summary] [--show] [--stored-auth] [--samples N] [--model p/id,...] [--max-tokens N] [--json]");
 		process.exit(2);
 	}
 
@@ -139,6 +140,7 @@ async function main(): Promise<void> {
 		samples: values.samples ? Number(values.samples) : undefined,
 		models: values.model ? values.model.split(",").map(s => s.trim()).filter(Boolean) : undefined,
 		maxTokens: values["max-tokens"] ? Number(values["max-tokens"]) : undefined,
+		useStoredAuth: Boolean(values["stored-auth"]),
 	});
 
 	if (values.json) {
