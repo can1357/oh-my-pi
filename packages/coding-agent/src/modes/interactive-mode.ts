@@ -154,6 +154,7 @@ import {
 	setSessionTerminalTitle,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
+import { restoreTmuxWindowName, setTmuxWindowName, setTmuxWindowNameEnabled } from "../utils/tmux-session";
 import {
 	aggregateVibeWorkerTokensPerSecond,
 	type VibeOwnerScope,
@@ -1260,11 +1261,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		pushTerminalTitle();
 		setTerminalTitleStateEnabled(this.settings.get("tui.titleState"));
+		setTmuxWindowNameEnabled(this.settings.get("tui.tmuxWindowName"));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		setTmuxWindowName(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		this.updateEditorBorderColor();
 		// Single side-effect point for title changes: every setSessionName caller
 		// (first-input titling, /rename, extension renames, plan seeding, replan
-		// refresh) gets the terminal title + accent updates from here. Registered
+		// refresh) gets the terminal title, tmux window name, and accent updates
+		// from here. Registered
 		// before initHooksAndCustomTools/#reconcileModeFromSession/#enterPlanMode —
 		// all of which can reach setSessionName during init.
 		this.#eventBusUnsubscribers.push(
@@ -1279,6 +1283,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 			this.sessionManager.onSessionNameChanged(() => {
 				setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+				setTmuxWindowName(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 				this.#handleSessionAccentInputsChanged();
 			}),
 		);
@@ -1651,6 +1656,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			return false;
 		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		// The tmux window name falls back to the cwd basename for unnamed sessions.
+		setTmuxWindowName(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		this.statusLine.applyCwdChange();
 		return true;
 	}
@@ -4915,6 +4922,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// terminal back (which would leave the parent shell with a `π ⠋ …` tab).
 		disposeTerminalTitleState();
 		popTerminalTitle();
+		restoreTmuxWindowName();
 		this.stop();
 	}
 

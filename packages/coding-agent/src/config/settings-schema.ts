@@ -1244,6 +1244,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.tmuxWindowName": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Tmux Window Name",
+			description:
+				"Rename the enclosing tmux window to the current session name so `tmux list-windows -a` identifies live sessions; the original window name is restored on exit",
+		},
+	},
+
 	"tui.hyperlinks": {
 		type: "enum",
 		values: ["off", "auto", "always"] as const,
