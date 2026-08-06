@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@pk-nerdsaver-ai/pi-utils",
-	"version": "16.3.0",
+	"version": "16.4.0",
 	"description": "Shared utilities for pi packages",
 	"homepage": "https://github.com/kingkillery/oh-my-pi",
 	"author": "Can Boluk",
