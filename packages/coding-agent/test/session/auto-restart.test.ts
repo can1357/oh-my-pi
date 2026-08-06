@@ -3,7 +3,9 @@ import {
 	AUTO_RESTART_COMMAND_ENV,
 	AUTO_RESTART_SESSION_FILE_ENV,
 	type AutoRestartableArgs,
+	autoRestartHandoffEnv,
 	buildAutoRestartCommand,
+	consumeAutoRestartHandoff,
 	ExecutableUpdateMonitor,
 	handoffAutoRestart,
 	prepareAutoRestartArgs,
@@ -155,5 +157,26 @@ describe("auto restart handoff", () => {
 
 	it("uses a dedicated environment key for the exact session file", () => {
 		expect(AUTO_RESTART_SESSION_FILE_ENV).toBe("OMP_AUTO_RESTART_SESSION_FILE");
+	});
+
+	// The handoff token rides the environment, so every descendant of the
+	// replacement inherits it: tool subprocesses, nested `omp` invocations, and
+	// the long-lived worker daemon. Only the process the parent actually spawned
+	// may act on it, otherwise an unrelated startup is hijacked into resuming a
+	// stale session instead of honouring its own CLI arguments.
+	it("accepts the handoff token only from the process that spawned this one", () => {
+		const addressed: Record<string, string | undefined> = {
+			PATH: "/usr/bin",
+			...autoRestartHandoffEnv("/sessions/current.jsonl", 4242),
+		};
+		expect(consumeAutoRestartHandoff(addressed, 4242)).toBe("/sessions/current.jsonl");
+		expect(addressed).toEqual({ PATH: "/usr/bin" });
+
+		const inherited: Record<string, string | undefined> = {
+			PATH: "/usr/bin",
+			...autoRestartHandoffEnv("/sessions/current.jsonl", 4242),
+		};
+		expect(consumeAutoRestartHandoff(inherited, 5150)).toBeUndefined();
+		expect(inherited).toEqual({ PATH: "/usr/bin" });
 	});
 });
