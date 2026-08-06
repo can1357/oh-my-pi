@@ -111,12 +111,9 @@ const CONTAINER_AGENT_ENV_KEYS = [
 	"OMPK_FENCE_JOB",
 	"OMPK_FENCE_ATTEMPT",
 	"OMPK_FENCE_TOKEN",
-	"GH_TOKEN",
 	"GIT_CONFIG_COUNT",
 	"GIT_CONFIG_KEY_0",
 	"GIT_CONFIG_VALUE_0",
-	"GIT_CONFIG_KEY_1",
-	"GIT_CONFIG_VALUE_1",
 ] as const;
 
 const SETUP_ENV_KEYS = [
@@ -149,6 +146,7 @@ export interface ContainerRunOptions {
 	path?: string;
 	home?: string;
 	gitHooksDir?: string;
+	name?: string;
 }
 
 function appendContainerEnv(args: string[], env: NodeJS.ProcessEnv): void {
@@ -174,11 +172,13 @@ function buildContainerBaseArgs(
 		"--tmpfs",
 		`${home}:rw,mode=700`,
 		"--network=host",
+		"--http-proxy=false",
 		"--memory",
 		options.memory ?? "4g",
 		"--pids-limit",
 		String(options.pidsLimit ?? CONTAINER_PIDS_LIMIT),
 	];
+	if (options.name) args.push("--name", options.name);
 	if (mountGitHooks) {
 		args.push("--volume", `${options.gitHooksDir ?? GIT_HOOKS_DIR}:${CONTAINER_GIT_HOOKS_DIR}:ro,z`);
 	}
@@ -187,12 +187,17 @@ function buildContainerBaseArgs(
 	return args;
 }
 
+export function deriveContainerName(jobId: string, attemptId: string, phase: "setup" | "agent"): string {
+	const safeAttempt = `${jobId}-${attemptId}`.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 120);
+	return `ompk-${safeAttempt}-${phase}`;
+}
+
 /**
  * Build a podman-compatible container argv for the untrusted agent phase.
  * Only the explicit fence/git/GitHub variables cross the container boundary.
  */
 export function buildContainerArgs(
-	job: Pick<Job, "model" | "prompt">,
+	job: Pick<Job, "model" | "prompt" | "source" | "githubToken">,
 	workspace: string,
 	env: NodeJS.ProcessEnv,
 	options: ContainerRunOptions,
@@ -204,6 +209,12 @@ export function buildContainerArgs(
 	for (const key of CONTAINER_AGENT_ENV_KEYS) {
 		const value = env[key];
 		if (value !== undefined) containerEnv[key] = value;
+	}
+	if (job.source === "github" && job.githubToken) {
+		containerEnv.GH_TOKEN = job.githubToken;
+		containerEnv.GIT_CONFIG_COUNT = "2";
+		containerEnv.GIT_CONFIG_KEY_1 = `url.https://x-access-token:${job.githubToken}@github.com/.insteadOf`;
+		containerEnv.GIT_CONFIG_VALUE_1 = "https://github.com/";
 	}
 	if (containerEnv.GIT_CONFIG_VALUE_0 !== undefined) {
 		containerEnv.GIT_CONFIG_VALUE_0 = CONTAINER_GIT_HOOKS_DIR;
@@ -224,11 +235,10 @@ export function buildSetupHookEnv(source: NodeJS.ProcessEnv = process.env): Node
 	}
 	return env;
 }
-
 export type SpawnFn = (
 	command: string,
 	args: readonly string[],
-	options: { cwd: string; shell?: false; env?: NodeJS.ProcessEnv },
+	options: { cwd: string; shell?: false; env?: NodeJS.ProcessEnv; detached?: boolean },
 ) => ChildProcess;
 
 export interface RunHooks {
@@ -242,6 +252,9 @@ export interface RunHooks {
 	args?: readonly string[];
 	/** Container runtime exits are retryable infrastructure failures. */
 	nonZeroFailureClass?: "transient" | "permanent";
+	/** Awaitable container cleanup used for hard timeouts. */
+	onTimeout?: () => Promise<void>;
+	detached?: boolean;
 }
 
 /** Runs the job's prompt through `omp` headlessly — argv only, no shell. */
@@ -256,14 +269,30 @@ export function runOmp(
 	const child = spawnImpl(hooks.command ?? OMP_BIN, hooks.args ?? buildOmpArgs(model, prompt), {
 		cwd: hooks.cwd ?? WORKSPACE_DIR,
 		...(hooks.env ? { env: hooks.env } : {}),
+		...(hooks.detached !== undefined ? { detached: hooks.detached } : {}),
 	});
 	hooks.onSpawn?.(child);
 
 	let stdout = "";
 	let stderr = "";
+	let timedOut = false;
+	const timeoutResult = (): JobRunResult => ({
+		success: false,
+		output: stdout,
+		error: `timed out after ${timeoutMs}ms`,
+		failureClass: "transient",
+	});
 	const timer = setTimeout(() => {
+		timedOut = true;
+		if (hooks.onTimeout) {
+			void hooks
+				.onTimeout()
+				.catch(() => undefined)
+				.then(() => resolve(timeoutResult()));
+			return;
+		}
 		child.kill();
-		resolve({ success: false, output: stdout, error: `timed out after ${timeoutMs}ms`, failureClass: "transient" });
+		resolve(timeoutResult());
 	}, timeoutMs);
 
 	child.stdout?.on("data", d => {
@@ -274,10 +303,12 @@ export function runOmp(
 	});
 	child.on("error", err => {
 		clearTimeout(timer);
+		if (timedOut && hooks.onTimeout) return;
 		resolve({ success: false, output: stdout, error: err.message, failureClass: "transient" });
 	});
 	child.on("close", code => {
 		clearTimeout(timer);
+		if (timedOut && hooks.onTimeout) return;
 		if (code === 0) {
 			resolve({ success: true, output: stdout });
 			return;
@@ -329,13 +360,25 @@ export interface SetupHookRunOptions {
 	args?: readonly string[];
 	redactionToken?: string;
 	nonZeroFailureClass?: "transient" | "permanent";
+	onTimeout?: () => Promise<void>;
 }
 
-function setupFailureOutput(stdout: string, stderr: string, secret: string | undefined): string {
-	const combined = [stdout, stderr].filter(part => part.length > 0).join("\n");
-	const scrubbed = secret ? combined.replaceAll(secret, "[redacted]") : combined;
-	const limit = 4096;
-	return scrubbed.length > limit ? `${scrubbed.slice(0, limit)}\n...[truncated]` : scrubbed;
+const SETUP_OUTPUT_LIMIT = 4096;
+
+function setupFailureOutput(captured: string, wasTruncated: boolean): string {
+	return wasTruncated ? `${captured}\n...[truncated]` : captured;
+}
+
+function forceKillChildTree(child: ChildProcess): void {
+	if (process.platform !== "win32" && child.pid !== undefined) {
+		try {
+			process.kill(-child.pid, "SIGKILL");
+			return;
+		} catch {
+			// Fall through when the child exited before its process group.
+		}
+	}
+	child.kill("SIGKILL");
 }
 
 /**
@@ -359,6 +402,7 @@ export async function runSetupHook(
 		child = spawnImpl(command, args, {
 			cwd: workspace,
 			env: options.env ?? buildSetupHookEnv(),
+			detached: process.platform !== "win32",
 		});
 	} catch (err) {
 		return {
@@ -371,41 +415,102 @@ export async function runSetupHook(
 	options.onSpawn?.(child);
 
 	const { promise, resolve } = Promise.withResolvers<JobRunResult | undefined>();
-	let stdout = "";
-	let stderr = "";
+	let captured = "";
+	let pending = "";
+	let outputTruncated = false;
+	let timedOut = false;
+	const appendCaptured = (text: string): void => {
+		const remaining = SETUP_OUTPUT_LIMIT - captured.length;
+		if (remaining <= 0) {
+			if (text.length > 0) outputTruncated = true;
+			return;
+		}
+		captured += text.slice(0, remaining);
+		if (text.length > remaining) outputTruncated = true;
+	};
+	const capture = (data: unknown): void => {
+		pending += String(data);
+		const secret = options.redactionToken;
+		if (!secret) {
+			appendCaptured(pending);
+			pending = "";
+			return;
+		}
+		for (;;) {
+			const secretIndex = pending.indexOf(secret);
+			if (secretIndex >= 0) {
+				appendCaptured(pending.slice(0, secretIndex));
+				appendCaptured("[redacted]");
+				pending = pending.slice(secretIndex + secret.length);
+				continue;
+			}
+			const safeLength = Math.max(0, pending.length - (secret.length - 1));
+			appendCaptured(pending.slice(0, safeLength));
+			pending = pending.slice(safeLength);
+			return;
+		}
+	};
+	const flushPending = (): void => {
+		const secret = options.redactionToken;
+		if (secret && pending.length > 0) {
+			let prefixLength = Math.min(secret.length - 1, pending.length);
+			while (prefixLength > 0 && !secret.startsWith(pending.slice(-prefixLength))) prefixLength -= 1;
+			appendCaptured(pending.slice(0, pending.length - prefixLength));
+			if (prefixLength > 0) appendCaptured("[redacted]");
+		} else {
+			appendCaptured(pending);
+		}
+		pending = "";
+	};
+	const failureOutput = (): string => {
+		flushPending();
+		return setupFailureOutput(captured, outputTruncated);
+	};
+	const timeoutResult = (): JobRunResult => ({
+		success: false,
+		output: failureOutput(),
+		error: `setup hook .ompk/setup.sh timed out after ${timeoutMs}ms`,
+		failureClass: "transient",
+	});
 	const timer = setTimeout(() => {
-		child.kill();
-		resolve({
-			success: false,
-			output: setupFailureOutput(stdout, stderr, options.redactionToken),
-			error: `setup hook .ompk/setup.sh timed out after ${timeoutMs}ms`,
-			failureClass: "transient",
-		});
+		timedOut = true;
+		if (options.onTimeout) {
+			void options
+				.onTimeout()
+				.catch(() => undefined)
+				.then(() => resolve(timeoutResult()));
+			return;
+		}
+		forceKillChildTree(child);
 	}, timeoutMs);
-	child.stdout?.on("data", data => {
-		stdout += data.toString();
-	});
-	child.stderr?.on("data", data => {
-		stderr += data.toString();
-	});
+	child.stdout?.on("data", capture);
+	child.stderr?.on("data", capture);
 	child.on("error", err => {
 		clearTimeout(timer);
+		if (timedOut) {
+			if (!options.onTimeout) resolve(timeoutResult());
+			return;
+		}
 		resolve({
 			success: false,
-			output: setupFailureOutput(stdout, stderr, options.redactionToken),
+			output: failureOutput(),
 			error: `setup hook .ompk/setup.sh failed to start: ${err.message}`,
 			failureClass: "transient",
 		});
 	});
 	child.on("close", code => {
 		clearTimeout(timer);
+		if (timedOut) {
+			if (!options.onTimeout) resolve(timeoutResult());
+			return;
+		}
 		if (code === 0) {
 			resolve(undefined);
 			return;
 		}
 		resolve({
 			success: false,
-			output: setupFailureOutput(stdout, stderr, options.redactionToken),
+			output: failureOutput(),
 			error: `setup hook .ompk/setup.sh failed with exit code ${code}`,
 			failureClass: options.nonZeroFailureClass ?? "permanent",
 		});
@@ -425,6 +530,34 @@ function buildContainerSetupArgs(
 	};
 	return [...buildContainerBaseArgs(workspace, containerEnv, options, false), "bash", ".ompk/setup.sh"];
 }
+async function forceRemoveContainer(name: string): Promise<void> {
+	const subprocess = Bun.spawn([CONTAINER_BIN, "rm", "--force", name], {
+		env: process.env,
+		stdout: "ignore",
+		stderr: "pipe",
+	});
+	const exitCode = await subprocess.exited;
+	if (exitCode !== 0) {
+		const error = subprocess.stderr ? await new Response(subprocess.stderr).text() : "";
+		throw new Error(`container cleanup failed: ${error.trim() || `exit code ${exitCode}`}`);
+	}
+}
+
+async function stopNamedContainer(name: string, runtimeChild: ChildProcess | undefined): Promise<void> {
+	if (runtimeChild) forceKillChildTree(runtimeChild);
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 2; attempt += 1) {
+		try {
+			await forceRemoveContainer(name);
+			return;
+		} catch (err) {
+			lastError = err;
+			if (attempt === 0) await Bun.sleep(100);
+		}
+	}
+	throw lastError instanceof Error ? lastError : new Error("container cleanup failed");
+}
+
 
 function authHeaders(token: string): Record<string, string> {
 	return { Authorization: `Bearer ${token}` };
@@ -716,13 +849,41 @@ async function runOnce(token: string, allowedModels: readonly string[]): Promise
 	let child: ChildProcess | undefined;
 	let fenceLost = false;
 	let workspace: string | undefined;
+	let activeContainerName: string | undefined;
+	let containerStop: Promise<void> | undefined;
+	const stopActive = (): Promise<void> => {
+		if (activeContainerName) {
+			containerStop ??= stopNamedContainer(activeContainerName, child).catch(err => {
+				console.error(
+					`[${new Date().toISOString()}] failed to remove container ${activeContainerName}: ${err instanceof Error ? err.message : err}`,
+				);
+			});
+			return containerStop;
+		}
+		if (child) forceKillChildTree(child);
+		return Promise.resolve();
+	};
+	const registerChild =
+		(containerName?: string) =>
+		(spawned: ChildProcess): void => {
+			child = spawned;
+			activeContainerName = containerName;
+			containerStop = undefined;
+			if (fenceLost) void stopActive();
+		};
+	const discardIfFenced = async (): Promise<boolean> => {
+		if (!fenceLost) return false;
+		await stopActive();
+		console.error(`[${new Date().toISOString()}] job ${job.id} discarded: lease no longer held`);
+		return true;
+	};
 	const cadence = job.heartbeatMs ?? HEARTBEAT_FALLBACK_MS;
 	const beat = setInterval(() => {
 		void sendHeartbeat(token, job).then(live => {
 			if (live || fenceLost) return;
 			fenceLost = true;
 			console.error(`[${new Date().toISOString()}] lease for job ${job.id} was fenced off; killing runner`);
-			child?.kill();
+			void stopActive();
 		});
 	}, cadence);
 	try {
@@ -738,43 +899,48 @@ async function runOnce(token: string, allowedModels: readonly string[]): Promise
 						gitHooksDir: GIT_HOOKS_DIR,
 					}
 				: undefined;
+			const setupContainerName = deriveContainerName(job.id, job.attemptId, "setup");
+			const agentContainerName = deriveContainerName(job.id, job.attemptId, "agent");
 			let result: JobRunResult;
 			if (!allowedModels.includes(job.model)) {
 				result = await executeJob(job, allowedModels, spawn, JOB_TIMEOUT_MS);
 			} else {
+				if (await discardIfFenced()) return true;
 				const setupEnv = buildSetupHookEnv();
 				const setupResult = await runSetupHook(executionWorkspace, {
 					spawn,
 					timeoutMs: SETUP_TIMEOUT_MS,
 					env: setupEnv,
-					onSpawn: spawned => {
-						child = spawned;
-					},
+					onSpawn: registerChild(containerOptions ? setupContainerName : undefined),
 					redactionToken: job.githubToken,
 					...(containerOptions
 						? {
 								command: CONTAINER_BIN,
-								args: buildContainerSetupArgs(executionWorkspace, setupEnv, containerOptions),
+								args: buildContainerSetupArgs(executionWorkspace, setupEnv, {
+									...containerOptions,
+									name: setupContainerName,
+								}),
 								nonZeroFailureClass: "transient" as const,
+								onTimeout: () => stopNamedContainer(setupContainerName, child),
 							}
 						: {}),
 				});
-				if (fenceLost) {
-					console.error(`[${new Date().toISOString()}] job ${job.id} discarded: lease no longer held`);
-					return true;
-				}
+				if (await discardIfFenced()) return true;
 				result =
 					setupResult ??
 					(await executeJob(job, allowedModels, spawn, JOB_TIMEOUT_MS, {
-						onSpawn: spawned => {
-							child = spawned;
-						},
+						onSpawn: registerChild(containerOptions ? agentContainerName : undefined),
 						...(containerOptions
 							? {
 									command: CONTAINER_BIN,
-									args: buildContainerArgs(job, executionWorkspace, agentEnv, containerOptions),
+									args: buildContainerArgs(job, executionWorkspace, agentEnv, {
+										...containerOptions,
+										name: agentContainerName,
+									}),
 									cwd: WORKSPACE_DIR,
 									nonZeroFailureClass: "transient" as const,
+									onTimeout: () => stopNamedContainer(agentContainerName, child),
+									detached: process.platform !== "win32",
 								}
 							: {
 									env: agentEnv,
@@ -782,10 +948,7 @@ async function runOnce(token: string, allowedModels: readonly string[]): Promise
 								}),
 					}));
 			}
-			if (fenceLost) {
-				console.error(`[${new Date().toISOString()}] job ${job.id} discarded: lease no longer held`);
-				return true;
-			}
+			if (await discardIfFenced()) return true;
 			await submitResult(token, job, scrubJobResult(result, job.githubToken));
 			console.log(`[${new Date().toISOString()}] job ${job.id} ${result.success ? "succeeded" : "failed"}`);
 		} catch (err) {
@@ -799,6 +962,7 @@ async function runOnce(token: string, allowedModels: readonly string[]): Promise
 		}
 	} finally {
 		clearInterval(beat);
+		if (containerStop) await containerStop;
 		if (workspace) await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
 	}
 	return true;

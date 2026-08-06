@@ -8,6 +8,7 @@ import {
 	buildSetupHookEnv,
 	buildWorkspaceCloneArgs,
 	cloneWorkspaceWithMirrorFallback,
+	deriveContainerName,
 	deriveMirrorPath,
 	executeJob,
 	fenceEnv,
@@ -25,8 +26,9 @@ class FakeChild extends EventEmitter {
 	readonly stderr = new EventEmitter();
 	killed = false;
 
-	kill(): boolean {
+	kill(_signal?: NodeJS.Signals | number): boolean {
 		this.killed = true;
+		queueMicrotask(() => this.emit("close", null));
 		return true;
 	}
 }
@@ -34,7 +36,7 @@ class FakeChild extends EventEmitter {
 interface SpawnCapture {
 	command: string;
 	args: readonly string[];
-	options: { cwd: string; shell?: false; env?: NodeJS.ProcessEnv };
+	options: { cwd: string; shell?: false; env?: NodeJS.ProcessEnv; detached?: boolean };
 }
 
 function makeSpawn(script: (child: FakeChild) => void): { spawn: SpawnFn; calls: SpawnCapture[] } {
@@ -79,7 +81,7 @@ describe("buildOmpArgs", () => {
 describe("container command assembly", () => {
 	it("mounts and limits the job while forwarding only the agent allowlist", () => {
 		const args = buildContainerArgs(
-			{ model: "combo-a", prompt: "do the work" },
+			{ model: "combo-a", prompt: "do the work", source: "github", githubToken: "ghs_leased" },
 			"/srv/relay/job-1",
 			{
 				PATH: "/host/bin",
@@ -89,22 +91,24 @@ describe("container command assembly", () => {
 				OMPK_FENCE_JOB: "job-1",
 				OMPK_FENCE_ATTEMPT: "attempt-1",
 				OMPK_FENCE_TOKEN: "fence-1",
-				GH_TOKEN: "ghs_agent",
+				GH_TOKEN: "ghs_host",
 				GIT_CONFIG_COUNT: "2",
 				GIT_CONFIG_KEY_0: "core.hooksPath",
 				GIT_CONFIG_VALUE_0: "/host/hooks",
 				GIT_CONFIG_KEY_1: "url.auth.insteadOf",
 				GIT_CONFIG_VALUE_1: "https://github.com/",
 			},
-			{ image: "registry.test/ompk-agent:1" },
+			{ image: "registry.test/ompk-agent:1", name: deriveContainerName("job-1", "attempt-2", "agent") },
 		);
 
 		expect(args).toContain("/srv/relay/job-1:/workspace:Z");
 		expect(args).toContain("--network=host");
+		expect(args).toContain("--http-proxy=false");
+		expect(args[args.indexOf("--name") + 1]).toBe("ompk-job-1-attempt-2-agent");
 		expect(args[args.indexOf("--memory") + 1]).toBe("4g");
 		expect(args[args.indexOf("--pids-limit") + 1]).toBe("2048");
 		expect(args).toContain("HOME=/tmp/ompk-home");
-		expect(args).toContain("GH_TOKEN=ghs_agent");
+		expect(args).toContain("GH_TOKEN=ghs_leased");
 		expect(args).toContain("GIT_CONFIG_VALUE_0=/opt/ompk/git-hooks");
 		expect(args.some(arg => arg.includes("must-not-cross"))).toBe(false);
 		expect(args).not.toContain("PATH=/host/bin");
@@ -118,6 +122,27 @@ describe("container command assembly", () => {
 			"--",
 			"do the work",
 		]);
+	});
+
+	it("does not forward host GitHub credentials into a Linear container", () => {
+		const args = buildContainerArgs(
+			{ model: "combo-a", prompt: "linear work", source: "linear" },
+			"/srv/relay/linear-job",
+			{
+				GH_TOKEN: "ghs_host_admin",
+				GIT_CONFIG_COUNT: "1",
+				GIT_CONFIG_KEY_0: "core.hooksPath",
+				GIT_CONFIG_VALUE_0: "/host/hooks",
+				GIT_CONFIG_KEY_1: "url.host-auth.insteadOf",
+				GIT_CONFIG_VALUE_1: "https://github.com/",
+			},
+			{ image: "registry.test/ompk-agent:1" },
+		);
+
+		expect(args.some(arg => arg.includes("ghs_host_admin"))).toBe(false);
+		expect(args.some(arg => arg.startsWith("GIT_CONFIG_KEY_1="))).toBe(false);
+		expect(args.some(arg => arg.startsWith("GIT_CONFIG_VALUE_1="))).toBe(false);
+		expect(args).toContain("GIT_CONFIG_COUNT=1");
 	});
 });
 
@@ -165,6 +190,29 @@ describe("setup hook isolation", () => {
 		expect(result?.error).toContain("setup hook .ompk/setup.sh failed with exit code 7");
 		expect(result?.output).toContain("[redacted]");
 		expect(result?.output).not.toContain(secret);
+		expect(result?.output.length).toBeLessThan(4_200);
+	});
+
+	it("redacts repeated tokens split across the capture boundary", async () => {
+		const secret = "ghs_boundary_secret";
+		const split = 7;
+		const { spawn } = makeSpawn(child => {
+			child.stdout.emit("data", "x".repeat(4_080));
+			child.stdout.emit("data", secret.slice(0, split));
+			child.stdout.emit("data", secret.slice(split));
+			child.stdout.emit("data", secret.repeat(100));
+			child.emit("close", 9);
+		});
+		const result = await runSetupHook("/workspace", {
+			spawn,
+			timeoutMs: 1_000,
+			hookExists: async () => true,
+			redactionToken: secret,
+		});
+
+		expect(result?.output).toContain("[redacted]");
+		expect(result?.output).not.toContain(secret);
+		expect(result?.output).not.toContain(secret.slice(0, split));
 		expect(result?.output.length).toBeLessThan(4_200);
 	});
 
@@ -417,6 +465,24 @@ describe("executeJob", () => {
 		expect(result.error).toContain("timed out");
 		expect(result.failureClass).toBe("transient");
 		expect(spawned?.killed).toBe(true);
+	});
+
+	it("awaits container cleanup before returning a timeout", async () => {
+		let cleanupFinished = false;
+		const { spawn } = makeSpawn(() => {});
+		const result = await executeJob({ model: "combo-a", prompt: "p" }, ["combo-a"], spawn, 5, {
+			command: "podman",
+			args: ["run", "--name", "ompk-job-agent", "image", "omp"],
+			nonZeroFailureClass: "transient",
+			onTimeout: async () => {
+				await Bun.sleep(5);
+				cleanupFinished = true;
+			},
+		});
+
+		expect(result.failureClass).toBe("transient");
+		expect(result.error).toContain("timed out");
+		expect(cleanupFinished).toBe(true);
 	});
 
 	it("classifies a spawn error as transient", async () => {

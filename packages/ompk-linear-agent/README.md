@@ -333,8 +333,9 @@ Isolation, setup, and cache settings:
 | `OMPK_RELAY_SETUP_TIMEOUT_MS` | `600000` | Hard timeout for a repository's optional `.ompk/setup.sh`. |
 | `OMPK_RELAY_GITHUB_ROOT` | `<workspace>/github-workspaces` | Holds disposable job clones plus reusable bare mirrors under `.mirrors/`. |
 
-The container image is operator-provided and must contain `omp`, Bun, Git, and
-`bash`. It must also arrange usable model authentication (for example a
+The container image is operator-provided and must contain `omp`, Bun, Git,
+`bash`, `/bin/sh`, and `curl` (the mounted pre-push fence hook uses the latter
+two). It must also arrange usable model authentication (for example a
 host-network-reachable auth broker); the container receives neither the host
 credential store nor its `HOME`. The agent container receives only
 `PATH`/`HOME`, the lease-fence and git-hook variables, and (for GitHub jobs)
