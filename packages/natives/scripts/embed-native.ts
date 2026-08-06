@@ -95,11 +95,27 @@ if (available.length === 0) {
 }
 const packageJson = (await Bun.file(packageJsonPath).json()) as { version: string };
 
+// Version-sentinel guard: the loader refuses any addon that does not export
+// `__piNativesV{version}` matching package.json#version (see
+// `validateLoadedBindings` in native/loader-state.js). Embedding a stale
+// .node here — e.g. when package.json was bumped without rerunning the Rust
+// build — would bake an addon into the binary that can never load, and the
+// extracted copy in the per-version cache would shadow any fix until manually
+// deleted. Fail the build with the rebuild command instead.
+const versionSentinel = `__piNativesV${packageJson.version.replace(/[^A-Za-z0-9]/g, "_")}`;
 const archiveFilename = `${archivePrefix}${platformTag}${archiveSuffix}`;
 const archivePath = path.join(nativeDir, archiveFilename);
 const archiveEntries: Record<string, Uint8Array> = {};
 for (const addon of available) {
-	archiveEntries[addon.filename] = await fs.readFile(addon.path);
+	const content = await fs.readFile(addon.path);
+	if (!content.includes(versionSentinel)) {
+		throw new Error(
+			`${addon.filename} does not expose the version sentinel \`${versionSentinel}\` for ` +
+				`@pk-nerdsaver-ai/pi-natives@${packageJson.version} — it was built from a different release. ` +
+				"Rebuild it with: bun --cwd=packages/natives run build",
+		);
+	}
+	archiveEntries[addon.filename] = content;
 }
 await Bun.write(archivePath, await new Bun.Archive(archiveEntries, { compress: "gzip", level: 9 }).bytes());
 

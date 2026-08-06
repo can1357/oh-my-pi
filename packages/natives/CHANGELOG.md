@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `embed-native.ts` now refuses to embed a `.node` addon that does not export the `__piNativesV{version}` sentinel matching `package.json#version`, failing the binary build with the `bun --cwd=packages/natives run build` rebuild hint. Previously a stale addon (e.g. after a version bump without a Rust rebuild) was baked into the compiled binary, which then crashed on every startup with "does not expose the version sentinel" once the loader extracted and validated it.
+
 ## [16.1.23] - 2026-06-26
 
 ### Added
