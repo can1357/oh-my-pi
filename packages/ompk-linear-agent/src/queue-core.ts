@@ -261,7 +261,7 @@ export class QueueCore {
 		job.attempts += 1;
 		job.attemptId = crypto.randomUUID();
 		job.leaseToken = crypto.randomUUID();
-		job.logicalAttemptKey = `linear:${job.organizationId ?? "unknown"}:${job.issueId}:${job.attempts}`;
+		job.logicalAttemptKey = `${job.source ?? "linear"}:${job.organizationId ?? "unknown"}:${job.issueId}:${job.attempts}`;
 		if (job.stagedPrompt !== undefined) {
 			// The issue was revised between attempts: latest revision wins.
 			job.prompt = job.stagedPrompt;

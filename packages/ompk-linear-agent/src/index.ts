@@ -1,3 +1,9 @@
+import {
+	createConfiguredInstallationToken,
+	fetchGitHubWorkItem,
+	getGitHubCollaboratorPermission,
+	postGitHubComment,
+} from "./github";
 import { fetchIssue, postComment } from "./linear";
 import type { Env } from "./types";
 import type { JobQueueStub } from "./worker";
@@ -13,4 +19,14 @@ function queueStub(env: Env): JobQueueStub {
 	return stub;
 }
 
-export default createWorker({ fetchIssue, postComment, queue: queueStub });
+export default createWorker({
+	fetchIssue,
+	postComment,
+	github: {
+		createInstallationToken: createConfiguredInstallationToken,
+		fetchWorkItem: fetchGitHubWorkItem,
+		postComment: (token, target, body) => postGitHubComment(token, target.owner, target.repo, target.number, body),
+		getCollaboratorPermission: getGitHubCollaboratorPermission,
+	},
+	queue: queueStub,
+});

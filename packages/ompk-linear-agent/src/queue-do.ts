@@ -15,6 +15,7 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
+import { createConfiguredInstallationToken, postGitHubComment } from "./github";
 import { postComment, reconcileComment } from "./linear";
 import {
 	type AdmitOutcome,
@@ -147,7 +148,18 @@ export class JobQueue extends DurableObject<Env> {
 		});
 		for (const job of reconciled) {
 			try {
-				await postComment(this.env.LINEAR_API_TOKEN, job.issueId, reconcileComment(job));
+				if (job.source === "github" && job.github) {
+					const token = await createConfiguredInstallationToken(this.env, job.github.installationId);
+					await postGitHubComment(
+						token.token,
+						job.github.owner,
+						job.github.repo,
+						job.github.number,
+						reconcileComment(job),
+					);
+				} else {
+					await postComment(this.env.LINEAR_API_TOKEN, job.issueId, reconcileComment(job));
+				}
 			} catch (err) {
 				console.error(
 					`reconcile comment failed for ${job.issueIdentifier}:`,

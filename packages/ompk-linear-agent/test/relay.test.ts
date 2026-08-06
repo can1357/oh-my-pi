@@ -1,7 +1,15 @@
 import { describe, expect, it } from "bun:test";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { buildOmpArgs, executeJob, parseAllowedModels, type SpawnFn } from "../relay/relay";
+import {
+	buildOmpArgs,
+	executeJob,
+	fenceEnv,
+	type Job,
+	parseAllowedModels,
+	type SpawnFn,
+	scrubJobResult,
+} from "../relay/relay";
 
 /** Minimal ChildProcess double: capture spawn inputs, emit scripted output. */
 class FakeChild extends EventEmitter {
@@ -61,6 +69,28 @@ describe("buildOmpArgs", () => {
 	});
 });
 
+describe("scrubJobResult", () => {
+	it("redacts the installation token from output and error text", () => {
+		const scrubbed = scrubJobResult(
+			{
+				success: false,
+				output: "fatal: unable to access https://x-access-token:ghs_secret123@github.com/a/b.git",
+				error: "clone failed with ghs_secret123",
+				failureClass: "transient",
+			},
+			"ghs_secret123",
+		);
+		expect(scrubbed.output).not.toContain("ghs_secret123");
+		expect(scrubbed.error).not.toContain("ghs_secret123");
+		expect(scrubbed.output).toContain("[redacted]");
+	});
+
+	it("passes results through when no token is present", () => {
+		const result = { success: true, output: "done" };
+		expect(scrubJobResult(result, undefined)).toEqual(result);
+	});
+});
+
 describe("fence environment threading", () => {
 	it("passes the hooks env through to the spawned process verbatim", async () => {
 		const { spawn, calls } = makeSpawn(child => {
@@ -86,6 +116,35 @@ describe("fence environment threading", () => {
 		});
 		await executeJob({ model: "combo-a", prompt: "p" }, ["combo-a"], spawn, 1_000);
 		expect(calls[0]!.options.env).toBeUndefined();
+	});
+
+	it("injects GitHub credentials into the child env only for GitHub jobs", () => {
+		const base: Job = {
+			id: "job-1",
+			issueId: "kingkillery/oh-my-pk#7",
+			issueIdentifier: "kingkillery/oh-my-pk#7",
+			model: "combo-a",
+			prompt: "p",
+			status: "leased",
+			createdAt: "2026-08-06T00:00:00Z",
+			attemptId: "attempt-1",
+			leaseToken: "lease-1",
+		};
+		const linearEnv = fenceEnv(base);
+		expect(linearEnv.GH_TOKEN).toBe(process.env.GH_TOKEN);
+		expect(linearEnv.GIT_CONFIG_COUNT).toBe("1");
+
+		const githubEnv = fenceEnv({
+			...base,
+			source: "github",
+			githubToken: "ghs_abc",
+			github: { owner: "kingkillery", repo: "oh-my-pk", number: 7, defaultBranch: "main" },
+		});
+		expect(githubEnv.GH_TOKEN).toBe("ghs_abc");
+		expect(githubEnv.GIT_CONFIG_COUNT).toBe("2");
+		expect(githubEnv.GIT_CONFIG_KEY_1).toBe("url.https://x-access-token:ghs_abc@github.com/.insteadOf");
+		expect(githubEnv.GIT_CONFIG_VALUE_1).toBe("https://github.com/");
+		expect(githubEnv.GIT_CONFIG_KEY_0).toBe("core.hooksPath");
 	});
 });
 

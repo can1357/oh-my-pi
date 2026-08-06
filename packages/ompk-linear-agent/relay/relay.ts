@@ -25,14 +25,17 @@
  *   bun relay.ts
  */
 
+import { mkdir, rm } from "node:fs/promises";
 import { type ChildProcess, spawn } from "node:child_process";
 import { hostname } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const WORKER_URL = process.env.WORKER_URL ?? "https://ompk-linear-agent.pkkidking.workers.dev";
 const RELAY_TOKEN = process.env.RELAY_TOKEN;
 const RELAY_NAME = process.env.RELAY_NAME ?? hostname();
 const WORKSPACE_DIR = process.env.OMPK_RELAY_WORKSPACE ?? process.cwd();
+const GITHUB_WORKSPACE_ROOT = process.env.OMPK_RELAY_GITHUB_ROOT ?? join(WORKSPACE_DIR, "github-workspaces");
 const POLL_INTERVAL_MS = Number(process.env.OMPK_RELAY_POLL_MS ?? 5000);
 const JOB_TIMEOUT_MS = Number(process.env.OMPK_RELAY_JOB_TIMEOUT_MS ?? 30 * 60 * 1000);
 /**
@@ -44,6 +47,7 @@ const OMP_BIN = process.env.OMPK_RELAY_OMP_BIN ?? "omp";
 
 export interface Job {
 	id: string;
+	source?: "linear" | "github";
 	issueId: string;
 	issueIdentifier: string;
 	model: string;
@@ -52,9 +56,19 @@ export interface Job {
 	createdAt: string;
 	attemptId: string;
 	leaseToken: string;
+	github?: {
+		owner: string;
+		repo: string;
+		number: number;
+		headRef?: string;
+		defaultBranch: string;
+	};
+	/** Ephemeral installation token returned only in the poll response. */
+	githubToken?: string;
 	/** Heartbeat cadence the Worker expects; two missed beats park the job. */
 	heartbeatMs?: number;
 }
+
 
 export interface JobRunResult {
 	success: boolean;
@@ -95,6 +109,8 @@ export interface RunHooks {
 	onSpawn?: (child: ChildProcess) => void;
 	/** Full child environment (replaces, not merges; spread process.env in). */
 	env?: NodeJS.ProcessEnv;
+	/** Optional per-job checkout directory for GitHub work. */
+	cwd?: string;
 }
 
 /** Runs the job's prompt through `omp` headlessly — argv only, no shell. */
@@ -107,7 +123,7 @@ export function runOmp(
 ): Promise<JobRunResult> {
 	const { promise, resolve } = Promise.withResolvers<JobRunResult>();
 	const child = spawnImpl(OMP_BIN, buildOmpArgs(model, prompt), {
-		cwd: WORKSPACE_DIR,
+		cwd: hooks.cwd ?? WORKSPACE_DIR,
 		...(hooks.env ? { env: hooks.env } : {}),
 	});
 	hooks.onSpawn?.(child);
@@ -242,6 +258,46 @@ async function announceStartup(token: string): Promise<void> {
 	}
 }
 
+async function runGit(
+	args: readonly string[],
+	cwd: string,
+	env: NodeJS.ProcessEnv,
+	redactionToken?: string,
+): Promise<void> {
+	const process = Bun.spawn(["git", ...args], { cwd, env, stdout: "pipe", stderr: "pipe" });
+	const exitCode = await process.exited;
+	if (exitCode !== 0) {
+		const rawError = process.stderr ? await new Response(process.stderr).text() : "";
+		const error = redactionToken ? rawError.replaceAll(redactionToken, "[redacted]") : rawError;
+		throw new Error(`git ${args[0] ?? "command"} failed: ${error.trim() || `exit code ${exitCode}`}`);
+	}
+}
+
+async function prepareGitHubWorkspace(job: Job): Promise<string> {
+	if (!job.github || !job.githubToken) throw new Error("GitHub job is missing repository credentials");
+	const workspace = join(
+		GITHUB_WORKSPACE_ROOT,
+		`${job.github.owner}-${job.github.repo}-${job.id}`.replace(/[^A-Za-z0-9._-]/g, "_"),
+	);
+	await mkdir(GITHUB_WORKSPACE_ROOT, { recursive: true });
+	await rm(workspace, { recursive: true, force: true });
+	const gitEnv = {
+		...process.env,
+		GIT_CONFIG_COUNT: "1",
+		GIT_CONFIG_KEY_0: `url.https://x-access-token:${job.githubToken}@github.com/.insteadOf`,
+		GIT_CONFIG_VALUE_0: "https://github.com/",
+	};
+	const cloneUrl = `https://github.com/${job.github.owner}/${job.github.repo}.git`;
+	await runGit(["clone", "--origin", "origin", cloneUrl, workspace], GITHUB_WORKSPACE_ROOT, gitEnv, job.githubToken);
+	if (job.github.headRef) {
+		await runGit(["checkout", "-B", job.github.headRef, `origin/${job.github.headRef}`], workspace, gitEnv, job.githubToken);
+	} else {
+		const branch = `ompk/issue-${job.github.number}-${job.id.slice(0, 8)}`;
+		await runGit(["checkout", "-B", branch, `origin/${job.github.defaultBranch}`], workspace, gitEnv, job.githubToken);
+	}
+	return workspace;
+}
+
 /** Hooks directory shipped next to the relay; contains the pre-push fence guard. */
 const GIT_HOOKS_DIR = fileURLToPath(new URL("git-hooks/", import.meta.url)).replace(/[\\/]+$/, "");
 
@@ -252,16 +308,37 @@ const GIT_HOOKS_DIR = fileURLToPath(new URL("git-hooks/", import.meta.url)).repl
  * child tree runs the fence guard. The override shadows repo-local hooks
  * for the child, which is intended for a headless runner workspace.
  */
-function fenceEnv(job: Job): NodeJS.ProcessEnv {
+export function fenceEnv(job: Job): NodeJS.ProcessEnv {
+	const githubAuth =
+		job.source === "github" && job.githubToken
+			? {
+					GH_TOKEN: job.githubToken,
+					GIT_CONFIG_COUNT: "2",
+					GIT_CONFIG_KEY_1: `url.https://x-access-token:${job.githubToken}@github.com/.insteadOf`,
+					GIT_CONFIG_VALUE_1: "https://github.com/",
+				}
+			: {
+					GIT_CONFIG_COUNT: "1",
+				};
 	return {
 		...process.env,
 		OMPK_FENCE_URL: `${WORKER_URL}/fence-check`,
 		OMPK_FENCE_JOB: job.id,
 		OMPK_FENCE_ATTEMPT: job.attemptId,
 		OMPK_FENCE_TOKEN: job.leaseToken,
-		GIT_CONFIG_COUNT: "1",
 		GIT_CONFIG_KEY_0: "core.hooksPath",
 		GIT_CONFIG_VALUE_0: GIT_HOOKS_DIR,
+		...githubAuth,
+	};
+}
+
+/** Remove the ephemeral installation token from any relay-reported text. */
+export function scrubJobResult(result: JobRunResult, secret: string | undefined): JobRunResult {
+	if (!secret) return result;
+	return {
+		...result,
+		output: result.output.replaceAll(secret, "[redacted]"),
+		...(result.error !== undefined ? { error: result.error.replaceAll(secret, "[redacted]") } : {}),
 	};
 }
 
@@ -272,6 +349,7 @@ async function runOnce(token: string, allowedModels: readonly string[]): Promise
 	console.log(`[${new Date().toISOString()}] running job ${job.id} (${job.issueIdentifier}, model=${job.model})`);
 	let child: ChildProcess | undefined;
 	let fenceLost = false;
+	let workspace: string | undefined;
 	const cadence = job.heartbeatMs ?? HEARTBEAT_FALLBACK_MS;
 	const beat = setInterval(() => {
 		void sendHeartbeat(token, job).then(live => {
@@ -282,20 +360,33 @@ async function runOnce(token: string, allowedModels: readonly string[]): Promise
 		});
 	}, cadence);
 	try {
-		const result = await executeJob(job, allowedModels, spawn, JOB_TIMEOUT_MS, {
-			onSpawn: spawned => {
-				child = spawned;
-			},
-			env: fenceEnv(job),
-		});
-		if (fenceLost) {
-			console.error(`[${new Date().toISOString()}] job ${job.id} discarded: lease no longer held`);
-			return true;
+		try {
+			workspace = job.source === "github" ? await prepareGitHubWorkspace(job) : undefined;
+			const result = await executeJob(job, allowedModels, spawn, JOB_TIMEOUT_MS, {
+				onSpawn: spawned => {
+					child = spawned;
+				},
+				env: fenceEnv(job),
+				cwd: workspace,
+			});
+			if (fenceLost) {
+				console.error(`[${new Date().toISOString()}] job ${job.id} discarded: lease no longer held`);
+				return true;
+			}
+			await submitResult(token, job, scrubJobResult(result, job.githubToken));
+			console.log(`[${new Date().toISOString()}] job ${job.id} ${result.success ? "succeeded" : "failed"}`);
+		} catch (err) {
+			const result: JobRunResult = {
+				success: false,
+				output: "",
+				error: err instanceof Error ? err.message : "GitHub workspace preparation failed",
+				failureClass: "transient",
+			};
+			if (!fenceLost) await submitResult(token, job, scrubJobResult(result, job.githubToken));
 		}
-		await submitResult(token, job, result);
-		console.log(`[${new Date().toISOString()}] job ${job.id} ${result.success ? "succeeded" : "failed"}`);
 	} finally {
 		clearInterval(beat);
+		if (workspace) await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
 	}
 	return true;
 }

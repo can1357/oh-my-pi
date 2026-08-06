@@ -21,6 +21,11 @@ new_sqlite_classes = [ "JobQueue" ]
 LINEAR_AGENT_USER_ID = ""
 ALLOWED_PROJECT_IDS = ""
 ALLOWED_MODELS = ""
+# Account-wide GitHub App installation for kingkillery.
+GITHUB_INSTALLATION_ID = ""
+GITHUB_ACCOUNT_LOGIN = "kingkillery"
+GITHUB_MENTION_HANDLE = "ompk"
+GITHUB_MODEL = ""
 
 # Secrets (set via `wrangler secret put <NAME>`, never committed):
 #   LINEAR_WEBHOOK_SECRET   - signing secret from the Linear OAuth app's webhook config
@@ -28,3 +33,6 @@ ALLOWED_MODELS = ""
 #                             and post comments back as the ompk agent
 #   RELAY_TOKEN             - shared secret the Windows-side relay presents when polling/submitting
 #   STATUS_TOKEN            - separate administrative credential required by /status
+#   GITHUB_WEBHOOK_SECRET   - GitHub App webhook secret
+#   GITHUB_APP_ID           - GitHub App numeric id
+#   GITHUB_APP_PRIVATE_KEY  - GitHub App PKCS#8 PEM private key

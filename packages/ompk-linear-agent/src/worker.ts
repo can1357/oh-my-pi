@@ -16,6 +16,14 @@
  */
 
 import { evaluateDispatch, resolveDispatchConfig } from "./dispatch-policy";
+import { verifyGitHubSignature } from "./github";
+import {
+	type GitHubEventPayload,
+	isSupportedGitHubEvent,
+	isTrustedAssociation,
+	isTrustedPermission,
+	parseGitHubTrigger,
+} from "./github-dispatch";
 import type { IssueDetails } from "./linear";
 import { deadLetterComment, reconcileComment, timingSafeEqual, verifyLinearSignature } from "./linear";
 import type {
@@ -28,7 +36,7 @@ import type {
 	SweepResult,
 } from "./queue-core";
 import { DEFAULT_QUEUE_LIMITS } from "./queue-core";
-import type { Env, Job, JobResult } from "./types";
+import type { Env, GitHubJobTarget, Job, JobResult } from "./types";
 import { redactJob } from "./types";
 
 export interface JobQueueStub {
@@ -65,6 +73,19 @@ export interface JobQueueStub {
 export interface WorkerDeps {
 	fetchIssue(token: string, issueId: string): Promise<IssueDetails>;
 	postComment(token: string, issueId: string, body: string): Promise<void>;
+	github?: {
+		createInstallationToken(env: Env, installationId: string): Promise<{ token: string; expiresAt: string }>;
+		fetchWorkItem(
+			token: string,
+			owner: string,
+			repo: string,
+			number: number,
+			installationId: string,
+			defaultBranch: string,
+		): Promise<{ target: GitHubJobTarget; title: string; body: string }>;
+		postComment(token: string, target: GitHubJobTarget, body: string): Promise<void>;
+		getCollaboratorPermission(token: string, owner: string, repo: string, login: string): Promise<string | null>;
+	};
 	queue(env: Env): JobQueueStub;
 }
 
@@ -109,6 +130,119 @@ function extractIssueId(payload: LinearWebhookPayload): string | null {
 	if (payload.type === "Issue" && typeof payload.data?.id === "string") return payload.data.id;
 	return null;
 }
+async function postJobComment(env: Env, deps: WorkerDeps, job: Job, body: string): Promise<void> {
+	if (job.source === "github") {
+		if (!deps.github || !job.github) throw new Error("GitHub job dependencies are not configured");
+		const installationToken = await deps.github.createInstallationToken(env, job.github.installationId);
+		await deps.github.postComment(installationToken.token, job.github, body);
+		return;
+	}
+	await deps.postComment(env.LINEAR_API_TOKEN, job.issueId, body);
+}
+
+async function handleGitHubWebhook(request: Request, env: Env, deps: WorkerDeps): Promise<Response> {
+	const rawBody = await request.text();
+	if (!(await verifyGitHubSignature(rawBody, request.headers.get("x-hub-signature-256"), env.GITHUB_WEBHOOK_SECRET))) {
+		return unauthorized();
+	}
+	const eventName = request.headers.get("x-github-event") ?? "";
+	const deliveryId = request.headers.get("x-github-delivery")?.trim() ?? "";
+	if (!deliveryId) return json({ error: "missing GitHub delivery id" }, 400);
+	if (!isSupportedGitHubEvent(eventName)) return json({ ok: true, skipped: "unsupported event" });
+
+	let payload: GitHubEventPayload;
+	try {
+		payload = JSON.parse(rawBody) as GitHubEventPayload;
+	} catch {
+		return json({ error: "invalid payload" }, 400);
+	}
+	const installationId = payload.installation?.id === undefined ? "" : String(payload.installation.id);
+	if (!installationId || !env.GITHUB_INSTALLATION_ID || installationId !== env.GITHUB_INSTALLATION_ID.trim()) {
+		return json({ ok: true, skipped: "unauthorized installation" });
+	}
+	// Regular event deliveries abbreviate `installation` to `{id}`; the account
+	// object only appears on installation.* events. Fall back to the repository
+	// owner, which is present on every supported event.
+	const accountLogin = payload.installation?.account?.login ?? payload.repository?.owner?.login;
+	if (env.GITHUB_ACCOUNT_LOGIN && accountLogin?.toLowerCase() !== env.GITHUB_ACCOUNT_LOGIN.toLowerCase()) {
+		return json({ ok: true, skipped: "unauthorized account" });
+	}
+	const handle = env.GITHUB_MENTION_HANDLE?.trim() || "ompk";
+	const parsed = parseGitHubTrigger(eventName, payload, handle);
+	if (!parsed.ok) return json({ ok: true, skipped: parsed.reason });
+	if (!deps.github) return json({ error: "GitHub adapter is not configured" }, 503);
+	if (!parsed.trigger.actor) return json({ ok: true, skipped: "missing actor" });
+
+	const [owner, repo] = parsed.trigger.repo.split("/");
+	if (!owner || !repo) return json({ error: "invalid repository" }, 400);
+	let installationToken: { token: string; expiresAt: string };
+	let permission: string | null;
+	let workItem: { target: GitHubJobTarget; title: string; body: string };
+	try {
+		installationToken = await deps.github.createInstallationToken(env, installationId);
+		permission = isTrustedAssociation(parsed.trigger.association)
+			? null
+			: await deps.github.getCollaboratorPermission(installationToken.token, owner, repo, parsed.trigger.actor);
+		if (!isTrustedAssociation(parsed.trigger.association) && !isTrustedPermission(permission)) {
+			return json({ ok: true, skipped: "requester is not authorized" });
+		}
+		workItem = await deps.github.fetchWorkItem(
+			installationToken.token,
+			owner,
+			repo,
+			parsed.trigger.number,
+			installationId,
+			payload.repository?.default_branch ?? "main",
+		);
+	} catch (err) {
+		return json({ error: `GitHub API call failed: ${err instanceof Error ? err.message : "unknown"}` }, 502);
+	}
+	if (
+		workItem.target.isPullRequest &&
+		workItem.target.headRepo &&
+		workItem.target.headRepo.toLowerCase() !== parsed.trigger.repo.toLowerCase()
+	) {
+		return json({ ok: true, skipped: "fork-originated execution is not supported" });
+	}
+	const model = env.GITHUB_MODEL?.trim() ?? "";
+	if (!model) return json({ error: "GITHUB_MODEL is not configured" }, 503);
+	const prompt = [
+		`Repository: ${parsed.trigger.repo}`,
+		`Target: ${parsed.trigger.kind} #${parsed.trigger.number}`,
+		`URL: ${workItem.target.htmlUrl ?? "unavailable"}`,
+		`Title: ${workItem.title}`,
+		`Description: ${workItem.body}`,
+		parsed.trigger.location ? `Review location: ${parsed.trigger.location}` : "",
+		`Request: ${parsed.trigger.request}`,
+	]
+		.filter(Boolean)
+		.join("\n\n")
+		.trim();
+	const issueId = `${parsed.trigger.repo}#${parsed.trigger.number}`;
+	const job: Job = {
+		id: crypto.randomUUID(),
+		source: "github",
+		issueId,
+		issueIdentifier: issueId,
+		model,
+		prompt,
+		status: "pending",
+		createdAt: new Date().toISOString(),
+		dedupeKey: `github:${parsed.trigger.dedupeId}`,
+		attempts: 0,
+		github: workItem.target,
+	};
+	const queue = deps.queue(env);
+	const admitted = await queue.admit(job);
+	if (admitted.accepted) return json({ ok: true, queued: admitted.jobId, target: issueId, model });
+	if (admitted.reason === "active_job_exists") {
+		const refreshed = await queue.refreshPrompt(issueId, prompt, job.dedupeKey);
+		return refreshed.ok
+			? json({ ok: true, refreshed: refreshed.applied, job: refreshed.job.id, target: issueId })
+			: json({ ok: true, skipped: refreshed.code, target: issueId });
+	}
+	return json({ ok: true, skipped: admitted.reason ?? "not admitted", target: issueId });
+}
 
 async function handleWebhook(request: Request, env: Env, deps: WorkerDeps): Promise<Response> {
 	const rawBody = await request.text();
@@ -149,6 +283,7 @@ async function handleWebhook(request: Request, env: Env, deps: WorkerDeps): Prom
 	const prompt = `${issue.title}\n\n${issue.description ?? ""}`.trim();
 	const job: Job = {
 		id: crypto.randomUUID(),
+		source: "linear",
 		issueId: issue.id,
 		issueIdentifier: issue.identifier,
 		model: decision.model,
@@ -189,7 +324,7 @@ async function handlePoll(request: Request, env: Env, deps: WorkerDeps): Promise
 	const { reconciled } = await queue.sweep();
 	for (const job of reconciled) {
 		try {
-			await deps.postComment(env.LINEAR_API_TOKEN, job.issueId, reconcileComment(job));
+			await postJobComment(env, deps, job, reconcileComment(job));
 		} catch (err) {
 			// Best-effort mirror: the parked state is authoritative and visible
 			// via /status; a Linear hiccup must not block job pickup.
@@ -202,6 +337,10 @@ async function handlePoll(request: Request, env: Env, deps: WorkerDeps): Promise
 	const grant = await queue.lease(relayName);
 	if (!grant) return new Response(null, { status: 204 });
 	const { job, attemptId, leaseToken } = grant;
+	const githubToken =
+		job.source === "github" && deps.github && job.github
+			? await deps.github.createInstallationToken(env, job.github.installationId)
+			: undefined;
 	return json({
 		id: job.id,
 		issueId: job.issueId,
@@ -212,6 +351,9 @@ async function handlePoll(request: Request, env: Env, deps: WorkerDeps): Promise
 		createdAt: job.createdAt,
 		attemptId,
 		leaseToken,
+		...(job.source === "github" && job.github && githubToken
+			? { github: job.github, githubToken: githubToken.token, githubTokenExpiresAt: githubToken.expiresAt }
+			: {}),
 		heartbeatMs: DEFAULT_QUEUE_LIMITS.heartbeatMs,
 	});
 }
@@ -258,14 +400,14 @@ async function handleResult(request: Request, env: Env, deps: WorkerDeps): Promi
 	}
 	if (outcome.retryScheduled) {
 		// Scheduled retry: no terminal result exists yet, so nothing is
-		// mirrored to Linear (context discipline: no per-retry noise).
+		// mirrored to the source system (context discipline: no per-retry noise).
 		return json({ ok: true, retryScheduled: true, job: redactJob(outcome.job) });
 	}
 	if (!outcome.duplicate) {
 		const commentBody = body.success
 			? `**ompk (${outcome.job.model}) — done**\n\n${body.output}`
 			: `**ompk (${outcome.job.model}) — failed**\n\n${outcome.job.result?.error ?? body.error ?? "unknown error"}\n\n${body.output}`;
-		await deps.postComment(env.LINEAR_API_TOKEN, outcome.job.issueId, commentBody);
+		await postJobComment(env, deps, outcome.job, commentBody);
 	}
 	return json({ ok: true, duplicate: outcome.duplicate, job: redactJob(outcome.job) });
 }
@@ -342,11 +484,7 @@ async function handleReconcile(request: Request, env: Env, deps: WorkerDeps): Pr
 			.resolveReconcileByRunner(body.runner, `relay ${body.runner} restarted with no live jobs`);
 		for (const { job, disposition } of resolved) {
 			if (disposition === "requeued") continue;
-			await deps.postComment(
-				env.LINEAR_API_TOKEN,
-				job.issueId,
-				deadLetterComment(job, job.result?.error ?? "runner terminated"),
-			);
+			await postJobComment(env, deps, job, deadLetterComment(job, job.result?.error ?? "runner terminated"));
 		}
 		return json({
 			ok: true,
@@ -371,15 +509,10 @@ async function handleReconcile(request: Request, env: Env, deps: WorkerDeps): Pr
 		return json({ error: `reconcile rejected: ${outcome.code}` }, 409);
 	}
 	if (outcome.disposition !== "requeued") {
-		await deps.postComment(
-			env.LINEAR_API_TOKEN,
-			outcome.job.issueId,
-			deadLetterComment(outcome.job, outcome.job.result?.error ?? reason),
-		);
+		await postJobComment(env, deps, outcome.job, deadLetterComment(outcome.job, outcome.job.result?.error ?? reason));
 	}
 	return json({ ok: true, disposition: outcome.disposition, job: redactJob(outcome.job) });
 }
-
 async function handleStatus(request: Request, env: Env, deps: WorkerDeps): Promise<Response> {
 	if (!bearerAuthorized(request, env.STATUS_TOKEN)) return unauthorized();
 	const url = new URL(request.url);
@@ -425,6 +558,9 @@ export function createWorker(deps: WorkerDeps): { fetch(request: Request, env: E
 
 			if (request.method === "POST" && url.pathname === "/webhook") {
 				return handleWebhook(request, env, deps);
+			}
+			if (request.method === "POST" && url.pathname === "/github/webhook") {
+				return handleGitHubWebhook(request, env, deps);
 			}
 			if (request.method === "GET" && url.pathname === "/poll") {
 				return handlePoll(request, env, deps);

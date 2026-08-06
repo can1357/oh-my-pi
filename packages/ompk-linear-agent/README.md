@@ -5,12 +5,19 @@ when an issue reaches the queue-admission state, reads the `model:<combo-id>`
 label off the issue, and queues a job for a local relay to execute — then
 posts the result back to Linear as a comment.
 
+The same Worker, queue, and relay also back the **account-wide GitHub App
+integration**: `@ompk` mentions on GitHub Issues and Pull Requests enter the
+identical job pipeline through `/github/webhook` (see
+[GitHub App integration](#github-app-integration-ompk-on-issuesprs)).
+
 ## Pieces
 
-- `src/index.ts` — Cloudflare entrypoint (binds the real Linear API + Durable Object queue)
-- `src/worker.ts` — request handlers (`/webhook`, `/poll`, `/result`, `/heartbeat`, `/reconcile`, `/fence-check`, `/status`)
-- `src/dispatch-policy.ts` — webhook dispatch authorization + replay dedupe key
-- `src/linear.ts` — webhook signature verification + Linear GraphQL calls
+- `src/index.ts` — Cloudflare entrypoint (binds the real Linear + GitHub APIs and the Durable Object queue)
+- `src/worker.ts` — request handlers (`/webhook`, `/github/webhook`, `/poll`, `/result`, `/heartbeat`, `/reconcile`, `/fence-check`, `/status`)
+- `src/dispatch-policy.ts` — Linear webhook dispatch authorization + replay dedupe key
+- `src/linear.ts` — Linear webhook signature verification + GraphQL calls
+- `src/github.ts` — GitHub App JWT/installation tokens, webhook HMAC verification, REST calls
+- `src/github-dispatch.ts` — `@ompk` mention parsing + event authorization helpers
 - `src/queue-core.ts` / `src/queue-do.ts` — atomic, lease-fenced job queue (Durable Object)
 - `relay/relay.ts` — Windows-side long-poll relay that runs jobs via `omp --print`
 
@@ -28,6 +35,130 @@ ALL of the following hold (see `docs/multi-agent-fork-collaboration.md`):
 
 Deliveries are deduplicated on `delivery id + issue revision`, and at most one
 active job may exist per issue. Missing allowlist configuration fails closed.
+
+## GitHub App integration (@ompk on Issues/PRs)
+
+A single GitHub App installed account-wide on `kingkillery` gives `@ompk`
+Copilot-style mention behavior across every repository. GitHub events flow
+into this package's Durable Object queue and relay; only the adapter
+differs from Linear. Anthropic execution keeps using the relay machine's
+existing CLI OAuth login (`omp login` / `omp auth-broker`) — no
+`ANTHROPIC_API_KEY` anywhere, and no OAuth credential ever leaves the relay
+host.
+
+> **Deployed topology (2026-08):** the GitHub App `pk-ompk` (App ID 4503460)
+> points at a dedicated instance of this Worker, `pk-ompk-github`
+> (`https://pk-ompk-github.pkkidking.workers.dev/github/webhook`), deployed
+> with `wrangler deploy --name pk-ompk-github`. The pre-existing
+> `ompk-linear-agent` Worker runs an older, separate Linear implementation
+> with a different secret contract and was deliberately left untouched; its
+> Linear-facing behavior is unaffected. On the `pk-ompk-github` instance the
+> Linear secrets are random placeholders, so Linear webhooks fail closed.
+
+### Create the App (manual, one-time)
+
+GitHub → Settings → Developer settings → GitHub Apps → **New GitHub App**:
+
+- **Webhook URL**: `https://<worker-host>/github/webhook`
+- **Webhook secret**: a fresh random value (becomes `GITHUB_WEBHOOK_SECRET`)
+- **Repository permissions**: Contents *read & write*, Issues *read & write*,
+  Pull requests *read & write*, Metadata *read-only*
+- **Subscribed events**: Issues, Issue comment, Pull request,
+  Pull request review, Pull request review comment
+- Generate a **private key** (PEM) and note the **App ID**.
+
+Install the App on the `kingkillery` account with **All repositories** —
+that is the account-wide switch; new repos are covered automatically. Note
+the installation id from the installation URL
+(`.../settings/installations/<id>`).
+
+### Configure the Worker
+
+```sh
+npx wrangler secret put GITHUB_WEBHOOK_SECRET   # webhook signing secret
+npx wrangler secret put GITHUB_APP_ID           # numeric App id
+npx wrangler secret put GITHUB_APP_PRIVATE_KEY  # PKCS#8 PEM (literal \n accepted)
+# edit wrangler.toml [vars]: GITHUB_INSTALLATION_ID, GITHUB_ACCOUNT_LOGIN,
+# GITHUB_MENTION_HANDLE (default "ompk"), GITHUB_MODEL (combo id jobs run with)
+npx wrangler deploy
+```
+
+The App's private key exists only as a Worker secret; the relay never sees
+it. GitHub calls authenticate exclusively with short-lived (1 h)
+installation tokens minted by the Worker.
+
+### GitHub dispatch authorization
+
+A signed webhook is necessary but not sufficient. A GitHub job is queued only
+when ALL of the following hold (`src/worker.ts` + `src/github-dispatch.ts`,
+each check fails closed):
+
+- the `X-Hub-Signature-256` HMAC verifies against `GITHUB_WEBHOOK_SECRET`;
+- the delivery carries `X-GitHub-Delivery` and a supported event:
+  `issues.opened`, `issue_comment.created`, `pull_request.opened`,
+  `pull_request_review.submitted`, `pull_request_review_comment.created`;
+- the payload's installation id equals `GITHUB_INSTALLATION_ID` and the
+  installation account equals `GITHUB_ACCOUNT_LOGIN`;
+- the body/title/comment contains a real `@ompk` mention outside code fences
+  and inline code, authored by a non-bot user;
+- the author is trusted: `OWNER`/`MEMBER`/`COLLABORATOR` association, or a
+  collaborator whose permission resolves to `write`/`maintain`/`admin`;
+- the target is not a fork-originated PR (head repo must equal base repo);
+- `GITHUB_MODEL` is configured (503 otherwise).
+
+Duplicate protection: jobs dedupe on a redelivery-stable key
+(`github:issue_comment:<comment-id>`, `github:review:<review-id>`,
+`github:pr_opened:<repo>#<n>`, …) — GitHub redeliveries change the delivery
+GUID but reuse these ids, so retries and manual redeliveries no-op. At most
+one active job exists per `<repo>#<number>`; a second mention while one is
+active refreshes the prompt under the same attempt rules as Linear.
+
+### GitHub job execution
+
+1. The Worker admits the job (`source: "github"`) with repo metadata
+   (`owner/repo`, number, default branch, PR head ref, installation id).
+2. The relay's `/poll` grant carries the metadata plus a fresh installation
+   token. The relay clones the repo into a per-job workspace under
+   `OMPK_RELAY_GITHUB_ROOT` (default `<workspace>/github-workspaces`),
+   checks out the PR head branch — or a new `ompk/issue-<n>-<jobid>` branch
+   off the default branch for issues — and runs `omp` there. Linear jobs
+   keep using the static `OMPK_RELAY_WORKSPACE`.
+3. The child env carries `GH_TOKEN` plus a git `insteadOf` rewrite, so `git
+   push` and `gh pr create` inside the run authenticate as the App
+   installation. The pre-push fence guard applies unchanged.
+4. The relay scrubs the installation token from all reported output, then
+   posts `/result`; the Worker mints a NEW installation token at result time
+   and posts the outcome as an issue/PR comment (tokens expire after 1 h, so
+   completion never reuses the leased one). Reconcile parking and
+   dead-letter comments follow the same path.
+
+The leased token expires after 1 h; the default job timeout (30 min) fits
+inside that budget. Raising `OMPK_RELAY_JOB_TIMEOUT_MS` past ~55 min will
+break pushes late in a GitHub job.
+
+### Anthropic authentication (unchanged)
+
+The relay host authenticates models exactly like the interactive CLI:
+
+```sh
+omp login            # interactive Anthropic OAuth; stores tokens in AuthStorage
+# or, for a shared/headless relay host:
+omp auth-broker login anthropic && omp auth-broker serve
+```
+
+`omp` resolves credentials from local auth storage / the broker at spawn
+time. Nothing GitHub-related touches them, and they never appear in Worker
+secrets, webhook payloads, or job output.
+
+### Manual infrastructure checklist
+
+Repository code cannot create these; they are one-time account operations:
+
+1. Create the GitHub App (settings above) and generate its private key.
+2. Install it account-wide on `kingkillery` (**All repositories**).
+3. Set the three `GITHUB_*` Worker secrets + `wrangler.toml` vars; deploy.
+4. Run the relay on a host that has `omp` logged in to Anthropic.
+5. Send a test mention and watch `wrangler tail` + `/status`.
 
 ## Queue semantics
 
@@ -183,7 +314,9 @@ executing). Optional: `RELAY_NAME` (defaults to hostname),
 `OMPK_RELAY_WORKSPACE` (cwd `omp` runs in, defaults to the relay's own cwd),
 `OMPK_RELAY_POLL_MS` (default 5000), `OMPK_RELAY_JOB_TIMEOUT_MS` (default
 30 min), `OMPK_RELAY_OMP_BIN` (absolute path to the `omp` executable when
-PATH resolution can't find it).
+PATH resolution can't find it), `OMPK_RELAY_GITHUB_ROOT` (parent directory
+for per-job GitHub clones, defaults to `<workspace>/github-workspaces`;
+each GitHub job clones fresh and is deleted afterwards).
 
 ### Relay security posture
 

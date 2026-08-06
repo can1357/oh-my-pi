@@ -5,6 +5,19 @@ export interface Env {
 	LINEAR_WEBHOOK_SECRET: string;
 	/** Linear app developer token used to read issues and post comments. */
 	LINEAR_API_TOKEN: string;
+	/** GitHub App webhook signing secret. */
+	GITHUB_WEBHOOK_SECRET?: string;
+	/** GitHub App numeric id used to mint installation tokens. */
+	GITHUB_APP_ID?: string;
+	/** GitHub App PKCS#8 private key in PEM form. */
+	GITHUB_APP_PRIVATE_KEY?: string;
+	/** Account-wide installation id allowed to dispatch work. */
+	GITHUB_INSTALLATION_ID?: string;
+	/** GitHub account login allowed to dispatch work. */
+	GITHUB_ACCOUNT_LOGIN?: string;
+	/** Mention handle and model used by the GitHub adapter. */
+	GITHUB_MENTION_HANDLE?: string;
+	GITHUB_MODEL?: string;
 	/** Shared secret the execution relay presents on /poll and /result. */
 	RELAY_TOKEN: string;
 	/** Separate administrative credential required for /status. Never the relay or webhook secret. */
@@ -15,6 +28,20 @@ export interface Env {
 	ALLOWED_PROJECT_IDS: string;
 	/** Comma-separated `model:` combo ids allowed to dispatch. Empty disables dispatch. */
 	ALLOWED_MODELS: string;
+}
+
+export type JobSource = "linear" | "github";
+
+export interface GitHubJobTarget {
+	owner: string;
+	repo: string;
+	number: number;
+	installationId: string;
+	defaultBranch: string;
+	headRef?: string;
+	headRepo?: string;
+	isPullRequest: boolean;
+	htmlUrl?: string;
 }
 
 export type JobStatus = "pending" | "leased" | "reconcile" | "done" | "failed";
@@ -35,6 +62,10 @@ export interface JobResult {
 
 export interface Job {
 	id: string;
+	/** Source adapter; missing on pre-migration jobs means Linear. */
+	source?: JobSource;
+	/** GitHub target metadata for account-wide jobs. */
+	github?: GitHubJobTarget;
 	issueId: string;
 	issueIdentifier: string;
 	model: string;
