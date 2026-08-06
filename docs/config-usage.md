@@ -227,7 +227,8 @@ Native provider (`id: native`) reads native config from:
 
 - Slash commands, rules, prompts, instructions, hooks, tools, extensions, extension modules, and settings use a project/user root only when the root directory exists and is non-empty.
 - Skills scan `<ancestor>/.ompk/skills` for each ancestor from the current working directory up to the repo root/home boundary, plus `~/.ompk/agent/skills`, without requiring the root `.ompk` directory itself to be non-empty.
-- `SYSTEM.md` and `AGENTS.md` read user-level files directly and use nearest-ancestor project `.ompk` lookup for project files, but the project `.ompk` directory must be non-empty. See [`docs/system-prompt-customization.md`](./system-prompt-customization.md) for the full `SYSTEM.md` / `APPEND_SYSTEM.md` contract (replace vs. append, templating).
+- `SYSTEM.md` reads the user-level file directly and uses nearest-ancestor project `.ompk` **directory** lookup (the project `.ompk` directory must be non-empty). See [`docs/system-prompt-customization.md`](./system-prompt-customization.md) for the full `SYSTEM.md` / `APPEND_SYSTEM.md` contract (replace vs. append, templating).
+- `AGENTS.md` and `RULES.md` read user-level files directly and use nearest-ancestor **per-file** lookup for project files: the walk stops at the first ancestor whose `.ompk/<file>` has non-empty content, so a nearer `.ompk/` without that file falls through to a farther ancestor.
 
 ### Scope-specific loading
 
@@ -244,7 +245,7 @@ Native provider (`id: native`) reads native config from:
 
 ### Nearest-project lookup nuance
 
-## For `SYSTEM.md` and `AGENTS.md`, native provider uses nearest-ancestor project `.ompk` directory search (walk-up) and still requires the project `.ompk` dir to be non-empty.
+## For `SYSTEM.md`, the native provider uses nearest-ancestor project `.ompk` directory search (walk-up) and still requires the project `.ompk` dir to be non-empty. For `AGENTS.md` / `RULES.md`, the walk-up is per file: it stops at the first ancestor whose `.ompk/` holds a non-empty copy of that specific file.
 
 ## 7) How major subsystems consume config
 

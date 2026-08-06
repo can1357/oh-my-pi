@@ -97,6 +97,26 @@ async function findNearestProjectConfigDir(
 	return null;
 }
 
+/**
+ * Find the nearest ancestor (walking cwd -> repoRoot) whose `.ompk/<filename>`
+ * has non-empty content. Unlike `findNearestProjectConfigDir`, the walk is
+ * file-specific: an ancestor `.ompk/` that lacks the requested file (or holds
+ * an empty copy) does not stop the walk — per the context-files docs, "the
+ * walk-up continues" until a usable file or the repo root. Used for AGENTS.md
+ * and RULES.md; SYSTEM.md keeps the dir-based contract (docs/config-usage.md).
+ */
+async function findNearestProjectFile(
+	ctx: LoadContext,
+	filename: string,
+): Promise<{ path: string; content: string; depth: number } | null> {
+	for (const ancestor of getAncestorDirs(ctx.cwd, ctx.repoRoot)) {
+		const filePath = path.join(ancestor.dir, PATHS.projectDir, filename);
+		const content = await readFile(filePath);
+		if (content) return { path: filePath, content, depth: ancestor.depth };
+	}
+	return null;
+}
+
 // MCP
 async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
 	const items: MCPServer[] = [];
@@ -243,6 +263,8 @@ async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemProm
 		});
 	}
 
+	// SYSTEM.md keeps the documented dir-based contract: nearest non-empty
+	// project `.ompk/` directory, no per-file fallback (docs/config-usage.md).
 	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
 	if (nearestProjectConfigDir) {
 		const projectPath = path.join(nearestProjectConfigDir.dir, "SYSTEM.md");
@@ -383,10 +405,9 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 	const userRule = await loadStickyRulesFile(userRulesFile, "user");
 	if (userRule) items.push(userRule);
 
-	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
-	if (nearestProjectConfigDir) {
-		const projectRulesFile = path.join(nearestProjectConfigDir.dir, "RULES.md");
-		const projectRule = await loadStickyRulesFile(projectRulesFile, "project");
+	const projectRulesFile = await findNearestProjectFile(ctx, "RULES.md");
+	if (projectRulesFile) {
+		const projectRule = await loadStickyRulesFile(projectRulesFile.path, "project");
 		if (projectRule) items.push(projectRule);
 	}
 
@@ -907,20 +928,15 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 		});
 	}
 
-	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
-	if (nearestProjectConfigDir) {
-		const projectPath = path.join(nearestProjectConfigDir.dir, "AGENTS.md");
-		const projectContent = await readFile(projectPath);
-		if (projectContent) {
-			items.push({
-				path: projectPath,
-				content: projectContent,
-				level: "project",
-				depth: nearestProjectConfigDir.depth,
-				_source: createSourceMeta(PROVIDER_ID, projectPath, "project"),
-			});
-			return { items, warnings };
-		}
+	const projectFile = await findNearestProjectFile(ctx, "AGENTS.md");
+	if (projectFile) {
+		items.push({
+			path: projectFile.path,
+			content: projectFile.content,
+			level: "project",
+			depth: projectFile.depth,
+			_source: createSourceMeta(PROVIDER_ID, projectFile.path, "project"),
+		});
 	}
 	return { items, warnings };
 }

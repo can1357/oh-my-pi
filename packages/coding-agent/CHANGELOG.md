@@ -14,7 +14,8 @@
 - Added `SqliteActivityLedgerReader` to `@pk-nerdsaver-ai/pi-activity-journal`: a read-only ledger view that opens the sqlite handle read-only and skips the `CREATE TABLE` bootstrap, so readers cannot take a write lock or contend with the live ingest daemon. Recall and the `activity` tool both use it.
 
 ### Changed
-
+- Reduced default system/context prompt overhead by removing duplicated workflow and delivery prose and moving package-specific rules into conditional `AGENTS.md` files; focused prompt tests cover tool/skill gating, deduplication, and block assembly.
+- Added stored-credential support to tool-prompt schema probes, including OpenAI Codex OAuth, and removed one schema-only `eval` parameter recap after a three-sample probe.
 - Activity Memory ingestion is now owned exclusively by the always-on `gopk-ingest` daemon. `AgentSession` no longer starts a second ingest host when `gopkClips.enabled` is on: two consumers raced to delete the same journal-handoff files and contended for the ledger's write lock, which could split clips across ledgers. `gopkClips.enabled` now gates in-session *reading* only.
 - Unified gopk-clips path resolution behind a single resolver (explicit override, then the shared `config.json`, then the agent dir), with `~` expansion and absolute resolution applied to both the capture root and the ledger path. Previously the daemon's `ingest.pid` lock could land in a cwd-relative `./~/` directory while its host resolved elsewhere.
 
@@ -24,6 +25,9 @@
 - Fixed context-file disable ids being machine-specific: they are now repo-root-relative (`context-file:project:./packages/app/AGENTS.md`), so a checked-in `disabledExtensions` entry survives a different checkout path, falling back to `~/`-relative and then absolute outside a repo. Legacy bare-basename ids still disable, and the extensions dashboard now shows the canonical id and clears legacy entries when an item is re-enabled.
 - Fixed hour-over-hour activity recall on days that are not 24 hours long: the day window is now derived from local midnight to the next local midnight, so DST transition days correctly span 23 or 25 hours instead of being truncated or overrun.
 - Fixed activity recall bucketing in half-hour-offset timezones (IST, NPT): buckets now start on real local hour marks rather than UTC hour boundaries labelled with the local hour, and are keyed by absolute instant so the repeated hour on a fall-back day stays two distinct buckets.
+- Fixed the native project walk-up for `AGENTS.md` and `RULES.md` to be per-file, matching the documented contract: a nearer non-empty `.ompk/` that lacks the requested file (or holds an empty copy) no longer blocks a farther ancestor's file — e.g. a package-level `.ompk/config.yml` no longer hides the repo root's `.ompk/AGENTS.md` and `.ompk/RULES.md`. `SYSTEM.md` keeps the documented directory-based lookup.
+- Fixed discovery walk-ups with non-canonical working directories: `loadCapability` now canonicalizes `cwd` and `home` (absolute, symlinks resolved, real on-disk casing) before deriving the repo root, so a relative, mixed-separator, differently-cased, or symlinked cwd no longer walks past the repo root — which could leak `.ompk` config from directories above the repository.
+- Fixed `calculateDepth` to use `path.relative` instead of raw separator counting, so context-file depths (and therefore per-depth shadowing and ordering) are correct for mixed-separator and non-normalized paths; `gemini` and `github` project files now report the depth of the ancestor holding the config directory, matching the documented "config subdirectories count as the same depth as that ancestor" rule.
 
 ### Removed
 

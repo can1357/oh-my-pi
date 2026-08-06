@@ -6,6 +6,7 @@
  * - Registering providers (where to find it)
  * - Loading items for a capability across all providers
  */
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getProjectDir, logger } from "@pk-nerdsaver-ai/pi-utils";
@@ -264,6 +265,22 @@ function filterProviders<T>(capability: Capability<T>, options: LoadOptions): Pr
 }
 
 /**
+ * Canonicalize a path for discovery walks: absolute, symlinks resolved, and
+ * (on Windows) real on-disk casing. Every `LoadContext` path compare is a
+ * string `===` against `path.dirname()` ancestors, so a relative, mixed-case,
+ * or symlinked cwd would otherwise never match `repoRoot`/`home` sentinels
+ * and the walk-up could run past the repo root.
+ */
+async function canonicalizePath(p: string): Promise<string> {
+	const resolved = path.resolve(p);
+	try {
+		return await fs.promises.realpath(resolved);
+	} catch {
+		return resolved;
+	}
+}
+
+/**
  * Load a capability by ID.
  */
 export async function loadCapability<T>(capabilityId: string, options: LoadOptions = {}): Promise<CapabilityResult<T>> {
@@ -272,8 +289,8 @@ export async function loadCapability<T>(capabilityId: string, options: LoadOptio
 		throw new Error(`Unknown capability: "${capabilityId}"`);
 	}
 
-	const cwd = options.cwd ?? getProjectDir();
-	const home = os.homedir();
+	const cwd = await canonicalizePath(options.cwd ?? getProjectDir());
+	const home = await canonicalizePath(os.homedir());
 	const repoRoot = await findRepoRoot(cwd);
 	const ctx: LoadContext = { cwd, home, repoRoot };
 	const providers = filterProviders(capability, options);

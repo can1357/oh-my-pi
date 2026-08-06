@@ -35,7 +35,7 @@ async function loadAgentsMd(ctx: LoadContext): Promise<LoadResult<ContextFile>> 
 
 			if (!baseName.startsWith(".")) {
 				const fileDir = path.dirname(candidate);
-				const calculatedDepth = calculateDepth(ctx.cwd, fileDir, path.sep);
+				const calculatedDepth = calculateDepth(ctx.cwd, fileDir);
 
 				items.push({
 					path: candidate,

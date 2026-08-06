@@ -185,7 +185,7 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 		if (!content) return null;
 		// filePath is <ancestor>/.agent(s)/AGENTS.md — go up past the config dir to the ancestor
 		const ancestorDir = path.dirname(path.dirname(filePath));
-		const depth = level === "project" ? calculateDepth(ctx.cwd, ancestorDir, path.sep) : undefined;
+		const depth = level === "project" ? calculateDepth(ctx.cwd, ancestorDir) : undefined;
 		return { path: filePath, content, level, depth, _source: createSourceMeta(PROVIDER_ID, filePath, level) };
 	};
 

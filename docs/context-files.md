@@ -28,8 +28,8 @@ The native provider is the recommended format for new projects. It reads from yo
 
 Two details matter:
 
-- **Walk-up to the repository root.** Discovery starts in the current working directory and climbs through each ancestor up to the repository root, stopping at the first ancestor that has a usable `.ompk/` directory. The *nearest* match wins; ancestors above it are not loaded as native context.
-- **The `.ompk/` directory must be non-empty.** An empty `.ompk/` directory is skipped during the walk-up, so the search continues to the next ancestor. An empty `AGENTS.md` or `RULES.md` file contributes nothing.
+- **Walk-up to the repository root.** Discovery starts in the current working directory and climbs through each ancestor up to the repository root, stopping at the first ancestor whose `.ompk/` holds a non-empty copy of the requested file. The *nearest* match wins; ancestors above it are not loaded as native context.
+- **The walk-up is per file.** An ancestor `.ompk/` that lacks the requested file — or holds an empty copy — does not stop the walk; the search continues to the next ancestor. `AGENTS.md` and `RULES.md` resolve independently, so a package-level `.ompk/` with only an `AGENTS.md` still falls through to the repo root's `RULES.md`.
 
 `~/.ompk/agent` is the user base. If `PI_CODING_AGENT_DIR` is set, it relocates that base, so the user files become `$PI_CODING_AGENT_DIR/AGENTS.md` and `$PI_CODING_AGENT_DIR/RULES.md`.
 
@@ -212,7 +212,7 @@ Remember that higher-precedence settings layers **replace** array settings rathe
 
 ### A file is not loaded
 
-- Native project context must live at `.ompk/AGENTS.md`, and the `.ompk/` directory must be non-empty; an empty `.ompk/` is skipped and the walk-up continues to the next ancestor.
+- Native project context must live at `.ompk/AGENTS.md` with non-empty content; an ancestor `.ompk/` without a usable `AGENTS.md` is skipped and the walk-up continues to the next ancestor.
 - A standalone `AGENTS.md` is handled by `agents-md`, not `native`.
 - `.claude/CLAUDE.md`, `.gemini/GEMINI.md`, and `.github/copilot-instructions.md` are read only from the current working directory's config directory — not from every ancestor.
 - `~/.codex/AGENTS.md` and `~/.config/opencode/AGENTS.md` are user-level only and have no project equivalent.

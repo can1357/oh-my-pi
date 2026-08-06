@@ -546,13 +546,21 @@ export async function loadFilesFromDir<T>(
 
 /**
  * Calculate depth of target directory relative to current working directory.
- * Depth is the number of directory levels from cwd to target.
+ * Depth is the number of directory levels from cwd to target:
  * - Positive depth: target is above cwd (parent/ancestor)
  * - Zero depth: target is cwd
- * - This uses path splitting to count directory levels
+ * - Negative depth: target is below cwd
+ * Uses `path.relative`, so mixed separators, relative inputs, trailing
+ * separators, and (on Windows) drive-letter/prefix casing are handled.
  */
-export function calculateDepth(cwd: string, targetDir: string, separator: string): number {
-	return cwd.split(separator).length - targetDir.split(separator).length;
+export function calculateDepth(cwd: string, targetDir: string): number {
+	const rel = path.relative(path.resolve(targetDir), path.resolve(cwd));
+	if (rel === "") return 0;
+	const parts = rel.split(path.sep);
+	// `..` segments only appear as a leading run in `path.relative` output:
+	// depth = (levels down from target to cwd) - (levels up from target).
+	const ups = parts.filter(part => part === "..").length;
+	return parts.length - 2 * ups;
 }
 
 interface ExtensionModuleManifest {

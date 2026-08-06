@@ -53,8 +53,9 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 	if (copilotInstructionsPath) {
 		const content = await readFile(copilotInstructionsPath);
 		if (content) {
-			const fileDir = path.dirname(copilotInstructionsPath);
-			const depth = calculateDepth(ctx.cwd, fileDir, path.sep);
+			// Depth of the ancestor holding `.github/`, not the config dir itself:
+			// config subdirs count as the same depth as their parent (see docs).
+			const depth = calculateDepth(ctx.cwd, path.dirname(path.dirname(copilotInstructionsPath)));
 
 			items.push({
 				path: copilotInstructionsPath,

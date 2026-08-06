@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import * as path from "node:path";
+import { calculateDepth } from "@pk-nerdsaver-ai/pi-coding-agent/discovery/helpers";
 import { parseFrontmatter } from "@pk-nerdsaver-ai/pi-utils";
 
 describe("parseFrontmatter", () => {
@@ -145,5 +147,41 @@ Body content`;
 			nestedField: { innerKey: "value" },
 		});
 		expect(result.body).toBe("Body content");
+	});
+});
+
+describe("calculateDepth", () => {
+	const repo = path.resolve(path.join("repo-root"));
+	const pkg = path.join(repo, "packages", "app");
+
+	test("zero for the cwd itself", () => {
+		expect(calculateDepth(pkg, pkg)).toBe(0);
+	});
+
+	test("positive for ancestors, counted per level", () => {
+		expect(calculateDepth(pkg, path.join(repo, "packages"))).toBe(1);
+		expect(calculateDepth(pkg, repo)).toBe(2);
+	});
+
+	test("negative for directories below the cwd", () => {
+		expect(calculateDepth(repo, pkg)).toBe(-2);
+	});
+
+	test("trailing separators do not change the result", () => {
+		expect(calculateDepth(pkg + path.sep, repo + path.sep)).toBe(2);
+	});
+
+	test("mixed separators match native-separator results", () => {
+		// Identity on POSIX (no backslashes to replace); on Windows this is the
+		// forward-slash spelling that previously produced garbage depths.
+		expect(calculateDepth(pkg.replaceAll("\\", "/"), repo)).toBe(2);
+		expect(calculateDepth(pkg, repo.replaceAll("\\", "/"))).toBe(2);
+	});
+
+	test("sibling directories net out ups and downs", () => {
+		const sibling = path.join(repo, "packages", "other", "deep");
+		// From pkg (…/packages/app) to sibling (…/packages/other/deep):
+		// old formula = segment-count difference = -1.
+		expect(calculateDepth(pkg, sibling)).toBe(-1);
 	});
 });

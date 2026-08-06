@@ -118,3 +118,31 @@ test("absent RULES.md does not produce a rule", async () => {
 
 	expect(rules.find(r => r.name === "RULES")).toBeUndefined();
 });
+
+// Regression: the walk-up must be file-specific. A nearer `.ompk/` that is
+// non-empty but lacks a usable RULES.md must not stop the walk — per docs,
+// "otherwise the walk-up continues" to the next ancestor.
+test("child .ompk without RULES.md falls through to parent RULES.md", async () => {
+	const subPkg = path.join(project, "packages", "app");
+	writeFile(path.join(subPkg, ".ompk", "config.yml"), "theme: dark\n");
+	writeFile(path.join(project, ".ompk", "RULES.md"), "# Root sticky rule\n");
+
+	const rules = await loadNativeRules({ cwd: subPkg, home, repoRoot: project });
+
+	const projectRule = rules.find(r => r._source.level === "project" && r.name === "RULES");
+	expect(projectRule).toBeDefined();
+	expect(projectRule?.path).toBe(path.join(project, ".ompk", "RULES.md"));
+});
+
+test("empty child RULES.md falls through to parent RULES.md", async () => {
+	const subPkg = path.join(project, "packages", "app");
+	writeFile(path.join(subPkg, ".ompk", "RULES.md"), "");
+	writeFile(path.join(project, ".ompk", "RULES.md"), "# Root sticky rule\n");
+
+	const rules = await loadNativeRules({ cwd: subPkg, home, repoRoot: project });
+
+	const projectRule = rules.find(r => r._source.level === "project" && r.name === "RULES");
+	expect(projectRule).toBeDefined();
+	expect(projectRule?.path).toBe(path.join(project, ".ompk", "RULES.md"));
+	expect(projectRule?.content).toContain("Root sticky rule");
+});

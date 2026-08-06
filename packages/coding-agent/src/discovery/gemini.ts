@@ -146,7 +146,9 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 		const content = await readFile(projectGeminiMd);
 		if (content) {
 			const projectBase = getProjectPath(ctx, "gemini", "");
-			const depth = projectBase ? calculateDepth(ctx.cwd, projectBase, path.sep) : 0;
+			// Depth of the ancestor holding `.gemini/`, not the config dir itself:
+			// config subdirs count as the same depth as their parent (see docs).
+			const depth = projectBase ? calculateDepth(ctx.cwd, path.dirname(projectBase)) : 0;
 
 			items.push({
 				path: projectGeminiMd,

@@ -147,7 +147,7 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 	const projectClaudeMd = path.join(projectBase, "CLAUDE.md");
 	const projectContent = await readFile(projectClaudeMd);
 	if (projectContent !== null) {
-		const depth = calculateDepth(ctx.cwd, path.dirname(projectBase), path.sep);
+		const depth = calculateDepth(ctx.cwd, path.dirname(projectBase));
 		items.push({
 			path: projectClaudeMd,
 			content: projectContent,

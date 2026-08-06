@@ -389,7 +389,7 @@ describe("agents provider project-level discovery", () => {
 				const content = await readFile(p);
 				if (!content) continue;
 				const ancestorDir = path.dirname(path.dirname(p));
-				const depth = calculateDepth(ctx.cwd, ancestorDir, path.sep);
+				const depth = calculateDepth(ctx.cwd, ancestorDir);
 				items.push({ content, depth });
 			}
 
