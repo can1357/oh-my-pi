@@ -59,6 +59,7 @@ the CLI for `omp://docs` and `/help <question>`.
 - [Task agent discovery](task-agent-discovery.md)
 - [Task contract orchestration](task-contract-orchestration.md)
 - [Multi-agent fork collaboration](multi-agent-fork-collaboration.md)
+- [Prime Agent control-plane adaptation](prime-agent-control-plane-adaptation.md)
 - [Environments cloud](environments-cloud.md)
 - [Fork boundaries](fork-boundaries.md)
 
