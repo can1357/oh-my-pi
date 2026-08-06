@@ -32,8 +32,8 @@ export const cfgSettingsHotReload = register({
 	type: "boolean",
 	default: false,
 	ui: {
-		tab: "general",
-		group: "Settings",
+		tab: "interaction",
+		group: "Startup & Updates",
 		label: "Auto-reload config",
 		description: "Re-read config.yml before the next turn or at the end of the current one",
 	},
