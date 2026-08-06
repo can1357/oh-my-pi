@@ -5,12 +5,16 @@ name: ompk mention agent
 # comment, or review body (or assign an issue to it) and the OMPK coding
 # agent picks the task up, works on a sanctioned branch, and replies with a
 # verified report. scripts/ompk-mention-agent.ts is the precise gate + runner
-# (GitHub-compatible mention matching, trust checks, fork-PR credential
-# stripping, and the M2 assignment-verification gate); the job-level `if` is
+# (GitHub-compatible mention matching, trust checks, fork-PR refusal before
+# any checkout, and the M2 assignment-verification gate); the job-level `if` is
 # only a cheap prefilter so unrelated events never spin up a runner.
 
 on:
   issues:
+    # `assigned` fires the driver only when the assignee login equals the
+    # handle — that path (and native agents-pane presence) requires a REAL
+    # GitHub user / App bot with that login that can be assigned issues.
+    # Plain-text `@ompk` mentions work regardless of whether the login exists.
     types: [opened, assigned]
   issue_comment:
     types: [created]
@@ -50,13 +54,13 @@ jobs:
     if: >-
       (!github.event.pull_request ||
        github.event.pull_request.head.repo.full_name == github.repository) &&
-      (contains(github.event.comment.body, '@ompk') ||
-       contains(github.event.review.body, '@ompk') ||
-       contains(github.event.issue.body, '@ompk') ||
-       contains(github.event.issue.title, '@ompk') ||
-       contains(github.event.pull_request.body, '@ompk') ||
-       contains(github.event.pull_request.title, '@ompk') ||
-       github.event.assignee.login == 'ompk')
+      (contains(github.event.comment.body, format('@{0}', vars.OMPK_MENTION_HANDLE || 'ompk')) ||
+       contains(github.event.review.body, format('@{0}', vars.OMPK_MENTION_HANDLE || 'ompk')) ||
+       contains(github.event.issue.body, format('@{0}', vars.OMPK_MENTION_HANDLE || 'ompk')) ||
+       contains(github.event.issue.title, format('@{0}', vars.OMPK_MENTION_HANDLE || 'ompk')) ||
+       contains(github.event.pull_request.body, format('@{0}', vars.OMPK_MENTION_HANDLE || 'ompk')) ||
+       contains(github.event.pull_request.title, format('@{0}', vars.OMPK_MENTION_HANDLE || 'ompk')) ||
+       github.event.assignee.login == (vars.OMPK_MENTION_HANDLE || 'ompk'))
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -78,7 +82,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OMPK_MENTION_HANDLE: ompk
+          # One knob for the whole pipeline: set the repo/org variable
+          # OMPK_MENTION_HANDLE to rename the agent (must match the prefilter
+          # above, which reads the same variable).
+          OMPK_MENTION_HANDLE: ${{ vars.OMPK_MENTION_HANDLE || 'ompk' }}
           # Optional model override (repo/org variable), e.g. a cheaper model
           # for mention traffic. Empty → omp's default model resolution.
           OMPK_MENTION_MODEL: ${{ vars.OMPK_MENTION_MODEL }}

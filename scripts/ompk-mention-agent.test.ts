@@ -22,8 +22,10 @@ import {
 	hasMention,
 	isTrustedAssociation,
 	isTrustedPermission,
+	type MentionDeps,
 	type MentionTrigger,
 	parseTrigger,
+	runMentionAgent,
 	shQuote,
 	stripCodeSegments,
 	stripMention,
@@ -567,7 +569,12 @@ describe("workflow event surface", () => {
 			["pull_request", "[opened]"],
 		];
 		for (const [event, actions] of surfaces) {
-			expect(workflow).toContain(`  ${event}:\n    types: ${actions}`);
+			// Comment lines may sit between the event key and its types list.
+			const pattern = new RegExp(
+				`^  ${event}:\\n(?:    #[^\\n]*\\n)*    types: ${actions.replace(/[[\]]/g, "\\$&")}$`,
+				"m",
+			);
+			expect(workflow).toMatch(pattern);
 		}
 		// The cheap prefilter must cover every body/title field the driver
 		// inspects, or mentions on that surface never reach the runner.
@@ -579,9 +586,13 @@ describe("workflow event surface", () => {
 			"github.event.pull_request.body",
 			"github.event.pull_request.title",
 		]) {
-			expect(workflow).toContain(`contains(${field}, '@ompk')`);
+			// Handle is parameterized in ONE place: the repo/org variable,
+			// falling back to 'ompk', so the prefilter and the driver's
+			// OMPK_MENTION_HANDLE env can never disagree.
+			expect(workflow).toContain(`contains(${field}, format('@{0}', vars.OMPK_MENTION_HANDLE || 'ompk'))`);
 		}
-		expect(workflow).toContain("github.event.assignee.login == 'ompk'");
+		expect(workflow).toContain("github.event.assignee.login == (vars.OMPK_MENTION_HANDLE || 'ompk')");
+		expect(workflow).toContain(`OMPK_MENTION_HANDLE: \${{ vars.OMPK_MENTION_HANDLE || 'ompk' }}`);
 		// Fork-originated pull_request/review runs get no secrets and a
 		// downgraded token; the workflow must skip them at the job gate so
 		// the driver never runs (or half-runs) without being able to reply.
@@ -589,35 +600,37 @@ describe("workflow event surface", () => {
 	});
 });
 
+// --- shared real-git fixture -------------------------------------------------
+
+function git(cwd: string, ...args: string[]): string {
+	const proc = Bun.spawnSync(
+		["git", "-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", ...args],
+		{ cwd },
+	);
+	if (!proc.success) throw new Error(`git ${args.join(" ")}: ${proc.stderr.toString()}`);
+	return proc.stdout.toString().trim();
+}
+
+// Bare origin plus two clones, so branch-resume paths can be exercised from
+// a machine that has never fetched the work branch.
+async function makeFixture(): Promise<{ root: string; origin: string; cloneA: string; cloneB: string }> {
+	const { mkdtemp } = await import("node:fs/promises");
+	const { tmpdir } = await import("node:os");
+	const root = await mkdtemp(path.join(tmpdir(), "ompk-mention-git-"));
+	const origin = path.join(root, "origin.git");
+	const cloneA = path.join(root, "clone-a");
+	const cloneB = path.join(root, "clone-b");
+	git(root, "init", "--bare", "-b", "main", origin);
+	git(root, "clone", origin, cloneA);
+	await Bun.write(path.join(cloneA, "readme.md"), "hello\n");
+	git(cloneA, "add", "readme.md");
+	git(cloneA, "commit", "-m", "initial");
+	git(cloneA, "push", "-u", "origin", "main");
+	git(root, "clone", origin, cloneB);
+	return { root, origin, cloneA, cloneB };
+}
+
 describe("checkoutIssueBranch (real git)", () => {
-	// Integration fixture: a bare origin plus two clones, so the resume path
-	// can be exercised from a machine that has never fetched the work branch.
-	function git(cwd: string, ...args: string[]): string {
-		const proc = Bun.spawnSync(
-			["git", "-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", ...args],
-			{ cwd },
-		);
-		if (!proc.success) throw new Error(`git ${args.join(" ")}: ${proc.stderr.toString()}`);
-		return proc.stdout.toString().trim();
-	}
-
-	async function makeFixture(): Promise<{ origin: string; cloneA: string; cloneB: string }> {
-		const { mkdtemp } = await import("node:fs/promises");
-		const { tmpdir } = await import("node:os");
-		const root = await mkdtemp(path.join(tmpdir(), "ompk-mention-git-"));
-		const origin = path.join(root, "origin.git");
-		const cloneA = path.join(root, "clone-a");
-		const cloneB = path.join(root, "clone-b");
-		git(root, "init", "--bare", "-b", "main", origin);
-		git(root, "clone", origin, cloneA);
-		await Bun.write(path.join(cloneA, "readme.md"), "hello\n");
-		git(cloneA, "add", "readme.md");
-		git(cloneA, "commit", "-m", "initial");
-		git(cloneA, "push", "-u", "origin", "main");
-		git(root, "clone", origin, cloneB);
-		return { origin, cloneA, cloneB };
-	}
-
 	it("creates a fresh branch from HEAD when origin has none", async () => {
 		const { cloneA } = await makeFixture();
 		const baseSha = git(cloneA, "rev-parse", "HEAD");
@@ -646,5 +659,152 @@ describe("checkoutIssueBranch (real git)", () => {
 		// on run 1 instead of producing a non-fast-forward push.
 		expect(git(cloneB, "rev-parse", "HEAD")).toBe(pushedTip);
 		expect(git(cloneB, "rev-parse", "HEAD")).not.toBe(git(cloneB, "rev-parse", "origin/main"));
+	});
+});
+
+describe("runMentionAgent trigger path (real git + verifier, fake gh/agent)", () => {
+	// End-to-end through runMentionAgent(): authorization, reaction, branch
+	// checkout, contract authoring, result extraction, REAL verifier
+	// re-execution in the fixture repo, and the posted reply. Only the two
+	// external seams (gh network, LLM process) are deterministic fakes.
+	const hasBash = Bun.which("bash") !== null;
+
+	interface Harness {
+		deps: MentionDeps;
+		ghCalls: string[][];
+		posted: string[];
+	}
+
+	async function makeHarness(repoDir: string, runAgent: MentionDeps["runAgent"]): Promise<Harness> {
+		const { mkdtemp } = await import("node:fs/promises");
+		const { tmpdir } = await import("node:os");
+		const tempDir = await mkdtemp(path.join(tmpdir(), "ompk-mention-tmp-"));
+		const ghCalls: string[][] = [];
+		const posted: string[] = [];
+		const deps: MentionDeps = {
+			repoDir,
+			tempDir,
+			handle: HANDLE,
+			runId: "itest-1",
+			runUrl: "https://ci.example/run/1",
+			gh: async args => {
+				ghCalls.push(args);
+				const bodyArg = args.find(a => a.startsWith("body=@"));
+				if (bodyArg) posted.push(await Bun.file(bodyArg.slice("body=@".length)).text());
+				return "";
+			},
+			runAgent,
+			log: () => {},
+		};
+		return { deps, ghCalls, posted };
+	}
+
+	/** Stub agent helper: parse the digest-bound contract out of the prompt. */
+	function contractFromPrompt(prompt: string): AssignmentContractV1 {
+		const block = prompt.match(/```json\n([\s\S]*?)\n```/);
+		if (!block) throw new Error("prompt carries no contract block");
+		return JSON.parse(block[1]) as AssignmentContractV1;
+	}
+
+	function successResult(contract: AssignmentContractV1, changedFiles: string[]): string {
+		return JSON.stringify({
+			version: "assignment-result/v1",
+			contractId: contract.id,
+			revision: contract.revision,
+			digest: contract.digest,
+			status: "success",
+			changedFiles,
+			evidence: contract.acceptance.map(c => ({
+				criterionId: c.id,
+				passed: true,
+				summary: `checked ${c.id}: state inspected in the workspace after finishing`,
+			})),
+			summary: "Explained the widget failure root cause; no code change was required.",
+		});
+	}
+
+	it.skipIf(!hasBash)("verifies a truthful answer-only run end to end", async () => {
+		const { cloneA } = await makeFixture();
+		const { deps, ghCalls, posted } = await makeHarness(cloneA, async prompt => {
+			const contract = contractFromPrompt(prompt);
+			return {
+				exitCode: 0,
+				stdout: `The widget breaks because the cache is stale.\n\n\`\`\`json\n${successResult(contract, [])}\n\`\`\`\n`,
+			};
+		});
+		const outcome = await runMentionAgent(
+			"issue_comment",
+			issueCommentPayload({ body: `@${HANDLE} why does the widget break?` }),
+			deps,
+		);
+		expect(outcome.outcome).toBe("verified");
+		// Real side effects happened: 👀 reaction + posted reply.
+		expect(ghCalls.some(args => args.join(" ").includes("reactions"))).toBe(true);
+		expect(posted).toHaveLength(1);
+		expect(posted[0]).toContain("### `@ompk`");
+		expect(posted[0]).toContain("cache is stale");
+		expect(posted[0]).not.toContain("run failed");
+		// The work branch was really checked out in the fixture repo.
+		expect(git(cloneA, "rev-parse", "--abbrev-ref", "HEAD")).toBe("ompk/issue-42");
+	});
+
+	it.skipIf(!hasBash)("fails the run when the agent omits the result block", async () => {
+		const { cloneA } = await makeFixture();
+		const { deps, posted } = await makeHarness(cloneA, async () => ({
+			exitCode: 0,
+			stdout: "I did lots of great work, trust me.",
+		}));
+		const outcome = await runMentionAgent("issue_comment", issueCommentPayload({ body: `@${HANDLE} fix it` }), deps);
+		expect(outcome.outcome).toBe("failed");
+		expect(posted[0]).toContain("run failed");
+		expect(posted[0]).toContain("mandatory assignment-result block");
+	});
+
+	it.skipIf(!hasBash)("rejects a fabricated success over unpushed commits via the real verifier", async () => {
+		const { cloneA } = await makeFixture();
+		const { deps, posted } = await makeHarness(cloneA, async prompt => {
+			const contract = contractFromPrompt(prompt);
+			// The "agent" commits work on the branch but never pushes, then
+			// claims success — work-delivered must catch it with real git.
+			await Bun.write(path.join(cloneA, "hack.md"), "unpushed work\n");
+			git(cloneA, "add", "hack.md");
+			git(cloneA, "commit", "-m", "unpushed");
+			return {
+				exitCode: 0,
+				stdout: `Fixed it and pushed everything.\n\n\`\`\`json\n${successResult(contract, ["hack.md"])}\n\`\`\`\n`,
+			};
+		});
+		const outcome = await runMentionAgent(
+			"issue_comment",
+			issueCommentPayload({ body: `@${HANDLE} fix the widget` }),
+			deps,
+		);
+		expect(outcome.outcome).toBe("failed");
+		expect(posted[0]).toContain("run failed");
+		expect(posted[0]).toContain("did not pass independent verification");
+	});
+
+	it("refuses fork PRs before any checkout or agent run", async () => {
+		const { cloneA } = await makeFixture();
+		const { deps, posted } = await makeHarness(cloneA, async () => {
+			throw new Error("agent must never run for fork PRs");
+		});
+		const payload: EventPayload = {
+			action: "submitted",
+			repository: { full_name: "octo/widget" },
+			pull_request: { number: 9, head: { ref: "fix", repo: { full_name: "fork/widget" } } },
+			review: {
+				id: 1,
+				body: `@${HANDLE} please finish this`,
+				user: { login: "carol" },
+				author_association: "OWNER",
+			},
+		};
+		const outcome = await runMentionAgent("pull_request_review", payload, deps);
+		expect(outcome.outcome).toBe("refused-fork");
+		expect(posted).toHaveLength(1);
+		expect(posted[0]).toContain("fork PRs");
+		// No checkout happened: the fixture repo is untouched on main.
+		expect(git(cloneA, "rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
 	});
 });

@@ -631,7 +631,7 @@ export function buildComment(opts: {
 }
 
 // ---------------------------------------------------------------------------
-// Runner (side effects live below this line only)
+// Runner (side effects live below this line)
 // ---------------------------------------------------------------------------
 
 async function run(cmd: string[], opts?: { allowFailure?: boolean; cwd?: string }): Promise<string> {
@@ -647,32 +647,42 @@ async function run(cmd: string[], opts?: { allowFailure?: boolean; cwd?: string 
 	return stdout;
 }
 
-/** Parent-authored acceptance commands run through a plain shell. */
-const verifierRunners: AssignmentVerifierRunners = {
-	runCommand: async command => {
-		const proc = Bun.spawn(["bash", "-c", command], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-		const [stdout, stderr, exitCode] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
-			proc.exited,
-		]);
-		return { exitCode, timedOut: false, stdout, stderr };
-	},
-};
+export interface AgentRunResult {
+	exitCode: number;
+	stdout: string;
+}
 
 /**
- * Authoritative changed-file list: tracked changes (committed + staged +
- * unstaged) relative to the pre-run baseline SHA, plus untracked files.
+ * External seams for `runMentionAgent`. Only the two genuinely external
+ * dependencies are injectable — the GitHub CLI (network) and the agent
+ * process (LLM). Git operations and the verifier's parent-authored shell
+ * checks always run for real against `repoDir`: an integration test with
+ * fake `gh`/agent still exercises real branch checkout, baseline diffing,
+ * and criterion re-execution.
  */
-async function collectChangedFiles(baselineSha: string): Promise<string[]> {
-	const tracked = await run(["git", "diff", "--name-only", baselineSha]);
-	const untracked = await run(["git", "ls-files", "--others", "--exclude-standard"]);
-	const files = new Set<string>();
-	for (const line of `${tracked}\n${untracked}`.split("\n")) {
-		const trimmed = line.trim();
-		if (trimmed) files.add(trimmed);
-	}
-	return [...files].sort();
+export interface MentionDeps {
+	/** Workspace root: git commands and verifier checks execute here. */
+	repoDir: string;
+	/** Scratch dir for the report/comment files (RUNNER_TEMP in CI). */
+	tempDir: string;
+	/** GitHub CLI seam: `gh(args)` → stdout. */
+	gh(args: string[], opts?: { allowFailure?: boolean }): Promise<string>;
+	/** Agent process seam: run omp with the assembled prompt. */
+	runAgent(prompt: string): Promise<AgentRunResult>;
+	/** Mention handle (default "ompk"). */
+	handle: string;
+	/** Unique run discriminator (GITHUB_RUN_ID). */
+	runId: string;
+	/** Link to this workflow run, when known. */
+	runUrl?: string;
+	log(line: string): void;
+}
+
+export interface MentionOutcome {
+	outcome: "skip" | "unauthorized" | "refused-fork" | "verified" | "failed";
+	reason?: string;
+	/** The comment body posted to GitHub, when one was posted. */
+	comment?: string;
 }
 
 /**
@@ -703,34 +713,52 @@ export async function checkoutIssueBranch(branch: string, cwd?: string): Promise
 	return "created";
 }
 
-async function postComment(repo: string, number: number, body: string): Promise<void> {
-	const file = `${process.env.RUNNER_TEMP ?? "/tmp"}/ompk-mention-comment.md`;
-	await Bun.write(file, body);
-	await run(["gh", "api", "-X", "POST", `repos/${repo}/issues/${number}/comments`, "-F", `body=@${file}`]);
+/**
+ * Authoritative changed-file list: tracked changes (committed + staged +
+ * unstaged) relative to the pre-run baseline SHA, plus untracked files.
+ */
+async function collectChangedFiles(baselineSha: string, cwd: string): Promise<string[]> {
+	const tracked = await run(["git", "diff", "--name-only", baselineSha], { cwd });
+	const untracked = await run(["git", "ls-files", "--others", "--exclude-standard"], { cwd });
+	const files = new Set<string>();
+	for (const line of `${tracked}\n${untracked}`.split("\n")) {
+		const trimmed = line.trim();
+		if (trimmed) files.add(trimmed);
+	}
+	return [...files].sort();
 }
 
-async function main(): Promise<void> {
-	const eventName = process.env.GITHUB_EVENT_NAME;
-	const eventPath = process.env.GITHUB_EVENT_PATH;
-	if (!eventName || !eventPath) {
-		throw new Error("GITHUB_EVENT_NAME / GITHUB_EVENT_PATH are required (run this from GitHub Actions)");
+/**
+ * The full trigger path, from webhook payload to posted reply. Extracted
+ * from `main()` so an integration test can drive it with a fake `gh`/agent
+ * while git + verifier work stays real (see MentionDeps).
+ */
+export async function runMentionAgent(
+	eventName: string,
+	payload: EventPayload,
+	deps: MentionDeps,
+): Promise<MentionOutcome> {
+	const { handle, repoDir, log } = deps;
+
+	async function postComment(repo: string, number: number, body: string): Promise<void> {
+		const file = `${deps.tempDir}/ompk-mention-comment.md`;
+		await Bun.write(file, body);
+		await deps.gh(["api", "-X", "POST", `repos/${repo}/issues/${number}/comments`, "-F", `body=@${file}`]);
 	}
-	const handle = process.env.OMPK_MENTION_HANDLE || DEFAULT_HANDLE;
-	const payload = (await Bun.file(eventPath).json()) as EventPayload;
 
 	const result = parseTrigger(eventName, payload, handle);
 	if (!result.ok) {
-		console.log(`skip: ${result.reason}`);
-		return;
+		log(`skip: ${result.reason}`);
+		return { outcome: "skip", reason: result.reason };
 	}
 	const trigger = result.trigger;
-	console.log(`trigger: ${trigger.event} on ${trigger.repo}#${trigger.number} by @${trigger.actor}`);
+	log(`trigger: ${trigger.event} on ${trigger.repo}#${trigger.number} by @${trigger.actor}`);
 
 	// --- authorization ------------------------------------------------------
 	let authorized = isTrustedAssociation(trigger.association);
 	if (!authorized && trigger.actor) {
-		const out = await run(
-			["gh", "api", `repos/${trigger.repo}/collaborators/${trigger.actor}/permission`, "--jq", ".permission"],
+		const out = await deps.gh(
+			["api", `repos/${trigger.repo}/collaborators/${trigger.actor}/permission`, "--jq", ".permission"],
 			{ allowFailure: true },
 		);
 		authorized = isTrustedPermission(out.trim());
@@ -738,8 +766,8 @@ async function main(): Promise<void> {
 	if (!authorized) {
 		// Silent skip: replying to untrusted mentions would let anyone spend
 		// CI minutes / tokens by mentioning the handle.
-		console.log(`skip: @${trigger.actor} (association=${trigger.association ?? "none"}) is not authorized`);
-		return;
+		log(`skip: @${trigger.actor} (association=${trigger.association ?? "none"}) is not authorized`);
+		return { outcome: "unauthorized", reason: trigger.actor };
 	}
 
 	// --- fork refusal (BEFORE any checkout) ----------------------------------
@@ -749,8 +777,7 @@ async function main(): Promise<void> {
 	if (trigger.kind === "pr") {
 		let crossRepo = trigger.crossRepo;
 		if (crossRepo === undefined) {
-			const out = await run([
-				"gh",
+			const out = await deps.gh([
 				"pr",
 				"view",
 				String(trigger.number),
@@ -762,19 +789,16 @@ async function main(): Promise<void> {
 			crossRepo = out.trim() === "true";
 		}
 		if (crossRepo) {
-			console.log("skip: cross-repo (fork) PR — refusing to execute fork-controlled source");
-			await postComment(
-				trigger.repo,
-				trigger.number,
-				`### \`@${handle}\`\n\nI can't work on fork PRs: running the agent would execute the fork's code with repository secrets. Push this branch to the base repository (or let a maintainer recreate it there) and mention me again.`,
-			);
-			return;
+			log("skip: cross-repo (fork) PR — refusing to execute fork-controlled source");
+			const refusal = `### \`@${handle}\`\n\nI can't work on fork PRs: running the agent would execute the fork's code with repository secrets. Push this branch to the base repository (or let a maintainer recreate it there) and mention me again.`;
+			await postComment(trigger.repo, trigger.number, refusal);
+			return { outcome: "refused-fork", comment: refusal };
 		}
 	}
 
 	// --- acknowledge --------------------------------------------------------
 	if (trigger.reactionPath) {
-		await run(["gh", "api", "-X", "POST", trigger.reactionPath, "-f", "content=eyes"], { allowFailure: true });
+		await deps.gh(["api", "-X", "POST", trigger.reactionPath, "-f", "content=eyes"], { allowFailure: true });
 	}
 
 	// --- workspace + delivery semantics --------------------------------------
@@ -783,77 +807,116 @@ async function main(): Promise<void> {
 	let workBranch: string | undefined;
 	let deliveryBranch: string;
 	if (trigger.kind === "pr") {
-		await run(["gh", "pr", "checkout", String(trigger.number)]);
-		deliveryBranch = (await run(["git", "rev-parse", "--abbrev-ref", "HEAD"])).trim();
+		await deps.gh(["pr", "checkout", String(trigger.number)]);
+		deliveryBranch = (await run(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoDir })).trim();
 	} else {
 		workBranch = `${handle}/issue-${trigger.number}`;
 		deliveryBranch = workBranch;
 		// Follow-up mentions continue from the previously pushed tip.
-		const mode = await checkoutIssueBranch(workBranch);
-		console.log(`work branch ${workBranch}: ${mode}`);
+		const mode = await checkoutIssueBranch(workBranch, repoDir);
+		log(`work branch ${workBranch}: ${mode}`);
 	}
 
 	// Baseline AFTER checkout/branch setup, BEFORE the agent runs: the
 	// authoritative changedFiles diff is anchored here.
-	const baselineSha = (await run(["git", "rev-parse", "HEAD"])).trim();
+	const baselineSha = (await run(["git", "rev-parse", "HEAD"], { cwd: repoDir })).trim();
 
 	// --- run the agent ------------------------------------------------------
-	const runUrl =
-		process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY && process.env.GITHUB_RUN_ID
-			? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
-			: undefined;
-	const reportFile = `${process.env.RUNNER_TEMP ?? "/tmp"}/ompk-mention-report.md`;
+	const reportFile = `${deps.tempDir}/ompk-mention-report.md`;
 	const contract = buildAssignmentContract(trigger, {
-		runId: process.env.GITHUB_RUN_ID ?? String(Date.now()),
+		runId: deps.runId,
 		baselineSha,
 		deliveryBranch,
 		reportFile,
 	});
-	const prompt = buildPrompt(trigger, { handle, runUrl, workBranch, contract, baselineSha });
-	const model = process.env.OMPK_MENTION_MODEL;
-	const cmd = [
-		"bun",
-		"packages/coding-agent/src/cli.ts",
-		"--print",
-		"--yolo",
-		"--no-session",
-		...(model ? ["--model", model] : []),
-		prompt,
-	];
-	console.log(`running: ${cmd.slice(0, -1).join(" ")} <prompt>`);
-	const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "inherit" });
-	const rawReport = await new Response(proc.stdout).text();
-	const exitCode = await proc.exited;
+	const prompt = buildPrompt(trigger, { handle, runUrl: deps.runUrl, workBranch, contract, baselineSha });
+	const agentRun = await deps.runAgent(prompt);
 
 	// --- verify --------------------------------------------------------------
 	// Success requires the digest-bound result block to pass independent
 	// verification: parent-authored checks re-run by the driver, and the
 	// child's changedFiles reconciled against the baseline diff. exitCode
 	// alone NEVER produces a success outcome.
-	const { result: assignmentResult, rest: report } = extractAssignmentResult(rawReport);
+	const { result: assignmentResult, rest: report } = extractAssignmentResult(agentRun.stdout);
 	// The public-report acceptance criterion reads this file; write it before
 	// the verifier runs the parent-authored checks.
 	await Bun.write(reportFile, report);
 	let verification: VerificationSummary;
-	if (exitCode !== 0) {
-		verification = { verified: false, reasons: [`agent process exited ${exitCode}`] };
+	if (agentRun.exitCode !== 0) {
+		verification = { verified: false, reasons: [`agent process exited ${agentRun.exitCode}`] };
 	} else if (!assignmentResult) {
 		verification = { verified: false, reasons: ["agent did not emit the mandatory assignment-result block"] };
 	} else {
 		const outcome = await verifyAssignmentResult({
 			contract,
 			result: assignmentResult,
-			runners: verifierRunners,
-			actualChangedFiles: await collectChangedFiles(baselineSha),
+			// Parent-authored acceptance commands run through a plain shell
+			// in the workspace — always real, never injected.
+			runners: {
+				runCommand: async command => {
+					const proc = Bun.spawn(["bash", "-c", command], {
+						stdin: "ignore",
+						stdout: "pipe",
+						stderr: "pipe",
+						cwd: repoDir,
+					});
+					const [stdout, stderr, exitCode] = await Promise.all([
+						new Response(proc.stdout).text(),
+						new Response(proc.stderr).text(),
+						proc.exited,
+					]);
+					return { exitCode, timedOut: false, stdout, stderr };
+				},
+			} satisfies AssignmentVerifierRunners,
+			actualChangedFiles: await collectChangedFiles(baselineSha, repoDir),
 		});
 		verification = { verified: outcome.verified, reasons: outcome.reasons };
 	}
 	const ok = verification.verified;
-	console.log(`verification: ${ok ? "verified" : `REJECTED — ${verification.reasons.join("; ")}`}`);
+	log(`verification: ${ok ? "verified" : `REJECTED — ${verification.reasons.join("; ")}`}`);
 
 	// --- reply --------------------------------------------------------------
-	await postComment(trigger.repo, trigger.number, buildComment({ handle, ok, report, runUrl, verification }));
-	if (!ok) {
+	const comment = buildComment({ handle, ok, report, runUrl: deps.runUrl, verification });
+	await postComment(trigger.repo, trigger.number, comment);
+	return { outcome: ok ? "verified" : "failed", comment };
+}
+
+async function main(): Promise<void> {
+	const eventName = process.env.GITHUB_EVENT_NAME;
+	const eventPath = process.env.GITHUB_EVENT_PATH;
+	if (!eventName || !eventPath) {
+		throw new Error("GITHUB_EVENT_NAME / GITHUB_EVENT_PATH are required (run this from GitHub Actions)");
+	}
+	const payload = (await Bun.file(eventPath).json()) as EventPayload;
+	const model = process.env.OMPK_MENTION_MODEL;
+	const outcome = await runMentionAgent(eventName, payload, {
+		repoDir: process.cwd(),
+		tempDir: process.env.RUNNER_TEMP ?? "/tmp",
+		handle: process.env.OMPK_MENTION_HANDLE || DEFAULT_HANDLE,
+		runId: process.env.GITHUB_RUN_ID ?? String(Date.now()),
+		runUrl:
+			process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY && process.env.GITHUB_RUN_ID
+				? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+				: undefined,
+		gh: (args, opts) => run(["gh", ...args], opts),
+		runAgent: async prompt => {
+			const cmd = [
+				"bun",
+				"packages/coding-agent/src/cli.ts",
+				"--print",
+				"--yolo",
+				"--no-session",
+				...(model ? ["--model", model] : []),
+				prompt,
+			];
+			console.log(`running: ${cmd.slice(0, -1).join(" ")} <prompt>`);
+			const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "inherit" });
+			const stdout = await new Response(proc.stdout).text();
+			return { exitCode: await proc.exited, stdout };
+		},
+		log: line => console.log(line),
+	});
+	if (outcome.outcome === "failed") {
 		process.exitCode = 1;
 	}
 }
