@@ -236,6 +236,7 @@ import {
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
+import { restoreTmuxWindowName, setTmuxWindowName, setTmuxWindowNameEnabled } from "../utils/tmux-session";
 import {
 	aggregateVibeWorkerTokensPerSecond,
 	type VibeOwnerScope,
@@ -401,6 +402,7 @@ import {
 	cfgTuiCompleteScrollback,
 	cfgTuiTextSizing,
 	cfgTuiTight,
+	cfgTuiTmuxWindowName,
 	cfgTuiTitleSpinner,
 	cfgTuiTitleState,
 	cfgTuiVimMode,
@@ -2459,14 +2461,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			file: () => this.sessionManager.getSessionFile(),
 			cwd: () => this.sessionManager.getCwd(),
 		});
+		setTmuxWindowNameEnabled(cfgTuiTmuxWindowName.get(this.settings));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		setTmuxWindowName(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
 		// #focusController exists, which updateEditorBorderColor dereferences.
 		this.#syncVimStatus(this.editor);
 		// Single side-effect point for title changes: every setSessionName caller
 		// (first-input titling, /rename, extension renames, plan seeding, replan
-		// refresh) gets the terminal title + accent updates from here. Registered
+		// refresh) gets the terminal title, tmux window name, and accent updates
+		// from here. Registered
 		// before initHooksAndCustomTools/#reconcileModeFromSession/#enterPlanMode —
 		// all of which can reach setSessionName during init.
 		this.#eventBusUnsubscribers.push(
@@ -2482,6 +2487,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.sessionManager.onPersistenceNotice(notice => this.showWarning(formatPersistenceNotice(notice))),
 			this.sessionManager.onSessionNameChanged(() => {
 				setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+				setTmuxWindowName(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 				this.#handleSessionAccentInputsChanged();
 			}),
 			// Fork and branch adopt a new session file without retitling.
@@ -2992,6 +2998,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			return false;
 		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		// The tmux window name falls back to the cwd basename for unnamed sessions.
+		setTmuxWindowName(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		this.statusLine.applyCwdChange();
 		return true;
 	}
@@ -7480,6 +7488,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		disposeTerminalTitleState();
 		disposeProgramStatus();
 		popTerminalTitle();
+		restoreTmuxWindowName();
 		this.stop();
 	}
 
