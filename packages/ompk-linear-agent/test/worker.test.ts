@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import type { IssueDetails } from "../src/linear";
-import type { Env } from "../src/types";
+import type { Env, Job } from "../src/types";
 import { createWorker } from "../src/worker";
 import { FakeQueueStub } from "./queue-fixture";
 
@@ -740,5 +740,83 @@ describe("fence-check endpoint", () => {
 			makeEnv(),
 		);
 		expect(fresh.status).toBe(200);
+	});
+});
+
+describe("GitHub JIT token broker endpoint", () => {
+	it("requires the host relay bearer in addition to the current GitHub fence", async () => {
+		const stub = new FakeQueueStub();
+		const githubJob: Job = {
+			id: "github-job-1",
+			source: "github",
+			github: {
+				owner: "kingkillery",
+				repo: "oh-my-pk",
+				number: 41,
+				installationId: "12345",
+				defaultBranch: "main",
+				isPullRequest: false,
+			},
+			issueId: "kingkillery/oh-my-pk#41",
+			issueIdentifier: "kingkillery/oh-my-pk#41",
+			model: "combo-a",
+			prompt: "implement",
+			status: "pending",
+			createdAt: new Date().toISOString(),
+			dedupeKey: "github:issue:41",
+			attempts: 0,
+		};
+		await stub.admit(githubJob);
+		const grant = await stub.lease("relay-test");
+		expect(grant).not.toBeNull();
+		let tokenMints = 0;
+		const worker = createWorker({
+			fetchIssue: async () => makeIssue(),
+			postComment: async () => undefined,
+			github: {
+				createInstallationToken: async (_env, installationId) => {
+					expect(installationId).toBe("12345");
+					tokenMints += 1;
+					return { token: "ghs_jit_host_only", expiresAt: "2026-08-06T20:00:00Z" };
+				},
+				fetchWorkItem: async () => {
+					throw new Error("unused");
+				},
+				postComment: async () => undefined,
+				getCollaboratorPermission: async () => null,
+			},
+			queue: () => stub,
+		});
+		const currentFence = {
+			jobId: githubJob.id,
+			attemptId: grant!.attemptId,
+			leaseToken: grant!.leaseToken,
+		};
+		const tokenRequest = (body: unknown, bearer?: string): Request => {
+			const headers = new Headers({ "Content-Type": "application/json" });
+			if (bearer !== undefined) headers.set("Authorization", `Bearer ${bearer}`);
+			return new Request("https://worker.test/github-token", {
+				method: "POST",
+				headers,
+				body: JSON.stringify(body),
+			});
+		};
+
+		const missingBearer = await worker.fetch(tokenRequest(currentFence), makeEnv());
+		expect(missingBearer.status).toBe(401);
+		const wrongBearer = await worker.fetch(tokenRequest(currentFence, "wrong-relay-token"), makeEnv());
+		expect(wrongBearer.status).toBe(401);
+		expect(tokenMints).toBe(0);
+
+		const valid = await worker.fetch(tokenRequest(currentFence, RELAY_TOKEN), makeEnv());
+		expect(valid.status).toBe(200);
+		expect(await valid.json()).toEqual({
+			token: "ghs_jit_host_only",
+			expiresAt: "2026-08-06T20:00:00Z",
+		});
+
+		const stale = await worker.fetch(tokenRequest({ ...currentFence, leaseToken: "forged" }, RELAY_TOKEN), makeEnv());
+		expect(stale.status).toBe(409);
+		expect(tokenMints).toBe(1);
 	});
 });

@@ -1,0 +1,162 @@
+#!/bin/sh
+# Narrow gh compatibility shim for fenced agent containers.
+# Only `gh pr create` is supported. The host broker pins the repository,
+# validates refs, mints the JIT token, and never returns a credential here.
+
+set -eu
+
+if [ "${1:-}" != "pr" ] || [ "${2:-}" != "create" ]; then
+	echo "ompk gh wrapper: fenced container mode supports only 'gh pr create'" >&2
+	exit 2
+fi
+shift 2
+
+pinned_repo=${OMPK_GITHUB_REPO:-}
+repo=$pinned_repo
+base=${OMPK_GITHUB_DEFAULT_BRANCH:-}
+head=
+title=
+body=
+draft=false
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		-R|--repo)
+			[ "$#" -ge 2 ] || {
+				echo "ompk gh wrapper: $1 requires a value" >&2
+				exit 2
+			}
+			repo=$2
+			shift 2
+			;;
+		--repo=*)
+			repo=${1#--repo=}
+			shift
+			;;
+		-B|--base)
+			[ "$#" -ge 2 ] || {
+				echo "ompk gh wrapper: $1 requires a value" >&2
+				exit 2
+			}
+			base=$2
+			shift 2
+			;;
+		--base=*)
+			base=${1#--base=}
+			shift
+			;;
+		-H|--head)
+			[ "$#" -ge 2 ] || {
+				echo "ompk gh wrapper: $1 requires a value" >&2
+				exit 2
+			}
+			head=$2
+			shift 2
+			;;
+		--head=*)
+			head=${1#--head=}
+			shift
+			;;
+		-t|--title)
+			[ "$#" -ge 2 ] || {
+				echo "ompk gh wrapper: $1 requires a value" >&2
+				exit 2
+			}
+			title=$2
+			shift 2
+			;;
+		--title=*)
+			title=${1#--title=}
+			shift
+			;;
+		-b|--body)
+			[ "$#" -ge 2 ] || {
+				echo "ompk gh wrapper: $1 requires a value" >&2
+				exit 2
+			}
+			body=$2
+			shift 2
+			;;
+		--body=*)
+			body=${1#--body=}
+			shift
+			;;
+		-d|--draft)
+			draft=true
+			shift
+			;;
+		*)
+			echo "ompk gh wrapper: unsupported gh pr create argument '$1'" >&2
+			exit 2
+			;;
+	esac
+done
+
+if [ -z "$head" ]; then
+	head=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+fi
+if [ -z "$pinned_repo" ] || [ -z "$base" ] || [ -z "$head" ] || [ -z "$title" ]; then
+	echo "ompk gh wrapper: repository, base, head, and title are required" >&2
+	exit 2
+fi
+if [ "$repo" != "$pinned_repo" ]; then
+	echo "ompk gh wrapper: repository is outside this job's broker scope" >&2
+	exit 2
+fi
+if [ -z "${OMPK_BROKER_URL:-}" ] || [ -z "${OMPK_BROKER_CREDENTIAL:-}" ]; then
+	echo "ompk gh wrapper: broker environment is incomplete" >&2
+	exit 1
+fi
+
+export OMPK_PR_TITLE="$title"
+export OMPK_PR_BODY="$body"
+export OMPK_PR_BASE="$base"
+export OMPK_PR_HEAD="$head"
+export OMPK_PR_DRAFT="$draft"
+
+exec bun -e '
+const request = {
+	title: process.env.OMPK_PR_TITLE,
+	body: process.env.OMPK_PR_BODY,
+	base: process.env.OMPK_PR_BASE,
+	head: process.env.OMPK_PR_HEAD,
+	draft: process.env.OMPK_PR_DRAFT === "true",
+};
+let response;
+try {
+	response = await fetch(new URL("/pull-request", process.env.OMPK_BROKER_URL), {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"X-OMPK-Placeholder": process.env.OMPK_BROKER_CREDENTIAL,
+		},
+		body: JSON.stringify(request),
+		signal: AbortSignal.timeout(30_000),
+	});
+} catch {
+	console.error("ompk gh wrapper: pull request broker is unavailable");
+	process.exit(1);
+}
+if (!response.ok) {
+	console.error(`ompk gh wrapper: pull request broker rejected the request (${response.status})`);
+	process.exit(1);
+}
+let metadata;
+try {
+	metadata = await response.json();
+} catch {
+	console.error("ompk gh wrapper: pull request broker returned an invalid response");
+	process.exit(1);
+}
+const expectedUrl = `https://github.com/${process.env.OMPK_GITHUB_REPO}/pull/${metadata?.number}`;
+if (
+	!Number.isSafeInteger(metadata?.number) ||
+	metadata.number < 1 ||
+	typeof metadata?.url !== "string" ||
+	metadata.url !== expectedUrl
+) {
+	console.error("ompk gh wrapper: pull request broker returned an invalid response");
+	process.exit(1);
+}
+process.stdout.write(`${metadata.url}\n`);
+'

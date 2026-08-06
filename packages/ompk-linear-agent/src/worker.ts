@@ -551,6 +551,35 @@ async function handleFenceCheck(request: Request, env: Env, deps: WorkerDeps): P
 	return valid ? json({ valid: true }) : json({ valid: false }, 409);
 }
 
+/**
+ * Host-relay-authenticated, fence-bound GitHub installation token issuance.
+ * Both credentials are required: the fence binds the current attempt, while
+ * the relay bearer keeps a leaked container fence from becoming a raw-token
+ * minting capability. Only the host-side broker receives the response.
+ */
+async function handleGitHubToken(request: Request, env: Env, deps: WorkerDeps): Promise<Response> {
+	if (!bearerAuthorized(request, env.RELAY_TOKEN)) return unauthorized();
+	if (!deps.github) return json({ error: "GitHub integration unavailable" }, 503);
+	let body: FenceCheckBody;
+	try {
+		body = (await request.json()) as FenceCheckBody;
+	} catch {
+		return json({ error: "invalid body" }, 400);
+	}
+	if (typeof body.jobId !== "string" || typeof body.attemptId !== "string" || typeof body.leaseToken !== "string") {
+		return json({ error: "invalid body" }, 400);
+	}
+	const queue = deps.queue(env);
+	const { valid } = await queue.checkFence(body.jobId, body.attemptId, body.leaseToken);
+	if (!valid) return json({ error: "stale fence" }, 409);
+	const job = await queue.getJob(body.jobId);
+	if (job?.source !== "github" || !job.github) {
+		return json({ error: "job has no GitHub target" }, 403);
+	}
+	const token = await deps.github.createInstallationToken(env, job.github.installationId);
+	return json(token);
+}
+
 export function createWorker(deps: WorkerDeps): { fetch(request: Request, env: Env): Promise<Response> } {
 	return {
 		async fetch(request: Request, env: Env): Promise<Response> {
@@ -576,6 +605,9 @@ export function createWorker(deps: WorkerDeps): { fetch(request: Request, env: E
 			}
 			if (request.method === "POST" && url.pathname === "/fence-check") {
 				return handleFenceCheck(request, env, deps);
+			}
+			if (request.method === "POST" && url.pathname === "/github-token") {
+				return handleGitHubToken(request, env, deps);
 			}
 			if (request.method === "GET" && url.pathname === "/status") {
 				return handleStatus(request, env, deps);

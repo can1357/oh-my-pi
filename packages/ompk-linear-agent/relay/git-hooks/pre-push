@@ -18,6 +18,22 @@ if [ -z "$OMPK_FENCE_JOB" ] || [ -z "$OMPK_FENCE_ATTEMPT" ] || [ -z "$OMPK_FENCE
 	exit 1
 fi
 
+# Container broker mode adds an early usability guard. The host broker repeats
+# this policy on the receive-pack stream, so --no-verify cannot bypass it.
+if [ -n "$OMPK_BROKER_URL" ]; then
+	while IFS=' ' read -r _local_ref _local_oid remote_ref _remote_oid; do
+		[ -z "$remote_ref" ] && continue
+		case "$remote_ref" in
+			refs/heads/ompk/?*)
+				;;
+			*)
+				echo "ompk fence guard: push to '$remote_ref' rejected; container jobs may push only refs/heads/ompk/*" >&2
+				exit 1
+				;;
+		esac
+	done
+fi
+
 body="{\"jobId\":\"$OMPK_FENCE_JOB\",\"attemptId\":\"$OMPK_FENCE_ATTEMPT\",\"leaseToken\":\"$OMPK_FENCE_TOKEN\"}"
 
 if curl -fsS --max-time 10 -X POST -H "Content-Type: application/json" \

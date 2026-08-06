@@ -13,7 +13,7 @@ identical job pipeline through `/github/webhook` (see
 ## Pieces
 
 - `src/index.ts` — Cloudflare entrypoint (binds the real Linear + GitHub APIs and the Durable Object queue)
-- `src/worker.ts` — request handlers (`/webhook`, `/github/webhook`, `/poll`, `/result`, `/heartbeat`, `/reconcile`, `/fence-check`, `/status`)
+- `src/worker.ts` — request handlers (`/webhook`, `/github/webhook`, `/poll`, `/result`, `/heartbeat`, `/reconcile`, `/fence-check`, `/github-token`, `/status`)
 - `src/dispatch-policy.ts` — Linear webhook dispatch authorization + replay dedupe key
 - `src/linear.ts` — Linear webhook signature verification + GraphQL calls
 - `src/github.ts` — GitHub App JWT/installation tokens, webhook HMAC verification, REST calls
@@ -118,8 +118,8 @@ active refreshes the prompt under the same attempt rules as Linear.
 1. The Worker admits the job (`source: "github"`) with repo metadata
    (`owner/repo`, number, default branch, PR head ref, installation id).
 2. The relay's `/poll` grant carries the metadata plus a fresh installation
-   token. It refreshes a bare mirror at
-   `<OMPK_RELAY_GITHUB_ROOT>/.mirrors/<owner>-<repo>.git`, then makes the
+   token for host-side workspace preparation only. It refreshes a bare mirror
+   at `<OMPK_RELAY_GITHUB_ROOT>/.mirrors/<owner>-<repo>.git`, then makes the
    per-job clone with `--reference-if-able --dissociate`. Mirror failures log
    a warning and fall back to a full clone; the disposable workspace never
    depends on the mirror after cloning.
@@ -127,22 +127,41 @@ active refreshes the prompt under the same attempt rules as Linear.
    `ompk/issue-<n>-<jobid>` branch off the default branch for issues. If the
    checkout declares `.ompk/setup.sh`, the relay runs it with `bash` before
    the agent, without GitHub, git-rewrite, relay, or lease-fence credentials.
-4. By default `omp` runs directly in the workspace, preserving the existing
-   bare-process behavior. Setting `OMPK_RELAY_CONTAINER_IMAGE` instead runs
-   setup and agent phases in separate, disposable containers using that same
-   image, with the workspace mounted at `/workspace`.
-5. The agent env carries `GH_TOKEN` plus a git `insteadOf` rewrite, so `git
-   push` and `gh pr create` inside the run authenticate as the App
-   installation. The pre-push fence guard applies unchanged.
-6. The relay scrubs the installation token from all reported output, then
-   posts `/result`; the Worker mints a NEW installation token at result time
-   and posts the outcome as an issue/PR comment (tokens expire after 1 h, so
-   completion never reuses the leased one). Reconcile parking and
+4. With no `OMPK_RELAY_CONTAINER_IMAGE`, `omp` runs directly in the workspace.
+   This **bare mode is intentionally unfenced for network egress** and keeps
+   the existing `GH_TOKEN`/credentialed-git behavior for compatibility. Use it
+   only when model-written code is trusted to share the relay host network.
+5. Setting `OMPK_RELAY_CONTAINER_IMAGE` enables the fenced mode. Each attempt
+   gets an internal Podman bridge plus an nftables input fence. Only the
+   currently active proxy/broker ports on that bridge are reachable:
+   - setup: a CONNECT proxy for GitHub, npm/Yarn, PyPI, and crates.io;
+   - agent: a different CONNECT proxy for `api.anthropic.com` and the local
+     fence/git broker.
+   The setup proxy and all of its established sockets are destroyed before
+   the agent proxy starts. DNS answers that resolve an allowlisted hostname to
+   private or special-use addresses are rejected. Network, proxy, broker, or
+   firewall initialization failure fails the job transiently; fenced mode
+   never falls back to `--network=host`.
+6. A container receives only a random, attempt-local broker capability in its
+   git URL rewrite; it is never sent to GitHub and is not a GitHub credential.
+   The host broker calls `POST /github-token` with both the host-only
+   `RELAY_TOKEN` bearer and the current fence tuple, injects the resulting JIT
+   installation token into the upstream request, and never returns that token
+   or the relay bearer to the container. The broker pins smart-HTTP and PR
+   requests to the job's `owner/repo`, parses `git-receive-pack` command
+   pkt-lines before token issuance, and rejects every target outside
+   `refs/heads/ompk/*`; `--no-verify` cannot bypass the server-side check. A
+   read-only `gh` compatibility shim supports only `gh pr create` with
+   title/body/base/head/draft (and a matching `--repo`); the host broker creates
+   the PR and returns only its number, canonical URL, and draft state.
+7. The relay scrubs the lease-time installation token from all reported output,
+   then posts `/result`; the Worker mints a new installation token at result
+   time and posts the outcome as an issue/PR comment. Reconcile parking and
    dead-letter comments follow the same path.
 
-The leased token expires after 1 h; the default job timeout (30 min) fits
-inside that budget. Raising `OMPK_RELAY_JOB_TIMEOUT_MS` past ~55 min will
-break pushes late in a GitHub job.
+Fenced container mode requires `nft` (or `OMPK_RELAY_NFT_BIN`) to be available
+to the relay with permission to create and delete per-attempt `inet` tables.
+This requirement is fail-closed: do not grant a host-network fallback.
 
 ### Anthropic authentication (unchanged)
 
@@ -221,14 +240,15 @@ Branch-mutation fencing:
 - The relay exports the fence triple (`OMPK_FENCE_JOB` / `_ATTEMPT` /
   `_TOKEN`, plus `OMPK_FENCE_URL`) and a `core.hooksPath` override
   (`GIT_CONFIG_*`) into the `omp` child, pointing at
-  `relay/git-hooks/pre-push`. Every `git push` in the child tree first
-  validates the fence against `POST /fence-check` (unauthenticated by
-  design: the fence triple is the credential, and the runner env must never
-  carry relay bearer tokens). Superseded, resolved, or terminal fences —
-  and network partitions — block the push fail-closed; a reconcile-parked
-  fence remains valid because the original runner still owns the attempt.
-  The override shadows repo-local hooks for the child, which is intended
-  for a headless runner workspace.
+  `relay/git-hooks/pre-push`. Every `git push` first validates the fence
+  against `POST /fence-check` (the fence triple is the credential; the runner
+  never carries relay bearer tokens). In fenced container mode that request
+  goes through the per-job broker, and both the hook and the broker require
+  target refs under `refs/heads/ompk/*`; only the broker check is authoritative.
+  Superseded, resolved, or terminal fences — and network partitions — block
+  the push fail-closed; a reconcile-parked fence remains valid because the
+  original runner still owns the attempt. The override shadows repo-local
+  hooks for the child, which is intended for a headless runner workspace.
 
 ## Flow
 
@@ -329,17 +349,18 @@ Isolation, setup, and cache settings:
 | --- | --- | --- |
 | `OMPK_RELAY_CONTAINER_IMAGE` | empty (off) | Runs each setup/agent phase with `podman run --rm`; empty keeps bare-process execution and requires no Podman installation. |
 | `OMPK_RELAY_CONTAINER_BIN` | `podman` | Container runtime binary or absolute path used when an image is enabled. |
-| `OMPK_RELAY_CONTAINER_MEMORY` | `4g` | Per-container memory limit. Containers also use a fixed 2048 PID limit, tmpfs `HOME`, and host networking. |
+| `OMPK_RELAY_CONTAINER_MEMORY` | `4g` | Per-container memory limit. Containers also use a fixed 2048 PID limit, tmpfs `HOME`, and an attempt-specific internal network; fenced mode never uses host networking. |
 | `OMPK_RELAY_SETUP_TIMEOUT_MS` | `600000` | Hard timeout for a repository's optional `.ompk/setup.sh`. |
 | `OMPK_RELAY_GITHUB_ROOT` | `<workspace>/github-workspaces` | Holds disposable job clones plus reusable bare mirrors under `.mirrors/`. |
 
 The container image is operator-provided and must contain `omp`, Bun, Git,
 `bash`, `/bin/sh`, and `curl` (the mounted pre-push fence hook uses the latter
-two). It must also arrange usable model authentication (for example a
-host-network-reachable auth broker); the container receives neither the host
-credential store nor its `HOME`. The agent container receives only
-`PATH`/`HOME`, the lease-fence and git-hook variables, and (for GitHub jobs)
-`GH_TOKEN` plus its git URL rewrite. Setup containers do not receive those
+two). Model authentication must work without mounting the host credential
+store and with agent egress restricted to `api.anthropic.com`. The agent
+container receives only its minimal `PATH`/`HOME`, proxy settings, the fence
+tuple, and, for GitHub jobs, an attempt-local broker capability plus pinned
+repository metadata. It receives no `GH_TOKEN`, installation token, or
+`RELAY_TOKEN`. Setup containers receive no fence, broker, or GitHub
 credentials.
 
 ### Relay security posture
@@ -353,10 +374,126 @@ untrusted-input surfaces:
   workspace holding credentials, production configuration, or work you cannot
   lose (the default is only the relay's own cwd);
 - run the relay under a low-privilege user where practical;
-- keep `OMPK_RELAY_MODELS` minimal.
-- enable `OMPK_RELAY_CONTAINER_IMAGE` on Linux relays when the image and model
-  authentication path have been validated; v1 deliberately uses
-  `--network=host`, so it does not provide egress control.
+- keep `OMPK_RELAY_MODELS` minimal;
+- enable `OMPK_RELAY_CONTAINER_IMAGE` only on Linux relays where Podman,
+  netavark, and the relay's permission to manage per-attempt nftables tables
+  have been validated. Initialization fails closed. Leaving the setting empty
+  selects compatibility-oriented bare mode, which is explicitly unfenced.
+
+### Linux Podman security canary
+
+Run this against a disposable repository and GitHub App installation before
+enabling fenced mode. Exercise both rootful Podman and the intended rootless
+relay account. Start an unrelated host service first:
+
+```sh
+HOST_CANARY_PORT=18080
+python3 -m http.server "$HOST_CANARY_PORT" --bind 0.0.0.0 >/tmp/ompk-host-canary.log 2>&1 &
+HOST_CANARY_PID=$!
+```
+
+In the disposable repository's setup hook, keep the phase alive long enough
+to inspect it and prove that only setup destinations work:
+
+```sh
+set -eu
+curl -fsS --max-time 15 https://registry.npmjs.org/ >/dev/null
+curl -fsS --max-time 15 https://github.com/ >/dev/null
+if curl -sS --max-time 10 https://api.anthropic.com/ >/dev/null; then
+	echo "agent-only Anthropic endpoint was reachable during setup" >&2
+	exit 1
+fi
+GATEWAY=${NO_PROXY%%,*}
+if curl --noproxy '*' -fsS --max-time 3 "http://$GATEWAY:18080/" >/dev/null; then
+	echo "host gateway canary was reachable during setup" >&2
+	exit 1
+fi
+sleep 60
+```
+
+Use this as the GitHub job's agent-phase shell canary (replace
+`WORKER_CANARY_URL` and `FOREIGN_REPO` with real values). A `401`/`404` from
+Anthropic is acceptable because it proves the CONNECT and TLS path worked;
+curl must not report status `000`.
+
+```sh
+set -eu
+export WORKER_CANARY_URL=https://ompk-linear-agent.example.workers.dev/
+export FOREIGN_REPO=owner/a-different-installed-repository
+GATEWAY=${NO_PROXY%%,*}
+
+must_fail() {
+	if timeout 5 env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
+		"$@" >/dev/null 2>&1; then
+		echo "unexpected direct egress: $*" >&2
+		exit 1
+	fi
+}
+
+must_fail curl --noproxy '*' -fsS https://example.com/
+must_fail curl --noproxy '*' -fsS "$WORKER_CANARY_URL"
+must_fail curl --noproxy '*' -fsS "http://$GATEWAY:18080/"
+must_fail curl --noproxy '*' -fsS http://host.containers.internal:18080/
+must_fail curl --noproxy '*' -fsS http://127.0.0.1:18080/
+must_fail curl --noproxy '*' -fsS http://2130706433:18080/
+must_fail curl --noproxy '*' -fsS http://0x7f000001:18080/
+must_fail curl --noproxy '*' -g -fsS 'http://[::1]:18080/'
+for port in 22 80 443 2375 18080; do
+	if timeout 2 bash -c ":</dev/tcp/$GATEWAY/$port" >/dev/null 2>&1; then
+		echo "unexpected host gateway port: $GATEWAY:$port" >&2
+		exit 1
+	fi
+done
+
+test "$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' https://api.anthropic.com/)" != 000
+if curl -fsS --max-time 10 https://registry.npmjs.org/ >/dev/null; then
+	echo "setup-only registry was reachable during agent phase" >&2
+	exit 1
+fi
+BROKER_RESPONSE=$HOME/ompk-broker-canary-response
+BROKER_STATUS=$(curl -sS --max-time 5 -o "$BROKER_RESPONSE" -w '%{http_code}' \
+	"$OMPK_BROKER_URL/credential")
+test "$BROKER_STATUS" = 403
+! grep -E 'ghs_[A-Za-z0-9_]+|RELAY_TOKEN|GH_TOKEN' "$BROKER_RESPONSE"
+rm -f "$BROKER_RESPONSE"
+
+git checkout -B ompk/podman-canary
+git -c user.name=ompk-canary -c user.email=ompk-canary@example.invalid \
+	commit --allow-empty -m 'ompk Podman canary'
+git push origin HEAD:refs/heads/ompk/podman-canary
+gh pr create --draft --repo "$OMPK_GITHUB_REPO" \
+	--base "$OMPK_GITHUB_DEFAULT_BRANCH" --head ompk/podman-canary \
+	--title 'ompk Podman canary' --body 'Disposable fenced-mode canary.'
+! git push --no-verify origin HEAD:refs/heads/main
+! git ls-remote "https://github.com/$FOREIGN_REPO.git"
+! gh pr create --draft --repo "$FOREIGN_REPO" \
+	--base main --head ompk/podman-canary --title forbidden --body forbidden
+
+! env | grep -E '^(RELAY_TOKEN|GH_TOKEN)='
+if for environ in /proc/[0-9]*/environ; do
+	tr '\0' '\n' <"$environ" 2>/dev/null || true
+done | grep -E '^(RELAY_TOKEN|GH_TOKEN)=|ghs_[A-Za-z0-9_]+'; then
+	echo "credential found in a container process environment" >&2
+	exit 1
+fi
+! git config --show-origin --list | grep -E 'ghs_[A-Za-z0-9_]+'
+! grep -R -E 'ghs_[A-Za-z0-9_]+' /workspace "$HOME" /tmp 2>/dev/null
+```
+
+While the agent is running, verify the host view contains no credential:
+
+```sh
+CTR=$(podman ps --filter 'name=ompk-' --format '{{.Names}}' | sed -n '1p')
+test -n "$CTR"
+! podman inspect "$CTR" | grep -E '"(RELAY_TOKEN|GH_TOKEN)"|ghs_[A-Za-z0-9_]+'
+! podman logs "$CTR" 2>&1 | grep -E 'ghs_[A-Za-z0-9_]+'
+```
+
+After success, timeout, and a deliberately superseded fence, the container,
+network, nftables table, proxy ports, and held tunnels must all disappear.
+Repeat under the rootless relay account. If that account cannot install the
+nftables fence, the expected result is a transient infrastructure failure with
+no setup or agent `podman run`; never compensate with `--network=host`.
 
 ## Automation boundary
 
