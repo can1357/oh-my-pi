@@ -117,20 +117,27 @@ active refreshes the prompt under the same attempt rules as Linear.
 
 1. The Worker admits the job (`source: "github"`) with repo metadata
    (`owner/repo`, number, default branch, PR head ref, installation id).
-2. The relay's `/poll` grant carries the metadata plus a fresh installation
-   token for host-side workspace preparation only. It refreshes a bare mirror
-   at `<OMPK_RELAY_GITHUB_ROOT>/.mirrors/<owner>-<repo>.git`, then makes the
-   per-job clone with `--reference-if-able --dissociate`. Mirror failures log
-   a warning and fall back to a full clone; the disposable workspace never
-   depends on the mirror after cloning.
+2. The `/poll` grant serializes `source` plus the repository metadata. It also
+   retains a lease-time installation token for rolling compatibility, but the
+   relay does not depend on that token surviving a repository-mutex wait. Once
+   admitted to the mutex, the host relay calls the existing fenced
+   `/github-token` route and uses that newly minted token immediately to refresh
+   the bare mirror at `<OMPK_RELAY_GITHUB_ROOT>/.mirrors/<owner>-<repo>.git`.
+   Mirror mutation holds a lock scoped to that path, then the relay makes the
+   per-job clone with `--reference-if-able --dissociate`. Mirror failures log a
+   redacted warning and fall back to a full clone; the disposable workspace
+   never depends on the mirror after cloning.
 3. The relay checks out the PR head branch — or a new
    `ompk/issue-<n>-<jobid>` branch off the default branch for issues. If the
    checkout declares `.ompk/setup.sh`, the relay runs it with `bash` before
    the agent, without GitHub, git-rewrite, relay, or lease-fence credentials.
 4. With no `OMPK_RELAY_CONTAINER_IMAGE`, `omp` runs directly in the workspace.
-   This **bare mode is intentionally unfenced for network egress** and keeps
-   the existing `GH_TOKEN`/credentialed-git behavior for compatibility. Use it
-   only when model-written code is trusted to share the relay host network.
+   This **bare mode is intentionally unfenced for general network egress** and
+   should be used only when model-written code is trusted to share the relay
+   host network. GitHub publishing is still credential-isolated: the relay
+   starts the same broker on loopback, removes lease-time GitHub and relay
+   tokens from the agent environment, and routes Git/`gh pr create` through
+   the broker.
 5. Setting `OMPK_RELAY_CONTAINER_IMAGE` enables the fenced mode. Each attempt
    gets an internal Podman bridge plus an nftables input fence. Only the
    currently active proxy/broker ports on that bridge are reachable:
@@ -142,22 +149,29 @@ active refreshes the prompt under the same attempt rules as Linear.
    private or special-use addresses are rejected. Network, proxy, broker, or
    firewall initialization failure fails the job transiently; fenced mode
    never falls back to `--network=host`.
-6. A container receives only a random, attempt-local broker capability in its
-   git URL rewrite; it is never sent to GitHub and is not a GitHub credential.
-   The host broker calls `POST /github-token` with both the host-only
-   `RELAY_TOKEN` bearer and the current fence tuple, injects the resulting JIT
-   installation token into the upstream request, and never returns that token
-   or the relay bearer to the container. The broker pins smart-HTTP and PR
+6. In either mode, a GitHub agent receives only a random, attempt-local broker
+   capability in its Git URL rewrite plus the fence tuple and pinned repository
+   metadata. The capability is never sent to GitHub and is not a GitHub
+   credential. For initial clone preparation, the host relay calls
+   `POST /github-token` immediately after the repository mutex admits the job.
+   For publishing, the host broker calls the same route immediately before
+   **every** authorized Git smart-HTTP or PR operation. Every call carries the
+   host-only `RELAY_TOKEN` bearer plus the current fence tuple; the newly minted
+   installation token is injected only into the immediate host-side upstream
+   request and neither token nor relay bearer is returned to the agent. Mutex
+   waits and job duration are therefore decoupled from the one-hour
+   installation-token lifetime. The broker pins smart-HTTP and PR
    requests to the job's `owner/repo`, parses `git-receive-pack` command
    pkt-lines before token issuance, and rejects every target outside
    `refs/heads/ompk/*`; `--no-verify` cannot bypass the server-side check. A
-   read-only `gh` compatibility shim supports only `gh pr create` with
+   narrow `gh` compatibility shim supports only `gh pr create` with
    title/body/base/head/draft (and a matching `--repo`); the host broker creates
    the PR and returns only its number, canonical URL, and draft state.
-7. The relay scrubs the lease-time installation token from all reported output,
-   then posts `/result`; the Worker mints a new installation token at result
-   time and posts the outcome as an issue/PR comment. Reconcile parking and
-   dead-letter comments follow the same path.
+7. The relay scrubs both compatibility and freshly minted
+   workspace-preparation tokens from reported output, then posts `/result`;
+   the Worker mints a new installation token at result time and posts the
+   outcome as an issue/PR comment. Reconcile parking and dead-letter comments
+   follow the same path.
 
 Fenced container mode requires `nft` (or `OMPK_RELAY_NFT_BIN`) to be available
 to the relay with permission to create and delete per-attempt `inet` tables.
@@ -195,11 +209,23 @@ heartbeats, and completion are serialized. Every lease issues an
 never overwrite a newer attempt or repeat the Linear comment (duplicate
 completion of the accepted attempt is acknowledged idempotently).
 
+The relay leases at most `OMPK_RELAY_CONCURRENCY` jobs (default 2, hard-capped
+at 8). GitHub jobs sharing a case-insensitive `owner/repo` key serialize for
+their full attempt; Linear and other jobs serialize under the single shared
+`OMPK_RELAY_WORKSPACE` key. A leased job heartbeats once before waiting for its
+key and throughout the wait. Fence loss aborts the queued acquisition, so the
+job never enters the critical section. Different repository keys remain
+concurrent, and mirror mutation has its own per-path lock independent of the
+job lock.
+
 Liveness follows the reconcile contract from
 `docs/multi-agent-fork-collaboration.md`:
 
 - The relay heartbeats every `heartbeatMs` (10 min, carried on the lease
   grant); each fenced beat re-arms the 30-minute lease.
+  Each individual heartbeat request has an aborting timeout derived from the
+  cadence and capped at 30 seconds, so a stuck transport cannot pin a capacity
+  slot forever; a timeout retains the existing transient-heartbeat semantics.
 - A lease that misses two heartbeats (or expires) is parked in `reconcile`
   by the poll-time sweep or the Durable Object storage alarm — it is never
   re-granted directly, and its issue claim is retained. Each parking is
@@ -258,12 +284,14 @@ Branch-mutation fencing:
    authorizes the dispatch as above, and admits a job into the Durable Object
    queue.
 3. The relay polls `/poll` with `RELAY_TOKEN`, receives the job plus its lease
-   identity and heartbeat cadence, checks the model against its own
-   `OMPK_RELAY_MODELS` allowlist, and spawns
+   identity and heartbeat cadence, and dispatches up to its bounded capacity.
+   Before either waiting on the repository/workspace mutex or spawning work,
+   it starts fenced heartbeats to `/heartbeat`. A 409 aborts a queued waiter or
+   kills an active child, and the relay discards the result. Once admitted to
+   the critical section, it checks the model against its own
+   `OMPK_RELAY_MODELS` allowlist and spawns
    `omp --print --yolo --model <combo-id> -- <prompt>` — argv only, never a
-   shell. While the job runs it posts fenced heartbeats to `/heartbeat`; a
-   409 means the lease was lost, so the relay kills the child and discards
-   the result.
+   shell.
 4. The relay posts the result (with `attemptId` + `leaseToken`) to `/result`;
    the Worker validates the fence and comments on the Linear issue once. On
    startup the relay posts `{ runner, startupSweep: true }` to `/reconcile`,
@@ -340,22 +368,27 @@ Required env vars: `RELAY_TOKEN`, `OMPK_RELAY_MODELS` (comma-separated model
 allowlist; jobs naming any other model are reported back as failures without
 executing). Existing optional settings remain: `RELAY_NAME` (hostname),
 `OMPK_RELAY_WORKSPACE` (relay cwd), `OMPK_RELAY_POLL_MS` (5000),
-`OMPK_RELAY_JOB_TIMEOUT_MS` (30 min), `OMPK_RELAY_OMP_BIN` (`omp`), and
-`OMPK_RELAY_GITHUB_ROOT` (`<workspace>/github-workspaces`).
+`OMPK_RELAY_CONCURRENCY` (2, capped at 8), `OMPK_RELAY_JOB_TIMEOUT_MS`
+(30 min), `OMPK_RELAY_OMP_BIN` (`omp`), and `OMPK_RELAY_GITHUB_ROOT`
+(`<workspace>/github-workspaces`).
 
 Isolation, setup, and cache settings:
 
 | Environment variable | Default | Effect |
 | --- | --- | --- |
+| `OMPK_RELAY_CONCURRENCY` | `2` | Maximum leased/running jobs on one relay. Values above the operator safety cap are clamped to 8; invalid/non-positive values use the default. |
 | `OMPK_RELAY_CONTAINER_IMAGE` | empty (off) | Runs each setup/agent phase with `podman run --rm`; empty keeps bare-process execution and requires no Podman installation. |
 | `OMPK_RELAY_CONTAINER_BIN` | `podman` | Container runtime binary or absolute path used when an image is enabled. |
 | `OMPK_RELAY_CONTAINER_MEMORY` | `4g` | Per-container memory limit. Containers also use a fixed 2048 PID limit, tmpfs `HOME`, and an attempt-specific internal network; fenced mode never uses host networking. |
 | `OMPK_RELAY_SETUP_TIMEOUT_MS` | `600000` | Hard timeout for a repository's optional `.ompk/setup.sh`. |
 | `OMPK_RELAY_GITHUB_ROOT` | `<workspace>/github-workspaces` | Holds disposable job clones plus reusable bare mirrors under `.mirrors/`. |
 
-The container image is operator-provided and must contain `omp`, Bun, Git,
+The container image is operator-trusted and must contain `omp`, Bun, Git,
 `bash`, `/bin/sh`, and `curl` (the mounted pre-push fence hook uses the latter
-two). Model authentication must work without mounting the host credential
+two). Before nftables is installed, the relay runs this same trusted image
+with a fixed `/bin/sh` sleep-loop entrypoint solely to materialize the private
+bridge. That inert anchor receives no environment, mount, workspace, host path,
+or secret. Model authentication must work without mounting the host credential
 store and with agent egress restricted to `api.anthropic.com`. The agent
 container receives only its minimal `PATH`/`HOME`, proxy settings, the fence
 tuple, and, for GitHub jobs, an attempt-local broker capability plus pinned
@@ -376,9 +409,11 @@ untrusted-input surfaces:
 - run the relay under a low-privilege user where practical;
 - keep `OMPK_RELAY_MODELS` minimal;
 - enable `OMPK_RELAY_CONTAINER_IMAGE` only on Linux relays where Podman,
-  netavark, and the relay's permission to manage per-attempt nftables tables
-  have been validated. Initialization fails closed. Leaving the setting empty
-  selects compatibility-oriented bare mode, which is explicitly unfenced.
+  netavark, the operator-trusted image, and the relay's permission to manage
+  per-attempt nftables tables have been validated. Initialization fails
+  closed. Leaving the setting empty selects compatibility-oriented bare mode,
+  whose general network egress is explicitly unfenced even though GitHub
+  publishing remains fence-checked and brokered.
 
 ### Linux Podman security canary
 

@@ -31,7 +31,7 @@ import { lookup } from "node:dns/promises";
 import { chmod, copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { createConnection, createServer, type AddressInfo, isIP, type Socket } from "node:net";
 import { hostname, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const WORKER_URL = process.env.WORKER_URL ?? "https://ompk-linear-agent.pkkidking.workers.dev";
@@ -41,6 +41,18 @@ const WORKSPACE_DIR = process.env.OMPK_RELAY_WORKSPACE ?? process.cwd();
 const GITHUB_WORKSPACE_ROOT = process.env.OMPK_RELAY_GITHUB_ROOT ?? join(WORKSPACE_DIR, "github-workspaces");
 const POLL_INTERVAL_MS = Number(process.env.OMPK_RELAY_POLL_MS ?? 5000);
 const JOB_TIMEOUT_MS = Number(process.env.OMPK_RELAY_JOB_TIMEOUT_MS ?? 30 * 60 * 1000);
+export const DEFAULT_RELAY_CAPACITY = 2;
+export const MAX_RELAY_CAPACITY = 8;
+
+/** Operator capacity is always an integer in [1, MAX_RELAY_CAPACITY]. */
+export function parseRelayCapacity(raw: string | undefined): number {
+	if (raw === undefined || raw.trim() === "") return DEFAULT_RELAY_CAPACITY;
+	const parsed = Number(raw);
+	if (!Number.isSafeInteger(parsed) || parsed < 1) return DEFAULT_RELAY_CAPACITY;
+	return Math.min(parsed, MAX_RELAY_CAPACITY);
+}
+
+const RELAY_CAPACITY = parseRelayCapacity(process.env.OMPK_RELAY_CONCURRENCY);
 /**
  * Executable dispatched for each job. Resolved from PATH by CreateProcess /
  * execvp without any shell; override with an absolute path when `omp` is
@@ -273,7 +285,25 @@ export function startEgressProxy(
 	return promise;
 }
 
-export interface Job {
+export interface RelayGitHubTarget {
+	owner: string;
+	repo: string;
+	number: number;
+	headRef?: string;
+	defaultBranch: string;
+}
+
+export interface GitHubTargetCarrier {
+	github?: RelayGitHubTarget;
+}
+
+export function hasGitHubTarget(
+	job: GitHubTargetCarrier,
+): job is GitHubTargetCarrier & { github: RelayGitHubTarget } {
+	return job.github !== undefined;
+}
+
+export interface Job extends GitHubTargetCarrier {
 	id: string;
 	source?: "linear" | "github";
 	issueId: string;
@@ -284,17 +314,166 @@ export interface Job {
 	createdAt: string;
 	attemptId: string;
 	leaseToken: string;
-	github?: {
-		owner: string;
-		repo: string;
-		number: number;
-		headRef?: string;
-		defaultBranch: string;
-	};
 	/** Ephemeral installation token returned only in the poll response. */
 	githubToken?: string;
 	/** Heartbeat cadence the Worker expects; two missed beats park the job. */
 	heartbeatMs?: number;
+}
+export interface KeyedMutexLease {
+	release(): void;
+}
+
+interface KeyedMutexWaiter {
+	readonly resolve: (lease: KeyedMutexLease | undefined) => void;
+	readonly signal?: AbortSignal;
+	readonly abort: () => void;
+	settled: boolean;
+}
+
+interface KeyedMutexState {
+	readonly waiters: KeyedMutexWaiter[];
+}
+
+/**
+ * FIFO keyed mutex with abortable waiting and deterministic key cleanup.
+ * Separate keys never share a queue.
+ */
+export class KeyedMutex {
+	readonly #states = new Map<string, KeyedMutexState>();
+
+	get keyCount(): number {
+		return this.#states.size;
+	}
+
+	acquire(key: string, signal?: AbortSignal): Promise<KeyedMutexLease | undefined> {
+		if (signal?.aborted) return Promise.resolve(undefined);
+		const state = this.#states.get(key);
+		if (!state) {
+			const acquired: KeyedMutexState = { waiters: [] };
+			this.#states.set(key, acquired);
+			return Promise.resolve(this.#lease(key, acquired));
+		}
+		return new Promise(resolve => {
+			const waiter: KeyedMutexWaiter = {
+				resolve,
+				signal,
+				settled: false,
+				abort: () => {
+					if (waiter.settled) return;
+					waiter.settled = true;
+					signal?.removeEventListener("abort", waiter.abort);
+					const index = state.waiters.indexOf(waiter);
+					if (index >= 0) state.waiters.splice(index, 1);
+					resolve(undefined);
+				},
+			};
+			state.waiters.push(waiter);
+			signal?.addEventListener("abort", waiter.abort, { once: true });
+			if (signal?.aborted) waiter.abort();
+		});
+	}
+
+	#lease(key: string, state: KeyedMutexState): KeyedMutexLease {
+		let released = false;
+		return {
+			release: () => {
+				if (released) return;
+				released = true;
+				for (;;) {
+					const waiter = state.waiters.shift();
+					if (!waiter) {
+						if (this.#states.get(key) === state) this.#states.delete(key);
+						return;
+					}
+					if (waiter.settled) continue;
+					waiter.settled = true;
+					waiter.signal?.removeEventListener("abort", waiter.abort);
+					waiter.resolve(this.#lease(key, state));
+					return;
+				}
+			},
+		};
+	}
+}
+
+export interface LeaseLiveLockOptions {
+	readonly mutex: KeyedMutex;
+	readonly key: string;
+	readonly heartbeatMs: number;
+	readonly heartbeat: () => Promise<boolean>;
+	readonly onFenceLoss?: () => Promise<void> | void;
+	readonly onHeartbeatError?: (error: unknown) => void;
+}
+
+export type LeaseLiveLockResult<T> = { status: "completed"; value: T } | { status: "fenced" };
+
+/**
+ * Heartbeat immediately and for the entire mutex wait/critical section.
+ * A rejected fence aborts a queued acquisition before it can enter.
+ */
+export async function withLeaseLiveLock<T>(
+	options: LeaseLiveLockOptions,
+	work: (signal: AbortSignal) => Promise<T>,
+): Promise<LeaseLiveLockResult<T>> {
+	const fenceAbort = new AbortController();
+	let fenceLost = false;
+	let heartbeatInFlight: Promise<boolean> | undefined;
+	const loseFence = async (): Promise<void> => {
+		if (fenceLost) return;
+		fenceLost = true;
+		fenceAbort.abort();
+		try {
+			await options.onFenceLoss?.();
+		} catch (error) {
+			options.onHeartbeatError?.(error);
+		}
+	};
+	const heartbeat = (): Promise<boolean> => {
+		if (heartbeatInFlight) return heartbeatInFlight;
+		const current = Promise.resolve()
+			.then(options.heartbeat)
+			.catch(error => {
+				options.onHeartbeatError?.(error);
+				return true;
+			})
+			.then(async live => {
+				if (!live) await loseFence();
+				return live;
+			});
+		heartbeatInFlight = current;
+		void current.then(() => {
+			if (heartbeatInFlight === current) heartbeatInFlight = undefined;
+		});
+		return current;
+	};
+
+	if (!(await heartbeat())) return { status: "fenced" };
+	const beat = setInterval(() => {
+		void heartbeat();
+	}, Math.max(1, options.heartbeatMs));
+	let lease: KeyedMutexLease | undefined;
+	let outcome: LeaseLiveLockResult<T> = { status: "fenced" };
+	try {
+		lease = await options.mutex.acquire(options.key, fenceAbort.signal);
+		if (!lease || fenceLost) return { status: "fenced" };
+		outcome = { status: "completed", value: await work(fenceAbort.signal) };
+	} finally {
+		clearInterval(beat);
+		lease?.release();
+		if (heartbeatInFlight) await heartbeatInFlight;
+	}
+	return fenceLost ? { status: "fenced" } : outcome;
+}
+
+/** GitHub repositories serialize by case-insensitive slug; shared-workspace jobs use one key. */
+export function jobSerializationKey(
+	job: GitHubTargetCarrier,
+	sharedWorkspace: string = WORKSPACE_DIR,
+): string {
+	if (hasGitHubTarget(job)) {
+		return `github:${job.github.owner.toLowerCase()}/${job.github.repo.toLowerCase()}`;
+	}
+	return `workspace:${sharedWorkspace}`;
 }
 
 
@@ -1330,16 +1509,31 @@ async function validatePullRequest(
 	};
 }
 
-export async function startGitBroker(options: GitBrokerOptions): Promise<GitBrokerHandle> {
-	const bindAddress = options.bindAddress ?? "127.0.0.1";
-	const placeholderCredential = options.placeholderCredential ?? crypto.randomUUID();
-	const fetchImpl = options.fetchImpl ?? fetch;
-	const repoPrefix =
-		options.owner && options.repo ? `/gh/${options.owner}/${options.repo}` : undefined;
-	const fetchJitToken = async (): Promise<string> => {
-		const relayToken = options.workerRelayToken?.trim();
-		if (!options.workerTokenUrl || !relayToken) throw new Error("git token broker is not configured");
-		const response = await fetchImpl(options.workerTokenUrl, {
+export interface GitHubTokenRequest {
+	readonly workerTokenUrl: string;
+	readonly workerRelayToken: string;
+	readonly jobId: string;
+	readonly attemptId: string;
+	readonly leaseToken: string;
+	readonly fetchImpl?: typeof fetch;
+	readonly timeoutMs?: number;
+}
+
+/** Mint one fence-bound GitHub App token for an immediate host-side operation. */
+export async function requestGitHubToken(options: GitHubTokenRequest): Promise<string> {
+	const relayToken = options.workerRelayToken.trim();
+	if (!relayToken) throw new Error("GitHub token request is not configured");
+	const requestTimeoutMs =
+		typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+			? Math.min(Math.floor(options.timeoutMs), 30_000)
+			: 30_000;
+	const abort = new AbortController();
+	const timeout = setTimeout(() => {
+		abort.abort(new DOMException("GitHub token request timed out", "TimeoutError"));
+	}, requestTimeoutMs);
+	let response: Response;
+	try {
+		response = await (options.fetchImpl ?? fetch)(options.workerTokenUrl, {
 			method: "POST",
 			headers: {
 				Authorization: `Bearer ${relayToken}`,
@@ -1350,19 +1544,42 @@ export async function startGitBroker(options: GitBrokerOptions): Promise<GitBrok
 				attemptId: options.attemptId,
 				leaseToken: options.leaseToken,
 			}),
+			signal: abort.signal,
 		});
-		if (!response.ok) throw new Error(`JIT token request failed with status ${response.status}`);
-		const payload: unknown = await response.json().catch(() => null);
-		if (
-			typeof payload !== "object" ||
-			payload === null ||
-			!("token" in payload) ||
-			typeof (payload as Record<string, unknown>).token !== "string" ||
-			(payload as Record<string, unknown>).token === ""
-		) {
-			throw new Error("JIT token response was invalid");
-		}
-		return (payload as Record<string, string>).token;
+	} finally {
+		clearTimeout(timeout);
+	}
+	if (!response.ok) throw new Error(`JIT token request failed with status ${response.status}`);
+	const payload: unknown = await response.json().catch(() => null);
+	if (
+		typeof payload !== "object" ||
+		payload === null ||
+		!("token" in payload) ||
+		typeof (payload as Record<string, unknown>).token !== "string" ||
+		(payload as Record<string, unknown>).token === ""
+	) {
+		throw new Error("JIT token response was invalid");
+	}
+	return (payload as Record<string, string>).token;
+}
+
+export async function startGitBroker(options: GitBrokerOptions): Promise<GitBrokerHandle> {
+	const bindAddress = options.bindAddress ?? "127.0.0.1";
+	const placeholderCredential = options.placeholderCredential ?? crypto.randomUUID();
+	const fetchImpl = options.fetchImpl ?? fetch;
+	const repoPrefix =
+		options.owner && options.repo ? `/gh/${options.owner}/${options.repo}` : undefined;
+	const fetchJitToken = (): Promise<string> => {
+		const relayToken = options.workerRelayToken?.trim();
+		if (!options.workerTokenUrl || !relayToken) throw new Error("git token broker is not configured");
+		return requestGitHubToken({
+			workerTokenUrl: options.workerTokenUrl,
+			workerRelayToken: relayToken,
+			jobId: options.jobId,
+			attemptId: options.attemptId,
+			leaseToken: options.leaseToken,
+			fetchImpl,
+		});
 	};
 
 	const server = Bun.serve({
@@ -1575,22 +1792,52 @@ async function submitResult(token: string, job: Job, result: JobRunResult): Prom
 }
 
 const HEARTBEAT_FALLBACK_MS = 10 * 60_000;
+export const MAX_HEARTBEAT_REQUEST_MS = 30_000;
+
+export interface HeartbeatRequestDependencies {
+	readonly fetchImpl?: typeof fetch;
+	readonly timeoutMs?: number;
+}
+
+export function heartbeatRequestTimeoutMs(heartbeatMs: number | undefined): number {
+	const cadence =
+		typeof heartbeatMs === "number" && Number.isFinite(heartbeatMs) && heartbeatMs > 0
+			? Math.floor(heartbeatMs)
+			: HEARTBEAT_FALLBACK_MS;
+	return Math.max(1, Math.min(MAX_HEARTBEAT_REQUEST_MS, cadence));
+}
 
 /**
- * Fenced heartbeat. Returns false when the Worker rejects the fence (409):
- * the lease was reassigned or resolved, so this attempt must stop burning
- * tokens — the caller kills the child and skips the result submit.
+ * Fenced heartbeat. Returns false when the Worker rejects the fence (409).
+ * Every request is abort-bounded so a stuck fetch cannot consume capacity
+ * forever; transport/timeout errors remain transient to withLeaseLiveLock.
  */
-async function sendHeartbeat(token: string, job: Job): Promise<boolean> {
-	const res = await fetch(`${WORKER_URL}/heartbeat`, {
-		method: "POST",
-		headers: { ...authHeaders(token), "Content-Type": "application/json" },
-		body: JSON.stringify({ jobId: job.id, attemptId: job.attemptId, leaseToken: job.leaseToken }),
-	});
+export async function sendHeartbeat(
+	token: string,
+	job: Job,
+	dependencies: HeartbeatRequestDependencies = {},
+): Promise<boolean> {
+	const timeoutMs =
+		dependencies.timeoutMs === undefined
+			? heartbeatRequestTimeoutMs(job.heartbeatMs)
+			: heartbeatRequestTimeoutMs(dependencies.timeoutMs);
+	const abort = new AbortController();
+	const timeout = setTimeout(() => {
+		abort.abort(new DOMException("heartbeat request timed out", "TimeoutError"));
+	}, timeoutMs);
+	let res: Response;
+	try {
+		res = await (dependencies.fetchImpl ?? fetch)(`${WORKER_URL}/heartbeat`, {
+			method: "POST",
+			headers: { ...authHeaders(token), "Content-Type": "application/json" },
+			body: JSON.stringify({ jobId: job.id, attemptId: job.attemptId, leaseToken: job.leaseToken }),
+			signal: abort.signal,
+		});
+	} finally {
+		clearTimeout(timeout);
+	}
 	if (res.status === 409) return false;
 	if (!res.ok) {
-		// Network or Worker hiccup: keep running; the next beat may recover
-		// and a reconcile-parked job is restored by any later fenced beat.
 		console.error(`[${new Date().toISOString()}] heartbeat for ${job.id} failed: ${res.status}`);
 	}
 	return true;
@@ -1635,7 +1882,10 @@ export interface MirrorDependencies {
 	mirrorExists?: (path: string) => Promise<boolean>;
 	makeDir?: (path: string) => Promise<void>;
 	warn?: (message: string) => void;
+	mirrorMutex?: KeyedMutex;
 }
+
+const defaultMirrorMutex = new KeyedMutex();
 
 /** Stable, filesystem-safe bare mirror location for one GitHub repository. */
 export function deriveMirrorPath(root: string, owner: string, repo: string): string {
@@ -1662,6 +1912,8 @@ export async function tryPrepareRepoMirror(
 			await mkdir(path, { recursive: true });
 		});
 	const warn = dependencies.warn ?? (message => console.error(message));
+	const lease = await (dependencies.mirrorMutex ?? defaultMirrorMutex).acquire(mirror);
+	if (!lease) return undefined;
 	try {
 		await makeDir(dirname(mirror));
 		if (await mirrorExists(mirror)) {
@@ -1675,6 +1927,8 @@ export async function tryPrepareRepoMirror(
 		const message = redactionToken ? rawMessage.replaceAll(redactionToken, "[redacted]") : rawMessage;
 		warn(`[${new Date().toISOString()}] GitHub mirror cache unavailable; using full clone: ${message}`);
 		return undefined;
+	} finally {
+		lease.release();
 	}
 }
 /** Workspace clones detach from the mirror so later pruning cannot break them. */
@@ -1821,6 +2075,15 @@ export async function prepareRuntimeGitHooks(
 	};
 }
 
+function includeNoProxyHost(raw: string | undefined, host: string): string {
+	const entries = (raw ?? "")
+		.split(",")
+		.map(entry => entry.trim())
+		.filter(entry => entry.length > 0);
+	if (!entries.some(entry => entry.toLowerCase() === host.toLowerCase())) entries.push(host);
+	return entries.join(",");
+}
+
 /**
  * Child environment for one attempt: the fence triple (the pre-push guard's
  * credential — never the relay bearer token) plus a `core.hooksPath`
@@ -1828,13 +2091,24 @@ export async function prepareRuntimeGitHooks(
  * child tree runs the fence guard. The override shadows repo-local hooks
  * for the child, which is intended for a headless runner workspace.
  */
-export function fenceEnv(job: Job, gitHooksDir: string = GIT_HOOKS_DIR): NodeJS.ProcessEnv {
-	const githubAuth =
-		job.source === "github" && job.githubToken
+export function fenceEnv(
+	job: Job,
+	gitHooksDir: string = GIT_HOOKS_DIR,
+	broker?: ContainerBrokerConfig,
+): NodeJS.ProcessEnv {
+	const brokeredGit =
+		hasGitHubTarget(job) && broker?.authenticatedGitBaseUrl
 			? {
-					GH_TOKEN: job.githubToken,
+					PATH: `${gitHooksDir}${delimiter}${process.env.PATH ?? ""}`,
+					NO_PROXY: includeNoProxyHost(process.env.NO_PROXY, new URL(broker.fenceUrl).hostname),
+					no_proxy: includeNoProxyHost(process.env.no_proxy, new URL(broker.fenceUrl).hostname),
+					OMPK_FENCE_URL: broker.fenceUrl,
+					OMPK_BROKER_URL: broker.fenceUrl.slice(0, -"/fence-check".length),
+					OMPK_BROKER_CREDENTIAL: broker.placeholderCredential,
+					OMPK_GITHUB_REPO: `${job.github.owner}/${job.github.repo}`,
+					OMPK_GITHUB_DEFAULT_BRANCH: job.github.defaultBranch,
 					GIT_CONFIG_COUNT: "2",
-					GIT_CONFIG_KEY_1: `url.https://x-access-token:${job.githubToken}@github.com/.insteadOf`,
+					GIT_CONFIG_KEY_1: `url.${broker.authenticatedGitBaseUrl}.insteadOf`,
 					GIT_CONFIG_VALUE_1: "https://github.com/",
 				}
 			: {
@@ -1842,13 +2116,16 @@ export function fenceEnv(job: Job, gitHooksDir: string = GIT_HOOKS_DIR): NodeJS.
 				};
 	return {
 		...process.env,
+		RELAY_TOKEN: undefined,
+		GH_TOKEN: undefined,
+		GITHUB_TOKEN: undefined,
 		OMPK_FENCE_URL: `${WORKER_URL}/fence-check`,
 		OMPK_FENCE_JOB: job.id,
 		OMPK_FENCE_ATTEMPT: job.attemptId,
 		OMPK_FENCE_TOKEN: job.leaseToken,
 		GIT_CONFIG_KEY_0: "core.hooksPath",
 		GIT_CONFIG_VALUE_0: gitHooksDir,
-		...githubAuth,
+		...brokeredGit,
 	};
 }
 
@@ -1862,14 +2139,13 @@ export function scrubJobResult(result: JobRunResult, secret: string | undefined)
 	};
 }
 
-async function runOnce(token: string, allowedModels: readonly string[]): Promise<boolean> {
-	const job = await pollJob(token);
-	if (!job) return false;
+const jobMutex = new KeyedMutex();
 
-	console.log(`[${new Date().toISOString()}] running job ${job.id} (${job.issueIdentifier}, model=${job.model})`);
+async function runJob(token: string, allowedModels: readonly string[], job: Job): Promise<void> {
 	let child: ChildProcess | undefined;
 	let fenceLost = false;
 	let workspace: string | undefined;
+	let cloneToken: string | undefined;
 	let activeContainerName: string | undefined;
 	let containerStop: Promise<void> | undefined;
 	let jobNetwork: JobNetworkHandle | undefined;
@@ -1899,150 +2175,182 @@ async function runOnce(token: string, allowedModels: readonly string[]): Promise
 	const discardIfFenced = async (): Promise<boolean> => {
 		if (!fenceLost) return false;
 		await stopActive();
-		console.error(`[${new Date().toISOString()}] job ${job.id} discarded: lease no longer held`);
 		return true;
 	};
-	const cadence = job.heartbeatMs ?? HEARTBEAT_FALLBACK_MS;
-	const beat = setInterval(() => {
-		void sendHeartbeat(token, job).then(live => {
-			if (live || fenceLost) return;
-			fenceLost = true;
-			console.error(`[${new Date().toISOString()}] lease for job ${job.id} was fenced off; killing runner`);
-			void stopActive();
-		});
-	}, cadence);
-	try {
-		try {
-			workspace = job.source === "github" ? await prepareGitHubWorkspace(job) : undefined;
-			const executionWorkspace = workspace ?? WORKSPACE_DIR;
-			const setupContainerName = deriveContainerName(job.id, job.attemptId, "setup");
-			const agentContainerName = deriveContainerName(job.id, job.attemptId, "agent");
-			let containerOptions: ContainerRunOptions | undefined;
-			let result: JobRunResult;
-			if (!allowedModels.includes(job.model)) {
-				result = await executeJob(job, allowedModels, spawn, JOB_TIMEOUT_MS);
-			} else {
-				if (await discardIfFenced()) return true;
-				let agentEnv = fenceEnv(job);
-				if (CONTAINER_IMAGE) {
-					runtimeGitHooks = await prepareRuntimeGitHooks();
-					agentEnv = fenceEnv(job, runtimeGitHooks.path);
-					jobNetwork = await createJobNetwork(job.id, job.attemptId, CONTAINER_IMAGE);
-					containerOptions = {
-						image: CONTAINER_IMAGE,
-						network: jobNetwork.name,
-						memory: CONTAINER_MEMORY,
-						pidsLimit: CONTAINER_PIDS_LIMIT,
-						gitHooksDir: runtimeGitHooks.path,
-						noProxyHosts: jobNetwork.gatewayIp,
-					};
-					phaseProxy = await startEgressProxy("setup", {
-						bindAddress: jobNetwork.gatewayIp,
-					});
-					await jobNetwork.setAllowedPorts([phaseProxy.port]);
+	const scrubCredentials = (result: JobRunResult): JobRunResult =>
+		scrubJobResult(scrubJobResult(result, job.githubToken), cloneToken);
+	const brokerOptions = (bindAddress: string): GitBrokerOptions => ({
+		jobId: job.id,
+		attemptId: job.attemptId,
+		leaseToken: job.leaseToken,
+		workerFenceUrl: `${WORKER_URL}/fence-check`,
+		bindAddress,
+		...(hasGitHubTarget(job)
+			? {
+					owner: job.github.owner,
+					repo: job.github.repo,
+					defaultBranch: job.github.defaultBranch,
+					workerTokenUrl: `${WORKER_URL}/github-token`,
+					workerRelayToken: token,
 				}
-				const setupEnv = buildSetupHookEnv();
-				const setupResult = await runSetupHook(executionWorkspace, {
-					spawn,
-					timeoutMs: SETUP_TIMEOUT_MS,
-					env: setupEnv,
-					onSpawn: registerChild(containerOptions ? setupContainerName : undefined),
-					redactionToken: job.githubToken,
-					...(containerOptions && jobNetwork && phaseProxy
-						? {
-								command: CONTAINER_BIN,
-								args: buildContainerSetupArgs(executionWorkspace, setupEnv, {
-									...containerOptions,
-									name: setupContainerName,
-									egressProxyUrl: `http://${jobNetwork.gatewayIp}:${phaseProxy.port}`,
-								}),
-								spawnEnv: process.env,
-								nonZeroFailureClass: "transient" as const,
-								onTimeout: () => stopNamedContainer(setupContainerName, child),
-							}
-						: {}),
-				});
-				activeContainerName = undefined;
-				child = undefined;
-				phaseProxy?.stop();
-				phaseProxy = undefined;
-				if (await discardIfFenced()) return true;
-				if (setupResult !== undefined) {
-					result = setupResult;
-				} else if (containerOptions && jobNetwork) {
-					phaseProxy = await startEgressProxy("agent", {
-						bindAddress: jobNetwork.gatewayIp,
-					});
-					broker = await startGitBroker({
-						jobId: job.id,
-						attemptId: job.attemptId,
-						leaseToken: job.leaseToken,
-						workerFenceUrl: `${WORKER_URL}/fence-check`,
-						bindAddress: jobNetwork.gatewayIp,
-						...(job.source === "github" && job.github
-							? {
-									owner: job.github.owner,
-									repo: job.github.repo,
-									defaultBranch: job.github.defaultBranch,
-									workerTokenUrl: `${WORKER_URL}/github-token`,
-									workerRelayToken: token,
-								}
-							: {}),
-					});
-					await jobNetwork.setAllowedPorts([phaseProxy.port, broker.port]);
-					result = await executeJob(job, allowedModels, spawn, JOB_TIMEOUT_MS, {
-						onSpawn: registerChild(agentContainerName),
-						command: CONTAINER_BIN,
-						args: buildContainerArgs(
-							job,
-							executionWorkspace,
-							agentEnv,
-							{
-								...containerOptions,
-								name: agentContainerName,
-								egressProxyUrl: `http://${jobNetwork.gatewayIp}:${phaseProxy.port}`,
-							},
-							broker,
-						),
-						cwd: WORKSPACE_DIR,
-						nonZeroFailureClass: "transient",
-						onTimeout: () => stopNamedContainer(agentContainerName, child),
-						detached: process.platform !== "win32",
-					});
-				} else {
-					result = await executeJob(job, allowedModels, spawn, JOB_TIMEOUT_MS, {
-						onSpawn: registerChild(),
-						env: agentEnv,
-						cwd: workspace,
-					});
-				}
-			}
-			if (await discardIfFenced()) return true;
-			await submitResult(token, job, scrubJobResult(result, job.githubToken));
-			console.log(`[${new Date().toISOString()}] job ${job.id} ${result.success ? "succeeded" : "failed"}`);
-		} catch (err) {
-			const result: JobRunResult = {
-				success: false,
-				output: "",
-				error: err instanceof Error ? err.message : "GitHub workspace preparation failed",
-				failureClass: "transient",
-			};
-			if (!fenceLost) await submitResult(token, job, scrubJobResult(result, job.githubToken));
-		}
-	} finally {
-		clearInterval(beat);
-		if (containerStop) await containerStop;
-		await broker?.stop().catch(() => undefined);
-		phaseProxy?.stop();
-		await jobNetwork?.remove().catch(err => {
-			console.error(
-				`[${new Date().toISOString()}] failed to remove network ${jobNetwork!.name}: ${err instanceof Error ? err.message : err}`,
+			: {}),
+	});
+
+	const outcome = await withLeaseLiveLock(
+		{
+			mutex: jobMutex,
+			key: jobSerializationKey(job),
+			heartbeatMs: job.heartbeatMs ?? HEARTBEAT_FALLBACK_MS,
+			heartbeat: () => sendHeartbeat(token, job),
+			onFenceLoss: async () => {
+				fenceLost = true;
+				console.error(`[${new Date().toISOString()}] lease for job ${job.id} was fenced off; killing runner`);
+				await stopActive();
+			},
+			onHeartbeatError: error => {
+				console.error(
+					`[${new Date().toISOString()}] heartbeat for ${job.id} failed: ${error instanceof Error ? error.message : error}`,
+				);
+			},
+		},
+		async () => {
+			console.log(
+				`[${new Date().toISOString()}] running job ${job.id} (${job.issueIdentifier}, model=${job.model})`,
 			);
-		});
-		if (workspace) await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
-		await runtimeGitHooks?.remove().catch(() => undefined);
+			try {
+				try {
+					if (hasGitHubTarget(job)) {
+						cloneToken = await requestGitHubToken({
+							workerTokenUrl: `${WORKER_URL}/github-token`,
+							workerRelayToken: token,
+							jobId: job.id,
+							attemptId: job.attemptId,
+							leaseToken: job.leaseToken,
+						});
+						workspace = await prepareGitHubWorkspace({ ...job, githubToken: cloneToken });
+					}
+					const executionWorkspace = workspace ?? WORKSPACE_DIR;
+					const setupContainerName = deriveContainerName(job.id, job.attemptId, "setup");
+					const agentContainerName = deriveContainerName(job.id, job.attemptId, "agent");
+					let containerOptions: ContainerRunOptions | undefined;
+					let result: JobRunResult;
+					if (!allowedModels.includes(job.model)) {
+						result = await executeJob(job, allowedModels, spawn, JOB_TIMEOUT_MS);
+					} else {
+						if (await discardIfFenced()) return;
+						if (CONTAINER_IMAGE) {
+							jobNetwork = await createJobNetwork(job.id, job.attemptId, CONTAINER_IMAGE);
+							containerOptions = {
+								image: CONTAINER_IMAGE,
+								network: jobNetwork.name,
+								memory: CONTAINER_MEMORY,
+								pidsLimit: CONTAINER_PIDS_LIMIT,
+								noProxyHosts: jobNetwork.gatewayIp,
+							};
+							phaseProxy = await startEgressProxy("setup", {
+								bindAddress: jobNetwork.gatewayIp,
+							});
+							await jobNetwork.setAllowedPorts([phaseProxy.port]);
+						}
+						const setupEnv = buildSetupHookEnv();
+						const setupResult = await runSetupHook(executionWorkspace, {
+							spawn,
+							timeoutMs: SETUP_TIMEOUT_MS,
+							env: setupEnv,
+							onSpawn: registerChild(containerOptions ? setupContainerName : undefined),
+							redactionToken: cloneToken,
+							...(containerOptions && jobNetwork && phaseProxy
+								? {
+										command: CONTAINER_BIN,
+										args: buildContainerSetupArgs(executionWorkspace, setupEnv, {
+											...containerOptions,
+											name: setupContainerName,
+											egressProxyUrl: `http://${jobNetwork.gatewayIp}:${phaseProxy.port}`,
+										}),
+										spawnEnv: process.env,
+										nonZeroFailureClass: "transient" as const,
+										onTimeout: () => stopNamedContainer(setupContainerName, child),
+									}
+								: {}),
+						});
+						activeContainerName = undefined;
+						child = undefined;
+						phaseProxy?.stop();
+						phaseProxy = undefined;
+						if (await discardIfFenced()) return;
+						if (setupResult !== undefined) {
+							result = setupResult;
+						} else {
+							runtimeGitHooks = await prepareRuntimeGitHooks();
+							if (containerOptions && jobNetwork) {
+								phaseProxy = await startEgressProxy("agent", {
+									bindAddress: jobNetwork.gatewayIp,
+								});
+								broker = await startGitBroker(brokerOptions(jobNetwork.gatewayIp));
+								await jobNetwork.setAllowedPorts([phaseProxy.port, broker.port]);
+								const agentEnv = fenceEnv(job, runtimeGitHooks.path, broker);
+								result = await executeJob(job, allowedModels, spawn, JOB_TIMEOUT_MS, {
+									onSpawn: registerChild(agentContainerName),
+									command: CONTAINER_BIN,
+									args: buildContainerArgs(
+										job,
+										executionWorkspace,
+										agentEnv,
+										{
+											...containerOptions,
+											name: agentContainerName,
+											gitHooksDir: runtimeGitHooks.path,
+											egressProxyUrl: `http://${jobNetwork.gatewayIp}:${phaseProxy.port}`,
+										},
+										broker,
+									),
+									cwd: WORKSPACE_DIR,
+									nonZeroFailureClass: "transient",
+									onTimeout: () => stopNamedContainer(agentContainerName, child),
+									detached: process.platform !== "win32",
+								});
+							} else {
+								if (hasGitHubTarget(job)) {
+									broker = await startGitBroker(brokerOptions("127.0.0.1"));
+								}
+								const agentEnv = fenceEnv(job, runtimeGitHooks.path, broker);
+								result = await executeJob(job, allowedModels, spawn, JOB_TIMEOUT_MS, {
+									onSpawn: registerChild(),
+									env: agentEnv,
+									cwd: workspace,
+								});
+							}
+						}
+					}
+					if (await discardIfFenced()) return;
+					await submitResult(token, job, scrubCredentials(result));
+					console.log(`[${new Date().toISOString()}] job ${job.id} ${result.success ? "succeeded" : "failed"}`);
+				} catch (err) {
+					const result: JobRunResult = {
+						success: false,
+						output: "",
+						error: err instanceof Error ? err.message : "GitHub workspace preparation failed",
+						failureClass: "transient",
+					};
+					if (!fenceLost) await submitResult(token, job, scrubCredentials(result));
+				}
+			} finally {
+				if (containerStop) await containerStop;
+				await broker?.stop().catch(() => undefined);
+				phaseProxy?.stop();
+				await jobNetwork?.remove().catch(err => {
+					console.error(
+						`[${new Date().toISOString()}] failed to remove network ${jobNetwork!.name}: ${err instanceof Error ? err.message : err}`,
+					);
+				});
+				if (workspace) await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
+				await runtimeGitHooks?.remove().catch(() => undefined);
+			}
+		},
+	);
+	if (outcome.status === "fenced") {
+		console.error(`[${new Date().toISOString()}] job ${job.id} discarded: lease no longer held`);
 	}
-	return true;
 }
 
 async function main(): Promise<void> {
@@ -2056,13 +2364,31 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 	console.log(
-		`ompk relay "${RELAY_NAME}" starting — polling ${WORKER_URL} every ${POLL_INTERVAL_MS}ms, ${allowedModels.length} allowed model(s)`,
+		`ompk relay "${RELAY_NAME}" starting — polling ${WORKER_URL} every ${POLL_INTERVAL_MS}ms, capacity ${RELAY_CAPACITY}, ${allowedModels.length} allowed model(s)`,
 	);
 	await announceStartup(RELAY_TOKEN);
+	const activeJobs = new Set<Promise<void>>();
 	for (;;) {
+		if (activeJobs.size >= RELAY_CAPACITY) {
+			await Promise.race(activeJobs);
+			continue;
+		}
 		try {
-			const ranSomething = await runOnce(RELAY_TOKEN, allowedModels);
-			if (!ranSomething) await Bun.sleep(POLL_INTERVAL_MS);
+			const job = await pollJob(RELAY_TOKEN);
+			if (!job) {
+				await Bun.sleep(POLL_INTERVAL_MS);
+				continue;
+			}
+			const activeJob = runJob(RELAY_TOKEN, allowedModels, job).catch(error => {
+				console.error(
+					`relay job ${job.id} failed unexpectedly:`,
+					error instanceof Error ? error.message : error,
+				);
+			});
+			activeJobs.add(activeJob);
+			void activeJob.then(() => {
+				activeJobs.delete(activeJob);
+			});
 		} catch (err) {
 			console.error("relay loop error:", err instanceof Error ? err.message : err);
 			await Bun.sleep(POLL_INTERVAL_MS);

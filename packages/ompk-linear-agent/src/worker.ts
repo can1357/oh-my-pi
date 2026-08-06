@@ -131,8 +131,8 @@ function extractIssueId(payload: LinearWebhookPayload): string | null {
 	return null;
 }
 async function postJobComment(env: Env, deps: WorkerDeps, job: Job, body: string): Promise<void> {
-	if (job.source === "github") {
-		if (!deps.github || !job.github) throw new Error("GitHub job dependencies are not configured");
+	if (job.github) {
+		if (!deps.github) throw new Error("GitHub job dependencies are not configured");
 		const installationToken = await deps.github.createInstallationToken(env, job.github.installationId);
 		await deps.github.postComment(installationToken.token, job.github, body);
 		return;
@@ -338,11 +338,10 @@ async function handlePoll(request: Request, env: Env, deps: WorkerDeps): Promise
 	if (!grant) return new Response(null, { status: 204 });
 	const { job, attemptId, leaseToken } = grant;
 	const githubToken =
-		job.source === "github" && deps.github && job.github
-			? await deps.github.createInstallationToken(env, job.github.installationId)
-			: undefined;
+		deps.github && job.github ? await deps.github.createInstallationToken(env, job.github.installationId) : undefined;
 	return json({
 		id: job.id,
+		source: job.source,
 		issueId: job.issueId,
 		issueIdentifier: job.issueIdentifier,
 		model: job.model,
@@ -351,7 +350,7 @@ async function handlePoll(request: Request, env: Env, deps: WorkerDeps): Promise
 		createdAt: job.createdAt,
 		attemptId,
 		leaseToken,
-		...(job.source === "github" && job.github && githubToken
+		...(job.github && githubToken
 			? { github: job.github, githubToken: githubToken.token, githubTokenExpiresAt: githubToken.expiresAt }
 			: {}),
 		heartbeatMs: DEFAULT_QUEUE_LIMITS.heartbeatMs,
@@ -573,7 +572,7 @@ async function handleGitHubToken(request: Request, env: Env, deps: WorkerDeps): 
 	const { valid } = await queue.checkFence(body.jobId, body.attemptId, body.leaseToken);
 	if (!valid) return json({ error: "stale fence" }, 409);
 	const job = await queue.getJob(body.jobId);
-	if (job?.source !== "github" || !job.github) {
+	if (!job?.github) {
 		return json({ error: "job has no GitHub target" }, 403);
 	}
 	const token = await deps.github.createInstallationToken(env, job.github.installationId);

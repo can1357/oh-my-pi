@@ -1,12 +1,12 @@
 #!/bin/sh
-# Narrow gh compatibility shim for fenced agent containers.
+# Narrow gh compatibility shim for relay agent jobs.
 # Only `gh pr create` is supported. The host broker pins the repository,
-# validates refs, mints the JIT token, and never returns a credential here.
+# validates refs, mints a JIT token per operation, and never returns a credential here.
 
 set -eu
 
 if [ "${1:-}" != "pr" ] || [ "${2:-}" != "create" ]; then
-	echo "ompk gh wrapper: fenced container mode supports only 'gh pr create'" >&2
+	echo "ompk gh wrapper: relay mode supports only 'gh pr create'" >&2
 	exit 2
 fi
 shift 2

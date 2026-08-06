@@ -38,6 +38,30 @@ function makeIssue(overrides: Partial<IssueDetails> = {}): IssueDetails {
 	};
 }
 
+function makeGitHubJob(overrides: Partial<Job> = {}): Job {
+	return {
+		id: "github-job-1",
+		source: "github",
+		github: {
+			owner: "kingkillery",
+			repo: "oh-my-pk",
+			number: 41,
+			installationId: "12345",
+			defaultBranch: "main",
+			isPullRequest: false,
+		},
+		issueId: "kingkillery/oh-my-pk#41",
+		issueIdentifier: "kingkillery/oh-my-pk#41",
+		model: "combo-a",
+		prompt: "implement",
+		status: "pending",
+		createdAt: "2026-08-06T18:00:00Z",
+		dedupeKey: "github:issue:41",
+		attempts: 0,
+		...overrides,
+	};
+}
+
 interface Harness {
 	worker: { fetch(request: Request, env: Env): Promise<Response> };
 	stub: FakeQueueStub;
@@ -200,11 +224,13 @@ describe("relay poll and fenced completion", () => {
 	it("leases a job with fencing identity and completes it with exactly one comment", async () => {
 		const leased = (await (await harness.worker.fetch(pollRequest(), makeEnv())).json()) as {
 			id: string;
+			source?: string;
 			attemptId: string;
 			leaseToken: string;
 			prompt: string;
 		};
 		expect(leased.attemptId).toBeDefined();
+		expect(leased.source).toBe("linear");
 		expect(leased.leaseToken).toBeDefined();
 		expect(leased.prompt).toContain("Fix the parser");
 
@@ -744,28 +770,48 @@ describe("fence-check endpoint", () => {
 });
 
 describe("GitHub JIT token broker endpoint", () => {
+	it("serializes source and GitHub metadata in the real poll grant", async () => {
+		const stub = new FakeQueueStub();
+		await stub.admit(makeGitHubJob());
+		let tokenMints = 0;
+		const worker = createWorker({
+			fetchIssue: async () => makeIssue(),
+			postComment: async () => undefined,
+			github: {
+				createInstallationToken: async (_env, installationId) => {
+					expect(installationId).toBe("12345");
+					tokenMints += 1;
+					return { token: "ghs_poll_clone_only", expiresAt: "2026-08-06T20:00:00Z" };
+				},
+				fetchWorkItem: async () => {
+					throw new Error("unused");
+				},
+				postComment: async () => undefined,
+				getCollaboratorPermission: async () => null,
+			},
+			queue: () => stub,
+		});
+		const response = await worker.fetch(
+			new Request("https://worker.test/poll?relay=relay-test", {
+				headers: { Authorization: `Bearer ${RELAY_TOKEN}` },
+			}),
+			makeEnv(),
+		);
+		expect(response.status).toBe(200);
+		const grant = (await response.json()) as {
+			source?: string;
+			github?: Job["github"];
+			githubToken?: string;
+		};
+		expect(grant.source).toBe("github");
+		expect(grant.github).toEqual(makeGitHubJob().github);
+		expect(grant.githubToken).toBe("ghs_poll_clone_only");
+		expect(tokenMints).toBe(1);
+	});
+
 	it("requires the host relay bearer in addition to the current GitHub fence", async () => {
 		const stub = new FakeQueueStub();
-		const githubJob: Job = {
-			id: "github-job-1",
-			source: "github",
-			github: {
-				owner: "kingkillery",
-				repo: "oh-my-pk",
-				number: 41,
-				installationId: "12345",
-				defaultBranch: "main",
-				isPullRequest: false,
-			},
-			issueId: "kingkillery/oh-my-pk#41",
-			issueIdentifier: "kingkillery/oh-my-pk#41",
-			model: "combo-a",
-			prompt: "implement",
-			status: "pending",
-			createdAt: new Date().toISOString(),
-			dedupeKey: "github:issue:41",
-			attempts: 0,
-		};
+		const githubJob = makeGitHubJob({ source: undefined });
 		await stub.admit(githubJob);
 		const grant = await stub.lease("relay-test");
 		expect(grant).not.toBeNull();
