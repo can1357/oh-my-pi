@@ -3,10 +3,40 @@ import * as path from "node:path";
 
 /** Session file injected into the replacement process during an automatic handoff. */
 export const AUTO_RESTART_SESSION_FILE_ENV = "OMP_AUTO_RESTART_SESSION_FILE";
+/** Process id of the handoff parent, so only its direct replacement accepts the session file. */
+export const AUTO_RESTART_PARENT_PID_ENV = "OMP_AUTO_RESTART_PARENT_PID";
 /** Optional stable launcher path supplied by wrappers that need custom Bun preloads. */
 export const AUTO_RESTART_COMMAND_ENV = "OMP_AUTO_RESTART_COMMAND";
 /** Optional additional artifact path for a wrapper or package manager to monitor. */
 export const AUTO_RESTART_WATCH_PATH_ENV = "OMP_AUTO_RESTART_WATCH_PATH";
+
+/** Environment entries that hand one persisted session to a replacement process. */
+export function autoRestartHandoffEnv(sessionFile: string, parentPid: number): Record<string, string> {
+	return {
+		[AUTO_RESTART_SESSION_FILE_ENV]: sessionFile,
+		[AUTO_RESTART_PARENT_PID_ENV]: String(parentPid),
+	};
+}
+
+/**
+ * Take the one-shot handoff token addressed to this process. The token travels
+ * in the environment, which every descendant of the replacement inherits, so it
+ * is bound to the spawning process id: a nested `omp`, a tool subprocess, or a
+ * long-lived daemon started from the replacement sees a token addressed to
+ * someone else and must not be hijacked into resuming that session. Both keys
+ * are removed either way so nothing further down the tree observes them.
+ */
+export function consumeAutoRestartHandoff(
+	env: Record<string, string | undefined>,
+	parentPid: number,
+): string | undefined {
+	const sessionFile = env[AUTO_RESTART_SESSION_FILE_ENV];
+	const handoffParent = env[AUTO_RESTART_PARENT_PID_ENV];
+	delete env[AUTO_RESTART_SESSION_FILE_ENV];
+	delete env[AUTO_RESTART_PARENT_PID_ENV];
+	if (!sessionFile) return undefined;
+	return handoffParent === String(parentPid) ? sessionFile : undefined;
+}
 
 export interface AutoRestartProcess {
 	argv: readonly string[];
