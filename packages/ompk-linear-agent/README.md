@@ -118,15 +118,23 @@ active refreshes the prompt under the same attempt rules as Linear.
 1. The Worker admits the job (`source: "github"`) with repo metadata
    (`owner/repo`, number, default branch, PR head ref, installation id).
 2. The relay's `/poll` grant carries the metadata plus a fresh installation
-   token. The relay clones the repo into a per-job workspace under
-   `OMPK_RELAY_GITHUB_ROOT` (default `<workspace>/github-workspaces`),
-   checks out the PR head branch — or a new `ompk/issue-<n>-<jobid>` branch
-   off the default branch for issues — and runs `omp` there. Linear jobs
-   keep using the static `OMPK_RELAY_WORKSPACE`.
-3. The child env carries `GH_TOKEN` plus a git `insteadOf` rewrite, so `git
+   token. It refreshes a bare mirror at
+   `<OMPK_RELAY_GITHUB_ROOT>/.mirrors/<owner>-<repo>.git`, then makes the
+   per-job clone with `--reference-if-able --dissociate`. Mirror failures log
+   a warning and fall back to a full clone; the disposable workspace never
+   depends on the mirror after cloning.
+3. The relay checks out the PR head branch — or a new
+   `ompk/issue-<n>-<jobid>` branch off the default branch for issues. If the
+   checkout declares `.ompk/setup.sh`, the relay runs it with `bash` before
+   the agent, without GitHub, git-rewrite, relay, or lease-fence credentials.
+4. By default `omp` runs directly in the workspace, preserving the existing
+   bare-process behavior. Setting `OMPK_RELAY_CONTAINER_IMAGE` instead runs
+   setup and agent phases in separate, disposable containers using that same
+   image, with the workspace mounted at `/workspace`.
+5. The agent env carries `GH_TOKEN` plus a git `insteadOf` rewrite, so `git
    push` and `gh pr create` inside the run authenticate as the App
    installation. The pre-push fence guard applies unchanged.
-4. The relay scrubs the installation token from all reported output, then
+6. The relay scrubs the installation token from all reported output, then
    posts `/result`; the Worker mints a NEW installation token at result time
    and posts the outcome as an issue/PR comment (tokens expire after 1 h, so
    completion never reuses the leased one). Reconcile parking and
@@ -310,13 +318,28 @@ bun run relay
 
 Required env vars: `RELAY_TOKEN`, `OMPK_RELAY_MODELS` (comma-separated model
 allowlist; jobs naming any other model are reported back as failures without
-executing). Optional: `RELAY_NAME` (defaults to hostname),
-`OMPK_RELAY_WORKSPACE` (cwd `omp` runs in, defaults to the relay's own cwd),
-`OMPK_RELAY_POLL_MS` (default 5000), `OMPK_RELAY_JOB_TIMEOUT_MS` (default
-30 min), `OMPK_RELAY_OMP_BIN` (absolute path to the `omp` executable when
-PATH resolution can't find it), `OMPK_RELAY_GITHUB_ROOT` (parent directory
-for per-job GitHub clones, defaults to `<workspace>/github-workspaces`;
-each GitHub job clones fresh and is deleted afterwards).
+executing). Existing optional settings remain: `RELAY_NAME` (hostname),
+`OMPK_RELAY_WORKSPACE` (relay cwd), `OMPK_RELAY_POLL_MS` (5000),
+`OMPK_RELAY_JOB_TIMEOUT_MS` (30 min), `OMPK_RELAY_OMP_BIN` (`omp`), and
+`OMPK_RELAY_GITHUB_ROOT` (`<workspace>/github-workspaces`).
+
+Isolation, setup, and cache settings:
+
+| Environment variable | Default | Effect |
+| --- | --- | --- |
+| `OMPK_RELAY_CONTAINER_IMAGE` | empty (off) | Runs each setup/agent phase with `podman run --rm`; empty keeps bare-process execution and requires no Podman installation. |
+| `OMPK_RELAY_CONTAINER_BIN` | `podman` | Container runtime binary or absolute path used when an image is enabled. |
+| `OMPK_RELAY_CONTAINER_MEMORY` | `4g` | Per-container memory limit. Containers also use a fixed 2048 PID limit, tmpfs `HOME`, and host networking. |
+| `OMPK_RELAY_SETUP_TIMEOUT_MS` | `600000` | Hard timeout for a repository's optional `.ompk/setup.sh`. |
+| `OMPK_RELAY_GITHUB_ROOT` | `<workspace>/github-workspaces` | Holds disposable job clones plus reusable bare mirrors under `.mirrors/`. |
+
+The container image is operator-provided and must contain `omp`, Bun, Git, and
+`bash`. It must also arrange usable model authentication (for example a
+host-network-reachable auth broker); the container receives neither the host
+credential store nor its `HOME`. The agent container receives only
+`PATH`/`HOME`, the lease-fence and git-hook variables, and (for GitHub jobs)
+`GH_TOKEN` plus its git URL rewrite. Setup containers do not receive those
+credentials.
 
 ### Relay security posture
 
@@ -330,6 +353,9 @@ untrusted-input surfaces:
   lose (the default is only the relay's own cwd);
 - run the relay under a low-privilege user where practical;
 - keep `OMPK_RELAY_MODELS` minimal.
+- enable `OMPK_RELAY_CONTAINER_IMAGE` on Linux relays when the image and model
+  authentication path have been validated; v1 deliberately uses
+  `--network=host`, so it does not provide egress control.
 
 ## Automation boundary
 
