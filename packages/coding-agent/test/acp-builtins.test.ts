@@ -275,6 +275,7 @@ describe("ACP builtin slash commands", () => {
 			"Extended context disabled.",
 			"Extended context is off.",
 		]);
+	});
 	it("reports active automatic fast mode as on", async () => {
 		const { output, runtime, session } = createRuntime();
 		session.model = { provider: "openai", id: "gpt-5.2" };
