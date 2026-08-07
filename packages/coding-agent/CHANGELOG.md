@@ -1125,6 +1125,7 @@
 
 - Reworked the Ctrl+S Agent Hub into a responsive fullscreen roster and selected-agent inspector, featuring aggregate status/usage metrics, detailed per-agent views (task, model, activity, usage, lineage), roster and spawn-tree views, stable ordering, asynchronous persisted-session discovery, restored historical metadata, and improved keyboard and mouse navigation.
 - Replaced `arktype` with `@oh-my-pi/omptype` for all tool parameter and configuration schemas, resulting in significantly faster startup times. Configuration schema errors are now reported via `OmpErrors` entries using the standard `path`/`problem` format.
+- Allowed registry-declared optional-key providers to resolve credentials owned by their transport without failing OMP's generic API-key preflight, and documented Factory Droid's headless token override.
 
 ### Fixed
 
