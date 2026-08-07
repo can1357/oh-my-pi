@@ -336,6 +336,10 @@
 - Fixed Devin model families (including SWE-1.7, Claude 5, Gemini 3.6 Flash, Kimi K3, Grok 4.5, and Inkling) to correctly group as logical models with reasoning-effort routing instead of separate wire variants.
 - Added missing context-window and output-token limits for dynamically discovered Alibaba Token Plan models.
 
+### Added
+
+- Added the `factory-droid` provider with a static Droid Core model registry mirroring the Droid CLI's bundled catalog (Kimi K3, Kimi K2.6/K2.7 Code, DeepSeek V4 Pro/Flash, GLM-5.2/5.2 Fast, GLM-4.6, Nemotron 3 Ultra), per-model upstream routing headers, reasoning ladders, and zero-cost subscription accounting.
+
 ## [17.2.10] - 2026-08-06
 
 ### Changed
