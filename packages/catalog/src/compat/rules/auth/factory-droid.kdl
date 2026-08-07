@@ -1,0 +1,5 @@
+auth "factory-droid" {
+    name "Factory Droid"
+    login "custom" hook="factory-droid"
+    refresh hook="factory-droid"
+}
