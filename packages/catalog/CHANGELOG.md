@@ -338,7 +338,7 @@
 
 ### Added
 
-- Added the `factory-droid` provider with a static Droid Core model registry mirroring the Droid CLI's bundled catalog (Kimi K3, Kimi K2.6/K2.7 Code, DeepSeek V4 Pro/Flash, GLM-5.2/5.2 Fast, GLM-4.6, Nemotron 3 Ultra), per-model upstream routing headers, reasoning ladders, and zero-cost subscription accounting.
+- Added the `factory-droid` provider with a static model registry ported byte-faithfully from the Droid CLI's compiled-in catalog: 55 CLI-visible models across the Droid Core flat-rate series (Kimi, GLM, DeepSeek, MiniMax, Inkling, Nemotron) and Standard Credits families (GPT-5.x, Claude, Gemini, Grok), with per-model wire protocol (`openai-completions`/`openai-responses`/`anthropic-messages`/`google-generate`), upstream rotation lists, reasoning ladders, credit multipliers, context limits, and Statsig feature-flag plus hard-deprecation gating matching the CLI's picker.
 
 ## [17.2.10] - 2026-08-06
 
