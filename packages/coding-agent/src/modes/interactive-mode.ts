@@ -165,7 +165,7 @@ import {
 	setSessionTerminalTitle,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
-import { restoreTmuxWindowName, setTmuxWindowName, setTmuxWindowNameEnabled } from "../utils/tmux-session";
+import { TmuxWindowNamer } from "../utils/tmux-session";
 import {
 	aggregateVibeWorkerTokensPerSecond,
 	type VibeOwnerScope,
@@ -757,6 +757,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	#autocompleteProviderFactories: AutocompleteProviderFactory[] = [];
 	#cleanupUnsubscribe?: () => void;
 	#signalTeardown?: SessionTeardown;
+	/**
+	 * Owns this mode's tmux window name. Instance-scoped so two in-process modes
+	 * cannot clobber each other's captured window name; restored by `shutdown()`
+	 * and, on signal/fatal exits, by the postmortem cleanup it registers itself.
+	 */
+	readonly #tmuxWindow = new TmuxWindowNamer();
 	readonly #version: string;
 	readonly #startupChangelog: StartupChangelogSelection | undefined;
 	/** Header components below the config warnings + welcome, retained so a live config-warning change can rebuild the header (#10048). */
@@ -1305,9 +1311,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		pushTerminalTitle();
 		setTerminalTitleStateEnabled(this.settings.get("tui.titleState"));
-		setTmuxWindowNameEnabled(this.settings.get("tui.tmuxWindowName"));
+		this.#tmuxWindow.setEnabled(this.settings.get("tui.tmuxWindowName"));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
-		setTmuxWindowName(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		this.#tmuxWindow.sync(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
 		// #focusController exists, which updateEditorBorderColor dereferences.
@@ -1330,7 +1336,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 			this.sessionManager.onSessionNameChanged(() => {
 				setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
-				setTmuxWindowName(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+				this.#tmuxWindow.sync(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 				this.#handleSessionAccentInputsChanged();
 			}),
 		);
@@ -1704,7 +1710,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		// The tmux window name falls back to the cwd basename for unnamed sessions.
-		setTmuxWindowName(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		this.#tmuxWindow.sync(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		this.statusLine.applyCwdChange();
 		return true;
 	}
@@ -5252,7 +5258,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// terminal back (which would leave the parent shell with a `π ⠋ …` tab).
 		disposeTerminalTitleState();
 		popTerminalTitle();
-		restoreTmuxWindowName();
+		this.#tmuxWindow.restore();
 		this.stop();
 	}
 
