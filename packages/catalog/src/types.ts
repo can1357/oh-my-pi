@@ -19,6 +19,7 @@ export type KnownApi =
 	| "google-vertex"
 	| "ollama-chat"
 	| "cursor-agent"
+	| "factory-droid-agent"
 	| "gitlab-duo-agent"
 	| "devin-agent";
 export type Api = KnownApi | (string & {});
