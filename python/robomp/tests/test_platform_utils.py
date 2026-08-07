@@ -13,11 +13,11 @@ from robomp.platform_utils import (
     resolve_token_for_platform,
 )
 
-_BASE = dict(
-    GITHUB_WEBHOOK_SECRET="x",
-    ROBOMP_BOT_LOGIN="bot",
-    ROBOMP_GIT_AUTHOR_EMAIL="a@b.c",
-)
+_BASE = {
+    "GITHUB_WEBHOOK_SECRET": "x",
+    "ROBOMP_BOT_LOGIN": "bot",
+    "ROBOMP_GIT_AUTHOR_EMAIL": "a@b.c",
+}
 
 
 def test_resolve_token_for_github() -> None:
@@ -37,7 +37,9 @@ def test_resolve_token_for_forgejo_raises_when_unset() -> None:
 
 
 def test_resolve_token_for_github_raises_when_unset() -> None:
-    s = Settings(FORGEJO_TOKEN="fj_token", ROBOMP_GH_PROXY_URL="http://proxy", ROBOMP_GH_PROXY_HMAC_KEY=SecretStr("k"), **_BASE)  # type: ignore[arg-type]
+    s = Settings(
+        FORGEJO_TOKEN="fj_token", ROBOMP_GH_PROXY_URL="http://proxy", ROBOMP_GH_PROXY_HMAC_KEY=SecretStr("k"), **_BASE
+    )  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="GITHUB_TOKEN not configured"):
         resolve_token_for_platform(s, "github")
 

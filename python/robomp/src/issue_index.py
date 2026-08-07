@@ -144,8 +144,9 @@ class IssueIndexSync:
     rather than hogging one.
     """
 
-    def __init__(self, *, settings: Settings, db: Database, github: GitHubBackend,
-                 forgejo_github: GitHubBackend | None = None) -> None:
+    def __init__(
+        self, *, settings: Settings, db: Database, github: GitHubBackend, forgejo_github: GitHubBackend | None = None
+    ) -> None:
         self._settings = settings
         self._db = db
         self._github = github

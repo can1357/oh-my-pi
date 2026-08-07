@@ -14,8 +14,7 @@ from robomp.cancellation import clear_current_event, set_current_event
 from robomp.config import Settings
 from robomp.db import Database, EventRow
 from robomp.github_backend import GitHubBackend
-from robomp.platform_utils import proxy_credentials
-from robomp.proxy_client import GitHubProxyClient, ProxyGitTransport
+from robomp.platform_utils import create_git_transport, create_proxy_backend
 from robomp.sandbox import GitTransport, SandboxManager, _reap_slot
 from robomp.slot_pool import SlotPool
 
@@ -370,10 +369,6 @@ class WorkerPool:
         else:
             self.db.mark_event(row.delivery_id, "done")
 
-    def _proxy_auth(self) -> tuple[str, bytes]:
-        """Return (base_url, hmac_key) shared by GitHubProxyClient and ProxyGitTransport."""
-        return proxy_credentials(self.settings)
-
     def _platform_github(self, platform: str) -> GitHubBackend:
         """Return a proxy client scoped to the event's platform.
 
@@ -382,20 +377,16 @@ class WorkerPool:
         so every HMAC-signed request carries it in the query string and
         gh-proxy routes to the Forgejo API + token.
         """
-        if platform == "forgejo":
-            base_url, key = self._proxy_auth()
-            return GitHubProxyClient(
-                base_url=base_url, hmac_key=key, platform="forgejo",
-            )
+        forged = create_proxy_backend(self.settings, platform)
+        if forged is not None:
+            return forged
         return self.github
 
     def _platform_transport(self, platform: str) -> GitTransport:
         """Return a git transport scoped to the event's platform."""
-        if platform == "forgejo":
-            base_url, key = self._proxy_auth()
-            return ProxyGitTransport(
-                base_url=base_url, hmac_key=key, platform="forgejo",
-            )
+        forged = create_git_transport(self.settings, platform)
+        if forged is not None:
+            return forged
         return self.git_transport
 
     async def _dispatch(self, row: EventRow, *, slot_uid: int | None = None) -> None:
@@ -476,7 +467,11 @@ class WorkerPool:
                 attempts=row.attempts,
                 slot_uid=slot_uid,
             )
-        elif event in ("pull_request_review_comment", "pull_request_comment") and action in ("created", "reviewed"):
+        elif event in ("pull_request_review_comment", "pull_request_comment") and action in (
+            "created",
+            "reviewed",
+            "edited",
+        ):
             await tasks.handle_review(
                 settings=self.settings,
                 db=self.db,

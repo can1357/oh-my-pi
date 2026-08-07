@@ -482,7 +482,7 @@ class GitHubClient:
         data = await self.request(
             "GET",
             f"/repos/{repo}/issues/{number}/timeline",
-            params={"per_page": 100},
+            params={"per_page": 100} if self._platform != "forgejo" else {"limit": 100},
         )
         linked: set[int] = set()
         states: dict[int, str] = {}
@@ -511,15 +511,20 @@ class GitHubClient:
     async def list_pr_files(self, repo: str, pr_number: int) -> list[PullRequestFileInfo]:
         files: list[PullRequestFileInfo] = []
         page = 1
+        # Forgejo clamps limit to MaxResponseItems (default 50), so use
+        # the effective per-page size for the termination check.
+        per_page = 100 if self._platform != "forgejo" else 50
         while True:
             data = await self.request(
                 "GET",
                 f"/repos/{repo}/pulls/{pr_number}/files",
-                params={"per_page": 100, "page": page},
+                params={"per_page": per_page, "page": page}
+                if self._platform != "forgejo"
+                else {"limit": per_page, "page": page},
             )
             batch = [_pr_file_from_payload(item) for item in (data or [])]
             files.extend(batch)
-            if len(batch) < 100:
+            if len(batch) < per_page:
                 return files
             page += 1
 
@@ -539,11 +544,11 @@ class GitHubClient:
         if state not in ("open", "closed", "all"):
             raise ValueError(f"invalid state: {state!r}")
         per_page = max(1, min(int(limit), 100))
-        data = await self.request(
-            "GET",
-            f"/repos/{repo}/issues",
-            params={"state": state, "per_page": per_page, "sort": "updated", "direction": "desc"},
-        )
+        if self._platform == "forgejo":
+            params = {"state": state, "limit": per_page, "sort": "updated", "direction": "desc"}
+        else:
+            params = {"state": state, "per_page": per_page, "sort": "updated", "direction": "desc"}
+        data = await self.request("GET", f"/repos/{repo}/issues", params=params)
         out: list[IssueSummary] = []
         for item in data or []:
             if item.get("pull_request") is not None:
@@ -600,20 +605,28 @@ class GitHubClient:
         `since` is GitHub's ISO `updated_at` lower bound; omit for a full
         backfill. Callers page from 1 until a short page comes back.
         """
+        page_size = max(1, min(int(per_page), 100))
         params: dict[str, Any] = {
             "state": "all",
-            "per_page": max(1, min(int(per_page), 100)),
             "page": max(1, int(page)),
             "sort": "updated",
             "direction": "asc",
         }
+        if self._platform == "forgejo":
+            params["limit"] = page_size
+        else:
+            params["per_page"] = page_size
         if since:
             params["since"] = since
         data = await self.request("GET", f"/repos/{repo}/issues", params=params)
         return [index_entry_from_issue_object(repo, item) for item in (data or [])]
 
     async def list_comments(self, repo: str, number: int) -> list[CommentInfo]:
-        data = await self.request("GET", f"/repos/{repo}/issues/{number}/comments", params={"per_page": 100})
+        data = await self.request(
+            "GET",
+            f"/repos/{repo}/issues/{number}/comments",
+            params={"per_page": 100} if self._platform != "forgejo" else {"limit": 100},
+        )
         return [_comment_from_payload(item) for item in (data or [])]
 
     async def list_review_comments(self, repo: str, pr_number: int) -> list[ReviewCommentInfo]:
@@ -621,7 +634,7 @@ class GitHubClient:
         data = await self.request(
             "GET",
             f"/repos/{repo}/pulls/{pr_number}/comments",
-            params={"per_page": 100},
+            params={"per_page": 100} if self._platform != "forgejo" else {"limit": 100},
         )
         out: list[ReviewCommentInfo] = []
         for item in data or []:
@@ -648,7 +661,7 @@ class GitHubClient:
         data = await self.request(
             "GET",
             f"/repos/{repo}/pulls/{pr_number}/reviews",
-            params={"per_page": 100},
+            params={"per_page": 100} if self._platform != "forgejo" else {"limit": 100},
         )
         out: list[PullRequestReviewInfo] = []
         for item in data or []:
@@ -822,7 +835,9 @@ class GitHubClient:
         data = await self.request(
             "GET",
             f"/repos/{repo}/issues/comments/{comment_id}/reactions",
-            params={"content": "-1", "per_page": 100},
+            params={"content": "-1", "per_page": 100}
+            if self._platform != "forgejo"
+            else {"content": "-1", "limit": 100},
         )
         return tuple(_reaction_from_payload(item) for item in (data or []))
 

@@ -151,6 +151,73 @@ async def test_dispatch_routes_completed_workflow_to_release_handler(
     await _make_pool(settings, db)._dispatch(row)  # noqa: SLF001
 
     assert seen == [("completed", 2)]
+
+
+@pytest.mark.parametrize("action", ["created", "reviewed", "edited"])
+@pytest.mark.asyncio
+async def test_dispatch_routes_review_comment_actions_to_handle_review(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    """Every review comment action MUST reach tasks.handle_review."""
+    seen: list[str] = []
+
+    async def fake_handle_review(*, payload, **_kwargs) -> None:
+        seen.append(str(payload.get("action")))
+
+    monkeypatch.setattr(tasks, "handle_review", fake_handle_review)
+
+    row = EventRow(
+        delivery_id=f"rc-{action}",
+        event_type="pull_request_review_comment",
+        repo="octo/widget",
+        issue_key="octo/widget#7",
+        payload={
+            "action": action,
+            "pull_request": {"number": 7},
+            "comment": {"body": "nit", "user": {"login": "alice"}},
+        },
+        received_at="2026-01-01T00:00:00Z",
+        state="running",
+        attempts=1,
+        last_error=None,
+    )
+    await _make_pool(settings, db)._dispatch(row)  # noqa: SLF001
+
+    assert seen == [action]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_review_comment_deleted_is_noop(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleted review comments must NOT spawn a handle_review task."""
+    called = False
+
+    async def fake_handle_review(**_kwargs) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(tasks, "handle_review", fake_handle_review)
+
+    row = EventRow(
+        delivery_id="rc-del",
+        event_type="pull_request_review_comment",
+        repo="octo/widget",
+        issue_key="octo/widget#7",
+        payload={
+            "action": "deleted",
+            "pull_request": {"number": 7},
+            "comment": {"body": "", "user": {"login": "alice"}},
+        },
+        received_at="2026-01-01T00:00:00Z",
+        state="running",
+        attempts=1,
+        last_error=None,
+    )
+    await _make_pool(settings, db)._dispatch(row)  # noqa: SLF001
+
+    assert called is False
+
 def test_platform_github_routes_forgejo_to_proxy_client(settings: Settings, db: Database) -> None:
     """`_platform_github` returns a platform-scoped proxy client for forgejo,
     and the shared singleton for the default github platform."""

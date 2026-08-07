@@ -61,3 +61,31 @@ def proxy_credentials(cfg: Settings) -> tuple[str, bytes]:
     if cfg.gh_proxy_hmac_key:
         key = cfg.gh_proxy_hmac_key.get_secret_value().encode("utf-8")
     return base_url, key
+
+
+def create_proxy_backend(cfg: Settings, platform: str) -> GitHubBackend | None:
+    """Return a proxy backend (GitHubProxyClient) for the given platform.
+
+    For ``github``, returns None (caller should use its cached singleton).
+    For ``forgejo``, creates a new GitHubProxyClient with the forgejo platform.
+    """
+    if platform == "forgejo":
+        base_url, key = proxy_credentials(cfg)
+        from robomp.proxy_client import GitHubProxyClient
+
+        return GitHubProxyClient(base_url=base_url, hmac_key=key, platform="forgejo")
+    return None
+
+
+def create_git_transport(cfg: Settings, platform: str):
+    """Return a git transport (ProxyGitTransport) for the given platform.
+
+    For ``github``, returns None (caller should use its cached singleton).
+    For ``forgejo``, creates a new ProxyGitTransport with the forgejo platform.
+    """
+    if platform == "forgejo":
+        base_url, key = proxy_credentials(cfg)
+        from robomp.proxy_client import ProxyGitTransport
+
+        return ProxyGitTransport(base_url=base_url, hmac_key=key, platform="forgejo")
+    return None

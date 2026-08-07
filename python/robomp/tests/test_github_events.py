@@ -1154,3 +1154,38 @@ def test_route_pull_request_review_comment_created_github() -> None:
     )
     assert decision.should_queue
     assert decision.task == "handle_review"
+
+
+def test_route_review_comment_edited_retriggers_followup() -> None:
+    """An edited review comment re-drives the followup."""
+    decision = route(
+        "pull_request_review_comment",
+        {
+            "action": "edited",
+            "comment": {"body": "updated finding", "user": {"login": "mira"}, "id": 42},
+            "pull_request": {"number": 50, "user": {"login": BOT}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+    )
+    assert decision.should_queue
+    assert decision.task == "handle_review"
+
+
+def test_route_review_comment_deleted_does_not_queue() -> None:
+    """Deleted review comments must NOT re-drive a followup."""
+    decision = route(
+        "pull_request_review_comment",
+        {
+            "action": "deleted",
+            "comment": {"body": "", "user": {"login": "mira"}, "id": 42},
+            "pull_request": {"number": 50, "user": {"login": BOT}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+    )
+    assert not decision.should_queue
