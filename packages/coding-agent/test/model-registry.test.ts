@@ -414,9 +414,10 @@ describe("ModelRegistry", () => {
 					buildFactoryDroidModel({
 						id: "kimi-k3",
 						name: "Kimi K3 (Droid Core)",
-						contextWindow: 262_144,
+						wire: "openai-completions",
+						contextWindow: 196_608,
 						maxTokens: 65_536,
-						upstream: "fireworks",
+						apiProviders: ["fireworks", "baseten"],
 						supportedReasoningEfforts: ["off", "low", "high", "max"],
 						defaultReasoningEffort: "high",
 					}),

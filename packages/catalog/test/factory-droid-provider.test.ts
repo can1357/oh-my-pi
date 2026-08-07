@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
 	buildFactoryDroidModel,
-	FACTORY_DROID_BASE_URL,
+	FACTORY_DROID_COMPLETIONS_BASE_URL,
+	FACTORY_DROID_MODEL_META,
 	FACTORY_DROID_MODELS,
 	FACTORY_DROID_UPSTREAMS,
 	fetchFactoryDroidModels,
@@ -17,9 +18,10 @@ describe("Factory Droid catalog", () => {
 		const model = buildFactoryDroidModel({
 			id: "kimi-k3",
 			name: "Kimi K3 (Droid Core)",
-			contextWindow: 262_144,
+			wire: "openai-completions",
+			contextWindow: 196_608,
 			maxTokens: 65_536,
-			upstream: "fireworks",
+			apiProviders: ["fireworks", "baseten"],
 			supportedReasoningEfforts: ["off", Effort.Low, Effort.High, Effort.Max],
 			defaultReasoningEffort: Effort.High,
 		});
@@ -28,10 +30,10 @@ describe("Factory Droid catalog", () => {
 			id: "kimi-k3",
 			api: "factory-droid-agent",
 			provider: "factory-droid",
-			baseUrl: FACTORY_DROID_BASE_URL,
+			baseUrl: FACTORY_DROID_COMPLETIONS_BASE_URL,
 			input: ["text", "image"],
 			cost: zeroCost,
-			contextWindow: 262_144,
+			contextWindow: 196_608,
 			maxTokens: 65_536,
 			thinking: { mode: "effort", efforts: [Effort.Low, Effort.High, Effort.Max], defaultLevel: Effort.High },
 		});
@@ -44,9 +46,10 @@ describe("Factory Droid catalog", () => {
 		const model = buildFactoryDroidModel({
 			id: "text-model",
 			name: "Text model",
+			wire: "openai-completions",
 			contextWindow: 100_000,
 			maxTokens: 10_000,
-			upstream: "baseten",
+			apiProviders: ["baseten"],
 			noImageSupport: true,
 			supportedReasoningEfforts: [Effort.High],
 			defaultReasoningEffort: Effort.High,
@@ -65,9 +68,10 @@ describe("Factory Droid catalog", () => {
 		const model = buildFactoryDroidModel({
 			id: "glm-4.6",
 			name: "GLM-4.6 (Droid Core)",
+			wire: "openai-completions",
 			contextWindow: 200_000,
 			maxTokens: 128_000,
-			upstream: "baseten",
+			apiProviders: ["baseten"],
 			supportedReasoningEfforts: ["none"],
 			defaultReasoningEffort: "none",
 			noImageSupport: true,
@@ -82,11 +86,10 @@ describe("Factory Droid catalog", () => {
 		expect(manager.providerId).toBe("factory-droid");
 		const models = manager.staticModels ?? [];
 		expect(models.map(model => model.id)).toEqual(FACTORY_DROID_MODELS.map(model => model.id));
-		expect(models.length).toBeGreaterThanOrEqual(9);
+		expect(models.length).toBeGreaterThanOrEqual(50);
 		for (const model of models) {
-			expect(model.baseUrl).toBe(FACTORY_DROID_BASE_URL);
-			const upstream = FACTORY_DROID_UPSTREAMS[model.id];
-			expect(upstream === "fireworks" || upstream === "baseten").toBe(true);
+			expect(model.baseUrl).toBe(FACTORY_DROID_COMPLETIONS_BASE_URL);
+			expect(FACTORY_DROID_UPSTREAMS[model.id]).toBe(FACTORY_DROID_MODEL_META[model.id].apiProviders[0]);
 		}
 		expect(models.find(model => model.id === "kimi-k3")).toBeDefined();
 	});
