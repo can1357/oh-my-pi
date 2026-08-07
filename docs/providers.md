@@ -6,6 +6,21 @@ A **provider** is the account or backend namespace, such as `anthropic`, `openai
 
 This page covers how providers become available, how credentials are resolved, the provider/environment-variable map, local engines, disabling providers, and custom providers. For endpoint-specific request, reasoning, tool, stream, usage, and retry constraints, see [Provider endpoint constraints](./provider-endpoint-constraints.md). For model selection and the full `models.yml` schema, see [Model and Provider Configuration](./models.md). For config-file locations and merge precedence, see [Settings](./settings.md). For credential storage and login flows in depth, see [Secrets and credentials](./secrets.md). For the complete environment-variable reference, see [Environment variables](./environment-variables.md). For local engine setup, see [Local models](./local-models.md). For context-file discovery providers, see [Context files](./context-files.md).
 
+## Factory Droid (Droid Core)
+
+The `factory-droid` provider serves Factory's Droid Core subscription models through Factory's OpenAI-compatible LLM proxy directly over HTTPS — no `droid` binary, daemon, or SDK subprocess is needed at inference time.
+
+1. Sign in with `/login factory-droid` (or `omp auth-broker login factory-droid`). OMP runs the same WorkOS device-code flow as the Droid CLI: open the printed `auth.factory.ai/device` link, enter the code, approve. No `droid` install required.
+2. Select a model, for example:
+
+   ```bash
+   omp --model factory-droid/kimi-k3
+   ```
+
+If you already signed in with the Droid CLI (`droid auth login`), OMP reuses that session from `~/.factory/auth.v2.file` (encrypted; key in the adjacent `auth.v2.key`), refreshes it through WorkOS when it expires, and writes rotated tokens back so the CLI keeps working. For headless environments, set `FACTORY_DROID_ACCESS_TOKEN` (and optionally `FACTORY_DROID_ORG_ID`) instead. Factory API keys cover the control plane only and cannot authorize subscription inference.
+
+The available models (Kimi K3, Kimi K2.6/K2.7 Code, DeepSeek V4 Pro/Flash, GLM-5.2/5.2 Fast, GLM-4.6, Nemotron 3 Ultra) mirror the Droid CLI's bundled registry — Factory has no model-listing endpoint in any client — narrowed live by the account's feature flags and org model policy, exactly as the CLI and desktop app do. Reasoning effort maps to each upstream's wire switch (`reasoning_effort` on Fireworks, `chat_template_args.enable_thinking` on Baseten), and streamed `reasoning_content` is surfaced as thinking. Requests present the Droid CLI's client identity (user agent, client-version, `x-api-provider`, session/message ids) and open the system prompt with Factory's Droid identity sentence, which the proxy requires.
+
 ## How `omp` decides a provider is available
 
 At startup the model registry assembles its catalog from four sources, in order:
@@ -141,6 +156,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                |
 | `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                            |
 | `cline-pass`                     | `CLINE_API_KEY`                                                               |
+| `factory-droid`                  | `FACTORY_API_KEY` (optional; otherwise uses the local Droid WorkOS session)   |
 | `firepass`                       | `FIREPASS_API_KEY`                                                            |
 | `wafer-serverless`               | `WAFER_SERVERLESS_API_KEY`                                                    |
 | `xiaomi`                         | `XIAOMI_API_KEY`                                                              |
