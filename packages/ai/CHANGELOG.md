@@ -383,6 +383,10 @@
 - Improved error classification for Simplified Chinese quota-exhaustion and rate-limit messages, ensuring affected credentials are correctly rotated or backed off instead of being treated as unknown errors.
 - Classified subscription and plan-cap 429 responses as rotatable usage limits rather than transient rate-limit throttles, enabling smoother credential rotation.
 
+### Added
+
+- Added the sidecar-free `factory-droid-agent` transport: direct HTTPS calls to Factory's OpenAI-compatible subscription LLM proxy, authenticated by the local Droid WorkOS session (`~/.factory/auth.v2.file`, decrypted with its adjacent key, refreshed through WorkOS with token rotation written back) or `FACTORY_DROID_ACCESS_TOKEN`, with the proxy's required client-version/`x-api-provider` headers and Droid system-prompt prefix handled transparently.
+
 ## [17.2.10] - 2026-08-06
 
 ### Breaking Changes
