@@ -1,12 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
-	drainTmuxWindowQueue,
-	restoreTmuxWindowName,
 	sanitizeTmuxWindowName,
-	setTmuxCommandRunnerForTesting,
-	setTmuxWindowName,
-	setTmuxWindowNameEnabled,
 	type TmuxCommandRunner,
+	TmuxWindowNamer,
 } from "@oh-my-pi/pi-coding-agent/utils/tmux-session";
 
 interface RecordingRunner extends TmuxCommandRunner {
@@ -22,7 +18,7 @@ function createRunner(captured: string | undefined = "shell\t1"): RecordingRunne
 		async run(args) {
 			calls.push(args);
 		},
-		async capture(args) {
+		captureSync(args) {
 			calls.push(args);
 			return this.captured;
 		},
@@ -33,6 +29,7 @@ function createRunner(captured: string | undefined = "shell\t1"): RecordingRunne
 }
 
 let runner: RecordingRunner;
+let namer: TmuxWindowNamer;
 /**
  * `TMUX_PANE` feeds `getTerminalId()`, which keys the terminal-session
  * breadcrumbs every SessionManager suite reads. Restore whatever the developer's
@@ -43,15 +40,16 @@ const ambientTmuxEnv = { TMUX: Bun.env.TMUX, TMUX_PANE: Bun.env.TMUX_PANE };
 
 beforeEach(() => {
 	runner = createRunner();
-	setTmuxCommandRunnerForTesting(runner);
-	setTmuxWindowNameEnabled(true);
+	namer = new TmuxWindowNamer(runner);
+	namer.setEnabled(true);
 	Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
 	Bun.env.TMUX_PANE = "%7";
 });
 
 afterEach(() => {
-	setTmuxCommandRunnerForTesting(undefined);
-	setTmuxWindowNameEnabled(false);
+	// Also cancels the postmortem cleanup the namer registers on first capture,
+	// so a namer from this suite never fires against the real tmux at exit.
+	namer.restore();
 	for (const [key, value] of Object.entries(ambientTmuxEnv)) {
 		if (value === undefined) delete Bun.env[key];
 		else Bun.env[key] = value;
@@ -60,13 +58,14 @@ afterEach(() => {
 
 /** Every `rename-window` argv the runner saw, in order. */
 function renamedNames(): string[] {
-	return runner.calls.filter(args => args[0] === "rename-window").map(args => args[3] as string);
+	return runner.calls.filter(args => args[0] === "rename-window").map(args => args[4] as string);
 }
 
 describe("sanitizeTmuxWindowName", () => {
-	it("strips dots and colons, which break later `-t <name>` lookups", () => {
-		expect(sanitizeTmuxWindowName("feat: fix.thing")).toBe("feat fixthing");
-		expect(sanitizeTmuxWindowName("v1.2.3")).toBe("v123");
+	it("keeps dots and colons, which tmux only treats as separators in `-t` targets", () => {
+		expect(sanitizeTmuxWindowName("Refactor: the parser")).toBe("Refactor: the parser");
+		expect(sanitizeTmuxWindowName("feat: fix.thing")).toBe("feat: fix.thing");
+		expect(sanitizeTmuxWindowName("v1.2.3")).toBe("v1.2.3");
 	});
 
 	it("strips control characters so a session name cannot inject terminal escapes", () => {
@@ -84,147 +83,221 @@ describe("sanitizeTmuxWindowName", () => {
 	});
 
 	it("returns undefined when nothing survives sanitizing", () => {
-		expect(sanitizeTmuxWindowName("...")).toBeUndefined();
+		expect(sanitizeTmuxWindowName("\u0000\u0007")).toBeUndefined();
 		expect(sanitizeTmuxWindowName("   ")).toBeUndefined();
 		expect(sanitizeTmuxWindowName(undefined)).toBeUndefined();
 	});
 });
 
-describe("setTmuxWindowName", () => {
+describe("TmuxWindowNamer.sync", () => {
 	it("renames the window addressed by TMUX_PANE with an argv array", async () => {
-		setTmuxWindowName("Refactor: the parser", "/tmp/project");
-		await drainTmuxWindowQueue();
+		namer.sync("Refactor: the parser", "/tmp/project");
+		await namer.drain();
 
-		expect(runner.calls).toContainEqual(["rename-window", "-t", "%7", "Refactor the parser"]);
+		expect(runner.calls).toContainEqual(["rename-window", "-t", "%7", "--", "Refactor: the parser"]);
+	});
+
+	it("passes `--` so a name starting with `-` is not parsed as a tmux flag", async () => {
+		namer.sync("-debug", "/tmp/project");
+		await namer.drain();
+
+		expect(runner.calls).toContainEqual(["rename-window", "-t", "%7", "--", "-debug"]);
 	});
 
 	it("falls back to the cwd basename when the session name sanitizes away", async () => {
-		setTmuxWindowName("...", "/tmp/my-project");
-		await drainTmuxWindowQueue();
+		namer.sync("\u0000", "/tmp/my-project");
+		await namer.drain();
 
 		expect(renamedNames()).toEqual(["my-project"]);
 	});
 
 	it("falls back to the cwd basename when the session is unnamed", async () => {
-		setTmuxWindowName(undefined, "/tmp/my-project/");
-		await drainTmuxWindowQueue();
+		namer.sync(undefined, "/tmp/my-project/");
+		await namer.drain();
 
 		expect(renamedNames()).toEqual(["my-project"]);
 	});
 
 	it("captures the original window name before the first rename", async () => {
-		setTmuxWindowName("first", "/tmp/project");
-		await drainTmuxWindowQueue();
+		namer.sync("first", "/tmp/project");
+		await namer.drain();
 
 		expect(runner.calls[0]).toEqual(["display-message", "-p", "-t", "%7", "#{window_name}\t#{automatic-rename}"]);
-		expect(runner.calls[1]).toEqual(["rename-window", "-t", "%7", "first"]);
+		expect(runner.calls[1]).toEqual(["rename-window", "-t", "%7", "--", "first"]);
 	});
 
 	it("captures only once across repeated renames", async () => {
-		setTmuxWindowName("first", "/tmp/project");
-		setTmuxWindowName("second", "/tmp/project");
-		await drainTmuxWindowQueue();
+		namer.sync("first", "/tmp/project");
+		namer.sync("second", "/tmp/project");
+		await namer.drain();
 
 		expect(runner.calls.filter(args => args[0] === "display-message")).toHaveLength(1);
 		expect(renamedNames()).toEqual(["first", "second"]);
 	});
 
 	it("is a no-op when the sanitized name is unchanged", async () => {
-		setTmuxWindowName("same name", "/tmp/project");
-		await drainTmuxWindowQueue();
+		namer.sync("same name", "/tmp/project");
+		await namer.drain();
 		// Sanitizing collapses both spellings onto the same window name.
-		setTmuxWindowName("same   name", "/tmp/project");
-		await drainTmuxWindowQueue();
+		namer.sync("same   name", "/tmp/project");
+		await namer.drain();
 
 		expect(renamedNames()).toEqual(["same name"]);
 	});
 
 	it("is a no-op outside tmux", async () => {
 		delete Bun.env.TMUX;
-		setTmuxWindowName("session", "/tmp/project");
-		await drainTmuxWindowQueue();
+		namer.sync("session", "/tmp/project");
+		await namer.drain();
 
 		expect(runner.calls).toEqual([]);
 	});
 
 	it("is a no-op without TMUX_PANE", async () => {
 		delete Bun.env.TMUX_PANE;
-		setTmuxWindowName("session", "/tmp/project");
-		await drainTmuxWindowQueue();
+		namer.sync("session", "/tmp/project");
+		await namer.drain();
 
 		expect(runner.calls).toEqual([]);
 	});
 
 	it("is a no-op when the setting is disabled", async () => {
-		setTmuxWindowNameEnabled(false);
-		setTmuxWindowName("session", "/tmp/project");
-		await drainTmuxWindowQueue();
+		namer.setEnabled(false);
+		namer.sync("session", "/tmp/project");
+		await namer.drain();
 
 		expect(runner.calls).toEqual([]);
 	});
+
+	it("keeps two in-process namers from sharing capture or restore state", async () => {
+		const otherRunner = createRunner("build\t0");
+		const other = new TmuxWindowNamer(otherRunner);
+		other.setEnabled(true);
+
+		namer.sync("first", "/tmp/project");
+		other.sync("second", "/tmp/project");
+		await Promise.all([namer.drain(), other.drain()]);
+		// One namer shutting down must not clear the other's restore target.
+		other.restore();
+		runner.calls.length = 0;
+		namer.restore();
+
+		expect(otherRunner.calls).toContainEqual(["rename-window", "-t", "%7", "--", "build"]);
+		expect(runner.calls).toEqual([
+			["rename-window", "-t", "%7", "--", "shell"],
+			["set-window-option", "-t", "%7", "automatic-rename", "on"],
+		]);
+	});
 });
 
-describe("restoreTmuxWindowName", () => {
+describe("TmuxWindowNamer.restore", () => {
 	it("restores the captured name and automatic-rename state", async () => {
-		setTmuxWindowName("session", "/tmp/project");
-		await drainTmuxWindowQueue();
+		namer.sync("session", "/tmp/project");
+		await namer.drain();
 		runner.calls.length = 0;
 
-		restoreTmuxWindowName();
-		await drainTmuxWindowQueue();
+		namer.restore();
+		await namer.drain();
 
 		expect(runner.calls).toEqual([
-			["rename-window", "-t", "%7", "shell"],
+			["rename-window", "-t", "%7", "--", "shell"],
 			["set-window-option", "-t", "%7", "automatic-rename", "on"],
 		]);
 	});
 
 	it("restores synchronously, because the caller exits the process immediately after", async () => {
-		setTmuxWindowName("session", "/tmp/project");
-		await drainTmuxWindowQueue();
+		namer.sync("session", "/tmp/project");
+		await namer.drain();
 		runner.calls.length = 0;
 
 		// Deliberately NOT awaited: an enqueued async spawn never runs once the
 		// shutdown path calls process.exit, stranding the window on the omp name
 		// with automatic-rename left off.
-		restoreTmuxWindowName();
+		namer.restore();
 
 		expect(runner.calls).toEqual([
-			["rename-window", "-t", "%7", "shell"],
+			["rename-window", "-t", "%7", "--", "shell"],
 			["set-window-option", "-t", "%7", "automatic-rename", "on"],
+		]);
+	});
+
+	it("restores an original name starting with `-` behind `--`", async () => {
+		runner.captured = "-shell\t0";
+		namer.sync("session", "/tmp/project");
+		await namer.drain();
+		runner.calls.length = 0;
+
+		namer.restore();
+
+		expect(runner.calls).toEqual([
+			["rename-window", "-t", "%7", "--", "-shell"],
+			["set-window-option", "-t", "%7", "automatic-rename", "off"],
 		]);
 	});
 
 	it("restores automatic-rename off when the window was explicitly named", async () => {
 		runner.captured = "build\t0";
-		setTmuxWindowName("session", "/tmp/project");
-		await drainTmuxWindowQueue();
+		namer.sync("session", "/tmp/project");
+		await namer.drain();
 		runner.calls.length = 0;
 
-		restoreTmuxWindowName();
-		await drainTmuxWindowQueue();
+		namer.restore();
+		await namer.drain();
 
 		expect(runner.calls).toEqual([
-			["rename-window", "-t", "%7", "build"],
+			["rename-window", "-t", "%7", "--", "build"],
 			["set-window-option", "-t", "%7", "automatic-rename", "off"],
 		]);
 	});
 
 	it("skips restore when the original window could not be captured", async () => {
 		runner.captured = undefined;
-		setTmuxWindowName("session", "/tmp/project");
-		await drainTmuxWindowQueue();
+		namer.sync("session", "/tmp/project");
+		await namer.drain();
 		runner.calls.length = 0;
 
-		restoreTmuxWindowName();
-		await drainTmuxWindowQueue();
+		namer.restore();
+		await namer.drain();
 
 		expect(runner.calls).toEqual([]);
 	});
 
 	it("skips restore when no rename ever happened", async () => {
-		restoreTmuxWindowName();
-		await drainTmuxWindowQueue();
+		namer.restore();
+		await namer.drain();
+
+		expect(runner.calls).toEqual([]);
+	});
+
+	/**
+	 * Regression for a shutdown that begins before the queued rename has run.
+	 * The original name is captured synchronously, so restore always has its
+	 * target, and the queued rename must not re-apply the omp name afterwards.
+	 */
+	it("restores, and drops the still-queued rename, when shutdown beats the queue", async () => {
+		namer.sync("session", "/tmp/project");
+		// No drain: the rename is still sitting in the queue.
+		namer.restore();
+
+		expect(runner.calls).toEqual([
+			["display-message", "-p", "-t", "%7", "#{window_name}\t#{automatic-rename}"],
+			["rename-window", "-t", "%7", "--", "shell"],
+			["set-window-option", "-t", "%7", "automatic-rename", "on"],
+		]);
+
+		await namer.drain();
+
+		expect(renamedNames()).toEqual(["shell"]);
+	});
+
+	it("ignores a rename requested after restore", async () => {
+		namer.sync("session", "/tmp/project");
+		await namer.drain();
+		namer.restore();
+		runner.calls.length = 0;
+
+		namer.sync("later", "/tmp/project");
+		await namer.drain();
 
 		expect(runner.calls).toEqual([]);
 	});
