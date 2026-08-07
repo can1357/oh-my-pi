@@ -401,6 +401,25 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                 "missing delivery id header (X-GitHub-Delivery, X-Gitea-Delivery, or X-Forgejo-Delivery)",
             )
 
+        # Extract repo early for platform validation (used below).
+        repo_full = str((payload.get("repository") or {}).get("full_name") or "")
+
+        # Validate header-derived platform against repo membership (forgejo_repos).
+        # Repo membership is the source of truth; header detection can be spoofed or
+        # misconfigured. If the repo is in forgejo_repos, the platform IS forgejo
+        # regardless of what the delivery headers say.
+        if repo_full and cfg.forgejo_repos:
+            expected_platform = "forgejo" if repo_full.lower() in cfg.forgejo_repos else "github"
+            if expected_platform != platform:
+                log.warning(
+                    "platform mismatch: header says %s but repo %s is %s",
+                    platform,
+                    repo_full,
+                    expected_platform,
+                    extra={"delivery": delivery_id, "repo": repo_full},
+                )
+                platform = expected_platform
+
         db: Database = bag["db"]
         issue_cache: _IssueBrowseCache = bag["issue_browse_cache"]
         await issue_cache.apply_webhook(
@@ -411,7 +430,6 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         # Keep the local search index fresh from every delivery that carries an
         # issue/PR object — including ones the router will skip.
         if x_github_event in ("issues", "issue_comment") or x_github_event.startswith("pull_request"):
-            repo_full = str((payload.get("repository") or {}).get("full_name") or "")
             if repo_full and repo_full in cfg.repo_allowlist:
                 try:
                     issue_index.ingest_webhook_payload(db, repo_full, x_github_event, payload)

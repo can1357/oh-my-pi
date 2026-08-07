@@ -2482,8 +2482,6 @@ def test_reclaim_all_caches_sweeps_workspaces_not_pool(tmp_path: Path) -> None:
     assert mgr.reclaim_all_caches() == 0
 
 
-
-
 # ---- transport parameterization ----
 
 

@@ -191,6 +191,7 @@ async def test_sync_repo_backfills_pages_and_sets_watermark(db: Database, tmp_pa
 
 async def test_sync_repo_routes_to_forgejo_backend_when_configured(db: Database, tmp_path: Path) -> None:
     """sync_repo routes forgejo repos to the forgejo backend."""
+
     class _FakeForgejoBackend:
         def __init__(self) -> None:
             self.calls: list[str] = []
@@ -224,6 +225,7 @@ async def test_sync_repo_routes_to_forgejo_backend_when_configured(db: Database,
 
 async def test_sync_repo_falls_back_to_github_when_no_forgejo_backend(db: Database, tmp_path: Path) -> None:
     """sync_repo uses default backend when forgejo_github is None, even for forgejo repos."""
+
     class _FakeSettings:
         issue_index_sync_seconds = 900.0
         repo_allowlist = frozenset({"forgejo-org/fj-repo"})

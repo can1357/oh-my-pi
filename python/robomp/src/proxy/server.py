@@ -218,6 +218,8 @@ def _pool_dir(cfg: Settings, repo: str, *, platform: str = "github") -> Path:
 
 
 def _workspace_repo_dir(cfg: Settings, workspace_key: str) -> Path:
+    # workspace_key embeds the repo name (via sandbox.workspace_key), which is
+    # platform-unique in practice (Forgejo repos differ from GitHub repos).
     # Defense-in-depth: workspace_key is constructed by `sandbox.workspace_key`
     # as `<repo_with_underscores>__<number>`. Reject anything outside that shape.
     if "/" in workspace_key or workspace_key.startswith(".") or ".." in workspace_key:
@@ -920,10 +922,14 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         clone_url = _require_str(data.get("clone_url"), "clone_url")
         default_branch = _require_str(data.get("default_branch"), "default_branch")
         platform = _platform(request)
+        try:
+            token = resolve_token_for_platform(settings, platform)
+        except ValueError as exc:
+            raise HTTPException(500, str(exc)) from exc
         remote = _clone_remote_auth(
             clone_url,
             repo,
-            resolve_token_for_platform(settings, platform),
+            token,
             git_host=resolve_git_host_for_platform(settings, platform),
             platform=platform,
         )
@@ -947,11 +953,15 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo = _require_str(data.get("repo"), "repo")
         platform = _platform(request)
         target = _pool_dir(settings, repo, platform=platform)
+        try:
+            token = resolve_token_for_platform(settings, platform)
+        except ValueError as exc:
+            raise HTTPException(500, str(exc)) from exc
         remote = await asyncio.to_thread(
             _origin_remote_auth,
             target,
             repo,
-            resolve_token_for_platform(settings, platform),
+            token,
             git_host=resolve_git_host_for_platform(settings, platform),
             platform=platform,
         )
@@ -974,11 +984,15 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         ref = _require_fetch_ref(data.get("ref"))
         platform = _platform(request)
         target = _pool_dir(settings, repo, platform=platform)
+        try:
+            token = resolve_token_for_platform(settings, platform)
+        except ValueError as exc:
+            raise HTTPException(500, str(exc)) from exc
         remote = await asyncio.to_thread(
             _origin_remote_auth,
             target,
             repo,
-            resolve_token_for_platform(settings, platform),
+            token,
             git_host=resolve_git_host_for_platform(settings, platform),
             platform=platform,
         )
@@ -1000,11 +1014,15 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         pr_number = _require_int(data.get("pr_number"), "pr_number")
         platform = _platform(request)
         target = _pool_dir(settings, repo, platform=platform)
+        try:
+            token = resolve_token_for_platform(settings, platform)
+        except ValueError as exc:
+            raise HTTPException(500, str(exc)) from exc
         remote = await asyncio.to_thread(
             _origin_remote_auth,
             target,
             repo,
-            resolve_token_for_platform(settings, platform),
+            token,
             git_host=resolve_git_host_for_platform(settings, platform),
             platform=platform,
         )
@@ -1036,11 +1054,15 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo_dir = _workspace_repo_dir(settings, workspace_key)
         if not repo_dir.is_dir():
             raise HTTPException(404, f"workspace not found: {workspace_key}")
+        try:
+            token = resolve_token_for_platform(settings, _platform(request))
+        except ValueError as exc:
+            raise HTTPException(500, str(exc)) from exc
         remote = await asyncio.to_thread(
             _origin_remote_auth,
             repo_dir,
             repo,
-            resolve_token_for_platform(settings, _platform(request)),
+            token,
             push=True,
             slot_uid=slot_uid,
             git_host=resolve_git_host_for_platform(settings, _platform(request)),

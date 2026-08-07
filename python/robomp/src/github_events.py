@@ -414,7 +414,11 @@ def route(
     # in modules/webhook/type.go maps HookEventPullRequestReviewComment to
     # "pull_request_comment", NOT "pull_request_review_comment").
     # Accept both event type names so the same endpoint handles both platforms.
-    if event_type in ("pull_request_review_comment", "pull_request_comment") and action in ("created", "reviewed"):
+    if event_type in ("pull_request_review_comment", "pull_request_comment") and action in (
+        "created",
+        "reviewed",
+        "edited",
+    ):
         # GitHub sends payload.comment with body/user/path/line.
         # Forgejo sends payload.review with content, and sender as the author.
         comment = normalize_review_to_comment(payload)

@@ -855,25 +855,31 @@ async def handle_review(
     comment = normalize_review_to_comment(payload)
     user = comment.get("user") or {}
     body = str(comment.get("body") or "").strip()
-    # Forgejo #7935: pull_request_review_comment webhook payloads carry empty
-    # `body` — the actual comment text must be fetched via the API.
-    if not body:
-        comment_id = comment.get("id")
-        if comment_id is not None and hasattr(github, "get_review_comment"):
-            try:
-                fetched = await github.get_review_comment(repo_full, int(comment_id))
+    # The webhook body is a snapshot of the CREATE/EDIT event; review bots
+    # publish placeholder bodies ("Reviewing this PR…") and fill the real
+    # finding in later. The canonical /pulls/comments/{id} endpoint always
+    # returns the authoritative final text, so resolve from it whenever we
+    # have a comment id.
+    comment_id = comment.get("id")
+    if comment_id is not None and hasattr(github, "get_review_comment"):
+        try:
+            fetched = await github.get_review_comment(repo_full, int(comment_id))
+            if fetched.body.strip():
                 body = fetched.body.strip()
-                comment["path"] = str(fetched.path or "")
+            if fetched.path:
+                comment["path"] = fetched.path
+            if fetched.line is not None:
                 comment["line"] = fetched.line
-                log.info(
-                    "forgejo_7935_workaround",
-                    extra={"repo": repo_full, "pr": pr_number, "comment_id": comment_id},
-                )
-            except Exception:
-                log.exception(
-                    "forgejo review comment fetch failed",
-                    extra={"repo": repo_full, "pr": pr_number},
-                )
+            log.info(
+                "review_comment_refetch",
+                extra={"repo": repo_full, "pr": pr_number, "comment_id": comment_id},
+            )
+        except Exception:
+            log.exception(
+                "review comment refetch failed",
+                extra={"repo": repo_full, "pr": pr_number},
+            )
+            # fall back to the webhook comment body below
     review_payload = {
         "author": str(user.get("login") or ""),
         "body": body,
@@ -895,11 +901,22 @@ async def handle_review(
         slot_uid=slot_uid,
         natives_cache=sandbox.natives_cache,
     )
+    # Give the review followup the live PR conversation (best-effort; a fetch
+    # failure must never block the followup).
+    thread: tuple[ThreadMessage, ...] = ()
+    try:
+        thread = await _fetch_thread(github, repo_full, pr_number, is_pr=True)
+    except Exception:
+        log.exception(
+            "handle_review thread fetch failed",
+            extra={"repo": repo_full, "pr": pr_number},
+        )
     await run_task(
         task_kind="handle_review",
         inputs=inputs,
         pr_number=pr_number,
         review_payload=review_payload,
+        thread=thread,
     )
 
 
