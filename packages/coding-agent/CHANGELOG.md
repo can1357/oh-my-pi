@@ -1114,10 +1114,6 @@
 
 - Wired `factory-droid` model discovery and login help into the CLI.
 
-### Changed
-
-- Model availability now honors provider definitions with `allowsMissingApiKey` (aligning the picker with the existing inference-time check in `stream.ts`), so `factory-droid` — and existing `bedrock-mantle` — appear available without a stored OMP credential.
-
 ## [17.2.10] - 2026-08-06
 
 ### Breaking Changes

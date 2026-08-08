@@ -33,7 +33,6 @@ export function getExtraHelpText(): string {
   OPENCODE_API_KEY           - OpenCode Zen/OpenCode Go models
   CURSOR_ACCESS_TOKEN        - Cursor AI models
   CLINE_API_KEY              - ClinePass subscription models
-  FACTORY_DROID_ACCESS_TOKEN - Factory Droid (headless; defaults to local droid auth login session)
   AI_GATEWAY_API_KEY         - Vercel AI Gateway
   WAFER_SERVERLESS_API_KEY   - Wafer Serverless (pay-as-you-go)
   YOLO_AUTO_API_KEY          - Yolo-Auto flat-rate Qwen models
