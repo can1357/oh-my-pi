@@ -74,6 +74,8 @@ export interface FactoryDroidModelInput {
 	maxTokens: number;
 	/** Upstream rotation list; the first entry is the default `x-api-provider`. */
 	apiProviders: readonly FactoryDroidUpstream[];
+	/** Tool-result messages carry the tool `name` field on the wire. */
+	toolMessageIncludesName?: boolean;
 	/** Upstream override when the account region is EU. */
 	euApiProviders?: readonly FactoryDroidUpstream[];
 	/** Droid reasoning ladder; "off"/"none" entries mean thinking can be disabled. */
@@ -795,7 +797,8 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		contextWindow: 196608,
 		maxTokens: 65536,
 		apiProviders: ["fireworks", "baseten"],
-		supportedReasoningEfforts: ["low", "high", "max"],
+		toolMessageIncludesName: true,
+		supportedReasoningEfforts: ["off", "low", "high", "max"],
 		defaultReasoningEffort: "high",
 		featureFlag: "kimi_k3",
 		billingPool: "core",
@@ -1015,6 +1018,29 @@ function readModelPolicy(body: unknown): FactoryModelPolicy | null {
 	};
 }
 
+/**
+ * Live `provider_routing` dynamic config from the flags payload: per-model
+ * upstream rotations that override the registry's static order.
+ */
+interface FactoryProviderRouting {
+	models?: Record<string, readonly string[]>;
+}
+
+/** Reads `configs.provider_routing` from the feature-flags payload. */
+function readProviderRouting(body: Record<string, unknown>): FactoryProviderRouting | null {
+	const configs = body.configs;
+	if (configs == null || typeof configs !== "object") return null;
+	const routing = (configs as Record<string, unknown>).provider_routing;
+	if (routing == null || typeof routing !== "object") return null;
+	const models = (routing as Record<string, unknown>).models;
+	if (models == null || typeof models !== "object" || Array.isArray(models)) return null;
+	const parsed: Record<string, readonly string[]> = {};
+	for (const [modelId, providers] of Object.entries(models as Record<string, unknown>)) {
+		if (Array.isArray(providers) && providers.every(p => typeof p === "string")) parsed[modelId] = providers;
+	}
+	return { models: parsed };
+}
+
 /** Mirrors the client-side model gating: feature flags first, then org model policy. */
 function isModelAvailable(
 	model: FactoryDroidModelInput,
@@ -1062,6 +1088,7 @@ export async function fetchFactoryDroidModels(
 	};
 	let flags: Record<string, unknown>;
 	let policy: FactoryModelPolicy | null = null;
+	let routing: FactoryProviderRouting | null = null;
 	try {
 		const [flagsResponse, settingsResponse] = await Promise.all([
 			fetchImpl(FACTORY_FEATURE_FLAGS_URL, { headers }),
@@ -1076,13 +1103,19 @@ export async function fetchFactoryDroidModels(
 		if (settingsResponse?.ok) {
 			policy = readModelPolicy(await settingsResponse.json());
 		}
+		routing = readProviderRouting(body as Record<string, unknown>);
 	} catch {
 		return null;
 	}
-	return FACTORY_DROID_MODELS.filter(model => isModelAvailable(model, flags, policy)).map(buildFactoryDroidModel);
+	return FACTORY_DROID_MODELS.filter(model => isModelAvailable(model, flags, policy)).map(model =>
+		buildFactoryDroidModel(model, routing?.models?.[model.id]),
+	);
 }
 
-export function buildFactoryDroidModel(input: FactoryDroidModelInput): ModelSpec<"factory-droid-agent"> {
+export function buildFactoryDroidModel(
+	input: FactoryDroidModelInput,
+	resolvedApiProviders?: readonly string[],
+): ModelSpec<"factory-droid-agent"> {
 	const thinking = buildFactoryDroidThinking(input);
 	return {
 		id: input.id,
@@ -1096,6 +1129,7 @@ export function buildFactoryDroidModel(input: FactoryDroidModelInput): ModelSpec
 		thinking,
 		contextWindow: input.contextWindow,
 		maxTokens: input.maxTokens,
+		...(resolvedApiProviders?.length ? { factoryDroidApiProviders: [...resolvedApiProviders] } : {}),
 	};
 }
 

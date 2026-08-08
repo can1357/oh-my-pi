@@ -1104,6 +1104,12 @@ export interface Model<TApi extends Api = Api> {
 	gitlabDuoWorkflowRootNamespaceId?: string;
 	/** Cursor `max_mode` request flag returned by `GetUsableModels` for premium models that require max mode. */
 	cursorMaxMode?: boolean;
+	/**
+	 * Factory Droid: account-resolved upstream rotation from the live
+	 * `provider_routing` config (first entry = default `x-api-provider`).
+	 * Overrides the registry's static `apiProviders` order when present.
+	 */
+	factoryDroidApiProviders?: string[];
 	cost: ModelCost;
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;

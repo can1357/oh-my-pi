@@ -73,10 +73,12 @@ function resolveModelMeta(model: Model<"factory-droid-agent">): FactoryDroidMode
 /**
  * Registry comes from the static table, never from `model.headers`:
  * the shared model cache intentionally strips headers from persisted specs,
- * so header-carried routing would silently vanish on cached loads.
+ * so header-carried routing would silently vanish on cached loads. The
+ * account's live-resolved upstream rotation rides the spec itself
+ * (`factoryDroidApiProviders`), which the cache preserves.
  */
-function resolveUpstream(meta: FactoryDroidModelInput | undefined): string {
-	return meta?.apiProviders[0] ?? "fireworks";
+function resolveUpstream(model: Model<"factory-droid-agent">, meta: FactoryDroidModelInput | undefined): string {
+	return model.factoryDroidApiProviders?.[0] ?? meta?.apiProviders[0] ?? "fireworks";
 }
 
 /** Identity headers shared by the OpenAI-SDK paths (completions + responses). */
@@ -176,7 +178,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 			const auth = { accessToken: harnessToken, orgId: undefined };
 
 			const meta = resolveModelMeta(model);
-			const upstream = resolveUpstream(meta);
+			const upstream = resolveUpstream(model, meta);
 			// The proxy expects v4-shaped ids; the OMP session id is a UUIDv7-style
 			// timestamp id, so map it through a deterministic v4 shape that stays
 			// stable per session.
@@ -313,11 +315,11 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					api: "openai-completions",
 					baseUrl: FACTORY_DROID_COMPLETIONS_BASE_URL,
 					compat: {
-						// Wire parity with the Droid CLI: the proxy's upstreams speak
-						// `max_tokens` (not the OpenAI-era `max_completion_tokens`) and
-						// have no `store` field.
+						// The proxy's upstreams speak `max_tokens` (not the OpenAI-era
+						// `max_completion_tokens`) and have no `store` field.
 						maxTokensField: "max_tokens",
 						supportsStore: false,
+						...(meta?.toolMessageIncludesName ? { requiresToolResultName: true } : {}),
 						...(model.compatConfig ?? {}),
 						...(extraBody ? { extraBody } : {}),
 					},

@@ -399,10 +399,10 @@ export function factoryDroidModelManagerOptions(
 ): ModelManagerOptions<"factory-droid-agent"> {
 	return {
 		providerId: "factory-droid",
-		// Factory exposes no model-listing endpoint; the Droid CLI ships its
-		// registry in the binary, so the catalog ships the same static list.
-		// Dynamic fetch filters it by the account's Statsig feature flags.
-		staticModels: FACTORY_DROID_MODELS.map(buildFactoryDroidModel),
+		// Factory exposes no model-listing endpoint, so the catalog ships a
+		// bundled static list. Dynamic fetch filters it by the account's
+		// Statsig feature flags and resolves upstream routing.
+		staticModels: FACTORY_DROID_MODELS.map(model => buildFactoryDroidModel(model)),
 		dynamicModelsAuthoritative: true,
 		fetchDynamicModels: () => fetchFactoryDroidModels(config),
 	};

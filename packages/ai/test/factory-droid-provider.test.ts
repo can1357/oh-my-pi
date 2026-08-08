@@ -270,8 +270,8 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 		expect(request.body.model).toBe("kimi-k3");
 		expect(request.body.stream).toBe(true);
 		expect(request.body.stream_options).toEqual({ include_usage: true });
-		// buildModel's output clamp lands at 64000 for kimi-k3 (65536 exceeds the compat ceiling).
-		expect(request.body.max_tokens).toBe(64_000);
+		// The proxy accepts each model's advertised output cap — no 64k clamp here.
+		expect(request.body.max_tokens).toBe(65_536);
 		expect(request.body.temperature).toBe(1);
 		expect(request.body.store).toBeUndefined();
 		const messages = request.body.messages as Array<{ role: string; content: unknown }>;
@@ -310,6 +310,70 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 
 		expect(captured[0].body.reasoning_effort).toBe("max");
 		expect(captured[0].body.reasoning_history).toBe("preserved");
+	});
+
+	it("honors the account-resolved upstream rotation from the model spec", async () => {
+		// The live provider_routing config routes kimi-k3 baseten-first for this
+		// account; the spec field must override the registry's static order.
+		const routed = kimiK3();
+		routed.factoryDroidApiProviders = ["baseten", "fireworks"];
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			routed,
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: "workos-token",
+				fetch: captureFetch(captured, completionsChunks("OK", "kimi-k3")),
+				reasoning: Effort.High,
+			},
+		).result();
+
+		expect(captured[0].headers["x-api-provider"]).toBe("baseten");
+		// Baseten thinking rides the template switch, never reasoning_effort.
+		expect(captured[0].body.chat_template_args).toEqual({ enable_thinking: true });
+		expect(captured[0].body.reasoning_effort).toBeUndefined();
+	});
+
+	it("includes the tool name on tool-result messages for kimi-k3", async () => {
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			kimiK3(),
+			{
+				messages: [
+					{ role: "user", content: "read it", timestamp: 1 },
+					{
+						role: "assistant",
+						content: [{ type: "toolCall", id: "call_0", name: "Read", arguments: { path: "/tmp/x" } }],
+						api: "factory-droid-agent",
+						provider: "factory-droid",
+						model: "kimi-k3",
+						usage: {
+							input: 1,
+							output: 1,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 2,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "toolUse",
+						timestamp: 2,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "call_0",
+						toolName: "Read",
+						content: [{ type: "text", text: "body" }],
+						isError: false,
+						timestamp: 3,
+					},
+				],
+			},
+			{ apiKey: "workos-token", fetch: captureFetch(captured, completionsChunks("OK", "kimi-k3")) },
+		).result();
+
+		const messages = captured[0].body.messages as Array<{ role: string; name?: string }>;
+		const toolMessage = messages.find(message => message.role === "tool");
+		expect(toolMessage?.name).toBe("Read");
 	});
 
 	it("emits chat_template_args enable_thinking without reasoning_effort on Baseten", async () => {
