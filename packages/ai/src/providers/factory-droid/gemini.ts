@@ -3,6 +3,7 @@ import type { AssistantMessage, Context, Model, StreamOptions, Tool } from "../.
 import { AssistantMessageEventStream } from "../../utils/event-stream";
 import { normalizeSchemaForGoogle } from "../../utils/schema";
 import { createProviderErrorMessage } from "../error-message";
+import { retainThoughtSignature } from "../google-shared";
 
 /**
  * Factory's Gemini path (`POST /api/llm/g/v1/generate`) speaks native
@@ -65,10 +66,19 @@ function toGeminiContents(context: Context): {
 		if (message.role === "assistant") {
 			const parts: GeminiPart[] = [];
 			for (const block of message.content) {
-				if (block.type === "text" && block.text) parts.push({ text: block.text });
-				else if (block.type === "thinking" && block.thinking) parts.push({ text: block.thinking, thought: true });
+				// Mirrors the droid continuation body (captured live): model turns replay
+				// only text and functionCall parts with their thoughtSignature attached;
+				// thinking text itself is never resent.
+				if (block.type === "text" && block.text)
+					parts.push({
+						text: block.text,
+						...(block.textSignature ? { thoughtSignature: block.textSignature } : {}),
+					});
 				else if (block.type === "toolCall")
-					parts.push({ functionCall: { name: block.name, args: block.arguments } });
+					parts.push({
+						functionCall: { name: block.name, args: block.arguments },
+						...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}),
+					});
 			}
 			if (parts.length > 0) contents.push({ role: "model", parts });
 			continue;
@@ -235,6 +245,7 @@ export function streamFactoryDroidGemini(
 								id: `call_${contentIndex}`,
 								name: part.functionCall.name,
 								arguments: part.functionCall.args ?? {},
+								...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
 							} as AssistantMessage["content"][number]);
 							toolCalls.set(contentIndex, { name: part.functionCall.name, args: argsJson });
 							stream.push({ type: "toolcall_start", contentIndex, partial: output });
@@ -248,7 +259,8 @@ export function streamFactoryDroidGemini(
 								output.content.push({ type: "thinking", thinking: "" } as AssistantMessage["content"][number]);
 								stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
 							}
-							const block = output.content[thinkingIndex] as { thinking: string };
+							const block = output.content[thinkingIndex] as { thinking: string; thinkingSignature?: string };
+							block.thinkingSignature = retainThoughtSignature(block.thinkingSignature, part.thoughtSignature);
 							block.thinking += part.text;
 							stream.push({
 								type: "thinking_delta",
@@ -256,15 +268,18 @@ export function streamFactoryDroidGemini(
 								delta: part.text,
 								partial: output,
 							});
-						} else if (part.text.length > 0) {
+						} else if (part.text.length > 0 || (part.thoughtSignature && !part.functionCall)) {
 							if (textIndex < 0) {
 								textIndex = output.content.length;
 								output.content.push({ type: "text", text: "" } as AssistantMessage["content"][number]);
 								stream.push({ type: "text_start", contentIndex: textIndex, partial: output });
 							}
-							const block = output.content[textIndex] as { text: string };
-							block.text += part.text;
-							stream.push({ type: "text_delta", contentIndex: textIndex, delta: part.text, partial: output });
+							const block = output.content[textIndex] as { text: string; textSignature?: string };
+							block.textSignature = retainThoughtSignature(block.textSignature, part.thoughtSignature);
+							if (part.text.length > 0) {
+								block.text += part.text;
+								stream.push({ type: "text_delta", contentIndex: textIndex, delta: part.text, partial: output });
+							}
 						}
 					}
 				}
@@ -290,7 +305,8 @@ export function streamFactoryDroidGemini(
 				>;
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
 			}
-			stream.push({ type: "done", reason: "stop", message: output });
+			if (toolCalls.size > 0) output.stopReason = "toolUse";
+			stream.push({ type: "done", reason: toolCalls.size > 0 ? "toolUse" : "stop", message: output });
 			stream.end();
 		} catch (error) {
 			stream.push({ type: "error", reason: "error", error: createProviderErrorMessage(model, error) });

@@ -158,6 +158,25 @@ function anthropicChunks(text: string): string[] {
 	];
 }
 
+function geminiToolChunks(): string[] {
+	return [
+		JSON.stringify({
+			candidates: [
+				{
+					content: {
+						role: "model",
+						parts: [{ functionCall: { name: "Read", args: { path: "/tmp/x" } }, thoughtSignature: "sig-abc" }],
+					},
+				},
+			],
+		}),
+		JSON.stringify({
+			candidates: [{ content: { role: "model", parts: [{ text: "" }] }, finishReason: "STOP" }],
+			usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 4 },
+		}),
+	];
+}
+
 function geminiChunks(text: string): string[] {
 	return [
 		JSON.stringify({ candidates: [{ content: { role: "model", parts: [{ text }] } }] }),
@@ -395,5 +414,51 @@ describe("Factory Droid gemini wire (Google series)", () => {
 		expect(generation.temperature).toBe(1);
 		expect(generation.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: "MEDIUM" });
 		expect(JSON.stringify(request.body.systemInstruction)).toContain(DROID_SYSTEM_PREFIX);
+	});
+
+	it("captures thoughtSignature on tool calls and replays the droid continuation shape", async () => {
+		// First turn: the stream stores the signature on the toolCall block.
+		const firstCaptured: CapturedRequest[] = [];
+		const first = await streamFactoryDroid(
+			gemini(),
+			{ messages: [{ role: "user", content: "read the file", timestamp: 1 }] },
+			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(firstCaptured, geminiToolChunks()), sessionId: "sess-4" },
+		).result();
+		expect(first.stopReason).toBe("toolUse");
+		const toolCall = first.content.find(block => block.type === "toolCall");
+		expect(toolCall).toMatchObject({ name: "Read", thoughtSignature: "sig-abc" });
+
+		// Second turn: the continuation body mirrors droid's captured shape — the
+		// model turn replays functionCall parts with their thoughtSignature, and
+		// thinking text is never resent.
+		const secondCaptured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			gemini(),
+			{
+				messages: [
+					{ role: "user", content: "read the file", timestamp: 1 },
+					{ ...first, content: [{ type: "thinking", thinking: "hidden reasoning" }, ...first.content] },
+					{
+						role: "toolResult",
+						toolCallId: "call_0",
+						toolName: "Read",
+						content: [{ type: "text", text: "file body" }],
+						isError: false,
+						timestamp: 2,
+					},
+				],
+			},
+			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(secondCaptured, geminiChunks("DONE")), sessionId: "sess-4" },
+		).result();
+		const contents = secondCaptured[0].body.contents as Array<{
+			role: string;
+			parts: Array<Record<string, unknown>>;
+		}>;
+		const modelTurn = contents.find(entry => entry.role === "model");
+		expect(modelTurn?.parts).toEqual([
+			{ functionCall: { name: "Read", args: { path: "/tmp/x" } }, thoughtSignature: "sig-abc" },
+		]);
+		expect(JSON.stringify(modelTurn)).not.toContain('thought":true');
+		expect(JSON.stringify(modelTurn)).not.toContain("hidden reasoning");
 	});
 });
