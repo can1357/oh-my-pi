@@ -19,8 +19,7 @@ import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from 
 
 /**
  * Factory Droid subscription provider — sidecar-free transport over Factory's
- * LLM proxy. The proxy multiplexes four wire protocols by model family
- * (reverse-engineered from droid 0.189.0 and verified live):
+ * LLM proxy. The proxy multiplexes four wire protocols by model family:
  *
  * | family | path | models |
  * |---|---|---|
@@ -36,16 +35,16 @@ import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from 
  *   Factory API keys are control-plane only and get 403 here.
  * - Identity headers: `factory-cli/<version>` user agent, `X-Client-Version`,
  *   `X-Factory-Client: cli`, `X-Factory-Org-Id`, the X-Stainless runtime
- *   fingerprint the CLI's SDKs emit, and v4-shaped `x-session-id` /
+ *   fingerprint, and v4-shaped `x-session-id` /
  *   `x-assistant-message-id` used for usage attribution.
  * - System-prompt gate: the proxy rejects (403) requests whose system prompt
  *   does not start with the exact Droid identity sentence
  *   {@link DROID_SYSTEM_PREFIX}. The rest of the prompt is untouched.
  * - `x-api-provider` selects the upstream router from the model's registry
- *   rotation list (first entry pinned, matching the CLI default).
+ *   rotation list (first entry pinned).
  */
 
-/** Exact first sentence of the Droid CLI system prompt; the proxy prefix-gates on it. */
+/** Droid identity sentence; the proxy rejects requests whose system prompt lacks this prefix. */
 export const DROID_SYSTEM_PREFIX = "You are Droid, an AI software engineering agent built by Factory.";
 
 export interface FactoryDroidOptions extends StreamOptions {
@@ -57,7 +56,7 @@ export interface FactoryDroidOptions extends StreamOptions {
 	serviceTier?: ServiceTier;
 }
 
-/** Per-upstream thinking budgets from the CLI (`xnT` table). */
+/** Per-upstream thinking budgets by effort level. */
 const ANTHROPIC_THINKING_BUDGETS: Readonly<Record<string, number>> = {
 	low: 4096,
 	medium: 12288,
@@ -178,9 +177,9 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 
 			const meta = resolveModelMeta(model);
 			const upstream = resolveUpstream(meta);
-			// Droid mints random v4 UUIDs for both ids; the OMP session id is a
-			// UUIDv7-style timestamp id, so map it through a deterministic v4 shape
-			// to keep the wire indistinguishable while staying stable per session.
+			// The proxy expects v4-shaped ids; the OMP session id is a UUIDv7-style
+			// timestamp id, so map it through a deterministic v4 shape that stays
+			// stable per session.
 			const requestId = crypto.randomUUID();
 			const sessionUuid = options?.sessionId ? deterministicUuid(options.sessionId) : requestId;
 			const orgId = auth.orgId ?? factoryDroidOrgIdFromToken(auth.accessToken);

@@ -138,7 +138,7 @@ export function retainThoughtSignature(existing: string | undefined, incoming: s
 // Thought signatures must be base64 for Google APIs (TYPE_BYTES).
 const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
 
-const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
+export const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
 
 function isValidThoughtSignature(signature: string | undefined): boolean {
 	if (!signature) return false;

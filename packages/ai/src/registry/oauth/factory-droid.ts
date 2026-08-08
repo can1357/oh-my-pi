@@ -1,9 +1,9 @@
 /**
  * Factory Droid (Droid Core) OAuth — WorkOS device-code flow.
  *
- * Mirrors the Droid CLI's own `device-code.ts` login: a public WorkOS
- * user-management client, RFC 8628 device authorization, no localhost
- * callback server. Users approve at https://auth.factory.ai/device with a
+ * A public WorkOS user-management client with RFC 8628 device
+ * authorization, no localhost callback server. Users approve at
+ * https://auth.factory.ai/device with a
  * short user code; the returned access/refresh pair is what Factory's
  * subscription LLM proxy accepts as `Bearer` (Factory API keys are
  * control-plane only and do not authorize inference).
@@ -16,7 +16,7 @@ import { type OAuthDeviceCodePollResult, pollOAuthDeviceCodeFlow } from "./devic
 import type { OAuthController, OAuthCredentials } from "./types";
 
 const WORKOS_BASE_URL = "https://api.workos.com/user_management";
-/** Public WorkOS client id the Droid CLI registers for its device flow. */
+/** Public WorkOS client id for Droid device authorization. */
 const WORKOS_CLIENT_ID = "client_01HNM792M5G5G1A2THWPXKFMXB";
 const TOKEN_REQUEST_TIMEOUT_MS = 15_000;
 
