@@ -387,7 +387,6 @@
 
 - Added the sidecar-free `factory-droid-agent` transport: direct HTTPS calls to Factory's subscription LLM proxy across its four wire protocols (OpenAI chat completions for Droid Core, OpenAI Responses for GPT, Anthropic Messages for Claude/MiniMax, Gemini generateContent for Google), authenticated by `/login factory-droid` (WorkOS device code), the local Droid session bridge, or `FACTORY_DROID_ACCESS_TOKEN`. Requests carry the Droid CLI's client identity (user agent, version markers, X-Stainless fingerprint, v4 session/message ids, org id) and the required Droid system-prompt prefix; reasoning effort maps per upstream (`reasoning_effort` + `reasoning_history` on Fireworks, `chat_template_args` on Baseten, adaptive/budget thinking + `output_config.effort` on Anthropic, `thinkingLevel` on Gemini).
 - Added the `factory-droid` usage provider: subscription quota from `GET /api/billing/limits` (Standard credits and Droid Core pools across 5-hour/weekly/monthly windows with reset timestamps, plus extra-usage balance) flows into OMP's usage surfaces.
-- Added opt-in Factory dashboard session registration behind `FACTORY_DROID_SESSION_SYNC=1`, using the CLI's `/api/sessions/create` shape so OMP sessions appear on the Factory site.
 
 ## [17.2.10] - 2026-08-06
 

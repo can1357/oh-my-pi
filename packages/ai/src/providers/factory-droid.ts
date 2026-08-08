@@ -12,16 +12,7 @@ import {
 } from "@oh-my-pi/pi-catalog/discovery";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as AIError from "../error";
-import type {
-	Context,
-	FetchImpl,
-	Model,
-	ModelSpec,
-	ServiceTier,
-	StreamFunction,
-	StreamOptions,
-	ToolChoice,
-} from "../types";
+import type { Context, Model, ModelSpec, ServiceTier, StreamFunction, StreamOptions, ToolChoice } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { createProviderErrorMessage } from "./error-message";
@@ -76,64 +67,6 @@ const ANTHROPIC_THINKING_BUDGETS: Readonly<Record<string, number>> = {
 	xhigh: 24576,
 	max: 0,
 };
-
-/**
- * Opt-in dashboard parity: when `FACTORY_DROID_SESSION_SYNC=1`, the first
- * inference of a session also registers it via `POST /api/sessions/create`
- * (the call the droid CLI makes), so the session appears on the Factory site
- * with usage linked by `x-session-id`. Off by default — it writes records
- * into the user's Factory account from a third-party client.
- */
-const FACTORY_DROID_SESSION_SYNC_ENV = "FACTORY_DROID_SESSION_SYNC";
-const syncedSessions = new Set<string>();
-
-function maybeSyncFactorySession(input: {
-	accessToken: string;
-	orgId?: string;
-	sessionUuid: string;
-	context: Context;
-	cwd?: string;
-	fetch?: FetchImpl;
-}): void {
-	if (syncedSessions.has(input.sessionUuid)) return;
-	const env = (typeof Bun !== "undefined" ? Bun.env : process.env)[FACTORY_DROID_SESSION_SYNC_ENV];
-	if (env !== "1" && env?.toLowerCase() !== "true") return;
-	syncedSessions.add(input.sessionUuid);
-	const firstUser = input.context.messages.find(message => message.role === "user");
-	const firstUserText =
-		typeof firstUser?.content === "string"
-			? firstUser.content
-			: (firstUser?.content ?? [])
-					.map(block => ("text" in block ? block.text : ""))
-					.filter(Boolean)
-					.join(" ");
-	const title = firstUserText.replace(/\s+/g, " ").trim().slice(0, 120) || "OMP session";
-	const body = {
-		id: input.sessionUuid,
-		title,
-		isStarted: true,
-		version: 2,
-		machineConnectionType: "cli",
-		hostId: deterministicUuid(`omp:${process.env.HOSTNAME ?? "localhost"}`),
-		tags: [{ name: "omp" }],
-		originalWorkingDirectory: input.cwd ?? process.cwd(),
-	};
-	void (input.fetch ?? fetch)("https://api.factory.ai/api/sessions/create", {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${input.accessToken}`,
-			"Content-Type": "application/json",
-			"User-Agent": `factory-cli/${FACTORY_DROID_CLIENT_VERSION}`,
-			"X-Client-Version": FACTORY_DROID_CLIENT_VERSION,
-			"X-Factory-Client": "cli",
-			...(input.orgId ? { "X-Factory-Org-Id": input.orgId } : {}),
-		},
-		body: JSON.stringify(body),
-	}).catch(() => {
-		// Dashboard sync is best-effort; inference must never fail on it.
-		syncedSessions.delete(input.sessionUuid);
-	});
-}
 
 /** Registry lookup; falls back to a completions default so custom ids still stream. */
 function resolveModelMeta(model: Model<"factory-droid-agent">): FactoryDroidModelInput | undefined {
@@ -240,14 +173,6 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 			const requestId = crypto.randomUUID();
 			const sessionUuid = options?.sessionId ? deterministicUuid(options.sessionId) : requestId;
 			const orgId = auth.orgId ?? factoryDroidOrgIdFromToken(auth.accessToken);
-			maybeSyncFactorySession({
-				accessToken: auth.accessToken,
-				orgId,
-				sessionUuid,
-				context,
-				cwd: options?.cwd,
-				fetch: options?.fetch,
-			});
 
 			const proxiedContext: Context = {
 				...context,

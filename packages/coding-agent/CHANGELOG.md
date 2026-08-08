@@ -1110,6 +1110,14 @@
 - Fixed automatic `agent.continue()` paths failing to run context-fit maintenance when reverting to a smaller-context model after a cooldown expiry.
 - Fixed `/handoff` reporting "Handoff cancelled" for actual generation or stream timeout errors, ensuring the real error is surfaced.
 
+### Added
+
+- Wired `factory-droid` model discovery and login help into the CLI.
+
+### Changed
+
+- Model availability now honors provider definitions with `allowsMissingApiKey` (aligning the picker with the existing inference-time check in `stream.ts`), so `factory-droid` — and existing `bedrock-mantle` — appear available without a stored OMP credential.
+
 ## [17.2.10] - 2026-08-06
 
 ### Breaking Changes
