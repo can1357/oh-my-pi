@@ -23,7 +23,7 @@ The model surface mirrors the Droid CLI's compiled-in registry byte-for-byte (ex
 
 Four wire protocols are dispatched by model family, each with the CLI's request shape: OpenAI chat completions for Droid Core (`reasoning_effort` + `reasoning_history: preserved` on Fireworks, `chat_template_args.enable_thinking` on Baseten), OpenAI Responses for GPT (with prompt-cache key/retention and per-model service tiers), Anthropic Messages for Claude and MiniMax (adaptive or budget thinking per model, `output_config.effort`), and Gemini's native `generateContent` SSE for Google models (`thinkingConfig` levels). Requests present the Droid CLI's client identity (user agent, client-version, `x-api-provider`, v4-shaped session/message ids) and open the system prompt with Factory's Droid identity sentence, which the proxy requires.
 
-Subscription usage (Standard credits and Droid Core pools across the 5-hour, weekly, and monthly windows) appears in OMP's usage surfaces from the same `/api/billing/limits` endpoint the CLI reads. Sessions are not registered in Factory's web dashboard by default; set `FACTORY_DROID_SESSION_SYNC=1` to have each session created via the CLI's `/api/sessions/create` call so it appears on the Factory site with usage linked by session id.
+Subscription usage (Standard credits and Droid Core pools across the 5-hour, weekly, and monthly windows) appears in OMP's usage surfaces from the same `/api/billing/limits` endpoint the CLI reads.
 
 ## How `omp` decides a provider is available
 
@@ -160,7 +160,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                |
 | `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                            |
 | `cline-pass`                     | `CLINE_API_KEY`                                                               |
-| `factory-droid`                  | `FACTORY_API_KEY` (optional; otherwise uses the local Droid WorkOS session)   |
+| `factory-droid`                  | `FACTORY_DROID_ACCESS_TOKEN` (optional; otherwise `/login factory-droid` or the local Droid WorkOS session) |
 | `firepass`                       | `FIREPASS_API_KEY`                                                            |
 | `wafer-serverless`               | `WAFER_SERVERLESS_API_KEY`                                                    |
 | `xiaomi`                         | `XIAOMI_API_KEY`                                                              |
