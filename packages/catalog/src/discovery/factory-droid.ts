@@ -1,7 +1,6 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { Effort } from "../effort";
 import type { FetchImpl, ModelSpec, ThinkingConfig, ThinkingControlMode } from "../types";
-import { resolveFactoryDroidAuth } from "./factory-droid-auth";
 
 /**
  * Factory Droid (Droid Core + Standard Credits subscription) — direct HTTP integration.
@@ -1054,7 +1053,7 @@ export interface FactoryDroidModelDiscoveryOptions {
 export async function fetchFactoryDroidModels(
 	options: FactoryDroidModelDiscoveryOptions = {},
 ): Promise<ModelSpec<"factory-droid-agent">[] | null> {
-	const token = options.apiKey?.trim() || (await resolveFactoryDroidAuth())?.accessToken;
+	const token = options.apiKey?.trim();
 	if (!token) return null;
 	const fetchImpl = options.fetch ?? fetch;
 	const headers = {

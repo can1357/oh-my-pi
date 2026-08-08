@@ -17,7 +17,7 @@ The `factory-droid` provider serves Factory's Droid Core subscription models thr
    omp --model factory-droid/kimi-k3
    ```
 
-If you already signed in with the Droid CLI (`droid auth login`), OMP reuses that session from `~/.factory/auth.v2.file` (encrypted; key in the adjacent `auth.v2.key`), refreshes it through WorkOS when it expires, and writes rotated tokens back so the CLI keeps working. For headless environments, set `FACTORY_DROID_ACCESS_TOKEN` (and optionally `FACTORY_DROID_ORG_ID`) instead. Factory API keys cover the control plane only and cannot authorize subscription inference.
+The stored session refreshes through WorkOS automatically. Factory API keys cover the control plane only and cannot authorize subscription inference — there is no API-key path; the WorkOS login is the single credential source.
 
 The model surface mirrors the Droid CLI's compiled-in registry byte-for-byte (extracted from the CLI, not hand-listed) — Factory has no model-listing endpoint in any client — narrowed live by the account's feature flags (including hard-deprecation gates) and org model policy, exactly as the CLI and desktop app do. That covers the Droid Core flat-rate series (Kimi, GLM, DeepSeek, MiniMax, Inkling, Nemotron), the GPT-5.x series, Claude models, and Gemini models billed in Standard Credits.
 
@@ -160,7 +160,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                |
 | `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                            |
 | `cline-pass`                     | `CLINE_API_KEY`                                                               |
-| `factory-droid`                  | `FACTORY_DROID_ACCESS_TOKEN` (optional; otherwise `/login factory-droid` or the local Droid WorkOS session) |
+| `factory-droid`                  | none — `/login factory-droid` (WorkOS device code) is the credential source                              |
 | `firepass`                       | `FIREPASS_API_KEY`                                                            |
 | `wafer-serverless`               | `WAFER_SERVERLESS_API_KEY`                                                    |
 | `xiaomi`                         | `XIAOMI_API_KEY`                                                              |

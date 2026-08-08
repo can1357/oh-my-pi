@@ -1,7 +1,6 @@
-import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, mock } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
-import * as FactoryDroidAuth from "@oh-my-pi/pi-catalog/discovery/factory-droid-auth";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { DROID_SYSTEM_PREFIX, streamFactoryDroid } from "../src/providers/factory-droid";
 import type { Model } from "../src/types";
@@ -169,9 +168,14 @@ function geminiChunks(text: string): string[] {
 	];
 }
 
-function mockAuth(auth: FactoryDroidAuth.FactoryDroidAuth | null): void {
-	spyOn(FactoryDroidAuth, "resolveFactoryDroidAuth").mockResolvedValue(auth);
+/** Fake WorkOS-shaped JWT carrying the given external org id claim. */
+function workosJwt(orgId?: string): string {
+	const b64 = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
+	return `${b64({ alg: "none" })}.${b64(orgId ? { external_org_id: orgId } : {})}.sig`;
 }
+
+/** Credential for the `/login factory-droid` store path, with an org claim. */
+const WORKOS_TOKEN = workosJwt("org-1");
 
 function captureFetch(captured: CapturedRequest[], chunks: string[], eventNames?: string[]) {
 	return mock(async (url: string | URL | Request, init?: RequestInit) => {
@@ -198,28 +202,26 @@ function captureFetch(captured: CapturedRequest[], chunks: string[], eventNames?
 
 afterEach(() => {
 	mock.restore();
-	FactoryDroidAuth.resetFactoryDroidAuthForTests();
 });
 
 describe("Factory Droid completions wire (Droid Core)", () => {
 	it("fails with sign-in guidance when no Droid session exists", async () => {
-		mockAuth(null);
 		const result = await streamFactoryDroid(
 			kimiK3(),
 			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
 			{},
 		).result();
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("droid auth login");
+		expect(result.errorMessage).toContain("/login factory-droid");
 	});
 
 	it("posts to the Factory LLM proxy with bearer auth, identity headers, and upstream routing", async () => {
-		mockAuth({ accessToken: "workos-token", orgId: "org-1" });
 		const captured: CapturedRequest[] = [];
 		const result = await streamFactoryDroid(
 			kimiK3(),
 			{ systemPrompt: ["OMP system prompt"], messages: [{ role: "user", content: "hello", timestamp: 1 }] },
 			{
+				apiKey: WORKOS_TOKEN,
 				fetch: captureFetch(captured, completionsChunks("OMP_DIRECT_OK", "kimi-k3")),
 				sessionId: "019fd-test-session",
 			},
@@ -233,7 +235,7 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 		expect(captured).toHaveLength(1);
 		const request = captured[0];
 		expect(request.url).toBe("https://api.factory.ai/api/llm/o/v1/chat/completions");
-		expect(request.headers.authorization).toBe("Bearer workos-token");
+		expect(request.headers.authorization).toBe(`Bearer ${WORKOS_TOKEN}`);
 		expect(request.headers["x-api-provider"]).toBe("fireworks");
 		expect(request.headers["x-client-version"]).toBeDefined();
 		expect(request.headers["user-agent"]).toMatch(/^factory-cli\//);
@@ -258,24 +260,30 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 	});
 
 	it("sends reasoning_effort none when thinking is disabled", async () => {
-		mockAuth({ accessToken: "workos-token" });
 		const captured: CapturedRequest[] = [];
 		await streamFactoryDroid(
 			kimiK3(),
 			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
-			{ fetch: captureFetch(captured, completionsChunks("OK", "kimi-k3")), disableReasoning: true },
+			{
+				apiKey: "workos-token",
+				fetch: captureFetch(captured, completionsChunks("OK", "kimi-k3")),
+				disableReasoning: true,
+			},
 		).result();
 
 		expect(captured[0].body.reasoning_effort).toBe("none");
 	});
 
 	it("emits reasoning_effort plus reasoning_history preserved on Fireworks when effort is set", async () => {
-		mockAuth({ accessToken: "workos-token" });
 		const captured: CapturedRequest[] = [];
 		await streamFactoryDroid(
 			kimiK3(),
 			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
-			{ fetch: captureFetch(captured, completionsChunks("OK", "kimi-k3")), reasoning: Effort.Max },
+			{
+				apiKey: "workos-token",
+				fetch: captureFetch(captured, completionsChunks("OK", "kimi-k3")),
+				reasoning: Effort.Max,
+			},
 		).result();
 
 		expect(captured[0].body.reasoning_effort).toBe("max");
@@ -283,12 +291,15 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 	});
 
 	it("emits chat_template_args enable_thinking without reasoning_effort on Baseten", async () => {
-		mockAuth({ accessToken: "workos-token" });
 		const captured: CapturedRequest[] = [];
 		await streamFactoryDroid(
 			nemotron(),
 			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
-			{ fetch: captureFetch(captured, completionsChunks("OK", "nemotron-3-ultra")), reasoning: Effort.High },
+			{
+				apiKey: "workos-token",
+				fetch: captureFetch(captured, completionsChunks("OK", "nemotron-3-ultra")),
+				reasoning: Effort.High,
+			},
 		).result();
 
 		expect(captured[0].body.chat_template_args).toEqual({ enable_thinking: true });
@@ -299,18 +310,22 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 
 describe("Factory Droid responses wire (GPT series)", () => {
 	it("posts to /responses with droid cache and routing fields", async () => {
-		mockAuth({ accessToken: "workos-token", orgId: "org-1" });
 		const captured: CapturedRequest[] = [];
 		const result = await streamFactoryDroid(
 			gptTerra(),
 			{ systemPrompt: ["OMP prompt"], messages: [{ role: "user", content: "hello", timestamp: 1 }] },
-			{ fetch: captureFetch(captured, responsesChunks("GPT_OK")), sessionId: "sess-1", reasoning: Effort.Max },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch(captured, responsesChunks("GPT_OK")),
+				sessionId: "sess-1",
+				reasoning: Effort.Max,
+			},
 		).result();
 
 		expect(result.stopReason).toBe("stop");
 		const request = captured[0];
 		expect(request.url).toBe("https://api.factory.ai/api/llm/o/v1/responses");
-		expect(request.headers.authorization).toBe("Bearer workos-token");
+		expect(request.headers.authorization).toBe(`Bearer ${WORKOS_TOKEN}`);
 		expect(request.headers["x-api-provider"]).toBe("openai");
 		expect(request.body.model).toBe("gpt-5.6-terra");
 		expect(request.body.prompt_cache_key).toBeDefined();
@@ -329,12 +344,12 @@ describe("Factory Droid responses wire (GPT series)", () => {
 
 describe("Factory Droid anthropic wire (Claude series)", () => {
 	it("posts to /a/v1/messages with adaptive thinking and effort config", async () => {
-		mockAuth({ accessToken: "workos-token", orgId: "org-1" });
 		const captured: CapturedRequest[] = [];
 		const result = await streamFactoryDroid(
 			sonnet5(),
 			{ systemPrompt: ["OMP prompt"], messages: [{ role: "user", content: "hello", timestamp: 1 }] },
 			{
+				apiKey: WORKOS_TOKEN,
 				fetch: captureFetch(captured, anthropicChunks("CLAUDE_OK"), ANTHROPIC_EVENTS),
 				sessionId: "sess-2",
 				reasoning: Effort.High,
@@ -344,7 +359,7 @@ describe("Factory Droid anthropic wire (Claude series)", () => {
 		expect(result.stopReason).toBe("stop");
 		const request = captured[0];
 		expect(request.url).toStartWith("https://api.factory.ai/api/llm/a/v1/messages");
-		expect(request.headers.authorization).toBe("Bearer workos-token");
+		expect(request.headers.authorization).toBe(`Bearer ${WORKOS_TOKEN}`);
 		expect(request.headers["x-api-key"]).toBe("placeholder");
 		expect(request.headers["x-api-provider"]).toBe("anthropic");
 		expect(request.headers["anthropic-version"]).toBe("2023-06-01");
@@ -356,12 +371,16 @@ describe("Factory Droid anthropic wire (Claude series)", () => {
 
 describe("Factory Droid gemini wire (Google series)", () => {
 	it("posts native generateContent to /g/v1/generate with thinking config", async () => {
-		mockAuth({ accessToken: "workos-token", orgId: "org-1" });
 		const captured: CapturedRequest[] = [];
 		const result = await streamFactoryDroid(
 			gemini(),
 			{ systemPrompt: ["OMP prompt"], messages: [{ role: "user", content: "hello", timestamp: 1 }] },
-			{ fetch: captureFetch(captured, geminiChunks("GEM_OK")), sessionId: "sess-3", reasoning: Effort.Medium },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch(captured, geminiChunks("GEM_OK")),
+				sessionId: "sess-3",
+				reasoning: Effort.Medium,
+			},
 		).result();
 
 		expect(result.stopReason).toBe("stop");
@@ -369,7 +388,7 @@ describe("Factory Droid gemini wire (Google series)", () => {
 		expect(result.usage.input).toBe(21);
 		const request = captured[0];
 		expect(request.url).toBe("https://api.factory.ai/api/llm/g/v1/generate");
-		expect(request.headers.authorization).toBe("Bearer workos-token");
+		expect(request.headers.authorization).toBe(`Bearer ${WORKOS_TOKEN}`);
 		expect(request.headers["x-api-provider"]).toBe("google");
 		expect(request.body.model).toBe("gemini-3.1-pro-preview");
 		const generation = request.body.generationConfig as Record<string, unknown>;

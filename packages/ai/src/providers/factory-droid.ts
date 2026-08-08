@@ -7,8 +7,6 @@ import {
 	FACTORY_DROID_MODEL_META,
 	FACTORY_DROID_RESPONSES_BASE_URL,
 	type FactoryDroidModelInput,
-	factoryDroidOrgIdFromToken,
-	resolveFactoryDroidAuth,
 } from "@oh-my-pi/pi-catalog/discovery";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as AIError from "../error";
@@ -34,7 +32,7 @@ import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from 
  * Cross-cutting contract on every path:
  *
  * - Auth: `Authorization: Bearer <workos access token>` from `/login
- *   factory-droid`, the local droid-file bridge, or FACTORY_DROID_ACCESS_TOKEN.
+ *   factory-droid` (WorkOS device code, refreshed through the auth store).
  *   Factory API keys are control-plane only and get 403 here.
  * - Identity headers: `factory-cli/<version>` user agent, `X-Client-Version`,
  *   `X-Factory-Client: cli`, `X-Factory-Org-Id`, the X-Stainless runtime
@@ -140,6 +138,24 @@ function buildCompletionsReasoningBody(
 	return undefined;
 }
 
+/** Decodes the WorkOS JWT payload without verifying the signature (server verifies). */
+function factoryDroidTokenClaims(accessToken: string): Record<string, unknown> | null {
+	const [, payloadSegment] = accessToken.split(".");
+	if (!payloadSegment) return null;
+	try {
+		const payload: unknown = JSON.parse(Buffer.from(payloadSegment, "base64url").toString("utf8"));
+		return payload != null && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Factory's external org id (`X-Factory-Org-Id` header value) from a token's claims. */
+function factoryDroidOrgIdFromToken(accessToken: string): string | undefined {
+	const external = factoryDroidTokenClaims(accessToken)?.external_org_id;
+	return typeof external === "string" && external.length > 0 ? external : undefined;
+}
+
 export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 	model: Model<"factory-droid-agent">,
 	context: Context,
@@ -149,21 +165,16 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 
 	(async () => {
 		try {
-			// Auth precedence: an OMP-stored WorkOS session from `/login factory-droid`
-			// (resolved and refreshed by the harness, passed as apiKey) wins over the
-			// local droid-file bridge. The kNoAuth sentinel ("N/A") means no stored
-			// credential — fall through to the bridge.
+			// Sole credential path: the OMP-stored WorkOS session from `/login
+			// factory-droid`, resolved and refreshed by the harness and passed as
+			// apiKey. The kNoAuth sentinel ("N/A") means no stored credential.
 			const harnessToken = options?.apiKey?.trim();
-			const auth =
-				harnessToken && harnessToken !== "N/A"
-					? { accessToken: harnessToken, orgId: undefined }
-					: await resolveFactoryDroidAuth();
-			if (!auth) {
+			if (!harnessToken || harnessToken === "N/A") {
 				throw new AIError.ConfigurationError(
-					"No Factory Droid credentials found. Run `/login factory-droid` (browser device code), " +
-						"sign in once with `droid auth login`, or set FACTORY_DROID_ACCESS_TOKEN.",
+					"No Factory Droid credentials found. Run `/login factory-droid` (WorkOS device code).",
 				);
 			}
+			const auth = { accessToken: harnessToken, orgId: undefined };
 
 			const meta = resolveModelMeta(model);
 			const upstream = resolveUpstream(meta);

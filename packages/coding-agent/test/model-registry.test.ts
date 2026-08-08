@@ -5,11 +5,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Effort, type FetchImpl, type Model, type OpenAICompat, type ThinkingConfig } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -402,32 +401,6 @@ describe("ModelRegistry", () => {
 			} finally {
 				if (originalOpenAiKey === undefined) delete Bun.env.OPENAI_API_KEY;
 				else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
-			}
-		});
-
-		test("built-in providers with optional API keys resolve the no-auth sentinel", async () => {
-			const originalFactoryKey = Bun.env.FACTORY_API_KEY;
-			delete Bun.env.FACTORY_API_KEY;
-			try {
-				const registry = new ModelRegistry(authStorage, modelsJsonPath);
-				const model = buildModel(
-					buildFactoryDroidModel({
-						id: "kimi-k3",
-						name: "Kimi K3 (Droid Core)",
-						wire: "openai-completions",
-						contextWindow: 196_608,
-						maxTokens: 65_536,
-						apiProviders: ["fireworks", "baseten"],
-						supportedReasoningEfforts: ["off", "low", "high", "max"],
-						defaultReasoningEffort: "high",
-					}),
-				);
-
-				expect(registry.hasConfiguredAuth(model)).toBe(true);
-				await expect(registry.getApiKey(model)).resolves.toBe(kNoAuth);
-			} finally {
-				if (originalFactoryKey === undefined) delete Bun.env.FACTORY_API_KEY;
-				else Bun.env.FACTORY_API_KEY = originalFactoryKey;
 			}
 		});
 		test("zhipu-coding-plan glm-5.2 chat resolves the zhipu credential with model-scoped hints", async () => {
