@@ -3,22 +3,22 @@ import type { AssistantMessage, Context, Model, StreamOptions, Tool } from "../.
 import { AssistantMessageEventStream } from "../../utils/event-stream";
 import { normalizeSchemaForGoogle } from "../../utils/schema";
 import { createProviderErrorMessage } from "../error-message";
-import { retainThoughtSignature } from "../google-shared";
+import { retainThoughtSignature, SKIP_THOUGHT_SIGNATURE } from "../google-shared";
 
 /**
  * Factory's Gemini path (`POST /api/llm/g/v1/generate`) speaks native
  * generateContent SSE — not the standard `:streamGenerateContent` route OMP's
  * google transport composes — so the Droid Core/Standard Gemini models get
- * this dedicated client. Request/response shapes mirror the droid CLI's
- * gemini client (captured live from droid 0.189.0).
+ * this dedicated client. Request/response shapes verified against live traffic.
  */
 
 interface GeminiPart {
 	text?: string;
 	thought?: boolean;
 	thoughtSignature?: string;
+	inlineData?: { mimeType: string; data: string };
 	functionCall?: { name: string; args?: Record<string, unknown> };
-	functionResponse?: { name: string; response: Record<string, unknown> };
+	functionResponse?: { name: string; response: Record<string, unknown>; parts?: GeminiPart[] };
 }
 
 interface GeminiCandidate {
@@ -36,7 +36,7 @@ interface GeminiChunk {
 	};
 }
 
-/** OMP effort → Gemini thinkingLevel (`rah` in the CLI: low/minimal→LOW, medium→MEDIUM when supported, else HIGH). */
+/** OMP effort → Gemini thinkingLevel (low/minimal→LOW, medium→MEDIUM when supported, else HIGH). */
 function geminiThinkingLevel(effort: string | undefined, supportsMedium: boolean): "LOW" | "MEDIUM" | "HIGH" {
 	switch (effort) {
 		case "low":
@@ -49,6 +49,21 @@ function geminiThinkingLevel(effort: string | undefined, supportsMedium: boolean
 	}
 }
 
+/**
+ * Message → contents converter for the proxy's gemini history contract:
+ *
+ * - User text becomes one text part per block; images ride as `inlineData`.
+ * - Text replays unsigned. Thinking replays ONLY when it carries a google
+ *   signature, as a plain text part with `thoughtSignature` attached (never
+ *   `thought: true`) — unsigned or cross-provider thinking is dropped on this
+ *   route.
+ * - Tool calls replay as `functionCall` parts carrying their
+ *   `thoughtSignature`; consecutive tool results group into ONE user content,
+ *   because the proxy 400s when a call turn's response part count mismatches.
+ * - After the latest user turn containing a non-response part, function calls
+ *   missing a signature get the validator-skip sentinel.
+ * - Model turns with no valid parts are dropped.
+ */
 function toGeminiContents(context: Context): {
 	contents: Array<{ role: "user" | "model"; parts: GeminiPart[] }>;
 	systemInstruction?: { parts: GeminiPart[] };
@@ -56,47 +71,85 @@ function toGeminiContents(context: Context): {
 	const contents: Array<{ role: "user" | "model"; parts: GeminiPart[] }> = [];
 	for (const message of context.messages) {
 		if (message.role === "user") {
-			const text =
-				typeof message.content === "string"
-					? message.content
-					: message.content.map(c => ("text" in c ? c.text : "")).join("");
-			if (text) contents.push({ role: "user", parts: [{ text }] });
+			const parts: GeminiPart[] = [];
+			if (typeof message.content === "string") {
+				if (message.content) parts.push({ text: message.content });
+			} else {
+				for (const block of message.content) {
+					if (block.type === "text" && block.text) parts.push({ text: block.text });
+					else if (block.type === "image")
+						parts.push({ inlineData: { mimeType: block.mimeType, data: block.data } });
+				}
+			}
+			if (parts.length > 0) contents.push({ role: "user", parts });
 			continue;
 		}
 		if (message.role === "assistant") {
 			const parts: GeminiPart[] = [];
 			for (const block of message.content) {
-				// Mirrors the droid continuation body (captured live): model turns replay
-				// only text and functionCall parts with their thoughtSignature attached;
-				// thinking text itself is never resent.
-				if (block.type === "text" && block.text)
-					parts.push({
-						text: block.text,
-						...(block.textSignature ? { thoughtSignature: block.textSignature } : {}),
-					});
-				else if (block.type === "toolCall")
+				if (block.type === "text" && block.text) {
+					parts.push({ text: block.text });
+				} else if (block.type === "thinking" && block.thinking.trim() && block.thinkingSignature?.trim()) {
+					parts.push({ text: block.thinking, thoughtSignature: block.thinkingSignature });
+				} else if (block.type === "toolCall") {
 					parts.push({
 						functionCall: { name: block.name, args: block.arguments },
 						...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}),
 					});
+				}
 			}
 			if (parts.length > 0) contents.push({ role: "model", parts });
 			continue;
 		}
 		if (message.role === "toolResult") {
-			contents.push({
-				role: "user",
-				parts: [
-					{
-						functionResponse: {
-							name: message.toolName,
-							response: {
-								result: typeof message.content === "string" ? message.content : JSON.stringify(message.content),
-							},
-						},
+			const textParts: string[] = [];
+			const binaryParts: GeminiPart[] = [];
+			if (typeof message.content === "string") {
+				if (message.content) textParts.push(message.content);
+			} else {
+				for (const block of message.content) {
+					if (block.type === "text" && block.text) textParts.push(block.text);
+					else if (block.type === "image")
+						binaryParts.push({ inlineData: { mimeType: block.mimeType, data: block.data } });
+				}
+			}
+			const part: GeminiPart = {
+				functionResponse: {
+					name: message.toolName,
+					response: {
+						result:
+							textParts.length > 0
+								? textParts.join("\n")
+								: binaryParts.length > 0
+									? `Binary content provided (${binaryParts.length} item(s)).`
+									: "Tool execution succeeded.",
 					},
-				],
-			});
+					...(binaryParts.length > 0 ? { parts: binaryParts } : {}),
+				},
+			};
+			const last = contents[contents.length - 1];
+			if (last && last.role === "user" && last.parts.every(p => p.functionResponse)) {
+				last.parts.push(part);
+			} else {
+				contents.push({ role: "user", parts: [part] });
+			}
+		}
+	}
+	// Sentinel injection: scope to model turns at/after the latest user turn
+	// with a non-response part (the validator only checks the current tail).
+	let lastUserText = 0;
+	for (let i = contents.length - 1; i >= 0; i--) {
+		const entry = contents[i];
+		if (entry.role === "user" && entry.parts.some(part => !part.functionResponse)) {
+			lastUserText = i;
+			break;
+		}
+	}
+	for (let i = lastUserText; i < contents.length; i++) {
+		const entry = contents[i];
+		if (entry.role !== "model") continue;
+		for (const part of entry.parts) {
+			if (part.functionCall && !part.thoughtSignature?.trim()) part.thoughtSignature = SKIP_THOUGHT_SIGNATURE;
 		}
 	}
 	const system = (context.systemPrompt ?? []).filter(Boolean).join("\n\n");
@@ -167,10 +220,10 @@ export function streamFactoryDroidGemini(
 				contents,
 				...(systemInstruction ? { systemInstruction } : {}),
 				generationConfig: {
+					// The proxy's accepted shape: exactly these four keys — no maxOutputTokens.
 					temperature: options.temperature ?? 1,
 					topP: 0.95,
 					topK: 64,
-					maxOutputTokens: options.maxTokens ?? model.maxTokens ?? undefined,
 					thinkingConfig: thinkingOn
 						? {
 								includeThoughts: true,

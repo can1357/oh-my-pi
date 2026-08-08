@@ -5,8 +5,8 @@ import type { ProviderDefinition } from "./types";
  * Factory Droid (Droid Core subscription).
  *
  * Single credential path: `/login factory-droid` runs the WorkOS device-code
- * flow (same public client the Droid CLI uses), stored in OMP's auth storage
- * and refreshed through WorkOS.
+ * flow over the public Droid client, stored in OMP's auth storage and
+ * refreshed through WorkOS.
  */
 export const factoryDroidProvider = {
 	id: "factory-droid",

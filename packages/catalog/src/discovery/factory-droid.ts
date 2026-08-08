@@ -5,11 +5,11 @@ import type { FetchImpl, ModelSpec, ThinkingConfig, ThinkingControlMode } from "
 /**
  * Factory Droid (Droid Core + Standard Credits subscription) — direct HTTP integration.
  *
- * The model registry below is a byte-faithful port of the droid CLI's compiled-in
- * registry (v0.189.0): Factory has no model-listing endpoint, so both first-party
- * clients ship this table and narrow it live with Statsig feature flags and the
- * org model policy. Context windows, reasoning ladders, credit multipliers, and
- * per-model wire protocols are all extracted from the binary, not hand-estimated.
+ * The model registry below is bundled statically: Factory has no model-listing
+ * endpoint, so first-party clients ship this table and narrow it live with
+ * Statsig feature flags and the org model policy. Context windows, reasoning
+ * ladders, credit multipliers, and per-model wire protocols are verified
+ * against live traffic.
  */
 
 /** Base URL per wire protocol namespace (paths appended by the stream layer). */
@@ -18,11 +18,11 @@ export const FACTORY_DROID_RESPONSES_BASE_URL = "https://api.factory.ai/api/llm/
 export const FACTORY_DROID_ANTHROPIC_BASE_URL = "https://api.factory.ai/api/llm/a";
 export const FACTORY_DROID_GOOGLE_BASE_URL = "https://api.factory.ai/api/llm/g/v1";
 
-/** Matches the CLI version the wire contract was verified against. */
+/** Client version reported to Factory's API. */
 export const FACTORY_DROID_CLIENT_VERSION = "0.189.0";
 
 /**
- * Wire protocol the proxy expects for a model, mirroring the CLI's dispatch:
+ * Wire protocol the proxy expects for a model:
  * - `openai-completions`: `/api/llm/o/v1/chat/completions` (Droid Core + xAI)
  * - `openai-responses`: `/api/llm/o/v1/responses` (GPT series)
  * - `anthropic-messages`: `/api/llm/a/v1/messages` (Claude + MiniMax)
@@ -43,7 +43,7 @@ export type FactoryDroidUpstream =
 	| "google"
 	| "xai";
 
-/** How thinking is wired on the Anthropic messages path (from the CLI registry). */
+/** How thinking is wired on the Anthropic messages path. */
 export type FactoryDroidAnthropicThinking =
 	/** `{thinking:{type:"adaptive"}, output_config:{effort}}` — modern Claude. */
 	| "adaptive"
@@ -56,7 +56,7 @@ export type FactoryDroidAnthropicThinking =
 	/** Budget + `output_config.effort`, no betas — MiniMax on the Anthropic path. */
 	| "budget-effort";
 
-/** OpenAI Responses request shaping for GPT-series models (CLI `Vx` config). */
+/** OpenAI Responses request shaping for GPT-series models. */
 export interface FactoryDroidResponsesConfig {
 	verbosity?: "low";
 	serviceTier?: "priority";
@@ -67,7 +67,7 @@ export interface FactoryDroidResponsesConfig {
 
 export interface FactoryDroidModelInput {
 	id: string;
-	/** CLI display name, e.g. "Kimi K3 (Droid Core)". */
+	/** Display name, e.g. "Kimi K3 (Droid Core)". */
 	name: string;
 	wire: FactoryDroidWire;
 	contextWindow: number;
@@ -85,14 +85,13 @@ export interface FactoryDroidModelInput {
 	 */
 	featureFlag?: string;
 	/**
-	 * Hard deprecation gate (from the CLI registry's `deprecation.hard` block):
-	 * when this Statsig flag is on, the CLI hides the model in favor of its
-	 * fallback. Evaluated after `featureFlag`.
+	 * Hard deprecation gate: when this Statsig flag is on, first-party clients
+	 * hide the model in favor of its fallback. Evaluated after `featureFlag`.
 	 */
 	deprecationFlag?: string;
 	/** "core" = Droid Core flat-rate pool; absent = Standard Credits pool. */
 	billingPool?: "core";
-	/** Standard Credits multipliers shown in the CLI picker. */
+	/** Standard Credits multipliers. */
 	creditMultiplier?: number;
 	outputCreditMultiplier?: number;
 	thinkingStyle?: FactoryDroidAnthropicThinking;
@@ -101,7 +100,7 @@ export interface FactoryDroidModelInput {
 	responsesConfig?: FactoryDroidResponsesConfig;
 	noImageSupport?: boolean;
 	pdfSupport?: boolean;
-	/** Droid Core models run on US-based inference (CLI picker footnote). */
+	/** Droid Core models run on US-based inference. */
 	usOnlyInference?: boolean;
 	/** Fast-mode variants point at their base model. */
 	baseVariant?: string;
@@ -1042,13 +1041,13 @@ export interface FactoryDroidModelDiscoveryOptions {
 }
 
 /**
- * Availability filter, not a catalog: Factory has no model-listing endpoint —
- * the CLI and desktop app both ship the same static registry and narrow it
- * with `GET /api/feature-flags` (Statsig gates) and the org model policy in
- * `GET /api/organization/managed-settings`. This does the same. Returns null
- * when no credential resolves or the flags fetch fails — callers keep the
- * static list, matching the CLI's cached-snapshot behavior. Policy-filter
- * failures do not hide models (self-hosted/legacy servers may lack it).
+ * Availability filter, not a catalog: Factory has no model-listing endpoint,
+ * so the bundled registry is narrowed live with `GET /api/feature-flags`
+ * (Statsig gates) and the org model policy in
+ * `GET /api/organization/managed-settings`. Returns null when no credential
+ * resolves or the flags fetch fails — callers keep the static list as an
+ * offline snapshot. Policy-filter failures do not hide models
+ * (self-hosted/legacy servers may lack it).
  */
 export async function fetchFactoryDroidModels(
 	options: FactoryDroidModelDiscoveryOptions = {},
@@ -1102,9 +1101,9 @@ export function buildFactoryDroidModel(input: FactoryDroidModelInput): ModelSpec
 
 /**
  * The thinking control mode rides the wire family, not the model: Anthropic
- * variants follow the CLI's per-model thinking factory (adaptive vs budget),
- * Gemini uses thinkingLevel, and the completions/responses families take the
- * generic effort field.
+ * variants use per-model adaptive vs budget thinking, Gemini uses
+ * thinkingLevel, and the completions/responses families take the generic
+ * effort field.
  */
 function buildFactoryDroidThinking(input: FactoryDroidModelInput): ThinkingConfig | undefined {
 	const available = input.supportedReasoningEfforts ?? [];

@@ -165,7 +165,10 @@ function geminiToolChunks(): string[] {
 				{
 					content: {
 						role: "model",
-						parts: [{ functionCall: { name: "Read", args: { path: "/tmp/x" } }, thoughtSignature: "sig-abc" }],
+						parts: [
+							{ functionCall: { name: "Read", args: { path: "/tmp/x" } }, thoughtSignature: "sig-abc" },
+							{ functionCall: { name: "Read", args: { path: "/tmp/y" } }, thoughtSignature: "sig-def" },
+						],
 					},
 				},
 			],
@@ -425,8 +428,10 @@ describe("Factory Droid gemini wire (Google series)", () => {
 			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(firstCaptured, geminiToolChunks()), sessionId: "sess-4" },
 		).result();
 		expect(first.stopReason).toBe("toolUse");
-		const toolCall = first.content.find(block => block.type === "toolCall");
-		expect(toolCall).toMatchObject({ name: "Read", thoughtSignature: "sig-abc" });
+		const toolCalls = first.content.filter(block => block.type === "toolCall");
+		expect(toolCalls).toHaveLength(2);
+		expect(toolCalls[0]).toMatchObject({ name: "Read", thoughtSignature: "sig-abc" });
+		expect(toolCalls[1]).toMatchObject({ name: "Read", thoughtSignature: "sig-def" });
 
 		// Second turn: the continuation body mirrors droid's captured shape — the
 		// model turn replays functionCall parts with their thoughtSignature, and
@@ -437,7 +442,14 @@ describe("Factory Droid gemini wire (Google series)", () => {
 			{
 				messages: [
 					{ role: "user", content: "read the file", timestamp: 1 },
-					{ ...first, content: [{ type: "thinking", thinking: "hidden reasoning" }, ...first.content] },
+					{
+						...first,
+						content: [
+							{ type: "thinking", thinking: "unsigned reasoning" },
+							{ type: "thinking", thinking: "signed reasoning", thinkingSignature: "sig-think" },
+							...first.content,
+						],
+					},
 					{
 						role: "toolResult",
 						toolCallId: "call_0",
@@ -445,6 +457,14 @@ describe("Factory Droid gemini wire (Google series)", () => {
 						content: [{ type: "text", text: "file body" }],
 						isError: false,
 						timestamp: 2,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "call_1",
+						toolName: "Read",
+						content: [{ type: "text", text: "other body" }],
+						isError: false,
+						timestamp: 3,
 					},
 				],
 			},
@@ -455,10 +475,25 @@ describe("Factory Droid gemini wire (Google series)", () => {
 			parts: Array<Record<string, unknown>>;
 		}>;
 		const modelTurn = contents.find(entry => entry.role === "model");
+		// History contract: unsigned thinking is dropped on the google route;
+		// signed thinking replays as a plain text part carrying its
+		// thoughtSignature (never `thought: true`); calls carry their signatures.
 		expect(modelTurn?.parts).toEqual([
+			{ text: "signed reasoning", thoughtSignature: "sig-think" },
 			{ functionCall: { name: "Read", args: { path: "/tmp/x" } }, thoughtSignature: "sig-abc" },
+			{ functionCall: { name: "Read", args: { path: "/tmp/y" } }, thoughtSignature: "sig-def" },
 		]);
 		expect(JSON.stringify(modelTurn)).not.toContain('thought":true');
-		expect(JSON.stringify(modelTurn)).not.toContain("hidden reasoning");
+		expect(JSON.stringify(modelTurn)).not.toContain("unsigned reasoning");
+		// Parallel responses ride ONE user content — the proxy 400s on a
+		// call/response part-count mismatch.
+		const responseTurns = contents.filter(
+			entry => entry.role === "user" && entry.parts.some(part => part.functionResponse),
+		);
+		expect(responseTurns).toHaveLength(1);
+		expect(responseTurns[0].parts.map(part => (part.functionResponse as { name: string }).name)).toEqual([
+			"Read",
+			"Read",
+		]);
 	});
 });

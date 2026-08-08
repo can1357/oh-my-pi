@@ -12,7 +12,7 @@ import type {
 } from "../usage";
 
 const FACTORY_BILLING_LIMITS_URL = "https://api.factory.ai/api/billing/limits";
-/** Matches the CLI version the wire contract was verified against. */
+/** Client version reported to Factory's API on usage requests. */
 const FACTORY_DROID_CLIENT_VERSION = "0.189.0";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -37,8 +37,8 @@ function statusFor(usedFraction: number): UsageStatus {
 }
 
 /**
- * Parses `GET /api/billing/limits` (the payload the droid CLI renders in its
- * usage footer) into a usage report: per-pool (Standard credits / Droid Core)
+ * Parses `GET /api/billing/limits` into a usage report: per-pool
+ * (Standard credits / Droid Core)
  * × per-window (5h / weekly / monthly) percent-used limits, plus the extra
  * usage balance when present.
  */
