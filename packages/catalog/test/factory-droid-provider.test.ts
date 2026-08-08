@@ -114,6 +114,27 @@ describe("Factory Droid catalog", () => {
 		expect(models?.map(model => model.id)).toEqual(["kimi-k2.6"]);
 	});
 
+	it("applies the live provider_routing config to the model spec", async () => {
+		const fetchImpl: FetchImpl = async url => {
+			if (String(url).includes("feature-flags")) {
+				return new Response(
+					JSON.stringify({
+						flags: { kimi_k3: true },
+						configs: { provider_routing: { version: 1, models: { "kimi-k3": ["baseten", "fireworks"] } } },
+					}),
+					{ status: 200 },
+				);
+			}
+			return new Response(JSON.stringify({ settings: {} }), { status: 200 });
+		};
+		const models = await fetchFactoryDroidModels({ apiKey: "token", fetch: fetchImpl });
+		const kimi = models?.find(model => model.id === "kimi-k3");
+		expect(kimi?.factoryDroidApiProviders).toEqual(["baseten", "fireworks"]);
+		// Models without a routing entry keep the registry's static order.
+		const glm = models?.find(model => model.id === "glm-5.2");
+		expect(glm?.factoryDroidApiProviders).toBeUndefined();
+	});
+
 	it("falls back to null without credentials so the static list stays", async () => {
 		const fetchImpl: FetchImpl = async () => {
 			throw new Error("network down");
