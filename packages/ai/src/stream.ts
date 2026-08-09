@@ -4,7 +4,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
-import type { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { ANTHROPIC_THINKING, type Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl, resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	defaultSupportedEffort,
@@ -1040,13 +1040,6 @@ function streamDispatch<TApi extends Api>(
 		case "cursor-agent":
 			return streamCursor(providerModel as Model<"cursor-agent">, context, providerOptions as CursorOptions);
 
-		case "factory-droid-agent":
-			return streamFactoryDroid(
-				providerModel as Model<"factory-droid-agent">,
-				context,
-				providerOptions as FactoryDroidOptions,
-			);
-
 		case "devin-agent":
 			return streamDevin(providerModel as Model<"devin-agent">, context, providerOptions as DevinOptions);
 
@@ -1749,15 +1742,6 @@ function maxTokensWithThinkingBudget(
 }
 export const OUTPUT_FALLBACK_BUFFER = 4000;
 const ANTHROPIC_USE_INTERLEAVED_THINKING = Bun.env.PI_NO_INTERLEAVED_THINKING !== "1";
-
-export const ANTHROPIC_THINKING: Record<Effort, number> = {
-	minimal: 1024,
-	low: 4096,
-	medium: 8192,
-	high: 16384,
-	xhigh: 32768,
-	max: 32768,
-};
 
 const GOOGLE_THINKING: Record<Effort, number> = {
 	minimal: 1024,
