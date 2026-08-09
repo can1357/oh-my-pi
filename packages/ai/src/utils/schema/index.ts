@@ -1,4 +1,5 @@
 export * from "./adapt";
+export * from "./allowlist";
 export * from "./compatibility";
 export * from "./dereference";
 export * from "./draft";
