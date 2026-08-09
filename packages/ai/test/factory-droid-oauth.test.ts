@@ -1,9 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-	getFactoryDroidApiKey,
-	loginFactoryDroid,
-	refreshFactoryDroidToken,
-} from "../src/registry/oauth/factory-droid";
+import { loginFactoryDroid, refreshFactoryDroidToken } from "../src/registry/oauth/factory-droid";
 import type { OAuthController } from "../src/registry/oauth/types";
 import type { FetchImpl } from "../src/types";
 
@@ -88,6 +84,16 @@ describe("Factory Droid OAuth", () => {
 		await expect(loginFactoryDroid({ fetch: fetchImpl })).rejects.toThrow(/denied/);
 	});
 
+	it("fails with the expiry message when the device code expires mid-poll", async () => {
+		const fetchImpl: FetchImpl = async url => {
+			if (String(url).endsWith("/authorize/device")) return jsonResponse(200, DEVICE_AUTH);
+			return jsonResponse(400, { error: "expired_token" });
+		};
+		// expired_token maps to the dedicated "login expired" message, not the
+		// generic failed-poll text.
+		await expect(loginFactoryDroid({ fetch: fetchImpl })).rejects.toThrow("Factory device login expired");
+	});
+
 	it("refreshes via the WorkOS refresh_token grant and maps the user payload", async () => {
 		const access = makeJwt({ sub: "user_9", exp: Math.floor(Date.now() / 1000) + 7200 });
 		const calls: Array<{ url: string; body: string }> = [];
@@ -113,9 +119,5 @@ describe("Factory Droid OAuth", () => {
 	it("surfaces refresh failures with the provider error", async () => {
 		const fetchImpl: FetchImpl = async () => jsonResponse(401, { error: "invalid_grant" });
 		await expect(refreshFactoryDroidToken("dead", fetchImpl)).rejects.toThrow(/invalid_grant/);
-	});
-
-	it("exposes the access token as the provider api key", () => {
-		expect(getFactoryDroidApiKey({ refresh: "r", access: "a-token", expires: Date.now() + 1000 })).toBe("a-token");
 	});
 });

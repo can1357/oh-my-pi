@@ -1,226 +1,22 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { DROID_SYSTEM_PREFIX, streamFactoryDroid } from "../src/providers/factory-droid";
-import type { Model } from "../src/types";
-
-function kimiK3(): Model<"factory-droid-agent"> {
-	return buildModel(
-		buildFactoryDroidModel({
-			id: "kimi-k3",
-			name: "Kimi K3 (Droid Core)",
-			wire: "openai-completions",
-			contextWindow: 196_608,
-			maxTokens: 65_536,
-			apiProviders: ["fireworks", "baseten"],
-			supportedReasoningEfforts: ["off", Effort.Low, Effort.High, Effort.Max],
-			defaultReasoningEffort: Effort.High,
-		}),
-	);
-}
-
-function nemotron(): Model<"factory-droid-agent"> {
-	return buildModel(
-		buildFactoryDroidModel({
-			id: "nemotron-3-ultra",
-			name: "Nemotron 3 Ultra (Droid Core)",
-			wire: "openai-completions",
-			contextWindow: 136_464,
-			maxTokens: 65_536,
-			apiProviders: ["baseten", "fireworks"],
-			supportedReasoningEfforts: ["off", Effort.High],
-			defaultReasoningEffort: Effort.High,
-			noImageSupport: true,
-		}),
-	);
-}
-
-function gptTerra(): Model<"factory-droid-agent"> {
-	return buildModel(
-		buildFactoryDroidModel({
-			id: "gpt-5.6-terra",
-			name: "GPT-5.6 Terra",
-			wire: "openai-responses",
-			contextWindow: 922_000,
-			maxTokens: 128_000,
-			apiProviders: ["openai"],
-			supportedReasoningEfforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
-			defaultReasoningEffort: Effort.Medium,
-			responsesConfig: { verbosity: "low", parallelToolCalls: true, extendedCache: true, safetyId: true },
-		}),
-	);
-}
-
-function sonnet5(): Model<"factory-droid-agent"> {
-	return buildModel(
-		buildFactoryDroidModel({
-			id: "claude-sonnet-5",
-			name: "Sonnet 5",
-			wire: "anthropic-messages",
-			contextWindow: 872_000,
-			maxTokens: 128_000,
-			apiProviders: ["anthropic", "vertex_anthropic", "bedrock_anthropic"],
-			supportedReasoningEfforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
-			defaultReasoningEffort: Effort.High,
-			thinkingStyle: "adaptive-summarized",
-			pdfSupport: true,
-		}),
-	);
-}
-
-function gemini(): Model<"factory-droid-agent"> {
-	return buildModel(
-		buildFactoryDroidModel({
-			id: "gemini-3.1-pro-preview",
-			name: "Gemini 3.1 Pro",
-			wire: "google-generate",
-			contextWindow: 1_000_000,
-			maxTokens: 65_536,
-			apiProviders: ["google"],
-			supportedReasoningEfforts: [Effort.Low, Effort.Medium, Effort.High],
-			defaultReasoningEffort: Effort.High,
-			geminiMedium: true,
-			pdfSupport: true,
-		}),
-	);
-}
-
-interface CapturedRequest {
-	url: string;
-	headers: Record<string, string>;
-	body: Record<string, unknown>;
-}
-
-function sseResponse(chunks: string[]): Response {
-	const body = `${chunks.map(chunk => `data: ${chunk}`).join("\n\n")}\n\ndata: [DONE]\n\n`;
-	return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
-}
-
-function completionsChunks(text: string, model: string): string[] {
-	return [
-		JSON.stringify({
-			id: "chatcmpl-test",
-			object: "chat.completion.chunk",
-			created: 1,
-			model,
-			choices: [{ index: 0, delta: { role: "assistant", content: text } }],
-		}),
-		JSON.stringify({
-			id: "chatcmpl-test",
-			object: "chat.completion.chunk",
-			created: 1,
-			model,
-			choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-			usage: { prompt_tokens: 11, completion_tokens: 3, total_tokens: 14 },
-		}),
-	];
-}
-
-function responsesChunks(text: string): string[] {
-	return [
-		JSON.stringify({ type: "response.output_text.delta", delta: text }),
-		JSON.stringify({
-			type: "response.completed",
-			response: { status: "completed", usage: { input_tokens: 9, output_tokens: 4, total_tokens: 13 } },
-		}),
-	];
-}
-
-const ANTHROPIC_EVENTS = [
-	"message_start",
-	"content_block_start",
-	"content_block_delta",
-	"content_block_stop",
-	"message_delta",
-	"message_stop",
-];
-
-function anthropicChunks(text: string): string[] {
-	return [
-		JSON.stringify({
-			type: "message_start",
-			message: {
-				id: "msg_t",
-				type: "message",
-				role: "assistant",
-				model: "claude-sonnet-5",
-				content: [],
-				stop_reason: null,
-				usage: { input_tokens: 7 },
-			},
-		}),
-		JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }),
-		JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }),
-		JSON.stringify({ type: "content_block_stop", index: 0 }),
-		JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 5 } }),
-		JSON.stringify({ type: "message_stop" }),
-	];
-}
-
-function geminiToolChunks(): string[] {
-	return [
-		JSON.stringify({
-			candidates: [
-				{
-					content: {
-						role: "model",
-						parts: [
-							{ functionCall: { name: "Read", args: { path: "/tmp/x" } }, thoughtSignature: "sig-abc" },
-							{ functionCall: { name: "Read", args: { path: "/tmp/y" } }, thoughtSignature: "sig-def" },
-						],
-					},
-				},
-			],
-		}),
-		JSON.stringify({
-			candidates: [{ content: { role: "model", parts: [{ text: "" }] }, finishReason: "STOP" }],
-			usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 4 },
-		}),
-	];
-}
-
-function geminiChunks(text: string): string[] {
-	return [
-		JSON.stringify({ candidates: [{ content: { role: "model", parts: [{ text }] } }] }),
-		JSON.stringify({
-			candidates: [{ content: { role: "model", parts: [{ text: "" }] }, finishReason: "STOP" }],
-			usageMetadata: { promptTokenCount: 21, candidatesTokenCount: 6 },
-		}),
-	];
-}
-
-/** Fake WorkOS-shaped JWT carrying the given external org id claim. */
-function workosJwt(orgId?: string): string {
-	const b64 = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
-	return `${b64({ alg: "none" })}.${b64(orgId ? { external_org_id: orgId } : {})}.sig`;
-}
-
-/** Credential for the `/login factory-droid` store path, with an org claim. */
-const WORKOS_TOKEN = workosJwt("org-1");
-
-function captureFetch(captured: CapturedRequest[], chunks: string[], eventNames?: string[]) {
-	return mock(async (url: string | URL | Request, init?: RequestInit) => {
-		const rawHeaders = (init?.headers ?? {}) as Record<string, string>;
-		const headers: Record<string, string> = {};
-		for (const [key, value] of Object.entries(rawHeaders)) headers[key.toLowerCase()] = value;
-		const rawBody = init?.body;
-		const bodyText =
-			typeof rawBody === "string"
-				? rawBody
-				: rawBody instanceof Uint8Array
-					? new TextDecoder().decode(rawBody)
-					: "{}";
-		captured.push({
-			url: typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url,
-			headers,
-			body: JSON.parse(bodyText || "{}") as Record<string, unknown>,
-		});
-		if (!eventNames) return sseResponse(chunks);
-		const body = `${chunks.map((chunk, i) => `event: ${eventNames[i] ?? "message"}\ndata: ${chunk}`).join("\n\n")}\n\n`;
-		return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
-	});
-}
+import {
+	ANTHROPIC_EVENTS,
+	anthropicChunks,
+	type CapturedRequest,
+	captureFetch,
+	completionsChunks,
+	gemini,
+	geminiChunks,
+	geminiToolChunks,
+	gptTerra,
+	kimiK3,
+	nemotron,
+	responsesChunks,
+	sonnet5,
+	WORKOS_TOKEN,
+} from "./helpers/factory-droid";
 
 afterEach(() => {
 	mock.restore();
@@ -272,7 +68,8 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 		expect(request.body.stream_options).toEqual({ include_usage: true });
 		// The proxy accepts each model's advertised output cap — no 64k clamp here.
 		expect(request.body.max_tokens).toBe(65_536);
-		expect(request.body.temperature).toBe(1);
+		// Temperature is caller-driven; omitted when unset (probe-verified).
+		expect(request.body.temperature).toBeUndefined();
 		expect(request.body.store).toBeUndefined();
 		const messages = request.body.messages as Array<{ role: string; content: unknown }>;
 		expect(messages[0].role).toBe("system");
@@ -392,6 +189,30 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 		expect(captured[0].body.reasoning_effort).toBeUndefined();
 		expect(captured[0].headers["x-api-provider"]).toBe("baseten");
 	});
+
+	it("surfaces a non-200 JSON error body as a provider error on the completions wire", async () => {
+		const result = await streamFactoryDroid(
+			kimiK3(),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: mock(
+					async () =>
+						new Response(JSON.stringify({ error: { message: "insufficient credits" } }), {
+							status: 400,
+							headers: { "Content-Type": "application/json" },
+						}),
+				),
+			},
+		).result();
+
+		// The transport decodes the OpenAI envelope and surfaces the status plus
+		// the body detail; a billing rejection must not look like a clean stop.
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(400);
+		expect(result.errorMessage).toContain("400");
+		expect(result.errorMessage).toContain("insufficient credits");
+	});
 });
 
 describe("Factory Droid responses wire (GPT series)", () => {
@@ -418,7 +239,8 @@ describe("Factory Droid responses wire (GPT series)", () => {
 		// The HTTPS Responses route rejects droid's legacy "900" — these models
 		// require 24h extended caching (verified live).
 		expect(request.body.prompt_cache_retention).toBe("24h");
-		expect(request.body.parallel_tool_calls).toBe(true);
+		// parallel_tool_calls defaults to the API's on; only false is written.
+		expect(request.body.parallel_tool_calls).toBeUndefined();
 		// Top-level verbosity moved to text.verbosity on the HTTPS Responses surface; omitted.
 		// dXT: the Responses surface wants xhigh, never max.
 		expect(JSON.stringify(request.body.reasoning)).toContain("xhigh");
@@ -453,6 +275,32 @@ describe("Factory Droid anthropic wire (Claude series)", () => {
 		expect(request.body.output_config).toEqual({ effort: "high" });
 		expect(JSON.stringify(request.body.system)).toContain(DROID_SYSTEM_PREFIX);
 	});
+
+	it("surfaces a non-200 JSON error body as a provider error on the anthropic wire", async () => {
+		const result = await streamFactoryDroid(
+			sonnet5(),
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: mock(
+					async () =>
+						new Response(
+							JSON.stringify({
+								type: "error",
+								error: { type: "invalid_request_error", message: "bad request" },
+							}),
+							{ status: 400, headers: { "Content-Type": "application/json" } },
+						),
+				),
+			},
+		).result();
+
+		// The SDK reads the error envelope and the catch surfaces the status;
+		// a 400 must land as an error turn, never a clean stop.
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(400);
+		expect(result.errorMessage).toContain("400");
+	});
 });
 
 describe("Factory Droid gemini wire (Google series)", () => {
@@ -478,7 +326,9 @@ describe("Factory Droid gemini wire (Google series)", () => {
 		expect(request.headers["x-api-provider"]).toBe("google");
 		expect(request.body.model).toBe("gemini-3.1-pro-preview");
 		const generation = request.body.generationConfig as Record<string, unknown>;
-		expect(generation.temperature).toBe(1);
+		// Sampling is caller-driven; no defaults are injected.
+		expect(generation.temperature).toBeUndefined();
+		expect(generation.topP).toBeUndefined();
 		expect(generation.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: "MEDIUM" });
 		expect(JSON.stringify(request.body.systemInstruction)).toContain(DROID_SYSTEM_PREFIX);
 	});
@@ -497,9 +347,9 @@ describe("Factory Droid gemini wire (Google series)", () => {
 		expect(toolCalls[0]).toMatchObject({ name: "Read", thoughtSignature: "sig-abc" });
 		expect(toolCalls[1]).toMatchObject({ name: "Read", thoughtSignature: "sig-def" });
 
-		// Second turn: the continuation body mirrors droid's captured shape — the
-		// model turn replays functionCall parts with their thoughtSignature, and
-		// thinking text is never resent.
+		// Second turn: the two parallel tool results continue past the captured
+		// first turn. Replayed model-turn part shapes (functionCall + signature,
+		// thinking as plain text) are covered by the transport-level gemini tests.
 		const secondCaptured: CapturedRequest[] = [];
 		await streamFactoryDroid(
 			gemini(),
@@ -538,18 +388,9 @@ describe("Factory Droid gemini wire (Google series)", () => {
 			role: string;
 			parts: Array<Record<string, unknown>>;
 		}>;
-		const modelTurn = contents.find(entry => entry.role === "model");
-		// History contract: unsigned thinking is dropped on the google route;
-		// signed thinking replays as a plain text part carrying its
-		// thoughtSignature (never `thought: true`); calls carry their signatures.
-		expect(modelTurn?.parts).toEqual([
-			{ text: "signed reasoning", thoughtSignature: "sig-think" },
-			{ functionCall: { name: "Read", args: { path: "/tmp/x" } }, thoughtSignature: "sig-abc" },
-			{ functionCall: { name: "Read", args: { path: "/tmp/y" } }, thoughtSignature: "sig-def" },
-		]);
-		expect(JSON.stringify(modelTurn)).not.toContain('thought":true');
-		expect(JSON.stringify(modelTurn)).not.toContain("unsigned reasoning");
-		// Parallel responses ride ONE user content — the proxy 400s on a
+		// Replayed functionCall part shapes are covered by the transport-level
+		// gemini tests; this driver test only pins the driver-owned contract:
+		// parallel responses ride ONE user content — the proxy 400s on a
 		// call/response part-count mismatch.
 		const responseTurns = contents.filter(
 			entry => entry.role === "user" && entry.parts.some(part => part.functionResponse),
