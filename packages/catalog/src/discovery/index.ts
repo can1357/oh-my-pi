@@ -1,6 +1,7 @@
 export * from "./antigravity";
 export * from "./codex";
 export * from "./factory-droid";
+export * from "./factory-droid-models";
 export * from "./gemini";
 export * from "./gemini-cli";
 export * from "./gitlab-duo-workflow";
