@@ -2253,8 +2253,10 @@ export function convertMessages(
 			}
 			// Tier 2: When the provider requires reasoning_content but there are genuinely no
 			// thinking blocks at all (e.g. proxy stripped reasoning_content from the response),
-			// emit an empty string. The field must be present; an empty string is the most honest
-			// representation of "no reasoning was captured."
+			// emit the configured fallback (empty string by default — the most honest
+			// representation of "no reasoning was captured"). Providers that validate
+			// the exact value opt in via `syntheticReasoningContentFallback` (the droid
+			// proxy's DeepSeek family requires a single space).
 			if (
 				needsReasoningField &&
 				!hasReasoningField &&
@@ -2262,7 +2264,7 @@ export function convertMessages(
 				!compat.allowsSyntheticReasoningContentForToolCalls
 			) {
 				const reasoningField = compat.reasoningContentField ?? "reasoning_content";
-				assistantMsg[reasoningField] = "";
+				assistantMsg[reasoningField] = compat.syntheticReasoningContentFallback ?? "";
 				hasReasoningField = true;
 			}
 			// Tier 3: For providers that accept synthetic placeholders (Kimi, OpenRouter).

@@ -250,6 +250,13 @@ export interface OpenAICompat {
 	/** Whether the provider accepts a synthetic placeholder (e.g. ".") for missing reasoning_content on tool-call turns. Default: true. Set to false for providers like DeepSeek that validate the exact reasoning_content value. */
 	allowsSyntheticReasoningContentForToolCalls?: boolean;
 	/**
+	 * Value emitted for the reasoning field on tool-call turns when the provider
+	 * requires it (`requiresReasoningContentForToolCalls`) but no reasoning was
+	 * captured. Default: "". Some upstreams validate the exact value — the droid
+	 * proxy's DeepSeek family requires a single space.
+	 */
+	syntheticReasoningContentFallback?: string;
+	/**
 	 * Replay preserved thinking blocks as `reasoning_content` (or the configured
 	 * `reasoningContentField`) on EVERY assistant turn that carried reasoning,
 	 * regardless of whether the upstream provider validates the field. Local
@@ -682,6 +689,8 @@ export interface ResolvedOpenAISharedCompat {
 	requiresReasoningContentForToolCalls: boolean;
 	requiresReasoningContentForAllAssistantTurns: boolean;
 	allowsSyntheticReasoningContentForToolCalls: boolean;
+	/** See {@link OpenAICompat.syntheticReasoningContentFallback}. */
+	syntheticReasoningContentFallback?: string;
 	replayReasoningContent: boolean;
 	qwenPreserveThinking: boolean;
 	qwenTemplateReasoningEffort: boolean;
@@ -757,6 +766,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "requiresReasoningContentForToolCalls"
 			| "requiresReasoningContentForAllAssistantTurns"
 			| "allowsSyntheticReasoningContentForToolCalls"
+			| "syntheticReasoningContentFallback"
 			| "replayReasoningContent"
 			| "qwenPreserveThinking"
 			| "qwenTemplateReasoningEffort"

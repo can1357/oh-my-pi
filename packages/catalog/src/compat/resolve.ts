@@ -512,6 +512,8 @@ function detectOpenAICompat(
 		requiresReasoningContentForAllAssistantTurns:
 			((isDeepseekFamily && Boolean(spec.reasoning)) || d.isXiaomiMimo) && !d.isOpenRouter,
 		allowsSyntheticReasoningContentForToolCalls: (!isDeepseekFamily || !spec.reasoning) && !d.isXiaomiMimo,
+		// Declared so spec-level overrides can set it; "''" is the shared default.
+		syntheticReasoningContentFallback: undefined,
 		replayReasoningContent: d.isLocalOpenAICompatBackend,
 		qwenPreserveThinking:
 			(thinkingFormat === "qwen" || thinkingFormat === "qwen-chat-template") && d.isLocalOpenAICompatBackend,
