@@ -169,7 +169,7 @@ export function kimiK3(): Model<"factory-droid-agent"> {
 			id: "kimi-k3",
 			name: "Kimi K3 (Droid Core)",
 			wire: "openai-completions",
-			contextWindow: 196_608,
+			contextWindow: 262_144,
 			maxTokens: 65_536,
 			apiProviders: ["fireworks", "baseten"],
 			supportedReasoningEfforts: ["off", Effort.Low, Effort.High, Effort.Max],
