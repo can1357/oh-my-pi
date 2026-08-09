@@ -82,7 +82,7 @@ import {
 	TTS_LOCAL_VOICE_OPTIONS,
 } from "../../tts/models";
 import { canonicalizeMessage } from "../../utils/thinking-display";
-import { createAcpClientBridge } from "./acp-client-bridge";
+import { createAcpClientBridge, hasPkzzHostFinalReply, hasPkzzOwnerPermissionBridge } from "./acp-client-bridge";
 import {
 	buildToolCallStartUpdate,
 	mapAgentSessionEventToAcpSessionUpdates,
@@ -113,6 +113,7 @@ export const ACP_BOOTSTRAP_RACE_GUARD_MS = 50;
 const ACP_CANCEL_CLEANUP_TIMEOUT_MS = 5_000;
 const ACP_ASYNC_DELIVERY_DRAIN_TIMEOUT_MS = 250;
 const ACP_ASYNC_DELIVERY_DRAIN_MAX_PASSES = 3;
+const HOST_FINAL_REPLY_MAX_UTF8_BYTES = 64 * 1024;
 
 type AgentImageContent = {
 	type: "image";
@@ -478,8 +479,27 @@ export class AcpAgent implements Agent {
 				args: [ACP_TERMINAL_AUTH_FLAG],
 			});
 		}
+		const ownerPermissionBridgeEnabled = hasPkzzOwnerPermissionBridge(params.clientCapabilities);
+		const hostFinalReplyEnabled = hasPkzzHostFinalReply(params.clientCapabilities);
 		return {
 			protocolVersion: PROTOCOL_VERSION,
+			...(ownerPermissionBridgeEnabled || hostFinalReplyEnabled
+				? {
+						_meta: {
+							pkzz: {
+								...(ownerPermissionBridgeEnabled
+									? {
+											ownerPermissionBridge: {
+												version: 1,
+												policy: "write_exec_always_ask",
+											},
+										}
+									: {}),
+								...(hostFinalReplyEnabled ? { hostFinalReply: { version: 1 } } : {}),
+							},
+						},
+					}
+				: {}),
 			agentInfo: {
 				name: "oh-my-pk",
 				title: "oh-my-pk",
@@ -1259,9 +1279,24 @@ export class AcpAgent implements Agent {
 		if (event.type === "agent_end") {
 			await this.#emitEndOfTurnUpdates(record);
 			await this.#waitForAcpPromptIdle(record);
+			const stopReason = this.#resolveStopReason(event, promptTurn.cancelRequested);
+			const hostFinalReply = this.#buildHostFinalReply(event, stopReason);
 			this.#finishPrompt(record, {
-				stopReason: this.#resolveStopReason(event, promptTurn.cancelRequested),
+				stopReason,
 				usage: this.#buildTurnUsage(promptTurn.usageBaseline, record.session.sessionManager.getUsageStatistics()),
+				...(hostFinalReply
+					? {
+							_meta: {
+								pkzz: {
+									hostFinalReply: {
+										version: 1,
+										deliveryId: "final",
+										content: hostFinalReply,
+									},
+								},
+							},
+						}
+					: {}),
 			});
 		}
 	}
@@ -1334,6 +1369,40 @@ export class AcpAgent implements Agent {
 			return;
 		}
 		promptTurn.resolve(response ?? { stopReason: "end_turn" });
+	}
+
+	#buildHostFinalReply(
+		event: Extract<AgentSessionEvent, { type: "agent_end" }>,
+		stopReason: PromptResponse["stopReason"],
+	): string | undefined {
+		if (!hasPkzzHostFinalReply(this.#clientCapabilities)) {
+			return undefined;
+		}
+		const lastAssistant = [...event.messages]
+			.reverse()
+			.find((message): message is AssistantMessage => message.role === "assistant");
+		if (!lastAssistant) {
+			return undefined;
+		}
+		const isEndTurn = stopReason === "end_turn" && lastAssistant.stopReason === "stop";
+		const isTextualRefusal =
+			stopReason === "refusal" && /content[_ ]?filter|refus(al|ed)/i.test(lastAssistant.errorMessage ?? "");
+		if (!isEndTurn && !isTextualRefusal) {
+			return undefined;
+		}
+		const content = lastAssistant.content
+			.filter(
+				(block): block is Extract<AssistantMessage["content"][number], { type: "text" }> => block.type === "text",
+			)
+			.map(block => block.text)
+			.join("");
+		if (
+			content.trim().length === 0 ||
+			new TextEncoder().encode(content).byteLength > HOST_FINAL_REPLY_MAX_UTF8_BYTES
+		) {
+			return undefined;
+		}
+		return content;
 	}
 
 	#resolveStopReason(

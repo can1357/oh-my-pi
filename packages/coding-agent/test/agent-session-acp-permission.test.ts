@@ -6,12 +6,14 @@
  * behavior they have in the TUI.
  */
 import { afterEach, beforeEach, expect, it, spyOn } from "bun:test";
+import type { AgentSideConnection, RequestPermissionRequest } from "@agentclientprotocol/sdk";
 import { Agent, type AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
 import { createMockModel, type MockModelOptions } from "@pk-nerdsaver-ai/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@pk-nerdsaver-ai/pi-ai/utils/event-stream";
 import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
 import { type SettingPath, Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { EditTool } from "@pk-nerdsaver-ai/pi-coding-agent/edit";
+import { createAcpClientBridge } from "@pk-nerdsaver-ai/pi-coding-agent/modes/acp/acp-client-bridge";
 import { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
 import type {
 	ClientBridge,
@@ -80,13 +82,21 @@ function makeBridge(outcome: ClientBridgePermissionOutcome): ClientBridge {
 	};
 }
 
-function makeAlwaysAskBridge(outcome: ClientBridgePermissionOutcome): ClientBridge {
-	return {
-		capabilities: { requestPermission: true, toolApprovalMode: "always-ask" },
-		async requestPermission() {
-			return outcome;
+function makeMarkedAcpBridge(outcome: ClientBridgePermissionOutcome): ClientBridge {
+	const connection = {
+		async requestPermission(_params: RequestPermissionRequest) {
+			return outcome.outcome === "cancelled"
+				? { outcome: { outcome: "cancelled" as const } }
+				: { outcome: { outcome: "selected" as const, optionId: outcome.optionId } };
 		},
-	};
+	} as unknown as AgentSideConnection;
+	return createAcpClientBridge(connection, "session-1", {
+		_meta: {
+			pkzz: {
+				ownerPermissionBridge: { version: 1 },
+			},
+		},
+	});
 }
 
 async function createSession(
@@ -822,7 +832,7 @@ it("always-ask gates write and exec tools from every source despite yolo and all
 		makeFakeTool("ix_bridge", "write"),
 		makeFakeTool("mcp__fake__write", "write"),
 	];
-	const bridge = makeAlwaysAskBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const bridge = makeMarkedAcpBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
 	const permissionSpy = spyOn(bridge, "requestPermission");
 	session = await createSession(tools, bridge, {
 		"tools.approvalMode": "yolo",
@@ -849,7 +859,7 @@ it("always-ask gates write and exec tools from every source despite yolo and all
 
 it("always-ask passes read-tier calls through without prompting", async () => {
 	const readTool = makeFakeTool("read", "read");
-	const bridge = makeAlwaysAskBridge({ outcome: "selected", optionId: "allow_once" });
+	const bridge = makeMarkedAcpBridge({ outcome: "selected", optionId: "allow_once" });
 	const permissionSpy = spyOn(bridge, "requestPermission");
 	session = await createSession([readTool], bridge);
 
@@ -862,7 +872,7 @@ it("always-ask passes read-tier calls through without prompting", async () => {
 
 it("always-ask explicit deny fails closed before consulting the bridge", async () => {
 	const tool = makeFakeTool("mcp__fake__write", "write");
-	const bridge = makeAlwaysAskBridge({ outcome: "selected", optionId: "allow_once" });
+	const bridge = makeMarkedAcpBridge({ outcome: "selected", optionId: "allow_once" });
 	const permissionSpy = spyOn(bridge, "requestPermission");
 	session = await createSession([tool], bridge, { "tools.approval": { [tool.name]: "deny" } });
 
@@ -877,7 +887,7 @@ it("always-ask explicit deny fails closed before consulting the bridge", async (
 
 it("always-ask cancellation fails closed for generic dangerous tools", async () => {
 	const tool = makeFakeTool("browser", "exec");
-	const bridge = makeAlwaysAskBridge({ outcome: "cancelled" });
+	const bridge = makeMarkedAcpBridge({ outcome: "cancelled" });
 	session = await createSession([tool], bridge);
 
 	await session.setActiveToolsByName([tool.name]);

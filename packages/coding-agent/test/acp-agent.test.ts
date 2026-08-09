@@ -17,7 +17,8 @@ import {
 	zPromptResponse,
 	zSessionNotification,
 } from "@agentclientprotocol/sdk/dist/schema/zod.gen.js";
-import type { Model } from "@pk-nerdsaver-ai/pi-ai";
+import type { AgentMessage } from "@pk-nerdsaver-ai/pi-agent-core";
+import type { AssistantMessage, Model } from "@pk-nerdsaver-ai/pi-ai";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@pk-nerdsaver-ai/pi-coding-agent/internal-urls";
@@ -105,6 +106,8 @@ function makeAssistantMessage(text: string, thinking?: string) {
 	};
 }
 
+const cleanupSessions = new Set<FakeAgentSession>();
+
 class FakeAgentSession {
 	sessionManager: SessionManager;
 	sessionId: string;
@@ -145,6 +148,7 @@ class FakeAgentSession {
 			},
 		};
 		this.model = models[0];
+		cleanupSessions.add(this);
 	}
 
 	get sessionName(): string {
@@ -270,6 +274,7 @@ class FakeAgentSession {
 	}
 
 	async dispose(): Promise<void> {
+		if (this.disposed) return;
 		this.disposed = true;
 		await this.sessionManager.close();
 	}
@@ -399,6 +404,40 @@ function holdPromptStreaming(session: FakeAgentSession): () => void {
 	return () => finishPrompt();
 }
 
+function emitAgentEndOnPrompt(session: FakeAgentSession, messages: AgentMessage[]): void {
+	session.prompt = async (text: string): Promise<boolean> => {
+		session.promptCalls.push(text);
+		session.isStreaming = true;
+		for (const listener of session.listeners()) {
+			listener({ type: "agent_end", messages } as AgentSessionEvent);
+		}
+		session.isStreaming = false;
+		return true;
+	};
+}
+
+function makeToolUseAssistantMessage(text: string, toolCallId: string): AssistantMessage {
+	return {
+		...makeAssistantMessage(text),
+		content: [
+			{ type: "text", text },
+			{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "echo test" } },
+		],
+		stopReason: "toolUse",
+	};
+}
+
+function makeToolResultMessage(toolCallId: string): AgentMessage {
+	return {
+		role: "toolResult",
+		toolCallId,
+		toolName: "bash",
+		content: [{ type: "text", text: "ok" }],
+		isError: false,
+		timestamp: Date.now(),
+	};
+}
+
 interface AgentHarness {
 	agent: AcpAgent;
 	updates: SessionNotification[];
@@ -432,14 +471,19 @@ afterEach(async () => {
 		delete process.env.PI_CODING_AGENT_DIR;
 	}
 	resetSettingsForTest();
+	await Promise.all([...cleanupSessions].map(session => session.dispose()));
+	cleanupSessions.clear();
 
 	for (const root of cleanupRoots.splice(0)) {
-		await fs.promises.rm(root, { recursive: true, force: true });
+		await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
 
 async function createHarness(
-	options: { elicitationHandler?: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse> } = {},
+	options: {
+		elicitationHandler?: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse>;
+		clientCapabilities?: ClientCapabilities;
+	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
 	cleanupRoots.push(root);
@@ -475,12 +519,14 @@ async function createHarness(
 	};
 
 	const agent = new AcpAgent(connection, factory, initialSession as unknown as AgentSession);
-	if (options.elicitationHandler) {
-		// Drive `initialize` so the agent caches `clientCapabilities.elicitation.form`
-		// and `#requestAcpPlanApprovalChoice` actually goes through the elicitation.
+	if (options.elicitationHandler || options.clientCapabilities) {
+		// Drive `initialize` when a test needs cached client capabilities.
 		await agent.initialize({
 			protocolVersion: 1,
-			clientCapabilities: { elicitation: { form: {} } },
+			clientCapabilities: {
+				...options.clientCapabilities,
+				...(options.elicitationHandler ? { elicitation: { form: {} } } : {}),
+			},
 		} as Parameters<typeof agent.initialize>[0]);
 	}
 
@@ -1014,6 +1060,216 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("returns only the final assistant text after pre-tool text", async () => {
+		const harness = await createHarness({
+			clientCapabilities: { _meta: { pkzz: { hostFinalReply: { version: 1 } } } },
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const finalAssistant = {
+			...makeAssistantMessage(""),
+			content: [
+				{ type: "text" as const, text: "final" },
+				{ type: "thinking" as const, thinking: "private reasoning" },
+				{ type: "text" as const, text: " answer" },
+			],
+		} satisfies AssistantMessage;
+		emitAgentEndOnPrompt(session, [
+			makeToolUseAssistantMessage("pre-tool draft", "tool-1"),
+			makeToolResultMessage("tool-1"),
+			finalAssistant,
+		]);
+
+		const response = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "do work" }],
+		});
+
+		expect(response.stopReason).toBe("end_turn");
+		expect(response._meta).toEqual({
+			pkzz: {
+				hostFinalReply: {
+					version: 1,
+					deliveryId: "final",
+					content: "final answer",
+				},
+			},
+		});
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("returns the last assistant text after multiple tool rounds", async () => {
+		const harness = await createHarness({
+			clientCapabilities: { _meta: { pkzz: { hostFinalReply: { version: 1 } } } },
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		emitAgentEndOnPrompt(session, [
+			makeToolUseAssistantMessage("first tool preface", "tool-1"),
+			makeToolResultMessage("tool-1"),
+			makeToolUseAssistantMessage("second tool preface", "tool-2"),
+			makeToolResultMessage("tool-2"),
+			makeAssistantMessage("completed after both tools"),
+		]);
+
+		const response = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "use two tools" }],
+		});
+
+		expect(response._meta).toEqual({
+			pkzz: {
+				hostFinalReply: {
+					version: 1,
+					deliveryId: "final",
+					content: "completed after both tools",
+				},
+			},
+		});
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("returns nonblank textual refusal content", async () => {
+		const harness = await createHarness({
+			clientCapabilities: { _meta: { pkzz: { hostFinalReply: { version: 1 } } } },
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const refusal = {
+			...makeAssistantMessage("I cannot help with that."),
+			stopReason: "error" as const,
+			errorMessage: "Request refused by content filter",
+		} satisfies AssistantMessage;
+		emitAgentEndOnPrompt(session, [refusal]);
+
+		const response = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "refused request" }],
+		});
+
+		expect(response.stopReason).toBe("refusal");
+		expect(response._meta).toEqual({
+			pkzz: {
+				hostFinalReply: {
+					version: 1,
+					deliveryId: "final",
+					content: "I cannot help with that.",
+				},
+			},
+		});
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("omits host-final-reply metadata for blank and oversized final text", async () => {
+		const harness = await createHarness({
+			clientCapabilities: { _meta: { pkzz: { hostFinalReply: { version: 1 } } } },
+		});
+		const blankSessionResponse = await (async () => {
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			emitAgentEndOnPrompt(harness.findSession(created.sessionId)!, [makeAssistantMessage(" \n\t ")]);
+			return await harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "blank" }],
+			});
+		})();
+		const oversizedSessionResponse = await (async () => {
+			const created = await harness.agent.newSession({ cwd: harness.cwdB, mcpServers: [] });
+			emitAgentEndOnPrompt(harness.findSession(created.sessionId)!, [makeAssistantMessage("🙂".repeat(16_385))]);
+			return await harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "oversized" }],
+			});
+		})();
+
+		expect(blankSessionResponse._meta).toBeUndefined();
+		expect(oversizedSessionResponse._meta).toBeUndefined();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("omits host-final-reply metadata on cancellation", async () => {
+		const harness = await createHarness({
+			clientCapabilities: { _meta: { pkzz: { hostFinalReply: { version: 1 } } } },
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const finishPrompt = holdPromptStreaming(session);
+		const pending = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "cancel" }],
+		});
+		await Bun.sleep(0);
+
+		await harness.agent.cancel({ sessionId: created.sessionId });
+		const response = await pending;
+
+		expect(response.stopReason).toBe("cancelled");
+		expect(response._meta).toBeUndefined();
+		finishPrompt();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("omits host-final-reply metadata for max tokens, non-refusal errors, and local commands", async () => {
+		const harness = await createHarness({
+			clientCapabilities: { _meta: { pkzz: { hostFinalReply: { version: 1 } } } },
+		});
+		const maxTokensSession = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		emitAgentEndOnPrompt(harness.findSession(maxTokensSession.sessionId)!, [
+			{ ...makeAssistantMessage("truncated text"), stopReason: "length" as const },
+		]);
+		const maxTokensResponse = await harness.agent.prompt({
+			sessionId: maxTokensSession.sessionId,
+			prompt: [{ type: "text", text: "too long" }],
+		});
+
+		const errorSession = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		emitAgentEndOnPrompt(harness.findSession(errorSession.sessionId)!, [
+			{
+				...makeAssistantMessage("partial failure text"),
+				stopReason: "error" as const,
+				errorMessage: "network disconnected",
+			},
+		]);
+		const errorResponse = await harness.agent.prompt({
+			sessionId: errorSession.sessionId,
+			prompt: [{ type: "text", text: "fail" }],
+		});
+
+		const localSession = await harness.agent.newSession({ cwd: harness.cwdB, mcpServers: [] });
+		harness.findSession(localSession.sessionId)!.prompt = async () => false;
+		const localResponse = await harness.agent.prompt({
+			sessionId: localSession.sessionId,
+			prompt: [{ type: "text", text: "local command" }],
+		});
+
+		expect(maxTokensResponse.stopReason).toBe("max_tokens");
+		expect(maxTokensResponse._meta).toBeUndefined();
+		expect(errorResponse._meta).toBeUndefined();
+		expect(localResponse._meta).toBeUndefined();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("omits host-final-reply metadata for legacy and downgraded clients", async () => {
+		const capabilityCases: ClientCapabilities[] = [{}, { _meta: { pkzz: { hostFinalReply: { version: 2 } } } }];
+
+		for (const clientCapabilities of capabilityCases) {
+			const harness = await createHarness({ clientCapabilities });
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			const response = await harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "legacy" }],
+			});
+			expect(response._meta).toBeUndefined();
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
 	});
 
 	it("replays assistant tool calls and matching results without duplicating the start", async () => {

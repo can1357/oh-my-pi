@@ -22,6 +22,30 @@ import type {
 	ClientBridgeTerminalHandle,
 } from "../../session/client-bridge";
 
+export function hasPkzzOwnerPermissionBridge(clientCapabilities: ClientCapabilities | undefined): boolean {
+	const meta = clientCapabilities?._meta;
+	if (!meta || typeof meta !== "object" || Array.isArray(meta)) return false;
+	const pkzz = meta.pkzz;
+	if (!pkzz || typeof pkzz !== "object" || Array.isArray(pkzz)) return false;
+	const ownerPermissionBridge = (pkzz as Record<string, unknown>).ownerPermissionBridge;
+	if (!ownerPermissionBridge || typeof ownerPermissionBridge !== "object" || Array.isArray(ownerPermissionBridge)) {
+		return false;
+	}
+	return (ownerPermissionBridge as Record<string, unknown>).version === 1;
+}
+
+export function hasPkzzHostFinalReply(clientCapabilities: ClientCapabilities | undefined): boolean {
+	const meta = clientCapabilities?._meta;
+	if (!meta || typeof meta !== "object" || Array.isArray(meta)) return false;
+	const pkzz = meta.pkzz;
+	if (!pkzz || typeof pkzz !== "object" || Array.isArray(pkzz)) return false;
+	const hostFinalReply = (pkzz as Record<string, unknown>).hostFinalReply;
+	if (!hostFinalReply || typeof hostFinalReply !== "object" || Array.isArray(hostFinalReply)) {
+		return false;
+	}
+	return (hostFinalReply as Record<string, unknown>).version === 1;
+}
+
 export function createAcpClientBridge(
 	connection: AgentSideConnection,
 	sessionId: string,
@@ -34,6 +58,7 @@ export function createAcpClientBridge(
 		// Permission requests are always usable on the connection; gating is
 		// the agent's policy choice rather than a client capability.
 		requestPermission: true,
+		...(hasPkzzOwnerPermissionBridge(clientCapabilities) ? { toolApprovalMode: "always-ask" as const } : {}),
 	};
 
 	const bridge: ClientBridge = { capabilities, deferAgentInitiatedTurns: true };

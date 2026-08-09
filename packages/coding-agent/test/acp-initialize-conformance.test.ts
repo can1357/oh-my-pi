@@ -129,6 +129,7 @@ class FakeAgentSession {
 }
 
 const cleanupRoots: string[] = [];
+const cleanupSessions: FakeAgentSession[] = [];
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
@@ -139,8 +140,9 @@ afterEach(async () => {
 		setAgentDir(fallbackAgentDir);
 		delete process.env.PI_CODING_AGENT_DIR;
 	}
+	await Promise.all(cleanupSessions.splice(0).map(session => session.dispose()));
 	for (const root of cleanupRoots.splice(0)) {
-		await fs.promises.rm(root, { recursive: true, force: true });
+		await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
 
@@ -161,6 +163,7 @@ async function createAgent(): Promise<AcpAgent> {
 	} as unknown as AgentSideConnection;
 
 	const initialSession = new FakeAgentSession(cwd);
+	cleanupSessions.push(initialSession);
 	const factory = async (next: string): Promise<AgentSession> => new FakeAgentSession(next) as unknown as AgentSession;
 	return new AcpAgent(connection, factory, initialSession as unknown as AgentSession);
 }
@@ -256,5 +259,103 @@ describe("ACP initialize conformance", () => {
 				}),
 			}),
 		);
+	});
+
+	it("acknowledges the exact Pkzz owner-permission bridge v1 marker with the strict policy", async () => {
+		const agent = await createAgent();
+		const response = await agent.initialize(
+			buildInitializeRequest({
+				clientCapabilities: {
+					_meta: {
+						pkzz: {
+							ownerPermissionBridge: { version: 1 },
+						},
+					},
+				},
+			}),
+		);
+
+		expect(response._meta).toEqual({
+			pkzz: {
+				ownerPermissionBridge: {
+					version: 1,
+					policy: "write_exec_always_ask",
+				},
+			},
+		});
+	});
+
+	it("acknowledges the exact Pkzz host-final-reply v1 marker", async () => {
+		const agent = await createAgent();
+		const response = await agent.initialize(
+			buildInitializeRequest({
+				clientCapabilities: {
+					_meta: {
+						pkzz: {
+							hostFinalReply: { version: 1 },
+						},
+					},
+				},
+			}),
+		);
+
+		expect(response._meta).toEqual({
+			pkzz: {
+				hostFinalReply: {
+					version: 1,
+				},
+			},
+		});
+	});
+
+	it("preserves the owner-permission acknowledgement when both Pkzz v1 capabilities are marked", async () => {
+		const agent = await createAgent();
+		const response = await agent.initialize(
+			buildInitializeRequest({
+				clientCapabilities: {
+					_meta: {
+						pkzz: {
+							ownerPermissionBridge: { version: 1 },
+							hostFinalReply: { version: 1 },
+						},
+					},
+				},
+			}),
+		);
+
+		expect(response._meta).toEqual({
+			pkzz: {
+				ownerPermissionBridge: {
+					version: 1,
+					policy: "write_exec_always_ask",
+				},
+				hostFinalReply: {
+					version: 1,
+				},
+			},
+		});
+	});
+
+	it("omits the strict-policy acknowledgement for every unmarked client", async () => {
+		const unmarkedCapabilities: unknown[] = [
+			undefined,
+			{},
+			{ _meta: null },
+			{ _meta: { pkzz: false } },
+			{ _meta: { pkzz: { ownerPermissionBridge: false } } },
+			{ _meta: { pkzz: { ownerPermissionBridge: { version: false } } } },
+			{ _meta: { pkzz: { ownerPermissionBridge: { version: "1" } } } },
+			{ _meta: { pkzz: { ownerPermissionBridge: { version: 2 } } } },
+		];
+
+		for (const clientCapabilities of unmarkedCapabilities) {
+			const agent = await createAgent();
+			const response = await agent.initialize(
+				buildInitializeRequest({
+					clientCapabilities: clientCapabilities as InitializeRequest["clientCapabilities"],
+				}),
+			);
+			expect(response._meta).toBeUndefined();
+		}
 	});
 });
