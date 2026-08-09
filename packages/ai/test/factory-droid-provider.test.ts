@@ -68,6 +68,7 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 		expect(request.body.stream_options).toEqual({ include_usage: true });
 		// The proxy accepts each model's advertised output cap — no 64k clamp here.
 		expect(request.body.max_tokens).toBe(65_536);
+
 		// Temperature is caller-driven; omitted when unset (probe-verified).
 		expect(request.body.temperature).toBeUndefined();
 		expect(request.body.store).toBeUndefined();
@@ -76,6 +77,55 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 		// The proxy gates on the Droid identity prefix; OMP's own prompt must survive behind it.
 		expect(JSON.stringify(messages[0].content)).toContain(DROID_SYSTEM_PREFIX);
 		expect(JSON.stringify(messages[0].content)).toContain("OMP system prompt");
+	});
+	it("reports cacheRead from the fireworks-cached-prompt-tokens header when the body omits cached_tokens", async () => {
+		const captured: CapturedRequest[] = [];
+		const result = await streamFactoryDroid(
+			kimiK3(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch(captured, completionsChunks("OK", "kimi-k3"), undefined, {
+					"fireworks-cached-prompt-tokens": "7",
+				}),
+				sessionId: "019fd-test-session",
+			},
+		).result();
+
+		expect(result.usage.input).toBe(4);
+		expect(result.usage.cacheRead).toBe(7);
+		expect(result.usage.output).toBe(3);
+		expect(result.usage.totalTokens).toBe(14);
+	});
+
+	it("prefers body cached_tokens over the fireworks-cached-prompt-tokens header", async () => {
+		const captured: CapturedRequest[] = [];
+		const chunks = completionsChunks("OK", "kimi-k3");
+		// Rebuild the terminal chunk with body-reported cached tokens.
+		const terminal = JSON.parse(chunks[1]) as Record<string, unknown> & {
+			usage?: Record<string, unknown>;
+		};
+		terminal.usage = {
+			prompt_tokens: 11,
+			completion_tokens: 3,
+			total_tokens: 14,
+			prompt_tokens_details: { cached_tokens: 8 },
+		};
+		const result = await streamFactoryDroid(
+			kimiK3(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: captureFetch(captured, [chunks[0], JSON.stringify(terminal)], undefined, {
+					"fireworks-cached-prompt-tokens": "7",
+				}),
+				sessionId: "019fd-test-session",
+			},
+		).result();
+
+		expect(result.usage.cacheRead).toBe(8);
+		expect(result.usage.input).toBe(3);
+		expect(result.usage.output).toBe(3);
 	});
 
 	it("sends reasoning_effort none when thinking is disabled", async () => {

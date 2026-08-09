@@ -12,9 +12,12 @@ export interface CapturedRequest {
 }
 
 /** Build a 200 `text/event-stream` response from bare SSE data lines. */
-export function sseResponse(chunks: string[]): Response {
+export function sseResponse(chunks: string[], responseHeaders?: Record<string, string>): Response {
 	const body = `${chunks.map(chunk => `data: ${chunk}`).join("\n\n")}\n\ndata: [DONE]\n\n`;
-	return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+	return new Response(body, {
+		status: 200,
+		headers: { "Content-Type": "text/event-stream", ...responseHeaders },
+	});
 }
 
 /**
@@ -24,7 +27,12 @@ export function sseResponse(chunks: string[]): Response {
  * named SSE `event:` frames (the anthropic wire); otherwise they use the
  * bare `data:` framing.
  */
-export function captureFetch(captured: CapturedRequest[], chunks: string[], eventNames?: string[]) {
+export function captureFetch(
+	captured: CapturedRequest[],
+	chunks: string[],
+	eventNames?: string[],
+	responseHeaders?: Record<string, string>,
+) {
 	return mock(async (url: string | URL | Request, init?: RequestInit) => {
 		const rawHeaders = (init?.headers ?? {}) as Record<string, string>;
 		const headers: Record<string, string> = {};
@@ -41,9 +49,12 @@ export function captureFetch(captured: CapturedRequest[], chunks: string[], even
 			headers,
 			body: JSON.parse(bodyText || "{}") as Record<string, unknown>,
 		});
-		if (!eventNames) return sseResponse(chunks);
+		if (!eventNames) return sseResponse(chunks, responseHeaders);
 		const body = `${chunks.map((chunk, i) => `event: ${eventNames[i] ?? "message"}\ndata: ${chunk}`).join("\n\n")}\n\n`;
-		return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+		return new Response(body, {
+			status: 200,
+			headers: { "Content-Type": "text/event-stream", ...responseHeaders },
+		});
 	});
 }
 
