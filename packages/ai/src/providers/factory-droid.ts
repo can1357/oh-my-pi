@@ -7,12 +7,14 @@ import {
 	FACTORY_DROID_MODEL_META,
 	FACTORY_DROID_RESPONSES_BASE_URL,
 	type FactoryDroidModelInput,
+	type FactoryDroidWire,
 } from "@oh-my-pi/pi-catalog/discovery";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as AIError from "../error";
 import type { Context, Model, ModelSpec, ServiceTier, StreamFunction, StreamOptions, ToolChoice } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { hasNonThinkingTurnAfterLastUser, hasThinkinglessAssistantHistory } from "./anthropic";
 import { createProviderErrorMessage } from "./error-message";
 import { streamFactoryDroidGemini } from "./factory-droid/gemini";
 import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from "./register-builtins";
@@ -54,16 +56,11 @@ export interface FactoryDroidOptions extends StreamOptions {
 	disableReasoning?: boolean;
 	toolChoice?: ToolChoice;
 	serviceTier?: ServiceTier;
+	/** OMP-native "omit thinking summaries" (anthropic adaptive display). */
+	hideThinkingSummary?: boolean;
+	/** OMP-native response verbosity (responses wire `text.verbosity`). */
+	textVerbosity?: "low" | "medium" | "high";
 }
-
-/** Per-upstream thinking budgets by effort level. */
-const ANTHROPIC_THINKING_BUDGETS: Readonly<Record<string, number>> = {
-	low: 4096,
-	medium: 12288,
-	high: 24576,
-	xhigh: 24576,
-	max: 0,
-};
 
 /** Registry lookup; falls back to a completions default so custom ids still stream. */
 function resolveModelMeta(model: Model<"factory-droid-agent">): FactoryDroidModelInput | undefined {
@@ -81,60 +78,123 @@ function resolveUpstream(model: Model<"factory-droid-agent">, meta: FactoryDroid
 	return model.factoryDroidApiProviders?.[0] ?? meta?.apiProviders[0] ?? "fireworks";
 }
 
-/** Identity headers shared by the OpenAI-SDK paths (completions + responses). */
-function buildOpenAiHeaders(input: {
+/**
+ * Identity headers every wire sends, plus the wire-specific extras observed
+ * on the live traffic from the CLI's underlying SDKs:
+ * - completions/responses add `Accept` and the `OpenAI-Platform` org hint
+ *   (openai/azure upstreams only).
+ * - completions adds the OpenAI SDK's X-Stainless fingerprint. The Responses
+ *   route 431s once total header size crosses its WAF budget (verified
+ *   live), so it goes without the telemetry set.
+ * - anthropic adds the Anthropic SDK's X-Stainless fingerprint (no
+ *   timeout/helper entries) and the `x-api-key` placeholder the SDK
+ *   contract requires.
+ * - google adds nothing beyond the shared identity set.
+ */
+function buildIdentityHeaders(input: {
 	upstream: string;
 	sessionUuid: string;
 	requestId: string;
 	orgId?: string;
-	/**
-	 * The chat-completions route accepts droid's full X-Stainless SDK
-	 * fingerprint; the Responses route 431s once total header size crosses its
-	 * WAF budget (verified live), so it goes without the telemetry set.
-	 */
-	stainless?: boolean;
+	wire: FactoryDroidWire;
 }): Record<string, string> {
-	return {
-		Accept: "application/json",
+	const headers: Record<string, string> = {
 		"User-Agent": `factory-cli/${FACTORY_DROID_CLIENT_VERSION}`,
 		"X-Client-Version": FACTORY_DROID_CLIENT_VERSION,
 		"X-Factory-Client": "cli",
-		...(input.stainless === false
-			? {}
-			: {
-					"X-Stainless-Lang": "js",
-					"X-Stainless-Package-Version": "6.25.0",
-					"X-Stainless-Runtime": "node",
-					"X-Stainless-Runtime-Version": process.version,
-					"X-Stainless-Arch": process.arch,
-					"X-Stainless-OS":
-						process.platform === "darwin" ? "MacOS" : process.platform === "win32" ? "Windows" : "Linux",
-					"X-Stainless-Retry-Count": "0",
-				}),
 		"x-api-provider": input.upstream,
 		"x-session-id": input.sessionUuid,
 		"x-assistant-message-id": input.requestId,
-		...(input.orgId ? { "X-Factory-Org-Id": input.orgId } : {}),
 	};
+	if (input.wire === "openai-completions" || input.wire === "openai-responses") {
+		headers.Accept = "application/json";
+		if (input.upstream === "openai" || input.upstream === "azure_openai") {
+			headers["OpenAI-Platform"] = "org-bHuLtG1fGmYk5YaOihAAXFBw";
+		}
+	}
+	if (input.wire === "openai-completions" || input.wire === "anthropic-messages") {
+		headers["X-Stainless-Lang"] = "js";
+		headers["X-Stainless-Package-Version"] = input.wire === "openai-completions" ? "6.25.0" : "0.70.1";
+		headers["X-Stainless-Runtime"] = "node";
+		headers["X-Stainless-Runtime-Version"] = process.version;
+		headers["X-Stainless-Arch"] = process.arch;
+		headers["X-Stainless-OS"] =
+			process.platform === "darwin" ? "MacOS" : process.platform === "win32" ? "Windows" : "Linux";
+		headers["X-Stainless-Retry-Count"] = "0";
+		if (input.wire === "openai-completions") {
+			// The CLI's chat-completions client configures a 300s timeout and
+			// marks the helper method when streaming (both present in the
+			// SDK's request headers and captured on the live wire).
+			headers["X-Stainless-Timeout"] = "300";
+			headers["X-Stainless-Helper-Method"] = "stream";
+		} else {
+			headers["x-api-key"] = "placeholder";
+		}
+	}
+	if (input.orgId) headers["X-Factory-Org-Id"] = input.orgId;
+	return headers;
 }
 
 /**
  * Reasoning body extras for the completions path, mirroring the CLI's
- * `buildRequestParams`: Fireworks takes `reasoning_effort` plus
- * `reasoning_history: "preserved"` while thinking; Baseten takes
- * `chat_template_args.enable_thinking` (forced-on family) and never receives
- * `reasoning_effort`.
+ * per-model `apiProviderConfig` request builders. The shape is keyed by
+ * model×upstream:
+ *
+ * - Fireworks takes `reasoning_effort` (the per-model effort mappers are
+ *   identity for every rung, "max" included) plus `reasoning_history` while
+ *   thinking: "preserved" for kimi/glm/nemotron-3-ultra/inkling,
+ *   "interleaved" for deepseek. Disabled sends `reasoning_effort: "none"`
+ *   with no history.
+ * - Baseten opt-in families (kimi, glm-5.1, nemotron) take
+ *   `chat_template_args.enable_thinking`; Baseten never receives
+ *   `reasoning_history`.
+ * - Baseten reasoning-effort families (glm-5.2, glm-5.2-fast, inkling) take
+ *   `reasoning_effort` verbatim (incl. "max"); disabled sends
+ *   `reasoning_effort: "none"` (emitNone).
+ * - Baseten forced-on (deepseek-v4-pro) coerces off/disabled to
+ *   `reasoning_effort: "low"` — thinking can never be switched off there.
+ *
+ * Models without a registry `completionsReasoning` entry (glm-4.7, glm-5,
+ * custom ids) keep the legacy upstream-only shape.
  */
 function buildCompletionsReasoningBody(
+	meta: FactoryDroidModelInput | undefined,
 	upstream: string,
 	options: FactoryDroidOptions | undefined,
 ): Record<string, unknown> | undefined {
-	if (options?.disableReasoning) {
-		return upstream === "baseten" ? { chat_template_args: { enable_thinking: false } } : { reasoning_effort: "none" };
+	// The CLI treats the "off"/"none" rungs as the disable state, same as the
+	// explicit disable flag: Fireworks maps off -> "none", opt-in Baseten
+	// flips the template switch off, reasoning-effort Baseten emits "none".
+	// (OMP's harness already maps those rungs to `disableReasoning: true` —
+	// `reasoning` is typed `Effort` and never carries "off"/"none".)
+	const disabled = options?.disableReasoning === true;
+	const shaping = meta?.completionsReasoning;
+
+	if (upstream === "baseten") {
+		const mode = shaping?.baseten?.mode;
+		if (mode === "reasoning-effort") {
+			// While thinking the transport emits reasoning_effort verbatim; only
+			// the disable state needs a body override (emitNone).
+			return disabled ? { reasoning_effort: "none" } : undefined;
+		}
+		if (mode === "forced-on") {
+			return disabled ? { reasoning_effort: "low" } : undefined;
+		}
+		// opt-in families (kimi, glm-5.1, nemotron): the template defaults to
+		// thinking-off, and the CLI's `fah` short-circuit returns an empty body
+		// for off/none on opt-in models — the disable state is expressed by
+		// omission, never by enable_thinking: false. Only an explicit effort
+		// flips the switch on.
+		if (!disabled && options?.reasoning !== undefined) {
+			return { chat_template_args: { enable_thinking: true } };
+		}
+		return undefined;
 	}
+
+	// Fireworks (and any other upstream for unregistered models).
+	if (disabled) return { reasoning_effort: "none" };
 	if (options?.reasoning !== undefined) {
-		if (upstream === "baseten") return { chat_template_args: { enable_thinking: true } };
-		return { reasoning_history: "preserved" };
+		return { reasoning_history: shaping?.fireworks?.history ?? "preserved" };
 	}
 	return undefined;
 }
@@ -175,8 +235,6 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					"No Factory Droid credentials found. Run `/login factory-droid` (WorkOS device code).",
 				);
 			}
-			const auth = { accessToken: harnessToken, orgId: undefined };
-
 			const meta = resolveModelMeta(model);
 			const upstream = resolveUpstream(model, meta);
 			// The proxy expects v4-shaped ids; the OMP session id is a UUIDv7-style
@@ -184,7 +242,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 			// stable per session.
 			const requestId = crypto.randomUUID();
 			const sessionUuid = options?.sessionId ? deterministicUuid(options.sessionId) : requestId;
-			const orgId = auth.orgId ?? factoryDroidOrgIdFromToken(auth.accessToken);
+			const orgId = factoryDroidOrgIdFromToken(harnessToken);
 
 			const proxiedContext: Context = {
 				...context,
@@ -193,9 +251,14 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 
 			const wire = meta?.wire ?? "openai-completions";
 			const baseOptions = {
-				apiKey: auth.accessToken,
+				apiKey: harnessToken,
 				signal: options?.signal,
 				fetch: options?.fetch,
+				// Forward the watchdog knobs: without them the inner OpenAI-family
+				// transports fall back to 300s defaults and a silent stall (e.g.
+				// kimi-k3 after a tool call) would only surface at that boundary.
+				streamIdleTimeoutMs: options?.streamIdleTimeoutMs,
+				streamFirstEventTimeoutMs: options?.streamFirstEventTimeoutMs,
 			};
 
 			let innerStream: AssistantMessageEventStream;
@@ -206,16 +269,12 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					geminiMedium: meta?.geminiMedium,
 					maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 					temperature: options?.temperature,
+					topP: options?.topP,
+					topK: options?.topK,
 					reasoning: options?.reasoning,
 					disableReasoning: options?.disableReasoning,
 					headers: {
-						"User-Agent": `factory-cli/${FACTORY_DROID_CLIENT_VERSION}`,
-						"X-Client-Version": FACTORY_DROID_CLIENT_VERSION,
-						"X-Factory-Client": "cli",
-						"x-api-provider": upstream,
-						"x-session-id": sessionUuid,
-						"x-assistant-message-id": requestId,
-						...(orgId ? { "X-Factory-Org-Id": orgId } : {}),
+						...buildIdentityHeaders({ upstream, sessionUuid, requestId, orgId, wire: "google-generate" }),
 						...options?.headers,
 					},
 				});
@@ -228,7 +287,25 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				const effort = options?.disableReasoning ? undefined : options?.reasoning;
 				const thinkingStyle = meta?.thinkingStyle ?? "adaptive";
 				const adaptive = thinkingStyle === "adaptive" || thinkingStyle === "adaptive-summarized";
-				const budget = effort !== undefined ? (ANTHROPIC_THINKING_BUDGETS[effort] ?? 24_576) : undefined;
+				const budgetEffortStyle = thinkingStyle === "budget-effort" || thinkingStyle === "budget-effort-beta";
+				// Budget styles carry the model's baked effortBudgets (the standard
+				// OMP ladder, set in catalog discovery) — no provider-side table.
+				const budget = effort !== undefined ? anthropicModel.thinking?.effortBudgets?.[effort] : undefined;
+				// Native budget-effort thinking maps effort through {low,medium,high}
+				// only — xhigh/max fall back to "high" (adaptive keeps the full ladder).
+				const budgetEffort = effort === "xhigh" || effort === "max" ? "high" : effort;
+				// The effort-2025-11-24 beta rides Bedrock/Vertex upstreams whenever
+				// `output_config.effort` is on the wire, and the budget-effort-beta
+				// style carries it unconditionally; Factory's direct anthropic route
+				// and MiniMax never advertise it.
+				// Native appends the beta only when an `output_config` is actually on
+				// the wire — budget-interleaved builds never carry one.
+				const emitsOutputConfig = thinkingStyle !== "budget-interleaved";
+				const effortBeta =
+					thinkingStyle === "budget-effort-beta" ||
+					(emitsOutputConfig &&
+						(upstream === "bedrock_anthropic" || upstream === "vertex_anthropic") &&
+						effort !== undefined);
 				innerStream = streamAnthropic(anthropicModel, proxiedContext, {
 					...baseOptions,
 					// NOT isOAuth: the OAuth branch would cloak the request in Claude
@@ -241,40 +318,58 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 					thinkingEnabled: options?.disableReasoning !== true,
 					...(adaptive
 						? { effort: (effort ?? "high") as "low" | "medium" | "high" | "xhigh" | "max" }
-						: { thinkingBudgetTokens: budget }),
-					thinkingDisplay: thinkingStyle === "adaptive-summarized" ? "summarized" : undefined,
-					interleavedThinking: thinkingStyle === "budget-interleaved",
+						: {
+								thinkingBudgetTokens: budget,
+								...(budgetEffortStyle
+									? { effort: (budgetEffort ?? "high") as "low" | "medium" | "high" | "xhigh" | "max" }
+									: {}),
+							}),
+					// OMP's native pattern: the shared transport defaults supported
+					// models to "summarized"; only an explicit hide is forwarded.
+					thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
+					// Native emits the interleaved beta only while a thinking config is
+					// actually on the wire: off/default-off turns get betaFlags: [] and a
+					// non-thinking-led history strips budget-interleaved models (no
+					// output_config) to betaFlags: [] as well. The header is built before
+					// buildParams, so the branch replicates the strip condition.
+					interleavedThinking:
+						thinkingStyle === "budget-interleaved" &&
+						effort !== undefined &&
+						!hasThinkinglessAssistantHistory(context.messages) &&
+						!hasNonThinkingTurnAfterLastUser(context.messages),
+					// Native thinking-history handling: non-adaptive styles replay
+					// thinking blocks only while the conversation stays thinking-led.
+					stripThinkingHistory: !adaptive,
+					effortBeta,
+					fastMode: meta?.fastMode === true,
 					maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 					temperature: options?.temperature,
 					toolChoice: options?.toolChoice as "auto" | "any" | "none" | { type: "tool"; name: string } | undefined,
 					sessionId: sessionUuid,
 					headers: {
-						"User-Agent": `factory-cli/${FACTORY_DROID_CLIENT_VERSION}`,
-						"X-Client-Version": FACTORY_DROID_CLIENT_VERSION,
-						"X-Factory-Client": "cli",
-						"X-Stainless-Lang": "js",
-						"X-Stainless-Package-Version": "0.70.1",
-						"X-Stainless-Runtime": "node",
-						"X-Stainless-Runtime-Version": process.version,
-						"X-Stainless-Arch": process.arch,
-						"X-Stainless-OS":
-							process.platform === "darwin" ? "MacOS" : process.platform === "win32" ? "Windows" : "Linux",
-						"X-Stainless-Retry-Count": "0",
-						"x-api-key": "placeholder",
-						"x-api-provider": upstream,
-						"x-session-id": sessionUuid,
-						"x-assistant-message-id": requestId,
-						...(orgId ? { "X-Factory-Org-Id": orgId } : {}),
+						...buildIdentityHeaders({ upstream, sessionUuid, requestId, orgId, wire: "anthropic-messages" }),
 						...options?.headers,
 					},
 				});
 			} else if (wire === "openai-responses") {
+				const cfg = meta?.responsesConfig;
+				// The model's registry provider ("openai" for GPT-5.x, "xai" for
+				// grok) gates the openai-family shaping — tool_choice stays "auto"
+				// and max_output_tokens stays omitted even on bedrock_openai
+				// rotations — while retention and the OpenAI-Platform header track
+				// the resolved upstream instead.
+				const family = meta?.apiProviders[0] ?? upstream;
+				const openaiFamily = family === "openai";
+				const xaiFamily = family === "xai";
 				const responsesModel = buildModel({
 					...model,
 					api: "openai-responses",
 					baseUrl: FACTORY_DROID_RESPONSES_BASE_URL,
+					// The CLI never sends max_output_tokens for openai-provider
+					// models; only xai (grok) carries one (63356). The shared
+					// transport honors `omitMaxOutputTokens` by dropping the field.
+					omitMaxOutputTokens: openaiFamily,
 				} as ModelSpec<"openai-responses">);
-				const cfg = meta?.responsesConfig;
 				// dXT: the proxy's Responses surface wants "xhigh", never "max".
 				const effort = options?.disableReasoning
 					? undefined
@@ -284,9 +379,14 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				innerStream = streamOpenAIResponses(responsesModel, proxiedContext, {
 					...baseOptions,
 					reasoning: effort as "minimal" | "low" | "medium" | "high" | "xhigh" | undefined,
-					reasoningSummary: effort ? "auto" : undefined,
+					// The CLI omits reasoning.summary for xai-routed models (grok);
+					// null suppresses the shared transport's "auto" default.
+					reasoningSummary: effort ? (xaiFamily ? null : "auto") : undefined,
 					maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
-					temperature: options?.temperature,
+					// The CLI sends no `temperature` on this wire; tool_choice is
+					// forwarded only when the caller picks one (the API's default
+					// is already "auto" — probe-verified the proxy accepts the
+					// omission).
 					toolChoice: options?.toolChoice,
 					sessionId: sessionUuid,
 					extraBody: {
@@ -295,21 +395,48 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 						// retention; the HTTPS Responses route rejects both — verbosity
 						// moved under `text`, and these models require "24h" caching.
 						prompt_cache_key: sessionUuid,
-						// Only extendedCache models (Vx config) carry retention;
-						// the proxy requires "24h" for them and rejects the field
-						// entirely for lighter configs like grok's.
-						...(cfg?.extendedCache ? { prompt_cache_retention: "24h" } : {}),
-						parallel_tool_calls: cfg?.parallelToolCalls ?? true,
+						// Only extendedCache models routed to the openai upstream
+						// carry retention; the proxy requires "24h" for them, rejects
+						// the field for lighter configs, and rotations like
+						// bedrock_openai drop it for the turn.
+						...(cfg?.extendedCache && upstream === "openai" ? { prompt_cache_retention: "24h" } : {}),
+						// Defaults ride the API's own (parallel tool calls are on
+						// by default); only the non-default false is written.
+						...(cfg?.parallelToolCalls === false ? { parallel_tool_calls: false } : {}),
 						...(cfg?.serviceTier ? { service_tier: cfg.serviceTier } : {}),
-						...(cfg?.safetyId ? { safety_identifier: orgId ?? sessionUuid } : {}),
+						// Caller textVerbosity (StreamOptions) wins over the model's
+						// registry verbosity, mirroring OMP's own option surface.
+						...((cfg?.verbosity ?? options?.textVerbosity)
+							? { text: { verbosity: options?.textVerbosity ?? cfg?.verbosity } }
+							: {}),
+						// The CLI computes userId ?? sessionId and its call site never
+						// passes userId, so the wire value is the session id — match it
+						// exactly rather than leaking the stable WorkOS user id.
+						...(cfg?.safetyId ? { safety_identifier: sessionUuid } : {}),
 					},
 					headers: {
-						...buildOpenAiHeaders({ upstream, sessionUuid, requestId, orgId, stainless: false }),
+						...buildIdentityHeaders({ upstream, sessionUuid, requestId, orgId, wire: "openai-responses" }),
 						...options?.headers,
 					},
 				});
 			} else {
-				const extraBody = buildCompletionsReasoningBody(upstream, options);
+				const extraBody = buildCompletionsReasoningBody(meta, upstream, options);
+				// Baseten opt-in families (kimi, glm-5.1, nemotron) ride the
+				// template switch; reasoning-effort and forced-on families
+				// (glm-5.2/5.2-fast, inkling, deepseek-v4-pro) take
+				// `reasoning_effort` verbatim from the transport while thinking.
+				const basetenReasoningEffort =
+					upstream === "baseten" &&
+					(meta?.completionsReasoning?.baseten?.mode === "reasoning-effort" ||
+						meta?.completionsReasoning?.baseten?.mode === "forced-on");
+				// The proxy's completions families replay stored reasoning_content
+				// on assistant turns (streamed as `reasoning_content` deltas).
+				// Kimi/GLM/inkling/nemotron replay only what was captured; DeepSeek
+				// additionally forces a placeholder on tool-call turns (see the
+				// transport's tier-2 fallback).
+				// Registry classification (reasoningReplay) drives the replay
+				// compat flags; unregistered custom ids get no replay behavior.
+				const reasoningReplay = meta?.reasoningReplay;
 				const openaiModel = buildModel({
 					...model,
 					api: "openai-completions",
@@ -320,27 +447,55 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 						maxTokensField: "max_tokens",
 						supportsStore: false,
 						...(meta?.toolMessageIncludesName ? { requiresToolResultName: true } : {}),
+						// Generic-host heuristics that don't apply to the Factory
+						// proxy: native emits reasoning params regardless of
+						// tool_choice, never invents "." reasoning_content, and never
+						// rewrites empty assistant content to ".".
+						disableReasoningOnForcedToolChoice: false,
+						disableReasoningOnToolChoice: false,
+						allowsSyntheticReasoningContentForToolCalls: false,
+						requiresAssistantContentForToolCalls: false,
+						// capture-only (Kimi): replay through the capture-only
+						// path, no synthetic fallback tiers. placeholder
+						// (DeepSeek): keep the requires-path so the tool-call-turn
+						// placeholder can fire — native forces the placeholder
+						// only on tool-call turns with a single space, where the
+						// generic family heuristic demands it on every assistant
+						// turn with an empty string.
+						...(reasoningReplay === "capture-only" ? { requiresReasoningContentForToolCalls: false } : {}),
+						...(reasoningReplay === "capture-only" || reasoningReplay === "standard"
+							? { replayReasoningContent: true }
+							: {}),
+						...(reasoningReplay === "placeholder"
+							? {
+									requiresReasoningContentForAllAssistantTurns: false,
+									syntheticReasoningContentFallback: " ",
+								}
+							: {}),
 						...(model.compatConfig ?? {}),
 						...(extraBody ? { extraBody } : {}),
 					},
 				} as ModelSpec<"openai-completions">);
 				innerStream = streamOpenAICompletions(openaiModel, proxiedContext, {
 					...baseOptions,
-					temperature: options?.temperature ?? 1,
+					temperature: options?.temperature,
 					topP: options?.topP,
 					topK: options?.topK,
 					minP: options?.minP,
 					presencePenalty: options?.presencePenalty,
 					repetitionPenalty: options?.repetitionPenalty,
 					maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
-					// Baseten reasoning rides chat_template_args only; the generic
-					// reasoning_effort passthrough would add a field droid never sends.
-					reasoning: upstream === "baseten" ? undefined : options?.reasoning,
+					// Baseten opt-in reasoning rides chat_template_args only; the
+					// generic reasoning_effort passthrough would add a field droid
+					// never sends for those families. Reasoning-effort / forced-on
+					// Baseten models pass through so the transport emits the effort
+					// verbatim (the body builder supplies only the disable coercions).
+					reasoning: upstream === "baseten" && !basetenReasoningEffort ? undefined : options?.reasoning,
 					disableReasoning: upstream === "baseten" ? undefined : options?.disableReasoning,
 					toolChoice: options?.toolChoice,
 					sessionId: sessionUuid,
 					headers: {
-						...buildOpenAiHeaders({ upstream, sessionUuid, requestId, orgId }),
+						...buildIdentityHeaders({ upstream, sessionUuid, requestId, orgId, wire: "openai-completions" }),
 						...options?.headers,
 					},
 				});

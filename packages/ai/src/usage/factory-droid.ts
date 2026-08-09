@@ -12,8 +12,6 @@ import type {
 } from "../usage";
 
 const FACTORY_BILLING_LIMITS_URL = "https://api.factory.ai/api/billing/limits";
-/** Client version reported to Factory's API on usage requests. */
-const FACTORY_DROID_CLIENT_VERSION = "0.189.0";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
