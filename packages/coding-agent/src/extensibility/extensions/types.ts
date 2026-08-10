@@ -84,6 +84,7 @@ import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
+import type { AgentStatus } from "../../registry/agent-registry";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
@@ -1201,6 +1202,20 @@ export interface IrcApi {
 	 * capability-detected by callers, absent on inbound-only builds.
 	 */
 	setRemoteTransport?(transport: RemoteTransport | undefined): void;
+
+	/**
+	 * Register a cross-process `remote` proxy peer (the murmur bridge imports mesh agents this way),
+	 * attributed to the calling extension so a failed load or the extension's own teardown can roll it
+	 * back (can1357/oh-my-pi#7401). `kind` is forced to `remote` and `session` to `null`; a send
+	 * addressed to this id is then handed to the installed transport. OPTIONAL: outbound-seam builds only.
+	 */
+	registerRemotePeer?(peer: { id: string; displayName?: string; status?: AgentStatus; parentId?: string }): void;
+
+	/**
+	 * Retract a `remote` proxy peer previously registered by THIS extension (ownership-checked, so one
+	 * extension cannot evict another's peers). OPTIONAL: outbound-seam builds only.
+	 */
+	unregisterRemotePeer?(id: string): boolean;
 }
 
 /**

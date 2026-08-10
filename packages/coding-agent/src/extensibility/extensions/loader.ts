@@ -28,6 +28,7 @@ import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
 import { IrcBus } from "../../irc/bus";
+import { AgentRegistry } from "../../registry/agent-registry";
 import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -186,6 +187,27 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly irc: IrcApi = {
 		deliverInbound: (msg, opts) => IrcBus.global().deliverInbound(msg, opts),
 		setRemoteTransport: transport => IrcBus.global().setRemoteTransport(transport),
+		registerRemotePeer: peer => {
+			// Attribute the proxy to this extension (mirrors provider `sourceId`) so a failed load or
+			// the extension's own teardown can retract exactly its refs. `this.extension` is deref'd
+			// lazily at call time (well after construction), so the field-initializer order is safe.
+			AgentRegistry.global().register({
+				id: peer.id,
+				displayName: peer.displayName ?? peer.id,
+				kind: "remote",
+				parentId: peer.parentId,
+				session: null,
+				status: peer.status,
+				extensionId: this.extension.path,
+			});
+		},
+		unregisterRemotePeer: id => {
+			const registry = AgentRegistry.global();
+			const ref = registry.get(id);
+			// Ownership-checked: an extension may retract only the remote proxies it registered.
+			if (ref?.kind !== "remote" || ref.extensionId !== this.extension.path) return false;
+			return registry.unregister(id);
+		},
 	};
 	readonly flagValues = new Map<string, boolean | string>();
 	readonly pendingProviderRegistrations: Array<{
@@ -385,17 +407,18 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 }
 
 /**
- * Runs an extension factory with rollback of process-global state the factory
- * may have mutated before throwing. Restores the complete provider-registration
- * queue (an extension may unregister entries queued by an earlier extension) and
- * the {@link IrcBus} remote transport, so a factory that installs a transport via
- * `pi.irc.setRemoteTransport` and then throws does not leave a stale transport
- * routing registry-miss sends for an extension that never finished loading.
+ * Runs an extension factory with rollback of process-global state the factory may have mutated
+ * before throwing. Restores the complete provider-registration queue (an extension may unregister
+ * entries queued by an earlier extension), the {@link IrcBus} remote transport, and any `remote`
+ * proxy refs the factory registered via `pi.irc.registerRemotePeer` (attributed by `extensionId`).
+ * So a factory that installs a transport / seeds remote peers and then throws leaves no stale
+ * transport and no orphaned, unreachable proxies for an extension that never finished loading.
  */
 async function runExtensionFactory(
 	factory: ExtensionFactory,
 	api: ExtensionAPI,
 	runtime: IExtensionRuntime,
+	extensionId: string,
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
 	const bus = IrcBus.global();
@@ -410,6 +433,12 @@ async function runExtensionFactory(
 			...providerRegistrationCheckpoint,
 		);
 		bus.setRemoteTransport(remoteTransportCheckpoint);
+		// Retract every ref the failed factory registered, attributed by extensionId — no orphaned
+		// `remote` proxies linger in the process-global registry (can1357/oh-my-pi#7401 review).
+		const registry = AgentRegistry.global();
+		for (const ref of registry.list()) {
+			if (ref.extensionId === extensionId) registry.unregister(ref.id);
+		}
 		throw error;
 	}
 }
@@ -450,7 +479,7 @@ async function bindExtension(
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
 		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
-		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
+		await withHostGuard(() => runExtensionFactory(factory, api, runtime, extension.path));
 
 		return { extension, error: null };
 	} catch (err) {
@@ -471,7 +500,7 @@ export async function loadExtensionFromFactory(
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
 	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
-	await runExtensionFactory(factory, api, runtime);
+	await runExtensionFactory(factory, api, runtime, extension.path);
 	return extension;
 }
 

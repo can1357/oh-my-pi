@@ -6,6 +6,7 @@ import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ProviderConfig } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { IrcBus, type RemoteTransport } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -403,6 +404,54 @@ describe("extension provider registration rollback", () => {
 			expect(IrcBus.global().getRemoteTransport()).toBe(first);
 		} finally {
 			IrcBus.resetGlobalForTests();
+		}
+	});
+
+	test("keeps a remote proxy registered by an extension that loads successfully", async () => {
+		AgentRegistry.resetGlobalForTests();
+		try {
+			const runtime = new ExtensionRuntime();
+			const events = new EventBus();
+			await loadExtensionFromFactory(
+				pi => {
+					pi.irc.registerRemotePeer?.({ id: "beatrice", displayName: "beatrice" });
+				},
+				process.cwd(),
+				events,
+				runtime,
+				"ok-bridge-extension",
+			);
+			const ref = AgentRegistry.global().get("beatrice");
+			expect(ref?.kind).toBe("remote");
+			expect(ref?.extensionId).toBe("ok-bridge-extension");
+		} finally {
+			AgentRegistry.resetGlobalForTests();
+		}
+	});
+
+	test("retracts remote proxies registered by an extension that then fails to load", async () => {
+		AgentRegistry.resetGlobalForTests();
+		try {
+			const runtime = new ExtensionRuntime();
+			const events = new EventBus();
+
+			await expect(
+				loadExtensionFromFactory(
+					pi => {
+						pi.irc.registerRemotePeer?.({ id: "beatrice", displayName: "beatrice" });
+						throw new Error("failed after seeding remote peer");
+					},
+					process.cwd(),
+					events,
+					runtime,
+					"broken-bridge-extension",
+				),
+			).rejects.toThrow("failed after seeding remote peer");
+
+			// The orphaned proxy must not survive a failed load — attributed rollback by extensionId.
+			expect(AgentRegistry.global().get("beatrice")).toBeUndefined();
+		} finally {
+			AgentRegistry.resetGlobalForTests();
 		}
 	});
 });

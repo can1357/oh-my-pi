@@ -76,4 +76,43 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		expect(seen).toBe("remote-peer");
 		expect(receipt.outcome).toBe("injected");
 	});
+
+	it("registerRemotePeer seeds a `remote` ref attributed to the extension, addressable via the transport", async () => {
+		const irc = await captureIrc();
+		irc.registerRemotePeer?.({ id: "beatrice", displayName: "beatrice" });
+		const ref = AgentRegistry.global().get("beatrice");
+		expect(ref?.kind).toBe("remote");
+		expect(ref?.extensionId).toBe("<inline>");
+
+		let seen: string | undefined;
+		irc.setRemoteTransport?.({
+			async send(message) {
+				seen = message.to;
+				return { to: message.to, outcome: "injected" };
+			},
+		});
+		const receipt = await IrcBus.global().send({ from: "Main", to: "beatrice", body: "hi" });
+		expect(seen).toBe("beatrice");
+		expect(receipt.outcome).toBe("injected");
+	});
+
+	it("unregisterRemotePeer retracts only the caller's own remote proxies", async () => {
+		// A proxy owned by a different extension must not be retractable.
+		AgentRegistry.global().register({
+			id: "foreign",
+			displayName: "foreign",
+			kind: "remote",
+			session: null,
+			status: "running",
+			extensionId: "other-ext",
+		});
+		const irc = await captureIrc();
+		irc.registerRemotePeer?.({ id: "mine", displayName: "mine" });
+
+		expect(irc.unregisterRemotePeer?.("foreign")).toBe(false);
+		expect(AgentRegistry.global().get("foreign")).toBeDefined();
+
+		expect(irc.unregisterRemotePeer?.("mine")).toBe(true);
+		expect(AgentRegistry.global().get("mine")).toBeUndefined();
+	});
 });
