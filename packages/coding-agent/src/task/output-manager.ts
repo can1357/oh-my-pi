@@ -13,6 +13,7 @@
 import * as fs from "node:fs/promises";
 import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-recorder";
 import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
+import { REMOTE_ID_PREFIX } from "../registry/agent-registry";
 
 /**
  * Manages agent output ID allocation to ensure uniqueness.
@@ -113,6 +114,11 @@ export class AgentOutputManager {
 	 * @returns Unique ID ("Anna" first, then "Anna-2", "Anna-3", …)
 	 */
 	async allocate(id: string): Promise<string> {
+		if (id.startsWith(REMOTE_ID_PREFIX)) {
+			throw new Error(
+				`Subagent name ${JSON.stringify(id)} may not start with "${REMOTE_ID_PREFIX}" — that prefix is reserved for cross-process remote peers.`,
+			);
+		}
 		await this.#ensureInitialized();
 		return this.#allocateUnique(id);
 	}
