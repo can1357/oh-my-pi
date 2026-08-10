@@ -179,7 +179,16 @@ export class IrcBus {
 			// multi-top-level-session host (can1357/oh-my-pi#7401 review).
 			if (this.#remote) {
 				try {
-					return await this.#remote.send(message, opts?.expectsReply ? { expectsReply: true } : undefined);
+					const receipt = await this.#remote.send(
+						message,
+						opts?.expectsReply ? { expectsReply: true } : undefined,
+					);
+					// Relay a successful outbound send to the root UI — symmetric with local agent↔agent
+					// delivery (§#deliverToLocalRef) and inbound remote→local (deliverInbound). Otherwise a
+					// bridged run shows replies FROM remote peers but not the local subagent→remote messages
+					// that prompted them. Display-only and skips Main-as-endpoint, so no echo loop (murmur-ffh4).
+					if (receipt.outcome !== "failed" && !opts?.suppressRelay) this.#relayToMainUi(message);
+					return receipt;
 				} catch (error) {
 					// A transport that rejects (transient network/proxy failure) must not escape
 					// IrcBus.send and turn a whole (possibly broadcast) `hub send` into a tool

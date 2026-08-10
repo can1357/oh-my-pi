@@ -190,16 +190,16 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		registerRemotePeer: peer => {
 			const registry = AgentRegistry.global();
 			const existing = registry.get(peer.id);
-			// Never clobber a live local agent or another extension's proxy: overwriting would turn a
-			// real session into a session-less `remote` ref (and a later factory-failure rollback would
-			// then delete it outright, killing hub/history/inbound for the real agent). Only (re)register
-			// when the id is free or already our own remote proxy (can1357/oh-my-pi#7401 review).
-			if (existing && !(existing.kind === "remote" && existing.extensionId === this.extension.path)) {
+			// Never clobber a live local agent or another load's proxy: overwriting would turn a real
+			// session into a session-less `remote` ref (and a later factory-failure rollback would then
+			// delete it outright, killing hub/history/inbound for the real agent). Only (re)register when
+			// the id is free or already THIS load's own remote proxy (can1357/oh-my-pi#7401 review).
+			if (existing && !(existing.kind === "remote" && existing.ownerToken === this.ownerToken)) {
 				return false;
 			}
-			// Attribute the proxy to this extension (mirrors provider `sourceId`) so a failed load or
-			// the extension's own teardown can retract exactly its refs. `this.extension` is deref'd
-			// lazily at call time (well after construction), so the field-initializer order is safe.
+			// Attribute the proxy to this extension LOAD (mirrors provider `sourceId`) so a failed load or
+			// the extension's own teardown retracts exactly its refs. `this.ownerToken` is deref'd lazily
+			// at call time (well after construction), so the field-initializer order is safe.
 			registry.register({
 				id: peer.id,
 				displayName: peer.displayName ?? peer.id,
@@ -207,15 +207,15 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 				parentId: peer.parentId,
 				session: null,
 				status: peer.status,
-				extensionId: this.extension.path,
+				ownerToken: this.ownerToken,
 			});
 			return true;
 		},
 		unregisterRemotePeer: id => {
 			const registry = AgentRegistry.global();
 			const ref = registry.get(id);
-			// Ownership-checked: an extension may retract only the remote proxies it registered.
-			if (ref?.kind !== "remote" || ref.extensionId !== this.extension.path) return false;
+			// Ownership-checked: a load may retract only the remote proxies it registered.
+			if (ref?.kind !== "remote" || ref.ownerToken !== this.ownerToken) return false;
 			return registry.unregister(id);
 		},
 	};
@@ -232,6 +232,8 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		private readonly runtime: IExtensionRuntime,
 		private readonly cwd: string,
 		public readonly events: EventBus,
+		/** Per-load owner token stamped on refs this load registers (see {@link AgentRef.ownerToken}). */
+		private readonly ownerToken: string,
 	) {}
 
 	on<F extends HandlerFn>(event: string, handler: F): void {
@@ -420,15 +422,16 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
  * Runs an extension factory with rollback of process-global state the factory may have mutated
  * before throwing. Restores the complete provider-registration queue (an extension may unregister
  * entries queued by an earlier extension), the {@link IrcBus} remote transport, and any `remote`
- * proxy refs the factory registered via `pi.irc.registerRemotePeer` (attributed by `extensionId`).
- * So a factory that installs a transport / seeds remote peers and then throws leaves no stale
- * transport and no orphaned, unreachable proxies for an extension that never finished loading.
+ * proxy refs the factory registered via `pi.irc.registerRemotePeer` (attributed by the per-load
+ * `ownerToken`). So a factory that installs a transport / seeds remote peers and then throws leaves
+ * no stale transport and no orphaned proxies — and, because the token is per LOAD not per source
+ * path, a failed load never retracts a sibling load's peers (can1357/oh-my-pi#7401 review).
  */
 async function runExtensionFactory(
 	factory: ExtensionFactory,
 	api: ExtensionAPI,
 	runtime: IExtensionRuntime,
-	extensionId: string,
+	ownerToken: string,
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
 	const bus = IrcBus.global();
@@ -443,11 +446,11 @@ async function runExtensionFactory(
 			...providerRegistrationCheckpoint,
 		);
 		bus.setRemoteTransport(remoteTransportCheckpoint);
-		// Retract every ref the failed factory registered, attributed by extensionId — no orphaned
-		// `remote` proxies linger in the process-global registry (can1357/oh-my-pi#7401 review).
+		// Retract every ref THIS load registered, attributed by ownerToken — no orphaned `remote`
+		// proxies linger, and a sibling load of the same extension path is untouched (murmur-q00p).
 		const registry = AgentRegistry.global();
 		for (const ref of registry.list()) {
-			if (ref.extensionId === extensionId) registry.unregister(ref.id);
+			if (ref.ownerToken === ownerToken) registry.unregister(ref.id);
 		}
 		throw error;
 	}
@@ -488,8 +491,9 @@ async function bindExtension(
 	}
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
-		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
-		await withHostGuard(() => runExtensionFactory(factory, api, runtime, extension.path));
+		const ownerToken = `${extension.path}:${crypto.randomUUID()}`;
+		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus, ownerToken);
+		await withHostGuard(() => runExtensionFactory(factory, api, runtime, ownerToken));
 
 		return { extension, error: null };
 	} catch (err) {
@@ -509,8 +513,9 @@ export async function loadExtensionFromFactory(
 	name = "<inline>",
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
-	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
-	await runExtensionFactory(factory, api, runtime, extension.path);
+	const ownerToken = `${extension.path}:${crypto.randomUUID()}`;
+	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus, ownerToken);
+	await runExtensionFactory(factory, api, runtime, ownerToken);
 	return extension;
 }
 

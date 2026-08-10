@@ -109,11 +109,13 @@ export interface AgentRef {
 	/** Run lifecycle milestones (launch is {@link createdAt}). */
 	lifecycle?: AgentRunLifecycle;
 	/**
-	 * Path of the extension that registered this ref (e.g. a `remote` proxy seeded via
-	 * `pi.irc.registerRemotePeer`). Lets a failed or unloading extension's refs be rolled back by
-	 * attribution rather than a fragile "new since snapshot" heuristic (can1357/oh-my-pi#7401 review).
+	 * Per-load owner token of the extension that registered this ref (e.g. a `remote` proxy seeded via
+	 * `pi.irc.registerRemotePeer`), formatted `${extensionPath}:${randomId}`. Unique per extension
+	 * LOAD — not per source path — so a failed or unloading load rolls back exactly its own refs
+	 * without touching a sibling load of the same extension (subagents / other SDK sessions reuse the
+	 * path) (can1357/oh-my-pi#7401 review).
 	 */
-	extensionId?: string;
+	ownerToken?: string;
 }
 
 export type AgentRefExpectation = AgentRef | AgentSession;
@@ -144,8 +146,8 @@ export interface RegisterInput {
 	history?: AgentHistorySummary;
 	/** Run lifecycle milestones restored from persisted history, when known. */
 	lifecycle?: AgentRunLifecycle;
-	/** Path of the registering extension, for attribution-based rollback (see {@link AgentRef.extensionId}). */
-	extensionId?: string;
+	/** Per-load owner token of the registering extension load, for attribution-based rollback (see {@link AgentRef.ownerToken}). */
+	ownerToken?: string;
 }
 
 export class AgentRegistry {
@@ -190,7 +192,7 @@ export class AgentRegistry {
 			activity: input.activity,
 			history: input.history,
 			lifecycle: input.lifecycle,
-			extensionId: input.extensionId,
+			ownerToken: input.ownerToken,
 		};
 		this.#refs.set(ref.id, ref);
 		this.#emit({ type: "registered", ref });

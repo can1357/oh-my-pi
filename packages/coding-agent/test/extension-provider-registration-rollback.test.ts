@@ -423,7 +423,7 @@ describe("extension provider registration rollback", () => {
 			);
 			const ref = AgentRegistry.global().get("beatrice");
 			expect(ref?.kind).toBe("remote");
-			expect(ref?.extensionId).toBe("ok-bridge-extension");
+			expect(ref?.ownerToken?.startsWith("ok-bridge-extension:")).toBe(true);
 		} finally {
 			AgentRegistry.resetGlobalForTests();
 		}
@@ -448,7 +448,7 @@ describe("extension provider registration rollback", () => {
 				),
 			).rejects.toThrow("failed after seeding remote peer");
 
-			// The orphaned proxy must not survive a failed load — attributed rollback by extensionId.
+			// The orphaned proxy must not survive a failed load — attributed rollback by ownerToken.
 			expect(AgentRegistry.global().get("beatrice")).toBeUndefined();
 		} finally {
 			AgentRegistry.resetGlobalForTests();
@@ -485,6 +485,45 @@ describe("extension provider registration rollback", () => {
 
 			// …so the attributed rollback leaves the real local agent intact.
 			expect(AgentRegistry.global().get("Main")?.kind).toBe("main");
+		} finally {
+			AgentRegistry.resetGlobalForTests();
+		}
+	});
+
+	test("a failed load does not retract remote proxies from an earlier successful load of the same path", async () => {
+		AgentRegistry.resetGlobalForTests();
+		try {
+			const runtime = new ExtensionRuntime();
+			const events = new EventBus();
+			// Load #1 of path P succeeds and seeds a proxy.
+			await loadExtensionFromFactory(
+				pi => {
+					pi.irc.registerRemotePeer?.({ id: "beatrice", displayName: "beatrice" });
+				},
+				process.cwd(),
+				events,
+				runtime,
+				"same/bridge.ts",
+			);
+			expect(AgentRegistry.global().get("beatrice")?.kind).toBe("remote");
+
+			// Load #2 of the SAME path fails after seeding its own proxy.
+			await expect(
+				loadExtensionFromFactory(
+					pi => {
+						pi.irc.registerRemotePeer?.({ id: "carol", displayName: "carol" });
+						throw new Error("boom");
+					},
+					process.cwd(),
+					events,
+					runtime,
+					"same/bridge.ts",
+				),
+			).rejects.toThrow("boom");
+
+			// Per-load ownerToken: load #2's proxy is retracted; load #1's survives untouched.
+			expect(AgentRegistry.global().get("carol")).toBeUndefined();
+			expect(AgentRegistry.global().get("beatrice")?.kind).toBe("remote");
 		} finally {
 			AgentRegistry.resetGlobalForTests();
 		}
