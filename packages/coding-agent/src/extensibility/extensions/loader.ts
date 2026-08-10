@@ -190,7 +190,8 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly zod = zod;
 	readonly irc: IrcApi = {
 		deliverInbound: (msg, opts) => IrcBus.global().deliverInbound(msg, opts),
-		setRemoteTransport: transport => IrcBus.global().setRemoteTransport(this.ownerToken, transport),
+		setRemoteTransport: (namespace, transport) =>
+			IrcBus.global().setRemoteTransport(namespace, transport, this.ownerToken),
 		registerRemotePeer: peer => {
 			// Reserved ids a remote peer can never take: MAIN_AGENT_ID (the local root, registered by a
 			// top-level session AFTER extensions load — absent from the registry at bridge-load time, so
@@ -459,8 +460,8 @@ async function runExtensionFactory(
 			runtime.pendingProviderRegistrations.length,
 			...providerRegistrationCheckpoint,
 		);
-		// Drop this load's transport entry (owner-scoped, so other loads' transports are untouched).
-		bus.setRemoteTransport(ownerToken, undefined);
+		// Release this load's namespace claims + transports (owner-scoped; sibling loads untouched).
+		bus.releaseTransportsForOwner(ownerToken);
 		// Retract every ref THIS load registered, attributed by ownerToken — no orphaned `remote`
 		// proxies linger, and a sibling load of the same extension path is untouched (murmur-q00p).
 		const registry = AgentRegistry.global();

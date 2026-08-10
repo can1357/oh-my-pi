@@ -1196,12 +1196,13 @@ export interface IrcApi {
 	): Promise<{ receipt: IrcDeliveryReceipt; id: string }>;
 
 	/**
-	 * Install (or clear, with `undefined`) the transport fired on a local-registry miss — an
-	 * omp agent messaging a peer absent from this process's registry (a remote murmur peer).
+	 * Claim a globally-unique `namespace` and install (or, with `undefined`, clear) its outbound
+	 * transport. A send addressed to `@<namespace>/<name>` routes to this transport with the bare
+	 * `<name>` in `opts.toName`. Claiming a namespace already owned by another live extension throws.
 	 * OPTIONAL: present only on omp builds carrying the outbound/[3] transport seam (murmur-l5vv);
 	 * capability-detected by callers, absent on inbound-only builds.
 	 */
-	setRemoteTransport?(transport: RemoteTransport | undefined): void;
+	setRemoteTransport?(namespace: string, transport: RemoteTransport | undefined): void;
 
 	/**
 	 * Register a cross-process `remote` proxy peer (the murmur bridge imports mesh agents this way),

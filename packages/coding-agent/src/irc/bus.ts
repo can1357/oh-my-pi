@@ -24,16 +24,16 @@ import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { CustomMessage } from "../session/messages";
 
 /**
- * Transport that delivers a send addressed to a registered cross-process `remote` proxy peer to
- * whatever lives behind it (e.g. the murmur bridge). Installed per owning extension load via
- * {@link IrcBus.setRemoteTransport}; `send` routes a `remote` ref to ITS owner's transport (keyed by
- * {@link AgentRef.ownerToken}) and NEVER fires for a local miss / aborted / advisor / no-session
- * recipient (those stay local `failed`). `opts.expectsReply` is forwarded so an awaited send (sender
- * blocked on a reply) gets the same side-channel auto-reply behaviour cross-process as a local send.
- * Returns a synthesized {@link IrcDeliveryReceipt} for a uniform outcome.
+ * Transport that carries a cross-process IRC send out of this process to the mesh behind it (e.g. the
+ * murmur bridge). Installed per globally-unique `namespace` via {@link IrcBus.setRemoteTransport};
+ * `send` routes any `@<namespace>/<name>` recipient to that namespace's transport (prefix-authoritative
+ * — a registered proxy ref is optional). `opts.toName` is the recipient's bare mesh name (the `@ns/`
+ * prefix stripped) so the transport never parses ids; `opts.expectsReply` is forwarded so an awaited
+ * send gets the same side-channel auto-reply behaviour cross-process as a local send. Returns a
+ * synthesized {@link IrcDeliveryReceipt} for a uniform outcome.
  */
 export interface RemoteTransport {
-	send(message: IrcMessage, opts?: { expectsReply?: boolean }): Promise<IrcDeliveryReceipt>;
+	send(message: IrcMessage, opts?: { expectsReply?: boolean; toName?: string }): Promise<IrcDeliveryReceipt>;
 }
 
 /**
@@ -130,8 +130,10 @@ export class IrcBus {
 	readonly #waiters = new Map<string, IrcWaiter[]>();
 	/** Timestamp of the latest successful send per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, number>>();
-	/** Outbound transports keyed by the installing extension load's `ownerToken` (murmur-l5vv). */
-	readonly #remotes = new Map<string, RemoteTransport>();
+	/** Outbound transports keyed by globally-unique NAMESPACE (the `@<namespace>/` routing prefix). */
+	readonly #transports = new Map<string, RemoteTransport>();
+	/** namespace -> the extension load `ownerToken` that claimed it (clash guard + owner-scoped release). */
+	readonly #namespaceOwners = new Map<string, string>();
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
@@ -141,19 +143,51 @@ export class IrcBus {
 	}
 
 	/**
-	 * Install (or clear, with `undefined`) the outbound transport for one extension LOAD, keyed by its
-	 * `ownerToken`. A `remote` proxy ref registered by that load routes through this transport; other
-	 * loads' transports are independent, so two bridges to different rosters coexist without clobbering
-	 * each other (can1357/oh-my-pi#7401 review).
+	 * Install, update, or clear the outbound transport for a globally-unique `namespace`, claimed by
+	 * the installing extension load's `ownerToken`:
+	 * - unclaimed namespace: claim it for `ownerToken` and install `transport`;
+	 * - claimed by the SAME `ownerToken`: update `transport`, or (with `undefined`) clear ROUTING while
+	 *   KEEPING the claim + any registered peers, so the owner can reinstall after a reconnect;
+	 * - claimed by a DIFFERENT `ownerToken`: throw — a namespace is single-owner across the process, so
+	 *   two bridges to the same external cluster must each pick a distinct namespace.
+	 *
+	 * Full release of the claim (freeing the namespace) happens via {@link releaseTransportsForOwner}
+	 * on extension teardown / load-failure rollback, never on a plain clear.
 	 */
-	setRemoteTransport(ownerToken: string, transport: RemoteTransport | undefined): void {
-		if (transport) this.#remotes.set(ownerToken, transport);
-		else this.#remotes.delete(ownerToken);
+	setRemoteTransport(namespace: string, transport: RemoteTransport | undefined, ownerToken: string): void {
+		const owner = this.#namespaceOwners.get(namespace);
+		if (owner !== undefined && owner !== ownerToken) {
+			throw new Error(
+				`IRC namespace "${namespace}" is already claimed by another extension load; choose a distinct namespace.`,
+			);
+		}
+		if (transport) {
+			this.#namespaceOwners.set(namespace, ownerToken);
+			this.#transports.set(namespace, transport);
+		} else {
+			// Clear routing only; the claim survives (reconnect-friendly). releaseTransportsForOwner drops it.
+			this.#transports.delete(namespace);
+		}
 	}
 
 	/** Whether any outbound transport is installed (murmur-q00p): a leaf agent then still has peers. */
 	hasRemoteTransport(): boolean {
-		return this.#remotes.size > 0;
+		return this.#transports.size > 0;
+	}
+
+	/**
+	 * Release every namespace claimed by `ownerToken`: drop its transport AND its claim (freeing the
+	 * namespace for re-claim). Owner-scoped, so sibling loads are untouched; called on extension
+	 * load-failure rollback and runtime teardown. Distinct from a plain `setRemoteTransport(ns,
+	 * undefined, owner)` clear, which keeps the claim for reconnect.
+	 */
+	releaseTransportsForOwner(ownerToken: string): void {
+		for (const [namespace, owner] of this.#namespaceOwners) {
+			if (owner === ownerToken) {
+				this.#namespaceOwners.delete(namespace);
+				this.#transports.delete(namespace);
+			}
+		}
 	}
 
 	/**
@@ -211,56 +245,52 @@ export class IrcBus {
 		message: IrcMessage,
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
 	): Promise<IrcDeliveryReceipt> {
-		const ref = this.#registry.get(message.to);
-		if (ref?.kind === "remote") {
-			// A `remote` proxy the bridge has marked `aborted` is terminally dead — fail it like a local
-			// aborted agent (§#deliverToLocalRef) instead of handing a tombstone to the transport
-			// (broadcast/visible-peer paths already skip it, murmur-q00p). A `parked`/live remote forwards
-			// below: the remote side revives it, mirroring a local parked→revive.
-			if (ref.status === "aborted") {
+		const namespace = remoteNamespaceOf(message.to);
+		if (namespace !== undefined) {
+			// Prefix-authoritative: an `@<namespace>/<name>` recipient is unambiguously remote and routes
+			// to its namespace's transport — a registered proxy ref is optional (reach-by-name). A ref is
+			// consulted ONLY to honor an `aborted` tombstone, matching a local hard-aborted agent.
+			const ref = this.#registry.get(message.to);
+			if (ref?.status === "aborted") {
 				return {
 					to: message.to,
 					outcome: "failed",
 					error: `Agent "${message.to}" was aborted and cannot be messaged.`,
 				};
 			}
-			// The ONLY branch that leaves the process: a registered cross-process `remote` proxy peer
-			// (murmur-q00p) hands off to ITS OWNER's transport — the one the same extension load installed
-			// via setRemoteTransport (keyed by ownerToken), so two bridges to different rosters never
-			// cross-deliver. A bare local-registry MISS never forwards (see below): cross-process
-			// recipients are addressable ONLY as registered `remote` refs, so a transport installed for
-			// one top-level session can't swallow another's mistyped/unknown recipient in a shared-registry,
-			// multi-top-level-session host (can1357/oh-my-pi#7401 review).
-			const transport = ref.ownerToken ? this.#remotes.get(ref.ownerToken) : undefined;
-			if (transport) {
-				try {
-					const receipt = await transport.send(message, opts?.expectsReply ? { expectsReply: true } : undefined);
-					// Relay a successful outbound send to the root UI — symmetric with local agent↔agent
-					// delivery (§#deliverToLocalRef) and inbound remote→local (deliverInbound). Otherwise a
-					// bridged run shows replies FROM remote peers but not the local subagent→remote messages
-					// that prompted them. Display-only and skips Main-as-endpoint, so no echo loop (murmur-ffh4).
-					if (receipt.outcome !== "failed" && !opts?.suppressRelay) this.#relayToMainUi(message);
-					return receipt;
-				} catch (error) {
-					// A transport that rejects (transient network/proxy failure) must not escape
-					// IrcBus.send and turn a whole (possibly broadcast) `hub send` into a tool
-					// exception — surface it as a failed receipt, symmetric with local delivery.
-					return {
-						to: message.to,
-						outcome: "failed",
-						error: error instanceof Error ? error.message : String(error),
-					};
-				}
+			const transport = this.#transports.get(namespace);
+			if (!transport) {
+				return {
+					to: message.to,
+					outcome: "failed",
+					error: `Remote agent "${message.to}" is unreachable — no transport for namespace "@${namespace}".`,
+				};
 			}
-			return {
-				to: message.to,
-				outcome: "failed",
-				error: `Remote agent "${message.to}" is unreachable — its transport is not installed.`,
-			};
+			try {
+				const receipt = await transport.send(message, {
+					expectsReply: opts?.expectsReply,
+					toName: remoteNameOf(message.to),
+				});
+				// Relay a successful outbound send to the root UI — symmetric with local agent↔agent
+				// delivery (§#deliverToLocalRef) and inbound remote→local (deliverInbound). Display-only
+				// and skips Main-as-endpoint, so no echo loop (murmur-ffh4).
+				if (receipt.outcome !== "failed" && !opts?.suppressRelay) this.#relayToMainUi(message);
+				return receipt;
+			} catch (error) {
+				// A transport that rejects (transient network/proxy failure) must not escape IrcBus.send
+				// and turn a whole (possibly broadcast) `hub send` into a tool exception — surface it as a
+				// failed receipt, symmetric with local delivery.
+				return {
+					to: message.to,
+					outcome: "failed",
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
 		}
+		// A non-namespaced id is local. A bare miss is a genuine unknown recipient and gets the
+		// actionable local error even with transports installed — a mistyped local id never leaks out.
+		const ref = this.#registry.get(message.to);
 		if (!ref) {
-			// A local-registry MISS is a genuine unknown recipient and gets the actionable local error,
-			// even with a transport installed — see the remote branch above for why misses never leave.
 			return {
 				to: message.to,
 				outcome: "failed",

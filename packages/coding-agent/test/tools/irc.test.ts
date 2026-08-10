@@ -659,14 +659,18 @@ describe("IRC", () => {
 			const bus = IrcBus.global();
 			try {
 				// The murmur bridge installs a transport + seeds remote proxies: a leaf root now has peers.
-				bus.setRemoteTransport("ext:test", {
-					async send(m) {
-						return { to: m.to, outcome: "injected" };
+				bus.setRemoteTransport(
+					"cluster-a",
+					{
+						async send(m) {
+							return { to: m.to, outcome: "injected" };
+						},
 					},
-				});
+					"ext:test",
+				);
 				expect(isIrcEnabled(settings, 0)).toBe(true);
 			} finally {
-				bus.setRemoteTransport("ext:test", undefined);
+				bus.releaseTransportsForOwner("ext:test");
 			}
 		});
 
