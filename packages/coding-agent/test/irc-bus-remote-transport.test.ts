@@ -8,7 +8,15 @@
  * name so it never parses ids.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { IrcBus, type RemoteTransport } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import {
+	composeRemoteId,
+	IrcBus,
+	isValidRemoteName,
+	isValidRemoteNamespace,
+	type RemoteTransport,
+	remoteNameOf,
+	remoteNamespaceOf,
+} from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
@@ -459,5 +467,36 @@ describe("AgentRegistry.listVisibleTo remote proxies (murmur-q00p)", () => {
 		expect(visible).toContain("@cluster-a/live-remote");
 		expect(visible).not.toContain("@cluster-a/gone-remote");
 		expect(visible).not.toContain("@cluster-a/dead-remote");
+	});
+});
+
+describe("remote id helpers (murmur-167o)", () => {
+	it("composes and round-trips @ns/name", () => {
+		const id = composeRemoteId("cluster-a", "ariel.scout");
+		expect(id).toBe("@cluster-a/ariel.scout");
+		expect(remoteNamespaceOf(id)).toBe("cluster-a");
+		expect(remoteNameOf(id)).toBe("ariel.scout");
+	});
+
+	it("treats a bare (non-@) or malformed id as local", () => {
+		expect(remoteNamespaceOf("Main")).toBeUndefined();
+		expect(remoteNamespaceOf("Main.Scout")).toBeUndefined();
+		expect(remoteNameOf("Main")).toBeUndefined();
+		// A lone `@`, an empty namespace, or a namespace with no `/` is not a well-formed remote id.
+		expect(remoteNamespaceOf("@")).toBeUndefined();
+		expect(remoteNamespaceOf("@/x")).toBeUndefined();
+		expect(remoteNamespaceOf("@ns")).toBeUndefined();
+	});
+
+	it("validates namespace + name charset and rejects invalid compositions", () => {
+		expect(isValidRemoteNamespace("cluster-a.1_b")).toBe(true);
+		expect(isValidRemoteNamespace("bad ns")).toBe(false);
+		expect(isValidRemoteNamespace("bad/ns")).toBe(false);
+		expect(isValidRemoteNamespace("")).toBe(false);
+		expect(isValidRemoteName("ariel.scout")).toBe(true);
+		expect(isValidRemoteName("a/b")).toBe(false);
+		expect(isValidRemoteName("has space")).toBe(false);
+		expect(() => composeRemoteId("bad ns", "x")).toThrow(/namespace/);
+		expect(() => composeRemoteId("cluster-a", "a/b")).toThrow(/name/);
 	});
 });
