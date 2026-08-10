@@ -24,12 +24,13 @@ import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { CustomMessage } from "../session/messages";
 
 /**
- * Transport for messages whose recipient is absent from this process's registry (a local-registry
- * MISS) or is a `remote` proxy peer. Installed via {@link IrcBus.setRemoteTransport} by the murmur
- * bridge extension; `send` invokes it ONLY on the miss / `remote` branch — never for aborted /
- * advisor / no-session recipients (those stay local `failed`). `opts.expectsReply` is forwarded so
- * an awaited send (sender blocked on a reply) gets the same side-channel auto-reply behaviour
- * cross-process as a local send. Returns a synthesized {@link IrcDeliveryReceipt} for a uniform outcome.
+ * Transport that delivers a send addressed to a registered cross-process `remote` proxy peer to
+ * whatever lives behind it (e.g. the murmur bridge). Installed per owning extension load via
+ * {@link IrcBus.setRemoteTransport}; `send` routes a `remote` ref to ITS owner's transport (keyed by
+ * {@link AgentRef.ownerToken}) and NEVER fires for a local miss / aborted / advisor / no-session
+ * recipient (those stay local `failed`). `opts.expectsReply` is forwarded so an awaited send (sender
+ * blocked on a reply) gets the same side-channel auto-reply behaviour cross-process as a local send.
+ * Returns a synthesized {@link IrcDeliveryReceipt} for a uniform outcome.
  */
 export interface RemoteTransport {
 	send(message: IrcMessage, opts?: { expectsReply?: boolean }): Promise<IrcDeliveryReceipt>;
@@ -79,7 +80,8 @@ export class IrcBus {
 	readonly #waiters = new Map<string, IrcWaiter[]>();
 	/** Timestamp of the latest successful send per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, number>>();
-	#remote: RemoteTransport | undefined;
+	/** Outbound transports keyed by the installing extension load's `ownerToken` (murmur-l5vv). */
+	readonly #remotes = new Map<string, RemoteTransport>();
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
@@ -88,19 +90,20 @@ export class IrcBus {
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
 	}
 
-	/** Install (or clear) the transport fired on a local-registry miss (murmur-l5vv). */
-	setRemoteTransport(transport: RemoteTransport | undefined): void {
-		this.#remote = transport;
+	/**
+	 * Install (or clear, with `undefined`) the outbound transport for one extension LOAD, keyed by its
+	 * `ownerToken`. A `remote` proxy ref registered by that load routes through this transport; other
+	 * loads' transports are independent, so two bridges to different rosters coexist without clobbering
+	 * each other (can1357/oh-my-pi#7401 review).
+	 */
+	setRemoteTransport(ownerToken: string, transport: RemoteTransport | undefined): void {
+		if (transport) this.#remotes.set(ownerToken, transport);
+		else this.#remotes.delete(ownerToken);
 	}
 
-	/** The transport currently installed via {@link setRemoteTransport}, if any (for load-failure rollback). */
-	getRemoteTransport(): RemoteTransport | undefined {
-		return this.#remote;
-	}
-
-	/** Whether an outbound transport is installed (murmur-q00p): a leaf agent then still has peers. */
+	/** Whether any outbound transport is installed (murmur-q00p): a leaf agent then still has peers. */
 	hasRemoteTransport(): boolean {
-		return this.#remote != null;
+		return this.#remotes.size > 0;
 	}
 
 	/**
@@ -172,17 +175,16 @@ export class IrcBus {
 				};
 			}
 			// The ONLY branch that leaves the process: a registered cross-process `remote` proxy peer
-			// (murmur-q00p) hands off to the transport. A bare local-registry MISS never forwards (see
-			// below) — cross-process recipients are addressable ONLY as registered `remote` refs, imported
-			// from the bus by the bridge. That keeps a transport installed for one top-level session from
-			// silently swallowing another session's mistyped / nonexistent recipient in a shared-registry,
+			// (murmur-q00p) hands off to ITS OWNER's transport — the one the same extension load installed
+			// via setRemoteTransport (keyed by ownerToken), so two bridges to different rosters never
+			// cross-deliver. A bare local-registry MISS never forwards (see below): cross-process
+			// recipients are addressable ONLY as registered `remote` refs, so a transport installed for
+			// one top-level session can't swallow another's mistyped/unknown recipient in a shared-registry,
 			// multi-top-level-session host (can1357/oh-my-pi#7401 review).
-			if (this.#remote) {
+			const transport = ref.ownerToken ? this.#remotes.get(ref.ownerToken) : undefined;
+			if (transport) {
 				try {
-					const receipt = await this.#remote.send(
-						message,
-						opts?.expectsReply ? { expectsReply: true } : undefined,
-					);
+					const receipt = await transport.send(message, opts?.expectsReply ? { expectsReply: true } : undefined);
 					// Relay a successful outbound send to the root UI — symmetric with local agent↔agent
 					// delivery (§#deliverToLocalRef) and inbound remote→local (deliverInbound). Otherwise a
 					// bridged run shows replies FROM remote peers but not the local subagent→remote messages
@@ -203,7 +205,7 @@ export class IrcBus {
 			return {
 				to: message.to,
 				outcome: "failed",
-				error: `Remote agent "${message.to}" is unreachable — no transport installed.`,
+				error: `Remote agent "${message.to}" is unreachable — its transport is not installed.`,
 			};
 		}
 		if (!ref) {

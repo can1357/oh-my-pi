@@ -354,27 +354,29 @@ describe("extension provider registration rollback", () => {
 			// The half-installed transport must not survive: a leaf session must
 			// not observe hasRemoteTransport() or route registry-miss sends out
 			// through an extension that never finished loading.
-			expect(IrcBus.global().getRemoteTransport()).toBeUndefined();
 			expect(IrcBus.global().hasRemoteTransport()).toBe(false);
 		} finally {
 			IrcBus.resetGlobalForTests();
 		}
 	});
 
-	test("restores an earlier extension's transport when a later extension fails to load", async () => {
+	test("a failed load's transport rollback leaves an earlier load's transport intact", async () => {
+		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
 		try {
 			const runtime = new ExtensionRuntime();
 			const events = new EventBus();
-			const first: RemoteTransport = {
-				async send(message) {
-					return { to: message.to, outcome: "injected" };
-				},
-			};
-
+			const seenFirst: string[] = [];
+			// Load #1 installs its transport and registers a peer routed through it.
 			await loadExtensionFromFactory(
 				pi => {
-					pi.irc.setRemoteTransport?.(first);
+					pi.irc.setRemoteTransport?.({
+						async send(message) {
+							seenFirst.push(message.to);
+							return { to: message.to, outcome: "injected" };
+						},
+					});
+					pi.irc.registerRemotePeer?.({ id: "alice", displayName: "alice" });
 				},
 				process.cwd(),
 				events,
@@ -382,6 +384,7 @@ describe("extension provider registration rollback", () => {
 				"first-transport-extension",
 			);
 
+			// Load #2 installs its own transport, then throws.
 			await expect(
 				loadExtensionFromFactory(
 					pi => {
@@ -399,11 +402,14 @@ describe("extension provider registration rollback", () => {
 				),
 			).rejects.toThrow("second extension failed");
 
-			// Rollback restores the checkpoint (the first extension's transport),
-			// not a blanket clear — the surviving extension keeps routing.
-			expect(IrcBus.global().getRemoteTransport()).toBe(first);
+			// Load #2's transport entry is rolled back, but load #1's is owner-scoped and untouched:
+			// its peer still routes through it.
+			const receipt = await IrcBus.global().send({ from: "Main", to: "alice", body: "hi" });
+			expect(receipt.outcome).toBe("injected");
+			expect(seenFirst).toEqual(["alice"]);
 		} finally {
 			IrcBus.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
 		}
 	});
 

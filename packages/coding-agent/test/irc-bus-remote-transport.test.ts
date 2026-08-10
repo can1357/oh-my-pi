@@ -13,6 +13,8 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 
+const OWNER = "ext:test";
+
 function recordingTransport(outcome: "injected" | "failed" = "injected"): {
 	transport: RemoteTransport;
 	seen: IrcMessage[];
@@ -46,7 +48,7 @@ describe("IrcBus RemoteTransport seam", () => {
 	it("does NOT fire the transport on a bare !ref miss — fails locally even with a transport installed", async () => {
 		const bus = new IrcBus(AgentRegistry.global());
 		const { transport, seen } = recordingTransport("injected");
-		bus.setRemoteTransport(transport);
+		bus.setRemoteTransport(OWNER, transport);
 
 		// No registered `remote` ref for this id: a bare miss is a genuine unknown recipient and must
 		// NOT leave the process, even though a transport is installed (multi-top-level-session leak guard).
@@ -62,7 +64,7 @@ describe("IrcBus RemoteTransport seam", () => {
 		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "idle" });
 		const bus = new IrcBus(registry);
 		const { transport, seen } = recordingTransport();
-		bus.setRemoteTransport(transport);
+		bus.setRemoteTransport(OWNER, transport);
 
 		// A pending waiter satisfies delivery in-process without a session or the transport.
 		const reply = bus.wait("Main", { from: "peer" }, 1000);
@@ -78,7 +80,7 @@ describe("IrcBus RemoteTransport seam", () => {
 		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "aborted" });
 		const bus = new IrcBus(registry);
 		const { transport, seen } = recordingTransport();
-		bus.setRemoteTransport(transport);
+		bus.setRemoteTransport(OWNER, transport);
 
 		const receipt = await bus.send({ from: "peer", to: "Main", body: "hi" });
 
@@ -96,11 +98,18 @@ describe("IrcBus RemoteTransport seam", () => {
 
 	it("setRemoteTransport(undefined) clears the seam — a registered remote proxy becomes unreachable", async () => {
 		const registry = AgentRegistry.global();
-		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
+		registry.register({
+			id: "beatrice",
+			displayName: "beatrice",
+			kind: "remote",
+			session: null,
+			status: "running",
+			ownerToken: OWNER,
+		});
 		const bus = new IrcBus(registry);
 		const { transport, seen } = recordingTransport();
-		bus.setRemoteTransport(transport);
-		bus.setRemoteTransport(undefined);
+		bus.setRemoteTransport(OWNER, transport);
+		bus.setRemoteTransport(OWNER, undefined);
 
 		const receipt = await bus.send({ from: "Main", to: "beatrice", body: "hi" });
 		expect(receipt.outcome).toBe("failed");
@@ -110,10 +119,17 @@ describe("IrcBus RemoteTransport seam", () => {
 
 	it("routes a `remote`-kind proxy ref to the transport (murmur-q00p), with the native id already minted", async () => {
 		const registry = AgentRegistry.global();
-		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
+		registry.register({
+			id: "beatrice",
+			displayName: "beatrice",
+			kind: "remote",
+			session: null,
+			status: "running",
+			ownerToken: OWNER,
+		});
 		const bus = new IrcBus(registry);
 		const { transport, seen } = recordingTransport("injected");
-		bus.setRemoteTransport(transport);
+		bus.setRemoteTransport(OWNER, transport);
 
 		const receipt = await bus.send({ from: "Main", to: "beatrice", body: "hi remote", replyTo: "r1" });
 
@@ -131,10 +147,17 @@ describe("IrcBus RemoteTransport seam", () => {
 
 	it("does NOT forward an `aborted` remote proxy to the transport — fails like a local aborted agent (Codex)", async () => {
 		const registry = AgentRegistry.global();
-		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "aborted" });
+		registry.register({
+			id: "beatrice",
+			displayName: "beatrice",
+			kind: "remote",
+			session: null,
+			status: "aborted",
+			ownerToken: OWNER,
+		});
 		const bus = new IrcBus(registry);
 		const { transport, seen } = recordingTransport("injected");
-		bus.setRemoteTransport(transport);
+		bus.setRemoteTransport(OWNER, transport);
 
 		const receipt = await bus.send({ from: "Main", to: "beatrice", body: "hi remote" });
 
@@ -145,10 +168,17 @@ describe("IrcBus RemoteTransport seam", () => {
 
 	it("forwards expectsReply to the transport on an awaited remote send (Codex)", async () => {
 		const registry = AgentRegistry.global();
-		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
+		registry.register({
+			id: "beatrice",
+			displayName: "beatrice",
+			kind: "remote",
+			session: null,
+			status: "running",
+			ownerToken: OWNER,
+		});
 		const bus = new IrcBus(registry);
 		const { transport, seenOpts } = recordingTransport("injected");
-		bus.setRemoteTransport(transport);
+		bus.setRemoteTransport(OWNER, transport);
 
 		await bus.send({ from: "Main", to: "beatrice", body: "await me" }, { expectsReply: true });
 		expect(seenOpts).toHaveLength(1);
@@ -162,7 +192,14 @@ describe("IrcBus RemoteTransport seam", () => {
 	it("a wait for an idle remote peer is NOT aborted by the liveness gate (band-aid; can1357/oh-my-pi#7503)", async () => {
 		const registry = AgentRegistry.global();
 		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "running" });
-		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "idle" });
+		registry.register({
+			id: "beatrice",
+			displayName: "beatrice",
+			kind: "remote",
+			session: null,
+			status: "idle",
+			ownerToken: OWNER,
+		});
 		const bus = new IrcBus(registry);
 
 		// An idle remote is alive and can deliver inbound → the wait must block (not abort), then resolve.
@@ -177,9 +214,16 @@ describe("IrcBus RemoteTransport seam", () => {
 
 	it("surfaces a transport rejection as a failed receipt instead of throwing (Codex: no whole hub-call exception)", async () => {
 		const registry = AgentRegistry.global();
-		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
+		registry.register({
+			id: "beatrice",
+			displayName: "beatrice",
+			kind: "remote",
+			session: null,
+			status: "running",
+			ownerToken: OWNER,
+		});
 		const bus = new IrcBus(registry);
-		bus.setRemoteTransport({
+		bus.setRemoteTransport(OWNER, {
 			async send() {
 				throw new Error("proxy unreachable");
 			},
@@ -194,10 +238,17 @@ describe("IrcBus RemoteTransport seam", () => {
 
 	it("deliverInbound rejects a `remote`-kind target and never bounces to the transport", async () => {
 		const registry = AgentRegistry.global();
-		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
+		registry.register({
+			id: "beatrice",
+			displayName: "beatrice",
+			kind: "remote",
+			session: null,
+			status: "running",
+			ownerToken: OWNER,
+		});
 		const bus = new IrcBus(registry);
 		const { transport, seen } = recordingTransport("injected");
-		bus.setRemoteTransport(transport);
+		bus.setRemoteTransport(OWNER, transport);
 
 		const { receipt } = await bus.deliverInbound({ from: "peer", to: "beatrice", body: "hi" });
 
@@ -217,7 +268,7 @@ describe("IrcBus RemoteTransport seam", () => {
 		});
 		const bus = new IrcBus(registry);
 		const { transport, seen } = recordingTransport();
-		bus.setRemoteTransport(transport);
+		bus.setRemoteTransport(OWNER, transport);
 
 		// A message that arrived FROM murmur (inbound) delivers to the local waiter in-process and
 		// must NOT bounce back onto the bus — the inbound-never-re-forwarded invariant (contract §8).
@@ -252,7 +303,7 @@ describe("IrcBus RemoteTransport seam", () => {
 		});
 		const bus = new IrcBus(registry);
 		const { transport, seen } = recordingTransport();
-		bus.setRemoteTransport(transport);
+		bus.setRemoteTransport(OWNER, transport);
 
 		const reply = bus.wait("worker", { from: "alice" }, 1000);
 		const { receipt } = await bus.deliverInbound({ from: "alice", to: "worker", body: "hi worker" });
@@ -273,9 +324,16 @@ describe("IrcBus RemoteTransport seam", () => {
 			session: { emitIrcRelayObservation: () => relayed.push(1) } as unknown as AgentSession,
 			status: "running",
 		});
-		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
+		registry.register({
+			id: "beatrice",
+			displayName: "beatrice",
+			kind: "remote",
+			session: null,
+			status: "running",
+			ownerToken: OWNER,
+		});
 		const bus = new IrcBus(registry);
-		bus.setRemoteTransport(recordingTransport("injected").transport);
+		bus.setRemoteTransport(OWNER, recordingTransport("injected").transport);
 
 		// A subagent → remote send is mirrored to the root UI (neither endpoint is Main) — otherwise the
 		// root sees replies from remote peers but not the outbound messages that prompted them.
@@ -301,13 +359,68 @@ describe("IrcBus RemoteTransport seam", () => {
 			session: { emitIrcRelayObservation: () => relayed.push(1) } as unknown as AgentSession,
 			status: "running",
 		});
-		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
+		registry.register({
+			id: "beatrice",
+			displayName: "beatrice",
+			kind: "remote",
+			session: null,
+			status: "running",
+			ownerToken: OWNER,
+		});
 		const bus = new IrcBus(registry);
-		bus.setRemoteTransport(recordingTransport("failed").transport);
+		bus.setRemoteTransport(OWNER, recordingTransport("failed").transport);
 
 		const receipt = await bus.send({ from: "worker", to: "beatrice", body: "will fail" });
 		expect(receipt.outcome).toBe("failed");
 		expect(relayed).toHaveLength(0);
+	});
+
+	it("routes each remote proxy through ITS OWNER's transport, not another owner's (Codex)", async () => {
+		const registry = AgentRegistry.global();
+		// Two bridges to different rosters coexist in one process.
+		registry.register({
+			id: "alice",
+			displayName: "alice",
+			kind: "remote",
+			session: null,
+			status: "running",
+			ownerToken: "ext-a",
+		});
+		registry.register({
+			id: "bob",
+			displayName: "bob",
+			kind: "remote",
+			session: null,
+			status: "running",
+			ownerToken: "ext-b",
+		});
+		const bus = new IrcBus(registry);
+		const seenA: string[] = [];
+		const seenB: string[] = [];
+		bus.setRemoteTransport("ext-a", {
+			async send(m) {
+				seenA.push(m.to);
+				return { to: m.to, outcome: "injected" };
+			},
+		});
+		bus.setRemoteTransport("ext-b", {
+			async send(m) {
+				seenB.push(m.to);
+				return { to: m.to, outcome: "injected" };
+			},
+		});
+
+		await bus.send({ from: "Main", to: "alice", body: "to A's roster" });
+		await bus.send({ from: "Main", to: "bob", body: "to B's roster" });
+		expect(seenA).toEqual(["alice"]);
+		expect(seenB).toEqual(["bob"]);
+
+		// Clearing one owner's transport leaves the other's intact.
+		bus.setRemoteTransport("ext-a", undefined);
+		const receipt = await bus.send({ from: "Main", to: "alice", body: "now unreachable" });
+		expect(receipt.outcome).toBe("failed");
+		expect(receipt.error).toMatch(/unreachable/);
+		expect((await bus.send({ from: "Main", to: "bob", body: "still ok" })).outcome).toBe("injected");
 	});
 });
 

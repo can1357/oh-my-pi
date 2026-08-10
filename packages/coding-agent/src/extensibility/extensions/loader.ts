@@ -186,7 +186,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly zod = zod;
 	readonly irc: IrcApi = {
 		deliverInbound: (msg, opts) => IrcBus.global().deliverInbound(msg, opts),
-		setRemoteTransport: transport => IrcBus.global().setRemoteTransport(transport),
+		setRemoteTransport: transport => IrcBus.global().setRemoteTransport(this.ownerToken, transport),
 		registerRemotePeer: peer => {
 			// MAIN_AGENT_ID is the reserved local-root id; a top-level session registers it AFTER
 			// extensions load (sdk.ts), so it is absent from the registry at bridge-load time — the
@@ -428,7 +428,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 /**
  * Runs an extension factory with rollback of process-global state the factory may have mutated
  * before throwing. Restores the complete provider-registration queue (an extension may unregister
- * entries queued by an earlier extension), the {@link IrcBus} remote transport, and any `remote`
+ * entries queued by an earlier extension), this load's {@link IrcBus} remote transport, and any `remote`
  * proxy refs the factory registered via `pi.irc.registerRemotePeer` (attributed by the per-load
  * `ownerToken`). So a factory that installs a transport / seeds remote peers and then throws leaves
  * no stale transport and no orphaned proxies — and, because the token is per LOAD not per source
@@ -442,7 +442,6 @@ async function runExtensionFactory(
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
 	const bus = IrcBus.global();
-	const remoteTransportCheckpoint = bus.getRemoteTransport();
 
 	try {
 		await factory(api);
@@ -452,7 +451,8 @@ async function runExtensionFactory(
 			runtime.pendingProviderRegistrations.length,
 			...providerRegistrationCheckpoint,
 		);
-		bus.setRemoteTransport(remoteTransportCheckpoint);
+		// Drop this load's transport entry (owner-scoped, so other loads' transports are untouched).
+		bus.setRemoteTransport(ownerToken, undefined);
 		// Retract every ref THIS load registered, attributed by ownerToken — no orphaned `remote`
 		// proxies linger, and a sibling load of the same extension path is untouched (murmur-q00p).
 		const registry = AgentRegistry.global();
