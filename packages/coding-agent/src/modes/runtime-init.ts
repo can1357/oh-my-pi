@@ -112,6 +112,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			getServiceTiers: () => session.serviceTierByFamily,
 			setServiceTier: (family, tier) => session.setServiceTierFamily(family, tier),
 			getSessionName: () => session.sessionManager.getSessionName(),
+			getAgentId: () => session.getAgentId(),
 			setSessionName: async name => {
 				await session.sessionManager.setSessionName(name, "user");
 			},

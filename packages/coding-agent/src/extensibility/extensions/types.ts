@@ -1500,6 +1500,13 @@ export interface ExtensionAPI {
 	/** Set the session name. Persists to the session file. */
 	setSessionName(name: string): Promise<void>;
 
+	/**
+	 * The session's own agent id in the global registry — `"Main"` (or `acp:<sessionId>`) for a
+	 * top-level session, a subagent id otherwise. A session-scoped extension (e.g. an IRC bridge)
+	 * uses it to filter the global registry to the agents rooted at this session.
+	 */
+	getAgentId(): string | undefined;
+
 	// =========================================================================
 	// Provider Registration
 	// =========================================================================
@@ -1731,6 +1738,8 @@ export interface ExtensionActions {
 	getServiceTiers?: GetServiceTiersHandler;
 	setServiceTier?: SetServiceTierHandler;
 	getSessionName: () => string | undefined;
+	/** The session's own agent id in the registry (e.g. "Main", "acp:<sessionId>", or a subagent id). */
+	getAgentId: () => string | undefined;
 	setSessionName: (name: string) => Promise<void>;
 }
 

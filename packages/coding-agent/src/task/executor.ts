@@ -4015,6 +4015,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						getServiceTiers: () => session.serviceTierByFamily,
 						setServiceTier: (family, tier) => session.setServiceTierFamily(family, tier),
 						getSessionName: () => session.sessionManager.getSessionName(),
+						getAgentId: () => session.getAgentId(),
 						setSessionName: async name => {
 							await session.sessionManager.setSessionName(name, "user");
 						},
