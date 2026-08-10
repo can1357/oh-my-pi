@@ -18,7 +18,7 @@ import { type IrcMessage, type IrcDeliveryReceipt } from "@oh-my-pi/pi-tui/tools
 
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID, REMOTE_ID_PREFIX } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { CustomMessage } from "../session/messages";
@@ -34,6 +34,56 @@ import type { CustomMessage } from "../session/messages";
  */
 export interface RemoteTransport {
 	send(message: IrcMessage, opts?: { expectsReply?: boolean }): Promise<IrcDeliveryReceipt>;
+}
+
+/**
+ * The remote agent id scheme: a cross-process peer is addressed as `@<namespace>/<name>` — a
+ * globally-unique `namespace` (claimed by the installing extension) plus the peer's bare mesh
+ * `name`. Because a local agent id can never start with `@` ({@link REMOTE_ID_PREFIX}), the remote
+ * and local id spaces are disjoint and can never collide.
+ */
+const REMOTE_NAMESPACE_RE = /^[A-Za-z0-9._-]+$/;
+const REMOTE_NAME_RE = /^[^/\s]+$/;
+
+/** Whether `namespace` is a well-formed remote namespace (letters, digits, `.`, `_`, `-`). */
+export function isValidRemoteNamespace(namespace: string): boolean {
+	return REMOTE_NAMESPACE_RE.test(namespace);
+}
+
+/** Whether `name` is a well-formed bare remote peer name (no `/` separator, no whitespace). */
+export function isValidRemoteName(name: string): boolean {
+	return REMOTE_NAME_RE.test(name);
+}
+
+/**
+ * Compose a remote agent id `@<namespace>/<name>`. Throws on an invalid namespace/name so a
+ * malformed id can never enter the registry or routing.
+ */
+export function composeRemoteId(namespace: string, name: string): string {
+	if (!isValidRemoteNamespace(namespace)) {
+		throw new Error(
+			`Invalid remote namespace ${JSON.stringify(namespace)} (allowed: letters, digits, ".", "_", "-").`,
+		);
+	}
+	if (!isValidRemoteName(name)) {
+		throw new Error(`Invalid remote peer name ${JSON.stringify(name)} (no "/" or whitespace).`);
+	}
+	return `${REMOTE_ID_PREFIX}${namespace}/${name}`;
+}
+
+/** The namespace of a remote id `@<namespace>/<name>`, or undefined if `id` is not remote-prefixed. */
+export function remoteNamespaceOf(id: string): string | undefined {
+	if (!id.startsWith(REMOTE_ID_PREFIX)) return undefined;
+	const sep = id.indexOf("/", REMOTE_ID_PREFIX.length);
+	if (sep < REMOTE_ID_PREFIX.length + 1) return undefined;
+	return id.slice(REMOTE_ID_PREFIX.length, sep);
+}
+
+/** The bare mesh name of a remote id `@<namespace>/<name>`, or undefined if `id` is not remote. */
+export function remoteNameOf(id: string): string | undefined {
+	const namespace = remoteNamespaceOf(id);
+	if (namespace === undefined) return undefined;
+	return id.slice(REMOTE_ID_PREFIX.length + namespace.length + 1);
 }
 
 interface IrcWaiter {
