@@ -28,7 +28,7 @@ import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
 import { IrcBus } from "../../irc/bus";
-import { AgentRegistry } from "../../registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -188,6 +188,13 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		deliverInbound: (msg, opts) => IrcBus.global().deliverInbound(msg, opts),
 		setRemoteTransport: transport => IrcBus.global().setRemoteTransport(transport),
 		registerRemotePeer: peer => {
+			// MAIN_AGENT_ID is the reserved local-root id; a top-level session registers it AFTER
+			// extensions load (sdk.ts), so it is absent from the registry at bridge-load time — the
+			// presence check below can't catch it. A remote peer can never be the local root, so reject
+			// it outright; otherwise the accepted proxy is silently overwritten by the later local `Main`
+			// registration, leaving the remote root unaddressable though the bridge believed it
+			// registered (can1357/oh-my-pi#7401 review).
+			if (peer.id === MAIN_AGENT_ID) return false;
 			const registry = AgentRegistry.global();
 			const existing = registry.get(peer.id);
 			// Never clobber a live local agent or another load's proxy: overwriting would turn a real
