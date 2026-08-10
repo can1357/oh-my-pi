@@ -188,10 +188,19 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		deliverInbound: (msg, opts) => IrcBus.global().deliverInbound(msg, opts),
 		setRemoteTransport: transport => IrcBus.global().setRemoteTransport(transport),
 		registerRemotePeer: peer => {
+			const registry = AgentRegistry.global();
+			const existing = registry.get(peer.id);
+			// Never clobber a live local agent or another extension's proxy: overwriting would turn a
+			// real session into a session-less `remote` ref (and a later factory-failure rollback would
+			// then delete it outright, killing hub/history/inbound for the real agent). Only (re)register
+			// when the id is free or already our own remote proxy (can1357/oh-my-pi#7401 review).
+			if (existing && !(existing.kind === "remote" && existing.extensionId === this.extension.path)) {
+				return false;
+			}
 			// Attribute the proxy to this extension (mirrors provider `sourceId`) so a failed load or
 			// the extension's own teardown can retract exactly its refs. `this.extension` is deref'd
 			// lazily at call time (well after construction), so the field-initializer order is safe.
-			AgentRegistry.global().register({
+			registry.register({
 				id: peer.id,
 				displayName: peer.displayName ?? peer.id,
 				kind: "remote",
@@ -200,6 +209,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 				status: peer.status,
 				extensionId: this.extension.path,
 			});
+			return true;
 		},
 		unregisterRemotePeer: id => {
 			const registry = AgentRegistry.global();

@@ -11,6 +11,7 @@ import type { IrcApi } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
 async function captureIrc(): Promise<IrcApi> {
@@ -114,5 +115,41 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 
 		expect(irc.unregisterRemotePeer?.("mine")).toBe(true);
 		expect(AgentRegistry.global().get("mine")).toBeUndefined();
+	});
+
+	it("registerRemotePeer never clobbers a live local agent or another extension's proxy", async () => {
+		const registry = AgentRegistry.global();
+		// A live local main session and a proxy owned by a different extension.
+		registry.register({
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			session: {} as unknown as AgentSession,
+			status: "running",
+		});
+		registry.register({
+			id: "foreign",
+			displayName: "foreign",
+			kind: "remote",
+			session: null,
+			status: "running",
+			extensionId: "other-ext",
+		});
+		const irc = await captureIrc();
+
+		// Colliding with a live local agent is refused — the real ref is untouched.
+		expect(irc.registerRemotePeer?.({ id: "Main", displayName: "spoof" })).toBe(false);
+		expect(registry.get("Main")?.kind).toBe("main");
+		expect(registry.get("Main")?.session).not.toBeNull();
+
+		// Colliding with another extension's proxy is refused too.
+		expect(irc.registerRemotePeer?.({ id: "foreign" })).toBe(false);
+		expect(registry.get("foreign")?.extensionId).toBe("other-ext");
+
+		// A free id registers; re-registering our own proxy updates it (still ours).
+		expect(irc.registerRemotePeer?.({ id: "beatrice", displayName: "beatrice" })).toBe(true);
+		expect(irc.registerRemotePeer?.({ id: "beatrice", displayName: "beatrice", status: "idle" })).toBe(true);
+		expect(registry.get("beatrice")?.status).toBe("idle");
+		expect(registry.get("beatrice")?.extensionId).toBe("<inline>");
 	});
 });

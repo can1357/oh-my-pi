@@ -1207,9 +1207,12 @@ export interface IrcApi {
 	 * Register a cross-process `remote` proxy peer (the murmur bridge imports mesh agents this way),
 	 * attributed to the calling extension so a failed load or the extension's own teardown can roll it
 	 * back (can1357/oh-my-pi#7401). `kind` is forced to `remote` and `session` to `null`; a send
-	 * addressed to this id is then handed to the installed transport. OPTIONAL: outbound-seam builds only.
+	 * addressed to this id is then handed to the installed transport. Returns `false` (a no-op) when the
+	 * id already belongs to a live local agent or another extension's proxy — it never clobbers an
+	 * existing ref; only a free id or this extension's own remote proxy is (re)registered. OPTIONAL:
+	 * outbound-seam builds only.
 	 */
-	registerRemotePeer?(peer: { id: string; displayName?: string; status?: AgentStatus; parentId?: string }): void;
+	registerRemotePeer?(peer: { id: string; displayName?: string; status?: AgentStatus; parentId?: string }): boolean;
 
 	/**
 	 * Retract a `remote` proxy peer previously registered by THIS extension (ownership-checked, so one

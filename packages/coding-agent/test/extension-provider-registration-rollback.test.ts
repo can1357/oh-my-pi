@@ -454,4 +454,39 @@ describe("extension provider registration rollback", () => {
 			AgentRegistry.resetGlobalForTests();
 		}
 	});
+
+	test("a failed factory does not remove a colliding local ref it could not overwrite", async () => {
+		AgentRegistry.resetGlobalForTests();
+		try {
+			const runtime = new ExtensionRuntime();
+			const events = new EventBus();
+			// A local agent already occupies "Main" before the bridge loads.
+			AgentRegistry.global().register({
+				id: "Main",
+				displayName: "Main",
+				kind: "main",
+				session: null,
+				status: "running",
+			});
+
+			await expect(
+				loadExtensionFromFactory(
+					pi => {
+						// Colliding with the local agent is refused (no-op), so it is never stamped…
+						expect(pi.irc.registerRemotePeer?.({ id: "Main", displayName: "spoof" })).toBe(false);
+						throw new Error("boom");
+					},
+					process.cwd(),
+					events,
+					runtime,
+					"clumsy-bridge",
+				),
+			).rejects.toThrow("boom");
+
+			// …so the attributed rollback leaves the real local agent intact.
+			expect(AgentRegistry.global().get("Main")?.kind).toBe("main");
+		} finally {
+			AgentRegistry.resetGlobalForTests();
+		}
+	});
 });
