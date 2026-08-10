@@ -8,10 +8,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import type { IrcApi } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { IrcBus, type RemoteTransport } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
 async function captureIrc(): Promise<IrcApi> {
@@ -26,6 +25,16 @@ async function captureIrc(): Promise<IrcApi> {
 	);
 	if (!irc) throw new Error("pi.irc was not exposed to the extension");
 	return irc;
+}
+
+/** A transport that records the delivered id + bare toName and reports success. */
+function injectingTransport(onSend?: (to: string, toName: string | undefined) => void): RemoteTransport {
+	return {
+		async send(message, opts) {
+			onSend?.(message.to, opts?.toName);
+			return { to: message.to, outcome: "injected" };
+		},
+	};
 }
 
 describe("pi.irc (ExtensionAPI inbound surface)", () => {
@@ -56,45 +65,63 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		expect(receipt.outcome).not.toBe("failed");
 	});
 
-	it("exposes setRemoteTransport and installs it on the global bus (a registered remote ref routes to it)", async () => {
+	it("claims a namespace via setRemoteTransport; a registered peer routes to the transport with its bare name", async () => {
 		const irc = await captureIrc();
 		expect(typeof irc.setRemoteTransport).toBe("function");
-		irc.registerRemotePeer?.({ id: "remote-peer", displayName: "remote-peer" });
 		let seen: string | undefined;
-		irc.setRemoteTransport?.("cluster-a", {
-			async send(message) {
-				seen = message.to;
-				return { to: message.to, outcome: "injected" };
-			},
-		});
-		const receipt = await IrcBus.global().send({ from: "Main", to: "remote-peer", body: "hi" });
-		expect(seen).toBe("remote-peer");
+		let seenToName: string | undefined;
+		irc.setRemoteTransport?.(
+			"cluster-a",
+			injectingTransport((to, toName) => {
+				seen = to;
+				seenToName = toName;
+			}),
+		);
+		const id = irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
+		expect(id).toBe("@cluster-a/beatrice");
+		const receipt = await IrcBus.global().send({ from: "Main", to: "@cluster-a/beatrice", body: "hi" });
 		expect(receipt.outcome).toBe("injected");
+		expect(seen).toBe("@cluster-a/beatrice");
+		expect(seenToName).toBe("beatrice");
 	});
 
-	it("registerRemotePeer seeds a `remote` ref attributed to the extension, addressable via the transport", async () => {
+	it("registerRemotePeer seeds a `remote` ref at @ns/name attributed to the extension", async () => {
 		const irc = await captureIrc();
-		irc.registerRemotePeer?.({ id: "beatrice", displayName: "beatrice" });
-		const ref = AgentRegistry.global().get("beatrice");
+		irc.setRemoteTransport?.("cluster-a", injectingTransport());
+		const id = irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
+		expect(id).toBe("@cluster-a/beatrice");
+		const ref = AgentRegistry.global().get("@cluster-a/beatrice");
 		expect(ref?.kind).toBe("remote");
+		expect(ref?.displayName).toBe("beatrice");
 		expect(ref?.ownerToken?.startsWith("<inline>:")).toBe(true);
-
-		let seen: string | undefined;
-		irc.setRemoteTransport?.("cluster-a", {
-			async send(message) {
-				seen = message.to;
-				return { to: message.to, outcome: "injected" };
-			},
-		});
-		const receipt = await IrcBus.global().send({ from: "Main", to: "beatrice", body: "hi" });
-		expect(seen).toBe("beatrice");
-		expect(receipt.outcome).toBe("injected");
 	});
 
-	it("unregisterRemotePeer retracts only the caller's own remote proxies", async () => {
-		// A proxy owned by a different extension must not be retractable.
+	it("registerRemotePeer returns undefined before a namespace is claimed", async () => {
+		const irc = await captureIrc();
+		expect(irc.registerRemotePeer?.({ name: "beatrice" })).toBeUndefined();
+		expect(
+			AgentRegistry.global()
+				.list()
+				.some(ref => ref.kind === "remote"),
+		).toBe(false);
+	});
+
+	it("registerRemotePeer returns undefined for an invalid bare name", async () => {
+		const irc = await captureIrc();
+		irc.setRemoteTransport?.("cluster-a", injectingTransport());
+		expect(irc.registerRemotePeer?.({ name: "a/b" })).toBeUndefined(); // "/" is the @ns/name separator
+		expect(irc.registerRemotePeer?.({ name: "has space" })).toBeUndefined();
+		expect(
+			AgentRegistry.global()
+				.list()
+				.some(ref => ref.kind === "remote"),
+		).toBe(false);
+	});
+
+	it("unregisterRemotePeer retracts only the caller's own proxies (by composed id or bare name)", async () => {
+		// A proxy owned by a different extension (a different namespace) must not be retractable.
 		AgentRegistry.global().register({
-			id: "foreign",
+			id: "@other/foreign",
 			displayName: "foreign",
 			kind: "remote",
 			session: null,
@@ -102,59 +129,28 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 			ownerToken: "other-ext",
 		});
 		const irc = await captureIrc();
-		irc.registerRemotePeer?.({ id: "mine", displayName: "mine" });
+		irc.setRemoteTransport?.("cluster-a", injectingTransport());
+		irc.registerRemotePeer?.({ name: "mine" });
 
-		expect(irc.unregisterRemotePeer?.("foreign")).toBe(false);
-		expect(AgentRegistry.global().get("foreign")).toBeDefined();
+		// Ownership-checked: cannot retract a foreign proxy.
+		expect(irc.unregisterRemotePeer?.("@other/foreign")).toBe(false);
+		expect(AgentRegistry.global().get("@other/foreign")).toBeDefined();
 
+		// Retract by bare name (composed against the claimed namespace)...
 		expect(irc.unregisterRemotePeer?.("mine")).toBe(true);
-		expect(AgentRegistry.global().get("mine")).toBeUndefined();
+		expect(AgentRegistry.global().get("@cluster-a/mine")).toBeUndefined();
+
+		// ...or by the composed id.
+		irc.registerRemotePeer?.({ name: "again" });
+		expect(irc.unregisterRemotePeer?.("@cluster-a/again")).toBe(true);
+		expect(AgentRegistry.global().get("@cluster-a/again")).toBeUndefined();
 	});
 
-	it("registerRemotePeer never clobbers a live local agent or another extension's proxy", async () => {
-		const registry = AgentRegistry.global();
-		// A live local main session and a proxy owned by a different extension.
-		registry.register({
-			id: "Main",
-			displayName: "Main",
-			kind: "main",
-			session: {} as unknown as AgentSession,
-			status: "running",
-		});
-		registry.register({
-			id: "foreign",
-			displayName: "foreign",
-			kind: "remote",
-			session: null,
-			status: "running",
-			ownerToken: "other-ext",
-		});
+	it("setRemoteTransport rejects a second, different namespace from the same extension load", async () => {
 		const irc = await captureIrc();
-
-		// Colliding with a live local agent is refused — the real ref is untouched.
-		expect(irc.registerRemotePeer?.({ id: "Main", displayName: "spoof" })).toBe(false);
-		expect(registry.get("Main")?.kind).toBe("main");
-		expect(registry.get("Main")?.session).not.toBeNull();
-
-		// Colliding with another extension's proxy is refused too.
-		expect(irc.registerRemotePeer?.({ id: "foreign" })).toBe(false);
-		expect(registry.get("foreign")?.ownerToken).toBe("other-ext");
-
-		// A free id registers; re-registering our own proxy updates it (still ours).
-		expect(irc.registerRemotePeer?.({ id: "beatrice", displayName: "beatrice" })).toBe(true);
-		expect(irc.registerRemotePeer?.({ id: "beatrice", displayName: "beatrice", status: "idle" })).toBe(true);
-		expect(registry.get("beatrice")?.status).toBe("idle");
-		expect(registry.get("beatrice")?.ownerToken?.startsWith("<inline>:")).toBe(true);
-	});
-
-	it("registerRemotePeer refuses the reserved ids (local root `Main`, broadcast `all`)", async () => {
-		// createAgentSession registers the local Main AFTER extensions load, so the registry is empty
-		// here — the reservation (not a presence check) is what stops the accepted proxy being silently
-		// overwritten by the later local Main registration. `all` is the broadcast pseudo-recipient.
-		const irc = await captureIrc();
-		expect(irc.registerRemotePeer?.({ id: "Main", displayName: "remote-root" })).toBe(false);
-		expect(AgentRegistry.global().get("Main")).toBeUndefined();
-		expect(irc.registerRemotePeer?.({ id: "all", displayName: "everyone" })).toBe(false);
-		expect(AgentRegistry.global().get("all")).toBeUndefined();
+		irc.setRemoteTransport?.("cluster-a", injectingTransport());
+		expect(() => irc.setRemoteTransport?.("cluster-b", injectingTransport())).toThrow(/single namespace/);
+		// Re-using the SAME namespace is fine (reinstall after a reconnect).
+		expect(() => irc.setRemoteTransport?.("cluster-a", injectingTransport())).not.toThrow();
 	});
 });

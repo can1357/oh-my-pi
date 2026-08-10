@@ -1205,21 +1205,23 @@ export interface IrcApi {
 	setRemoteTransport?(namespace: string, transport: RemoteTransport | undefined): void;
 
 	/**
-	 * Register a cross-process `remote` proxy peer (the murmur bridge imports mesh agents this way),
-	 * attributed to the calling extension so a failed load or the extension's own teardown can roll it
-	 * back (can1357/oh-my-pi#7401). `kind` is forced to `remote` and `session` to `null`; a send
-	 * addressed to this id is then handed to the installed transport. Returns `false` (a no-op) when the
-	 * id already belongs to a live local agent or another extension's proxy — it never clobbers an
-	 * existing ref; only a free id or this extension's own remote proxy is (re)registered. OPTIONAL:
+	 * Register a cross-process `remote` proxy peer at `@<namespace>/<name>`, using the namespace this
+	 * extension claimed via {@link IrcApi.setRemoteTransport} (call that first, else this returns
+	 * `undefined`). The bare `name` is composed into the id; `kind` is forced to `remote` and `session`
+	 * to `null`. Returns the composed `@ns/name` id (the caller can address it) or `undefined` on an
+	 * invalid name / no claimed namespace. Attributed to this load so a failed load or the extension's
+	 * own teardown rolls it back. Remote ids are disjoint from local ids and from other extensions'
+	 * namespaces, so registration is collision-free — no reserved-id or clobber guards. OPTIONAL:
 	 * outbound-seam builds only.
 	 */
-	registerRemotePeer?(peer: { id: string; displayName?: string; status?: AgentStatus; parentId?: string }): boolean;
+	registerRemotePeer?(peer: { name: string; displayName?: string; status?: AgentStatus }): string | undefined;
 
 	/**
 	 * Retract a `remote` proxy peer previously registered by THIS extension (ownership-checked, so one
-	 * extension cannot evict another's peers). OPTIONAL: outbound-seam builds only.
+	 * extension cannot evict another's peers). Accepts either the composed `@ns/name` id or the bare
+	 * `name` (composed against the claimed namespace). OPTIONAL: outbound-seam builds only.
 	 */
-	unregisterRemotePeer?(id: string): boolean;
+	unregisterRemotePeer?(idOrName: string): boolean;
 }
 
 /**

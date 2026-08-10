@@ -372,12 +372,12 @@ describe("extension provider registration rollback", () => {
 			await loadExtensionFromFactory(
 				pi => {
 					pi.irc.setRemoteTransport?.("cluster-a", {
-						async send(message) {
-							seenFirst.push(message.to);
+						async send(message, opts) {
+							seenFirst.push(opts?.toName ?? message.to);
 							return { to: message.to, outcome: "injected" };
 						},
 					});
-					pi.irc.registerRemotePeer?.({ id: "alice", displayName: "alice" });
+					pi.irc.registerRemotePeer?.({ name: "alice", displayName: "alice" });
 				},
 				process.cwd(),
 				events,
@@ -405,7 +405,7 @@ describe("extension provider registration rollback", () => {
 
 			// Load #2's transport entry is rolled back, but load #1's is owner-scoped and untouched:
 			// its peer still routes through it.
-			const receipt = await IrcBus.global().send({ from: "Main", to: "alice", body: "hi" });
+			const receipt = await IrcBus.global().send({ from: "Main", to: "@cluster-a/alice", body: "hi" });
 			expect(receipt.outcome).toBe("injected");
 			expect(seenFirst).toEqual(["alice"]);
 		} finally {
@@ -416,28 +416,36 @@ describe("extension provider registration rollback", () => {
 
 	test("keeps a remote proxy registered by an extension that loads successfully", async () => {
 		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
 		try {
 			const runtime = new ExtensionRuntime();
 			const events = new EventBus();
 			await loadExtensionFromFactory(
 				pi => {
-					pi.irc.registerRemotePeer?.({ id: "beatrice", displayName: "beatrice" });
+					pi.irc.setRemoteTransport?.("cluster-a", {
+						async send(message) {
+							return { to: message.to, outcome: "injected" };
+						},
+					});
+					pi.irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
 				},
 				process.cwd(),
 				events,
 				runtime,
 				"ok-bridge-extension",
 			);
-			const ref = AgentRegistry.global().get("beatrice");
+			const ref = AgentRegistry.global().get("@cluster-a/beatrice");
 			expect(ref?.kind).toBe("remote");
 			expect(ref?.ownerToken?.startsWith("ok-bridge-extension:")).toBe(true);
 		} finally {
 			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
 		}
 	});
 
 	test("retracts remote proxies registered by an extension that then fails to load", async () => {
 		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
 		try {
 			const runtime = new ExtensionRuntime();
 			const events = new EventBus();
@@ -445,7 +453,12 @@ describe("extension provider registration rollback", () => {
 			await expect(
 				loadExtensionFromFactory(
 					pi => {
-						pi.irc.registerRemotePeer?.({ id: "beatrice", displayName: "beatrice" });
+						pi.irc.setRemoteTransport?.("cluster-a", {
+							async send(message) {
+								return { to: message.to, outcome: "injected" };
+							},
+						});
+						pi.irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
 						throw new Error("failed after seeding remote peer");
 					},
 					process.cwd(),
@@ -456,18 +469,20 @@ describe("extension provider registration rollback", () => {
 			).rejects.toThrow("failed after seeding remote peer");
 
 			// The orphaned proxy must not survive a failed load — attributed rollback by ownerToken.
-			expect(AgentRegistry.global().get("beatrice")).toBeUndefined();
+			expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
 		} finally {
 			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
 		}
 	});
 
-	test("a failed factory does not remove a colliding local ref it could not overwrite", async () => {
+	test("a failed bridge load's attributed rollback leaves a live local agent intact", async () => {
 		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
 		try {
 			const runtime = new ExtensionRuntime();
 			const events = new EventBus();
-			// A local agent already occupies "Main" before the bridge loads.
+			// A live local agent (no bridge ownerToken) exists before the bridge loads.
 			AgentRegistry.global().register({
 				id: "Main",
 				displayName: "Main",
@@ -479,8 +494,12 @@ describe("extension provider registration rollback", () => {
 			await expect(
 				loadExtensionFromFactory(
 					pi => {
-						// Colliding with the local agent is refused (no-op), so it is never stamped…
-						expect(pi.irc.registerRemotePeer?.({ id: "Main", displayName: "spoof" })).toBe(false);
+						pi.irc.setRemoteTransport?.("cluster-a", {
+							async send(message) {
+								return { to: message.to, outcome: "injected" };
+							},
+						});
+						pi.irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
 						throw new Error("boom");
 					},
 					process.cwd(),
@@ -490,35 +509,49 @@ describe("extension provider registration rollback", () => {
 				),
 			).rejects.toThrow("boom");
 
-			// …so the attributed rollback leaves the real local agent intact.
+			// Attributed rollback (by ownerToken) drops the bridge's own proxy but never the local agent
+			// — and a remote id `@cluster-a/beatrice` could never have collided with the local `Main`.
+			expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
 			expect(AgentRegistry.global().get("Main")?.kind).toBe("main");
 		} finally {
 			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
 		}
 	});
 
 	test("a failed load does not retract remote proxies from an earlier successful load of the same path", async () => {
 		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
 		try {
 			const runtime = new ExtensionRuntime();
 			const events = new EventBus();
 			// Load #1 of path P succeeds and seeds a proxy.
 			await loadExtensionFromFactory(
 				pi => {
-					pi.irc.registerRemotePeer?.({ id: "beatrice", displayName: "beatrice" });
+					pi.irc.setRemoteTransport?.("cluster-a", {
+						async send(message) {
+							return { to: message.to, outcome: "injected" };
+						},
+					});
+					pi.irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
 				},
 				process.cwd(),
 				events,
 				runtime,
 				"same/bridge.ts",
 			);
-			expect(AgentRegistry.global().get("beatrice")?.kind).toBe("remote");
+			expect(AgentRegistry.global().get("@cluster-a/beatrice")?.kind).toBe("remote");
 
 			// Load #2 of the SAME path fails after seeding its own proxy.
 			await expect(
 				loadExtensionFromFactory(
 					pi => {
-						pi.irc.registerRemotePeer?.({ id: "carol", displayName: "carol" });
+						pi.irc.setRemoteTransport?.("cluster-b", {
+							async send(message) {
+								return { to: message.to, outcome: "injected" };
+							},
+						});
+						pi.irc.registerRemotePeer?.({ name: "carol", displayName: "carol" });
 						throw new Error("boom");
 					},
 					process.cwd(),
@@ -529,10 +562,11 @@ describe("extension provider registration rollback", () => {
 			).rejects.toThrow("boom");
 
 			// Per-load ownerToken: load #2's proxy is retracted; load #1's survives untouched.
-			expect(AgentRegistry.global().get("carol")).toBeUndefined();
-			expect(AgentRegistry.global().get("beatrice")?.kind).toBe("remote");
+			expect(AgentRegistry.global().get("@cluster-b/carol")).toBeUndefined();
+			expect(AgentRegistry.global().get("@cluster-a/beatrice")?.kind).toBe("remote");
 		} finally {
 			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
 		}
 	});
 });
