@@ -55,7 +55,14 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		expect(receipt.outcome).not.toBe("failed");
 	});
 
-	it("exposes setRemoteTransport and installs it on the global bus (a registry miss routes to it)", async () => {
+	it("exposes setRemoteTransport and installs it on the global bus (a registered remote ref routes to it)", async () => {
+		AgentRegistry.global().register({
+			id: "remote-peer",
+			displayName: "remote-peer",
+			kind: "remote",
+			session: null,
+			status: "running",
+		});
 		const irc = await captureIrc();
 		expect(typeof irc.setRemoteTransport).toBe("function");
 		let seen: string | undefined;
