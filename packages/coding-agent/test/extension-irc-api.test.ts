@@ -83,7 +83,7 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		irc.registerRemotePeer?.({ id: "beatrice", displayName: "beatrice" });
 		const ref = AgentRegistry.global().get("beatrice");
 		expect(ref?.kind).toBe("remote");
-		expect(ref?.extensionId).toBe("<inline>");
+		expect(ref?.ownerToken?.startsWith("<inline>:")).toBe(true);
 
 		let seen: string | undefined;
 		irc.setRemoteTransport?.({
@@ -105,7 +105,7 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 			kind: "remote",
 			session: null,
 			status: "running",
-			extensionId: "other-ext",
+			ownerToken: "other-ext",
 		});
 		const irc = await captureIrc();
 		irc.registerRemotePeer?.({ id: "mine", displayName: "mine" });
@@ -133,7 +133,7 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 			kind: "remote",
 			session: null,
 			status: "running",
-			extensionId: "other-ext",
+			ownerToken: "other-ext",
 		});
 		const irc = await captureIrc();
 
@@ -144,12 +144,12 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 
 		// Colliding with another extension's proxy is refused too.
 		expect(irc.registerRemotePeer?.({ id: "foreign" })).toBe(false);
-		expect(registry.get("foreign")?.extensionId).toBe("other-ext");
+		expect(registry.get("foreign")?.ownerToken).toBe("other-ext");
 
 		// A free id registers; re-registering our own proxy updates it (still ours).
 		expect(irc.registerRemotePeer?.({ id: "beatrice", displayName: "beatrice" })).toBe(true);
 		expect(irc.registerRemotePeer?.({ id: "beatrice", displayName: "beatrice", status: "idle" })).toBe(true);
 		expect(registry.get("beatrice")?.status).toBe("idle");
-		expect(registry.get("beatrice")?.extensionId).toBe("<inline>");
+		expect(registry.get("beatrice")?.ownerToken?.startsWith("<inline>:")).toBe(true);
 	});
 });

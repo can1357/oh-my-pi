@@ -262,6 +262,53 @@ describe("IrcBus RemoteTransport seam", () => {
 		expect(seen).toHaveLength(0); // inbound never bounces outbound
 		expect(relayed).toHaveLength(1); // Main got a display-only copy — the relay ran but did not re-enter delivery
 	});
+
+	it("relays a successful non-Main outbound remote send to the Main UI (symmetric with local + inbound)", async () => {
+		const registry = AgentRegistry.global();
+		const relayed: unknown[] = [];
+		registry.register({
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			session: { emitIrcRelayObservation: () => relayed.push(1) } as unknown as AgentSession,
+			status: "running",
+		});
+		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
+		const bus = new IrcBus(registry);
+		bus.setRemoteTransport(recordingTransport("injected").transport);
+
+		// A subagent → remote send is mirrored to the root UI (neither endpoint is Main) — otherwise the
+		// root sees replies from remote peers but not the outbound messages that prompted them.
+		await bus.send({ from: "worker", to: "beatrice", body: "outbound to remote" });
+		expect(relayed).toHaveLength(1);
+
+		// A Main → remote send is NOT relayed (Main already rendered its own outbound send).
+		await bus.send({ from: "Main", to: "beatrice", body: "from main" });
+		expect(relayed).toHaveLength(1);
+
+		// suppressRelay skips the relay leg (broadcast dedup).
+		await bus.send({ from: "worker", to: "beatrice", body: "dup" }, { suppressRelay: true });
+		expect(relayed).toHaveLength(1);
+	});
+
+	it("does not relay a failed outbound remote send", async () => {
+		const registry = AgentRegistry.global();
+		const relayed: unknown[] = [];
+		registry.register({
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			session: { emitIrcRelayObservation: () => relayed.push(1) } as unknown as AgentSession,
+			status: "running",
+		});
+		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
+		const bus = new IrcBus(registry);
+		bus.setRemoteTransport(recordingTransport("failed").transport);
+
+		const receipt = await bus.send({ from: "worker", to: "beatrice", body: "will fail" });
+		expect(receipt.outcome).toBe("failed");
+		expect(relayed).toHaveLength(0);
+	});
 });
 
 describe("AgentRegistry.listVisibleTo remote proxies (murmur-q00p)", () => {
