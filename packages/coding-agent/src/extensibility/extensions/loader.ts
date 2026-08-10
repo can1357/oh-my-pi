@@ -27,8 +27,8 @@ import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
-import { IrcBus } from "../../irc/bus";
-import { AgentRegistry, BROADCAST_ID, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { composeRemoteId, IrcBus, isValidRemoteName, isValidRemoteNamespace, remoteNamespaceOf } from "../../irc/bus";
+import { AgentRegistry } from "../../registry/agent-registry";
 import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -188,42 +188,49 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly typebox = TypeBox;
 	readonly arktype = type;
 	readonly zod = zod;
+	/** The single namespace this extension load claimed via `irc.setRemoteTransport` (one per load). */
+	#claimedNamespace: string | undefined;
 	readonly irc: IrcApi = {
 		deliverInbound: (msg, opts) => IrcBus.global().deliverInbound(msg, opts),
-		setRemoteTransport: (namespace, transport) =>
-			IrcBus.global().setRemoteTransport(namespace, transport, this.ownerToken),
-		registerRemotePeer: peer => {
-			// Reserved ids a remote peer can never take: MAIN_AGENT_ID (the local root, registered by a
-			// top-level session AFTER extensions load — absent from the registry at bridge-load time, so
-			// the presence check below can't catch it; an accepted proxy would be silently overwritten by
-			// the later local `Main` registration) and BROADCAST_ID (`all`, the `hub send` broadcast
-			// pseudo-recipient — a proxy under it would list but never be directly messageable/awaitable).
-			// (can1357/oh-my-pi#7401 review.)
-			if (peer.id === MAIN_AGENT_ID || peer.id === BROADCAST_ID) return false;
-			const registry = AgentRegistry.global();
-			const existing = registry.get(peer.id);
-			// Never clobber a live local agent or another load's proxy: overwriting would turn a real
-			// session into a session-less `remote` ref (and a later factory-failure rollback would then
-			// delete it outright, killing hub/history/inbound for the real agent). Only (re)register when
-			// the id is free or already THIS load's own remote proxy (can1357/oh-my-pi#7401 review).
-			if (existing && !(existing.kind === "remote" && existing.ownerToken === this.ownerToken)) {
-				return false;
+		setRemoteTransport: (namespace, transport) => {
+			if (!isValidRemoteNamespace(namespace)) {
+				throw new Error(
+					`Invalid IRC namespace ${JSON.stringify(namespace)} (allowed: letters, digits, ".", "_", "-").`,
+				);
 			}
-			// Attribute the proxy to this extension LOAD (mirrors provider `sourceId`) so a failed load or
-			// the extension's own teardown retracts exactly its refs. `this.ownerToken` is deref'd lazily
-			// at call time (well after construction), so the field-initializer order is safe.
-			registry.register({
-				id: peer.id,
-				displayName: peer.displayName ?? peer.id,
+			if (this.#claimedNamespace !== undefined && this.#claimedNamespace !== namespace) {
+				throw new Error(
+					`This extension already claimed IRC namespace "${this.#claimedNamespace}"; an extension load owns a single namespace.`,
+				);
+			}
+			IrcBus.global().setRemoteTransport(namespace, transport, this.ownerToken);
+			this.#claimedNamespace = namespace;
+		},
+		registerRemotePeer: peer => {
+			// A remote peer lives at `@<claimedNamespace>/<name>`; a namespace must be claimed first (via
+			// setRemoteTransport). The composed id is disjoint from local ids (`@` reserved) and from other
+			// extensions' peers (namespaces are globally unique), so registration is collision-free — no
+			// reserved-id or clobber guards — and is attributed to this load's ownerToken for rollback.
+			const namespace = this.#claimedNamespace;
+			if (namespace === undefined || !isValidRemoteName(peer.name)) return undefined;
+			const id = composeRemoteId(namespace, peer.name);
+			AgentRegistry.global().register({
+				id,
+				displayName: peer.displayName ?? peer.name,
 				kind: "remote",
-				parentId: peer.parentId,
 				session: null,
 				status: peer.status,
 				ownerToken: this.ownerToken,
 			});
-			return true;
+			return id;
 		},
-		unregisterRemotePeer: id => {
+		unregisterRemotePeer: idOrName => {
+			// Accept the composed `@ns/name` id or a bare name (composed against the claimed namespace).
+			let id = idOrName;
+			const namespace = this.#claimedNamespace;
+			if (remoteNamespaceOf(idOrName) === undefined && namespace !== undefined && isValidRemoteName(idOrName)) {
+				id = composeRemoteId(namespace, idOrName);
+			}
 			const registry = AgentRegistry.global();
 			const ref = registry.get(id);
 			// Ownership-checked: a load may retract only the remote proxies it registered.
