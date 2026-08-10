@@ -93,6 +93,11 @@ export class IrcBus {
 		this.#remote = transport;
 	}
 
+	/** The transport currently installed via {@link setRemoteTransport}, if any (for load-failure rollback). */
+	getRemoteTransport(): RemoteTransport | undefined {
+		return this.#remote;
+	}
+
 	/** Whether an outbound transport is installed (murmur-q00p): a leaf agent then still has peers. */
 	hasRemoteTransport(): boolean {
 		return this.#remote != null;

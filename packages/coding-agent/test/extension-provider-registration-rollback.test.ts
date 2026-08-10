@@ -5,6 +5,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ProviderConfig } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { IrcBus, type RemoteTransport } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -322,5 +323,86 @@ describe("extension provider registration rollback", () => {
 		).rejects.toThrow("failed after multiple registrations");
 
 		expect(runtime.pendingProviderRegistrations).toEqual([]);
+	});
+
+	test("clears a remote transport installed by an extension that then fails to load", async () => {
+		IrcBus.resetGlobalForTests();
+		try {
+			const runtime = new ExtensionRuntime();
+			const events = new EventBus();
+			const transport: RemoteTransport = {
+				async send(message) {
+					return { to: message.to, outcome: "injected" };
+				},
+			};
+
+			// No transport is installed before the failing extension runs.
+			await expect(
+				loadExtensionFromFactory(
+					pi => {
+						pi.irc.setRemoteTransport?.(transport);
+						throw new Error("failed after installing transport");
+					},
+					process.cwd(),
+					events,
+					runtime,
+					"broken-transport-extension",
+				),
+			).rejects.toThrow("failed after installing transport");
+
+			// The half-installed transport must not survive: a leaf session must
+			// not observe hasRemoteTransport() or route registry-miss sends out
+			// through an extension that never finished loading.
+			expect(IrcBus.global().getRemoteTransport()).toBeUndefined();
+			expect(IrcBus.global().hasRemoteTransport()).toBe(false);
+		} finally {
+			IrcBus.resetGlobalForTests();
+		}
+	});
+
+	test("restores an earlier extension's transport when a later extension fails to load", async () => {
+		IrcBus.resetGlobalForTests();
+		try {
+			const runtime = new ExtensionRuntime();
+			const events = new EventBus();
+			const first: RemoteTransport = {
+				async send(message) {
+					return { to: message.to, outcome: "injected" };
+				},
+			};
+
+			await loadExtensionFromFactory(
+				pi => {
+					pi.irc.setRemoteTransport?.(first);
+				},
+				process.cwd(),
+				events,
+				runtime,
+				"first-transport-extension",
+			);
+
+			await expect(
+				loadExtensionFromFactory(
+					pi => {
+						pi.irc.setRemoteTransport?.({
+							async send(message) {
+								return { to: message.to, outcome: "injected" };
+							},
+						});
+						throw new Error("second extension failed");
+					},
+					process.cwd(),
+					events,
+					runtime,
+					"second-transport-extension",
+				),
+			).rejects.toThrow("second extension failed");
+
+			// Rollback restores the checkpoint (the first extension's transport),
+			// not a blanket clear — the surviving extension keeps routing.
+			expect(IrcBus.global().getRemoteTransport()).toBe(first);
+		} finally {
+			IrcBus.resetGlobalForTests();
+		}
 	});
 });
