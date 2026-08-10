@@ -515,6 +515,7 @@ describe("IRC", () => {
 	});
 
 
+
 	describe("AgentSession.deliverIrcMessage", () => {
 		it("wakes an idle session with a real turn and emits the irc_message event", async () => {
 			const { session } = createRealSession();
@@ -649,14 +650,14 @@ describe("isIrcEnabled", () => {
 		try {
 			expect(isIrcEnabled(settings, 0)).toBe(false);
 			// The murmur bridge installs a transport + seeds remote proxies: a leaf root now has peers.
-			bus.setRemoteTransport({
+			bus.setRemoteTransport("ext:test", {
 				async send(m) {
 					return { to: m.to, outcome: "injected" };
 				},
 			});
 			expect(isIrcEnabled(settings, 0)).toBe(true);
 		} finally {
-			bus.setRemoteTransport(undefined);
+			bus.setRemoteTransport("ext:test", undefined);
 		}
 	});
 });
