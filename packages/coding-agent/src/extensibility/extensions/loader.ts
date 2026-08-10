@@ -190,6 +190,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly zod = zod;
 	/** The single namespace this extension load claimed via `irc.setRemoteTransport` (one per load). */
 	#claimedNamespace: string | undefined;
+	#ircTeardownArmed = false;
 	readonly irc: IrcApi = {
 		deliverInbound: (msg, opts) => IrcBus.global().deliverInbound(msg, opts),
 		setRemoteTransport: (namespace, transport) => {
@@ -205,6 +206,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			}
 			IrcBus.global().setRemoteTransport(namespace, transport, this.ownerToken);
 			this.#claimedNamespace = namespace;
+			this.#armIrcTeardown();
 		},
 		registerRemotePeer: peer => {
 			// A remote peer lives at `@<claimedNamespace>/<name>`; a namespace must be claimed first (via
@@ -254,6 +256,18 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		/** Per-load owner token stamped on refs this load registers (see {@link AgentRef.ownerToken}). */
 		private readonly ownerToken: string,
 	) {}
+
+	/**
+	 * Arm a one-shot `session_shutdown` teardown that releases this load's process-global IRC state
+	 * (namespace claims + transports + `remote` refs) — symmetric with the factory-failure rollback so a
+	 * claim never outlives its load in a long-lived (SDK/ACP) host. Registered on the FIRST namespace
+	 * claim only, so non-IRC extensions add no shutdown handler.
+	 */
+	#armIrcTeardown(): void {
+		if (this.#ircTeardownArmed) return;
+		this.#ircTeardownArmed = true;
+		this.on("session_shutdown", async () => releaseExtensionIrc(this.ownerToken));
+	}
 
 	on<F extends HandlerFn>(event: string, handler: F): void {
 		const list = this.extension.handlers.get(event) ?? [];
@@ -442,6 +456,20 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 }
 
 /**
+ * Release every process-global IRC resource a single extension load owns, keyed by its `ownerToken`:
+ * drop its namespace claims + transports (freeing the namespaces for re-claim) and unregister every
+ * `remote` proxy ref it registered. Owner-scoped + idempotent, so sibling loads are untouched. Runs on
+ * BOTH factory-failure rollback and clean session_shutdown teardown, so a claim never outlives its load.
+ */
+function releaseExtensionIrc(ownerToken: string): void {
+	IrcBus.global().releaseTransportsForOwner(ownerToken);
+	const registry = AgentRegistry.global();
+	for (const ref of registry.list()) {
+		if (ref.ownerToken === ownerToken) registry.unregister(ref.id);
+	}
+}
+
+/**
  * Runs an extension factory with rollback of process-global state the factory may have mutated
  * before throwing. Restores the complete provider-registration queue (an extension may unregister
  * entries queued by an earlier extension), this load's {@link IrcBus} remote transport, and any `remote`
@@ -457,7 +485,6 @@ async function runExtensionFactory(
 	ownerToken: string,
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
-	const bus = IrcBus.global();
 
 	try {
 		await factory(api);
@@ -467,14 +494,9 @@ async function runExtensionFactory(
 			runtime.pendingProviderRegistrations.length,
 			...providerRegistrationCheckpoint,
 		);
-		// Release this load's namespace claims + transports (owner-scoped; sibling loads untouched).
-		bus.releaseTransportsForOwner(ownerToken);
-		// Retract every ref THIS load registered, attributed by ownerToken — no orphaned `remote`
-		// proxies linger, and a sibling load of the same extension path is untouched (murmur-q00p).
-		const registry = AgentRegistry.global();
-		for (const ref of registry.list()) {
-			if (ref.ownerToken === ownerToken) registry.unregister(ref.id);
-		}
+		// Release this load's IRC state (namespace claims + transports + `remote` refs), owner-scoped so
+		// sibling loads are untouched. Identical to the clean session_shutdown teardown (#armIrcTeardown).
+		releaseExtensionIrc(ownerToken);
 		throw error;
 	}
 }

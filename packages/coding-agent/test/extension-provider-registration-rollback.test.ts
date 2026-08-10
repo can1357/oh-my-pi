@@ -569,4 +569,55 @@ describe("extension provider registration rollback", () => {
 			IrcBus.resetGlobalForTests();
 		}
 	});
+
+	test("session_shutdown releases a successful load's IRC claim + proxies (symmetric with rollback)", async () => {
+		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
+		try {
+			const runtime = new ExtensionRuntime();
+			const events = new EventBus();
+			const extension = await loadExtensionFromFactory(
+				pi => {
+					pi.irc.setRemoteTransport?.("cluster-a", {
+						async send(message) {
+							return { to: message.to, outcome: "injected" };
+						},
+					});
+					pi.irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
+				},
+				process.cwd(),
+				events,
+				runtime,
+				"bridge-extension",
+			);
+
+			// Claimed + registered while the load is live.
+			expect(IrcBus.global().hasRemoteTransport()).toBe(true);
+			expect(AgentRegistry.global().get("@cluster-a/beatrice")?.kind).toBe("remote");
+
+			// The load armed a session_shutdown teardown; running it releases its IRC state.
+			const handlers = extension.handlers.get("session_shutdown") ?? [];
+			expect(handlers.length).toBeGreaterThan(0);
+			for (const handler of handlers) await handler();
+
+			// Transport + claim gone (namespace re-claimable), proxy unregistered — symmetric with the
+			// factory-failure rollback.
+			expect(IrcBus.global().hasRemoteTransport()).toBe(false);
+			expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
+			expect(() =>
+				IrcBus.global().setRemoteTransport(
+					"cluster-a",
+					{
+						async send(message) {
+							return { to: message.to, outcome: "injected" };
+						},
+					},
+					"other-owner",
+				),
+			).not.toThrow();
+		} finally {
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		}
+	});
 });

@@ -397,6 +397,29 @@ describe("IrcBus RemoteTransport seam", () => {
 		expect(() => bus.setRemoteTransport("cluster-a", t, "ext-b")).not.toThrow();
 		expect((await bus.send({ from: "Main", to: "@cluster-a/x", body: "hi" })).outcome).toBe("injected");
 	});
+
+	it("clearing a namespace transport leaves its registered peers listed (T7 reconnect roster)", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "@cluster-a/beatrice",
+			displayName: "beatrice",
+			kind: "remote",
+			session: null,
+			status: "running",
+			ownerToken: OWNER,
+		});
+		const bus = new IrcBus(registry);
+		bus.setRemoteTransport(NS, recordingTransport().transport, OWNER);
+		bus.setRemoteTransport(NS, undefined, OWNER); // clear routing (claim + roster retained)
+
+		// The registered peer survives the clear — still in the registry and the hub roster...
+		expect(registry.get("@cluster-a/beatrice")?.kind).toBe("remote");
+		expect(registry.listVisibleTo("Main").map(ref => ref.id)).toContain("@cluster-a/beatrice");
+		// ...but a send to it now fails unreachable (no transport until the owner reinstalls).
+		const receipt = await bus.send({ from: "Main", to: "@cluster-a/beatrice", body: "hi" });
+		expect(receipt.outcome).toBe("failed");
+		expect(receipt.error).toMatch(/unreachable/);
+	});
 });
 
 describe("AgentRegistry.listVisibleTo remote proxies (murmur-q00p)", () => {
