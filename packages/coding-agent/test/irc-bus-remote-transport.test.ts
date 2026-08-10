@@ -1,8 +1,11 @@
 /**
- * IrcBus RemoteTransport seam (murmur-l5vv): a local-registry MISS (`!ref`) hands off to an
- * installed transport instead of failing; every other failure mode (aborted / advisor /
- * no-session) stays local `failed` and never touches the transport. This is the loop-safety
- * invariant the murmur bridge relies on — only a genuine cross-process recipient leaves.
+ * IrcBus RemoteTransport seam (murmur-l5vv): only a REGISTERED cross-process `remote` proxy ref hands
+ * off to an installed transport. A bare local-registry MISS (`!ref`) fails locally with the
+ * unknown-agent error even when a transport is installed, and every other failure mode (aborted /
+ * advisor / no-session) stays local `failed` and never touches the transport. This is the loop-safety
+ * invariant the murmur bridge relies on — only a genuine, registered cross-process recipient leaves,
+ * so a transport installed by one top-level session cannot swallow another's mistyped/unknown
+ * recipient in a shared-registry, multi-top-level-session host (can1357/oh-my-pi#7401 review).
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { IrcBus, type RemoteTransport } from "@oh-my-pi/pi-coding-agent/irc/bus";
@@ -40,24 +43,18 @@ describe("IrcBus RemoteTransport seam", () => {
 		AgentRegistry.resetGlobalForTests();
 	});
 
-	it("fires the transport on a !ref miss and returns its receipt, with the native id already minted", async () => {
+	it("does NOT fire the transport on a bare !ref miss — fails locally even with a transport installed", async () => {
 		const bus = new IrcBus(AgentRegistry.global());
 		const { transport, seen } = recordingTransport("injected");
 		bus.setRemoteTransport(transport);
 
+		// No registered `remote` ref for this id: a bare miss is a genuine unknown recipient and must
+		// NOT leave the process, even though a transport is installed (multi-top-level-session leak guard).
 		const receipt = await bus.send({ from: "Main", to: "remote-peer", body: "how goes it", replyTo: "r1" });
 
-		expect(receipt).toEqual({ to: "remote-peer", outcome: "injected" });
-		expect(seen).toHaveLength(1);
-		const msg = seen[0]!;
-		expect(msg.from).toBe("Main");
-		expect(msg.to).toBe("remote-peer");
-		expect(msg.body).toBe("how goes it");
-		expect(msg.replyTo).toBe("r1");
-		// send() mints omp's native id/ts BEFORE the miss branch — the transport receives them.
-		expect(typeof msg.id).toBe("string");
-		expect(msg.id.length).toBeGreaterThan(0);
-		expect(msg.ts).toBeGreaterThan(0);
+		expect(receipt.outcome).toBe("failed");
+		expect(receipt.error).toMatch(/Unknown agent "remote-peer"/);
+		expect(seen).toHaveLength(0);
 	});
 
 	it("does NOT fire the transport for a live local recipient (stays in-process)", async () => {
@@ -97,27 +94,39 @@ describe("IrcBus RemoteTransport seam", () => {
 		expect(receipt.error).toMatch(/Unknown agent "ghost"/);
 	});
 
-	it("setRemoteTransport(undefined) clears the seam — a miss fails again", async () => {
-		const bus = new IrcBus(AgentRegistry.global());
-		bus.setRemoteTransport(recordingTransport().transport);
+	it("setRemoteTransport(undefined) clears the seam — a registered remote proxy becomes unreachable", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
+		const bus = new IrcBus(registry);
+		const { transport, seen } = recordingTransport();
+		bus.setRemoteTransport(transport);
 		bus.setRemoteTransport(undefined);
 
-		const receipt = await bus.send({ from: "Main", to: "ghost", body: "hi" });
+		const receipt = await bus.send({ from: "Main", to: "beatrice", body: "hi" });
 		expect(receipt.outcome).toBe("failed");
+		expect(receipt.error).toMatch(/unreachable/);
+		expect(seen).toHaveLength(0);
 	});
 
-	it("routes a `remote`-kind proxy ref to the transport (murmur-q00p), not local delivery", async () => {
+	it("routes a `remote`-kind proxy ref to the transport (murmur-q00p), with the native id already minted", async () => {
 		const registry = AgentRegistry.global();
 		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
 		const bus = new IrcBus(registry);
 		const { transport, seen } = recordingTransport("injected");
 		bus.setRemoteTransport(transport);
 
-		const receipt = await bus.send({ from: "Main", to: "beatrice", body: "hi remote" });
+		const receipt = await bus.send({ from: "Main", to: "beatrice", body: "hi remote", replyTo: "r1" });
 
 		expect(receipt).toEqual({ to: "beatrice", outcome: "injected" });
 		expect(seen).toHaveLength(1);
-		expect(seen[0]!.to).toBe("beatrice");
+		const msg = seen[0]!;
+		expect(msg.to).toBe("beatrice");
+		expect(msg.body).toBe("hi remote");
+		expect(msg.replyTo).toBe("r1");
+		// send() mints omp's native id/ts BEFORE the handoff — the transport receives them.
+		expect(typeof msg.id).toBe("string");
+		expect(msg.id.length).toBeGreaterThan(0);
+		expect(msg.ts).toBeGreaterThan(0);
 	});
 
 	it("does NOT forward an `aborted` remote proxy to the transport — fails like a local aborted agent (Codex)", async () => {
@@ -167,17 +176,19 @@ describe("IrcBus RemoteTransport seam", () => {
 	});
 
 	it("surfaces a transport rejection as a failed receipt instead of throwing (Codex: no whole hub-call exception)", async () => {
-		const bus = new IrcBus(AgentRegistry.global());
+		const registry = AgentRegistry.global();
+		registry.register({ id: "beatrice", displayName: "beatrice", kind: "remote", session: null, status: "running" });
+		const bus = new IrcBus(registry);
 		bus.setRemoteTransport({
 			async send() {
 				throw new Error("proxy unreachable");
 			},
 		});
 
-		const receipt = await bus.send({ from: "Main", to: "remote-peer", body: "hi" });
+		const receipt = await bus.send({ from: "Main", to: "beatrice", body: "hi" });
 
 		expect(receipt.outcome).toBe("failed");
-		expect(receipt.to).toBe("remote-peer");
+		expect(receipt.to).toBe("beatrice");
 		expect(receipt.error).toContain("proxy unreachable");
 	});
 

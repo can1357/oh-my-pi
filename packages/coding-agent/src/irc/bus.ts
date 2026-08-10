@@ -159,22 +159,24 @@ export class IrcBus {
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
 	): Promise<IrcDeliveryReceipt> {
 		const ref = this.#registry.get(message.to);
-		if (!ref || ref.kind === "remote") {
-			// A `remote` proxy the bridge has marked `aborted` is terminally dead — fail it like a
-			// local aborted agent (§#deliverToLocalRef) instead of handing a tombstone to the transport
-			// (broadcast/visible-peer paths already skip it, murmur-q00p). A `parked`/live remote still
-			// forwards below: the remote side revives it, mirroring a local parked→revive.
-			if (ref?.status === "aborted") {
+		if (ref?.kind === "remote") {
+			// A `remote` proxy the bridge has marked `aborted` is terminally dead — fail it like a local
+			// aborted agent (§#deliverToLocalRef) instead of handing a tombstone to the transport
+			// (broadcast/visible-peer paths already skip it, murmur-q00p). A `parked`/live remote forwards
+			// below: the remote side revives it, mirroring a local parked→revive.
+			if (ref.status === "aborted") {
 				return {
 					to: message.to,
 					outcome: "failed",
 					error: `Agent "${message.to}" was aborted and cannot be messaged.`,
 				};
 			}
-			// Local-registry MISS, or a `remote` proxy peer (murmur-q00p): hand off to the remote
-			// transport if one is installed (murmur bridge), else fail. Only branch that leaves the
-			// process. Once a transport is installed, unknown-recipient diagnostics (the `irc list`
-			// hint below) become the transport's responsibility: a miss is routed out, not reported here.
+			// The ONLY branch that leaves the process: a registered cross-process `remote` proxy peer
+			// (murmur-q00p) hands off to the transport. A bare local-registry MISS never forwards (see
+			// below) — cross-process recipients are addressable ONLY as registered `remote` refs, imported
+			// from the bus by the bridge. That keeps a transport installed for one top-level session from
+			// silently swallowing another session's mistyped / nonexistent recipient in a shared-registry,
+			// multi-top-level-session host (can1357/oh-my-pi#7401 review).
 			if (this.#remote) {
 				try {
 					return await this.#remote.send(message, opts?.expectsReply ? { expectsReply: true } : undefined);
@@ -189,6 +191,15 @@ export class IrcBus {
 					};
 				}
 			}
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: `Remote agent "${message.to}" is unreachable — no transport installed.`,
+			};
+		}
+		if (!ref) {
+			// A local-registry MISS is a genuine unknown recipient and gets the actionable local error,
+			// even with a transport installed — see the remote branch above for why misses never leave.
 			return {
 				to: message.to,
 				outcome: "failed",
