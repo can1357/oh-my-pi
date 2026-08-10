@@ -18,7 +18,7 @@ import type { Settings } from "../../config/settings";
 import { IrcAwaitTargetStopped, IrcBus } from "../../irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 
-import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { type AgentRegistry, BROADCAST_ID, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../../registry/persisted-agents";
 import { canSpawnAtDepth } from "../../task/types";
 
@@ -223,7 +223,7 @@ export async function executeSend(
 	if (to === senderId) {
 		return hubErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
 	}
-	const isBroadcast = to === "all";
+	const isBroadcast = to === BROADCAST_ID;
 	if (isBroadcast && params.await) {
 		return hubErrorResult('`await` is invalid with to:"all" — broadcasts have no single replier.', {
 			op: "send",
@@ -430,3 +430,4 @@ export function executeInbox(
 		details: { op: "inbox", from: senderId, inbox: messages },
 	};
 }
+

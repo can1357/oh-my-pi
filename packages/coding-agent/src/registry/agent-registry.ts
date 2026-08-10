@@ -17,6 +17,9 @@ import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-m
 export { MAIN_AGENT_ID };
 export type { AgentStatus, AgentMetricsSummary };
 
+/** Reserved pseudo-recipient for `hub send --to all` (broadcast fan-out); never a real/registered agent id. */
+export const BROADCAST_ID = "all";
+
 /** Sidecar marker retained beside a child transcript after an explicit kill. */
 const AGENT_TOMBSTONE_SUFFIX = ".tombstone";
 
