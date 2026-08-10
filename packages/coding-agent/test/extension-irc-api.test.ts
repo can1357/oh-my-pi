@@ -147,13 +147,14 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		expect(registry.get("beatrice")?.ownerToken?.startsWith("<inline>:")).toBe(true);
 	});
 
-	it("registerRemotePeer refuses the reserved local root id even before Main is registered", async () => {
+	it("registerRemotePeer refuses the reserved ids (local root `Main`, broadcast `all`)", async () => {
 		// createAgentSession registers the local Main AFTER extensions load, so the registry is empty
 		// here — the reservation (not a presence check) is what stops the accepted proxy being silently
-		// overwritten by the later local Main registration.
+		// overwritten by the later local Main registration. `all` is the broadcast pseudo-recipient.
 		const irc = await captureIrc();
-		expect(AgentRegistry.global().get("Main")).toBeUndefined();
 		expect(irc.registerRemotePeer?.({ id: "Main", displayName: "remote-root" })).toBe(false);
 		expect(AgentRegistry.global().get("Main")).toBeUndefined();
+		expect(irc.registerRemotePeer?.({ id: "all", displayName: "everyone" })).toBe(false);
+		expect(AgentRegistry.global().get("all")).toBeUndefined();
 	});
 });

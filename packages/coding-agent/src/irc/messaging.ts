@@ -3,7 +3,7 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { Settings } from "../config/settings";
 import { IrcBus } from "./bus";
-import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRegistry, BROADCAST_ID, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { canSpawnAtDepth } from "../task/types";
 
@@ -57,7 +57,7 @@ export async function executeSend(
 		return coordinationErrorResult("A non-empty message is required.", { op: "send", from: senderId });
 	if (to === senderId)
 		return coordinationErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
-	const isBroadcast = to === "all";
+	const isBroadcast = to === BROADCAST_ID;
 	// Restore parked recipients only when needed; never delay delivery to a live peer.
 	if (!isBroadcast && sessionFileHint) {
 		const recipient = registry.get(to);
