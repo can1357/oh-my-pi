@@ -696,7 +696,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			);
 		if (name === "hub") {
 			return (
-				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
+				!restrictToolNames &&
+				session.enableIrc !== false &&
+				isIrcEnabled(session.settings, session.taskDepth ?? 0, session.agentRegistry)
 			);
 		}
 		if (name === "retain" || name === "recall" || name === "reflect") {

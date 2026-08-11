@@ -93,13 +93,14 @@ function formatRosterSummary(counts: HubRosterCounts, emptyNoun: string): string
  * session that can still spawn subagents through the task tool. Only a
  * top-level session with task spawning unavailable has no peers.
  */
-export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
+export function isIrcEnabled(settings: Settings, taskDepth: number, registry?: AgentRegistry): boolean {
 	if (taskDepth > 0) return true;
 	// Top-level session: peers exist if it can still spawn subagents (the capacity gate the task tool
 	// uses, reused to avoid drift) OR a remote transport is installed — the murmur bridge seeds remote
 	// cluster peers as proxy refs (murmur-q00p), so even a leaf root has peers to reach.
 	const maxDepth = settings.get("task.maxRecursionDepth") ?? 2;
-	return canSpawnAtDepth(maxDepth, taskDepth) || IrcBus.global().hasRemoteTransport();
+	const bus = registry ? IrcBus.forRegistry(registry) : IrcBus.global();
+	return canSpawnAtDepth(maxDepth, taskDepth) || bus.hasRemoteTransport();
 }
 
 export function formatIncoming(msg: IrcMessage): string {
@@ -164,7 +165,7 @@ export async function executeList(
 		truncated,
 	};
 
-	const bus = IrcBus.global();
+	const bus = IrcBus.forRegistry(registry);
 	const peers = shownRefs.map(ref => ({
 		id: ref.id,
 		displayName: ref.displayName,
@@ -243,7 +244,7 @@ export async function executeSend(
 		await ensurePersistedRoster(registry, sessionFileHint);
 	}
 
-	const bus = IrcBus.global();
+	const bus = IrcBus.forRegistry(registry);
 	let waited: IrcMessage | null | undefined;
 	const timeoutMs = params.await ? normalizeIrcTimeoutMs(settings.get("irc.timeoutMs")) : undefined;
 	const awaitAbort = params.await ? new AbortController() : undefined;
@@ -384,7 +385,7 @@ export async function executeMessageWait(
 	const { timeoutMs } = params;
 	const from = params.from?.trim() || undefined;
 	try {
-		const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
+		const waited = await IrcBus.forRegistry(registry).wait(senderId, { from }, timeoutMs, signal, {
 			liveness: { registry, senderId },
 		});
 		if (!waited) {
@@ -410,7 +411,7 @@ export function executeInbox(
 	senderId: string,
 	peek?: boolean,
 ): AgentToolResult<CoordinationDetails> {
-	const busMessages = IrcBus.global().inbox(senderId, { peek });
+	const busMessages = IrcBus.forRegistry(registry).inbox(senderId, { peek });
 	const session = registry.get(senderId)?.session;
 	const pendingMessages =
 		typeof session?.drainPendingIrcInboxMessages === "function" ? session.drainPendingIrcInboxMessages(senderId) : [];

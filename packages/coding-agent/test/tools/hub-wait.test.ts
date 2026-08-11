@@ -14,7 +14,10 @@ import { HubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
 
 const SELF_ID = "Main";
 
-function makeSession(manager: AsyncJobManager | undefined): ToolSession {
+function makeSession(
+	manager: AsyncJobManager | undefined,
+	registry: AgentRegistry = AgentRegistry.global(),
+): ToolSession {
 	const stub = {
 		cwd: process.cwd(),
 		settings: {
@@ -23,7 +26,7 @@ function makeSession(manager: AsyncJobManager | undefined): ToolSession {
 				return undefined;
 			},
 		},
-		agentRegistry: AgentRegistry.global(),
+		agentRegistry: registry,
 		asyncJobManager: manager,
 		getAgentId: () => SELF_ID,
 	};
@@ -201,5 +204,35 @@ describe("hub unified wait", () => {
 				.inbox(SELF_ID)
 				.map(message => message.body),
 		).toEqual(["starting the edit"]);
+	});
+
+	test("bare wait consults the session's own registry bus, not the global one (custom registry)", async () => {
+		// finding 6a (per-registry): the hub bare-wait precheck takes queued mail from the session's
+		// bus. A message queued on a custom registry's bus is invisible to the global bus, so a hub
+		// bound to a custom agentRegistry must still return it instead of "nothing to wait for".
+		const custom = new AgentRegistry();
+		// A recipient whose live hand-off throws is the only way a message reaches the mailbox.
+		custom.register({
+			id: SELF_ID,
+			displayName: "main",
+			kind: "main",
+			session: {
+				deliverIrcMessage: () => Promise.reject(new Error("session disposed")),
+			},
+		} as unknown as Parameters<AgentRegistry["register"]>[0]);
+		custom.register({ id: "Peer", displayName: "task", kind: "sub", session: null, status: "idle" });
+
+		const receipt = await IrcBus.forRegistry(custom).send({ from: "Peer", to: SELF_ID, body: "custom-bus message" });
+		expect(receipt.outcome).toBe("failed");
+		expect(IrcBus.forRegistry(custom).unreadCount(SELF_ID)).toBe(1);
+		// The global bus never saw it: a hub reading global().take would answer "nothing to wait for".
+		expect(IrcBus.global().unreadCount(SELF_ID)).toBe(0);
+
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const result = await new HubTool(makeSession(manager, custom)).execute("call_custom_bus", { op: "wait" });
+		const details = result.details as CoordinationDetails;
+		expect(details.op).toBe("wait");
+		expect(details.waited?.from).toBe("Peer");
+		expect(details.waited?.body).toBe("custom-bus message");
 	});
 });

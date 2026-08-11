@@ -16,6 +16,7 @@ export interface IrcBridgeHost {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	agentRegistry?: AgentRegistry;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	planModeEnabled(): boolean;
@@ -216,7 +217,7 @@ export class IrcBridge {
 		};
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
-			const recipientParentId = AgentRegistry.global().get(msg.to)?.parentId;
+			const recipientParentId = (this.#host.agentRegistry ?? AgentRegistry.global()).get(msg.to)?.parentId;
 			if (recipientParentId === msg.from) {
 				this.#host.agent.steer({
 					role: "user",
@@ -286,7 +287,12 @@ export class IrcBridge {
 			};
 			void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 			this.#asides.push(record);
-			const receipt = await IrcBus.global().send({ from: msg.to, to: msg.from, body, replyTo: msg.id });
+			const receipt = await IrcBus.forRegistry(this.#host.agentRegistry ?? AgentRegistry.global()).send({
+				from: msg.to,
+				to: msg.from,
+				body,
+				replyTo: msg.id,
+			});
 			if (receipt.outcome === "failed") {
 				logger.warn("IRC auto-reply delivery failed", { to: msg.from, error: receipt.error });
 			}

@@ -1339,6 +1339,7 @@ export class AgentSession {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
 			settings: this.settings,
+			agentRegistry: config.agentRegistry,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
 			planModeEnabled: () => this.#planModeState?.enabled === true,

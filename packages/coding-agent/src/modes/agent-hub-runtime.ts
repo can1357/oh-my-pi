@@ -37,7 +37,7 @@ export function createAgentHubRuntime(
 		registry,
 		hasLocalPresence,
 		lifecycle: () => options.lifecycle ?? AgentLifecycleManager.global(),
-		irc: options.irc ?? IrcBus.global(),
+		irc: options.irc ?? IrcBus.forRegistry(registry),
 		activity: options.activity ?? new AgentActivityIndex({ remote: options.remote }),
 		manageActivityLive: !options.activity,
 		transcript: agentTranscriptSource,

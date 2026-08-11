@@ -192,7 +192,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	#claimedNamespace: string | undefined;
 	#ircTeardownArmed = false;
 	readonly irc: IrcApi = {
-		deliverInbound: (msg, opts) => IrcBus.global().deliverInbound(msg, opts),
+		deliverInbound: (msg, opts) => IrcBus.forRegistry(this.registry).deliverInbound(msg, opts),
 		setRemoteTransport: (namespace, transport) => {
 			if (!isValidRemoteNamespace(namespace)) {
 				throw new Error(
@@ -204,7 +204,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 					`This extension already claimed IRC namespace "${this.#claimedNamespace}"; an extension load owns a single namespace.`,
 				);
 			}
-			IrcBus.global().setRemoteTransport(namespace, transport, this.ownerToken);
+			IrcBus.forRegistry(this.registry).setRemoteTransport(namespace, transport, this.ownerToken);
 			this.#claimedNamespace = namespace;
 			this.#armIrcTeardown();
 		},
@@ -469,7 +469,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
  * clean session_shutdown teardown, so a claim never outlives its load.
  */
 function releaseExtensionIrc(ownerToken: string, registry: AgentRegistry): void {
-	IrcBus.global().releaseTransportsForOwner(ownerToken);
+	IrcBus.forRegistry(registry).releaseTransportsForOwner(ownerToken);
 	for (const ref of registry.list()) {
 		if (ref.ownerToken === ownerToken) registry.unregister(ref.id);
 	}

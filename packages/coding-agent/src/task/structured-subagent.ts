@@ -349,7 +349,7 @@ export async function resolveEffectiveSubagentPolicy(
 			!planMode &&
 			(request.enableIrc ??
 				(request.session.enableIrc !== false &&
-					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
+					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0, request.session.agentRegistry))),
 	};
 }
 

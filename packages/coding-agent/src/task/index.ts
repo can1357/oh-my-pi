@@ -606,7 +606,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			effortEnabled: this.session.settings.get("task.enableEffort"),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			asyncEnabled: this.session.settings.get("async.enabled"),
-			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry),
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
 		});
 	}
@@ -655,7 +655,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
-			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry),
 			maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
 		});
 	}
@@ -742,7 +742,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			this.session.settings.get("task.maxRecursionDepth") ?? 2,
 			this.session.taskDepth ?? 0,
 		);
-		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
+		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry);
 
 		if (!manager || asyncItems.length === 0) {
 			// Sync fallback: async execution disabled, orphaned host that never
@@ -1505,7 +1505,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 				blockedAgent: this.#blockedAgent,
 				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
-				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry),
 				maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
 				signal,
 				onProgress: progress => {

@@ -110,18 +110,30 @@ export class IrcAwaitTargetStopped extends Error {
 const MAILBOX_CAP = 100;
 
 export class IrcBus {
-	static #global: IrcBus | undefined;
+	/** One IrcBus per AgentRegistry: the root + its subagents share the global registry (one bus, so
+	 *  Main<->Scout works), while an isolated session registry gets its own bus with its own waiters,
+	 *  mailboxes, and transports. Weak so a bus is collected with its registry. */
+	static #buses = new WeakMap<AgentRegistry, IrcBus>();
 
-	static global(): IrcBus {
-		if (!IrcBus.#global) {
-			IrcBus.#global = new IrcBus();
+	/** The bus serving `registry`, created on first use. Delivery resolves recipients in that one
+	 *  registry, so a custom session registry is isolated by construction (no cross-registry leak). */
+	static forRegistry(registry: AgentRegistry): IrcBus {
+		let bus = IrcBus.#buses.get(registry);
+		if (!bus) {
+			bus = new IrcBus(registry);
+			IrcBus.#buses.set(registry, bus);
 		}
-		return IrcBus.#global;
+		return bus;
 	}
 
-	/** Reset the global bus. Test-only. */
+	/** The bus for the process-global registry — the default for the root session and its subagents. */
+	static global(): IrcBus {
+		return IrcBus.forRegistry(AgentRegistry.global());
+	}
+
+	/** Reset the global registry's bus. Test-only. */
 	static resetGlobalForTests(): void {
-		IrcBus.#global = undefined;
+		IrcBus.#buses.delete(AgentRegistry.global());
 	}
 
 	readonly #registry: AgentRegistry;

@@ -3334,7 +3334,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					options.spawns ?? "*",
 				),
 				delegationBias: sessionDelegationBias(toolSession),
-				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
+				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0, agentRegistry),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				writeTransportOnly:
 					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
@@ -3872,6 +3872,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorConfigs: discoveredAdvisors.advisors,
 			advisorConfigWarnings: discoveredAdvisors.warnings,
 			agent,
+			agentRegistry,
 			pruneToolDescriptions: inlineToolDescriptors,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
