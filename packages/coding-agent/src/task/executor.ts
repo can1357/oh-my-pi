@@ -432,6 +432,8 @@ export interface ExecutorOptions {
 	getApiKey?: CreateAgentSessionOptions["getApiKey"];
 	/** Parent session whose stored credential affinities seed the child session. */
 	credentialSourceSessionId?: string;
+	/** The parent session's agent registry, so a spawned subagent shares its IRC world (peers + bus). Default global. */
+	agentRegistry?: CreateAgentSessionOptions["agentRegistry"];
 	worktree?: string;
 	agent: AgentDefinition;
 	task: string;
@@ -3933,6 +3935,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				getApiKey: options.getApiKey,
 				credentialSourceSessionId: options.credentialSourceSessionId,
 				inheritedSessionAgents: options.inheritedSessionAgents,
+				agentRegistry: options.agentRegistry,
 				settings: subagentSettings,
 				model,
 				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
