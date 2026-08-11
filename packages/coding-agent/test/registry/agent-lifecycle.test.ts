@@ -163,6 +163,16 @@ describe("AgentLifecycleManager", () => {
 		expect(reg.get("B-sub")).toBeUndefined();
 	});
 
+	it("forRegistry hands back a fresh manager after the cached one is disposed", async () => {
+		// After the last root disposes, the manager unsubscribed from registry.onChange; forRegistry
+		// must not keep returning that dead instance, or a later session's subagents miss status events.
+		const reg = new AgentRegistry();
+		const first = AgentLifecycleManager.forRegistry(reg);
+		expect(AgentLifecycleManager.forRegistry(reg)).toBe(first); // cached per registry
+		await first.dispose();
+		expect(AgentLifecycleManager.forRegistry(reg)).not.toBe(first); // evicted on dispose → fresh
+	});
+
 	it("adopt arms the TTL: an idle agent is parked — session disposed, ref + sessionFile retained", async () => {
 		vi.useFakeTimers();
 		const stub = makeSessionStub();
