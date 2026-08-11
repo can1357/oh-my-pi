@@ -1343,7 +1343,9 @@ describe("Agent hub row ordering", () => {
 			expect(list).toContain("Conversations");
 			expect(list).toContain("Needs attention");
 			expect(list).toMatch(/Worker\s+1/);
-			// Periodic/history refresh must not clear unread while only the list is visible.
+			// Periodic/history refresh and list navigation must not clear unread while only the list is visible.
+			hub.handleInput("j");
+			hub.handleInput("k");
 			const stillUnread = Bun.stripANSI(hub.render(80).join("\n"));
 			expect(stillUnread).toMatch(/Worker\s+1/);
 			hub.handleInput("\r");

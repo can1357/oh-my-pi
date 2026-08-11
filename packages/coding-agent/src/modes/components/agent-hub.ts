@@ -1067,7 +1067,10 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			);
 		}
 		if (availableWidth < 96) {
-			return theme.fg("dim", `${filter}1/2/3:view  j/k:select  Enter:open  t:${nextView}  Tab:details  r/x:manage  Esc:close`);
+			return theme.fg(
+				"dim",
+				`${filter}1/2/3:view  j/k:select  Enter:open  t:${nextView}  Tab:details  r/x:manage  Esc:close`,
+			);
 		}
 		return theme.fg(
 			"dim",
@@ -1489,7 +1492,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 					Math.min(this.#selectedConversationRow + delta, this.#conversations.length - 1),
 				);
 				this.#selectedMessageRow = (this.#conversations[this.#selectedConversationRow]?.messages.length ?? 1) - 1;
-				this.#markSelectedConversationRead();
+				// Wide split marks on render; narrow list-only must keep unread until thread open.
 			}
 		} else if (this.#rows.length > 0) {
 			this.#selectRow(Math.max(0, Math.min(this.#selectedRow + delta, this.#rows.length - 1)));
@@ -1524,10 +1527,10 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			if (index === this.#selectedConversationRow) {
 				this.#messageFocus = "thread";
 				this.#messageThreadOpen = true;
+				this.#markSelectedConversationRead();
 			} else {
 				this.#selectedConversationRow = index;
 				this.#selectedMessageRow = (this.#conversations[this.#selectedConversationRow]?.messages.length ?? 1) - 1;
-				this.#markSelectedConversationRead();
 			}
 			this.#requestRender();
 			return;
@@ -1603,7 +1606,13 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		}
 		if (matchesKey(keyData, "tab") || keyData === "\t") {
 			this.#messageFocus = this.#messageFocus === "conversations" ? "thread" : "conversations";
-			if (this.#messageFocus === "thread") this.#markSelectedConversationRead();
+			if (this.#messageFocus === "thread") {
+				// Narrow layout only shows the thread when drilled in; wide split is already visible.
+				if (!this.#messagesSplitVisible) this.#messageThreadOpen = true;
+				this.#markSelectedConversationRead();
+			} else {
+				this.#messageThreadOpen = false;
+			}
 			this.#requestRender();
 			return;
 		}
@@ -1653,7 +1662,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				Math.min(this.#selectedConversationRow + delta, this.#conversations.length - 1),
 			);
 			this.#selectedMessageRow = (this.#conversations[this.#selectedConversationRow]?.messages.length ?? 1) - 1;
-			this.#markSelectedConversationRead();
 		}
 		this.#requestRender();
 	}
