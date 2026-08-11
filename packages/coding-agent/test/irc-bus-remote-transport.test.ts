@@ -70,6 +70,22 @@ describe("IrcBus RemoteTransport seam", () => {
 		expect(seen).toHaveLength(0);
 	});
 
+	it("rejects a malformed reach-by-name recipient locally — never hands a bad name to the transport", async () => {
+		const bus = new IrcBus(AgentRegistry.global());
+		const { transport, seen } = recordingTransport("injected");
+		bus.setRemoteTransport(NS, transport, OWNER);
+		// Names the @ns/name contract forbids: empty, whitespace, or an extra "/".
+		for (const bad of [`@${NS}/`, `@${NS}/a b`, `@${NS}/a/b`]) {
+			const receipt = await bus.send({ from: "Main", to: bad, body: "hi" });
+			expect(receipt.outcome).toBe("failed");
+			expect(receipt.error).toMatch(/Invalid remote recipient/);
+		}
+		// A well-formed reach-by-name recipient still routes — only it reaches the transport.
+		const ok = await bus.send({ from: "Main", to: composeRemoteId(NS, "alice"), body: "hi" });
+		expect(ok.outcome).toBe("injected");
+		expect(seen.map(m => m.to)).toEqual([`@${NS}/alice`]);
+	});
+
 	it("does NOT fire the transport for a live local recipient (stays in-process)", async () => {
 		const registry = AgentRegistry.global();
 		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "idle" });

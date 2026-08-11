@@ -267,6 +267,17 @@ export class IrcBus {
 	): Promise<IrcDeliveryReceipt> {
 		const namespace = remoteNamespaceOf(message.to);
 		if (namespace !== undefined) {
+			// Reach-by-name still must honor the @ns/name contract: reject a malformed name (empty,
+			// whitespace, or an extra "/") locally so a mistyped id never reaches the transport as a
+			// bogus opts.toName.
+			const toName = remoteNameOf(message.to);
+			if (toName === undefined || !isValidRemoteName(toName)) {
+				return {
+					to: message.to,
+					outcome: "failed",
+					error: `Invalid remote recipient "${message.to}" — the name after "@${namespace}/" must match the @ns/name contract (letters, digits, ".", "_", "-").`,
+				};
+			}
 			// Prefix-authoritative: an `@<namespace>/<name>` recipient is unambiguously remote and routes
 			// to its namespace's transport — a registered proxy ref is optional (reach-by-name). A ref is
 			// consulted ONLY to honor an `aborted` tombstone, matching a local hard-aborted agent.
@@ -289,7 +300,7 @@ export class IrcBus {
 			try {
 				const receipt = await transport.send(message, {
 					expectsReply: opts?.expectsReply,
-					toName: remoteNameOf(message.to),
+					toName,
 				});
 				// Relay a successful outbound send to the root UI — symmetric with local agent↔agent
 				// delivery (§#deliverToLocalRef) and inbound remote→local (deliverInbound). Display-only
