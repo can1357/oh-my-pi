@@ -43,14 +43,14 @@ export interface RemoteTransport {
  * and local id spaces are disjoint and can never collide.
  */
 const REMOTE_NAMESPACE_RE = /^[A-Za-z0-9._-]+$/;
-const REMOTE_NAME_RE = /^[^/\s]+$/;
+const REMOTE_NAME_RE = /^[A-Za-z0-9._-]+$/;
 
 /** Whether `namespace` is a well-formed remote namespace (letters, digits, `.`, `_`, `-`). */
 export function isValidRemoteNamespace(namespace: string): boolean {
 	return REMOTE_NAMESPACE_RE.test(namespace);
 }
 
-/** Whether `name` is a well-formed bare remote peer name (no `/` separator, no whitespace). */
+/** Whether `name` is a well-formed bare remote peer name (letters, digits, `.`, `_`, `-`). */
 export function isValidRemoteName(name: string): boolean {
 	return REMOTE_NAME_RE.test(name);
 }
@@ -66,7 +66,7 @@ export function composeRemoteId(namespace: string, name: string): string {
 		);
 	}
 	if (!isValidRemoteName(name)) {
-		throw new Error(`Invalid remote peer name ${JSON.stringify(name)} (no "/" or whitespace).`);
+		throw new Error(`Invalid remote peer name ${JSON.stringify(name)} (allowed: letters, digits, ".", "_", "-").`);
 	}
 	return `${REMOTE_ID_PREFIX}${namespace}/${name}`;
 }

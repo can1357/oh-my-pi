@@ -2315,6 +2315,39 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 			extensionsResult.runtime.pendingProviderRegistrations = [];
 		}
+
+		// The runner is created unconditionally — even with zero extensions loaded — because the
+		// `ExtensionToolWrapper` installed below is the only place the per-tool approval gate runs.
+		// A conditional runner means the approval system silently disappears for users with no
+		// extensions, contradicting non-yolo `tools.approvalMode` settings without feedback.
+		// (The builtin autoresearch extension is unconditionally loaded above, so this scenario
+		// is unreachable; unconditional runner construction keeps that invariant explicit and
+		// prevents future optional extensions from silently re-opening the hole.)
+		//
+		// Constructed HERE — right after extensions load, before the model/provider setup window —
+		// so `credentialDisabledTarget` is assigned before any throw in that window. The startup-abort
+		// catch (`!hasSession`) fires `session_shutdown` through this runner to release the loaded
+		// extensions' IRC state (namespace claims / transports / remote proxies); with the runner built
+		// later, a throw during model/provider setup left that target undefined and leaked the claims
+		// (#7401 review).
+		const extensionRunner: ExtensionRunner = new ExtensionRunner(
+			extensionsResult.extensions,
+			extensionsResult.runtime,
+			cwd,
+			sessionManager,
+			modelRegistry,
+			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
+			settings,
+			localProtocolOptions,
+			() => (hasSession ? session.getAsyncJobSnapshot() : null),
+		);
+
+		credentialDisabledTarget = extensionRunner;
+		for (const event of startupCredentialDisabledEvents.splice(0)) {
+			// Discard return: any handler error is routed through runner.onError listeners.
+			void extensionRunner.emitCredentialDisabled(event);
+		}
+
 		// Hydrate cached runtime (extension) provider catalogs before model
 		// resolution. Dynamic-only providers have no synchronous registration side
 		// effect, so a cold --model/provider resume must see the same fresh SQLite
@@ -2865,31 +2898,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			for (const { path, error } of customCommandsResult.errors) {
 				logger.error("Failed to load custom command", { path, error });
 			}
-		}
-
-		// The runner is created unconditionally — even with zero extensions loaded — because the
-		// `ExtensionToolWrapper` installed below is the only place the per-tool approval gate runs.
-		// A conditional runner means the approval system silently disappears for users with no
-		// extensions, contradicting non-yolo `tools.approvalMode` settings without feedback.
-		// (The builtin autoresearch extension is unconditionally loaded above, so this scenario
-		// is unreachable; unconditional runner construction keeps that invariant explicit and
-		// prevents future optional extensions from silently re-opening the hole.)
-		const extensionRunner: ExtensionRunner = new ExtensionRunner(
-			extensionsResult.extensions,
-			extensionsResult.runtime,
-			cwd,
-			sessionManager,
-			modelRegistry,
-			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
-			settings,
-			localProtocolOptions,
-			() => (hasSession ? session.getAsyncJobSnapshot() : null),
-		);
-
-		credentialDisabledTarget = extensionRunner;
-		for (const event of startupCredentialDisabledEvents.splice(0)) {
-			// Discard return: any handler error is routed through runner.onError listeners.
-			void extensionRunner.emitCredentialDisabled(event);
 		}
 
 		const getSessionContext = () => ({
