@@ -1489,6 +1489,7 @@ export class AgentSession implements SettingsScope {
 		const ircHost: IrcBridgeHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
+			agentRegistry: config.agentRegistry,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
 			planModeEnabled: () => this.#planModeState?.enabled === true,

@@ -49,7 +49,10 @@ interface WaitMessaging {
 
 function takeQueuedMessage(messaging: WaitMessaging | undefined): IrcMessage | undefined {
 	if (!messaging) return undefined;
-	return drainPendingInbox(messaging.registry, messaging.senderId) ?? IrcBus.global().take(messaging.senderId);
+	return (
+		drainPendingInbox(messaging.registry, messaging.senderId) ??
+		IrcBus.forRegistry(messaging.registry).take(messaging.senderId)
+	);
 }
 
 /**
@@ -226,7 +229,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		const busCancelled = new Error("wait settled");
 		const busLeg: Promise<{ message: IrcMessage | null; error: Error | null }> | undefined =
 			messaging && busAbort
-				? IrcBus.global()
+				? IrcBus.forRegistry(messaging.registry)
 						.wait(
 							messaging.senderId,
 							{},

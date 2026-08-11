@@ -12,6 +12,7 @@ import type { SessionManager } from "./session-manager";
 export interface IrcBridgeHost {
 	agent: Agent;
 	sessionManager: SessionManager;
+	agentRegistry?: AgentRegistry;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	planModeEnabled(): boolean;
@@ -203,7 +204,7 @@ export class IrcBridge {
 		};
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
-			const recipientParentId = AgentRegistry.global().get(msg.to)?.parentId;
+			const recipientParentId = (this.#host.agentRegistry ?? AgentRegistry.global()).get(msg.to)?.parentId;
 			if (recipientParentId === msg.from) {
 				this.#host.agent.steer({
 					role: "user",
@@ -244,4 +245,5 @@ export class IrcBridge {
 			this.#host.agent.emitExternalEvent({ type: "message_end", message: record });
 		}
 	}
+
 }

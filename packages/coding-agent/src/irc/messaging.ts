@@ -14,13 +14,14 @@ function coordinationErrorResult(text: string, details: CoordinationDetails): Ag
 }
 
 /** Messaging is available to subagents and to top-level sessions able to spawn peers. */
-export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
+export function isIrcEnabled(settings: Settings, taskDepth: number, registry?: AgentRegistry): boolean {
 	if (taskDepth > 0) return true;
 	// Top-level session: peers exist if it can still spawn subagents (the capacity gate the task tool
 	// uses, reused to avoid drift) OR a remote transport is installed — the murmur bridge seeds remote
 	// cluster peers as proxy refs (murmur-q00p), so even a leaf root has peers to reach.
 	const maxDepth = cfgTaskMaxRecursionDepth.get(settings);
-	return canSpawnAtDepth(maxDepth, taskDepth) || IrcBus.global().hasRemoteTransport();
+	const bus = registry ? IrcBus.forRegistry(registry) : IrcBus.global();
+	return canSpawnAtDepth(maxDepth, taskDepth) || bus.hasRemoteTransport();
 }
 
 export function formatIncoming(msg: IrcMessage): string {
@@ -66,7 +67,7 @@ export async function executeSend(
 
 	const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
 	const suppressRelay = isBroadcast && targets.includes(MAIN_AGENT_ID);
-	const bus = IrcBus.global();
+	const bus = IrcBus.forRegistry(registry);
 	const receipts = await Promise.all(
 		targets.map(target => bus.send({ from: senderId, to: target, body: message }, { suppressRelay })),
 	);
