@@ -6,16 +6,19 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 
 describe("IrcBus.deliverInbound", () => {
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
 	});
 	afterEach(() => {
 		IrcBus.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
 	});
 
 	it("delivers to a live local recipient and returns the native id it minted", async () => {
