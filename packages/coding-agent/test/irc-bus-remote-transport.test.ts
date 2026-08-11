@@ -526,4 +526,20 @@ describe("remote id helpers (murmur-167o)", () => {
 		expect(() => composeRemoteId("bad ns", "x")).toThrow(/namespace/);
 		expect(() => composeRemoteId("cluster-a", "a/b")).toThrow(/name/);
 	});
+
+	it("rejects namespaces over 64 chars and names over 128 chars", () => {
+		// Boundary: a max-length id is accepted, one char over is rejected — so a bridge cannot bloat
+		// every subagent prompt / `hub list` with an unbounded @ns/name (displayName is separately
+		// capped). Murmur wire slugs are <=40 chars/segment, so these bound abuse without rejecting a
+		// realistic dotted id (#7401 review).
+		const ns64 = "a".repeat(64);
+		const name128 = "a".repeat(128);
+		expect(isValidRemoteNamespace(ns64)).toBe(true);
+		expect(isValidRemoteNamespace(`${ns64}a`)).toBe(false);
+		expect(isValidRemoteName(name128)).toBe(true);
+		expect(isValidRemoteName(`${name128}a`)).toBe(false);
+		expect(composeRemoteId(ns64, name128)).toBe(`@${ns64}/${name128}`);
+		expect(() => composeRemoteId(`${ns64}a`, "x")).toThrow(/namespace/);
+		expect(() => composeRemoteId("cluster-a", `${name128}a`)).toThrow(/name/);
+	});
 });
