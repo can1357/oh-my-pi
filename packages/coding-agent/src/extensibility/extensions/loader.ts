@@ -17,7 +17,7 @@ import type {
 	TSchema,
 } from "@oh-my-pi/pi-ai";
 import { isBuiltinComposerStyle, type KeyId } from "@oh-my-pi/pi-tui";
-import { hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { hasFsCode, isEacces, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { type ExtensionModule, extensionModuleCapability } from "../../capability/extension-module";
 import { type Hook, hookCapability } from "../../capability/hook";
 import { isServiceTierFamily, isServiceTierForFamily } from "../../config/service-tier";
@@ -214,7 +214,22 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	#claimedNamespace: string | undefined;
 	#ircTeardownArmed = false;
 	readonly irc: IrcApi = {
-		deliverInbound: (msg, opts) => IrcBus.forRegistry(this.registry).deliverInbound(msg, opts),
+		deliverInbound: (msg, opts) => {
+			// A load may only inject inbound from the namespace it claimed via setRemoteTransport, so a
+			// bridge for namespace A cannot forge `@B/x` and have B's wait/auto-reply route a reply back
+			// out through B's transport (#7401 review). Enforced per-load, above the shared-registry bus.
+			if (this.#claimedNamespace === undefined || remoteNamespaceOf(msg.from) !== this.#claimedNamespace) {
+				return Promise.resolve({
+					receipt: {
+						to: msg.to,
+						outcome: "failed" as const,
+						error: `Inbound sender "${msg.from}" is not in this load's claimed IRC namespace "@${this.#claimedNamespace ?? "(none)"}/".`,
+					},
+					id: Snowflake.next(),
+				});
+			}
+			return IrcBus.forRegistry(this.registry).deliverInbound(msg, opts);
+		},
 		setRemoteTransport: (namespace, transport) => {
 			if (!isValidRemoteNamespace(namespace)) {
 				throw new Error(

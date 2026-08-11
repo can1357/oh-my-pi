@@ -708,13 +708,17 @@ export class IrcBus {
 
 	/**
 	 * Surface agent↔agent (or agent↔remote) traffic as a display-only card on the ROOT session's
-	 * UI — this registry's `main`-kind agent, "Main" for the in-repo default but a custom id (e.g.
-	 * ACP's `acp:<sessionId>`) for an embedder-supplied registry. Skipped when the root is itself an
-	 * endpoint: as recipient its own `deliverIrcMessage`/`wait` result already shows the message,
-	 * and as sender the irc send tool call already rendered the outbound body.
+	 * UI — the `main`-kind root of the LOCAL participant's tree ({@link #rootMainFor}): "Main" for
+	 * the in-repo default, a custom id (e.g. ACP's `acp:<sessionId>`) for an embedder-supplied
+	 * registry, and — when several top-level sessions share one registry — the sender's OWN root.
+	 * Skipped when that root is itself an endpoint: as recipient its own `deliverIrcMessage`/`wait`
+	 * result already shows the message, and as sender the irc send tool call already rendered it.
 	 */
 	#relayToMainUi(message: IrcMessage): void {
-		const root = this.#rootMainRef();
+		// The local participant is the non-remote endpoint (a remote `@ns/name` peer has no local
+		// transcript to relay into).
+		const localId = remoteNamespaceOf(message.from) === undefined ? message.from : message.to;
+		const root = this.#rootMainFor(localId);
 		if (!root || message.to === root.id || message.from === root.id) return;
 		const rootSession = root.session;
 		if (!rootSession) return;
@@ -735,9 +739,19 @@ export class IrcBus {
 		}
 	}
 
-	/** This registry's top-level `main`-kind ref — "Main" for the in-repo default, or a custom root
-	 *  (e.g. ACP's `acp:<sessionId>`) for an embedder-supplied registry. */
-	#rootMainRef(): AgentRef | undefined {
-		return this.#registry.list().find(ref => ref.kind === "main");
+	/**
+	 * The `main`-kind root of `id`'s tree — walk its parentId chain to the first `main` ref, so in a
+	 * shared registry a subagent's traffic lands on ITS root, not whichever main registered first.
+	 * Falls back to the registry's main when the chain isn't registered (a synthetic/unregistered
+	 * sender) so the relay still surfaces instead of being dropped.
+	 */
+	#rootMainFor(id: string): AgentRef | undefined {
+		let ref = this.#registry.get(id);
+		const seen = new Set<string>();
+		while (ref && ref.kind !== "main" && ref.parentId && !seen.has(ref.id)) {
+			seen.add(ref.id);
+			ref = this.#registry.get(ref.parentId);
+		}
+		return ref?.kind === "main" ? ref : this.#registry.list().find(candidate => candidate.kind === "main");
 	}
 }

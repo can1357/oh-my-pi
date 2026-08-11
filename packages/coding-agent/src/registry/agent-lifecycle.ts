@@ -561,14 +561,17 @@ export class AgentLifecycleManager {
 		this.#disposed = true;
 		this.#unsubscribe = undefined;
 		this.#roots.clear();
-		await this.#releaseIds([...new Set([...this.#adopted.keys(), ...this.#parks.keys()])], deadlineAt);
-		this.#revivals.clear();
-		this.#parks.clear();
-		this.#persistedReviverFactory = undefined;
+		// Evict this dead manager so a later session on the same registry gets a FRESH, re-subscribed
+		// one from forRegistry() — a disposed manager has torn down its registry.onChange listener and
+		// would silently miss status_changed/removed for future adopted subagents (#7401 review).
 		if (AgentLifecycleManager.#managers.get(this.#registry) === this) {
 			AgentLifecycleManager.#managers.delete(this.#registry);
 		}
 		if (AgentLifecycleManager.#global === this) AgentLifecycleManager.#global = undefined;
+		await this.#releaseIds([...new Set([...this.#adopted.keys(), ...this.#parks.keys()])], deadlineAt);
+		this.#revivals.clear();
+		this.#parks.clear();
+		this.#persistedReviverFactory = undefined;
 	}
 
 	/** Release the given adopted/parked ids together under a shared cleanup deadline. */

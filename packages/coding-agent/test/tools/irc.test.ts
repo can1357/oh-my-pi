@@ -203,9 +203,9 @@ describe("IRC", () => {
 			const main = makeFakeSession();
 			registry.register({ id: "Main", displayName: "main", kind: "main", session: main.session });
 			const a = makeFakeSession();
-			registry.register({ id: "0-A", displayName: "task", kind: "sub", session: a.session });
+			registry.register({ id: "0-A", displayName: "task", kind: "sub", parentId: "Main", session: a.session });
 			const b = makeFakeSession();
-			registry.register({ id: "0-B", displayName: "task", kind: "sub", session: b.session });
+			registry.register({ id: "0-B", displayName: "task", kind: "sub", parentId: "Main", session: b.session });
 
 			await bus.send({ from: "Main", to: "0-A", body: "outbound from main" });
 			await bus.send({ from: "0-A", to: "Main", body: "inbound to main" });
@@ -221,9 +221,21 @@ describe("IRC", () => {
 			const root = makeFakeSession();
 			registry.register({ id: "acp:sid", displayName: "acp", kind: "main", session: root.session });
 			const a = makeFakeSession();
-			registry.register({ id: "acp:sid-A", displayName: "task", kind: "sub", session: a.session });
+			registry.register({
+				id: "acp:sid-A",
+				displayName: "task",
+				kind: "sub",
+				parentId: "acp:sid",
+				session: a.session,
+			});
 			const b = makeFakeSession();
-			registry.register({ id: "acp:sid-B", displayName: "task", kind: "sub", session: b.session });
+			registry.register({
+				id: "acp:sid-B",
+				displayName: "task",
+				kind: "sub",
+				parentId: "acp:sid",
+				session: b.session,
+			});
 
 			await bus.send({ from: "acp:sid-A", to: "acp:sid-B", body: "sibling note" });
 

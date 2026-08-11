@@ -53,6 +53,7 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 
 	it("delegates to the global bus — a miss returns deliverInbound's failed receipt + a native id", async () => {
 		const irc = await captureIrc();
+		irc.setRemoteTransport?.("cluster", injectingTransport());
 		const { receipt, id } = await irc.deliverInbound({ from: "@cluster/remote", to: "ghost", body: "hi" });
 		expect(receipt.outcome).toBe("failed");
 		expect(receipt.error).toMatch(/Unknown agent "ghost"/);
@@ -62,9 +63,24 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 	it("resolves a recipient on the global registry (proves it uses IrcBus.global(), not a fresh bus)", async () => {
 		AgentRegistry.global().register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "idle" });
 		const irc = await captureIrc();
+		irc.setRemoteTransport?.("cluster", injectingTransport());
 		IrcBus.global().wait("Main", { from: "@cluster/peer" }, 1000);
 		const { receipt } = await irc.deliverInbound({ from: "@cluster/peer", to: "Main", body: "hi" });
 		expect(receipt.outcome).not.toBe("failed");
+	});
+
+	it("deliverInbound rejects a sender outside the load's claimed namespace", async () => {
+		AgentRegistry.global().register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "idle" });
+		const irc = await captureIrc();
+		irc.setRemoteTransport?.("cluster-a", injectingTransport());
+		// In-namespace sender is delivered (a waiter consumes it)...
+		IrcBus.global().wait("Main", { from: "@cluster-a/alice" }, 1000);
+		const ok = await irc.deliverInbound({ from: "@cluster-a/alice", to: "Main", body: "hi" });
+		expect(ok.receipt.outcome).not.toBe("failed");
+		// ...but a forged sender in a DIFFERENT namespace is rejected before it reaches the bus.
+		const forged = await irc.deliverInbound({ from: "@cluster-b/mallory", to: "Main", body: "spoof" });
+		expect(forged.receipt.outcome).toBe("failed");
+		expect(forged.receipt.error).toMatch(/claimed IRC namespace/);
 	});
 
 	it("claims a namespace via setRemoteTransport; a registered peer routes to the transport with its bare name", async () => {
