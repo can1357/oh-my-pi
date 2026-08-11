@@ -33,12 +33,12 @@ describe("IrcBus.forRegistry (per-registry isolation)", () => {
 		const b = new AgentRegistry();
 		a.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "idle" });
 		// A's bus resolves "Main" (its waiter consumes the message).
-		const waitA = IrcBus.forRegistry(a).wait("Main", { from: "peer" }, 1000);
-		const inA = await IrcBus.forRegistry(a).deliverInbound({ from: "peer", to: "Main", body: "hi-a" });
+		const waitA = IrcBus.forRegistry(a).wait("Main", { from: "@cluster/peer" }, 1000);
+		const inA = await IrcBus.forRegistry(a).deliverInbound({ from: "@cluster/peer", to: "Main", body: "hi-a" });
 		expect(inA.receipt.outcome).not.toBe("failed");
 		expect((await waitA)?.body).toBe("hi-a");
 		// B never registered "Main" — the same address misses; registries share no refs.
-		const inB = await IrcBus.forRegistry(b).deliverInbound({ from: "peer", to: "Main", body: "hi-b" });
+		const inB = await IrcBus.forRegistry(b).deliverInbound({ from: "@cluster/peer", to: "Main", body: "hi-b" });
 		expect(inB.receipt.outcome).toBe("failed");
 		expect(inB.receipt.error).toMatch(/Unknown agent "Main"/);
 	});

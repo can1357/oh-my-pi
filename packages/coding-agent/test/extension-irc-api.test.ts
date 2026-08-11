@@ -53,7 +53,7 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 
 	it("delegates to the global bus — a miss returns deliverInbound's failed receipt + a native id", async () => {
 		const irc = await captureIrc();
-		const { receipt, id } = await irc.deliverInbound({ from: "remote", to: "ghost", body: "hi" });
+		const { receipt, id } = await irc.deliverInbound({ from: "@cluster/remote", to: "ghost", body: "hi" });
 		expect(receipt.outcome).toBe("failed");
 		expect(receipt.error).toMatch(/Unknown agent "ghost"/);
 		expect(typeof id).toBe("string");
@@ -62,8 +62,8 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 	it("resolves a recipient on the global registry (proves it uses IrcBus.global(), not a fresh bus)", async () => {
 		AgentRegistry.global().register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "idle" });
 		const irc = await captureIrc();
-		IrcBus.global().wait("Main", { from: "peer" }, 1000);
-		const { receipt } = await irc.deliverInbound({ from: "peer", to: "Main", body: "hi" });
+		IrcBus.global().wait("Main", { from: "@cluster/peer" }, 1000);
+		const { receipt } = await irc.deliverInbound({ from: "@cluster/peer", to: "Main", body: "hi" });
 		expect(receipt.outcome).not.toBe("failed");
 	});
 

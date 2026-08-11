@@ -266,7 +266,7 @@ describe("IrcBus RemoteTransport seam", () => {
 		const { transport, seen } = recordingTransport("injected");
 		bus.setRemoteTransport(NS, transport, OWNER);
 
-		const { receipt } = await bus.deliverInbound({ from: "peer", to: "@cluster-a/beatrice", body: "hi" });
+		const { receipt } = await bus.deliverInbound({ from: "@cluster-a/alice", to: "@cluster-a/beatrice", body: "hi" });
 
 		expect(receipt.outcome).toBe("failed");
 		expect(seen).toHaveLength(0);
