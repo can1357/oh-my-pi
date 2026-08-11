@@ -179,6 +179,28 @@ export class ExtensionRuntime implements IExtensionRuntime {
 }
 
 /**
+ * Sanitize a bridge-provided remote peer display name before it is stored on an AgentRef and later
+ * interpolated into subagent system prompts (renderIrcPeerRoster). The value arrives over the
+ * transport from another process, so an unsanitized name with newlines/control chars could inject
+ * lines into every spawned subagent's prompt. Collapse to a bounded single line; fall back to the
+ * (already isValidRemoteName-validated) bare name when nothing usable remains.
+ */
+const REMOTE_DISPLAY_NAME_MAX = 64;
+function sanitizeRemoteDisplayName(raw: string | undefined, fallback: string): string {
+	if (typeof raw !== "string") return fallback;
+	let out = "";
+	for (const ch of raw) {
+		const code = ch.codePointAt(0) ?? 0;
+		// Drop C0/C1 control chars (incl. newlines, tabs, ESC) so a hostile name can't break out of
+		// its roster line; printable chars pass through and whitespace runs are collapsed below.
+		out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? " " : ch;
+	}
+	const single = out.replace(/\s+/g, " ").trim();
+	if (single.length === 0) return fallback;
+	return single.length > REMOTE_DISPLAY_NAME_MAX ? `${single.slice(0, REMOTE_DISPLAY_NAME_MAX - 1)}…` : single;
+}
+
+/**
  * ExtensionAPI implementation for an extension.
  * Registration methods write to the extension object.
  * Action methods delegate to the shared runtime.
@@ -218,7 +240,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			const id = composeRemoteId(namespace, peer.name);
 			this.registry.register({
 				id,
-				displayName: peer.displayName ?? peer.name,
+				displayName: sanitizeRemoteDisplayName(peer.displayName, peer.name),
 				kind: "remote",
 				session: null,
 				status: peer.status,
