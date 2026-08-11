@@ -18,6 +18,7 @@ import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -34,7 +35,11 @@ const taskAgent: AgentDefinition = {
 	source: "bundled",
 };
 
-function createSession(options: { manager?: AsyncJobManager; settings?: Record<string, unknown> }): ToolSession {
+function createSession(options: {
+	manager?: AsyncJobManager;
+	settings?: Record<string, unknown>;
+	agentRegistry?: AgentRegistry;
+}): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
@@ -42,6 +47,7 @@ function createSession(options: { manager?: AsyncJobManager; settings?: Record<s
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		asyncJobManager: options.manager,
+		agentRegistry: options.agentRegistry,
 	} as unknown as ToolSession;
 }
 
@@ -156,6 +162,43 @@ describe("task spawn routing", () => {
 		expect(job!.resultText).toContain("history://Spawnling");
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
+	});
+
+	it("uses the session registry for stopped-agent resume and transcript hints", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
+		const registry = new AgentRegistry();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const id = options.id ?? "?";
+			registry.register({
+				id,
+				displayName: "task",
+				kind: "sub",
+				session: { messages: [] } as unknown as AgentSession,
+				status: "idle",
+			});
+			AgentRegistry.global().register({
+				id,
+				displayName: "task",
+				kind: "sub",
+				session: null,
+				status: "aborted",
+			});
+			return makeResult(id, { aborted: true, exitCode: 1 });
+		});
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager, agentRegistry: registry }));
+		const result = await tool.execute("tc-stopped", {
+			agent: "task",
+			name: "Stopped",
+			task: "Do the thing.",
+		} as TaskParams);
+		const job = manager.getJob(result.details!.async!.jobId)!;
+		await job.promise;
+
+		expect(job.status).toBe("failed");
+		expect(job.errorText).toContain("Stopped was stopped but is still resumable");
+		expect(job.errorText).toContain("history://Stopped");
+		expect(job.errorText).not.toContain("transcript unavailable");
 	});
 
 	for (const { label, runnerOverrides, expectRetained } of [

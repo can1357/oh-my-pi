@@ -90,28 +90,38 @@ interface RevivingAgent {
 }
 
 export class AgentLifecycleManager {
+	/**
+	 * One manager per AgentRegistry — mirrors IrcBus.forRegistry so the per-registry
+	 * (registry, bus, lifecycle) trio stays consistent: the root + its subagents share the
+	 * process-global registry (one manager, so Main<->Scout adoption/revival works), while an
+	 * isolated session registry gets its own manager owning ONLY its refs. Weak so a manager is
+	 * collected with its registry; #global caches the global-registry manager for a deterministic,
+	 * order-independent test reset.
+	 */
+	static #managers = new WeakMap<AgentRegistry, AgentLifecycleManager>();
 	static #global: AgentLifecycleManager | undefined;
 
-	static global(): AgentLifecycleManager {
-		const current = AgentLifecycleManager.#global;
-		if (current) {
-			// The manager captures its registry at construction and subscribes to
-			// it for the manager's lifetime. A test that swaps the global registry
-			// (`AgentRegistry.resetGlobalForTests`) without also resetting this
-			// manager would strand it on the dead instance: terminal transitions
-			// (`release`) would mutate the old registry while consumers subscribe
-			// to the new one, so `status_changed` never reaches them (issue #11432).
-			// Rebind by retiring the stale manager and reconstructing against the
-			// current global registry. In production the registry is never reset, so
-			// this always short-circuits and the singleton is stable.
-			if (current.#registry === AgentRegistry.global()) return current;
-			current.#retire();
+	/** The manager owning `registry`'s adopted-subagent lifecycle, created on first use. */
+	static forRegistry(registry: AgentRegistry = AgentRegistry.global()): AgentLifecycleManager {
+		if (registry === AgentRegistry.global()) {
+			const current = AgentLifecycleManager.#global;
+			if (current && current.#registry !== registry) current.#retire();
 		}
-		AgentLifecycleManager.#global = new AgentLifecycleManager();
-		return AgentLifecycleManager.#global;
+		let manager = AgentLifecycleManager.#managers.get(registry);
+		if (!manager) {
+			manager = new AgentLifecycleManager(registry);
+			AgentLifecycleManager.#managers.set(registry, manager);
+		}
+		if (registry === AgentRegistry.global()) AgentLifecycleManager.#global = manager;
+		return manager;
 	}
 
-	/** Reset the global manager. Test-only. */
+	/** The manager for the process-global registry — the default for the root session and subagents. */
+	static global(): AgentLifecycleManager {
+		return AgentLifecycleManager.forRegistry(AgentRegistry.global());
+	}
+
+	/** Reset the global registry's manager. Test-only. */
 	static resetGlobalForTests(): void {
 		const current = AgentLifecycleManager.#global;
 		if (current) current.#retire();
@@ -129,6 +139,7 @@ export class AgentLifecycleManager {
 		this.#revivals.clear();
 		this.#parks.clear();
 		this.#persistedReviverFactory = undefined;
+		AgentLifecycleManager.#managers.delete(this.#registry);
 	}
 
 	readonly #registry: AgentRegistry;
@@ -527,6 +538,9 @@ export class AgentLifecycleManager {
 		this.#revivals.clear();
 		this.#parks.clear();
 		this.#persistedReviverFactory = undefined;
+		if (AgentLifecycleManager.#managers.get(this.#registry) === this) {
+			AgentLifecycleManager.#managers.delete(this.#registry);
+		}
 		if (AgentLifecycleManager.#global === this) AgentLifecycleManager.#global = undefined;
 	}
 

@@ -13,6 +13,7 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type AgentHubDeps, AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
@@ -375,6 +376,24 @@ describe("Agent hub row ordering", () => {
 			expect(ids).not.toContain("remote-peer");
 		} finally {
 			hub.dispose();
+		}
+	});
+
+	it("releases a custom-registry agent through the host lifecycle adapter", async () => {
+		const registry = new AgentRegistry();
+		const ref = registry.register({
+			id: "ScopedHubWorker",
+			displayName: "Scoped hub worker",
+			kind: "sub",
+			session: null,
+			status: "idle",
+		});
+		const runtime = createAgentHubRuntime({ registry });
+		try {
+			expect(await runtime.lifecycle().release(ref.id, ref, { tombstone: true })).toBe(true);
+			expect(registry.get(ref.id)?.status).toBe("aborted");
+		} finally {
+			await AgentLifecycleManager.forRegistry(registry).dispose();
 		}
 	});
 

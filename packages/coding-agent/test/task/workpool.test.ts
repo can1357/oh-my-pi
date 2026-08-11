@@ -44,6 +44,7 @@ function makeSession(
 	concurrency = 2,
 	freshAgents = false,
 	deliveries?: Array<{ id: string; text: string }>,
+	registry: AgentRegistry = AgentRegistry.global(),
 ): ToolSession {
 	const manager = new AsyncJobManager({ retentionMs: 0 });
 	if (deliveries) {
@@ -61,12 +62,13 @@ function makeSession(
 			"eval.workpool.freshAgents": freshAgents,
 		}),
 		asyncJobManager: manager,
+		agentRegistry: registry,
 		getAgentId: () => "Main",
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => null,
 	} satisfies ToolSession;
-	AgentRegistry.global().register({
+	registry.register({
 		id: "Main",
 		displayName: "Main",
 		kind: "main",
@@ -104,8 +106,8 @@ function execution(id: string, output?: string): StructuredSubagentResult {
 	};
 }
 
-function markIdle(id: string): void {
-	AgentRegistry.global().register({
+function markIdle(id: string, registry: AgentRegistry = AgentRegistry.global()): void {
+	registry.register({
 		id,
 		displayName: id,
 		kind: "sub",
@@ -220,6 +222,45 @@ describe("WorkPool dispatch", () => {
 		expect(followSpy.mock.calls[0]?.[0].message).not.toContain("todo");
 		follow.resolve();
 		await finishPool(session, workpool);
+	});
+	it("threads the session's own registry into the WorkPool follow-up turn (custom registry, finding 5)", async () => {
+		const custom = new AgentRegistry();
+		const cards: CustomMessage[] = [];
+		const session = makeSession(cards, 1, false, undefined, custom);
+		const first = Promise.withResolvers<void>();
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			await first.promise;
+			markIdle(request.identity?.id ?? "missing", custom);
+			return execution(request.identity?.id ?? "missing");
+		});
+		const followSpy = vi.spyOn(executor, "runSubagentFollowUpTurn").mockImplementation(async options => {
+			markIdle(options.id, custom);
+			return singleResult(options.id, "second batch");
+		});
+		const workpool = pool(session, "custom-reg");
+		workpool.push(["first", "second"]);
+		await until(() => workpool.agents[0]?.queue.length === 1);
+		first.resolve();
+		await until(() => followSpy.mock.calls.length === 1);
+		// finding 5: turn 2 must run against the session's OWN registry, never the process-global one —
+		// a custom-registry SDK worker is otherwise "Unknown agent" on turn 2. Reverting the workpool
+		// registry thread leaves this undefined, so this assertion fails.
+		expect(followSpy.mock.calls[0]?.[0].registry).toBe(custom);
+		await finishPool(session, workpool);
+		// finding 5 (behaviour): the pool relays cards to the owner registered ONLY in `custom`. The
+		// second-turn `batch` card (#card fires it once agent.turns>0) must reach that parent recorder;
+		// reverting workpool.ts:611 to AgentRegistry.global() drops it (global has no owner) and empties this.
+		const secondTurnCard = cards.some(card => {
+			const details = card.details;
+			return (
+				card.customType === "irc:workpool" &&
+				typeof details === "object" &&
+				details !== null &&
+				"mode" in details &&
+				details.mode === "batch"
+			);
+		});
+		expect(secondTurnCard).toBe(true);
 	});
 	it("tombstones the worker session when clearing the yield contract fails", async () => {
 		const session = makeSession([], 1);

@@ -112,9 +112,11 @@ export async function sessionFilesFromDisk(preferredDir?: string): Promise<Map<s
  * and probing never throws: a stale path or unreadable artifacts subtree
  * reads as unavailable instead of disturbing the caller's delivery path.
  */
-export async function hasResolvableTranscript(agentId: string): Promise<boolean> {
+export async function hasResolvableTranscript(
+	agentId: string,
+	registry: AgentRegistry = AgentRegistry.global(),
+): Promise<boolean> {
 	try {
-		const registry = AgentRegistry.global();
 		const lower = agentId.toLowerCase();
 		let ref = registry.get(agentId);
 		if (ref && !isLocalSession(ref.kind)) ref = undefined;

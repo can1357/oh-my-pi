@@ -30,13 +30,21 @@ export function createAgentHubRuntime(
 	} = {},
 ): Pick<
 	AgentHubDeps<AgentRef>,
-	"registry" | "hasLocalPresence" | "lifecycle" | "irc" | "activity" | "manageActivityLive" | "transcript" | "loadPersisted" | "getRoleInfo"
+	| "registry"
+	| "hasLocalPresence"
+	| "lifecycle"
+	| "irc"
+	| "activity"
+	| "manageActivityLive"
+	| "transcript"
+	| "loadPersisted"
+	| "getRoleInfo"
 > {
 	const registry = options.registry ?? AgentRegistry.global();
 	return {
 		registry,
 		hasLocalPresence,
-		lifecycle: () => options.lifecycle ?? AgentLifecycleManager.global(),
+		lifecycle: () => options.lifecycle ?? AgentLifecycleManager.forRegistry(registry),
 		irc: options.irc ?? IrcBus.forRegistry(registry),
 		activity: options.activity ?? new AgentActivityIndex({ remote: options.remote }),
 		manageActivityLive: !options.activity,
