@@ -473,20 +473,29 @@ export class MCPCommandController {
 					}
 					const authResult = analyzeAuthError(error as Error, finalConfig.url);
 					if (authResult.requiresAuth) {
-						let oauth = authResult.authType === "oauth" ? (authResult.oauth ?? null) : null;
-						if (!oauth && finalConfig.url) {
-							try {
-								oauth = await discoverOAuthEndpoints(
-									finalConfig.url,
-									authResult.authServerUrl,
-									authResult.resourceMetadataUrl,
-								);
-							} catch {
-								// Ignore discovery error and handle below.
+						const hintedOAuth = authResult.authType === "oauth" ? (authResult.oauth ?? null) : null;
+						let oauth = null;
+						try {
+							oauth = await discoverOAuthEndpoints(
+								finalConfig.url,
+								hintedOAuth?.issuer ?? authResult.authServerUrl,
+								authResult.resourceMetadataUrl,
+								{ protectedResource: hintedOAuth?.resource },
+							);
+							if (
+								oauth &&
+								hintedOAuth &&
+								(hintedOAuth.authorizationUrl !== oauth.authorizationUrl ||
+									hintedOAuth.tokenUrl !== oauth.tokenUrl ||
+									(hintedOAuth.issuer !== undefined && hintedOAuth.issuer !== oauth.issuer))
+							) {
+								oauth = null;
 							}
+						} catch {
+							// Ignore discovery error and handle below.
 						}
 
-						if (!oauth) {
+						if (!oauth?.issuer) {
 							this.ctx.showError(
 								`Authentication required for "${parsed.initialName}", but OAuth endpoints could not be discovered. ` +
 									`Use /mcp add ${parsed.initialName} (wizard) or configure auth manually.`,
@@ -500,7 +509,9 @@ export class MCPCommandController {
 							const oauthResult = await this.#handleOAuthFlow(
 								oauth.authorizationUrl,
 								oauth.tokenUrl,
-								oauth.clientId ?? finalConfig.oauth?.clientId ?? "",
+								oauth.issuer,
+								oauth.authorizationResponseIssuerRequired,
+								finalConfig.oauth?.clientId ?? oauth.clientId ?? "",
 								finalConfig.oauth?.clientSecret ?? "",
 								oauth.scopes ?? "",
 								{
@@ -511,6 +522,8 @@ export class MCPCommandController {
 									serverUrl: finalConfig.url,
 									resource: oauthResource,
 									stripSameOriginResource: oauthResourceIsFallback,
+									clientMetadataUrl: finalConfig.oauth?.clientMetadataUrl,
+									clientIdMetadataDocumentSupported: oauth.clientIdMetadataDocumentSupported,
 								},
 							);
 							finalConfig = this.#persistOAuthResult(finalConfig, oauthResult, {
@@ -518,6 +531,7 @@ export class MCPCommandController {
 								resource: oauthResource,
 								stripSameOriginResource: oauthResourceIsFallback,
 								clientId: oauth.clientId,
+								clientMetadataUrl: finalConfig.oauth?.clientMetadataUrl,
 								userClientSecret: finalConfig.oauth?.clientSecret,
 							});
 						} catch (oauthError) {
@@ -540,6 +554,10 @@ export class MCPCommandController {
 			this.ctx.ui.setFocus(this.ctx.editor);
 		};
 
+		const wizardDiscoveryHints = new Map<
+			string,
+			{ authServerUrl?: string; resourceMetadataUrl?: string; resource?: string }
+		>();
 		// Create wizard with OAuth handler and connection test
 		const wizard = new MCPAddWizard(
 			async (name: string, config: MCPServerConfig, scope: "user" | "project") => {
@@ -551,10 +569,43 @@ export class MCPCommandController {
 				this.#handleWizardCancel();
 			},
 			async (authUrl: string, tokenUrl: string, clientId: string, clientSecret: string, scopes: string, options) => {
-				return await this.#handleOAuthFlow(authUrl, tokenUrl, clientId, clientSecret, scopes, options);
+				const hints = options?.serverUrl ? wizardDiscoveryHints.get(options.serverUrl) : undefined;
+				const discovered =
+					options?.serverUrl === undefined
+						? null
+						: await discoverOAuthEndpoints(options.serverUrl, hints?.authServerUrl, hints?.resourceMetadataUrl, {
+								protectedResource: hints?.resource ?? options.resource,
+							});
+				if (!discovered?.issuer || discovered.authorizationUrl !== authUrl || discovered.tokenUrl !== tokenUrl) {
+					throw new Error(
+						"Could not bind the configured OAuth endpoints to a discovered authorization-server issuer.",
+					);
+				}
+				return await this.#handleOAuthFlow(
+					authUrl,
+					tokenUrl,
+					discovered.issuer,
+					discovered.authorizationResponseIssuerRequired,
+					clientId,
+					clientSecret,
+					scopes,
+					options,
+				);
 			},
 			async (config: MCPServerConfig) => {
-				return await this.#handleTestConnection(config);
+				try {
+					return await this.#handleTestConnection(config);
+				} catch (error) {
+					if ((config.type === "http" || config.type === "sse") && config.url) {
+						const authResult = analyzeAuthError(error as Error, config.url);
+						wizardDiscoveryHints.set(config.url, {
+							authServerUrl: authResult.oauth?.issuer ?? authResult.authServerUrl,
+							resourceMetadataUrl: authResult.resourceMetadataUrl,
+							resource: authResult.oauth?.resource,
+						});
+					}
+					throw error;
+				}
 			},
 			() => {
 				this.ctx.ui.requestRender();
@@ -575,6 +626,8 @@ export class MCPCommandController {
 	async #handleOAuthFlow(
 		authUrl: string,
 		tokenUrl: string,
+		issuer: string,
+		authorizationResponseIssuerRequired: boolean | undefined,
 		clientId: string,
 		clientSecret: string,
 		scopes: string,
@@ -586,6 +639,8 @@ export class MCPCommandController {
 			serverUrl?: string;
 			resource?: string;
 			stripSameOriginResource?: boolean;
+			clientMetadataUrl?: string;
+			clientIdMetadataDocumentSupported?: boolean;
 		},
 	): Promise<OAuthFlowResult> {
 		const authStorage = this.ctx.session.modelRegistry.authStorage;
@@ -618,6 +673,8 @@ export class MCPCommandController {
 			const flow = new MCPOAuthFlow(
 				{
 					authorizationUrl: authUrl,
+					issuer,
+					authorizationResponseIssuerRequired,
 					tokenUrl: tokenUrl,
 					clientId: resolvedClientId,
 					clientSecret: resolvedClientSecret,
@@ -628,6 +685,8 @@ export class MCPCommandController {
 					callbackPath: opts?.callbackPath,
 					resource: opts?.resource,
 					stripSameOriginResource: opts?.stripSameOriginResource,
+					clientMetadataUrl: opts?.clientMetadataUrl,
+					clientIdMetadataDocumentSupported: opts?.clientIdMetadataDocumentSupported,
 				},
 				{
 					onAuth: (info: { url: string; instructions?: string }) => {
@@ -716,6 +775,7 @@ export class MCPCommandController {
 				clientSecret: flow.registeredClientSecret ?? resolvedClientSecret,
 				resource: flow.resource,
 				authorizationUrl: flow.authorizationUrl,
+				issuer: flow.issuer,
 			};
 
 			await authStorage.set(credentialId, oauthCredential);
@@ -762,9 +822,12 @@ export class MCPCommandController {
 			stripSameOriginResource?: boolean;
 			clientId?: string;
 			userClientSecret?: string;
+			clientMetadataUrl?: string;
 		},
 	): MCPServerConfig {
-		const clientId = result.clientId ?? opts.clientId ?? config.oauth?.clientId;
+		const clientId = opts.clientMetadataUrl
+			? result.clientId
+			: (result.clientId ?? opts.clientId ?? config.oauth?.clientId);
 		const resource =
 			result.resource ?? (opts.stripSameOriginResource ? undefined : opts.resource) ?? config.auth?.resource;
 		return {
@@ -779,7 +842,7 @@ export class MCPCommandController {
 			},
 			oauth: {
 				...config.oauth,
-				clientId,
+				...(opts.clientMetadataUrl ? {} : { clientId }),
 			},
 		};
 	}
@@ -894,6 +957,9 @@ export class MCPCommandController {
 		authorizationUrl: string;
 		tokenUrl: string;
 		clientId?: string;
+		clientIdMetadataDocumentSupported?: boolean;
+		issuer: string;
+		authorizationResponseIssuerRequired?: boolean;
 		scopes?: string;
 		resource?: string;
 	}> {
@@ -929,17 +995,31 @@ export class MCPCommandController {
 
 		// Analyze the connection error to extract OAuth endpoints
 		const authResult = analyzeAuthError(connectionError!, "url" in config ? config.url : undefined);
-		let oauth = authResult.authType === "oauth" ? (authResult.oauth ?? null) : null;
-
-		if (!oauth && (config.type === "http" || config.type === "sse") && config.url) {
-			oauth = await discoverOAuthEndpoints(config.url, authResult.authServerUrl, authResult.resourceMetadataUrl);
+		const serverUrl = config.url;
+		const hintedOAuth = authResult.authType === "oauth" ? (authResult.oauth ?? null) : null;
+		const oauth = await discoverOAuthEndpoints(
+			serverUrl,
+			hintedOAuth?.issuer ?? authResult.authServerUrl,
+			authResult.resourceMetadataUrl,
+			{ protectedResource: hintedOAuth?.resource },
+		);
+		if (
+			oauth &&
+			hintedOAuth &&
+			(hintedOAuth.authorizationUrl !== oauth.authorizationUrl ||
+				hintedOAuth.tokenUrl !== oauth.tokenUrl ||
+				(hintedOAuth.issuer !== undefined && hintedOAuth.issuer !== oauth.issuer))
+		) {
+			throw new Error(
+				"OAuth endpoints from the authentication challenge do not match authorization-server metadata.",
+			);
 		}
 
-		if (!oauth) {
+		if (!oauth?.issuer) {
 			throw new Error("Could not discover OAuth endpoints from server response.");
 		}
 
-		return oauth;
+		return { ...oauth, issuer: oauth.issuer };
 	}
 
 	async #waitForServerConnectionWithAnimation(
@@ -1557,17 +1637,43 @@ export class MCPCommandController {
 			// A user-supplied client secret may live in either block (the wizard
 			// writes it to auth.clientSecret); DCR secrets are embedded in the
 			// stored credential and never echoed back into config files.
-			const configuredClientId = found.config.oauth?.clientId ?? currentAuth?.clientId;
-			const existingCredential = lookupMcpOAuthCredentialForServer(authStorage, currentAuth, serverUrl)?.credential;
-			const flowClientId = oauth.clientId ?? configuredClientId ?? existingCredential?.clientId ?? "";
+			const unboundLookup = lookupMcpOAuthCredentialForServer(authStorage, currentAuth, serverUrl);
+			const existingLookup = lookupMcpOAuthCredentialForServer(authStorage, currentAuth, serverUrl, {
+				issuer: oauth.issuer,
+			});
+			const issuerChanged = unboundLookup !== undefined && existingLookup === undefined;
+			if (!existingLookup) {
+				await removeManagedMcpOAuthCredentials(authStorage, [
+					currentAuth?.credentialId,
+					...mcpOAuthCredentialIdsForServerUrl(serverUrl),
+				]);
+			}
+			const existingCredential = existingLookup?.credential;
+			const staticClientId = (issuerChanged ? undefined : found.config.oauth?.clientId) ?? oauth.clientId;
+			const useClientMetadataDocument =
+				staticClientId === undefined &&
+				found.config.oauth?.clientMetadataUrl !== undefined &&
+				oauth.clientIdMetadataDocumentSupported === true;
+			const flowClientId =
+				staticClientId ??
+				(useClientMetadataDocument
+					? undefined
+					: (existingCredential?.clientId ?? (issuerChanged ? undefined : currentAuth?.clientId))) ??
+				"";
 			const storedClientSecret =
-				existingCredential?.clientId === flowClientId ? existingCredential.clientSecret : undefined;
-			const userClientSecret = found.config.oauth?.clientSecret ?? currentAuth?.clientSecret;
+				!useClientMetadataDocument && existingCredential?.clientId === flowClientId
+					? existingCredential.clientSecret
+					: undefined;
+			const userClientSecret =
+				issuerChanged || useClientMetadataDocument
+					? undefined
+					: (found.config.oauth?.clientSecret ?? currentAuth?.clientSecret);
 			const flowClientSecret = userClientSecret ?? storedClientSecret ?? "";
 
 			this.#showMessage(["", theme.fg("muted", `Reauthorizing "${name}"...`), ""].join("\n"));
 
-			const currentAuthResource = currentAuth?.resource ? expandEnvVarsDeep(currentAuth.resource) : undefined;
+			const currentAuthResource =
+				!issuerChanged && currentAuth?.resource ? expandEnvVarsDeep(currentAuth.resource) : undefined;
 			const oauthResource =
 				oauth.resource ?? currentAuthResource ?? ("url" in runtimeBaseConfig ? runtimeBaseConfig.url : undefined);
 			const oauthResourceIsFallback = !oauth.resource && !currentAuthResource;
@@ -1575,6 +1681,8 @@ export class MCPCommandController {
 			const oauthResult = await this.#handleOAuthFlow(
 				oauth.authorizationUrl,
 				oauth.tokenUrl,
+				oauth.issuer,
+				oauth.authorizationResponseIssuerRequired,
 				flowClientId,
 				flowClientSecret,
 				oauth.scopes ?? "",
@@ -1586,6 +1694,8 @@ export class MCPCommandController {
 					serverUrl,
 					resource: oauthResource,
 					stripSameOriginResource: oauthResourceIsFallback,
+					clientMetadataUrl: found.config.oauth?.clientMetadataUrl,
+					clientIdMetadataDocumentSupported: oauth.clientIdMetadataDocumentSupported,
 				},
 			);
 
@@ -1603,6 +1713,7 @@ export class MCPCommandController {
 			if (currentAuth || oauthResult.credentialId !== urlKeyedId) {
 				const updated = this.#persistOAuthResult(baseConfig, oauthResult, {
 					tokenUrl: oauth.tokenUrl,
+					clientMetadataUrl: found.config.oauth?.clientMetadataUrl,
 					clientId: oauth.clientId,
 					userClientSecret,
 					resource: oauthResource,

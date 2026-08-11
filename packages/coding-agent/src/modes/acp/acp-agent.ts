@@ -56,8 +56,13 @@ import { getSessionSlashCommands } from "../../extensibility/extensions/get-comm
 import { buildSkillPromptMessage } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { resolveLocalUrlToPath } from "../../internal-urls";
+import {
+	createMCPHostInteractionBridge,
+	type MCPHostInteractionFormField,
+	type MCPHostInteractionPresentation,
+} from "../../mcp/host-interaction";
 import { MCPManager } from "../../mcp/manager";
-import type { MCPServerConfig } from "../../mcp/types";
+import type { MCPHostInteraction, MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { theme } from "../../modes/theme/theme";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
@@ -436,6 +441,127 @@ export function createAcpExtensionUiContext(
 		setTheme: async () => ({ success: false, error: "Theme changes are unavailable in ACP mode" }),
 		getToolsExpanded: () => false,
 		setToolsExpanded: () => {},
+	};
+}
+
+/**
+ * Convert the generic bridge's validated primitive field into ACP's narrower
+ * form-schema dialect. A server may offer otherwise valid MCP fields ACP
+ * cannot represent (notably `null` and numeric enums); those forms are
+ * cancelled rather than misrepresented to the client.
+ */
+function toAcpElicitationProperty(field: MCPHostInteractionFormField): ElicitationPropertySchema | undefined {
+	const common = {
+		title: field.title,
+		...(field.description !== undefined ? { description: field.description } : {}),
+	};
+	switch (field.type) {
+		case "string": {
+			const enumValues = field.enum?.filter((value): value is string => typeof value === "string");
+			if (field.enum && enumValues?.length !== field.enum.length) return undefined;
+			if (field.default !== undefined && typeof field.default !== "string") return undefined;
+			return {
+				type: "string",
+				...common,
+				...(enumValues ? { enum: enumValues } : {}),
+				...(field.default !== undefined ? { default: field.default } : {}),
+			};
+		}
+		case "number":
+		case "integer":
+			if (field.enum || (field.default !== undefined && typeof field.default !== "number")) return undefined;
+			return {
+				type: field.type,
+				...common,
+				...(field.default !== undefined ? { default: field.default } : {}),
+			};
+		case "boolean":
+			if (field.enum || (field.default !== undefined && typeof field.default !== "boolean")) return undefined;
+			return {
+				type: "boolean",
+				...common,
+				...(field.default !== undefined ? { default: field.default } : {}),
+			};
+		case "null":
+			return undefined;
+	}
+}
+
+/**
+ * Bind ACP form elicitations to the generic MRTR interaction coordinator.
+ *
+ * The coordinator validates server input and retains its request keys while
+ * this ACP-specific presenter only renders forms. The public capabilities are
+ * intentionally narrower than the generic bridge's interactive defaults:
+ * ACP has no safe URL opener here, and must not claim roots or sampling.
+ */
+export function createAcpMcpHostInteraction(
+	connection: AgentSideConnection,
+	getSessionId: () => string,
+	clientCapabilities: ClientCapabilities | undefined,
+): MCPHostInteraction | undefined {
+	if (clientCapabilities?.elicitation?.form == null) return undefined;
+
+	const bridge = createMCPHostInteractionBridge();
+	bridge.bind({
+		presentForm: async (request, signal) => {
+			if (signal?.aborted) return { action: "cancel" };
+			const properties: Record<string, ElicitationPropertySchema> = Object.create(null);
+			for (const field of request.fields) {
+				const property = toAcpElicitationProperty(field);
+				if (!property) return { action: "cancel" };
+				properties[field.name] = property;
+			}
+			const required = request.fields.filter(field => field.required).map(field => field.name);
+
+			const { promise, resolve } = Promise.withResolvers<MCPHostInteractionPresentation>();
+			let settled = false;
+			const finish = (value: MCPHostInteractionPresentation) => {
+				if (settled) return;
+				settled = true;
+				signal?.removeEventListener("abort", onAbort);
+				resolve(value);
+			};
+			const onAbort = () => finish({ action: "cancel" });
+			signal?.addEventListener("abort", onAbort, { once: true });
+
+			connection
+				.unstable_createElicitation({
+					mode: "form",
+					sessionId: getSessionId(),
+					message: request.message,
+					requestedSchema: {
+						type: "object",
+						properties,
+						...(required.length > 0 ? { required } : {}),
+					},
+				})
+				.then(
+					response => {
+						if (settled) return;
+						if (response.action === "accept") {
+							finish({ action: "accept", content: response.content });
+						} else {
+							finish({ action: response.action });
+						}
+					},
+					() => {
+						if (settled) return;
+						finish({ action: "cancel" });
+					},
+				);
+
+			return promise;
+		},
+		// URL elicitations are rejected by the coordinator before this can be
+		// reached because the facade below does not advertise URL support.
+		presentUrl: async () => ({ action: "cancel" }),
+		openUrl: () => {},
+	});
+
+	return {
+		clientCapabilities: { elicitation: { form: {} } },
+		collectInput: context => bridge.collectInput(context),
 	};
 }
 
@@ -2346,7 +2472,14 @@ export class AcpAgent implements Agent {
 			return;
 		}
 
-		const manager = new MCPManager(record.session.sessionManager.getCwd());
+		const hostInteraction = createAcpMcpHostInteraction(
+			this.#connection,
+			() => record.session.sessionId,
+			this.#clientCapabilities,
+		);
+		const manager = hostInteraction
+			? new MCPManager(record.session.sessionManager.getCwd(), null, { hostInteraction })
+			: new MCPManager(record.session.sessionManager.getCwd());
 		const configs: MCPConfigMap = {};
 		const sources: MCPSourceMap = {};
 		for (const server of servers) {

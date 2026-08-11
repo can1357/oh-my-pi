@@ -10,6 +10,12 @@
 - Deeper `AGENTS.md` files contain package-specific rules; read them before editing those directories.
 - Before editing `packages/coding-agent/` or `packages/catalog/`, read that package's `AGENTS.md`.
 
+## Kade context
+
+- Use `C:\Users\prest\.agents\kade.md` and `human.md` as the minimal machine-level bootstrap; load the `kade-hq` skill for detailed rules.
+- Unqualified “update the wiki” requests route to the repository `.wiki/` for project documentation; the two external vaults (`C:\dev\Vaults\Kade` and `C:\dev\Vaults\Design-and-Building`) remain explicit Kade destinations.
+- The `pk-has-adhd` reference is supplemental and does not override repository-local instructions.
+
 ## Code
 
 - Avoid `any` and `ReturnType<>`; use ES `#private` fields and methods.

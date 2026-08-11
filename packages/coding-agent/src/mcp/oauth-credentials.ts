@@ -1,6 +1,7 @@
 import { getActiveProfile } from "@pk-nerdsaver-ai/pi-utils/dirs";
 import { expandEnvVarsDeep } from "../discovery/helpers";
 import type { AuthStorage } from "../session/auth-storage";
+import { canonicalizeOAuthIssuer } from "./oauth-discovery";
 import {
 	isManagedMCPOAuthCredentialId,
 	type MCPStoredOAuthCredential,
@@ -15,6 +16,23 @@ export interface MCPOAuthCredentialLookup {
 }
 
 export type MCPOAuthRefreshMaterial = MCPStoredOAuthCredential | MCPAuthConfig | undefined;
+/**
+ * Issuer-bound lookup policy. Legacy credentials without `issuer`, credentials
+ * whose issuer is not already canonical, and credentials minted by a different
+ * issuer all fail closed. The legacy `authorizationUrl` field is deliberately
+ * ignored because it stored an authorization endpoint, not an issuer.
+ */
+export function mcpOAuthCredentialMatchesIssuer(credential: MCPStoredOAuthCredential, issuer: string): boolean {
+	const expectedIssuer = canonicalizeOAuthIssuer(issuer);
+	const storedIssuer = credential.issuer ? canonicalizeOAuthIssuer(credential.issuer) : undefined;
+	return (
+		expectedIssuer !== undefined &&
+		expectedIssuer === issuer &&
+		storedIssuer !== undefined &&
+		storedIssuer === credential.issuer &&
+		storedIssuer === expectedIssuer
+	);
+}
 
 export function mcpOAuthCredentialIdsForServerUrl(serverUrl: string | undefined): string[] {
 	if (!serverUrl) return [];
@@ -35,7 +53,7 @@ export function lookupMcpOAuthCredentialForServer(
 	authStorage: AuthStorage | null | undefined,
 	auth: MCPAuthConfig | undefined,
 	serverUrl: string | undefined,
-	options: { allowUrlKeyedFallback?: boolean } = {},
+	options: { allowUrlKeyedFallback?: boolean; issuer?: string } = {},
 ): MCPOAuthCredentialLookup | undefined {
 	if (!authStorage) return undefined;
 	if (auth && auth.type !== "oauth") return undefined;
@@ -45,7 +63,10 @@ export function lookupMcpOAuthCredentialForServer(
 		(!auth.credentialId.startsWith("mcp_oauth:profile:") || urlKeyedCredentialIds.includes(auth.credentialId))
 	) {
 		const credential = authStorage.get(auth.credentialId);
-		if (credential?.type === "oauth") {
+		if (
+			credential?.type === "oauth" &&
+			(options.issuer === undefined || mcpOAuthCredentialMatchesIssuer(credential, options.issuer))
+		) {
 			return { credentialId: auth.credentialId, credential };
 		}
 	}
@@ -53,6 +74,7 @@ export function lookupMcpOAuthCredentialForServer(
 	for (const credentialId of urlKeyedCredentialIds) {
 		const credential = authStorage.get(credentialId);
 		if (credential?.type === "oauth") {
+			if (options.issuer !== undefined && !mcpOAuthCredentialMatchesIssuer(credential, options.issuer)) continue;
 			return { credentialId, credential };
 		}
 	}

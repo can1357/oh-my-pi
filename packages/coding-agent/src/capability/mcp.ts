@@ -41,6 +41,8 @@ export interface MCPServer {
 	/** OAuth configuration (clientId, clientSecret, redirectUri, callbackPort, callbackPath, prompt) for servers requiring explicit client credentials */
 	oauth?: {
 		clientId?: string;
+		/** HTTPS OAuth Client ID Metadata Document URL used as a URL-form client_id when supported by the authorization server */
+		clientMetadataUrl?: string;
 		clientSecret?: string;
 		redirectUri?: string;
 		callbackPort?: number;

@@ -101,6 +101,22 @@ describe("NineRouterController", () => {
 		expect(settings.getModelRole("task")).toBe("9router/openrouter/qwen/qwen3.6-35b-a3b:nitro");
 	});
 
+	test("routes the optional ClinePass subscription combo", async () => {
+		const settings = makeSettings();
+		const controller = new NineRouterController({
+			settings,
+			baseUrl: "http://127.0.0.1:20128/v1",
+			fetch: makeFetch(["clinepass-deepseek-v4-flash"]),
+		});
+
+		await controller.apply({ roles: ["default", "balanced", "task", "budget"] });
+
+		expect(settings.getModelRole("default")).toBe("9router/clinepass-deepseek-v4-flash");
+		expect(settings.getModelRole("balanced")).toBe("9router/clinepass-deepseek-v4-flash");
+		expect(settings.getModelRole("task")).toBe("9router/clinepass-deepseek-v4-flash");
+		expect(settings.getModelRole("budget")).toBe("9router/clinepass-deepseek-v4-flash");
+	});
+
 	test("probe mode skips candidates that fail the chat probe", async () => {
 		const settings = makeSettings();
 		const fetchImpl: FetchImpl = async (input, init) => {

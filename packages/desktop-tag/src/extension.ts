@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@pk-nerdsaver-ai/pi-coding-
 import type { KeyId } from "@pk-nerdsaver-ai/pi-tui";
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
 
+import { gatewayDaemonStatus, loadCaptureConfig, startGatewayDaemon, stopGatewayDaemon } from "./capture";
 import { CaptureService } from "./context";
 import { type CapabilityRegistry, createDefaultRegistry, routeContext, updateAvailability } from "./router";
 import type { CaptureMode, CaptureRegion, ContextPacket } from "./types";
@@ -28,6 +29,59 @@ export default function desktopTagExtension(pi: ExtensionAPI): void {
 				const message = error instanceof Error ? error.message : String(error);
 				logger.error("desktop-tag command rejected", { error: message });
 				if (ctx.hasUI) ctx.ui.notify(message, "error");
+			}
+		},
+	});
+
+	pi.registerCommand("telegram", {
+		description: "Telegram capture gateway daemon: /telegram on|off|status",
+		getArgumentCompletions(argumentPrefix) {
+			const prefix = argumentPrefix.toLowerCase();
+			const items = TELEGRAM_ACTIONS.filter(action => action.startsWith(prefix)).map(action => ({
+				value: action,
+				label: action,
+			}));
+			return items.length > 0 ? items : null;
+		},
+		async handler(args, ctx) {
+			const notify = (message: string, type: "info" | "warning" | "error" = "info"): void => {
+				if (ctx.hasUI) ctx.ui.notify(message, type);
+			};
+			try {
+				const action = parseTelegramCommandArgs(args);
+				if (action === "status") {
+					const status = gatewayDaemonStatus();
+					notify(
+						status.running ? `Telegram gateway: running (pid ${status.pid})` : "Telegram gateway: not running",
+					);
+					return;
+				}
+				if (action === "on") {
+					const result = await startGatewayDaemon();
+					if (result.started) {
+						logger.info("telegram gateway started", { pid: result.pid, logFile: result.logFile });
+						notify(`Telegram gateway started (pid ${result.pid})`);
+						await warnIfTelegramUnconfigured(notify);
+					} else if (result.alreadyRunning) {
+						notify(`Telegram gateway already running (pid ${result.pid})`);
+					} else {
+						logger.error("telegram gateway failed to start", { reason: result.reason });
+						notify(`Telegram gateway failed to start: ${result.reason}`, "error");
+					}
+					return;
+				}
+				const result = await stopGatewayDaemon();
+				if (result.stopped) {
+					notify(`Telegram gateway stopped (pid ${result.pid})`);
+				} else if (!result.running) {
+					notify("Telegram gateway is not running");
+				} else {
+					notify(`Telegram gateway did not stop: ${result.reason}`, "error");
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				logger.error("telegram command rejected", { error: message });
+				notify(message, "error");
 			}
 		},
 	});
@@ -130,4 +184,37 @@ export function parseCommandArgs(args: string): ParsedTagCommand {
 		return { mode: firstMode, request: tokens.slice(1).join(" ") || DEFAULT_REQUEST };
 	}
 	return { mode: "screen", request: args.trim() || DEFAULT_REQUEST };
+}
+
+const TELEGRAM_ACTIONS = ["on", "off", "status"] as const;
+
+export type TelegramCommandAction = (typeof TELEGRAM_ACTIONS)[number];
+
+const TELEGRAM_USAGE = "Usage: /telegram <on|off|status>";
+
+export function parseTelegramCommandArgs(args: string): TelegramCommandAction {
+	const token = args.trim().split(/\s+/).filter(Boolean)[0]?.toLowerCase();
+	if (token === undefined || token === "status") return "status";
+	if (token === "on" || token === "start") return "on";
+	if (token === "off" || token === "stop") return "off";
+	throw new TypeError(TELEGRAM_USAGE);
+}
+
+/**
+ * Best-effort hint only: the gateway loads its own env (including the package
+ * `.env` via its spawn cwd), so a missing config here must not block startup.
+ */
+export async function warnIfTelegramUnconfigured(
+	notify: (message: string, type: "info" | "warning" | "error") => void,
+): Promise<void> {
+	try {
+		const config = loadCaptureConfig();
+		if (config.enabled && config.telegram.enabled && config.telegram.botToken) return;
+	} catch {
+		// fall through to the generic hint
+	}
+	notify(
+		"No Telegram capture config visible (TELEGRAM_CAPTURE_ENABLED, TELEGRAM_BOT_TOKEN). The gateway is running, but the bridge stays inactive until you set env vars or packages/desktop-tag/.env — see docs/capture-to-agent.md.",
+		"warning",
+	);
 }

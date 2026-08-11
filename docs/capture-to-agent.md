@@ -148,6 +148,28 @@ Commands: `/status`, `/stop`, `/resume`, `/session`, `/runner`,
 `/new <instruction>`, `/help`. Commands are only honored from allowlisted
 chats/users.
 
+### Toggling the gateway from the omp TUI
+
+The desktop-tag extension registers a `/telegram` slash command in the omp
+TUI:
+
+- `/telegram on` — start the gateway as a detached background process; it
+  survives closing the TUI. Output goes to `<agent-dir>/capture/gateway.log`.
+- `/telegram off` — stop the running gateway (works from any later TUI).
+- `/telegram` or `/telegram status` — report running state and pid.
+
+The gateway process owns `<agent-dir>/capture/gateway.pid` with a verifiable identity lock payload; a second
+instance (manual or toggled) is refused while one is alive. Atomic lock acquisition before initialization prevents concurrent startup races from orphaned gateways. Process ownership checks fail closed and verify process args before signaling SIGTERM. The spawned
+gateway runs with `packages/desktop-tag` as its cwd, so a `.env` file there
+is picked up by Bun in addition to variables inherited from the TUI's
+environment.
+
+Gateways started via `/telegram on` self-terminate after 30 minutes with no
+authorized inbound messages and no active runs (`CAPTURE_IDLE_EXIT_MS`,
+overridable; `0` disables). Explicit package `.env` values (including `0`) take precedence over the controller default. Active runs (evaluated uncapped across all historical rows) reset the idle clock, so the window
+starts when the last run finishes. Shutdown is lossless: sessions resume from
+their JSONL files and pending Telegram updates are retained server-side.
+
 ## API
 
 All routes are served by the loopback gateway (`TagGatewayServer`).

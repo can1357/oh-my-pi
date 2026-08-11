@@ -55,7 +55,7 @@ function startServer(): void {
 		// Notifications (no `id`) get no response.
 		if (msg.id === undefined || msg.id === null) return;
 
-		if (msg.method === "resources/templates/list") {
+		if (msg.method === "server/discover" || msg.method === "resources/templates/list") {
 			// Optional method this server doesn't implement.
 			const error = {
 				jsonrpc: "2.0" as const,

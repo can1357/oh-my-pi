@@ -35,6 +35,10 @@ rl.on("line", line => {
 		return;
 	}
 
+	if (message.method === "server/discover" && message.id !== undefined) {
+		send({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } });
+		return;
+	}
 	if (message.method === "initialize" && message.id !== undefined) {
 		send({
 			jsonrpc: "2.0",

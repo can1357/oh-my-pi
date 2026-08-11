@@ -76,7 +76,10 @@ function startServer(): void {
 			if (msg.method === "initialize" && initializeDelayMs > 0) {
 				await Bun.sleep(initializeDelayMs);
 			}
-			const response = { jsonrpc: "2.0" as const, id: msg.id, result: buildResult(msg.method) };
+			const response =
+				msg.method === "server/discover"
+					? { jsonrpc: "2.0" as const, id: msg.id, error: { code: -32601, message: "Method not found" } }
+					: { jsonrpc: "2.0" as const, id: msg.id, result: buildResult(msg.method) };
 			process.stdout.write(`${JSON.stringify(response)}\n`);
 		})();
 	});

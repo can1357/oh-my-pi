@@ -40,6 +40,11 @@ function makeResourceConnection(transport: MCPTransport): MCPServerConnection {
 		transport,
 		serverInfo: { name: "docs", version: "1.0" },
 		capabilities: { resources: {} },
+		protocol: {
+			era: "legacy",
+			version: "2025-03-26",
+			capabilities: { resources: {} },
+		},
 	};
 }
 

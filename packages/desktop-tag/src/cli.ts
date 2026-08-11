@@ -1,13 +1,23 @@
 #!/usr/bin/env bun
+import { Database } from "bun:sqlite";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
 
 import {
+	acquireGatewayLock,
 	CaptureHttpRouter,
 	CaptureOrchestrator,
 	CaptureStore,
+	createIdleExitSupervisor,
 	createTelegramTransport,
+	GATEWAY_PACKAGE_ROOT,
+	isTerminalRunStatus,
 	loadCaptureConfig,
 	PiRunnerAdapter,
+	parseIdleExitTimeoutMs,
+	releaseGatewayPidLock,
+	resolveGatewayDaemonPaths,
 	TelegramBridge,
 } from "./capture";
 import { CaptureService } from "./context";
@@ -22,6 +32,37 @@ function main(): void {
 	const port = portArg ? Number.parseInt(portArg, 10) : Number(Bun.env.OMP_DESKTOP_TAG_PORT ?? 18087);
 	const hostname = hostArg ?? (Bun.env.OMP_DESKTOP_TAG_HOST || "127.0.0.1");
 
+	let envIdleExit = Bun.env.CAPTURE_IDLE_EXIT_MS ?? Bun.env.GATEWAY_DEFAULT_IDLE_EXIT_MS;
+	try {
+		const dotEnvPath = path.join(GATEWAY_PACKAGE_ROOT, ".env");
+		if (fs.existsSync(dotEnvPath)) {
+			const content = fs.readFileSync(dotEnvPath, "utf8");
+			for (const line of content.split(/\r?\n/)) {
+				const trimmed = line.trim();
+				if (trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+				const [key, ...valParts] = trimmed.split("=");
+				if (key.trim() === "CAPTURE_IDLE_EXIT_MS") {
+					envIdleExit = valParts.join("=").trim();
+					break;
+				}
+			}
+		}
+	} catch {
+		// fall through
+	}
+	const idleExitTimeoutMs = parseIdleExitTimeoutMs(envIdleExit);
+
+	const daemonPaths = resolveGatewayDaemonPaths();
+	const lockResult = acquireGatewayLock(daemonPaths);
+	if (!lockResult.acquired) {
+		logger.error("ompk-tag already running", { pid: lockResult.pid, pidFile: daemonPaths.pidFile });
+		console.error(
+			`ompk-tag gateway already running (pid ${lockResult.pid}); stop it with /telegram off or kill ${lockResult.pid}`,
+		);
+		process.exit(1);
+	}
+	process.on("exit", () => releaseGatewayPidLock(daemonPaths));
+
 	const captureConfig = loadCaptureConfig();
 	const captureService = new CaptureService();
 
@@ -30,6 +71,32 @@ function main(): void {
 	let retentionTimer: ReturnType<typeof setInterval> | undefined;
 	let store: CaptureStore | undefined;
 
+	const idleSupervisor = createIdleExitSupervisor({
+		timeoutMs: idleExitTimeoutMs,
+		hasActiveWork: () => {
+			if (!store) return false;
+			try {
+				const dbPath = path.join(captureConfig.dataDir, "capture.db");
+				if (fs.existsSync(dbPath)) {
+					const db = new Database(dbPath, { readonly: true });
+					try {
+						const row = db
+							.query<{ count: number }, []>(
+								"SELECT COUNT(*) as count FROM capture_runs WHERE status NOT IN ('completed', 'failed', 'cancelled')",
+							)
+							.get();
+						return (row?.count ?? 0) > 0;
+					} finally {
+						db.close();
+					}
+				}
+			} catch {
+				// Fallback if sqlite open/query fails
+			}
+			return store.listRuns(500).some(run => !isTerminalRunStatus(run.status));
+		},
+		onIdle: () => void shutdown("idle-timeout"),
+	});
 	if (captureConfig.enabled) {
 		store = new CaptureStore({ dataDir: captureConfig.dataDir });
 		const runner = new PiRunnerAdapter({ autoApprove: captureConfig.autoApprove });
@@ -58,6 +125,7 @@ function main(): void {
 				config: captureConfig.telegram,
 				store,
 				transport: createTelegramTransport(captureConfig.telegram.botToken),
+				onActivity: () => idleSupervisor.noteActivity(),
 			});
 			telegram.bindOrchestrator(orchestrator);
 			orchestrator.registerCollaborationAdapter(telegram);
@@ -96,6 +164,7 @@ function main(): void {
 		stopping = true;
 		logger.info("Shutting down ompk-tag", { signal });
 		if (retentionTimer) clearInterval(retentionTimer);
+		idleSupervisor.stop();
 		stopTelegramPoll?.();
 		await server.stop();
 		store?.close();
@@ -104,6 +173,11 @@ function main(): void {
 
 	process.on("SIGINT", () => void shutdown("SIGINT"));
 	process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
+	if (idleSupervisor.enabled) {
+		idleSupervisor.start();
+		logger.info("Idle exit armed", { idleExitTimeoutMs });
+	}
 }
 
 main();

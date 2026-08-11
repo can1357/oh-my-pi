@@ -583,3 +583,479 @@ describe("StdioTransport.close", () => {
 		expect(transport.connected).toBe(false);
 	});
 });
+
+type CapturedFrame = {
+	jsonrpc?: "2.0";
+	id?: string | number;
+	method?: string;
+	params?: Record<string, unknown>;
+	result?: unknown;
+};
+
+const STDIO_CAPTURE_FIXTURE = path.join(import.meta.dir, "fixtures", "mcp-stdio-capture.mjs");
+
+async function readCapturedFrames(frameLog: string): Promise<CapturedFrame[]> {
+	let contents: string;
+	try {
+		contents = await fs.readFile(frameLog, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+		throw error;
+	}
+	return contents
+		.split(/\r?\n/)
+		.filter(Boolean)
+		.map(line => JSON.parse(line) as CapturedFrame);
+}
+
+async function waitForCapturedFrames(
+	frameLog: string,
+	predicate: (frames: CapturedFrame[]) => boolean,
+): Promise<CapturedFrame[]> {
+	for (let attempt = 0; attempt < 200; attempt++) {
+		const frames = await readCapturedFrames(frameLog);
+		if (predicate(frames)) return frames;
+		await Bun.sleep(10);
+	}
+	throw new Error(`Timed out waiting for captured stdio frames in ${frameLog}`);
+}
+
+describe("StdioTransport negotiated protocol behavior", () => {
+	let transport: StdioTransport | undefined;
+	let tempDir: string | undefined;
+	let frameLog: string;
+
+	async function connectCaptureServer(timeout?: number, extraEnv: Record<string, string> = {}): Promise<void> {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-stdio-protocol-"));
+		frameLog = path.join(tempDir, "frames.jsonl");
+		transport = new StdioTransport({
+			type: "stdio",
+			command: "node",
+			args: [STDIO_CAPTURE_FIXTURE],
+			env: { OMP_TEST_FRAME_LOG: frameLog, ...extraEnv },
+			...(timeout === undefined ? {} : { timeout }),
+		});
+		await transport.connect();
+	}
+
+	afterEach(async () => {
+		await transport?.close().catch(() => {});
+		transport = undefined;
+		if (tempDir) {
+			await fs.rm(tempDir, { recursive: true, force: true });
+			tempDir = undefined;
+		}
+	});
+
+	it("diagnoses but never dispatches or answers a server request in modern state", async () => {
+		await connectCaptureServer();
+		transport?.configureProtocol({
+			era: "modern",
+			phase: "connected",
+			version: "2026-07-28",
+			clientInfo: { name: "stdio-test", version: "1" },
+			clientCapabilities: {},
+		});
+		expect(transport?.getProtocolConfiguration()).toEqual({
+			era: "modern",
+			phase: "connected",
+			version: "2026-07-28",
+			clientInfo: { name: "stdio-test", version: "1" },
+			clientCapabilities: {},
+		});
+
+		let requestCalls = 0;
+		transport!.onRequest = async () => {
+			requestCalls++;
+			return { roots: [{ uri: "file:///forbidden" }] };
+		};
+		const violation = Promise.withResolvers<Error>();
+		transport!.onError = error => violation.resolve(error);
+
+		await transport!.notify("fixture/emit-server-request");
+		const reported = await Promise.race([
+			violation.promise,
+			Bun.sleep(2_000).then(() => {
+				throw new Error("Timed out waiting for modern server-request violation");
+			}),
+		]);
+		await Bun.sleep(50);
+
+		const frames = await readCapturedFrames(frameLog);
+		expect(reported.message).toContain("modern server sent client request");
+		expect(requestCalls).toBe(0);
+		expect(frames.some(frame => frame.id === "fixture-server-request")).toBe(false);
+	});
+
+	it("retains legacy server-request dispatch and writes the roots response", async () => {
+		await connectCaptureServer();
+		transport?.configureProtocol({
+			era: "legacy",
+			phase: "connected",
+			version: "2025-03-26",
+		});
+		let requestCalls = 0;
+		transport!.onRequest = async method => {
+			requestCalls++;
+			expect(method).toBe("roots/list");
+			return { roots: [{ uri: "file:///legacy-root" }] };
+		};
+
+		await transport!.notify("fixture/emit-server-request");
+		const frames = await waitForCapturedFrames(frameLog, captured =>
+			captured.some(frame => frame.id === "fixture-server-request"),
+		);
+		const response = frames.find(frame => frame.id === "fixture-server-request");
+
+		expect(requestCalls).toBe(1);
+		expect(response).toEqual({
+			jsonrpc: "2.0",
+			id: "fixture-server-request",
+			result: { roots: [{ uri: "file:///legacy-root" }] },
+		});
+	});
+
+	it("sends exactly one cancellation frame for an explicitly aborted in-flight request", async () => {
+		await connectCaptureServer();
+		const controller = new AbortController();
+		const reason = new Error("caller stopped request");
+		const request = transport!.request("fixture/hold", {}, { signal: controller.signal });
+		const sentFrames = await waitForCapturedFrames(frameLog, frames =>
+			frames.some(frame => frame.method === "fixture/hold"),
+		);
+		const requestId = sentFrames.find(frame => frame.method === "fixture/hold")?.id;
+
+		controller.abort(reason);
+		await expect(request).rejects.toBe(reason);
+		await waitForCapturedFrames(frameLog, frames =>
+			frames.some(frame => frame.method === "notifications/cancelled" && frame.params?.requestId === requestId),
+		);
+		await Bun.sleep(50);
+
+		const cancellations = (await readCapturedFrames(frameLog)).filter(
+			frame => frame.method === "notifications/cancelled" && frame.params?.requestId === requestId,
+		);
+		expect(cancellations).toHaveLength(1);
+		expect(cancellations[0]?.params).toEqual({ requestId });
+	});
+
+	it("sends exactly one cancellation frame when a sent request times out", async () => {
+		await connectCaptureServer(30);
+		const request = transport!.request("fixture/hold");
+		const outcome = request.catch((error: unknown) => error);
+		const sentFrames = await waitForCapturedFrames(frameLog, frames =>
+			frames.some(frame => frame.method === "fixture/hold"),
+		);
+		const requestId = sentFrames.find(frame => frame.method === "fixture/hold")?.id;
+
+		expect(await outcome).toEqual(new Error("Request timeout after 30ms"));
+		const frames = await waitForCapturedFrames(frameLog, captured =>
+			captured.some(frame => frame.method === "notifications/cancelled" && frame.params?.requestId === requestId),
+		);
+		expect(
+			frames.filter(frame => frame.method === "notifications/cancelled" && frame.params?.requestId === requestId),
+		).toHaveLength(1);
+	});
+
+	it("preserves a pre-abort reason without sending any frame", async () => {
+		await connectCaptureServer();
+		const controller = new AbortController();
+		const reason = new Error("already cancelled");
+		controller.abort(reason);
+
+		await expect(transport!.request("fixture/hold", {}, { signal: controller.signal })).rejects.toBe(reason);
+		await Bun.sleep(50);
+
+		expect(await readCapturedFrames(frameLog)).toEqual([]);
+	});
+
+	it("does not cancel when a response wins the response-abort race", async () => {
+		await connectCaptureServer();
+		const controller = new AbortController();
+		const request = transport!.request<{ ok: boolean }>("fixture/respond", {}, { signal: controller.signal });
+		const abortAfterResponse = request.then(() => controller.abort(new Error("too late")));
+
+		await expect(request).resolves.toEqual({ ok: true });
+		await abortAfterResponse;
+		await Bun.sleep(50);
+
+		const frames = await readCapturedFrames(frameLog);
+		const requestId = frames.find(frame => frame.method === "fixture/respond")?.id;
+		expect(
+			frames.filter(frame => frame.method === "notifications/cancelled" && frame.params?.requestId === requestId),
+		).toHaveLength(0);
+	});
+
+	it("keeps cancellation best-effort and nonfatal when the child closes its input pipe", async () => {
+		const tracker = trackUnhandled();
+		try {
+			await connectCaptureServer();
+			const controller = new AbortController();
+			const reason = new Error("abort after pipe close");
+			const request = transport!.request("fixture/close-input", {}, { signal: controller.signal });
+			await waitForCapturedFrames(frameLog, frames => frames.some(frame => frame.method === "fixture/close-input"));
+			await Bun.sleep(100);
+
+			controller.abort(reason);
+			await expect(request).rejects.toBe(reason);
+			await Bun.sleep(100);
+
+			expect(tracker.capture()).toEqual([]);
+		} finally {
+			tracker.release();
+		}
+	});
+
+	it("frames modern subscriptions/listen metadata, honors the acknowledged subset, and closes gracefully", async () => {
+		await connectCaptureServer(undefined, { OMP_TEST_ACK_TOOLS_ONLY: "1" });
+		transport!.configureProtocol({
+			era: "modern",
+			phase: "connected",
+			version: "2026-07-28",
+			clientInfo: { name: "stdio-test", version: "1" },
+			clientCapabilities: {},
+		});
+		const delivered: string[] = [];
+		const listener = await transport!.listen(
+			{ notifications: { toolsListChanged: true, promptsListChanged: true } },
+			{ onNotification: method => delivered.push(method) },
+		);
+
+		await expect(listener.acknowledged).resolves.toEqual({ toolsListChanged: true });
+		const frames = await waitForCapturedFrames(frameLog, captured =>
+			captured.some(frame => frame.method === "subscriptions/listen"),
+		);
+		const listenFrame = frames.find(frame => frame.method === "subscriptions/listen");
+		expect(listenFrame?.id).toBe(listener.requestId);
+		expect(listenFrame?.params).toEqual({
+			notifications: { toolsListChanged: true, promptsListChanged: true },
+			_meta: {
+				"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+				"io.modelcontextprotocol/clientCapabilities": {},
+				"io.modelcontextprotocol/clientInfo": { name: "stdio-test", version: "1" },
+			},
+		});
+
+		await transport!.notify("fixture/emit-subscription", { requestId: listener.requestId });
+		await transport!.notify("fixture/close-subscription", { requestId: listener.requestId });
+		await expect(listener.completion).resolves.toBeUndefined();
+		expect(delivered).toEqual(["notifications/tools/list_changed"]);
+	});
+
+	it("rejects a stdio subscription event delivered before its acknowledgment", async () => {
+		await connectCaptureServer();
+		transport!.configureProtocol({
+			era: "modern",
+			phase: "connected",
+			version: "2026-07-28",
+			clientInfo: { name: "stdio-test", version: "1" },
+			clientCapabilities: {},
+		});
+		const listener = await transport!.listen({
+			notifications: { resourceSubscriptions: ["fixture://before-ack"] },
+		});
+		const acknowledgment = expect(listener.acknowledged).rejects.toThrow("before acknowledgment");
+		const completion = expect(listener.completion).rejects.toThrow("before acknowledgment");
+		await Promise.all([acknowledgment, completion]);
+	});
+
+	it("demultiplexes concurrent stdio listener IDs, cancels exactly one, and ignores its stale events", async () => {
+		await connectCaptureServer();
+		transport!.configureProtocol({
+			era: "modern",
+			phase: "connected",
+			version: "2026-07-28",
+			clientInfo: { name: "stdio-test", version: "1" },
+			clientCapabilities: {},
+		});
+		const firstEvents: string[] = [];
+		const secondEvents: string[] = [];
+		const transportEvents: string[] = [];
+		transport!.onNotification = method => transportEvents.push(method);
+		const first = await transport!.listen(
+			{ notifications: { toolsListChanged: true } },
+			{ onNotification: method => firstEvents.push(method) },
+		);
+		const second = await transport!.listen(
+			{ notifications: { toolsListChanged: true } },
+			{ onNotification: method => secondEvents.push(method) },
+		);
+		expect(first.requestId).not.toBe(second.requestId);
+		await Promise.all([first.acknowledged, second.acknowledged]);
+
+		await transport!.notify("fixture/emit-subscription", { requestId: second.requestId });
+		await Bun.sleep(20);
+		expect(firstEvents).toEqual([]);
+		expect(secondEvents).toEqual(["notifications/tools/list_changed"]);
+
+		await first.cancel();
+		await expect(first.completion).resolves.toBeUndefined();
+		await transport!.notify("fixture/emit-subscription", { requestId: first.requestId });
+		await Bun.sleep(20);
+		expect(firstEvents).toEqual([]);
+		expect(transportEvents).toEqual([]);
+
+		await transport!.notify("fixture/close-subscription", { requestId: second.requestId });
+		await expect(second.completion).resolves.toBeUndefined();
+		const frames = await waitForCapturedFrames(frameLog, captured =>
+			captured.some(
+				frame => frame.method === "notifications/cancelled" && frame.params?.requestId === first.requestId,
+			),
+		);
+		expect(
+			frames.filter(
+				frame => frame.method === "notifications/cancelled" && frame.params?.requestId === first.requestId,
+			),
+		).toHaveLength(1);
+		expect(
+			frames.filter(
+				frame => frame.method === "notifications/cancelled" && frame.params?.requestId === second.requestId,
+			),
+		).toHaveLength(0);
+	});
+
+	it("cancels exactly once and releases an acknowledged listener when its callback throws", async () => {
+		await connectCaptureServer();
+		transport!.configureProtocol({
+			era: "modern",
+			phase: "connected",
+			version: "2026-07-28",
+			clientInfo: { name: "stdio-test", version: "1" },
+			clientCapabilities: {},
+		});
+		const listener = await transport!.listen(
+			{ notifications: { resourceSubscriptions: ["file:///a"] } },
+			{
+				onNotification: () => {
+					throw new Error("delivery failed");
+				},
+			},
+		);
+		await expect(listener.acknowledged).resolves.toEqual({ resourceSubscriptions: ["file:///a"] });
+
+		await transport!.notify("fixture/emit-subscription", {
+			requestId: listener.requestId,
+			notificationMethod: "notifications/resources/updated",
+			uri: "file:///a/child",
+		});
+		await expect(listener.completion).rejects.toThrow("delivery failed");
+		const frames = await waitForCapturedFrames(frameLog, captured =>
+			captured.some(
+				frame => frame.method === "notifications/cancelled" && frame.params?.requestId === listener.requestId,
+			),
+		);
+		expect(
+			frames.filter(
+				frame => frame.method === "notifications/cancelled" && frame.params?.requestId === listener.requestId,
+			),
+		).toHaveLength(1);
+
+		await transport!.notify("fixture/emit-subscription", {
+			requestId: listener.requestId,
+			notificationMethod: "notifications/resources/updated",
+			uri: "file:///a/another-child",
+		});
+		await Bun.sleep(20);
+		expect(
+			(await readCapturedFrames(frameLog)).filter(
+				frame => frame.method === "notifications/cancelled" && frame.params?.requestId === listener.requestId,
+			),
+		).toHaveLength(1);
+	});
+
+	it("cancels after a callback failure racing the initial listener write", async () => {
+		await connectCaptureServer(undefined, { OMP_TEST_EMIT_SUBSCRIPTION_DURING_LISTEN_WRITE: "1" });
+		transport!.configureProtocol({
+			era: "modern",
+			phase: "connected",
+			version: "2026-07-28",
+			clientInfo: { name: "stdio-test", version: "1" },
+			clientCapabilities: {},
+		});
+		const listener = await transport!.listen(
+			{ notifications: { toolsListChanged: true } },
+			{
+				onNotification: () => {
+					throw new Error("delivery failed during initial write");
+				},
+			},
+		);
+		await expect(listener.completion).rejects.toThrow("delivery failed during initial write");
+		const frames = await waitForCapturedFrames(frameLog, captured =>
+			captured.some(
+				frame => frame.method === "notifications/cancelled" && frame.params?.requestId === listener.requestId,
+			),
+		);
+		expect(
+			frames.filter(
+				frame => frame.method === "notifications/cancelled" && frame.params?.requestId === listener.requestId,
+			),
+		).toHaveLength(1);
+	});
+
+	it("completes close within bounded interval even if child process does not exit on stdin end", async () => {
+		const t = new StdioTransport({
+			command: "node",
+			args: ["-e", "setInterval(() => {}, 1000)"],
+		});
+		await t.connect();
+		const start = Date.now();
+		await t.close();
+		const duration = Date.now() - start;
+		expect(duration).toBeLessThan(3500);
+		expect(t.connected).toBeFalse();
+	});
+
+	it("sends notifications/cancelled before dropping state when listener experiences protocol failure after reaching server", async () => {
+		await connectCaptureServer();
+		transport!.configureProtocol({
+			era: "modern",
+			phase: "connected",
+			version: "2026-07-28",
+			clientInfo: { name: "stdio-test", version: "1" },
+			clientCapabilities: {},
+		});
+		const listener = await transport!.listen(
+			{ notifications: { toolsListChanged: true } },
+			{ onNotification: () => {} },
+		);
+		await expect(listener.acknowledged).resolves.toEqual({ toolsListChanged: true });
+		// Inject a protocol failure (unacknowledged notification method)
+		await transport!.notify("fixture/emit-subscription", {
+			requestId: listener.requestId,
+			notificationMethod: "notifications/prompts/list_changed", // not acknowledged
+		});
+		await expect(listener.completion).rejects.toThrow("received unacknowledged notification");
+		const frames = await waitForCapturedFrames(frameLog, captured =>
+			captured.some(
+				frame => frame.method === "notifications/cancelled" && frame.params?.requestId === listener.requestId,
+			),
+		);
+		expect(
+			frames.filter(
+				frame => frame.method === "notifications/cancelled" && frame.params?.requestId === listener.requestId,
+			),
+		).toHaveLength(1);
+	});
+
+	it("handles abort-at-registration for listen and request without hanging", async () => {
+		await connectCaptureServer();
+		transport!.configureProtocol({
+			era: "modern",
+			phase: "connected",
+			version: "2026-07-28",
+			clientInfo: { name: "stdio-test", version: "1" },
+			clientCapabilities: {},
+		});
+		const controller = new AbortController();
+		controller.abort(new Error("pre-aborted"));
+
+		await expect(
+			transport!.listen({ notifications: { toolsListChanged: true } }, { signal: controller.signal }),
+		).rejects.toThrow("pre-aborted");
+
+		await expect(transport!.request("tools/list", undefined, { signal: controller.signal })).rejects.toThrow(
+			"pre-aborted",
+		);
+	});
+});

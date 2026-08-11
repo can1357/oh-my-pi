@@ -12,6 +12,11 @@ plain markdown + YAML frontmatter, diffable in git, readable by humans and agent
 
 * [Concepts](concepts/) - design decisions and synthesized patterns for this codebase.
 
+Recent additions (2026-08-06):
+
+* [@ompk GitHub mention agent and relay isolation](concepts/ompk-github-mention-agent.md) — account-wide GitHub App adapter, container-per-job relay, M2 verification gate
+* [Recent History — 2026-08](concepts/recent-history-2026-08.md) — committed history from late July through 2026-08-06
+
 Recent additions (2026-07-29):
 
 * [Coding-agent reliability hardening](concepts/coding-agent-reliability-hardening.md) — CI recovery evidence, Bun 1.3.14 singleton-bucket mitigation, and context-file disable-ID migration status
@@ -27,4 +32,5 @@ Recent additions (2026-07-29):
 
 # History
 
+* [Recent History — 2026-08](concepts/recent-history-2026-08.md) — gopk OCR consent, repo-relative context-file IDs, @ompk mention agent and relay isolation, discovery/prompt refactors, 16.4.0, ClinePass provider.
 * [Recent History — 2026-07](concepts/recent-history-2026-07.md) — browser agents, context evidence, orchestration, side-agent coordination, remote workspaces, and environments-cloud routing.

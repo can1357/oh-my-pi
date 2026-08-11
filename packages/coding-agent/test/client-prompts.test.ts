@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { getPrompt, listPrompts, serverSupportsPrompts } from "@pk-nerdsaver-ai/pi-coding-agent/mcp/client";
 import type { MCPGetPromptResult, MCPPrompt, MCPPromptsListResult } from "@pk-nerdsaver-ai/pi-coding-agent/mcp/types";
-import { createMockConnection, createMockTransport } from "./mcp-test-utils";
+import { createMockConnection, createMockTransport, createModernMockConnection } from "./mcp-test-utils";
 
 describe("listPrompts", () => {
 	it("returns empty array when server does not support prompts", async () => {
@@ -58,6 +58,30 @@ describe("listPrompts", () => {
 
 		const result = await listPrompts(conn);
 		expect(result).toEqual([...page1, ...page2]);
+	});
+
+	it("requires modern cache hints and does not retain zero-TTL prompt lists", async () => {
+		let requests = 0;
+		const zeroTtl = {
+			resultType: "complete",
+			ttlMs: 0,
+			cacheScope: "public",
+			prompts: [{ name: "volatile" }],
+		};
+		const zeroConnection = createModernMockConnection(
+			{ prompts: {} },
+			createMockTransport(new Map([["prompts/list", [zeroTtl, zeroTtl]]]), () => requests++),
+		);
+		await listPrompts(zeroConnection);
+		await listPrompts(zeroConnection);
+		expect(requests).toBe(2);
+		expect(zeroConnection.prompts).toBeUndefined();
+
+		const missingConnection = createModernMockConnection(
+			{ prompts: {} },
+			createMockTransport(new Map([["prompts/list", [{ resultType: "complete", prompts: [] }]]])),
+		);
+		await expect(listPrompts(missingConnection)).rejects.toThrow("ttlMs");
 	});
 });
 
@@ -129,6 +153,32 @@ describe("getPrompt", () => {
 		const result = await getPrompt(conn, "no-args-prompt", undefined);
 		expect(result).toEqual(mockResult);
 		expect(requestParams).toEqual({ name: "no-args-prompt" });
+	});
+
+	it("requires a complete modern result but does not cache prompts/get", async () => {
+		let requests = 0;
+		const complete = {
+			resultType: "complete" as const,
+			_meta: { "com.example/prompt": "preserved" },
+			messages: [{ role: "user" as const, content: { type: "text" as const, text: "Modern" } }],
+		};
+		const connection = createModernMockConnection(
+			{ prompts: {} },
+			createMockTransport(new Map([["prompts/get", [complete, complete]]]), () => requests++),
+		);
+		const first = await getPrompt(connection, "modern");
+		const second = await getPrompt(connection, "modern");
+		expect(first._meta).toBe(complete._meta);
+		expect(second).toBe(complete);
+		expect(requests).toBe(2);
+
+		const malformed = createModernMockConnection(
+			{ prompts: {} },
+			createMockTransport(
+				new Map([["prompts/get", [{ messages: [{ role: "user", content: { type: "text", text: "missing" } }] }]]]),
+			),
+		);
+		await expect(getPrompt(malformed, "missing")).rejects.toThrow("resultType");
 	});
 });
 

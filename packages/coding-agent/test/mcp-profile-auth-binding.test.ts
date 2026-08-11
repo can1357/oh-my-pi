@@ -12,7 +12,10 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@pk-nerdsaver-ai/pi-ai";
 import { MCPManager } from "@pk-nerdsaver-ai/pi-coding-agent/mcp/manager";
-import { removeManagedMcpOAuthCredential } from "@pk-nerdsaver-ai/pi-coding-agent/mcp/oauth-credentials";
+import {
+	lookupMcpOAuthCredentialForServer,
+	removeManagedMcpOAuthCredential,
+} from "@pk-nerdsaver-ai/pi-coding-agent/mcp/oauth-credentials";
 import * as oauthFlow from "@pk-nerdsaver-ai/pi-coding-agent/mcp/oauth-flow";
 import { mcpOAuthCredentialId } from "@pk-nerdsaver-ai/pi-coding-agent/mcp/oauth-flow";
 import type { MCPServerConfig } from "@pk-nerdsaver-ai/pi-coding-agent/mcp/types";
@@ -143,6 +146,43 @@ describe("per-profile MCP OAuth binding", () => {
 		const prepared = await manager.prepareConfig({ type: "http", url: SERVER_URL });
 
 		expect(authorizationHeader(prepared)).toBe("Bearer bound-token");
+	});
+
+	test("issuer-bound lookup accepts only the exact canonical issuer", async () => {
+		await authStorage.set(URL_KEY_ID, {
+			type: "oauth",
+			issuer: "https://auth.example.com/",
+			access: "bound-token",
+			refresh: "r",
+			expires: Date.now() + 3_600_000,
+		} as oauthFlow.MCPStoredOAuthCredential);
+
+		expect(
+			lookupMcpOAuthCredentialForServer(authStorage, undefined, SERVER_URL, {
+				issuer: "https://auth.example.com/",
+			})?.credential.access,
+		).toBe("bound-token");
+		expect(
+			lookupMcpOAuthCredentialForServer(authStorage, undefined, SERVER_URL, {
+				issuer: "https://changed-auth.example.com/",
+			}),
+		).toBeUndefined();
+	});
+
+	test("legacy authorizationUrl rows fail closed instead of treating the endpoint as an issuer", async () => {
+		await authStorage.set(URL_KEY_ID, {
+			type: "oauth",
+			authorizationUrl: "https://auth.example.com/authorize",
+			access: "legacy-token",
+			refresh: "r",
+			expires: Date.now() + 3_600_000,
+		} as oauthFlow.MCPStoredOAuthCredential);
+
+		expect(
+			lookupMcpOAuthCredentialForServer(authStorage, undefined, SERVER_URL, {
+				issuer: "https://auth.example.com/",
+			}),
+		).toBeUndefined();
 	});
 
 	test("prepareConfig({ oauth: false }) skips injection so the reauth probe sees the bare server", async () => {

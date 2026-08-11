@@ -13,20 +13,34 @@ import { resolveConfigValue } from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { AuthStorage } from "../session/auth-storage";
 import {
+	complete,
+	completeWithProgress,
 	connectToServer,
 	disconnectServer,
-	getPrompt,
+	getPromptWithMRTR,
+	invalidateMCPConnectionListCache,
+	invalidateMCPConnectionResourceReadCache,
+	listenToNotifications,
 	listPrompts,
 	listResources,
 	listResourceTemplates,
 	listTools,
-	readResource,
+	MCPProgressRegistry,
+	readResourceWithMRTR,
+	serverSupportsCompletions,
 	serverSupportsPrompts,
 	serverSupportsResources,
 	subscribeToResources,
 	unsubscribeFromResources,
 } from "./client";
 import { type LoadMCPConfigsResult, loadAllMCPConfigs, validateServerConfig } from "./config";
+import {
+	createMCPExtensionRuntime,
+	EMPTY_MCP_EXTENSION_REGISTRY,
+	type MCPExtensionRegistry,
+	type MCPExtensionRuntime,
+	validateMCPExtensionConfig,
+} from "./extensions";
 import {
 	lookupMcpOAuthCredential,
 	type MCPOAuthCredentialLookup,
@@ -39,7 +53,14 @@ import { DeferredMCPTool, MCPTool } from "./tool-bridge";
 import type { MCPToolCache } from "./tool-cache";
 import { HttpTransport } from "./transports/http";
 import type {
+	MCPCompletionArgument,
+	MCPCompletionContext,
+	MCPCompletionReference,
+	MCPCompletionResult,
 	MCPGetPromptResult,
+	MCPHostInteraction,
+	MCPListenHandle,
+	MCPProgressHandler,
 	MCPPrompt,
 	MCPRequestOptions,
 	MCPResource,
@@ -47,9 +68,16 @@ import type {
 	MCPResourceTemplate,
 	MCPServerConfig,
 	MCPServerConnection,
+	MCPSubscriptionNotificationFilter,
 	MCPToolDefinition,
 } from "./types";
-import { MCPNotificationMethods } from "./types";
+import {
+	areMCPSubscriptionFiltersEqual,
+	isMCPResourceUriOrSubresource,
+	isMCPResultCacheFresh,
+	isMCPSubscriptionNotificationAcknowledged,
+	MCPNotificationMethods,
+} from "./types";
 
 type ToolLoadResult = {
 	connection: MCPServerConnection;
@@ -61,6 +89,13 @@ type TrackedPromise<T> = {
 	status: "pending" | "fulfilled" | "rejected";
 	value?: T;
 	reason?: unknown;
+};
+
+type ModernSubscriptionState = {
+	connection: MCPServerConnection;
+	handle: MCPListenHandle;
+	epoch: number;
+	revision: number;
 };
 
 const STARTUP_TIMEOUT_MS = 250;
@@ -85,6 +120,9 @@ const STARTUP_TIMEOUT_MS = 250;
  */
 const RECONNECT_BURST_WINDOW_MS = 30_000;
 const RECONNECT_BURST_LIMIT = 5;
+
+const HTTP_SUBSCRIPTION_RECOVERY_BASE_DELAY_MS = 100;
+const HTTP_SUBSCRIPTION_RECOVERY_MAX_ATTEMPTS = 5;
 
 function trackPromise<T>(promise: Promise<T>): TrackedPromise<T> {
 	const tracked: TrackedPromise<T> = { promise, status: "pending" };
@@ -153,6 +191,13 @@ export interface MCPDiscoverOptions {
 	onStatus?: (event: McpConnectionStatusEvent) => void;
 }
 
+/** Optional host-owned MRTR interaction policy and trusted extension registry. */
+export interface MCPManagerOptions {
+	hostInteraction?: MCPHostInteraction;
+	/** Compiled-in trusted extension definitions. No registry means an empty allowlist. */
+	extensionRegistry?: MCPExtensionRegistry;
+}
+
 /**
  * MCP Server Manager.
  *
@@ -183,16 +228,24 @@ export class MCPManager {
 	#sources = new Map<string, SourceMeta>();
 	#authStorage: AuthStorage | null = null;
 	#onNotification?: (serverName: string, method: string, params: unknown) => void;
+	#progressRegistry = new MCPProgressRegistry();
 	#onToolsChanged?: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void;
 	#onResourcesChanged?: (serverName: string, uri: string) => void;
 	#onPromptsChanged?: (serverName: string) => void;
 	#notificationsEnabled = false;
 	#notificationsEpoch = 0;
 	#subscribedResources = new Map<string, Set<string>>();
+	#knownResourceUris = new Map<string, Set<string>>();
 	#pendingResourceRefresh = new Map<string, { connection: MCPServerConnection; promise: Promise<void> }>();
+	#modernSubscriptions = new Map<string, ModernSubscriptionState>();
+	#modernSubscriptionRevisions = new Map<string, number>();
+	#modernSubscriptionRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	#modernSubscriptionRecoveryAttempts = new Map<string, number>();
 	#pendingReconnections = new Map<string, Promise<MCPServerConnection | null>>();
 	/** Preserved configs for reconnection after connection loss. */
 	#serverConfigs = new Map<string, MCPServerConfig>();
+	/** Per-connection extension runtimes; never populated from server advertisements. */
+	#extensionRuntimes = new Map<string, { connection: MCPServerConnection; runtime: MCPExtensionRuntime }>();
 	/**
 	 * Timestamps of recent `reconnectServer` invocations per server, used by the
 	 * crash-storm circuit breaker (see {@link RECONNECT_BURST_LIMIT}).
@@ -204,7 +257,22 @@ export class MCPManager {
 	constructor(
 		private cwd: string,
 		private toolCache: MCPToolCache | null = null,
+		private readonly options: MCPManagerOptions = {},
 	) {}
+
+	/** Cache persistence is an optimization and must never fail a live MCP connection. */
+	async #persistToolCache(
+		name: string,
+		config: MCPServerConfig,
+		tools: MCPToolDefinition[],
+		connection: MCPServerConnection,
+	): Promise<void> {
+		try {
+			await this.toolCache?.set(name, config, tools, connection.resultHints?.tools);
+		} catch (error) {
+			logger.warn("MCP tool cache persistence failed", { path: `mcp:${name}`, error: String(error) });
+		}
+	}
 
 	/**
 	 * Set a callback to receive all server notifications.
@@ -240,7 +308,220 @@ export class MCPManager {
 		}
 	}
 
+	#nextModernSubscriptionRevision(name: string): number {
+		const revision = (this.#modernSubscriptionRevisions.get(name) ?? 0) + 1;
+		this.#modernSubscriptionRevisions.set(name, revision);
+		return revision;
+	}
+
+	#clearModernSubscriptionRecovery(name: string): void {
+		const timer = this.#modernSubscriptionRecoveryTimers.get(name);
+		if (timer) clearTimeout(timer);
+		this.#modernSubscriptionRecoveryTimers.delete(name);
+		this.#modernSubscriptionRecoveryAttempts.delete(name);
+	}
+
+	#scheduleModernHttpSubscriptionRecovery(name: string, state: ModernSubscriptionState): void {
+		if (state.connection.config.type !== "http") return;
+		if (
+			!this.#notificationsEnabled ||
+			this.#notificationsEpoch !== state.epoch ||
+			this.#modernSubscriptionRevisions.get(name) !== state.revision ||
+			this.#connections.get(name) !== state.connection ||
+			this.#modernSubscriptionRecoveryTimers.has(name)
+		) {
+			return;
+		}
+		const attempt = (this.#modernSubscriptionRecoveryAttempts.get(name) ?? 0) + 1;
+		if (attempt > HTTP_SUBSCRIPTION_RECOVERY_MAX_ATTEMPTS) {
+			logger.debug("Modern HTTP MCP subscription recovery limit reached", { path: `mcp:${name}` });
+			return;
+		}
+		this.#modernSubscriptionRecoveryAttempts.set(name, attempt);
+		const delay = HTTP_SUBSCRIPTION_RECOVERY_BASE_DELAY_MS * 2 ** (attempt - 1);
+		const timer = setTimeout(() => {
+			this.#modernSubscriptionRecoveryTimers.delete(name);
+			if (
+				!this.#notificationsEnabled ||
+				this.#notificationsEpoch !== state.epoch ||
+				this.#modernSubscriptionRevisions.get(name) !== state.revision ||
+				this.#connections.get(name) !== state.connection ||
+				this.#modernSubscriptions.has(name)
+			) {
+				return;
+			}
+			void this.#reconcileModernSubscription(name, state.connection).catch(error => {
+				logger.debug("Failed to recover modern HTTP MCP subscription", { path: `mcp:${name}`, error });
+			});
+		}, delay);
+		timer.unref?.();
+		this.#modernSubscriptionRecoveryTimers.set(name, timer);
+	}
+
+	#desiredModernSubscriptionFilter(connection: MCPServerConnection): MCPSubscriptionNotificationFilter {
+		const capabilities = connection.protocol?.era === "modern" ? connection.protocol.capabilities : {};
+		const resourceSubscriptions =
+			capabilities.resources?.subscribe === true
+				? [...(this.#knownResourceUris.get(connection.name) ?? [])].sort()
+				: [];
+		return {
+			...(capabilities.tools?.listChanged === true ? { toolsListChanged: true } : {}),
+			...(capabilities.prompts?.listChanged === true ? { promptsListChanged: true } : {}),
+			...(capabilities.resources?.listChanged === true ? { resourcesListChanged: true } : {}),
+			...(resourceSubscriptions.length > 0 ? { resourceSubscriptions } : {}),
+		};
+	}
+
+	#cancelModernSubscription(name: string): void {
+		this.#clearModernSubscriptionRecovery(name);
+		this.#nextModernSubscriptionRevision(name);
+		const active = this.#modernSubscriptions.get(name);
+		this.#modernSubscriptions.delete(name);
+		this.#subscribedResources.delete(name);
+		if (active) {
+			void active.handle.cancel().catch(error => {
+				logger.debug("Failed to cancel modern MCP subscription", { path: `mcp:${name}`, error });
+			});
+		}
+	}
+
+	#isCurrentModernSubscription(name: string, state: ModernSubscriptionState): boolean {
+		return (
+			this.#notificationsEnabled &&
+			this.#notificationsEpoch === state.epoch &&
+			this.#modernSubscriptionRevisions.get(name) === state.revision &&
+			this.#connections.get(name) === state.connection &&
+			this.#modernSubscriptions.get(name)?.handle === state.handle
+		);
+	}
+
+	#handleModernSubscriptionNotification(
+		name: string,
+		state: ModernSubscriptionState,
+		method: string,
+		params: unknown,
+	): void {
+		if (!this.#isCurrentModernSubscription(name, state)) return;
+		const acknowledged = state.handle.acknowledgedNotifications;
+		if (!acknowledged || !isMCPSubscriptionNotificationAcknowledged(acknowledged, method, params)) return;
+		const capabilities = state.connection.protocol?.era === "modern" ? state.connection.protocol.capabilities : {};
+
+		switch (method) {
+			case MCPNotificationMethods.TOOLS_LIST_CHANGED:
+				if (capabilities.tools?.listChanged !== true || acknowledged.toolsListChanged !== true) return;
+				this.#triggerNotificationRefresh(name, "tools");
+				break;
+			case MCPNotificationMethods.RESOURCES_LIST_CHANGED:
+				if (capabilities.resources?.listChanged !== true || acknowledged.resourcesListChanged !== true) return;
+				this.#triggerNotificationRefresh(name, "resources");
+				break;
+			case MCPNotificationMethods.PROMPTS_LIST_CHANGED:
+				if (capabilities.prompts?.listChanged !== true || acknowledged.promptsListChanged !== true) return;
+				this.#triggerNotificationRefresh(name, "prompts");
+				break;
+			case MCPNotificationMethods.RESOURCES_UPDATED: {
+				if (capabilities.resources?.subscribe !== true) return;
+				const uri =
+					typeof params === "object" && params !== null && !Array.isArray(params)
+						? (params as Record<string, unknown>).uri
+						: undefined;
+				if (
+					typeof uri !== "string" ||
+					acknowledged.resourceSubscriptions?.some(acknowledgedUri =>
+						isMCPResourceUriOrSubresource(acknowledgedUri, uri),
+					) !== true
+				)
+					return;
+				invalidateMCPConnectionResourceReadCache(state.connection, uri);
+				this.#onResourcesChanged?.(name, uri);
+				break;
+			}
+			default:
+				return;
+		}
+		this.#onNotification?.(name, method, params);
+	}
+
+	async #reconcileModernSubscription(name: string, connection: MCPServerConnection): Promise<void> {
+		if (connection.protocol?.era !== "modern") return;
+		const epoch = this.#notificationsEpoch;
+		if (!this.#notificationsEnabled || this.#connections.get(name) !== connection) return;
+
+		const desired = this.#desiredModernSubscriptionFilter(connection);
+		const existing = this.#modernSubscriptions.get(name);
+		if (
+			existing &&
+			this.#isCurrentModernSubscription(name, existing) &&
+			areMCPSubscriptionFiltersEqual(existing.handle.requestedNotifications, desired)
+		) {
+			return;
+		}
+		if (
+			!this.#notificationsEnabled ||
+			this.#notificationsEpoch !== epoch ||
+			this.#connections.get(name) !== connection
+		)
+			return;
+
+		const revision = this.#nextModernSubscriptionRevision(name);
+		if (existing) {
+			this.#modernSubscriptions.delete(name);
+			this.#subscribedResources.delete(name);
+			void existing.handle.cancel().catch(() => {});
+		}
+		let state: ModernSubscriptionState | undefined;
+		const handle = await listenToNotifications(connection, desired, {
+			onNotification: (method, params) => {
+				if (state) this.#handleModernSubscriptionNotification(name, state, method, params);
+			},
+		});
+		if (!handle) return;
+		state = { connection, handle, epoch, revision };
+		if (
+			!this.#notificationsEnabled ||
+			this.#notificationsEpoch !== epoch ||
+			this.#modernSubscriptionRevisions.get(name) !== revision ||
+			this.#connections.get(name) !== connection
+		) {
+			await handle.cancel().catch(() => {});
+			return;
+		}
+		this.#modernSubscriptions.set(name, state);
+		void handle.completion.then(
+			() => {
+				if (!this.#isCurrentModernSubscription(name, state)) return;
+				this.#modernSubscriptions.delete(name);
+				this.#subscribedResources.delete(name);
+			},
+			error => {
+				if (!this.#isCurrentModernSubscription(name, state)) return;
+				logger.debug("Modern MCP subscription ended unexpectedly", { path: `mcp:${name}`, error });
+				this.#modernSubscriptions.delete(name);
+				this.#subscribedResources.delete(name);
+				this.#scheduleModernHttpSubscriptionRecovery(name, state);
+			},
+		);
+
+		try {
+			const acknowledged = await handle.acknowledged;
+			if (!this.#isCurrentModernSubscription(name, state)) {
+				await handle.cancel().catch(() => {});
+				return;
+			}
+			this.#clearModernSubscriptionRecovery(name);
+			this.#subscribedResources.set(name, new Set(acknowledged.resourceSubscriptions ?? []));
+		} catch (error) {
+			if (this.#isCurrentModernSubscription(name, state)) {
+				logger.debug("Failed to establish modern MCP subscription", { path: `mcp:${name}`, error });
+				this.#modernSubscriptions.delete(name);
+				this.#subscribedResources.delete(name);
+				this.#scheduleModernHttpSubscriptionRecovery(name, state);
+			}
+		}
+	}
+
 	#subscribeAndTrack(name: string, connection: MCPServerConnection, uris: string[], notificationEpoch: number): void {
+		if (connection.protocol?.era !== "legacy") return;
 		void subscribeToResources(connection, uris)
 			.then(() => {
 				const action = resolveSubscriptionPostAction(
@@ -257,7 +538,7 @@ export class MCPManager {
 					});
 					return;
 				}
-				if (action === "ignore") {
+				if (action === "ignore" || this.#connections.get(name) !== connection) {
 					return;
 				}
 				this.#subscribedResources.set(name, new Set(uris));
@@ -276,18 +557,34 @@ export class MCPManager {
 		const notificationEpoch = this.#notificationsEpoch;
 
 		if (enabled) {
-			// Subscribe to all connected servers that support it
 			for (const [name, connection] of this.#connections) {
-				if (connection.capabilities.resources?.subscribe && connection.resources) {
-					const uris = connection.resources.map(r => r.uri);
+				if (connection.protocol?.era === "modern") {
+					void this.#reconcileModernSubscription(name, connection).catch(error => {
+						logger.debug("Failed to reconcile modern MCP subscription", { path: `mcp:${name}`, error });
+					});
+				} else if (
+					connection.protocol?.era === "legacy" &&
+					connection.capabilities.resources?.subscribe &&
+					connection.resources
+				) {
+					const uris = connection.resources.map(resource => resource.uri);
 					this.#subscribeAndTrack(name, connection, uris, notificationEpoch);
 				}
 			}
 			return;
 		}
 
-		// Unsubscribe from all servers
+		for (const name of new Set([
+			...this.#modernSubscriptionRecoveryTimers.keys(),
+			...this.#modernSubscriptionRecoveryAttempts.keys(),
+		])) {
+			this.#clearModernSubscriptionRecovery(name);
+		}
+		for (const name of [...this.#modernSubscriptions.keys()]) {
+			this.#cancelModernSubscription(name);
+		}
 		for (const [name, connection] of this.#connections) {
+			if (connection.protocol?.era !== "legacy") continue;
 			const uris = this.#subscribedResources.get(name);
 			if (uris && uris.size > 0) {
 				void unsubscribeFromResources(connection, Array.from(uris)).catch(error => {
@@ -380,8 +677,15 @@ export class MCPManager {
 
 			statusServerNames.push(name);
 
-			// Validate config
-			const validationErrors = validateServerConfig(name, config);
+			// Validate transport and trusted-extension configuration before starting any connection.
+			const validationErrors = [
+				...validateServerConfig(name, config),
+				...validateMCPExtensionConfig(
+					this.options.extensionRegistry ?? EMPTY_MCP_EXTENSION_REGISTRY,
+					name,
+					config.extensions,
+				),
+			];
 			if (validationErrors.length > 0) {
 				const message = validationErrors.join("; ");
 				errors.set(name, message);
@@ -393,18 +697,27 @@ export class MCPManager {
 			// Save config early so reconnection works even if the initial connect times out
 			// and falls back to cached/deferred tools.
 			this.#serverConfigs.set(name, config);
+			const extensionRuntime = createMCPExtensionRuntime(
+				this.options.extensionRegistry ?? EMPTY_MCP_EXTENSION_REGISTRY,
+				config.extensions,
+			);
 
 			// Resolve auth config before connecting, but do so per-server in parallel.
 			const connectionPromise = (async () => {
 				const resolvedConfig = await this.#resolveAuthConfig(config);
-				return connectToServer(name, resolvedConfig, {
+				let notificationConnection: MCPServerConnection | undefined;
+				const connection = await connectToServer(name, resolvedConfig, {
 					onNotification: (method, params) => {
-						this.#handleServerNotification(name, method, params);
+						this.#handleServerNotification(name, method, params, notificationConnection);
 					},
 					onRequest: (method, params) => {
 						return this.#handleServerRequest(method, params);
 					},
+					modernClientCapabilities: this.options.hostInteraction?.clientCapabilities,
+					extensionRuntime,
 				});
+				notificationConnection = connection;
+				return connection;
 			})().then(
 				connection => {
 					// Store original config (without resolved tokens) to keep
@@ -417,6 +730,7 @@ export class MCPManager {
 					if (this.#pendingConnections.get(name) === connectionPromise) {
 						this.#pendingConnections.delete(name);
 						this.#connections.set(name, connection);
+						this.#extensionRuntimes.set(name, { connection, runtime: extensionRuntime });
 					}
 
 					// Wire auth refresh for HTTP transports so 401s trigger token refresh.
@@ -439,6 +753,8 @@ export class MCPManager {
 					// Re-establish connection if the transport closes (server restart,
 					// network interruption).
 					connection.transport.onClose = () => {
+						if (this.#connections.get(name) !== connection) return;
+						this.#cancelModernSubscription(name);
 						logger.debug("MCP transport lost, triggering reconnect", { path: `mcp:${name}` });
 						void this.reconnectServer(name);
 					};
@@ -468,10 +784,10 @@ export class MCPManager {
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
 					this.#pendingToolLoads.delete(name);
 					const reconnect = () => this.reconnectServer(name);
-					const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
+					const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.options.hostInteraction);
 					this.#replaceServerTools(name, customTools);
 					this.#onToolsChanged?.(this.#tools);
-					void this.toolCache?.set(name, config, serverTools);
+					await this.#persistToolCache(name, config, serverTools, connection);
 
 					onStatus?.({ type: "connected", serverName: name });
 					await this.#loadServerResourcesAndPrompts(name, connection);
@@ -530,7 +846,7 @@ export class MCPManager {
 					const { connection, serverTools } = value;
 					connectedServers.add(name);
 					const reconnect = () => this.reconnectServer(name);
-					allTools.push(...MCPTool.fromTools(connection, serverTools, reconnect));
+					allTools.push(...MCPTool.fromTools(connection, serverTools, reconnect, this.options.hostInteraction));
 				} else if (task.tracked.status === "rejected") {
 					const message =
 						task.tracked.reason instanceof Error ? task.tracked.reason.message : String(task.tracked.reason);
@@ -542,7 +858,14 @@ export class MCPManager {
 						const source = this.#sources.get(name);
 						const reconnect = () => this.reconnectServer(name);
 						allTools.push(
-							...DeferredMCPTool.fromTools(name, cached, () => this.waitForConnection(name), source, reconnect),
+							...DeferredMCPTool.fromTools(
+								name,
+								cached,
+								() => this.waitForConnection(name),
+								source,
+								reconnect,
+								this.options.hostInteraction,
+							),
 						);
 					}
 				}
@@ -588,26 +911,57 @@ export class MCPManager {
 			logger.debug("Failed MCP notification refresh", { path: `mcp:${serverName}`, kind, error });
 		});
 	}
-	#handleServerNotification(serverName: string, method: string, params: unknown): void {
+	#handleServerNotification(
+		serverName: string,
+		method: string,
+		params: unknown,
+		sourceConnection?: MCPServerConnection,
+	): void {
+		const connection = this.#connections.get(serverName);
+		if (!connection || (sourceConnection && sourceConnection !== connection)) return;
 		logger.debug("MCP notification received", { path: `mcp:${serverName}`, method });
+		const extensionRuntime = this.#extensionRuntimes.get(serverName);
+		if (extensionRuntime?.connection === connection) {
+			extensionRuntime.runtime.onNotification(connection, method, params);
+		}
+		this.#progressRegistry.dispatch(method, params);
+
+		if (connection.protocol?.era === "modern") {
+			if (
+				method !== MCPNotificationMethods.TOOLS_LIST_CHANGED &&
+				method !== MCPNotificationMethods.RESOURCES_LIST_CHANGED &&
+				method !== MCPNotificationMethods.RESOURCES_UPDATED &&
+				method !== MCPNotificationMethods.PROMPTS_LIST_CHANGED &&
+				method !== MCPNotificationMethods.SUBSCRIPTIONS_ACKNOWLEDGED
+			) {
+				this.#onNotification?.(serverName, method, params);
+			}
+			return;
+		}
 
 		switch (method) {
 			case MCPNotificationMethods.TOOLS_LIST_CHANGED:
-				this.#triggerNotificationRefresh(serverName, "tools");
+				if (connection.capabilities.tools?.listChanged === true) {
+					this.#triggerNotificationRefresh(serverName, "tools");
+				}
 				break;
 			case MCPNotificationMethods.RESOURCES_LIST_CHANGED:
-				this.#triggerNotificationRefresh(serverName, "resources");
+				if (connection.capabilities.resources?.listChanged === true) {
+					this.#triggerNotificationRefresh(serverName, "resources");
+				}
 				break;
 			case MCPNotificationMethods.RESOURCES_UPDATED: {
 				const uri = (params as { uri?: string })?.uri;
 				const subscribed = this.#subscribedResources.get(serverName);
-				if (uri && subscribed?.has(uri)) {
+				if (connection.capabilities.resources?.subscribe === true && uri && subscribed?.has(uri)) {
 					this.#onResourcesChanged?.(serverName, uri);
 				}
 				break;
 			}
 			case MCPNotificationMethods.PROMPTS_LIST_CHANGED:
-				this.#triggerNotificationRefresh(serverName, "prompts");
+				if (connection.capabilities.prompts?.listChanged === true) {
+					this.#triggerNotificationRefresh(serverName, "prompts");
+				}
 				break;
 			default:
 				break;
@@ -737,15 +1091,21 @@ export class MCPManager {
 		this.#sources.delete(name);
 		this.#serverConfigs.delete(name);
 		this.#pendingResourceRefresh.delete(name);
+		this.#extensionRuntimes.delete(name);
 		this.#reconnectHistory.delete(name);
+		this.#knownResourceUris.delete(name);
 
 		const connection = this.#connections.get(name);
 
-		const subscribedUris = this.#subscribedResources.get(name);
-		if (subscribedUris && subscribedUris.size > 0 && connection) {
-			void unsubscribeFromResources(connection, Array.from(subscribedUris)).catch(() => {});
+		if (connection?.protocol?.era === "modern") {
+			this.#cancelModernSubscription(name);
+		} else {
+			const subscribedUris = this.#subscribedResources.get(name);
+			if (subscribedUris && subscribedUris.size > 0 && connection) {
+				void unsubscribeFromResources(connection, Array.from(subscribedUris)).catch(() => {});
+			}
+			this.#subscribedResources.delete(name);
 		}
-		this.#subscribedResources.delete(name);
 
 		if (connection) {
 			// Detach onClose to prevent spurious reconnect from close()
@@ -770,6 +1130,16 @@ export class MCPManager {
 		// Invalidate any in-flight reconnection attempts that outlive this call.
 		// They captured the old epoch; after increment they'll detect staleness.
 		this.#epoch++;
+		this.#notificationsEpoch++;
+		for (const name of new Set([
+			...this.#modernSubscriptionRecoveryTimers.keys(),
+			...this.#modernSubscriptionRecoveryAttempts.keys(),
+		])) {
+			this.#clearModernSubscriptionRecovery(name);
+		}
+		for (const name of [...this.#modernSubscriptions.keys()]) {
+			this.#cancelModernSubscription(name);
+		}
 		// Detach onClose before closing to prevent spurious reconnect attempts
 		for (const conn of this.#connections.values()) {
 			conn.transport.onClose = undefined;
@@ -777,6 +1147,7 @@ export class MCPManager {
 		const promises = Array.from(this.#connections.values()).map(conn => disconnectServer(conn));
 		await Promise.allSettled(promises);
 
+		this.#extensionRuntimes.clear();
 		this.#pendingConnections.clear();
 		this.#pendingToolLoads.clear();
 		this.#pendingReconnections.clear();
@@ -786,7 +1157,10 @@ export class MCPManager {
 		this.#connections.clear();
 		this.#tools = [];
 		this.#subscribedResources.clear();
+		this.#knownResourceUris.clear();
 		this.#reconnectHistory.clear();
+		this.#modernSubscriptions.clear();
+		this.#modernSubscriptionRevisions.clear();
 	}
 
 	/**
@@ -849,6 +1223,8 @@ export class MCPManager {
 			// transport's own `close()` cannot re-arm this path.
 			const stale = this.#connections.get(name);
 			if (stale) {
+				this.#cancelModernSubscription(name);
+				this.#knownResourceUris.delete(name);
 				stale.transport.onClose = undefined;
 				void stale.transport.close().catch(() => {});
 				this.#connections.delete(name);
@@ -875,10 +1251,13 @@ export class MCPManager {
 		// reconnect loop by that amount on every server restart.
 		const reconnectEpoch = this.#epoch;
 		if (oldConnection) {
+			this.#cancelModernSubscription(name);
+			this.#knownResourceUris.delete(name);
 			// Detach onClose to prevent re-entrant reconnect from the close itself
 			oldConnection.transport.onClose = undefined;
 			void oldConnection.transport.close().catch(() => {});
 			this.#connections.delete(name);
+			this.#extensionRuntimes.delete(name);
 		}
 		this.#pendingConnections.delete(name);
 		this.#pendingToolLoads.delete(name);
@@ -935,16 +1314,23 @@ export class MCPManager {
 		source: SourceMeta | undefined,
 		reconnectEpoch: number,
 	): Promise<MCPServerConnection> {
+		const extensionRuntime = createMCPExtensionRuntime(
+			this.options.extensionRegistry ?? EMPTY_MCP_EXTENSION_REGISTRY,
+			config.extensions,
+		);
 		const resolvedConfig = await this.#resolveAuthConfig(config);
+		let notificationConnection: MCPServerConnection | undefined;
 		const connection = await connectToServer(name, resolvedConfig, {
 			onNotification: (method, params) => {
-				this.#handleServerNotification(name, method, params);
+				this.#handleServerNotification(name, method, params, notificationConnection);
 			},
 			onRequest: (method, params) => {
 				return this.#handleServerRequest(method, params);
 			},
+			modernClientCapabilities: this.options.hostInteraction?.clientCapabilities,
+			extensionRuntime,
 		});
-
+		notificationConnection = connection;
 		connection.config = config;
 		if (source) connection._source = source;
 
@@ -956,6 +1342,7 @@ export class MCPManager {
 		}
 
 		this.#connections.set(name, connection);
+		this.#extensionRuntimes.set(name, { connection, runtime: extensionRuntime });
 
 		// Wire auth refresh for HTTP transports, and reconnect for any transport.
 		// Same gate as connectServers: any resolvable managed credential.
@@ -969,14 +1356,16 @@ export class MCPManager {
 			};
 		}
 		connection.transport.onClose = () => {
+			if (this.#connections.get(name) !== connection) return;
+			this.#cancelModernSubscription(name);
 			logger.debug("MCP transport lost, triggering reconnect", { path: `mcp:${name}` });
 			void this.reconnectServer(name);
 		};
 		try {
 			const serverTools = await listTools(connection);
 			const reconnect = () => this.reconnectServer(name);
-			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
-			void this.toolCache?.set(name, config, serverTools);
+			const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.options.hostInteraction);
+			await this.#persistToolCache(name, config, serverTools, connection);
 			this.#replaceServerTools(name, customTools);
 			this.#onToolsChanged?.(this.#tools);
 			void this.#loadServerResourcesAndPrompts(name, connection);
@@ -995,12 +1384,19 @@ export class MCPManager {
 	 * Shared between initial connection and reconnection.
 	 */
 	async #loadServerResourcesAndPrompts(name: string, connection: MCPServerConnection): Promise<void> {
+		let resources: MCPResource[] = [];
 		if (serverSupportsResources(connection.capabilities)) {
 			try {
-				const [resources] = await Promise.all([listResources(connection), listResourceTemplates(connection)]);
+				[resources] = await Promise.all([listResources(connection), listResourceTemplates(connection)]);
+				if (this.#connections.get(name) !== connection) return;
+				this.#knownResourceUris.set(name, new Set(resources.map(resource => resource.uri)));
 
-				if (this.#notificationsEnabled && connection.capabilities.resources?.subscribe) {
-					const uris = resources.map(r => r.uri);
+				if (
+					this.#notificationsEnabled &&
+					connection.protocol?.era === "legacy" &&
+					connection.capabilities.resources?.subscribe
+				) {
+					const uris = resources.map(resource => resource.uri);
 					const notificationEpoch = this.#notificationsEpoch;
 					this.#subscribeAndTrack(name, connection, uris, notificationEpoch);
 				}
@@ -1012,10 +1408,16 @@ export class MCPManager {
 		if (serverSupportsPrompts(connection.capabilities)) {
 			try {
 				await listPrompts(connection);
+				if (this.#connections.get(name) !== connection) return;
 				this.#onPromptsChanged?.(name);
 			} catch (error) {
 				logger.debug("Failed to load MCP prompts", { path: `mcp:${name}`, error });
 			}
+		}
+
+		if (this.#connections.get(name) !== connection) return;
+		if (this.#notificationsEnabled && connection.protocol?.era === "modern") {
+			await this.#reconcileModernSubscription(name, connection);
 		}
 	}
 
@@ -1026,14 +1428,13 @@ export class MCPManager {
 		const connection = this.#connections.get(name);
 		if (!connection) return;
 
-		// Clear cached tools
-		connection.tools = undefined;
+		invalidateMCPConnectionListCache(connection, "tools");
 
 		// Reload tools
 		const serverTools = await listTools(connection);
 		const reconnect = () => this.reconnectServer(name);
-		const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
-		void this.toolCache?.set(name, connection.config, serverTools);
+		const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.options.hostInteraction);
+		await this.#persistToolCache(name, connection.config, serverTools, connection);
 
 		// Replace tools from this server
 		this.#replaceServerTools(name, customTools);
@@ -1059,18 +1460,24 @@ export class MCPManager {
 		if (existing && existing.connection === connection) return existing.promise;
 
 		const doRefresh = async (): Promise<void> => {
-			// Clear cached resources
-			connection.resources = undefined;
-			connection.resourceTemplates = undefined;
+			invalidateMCPConnectionListCache(connection, "resources");
+			invalidateMCPConnectionListCache(connection, "resourceTemplates");
 
 			// Reload
 			const [resources] = await Promise.all([listResources(connection), listResourceTemplates(connection)]);
-			if (this.#notificationsEnabled && connection.capabilities.resources?.subscribe) {
-				const newUris = new Set(resources.map(r => r.uri));
+			if (this.#connections.get(name) !== connection) return;
+			this.#knownResourceUris.set(name, new Set(resources.map(resource => resource.uri)));
+			if (this.#notificationsEnabled && connection.protocol?.era === "modern") {
+				await this.#reconcileModernSubscription(name, connection);
+			} else if (
+				this.#notificationsEnabled &&
+				connection.protocol?.era === "legacy" &&
+				connection.capabilities.resources?.subscribe
+			) {
+				const newUris = new Set(resources.map(resource => resource.uri));
 				const oldUris = this.#subscribedResources.get(name);
 				const notificationEpoch = this.#notificationsEpoch;
 
-				// Unsubscribe URIs that were removed
 				if (oldUris) {
 					const removed = [...oldUris].filter(uri => !newUris.has(uri));
 					if (removed.length > 0) {
@@ -1082,7 +1489,6 @@ export class MCPManager {
 					}
 				}
 
-				// Subscribe to the current set and update tracking atomically
 				try {
 					const allUris = [...newUris];
 					await subscribeToResources(connection, allUris);
@@ -1097,7 +1503,7 @@ export class MCPManager {
 						});
 						return;
 					}
-					if (action === "ignore") {
+					if (action === "ignore" || this.#connections.get(name) !== connection) {
 						return;
 					}
 					this.#subscribedResources.set(name, newUris);
@@ -1124,7 +1530,7 @@ export class MCPManager {
 		const connection = this.#connections.get(name);
 		if (!connection || !serverSupportsPrompts(connection.capabilities)) return;
 
-		connection.prompts = undefined;
+		invalidateMCPConnectionListCache(connection, "prompts");
 		await listPrompts(connection);
 
 		this.#onPromptsChanged?.(name);
@@ -1136,10 +1542,11 @@ export class MCPManager {
 	getServerResources(name: string): { resources: MCPResource[]; templates: MCPResourceTemplate[] } | undefined {
 		const connection = this.#connections.get(name);
 		if (!connection) return undefined;
-		return {
-			resources: connection.resources ?? [],
-			templates: connection.resourceTemplates ?? [],
-		};
+		const resources = isMCPResultCacheFresh(connection.resultHints?.resources) ? (connection.resources ?? []) : [];
+		const templates = isMCPResultCacheFresh(connection.resultHints?.resourceTemplates)
+			? (connection.resourceTemplates ?? [])
+			: [];
+		return { resources, templates };
 	}
 
 	/**
@@ -1152,7 +1559,7 @@ export class MCPManager {
 	): Promise<MCPResourceReadResult | undefined> {
 		const connection = this.#connections.get(name);
 		if (!connection) return undefined;
-		return readResource(connection, uri, options);
+		return readResourceWithMRTR(connection, uri, this.options.hostInteraction, options);
 	}
 
 	/**
@@ -1161,7 +1568,35 @@ export class MCPManager {
 	getServerPrompts(name: string): MCPPrompt[] | undefined {
 		const connection = this.#connections.get(name);
 		if (!connection) return undefined;
-		return connection.prompts ?? [];
+		return isMCPResultCacheFresh(connection.resultHints?.prompts) ? (connection.prompts ?? []) : [];
+	}
+
+	/**
+	 * Complete a prompt or resource-template argument only when the connected
+	 * server advertises this optional capability.
+	 */
+	async completeServerArgument(
+		name: string,
+		ref: MCPCompletionReference,
+		argument: MCPCompletionArgument,
+		context?: MCPCompletionContext,
+		options?: MCPRequestOptions & { onProgress?: MCPProgressHandler },
+	): Promise<MCPCompletionResult | undefined> {
+		const connection = this.#connections.get(name);
+		if (!connection || !serverSupportsCompletions(connection.capabilities)) return undefined;
+		const { onProgress, ...requestOptions } = options ?? {};
+		if (onProgress) {
+			return completeWithProgress(
+				connection,
+				ref,
+				argument,
+				this.#progressRegistry,
+				onProgress,
+				context,
+				requestOptions,
+			);
+		}
+		return complete(connection, ref, argument, context, requestOptions);
 	}
 
 	/**
@@ -1175,7 +1610,7 @@ export class MCPManager {
 	): Promise<MCPGetPromptResult | undefined> {
 		const connection = this.#connections.get(name);
 		if (!connection) return undefined;
-		return getPrompt(connection, promptName, args, options);
+		return getPromptWithMRTR(connection, promptName, args, this.options.hostInteraction, options);
 	}
 
 	/**

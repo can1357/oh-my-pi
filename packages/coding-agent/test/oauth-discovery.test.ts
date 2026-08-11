@@ -12,10 +12,10 @@ describe("mcp oauth discovery", () => {
 			'HTTP 401: unauthorized [WWW-Authenticate: Bearer resource_metadata="https://mcp.figma.com/.well-known/oauth-protected-resource"; Mcp-Auth-Server: https://www.figma.com]',
 		);
 
-		expect(extractMcpAuthServerUrl(error)).toBe("https://www.figma.com/");
+		expect(extractMcpAuthServerUrl(error)).toBe("https://www.figma.com");
 		const auth = analyzeAuthError(error);
 		expect(auth.requiresAuth).toBe(true);
-		expect(auth.authServerUrl).toBe("https://www.figma.com/");
+		expect(auth.authServerUrl).toBe("https://www.figma.com");
 	});
 
 	it("discovers oauth endpoints from auth server metadata", async () => {
@@ -27,6 +27,8 @@ describe("mcp oauth discovery", () => {
 			if (url === "https://www.figma.com/.well-known/oauth-authorization-server") {
 				return new Response(
 					JSON.stringify({
+						issuer: "https://www.figma.com",
+						authorization_response_iss_parameter_supported: true,
 						authorization_endpoint: "https://www.figma.com/oauth",
 						token_endpoint: "https://api.figma.com/v1/oauth/token",
 						client_id: "figma-client-id",
@@ -43,7 +45,9 @@ describe("mcp oauth discovery", () => {
 			fetch: fetchImpl,
 		});
 
-		expect(oauth).toEqual({
+		expect(oauth).toMatchObject({
+			issuer: "https://www.figma.com",
+			authorizationResponseIssuerRequired: true,
 			authorizationUrl: "https://www.figma.com/oauth",
 			tokenUrl: "https://api.figma.com/v1/oauth/token",
 			clientId: "figma-client-id",
@@ -68,6 +72,7 @@ describe("path-prefixed auth servers", () => {
 			if (url === "https://gateway.example.com/my-service/.well-known/oauth-authorization-server") {
 				return new Response(
 					JSON.stringify({
+						issuer: "https://gateway.example.com/my-service",
 						authorization_endpoint: "https://gateway.example.com/my-service/oauth/authorize",
 						token_endpoint: "https://gateway.example.com/my-service/oauth/token",
 					}),
@@ -82,7 +87,7 @@ describe("path-prefixed auth servers", () => {
 			fetch: fetchImpl,
 		});
 
-		expect(oauth).toEqual({
+		expect(oauth).toMatchObject({
 			authorizationUrl: "https://gateway.example.com/my-service/oauth/authorize",
 			tokenUrl: "https://gateway.example.com/my-service/oauth/token",
 		});
@@ -104,6 +109,7 @@ describe("path-prefixed auth servers", () => {
 			if (url === "https://gateway.example.com/my-service/.well-known/oauth-authorization-server") {
 				return new Response(
 					JSON.stringify({
+						issuer: "https://gateway.example.com/my-service",
 						authorization_endpoint: "https://gateway.example.com/my-service/oauth/authorize",
 						token_endpoint: "https://gateway.example.com/my-service/oauth/token",
 					}),
@@ -118,7 +124,7 @@ describe("path-prefixed auth servers", () => {
 			fetch: fetchImpl,
 		});
 
-		expect(oauth).toEqual({
+		expect(oauth).toMatchObject({
 			authorizationUrl: "https://gateway.example.com/my-service/oauth/authorize",
 			tokenUrl: "https://gateway.example.com/my-service/oauth/token",
 		});
@@ -135,6 +141,7 @@ describe("path-prefixed auth servers", () => {
 			if (url === "https://gateway.example.com/.well-known/oauth-authorization-server/my-service") {
 				return new Response(
 					JSON.stringify({
+						issuer: "https://gateway.example.com/my-service",
 						authorization_endpoint: "https://gateway.example.com/my-service/oauth",
 						token_endpoint: "https://gateway.example.com/my-service/token",
 					}),
@@ -149,7 +156,7 @@ describe("path-prefixed auth servers", () => {
 			fetch: fetchImpl,
 		});
 
-		expect(oauth).toEqual({
+		expect(oauth).toMatchObject({
 			authorizationUrl: "https://gateway.example.com/my-service/oauth",
 			tokenUrl: "https://gateway.example.com/my-service/token",
 		});
@@ -179,7 +186,7 @@ describe("path-prefixed auth servers", () => {
 			fetch: fetchImpl,
 		});
 
-		expect(oauth).toEqual({
+		expect(oauth).toMatchObject({
 			authorizationUrl: "https://auth.example.com/oauth",
 			tokenUrl: "https://auth.example.com/token",
 		});
@@ -243,7 +250,7 @@ describe("resource_metadata chain", () => {
 			{ fetch: fetchImpl },
 		);
 
-		expect(oauth).toEqual({
+		expect(oauth).toMatchObject({
 			authorizationUrl: "https://gateway.example.com/my-service/oauth",
 			tokenUrl: "https://gateway.example.com/my-service/token",
 			resource: "https://gateway.example.com/my-service/mcp",
@@ -293,7 +300,7 @@ describe("resource_metadata chain", () => {
 			fetch: fetchImpl,
 		});
 
-		expect(oauth).toEqual({
+		expect(oauth).toMatchObject({
 			authorizationUrl: "https://auth.example.com/my-service/oauth",
 			tokenUrl: "https://auth.example.com/my-service/token",
 			resource: "https://gateway.example.com/my-service/custom-resource",
@@ -342,7 +349,8 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 			fetch: fetchImpl,
 		});
 
-		expect(oauth).toEqual({
+		expect(oauth).toMatchObject({
+			issuer: "https://cf.mcp.atlassian.com",
 			authorizationUrl: "https://mcp.atlassian.com/v1/authorize",
 			tokenUrl: "https://cf.mcp.atlassian.com/v1/token",
 		});
@@ -407,7 +415,8 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 			{ fetch: fetchImpl },
 		);
 
-		expect(oauth).toEqual({
+		expect(oauth).toMatchObject({
+			issuer: "https://mcp.plane.so/http",
 			authorizationUrl: "https://mcp.plane.so/http/authorize",
 			tokenUrl: "https://mcp.plane.so/http/token",
 			resource: "https://mcp.plane.so/http/mcp",
@@ -418,13 +427,12 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 		expect(calls).toContain("https://mcp.plane.so/http/.well-known/oauth-authorization-server");
 	});
 
-	it("treats trailing-slash issuer differences as a match", async () => {
+	it("rejects trailing-slash issuer differences because issuer comparison is exact", async () => {
 		const fetchImpl = mockFetch((input: FetchInput) => {
 			const url = String(input);
 			if (url === "https://auth.example.com/.well-known/oauth-authorization-server") {
 				return new Response(
 					JSON.stringify({
-						// Issuer with trailing slash; queried base without.
 						issuer: "https://auth.example.com/",
 						authorization_endpoint: "https://auth.example.com/oauth/authorize",
 						token_endpoint: "https://auth.example.com/oauth/token",
@@ -439,10 +447,7 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 			fetch: fetchImpl,
 		});
 
-		expect(oauth).toEqual({
-			authorizationUrl: "https://auth.example.com/oauth/authorize",
-			tokenUrl: "https://auth.example.com/oauth/token",
-		});
+		expect(oauth).toBeNull();
 	});
 
 	it("accepts metadata without an issuer field (legacy / nonstandard servers)", async () => {
@@ -466,9 +471,55 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 			fetch: fetchImpl,
 		});
 
-		expect(oauth).toEqual({
+		expect(oauth).toMatchObject({
+			issuer: "https://auth.example.com",
 			authorizationUrl: "https://auth.example.com/oauth",
 			tokenUrl: "https://auth.example.com/token",
 		});
+	});
+
+	it("rejects authorization-server metadata with a non-canonical issuer", async () => {
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			if (String(input) === "https://auth.example.com/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						issuer: "https://auth.example.com/?tenant=other",
+						authorization_endpoint: "https://auth.example.com/oauth",
+						token_endpoint: "https://auth.example.com/token",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints("https://mcp.example.com", "https://auth.example.com", undefined, {
+			fetch: fetchImpl,
+		});
+
+		expect(oauth).toBeNull();
+	});
+
+	it("reads Client ID Metadata Document support only from issuer-bound authorization-server metadata", async () => {
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			if (String(input) === "https://auth.example.com/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						issuer: "https://auth.example.com",
+						authorization_endpoint: "https://auth.example.com/oauth",
+						token_endpoint: "https://auth.example.com/token",
+						client_id_metadata_document_supported: true,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints("https://mcp.example.com", "https://auth.example.com", undefined, {
+			fetch: fetchImpl,
+		});
+
+		expect(oauth?.clientIdMetadataDocumentSupported).toBe(true);
 	});
 });

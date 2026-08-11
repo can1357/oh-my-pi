@@ -11,6 +11,7 @@
 ### Added
 
 - Added ClinePass to the interactive login selector as `/login cline-pass`, with ClinePass-only models and shared `CLINE_API_KEY` environment fallback kept separate from canonical Cline usage-billing models.
+- Added the optional `clinepass-deepseek-v4-flash` 9router combo to the default, balanced, task, and budget routing slots; installations without the combo continue to skip it.
 - Added opt-in ACP `pkzz` v1 extensions for owner-mediated write/exec permission prompts and bounded host-visible final replies. Legacy ACP clients retain their existing behavior unless they explicitly negotiate the matching capability markers.
 
 - Added the `activity` discoverable tool, gated by `gopkClips.enabled` (default off), which answers "what was I working on this morning?" by reading the local Activity Memory ledger: tracked time, application mix, and sanitized window-title digests bucketed by local hour, for a calendar day (`date`) or a trailing window (`lastHours`). Read-only and local-only — it never records anything itself.

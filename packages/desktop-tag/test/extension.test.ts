@@ -1,11 +1,32 @@
 import { describe, expect, it, mock } from "bun:test";
 import type { ExtensionAPI } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/extensions";
-import desktopTagExtension, { parseCommandArgs } from "../src/extension";
+import desktopTagExtension, {
+	parseCommandArgs,
+	parseTelegramCommandArgs,
+	warnIfTelegramUnconfigured,
+} from "../src/extension";
+
+interface CommandSpec {
+	description?: string;
+	handler: (...args: unknown[]) => unknown;
+	getArgumentCompletions?: (argumentPrefix: string) => Array<{ value: string; label?: string }> | null;
+}
+
+interface RegisteredCommandCapture {
+	name: string;
+	spec: CommandSpec;
+}
+
+/** Commands registered since the last createFakeApi() call. */
+const registeredCommands: RegisteredCommandCapture[] = [];
 
 function createFakeApi(): ExtensionAPI {
+	registeredCommands.length = 0;
 	return {
 		setLabel: mock(() => {}),
-		registerCommand: mock(() => {}),
+		registerCommand: mock((name: string, spec: CommandSpec) => {
+			registeredCommands.push({ name, spec });
+		}),
 		registerShortcut: mock(() => {}),
 		registerTool: mock(() => {}),
 		registerFlag: mock(() => {}),
@@ -86,5 +107,55 @@ describe("region overlay", () => {
 		expect(html).not.toContain("userRequest: requestEl.value.trim()");
 		expect(html).toContain("payload.region = region");
 		expect(html).toContain("valueAsNumber");
+	});
+});
+describe("telegram command registration", () => {
+	it("registers a /telegram command with description, handler and argument completions", () => {
+		const api = createFakeApi();
+		desktopTagExtension(api);
+
+		const telegram = registeredCommands.find(cmd => cmd.name === "telegram");
+		expect(telegram).toBeDefined();
+		expect(telegram?.spec.description).toBe("Telegram capture gateway daemon: /telegram on|off|status");
+		expect(typeof telegram?.spec.handler).toBe("function");
+		expect(typeof telegram?.spec.getArgumentCompletions).toBe("function");
+
+		// Completions surface only valid action prefixes.
+		const complete = telegram?.spec.getArgumentCompletions;
+		expect(complete?.("s")?.map(item => item.value)).toEqual(["status"]);
+		expect(complete?.("")).not.toBeNull();
+		expect(complete?.("xyz")).toBeNull();
+	});
+});
+
+describe("telegram command arguments", () => {
+	it.each([
+		["", "status"],
+		["status", "status"],
+		["STATUS", "status"],
+		["on", "on"],
+		["start", "on"],
+		["off", "off"],
+		["stop", "off"],
+		["  on  extra", "on"],
+	] as const)("parses %s -> %s", (args, expected) => {
+		expect(parseTelegramCommandArgs(args)).toBe(expected);
+	});
+
+	it("rejects an unknown token with usage guidance", () => {
+		expect(() => parseTelegramCommandArgs("bogus")).toThrow(TypeError);
+		expect(() => parseTelegramCommandArgs("bogus")).toThrow("Usage: /telegram <on|off|status>");
+	});
+});
+
+describe("warnIfTelegramUnconfigured", () => {
+	it("notifies warning when Telegram config is disabled/missing, regardless of .env existence", async () => {
+		const notifications: Array<{ message: string; type: string }> = [];
+		await warnIfTelegramUnconfigured((message, type) => {
+			notifications.push({ message, type });
+		});
+		expect(notifications.length).toBe(1);
+		expect(notifications[0].type).toBe("warning");
+		expect(notifications[0].message).toContain("No Telegram capture config visible");
 	});
 });

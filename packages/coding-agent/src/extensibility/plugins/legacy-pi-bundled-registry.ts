@@ -555,12 +555,15 @@ import * as bundledPiCodingAgentMcp from "@pk-nerdsaver-ai/pi-coding-agent/mcp";
 import * as bundledPiCodingAgentMcpClient from "@pk-nerdsaver-ai/pi-coding-agent/mcp/client";
 import * as bundledPiCodingAgentMcpConfig from "@pk-nerdsaver-ai/pi-coding-agent/mcp/config";
 import * as bundledPiCodingAgentMcpConfigWriter from "@pk-nerdsaver-ai/pi-coding-agent/mcp/config-writer";
+import * as bundledPiCodingAgentMcpExtensions from "@pk-nerdsaver-ai/pi-coding-agent/mcp/extensions";
+import * as bundledPiCodingAgentMcpHostInteraction from "@pk-nerdsaver-ai/pi-coding-agent/mcp/host-interaction";
 import * as bundledPiCodingAgentMcpJsonRpc from "@pk-nerdsaver-ai/pi-coding-agent/mcp/json-rpc";
 import * as bundledPiCodingAgentMcpLoader from "@pk-nerdsaver-ai/pi-coding-agent/mcp/loader";
 import * as bundledPiCodingAgentMcpManager from "@pk-nerdsaver-ai/pi-coding-agent/mcp/manager";
 import * as bundledPiCodingAgentMcpOauthCredentials from "@pk-nerdsaver-ai/pi-coding-agent/mcp/oauth-credentials";
 import * as bundledPiCodingAgentMcpOauthDiscovery from "@pk-nerdsaver-ai/pi-coding-agent/mcp/oauth-discovery";
 import * as bundledPiCodingAgentMcpOauthFlow from "@pk-nerdsaver-ai/pi-coding-agent/mcp/oauth-flow";
+import * as bundledPiCodingAgentMcpOutputSchemaValidator from "@pk-nerdsaver-ai/pi-coding-agent/mcp/output-schema-validator";
 import * as bundledPiCodingAgentMcpRender from "@pk-nerdsaver-ai/pi-coding-agent/mcp/render";
 import * as bundledPiCodingAgentMcpSmitheryAuth from "@pk-nerdsaver-ai/pi-coding-agent/mcp/smithery-auth";
 import * as bundledPiCodingAgentMcpSmitheryConnect from "@pk-nerdsaver-ai/pi-coding-agent/mcp/smithery-connect";
@@ -2447,6 +2450,11 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/mcp/config": bundledPiCodingAgentMcpConfig as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/mcp/extensions": bundledPiCodingAgentMcpExtensions as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/mcp/host-interaction":
+		bundledPiCodingAgentMcpHostInteraction as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/mcp/json-rpc": bundledPiCodingAgentMcpJsonRpc as unknown as Readonly<
 		Record<string, unknown>
 	>,
@@ -2464,6 +2472,8 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/mcp/oauth-flow": bundledPiCodingAgentMcpOauthFlow as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/mcp/output-schema-validator":
+		bundledPiCodingAgentMcpOutputSchemaValidator as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/mcp/render": bundledPiCodingAgentMcpRender as unknown as Readonly<
 		Record<string, unknown>
 	>,

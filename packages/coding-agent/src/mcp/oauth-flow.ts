@@ -11,6 +11,7 @@ import type { OAuthController, OAuthCredentials } from "@pk-nerdsaver-ai/pi-ai/o
 import type { FetchImpl } from "@pk-nerdsaver-ai/pi-ai/types";
 import { getActiveProfile } from "@pk-nerdsaver-ai/pi-utils/dirs";
 import type { OAuthCredential } from "../session/auth-storage";
+import { canonicalizeOAuthIssuer } from "./oauth-discovery";
 
 /** Credential-id prefix for OMP-managed MCP OAuth credentials keyed by profile and server URL. */
 const MCP_OAUTH_URL_CREDENTIAL_PREFIX = "mcp_oauth:";
@@ -58,22 +59,25 @@ export function mcpOAuthCredentialProfile(credentialId: string): string | undefi
  * works without any `auth` block persisted in (possibly shared) config files.
  */
 export interface MCPStoredOAuthCredential extends OAuthCredential {
+	/** Canonical issuer that minted this credential. Absent only on legacy rows. */
+	issuer?: string;
 	tokenUrl?: string;
 	clientId?: string;
 	clientSecret?: string;
 	resource?: string;
 	/**
-	 * Authorization-server URL (the issuer the grant was minted against). Used
-	 * to filter same-origin resource indicators on refresh: RFC 8414 lets the
-	 * authorize and token endpoints sit on different origins, so refresh
-	 * cannot infer the original auth-server origin from `tokenUrl` alone.
-	 * Unset on legacy credentials minted before issue #3502's fix.
+	 * Legacy field written before issuer binding. It contains the authorization
+	 * endpoint URL, not an issuer, and MUST NOT be used for issuer comparison.
 	 */
 	authorizationUrl?: string;
 }
 
 const DEFAULT_PORT = 3000;
 const CALLBACK_PATH = "/callback";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function isLoopbackHostname(hostname: string): boolean {
 	return hostname === "localhost" || hostname === "127.0.0.1";
@@ -216,12 +220,20 @@ function filterResourceIndicator(
 export interface MCPOAuthConfig {
 	/** Authorization endpoint URL */
 	authorizationUrl: string;
+	/** Canonical authorization-server issuer identifier */
+	issuer: string;
+	/** Require `iss` on authorization responses per AS metadata. */
+	authorizationResponseIssuerRequired?: boolean;
 	/** Token endpoint URL */
 	tokenUrl: string;
 	/** Client ID (optional when already embedded in authorization URL) */
 	clientId?: string;
 	/** Client secret (optional for PKCE flows) */
 	clientSecret?: string;
+	/** Hosted HTTPS Client ID Metadata Document URL, used only when the AS advertises support. */
+	clientMetadataUrl?: string;
+	/** True only when discovered authorization-server metadata advertises CIMD support. */
+	clientIdMetadataDocumentSupported?: boolean;
 	/** OAuth scopes (space-separated) */
 	scopes?: string;
 	/**
@@ -261,6 +273,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	#registeredClientSecret?: string;
 	#codeVerifier?: string;
 	#fetch: FetchImpl;
+	#usingClientMetadataDocument = false;
 	#resource?: string;
 
 	constructor(
@@ -268,6 +281,9 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		ctrl: OAuthController,
 	) {
 		super(ctrl, resolveCallbackOptions(config));
+		if (canonicalizeOAuthIssuer(config.issuer) !== config.issuer) {
+			throw new Error("OAuth issuer must be a canonical URL without credentials, query, or fragment");
+		}
 		this.#resolvedClientId = this.#resolveClientId(config);
 		this.#fetch = config.fetch ?? ctrl.fetch ?? fetch;
 		this.#resource = this.#filterResourceIndicator(
@@ -305,6 +321,10 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	 */
 	get authorizationUrl(): string {
 		return this.config.authorizationUrl;
+	}
+	/** Canonical authorization-server issuer recorded for this request. */
+	get issuer(): string {
+		return this.config.issuer;
 	}
 
 	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
@@ -367,7 +387,15 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		return { url: authUrl.toString() };
 	}
 
-	async exchangeToken(code: string, _state: string, redirectUri: string): Promise<OAuthCredentials> {
+	async exchangeToken(code: string, _state: string, redirectUri: string, iss?: string): Promise<OAuthCredentials> {
+		if (iss === undefined && this.config.authorizationResponseIssuerRequired) {
+			throw new Error("Authorization response is missing required issuer");
+		}
+		if (iss !== undefined && iss !== this.config.issuer) {
+			throw new Error(
+				`Authorization response issuer mismatch: expected ${this.config.issuer}, received ${iss || "(empty)"}`,
+			);
+		}
 		const params = new URLSearchParams({
 			grant_type: "authorization_code",
 			code,
@@ -387,7 +415,9 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		if (this.#resource) {
 			params.set("resource", this.#resource);
 		}
-		const clientSecret = this.config.clientSecret ?? this.#registeredClientSecret;
+		const clientSecret = this.#usingClientMetadataDocument
+			? undefined
+			: (this.config.clientSecret ?? this.#registeredClientSecret);
 		if (clientSecret) {
 			params.set("client_secret", clientSecret);
 		}
@@ -474,7 +504,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	 * values opt into same-origin stripping via `stripSameOriginResource`.
 	 */
 	#filterResourceIndicator(resource: string | undefined): string | undefined {
-		return filterResourceIndicator(resource, this.config.authorizationUrl, {
+		return filterResourceIndicator(resource, this.config.issuer, {
 			stripSameOriginResource: this.config.stripSameOriginResource,
 		});
 	}
@@ -483,6 +513,11 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	 * Try OAuth dynamic client registration when provider requires a client_id.
 	 */
 	async #tryRegisterClient(redirectUri: string): Promise<void> {
+		if (this.config.clientMetadataUrl && this.config.clientIdMetadataDocumentSupported) {
+			await this.#useClientMetadataDocument(this.config.clientMetadataUrl, redirectUri);
+			return;
+		}
+
 		const registrationEndpoint = await this.#resolveRegistrationEndpoint();
 		if (!registrationEndpoint) return;
 
@@ -521,26 +556,113 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		}
 	}
 
+	/**
+	 * Validate the configured, OMP-controlled Client ID Metadata Document before
+	 * sending its URL as a portable OAuth client identifier. The authorization
+	 * server will fetch it independently, but the client must not send a URL
+	 * whose declared identity or callback registration it has not verified.
+	 */
+	async #useClientMetadataDocument(metadataUrl: string, redirectUri: string): Promise<void> {
+		if (metadataUrl.trim() !== metadataUrl) {
+			throw new Error("OAuth client metadata URL must not include surrounding whitespace");
+		}
+		const clientId = new URL(metadataUrl);
+		const rawPath = metadataUrl.match(/^https:\/\/[^/?#]+(\/[^?#]*)/)?.[1];
+		let hasDotSegment = !rawPath;
+		try {
+			hasDotSegment ||=
+				rawPath?.split("/").some(segment => {
+					const decoded = decodeURIComponent(segment);
+					return decoded === "." || decoded === "..";
+				}) ?? false;
+		} catch {
+			throw new Error("OAuth client metadata URL path must use valid percent encoding");
+		}
+		if (
+			clientId.protocol !== "https:" ||
+			clientId.username ||
+			clientId.password ||
+			clientId.hash ||
+			clientId.search ||
+			clientId.pathname === "/" ||
+			hasDotSegment
+		) {
+			throw new Error(
+				"OAuth client metadata URL must be an HTTPS URL with a non-root dot-segment-free path and no credentials, query, or fragment",
+			);
+		}
+		if (this.config.clientSecret?.trim()) {
+			throw new Error("OAuth Client ID Metadata Documents cannot use a configured client secret");
+		}
+
+		const response = await this.#fetch(metadataUrl, {
+			method: "GET",
+			headers: { Accept: "application/json" },
+			redirect: "error",
+		});
+		if (!response.ok) {
+			throw new Error(`OAuth client metadata document request failed: ${response.status}`);
+		}
+		const contentLength = response.headers.get("content-length");
+		if (contentLength !== null && Number(contentLength) > 5 * 1024) {
+			throw new Error("OAuth client metadata document exceeds the 5 KiB safety limit");
+		}
+		const body = await response.text();
+		if (new TextEncoder().encode(body).byteLength > 5 * 1024) {
+			throw new Error("OAuth client metadata document exceeds the 5 KiB safety limit");
+		}
+
+		let metadata: unknown;
+		try {
+			metadata = JSON.parse(body);
+		} catch {
+			throw new Error("OAuth client metadata document is not valid JSON");
+		}
+		if (!isRecord(metadata)) {
+			throw new Error("OAuth client metadata document must be a JSON object");
+		}
+		if (metadata.client_id !== metadataUrl) {
+			throw new Error("OAuth client metadata document client_id must exactly match its URL");
+		}
+		if (typeof metadata.client_name !== "string" || metadata.client_name.trim() === "") {
+			throw new Error("OAuth client metadata document must include a non-empty client_name");
+		}
+		if (
+			!Array.isArray(metadata.redirect_uris) ||
+			!metadata.redirect_uris.some(uri => typeof uri === "string" && uri === redirectUri)
+		) {
+			throw new Error("OAuth client metadata document must register the exact redirect URI used by OMP");
+		}
+		if (Object.hasOwn(metadata, "client_secret") || Object.hasOwn(metadata, "client_secret_expires_at")) {
+			throw new Error("OAuth client metadata document must not declare shared-secret client authentication");
+		}
+		if (metadata.token_endpoint_auth_method !== undefined && metadata.token_endpoint_auth_method !== "none") {
+			throw new Error(
+				`OAuth client metadata document specifies unsupported token_endpoint_auth_method: ${String(metadata.token_endpoint_auth_method)}`,
+			);
+		}
+
+		this.#resolvedClientId = metadataUrl;
+		this.#usingClientMetadataDocument = true;
+	}
+
 	async #resolveRegistrationEndpoint(): Promise<string | null> {
-		const authorizationUrl = new URL(this.config.authorizationUrl);
+		const issuerUrl = new URL(this.config.issuer);
 
 		// origin-root well-known; most servers serve metadata here.
-		const rootUrl = new URL("/.well-known/oauth-authorization-server", authorizationUrl.origin).toString();
+		const rootUrl = new URL("/.well-known/oauth-authorization-server", issuerUrl.origin).toString();
 		const endpoint = await this.#tryWellKnownForRegistration(rootUrl);
 		if (endpoint) return endpoint;
 
 		// path-prefixed well-known for gateways (e.g. https://gateway.example.com/my-service/).
-		const normalizedPath = authorizationUrl.pathname.replace(/\/$/, "");
-		const lastSlash = normalizedPath.lastIndexOf("/");
-		// Bare-origin authorization URL — nothing further to try.
-		if (lastSlash < 0) return null;
+		const normalizedPath = issuerUrl.pathname.replace(/\/$/, "");
+		if (!normalizedPath) return null;
 
-		// Single-segment paths are the gateway prefix itself; multi-segment paths
-		// drop the trailing segment (typically a service endpoint).
-		const prefixPath = lastSlash === 0 ? normalizedPath : normalizedPath.slice(0, lastSlash);
+		// Compatibility path used by gateways that mount metadata below the
+		// issuer, followed by RFC 8414's path-ful issuer form.
 		const prefixedUrl = new URL(
 			".well-known/oauth-authorization-server",
-			`${authorizationUrl.origin}${prefixPath}/`,
+			`${issuerUrl.origin}${normalizedPath}/`,
 		).toString();
 		const prefixedEndpoint = await this.#tryWellKnownForRegistration(prefixedUrl);
 		if (prefixedEndpoint) return prefixedEndpoint;
@@ -548,7 +670,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		// RFC 8414 §3.1 path-ful issuer form: /.well-known/oauth-authorization-server/<path>.
 		const pathfulUrl = new URL(
 			`/.well-known/oauth-authorization-server${normalizedPath}`,
-			authorizationUrl.origin,
+			issuerUrl.origin,
 		).toString();
 		return await this.#tryWellKnownForRegistration(pathfulUrl);
 	}
@@ -560,7 +682,13 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				headers: { Accept: "application/json" },
 			});
 			if (!response.ok) return null;
-			const metadata = (await response.json()) as { registration_endpoint?: string };
+			const metadata = (await response.json()) as { issuer?: unknown; registration_endpoint?: string };
+			if (
+				metadata.issuer !== undefined &&
+				(typeof metadata.issuer !== "string" || canonicalizeOAuthIssuer(metadata.issuer) !== this.config.issuer)
+			) {
+				return null;
+			}
 			if (metadata.registration_endpoint && metadata.registration_endpoint.trim() !== "") {
 				return metadata.registration_endpoint;
 			}

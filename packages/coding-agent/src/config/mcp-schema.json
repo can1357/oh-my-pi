@@ -76,6 +76,10 @@
         "clientId": {
           "type": "string"
         },
+        "clientMetadataUrl": {
+          "type": "string",
+          "description": "HTTPS OAuth Client ID Metadata Document URL used as a URL-form client_id when the authorization server advertises support."
+        },
         "clientSecret": {
           "type": "string"
         },

@@ -22,10 +22,12 @@ import type { AssistantMessage, Model } from "@pk-nerdsaver-ai/pi-ai";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@pk-nerdsaver-ai/pi-coding-agent/internal-urls";
+import type { MCPInputCollectionContext, MCPInputRequests } from "@pk-nerdsaver-ai/pi-coding-agent/mcp/types";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
 	AcpAgent,
 	createAcpExtensionUiContext,
+	createAcpMcpHostInteraction,
 } from "@pk-nerdsaver-ai/pi-coding-agent/modes/acp/acp-agent";
 import type { PlanModeState } from "@pk-nerdsaver-ai/pi-coding-agent/plan-mode/state";
 import type { AgentSession, AgentSessionEvent } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
@@ -2558,6 +2560,161 @@ describe("ACP agent", () => {
 			expect(first.sessionId).toBe("session-before-switch");
 			expect(second.sessionId).toBe("session-after-switch");
 			expect(third.sessionId).toBe("session-after-switch");
+		});
+	});
+	describe("ACP MCP form interaction bridge", () => {
+		const FORM_CAPABILITIES: ClientCapabilities = { elicitation: { form: {} } };
+
+		function createInputContext(inputRequests: MCPInputRequests, signal?: AbortSignal): MCPInputCollectionContext {
+			return {
+				connection: {
+					name: "interactive-server",
+					serverInfo: { name: "interactive-server", version: "1.0.0" },
+				},
+				method: "tools/call",
+				originalParams: { tool: "gather" },
+				round: 1,
+				inputRequired: {
+					resultType: "input_required",
+					requestState: "state-must-survive",
+					inputRequests,
+				},
+				...(signal ? { signal } : {}),
+			};
+		}
+
+		it("does not create or advertise interaction support without ACP form capability", () => {
+			const connection = {
+				unstable_createElicitation: async () => ({ action: "cancel" }),
+			} as unknown as AgentSideConnection;
+
+			expect(createAcpMcpHostInteraction(connection, () => "session-none", {})).toBeUndefined();
+		});
+
+		it("advertises only forms and forwards the complete validated form schema", async () => {
+			const calls: CreateElicitationRequest[] = [];
+			const connection = {
+				unstable_createElicitation: async (request: CreateElicitationRequest) => {
+					calls.push(request);
+					return {
+						action: "accept" as const,
+						content: { name: "Ada", retries: 3, approved: true },
+					};
+				},
+			} as unknown as AgentSideConnection;
+			const interaction = createAcpMcpHostInteraction(connection, () => "mcp-session", FORM_CAPABILITIES);
+			if (!interaction) throw new Error("expected ACP form interaction");
+
+			expect(interaction.clientCapabilities).toEqual({ elicitation: { form: {} } });
+			const responses = await interaction.collectInput(
+				createInputContext({
+					"form-request": {
+						method: "elicitation/create",
+						params: {
+							mode: "form",
+							message: "Provide deployment details",
+							requestedSchema: {
+								type: "object",
+								additionalProperties: false,
+								properties: {
+									name: {
+										type: "string",
+										title: "Release name",
+										description: "Visible deployment label",
+										enum: ["Ada", "Lin"],
+										default: "Ada",
+									},
+									retries: { type: "integer", title: "Retries", default: 2 },
+									approved: { type: "boolean", description: "Approval received" },
+								},
+								required: ["name", "approved"],
+							},
+						},
+					},
+				}),
+			);
+
+			expect(responses).toEqual({
+				"form-request": { action: "accept", content: { name: "Ada", retries: 3, approved: true } },
+			});
+			expect(calls).toHaveLength(1);
+			const request = calls[0]!;
+			if (request.mode !== "form" || !("sessionId" in request))
+				throw new Error("expected session-scoped form request");
+			expect(request.sessionId).toBe("mcp-session");
+			expect(request.message).toBe("Provide deployment details");
+			expect(request.requestedSchema).toEqual({
+				type: "object",
+				properties: {
+					name: {
+						type: "string",
+						title: "Release name",
+						description: "Visible deployment label",
+						enum: ["Ada", "Lin"],
+						default: "Ada",
+					},
+					retries: { type: "integer", title: "Retries", default: 2 },
+					approved: { type: "boolean", title: "approved", description: "Approval received" },
+				},
+				required: ["name", "approved"],
+			});
+		});
+
+		it("preserves server request keys while mapping decline and cancel exactly", async () => {
+			const connection = {
+				unstable_createElicitation: async (request: CreateElicitationRequest) => ({
+					action: request.message === "Decline this" ? ("decline" as const) : ("cancel" as const),
+				}),
+			} as unknown as AgentSideConnection;
+			const interaction = createAcpMcpHostInteraction(connection, () => "mcp-session", FORM_CAPABILITIES);
+			if (!interaction) throw new Error("expected ACP form interaction");
+			const form = (message: string): MCPInputRequests[string] => ({
+				method: "elicitation/create",
+				params: {
+					mode: "form",
+					message,
+					requestedSchema: { type: "object", properties: { value: { type: "string" } } },
+				},
+			});
+
+			await expect(
+				interaction.collectInput(createInputContext({ first: form("Decline this"), second: form("Cancel this") })),
+			).resolves.toEqual({ first: { action: "decline" }, second: { action: "cancel" } });
+		});
+		it("races unstable_createElicitation against signal abort and discards late responses after abort", async () => {
+			const { promise: elicitationPromise, resolve: resolveElicitation } =
+				Promise.withResolvers<CreateElicitationResponse>();
+
+			const connection = {
+				unstable_createElicitation: () => elicitationPromise,
+			} as unknown as AgentSideConnection;
+
+			const interaction = createAcpMcpHostInteraction(connection, () => "mcp-session", FORM_CAPABILITIES);
+			if (!interaction) throw new Error("expected ACP form interaction");
+
+			const controller = new AbortController();
+			const inputPromise = interaction.collectInput(
+				createInputContext(
+					{
+						req: {
+							method: "elicitation/create",
+							params: {
+								mode: "form",
+								message: "Delayed prompt",
+								requestedSchema: { type: "object", properties: { value: { type: "string" } } },
+							},
+						},
+					},
+					controller.signal,
+				),
+			);
+
+			controller.abort();
+			const responses = await inputPromise;
+			expect(responses).toEqual({ req: { action: "cancel" } });
+
+			resolveElicitation({ action: "accept", content: { value: "late-value" } });
+			await Bun.sleep(10);
 		});
 	});
 });

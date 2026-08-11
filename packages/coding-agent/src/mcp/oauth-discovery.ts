@@ -10,9 +10,19 @@ import type { FetchImpl } from "@pk-nerdsaver-ai/pi-ai/types";
 export interface OAuthEndpoints {
 	authorizationUrl: string;
 	tokenUrl: string;
+	/** Canonical authorization-server issuer identifier. */
+	issuer?: string;
+	/** AS metadata requires `iss` in authorization responses when true. */
+	authorizationResponseIssuerRequired?: boolean;
 	clientId?: string;
+	/** Authorization-server metadata advertises Client ID Metadata Documents. */
+	clientIdMetadataDocumentSupported?: boolean;
 	scopes?: string;
 	resource?: string;
+}
+
+export interface DiscoveredOAuthEndpoints extends OAuthEndpoints {
+	issuer: string;
 }
 
 export interface AuthDetectionResult {
@@ -29,7 +39,9 @@ export function extractMcpAuthServerUrl(error: Error, serverUrl?: string): strin
 	if (!match?.[1]) return undefined;
 
 	try {
-		return new URL(match[1], serverUrl).toString();
+		const headerValue = match[1];
+		new URL(headerValue, serverUrl);
+		return /^[a-z][a-z\d+.-]*:/i.test(headerValue) ? headerValue : new URL(headerValue, serverUrl).toString();
 	} catch {
 		return undefined;
 	}
@@ -74,8 +86,18 @@ export function extractOAuthEndpoints(error: Error): OAuthEndpoints | null {
 			(obj.resource as string | undefined) ||
 			(obj.resource_uri as string | undefined) ||
 			(obj.resourceUri as string | undefined);
+		const issuer = typeof obj.issuer === "string" ? obj.issuer : undefined;
 
-		return { authorizationUrl, tokenUrl, clientId, scopes, resource };
+		const authorizationResponseIssuerRequired = obj.authorization_response_iss_parameter_supported === true;
+		return {
+			authorizationUrl,
+			tokenUrl,
+			issuer,
+			authorizationResponseIssuerRequired,
+			clientId,
+			scopes,
+			resource,
+		};
 	};
 
 	const clientIdFromAuthUrl = (authorizationUrl: string): string | undefined => {
@@ -148,6 +170,7 @@ export function extractOAuthEndpoints(error: Error): OAuthEndpoints | null {
 			return {
 				authorizationUrl,
 				tokenUrl,
+				issuer: challengeValues.get("issuer"),
 				clientId: challengeValues.get("client_id") || clientIdFromAuthUrl(authorizationUrl),
 				scopes: challengeValues.get("scope") || challengeValues.get("scopes") || scopeFromAuthUrl(authorizationUrl),
 				resource,
@@ -227,15 +250,24 @@ export function analyzeAuthError(error: Error, serverUrl?: string): AuthDetectio
 }
 
 /**
- * Normalize an OAuth issuer URL for RFC 8414 §3.3 comparison: lowercase
- * scheme/host (URL parser already does this), drop fragment/query, strip a
- * trailing slash on the path. The path is otherwise case-sensitive.
+ * Validate an OAuth issuer URL while preserving its source string. OAuth
+ * authorization-response `iss` comparison is exact, so URL serialization must
+ * not add/remove a slash or otherwise rewrite a validated issuer identifier.
  */
-function normalizeIssuerUrl(value: string): string | undefined {
+export function canonicalizeOAuthIssuer(value: string): string | undefined {
+	if (!value || value.trim() !== value) return undefined;
 	try {
-		const u = new URL(value);
-		const path = u.pathname.replace(/\/+$/, "");
-		return `${u.protocol}//${u.host}${path}`;
+		const url = new URL(value);
+		if (
+			(url.protocol !== "https:" && url.protocol !== "http:") ||
+			url.username ||
+			url.password ||
+			url.search ||
+			url.hash
+		) {
+			return undefined;
+		}
+		return value;
 	} catch {
 		return undefined;
 	}
@@ -250,19 +282,13 @@ function normalizeIssuerUrl(value: string): string | undefined {
  * well-known URL), accepting the first hit silently routes the grant to the
  * wrong `/authorize` endpoint and produces opaque `server_error` redirects.
  *
- * Returns true when the metadata is safe to use:
  *   - the document has no `issuer` field (nonstandard / legacy servers — keep
  *     today's permissive behavior), or
- *   - the issuer matches `baseUrl` after trailing-slash normalization.
+ *   - the validated issuer exactly matches `baseUrl`.
  */
 function issuerMatchesBase(metadataIssuer: unknown, baseUrl: string): boolean {
-	if (typeof metadataIssuer !== "string" || !metadataIssuer.trim()) {
-		return true;
-	}
-	const normalizedIssuer = normalizeIssuerUrl(metadataIssuer);
-	const normalizedBase = normalizeIssuerUrl(baseUrl);
-	if (!normalizedIssuer || !normalizedBase) return true;
-	return normalizedIssuer === normalizedBase;
+	if (typeof metadataIssuer !== "string" || !metadataIssuer) return true;
+	return canonicalizeOAuthIssuer(metadataIssuer) !== undefined && metadataIssuer === baseUrl;
 }
 
 /**
@@ -274,7 +300,7 @@ export async function discoverOAuthEndpoints(
 	authServerUrl?: string,
 	resourceMetadataUrl?: string,
 	opts?: { fetch?: FetchImpl; protectedResource?: string },
-): Promise<OAuthEndpoints | null> {
+): Promise<DiscoveredOAuthEndpoints | null> {
 	const fetchImpl: FetchImpl = opts?.fetch ?? fetch;
 	const wellKnownPaths = [
 		"/.well-known/oauth-authorization-server",
@@ -325,16 +351,26 @@ export async function discoverOAuthEndpoints(
 	addDiscoveryBase(authServerUrl, true);
 	addDiscoveryBase(serverUrl, false);
 
-	const findEndpoints = (metadata: Record<string, unknown>): OAuthEndpoints | null => {
+	const findEndpoints = (
+		metadata: Record<string, unknown>,
+		base: { url: string; issuerCandidate: boolean },
+	): DiscoveredOAuthEndpoints | null => {
 		if (metadata.authorization_endpoint && metadata.token_endpoint) {
 			const scopesSupported = Array.isArray(metadata.scopes_supported)
 				? metadata.scopes_supported.filter((scope): scope is string => typeof scope === "string").join(" ")
 				: undefined;
 			const resource = typeof metadata.resource === "string" ? metadata.resource : protectedResource;
+			const issuer =
+				(typeof metadata.issuer === "string" ? canonicalizeOAuthIssuer(metadata.issuer) : undefined) ??
+				(base.issuerCandidate ? canonicalizeOAuthIssuer(base.url) : undefined);
+			if (!issuer) return null;
 
 			return {
+				issuer,
 				authorizationUrl: String(metadata.authorization_endpoint),
 				tokenUrl: String(metadata.token_endpoint),
+				authorizationResponseIssuerRequired: metadata.authorization_response_iss_parameter_supported === true,
+				clientIdMetadataDocumentSupported: metadata.client_id_metadata_document_supported === true,
 				clientId:
 					typeof metadata.client_id === "string"
 						? metadata.client_id
@@ -360,10 +396,27 @@ export async function discoverOAuthEndpoints(
 			const oauthData = (metadata.oauth || metadata.authorization || metadata.auth) as Record<string, unknown>;
 			if (typeof oauthData.authorization_url === "string" && typeof oauthData.token_url === "string") {
 				const resource = typeof oauthData.resource === "string" ? oauthData.resource : protectedResource;
+				const rawIssuer = oauthData.issuer ?? metadata.issuer;
+				const issuer =
+					rawIssuer === undefined
+						? base.issuerCandidate
+							? canonicalizeOAuthIssuer(base.url)
+							: undefined
+						: typeof rawIssuer === "string"
+							? canonicalizeOAuthIssuer(rawIssuer)
+							: undefined;
+				if (!issuer) return null;
 
 				return {
+					issuer,
 					authorizationUrl: oauthData.authorization_url || String(oauthData.authorizationUrl),
 					tokenUrl: oauthData.token_url || String(oauthData.tokenUrl),
+					authorizationResponseIssuerRequired:
+						oauthData.authorization_response_iss_parameter_supported === true ||
+						metadata.authorization_response_iss_parameter_supported === true,
+					clientIdMetadataDocumentSupported:
+						oauthData.client_id_metadata_document_supported === true ||
+						metadata.client_id_metadata_document_supported === true,
 					clientId:
 						typeof oauthData.client_id === "string"
 							? oauthData.client_id
@@ -412,7 +465,10 @@ export async function discoverOAuthEndpoints(
 							(path === "/.well-known/oauth-authorization-server" ||
 								path === "/.well-known/openid-configuration");
 						const issuerOk = requireIssuerMatch ? issuerMatchesBase(metadata.issuer, base.url) : true;
-						const endpoints = issuerOk ? findEndpoints(metadata) : null;
+						const issuerValid =
+							metadata.issuer === undefined ||
+							(typeof metadata.issuer === "string" && canonicalizeOAuthIssuer(metadata.issuer) !== undefined);
+						const endpoints = issuerOk && issuerValid ? findEndpoints(metadata, base) : null;
 						if (endpoints) return endpoints;
 
 						if (path === "/.well-known/oauth-protected-resource") {

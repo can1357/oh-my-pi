@@ -14,3 +14,5 @@
 * [Task-contract and orchestration runtime](task-contract-orchestration.md) - ephemeral root task contracts, evidence ledger, completion-gate modules under `src/orchestration/`.
 * [Ethereal workspaces](ethereal-workspaces.md) - session-scoped isolated cwd so agent edits do not mutate the source checkout.
 * [Collab live sessions](collab-live-sessions.md) - `/collab` multi-client live session sharing and collab-web guest client.
+* [@ompk GitHub mention agent and relay isolation](ompk-github-mention-agent.md) - account-wide GitHub App mention agent on the ompk-linear-agent worker, with container-per-job relay isolation, credential-free setup hook, clone cache, and boundary-aware redaction.
+* [Recent History — 2026-08](recent-history-2026-08.md) - committed history synthesis from late July through 2026-08-06 (gopk OCR consent, context-file IDs, mention agent, discovery/prompt refactors, 16.4.0, ClinePass).

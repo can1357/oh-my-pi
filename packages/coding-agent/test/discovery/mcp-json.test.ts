@@ -23,6 +23,7 @@ describe("standalone mcp.json oauth env expansion", () => {
 	const originalEnv = {
 		PI_OAUTH_TOKEN_URL: process.env.PI_OAUTH_TOKEN_URL,
 		PI_OAUTH_CLIENT_ID: process.env.PI_OAUTH_CLIENT_ID,
+		PI_OAUTH_CLIENT_METADATA_URL: process.env.PI_OAUTH_CLIENT_METADATA_URL,
 		PI_OAUTH_CLIENT_SECRET: process.env.PI_OAUTH_CLIENT_SECRET,
 		PI_OAUTH_REDIRECT_URI: process.env.PI_OAUTH_REDIRECT_URI,
 		PI_OAUTH_CALLBACK_PATH: process.env.PI_OAUTH_CALLBACK_PATH,
@@ -35,6 +36,7 @@ describe("standalone mcp.json oauth env expansion", () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-json-"));
 		process.env.PI_OAUTH_TOKEN_URL = "https://provider.example/token";
 		process.env.PI_OAUTH_CLIENT_ID = "oauth-client-id";
+		process.env.PI_OAUTH_CLIENT_METADATA_URL = "https://client.example/metadata.json";
 		process.env.PI_OAUTH_CLIENT_SECRET = "oauth-client-secret";
 		process.env.PI_OAUTH_REDIRECT_URI = "https://public.example/oauth/callback";
 		process.env.PI_OAUTH_CALLBACK_PATH = "/oauth/callback";
@@ -71,6 +73,7 @@ describe("standalone mcp.json oauth env expansion", () => {
 						},
 						oauth: {
 							clientId: envPlaceholder("PI_OAUTH_CLIENT_ID"),
+							clientMetadataUrl: envPlaceholder("PI_OAUTH_CLIENT_METADATA_URL"),
 							clientSecret: envPlaceholder("PI_OAUTH_CLIENT_SECRET"),
 							redirectUri: envPlaceholder("PI_OAUTH_REDIRECT_URI"),
 							callbackPort: 4317,
@@ -94,6 +97,7 @@ describe("standalone mcp.json oauth env expansion", () => {
 		});
 		expect(server?.oauth).toEqual({
 			clientId: "oauth-client-id",
+			clientMetadataUrl: "https://client.example/metadata.json",
 			clientSecret: "oauth-client-secret",
 			redirectUri: "https://public.example/oauth/callback",
 			callbackPort: 4317,

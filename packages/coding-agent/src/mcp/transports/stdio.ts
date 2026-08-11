@@ -10,16 +10,28 @@ import * as path from "node:path";
 import { getProjectDir, readJsonl, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 import { type Subprocess, spawn } from "bun";
 import { hostHasInheritableConsole } from "../../eval/py/spawn-options";
-import type {
-	JsonRpcError,
-	JsonRpcMessage,
-	JsonRpcRequest,
-	JsonRpcResponse,
-	MCPRequestOptions,
-	MCPStdioServerConfig,
-	MCPTransport,
+import {
+	buildModernRequestParams,
+	getMCPNotificationSubscriptionId,
+	hasMCPSubscriptionNotifications,
+	isMCPSubscriptionNotificationAcknowledged,
+	type JsonRpcError,
+	type JsonRpcMessage,
+	type JsonRpcRequest,
+	type JsonRpcResponse,
+	type MCPListenHandle,
+	type MCPListenOptions,
+	MCPNotificationMethods,
+	type MCPRequestId,
+	type MCPRequestOptions,
+	type MCPStdioServerConfig,
+	type MCPSubscriptionNotificationFilter,
+	MCPSubscriptionProtocolError,
+	type MCPTransport,
+	type MCPTransportProtocolConfiguration,
+	toJsonRpcError,
+	validateMCPSubscriptionAcknowledgement,
 } from "../../mcp/types";
-import { toJsonRpcError } from "../../mcp/types";
 import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
 
 /** Subprocess argv and platform-derived spawn flags for an MCP stdio server. */
@@ -327,6 +339,22 @@ export function writeFrame(stdin: FrameSink, frame: string): boolean {
 		return false;
 	}
 }
+interface MCPStdioListenerState {
+	handle: MCPListenHandle;
+	requestedNotifications: MCPSubscriptionNotificationFilter;
+	acknowledgment: ReturnType<typeof Promise.withResolvers<MCPSubscriptionNotificationFilter>>;
+	completion: ReturnType<typeof Promise.withResolvers<void>>;
+	stdin: FrameSink;
+	onNotification?: (method: string, params: unknown) => void;
+	signal?: AbortSignal;
+	onAbort?: () => void;
+	writePromise: Promise<void>;
+	requestSent: boolean;
+	cancellationSent: boolean;
+	cancelled: boolean;
+	acknowledged: boolean;
+	settled: boolean;
+}
 
 /**
  * Stdio transport for MCP servers.
@@ -343,6 +371,8 @@ export class StdioTransport implements MCPTransport {
 	>();
 	#connected = false;
 	#readLoop: Promise<void> | null = null;
+	#protocolConfiguration: MCPTransportProtocolConfiguration | undefined;
+	#listeners = new Map<MCPRequestId, MCPStdioListenerState>();
 
 	onClose?: () => void;
 	onError?: (error: Error) => void;
@@ -353,6 +383,14 @@ export class StdioTransport implements MCPTransport {
 
 	get connected(): boolean {
 		return this.#connected;
+	}
+
+	configureProtocol(configuration: MCPTransportProtocolConfiguration): void {
+		this.#protocolConfiguration = configuration;
+	}
+
+	getProtocolConfiguration(): MCPTransportProtocolConfiguration | undefined {
+		return this.#protocolConfiguration;
 	}
 
 	/**
@@ -447,15 +485,34 @@ export class StdioTransport implements MCPTransport {
 			for (const m of message) this.#handleMessage(m);
 			return;
 		}
-		// Server-to-client request: has both method and id
+		// Initialization-based revisions permit server-to-client requests. The
+		// modern protocol represents interaction through request results instead,
+		// so answering a server-originated request would itself violate the wire
+		// protocol. An unconfigured transport remains legacy-compatible for
+		// callers that construct StdioTransport directly.
 		if ("method" in message && "id" in message && message.id != null) {
-			void this.#handleServerRequest(message as JsonRpcRequest);
+			const request = message as JsonRpcRequest;
+			if (this.#protocolConfiguration?.era === "modern") {
+				const error = new Error(`MCP protocol violation: modern server sent client request "${request.method}"`);
+				try {
+					this.onError?.(error);
+				} catch {
+					// A diagnostic callback must not break the stdout read loop.
+				}
+				return;
+			}
+			void this.#handleServerRequest(request);
 			return;
 		}
 
-		// Response to our request: has id
+		// Responses complete ordinary requests or gracefully close listeners.
 		if ("id" in message && message.id != null) {
 			const response = message as JsonRpcResponse;
+			const listener = this.#listeners.get(response.id);
+			if (listener) {
+				this.#handleListenerResponse(listener, response);
+				return;
+			}
 			const pending = this.#pendingRequests.get(response.id);
 			if (pending) {
 				this.#pendingRequests.delete(response.id);
@@ -468,10 +525,172 @@ export class StdioTransport implements MCPTransport {
 			return;
 		}
 
-		// Notification: has method but no id
+		// Subscription notifications are demultiplexed by their listen request ID.
 		if ("method" in message) {
 			const notification = message as { method: string; params?: unknown };
+			if (notification.method === MCPNotificationMethods.CANCELLED) {
+				const requestId =
+					typeof notification.params === "object" &&
+					notification.params !== null &&
+					!Array.isArray(notification.params)
+						? (notification.params as Record<string, unknown>).requestId
+						: undefined;
+				const listener =
+					typeof requestId === "string" || typeof requestId === "number"
+						? this.#listeners.get(requestId)
+						: undefined;
+				if (listener) {
+					this.#settleListenerSuccess(listener);
+					return;
+				}
+				return;
+			}
+
+			const subscriptionId = getMCPNotificationSubscriptionId(notification.params);
+			if (subscriptionId !== undefined) {
+				const listener = this.#listeners.get(subscriptionId);
+				if (listener) this.#handleListenerNotification(listener, notification.method, notification.params);
+				return;
+			}
+			if (notification.method === MCPNotificationMethods.SUBSCRIPTIONS_ACKNOWLEDGED) {
+				this.onError?.(
+					new MCPSubscriptionProtocolError(
+						"subscriptions/listen acknowledgment omitted io.modelcontextprotocol/subscriptionId",
+					),
+				);
+				return;
+			}
 			this.onNotification?.(notification.method, notification.params);
+		}
+	}
+
+	#cleanupListener(listener: MCPStdioListenerState): void {
+		this.#listeners.delete(listener.handle.requestId);
+		if (listener.signal && listener.onAbort) {
+			listener.signal.removeEventListener("abort", listener.onAbort);
+		}
+	}
+
+	async #sendListenerCancellation(listener: MCPStdioListenerState): Promise<void> {
+		if (listener.cancellationSent || !listener.requestSent) return;
+		if (!this.#connected || this.#process?.stdin !== listener.stdin) return;
+		listener.cancellationSent = true;
+		const notification = {
+			jsonrpc: "2.0" as const,
+			method: MCPNotificationMethods.CANCELLED,
+			params: { requestId: listener.handle.requestId },
+		};
+		try {
+			await listener.stdin.write(`${JSON.stringify(notification)}\n`);
+			await listener.stdin.flush();
+		} catch {
+			// Advisory cancellation must not replace local listener failure.
+		}
+	}
+
+	#settleListenerFailure(listener: MCPStdioListenerState, error: unknown): void {
+		if (listener.settled) return;
+		listener.settled = true;
+		if ((listener.acknowledged || listener.requestSent) && !listener.cancellationSent) {
+			listener.cancelled = true;
+			void this.#sendListenerCancellation(listener);
+		}
+		this.#cleanupListener(listener);
+		const failure = error instanceof Error ? error : new Error(String(error));
+		if (!listener.acknowledged) listener.acknowledgment.reject(failure);
+		listener.completion.reject(failure);
+		try {
+			this.onError?.(failure);
+		} catch {
+			// Diagnostic callbacks do not own the transport read loop.
+		}
+	}
+
+	#settleListenerSuccess(listener: MCPStdioListenerState): void {
+		if (listener.settled) return;
+		listener.settled = true;
+		this.#cleanupListener(listener);
+		if (!listener.acknowledged) {
+			listener.acknowledgment.reject(
+				new MCPSubscriptionProtocolError(
+					`subscriptions/listen ${listener.handle.requestId} ended before acknowledgment`,
+				),
+			);
+		}
+		listener.completion.resolve();
+	}
+
+	#handleListenerResponse(listener: MCPStdioListenerState, response: JsonRpcResponse): void {
+		try {
+			if (response.error) {
+				throw new Error(`MCP error ${response.error.code}: ${response.error.message}`);
+			}
+			if (!listener.acknowledged) {
+				throw new MCPSubscriptionProtocolError(
+					`subscriptions/listen ${listener.handle.requestId} closed before acknowledgment`,
+				);
+			}
+			const result = response.result;
+			if (typeof result !== "object" || result === null || Array.isArray(result)) {
+				throw new MCPSubscriptionProtocolError("Invalid subscriptions/listen closure result");
+			}
+			const closure = result as Record<string, unknown>;
+			const metadata =
+				typeof closure._meta === "object" && closure._meta !== null && !Array.isArray(closure._meta)
+					? (closure._meta as Record<string, unknown>)
+					: undefined;
+			if (
+				closure.resultType !== "complete" ||
+				metadata?.["io.modelcontextprotocol/subscriptionId"] !== listener.handle.requestId
+			) {
+				throw new MCPSubscriptionProtocolError("Invalid subscriptions/listen graceful closure");
+			}
+			this.#settleListenerSuccess(listener);
+		} catch (error) {
+			this.#settleListenerFailure(listener, error);
+		}
+	}
+
+	#handleListenerNotification(listener: MCPStdioListenerState, method: string, params: unknown): void {
+		try {
+			if (!listener.acknowledged) {
+				if (method !== MCPNotificationMethods.SUBSCRIPTIONS_ACKNOWLEDGED) {
+					throw new MCPSubscriptionProtocolError(
+						`subscriptions/listen ${listener.handle.requestId} received ${method} before acknowledgment`,
+					);
+				}
+				const accepted = validateMCPSubscriptionAcknowledgement(listener.requestedNotifications, params);
+				listener.acknowledged = true;
+				listener.handle.acknowledgedNotifications = accepted;
+				listener.acknowledgment.resolve(accepted);
+				return;
+			}
+			if (method === MCPNotificationMethods.SUBSCRIPTIONS_ACKNOWLEDGED) {
+				throw new MCPSubscriptionProtocolError(
+					`subscriptions/listen ${listener.handle.requestId} was acknowledged more than once`,
+				);
+			}
+			if (
+				!isMCPSubscriptionNotificationAcknowledged(listener.handle.acknowledgedNotifications ?? {}, method, params)
+			) {
+				throw new MCPSubscriptionProtocolError(
+					`subscriptions/listen ${listener.handle.requestId} received unacknowledged notification ${method}`,
+				);
+			}
+			try {
+				listener.onNotification?.(method, params);
+			} catch (error) {
+				// Delivery has failed after the server accepted this listener, so
+				// tell it to release only this request-scoped subscription. Mark
+				// cancellation requested before settling: the server can respond
+				// between stdin.write() and stdin.flush(), before requestSent is
+				// recorded, and the write continuation will send it once framed.
+				listener.cancelled = true;
+				void this.#sendListenerCancellation(listener);
+				this.#settleListenerFailure(listener, error);
+			}
+		} catch (error) {
+			this.#settleListenerFailure(listener, error);
 		}
 	}
 
@@ -489,6 +708,7 @@ export class StdioTransport implements MCPTransport {
 	}
 
 	#sendResponse(id: string | number, result?: unknown, error?: JsonRpcError): void {
+		if (this.#protocolConfiguration?.era === "modern") return;
 		if (!this.#connected || !this.#process?.stdin) return;
 		const response = error
 			? { jsonrpc: "2.0" as const, id, error }
@@ -507,10 +727,117 @@ export class StdioTransport implements MCPTransport {
 			pending.reject(new Error("Transport closed"));
 		}
 		this.#pendingRequests.clear();
+		for (const listener of this.#listeners.values()) {
+			this.#settleListenerFailure(listener, new Error("Transport closed"));
+		}
+		this.#listeners.clear();
 
 		this.onClose?.();
 	}
 
+	async listen(
+		params: { notifications: MCPSubscriptionNotificationFilter },
+		options?: MCPListenOptions,
+	): Promise<MCPListenHandle> {
+		if (!this.#connected || !this.#process?.stdin) {
+			throw new Error("Transport not connected");
+		}
+		const protocol = this.#protocolConfiguration;
+		if (protocol?.era !== "modern" || protocol.phase !== "connected") {
+			throw new Error("subscriptions/listen requires a connected modern MCP transport");
+		}
+		if (!hasMCPSubscriptionNotifications(params.notifications)) {
+			throw new Error("subscriptions/listen requires at least one notification filter");
+		}
+		if (params.notifications.resourceSubscriptions?.some(uri => typeof uri !== "string" || uri.length === 0)) {
+			throw new Error("subscriptions/listen resourceSubscriptions must contain non-empty strings");
+		}
+		if (options?.signal?.aborted) {
+			throw options.signal.reason instanceof Error ? options.signal.reason : new Error("Aborted");
+		}
+
+		const requestedNotifications: MCPSubscriptionNotificationFilter = {
+			...(params.notifications.toolsListChanged === true ? { toolsListChanged: true } : {}),
+			...(params.notifications.promptsListChanged === true ? { promptsListChanged: true } : {}),
+			...(params.notifications.resourcesListChanged === true ? { resourcesListChanged: true } : {}),
+			...(params.notifications.resourceSubscriptions
+				? { resourceSubscriptions: [...new Set(params.notifications.resourceSubscriptions)] }
+				: {}),
+		};
+		const requestId = Snowflake.next();
+		const acknowledgment = Promise.withResolvers<MCPSubscriptionNotificationFilter>();
+		const completion = Promise.withResolvers<void>();
+		// A subprocess can answer during the same turn as the request write.
+		// Mark lifecycle promises handled until the returned handle can be observed.
+		void acknowledgment.promise.catch(() => {});
+		void completion.promise.catch(() => {});
+		const stdin = this.#process.stdin;
+		let listener!: MCPStdioListenerState;
+
+		const sendCancellation = (): Promise<void> => this.#sendListenerCancellation(listener);
+		const cancel = async (): Promise<void> => {
+			if (listener.settled) return;
+			listener.cancelled = true;
+			await listener.writePromise.catch(() => {});
+			await sendCancellation();
+			this.#settleListenerSuccess(listener);
+		};
+		const handle: MCPListenHandle = {
+			requestId,
+			requestedNotifications,
+			acknowledged: acknowledgment.promise,
+			completion: completion.promise,
+			cancel,
+		};
+		listener = {
+			handle,
+			requestedNotifications,
+			acknowledgment,
+			completion,
+			stdin,
+			onNotification: options?.onNotification,
+			signal: options?.signal,
+			requestSent: false,
+			cancellationSent: false,
+			cancelled: false,
+			acknowledged: false,
+			settled: false,
+			writePromise: Promise.resolve(),
+		};
+		if (options?.signal) {
+			listener.onAbort = () => {
+				void cancel();
+			};
+			options.signal.addEventListener("abort", listener.onAbort, { once: true });
+			if (options.signal.aborted) {
+				listener.onAbort();
+			}
+		}
+		this.#listeners.set(requestId, listener);
+
+		const request = {
+			jsonrpc: "2.0" as const,
+			id: requestId,
+			method: "subscriptions/listen",
+			params: buildModernRequestParams(
+				{ notifications: requestedNotifications },
+				{ version: protocol.version, clientCapabilities: protocol.clientCapabilities },
+				options?.metadata,
+				protocol.clientInfo,
+			),
+		};
+		listener.writePromise = (async () => {
+			try {
+				await stdin.write(`${JSON.stringify(request)}\n`);
+				await stdin.flush();
+				listener.requestSent = true;
+				if (listener.cancelled) await sendCancellation();
+			} catch (error) {
+				this.#settleListenerFailure(listener, error);
+			}
+		})();
+		return handle;
+	}
 	async request<T = unknown>(
 		method: string,
 		params?: Record<string, unknown>,
@@ -520,6 +847,13 @@ export class StdioTransport implements MCPTransport {
 			throw new Error("Transport not connected");
 		}
 
+		const timeout = resolveMCPTimeoutMs(this.config.timeout);
+		const signal = options?.signal;
+		if (signal?.aborted) {
+			const reason = signal.reason instanceof Error ? signal.reason : new Error("Aborted");
+			return Promise.reject(reason);
+		}
+
 		const id = Snowflake.next();
 		const request = {
 			jsonrpc: "2.0" as const,
@@ -527,21 +861,32 @@ export class StdioTransport implements MCPTransport {
 			method,
 			params: params ?? {},
 		};
-
-		const timeout = resolveMCPTimeoutMs(this.config.timeout);
-		const signal = options?.signal;
-
-		if (signal?.aborted) {
-			const reason = signal.reason instanceof Error ? signal.reason : new Error("Aborted");
-			return Promise.reject(reason);
-		}
-
+		const stdin = this.#process.stdin;
 		const { promise, resolve, reject } = Promise.withResolvers<T>();
 		let timer: NodeJS.Timeout | undefined;
 		let settled = false;
+		let requestSent = false;
+		let cancellationRequested = false;
+		let cancellationSent = false;
 
-		const cleanup = () => {
-			if (settled) return;
+		const sendCancellationIfNeeded = () => {
+			if (!cancellationRequested || cancellationSent || !requestSent) return;
+			if (!this.#connected || this.#process?.stdin !== stdin) return;
+
+			cancellationSent = true;
+			const notification = {
+				jsonrpc: "2.0" as const,
+				method: "notifications/cancelled",
+				params: { requestId: id },
+			};
+			// Cancellation is advisory and best-effort. A pipe that closes between
+			// the liveness check and this write must not replace the local abort or
+			// timeout result, nor may an asynchronous EPIPE escape unhandled.
+			writeFrame(stdin, `${JSON.stringify(notification)}\n`);
+		};
+
+		const settle = (complete: () => void): boolean => {
+			if (settled) return false;
 			settled = true;
 			if (timer) {
 				clearTimeout(timer);
@@ -551,50 +896,56 @@ export class StdioTransport implements MCPTransport {
 				signal.removeEventListener("abort", onAbort);
 			}
 			this.#pendingRequests.delete(id);
+			complete();
+			return true;
 		};
 
 		const onAbort = () => {
-			cleanup();
+			if (settled) return;
+			cancellationRequested = true;
 			const reason = signal?.reason instanceof Error ? signal.reason : new Error("Aborted");
-			reject(reason);
+			settle(() => reject(reason));
+			sendCancellationIfNeeded();
 		};
 
 		if (signal) {
 			signal.addEventListener("abort", onAbort, { once: true });
+			if (signal.aborted) {
+				onAbort();
+			}
 		}
 
 		this.#pendingRequests.set(id, {
 			resolve: (value: unknown) => {
-				cleanup();
-				resolve(value as T);
+				settle(() => resolve(value as T));
 			},
 			reject: (error: Error) => {
-				cleanup();
-				reject(error);
+				settle(() => reject(error));
 			},
 		});
 
 		if (isMCPTimeoutEnabled(timeout)) {
 			timer = setTimeout(() => {
-				cleanup();
-				reject(new Error(`Request timeout after ${timeout}ms`));
+				if (settled) return;
+				cancellationRequested = true;
+				settle(() => reject(new Error(`Request timeout after ${timeout}ms`)));
+				sendCancellationIfNeeded();
 			}, timeout);
 		}
 
-		const stdin = this.#process.stdin;
 		const message = `${JSON.stringify(request)}\n`;
-		try {
-			// Await both: Bun's FileSink can surface a broken pipe either as a
-			// synchronous throw or as a rejected Promise (the EPIPE arrives on a
-			// processTicksAndRejections tick). Awaiting funnels both into this catch
-			// so the request rejects cleanly instead of leaving a floating rejected
-			// promise that crashes the process via the unhandledRejection handler.
-			await stdin.write(message);
-			await stdin.flush();
-		} catch (error: unknown) {
-			cleanup();
-			reject(error instanceof Error ? error : new Error(String(error)));
-		}
+		void (async () => {
+			try {
+				// Await both: Bun's FileSink can surface a broken pipe either as a
+				// synchronous throw or as a rejected Promise.
+				await stdin.write(message);
+				await stdin.flush();
+				requestSent = true;
+				sendCancellationIfNeeded();
+			} catch (error: unknown) {
+				settle(() => reject(error instanceof Error ? error : new Error(String(error))));
+			}
+		})();
 
 		return promise;
 	}
@@ -627,20 +978,40 @@ export class StdioTransport implements MCPTransport {
 	}
 
 	async close(): Promise<void> {
-		// `close()` is the authoritative resource teardown. `#handleClose()`
-		// may have already run (read-loop EOF, or a notify() write failure
-		// that surfaces the dead transport to the caller) and flipped
-		// `#connected` to false — but the subprocess and read loop are still
-		// alive in that path, so we MUST keep cleaning up regardless. Each
-		// step is individually guarded so this remains idempotent across
-		// repeat calls.
+		const listeners = [...this.#listeners.values()];
+		for (const listener of listeners) {
+			listener.cancelled = true;
+			void this.#sendListenerCancellation(listener);
+		}
 		if (this.#connected) {
 			this.#handleClose();
 		}
 
 		if (this.#process) {
-			this.#process.kill();
+			const proc = this.#process;
 			this.#process = null;
+			try {
+				proc.stdin?.end?.();
+			} catch {
+				// Ignore stdin close errors
+			}
+			const exited = proc.exited;
+			let timeoutId: NodeJS.Timeout | undefined;
+			const timeoutPromise = new Promise<void>(resolve => {
+				timeoutId = setTimeout(resolve, 2000);
+			});
+			try {
+				await Promise.race([exited, timeoutPromise]);
+			} catch {
+				// Ignore exited rejection
+			} finally {
+				if (timeoutId) clearTimeout(timeoutId);
+			}
+			try {
+				proc.kill();
+			} catch {
+				// Ignore kill errors
+			}
 		}
 
 		if (this.#readLoop) {

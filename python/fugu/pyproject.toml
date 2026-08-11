@@ -21,7 +21,7 @@ dev = ["pytest>=8.0"]
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.40"]
 llm = ["anthropic>=0.40", "openai>=1.40"]
-mcp = ["mcp>=1.0"]
+mcp = ["mcp>=2.0.0,<3"]
 serve = ["fastapi>=0.110", "uvicorn>=0.29"]
 # Red Queen Godel Machine co-evolutionary search (standalone package). Not yet on
 # PyPI: for local dev install editable from the sibling checkout first, e.g.

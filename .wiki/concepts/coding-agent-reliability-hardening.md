@@ -40,9 +40,11 @@ The chunking is explicitly a temporary NER-134 mitigation. Re-evaluate and remov
 
 ### Context-file disable IDs: precise going forward, compatible for existing users
 
-[PR #33](https://github.com/kingkillery/oh-my-pk/pull/33) is the remaining context-file follow-up, pending CI at the time this note was written. It changes newly written `disabledExtensions` IDs for context files from a basename-only form to a resolved, path-qualified form with forward slashes. Disabling one project's `AGENTS.md` therefore no longer suppresses same-named context files in another project.
+This follow-up landed as [PR #37](https://github.com/kingkillery/oh-my-pk/pull/37) (`853ac1628`, merged `a5bc84e7c`). It changes newly written `disabledExtensions` IDs for context files from a basename-only form to a resolved, repo-relative path-qualified form with forward slashes. Disabling one project's `AGENTS.md` therefore no longer suppresses same-named context files in another project. The landing also fixed a module-level `Settings` pin that outlived its instance: `disabledExtensions` filtering now rebinds on every settings swap, `toExtensionId` is context-aware, and context files stamp a `_source` id so the extension dashboard matches loader behavior.
 
 The change deliberately dual-reads the old basename ID. Existing settings continue to disable the files they previously matched, including the old collision behaviour, rather than silently re-enabling a file that a user deliberately disabled. Only newly created disable entries receive the path-level precision.
+
+A later merge with main (`1eace8324`) reconciled this with main's independent NER-144 implementation: the merge kept main's settings reset-hook mechanism and legacy-id documentation, but kept this branch's repo-relative ID scope over main's absolute-path form, plus the context-aware `toExtensionId`, `_source` stamping, dashboard parity, and settings-swap rebinding.
 
 ## WikiGraph path sandbox
 

@@ -177,6 +177,8 @@ export interface TelegramBridgeOptions {
 	store: CaptureStore;
 	transport: TelegramTransport;
 	now?: () => number;
+	/** Called once per authorized inbound update, before dispatch (activity signal for idle-exit). */
+	onActivity?: () => void;
 }
 
 interface RootMessageState {
@@ -191,6 +193,7 @@ export class TelegramBridge implements CollaborationAdapter {
 	readonly #store: CaptureStore;
 	readonly #transport: TelegramTransport;
 	readonly #now: () => number;
+	readonly #onActivity: (() => void) | undefined;
 	readonly #rootState = new Map<string, RootMessageState>();
 	#orchestrator: CaptureDispatcher | undefined;
 	#pollAbort: AbortController | undefined;
@@ -200,6 +203,7 @@ export class TelegramBridge implements CollaborationAdapter {
 		this.#store = options.store;
 		this.#transport = options.transport;
 		this.#now = options.now ?? (() => Date.now());
+		this.#onActivity = options.onActivity;
 	}
 
 	/** The orchestrator registers the bridge and the bridge dispatches into it. */
@@ -442,6 +446,8 @@ export class TelegramBridge implements CollaborationAdapter {
 			await this.#send(chatId, message.message_thread_id, "You are not authorized to control this agent.");
 			return { kind: "unauthorized", reason: "user not allowlisted" };
 		}
+
+		this.#onActivity?.();
 
 		const text = (message.text ?? message.caption ?? "").trim();
 		try {

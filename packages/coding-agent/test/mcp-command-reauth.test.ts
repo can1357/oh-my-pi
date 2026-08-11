@@ -19,8 +19,9 @@ import {
 
 const RAW_SERVER_URL = `https://\${MCP_HOST}/mcp`;
 const EXPANDED_SERVER_URL = "https://mcp.example.com/mcp";
+const AUTH_ISSUER = "https://auth.example.com/";
 const AUTH_ERROR = new Error(
-	'HTTP 401: {"authorization_url":"https://auth.example.com/authorize","token_url":"https://auth.example.com/token"}',
+	`HTTP 401: {"issuer":"${AUTH_ISSUER}","authorization_url":"https://auth.example.com/authorize","token_url":"https://auth.example.com/token"}`,
 );
 
 type TestConfigFile = {
@@ -108,6 +109,19 @@ describe("/mcp auth commands", () => {
 				2,
 			)}\n`,
 		);
+		vi.spyOn(globalThis, "fetch").mockImplementation((async input => {
+			if (String(input) === "https://auth.example.com/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						issuer: AUTH_ISSUER,
+						authorization_endpoint: "https://auth.example.com/authorize",
+						token_endpoint: "https://auth.example.com/token",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response("not found", { status: 404 });
+		}) as typeof fetch);
 	});
 
 	afterEach(async () => {
@@ -149,6 +163,7 @@ describe("/mcp auth commands", () => {
 		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
 			type: "oauth",
 			access: "fresh-access",
+			issuer: AUTH_ISSUER,
 			tokenUrl: "https://auth.example.com/token",
 			resource: EXPANDED_SERVER_URL,
 		});
@@ -166,6 +181,7 @@ describe("/mcp auth commands", () => {
 		await authStorage.reload();
 		await authStorage.set(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL), {
 			type: "oauth",
+			issuer: AUTH_ISSUER,
 			access: "old-access",
 			refresh: "old-refresh",
 			expires: Date.now() + 3_600_000,
@@ -174,8 +190,18 @@ describe("/mcp auth commands", () => {
 			clientSecret: "dcr-secret",
 			resource: EXPANDED_SERVER_URL,
 		} as oauthFlow.MCPStoredOAuthCredential);
-		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			new Response(
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((async input => {
+			if (String(input) === "https://auth.example.com/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						issuer: AUTH_ISSUER,
+						authorization_endpoint: "https://auth.example.com/authorize",
+						token_endpoint: "https://auth.example.com/token",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response(
 				JSON.stringify({
 					access_token: "fresh-access",
 					refresh_token: "fresh-refresh",
@@ -183,8 +209,8 @@ describe("/mcp auth commands", () => {
 					token_type: "Bearer",
 				}),
 				{ status: 200, headers: { "Content-Type": "application/json" } },
-			),
-		);
+			);
+		}) as typeof fetch);
 		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
 		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(function (this: oauthFlow.MCPOAuthFlow) {
 			return this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
@@ -194,7 +220,9 @@ describe("/mcp auth commands", () => {
 		await controller.handle("/mcp reauth envserver");
 
 		expect(showError).not.toHaveBeenCalled();
-		const tokenRequestBody = String(fetchSpy.mock.calls[0]?.[1]?.body ?? "");
+		const tokenRequestBody = String(
+			fetchSpy.mock.calls.find(call => String(call[0]) === "https://auth.example.com/token")?.[1]?.body ?? "",
+		);
 		const tokenRequest = new URLSearchParams(tokenRequestBody);
 		expect(tokenRequest.get("client_id")).toBe("dcr-client");
 		expect(tokenRequest.get("client_secret")).toBe("dcr-secret");
@@ -202,8 +230,65 @@ describe("/mcp auth commands", () => {
 			type: "oauth",
 			access: "fresh-access",
 			clientId: "dcr-client",
+			issuer: AUTH_ISSUER,
 			clientSecret: "dcr-secret",
 		});
+	});
+
+	test("clears a credential from a changed issuer before reauthorization", async () => {
+		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
+		await authStorage.reload();
+		const credentialId = oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL);
+		await authStorage.set(credentialId, {
+			type: "oauth",
+			issuer: "https://old-auth.example.com/",
+			authorizationUrl: "https://old-auth.example.com/authorize",
+			access: "old-access",
+			refresh: "old-refresh",
+			expires: Date.now() + 3_600_000,
+			tokenUrl: "https://old-auth.example.com/token",
+			clientId: "old-dcr-client",
+			clientSecret: "old-dcr-secret",
+		} as oauthFlow.MCPStoredOAuthCredential);
+		await Bun.write(
+			configPath,
+			JSON.stringify({
+				mcpServers: {
+					envserver: {
+						type: "http",
+						url: RAW_SERVER_URL,
+						oauth: { clientId: "old-config-client", clientSecret: "old-config-secret" },
+					},
+				},
+			}),
+		);
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(function (this: oauthFlow.MCPOAuthFlow) {
+			expect(this.resolvedClientId).toBeUndefined();
+			return Promise.reject(new Error("authorization cancelled"));
+		});
+		const { controller, showError } = createController(authStorage);
+
+		await controller.handle("/mcp reauth envserver");
+
+		expect(showError).toHaveBeenCalledWith(expect.stringContaining("authorization cancelled"));
+		expect(authStorage.get(credentialId)).toBeUndefined();
+	});
+
+	test("rejects challenge endpoints that do not match authorization-server metadata", async () => {
+		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
+		await authStorage.reload();
+		const challengeError = new Error(
+			`HTTP 401: {"issuer":"${AUTH_ISSUER}","authorization_url":"https://attacker.example/authorize","token_url":"https://attacker.example/token"}`,
+		);
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(challengeError);
+		const login = vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login");
+		const { controller, showError } = createController(authStorage);
+
+		await controller.handle("/mcp reauth envserver");
+
+		expect(showError).toHaveBeenCalledWith(expect.stringContaining("do not match authorization-server metadata"));
+		expect(login).not.toHaveBeenCalled();
 	});
 
 	test("clears both expanded and stale raw URL-keyed credentials on unauth", async () => {

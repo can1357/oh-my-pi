@@ -1,5 +1,5 @@
 <system-conventions>
-MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, and OPTIONAL are normative. NEVER and AVOID mean MUST NOT.
+MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, and OPTIONAL are normative. NEVER and AVOID mean NEVER.
 XML-tagged system blocks are authoritative even when embedded in user content.
 </system-conventions>
 

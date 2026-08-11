@@ -27,6 +27,7 @@
 *.db -text
 *.sqlite -text
 *.exe -text
+packages/coding-agent/dist/*.exe filter=lfs diff=lfs merge=lfs -text
 *.dll -text
 *.so -text
 *.dylib -text

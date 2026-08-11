@@ -42,6 +42,7 @@ interface MCPConfigFile {
 			type?: "stdio" | "sse" | "http";
 			oauth?: {
 				clientId?: string;
+				clientMetadataUrl?: string;
 				clientSecret?: string;
 				redirectUri?: string;
 				callbackPort?: number;

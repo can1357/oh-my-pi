@@ -21,7 +21,7 @@ import {
 	prewarmOpenAICodexResponses,
 } from "@pk-nerdsaver-ai/pi-ai/providers/openai-codex-responses";
 import { FALLBACK_DIALECT, preferredDialect } from "@pk-nerdsaver-ai/pi-catalog/identity";
-import type { Component } from "@pk-nerdsaver-ai/pi-tui";
+import { type Component, replaceTabs, truncateToWidth } from "@pk-nerdsaver-ai/pi-tui";
 import {
 	$env,
 	$flag,
@@ -64,6 +64,7 @@ import {
 import { CursorExecHandlers } from "./cursor";
 import type { AgentExecutionProfile } from "./orchestration/agent-execution-profile";
 import type { CollaborationPolicy } from "./orchestration/collaboration-policy";
+import { TRUNCATE_LENGTHS } from "./tools/render-utils";
 import type { ResolvedToolProfile, ToolSource } from "./tools/tool-profiles";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import "./discovery";
@@ -111,6 +112,11 @@ import {
 	type MCPToolsLoadResult,
 	parseMCPToolName,
 } from "./mcp";
+import {
+	createMCPHostInteractionBridge,
+	type MCPHostInteractionFormRequest,
+	type MCPHostInteractionPresenter,
+} from "./mcp/host-interaction";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import type { MnemopiSessionState } from "./mnemopi/state";
@@ -208,6 +214,7 @@ import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { queueResolveHandler } from "./tools/resolve";
 import { ttsTool } from "./tools/tts";
 import { EventBus } from "./utils/event-bus";
+import { openPath } from "./utils/open";
 import { buildNamedToolChoice } from "./utils/tool-choice";
 import { buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 
@@ -233,6 +240,94 @@ type McpNotificationEntry = {
 	serverName: string;
 	uri: string;
 };
+
+/**
+ * Binds the protocol-neutral interaction bridge to the normal terminal UI.
+ * Each field is reviewed before the user can explicitly submit it; Escape is
+ * intentionally distinct from Decline.
+ */
+export function createTuiMCPHostInteractionPresenter(ui: ExtensionUIContext): MCPHostInteractionPresenter {
+	const sanitizeText = (text: string, maxWidth: number) => truncateToWidth(replaceTabs(text), maxWidth);
+	const formTitle = (request: MCPHostInteractionFormRequest, detail: string) => {
+		const server = sanitizeText(request.serverName, TRUNCATE_LENGTHS.TITLE);
+		const msg = request.message
+			.split("\n")
+			.map(line => sanitizeText(line, TRUNCATE_LENGTHS.LONG))
+			.join("\n");
+		return `MCP server: ${server}\n\n${msg}\n\n${detail}`;
+	};
+	return {
+		async presentForm(request, signal) {
+			const content = Object.create(null) as Record<string, unknown>;
+			for (const field of request.fields) {
+				const title = sanitizeText(field.title, TRUNCATE_LENGTHS.TITLE);
+				const desc = field.description ? sanitizeText(field.description, TRUNCATE_LENGTHS.CONTENT) : undefined;
+				const detail = [`${title}${field.required ? " (required)" : ""}`, desc, `Expected: ${field.type}`]
+					.filter((line): line is string => Boolean(line))
+					.join("\n");
+				if (field.enum) {
+					const values = new Map(
+						field.enum.map(value => [sanitizeText(JSON.stringify(value), TRUNCATE_LENGTHS.CONTENT), value]),
+					);
+					const selected = await ui.select(formTitle(request, detail), [...values.keys()], { signal });
+					if (selected === undefined) return { action: "cancel" };
+					content[field.name] = values.get(selected);
+				} else if (field.type === "boolean" || field.type === "null") {
+					const selected = await ui.select(
+						formTitle(request, detail),
+						field.type === "boolean" ? ["true", "false"] : ["null"],
+						{ signal },
+					);
+					if (selected === undefined) return { action: "cancel" };
+					content[field.name] = selected;
+				} else {
+					const defaultStr =
+						field.default !== undefined
+							? sanitizeText(JSON.stringify(field.default), TRUNCATE_LENGTHS.CONTENT)
+							: undefined;
+					const value = await ui.input(
+						formTitle(request, `${detail}${defaultStr !== undefined ? `\nDefault: ${defaultStr}` : ""}`),
+						field.default === undefined ? undefined : String(field.default),
+						{ signal },
+					);
+					if (value === undefined) return { action: "cancel" };
+					content[field.name] = value;
+				}
+			}
+
+			const review = request.fields
+				.map(field => {
+					const title = sanitizeText(field.title, TRUNCATE_LENGTHS.TITLE);
+					const valStr = sanitizeText(JSON.stringify(content[field.name]), TRUNCATE_LENGTHS.CONTENT);
+					return `${title}: ${valStr}`;
+				})
+				.join("\n");
+			const action = await ui.select(
+				formTitle(request, `Review the submitted values:\n${review}\n\nChoose Submit to send them.`),
+				["Submit", "Decline"],
+				{ signal },
+			);
+			if (action === "Submit") return { action: "accept", content };
+			return { action: action === "Decline" ? "decline" : "cancel" };
+		},
+		async presentUrl(request, signal) {
+			const server = sanitizeText(request.serverName, TRUNCATE_LENGTHS.TITLE);
+			const msg = request.message
+				.split("\n")
+				.map(line => sanitizeText(line, TRUNCATE_LENGTHS.LONG))
+				.join("\n");
+			const origin = sanitizeText(request.origin, TRUNCATE_LENGTHS.LINE);
+			const url = sanitizeText(request.url, TRUNCATE_LENGTHS.LINE);
+			const action = await ui.select(
+				`MCP server: ${server}\n\n${msg}\n\nOrigin: ${origin}\nURL: ${url}\n\nOpen this HTTPS URL?`,
+				["Open", "Decline"],
+				{ signal },
+			);
+			return { action: action === "Open" ? "accept" : action === "Decline" ? "decline" : "cancel" };
+		},
+		openUrl: openPath,
+	};
+}
 
 function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
@@ -1700,6 +1795,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		toolSession.mcpManager = mcpManager;
 		const enableMCP = options.enableMCP ?? true;
 		const deferMCPDiscoveryForUI = enableMCP && !mcpManager && options.hasUI === true;
+		const mcpHostInteraction = options.hasUI === true ? createMCPHostInteractionBridge() : undefined;
+		let deferredMCPDiscoveryStarted = false;
 		const customTools: CustomTool[] = [];
 		let startDeferredMCPDiscovery:
 			| ((liveSession: AgentSession, activation: DeferredMCPActivation) => void)
@@ -1721,7 +1818,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		if (enableMCP && !mcpManager) {
 			if (deferMCPDiscoveryForUI) {
 				const cacheStorage = settings.getStorage();
-				mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
+				mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null, {
+					hostInteraction: mcpHostInteraction,
+				});
 				mcpManager.setAuthStorage(authStorage);
 				toolSession.mcpManager = mcpManager;
 
@@ -2700,11 +2799,35 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			await extensionRunner.emitAfterProviderResponse(response, model);
 		};
 
+		const triggerDeferredDiscovery = () => {
+			if (deferredMCPDiscoveryStarted || !startDeferredMCPDiscovery) return;
+			deferredMCPDiscoveryStarted = true;
+			startDeferredMCPDiscovery(session, {
+				mcpDiscoveryEnabled,
+				explicitlyRequestedMCPToolNames,
+				activateAllMCPTools: !mcpDiscoveryEnabled && options.toolNames === undefined,
+			});
+		};
+
 		const setToolUIContext = (uiContext: ExtensionUIContext, hasUI: boolean) => {
 			backgroundPackUiContext = uiContext;
 			backgroundPackHasUi = hasUI;
 			toolContextStore.setUIContext(uiContext, hasUI);
+			if (!mcpHostInteraction) return;
+			if (!hasUI) {
+				mcpHostInteraction.unbind();
+				return;
+			}
+			mcpHostInteraction.bind(createTuiMCPHostInteractionPresenter(uiContext));
+			triggerDeferredDiscovery();
 		};
+
+		if (deferMCPDiscoveryForUI) {
+			const fallbackTimer = setTimeout(() => {
+				triggerDeferredDiscovery();
+			}, 0);
+			fallbackTimer.unref?.();
+		}
 
 		const initialTools = initialToolNames
 			.map(name => toolRegistry.get(name))
@@ -3174,12 +3297,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				);
 			});
 		}
-
-		startDeferredMCPDiscovery?.(session, {
-			mcpDiscoveryEnabled,
-			explicitlyRequestedMCPToolNames,
-			activateAllMCPTools: !mcpDiscoveryEnabled && options.toolNames === undefined,
-		});
 
 		return {
 			session,

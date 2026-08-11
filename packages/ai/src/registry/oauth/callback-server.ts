@@ -18,7 +18,7 @@ const DEFAULT_TIMEOUT = 300_000;
 const DEFAULT_HOSTNAME = "localhost";
 const CALLBACK_PATH = "/callback";
 
-export type CallbackResult = { code: string; state: string };
+export type CallbackResult = { code: string; state: string; iss?: string };
 
 export interface OAuthCallbackFlowOptions {
 	preferredPort: number;
@@ -74,7 +74,7 @@ export abstract class OAuthCallbackFlow {
 	 * @param redirectUri - The actual redirect URI used (must match authorization request)
 	 * @returns OAuth credentials
 	 */
-	abstract exchangeToken(code: string, state: string, redirectUri: string): Promise<OAuthCredentials>;
+	abstract exchangeToken(code: string, state: string, redirectUri: string, iss?: string): Promise<OAuthCredentials>;
 
 	/**
 	 * Generate CSRF state token. Override if provider needs custom state generation.
@@ -105,11 +105,11 @@ export abstract class OAuthCallbackFlow {
 			this.ctrl.onProgress?.("Waiting for browser authentication...");
 
 			// Wait for callback or manual input
-			const { code } = await this.#waitForCallback(state);
+			const { code, iss } = await this.#waitForCallback(state);
 
 			this.ctrl.onProgress?.("Exchanging authorization code for tokens...");
 
-			return await this.exchangeToken(code, state, redirectUri);
+			return await this.exchangeToken(code, state, redirectUri, iss);
 		} finally {
 			server.stop();
 		}
@@ -165,10 +165,11 @@ export abstract class OAuthCallbackFlow {
 
 		const code = url.searchParams.get("code");
 		const state = url.searchParams.get("state") || "";
+		const iss = url.searchParams.get("iss") ?? undefined;
 		const error = url.searchParams.get("error") || "";
 		const errorDescription = url.searchParams.get("error_description") || error;
 
-		type OkState = { ok: true; code: string; state: string };
+		type OkState = { ok: true; code: string; state: string; iss?: string };
 		type ErrorState = { ok?: false; error?: string };
 		let resultState: OkState | ErrorState;
 
@@ -179,7 +180,7 @@ export abstract class OAuthCallbackFlow {
 		} else if (expectedState && state !== expectedState) {
 			resultState = { ok: false, error: "State mismatch - possible CSRF attack" };
 		} else {
-			resultState = { ok: true, code, state };
+			resultState = { ok: true, code, state, ...(iss === undefined ? {} : { iss }) };
 		}
 
 		// Signal to waitForCallback - capture refs before they could be cleared
@@ -187,7 +188,11 @@ export abstract class OAuthCallbackFlow {
 		const reject = this.#callbackReject;
 		queueMicrotask(() => {
 			if (resultState.ok) {
-				resolve?.({ code: resultState.code, state: resultState.state });
+				resolve?.({
+					code: resultState.code,
+					state: resultState.state,
+					...(resultState.iss === undefined ? {} : { iss: resultState.iss }),
+				});
 			} else {
 				reject?.(resultState.error ?? "Unknown error");
 			}
@@ -232,7 +237,11 @@ export abstract class OAuthCallbackFlow {
 								const parsed = parseCallbackInput(input);
 								if (!parsed.code) return null;
 								if (expectedState && parsed.state && parsed.state !== expectedState) return null;
-								return { code: parsed.code, state: parsed.state ?? "" };
+								return {
+									code: parsed.code,
+									state: parsed.state ?? "",
+									...(parsed.iss === undefined ? {} : { iss: parsed.iss }),
+								};
 							})
 							.catch((): CallbackResult | null => null),
 					]);
@@ -250,15 +259,17 @@ export abstract class OAuthCallbackFlow {
 /**
  * Parse a redirect URL or code string to extract code and state.
  */
-export function parseCallbackInput(input: string): { code?: string; state?: string } {
+export function parseCallbackInput(input: string): { code?: string; state?: string; iss?: string } {
 	const value = input.trim();
 	if (!value) return {};
 
 	try {
 		const url = new URL(value);
+		const iss = url.searchParams.get("iss") ?? undefined;
 		return {
 			code: url.searchParams.get("code") ?? undefined,
 			state: url.searchParams.get("state") ?? undefined,
+			...(iss === undefined ? {} : { iss }),
 		};
 	} catch {
 		// Not a URL - check for query string format
@@ -266,9 +277,11 @@ export function parseCallbackInput(input: string): { code?: string; state?: stri
 
 	if (value.includes("code=")) {
 		const params = new URLSearchParams(value.replace(/^[?#]/, ""));
+		const iss = params.get("iss") ?? undefined;
 		return {
 			code: params.get("code") ?? undefined,
 			state: params.get("state") ?? undefined,
+			...(iss === undefined ? {} : { iss }),
 		};
 	}
 
