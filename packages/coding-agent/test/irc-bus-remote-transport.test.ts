@@ -147,6 +147,17 @@ describe("IrcBus RemoteTransport seam", () => {
 		expect((await bus.send({ from: "Main", to: "@cluster-a/beatrice", body: "again" })).outcome).toBe("injected");
 	});
 
+	it("rejects clearing a namespace that was never claimed (no phantom claim from clear-before-install)", () => {
+		const bus = new IrcBus(AgentRegistry.global());
+		// A clear (undefined) before any install must throw, not silently no-op: otherwise the ExtensionAPI
+		// marks the namespace claimed while the bus records no owner, letting a later load claim it and
+		// steal this load's @ns/* routing (PR #7401 codex, bus.ts:174).
+		expect(() => bus.setRemoteTransport(NS, undefined, OWNER)).toThrow(/not claimed/);
+		// The namespace stays free — a different owner can still claim it cleanly afterwards.
+		expect(bus.hasRemoteTransport()).toBe(false);
+		expect(() => bus.setRemoteTransport(NS, recordingTransport().transport, "other-owner")).not.toThrow();
+	});
+
 	it("does NOT forward to an `aborted` remote proxy ref — fails like a local aborted agent (honors the tombstone)", async () => {
 		const registry = AgentRegistry.global();
 		registry.register({

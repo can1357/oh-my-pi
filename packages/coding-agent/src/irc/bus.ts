@@ -165,7 +165,15 @@ export class IrcBus {
 			this.#namespaceOwners.set(namespace, ownerToken);
 			this.#transports.set(namespace, transport);
 		} else {
-			// Clear routing only; the claim survives (reconnect-friendly). releaseTransportsForOwner drops it.
+			// A clear is only meaningful for a namespace this load already claimed (install → clear →
+			// reinstall, the reconnect flow). Reject a clear of an UNCLAIMED namespace: otherwise a
+			// clear-before-install marks the namespace claimed on the ExtensionAPI side (#claimedNamespace)
+			// while recording NO owner here, letting a later load claim it and steal this load's @ns/*
+			// routing (PR #7401 codex).
+			if (owner === undefined) {
+				throw new Error(`IRC namespace "${namespace}" is not claimed; install a transport before clearing.`);
+			}
+			// Clear ROUTING only; the claim survives (reconnect-friendly). releaseTransportsForOwner drops it.
 			this.#transports.delete(namespace);
 		}
 	}
