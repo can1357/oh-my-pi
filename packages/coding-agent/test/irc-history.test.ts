@@ -148,4 +148,42 @@ describe("IRC history", () => {
 		expect(conversations[2]?.messages[2]).toMatchObject({ id: "d3", replyTo: "d2" });
 		expect(conversations[2]?.unread).toBe(1);
 	});
+	it("preserves failed aggregate outcome for mixed broadcast receipts", () => {
+		const records: IrcHistoryRecord[] = [
+			{
+				message: {
+					id: "b-ok",
+					from: "Main",
+					to: "Worker",
+					body: "Status update",
+					ts: 4_000,
+					broadcastId: "broadcast-mixed",
+				},
+				outcome: "injected",
+				updatedAt: 4_000,
+			},
+			{
+				message: {
+					id: "b-fail",
+					from: "Main",
+					to: "Reviewer",
+					body: "Status update",
+					ts: 4_000,
+					broadcastId: "broadcast-mixed",
+				},
+				outcome: "failed",
+				error: 'Agent "Reviewer" has no live session.',
+				updatedAt: 4_001,
+			},
+		];
+		const conversations = deriveIrcConversations(records);
+		expect(conversations).toHaveLength(1);
+		expect(conversations[0]?.id).toBe("broadcast:all");
+		expect(conversations[0]?.messages).toHaveLength(1);
+		expect(conversations[0]?.messages[0]).toMatchObject({
+			outcome: "failed",
+			error: 'Agent "Reviewer" has no live session.',
+			recipients: ["Worker", "Reviewer"],
+		});
+	});
 });

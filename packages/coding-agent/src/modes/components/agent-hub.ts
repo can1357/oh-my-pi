@@ -227,11 +227,13 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#messageComposing = false;
 	#messageSending = false;
 	#messageThreadOpen = false;
+	#messagesSplitVisible = false;
 	#messageReplyTo: string | undefined;
 	#messageNotice: string | undefined;
 	#remoteHistoryRecords: IrcHistoryRecord[] = [];
 	#remoteMessagesFetchInFlight = false;
 	#remoteMessageReadAt = new Map<string, IrcReadCursor>();
+	#conversationMessageCounts = new Map<string, number>();
 
 	// Table state
 	#rows: AgentRef[] = [];
@@ -672,6 +674,38 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		else this.#selectedActivityRow = Math.min(this.#selectedActivityRow, rows.length - 1);
 	}
 
+	#ensureComposableConversations(): void {
+		const byId = new Map(this.#conversations.map(conversation => [conversation.id, conversation]));
+		const ensure = (id: string, label: string, participants: string[]): void => {
+			if (byId.has(id)) return;
+			const conversation: IrcConversation = {
+				id,
+				label,
+				participants,
+				messages: [],
+				lastMessageAt: 0,
+				unread: 0,
+			};
+			byId.set(id, conversation);
+			this.#conversations.push(conversation);
+		};
+		ensure("broadcast:all", "All agents", [MAIN_AGENT_ID]);
+		for (const ref of this.#registry.listVisibleTo(MAIN_AGENT_ID)) {
+			if (ref.id === MAIN_AGENT_ID || ref.kind === "advisor") continue;
+			const id = `direct:${[MAIN_AGENT_ID, ref.id].sort().join(":")}`;
+			ensure(id, ref.displayName || ref.id, [MAIN_AGENT_ID, ref.id]);
+		}
+		this.#conversations.sort((a, b) => {
+			const aLive = a.messages.length > 0 ? 1 : 0;
+			const bLive = b.messages.length > 0 ? 1 : 0;
+			if (aLive !== bLive) return bLive - aLive;
+			if (a.lastMessageAt !== b.lastMessageAt) return b.lastMessageAt - a.lastMessageAt;
+			if (a.id === "broadcast:all") return 1;
+			if (b.id === "broadcast:all") return -1;
+			return a.id.localeCompare(b.id);
+		});
+	}
+
 	#refreshMessages(): void {
 		const selectedId = this.#conversations[this.#selectedConversationRow]?.id;
 		if (this.#remote) void this.#refreshRemoteMessages();
@@ -684,16 +718,30 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 					? (this.#remoteMessageReadAt.get(id) ?? { timestamp: 0, messageId: "" })
 					: this.#irc.history.readAt(id),
 		});
+		this.#ensureComposableConversations();
 		const kept = selectedId ? this.#conversations.findIndex(conversation => conversation.id === selectedId) : -1;
-		this.#selectedConversationRow =
-			kept >= 0 ? kept : Math.min(this.#selectedConversationRow, Math.max(0, this.#conversations.length - 1));
+		if (kept >= 0) {
+			this.#selectedConversationRow = kept;
+		} else {
+			const withMessages = this.#conversations.findIndex(conversation => conversation.messages.length > 0);
+			this.#selectedConversationRow =
+				withMessages >= 0
+					? withMessages
+					: Math.min(this.#selectedConversationRow, Math.max(0, this.#conversations.length - 1));
+		}
 		const selected = this.#conversations[this.#selectedConversationRow];
-		this.#selectedMessageRow = selected
-			? selectedId
-				? Math.min(this.#selectedMessageRow, Math.max(0, selected.messages.length - 1))
-				: Math.max(0, selected.messages.length - 1)
-			: 0;
-		if (selected && this.#section === "messages") this.#markSelectedConversationRead();
+		if (!selected) {
+			this.#selectedMessageRow = 0;
+		} else {
+			const previousCount = this.#conversationMessageCounts.get(selected.id) ?? 0;
+			const nextCount = selected.messages.length;
+			this.#conversationMessageCounts.set(selected.id, nextCount);
+			if (!selectedId || (previousCount === 0 && nextCount > 0)) {
+				this.#selectedMessageRow = Math.max(0, nextCount - 1);
+			} else {
+				this.#selectedMessageRow = Math.min(this.#selectedMessageRow, Math.max(0, nextCount - 1));
+			}
+		}
 	}
 
 	#markSelectedConversationRead(): void {
@@ -813,6 +861,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		const contentRows = Math.max(1, termHeight - 4);
 		const body: string[] = [this.#sectionTabs()];
 		const split = width >= 90 && !this.#messageThreadOpen;
+		this.#messagesSplitVisible = split;
+		if (split || this.#messageThreadOpen) this.#markSelectedConversationRead();
 		const conversationWidth = split ? Math.max(24, Math.min(36, Math.floor(width * 0.3))) : Math.max(1, width - 4);
 		const threadWidth = split ? Math.max(1, width - conversationWidth - 7) : Math.max(1, width - 4);
 		const selected = this.#conversations[this.#selectedConversationRow];
@@ -887,8 +937,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				const conversation = this.#conversations[index]!;
 				const cursor = index === selected ? theme.fg("accent", theme.nav.cursor) : " ";
 				const unread = conversation.unread > 0 ? theme.fg("warning", ` ${conversation.unread}`) : "";
-				const preview = conversation.messages.at(-1)?.body ?? "";
-				const prefix = `${cursor} ${theme.bold(conversation.label)}${unread} `;
+				const preview = sanitizeDisplayText(conversation.messages.at(-1)?.body ?? "");
+				const label = sanitizeDisplayText(conversation.label);
+				const prefix = `${cursor} ${theme.bold(label)}${unread} `;
 				lines.push(
 					`${prefix}${theme.fg("muted", truncateToWidth(preview, Math.max(1, width - visibleWidth(prefix))))}`,
 				);
@@ -905,7 +956,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				...Array.from({ length: Math.max(0, rows - 1) }, () => ""),
 			];
 		}
-		const lines = [theme.bold(`${conversation.label} · ${conversation.messages.length} messages`)];
+		const lines = [
+			theme.bold(`${sanitizeDisplayText(conversation.label)} · ${conversation.messages.length} messages`),
+		];
 		const budget = Math.max(0, rows - 1);
 		const selected = Math.min(this.#selectedMessageRow, Math.max(0, conversation.messages.length - 1));
 		const start = Math.max(
@@ -916,17 +969,18 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			const message = conversation.messages[index]!;
 			const cursor =
 				this.#messageFocus === "thread" && index === selected ? theme.fg("accent", theme.nav.cursor) : " ";
-			const direction = `${message.from} → ${message.to}`;
-			const reply = message.replyTo ? ` ↳${message.replyTo}` : "";
+			const direction = `${sanitizeDisplayText(message.from)} → ${sanitizeDisplayText(message.to)}`;
+			const reply = message.replyTo ? ` ↳${sanitizeDisplayText(message.replyTo)}` : "";
 			const outcome =
 				message.outcome === "failed"
 					? theme.fg("error", "×")
 					: message.outcome === "pending"
 						? theme.fg("warning", "…")
 						: theme.fg("success", "✓");
+			const error = message.outcome === "failed" && message.error ? ` ${sanitizeDisplayText(message.error)}` : "";
 			const prefix = `${cursor} ${activityClock(message.ts)} ${outcome} ${theme.fg("muted", direction)}${theme.fg("dim", reply)} `;
 			lines.push(
-				`${prefix}${truncateToWidth(sanitizeLine(message.body), Math.max(1, width - visibleWidth(prefix)))}`,
+				`${prefix}${truncateToWidth(sanitizeLine(message.body + error), Math.max(1, width - visibleWidth(prefix)))}`,
 			);
 		}
 		while (lines.length < rows) lines.push("");
@@ -1493,8 +1547,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#narrowDetailsOpen = false;
 		if (section === "activity") this.#refreshActivityRows();
 		if (section === "messages") {
+			this.#messageFocus = "conversations";
+			this.#messageThreadOpen = false;
 			this.#refreshMessages();
-			this.#markSelectedConversationRead();
 		}
 		this.#requestRender();
 	}
@@ -1561,6 +1616,12 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			return;
 		}
 		if (keyData === "c") {
+			this.#ensureComposableConversations();
+			if (this.#conversations.length === 0) {
+				this.#messageNotice = "No agents available to message";
+				this.#requestRender();
+				return;
+			}
 			this.#messageComposing = true;
 			this.#messageDraft = "";
 			this.#messageReplyTo = undefined;
@@ -1625,8 +1686,14 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 	async #submitMessage(): Promise<void> {
 		const body = this.#messageDraft.trim();
+		if (!body) return;
+		this.#ensureComposableConversations();
 		const conversation = this.#conversations[this.#selectedConversationRow];
-		if (!body || !conversation) return;
+		if (!conversation) {
+			this.#messageNotice = "Select a recipient conversation (or All agents) before sending";
+			this.#requestRender();
+			return;
+		}
 		this.#messageSending = true;
 		this.#messageNotice = undefined;
 		try {

@@ -61,8 +61,14 @@ export function deriveIrcConversations(
 			const existing = broadcastById.get(message.broadcastId);
 			if (existing) {
 				if (!existing.recipients?.includes(message.to)) existing.recipients?.push(message.to);
-				if (OUTCOME_RANK[record.outcome] > OUTCOME_RANK[existing.outcome]) existing.outcome = record.outcome;
-				if (!existing.error && record.error) existing.error = record.error;
+				// Any failed leg must win so reconstructed broadcasts keep partial-delivery truth.
+				if (record.outcome === "failed" || existing.outcome === "failed") {
+					existing.outcome = "failed";
+					if (record.outcome === "failed" && record.error) existing.error = record.error;
+					else if (!existing.error && record.error) existing.error = record.error;
+				} else if (OUTCOME_RANK[record.outcome] > OUTCOME_RANK[existing.outcome]) {
+					existing.outcome = record.outcome;
+				}
 				continue;
 			}
 			const projected: IrcConversationMessage = {

@@ -164,7 +164,13 @@ export class IrcHistoryStore {
 		const line = `${JSON.stringify(event)}\n`;
 		const write = this.#writeQueue.then(async () => {
 			await fs.mkdir(path.dirname(file), { recursive: true });
-			await fs.appendFile(file, line, { encoding: "utf8", mode: 0o600 });
+			const handle = await fs.open(file, "a", 0o600);
+			try {
+				await handle.writeFile(line, "utf8");
+				await handle.sync();
+			} finally {
+				await handle.close();
+			}
 		});
 		this.#writeQueue = write.catch(error => {
 			logger.error("IRC history append failed", { file, error: String(error) });

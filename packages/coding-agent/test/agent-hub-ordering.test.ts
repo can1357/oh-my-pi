@@ -1322,4 +1322,74 @@ describe("Agent hub row ordering", () => {
 			hub.dispose();
 		}
 	});
+
+	it("preserves unread on narrow conversation list until the thread is opened", () => {
+		geometry = stubStdoutGeometry(80);
+		geometry.setRows(28);
+		const agents = new AgentRegistry();
+		agents.register({ id: "Worker", displayName: "Worker", kind: "sub", parentId: "Main", session: null });
+		const irc = new IrcBus(agents);
+		irc.history.recordMessage({
+			id: "m1",
+			from: "Worker",
+			to: "Main",
+			body: "Needs attention",
+			ts: 2_000,
+		});
+		irc.history.recordDelivery("m1", { to: "Main", outcome: "injected" });
+		const hub = makeHub(agents, { irc, initialSection: "messages" });
+		try {
+			const list = Bun.stripANSI(hub.render(80).join("\n"));
+			expect(list).toContain("Conversations");
+			expect(list).toContain("Needs attention");
+			expect(list).toMatch(/Worker\s+1/);
+			// Periodic/history refresh must not clear unread while only the list is visible.
+			const stillUnread = Bun.stripANSI(hub.render(80).join("\n"));
+			expect(stillUnread).toMatch(/Worker\s+1/);
+			hub.handleInput("\r");
+			const thread = Bun.stripANSI(hub.render(80).join("\n"));
+			expect(thread).toContain("Needs attention");
+			expect(thread).not.toMatch(/Worker\s+1/);
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("lets compose start a fresh direct or broadcast conversation with no prior history", async () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(28);
+		const agents = new AgentRegistry();
+		const delivered: string[] = [];
+		const { promise: deliveryObserved, resolve: resolveDelivery } = Promise.withResolvers<void>();
+		const session = {
+			deliverIrcMessage: async (message: { body: string }) => {
+				delivered.push(message.body);
+				resolveDelivery();
+				return "injected" as const;
+			},
+			emitIrcRelayObservation() {},
+		} as unknown as AgentSession;
+		agents.register({ id: "Worker", displayName: "Worker", kind: "sub", parentId: "Main", session, status: "idle" });
+		const irc = new IrcBus(agents);
+		const hub = makeHub(agents, { irc, initialSection: "messages" });
+		try {
+			const empty = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(empty).toContain("All agents");
+			expect(empty).toContain("Worker");
+			hub.handleInput("j"); // move from All agents to Worker if needed
+			// Ensure Worker direct conversation is selected
+			for (let i = 0; i < 3; i++) {
+				const frame = Bun.stripANSI(hub.render(120).join("\n"));
+				if (frame.includes("❯ Worker") || frame.includes("Worker · 0 messages") || frame.includes("Message")) break;
+				hub.handleInput("j");
+			}
+			hub.handleInput("c");
+			for (const key of "Hello fresh") hub.handleInput(key);
+			hub.handleInput("\r");
+			await deliveryObserved;
+			expect(delivered).toEqual(["Hello fresh"]);
+		} finally {
+			hub.dispose();
+		}
+	});
 });
