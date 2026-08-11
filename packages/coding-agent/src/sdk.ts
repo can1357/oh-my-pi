@@ -106,6 +106,7 @@ import {
 	ExtensionToolWrapper,
 	type ExtensionUIContext,
 	extensionToolSourceInfo,
+	emitSessionShutdownEvent,
 	type LoadExtensionsResult,
 	loadExtensionFromFactory,
 	loadExtensions,
@@ -155,6 +156,7 @@ import {
 	type SecretObfuscator,
 } from "./secrets";
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
+import type { AgentSessionDisposeOptions } from "./session/agent-session-types";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { DateCwdReminderInjector } from "./session/date-cwd-reminder";
@@ -3474,6 +3476,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (!registeredAgentRef) {
 			throw new Error(`Agent "${resolvedAgentId}" is already owned by another session generation.`);
 		}
+		if (agentKind === "main") {
+			// Track this top-level session as a root of its registry's lifecycle manager: a shared
+			// (custom) registry only fully tears the manager down when its LAST root session disposes.
+			AgentLifecycleManager.forRegistry(agentRegistry).retainRoot(resolvedAgentId);
+		}
 		// A reused parked ref remains parked until the new AgentSession is fully
 		// constructed and attached. Startup failure therefore leaves it revivable.
 		hasRegistered = options.expectedAgentRef === undefined || options.expectedAgentRef === null;
@@ -4143,19 +4150,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		{
 			const originalDispose = session.dispose.bind(session);
-			session.dispose = async () => {
+			let disposeCall: Promise<void> | undefined;
+			const disposeSession = async (disposeOptions?: AgentSessionDisposeOptions): Promise<void> => {
 				try {
 					// Reject new session work (eval starts) the moment disposal
 					// begins — the lifecycle await below opens an async gap before
 					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
 					if (agentKind === "main") {
-						// Top-level teardown owns this session's registry-paired lifecycle: park
-						// timers, adopted subagent sessions, revivers. Tear it down while shared
-						// resources (kernels, MCP, LSP) are still live. Subagent disposal must NOT
-						// touch it. For an in-repo session this IS the global manager
-						// (forRegistry(global) === global()); a custom-registry SDK session disposes
-						// its own manager, never an unrelated global one.
+						// Top-level teardown releases this root's adopted subtree through its registry-paired
+						// lifecycle manager, and fully disposes that manager only when this is the registry's
+						// LAST root — so a shared custom registry's other live sessions keep their keep-alive
+						// subagents. An in-repo session is the sole root of the global manager
+						// (forRegistry(global) === global()), so it tears down exactly as before.
 						const vibeRegistry = VibeSessionRegistry.global();
 						const vibeParentSession = {
 							getAgentId: () => resolvedAgentId,
@@ -4167,9 +4174,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							getActiveModelString,
 						};
 						await vibeRegistry.suspendScope(vibeRegistry.ownerScope(vibeParentSession), scopedAsyncJobManager);
-						await AgentLifecycleManager.forRegistry(agentRegistry).dispose();
+						await AgentLifecycleManager.forRegistry(agentRegistry).releaseRoot(resolvedAgentId);
 					}
-					await originalDispose();
+					await originalDispose(disposeOptions);
 				} finally {
 					unregisterUnlessParked();
 					unsubscribeCredentialDisabled?.();
@@ -4183,6 +4190,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					unregisterMcpPostmortem = undefined;
 				}
 			};
+			session.dispose = disposeOptions => (disposeCall ??= disposeSession(disposeOptions));
 		}
 
 		if (model?.api === "openai-codex-responses") {
@@ -4487,6 +4495,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				await session.dispose();
 				if (hasRegistered) unregisterUnlessParked();
 			} else {
+				// Startup aborted before the session existed, so AgentSession.dispose() (which fires
+				// session_shutdown) never ran: release the loaded extensions' IRC state (namespace claims
+				// + transports + remote proxies) and this session's lifecycle root here, so a never-started
+				// session leaves no stale peers or namespace claim (#7401 review).
+				await emitSessionShutdownEvent(credentialDisabledTarget);
+				if (agentKind === "main" && registeredAgentRef) {
+					await AgentLifecycleManager.forRegistry(agentRegistry).releaseRoot(resolvedAgentId);
+				}
 				if (hasRegistered) unregisterUnlessParked();
 				if (asyncJobManager) {
 					if (AsyncJobManager.instance() === asyncJobManager) {

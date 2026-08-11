@@ -18,7 +18,7 @@ import { type IrcMessage, type IrcDeliveryReceipt } from "@oh-my-pi/pi-tui/tools
 
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, MAIN_AGENT_ID, REMOTE_ID_PREFIX } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, REMOTE_ID_PREFIX } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { CustomMessage } from "../session/messages";
@@ -707,16 +707,17 @@ export class IrcBus {
 	}
 
 	/**
-	 * Surface agent↔agent traffic as a display-only card on the main session
-	 * UI. Skipped when the main agent is either endpoint: as recipient its
-	 * own `deliverIrcMessage` (or `wait` tool result) already shows the
-	 * message, and as sender the irc send tool call already rendered the
-	 * outbound body — relaying it again would duplicate it in the transcript.
+	 * Surface agent↔agent (or agent↔remote) traffic as a display-only card on the ROOT session's
+	 * UI — this registry's `main`-kind agent, "Main" for the in-repo default but a custom id (e.g.
+	 * ACP's `acp:<sessionId>`) for an embedder-supplied registry. Skipped when the root is itself an
+	 * endpoint: as recipient its own `deliverIrcMessage`/`wait` result already shows the message,
+	 * and as sender the irc send tool call already rendered the outbound body.
 	 */
 	#relayToMainUi(message: IrcMessage): void {
-		if (message.to === MAIN_AGENT_ID || message.from === MAIN_AGENT_ID) return;
-		const mainSession = this.#registry.get(MAIN_AGENT_ID)?.session;
-		if (!mainSession) return;
+		const root = this.#rootMainRef();
+		if (!root || message.to === root.id || message.from === root.id) return;
+		const rootSession = root.session;
+		if (!rootSession) return;
 		const record: CustomMessage = {
 			role: "custom",
 			customType: "irc:relay",
@@ -727,10 +728,16 @@ export class IrcBus {
 			timestamp: message.ts,
 		};
 		try {
-			mainSession.emitIrcRelayObservation(record);
+			rootSession.emitIrcRelayObservation(record);
 		} catch (error) {
 			// Display-only forwarding must never affect delivery semantics.
-			logger.debug("IrcBus: main UI relay failed", { to: message.to, error: String(error) });
+			logger.debug("IrcBus: root UI relay failed", { to: message.to, error: String(error) });
 		}
+	}
+
+	/** This registry's top-level `main`-kind ref — "Main" for the in-repo default, or a custom root
+	 *  (e.g. ACP's `acp:<sessionId>`) for an embedder-supplied registry. */
+	#rootMainRef(): AgentRef | undefined {
+		return this.#registry.list().find(ref => ref.kind === "main");
 	}
 }

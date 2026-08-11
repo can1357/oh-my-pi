@@ -65,6 +65,8 @@ export interface AdoptOptions {
 
 interface AdoptedAgent {
 	ref: AgentRef;
+	/** Top-level (parentless) session this subagent's tree is rooted at; keys root-scoped release. */
+	rootId: string;
 	idleTtlMs: number;
 	revive?: AgentReviver;
 	onRelease?: () => Promise<void>;
@@ -145,6 +147,12 @@ export class AgentLifecycleManager {
 	readonly #registry: AgentRegistry;
 	readonly #adopted = new Map<string, AdoptedAgent>();
 	/**
+	 * Top-level sessions (root main ids) whose adopted subagents live in this manager. The manager
+	 * fully disposes only when its LAST root leaves, so a shared (custom) registry's sessions never
+	 * tear down each other's keep-alive subagents (can1357/oh-my-pi#7401 review).
+	 */
+	readonly #roots = new Set<string>();
+	/**
 	 * In-flight park attempts, each bound to the ref it started from. A park is
 	 * cancelable until the live session is detached; after detach, ensureLive
 	 * waits for the park and revives.
@@ -195,9 +203,43 @@ export class AgentLifecycleManager {
 			idleTtlMs: opts.idleTtlMs,
 			revive: opts.revive,
 			onRelease: opts.onRelease,
+			rootId: this.#rootIdOf(id),
 		};
 		this.#adopted.set(id, adopted);
 		this.#armTimer(id, adopted);
+	}
+
+	/** Register a top-level session (root main id) whose adopted subagents this manager owns. */
+	retainRoot(rootId: string): void {
+		this.#roots.add(rootId);
+	}
+
+	/**
+	 * Tear down a top-level session: when it was the manager's LAST retained root, fully
+	 * {@link dispose} it; otherwise release only the adopted subtree rooted at `rootId`, so a shared
+	 * (custom) registry's other sessions keep their own keep-alive subagents.
+	 */
+	async releaseRoot(rootId: string, deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS): Promise<void> {
+		this.#roots.delete(rootId);
+		if (this.#roots.size === 0) {
+			await this.dispose(deadlineAt);
+			return;
+		}
+		const subtree = [...this.#adopted.entries()].filter(([, adopted]) => adopted.rootId === rootId).map(([id]) => id);
+		await this.#releaseIds(subtree, deadlineAt);
+	}
+
+	/** Walk `id`'s parentId chain to the registry's top-level (parentless) agent — its tree root. */
+	#rootIdOf(id: string): string {
+		let ref = this.#registry.get(id);
+		const seen = new Set<string>();
+		while (ref?.parentId && !seen.has(ref.id)) {
+			seen.add(ref.id);
+			const parent = this.#registry.get(ref.parentId);
+			if (!parent) break;
+			ref = parent;
+		}
+		return ref?.id ?? id;
 	}
 
 	/** True if the id is adopted (parked or live) — and, when `expected` is given, still bound to that ref. */
@@ -411,7 +453,7 @@ export class AgentLifecycleManager {
 				);
 			}
 			if (revive) {
-				adoption = { ref, idleTtlMs: this.#persistedReviveTtlMs, revive };
+				adoption = { ref, idleTtlMs: this.#persistedReviveTtlMs, revive, rootId: this.#rootIdOf(id) };
 				this.#adopted.set(id, adoption);
 				coldAdopted = true;
 			}
@@ -513,12 +555,24 @@ export class AgentLifecycleManager {
 		return true;
 	}
 
-	/** Teardown everything; disposing the global manager makes its next owner a fresh instance. */
+	/** Teardown everything; the registry's next owner gets a fresh manager. */
 	async dispose(deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS): Promise<void> {
 		this.#unsubscribe?.();
 		this.#disposed = true;
 		this.#unsubscribe = undefined;
-		const ids = [...new Set([...this.#adopted.keys(), ...this.#parks.keys()])];
+		this.#roots.clear();
+		await this.#releaseIds([...new Set([...this.#adopted.keys(), ...this.#parks.keys()])], deadlineAt);
+		this.#revivals.clear();
+		this.#parks.clear();
+		this.#persistedReviverFactory = undefined;
+		if (AgentLifecycleManager.#managers.get(this.#registry) === this) {
+			AgentLifecycleManager.#managers.delete(this.#registry);
+		}
+		if (AgentLifecycleManager.#global === this) AgentLifecycleManager.#global = undefined;
+	}
+
+	/** Release the given adopted/parked ids together under a shared cleanup deadline. */
+	async #releaseIds(ids: string[], deadlineAt: number): Promise<void> {
 		await Promise.all(
 			ids.map(async id => {
 				const release = this.release(id).then(() => {});
@@ -535,13 +589,6 @@ export class AgentLifecycleManager {
 				}
 			}),
 		);
-		this.#revivals.clear();
-		this.#parks.clear();
-		this.#persistedReviverFactory = undefined;
-		if (AgentLifecycleManager.#managers.get(this.#registry) === this) {
-			AgentLifecycleManager.#managers.delete(this.#registry);
-		}
-		if (AgentLifecycleManager.#global === this) AgentLifecycleManager.#global = undefined;
 	}
 
 	async #revive(id: string, revive: AgentReviver, ref: AgentRef, adopted: AdoptedAgent): Promise<AgentSession> {

@@ -120,6 +120,49 @@ describe("AgentLifecycleManager", () => {
 		}
 	});
 
+	it("releaseRoot tears down the manager only when the last shared-registry root leaves", async () => {
+		// Two SDK top-level sessions share one custom registry (PR #7401 codex). Disposing one must
+		// not release the other's keep-alive subagents; the manager disposes only with the last root.
+		const reg = new AgentRegistry();
+		const mgr = new AgentLifecycleManager(reg);
+		reg.register({ id: "A", displayName: "main", kind: "main", session: null, status: "running" });
+		reg.register({ id: "B", displayName: "main", kind: "main", session: null, status: "running" });
+		reg.register({
+			id: "A-sub",
+			displayName: "task",
+			kind: "sub",
+			parentId: "A",
+			session: makeSessionStub().session,
+			status: "idle",
+		});
+		reg.register({
+			id: "B-sub",
+			displayName: "task",
+			kind: "sub",
+			parentId: "B",
+			session: makeSessionStub().session,
+			status: "idle",
+		});
+		mgr.retainRoot("A");
+		mgr.retainRoot("B");
+		mgr.adopt("A-sub", { idleTtlMs: 0 });
+		mgr.adopt("B-sub", { idleTtlMs: 0 });
+		expect(mgr.has("A-sub")).toBe(true);
+		expect(mgr.has("B-sub")).toBe(true);
+
+		// Root A leaves: only A's subtree is released; B's kept-alive subagent survives.
+		await mgr.releaseRoot("A");
+		expect(mgr.has("A-sub")).toBe(false);
+		expect(reg.get("A-sub")).toBeUndefined();
+		expect(mgr.has("B-sub")).toBe(true);
+		expect(reg.get("B-sub")).toBeDefined();
+
+		// Last root leaves: the manager fully disposes, releasing B's subagent too.
+		await mgr.releaseRoot("B");
+		expect(mgr.has("B-sub")).toBe(false);
+		expect(reg.get("B-sub")).toBeUndefined();
+	});
+
 	it("adopt arms the TTL: an idle agent is parked — session disposed, ref + sessionFile retained", async () => {
 		vi.useFakeTimers();
 		const stub = makeSessionStub();

@@ -215,6 +215,22 @@ describe("IRC", () => {
 			expect(main.relayed[0]?.details).toEqual({ from: "0-A", to: "0-B", body: "sibling note" });
 		});
 
+		it("relays to a custom (non-Main) root — the registry's main ref, not a hardcoded Main", async () => {
+			// ACP/custom-root sessions register the root under its own id (e.g. `acp:<sid>`), not "Main".
+			// The relay must target that main ref; the old hardcoded `Main` lookup dropped it entirely.
+			const root = makeFakeSession();
+			registry.register({ id: "acp:sid", displayName: "acp", kind: "main", session: root.session });
+			const a = makeFakeSession();
+			registry.register({ id: "acp:sid-A", displayName: "task", kind: "sub", session: a.session });
+			const b = makeFakeSession();
+			registry.register({ id: "acp:sid-B", displayName: "task", kind: "sub", session: b.session });
+
+			await bus.send({ from: "acp:sid-A", to: "acp:sid-B", body: "sibling note" });
+
+			expect(root.relayed).toHaveLength(1);
+			expect(root.relayed[0]?.details).toEqual({ from: "acp:sid-A", to: "acp:sid-B", body: "sibling note" });
+		});
+
 		it("send to an unknown or aborted agent fails", async () => {
 			const unknown = await bus.send({ from: "0-Main", to: "0-Ghost", body: "hello?" });
 			expect(unknown.outcome).toBe("failed");

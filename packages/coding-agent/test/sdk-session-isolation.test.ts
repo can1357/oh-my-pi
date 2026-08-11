@@ -372,6 +372,51 @@ describe("createAgentSession session storage isolation", () => {
 		expect(suspend.mock.invocationCallOrder[0]).toBeLessThan(lifecycleDispose.mock.invocationCallOrder[0]);
 	});
 
+	it("repeated disposal cannot release a replacement root's adopted child", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-dispose-generation-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const registry = new AgentRegistry();
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: path.join(tempDir, "agent"),
+			modelRegistry: sharedModelRegistry,
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			agentRegistry: registry,
+			agentId: "ScopedRoot",
+		});
+		const first = session.dispose();
+		const concurrent = session.dispose();
+		await Promise.all([first, concurrent]);
+
+		registry.register({ id: "ScopedRoot", displayName: "New root", kind: "main", session: null, status: "idle" });
+		const child = registry.register({
+			id: "ReplacementChild",
+			displayName: "Replacement child",
+			kind: "sub",
+			parentId: "ScopedRoot",
+			session: null,
+			status: "parked",
+		});
+		const lifecycle = AgentLifecycleManager.forRegistry(registry);
+		lifecycle.retainRoot("ScopedRoot");
+		lifecycle.adopt(child.id, { idleTtlMs: 0 });
+		try {
+			await session.dispose();
+			expect(registry.get(child.id)).toBe(child);
+			expect(lifecycle.has(child.id)).toBe(true);
+			expect(concurrent).toBe(first);
+		} finally {
+			await lifecycle.dispose();
+		}
+	});
+
 	it("wires the discovered TTSR manager into the created session", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-ttsr-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
