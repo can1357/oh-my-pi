@@ -301,14 +301,24 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	) {}
 
 	/**
-	 * Arm a one-shot `session_shutdown` teardown that releases this load's process-global IRC state
-	 * (namespace claims + transports + `remote` refs) — symmetric with the factory-failure rollback so a
-	 * claim never outlives its load in a long-lived (SDK/ACP) host. Registered on the FIRST namespace
-	 * claim only, so non-IRC extensions add no shutdown handler.
+	 * Mark that this load claimed an IRC namespace so {@link finalizeIrcTeardown} registers the
+	 * safety-net `session_shutdown` release once the factory has run. Idempotent across repeated
+	 * claims; a non-IRC extension never arms it, so it adds no shutdown handler.
 	 */
 	#armIrcTeardown(): void {
-		if (this.#ircTeardownArmed) return;
 		this.#ircTeardownArmed = true;
+	}
+
+	/**
+	 * Register the one-shot IRC safety-net teardown — release this load's process-global namespace
+	 * claims, transports, and `remote` refs — iff a namespace was claimed. Called AFTER the factory
+	 * runs so it is appended LAST among `session_shutdown` handlers: the extension's OWN cleanup (e.g.
+	 * the natural `setRemoteTransport(ns, undefined)` clear before closing its socket) then runs first
+	 * while its claim is still held, instead of throwing on a namespace this net already released
+	 * (#7401 review). Symmetric with the factory-failure rollback, so a claim never outlives its load.
+	 */
+	finalizeIrcTeardown(): void {
+		if (!this.#ircTeardownArmed) return;
 		this.on("session_shutdown", async () => releaseExtensionIrc(this.ownerToken, this.registry));
 	}
 
@@ -523,7 +533,7 @@ function releaseExtensionIrc(ownerToken: string, registry: AgentRegistry): void 
  */
 async function runExtensionFactory(
 	factory: ExtensionFactory,
-	api: ExtensionAPI,
+	api: ConcreteExtensionAPI,
 	runtime: IExtensionRuntime,
 	ownerToken: string,
 	registry: AgentRegistry,
@@ -532,6 +542,9 @@ async function runExtensionFactory(
 
 	try {
 		await factory(api);
+		// Register the IRC safety-net teardown LAST — after the factory's own session_shutdown
+		// handlers — so the extension's cleanup clear runs before the net releases the claim (#7401).
+		api.finalizeIrcTeardown();
 	} catch (error) {
 		runtime.pendingProviderRegistrations.splice(
 			0,
