@@ -217,6 +217,17 @@ export class IrcBus {
 	}
 
 	/**
+	 * The id of the `main`-kind root of `localId`'s tree — "Main" for the in-repo default, a custom id
+	 * (e.g. ACP's `acp:<sessionId>`) for an embedder registry, or the sender's own root when several
+	 * top-level sessions share one registry. Lets a broadcast dedup its direct self-delivery against
+	 * its relay cards without assuming the root is `MAIN_AGENT_ID`. Undefined only when the registry
+	 * has no `main` ref at all.
+	 */
+	rootIdFor(localId: string): string | undefined {
+		return this.#rootMainFor(localId)?.id;
+	}
+
+	/**
 	 * Release every namespace claimed by `ownerToken`: drop its transport AND its claim (freeing the
 	 * namespace for re-claim). Owner-scoped, so sibling loads are untouched; called on extension
 	 * load-failure rollback and runtime teardown. Distinct from a plain `setRemoteTransport(ns,

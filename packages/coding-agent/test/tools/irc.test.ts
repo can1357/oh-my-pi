@@ -861,6 +861,38 @@ describe("IRC", () => {
 			expect(b.delivered.map(msg => msg.body)).toEqual(["anyone there?"]);
 		});
 
+		it("op=send to=all dedups against a custom (non-Main) root, not a hardcoded Main", async () => {
+			// ACP/custom-root registries register the root as e.g. `acp:sid`. The broadcast reaches it
+			// directly, so its sibling relay cards must be suppressed against THAT root — not "Main",
+			// which isn't in this registry at all — or the root transcript double-renders the body.
+			const root = makeFakeSession();
+			registry.register({ id: "acp:sid", displayName: "acp", kind: "main", session: root.session });
+			const b = makeFakeSession();
+			registry.register({
+				id: "acp:sid-B",
+				displayName: "task",
+				kind: "sub",
+				parentId: "acp:sid",
+				session: b.session,
+			});
+			registry.register({
+				id: "acp:sid-A",
+				displayName: "task",
+				kind: "sub",
+				parentId: "acp:sid",
+				session: makeFakeSession().session,
+			});
+
+			const tool = new HubTool(makeToolSession(registry, "acp:sid-A"));
+			await tool.execute("call-1", { op: "send", to: "all", message: "anyone there?" });
+
+			// The custom root gets the broadcast directly ...
+			expect(root.delivered.map(msg => msg.body)).toEqual(["anyone there?"]);
+			// ... so the acp:sid-A -> acp:sid-B sibling leg must NOT also relay to it.
+			expect(root.relayed).toEqual([]);
+			expect(b.delivered.map(msg => msg.body)).toEqual(["anyone there?"]);
+		});
+
 		it("op=send await=true round-trips the recipient's reply", async () => {
 			const main = makeFakeSession();
 			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
