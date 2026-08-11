@@ -234,15 +234,15 @@ describe("createAgentSession session storage isolation", () => {
 		expect(replacement).toMatchObject({ status: "idle", session: null });
 	});
 
-	it("reclaims an unrevivable parked generation before a fresh same-id spawn", async () => {
+	it("reclaims an unrevivable parked generation in the session registry before a fresh same-id spawn", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-generation-corpse-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
 		const cwd = path.join(tempDir, "project");
 		fs.mkdirSync(cwd, { recursive: true });
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
-		const lifecycle = AgentLifecycleManager.global();
-		const registry = AgentRegistry.global();
+		const registry = new AgentRegistry();
+		const lifecycle = AgentLifecycleManager.forRegistry(registry);
 		const corpse = registry.register({
 			id: "reused-worker",
 			displayName: "dead generation",
@@ -279,6 +279,7 @@ describe("createAgentSession session storage isolation", () => {
 			expect(replacement).toBeDefined();
 			expect(replacement).not.toBe(corpse);
 			expect(replacement?.session).toBe(session);
+			expect(AgentRegistry.global().get("reused-worker")).toBeUndefined();
 		} finally {
 			await session?.dispose();
 			await lifecycle.dispose();
