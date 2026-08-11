@@ -241,7 +241,7 @@ import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
 import { ToolContextStore } from "./tools/context";
-import { isIrcEnabled } from "./tools/hub";
+import { HubTool, isIrcEnabled } from "./tools/hub";
 import { getImageGenTools } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { isFilesystemSourcePath } from "./tools/path-utils";
@@ -2265,6 +2265,38 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		toolSession.extensionPaths = extensionPaths;
 		toolSession.effectiveExtensionRoots = buildSessionExtensionRoots;
 
+		// Construct the extension runner BEFORE the inline-factory loop below and the
+		// model/provider setup window, recording it as `credentialDisabledTarget`. Two
+		// reasons: (1) it is the shutdown owner the startup-abort catch (`!hasSession`)
+		// fires `session_shutdown` through to release loaded extensions' IRC state
+		// (namespace claims / transports / proxies) — a throw from an inline factory that
+		// ran after an earlier one already claimed a namespace, or anywhere in the
+		// model/provider window, must find a live owner or the claim leaks (#7401 review);
+		// (2) it is created unconditionally — even with zero extensions — because the
+		// `ExtensionToolWrapper` installed below is the only place the per-tool approval
+		// gate runs, so a conditional runner would silently drop approvals for
+		// extension-less users. Construction is inert (live action wiring is the later
+		// `initialize()`), and `hasHandlers`/`emit` read `extensionsResult.extensions`
+		// live, so inline extensions the loop pushes onto that same array are still seen
+		// at shutdown.
+		const extensionRunner: ExtensionRunner = new ExtensionRunner(
+			extensionsResult.extensions,
+			extensionsResult.runtime,
+			cwd,
+			sessionManager,
+			modelRegistry,
+			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
+			settings,
+			localProtocolOptions,
+			() => (hasSession ? session.getAsyncJobSnapshot() : null),
+		);
+
+		credentialDisabledTarget = extensionRunner;
+		for (const event of startupCredentialDisabledEvents.splice(0)) {
+			// Discard return: any handler error is routed through runner.onError listeners.
+			void extensionRunner.emitCredentialDisabled(event);
+		}
+
 		// Inline source ids must remain stable when caller factories are rebound in
 		// child sessions. Start after any prepared inline sources so SDK-provided
 		// factories (autoresearch/custom tools) keep the same ids as the parent.
@@ -2299,9 +2331,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		toolSession.preparedExtensions = extensionsResult.preparedExtensions;
 
-		// Process provider registrations queued during extension loading.
-		// This must happen before the runner is created so that models registered by
-		// extensions are available for model selection on session resume / fallback.
+		// Process provider registrations queued during extension loading, before model
+		// resolution below consumes them for session-resume / fallback model selection.
 		if (!restrictToolNames) {
 			const activeExtensionSources = extensionsResult.extensions.map(extension => extension.path);
 			modelRegistry.syncExtensionSources(activeExtensionSources);
@@ -2314,38 +2345,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				modelRegistry.registerProvider(name, config, sourceId);
 			}
 			extensionsResult.runtime.pendingProviderRegistrations = [];
-		}
-
-		// The runner is created unconditionally — even with zero extensions loaded — because the
-		// `ExtensionToolWrapper` installed below is the only place the per-tool approval gate runs.
-		// A conditional runner means the approval system silently disappears for users with no
-		// extensions, contradicting non-yolo `tools.approvalMode` settings without feedback.
-		// (The builtin autoresearch extension is unconditionally loaded above, so this scenario
-		// is unreachable; unconditional runner construction keeps that invariant explicit and
-		// prevents future optional extensions from silently re-opening the hole.)
-		//
-		// Constructed HERE — right after extensions load, before the model/provider setup window —
-		// so `credentialDisabledTarget` is assigned before any throw in that window. The startup-abort
-		// catch (`!hasSession`) fires `session_shutdown` through this runner to release the loaded
-		// extensions' IRC state (namespace claims / transports / remote proxies); with the runner built
-		// later, a throw during model/provider setup left that target undefined and leaked the claims
-		// (#7401 review).
-		const extensionRunner: ExtensionRunner = new ExtensionRunner(
-			extensionsResult.extensions,
-			extensionsResult.runtime,
-			cwd,
-			sessionManager,
-			modelRegistry,
-			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
-			settings,
-			localProtocolOptions,
-			() => (hasSession ? session.getAsyncJobSnapshot() : null),
-		);
-
-		credentialDisabledTarget = extensionRunner;
-		for (const event of startupCredentialDisabledEvents.splice(0)) {
-			// Discard return: any handler error is routed through runner.onError listeners.
-			void extensionRunner.emitCredentialDisabled(event);
 		}
 
 		// Hydrate cached runtime (extension) provider catalogs before model
@@ -2977,6 +2976,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				builtInRegistryToolNames.add(goalTool.name);
 				nativeToolsByName.set(goalTool.name, wrapped);
 			}
+		}
+		if (
+			!restrictToolNames &&
+			!toolRegistry.has("hub") &&
+			toolSession.enableIrc !== false &&
+			isIrcEnabled(settings, options.taskDepth ?? 0, agentRegistry)
+		) {
+			// `createTools` builds the built-in slate before extensions load, so a bridge that
+			// installs its RemoteTransport during load (a leaf root with task.maxRecursionDepth=0
+			// has no spawn-based peers, only the transport's remote ones) was invisible to the hub
+			// gate and `hub` was dropped for the whole session. Re-check now that transports are
+			// claimed and add it, keeping the tool consistent with the `taskIrcEnabled` prompt block
+			// that already advertises those remote peers (#7401 review).
+			const hubTool = new HubTool(toolSession);
+			const wrapped = wrapToolWithMetaNotice(hubTool);
+			toolRegistry.set(hubTool.name, wrapped);
+			builtInRegistryToolNames.add(hubTool.name);
+			nativeToolsByName.set(hubTool.name, wrapped);
 		}
 		for (const tool of wrappedExtensionTools) {
 			toolRegistry.set(tool.name, tool);
