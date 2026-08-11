@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
-import { isIrcEnabled } from "@oh-my-pi/pi-coding-agent/irc/messaging";
+import { executeSend, isIrcEnabled } from "@oh-my-pi/pi-coding-agent/irc/messaging";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -157,6 +157,37 @@ describe("IRC", () => {
 
 			expect(root.relayed).toHaveLength(1);
 			expect(root.relayed[0]?.details).toEqual({ from: "acp:sid-A", to: "acp:sid-B", body: "sibling note" });
+		});
+
+		it("broadcast dedups against a custom (non-Main) root, not a hardcoded Main", async () => {
+			// ACP/custom-root registries register the root as e.g. `acp:sid`. The broadcast reaches it
+			// directly, so its sibling relay cards must be suppressed against THAT root — not "Main",
+			// which isn't in this registry at all — or the root transcript double-renders the body.
+			const root = makeFakeSession();
+			registry.register({ id: "acp:sid", displayName: "acp", kind: "main", session: root.session });
+			const b = makeFakeSession();
+			registry.register({
+				id: "acp:sid-B",
+				displayName: "task",
+				kind: "sub",
+				parentId: "acp:sid",
+				session: b.session,
+			});
+			registry.register({
+				id: "acp:sid-A",
+				displayName: "task",
+				kind: "sub",
+				parentId: "acp:sid",
+				session: makeFakeSession().session,
+			});
+
+			await executeSend({ registry, senderId: "acp:sid-A" }, { to: "all", message: "anyone there?" });
+
+			// The custom root gets the broadcast directly ...
+			expect(root.delivered.map(msg => msg.body)).toEqual(["anyone there?"]);
+			// ... so the acp:sid-A -> acp:sid-B sibling leg must NOT also relay to it.
+			expect(root.relayed).toEqual([]);
+			expect(b.delivered.map(msg => msg.body)).toEqual(["anyone there?"]);
 		});
 
 		it("send to an unknown or aborted agent fails", async () => {
@@ -562,6 +593,7 @@ describe("IRC", () => {
 			await expect(waiting).rejects.toThrow('agent "0-Sub" is not running');
 		});
 	});
+
 
 
 
