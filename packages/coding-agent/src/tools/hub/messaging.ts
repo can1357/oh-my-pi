@@ -96,11 +96,12 @@ function formatRosterSummary(counts: HubRosterCounts, emptyNoun: string): string
 export function isIrcEnabled(settings: Settings, taskDepth: number, registry?: AgentRegistry): boolean {
 	if (taskDepth > 0) return true;
 	// Top-level session: peers exist if it can still spawn subagents (the capacity gate the task tool
-	// uses, reused to avoid drift) OR a remote transport is installed — the murmur bridge seeds remote
-	// cluster peers as proxy refs (murmur-q00p), so even a leaf root has peers to reach.
+	// uses, reused to avoid drift) OR a remote namespace is claimed — the murmur bridge seeds remote
+	// cluster peers as proxy refs (murmur-q00p), so even a leaf root has peers to reach. Gate on the
+	// CLAIM (not an installed transport) so hub survives a bridge's install→clear→reinstall reconnect.
 	const maxDepth = settings.get("task.maxRecursionDepth") ?? 2;
 	const bus = registry ? IrcBus.forRegistry(registry) : IrcBus.global();
-	return canSpawnAtDepth(maxDepth, taskDepth) || bus.hasRemoteTransport();
+	return canSpawnAtDepth(maxDepth, taskDepth) || bus.hasClaimedNamespace();
 }
 
 export function formatIncoming(msg: IrcMessage): string {

@@ -42,15 +42,15 @@ export interface RemoteTransport {
  * `name`. Because a local agent id can never start with `@` ({@link REMOTE_ID_PREFIX}), the remote
  * and local id spaces are disjoint and can never collide.
  */
-const REMOTE_NAMESPACE_RE = /^[A-Za-z0-9._-]+$/;
-const REMOTE_NAME_RE = /^[A-Za-z0-9._-]+$/;
+const REMOTE_NAMESPACE_RE = /^[A-Za-z0-9._-]{1,64}$/;
+const REMOTE_NAME_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
-/** Whether `namespace` is a well-formed remote namespace (letters, digits, `.`, `_`, `-`). */
+/** Whether `namespace` is a well-formed remote namespace (1-64 chars of letters, digits, `.`, `_`, `-`). */
 export function isValidRemoteNamespace(namespace: string): boolean {
 	return REMOTE_NAMESPACE_RE.test(namespace);
 }
 
-/** Whether `name` is a well-formed bare remote peer name (letters, digits, `.`, `_`, `-`). */
+/** Whether `name` is a well-formed bare remote peer name (1-128 chars of letters, digits, `.`, `_`, `-`). */
 export function isValidRemoteName(name: string): boolean {
 	return REMOTE_NAME_RE.test(name);
 }
@@ -62,11 +62,13 @@ export function isValidRemoteName(name: string): boolean {
 export function composeRemoteId(namespace: string, name: string): string {
 	if (!isValidRemoteNamespace(namespace)) {
 		throw new Error(
-			`Invalid remote namespace ${JSON.stringify(namespace)} (allowed: letters, digits, ".", "_", "-").`,
+			`Invalid remote namespace ${JSON.stringify(namespace)} (allowed: 1-64 chars of letters, digits, ".", "_", "-").`,
 		);
 	}
 	if (!isValidRemoteName(name)) {
-		throw new Error(`Invalid remote peer name ${JSON.stringify(name)} (allowed: letters, digits, ".", "_", "-").`);
+		throw new Error(
+			`Invalid remote peer name ${JSON.stringify(name)} (allowed: 1-128 chars of letters, digits, ".", "_", "-").`,
+		);
 	}
 	return `${REMOTE_ID_PREFIX}${namespace}/${name}`;
 }
@@ -202,6 +204,16 @@ export class IrcBus {
 	/** Whether any outbound transport is installed (murmur-q00p): a leaf agent then still has peers. */
 	hasRemoteTransport(): boolean {
 		return this.#transports.size > 0;
+	}
+
+	/**
+	 * Whether any namespace is currently CLAIMED (murmur-q00p): true while an extension owns a
+	 * namespace, even across a reconnect `setRemoteTransport(ns, undefined)` clear that drops routing
+	 * but keeps the claim and its registered remote peers. The durable "this session is bridged"
+	 * signal — unlike `hasRemoteTransport`, which reports only a transport installed right now.
+	 */
+	hasClaimedNamespace(): boolean {
+		return this.#namespaceOwners.size > 0;
 	}
 
 	/**

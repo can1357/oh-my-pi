@@ -199,4 +199,51 @@ describe("createAgentSession + extension IRC (murmur bridge)", () => {
 			await session.dispose();
 		}
 	});
+
+	// The install→clear→reinstall reconnect flow (bus.ts) clears the transport but keeps the
+	// namespace claim + roster. The hub gate must survive that: a leaf root whose bridge starts
+	// disconnected still has peers, so `hub` must be present for when the transport reinstalls
+	// (#7401 review).
+	it("keeps hub for a leaf root whose bridge cleared its transport (reconnect flow)", async () => {
+		const { cwd, agentDir } = makeProject();
+		const agentRegistry = new AgentRegistry();
+		const reconnectingBridge: ExtensionFactory = pi => {
+			const { setRemoteTransport, registerRemotePeer } = pi.irc;
+			if (!setRemoteTransport || !registerRemotePeer) {
+				throw new Error("test setup: pi.irc remote-transport seam unavailable on this build");
+			}
+			setRemoteTransport("cluster-reconnect", okTransport());
+			registerRemotePeer({ name: "alice", displayName: "alice" });
+			setRemoteTransport("cluster-reconnect", undefined); // clear routing, keep the claim
+		};
+
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			sessionManager: SessionManager.inMemory(cwd),
+			settings: Settings.isolated({ "task.maxRecursionDepth": 0 }),
+			model: getModel(),
+			disableExtensionDiscovery: true,
+			extensions: [reconnectingBridge],
+			skills: [],
+			rules: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			workspaceTree: emptyWorkspaceTree(cwd),
+			agentRegistry,
+		});
+		try {
+			const bus = IrcBus.forRegistry(agentRegistry);
+			// Disconnected right now, but the claim persists — the durable "bridged" signal.
+			expect(bus.hasRemoteTransport()).toBe(false);
+			expect(bus.hasClaimedNamespace()).toBe(true);
+			// So hub stays available for the retained @cluster-reconnect/* peers despite the leaf root.
+			expect(session.getActiveToolNames()).toContain("hub");
+		} finally {
+			await session.dispose();
+		}
+	});
 });
