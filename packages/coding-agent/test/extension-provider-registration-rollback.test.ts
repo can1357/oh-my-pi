@@ -621,13 +621,13 @@ describe("extension provider registration rollback", () => {
 		}
 	});
 
-	test("session_shutdown runs the extension's own cleanup before the internal IRC release", async () => {
+	test("session_shutdown clear is idempotent when the safety net releases first (concurrent emit)", async () => {
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
 		try {
 			const runtime = new ExtensionRuntime();
 			const events = new EventBus();
-			const order: string[] = [];
+			let cleared = false;
 			const extension = await loadExtensionFromFactory(
 				pi => {
 					pi.irc.setRemoteTransport?.("cluster-a", {
@@ -636,13 +636,14 @@ describe("extension provider registration rollback", () => {
 						},
 					});
 					pi.irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
-					// The bridge's own cleanup: clear the transport (keeping the claim) before it would
-					// close its socket. It must run while the claim is still held — i.e. BEFORE the
-					// internal safety-net release — or setRemoteTransport(ns, undefined) throws on an
-					// already-released namespace and the rest of the bridge cleanup is skipped.
-					pi.on("session_shutdown", () => {
+					// The bridge's own cleanup awaits (e.g. flushing a socket) before clearing its
+					// transport. session_shutdown handlers run concurrently (ExtensionRunner Promise.all),
+					// so the internal safety net can release the claim first — the clear must then be a
+					// no-op, not a throw.
+					pi.on("session_shutdown", async () => {
+						await Promise.resolve();
 						pi.irc.setRemoteTransport?.("cluster-a", undefined);
-						order.push("extension-clear");
+						cleared = true;
 					});
 				},
 				process.cwd(),
@@ -652,14 +653,59 @@ describe("extension provider registration rollback", () => {
 			);
 
 			const handlers = extension.handlers.get("session_shutdown") ?? [];
-			expect(handlers.length).toBe(2); // the extension's own clear + the internal safety-net release
-			// Run them in registration order; the extension's clear must not throw.
-			for (const handler of handlers) await handler();
+			expect(handlers.length).toBe(2); // internal safety net (armed at claim) + the extension's clear
+			// Emit like ExtensionRunner: start every handler, then await all. The internal net releases
+			// (sync) while the extension's clear is still awaiting; the clear then resolves against an
+			// already-released namespace and must not throw.
+			await Promise.all(handlers.map(h => h()));
 
-			// The extension's own handler ran (its clear did not throw on an unclaimed namespace) ...
-			expect(order).toEqual(["extension-clear"]);
-			// ... and the internal net still fully released the claim + transport + proxy afterwards.
+			expect(cleared).toBe(true); // the extension's clear completed without throwing
 			expect(IrcBus.global().hasRemoteTransport()).toBe(false);
+			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+			expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
+		} finally {
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		}
+	});
+
+	test("a namespace claimed after the factory (runtime handler) still arms the teardown", async () => {
+		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
+		try {
+			const runtime = new ExtensionRuntime();
+			const events = new EventBus();
+			let claim: (() => void) | undefined;
+			const extension = await loadExtensionFromFactory(
+				pi => {
+					// The bridge defers its claim to a runtime handler (e.g. session_start, once it has
+					// pi.getAgentId() or an async socket). Nothing is claimed during factory load.
+					claim = () => {
+						pi.irc.setRemoteTransport?.("cluster-a", {
+							async send(message) {
+								return { to: message.to, outcome: "injected" };
+							},
+						});
+						pi.irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
+					};
+				},
+				process.cwd(),
+				events,
+				runtime,
+				"bridge-extension",
+			);
+
+			// Nothing claimed during the factory, so no teardown handler yet.
+			expect(extension.handlers.get("session_shutdown") ?? []).toHaveLength(0);
+
+			// The delayed (post-factory) claim arms the teardown at claim time.
+			claim?.();
+			expect(IrcBus.global().hasClaimedNamespace()).toBe(true);
+			const handlers = extension.handlers.get("session_shutdown") ?? [];
+			expect(handlers).toHaveLength(1);
+
+			// session_shutdown then releases the delayed claim.
+			for (const h of handlers) await h();
 			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
 			expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
 		} finally {

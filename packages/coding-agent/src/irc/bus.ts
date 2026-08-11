@@ -216,6 +216,11 @@ export class IrcBus {
 		return this.#namespaceOwners.size > 0;
 	}
 
+	/** The `ownerToken` currently claiming `namespace`, or undefined if unclaimed (owner-scoped clear). */
+	namespaceOwner(namespace: string): string | undefined {
+		return this.#namespaceOwners.get(namespace);
+	}
+
 	/**
 	 * The id of the `main`-kind root of `localId`'s tree — "Main" for the in-repo default, a custom id
 	 * (e.g. ACP's `acp:<sessionId>`) for an embedder registry, or the sender's own root when several

@@ -241,7 +241,24 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 					`This extension already claimed IRC namespace "${this.#claimedNamespace}"; an extension load owns a single namespace.`,
 				);
 			}
-			IrcBus.forRegistry(this.registry).setRemoteTransport(namespace, transport, this.ownerToken);
+			const bus = IrcBus.forRegistry(this.registry);
+			if (transport === undefined) {
+				// Clearing this load's transport (reconnect / teardown). A clear of a namespace this load
+				// never claimed stays a hard error, but a clear when the claim is already gone — the
+				// session_shutdown safety net released it first, and those handlers run concurrently
+				// (ExtensionRunner awaits them via Promise.all) — is a no-op, so a bridge's own teardown
+				// clear never races the net (#7401 review).
+				if (this.#claimedNamespace !== namespace) {
+					throw new Error(
+						`IRC namespace ${JSON.stringify(namespace)} is not claimed; install a transport before clearing.`,
+					);
+				}
+				if (bus.namespaceOwner(namespace) === this.ownerToken) {
+					bus.setRemoteTransport(namespace, undefined, this.ownerToken);
+				}
+				return;
+			}
+			bus.setRemoteTransport(namespace, transport, this.ownerToken);
 			this.#claimedNamespace = namespace;
 			this.#armIrcTeardown();
 		},
@@ -301,24 +318,17 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	) {}
 
 	/**
-	 * Mark that this load claimed an IRC namespace so {@link finalizeIrcTeardown} registers the
-	 * safety-net `session_shutdown` release once the factory has run. Idempotent across repeated
-	 * claims; a non-IRC extension never arms it, so it adds no shutdown handler.
+	 * Arm the one-shot IRC safety-net teardown on the FIRST namespace claim: release this load's
+	 * process-global namespace claims, transports, and `remote` refs on `session_shutdown`, so a claim
+	 * never outlives its load in a long-lived (SDK/ACP) host. Registered at claim time (not deferred to
+	 * after the factory) so a delayed claim from a runtime handler — e.g. a bridge calling
+	 * setRemoteTransport from `session_start` once it has `pi.getAgentId()` — is covered too (#7401
+	 * review). Ordering among shutdown handlers is irrelevant: the release and the extension's own
+	 * transport clear are each idempotent, and session_shutdown handlers run concurrently anyway.
 	 */
 	#armIrcTeardown(): void {
+		if (this.#ircTeardownArmed) return;
 		this.#ircTeardownArmed = true;
-	}
-
-	/**
-	 * Register the one-shot IRC safety-net teardown — release this load's process-global namespace
-	 * claims, transports, and `remote` refs — iff a namespace was claimed. Called AFTER the factory
-	 * runs so it is appended LAST among `session_shutdown` handlers: the extension's OWN cleanup (e.g.
-	 * the natural `setRemoteTransport(ns, undefined)` clear before closing its socket) then runs first
-	 * while its claim is still held, instead of throwing on a namespace this net already released
-	 * (#7401 review). Symmetric with the factory-failure rollback, so a claim never outlives its load.
-	 */
-	finalizeIrcTeardown(): void {
-		if (!this.#ircTeardownArmed) return;
 		this.on("session_shutdown", async () => releaseExtensionIrc(this.ownerToken, this.registry));
 	}
 
@@ -533,7 +543,7 @@ function releaseExtensionIrc(ownerToken: string, registry: AgentRegistry): void 
  */
 async function runExtensionFactory(
 	factory: ExtensionFactory,
-	api: ConcreteExtensionAPI,
+	api: ExtensionAPI,
 	runtime: IExtensionRuntime,
 	ownerToken: string,
 	registry: AgentRegistry,
@@ -542,9 +552,6 @@ async function runExtensionFactory(
 
 	try {
 		await factory(api);
-		// Register the IRC safety-net teardown LAST — after the factory's own session_shutdown
-		// handlers — so the extension's cleanup clear runs before the net releases the claim (#7401).
-		api.finalizeIrcTeardown();
 	} catch (error) {
 		runtime.pendingProviderRegistrations.splice(
 			0,
