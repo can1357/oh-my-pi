@@ -13,7 +13,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
-async function captureIrc(): Promise<IrcApi> {
+async function captureIrc(registry?: AgentRegistry): Promise<IrcApi> {
 	let irc: IrcApi | undefined;
 	await loadExtensionFromFactory(
 		pi => {
@@ -22,6 +22,8 @@ async function captureIrc(): Promise<IrcApi> {
 		process.cwd(),
 		new EventBus(),
 		new ExtensionRuntime(),
+		"<inline>",
+		registry,
 	);
 	if (!irc) throw new Error("pi.irc was not exposed to the extension");
 	return irc;
@@ -94,6 +96,44 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		expect(ref?.kind).toBe("remote");
 		expect(ref?.displayName).toBe("beatrice");
 		expect(ref?.ownerToken?.startsWith("<inline>:")).toBe(true);
+	});
+
+	it("registerRemotePeer targets the session's registry, not the global one", async () => {
+		const sessionRegistry = new AgentRegistry();
+		const irc = await captureIrc(sessionRegistry);
+		irc.setRemoteTransport?.("cluster-a", injectingTransport());
+		const id = irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
+		expect(id).toBe("@cluster-a/beatrice");
+		// The proxy lands in THIS session's registry...
+		expect(sessionRegistry.get("@cluster-a/beatrice")?.kind).toBe("remote");
+		// ...and never leaks into the global one.
+		expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
+		expect(
+			AgentRegistry.global()
+				.list()
+				.some(ref => ref.kind === "remote"),
+		).toBe(false);
+	});
+
+	it("factory-failure rollback retracts the load's peers from the session registry", async () => {
+		const sessionRegistry = new AgentRegistry();
+		await expect(
+			loadExtensionFromFactory(
+				pi => {
+					pi.irc.setRemoteTransport?.("cluster-a", injectingTransport());
+					pi.irc.registerRemotePeer?.({ name: "beatrice" });
+					throw new Error("boom");
+				},
+				process.cwd(),
+				new EventBus(),
+				new ExtensionRuntime(),
+				"<inline>",
+				sessionRegistry,
+			),
+		).rejects.toThrow("boom");
+		// Rollback retracted the proxy from THIS registry, proving releaseExtensionIrc is registry-scoped.
+		expect(sessionRegistry.get("@cluster-a/beatrice")).toBeUndefined();
+		expect(sessionRegistry.list().some(ref => ref.kind === "remote")).toBe(false);
 	});
 
 	it("registerRemotePeer returns undefined before a namespace is claimed", async () => {
