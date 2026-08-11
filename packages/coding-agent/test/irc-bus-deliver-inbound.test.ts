@@ -26,8 +26,8 @@ describe("IrcBus.deliverInbound", () => {
 		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "idle" });
 		const bus = new IrcBus(registry);
 
-		const reply = bus.wait("Main", { from: "peer" }, 1000);
-		const { receipt, id } = await bus.deliverInbound({ from: "peer", to: "Main", body: "inbound hi" });
+		const reply = bus.wait("Main", { from: "@cluster/peer" }, 1000);
+		const { receipt, id } = await bus.deliverInbound({ from: "@cluster/peer", to: "Main", body: "inbound hi" });
 
 		expect(receipt.outcome).toBe("injected");
 		expect(typeof id).toBe("string");
@@ -41,7 +41,7 @@ describe("IrcBus.deliverInbound", () => {
 	it("a !ref miss returns failed", async () => {
 		const bus = new IrcBus(AgentRegistry.global());
 
-		const { receipt, id } = await bus.deliverInbound({ from: "remote", to: "ghost", body: "hi" });
+		const { receipt, id } = await bus.deliverInbound({ from: "@cluster/remote", to: "ghost", body: "hi" });
 
 		expect(receipt.outcome).toBe("failed");
 		expect(typeof id).toBe("string");
@@ -52,7 +52,7 @@ describe("IrcBus.deliverInbound", () => {
 		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "aborted" });
 		const bus = new IrcBus(registry);
 
-		const { receipt } = await bus.deliverInbound({ from: "peer", to: "Main", body: "hi" });
+		const { receipt } = await bus.deliverInbound({ from: "@cluster/peer", to: "Main", body: "hi" });
 
 		expect(receipt.outcome).toBe("failed");
 		expect(receipt.error).toMatch(/hard-aborted/);
@@ -63,11 +63,28 @@ describe("IrcBus.deliverInbound", () => {
 		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "idle" });
 		const bus = new IrcBus(registry);
 
-		bus.wait("Main", { from: "a" }, 1000);
-		bus.wait("Main", { from: "b" }, 1000);
-		const r1 = await bus.deliverInbound({ from: "a", to: "Main", body: "1" });
-		const r2 = await bus.deliverInbound({ from: "b", to: "Main", body: "2" });
+		bus.wait("Main", { from: "@cluster/a" }, 1000);
+		bus.wait("Main", { from: "@cluster/b" }, 1000);
+		const r1 = await bus.deliverInbound({ from: "@cluster/a", to: "Main", body: "1" });
+		const r2 = await bus.deliverInbound({ from: "@cluster/b", to: "Main", body: "2" });
 
 		expect(r1.id).not.toBe(r2.id);
+	});
+
+	it("rejects an inbound sender that is not a well-formed remote id", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "idle" });
+		const bus = new IrcBus(registry);
+		// A bare local id (impersonation) or a malformed remote id fails locally, before delivery.
+		for (const from of ["Main", "peer", "@cluster/", "@cluster/bad name", "@/name"]) {
+			const { receipt } = await bus.deliverInbound({ from, to: "Main", body: "spoof" });
+			expect(receipt.outcome).toBe("failed");
+			expect(receipt.error).toMatch(/not a remote id/);
+		}
+		// A well-formed remote sender still delivers.
+		const reply = bus.wait("Main", { from: "@cluster/alice" }, 1000);
+		const { receipt } = await bus.deliverInbound({ from: "@cluster/alice", to: "Main", body: "ok" });
+		expect(receipt.outcome).toBe("injected");
+		expect((await reply)?.body).toBe("ok");
 	});
 });

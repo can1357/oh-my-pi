@@ -86,6 +86,14 @@ export function remoteNameOf(id: string): string | undefined {
 	return id.slice(REMOTE_ID_PREFIX.length + namespace.length + 1);
 }
 
+/** Whether `id` is a well-formed remote id `@<namespace>/<name>` (valid namespace + bare name). */
+export function isValidRemoteId(id: string): boolean {
+	const namespace = remoteNamespaceOf(id);
+	if (namespace === undefined || !isValidRemoteNamespace(namespace)) return false;
+	const name = remoteNameOf(id);
+	return name !== undefined && isValidRemoteName(name);
+}
+
 interface IrcWaiter {
 	from?: string;
 	resolve: (msg: IrcMessage) => void;
@@ -345,6 +353,21 @@ export class IrcBus {
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
 	): Promise<{ receipt: IrcDeliveryReceipt; id: string }> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		// Inbound arrives FROM the mesh, so the sender MUST be a well-formed remote id
+		// (@namespace/name). Reject a bare local id (e.g. "Main") or a malformed remote id before the
+		// local delivery path: msg.from feeds wait filters, IrcBridge.deliver, and #runAutoReply's
+		// side-channel reply, so an unvalidated sender could impersonate a local agent and route a
+		// reply back to that id on the local bus.
+		if (!isValidRemoteId(message.from)) {
+			return {
+				receipt: {
+					to: message.to,
+					outcome: "failed",
+					error: `Inbound sender "${message.from}" is not a remote id (@namespace/name).`,
+				},
+				id: message.id,
+			};
+		}
 		const ref = this.#registry.get(message.to);
 		if (!ref || ref.kind === "remote") {
 			return {
