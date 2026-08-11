@@ -149,9 +149,10 @@ export class IrcBus {
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
-		// Lazy: the lifecycle global self-constructs against the global registry,
-		// so only touch it when a parked recipient actually needs reviving.
-		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+		// Lazy + registry-paired: default to THIS registry's lifecycle manager (mirrors the
+		// bus<->registry pairing) so a custom-registry bus revives its own parked peers instead
+		// of consulting the global manager. Only touched when a parked recipient needs reviving.
+		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.forRegistry(this.#registry);
 	}
 
 	/**

@@ -4150,10 +4150,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
 					if (agentKind === "main") {
-						// Top-level teardown owns the global agent lifecycle: park timers,
-						// adopted subagent sessions, revivers. Tear it down while shared
-						// resources (kernels, MCP, LSP) are still live. Subagent disposal
-						// must NOT touch the global lifecycle.
+						// Top-level teardown owns this session's registry-paired lifecycle: park
+						// timers, adopted subagent sessions, revivers. Tear it down while shared
+						// resources (kernels, MCP, LSP) are still live. Subagent disposal must NOT
+						// touch it. For an in-repo session this IS the global manager
+						// (forRegistry(global) === global()); a custom-registry SDK session disposes
+						// its own manager, never an unrelated global one.
 						const vibeRegistry = VibeSessionRegistry.global();
 						const vibeParentSession = {
 							getAgentId: () => resolvedAgentId,
@@ -4165,7 +4167,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							getActiveModelString,
 						};
 						await vibeRegistry.suspendScope(vibeRegistry.ownerScope(vibeParentSession), scopedAsyncJobManager);
-						await AgentLifecycleManager.global().dispose();
+						await AgentLifecycleManager.forRegistry(agentRegistry).dispose();
 					}
 					await originalDispose();
 				} finally {

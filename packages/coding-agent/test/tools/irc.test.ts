@@ -291,6 +291,27 @@ describe("IRC", () => {
 			expect(globalStub.delivered).toEqual([]);
 		});
 
+		it("custom-registry bus revives a parked recipient through its OWN lifecycle manager", async () => {
+			// PR #7401 codex (r3758432383): the custom bus fell back to AgentLifecycleManager.global(),
+			// which does not own the custom registry's parked ref, so send() failed instead of reviving.
+			// The bus now derives its lifecycle from its own registry.
+			const customRegistry = new AgentRegistry();
+			const customBus = IrcBus.forRegistry(customRegistry);
+			const sub = makeFakeSession();
+			sub.setOutcome("woken");
+			customRegistry.register({ id: "0-Parked", displayName: "task", kind: "sub", session: null, status: "parked" });
+			AgentLifecycleManager.forRegistry(customRegistry).adopt("0-Parked", {
+				idleTtlMs: 0,
+				revive: async () => sub.session,
+			});
+
+			const receipt = await customBus.send({ from: "0-Main", to: "0-Parked", body: "wake up" });
+			expect(receipt.outcome).toBe("revived");
+			expect(sub.delivered.map(msg => msg.body)).toEqual(["wake up"]);
+			expect(customRegistry.get("0-Parked")?.status).toBe("idle");
+			expect(AgentLifecycleManager.global().has("0-Parked")).toBe(false);
+		});
+
 		it("send during pre-detach park keeps the live session and does not revive", async () => {
 			const { promise: disposeGate, resolve: resolveDispose } = Promise.withResolvers<void>();
 			let disposeCalls = 0;
