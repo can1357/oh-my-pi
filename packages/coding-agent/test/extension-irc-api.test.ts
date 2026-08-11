@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import type { IrcApi } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
@@ -30,10 +31,12 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
 	});
 	afterEach(() => {
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
 	});
 
 	it("delegates to the global bus — a miss returns deliverInbound's failed receipt + a native id", async () => {
