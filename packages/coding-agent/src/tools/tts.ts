@@ -9,7 +9,16 @@ import { ProviderHttpError } from "@pk-nerdsaver-ai/pi-ai/error";
 import { type } from "arktype";
 import { settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
+import {
+	DEFAULT_ELEVENLABS_MODEL_ID,
+	DEFAULT_ELEVENLABS_VOICE_ID,
+	ELEVENLABS_PCM_SAMPLE_RATE,
+	ohMyPkElevenLabsUserAgent,
+	resolveElevenLabsApiKey,
+	resolveElevenLabsBaseUrl,
+} from "../lib/elevenlabs-http";
 import { ohMyPkXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
+import { resolveTtsBackend, type TtsBackend } from "../tts/backend";
 import { DEFAULT_TTS_LOCAL_MODEL_KEY, DEFAULT_TTS_VOICE, isTtsLocalModelKey, KOKORO_VOICES } from "../tts/models";
 import { ttsClient } from "../tts/tts-client";
 import { encodeWav } from "../tts/wav";
@@ -29,7 +38,6 @@ const formatVoiceList = (): string =>
 	XAI_BUILTIN_VOICES.map(v => (v === DEFAULT_XAI_VOICE_ID ? `${v} (default)` : v)).join(", ");
 
 type TtsCodec = "mp3" | "wav";
-type TtsBackend = "local" | "xai";
 
 const ttsSchema = type({
 	text: "1 <= string <= 15000",
@@ -47,22 +55,6 @@ interface TtsToolDetails {
 	voiceId: string;
 	codec: TtsCodec;
 	backend: TtsBackend;
-}
-
-/**
- * Pick the synthesis backend. Pure for testability.
- *
- * - `xai` / `local` are honored verbatim (the xAI path still surfaces its own
- *   "no credentials" error when creds are missing).
- * - `auto` prefers the local on-device backend, except when the caller asked for
- *   an `.mp3` and xAI credentials exist — only the cloud path can emit MP3, so we
- *   route there to satisfy the requested container rather than substituting WAV.
- */
-export function resolveTtsBackend(opts: { preference: string; wantsMp3: boolean; hasXaiCreds: boolean }): TtsBackend {
-	if (opts.preference === "xai") return "xai";
-	if (opts.preference === "local") return "local";
-	if (opts.wantsMp3 && opts.hasXaiCreds) return "xai";
-	return "local";
 }
 
 /**
@@ -86,6 +78,84 @@ function readStringSetting(key: "providers.tts" | "tts.localModel" | "tts.localV
 	} catch {
 		return undefined;
 	}
+}
+
+async function synthesizeElevenLabs(
+	params: TtsSchemaType,
+	outputPath: string,
+	displayPath: string,
+	codec: TtsCodec,
+	signal: AbortSignal | undefined,
+): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
+	const apiKey = resolveElevenLabsApiKey();
+	if (!apiKey) {
+		return {
+			isError: true,
+			content: [{ type: "text", text: "No ElevenLabs credentials. Set the ELEVENLABS_API_KEY environment variable." }],
+		};
+	}
+
+	const voiceId = params.voice_id === "eve" ? DEFAULT_ELEVENLABS_VOICE_ID : params.voice_id;
+	const wantsPcm = codec === "wav";
+	const outputFormat = wantsPcm ? `pcm_${params.sample_rate ?? ELEVENLABS_PCM_SAMPLE_RATE}` : "mp3_44100_128";
+	const baseUrl = resolveElevenLabsBaseUrl();
+	const url = `${baseUrl}/text-to-speech/${encodeURIComponent(voiceId)}/stream?output_format=${outputFormat}`;
+
+	const timeoutSignal = AbortSignal.timeout(60_000);
+	const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+
+	let response: Response;
+	try {
+		response = await fetch(url, {
+			method: "POST",
+			headers: {
+				"xi-api-key": apiKey,
+				"Content-Type": "application/json",
+				"User-Agent": ohMyPkElevenLabsUserAgent(),
+			},
+			body: JSON.stringify({ text: params.text, model_id: DEFAULT_ELEVENLABS_MODEL_ID }),
+			signal: combinedSignal,
+		});
+	} catch (error) {
+		if (error instanceof Error) return { isError: true, content: [{ type: "text", text: error.message }] };
+		throw error;
+	}
+	if (!response.ok) {
+		const detail = await response.text().catch(() => "");
+		return {
+			isError: true,
+			content: [{ type: "text", text: `ElevenLabs TTS failed (${response.status}): ${detail.slice(0, 300)}` }],
+		};
+	}
+
+	const bytes = new Uint8Array(await response.arrayBuffer());
+	if (wantsPcm) {
+		const sampleRate = params.sample_rate ?? ELEVENLABS_PCM_SAMPLE_RATE;
+		const pcm = new Float32Array(Math.floor(bytes.length / 2));
+		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+		for (let i = 0; i < pcm.length; i++) pcm[i] = view.getInt16(i * 2, true) / 32_768;
+		const wav = encodeWav(pcm, sampleRate);
+		await Bun.write(outputPath, wav);
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Saved ${wav.length} bytes to ${displayPath} (voice=${voiceId}, codec=wav, backend=elevenlabs, ${sampleRate} Hz).`,
+				},
+			],
+			details: { bytes: wav.length, voiceId, codec: "wav", backend: "elevenlabs" },
+		};
+	}
+	await Bun.write(outputPath, bytes);
+	return {
+		content: [
+			{
+				type: "text",
+				text: `Saved ${bytes.length} bytes to ${displayPath} (voice=${voiceId}, codec=mp3, backend=elevenlabs).`,
+			},
+		],
+		details: { bytes: bytes.length, voiceId, codec: "mp3", backend: "elevenlabs" },
+	};
 }
 
 async function synthesizeXai(
@@ -235,11 +305,12 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 	strict: false,
 	approval: "write",
 	description:
-		"Generate a speech audio file from text and write it to output_path. Two backends, selected by the providers.tts setting (auto|local|xai): " +
+		"Generate a speech audio file from text and write it to output_path. Three backends, selected by the providers.tts setting (auto|local|xai|elevenlabs): " +
 		`local = on-device neural TTS (Kokoro-82M via the bundled ONNX runtime, no network, output is always WAV/PCM16; voice set by the tts.localVoice setting — ${KOKORO_VOICES.map(v => (v.id === DEFAULT_TTS_VOICE ? `${v.id} (default)` : v.id)).join(", ")}); ` +
 		`xai = xAI Grok Voice cloud (built-in voices: ${formatVoiceList()}; custom voice IDs accepted; MP3 or WAV). ` +
-		"auto prefers local, but routes an .mp3 request to xAI when credentials exist (only the cloud path emits MP3); " +
-		"otherwise an .mp3 path is written as a sibling .wav. xAI codec is inferred from the output_path suffix. " +
+		"elevenlabs = ElevenLabs cloud (requires ELEVENLABS_API_KEY env var; MP3 or WAV via PCM streaming, which needs a paid ElevenLabs plan; pass a voice_id or use the default). " +
+		"auto defaults to local, routing an .mp3 request to xAI when credentials exist (only xai/elevenlabs emit MP3); otherwise an .mp3 path is written as a sibling .wav. " +
+		"ElevenLabs is never auto-selected; set providers.tts=elevenlabs explicitly to use it. Cloud-backend codec is inferred from the output_path suffix. " +
 		`Max ${XAI_MAX_TEXT_LENGTH.toLocaleString("en-US")} characters.`,
 	parameters: ttsSchema,
 	async execute(
@@ -261,6 +332,7 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 		const backend = resolveTtsBackend({ preference, wantsMp3: codec === "mp3", hasXaiCreds });
 
 		if (backend === "local") return synthesizeLocal(params, cwd, outputPath, signal);
+		if (backend === "elevenlabs") return synthesizeElevenLabs(params, outputPath, displayPath, codec, signal);
 		return synthesizeXai(params, ctx, outputPath, displayPath, codec, signal);
 	},
 };

@@ -1458,7 +1458,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Sampling",
 			label: "Service Tier",
 			description:
-				'Processing priority hint (none = omit). OpenAI accepts the tier values directly; Anthropic realizes `priority` as `speed: "fast"` on supported Opus models. Scoped values target one family.',
+				'Processing priority hint (none = omit). OpenAI accepts tier values directly; Anthropic realizes `priority` as `speed: "fast"`; OpenRouter realizes it as `:nitro`. Scoped values target one family.',
 			options: [
 				{ value: "none", label: "None", description: "Omit service_tier parameter" },
 				{ value: "auto", label: "Auto", description: "Use provider default tier selection (OpenAI)" },
@@ -1468,7 +1468,7 @@ export const SETTINGS_SCHEMA = {
 				{
 					value: "priority",
 					label: "Priority",
-					description: "Priority on every supported provider (OpenAI `service_tier`, Anthropic fast mode)",
+					description: "Fast routing on every supported provider, including OpenRouter `:nitro`",
 				},
 				{
 					value: "openai-only",
@@ -1507,9 +1507,9 @@ export const SETTINGS_SCHEMA = {
 			group: "Sampling",
 			label: "Fast Mode Scope",
 			description:
-				'Which providers `/fast on` (and the fast-mode toggle) target. "both" = priority on every supported provider; "openai"/"claude" scope it to one family (mirrors serviceTier openai-only/claude-only).',
+				'Which providers `/fast on` targets. "both" enables all supported providers, including OpenRouter `:nitro`; "openai"/"claude" restrict it to that family.',
 			options: [
-				{ value: "both", label: "Both", description: "Priority on every supported provider" },
+				{ value: "both", label: "All supported", description: "Fast routing on OpenAI, Anthropic, and OpenRouter" },
 				{
 					value: "openai",
 					label: "OpenAI only",
@@ -4834,24 +4834,31 @@ export const SETTINGS_SCHEMA = {
 	},
 	"providers.tts": {
 		type: "enum",
-		values: ["auto", "local", "xai"] as const,
+		values: ["auto", "local", "xai", "elevenlabs"] as const,
 		default: "auto",
 		ui: {
 			tab: "providers",
 			group: "Services",
 			label: "Text-to-Speech Provider",
-			description: "Backend for the tts tool: local on-device neural TTS (Kokoro-82M) or xAI Grok Voice",
+			description:
+				"Backend for the tts tool and live /pk-speak vocalization: local on-device neural TTS (Kokoro-82M), xAI Grok Voice, or ElevenLabs",
 			options: [
 				{
 					value: "auto",
 					label: "Auto",
-					description: "Prefer local on-device TTS; route .mp3 output to xAI when credentials exist",
+					description:
+						"Local by default; route .mp3 output to xAI when credentials exist. Select ElevenLabs explicitly to use it.",
 				},
 				{ value: "local", label: "Local", description: "On-device neural TTS (Kokoro-82M); output is WAV/PCM16" },
 				{
 					value: "xai",
 					label: "xAI Grok Voice",
-					description: "Requires xAI Grok OAuth or XAI_API_KEY; MP3 or WAV",
+					description: "Requires xAI Grok OAuth or XAI_API_KEY; MP3 or WAV; one-shot tts tool only",
+				},
+				{
+					value: "elevenlabs",
+					label: "ElevenLabs",
+					description: "Requires ELEVENLABS_API_KEY; MP3 or WAV; used for both the tts tool and live /pk-speak",
 				},
 			],
 		},

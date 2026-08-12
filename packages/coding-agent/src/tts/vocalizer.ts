@@ -24,6 +24,9 @@
  */
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
 import { settings } from "../config/settings";
+import { resolveElevenLabsApiKey, DEFAULT_ELEVENLABS_VOICE_ID } from "../lib/elevenlabs-http";
+import { resolveTtsBackend } from "./backend";
+import { openElevenLabsStream } from "./elevenlabs-stream";
 import { DEFAULT_TTS_VOICE } from "./models";
 import { isSpeechHardStopped } from "./speech-hard-stop";
 import { createStreamingPlayer, DUCK_GAIN } from "./streaming-player";
@@ -118,14 +121,38 @@ export class Vocalizer {
 	/**
 	 * Open a streaming-synthesis session lazily on the first delta and chain its
 	 * playback after any prior session's, so sequential utterances never overlap.
+	 *
+	 * Backend selection mirrors `resolveTtsBackend` (the same decision the
+	 * one-shot `tts` tool makes), with `wantsMp3`/`hasXaiCreds` fixed to
+	 * `false`: live playback never needs MP3, and xAI has no live streaming
+	 * path today, so an explicit `providers.tts = "xai"` preference falls
+	 * back to local here rather than erroring.
 	 */
 	#ensureSession(): TtsStreamHandle {
 		if (this.#handle) return this.#handle;
-		const modelKey = settings.get("tts.localModel");
-		const voice = settings.get("speech.voice") || DEFAULT_TTS_VOICE;
 		const abort = new AbortController();
 		this.#abort = abort;
-		const handle = ttsClient.synthesizeStream(modelKey, { voice, signal: abort.signal });
+
+		const elevenLabsApiKey = resolveElevenLabsApiKey();
+		const backend = resolveTtsBackend({
+			preference: settings.get("providers.tts") ?? "auto",
+			wantsMp3: false,
+			hasXaiCreds: false,
+		});
+
+		const voice = settings.get("speech.voice");
+		const handle =
+			backend === "elevenlabs" && elevenLabsApiKey
+				? openElevenLabsStream({
+						apiKey: elevenLabsApiKey,
+						voiceId: voice || DEFAULT_ELEVENLABS_VOICE_ID,
+						signal: abort.signal,
+					})
+				: ttsClient.synthesizeStream(settings.get("tts.localModel"), {
+						voice: voice || DEFAULT_TTS_VOICE,
+						signal: abort.signal,
+					});
+
 		this.#handle = handle;
 		const player = this.#createPlayer();
 		player.setGain(this.#ducked ? DUCK_GAIN : 1);
