@@ -421,6 +421,30 @@ describe("IrcBus RemoteTransport seam", () => {
 		expect(() => bus.setRemoteTransport("cluster-a", t, "ext-a")).not.toThrow();
 	});
 
+	it("shares a namespace across re-loads of the same extension but rejects a different one (#7401)", () => {
+		const bus = new IrcBus(new AgentRegistry());
+		const tA = recordingTransport().transport;
+		const tB = recordingTransport().transport;
+		// A bridge extension claims the namespace; the 4th arg is its source path.
+		bus.setRemoteTransport("cluster-a", tA, "/ext/bridge.ts:load-1", "/ext/bridge.ts");
+		expect(bus.namespaceOwner("cluster-a")).toBe("/ext/bridge.ts:load-1");
+		// The SAME extension re-loaded with a fresh ownerToken — e.g. inherited by a spawned subagent
+		// that shares this registry/bus — re-claims without throwing and WITHOUT overwriting the owner.
+		expect(() => bus.setRemoteTransport("cluster-a", tB, "/ext/bridge.ts:load-2", "/ext/bridge.ts")).not.toThrow();
+		expect(bus.namespaceOwner("cluster-a")).toBe("/ext/bridge.ts:load-1");
+		// The re-load is a non-owner: disposing it does NOT release the shared transport...
+		bus.releaseTransportsForOwner("/ext/bridge.ts:load-2");
+		expect(bus.hasRemoteTransport()).toBe(true);
+		// ...only the original owner's release tears it down.
+		bus.releaseTransportsForOwner("/ext/bridge.ts:load-1");
+		expect(bus.hasRemoteTransport()).toBe(false);
+		// A genuinely different extension claiming the same namespace is still rejected.
+		bus.setRemoteTransport("cluster-a", tA, "/ext/bridge.ts:load-3", "/ext/bridge.ts");
+		expect(() => bus.setRemoteTransport("cluster-a", tB, "/other/bridge.ts:load-1", "/other/bridge.ts")).toThrow(
+			/already claimed/,
+		);
+	});
+
 	it("releaseTransportsForOwner drops the claim so the namespace can be re-claimed by another load", async () => {
 		const bus = new IrcBus(AgentRegistry.global());
 		const t = recordingTransport().transport;
