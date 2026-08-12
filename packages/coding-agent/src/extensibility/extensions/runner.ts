@@ -1181,7 +1181,83 @@ export class ExtensionRunner {
 			const active = this.#loadOrder.filter(extension => !this.#suspendedExtensions.has(extension));
 			this.extensions.splice(0, this.extensions.length, ...active);
 		}
-		return { suspended, resumed };
+
+	/**
+	 * Supplies fresh `Extension` objects for {@link reloadExtensions}. Set by
+	 * whoever loaded the extensions in the first place, because only that caller
+	 * knows the paths, cwd and event bus this session was built with; the runner
+	 * receives an already-bound set and cannot reconstruct those inputs.
+	 */
+	#extensionReloader?: () => Promise<{ extensions: Extension[]; errors: Array<{ path: string; error: string }> }>;
+
+	setExtensionReloader(
+		reloader: () => Promise<{ extensions: Extension[]; errors: Array<{ path: string; error: string }> }>,
+	): void {
+		this.#extensionReloader = reloader;
+	}
+
+	/**
+	 * Re-import every extension module and swap the running set, without
+	 * restarting the session.
+	 *
+	 * Module identity was never the obstacle: the import specifier already
+	 * carries a monotonic `?mtime=` tag, so a second import compiles from disk
+	 * rather than returning the cached module. What was missing is that nothing
+	 * re-entered the load path and nothing tore the old registrations down.
+	 *
+	 * Order matters:
+	 *
+	 *  1. `session_shutdown` lets extensions release what they own — file
+	 *     handles, sockets, child processes. From an extension's side this IS a
+	 *     shutdown: that instance never runs again.
+	 *  2. Managed timers are cleared unconditionally, including when a teardown
+	 *     handler throws. Otherwise a reloaded extension's `ctx.setInterval`
+	 *     keeps firing next to its replacement's, and two copies poll the same
+	 *     resource forever.
+	 *  3. Only then is the new set swapped in, in place (see
+	 *     {@link replaceExtensions}).
+	 *  4. `session_start` is re-emitted, because extensions do their
+	 *     per-session registration there. Without it the new modules are loaded
+	 *     but inert — which looks exactly like the reload not working.
+	 *
+	 * A module that fails to import is reported in `errors` and is absent from
+	 * the new set; the others still load. A syntax error in one extension while
+	 * editing should not take the rest of the session's extensions down.
+	 */
+	async reloadExtensions(): Promise<{ loaded: number; errors: Array<{ path: string; error: string }> } | null> {
+		const reloader = this.#extensionReloader;
+		if (!reloader) return null;
+
+		try {
+			if (this.hasHandlers("session_shutdown")) {
+				await this.emit({ type: "session_shutdown" });
+			}
+		} catch {
+			// A hung or throwing teardown handler must not strand the session on
+			// the old code. The timer sweep below still runs.
+		}
+		this.clearManagedTimers();
+
+		const result = await reloader();
+		this.replaceExtensions(result.extensions);
+		await this.emit({ type: "session_start" });
+		return { loaded: result.extensions.length, errors: result.errors };
+	}
+
+	/**
+	 * Replace the loaded extension set in place.
+	 *
+	 * Mutates the existing array rather than rebinding it: every dispatch site
+	 * in this class iterates `this.extensions` live, and the runner reference is
+	 * handed to the session, mode controllers and the tool registry at startup.
+	 * Swapping the array itself would leave all of those pointing at the old
+	 * set, so the reload would appear to work and change nothing.
+	 */
+	replaceExtensions(next: readonly Extension[]): void {
+		this.#loadOrder = undefined;
+		this.#suspendedExtensions.clear();
+		this.extensions.length = 0;
+		this.extensions.push(...next);
 	}
 
 	/** Get all registered tools from all extensions. */
@@ -1579,6 +1655,12 @@ export class ExtensionRunner {
 	 */
 	disposeFileFallbacks(): void {
 		for (const dispose of this.#fileFallbackDisposers.splice(0)) dispose();
+	}
+
+	/** Outstanding extension-owned timers. Lets teardown be asserted directly
+	 * instead of by waiting to see whether a stale callback still fires. */
+	get managedTimerCount(): number {
+		return this.#managedTimers.size;
 	}
 
 	createCommandContext(): ExtensionCommandContext {
