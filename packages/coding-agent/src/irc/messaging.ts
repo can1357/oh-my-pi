@@ -1,6 +1,7 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
+import { sanitizeInline } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { Settings } from "../config/settings";
 import { IrcBus } from "./bus";
 import { type AgentRegistry, BROADCAST_ID } from "../registry/agent-registry";
@@ -88,8 +89,8 @@ export async function executeSend(
 			text += `\n${receipts
 				.map(receipt =>
 					receipt.outcome === "failed"
-						? `- ${receipt.to}: failed — ${receipt.error ?? "not running"}`
-						: `- ${receipt.to}: ${receipt.outcome}`,
+						? `- ${sanitizeInline(receipt.to)}: failed — ${sanitizeInline(receipt.error ?? "not running")}`
+						: `- ${sanitizeInline(receipt.to)}: ${receipt.outcome}`,
 				)
 				.join("\n")}`;
 		}
