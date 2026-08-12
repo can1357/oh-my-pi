@@ -1230,7 +1230,12 @@ export class ExtensionRunner {
 
 		try {
 			if (this.hasHandlers("session_shutdown")) {
-				await this.emit({ type: "session_shutdown" });
+				// `reason: "reload"` so handlers can tell this apart from the
+				// session actually ending. An extension that announces the end
+				// of a session to something outside the process would otherwise
+				// report a shutdown that did not happen, seconds before its
+				// replacement announces a start.
+				await this.emit({ type: "session_shutdown", reason: "reload" });
 			}
 		} catch {
 			// A hung or throwing teardown handler must not strand the session on
