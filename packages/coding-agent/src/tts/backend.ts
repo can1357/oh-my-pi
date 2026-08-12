@@ -5,6 +5,9 @@
  * a backwards import into `tools/`.
  */
 
+import { DEFAULT_ELEVENLABS_VOICE_ID } from "../lib/elevenlabs-http";
+import { DEFAULT_TTS_VOICE } from "./models";
+
 export type TtsBackend = "local" | "xai" | "elevenlabs";
 
 export interface ResolveTtsBackendOptions {
@@ -30,4 +33,15 @@ export function resolveTtsBackend(opts: ResolveTtsBackendOptions): TtsBackend {
 	if (opts.preference === "elevenlabs") return "elevenlabs";
 	if (opts.wantsMp3 && opts.hasXaiCreds) return "xai";
 	return "local";
+}
+
+export interface ResolveLiveTtsVoiceOptions {
+	localVoice?: string;
+	elevenLabsVoiceId?: string;
+}
+
+/** Keep local Kokoro voice names out of ElevenLabs' unrelated voice-id namespace. */
+export function resolveLiveTtsVoice(backend: TtsBackend, options: ResolveLiveTtsVoiceOptions): string {
+	if (backend === "elevenlabs") return options.elevenLabsVoiceId || DEFAULT_ELEVENLABS_VOICE_ID;
+	return options.localVoice || DEFAULT_TTS_VOICE;
 }

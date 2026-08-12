@@ -43,3 +43,30 @@ export function resolveElevenLabsBaseUrl(): string {
 export function hasElevenLabsCredentials(): boolean {
 	return resolveElevenLabsApiKey() !== undefined;
 }
+
+/**
+ * Run one ElevenLabs request with a bounded lifetime. The explicit timer is
+ * cleared on every exit path; Bun's AbortSignal.timeout/any combination can
+ * otherwise leave stalled requests (and test processes) alive.
+ */
+export async function withElevenLabsRequestTimeout<T>(
+	parentSignal: AbortSignal | undefined,
+	timeoutMs: number,
+	request: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+	const controller = new AbortController();
+	const abortFromParent = (): void => controller.abort(parentSignal?.reason);
+	if (parentSignal?.aborted) abortFromParent();
+	else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+	const timeout = setTimeout(
+		() => controller.abort(new Error(`ElevenLabs request timed out after ${timeoutMs}ms`)),
+		timeoutMs,
+	);
+
+	try {
+		return await request(controller.signal);
+	} finally {
+		clearTimeout(timeout);
+		parentSignal?.removeEventListener("abort", abortFromParent);
+	}
+}

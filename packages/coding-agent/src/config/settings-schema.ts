@@ -1,6 +1,7 @@
 import { THINKING_EFFORTS } from "@pk-nerdsaver-ai/pi-ai";
 import { DEFAULT_SHARE_URL } from "@pk-nerdsaver-ai/pi-wire";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
+import { DEFAULT_ELEVENLABS_VOICE_ID } from "../lib/elevenlabs-http";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
 import {
@@ -4885,6 +4886,16 @@ export const SETTINGS_SCHEMA = {
 			label: "Local TTS Voice",
 			description: "Kokoro voice used by the local TTS backend (American/British, female/male)",
 			options: TTS_LOCAL_VOICE_OPTIONS,
+		},
+	},
+	"tts.elevenLabsVoiceId": {
+		type: "string",
+		default: DEFAULT_ELEVENLABS_VOICE_ID,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "ElevenLabs Voice ID",
+			description: "ElevenLabs voice ID used by live speech and as the tts tool default",
 		},
 	},
 	"speech.enabled": {

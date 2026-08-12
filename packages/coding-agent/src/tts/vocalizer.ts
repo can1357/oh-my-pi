@@ -24,10 +24,9 @@
  */
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
 import { settings } from "../config/settings";
-import { resolveElevenLabsApiKey, DEFAULT_ELEVENLABS_VOICE_ID } from "../lib/elevenlabs-http";
-import { resolveTtsBackend } from "./backend";
+import { resolveElevenLabsApiKey } from "../lib/elevenlabs-http";
+import { resolveLiveTtsVoice, resolveTtsBackend } from "./backend";
 import { openElevenLabsStream } from "./elevenlabs-stream";
-import { DEFAULT_TTS_VOICE } from "./models";
 import { isSpeechHardStopped } from "./speech-hard-stop";
 import { createStreamingPlayer, DUCK_GAIN } from "./streaming-player";
 import { type TtsStreamHandle, ttsClient } from "./tts-client";
@@ -140,18 +139,21 @@ export class Vocalizer {
 			hasXaiCreds: false,
 		});
 
-		const voice = settings.get("speech.voice");
-		const handle =
-			backend === "elevenlabs" && elevenLabsApiKey
-				? openElevenLabsStream({
-						apiKey: elevenLabsApiKey,
-						voiceId: voice || DEFAULT_ELEVENLABS_VOICE_ID,
-						signal: abort.signal,
-					})
-				: ttsClient.synthesizeStream(settings.get("tts.localModel"), {
-						voice: voice || DEFAULT_TTS_VOICE,
-						signal: abort.signal,
-					});
+		const useElevenLabs = backend === "elevenlabs" && elevenLabsApiKey !== undefined;
+		const voice = resolveLiveTtsVoice(useElevenLabs ? "elevenlabs" : "local", {
+			localVoice: settings.get("speech.voice"),
+			elevenLabsVoiceId: settings.get("tts.elevenLabsVoiceId"),
+		});
+		const handle = useElevenLabs
+			? openElevenLabsStream({
+					apiKey: elevenLabsApiKey,
+					voiceId: voice,
+					signal: abort.signal,
+				})
+			: ttsClient.synthesizeStream(settings.get("tts.localModel"), {
+					voice,
+					signal: abort.signal,
+				});
 
 		this.#handle = handle;
 		const player = this.#createPlayer();

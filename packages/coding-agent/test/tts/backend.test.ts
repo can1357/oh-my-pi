@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { resolveTtsBackend } from "../../src/tts/backend";
+import { DEFAULT_ELEVENLABS_VOICE_ID } from "../../src/lib/elevenlabs-http";
+import { resolveLiveTtsVoice, resolveTtsBackend } from "../../src/tts/backend";
 
 describe("resolveTtsBackend", () => {
 	it("honors an explicit local preference verbatim", () => {
@@ -28,5 +29,24 @@ describe("resolveTtsBackend", () => {
 
 	it("auto prefers local over xai when mp3 was not requested", () => {
 		expect(resolveTtsBackend({ preference: "auto", wantsMp3: false, hasXaiCreds: true })).toBe("local");
+	});
+});
+
+describe("resolveLiveTtsVoice", () => {
+	it("uses the dedicated ElevenLabs voice instead of a Kokoro voice", () => {
+		expect(
+			resolveLiveTtsVoice("elevenlabs", {
+				localVoice: "af_heart",
+				elevenLabsVoiceId: "custom-elevenlabs-voice",
+			}),
+		).toBe("custom-elevenlabs-voice");
+	});
+
+	it("falls back to the valid ElevenLabs default independently of the local voice", () => {
+		expect(resolveLiveTtsVoice("elevenlabs", { localVoice: "af_heart" })).toBe(DEFAULT_ELEVENLABS_VOICE_ID);
+	});
+
+	it("keeps the configured Kokoro voice for local playback", () => {
+		expect(resolveLiveTtsVoice("local", { localVoice: "bf_emma" })).toBe("bf_emma");
 	});
 });

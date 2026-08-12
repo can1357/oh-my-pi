@@ -16,6 +16,7 @@ import {
 	ohMyPkElevenLabsUserAgent,
 	resolveElevenLabsApiKey,
 	resolveElevenLabsBaseUrl,
+	withElevenLabsRequestTimeout,
 } from "../lib/elevenlabs-http";
 import { ohMyPkXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
 import { resolveTtsBackend, type TtsBackend } from "../tts/backend";
@@ -71,7 +72,9 @@ export function resolveLocalWavPath(outputPath: string): { wavPath: string; subs
 	return { wavPath: `${base}.wav`, substituted: true };
 }
 
-function readStringSetting(key: "providers.tts" | "tts.localModel" | "tts.localVoice"): string | undefined {
+function readStringSetting(
+	key: "providers.tts" | "tts.localModel" | "tts.localVoice" | "tts.elevenLabsVoiceId",
+): string | undefined {
 	try {
 		const value = settings.get(key);
 		return typeof value === "string" ? value : undefined;
@@ -91,71 +94,79 @@ async function synthesizeElevenLabs(
 	if (!apiKey) {
 		return {
 			isError: true,
-			content: [{ type: "text", text: "No ElevenLabs credentials. Set the ELEVENLABS_API_KEY environment variable." }],
+			content: [
+				{ type: "text", text: "No ElevenLabs credentials. Set the ELEVENLABS_API_KEY environment variable." },
+			],
 		};
 	}
 
-	const voiceId = params.voice_id === "eve" ? DEFAULT_ELEVENLABS_VOICE_ID : params.voice_id;
+	const voiceId =
+		params.voice_id === "eve"
+			? readStringSetting("tts.elevenLabsVoiceId") || DEFAULT_ELEVENLABS_VOICE_ID
+			: params.voice_id;
 	const wantsPcm = codec === "wav";
 	const outputFormat = wantsPcm ? `pcm_${params.sample_rate ?? ELEVENLABS_PCM_SAMPLE_RATE}` : "mp3_44100_128";
 	const baseUrl = resolveElevenLabsBaseUrl();
 	const url = `${baseUrl}/text-to-speech/${encodeURIComponent(voiceId)}/stream?output_format=${outputFormat}`;
 
-	const timeoutSignal = AbortSignal.timeout(60_000);
-	const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-
-	let response: Response;
 	try {
-		response = await fetch(url, {
-			method: "POST",
-			headers: {
-				"xi-api-key": apiKey,
-				"Content-Type": "application/json",
-				"User-Agent": ohMyPkElevenLabsUserAgent(),
-			},
-			body: JSON.stringify({ text: params.text, model_id: DEFAULT_ELEVENLABS_MODEL_ID }),
-			signal: combinedSignal,
+		return await withElevenLabsRequestTimeout(signal, 60_000, async requestSignal => {
+			const response = await fetch(url, {
+				method: "POST",
+				headers: {
+					"xi-api-key": apiKey,
+					"Content-Type": "application/json",
+					"User-Agent": ohMyPkElevenLabsUserAgent(),
+				},
+				body: JSON.stringify({ text: params.text, model_id: DEFAULT_ELEVENLABS_MODEL_ID }),
+				signal: requestSignal,
+			});
+			if (!response.ok) {
+				const detail = await response.text().catch(() => "");
+				return {
+					isError: true,
+					content: [
+						{
+							type: "text" as const,
+							text: `ElevenLabs TTS failed (${response.status}): ${detail.slice(0, 300)}`,
+						},
+					],
+				};
+			}
+
+			const bytes = new Uint8Array(await response.arrayBuffer());
+			if (wantsPcm) {
+				const sampleRate = params.sample_rate ?? ELEVENLABS_PCM_SAMPLE_RATE;
+				const pcm = new Float32Array(Math.floor(bytes.length / 2));
+				const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+				for (let i = 0; i < pcm.length; i++) pcm[i] = view.getInt16(i * 2, true) / 32_768;
+				const wav = encodeWav(pcm, sampleRate);
+				await Bun.write(outputPath, wav);
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Saved ${wav.length} bytes to ${displayPath} (voice=${voiceId}, codec=wav, backend=elevenlabs, ${sampleRate} Hz).`,
+						},
+					],
+					details: { bytes: wav.length, voiceId, codec: "wav" as const, backend: "elevenlabs" as const },
+				};
+			}
+			await Bun.write(outputPath, bytes);
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `Saved ${bytes.length} bytes to ${displayPath} (voice=${voiceId}, codec=mp3, backend=elevenlabs).`,
+					},
+				],
+				details: { bytes: bytes.length, voiceId, codec: "mp3" as const, backend: "elevenlabs" as const },
+			};
 		});
 	} catch (error) {
 		if (error instanceof Error) return { isError: true, content: [{ type: "text", text: error.message }] };
 		throw error;
 	}
-	if (!response.ok) {
-		const detail = await response.text().catch(() => "");
-		return {
-			isError: true,
-			content: [{ type: "text", text: `ElevenLabs TTS failed (${response.status}): ${detail.slice(0, 300)}` }],
-		};
-	}
-
-	const bytes = new Uint8Array(await response.arrayBuffer());
-	if (wantsPcm) {
-		const sampleRate = params.sample_rate ?? ELEVENLABS_PCM_SAMPLE_RATE;
-		const pcm = new Float32Array(Math.floor(bytes.length / 2));
-		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-		for (let i = 0; i < pcm.length; i++) pcm[i] = view.getInt16(i * 2, true) / 32_768;
-		const wav = encodeWav(pcm, sampleRate);
-		await Bun.write(outputPath, wav);
-		return {
-			content: [
-				{
-					type: "text",
-					text: `Saved ${wav.length} bytes to ${displayPath} (voice=${voiceId}, codec=wav, backend=elevenlabs, ${sampleRate} Hz).`,
-				},
-			],
-			details: { bytes: wav.length, voiceId, codec: "wav", backend: "elevenlabs" },
-		};
-	}
-	await Bun.write(outputPath, bytes);
-	return {
-		content: [
-			{
-				type: "text",
-				text: `Saved ${bytes.length} bytes to ${displayPath} (voice=${voiceId}, codec=mp3, backend=elevenlabs).`,
-			},
-		],
-		details: { bytes: bytes.length, voiceId, codec: "mp3", backend: "elevenlabs" },
-	};
 }
 
 async function synthesizeXai(

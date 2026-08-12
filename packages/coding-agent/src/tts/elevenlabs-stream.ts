@@ -27,6 +27,7 @@ import {
 	ELEVENLABS_PCM_SAMPLE_RATE,
 	ohMyPkElevenLabsUserAgent,
 	resolveElevenLabsBaseUrl,
+	withElevenLabsRequestTimeout,
 } from "../lib/elevenlabs-http";
 import type { TtsAudioChunk, TtsStreamHandle } from "./tts-client";
 
@@ -36,12 +37,14 @@ export interface OpenElevenLabsStreamOptions {
 	modelId?: string;
 	baseUrl?: string;
 	signal?: AbortSignal;
+	requestTimeoutMs?: number;
 }
 
 /** Grabs a full sentence (including its terminator) or a forced line break. */
 const SENTENCE_BOUNDARY = /[^.!?\n]*[.!?\n]+/g;
-/** Caps a single synthesis request so one runaway unterminated sentence can't stall the pipeline. */
+/** Caps each synthesis request; longer sentence-like runs are split without dropping text. */
 const MAX_SENTENCE_CHARS = 2_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 
 /**
  * Single-producer/single-consumer async queue, mirroring the contract of the
@@ -124,6 +127,7 @@ class ElevenLabsStreamSession implements TtsStreamHandle {
 	#voiceId: string;
 	#modelId: string;
 	#signal: AbortSignal | undefined;
+	#requestTimeoutMs: number;
 
 	constructor(options: OpenElevenLabsStreamOptions) {
 		this.#apiKey = options.apiKey;
@@ -131,6 +135,7 @@ class ElevenLabsStreamSession implements TtsStreamHandle {
 		this.#voiceId = options.voiceId || DEFAULT_ELEVENLABS_VOICE_ID;
 		this.#modelId = options.modelId || DEFAULT_ELEVENLABS_MODEL_ID;
 		this.#signal = options.signal;
+		this.#requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 		this.#signal?.addEventListener("abort", () => this.#queue.close(), { once: true });
 	}
 
@@ -169,9 +174,20 @@ class ElevenLabsStreamSession implements TtsStreamHandle {
 	}
 
 	#enqueueSentence(text: string): void {
+		let remaining = text;
+		while (remaining.length > MAX_SENTENCE_CHARS) {
+			const window = remaining.slice(0, MAX_SENTENCE_CHARS);
+			const whitespace = window.lastIndexOf(" ");
+			const splitAt = whitespace >= 0 ? whitespace + 1 : MAX_SENTENCE_CHARS;
+			this.#enqueueBoundedSentence(remaining.slice(0, splitAt));
+			remaining = remaining.slice(splitAt);
+		}
+		if (remaining) this.#enqueueBoundedSentence(remaining);
+	}
+
+	#enqueueBoundedSentence(text: string): void {
 		const index = this.#nextIndex++;
-		const bounded = text.length > MAX_SENTENCE_CHARS ? text.slice(0, MAX_SENTENCE_CHARS) : text;
-		const task = this.#synthesizeSentence(index, bounded)
+		const task = this.#synthesizeSentence(index, text)
 			.then(chunk => {
 				this.#pendingResults.set(index, chunk);
 				this.#drainOrderedResults();
@@ -185,22 +201,24 @@ class ElevenLabsStreamSession implements TtsStreamHandle {
 
 	async #synthesizeSentence(index: number, text: string): Promise<TtsAudioChunk> {
 		const url = `${this.#baseUrl}/text-to-speech/${encodeURIComponent(this.#voiceId)}/stream?output_format=pcm_24000`;
-		const response = await fetch(url, {
-			method: "POST",
-			headers: {
-				"xi-api-key": this.#apiKey,
-				"Content-Type": "application/json",
-				"User-Agent": ohMyPkElevenLabsUserAgent(),
-			},
-			body: JSON.stringify({ text, model_id: this.#modelId }),
-			signal: this.#signal,
+		return withElevenLabsRequestTimeout(this.#signal, this.#requestTimeoutMs, async signal => {
+			const response = await fetch(url, {
+				method: "POST",
+				headers: {
+					"xi-api-key": this.#apiKey,
+					"Content-Type": "application/json",
+					"User-Agent": ohMyPkElevenLabsUserAgent(),
+				},
+				body: JSON.stringify({ text, model_id: this.#modelId }),
+				signal,
+			});
+			if (!response.ok) {
+				const detail = await response.text().catch(() => "");
+				throw new Error(`ElevenLabs TTS stream failed (${response.status}): ${detail.slice(0, 300)}`);
+			}
+			const bytes = new Uint8Array(await response.arrayBuffer());
+			return { index, text, pcm: pcm16BytesToFloat32(bytes), sampleRate: ELEVENLABS_PCM_SAMPLE_RATE };
 		});
-		if (!response.ok) {
-			const detail = await response.text().catch(() => "");
-			throw new Error(`ElevenLabs TTS stream failed (${response.status}): ${detail.slice(0, 300)}`);
-		}
-		const bytes = new Uint8Array(await response.arrayBuffer());
-		return { index, text, pcm: pcm16BytesToFloat32(bytes), sampleRate: ELEVENLABS_PCM_SAMPLE_RATE };
 	}
 
 	#drainOrderedResults(): void {

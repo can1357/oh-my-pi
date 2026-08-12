@@ -91,14 +91,50 @@ describe("openElevenLabsStream", () => {
 		expect(callCount).toBe(0);
 	});
 
+	it("splits oversized sentences without dropping text or boundary whitespace", async () => {
+		let requestedTexts: string[] = [];
+		globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+			const body = JSON.parse(String(init?.body)) as { text: string };
+			requestedTexts.push(body.text);
+			return new Response(int16PcmBytes([0]), { status: 200 });
+		}) as unknown as typeof fetch;
+
+		for (const text of [`${"x".repeat(2_001)}.`, `${"a".repeat(1_990)} ${"b".repeat(20)}.`]) {
+			requestedTexts = [];
+			const handle = openElevenLabsStream({ apiKey: "test-key" });
+			handle.push(text);
+			handle.end();
+
+			const chunks = await drain(handle.chunks);
+			expect(requestedTexts.every(part => part.length <= 2_000)).toBe(true);
+			expect(requestedTexts.join("")).toBe(text);
+			expect(chunks.map(chunk => chunk.text).join("")).toBe(text);
+		}
+	});
+
 	it("propagates an HTTP failure to the chunk iterator instead of hanging or silently dropping it", async () => {
-		globalThis.fetch = (async () => new Response("plan does not support pcm output", { status: 422 })) as unknown as typeof fetch;
+		globalThis.fetch = (async () =>
+			new Response("plan does not support pcm output", { status: 422 })) as unknown as typeof fetch;
 
 		const handle = openElevenLabsStream({ apiKey: "test-key" });
 		handle.push("Will fail.");
 		handle.end();
 
 		await expect(drain(handle.chunks)).rejects.toThrow(/ElevenLabs TTS stream failed \(422\)/);
+	});
+
+	it("times out a stalled synthesis request instead of blocking the stream forever", async () => {
+		globalThis.fetch = ((_input: string | URL | Request, init?: RequestInit) => {
+			const { promise, reject } = Promise.withResolvers<Response>();
+			init?.signal?.addEventListener("abort", () => reject(new Error("request timed out")), { once: true });
+			return promise;
+		}) as typeof fetch;
+
+		const handle = openElevenLabsStream({ apiKey: "test-key", requestTimeoutMs: 5 });
+		handle.push("Will time out.");
+		handle.end();
+
+		await expect(drain(handle.chunks)).rejects.toThrow("request timed out");
 	});
 
 	it("returns an inert, immediately-closed handle for an already-aborted signal", async () => {
