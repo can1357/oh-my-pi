@@ -146,7 +146,13 @@ import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
-import { type AgentKind, type AgentRef, AgentRegistry, MAIN_AGENT_ID, REMOTE_ID_PREFIX } from "./registry/agent-registry";
+import {
+	type AgentKind,
+	type AgentRef,
+	AgentRegistry,
+	MAIN_AGENT_ID,
+	REMOTE_ID_PREFIX,
+} from "./registry/agent-registry";
 import {
 	buildSecretObfuscator,
 	deobfuscateSessionContext,
@@ -2227,6 +2233,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cwd,
 				eventBus,
 				agentRegistry,
+				agentKind === "main",
 			);
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to bind extension", { path, error });
@@ -2240,6 +2247,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cwd,
 				eventBus,
 				agentRegistry,
+				agentKind === "main",
 			);
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to load extension", { path, error });
@@ -2255,6 +2263,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cwd,
 				eventBus,
 				agentRegistry,
+				agentKind === "main",
 			);
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to load extension", { path, error });
@@ -2316,7 +2325,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			for (let i = 0; i < inlineExtensions.length; i++) {
 				const factory = inlineExtensions[i];
 				const sourceId = `<inline-${nextInlineExtensionIndex++}>`;
-				const loaded = await loadExtensionFromFactory(factory, cwd, eventBus, extensionsResult.runtime, sourceId, agentRegistry);
+				const loaded = await loadExtensionFromFactory(
+					factory,
+					cwd,
+					eventBus,
+					extensionsResult.runtime,
+					sourceId,
+					agentRegistry,
+					agentKind === "main",
+				);
 				extensionsResult.extensions.push(loaded);
 				if (i < rebindableInlineExtensionCount) {
 					extensionsResult.preparedExtensions ??= [];

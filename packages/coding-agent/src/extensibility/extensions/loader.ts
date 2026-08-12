@@ -258,6 +258,15 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 				}
 				return;
 			}
+			// Root-only claim origination: only a top-level (root) session may CLAIM an unowned namespace.
+			// A subagent that inherits the same bridge may only SHARE an already-claimed one (the same-
+			// source no-op below); it must not originate a claim, else a transient subagent would own the
+			// namespace and its teardown would strand still-live siblings (#7401 review).
+			if (bus.namespaceOwner(namespace) === undefined && !this.isRootSession) {
+				throw new Error(
+					`Only the top-level session may claim IRC namespace ${JSON.stringify(namespace)}; a subagent shares the root's claim rather than originating one.`,
+				);
+			}
 			bus.setRemoteTransport(namespace, transport, this.ownerToken, this.extension.path);
 			this.#claimedNamespace = namespace;
 			this.#armIrcTeardown();
@@ -270,6 +279,14 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			const namespace = this.#claimedNamespace;
 			if (namespace === undefined || !isValidRemoteName(peer.name)) return undefined;
 			const id = composeRemoteId(namespace, peer.name);
+			// Only the namespace OWNER writes the roster. A subagent sharing the root's claim (a same-
+			// source non-owner no-op in setRemoteTransport) is a read-only passenger: registering here
+			// would overwrite the owner's `@ns/name` ref with this load's ownerToken, and this load's
+			// teardown (releaseExtensionIrc) would then unregister a peer the owner still needs (#7401
+			// review). Return the composed id so a passenger's call still resolves to the shared peer.
+			if (IrcBus.forRegistry(this.registry).namespaceOwner(namespace) !== this.ownerToken) {
+				return id;
+			}
 			this.registry.register({
 				id,
 				displayName: sanitizeRemoteDisplayName(peer.displayName, peer.name),
@@ -315,6 +332,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		 * per-session registry lists/receives its own peers instead of leaking into the global one.
 		 */
 		private readonly registry: AgentRegistry,
+		/** Whether this load's session is the top-level root of its registry (agentKind "main"). Only a
+		 * root may ORIGINATE a namespace claim via setRemoteTransport; a subagent may only share the
+		 * root's existing claim (see setRemoteTransport / registerRemotePeer). */
+		private readonly isRootSession: boolean,
 	) {}
 
 	/**
@@ -594,6 +615,7 @@ async function bindExtension(
 	eventBus: EventBus,
 	runtime: IExtensionRuntime,
 	registry: AgentRegistry,
+	isRootSession: boolean,
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const factory = imported.factory;
 	if (imported.error !== null || factory === null) {
@@ -602,7 +624,16 @@ async function bindExtension(
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
 		const ownerToken = `${extension.path}:${crypto.randomUUID()}`;
-		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus, ownerToken, registry);
+		const api = new ConcreteExtensionAPI(
+			PiCodingAgent,
+			extension,
+			runtime,
+			cwd,
+			eventBus,
+			ownerToken,
+			registry,
+			isRootSession,
+		);
 		await withHostGuard(() => runExtensionFactory(factory, api, runtime, ownerToken, registry));
 
 		return { extension, error: null };
@@ -622,10 +653,20 @@ export async function loadExtensionFromFactory(
 	runtime: IExtensionRuntime,
 	name = "<inline>",
 	registry: AgentRegistry = AgentRegistry.global(),
+	isRootSession = true,
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
 	const ownerToken = `${extension.path}:${crypto.randomUUID()}`;
-	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus, ownerToken, registry);
+	const api = new ConcreteExtensionAPI(
+		PiCodingAgent,
+		extension,
+		runtime,
+		cwd,
+		eventBus,
+		ownerToken,
+		registry,
+		isRootSession,
+	);
 	await runExtensionFactory(factory, api, runtime, ownerToken, registry);
 	return extension;
 }
@@ -643,9 +684,10 @@ export async function loadExtensions(
 	cwd: string,
 	eventBus?: EventBus,
 	registry: AgentRegistry = AgentRegistry.global(),
+	isRootSession = true,
 ): Promise<LoadExtensionsResult> {
 	const preparedExtensions = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd)));
-	return bindPreparedExtensions(preparedExtensions, cwd, eventBus, registry);
+	return bindPreparedExtensions(preparedExtensions, cwd, eventBus, registry, isRootSession);
 }
 
 /** Bind previously imported extension factories to a fresh session runtime. */
@@ -654,6 +696,7 @@ export async function bindPreparedExtensions(
 	cwd: string,
 	eventBus?: EventBus,
 	registry: AgentRegistry = AgentRegistry.global(),
+	isRootSession = true,
 ): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
@@ -661,7 +704,7 @@ export async function bindPreparedExtensions(
 	const runtime = new ExtensionRuntime();
 
 	for (const prepared of preparedExtensions) {
-		const { extension, error } = await bindExtension(prepared.path, prepared, cwd, resolvedEventBus, runtime, registry);
+		const { extension, error } = await bindExtension(prepared.path, prepared, cwd, resolvedEventBus, runtime, registry, isRootSession);
 
 		if (error) {
 			errors.push({ path: prepared.path, error });
@@ -834,7 +877,8 @@ export async function discoverAndLoadExtensions(
 	disabledExtensionIds?: string[],
 	options: DiscoverExtensionPathOptions = {},
 	registry: AgentRegistry = AgentRegistry.global(),
+	isRootSession = true,
 ): Promise<LoadExtensionsResult> {
 	const paths = await discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds, options);
-	return loadExtensions(paths, cwd, eventBus, registry);
+	return loadExtensions(paths, cwd, eventBus, registry, isRootSession);
 }

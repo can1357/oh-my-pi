@@ -39,6 +39,25 @@ function injectingTransport(onSend?: (to: string, toName: string | undefined) =>
 	};
 }
 
+/** Load the bridge extension under a specific session role (root vs subagent) and source path, so the
+ * root-only-claim + owner-only-peer rules can be exercised. Same `name` = same extension source. */
+async function loadBridge(opts: { name?: string; isRoot?: boolean; registry?: AgentRegistry }): Promise<IrcApi> {
+	let irc: IrcApi | undefined;
+	await loadExtensionFromFactory(
+		pi => {
+			irc = pi.irc;
+		},
+		process.cwd(),
+		new EventBus(),
+		new ExtensionRuntime(),
+		opts.name ?? "<inline>",
+		opts.registry,
+		opts.isRoot ?? true,
+	);
+	if (!irc) throw new Error("pi.irc was not exposed to the extension");
+	return irc;
+}
+
 describe("pi.irc (ExtensionAPI inbound surface)", () => {
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
@@ -227,5 +246,42 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		expect(() => irc.setRemoteTransport?.("cluster-b", injectingTransport())).toThrow(/single namespace/);
 		// Re-using the SAME namespace is fine (reinstall after a reconnect).
 		expect(() => irc.setRemoteTransport?.("cluster-a", injectingTransport())).not.toThrow();
+	});
+
+	it("a subagent load cannot originate an unclaimed namespace claim (#7401)", async () => {
+		// Only a top-level (root) session may CLAIM a namespace; a subagent that reaches an unclaimed one
+		// throws rather than becoming a transient owner whose teardown would strand still-live siblings.
+		await expect(
+			loadExtensionFromFactory(
+				pi => {
+					pi.irc.setRemoteTransport?.("cluster-a", injectingTransport());
+				},
+				process.cwd(),
+				new EventBus(),
+				new ExtensionRuntime(),
+				"bridge.ts",
+				AgentRegistry.global(),
+				false, // isRootSession — a subagent load
+			),
+		).rejects.toThrow(/top-level session may claim/);
+		expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+	});
+
+	it("a subagent sharing the root's claim does not take over its remote peers (#7401)", async () => {
+		const registry = AgentRegistry.global();
+		// Root claims the namespace and seeds a peer (owned by the root load).
+		const rootIrc = await loadBridge({ name: "bridge.ts", isRoot: true, registry });
+		rootIrc.setRemoteTransport?.("cluster-a", injectingTransport());
+		expect(rootIrc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" })).toBe("@cluster-a/beatrice");
+		const ownerToken = registry.get("@cluster-a/beatrice")?.ownerToken;
+		expect(ownerToken).toBeTruthy();
+
+		// The SAME bridge inherited by a subagent (same source, same shared registry) shares the claim...
+		const subIrc = await loadBridge({ name: "bridge.ts", isRoot: false, registry });
+		expect(() => subIrc.setRemoteTransport?.("cluster-a", injectingTransport())).not.toThrow();
+		// ...and re-seeding the peer is a no-op that KEEPS the root's ownership, so the subagent's own
+		// teardown never unregisters a peer the root still needs.
+		expect(subIrc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" })).toBe("@cluster-a/beatrice");
+		expect(registry.get("@cluster-a/beatrice")?.ownerToken).toBe(ownerToken);
 	});
 });

@@ -32,6 +32,7 @@ import {
 	TRUNCATE_LENGTHS,
 	shortenPath,
 	formatErrorDetail,
+	sanitizeInline,
 	type ConfiguredThinkingLevel,
 } from "../render/render-utils";
 import type { StructuredSubagentOutput } from "./task";
@@ -1190,9 +1191,9 @@ function renderSendResult(
 						const badge = formatBadge(receipt.outcome, outcomeColor(receipt.outcome), theme);
 						const error =
 							receipt.outcome === "failed" && receipt.error
-								? ` ${theme.fg("error", `${theme.format.dash} ${receipt.error}`)}`
+								? ` ${theme.fg("error", `${theme.format.dash} ${sanitizeInline(receipt.error)}`)}`
 								: "";
-						return `${theme.fg("toolOutput", receipt.to)} ${badge}${error}`;
+						return `${theme.fg("toolOutput", sanitizeInline(receipt.to))} ${badge}${error}`;
 					},
 				},
 				theme,

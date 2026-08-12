@@ -21,7 +21,7 @@ import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 import { type AgentRegistry, BROADCAST_ID } from "../../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../../registry/persisted-agents";
 import { canSpawnAtDepth } from "../../task/types";
-
+import { sanitizeInline } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	type CoordinationDetails,
 	DEFAULT_HUB_LIST_LIMIT,
@@ -312,8 +312,8 @@ export async function executeSend(
 		for (const receipt of receipts) {
 			lines.push(
 				receipt.outcome === "failed"
-					? `- ${receipt.to}: failed — ${receipt.error ?? "unknown error"}`
-					: `- ${receipt.to}: ${receipt.outcome}`,
+					? `- ${sanitizeInline(receipt.to)}: failed — ${sanitizeInline(receipt.error ?? "unknown error")}`
+					: `- ${sanitizeInline(receipt.to)}: ${receipt.outcome}`,
 			);
 		}
 
@@ -434,4 +434,3 @@ export function executeInbox(
 		details: { op: "inbox", from: senderId, inbox: messages },
 	};
 }
-
