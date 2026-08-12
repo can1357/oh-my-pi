@@ -2005,6 +2005,21 @@ describe("applyOpenRouterRoutingVariant", () => {
 		expect(applyOpenRouterRoutingVariant("openai/gpt-4o-mini", "floor")).toBe("openai/gpt-4o-mini:floor");
 	});
 
+	it("uses nitro for unscoped priority service tier while respecting explicit routing", () => {
+		expect(applyOpenRouterRoutingVariant("anthropic/claude-haiku-latest", undefined, "priority")).toBe(
+			"anthropic/claude-haiku-latest:nitro",
+		);
+		expect(applyOpenRouterRoutingVariant("anthropic/claude-haiku-latest", "floor", "priority")).toBe(
+			"anthropic/claude-haiku-latest:floor",
+		);
+		expect(applyOpenRouterRoutingVariant("anthropic/claude-haiku-latest", undefined, "openai-only")).toBe(
+			"anthropic/claude-haiku-latest",
+		);
+		expect(applyOpenRouterRoutingVariant("anthropic/claude-haiku-latest", undefined, "claude-only")).toBe(
+			"anthropic/claude-haiku-latest",
+		);
+	});
+
 	it("preserves an explicit variant already present in the id", () => {
 		// User-typed override
 		expect(applyOpenRouterRoutingVariant("anthropic/claude-haiku-latest:nitro", "exacto")).toBe(

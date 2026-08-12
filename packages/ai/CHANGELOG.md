@@ -11,6 +11,7 @@
 ### Added
 
 - Added ClinePass account login (`/login cline-pass`) as a provider distinct from canonical Cline, reusing Cline's WorkOS device flow and refreshable account credentials for the subscription catalog.
+- Added OpenRouter `:nitro` routing when unscoped priority service tier is active, allowing coding-agent `/fast` mode to request the fastest available upstream without overriding explicit model route suffixes.
 
 ## [16.3.0] - 2026-07-23
 

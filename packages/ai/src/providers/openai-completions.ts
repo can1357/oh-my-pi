@@ -197,7 +197,12 @@ function resolveOpenAICompletionsModelId(
 		options?.reasoning && !options.disableReasoning && model.reasoning ? (options.reasoning as Effort) : undefined;
 	const effort = resolveOpenAICompletionsRoutingEffort(model, requestedEffort);
 	const wireId = resolveWireModelId(model, effort);
-	return applyWireModelIdTransform(wireId, model.compat.wireModelIdMode, options?.openrouterVariant);
+	return applyWireModelIdTransform(
+		wireId,
+		model.compat.wireModelIdMode,
+		options?.openrouterVariant,
+		options?.serviceTier,
+	);
 }
 
 /**
@@ -448,10 +453,11 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 	/**
 	 * Routing-variant suffix appended to OpenRouter model IDs when none is
 	 * already present (`anthropic/claude-haiku-latest` → `…:nitro`). Common
-	 * values: `"nitro"`, `"floor"`, `"online"`, `"exacto"`. Ignored when the
-	 * resolved `model.id` already contains a colon-suffix after the last
-	 * provider segment (explicit `:nitro` in the selector or a catalog entry
-	 * with the variant baked in).
+	 * values: `"nitro"`, `"floor"`, `"online"`, `"exacto"`. When omitted,
+	 * unscoped priority service tier (including `/fast`) selects `"nitro"`.
+	 * Ignored when the resolved `model.id` already contains a colon-suffix
+	 * after the last provider segment (explicit `:nitro` in the selector or
+	 * a catalog entry with the variant baked in).
 	 */
 	openrouterVariant?: string;
 }

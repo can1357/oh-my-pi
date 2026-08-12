@@ -9,6 +9,7 @@ import type {
 	Model,
 	ModelSpec,
 	OpenAICompat,
+	ServiceTier,
 	StreamOptions,
 } from "@pk-nerdsaver-ai/pi-ai/types";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
@@ -90,6 +91,7 @@ async function capturePseudoChatRequest(
 		reasoning?: Effort;
 		disableReasoning?: boolean;
 		openrouterVariant?: string;
+		serviceTier?: ServiceTier;
 	} = {},
 ): Promise<Record<string, unknown>> {
 	let body: Record<string, unknown> | undefined;
@@ -118,6 +120,7 @@ async function capturePseudoResponsesRequest(
 		reasoning?: Effort;
 		disableReasoning?: boolean;
 		openrouterVariant?: string;
+		serviceTier?: ServiceTier;
 	} = {},
 ): Promise<Record<string, unknown>> {
 	let body: Record<string, unknown> | undefined;
@@ -267,6 +270,15 @@ describe("OpenRouter pseudo API dual-surface request parity", () => {
 		expect(chatBody).not.toHaveProperty("max_tokens");
 		expect(chatBody).not.toHaveProperty("max_completion_tokens");
 		expect(responsesBody).not.toHaveProperty("max_output_tokens");
+	});
+
+	it("maps priority service tier to nitro on both OpenRouter request surfaces", async () => {
+		const model = buildOpenRouterModel();
+		const chatBody = await capturePseudoChatRequest(model, { serviceTier: "priority" });
+		const responsesBody = await capturePseudoResponsesRequest(model, { serviceTier: "priority" });
+
+		expect(chatBody.model).toBe("anthropic/claude-haiku-latest:nitro");
+		expect(responsesBody.model).toBe("anthropic/claude-haiku-latest:nitro");
 	});
 
 	it("keeps stop and frequency penalty on Chat Completions but drops them for Responses", async () => {

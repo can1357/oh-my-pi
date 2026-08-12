@@ -458,19 +458,30 @@ export function isOpenRouterAnthropicModel(model: OpenAIModelIdentity): boolean 
  * "already present" when `modelId` contains a colon after the last `/` separator —
  * which covers both user-typed selectors (`anthropic/claude-haiku:nitro`) and catalog
  * entries that bake the variant in (`deepseek/deepseek-v3.1-terminus:exacto`).
+ *
+ * An explicit `variant` wins. Otherwise unscoped priority service tier — the state
+ * enabled by `/fast` — selects OpenRouter's `:nitro` throughput route. Provider-scoped
+ * OpenAI/Claude tiers do not affect OpenRouter.
  */
-export function applyOpenRouterRoutingVariant(modelId: string, variant: string | undefined): string {
-	if (!variant) return modelId;
+export function applyOpenRouterRoutingVariant(
+	modelId: string,
+	variant: string | undefined,
+	serviceTier?: ServiceTier,
+): string {
+	const resolvedVariant =
+		variant ?? (resolveServiceTier(serviceTier, "openrouter") === "priority" ? "nitro" : undefined);
+	if (!resolvedVariant) return modelId;
 	const lastSlash = modelId.lastIndexOf("/");
 	const lastColon = modelId.lastIndexOf(":");
 	if (lastColon > lastSlash) return modelId;
-	return `${modelId}:${variant}`;
+	return `${modelId}:${resolvedVariant}`;
 }
 
 export function applyWireModelIdTransform(
 	baseId: string,
 	mode: ResolvedOpenAISharedCompat["wireModelIdMode"],
 	openrouterVariant?: string,
+	serviceTier?: ServiceTier,
 ): string {
 	switch (mode) {
 		case "firepass":
@@ -478,7 +489,7 @@ export function applyWireModelIdTransform(
 		case "fireworks":
 			return toFireworksWireModelId(baseId);
 		case "openrouter":
-			return applyOpenRouterRoutingVariant(baseId, openrouterVariant);
+			return applyOpenRouterRoutingVariant(baseId, openrouterVariant, serviceTier);
 		default:
 			return baseId;
 	}

@@ -840,6 +840,7 @@ export function buildParams(
 		model.requestModelId ?? model.id,
 		model.compat.wireModelIdMode,
 		options?.openrouterVariant,
+		options?.serviceTier,
 	);
 	const params: OpenAIResponsesSamplingParams = {
 		model: modelId,

@@ -34,7 +34,7 @@ export const SERVICE_TIER_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierSettin
 	{
 		value: "priority",
 		label: "Priority",
-		description: "Priority on every supported provider (OpenAI `service_tier`, Anthropic fast mode)",
+		description: "Fast routing on every supported provider, including OpenRouter `:nitro`",
 	},
 	{
 		value: "openai-only",

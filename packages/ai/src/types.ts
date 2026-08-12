@@ -118,9 +118,10 @@ export type CacheRetention = "none" | "short" | "long";
  * Service tier hint for processing priority / cost control.
  *
  * The unscoped values (`"auto"`, `"default"`, `"flex"`, `"scale"`,
- * `"priority"`) are passed through to providers that understand them
- * (OpenAI's `service_tier` field directly; Anthropic translates
- * `"priority"` into `speed: "fast"` on supported Opus models).
+ * `"priority"`) are passed through to providers that understand them:
+ * OpenAI consumes `service_tier` directly, Anthropic translates
+ * `"priority"` into `speed: "fast"` on supported Opus models, and
+ * OpenRouter translates `"priority"` into the `:nitro` routing suffix.
  *
  * The scoped values target a specific provider family and behave as the
  * unscoped value on the matching provider, or `undefined` everywhere else.
