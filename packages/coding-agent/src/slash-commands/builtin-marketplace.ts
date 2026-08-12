@@ -25,9 +25,11 @@ import type { SlashCommandSpec } from "./types";
 /**
  * Reload the interactive session's plugin runtime: invalidate fs/plugin-root
  * caches, rediscover skills, file slash commands, and task agents, reset the
- * capability cache, and reconnect MCP servers (rebinding the session's MCP
- * tools). Shared by `/reload-plugins`'s TUI handler and the `handle`-adapter's
- * `reloadPlugins` hook so both honor the command's documented reload scope.
+ * capability cache, reconnect MCP servers (rebinding the session's MCP tools),
+ * and re-import extension modules. Shared by `/reload-plugins`'s TUI handler
+ * and the `handle`-adapter's `reloadPlugins` hook so both honor the command's
+ * documented reload scope. Extensions reload last so their tool and command
+ * registrations retain the same precedence they have at session start.
  */
 export async function reloadTuiPluginState(ctx: InteractiveModeContext): Promise<void> {
 	const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
@@ -39,6 +41,7 @@ export async function reloadTuiPluginState(ctx: InteractiveModeContext): Promise
 	if (ctx.mcpManager) {
 		await new MCPCommandController(ctx).reloadServers();
 	}
+	await ctx.session.extensionRunner?.reloadExtensions();
 }
 
 export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
