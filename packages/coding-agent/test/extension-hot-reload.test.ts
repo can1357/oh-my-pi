@@ -103,6 +103,40 @@ describe("extension hot reload", () => {
 		expect(markers()).toEqual(["v1", "v2"]);
 	});
 
+	test("teardown for a reload is distinguishable from a real shutdown", async () => {
+		resetMarkers();
+		const dir = extensionDir();
+		const file = path.join(dir, "shutdown-reason-extension.ts");
+
+		// Extensions that announce a session ending to something outside the
+		// process (a bridge posting to a chat room, a transcript flush) must be
+		// able to tell a reload apart, or they report an ending that did not
+		// happen seconds before announcing a start.
+		writeFileSync(
+			file,
+			`export default function ext(pi) {
+	pi.on("session_start", async () => {
+		globalThis.__ompReloadMarkers ??= [];
+		globalThis.__ompReloadMarkers.push("start");
+	});
+	pi.on("session_shutdown", async (event) => {
+		globalThis.__ompReloadMarkers.push("shutdown:" + String(event?.reason ?? "unset"));
+	});
+}
+`,
+		);
+		const runner = await makeRunner(file);
+		await runner.emit({ type: "session_start" });
+		await runner.reloadExtensions();
+
+		expect(markers()).toEqual(["start", "shutdown:reload", "start"]);
+
+		// A real shutdown still reports as one, so existing handlers that do not
+		// check `reason` keep working.
+		await runner.emit({ type: "session_shutdown" });
+		expect(markers()).toEqual(["start", "shutdown:reload", "start", "shutdown:unset"]);
+	});
+
 	test("a broken edit reports an error and leaves the session running", async () => {
 		resetMarkers();
 		const dir = extensionDir();
