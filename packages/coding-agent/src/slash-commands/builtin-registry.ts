@@ -132,6 +132,7 @@ export function buildTuiBuiltinSlashCommands(runtime: TuiSlashCommandRuntime): R
 export const BUILTIN_SLASH_COMMANDS_INTERNAL: ReadonlyArray<SlashCommandSpec> = BUILTIN_SLASH_COMMAND_REGISTRY;
 
 /**
+
  * Execute a builtin slash command in the interactive TUI.
  *
  * Returns `false` when no builtin matched. Returns `true` when a command
