@@ -4,7 +4,7 @@ import { unregisterOAuthProvider } from "@oh-my-pi/pi-ai/oauth";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { ProviderConfig } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { IrcApi, ProviderConfig } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { IrcBus, type RemoteTransport } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -615,6 +615,50 @@ describe("extension provider registration rollback", () => {
 					"other-owner",
 				),
 			).not.toThrow();
+		} finally {
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		}
+	});
+
+	test("rejects IRC installs/registrations after the safety-net teardown released the load (#7401)", async () => {
+		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
+		try {
+			const transport: RemoteTransport = {
+				async send(message) {
+					return { to: message.to, outcome: "injected" };
+				},
+			};
+			let irc: IrcApi | undefined;
+			const extension = await loadExtensionFromFactory(
+				pi => {
+					irc = pi.irc;
+					pi.irc.setRemoteTransport?.("cluster-a", transport);
+					pi.irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
+				},
+				process.cwd(),
+				new EventBus(),
+				new ExtensionRuntime(),
+				"bridge-extension",
+			);
+
+			// The safety net releases the load's IRC state AND closes its surface.
+			for (const handler of extension.handlers.get("session_shutdown") ?? []) await handler();
+			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+			expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
+
+			// A post-teardown reconnect must not re-establish state no teardown will ever release:
+			// install throws, registration no-ops, and nothing leaks back onto the bus/registry.
+			expect(() => irc?.setRemoteTransport?.("cluster-a", transport)).toThrow(/released at session shutdown/);
+			expect(irc?.registerRemotePeer?.({ name: "carol", displayName: "carol" })).toBeUndefined();
+			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+			expect(IrcBus.global().hasRemoteTransport()).toBe(false);
+			expect(
+				AgentRegistry.global()
+					.list()
+					.some(ref => ref.kind === "remote"),
+			).toBe(false);
 		} finally {
 			AgentRegistry.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();

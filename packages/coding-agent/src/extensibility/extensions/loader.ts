@@ -213,6 +213,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	/** The single namespace this extension load claimed via `irc.setRemoteTransport` (one per load). */
 	#claimedNamespace: string | undefined;
 	#ircTeardownArmed = false;
+	// Set by the safety-net teardown (session_shutdown): once released, this load's IRC surface is
+	// closed, so a later install/registration (e.g. an async reconnect firing after teardown) is
+	// rejected — it must not re-establish a transport/proxy that no teardown will release (#7401 review).
+	#ircClosed = false;
 	readonly irc: IrcApi = {
 		deliverInbound: (msg, opts) => {
 			// A load may only inject inbound from the namespace it claimed via setRemoteTransport, so a
@@ -258,6 +262,11 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 				}
 				return;
 			}
+			if (this.#ircClosed) {
+				throw new Error(
+					`IRC namespace ${JSON.stringify(namespace)} cannot be claimed: this extension load's IRC surface was released at session shutdown.`,
+				);
+			}
 			// Root-only claim origination: only a top-level (root) session may CLAIM an unowned namespace.
 			// A subagent that inherits the same bridge may only SHARE an already-claimed one (the same-
 			// source no-op below); it must not originate a claim, else a transient subagent would own the
@@ -276,6 +285,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			// setRemoteTransport). The composed id is disjoint from local ids (`@` reserved) and from other
 			// extensions' peers (namespaces are globally unique), so registration is collision-free — no
 			// reserved-id or clobber guards — and is attributed to this load's ownerToken for rollback.
+			if (this.#ircClosed) return undefined; // released at shutdown: no post-teardown roster writes
 			const namespace = this.#claimedNamespace;
 			if (namespace === undefined || !isValidRemoteName(peer.name)) return undefined;
 			const id = composeRemoteId(namespace, peer.name);
@@ -350,7 +360,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	#armIrcTeardown(): void {
 		if (this.#ircTeardownArmed) return;
 		this.#ircTeardownArmed = true;
-		this.on("session_shutdown", async () => releaseExtensionIrc(this.ownerToken, this.registry));
+		this.on("session_shutdown", async () => {
+			this.#ircClosed = true;
+			releaseExtensionIrc(this.ownerToken, this.registry);
+		});
 	}
 
 	on<F extends HandlerFn>(event: string, handler: F): void {
@@ -704,7 +717,15 @@ export async function bindPreparedExtensions(
 	const runtime = new ExtensionRuntime();
 
 	for (const prepared of preparedExtensions) {
-		const { extension, error } = await bindExtension(prepared.path, prepared, cwd, resolvedEventBus, runtime, registry, isRootSession);
+		const { extension, error } = await bindExtension(
+			prepared.path,
+			prepared,
+			cwd,
+			resolvedEventBus,
+			runtime,
+			registry,
+			isRootSession,
+		);
 
 		if (error) {
 			errors.push({ path: prepared.path, error });
