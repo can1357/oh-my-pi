@@ -713,4 +713,54 @@ describe("extension provider registration rollback", () => {
 			IrcBus.resetGlobalForTests();
 		}
 	});
+
+	test("a bridge inherited by a subagent (same extension path) re-claims its namespace without throwing", async () => {
+		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
+		try {
+			const runtime = new ExtensionRuntime();
+			const events = new EventBus();
+			const claim = () =>
+				loadExtensionFromFactory(
+					pi => {
+						pi.irc.setRemoteTransport?.("cluster-a", {
+							async send(message) {
+								return { to: message.to, outcome: "injected" };
+							},
+						});
+					},
+					process.cwd(),
+					events,
+					runtime,
+					"/ext/bridge.ts",
+				);
+			// Parent load of the bridge claims the namespace.
+			await claim();
+			const owner = IrcBus.global().namespaceOwner("cluster-a");
+			expect(owner).toBeDefined();
+			// The SAME extension path re-loaded (a spawned subagent inheriting the bridge, fresh
+			// ownerToken) re-claims WITHOUT throwing, and does not steal ownership.
+			await expect(claim()).resolves.toBeDefined();
+			expect(IrcBus.global().namespaceOwner("cluster-a")).toBe(owner);
+			// A genuinely DIFFERENT extension (path) claiming the same namespace is still rejected.
+			await expect(
+				loadExtensionFromFactory(
+					pi => {
+						pi.irc.setRemoteTransport?.("cluster-a", {
+							async send(message) {
+								return { to: message.to, outcome: "injected" };
+							},
+						});
+					},
+					process.cwd(),
+					events,
+					runtime,
+					"/other/bridge.ts",
+				),
+			).rejects.toThrow(/already claimed/);
+		} finally {
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		}
+	});
 });

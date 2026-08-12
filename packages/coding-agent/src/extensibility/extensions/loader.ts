@@ -254,11 +254,11 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 					);
 				}
 				if (bus.namespaceOwner(namespace) === this.ownerToken) {
-					bus.setRemoteTransport(namespace, undefined, this.ownerToken);
+					bus.setRemoteTransport(namespace, undefined, this.ownerToken, this.extension.path);
 				}
 				return;
 			}
-			bus.setRemoteTransport(namespace, transport, this.ownerToken);
+			bus.setRemoteTransport(namespace, transport, this.ownerToken, this.extension.path);
 			this.#claimedNamespace = namespace;
 			this.#armIrcTeardown();
 		},

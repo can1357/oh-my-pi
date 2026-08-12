@@ -154,8 +154,10 @@ export class IrcBus {
 	readonly #lastSent = new Map<string, Map<string, number>>();
 	/** Outbound transports keyed by globally-unique NAMESPACE (the `@<namespace>/` routing prefix). */
 	readonly #transports = new Map<string, RemoteTransport>();
-	/** namespace -> the extension load `ownerToken` that claimed it (clash guard + owner-scoped release). */
-	readonly #namespaceOwners = new Map<string, string>();
+	/** namespace -> the load that claimed it: `ownerToken` (owner-scoped release) + `source` extension
+	 *  path — a re-load of the SAME extension (e.g. inherited by a subagent) shares the claim; a
+	 *  DIFFERENT extension is rejected (single-owner across the process). */
+	readonly #namespaceOwners = new Map<string, { ownerToken: string; source: string }>();
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
@@ -167,33 +169,45 @@ export class IrcBus {
 
 	/**
 	 * Install, update, or clear the outbound transport for a globally-unique `namespace`, claimed by
-	 * the installing extension load's `ownerToken`:
+	 * the installing extension load's `ownerToken` (and its `source` extension path):
 	 * - unclaimed namespace: claim it for `ownerToken` and install `transport`;
 	 * - claimed by the SAME `ownerToken`: update `transport`, or (with `undefined`) clear ROUTING while
 	 *   KEEPING the claim + any registered peers, so the owner can reinstall after a reconnect;
-	 * - claimed by a DIFFERENT `ownerToken`: throw — a namespace is single-owner across the process, so
-	 *   two bridges to the same external cluster must each pick a distinct namespace.
+	 * - claimed by a DIFFERENT load of the SAME `source` extension (e.g. the bridge re-loaded in a
+	 *   spawned subagent sharing this registry): a no-op keeping the original claim + transport, so the
+	 *   child inherits routing and — being a non-owner — never releases the shared transport on its own
+	 *   teardown (only the original owner's {@link releaseTransportsForOwner} does, #7401 review);
+	 * - claimed by a DIFFERENT `source` extension: throw — a namespace is single-owner across the
+	 *   process, so two distinct bridges to the same external cluster must pick distinct namespaces.
 	 *
-	 * Full release of the claim (freeing the namespace) happens via {@link releaseTransportsForOwner}
-	 * on extension teardown / load-failure rollback, never on a plain clear.
+	 * `source` defaults to `ownerToken` (each caller its own extension) so a plain 3-arg call keeps the
+	 * strict single-owner behaviour; the ExtensionAPI passes the extension path to enable sharing.
 	 */
-	setRemoteTransport(namespace: string, transport: RemoteTransport | undefined, ownerToken: string): void {
-		const owner = this.#namespaceOwners.get(namespace);
-		if (owner !== undefined && owner !== ownerToken) {
-			throw new Error(
-				`IRC namespace "${namespace}" is already claimed by another extension load; choose a distinct namespace.`,
-			);
+	setRemoteTransport(
+		namespace: string,
+		transport: RemoteTransport | undefined,
+		ownerToken: string,
+		source: string = ownerToken,
+	): void {
+		const existing = this.#namespaceOwners.get(namespace);
+		if (existing !== undefined && existing.ownerToken !== ownerToken) {
+			// A different load claims a namespace someone else owns: same extension re-loading shares
+			// (keep the original owner + transport); a genuinely different extension is rejected.
+			if (existing.source !== source) {
+				throw new Error(
+					`IRC namespace "${namespace}" is already claimed by another extension; choose a distinct namespace.`,
+				);
+			}
+			return;
 		}
 		if (transport) {
-			this.#namespaceOwners.set(namespace, ownerToken);
+			this.#namespaceOwners.set(namespace, { ownerToken, source });
 			this.#transports.set(namespace, transport);
 		} else {
 			// A clear is only meaningful for a namespace this load already claimed (install → clear →
-			// reinstall, the reconnect flow). Reject a clear of an UNCLAIMED namespace: otherwise a
-			// clear-before-install marks the namespace claimed on the ExtensionAPI side (#claimedNamespace)
-			// while recording NO owner here, letting a later load claim it and steal this load's @ns/*
-			// routing (PR #7401 codex).
-			if (owner === undefined) {
+			// reinstall, the reconnect flow). Reject a clear of an UNCLAIMED namespace so a
+			// clear-before-install can't mark it claimed on the ExtensionAPI side with no owner here.
+			if (existing === undefined) {
 				throw new Error(`IRC namespace "${namespace}" is not claimed; install a transport before clearing.`);
 			}
 			// Clear ROUTING only; the claim survives (reconnect-friendly). releaseTransportsForOwner drops it.
@@ -218,7 +232,7 @@ export class IrcBus {
 
 	/** The `ownerToken` currently claiming `namespace`, or undefined if unclaimed (owner-scoped clear). */
 	namespaceOwner(namespace: string): string | undefined {
-		return this.#namespaceOwners.get(namespace);
+		return this.#namespaceOwners.get(namespace)?.ownerToken;
 	}
 
 	/**
@@ -240,7 +254,7 @@ export class IrcBus {
 	 */
 	releaseTransportsForOwner(ownerToken: string): void {
 		for (const [namespace, owner] of this.#namespaceOwners) {
-			if (owner === ownerToken) {
+			if (owner.ownerToken === ownerToken) {
 				this.#namespaceOwners.delete(namespace);
 				this.#transports.delete(namespace);
 			}
