@@ -22,6 +22,19 @@ import {
 import { Effort, THINKING_EFFORTS } from "../effort";
 import { FIREWORKS_FAST_SUFFIX, toFireworksPublicModelId } from "../fireworks-model-id";
 import { getBundledModelReferenceIndex } from "../identity/bundled";
+import { parseAnthropicModel } from "../identity/classify";
+import {
+	anthropicModelSupportsThinking,
+	isGlm52ReasoningEffortModelId,
+	isGlmVisionModelId,
+	isGrokReasoningEffortCapable,
+	isKimiK3ModelId,
+	isKimiModelId,
+	isMuseSparkModelId,
+	isOpenAIGptOssModelId,
+	isQwen38PlusTemplateEffortModelId,
+	isReasoningGlmModelId,
+} from "../identity/family";
 import { resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions, ModelsDevFallback } from "../model-manager";
 import { type GeneratedProvider, getBundledModels } from "../models";
@@ -610,6 +623,451 @@ function resolveSimpleProviderHeaders(
 	headers: SimpleProviderDiscoveryHeaders | undefined,
 ): Record<string, string> | undefined {
 	return typeof headers === "function" ? headers() : headers;
+}
+
+type EuropeanGatewayProviderId =
+	| "aki-io"
+	| "cortecs"
+	| "eurouter"
+	| "melious"
+	| "nebius"
+	| "opper"
+	| "ovhcloud"
+	| "scaleway";
+
+type EuropeanGatewayConfig = { apiKey?: string; baseUrl?: string; fetch?: FetchImpl };
+
+const EUROPEAN_GATEWAY_BASE_URLS: Record<EuropeanGatewayProviderId, string> = {
+	"aki-io": "https://aki.io/openai/v1",
+	cortecs: "https://api.cortecs.ai/v1",
+	eurouter: "https://api.eurouter.ai/api/v1",
+	melious: "https://api.melious.ai/v1",
+	nebius: "https://api.tokenfactory.nebius.com/v1",
+	opper: "https://api.opper.ai/v3/compat",
+	ovhcloud: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+	scaleway: "https://api.scaleway.ai/v1",
+};
+const NEBIUS_MODELS_PATH = "/models?verbose=true";
+
+const EUROPEAN_GATEWAY_ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+
+export const EUROPEAN_GATEWAY_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "kimi-k2.7-code-1100b",
+		name: "Kimi K2.7 Code 1100B",
+		api: "openai-completions",
+		provider: "aki-io",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS["aki-io"],
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0.86, output: 3, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: 262_144,
+		supportsTools: true,
+	},
+	{
+		id: "gpt-oss-120b",
+		name: "GPT-OSS 120B",
+		api: "openai-completions",
+		provider: "melious",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.melious,
+		reasoning: true,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_ZERO_COST,
+		contextWindow: 131_000,
+		maxTokens: 8192,
+	},
+	{
+		id: "Qwen/Qwen3-235B-A22B-Instruct-2507",
+		name: "Qwen3 235B A22B Instruct 2507",
+		api: "openai-completions",
+		provider: "nebius",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.nebius,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0.2, output: 0.6, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: 262_144,
+		supportsTools: true,
+	},
+	{
+		id: "gpt-oss-120b",
+		name: "GPT-OSS 120B",
+		api: "openai-completions",
+		provider: "cortecs",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.cortecs,
+		reasoning: true,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_ZERO_COST,
+		contextWindow: 131_000,
+		maxTokens: 8192,
+	},
+	{
+		id: "mistral-large-3",
+		name: "Mistral Large 3",
+		api: "openai-completions",
+		provider: "eurouter",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.eurouter,
+		reasoning: false,
+		input: ["text", "image"],
+		cost: EUROPEAN_GATEWAY_ZERO_COST,
+		contextWindow: null,
+		maxTokens: null,
+	},
+	{
+		id: "glm-5.2",
+		name: "GLM 5.2",
+		api: "openai-completions",
+		provider: "scaleway",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.scaleway,
+		reasoning: true,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_ZERO_COST,
+		contextWindow: 256_000,
+		maxTokens: 16_000,
+		supportsTools: true,
+	},
+	{
+		id: "mistral/devstral-2512",
+		name: "Devstral 2",
+		api: "openai-completions",
+		provider: "opper",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.opper,
+		reasoning: false,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_ZERO_COST,
+		contextWindow: 262_144,
+		maxTokens: 262_144,
+		supportsTools: true,
+	},
+	{
+		id: "gpt-oss-120b",
+		name: "GPT-OSS 120B",
+		api: "openai-completions",
+		provider: "ovhcloud",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.ovhcloud,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0.09, output: 0.47, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 131_072,
+		maxTokens: 131_072,
+		supportsTools: true,
+	},
+];
+
+export function getEuropeanGatewayStaticFallbackModels(
+	authoritativeProviders: ReadonlySet<string>,
+): readonly ModelSpec<"openai-completions">[] {
+	return EUROPEAN_GATEWAY_STATIC_MODELS.filter(model => !authoritativeProviders.has(model.provider));
+}
+
+function toStringArray(value: unknown): string[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	return value.filter((item): item is string => typeof item === "string");
+}
+
+function toGatewayCostPerMillion(value: unknown): number | undefined {
+	const parsed = toNumber(value);
+	if (parsed === undefined || parsed === null) {
+		return undefined;
+	}
+	if (parsed > 0 && parsed < 0.0001) {
+		return parsed * 1_000_000;
+	}
+	return parsed;
+}
+
+function hasGatewayImageInputModality(value: unknown): boolean {
+	if (typeof value !== "string") {
+		return false;
+	}
+	const inputSide = value.toLowerCase().split(/\s*(?:->|=>)\s*/, 1)[0] ?? "";
+	return /(?:^|[+\s,/_-])image(?:$|[+\s,/_-])/.test(inputSide);
+}
+
+function hasGatewayOnlyNonTextOutputModality(value: unknown): boolean {
+	if (typeof value !== "string") {
+		return false;
+	}
+	const [, outputSide = ""] = value.toLowerCase().split(/\s*(?:->|=>)\s*/, 2);
+	const outputTokens = outputSide.split(/[+\s,/_-]+/).filter(Boolean);
+	return outputTokens.length > 0 && !outputTokens.includes("text");
+}
+
+function toAnthropicCanonicalReferenceId(modelId: string): string | undefined {
+	const normalizedModelId = modelId.replace(
+		/\bclaude-(opus|sonnet|fable|mythos)(\d{1,2})(?=$|[.-])/gi,
+		"claude-$1-$2",
+	);
+	const parsed = parseAnthropicModel(normalizedModelId);
+	if (!parsed) {
+		return undefined;
+	}
+	const versionParts = [parsed.version.major];
+	if (parsed.version.minor !== 0 || parsed.version.patch !== 0) {
+		versionParts.push(parsed.version.minor);
+	}
+	if (parsed.version.patch !== 0) {
+		versionParts.push(parsed.version.patch);
+	}
+	return `claude-${parsed.kind}-${versionParts.join("-")}`;
+}
+
+function resolveEuropeanGatewayKnownReference(model: ModelSpec<Api>): Model<Api> | undefined {
+	const referenceIndex = getBundledModelReferenceIndex();
+	return (
+		resolveModelReference(model.id, referenceIndex) ??
+		resolveModelReference(toAnthropicCanonicalReferenceId(model.id) ?? model.id, referenceIndex)
+	);
+}
+
+function getEuropeanGatewayKnownInput(model: ModelSpec<Api>): ("text" | "image")[] | undefined {
+	if (isEuropeanGatewayKnownVisionModelId(model.id)) {
+		return ["text", "image"];
+	}
+	const reference = resolveEuropeanGatewayKnownReference(model);
+	if (reference?.input.includes("image")) {
+		return ["text", "image"];
+	}
+	return undefined;
+}
+
+function isEuropeanGatewayKnownVisionModelId(modelId: string): boolean {
+	return /(?:^|[/:._-])mini[-_]?cpm[-_]?v(?:$|[/:._-]|\d)/i.test(modelId);
+}
+
+function hasEuropeanGatewayKnownReasoning(model: ModelSpec<Api>): boolean {
+	const reference = resolveEuropeanGatewayKnownReference(model);
+	return reference?.reasoning === true;
+}
+
+function toGatewayInputCapabilities(
+	entry: OpenAICompatibleModelRecord,
+	model: ModelSpec<Api>,
+	fallback: ModelSpec<Api>["input"],
+): ("text" | "image")[] {
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	const rawInputModalities = architecture?.input_modalities ?? entry.input_modalities;
+	const inputModalities = toStringArray(rawInputModalities).map(modality => modality.toLowerCase());
+	const rawModality = architecture?.modality ?? entry.modality;
+	if (inputModalities.includes("image")) {
+		return ["text", "image"];
+	}
+	if (hasGatewayImageInputModality(rawModality)) {
+		return ["text", "image"];
+	}
+	const tags = toStringArray(entry.tags).map(tag => tag.toLowerCase());
+	if (tags.includes("image") || tags.includes("vision")) {
+		return ["text", "image"];
+	}
+	return getEuropeanGatewayKnownInput(model) ?? fallback;
+}
+
+const EUROPEAN_GATEWAY_NON_CHAT_ID_PATTERN =
+	/(?:^|[\s/:._-])(?:audio|bge|clip|embed|embedding|embeddings|guard|i2i|i2v|image|moderation|rerank|reranker|safeguard|speech|stt|t2i|t2v|transcribe|tts|video|whisper)(?:$|[\s/:._-])/i;
+
+const EUROPEAN_GATEWAY_NON_CHAT_ID_SUBSTRINGS = [
+	"dall-e",
+	"dalle",
+	"flux",
+	"imagen",
+	"midjourney",
+	"qwen3guard",
+	"sora",
+	"stable-diffusion",
+	"veo",
+] as const;
+
+function hasOnlyNonTextOutput(entry: OpenAICompatibleModelRecord): boolean {
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	const outputModalities = toStringArray(architecture?.output_modalities ?? entry.output_modalities).map(modality =>
+		modality.toLowerCase(),
+	);
+	return (
+		(outputModalities.length > 0 && !outputModalities.includes("text")) ||
+		hasGatewayOnlyNonTextOutputModality(architecture?.modality ?? entry.modality)
+	);
+}
+
+const EUROPEAN_GATEWAY_REASONING_ID_PATTERN = /(?:^|[\s/:._-])(?:reasoner|reasoning|thinking)(?:$|[\s/:._-])/i;
+const EUROPEAN_GATEWAY_DEEPSEEK_REASONING_ID_PATTERN = /deepseek.*(?:r1|reasoner)/i;
+const EUROPEAN_GATEWAY_TOOL_CAPABILITY_TOKENS = new Set([
+	"function-call",
+	"function-calling",
+	"function_call",
+	"function_calling",
+	"functions",
+	"tool-call",
+	"tool-calling",
+	"tool_choice",
+	"tools",
+]);
+
+const EUROPEAN_GATEWAY_TOOL_CAPABILITY_FIELDS = [
+	"supported_parameters",
+	"supported_features",
+	"features",
+	"capabilities",
+	"tags",
+] as const;
+
+function isLikelyEuropeanGatewayChatModel(entry: OpenAICompatibleModelRecord, model: ModelSpec<Api>): boolean {
+	if (hasOnlyNonTextOutput(entry)) {
+		return false;
+	}
+	const normalized = `${model.id} ${model.name}`.trim().toLowerCase();
+	return (
+		!EUROPEAN_GATEWAY_NON_CHAT_ID_PATTERN.test(normalized) &&
+		!EUROPEAN_GATEWAY_NON_CHAT_ID_SUBSTRINGS.some(token => normalized.includes(token))
+	);
+}
+
+function hasEuropeanGatewayReasoningIdentity(model: ModelSpec<Api>): boolean {
+	const normalized = `${model.id} ${model.name}`.trim();
+	return (
+		isOpenAIGptOssModelId(model.id) ||
+		isReasoningGlmModelId(model.id) ||
+		isGrokReasoningEffortCapable(model.id) ||
+		EUROPEAN_GATEWAY_DEEPSEEK_REASONING_ID_PATTERN.test(normalized) ||
+		EUROPEAN_GATEWAY_REASONING_ID_PATTERN.test(normalized)
+	);
+}
+
+function getEuropeanGatewayToolCapability(entry: OpenAICompatibleModelRecord): boolean | undefined {
+	if (entry.supports_tools === true || entry.supports_function_calling === true) {
+		return true;
+	}
+	if (entry.supports_tools === false || entry.supports_function_calling === false) {
+		return false;
+	}
+	const capabilityTokens: string[] = [];
+	let hasCapabilitySignal = false;
+	for (const field of EUROPEAN_GATEWAY_TOOL_CAPABILITY_FIELDS) {
+		const value = entry[field];
+		if (!Array.isArray(value)) {
+			continue;
+		}
+		hasCapabilitySignal = true;
+		capabilityTokens.push(...toStringArray(value));
+	}
+	if (!hasCapabilitySignal) {
+		return undefined;
+	}
+	return capabilityTokens.some(token => EUROPEAN_GATEWAY_TOOL_CAPABILITY_TOKENS.has(token));
+}
+
+function mapEuropeanGatewayModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const model = mapWithBundledReference(entry, defaults, reference);
+	const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
+	const supportsTools = getEuropeanGatewayToolCapability(entry);
+	return {
+		...model,
+		name: toModelName(entry.name, model.name),
+		reasoning:
+			model.reasoning || hasEuropeanGatewayReasoningIdentity(model) || hasEuropeanGatewayKnownReasoning(model),
+		input: toGatewayInputCapabilities(entry, model, model.input),
+		cost: {
+			input: toGatewayCostPerMillion(pricing?.prompt ?? pricing?.input_token) ?? model.cost.input,
+			output: toGatewayCostPerMillion(pricing?.completion ?? pricing?.output_token) ?? model.cost.output,
+			cacheRead:
+				toGatewayCostPerMillion(pricing?.input_cache_read ?? pricing?.cache_read_cost) ?? model.cost.cacheRead,
+			cacheWrite:
+				toGatewayCostPerMillion(pricing?.input_cache_write ?? pricing?.cache_write_cost) ?? model.cost.cacheWrite,
+		},
+		contextWindow: toPositiveNumber(
+			entry.context_length,
+			toPositiveNumber(entry.context_size, toPositiveNumber(topProvider?.context_length, model.contextWindow)),
+		),
+		maxTokens: toPositiveNumber(
+			entry.max_completion_tokens,
+			toPositiveNumber(topProvider?.max_completion_tokens, model.maxTokens),
+		),
+		...(supportsTools !== undefined ? { supportsTools } : {}),
+	};
+}
+
+function getEuropeanGatewayStaticModels(
+	providerId: EuropeanGatewayProviderId,
+	baseUrl?: string,
+): ModelSpec<"openai-completions">[] {
+	const models = EUROPEAN_GATEWAY_STATIC_MODELS.filter(model => model.provider === providerId);
+	return baseUrl ? models.map(model => ({ ...model, baseUrl })) : models;
+}
+
+interface EuropeanGatewayModelManagerSettings {
+	allowUnauthenticatedDiscovery?: boolean;
+	modelsPath?: string;
+}
+
+function createEuropeanGatewayModelManagerOptions(
+	providerId: EuropeanGatewayProviderId,
+	config?: EuropeanGatewayConfig,
+	settings: EuropeanGatewayModelManagerSettings = {},
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? EUROPEAN_GATEWAY_BASE_URLS[providerId];
+	const hasApiKey = typeof apiKey === "string" && apiKey.length > 0;
+	const canFetchDynamicModels = hasApiKey || settings.allowUnauthenticatedDiscovery === true;
+	const staticModels = getEuropeanGatewayStaticModels(providerId, baseUrl);
+	const references = new Map(staticModels.map(model => [model.id, model]));
+	return {
+		providerId,
+		cacheProviderId: resolveModelCacheProviderId(providerId, { baseUrl }),
+		staticModels,
+		dynamicModelsAuthoritative: true,
+		...(canFetchDynamicModels && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: providerId,
+					baseUrl,
+					modelsPath: settings.modelsPath,
+					apiKey,
+					filterModel: (entry, model) => isLikelyEuropeanGatewayChatModel(entry, model),
+					mapModel: (entry, defaults) => mapEuropeanGatewayModel(entry, defaults, references.get(defaults.id)),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+export function cortecsModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("cortecs", config, { allowUnauthenticatedDiscovery: true });
+}
+
+export function akiIoModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("aki-io", config);
+}
+
+export function eurouterModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("eurouter", config, { allowUnauthenticatedDiscovery: true });
+}
+
+export function meliousModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("melious", config);
+}
+
+export function nebiusModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("nebius", config, { modelsPath: NEBIUS_MODELS_PATH });
+}
+
+export function opperModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("opper", config);
+}
+
+export function ovhcloudModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("ovhcloud", config, { allowUnauthenticatedDiscovery: true });
+}
+
+export function scalewayModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("scaleway", config);
 }
 
 type OpenAICompatibleModelManagerBuilderOptions<TApi extends Api> = {

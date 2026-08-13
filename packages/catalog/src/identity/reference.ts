@@ -40,6 +40,28 @@ export function isZeroCostXaiOAuthReference(candidate: Model<Api>): boolean {
 	);
 }
 
+const CROSS_PROVIDER_REFERENCE_EXCLUDED_PROVIDERS = new Set([
+	"aki-io",
+	"cortecs",
+	"eurouter",
+	"melious",
+	"nebius",
+	"opper",
+	"ovhcloud",
+	"scaleway",
+]);
+
+/**
+ * European gateway catalog rows describe a provider-specific resale surface.
+ * They are valid as provider-local references but must not become metadata
+ * sources for unrelated proxies that only share a bare upstream model id.
+ */
+export function isCrossProviderReferenceEligible(candidate: Model<Api>): boolean {
+	return (
+		!isZeroCostXaiOAuthReference(candidate) && !CROSS_PROVIDER_REFERENCE_EXCLUDED_PROVIDERS.has(candidate.provider)
+	);
+}
+
 // Prefer the reference with the largest limits and complete cache pricing, then
 // first-party OpenAI entries.
 function shouldReplaceReference(existing: Model<Api> | undefined, candidate: Model<Api>): boolean {
@@ -69,7 +91,7 @@ function normalizeReferenceKey(value: string): string {
 export function buildModelReferenceIndex(models: Iterable<Model<Api>>): ModelReferenceIndex {
 	const exact = new Map<string, Model<Api>>();
 	for (const candidate of models) {
-		if (isZeroCostXaiOAuthReference(candidate)) {
+		if (!isCrossProviderReferenceEligible(candidate)) {
 			continue;
 		}
 		const key = normalizeReferenceKey(candidate.id);

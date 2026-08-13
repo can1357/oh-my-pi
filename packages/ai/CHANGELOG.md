@@ -304,6 +304,13 @@
 
 - Removed the Antigravity identity-prompt injection (`ANTIGRAVITY_SYSTEM_INSTRUCTION` and `shouldInjectAntigravitySystemInstruction`): Cloud Code Assist accepts arbitrary system instructions on gemini-3.x and Claude routes (verified live), and the injected stub never matched the real client's system prompt anyway. User system prompts are now sent unmodified (still tagged `role: "user"`).
 - Fixed Antigravity `auto` mode not failing over to the sandbox endpoint when the daily endpoint returned a thinking-only `STOP`, which caused Advisor turns to be falsely recorded as empty-response failures ([#8480](https://github.com/can1357/oh-my-pi/issues/8480)).
+### Added
+
+- Added `/login` support for AKI.IO, Cortecs, EUrouter, Melious, Nebius Token Factory, Opper, OVHcloud AI Endpoints, and Scaleway Generative APIs. ([#3319](https://github.com/can1357/oh-my-pi/issues/3319))
+
+### Fixed
+
+- Fixed hosted gateway API key validation to use each provider's authenticated OpenAI-compatible endpoint. ([#3319](https://github.com/can1357/oh-my-pi/issues/3319))
 
 ## [17.3.0] - 2026-08-13
 

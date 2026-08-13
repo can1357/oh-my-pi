@@ -10,10 +10,18 @@ test("lightweight cache resolver matches every descriptor default", () => {
 
 test("lightweight cache resolver matches scoped descriptor inputs", () => {
 	const cases = [
+		{ providerId: "aki-io", baseUrl: "https://aki.example/v1" },
+		{ providerId: "cortecs", baseUrl: "https://cortecs.example/v1" },
+		{ providerId: "eurouter", baseUrl: "https://eurouter.example/v1" },
 		{ providerId: "litellm", baseUrl: "http://litellm.example:4100/v1" },
+		{ providerId: "melious", baseUrl: "https://melious.example/v1" },
+		{ providerId: "nebius", baseUrl: "https://nebius.example/v1" },
+		{ providerId: "opper", baseUrl: "https://opper.example/v1" },
+		{ providerId: "ovhcloud", baseUrl: "https://ovhcloud.example/v1" },
 		{ providerId: "ollama", baseUrl: "http://ollama.example:11434/v1/" },
 		{ providerId: "opencode-go", baseUrl: "https://opencode.example/go" },
 		{ providerId: "opencode-zen", baseUrl: "https://opencode.example/zen/v1/" },
+		{ providerId: "scaleway", baseUrl: "https://scaleway.example/v1" },
 		{ providerId: "vllm", baseUrl: "http://vllm.example:8000/v1" },
 	] as const;
 	for (const { providerId, baseUrl } of cases) {

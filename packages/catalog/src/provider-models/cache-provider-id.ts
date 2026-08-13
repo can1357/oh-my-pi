@@ -18,14 +18,30 @@ export function isCredentialScopedModelCacheProvider(providerId: string): boolea
 
 export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | undefined {
 	switch (providerId) {
+		case "aki-io":
+			return "https://aki.io/openai/v1";
+		case "cortecs":
+			return "https://api.cortecs.ai/v1";
+		case "eurouter":
+			return "https://api.eurouter.ai/api/v1";
 		case "ollama":
 			return "http://127.0.0.1:11434";
 		case "litellm":
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
+		case "melious":
+			return "https://api.melious.ai/v1";
+		case "nebius":
+			return "https://api.tokenfactory.nebius.com/v1";
+		case "opper":
+			return "https://api.opper.ai/v3/compat";
+		case "ovhcloud":
+			return "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1";
 		case "opencode-go":
 			return "https://opencode.ai/zen/go/v1";
 		case "opencode-zen":
 			return "https://opencode.ai/zen/v1";
+		case "scaleway":
+			return "https://api.scaleway.ai/v1";
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
 		default:
@@ -51,6 +67,17 @@ export function resolveOllamaModelCacheProviderId(providerId: string, baseUrl?: 
 /** Resolve the cache namespace used by a provider's model-manager options without constructing those options. */
 export function resolveModelCacheProviderId(providerId: string, options: ModelCacheProviderIdOptions = {}): string {
 	switch (providerId) {
+		case "aki-io":
+		case "cortecs":
+		case "eurouter":
+		case "melious":
+		case "nebius":
+		case "opper":
+		case "ovhcloud":
+		case "scaleway": {
+			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			return `${providerId}:${Bun.hash(baseUrl).toString(36)}`;
+		}
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
 		case "cursor":

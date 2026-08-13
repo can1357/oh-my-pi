@@ -101,12 +101,15 @@ Each provider has one or more environment variables that supply a key when no st
 | Provider ID                      | Environment variable(s)                                                       |
 | -------------------------------- | ----------------------------------------------------------------------------- |
 | `aiand`                          | `AIAND_API_KEY`                                                               |
+| `aki-io`                         | `AKI_API_KEY`                                                                 |
 | `cerebras`                       | `CEREBRAS_API_KEY`                                                            |
+| `cortecs`                        | `CORTECS_API_KEY`                                                             |
 | `alibaba-token-plan`             | `ALIBABA_TOKEN_PLAN_API_KEY`, then `BAILIAN_TOKEN_PLAN_API_KEY`               |
 | `baseten`                        | `BASETEN_API_KEY`                                                             |
 | `bedrock-mantle`                 | `AWS_BEARER_TOKEN_BEDROCK`                                                    |
 | `deepinfra`                      | `DEEPINFRA_API_KEY`                                                           |
 | `deepseek`                       | `DEEPSEEK_API_KEY`                                                            |
+| `eurouter`                       | `EUROUTER_API_KEY`                                                            |
 | `siliconflow`                    | `SILICONFLOW_API_KEY`                                                         |
 | `siliconflow-cn`                 | `SILICONFLOW_CN_API_KEY`                                                      |
 | `fireworks`                      | `FIREWORKS_API_KEY`                                                           |
@@ -116,10 +119,14 @@ Each provider has one or more environment variables that supply a key when no st
 | `devin`                          | `DEVIN_API_KEY`                                                               |
 | `gmi-cloud`                      | `GMI_API_KEY`                                                                 |
 | `huggingface`                    | `HUGGINGFACE_HUB_TOKEN`, then `HF_TOKEN`                                      |
+| `melious`                        | `MELIOUS_API_KEY`                                                             |
 | `moonshot`                       | `MOONSHOT_API_KEY`, then `KIMI_API_KEY`                                       |
 | `meta`                           | `MODEL_API_KEY`, then `META_API_KEY`                                          |
 | `nanogpt`                        | `NANO_GPT_API_KEY`                                                            |
+| `nebius`                         | `NEBIUS_API_KEY`                                                              |
 | `novita`                         | `NOVITA_API_KEY`                                                              |
+| `ovhcloud`                       | `OVH_AI_ENDPOINTS_ACCESS_TOKEN`                                               |
+| `opper`                          | `OPPER_API_KEY`                                                               |
 | `venice`                         | `VENICE_API_KEY`                                                              |
 | `vercel-ai-gateway`              | `AI_GATEWAY_API_KEY` (also `VERCEL_AI_GATEWAY_API_KEY` for catalog discovery) |
 | `cloudflare-ai-gateway`          | `CLOUDFLARE_AI_GATEWAY_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
@@ -137,6 +144,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `minimax`                        | `MINIMAX_API_KEY`                                                             |
 | `alibaba-coding-plan`            | `ALIBABA_CODING_PLAN_API_KEY`                                                 |
 | `sakana`                         | `SAKANA_API_KEY`, then `FUGU_API_KEY`                                         |
+| `scaleway`                       | `SCW_SECRET_KEY`                                                              |
 | `aimlapi`                        | `AIMLAPI_API_KEY`                                                             |
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                |
 | `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                            |

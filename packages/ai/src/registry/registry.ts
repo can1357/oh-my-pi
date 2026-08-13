@@ -1,6 +1,7 @@
 import type { KnownProvider } from "@oh-my-pi/pi-catalog";
 import { aiandProvider } from "./aiand";
 import { aimlApiProvider } from "./aimlapi";
+import { akiIoProvider } from "./aki-io";
 import { alibabaCodingPlanProvider } from "./alibaba-coding-plan";
 import { alibabaTokenPlanProvider } from "./alibaba-token-plan";
 import { amazonBedrockProvider } from "./amazon-bedrock";
@@ -12,10 +13,12 @@ import { cerebrasProvider } from "./cerebras";
 import { clinePassProvider } from "./cline-pass";
 import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
 import { coreWeaveProvider } from "./coreweave";
+import { cortecsProvider } from "./cortecs";
 import { cursorProvider } from "./cursor";
 import { deepinfraProvider } from "./deepinfra";
 import { deepseekProvider } from "./deepseek";
 import { devinProvider } from "./devin";
+import { eurouterProvider } from "./eurouter";
 import { exaProvider } from "./exa";
 import { firepassProvider } from "./firepass";
 import { fireworksProvider } from "./fireworks";
@@ -35,6 +38,7 @@ import { kimiCodeProvider } from "./kimi-code";
 import { litellmProvider } from "./litellm";
 import { llamaCppProvider } from "./llama-cpp";
 import { lmStudioProvider } from "./lm-studio";
+import { meliousProvider } from "./melious";
 import { metaProvider } from "./meta";
 import { minimaxProvider } from "./minimax";
 import { minimaxCodeProvider } from "./minimax-code";
@@ -52,11 +56,15 @@ import { openaiCodexDeviceProvider } from "./openai-codex-device";
 import { opencodeGoProvider } from "./opencode-go";
 import { opencodeZenProvider } from "./opencode-zen";
 import { openrouterProvider } from "./openrouter";
+import { opperProvider } from "./opper";
+import { ovhcloudProvider } from "./ovhcloud";
 import { parallelProvider } from "./parallel";
 import { perplexityProvider } from "./perplexity";
+import { nebiusProvider } from "./provider-nebius";
 import { qianfanProvider } from "./qianfan";
 import { qwenPortalProvider } from "./qwen-portal";
 import { sakanaProvider } from "./sakana";
+import { scalewayProvider } from "./scaleway";
 import { siliconflowProvider } from "./siliconflow";
 import { siliconflowCnProvider } from "./siliconflow-cn";
 import { syntheticProvider } from "./synthetic";
@@ -142,6 +150,14 @@ const ALL = [
 	coreWeaveProvider,
 	vercelAiGatewayProvider,
 	cloudflareAiGatewayProvider,
+	akiIoProvider,
+	cortecsProvider,
+	eurouterProvider,
+	meliousProvider,
+	nebiusProvider,
+	opperProvider,
+	ovhcloudProvider,
+	scalewayProvider,
 	litellmProvider,
 	kiloProvider,
 	zenmuxProvider,
