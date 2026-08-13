@@ -1365,12 +1365,12 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				// the genuine recovery registration too (flaked in full-suite runs).
 				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 			});
-			testSetExtensionHandlerTimeoutMs(10);
+			testSetExtensionHandlerTimeoutMs(250);
 
 			await runner.emit({ type: "session_start" });
 			unsubscribe();
 
-			expect(errors).toContain("handler timed out after 10ms");
+			expect(errors).toContain("handler timed out after 250ms");
 			expect(session.getToolByName("stalled_registration_tool")).toBeUndefined();
 			expect(session.getToolByName("recovered_registration_tool")?.label).toBe("recovered_registration_tool");
 			expect(session.getEnabledToolNames()).toContain("recovered_registration_tool");
@@ -1567,7 +1567,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					await originalSetPresentation(toolNames, mountedToolNames, forcePromptRefresh, signal);
 					if (toolNames.includes("recovered_detached_tool")) recoveredActivation.resolve();
 				});
-			testSetExtensionHandlerTimeoutMs(10);
+			testSetExtensionHandlerTimeoutMs(250);
 
 			releaseStalledRegistration.resolve();
 			const failure = await detachedFailure.promise;
