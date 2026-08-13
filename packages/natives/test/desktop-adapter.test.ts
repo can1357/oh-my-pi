@@ -4,8 +4,12 @@ import { desktopEscapeStops, forgetDesktopEscapeStops } from "../native/desktop.
 import * as loaderState from "../native/loader-state.js";
 
 describe("desktop native ABI requirements", () => {
+	it("leaves an absent desktop export unavailable", () => {
+		expect(adaptDesktopSession(undefined)).toBeUndefined();
+	});
+
 	it.each([
-		["missing desktop export", undefined],
+		["null desktop export", null],
 		[
 			"legacy execute ABI",
 			class {
@@ -26,9 +30,10 @@ describe("desktop native ABI requirements", () => {
 				captureRegion() {}
 			},
 		],
-	])("defers rejection of %s until desktop use without constructing the addon", (_label, NativeSession) => {
-		// Importing the shared native module must remain safe for non-desktop tools.
+	])("defers rejection of stale %s until desktop use without constructing the addon", (_label, NativeSession) => {
 		const DesktopSession = adaptDesktopSession(NativeSession);
+		expect(DesktopSession).toBeDefined();
+		if (DesktopSession === undefined) throw new Error("stale desktop exports must not be bypassed");
 		expect(() => new DesktopSession({ display: "active" })).toThrow(/^Unsupported:/);
 	});
 
