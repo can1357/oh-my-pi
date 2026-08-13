@@ -1,4 +1,5 @@
 import type { DesktopSession } from "./index.js";
 
-/** Return the current native ABI, or a constructor that rejects an outdated addon on first desktop use. */
-export function adaptDesktopSession(NativeDesktopSession: unknown): typeof DesktopSession;
+/** Return a missing export as undefined and reject stale native ABIs on first desktop use. */
+export function adaptDesktopSession(NativeDesktopSession: undefined): undefined;
+export function adaptDesktopSession(NativeDesktopSession: unknown): typeof DesktopSession | undefined;

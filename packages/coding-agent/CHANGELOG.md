@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added native Android ARM64/Termux runtime support.
+
 ## [18.18.9] - 2026-11-11
 
 ### Added

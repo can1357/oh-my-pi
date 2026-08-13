@@ -31,7 +31,7 @@ async function expectRejectionCode(operation: () => Promise<unknown>, acceptedCo
 	expect(acceptedCodes).toContain(match[1]);
 }
 
-describe("DesktopSession", () => {
+describe.skipIf(process.platform === "android")("DesktopSession", () => {
 	it("constructs through the factory and reports the complete capability shape", async () => {
 		const session = createDesktopSession({ display: "all" });
 		try {
