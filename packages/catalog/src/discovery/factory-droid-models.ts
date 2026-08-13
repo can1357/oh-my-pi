@@ -708,7 +708,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		id: "deepseek-v4-pro",
 		name: "DeepSeek V4 Pro (Droid Core)",
 		wire: "openai-completions",
-		contextWindow: 974464,
+		contextWindow: 1040000,
 		maxTokens: 65536,
 		apiProviders: ["fireworks", "baseten"],
 		supportedReasoningEfforts: ["off", "low", "high", "max"],
