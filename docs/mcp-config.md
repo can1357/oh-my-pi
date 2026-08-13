@@ -248,11 +248,14 @@ profile for untrusted checkouts.
   "redirectUri": "...",
   "callbackPort": 3334,
   "callbackPath": "/oauth/callback",
+  "scopes": "https://api.example.com/mcp/mcp.invoke openid",
   "prompt": "consent"
 }
 ```
 
 Use `oauth` when the MCP server requires explicit OAuth client or callback settings. The callback listener defaults to port `3000` and path `/callback`; an HTTP loopback `redirectUri` supplies its own port/path unless explicitly overridden. An HTTPS loopback redirect requires a distinct `callbackPort` for the local HTTP listener behind your TLS terminator.
+
+`scopes` is a space-separated scope string for the authorization request, and takes precedence over the scopes OMP discovers from authorization-server or protected-resource metadata. Set it when the authorization server advertises a `scopes_supported` list the resource does not accept — a general-purpose corporate IdP fronting one MCP server typically advertises tenant-wide scopes (for example Amazon Cognito advertises `openid email phone profile`) while the resource requires its own resource-bound scope, so the discovered set is rejected with `invalid_scope` before sign-in. Setting `""` sends no `scope` parameter at all.
 
 `prompt` controls the OAuth `prompt` authorization parameter. By default OMP omits it, except that a requested `offline_access` scope defaults to `"consent"` so the provider can issue refresh access. Set it explicitly to a provider-supported value such as `"consent"` or `"select_account"`, or to `""` to force omission.
 

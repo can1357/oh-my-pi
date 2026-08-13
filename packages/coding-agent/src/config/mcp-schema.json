@@ -102,6 +102,10 @@
         "callbackPath": {
           "type": "string"
         },
+        "scopes": {
+          "type": "string",
+          "description": "Space-separated OAuth scopes for the authorization request. Takes precedence over scopes discovered from authorization-server or protected-resource metadata."
+        },
         "prompt": {
           "type": "string",
           "description": "OAuth `prompt` parameter sent during authorization (default: omit unless the requested scope contains `offline_access`, which sends \"consent\"; set to \"\" to always omit)."

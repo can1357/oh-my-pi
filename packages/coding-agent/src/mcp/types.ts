@@ -90,6 +90,15 @@ interface MCPServerConfigBase {
 		redirectUri?: string;
 		callbackPort?: number;
 		callbackPath?: string;
+		/**
+		 * Space-separated OAuth scopes for the authorization request. Takes
+		 * precedence over the scopes discovered from authorization-server or
+		 * protected-resource metadata, which is required when an authorization
+		 * server advertises tenant-wide `scopes_supported` that the resource does
+		 * not accept (e.g. Cognito advertising `openid email phone profile` while
+		 * the resource requires its own resource-bound scope).
+		 */
+		scopes?: string;
 		/** `prompt` param for the authorization request (default "consent"; "" to omit) */
 		prompt?: string;
 	};

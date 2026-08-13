@@ -315,6 +315,84 @@ describe("/mcp auth commands", () => {
 		expect(new URL(authorizationUrl).searchParams.get("resource")).toBe("https://gateway.example.com/mcp");
 	});
 
+	test("configured oauth.scopes take precedence over discovered authorization-server scopes", async () => {
+		// Without the override the authorization server's tenant-wide
+		// `scopes_supported` overwrites the resource's own scope, so the authorize
+		// request asks for scopes the resource never accepts and the provider
+		// rejects it with `invalid_scope` before sign-in.
+		await Bun.write(
+			configPath,
+			`${JSON.stringify(
+				{
+					mcpServers: {
+						envserver: {
+							type: "http",
+							url: RAW_SERVER_URL,
+							oauth: { scopes: "https://gateway.example.com/mcp/mcp.invoke openid" },
+						},
+					},
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(new Error("HTTP 401: Unauthorized"));
+
+		const resourceMetadataUrl = "https://gateway.example.com/.well-known/oauth-protected-resource";
+		const fetchMock = Object.assign(
+			async (input: string | URL | Request): Promise<Response> => {
+				const url = String(input);
+				if (url === resourceMetadataUrl) {
+					return new Response(
+						JSON.stringify({
+							resource: "https://gateway.example.com/mcp",
+							authorization_servers: ["https://auth.example.com"],
+							scopes_supported: ["https://gateway.example.com/mcp/mcp.invoke"],
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				if (url === "https://auth.example.com/.well-known/oauth-authorization-server") {
+					return new Response(
+						JSON.stringify({
+							authorization_endpoint: "https://auth.example.com/authorize",
+							token_endpoint: "https://auth.example.com/token",
+							client_id: "challenge-client",
+							scopes_supported: ["openid", "email", "phone", "profile"],
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response("not found", { status: 404 });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+
+		let authorizationUrl = "";
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(async function (
+			this: oauthFlow.MCPOAuthFlow,
+		) {
+			authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1:53192/callback")).url;
+			return {
+				access: "fresh-access",
+				refresh: "fresh-refresh",
+				expires: Date.now() + 3_600_000,
+			};
+		});
+
+		const { controller, showError } = createController(authStorage);
+		await controller.handleMCPAuthChallenge("envserver", {
+			wwwAuthenticate: [`Bearer resource_metadata="${resourceMetadataUrl}"`],
+		});
+		expect(showError).not.toHaveBeenCalled();
+		expect(new URL(authorizationUrl).searchParams.get("scope")).toBe(
+			"https://gateway.example.com/mcp/mcp.invoke openid",
+		);
+	});
+
 	test("reauthorizes on a tool challenge even when the anonymous handshake succeeds", async () => {
 		const authStorage = freshAuthStorage();
 		await authStorage.reload();

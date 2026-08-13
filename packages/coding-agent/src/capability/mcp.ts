@@ -61,6 +61,7 @@ export interface MCPServer {
 		redirectUri?: string;
 		callbackPort?: number;
 		callbackPath?: string;
+		scopes?: string;
 		prompt?: string;
 	};
 	/** Transport type */

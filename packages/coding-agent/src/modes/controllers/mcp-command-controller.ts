@@ -744,7 +744,7 @@ export class MCPCommandController {
 								oauth.tokenUrl,
 								oauth.clientId ?? finalConfig.oauth?.clientId ?? "",
 								finalConfig.oauth?.clientSecret ?? "",
-								oauth.scopes ?? "",
+								finalConfig.oauth?.scopes ?? oauth.scopes ?? "",
 								{
 									callbackPort: finalConfig.oauth?.callbackPort,
 									callbackPath: finalConfig.oauth?.callbackPath,
@@ -2010,7 +2010,7 @@ export class MCPCommandController {
 				oauth.tokenUrl,
 				flowClientId,
 				flowClientSecret,
-				oauth.scopes || runtimeBaseConfig.oauth?.scope || "",
+				runtimeBaseConfig.oauth?.scopes ?? oauth.scopes ?? runtimeBaseConfig.oauth?.scope ?? "",
 				{
 					callbackPort: found.config.oauth?.callbackPort,
 					callbackPath: found.config.oauth?.callbackPath,
