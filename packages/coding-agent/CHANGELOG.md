@@ -1113,6 +1113,7 @@
 ### Added
 
 - Wired `factory-droid` model discovery and login help into the CLI.
+- Added a Standard Credits rate badge (`Nx`) to the model browser for `factory-droid` models, rendered next to the $/Mtok cost pair.
 
 ## [17.2.10] - 2026-08-06
 

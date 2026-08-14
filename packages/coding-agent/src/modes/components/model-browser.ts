@@ -277,16 +277,22 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 	return theme.fg(info.color ?? "muted", `${theme.status.enabled} ${label}`) + suffix;
 }
 
-/** `$in/out` per-million cost pair; `free` when both legs are zero. */
+/**
+ * `$in/out` per-million cost pair; `free` when both legs are zero. Factory
+ * Droid models also carry an `N×` Standard Credits badge (effective per-token
+ * input rate) — the $ pair is the upstream-list counterfactual, the badge is
+ * what the subscription actually burns.
+ */
 function formatCostPair(model: Model): string {
 	const cost = model.cost;
-	if (!cost || (cost.input <= 0 && cost.output <= 0)) return "free";
 	const fmt = (n: number): string => {
 		if (n <= 0) return "0";
 		const s = n >= 100 ? String(Math.round(n)) : n >= 10 ? n.toFixed(1) : n.toFixed(2);
 		return s.replace(/\.?0+$/, "");
 	};
-	return `$${fmt(cost.input)}/${fmt(cost.output)}`;
+	const base = !cost || (cost.input <= 0 && cost.output <= 0) ? "free" : `$${fmt(cost.input)}/${fmt(cost.output)}`;
+	const credits = model.factoryDroidCredits;
+	return credits ? `${base} ${fmt(credits.input)}×` : base;
 }
 
 /** Provider-supplied blurb, flattened to a single renderable detail-line cell. */
