@@ -854,6 +854,11 @@ export function getModelDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "models.db", "data");
 }
 
+/** Get the path to the factory-droid region blocklist (~/.omp/agent/factory-droid-region-blocks.json). */
+export function getFactoryDroidRegionBlocklistPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "factory-droid-region-blocks.json", "state");
+}
+
 /** Get the tiny title model cache directory (~/.omp/agent/cache/tiny-models). */
 export function getTinyModelsCacheDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, path.join("cache", "tiny-models"), "cache");

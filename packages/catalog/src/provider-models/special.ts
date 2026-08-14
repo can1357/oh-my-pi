@@ -5,6 +5,7 @@ import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/c
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { buildFactoryDroidModel, fetchFactoryDroidModels } from "../discovery/factory-droid";
 import { FACTORY_DROID_MODELS } from "../discovery/factory-droid-models";
+import { readFactoryDroidRegionBlockedIds } from "../discovery/factory-droid-region-blocks";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModel } from "../models";
@@ -407,7 +408,10 @@ export function factoryDroidModelManagerOptions(
 		// Statsig feature flags and resolves upstream routing.
 		staticModels: FACTORY_DROID_MODELS.map(model => buildFactoryDroidModel(model)),
 		dynamicModelsAuthoritative: true,
-		fetchDynamicModels: () => fetchFactoryDroidModels(config),
+		// Region rejections recorded by the provider hide models the edge-PoP
+		// table did not already filter.
+		fetchDynamicModels: async () =>
+			fetchFactoryDroidModels({ ...config, excludeModelIds: await readFactoryDroidRegionBlockedIds() }),
 	};
 }
 // ---------------------------------------------------------------------------

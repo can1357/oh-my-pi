@@ -8,10 +8,11 @@ import {
 	FACTORY_DROID_RESPONSES_BASE_URL,
 	type FactoryDroidModelInput,
 	type FactoryDroidWire,
+	recordFactoryDroidRegionBlock,
 } from "@oh-my-pi/pi-catalog/discovery";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as AIError from "../error";
-import type { Context, Model, ModelSpec, ServiceTier, StreamFunction, StreamOptions, ToolChoice } from "../types";
+import type { Api, Context, Model, ModelSpec, ServiceTier, StreamFunction, StreamOptions, ToolChoice } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { hasNonThinkingTurnAfterLastUser, hasThinkinglessAssistantHistory } from "./anthropic";
@@ -215,6 +216,26 @@ function factoryDroidTokenClaims(accessToken: string): Record<string, unknown> |
 function factoryDroidOrgIdFromToken(accessToken: string): string | undefined {
 	const external = factoryDroidTokenClaims(accessToken)?.external_org_id;
 	return typeof external === "string" && external.length > 0 ? external : undefined;
+}
+
+const REGION_UNAVAILABLE_PATTERN = /not available in this region/i;
+
+/**
+ * Factory's proxy answers `400 Provider not available in this region` when
+ * the request's serving edge cannot reach the model's upstreams. Record the
+ * model so discovery hides it going forward (the edge-PoP table covers the
+ * known cases; this catches the rest), and replace the raw payload with an
+ * actionable message.
+ */
+function asRegionUnavailableError(model: Model<Api>, errorMessage: string | undefined): string | undefined {
+	if (errorMessage == null || !REGION_UNAVAILABLE_PATTERN.test(errorMessage)) return undefined;
+	void recordFactoryDroidRegionBlock(model.id);
+	const edge = /"requestId"\s*:\s*"([a-z]{3}\d)/i.exec(errorMessage)?.[1];
+	return (
+		`${model.id} is not served from your network's region` +
+		(edge ? ` (serving edge: ${edge})` : "") +
+		". It has been hidden from the model picker; choose another model."
+	);
 }
 
 export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
@@ -504,10 +525,20 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 			}
 
 			for await (const event of innerStream) {
+				if (event.type === "error") {
+					const regionMessage = asRegionUnavailableError(model, event.error.errorMessage);
+					if (regionMessage != null) {
+						stream.push({ ...event, error: { ...event.error, errorMessage: regionMessage } });
+						continue;
+					}
+				}
 				stream.push(event);
 			}
 		} catch (error) {
-			stream.push({ type: "error", reason: "error", error: createProviderErrorMessage(model, error) });
+			const message = createProviderErrorMessage(model, error);
+			const regionMessage = asRegionUnavailableError(model, message.errorMessage);
+			if (regionMessage != null) message.errorMessage = regionMessage;
+			stream.push({ type: "error", reason: "error", error: message });
 			stream.end();
 		}
 	})();

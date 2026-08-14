@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import * as discovery from "@oh-my-pi/pi-catalog/discovery";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { DROID_SYSTEM_PREFIX, streamFactoryDroid } from "../src/providers/factory-droid";
 import {
@@ -450,5 +451,53 @@ describe("Factory Droid gemini wire (Google series)", () => {
 			"Read",
 			"Read",
 		]);
+	});
+});
+
+describe("Factory Droid region availability", () => {
+	it("rewrites a region-400 into actionable guidance and records the model as region-blocked", async () => {
+		const recordSpy = spyOn(discovery, "recordFactoryDroidRegionBlock").mockResolvedValue(undefined);
+		const regionError = {
+			status: 400,
+			title: "Bad Request",
+			detail: "Provider not available in this region",
+			requestId: "cdg1::p123",
+		};
+		const result = await streamFactoryDroid(
+			kimiK3(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: mock(async () => new Response(JSON.stringify(regionError), { status: 400 })),
+				sessionId: "019fd-test-session",
+			},
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("kimi-k3 is not served from your network's region");
+		expect(result.errorMessage).toContain("serving edge: cdg1");
+		expect(result.errorMessage).toContain("hidden from the model picker");
+		expect(result.errorMessage).not.toContain("Bad Request");
+		expect(recordSpy).toHaveBeenCalledWith("kimi-k3");
+	});
+
+	it("passes unrelated errors through untouched", async () => {
+		const recordSpy = spyOn(discovery, "recordFactoryDroidRegionBlock").mockResolvedValue(undefined);
+		const result = await streamFactoryDroid(
+			kimiK3(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: mock(
+					async () =>
+						new Response(JSON.stringify({ status: 400, detail: "context length exceeded" }), { status: 400 }),
+				),
+				sessionId: "019fd-test-session",
+			},
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("context length exceeded");
+		expect(recordSpy).not.toHaveBeenCalled();
 	});
 });

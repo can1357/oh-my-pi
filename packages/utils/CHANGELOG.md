@@ -118,6 +118,10 @@
 
 ## [17.3.2] - 2026-08-13
 
+### Added
+
+- Added `getFactoryDroidRegionBlocklistPath` to `dirs`, resolving `factory-droid-region-blocks.json` under the agent state directory.
+
 ### Fixed
 
 - Fixed `fetchWithRetry()` aborts during retry backoff to preserve the documented `"Request was aborted"` error contract ([#8450](https://github.com/can1357/oh-my-pi/issues/8450)).

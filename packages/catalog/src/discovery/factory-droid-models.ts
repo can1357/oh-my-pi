@@ -68,6 +68,28 @@ export const FACTORY_DROID_UPSTREAM_REGIONS: Readonly<Record<FactoryDroidUpstrea
 };
 
 /**
+ * Vercel edge PoPs in Europe. Factory's proxy refuses upstreams it cannot
+ * serve from the request's edge — independent of account residency — so the
+ * serving edge is the availability signal for accounts whose whoami carries
+ * no region. Continental EU plus Dublin and London; unmapped PoPs fall back
+ * to the reactive region-error blocklist in the provider.
+ */
+const FACTORY_DROID_EU_EDGE_POPS = new Set(["arn1", "cdg1", "dub1", "fra1", "lhr1", "mad1", "mxp1", "waw1"]);
+
+/**
+ * Serving region from a response's `x-vercel-id` header, whose first segment
+ * is the client-serving edge PoP (e.g. `cdg1::sfo1::…` for a Paris edge in
+ * front of a US deployment). Returns `"eu"` for European edges, undefined
+ * otherwise or when the header is absent.
+ */
+export function factoryDroidEdgeRegion(headers: Headers): "eu" | undefined {
+	const id = headers.get("x-vercel-id");
+	if (!id) return undefined;
+	const pop = id.split("::", 1)[0]?.trim().toLowerCase();
+	return pop != null && FACTORY_DROID_EU_EDGE_POPS.has(pop) ? "eu" : undefined;
+}
+
+/**
  * Effective upstream rotation for an account region, ported from the CLI's
  * rotation resolver (`nJH`): an explicit per-region override wins verbatim
  * (an empty list means the model is unavailable in that region), otherwise

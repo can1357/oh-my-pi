@@ -7,6 +7,7 @@ import {
 	FACTORY_DROID_MODELS,
 	type FactoryDroidModelInput,
 	factoryDroidApiBaseUrl,
+	factoryDroidEdgeRegion,
 	factoryDroidWireBaseUrl,
 	resolveFactoryDroidRotation,
 } from "./factory-droid-models";
@@ -113,6 +114,12 @@ export interface FactoryDroidModelDiscoveryOptions {
 	 * EU-serving upstream, and resolves EU rotations. Absent ⇒ `"global"`.
 	 */
 	region?: string;
+	/**
+	 * Models to hide because Factory's proxy already rejected them as
+	 * unavailable from this network's region (recorded by the provider on a
+	 * region 400). Covers serving edges the PoP table does not map.
+	 */
+	excludeModelIds?: readonly string[];
 	fetch?: FetchImpl;
 }
 
@@ -139,12 +146,22 @@ export async function fetchFactoryDroidModels(
 	let flags: Record<string, unknown>;
 	let policy: FactoryModelPolicy | null = null;
 	let routing: FactoryProviderRouting | null = null;
+	// Account residency selects the host; serving geography (residency, else
+	// the response's edge PoP) selects availability and rotations. The edge
+	// matters because Factory's proxy enforces per-request geography even for
+	// accounts with no residency region set.
+	const accountRegion = options.region === "eu" ? ("eu" as const) : undefined;
+	let servingRegion = accountRegion;
 	try {
 		const [flagsResponse, settingsResponse] = await Promise.all([
 			fetchImpl(featureFlagsUrl(options.region), { headers }),
 			fetchImpl(managedSettingsUrl(options.region), { headers }).catch(() => null),
 		]);
 		if (!flagsResponse.ok) return null;
+		servingRegion =
+			accountRegion ??
+			factoryDroidEdgeRegion(flagsResponse.headers) ??
+			(settingsResponse?.ok ? factoryDroidEdgeRegion(settingsResponse.headers) : undefined);
 		const body: unknown = await flagsResponse.json();
 		if (body == null || typeof body !== "object" || !("flags" in body)) return null;
 		const raw = body.flags;
@@ -157,21 +174,22 @@ export async function fetchFactoryDroidModels(
 	} catch {
 		return null;
 	}
-	return FACTORY_DROID_MODELS.filter(model => isModelAvailable(model, flags, policy, options.region)).map(model =>
-		buildFactoryDroidModel(
-			model,
-			resolveRotation(model, routing?.models?.[model.id], options.region),
-			options.region,
-		),
+	const excluded = options.excludeModelIds;
+	return FACTORY_DROID_MODELS.filter(
+		model =>
+			(excluded == null || !excluded.includes(model.id)) && isModelAvailable(model, flags, policy, servingRegion),
+	).map(model =>
+		buildFactoryDroidModel(model, resolveRotation(model, routing?.models?.[model.id], servingRegion), options.region),
 	);
 }
 
 /**
- * Rotation for one discovered model: the account region resolves the base
- * rotation (override or region-filtered), then a live `provider_routing`
- * entry narrows it. For the global region the routing entry applies verbatim
- * (existing behavior); for EU it is intersected with the region-resolved set
- * so a US-centric routing entry cannot resurrect a global-only upstream.
+ * Rotation for one discovered model: the serving region (account residency,
+ * else the response's edge PoP) resolves the base rotation (override or
+ * region-filtered), then a live `provider_routing` entry narrows it. For the
+ * global region the routing entry applies verbatim (existing behavior); for
+ * EU it is intersected with the region-resolved set so a US-centric routing
+ * entry cannot resurrect a global-only upstream.
  */
 function resolveRotation(
 	input: FactoryDroidModelInput,
