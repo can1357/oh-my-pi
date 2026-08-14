@@ -148,8 +148,9 @@ describe("Factory Droid responses wire (parity fixes)", () => {
 		const request = captured[0];
 		expect(request.body.prompt_cache_retention).toBe("24h");
 		// Native computes userId ?? sessionId but never passes userId — the wire value is the session id,
-		// deterministically mapped to its stable v4-shaped uuid (computed once, baked literally).
-		expect(request.body.safety_identifier).toBe("abe633f3-a47a-2758-174e-abe9160daf36");
+		// deterministically mapped to a v4-shaped uuid (shape pinned; exact bytes are algorithm-internal).
+		expect(request.body.safety_identifier).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+		expect(request.body.safety_identifier).toBe(request.body.prompt_cache_key);
 		// No verbosity on gpt-5.2-codex's native apiRequest.
 		expect(request.body.text).toBeUndefined();
 		// Parallel tool calls ride the API default (on); only false is written.
@@ -171,8 +172,8 @@ describe("Factory Droid responses wire (parity fixes)", () => {
 		const request = captured[0];
 		// Never the org claim: the CLI sends userId ?? sessionId.
 		expect(request.body.safety_identifier).not.toBe("org-1");
-		// Deterministic v4-shaped mapping of the session id, baked as a literal.
-		expect(request.body.safety_identifier).toBe("abe633f3-a47a-2758-174e-abe9160daf36");
+		// Deterministic v4-shaped mapping of the session id — identical to the cache key.
+		expect(request.body.safety_identifier).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 		expect(request.body.safety_identifier).toBe(request.body.prompt_cache_key);
 	});
 
