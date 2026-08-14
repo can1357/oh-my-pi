@@ -16,7 +16,7 @@ export const FACTORY_DROID_ANTHROPIC_BASE_URL = "https://api.factory.ai/api/llm/
 export const FACTORY_DROID_GOOGLE_BASE_URL = "https://api.factory.ai/api/llm/g/v1";
 
 /** Client version reported to Factory's API. */
-export const FACTORY_DROID_CLIENT_VERSION = "0.195.0";
+export const FACTORY_DROID_CLIENT_VERSION = "0.196.0";
 
 /**
  * Wire protocol the proxy expects for a model:
@@ -49,7 +49,7 @@ export type FactoryDroidRegion = "global" | "eu";
 
 /**
  * Regions each upstream serves, ported from the CLI's upstream→regions table
- * (`LA0` in the 0.195.0 bundle). `"global"`-only upstreams are unreachable
+ * (`LA0` in the 0.196.0 bundle). `"global"`-only upstreams are unreachable
  * for EU accounts: the CLI filters them out of every model's rotation, which
  * is why Droid Core (fireworks/baseten-only) and Gemini (google-only) vanish
  * from the EU model list.
@@ -557,7 +557,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		contextWindow: 272000,
 		maxTokens: 128000,
 		apiProviders: ["openai"],
-		credits: { input: 1.4, output: 6 },
+		credits: { input: 1.4, output: 8 },
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
 		defaultReasoningEffort: "medium",
 		responsesConfig: {
@@ -615,6 +615,25 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
 		defaultReasoningEffort: "high",
 		responsesConfig: { verbosity: "low", parallelToolCalls: true, extendedCache: true, safetyId: true },
+		noImageSupport: true,
+	},
+	{
+		id: "gpt-5.4-mini-fast",
+		name: "GPT-5.4 Mini Fast Mode",
+		wire: "openai-responses",
+		contextWindow: 272000,
+		maxTokens: 128000,
+		apiProviders: ["openai"],
+		credits: { input: 0.6, output: 6 },
+		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
+		defaultReasoningEffort: "high",
+		responsesConfig: {
+			verbosity: "low",
+			serviceTier: "priority",
+			parallelToolCalls: true,
+			extendedCache: true,
+			safetyId: true,
+		},
 		noImageSupport: true,
 	},
 	{
@@ -799,13 +818,26 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		noImageSupport: true,
 	},
 	{
+		id: "grok-4.6",
+		name: "Grok 4.6",
+		wire: "openai-responses",
+		contextWindow: 200000,
+		maxTokens: 63356,
+		apiProviders: ["xai"],
+		credits: { input: 0.8, output: 3, cacheRead: 0.25 },
+		// No priceRef: xai/grok-4.6 is not in the bundled catalog yet; zero-cost SKU with credit badge until a models.json regen picks it up.
+		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
+		defaultReasoningEffort: "high",
+		featureFlag: "grok_4_6",
+	},
+	{
 		id: "grok-4.5",
 		name: "Grok 4.5",
 		wire: "openai-responses",
 		contextWindow: 200000,
 		maxTokens: 63356,
 		apiProviders: ["xai"],
-		credits: { input: 0.8, output: 3, cacheRead: 0.25 },
+		credits: { input: 0.8, output: 3, cacheRead: 0.15 },
 		priceRef: { provider: "xai", modelId: "grok-4.5" },
 		supportedReasoningEfforts: ["low", "medium", "high"],
 		defaultReasoningEffort: "high",

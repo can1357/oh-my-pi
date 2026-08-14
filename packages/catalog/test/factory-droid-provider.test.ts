@@ -280,7 +280,7 @@ describe("Factory Droid catalog", () => {
 		// Cache-read-metered models project the relative multiplier through the input rate.
 		const grok = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["grok-4.5"]);
 		expect(grok.cost).toEqual(getBundledModel("xai", "grok-4.5").cost);
-		expect(grok.factoryDroidCredits).toEqual({ input: 0.8, output: 2.4, cacheRead: 0.2 });
+		expect(grok.factoryDroidCredits).toEqual({ input: 0.8, output: 2.4, cacheRead: 0.12 });
 
 		// No outputTokenMultiplier -> output billed at the input rate.
 		const opus = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["claude-opus-5"]);
