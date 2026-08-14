@@ -1,4 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { getFactoryDroidRegionBlocklistPath } from "@oh-my-pi/pi-utils";
 import { buildFactoryDroidModel, fetchFactoryDroidModels } from "../src/discovery/factory-droid";
 import {
 	FACTORY_DROID_ANTHROPIC_BASE_URL,
@@ -7,8 +11,13 @@ import {
 	FACTORY_DROID_MODEL_META,
 	FACTORY_DROID_MODELS,
 	FACTORY_DROID_RESPONSES_BASE_URL,
+	factoryDroidEdgeRegion,
 	resolveFactoryDroidRotation,
 } from "../src/discovery/factory-droid-models";
+import {
+	readFactoryDroidRegionBlockedIds,
+	recordFactoryDroidRegionBlock,
+} from "../src/discovery/factory-droid-region-blocks";
 import { ANTHROPIC_THINKING, Effort } from "../src/effort";
 import { getBundledModel } from "../src/models";
 import { factoryDroidModelManagerOptions } from "../src/provider-models/special";
@@ -305,7 +314,6 @@ describe("Factory Droid catalog", () => {
 	});
 });
 
-
 describe("Factory Droid EU region", () => {
 	const allFlagsOn = Object.fromEntries(
 		FACTORY_DROID_MODELS.flatMap(m => (m.featureFlag ? [[m.featureFlag, true]] : [])),
@@ -389,9 +397,9 @@ describe("Factory Droid EU region", () => {
 		expect(models!.find(model => model.id === "claude-opus-5")?.factoryDroidApiProviders).toEqual([
 			"bedrock_anthropic",
 		]);
-		expect(
-			models!.find(model => model.id === "claude-sonnet-4-5-20250929")?.factoryDroidApiProviders,
-		).toEqual(["bedrock_anthropic"]);
+		expect(models!.find(model => model.id === "claude-sonnet-4-5-20250929")?.factoryDroidApiProviders).toEqual([
+			"bedrock_anthropic",
+		]);
 	});
 
 	it("keeps the global path byte-identical when no region is known", async () => {
@@ -408,5 +416,105 @@ describe("Factory Droid EU region", () => {
 		expect(opus5.factoryDroidApiProviders).toBeUndefined();
 		expect(opus5.baseUrl).toBe("https://api.factory.ai/api/llm/a");
 		expect(models!.find(model => model.id === "kimi-k3")).toBeDefined();
+	});
+});
+
+describe("Factory Droid serving edge", () => {
+	const allFlagsOn = Object.fromEntries(
+		FACTORY_DROID_MODELS.flatMap(m => (m.featureFlag ? [[m.featureFlag, true]] : [])),
+	);
+
+	it("parses the serving edge PoP from x-vercel-id", () => {
+		expect(factoryDroidEdgeRegion(new Headers({ "x-vercel-id": "cdg1::sfo1::jsvsj-123" }))).toBe("eu");
+		expect(factoryDroidEdgeRegion(new Headers({ "x-vercel-id": "FRA1::iad1::x" }))).toBe("eu");
+		expect(factoryDroidEdgeRegion(new Headers({ "x-vercel-id": "sfo1::sfo1::x" }))).toBeUndefined();
+		expect(factoryDroidEdgeRegion(new Headers({ "x-vercel-id": "cpt1::sfo1::x" }))).toBeUndefined();
+		expect(factoryDroidEdgeRegion(new Headers())).toBeUndefined();
+		expect(factoryDroidEdgeRegion(new Headers({ "x-vercel-id": "" }))).toBeUndefined();
+	});
+
+	it("hides global-only-upstream models and resolves EU rotations on an EU edge, keeping the global host", async () => {
+		const fetchImpl: FetchImpl = async url => {
+			if (String(url).includes("feature-flags")) {
+				return new Response(JSON.stringify({ flags: allFlagsOn }), {
+					status: 200,
+					headers: { "x-vercel-id": "cdg1::sfo1::jsvsj-123" },
+				});
+			}
+			return new Response(JSON.stringify({ settings: {} }), { status: 200 });
+		};
+		const models = await fetchFactoryDroidModels({ apiKey: "token", fetch: fetchImpl });
+		const ids = models!.map(model => model.id);
+		// No EU-serving upstream: hidden exactly as for an EU-resident account.
+		expect(ids).not.toContain("kimi-k3");
+		expect(ids).not.toContain("gemini-3.1-pro-preview");
+		expect(ids).not.toContain("grok-4.5");
+		expect(ids).not.toContain("claude-fable-5");
+		// EU rotation override applies, but the host stays global (account has
+		// no residency region; only the serving edge is European).
+		const opus5 = models!.find(model => model.id === "claude-opus-5");
+		expect(opus5?.factoryDroidApiProviders).toEqual(["bedrock_anthropic"]);
+		expect(opus5?.baseUrl).toBe(FACTORY_DROID_ANTHROPIC_BASE_URL);
+	});
+
+	it("leaves the model list untouched on a US edge", async () => {
+		const fetchImpl: FetchImpl = async url => {
+			if (String(url).includes("feature-flags")) {
+				return new Response(JSON.stringify({ flags: allFlagsOn }), {
+					status: 200,
+					headers: { "x-vercel-id": "sfo1::sfo1::jsvsj-123" },
+				});
+			}
+			return new Response(JSON.stringify({ settings: {} }), { status: 200 });
+		};
+		const models = await fetchFactoryDroidModels({ apiKey: "token", fetch: fetchImpl });
+		expect(models!.find(model => model.id === "kimi-k3")).toBeDefined();
+	});
+
+	it("lets an explicit account region win over a US edge", async () => {
+		const fetchImpl: FetchImpl = async url => {
+			if (String(url).includes("feature-flags")) {
+				return new Response(JSON.stringify({ flags: allFlagsOn }), {
+					status: 200,
+					headers: { "x-vercel-id": "sfo1::sfo1::jsvsj-123" },
+				});
+			}
+			return new Response(JSON.stringify({ settings: {} }), { status: 200 });
+		};
+		const models = await fetchFactoryDroidModels({ apiKey: "token", region: "eu", fetch: fetchImpl });
+		const ids = models!.map(model => model.id);
+		expect(ids).not.toContain("kimi-k3");
+		expect(models!.find(model => model.id === "claude-opus-5")?.baseUrl).toContain("api.eu.factory.ai");
+	});
+
+	it("hides models excluded by the region blocklist", async () => {
+		const fetchImpl: FetchImpl = async url => {
+			if (String(url).includes("feature-flags")) {
+				return new Response(JSON.stringify({ flags: allFlagsOn }), { status: 200 });
+			}
+			return new Response(JSON.stringify({ settings: {} }), { status: 200 });
+		};
+		const models = await fetchFactoryDroidModels({
+			apiKey: "token",
+			fetch: fetchImpl,
+			excludeModelIds: ["claude-opus-5"],
+		});
+		const ids = models!.map(model => model.id);
+		expect(ids).not.toContain("claude-opus-5");
+		expect(ids).toContain("kimi-k3");
+	});
+});
+
+describe("Factory Droid region blocklist", () => {
+	it("round-trips blocked model ids and tolerates a missing or corrupt file", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "fd-region-blocks-"));
+		expect(await readFactoryDroidRegionBlockedIds(dir)).toEqual([]);
+		await recordFactoryDroidRegionBlock("deepseek-v4-flash-0731", dir);
+		await recordFactoryDroidRegionBlock("kimi-k3", dir);
+		// Re-recording keeps the entry idempotent.
+		await recordFactoryDroidRegionBlock("kimi-k3", dir);
+		expect([...(await readFactoryDroidRegionBlockedIds(dir))].sort()).toEqual(["deepseek-v4-flash-0731", "kimi-k3"]);
+		await Bun.write(getFactoryDroidRegionBlocklistPath(dir), "not json");
+		expect(await readFactoryDroidRegionBlockedIds(dir)).toEqual([]);
 	});
 });

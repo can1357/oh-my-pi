@@ -105,7 +105,11 @@ describe("Factory Droid OAuth", () => {
 		const calls: Array<{ url: string; body: string; authorization?: string }> = [];
 		const fetchImpl: FetchImpl = async (url, init) => {
 			const headers = new Headers(init?.headers);
-			calls.push({ url: String(url), body: String(init?.body ?? ""), authorization: headers.get("authorization") ?? undefined });
+			calls.push({
+				url: String(url),
+				body: String(init?.body ?? ""),
+				authorization: headers.get("authorization") ?? undefined,
+			});
 			if (String(url).endsWith("/api/cli/whoami")) return jsonResponse(200, { region: "eu" });
 			return jsonResponse(200, {
 				access_token: access,
