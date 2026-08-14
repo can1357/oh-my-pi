@@ -21,7 +21,13 @@ export function renderSetupOutro(width: number, height: number, elapsedMs: numbe
 	const frame = Math.floor(elapsedMs / SETUP_TICK_MS);
 	const lines = renderStarfield(width, height, frame + 1000);
 	const progress = Math.max(0, Math.min(1, elapsedMs / SETUP_OUTRO_MS));
-	const logo = gradientLogo(PI_LOGO, progress * 1.2, { pos: (progress * 2) % 1, strength: 1 - progress });
+	// Ease-out cubic so the spin decelerates into rest; phase is driven by
+	// (1 - eased), which hits exactly 0 at progress=1 (same convergence
+	// policy as welcome.ts's introLogoFrame and the setup splash), so the
+	// settled frame never wraps mid-glyph.
+	const eased = 1 - (1 - progress) ** 3;
+	const phase = ((((1 - eased) * 1.2) % 1) + 1) % 1;
+	const logo = gradientLogo(PI_LOGO, phase, { pos: (progress * 2) % 1, strength: 1 - progress });
 	const title = theme.bold(theme.fg("success", `${theme.status.success} Setup saved`));
 	const subtitle = theme.fg("muted", "Handing off to the normal CLI…");
 	const sweepWidth = Math.max(1, Math.min(width - 8, Math.floor((width - 8) * progress)));
