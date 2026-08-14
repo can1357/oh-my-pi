@@ -566,10 +566,9 @@ export function gradientLogo(lines: readonly string[], phase = 0, shine?: ShineC
 				result += char;
 				continue;
 			}
-			// SVG's (0,0) → (1,1) gradient projects both normalized axes
-			// equally: top-right and bottom-left land on the purple midpoint.
-			const base = (x / xSpan + y / ySpan) / 2;
-			const t = normalizedPhase === 0 ? base : (base + normalizedPhase) % 1;
+			// Diagonal: top-left (x=0, y=0) → bottom-right (x=cols-1, y=rows-1)
+			const base = (x + y) / span;
+			const t = (((base + phase) % 1) + 1) % 1;
 			result += gradientEscape(t, shine) + char + reset;
 		}
 		return result;
