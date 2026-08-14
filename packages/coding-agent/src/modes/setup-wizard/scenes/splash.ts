@@ -63,10 +63,10 @@ export function renderStarfield(width: number, height: number, frame: number): s
 	return lines;
 }
 
-/** Continuous diagonal gradient position (bottom-left → top-right) across the whole screen. */
+/** Continuous diagonal gradient position (top-left → bottom-right) across the whole screen. */
 function screenGradientT(x: number, y: number, width: number, height: number, phase: number): number {
 	const span = Math.max(1, width + height - 1);
-	const base = (x + (height - 1 - y)) / span;
+	const base = (x + y) / span;
 	return (((base + phase) % 1) + 1) % 1;
 }
 
