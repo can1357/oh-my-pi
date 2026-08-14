@@ -392,6 +392,8 @@ const devinDiscovery = once(() => import("../discovery/devin"));
 
 export interface FactoryDroidModelManagerConfig {
 	apiKey?: string;
+	/** Account residency region from the stored OAuth credential, when known. */
+	region?: string;
 	fetch?: FetchImpl;
 }
 

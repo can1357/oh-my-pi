@@ -265,7 +265,9 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 			if (wire === "google-generate") {
 				innerStream = streamFactoryDroidGemini(model, proxiedContext, {
 					...baseOptions,
-					baseUrl: FACTORY_DROID_GOOGLE_BASE_URL,
+					// Discovery stamps the region-resolved wire URL; the constant
+					// is the global default for hand-registered custom models.
+					baseUrl: model.baseUrl ?? FACTORY_DROID_GOOGLE_BASE_URL,
 					geminiMedium: meta?.geminiMedium,
 					maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 					temperature: options?.temperature,
@@ -282,7 +284,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				const anthropicModel = buildModel({
 					...model,
 					api: "anthropic-messages",
-					baseUrl: FACTORY_DROID_ANTHROPIC_BASE_URL,
+					baseUrl: model.baseUrl ?? FACTORY_DROID_ANTHROPIC_BASE_URL,
 				} as ModelSpec<"anthropic-messages">);
 				const effort = options?.disableReasoning ? undefined : options?.reasoning;
 				const thinkingStyle = meta?.thinkingStyle ?? "adaptive";
@@ -364,7 +366,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				const responsesModel = buildModel({
 					...model,
 					api: "openai-responses",
-					baseUrl: FACTORY_DROID_RESPONSES_BASE_URL,
+					baseUrl: model.baseUrl ?? FACTORY_DROID_RESPONSES_BASE_URL,
 					// The CLI never sends max_output_tokens for openai-provider
 					// models; only xai (grok) carries one (63356). The shared
 					// transport honors `omitMaxOutputTokens` by dropping the field.
@@ -440,7 +442,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				const openaiModel = buildModel({
 					...model,
 					api: "openai-completions",
-					baseUrl: FACTORY_DROID_COMPLETIONS_BASE_URL,
+					baseUrl: model.baseUrl ?? FACTORY_DROID_COMPLETIONS_BASE_URL,
 					compat: {
 						// The proxy's upstreams speak `max_tokens` (not the OpenAI-era
 						// `max_completion_tokens`) and have no `store` field.

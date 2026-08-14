@@ -33,6 +33,7 @@ describe("Factory Droid OAuth", () => {
 		const fetchImpl: FetchImpl = async (url, init) => {
 			calls.push({ url: String(url), body: String(init?.body ?? "") });
 			if (String(url).endsWith("/authorize/device")) return jsonResponse(200, DEVICE_AUTH);
+			if (String(url).endsWith("/api/cli/whoami")) return jsonResponse(200, { region: "eu" });
 			return jsonResponse(200, { access_token: access, refresh_token: "refresh-1" });
 		};
 		const auths: Array<{ url: string; instructions?: string }> = [];
@@ -57,6 +58,10 @@ describe("Factory Droid OAuth", () => {
 		expect(credentials.accountId).toBe("user_123");
 		expect(credentials.orgId).toBe("org-ext-1");
 		expect(credentials.expires).toBeGreaterThan(Date.now());
+		// whoami runs against the default host with the fresh access token and
+		// captures the account residency region.
+		expect(calls[2].url).toBe("https://api.factory.ai/api/cli/whoami");
+		expect(credentials.region).toBe("eu");
 	});
 
 	it("keeps polling through authorization_pending and slow_down", async () => {
@@ -64,6 +69,7 @@ describe("Factory Droid OAuth", () => {
 		let polls = 0;
 		const fetchImpl: FetchImpl = async url => {
 			if (String(url).endsWith("/authorize/device")) return jsonResponse(200, DEVICE_AUTH);
+			if (String(url).endsWith("/api/cli/whoami")) return jsonResponse(200, {});
 			polls += 1;
 			if (polls === 1) return jsonResponse(400, { error: "authorization_pending" });
 			if (polls === 2) return jsonResponse(400, { error: "slow_down" });
@@ -96,9 +102,11 @@ describe("Factory Droid OAuth", () => {
 
 	it("refreshes via the WorkOS refresh_token grant and maps the user payload", async () => {
 		const access = makeJwt({ sub: "user_9", exp: Math.floor(Date.now() / 1000) + 7200 });
-		const calls: Array<{ url: string; body: string }> = [];
+		const calls: Array<{ url: string; body: string; authorization?: string }> = [];
 		const fetchImpl: FetchImpl = async (url, init) => {
-			calls.push({ url: String(url), body: String(init?.body ?? "") });
+			const headers = new Headers(init?.headers);
+			calls.push({ url: String(url), body: String(init?.body ?? ""), authorization: headers.get("authorization") ?? undefined });
+			if (String(url).endsWith("/api/cli/whoami")) return jsonResponse(200, { region: "eu" });
 			return jsonResponse(200, {
 				access_token: access,
 				refresh_token: "refresh-rotated",
@@ -114,6 +122,23 @@ describe("Factory Droid OAuth", () => {
 		expect(credentials.refresh).toBe("refresh-rotated");
 		expect(credentials.email).toBe("rotated@example.com");
 		expect(credentials.orgId).toBe("org-9");
+		// Refresh re-reads whoami with the rotated access token (mirrors the CLI).
+		expect(calls[1].url).toBe("https://api.factory.ai/api/cli/whoami");
+		expect(calls[1].authorization).toBe(`Bearer ${access}`);
+		expect(credentials.region).toBe("eu");
+	});
+
+	it("treats a whoami failure as region unknown, not a login failure", async () => {
+		const access = makeJwt({ sub: "user_2", exp: Math.floor(Date.now() / 1000) + 3600 });
+		const fetchImpl: FetchImpl = async url => {
+			if (String(url).endsWith("/authorize/device")) return jsonResponse(200, DEVICE_AUTH);
+			if (String(url).endsWith("/api/cli/whoami")) return jsonResponse(500, {});
+			return jsonResponse(200, { access_token: access, refresh_token: "refresh-3" });
+		};
+
+		const credentials = await loginFactoryDroid({ fetch: fetchImpl });
+		expect(credentials.refresh).toBe("refresh-3");
+		expect(credentials.region).toBeUndefined();
 	});
 
 	it("surfaces refresh failures with the provider error", async () => {

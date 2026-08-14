@@ -2643,6 +2643,7 @@ export class AuthStorage {
 						apiEndpoint: refreshed.apiEndpoint ?? current.apiEndpoint,
 						orgId: refreshed.orgId ?? current.orgId,
 						orgName: refreshed.orgName ?? current.orgName,
+						region: refreshed.region ?? current.region,
 					};
 			if (this.#store.tryUpdateAuthCredentialIfMatches) {
 				if (
@@ -5491,6 +5492,7 @@ export class AuthStorage {
 				apiEndpoint: result.newCredentials.apiEndpoint ?? selection.credential.apiEndpoint,
 				orgId: result.newCredentials.orgId ?? selection.credential.orgId,
 				orgName: result.newCredentials.orgName ?? selection.credential.orgName,
+				region: result.newCredentials.region ?? selection.credential.region,
 				authorizedAt: result.newCredentials.authorizedAt ?? selection.credential.authorizedAt,
 			};
 			if (credentialId !== undefined) {
@@ -6744,6 +6746,7 @@ export class AuthStorage {
 				apiEndpoint: refreshed.apiEndpoint ?? attempted.apiEndpoint,
 				orgId: refreshed.orgId ?? attempted.orgId,
 				orgName: refreshed.orgName ?? attempted.orgName,
+				region: refreshed.region ?? attempted.region,
 				authorizedAt: refreshed.authorizedAt ?? attempted.authorizedAt,
 			};
 			// Persist by id: the array may have been reordered/shrunk while the

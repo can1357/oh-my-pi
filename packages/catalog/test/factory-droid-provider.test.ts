@@ -7,6 +7,7 @@ import {
 	FACTORY_DROID_MODEL_META,
 	FACTORY_DROID_MODELS,
 	FACTORY_DROID_RESPONSES_BASE_URL,
+	resolveFactoryDroidRotation,
 } from "../src/discovery/factory-droid-models";
 import { ANTHROPIC_THINKING, Effort } from "../src/effort";
 import { getBundledModel } from "../src/models";
@@ -301,5 +302,111 @@ describe("Factory Droid catalog", () => {
 			expect(reference, `${meta.id} -> ${meta.priceRef.provider}/${meta.priceRef.modelId}`).toBeDefined();
 		}
 		expect(checked).toBeGreaterThan(30);
+	});
+});
+
+
+describe("Factory Droid EU region", () => {
+	const allFlagsOn = Object.fromEntries(
+		FACTORY_DROID_MODELS.flatMap(m => (m.featureFlag ? [[m.featureFlag, true]] : [])),
+	);
+	const okJson = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
+
+	it("resolves rotations from the region: override wins, filter is the fallback, global passes through", () => {
+		const opus5 = FACTORY_DROID_MODELS.find(m => m.id === "claude-opus-5")!;
+		const sonnet = FACTORY_DROID_MODELS.find(m => m.id === "claude-sonnet-4-5-20250929")!;
+		const fable = FACTORY_DROID_MODELS.find(m => m.id === "claude-fable-5")!;
+		const kimi = FACTORY_DROID_MODELS.find(m => m.id === "kimi-k3")!;
+
+		// Explicit EU override (the CLI's regionOverrides.eu) wins verbatim.
+		expect(resolveFactoryDroidRotation(opus5, "eu")).toEqual(["bedrock_anthropic"]);
+		// An empty override means unavailable in the region.
+		expect(resolveFactoryDroidRotation(fable, "eu")).toEqual([]);
+		// No override: the default rotation is filtered to EU-serving upstreams.
+		expect(resolveFactoryDroidRotation(sonnet, "eu")).toEqual(["vertex_anthropic", "bedrock_anthropic"]);
+		// fireworks/baseten serve only the global region.
+		expect(resolveFactoryDroidRotation(kimi, "eu")).toEqual([]);
+		// Global and unknown regions keep the static rotation untouched.
+		expect(resolveFactoryDroidRotation(opus5, undefined)).toEqual(opus5.apiProviders);
+		expect(resolveFactoryDroidRotation(opus5, "global")).toEqual(opus5.apiProviders);
+		expect(resolveFactoryDroidRotation(kimi, "global")).toEqual(["fireworks", "baseten"]);
+	});
+
+	it("queries the EU host and hides models with no EU-serving upstream", async () => {
+		const urls: string[] = [];
+		const fetchImpl: FetchImpl = async url => {
+			urls.push(String(url));
+			if (String(url).includes("feature-flags")) return okJson({ flags: allFlagsOn });
+			return okJson({ settings: {} });
+		};
+		const models = await fetchFactoryDroidModels({ apiKey: "token", region: "eu", fetch: fetchImpl });
+		expect(models).not.toBeNull();
+		const ids = models!.map(model => model.id);
+
+		// Discovery endpoints follow the region.
+		expect(urls[0]).toBe("https://api.eu.factory.ai/api/feature-flags");
+		expect(urls[1]).toBe("https://api.eu.factory.ai/api/organization/managed-settings");
+
+		// Hidden for EU: Droid Core (fireworks/baseten-only), Gemini (google-only),
+		// grok (xai-only), and fable-5 (explicit empty EU override).
+		expect(ids).not.toContain("kimi-k3");
+		expect(ids).not.toContain("gemini-3.1-pro-preview");
+		expect(ids).not.toContain("grok-4.5");
+		expect(ids).not.toContain("claude-fable-5");
+		// Available with region-resolved rotations and EU wire URLs.
+		const opus5 = models!.find(model => model.id === "claude-opus-5")!;
+		expect(opus5.factoryDroidApiProviders).toEqual(["bedrock_anthropic"]);
+		expect(opus5.baseUrl).toBe("https://api.eu.factory.ai/api/llm/a");
+		const sonnet = models!.find(model => model.id === "claude-sonnet-4-5-20250929")!;
+		expect(sonnet.factoryDroidApiProviders).toEqual(["vertex_anthropic", "bedrock_anthropic"]);
+		const gpt54 = models!.find(model => model.id === "gpt-5.4")!;
+		expect(gpt54.factoryDroidApiProviders).toEqual(["openai"]);
+		expect(gpt54.baseUrl).toBe("https://api.eu.factory.ai/api/llm/o/v1");
+	});
+
+	it("intersects live provider_routing with the EU rotation instead of resurrecting global upstreams", async () => {
+		const fetchImpl: FetchImpl = async url => {
+			if (String(url).includes("feature-flags")) {
+				return okJson({
+					flags: allFlagsOn,
+					configs: {
+						provider_routing: {
+							version: 1,
+							models: {
+								// US-centric entry: no EU upstream survives the intersection,
+								// so the region-resolved rotation wins.
+								"claude-opus-5": ["anthropic"],
+								// Mixed entry narrows to the EU-serving subset.
+								"claude-sonnet-4-5-20250929": ["anthropic", "bedrock_anthropic"],
+							},
+						},
+					},
+				});
+			}
+			return okJson({ settings: {} });
+		};
+		const models = await fetchFactoryDroidModels({ apiKey: "token", region: "eu", fetch: fetchImpl });
+		expect(models!.find(model => model.id === "claude-opus-5")?.factoryDroidApiProviders).toEqual([
+			"bedrock_anthropic",
+		]);
+		expect(
+			models!.find(model => model.id === "claude-sonnet-4-5-20250929")?.factoryDroidApiProviders,
+		).toEqual(["bedrock_anthropic"]);
+	});
+
+	it("keeps the global path byte-identical when no region is known", async () => {
+		const urls: string[] = [];
+		const fetchImpl: FetchImpl = async url => {
+			urls.push(String(url));
+			if (String(url).includes("feature-flags")) return okJson({ flags: allFlagsOn });
+			return okJson({ settings: {} });
+		};
+		const models = await fetchFactoryDroidModels({ apiKey: "token", fetch: fetchImpl });
+		expect(urls[0]).toBe("https://api.factory.ai/api/feature-flags");
+		const opus5 = models!.find(model => model.id === "claude-opus-5")!;
+		// No routing entry: the sparse field stays unset and the wire URL is the global host.
+		expect(opus5.factoryDroidApiProviders).toBeUndefined();
+		expect(opus5.baseUrl).toBe("https://api.factory.ai/api/llm/a");
+		expect(models!.find(model => model.id === "kimi-k3")).toBeDefined();
 	});
 });

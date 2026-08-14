@@ -1854,10 +1854,17 @@ export class ModelRegistry {
 				hasExplicitVllmConfig ||
 				canUseSharedCatalogWithoutAuth
 			) {
+				// Region-partitioned providers (factory-droid today) read the
+				// account residency region captured into the OAuth credential at
+				// login; the first credential carrying one wins.
+				const region = getOAuthCredentialsForProvider(this.authStorage, descriptor.providerId).find(
+					credential => typeof credential.region === "string" && credential.region.length > 0,
+				)?.region;
 				const discoveryConfig = {
 					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
 					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
 					fetch: this.#fetch,
+					...(region !== undefined ? { region } : {}),
 				};
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??
