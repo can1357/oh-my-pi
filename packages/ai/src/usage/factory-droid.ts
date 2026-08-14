@@ -1,4 +1,5 @@
 import { FACTORY_DROID_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/discovery";
+import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import type {
 	UsageAmount,
@@ -104,6 +105,36 @@ export function parseFactoryDroidUsage(payload: unknown, fetchedAt = Date.now())
 	return { provider: "factory-droid", fetchedAt, limits, raw: payload };
 }
 
+/**
+ * Fetches and parses `GET /api/billing/limits`. Shared between the usage
+ * provider (quota widgets) and the factory-droid transport's error path,
+ * which re-checks pool state to turn the proxy's bare 403s into actionable
+ * quota messages. Returns null on any failure — callers treat that as
+ * "quota unknown", never as exhaustion.
+ */
+export async function fetchFactoryDroidUsageReport(
+	accessToken: string,
+	fetchImpl: FetchImpl,
+	signal?: AbortSignal,
+): Promise<UsageReport | null> {
+	try {
+		const response = await fetchImpl(FACTORY_BILLING_LIMITS_URL, {
+			headers: {
+				Accept: "application/json",
+				Authorization: `Bearer ${accessToken}`,
+				"X-Client-Version": FACTORY_DROID_CLIENT_VERSION,
+				"X-Factory-Client": "cli",
+			},
+			signal,
+		});
+		if (!response.ok) return null;
+		const payload: unknown = await response.json();
+		return parseFactoryDroidUsage(payload);
+	} catch {
+		return null;
+	}
+}
+
 export const factoryDroidUsageProvider: UsageProvider = {
 	id: "factory-droid",
 	supports(params: UsageFetchParams): boolean {
@@ -116,39 +147,18 @@ export const factoryDroidUsageProvider: UsageProvider = {
 		const { credential } = params;
 		if (credential.type !== "oauth" || !credential.accessToken) return null;
 
-		try {
-			const response = await ctx.fetch(FACTORY_BILLING_LIMITS_URL, {
-				headers: {
-					Accept: "application/json",
-					Authorization: `Bearer ${credential.accessToken}`,
-					"X-Client-Version": FACTORY_DROID_CLIENT_VERSION,
-					"X-Factory-Client": "cli",
-				},
-				signal: params.signal,
-			});
-			if (!response.ok) {
-				ctx.logger?.warn("Factory Droid usage request failed", {
-					status: response.status,
-					provider: params.provider,
-				});
-				return null;
-			}
-			const payload: unknown = await response.json();
-			const report = parseFactoryDroidUsage(payload);
-			if (report) {
-				const metadata = {
-					...(credential.email ? { email: credential.email } : {}),
-					...(credential.orgId ? { orgId: credential.orgId } : {}),
-				};
-				if (Object.keys(metadata).length > 0) report.metadata = metadata;
-			}
-			return report;
-		} catch (error) {
-			ctx.logger?.warn("Factory Droid usage request error", {
-				provider: params.provider,
-				error: String(error),
-			});
+		const report = await fetchFactoryDroidUsageReport(credential.accessToken, ctx.fetch, params.signal);
+		if (!report) {
+			ctx.logger?.warn("Factory Droid usage request failed", { provider: params.provider });
 			return null;
 		}
+		if (report) {
+			const metadata = {
+				...(credential.email ? { email: credential.email } : {}),
+				...(credential.orgId ? { orgId: credential.orgId } : {}),
+			};
+			if (Object.keys(metadata).length > 0) report.metadata = metadata;
+		}
+		return report;
 	},
 };

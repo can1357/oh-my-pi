@@ -11,8 +11,20 @@ import {
 	recordFactoryDroidRegionBlock,
 } from "@oh-my-pi/pi-catalog/discovery";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { formatDuration } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import type { Api, Context, Model, ModelSpec, ServiceTier, StreamFunction, StreamOptions, ToolChoice } from "../types";
+import type {
+	Api,
+	Context,
+	FetchImpl,
+	Model,
+	ModelSpec,
+	ServiceTier,
+	StreamFunction,
+	StreamOptions,
+	ToolChoice,
+} from "../types";
+import { fetchFactoryDroidUsageReport } from "../usage/factory-droid";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { hasNonThinkingTurnAfterLastUser, hasThinkinglessAssistantHistory } from "./anthropic";
@@ -238,6 +250,58 @@ function asRegionUnavailableError(model: Model<Api>, errorMessage: string | unde
 	);
 }
 
+const QUOTA_FORBIDDEN_PATTERN = /\b403\b|forbidden/i;
+
+/**
+ * Factory's proxy answers a bare `403 Forbidden` (no detail string) when the
+ * model's subscription pool is exhausted — on its face indistinguishable from
+ * an auth failure. Re-check the live billing limits and, when the model's
+ * pool has an exhausted window, rewrite the error with the binding window's
+ * reset and steer to the other pool. Droid Core models are exactly the
+ * `openai-completions` wire; every other wire bills Standard Credits.
+ *
+ * Conservative by design: any ambiguity (limits unreachable, no exhausted
+ * window, extra-usage balance remaining, custom unregistered model) leaves
+ * the original error untouched, and unlike the region path nothing is
+ * recorded — pools recover on their own, so there is nothing to persist.
+ */
+async function asQuotaExhaustedError(
+	model: Model<Api>,
+	errorMessage: string | undefined,
+	accessToken: string | undefined,
+	fetchImpl: FetchImpl | undefined,
+): Promise<string | undefined> {
+	if (!accessToken || errorMessage == null || !QUOTA_FORBIDDEN_PATTERN.test(errorMessage)) return undefined;
+	if (REGION_UNAVAILABLE_PATTERN.test(errorMessage)) return undefined;
+	const meta = FACTORY_DROID_MODEL_META[model.id];
+	if (!meta) return undefined;
+	const report = await fetchFactoryDroidUsageReport(accessToken, fetchImpl ?? fetch, AbortSignal.timeout(5_000));
+	if (!report) return undefined;
+	if (report.limits.some(limit => limit.id === "factory-droid:extra-balance" && (limit.amount.remaining ?? 0) > 0)) {
+		return undefined;
+	}
+	const pool = meta.wire === "openai-completions" ? "core" : "standard";
+	const poolLabel = pool === "core" ? "Droid Core" : "Standard Credits";
+	const exhausted = report.limits.filter(
+		limit => limit.id.startsWith(`factory-droid:${pool}:`) && limit.status === "exhausted",
+	);
+	if (exhausted.length === 0) return undefined;
+	// The binding window is the last to reset: the model works again only once
+	// every exhausted window has recovered.
+	const binding = exhausted.reduce((a, b) => ((a.window?.resetsAt ?? 0) >= (b.window?.resetsAt ?? 0) ? a : b));
+	const windowId = binding.id.split(":")[2] ?? "";
+	const resetsAt = binding.window?.resetsAt;
+	const resetHint =
+		resetsAt !== undefined && resetsAt > Date.now() ? ` (resets in ${formatDuration(resetsAt - Date.now())})` : "";
+	const otherLabel = pool === "core" ? "Standard Credits" : "Droid Core";
+	const otherPool = pool === "core" ? "standard" : "core";
+	const otherExhausted = report.limits.some(
+		limit => limit.id.startsWith(`factory-droid:${otherPool}:`) && limit.status === "exhausted",
+	);
+	const steer = otherExhausted ? "" : ` ${otherLabel} models remain available.`;
+	return `${model.id} is unavailable: your ${poolLabel} ${windowId} pool is exhausted${resetHint}.${steer}`;
+}
+
 export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 	model: Model<"factory-droid-agent">,
 	context: Context,
@@ -246,11 +310,12 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
+		// Sole credential path: the OMP-stored WorkOS session from `/login
+		// factory-droid`, resolved and refreshed by the harness and passed as
+		// apiKey. The kNoAuth sentinel ("N/A") means no stored credential.
+		// Hoisted above try: the catch path consults it for the quota re-check.
+		const harnessToken = options?.apiKey?.trim();
 		try {
-			// Sole credential path: the OMP-stored WorkOS session from `/login
-			// factory-droid`, resolved and refreshed by the harness and passed as
-			// apiKey. The kNoAuth sentinel ("N/A") means no stored credential.
-			const harnessToken = options?.apiKey?.trim();
 			if (!harnessToken || harnessToken === "N/A") {
 				throw new AIError.ConfigurationError(
 					"No Factory Droid credentials found. Run `/login factory-droid` (WorkOS device code).",
@@ -527,8 +592,11 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 			for await (const event of innerStream) {
 				if (event.type === "error") {
 					const regionMessage = asRegionUnavailableError(model, event.error.errorMessage);
-					if (regionMessage != null) {
-						stream.push({ ...event, error: { ...event.error, errorMessage: regionMessage } });
+					const rewritten =
+						regionMessage ??
+						(await asQuotaExhaustedError(model, event.error.errorMessage, harnessToken, options?.fetch));
+					if (rewritten != null) {
+						stream.push({ ...event, error: { ...event.error, errorMessage: rewritten } });
 						continue;
 					}
 				}
@@ -538,6 +606,10 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 			const message = createProviderErrorMessage(model, error);
 			const regionMessage = asRegionUnavailableError(model, message.errorMessage);
 			if (regionMessage != null) message.errorMessage = regionMessage;
+			else {
+				const quotaMessage = await asQuotaExhaustedError(model, message.errorMessage, harnessToken, options?.fetch);
+				if (quotaMessage != null) message.errorMessage = quotaMessage;
+			}
 			stream.push({ type: "error", reason: "error", error: message });
 			stream.end();
 		}
