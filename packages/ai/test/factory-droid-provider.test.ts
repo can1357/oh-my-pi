@@ -501,3 +501,108 @@ describe("Factory Droid region availability", () => {
 		expect(recordSpy).not.toHaveBeenCalled();
 	});
 });
+
+describe("Factory Droid quota exhaustion", () => {
+	const forbidden = { status: 403, title: "Forbidden", detail: "Forbidden", requestId: "yul1::q1" };
+
+	function limitsPayload(coreWeeklyPercent: number, extraBalanceCents = 0) {
+		const window = (usedPercent: number) => ({
+			usedPercent,
+			windowEnd: new Date(Date.now() + 2 * 24 * 60 * 60_000).toISOString(),
+		});
+		return {
+			limits: {
+				standard: { fiveHour: window(10), weekly: window(20), monthly: window(30) },
+				core: { fiveHour: window(40), weekly: window(coreWeeklyPercent), monthly: window(50) },
+			},
+			extraUsageBalanceCents: extraBalanceCents,
+		};
+	}
+
+	function quotaFetch(limitsResponse: () => Response) {
+		return mock(async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url.includes("/api/billing/limits")) return limitsResponse();
+			return new Response(JSON.stringify(forbidden), { status: 403 });
+		});
+	}
+
+	it("rewrites a bare 403 into pool guidance when the model's pool is exhausted", async () => {
+		const result = await streamFactoryDroid(
+			kimiK3(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: quotaFetch(() => new Response(JSON.stringify(limitsPayload(100)), { status: 200 })),
+				sessionId: "019fd-test-session",
+			},
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("kimi-k3 is unavailable");
+		expect(result.errorMessage).toContain("Droid Core weekly pool is exhausted");
+		expect(result.errorMessage).toContain("resets in");
+		expect(result.errorMessage).toContain("Standard Credits models remain available");
+		expect(result.errorMessage).not.toContain("Forbidden");
+	});
+
+	it("names the Standard Credits pool for non-core wires", async () => {
+		const payload = limitsPayload(10);
+		payload.limits.standard.weekly = { usedPercent: 100, windowEnd: new Date(Date.now() + 60_000).toISOString() };
+		const result = await streamFactoryDroid(
+			sonnet5(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: quotaFetch(() => new Response(JSON.stringify(payload), { status: 200 })),
+				sessionId: "019fd-test-session",
+			},
+		).result();
+
+		expect(result.errorMessage).toContain("Standard Credits weekly pool is exhausted");
+		expect(result.errorMessage).toContain("Droid Core models remain available");
+	});
+
+	it("leaves a bare 403 untouched when no pool is exhausted", async () => {
+		const result = await streamFactoryDroid(
+			kimiK3(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: quotaFetch(() => new Response(JSON.stringify(limitsPayload(40)), { status: 200 })),
+				sessionId: "019fd-test-session",
+			},
+		).result();
+
+		expect(result.errorMessage).toContain("Forbidden");
+	});
+
+	it("leaves the 403 untouched when the limits re-check fails", async () => {
+		const result = await streamFactoryDroid(
+			kimiK3(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: quotaFetch(() => new Response("unavailable", { status: 500 })),
+				sessionId: "019fd-test-session",
+			},
+		).result();
+
+		expect(result.errorMessage).toContain("Forbidden");
+	});
+
+	it("does not rewrite the 403 when extra-usage balance remains", async () => {
+		const result = await streamFactoryDroid(
+			kimiK3(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: WORKOS_TOKEN,
+				fetch: quotaFetch(() => new Response(JSON.stringify(limitsPayload(100, 500)), { status: 200 })),
+				sessionId: "019fd-test-session",
+			},
+		).result();
+
+		expect(result.errorMessage).toContain("Forbidden");
+		expect(result.errorMessage).not.toContain("pool is exhausted");
+	});
+});
