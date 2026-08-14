@@ -251,7 +251,7 @@ describe("Factory Droid catalog", () => {
 		expect(FACTORY_DROID_MODEL_META["kimi-k2.5"].reasoningReplay).toBe("capture-only");
 		// standard: GLM-5.1/5.2, Inkling, Nemotron mirror the captured content.
 		expect(FACTORY_DROID_MODEL_META["glm-5.2"].reasoningReplay).toBe("standard");
-		expect(FACTORY_DROID_MODEL_META["inkling"].reasoningReplay).toBe("standard");
+		expect(FACTORY_DROID_MODEL_META.inkling.reasoningReplay).toBe("standard");
 		// placeholder: DeepSeek V4 forces a synthetic placeholder on tool calls.
 		expect(FACTORY_DROID_MODEL_META["deepseek-v4-flash-0731"].reasoningReplay).toBe("placeholder");
 		expect(FACTORY_DROID_MODEL_META["deepseek-v4-pro"].reasoningReplay).toBe("placeholder");
