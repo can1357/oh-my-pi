@@ -117,6 +117,14 @@ function waterAmplitude(
 }
 
 /**
+ * Number of full gradient rotations the intro sweep performs before settling
+ * into the resting orientation (phase 0 — same convention as welcome.ts's
+ * introLogoFrame). Converging to exactly 0 keeps the settled frame's `base`
+ * (always < 1 by construction) from ever wrapping mid-glyph.
+ */
+const SPLASH_SWEEPS = 1.8;
+
+/**
  * Animated setup splash, in the spirit of the omp landing page: the brand π
  * mark rendered with the live diagonal gradient + shine sweep, rising out of a
  * rippling, gradient-lit water surface, under a faint twinkling starfield. The
@@ -127,8 +135,12 @@ export function renderSetupSplash(width: number, height: number, elapsedMs: numb
 	const w = Math.max(1, width);
 	const h = Math.max(1, height);
 	const progress = Math.max(0, Math.min(1, elapsedMs / SETUP_SPLASH_MS));
-	const phase = progress * 1.8;
-	const shine: ShineConfig = { pos: (progress * 2.5) % 1, strength: Math.max(0, 1 - progress * 0.35) };
+	// Ease-out cubic so the spin decelerates into rest; phase is driven by
+	// (1 - eased), which hits exactly 0 at progress=1, so the settled frame
+	// never wraps mid-glyph and matches the app's canonical resting gradient.
+	const eased = 1 - (1 - progress) ** 3;
+	const phase = ((((1 - eased) * SPLASH_SWEEPS) % 1) + 1) % 1;
+	const shine: ShineConfig = { pos: (progress * 2.5) % 1, strength: (1 - eased) ** 1.5 };
 
 	if (w < MIN_SCENE_WIDTH || h < MIN_SCENE_HEIGHT) return renderCompactSplash(w, h, phase, shine);
 
