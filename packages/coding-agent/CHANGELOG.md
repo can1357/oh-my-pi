@@ -888,9 +888,9 @@
 - Fixed the extension tool-call handler timeout rendering outside a titled section in `/settings` by registering its Extensions group on the Tools tab.
 
 ### Added
-- Wired `factory-droid` model discovery and login help into the CLI.
-- Added a Standard Credits rate badge (`Nx`) to the model browser for `factory-droid` models, rendered next to the $/Mtok cost pair.
-- Allowed registry-declared optional-key providers to resolve credentials owned by their transport without failing OMP's generic API-key preflight, and documented Factory Droid's headless token override.
+- Wired `factory-droid` model discovery and login help into the CLI ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added a Standard Credits rate badge (`Nx`) to the model browser for `factory-droid` models, rendered next to the $/Mtok cost pair ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
+- Allowed registry-declared optional-key providers to resolve credentials owned by their transport without failing OMP's generic API-key preflight, and documented Factory Droid's headless token override ([#8577](https://github.com/can1357/oh-my-pi/pull/8577) by [@will-bogusz](https://github.com/will-bogusz)).
 
 
 ## [17.3.4] - 2026-08-14
