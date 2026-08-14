@@ -833,7 +833,7 @@
 - Kept current terminal retry errors in one pinned banner with attempt context while surfacing local continuation failures instead of stale provider errors.
 ### Added
 
-- Added an `oauth.scopes` field to per-server MCP configuration that takes precedence over the scopes discovered from authorization-server or protected-resource metadata, so an MCP server behind a general-purpose corporate IdP can request its own resource-bound scope instead of the tenant-wide `scopes_supported` list the resource rejects ([#7841](https://github.com/can1357/oh-my-pi/issues/7841))
+- Added an `oauth.scopes` field to per-server MCP configuration that takes precedence over the scopes discovered from authorization-server or protected-resource metadata (and over a `scope` embedded in the provider's authorization URL), so an MCP server behind a general-purpose corporate IdP can request its own resource-bound scope instead of the tenant-wide `scopes_supported` list the resource rejects; `""` sends no `scope` parameter at all ([#7841](https://github.com/can1357/oh-my-pi/issues/7841))
 
 ## [17.3.2] - 2026-08-13
 

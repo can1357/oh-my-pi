@@ -104,7 +104,7 @@
         },
         "scopes": {
           "type": "string",
-          "description": "Space-separated OAuth scopes for the authorization request. Takes precedence over scopes discovered from authorization-server or protected-resource metadata."
+          "description": "Space-separated OAuth scopes for the authorization request. Takes precedence over scopes discovered from authorization-server or protected-resource metadata and over a `scope` embedded in the provider's authorization URL; set to \"\" to send no `scope` parameter."
         },
         "prompt": {
           "type": "string",
