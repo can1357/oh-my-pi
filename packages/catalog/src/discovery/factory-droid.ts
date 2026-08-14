@@ -1,6 +1,7 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { ANTHROPIC_THINKING, type Effort, THINKING_EFFORTS } from "../effort";
-import type { FetchImpl, ModelSpec, ThinkingConfig, ThinkingControlMode } from "../types";
+import { getBundledModel } from "../models";
+import type { FactoryDroidCredits, FetchImpl, ModelSpec, ThinkingConfig, ThinkingControlMode } from "../types";
 import {
 	FACTORY_DROID_CLIENT_VERSION,
 	FACTORY_DROID_MODELS,
@@ -147,6 +148,9 @@ export function buildFactoryDroidModel(
 	resolvedApiProviders?: readonly string[],
 ): ModelSpec<"factory-droid-agent"> {
 	const thinking = buildFactoryDroidThinking(input);
+	// Runtime-unsafe lookup by design: a models.json regen can drop a referenced
+	// id, and a missing reference must degrade to zero cost, not break discovery.
+	const reference = input.priceRef ? getBundledModel(input.priceRef.provider, input.priceRef.modelId) : undefined;
 	return {
 		id: input.id,
 		name: input.name,
@@ -155,11 +159,30 @@ export function buildFactoryDroidModel(
 		baseUrl: FACTORY_DROID_WIRE_BASE_URLS[input.wire],
 		reasoning: thinking != null,
 		input: input.noImageSupport ? ["text"] : ["text", "image"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		cost: reference?.cost ? { ...reference.cost } : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		thinking,
 		contextWindow: input.contextWindow,
 		maxTokens: input.maxTokens,
+		...(input.credits ? { factoryDroidCredits: projectFactoryDroidCredits(input.credits) } : {}),
 		...(resolvedApiProviders?.length ? { factoryDroidApiProviders: [...resolvedApiProviders] } : {}),
+	};
+}
+
+/**
+ * Project the registry's relative credit multipliers into effective per-token
+ * rates: `output` defaults to the input rate when the CLI table declares no
+ * `outputTokenMultiplier`; `cacheRead` is reported only when separately metered.
+ */
+export function projectFactoryDroidCredits(
+	credits: NonNullable<FactoryDroidModelInput["credits"]>,
+): FactoryDroidCredits {
+	// Rates are rendered and compared, never accumulated — round off float dust
+	// (0.8 * 3 = 2.4000000000000004) at the projection boundary.
+	const rate = (n: number): number => Math.round(n * 1e6) / 1e6;
+	return {
+		input: rate(credits.input),
+		output: rate(credits.input * (credits.output ?? 1)),
+		...(credits.cacheRead != null ? { cacheRead: rate(credits.input * credits.cacheRead) } : {}),
 	};
 }
 

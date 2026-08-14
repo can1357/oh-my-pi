@@ -9,6 +9,7 @@ import {
 	FACTORY_DROID_RESPONSES_BASE_URL,
 } from "../src/discovery/factory-droid-models";
 import { ANTHROPIC_THINKING, Effort } from "../src/effort";
+import { getBundledModel } from "../src/models";
 import { factoryDroidModelManagerOptions } from "../src/provider-models/special";
 import type { FetchImpl } from "../src/types";
 
@@ -258,5 +259,47 @@ describe("Factory Droid catalog", () => {
 			mode: "anthropic-adaptive",
 			supportsDisplay: true,
 		});
+	});
+
+	it("wires upstream list prices and effective credit rates from the registry", () => {
+		// Cost is inherited from the referenced bundled catalog entry, not inlined.
+		const kimi = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["kimi-k3"]);
+		expect(kimi.cost).toEqual(getBundledModel("fireworks", "kimi-k3").cost);
+		expect(kimi.factoryDroidCredits).toEqual({ input: 1.2, output: 6 });
+
+		// Cache-read-metered models project the relative multiplier through the input rate.
+		const grok = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["grok-4.5"]);
+		expect(grok.cost).toEqual(getBundledModel("xai", "grok-4.5").cost);
+		expect(grok.factoryDroidCredits).toEqual({ input: 0.8, output: 2.4, cacheRead: 0.2 });
+
+		// No outputTokenMultiplier -> output billed at the input rate.
+		const opus = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["claude-opus-5"]);
+		expect(opus.factoryDroidCredits).toEqual({ input: 2, output: 2 });
+		expect(opus.cost).toEqual(getBundledModel("anthropic", "claude-opus-5").cost);
+	});
+
+	it("keeps Factory-only SKUs at zero cost with the credit badge only", () => {
+		// Fast tiers are distinct SKUs with no upstream list price.
+		const fast = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["claude-opus-4-8-fast"]);
+		expect(fast.cost).toEqual(zeroCost);
+		expect(fast.factoryDroidCredits).toEqual({ input: 4, output: 4 });
+
+		// Preview codenames have no upstream catalog entry either.
+		const atlas = buildFactoryDroidModel(FACTORY_DROID_MODEL_META["atlas-07-21"]);
+		expect(atlas.cost).toEqual(zeroCost);
+		expect(atlas.factoryDroidCredits).toEqual({ input: 2, output: 2 });
+	});
+
+	it("resolves every registry priceRef in the bundled catalog", () => {
+		// A models.json regen that drops a referenced id must fail here, not
+		// silently degrade the model's cost display to zero.
+		let checked = 0;
+		for (const meta of FACTORY_DROID_MODELS) {
+			if (!meta.priceRef) continue;
+			checked += 1;
+			const reference = getBundledModel(meta.priceRef.provider, meta.priceRef.modelId) as unknown;
+			expect(reference, `${meta.id} -> ${meta.priceRef.provider}/${meta.priceRef.modelId}`).toBeDefined();
+		}
+		expect(checked).toBeGreaterThan(30);
 	});
 });
