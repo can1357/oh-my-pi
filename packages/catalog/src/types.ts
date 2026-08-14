@@ -1052,6 +1052,13 @@ export type ModelTokenizer =
 	| "glm5";
 
 // Model interface for the unified model system
+/** Factory Droid effective per-token Standard Credits rates (relative unit, not dollars). */
+export interface FactoryDroidCredits {
+	input: number;
+	output: number;
+	cacheRead?: number;
+}
+
 export interface Model<TApi extends Api = Api> {
 	id: string;
 	/**
@@ -1120,6 +1127,13 @@ export interface Model<TApi extends Api = Api> {
 	 * Overrides the registry's static `apiProviders` order when present.
 	 */
 	factoryDroidApiProviders?: string[];
+	/**
+	 * Factory Droid: effective per-token Standard Credits rates, projected from
+	 * the registry's relative multipliers at discovery time (`output`/`cacheRead`
+	 * already multiplied through; `cacheRead` absent when not separately
+	 * metered). Rendered as an `N×` badge next to the raw-$ pair.
+	 */
+	factoryDroidCredits?: FactoryDroidCredits;
 	cost: ModelCost;
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;

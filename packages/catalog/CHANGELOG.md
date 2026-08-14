@@ -339,6 +339,7 @@
 ### Added
 
 - Added the `factory-droid` provider with a static model registry ported byte-faithfully from the Droid CLI's compiled-in catalog: 55 CLI-visible models across the Droid Core flat-rate series (Kimi, GLM, DeepSeek, MiniMax, Inkling, Nemotron) and Standard Credits families (GPT-5.x, Claude, Gemini, Grok), with per-model wire protocol (`openai-completions`/`openai-responses`/`anthropic-messages`/`google-generate`), upstream rotation lists, reasoning ladders, credit multipliers, context limits, and Statsig feature-flag plus hard-deprecation gating matching the CLI's picker.
+- Added effective Standard Credits rates to `factory-droid` discovery: the registry now mirrors the CLI's per-model credit table (`credits`) and maps each model to its upstream catalog entry (`priceRef`), so discovered models expose both the projected per-token credit rate (`factoryDroidCredits` on `Model`) and the raw-API list price as their `cost` counterfactual. Factory-only SKUs (fast tiers, preview codenames) stay zero-cost with credit data only.
 
 ## [17.2.10] - 2026-08-06
 
