@@ -116,11 +116,14 @@
 
 - Fixed the Markdown renderer incorrectly breaking into a raw code block when a 4-space-indented line (such as a box-drawing tree child under a └── branch) directly followed paragraph text; it now correctly stays part of the paragraph, matching standard Markdown behavior.
 
+### Added
+- Added `getFactoryDroidRegionBlocklistPath` to `dirs`, resolving `factory-droid-region-blocks.json` under the agent state directory.
+
+
 ## [17.3.2] - 2026-08-13
 
 ### Added
 
-- Added `getFactoryDroidRegionBlocklistPath` to `dirs`, resolving `factory-droid-region-blocks.json` under the agent state directory.
 
 ### Fixed
 

@@ -887,6 +887,12 @@
 - Fixed external thinking being offered on xAI reasoning-only Responses models (grok-4 family) that reject `reasoning.effort`, where the private scratchpad ran alongside native reasoning instead of replacing it.
 - Fixed the extension tool-call handler timeout rendering outside a titled section in `/settings` by registering its Extensions group on the Tools tab.
 
+### Added
+- Wired `factory-droid` model discovery and login help into the CLI.
+- Added a Standard Credits rate badge (`Nx`) to the model browser for `factory-droid` models, rendered next to the $/Mtok cost pair.
+- Allowed registry-declared optional-key providers to resolve credentials owned by their transport without failing OMP's generic API-key preflight, and documented Factory Droid's headless token override.
+
+
 ## [17.3.4] - 2026-08-14
 
 ### Changed
@@ -1112,8 +1118,6 @@
 
 ### Added
 
-- Wired `factory-droid` model discovery and login help into the CLI.
-- Added a Standard Credits rate badge (`Nx`) to the model browser for `factory-droid` models, rendered next to the $/Mtok cost pair.
 
 ## [17.2.10] - 2026-08-06
 
@@ -1130,7 +1134,6 @@
 
 - Reworked the Ctrl+S Agent Hub into a responsive fullscreen roster and selected-agent inspector, featuring aggregate status/usage metrics, detailed per-agent views (task, model, activity, usage, lineage), roster and spawn-tree views, stable ordering, asynchronous persisted-session discovery, restored historical metadata, and improved keyboard and mouse navigation.
 - Replaced `arktype` with `@oh-my-pi/omptype` for all tool parameter and configuration schemas, resulting in significantly faster startup times. Configuration schema errors are now reported via `OmpErrors` entries using the standard `path`/`problem` format.
-- Allowed registry-declared optional-key providers to resolve credentials owned by their transport without failing OMP's generic API-key preflight, and documented Factory Droid's headless token override.
 
 ### Fixed
 

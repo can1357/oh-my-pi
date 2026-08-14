@@ -274,6 +274,14 @@
 - Fixed Anthropic-compatible streams dropping thinking content, which broke replay of prior reasoning.
 - Updated the Alibaba Coding Plan China login flow to point to the current Bailian API-key management console.
 
+### Added
+
+- Added the sidecar-free `factory-droid-agent` transport: direct HTTPS calls to Factory's subscription LLM proxy across its four wire protocols (OpenAI chat completions for Droid Core, OpenAI Responses for GPT, Anthropic Messages for Claude/MiniMax, Gemini generateContent for Google), authenticated by `/login factory-droid` (WorkOS device code, refreshed through the auth store). Requests carry the Droid CLI's client identity (user agent, version markers, X-Stainless fingerprint, v4 session/message ids, org id) and the required Droid system-prompt prefix; reasoning effort maps per upstream (`reasoning_effort` + `reasoning_history` on Fireworks, `chat_template_args` on Baseten, adaptive/budget thinking + `output_config.effort` on Anthropic, `thinkingLevel` on Gemini, with `thoughtSignature` capture and replay across multi-turn tool loops).
+- Added region capture to the `factory-droid` OAuth flow: login and token refresh read the account residency region from `GET /api/cli/whoami` (best-effort; failure leaves the region unknown, i.e. global), stored as `region` on the OAuth credential and preserved across refreshes. The provider honors the region-resolved `baseUrl` stamped by catalog discovery on all four wire protocols.
+- Added region-unavailable handling to the `factory-droid` provider: a `400 Provider not available in this region` from Factory's proxy is rewritten into actionable guidance (naming the serving edge when the request id reveals it) and the model is recorded in the region blocklist so discovery hides it going forward.
+- Added the `factory-droid` usage provider: subscription quota from `GET /api/billing/limits` (Standard credits and Droid Core pools across 5-hour/weekly/monthly windows with reset timestamps, plus extra-usage balance) flows into OMP's usage surfaces.
+- Added pool-exhaustion classification to the `factory-droid` provider: a bare `403 Forbidden` from Factory's proxy triggers a live `/api/billing/limits` re-check and, when the model's pool (Droid Core or Standard Credits) has an exhausted window, the error is rewritten with the binding window's reset time and a pointer to the other pool.
+
 ## [17.3.4] - 2026-08-14
 
 ### Fixed
@@ -384,11 +392,6 @@
 - Classified subscription and plan-cap 429 responses as rotatable usage limits rather than transient rate-limit throttles, enabling smoother credential rotation.
 
 ### Added
-
-- Added the sidecar-free `factory-droid-agent` transport: direct HTTPS calls to Factory's subscription LLM proxy across its four wire protocols (OpenAI chat completions for Droid Core, OpenAI Responses for GPT, Anthropic Messages for Claude/MiniMax, Gemini generateContent for Google), authenticated by `/login factory-droid` (WorkOS device code, refreshed through the auth store). Requests carry the Droid CLI's client identity (user agent, version markers, X-Stainless fingerprint, v4 session/message ids, org id) and the required Droid system-prompt prefix; reasoning effort maps per upstream (`reasoning_effort` + `reasoning_history` on Fireworks, `chat_template_args` on Baseten, adaptive/budget thinking + `output_config.effort` on Anthropic, `thinkingLevel` on Gemini, with `thoughtSignature` capture and replay across multi-turn tool loops).
-- Added region capture to the `factory-droid` OAuth flow: login and token refresh read the account residency region from `GET /api/cli/whoami` (best-effort; failure leaves the region unknown, i.e. global), stored as `region` on the OAuth credential and preserved across refreshes. The provider honors the region-resolved `baseUrl` stamped by catalog discovery on all four wire protocols.
-- Added region-unavailable handling to the `factory-droid` provider: a `400 Provider not available in this region` from Factory's proxy is rewritten into actionable guidance (naming the serving edge when the request id reveals it) and the model is recorded in the region blocklist so discovery hides it going forward.
-- Added the `factory-droid` usage provider: subscription quota from `GET /api/billing/limits` (Standard credits and Droid Core pools across 5-hour/weekly/monthly windows with reset timestamps, plus extra-usage balance) flows into OMP's usage surfaces.
 
 ## [17.2.10] - 2026-08-06
 
