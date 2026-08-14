@@ -412,6 +412,9 @@ export function factoryDroidModelManagerOptions(
 		// table did not already filter.
 		fetchDynamicModels: async () =>
 			fetchFactoryDroidModels({ ...config, excludeModelIds: await readFactoryDroidRegionBlockedIds() }),
+		// Discovery encodes the request's serving region; a cache written from
+		// one network must not be replayed from another.
+		alwaysRefetchDynamicModels: true,
 	};
 }
 // ---------------------------------------------------------------------------
