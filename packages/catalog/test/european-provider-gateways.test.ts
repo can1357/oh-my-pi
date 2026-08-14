@@ -172,14 +172,52 @@ describe("European gateway provider catalog support", () => {
 		}
 	});
 
-	test("keeps the Nebius fallback in the saved public catalog snapshot", () => {
-		const fallback = EUROPEAN_GATEWAY_STATIC_MODELS.find(model => model.provider === "nebius");
-		const currentModelIds = nebiusModelsInfoFixture.models.flatMap(model =>
-			model.flavors.map(flavor => flavor.model_id),
-		);
+	test("discovers the saved current Nebius catalog model through the model manager", async () => {
+		const snapshotModel = nebiusModelsInfoFixture.models[0];
+		const flavor = snapshotModel?.flavors[0];
+		if (!snapshotModel || !flavor) throw new Error("Expected a Nebius catalog model fixture");
 
-		if (!fallback) throw new Error("Expected a Nebius fallback model");
-		expect(currentModelIds).toContain(fallback.id);
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return new Response(
+				JSON.stringify({
+					data: [
+						{
+							id: flavor.model_id,
+							name: snapshotModel.name,
+							context_length: flavor.max_model_len,
+							supported_parameters: snapshotModel.use_cases,
+							pricing: {
+								prompt: flavor.input_price_per_million_tokens / 1_000_000,
+								completion: flavor.output_price_per_million_tokens / 1_000_000,
+							},
+						},
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		});
+		const manager = createModelManager({
+			...nebiusModelManagerOptions({ apiKey: "nebius-test-key", fetch: fetchMock }),
+			cacheDbPath: `/private/tmp/omp-nebius-snapshot-${Date.now()}-${Math.random()}.sqlite`,
+		});
+
+		const result = await manager.refresh("online");
+
+		expect(result.stale).toBe(false);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.models).toContainEqual(
+			expect.objectContaining({
+				id: flavor.model_id,
+				provider: "nebius",
+				baseUrl: "https://api.tokenfactory.nebius.com/v1",
+				contextWindow: flavor.max_model_len,
+				supportsTools: true,
+				cost: expect.objectContaining({
+					input: flavor.input_price_per_million_tokens,
+					output: flavor.output_price_per_million_tokens,
+				}),
+			}),
+		);
 	});
 
 	test("preserves EURouter fallback vision metadata for the default model", () => {
@@ -435,6 +473,31 @@ describe("European gateway provider catalog support", () => {
 				supportsTools: true,
 			}),
 		);
+	});
+
+	test("normalizes gateway tool capability tokens before matching", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return new Response(
+				JSON.stringify({
+					data: [
+						{
+							id: "mistral-large-3",
+							name: "Mistral Large 3",
+							tags: [" Tools "],
+						},
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		});
+
+		const models = await eurouterModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(models?.[0]).toMatchObject({
+			id: "mistral-large-3",
+			provider: "eurouter",
+			supportsTools: true,
+		});
 	});
 
 	test("preserves native tool support when gateway capability metadata is absent", async () => {

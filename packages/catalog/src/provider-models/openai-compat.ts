@@ -955,7 +955,7 @@ function getEuropeanGatewayToolCapability(entry: OpenAICompatibleModelRecord): b
 	if (!hasCapabilitySignal) {
 		return undefined;
 	}
-	return capabilityTokens.some(token => EUROPEAN_GATEWAY_TOOL_CAPABILITY_TOKENS.has(token));
+	return capabilityTokens.some(token => EUROPEAN_GATEWAY_TOOL_CAPABILITY_TOKENS.has(token.trim().toLowerCase()));
 }
 
 function mapEuropeanGatewayModel(
