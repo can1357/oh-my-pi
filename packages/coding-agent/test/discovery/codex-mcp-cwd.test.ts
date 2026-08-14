@@ -147,3 +147,28 @@ test("path-like command resolves against a subdirectory cwd, not the config dire
 	expect(nested?.cwd).toBe(path.join(codexDir, "server"));
 	expect(nested?.command).toBe(path.join(codexDir, "server", "bin", "mcp"));
 });
+
+test("Codex OAuth scopes import as the space-separated authorization scope string", async () => {
+	const codexDir = path.join(tempHome, ".codex");
+	await fs.writeFile(
+		path.join(codexDir, "config.toml"),
+		[
+			"[mcp_servers.gateway]",
+			'url = "https://gateway.example.com/mcp"',
+			'scopes = ["https://gateway.example.com/mcp/mcp.invoke", "openid"]',
+			"",
+			"[mcp_servers.plain]",
+			'url = "https://plain.example.com/mcp"',
+			"",
+		].join("\n"),
+	);
+
+	const servers = await loadCodexServers();
+
+	// Codex stores scopes as an array; the authorization request needs the
+	// space-separated form, so the importer joins them rather than dropping them.
+	expect(servers.find(server => server.name === "gateway")?.oauth).toEqual({
+		scopes: "https://gateway.example.com/mcp/mcp.invoke openid",
+	});
+	expect(servers.find(server => server.name === "plain")?.oauth).toBeUndefined();
+});
