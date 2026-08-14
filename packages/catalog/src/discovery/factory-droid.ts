@@ -5,8 +5,10 @@ import type { FactoryDroidCredits, FetchImpl, ModelSpec, ThinkingConfig, Thinkin
 import {
 	FACTORY_DROID_CLIENT_VERSION,
 	FACTORY_DROID_MODELS,
-	FACTORY_DROID_WIRE_BASE_URLS,
 	type FactoryDroidModelInput,
+	factoryDroidApiBaseUrl,
+	factoryDroidWireBaseUrl,
+	resolveFactoryDroidRotation,
 } from "./factory-droid-models";
 
 /**
@@ -23,8 +25,14 @@ import {
 /** User-facing effort rungs, derived from the shared thinking ladder. */
 const SUPPORTED_EFFORTS = new Set<string>(THINKING_EFFORTS);
 
-const FACTORY_FEATURE_FLAGS_URL = "https://api.factory.ai/api/feature-flags";
-const FACTORY_MANAGED_SETTINGS_URL = "https://api.factory.ai/api/organization/managed-settings";
+/** Region-aware discovery endpoints; EU accounts are gated and routed from the EU host. */
+function featureFlagsUrl(region: string | undefined): string {
+	return `${factoryDroidApiBaseUrl(region)}/api/feature-flags`;
+}
+
+function managedSettingsUrl(region: string | undefined): string {
+	return `${factoryDroidApiBaseUrl(region)}/api/organization/managed-settings`;
+}
 
 /** Org policy subset from `/api/organization/managed-settings` that gates models. */
 interface FactoryModelPolicy {
@@ -77,7 +85,12 @@ function isModelAvailable(
 	model: FactoryDroidModelInput,
 	flags: Record<string, unknown>,
 	policy: FactoryModelPolicy | null,
+	region: string | undefined,
 ): boolean {
+	// Region gating (the CLI's `nJH`): a model with no upstream serving the
+	// account's region is hidden outright — this is what removes Droid Core
+	// (fireworks/baseten-only) and Gemini (google-only) for EU accounts.
+	if (resolveFactoryDroidRotation(model, region).length === 0) return false;
 	if (model.featureFlag !== undefined && flags[model.featureFlag] !== true) return false;
 	if (model.deprecationFlag !== undefined && flags[model.deprecationFlag] === true) return false;
 	if (policy?.blockedModelIds?.includes(model.id)) return false;
@@ -94,6 +107,12 @@ function isModelAvailable(
 export interface FactoryDroidModelDiscoveryOptions {
 	/** OMP-stored WorkOS access token (from `/login factory-droid`), when present. */
 	apiKey?: string;
+	/**
+	 * Account residency region from the stored OAuth credential (`whoami` at
+	 * login). `"eu"` switches discovery to the EU host, hides models with no
+	 * EU-serving upstream, and resolves EU rotations. Absent ⇒ `"global"`.
+	 */
+	region?: string;
 	fetch?: FetchImpl;
 }
 
@@ -122,8 +141,8 @@ export async function fetchFactoryDroidModels(
 	let routing: FactoryProviderRouting | null = null;
 	try {
 		const [flagsResponse, settingsResponse] = await Promise.all([
-			fetchImpl(FACTORY_FEATURE_FLAGS_URL, { headers }),
-			fetchImpl(FACTORY_MANAGED_SETTINGS_URL, { headers }).catch(() => null),
+			fetchImpl(featureFlagsUrl(options.region), { headers }),
+			fetchImpl(managedSettingsUrl(options.region), { headers }).catch(() => null),
 		]);
 		if (!flagsResponse.ok) return null;
 		const body: unknown = await flagsResponse.json();
@@ -138,14 +157,38 @@ export async function fetchFactoryDroidModels(
 	} catch {
 		return null;
 	}
-	return FACTORY_DROID_MODELS.filter(model => isModelAvailable(model, flags, policy)).map(model =>
-		buildFactoryDroidModel(model, routing?.models?.[model.id]),
+	return FACTORY_DROID_MODELS.filter(model => isModelAvailable(model, flags, policy, options.region)).map(model =>
+		buildFactoryDroidModel(
+			model,
+			resolveRotation(model, routing?.models?.[model.id], options.region),
+			options.region,
+		),
 	);
+}
+
+/**
+ * Rotation for one discovered model: the account region resolves the base
+ * rotation (override or region-filtered), then a live `provider_routing`
+ * entry narrows it. For the global region the routing entry applies verbatim
+ * (existing behavior); for EU it is intersected with the region-resolved set
+ * so a US-centric routing entry cannot resurrect a global-only upstream.
+ */
+function resolveRotation(
+	input: FactoryDroidModelInput,
+	routed: readonly string[] | undefined,
+	region: string | undefined,
+): readonly string[] | undefined {
+	if (region !== "eu") return routed ?? undefined;
+	const regionResolved = resolveFactoryDroidRotation(input, region);
+	if (!routed) return regionResolved;
+	const intersection = routed.filter(p => (regionResolved as readonly string[]).includes(p));
+	return intersection.length > 0 ? intersection : regionResolved;
 }
 
 export function buildFactoryDroidModel(
 	input: FactoryDroidModelInput,
 	resolvedApiProviders?: readonly string[],
+	region?: string,
 ): ModelSpec<"factory-droid-agent"> {
 	const thinking = buildFactoryDroidThinking(input);
 	// Runtime-unsafe lookup by design: a models.json regen can drop a referenced
@@ -156,7 +199,7 @@ export function buildFactoryDroidModel(
 		name: input.name,
 		api: "factory-droid-agent",
 		provider: "factory-droid",
-		baseUrl: FACTORY_DROID_WIRE_BASE_URLS[input.wire],
+		baseUrl: factoryDroidWireBaseUrl(input.wire, region),
 		reasoning: thinking != null,
 		input: input.noImageSupport ? ["text"] : ["text", "image"],
 		cost: reference?.cost ? { ...reference.cost } : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

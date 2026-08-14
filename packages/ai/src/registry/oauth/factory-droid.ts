@@ -9,6 +9,7 @@
  * control-plane only and do not authorize inference).
  */
 
+import { factoryDroidApiBaseUrl } from "@oh-my-pi/pi-catalog/discovery";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import { isRecord } from "../../utils";
@@ -158,6 +159,34 @@ function toCredentials(tokens: TokenResponse): OAuthCredentials {
 	};
 }
 
+/**
+ * Account residency region from `GET /api/cli/whoami` (the CLI's `X4L`).
+ * Best-effort: a failed or region-less response leaves the region undefined,
+ * which every consumer treats as the default "global" region — the CLI
+ * behaves the same way. The whoami call always targets the default host
+ * because the region is unknown until the call returns.
+ */
+async function fetchRegion(
+	fetchImpl: FetchImpl,
+	accessToken: string,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	try {
+		const response = await fetchImpl(`${factoryDroidApiBaseUrl(undefined)}/api/cli/whoami`, {
+			headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+			signal: signal ?? AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
+		});
+		if (!response.ok) return undefined;
+		const body: unknown = await response.json();
+		if (isRecord(body) && typeof body.region === "string" && body.region.length > 0) {
+			return body.region;
+		}
+	} catch {
+		// Best-effort: region stays undefined (global) on any failure.
+	}
+	return undefined;
+}
+
 /** Login with Factory Droid via the WorkOS device-code flow (headless-friendly, no callback port). */
 export async function loginFactoryDroid(ctrl: OAuthController): Promise<OAuthCredentials> {
 	const fetchImpl = ctrl.fetch ?? fetch;
@@ -174,7 +203,9 @@ export async function loginFactoryDroid(ctrl: OAuthController): Promise<OAuthCre
 		expiresInSeconds: device.expiresInSeconds,
 		signal: ctrl.signal,
 	});
-	return toCredentials(tokens);
+	const credentials = toCredentials(tokens);
+	const region = await fetchRegion(fetchImpl, credentials.access, ctrl.signal);
+	return region === undefined ? credentials : { ...credentials, region };
 }
 
 /** Refresh a stored Factory Droid WorkOS session. */
@@ -204,7 +235,12 @@ export async function refreshFactoryDroidToken(
 	if (!isRecord(body) || typeof body.access_token !== "string" || typeof body.refresh_token !== "string") {
 		throw new AIError.OAuthError("Factory token refresh returned an unexpected payload", { kind: "validation" });
 	}
-	return toCredentials(readTokenResponse(body));
+	const credentials = toCredentials(readTokenResponse(body));
+	// Mirror the CLI, which re-reads whoami on every token refresh: an account
+	// migrated between regions picks up the new region here, and the
+	// auth-storage merge falls back to the prior region when this call fails.
+	const region = await fetchRegion(fetchImpl, credentials.access);
+	return region === undefined ? credentials : { ...credentials, region };
 }
 
 /** Extract the bearer token for the LLM proxy from stored credentials. */

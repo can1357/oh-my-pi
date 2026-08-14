@@ -40,6 +40,69 @@ export type FactoryDroidUpstream =
 	| "google"
 	| "xai";
 
+/**
+ * Account residency region, resolved from `GET /api/cli/whoami` at login.
+ * `"global"` is the default (US) region; the CLI keys every region behavior
+ * off the literal `"eu"`, so any other value behaves as `"global"`.
+ */
+export type FactoryDroidRegion = "global" | "eu";
+
+/**
+ * Regions each upstream serves, ported from the CLI's upstream→regions table
+ * (`LA0` in the 0.195.0 bundle). `"global"`-only upstreams are unreachable
+ * for EU accounts: the CLI filters them out of every model's rotation, which
+ * is why Droid Core (fireworks/baseten-only) and Gemini (google-only) vanish
+ * from the EU model list.
+ */
+export const FACTORY_DROID_UPSTREAM_REGIONS: Readonly<Record<FactoryDroidUpstream, readonly FactoryDroidRegion[]>> = {
+	fireworks: ["global"],
+	baseten: ["global"],
+	anthropic: ["global"],
+	vertex_anthropic: ["global", "eu"],
+	bedrock_anthropic: ["global", "eu"],
+	openai: ["global", "eu"],
+	azure_openai: ["global"],
+	bedrock_openai: ["global", "eu"],
+	google: ["global"],
+	xai: ["global"],
+};
+
+/**
+ * Effective upstream rotation for an account region, ported from the CLI's
+ * rotation resolver (`nJH`): an explicit per-region override wins verbatim
+ * (an empty list means the model is unavailable in that region), otherwise
+ * the default rotation is filtered to upstreams serving the region.
+ */
+export function resolveFactoryDroidRotation(
+	input: FactoryDroidModelInput,
+	region: string | undefined,
+): readonly FactoryDroidUpstream[] {
+	if (region === "eu") {
+		if (input.euApiProviders !== undefined) return input.euApiProviders;
+		return input.apiProviders.filter(upstream => FACTORY_DROID_UPSTREAM_REGIONS[upstream]?.includes("eu"));
+	}
+	return input.apiProviders;
+}
+
+/** Factory API host per residency region; EU accounts are served from the EU region. */
+export function factoryDroidApiBaseUrl(region: string | undefined): string {
+	return region === "eu" ? "https://api.eu.factory.ai" : "https://api.factory.ai";
+}
+
+/** Per-wire base URL for an account region; the stream layer appends the path suffix. */
+export function factoryDroidWireBaseUrl(wire: FactoryDroidWire, region: string | undefined): string {
+	const host = factoryDroidApiBaseUrl(region);
+	switch (wire) {
+		case "openai-completions":
+		case "openai-responses":
+			return `${host}/api/llm/o/v1`;
+		case "anthropic-messages":
+			return `${host}/api/llm/a`;
+		case "google-generate":
+			return `${host}/api/llm/g/v1`;
+	}
+}
+
 /** How thinking is wired on the Anthropic messages path. */
 export type FactoryDroidAnthropicThinking =
 	/** `{thinking:{type:"adaptive"}, output_config:{effort}}` — modern Claude. */
@@ -74,6 +137,13 @@ export interface FactoryDroidModelInput {
 	maxTokens: number;
 	/** Upstream rotation list; the first entry is the default `x-api-provider`. */
 	apiProviders: readonly FactoryDroidUpstream[];
+	/**
+	 * Explicit rotation override for EU-resident accounts (the CLI's
+	 * `regionOverrides.eu`), mirrored verbatim. Absent ⇒ the default rotation
+	 * is filtered to upstreams serving the EU; an empty list means the model
+	 * is unavailable for EU accounts.
+	 */
+	euApiProviders?: readonly FactoryDroidUpstream[];
 	/**
 	 * Droid Standard Credits rates, mirrored verbatim from the CLI's model
 	 * table: `input` is the per-token credit weight (`tokenMultiplier`);
@@ -230,6 +300,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		contextWindow: 867000,
 		maxTokens: 128000,
 		apiProviders: ["anthropic", "vertex_anthropic", "bedrock_anthropic"],
+		euApiProviders: ["bedrock_anthropic"],
 		credits: { input: 2 },
 		priceRef: { provider: "anthropic", modelId: "claude-opus-4-7" },
 		supportedReasoningEfforts: ["off", "low", "medium", "high", "xhigh", "max"],
@@ -259,6 +330,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		contextWindow: 867000,
 		maxTokens: 128000,
 		apiProviders: ["anthropic", "vertex_anthropic", "bedrock_anthropic"],
+		euApiProviders: ["bedrock_anthropic"],
 		credits: { input: 2 },
 		priceRef: { provider: "anthropic", modelId: "claude-opus-4-8" },
 		supportedReasoningEfforts: ["off", "low", "medium", "high", "xhigh", "max"],
@@ -289,6 +361,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		contextWindow: 867000,
 		maxTokens: 128000,
 		apiProviders: ["anthropic", "vertex_anthropic", "bedrock_anthropic"],
+		euApiProviders: ["bedrock_anthropic"],
 		credits: { input: 2 },
 		priceRef: { provider: "anthropic", modelId: "claude-opus-5" },
 		supportedReasoningEfforts: ["off", "low", "medium", "high", "xhigh", "max"],
@@ -319,6 +392,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		contextWindow: 867000,
 		maxTokens: 128000,
 		apiProviders: ["anthropic", "vertex_anthropic", "bedrock_anthropic"],
+		euApiProviders: [],
 		credits: { input: 4, output: 5 },
 		priceRef: { provider: "anthropic", modelId: "claude-fable-5" },
 		supportedReasoningEfforts: ["off", "low", "medium", "high", "xhigh", "max"],
@@ -480,6 +554,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		contextWindow: 922000,
 		maxTokens: 128000,
 		apiProviders: ["openai", "bedrock_openai"],
+		euApiProviders: ["openai"],
 		credits: { input: 1, output: 6 },
 		priceRef: { provider: "openai", modelId: "gpt-5.4" },
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
@@ -527,6 +602,7 @@ export const FACTORY_DROID_MODELS: readonly FactoryDroidModelInput[] = [
 		contextWindow: 922000,
 		maxTokens: 128000,
 		apiProviders: ["openai", "bedrock_openai"],
+		euApiProviders: ["openai"],
 		credits: { input: 2, output: 6 },
 		priceRef: { provider: "openai", modelId: "gpt-5.5" },
 		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
