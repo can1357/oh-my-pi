@@ -226,10 +226,14 @@ function extractMCPServersFromToml(
 		}
 
 		// Codex lists OAuth scopes as an array; the canonical field holds the
-		// space-separated form the authorization request sends.
-		const scopes = config.scopes?.filter(scope => typeof scope === "string" && scope.trim() !== "").join(" ");
-		if (scopes) {
-			server.oauth = { scopes };
+		// space-separated form the authorization request sends. An empty array is
+		// preserved as `""` rather than dropped: like `oauth.scopes: ""` it
+		// suppresses the `scope` parameter, which is a different request than
+		// sending discovered scopes.
+		if (Array.isArray(config.scopes)) {
+			server.oauth = {
+				scopes: config.scopes.filter(scope => typeof scope === "string" && scope.trim() !== "").join(" "),
+			};
 		}
 		result[name] = server;
 	}

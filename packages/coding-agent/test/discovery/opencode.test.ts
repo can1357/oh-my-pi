@@ -378,9 +378,14 @@ describe("OpenCode MCP discovery", () => {
 						url: "https://gateway.example.com/mcp",
 						oauth: { clientId: "gateway-client", scope: "https://gateway.example.com/mcp/mcp.invoke openid" },
 					},
+					// An explicitly empty `scope` suppresses the `scope` parameter, which
+					// is a different authorization request than sending discovered
+					// scopes — so it must survive the import instead of being dropped.
+					suppressed: { type: "remote", url: "https://suppressed.example.com/mcp", oauth: { scope: "" } },
 					// `oauth: false` disables OpenCode's auto-detection and carries no
 					// scope, so there is nothing to import.
 					noauth: { type: "remote", url: "https://plain.example.com/mcp", oauth: false },
+					plain: { type: "remote", url: "https://bare.example.com/mcp" },
 				},
 			}),
 		);
@@ -393,6 +398,8 @@ describe("OpenCode MCP discovery", () => {
 			clientId: "gateway-client",
 			scopes: "https://gateway.example.com/mcp/mcp.invoke openid",
 		});
+		expect(servers.find(item => item.name === "suppressed")?.oauth).toMatchObject({ scopes: "" });
 		expect(servers.find(item => item.name === "noauth")?.oauth).toBeUndefined();
+		expect(servers.find(item => item.name === "plain")?.oauth).toBeUndefined();
 	});
 });

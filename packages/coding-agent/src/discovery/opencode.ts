@@ -329,12 +329,14 @@ function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: O
 
 	// OpenCode's singular `oauth.scope` is the same space-separated authorization
 	// scope string as the canonical `oauth.scopes`. `oauth: false` carries no
-	// scope, so it maps to no OAuth config at all.
+	// scope, so it maps to no OAuth config at all. An empty `scope` is preserved
+	// rather than dropped: like `oauth.scopes: ""` it suppresses the `scope`
+	// parameter, which is a different request than sending discovered scopes.
 	const oauth = normalizeOAuth(serverConfig.oauth);
 	const scopes =
 		typeof serverConfig.oauth === "object" && typeof serverConfig.oauth?.scope === "string"
 			? serverConfig.oauth.scope.trim()
-			: "";
+			: undefined;
 
 	return {
 		name,
@@ -343,7 +345,7 @@ function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: O
 		env,
 		url: typeof serverConfig.url === "string" ? serverConfig.url : undefined,
 		headers: serverConfig.headers && typeof serverConfig.headers === "object" ? serverConfig.headers : undefined,
-		oauth: scopes ? { ...oauth, scopes } : oauth,
+		oauth: scopes === undefined ? oauth : { ...oauth, scopes },
 		enabled: serverConfig.enabled,
 		timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
 		transport,
