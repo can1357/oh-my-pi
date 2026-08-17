@@ -259,6 +259,8 @@ Use `oauth` when the MCP server requires explicit OAuth client or callback setti
 
 Codex `[mcp_servers.<name>] scopes` (an array) and OpenCode `mcp.<name>.oauth.scope` import into this field, including when they are empty — an empty Codex array or an empty OpenCode scope imports as `""` and suppresses the parameter, rather than falling back to discovered scopes.
 
+The `/mcp add` wizard writes this field too. Its scope prompt is prefilled with whatever discovery found; if you replace that value, the wizard records your value as `oauth.scopes` so later authorizations reuse it. Leaving the prefilled value alone writes nothing, keeping the discovered set free to change with the server.
+
 `prompt` controls the OAuth `prompt` authorization parameter. By default OMP omits it, except that a requested `offline_access` scope defaults to `"consent"` so the provider can issue refresh access. Set it explicitly to a provider-supported value such as `"consent"` or `"select_account"`, or to `""` to force omission.
 
 Example:
