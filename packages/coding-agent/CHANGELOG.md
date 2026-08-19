@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Retried the `v16.4.4` release after a transient sccache/GitHub Actions cache network failure aborted the install-method smoke test and stalled the modern Linux x64 native build; no source change.
+
 ## [16.4.4] - 2026-08-19
 
 ### Added
