@@ -119,8 +119,15 @@ runs:
         if: steps.detect.outputs.on_infra == 'false' && runner.os == 'Linux'
         shell: bash
         run: |
-           sudo apt-get update
-           sudo apt-get install -y build-essential
+           # GitHub's Azure mirror can accept the index request and then stall on
+           # package lists indefinitely. Prefer Ubuntu's public archive and keep a
+           # transient network failure bounded so a fresh retry can recover.
+           if [ -f /etc/apt/apt-mirrors.txt ]; then
+             printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+           fi
+           apt_network_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+           sudo apt-get "${apt_network_options[@]}" update
+           sudo apt-get "${apt_network_options[@]}" install -y build-essential
       - name: Prepend rustup toolchain bin to PATH (GitHub-hosted)
         if: steps.detect.outputs.on_infra == 'false'
         shell: bash
