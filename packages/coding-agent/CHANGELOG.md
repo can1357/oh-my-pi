@@ -1,12 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
 > **Note on `.omp` paths below.** The configuration directory was renamed to
 > `~/.ompk` (and project-local `.omp/` to `.ompk/`). Entries dated before that
 > rename still say `.omp` because that is what those releases actually shipped;
 > they are left unedited so this history stays accurate. When following an older
 > entry today, read `.omp` as `.ompk`.
 
-## [Unreleased]
+## [16.4.2] - 2026-08-19
 
 ### Added
 
@@ -15,12 +17,12 @@
 - Added the optional `clinepass-deepseek-v4-flash` 9router combo to the default, balanced, task, and budget routing slots; installations without the combo continue to skip it.
 - Added opt-in ACP `pkzz` v1 extensions for owner-mediated write/exec permission prompts and bounded host-visible final replies. Legacy ACP clients retain their existing behavior unless they explicitly negotiate the matching capability markers.
 - Extended `/fast` to OpenRouter models by selecting the `:nitro` throughput route when fast mode is enabled with its all-provider scope; explicit OpenRouter route suffixes still win.
-
 - Added the `activity` discoverable tool, gated by `gopkClips.enabled` (default off), which answers "what was I working on this morning?" by reading the local Activity Memory ledger: tracked time, application mix, and sanitized window-title digests bucketed by local hour, for a calendar day (`date`) or a trailing window (`lastHours`). Read-only and local-only — it never records anything itself.
 - Added ElevenLabs as a third `providers.tts` backend (`auto|local|xai|elevenlabs`), covering both the one-shot `tts` tool and live `/pk-speak` vocalization (lowest-latency `eleven_flash_v2_5` model). `auto` is unchanged — it still defaults to local, routing `.mp3` requests to xAI when credentials exist; ElevenLabs is only used when `providers.tts` is set to `elevenlabs` explicitly. The live streaming backend selection (`resolveTtsBackend`) moved from `tools/tts.ts` into `tts/backend.ts` so the vocalizer can share it without a backwards import. `tts.elevenLabsVoiceId` keeps ElevenLabs voice IDs separate from Kokoro voice names, live sentence requests time out after 60 seconds, and oversized sentence-like runs are split without dropping text. ElevenLabs credentials are environment-variable only (`ELEVENLABS_API_KEY`), never settings-stored.
 - Added `SqliteActivityLedgerReader` to `@pk-nerdsaver-ai/pi-activity-journal`: a read-only ledger view that opens the sqlite handle read-only and skips the `CREATE TABLE` bootstrap, so readers cannot take a write lock or contend with the live ingest daemon. Recall and the `activity` tool both use it.
 
 ### Changed
+
 - Reduced default system/context prompt overhead by removing duplicated workflow and delivery prose and moving package-specific rules into conditional `AGENTS.md` files; focused prompt tests cover tool/skill gating, deduplication, and block assembly.
 - Added stored-credential support to tool-prompt schema probes, including OpenAI Codex OAuth, and removed one schema-only `eval` parameter recap after a three-sample probe.
 - Activity Memory ingestion is now owned exclusively by the always-on `gopk-ingest` daemon. `AgentSession` no longer starts a second ingest host when `gopkClips.enabled` is on: two consumers raced to delete the same journal-handoff files and contended for the ledger's write lock, which could split clips across ledgers. `gopkClips.enabled` now gates in-session *reading* only.

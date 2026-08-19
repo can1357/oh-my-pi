@@ -164,7 +164,7 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV16_4_1(): void
+export declare function __piNativesV16_4_2(): void
 
 /**
  * Apply conservative pre-execution rewrites to a bash command.
