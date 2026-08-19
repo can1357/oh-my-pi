@@ -17,6 +17,8 @@ pub fn run(config: Result<Config>) -> Result<()> {
 pub fn report_fatal(error: &anyhow::Error) {
 	let title = wide("Oh My Pi Desktop Tag");
 	let message = wide(&format!("Desktop Tag could not start:\n{error:#}"));
+	// SAFETY: Both UTF-16 buffers are live and null-terminated through this
+	// synchronous call; a null owner window is explicitly permitted.
 	unsafe {
 		MessageBoxW(std::ptr::null_mut(), message.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR)
 	};

@@ -197,6 +197,8 @@ fn set_state(state: &Mutex<GatewayState>, ready: Option<GatewayReady>, status: &
 
 fn write_control_token(path: &Path) -> Result<()> {
 	let mut bytes = [0_u8; 32];
+	// SAFETY: A null algorithm handle with the system-preferred flag is valid,
+	// and `bytes` provides writable storage for exactly the requested length.
 	let status = unsafe {
 		BCryptGenRandom(
 			std::ptr::null_mut(),
@@ -264,6 +266,8 @@ fn split_http_url(url: &str) -> Result<(&str, &str, &str)> {
 pub fn launch_url(url: &str) -> Result<()> {
 	let verb = wide("open");
 	let target = wide(url);
+	// SAFETY: Both UTF-16 buffers are live and null-terminated through the call;
+	// null optional handles and parameters are permitted by `ShellExecuteW`.
 	let result = unsafe {
 		ShellExecuteW(
 			std::ptr::null_mut(),

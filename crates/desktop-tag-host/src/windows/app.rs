@@ -55,7 +55,11 @@ struct AppState {
 	status:    Mutex<String>,
 }
 
+// SAFETY: `HWND` is an opaque process-local handle that may be passed to
+// `PostMessageW` from another thread; every mutable Rust field is synchronized.
 unsafe impl Send for AppState {}
+// SAFETY: Shared access only reads the window handle or uses synchronized
+// fields.
 unsafe impl Sync for AppState {}
 
 pub fn run(config: Config) -> Result<()> {
@@ -70,7 +74,11 @@ pub fn run(config: Config) -> Result<()> {
 		bail!("no running Desktop Tag host accepted the command");
 	}
 	secure_root(&config.root, &instance.sid)?;
+	// SAFETY: This process-wide setting takes no pointers and runs before creating
+	// the window or starting the host's worker threads.
 	unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+	// SAFETY: A null module-name pointer requests the current process module; the
+	// returned handle is checked before use.
 	let module = unsafe { GetModuleHandleW(ptr::null()) };
 	if module.is_null() {
 		return Err(std::io::Error::last_os_error()).context("get host module handle");
@@ -133,9 +141,13 @@ fn create_hidden_window(instance: HINSTANCE) -> Result<HWND> {
 		lpszClassName: class_name.as_ptr(),
 		..Default::default()
 	};
+	// SAFETY: The class structure and its referenced UTF-16 name remain alive for
+	// the call, and the window procedure has the required system ABI.
 	if unsafe { RegisterClassW(&class) } == 0 {
 		return Err(std::io::Error::last_os_error()).context("register Desktop Tag window class");
 	}
+	// SAFETY: The registered class name and module handle are valid, temporary
+	// UTF-16 title storage lives through the call, and null handles are optional.
 	let hwnd = unsafe {
 		CreateWindowExW(
 			0,
@@ -160,7 +172,10 @@ fn create_hidden_window(instance: HINSTANCE) -> Result<HWND> {
 
 fn message_loop(tray: &TrayIcon) {
 	let mut message = MSG::default();
+	// SAFETY: `message` is valid writable storage for the duration of the call.
 	while unsafe { GetMessageW(&mut message, ptr::null_mut(), 0, 0) } > 0 {
+		// SAFETY: A positive `GetMessageW` result initialized `message`, which
+		// remains alive while both Win32 message functions read it.
 		unsafe {
 			TranslateMessage(&message);
 			DispatchMessageW(&message);
@@ -193,8 +208,16 @@ unsafe extern "system" fn window_proc(
 		WM_CONTROL_OPEN => open_overlay(),
 		WM_CONTROL_CAPTURE => begin_capture(),
 		WM_CONTROL_STATUS => show_status(),
-		WM_CLOSE | WM_DESTROY => unsafe { PostQuitMessage(0) },
-		_ => return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+		WM_CLOSE | WM_DESTROY => {
+			// SAFETY: Posting a quit message takes no pointers and targets the
+			// current thread's message queue.
+			unsafe { PostQuitMessage(0) }
+		},
+		_ => {
+			// SAFETY: Win32 supplied this callback's handle and message arguments;
+			// unhandled messages must be delegated to the default procedure.
+			return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
+		},
 	}
 	0
 }
@@ -214,7 +237,11 @@ fn handle_menu(command: usize) {
 				Err(error) => format!("startup setting failed: {error}"),
 			});
 		},
-		tray::CMD_EXIT => unsafe { PostQuitMessage(0) },
+		tray::CMD_EXIT => {
+			// SAFETY: Posting a quit message takes no pointers and targets the
+			// current thread's message queue.
+			unsafe { PostQuitMessage(0) }
+		},
 		_ => {},
 	}
 }
@@ -268,6 +295,8 @@ fn show_status() {
 			.unwrap_or_else(|value| value.into_inner()),
 		state.gateway.state().status
 	);
+	// SAFETY: The host owns `state.hwnd`, and both UTF-16 buffers remain alive
+	// and null-terminated for the duration of this synchronous call.
 	unsafe {
 		MessageBoxW(
 			state.hwnd,
@@ -292,6 +321,8 @@ fn handle_control(state: &Arc<AppState>, request: ControlRequest) -> ControlResp
 		ControlCommand::Status => Some(WM_CONTROL_STATUS),
 		ControlCommand::Shutdown => None,
 	};
+	// SAFETY: `state.hwnd` belongs to the live host window, and this call only
+	// enqueues an integer-valued application message.
 	let posted = unsafe { PostMessageW(state.hwnd, message.unwrap_or(WM_CLOSE), 0, 0) } != 0;
 	ControlResponse {
 		version: 1,
@@ -327,6 +358,8 @@ fn secure_root(root: &Path, sid: &str) -> Result<()> {
 	fs::create_dir_all(root)?;
 	let descriptor = wide(&format!("D:P(A;;FA;;;{sid})"));
 	let mut security = ptr::null_mut();
+	// SAFETY: `descriptor` is a live null-terminated UTF-16 buffer and `security`
+	// is valid writable storage for the API-owned allocation pointer.
 	if unsafe {
 		ConvertStringSecurityDescriptorToSecurityDescriptorW(
 			descriptor.as_ptr(),
@@ -338,6 +371,8 @@ fn secure_root(root: &Path, sid: &str) -> Result<()> {
 	{
 		return Err(std::io::Error::last_os_error()).context("build Desktop Tag directory ACL");
 	}
+	// SAFETY: The path buffer lives through the call and `security` is the valid
+	// descriptor returned by the conversion call above.
 	let result = unsafe {
 		SetFileSecurityW(
 			wide(&root.to_string_lossy()).as_ptr(),
@@ -345,6 +380,8 @@ fn secure_root(root: &Path, sid: &str) -> Result<()> {
 			security,
 		)
 	};
+	// SAFETY: `security` was allocated by the Windows local allocator and is no
+	// longer used after this release.
 	unsafe { LocalFree(security) };
 	if result == 0 {
 		return Err(std::io::Error::last_os_error()).context("secure Desktop Tag private directory");

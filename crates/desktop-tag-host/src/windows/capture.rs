@@ -40,6 +40,7 @@ pub struct PixelSnapshot {
 }
 
 pub fn snapshot_foreground(capture_root: &Path) -> Result<PixelSnapshot> {
+	// SAFETY: This call takes no pointers; its nullable result is checked below.
 	let hwnd = unsafe { GetForegroundWindow() };
 	if hwnd.is_null() {
 		bail!("no foreground window is available");
@@ -47,6 +48,7 @@ pub fn snapshot_foreground(capture_root: &Path) -> Result<PixelSnapshot> {
 	let bounds = window_bounds(hwnd)?;
 	let (process_id, process_name, executable_path) = process_metadata(hwnd);
 	let window_title = window_title(hwnd);
+	// SAFETY: `hwnd` was returned by Win32 and checked for null above.
 	let dpi = unsafe { GetDpiForWindow(hwnd) };
 	let display_scale = if dpi == 0 { 1.0 } else { f64::from(dpi) / 96.0 };
 	let pixels = copy_pixels(&bounds)?;
@@ -98,6 +100,8 @@ fn temporary_path(path: &Path) -> PathBuf {
 
 fn window_bounds(hwnd: HWND) -> Result<Bounds> {
 	let mut rect = RECT::default();
+	// SAFETY: `hwnd` is a live foreground-window handle and `rect` is valid
+	// writable storage whose exact size is supplied.
 	let dwm = unsafe {
 		DwmGetWindowAttribute(
 			hwnd,
@@ -106,6 +110,8 @@ fn window_bounds(hwnd: HWND) -> Result<Bounds> {
 			size_of::<RECT>() as u32,
 		)
 	};
+	// SAFETY: `hwnd` is the same live handle and `rect` remains valid writable
+	// storage.
 	if dwm < 0 && unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
 		return Err(std::io::Error::last_os_error()).context("read foreground window bounds");
 	}
@@ -123,14 +129,20 @@ fn window_bounds(hwnd: HWND) -> Result<Bounds> {
 }
 
 fn copy_pixels(bounds: &Bounds) -> Result<Vec<u8>> {
+	// SAFETY: A null window handle requests the desktop DC; the nullable result
+	// is checked and released on every later path.
 	let screen = unsafe { GetDC(ptr::null_mut()) };
 	if screen.is_null() {
 		return Err(std::io::Error::last_os_error()).context("acquire virtual screen DC");
 	}
+	// SAFETY: `screen` is a valid desktop DC and the nullable result is checked.
 	let memory = unsafe { CreateCompatibleDC(screen) };
+	// SAFETY: `screen` is valid and the positive bounds fit the Win32 dimensions.
 	let bitmap =
 		unsafe { CreateCompatibleBitmap(screen, bounds.width as i32, bounds.height as i32) };
 	if memory.is_null() || bitmap.is_null() {
+		// SAFETY: Each non-null handle was created above and has not yet been
+		// released; cleanup follows the corresponding Win32 ownership rules.
 		unsafe {
 			if !bitmap.is_null() {
 				let _ = DeleteObject(bitmap);
@@ -142,7 +154,10 @@ fn copy_pixels(bounds: &Bounds) -> Result<Vec<u8>> {
 		}
 		return Err(std::io::Error::last_os_error()).context("allocate capture bitmap");
 	}
+	// SAFETY: `memory` and `bitmap` are valid compatible GDI handles.
 	let old = unsafe { SelectObject(memory, bitmap) };
+	// SAFETY: Both DCs are live, and the source/destination rectangles use the
+	// validated positive capture bounds.
 	let copied = unsafe {
 		BitBlt(
 			memory,
@@ -161,17 +176,21 @@ fn copy_pixels(bounds: &Bounds) -> Result<Vec<u8>> {
 		.and_then(|count| count.checked_mul(4))
 		.context("capture is too large")?;
 	let mut bgra = vec![0_u8; byte_count];
-	let mut info = BITMAPINFO::default();
-	info.bmiHeader = BITMAPINFOHEADER {
-		biSize: size_of::<BITMAPINFOHEADER>() as u32,
-		biWidth: bounds.width as i32,
-		biHeight: -(bounds.height as i32),
-		biPlanes: 1,
-		biBitCount: 32,
-		biCompression: BI_RGB,
+	let mut info = BITMAPINFO {
+		bmiHeader: BITMAPINFOHEADER {
+			biSize: size_of::<BITMAPINFOHEADER>() as u32,
+			biWidth: bounds.width as i32,
+			biHeight: -(bounds.height as i32),
+			biPlanes: 1,
+			biBitCount: 32,
+			biCompression: BI_RGB,
+			..Default::default()
+		},
 		..Default::default()
 	};
 	let read = if copied != 0 {
+		// SAFETY: The bitmap and DC are valid, `bgra` has the exact required
+		// capacity, and `info` describes the requested 32-bit output.
 		unsafe {
 			GetDIBits(
 				memory,
@@ -186,6 +205,8 @@ fn copy_pixels(bounds: &Bounds) -> Result<Vec<u8>> {
 	} else {
 		0
 	};
+	// SAFETY: Restore the selected object before releasing each live GDI handle;
+	// none of these handles is used after this block.
 	unsafe {
 		SelectObject(memory, old);
 		DeleteObject(bitmap);
@@ -203,25 +224,33 @@ fn copy_pixels(bounds: &Bounds) -> Result<Vec<u8>> {
 }
 
 fn window_title(hwnd: HWND) -> Option<String> {
+	// SAFETY: `hwnd` is a Win32 window handle supplied by the caller.
 	let length = unsafe { GetWindowTextLengthW(hwnd) };
 	if length <= 0 {
 		return None;
 	}
 	let mut buffer = vec![0_u16; length as usize + 1];
+	// SAFETY: The UTF-16 buffer is writable for the advertised capacity and
+	// `hwnd` is the same caller-supplied window handle.
 	let copied = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
 	(copied > 0).then(|| String::from_utf16_lossy(&buffer[..copied as usize]))
 }
 
 fn process_metadata(hwnd: HWND) -> (u32, Option<String>, Option<PathBuf>) {
 	let mut process_id = 0;
+	// SAFETY: `process_id` is valid writable storage for the duration of the call.
 	unsafe { GetWindowThreadProcessId(hwnd, &mut process_id) };
+	// SAFETY: `process_id` came from Win32; the nullable process handle is checked.
 	let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
 	if process.is_null() {
 		return (process_id, None, None);
 	}
 	let mut buffer = vec![0_u16; MAX_PATH as usize * 4];
 	let mut length = buffer.len() as u32;
+	// SAFETY: `process` is live, and `buffer` plus `length` describe writable
+	// UTF-16 storage owned by this function.
 	let ok = unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut length) };
+	// SAFETY: `process` is the live handle opened above and is no longer used.
 	unsafe { CloseHandle(process) };
 	if ok == 0 {
 		return (process_id, None, None);
