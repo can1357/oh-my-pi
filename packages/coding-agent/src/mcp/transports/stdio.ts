@@ -977,7 +977,7 @@ export class StdioTransport implements MCPTransport {
 		}
 	}
 
-	async close(): Promise<void> {
+	#beginClose(): Subprocess<"pipe", "pipe", "pipe"> | null {
 		const listeners = [...this.#listeners.values()];
 		for (const listener of listeners) {
 			listener.cancelled = true;
@@ -987,30 +987,13 @@ export class StdioTransport implements MCPTransport {
 			this.#handleClose();
 		}
 
-		if (this.#process) {
-			const proc = this.#process;
-			this.#process = null;
+		const proc = this.#process;
+		this.#process = null;
+		if (proc) {
 			try {
 				proc.stdin?.end?.();
 			} catch {
 				// Ignore stdin close errors
-			}
-			const exited = proc.exited;
-			let timeoutId: NodeJS.Timeout | undefined;
-			const timeoutPromise = new Promise<void>(resolve => {
-				timeoutId = setTimeout(resolve, 2000);
-			});
-			try {
-				await Promise.race([exited, timeoutPromise]);
-			} catch {
-				// Ignore exited rejection
-			} finally {
-				if (timeoutId) clearTimeout(timeoutId);
-			}
-			try {
-				proc.kill();
-			} catch {
-				// Ignore kill errors
 			}
 		}
 
@@ -1018,6 +1001,46 @@ export class StdioTransport implements MCPTransport {
 			// Do not block/await the read loop as it can hang indefinitely in some environments
 			this.#readLoop.catch(() => {});
 			this.#readLoop = null;
+		}
+		return proc;
+	}
+
+	/**
+	 * Permanently revoke this transport's subprocess ownership without waiting
+	 * through the graceful-close window. The exit promise remains observed so
+	 * forced probe retirement cannot leak an unhandled process failure.
+	 */
+	retire(): void {
+		const proc = this.#beginClose();
+		if (!proc) return;
+		try {
+			proc.kill();
+		} catch {
+			// Ignore kill errors
+		}
+		void proc.exited.catch(() => {});
+	}
+
+	async close(): Promise<void> {
+		const proc = this.#beginClose();
+		if (!proc) return;
+
+		const exited = proc.exited;
+		let timeoutId: NodeJS.Timeout | undefined;
+		const timeoutPromise = new Promise<void>(resolve => {
+			timeoutId = setTimeout(resolve, 2000);
+		});
+		try {
+			await Promise.race([exited, timeoutPromise]);
+		} catch {
+			// Ignore exited rejection
+		} finally {
+			if (timeoutId) clearTimeout(timeoutId);
+		}
+		try {
+			proc.kill();
+		} catch {
+			// Ignore kill errors
 		}
 	}
 }

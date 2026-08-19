@@ -265,6 +265,8 @@ describe("ModelRegistry", () => {
 					demo: providerConfig("https://demo.example.com/v1", [
 						{ id: "anthropic/claude-sonnet-4.5" },
 						{ id: "anthropic/claude-opus-4.5" },
+						{ id: "anthropic/claude-haiku-4.5" },
+						{ id: "claude-haiku-4-5-20251001-thinking" },
 						{ id: "claude-opus-4-5-20251101" },
 						{ id: "claude-4.5-opus-high-thinking" },
 						{ id: "hf:zai-org/GLM-4.7" },
@@ -415,13 +417,34 @@ describe("ModelRegistry", () => {
 		});
 
 		test("collapses anthropic latest aliases into the best upstream claude family id", () => {
-			const opusVariants = canonical.getCanonicalVariants("claude-opus-4-8");
-			const haikuVariants = canonical.getCanonicalVariants("claude-haiku-4-5");
-			expect(opusVariants.some(variant => variant.selector === "demo/anthropic/claude-opus-latest")).toBe(true);
-			expect(haikuVariants.some(variant => variant.selector === "demo/anthropic/claude-haiku-latest")).toBe(true);
+			const opusLatest = canonical.find("demo", "anthropic/claude-opus-latest");
+			const haikuLatest = canonical.find("demo", "anthropic/claude-haiku-latest");
+			const datedThinkingHaiku = canonical.find("demo", "claude-haiku-4-5-20251001-thinking");
+			if (!opusLatest || !haikuLatest || !datedThinkingHaiku) {
+				throw new Error("Anthropic latest-alias canonical equivalence fixture models were not registered");
+			}
+
+			const opusCanonicalId = canonical.getCanonicalId(opusLatest);
+			const haikuCanonicalId = canonical.getCanonicalId(haikuLatest);
+			if (!opusCanonicalId || !haikuCanonicalId) {
+				throw new Error("Anthropic latest-alias fixtures did not resolve to canonical model families");
+			}
+			expect(opusCanonicalId).toMatch(/^claude-opus-\d+(?:-\d+)*$/);
+			expect(haikuCanonicalId).toMatch(/^claude-haiku-\d+(?:-\d+)*$/);
 			expect(
 				canonical
-					.getCanonicalVariants("claude-haiku-4-5-20251001-thinking")
+					.getCanonicalVariants(opusCanonicalId)
+					.some(variant => variant.selector === "demo/anthropic/claude-opus-latest"),
+			).toBe(true);
+			expect(
+				canonical
+					.getCanonicalVariants(haikuCanonicalId)
+					.some(variant => variant.selector === "demo/anthropic/claude-haiku-latest"),
+			).toBe(true);
+			expect(haikuCanonicalId).not.toBe(datedThinkingHaiku.id);
+			expect(
+				canonical
+					.getCanonicalVariants(datedThinkingHaiku.id)
 					.some(variant => variant.selector === "demo/anthropic/claude-haiku-latest"),
 			).toBe(false);
 		});

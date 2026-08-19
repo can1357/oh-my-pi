@@ -12,6 +12,10 @@ interface BinaryTarget {
 }
 
 const repoRoot = path.join(import.meta.dir, "..");
+const codingAgentDir = path.join(repoRoot, "packages", "coding-agent");
+const nativesDir = path.join(repoRoot, "packages", "natives");
+const statsDir = path.join(repoRoot, "packages", "stats");
+
 const binariesDir = path.join(repoRoot, "packages", "coding-agent", "binaries");
 const entrypoint = "./packages/coding-agent/src/cli.ts";
 // Worker threads spawn `new Worker(Bun.main, { argv })` — they re-enter the
@@ -100,7 +104,7 @@ async function embedNative(target: BinaryTarget): Promise<void> {
 		return;
 	}
 
-	await runCommand(["bun", "run", "gen:native"], repoRoot, {
+	await runCommand(["bun", "run", "gen:native"], nativesDir, {
 		...Bun.env,
 		TARGET_PLATFORM: target.platform,
 		TARGET_ARCH: target.arch,
@@ -156,9 +160,9 @@ async function generateBundle(): Promise<void> {
 		console.log("DRY RUN bun run gen:mupdf");
 		return;
 	}
-	await runCommand(["bun", "run", "gen:stats"], repoRoot);
-	await runCommand(["bun", "run", "gen:docs"], repoRoot);
-	await runCommand(["bun", "run", "gen:mupdf"], repoRoot);
+	await runCommand(["bun", "run", "gen:stats"], statsDir);
+	await runCommand(["bun", "run", "gen:docs"], codingAgentDir);
+	await runCommand(["bun", "run", "gen:mupdf"], codingAgentDir);
 }
 
 async function resetArtifacts(): Promise<void> {
@@ -169,10 +173,10 @@ async function resetArtifacts(): Promise<void> {
 		console.log("DRY RUN bun run gen:mupdf:reset");
 		return;
 	}
-	await runCommand(["bun", "run", "gen:native:reset"], repoRoot);
-	await runCommand(["bun", "run", "gen:stats:reset"], repoRoot);
-	await runCommand(["bun", "run", "gen:docs:reset"], repoRoot);
-	await runCommand(["bun", "run", "gen:mupdf:reset"], repoRoot);
+	await runCommand(["bun", "run", "gen:native:reset"], nativesDir);
+	await runCommand(["bun", "run", "gen:stats:reset"], statsDir);
+	await runCommand(["bun", "run", "gen:docs:reset"], codingAgentDir);
+	await runCommand(["bun", "run", "gen:mupdf:reset"], codingAgentDir);
 }
 
 async function main(): Promise<void> {

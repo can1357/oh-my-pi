@@ -10,7 +10,7 @@ import { throwIfAborted } from "../tools/tool-errors";
 import type { MCPExtensionRuntime } from "./extensions";
 import { describeMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "./timeout";
 import { createHttpTransport } from "./transports/http";
-import { createStdioTransport } from "./transports/stdio";
+import { createStdioTransport, StdioTransport } from "./transports/stdio";
 import type {
 	MCPAuthenticationContextRevision,
 	MCPCompleteParams,
@@ -217,6 +217,19 @@ async function createTransport(config: MCPServerConfig, transportFactory?: Trans
 		default:
 			throw new Error(`Unknown server type: ${serverType}`);
 	}
+}
+
+/**
+ * Retire a failed transport before another attempt can become authoritative.
+ * Stdio teardown revokes subprocess ownership synchronously, while transports
+ * without that concrete lifecycle retain their normal awaited close contract.
+ */
+async function retireFailedTransport(transport: MCPTransport): Promise<void> {
+	if (transport instanceof StdioTransport) {
+		transport.retire();
+		return;
+	}
+	await transport.close();
 }
 
 /** Apply callbacks that are safe before the connection's protocol era is known. */
@@ -543,10 +556,20 @@ export async function connectToServer(
 		}),
 	);
 	let transport: MCPTransport | undefined;
+	let connectionAttemptOwned = true;
 	const timeoutMs = resolveMCPTimeoutMs(config.timeout);
+	const createOwnedTransport = async (): Promise<MCPTransport> => {
+		const candidate = await createTransport(config, options?.transportFactory);
+		if (!connectionAttemptOwned) {
+			await retireFailedTransport(candidate);
+			throw new Error(`Connection attempt to MCP server "${name}" was retired`);
+		}
+		transport = candidate;
+		return candidate;
+	};
 
 	const connect = async (): Promise<MCPServerConnection> => {
-		transport = await createTransport(config, options?.transportFactory);
+		transport = await createOwnedTransport();
 		prepareTransportForNegotiation(transport, options);
 
 		const connectLegacy = async (): Promise<MCPServerConnection> => {
@@ -626,15 +649,15 @@ export async function connectToServer(
 						error instanceof MCPModernProbeTimeoutError || (isStdioConfig(config) && !transport.connected);
 					if (requiresReplacement) {
 						const probeTransport = transport;
-						await probeTransport.close();
-						const replacementTransport = await createTransport(config, options?.transportFactory);
+						transport = undefined;
+						await retireFailedTransport(probeTransport);
+						const replacementTransport = await createOwnedTransport();
 						if (replacementTransport === probeTransport) {
 							throw new MCPModernProtocolNegotiationError(
 								"Legacy MCP initialization requires a replacement transport after the modern probe closed or timed out",
 							);
 						}
-						transport = replacementTransport;
-						prepareTransportForNegotiation(transport, options);
+						prepareTransportForNegotiation(replacementTransport, options);
 					}
 					return await connectLegacy();
 				}
@@ -644,7 +667,11 @@ export async function connectToServer(
 				throw error;
 			}
 		} catch (error) {
-			await transport.close();
+			const failedTransport = transport;
+			transport = undefined;
+			if (failedTransport) {
+				await retireFailedTransport(failedTransport);
+			}
 			throw error;
 		}
 	};
@@ -658,10 +685,18 @@ export async function connectToServer(
 			options?.signal,
 		);
 	} catch (error) {
-		// If withTimeout rejected while connect() was still pending, close any
-		// transport that could otherwise retain a listener or subprocess.
-		if (transport) {
-			void transport.close().catch(() => {});
+		// Revoke ownership before cleanup so a late factory result cannot install a
+		// transport after the caller's total connection budget has expired.
+		connectionAttemptOwned = false;
+		const failedTransport = transport;
+		transport = undefined;
+		if (failedTransport) {
+			void retireFailedTransport(failedTransport).catch(retirementError => {
+				logger.debug("Failed to retire MCP transport after connection failure", {
+					server: name,
+					error: retirementError instanceof Error ? retirementError.message : String(retirementError),
+				});
+			});
 		}
 		throw error;
 	}

@@ -124,6 +124,34 @@ function exitingStdioProbeServer(tracePath: string, fallbackMarkerPath: string):
 	`;
 }
 
+type StdioTraceFrame = {
+	processId: string;
+	method: string;
+};
+
+async function readStdioTrace(tracePath: string): Promise<StdioTraceFrame[]> {
+	const content = await fs.readFile(tracePath, "utf8");
+	return content
+		.trim()
+		.split("\n")
+		.filter(Boolean)
+		.map(frame => {
+			const separator = frame.indexOf(":");
+			return { processId: frame.slice(0, separator), method: frame.slice(separator + 1) };
+		});
+}
+
+async function waitForInitializedTrace(tracePath: string): Promise<StdioTraceFrame[]> {
+	const deadline = Date.now() + 1_000;
+	let frames: StdioTraceFrame[] = [];
+	do {
+		frames = await readStdioTrace(tracePath);
+		if (frames.some(frame => frame.method === "notifications/initialized")) return frames;
+		await Bun.sleep(10);
+	} while (Date.now() < deadline);
+	return frames;
+}
+
 describe("MCP dual-era connection negotiation", () => {
 	it("snapshots required modern metadata instead of retaining caller references", () => {
 		const clientCapabilities = {
@@ -359,16 +387,16 @@ describe("MCP dual-era connection negotiation", () => {
 				timeout: 2_000,
 			});
 			try {
-				const frames = (await fs.readFile(tracePath, "utf8"))
-					.trim()
-					.split("\n")
-					.map(frame => {
-						const separator = frame.indexOf(":");
-						return { processId: frame.slice(0, separator), method: frame.slice(separator + 1) };
-					});
+				const frames = await waitForInitializedTrace(tracePath);
+				const discoverFrames = frames.filter(frame => frame.method === "server/discover");
+				const initializeFrames = frames.filter(frame => frame.method === "initialize");
+				const initializedFrames = frames.filter(frame => frame.method === "notifications/initialized");
 
-				expect(frames.slice(0, 2).map(frame => frame.method)).toEqual(["server/discover", "initialize"]);
-				expect(frames[0]?.processId).not.toBe(frames[1]?.processId);
+				expect(discoverFrames).toHaveLength(1);
+				expect(initializeFrames).toHaveLength(1);
+				expect(initializedFrames).toHaveLength(1);
+				expect(discoverFrames[0]?.processId).not.toBe(initializeFrames[0]?.processId);
+				expect(initializedFrames[0]?.processId).toBe(initializeFrames[0]?.processId);
 				expect(connection.protocol?.era).toBe("legacy");
 			} finally {
 				await connection.transport.close();
@@ -390,16 +418,16 @@ describe("MCP dual-era connection negotiation", () => {
 				timeout: 2_000,
 			});
 			try {
-				const frames = (await fs.readFile(tracePath, "utf8"))
-					.trim()
-					.split("\n")
-					.map(frame => {
-						const separator = frame.indexOf(":");
-						return { processId: frame.slice(0, separator), method: frame.slice(separator + 1) };
-					});
+				const frames = await waitForInitializedTrace(tracePath);
+				const discoverFrames = frames.filter(frame => frame.method === "server/discover");
+				const initializeFrames = frames.filter(frame => frame.method === "initialize");
+				const initializedFrames = frames.filter(frame => frame.method === "notifications/initialized");
 
-				expect(frames.map(frame => frame.method)).toEqual(["server/discover", "initialize"]);
-				expect(frames[0]?.processId).not.toBe(frames[1]?.processId);
+				expect(discoverFrames).toHaveLength(1);
+				expect(initializeFrames).toHaveLength(1);
+				expect(initializedFrames).toHaveLength(1);
+				expect(discoverFrames[0]?.processId).not.toBe(initializeFrames[0]?.processId);
+				expect(initializedFrames[0]?.processId).toBe(initializeFrames[0]?.processId);
 				expect(connection.protocol?.era).toBe("legacy");
 			} finally {
 				await connection.transport.close();
@@ -407,6 +435,24 @@ describe("MCP dual-era connection negotiation", () => {
 		} finally {
 			await fs.rm(traceDirectory, { recursive: true, force: true });
 		}
+	});
+
+	it("preserves the connection timeout when factory transport cleanup fails", async () => {
+		const transport = createMockTransport(new Map([["server/discover", [new Promise<never>(() => {})]]]));
+		let closeCalls = 0;
+		transport.close = async () => {
+			closeCalls++;
+			throw new Error("cleanup failed");
+		};
+
+		await expect(
+			connectToServer(
+				"cleanup-failure",
+				{ type: "http", url: "https://cleanup.example.test/mcp", timeout: 80 },
+				{ transportFactory: async () => transport },
+			),
+		).rejects.toThrow('Connection to MCP server "cleanup-failure" timed out after 80ms');
+		expect(closeCalls).toBe(1);
 	});
 
 	it("protects modern reserved metadata while retaining caller metadata on high-level calls", async () => {

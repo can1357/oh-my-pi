@@ -2822,13 +2822,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			triggerDeferredDiscovery();
 		};
 
-		if (deferMCPDiscoveryForUI) {
-			const fallbackTimer = setTimeout(() => {
-				triggerDeferredDiscovery();
-			}, 0);
-			fallbackTimer.unref?.();
-		}
-
 		const initialTools = initialToolNames
 			.map(name => toolRegistry.get(name))
 			.filter((tool): tool is AgentTool => tool !== undefined);
@@ -3296,6 +3289,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					}, debounceMs),
 				);
 			});
+		}
+		if (deferMCPDiscoveryForUI) {
+			// The fallback must not race the one-shot trigger against the
+			// `AgentSession` assignment above. Schedule only after the live session
+			// and manager callbacks are fully wired.
+			const fallbackTimer = setTimeout(() => {
+				triggerDeferredDiscovery();
+			}, 0);
+			fallbackTimer.unref?.();
 		}
 
 		return {

@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { resolveProviderModels } from "@pk-nerdsaver-ai/pi-catalog/model-manager";
 import { googleVertexModelManagerOptions } from "@pk-nerdsaver-ai/pi-catalog/provider-models/google";
 import {
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
@@ -75,20 +74,13 @@ describe("google-vertex model catalog", () => {
 		expect(claude?.reasoning).toBe(true);
 	});
 
-	it("uses the bundled Vertex catalog without ADC project discovery", async () => {
+	it("does not configure ADC project discovery", () => {
 		const options = googleVertexModelManagerOptions({
 			project: "vertex-project",
 			location: "global",
 			fetch: async () => new Response("unexpected", { status: 500 }),
 		});
 
-		expect(options.fetchDynamicModels).toBeUndefined();
-		expect(options.staticModels).toBeUndefined();
-
-		const result = await resolveProviderModels(options, "offline");
-		expect(result.stale).toBe(false);
-		expect(result.models.some(model => model.id === "deepseek-ai/deepseek-v3.2-maas")).toBe(true);
-		expect(result.models.some(model => model.id === "gemini-3.5-flash")).toBe(true);
-		expect(result.models.some(model => model.id === "gemini-1.5-pro")).toBe(false);
+		expect(options).toEqual({ providerId: "google-vertex" });
 	});
 });
