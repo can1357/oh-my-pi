@@ -284,13 +284,14 @@ Use the built-in command with a public Hugging Face GGUF repository or a direct 
 ```text
 /colab-model unsloth/Qwen3.8-27B-GGUF
 /colab-model https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/main/Qwen3.8-27B-Q6_K.gguf
+/colab-model --gpu T4 unsloth/Qwen3.8-27B-GGUF
 ```
 
 The command owns the interactive lifecycle:
 
-1. Resolve the repository and choose a GGUF that fits the accelerator (A100 first, then L4). A direct file URL overrides automatic quantization selection.
-2. Create or reuse a Colab CLI session. Set `OMPK_COLAB_SESSION` before starting OMPK to choose a reusable session name. On Windows, OMPK invokes the Colab CLI through WSL; on Linux it invokes `colab` directly.
-3. Build or update CUDA-enabled llama.cpp, download the model, start `llama-server`, and run a warmup completion.
+1. Resolve the repository and choose a GGUF that fits the accelerator. Automatic launches try the cheapest viable T4, L4, then A100 runtime; `--gpu T4|L4|A100|H100|G4` requests a specific accelerator. A direct file URL overrides automatic quantization selection.
+2. Create or reuse a Colab CLI session. Set `OMPK_COLAB_SESSION` before starting OMPK to choose a reusable session name. On Windows, OMPK invokes the Colab CLI through WSL; on Linux it invokes `colab` directly. An explicit `--gpu` request never replaces a working session on a different accelerator.
+3. Reuse a healthy server or existing build when possible. On a cold runtime, download the model while building CUDA-enabled llama.cpp with native-only GPU code, then start `llama-server` and run a warmup completion.
 4. Open a loopback-only OpenAI Chat Completions bridge, register the warmed model under the existing `llama.cpp` provider, select it, and print the local `/v1` base URL. No Colab runtime token or public unauthenticated tunnel is exposed.
 
 The command supports public repositories without forwarding Hugging Face credentials. Gated repositories fail closed. The loopback API bridge lives only for the current OMPK process; the Colab GPU session remains allocated after OMPK exits. Release it explicitly (from WSL on Windows):

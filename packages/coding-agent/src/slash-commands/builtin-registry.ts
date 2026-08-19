@@ -587,8 +587,8 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "colab-model",
-		description: "Launch a Hugging Face GGUF on Colab and select it",
-		inlineHint: "<Hugging Face model id or GGUF URL>",
+		description: "Launch a Hugging Face GGUF on a selected Colab GPU",
+		inlineHint: "[--gpu T4|L4|A100|H100|G4] <Hugging Face model id or GGUF URL>",
 		allowArgs: true,
 		handle: async (command, runtime) => handleColabModelSlashCommand(command.args, runtime),
 	},

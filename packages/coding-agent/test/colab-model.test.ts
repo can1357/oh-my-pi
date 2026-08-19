@@ -4,9 +4,12 @@ import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES } from "@pk-nerdsaver-ai/pi-coding
 import {
 	buildColabCommand,
 	type ColabModelLaunchResult,
+	getColabAcceleratorProfile,
 	type HuggingFaceTreeEntry,
 	handleColabModelSlashCommand,
+	parseColabModelCommandArgs,
 	parseHuggingFaceModelReference,
+	selectAutomaticColabAccelerators,
 	selectGgufArtifact,
 } from "@pk-nerdsaver-ai/pi-coding-agent/slash-commands/helpers/colab-model";
 import type { SlashCommandRuntime } from "@pk-nerdsaver-ai/pi-coding-agent/slash-commands/types";
@@ -70,12 +73,48 @@ describe("Hugging Face Colab model references", () => {
 	});
 });
 
+describe("/colab-model arguments", () => {
+	test("accepts explicit cheap and premium GPU selections", () => {
+		expect(parseColabModelCommandArgs("--gpu T4 owner/model")).toEqual({
+			accelerator: "T4",
+			modelReference: "owner/model",
+		});
+		expect(parseColabModelCommandArgs("owner/model --gpu=l4")).toEqual({
+			accelerator: "L4",
+			modelReference: "owner/model",
+		});
+		expect(parseColabModelCommandArgs("--gpu H100 owner/model")).toEqual({
+			accelerator: "H100",
+			modelReference: "owner/model",
+		});
+	});
+
+	test("rejects unknown GPUs and options", () => {
+		expect(() => parseColabModelCommandArgs("--gpu V100 owner/model")).toThrow("Unsupported Colab GPU");
+		expect(() => parseColabModelCommandArgs("--cheap owner/model")).toThrow("Unknown /colab-model option");
+	});
+});
+
 describe("GGUF accelerator selection", () => {
 	const reference = { repoId: "unsloth/Qwen3.8-27B-GGUF", revision: "main" };
 
 	test("selects Q6_K for A100 and Q4_K_M for L4", () => {
 		expect(selectGgufArtifact(QWEN_FILES, reference, "A100").primaryFile).toBe("Qwen3.8-27B-Q6_K.gguf");
 		expect(selectGgufArtifact(QWEN_FILES, reference, "L4").primaryFile).toBe("Qwen3.8-27B-Q4_K_M.gguf");
+	});
+
+	test("uses cheaper viable GPUs before A100", () => {
+		expect(selectAutomaticColabAccelerators(QWEN_FILES, reference)).toEqual(["L4", "A100"]);
+		const smallFiles: HuggingFaceTreeEntry[] = [{ type: "file", path: "small-Q4_K_M.gguf", size: 8_000_000_000 }];
+		expect(selectAutomaticColabAccelerators(smallFiles, reference)).toEqual(["T4", "L4", "A100"]);
+	});
+
+	test("uses native-only CUDA architectures for every supported GPU", () => {
+		expect(getColabAcceleratorProfile("T4").cmakeArchitecture).toBe("75-real");
+		expect(getColabAcceleratorProfile("L4").cmakeArchitecture).toBe("89-real");
+		expect(getColabAcceleratorProfile("A100").cmakeArchitecture).toBe("80-real");
+		expect(getColabAcceleratorProfile("H100").cmakeArchitecture).toBe("90-real");
+		expect(getColabAcceleratorProfile("G4").cmakeArchitecture).toBe("120-real");
 	});
 
 	test("keeps every shard and uses the first shard as the llama.cpp model path", () => {
@@ -137,7 +176,8 @@ describe("/colab-model command", () => {
 		} as unknown as SlashCommandRuntime;
 		const launch = vi.fn(async () => launchResult());
 
-		await handleColabModelSlashCommand("unsloth/Qwen3.8-27B-GGUF", runtime, launch);
+		await handleColabModelSlashCommand("--gpu A100 unsloth/Qwen3.8-27B-GGUF", runtime, launch);
+		expect(launch).toHaveBeenCalledWith("unsloth/Qwen3.8-27B-GGUF", expect.any(Function), { accelerator: "A100" });
 
 		expect(registerProvider).toHaveBeenCalledTimes(1);
 		expect(registerProvider.mock.calls[0]?.[0]).toBe("llama.cpp");

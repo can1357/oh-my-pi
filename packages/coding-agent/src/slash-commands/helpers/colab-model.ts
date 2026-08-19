@@ -13,7 +13,47 @@ const READY_PREFIX = "__OMPK_COLAB_READY__";
 const HTTP_PREFIX = "__OMPK_COLAB_HTTP__";
 const MAX_COMMAND_OUTPUT = 2 * 1024 * 1024;
 
-export type ColabAccelerator = "A100" | "L4";
+export type ColabAccelerator = "T4" | "L4" | "A100" | "H100" | "G4";
+
+export interface ColabAcceleratorProfile {
+	cmakeArchitecture: string;
+	modelSizeBudget: number;
+	preferredQuantizations: readonly string[];
+}
+
+const ACCELERATOR_PROFILES: Record<ColabAccelerator, ColabAcceleratorProfile> = {
+	T4: {
+		cmakeArchitecture: "75-real",
+		modelSizeBudget: 12_000_000_000,
+		preferredQuantizations: ["Q3_K_M", "Q3_K_S", "IQ4_XS", "Q4_K_S", "Q4_K_M"],
+	},
+	L4: {
+		cmakeArchitecture: "89-real",
+		modelSizeBudget: 18_000_000_000,
+		preferredQuantizations: ["Q4_K_M", "Q4_K_S", "IQ4_XS", "Q3_K_M", "Q3_K_S", "Q5_K_M"],
+	},
+	A100: {
+		cmakeArchitecture: "80-real",
+		modelSizeBudget: 28_000_000_000,
+		preferredQuantizations: ["Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q8_0"],
+	},
+	H100: {
+		cmakeArchitecture: "90-real",
+		modelSizeBudget: 60_000_000_000,
+		preferredQuantizations: ["Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M"],
+	},
+	G4: {
+		cmakeArchitecture: "120-real",
+		modelSizeBudget: 72_000_000_000,
+		preferredQuantizations: ["Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M"],
+	},
+};
+
+const AUTOMATIC_ACCELERATORS: readonly ColabAccelerator[] = ["T4", "L4", "A100"];
+
+export function getColabAcceleratorProfile(accelerator: ColabAccelerator): ColabAcceleratorProfile {
+	return ACCELERATOR_PROFILES[accelerator];
+}
 
 export interface HuggingFaceModelReference {
 	repoId: string;
@@ -46,6 +86,11 @@ export interface ColabModelLaunchResult {
 	sessionName: string;
 }
 
+export interface ColabModelCommandRequest {
+	accelerator?: ColabAccelerator;
+	modelReference: string;
+}
+
 interface CommandResult {
 	exitCode: number;
 	stderr: string;
@@ -65,6 +110,7 @@ interface HttpMetadata {
 }
 
 interface ColabModelLaunchOptions {
+	accelerator?: ColabAccelerator;
 	fetch?: typeof globalThis.fetch;
 	sessionName?: string;
 }
@@ -145,6 +191,38 @@ export function parseHuggingFaceModelReference(input: string): HuggingFaceModelR
 	throw new Error(`Unsupported Hugging Face model URL: ${value}`);
 }
 
+function normalizeAccelerator(value: string): ColabAccelerator {
+	const normalized = value.toUpperCase();
+	if (normalized in ACCELERATOR_PROFILES) return normalized as ColabAccelerator;
+	throw new Error(`Unsupported Colab GPU "${value}". Choose T4, L4, A100, H100, or G4.`);
+}
+
+export function parseColabModelCommandArgs(input: string): ColabModelCommandRequest {
+	const tokens = input.trim().split(/\s+/).filter(Boolean);
+	const modelTokens: string[] = [];
+	let accelerator: ColabAccelerator | undefined;
+	for (let index = 0; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (token === "--gpu") {
+			const value = tokens[index + 1];
+			if (!value) throw new Error("--gpu requires T4, L4, A100, H100, or G4.");
+			accelerator = normalizeAccelerator(value);
+			index += 1;
+			continue;
+		}
+		if (token.startsWith("--gpu=")) {
+			accelerator = normalizeAccelerator(token.slice("--gpu=".length));
+			continue;
+		}
+		if (token.startsWith("--")) throw new Error(`Unknown /colab-model option "${token}".`);
+		modelTokens.push(token);
+	}
+	if (modelTokens.length > 1) {
+		throw new Error("Expected one Hugging Face model id or URL.");
+	}
+	return { accelerator, modelReference: modelTokens[0] ?? "" };
+}
+
 function isTreeEntry(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
@@ -204,11 +282,6 @@ function isPrimaryModelFile(file: string): boolean {
 	);
 }
 
-const PREFERRED_QUANTIZATIONS: Record<ColabAccelerator, readonly string[]> = {
-	A100: ["Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q8_0"],
-	L4: ["Q4_K_M", "Q4_K_S", "IQ4_XS", "Q3_K_M", "Q3_K_S", "Q5_K_M"],
-};
-
 export function selectGgufArtifact(
 	entries: readonly HuggingFaceTreeEntry[],
 	reference: HuggingFaceModelReference,
@@ -241,18 +314,20 @@ export function selectGgufArtifact(
 	}
 
 	const artifacts = [...byGroup.values()].filter(group => isPrimaryModelFile(group[0].path)).map(toArtifact);
-	const sizeBudget = accelerator === "A100" ? 28_000_000_000 : 18_000_000_000;
-	const fitting = artifacts.filter(artifact => artifact.totalSize === 0 || artifact.totalSize <= sizeBudget);
+	const profile = getColabAcceleratorProfile(accelerator);
+	const fitting = artifacts.filter(
+		artifact => artifact.totalSize === 0 || artifact.totalSize <= profile.modelSizeBudget,
+	);
 	if (fitting.length === 0) {
 		const smallest = artifacts.reduce<GgufArtifact | undefined>(
 			(current, artifact) => (!current || artifact.totalSize < current.totalSize ? artifact : current),
 			undefined,
 		);
 		throw new Error(
-			`No GGUF in ${reference.repoId} fits the ${accelerator} launch budget (${Math.round(sizeBudget / 1_000_000_000)} GB). Smallest candidate is ${smallest ? `${(smallest.totalSize / 1_000_000_000).toFixed(1)} GB` : "unknown"}. Pass a direct GGUF file URL to override automatic selection.`,
+			`No GGUF in ${reference.repoId} fits the ${accelerator} launch budget (${Math.round(profile.modelSizeBudget / 1_000_000_000)} GB). Smallest candidate is ${smallest ? `${(smallest.totalSize / 1_000_000_000).toFixed(1)} GB` : "unknown"}. Pass a direct GGUF file URL to override automatic selection.`,
 		);
 	}
-	const preferred = PREFERRED_QUANTIZATIONS[accelerator];
+	const preferred = profile.preferredQuantizations;
 	fitting.sort((left, right) => {
 		const leftRank = preferred.indexOf(left.quantization);
 		const rightRank = preferred.indexOf(right.quantization);
@@ -262,6 +337,20 @@ export function selectGgufArtifact(
 		return right.totalSize - left.totalSize;
 	});
 	return fitting[0];
+}
+
+export function selectAutomaticColabAccelerators(
+	entries: readonly HuggingFaceTreeEntry[],
+	reference: HuggingFaceModelReference,
+): ColabAccelerator[] {
+	return AUTOMATIC_ACCELERATORS.filter(accelerator => {
+		try {
+			selectGgufArtifact(entries, reference, accelerator);
+			return true;
+		} catch {
+			return false;
+		}
+	});
 }
 
 export function buildColabCommand(args: readonly string[], platform = process.platform): string[] {
@@ -326,21 +415,33 @@ async function runCommand(
 }
 
 function parseAccelerator(output: string): ColabAccelerator | undefined {
-	if (/\bA100\b/i.test(output)) return "A100";
-	if (/\bL4\b/i.test(output)) return "L4";
+	for (const accelerator of Object.keys(ACCELERATOR_PROFILES) as ColabAccelerator[]) {
+		if (new RegExp(`\\b${accelerator}\\b`, "i").test(output)) return accelerator;
+	}
 	return undefined;
 }
 
-async function ensureColabSession(sessionName: string, emit: StatusEmitter): Promise<ColabAccelerator> {
+async function ensureColabSession(
+	sessionName: string,
+	accelerators: readonly ColabAccelerator[],
+	requestedAccelerator: ColabAccelerator | undefined,
+	emit: StatusEmitter,
+): Promise<ColabAccelerator> {
 	const status = await runCommand(["status", "--session", sessionName], { timeoutMs: 60_000 });
 	const existingAccelerator =
 		status.exitCode === 0 ? parseAccelerator(`${status.stdout}\n${status.stderr}`) : undefined;
 	if (existingAccelerator) {
+		if (requestedAccelerator && existingAccelerator !== requestedAccelerator) {
+			throw new Error(
+				`${sessionName} is already using ${existingAccelerator}; stop it before requesting ${requestedAccelerator}.`,
+			);
+		}
 		await emit(`Colab: reusing ${sessionName} on ${existingAccelerator}.`);
 		return existingAccelerator;
 	}
 
-	for (const accelerator of ["A100", "L4"] as const) {
+	let lastFailure = "";
+	for (const accelerator of accelerators) {
 		await emit(`Colab: requesting ${accelerator} runtime…`);
 		const launch = await runCommand(["new", "--session", sessionName, "--gpu", accelerator], {
 			timeoutMs: 5 * 60_000,
@@ -348,17 +449,24 @@ async function ensureColabSession(sessionName: string, emit: StatusEmitter): Pro
 		if (launch.exitCode === 0) {
 			return parseAccelerator(`${launch.stdout}\n${launch.stderr}`) ?? accelerator;
 		}
+		lastFailure = launch.stderr || launch.stdout;
 		const recoveredStatus = await runCommand(["status", "--session", sessionName], { timeoutMs: 60_000 });
 		const recoveredAccelerator =
 			recoveredStatus.exitCode === 0
 				? parseAccelerator(`${recoveredStatus.stdout}\n${recoveredStatus.stderr}`)
 				: undefined;
-		if (recoveredAccelerator) return recoveredAccelerator;
-		if (accelerator === "L4") {
-			throw new Error(`Could not acquire an A100 or L4 Colab runtime: ${launch.stderr || launch.stdout}`);
+		if (recoveredAccelerator) {
+			if (requestedAccelerator && recoveredAccelerator !== requestedAccelerator) {
+				throw new Error(
+					`${sessionName} is already using ${recoveredAccelerator}; stop it before requesting ${requestedAccelerator}.`,
+				);
+			}
+			return recoveredAccelerator;
 		}
 	}
-	throw new Error("Could not acquire a Colab GPU runtime.");
+	throw new Error(
+		`Could not acquire a ${accelerators.join(", ")} Colab runtime${lastFailure ? `: ${lastFailure}` : "."}`,
+	);
 }
 
 function pythonJson(value: unknown): string {
@@ -374,6 +482,7 @@ function buildRemoteSetupScript(config: {
 }): string {
 	const payload = {
 		accelerator: config.accelerator,
+		cmakeArchitecture: getColabAcceleratorProfile(config.accelerator).cmakeArchitecture,
 		contextWindow: config.contextWindow,
 		files: config.artifact.files,
 		primaryFile: config.artifact.primaryFile,
@@ -383,8 +492,10 @@ function buildRemoteSetupScript(config: {
 		revision: config.reference.revision,
 	};
 	return `import json
+from concurrent.futures import ThreadPoolExecutor
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -421,42 +532,39 @@ def request_json(url, payload=None, timeout=30):
         return json.loads(response.read())
 
 
-progress("checking CUDA runtime")
-run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"])
-if not LLAMA_DIR.exists():
-    progress("cloning llama.cpp")
-    run(["git", "clone", "--depth", "1", "https://github.com/ggml-org/llama.cpp.git", str(LLAMA_DIR)])
-else:
-    progress("updating llama.cpp")
-    run(["git", "pull", "--ff-only"], cwd=LLAMA_DIR)
+def announce_ready(model_id, primary_name, base_url):
+    context_window = CONFIG["contextWindow"]
+    try:
+        props = request_json(base_url + "/props")
+        context_window = int(props.get("default_generation_settings", {}).get("n_ctx", context_window))
+    except (OSError, urllib.error.URLError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    progress("warming model with a generation request")
+    warmup = request_json(base_url + "/v1/chat/completions", {
+        "model": model_id,
+        "messages": [{"role": "user", "content": "Reply with OK."}],
+        "temperature": 0,
+        "max_tokens": 16,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }, timeout=300)
+    if not warmup.get("choices"):
+        raise RuntimeError("Warmup request returned no completion choices")
+    print(READY_PREFIX + json.dumps({
+        "contextWindow": context_window,
+        "modelId": model_id,
+        "modelName": Path(primary_name).stem,
+        "port": CONFIG["remotePort"],
+    }), flush=True)
 
-server = LLAMA_DIR / "build" / "bin" / "llama-server"
-progress("building CUDA llama-server")
-architecture = "80" if CONFIG["accelerator"] == "A100" else "89"
-run([
-    "cmake", "-S", str(LLAMA_DIR), "-B", str(LLAMA_DIR / "build"),
-    "-DGGML_CUDA=ON", f"-DCMAKE_CUDA_ARCHITECTURES={architecture}",
-    "-DCMAKE_BUILD_TYPE=Release", "-DLLAMA_CURL=OFF",
-])
-run([
-    "cmake", "--build", str(LLAMA_DIR / "build"), "--config", "Release",
-    "--parallel", str(min(8, os.cpu_count() or 2)), "--target", "llama-server",
-])
 
-primary_name = Path(CONFIG["primaryFile"]).name
-required_names = [Path(name).name for name in CONFIG["files"]]
-model_path = None
-for root in (MODEL_ROOT, Path("/content/models")):
-    if not root.exists():
-        continue
-    for candidate in root.rglob(primary_name):
-        if candidate.is_file() and all((candidate.parent / name).is_file() for name in required_names):
-            model_path = candidate
-            break
-    if model_path is not None:
-        break
-
-if model_path is None:
+def resolve_model_path(primary_name, required_names):
+    for root in (MODEL_ROOT, Path("/content/models")):
+        if not root.exists():
+            continue
+        for candidate in root.rglob(primary_name):
+            if candidate.is_file() and all((candidate.parent / name).is_file() for name in required_names):
+                progress(f"reusing downloaded {primary_name}")
+                return candidate
     progress(f"downloading {CONFIG['repoId']} {CONFIG['quantization']}")
     try:
         from huggingface_hub import snapshot_download
@@ -471,12 +579,15 @@ if model_path is None:
         local_dir=str(model_dir),
     )
     model_path = model_dir / CONFIG["primaryFile"]
-else:
-    progress(f"reusing downloaded {primary_name}")
+    if not model_path.is_file():
+        raise FileNotFoundError(model_path)
+    return model_path
 
-if not model_path.is_file():
-    raise FileNotFoundError(model_path)
 
+progress("checking CUDA runtime")
+run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"])
+primary_name = Path(CONFIG["primaryFile"]).name
+required_names = [Path(name).name for name in CONFIG["files"]]
 base_url = f"http://127.0.0.1:{CONFIG['remotePort']}"
 models_payload = None
 try:
@@ -486,6 +597,38 @@ except (OSError, urllib.error.URLError, json.JSONDecodeError):
 running_ids = [item.get("id", "") for item in (models_payload or {}).get("data", []) if isinstance(item, dict)]
 matching_names = {primary_name, Path(primary_name).stem}
 matching_id = next((model_id for model_id in running_ids if Path(model_id).name in matching_names), None)
+if matching_id is not None:
+    progress(f"reusing running {Path(primary_name).stem}")
+    announce_ready(matching_id, primary_name, base_url)
+    raise SystemExit(0)
+
+with ThreadPoolExecutor(max_workers=1) as executor:
+    model_future = executor.submit(resolve_model_path, primary_name, required_names)
+    server = LLAMA_DIR / "build" / "bin" / "llama-server"
+    if server.is_file():
+        progress("reusing CUDA llama-server")
+    else:
+        if not LLAMA_DIR.exists():
+            progress("cloning llama.cpp")
+            run(["git", "clone", "--depth", "1", "https://github.com/ggml-org/llama.cpp.git", str(LLAMA_DIR)])
+        else:
+            progress("updating llama.cpp")
+            run(["git", "pull", "--ff-only"], cwd=LLAMA_DIR)
+        progress("building CUDA llama-server")
+        build_dir = LLAMA_DIR / "build"
+        configure = [
+            "cmake", "-S", str(LLAMA_DIR), "-B", str(build_dir),
+            "-DGGML_CUDA=ON", f"-DCMAKE_CUDA_ARCHITECTURES={CONFIG['cmakeArchitecture']}",
+            "-DCMAKE_BUILD_TYPE=Release", "-DLLAMA_CURL=OFF",
+        ]
+        if shutil.which("ninja") and not (build_dir / "CMakeCache.txt").exists():
+            configure.extend(["-G", "Ninja"])
+        run(configure)
+        run([
+            "cmake", "--build", str(build_dir), "--config", "Release",
+            "--parallel", str(max(2, os.cpu_count() or 2)), "--target", "llama-server",
+        ])
+    model_path = model_future.result()
 
 if matching_id is None:
     if PID_FILE.exists():
@@ -526,29 +669,7 @@ model_items = models_payload.get("data", [])
 if not model_items or not isinstance(model_items[0], dict) or not model_items[0].get("id"):
     raise RuntimeError("llama-server did not advertise a model id")
 model_id = model_items[0]["id"]
-context_window = CONFIG["contextWindow"]
-try:
-    props = request_json(base_url + "/props")
-    context_window = int(props.get("default_generation_settings", {}).get("n_ctx", context_window))
-except (OSError, urllib.error.URLError, ValueError, TypeError, json.JSONDecodeError):
-    pass
-
-progress("warming model with a generation request")
-warmup = request_json(base_url + "/v1/chat/completions", {
-    "model": model_id,
-    "messages": [{"role": "user", "content": "Reply with OK."}],
-    "temperature": 0,
-    "max_tokens": 16,
-    "chat_template_kwargs": {"enable_thinking": False},
-}, timeout=300)
-if not warmup.get("choices"):
-    raise RuntimeError("Warmup request returned no completion choices")
-print(READY_PREFIX + json.dumps({
-    "contextWindow": context_window,
-    "modelId": model_id,
-    "modelName": Path(primary_name).stem,
-    "port": CONFIG["remotePort"],
-}), flush=True)
+announce_ready(model_id, primary_name, base_url)
 `;
 }
 
@@ -728,7 +849,15 @@ export async function launchColabModel(
 	await emit(`Colab: resolving ${reference.repoId}@${reference.revision}…`);
 	const entries = await fetchHuggingFaceGgufs(reference, options.fetch);
 	const sessionName = options.sessionName ?? (Bun.env.OMPK_COLAB_SESSION?.trim() || DEFAULT_SESSION_NAME);
-	let accelerator = await ensureColabSession(sessionName, emit);
+	const acquisitionCandidates = options.accelerator
+		? [options.accelerator]
+		: selectAutomaticColabAccelerators(entries, reference);
+	if (acquisitionCandidates.length === 0) {
+		throw new Error(
+			`No GGUF in ${reference.repoId} fits an automatic T4, L4, or A100 launch. Pass --gpu H100 or --gpu G4, or use a smaller GGUF.`,
+		);
+	}
+	let accelerator = await ensureColabSession(sessionName, acquisitionCandidates, options.accelerator, emit);
 	let artifact = selectGgufArtifact(entries, reference, accelerator);
 	let ready: RemoteReadyPayload | undefined;
 	for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -756,7 +885,7 @@ export async function launchColabModel(
 		const failure = setup.stderr || setup.stdout;
 		if (attempt === 0 && /appears to be lost|session .* not found|\b40[14]\b/i.test(failure)) {
 			await emit("Colab: stale runtime expired; acquiring a replacement…");
-			accelerator = await ensureColabSession(sessionName, emit);
+			accelerator = await ensureColabSession(sessionName, acquisitionCandidates, options.accelerator, emit);
 			artifact = selectGgufArtifact(entries, reference, accelerator);
 			continue;
 		}
@@ -783,16 +912,17 @@ export async function handleColabModelSlashCommand(
 	runtime: SlashCommandRuntime,
 	launch: typeof launchColabModel = launchColabModel,
 ): Promise<{ consumed: true }> {
-	const modelReference = args.trim();
-	if (!modelReference) {
-		await runtime.output(
-			"Usage: /colab-model <owner/repository | huggingface.co model or GGUF URL>\nExample: /colab-model unsloth/Qwen3.8-27B-GGUF",
-		);
-		return { consumed: true };
-	}
-
 	try {
-		const result = await launch(modelReference, message => runtime.output(message));
+		const request = parseColabModelCommandArgs(args);
+		if (!request.modelReference) {
+			await runtime.output(
+				"Usage: /colab-model [--gpu T4|L4|A100|H100|G4] <owner/repository | huggingface.co model or GGUF URL>\nExample: /colab-model --gpu L4 unsloth/Qwen3.8-27B-GGUF",
+			);
+			return { consumed: true };
+		}
+		const result = await launch(request.modelReference, message => runtime.output(message), {
+			accelerator: request.accelerator,
+		});
 		runtime.session.modelRegistry.registerProvider(
 			RUNTIME_PROVIDER,
 			{
