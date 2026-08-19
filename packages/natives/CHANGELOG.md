@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.3] - 2026-08-19
+
 > **Note on `.omp` paths below.** The configuration directory was renamed to
 > `~/.ompk` (and project-local `.omp/` to `.ompk/`). Entries dated before that
 > rename still say `.omp` because that is what those releases actually shipped;
