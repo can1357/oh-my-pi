@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage, type AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { AssistantMessage, TextContent, ToolCall } from "@pk-nerdsaver-ai/pi-ai";
@@ -171,6 +171,20 @@ describe("AgentSession eager todo enforcement", () => {
 			modelRegistry,
 			toolRegistry,
 		});
+		vi.spyOn(session, "evaluateRootCompletionGate").mockReturnValue({
+			gate: {
+				allDeliverablesPresent: true,
+				criteriaSatisfied: true,
+				nonSolutionTriggered: false,
+				requiredEvidencePresent: true,
+				unresolvedBlockersAcknowledged: true,
+				scopeValid: true,
+			},
+			outcome: "pass",
+			missingCriteria: [],
+			failedCriteria: [],
+			unprovenCriteria: [],
+		});
 	}
 
 	beforeEach(async () => {
@@ -186,6 +200,7 @@ describe("AgentSession eager todo enforcement", () => {
 			await session.dispose();
 		}
 		authStorage?.close();
+		vi.restoreAllMocks();
 		authStorage = undefined;
 		tempDir.removeSync();
 	});

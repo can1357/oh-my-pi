@@ -120,6 +120,69 @@ describe("AgentSession task-contract runtime", () => {
 		expect(block).toContain("<task-contract");
 		expect(block).toContain("auth service");
 	});
+	it("delivers a streamed substantial follow-up with its executor contract", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: [
+				async () => {
+					started.resolve();
+					await release.promise;
+					return { content: ["initial turn"] };
+				},
+				{ content: ["follow-up turn"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		const gateSpy = vi.spyOn(session, "evaluateRootCompletionGate").mockReturnValue({
+			gate: {
+				allDeliverablesPresent: true,
+				criteriaSatisfied: true,
+				nonSolutionTriggered: false,
+				requiredEvidencePresent: true,
+				unresolvedBlockersAcknowledged: true,
+				scopeValid: true,
+			},
+			outcome: "pass",
+			missingCriteria: [],
+			failedCriteria: [],
+			unprovenCriteria: [],
+		});
+
+		const running = session.prompt("do the thing");
+		await started.promise;
+		try {
+			await session.prompt("then add the test", { streamingBehavior: "followUp" });
+			const queued = session.agent.peekFollowUpQueue();
+			expect(queued[0]?.role).toBe("custom");
+			expect(queued[0]?.role === "custom" ? queued[0].customType : undefined).toBe("task-contract-notice");
+			expect(queued[1]?.role).toBe("user");
+			release.resolve();
+			await running;
+			expect(
+				session.agent.state.messages.some(message => {
+					if (message.role !== "custom" || message.customType !== "task-contract-notice") return false;
+					const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content);
+					return content.includes("<task-contract");
+				}),
+			).toBe(true);
+			expect(gateSpy).toHaveBeenCalled();
+		} finally {
+			release.resolve();
+			await running.catch(() => {});
+		}
+	});
+
 	it("continues a compiled root task when its first stop lacks verification evidence", async () => {
 		session = await makeStreamingSession([{ content: ["I implemented auth."] }]);
 

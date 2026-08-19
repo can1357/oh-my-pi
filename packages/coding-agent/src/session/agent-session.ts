@@ -6698,17 +6698,19 @@ export class AgentSession {
 			if (!options?.streamingBehavior) {
 				throw new AgentBusyError();
 			}
-			// Steer/follow-up the keyword notices BEFORE the queued user message so the
-			// model reads the steering notice ahead of the prompt it modifies. The
-			// task-contract notice never rides the delivery queues: it is runtime-only
-			// executor context (dropped at the LLM boundary by convertToLlm), so it is
-			// appended straight to agent state where the completion gate and retry
-			// replay read it — a mid-flight dequeue then restores only the user's text.
+			// Queue keyword and task-contract notices immediately before the user message
+			// on the same delivery queue. A streaming follow-up must not activate a root
+			// contract whose executor notice is stranded in #pendingNextTurnMessages:
+			// the follow-up can be consumed by the live loop before that hidden notice.
 			for (const notice of keywordNotices) {
 				await this.sendCustomMessage(notice, { deliverAs: options.streamingBehavior });
 			}
 			if (taskContractNotice) {
-				await this.sendCustomMessage(taskContractNotice, { deliverAs: "nextTurn" });
+				if (options.streamingBehavior === "followUp") {
+					this.agent.followUp(taskContractNotice);
+				} else {
+					this.agent.steer(taskContractNotice);
+				}
 			}
 			if (options.streamingBehavior === "followUp") {
 				await this.#queueUserMessage(expandedText, options?.images, "followUp");
@@ -10179,6 +10181,21 @@ export class AgentSession {
 		if (this.#agentKind !== "main") return false;
 		const contract = this.#activeTaskContract;
 		if (!contract) return false;
+		// A queued streaming follow-up may activate a compiled root contract before its
+		// hidden executor notice is actually delivered. Do not let an unrelated wake turn
+		// enforce that deferred contract; enforcement starts once the notice enters context.
+		const compiledContract = this.#activeCompiledTaskContract;
+		if (
+			compiledContract &&
+			!this.agent.state.messages.some(
+				message =>
+					message.role === "custom" &&
+					message.customType === "task-contract-notice" &&
+					message.content === compiledContract.executorBlock.text,
+			)
+		) {
+			return false;
+		}
 
 		if (this.#completionGateAwaitingProgress) {
 			logger.debug("Completion gate: prior reminder still awaiting agent action; staying silent", {

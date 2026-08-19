@@ -228,7 +228,7 @@ describe("AgentSession queued steer delivery", () => {
 
 		await session.prompt("hello");
 
-		expect(queuedShape).toEqual(["ultrathink-notice", "user"]);
+		expect(queuedShape).toEqual(["ultrathink-notice", "task-contract-notice", "user"]);
 		expect(clearedSteering).toEqual([{ text: "ultrathink fix it", images: undefined }]);
 		expect(hasQueuedAfterClear).toBe(false);
 	});
