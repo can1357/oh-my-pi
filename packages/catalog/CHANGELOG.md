@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `openai-codex/gpt-5.6-sol` to expose its 1,050,000-token context window and 128,000-token output limit instead of inheriting the generic 272,000-token Codex default.
+
 ## [16.4.3] - 2026-08-19
 
 > **Note on `.omp` paths below.** The configuration directory was renamed to

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added deterministic `low`, `medium`, and `high` subagent difficulty routing for native `task` and eval `agent()` spawns. Difficulty reuses named `agent.profiles` through the `smol`, `task`, and `slow` model roles, preserves explicit-model precedence and restrictive policies, fails unavailable routes before allocation, and exposes privacy-safe routing provenance in progress, results, telemetry, and the optional resolved-model badge.
+
+### Changed
+
+- Routed compiled-root and subagent assignment contracts through the shared evidence-backed completion gate, including criterion-bound ledger coverage, bounded recovery reminders, and accepted-but-flagged escalation instead of an unbounded yield loop.
+- Enforced collaboration policies consistently for cross-process IRC discovery, remote sends, wake budgets, and the peer roster shown to spawned agents.
+
+### Fixed
+
+- Fixed the compiled-binary release builder to run native, stats, docs, and MuPDF generation from each owning workspace directory instead of the monorepo root.
+
 ## [16.4.3] - 2026-08-19
 
 > **Note on `.omp` paths below.** The configuration directory was renamed to
@@ -16,9 +29,6 @@
 
 - Added `/colab-model <Hugging Face model or GGUF URL>`: it acquires or reuses an A100/L4 Colab CLI runtime, selects a fitting GGUF, builds and warms llama.cpp, exposes a private loopback OpenAI-compatible bridge, registers the model under the existing `llama.cpp` provider, and selects it only after a successful generation. Expired Colab sessions are replaced once automatically, and gated Hugging Face repositories fail without forwarding credentials.
 - Added `/colab-model [--gpu T4|L4|A100|H100|G4] <Hugging Face model or GGUF URL>`: automatic launches choose the cheapest viable T4, L4, or A100 runtime, while explicit selection supports every Colab CLI GPU. It selects a fitting GGUF, reuses healthy servers and existing builds, overlaps model downloads with native-only CUDA compilation, exposes a private loopback OpenAI-compatible bridge, registers the model under the existing `llama.cpp` provider, and selects it only after a successful generation. Expired Colab sessions are replaced once automatically, and gated Hugging Face repositories fail without forwarding credentials.
-- Added `/colab-model [--gpu T4|L4|A100|H100|G4] <Hugging Face model or GGUF URL>`: automatic launches choose the cheapest viable T4, L4, or A100 runtime, while explicit selection supports every Colab CLI GPU. It selects a fitting GGUF, reuses healthy servers and existing builds, overlaps model downloads with native-only CUDA compilation, exposes a private loopback OpenAI-compatible bridge, registers the model under the existing `llama.cpp` provider, and selects it only after a successful generation. Expired Colab sessions are replaced once automatically, and gated Hugging Face repositories fail without forwarding credentials.
-- Added deterministic `low`, `medium`, and `high` subagent difficulty routing for native `task` and eval `agent()` spawns. Difficulty reuses named `agent.profiles` through the `smol`, `task`, and `slow` model roles, preserves explicit-model precedence and restrictive policies, fails unavailable routes before allocation, and exposes privacy-safe routing provenance in progress, results, telemetry, and the optional resolved-model badge.
-
 - Added ClinePass to the interactive login selector as `/login cline-pass`, with ClinePass-only models and shared `CLINE_API_KEY` environment fallback kept separate from canonical Cline usage-billing models.
 - Added the optional `clinepass-deepseek-v4-flash` 9router combo to the default, balanced, task, and budget routing slots; installations without the combo continue to skip it.
 - Added opt-in ACP `pkzz` v1 extensions for owner-mediated write/exec permission prompts and bounded host-visible final replies. Legacy ACP clients retain their existing behavior unless they explicitly negotiate the matching capability markers.
