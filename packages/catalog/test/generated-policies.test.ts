@@ -87,6 +87,37 @@ describe("generated model policies", () => {
 		expect(models[3]?.priority).toBe(1);
 	});
 
+	it("pins Codex GPT-5.6 Sol to its Max-plan 1M context window", () => {
+		const models: ModelSpec<Api>[] = [
+			createSpec({
+				id: "gpt-5.6-sol",
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				contextWindow: 272_000,
+				maxTokens: 32_000,
+			}),
+			createSpec({
+				id: "gpt-5.6-terra",
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				contextWindow: 272_000,
+			}),
+			createSpec({
+				id: "gpt-5.6-sol",
+				api: "openai-responses",
+				provider: "openai",
+				contextWindow: 272_000,
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.contextWindow).toBe(1_050_000);
+		expect(models[0]?.maxTokens).toBe(128_000);
+		expect(models[1]?.contextWindow).toBe(272_000);
+		expect(models[2]?.contextWindow).toBe(272_000);
+	});
+
 	it("pins Claude Mythos 5 first-party Anthropic catalog metadata", () => {
 		const models: ModelSpec<Api>[] = [
 			createSpec({

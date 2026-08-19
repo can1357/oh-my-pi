@@ -331,6 +331,18 @@ function inferGeneratedApplyPatchToolType(
 }
 
 function applyOpenAICatalogPolicy(model: ModelSpec<Api>, parsedModel: OpenAIModel): void {
+	// GPT-5.6 Sol can opt into its native 1.05M context window on Codex,
+	// including Max-plan accounts. Codex discovery still reports the 272K
+	// default, so pin the expanded limit for OMPK's compaction accounting.
+	if (
+		model.api === "openai-codex-responses" &&
+		semverEqual(parsedModel.version, "5.6") &&
+		bareModelId(model.id) === "gpt-5.6-sol"
+	) {
+		model.contextWindow = 1_050_000;
+		model.maxTokens = 128_000;
+	}
+
 	// Codex models: 400K figure includes output budget; input window is 272K.
 	if (parsedModel.variant.startsWith("codex") && parsedModel.variant !== "codex-spark") {
 		model.contextWindow = 272000;
