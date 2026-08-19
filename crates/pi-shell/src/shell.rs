@@ -2722,7 +2722,7 @@ mod tests {
 		// -path matches against the operand-relative path.
 		session
 			.shell
-			.run_string("find . -path '*sub?drop.tmp' > p.txt", &si, &params)
+			.run_string("find . -path '.?sub?drop.tmp' > p.txt", &si, &params)
 			.await
 			.expect("path");
 		assert_eq!(
