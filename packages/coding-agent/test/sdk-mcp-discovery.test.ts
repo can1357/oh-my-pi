@@ -114,7 +114,7 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 
 		expect(session.systemPrompt.join("\n")).not.toContain("### MCP tool discovery");
 		expect(session.systemPrompt.join("\n")).not.toContain(
-			"call `search_tool_bm25` before concluding no such tool exists",
+			"call `search_tool_bm25` before concluding that no such tool exists",
 		);
 	});
 
@@ -206,7 +206,7 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 		const prompt = session.systemPrompt.join("\n");
 		const searchTool = session.agent.state.tools.find(tool => tool.name === "search_tool_bm25");
 		expect(session.getActiveToolNames()).not.toContain("search");
-		expect(prompt).toContain("call `search_tool_bm25` before concluding no such tool exists");
+		expect(prompt).toContain("call `search_tool_bm25` before concluding that no such tool exists");
 		expect(searchTool?.description).toContain("Total discoverable tools available:");
 	});
 
