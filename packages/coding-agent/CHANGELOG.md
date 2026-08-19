@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.4] - 2026-08-19
+
 ### Added
 
 - Added deterministic `low`, `medium`, and `high` subagent difficulty routing for native `task` and eval `agent()` spawns. Difficulty reuses named `agent.profiles` through the `smol`, `task`, and `slow` model roles, preserves explicit-model precedence and restrictive policies, fails unavailable routes before allocation, and exposes privacy-safe routing provenance in progress, results, telemetry, and the optional resolved-model badge.

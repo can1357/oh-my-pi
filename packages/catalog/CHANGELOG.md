@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.4] - 2026-08-19
+
 ### Fixed
 
 - Fixed `openai-codex/gpt-5.6-sol` to expose its 1,050,000-token context window and 128,000-token output limit instead of inheriting the generic 272,000-token Codex default.
