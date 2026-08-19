@@ -189,4 +189,92 @@ describe("createSpawnPlan", () => {
 		if (denied.ok) return;
 		expect(denied.diagnostics[0]?.code).toBe("router-denied");
 	});
+
+	test("difficulty-profile routing intersects concrete candidateSelectors with a restricted model pool", () => {
+		let allocations = 0;
+		const bump = () => {
+			allocations += 1;
+		};
+
+		const result = createSpawnPlan({
+			correlationId: "corr-pool-overlap",
+			agentName: "task",
+			assignment: "Do the hard part",
+			// Symbolic role token, exactly what resolveSubagentModelRouting hands
+			// back for a difficulty route -- must NOT be exact-string-matched
+			// against a concrete pool.
+			modelPatterns: ["pi/slow"],
+			modelRouting: {
+				requestedDifficulty: "high",
+				source: "difficulty-profile",
+				role: "slow",
+				candidateSelectors: ["anthropic/claude-other", "anthropic/claude-approved"],
+			},
+			profile: {
+				tier: "frontier",
+				autonomy: "independent",
+				collaboration: "self-coordinate",
+				workClass: "judgment",
+				editMode: "hashline",
+				maxRequests: 20,
+				maxRuntimeMs: 0,
+				modelPool: ["anthropic/claude-approved"],
+				modelPoolConstrained: true,
+			},
+			onAllocateId: bump,
+			onAllocateJob: bump,
+			onAllocateWorktree: bump,
+			onAllocateSession: bump,
+		});
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(allocations).toBe(0);
+		// Only the overlap survives -- the disjoint candidate never leaks in,
+		// and the pool never silently substitutes an unrequested model.
+		expect(result.plan.eligible.map(candidate => candidate.selector)).toEqual(["anthropic/claude-approved"]);
+	});
+
+	test("difficulty-profile routing fails preallocation when the restricted pool is fully disjoint", () => {
+		let allocations = 0;
+		const bump = () => {
+			allocations += 1;
+		};
+
+		const result = createSpawnPlan({
+			correlationId: "corr-pool-disjoint",
+			agentName: "task",
+			assignment: "Do the hard part",
+			modelPatterns: ["pi/slow"],
+			modelRouting: {
+				requestedDifficulty: "high",
+				source: "difficulty-profile",
+				role: "slow",
+				candidateSelectors: ["anthropic/claude-expensive"],
+			},
+			profile: {
+				tier: "frontier",
+				autonomy: "independent",
+				collaboration: "self-coordinate",
+				workClass: "judgment",
+				editMode: "hashline",
+				maxRequests: 20,
+				maxRuntimeMs: 0,
+				modelPool: ["cheap-provider/cheap-model"],
+				modelPoolConstrained: true,
+			},
+			onAllocateId: bump,
+			onAllocateJob: bump,
+			onAllocateWorktree: bump,
+			onAllocateSession: bump,
+		});
+
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		// Never allocates before validation rejects the spawn, and never
+		// silently substitutes a cheaper pool member for the requested one.
+		expect(allocations).toBe(0);
+		expect(result.diagnostics.some(diagnostic => diagnostic.code === "model-pool-disjoint")).toBe(true);
+		expect(result.diagnostics.some(diagnostic => diagnostic.selector === "cheap-provider/cheap-model")).toBe(false);
+	});
 });

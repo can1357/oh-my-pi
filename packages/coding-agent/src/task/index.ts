@@ -20,13 +20,7 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@pk-ne
 import type { Usage } from "@pk-nerdsaver-ai/pi-ai";
 import { $env, logger, prompt, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 import type { ToolSession } from "..";
-import {
-	canonicalizeRoleSelector,
-	resolveAgentModelPatterns,
-	resolveKnownModelRole,
-	resolveModelOverride,
-} from "../config/model-resolver";
-import { mergeSubagentModelAliases, resolveSubagentModelAlias } from "../config/subagent-model-aliases";
+import { resolveModelOverride } from "../config/model-resolver";
 import type { ExtensionRunner } from "../extensibility/extensions/runner";
 import { MCPManager } from "../mcp/manager";
 import type { Theme } from "../modes/theme/theme";
@@ -45,6 +39,10 @@ import {
 	recordSpawnResultTelemetry,
 	recordSpawnTelemetry,
 } from "../orchestration/orchestration-telemetry";
+import {
+	resolveSubagentModelRouting,
+	type SubagentModelRoutingDecision,
+} from "../orchestration/subagent-model-routing";
 import { snapshotFromAssignmentFields } from "../orchestration/task-contract";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentPrefetchEvidenceTemplate from "../prompts/system/subagent-prefetch-evidence.md" with { type: "text" };
@@ -155,6 +153,7 @@ interface PreparedSpawn {
 	readonly effectiveAgent: AgentDefinition;
 	readonly plan: SpawnPlan;
 	readonly modelOverride: string | string[] | undefined;
+	readonly modelRouting: SubagentModelRoutingDecision;
 	readonly parentActiveModelPattern: string | undefined;
 	readonly harness: AgentHarness;
 	readonly toolProfile: ResolvedToolProfile;
@@ -489,6 +488,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 			description: params.description,
 			role: params.role,
 			model: params.model,
+			difficulty: params.difficulty,
 			assignment: params.assignment,
 			executionProfile: internal.executionProfile,
 			toolProfile: internal.toolProfile,
@@ -519,6 +519,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem): OrchestratedTaskPar
 	if (item.description !== undefined) spawn.description = item.description;
 	if (item.role !== undefined) spawn.role = item.role;
 	if (item.model !== undefined) spawn.model = item.model;
+	if (item.difficulty !== undefined) spawn.difficulty = item.difficulty;
 	if (item.assignment !== undefined) spawn.assignment = item.assignment;
 	if (item.fork !== undefined) spawn.fork = item.fork;
 	if (params.context !== undefined) spawn.context = params.context;
@@ -820,43 +821,30 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				}
 			: agent;
 
-		const agentModelOverrides = this.session.settings.get("task.agentModelOverrides");
-		const settingsModelOverride = agentModelOverrides[agentName];
-		const explicitModelSelector = params.model?.trim();
-		let explicitModelOverride: string | undefined;
-		if (explicitModelSelector) {
-			if (!this.session.modelRegistry) {
-				return fail(`Model "${explicitModelSelector}" cannot be validated because no model registry is available.`);
-			}
-			const canonicalRoleSelector = canonicalizeRoleSelector(explicitModelSelector);
-			if (resolveKnownModelRole(canonicalRoleSelector)) {
-				const roleResolution = resolveModelOverride(
-					[canonicalRoleSelector],
-					this.session.modelRegistry,
-					this.session.settings,
-				);
-				explicitModelOverride = roleResolution.model ? canonicalRoleSelector : undefined;
-			} else {
-				const aliases = mergeSubagentModelAliases(this.session.settings.get("subagent.modelAliases"));
-				explicitModelOverride =
-					resolveSubagentModelAlias(explicitModelSelector, aliases, this.session.modelRegistry) ?? undefined;
-			}
-			if (!explicitModelOverride) {
-				return fail(
-					`Model "${explicitModelSelector}" not found for task spawn. Configure subagent.modelAliases or use a concrete catalog selector.`,
-				);
-			}
+		if (params.difficulty && params.fork === true) {
+			return fail(
+				`Task spawn rejected: "difficulty" cannot be combined with "fork: true". Fork mode inherits the parent's exact model, so it is incompatible with difficulty-based routing; omit "difficulty" for a forked spawn, or set "fork: false" (or omit it) to route by difficulty.`,
+			);
 		}
+		const explicitModelSelector = params.model?.trim() || undefined;
 		const parentActiveModelPattern = this.session.getActiveModelString?.();
-		const modelOverride = explicitModelOverride
-			? [explicitModelOverride]
-			: resolveAgentModelPatterns({
-					settingsOverride: settingsModelOverride,
-					agentModel: effectiveAgent.model,
-					settings: this.session.settings,
-					activeModelPattern: parentActiveModelPattern,
-					fallbackModelPattern: this.session.getModelString?.(),
-				});
+		const routingResult = resolveSubagentModelRouting({
+			requestedModel: explicitModelSelector,
+			requestedDifficulty: params.difficulty,
+			agentName,
+			agentModelDefault: effectiveAgent.model,
+			settings: this.session.settings,
+			modelRegistry: this.session.modelRegistry,
+			parentActiveModelPattern,
+			sessionDefaultModelPattern: this.session.getModelString?.(),
+		});
+		if (!routingResult.ok) {
+			return fail(
+				`Task spawn model routing failed:\n- [${routingResult.error.kind}] ${routingResult.error.message}`,
+			);
+		}
+		const modelRouting = routingResult.decision;
+		const modelOverride = routingResult.modelPatterns;
 
 		const assignment = (params.assignment ?? "").trim();
 		const agentId = params.id?.trim() ?? "";
@@ -886,7 +874,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 							: undefined,
 					},
 			modelPatterns: modelOverride.length > 0 ? modelOverride : undefined,
-			requestedModel: explicitModelOverride,
+			requestedModel: modelRouting.source === "explicit" ? modelOverride[0] : undefined,
+			modelRouting,
 			manualModelSelection: Boolean(explicitModelSelector),
 			fusionSidekick: false,
 			softRequestBudget: this.session.settings.get("task.softRequestBudget"),
@@ -1003,6 +992,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			}
 		}
 
+		// Privacy-safe routing provenance: difficulty, selection source, profile
+		// name, and selector metadata only — never assignment text or credentials.
 		recordSpawnTelemetry(this.session.getOrchestrationTelemetry?.() ?? { emit: () => {}, events: [] }, {
 			sessionId: this.session.getSessionId?.() ?? undefined,
 			correlationId: planned.plan.correlationId,
@@ -1012,6 +1003,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			contextPolicy: params.contextPolicy ?? "shared",
 			routeLabel: tierToRouteLabel(planned.plan.profile.tier),
 			taskContractClass: params.assignmentContract ? "assignment-contract" : undefined,
+			metadata: Object.freeze({
+				requestedDifficulty: modelRouting.requestedDifficulty,
+				modelSelectionSource: modelRouting.source,
+				modelProfileName: modelRouting.profileName,
+				modelRole: modelRouting.role,
+				candidateSelectors: modelRouting.candidateSelectors,
+			}),
 		});
 		if (params.assignmentContract && this.session.setActiveTaskContract) {
 			const contract = params.assignmentContract;
@@ -1044,6 +1042,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				effectiveAgent,
 				plan: planned.plan,
 				modelOverride: planned.plan.eligible.map(candidate => candidate.selector),
+				modelRouting,
 				parentActiveModelPattern,
 				harness: effectiveHarness,
 				toolProfile,
@@ -1182,6 +1181,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					recoveryAttempt: spawnParams.recoveryAttempt?.attempt,
 					recoveryTier: spawnParams.recoveryAttempt?.tier,
 					recoveryProvider: spawnParams.recoveryAttempt?.provider,
+					modelRouting: prepared.modelRouting,
 					recentTools: [],
 					recentOutput: [],
 					toolCount: 0,
@@ -1627,6 +1627,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			effectiveAgent,
 			plan: spawnPlan,
 			modelOverride,
+			modelRouting,
 			parentActiveModelPattern,
 			harness,
 			toolProfile,
@@ -1756,6 +1757,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				cost: 0,
 				durationMs: 0,
 				modelOverride,
+				modelRouting,
 				description: params.description,
 			};
 			const emitProgress = () => {
@@ -1836,6 +1838,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				allocateRecoveryId: (recovery: RecoveryAttempt) =>
 					outputManager.allocate(`${agentId}-recovery-${recovery.attempt}`),
 				modelOverride,
+				modelRouting,
 				contextMode: params.fork === true ? ("fork" as const) : undefined,
 				forkContext: params.fork === true ? this.session.getForkContext?.() : undefined,
 				parentActiveModelPattern,
@@ -1957,6 +1960,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						tokens: 0,
 						requests: 0,
 						modelOverride,
+						modelRouting,
 						error: message,
 					};
 				} finally {
@@ -1990,7 +1994,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					strategyFamily: params.strategyFamily,
 					workerMode: resolveWorkerMode(agentName),
 					verificationOutcome: resultStatus,
-					metadata: { exitCode: result.exitCode },
+					metadata: {
+						exitCode: result.exitCode,
+						resolvedModel: result.resolvedModel,
+						requestedDifficulty: modelRouting.requestedDifficulty,
+						modelSelectionSource: modelRouting.source,
+					},
 				});
 				// Update approach registry and emit blocker/approach_update when the child
 				// reported a blocked or falsified outcome.

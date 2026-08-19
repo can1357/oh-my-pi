@@ -159,7 +159,7 @@ describe("TaskTool spawn profile integration", () => {
 		});
 
 		expect(result.content.find(part => part.type === "text")?.text ?? "").toContain(
-			'Model "not-a-real-model" not found for task spawn',
+			'Model "not-a-real-model" not found for subagent spawn',
 		);
 		expect(result.details?.results).toEqual([]);
 		expect(allocateSpy).not.toHaveBeenCalled();
@@ -186,7 +186,7 @@ describe("TaskTool spawn profile integration", () => {
 		});
 
 		expect(result.content.find(part => part.type === "text")?.text ?? "").toContain(
-			'Model "not-a-real-model" not found for task spawn',
+			'Model "not-a-real-model" not found for subagent spawn',
 		);
 		expect(result.details?.results).toEqual([]);
 		expect(allocateSpy).not.toHaveBeenCalled();

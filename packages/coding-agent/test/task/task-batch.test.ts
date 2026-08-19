@@ -447,3 +447,170 @@ describe("task.batch spawning", () => {
 		]);
 	});
 });
+describe("task.batch difficulty routing", () => {
+	const managers: AsyncJobManager[] = [];
+
+	function createManager(): AsyncJobManager {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.push(manager);
+		return manager;
+	}
+
+	beforeEach(() => {
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		for (const manager of managers.splice(0)) {
+			await manager.dispose({ timeoutMs: 1000 });
+		}
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
+	});
+
+	const difficultyModelRoles = {
+		smol: "minimax-code/MiniMax-M3",
+		task: "clinepass/deepseek",
+		slow: "minimax-code/MiniMax-M3",
+	};
+
+	it("routes independent low/medium/high batch siblings to their fixed model role", async () => {
+		mockDiscovery();
+		const seen: Array<{ id?: string; modelOverride?: string | string[]; modelRouting?: unknown }> = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			seen.push({ id: options.id, modelOverride: options.modelOverride, modelRouting: options.modelRouting });
+			return makeResult(options.id ?? "?");
+		});
+		const modelRegistry = makeModelRegistry([
+			makeModel("minimax-code", "MiniMax-M3"),
+			makeModel("clinepass", "deepseek"),
+		]);
+
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({
+				manager,
+				modelRegistry,
+				settings: { "async.enabled": true, "task.batch": true, modelRoles: difficultyModelRoles },
+			}),
+		);
+
+		await tool.execute("tc-difficulty", {
+			agent: "task",
+			context: "Shared notes.",
+			tasks: [
+				{ id: "Low", difficulty: "low", assignment: "Do A." },
+				{ id: "Medium", difficulty: "medium", assignment: "Do B." },
+				{ id: "High", difficulty: "high", assignment: "Do C." },
+			],
+		} as TaskParams);
+		await manager.getJob("Low")!.promise;
+		await manager.getJob("Medium")!.promise;
+		await manager.getJob("High")!.promise;
+
+		const byId = Object.fromEntries(seen.map(entry => [entry.id, entry]));
+		expect(byId.Low?.modelOverride).toEqual(["pi/smol"]);
+		expect(byId.Medium?.modelOverride).toEqual(["pi/task"]);
+		expect(byId.High?.modelOverride).toEqual(["pi/slow"]);
+		expect(byId.Low?.modelRouting).toMatchObject({
+			requestedDifficulty: "low",
+			source: "difficulty-profile",
+			role: "smol",
+		});
+		expect(byId.Medium?.modelRouting).toMatchObject({
+			requestedDifficulty: "medium",
+			source: "difficulty-profile",
+			role: "task",
+		});
+		expect(byId.High?.modelRouting).toMatchObject({
+			requestedDifficulty: "high",
+			source: "difficulty-profile",
+			role: "slow",
+		});
+	});
+
+	it("lets an explicit model win over a requested difficulty while retaining provenance", async () => {
+		mockDiscovery();
+		let captured: { modelOverride?: string | string[]; modelRouting?: unknown } | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			captured = { modelOverride: options.modelOverride, modelRouting: options.modelRouting };
+			return makeResult(options.id ?? "?");
+		});
+		const modelRegistry = makeModelRegistry([makeModel("minimax-code", "MiniMax-M3")]);
+		const tool = await TaskTool.create(
+			createSession({
+				modelRegistry,
+				settings: { "task.batch": false, modelRoles: difficultyModelRoles },
+			}),
+		);
+
+		await tool.execute("tc-difficulty-explicit", {
+			agent: "task",
+			model: "minimax-code",
+			difficulty: "high",
+			assignment: "Do the thing.",
+		} as TaskParams);
+
+		expect(captured?.modelOverride).toEqual(["minimax-code/MiniMax-M3"]);
+		expect(captured?.modelRouting).toMatchObject({ source: "explicit", requestedDifficulty: "high" });
+	});
+
+	it("rejects difficulty combined with fork before any allocation", async () => {
+		mockDiscovery();
+		const runSpy = vi.spyOn(executorModule, "runSubprocess");
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": false, modelRoles: difficultyModelRoles },
+			}),
+		);
+
+		const result = await tool.execute("tc-difficulty-fork", {
+			agent: "task",
+			difficulty: "low",
+			fork: true,
+			assignment: "Do the thing.",
+		} as TaskParams);
+
+		expect(getFirstText(result)).toContain('"difficulty" cannot be combined with "fork: true"');
+		expect(runSpy).not.toHaveBeenCalled();
+	});
+
+	it("rejects an unavailable difficulty role before allocation without silently downgrading", async () => {
+		mockDiscovery();
+		const runSpy = vi.spyOn(executorModule, "runSubprocess");
+		const tool = await TaskTool.create(
+			createSession({
+				settings: { "task.batch": false },
+			}),
+		);
+
+		const result = await tool.execute("tc-difficulty-unavailable", {
+			agent: "task",
+			difficulty: "high",
+			assignment: "Do the thing.",
+		} as TaskParams);
+
+		expect(getFirstText(result)).toContain("difficulty-role-unavailable");
+		expect(runSpy).not.toHaveBeenCalled();
+	});
+
+	it("no-difficulty spawns keep resolving through the existing fallback chain", async () => {
+		mockDiscovery();
+		let captured: { modelOverride?: string | string[]; modelRouting?: unknown } | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			captured = { modelOverride: options.modelOverride, modelRouting: options.modelRouting };
+			return makeResult(options.id ?? "?");
+		});
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
+
+		const result = await tool.execute("tc-no-difficulty", {
+			agent: "task",
+			assignment: "Do the thing.",
+		} as TaskParams);
+
+		expect(result.isError).not.toBe(true);
+		expect(captured?.modelRouting).toMatchObject({ source: "session-default" });
+	});
+});

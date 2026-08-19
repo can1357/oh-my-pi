@@ -65,6 +65,7 @@ export function recordSpawnTelemetry(
 		readonly contextPolicy?: string;
 		readonly routeLabel?: string;
 		readonly taskContractClass?: string;
+		readonly metadata?: Readonly<Record<string, unknown>>;
 	},
 ): void {
 	sink.emit(

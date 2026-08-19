@@ -3,6 +3,7 @@ import type { RenderResultOptions } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { SettingPath, SettingValue } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { resetSettingsForTest, Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { getThemeByName, setThemeInstance } from "@pk-nerdsaver-ai/pi-coding-agent/modes/theme/theme";
+import type { SubagentModelRoutingDecision } from "@pk-nerdsaver-ai/pi-coding-agent/orchestration/subagent-model-routing";
 import { taskToolRenderer } from "@pk-nerdsaver-ai/pi-coding-agent/task/render";
 import type { AgentProgress, SingleResult, TaskToolDetails } from "@pk-nerdsaver-ai/pi-coding-agent/task/types";
 
@@ -360,6 +361,229 @@ describe("task progress rendering", () => {
 		// The run summary footer still counts the full batch.
 		expect(collapsed).toContain("5 succeeded");
 		expect(collapsed).toContain("1 failed");
+	});
+});
+
+describe("resolved-model badge routing context", () => {
+	beforeEach(async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		resetSettingsForTest();
+	});
+
+	function withBadgeEnabled(enabled: boolean): void {
+		const settings = Settings.instance;
+		const readSetting: Settings["get"] = settings.get.bind(settings);
+		vi.spyOn(settings, "get").mockImplementation(<P extends SettingPath>(path: P): SettingValue<P> => {
+			if (path === "task.showResolvedModelBadge") return enabled as SettingValue<P>;
+			return readSetting(path);
+		});
+	}
+
+	async function renderRowFor(progress: AgentProgress): Promise<string> {
+		const theme = (await getThemeByName("dark"))!;
+		const options: RenderResultOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };
+		return Bun.stripANSI(
+			findRow(
+				taskToolRenderer.renderResult(
+					{ content: [{ type: "text", text: "" }], details: detailsFor(progress) },
+					options,
+					theme,
+				),
+				progress.id,
+			),
+		);
+	}
+
+	it("stays off by default even when routing metadata is present", async () => {
+		const row = await renderRowFor(
+			runningProgress({
+				id: "BadgeOffDefault",
+				status: "completed",
+				resolvedModel: "anthropic/claude-opus-4-5",
+				modelRouting: {
+					requestedDifficulty: "high",
+					source: "difficulty-profile",
+					profileName: "balanced",
+					role: "slow",
+					candidateSelectors: ["anthropic/claude-opus-4-5"],
+				},
+			}),
+		);
+		expect(row).not.toContain("anthropic/claude-opus-4-5");
+		expect(row).not.toContain("profile:balanced");
+	});
+
+	it("renders legacy resolved-model badge unchanged when routing metadata is absent", async () => {
+		withBadgeEnabled(true);
+		const row = await renderRowFor(
+			runningProgress({
+				id: "LegacyBadge",
+				status: "completed",
+				resolvedModel: "anthropic/claude-3-5-haiku",
+			}),
+		);
+		expect(row).toContain("anthropic/claude-3-5-haiku");
+		expect(row).not.toContain("→");
+	});
+
+	it("shows difficulty + profile context ahead of the resolved model", async () => {
+		withBadgeEnabled(true);
+		const row = await renderRowFor(
+			runningProgress({
+				id: "RouteHighProfile",
+				status: "completed",
+				resolvedModel: "anthropic/claude-opus-4-5",
+				modelRouting: {
+					requestedDifficulty: "high",
+					source: "difficulty-profile",
+					profileName: "balanced",
+					role: "slow",
+					candidateSelectors: ["anthropic/claude-opus-4-5"],
+				},
+			}),
+		);
+		expect(row).toContain("high/profile:balanced → anthropic/claude-opus-4-5");
+	});
+
+	const sourceCases: Array<{ name: string; routing: SubagentModelRoutingDecision; expected: string }> = [
+		{
+			name: "difficulty-profile without an active profile name",
+			routing: { requestedDifficulty: "low", source: "difficulty-profile", role: "smol", candidateSelectors: [] },
+			expected: "low/difficulty",
+		},
+		{
+			name: "explicit model alone (no difficulty requested)",
+			routing: { source: "explicit", requestedModel: "anthropic/claude-opus-4-5", candidateSelectors: [] },
+			expected: undefined as unknown as string,
+		},
+		{
+			name: "explicit model coexisting with a requested difficulty",
+			routing: {
+				requestedDifficulty: "high",
+				source: "explicit",
+				requestedModel: "anthropic/claude-opus-4-5",
+				candidateSelectors: [],
+			},
+			expected: "high/explicit",
+		},
+		{
+			name: "per-agent override",
+			routing: { source: "agent-override", role: "task", candidateSelectors: [] },
+			expected: "override",
+		},
+		{
+			name: "agent definition default",
+			routing: { source: "agent-definition", role: "task", candidateSelectors: [] },
+			expected: "agent-default",
+		},
+		{
+			name: "parent's active model",
+			routing: { source: "parent-active", candidateSelectors: [] },
+			expected: "parent",
+		},
+		{
+			name: "session default (no extra context)",
+			routing: { source: "session-default", candidateSelectors: [] },
+			expected: undefined as unknown as string,
+		},
+	];
+
+	it.each(sourceCases)("selection source: $name", async ({ routing, expected }) => {
+		withBadgeEnabled(true);
+		const row = await renderRowFor(
+			runningProgress({
+				id: "RouteSource",
+				status: "completed",
+				resolvedModel: "anthropic/claude-opus-4-5",
+				modelRouting: routing,
+			}),
+		);
+		if (expected) {
+			expect(row).toContain(`${expected} → anthropic/claude-opus-4-5`);
+		} else {
+			expect(row).toContain("anthropic/claude-opus-4-5");
+			expect(row).not.toContain("→");
+		}
+	});
+
+	it("truncates a long routing context + model without unbounded growth", async () => {
+		withBadgeEnabled(true);
+		const row = await renderRowFor(
+			runningProgress({
+				id: "RouteLongSelector",
+				status: "completed",
+				resolvedModel: "some-provider/an-extremely-long-model-identifier-string-that-keeps-going-on",
+				modelRouting: {
+					requestedDifficulty: "high",
+					source: "difficulty-profile",
+					profileName: "an-unusually-long-profile-name-for-testing-truncation",
+					role: "slow",
+					candidateSelectors: [],
+				},
+			}),
+		);
+		expect(row).toContain("…");
+		expect(row).not.toContain("an-unusually-long-profile-name-for-testing-truncation");
+		expect(row).not.toContain("some-provider/an-extremely-long-model-identifier-string-that-keeps-going-on");
+	});
+
+	it("never renders candidate selectors, raw model assignments, or diagnostic detail", async () => {
+		withBadgeEnabled(true);
+		const row = await renderRowFor(
+			runningProgress({
+				id: "RouteNoSecrets",
+				status: "completed",
+				resolvedModel: "anthropic/claude-opus-4-5",
+				modelRouting: {
+					requestedDifficulty: "high",
+					source: "difficulty-profile",
+					profileName: "balanced",
+					role: "slow",
+					candidateSelectors: ["anthropic/claude-opus-4-5", "openai/gpt-5", "sk-secret-token-should-not-appear"],
+				},
+			}),
+		);
+		expect(row).not.toContain("candidateSelectors");
+		expect(row).not.toContain("sk-secret-token-should-not-appear");
+		expect(row).not.toContain("openai/gpt-5");
+	});
+
+	it("shows the same routing context on a finalized SingleResult row", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		withBadgeEnabled(true);
+		const details: TaskToolDetails = {
+			projectAgentsDir: null,
+			totalDurationMs: 0,
+			results: [
+				finishedResult({
+					id: "FinalRouteHigh",
+					resolvedModel: "anthropic/claude-opus-4-5",
+					modelRouting: {
+						requestedDifficulty: "high",
+						source: "difficulty-profile",
+						profileName: "balanced",
+						role: "slow",
+						candidateSelectors: ["anthropic/claude-opus-4-5"],
+					},
+				}),
+			],
+		};
+		const row = Bun.stripANSI(
+			findRow(
+				taskToolRenderer.renderResult(
+					{ content: [{ type: "text", text: "" }], details },
+					{ expanded: false, isPartial: false },
+					theme,
+				),
+				"FinalRouteHigh",
+			),
+		);
+		expect(row).toContain("high/profile:balanced → anthropic/claude-opus-4-5");
 	});
 });
 

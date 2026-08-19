@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { TaskTool, taskSchema } from "@pk-nerdsaver-ai/pi-coding-agent/task";
 import * as discoveryModule from "@pk-nerdsaver-ai/pi-coding-agent/task/discovery";
+import { getTaskSchema, taskItemSchema } from "@pk-nerdsaver-ai/pi-coding-agent/task/types";
 import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import { type } from "arktype";
 
@@ -43,6 +44,115 @@ describe("task schema (single-spawn)", () => {
 			expect("context" in parsed).toBe(false);
 			expect("schema" in parsed).toBe(false);
 		}
+	});
+});
+
+describe("task schema difficulty field", () => {
+	it("accepts a valid difficulty value on the single-spawn schema", () => {
+		const parsed = taskSchema({ agent: "explore", assignment: "Map the auth module.", difficulty: "low" });
+		expect(parsed instanceof type.errors).toBe(false);
+		if (!(parsed instanceof type.errors)) {
+			expect(parsed.difficulty).toBe("low");
+		}
+	});
+
+	it("accepts every difficulty value", () => {
+		for (const difficulty of ["low", "medium", "high"] as const) {
+			const parsed = taskSchema({ agent: "explore", assignment: "...", difficulty });
+			expect(parsed instanceof type.errors).toBe(false);
+		}
+	});
+
+	it("rejects an unsupported difficulty string", () => {
+		const parsed = taskSchema({ agent: "explore", assignment: "...", difficulty: "extreme" });
+		expect(parsed instanceof type.errors).toBe(true);
+	});
+
+	it("omits difficulty when not provided", () => {
+		const parsed = taskSchema({ agent: "explore", assignment: "..." });
+		expect(parsed instanceof type.errors).toBe(false);
+		if (!(parsed instanceof type.errors)) {
+			expect("difficulty" in parsed).toBe(false);
+		}
+	});
+});
+
+describe("task item schema (direct) — flat/no-batch item shape", () => {
+	it("accepts a valid item with every field including difficulty", () => {
+		const parsed = taskItemSchema({
+			id: "A",
+			description: "Map auth",
+			assignment: "Map the auth module.",
+			model: "anthropic/claude-haiku",
+			difficulty: "medium",
+			fork: false,
+			cwd: "/tmp",
+		});
+		expect(parsed instanceof type.errors).toBe(false);
+		if (!(parsed instanceof type.errors)) {
+			expect(parsed.difficulty).toBe("medium");
+		}
+	});
+
+	it("accepts an item with no difficulty at all", () => {
+		const parsed = taskItemSchema({ id: "A", assignment: "..." });
+		expect(parsed instanceof type.errors).toBe(false);
+	});
+
+	it("rejects an invalid difficulty value", () => {
+		const parsed = taskItemSchema({ id: "A", assignment: "...", difficulty: "extreme" });
+		expect(parsed instanceof type.errors).toBe(true);
+	});
+
+	it("still requires assignment", () => {
+		const parsed = taskItemSchema({ id: "A", difficulty: "low" });
+		expect(parsed instanceof type.errors).toBe(true);
+	});
+});
+
+describe("task item schema (direct) — batch/isolated item shape via getTaskSchema", () => {
+	const batchSchema = getTaskSchema({ isolationEnabled: true, batchEnabled: true });
+
+	it("accepts a batch tasks[] item with a valid difficulty and isolated/fork fields", () => {
+		const parsed = batchSchema({
+			agent: "explore",
+			context: "shared background",
+			tasks: [{ id: "A", assignment: "Map the auth module.", difficulty: "high", isolated: true, fork: false }],
+		});
+		expect(parsed instanceof type.errors).toBe(false);
+		if (!(parsed instanceof type.errors)) {
+			expect("tasks" in parsed).toBe(true);
+			if ("tasks" in parsed) expect(parsed.tasks[0]?.difficulty).toBe("high");
+		}
+	});
+
+	it("accepts every difficulty value on a batch tasks[] item", () => {
+		for (const difficulty of ["low", "medium", "high"] as const) {
+			const parsed = batchSchema({
+				agent: "explore",
+				context: "shared background",
+				tasks: [{ id: "A", assignment: "...", difficulty }],
+			});
+			expect(parsed instanceof type.errors).toBe(false);
+		}
+	});
+
+	it("rejects a batch tasks[] item with an invalid difficulty value", () => {
+		const parsed = batchSchema({
+			agent: "explore",
+			context: "shared background",
+			tasks: [{ id: "A", assignment: "...", difficulty: "extreme" }],
+		});
+		expect(parsed instanceof type.errors).toBe(true);
+	});
+
+	it("accepts a batch tasks[] item with no difficulty at all", () => {
+		const parsed = batchSchema({
+			agent: "explore",
+			context: "shared background",
+			tasks: [{ id: "A", assignment: "..." }],
+		});
+		expect(parsed instanceof type.errors).toBe(false);
 	});
 });
 

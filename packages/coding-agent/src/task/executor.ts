@@ -39,6 +39,7 @@ import {
 	resolveCollaborationPolicy,
 	serializeCollaborationPolicy,
 } from "../orchestration/collaboration-policy";
+import type { SubagentModelRoutingDecision } from "../orchestration/subagent-model-routing";
 import assignmentContractPromptTemplate from "../prompts/system/assignment-contract.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
@@ -397,6 +398,8 @@ export interface ExecutorOptions {
 	/** Internal marker for the persistent Fusion warm sidekick spawn. */
 	fusionSidekick?: boolean;
 	modelOverride?: string | string[];
+	/** Immutable model-routing provenance for this spawn's resolved route. See {@link AgentProgress.modelRouting}. */
+	modelRouting?: SubagentModelRoutingDecision;
 	/**
 	 * "fork" inherits the parent's exact prefix (system prompt, tools, model)
 	 * plus a read-only history snapshot via {@link forkContext} so the child's
@@ -1001,6 +1004,7 @@ interface RunMonitorArgs {
 	assignment?: string;
 	description?: string;
 	modelOverride?: string | string[];
+	modelRouting?: SubagentModelRoutingDecision;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
 	eventBus?: EventBus;
@@ -1070,6 +1074,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		cost: 0,
 		durationMs: 0,
 		modelOverride: args.modelOverride,
+		modelRouting: args.modelRouting,
 	};
 
 	const outputChunks: string[] = [];
@@ -1900,6 +1905,7 @@ interface FinalizeRunArgs {
 	assignment?: string;
 	description?: string;
 	modelOverride?: string | string[];
+	modelRouting?: SubagentModelRoutingDecision;
 	outputSchema?: unknown;
 	signal?: AbortSignal;
 	artifactsDir?: string;
@@ -2092,6 +2098,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		contextTokens: progress.contextTokens,
 		contextWindow: progress.contextWindow,
 		modelOverride,
+		modelRouting: progress.modelRouting,
 		resolvedModel: progress.resolvedModel,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
@@ -2147,6 +2154,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			tokens: 0,
 			requests: 0,
 			modelOverride,
+			modelRouting: options.modelRouting,
 			error: "Cancelled before start",
 			aborted: true,
 			abortReason: "Cancelled before start",
@@ -2272,6 +2280,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		assignment,
 		description: options.description,
 		modelOverride,
+		modelRouting: options.modelRouting,
 		signal,
 		onProgress,
 		eventBus: options.eventBus,
@@ -2851,6 +2860,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		assignment,
 		description: options.description,
 		modelOverride,
+		modelRouting: options.modelRouting,
 		outputSchema,
 		signal,
 		artifactsDir: options.artifactsDir,

@@ -23,6 +23,7 @@
   - `revealSiblingFindings?`: with `contextPolicy: staged`, pass `true` on synthesis spawns to include first-pass sibling findings
   - `siblingFindings?`: text summary of sibling worker findings for staged synthesis (required when `revealSiblingFindings` is true)
   - `model?`: explicit model selector; aliases and concrete catalog names resolve before agent defaults
+  - `difficulty?`: `low` (bounded/simple), `medium` (normal implementation), `high` (architecture/debugging/review) — routes through fixed `smol`/`task`/`slow` model roles, independent from `agent.tier`; explicit `model` wins when both are set. Fresh spawns only — errors with `fork: true`, which inherits the parent's model
   - `cwd?`: working directory; defaults to parent session cwd
   - `fork?`: inherit the parent's exact context (system prompt, tools, model, and a snapshot of this conversation's history) instead of a fresh one — the provider re-reads the parent's warm prompt cache; agent-specific prompts/tools and output schemas are ignored. Use fresh (default) for independent work
 {{#if isolationEnabled}}
@@ -38,6 +39,7 @@
 - `revealSiblingFindings?`: with `contextPolicy: staged`, pass `true` on synthesis spawns to include first-pass sibling findings
 - `siblingFindings?`: text summary of sibling worker findings for staged synthesis (required when `revealSiblingFindings` is true)
 - `model?`: explicit model selector; aliases and concrete catalog names resolve before agent defaults
+- `difficulty?`: `low` (bounded/simple), `medium` (normal implementation), `high` (architecture/debugging/review) — routes through fixed `smol`/`task`/`slow` model roles, independent from `agent.tier`; explicit `model` wins when both are set. Fresh spawns only — errors with `fork: true`, which inherits the parent's model
 - `cwd?`: working directory; defaults to parent session cwd
 {{#if isolationEnabled}}
 - `isolated?`: run in isolated env; returns patches. Agent is torn down at completion — not addressable afterwards

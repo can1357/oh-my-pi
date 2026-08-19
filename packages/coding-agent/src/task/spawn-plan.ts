@@ -17,6 +17,7 @@ import {
 	resolveAgentExecutionProfile,
 	type WorkClass,
 } from "../orchestration/agent-execution-profile";
+import type { SubagentModelRoutingDecision } from "../orchestration/subagent-model-routing";
 
 export type SpawnRouteLabel = "light" | "mid" | "heavy";
 
@@ -96,6 +97,8 @@ export interface SpawnPlanInput {
 	onAllocateJob?: () => void;
 	onAllocateWorktree?: () => void;
 	onAllocateSession?: () => void;
+	/** Immutable model-routing provenance for this spawn's resolved route, when computed by the caller. */
+	readonly modelRouting?: SubagentModelRoutingDecision;
 }
 
 export interface SpawnPlan {
@@ -110,6 +113,7 @@ export interface SpawnPlan {
 	readonly fusionSidekick: boolean;
 	readonly manualModelSelection: boolean;
 	readonly requestedModel?: string;
+	readonly modelRouting?: SubagentModelRoutingDecision;
 }
 
 export type SpawnPlanResult = { ok: true; plan: SpawnPlan } | { ok: false; diagnostics: SpawnPlanDiagnostic[] };
@@ -332,14 +336,36 @@ export function createSpawnPlan(input: SpawnPlanInput): SpawnPlanResult {
 	const maxRequests = minBudget(profile.maxRequests, input.softRequestBudget ?? 0);
 	const maxRuntimeMs = minBudget(profile.maxRuntimeMs, input.maxRuntimeMs ?? 0);
 
+	const poolConstrained = profile.modelPoolConstrained || profile.modelPool.length > 0;
+	const strictRoutedSource =
+		input.modelRouting?.source === "explicit" || input.modelRouting?.source === "difficulty-profile";
+
 	const seedSelectors = (() => {
-		if (profile.modelPoolConstrained) {
-			return profile.modelPool;
+		if (!poolConstrained) {
+			return input.modelPatterns;
 		}
-		if (profile.modelPool.length > 0) {
-			return profile.modelPool;
+		// The pool holds concrete provider/model selectors, but a difficulty
+		// route's `modelPatterns` is the symbolic role token (e.g. "pi/slow").
+		// Intersect against the routing decision's already-resolved concrete
+		// `candidateSelectors` instead, so a role that expands into a pool
+		// member is honored rather than exact-string-matched into rejection.
+		const routedConcreteSelectors = input.modelRouting?.candidateSelectors;
+		if (strictRoutedSource && routedConcreteSelectors && routedConcreteSelectors.length > 0) {
+			const pool = new Set(profile.modelPool);
+			const clamped = routedConcreteSelectors.filter(selector => pool.has(selector));
+			if (clamped.length === 0) {
+				diagnostics.push({
+					code: "model-pool-disjoint",
+					message: `Requested ${
+						input.modelRouting?.source === "difficulty-profile" ? "difficulty" : "explicit model"
+					} selector(s) [${routedConcreteSelectors.join(", ")}] are not permitted by this agent's restricted model pool [${profile.modelPool.join(", ")}].`,
+				});
+			}
+			return clamped;
 		}
-		return input.modelPatterns;
+		// Legacy (no explicit model, no difficulty) behavior: an agent-policy
+		// model pool wins outright over the resolved fallback-chain patterns.
+		return profile.modelPool;
 	})();
 
 	const seedCandidates =
@@ -391,6 +417,7 @@ export function createSpawnPlan(input: SpawnPlanInput): SpawnPlanResult {
 		fusionSidekick: input.fusionSidekick ?? false,
 		manualModelSelection: input.manualModelSelection ?? false,
 		requestedModel: input.requestedModel,
+		modelRouting: input.modelRouting,
 	});
 
 	return { ok: true, plan };

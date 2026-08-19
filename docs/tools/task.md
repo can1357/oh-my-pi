@@ -39,6 +39,8 @@ The wire schema is shape-swapped by `task.batch` (default on). One unit of work 
 | `id` | `string` | No | Stable agent id, schema max length 48. Defaults to a generated AdjectiveNoun name. Uniquified per session by `AgentOutputManager`. Item field in batch shape, top-level in flat shape. |
 | `description` | `string` | No | UI label only; the subagent never sees it. Item field in batch shape, top-level in flat shape. |
 | `role` | `string` | No | Specialist role/expertise the subagent embodies; schema max length 256 (`ROLE_INPUT_MAX`). The full trimmed text feeds the subagent's system-prompt identity (`role` preamble field); a one-line normalized form (`oneLineLabel`, `ROLE_LABEL_MAX = 80`) becomes its registry/roster display name, falling back to the agent type name when omitted. Item field in batch shape, top-level in flat shape. |
+| `model` | `string` | No | Explicit model selector for this spawn; resolves through subagent aliases/catalog before agent defaults. Wins over `difficulty` when both are set. Item field in batch shape, top-level in flat shape. |
+| `difficulty` | `"low"\|"medium"\|"high"` | No | Requested subtask difficulty, independent from `agent.tier`. Maps deterministically to a model role: `low → pi/smol`, `medium → pi/task`, `high → pi/slow`, resolved through the active `agent.profile`/`agent.profiles` (see [Settings](../settings.md#agent-model-profiles-and-difficulty-routing)). Fresh spawns only — rejected up front when combined with `fork: true`. An unavailable/unresolvable difficulty role fails clearly before allocation; it never silently downgrades. Item field in batch shape, top-level in flat shape. |
 | `assignment` | `string` | Yes | The work — complete, self-contained instructions. Empty-after-trim is rejected. Item field in batch shape, top-level in flat shape. |
 | `isolated` | `boolean` | No | Run in an isolated workspace and return patches. Exists only when `task.isolation.mode` is not `none`; per item in batch shape, top-level in flat shape. Isolated agents are torn down at completion — not revivable. |
 
@@ -107,6 +109,12 @@ Artifacts and side channels:
 - Isolation mode (`task.isolation.mode`): `none`, `auto`, `apfs`, `btrfs`, `zfs`, `reflink`, `overlayfs`, `projfs`, `block-clone`, `rcopy` (legacy `worktree`, `fuse-overlay`, `fuse-projfs` accepted for back-compat); the PAL resolves the actual backend with fallback.
 - Isolation merge strategy: patch mode (capture/apply root patches) or branch mode (commit to `omp/task/<id>`, cherry-pick into parent).
  - Agent source precedence: project custom agents, then user custom agents, then bundled agents (`explore`, `plan`, `designer`, `reviewer`, `task`, `quick_task`, `librarian`, `oracle`, `ix-browser-fast`).
+- Difficulty routing (`difficulty`, independent from `agent.tier`)
+  - Fixed mapping: `low → pi/smol`, `medium → pi/task`, `high → pi/slow`; the concrete model behind each role comes from the active `agent.profile`/`agent.profiles` bundle (or explicit `modelRoles.<role>`) — see [Settings: Agent Model Profiles and Difficulty Routing](../settings.md#agent-model-profiles-and-difficulty-routing).
+  - Precedence (highest wins): explicit `model` → requested `difficulty` → `task.agentModelOverrides[agent]` → the agent definition's own `model` → the parent session's active model → the session default model. An explicit `model` and `difficulty` may coexist — `model` wins, and the routing decision still records the requested difficulty for provenance.
+  - Fail-closed: an unavailable or unresolvable difficulty role is rejected before any allocation (id/job/worktree/session) with a typed diagnostic. It never silently falls back to a lower difficulty.
+  - Composition with policy: `task.agentPolicies` / `agent.tier` restrictive execution envelopes still clamp the spawn; `difficulty` only steers model selection and never widens a restrictive policy.
+  - Observability: every spawn's resolved route (requested difficulty, selection source, active profile name when one applied, and the final resolved model) is machine-readable on `AgentProgress.modelRouting` / `SingleResult.modelRouting`. `task.showResolvedModelBadge` (off by default) additionally renders a concise form in the TUI status line, e.g. `high/profile:balanced → anthropic/claude-opus-4-5`; it never prints candidate selectors, raw assignment text, or credentials.
 
 ## Side Effects
 - Filesystem
@@ -148,6 +156,8 @@ Artifacts and side channels:
   - batch calls: missing/empty `tasks`, an item without `assignment`, duplicate provided ids, missing shared `context`, top-level `assignment` alongside `tasks`
   - flat calls: missing/empty `assignment`
   - unknown or settings-disabled agent, spawn-policy denial, requesting `isolated` while isolation mode is `none`
+- `difficulty` combined with `fork: true` is rejected up front (before id/job/worktree/session allocation) — fork inherits the parent's exact model, so difficulty-based routing does not apply.
+- An unresolved explicit `model` or an unavailable difficulty role returns a typed `SubagentModelRoutingError` (`kind: "explicit-model-unresolved" | "difficulty-role-unavailable"`) as spawn-plan-rejection text before any allocation — never a silent downgrade to a lower difficulty.
 - Isolated execution without a git repo returns `Isolated task execution requires a git repository. ...`; unavailable backends fall back through the PAL candidate list (reported via `fellBack`/`fallbackReason`), other backend errors rethrow, and exhausting every candidate errors with the fallback reason.
 - Job registration failure returns `Failed to start background task job(s): ...`; a batch that schedules only some jobs reports the failed ids in the immediate text and keeps the started ones running.
 - Child failures surface as `SingleResult.exitCode = 1` with `stderr`/`error` populated; the async job is marked failed but the delivery text still carries the output plus a follow-up/transcript hint.

@@ -137,7 +137,7 @@ Implemented in `packages/coding-agent/src/eval/js/worker-core.ts`, `packages/cod
 - JS host/runtime helpers (`read`, `write`, `output`) are async and `await`able; `env` returns synchronously.
 - JS helper options may be passed either positionally in the Python order or as a trailing options object. `null` and `undefined` skip positional slots:
   - `await read(path, offset?, limit?)` or `await read(path, { offset?, limit? })`
-  - `await agent(prompt, agent?, model?, label?, schema?)` or `await agent(prompt, { agent?, model?, label?, schema?, handle? })`
+  - `await agent(prompt, agent?, model?, difficulty?, label?, schema?)` or `await agent(prompt, { agent?, model?, difficulty?, label?, schema?, handle? })`
   - `await parallel([() => agent("a"), () => agent("b")])`
   - `await pipeline(items, stage1, stage2)`
 - `display(value)` behavior:
@@ -191,16 +191,18 @@ Both runtimes expose `completion()` — a single stateless completion against a 
 Both runtimes expose `agent()` — a single subagent invocation routed through `packages/coding-agent/src/eval/agent-bridge.ts` into the same `runSubprocess(...)` path used by the `task` tool. It uses the current eval session's spawn policy and inherits the parent eval executor id, so parent and subagent code share JS/Python runtime state.
 
 - Signatures:
-  - JS: `await agent(prompt, agent?, model?, label?, schema?)` or `await agent(prompt, { agent?, model?, label?, schema?, handle? })`
-  - Python: `agent(prompt, *, agent="task", model=None, label=None, schema=None, handle=False)`
+  - JS: `await agent(prompt, agent?, model?, difficulty?, label?, schema?)` or `await agent(prompt, { agent?, model?, difficulty?, label?, schema?, handle? })`
+  - Python: `agent(prompt, *, agent="task", model=None, difficulty=None, label=None, schema=None, handle=False)`
 - `agent` defaults to the bundled `task` agent and resolves through normal agent discovery, so project and user agents work.
 - `model` overrides the selected agent's model. Without it, normal per-agent settings and the agent frontmatter model apply.
+- `difficulty` (`"low"` | `"medium"` | `"high"`) requests a model role — fixed mapping `low → pi/smol`, `medium → pi/task`, `high → pi/slow`, resolved through the active `agent.profile`/`agent.profiles` bundle; independent from `agent.tier`. An explicit `model` wins over `difficulty` when both are set (the routing decision still records the requested difficulty). `agent()` always spawns fresh, so there is no fork-mode conflict. An unavailable difficulty role fails the call with a typed diagnostic rather than silently downgrading. See [Settings: Agent Model Profiles and Difficulty Routing](../settings.md#agent-model-profiles-and-difficulty-routing).
+- Observability: the resolved route (requested difficulty, selection source, active profile name, role, candidate selectors) is available as `EvalAgentResult.details.modelRouting` on the awaited result — never prompt or credential data. The same frozen decision is threaded into the underlying subprocess call's `ExecutorOptions.modelRouting`.
 - Shared background is passed via files: write a `local://` file and reference it in the prompt. `label` controls the `agent://<id>` output label prefix.
 - `schema` passes a JSON Schema to the subagent structured-output path. When present, the helper parses the final JSON text and returns an object.
 - `handle` (default off) returns a DAG node dict — `{ text, output, handle: "agent://<id>", id, agent }`, plus a parsed `data` field when `schema` is set — instead of the bare output, so a downstream stage can reference the transcript by handle.
 - Spawn restrictions use `session.getSessionSpawns()` exactly like the `task` tool. Eval-driven subagent recursion is capped at depth 3.
 - JS and Python both expose `parallel(thunks)` and `pipeline(items, ...stages)`; both use a bounded async/threaded pool whose width tracks the `task.maxConcurrency` setting (the same ceiling the `task` tool uses; `0` = run every item at once), preserve item order, and propagate rejections. The width is fetched live from the host via the `__concurrency__` bridge, so the helpers no longer take a `concurrency` argument.
-- Errors surface as exceptions: unknown or disabled agent, disallowed spawn, recursion cap, subagent failure, or invalid structured output all fail the eval cell.
+- Errors surface as exceptions: unknown or disabled agent, disallowed spawn, recursion cap, subagent failure, invalid structured output, an unresolved explicit `model`, or an unavailable `difficulty` role all fail the eval cell.
 
 ### Multi-language call behavior
 

@@ -6,10 +6,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { prompt, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 import { type } from "arktype";
-import { resolveAgentModelPatterns } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
+import {
+	resolveSubagentModelRouting,
+	type SubagentModelRoutingDecision,
+	type SubagentModelRoutingRequest,
+	type SubagentTaskDifficulty,
+} from "../orchestration/subagent-model-routing";
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import * as taskDiscovery from "../task/discovery";
@@ -46,6 +51,7 @@ const agentArgsSchema = type({
 	prompt: "string>0",
 	"agent?": "string>0",
 	"model?": "string>0|string>0[]",
+	"difficulty?": "'low'|'medium'|'high'",
 	"label?": "string",
 	"schema?": "unknown",
 	"isolated?": "boolean",
@@ -58,6 +64,8 @@ interface EvalAgentArgs {
 	prompt: string;
 	agent?: string;
 	model?: string | string[];
+	/** Requested subtask difficulty; independent from execution tier. Explicit `model` wins when both are set; the requested difficulty is still recorded as routing provenance. Resolved through {@link resolveSubagentModelRouting}, the same centralized precedence native `task` spawns use. */
+	difficulty?: SubagentTaskDifficulty;
 	label?: string;
 	schema?: unknown;
 	/**
@@ -99,6 +107,8 @@ export interface EvalAgentResult {
 		agent: string;
 		id: string;
 		model?: string | string[];
+		/** Deterministic model-routing provenance for this call's resolved route (requested difficulty, selection source, active profile, role, and candidate selectors). Never carries prompt or credential data. */
+		modelRouting?: SubagentModelRoutingDecision;
 		structured: boolean;
 		/** True iff this run executed inside an isolation worktree. */
 		isolated?: boolean;
@@ -236,7 +246,11 @@ function plainIsolationSummary(summary: string): string {
 	return summary.replace(/<\/?system-notification>/g, "").trim();
 }
 
-function emitProgressStatus(emitStatus: ((event: JsStatusEvent) => void) | undefined, progress: AgentProgress): void {
+function emitProgressStatus(
+	emitStatus: ((event: JsStatusEvent) => void) | undefined,
+	progress: AgentProgress,
+	routing?: SubagentModelRoutingDecision,
+): void {
 	if (!emitStatus) return;
 	const preview = (progress.assignment ?? progress.task ?? "").split("\n")[0]?.slice(0, 120);
 	emitStatus({
@@ -255,6 +269,11 @@ function emitProgressStatus(emitStatus: ((event: JsStatusEvent) => void) | undef
 		cost: progress.cost,
 		durationMs: progress.durationMs,
 		model: progress.resolvedModel,
+		difficulty: routing?.requestedDifficulty,
+		routingSource: routing?.source,
+		routingProfile: routing?.profileName,
+		routingRole: routing?.role,
+		routingCandidates: routing?.candidateSelectors,
 	});
 }
 
@@ -307,14 +326,21 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 
 	const effectiveAgent = agent;
 	const parentActiveModelPattern = options.session.getActiveModelString?.();
-	const agentModelOverrides = options.session.settings.get("task.agentModelOverrides");
-	const modelOverride = resolveAgentModelPatterns({
-		settingsOverride: parsed.model ?? agentModelOverrides[agentName],
-		agentModel: effectiveAgent.model,
+	const routingRequest: SubagentModelRoutingRequest = {
+		requestedModel: parsed.model,
+		requestedDifficulty: parsed.difficulty,
+		agentName,
+		agentModelDefault: effectiveAgent.model,
 		settings: options.session.settings,
-		activeModelPattern: parentActiveModelPattern,
-		fallbackModelPattern: options.session.getModelString?.(),
-	});
+		modelRegistry: options.session.modelRegistry,
+		parentActiveModelPattern,
+		sessionDefaultModelPattern: options.session.getModelString?.(),
+	};
+	const routing = resolveSubagentModelRouting(routingRequest);
+	if (!routing.ok) {
+		throw new ToolError(`agent() model routing failed: ${routing.error.message}`);
+	}
+	const modelOverride: string[] = [...routing.modelPatterns];
 	const availableSkills = [...(options.session.skills ?? [])];
 	const resolvedAutoloadSkills =
 		effectiveAgent.autoloadSkills?.length && availableSkills.length > 0
@@ -368,6 +394,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		id,
 		taskDepth: options.session.taskDepth ?? 0,
 		modelOverride,
+		modelRouting: routing.decision,
 		parentActiveModelPattern,
 		thinkingLevel: effectiveAgent.thinkingLevel,
 		outputSchema: structured ? parsed.schema : undefined,
@@ -382,7 +409,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		enableLsp: false,
 		signal: options.signal,
 		eventBus: options.session.eventBus,
-		onProgress: progress => emitProgressStatus(options.emitStatus, progress),
+		onProgress: progress => emitProgressStatus(options.emitStatus, progress, routing.decision),
 		authStorage: options.session.authStorage,
 		modelRegistry: options.session.modelRegistry,
 		settings: options.session.settings,
@@ -562,6 +589,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			agent: result.agent,
 			id: result.id,
 			model: result.resolvedModel ?? modelOverride,
+			modelRouting: routing.decision,
 			structured,
 			isolated: isIsolated || undefined,
 			patchPath: result.patchPath,

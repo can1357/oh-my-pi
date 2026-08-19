@@ -6,6 +6,7 @@ import type { AgentPrefetch } from "../discovery/helpers";
 import type { AgentExecutionProfile, AgentTier, CollaborationMode } from "../orchestration/agent-execution-profile";
 import type { CollaborationPolicy } from "../orchestration/collaboration-policy";
 import type { ContextPolicy } from "../orchestration/context-policy";
+import type { SubagentModelRoutingDecision, SubagentTaskDifficulty } from "../orchestration/subagent-model-routing";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ResolvedToolProfile } from "../tools/tool-profiles";
 import type { AssignmentContract } from "./assignment-contract";
@@ -95,6 +96,7 @@ export const taskItemSchema = type({
 	"description?": "string",
 	"role?": ROLE_INPUT_SCHEMA,
 	"model?": "string",
+	"difficulty?": "'low'|'medium'|'high'",
 	assignment: "string",
 	"fork?": "boolean",
 	"cwd?": "string",
@@ -106,6 +108,7 @@ const taskItemSchemaIsolated = type({
 	"role?": ROLE_INPUT_SCHEMA,
 	assignment: "string",
 	"model?": "string",
+	"difficulty?": "'low'|'medium'|'high'",
 	"isolated?": "boolean",
 	"fork?": "boolean",
 	"cwd?": "string",
@@ -122,6 +125,8 @@ export interface TaskItem {
 	role?: string;
 	/** Explicit model selector for this spawn; resolves through subagent aliases/catalog before agent defaults. */
 	model?: string;
+	/** Requested subtask difficulty; independent from execution tier. Maps deterministically to `pi/smol` | `pi/task` | `pi/slow` via `resolveSubagentModelRouting`. */
+	difficulty?: SubagentTaskDifficulty;
 	/** The work; required by the schema. */
 	assignment?: string;
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
@@ -166,6 +171,7 @@ export const taskSchema = type({
 	"description?": "string",
 	"role?": ROLE_INPUT_SCHEMA,
 	"model?": "string",
+	"difficulty?": "'low'|'medium'|'high'",
 	assignment: "string",
 	"isolated?": "boolean",
 	"fork?": "boolean",
@@ -178,6 +184,7 @@ const taskSchemaNoIsolation = type({
 	"description?": "string",
 	"role?": ROLE_INPUT_SCHEMA,
 	"model?": "string",
+	"difficulty?": "'low'|'medium'|'high'",
 	assignment: "string",
 	"fork?": "boolean",
 	"cwd?": "string",
@@ -226,6 +233,8 @@ export interface TaskParams {
 	role?: string;
 	/** Explicit model selector for this spawn; resolves through subagent aliases/catalog before agent defaults. */
 	model?: string;
+	/** Requested subtask difficulty (flat form). See {@link TaskItem.difficulty}. */
+	difficulty?: SubagentTaskDifficulty;
 	/** The work (flat form). */
 	assignment?: string;
 	/** Batch form (`task.batch`): one subagent per item. */
@@ -406,6 +415,8 @@ export interface AgentProgress {
 	 * `extractedToolData.task` after that.
 	 */
 	inflightTaskDetails?: TaskToolDetails;
+	/** Deterministic model-routing provenance for this spawn's resolved route. Immutable; absent for legacy no-difficulty/no-explicit-model spawns predating this field. */
+	readonly modelRouting?: SubagentModelRoutingDecision;
 }
 
 /** Result from a single agent execution */
@@ -474,6 +485,8 @@ export interface SingleResult {
 	};
 	/** Output metadata for agent:// URL integration */
 	outputMeta?: { lineCount: number; charCount: number };
+	/** Deterministic model-routing provenance for this spawn's resolved route. Immutable. See {@link AgentProgress.modelRouting}. */
+	readonly modelRouting?: SubagentModelRoutingDecision;
 }
 
 /** Tool details for TUI rendering */

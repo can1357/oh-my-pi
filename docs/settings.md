@@ -340,6 +340,47 @@ enabledModels:
 
 See [Models](./models.md) for the `models.yml` schema and custom-provider definitions.
 
+### Agent Model Profiles and Difficulty Routing
+
+`agent.profile` and `agent.profiles` bundle `smol`/`task`/`slow` (plus other roles) into named, swappable presets — "optimal model per agent slot". This is the **only** setting subagent difficulty routing uses; there is no separate difficulty setting.
+
+Copy-paste recipe — define one named profile with the three roles subagent difficulty routing maps to, then activate it:
+
+```yaml
+agent:
+  profile: balanced
+  profiles:
+    balanced:
+      smol: <fast-model>
+      task: <coding-model>
+      slow: <strong-model>
+```
+
+Fixed, non-configurable difficulty → role mapping used by the `task` tool's `difficulty` field and the eval `agent()` helper's `difficulty` argument:
+
+| Difficulty | Model role |
+|---|---|
+| `low` | `smol` |
+| `medium` | `task` |
+| `high` | `slow` |
+
+`difficulty` is a per-spawn request, independent from `agent.tier` (a restrictive capability/tool/model-pool envelope — see [Interactive spawned-agent tier](#interactive-spawned-agent-tier)). Difficulty only steers *which model* a role resolves to; it never widens what a restrictive `agent.tier` or `task.agentPolicies` envelope permits.
+
+Selection precedence for a fresh subagent spawn, highest to lowest:
+
+1. An explicit `model` on the spawn.
+2. The requested `difficulty`, resolved through the active `agent.profile` (or explicit `modelRoles.<role>`, which always wins over a profile's role).
+3. `task.agentModelOverrides[<agent-name>]`.
+4. The agent definition's own `model` frontmatter field.
+5. The parent session's active model.
+6. The session default model.
+
+An explicit `model` and a requested `difficulty` may coexist on the same spawn: the explicit `model` wins, and the routing decision still records the requested difficulty for provenance.
+
+Failure semantics: `difficulty` only applies to fresh spawns — combining it with `fork: true` (task tool) is rejected up front, since fork inherits the parent's exact model instead of routing by difficulty. An unresolved explicit `model`, or a requested difficulty whose mapped role has no available model, fails clearly before any spawn allocation. Routing **never** silently falls back to a lower difficulty or a different role.
+
+Observability: every routed spawn carries machine-readable provenance — requested difficulty, selection source, the active profile name (when one supplied the role), and the final resolved model — on `AgentProgress.modelRouting` / `SingleResult.modelRouting`. `task.showResolvedModelBadge` (default `false`) additionally renders a concise form of that context next to the existing resolved-model badge in the TUI status line, e.g. `high/profile:balanced → anthropic/claude-opus-4-5`; it never displays candidate selectors, raw assignments, or credentials.
+
 ### Advisor
 
 The advisor is a second model that reviews each completed turn and can inject advice into the primary session. Assign a model with `modelRoles.advisor`, then enable it with `advisor.enabled`, `/advisor on`, or by launching with the `--advisor` flag.

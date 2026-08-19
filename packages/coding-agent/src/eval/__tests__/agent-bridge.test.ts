@@ -1,10 +1,13 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { Api, Model } from "@pk-nerdsaver-ai/pi-ai";
+import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
 import { TempDir } from "@pk-nerdsaver-ai/pi-utils";
 import { Settings } from "../../config/settings";
 import { AgentProtocolHandler } from "../../internal-urls/agent-protocol";
 import { resetRegisteredArtifactDirsForTests } from "../../internal-urls/registry-helpers";
+import type { SubagentModelRoutingRegistry } from "../../orchestration/subagent-model-routing";
 import type { PlanModeState } from "../../plan-mode/state";
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { AgentSession } from "../../session/agent-session";
@@ -49,6 +52,56 @@ const reviewerAgent = {
 	model: ["pi/smol"],
 } satisfies AgentDefinition;
 
+function makeRoutingModel(provider: string, id: string, name: string): Model<Api> {
+	return buildModel({
+		id,
+		name,
+		api: "anthropic-messages",
+		provider,
+		baseUrl: `https://${provider}.example.test`,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
+		contextWindow: 128000,
+		maxTokens: 8192,
+	});
+}
+
+function makeRoutingRegistry(models: Model<Api>[]): SubagentModelRoutingRegistry {
+	return {
+		getAvailable: () => models,
+		resolveCanonicalModel: () => undefined,
+		getCanonicalVariants: () => [],
+		getCanonicalId: () => undefined,
+	} as unknown as SubagentModelRoutingRegistry;
+}
+
+// Same fixture shape as test/orchestration/subagent-model-routing.test.ts so the
+// eval bridge and native task paths are proven against an equivalent registry.
+const routingSmolModel = makeRoutingModel("anthropic", "claude-haiku", "Claude Haiku");
+const routingTaskModel = makeRoutingModel("anthropic", "claude-sonnet-4-5", "Claude Sonnet");
+const routingSlowModel = makeRoutingModel("anthropic", "claude-opus-4-8", "Claude Opus");
+const routingActiveModel = makeRoutingModel("p", "active", "P Active");
+const routingFallbackModel = makeRoutingModel("p", "fallback", "P Fallback");
+const routingCurrentModel = makeRoutingModel("p", "current", "P Current");
+const routingOverrideModel = makeRoutingModel("p", "override", "P Override");
+
+const defaultRoutingRegistry = makeRoutingRegistry([
+	routingSmolModel,
+	routingTaskModel,
+	routingSlowModel,
+	routingActiveModel,
+	routingFallbackModel,
+	routingCurrentModel,
+	routingOverrideModel,
+]);
+
+const baseModelRoles = {
+	smol: "anthropic/claude-haiku",
+	task: "anthropic/claude-sonnet-4-5",
+	slow: "anthropic/claude-opus-4-8",
+};
+
 interface SessionOptions {
 	cwd?: string;
 	sessionFile?: string | null;
@@ -61,6 +114,8 @@ interface SessionOptions {
 	settings?: Settings;
 	outputManager?: AgentOutputManager;
 	planMode?: boolean;
+	/** Omit for the shared routing-aware fixture registry; pass `null` to simulate a legacy session with no registry at all. */
+	modelRegistry?: SubagentModelRoutingRegistry | null;
 }
 
 function makeSession(options: SessionOptions = {}): ToolSession {
@@ -76,6 +131,10 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 		cwd: options.cwd ?? process.cwd(),
 		hasUI: false,
 		settings,
+		modelRegistry:
+			options.modelRegistry === null
+				? undefined
+				: ((options.modelRegistry ?? defaultRoutingRegistry) as unknown as ToolSession["modelRegistry"]),
 		taskDepth: options.depth ?? 0,
 		enableLsp: options.enableLsp ?? true,
 		agentOutputManager: options.outputManager,
@@ -350,7 +409,13 @@ describe("runEvalAgent", () => {
 		const result = await runEvalAgent({ prompt: "hello" }, { session: makeSession() });
 		expect(result).toEqual({
 			text: "done",
-			details: { agent: "task", id: "0-EvalAgent", model: "p/model", structured: false },
+			details: {
+				agent: "task",
+				id: "0-EvalAgent",
+				model: "p/model",
+				modelRouting: { source: "parent-active", candidateSelectors: ["p/active"] },
+				structured: false,
+			},
 		});
 		await expect(runEvalAgent({ prompt: "fail" }, { session: makeSession() })).rejects.toThrow("boom");
 	});
@@ -404,6 +469,170 @@ describe("runEvalAgent", () => {
 		await expect(runEvalAgent({ prompt: "blank" }, { session: makeSession() })).rejects.toThrow(
 			"agent() subagent 'task' failed.",
 		);
+	});
+});
+
+describe("runEvalAgent difficulty routing", () => {
+	afterEach(() => {
+		restoreTrackedSpies();
+	});
+
+	it("resolves low/medium/high difficulty to the pi/smol, pi/task, pi/slow roles", async () => {
+		mockAgents();
+		const runSpy = trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options),
+		);
+		const session = makeSession({ settings: Settings.isolated({ modelRoles: baseModelRoles }) });
+
+		const low = await runEvalAgent({ prompt: "hello", difficulty: "low" }, { session });
+		const medium = await runEvalAgent({ prompt: "hello", difficulty: "medium" }, { session });
+		const high = await runEvalAgent({ prompt: "hello", difficulty: "high" }, { session });
+
+		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["pi/smol"]);
+		expect(runSpy.mock.calls[1]?.[0].modelOverride).toEqual(["pi/task"]);
+		expect(runSpy.mock.calls[2]?.[0].modelOverride).toEqual(["pi/slow"]);
+		expect(low.details.modelRouting).toMatchObject({
+			requestedDifficulty: "low",
+			source: "difficulty-profile",
+			role: "smol",
+		});
+		expect(medium.details.modelRouting).toMatchObject({
+			requestedDifficulty: "medium",
+			source: "difficulty-profile",
+			role: "task",
+		});
+		expect(high.details.modelRouting).toMatchObject({
+			requestedDifficulty: "high",
+			source: "difficulty-profile",
+			role: "slow",
+		});
+		// The exact same frozen decision object flows into runSubprocess's
+		// ExecutorOptions and back out through the returned details.
+		expect(runSpy.mock.calls[2]?.[0].modelRouting).toBe(high.details.modelRouting);
+	});
+
+	it("explicit model wins over requested difficulty; the requested difficulty is still recorded as provenance", async () => {
+		mockAgents();
+		const runSpy = trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options),
+		);
+		const session = makeSession({ settings: Settings.isolated({ modelRoles: baseModelRoles }) });
+
+		const result = await runEvalAgent({ prompt: "hello", model: "p/override", difficulty: "high" }, { session });
+
+		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["p/override"]);
+		expect(result.details.modelRouting).toMatchObject({ source: "explicit", requestedDifficulty: "high" });
+		expect(runSpy.mock.calls[0]?.[0].modelRouting).toBe(result.details.modelRouting);
+	});
+
+	it("surfaces the active named profile as provenance when it supplies the difficulty role", async () => {
+		mockAgents();
+		trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const session = makeSession({
+			settings: Settings.isolated({
+				"agent.profile": "budget",
+				"agent.profiles": { budget: { smol: "p/fallback" } },
+			}),
+		});
+
+		const result = await runEvalAgent({ prompt: "hello", difficulty: "low" }, { session });
+
+		expect(result.details.modelRouting).toMatchObject({
+			source: "difficulty-profile",
+			profileName: "budget",
+			role: "smol",
+		});
+	});
+
+	it("rejects an unknown difficulty value before subprocess allocation", async () => {
+		mockAgents();
+		const runSpy = trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options),
+		);
+
+		await expect(
+			runEvalAgent({ prompt: "hello", difficulty: "extreme" }, { session: makeSession() }),
+		).rejects.toThrow(/agent\(\) received invalid arguments/);
+		expect(runSpy).not.toHaveBeenCalled();
+	});
+
+	it("fails clearly instead of silently downgrading when the difficulty role is unavailable", async () => {
+		mockAgents();
+		const runSpy = trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options),
+		);
+		// No modelRegistry at all: a legacy session predating model-aware spawning.
+		const session = makeSession({ modelRegistry: null, settings: Settings.isolated({ modelRoles: baseModelRoles }) });
+
+		await expect(runEvalAgent({ prompt: "hello", difficulty: "high" }, { session })).rejects.toThrow(
+			/routing failed/,
+		);
+		expect(runSpy).not.toHaveBeenCalled();
+	});
+
+	it("emits requested difficulty, selection source, profile, candidate selectors, and resolved model on status events", async () => {
+		mockAgents();
+		trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+			options.onProgress?.({
+				index: 0,
+				id: options.id,
+				agent: options.agent.name,
+				agentSource: options.agent.source,
+				status: "running",
+				task: options.task,
+				assignment: options.assignment,
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 0,
+				requests: 0,
+				tokens: 0,
+				cost: 0,
+				durationMs: 0,
+				resolvedModel: "anthropic/claude-opus-4-8",
+			});
+			return singleResult(options);
+		});
+		const events: Array<Record<string, unknown>> = [];
+		const session = makeSession({ settings: Settings.isolated({ modelRoles: baseModelRoles }) });
+
+		await runEvalAgent({ prompt: "hello", difficulty: "high" }, { session, emitStatus: event => events.push(event) });
+
+		const agentEvent = events.find(event => event.op === "agent");
+		expect(agentEvent).toMatchObject({
+			difficulty: "high",
+			routingSource: "difficulty-profile",
+			routingRole: "slow",
+			model: "anthropic/claude-opus-4-8",
+		});
+		expect(agentEvent?.routingCandidates).toEqual(["anthropic/claude-opus-4-8"]);
+		// No prompt/assignment text leaks through the routing-specific fields
+		// (taskPreview legitimately carries the assignment preview; that is
+		// pre-existing, unrelated behavior this lane does not touch).
+		expect(
+			JSON.stringify({
+				difficulty: agentEvent?.difficulty,
+				routingSource: agentEvent?.routingSource,
+				routingRole: agentEvent?.routingRole,
+				routingProfile: agentEvent?.routingProfile,
+				routingCandidates: agentEvent?.routingCandidates,
+			}),
+		).not.toContain("hello");
+	});
+
+	it("no-difficulty calls keep resolving through the existing per-agent/agent-definition/parent/session fallback chain", async () => {
+		mockAgents();
+		const runSpy = trackedSpyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options),
+		);
+		const session = makeSession({
+			settings: Settings.isolated({ "task.agentModelOverrides": { task: "p/override" } }),
+		});
+
+		const result = await runEvalAgent({ prompt: "hello" }, { session });
+
+		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["p/override"]);
+		expect(result.details.modelRouting).toMatchObject({ source: "agent-override" });
+		expect(runSpy.mock.calls[0]?.[0].modelRouting).toBe(result.details.modelRouting);
 	});
 });
 

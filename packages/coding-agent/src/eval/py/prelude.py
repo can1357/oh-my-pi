@@ -423,12 +423,14 @@ if "__omp_prelude_loaded__" not in globals():
         text = res.get("text") if isinstance(res, dict) else res
         return json.loads(text) if schema is not None else text
 
-    def agent(prompt, *, agent="task", model=None, label=None, schema=None, isolated=None, apply=None, merge=None, handle=False):
+    def agent(prompt, *, agent="task", model=None, difficulty=None, label=None, schema=None, isolated=None, apply=None, merge=None, handle=False):
         """Run a subagent and return its final output.
 
         `agent` selects the subagent definition (default "task"). Pass
-        `model` to override that agent's model, `label` for the output artifact
-        id, and `schema` to request structured JSON output; when `schema` is
+        `model` to override that agent's model, `difficulty` ("low"/"medium"/
+        "high") to route through the pi/smol|pi/task|pi/slow model roles
+        (explicit `model` wins when both are set), `label` for the output
+        artifact id, and `schema` to request structured JSON output; when
         supplied the parsed object is returned. Share background by writing a
         local:// file and referencing it in the prompt.
 
@@ -467,6 +469,8 @@ if "__omp_prelude_loaded__" not in globals():
             args["agent"] = agent
         if model is not None:
             args["model"] = model
+        if difficulty is not None:
+            args["difficulty"] = difficulty
         if label is not None:
             args["label"] = label
         if schema is not None:

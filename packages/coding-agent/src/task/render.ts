@@ -12,6 +12,10 @@ import { settings } from "../config/settings";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { formatContextUsage } from "../modes/components/status-line/context-thresholds";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
+import type {
+	SubagentModelRoutingDecision,
+	SubagentModelSelectionSource,
+} from "../orchestration/subagent-model-routing";
 import {
 	formatBadge,
 	formatDuration,
@@ -75,6 +79,35 @@ function getStatusIcon(status: AgentProgress["status"], theme: Theme, spinnerFra
 }
 
 /**
+ * Concise routing-context label for the resolved-model badge, e.g.
+ * `high/profile:balanced` or `override`. Never renders candidate selectors,
+ * raw assignment text, or diagnostic detail — those stay machine-readable
+ * only in `AgentProgress.modelRouting` / `SingleResult.modelRouting`.
+ * Returns `undefined` when there is nothing informative to add (no requested
+ * difficulty and a source that carries no extra signal), so the badge falls
+ * back to the plain resolved-model string.
+ */
+const ROUTING_SOURCE_LABEL: Partial<Record<SubagentModelSelectionSource, string>> = {
+	"agent-override": "override",
+	"agent-definition": "agent-default",
+	"parent-active": "parent",
+};
+
+function formatRoutingBadgeContext(routing: SubagentModelRoutingDecision): string | undefined {
+	const parts: string[] = [];
+	if (routing.requestedDifficulty) parts.push(routing.requestedDifficulty);
+	if (routing.source === "difficulty-profile") {
+		parts.push(routing.profileName ? `profile:${routing.profileName}` : "difficulty");
+	} else if (routing.source === "explicit") {
+		if (routing.requestedDifficulty) parts.push("explicit");
+	} else if (routing.source !== "session-default") {
+		const label = ROUTING_SOURCE_LABEL[routing.source];
+		if (label) parts.push(label);
+	}
+	return parts.length > 0 ? parts.join("/") : undefined;
+}
+
+/**
  * Append tool-count, context, and cost stats to a status line string.
  */
 function appendAgentStats(
@@ -88,6 +121,7 @@ function appendAgentStats(
 		cost: number;
 		resolvedModel?: string;
 		showResolvedModelBadge?: boolean;
+		modelRouting?: SubagentModelRoutingDecision;
 	},
 	theme: Theme,
 ): string {
@@ -109,7 +143,9 @@ function appendAgentStats(
 		line += `${theme.sep.dot}${theme.fg("statusLineCost", `$${opts.cost.toFixed(2)}`)}`;
 	}
 	if (opts.resolvedModel && opts.showResolvedModelBadge) {
-		line += `${theme.sep.dot}${theme.fg("dim", truncateToWidth(replaceTabs(opts.resolvedModel), 30))}`;
+		const context = opts.modelRouting ? formatRoutingBadgeContext(opts.modelRouting) : undefined;
+		const badgeText = context ? `${context} → ${opts.resolvedModel}` : opts.resolvedModel;
+		line += `${theme.sep.dot}${theme.fg("dim", truncateToWidth(replaceTabs(badgeText), context ? 56 : 30))}`;
 	}
 	return line;
 }
@@ -1082,6 +1118,7 @@ function renderAgentResult(
 			cost: result.usage?.cost.total ?? 0,
 			resolvedModel: result.resolvedModel,
 			showResolvedModelBadge: showBadge,
+			modelRouting: result.modelRouting,
 		},
 		theme,
 	);
