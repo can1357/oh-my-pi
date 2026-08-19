@@ -44,6 +44,7 @@ import { urlHyperlinkAlways } from "../tui";
 import { getChangelogPath, parseChangelog } from "../utils/changelog";
 import { handleGraphtreeCommand, handleGraphtreeCommandTui } from "./builtin/graphtree";
 import { handleWikigraphCommand, handleWikigraphCommandTui } from "./builtin/wikigraph";
+import { handleColabModelSlashCommand } from "./helpers/colab-model";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
 import { buildContextReportText } from "./helpers/context-report";
 import { handleDelegateSlashCommand } from "./helpers/delegate";
@@ -583,6 +584,13 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			// submit flow runs the first loop iteration (recording it as the loop prompt).
 			if (prompt) return { prompt };
 		},
+	},
+	{
+		name: "colab-model",
+		description: "Launch a Hugging Face GGUF on Colab and select it",
+		inlineHint: "<Hugging Face model id or GGUF URL>",
+		allowArgs: true,
+		handle: async (command, runtime) => handleColabModelSlashCommand(command.args, runtime),
 	},
 	{
 		name: "model",

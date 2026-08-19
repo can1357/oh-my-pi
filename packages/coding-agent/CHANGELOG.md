@@ -10,6 +10,7 @@
 
 ### Added
 
+- Added `/colab-model <Hugging Face model or GGUF URL>`: it acquires or reuses an A100/L4 Colab CLI runtime, selects a fitting GGUF, builds and warms llama.cpp, exposes a private loopback OpenAI-compatible bridge, registers the model under the existing `llama.cpp` provider, and selects it only after a successful generation. Expired Colab sessions are replaced once automatically, and gated Hugging Face repositories fail without forwarding credentials.
 - Added ClinePass to the interactive login selector as `/login cline-pass`, with ClinePass-only models and shared `CLINE_API_KEY` environment fallback kept separate from canonical Cline usage-billing models.
 - Added the optional `clinepass-deepseek-v4-flash` 9router combo to the default, balanced, task, and budget routing slots; installations without the combo continue to skip it.
 - Added opt-in ACP `pkzz` v1 extensions for owner-mediated write/exec permission prompts and bounded host-visible final replies. Legacy ACP clients retain their existing behavior unless they explicitly negotiate the matching capability markers.

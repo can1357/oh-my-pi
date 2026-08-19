@@ -277,6 +277,28 @@ If `llama.cpp` is not explicitly configured, registry adds an implicit discovera
 
 Runtime discovery calls llama.cpp model endpoints and synthesizes model entries with local defaults.
 
+### Launching a Hugging Face GGUF on Colab
+
+Use the built-in command with a public Hugging Face GGUF repository or a direct GGUF file URL:
+
+```text
+/colab-model unsloth/Qwen3.8-27B-GGUF
+/colab-model https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/main/Qwen3.8-27B-Q6_K.gguf
+```
+
+The command owns the interactive lifecycle:
+
+1. Resolve the repository and choose a GGUF that fits the accelerator (A100 first, then L4). A direct file URL overrides automatic quantization selection.
+2. Create or reuse a Colab CLI session. Set `OMPK_COLAB_SESSION` before starting OMPK to choose a reusable session name. On Windows, OMPK invokes the Colab CLI through WSL; on Linux it invokes `colab` directly.
+3. Build or update CUDA-enabled llama.cpp, download the model, start `llama-server`, and run a warmup completion.
+4. Open a loopback-only OpenAI Chat Completions bridge, register the warmed model under the existing `llama.cpp` provider, select it, and print the local `/v1` base URL. No Colab runtime token or public unauthenticated tunnel is exposed.
+
+The command supports public repositories without forwarding Hugging Face credentials. Gated repositories fail closed. The loopback API bridge lives only for the current OMPK process; the Colab GPU session remains allocated after OMPK exits. Release it explicitly (from WSL on Windows):
+
+```bash
+colab stop --session ompk-colab-model
+```
+
 ### Implicit LM Studio discovery
 
 If `lm-studio` is not explicitly configured, registry adds an implicit discoverable provider:
