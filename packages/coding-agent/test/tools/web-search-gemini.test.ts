@@ -4,7 +4,7 @@ import type { FetchImpl } from "@pk-nerdsaver-ai/pi-ai/types";
 import { searchGemini } from "@pk-nerdsaver-ai/pi-coding-agent/web/search/providers/gemini";
 
 const SSE_RESPONSE =
-	'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Gemini answer"}]}}],"modelVersion":"gemini-2.5-flash"}}\n\n';
+	'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Gemini answer"}]}}],"modelVersion":"gemini-3.7-flash"}}\n\n';
 
 type CapturedRequest = {
 	body: Record<string, unknown> | null;
@@ -57,6 +57,7 @@ describe("searchGemini tools serialization", () => {
 		await searchGemini({ ...makeParams("default tools"), fetch: fetchMock });
 
 		expect(capturedRequest).not.toBeNull();
+		expect(capturedRequest?.body?.model).toBe("gemini-3.7-flash");
 		expect(capturedRequest?.body?.request).toMatchObject({
 			tools: [{ googleSearch: {} }],
 		});

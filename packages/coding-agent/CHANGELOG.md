@@ -25,6 +25,7 @@
 
 ### Changed
 
+- Updated Gemini-backed `web_search` requests to use Gemini 3.7 Flash by default.
 - Reduced default system/context prompt overhead by removing duplicated workflow and delivery prose and moving package-specific rules into conditional `AGENTS.md` files; focused prompt tests cover tool/skill gating, deduplication, and block assembly.
 - Added stored-credential support to tool-prompt schema probes, including OpenAI Codex OAuth, and removed one schema-only `eval` parameter recap after a three-sample probe.
 - Activity Memory ingestion is now owned exclusively by the always-on `gopk-ingest` daemon. `AgentSession` no longer starts a second ingest host when `gopkClips.enabled` is on: two consumers raced to delete the same journal-handoff files and contended for the ledger's write lock, which could split clips across ledgers. `gopkClips.enabled` now gates in-session *reading* only.
