@@ -263,6 +263,7 @@ import {
 	isSubstantialRequest,
 	startsWithSubstantialAction,
 	type TaskContractV1,
+	toActiveTaskContractSnapshot,
 } from "../orchestration/task-contract";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { PlanModeState } from "../plan-mode/state";
@@ -1326,7 +1327,7 @@ export class AgentSession {
 	#advisorReadOnlyTools?: AgentTool[];
 	#advisorWatchdogPrompt?: string;
 	#activeTaskContract?: ActiveTaskContractSnapshot;
-	/** Ephemeral compiled root contract. Separate from the M2 assignment/evidence snapshot. */
+	/** Ephemeral compiled root contract, adapted into the shared completion-gate snapshot. */
 	#activeCompiledTaskContract?: ActiveCompiledTaskContract;
 	#taskContractActivatedAt?: number;
 	#completionGateReminderCount = 0;
@@ -6462,7 +6463,7 @@ export class AgentSession {
 		return this.settings.get("magicKeywords.enabled") && this.settings.get(`magicKeywords.${keyword}`);
 	}
 
-	/** Build immutable per-session root-turn state without enabling M2 completion gating. */
+	/** Build immutable per-session root-turn state for executor, advisor, and completion-gate use. */
 	#createActiveCompiledTaskContract(
 		contract: TaskContractV1,
 		gaps: readonly ContractGap[],
@@ -6502,7 +6503,7 @@ export class AgentSession {
 
 	#activateCompiledTaskContract(contract: ActiveCompiledTaskContract | undefined): void {
 		this.#activeCompiledTaskContract = contract;
-		this.#syncAdvisorSystemPrompt();
+		this.setActiveTaskContract(contract ? toActiveTaskContractSnapshot(contract.contract) : undefined);
 	}
 
 	#createTaskContractNotice(contract: ActiveCompiledTaskContract): CustomMessage {
@@ -6519,7 +6520,7 @@ export class AgentSession {
 	/**
 	 * Compile a root request into ephemeral runtime state and append its executor
 	 * block to that turn. A pending material clarification consumes exactly one
-	 * later user response; M1 does not gate completion on evidence or success.
+	 * later user response; unresolved gaps remain context-only for the shared gate.
 	 */
 	#maybeCreateTaskContractNotice(text: string, synthetic?: boolean): CustomMessage | undefined {
 		if (synthetic || this.#agentKind !== "main") return undefined;
@@ -6679,7 +6680,7 @@ export class AgentSession {
 
 		// Root task contracts compile only on root user turns. A pending material
 		// clarification consumes the next user response; later substantial root turns
-		// replace the ephemeral contract without touching M2 completion gating.
+		// replace the ephemeral contract and its shared completion-gate snapshot.
 		const taskContractNotice = this.#maybeCreateTaskContractNotice(
 			expandedText,
 			options?.synthetic || options?.attribution === "agent",
@@ -14370,16 +14371,14 @@ export class AgentSession {
 	}
 
 	/**
-	 * Set the legacy assignment/evidence snapshot. Compiled root contracts use
-	 * separate ephemeral state so M1 does not activate completion enforcement.
+	 * Set the active completion-gate snapshot. Assignment-child and compiled-root
+	 * contracts both adapt through this seam; compiled contracts remain ephemeral.
 	 */
 	setActiveTaskContract(snapshot: ActiveTaskContractSnapshot | undefined): void {
 		this.#activeTaskContract = snapshot;
 		this.#taskContractActivatedAt = snapshot ? Date.now() : undefined;
-		if (!snapshot) {
-			this.#completionGateReminderCount = 0;
-			this.#completionGateAwaitingProgress = false;
-		}
+		this.#completionGateReminderCount = 0;
+		this.#completionGateAwaitingProgress = false;
 		this.#syncAdvisorSystemPrompt();
 	}
 

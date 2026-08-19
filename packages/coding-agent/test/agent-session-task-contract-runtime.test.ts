@@ -8,6 +8,7 @@ import { AgentSession } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-ses
 import { AuthStorage } from "@pk-nerdsaver-ai/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
 import { TempDir } from "@pk-nerdsaver-ai/pi-utils";
+import { buildCompletionGateInputFromTranscript } from "../src/orchestration/root-completion-gate";
 
 /** Extract the textual payload of a message whether its content is a plain string
  *  or an array of content blocks, narrowing each block before reading `.text`. */
@@ -77,6 +78,22 @@ describe("AgentSession task-contract runtime", () => {
 			modelRegistry: new ModelRegistry(authStorage),
 		});
 	}
+	async function makeStreamingSession(
+		responses: NonNullable<Parameters<typeof createMockModel>[0]>["responses"],
+	): Promise<AgentSession> {
+		const mock = createMockModel({ responses });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		return new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+	}
 
 	/** Spy on the agent's prompt entry point so each turn's full message array —
 	 *  including the hidden task-contract-notice — is captured without driving a
@@ -102,6 +119,50 @@ describe("AgentSession task-contract runtime", () => {
 		expect(block).toBeDefined();
 		expect(block).toContain("<task-contract");
 		expect(block).toContain("auth service");
+	});
+	it("continues a compiled root task when its first stop lacks verification evidence", async () => {
+		session = await makeStreamingSession([{ content: ["I implemented auth."] }]);
+
+		await session.prompt("Implement the auth flow");
+		await session.waitForIdle();
+
+		expect(
+			session.agent.state.messages.some(
+				message => message.role === "developer" && textOf(message).includes("Completion gate reminder 1/2"),
+			),
+		).toBe(true);
+	});
+
+	it("passes the compiled root gate after verification evidence", async () => {
+		session = await makeSession();
+		capturePromptTurns(session);
+
+		await session.prompt("Implement the auth flow");
+		const contract = session.getActiveTaskContract();
+		if (!contract) throw new Error("Expected compiled root contract to activate the completion gate");
+
+		const timestamp = Date.now();
+		session.agent.appendMessage({
+			role: "toolResult",
+			toolCallId: "bash-check",
+			toolName: "bash",
+			content: [{ type: "text", text: "tests pass" }],
+			isError: false,
+			timestamp,
+		});
+		session.agent.appendMessage({
+			role: "toolResult",
+			toolCallId: "read-check",
+			toolName: "read",
+			content: [{ type: "text", text: "implementation reviewed" }],
+			isError: false,
+			timestamp: timestamp + 1,
+		});
+
+		const evaluation = session.evaluateRootCompletionGate(
+			buildCompletionGateInputFromTranscript(contract, session.agent.state.messages, timestamp),
+		);
+		expect(evaluation.outcome).toBe("pass");
 	});
 
 	it("keeps the executor and live advisor on the same digest", async () => {

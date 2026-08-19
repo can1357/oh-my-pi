@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { getBundledModel } from "@pk-nerdsaver-ai/pi-catalog/models";
 import { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-registry";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
+import type { CompletionGateInput } from "@pk-nerdsaver-ai/pi-coding-agent/orchestration/completion-gate";
 import {
 	type CreateAgentSessionOptions,
 	createAgentSession,
@@ -12,6 +13,13 @@ import {
 	type ExtensionFactory,
 } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import { SessionManager } from "@pk-nerdsaver-ai/pi-coding-agent/session/session-manager";
+import { TaskTool } from "@pk-nerdsaver-ai/pi-coding-agent/task";
+import {
+	ASSIGNMENT_CONTRACT_VERSION,
+	ASSIGNMENT_RESULT_VERSION,
+	withAssignmentContractDigest,
+} from "@pk-nerdsaver-ai/pi-coding-agent/task/assignment-contract";
+import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import { removeSyncWithRetries, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 import { type } from "arktype";
 
@@ -95,6 +103,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 	});
 
 	afterAll(() => {
+		modelRegistry.authStorage.close();
 		removeSyncWithRetries(registryAuthDir);
 	});
 
@@ -251,4 +260,84 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.dispose();
 		}
 	});
+
+	it("wires assignment completion contracts through the TaskTool and YieldTool session seam", async () => {
+		const tempDir = makeTempDir();
+		modelRegistry.authStorage.setRuntimeApiKey("openai", "test-key");
+		let contractSeam: ToolSession | undefined;
+		const createTaskTool = TaskTool.create;
+		vi.spyOn(TaskTool, "create").mockImplementation(async toolSession => {
+			contractSeam = toolSession;
+			return createTaskTool(toolSession);
+		});
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "async.enabled": true, "task.prefetch.enabled": false }),
+			toolNames: ["task", "yield"],
+		});
+
+		try {
+			if (!contractSeam) throw new Error("Expected SDK to construct TaskTool with a ToolSession");
+			expect(contractSeam.setActiveTaskContract).toBeFunction();
+			expect(contractSeam.getActiveTaskContract).toBeFunction();
+			expect(contractSeam.evaluateRootCompletionGate).toBeFunction();
+
+			const task = await TaskTool.create(contractSeam);
+			const yieldTool = session.getToolByName("yield");
+			if (!yieldTool) throw new Error("Expected yield tool");
+			const assignmentContract = withAssignmentContractDigest({
+				version: ASSIGNMENT_CONTRACT_VERSION,
+				id: "sdk-contract-child",
+				revision: 1,
+				role: "task",
+				workClass: "mechanical",
+				autonomy: "bound",
+				objective: "Wire the ToolSession contract seam",
+				deliverables: ["packages/coding-agent/src/sdk.ts"],
+				scope: { allowedPaths: ["packages/coding-agent/src/sdk.ts"] },
+				acceptance: [
+					{
+						id: "seam-wired",
+						description: "The completion gate is reachable from YieldTool",
+						check: "content_match",
+					},
+				],
+				reporting: ASSIGNMENT_RESULT_VERSION,
+			});
+
+			const spawn = await task.execute("contract-child", {
+				agent: "task",
+				id: "ContractChild",
+				model: "openai/gpt-4o-mini",
+				assignment: "Wire the ToolSession completion-contract seam.",
+				assignmentContract,
+			});
+			expect(spawn.content).not.toHaveLength(0);
+
+			const activeContract = contractSeam.getActiveTaskContract?.();
+			if (!activeContract) throw new Error("Expected assignment contract snapshot to remain active");
+			expect(activeContract).toMatchObject({
+				objective: assignmentContract.objective,
+				deliverables: assignmentContract.deliverables,
+			});
+
+			const gateInput: CompletionGateInput = {
+				contract: activeContract,
+				deliverablesPresent: [],
+				criteriaEvidence: {},
+				triggeredNonSolutions: [],
+				requiredEvidencePresent: false,
+				unresolvedBlockers: [],
+				scopeValid: true,
+			};
+			const expected = contractSeam.evaluateRootCompletionGate?.(gateInput);
+			if (!expected?.reminder) throw new Error("Expected a recoverable completion-gate reminder");
+			expect(expected.outcome).toBe("recoverable");
+			expect(expected).toEqual(session.evaluateRootCompletionGate(gateInput));
+
+			await expect(yieldTool.execute("contract-yield", { result: { data: {} } })).rejects.toThrow(expected.reminder);
+		} finally {
+			await session.dispose();
+		}
+	}, 60000);
 });

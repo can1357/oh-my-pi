@@ -2,6 +2,7 @@ import { mkdir, readdir, realpath, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
+import { canDiscoverPeer } from "../orchestration/collaboration-policy";
 import type { AgentRegistry, AgentStatus } from "../registry/agent-registry";
 import type { IrcBus, IrcDeliveryReceipt, IrcMessage, IrcSendOptions } from "./bus";
 
@@ -21,6 +22,8 @@ export interface IrcRemotePeer {
 	color?: string;
 	unread: number;
 }
+
+export type IrcRemoteSendAuthorizer = (peer: IrcRemotePeer) => string | undefined;
 
 interface IrcPeerDescriptor {
 	version: 1;
@@ -103,6 +106,22 @@ function isLoopbackEndpoint(endpoint: string): boolean {
 	}
 }
 
+function toRemotePeer(descriptor: IrcPeerDescriptor, agent: IrcPeerDescriptor["agents"][number]): IrcRemotePeer {
+	return {
+		id: `${agent.id}@${descriptor.processId}`,
+		localId: agent.id,
+		processId: descriptor.processId,
+		displayName: agent.displayName,
+		kind: agent.kind,
+		status: agent.status,
+		parentId: agent.parentId,
+		lastActivity: agent.lastActivity,
+		activity: agent.activity,
+		color: agent.color,
+		unread: 0,
+	};
+}
+
 export class IrcIpc {
 	static #global: IrcIpc | undefined;
 
@@ -180,26 +199,17 @@ export class IrcIpc {
 		}
 	}
 
-	async list(_viewerId?: string): Promise<IrcRemotePeer[]> {
+	async list(viewerId?: string): Promise<IrcRemotePeer[]> {
 		if (!this.#enabled || !this.#cwdKey) return [];
 		const peers: IrcRemotePeer[] = [];
+		const viewerPolicy = viewerId ? this.#config?.registry.get(viewerId)?.collaborationPolicy : undefined;
 		for (const descriptor of await this.#readDescriptors()) {
 			if (descriptor.processId === this.#processId) continue;
 			for (const agent of descriptor.agents) {
 				if (agent.kind === "advisor") continue;
-				peers.push({
-					id: `${agent.id}@${descriptor.processId}`,
-					localId: agent.id,
-					processId: descriptor.processId,
-					displayName: agent.displayName,
-					kind: agent.kind,
-					status: agent.status,
-					parentId: agent.parentId,
-					lastActivity: agent.lastActivity,
-					activity: agent.activity,
-					color: agent.color,
-					unread: 0,
-				});
+				const peer = toRemotePeer(descriptor, agent);
+				if (viewerId && !canDiscoverPeer(viewerPolicy, viewerId, peer.id)) continue;
+				peers.push(peer);
 			}
 		}
 		return peers;
@@ -209,6 +219,7 @@ export class IrcIpc {
 		targetId: string,
 		message: Omit<IrcMessage, "id" | "ts">,
 		opts?: IrcSendOptions,
+		authorize?: IrcRemoteSendAuthorizer,
 	): Promise<IrcDeliveryReceipt | undefined> {
 		if (!this.#enabled || !this.#cwdKey) return undefined;
 		const at = targetId.lastIndexOf("@");
@@ -217,6 +228,10 @@ export class IrcIpc {
 		const processId = targetId.slice(at + 1);
 		const descriptor = (await this.#readDescriptors()).find(item => item.processId === processId);
 		if (!descriptor) return { to: targetId, outcome: "failed", error: `Unknown remote IRC peer "${targetId}".` };
+		const agent = descriptor.agents.find(item => item.id === localId);
+		if (!agent) return { to: targetId, outcome: "failed", error: `Unknown remote IRC peer "${targetId}".` };
+		const authorizationError = authorize?.(toRemotePeer(descriptor, agent));
+		if (authorizationError) return { to: targetId, outcome: "failed", error: authorizationError };
 		try {
 			const transport: IrcFetch = this.#config?.transport ?? ((input, init) => fetch(input, init));
 			const response = await transport(`${descriptor.endpoint}/irc`, {

@@ -35,6 +35,8 @@ export interface YieldDetails {
 	 * subagent's acceptance and the parent's view of the result in lockstep.
 	 */
 	schemaOverridden?: boolean;
+	/** Set when recoverable completion-gate reminders are exhausted and yield escalates. */
+	gateOverridden?: boolean;
 }
 
 function formatSchema(schema: unknown): string {
@@ -111,6 +113,9 @@ function wrapYieldParameters(dataSchema: Record<string, unknown>): Record<string
  * runtime.
  */
 const MAX_SCHEMA_RETRIES = 3;
+
+/** Recoverable completion-gate reminders before escalating the child result to its parent. */
+const MAX_GATE_REMINDERS = 2;
 
 /**
  * Build a CompletionGateInput from yield data and the active contract snapshot.
@@ -198,6 +203,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	readonly #evaluateGate?: ToolSession["evaluateRootCompletionGate"];
 	readonly #getContract?: ToolSession["getActiveTaskContract"];
 	#schemaValidationFailures = 0;
+	#gateRejectionCount = 0;
+	#lastGateContract?: ActiveTaskContractSnapshot;
 
 	constructor(session: ToolSession) {
 		this.#assignmentContractActive = session.assignmentContractActive === true;
@@ -295,6 +302,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 
 		const status = errorMessage !== undefined ? "aborted" : "success";
 		let schemaValidationOverridden = false;
+		let gateOverridden = false;
 		if (status === "success") {
 			if (data === undefined || data === null) {
 				throw new Error("data is required when yield indicates success");
@@ -330,9 +338,19 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			const contract = this.#getContract();
 			if (contract) {
 				const gateInput = buildCompletionGateInputFromYield(contract, data);
+				if (contract !== this.#lastGateContract) {
+					this.#lastGateContract = contract;
+					this.#gateRejectionCount = 0;
+				}
 				const evaluation = this.#evaluateGate(gateInput);
 				if (evaluation.outcome === "recoverable" && evaluation.reminder) {
-					throw new Error(`Completion gate: ${evaluation.reminder} — address these before calling yield again.`);
+					if (this.#gateRejectionCount < MAX_GATE_REMINDERS) {
+						this.#gateRejectionCount++;
+						throw new Error(
+							`Completion gate: ${evaluation.reminder} — address these before calling yield again.`,
+						);
+					}
+					gateOverridden = true;
 				}
 			}
 		}
@@ -342,10 +360,18 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				? `Task aborted: ${errorMessage}`
 				: schemaValidationOverridden
 					? `Result submitted (schema validation overridden after ${this.#schemaValidationFailures} failed attempt(s)).`
-					: "Result submitted.";
+					: gateOverridden
+						? `Result submitted (completion gate overridden after ${MAX_GATE_REMINDERS} reminder(s)).`
+						: "Result submitted.";
 		return {
 			content: [{ type: "text", text: responseText }],
-			details: { data, status, error: errorMessage, schemaOverridden: schemaValidationOverridden || undefined },
+			details: {
+				data,
+				status,
+				error: errorMessage,
+				schemaOverridden: schemaValidationOverridden || undefined,
+				gateOverridden: gateOverridden || undefined,
+			},
 		};
 	}
 }
@@ -363,6 +389,7 @@ subprocessToolRegistry.register<YieldDetails>("yield", {
 			status,
 			error: typeof record.error === "string" ? record.error : undefined,
 			schemaOverridden: record.schemaOverridden === true ? true : undefined,
+			gateOverridden: record.gateOverridden === true ? true : undefined,
 		};
 	},
 	shouldTerminate: event => !event.isError,

@@ -17,6 +17,11 @@ import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-registry";
 import { TaskTool } from "@pk-nerdsaver-ai/pi-coding-agent/task";
+import {
+	ASSIGNMENT_CONTRACT_VERSION,
+	ASSIGNMENT_RESULT_VERSION,
+	withAssignmentContractDigest,
+} from "@pk-nerdsaver-ai/pi-coding-agent/task/assignment-contract";
 import * as discoveryModule from "@pk-nerdsaver-ai/pi-coding-agent/task/discovery";
 import * as executorModule from "@pk-nerdsaver-ai/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult, TaskParams } from "@pk-nerdsaver-ai/pi-coding-agent/task/types";
@@ -145,6 +150,57 @@ describe("task spawn routing", () => {
 		expect(job!.resultText).toContain("message it via `irc` to follow up");
 		expect(job!.resultText).toContain("history://Spawnling");
 		expect(runSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("clears assignment contract snapshots after success, error, and cancellation", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		for (const outcome of ["success", "error", "cancellation"] as const) {
+			const gate = deferred();
+			const manager = createManager();
+			const session = createSession({ manager });
+			let activeContract: ReturnType<NonNullable<ToolSession["getActiveTaskContract"]>>;
+			session.setActiveTaskContract = contract => {
+				activeContract = contract;
+			};
+			session.getActiveTaskContract = () => activeContract;
+			vi.spyOn(executorModule, "runSubprocess").mockImplementationOnce(async options => {
+				await gate.promise;
+				if (outcome === "error") return makeResult(options.id ?? "?", { exitCode: 1, isError: true });
+				if (outcome === "cancellation") return makeResult(options.id ?? "?", { aborted: true, exitCode: 1 });
+				return makeResult(options.id ?? "?");
+			});
+			const tool = await TaskTool.create(session);
+			const assignmentContract = withAssignmentContractDigest({
+				version: ASSIGNMENT_CONTRACT_VERSION,
+				id: `terminal-${outcome}`,
+				revision: 1,
+				role: "task",
+				workClass: "mechanical",
+				autonomy: "bound",
+				objective: `Verify ${outcome} snapshot cleanup`,
+				deliverables: ["packages/coding-agent/src/task/index.ts"],
+				scope: { allowedPaths: ["packages/coding-agent/src/task/index.ts"] },
+				acceptance: [{ id: "cleared", description: "The snapshot is cleared", check: "content_match" }],
+				reporting: ASSIGNMENT_RESULT_VERSION,
+			});
+
+			const result = await tool.execute("tc-contract", {
+				agent: "task",
+				id: `Contract-${outcome}`,
+				assignment: "Run the assigned task.",
+				assignmentContract,
+			} as TaskParams);
+			const job = manager.getJob(result.details!.async!.jobId)!;
+			expect(session.getActiveTaskContract?.()).toMatchObject({ objective: assignmentContract.objective });
+
+			if (outcome === "cancellation") expect(manager.cancel(job.id)).toBe(true);
+			gate.resolve();
+			await job.promise;
+			expect(session.getActiveTaskContract?.()).toBeUndefined();
+		}
 	});
 
 	it("bounds concurrent job bodies with the session spawn semaphore", async () => {

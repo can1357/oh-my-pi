@@ -19,6 +19,25 @@ describe("yield subprocess extraction", () => {
 		expect(data).toEqual({ status: "success", data: { ok: true }, error: undefined });
 	});
 
+	it("preserves completion-gate escalation flags", () => {
+		const data = handler?.extractData?.({
+			toolName: "yield",
+			toolCallId: "call-gate-override",
+			result: {
+				content: [{ type: "text", text: "Result submitted (completion gate overridden after 2 reminder(s))." }],
+				details: { status: "success", data: { ok: true }, gateOverridden: true },
+			},
+			isError: false,
+		});
+
+		expect(data).toEqual({
+			status: "success",
+			data: { ok: true },
+			error: undefined,
+			gateOverridden: true,
+		});
+	});
+
 	it("ignores malformed yield details without status", () => {
 		const data = handler?.extractData?.({
 			toolName: "yield",

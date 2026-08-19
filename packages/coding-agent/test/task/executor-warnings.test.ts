@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	finalizeSubprocessOutput,
+	SUBAGENT_WARNING_GATE_OVERRIDDEN,
 	SUBAGENT_WARNING_MISSING_YIELD,
 	SUBAGENT_WARNING_NULL_YIELD,
 	SUBAGENT_WARNING_SCHEMA_OVERRIDDEN,
@@ -190,5 +191,44 @@ describe("subagent warning injection", () => {
 		expect(result.exitCode).toBe(0);
 		expect(JSON.parse(result.rawOutput)).toEqual({ verdict: "looks good" });
 		expect(result.stderr.startsWith("invalid output schema:")).toBe(true);
+	});
+
+	it("surfaces gateOverridden flag from yield as a stderr warning to the parent", () => {
+		// The gate cap accepts the payload after MAX_GATE_REMINDERS; without a
+		// parent-visible warning the escalation would be invisible outside nested
+		// result metadata.
+		const result = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [{ status: "success", data: { summary: "done without evidence" }, gateOverridden: true }],
+			outputSchema: undefined,
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toBe(SUBAGENT_WARNING_GATE_OVERRIDDEN);
+		expect(JSON.parse(result.rawOutput)).toEqual({ summary: "done without evidence" });
+	});
+
+	it("combines schema and gate override warnings when both flags are set", () => {
+		const result = finalizeSubprocessOutput({
+			rawOutput: "",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [{ status: "success", data: { ok: true }, schemaOverridden: true, gateOverridden: true }],
+			outputSchema: {
+				type: "object",
+				required: ["findings"],
+				properties: { findings: { type: "array" } },
+			},
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toBe(`${SUBAGENT_WARNING_SCHEMA_OVERRIDDEN}\n${SUBAGENT_WARNING_GATE_OVERRIDDEN}`);
+		expect(JSON.parse(result.rawOutput)).toEqual({ ok: true });
 	});
 });

@@ -1237,6 +1237,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				failedSchedules.push(`${spawn.agentId}: ${message}`);
+				if (spawn.spawnParams.assignmentContract) {
+					this.session.setActiveTaskContract?.(undefined);
+				}
 				spawn.progress.status = "failed";
 				settledCount += 1;
 				failedCount += 1;
@@ -1353,6 +1356,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					semaphore.release();
 					progress.status = "aborted";
 					onSettled?.(true);
+					if (spawnParams.assignmentContract) {
+						this.session.setActiveTaskContract?.(undefined);
+					}
 					throw new Error("Aborted before execution");
 				}
 				markRunning();
@@ -1546,6 +1552,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const payload = payloads[index];
 			if (!payload) {
 				contentParts.push(`Task ${spawnItems[index].id?.trim() || `#${index + 1}`}: cancelled before start.`);
+				if (spawnParamsFor(params, spawnItems[index]).assignmentContract) {
+					this.session.setActiveTaskContract?.(undefined);
+				}
 				continue;
 			}
 			projectAgentsDir ??= payload.details?.projectAgentsDir ?? null;
@@ -1655,6 +1664,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const thinkingLevelOverride = effectiveAgent.thinkingLevel;
 
 		if (isolationMode === "none" && "isolated" in params) {
+			if (params.assignmentContract) {
+				this.session.setActiveTaskContract?.(undefined);
+			}
 			return {
 				content: [{ type: "text", text: "Task isolation is disabled." }],
 				details: { projectAgentsDir, results: [], totalDurationMs: 0 },
@@ -1674,6 +1686,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				baseline = await captureBaseline(repoRoot);
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
+				if (params.assignmentContract) {
+					this.session.setActiveTaskContract?.(undefined);
+				}
 				return {
 					content: [{ type: "text", text: `Isolated task execution requires a git repository. ${message}` }],
 					details: { projectAgentsDir, results: [], totalDurationMs: Date.now() - startTime },
@@ -2142,6 +2157,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				content: [{ type: "text", text: `Task execution failed: ${err}` }],
 				details: { projectAgentsDir, results: [], totalDurationMs: Date.now() - startTime },
 			};
+		} finally {
+			if (params.assignmentContract) {
+				this.session.setActiveTaskContract?.(undefined);
+			}
 		}
 	}
 

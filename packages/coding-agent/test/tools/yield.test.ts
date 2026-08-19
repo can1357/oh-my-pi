@@ -3,6 +3,7 @@ import type { Tool, ToolCall } from "@pk-nerdsaver-ai/pi-ai/types";
 import { enforceStrictSchema } from "@pk-nerdsaver-ai/pi-ai/utils/schema";
 import { validateToolArguments } from "@pk-nerdsaver-ai/pi-ai/utils/validation";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
+import { evaluateCompletionGate } from "@pk-nerdsaver-ai/pi-coding-agent/orchestration/completion-gate";
 import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import { YieldTool } from "@pk-nerdsaver-ai/pi-coding-agent/tools/yield";
 
@@ -574,5 +575,98 @@ describe("YieldTool", () => {
 				result: { data: { $ref: "different" } },
 			} as never),
 		).rejects.toThrow("Output does not match schema");
+	});
+	it("caps recoverable completion-gate reminders and flags the accepted escalation", async () => {
+		const contract = {
+			objective: "Prove the change",
+			deliverables: [],
+			completionCriteria: [{ id: "c1", description: "Artifact-backed evidence exists" }],
+			nonSolutions: [],
+			knownFailureModes: [],
+		};
+		const tool = new YieldTool(
+			createSession({
+				getActiveTaskContract: () => contract,
+				evaluateRootCompletionGate: evaluateCompletionGate,
+			}),
+		);
+		const weakResult = { evidence: [{ criterionId: "c1", passed: true, summary: "done" }] };
+
+		await expect(tool.execute("gate-reminder-1", { result: { data: weakResult } } as never)).rejects.toThrow(
+			"Completion gate",
+		);
+		await expect(tool.execute("gate-reminder-2", { result: { data: weakResult } } as never)).rejects.toThrow(
+			"Completion gate",
+		);
+
+		const escalated = await tool.execute("gate-override", { result: { data: weakResult } } as never);
+		expect(escalated.details?.gateOverridden).toBe(true);
+		expect(escalated.content).toEqual([
+			{ type: "text", text: "Result submitted (completion gate overridden after 2 reminder(s))." },
+		]);
+	});
+
+	it("resets completion-gate reminders when the active contract changes", async () => {
+		const firstContract = {
+			objective: "Prove the first change",
+			deliverables: [],
+			completionCriteria: [{ id: "c1", description: "Artifact-backed evidence exists" }],
+			nonSolutions: [],
+			knownFailureModes: [],
+		};
+		const secondContract = {
+			objective: "Prove the second change",
+			deliverables: [],
+			completionCriteria: [{ id: "c2", description: "Artifact-backed evidence exists" }],
+			nonSolutions: [],
+			knownFailureModes: [],
+		};
+		let activeContract = firstContract;
+		const tool = new YieldTool(
+			createSession({
+				getActiveTaskContract: () => activeContract,
+				evaluateRootCompletionGate: evaluateCompletionGate,
+			}),
+		);
+
+		const weakResult = { evidence: [{ criterionId: "c1", passed: true, summary: "done" }] };
+		await expect(tool.execute("gate-first-1", { result: { data: weakResult } } as never)).rejects.toThrow(
+			"Completion gate",
+		);
+		await expect(tool.execute("gate-first-2", { result: { data: weakResult } } as never)).rejects.toThrow(
+			"Completion gate",
+		);
+		await tool.execute("gate-first-override", { result: { data: weakResult } } as never);
+
+		activeContract = secondContract;
+		const secondWeakResult = { evidence: [{ criterionId: "c2", passed: true, summary: "done" }] };
+		await expect(tool.execute("gate-second-1", { result: { data: secondWeakResult } } as never)).rejects.toThrow(
+			"Completion gate",
+		);
+	});
+
+	it("accepts artifact-backed contract evidence without completion-gate override", async () => {
+		const contract = {
+			objective: "Prove the change",
+			deliverables: [],
+			completionCriteria: [{ id: "c1", description: "Artifact-backed evidence exists" }],
+			nonSolutions: [],
+			knownFailureModes: [],
+		};
+		const tool = new YieldTool(
+			createSession({
+				getActiveTaskContract: () => contract,
+				evaluateRootCompletionGate: evaluateCompletionGate,
+			}),
+		);
+
+		const result = await tool.execute("gate-satisfied", {
+			result: {
+				data: { evidence: [{ criterionId: "c1", passed: true, artifactRefs: ["artifact://1"] }] },
+			},
+		} as never);
+
+		expect(result.details?.gateOverridden).toBeUndefined();
+		expect(result.content).toEqual([{ type: "text", text: "Result submitted." }]);
 	});
 });

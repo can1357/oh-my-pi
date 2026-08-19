@@ -59,7 +59,7 @@ For a substantial root-session request, `AgentSession` compiles an ephemeral `Ta
 
 The block contains objective, inline deliverables, criterion ids, non-solutions, critical/high unverified assumptions, and blocking/significant unresolved gaps. It carries the same digest prefix as the executor's `<task-contract>` message block, including during normal retries and post-compaction recovery.
 
-The advisor can use this context to identify drift, but it cannot enforce completion. Evidence-backed completion gating remains a separate M2 mechanism and is not enabled by this M1 task-contract wiring.
+The advisor can use this context to identify drift, while the compiled root contract also activates the existing evidence-backed completion gate through `AgentSession.setActiveTaskContract()`; the advisor itself does not enforce completion.
 
 See [`docs/task-contract-orchestration.md`](task-contract-orchestration.md) for the runtime and clarification policy.
 

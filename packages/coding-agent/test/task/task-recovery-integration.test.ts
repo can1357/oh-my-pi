@@ -135,6 +135,7 @@ function yieldingSession(status: "success" | "failed", data?: AssignmentResultV1
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["read", "yield"],
 		setActiveToolsByName: async (_toolNames: string[]) => {},
+		setActiveTaskContract: () => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
 			return () => {

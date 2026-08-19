@@ -36,10 +36,12 @@ import type { MnemopiSessionState } from "../mnemopi/state";
 import type { AgentExecutionProfile } from "../orchestration/agent-execution-profile";
 import {
 	type CollaborationPolicy,
+	canDiscoverPeer,
 	resolveCollaborationPolicy,
 	serializeCollaborationPolicy,
 } from "../orchestration/collaboration-policy";
 import type { SubagentModelRoutingDecision } from "../orchestration/subagent-model-routing";
+import { snapshotFromAssignmentFields } from "../orchestration/task-contract";
 import assignmentContractPromptTemplate from "../prompts/system/assignment-contract.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
@@ -306,10 +308,16 @@ function installSubagentRetryFallbackChain(args: {
 	return role;
 }
 
-function renderIrcPeerRoster(selfId: string): string {
+function renderIrcPeerRoster(selfId: string, collaborationPolicy?: CollaborationPolicy): string {
 	const peers = AgentRegistry.global()
 		.list()
-		.filter(ref => ref.id !== selfId && ref.status !== "aborted" && ref.kind !== "advisor");
+		.filter(
+			ref =>
+				ref.id !== selfId &&
+				ref.status !== "aborted" &&
+				ref.kind !== "advisor" &&
+				canDiscoverPeer(collaborationPolicy, selfId, ref.id),
+		);
 	if (peers.length === 0) return "- (no other agents)";
 	const lines = peers.map(
 		peer =>
@@ -643,6 +651,13 @@ export interface YieldItem {
 	 * different, opaque error blob in the parent's view of the result.
 	 */
 	schemaOverridden?: boolean;
+	/**
+	 * Set by YieldTool when it exhausted its completion-gate reminder budget
+	 * (MAX_GATE_REMINDERS) and accepted the payload anyway. Surfaced as a
+	 * stderr warning so the parent can see the escalation, mirroring
+	 * schemaOverridden.
+	 */
+	gateOverridden?: boolean;
 }
 
 interface FinalizeSubprocessOutputArgs {
@@ -665,6 +680,8 @@ interface FinalizeSubprocessOutputResult {
 }
 export const SUBAGENT_WARNING_SCHEMA_OVERRIDDEN =
 	"SYSTEM WARNING: Subagent exhausted schema-retry budget; result was accepted despite failing the output schema.";
+export const SUBAGENT_WARNING_GATE_OVERRIDDEN =
+	"SYSTEM WARNING: Subagent exhausted completion-gate reminders; result was accepted without satisfying the assignment contract's evidence criteria.";
 export const SUBAGENT_WARNING_NULL_YIELD = "SYSTEM WARNING: Subagent called yield with null data.";
 export const SUBAGENT_WARNING_MISSING_YIELD =
 	"SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
@@ -719,6 +736,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 			} else {
 				const { validator, error: schemaError } = buildOutputValidator(outputSchema);
 				const overridden = lastYield?.schemaOverridden === true;
+				const gateOverridden = lastYield?.gateOverridden === true;
 				const completeData = normalizeCompleteData(submitData, reportFindings, validator);
 				const result =
 					schemaError || overridden
@@ -739,11 +757,14 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 					}
 					if (!hadFailureBeforeYield) {
 						exitCode = 0;
-						stderr = overridden
+						const baseWarning = overridden
 							? SUBAGENT_WARNING_SCHEMA_OVERRIDDEN
 							: schemaError
 								? `invalid output schema: ${schemaError}`
 								: "";
+						stderr = gateOverridden
+							? [baseWarning, SUBAGENT_WARNING_GATE_OVERRIDDEN].filter(Boolean).join("\n")
+							: baseWarning;
 					} else if (!stderr) {
 						stderr = "Subagent failed after yielding a result.";
 					}
@@ -2516,6 +2537,20 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// assistant text (finalizeSubprocessOutput's schemaless raw-output
 			// path); output schemas are unsupported in fork mode.
 			const fork = options.contextMode === "fork" && options.forkContext !== undefined ? options.forkContext : null;
+			const seedAssignmentContract = (session: AgentSession) => {
+				if (fork || !options.assignmentContract) return;
+				session.setActiveTaskContract(
+					snapshotFromAssignmentFields({
+						objective: options.assignmentContract.objective,
+						deliverables: options.assignmentContract.deliverables,
+						acceptance: options.assignmentContract.acceptance,
+						nonSolutions:
+							"nonSolutions" in options.assignmentContract ? options.assignmentContract.nonSolutions : undefined,
+						failureModes:
+							"failureModes" in options.assignmentContract ? options.assignmentContract.failureModes : undefined,
+					}),
+				);
+			};
 			const buildSubagentSessionOptions = (sessionManagerForRun: SessionManager): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
 				authStorage,
@@ -2543,7 +2578,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						planReferencePath: options.planReference?.path ?? "",
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,
-						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
+						ircPeers: ircEnabled ? renderIrcPeerRoster(id, collaborationPolicy) : "",
 						ircSelfId: ircEnabled ? id : "",
 					});
 					const contractPrompt = options.assignmentContract
@@ -2600,7 +2635,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// context is parent prefix + this task's user message. Agent-state
 				// only (not persisted as branch entries): the fork is ephemeral and
 				// its own prompts/results persist normally after the snapshot.
-				if (fork) created.session.agent.replaceMessages([...fork.messages]);
+				if (fork) {
+					created.session.agent.replaceMessages([...fork.messages]);
+				} else {
+					seedAssignmentContract(created.session);
+				}
 				return created;
 			});
 			let session: AgentSession;
@@ -2630,6 +2669,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						reopened.adoptArtifactManager(options.parentArtifactManager);
 					}
 					const { session: revived } = await createAgentSession(buildSubagentSessionOptions(reopened));
+					seedAssignmentContract(revived);
 					installRegistryStatusSync(revived);
 					return revived;
 				};

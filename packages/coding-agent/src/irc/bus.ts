@@ -131,8 +131,26 @@ export class IrcBus {
 	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: IrcSendOptions): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		if (!this.#registry.get(message.to) && this.#ipc) {
-			const remoteReceipt = await this.#ipc.send(message.to, msg, opts);
-			if (remoteReceipt) return remoteReceipt;
+			const reservations: WakeReservation[] = [];
+			const remoteReceipt = await this.#ipc.send(message.to, msg, opts, remotePeer => {
+				const requiresWake = remotePeer.status === "idle" || remotePeer.status === "parked";
+				const senderPolicy = this.#policyFor(this.#registry.get(message.from));
+				const senderError = this.#authorizationError(senderPolicy, message.from, {
+					fromId: message.from,
+					toId: message.to,
+					requiresWake,
+					isBroadcast: opts?.isBroadcast,
+				});
+				if (senderError) return senderError;
+				const reservation = requiresWake ? this.#reserveWake(message.from, senderPolicy) : undefined;
+				if (reservation) reservations.push(reservation);
+				return undefined;
+			});
+			if (remoteReceipt) {
+				if (remoteReceipt.outcome === "failed") this.#restoreWakeReservations(reservations);
+				return remoteReceipt;
+			}
+			this.#restoreWakeReservations(reservations);
 		}
 		const ref = this.#registry.get(message.to);
 		if (!ref || ref.status === "aborted") {

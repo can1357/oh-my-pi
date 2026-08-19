@@ -43,7 +43,7 @@ When the runtime has a pending question, the next response is consumed as its on
 
 ## Completion enforcement
 
-This is M1 context and clarification wiring only. Compiled root contracts do **not** call `setActiveTaskContract()` and therefore do **not** enable evidence-backed completion gating or prevent a success outcome. The existing evidence ledger and completion-gate modules remain separate M2 mechanisms for legacy assignment/evidence flows.
+Compiled root contracts activate the existing evidence-backed completion gate through `AgentSession.setActiveTaskContract(toActiveTaskContractSnapshot(contract))`. Assignment-child and compiled-root adapters share that one gate; for compiled roots, `root-completion-gate.ts` converts each successful, non-useless tool result after contract activation into an append-only `EvidenceLedger` record tied to the affected criterion IDs, then derives pass/fail/unproven coverage from that ledger instead of trusting completion prose. Failed and pre-activation results provide no evidence. Compiled contracts remain ephemeral and are still cleared on every session boundary. Criterion-adjudication and Prime control-plane wiring remain later M2 work.
 
 ## Relevant files
 

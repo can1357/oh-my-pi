@@ -9,6 +9,8 @@ import type { ModelRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/config/mode
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import type { ToolPathWithSource } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/custom-tools";
 import type { LoadExtensionsResult } from "@pk-nerdsaver-ai/pi-coding-agent/extensibility/extensions/types";
+import { resolveCollaborationPolicy } from "@pk-nerdsaver-ai/pi-coding-agent/orchestration/collaboration-policy";
+import { AgentRegistry } from "@pk-nerdsaver-ai/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionResult } from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import * as sdkModule from "@pk-nerdsaver-ai/pi-coding-agent/sdk";
 import type {
@@ -17,6 +19,11 @@ import type {
 	PromptOptions,
 } from "@pk-nerdsaver-ai/pi-coding-agent/session/agent-session";
 import type { ClientBridge } from "@pk-nerdsaver-ai/pi-coding-agent/session/client-bridge";
+import {
+	ASSIGNMENT_CONTRACT_VERSION,
+	ASSIGNMENT_RESULT_VERSION,
+	withAssignmentContractDigest,
+} from "@pk-nerdsaver-ai/pi-coding-agent/task/assignment-contract";
 import { runSubprocess } from "@pk-nerdsaver-ai/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@pk-nerdsaver-ai/pi-coding-agent/task/types";
 import { EventBus } from "@pk-nerdsaver-ai/pi-coding-agent/utils/event-bus";
@@ -177,6 +184,33 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.parentTaskPrefix).toBe("ChildAgent");
 	});
 
+	it("filters the rendered IRC peer roster through the child's collaboration policy", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: "RosterParent", displayName: "parent", kind: "main", session: null });
+		registry.register({ id: "UnrelatedPeer", displayName: "unrelated", kind: "sub", session: null });
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		try {
+			await runSubprocess({
+				...baseOptions,
+				id: "RosterChild",
+				parentAgentId: "RosterParent",
+				collaborationPolicy: resolveCollaborationPolicy({ mode: "report-only", parentId: "RosterParent" }),
+			});
+			const systemPrompt = spy.mock.calls[0]?.[0]?.systemPrompt;
+			expect(typeof systemPrompt).toBe("function");
+			if (typeof systemPrompt !== "function") throw new Error("Expected a dynamic subagent system prompt.");
+			const rendered = systemPrompt(["default"]);
+			const text = Array.isArray(rendered) ? rendered.join("\n") : rendered;
+			expect(text).toContain("`RosterParent`");
+			expect(text).not.toContain("`UnrelatedPeer`");
+		} finally {
+			registry.unregister("RosterParent");
+			registry.unregister("UnrelatedPeer");
+		}
+	});
+
 	it("applies fusion.sidekickRequestBudget only to the explicit Fusion sidekick spawn", async () => {
 		const settings = Settings.isolated();
 		settings.set("fusion.enabled", true);
@@ -206,5 +240,65 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(normalInits[0]?.maxModelRequestsPerRun).toBeUndefined();
 		expect(sidekickInits[0]?.fusionSidekick).toBe(true);
 		expect(sidekickInits[0]?.maxModelRequestsPerRun).toBe(3);
+	});
+	it("seeds a fresh child session with its assignment-contract snapshot", async () => {
+		let activeContract: ReturnType<NonNullable<AgentSession["getActiveTaskContract"]>>;
+		const session = yieldEmittingSession();
+		session.setActiveTaskContract = snapshot => {
+			activeContract = snapshot;
+		};
+		session.getActiveTaskContract = () => activeContract;
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const assignmentContract = withAssignmentContractDigest({
+			version: ASSIGNMENT_CONTRACT_VERSION,
+			id: "child-contract",
+			revision: 1,
+			role: "task",
+			workClass: "mechanical",
+			autonomy: "bound",
+			objective: "Seed the child completion contract",
+			deliverables: ["packages/coding-agent/src/task/executor.ts"],
+			scope: { allowedPaths: ["packages/coding-agent/src/task/executor.ts"] },
+			acceptance: [{ id: "seeded", description: "The child session is seeded", check: "content_match" }],
+			reporting: ASSIGNMENT_RESULT_VERSION,
+		});
+
+		await runSubprocess({ ...baseOptions, assignmentContract });
+		expect(session.getActiveTaskContract?.()).toMatchObject({
+			objective: assignmentContract.objective,
+			deliverables: assignmentContract.deliverables,
+			completionCriteria: [{ id: "seeded", description: "The child session is seeded" }],
+		});
+	});
+
+	it("does not seed assignment contracts into fork child sessions", async () => {
+		let activeContract: ReturnType<NonNullable<AgentSession["getActiveTaskContract"]>>;
+		const session = yieldEmittingSession();
+		session.setActiveTaskContract = snapshot => {
+			activeContract = snapshot;
+		};
+		session.getActiveTaskContract = () => activeContract;
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const assignmentContract = withAssignmentContractDigest({
+			version: ASSIGNMENT_CONTRACT_VERSION,
+			id: "fork-contract",
+			revision: 1,
+			role: "task",
+			workClass: "mechanical",
+			autonomy: "bound",
+			objective: "Do not seed fork child contracts",
+			deliverables: [],
+			scope: { allowedPaths: [] },
+			acceptance: [],
+			reporting: ASSIGNMENT_RESULT_VERSION,
+		});
+
+		await runSubprocess({
+			...baseOptions,
+			assignmentContract,
+			contextMode: "fork",
+			forkContext: { systemPrompt: ["parent"], toolNames: ["read"], model: undefined, messages: [] },
+		});
+		expect(session.getActiveTaskContract?.()).toBeUndefined();
 	});
 });
