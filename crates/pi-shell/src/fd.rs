@@ -369,17 +369,22 @@ struct SizeFilter {
 	bytes:    u64,
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy)]
 enum OwnerSide {
 	Include(u32),
 	Exclude(u32),
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy)]
 struct OwnerMatcher {
 	user:  Option<OwnerSide>,
 	group: Option<OwnerSide>,
 }
+
+#[cfg(not(unix))]
+type OwnerMatcher = ();
 
 #[derive(Clone)]
 struct SearchConfig {
@@ -859,6 +864,7 @@ const fn matches_owner_filters(filters: &[OwnerMatcher], _metadata: Option<&Meta
 	filters.is_empty()
 }
 
+#[cfg(unix)]
 const fn owner_side_matches(side: OwnerSide, actual: u32) -> bool {
 	match side {
 		OwnerSide::Include(expected) => actual == expected,
@@ -1166,6 +1172,7 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
 	i64::from(era) * 146_097 + i64::from(day_of_era) - 719_468
 }
 
+#[cfg(unix)]
 fn build_owner_filters(values: &[String]) -> io::Result<Vec<OwnerMatcher>> {
 	values
 		.iter()
@@ -1173,11 +1180,25 @@ fn build_owner_filters(values: &[String]) -> io::Result<Vec<OwnerMatcher>> {
 		.collect()
 }
 
+#[cfg(not(unix))]
+fn build_owner_filters(values: &[String]) -> io::Result<Vec<OwnerMatcher>> {
+	if values.is_empty() {
+		Ok(Vec::new())
+	} else {
+		Err(io::Error::new(
+			io::ErrorKind::Unsupported,
+			"owner filters in the in-process fd builtin are only supported on Unix",
+		))
+	}
+}
+
+#[cfg(unix)]
 fn parse_owner_filter(value: &str) -> io::Result<OwnerMatcher> {
 	let (user, group) = value.split_once(':').unwrap_or((value, ""));
 	Ok(OwnerMatcher { user: parse_owner_side(user)?, group: parse_owner_side(group)? })
 }
 
+#[cfg(unix)]
 fn parse_owner_side(value: &str) -> io::Result<Option<OwnerSide>> {
 	if value.is_empty() {
 		return Ok(None);

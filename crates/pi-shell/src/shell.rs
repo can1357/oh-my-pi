@@ -2291,7 +2291,7 @@ mod tests {
 			.run_string("find . -name '*.txt' > find.txt", &si, &params)
 			.await
 			.expect("find");
-		let found = read("find.txt");
+		let found = read("find.txt").replace('\\', "/");
 		assert!(!found.trim().is_empty(), "find produced no output");
 		for line in found.lines() {
 			assert!(
@@ -2353,7 +2353,7 @@ mod tests {
 			.await
 			.expect("rg");
 		assert_eq!(exit_code(&exec), 0, "rg recursive search should match");
-		let out = read("rg.txt");
+		let out = read("rg.txt").replace('\\', "/");
 		assert!(out.contains("data.txt:needle"), "rg missed visible file: {out:?}");
 		assert!(out.contains("sub/nested.txt:needle"), "rg missed nested file: {out:?}");
 		assert!(!out.contains(".hidden.txt"), "rg searched hidden file by default: {out:?}");
@@ -2426,7 +2426,7 @@ mod tests {
 			.await
 			.expect("fd");
 		assert_eq!(exit_code(&exec), 0, "fd should match visible files");
-		let out = read("fd.txt");
+		let out = read("fd.txt").replace('\\', "/");
 		assert!(out.contains("needle.txt"), "fd missed visible file: {out:?}");
 		assert!(out.contains("sub/needle.rs"), "fd missed nested file: {out:?}");
 		assert!(!out.contains(".hidden-needle.txt"), "fd searched hidden file: {out:?}");
@@ -2468,7 +2468,7 @@ mod tests {
 			.run_string("fd --glob '*.rs' sub > glob.txt", &si, &params)
 			.await
 			.expect("fd glob");
-		assert_eq!(read("glob.txt"), "sub/needle.rs\n");
+		assert_eq!(read("glob.txt").replace('\\', "/"), "sub/needle.rs\n");
 
 		let no_match = session
 			.shell
@@ -2722,10 +2722,14 @@ mod tests {
 		// -path matches against the operand-relative path.
 		session
 			.shell
-			.run_string("find . -path './sub/*' > p.txt", &si, &params)
+			.run_string("find . -path '*sub?drop.tmp' > p.txt", &si, &params)
 			.await
 			.expect("path");
-		assert_eq!(read("p.txt"), "./sub/drop.tmp\n", "-path should match the operand-relative path");
+		assert_eq!(
+			read("p.txt").replace('\\', "/"),
+			"./sub/drop.tmp\n",
+			"-path should match the operand-relative path"
+		);
 
 		// -printf %p emits the operand-relative path.
 		session
@@ -2733,7 +2737,11 @@ mod tests {
 			.run_string("find . -name keep.log -printf '%p\\n' > pf.txt", &si, &params)
 			.await
 			.expect("printf");
-		assert_eq!(read("pf.txt"), "./keep.log\n", "-printf %p should be operand-relative");
+		assert_eq!(
+			read("pf.txt").replace('\\', "/"),
+			"./keep.log\n",
+			"-printf %p should be operand-relative"
+		);
 
 		// -delete operates on the real (resolved) path, removing the right file.
 		let del = session
@@ -2757,7 +2765,7 @@ mod tests {
 			.await
 			.expect("exec");
 		assert_eq!(
-			read("ex.txt"),
+			read("ex.txt").replace('\\', "/"),
 			"./keep.log",
 			"-exec {{}} should be operand-relative and run in the shell cwd"
 		);
