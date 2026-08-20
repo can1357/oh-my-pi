@@ -68,7 +68,29 @@ export const ANTIGRAVITY_MODEL_WIRE_PROFILES: Readonly<Record<string, Antigravit
 	// untracked for these ids; the backend does not require it.
 	"claude-sonnet-4-6": { maxOutputTokens: 64000 },
 	"claude-opus-4-6-thinking": { maxOutputTokens: 64000 },
+	"claude-sonnet-4-5": { maxOutputTokens: 64000 },
+	"claude-sonnet-4-5-thinking": { maxOutputTokens: 64000 },
+	"claude-opus-4-5": { maxOutputTokens: 64000 },
+	"claude-opus-4-5-thinking": { maxOutputTokens: 64000 },
+	"claude-3-7-sonnet": { maxOutputTokens: 64000 },
+	"claude-3-7-sonnet-thinking": { maxOutputTokens: 64000 },
+	"claude-3-5-sonnet": { maxOutputTokens: 64000 },
+	"claude-3-5-sonnet-v2": { maxOutputTokens: 64000 },
+	"claude-3-5-haiku": { maxOutputTokens: 64000 },
+	"gpt-oss-120b": { maxOutputTokens: 32768 },
+	"gpt-oss-120b-medium": { maxOutputTokens: 32768 },
 };
 export function getAntigravityModelWireProfile(wireModelId: string): AntigravityModelWireProfile | undefined {
-	return ANTIGRAVITY_MODEL_WIRE_PROFILES[wireModelId];
+	const existing = ANTIGRAVITY_MODEL_WIRE_PROFILES[wireModelId];
+	if (existing) {
+		return existing;
+	}
+	const normalized = wireModelId.toLowerCase();
+	if (normalized.includes("claude")) {
+		return { maxOutputTokens: 64000 };
+	}
+	if (normalized.includes("gpt-oss")) {
+		return { maxOutputTokens: 32768 };
+	}
+	return undefined;
 }

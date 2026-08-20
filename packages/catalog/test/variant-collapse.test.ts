@@ -271,8 +271,40 @@ describe("collapseEffortVariants", () => {
 		expect(out[0]?.requestModelId).toBe("gpt-oss-120b-medium");
 		expect(out[0]?.thinking?.effortRouting).toBeUndefined();
 		expect(out[0]?.thinking?.mode).toBe("budget");
+
+		const bareOut = collapseEffortVariants(
+			[memberSpec("gpt-oss-120b", { input: ["text"] })],
+			ANTIGRAVITY_VARIANT_COLLAPSE_TABLE,
+		);
+		expect(bareOut[0]?.id).toBe("gpt-oss-120b");
+		expect(bareOut[0]?.requestModelId).toBeUndefined();
 	});
 
+	it("collapses Claude 3.7 and 3.5 thinking pairs on antigravity", () => {
+		const out = collapseEffortVariants(
+			[
+				memberSpec("claude-3-7-sonnet"),
+				memberSpec("claude-3-7-sonnet-thinking"),
+				memberSpec("claude-3-5-sonnet"),
+				memberSpec("claude-3-5-haiku"),
+			],
+			ANTIGRAVITY_VARIANT_COLLAPSE_TABLE,
+		);
+
+		const sonnet37 = out.find(m => m.id === "claude-3-7-sonnet");
+		expect(sonnet37).toBeDefined();
+		expect(sonnet37?.thinking?.mode).toBe("budget");
+		expect(sonnet37?.thinking?.effortRouting?.off).toBe("claude-3-7-sonnet");
+		expect(sonnet37?.thinking?.effortRouting?.[Effort.High]).toBe("claude-3-7-sonnet-thinking");
+
+		const sonnet35 = out.find(m => m.id === "claude-3-5-sonnet");
+		expect(sonnet35).toBeDefined();
+		expect(sonnet35?.thinking?.mode).toBe("budget");
+
+		const haiku35 = out.find(m => m.id === "claude-3-5-haiku");
+		expect(haiku35).toBeDefined();
+		expect(haiku35?.thinking?.mode).toBe("budget");
+	});
 	it("is idempotent and dedupes mixed raw+collapsed input", () => {
 		const once = collapseEffortVariants(FLASH_TRIPLET(), ANTIGRAVITY_VARIANT_COLLAPSE_TABLE);
 		expect(collapseEffortVariants(once, ANTIGRAVITY_VARIANT_COLLAPSE_TABLE)).toEqual(once);

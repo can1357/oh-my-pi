@@ -29,6 +29,7 @@ import {
 	type OAuthProvider,
 	type OAuthProviderInfo,
 	PROVIDER_REGISTRY,
+	resolveOAuthProvider,
 	SqliteAuthCredentialStore,
 } from "@pk-nerdsaver-ai/pi-ai";
 import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@pk-nerdsaver-ai/pi-ai/auth-broker";
@@ -195,7 +196,8 @@ async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 		}
 		providerArg = await pickProviderInteractively(providers);
 	}
-	if (!providers.some(p => p.id === providerArg)) {
+	const matched = resolveOAuthProvider(providerArg);
+	if (!matched) {
 		throw new Error(
 			`Unknown OAuth provider '${providerArg}'. Known: ${providers
 				.map(p => p.id)
@@ -203,6 +205,7 @@ async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 				.join(", ")}`,
 		);
 	}
+	providerArg = matched.id;
 	if (flags.via) {
 		await runRemoteLogin(providerArg, flags.via, flags.dryRun ?? false);
 		return;

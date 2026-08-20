@@ -265,7 +265,7 @@ const SHARED_CCA_FAMILIES: readonly EffortVariantFamily[] = [
 		// Rename-only collapse: every effort and off fall back to the wire id.
 		id: "gpt-oss-120b",
 		name: "GPT-OSS 120B",
-		members: ["gpt-oss-120b-medium"],
+		members: ["gpt-oss-120b", "gpt-oss-120b-medium"],
 		routing: {},
 		thinking: { mode: "budget", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
 	},
@@ -297,6 +297,9 @@ const SHARED_CCA_FAMILIES: readonly EffortVariantFamily[] = [
 	},
 	thinkingPair("claude-sonnet-4-5", "Claude Sonnet 4.5"),
 	thinkingPair("claude-opus-4-5", "Claude Opus 4.5"),
+	thinkingPair("claude-3-7-sonnet", "Claude 3.7 Sonnet"),
+	thinkingPair("claude-3-5-sonnet", "Claude 3.5 Sonnet"),
+	thinkingPair("claude-3-5-haiku", "Claude 3.5 Haiku"),
 	thinkingPair("gemini-2.5-flash", "Gemini 2.5 Flash"),
 ];
 

@@ -6,6 +6,7 @@ import {
 	getOAuthProviders,
 	refreshOAuthToken,
 	registerOAuthProvider,
+	resolveOAuthProvider,
 	unregisterOAuthProviders,
 } from "@pk-nerdsaver-ai/pi-ai/registry/oauth";
 import * as anthropicOauth from "@pk-nerdsaver-ai/pi-ai/registry/oauth/anthropic";
@@ -133,5 +134,16 @@ describe("provider registry auth surface", () => {
 		await storage.login("llama.cpp", { onAuth: () => {}, onPrompt: async () => "" });
 
 		expect(store.getApiKey("llama.cpp")).toBe("llama-cpp-local");
+	});
+
+	test("resolveOAuthProvider resolves canonical ids and aliases", () => {
+		expect(resolveOAuthProvider("google-antigravity")?.id).toBe("google-antigravity");
+		expect(resolveOAuthProvider("antigravity")?.id).toBe("google-antigravity");
+		expect(resolveOAuthProvider("Antigravity")?.id).toBe("google-antigravity");
+		expect(resolveOAuthProvider("gemini-cli")?.id).toBe("google-gemini-cli");
+		expect(resolveOAuthProvider("gemini")?.id).toBe("google-gemini-cli");
+		expect(resolveOAuthProvider("codex")?.id).toBe("openai-codex");
+		expect(resolveOAuthProvider("claude")?.id).toBe("anthropic");
+		expect(resolveOAuthProvider("nonexistent")).toBeUndefined();
 	});
 });

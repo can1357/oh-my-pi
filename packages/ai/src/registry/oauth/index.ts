@@ -256,6 +256,26 @@ export async function getOAuthApiKey(
 	return { newCredentials: creds, apiKey };
 }
 
+const OAUTH_PROVIDER_ALIASES: Readonly<Record<string, string>> = {
+	antigravity: "google-antigravity",
+	"gemini-cli": "google-gemini-cli",
+	gemini: "google-gemini-cli",
+	codex: "openai-codex",
+	claude: "anthropic",
+};
+
+/**
+ * Resolve an OAuth provider ID or alias to its OAuthProviderInfo.
+ */
+export function resolveOAuthProvider(id: string): OAuthProviderInfo | undefined {
+	const trimmed = id.trim();
+	if (!trimmed) return undefined;
+	const lower = trimmed.toLowerCase();
+	const targetId = OAUTH_PROVIDER_ALIASES[lower] ?? trimmed;
+	const all = getOAuthProviders();
+	return all.find(p => p.id === targetId || p.id.toLowerCase() === targetId.toLowerCase());
+}
+
 /**
  * Get list of OAuth providers.
  */

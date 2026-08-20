@@ -332,12 +332,17 @@ function isClaudeModel(modelId: string): boolean {
 }
 
 function needsClaudeThinkingBetaHeader(model: Model<"google-gemini-cli">): boolean {
-	return model.provider === "google-antigravity" && model.id.startsWith("claude-") && model.reasoning;
+	return model.provider === "google-antigravity" && isClaudeModel(model.id) && Boolean(model.reasoning);
 }
 
 function shouldInjectAntigravitySystemInstruction(modelId: string): boolean {
 	const normalized = modelId.toLowerCase();
-	return normalized.includes("claude") || normalized.includes("gemini-3");
+	return (
+		normalized.includes("claude") ||
+		normalized.includes("gemini") ||
+		normalized.includes("gpt-oss") ||
+		normalized.includes("gpt")
+	);
 }
 
 const optionalCredentialString = type("unknown").pipe(raw => {
@@ -1149,7 +1154,7 @@ function buildAntigravityRequestEnvelope(
 	const sessionId = state?.sessionId ?? deriveAntigravitySessionId(context);
 	const step = state?.stepIndex ?? 2;
 	const requestId = `agent/${agentId}/${Date.now()}/${trajectoryId}/${step}`;
-	const isClaude = isClaudeModel(model.id);
+	const isClaude = isClaudeModel(model.id) || isClaudeModel(wireModelId);
 	const profile = getAntigravityModelWireProfile(wireModelId);
 	const labels: Record<string, string> = {};
 	if (state?.lastExecutionId) labels.last_execution_id = state.lastExecutionId;
@@ -1269,8 +1274,8 @@ export function buildRequest(
 		}
 	}
 
-	// Claude on Antigravity always forces VALIDATED, even with no tools declared.
-	if (isAntigravity && isClaudeModel(model.id)) {
+	// Claude on Antigravity defaults to VALIDATED if no explicit toolConfig was specified.
+	if (isAntigravity && isClaudeModel(model.id) && !request.toolConfig) {
 		request.toolConfig = {
 			functionCallingConfig: {
 				mode: "VALIDATED" as FunctionCallingConfigMode,

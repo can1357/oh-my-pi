@@ -25,7 +25,14 @@ const SCOPES = [
 
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
+const ANTIGRAVITY_PRIMARY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
+const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 const CLOUD_CODE_ENDPOINT = "https://cloudcode-pa.googleapis.com";
+const DEFAULT_ANTIGRAVITY_ENDPOINTS = [
+	ANTIGRAVITY_PRIMARY_ENDPOINT,
+	ANTIGRAVITY_SANDBOX_ENDPOINT,
+	CLOUD_CODE_ENDPOINT,
+] as const;
 const TIER_LEGACY = "legacy-tier";
 const PROJECT_ONBOARD_MAX_ATTEMPTS = 5;
 const PROJECT_ONBOARD_INTERVAL_MS = 2000;
@@ -114,6 +121,9 @@ async function onboardProjectWithRetries(
 }
 
 async function discoverProject(accessToken: string, onProgress?: (message: string) => void): Promise<string> {
+	const envProjectId =
+		process.env.ANTIGRAVITY_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT_ID;
+
 	const headers = {
 		Authorization: `Bearer ${accessToken}`,
 		"Content-Type": "application/json",
@@ -121,44 +131,73 @@ async function discoverProject(accessToken: string, onProgress?: (message: strin
 	};
 
 	onProgress?.("Checking for existing project...");
-	const endpoint = CLOUD_CODE_ENDPOINT;
-	try {
-		const loadResponse = await fetch(`${endpoint}/v1internal:loadCodeAssist`, {
-			method: "POST",
-			headers,
-			body: JSON.stringify({
-				metadata: ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
-			}),
-		});
+	let lastError: unknown;
 
-		if (!loadResponse.ok) {
-			const errorText = await loadResponse.text();
-			throw new AIError.OAuthError(
-				`loadCodeAssist failed: ${loadResponse.status} ${loadResponse.statusText}: ${errorText}`,
-				{ kind: "discovery", status: loadResponse.status },
-			);
+	for (const endpoint of DEFAULT_ANTIGRAVITY_ENDPOINTS) {
+		try {
+			const loadBody: Record<string, unknown> = {
+				metadata: {
+					...ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
+					...(envProjectId ? { duetProject: envProjectId } : {}),
+				},
+			};
+			if (envProjectId) {
+				loadBody.cloudaicompanionProject = envProjectId;
+			}
+
+			const loadResponse = await fetch(`${endpoint}/v1internal:loadCodeAssist`, {
+				method: "POST",
+				headers,
+				body: JSON.stringify(loadBody),
+			});
+
+			if (!loadResponse.ok) {
+				const errorText = await loadResponse.text();
+				lastError = new AIError.OAuthError(
+					`loadCodeAssist failed on ${endpoint}: ${loadResponse.status} ${loadResponse.statusText}: ${errorText}`,
+					{ kind: "discovery", status: loadResponse.status },
+				);
+				continue;
+			}
+
+			const loadPayload = (await loadResponse.json()) as LoadCodeAssistPayload;
+			const existingProject = readProjectId(loadPayload.cloudaicompanionProject);
+			if (existingProject) {
+				return existingProject;
+			}
+			if (envProjectId) {
+				return envProjectId;
+			}
+
+			const tierId = getDefaultTierId(loadPayload.allowedTiers);
+			onProgress?.("Provisioning project...");
+			const onboardBody: {
+				tierId: string;
+				metadata: typeof ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA & { duetProject?: string };
+				cloudaicompanionProject?: string;
+			} = {
+				tierId,
+				metadata: {
+					...ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
+					...(envProjectId ? { duetProject: envProjectId } : {}),
+				},
+				...(envProjectId ? { cloudaicompanionProject: envProjectId } : {}),
+			};
+			const provisionedProject = await onboardProjectWithRetries(endpoint, headers, onboardBody, onProgress);
+			return provisionedProject;
+		} catch (error) {
+			lastError = error;
 		}
-
-		const loadPayload = (await loadResponse.json()) as LoadCodeAssistPayload;
-		const existingProject = readProjectId(loadPayload.cloudaicompanionProject);
-		if (existingProject) {
-			return existingProject;
-		}
-
-		const tierId = getDefaultTierId(loadPayload.allowedTiers);
-		onProgress?.("Provisioning project...");
-		const onboardBody = {
-			tierId,
-			metadata: ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA,
-		};
-		const provisionedProject = await onboardProjectWithRetries(endpoint, headers, onboardBody, onProgress);
-		return provisionedProject;
-	} catch (error) {
-		throw new AIError.OAuthError(
-			`Could not discover or provision an Antigravity project. ${error instanceof Error ? error.message : String(error)}`,
-			{ kind: "discovery", cause: error },
-		);
 	}
+
+	if (envProjectId) {
+		return envProjectId;
+	}
+
+	throw new AIError.OAuthError(
+		`Could not discover or provision an Antigravity project. ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+		{ kind: "discovery", cause: lastError },
+	);
 }
 
 export async function loginAntigravity(ctrl: OAuthController): Promise<OAuthCredentials> {

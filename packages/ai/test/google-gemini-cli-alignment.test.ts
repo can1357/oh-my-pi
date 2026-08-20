@@ -238,16 +238,53 @@ describe("Google Gemini CLI alignment", () => {
 		// `daily-cloudcode-pa` 400s when Claude requests exceed 64000.
 		// The Claude profiles also lack a captured model_enum token, so
 		// the request must not emit a stale or placeholder label.
-		const cases = [{ requestModelId: "claude-sonnet-4-6" }, { requestModelId: "claude-opus-4-6-thinking" }];
+		const cases = [
+			{ requestModelId: "claude-sonnet-4-6" },
+			{ requestModelId: "claude-opus-4-6-thinking" },
+			{ requestModelId: "claude-sonnet-4-5" },
+			{ requestModelId: "claude-sonnet-4-5-thinking" },
+			{ requestModelId: "claude-opus-4-5" },
+			{ requestModelId: "claude-opus-4-5-thinking" },
+			{ requestModelId: "claude-3-7-sonnet" },
+			{ requestModelId: "claude-3-5-sonnet" },
+			{ requestModelId: "claude-3-5-haiku" },
+		];
 		for (const opts of cases) {
 			const payload = buildRequest(createModel("google-antigravity"), createContext(), "proj-123", opts, true) as {
 				model?: string;
-				request: { generationConfig?: { maxOutputTokens?: number }; labels?: Record<string, string> };
+				request: {
+					generationConfig?: { maxOutputTokens?: number };
+					labels?: Record<string, string>;
+					systemInstruction?: { parts?: Array<{ text?: string }> };
+				};
 			};
 
 			expect(payload.model).toBe(opts.requestModelId);
 			expect(payload.request.generationConfig?.maxOutputTokens).toBe(64000);
 			expect(payload.request.labels?.model_enum).toBeUndefined();
+			expect(payload.request.labels?.used_claude).toBe("true");
+			expect(payload.request.labels?.used_claude_conservative).toBe("true");
+			expect(payload.request.systemInstruction?.parts?.[0]?.text).toBe(ANTIGRAVITY_SYSTEM_INSTRUCTION);
+		}
+	});
+
+	it("formats gpt-oss-120b request payload correctly for antigravity", () => {
+		const cases = [{ requestModelId: "gpt-oss-120b" }, { requestModelId: "gpt-oss-120b-medium" }];
+		for (const opts of cases) {
+			const payload = buildRequest(createModel("google-antigravity"), createContext(), "proj-123", opts, true) as {
+				model?: string;
+				request: {
+					generationConfig?: { maxOutputTokens?: number };
+					labels?: Record<string, string>;
+					systemInstruction?: { parts?: Array<{ text?: string }> };
+				};
+			};
+
+			expect(payload.model).toBe(opts.requestModelId);
+			expect(payload.request.generationConfig?.maxOutputTokens).toBe(32768);
+			expect(payload.request.labels?.used_claude).toBe("false");
+			expect(payload.request.labels?.used_claude_conservative).toBe("false");
+			expect(payload.request.systemInstruction?.parts?.[0]?.text).toBe(ANTIGRAVITY_SYSTEM_INSTRUCTION);
 		}
 	});
 

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Supported `/login`, `/logout`, and `auth-broker login` provider aliases (`antigravity` -> `google-antigravity`).
 - Retried the `v16.4.4` release after a transient sccache/GitHub Actions cache network failure aborted the install-method smoke test and stalled the modern Linux x64 native build; no source change.
 
 ## [16.4.4] - 2026-08-19

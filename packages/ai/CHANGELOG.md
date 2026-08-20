@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Antigravity login, endpoint discovery, and model selection / request shaping to support Anthropic Claude models and GPT-OSS 120B in addition to Google models on `google-antigravity`.
+
 ## [16.4.3] - 2026-08-19
 
 > **Note on `.omp` paths below.** The configuration directory was renamed to

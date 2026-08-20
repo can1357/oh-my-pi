@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getOAuthProviders } from "@pk-nerdsaver-ai/pi-ai/oauth";
+import { resolveOAuthProvider } from "@pk-nerdsaver-ai/pi-ai/oauth";
 import * as requestDebug from "@pk-nerdsaver-ai/pi-ai/utils/request-debug";
 import { type AutocompleteItem, Markdown, Spacer } from "@pk-nerdsaver-ai/pi-tui";
 import { $which, APP_NAME, getProjectDir, prompt, setProjectDir } from "@pk-nerdsaver-ai/pi-utils";
@@ -1688,7 +1688,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			const manualInput = runtime.ctx.oauthManualInput;
 			const args = command.args.trim();
 			if (args.length > 0) {
-				const matchedProvider = getOAuthProviders().find(provider => provider.id === args);
+				const matchedProvider = resolveOAuthProvider(args);
 				if (matchedProvider) {
 					if (manualInput.hasPending()) {
 						const pendingProvider = manualInput.pendingProviderId;
@@ -1735,7 +1735,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: (command, runtime) => {
 			const providerId = command.args.trim();
 			if (providerId) {
-				const matchedProvider = getOAuthProviders().find(provider => provider.id === providerId);
+				const matchedProvider = resolveOAuthProvider(providerId);
 				if (!matchedProvider) {
 					runtime.ctx.showWarning(`Unknown OAuth provider: ${providerId}`);
 					runtime.ctx.editor.setText("");
