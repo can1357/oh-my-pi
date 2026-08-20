@@ -104,7 +104,7 @@ import { transformMessages } from "./transform-messages";
 export interface OpenAICodexResponsesOptions extends StreamOptions {
 	reasoning?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 	reasoningSummary?: "auto" | "concise" | "detailed" | null;
-	/** `reasoning.context` replay scope; defaults to `all_turns` for every Codex request when unset. */
+	/** `reasoning.context` replay scope; defaults to `all_turns` for every Codex request when unset, except Codex Spark models which default to `auto` since Spark rejects `all_turns`. */
 	reasoningContext?: CodexReasoningContext;
 	textVerbosity?: "low" | "medium" | "high";
 	include?: string[];

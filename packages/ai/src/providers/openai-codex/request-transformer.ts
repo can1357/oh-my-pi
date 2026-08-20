@@ -14,7 +14,7 @@ export interface ReasoningConfig {
 export interface CodexRequestOptions {
 	reasoningEffort?: ReasoningConfig["effort"];
 	reasoningSummary?: ReasoningConfig["summary"] | null;
-	/** Explicit `reasoning.context` override; defaults to `all_turns` for every Codex request when unset. */
+	/** Explicit `reasoning.context` override; defaults to `all_turns` for every Codex request when unset, except Codex Spark models (`-spark` in `model.id`) which default to `auto` since Spark rejects `all_turns`. */
 	reasoningContext?: CodexReasoningContext;
 	textVerbosity?: "low" | "medium" | "high";
 	include?: string[];
@@ -256,7 +256,12 @@ export async function transformRequestBody(
 		};
 		// Default reasoning replay to `all_turns` for every Codex request,
 		// mirroring codex-rs; an explicit `reasoningContext` overrides it.
-		body.reasoning.context = options.reasoningContext ?? "all_turns";
+		// Codex Spark rejects `all_turns` server-side ("Unsupported value:
+		// 'all_turns' is not supported with the '<spark-model-id>' model"),
+		// so spark variants default to `auto` instead, matching the `-spark`
+		// detection convention already used in auth-storage.ts.
+		const isCodexSpark = typeof model.id === "string" && model.id.includes("-spark");
+		body.reasoning.context = options.reasoningContext ?? (isCodexSpark ? "auto" : "all_turns");
 	} else {
 		delete body.reasoning;
 	}

@@ -96,6 +96,28 @@ describe("openai-codex reasoning.context", () => {
 		expect(defaulted.reasoning?.context).toBe("all_turns");
 	});
 
+	it("defaults reasoning.context to auto for Codex Spark models but respects an explicit override", async () => {
+		const sparkModel = createCodexModel("gpt-5.3-codex-spark");
+
+		const defaulted = await transformRequestBody({ model: sparkModel.id }, sparkModel, {
+			reasoningEffort: "medium",
+		});
+		expect(defaulted.reasoning?.context).toBe("auto");
+
+		const overridden = await transformRequestBody({ model: sparkModel.id }, sparkModel, {
+			reasoningEffort: "medium",
+			reasoningContext: "current_turn",
+		});
+		expect(overridden.reasoning?.context).toBe("current_turn");
+
+		// Non-spark codex models are unaffected and keep defaulting to all_turns.
+		const baseModel = createCodexModel("gpt-5.1-codex");
+		const baseDefaulted = await transformRequestBody({ model: baseModel.id }, baseModel, {
+			reasoningEffort: "medium",
+		});
+		expect(baseDefaulted.reasoning?.context).toBe("all_turns");
+	});
+
 	it("defaults reasoning.context to all_turns under Responses Lite unless overridden", async () => {
 		const model = createCodexModel("gpt-5.1-codex");
 
