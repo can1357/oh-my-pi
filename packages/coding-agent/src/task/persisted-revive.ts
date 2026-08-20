@@ -139,6 +139,7 @@ export function persistedAgentDefinition(displayName: string, init: PersistedSes
 		name: displayName,
 		description: "",
 		systemPrompt: init.systemPrompt.join("\n\n"),
+		systemPreset: init.systemPreset,
 		source: "user",
 	};
 }
@@ -348,6 +349,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	// createSubagentSettings default).
 	const subagentSettings = createSubagentSettings(spec.settings, {
 		...subagentLspWritethroughSettings(spec.settings),
+		...(init.systemPreset === "minimal-task" ? { inlineToolDescriptors: "off" } : undefined),
 		...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 		...(init.advisor
 			? {
@@ -438,6 +440,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			expectedAgentRef: expectedRef,
 			taskDepth,
 			toolNames: init.tools,
+			...(init.systemPreset === "minimal-task" ? { skills: [], rules: [] } : undefined),
 			// The persisted enabled set includes tool commands: keep them as commands,
 			// or they come back as top-level tools and change the replayed tool list.
 			mountedToolNames: init.mountedTools,

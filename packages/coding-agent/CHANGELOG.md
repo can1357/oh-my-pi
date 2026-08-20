@@ -4,6 +4,10 @@
 
 ### Added
 
+- Added the opt-in `systemPreset: minimal-task` agent frontmatter setting for focused subagents,
+  including faithful native and in-band tool guidance, MCP server instructions,
+  opaque secret-token guidance, and cold-revival behavior
+  ([#6548](https://github.com/can1357/oh-my-pi/pull/6548) by [@dexhunter](https://github.com/dexhunter)).
 - Processes a bash call leaves running (`cmd &`, `(cmd &)`, `nohup cmd &`) no longer leak: the agent is reminded of them when it stops so it can register them as services or kill them, and the `&` ones are killed when the session ends (`nohup` ones never are). Turn off with `bash.reapBackground`; RPC mode never reaps.
 - New `o2ctl services` command in the bash tool's shell: `o2ctl services add <name> <pid|%job>` keeps an already-running process as a named service without restarting it (listed, supervised and stopped like any other; when its stdout or stderr goes to a file such as `nohup.out`, that file is the service's output), `o2ctl services ls` lists services and `o2ctl services stop <name>` stops one.
 

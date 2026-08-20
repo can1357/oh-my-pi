@@ -525,10 +525,13 @@ describe("persisted subagent revival", () => {
 		});
 
 		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
+		const reviver = await createFactory(cwd, undefined, parentSettings)(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
+		expect(capturedOptions?.settings?.get("inlineToolDescriptors")).toBe("on");
+		expect(capturedOptions?.skills).toBeUndefined();
+		expect(capturedOptions?.rules).toBeUndefined();
 		expect(capturedOptions?.restrictToolNames).toBeUndefined();
 		expect(capturedOptions?.enableLsp).toBe(true);
 		expect(capturedOptions?.mcpManager).toBe(hostileMcp);

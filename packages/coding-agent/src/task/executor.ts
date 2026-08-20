@@ -68,7 +68,6 @@ import type { MCPManagerApi, MCPToolScope } from "../mcp/manager";
 import type { MnemopiSessionStateApi } from "../mnemopi/state";
 import { initializeExtensions } from "../modes/runtime-init";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
-import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -133,6 +132,7 @@ import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import { recordStepsSent, type StepProgress, type StepReportRoute, sendStepReport } from "./steps";
+import { buildSubagentSystemPrompt } from "./system-prompt";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentDefinition,
@@ -177,9 +177,11 @@ import {
 	cfgTierOpenai,
 	cfgRetryFallbackChains,
 	cfgDefaultThinkingLevel,
+	cfgInlineToolDescriptors,
 	cfgPrewalkAutoTarget,
 	PREWALK_INITIAL_TARGET,
 } from "../session/settings";
+import { cfgToolsCommands } from "../tools/settings";
 import { type AutoPrewalkDecision, classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { type JudgmentUsage, journalJudgmentUsage, type NativeJudgmentDeps } from "../judgment";
 import { cfgDisabledProviders } from "../config/model-settings";
@@ -4336,6 +4338,7 @@ interface SubagentPromptInputs {
 	ircEnabled: boolean;
 	/** Root resolved by the latest roster ensure; peer rows render scoped to it, so a session switch hides stale parked trees. */
 	ircRoot: { sessionFile?: string };
+	systemPreset?: AgentDefinition["systemPreset"];
 	/** Peer roster each prompt block the live session rendered shows, keyed by that block. */
 	ircRenders: Map<string, IrcPeerRosterData>;
 	/** Peer roster of the prompt the parked session held; a warm revive renders it again. */
@@ -4400,6 +4403,7 @@ function buildSubagentSessionOptions(
 		// A launch prompts its assignment only after setup; a revive's turns are its IRC wakes.
 		awaitingAssignment: launch !== undefined,
 		systemPrompt: defaultPrompt => {
+			const promptPrefix = inputs.systemPreset === "minimal-task" ? [] : defaultPrompt;
 			// A revive shows the roster the parked session's prompt held, and a rebuild that leaves the
 			// rest of the prompt unchanged keeps the roster the prompt it replaces showed: peer rows carry
 			// each peer's live activity, so a re-collected roster changed the prompt's bytes on every such
@@ -4409,32 +4413,36 @@ function buildSubagentSessionOptions(
 				? undefined
 				: inputs.reviving && inputs.ircRoster
 					? inputs.ircRoster
-					: (heldIrcRoster(inputs, defaultPrompt) ??
+					: (heldIrcRoster(inputs, promptPrefix) ??
 						collectIrcPeerRoster(AgentRegistry.global(), inputs.id, inputs.ircRoot.sessionFile));
-			const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
-				agent: inputs.agentSystemPrompt,
-				context: inputs.context,
-				planReference: inputs.planReference,
-				planReferencePath: inputs.planReferencePath,
-				worktree: inputs.worktree,
-				structured: inputs.structured,
-				outputSchema: inputs.outputSchema,
-				outputSchemaOverridesAgent: inputs.outputSchemaOverridesAgent,
-				// Read the live item set through the registry instead of capturing the session, which
-				// would pin its whole graph past park. A revive builds while the registry session is
-				// null, so it renders the cleared set rather than the launch-time pooled instructions.
-				workPoolYieldItems:
-					ownAttachedSession(inputs.id)?.getWorkPoolYieldItems?.() ?? launch?.workPoolYieldItems ?? [],
-				ircPeers: ircRoster?.peers ?? [],
-				ircParkedCount: ircRoster?.parkedCount ?? 0,
-				ircOmittedCount: ircRoster?.omittedCount ?? 0,
-				ircSelfId: inputs.ircEnabled ? inputs.id : "",
-			});
-			if (ircRoster) recordIrcRender(inputs, subagentPrompt, ircRoster);
+			const subagentPrompt = buildSubagentSystemPrompt(
+				defaultPrompt,
+				inputs.systemPreset,
+				{
+					agent: inputs.agentSystemPrompt,
+					context: inputs.context,
+					planReference: inputs.planReference,
+					planReferencePath: inputs.planReferencePath,
+					worktree: inputs.worktree,
+					structured: inputs.structured,
+					outputSchema: inputs.outputSchema,
+					outputSchemaOverridesAgent: inputs.outputSchemaOverridesAgent,
+					// Read the live item set through the registry instead of capturing the session, which
+					// would pin its whole graph past park. A revive builds while the registry session is
+					// null, so it renders the cleared set rather than the launch-time pooled instructions.
+					workPoolYieldItems:
+						ownAttachedSession(inputs.id)?.getWorkPoolYieldItems?.() ?? launch?.workPoolYieldItems ?? [],
+					ircPeers: ircRoster?.peers ?? [],
+					ircParkedCount: ircRoster?.parkedCount ?? 0,
+					ircOmittedCount: ircRoster?.omittedCount ?? 0,
+					ircSelfId: inputs.ircEnabled ? inputs.id : "",
+				},
+			);
+			if (ircRoster) recordIrcRender(inputs, subagentPrompt.at(-1)!, ircRoster);
 			// Per-spawn text (context, worktree, IRC roster) goes after the trailing
 			// `<project-context>` block so spawns of the same agent share the static
 			// prompt prefix as a cache hit.
-			return [...defaultPrompt, subagentPrompt];
+			return subagentPrompt;
 		},
 	};
 }
@@ -4729,6 +4737,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	} = options;
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const structured = usesYield(outputSchema);
+	const isMinimalTask = agent.systemPreset === "minimal-task";
 	const startTime = Date.now();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
 	// loop dispatches a chat request to the provider — the launch-complete boundary.
@@ -4785,6 +4794,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		settings,
 		{
 			...compactionThresholdSettings(options.compactionThresholdOverride),
+			...(isMinimalTask ? { inlineToolDescriptors: "off" } : undefined),
 			...subagentLspWritethroughSettings(settings),
 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 			// Isolated runs must not expose roots outside the worktree.
@@ -5285,14 +5295,14 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					outputSchemaMode: options.outputSchemaMode,
 					restrictToolNames,
 					requireYieldTool: structured,
-					contextFiles: options.contextFiles,
+					contextFiles: isMinimalTask ? [] : options.contextFiles,
 					noContextFiles: options.noContextFiles,
 					// Subagents never receive AGENTS.md, including from additional workspace roots they rediscover.
 					excludeAgentsMd: true,
-					skills: options.skills,
+					skills: isMinimalTask ? [] : options.skills,
 					promptTemplates: options.promptTemplates,
 					workspaceTree: options.workspaceTree,
-					rules: options.rules,
+					rules: isMinimalTask ? [] : options.rules,
 					extensionRoots: options.extensionRoots,
 					preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 					preloadedPreparedExtensions: options.preloadedPreparedExtensions,
@@ -5328,6 +5338,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					id,
 					model: progress.resolvedModel,
 					agentSystemPrompt: agent.systemPrompt,
+					systemPreset: agent.systemPreset,
 					context: options.context?.trim() ?? "",
 					planReference: options.planReference?.content ?? "",
 					planReferencePath: options.planReference?.path ?? "",
@@ -5511,6 +5522,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				systemPrompt: session.agent.state.systemPrompt,
 				task,
 				tools: persistedSubagentTools,
+				systemPreset: agent.systemPreset,
 				mountedTools: session.getMountedToolCommandNames(),
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
@@ -5577,7 +5589,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 
 			checkAbort();
 			// Autoload skills via sendCustomMessage (same mechanic as /skill:<name>)
-			if (options.autoloadSkills?.length) {
+			if (!isMinimalTask && options.autoloadSkills?.length) {
 				for (const skill of options.autoloadSkills) {
 					const { message, details } = await buildSkillPromptMessage(skill, { args: "" }, "autoload", session);
 					await session.sendCustomMessage(

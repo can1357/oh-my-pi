@@ -7,6 +7,9 @@ import { $env, isRecord } from "@oh-my-pi/pi-utils";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 
+/** Opt-in strategy for constructing a subagent system prompt. */
+export type SystemPromptPreset = "minimal-task";
+
 const parseNumber = (value: string | undefined, defaultValue: number): number => {
 	if (value) {
 		try {
@@ -288,6 +291,7 @@ export interface AgentDefinition {
 	name: string;
 	description: string;
 	systemPrompt: string;
+	systemPreset?: SystemPromptPreset;
 	tools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];
