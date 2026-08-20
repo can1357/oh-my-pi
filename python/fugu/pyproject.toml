@@ -27,6 +27,11 @@ serve = ["fastapi>=0.110", "uvicorn>=0.29"]
 # PyPI: for local dev install editable from the sibling checkout first, e.g.
 # `pip install -e ../../../red-queen-godel-machine`, then `pip install -e .[rqgm]`.
 rqgm = ["red-queen-godel-machine>=0.1.0"]
+# Evidence-aware, position-bias-corrected, calibrated pairwise verifier
+# (K-repeat ensembling + Platt calibration) from kingkillery/llm-as-a-verifier.
+# Not on PyPI: install editable from a local checkout first, e.g.
+# `pip install -e /path/to/llm-as-a-verifier`, then `pip install -e .[verifier]`.
+verifier = ["llm-as-a-verifier>=0.1.0"]
 
 [project.scripts]
 fmh = "harness.cli.main:app"
