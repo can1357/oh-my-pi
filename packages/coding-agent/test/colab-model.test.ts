@@ -1,8 +1,10 @@
 import { describe, expect, test, vi } from "bun:test";
 import type { Api, Model } from "@pk-nerdsaver-ai/pi-ai";
+import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES } from "@pk-nerdsaver-ai/pi-coding-agent/slash-commands/builtin-registry";
 import {
 	buildColabCommand,
+	buildRemoteSetupScript,
 	type ColabModelLaunchResult,
 	getColabAcceleratorProfile,
 	type HuggingFaceTreeEntry,
@@ -13,6 +15,15 @@ import {
 	selectGgufArtifact,
 } from "@pk-nerdsaver-ai/pi-coding-agent/slash-commands/helpers/colab-model";
 import type { SlashCommandRuntime } from "@pk-nerdsaver-ai/pi-coding-agent/slash-commands/types";
+import { TaskTool } from "@pk-nerdsaver-ai/pi-coding-agent/task";
+import {
+	ASSIGNMENT_CONTRACT_V2_VERSION,
+	ASSIGNMENT_RESULT_V2_VERSION,
+	parseAssignmentContract,
+	withAssignmentContractV2Digest,
+} from "@pk-nerdsaver-ai/pi-coding-agent/task/assignment-contract";
+import { discoverAgents } from "@pk-nerdsaver-ai/pi-coding-agent/task/discovery";
+import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 
 const QWEN_FILES: HuggingFaceTreeEntry[] = [
 	{ type: "file", path: "Qwen3.8-27B-Q4_K_M.gguf", size: 17_100_000_000 },
@@ -32,9 +43,23 @@ function launchResult(overrides: Partial<ColabModelLaunchResult> = {}): ColabMod
 		modelName: "Qwen3.8-27B-Q6_K",
 		quantization: "Q6_K",
 		repoId: "unsloth/Qwen3.8-27B-GGUF",
+		toolCallReady: true,
 		sessionName: "ompk-colab-model",
 		...overrides,
 	};
+}
+
+async function compilePythonScript(source: string): Promise<{ exitCode: number; stderr: string }> {
+	const python = Bun.which("python") ?? Bun.which("python3");
+	if (!python) throw new Error("Python 3 is required to compile the Colab setup script");
+	const processHandle = Bun.spawn(
+		[python, "-c", "import sys; compile(sys.stdin.read(), '<colab-model-setup>', 'exec')"],
+		{ stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+	);
+	processHandle.stdin.write(source);
+	processHandle.stdin.end();
+	const [exitCode, stderr] = await Promise.all([processHandle.exited, new Response(processHandle.stderr).text()]);
+	return { exitCode, stderr };
 }
 
 describe("Hugging Face Colab model references", () => {
@@ -156,6 +181,27 @@ describe("/colab-model command", () => {
 		expect(buildColabCommand(["sessions"], "linux")).toEqual(["colab", "sessions"]);
 	});
 
+	test("compiles the setup probe and verifies target selection among tools", async () => {
+		const reference = parseHuggingFaceModelReference("unsloth/Qwen3.8-27B-GGUF");
+		const artifact = selectGgufArtifact(QWEN_FILES, reference, "A100");
+		const script = buildRemoteSetupScript({
+			accelerator: "A100",
+			artifact,
+			contextWindow: 32_768,
+			reference,
+			remotePort: 8_081,
+		});
+
+		expect(script).toContain('"name": "ompk_tool_readiness_probe"');
+		expect(script).toContain('"name": "ompk_decoy_probe"');
+		expect(script).toContain('"tool_choice": "required"');
+		expect(script).toContain('function.get("name") != "ompk_tool_readiness_probe"');
+		expect(script).toContain('"toolCallReady": True');
+
+		const compilation = await compilePythonScript(script);
+		expect(compilation.exitCode, compilation.stderr).toBe(0);
+	});
+
 	test("registers the warmed endpoint and selects the runtime model", async () => {
 		const output = vi.fn();
 		const registerProvider = vi.fn();
@@ -196,6 +242,47 @@ describe("/colab-model command", () => {
 		expect(output).toHaveBeenLastCalledWith(expect.stringContaining("Colab model ready: llama.cpp/"));
 	});
 
+	test("does not register a model when tool-call readiness is missing", async () => {
+		const output = vi.fn();
+		const registerProvider = vi.fn();
+		const setModel = vi.fn(async () => {});
+		const runtime = {
+			output,
+			session: {
+				modelRegistry: { registerProvider },
+				setModel,
+			},
+		} as unknown as SlashCommandRuntime;
+		const { toolCallReady: _missing, ...missingReadiness } = launchResult();
+		const launch = vi.fn(async () => missingReadiness as ColabModelLaunchResult);
+
+		await handleColabModelSlashCommand("unsloth/Qwen3.8-27B-GGUF", runtime, launch);
+
+		expect(registerProvider).not.toHaveBeenCalled();
+		expect(setModel).not.toHaveBeenCalled();
+		expect(output).toHaveBeenLastCalledWith(expect.stringContaining("tool-call readiness"));
+	});
+
+	test("does not register a model when readiness is malformed", async () => {
+		const output = vi.fn();
+		const registerProvider = vi.fn();
+		const setModel = vi.fn(async () => {});
+		const runtime = {
+			output,
+			session: {
+				modelRegistry: { registerProvider },
+				setModel,
+			},
+		} as unknown as SlashCommandRuntime;
+		const launch = vi.fn(async () => launchResult({ toolCallReady: false }));
+
+		await handleColabModelSlashCommand("unsloth/Qwen3.8-27B-GGUF", runtime, launch);
+
+		expect(registerProvider).not.toHaveBeenCalled();
+		expect(setModel).not.toHaveBeenCalled();
+		expect(output).toHaveBeenLastCalledWith(expect.stringContaining("tool-call readiness"));
+	});
+
 	test("reports usage without launching when the model reference is missing", async () => {
 		const output = vi.fn();
 		const launch = vi.fn(async () => launchResult());
@@ -205,5 +292,112 @@ describe("/colab-model command", () => {
 
 		expect(launch).not.toHaveBeenCalled();
 		expect(output).toHaveBeenCalledWith(expect.stringContaining("Usage: /colab-model"));
+	});
+
+	test("non-Gemini model registers, becomes active root Agent, exposes enabled discovered lanes under root spawns, and enforces AssignmentContract", async () => {
+		let registeredProvider: { name: string; getModels: () => Model<Api>[] } | undefined;
+		let activeModel: Model<Api> | undefined;
+
+		const models: Model<Api>[] = [];
+		const registerProvider = vi.fn((name: string, providerConfig: any) => {
+			registeredProvider = { name, ...providerConfig };
+			if (Array.isArray(providerConfig.models)) {
+				for (const m of providerConfig.models) {
+					models.push({
+						provider: name,
+						id: m.id,
+						name: m.name,
+						api: providerConfig.api,
+						supportsTools: m.supportsTools,
+						contextWindow: m.contextWindow,
+						maxTokens: m.maxTokens,
+						input: m.input,
+						cost: m.cost,
+					} as unknown as Model<Api>);
+				}
+			}
+		});
+		const find = vi.fn((provider: string, modelId: string) =>
+			models.find(m => m.provider === provider && m.id === modelId),
+		);
+		const setModel = vi.fn(async (model: Model<Api>) => {
+			activeModel = model;
+		});
+		const output = vi.fn();
+		const settings = Settings.isolated();
+		const sharedSession = {
+			cwd: process.cwd(),
+			settings,
+			modelRegistry: { registerProvider, find },
+			setModel,
+			get model() {
+				return activeModel;
+			},
+			getSessionSpawns: () => "*",
+			getSessionFile: () => "/tmp/test-session.json",
+			taskDepth: 0,
+		} as unknown as ToolSession & SlashCommandRuntime["session"];
+
+		const runtime = {
+			output,
+			session: sharedSession,
+		} as unknown as SlashCommandRuntime;
+
+		const launch = vi.fn(async () => launchResult());
+		await handleColabModelSlashCommand("unsloth/Qwen3.8-27B-GGUF", runtime, launch);
+
+		expect(registeredProvider).toBeDefined();
+		expect(registeredProvider?.name).toBe("llama.cpp");
+		expect(activeModel).toBeDefined();
+		expect(activeModel?.id).toBe("/content/models/Qwen3.8-27B-Q6_K.gguf");
+		expect(activeModel?.supportsTools).toBe(true);
+
+		const taskTool = await TaskTool.create(sharedSession as ToolSession);
+		const description = taskTool.description;
+
+		const { agents } = await discoverAgents(sharedSession.cwd);
+		const disabledAgents = sharedSession.settings.get("task.disabledAgents") as string[];
+		const enabledAgents = agents.filter(a => !disabledAgents.includes(a.name));
+
+		expect(enabledAgents.length).toBeGreaterThan(0);
+		for (const agent of enabledAgents) {
+			expect(description).toContain(`# ${agent.name}`);
+		}
+
+		const invalidContract = {
+			version: ASSIGNMENT_CONTRACT_V2_VERSION,
+			id: "test-lane",
+			revision: 1,
+			role: "Lane explorer",
+			workClass: "judgment",
+			autonomy: "supervised",
+			objective: "Explore lane requirements",
+			deliverables: ["findings.md"],
+			scope: { allowedPaths: ["**"] },
+			acceptance: [{ id: "c1", description: "check", check: "artifact_exists", params: { path: "findings.md" } }],
+			reporting: ASSIGNMENT_RESULT_V2_VERSION,
+			digest: "invalid-digest",
+		};
+		const parseResult = parseAssignmentContract(invalidContract);
+		expect(parseResult.ok).toBe(false);
+		if (!parseResult.ok) {
+			expect(parseResult.diagnostics.some(d => d.code === "digest_mismatch")).toBe(true);
+		}
+
+		const validContract = withAssignmentContractV2Digest({
+			version: ASSIGNMENT_CONTRACT_V2_VERSION,
+			id: "test-lane",
+			revision: 1,
+			role: "Lane explorer",
+			workClass: "judgment",
+			autonomy: "supervised",
+			objective: "Explore lane requirements",
+			deliverables: ["findings.md"],
+			scope: { allowedPaths: ["**"] },
+			acceptance: [{ id: "c1", description: "check", check: "artifact_exists", params: { path: "findings.md" } }],
+			reporting: ASSIGNMENT_RESULT_V2_VERSION,
+		});
+		const validParse = parseAssignmentContract(validContract);
+		expect(validParse.ok).toBe(true);
 	});
 });

@@ -11,6 +11,8 @@ const RUNTIME_SOURCE_ID = "builtin://colab-model";
 const PROGRESS_PREFIX = "__OMPK_COLAB_PROGRESS__";
 const READY_PREFIX = "__OMPK_COLAB_READY__";
 const HTTP_PREFIX = "__OMPK_COLAB_HTTP__";
+const TOOL_READINESS_FUNCTION = "ompk_tool_readiness_probe";
+const TOOL_READINESS_DECOY_FUNCTION = "ompk_decoy_probe";
 const MAX_COMMAND_OUTPUT = 2 * 1024 * 1024;
 
 export type ColabAccelerator = "T4" | "L4" | "A100" | "H100" | "G4";
@@ -84,6 +86,8 @@ export interface ColabModelLaunchResult {
 	quantization: string;
 	repoId: string;
 	sessionName: string;
+	/** True only after the remote runtime emitted a valid synthetic tool call. */
+	toolCallReady: boolean;
 }
 
 export interface ColabModelCommandRequest {
@@ -102,6 +106,7 @@ interface RemoteReadyPayload {
 	modelId: string;
 	modelName: string;
 	port: number;
+	toolCallReady: boolean;
 }
 
 interface HttpMetadata {
@@ -473,7 +478,7 @@ function pythonJson(value: unknown): string {
 	return JSON.stringify(JSON.stringify(value));
 }
 
-function buildRemoteSetupScript(config: {
+export function buildRemoteSetupScript(config: {
 	accelerator: ColabAccelerator;
 	artifact: GgufArtifact;
 	contextWindow: number;
@@ -545,15 +550,74 @@ def announce_ready(model_id, primary_name, base_url):
         "messages": [{"role": "user", "content": "Reply with OK."}],
         "temperature": 0,
         "max_tokens": 16,
+        "seed": 0,
         "chat_template_kwargs": {"enable_thinking": False},
     }, timeout=300)
-    if not warmup.get("choices"):
+    if not isinstance(warmup.get("choices"), list) or not warmup["choices"]:
         raise RuntimeError("Warmup request returned no completion choices")
+
+    progress("checking deterministic tool-call support")
+    tool_probe = request_json(base_url + "/v1/chat/completions", {
+        "model": model_id,
+        "messages": [
+            {"role": "system", "content": "The assignment requires " + ${JSON.stringify(TOOL_READINESS_FUNCTION)} + ". Call it exactly once, not " + ${JSON.stringify(TOOL_READINESS_DECOY_FUNCTION)} + ". Do not answer in prose."},
+            {"role": "user", "content": "Invoke the required target function now."},
+        ],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": ${JSON.stringify(TOOL_READINESS_FUNCTION)},
+                "description": "Synthetic target used to verify lane selection.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"lane": {"type": "string", "enum": ["task"]}},
+                    "required": ["lane"],
+                    "additionalProperties": False,
+                },
+            },
+        }, {
+            "type": "function",
+            "function": {
+                "name": ${JSON.stringify(TOOL_READINESS_DECOY_FUNCTION)},
+                "description": "Synthetic decoy that must not be selected.",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        }],
+        "tool_choice": "required",
+        "temperature": 0,
+        "max_tokens": 32,
+        "seed": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }, timeout=300)
+    choices = tool_probe.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1:
+        raise RuntimeError("Tool-call readiness probe returned an invalid choices payload")
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
+    if not isinstance(tool_calls, list) or len(tool_calls) != 1:
+        raise RuntimeError("Tool-call readiness probe returned no single tool call")
+    tool_call = tool_calls[0]
+    if not isinstance(tool_call, dict) or tool_call.get("type") != "function":
+        raise RuntimeError("Tool-call readiness probe returned a non-function tool call")
+    function = tool_call.get("function")
+    if not isinstance(function, dict) or function.get("name") != ${JSON.stringify(TOOL_READINESS_FUNCTION)}:
+        raise RuntimeError("Tool-call readiness probe selected the wrong function")
+    raw_arguments = function.get("arguments")
+    if not isinstance(raw_arguments, str):
+        raise RuntimeError("Tool-call readiness probe returned malformed arguments")
+    try:
+        arguments = json.loads(raw_arguments)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Tool-call readiness probe returned unparseable arguments") from error
+    if arguments != {"lane": "task"}:
+        raise RuntimeError("Tool-call readiness probe returned invalid target arguments")
+
     print(READY_PREFIX + json.dumps({
         "contextWindow": context_window,
         "modelId": model_id,
         "modelName": Path(primary_name).stem,
         "port": CONFIG["remotePort"],
+        "toolCallReady": True,
     }), flush=True)
 
 
@@ -877,8 +941,10 @@ export async function launchColabModel(
 		});
 		if (setup.exitCode === 0) {
 			ready = parseMarkedJson<RemoteReadyPayload>(setup.stdout, READY_PREFIX);
-			if (!ready?.modelId || !ready.port) {
-				throw new Error(`Colab setup completed without a readiness result: ${setup.stdout || setup.stderr}`);
+			if (!ready?.modelId || !ready.port || ready.toolCallReady !== true) {
+				throw new Error(
+					`Colab setup completed without a validated tool-call readiness probe: ${setup.stdout || setup.stderr}`,
+				);
 			}
 			break;
 		}
@@ -896,6 +962,7 @@ export async function launchColabModel(
 	const apiBaseUrl = startOpenAiBridge(sessionName, ready.port);
 	return {
 		accelerator,
+		toolCallReady: ready.toolCallReady,
 		apiBaseUrl,
 		contextWindow: ready.contextWindow || DEFAULT_CONTEXT_WINDOW,
 		maxTokens: Math.min(DEFAULT_MAX_TOKENS, ready.contextWindow || DEFAULT_CONTEXT_WINDOW),
@@ -923,6 +990,9 @@ export async function handleColabModelSlashCommand(
 		const result = await launch(request.modelReference, message => runtime.output(message), {
 			accelerator: request.accelerator,
 		});
+		if (result.toolCallReady !== true) {
+			throw new Error("Colab model failed the tool-call readiness probe; refusing to register it as tool-capable.");
+		}
 		runtime.session.modelRegistry.registerProvider(
 			RUNTIME_PROVIDER,
 			{
