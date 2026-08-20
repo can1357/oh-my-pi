@@ -1318,6 +1318,9 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		acpDescription: "Manage todos",
 		acpInputHint: "<subcommand>",
 		subcommands: [
+			{ name: "show", description: "Show the sticky todo panel (TUI only)" },
+			{ name: "hide", description: "Hide the sticky todo panel (TUI only)" },
+			{ name: "toggle", description: "Toggle the sticky todo panel (TUI only)" },
 			{ name: "edit", description: "Open todos in $EDITOR (Markdown round-trip)" },
 			{ name: "copy", description: "Copy todos as Markdown to clipboard" },
 			{ name: "export", description: "Write todos as Markdown to a file (default: TODO.md)", usage: "[<path>]" },

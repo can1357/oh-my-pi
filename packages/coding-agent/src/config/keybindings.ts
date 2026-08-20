@@ -29,6 +29,7 @@ interface AppKeybindings {
 	"app.model.select": true;
 	"app.model.selectTemporary": true;
 	"app.tools.expand": true;
+	"app.todos.toggle": true;
 	"app.editor.external": true;
 	"app.message.followUp": true;
 	"app.retry": true;
@@ -122,6 +123,10 @@ export const KEYBINDINGS = {
 	"app.tools.expand": {
 		defaultKeys: "ctrl+o",
 		description: "Expand tools",
+	},
+	"app.todos.toggle": {
+		defaultKeys: "ctrl+shift+o",
+		description: "Toggle todo visibility",
 	},
 	"app.editor.external": {
 		defaultKeys: "ctrl+g",

@@ -141,6 +141,9 @@ export interface InteractiveModeContext {
 	isBashMode: boolean;
 	toolOutputExpanded: boolean;
 	todoExpanded: boolean;
+	/** Whether the sticky Todos panel is currently displayed. */
+	todoVisible: boolean;
+
 	planModeEnabled: boolean;
 	askModeEnabled: boolean;
 	goalModeEnabled: boolean;
@@ -293,6 +296,9 @@ export interface InteractiveModeContext {
 	rebuildChatFromMessages(): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;
 	reloadTodos(): Promise<void>;
+	setTodoVisibility(visible: boolean): void;
+	toggleTodoVisibility(): void;
+
 	toggleTodoExpansion(): void;
 
 	// Command handling

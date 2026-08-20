@@ -103,6 +103,8 @@ function commitTodos(runtime: SlashCommandRuntime, phases: TodoPhase[]): void {
 const TODO_HELP_TEXT = [
 	"Usage: /todo <verb> [args]",
 	"  /todo                              Show current todos",
+	"  /todo show|hide|toggle             (TUI only) Change sticky panel visibility",
+
 	"  /todo edit                         (TUI only) open in $EDITOR",
 	"  /todo copy                         Print todos as Markdown",
 	"  /todo export [<path>]              Write todos to file (default: TODO.md)",
@@ -256,6 +258,10 @@ export async function handleTodoAcp(
 
 	const { verb, rest } = parseSubcommand(trimmed);
 	switch (verb) {
+		case "show":
+		case "hide":
+		case "toggle":
+			return usage(`/todo ${verb} is only available in TUI mode.`, runtime);
 		case "copy":
 			return await handleTodoCopyCommand(runtime);
 		case "export":

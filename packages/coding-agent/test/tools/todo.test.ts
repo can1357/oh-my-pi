@@ -104,6 +104,7 @@ it("renders completed tasks as checked before revealing strikethrough", async ()
 
 	const firstFrame = component.render(120).join("\n");
 	expect(Bun.stripANSI(firstFrame)).toContain("finish");
+	expect(Bun.stripANSI(firstFrame)).toContain(`${theme.checkbox.checked} finish`);
 	expect(firstFrame).not.toContain("\x1b[9m");
 
 	options.spinnerFrame = TODO_STRIKE_HOLD_FRAMES + 1;

@@ -15,6 +15,11 @@ describe("KeybindingsManager.getDisplayString", () => {
 
 		expect(keybindings.getDisplayString("app.retry")).toBe("Alt+R");
 	});
+	it("defaults todo visibility toggle to Ctrl+Shift+O", () => {
+		const keybindings = KeybindingsManager.inMemory();
+
+		expect(keybindings.getDisplayString("app.todos.toggle")).toBe("Ctrl+Shift+O");
+	});
 
 	it("formats multiple bindings with the existing separator", () => {
 		const keybindings = KeybindingsManager.inMemory({

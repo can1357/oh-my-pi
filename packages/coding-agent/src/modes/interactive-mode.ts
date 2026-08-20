@@ -429,8 +429,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	isBashMode = false;
 	toolOutputExpanded = false;
 	todoExpanded = false;
+	todoVisible = true;
 	planModeEnabled = false;
 	planModePaused = false;
+
 	askModeEnabled = false;
 	goalModeEnabled = false;
 	goalModePaused = false;
@@ -1949,8 +1951,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#renderTodoList(): void {
 		this.todoContainer.clear();
+		if (!this.todoVisible) return;
 		const phases = this.todoPhases.filter(phase => phase.tasks.length > 0);
 		if (phases.length === 0) return;
+
 		const indent = "  ";
 		const multiStage = phases.length > 1;
 		const activeIdx = Math.max(0, phases.indexOf(this.#getActivePhase(phases) ?? phases[0]));
@@ -4315,6 +4319,17 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	toggleThinkingBlockVisibility(): void {
 		this.#inputController.toggleThinkingBlockVisibility();
+	}
+
+	setTodoVisibility(visible: boolean): void {
+		this.todoVisible = visible;
+		this.#renderTodoList();
+		this.ui.requestRender();
+		this.showStatus(`Todos: ${visible ? "visible" : "hidden"}`);
+	}
+
+	toggleTodoVisibility(): void {
+		this.setTodoVisibility(!this.todoVisible);
 	}
 
 	toggleTodoExpansion(): void {

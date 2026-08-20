@@ -59,6 +59,7 @@ async function createContext() {
 		"app.model.selectTemporary": ["ctrl+y"],
 		"app.model.select": ["alt+m"],
 		"app.retry": ["alt+r"],
+		"app.todos.toggle": ["ctrl+shift+o"],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -72,6 +73,8 @@ async function createContext() {
 	const showModelSelector = vi.fn();
 	const requestRender = vi.fn();
 	const showError = vi.fn();
+	const toggleTodoVisibility = vi.fn();
+
 	let focused: unknown;
 	const addInputListener = vi.fn((listener: InputListener) => {
 		void listener;
@@ -194,6 +197,7 @@ async function createContext() {
 		handleBtwCopyKey,
 		showError,
 		showStatus: vi.fn(),
+		toggleTodoVisibility,
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -216,6 +220,7 @@ async function createContext() {
 			handleBtwBranchKey,
 			addInputListener,
 			canBranchBtw,
+			toggleTodoVisibility,
 			handleBtwCopyKey,
 			canCopyBtw,
 			showError,
@@ -245,6 +250,17 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
 		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
+	});
+	it("registers the todo visibility toggle as a custom key handler", async () => {
+		const { InputController, ctx, customHandlers, spies } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		const handler = customHandlers.get("ctrl+shift+o");
+		expect(handler).toBeDefined();
+		handler?.();
+		expect(spies.toggleTodoVisibility).toHaveBeenCalledTimes(1);
 	});
 
 	it("registers retry as an editor action and retries the failed turn", async () => {

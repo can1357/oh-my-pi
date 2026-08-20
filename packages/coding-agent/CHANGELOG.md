@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/todo show`, `/todo hide`, `/todo toggle`, and the configurable `Ctrl+Shift+O` shortcut to hide or display the sticky Todos panel. Completed tasks remain rendered with checked boxes.
+
 ### Fixed
 
 - Supported `/login`, `/logout`, and `auth-broker login` provider aliases (`antigravity` -> `google-antigravity`).

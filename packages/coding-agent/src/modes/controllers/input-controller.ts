@@ -444,6 +444,9 @@ export class InputController {
 		this.ctx.editor.setActionKeys("app.retry", this.ctx.keybindings.getKeys("app.retry"));
 		this.ctx.editor.onRetry = () => void this.handleRetry();
 		this.ctx.editor.clearCustomKeyHandlers();
+		for (const key of this.ctx.keybindings.getKeys("app.todos.toggle")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.toggleTodoVisibility());
+		}
 		// Wire up extension shortcuts
 		this.registerExtensionShortcuts();
 		const planModeKeys = this.ctx.keybindings.getKeys("app.plan.toggle");

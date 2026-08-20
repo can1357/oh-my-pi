@@ -8,6 +8,7 @@ describe("buildHotkeysMarkdown", () => {
 			"app.clipboard.copyPrompt": "Ctrl+Shift+P",
 			"app.plan.toggle": "Alt+Shift+P",
 			"app.tools.expand": "Ctrl+O",
+			"app.todos.toggle": "Ctrl+Shift+O",
 			"app.display.reset": "Ctrl+L",
 			"app.interrupt": "Esc",
 			"app.clear": "Ctrl+C",
@@ -41,6 +42,7 @@ describe("buildHotkeysMarkdown", () => {
 		expect(markdown).toContain("| `Ctrl+L` | Reset terminal display |");
 		expect(markdown).toContain("| `Alt+R` | Retry last failed assistant turn |");
 		expect(markdown).toContain("| `Alt+Shift+P` | Toggle plan mode |");
+		expect(markdown).toContain("| `Ctrl+Shift+O` | Toggle todo visibility |");
 		expect(markdown).toContain("| `#` | Open prompt actions |");
 		for (const line of lines) {
 			if (line.length === 0) continue;

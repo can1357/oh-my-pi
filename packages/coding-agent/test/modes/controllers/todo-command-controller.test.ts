@@ -25,6 +25,8 @@ function createContext(cwd: string, phases: TodoPhase[]): InteractiveModeContext
 		setTodos: vi.fn(),
 		showError: vi.fn(),
 		showStatus: vi.fn(),
+		setTodoVisibility: vi.fn(),
+		toggleTodoVisibility: vi.fn(),
 		showWarning: vi.fn(),
 	} as unknown as InteractiveModeContext;
 }
@@ -46,6 +48,23 @@ describe("TodoCommandController", () => {
 
 		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("/todo export [<path>]"));
 		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("/todo import [<path>]"));
+		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("/todo toggle"));
+	});
+
+	it("controls sticky todo panel visibility without mutating todo state", async () => {
+		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tui-todo-visibility-"));
+		const ctx = createContext(tempRoot, []);
+		const controller = new TodoCommandController(ctx);
+
+		await controller.handleTodoCommand("hide");
+		await controller.handleTodoCommand("show");
+		await controller.handleTodoCommand("toggle");
+
+		expect(ctx.setTodoVisibility).toHaveBeenNthCalledWith(1, false);
+		expect(ctx.setTodoVisibility).toHaveBeenNthCalledWith(2, true);
+		expect(ctx.toggleTodoVisibility).toHaveBeenCalledTimes(1);
+		expect(ctx.session.setTodoPhases).not.toHaveBeenCalled();
+		expect(ctx.setTodos).not.toHaveBeenCalled();
 	});
 
 	it("exports the default TODO.md under the active session cwd", async () => {

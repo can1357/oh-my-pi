@@ -16,6 +16,9 @@ import type { InteractiveModeContext } from "../types";
 const USAGE = [
 	"Usage: /todo <verb> [args]",
 	"  /todo                              Show current todos",
+	"  /todo show                         Show the sticky todo panel",
+	"  /todo hide                         Hide the sticky todo panel",
+	"  /todo toggle                       Toggle the sticky todo panel",
 	"  /todo edit                         Open todos in $EDITOR",
 	"  /todo copy                         Copy todos as Markdown to clipboard",
 	"  /todo export [<path>]              Write todos to file (default: TODO.md)",
@@ -169,6 +172,15 @@ export class TodoCommandController {
 			case "help":
 			case "?":
 				this.ctx.showStatus(USAGE);
+				return;
+			case "show":
+				this.ctx.setTodoVisibility(true);
+				return;
+			case "hide":
+				this.ctx.setTodoVisibility(false);
+				return;
+			case "toggle":
+				this.ctx.toggleTodoVisibility();
 				return;
 			case "append":
 				this.#append(rest);
