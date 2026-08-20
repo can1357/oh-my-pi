@@ -18,13 +18,15 @@ Input JSON shape:
   "candidates": [{"id":"...","summary":"...","content":"..."}],
   "n_verifications": 3,
   "granularity": 20,
-  "model": "gemini-2.5-flash"
+  "model": "gemini-2.5-flash",
+  "calibration_path": "optional override path to verifier_calibration.json"
 }
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -33,6 +35,7 @@ import sys
 from itertools import combinations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from harness.fusion.verifier_calibration import calibrate as calibrate_verifier_score
 from harness.fusion.verifier_scoring import confidence_from_margin, weighted_stddev, winner_from_scores
 
 
@@ -59,6 +62,42 @@ DEFAULT_GROUND_TRUTH_NOTE = (
 EVIDENCE_FIRST_INSTRUCTION = (
     "Before assigning any score, list exactly 3 evidence observations. Each observation must quote or paraphrase a concrete fact from the candidate, evidence, logs, tests, or task requirements. Do not count style, fluency, or confidence as evidence unless the criterion is explicitly about style. After the 3 observations, output the final score tag exactly as requested."
 )
+COMPARE_ROLE_INSTRUCTION = "You are an expert verifier choosing between two candidate solutions."
+COMPARE_EVALUATION_RULE = "Evaluate BOTH candidates only on the named criterion. Ignore unrelated aspects."
+COMPARE_TAG_INSTRUCTIONS = [
+    "Output evidence in exactly these tags before the scores:",
+    "<evidence_A>1. ... 2. ... 3. ...</evidence_A>",
+    "<evidence_B>1. ... 2. ... 3. ...</evidence_B>",
+    "Then output final scores exactly in this format:",
+    "<score_A>LETTER_A_TO_T</score_A>",
+    "<score_B>LETTER_A_TO_T</score_B>",
+]
+
+
+def verifier_protocol_digest(
+    ground_truth_note: str = DEFAULT_GROUND_TRUTH_NOTE,
+    granularity: int = GRANULARITY,
+) -> str:
+    """Canonical 16-hex hash of the exact score-shaping compare prompt templates,
+    scale description, evidence-first instructions, tag format, and ground truth note.
+    Any edit to prompt wording, scoring rules, evidence tags, or ground truth note
+    directly changes this digest, invalidating stale calibration parameters automatically.
+    """
+    material = json.dumps(
+        {
+            "role_instruction": COMPARE_ROLE_INSTRUCTION,
+            "evaluation_rule": COMPARE_EVALUATION_RULE,
+            "evidence_first_instruction": EVIDENCE_FIRST_INSTRUCTION,
+            "granularity": granularity,
+            "ground_truth_note": ground_truth_note,
+            "scale_description": SCALE_DESCRIPTION,
+            "tag_instructions": COMPARE_TAG_INSTRUCTIONS,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
 
 
 def load_dotenv(*roots: Path) -> None:
@@ -185,6 +224,9 @@ def normalize_input(payload: Dict[str, Any]) -> Dict[str, Any]:
     if n_verifications < 1 or n_verifications > 8:
         raise ValueError("n_verifications must be between 1 and 8")
 
+    cal_path_raw = payload.get("calibration_path")
+    cal_path = str(cal_path_raw).strip() if cal_path_raw is not None and str(cal_path_raw).strip() else None
+
     return {
         "mode": mode,
         "task": task,
@@ -196,6 +238,7 @@ def normalize_input(payload: Dict[str, Any]) -> Dict[str, Any]:
         "granularity": granularity,
         "model": str(payload.get("model") or "gemini-2.5-flash").strip(),
         "mock": bool(payload.get("mock") or False),
+        "calibration_path": cal_path,
     }
 
 
@@ -221,7 +264,7 @@ def format_candidate(candidate: Dict[str, Any], label: str) -> str:
 
 def create_compare_prompt(task: str, context: str, candidate_a: Dict[str, Any], candidate_b: Dict[str, Any], criterion: Dict[str, str], ground_truth_note: str) -> str:
     parts = [
-        "You are an expert verifier choosing between two candidate solutions.",
+        COMPARE_ROLE_INSTRUCTION,
         ground_truth_note,
         f"Task:\n{task}",
     ]
@@ -233,14 +276,9 @@ def create_compare_prompt(task: str, context: str, candidate_a: Dict[str, Any], 
             format_candidate(candidate_b, "Candidate B"),
             f"Criterion: {criterion['name']}\n{criterion['description']}",
             f"Rating scale:\n{SCALE_DESCRIPTION}",
-            "Evaluate BOTH candidates only on the named criterion. Ignore unrelated aspects.",
+            COMPARE_EVALUATION_RULE,
             EVIDENCE_FIRST_INSTRUCTION,
-            "Output evidence in exactly these tags before the scores:",
-            "<evidence_A>1. ... 2. ... 3. ...</evidence_A>",
-            "<evidence_B>1. ... 2. ... 3. ...</evidence_B>",
-            "Then output final scores exactly in this format:",
-            "<score_A>LETTER_A_TO_T</score_A>",
-            "<score_B>LETTER_A_TO_T</score_B>",
+            *COMPARE_TAG_INSTRUCTIONS,
         ]
     )
     return "\n\n".join(parts)
@@ -577,6 +615,12 @@ def score_audit_candidate(client: Any, config: Dict[str, Any], candidate: Dict[s
 
 
 def run_compare(client: Any, config: Dict[str, Any]) -> Dict[str, Any]:
+    effective_ground_truth_note = (
+        config["ground_truth_note"]
+        if "ground_truth_note" in config and config["ground_truth_note"] is not None
+        else DEFAULT_GROUND_TRUTH_NOTE
+    )
+    config = {**config, "ground_truth_note": effective_ground_truth_note}
     candidates = config["candidates"]
     criteria = config["criteria"]
     wins = {candidate["id"]: 0.0 for candidate in candidates}
@@ -670,6 +714,59 @@ def run_compare(client: Any, config: Dict[str, Any]) -> Dict[str, Any]:
 
         pair_score_totals[candidate_a["id"]].append(pair_mean_a)
         pair_score_totals[candidate_b["id"]].append(pair_mean_b)
+
+        # Best-effort Platt calibration lookup. `calibrate_verifier_score`
+        # returns None (never a guessed/uncalibrated stand-in, and never a
+        # crash) when no fit exists yet for this exact (model,
+        # n_verifications) configuration, e.g. `fmh verifier calibrate` has
+        # not been run for it. The raw score above is what still drives
+        # `winner`/`vote_margin` -- these calibrated_* fields are purely
+        # additive/informational, never a decision input, regardless of
+        # what the fitted slope turned out to be. sigmoid(a*s+b) only
+        # preserves the raw score's ordering when a>0; both `fmh verifier
+        # calibrate` (refuses to persist a fit with a<=0) and this lookup
+        # itself (`verifier_calibration.calibrate`'s `_valid_platt_entry`
+        # check, which rejects a non-positive, non-finite, missing, or
+        # non-numeric coefficient -- or a non-dict entry -- from any
+        # registry writer, not just the fitting command) enforce that
+        # invariant, so this field is never trusted for ordering on its
+        # own even if the two layers ever disagree. `config["calibration_path"]`
+        # is an optional override (tests use it to point at a throwaway
+        # registry instead of mutating the shared checked-in default);
+        # omitted or None means "use the real default registry".
+        _calibration_kwargs = {}
+        if config.get("calibration_path"):
+            _calibration_kwargs["path"] = config["calibration_path"]
+        granularity = config.get("granularity", GRANULARITY)
+        prompt_digest = verifier_protocol_digest(
+            ground_truth_note=effective_ground_truth_note, granularity=granularity
+        )
+        try:
+            calibrated_score_a = calibrate_verifier_score(
+                pair_mean_a,
+                config["model"],
+                config["n_verifications"],
+                granularity=granularity,
+                prompt_digest=prompt_digest,
+                **_calibration_kwargs,
+            )
+            calibrated_score_b = calibrate_verifier_score(
+                pair_mean_b,
+                config["model"],
+                config["n_verifications"],
+                granularity=granularity,
+                prompt_digest=prompt_digest,
+                **_calibration_kwargs,
+            )
+            calibrated_margin = (
+                calibrated_score_a - calibrated_score_b
+                if calibrated_score_a is not None and calibrated_score_b is not None
+                else None
+            )
+        except Exception:
+            calibrated_score_a = None
+            calibrated_score_b = None
+            calibrated_margin = None
         pairwise_results.append(
             {
                 "candidate_a": candidate_a["id"],
@@ -679,6 +776,9 @@ def run_compare(client: Any, config: Dict[str, Any]) -> Dict[str, Any]:
                 "margin": margin,
                 "vote_margin": vote_margin,
                 "winner": winner,
+                "calibrated_score_a": calibrated_score_a,
+                "calibrated_score_b": calibrated_score_b,
+                "calibrated_margin": calibrated_margin,
                 "criteria": criterion_results,
             }
         )

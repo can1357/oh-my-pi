@@ -5,12 +5,14 @@ import * as path from "node:path";
 import type { CompareRepetition } from "../index";
 import {
 	buildCompareBreakdown,
+	buildSummaryLines,
 	chooseWinner,
 	extractTaggedScore,
 	extractTextSource,
 	isVerifierRequestParams,
 	planSubagentOrchestration,
 	readEvidenceBlocks,
+	runVerifierRequest,
 	truncate,
 	weightedMean,
 	weightedStdDev,
@@ -340,6 +342,130 @@ describe("readEvidenceBlocks", () => {
 		await fs.writeFile(filePath, Buffer.from([0x00, 0x01]));
 		try {
 			await expect(readEvidenceBlocks(tempDir, ["evidence.bin"], 100)).rejects.toThrow("binary");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("buildSummaryLines calibration rendering", () => {
+	it("renders calibrated pairwise line when calibrated scores are present", () => {
+		const result: any = {
+			mode: "compare",
+			winner: {
+				id: "a",
+				wins: 1,
+				mean_pair_score: 0.8,
+				mean_pair_confidence: 0.9,
+				summary: "good",
+			},
+			ranking: [
+				{ id: "a", wins: 1, mean_pair_score: 0.8, mean_pair_confidence: 0.9, summary: "good" },
+				{ id: "b", wins: 0, mean_pair_score: 0.2, mean_pair_confidence: 0.9, summary: "bad" },
+			],
+			pairwise: [
+				{
+					candidate_a: "a",
+					candidate_b: "b",
+					score_a: 0.8,
+					score_b: 0.2,
+					margin: 0.6,
+					confidence: 0.9,
+					disagreement: 0,
+					vote_margin: 1.0,
+					winner: "a",
+					calibrated_score_a: 0.95,
+					calibrated_score_b: 0.05,
+					calibrated_margin: 0.9,
+					model_breakdown: [],
+					criteria: [],
+				},
+			],
+			estimated_calls: 2,
+		};
+		const lines = buildSummaryLines("compare", "gemini-python", [], [], result, false);
+		expect(lines.some(l => l.includes("Calibrated pairwise (a vs b): a=0.950, b=0.050 (margin +0.900)"))).toBe(true);
+	});
+});
+
+describe("runVerifierRequest python backend with calibration", () => {
+	it("executes lav_runner.py, performs calibration lookup, and populates calibrated summary lines", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "lav-cal-test-"));
+		const calPath = path.join(tempDir, "calibration.json");
+
+		const scriptsDir = path.join(import.meta.dir, "..", "..", "skills", "llm-as-verifier", "scripts");
+		const pythonBin = Bun.which("python") ?? Bun.which("python3") ?? "python";
+		const pyScript = `import sys, os; sys.path.insert(0, r"${scriptsDir}"); from harness.fusion.verifier_calibration import judge_config_key; import lav_runner; print(judge_config_key("gemini-2.5-flash", 1, prompt_digest=lav_runner.verifier_protocol_digest()))`;
+		const pyDigestProc = Bun.spawn([pythonBin, "-c", pyScript], { stdout: "pipe", stderr: "pipe" });
+		const digestOut = (await new Response(pyDigestProc.stdout).text()).trim();
+		expect(digestOut.length).toBe(16);
+
+		const registry = {
+			[digestOut]: {
+				config_digest: digestOut,
+				platt_a: 2.0,
+				platt_b: -1.0,
+				model: "gemini-2.5-flash",
+				n_verifications: 1,
+			},
+		};
+		await Bun.write(calPath, JSON.stringify(registry));
+
+		const mockPi: any = {
+			exec: async (cmd: string, args: string[]) => {
+				const resolvedBin = Bun.which(cmd) ?? Bun.which("python") ?? Bun.which("python3") ?? cmd;
+				const proc = Bun.spawn([resolvedBin, ...args], { stdout: "pipe", stderr: "pipe" });
+				const [stdout, stderr] = await Promise.all([
+					new Response(proc.stdout).text(),
+					new Response(proc.stderr).text(),
+				]);
+				const code = await proc.exited;
+				return { code, stdout, stderr };
+			},
+		};
+		const mockCtx: any = {
+			cwd: tempDir,
+			modelRegistry: {
+				find: (provider: string, id: string) => ({
+					provider,
+					id,
+					name: id,
+					api: "google",
+					contextWindow: 1048576,
+					maxTokens: 8192,
+					supportsTools: true,
+				}),
+				getAll: () => [
+					{
+						provider: "google",
+						id: "gemini-2.5-flash",
+						name: "gemini-2.5-flash",
+					},
+				],
+			},
+		};
+		try {
+			const run = await runVerifierRequest(mockPi, mockCtx, {
+				backend: "gemini-python",
+				mode: "compare",
+				task: "Test task",
+				candidates: [
+					{ id: "cand-1", content: "pass all tests" },
+					{ id: "cand-2", content: "fail tests" },
+				],
+				criteria: [{ name: "correctness", description: "is it correct" }],
+				nVerifications: 1,
+				mock: true,
+				calibrationPath: calPath,
+			});
+
+			expect(run.summaryLines.some(l => l.includes("Calibrated pairwise (cand-1 vs cand-2)"))).toBe(true);
+			const pair = (run.parsed.result as any).pairwise[0];
+			expect(pair.calibrated_score_a).toBeDefined();
+			expect(pair.calibrated_score_b).toBeDefined();
+			expect(pair.calibrated_margin).toBeDefined();
+			expect(pair.calibrated_score_a).toBeGreaterThan(0);
+			expect(pair.calibrated_score_b).toBeLessThan(1);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

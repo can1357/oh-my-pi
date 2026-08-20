@@ -2,6 +2,7 @@ from pathlib import Path
 
 import typer
 
+from harness.cli.calibrate_verifier import calibrate_verifier
 from harness.cli.compare import compare_candidates
 from harness.cli.evaluate_synthesizer import evaluate_synthesizer
 from harness.cli.evaluate_verifier import evaluate_verifier
@@ -42,6 +43,7 @@ app.add_typer(compare_app, name="compare")
 
 verifier_app = typer.Typer(no_args_is_help=True)
 verifier_app.command("fusion")(verifier_fusion)
+verifier_app.command("calibrate")(calibrate_verifier)
 app.add_typer(verifier_app, name="verifier")
 app.add_typer(fugu_app, name="fugu")
 app.add_typer(rqgm_app, name="rqgm")

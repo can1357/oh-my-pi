@@ -997,6 +997,9 @@ interface PairwiseResult {
 	disagreement: number;
 	vote_margin: number;
 	winner: string;
+	calibrated_score_a?: number | null;
+	calibrated_score_b?: number | null;
+	calibrated_margin?: number | null;
 	model_breakdown: Array<{
 		model: string;
 		weight: number;
@@ -1276,7 +1279,7 @@ const runPiAudit = async (
 	};
 };
 
-const buildSummaryLines = (
+export const buildSummaryLines = (
 	mode: "compare" | "audit",
 	backend: string,
 	models: ResolvedPiModel[],
@@ -1308,6 +1311,24 @@ const buildSummaryLines = (
 				),
 			);
 			lines.push(`Swap consistency: ${meanSwapConsistency.toFixed(3)}`);
+		}
+		const calibratedPairs = pairwise.filter(
+			p =>
+				p.calibrated_score_a !== undefined &&
+				p.calibrated_score_a !== null &&
+				p.calibrated_score_b !== undefined &&
+				p.calibrated_score_b !== null,
+		);
+		if (calibratedPairs.length > 0) {
+			for (const pair of calibratedPairs) {
+				const marginStr =
+					(pair.calibrated_margin ?? 0) >= 0
+						? `+${(pair.calibrated_margin ?? 0).toFixed(3)}`
+						: (pair.calibrated_margin ?? 0).toFixed(3);
+				lines.push(
+					`Calibrated pairwise (${pair.candidate_a} vs ${pair.candidate_b}): ${pair.candidate_a}=${pair.calibrated_score_a?.toFixed(3)}, ${pair.candidate_b}=${pair.calibrated_score_b?.toFixed(3)} (margin ${marginStr})`,
+				);
+			}
 		}
 		if (ranking.length) {
 			lines.push(
@@ -1346,6 +1367,7 @@ interface VerifierRequestParams {
 	model?: string;
 	models?: string[];
 	modelWeights?: ModelWeightInput[];
+	calibrationPath?: string;
 	outputPath?: string;
 	maxCandidateChars?: number;
 	maxEvidenceChars?: number;
@@ -1368,7 +1390,7 @@ export function isVerifierRequestParams(value: unknown): value is VerifierReques
 	return true;
 }
 
-const runVerifierRequest = async (
+export const runVerifierRequest = async (
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	params: VerifierRequestParams,
@@ -1498,6 +1520,8 @@ const runVerifierRequest = async (
 				granularity: config.granularity,
 				model: config.models[0]?.id ?? "gemini-2.5-flash",
 				mock: config.mock,
+				ground_truth_note: config.groundTruthNote,
+				calibration_path: params.calibrationPath,
 			};
 			await Bun.write(inputPath, JSON.stringify(runnerInput, null, 2));
 			await runPython(
@@ -1768,6 +1792,12 @@ export default function verifierExtension(pi: ExtensionAPI): void {
 					}),
 					{ minItems: 1, maxItems: 9 },
 				),
+			),
+			calibrationPath: typebox.Type.Optional(
+				typebox.Type.String({
+					description:
+						"Optional path to a fitted verifier_calibration.json registry. When omitted, defaults to FUGU_VERIFIER_CALIBRATION_PATH or ~/.fugu/verifier_calibration.json.",
+				}),
 			),
 			outputPath: typebox.Type.Optional(
 				typebox.Type.String({ description: "Optional path to save the full JSON result." }),
