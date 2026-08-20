@@ -613,8 +613,10 @@ function mergeRecallResult(
 }
 
 function compareRecallResults(left: RecallResult, right: RecallResult): number {
+	const leftScore = typeof left.rerank_score === "number" ? left.rerank_score : (left.score ?? 0);
+	const rightScore = typeof right.rerank_score === "number" ? right.rerank_score : (right.score ?? 0);
 	return (
-		(right.score ?? 0) - (left.score ?? 0) ||
+		rightScore - leftScore ||
 		(right.timestamp ?? "").localeCompare(left.timestamp ?? "") ||
 		left.content.localeCompare(right.content)
 	);

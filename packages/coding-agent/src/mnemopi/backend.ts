@@ -231,7 +231,7 @@ export const mnemopiBackend: MemoryBackend = {
 			content: result.content,
 			source: result.source ?? undefined,
 			timestamp: result.timestamp ?? undefined,
-			score: result.score,
+			score: typeof result.rerank_score === "number" ? result.rerank_score : result.score,
 		}));
 		return { backend: "mnemopi", query, count: items.length, items };
 	},
@@ -467,6 +467,7 @@ async function resolveMnemopiProviderOptions(
 	modelRegistry: ModelRegistry,
 	sessionId: string,
 ): Promise<MnemopiProviderOptions> {
+	const configuredReranker = config.providerOptions.reranker;
 	const base: MnemopiProviderOptions = {
 		noEmbeddings: config.providerOptions.noEmbeddings,
 		embeddingModel: config.providerOptions.embeddingModel,
@@ -474,6 +475,23 @@ async function resolveMnemopiProviderOptions(
 		embeddingApiKey:
 			config.providerOptions.embeddingApiKey ??
 			openrouterKeyResolver(modelRegistry, sessionId, config.providerOptions.embeddingApiUrl),
+		rerankerModel: config.providerOptions.rerankerModel,
+		rerankerApiUrl: config.providerOptions.rerankerApiUrl,
+		rerankerApiKey: config.providerOptions.rerankerApiKey,
+		reranker:
+			configuredReranker === false || configuredReranker === undefined
+				? configuredReranker
+				: {
+						...configuredReranker,
+						apiKey:
+							config.providerOptions.rerankerApiKey ??
+							configuredReranker.apiKey ??
+							openrouterKeyResolver(
+								modelRegistry,
+								sessionId,
+								config.providerOptions.rerankerApiUrl ?? configuredReranker.apiUrl,
+							),
+					},
 		llm: false,
 	};
 

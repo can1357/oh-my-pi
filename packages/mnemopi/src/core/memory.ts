@@ -16,6 +16,7 @@ import {
 	type MnemopiEmbeddingRuntimeOptions,
 	type MnemopiLlmCompletion,
 	type MnemopiLlmRuntimeOptions,
+	type MnemopiRerankerRuntimeOptions,
 	type ResolvedMnemopiRuntimeOptions,
 	resolveEmbeddingProvider,
 	withMnemopiRuntimeOptions,
@@ -39,6 +40,10 @@ export interface MnemopiOptions {
 	readonly embeddingApiUrl?: string;
 	readonly embeddingApiKey?: ApiKey;
 	readonly embeddings?: false | MnemopiEmbeddingRuntimeOptions;
+	readonly rerankerModel?: string;
+	readonly rerankerApiUrl?: string;
+	readonly rerankerApiKey?: ApiKey;
+	readonly reranker?: false | MnemopiRerankerRuntimeOptions;
 	readonly llmEnabled?: boolean;
 	readonly llmBaseUrl?: string;
 	readonly llmApiKey?: ApiKey;
@@ -174,6 +179,30 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 	const embeddingProvider = resolveEmbeddingProvider(nestedEmbeddings?.provider);
 	const embeddingMaxInputChars = nestedEmbeddings?.maxInputChars;
 
+	const nestedReranker = options.reranker !== false ? options.reranker : undefined;
+	const rerankerDisabled = options.reranker === false ? true : nestedReranker?.disabled;
+	const rerankerModel = options.rerankerModel ?? nestedReranker?.model;
+	const rerankerApiUrl = options.rerankerApiUrl ?? nestedReranker?.apiUrl;
+	const rerankerApiKey = options.rerankerApiKey ?? nestedReranker?.apiKey;
+	const rerankerProvider = nestedReranker?.provider;
+	const rerankerCandidateLimit = nestedReranker?.candidateLimit;
+	const reranker =
+		rerankerDisabled !== undefined ||
+		rerankerModel !== undefined ||
+		rerankerApiUrl !== undefined ||
+		rerankerApiKey !== undefined ||
+		rerankerProvider !== undefined ||
+		rerankerCandidateLimit !== undefined
+			? {
+					disabled: rerankerDisabled,
+					model: rerankerModel,
+					apiUrl: rerankerApiUrl,
+					apiKey: rerankerApiKey,
+					provider: rerankerProvider,
+					candidateLimit: rerankerCandidateLimit,
+				}
+			: undefined;
+
 	const embeddings =
 		embeddingDisabled !== undefined ||
 		embeddingModel !== undefined ||
@@ -244,10 +273,10 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 	}
 
 	const debug = options.debug ? true : undefined;
-	if (embeddings === undefined && llm === undefined && debug === undefined) {
+	if (embeddings === undefined && reranker === undefined && llm === undefined && debug === undefined) {
 		return undefined;
 	}
-	return { embeddings, llm, debug };
+	return { embeddings, reranker, llm, debug };
 }
 
 let defaultInstance: Mnemopi | null = null;

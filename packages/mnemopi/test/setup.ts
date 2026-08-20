@@ -5,6 +5,7 @@ import * as Embeddings from "@pk-nerdsaver-ai/pi-mnemopi/core/embeddings";
 import type { CompleteOptions, LlmBackend } from "@pk-nerdsaver-ai/pi-mnemopi/core/llm-backends";
 import * as LlmBackends from "@pk-nerdsaver-ai/pi-mnemopi/core/llm-backends";
 import * as Memory from "@pk-nerdsaver-ai/pi-mnemopi/core/memory";
+import * as Reranker from "@pk-nerdsaver-ai/pi-mnemopi/core/reranker";
 
 type ResettableModule = Record<string, unknown>;
 
@@ -16,9 +17,10 @@ const RESET_FUNCTION_NAMES = [
 	"resetEmbeddingStateForTests",
 	"resetHostLlmBackendForTests",
 	"resetLlmBackendStateForTests",
+	"resetRerankerStateForTests",
 ] as const;
 
-const RESETTABLE_MODULES: readonly ResettableModule[] = [Memory, Beam, LlmBackends, Embeddings];
+const RESETTABLE_MODULES: readonly ResettableModule[] = [Memory, Beam, LlmBackends, Embeddings, Reranker];
 
 function callResetFunctions(moduleExports: ResettableModule): void {
 	for (const name of RESET_FUNCTION_NAMES) {

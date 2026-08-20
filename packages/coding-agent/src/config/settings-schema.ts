@@ -2644,6 +2644,41 @@ export const SETTINGS_SCHEMA = {
 			condition: "mnemopiActive",
 		},
 	},
+	"mnemopi.rerankerModel": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemopi",
+			label: "Mnemopi Reranker Model",
+			description:
+				"Optional OpenRouter reranker model. Setting this enables reranking; default: qwen/qwen3-reranker-8b.",
+			condition: "mnemopiActive",
+		},
+	},
+	"mnemopi.rerankerApiUrl": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemopi",
+			label: "Mnemopi Reranker API URL",
+			description: "Optional reranker endpoint passed to Mnemopi",
+			condition: "mnemopiActive",
+		},
+	},
+	"mnemopi.rerankerApiKey": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemopi",
+			label: "Mnemopi Reranker API Key",
+			description: "Optional reranker API key; OpenRouter provider credentials are used when omitted",
+			condition: "mnemopiActive",
+		},
+	},
+
 	"mnemopi.llmMode": {
 		type: "enum",
 		values: ["none", "smol", "remote"] as const,

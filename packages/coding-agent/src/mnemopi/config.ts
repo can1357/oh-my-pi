@@ -9,9 +9,20 @@ export type MnemopiLlmMode = "none" | "smol" | "remote";
 
 export type MnemopiScoping = "global" | "per-project" | "per-project-tagged";
 
-export type MnemopiProviderOptions = Pick<
-	MnemopiOptions,
-	"noEmbeddings" | "embeddingModel" | "embeddingApiUrl" | "embeddingApiKey" | "llm" | "debug"
+export type MnemopiProviderOptions = Partial<
+	Pick<
+		MnemopiOptions,
+		| "noEmbeddings"
+		| "embeddingModel"
+		| "embeddingApiUrl"
+		| "embeddingApiKey"
+		| "rerankerModel"
+		| "rerankerApiUrl"
+		| "rerankerApiKey"
+		| "reranker"
+		| "llm"
+		| "debug"
+	>
 >;
 
 export interface MnemopiBackendConfig {
@@ -38,6 +49,9 @@ export interface MnemopiBackendConfig {
 	llmBaseUrl?: string;
 	llmApiKey?: string;
 	llmModel?: string;
+	rerankerModel?: string;
+	rerankerApiUrl?: string;
+	rerankerApiKey?: string;
 }
 
 export function loadMnemopiConfig(settings: Settings, agentDir: string): MnemopiBackendConfig {
@@ -51,6 +65,13 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 	const llmMode = settings.get("mnemopi.llmMode");
 	const embeddingOverride = settings.get("mnemopi.embeddingModel");
 	const embeddingVariant = settings.get("mnemopi.embeddingVariant");
+	const rerankerModel = settings.get("mnemopi.rerankerModel");
+	const rerankerApiUrl = settings.get("mnemopi.rerankerApiUrl");
+	const rerankerApiKey = settings.get("mnemopi.rerankerApiKey");
+	const reranker =
+		rerankerModel || rerankerApiUrl || rerankerApiKey
+			? { model: rerankerModel, apiUrl: rerankerApiUrl, apiKey: rerankerApiKey }
+			: undefined;
 	// Map the variant explicitly rather than indexing an object with the raw config
 	// value (which could resolve an inherited property like `__proto__`); any value
 	// other than the multilingual variant falls back to the English default.
@@ -85,6 +106,10 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 			embeddingModel,
 			embeddingApiUrl: settings.get("mnemopi.embeddingApiUrl"),
 			embeddingApiKey: settings.get("mnemopi.embeddingApiKey"),
+			rerankerModel,
+			rerankerApiUrl,
+			rerankerApiKey,
+			reranker,
 			llm:
 				llmMode === "remote"
 					? {
@@ -98,6 +123,9 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 		llmBaseUrl: settings.get("mnemopi.llmBaseUrl"),
 		llmApiKey: settings.get("mnemopi.llmApiKey"),
 		llmModel: settings.get("mnemopi.llmModel"),
+		rerankerModel,
+		rerankerApiUrl,
+		rerankerApiKey,
 	};
 }
 

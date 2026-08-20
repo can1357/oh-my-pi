@@ -3,6 +3,8 @@ import { quoteSqlIdentifier, quoteSqlQualifiedIdentifier } from "../../util/sql"
 import { embedQuery } from "../embeddings";
 import { mmrRerank } from "../mmr";
 import { adjustWeights, classifyIntent } from "../query-intent";
+import { rerank } from "../reranker";
+import { getMnemopiRuntimeOptions } from "../runtime-options";
 import { getSynonyms, normalizeQuery, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
 import { cosineSimilarity } from "../vector-math";
@@ -843,10 +845,32 @@ function dedupCrossTierSummaryLinks(beam: BeamMemoryState, results: readonly Rec
 function rerankRecallResults(results: readonly RecallResult[], lambdaParam: number, topK: number): RecallResult[] {
 	const items: RecallMmrItem[] = results.map(result => ({
 		content: result.content,
-		score: result.score,
+		score: typeof result.rerank_score === "number" ? result.rerank_score : result.score,
 		result,
 	}));
 	return mmrRerank(items, lambdaParam, topK).map(item => item.result);
+}
+
+async function rerankWithConfiguredModel(query: string, results: readonly RecallResult[]): Promise<RecallResult[]> {
+	const runtime = getMnemopiRuntimeOptions()?.reranker;
+	if (runtime === undefined || runtime.disabled === true || results.length < 2) return [...results];
+	const candidateLimit = Math.max(2, Math.min(results.length, Math.trunc(runtime?.candidateLimit ?? 40)));
+	const candidates = results.slice(0, candidateLimit);
+	const scores = await rerank(
+		query,
+		candidates.map(result => result.content),
+	);
+	if (scores === null || scores.length !== candidates.length) return [...results];
+	const ordered = [...scores].sort((left, right) => right.relevanceScore - left.relevanceScore);
+	const reordered: RecallResult[] = [];
+	const used = new Set<number>();
+	for (const score of ordered) {
+		const result = candidates[score.index];
+		if (result === undefined || used.has(score.index)) return [...results];
+		used.add(score.index);
+		reordered.push({ ...result, rerank_score: score.relevanceScore });
+	}
+	return [...reordered, ...results.slice(candidateLimit)];
 }
 
 function updateRecallCounts(
@@ -966,7 +990,13 @@ export async function recall(
 	}
 	scored.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
 	let finalResults = dedupCrossTierSummaryLinks(beam, dedupeResults(scored));
-	if (query.length > 0 && tokens.length >= 4 && finalResults.length > topK)
+	finalResults = await rerankWithConfiguredModel(query, finalResults);
+	if (
+		query.length > 0 &&
+		tokens.length >= 4 &&
+		finalResults.length > topK &&
+		!finalResults.some(result => typeof result.rerank_score === "number")
+	)
 		finalResults = diversifyByCoverage(finalResults, tokens, topK);
 	if (options.useMmr === true && finalResults.length > 1) {
 		finalResults = rerankRecallResults(finalResults, options.mmrLambda ?? 0.7, topK);
@@ -1031,7 +1061,11 @@ export async function recallEnhanced(
 		const facts = factRecall(beam, query, Math.min(3, topK));
 		results.push(...facts);
 	}
-	results.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+	results.sort((left, right) => {
+		const leftScore = typeof left.rerank_score === "number" ? left.rerank_score : (left.score ?? 0);
+		const rightScore = typeof right.rerank_score === "number" ? right.rerank_score : (right.score ?? 0);
+		return rightScore - leftScore;
+	});
 	const finalResults = rerankRecallResults(results, options.mmrLambda ?? 0.7, topK);
 	if (enhancedOptions.updateRecallCounts !== false) updateRecallCounts(beam, finalResults, enhancedOptions);
 	return finalResults;

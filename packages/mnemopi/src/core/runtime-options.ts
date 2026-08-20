@@ -27,6 +27,28 @@ export interface MnemopiEmbeddingProvider {
 	available?(): boolean | Promise<boolean>;
 }
 
+export interface MnemopiRerankScore {
+	index: number;
+	relevanceScore: number;
+}
+
+export interface MnemopiRerankerProvider {
+	rerank(
+		query: string,
+		documents: readonly string[],
+	): readonly MnemopiRerankScore[] | Promise<readonly MnemopiRerankScore[]>;
+	available?: () => boolean | Promise<boolean>;
+}
+
+export interface MnemopiRerankerRuntimeOptions {
+	disabled?: boolean;
+	model?: string;
+	apiUrl?: string;
+	apiKey?: ApiKey;
+	provider?: MnemopiRerankerProvider;
+	candidateLimit?: number;
+}
+
 export interface MnemopiEmbeddingRuntimeOptions {
 	disabled?: boolean;
 	model?: string;
@@ -52,6 +74,7 @@ export interface MnemopiLlmRuntimeOptions {
 
 export interface MnemopiRuntimeOptions {
 	embeddings?: false | MnemopiEmbeddingRuntimeOptions;
+	reranker?: false | MnemopiRerankerRuntimeOptions;
 	llm?: false | MnemopiLlmRuntimeOptions | Model<Api> | MnemopiLlmCompletion;
 	/** Verbose diagnostics: escalates best-effort failure logs from debug to warn. */
 	debug?: boolean;
@@ -64,6 +87,15 @@ export interface ResolvedMnemopiEmbeddingRuntimeOptions {
 	apiKey?: ApiKey;
 	provider?: MnemopiEmbeddingProvider;
 	maxInputChars?: number;
+}
+
+export interface ResolvedMnemopiRerankerRuntimeOptions {
+	disabled?: boolean;
+	model?: string;
+	apiUrl?: string;
+	apiKey?: ApiKey;
+	provider?: MnemopiRerankerProvider;
+	candidateLimit?: number;
 }
 
 export interface ResolvedMnemopiLlmRuntimeOptions {
@@ -79,6 +111,7 @@ export interface ResolvedMnemopiLlmRuntimeOptions {
 
 export interface ResolvedMnemopiRuntimeOptions {
 	embeddings?: ResolvedMnemopiEmbeddingRuntimeOptions;
+	reranker?: ResolvedMnemopiRerankerRuntimeOptions;
 	llm?: ResolvedMnemopiLlmRuntimeOptions;
 	debug?: boolean;
 }

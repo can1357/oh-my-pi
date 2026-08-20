@@ -31,3 +31,27 @@ export {
 	storeMemory,
 	update,
 } from "./core/memory";
+export {
+	available as rerankerAvailable,
+	currentRerankerModel,
+	DEFAULT_RERANKER_MODEL,
+	type MnemopiRerankerProvider,
+	type MnemopiRerankScore,
+	rerank,
+	resetRerankerProviderForTests,
+	resetRerankerStateForTests,
+	setRerankerProvider,
+	setRerankerProviderForTests,
+} from "./core/reranker";
+export type {
+	MnemopiEmbeddingProvider,
+	MnemopiEmbeddingRuntimeOptions,
+	MnemopiLlmCompleteOptions,
+	MnemopiLlmCompletion,
+	MnemopiLlmRuntimeOptions,
+	MnemopiRerankerRuntimeOptions,
+	ResolvedMnemopiEmbeddingRuntimeOptions,
+	ResolvedMnemopiLlmRuntimeOptions,
+	ResolvedMnemopiRerankerRuntimeOptions,
+	ResolvedMnemopiRuntimeOptions,
+} from "./core/runtime-options";

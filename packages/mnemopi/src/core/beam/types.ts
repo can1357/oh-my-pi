@@ -234,6 +234,7 @@ export type RecallResult = RecallRowFields & {
 	id: string;
 	content: string;
 	score?: number;
+	rerank_score?: number;
 	distance?: number;
 	rank?: number;
 	tier?: RecallTierLabel;
