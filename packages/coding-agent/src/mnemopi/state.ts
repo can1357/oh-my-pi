@@ -2,6 +2,7 @@ import { dirname } from "node:path";
 import type { AgentMessage } from "@pk-nerdsaver-ai/pi-agent-core";
 import type * as MnemopiNs from "@pk-nerdsaver-ai/pi-mnemopi";
 import type { Mnemopi, RecallResult } from "@pk-nerdsaver-ai/pi-mnemopi";
+import { effectiveRecallScore } from "@pk-nerdsaver-ai/pi-mnemopi";
 import type * as MnemopiCoreNs from "@pk-nerdsaver-ai/pi-mnemopi/core";
 import type { LocalModelInitializer } from "@pk-nerdsaver-ai/pi-mnemopi/core";
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
@@ -228,7 +229,7 @@ export class MnemopiSessionState {
 			const id = result.id ? ` (id: ${result.id})` : " (id unavailable)";
 			const source = result.source ? ` [${result.source}]` : "";
 			const date = result.timestamp ? ` (${result.timestamp.slice(0, 10)})` : "";
-			const score = result.score ?? result.importance;
+			const score = effectiveRecallScore(result);
 			const confidence = typeof score === "number" ? ` c:${score.toFixed(1)}` : "";
 			return `- ${result.content}${id}${source}${date}${confidence}`;
 		});

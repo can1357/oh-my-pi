@@ -58,6 +58,7 @@ import type {
 
 export { initBeam } from "./schema";
 export type * from "./types";
+export { effectiveRecallScore } from "./types";
 
 const DEFAULT_CONFIG: BeamConfig = {
 	workingMemoryLimit: 1000,

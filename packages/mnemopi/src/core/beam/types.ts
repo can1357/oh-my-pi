@@ -250,6 +250,17 @@ export type RecallResult = RecallRowFields & {
 	voice_scores?: RecallVoiceScores;
 	metadata?: Metadata;
 };
+/**
+ * Returns the score used for ranking and presenting a recall result.
+ * Reranker output takes precedence over the original score, with importance
+ * providing the final fallback for results produced without either score.
+ */
+export function effectiveRecallScore(result: Pick<RecallResult, "rerank_score" | "score" | "importance">): number {
+	if (typeof result.rerank_score === "number") return result.rerank_score;
+	if (typeof result.score === "number") return result.score;
+	if (typeof result.importance === "number") return result.importance;
+	return 0;
+}
 
 export interface BeamStats {
 	count: number;

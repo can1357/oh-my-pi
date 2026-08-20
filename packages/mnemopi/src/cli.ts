@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { dataDir as configuredDataDir, dbPath as configuredDbPath } from "./config";
 import { BankManager, ValueError } from "./core/banks";
 import { BeamMemory } from "./core/beam";
-import type { ImportStats, RecallResult } from "./core/beam/types";
+import { effectiveRecallScore, type ImportStats, type RecallResult } from "./core/beam/types";
 import { runDiagnostics } from "./diagnose";
 import { main as runMcpMain } from "./mcp-server";
 
@@ -195,7 +195,7 @@ export const cmdRecall: CommandHandler = async (args, context) => {
 		out(context, `\nResults for: ${query}\n`);
 		for (const result of results) {
 			const content = result.content ?? "";
-			const score = typeof result.score === "number" ? result.score : 0;
+			const score = effectiveRecallScore(result);
 			out(context, `  ID: ${result.id ?? "?"}`);
 			out(context, `  Content: ${content.slice(0, 150)}${content.length > 150 ? "..." : ""}`);
 			out(context, `  Score: ${score.toFixed(3)}`);

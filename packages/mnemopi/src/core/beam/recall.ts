@@ -9,6 +9,7 @@ import { getSynonyms, normalizeQuery, STOP_WORDS as QUERY_STOP_WORDS } from "../
 import { extractTemporal } from "../temporal-parser";
 import { cosineSimilarity } from "../vector-math";
 import type { BeamMemoryState, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
+import { effectiveRecallScore } from "./types";
 
 type DbValue = string | number | null | Uint8Array;
 type Row = Record<string, unknown>;
@@ -1076,10 +1077,15 @@ function sandwichOrder(results: readonly RecallResult[]): {
 	medium: RecallResult[];
 	closing: RecallResult[];
 } {
-	const scored = [...results].sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
-	const high = scored.filter(r => (r.score ?? 0) > 0.7).slice(0, 3);
-	const medium = scored.filter(r => (r.score ?? 0) > 0.3 && (r.score ?? 0) <= 0.7).slice(0, 5);
-	const closing = scored.filter(r => !high.includes(r)).slice(0, 3);
+	const scored = [...results].sort((left, right) => effectiveRecallScore(right) - effectiveRecallScore(left));
+	const high = scored.filter(result => effectiveRecallScore(result) > 0.7).slice(0, 3);
+	const medium = scored
+		.filter(result => {
+			const score = effectiveRecallScore(result);
+			return score > 0.3 && score <= 0.7;
+		})
+		.slice(0, 5);
+	const closing = scored.filter(result => !high.includes(result)).slice(0, 3);
 	return { high, medium, closing: closing.length > 0 ? closing : high.slice(0, 2) };
 }
 
@@ -1087,7 +1093,7 @@ function factLine(result: RecallResult): string {
 	const content = result.content.slice(0, 200).trim();
 	const ts = typeof result.timestamp === "string" && result.timestamp.length > 0 ? result.timestamp.slice(0, 10) : "?";
 	const source = result.source ?? "unknown";
-	const score = result.score ?? result.importance ?? 0;
+	const score = effectiveRecallScore(result);
 	return `${content} (${ts}, ${source}, c:${score.toFixed(1)})`;
 }
 
