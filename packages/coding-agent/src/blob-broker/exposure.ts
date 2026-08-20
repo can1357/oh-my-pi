@@ -247,6 +247,23 @@ async function spawnUrlTunnel(
 	const deadline = Date.now() + READY_TIMEOUT_MS;
 	let scanned = 0;
 	let baseUrl: string | undefined;
+	const scanLog = (text: string): string | undefined => {
+		if (text.length <= scanned) return undefined;
+		if (baseUrl === undefined) {
+			for (const line of text.slice(scanned).split("\n")) {
+				const url = extract(line);
+				if (url) {
+					baseUrl = normalizeBaseUrl(url);
+					break;
+				}
+			}
+			scanned = text.lastIndexOf("\n") + 1;
+		}
+		// The URL banner can precede edge registration (cloudflared prints the
+		// hostname before any connection is live); wait for the ready marker.
+		return baseUrl !== undefined && (!readyPattern || readyPattern.test(text)) ? baseUrl : undefined;
+	};
+
 	while (Date.now() < deadline) {
 		// Capture exit before reading: a process observed dead here cannot write
 		// after the read below, so that read sees its final output. Checking exit
@@ -258,23 +275,8 @@ async function spawnUrlTunnel(
 		} catch {
 			// Log file not flushed yet; keep polling.
 		}
-		if (text.length > scanned) {
-			if (baseUrl === undefined) {
-				for (const line of text.slice(scanned).split("\n")) {
-					const url = extract(line);
-					if (url) {
-						baseUrl = normalizeBaseUrl(url);
-						break;
-					}
-				}
-				scanned = text.lastIndexOf("\n") + 1;
-			}
-			// The URL banner can precede edge registration (cloudflared prints the
-			// hostname before any connection is live); wait for the ready marker.
-			if (baseUrl !== undefined && (!readyPattern || readyPattern.test(text))) {
-				return { proc, baseUrl };
-			}
-		}
+		const readyUrl = scanLog(text);
+		if (readyUrl) return { proc, baseUrl: readyUrl };
 		if (exitCode !== null) {
 			throw new Error(`${argv[0]} exited with code ${exitCode} before reporting a tunnel URL`);
 		}
