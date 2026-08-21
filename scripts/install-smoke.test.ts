@@ -102,7 +102,7 @@ function runInstaller({
 		rmSync(fixtureDir, { recursive: true, force: true });
 	}
 }
-const POWERSHELL_HARNESS = String.raw`
+const POWERSHELL_HARNESS = `
 $ErrorActionPreference = "Stop"
 $installerPath = $env:MOCK_INSTALLER_PATH
 $script:HarnessArchitecture = $env:MOCK_WINDOWS_ARCH

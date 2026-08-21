@@ -59,12 +59,12 @@ const validModes = new Set<Mode>([
 // process. A deterministic two-file trigger was removed by disposing leaked
 // harnesses (see acp-agent-fusion-sidekick.test.ts), but CI still crashed
 // ~25s into a single 54-file process (Peak RSS ~2GB, 70+ spawns), so bounding
-// accumulation to 10 files per process is the remaining lever. Groups of 10
+// accumulation to 5 files per process is the remaining lever. Groups of 5
 // still share a process, so per-chunk process-wide behaviour is exercised; a
 // suite that needs cross-chunk state must pin its files into one chunk.
 // Tracked in NER-134; revert when a fixed Bun ships.
 const codingAgentBucketPlans: Record<CodingAgentBucket, { label: string; parallel: number; chunkSize?: number }> = {
-	singleton: { label: "singleton/global-state bucket", parallel: 1, chunkSize: 10 },
+	singleton: { label: "singleton/global-state bucket", parallel: 1, chunkSize: 5 },
 	ui: { label: "UI/TUI bucket", parallel: 1, chunkSize: 10 },
 	runtime: { label: "runtime/session bucket", parallel: 1, chunkSize: 10 },
 	native: { label: "native/tooling/browser/unit bucket", parallel: 1, chunkSize: 10 },

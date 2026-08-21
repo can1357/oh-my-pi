@@ -263,9 +263,15 @@ runs:
       - name: Install LLVM tooling (GitHub-hosted, MSVC cross)
         if: steps.detect.outputs.on_infra == 'false' && endsWith(steps.resolve.outputs.cross_target, '-msvc')
         shell: bash
+        env:
+           DEBIAN_FRONTEND: noninteractive
         run: |
-           sudo apt-get update
-           sudo apt-get install -y clang lld llvm
+           if [ -f /etc/apt/apt-mirrors.txt ]; then
+             printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+           fi
+           apt_network_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+           sudo DEBIAN_FRONTEND=noninteractive apt-get "${apt_network_options[@]}" update
+           sudo DEBIAN_FRONTEND=noninteractive apt-get "${apt_network_options[@]}" install -y clang lld llvm
       - name: Ensure baked cargo-xwin (omp-kata, MSVC cross)
         if: steps.detect.outputs.on_infra == 'true' && endsWith(steps.resolve.outputs.cross_target, '-msvc')
         uses: ./.github/actions/ensure-cargo-tool
