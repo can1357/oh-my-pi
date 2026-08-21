@@ -78,6 +78,51 @@ export type { BuiltinSlashCommand, SubcommandDef } from "./types";
 /** TUI-specific runtime accepted by `executeBuiltinSlashCommand`. */
 export type BuiltinSlashCommandRuntime = TuiSlashCommandRuntime;
 
+type ModelSlashCommandRuntime = Pick<
+	SlashCommandRuntime,
+	"session" | "settings" | "output" | "notifyTitleChanged" | "notifyConfigChanged"
+>;
+
+async function handleModelSlashCommand(
+	command: ParsedSlashCommand,
+	runtime: ModelSlashCommandRuntime,
+): Promise<SlashCommandResult> {
+	if (command.args) {
+		const modelId = command.args.trim();
+		const availableModels = runtime.session.getAvailableModels?.() ?? [];
+		let match = availableModels.find(model => model.id === modelId || `${model.provider}/${model.id}` === modelId);
+		if (!match) {
+			// Role aliases (pi/budget, pi/max-intelligence, …) and fuzzy
+			// patterns resolve through the shared role-value pipeline.
+			match = resolveModelRoleValue(modelId, availableModels, {
+				settings: runtime.settings,
+				matchPreferences: getModelMatchPreferences(runtime.settings),
+				modelRegistry: runtime.session.modelRegistry,
+			}).model;
+		}
+		if (!match) {
+			await runtime.output(
+				`Unknown model: ${modelId}. Use ACP \`session/setModel\` for picker-driven selection or list available models with /model.`,
+			);
+			return commandConsumed();
+		}
+		try {
+			await runtime.session.setModel(match);
+			await runtime.output(`Model set to ${match.provider}/${match.id}.`);
+			await runtime.notifyTitleChanged?.();
+			await runtime.notifyConfigChanged?.();
+			return commandConsumed();
+		} catch (err) {
+			await runtime.output(`Failed to set model: ${errorMessage(err)}`);
+			return commandConsumed();
+		}
+	}
+
+	const model = runtime.session.model;
+	await runtime.output(model ? `Current model: ${model.provider}/${model.id}` : "No model is currently selected.");
+	return commandConsumed();
+}
+
 function refreshStatusLine(ctx: InteractiveModeContext): void {
 	ctx.statusLine.invalidate();
 	ctx.updateEditorTopBorder();
@@ -596,49 +641,22 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		name: "model",
 		aliases: ["models"],
 		description: "Switch model for this session",
+		allowArgs: true,
 		acpDescription: "Show current model selection",
-		handle: async (command, runtime) => {
+		handle: handleModelSlashCommand,
+		handleTui: async (command, runtime) => {
+			const ctx = runtime.ctx;
 			if (command.args) {
-				const modelId = command.args.trim();
-				const availableModels = runtime.session.getAvailableModels?.() ?? [];
-				let match = availableModels.find(
-					model => model.id === modelId || `${model.provider}/${model.id}` === modelId,
-				);
-				if (!match) {
-					// Role aliases (pi/budget, pi/max-intelligence, …) and fuzzy
-					// patterns resolve through the shared role-value pipeline.
-					match = resolveModelRoleValue(modelId, availableModels, {
-						settings: runtime.settings,
-						matchPreferences: getModelMatchPreferences(runtime.settings),
-						modelRegistry: runtime.session.modelRegistry,
-					}).model;
-				}
-				if (!match) {
-					return usage(
-						`Unknown model: ${modelId}. Use ACP \`session/setModel\` for picker-driven selection or list available models with /model.`,
-						runtime,
-					);
-				}
-				try {
-					await runtime.session.setModel(match);
-					await runtime.output(`Model set to ${match.provider}/${match.id}.`);
-					await runtime.notifyTitleChanged?.();
-					await runtime.notifyConfigChanged?.();
-					return commandConsumed();
-				} catch (err) {
-					return usage(`Failed to set model: ${errorMessage(err)}`, runtime);
-				}
+				const result = await handleModelSlashCommand(command, {
+					session: ctx.viewSession,
+					settings: ctx.settings,
+					output: text => ctx.showStatus(text),
+				});
+				ctx.editor.setText("");
+				return result;
 			}
-
-			const model = runtime.session.model;
-			await runtime.output(
-				model ? `Current model: ${model.provider}/${model.id}` : "No model is currently selected.",
-			);
-			return commandConsumed();
-		},
-		handleTui: (_command, runtime) => {
-			runtime.ctx.showModelSelector();
-			runtime.ctx.editor.setText("");
+			ctx.showModelSelector();
+			ctx.editor.setText("");
 		},
 	},
 	{

@@ -17,7 +17,12 @@ import { createPromptActionAutocompleteProvider } from "../../modes/prompt-actio
 import type { InteractiveModeContext } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
 import { SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails, USER_INTERRUPT_LABEL } from "../../session/messages";
-import { executeBuiltinSlashCommand, shouldPersistBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import {
+	executeBuiltinSlashCommand,
+	lookupBuiltinSlashCommand,
+	shouldPersistBuiltinSlashCommand,
+} from "../../slash-commands/builtin-registry";
+import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { isTinyTitleLocalModelKey } from "../../tiny/models";
 import { isLowSignalTitleInput } from "../../tiny/text";
 import { tinyTitleClient } from "../../tiny/title-client";
@@ -968,7 +973,7 @@ export class InputController {
 		};
 	}
 
-	/** Submit editor text to the focused subagent session (chat-only focus policy). */
+	/** Submit chat or focused-session controls to the viewed subagent session. */
 	async #submitToFocusedSession(text: string, streamingBehavior: "steer" | "followUp"): Promise<void> {
 		const target = this.ctx.viewSession;
 		// An empty submit only aborts/queues when there is truly no input —
@@ -982,7 +987,15 @@ export class InputController {
 			}
 			return;
 		}
-		if (text.startsWith("/") || text.startsWith("!") || parsePythonCommandInput(text)) {
+		const slashCommand = parseSlashCommand(text);
+		if (slashCommand?.args && lookupBuiltinSlashCommand(slashCommand.name)?.name === "model") {
+			const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx });
+			if (slashResult === true) {
+				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+				return;
+			}
+		}
+		if (slashCommand || text.startsWith("/") || text.startsWith("!") || parsePythonCommandInput(text)) {
 			this.ctx.showStatus("Commands run in the main session — press ←← to return first");
 			return; // editor text not cleared: Editor does not auto-clear on submit
 		}
@@ -1754,27 +1767,24 @@ export class InputController {
 	}
 
 	cycleThinkingLevel(): void {
-		if (this.ctx.focusedAgentId) {
-			this.ctx.showStatus("Model/thinking apply to the main session — press ←← to return first");
-			return;
-		}
-		const newLevel = this.ctx.session.cycleThinkingLevel();
+		// Target the viewed session so model/thinking changes work while an
+		// agent-hub subagent is focused, not just on the main session.
+		const newLevel = this.ctx.viewSession.cycleThinkingLevel();
 		if (newLevel === undefined) {
 			this.ctx.showStatus("Current model does not support thinking");
 		} else {
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
+			if (this.ctx.focusedAgentId) {
+				this.ctx.showStatus(`${this.ctx.focusedAgentId} thinking: ${newLevel}`);
+			}
 		}
 	}
 
 	async cycleRoleModel(direction: "forward" | "backward" = "forward"): Promise<void> {
-		if (this.ctx.focusedAgentId) {
-			this.ctx.showStatus("Model/thinking apply to the main session — press ←← to return first");
-			return;
-		}
 		try {
 			const cycleOrder = settings.get("cycleOrder");
-			const result = await this.ctx.session.cycleRoleModels(cycleOrder, direction);
+			const result = await this.ctx.viewSession.cycleRoleModels(cycleOrder, direction);
 			if (!result) {
 				this.ctx.showStatus("Only one role model available");
 				return;
@@ -1782,6 +1792,12 @@ export class InputController {
 
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
+			if (this.ctx.focusedAgentId) {
+				this.ctx.showStatus(
+					`${this.ctx.focusedAgentId} model: ${result.model.name || result.model.id} (${result.role})`,
+				);
+				return;
+			}
 			// The status line already reports the resolved model + thinking level, so
 			// the cycle status is just a status-line-style chip track (active role
 			// filled), matching the plan-approval model slider. It renders into its

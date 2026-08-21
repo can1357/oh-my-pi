@@ -56,6 +56,7 @@ async function createContext() {
 	let editorText = "";
 	const keyMap: Record<string, string[]> = {
 		"app.display.reset": ["ctrl+l"],
+		"app.thinking.cycle": ["ctrl+tab"],
 		"app.model.selectTemporary": ["ctrl+y"],
 		"app.model.select": ["alt+m"],
 		"app.retry": ["alt+r"],
@@ -84,6 +85,7 @@ async function createContext() {
 	const prompt = vi.fn(async () => {});
 	const retry = vi.fn(async () => true);
 	const abort = vi.fn(async () => {});
+	const cycleThinkingLevel = vi.fn(() => "low" as const);
 	const session = {
 		isStreaming: false,
 		isCompacting: false,
@@ -95,6 +97,7 @@ async function createContext() {
 		queuedMessageCount: 0,
 		abort,
 		retry,
+		cycleThinkingLevel,
 	};
 	const updatePendingMessagesDisplay = vi.fn();
 	const handleBtwBranchKey = vi.fn(async () => true);
@@ -189,6 +192,7 @@ async function createContext() {
 		showHistorySearch: vi.fn(),
 		toggleThinkingBlockVisibility: vi.fn(),
 		showModelSelector,
+		statusLine: { invalidate: vi.fn() },
 		updateEditorBorderColor: vi.fn(),
 		hasActiveBtw: vi.fn(() => false),
 		handleBtwBranchKey,
@@ -217,6 +221,7 @@ async function createContext() {
 			retry,
 			abort,
 			resetDisplay,
+			cycleThinkingLevel,
 			handleBtwBranchKey,
 			addInputListener,
 			canBranchBtw,
@@ -250,6 +255,22 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
 		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
+	});
+	it("routes the configured Ctrl+Tab effort cycle to the focused session", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const focusedCycleThinkingLevel = vi.fn(() => "high" as const);
+		(ctx as unknown as { focusedAgentId: string }).focusedAgentId = "worker";
+		(ctx as unknown as { viewSession: { cycleThinkingLevel: typeof focusedCycleThinkingLevel } }).viewSession = {
+			cycleThinkingLevel: focusedCycleThinkingLevel,
+		};
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.thinking.cycle", ["ctrl+tab"]);
+		editor.onCycleThinkingLevel?.();
+
+		expect(focusedCycleThinkingLevel).toHaveBeenCalledTimes(1);
+		expect(spies.cycleThinkingLevel).not.toHaveBeenCalled();
 	});
 	it("registers the todo visibility toggle as a custom key handler", async () => {
 		const { InputController, ctx, customHandlers, spies } = await createContext();
