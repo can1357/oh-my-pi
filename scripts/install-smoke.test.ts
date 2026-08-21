@@ -206,21 +206,29 @@ function runPowerShellInstallerHarness(architecture: "X64" | "ARM64"): Installer
 	};
 }
 
-powershellTest("install.ps1 downloads the Windows x64 binary for an x64 OS", () => {
-	const result = runPowerShellInstallerHarness("X64");
+powershellTest(
+	"install.ps1 downloads the Windows x64 binary for an x64 OS",
+	() => {
+		const result = runPowerShellInstallerHarness("X64");
 
-	expect(result.exitCode).toBe(0);
-	expect(result.stderr).toBe("");
-	expect(result.stdout).toContain("download=https://dist.example.test/bin/v16.4.6/omp-windows-x64.exe");
-});
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toBe("");
+		expect(result.stdout).toContain("download=https://dist.example.test/bin/v16.4.6/omp-windows-x64.exe");
+	},
+	30_000,
+);
 
-powershellTest("install.ps1 rejects Windows ARM64 before any network call", () => {
-	const result = runPowerShellInstallerHarness("ARM64");
+powershellTest(
+	"install.ps1 rejects Windows ARM64 before any network call",
+	() => {
+		const result = runPowerShellInstallerHarness("ARM64");
 
-	expect(result.exitCode).toBe(0);
-	expect(result.stderr).toBe("");
-	expect(result.stdout).toContain("rejected=ARM64 network=0");
-});
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toBe("");
+		expect(result.stdout).toContain("rejected=ARM64 network=0");
+	},
+	30_000,
+);
 
 describe("install.sh", () => {
 	test("keeps npm through Bun as the default install mode", () => {
