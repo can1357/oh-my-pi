@@ -32,7 +32,8 @@ from harness.cli.evaluate_verifier import (
     _normalize_candidate,
 )
 from harness.fusion.verifier_calibration import (
-    DEFAULT_PROMPT_DIGEST,
+    CANONICAL_CALIBRATION_CRITERIA,
+    compute_criteria_digest,
     judge_config_key,
     resolve_path,
     save_entry,
@@ -87,7 +88,7 @@ def calibrate_verifier(
         "The fitted calibration is only ever applied to comparisons run under this "
         "exact model + --n-verifications, never a different one.",
     ),
-    n_verifications: int = typer.Option(1, "--n-verifications"),
+    n_verifications: int = typer.Option(5, "--n-verifications"),
     runner_path: Path = typer.Option(DEFAULT_RUNNER_PATH, "--runner-path"),
     output: Path | None = typer.Option(None, "--output", help="Defaults to resolve_path()'s lookup chain."),
 ) -> None:
@@ -110,7 +111,7 @@ def calibrate_verifier(
             "refusing to fit calibration against an untracked prompt."
         )
     use_mock = model == "mock"
-    client = None if use_mock else runner.create_openai_client(model=model)
+    client = runner.create_judge_client(model, mock=use_mock)
 
     rows = _load_rows(labeled)
 
@@ -119,6 +120,7 @@ def calibrate_verifier(
     skipped_ties = 0
     skipped_malformed = 0
     batch_prompt_digest: str | None = None
+    batch_criteria_digest: str | None = None
 
     for row in rows:
         expected_winner = row.get("expected_winner", "tie")
@@ -137,7 +139,14 @@ def calibrate_verifier(
             skipped_malformed += 1
             continue
 
-        config = _build_runner_config(row, candidates, n_verifications, model=model, mock=use_mock)
+        config = _build_runner_config(
+            row,
+            candidates,
+            n_verifications,
+            model=model,
+            mock=use_mock,
+            criteria=CANONICAL_CALIBRATION_CRITERIA,
+        )
         result = runner.run_compare(client, config)
         pairwise = result.get("pairwise") or []
         if not pairwise:
@@ -150,15 +159,12 @@ def calibrate_verifier(
             {"problem": task_name, "trace": trace_a, "trial_name": "A", "reward": 1 if expected_winner == "A" else 0},
             {"problem": task_name, "trace": trace_b, "trial_name": "B", "reward": 1 if expected_winner == "B" else 0},
         ]
-        row_gt_note = (
-            config["ground_truth_note"]
-            if "ground_truth_note" in config and config["ground_truth_note"] is not None
-            else runner.DEFAULT_GROUND_TRUTH_NOTE
-        )
+        row_gt_note = runner.effective_ground_truth_note(config.get("ground_truth_note"))
         row_granularity = config.get("granularity", 20)
         row_prompt_digest = runner.verifier_protocol_digest(
             ground_truth_note=row_gt_note, granularity=row_granularity
         )
+        row_criteria_digest = compute_criteria_digest(config["criteria"])
         if not isinstance(row_prompt_digest, str) or len(row_prompt_digest) != 16:
             raise typer.BadParameter(
                 f"Runner verifier_protocol_digest() returned an invalid digest: {row_prompt_digest!r}"
@@ -170,8 +176,21 @@ def calibrate_verifier(
                 "calibrate-verifier cannot fit a single calibration across rows with "
                 "differing ground_truth_notes or protocol digests."
             )
+        if batch_criteria_digest is None:
+            batch_criteria_digest = row_criteria_digest
+        elif row_criteria_digest != batch_criteria_digest:
+            raise typer.BadParameter(
+                "calibrate-verifier cannot fit a single calibration across rows with differing criteria."
+            )
         prompt_digest = batch_prompt_digest
-        judge_key = judge_config_key(model, n_verifications, prompt_digest=prompt_digest)
+        criteria_digest = batch_criteria_digest
+        judge_key = judge_config_key(
+            model,
+            n_verifications,
+            prompt_digest=prompt_digest,
+            criteria_digest=criteria_digest,
+            scorer_id=runner.SCORER_IMPLEMENTATION_ID,
+        )
         scores[f"{CRITERION_ID}|{task_name}|0,1|0"] = {
             "score_i": pair["score_a"],
             "score_j": pair["score_b"],
@@ -186,10 +205,17 @@ def calibrate_verifier(
         }
 
     swing_tasks = list(tasks.keys())
-    if batch_prompt_digest is None:
-        raise typer.BadParameter("No valid labeled rows were processed to determine a prompt digest.")
+    if batch_prompt_digest is None or batch_criteria_digest is None:
+        raise typer.BadParameter("No valid labeled rows were processed to determine calibration digests.")
     prompt_digest = batch_prompt_digest
-    judge_key = judge_config_key(model, n_verifications, prompt_digest=prompt_digest)
+    criteria_digest = batch_criteria_digest
+    judge_key = judge_config_key(
+        model,
+        n_verifications,
+        prompt_digest=prompt_digest,
+        criteria_digest=criteria_digest,
+        scorer_id=runner.SCORER_IMPLEMENTATION_ID,
+    )
     report = calibrate_and_evaluate(tasks, swing_tasks, scores, [CRITERION_ID], judge_key, n_reps=1)
 
     rendered = json.dumps(
@@ -235,6 +261,8 @@ def calibrate_verifier(
     entry = {
         "config_digest": judge_key,
         "prompt_digest": prompt_digest,
+        "criteria_digest": criteria_digest,
+        "scorer_id": runner.SCORER_IMPLEMENTATION_ID,
         "platt_a": report["platt_a"],
         "platt_b": report["platt_b"],
         "fitted_at": datetime.now(timezone.utc).isoformat(),

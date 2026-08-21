@@ -18,7 +18,7 @@ Input JSON shape:
   "candidates": [{"id":"...","summary":"...","content":"..."}],
   "n_verifications": 3,
   "granularity": 20,
-  "model": "gemini-2.5-flash",
+  "model": "9router/gemini-3-5-flash-medium-round-robin",
   "calibration_path": "optional override path to verifier_calibration.json"
 }
 """
@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from itertools import combinations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from harness.fusion.verifier_calibration import calibrate as calibrate_verifier_score
+from harness.fusion.verifier_calibration import calibrate as calibrate_verifier_score, compute_criteria_digest
 from harness.fusion.verifier_scoring import confidence_from_margin, weighted_stddev, winner_from_scores
 
 
@@ -62,6 +62,14 @@ SCALE_DESCRIPTION = (
 DEFAULT_GROUND_TRUTH_NOTE = (
     "Prefer concrete evidence, observed outputs, tests, and explicit artifacts over polished narration or self-reported success."
 )
+SCORER_IMPLEMENTATION_ID = "lav-swap-agg-v1"
+
+
+def effective_ground_truth_note(value: Any = None) -> str:
+    if value is None:
+        return DEFAULT_GROUND_TRUTH_NOTE
+    text = str(value).strip()
+    return text if text else DEFAULT_GROUND_TRUTH_NOTE
 EVIDENCE_FIRST_INSTRUCTION = (
     "Before assigning any score, list exactly 3 evidence observations. Each observation must quote or paraphrase a concrete fact from the candidate, evidence, logs, tests, or task requirements. Do not count style, fluency, or confidence as evidence unless the criterion is explicitly about style. After the 3 observations, output the final score tag exactly as requested."
 )
@@ -86,6 +94,7 @@ def verifier_protocol_digest(
     Any edit to prompt wording, scoring rules, evidence tags, or ground truth note
     directly changes this digest, invalidating stale calibration parameters automatically.
     """
+    ground_truth_note = effective_ground_truth_note(ground_truth_note)
     material = json.dumps(
         {
             "role_instruction": COMPARE_ROLE_INSTRUCTION,
@@ -234,12 +243,12 @@ def normalize_input(payload: Dict[str, Any]) -> Dict[str, Any]:
         "mode": mode,
         "task": task,
         "context": str(payload.get("context") or "").strip(),
-        "ground_truth_note": str(payload.get("ground_truth_note") or DEFAULT_GROUND_TRUTH_NOTE).strip(),
+        "ground_truth_note": effective_ground_truth_note(payload.get("ground_truth_note")),
         "criteria": normalized_criteria,
         "candidates": normalized_candidates,
         "n_verifications": n_verifications,
         "granularity": granularity,
-        "model": str(payload.get("model") or "gemini-2.5-flash").strip(),
+        "model": str(payload.get("model") or "9router/gemini-3-5-flash-medium-round-robin").strip(),
         "mock": bool(payload.get("mock") or False),
         "calibration_path": cal_path,
     }
@@ -424,6 +433,14 @@ def _is_openai_compatible(model: str) -> bool:
         or low.startswith("o1") or low.startswith("o3") or low.startswith("o4")
         or low in ("openai", "codex")
     )
+
+
+def create_judge_client(model: str, mock: bool = False) -> Any:
+    if mock or model == "mock":
+        return None
+    if _is_openai_compatible(model):
+        return create_openai_client(model=model)
+    return create_gemini_client()
 
 
 def create_gemini_client() -> Any:
@@ -616,13 +633,19 @@ def score_audit_candidate(client: Any, config: Dict[str, Any], candidate: Dict[s
     }
 
 
+def select_overall_winner(ranking: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not ranking:
+        return None
+    if len(ranking) == 1:
+        return ranking[0]
+    if ranking[0]["wins"] == ranking[1]["wins"] and ranking[0]["mean_pair_score"] == ranking[1]["mean_pair_score"]:
+        return None
+    return ranking[0]
+
+
 def run_compare(client: Any, config: Dict[str, Any]) -> Dict[str, Any]:
-    effective_ground_truth_note = (
-        config["ground_truth_note"]
-        if "ground_truth_note" in config and config["ground_truth_note"] is not None
-        else DEFAULT_GROUND_TRUTH_NOTE
-    )
-    config = {**config, "ground_truth_note": effective_ground_truth_note}
+    ground_truth_note = effective_ground_truth_note(config.get("ground_truth_note"))
+    config = {**config, "ground_truth_note": ground_truth_note}
     candidates = config["candidates"]
     criteria = config["criteria"]
     wins = {candidate["id"]: 0.0 for candidate in candidates}
@@ -725,9 +748,8 @@ def run_compare(client: Any, config: Dict[str, Any]) -> Dict[str, Any]:
         if config.get("calibration_path"):
             _calibration_kwargs["path"] = config["calibration_path"]
         granularity = config.get("granularity", GRANULARITY)
-        prompt_digest = verifier_protocol_digest(
-            ground_truth_note=effective_ground_truth_note, granularity=granularity
-        )
+        prompt_digest = verifier_protocol_digest(ground_truth_note=ground_truth_note, granularity=granularity)
+        criteria_digest = compute_criteria_digest(criteria)
         try:
             calibrated_score_a = calibrate_verifier_score(
                 pair_mean_a,
@@ -735,6 +757,8 @@ def run_compare(client: Any, config: Dict[str, Any]) -> Dict[str, Any]:
                 config["n_verifications"],
                 granularity=granularity,
                 prompt_digest=prompt_digest,
+                criteria_digest=criteria_digest,
+                scorer_id=SCORER_IMPLEMENTATION_ID,
                 **_calibration_kwargs,
             )
             calibrated_score_b = calibrate_verifier_score(
@@ -743,6 +767,8 @@ def run_compare(client: Any, config: Dict[str, Any]) -> Dict[str, Any]:
                 config["n_verifications"],
                 granularity=granularity,
                 prompt_digest=prompt_digest,
+                criteria_digest=criteria_digest,
+                scorer_id=SCORER_IMPLEMENTATION_ID,
                 **_calibration_kwargs,
             )
             calibrated_margin = (
@@ -786,7 +812,7 @@ def run_compare(client: Any, config: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "mode": "compare",
-        "winner": ranking[0] if ranking else None,
+        "winner": select_overall_winner(ranking),
         "ranking": ranking,
         "pairwise": pairwise_results,
         "estimated_calls": call_count,
@@ -861,12 +887,7 @@ def main() -> int:
     }
 
     try:
-        if config["mock"]:
-            client = None
-        elif _is_openai_compatible(config["model"]):
-            client = create_openai_client(model=config["model"])
-        else:
-            client = create_gemini_client()
+        client = create_judge_client(config["model"], mock=config["mock"])
         if config["mode"] == "compare":
             result["result"] = run_compare(client, config)
         else:

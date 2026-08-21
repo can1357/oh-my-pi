@@ -50,6 +50,28 @@ DEFAULT_PROMPT_PROTOCOL = (
 
 DEFAULT_PROMPT_DIGEST = hashlib.sha256(DEFAULT_PROMPT_PROTOCOL.encode("utf-8")).hexdigest()[:16]
 
+CANONICAL_CALIBRATION_CRITERIA = [
+    {"id": "overall", "name": "Overall correctness", "description": "Overall correctness"}
+]
+
+
+def compute_criteria_digest(criteria: list[dict[str, Any]] | None) -> str:
+    """Hash score-shaping criteria in their declared order."""
+    source = criteria or CANONICAL_CALIBRATION_CRITERIA
+    canonical = [
+        {
+            "name": str(criterion.get("name") or ""),
+            "description": str(criterion.get("description") or ""),
+        }
+        for criterion in source
+    ]
+    material = json.dumps(canonical, sort_keys=True)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+DEFAULT_CRITERIA_DIGEST = compute_criteria_digest(CANONICAL_CALIBRATION_CRITERIA)
+DEFAULT_SCORER_ID = "lav-swap-agg-v1"
+
 
 def resolve_path(path: Path | str | None = None) -> Path:
     """Resolve the calibration registry location, in priority order:
@@ -72,18 +94,18 @@ def compute_verifier_config_digest(
     n_verifications: int,
     granularity: int = 20,
     prompt_digest: str = DEFAULT_PROMPT_DIGEST,
+    criteria_digest: str = DEFAULT_CRITERIA_DIGEST,
+    scorer_id: str = DEFAULT_SCORER_ID,
 ) -> str:
-    """Deterministic key identifying the verifier configuration a Platt fit
-    is valid for. Recomputed from the model id, repetition count, scoring
-    granularity, and prompt/protocol digest -- a fit for one configuration or
-    prompt must never be silently reused for a different one; re-fitting under
-    a new key is the only way to pick up a model, protocol, or prompt change."""
+    """Deterministic key identifying the score-shaping verifier configuration."""
     canonical = json.dumps(
         {
+            "criteria_digest": criteria_digest,
             "granularity": granularity,
             "model": model,
             "n_verifications": n_verifications,
             "prompt_digest": prompt_digest,
+            "scorer_id": scorer_id,
         },
         sort_keys=True,
     )
@@ -95,8 +117,17 @@ def judge_config_key(
     n_verifications: int,
     granularity: int = 20,
     prompt_digest: str = DEFAULT_PROMPT_DIGEST,
+    criteria_digest: str = DEFAULT_CRITERIA_DIGEST,
+    scorer_id: str = DEFAULT_SCORER_ID,
 ) -> str:
-    return compute_verifier_config_digest(model, n_verifications, granularity, prompt_digest)
+    return compute_verifier_config_digest(
+        model,
+        n_verifications,
+        granularity,
+        prompt_digest,
+        criteria_digest,
+        scorer_id,
+    )
 
 
 def load_registry(path: Path | str | None = None) -> dict[str, Any]:
@@ -169,19 +200,20 @@ def calibrate(
     n_verifications: int,
     granularity: int = 20,
     prompt_digest: str = DEFAULT_PROMPT_DIGEST,
+    criteria_digest: str = DEFAULT_CRITERIA_DIGEST,
+    scorer_id: str = DEFAULT_SCORER_ID,
     path: Path | str | None = None,
 ) -> float | None:
-    """Look up a fitted calibration for this exact verifier configuration
-    and prompt digest, and apply it to `raw_score`. Returns None -- never a
-    guessed or uncalibrated stand-in, and never a crash -- both when no
-    calibration has been fitted for this configuration yet, and when the
-    stored entry fails `_valid_platt_entry` (digest mismatch, non-positive,
-    non-finite, missing, non-numeric, or overflow coefficients); callers must
-    treat either case as "calibration unavailable" and simply omit the
-    calibrated field, not fall back to treating the raw score as if it were
-    calibrated."""
+    """Apply a fit only when its complete score-shaping configuration matches."""
     try:
-        digest = compute_verifier_config_digest(model, n_verifications, granularity, prompt_digest)
+        digest = compute_verifier_config_digest(
+            model,
+            n_verifications,
+            granularity,
+            prompt_digest,
+            criteria_digest,
+            scorer_id,
+        )
         entry = load_entry(digest, path)
         if entry is None or not _valid_platt_entry(entry, expected_digest=digest):
             return None

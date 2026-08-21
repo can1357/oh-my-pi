@@ -7,6 +7,7 @@ fitted one (tested in `test_verifier_calibration.py`) never does.
 """
 
 import json
+import importlib
 from pathlib import Path
 
 import pytest
@@ -17,13 +18,30 @@ from typer.testing import CliRunner
 
 from harness.cli.evaluate_verifier import _load_runner_module, DEFAULT_RUNNER_PATH
 from harness.cli.main import app
-from harness.fusion.verifier_calibration import calibrate, judge_config_key, load_entry, save_entry
+from harness.fusion.verifier_calibration import (
+    CANONICAL_CALIBRATION_CRITERIA,
+    calibrate,
+    compute_criteria_digest,
+    judge_config_key,
+    load_entry,
+    save_entry,
+)
 
 
 def _labeled_suite(tmp_path: Path, rows: list[dict]) -> Path:
     suite = tmp_path / "labeled.jsonl"
     suite.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
     return suite
+
+
+def _calibration_key(runner, n_verifications: int) -> str:
+    return judge_config_key(
+        "mock",
+        n_verifications,
+        prompt_digest=runner.verifier_protocol_digest(),
+        criteria_digest=compute_criteria_digest(CANONICAL_CALIBRATION_CRITERIA),
+        scorer_id=runner.SCORER_IMPLEMENTATION_ID,
+    )
 
 
 def _task_row(task_id: str, winner: str) -> dict:
@@ -69,7 +87,7 @@ def test_calibrate_verifier_fits_and_saves_a_scoped_entry(tmp_path: Path):
 
     assert result.exit_code == 0, result.output
     runner = _load_runner_module(DEFAULT_RUNNER_PATH)
-    key = judge_config_key("mock", 1, prompt_digest=runner.verifier_protocol_digest(ground_truth_note=""))
+    key = _calibration_key(runner, 1)
     entry = load_entry(key, output)
     assert entry is not None
     assert "platt_a" in entry and "platt_b" in entry
@@ -168,19 +186,18 @@ def test_run_compare_calibrated_fields_flow_from_a_real_fit(tmp_path: Path):
     )
     assert fit.exit_code == 0, fit.output
     runner = _load_runner_module(DEFAULT_RUNNER_PATH)
-    key = judge_config_key("mock", 1, prompt_digest=runner.verifier_protocol_digest(ground_truth_note=""))
+    key = _calibration_key(runner, 5)
     assert load_entry(key, output) is not None
     config = {
         "mode": "compare",
         "task": "test",
         "context": "",
-        "ground_truth_note": "",
-        "criteria": [{"id": "c0", "name": "correctness", "description": "is it correct"}],
+        "criteria": CANONICAL_CALIBRATION_CRITERIA,
         "candidates": [
             {"id": "A", "summary": "good", "content": "tests passed successfully"},
             {"id": "B", "summary": "bad", "content": "errors remain"},
         ],
-        "n_verifications": 1,
+        "n_verifications": 5,
         "granularity": 20,
         "model": "mock",
         "mock": True,
@@ -224,13 +241,12 @@ def test_run_compare_calibration_path_is_isolated_per_config(tmp_path: Path):
         "mode": "compare",
         "task": "test",
         "context": "",
-        "ground_truth_note": "",
-        "criteria": [{"id": "c0", "name": "correctness", "description": "is it correct"}],
+        "criteria": CANONICAL_CALIBRATION_CRITERIA,
         "candidates": [
             {"id": "A", "summary": "good", "content": "tests passed successfully"},
             {"id": "B", "summary": "bad", "content": "errors remain"},
         ],
-        "n_verifications": 1,
+        "n_verifications": 5,
         "granularity": 20,
         "model": "mock",
         "mock": True,
@@ -265,3 +281,73 @@ def test_calibrate_handles_huge_integer_overflow_without_raising(tmp_path: Path)
     huge_int = 10**400
     save_entry(key, {"config_digest": key, "platt_a": huge_int, "platt_b": 0}, path)
     assert calibrate(0.9, "mock", 1, path=path) is None
+
+
+def test_calibration_fit_applies_to_default_extension_path(tmp_path: Path):
+    suite = _labeled_suite(tmp_path, _synthetic_rows(20))
+    output = tmp_path / "calibration.json"
+
+    fit = CliRunner().invoke(
+        app,
+        ["verifier", "calibrate", "--labeled", str(suite), "--model", "mock", "--output", str(output)],
+    )
+    assert fit.exit_code == 0, fit.output
+
+    fugu_runner = _load_runner_module(DEFAULT_RUNNER_PATH)
+    key = _calibration_key(fugu_runner, 5)
+    assert load_entry(key, output) is not None
+    extension_runner_path = (
+        Path(__file__).resolve().parents[4]
+        / "packages/verifier-extension/skills/llm-as-verifier/scripts/lav_runner.py"
+    )
+    assert extension_runner_path.is_file()
+    extension_runner = _load_runner_module(extension_runner_path)
+    config = {
+        "mode": "compare",
+        "task": "test",
+        "context": "",
+        "criteria": CANONICAL_CALIBRATION_CRITERIA,
+        "candidates": [
+            {"id": "A", "summary": "good", "content": "tests passed successfully"},
+            {"id": "B", "summary": "bad", "content": "errors remain"},
+        ],
+        "n_verifications": 5,
+        "granularity": 20,
+        "model": "mock",
+        "mock": True,
+        "calibration_path": str(output),
+    }
+    pair = extension_runner.run_compare(None, config)["pairwise"][0]
+    assert pair["calibrated_score_a"] is not None
+    assert pair["calibrated_score_b"] is not None
+    assert pair["calibrated_margin"] is not None
+
+    style_pair = extension_runner.run_compare(
+        None,
+        {**config, "criteria": [{"id": "x", "name": "style", "description": "tone only"}]},
+    )["pairwise"][0]
+    assert style_pair["calibrated_score_a"] is None
+    assert style_pair["calibrated_score_b"] is None
+    assert style_pair["calibrated_margin"] is None
+
+
+def test_calibrate_verifier_uses_gemini_client_for_bare_gemini_id(tmp_path: Path, monkeypatch):
+    module = importlib.import_module("harness.cli.calibrate_verifier")
+    runner = _load_runner_module(DEFAULT_RUNNER_PATH)
+    calls: list[str] = []
+    monkeypatch.setattr(runner, "create_gemini_client", lambda: calls.append("gemini") or object())
+    monkeypatch.setattr(runner, "create_openai_client", lambda **_kwargs: calls.append("openai") or object())
+    monkeypatch.setattr(
+        runner,
+        "run_compare",
+        lambda _client, _config: {"pairwise": [{"score_a": 0.9, "score_b": 0.1}]},
+    )
+    monkeypatch.setattr(module, "_load_runner_module", lambda _path: runner)
+
+    result = CliRunner().invoke(
+        app,
+        ["verifier", "calibrate", "--labeled", str(_labeled_suite(tmp_path, [_task_row("one", "A")])), "--model", "gemini-2.5-flash"],
+    )
+
+    assert result.exit_code == 1
+    assert calls == ["gemini"]

@@ -13,6 +13,7 @@ import {
 	planSubagentOrchestration,
 	readEvidenceBlocks,
 	runVerifierRequest,
+	selectOverallWinner,
 	truncate,
 	weightedMean,
 	weightedStdDev,
@@ -69,6 +70,23 @@ describe("chooseWinner", () => {
 
 	it("calls a tie when scores are within the threshold", () => {
 		expect(chooseWinner(0.5, 0.51, 0.05)).toBe("tie");
+	});
+});
+
+describe("selectOverallWinner", () => {
+	it("abstains for an equal top ranking and keeps a decisive top rank", () => {
+		expect(
+			selectOverallWinner([
+				{ wins: 1, mean_pair_score: 0.5 },
+				{ wins: 1, mean_pair_score: 0.5 },
+			]),
+		).toBeNull();
+		expect(
+			selectOverallWinner([
+				{ wins: 2, mean_pair_score: 0.5 },
+				{ wins: 1, mean_pair_score: 0.9 },
+			]),
+		).toEqual({ wins: 2, mean_pair_score: 0.5 });
 	});
 });
 
@@ -281,6 +299,48 @@ describe("isVerifierRequestParams", () => {
 	});
 });
 
+describe("runVerifierRequest task-model default", () => {
+	it("resolves pi/task through the extension model facade and uses the native backend", async () => {
+		const taskModel = {
+			provider: "kimi-code",
+			id: "kimi-for-coding",
+			name: "kimi-for-coding",
+			api: "openai-completions",
+			contextWindow: 1048576,
+			maxTokens: 8192,
+			supportsTools: true,
+		};
+		const resolveCalls: string[] = [];
+		const ctx: any = {
+			cwd: process.cwd(),
+			models: {
+				resolve: (spec: string) => {
+					resolveCalls.push(spec);
+					return taskModel;
+				},
+			},
+			modelRegistry: { getAll: () => [] },
+		};
+
+		const run = await runVerifierRequest({} as any, ctx, {
+			mode: "compare",
+			task: "Test task",
+			candidates: [
+				{ id: "cand-1", content: "pass all tests" },
+				{ id: "cand-2", content: "fail tests" },
+			],
+			criteria: [{ name: "Overall correctness", description: "Overall correctness" }],
+			mock: true,
+		});
+
+		expect(resolveCalls).toEqual(["pi/task"]);
+		expect(run.backend).toBe("pi-model-ensemble");
+		expect(run.resolvedModels).toEqual([
+			{ spec: "pi/task", provider: "kimi-code", id: "kimi-for-coding", display: "kimi-code:kimi-for-coding" },
+		]);
+	});
+});
+
 describe("extractTextSource", () => {
 	it("reads a text file", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "lav-test-"));
@@ -386,16 +446,33 @@ describe("buildSummaryLines calibration rendering", () => {
 		const lines = buildSummaryLines("compare", "gemini-python", [], [], result, false);
 		expect(lines.some(l => l.includes("Calibrated pairwise (a vs b): a=0.950, b=0.050 (margin +0.900)"))).toBe(true);
 	});
+
+	it("renders a top-level tie without promoting the first ranked candidate", () => {
+		const result: any = {
+			mode: "compare",
+			winner: null,
+			ranking: [
+				{ id: "a", wins: 1, mean_pair_score: 0.5, mean_pair_confidence: 0.8, summary: "a" },
+				{ id: "b", wins: 1, mean_pair_score: 0.5, mean_pair_confidence: 0.8, summary: "b" },
+			],
+			pairwise: [],
+			estimated_calls: 2,
+		};
+		const lines = buildSummaryLines("compare", "gemini-python", [], [], result, true);
+		expect(lines).toContain("Winner: tie");
+		expect(lines).toContain("Winner confidence: 0.000");
+		expect(lines).not.toContain("Winner: a");
+	});
 });
 
-describe("runVerifierRequest python backend with calibration", () => {
+describe("runVerifierRequest Python backend with calibration", () => {
 	it("executes lav_runner.py, performs calibration lookup, and populates calibrated summary lines", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "lav-cal-test-"));
 		const calPath = path.join(tempDir, "calibration.json");
 
 		const scriptsDir = path.join(import.meta.dir, "..", "..", "skills", "llm-as-verifier", "scripts");
 		const pythonBin = Bun.which("python") ?? Bun.which("python3") ?? "python";
-		const pyScript = `import sys, os; sys.path.insert(0, r"${scriptsDir}"); from harness.fusion.verifier_calibration import judge_config_key; import lav_runner; print(judge_config_key("gemini-2.5-flash", 1, prompt_digest=lav_runner.verifier_protocol_digest()))`;
+		const pyScript = `import sys; sys.path.insert(0, r"${scriptsDir}"); from harness.fusion.verifier_calibration import CANONICAL_CALIBRATION_CRITERIA, compute_criteria_digest, judge_config_key; import lav_runner; print(judge_config_key("gemini-2.5-flash", 1, prompt_digest=lav_runner.verifier_protocol_digest(), criteria_digest=compute_criteria_digest(CANONICAL_CALIBRATION_CRITERIA), scorer_id="lav-swap-agg-v1"))`;
 		const pyDigestProc = Bun.spawn([pythonBin, "-c", pyScript], { stdout: "pipe", stderr: "pipe" });
 		const digestOut = (await new Response(pyDigestProc.stdout).text()).trim();
 		expect(digestOut.length).toBe(16);
@@ -447,13 +524,14 @@ describe("runVerifierRequest python backend with calibration", () => {
 		try {
 			const run = await runVerifierRequest(mockPi, mockCtx, {
 				backend: "gemini-python",
+				model: "google:gemini-2.5-flash",
 				mode: "compare",
 				task: "Test task",
 				candidates: [
 					{ id: "cand-1", content: "pass all tests" },
 					{ id: "cand-2", content: "fail tests" },
 				],
-				criteria: [{ name: "correctness", description: "is it correct" }],
+				criteria: [{ name: "Overall correctness", description: "Overall correctness" }],
 				nVerifications: 1,
 				mock: true,
 				calibrationPath: calPath,
@@ -466,6 +544,107 @@ describe("runVerifierRequest python backend with calibration", () => {
 			expect(pair.calibrated_margin).toBeDefined();
 			expect(pair.calibrated_score_a).toBeGreaterThan(0);
 			expect(pair.calibrated_score_b).toBeLessThan(1);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("runVerifierRequest calibration backend gate", () => {
+	it("rejects calibrationPath outside the gemini-python backend", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "lav-cal-gate-test-"));
+		const mockCtx: any = {
+			cwd: tempDir,
+			modelRegistry: {
+				find: (provider: string, id: string) => ({ provider, id, name: id }),
+				getAll: () => [],
+			},
+		};
+		try {
+			await expect(
+				runVerifierRequest({} as any, mockCtx, {
+					backend: "pi-model-ensemble",
+					mode: "compare",
+					task: "Test task",
+					candidates: [
+						{ id: "cand-1", content: "pass all tests" },
+						{ id: "cand-2", content: "fail tests" },
+					],
+					criteria: [{ name: "Overall correctness", description: "Overall correctness" }],
+					mock: true,
+					calibrationPath: "/tmp/x.json",
+				}),
+			).rejects.toThrow("calibrationPath is only supported for backend gemini-python");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("runVerifierRequest Python default calibration compatibility", () => {
+	it("applies a default-note canonical-criteria fit at five verifications", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "lav-default-cal-test-"));
+		const calPath = path.join(tempDir, "calibration.json");
+		const scriptsDir = path.join(import.meta.dir, "..", "..", "skills", "llm-as-verifier", "scripts");
+		const pythonBin = Bun.which("python") ?? Bun.which("python3") ?? "python";
+		const pyScript = `import sys; sys.path.insert(0, r"${scriptsDir}"); from harness.fusion.verifier_calibration import CANONICAL_CALIBRATION_CRITERIA, compute_criteria_digest, judge_config_key; import lav_runner; print(judge_config_key("9router/gemini-3-5-flash-medium-round-robin", 5, prompt_digest=lav_runner.verifier_protocol_digest(), criteria_digest=compute_criteria_digest(CANONICAL_CALIBRATION_CRITERIA), scorer_id="lav-swap-agg-v1"))`;
+		const pyDigestProc = Bun.spawn([pythonBin, "-c", pyScript], { stdout: "pipe", stderr: "pipe" });
+		const digestOut = (await new Response(pyDigestProc.stdout).text()).trim();
+		expect(digestOut.length).toBe(16);
+		await Bun.write(
+			calPath,
+			JSON.stringify({
+				[digestOut]: { config_digest: digestOut, platt_a: 2.0, platt_b: -1.0 },
+			}),
+		);
+
+		const mockPi: any = {
+			exec: async (cmd: string, args: string[]) => {
+				const resolvedBin = Bun.which(cmd) ?? Bun.which("python") ?? Bun.which("python3") ?? cmd;
+				const proc = Bun.spawn([resolvedBin, ...args], { stdout: "pipe", stderr: "pipe" });
+				const [stdout, stderr] = await Promise.all([
+					new Response(proc.stdout).text(),
+					new Response(proc.stderr).text(),
+				]);
+				return { code: await proc.exited, stdout, stderr };
+			},
+		};
+		const mockCtx: any = {
+			cwd: tempDir,
+			modelRegistry: {
+				find: (provider: string, id: string) => ({
+					provider,
+					id,
+					name: id,
+					api: "google",
+					contextWindow: 1048576,
+					maxTokens: 8192,
+					supportsTools: true,
+				}),
+				getAll: () => [
+					{
+						provider: "9router",
+						id: "gemini-3-5-flash-medium-round-robin",
+						name: "gemini-3-5-flash-medium-round-robin",
+					},
+				],
+			},
+		};
+		try {
+			const run = await runVerifierRequest(mockPi, mockCtx, {
+				backend: "gemini-python",
+				mode: "compare",
+				task: "Test task",
+				candidates: [
+					{ id: "cand-1", content: "pass all tests" },
+					{ id: "cand-2", content: "fail tests" },
+				],
+				criteria: [{ name: "Overall correctness", description: "Overall correctness" }],
+				nVerifications: 5,
+				mock: true,
+				calibrationPath: calPath,
+			});
+			expect(run.summaryLines.some(line => line.includes("Calibrated pairwise"))).toBe(true);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

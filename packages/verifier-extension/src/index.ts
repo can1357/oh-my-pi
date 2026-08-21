@@ -25,7 +25,8 @@ const VALID_TOKENS: Record<string, number> = Object.fromEntries(
 		[letter.toLowerCase(), GRANULARITY - index],
 	]),
 );
-const DEFAULT_ENSEMBLE_MODEL_SPECS = ["kimi:kimi-for-coding", "minimax.io:minimax-m3", "openai:gpt-5.5"] as const;
+const DEFAULT_SUBAGENT_MODEL_SPEC = "pi/task";
+const DEFAULT_GEMINI_PYTHON_MODEL_SPEC = "9router:gemini-3-5-flash-medium-round-robin";
 
 const resolveUserPath = (cwd: string, value: string): string =>
 	path.resolve(cwd, value.startsWith("@") ? value.slice(1) : value);
@@ -600,6 +601,19 @@ const buildMockAuditText = (prompt: string, candidate: NormalizedCandidate): str
 };
 
 const resolveVerifierModel = (ctx: ExtensionContext, spec: string): ResolvedPiModel => {
+	if (spec === DEFAULT_SUBAGENT_MODEL_SPEC) {
+		const model = ctx.models.resolve(DEFAULT_SUBAGENT_MODEL_SPEC);
+		if (!model) {
+			throw new Error("Configured subagent model 'pi/task' could not be resolved.");
+		}
+		return {
+			spec,
+			provider: model.provider,
+			id: model.id,
+			display: `${model.provider}:${model.id}`,
+			model,
+		};
+	}
 	const alias = MODEL_ALIASES[normalizeKey(spec)];
 	if (alias) {
 		const model = ctx.modelRegistry.find(alias.provider, alias.id);
@@ -675,6 +689,11 @@ const resolveVerifierModels = (ctx: ExtensionContext, specs: string[]): Resolved
 	}
 	return specs.map(spec => resolveVerifierModel(ctx, spec));
 };
+
+const modelForPythonRunner = (model: ResolvedPiModel): string =>
+	model.provider === "google" || model.provider === "openai" || model.provider === "openai-codex"
+		? model.id
+		: `${model.provider}/${model.id}`;
 
 const resolveModelWeights = (
 	resolvedModels: ResolvedPiModel[],
@@ -963,6 +982,14 @@ type CompareRunResult = {
 	estimated_calls: number;
 };
 
+export const selectOverallWinner = <T extends { wins: number; mean_pair_score: number }>(ranking: T[]): T | null => {
+	if (ranking.length === 0) return null;
+	if (ranking.length === 1) return ranking[0];
+	return ranking[0].wins === ranking[1].wins && ranking[0].mean_pair_score === ranking[1].mean_pair_score
+		? null
+		: ranking[0];
+};
+
 type AuditRunResult = {
 	mode: "audit";
 	candidate: { id: string; summary: string };
@@ -1211,7 +1238,7 @@ const runPiCompare = async (
 
 	return {
 		mode: "compare",
-		winner: ranking[0] ?? null,
+		winner: selectOverallWinner(ranking),
 		ranking,
 		pairwise,
 		estimated_calls: estimatedCalls,
@@ -1295,7 +1322,7 @@ export const buildSummaryLines = (
 	if (mode === "compare") {
 		const compareRes = result as CompareRunResult;
 		const ranking = compareRes.ranking;
-		const winner = compareRes.winner?.id ?? ranking[0]?.id ?? "unknown";
+		const winner = compareRes.winner?.id ?? "tie";
 		const confidence = Number(compareRes.winner?.mean_pair_confidence ?? 0).toFixed(3);
 		lines.push(`Winner: ${winner}`);
 		lines.push(`Winner confidence: ${confidence}`);
@@ -1397,7 +1424,10 @@ export const runVerifierRequest = async (
 	signal?: AbortSignal,
 ) => {
 	const cwd = ctx.cwd;
-	const backend = (params.backend ?? "gemini-python") as Backend;
+	const backend = (params.backend ?? "pi-model-ensemble") as Backend;
+	if (params.calibrationPath?.trim() && backend !== "gemini-python") {
+		throw new Error("calibrationPath is only supported for backend gemini-python");
+	}
 	const mode = params.mode ?? (params.candidates.length === 1 ? "audit" : "compare");
 	if (mode === "compare" && params.candidates.length < 2) {
 		throw new Error("compare mode requires at least two candidates");
@@ -1450,8 +1480,8 @@ export const runVerifierRequest = async (
 
 	const requestedModelSpecs =
 		backend === "pi-model-ensemble"
-			? (params.models ?? [...DEFAULT_ENSEMBLE_MODEL_SPECS])
-			: [params.model ?? (backend === "zai-coding-plan" ? "zai:glm-5.1" : "google:gemini-2.5-flash")];
+			? (params.models ?? [params.model ?? DEFAULT_SUBAGENT_MODEL_SPEC])
+			: [params.model ?? (backend === "zai-coding-plan" ? "zai:glm-5.1" : DEFAULT_GEMINI_PYTHON_MODEL_SPEC)];
 	const resolvedModels = resolveVerifierModels(ctx, requestedModelSpecs);
 	const resolvedWeights = resolveModelWeights(resolvedModels, params.modelWeights);
 
@@ -1460,7 +1490,7 @@ export const runVerifierRequest = async (
 		backend,
 		task: params.task,
 		context: sharedContextParts.join("\n\n"),
-		groundTruthNote: params.groundTruthNote ?? DEFAULT_GROUND_TRUTH_NOTE,
+		groundTruthNote: params.groundTruthNote?.trim() || DEFAULT_GROUND_TRUTH_NOTE,
 		criteria: params.criteria.map(criterion => ({
 			id:
 				criterion.id?.trim() ||
@@ -1480,6 +1510,10 @@ export const runVerifierRequest = async (
 		models: resolvedModels,
 		modelWeights: resolvedWeights,
 	};
+	const primaryModel = config.models[0];
+	if (!primaryModel) {
+		throw new Error("At least one verifier model must be resolved.");
+	}
 
 	let parsed: {
 		ok: boolean;
@@ -1518,7 +1552,7 @@ export const runVerifierRequest = async (
 				})),
 				n_verifications: config.nVerifications,
 				granularity: config.granularity,
-				model: config.models[0]?.id ?? "gemini-2.5-flash",
+				model: modelForPythonRunner(primaryModel),
 				mock: config.mock,
 				ground_truth_note: config.groundTruthNote,
 				calibration_path: params.calibrationPath,
@@ -1709,11 +1743,17 @@ export default function verifierExtension(pi: ExtensionAPI): void {
 			"Compare or audit candidate artifacts with repeated, criteria-decomposed LLM verification inspired by the llm-as-verifier paper.",
 		parameters: typebox.Type.Object({
 			backend: typebox.Type.Optional(
-				typebox.Type.Union([
-					typebox.Type.Literal("gemini-python"),
-					typebox.Type.Literal("zai-coding-plan"),
-					typebox.Type.Literal("pi-model-ensemble"),
-				]),
+				typebox.Type.Union(
+					[
+						typebox.Type.Literal("gemini-python"),
+						typebox.Type.Literal("zai-coding-plan"),
+						typebox.Type.Literal("pi-model-ensemble"),
+					],
+					{
+						description:
+							"Execution backend. Defaults to pi-model-ensemble with the settings-backed pi/task subagent model.",
+					},
+				),
 			),
 			mode: typebox.Type.Optional(
 				typebox.Type.Union([typebox.Type.Literal("compare"), typebox.Type.Literal("audit")]),
@@ -1769,7 +1809,7 @@ export default function verifierExtension(pi: ExtensionAPI): void {
 			model: typebox.Type.Optional(
 				typebox.Type.String({
 					description:
-						"Single verifier model. Defaults to zai:glm-5.1 for zai-coding-plan and google:gemini-2.5-flash for gemini-python.",
+						"Single verifier model. Defaults to zai:glm-5.1 for zai-coding-plan and the settings-backed pi/task subagent model for gemini-python.",
 				}),
 			),
 			models: typebox.Type.Optional(
@@ -1796,7 +1836,7 @@ export default function verifierExtension(pi: ExtensionAPI): void {
 			calibrationPath: typebox.Type.Optional(
 				typebox.Type.String({
 					description:
-						"Optional path to a fitted verifier_calibration.json registry. When omitted, defaults to FUGU_VERIFIER_CALIBRATION_PATH or ~/.fugu/verifier_calibration.json.",
+						"Optional path to a fitted verifier_calibration.json registry for gemini-python only. Calibrated scores apply only when model, nVerifications, default or explicit ground-truth note, criteria digest, and scorer id match the fit.",
 				}),
 			),
 			outputPath: typebox.Type.Optional(
@@ -1844,7 +1884,7 @@ export default function verifierExtension(pi: ExtensionAPI): void {
 				const file = Bun.file(outputPath);
 				const content = await file.text();
 				const parsed = JSON.parse(content) as { result?: { winner?: { id?: string } } };
-				const winner = parsed.result?.winner?.id ?? "unknown";
+				const winner = parsed.result?.winner?.id ?? "tie";
 				const message = `LLM-as-Verifier smoke test complete. Winner: ${winner}. Output: ${outputPath}`;
 				if (ctx.hasUI) ctx.ui.notify(message, "info");
 				else pi.logger.info(message);
@@ -1879,7 +1919,7 @@ export default function verifierExtension(pi: ExtensionAPI): void {
 				outputPath,
 			});
 			const result = run.parsed?.result;
-			const winner = result && "winner" in result && result.winner ? result.winner.id : "unknown";
+			const winner = result && "winner" in result && result.winner ? result.winner.id : "tie";
 			const weightSummary = run.resolvedModelWeights.map(entry => `${entry.model}=${entry.weight}`).join(", ");
 			const message = `LLM-as-Verifier ensemble smoke test complete. Winner: ${winner}. Weights: ${weightSummary}. Output: ${run.savedOutputPath}`;
 			if (ctx.hasUI) ctx.ui.notify(message, "info");

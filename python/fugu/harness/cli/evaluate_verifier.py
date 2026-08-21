@@ -71,26 +71,22 @@ def _build_runner_config(
     n_verifications: int,
     model: str = "mock",
     mock: bool = True,
+    criteria: list[dict] | None = None,
 ) -> dict:
-    """Translate a fixture row into a ``run_compare`` config. The runner
-    requires ``task``, ``criteria``, ``candidates``; we derive criteria from
-    the task's acceptance_criteria so a fixture written as a TaskContract
-    is enough to drive it.
-
-    ``model``/``mock`` default to the deterministic mock backend; pass a real
-    model id (and ``mock=False``) to grade a live verifier model."""
+    """Translate a fixture row into a ``run_compare`` config."""
+    if criteria is None:
+        contract = row.get("task_contract", {})
+        acceptance = contract.get("acceptance_criteria") or ["Overall correctness"]
+        criteria = [
+            {"id": f"c{i}", "name": text[:60] or f"criterion-{i}", "description": text}
+            for i, text in enumerate(acceptance)
+        ]
     contract = row.get("task_contract", {})
-    acceptance = contract.get("acceptance_criteria") or ["Overall correctness"]
-    criteria = [
-        {"id": f"c{i}", "name": text[:60] or f"criterion-{i}", "description": text}
-        for i, text in enumerate(acceptance)
-    ]
     task_text = contract.get("user_request") or contract.get("title") or row.get("eval_task_id", "verifier-eval")
     return {
         "mode": "compare",
         "task": task_text,
         "context": "",
-        "ground_truth_note": "",
         "criteria": criteria,
         "candidates": candidates,
         "n_verifications": n_verifications,
@@ -266,7 +262,7 @@ def evaluate_verifier(
             f"unsupported backend: {backend!r}; only 'mock' is implemented "
             f"(or pass --model <real-id> to grade a live model)"
         )
-    client = None if use_mock else runner.create_openai_client(model=model)
+    client = runner.create_judge_client(model, mock=use_mock)
 
     rows: list[dict] = []
     for line in suite.read_text(encoding="utf-8").splitlines():
