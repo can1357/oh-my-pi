@@ -93,42 +93,60 @@ def test_calibrate_rejects_stored_entry_with_mismatched_config_digest(tmp_path: 
 
 def test_calibrate_rejects_zero_slope(tmp_path: Path):
     path = tmp_path / "calibration.json"
-    save_entry(judge_config_key("mock", 1), {"platt_a": 0.0, "platt_b": 0.0}, path)
+    key = judge_config_key("mock", 1)
+    save_entry(key, {"config_digest": key, "platt_a": 0.0, "platt_b": 0.0}, path)
     assert calibrate(0.9, "mock", 1, path=path) is None
 
 
 def test_calibrate_rejects_negative_slope(tmp_path: Path):
     path = tmp_path / "calibration.json"
-    save_entry(judge_config_key("mock", 1), {"platt_a": -2.0, "platt_b": 0.5}, path)
+    key = judge_config_key("mock", 1)
+    save_entry(key, {"config_digest": key, "platt_a": -2.0, "platt_b": 0.5}, path)
     assert calibrate(0.9, "mock", 1, path=path) is None
 
 
 def test_calibrate_rejects_non_finite_coefficients(tmp_path: Path):
     path = tmp_path / "calibration.json"
-    save_entry(judge_config_key("mock", 1), {"platt_a": float("nan"), "platt_b": 0.0}, path)
+    key = judge_config_key("mock", 1)
+    save_entry(key, {"config_digest": key, "platt_a": float("nan"), "platt_b": 0.0}, path)
     assert calibrate(0.9, "mock", 1, path=path) is None
 
-    save_entry(judge_config_key("mock", 1), {"platt_a": 1.0, "platt_b": float("inf")}, path)
+    save_entry(key, {"config_digest": key, "platt_a": 1.0, "platt_b": float("inf")}, path)
     assert calibrate(0.9, "mock", 1, path=path) is None
 
 
 def test_calibrate_rejects_missing_coefficients(tmp_path: Path):
     path = tmp_path / "calibration.json"
-    save_entry(judge_config_key("mock", 1), {"platt_b": 0.0}, path)
+    key = judge_config_key("mock", 1)
+    save_entry(key, {"config_digest": key, "platt_b": 0.0}, path)
     assert calibrate(0.9, "mock", 1, path=path) is None
 
-    save_entry(judge_config_key("mock", 1), {"platt_a": 1.0}, path)
+    save_entry(key, {"config_digest": key, "platt_a": 1.0}, path)
     assert calibrate(0.9, "mock", 1, path=path) is None
 
 
 def test_calibrate_rejects_non_numeric_coefficients(tmp_path: Path):
     path = tmp_path / "calibration.json"
-    save_entry(judge_config_key("mock", 1), {"platt_a": "1.0", "platt_b": 0.0}, path)
+    key = judge_config_key("mock", 1)
+    save_entry(key, {"config_digest": key, "platt_a": "1.0", "platt_b": 0.0}, path)
     assert calibrate(0.9, "mock", 1, path=path) is None
 
     # Booleans are technically ints in Python but must never be treated as
     # numeric coefficients here.
-    save_entry(judge_config_key("mock", 1), {"platt_a": True, "platt_b": 0.0}, path)
+    save_entry(key, {"config_digest": key, "platt_a": True, "platt_b": 0.0}, path)
+    assert calibrate(0.9, "mock", 1, path=path) is None
+
+
+def test_calibrate_rejects_overflowing_integer_coefficients(tmp_path: Path):
+    """A JSON registry can hold an arbitrarily large integer; float() on it
+    raises OverflowError, which must read as "calibration unavailable",
+    never a crash."""
+    path = tmp_path / "calibration.json"
+    key = judge_config_key("mock", 1)
+    save_entry(key, {"config_digest": key, "platt_a": 10**400, "platt_b": 0.0}, path)
+    assert calibrate(0.9, "mock", 1, path=path) is None
+
+    save_entry(key, {"config_digest": key, "platt_a": 1.0, "platt_b": 10**400}, path)
     assert calibrate(0.9, "mock", 1, path=path) is None
 
 
