@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.5] - 2026-08-21
+
 ### Fixed
 
 - Fixed Antigravity login, endpoint discovery, and model selection / request shaping to support Anthropic Claude models and GPT-OSS 120B in addition to Google models on `google-antigravity`.

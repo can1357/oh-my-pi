@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.5] - 2026-08-21
+
 ### Added
 
 - Added `/todo show`, `/todo hide`, `/todo toggle`, and the configurable `Ctrl+Shift+O` shortcut to hide or display the sticky Todos panel. Completed tasks remain rendered with checked boxes.

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.5] - 2026-08-21
+
 ### Fixed
 
 - Added Antigravity variant collapse families and wire profiles for Anthropic models and GPT-OSS 120B.
