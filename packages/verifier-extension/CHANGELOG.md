@@ -1,11 +1,10 @@
 # @pk-nerdsaver-ai/verifier-extension
 
-## [Unreleased]
+## [16.4.11] - 2026-08-21
 
 ### Added
 
 - Added `/verify` to audit the current tracked workspace diff against operator-supplied acceptance criteria with the configured verifier model.
-
 
 ## [16.1.10] - 2026-06-22
 

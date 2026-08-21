@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.11] - 2026-08-21
+
 ### Added
 
 - Exposed the verifier model in Tasks settings for default verifier delegate lanes and `/verify` when the verifier extension is enabled.
